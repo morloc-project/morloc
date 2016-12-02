@@ -1,10 +1,9 @@
+STR \'[^']*\'|\"[^"]*\"
+EOL \n
+NIL NIL
+VAL [a-zA-Z_.][a-zA-Z0-9_.]*
 DBL [0-9]\.[0-9]+|[1-9][0-9]+\.[0-9]+
 INT [0-9]|[1-9][0-9]+
-STR \'[^']*\'|\"[^"]*\"
-
-NIL NA
-VAL [a-zA-Z_.][a-zA-Z0-9_.]*
-EOL \n
 
 DEP -->
 ARW ->
@@ -29,31 +28,32 @@ RSLT >
 
 #.*|\/\/.* ;
 
-{DBL}  { printf("DBL ");  }
-{INT}  { printf("INT ");  }
-{STR}  { printf("STR ");  }
+{DBL} { yylval.fval = atof(yytext);   return DBL; }
+{INT} { yylval.ival = atoi(yytext);   return INT; }
+{STR} { yylval.sval = strdup(yytext); return STR; }
 
-{VAL}  { printf("VAL ");  }
-{EOL}  { printf("\n");    }
+{VAL}  { yylval.sval = strdup(yytext); return VAL; }
+{NIL}  { return NIL; }
 
-{DEP}  { printf("DEP ");  }
-{ARW}  { printf("ARW ");  }
-{EQU}  { printf("EQU ");  }
-{DEF}  { printf("DEF ");  }
-{SEP}  { printf("SEP ");  }
-{LAB}  { printf("LAB ");  }
+{DEP}  { return DEP; }
+{ARW}  { return ARW; }
+{EQU}  { return EQU; }
+{DEF}  { return DEF; }
+{SEP}  { return SEP; }
+{LAB}  { return LAB; }
+{EOL}  { return EOL; }
 
-{GATE} { printf("GATE "); }
-{LPAR} { printf("LPAR "); }
-{RPAR} { printf("RPAR "); }
-{LBRC} { printf("LBRC "); }
-{RBRC} { printf("RBRC "); }
-{LBRK} { printf("LBRK "); }
-{RBRK} { printf("RBRK "); }
-{LDGT} { printf("LDGT "); }
-{RDGT} { printf("RDGT "); }
-{LSLT} { printf("LSLT "); }
-{RSLT} { printf("RSLT "); }
+{GATE} { return GATE; }
+{LPAR} { return LPAR; }
+{RPAR} { return RPAR; }
+{LBRC} { return LBRC; }
+{RBRC} { return RBRC; }
+{LBRK} { return LBRK; }
+{RBRK} { return RBRK; }
+{LDGT} { return LDGT; }
+{RDGT} { return RDGT; }
+{LSLT} { return LSLT; }
+{RSLT} { return RSLT; }
 
 %%
 
