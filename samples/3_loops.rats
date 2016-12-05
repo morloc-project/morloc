@@ -1,0 +1,5 @@
+// A is parallized across xs and ys, M merges the results
+{ A<x in xs, y in ys> M } B --> C
+
+// use an array defined in rats (only valid for numeric and character arrays)
+{ A<x in [1:10]> M } B --> C

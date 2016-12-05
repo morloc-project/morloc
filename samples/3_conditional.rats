@@ -1,8 +1,0 @@
-GetA  :: NA -> a
-GetM  :: NA -> m
-PrepA :: a -> b
-PrepM :: m -> n
-Merge :: b -> n -> x
-V     :: a -> Bool
-
-a V? { foo:{ b<<x=[1,2]>> } bar:{ b<<x=5>> } baz:{ b<<x=7>> } } --> c

@@ -1,7 +1,1 @@
-GetA  :: NA -> a
-GetM  :: NA -> m
-PrepA :: a -> b
-PrepM :: m -> n
-Merge :: b -> n -> x
-
 (GetA --> PrepA) (GetM --> PrepM) --> Merge

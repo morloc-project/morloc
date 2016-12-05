@@ -1,3 +1,4 @@
-lex.yy.c
-ratparser
+lex.yy.*
+rats.tab.*
 *.out
+rats
