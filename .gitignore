@@ -1,4 +1,5 @@
 lex.yy.*
-rats.tab.*
+*.tab.*
 *.out
 rats
+R
