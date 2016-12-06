@@ -9,7 +9,7 @@
 emit    ^emit
 link    ^link
 ws      [ \t]+
-par     [a-zA-Z_][a-zA-Z0-9_]*
+par     [a-zA-Z_.][a-zA-Z0-9_.]*
 eol     [\r\n]+
 
 %%
@@ -17,5 +17,5 @@ eol     [\r\n]+
 {ws}      { }
 {emit}    { return EMIT; }
 {link}    { return LINK; }
-{par}     { yylval = yytext; return PAR; }
+{par}     { yylval = strdup(yytext); return PAR; }
 {eol}     { return EOL; }

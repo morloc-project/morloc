@@ -16,6 +16,6 @@ eol     [\r\n]+
 
 {comment} { }
 {ws}      { }
-{var}     { yylval = yytext; return VAR; }
+{var}     { yylval = strdup(yytext); return VAR; }
 {dep}     { return DEP; }
 {eol}     { return EOL; }

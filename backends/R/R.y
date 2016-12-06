@@ -15,6 +15,7 @@ char* join(char* a, char* b);
 %}
 
 %define api.value.type {char*}
+
 %token EMIT LINK PAR EOL
 
 %%
@@ -25,28 +26,29 @@ input
 ;
 
 line
-  : cmd { printf("%s\n", $1); }
+  : EOL
+  | cmd { printf("%s\n", $1); }
 ;
 
 cmd
-  : emit
-  | link
+  : emit { $$ = $1; }
+  | link { $$ = $1; }
 ;
 
 emit
-  : EMIT PAR PAR EOL { $$ = get_str(); sprintf($$, "%s <- %s()\n", $3, $2); }
+  : EMIT PAR PAR EOL { $$ = get_str(); sprintf($$, "%s <- %s()", $3, $2); }
 ;
 
 link
   : LINK PAR PAR { $$ = get_str(); sprintf($$, "%s <- link(%s", $2, $3); }
   | link PAR { $$ = join($1, $2); }
-  | link EOL { $$ = get_str(); sprintf($$, "%s)\n", $1); }
+  | link EOL { $$ = get_str(); sprintf($$, "%s)", $1); }
 ;
 
 %%
 
 char* get_str(){
-    char* c = (char*)malloc(128 * sizeof(char));
+    char* c = (char*)calloc(128, sizeof(char));
     return c;
 }
 

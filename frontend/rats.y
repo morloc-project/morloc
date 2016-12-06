@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stding.h>
 
 #include "rats.tab.h"
 #include "lex.yy.h"
@@ -44,8 +45,6 @@ source
 
 var
   : VAR { $$ = e_emit($1); }
-
-
 
 %%
 
