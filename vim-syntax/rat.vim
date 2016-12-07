@@ -40,7 +40,7 @@ syn match break '^---\+$'
 syn match break ';'
 
 " setting operators
-syn match operator ' \. '
+syn match operator '[ \t\n]\.[ \t\n]'
 syn match operator '->'
 syn match operator '::'
 syn match operator ':'
@@ -72,8 +72,9 @@ syn region string start='"' end='"'
 syn keyword tag contained TODO NOTE
 
 " define comments
-syn match comment '\/\/.*$' contains=tag
-syn region comment start='\/\*' end='\*\/' contains=tag
+" syn match comment '\/\/.*$' contains=tag
+" syn region comment start='\/\*' end='\*\/' contains=tag
+syn match comment '#.*'
 
 let b:current_syntax = "rat"
 

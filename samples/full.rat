@@ -57,10 +57,6 @@ with L1
  split A:1 on a=[1,2,3,4]
        B   on x=[1,2,5,9]
  merge mergefunction
- gather_effects eff_gatherfunction
- merge_effects eff_merge
- gather_checks val_gatherfunction
- merge_checks val_merge
 -----------------------------
 
 with L2

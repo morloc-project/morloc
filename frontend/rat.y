@@ -9,6 +9,7 @@
 
 int yylex(void);
 void yyerror (char* s);
+char* get_str();
 char* make_label(char*);
 char* e_link(char* a, char* b);
 char* e_join(char* a, char* b);
@@ -17,7 +18,15 @@ char* e_emit(char* a);
 %}
 
 %define api.value.type {char*}
-%token VAR EOL
+%token VAR EOS
+
+%token BUILTIN GROUP KEYWORD
+
+%token COMPOSE EQUAL COUPLE LABEL
+
+%token LBRK RBRK SEP
+
+%token SECTION
 
 %left DEP 
 
@@ -25,32 +34,60 @@ char* e_emit(char* a);
 
 input
   : %empty
-  | input line
+  | input section
 ;
 
-line
-  : EOL
-  | path EOL
+section
+  : SECTION { printf("  %s\n", $1); }
+  | section statement
+;
+
+
+statement
+  : EOS
+  | path   EOS
+  | tokens EOS { printf("%s\n", $1); }
 ;
 
 path
   : source DEP var { $$ = e_link($3, $1); }
-  | path DEP var  { $$ = e_link($3, $1); }
+  | path   DEP var { $$ = e_link($3, $1); }
 ;
 
 source
-  : var           
-  | source source { $$ = e_join($1, $2); }
+  : var        { $$ = $1; }
+  | source var { $$ = e_join($1, $2); }
 ;
 
 var
   : VAR { $$ = e_emit($1); }
 
+tokens
+  : token        { $$ = $1; } 
+  | tokens token { $$ = get_str(); sprintf($$, "%s %s", $1, $2); } 
+
+token
+  : COMPOSE { $$ = "COMPOSE"; }
+  | EQUAL   { $$ = "EQUAL";   }
+  | COUPLE  { $$ = "COUPLE";  }
+  | LABEL   { $$ = "LABEL";   }
+  | LBRK    { $$ = "LBRK";    }
+  | RBRK    { $$ = "RBRK";    }
+  | SEP     { $$ = "SEP";     }
+  | KEYWORD { $$ = "KEYWORD"; }
+  | BUILTIN { $$ = "BUILTIN"; }
+  | GROUP   { $$ = "GROUP";   }
+
 %%
+
+char* get_str(){
+    char* a = (char*)malloc(128 * sizeof(char));
+    return a;
+}
 
 char* make_label(char* a){
     static int node_idx = 0;
-    char* a_star = (char*)malloc(64 * sizeof(char));
+    char* a_star = get_str();
     sprintf(a_star, "%s_%d", a, node_idx);
     ++node_idx;
     return(a_star);
@@ -62,7 +99,7 @@ char* e_link(char* a, char* b){
 }
 
 char* e_join(char* a, char* b){
-    char* out = (char*)malloc(128 * sizeof(char));
+    char* out = get_str();
     sprintf(out, "%s %s", a, b);
     return out;
 }
