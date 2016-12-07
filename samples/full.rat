@@ -1,0 +1,74 @@
+workflow:
+{ (A:1 --> B) }:L1
+{ (A:2 --> C) }:L2 --> D --> { E }:L3 --> F --> G
+
+alias:
+A = senhalatha
+B = huzurbazar
+C = fredericksen
+D = alonganduninterestingname
+E = someexpensiveoperation
+F = andanother
+G = thelastfunctioninthisparticularpipeline
+
+type:
+A :: NIL -> a
+B :: a -> b
+C :: a -> c
+D :: f -> g -> h
+E :: h -> i
+F :: i -> j
+G :: j -> k
+
+arg:
+A:1 :: x=45, y="hi", z=[1,2,3]
+A:2 :: x=46
+
+cache:
+__all__ --> memcache;
+A,E --> datcache;
+F --> nocache;
+final --> datcache;
+
+val:
+__all__ --> true;
+B,C --> va;
+D --> vb, vc;
+A B C --> vabc;
+
+eff:
+__all__ --> nothing;
+A:1 B --> eab;
+A:2 C --> eac;
+(D --> x) (F --> y --> z) (G --> x) --> Q --> final;
+vabc --> log;
+
+enter:
+__all__ --> id;
+
+fail:
+__all__ --> fail;
+
+pass:
+__all__ --> execute;
+
+loop:
+with L1
+ split A:1 on a=[1,2,3,4]
+       B   on x=[1,2,5,9]
+ merge mergefunction
+ gather_effects eff_gatherfunction
+ merge_effects eff_merge
+ gather_checks val_gatherfunction
+ merge_checks val_merge
+-----------------------------
+
+with L2
+ split A:2 on b=['t','a','g']
+ split C   on y=ys
+ merge mergefunction
+-----------------------------
+
+with L3
+ split cut_input_into_chunks
+ merge merge_processed_chunks
