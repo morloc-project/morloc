@@ -1,6 +1,12 @@
-workflow:
-{ (A:1 --> B) }:L1
-{ (A:2 --> C) }:L2 --> D --> { E }:L3 --> F --> G
+run:
+L0 :: L1 L2 --> D --> L3 --> F --> G
+-------------
+L1 :: A:1 --> B
+L2 :: A:2 --> C
+L3 :: E
+
+compose:
+F = h . g . f
 
 alias:
 A = senhalatha
@@ -10,15 +16,6 @@ D = alonganduninterestingname
 E = someexpensiveoperation
 F = andanother
 G = thelastfunctioninthisparticularpipeline
-
-type:
-A :: NIL -> a
-B :: a -> b
-C :: a -> c
-D :: f -> g -> h
-E :: h -> i
-F :: i -> j
-G :: j -> k
 
 arg:
 A:1 :: x=45, y="hi", z=[1,2,3]
@@ -30,27 +27,30 @@ A,E --> datcache;
 F --> nocache;
 final --> datcache;
 
-val:
+check:
 __all__ --> true;
 B,C --> va;
 D --> vb, vc;
 A B C --> vabc;
 
-eff:
-__all__ --> nothing;
+effect:
+__all__ --> null;
 A:1 B --> eab;
-A:2 C --> eac;
+A:2 C --> print;
 (D --> x) (F --> y --> z) (G --> x) --> Q --> final;
 vabc --> log;
 
-enter:
-__all__ --> id;
+pack:
+__all__ --> id
+
+open:
+__all__ --> id
 
 fail:
-__all__ --> fail;
+__all__ --> null
 
 pass:
-__all__ --> execute;
+__all__ --> call
 
 loop:
 with L1

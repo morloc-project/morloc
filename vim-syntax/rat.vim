@@ -20,23 +20,27 @@ endif
 " syn keyword conditional if else
 " syn keyword type        int string float node graph link
 
-syn match section '^workflow:\n'
+syn match section '^run:\n'
+syn match section '^compose:\n'
 syn match section '^alias:\n'
-syn match section '^type:\n'
 syn match section '^arg:\n'
-syn match section '^val:\n'
-syn match section '^eff:\n'
-syn match section '^group:\n'
+syn match section '^check:\n'
+syn match section '^effect:\n'
 syn match section '^cache:\n'
-syn match section '^enter:\n'
+syn match section '^pack:\n'
+syn match section '^open:\n'
 syn match section '^fail:\n'
 syn match section '^pass:\n'
 syn match section '^loop:\n'
+
+syn keyword function id null call true false
+syn keyword function memcache datcache nocache
 
 syn match break '^---\+$'
 syn match break ';'
 
 " setting operators
+syn match operator ' \. '
 syn match operator '->'
 syn match operator '::'
 syn match operator ':'
@@ -48,7 +52,7 @@ syn match operator '>'
 
 " define constants
 " TODO this currently highlights numbers inside strings, e.g. r5g or 5r or r5
-" syn match constant '\([a-zA-Z_]\)\@!-\?[1-9]\d*\h\@!'
+" syn match number '\([a-zA-Z_]\)\@!-\?[1-9]\d*\h\@!'
 syn match number '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!'
 syn keyword constant NIL
 syn keyword constant __all__
