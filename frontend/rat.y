@@ -2,9 +2,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stding.h>
+#include <string.h>
 
-#include "rats.tab.h"
+#include "rat.tab.h"
 #include "lex.yy.h"
 
 int yylex(void);

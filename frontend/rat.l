@@ -1,5 +1,5 @@
 %{
-    #include "rats.tab.h"
+    #include "rat.tab.h"
 %}
 
 %option outfile="lex.yy.c" header-file="lex.yy.h"

@@ -1,10 +1,10 @@
-TARGET=rats
+TARGET=rat
 
 all:
-	flex rats.l
-	bison -d rats.y
-	cc lex.yy.c rats.tab.c -lfl -o ${TARGET}
+	flex ${TARGET}.l
+	bison -d ${TARGET}.y
+	cc lex.yy.c ${TARGET}.tab.c -lfl -o ${TARGET}
 
 .PHONY: clean
 clean:
-	rm -f lex.yy.* rats.tab.* ${TARGET}
+	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET}
