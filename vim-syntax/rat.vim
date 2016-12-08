@@ -59,8 +59,7 @@ syn keyword constant __all__
 syn keyword constant __map__ __val__ __eff__ __cache__ __fail__ __pass__ 
 
 " keywords
-syn keyword keyword with split on merge merge_effects merge_checks
-syn keyword keyword gather_effects gather_checks
+syn keyword keyword with split on merge using
 
 " labels
 syn match varlabel ':[a-zA-Z0-9._]\+'

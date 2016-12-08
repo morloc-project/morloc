@@ -1,6 +1,5 @@
 run:
 L0 :: L1 L2 --> D --> L3 --> F --> G
--------------
 L1 :: A:1 --> B
 L2 :: A:2 --> C
 L3 :: E
@@ -17,16 +16,6 @@ E = someexpensiveoperation
 F = andanother
 G = thelastfunctioninthisparticularpipeline
 
-arg:
-A:1 :: x=45, y="hi", z=[1,2,3]
-A:2 :: x=46
-
-cache:
-__all__ --> memcache;
-A,E --> datcache;
-F --> nocache;
-final --> datcache;
-
 check:
 __all__ --> true;
 B,C --> va;
@@ -40,31 +29,39 @@ A:2 C --> print;
 (D --> x) (F --> y --> z) (G --> x) --> Q --> final;
 vabc --> log;
 
+arg:
+A:1 :: x=45, y="hi", z=[1,2,3]
+A:2 :: x=46
+
+cache:
+__all__ :: memcache
+A,E     :: datcache
+F       :: nocache
+final   :: datcache
+
 pack:
-__all__ --> id
+__all__ :: id
 
 open:
-__all__ --> id
+__all__ :: id
 
 fail:
-__all__ --> null
+__all__ :: null
 
 pass:
-__all__ --> call
+__all__ :: call
 
 loop:
 with L1
  split A:1 on a=[1,2,3,4]
        B   on x=[1,2,5,9]
- merge mergefunction
------------------------------
+ merge using mergefunction
 
 with L2
  split A:2 on b=['t','a','g']
  split C   on y=ys
- merge mergefunction
------------------------------
+ merge using mergefunction
 
 with L3
- split cut_input_into_chunks
- merge merge_processed_chunks
+ split using cut_input_into_chunks
+ merge using merge_processed_chunks

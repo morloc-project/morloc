@@ -18,65 +18,186 @@ char* e_emit(char* a);
 %}
 
 %define api.value.type {char*}
-%token VAR EOS
+%token VAL EOS
 
-%token BUILTIN GROUP KEYWORD
+%token BUILTIN GROUP
+
+%token WITH USING SPLIT ON MERGE
 
 %token COMPOSE EQUAL COUPLE LABEL
 
 %token LBRK RBRK SEP
 
-%token SECTION
+%token SECTION_RUN
+%token SECTION_COMPOSE
+%token SECTION_ALIAS
+%token SECTION_ARG
+%token SECTION_CACHE
+%token SECTION_CHECK
+%token SECTION_EFFECT
+%token SECTION_PACK
+%token SECTION_OPEN
+%token SECTION_FAIL
+%token SECTION_PASS
+%token SECTION_LOOP
 
+%left COUPLE
 %left DEP 
+%left EQUAL
+%left LABEL
 
 %%
 
+/* a rat program consists of a series of sections*/
 input
   : %empty
   | input section
 ;
 
 section
-  : SECTION { printf("  %s\n", $1); }
-  | section statement
-;
+  : section_run
+  | section_compose
+  | section_alias
+  | section_arg
+  | section_cache
+  | section_check
+  | section_effect
+  | section_pack
+  | section_open
+  | section_fail
+  | section_pass
+  | section_loop
 
 
-statement
-  : EOS
-  | path   EOS
-  | tokens EOS { printf("%s\n", $1); }
+/* sections have their own strict rules on their contents */
+section_run
+  : SECTION_RUN
+  | section_run named_path
+
+section_compose
+  : SECTION_COMPOSE
+  | section_compose val EQUAL composition
+
+section_alias
+  : SECTION_ALIAS
+  | section_alias val EQUAL val
+
+section_check
+  : SECTION_CHECK
+  | section_check path
+
+section_effect
+  : SECTION_EFFECT
+  | section_effect path
+
+section_arg
+  : SECTION_ARG
+  | section_arg args_couplet
+
+section_cache
+  : SECTION_CACHE
+  | section_cache cache_couplet
+
+section_pack
+  : SECTION_PACK
+  | section_pack pack_couplet
+
+section_open
+  : SECTION_OPEN
+  | section_open open_couplet
+
+section_fail
+  : SECTION_FAIL
+  | section_fail fail_couplet
+
+section_pass
+  : SECTION_PASS
+  | section_pass pass_couplet
+
+section_loop
+  : SECTION_LOOP
+  | section_loop loop_spec
+
+
+/* definitions for groups used directly by the section group above */
+named_path
+  : val COUPLE path
 ;
 
 path
-  : source DEP var { $$ = e_link($3, $1); }
-  | path   DEP var { $$ = e_link($3, $1); }
+  : source DEP val
+  | path   DEP val
+  | LPAR path RPAR
 ;
-
 source
-  : var        { $$ = $1; }
-  | source var { $$ = e_join($1, $2); }
+  : val
+  | source val
 ;
 
-var
-  : VAR { $$ = e_emit($1); }
+composition
+  : val COMPOSE val
+  | composition COMPOSE val
+;
 
-tokens
-  : token        { $$ = $1; } 
-  | tokens token { $$ = get_str(); sprintf($$, "%s %s", $1, $2); } 
+args_couplet
+  : val COUPLE arg 
+  | args_couplet SEP arg
+;
 
-token
-  : COMPOSE { $$ = "COMPOSE"; }
-  | EQUAL   { $$ = "EQUAL";   }
-  | COUPLE  { $$ = "COUPLE";  }
-  | LABEL   { $$ = "LABEL";   }
-  | LBRK    { $$ = "LBRK";    }
-  | RBRK    { $$ = "RBRK";    }
-  | SEP     { $$ = "SEP";     }
-  | KEYWORD { $$ = "KEYWORD"; }
-  | BUILTIN { $$ = "BUILTIN"; }
-  | GROUP   { $$ = "GROUP";   }
+cache_couplet
+  : list COUPLE val
+;
+
+pack_couplet
+  : list COUPLE val
+;
+
+open_couplet
+  : list COUPLE val
+;
+
+fail_couplet
+  : list COUPLE val
+;
+
+pass_couplet
+  : list COUPLE val
+;
+
+loop_spec
+  : WITH val
+  | loop_spec SPLIT USING val 
+  | loop_spec arg_split
+  | loop_spec MERGE USING val
+;
+
+
+/* groups used in defining argument lists */
+arg_split
+  : SPLIT val ON arg
+  | split val ON arg
+;
+
+arg
+  : val EQUAL higher_values
+;
+
+higher_value
+  : NUM
+  | STRING 
+  | array
+;
+
+array
+  : LBRK list RBRK
+;
+
+list
+  : val SEP val
+
+val
+  : VAL
+;
 
 %%
 
