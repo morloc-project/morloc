@@ -8,7 +8,10 @@
 
 comment #.*
 ws      [ \t\n\r]+
-val     [a-zA-Z0-9_]*
+int     [0-9]|[1-9][0-9]+
+dbl     {int}\.[0-9]+
+str     \'[^']*\'|\"[^"]*\"
+var     [a-zA-Z_][a-zA-Z_0-9]
 dep     -->
 eol     [\r\n]+
 
@@ -34,23 +37,37 @@ using ^using{ws}|{ws}using{ws}
 
 group   __all__
 
+
+section_run     ^run:\n
+section_compose ^compose:\n
+section_alias   ^alias:\n
+section_arg     ^arg:\n
+section_cache   ^cache:\n
+section_check   ^check:\n
+section_effect  ^effect:\n
+section_pack    ^pack:\n
+section_open    ^open:\n
+section_fail    ^fail:\n
+section_pass    ^pass:\n
+section_loop    ^loop:\n
+
 %%
 
 
 {comment} { }
 
-^run:\n     { return SECTION_RUN;     }
-^compose:\n { return SECTION_COMPOSE; }
-^alias:\n   { return SECTION_ALIAS;   }
-^arg:\n     { return SECTION_ARG;     }
-^cache:\n   { return SECTION_CACHE;   }
-^check:\n   { return SECTION_CHECK;   }
-^effect:\n  { return SECTION_EFFECT;  }
-^pack:\n    { return SECTION_PACK;    }
-^open:\n    { return SECTION_OPEN;    }
-^fail:\n    { return SECTION_FAIL;    }
-^pass:\n    { return SECTION_PASS;    }
-^loop:\n    { return SECTION_LOOP;    }
+{section_run}      { return SECTION_RUN;     }
+{section_compose}  { return SECTION_COMPOSE; }
+{section_alias}    { return SECTION_ALIAS;   }
+{section_arg}      { return SECTION_ARG;     }
+{section_cache}    { return SECTION_CACHE;   }
+{section_check}    { return SECTION_CHECK;   }
+{section_effect}   { return SECTION_EFFECT;  }
+{section_pack}     { return SECTION_PACK;    }
+{section_open}     { return SECTION_OPEN;    }
+{section_fail}     { return SECTION_FAIL;    }
+{section_pass}     { return SECTION_PASS;    }
+{section_loop}     { return SECTION_LOOP;    }
 
 {with}  { return WITH; }
 {using} { return USING; }
@@ -60,7 +77,9 @@ group   __all__
 
 {builtin} { yylval = strdup(yytext); return BUILTIN; }
 {group}   { yylval = strdup(yytext); return GROUP;   }
-{val}     { yylval = strdup(yytext); return VAL;     }
+{str}     { yylval = strdup(yytext); return STR;     }
+{var}     { yylval = strdup(yytext); return VAR;     }
+{dbl}     { yylval = strdup(yytext); return DBL;     }
 {int}     { yylval = strdup(yytext); return INT;     }
 
 {dep}     { return DEP; }

@@ -18,15 +18,14 @@ char* e_emit(char* a);
 %}
 
 %define api.value.type {char*}
-%token VAL EOS
+
+%token VAR INT DBL STR EOS
 
 %token BUILTIN GROUP
 
 %token WITH USING SPLIT ON MERGE
 
-%token COMPOSE EQUAL COUPLE LABEL
-
-%token LBRK RBRK SEP
+%token LBRK RBRK LPAR RPAR SEP
 
 %token SECTION_RUN
 %token SECTION_COMPOSE
@@ -42,6 +41,7 @@ char* e_emit(char* a);
 %token SECTION_LOOP
 
 %left COUPLE
+%left COMPOSE
 %left DEP 
 %left EQUAL
 %left LABEL
@@ -76,11 +76,11 @@ section_run
 
 section_compose
   : SECTION_COMPOSE
-  | section_compose val EQUAL composition
+  | section_compose var EQUAL composition
 
 section_alias
   : SECTION_ALIAS
-  | section_alias val EQUAL val
+  | section_alias var EQUAL var
 
 section_check
   : SECTION_CHECK
@@ -121,82 +121,88 @@ section_loop
 
 /* definitions for groups used directly by the section group above */
 named_path
-  : val COUPLE path
+  : var COUPLE path
 ;
 
 path
-  : source DEP val
-  | path   DEP val
+  : source DEP var
+  | path   DEP var
   | LPAR path RPAR
 ;
 source
-  : val
-  | source val
+  : var
+  | source var
 ;
 
 composition
-  : val COMPOSE val
-  | composition COMPOSE val
+  : var COMPOSE var
+  | composition COMPOSE var
 ;
 
 args_couplet
-  : val COUPLE arg 
+  : var COUPLE arg 
   | args_couplet SEP arg
 ;
 
 cache_couplet
-  : list COUPLE val
+  : list COUPLE var
 ;
 
 pack_couplet
-  : list COUPLE val
+  : list COUPLE var
 ;
 
 open_couplet
-  : list COUPLE val
+  : list COUPLE var
 ;
 
 fail_couplet
-  : list COUPLE val
+  : list COUPLE var
 ;
 
 pass_couplet
-  : list COUPLE val
+  : list COUPLE var
 ;
 
 loop_spec
-  : WITH val
-  | loop_spec SPLIT USING val 
+  : WITH var
+  | loop_spec SPLIT USING var 
   | loop_spec arg_split
-  | loop_spec MERGE USING val
+  | loop_spec MERGE USING var
 ;
 
 
 /* groups used in defining argument lists */
 arg_split
-  : SPLIT val ON arg
-  | split val ON arg
+  : SPLIT var ON arg
+  | arg_split var ON arg
 ;
 
 arg
-  : val EQUAL higher_values
+  : var EQUAL element
 ;
 
-higher_value
-  : NUM
-  | STRING 
+element
+  : var
+  | primitive
   | array
-;
 
 array
   : LBRK list RBRK
 ;
 
 list
-  : val SEP val
+  : element SEP element
+  | list SEP element
 
-val
-  : VAL
+var
+  : VAR
+;
+
+primitive
+  : INT
+  | DBL
+  | STR 
 ;
 
 %%
