@@ -1,13 +1,29 @@
-run:
-L0 :: L1 L2 --> D --> L3 --> F --> G
-L1 :: A:1 --> B
-L2 :: A:2 --> C
-L3 :: E
+@import
+"some_stupid_crap"
 
-compose:
+@export
+L0 as run_pipeline
+
+@path
+# main pathway
+L0 :: L1 L2 --> D --> L3 --> F --> G;
+L1 :: A:1 --> B;
+L2 :: A:2 --> C;
+L3 :: E;
+# validators
+vL1   :: L1 --> va;
+vL2   :: L2 --> va;
+vD    :: D --> vd;
+vLots :: D F --> vabc;
+# effectors
+eA1B   :: A:1 B --> eab;
+eA2C   :: A:2 C --> print;
+eFinal :: (D --> x) (F --> y --> z) (G --> x) --> Q --> final;
+
+@compose
 F = h . g . f
 
-alias:
+@alias
 A = senhalatha
 B = huzurbazar
 C = fredericksen
@@ -16,42 +32,43 @@ E = someexpensiveoperation
 F = andanother
 G = thelastfunctioninthisparticularpipeline
 
-check:
-__all__ --> true;
-B,C --> va;
-D --> vb, vc;
-A B C --> vabc;
+@check
+D  :: vL1
+D  :: vL2
+L3 :: vD
+G  :: vLots
 
-effect:
-__all__ --> null;
-A:1 B --> eab;
-A:2 C --> print;
-(D --> x) (F --> y --> z) (G --> x) --> Q --> final;
-vabc --> log;
+@effect
+B :: eA1B
+C :: eA2C
+G :: eFinal
 
-arg:
+@arg
 A:1 :: x=45, y="hi", z=[1,2,3]
 A:2 :: x=46
+E   :: x=45, y="df", z=[[1,['2',4]],2,3]
+F   :: ttt=1
 
-cache:
+@cache
 __all__ :: memcache
-A,E     :: datcache
+A       :: datcache
+E       :: datcache
 F       :: nocache
 final   :: datcache
 
-pack:
+@pack
 __all__ :: id
 
-open:
+@open
 __all__ :: id
 
-fail:
+@fail
 __all__ :: null
 
-pass:
+@pass
 __all__ :: call
 
-loop:
+@loop
 with L1
  split A:1 on a=[1,2,3,4]
        B   on x=[1,2,5,9]

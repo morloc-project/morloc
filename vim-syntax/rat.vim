@@ -20,18 +20,20 @@ endif
 " syn keyword conditional if else
 " syn keyword type        int string float node graph link
 
-syn match section '^run:\n'
-syn match section '^compose:\n'
-syn match section '^alias:\n'
-syn match section '^arg:\n'
-syn match section '^check:\n'
-syn match section '^effect:\n'
-syn match section '^cache:\n'
-syn match section '^pack:\n'
-syn match section '^open:\n'
-syn match section '^fail:\n'
-syn match section '^pass:\n'
-syn match section '^loop:\n'
+syn match section '@import'
+syn match section '@export'
+syn match section '@path'
+syn match section '@compose'
+syn match section '@alias'
+syn match section '@arg'
+syn match section '@check'
+syn match section '@effect'
+syn match section '@cache'
+syn match section '@pack'
+syn match section '@open'
+syn match section '@fail'
+syn match section '@pass'
+syn match section '@loop'
 
 syn keyword function id null call true false
 syn keyword function memcache datcache nocache
@@ -40,7 +42,7 @@ syn match break '^---\+$'
 syn match break ';'
 
 " setting operators
-syn match operator '[ \t\n]\.[ \t\n]'
+syn match operator '\.'
 syn match operator '->'
 syn match operator '::'
 syn match operator ':'
@@ -59,7 +61,7 @@ syn keyword constant __all__
 syn keyword constant __map__ __val__ __eff__ __cache__ __fail__ __pass__ 
 
 " keywords
-syn keyword keyword with split on merge using
+syn keyword keyword as with split on merge using
 
 " labels
 syn match varlabel ':[a-zA-Z0-9._]\+'

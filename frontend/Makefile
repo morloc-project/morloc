@@ -7,4 +7,4 @@ all:
 
 .PHONY: clean
 clean:
-	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET}
+	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET} a.out

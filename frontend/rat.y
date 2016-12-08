@@ -10,10 +10,6 @@
 int yylex(void);
 void yyerror (char* s);
 char* get_str();
-char* make_label(char*);
-char* e_link(char* a, char* b);
-char* e_join(char* a, char* b);
-char* e_emit(char* a);
 
 %}
 
@@ -23,11 +19,13 @@ char* e_emit(char* a);
 
 %token BUILTIN GROUP
 
-%token WITH USING SPLIT ON MERGE
+%token AS WITH USING SPLIT ON MERGE
 
 %token LBRK RBRK LPAR RPAR SEP
 
-%token SECTION_RUN
+%token SECTION_IMPORT
+%token SECTION_EXPORT
+%token SECTION_PATH
 %token SECTION_COMPOSE
 %token SECTION_ALIAS
 %token SECTION_ARG
@@ -40,11 +38,11 @@ char* e_emit(char* a);
 %token SECTION_PASS
 %token SECTION_LOOP
 
-%left COUPLE
-%left COMPOSE
-%left DEP 
-%left EQUAL
-%left LABEL
+%token COUPLE
+%token COMPOSE
+%token DEP 
+%token EQUAL
+%token LABEL
 
 %%
 
@@ -55,7 +53,9 @@ input
 ;
 
 section
-  : section_run
+  : section_import
+  | section_export
+  | section_path
   | section_compose
   | section_alias
   | section_arg
@@ -70,25 +70,34 @@ section
 
 
 /* sections have their own strict rules on their contents */
-section_run
-  : SECTION_RUN
-  | section_run named_path
+section_import
+  : SECTION_IMPORT
+  | section_import STR { printf("IMPORT %s\n", $2); }
+
+section_export
+  : SECTION_EXPORT
+  | section_export lvar AS var { printf("EXPORT %s %s\n", $2, $4); }
+
+section_path
+  : SECTION_PATH
+  | EOS
+  | section_path named_path
 
 section_compose
   : SECTION_COMPOSE
-  | section_compose var EQUAL composition
+  | section_compose var EQUAL composition { printf("COMPOSE %s %s\n", $2, $4); }
 
 section_alias
   : SECTION_ALIAS
-  | section_alias var EQUAL var
+  | section_alias var EQUAL var { printf("ALIAS %s %s\n", $2, $4); }
 
 section_check
   : SECTION_CHECK
-  | section_check path
+  | section_check check_couplet
 
 section_effect
   : SECTION_EFFECT
-  | section_effect path
+  | section_effect effect_couplet
 
 section_arg
   : SECTION_ARG
@@ -121,88 +130,108 @@ section_loop
 
 /* definitions for groups used directly by the section group above */
 named_path
-  : var COUPLE path
+  : var COUPLE path { printf("PATH %s %s\n", $1, $3); }
 ;
 
 path
-  : source DEP var
-  | path   DEP var
-  | LPAR path RPAR
+  : source         { $$ = $1; }
+  | path DEP var   { $$ = $3; printf("EMIT %s\n", $3); printf("LINK %s %s\n", $3, $1); }
 ;
 source
-  : var
-  | source var
+  : var            { $$ = $1; printf("EMIT %s\n", $1); }
+  | source var     { printf("EMIT %s\n", $2); $$ = get_str(); sprintf($$, "%s %s", $1, $2); }
+  | LPAR path RPAR { $$ = $2; }
+  | source LPAR path RPAR { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 ;
 
 composition
-  : var COMPOSE var
-  | composition COMPOSE var
+  : var COMPOSE var         { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+  | composition COMPOSE var { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 ;
 
 args_couplet
-  : var COUPLE arg 
-  | args_couplet SEP arg
+  : var COUPLE arg      { $$ = $1; printf("ARG %s %s\n", $1, $3); }
+  | args_couplet SEP arg { $$ = $1; printf("ARG %s %s\n", $1, $3); }
+;
+
+check_couplet
+  : var COUPLE var { printf("CHECK %s %s\n", $1, $3); }
+;
+
+effect_couplet
+  : var COUPLE var { printf("EFFECT %s %s\n", $1, $3); }
 ;
 
 cache_couplet
-  : list COUPLE var
+  : var COUPLE var { printf("CACHE %s %s\n", $1, $3); }
 ;
 
 pack_couplet
-  : list COUPLE var
+  : var COUPLE var { printf("PACK %s %s\n", $1, $3); }
 ;
 
 open_couplet
-  : list COUPLE var
+  : var COUPLE var { printf("OPEN %s %s\n", $1, $3); }
 ;
 
 fail_couplet
-  : list COUPLE var
+  : var COUPLE var { printf("FAIL %s %s\n", $1, $3); }
 ;
 
 pass_couplet
-  : list COUPLE var
+  : var COUPLE var { printf("PASS %s %s\n", $1, $3); }
 ;
 
 loop_spec
-  : WITH var
-  | loop_spec SPLIT USING var 
-  | loop_spec arg_split
-  | loop_spec MERGE USING var
+  : WITH var                  { $$ = $2; }
+  | loop_spec SPLIT USING var { $$ = $1; printf("LOOP_SPLIT_USING %s %s\n", $1, $4); }
+  | loop_spec MERGE USING var { $$ = $1; printf("LOOP_MERGE_USING %s %s\n", $1, $4); }
+  | loop_spec arg_split       { $$ = $1; printf("LOOP_SPLIT_ON %s %s\n",    $1, $2); }
+;
+arg_split
+  : SPLIT     var ON var EQUAL element { $$ = get_str(); sprintf($$, "[%s %s %s]", $2, $4, $6); }
+  | arg_split var ON var EQUAL element { $$ = get_str(); sprintf($$, "%s [%s %s %s]", $1, $2, $4, $6); }
 ;
 
 
 /* groups used in defining argument lists */
-arg_split
-  : SPLIT var ON arg
-  | arg_split var ON arg
-;
-
 arg
-  : var EQUAL element
+  : var EQUAL element { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 ;
 
 element
-  : var
-  | primitive
-  | array
+  : var       { $$ = $1; }
+  | primitive { $$ = $1; }
+  | array     { $$ = $1; }
+;
 
 array
-  : LBRK list RBRK
+  : LBRK list    RBRK { $$ = get_str(); sprintf($$, "array(%s)", $2); }
+  | LBRK element RBRK { $$ = get_str(); sprintf($$, "array(%s)", $2); }
+  | LBRK         RBRK { $$ = get_str(); sprintf($$, "array()", $2); }
 ;
 
 list
-  : element SEP element
-  | list SEP element
+  : element SEP element { $$ = get_str(); sprintf($$, "%s,%s", $1, $3); }
+  | list SEP element    { $$ = get_str(); sprintf($$, "%s,%s", $1, $3); }
+;
 
 var
-  : VAR
+  : lvar    { $$ = $1; }
+  | BUILTIN { $$ = $1; }
+  | GROUP   { $$ = $1; }
+;
+
+lvar
+  : VAR           { $$ = $1; }
+  | VAR LABEL VAR { $$ = get_str(); sprintf($$, "%s:%s", $1, $3); printf("LABEL %s %s\n", $1, $3); }
+  | VAR LABEL INT { $$ = get_str(); sprintf($$, "%s:%s", $1, $3); printf("LABEL %s %s\n", $1, $3); }
 ;
 
 primitive
-  : INT
-  | DBL
-  | STR 
+  : INT { $$ = $1; }
+  | DBL { $$ = $1; }
+  | STR { $$ = $1; }
 ;
 
 %%
@@ -210,31 +239,6 @@ primitive
 char* get_str(){
     char* a = (char*)malloc(128 * sizeof(char));
     return a;
-}
-
-char* make_label(char* a){
-    static int node_idx = 0;
-    char* a_star = get_str();
-    sprintf(a_star, "%s_%d", a, node_idx);
-    ++node_idx;
-    return(a_star);
-}
-
-char* e_link(char* a, char* b){
-    printf("link %s %s\n", a, b);
-    return a;
-}
-
-char* e_join(char* a, char* b){
-    char* out = get_str();
-    sprintf(out, "%s %s", a, b);
-    return out;
-}
-
-char* e_emit(char* a){
-    char* a_inst = make_label(a);
-    printf("emit %s %s\n", a, a_inst);
-    return a_inst;
 }
 
 void yyerror (char* s){
