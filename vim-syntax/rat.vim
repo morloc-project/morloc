@@ -1,7 +1,6 @@
 " Vim syntax file
 " Language: rat
 " Maintainer: Zebulun Arendsee
-" Latest Revision: 2016-12-02
 " -----------------------------------------------------------------------------
 " INSTALLATION
 " Run the following in your UNIX terminal
@@ -14,14 +13,15 @@ if exists("b:current_syntax")
   finish
 endif
 
-" syn keyword keyword     set save run
-" syn keyword function    clear import rand
-" syn keyword repeat      foreach in
-" syn keyword conditional if else
-" syn keyword type        int string float node graph link
+" illegal operators
+syn match error '@[^ \n\t]*'
+syn match error '\(\\\|==\|:::\|<-\|[^-]->\|[^ @A-Za-z0-9_(=.,?)\[\]:;-]\)[^ \n]*'
+syn match error ' \+$'
 
+" section headers
 syn match section '@import'
 syn match section '@export'
+syn match section '@type'
 syn match section '@path'
 syn match section '@compose'
 syn match section '@alias'
@@ -53,18 +53,15 @@ syn match operator '<'
 syn match operator '>'
 
 " define constants
-" TODO this currently highlights numbers inside strings, e.g. r5g or 5r or r5
-" syn match number '\([a-zA-Z_]\)\@!-\?[1-9]\d*\h\@!'
 syn match number '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!'
 syn keyword constant NIL
-syn keyword constant __all__
-syn keyword constant __map__ __val__ __eff__ __cache__ __fail__ __pass__ 
+syn keyword constant __all__ __map__ __val__ __eff__ __cache__ __fail__ __pass__ 
 
 " keywords
 syn keyword keyword as with split on merge using
 
 " labels
-syn match varlabel ':[a-zA-Z0-9._]\+'
+syn match varlabel ':[a-zA-Z0-9.]\+'
 
 syn region string start="'" end="'"
 syn region string start='"' end='"'
@@ -79,6 +76,7 @@ syn match comment '#.*'
 
 let b:current_syntax = "rat"
 
+hi def link error    Error 
 hi def link break    Underlined
 hi def link varlabel Special
 hi def link section  Label
