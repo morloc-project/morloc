@@ -121,3 +121,49 @@ def false(...):
     return FALSE
 
 ```
+
+# NOTES
+
+My current approach (partially realized) is to
+
+ 1. lexical analysis of rat code, descending into imported code with flex
+ 2. parse rat tokens into an AST
+ 3. do syntax and semantic checking on the AST, emitting compile time errors
+    and warnings 
+ 4. print rat intermediate language (RIL) from the AST.
+ 5. tokenize RIL with second flex program
+ 6. parse the tokenized RIL with a language-specific parser, perhaps loading
+    the function space to allow a second level of syntax and semantic checking.
+ 7. construct the code for the final language
+
+I have a few questions about this.
+
+ 1. Should a use a more featureful preprocessor? One that can concatenate all
+    the code into a build file, expand macros, expand ifdefs, etc. Perhaps use
+    C preprocessor before lexical analysis?
+
+ 2. Is RIL necessary? Maybe it would be easier to convert directly from the AST
+    to the final language.
+
+# TODO
+
+[ ] flex recursion into import code
+[ ] refactor parser: use unions instead of strings
+[ ] refactor the kludgy list handling
+[ ] build explicit AST
+[ ] handle intermediate language printing through AST
+[ ] auto label manifold instance variable names
+[ ] language specific flag to sections
+[ ] make informative syntax error/warning messages
+[ ]  - warnings for manifolds with that are missing elements without defaults
+[ ]  - warnings for unused elements
+[ ]  - warnings for missing type
+[ ]  - errors for incompatible types, can I use the haskell type checker?
+[ ] merge backends and frontend
+[ ] other compile options
+[ ]  - backend language
+[ ]  - import search path
+[ ]  - warnings
+[ ]  - print tokens
+[ ]  - print intermediate
+[ ] type inference, can I use haskell?
