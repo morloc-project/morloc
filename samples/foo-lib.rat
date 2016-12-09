@@ -1,0 +1,49 @@
+@path
+# default validators
+check_L1 :: L1 --> va;
+check_L2 :: L2 --> va;
+check_D  :: D  --> vd;
+check_F  :: F  --> vf;
+check_V  :: V  --> vv;
+
+# default effectors
+log_G :: G --> eg
+log_F :: F --> ef
+log_A :: A --> ea
+log_B :: B --> eb
+log_C :: C --> ec
+
+@type
+
+
+@arg
+# default arguments
+E   :: x=45, y="df", z=[[1,['2',4]],2,3]
+F   :: ttt=1
+
+@check
+D  :: check_L1
+D  :: check_L2
+L3 :: check_D
+
+@effect
+G :: log_G
+F :: log_F
+A :: log_A
+B :: log_B
+C :: log_C
+
+@cache
+__all__ :: memcache
+
+@pack
+__all__ :: id
+
+@open
+__all__ :: id
+
+@fail
+__all__ :: null
+
+@pass
+__all__ :: call

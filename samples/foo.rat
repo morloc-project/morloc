@@ -1,26 +1,21 @@
 @import
-"some_stupid_crap"
+"space.rat"
 
 @export
 L0 as run_pipeline
 
 @path
 # main pathway
-L0 :: L1 L2 --> D --> L3 --> F --> G;
+L0 :: L1 L2 --> D --> L3 --> F --> ( V ? O1 , O2 , O3 ) --> G;
 L1 :: A:1 --> B;
 L2 :: A:2 --> C;
 L3 :: E;
-# validators
-vL1   :: L1 --> va;
-vL2   :: L2 --> va;
-vD    :: D --> vd;
+# complex validator
 vLots :: D F --> vabc;
-# effectors
+# complex effectors
 eA1B   :: A:1 B --> eab;
 eA2C   :: A:2 C --> print;
 eFinal :: (D --> x) (F --> y --> z) (G --> x) --> Q --> final;
-# conditional test
-CONNY :: x --> ( V ? A , B , C ) --> y
 
 @compose
 F = h . g . f
@@ -34,11 +29,10 @@ E = someexpensiveoperation
 F = andanother
 G = thelastfunctioninthisparticularpipeline
 
-@check
-D  :: vL1
-D  :: vL2
-L3 :: vD
-G  :: vLots
+@cache
+A     :: datcache
+E     :: datcache
+final :: datcache
 
 @effect
 B :: eA1B
@@ -48,27 +42,6 @@ G :: eFinal
 @arg
 A:1 :: x=45, y="hi", z=[1,2,3]
 A:2 :: x=46
-E   :: x=45, y="df", z=[[1,['2',4]],2,3]
-F   :: ttt=1
-
-@cache
-__all__ :: memcache
-A       :: datcache
-E       :: datcache
-F       :: nocache
-final   :: datcache
-
-@pack
-__all__ :: id
-
-@open
-__all__ :: id
-
-@fail
-__all__ :: null
-
-@pass
-__all__ :: call
 
 @loop
 with L1
