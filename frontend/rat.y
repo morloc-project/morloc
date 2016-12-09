@@ -43,6 +43,7 @@ char* get_str();
 %token DEP 
 %token EQUAL
 %token LABEL
+%token CONDITION
 
 %%
 
@@ -136,13 +137,22 @@ named_path
 path
   : source         { $$ = $1; }
   | path DEP var   { $$ = $3; printf("EMIT %s\n", $3); printf("LINK %s %s\n", $3, $1); }
+  | path DEP con   { $$ = $3; printf("LINK %s %s\n", $3, $1); }
 ;
 source
-  : var            { $$ = $1; printf("EMIT %s\n", $1); }
-  | source var     { printf("EMIT %s\n", $2); $$ = get_str(); sprintf($$, "%s %s", $1, $2); }
+  : var { $$ = $1; printf("EMIT %s\n", $1); }
+  | con { $$ = $1; }
+  | source con { $$ = $2; }
+  | source var { printf("EMIT %s\n", $2); $$ = get_str(); sprintf($$, "%s %s", $1, $2); }
   | LPAR path RPAR { $$ = $2; }
   | source LPAR path RPAR { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 ;
+con
+  : LPAR var CONDITION lvar_list RPAR { $$ = $2; printf("COND %s %s\n", $2, $4); }
+lvar_list
+  : lvar SEP lvar      { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+  | lvar_list SEP lvar { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+
 
 composition
   : var COMPOSE var         { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }

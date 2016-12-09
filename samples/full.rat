@@ -19,6 +19,8 @@ vLots :: D F --> vabc;
 eA1B   :: A:1 B --> eab;
 eA2C   :: A:2 C --> print;
 eFinal :: (D --> x) (F --> y --> z) (G --> x) --> Q --> final;
+# conditional test
+CONNY :: x --> ( V ? A , B , C ) --> y
 
 @compose
 F = h . g . f

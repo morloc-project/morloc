@@ -50,8 +50,11 @@
 
 %option noyywrap
 
+%option pointer
+
 comment #.*\n
 ws      [ \t\n\r]+
+not_ws  [^ \t\n\r]+
 int     [0-9]|[1-9][0-9]+
 dbl     {int}\.[0-9]+
 str     \'[^']*\'|\"[^"]*\"
@@ -59,11 +62,12 @@ var     [a-zA-Z_][a-zA-Z_0-9]*
 dep     -->
 eol     [\n\r]+
 
-compose \.
+compose "."
 eos     ;|---+
 equal   =
 couple  ::
 label   :
+cond    "?"
 
 lbrk    \[
 rbrk    \]
@@ -81,7 +85,6 @@ merge merge
 using using
 
 group   __all__
-
 
 section_export  @export
 section_import  @import
@@ -118,7 +121,6 @@ section_loop    @loop
 {section_pass}    { return SECTION_PASS;    }
 {section_loop}    { return SECTION_LOOP;    }
 
-{eos}   { return EOS;   }
 {as}    { return AS;    }
 {with}  { return WITH;  }
 {using} { return USING; }
@@ -135,11 +137,12 @@ section_loop    @loop
 
 {dep}     { return DEP; }
 
-{eos}     { return EOS;     }
-{compose} { return COMPOSE; }
-{equal}   { return EQUAL;   }
-{couple}  { return COUPLE;  }
-{label}   { return LABEL;   }
+{eos}     { return EOS;       }
+{compose} { return COMPOSE;   }
+{equal}   { return EQUAL;     }
+{couple}  { return COUPLE;    }
+{label}   { return LABEL;     }
+{cond}    { return CONDITION; }
 
 {lbrk} { return LBRK; }
 {rbrk} { return RBRK; }

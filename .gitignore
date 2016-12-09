@@ -1,5 +1,6 @@
 lex.yy.*
 *.tab.*
 *.out
-rats
+rat
+lexer
 R
