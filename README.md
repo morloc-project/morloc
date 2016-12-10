@@ -147,7 +147,7 @@ I have a few questions about this.
 
 # TODO
 
-[ ] flex recursion into import code
+[x] flex recursion into import code
 [ ] refactor parser: use unions instead of strings
 [ ] refactor the kludgy list handling
 [ ] build explicit AST

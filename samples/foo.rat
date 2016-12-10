@@ -3,7 +3,7 @@
 # grammatically correct. But on a higher semantic level, isn't tested.
 
 @import
-"space.rat"
+"foo-lib.rat"
 
 @export
 L0 as run_pipeline

@@ -9,6 +9,8 @@
 
 int yylex(void);
 void yyerror (char* s);
+int newfile(char *fn);
+int popfile(void);
 char* get_str();
 
 %}
@@ -23,7 +25,6 @@ char* get_str();
 
 %token LBRK RBRK LPAR RPAR SEP
 
-%token SECTION_IMPORT
 %token SECTION_EXPORT
 %token SECTION_PATH
 %token SECTION_COMPOSE
@@ -54,8 +55,7 @@ input
 ;
 
 section
-  : section_import
-  | section_export
+  : section_export
   | section_path
   | section_compose
   | section_alias
@@ -71,10 +71,6 @@ section
 
 
 /* sections have their own strict rules on their contents */
-section_import
-  : SECTION_IMPORT
-  | section_import STR { printf("IMPORT %s\n", $2); }
-
 section_export
   : SECTION_EXPORT
   | section_export lvar AS var { printf("EXPORT %s %s\n", $2, $4); }
@@ -255,6 +251,12 @@ void yyerror (char* s){
   printf ("%s\n", s);
 }
 
-int main (void){
-  yyparse();
+int main(int argc, char ** argv){
+    if(argc < 2){
+        perror("Please provide a filename\n");
+        return 1;
+    }
+    if(newfile(argv[1]))
+        yyparse();
+    return 0;
 }
