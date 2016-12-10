@@ -7,4 +7,9 @@ L0 as runpipeline
 
 @path
 
-L0 :: A --> F
+L0 :: A --> F --> as
+
+@alias
+
+A :: r -->
+A = r

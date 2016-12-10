@@ -1,5 +1,5 @@
 @path
-# default validators
+# TODO default validators
 check_L1 :: L1 --> va;
 check_L2 :: L2 --> va;
 check_D  :: D  --> vd;
@@ -14,7 +14,7 @@ log_B :: B --> eb
 log_C :: C --> ec
 
 @type
-
+E :: a -> b
 
 @arg
 # default arguments

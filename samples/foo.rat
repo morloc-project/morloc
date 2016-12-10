@@ -1,3 +1,7 @@
+# Author: A. Rat
+# Description: This is a test of rat, it is should be lexically and
+# grammatically correct. But on a higher semantic level, isn't tested.
+
 @import
 "space.rat"
 
@@ -5,7 +9,7 @@
 L0 as run_pipeline
 
 @path
-# main pathway
+# main pathway TODO NOTE FIXME
 L0 :: L1 L2 --> D --> L3 --> F --> ( V ? O1 , O2 , O3 ) --> G;
 L1 :: A:1 --> B;
 L2 :: A:2 --> C;
@@ -38,6 +42,7 @@ final :: datcache
 B :: eA1B
 C :: eA2C
 G :: eFinal
+Z :: null
 
 @arg
 A:1 :: x=45, y="hi", z=[1,2,3]
