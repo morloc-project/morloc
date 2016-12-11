@@ -145,6 +145,130 @@ I have a few questions about this.
  2. Is RIL necessary? Maybe it would be easier to convert directly from the AST
     to the final language.
 
+There are two ways a workflow can be viewed: a graph of functions, or a graph
+of data. Of course the two can also be merged. If the functions are typed, the
+data graph is implicit in the function graph, and can be extracted from it. An
+anonymous function graph is also implicit in a data graph.
+
+## On directions
+
+I can write paths in two directions, from the bottom up, or from top down.
+
+```
+FinalResult <-- Piece3 <-- Piece1 Piece 2
+```
+
+Or
+
+```
+Piece1 Piece2 --> Piece3 --> FinalResult
+```
+
+The latter is reminiscent of a familiar shell pipeline. It mirrors the flow of
+data from well to sink. The former is like mathematical composition.
+
+A deeper example
+
+```
+FinalResult . ResultA ResultB
+ResultA . X Y Z
+X . E R T
+Y . U
+Z . whatever . yeah
+ResultB . W . R
+```
+
+Where `.` represents compositon. Phrases like `f . a b` indicates,
+`f(a(),b())`. Since we are dealing with manifolds, no arguments are passed to
+a and b, they know what to do. Multiple inputs prevents further chaining. `f
+. a b . c` doesn't make sense. It could possibly mean that that `a` and `b`
+both request input from `c`, but that is perhaps not very useful. It is better,
+probably, to consider these branches as chain ends. Then drop a level into the
+definitions of `a` and `b`.
+
+```
+f . x y;
+x = a . c;
+y = b . d . (e . i) . f . g h;
+```
+
+Where `c`, `g`, 'i', and `h` are wells, and `f` is a sink.
+
+There is a recursive beauty to this, and it allows very clean abstractions, it
+places the final goal at the top. It also clearly expresses the pull approach
+the manifolds follow. It avoids the weird situation where I have to recurse to
+the end of a path to find the sinks.
+
+But why choose? I can allow both.
+
+What if they are both used in the same statement? Should that be legal?
+
+```
+D <-- (A --> B) C 
+```
+
+```
+C <-- A --> B
+```
+
+Hmm, `-->` should have higher precedence. Still mixing is pretty convoluted.
+
+```
+D <-- (B <-- A) --> C
+```
+
+
+```
+Main = Analyze . Join . Map . Filter . Divide . Retrieve
+```
+
+
+sqrt(mean(runif(x)))
+
+sqrt . mean . runif:1
+
+log . median . runif:1
+
+
+Nahhh, mixing the two needs to be illegal.
+
+Why not express these as compositions?
+
+
+## Composite output
+
+```
+A --> (B, C, D)
+```
+
+Where A has three outputs, say of types [b,c,d]. For these, we automatically
+generate the linker functions B, C, and D.
+
+## On failure
+
+There are three kinds of failure.
+  1. a validator trips, the fail function is called before the run function has
+     even been called.
+  2. run functions raises an exception.
+  3. the run function succeeds, but the output is invalid (as assessed by
+     a post-validator).
+
+Currently, I directly handle failure of the first kind. The other two kinds can
+be handled by writing checks into the pack function and passing the results in
+the trappings of the pure output. This would be the monadic solution.
+
+To this point, I have mostly thought about validators as operating on the
+values of manifolds. But equally important, perhaps, is validation of
+arguments. The manifold validators check the environment and the values of
+other manifolds. But they cannot see the arguments of a particular manifold.
+Perhaps one solution would be for a manifold to access another manifold by
+reference, not value. That is, rather than accessing the stuff in the cache, it
+accesses the manifold metadata.
+
+No, there is a better way. Again, monads. I can pack the argument list into the
+monad. Then you just change the unpack function of the validator to take the
+argument list rather than just the pure value.
+
 # TODO
 
 [x] flex recursion into import code
