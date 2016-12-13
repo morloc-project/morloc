@@ -109,10 +109,10 @@ group   __all__
 
 section_export  @export
 section_import  @import
+section_doc     @doc
 section_path    @path
-section_compose @compose
+section_action  @action
 section_alias   @alias
-section_arg     @arg
 section_cache   @cache
 section_check   @check
 section_effect  @effect
@@ -130,9 +130,9 @@ section_loop    @loop
 {section_import}  { BEGIN S_IMPORT ; }
 {section_export}  { BEGIN INITIAL  ; return SECTION_EXPORT  ; }
 {section_path}    { BEGIN INITIAL  ; return SECTION_PATH    ; }
-{section_compose} { BEGIN INITIAL  ; return SECTION_COMPOSE ; }
+{section_action}  { BEGIN INITIAL  ; return SECTION_ACTION  ; }
 {section_alias}   { BEGIN INITIAL  ; return SECTION_ALIAS   ; }
-{section_arg}     { BEGIN INITIAL  ; return SECTION_ARG     ; }
+{section_doc}     { BEGIN INITIAL  ; return SECTION_DOC     ; }
 {section_cache}   { BEGIN INITIAL  ; return SECTION_CACHE   ; }
 {section_check}   { BEGIN INITIAL  ; return SECTION_CHECK   ; }
 {section_effect}  { BEGIN INITIAL  ; return SECTION_EFFECT  ; }

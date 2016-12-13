@@ -27,9 +27,9 @@ char* get_str();
 
 %token SECTION_EXPORT
 %token SECTION_PATH
-%token SECTION_COMPOSE
+%token SECTION_ACTION
 %token SECTION_ALIAS
-%token SECTION_ARG
+%token SECTION_DOC
 %token SECTION_CACHE
 %token SECTION_CHECK
 %token SECTION_EFFECT
@@ -57,9 +57,9 @@ input
 section
   : section_export
   | section_path
-  | section_compose
+  | section_action
   | section_alias
-  | section_arg
+  | section_doc
   | section_cache
   | section_check
   | section_effect
@@ -71,6 +71,7 @@ section
 
 
 /* sections have their own strict rules on their contents */
+/* TODO remove section_compose and section_arg, add section_doc and section_action */
 section_export
   : SECTION_EXPORT
   | section_export lvar AS var { printf("EXPORT %s %s\n", $2, $4); }
