@@ -269,6 +269,96 @@ No, there is a better way. Again, monads. I can pack the argument list into the
 monad. Then you just change the unpack function of the validator to take the
 argument list rather than just the pure value.
 
+## Conditionals
+
+Paritioning data is an important part of many workflows. `rat` needs a good
+method for expressing binary trees. It isn't hard: `V1 ? V2 ? A, B, V3 ? C, D` etc
+works fine. The grammar is:
+
+```
+cexp
+  : COND VAL  VAL
+  | COND cexp VAL
+  | COND VAL  cexp
+  | COND cexp cexp
+```
+
+Where the COND token is lexed with `{var} *\?` and has the value `{var}` (this
+is necessary, I believe, to avoid ambiguity in 1 token look-aheads).
+
+This allows clean expression of binary trees, e.g.
+
+```
+  V1 ? A,
+  V2 ?
+     V3 ? B,
+     V4 ? F, G,
+     V5 ? H,
+     V6 ? I, J
+  . x
+```
+
+Here each V. conditional statement is a function of x, y, and z. If the
+function returns true, the left path is evaluated. When a leaf is reached, the
+leaf function is called (on x,y,z by default).
+
+This would compile into pseudocode like the following:
+
+```
+if (V1 x)
+    A x
+elif (V2 x)
+    if (V3 x)
+        B x
+    elif (V4 x)
+        F x
+    else
+        G x
+else
+    if (V5 x)
+        H x
+    elif (V6 x)
+        I x
+    else
+        J x
+where
+x :: Foo
+V1,V1,... :: Foo -> Bool
+A,B,C,D,E,F,G,H,I,J :: Foo -> a
+```
+
+But how to loop this? That is, what if x is a list?
+
+I'll discuss the possibilities in the context of this simple example:
+
+```
+V ? A, B . x
+```
+
+This operation has the signature:
+
+```
+(V -> Foo -> Bool) -> (A -> Foo -> a) -> (B -> Foo -> b) -> [Foo] -> ([a], [b])
+```
+
+There are some variants in the first expression:
+
+```
+V   :: Foo -> Bool      -- e1
+V'  :: [Foo] -> Bool    -- e2
+V'' :: [Foo] -> [Bool]  -- e3
+```
+
+For e1, rat would just have to map V across x in the compiled code. The
+difference beween e2 and e3 is more significant. e2 reduces the entire vector
+to a single boolean. This will result in only a single leaf being selected and
+all data being processed by the one function. e3 maps list to list, leading to
+the data being partitioned between leafs. e3 would also return an ambiguous
+type (unless all A-J had the same signatures).
+
+Both uses are reasonable, and both should be allowed. But how to syntactically
+distinguish them? This brings me back to the ever troublesome loop issue.
+
 # TODO
 
 [x] flex recursion into import code
