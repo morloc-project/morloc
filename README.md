@@ -359,25 +359,111 @@ type (unless all A-J had the same signatures).
 Both uses are reasonable, and both should be allowed. But how to syntactically
 distinguish them? This brings me back to the ever troublesome loop issue.
 
+## On inputs, outputs and parameters
+
+Since Rat is a workflow language, a multifurcating relative of linear shell
+pipelines, connecting function inputs to function outputs is of prime
+importance. However their are other inputs to a function, the constant
+parameters. Take for example GNU grep. Grep has the general form
+
+```
+Grep :: [Line] -> Pattern -> [Line]
+```
+
+However Grep also has the flag `--invert-match`. You can add this parameter to the signature, of course:
+
+```
+Grep :: [Line] -> Pattern -> Bool -> [Line]
+```
+
+It has dozens of other options; adding all of them to the signature dilute the
+clarity of the original. There are a several solutions
+
+ 1. Have a different name for each combination of arguments, e.g. grep, vgrep,
+    egrep. But this quickly bloats the namespace.
+ 2. Make functions more atomic, then transform them, e.g. `invert grep`, but
+    this requires extensive reworking of the grep implementation, something
+    I want to avoid when possible. 
+ 3. Separate inputs from paramters. This is basically a general way to do
+    option #2. Adding options changes the way the function works, but preserves
+    the function signature.
+
+I am going with #3. Continuing with the grep example, there are options in GNU
+grep that alter the function type. For example, `--count` changes the signature
+to
+
+```
+Grep' :: [Line] -> Pattern -> Integer
+```
+
+and `--file` changes the type to
+
+```
+Grep'' :: [Line] -> File -> [Line]
+```
+
+Of couse you can also have both
+
+```
+Grep''' :: [Line] -> File -> Integer
+```
+
+GNU grep also allows you to read from a file, so for each Grep variant above,
+the first argument can be swapped with `[File]`.
+
+```
+FGrep    :: [File] -> Pattern -> [Line]
+FGrep'   :: [File] -> Pattern -> Integer
+FGrep''  :: [File] -> File -> [Line]
+FGrep''' :: [File] -> File -> Integer
+```
+
+So even after coralling type-conserving parameters into the @arg section, we
+still have a combinatoric explosion. The problem is that grep does too much. We should delegate reading files and counting lines to dedicated functions:
+
+```
+grep (read "world.txt") "waldo"
+length . grep (read "world.txt") "waldo"
+unnest . map (grep (read "world.txt")) (read "patterns.txt")
+```
+
+The last example uses currying, something not implemented in Rat. Also
+something that I can't literally implement at all in Rat since it would require
+changing client code (maybe, thar be hacks ...). However, if I create a `map`
+builtin, I can compile this with a loop calling `grep (read "world.txt) x` for
+all x in `(read "patterns.txt")`. However, this is inefficient. Grep has
+optimizations for searching multiple patterns (or if it doesn't, it should) and
+also this may require multiple loadings of the input document. This is a common
+problem where vectorization is optimized and problems can't be efficiently
+atomized. It is a very common problem in compiling R code. One solution to the
+Grep issue would be to define Grep as
+
+```
+Grep :: [Line] -> [Pattern] -> [Line]
+```
+
+So it is always vectorized.
+
+
 # TODO
 
-[x] flex recursion into import code
-[ ] refactor parser: use unions instead of strings
-[ ] refactor the kludgy list handling
-[ ] build explicit AST
-[ ] handle intermediate language printing through AST
-[ ] auto label manifold instance variable names
-[ ] language specific flag to sections
-[ ] make informative syntax error/warning messages
-[ ]  - warnings for manifolds with that are missing elements without defaults
-[ ]  - warnings for unused elements
-[ ]  - warnings for missing type
-[ ]  - errors for incompatible types, can I use the haskell type checker?
-[ ] merge backends and frontend
-[ ] other compile options
-[ ]  - backend language
-[ ]  - import search path
-[ ]  - warnings
-[ ]  - print tokens
-[ ]  - print intermediate
-[ ] type inference, can I use haskell?
+ [x] flex recursion into import code
+ [ ] refactor parser: use unions instead of strings
+ [ ] refactor the kludgy list handling
+ [ ] build explicit AST
+ [ ] handle intermediate language printing through AST
+ [ ] auto label manifold instance variable names
+ [ ] language specific flag to sections
+ [ ] make informative syntax error/warning messages
+ [ ]  - warnings for manifolds with that are missing elements without defaults
+ [ ]  - warnings for unused elements
+ [ ]  - warnings for missing type
+ [ ]  - errors for incompatible types, can I use the haskell type checker?
+ [ ] merge backends and frontend
+ [ ] other compile options
+ [ ]  - backend language
+ [ ]  - import search path
+ [ ]  - warnings
+ [ ]  - print tokens
+ [ ]  - print intermediate
+ [ ] type inference, can I use haskell?
