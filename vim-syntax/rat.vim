@@ -67,8 +67,10 @@ syn match s_section '@type'     contained
 " strings
 syn region s_string start="'" end="'" contained
 syn region s_string start='"' end='"' contained
-syn match s_var /[a-zA-Z_][a-zA-Z0-9_]*/ contained
+
+syn match s_var /[a-zA-Z_][a-zA-Z0-9_]*/         contained
 syn match s_num '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!' contained
+syn match s_fun /&[a-zA-Z_][a-zA-Z0-9_]*/       contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
@@ -111,9 +113,9 @@ syn cluster c_global    contains=@c_subglobal,s_var,s_constant
 
 syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_basic     contains=s_couple,s_varlabel
-syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par
+syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
 syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
-syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional
+syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun
 syn cluster c_type      contains=s_nil,s_rarror,s_sep,s_par,s_brk
 
 syn region r_header start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
@@ -175,5 +177,6 @@ hi def link s_todo     Todo
 hi def link s_tag      SpecialComment
 
 hi def link s_positional Identifier
+hi def link s_fun        Identifier
 
 hi def link DEFAULT_ERROR Error
