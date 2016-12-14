@@ -43,22 +43,23 @@ syn match s_break ';\+' contained
 syn keyword s_constant __all__ contained
 
 " section headers
-syn match s_section '@import'  contained
-syn match s_section '@export'  contained
-syn match s_section '@doc'     contained
-syn match s_section '@type'    contained
-syn match s_section '@path'    contained
-syn match s_section '@arg'     contained
-syn match s_section '@alias'   contained
-syn match s_section '@action'  contained
-syn match s_section '@check'   contained
-syn match s_section '@effect'  contained
-syn match s_section '@cache'   contained
-syn match s_section '@pack'    contained
-syn match s_section '@open'    contained
-syn match s_section '@fail'    contained
-syn match s_section '@pass'    contained
-syn match s_section '@comment' contained
+syn match s_section '@action'   contained
+syn match s_section '@alias'    contained
+syn match s_section '@arg'      contained
+syn match s_section '@cache'    contained
+syn match s_section '@check'    contained
+syn match s_section '@comment'  contained
+syn match s_section '@doc'      contained
+syn match s_section '@effect'   contained
+syn match s_section '@export'   contained
+syn match s_section '@fail'     contained
+syn match s_section '@import'   contained
+syn match s_section '@ontology' contained
+syn match s_section '@open'     contained
+syn match s_section '@pack'     contained
+syn match s_section '@pass'     contained
+syn match s_section '@path'     contained
+syn match s_section '@type'     contained
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Section specific syntax
@@ -88,6 +89,7 @@ syn match s_switch   /?/      contained
 syn match s_sep      /,/      contained
 syn match s_par      /[()]/   contained
 syn match s_brk      /[\[\]]/ contained
+syn match s_bar      /|/      contained
 
 syn match s_positional /\$\d\+/ contained
 
@@ -112,26 +114,27 @@ syn cluster c_basic     contains=s_couple,s_varlabel
 syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par
 syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional
-syn cluster c_type      contains=s_nil,s_rarror
+syn cluster c_type      contains=s_nil,s_rarror,s_sep,s_par,s_brk
 
 syn region r_header start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
+syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
-syn region r_comment start=/@comment/ end=/@\@=/ skip=/\\@/
-syn region r_import  start=/@import/  end=/@\@=/ contains=@c_subglobal,s_string
-syn region r_export  start=/@export/  end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
-syn region r_doc     start=/@doc/     end=/@\@=/ contains=@c_global,@c_basic,s_string
-syn region r_type    start=/@type/    end=/@\@=/ contains=@c_global,@c_type,s_couple
-syn region r_path    start=/@path/    end=/@\@=/ contains=@c_global,@c_function,@c_path
-syn region r_arg     start=/@arg/     end=/@\@=/ contains=@c_global,@c_hasarg,s_rarror,s_positional,s_angel
-syn region r_alias   start=/@alias/   end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
-syn region r_action  start=/@action/  end=/@\@=/ contains=@c_global,@c_function
-syn region r_check   start=/@check/   end=/@\@=/ contains=@c_global,@c_function
-syn region r_effect  start=/@effect/  end=/@\@=/ contains=@c_global,@c_function
-syn region r_pack    start=/@pack/    end=/@\@=/ contains=@c_global,@c_function
-syn region r_open    start=/@open/    end=/@\@=/ contains=@c_global,@c_function
-syn region r_fail    start=/@fail/    end=/@\@=/ contains=@c_global,@c_function
-syn region r_pass    start=/@pass/    end=/@\@=/ contains=@c_global,@c_function
-syn region r_cache   start=/@cache/   end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function
+syn region r_action   start=/@action/   end=/@\@=/ contains=@c_global,@c_function
+syn region r_alias    start=/@alias/    end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_rarror,s_positional,s_angel
+syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function
+syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function
+syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string
+syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function
+syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
+syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function
+syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string
+syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s_bar,s_sep,s_par,s_brk
+syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function
+syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function
+syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function
+syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_function,@c_path
+syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_couple
 
 
 
@@ -162,6 +165,7 @@ hi def link s_switch  Operator
 hi def link s_sep     Operator
 hi def link s_super   Operator
 hi def link s_angel   Operator
+hi def link s_bar     Operator
 
 hi def link s_num      Number
 hi def link s_string   String
