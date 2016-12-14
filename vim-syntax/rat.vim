@@ -58,7 +58,7 @@ syn match s_section '@pack'    contained
 syn match s_section '@open'    contained
 syn match s_section '@fail'    contained
 syn match s_section '@pass'    contained
-syn match s_section '@loop'    contained
+syn match s_section '@comment' contained
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Section specific syntax
@@ -78,20 +78,23 @@ syn keyword s_cache_function memcache datcache nocache contained
 syn keyword s_utility undefined contained
 
 " setting operators
-syn match s_compose /\./     contained
-syn match s_rarror  /->/     contained
-syn match s_couple  /::/     contained
-syn match s_equal   /=/      contained
-syn match s_switch  /?/      contained
-syn match s_sep     /,/      contained
-syn match s_par     /[()]/   contained
-syn match s_brk     /[\[\]]/ contained
+syn match s_compose  /\./     contained
+syn match s_super    /\(\.\*\|\*\.\)/ contained
+syn match s_angel    /[><]/   contained
+syn match s_rarror   /->/     contained
+syn match s_couple   /::/     contained
+syn match s_equal    /=/      contained
+syn match s_switch   /?/      contained
+syn match s_sep      /,/      contained
+syn match s_par      /[()]/   contained
+syn match s_brk      /[\[\]]/ contained
+
+syn match s_positional /\$\d\+/ contained
 
 " define constants
 syn keyword s_nil NIL contained
 
 " keywords
-syn keyword s_loop_keyword with split on merge using contained
 syn keyword s_export_keyword as contained
 
 " labels
@@ -108,17 +111,18 @@ syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_basic     contains=s_couple,s_varlabel
 syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par
 syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
-syn cluster c_path      contains=s_compose,s_switch,s_par,s_break
+syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional
 syn cluster c_type      contains=s_nil,s_rarror
 
-syn region r_header start=/\%^/ end=/@\@=/ contains=s_comment
+syn region r_header start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
+syn region r_comment start=/@comment/ end=/@\@=/ skip=/\\@/
 syn region r_import  start=/@import/  end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_export  start=/@export/  end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
 syn region r_doc     start=/@doc/     end=/@\@=/ contains=@c_global,@c_basic,s_string
 syn region r_type    start=/@type/    end=/@\@=/ contains=@c_global,@c_type,s_couple
 syn region r_path    start=/@path/    end=/@\@=/ contains=@c_global,@c_function,@c_path
-syn region r_arg     start=/@arg/     end=/@\@=/ contains=@c_global,@c_hasarg
+syn region r_arg     start=/@arg/     end=/@\@=/ contains=@c_global,@c_hasarg,s_rarror,s_positional,s_angel
 syn region r_alias   start=/@alias/   end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
 syn region r_action  start=/@action/  end=/@\@=/ contains=@c_global,@c_function
 syn region r_check   start=/@check/   end=/@\@=/ contains=@c_global,@c_function
@@ -128,7 +132,6 @@ syn region r_open    start=/@open/    end=/@\@=/ contains=@c_global,@c_function
 syn region r_fail    start=/@fail/    end=/@\@=/ contains=@c_global,@c_function
 syn region r_pass    start=/@pass/    end=/@\@=/ contains=@c_global,@c_function
 syn region r_cache   start=/@cache/   end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function
-syn region r_loop    start=/@loop/    end=/@\@=/ contains=@c_global,@c_hasarg,s_loop_keyword
 
 
 
@@ -140,11 +143,14 @@ let b:current_syntax = "rat"
 hi def link s_simple_function Function
 hi def link s_cache_function  Function
 
+hi def link s_constant Constant
+hi def link s_nil      Constant
+hi def link s_utility  Constant 
+
 hi def link s_break    Underlined
 hi def link s_varlabel Special
 hi def link s_section  Label
 
-hi def link s_loop_keyword   Keyword
 hi def link s_export_keyword Keyword
 
 hi def link s_compose Operator
@@ -154,15 +160,16 @@ hi def link s_equal   Operator
 hi def link s_depend  Operator
 hi def link s_switch  Operator
 hi def link s_sep     Operator
-
-hi def link s_constant Constant
-hi def link s_nil      Constant
-hi def link s_utility  Constant 
+hi def link s_super   Operator
+hi def link s_angel   Operator
 
 hi def link s_num      Number
 hi def link s_string   String
 hi def link s_comment  Comment
+hi def link r_comment  Comment
 hi def link s_todo     Todo
 hi def link s_tag      SpecialComment
+
+hi def link s_positional Identifier
 
 hi def link DEFAULT_ERROR Error
