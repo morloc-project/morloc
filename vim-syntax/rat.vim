@@ -13,6 +13,10 @@ if exists("b:current_syntax")
   finish
 endif
 
+let b:current_syntax = ''
+unlet b:current_syntax
+syn include @R syntax/r.vim
+
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Global syntax - shared between all sections
@@ -32,6 +36,9 @@ syn keyword DEFAULT_ERROR as                               contained
 " define todo highlighting
 syn keyword s_todo TODO NOTE FIXME XXX contained 
 syn match s_tag /\(Author\|Email\|Github\|Bugs\|Website\|Maintainer\|Description\):/ contained 
+
+" define keywords that will be translated into native equivalents
+syn keyword s_logical TRUE NULL FALSE contained
 
 " define comments
 " syn match comment '\/\/.*$' contains=tag
@@ -60,6 +67,8 @@ syn match s_section '@pack'     contained
 syn match s_section '@pass'     contained
 syn match s_section '@path'     contained
 syn match s_section '@type'     contained
+syn match s_section '@source-[^ \t\n]\+' contained
+
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Section specific syntax
@@ -70,7 +79,7 @@ syn region s_string start='"' end='"' contained
 
 syn match s_var /[a-zA-Z_][a-zA-Z0-9_]*/         contained
 syn match s_num '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!' contained
-syn match s_fun /&[a-zA-Z_][a-zA-Z0-9_]*/       contained
+syn match s_fun /&[a-zA-Z0-9_]\+/                 contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
@@ -109,7 +118,7 @@ syn match s_varlabel ':[a-zA-Z0-9.]\+' contained
 " Set a highlighting paradigm for each section
 
 syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
-syn cluster c_global    contains=@c_subglobal,s_var,s_constant
+syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical
 
 syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_basic     contains=s_couple,s_varlabel
@@ -118,7 +127,10 @@ syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun
 syn cluster c_type      contains=s_nil,s_rarror,s_sep,s_par,s_brk
 
-syn region r_header start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
+syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
+
+syn region r_r_source start=/@source-R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
+
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
 syn region r_action   start=/@action/   end=/@\@=/ contains=@c_global,@c_function
@@ -140,6 +152,7 @@ syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_
 
 
 
+
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Assign colors
 
@@ -149,6 +162,7 @@ hi def link s_simple_function Function
 hi def link s_cache_function  Function
 
 hi def link s_constant Constant
+hi def link s_logical  Constant
 hi def link s_nil      Constant
 hi def link s_utility  Constant 
 
