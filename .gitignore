@@ -4,3 +4,6 @@ lex.yy.*
 rat
 lexer
 R
+tags
+DELETEME
+tok.log

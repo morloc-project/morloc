@@ -1,10 +1,12 @@
 @comment
 
+Within a comment, if you want \@ you have to escape it
+
 This program should replicate the following R code:
 
 ```
 apply(
-    replicate_(
+    replicate(
         n=20,
         sample(letters, size=5, replace=TRUE)
     ),
@@ -15,7 +17,8 @@ apply(
 I had to redefine the replicate function, to bypass the funky non-standard
 evaluation it uses.
 
-@source-R
+@source R
+
 replicate <- function(n, f, ...){
   out <- list() 
   for(i in 1:n){

@@ -67,7 +67,7 @@ syn match s_section '@pack'     contained
 syn match s_section '@pass'     contained
 syn match s_section '@path'     contained
 syn match s_section '@type'     contained
-syn match s_section '@source-[^ \t\n]\+' contained
+syn match s_section '@source \+[^ \t\n]\+' contained
 
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -129,7 +129,7 @@ syn cluster c_type      contains=s_nil,s_rarror,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
-syn region r_r_source start=/@source-R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
+syn region r_r_source start=/@source R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 

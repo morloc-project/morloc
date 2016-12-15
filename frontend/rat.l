@@ -3,67 +3,30 @@
 
 /* My buffer stack handling code draws heavily from: */
 /* John Levine (2009) 'Flex and Bison'               */
-struct bufstack {
+typedef struct bufstack{
     struct bufstack *prev;    
     YY_BUFFER_STATE bs;
     int lineno;
     char *filename;
     FILE *f;
-} *current_bs = NULL;
+} bufstack;
 
-char* current_filename;
+/* global variable for storing filename */
+char* current_filename = NULL;
 
+/* global variable for storing buffer stack */
+bufstack *current_bs = NULL;
+
+/* descend into an included file */ 
 int newfile(char *fn);
+
+/* leave a file */
 int popfile(void);
 
-/*
-{comment} { printf( "COMMENT\n"); }
-{section_import}  { printf( "SECTION_IMPORT"  ); BEGIN S_IMPORT; }
-{section_export}  { printf( "SECTION_EXPORT"  ); BEGIN INITIAL;  }
-{section_path}    { printf( "SECTION_PATH"    ); BEGIN INITIAL;  }
-{section_compose} { printf( "SECTION_COMPOSE" ); BEGIN INITIAL;  }
-{section_alias}   { printf( "SECTION_ALIAS"   ); BEGIN INITIAL;  }
-{section_arg}     { printf( "SECTION_ARG"     ); BEGIN INITIAL;  }
-{section_cache}   { printf( "SECTION_CACHE"   ); BEGIN INITIAL;  }
-{section_check}   { printf( "SECTION_CHECK"   ); BEGIN INITIAL;  }
-{section_effect}  { printf( "SECTION_EFFECT"  ); BEGIN INITIAL;  }
-{section_pack}    { printf( "SECTION_PACK"    ); BEGIN INITIAL;  }
-{section_open}    { printf( "SECTION_OPEN"    ); BEGIN INITIAL;  }
-{section_fail}    { printf( "SECTION_FAIL"    ); BEGIN INITIAL;  }
-{section_pass}    { printf( "SECTION_PASS"    ); BEGIN INITIAL;  }
-{section_loop}    { printf( "SECTION_LOOP"    ); BEGIN INITIAL;  }
-<S_IMPORT>{str} {
-                  yytext++;
-                  yytext[strlen(yytext)-1]='\0';
-                  if(!newfile(yytext)) yyterminate();
-                }
-<<EOF>>         { if(!popfile()) yyterminate(); }
-{eol}           { printf("\n"); }
-{ws}            { }
-{with}    { printf( "WITH "    ); }
-{using}   { printf( "USING "   ); }
-{split}   { printf( "SPLIT "   ); }
-{on}      { printf( "ON "      ); }
-{as}      { printf( "AS "      ); }
-{merge}   { printf( "MERGE "   ); }
-{builtin} { printf( "BUILTIN " ); }
-{group}   { printf( "GROUP "   ); }
-{str}     { printf( "STR "     ); }
-{var}     { printf( "VAR "     ); }
-{dbl}     { printf( "DBL "     ); }
-{int}     { printf( "INT "     ); }
-{dep}     { printf( "DEP "     ); }
-{eos}     { printf( "EOS "     ); }
-{compose} { printf( "COMPOSE " ); }
-{equal}   { printf( "EQUAL "   ); }
-{couple}  { printf( "COUPLE "  ); }
-{label}   { printf( "LABEL "   ); }
-{lbrk}    { printf( "LBRK "    ); }
-{rbrk}    { printf( "RBRK "    ); }
-{lpar}    { printf( "LPAR "    ); }
-{rpar}    { printf( "RPAR "    ); }
-{sep}     { printf( "SEP "     ); }
-*/
+FILE* toklog;
+
+#define LOG(x) fprintf(toklog, x)
+#define LOGV(x,a) fprintf(toklog, x, a)
 
 %}
 
@@ -72,7 +35,11 @@ int popfile(void);
 %option noyywrap pointer yylineno
 
 %s S_IMPORT
+%x S_LANG
+%x S_SOURCE
+%x S_COMMENT
 
+line    ^(\n|[^@]).*
 comment #.*\n
 ws      [ \t\n\r]+
 not_ws  [^ \t\n\r]+
@@ -80,106 +47,133 @@ int     [0-9]|[1-9][0-9]+
 dbl     {int}\.[0-9]+
 str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
-dep     -->
-eol     \n
+
+pos     \$[1-9][0-9]*    
+cond    \?{ws}*{var}
 
 compose "."
 eos     ;|---+
 equal   =
 couple  ::
 label   :
-cond    "?"
+rarrow  "->"
+deref   &
 
 lbrk    \[
 rbrk    \]
 lpar    \(
 rpar    \)
+bar     \|
 sep     ,
 
 builtin (memcache|datcache|nocache|true|null|id|call)
-
-as    as
-with  with
-split split
-on    on
-merge merge
-using using
+logical (TRUE|NULL|FALSE)
 
 group   __all__
 
-section_export  @export
-section_import  @import
-section_doc     @doc
-section_path    @path
-section_action  @action
-section_alias   @alias
-section_cache   @cache
-section_check   @check
-section_effect  @effect
-section_pack    @pack
-section_open    @open
-section_fail    @fail
-section_pass    @pass
-section_loop    @loop
+section_action   @action
+section_alias    @alias
+section_arg      @arg
+section_cache    @cache
+section_check    @check
+section_comment  @comment
+section_doc      @doc
+section_effect   @effect
+section_export   @export
+section_fail     @fail
+section_import   @import
+section_ontology @ontology
+section_open     @open
+section_pack     @pack
+section_pass     @pass
+section_path     @path
+section_source   @source
+section_type     @type
+
+
 
 %%
-
 {comment} { }
-{ws} { }
 
-{section_import}  { BEGIN S_IMPORT ; }
-{section_export}  { BEGIN INITIAL  ; return SECTION_EXPORT  ; }
-{section_path}    { BEGIN INITIAL  ; return SECTION_PATH    ; }
-{section_action}  { BEGIN INITIAL  ; return SECTION_ACTION  ; }
-{section_alias}   { BEGIN INITIAL  ; return SECTION_ALIAS   ; }
-{section_doc}     { BEGIN INITIAL  ; return SECTION_DOC     ; }
-{section_cache}   { BEGIN INITIAL  ; return SECTION_CACHE   ; }
-{section_check}   { BEGIN INITIAL  ; return SECTION_CHECK   ; }
-{section_effect}  { BEGIN INITIAL  ; return SECTION_EFFECT  ; }
-{section_pack}    { BEGIN INITIAL  ; return SECTION_PACK    ; }
-{section_open}    { BEGIN INITIAL  ; return SECTION_OPEN    ; }
-{section_fail}    { BEGIN INITIAL  ; return SECTION_FAIL    ; }
-{section_pass}    { BEGIN INITIAL  ; return SECTION_PASS    ; }
-{section_loop}    { BEGIN INITIAL  ; return SECTION_LOOP    ; }
+{section_comment}  { LOG(""                 ); BEGIN S_COMMENT; }
+{section_import}   { LOG("SECTION_IMPORT"   ); BEGIN S_IMPORT;  }
+{section_ontology} { LOG("SECTION_ONTOLOGY" ); BEGIN INITIAL;   return SECTION_ONTOLOGY; }
+{section_source}   { LOG("SECTION_SOURCE"   ); BEGIN S_LANG;    return SECTION_SOURCE;   }
+{section_type}     { LOG("SECTION_TYPE"     ); BEGIN INITIAL;   return SECTION_TYPE;     }
+{section_doc}      { LOG("SECTION_DOC"      ); BEGIN INITIAL;   return SECTION_DOC;      }
+{section_export}   { LOG("SECTION_EXPORT"   ); BEGIN INITIAL;   return SECTION_EXPORT;   }
+{section_path}     { LOG("SECTION_PATH"     ); BEGIN INITIAL;   return SECTION_PATH;     }
+{section_alias}    { LOG("SECTION_ALIAS"    ); BEGIN INITIAL;   return SECTION_ALIAS;    }
+{section_arg}      { LOG("SECTION_ARG"      ); BEGIN INITIAL;   return SECTION_ARG;      }
+{section_cache}    { LOG("SECTION_CACHE"    ); BEGIN INITIAL;   return SECTION_CACHE;    }
+{section_check}    { LOG("SECTION_CHECK"    ); BEGIN INITIAL;   return SECTION_CHECK;    }
+{section_effect}   { LOG("SECTION_EFFECT"   ); BEGIN INITIAL;   return SECTION_EFFECT;   }
+{section_pack}     { LOG("SECTION_PACK"     ); BEGIN INITIAL;   return SECTION_PACK;     }
+{section_open}     { LOG("SECTION_OPEN"     ); BEGIN INITIAL;   return SECTION_OPEN;     }
+{section_fail}     { LOG("SECTION_FAIL"     ); BEGIN INITIAL;   return SECTION_FAIL;     }
+{section_pass}     { LOG("SECTION_PASS"     ); BEGIN INITIAL;   return SECTION_PASS;     }
+
+<S_COMMENT>@      { unput('@'); BEGIN INITIAL; }
+<S_COMMENT>(.|\n) { /* toss bodies */ }
+<S_COMMENT>\\@    { /* allow escaped @ */ }
+
+<S_LANG>[ ]+{var} {
+    LOG(" LANG");
+    BEGIN S_SOURCE;
+    while(yytext[0] == ' ' || yytext[0] == '\t' || yytext[0] == '\n') yytext++;
+    return LANG;
+  }
+<S_SOURCE>^[ \t]*([^\n@].*)?\n { LOGV("%s", yytext); return LINE; }
+<S_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
 
 <S_IMPORT>{str} {
-                  yytext++;
-                  yytext[strlen(yytext)-1]='\0';
-                  if(!newfile(yytext)) yyterminate();
-                }
+    yytext++;
+    yytext[strlen(yytext)-1]='\0';
+    if(!newfile(yytext)) yyterminate();
+  }
 <<EOF>>         { if(!popfile()) yyterminate(); }
 
-{as}    { return AS;    }
-{with}  { return WITH;  }
-{using} { return USING; }
-{split} { return SPLIT; }
-{on}    { return ON;    }
-{merge} { return MERGE; }
+{cond} {
+    /* remove ? */
+    yytext++;
+    /* remove whitespace */
+    while(yytext[0] == ' ' || yytext[0] == '\t' || yytext[0] == '\n') yytext++;
+    LOGV("COND-%s ", yytext);
+    return COND;
+  }
+{pos} {
+    yytext++; /* remove $ */
+    LOGV("POS-%s", yytext);
+    return POS;
+}
 
-{builtin}      { yylval = strdup(yytext); return BUILTIN; }
-{group}        { yylval = strdup(yytext); return GROUP;   }
-<INITIAL>{str} { yylval = strdup(yytext); return STR;     }
-{var}          { yylval = strdup(yytext); return VAR;     }
-{dbl}          { yylval = strdup(yytext); return DBL;     }
-{int}          { yylval = strdup(yytext); return INT;     }
+AS        { LOG("AS "      ); return AS;      }
+{rarrow}  { LOG("RARR "    ); return RARR;    }
+{bar}     { LOG("BAR "     ); return BAR;     }
+{deref}   { LOG("DEREF "   ); return DEREF;   }
+{builtin} { LOG("BUILTIN " ); return BUILTIN; }
+{group}   { LOG("GROUP "   ); return GROUP;   }
+{str}     { LOG("STR "     ); return STR;     }
+{var}     { LOG("VAR "     ); return VAR;     }
+{dbl}     { LOG("DBL "     ); return DBL;     }
+{int}     { LOG("INT "     ); return INT;     }
+{eos}     { LOG("EOS "     ); return EOS;     }
+{compose} { LOG("COMPOSE " ); return COMPOSE; }
+{equal}   { LOG("EQUAL "   ); return EQUAL;   }
+{couple}  { LOG("COUPLE "  ); return COUPLE;  }
+{label}   { LOG("LABEL "   ); return LABEL;   }
+{lbrk}    { LOG("LBRK "    ); return LBRK;    }
+{rbrk}    { LOG("RBRK "    ); return RBRK;    }
+{lpar}    { LOG("LPAR "    ); return LPAR;    }
+{rpar}    { LOG("RPAR "    ); return RPAR;    }
+{sep}     { LOG("SEP "     ); return SEP;     }
 
-{dep}     { return DEP; }
-{eos}     { return EOS;       }
-{compose} { return COMPOSE;   }
-{equal}   { return EQUAL;     }
-{couple}  { return COUPLE;    }
-{label}   { return LABEL;     }
-{cond}    { return CONDITION; }
-
-{lbrk} { return LBRK; }
-{rbrk} { return RBRK; }
-{lpar} { return LPAR; }
-{rpar} { return RPAR; }
-{sep}  { return SEP;  }
+{ws}      { LOG(yytext); }
+.         { LOG(yytext); }
 
 %%
 
-int newfile(char *fn){
+int newfile(char* fn){
     FILE *f = fopen(fn, "r");
     if(f == NULL){
         fprintf(stderr, "Could not open file '%s'\n", fn);
@@ -212,7 +206,6 @@ int newfile(char *fn){
 }
 
 int popfile(void){
-
     struct bufstack *bs = current_bs;
     struct bufstack *prevbs;
 
@@ -234,6 +227,6 @@ int popfile(void){
     current_filename = current_bs->filename;
 
     /* printf(" --- %s --- \n", current_filename); */
-    
+
     return 1;
 }

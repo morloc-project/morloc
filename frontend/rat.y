@@ -25,9 +25,15 @@ char* get_str();
 
 %token LBRK RBRK LPAR RPAR SEP
 
+/* TODO: incorporate all this new shit */
+%token LANG LINE COND POS RARR BAR DEREF
+%token SECTION_ONTOLOGY
+%token SECTION_SOURCE
+%token SECTION_TYPE
+
+%token SECTION_ARG
 %token SECTION_EXPORT
 %token SECTION_PATH
-%token SECTION_ACTION
 %token SECTION_ALIAS
 %token SECTION_DOC
 %token SECTION_CACHE
@@ -57,7 +63,6 @@ input
 section
   : section_export
   | section_path
-  | section_action
   | section_alias
   | section_doc
   | section_cache
@@ -71,7 +76,6 @@ section
 
 
 /* sections have their own strict rules on their contents */
-/* TODO remove section_compose and section_arg, add section_doc and section_action */
 section_export
   : SECTION_EXPORT
   | section_export lvar AS var { printf("EXPORT %s %s\n", $2, $4); }
@@ -81,13 +85,13 @@ section_path
   | EOS
   | section_path named_path
 
-section_compose
-  : SECTION_COMPOSE
-  | section_compose var EQUAL composition { printf("COMPOSE %s %s\n", $2, $4); }
-
 section_alias
   : SECTION_ALIAS
   | section_alias var EQUAL var { printf("ALIAS %s %s\n", $2, $4); }
+
+section_doc
+  : SECTION_DOC
+  | section_doc VAR COUPLE STR { printf("DOC %s %s\n", $2, $4); }
 
 section_check
   : SECTION_CHECK
@@ -252,12 +256,15 @@ void yyerror (char* s){
   printf ("%s\n", s);
 }
 
+FILE* toklog;
+
 int main(int argc, char ** argv){
     if(argc < 2){
         perror("Please provide a filename\n");
         return 1;
     }
     if(newfile(argv[1]))
+        toklog = fopen("tok.log", "w");
         yyparse();
     return 0;
 }
