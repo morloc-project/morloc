@@ -21,7 +21,7 @@ char* get_str();
 
 %token BUILTIN GROUP
 
-%token AS WITH USING SPLIT ON MERGE
+%token AS
 
 %token LBRK RBRK LPAR RPAR SEP
 
@@ -43,7 +43,6 @@ char* get_str();
 %token SECTION_OPEN
 %token SECTION_FAIL
 %token SECTION_PASS
-%token SECTION_LOOP
 
 %token COUPLE
 %token COMPOSE
@@ -72,7 +71,6 @@ section
   | section_open
   | section_fail
   | section_pass
-  | section_loop
 
 
 /* sections have their own strict rules on their contents */
@@ -93,41 +91,37 @@ section_doc
   : SECTION_DOC
   | section_doc VAR COUPLE STR { printf("DOC %s %s\n", $2, $4); }
 
+section_arg
+  : SECTION_ARG
+  | section_arg args_couplet { printf("ARG %s\n", $2); }
+
 section_check
   : SECTION_CHECK
-  | section_check check_couplet
+  | section_check var_couplet { printf("CHECK %s\n", $2); }
 
 section_effect
   : SECTION_EFFECT
-  | section_effect effect_couplet
-
-section_arg
-  : SECTION_ARG
-  | section_arg args_couplet
+  | section_effect var_couplet { printf("EFFECT %s\n", $2); }
 
 section_cache
   : SECTION_CACHE
-  | section_cache cache_couplet
+  | section_cache var_couplet { printf("CACHE %s\n", $2); }
 
 section_pack
   : SECTION_PACK
-  | section_pack pack_couplet
+  | section_pack var_couplet { printf("PACK %s\n", $2); }
 
 section_open
   : SECTION_OPEN
-  | section_open open_couplet
+  | section_open var_couplet { printf("OPEN %s\n", $2); }
 
 section_fail
   : SECTION_FAIL
-  | section_fail fail_couplet
+  | section_fail var_couplet { printf("FAIL %s\n", $2); }
 
 section_pass
   : SECTION_PASS
-  | section_pass pass_couplet
-
-section_loop
-  : SECTION_LOOP
-  | section_loop loop_spec
+  | section_pass var_couplet { printf("PASS %s\n", $2); }
 
 
 /* definitions for groups used directly by the section group above */
@@ -165,44 +159,8 @@ args_couplet
   | args_couplet SEP arg { $$ = $1; printf("ARG %s %s\n", $1, $3); }
 ;
 
-check_couplet
-  : var COUPLE var { printf("CHECK %s %s\n", $1, $3); }
-;
-
-effect_couplet
-  : var COUPLE var { printf("EFFECT %s %s\n", $1, $3); }
-;
-
-cache_couplet
-  : var COUPLE var { printf("CACHE %s %s\n", $1, $3); }
-;
-
-pack_couplet
-  : var COUPLE var { printf("PACK %s %s\n", $1, $3); }
-;
-
-open_couplet
-  : var COUPLE var { printf("OPEN %s %s\n", $1, $3); }
-;
-
-fail_couplet
-  : var COUPLE var { printf("FAIL %s %s\n", $1, $3); }
-;
-
-pass_couplet
-  : var COUPLE var { printf("PASS %s %s\n", $1, $3); }
-;
-
-loop_spec
-  : WITH var                  { $$ = $2; }
-  | loop_spec SPLIT USING var { $$ = $1; printf("LOOP_SPLIT_USING %s %s\n", $1, $4); }
-  | loop_spec MERGE USING var { $$ = $1; printf("LOOP_MERGE_USING %s %s\n", $1, $4); }
-  | loop_spec arg_split       { $$ = $1; printf("LOOP_SPLIT_ON %s %s\n",    $1, $2); }
-;
-arg_split
-  : SPLIT     var ON var EQUAL element { $$ = get_str(); sprintf($$, "[%s %s %s]", $2, $4, $6); }
-  | arg_split var ON var EQUAL element { $$ = get_str(); sprintf($$, "%s [%s %s %s]", $1, $2, $4, $6); }
-;
+var_couplet
+  : var COUPLE var { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 
 
 /* groups used in defining argument lists */
