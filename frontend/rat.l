@@ -139,29 +139,28 @@ section_type     @type
     /* remove whitespace */
     while(yytext[0] == ' ' || yytext[0] == '\t' || yytext[0] == '\n') yytext++;
     LOGV("COND-%s ", yytext);
-    return COND;
+    // return COND;
   }
 {pos} {
     yytext++; /* remove $ */
     LOGV("POS-%s", yytext);
-    return POS;
+    // return POS;
 }
 
 AS        { LOG("AS "      ); return AS;      }
+{logical} { LOG("LOG "     ); return LOG;     }
 {rarrow}  { LOG("RARR "    ); return RARR;    }
 {bar}     { LOG("BAR "     ); return BAR;     }
-{deref}   { LOG("DEREF "   ); return DEREF;   }
-{builtin} { LOG("BUILTIN " ); return BUILTIN; }
-{group}   { LOG("GROUP "   ); return GROUP;   }
+{deref}   { LOG("DEREF "   );                 }
 {str}     { LOG("STR "     ); return STR;     }
 {var}     { LOG("VAR "     ); return VAR;     }
 {dbl}     { LOG("DBL "     ); return DBL;     }
 {int}     { LOG("INT "     ); return INT;     }
-{eos}     { LOG("EOS "     ); return EOS;     }
+{eos}     { LOG("EOS "     );                 }
 {compose} { LOG("COMPOSE " ); return COMPOSE; }
 {equal}   { LOG("EQUAL "   ); return EQUAL;   }
 {couple}  { LOG("COUPLE "  ); return COUPLE;  }
-{label}   { LOG("LABEL "   ); return LABEL;   }
+{label}   { LOG("LABEL "   );                 }
 {lbrk}    { LOG("LBRK "    ); return LBRK;    }
 {rbrk}    { LOG("RBRK "    ); return RBRK;    }
 {lpar}    { LOG("LPAR "    ); return LPAR;    }

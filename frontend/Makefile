@@ -2,7 +2,7 @@ TARGET=rat
 
 all:
 	flex ${TARGET}.l
-	bison -d ${TARGET}.y
+	bison -Wall --report=all -d ${TARGET}.y
 	cc lex.yy.c ${TARGET}.tab.c -lfl -o ${TARGET}
 
 .PHONY: clean
