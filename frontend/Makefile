@@ -8,8 +8,4 @@ all:
 .PHONY: clean
 clean:
 	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET} lexer
-
-.PHONY: flex
-flex:
-	flex ${TARGET}.l
-	cc -lfl lex.yy.c -o lexer
+	rm -f rat.output tok.log

@@ -1,6 +1,8 @@
 %{
-    #include "rat.tab.h"
+    #include <ctype.h>
 
+    #include "rat.tab.h"
+    
 /* My buffer stack handling code draws heavily from: */
 /* John Levine (2009) 'Flex and Bison'               */
 typedef struct bufstack{
@@ -47,6 +49,7 @@ int     [0-9]|[1-9][0-9]+
 dbl     {int}\.[0-9]+
 str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
+ident   {var}[ \t\n\r]*(::|=)
 
 pos     \$[1-9][0-9]*    
 cond    \?{ws}*{var}
@@ -137,7 +140,7 @@ section_type     @type
     /* remove ? */
     yytext++;
     /* remove whitespace */
-    while(yytext[0] == ' ' || yytext[0] == '\t' || yytext[0] == '\n') yytext++;
+    while(isspace(yytext[0])) yytext++;
     LOGV("COND-%s ", yytext);
     // return COND;
   }
@@ -147,25 +150,47 @@ section_type     @type
     // return POS;
 }
 
-AS        { LOG("AS "      ); return AS;      }
-{logical} { LOG("LOG "     ); return LOG;     }
-{rarrow}  { LOG("RARR "    ); return RARR;    }
-{bar}     { LOG("BAR "     ); return BAR;     }
-{deref}   { LOG("DEREF "   );                 }
-{str}     { LOG("STR "     ); return STR;     }
-{var}     { LOG("VAR "     ); return VAR;     }
-{dbl}     { LOG("DBL "     ); return DBL;     }
-{int}     { LOG("INT "     ); return INT;     }
-{eos}     { LOG("EOS "     );                 }
-{compose} { LOG("COMPOSE " ); return COMPOSE; }
-{equal}   { LOG("EQUAL "   ); return EQUAL;   }
-{couple}  { LOG("COUPLE "  ); return COUPLE;  }
-{label}   { LOG("LABEL "   );                 }
-{lbrk}    { LOG("LBRK "    ); return LBRK;    }
-{rbrk}    { LOG("RBRK "    ); return RBRK;    }
-{lpar}    { LOG("LPAR "    ); return LPAR;    }
-{rpar}    { LOG("RPAR "    ); return RPAR;    }
-{sep}     { LOG("SEP "     ); return SEP;     }
+AS        { LOG("AS "         ); return AS;         }
+{logical} { LOG("LOG "        ); return LOG;        }
+{rarrow}  { LOG("RARR "       ); return RARR;       }
+{bar}     { LOG("BAR "        ); return BAR;        }
+{deref}   { LOG("DEREF "      ); }
+{str}     { LOG("STR "        ); return STR;        }
+{var}     { LOG("VARIABLE "   ); return VARIABLE;   }
+
+{ident}   {
+    char* s = strdup(yytext);
+    int i = strlen(s);
+    LOGV("s='%s'\n", s);
+    while(i--){
+        char c = s[i];
+        LOGV("c='%c'\n", c);
+        if(c == ':' || c == '='){
+            unput(c);
+            s[i] = '\0';
+        }
+        if(isspace(c)){
+            s[i] = '\0';
+        }
+    }
+    yytext = s;
+    LOGV("yytext='%s'\n", yytext);
+    LOGV("IDENTIFIER-%s ", s);
+    return IDENTIFIER;
+}
+
+{dbl}     { LOG("DBL "        ); return DBL;        }
+{int}     { LOG("INT "        ); return INT;        }
+{eos}     { LOG("EOS "        ); }
+{compose} { LOG("COMPOSE "    ); return COMPOSE;    }
+{equal}   { LOG("EQUAL "      ); return EQUAL;      }
+{couple}  { LOG("COUPLE "     ); return COUPLE;     }
+{label}   { LOG("LABEL "      ); }
+{lbrk}    { LOG("LBRK "       ); return LBRK;       }
+{rbrk}    { LOG("RBRK "       ); return RBRK;       }
+{lpar}    { LOG("LPAR "       ); return LPAR;       }
+{rpar}    { LOG("RPAR "       ); return RPAR;       }
+{sep}     { LOG("SEP "        ); return SEP;        }
 
 {ws}      { LOG(yytext); }
 .         { LOG(yytext); }
