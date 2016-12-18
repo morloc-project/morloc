@@ -1,35 +1,13 @@
 %{
-    #include <ctype.h>
+#include <ctype.h>
+#include "rat.tab.h"
 
-    #include "rat.tab.h"
-    
-/* My buffer stack handling code draws heavily from: */
-/* John Levine (2009) 'Flex and Bison'               */
-typedef struct bufstack{
-    struct bufstack *prev;    
-    YY_BUFFER_STATE bs;
-    int lineno;
-    char *filename;
-    FILE *f;
-} bufstack;
-
-/* global variable for storing filename */
-char* current_filename = NULL;
-
-/* global variable for storing buffer stack */
-bufstack *current_bs = NULL;
-
-/* descend into an included file */ 
 int newfile(char *fn);
-
-/* leave a file */
 int popfile(void);
 
 FILE* toklog;
-
 #define LOG(x) fprintf(toklog, x)
 #define LOGV(x,a) fprintf(toklog, x, a)
-
 %}
 
 %option outfile="lex.yy.c" header-file="lex.yy.h"
@@ -180,60 +158,15 @@ AS        { LOG("AS "         ); return AS;         }
 
 %%
 
-int newfile(char* fn){
-    FILE *f = fopen(fn, "r");
-    if(f == NULL){
-        fprintf(stderr, "Could not open file '%s'\n", fn);
-        return 0;
+#include "bufstack.h"
+
+int main(int argc, char ** argv){
+    if(argc < 2){
+        perror("Please provide a filename\n");
+        return 1;
     }
-
-    /* printf(" --- %s --- \n", fn); */
-
-    struct bufstack *bs = malloc(sizeof(struct bufstack));
-    if(bs == NULL){
-        fprintf(stderr, "malloc error\n");
-        return 0;
-    }
-
-    if(current_bs != NULL) current_bs->lineno = yylineno;
-
-    bs->prev     = current_bs;
-    bs->bs       = yy_create_buffer(f, YY_BUF_SIZE);
-    bs->lineno   = 1;
-    bs->filename = strdup(fn);
-    bs->f        = f;
-
-    yy_switch_to_buffer(bs->bs);
-
-    current_bs = bs;
-    current_filename = bs->filename;
-    yylineno = 1;
-
-    return 1;
-}
-
-int popfile(void){
-    struct bufstack *bs = current_bs;
-    struct bufstack *prevbs;
-
-    if(bs == NULL) return 0;
-
-    fclose(bs->f);
-    free(bs->filename);
-    yy_delete_buffer(bs->bs);
-
-    prevbs = current_bs->prev;
-    free(bs);
-
-    if(prevbs == NULL) return 0;
-
-    yy_switch_to_buffer(prevbs->bs);
-    current_bs = prevbs;
-
-    yylineno = current_bs->lineno;
-    current_filename = current_bs->filename;
-
-    /* printf(" --- %s --- \n", current_filename); */
-
-    return 1;
+    if(newfile(argv[1]))
+        toklog = fopen("tok.log", "w");
+        yyparse();
+    return 0;
 }

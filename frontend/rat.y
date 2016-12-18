@@ -1,25 +1,19 @@
 %{
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "rat.tab.h"
 #include "lex.yy.h"
 
-int yylex(void);
 void yyerror (char* s);
-int newfile(char *fn);
-int popfile(void);
-char* get_str();
-
 %}
+
 
 %define api.value.type {char*}
 
-
 /* named tokens on the left side of an assignemt (e.g. x=1) */
 %token IDENTIFIER
+
 /* named tokens on the right side (or anywhere else) */
 %token VARIABLE COMPOSON
 
@@ -75,7 +69,7 @@ section
 
 section_export
   : SECTION_EXPORT
-  | section_export VARIABLE AS VARIABLE { printf("EXPORT %s %s\n", $2, $4); }
+  | section_export VARIABLE AS VARIABLE
 
 /* --- composition sections ----------------------------------------------- */
 section_path
@@ -111,22 +105,22 @@ signature
 
 section_arg
   : SECTION_ARG
-  | section_arg IDENTIFIER COUPLE argument { $$ = $2; printf("ARG %s %s\n", $2, $4); }
-  | section_arg argument            { $$ = $1; printf("ARG %s %s\n", $1, $2); }
+  | section_arg IDENTIFIER COUPLE argument
+  | section_arg argument
 argument
-  : IDENTIFIER '=' primitive { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
-  | IDENTIFIER '=' array     { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+  : IDENTIFIER '=' primitive
+  | IDENTIFIER '=' array
 array
-  : '[' list ']'  { $$ = get_str(); sprintf($$, "array(%s)", $2); }
-  | '['      ']'   { $$ = get_str(); sprintf($$, "array()", $2); }
+  : '[' list ']'
+  | '['      ']'
 list
   : primitive
   | list ',' primitive
 primitive
-  : INT { $$ = $1; }
-  | DBL { $$ = $1; }
-  | STR { $$ = $1; }
-  | LOG { $$ = $1; }
+  : INT
+  | DBL
+  | STR
+  | LOG
 
 section_ontology
   : SECTION_ONTOLOGY
@@ -137,57 +131,39 @@ construction
   | construction VARIABLE
 
 section_source
-  : SECTION_SOURCE LANG { $$ = $2; }
-  | section_source LINE { $$ = $1; printf("SOURCE %s %s\n", $1, $2); }
+  : SECTION_SOURCE LANG
+  | section_source LINE
 
 section_doc
   : SECTION_DOC
-  | section_doc IDENTIFIER COUPLE STR { printf("DOC %s %s\n", $2, $4); }
+  | section_doc IDENTIFIER COUPLE STR
 
 section_alias
   : SECTION_ALIAS
-  | section_alias IDENTIFIER COUPLE VARIABLE { printf("ALIAS %s %s\n", $2, $4); }
+  | section_alias IDENTIFIER COUPLE VARIABLE
 
 section_cache
   : SECTION_CACHE
-  | section_cache IDENTIFIER COUPLE VARIABLE { printf("CACHE %s %s\n", $2, $4); }
+  | section_cache IDENTIFIER COUPLE VARIABLE
 
 section_pack
   : SECTION_PACK
-  | section_pack IDENTIFIER COUPLE VARIABLE { printf("PACK %s %s\n", $2, $4); }
+  | section_pack IDENTIFIER COUPLE VARIABLE
 
 section_open
   : SECTION_OPEN
-  | section_open IDENTIFIER COUPLE VARIABLE { printf("OPEN %s %s\n", $2, $4); }
+  | section_open IDENTIFIER COUPLE VARIABLE
 
 section_fail
   : SECTION_FAIL
-  | section_fail IDENTIFIER COUPLE VARIABLE { printf("FAIL %s %s\n", $2, $4); }
+  | section_fail IDENTIFIER COUPLE VARIABLE
 
 section_pass
   : SECTION_PASS
-  | section_pass IDENTIFIER COUPLE VARIABLE { printf("PASS %s %s\n", $2, $4); }
+  | section_pass IDENTIFIER COUPLE VARIABLE
 
 %%
 
-char* get_str(){
-    char* a = (char*)malloc(128 * sizeof(char));
-    return a;
-}
-
 void yyerror (char* s){
   printf ("%s\n", s);
-}
-
-FILE* toklog;
-
-int main(int argc, char ** argv){
-    if(argc < 2){
-        perror("Please provide a filename\n");
-        return 1;
-    }
-    if(newfile(argv[1]))
-        toklog = fopen("tok.log", "w");
-        yyparse();
-    return 0;
 }
