@@ -21,13 +21,11 @@ char* get_str();
 /* named tokens on the left side of an assignemt (e.g. x=1) */
 %token IDENTIFIER
 /* named tokens on the right side (or anywhere else) */
-%token VARIABLE
+%token VARIABLE COMPOSON
 
 %token INT DBL STR LOG
 
 %token AS
-
-%token LBRK RBRK LPAR RPAR
 
 %token LANG LINE
 
@@ -47,12 +45,7 @@ char* get_str();
 %token SECTION_FAIL
 %token SECTION_PASS
 
-%token EQUAL
-%token SEP
-
 %token COUPLE
-%token BAR
-%token COMPOSE
 %token RARR
 
 %%
@@ -79,43 +72,56 @@ section
   | section_ontology
   | section_arg
 
-/* sections have their own strict rules on their contents */
+
 section_export
   : SECTION_EXPORT
   | section_export VARIABLE AS VARIABLE { printf("EXPORT %s %s\n", $2, $4); }
 
-/* doesn't yet allow multiple composition, e.g.
- * a . b c
- */
+/* --- composition sections ----------------------------------------------- */
 section_path
   : SECTION_PATH
   | section_path IDENTIFIER COUPLE composition
-composition
-  : IDENTIFIER COMPOSE VARIABLE
-  | composition COMPOSE VARIABLE
-  | LPAR composition RPAR
 
-/* needs to support parentheses */
+section_effect
+  : SECTION_EFFECT
+  | section_effect IDENTIFIER COUPLE composition
+
+section_check
+  : SECTION_CHECK
+  | section_check IDENTIFIER COUPLE composition
+
+composition
+  : COMPOSON
+  | '(' composition ')'
+  | composition COMPOSON
+  | composition '(' composition ')'
+  | composition '.' COMPOSON
+  | composition '.' '(' composition ')'
+/* ------------------------------------------------------------------------ */
+
+
 section_type
   : SECTION_TYPE
-  | section_type IDENTIFIER COUPLE signature { printf("TYPE %s %s\n", $2, $4); }
+  | section_type IDENTIFIER COUPLE signature
 signature
   : VARIABLE RARR VARIABLE
+  | '(' signature ')'
   | signature RARR VARIABLE
+  | signature RARR '(' signature ')'
 
 section_arg
   : SECTION_ARG
   | section_arg IDENTIFIER COUPLE argument { $$ = $2; printf("ARG %s %s\n", $2, $4); }
   | section_arg argument            { $$ = $1; printf("ARG %s %s\n", $1, $2); }
 argument
-  : IDENTIFIER EQUAL primitive { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
-  | IDENTIFIER EQUAL array     { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+  : IDENTIFIER '=' primitive { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
+  | IDENTIFIER '=' array     { $$ = get_str(); sprintf($$, "%s %s", $1, $3); }
 array
-  : LBRK list RBRK   { $$ = get_str(); sprintf($$, "array(%s)", $2); }
-  | LBRK      RBRK   { $$ = get_str(); sprintf($$, "array()", $2); }
+  : '[' list ']'  { $$ = get_str(); sprintf($$, "array(%s)", $2); }
+  | '['      ']'   { $$ = get_str(); sprintf($$, "array()", $2); }
 list
   : primitive
-  | list SEP primitive
+  | list ',' primitive
 primitive
   : INT { $$ = $1; }
   | DBL { $$ = $1; }
@@ -127,16 +133,8 @@ section_ontology
   | section_ontology construction
 construction
   : IDENTIFIER COUPLE VARIABLE
-  | construction BAR VARIABLE
+  | construction '|' VARIABLE
   | construction VARIABLE
-
-section_effect
-  : SECTION_EFFECT
-  | section_effect IDENTIFIER COUPLE VARIABLE { printf("EFFECT %s %s\n", $2, $4); }
-
-section_check
-  : SECTION_CHECK
-  | section_check IDENTIFIER COUPLE VARIABLE { printf("CHECK %s %s\n", $2, $4); }
 
 section_source
   : SECTION_SOURCE LANG { $$ = $2; }

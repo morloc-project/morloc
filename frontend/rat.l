@@ -40,6 +40,7 @@ FILE* toklog;
 %x S_LANG
 %x S_SOURCE
 %x S_COMMENT
+%s S_COMPOSITION
 
 line    ^(\n|[^@]).*
 comment #.*\n
@@ -51,23 +52,14 @@ str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
 ident   {var}[ \t\n\r]*(::|=)
 
-pos     \$[1-9][0-9]*    
+positional \$[1-9][0-9]*    
 cond    \?{ws}*{var}
 
-compose "."
 eos     ;|---+
-equal   =
 couple  ::
 label   :
 rarrow  "->"
 deref   &
-
-lbrk    \[
-rbrk    \]
-lpar    \(
-rpar    \)
-bar     \|
-sep     ,
 
 builtin (memcache|datcache|nocache|true|null|id|call)
 logical (TRUE|NULL|FALSE)
@@ -98,23 +90,23 @@ section_type     @type
 %%
 {comment} { }
 
-{section_comment}  { LOG(""                 ); BEGIN S_COMMENT; }
-{section_import}   { LOG("SECTION_IMPORT"   ); BEGIN S_IMPORT;  }
-{section_ontology} { LOG("SECTION_ONTOLOGY" ); BEGIN INITIAL;   return SECTION_ONTOLOGY; }
-{section_source}   { LOG("SECTION_SOURCE"   ); BEGIN S_LANG;    return SECTION_SOURCE;   }
-{section_type}     { LOG("SECTION_TYPE"     ); BEGIN INITIAL;   return SECTION_TYPE;     }
-{section_doc}      { LOG("SECTION_DOC"      ); BEGIN INITIAL;   return SECTION_DOC;      }
-{section_export}   { LOG("SECTION_EXPORT"   ); BEGIN INITIAL;   return SECTION_EXPORT;   }
-{section_path}     { LOG("SECTION_PATH"     ); BEGIN INITIAL;   return SECTION_PATH;     }
-{section_alias}    { LOG("SECTION_ALIAS"    ); BEGIN INITIAL;   return SECTION_ALIAS;    }
-{section_arg}      { LOG("SECTION_ARG"      ); BEGIN INITIAL;   return SECTION_ARG;      }
-{section_cache}    { LOG("SECTION_CACHE"    ); BEGIN INITIAL;   return SECTION_CACHE;    }
-{section_check}    { LOG("SECTION_CHECK"    ); BEGIN INITIAL;   return SECTION_CHECK;    }
-{section_effect}   { LOG("SECTION_EFFECT"   ); BEGIN INITIAL;   return SECTION_EFFECT;   }
-{section_pack}     { LOG("SECTION_PACK"     ); BEGIN INITIAL;   return SECTION_PACK;     }
-{section_open}     { LOG("SECTION_OPEN"     ); BEGIN INITIAL;   return SECTION_OPEN;     }
-{section_fail}     { LOG("SECTION_FAIL"     ); BEGIN INITIAL;   return SECTION_FAIL;     }
-{section_pass}     { LOG("SECTION_PASS"     ); BEGIN INITIAL;   return SECTION_PASS;     }
+{section_comment}  { LOG(""                 ); BEGIN S_COMMENT;     }
+{section_import}   { LOG("SECTION_IMPORT"   ); BEGIN S_IMPORT;      }
+{section_ontology} { LOG("SECTION_ONTOLOGY" ); BEGIN INITIAL;       return SECTION_ONTOLOGY; }
+{section_source}   { LOG("SECTION_SOURCE"   ); BEGIN S_LANG;        return SECTION_SOURCE;   }
+{section_type}     { LOG("SECTION_TYPE"     ); BEGIN INITIAL;       return SECTION_TYPE;     }
+{section_doc}      { LOG("SECTION_DOC"      ); BEGIN INITIAL;       return SECTION_DOC;      }
+{section_export}   { LOG("SECTION_EXPORT"   ); BEGIN INITIAL;       return SECTION_EXPORT;   }
+{section_path}     { LOG("SECTION_PATH"     ); BEGIN S_COMPOSITION; return SECTION_PATH;     }
+{section_check}    { LOG("SECTION_CHECK"    ); BEGIN S_COMPOSITION; return SECTION_CHECK;    }
+{section_effect}   { LOG("SECTION_EFFECT"   ); BEGIN S_COMPOSITION; return SECTION_EFFECT;   }
+{section_alias}    { LOG("SECTION_ALIAS"    ); BEGIN INITIAL;       return SECTION_ALIAS;    }
+{section_arg}      { LOG("SECTION_ARG"      ); BEGIN INITIAL;       return SECTION_ARG;      }
+{section_cache}    { LOG("SECTION_CACHE"    ); BEGIN INITIAL;       return SECTION_CACHE;    }
+{section_pack}     { LOG("SECTION_PACK"     ); BEGIN INITIAL;       return SECTION_PACK;     }
+{section_open}     { LOG("SECTION_OPEN"     ); BEGIN INITIAL;       return SECTION_OPEN;     }
+{section_fail}     { LOG("SECTION_FAIL"     ); BEGIN INITIAL;       return SECTION_FAIL;     }
+{section_pass}     { LOG("SECTION_PASS"     ); BEGIN INITIAL;       return SECTION_PASS;     }
 
 <S_COMMENT>@      { unput('@'); BEGIN INITIAL; }
 <S_COMMENT>(.|\n) { /* toss bodies */ }
@@ -123,7 +115,7 @@ section_type     @type
 <S_LANG>[ ]+{var} {
     LOG(" LANG");
     BEGIN S_SOURCE;
-    while(yytext[0] == ' ' || yytext[0] == '\t' || yytext[0] == '\n') yytext++;
+    while(isspace(yytext[0])) yytext++;
     return LANG;
   }
 <S_SOURCE>^[ \t]*([^\n@].*)?\n { LOGV("%s", yytext); return LINE; }
@@ -134,18 +126,18 @@ section_type     @type
     yytext[strlen(yytext)-1]='\0';
     if(!newfile(yytext)) yyterminate();
   }
-<<EOF>>         { if(!popfile()) yyterminate(); }
+<<EOF>> { if(!popfile()) yyterminate(); }
 
 {cond} {
-    /* remove ? */
+    /* remove initial '?' */
     yytext++;
     /* remove whitespace */
     while(isspace(yytext[0])) yytext++;
     LOGV("COND-%s ", yytext);
     // return COND;
-  }
-{pos} {
-    yytext++; /* remove $ */
+}
+{positional} {
+    yytext++; /* remove '$' */
     LOGV("POS-%s", yytext);
     // return POS;
 }
@@ -153,18 +145,17 @@ section_type     @type
 AS        { LOG("AS "         ); return AS;         }
 {logical} { LOG("LOG "        ); return LOG;        }
 {rarrow}  { LOG("RARR "       ); return RARR;       }
-{bar}     { LOG("BAR "        ); return BAR;        }
 {deref}   { LOG("DEREF "      ); }
 {str}     { LOG("STR "        ); return STR;        }
-{var}     { LOG("VARIABLE "   ); return VARIABLE;   }
+
+<S_COMPOSITION>{var} { LOG("COMPOSON "); return COMPOSON; }
+{var}                { LOG("VARIABLE "); return VARIABLE; }
 
 {ident}   {
     char* s = strdup(yytext);
     int i = strlen(s);
-    LOGV("s='%s'\n", s);
     while(i--){
         char c = s[i];
-        LOGV("c='%c'\n", c);
         if(c == ':' || c == '='){
             unput(c);
             s[i] = '\0';
@@ -174,7 +165,6 @@ AS        { LOG("AS "         ); return AS;         }
         }
     }
     yytext = s;
-    LOGV("yytext='%s'\n", yytext);
     LOGV("IDENTIFIER-%s ", s);
     return IDENTIFIER;
 }
@@ -182,18 +172,11 @@ AS        { LOG("AS "         ); return AS;         }
 {dbl}     { LOG("DBL "        ); return DBL;        }
 {int}     { LOG("INT "        ); return INT;        }
 {eos}     { LOG("EOS "        ); }
-{compose} { LOG("COMPOSE "    ); return COMPOSE;    }
-{equal}   { LOG("EQUAL "      ); return EQUAL;      }
 {couple}  { LOG("COUPLE "     ); return COUPLE;     }
 {label}   { LOG("LABEL "      ); }
-{lbrk}    { LOG("LBRK "       ); return LBRK;       }
-{rbrk}    { LOG("RBRK "       ); return RBRK;       }
-{lpar}    { LOG("LPAR "       ); return LPAR;       }
-{rpar}    { LOG("RPAR "       ); return RPAR;       }
-{sep}     { LOG("SEP "        ); return SEP;        }
 
 {ws}      { LOG(yytext); }
-.         { LOG(yytext); }
+.         { LOG(yytext); return yytext[0]; }
 
 %%
 
