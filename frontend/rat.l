@@ -124,10 +124,17 @@ AS        { LOG("AS "         ); return AS;         }
 {logical} { LOG("LOG "        ); return LOG;        }
 {rarrow}  { LOG("RARR "       ); return RARR;       }
 {deref}   { LOG("DEREF "      ); }
-{str}     { LOG("STR "        ); return STR;        }
+
+{str} {
+    LOG("STR ");
+    char* s = strdup(yytext);
+    s++; s[strlen(s)-1] = '\0'; /* unquote */
+    yylval.STR = s;
+    return STR;
+}
 
 <S_COMPOSITION>{var} { LOG("COMPOSON "); return COMPOSON; }
-{var}                { LOG("VARIABLE "); return VARIABLE; }
+{var}                { LOG("VARIABLE "); yylval.VARIABLE = strdup(yytext); return VARIABLE; }
 
 {ident}   {
     char* s = strdup(yytext);
@@ -142,7 +149,7 @@ AS        { LOG("AS "         ); return AS;         }
             s[i] = '\0';
         }
     }
-    yytext = s;
+    yylval.IDENTIFIER = s;
     LOGV("IDENTIFIER-%s ", s);
     return IDENTIFIER;
 }

@@ -4,20 +4,52 @@
 #include <string.h>
 
 #include "lex.yy.h"
+#include "ril.h"
 
 void yyerror (char* s);
+
+RatStack* rs;
 %}
 
+%code requires{
+#include "types.h"
+}
 
-%define api.value.type {char*}
+/*
+1st TODO:
+ [x] make union
+ [x] structure for the doc couplets
+ [ ] structure for the other couplets
+ [ ] extend this to
+ [ ] - export
+ [ ] - source
+ [ ] - doc
+ [ ] make single-operator, nested, linked list
+ [ ] make type and ontology
+ [ ] make two-operator, nested, linked list
+ [ ] make compositions and args
+ [ ] add printing for everything
+2nd TODO:
+ [ ] add symbol table
+ [ ] add label-distinguished variables
+ [ ] add comma separated assignments
+ [ ] add positionals and derefs
+3rd TODO:
+ [ ] figure out how to do loops
+*/
+
+%define api.value.type union
 
 /* named tokens on the left side of an assignemt (e.g. x=1) */
-%token IDENTIFIER
+%token <char*> IDENTIFIER
 
 /* named tokens on the right side (or anywhere else) */
-%token VARIABLE COMPOSON
+%token <char*> VARIABLE 
+%token COMPOSON
 
-%token INT DBL STR LOG
+%token <char*> STR
+
+%token INT LOG DBL
 
 %token AS
 
@@ -39,21 +71,27 @@ void yyerror (char* s);
 %token SECTION_FAIL
 %token SECTION_PASS
 
+%type <CoupletStack*> section_doc
+
 %token COUPLE
 %token RARR
 
 %%
 
+final
+  : input { print_RIL(rs); }
+
 input
-  : %empty
+  : %empty { rs = new_RatStack(); }
   | input section
 ;
 
+/* TODO: allow multiple sections */
 section
   : section_export
   | section_path
   | section_alias
-  | section_doc
+  | section_doc      { rs->doc = $1; }
   | section_cache
   | section_check
   | section_effect
@@ -135,8 +173,8 @@ section_source
   | section_source LINE
 
 section_doc
-  : SECTION_DOC
-  | section_doc IDENTIFIER COUPLE STR
+  : SECTION_DOC { $$ = new_CoupletStack(); }
+  | section_doc IDENTIFIER COUPLE STR { $$ = $1; printf(""); put_Couplet($$, $2, $4); }
 
 section_alias
   : SECTION_ALIAS
