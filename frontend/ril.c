@@ -2,43 +2,46 @@
 
 RatStack* new_RatStack(){
      RatStack* rs = (RatStack*)calloc(1,sizeof(RatStack));
-     rs->doc   = new_CoupletStack();
-     rs->alias = new_CoupletStack();
-     rs->cache = new_CoupletStack();
-     rs->pack  = new_CoupletStack();
-     rs->open  = new_CoupletStack();
-     rs->fail  = new_CoupletStack();
-     rs->pass  = new_CoupletStack();
+     rs->export = new_List();
+     rs->doc    = new_List();
+     rs->alias  = new_List();
+     rs->cache  = new_List();
+     rs->pack   = new_List();
+     rs->open   = new_List();
+     rs->fail   = new_List();
+     rs->pass   = new_List();
+     /* rs->source = NULL; */
      return rs;
 }
 
+void rewind_RatStack(RatStack* rs){
+    while( rs->export->prev ) rs->export = rs->export->prev ;
+    while( rs->doc->prev    ) rs->doc    = rs->doc->prev    ;
+    while( rs->alias->prev  ) rs->alias  = rs->alias->prev  ;
+    while( rs->cache->prev  ) rs->cache  = rs->cache->prev  ;
+    while( rs->pack->prev   ) rs->pack   = rs->pack->prev   ;
+    while( rs->open->prev   ) rs->open   = rs->open->prev   ;
+    while( rs->fail->prev   ) rs->fail   = rs->fail->prev   ;
+    while( rs->pass->prev   ) rs->pass   = rs->pass->prev   ;
+}
+
+void print_couplet(List* l, char* cmd){
+    for( ; l; l = l->next ){
+        Couplet* c = (Couplet*) l->value;
+        printf("%s %s %s\n", cmd, c->name, c->value);
+    }
+}
+
 void print_RIL(RatStack* rs){
-    while( rs->doc->value ){
-        Couplet* c = pop_Couplet(rs->doc);
-        printf("DOC %s '%s'\n", c->name, c->value);
-    }
-    while( rs->alias->value ){
-        Couplet* c = pop_Couplet(rs->alias);
-        printf("ALIAS %s %s\n", c->name, c->value);
-    }
-    while( rs->cache->value ){
-        Couplet* c = pop_Couplet(rs->cache);
-        printf("CACHE %s %s\n", c->name, c->value);
-    }
-    while( rs->pack->value ){
-        Couplet* c = pop_Couplet(rs->pack);
-        printf("PACK %s %s\n", c->name, c->value);
-    }
-    while( rs->open->value ){
-        Couplet* c = pop_Couplet(rs->open);
-        printf("OPEN %s %s\n", c->name, c->value);
-    }
-    while( rs->fail->value ){
-        Couplet* c = pop_Couplet(rs->fail);
-        printf("FAIL %s %s\n", c->name, c->value);
-    }
-    while( rs->pass->value ){
-        Couplet* c = pop_Couplet(rs->pass);
-        printf("PASS %s %s\n", c->name, c->value);
-    }
+
+    rewind_RatStack(rs);
+
+    print_couplet(rs->export, "EXPORT");
+    print_couplet(rs->doc,    "DOC");
+    print_couplet(rs->alias,  "ALIAS");
+    print_couplet(rs->cache,  "CACHE");
+    print_couplet(rs->pack,   "PACK");
+    print_couplet(rs->open,   "OPEN");
+    print_couplet(rs->fail,   "FAIL");
+    print_couplet(rs->pass,   "PASS");
 }

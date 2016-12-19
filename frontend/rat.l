@@ -120,7 +120,7 @@ section_type     @type
     // return POS;
 }
 
-AS        { LOG("AS "         ); return AS;         }
+as        { LOG("AS "         ); return AS;         }
 {logical} { LOG("LOG "        ); return LOG;        }
 {rarrow}  { LOG("RARR "       ); return RARR;       }
 {deref}   { LOG("DEREF "      ); }

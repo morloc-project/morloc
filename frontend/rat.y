@@ -21,21 +21,28 @@ RatStack* rs;
  [x] structure for the doc couplets
  [x] structure for the other couplets
  [ ] extend this to
- [ ] - export
+ [x] - export
  [ ] - source
- [ ] - doc
  [ ] make single-operator, nested, linked list
  [ ] make type and ontology
  [ ] make two-operator, nested, linked list
  [ ] make compositions and args
- [ ] add printing for everything
 2nd TODO:
+ [ ] replace output printing with manifold creation
+ [ ] write print function for the manifolds
  [ ] add symbol table
  [ ] add label-distinguished variables
  [ ] add comma separated assignments
  [ ] add positionals and derefs
 3rd TODO:
  [ ] figure out how to do loops
+4th TODO:
+ [ ] add error handling
+ [ ] pass file and line number from lexer
+ [ ] integrate file and line number into error messages
+5th TODO:
+ [ ] compile ontology, type and composition sections into Haskell (with undef as bodies)
+ [ ] interface with ghc to typecheck
 */
 
 %define api.value.type union
@@ -53,7 +60,7 @@ RatStack* rs;
 
 %token AS
 
-%token LANG LINE
+%token <char*> LANG LINE
 
 %token SECTION_ONTOLOGY
 %token SECTION_SOURCE
@@ -71,13 +78,14 @@ RatStack* rs;
 %token SECTION_FAIL
 %token SECTION_PASS
 
-%type <CoupletStack*> section_doc
-%type <CoupletStack*> section_alias
-%type <CoupletStack*> section_cache
-%type <CoupletStack*> section_pack
-%type <CoupletStack*> section_open
-%type <CoupletStack*> section_fail
-%type <CoupletStack*> section_pass
+%type <List*> section_export
+%type <List*> section_doc
+%type <List*> section_alias
+%type <List*> section_cache
+%type <List*> section_pack
+%type <List*> section_open
+%type <List*> section_fail
+%type <List*> section_pass
 
 %token COUPLE
 %token RARR
@@ -94,7 +102,7 @@ input
 
 /* TODO: allow multiple sections */
 section
-  : section_export
+  : section_export    { rs->export = $1; }
   | section_path
   | section_doc       { rs->doc = $1; }
   | section_check
@@ -112,8 +120,8 @@ section
 
 
 section_export
-  : SECTION_EXPORT
-  | section_export VARIABLE AS VARIABLE
+  : SECTION_EXPORT { $$ = new_List(); }
+  | section_export VARIABLE AS VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 /* --- composition sections ----------------------------------------------- */
 section_path
@@ -179,32 +187,32 @@ section_source
   | section_source LINE
 
 section_doc
-  : SECTION_DOC { $$ = new_CoupletStack(); }
-  | section_doc IDENTIFIER COUPLE STR { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_DOC { $$ = new_List(); }
+  | section_doc IDENTIFIER COUPLE STR { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_alias
-  : SECTION_ALIAS { $$ = new_CoupletStack(); }
-  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_ALIAS { $$ = new_List(); }
+  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_cache
-  : SECTION_CACHE { $$ = new_CoupletStack(); }
-  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_CACHE { $$ = new_List(); }
+  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_pack
-  : SECTION_PACK { $$ = new_CoupletStack(); }
-  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_PACK { $$ = new_List(); }
+  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_open
-  : SECTION_OPEN { $$ = new_CoupletStack(); }
-  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_OPEN { $$ = new_List(); }
+  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_fail
-  : SECTION_FAIL { $$ = new_CoupletStack(); }
-  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_FAIL { $$ = new_List(); }
+  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 section_pass
-  : SECTION_PASS { $$ = new_CoupletStack(); }
-  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
+  : SECTION_PASS { $$ = new_List(); }
+  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
 
 %%
 
