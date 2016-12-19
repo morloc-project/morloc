@@ -20,9 +20,9 @@ RatStack* rs;
  [x] make union
  [x] structure for the doc couplets
  [x] structure for the other couplets
- [ ] extend this to
+ [x] extend this to
  [x] - export
- [ ] - source
+ [x] - source
  [ ] make single-operator, nested, linked list
  [ ] make type and ontology
  [ ] make two-operator, nested, linked list
@@ -86,6 +86,7 @@ RatStack* rs;
 %type <List*> section_open
 %type <List*> section_fail
 %type <List*> section_pass
+%type <Source*> section_source
 
 %token COUPLE
 %token RARR
@@ -114,7 +115,7 @@ section
   | section_fail      { rs->fail  = $1; }
   | section_pass      { rs->pass  = $1; }
   | section_type
-  | section_source
+  | section_source    { ADD(rs->source, $1, Source*); }
   | section_ontology
   | section_arg
 
@@ -183,8 +184,8 @@ construction
   | construction VARIABLE
 
 section_source
-  : SECTION_SOURCE LANG
-  | section_source LINE
+  : SECTION_SOURCE LANG { $$ = new_Source($2); }
+  | section_source LINE { $$ = $1; ADD($1->lines,$2,char*); }
 
 section_doc
   : SECTION_DOC { $$ = new_List(); }

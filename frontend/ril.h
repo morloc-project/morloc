@@ -13,7 +13,7 @@ typedef struct RatStack{
     List* open;
     List* fail;
     List* pass;
-    // SourceLL* source;
+    List* source;
 } RatStack;
 
 void rewind_RatStack();

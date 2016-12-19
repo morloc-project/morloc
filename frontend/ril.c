@@ -10,19 +10,20 @@ RatStack* new_RatStack(){
      rs->open   = new_List();
      rs->fail   = new_List();
      rs->pass   = new_List();
-     /* rs->source = NULL; */
+     rs->source = new_List();
      return rs;
 }
 
 void rewind_RatStack(RatStack* rs){
-    while( rs->export->prev ) rs->export = rs->export->prev ;
-    while( rs->doc->prev    ) rs->doc    = rs->doc->prev    ;
-    while( rs->alias->prev  ) rs->alias  = rs->alias->prev  ;
-    while( rs->cache->prev  ) rs->cache  = rs->cache->prev  ;
-    while( rs->pack->prev   ) rs->pack   = rs->pack->prev   ;
-    while( rs->open->prev   ) rs->open   = rs->open->prev   ;
-    while( rs->fail->prev   ) rs->fail   = rs->fail->prev   ;
-    while( rs->pass->prev   ) rs->pass   = rs->pass->prev   ;
+    REWIND( rs->export );
+    REWIND( rs->doc    );
+    REWIND( rs->alias  );
+    REWIND( rs->cache  );
+    REWIND( rs->pack   );
+    REWIND( rs->open   );
+    REWIND( rs->fail   );
+    REWIND( rs->pass   );
+    REWIND( rs->source );
 }
 
 void print_couplet(List* l, char* cmd){
@@ -44,4 +45,14 @@ void print_RIL(RatStack* rs){
     print_couplet(rs->open,   "OPEN");
     print_couplet(rs->fail,   "FAIL");
     print_couplet(rs->pass,   "PASS");
+
+    for(List* l = rs->source; l; l = l->next){
+        Source* s = (Source*)l->value;
+        REWIND(s->lines);
+        printf("SOURCE %s START\n", s->lang);
+        for(List* ll = s->lines; ll; ll = ll->next){
+            printf("  %s", (char*)ll->value);
+        }
+        printf("SOURCE END\n");
+    }
 }

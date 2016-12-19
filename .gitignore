@@ -1,6 +1,7 @@
 lex.yy.*
 *.tab.*
 *.out
+zzz.*
 rat
 rat.output
 lexer

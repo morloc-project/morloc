@@ -94,9 +94,14 @@ section_type     @type
     LOG(" LANG");
     BEGIN S_SOURCE;
     while(isspace(yytext[0])) yytext++;
+    yylval.LANG = strdup(yytext);
     return LANG;
   }
-<S_SOURCE>^[ \t]*([^\n@].*)?\n { LOGV("%s", yytext); return LINE; }
+<S_SOURCE>^[ \t]*([^\n@].*)?\n {
+    LOGV("%s", yytext);
+    yylval.LINE = strdup(yytext);
+    return LINE;
+}
 <S_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
 
 <S_IMPORT>{str} {

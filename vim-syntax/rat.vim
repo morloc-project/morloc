@@ -67,7 +67,7 @@ syn match s_section '@pack'     contained
 syn match s_section '@pass'     contained
 syn match s_section '@path'     contained
 syn match s_section '@type'     contained
-syn match s_section '@source \+[^ \t\n]\+' contained
+syn match s_section '@source' contained
 
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""

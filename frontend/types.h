@@ -15,8 +15,14 @@ typedef struct Couplet{
     char* value;
 } Couplet;
 
+typedef struct Source{
+    char* lang;
+    List* lines; 
+} Source;
+
 List* new_List();
 Couplet* new_Couplet(char* name, char* value);
+Source* new_Source(char* lang);
 
 
 #define NEW_LIST (List*)calloc(1, sizeof(List));

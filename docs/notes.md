@@ -484,5 +484,3 @@ signature). I should temper this by specifying the limitations of Rat,
 specifically, it requires pure functions with types that are invariant to
 parameter choise. This may necessitate writing wrappers for functions, for
 example see the discussion of GNU grep above.
-
-
