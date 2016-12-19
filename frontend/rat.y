@@ -19,7 +19,7 @@ RatStack* rs;
 1st TODO:
  [x] make union
  [x] structure for the doc couplets
- [ ] structure for the other couplets
+ [x] structure for the other couplets
  [ ] extend this to
  [ ] - export
  [ ] - source
@@ -61,17 +61,23 @@ RatStack* rs;
 %token SECTION_ARG
 %token SECTION_EXPORT
 %token SECTION_PATH
-%token SECTION_ALIAS
-%token SECTION_DOC
-%token SECTION_CACHE
 %token SECTION_CHECK
 %token SECTION_EFFECT
+%token SECTION_DOC
+%token SECTION_ALIAS
+%token SECTION_CACHE
 %token SECTION_PACK
 %token SECTION_OPEN
 %token SECTION_FAIL
 %token SECTION_PASS
 
 %type <CoupletStack*> section_doc
+%type <CoupletStack*> section_alias
+%type <CoupletStack*> section_cache
+%type <CoupletStack*> section_pack
+%type <CoupletStack*> section_open
+%type <CoupletStack*> section_fail
+%type <CoupletStack*> section_pass
 
 %token COUPLE
 %token RARR
@@ -90,15 +96,15 @@ input
 section
   : section_export
   | section_path
-  | section_alias
-  | section_doc      { rs->doc = $1; }
-  | section_cache
+  | section_doc       { rs->doc = $1; }
   | section_check
   | section_effect
-  | section_pack
-  | section_open
-  | section_fail
-  | section_pass
+  | section_alias     { rs->alias = $1; }
+  | section_cache     { rs->cache = $1; }
+  | section_pack      { rs->pack  = $1; }
+  | section_open      { rs->open  = $1; }
+  | section_fail      { rs->fail  = $1; }
+  | section_pass      { rs->pass  = $1; }
   | section_type
   | section_source
   | section_ontology
@@ -174,31 +180,31 @@ section_source
 
 section_doc
   : SECTION_DOC { $$ = new_CoupletStack(); }
-  | section_doc IDENTIFIER COUPLE STR { $$ = $1; printf(""); put_Couplet($$, $2, $4); }
+  | section_doc IDENTIFIER COUPLE STR { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_alias
-  : SECTION_ALIAS
-  | section_alias IDENTIFIER COUPLE VARIABLE
+  : SECTION_ALIAS { $$ = new_CoupletStack(); }
+  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_cache
-  : SECTION_CACHE
-  | section_cache IDENTIFIER COUPLE VARIABLE
+  : SECTION_CACHE { $$ = new_CoupletStack(); }
+  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_pack
-  : SECTION_PACK
-  | section_pack IDENTIFIER COUPLE VARIABLE
+  : SECTION_PACK { $$ = new_CoupletStack(); }
+  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_open
-  : SECTION_OPEN
-  | section_open IDENTIFIER COUPLE VARIABLE
+  : SECTION_OPEN { $$ = new_CoupletStack(); }
+  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_fail
-  : SECTION_FAIL
-  | section_fail IDENTIFIER COUPLE VARIABLE
+  : SECTION_FAIL { $$ = new_CoupletStack(); }
+  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 section_pass
-  : SECTION_PASS
-  | section_pass IDENTIFIER COUPLE VARIABLE
+  : SECTION_PASS { $$ = new_CoupletStack(); }
+  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; put_Couplet($$, $2, $4); }
 
 %%
 
