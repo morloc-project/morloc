@@ -14,6 +14,8 @@ typedef struct RatStack{
     NamedList* fail;
     NamedList* pass;
     NamedList* source;
+    NamedList* ontology;
+    NamedList* type;
 } RatStack;
 
 void rewind_RatStack();

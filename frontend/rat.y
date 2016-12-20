@@ -9,6 +9,9 @@
 void yyerror (char* s);
 
 RatStack* rs;
+
+#define BUFFER_SIZE 1028
+char* get_str();
 %}
 
 %code requires{
@@ -23,9 +26,7 @@ RatStack* rs;
  [x] extend this to
  [x] - export
  [x] - source
- [ ] make single-operator, nested, linked list
- [ ] make type and ontology
- [ ] make two-operator, nested, linked list
+ [x] make type and ontology
  [ ] make compositions and args
  [ ] allow multiple occurances of any sections
 2nd TODO:
@@ -79,9 +80,11 @@ RatStack* rs;
 %token SECTION_FAIL
 %token SECTION_PASS
 
-/* %type <NamedList*> section_type     */
-/* %type <NamedList*> section_ontology */
-/* %type <NamedList*> construction     */
+%type <NamedList*> section_type
+%type <char*>      signature
+
+%type <NamedList*> section_ontology
+%type <NamedList*> construction
 
 %type <NamedList*> section_export
 %type <NamedList*> section_doc
@@ -94,7 +97,7 @@ RatStack* rs;
 %type <NamedList*> section_source
 
 %token COUPLE
-%token RARR
+%left RARR
 
 %%
 
@@ -113,16 +116,16 @@ section
   | section_check
   | section_effect
   | section_arg
-  | section_type     /* { rs->type     = $1; } */
-  | section_ontology /* { rs->ontology = $1; } */
-  | section_doc      { rs->doc    = $1; }
-  | section_alias    { rs->alias  = $1; }
-  | section_cache    { rs->cache  = $1; }
-  | section_pack     { rs->pack   = $1; }
-  | section_open     { rs->open   = $1; }
-  | section_fail     { rs->fail   = $1; }
-  | section_pass     { rs->pass   = $1; }
-  | section_source   { rs->source = $1; }
+  | section_type     { rs->type     = $1; }
+  | section_ontology { rs->ontology = $1; }
+  | section_doc      { rs->doc      = $1; }
+  | section_alias    { rs->alias    = $1; }
+  | section_cache    { rs->cache    = $1; }
+  | section_pack     { rs->pack     = $1; }
+  | section_open     { rs->open     = $1; }
+  | section_fail     { rs->fail     = $1; }
+  | section_pass     { rs->pass     = $1; }
+  | section_source   { rs->source   = $1; }
 
 
 section_export
@@ -172,42 +175,40 @@ primitive
   | LOG
 
 section_type
-  : SECTION_TYPE
-  | section_type IDENTIFIER COUPLE signature
+  : SECTION_TYPE { $$ = new_NamedList(); }
+  | section_type IDENTIFIER COUPLE signature {
+      char* sig = get_str();
+      sprintf(sig, ":: %s", $4);
+      COUPLET($1, $2, sig);
+      $$ = $1;
+  }
 signature
-  : VARIABLE RARR VARIABLE
-  | '(' signature ')'
-  | signature RARR VARIABLE
-  | signature RARR '(' signature ')'
-
-/* section_ontology                                                        */
-/*   : SECTION_ONTOLOGY { $$ = new_NamedList(); }                          */
-/*   | section_ontology construction { JOIN($1, $2); $$ = $1; }            */
-/* construction                                                            */
-/*   : IDENTIFIER COUPLE VARIABLE {                                        */
-/*        $$ = new_NamedList();                                            */
-/*        ADD($$, $1, new_NamedList(), NamedList*);                        */
-/*        SET_CHILD($$, name, $3);                                         */
-/*        SET_CHILD($$, value, "");                                        */
-/*     }                                                                   */
-/*   | construction '|' VARIABLE {                                         */
-/*        $$ = $1;                                                         */
-/*        ADD($$, $$->name, new_NamedList(), NamedList*);                  */
-/*        SET_CHILD($$, name, $3);                                         */
-/*        SET_CHILD($$, value, "");                                        */
-/*     }                                                                   */
-/*   | construction VARIABLE {                                             */
-/*        $$ = $1;                                                         */
-/*        ADD(((NamedList*)$$)->value, ((NamedList*)$$)->name, $2, char*); */
-/*     }                                                                   */
+  : VARIABLE                 { $$ = $1; }
+  | '(' signature ')'        { $$ = get_str(); sprintf($$, "( %s )", $2); }
+  | signature RARR signature { $$ = get_str(); sprintf($$, "%s -> %s", $1, $3); }
 
 section_ontology
-  : SECTION_ONTOLOGY
-  | section_ontology construction
+  : SECTION_ONTOLOGY { $$ = new_NamedList(); }
+  | section_ontology construction { JOIN($1,$2); $$ = $1; }
 construction
-  : IDENTIFIER COUPLE VARIABLE
-  | construction '|' VARIABLE
-  | construction VARIABLE
+  : IDENTIFIER COUPLE VARIABLE {
+      $$ = new_NamedList();
+      char* buffer = (char*)malloc(4096 * sizeof(char));
+      sprintf(buffer, "%s ::", $1);
+      COUPLET($$, buffer, $3);
+  }
+  | construction '|' VARIABLE {
+      char* s = (char*)$1->value;
+      strcpy(s + strlen(s), " | ");
+      strcpy(s + strlen(s), $3);
+      $$ = $1;
+  }
+  | construction VARIABLE { 
+      char* s = (char*)$1->value;
+      strcpy(s + strlen(s), " ");
+      strcpy(s + strlen(s), $2);
+      $$ = $1;
+  }
 
 section_source
   : SECTION_SOURCE LANG { $$ = new_NamedList(); $$->name = $2; }
@@ -245,4 +246,9 @@ section_pass
 
 void yyerror (char* s){
   printf ("%s\n", s);
+}
+
+char* get_str(){
+    char* c = (char*)calloc(BUFFER_SIZE, sizeof(char));
+    return c;
 }

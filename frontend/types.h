@@ -74,8 +74,6 @@ do {                                           \
     }                                          \
 } while(0)
 
-#define SET_CHILD(xs, f, v) ((NamedList*)(xs->value))->f = (v);
-
 #define COUPLET(xs, name, x) ADD(xs, name, x, char*)
 
 #endif
