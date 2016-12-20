@@ -2,15 +2,15 @@
 
 RatStack* new_RatStack(){
      RatStack* rs = (RatStack*)calloc(1,sizeof(RatStack));
-     rs->export = new_List();
-     rs->doc    = new_List();
-     rs->alias  = new_List();
-     rs->cache  = new_List();
-     rs->pack   = new_List();
-     rs->open   = new_List();
-     rs->fail   = new_List();
-     rs->pass   = new_List();
-     rs->source = new_List();
+     rs->export = new_NamedList();
+     rs->doc    = new_NamedList();
+     rs->alias  = new_NamedList();
+     rs->cache  = new_NamedList();
+     rs->pack   = new_NamedList();
+     rs->open   = new_NamedList();
+     rs->fail   = new_NamedList();
+     rs->pass   = new_NamedList();
+     rs->source = new_NamedList();
      return rs;
 }
 
@@ -26,10 +26,9 @@ void rewind_RatStack(RatStack* rs){
     REWIND( rs->source );
 }
 
-void print_couplet(List* l, char* cmd){
+void print_couplet(NamedList* l, char* cmd){
     for( ; l; l = l->next ){
-        Couplet* c = (Couplet*) l->value;
-        printf("%s %s %s\n", cmd, c->name, c->value);
+        printf("%s %s %s\n", cmd, l->name, l->value);
     }
 }
 
@@ -45,12 +44,5 @@ void print_RIL(RatStack* rs){
     print_couplet(rs->open,   "OPEN");
     print_couplet(rs->fail,   "FAIL");
     print_couplet(rs->pass,   "PASS");
-
-    for(List* l = rs->source; l; l = l->next){
-        Source* s = (Source*)l->value;
-        REWIND(s->lines);
-        for(List* ll = s->lines; ll; ll = ll->next){
-            printf("SOURCE %s %s", s->lang, (char*)ll->value);
-        }
-    }
+    print_couplet(rs->source, "SOURCE");
 }

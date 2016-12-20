@@ -10,40 +10,72 @@ typedef struct List{
     void* value;
 } List;
 
-typedef struct Couplet{
+typedef struct NamedList{
+    struct NamedList* next;
+    struct NamedList* prev;
     char* name;
-    char* value;
-} Couplet;
-
-typedef struct Source{
-    char* lang;
-    List* lines; 
-} Source;
+    void* value;
+} NamedList;
 
 List* new_List();
-Couplet* new_Couplet(char* name, char* value);
-Source* new_Source(char* lang);
+NamedList* new_NamedList();
 
+#define REWIND(xs) do{ if(xs) {while(xs->prev != NULL) xs = xs->prev;} } while(0)
+#define UPWIND(xs) do{ if(xs) {while(xs->next != NULL) xs = xs->next;} } while(0)
 
-#define NEW_LIST (List*)calloc(1, sizeof(List));
-
-#define ADD(xs, x, type)                   \
-do {                                       \
-    while(xs->next != NULL) xs = xs->next; \
-    if(xs->value == NULL){                 \
-        xs->value = (type)(x);             \
-    } else {                               \
-        List* new_list = NEW_LIST;         \
-        new_list->value = (type)(x);       \
-        new_list->next = NULL;             \
-        new_list->prev = xs;               \
-        xs->next = new_list;               \
-        xs = new_list;                     \
-    }                                      \
+#define JOIN(xs, ys)                         \
+do{                                          \
+    UPWIND(xs);                              \
+    REWIND(ys);                              \
+    if(xs        != NULL &&                  \
+       ys        != NULL &&                  \
+       xs->value != NULL &&                  \
+       ys->value != NULL                     \
+    ){                                       \
+        xs->next = ys;                       \
+        ys->prev = xs;                       \
+    } else {                                 \
+        if(xs == NULL || xs->value == NULL){ \
+            xs = ys;                         \
+        }                                    \
+    }                                        \
+    UPWIND(xs);                              \
 } while(0)
 
-#define PUT_COUPLET(xs, n, v) ADD(xs, new_Couplet(n,v), Couplet*);
+#define ADD(xs, ln_name, x, type)                             \
+do {                                                          \
+    UPWIND(xs);                                               \
+    if(xs->value == NULL){                                    \
+        xs->value = (type)(x);                                \
+        xs->name = ln_name;                                   \
+    } else {                                                  \
+        NamedList* l = (NamedList*)malloc(sizeof(NamedList)); \
+        l->value = (type)(x);                                 \
+        l->name = ln_name;                                    \
+        l->next = NULL;                                       \
+        l->prev = xs;                                         \
+        xs->next = l;                                         \
+        xs = l;                                               \
+    }                                                         \
+} while(0)
 
-#define REWIND(xs) while(xs->prev != NULL) xs = xs->prev;
+#define LADD(xs, x, type)                      \
+do {                                           \
+    UPWIND(xs);                                \
+    if(xs->value == NULL){                     \
+        xs->value = (type)(x);                 \
+    } else {                                   \
+        List* l = (List*)malloc(sizeof(List)); \
+        l->value = (type)(x);                  \
+        l->next = NULL;                        \
+        l->prev = xs;                          \
+        xs->next = l;                          \
+        xs = l;                                \
+    }                                          \
+} while(0)
+
+#define SET_CHILD(xs, f, v) ((NamedList*)(xs->value))->f = (v);
+
+#define COUPLET(xs, name, x) ADD(xs, name, x, char*)
 
 #endif

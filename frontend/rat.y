@@ -27,6 +27,7 @@ RatStack* rs;
  [ ] make type and ontology
  [ ] make two-operator, nested, linked list
  [ ] make compositions and args
+ [ ] allow multiple occurances of any sections
 2nd TODO:
  [ ] replace output printing with manifold creation
  [ ] write print function for the manifolds
@@ -78,15 +79,19 @@ RatStack* rs;
 %token SECTION_FAIL
 %token SECTION_PASS
 
-%type <List*> section_export
-%type <List*> section_doc
-%type <List*> section_alias
-%type <List*> section_cache
-%type <List*> section_pack
-%type <List*> section_open
-%type <List*> section_fail
-%type <List*> section_pass
-%type <Source*> section_source
+/* %type <NamedList*> section_type     */
+/* %type <NamedList*> section_ontology */
+/* %type <NamedList*> construction     */
+
+%type <NamedList*> section_export
+%type <NamedList*> section_doc
+%type <NamedList*> section_alias
+%type <NamedList*> section_cache
+%type <NamedList*> section_pack
+%type <NamedList*> section_open
+%type <NamedList*> section_fail
+%type <NamedList*> section_pass
+%type <NamedList*> section_source
 
 %token COUPLE
 %token RARR
@@ -105,24 +110,24 @@ input
 section
   : section_export    { rs->export = $1; }
   | section_path
-  | section_doc       { rs->doc = $1; }
   | section_check
   | section_effect
-  | section_alias     { rs->alias = $1; }
-  | section_cache     { rs->cache = $1; }
-  | section_pack      { rs->pack  = $1; }
-  | section_open      { rs->open  = $1; }
-  | section_fail      { rs->fail  = $1; }
-  | section_pass      { rs->pass  = $1; }
-  | section_type
-  | section_source    { ADD(rs->source, $1, Source*); }
-  | section_ontology
   | section_arg
+  | section_type     /* { rs->type     = $1; } */
+  | section_ontology /* { rs->ontology = $1; } */
+  | section_doc      { rs->doc    = $1; }
+  | section_alias    { rs->alias  = $1; }
+  | section_cache    { rs->cache  = $1; }
+  | section_pack     { rs->pack   = $1; }
+  | section_open     { rs->open   = $1; }
+  | section_fail     { rs->fail   = $1; }
+  | section_pass     { rs->pass   = $1; }
+  | section_source   { rs->source = $1; }
 
 
 section_export
-  : SECTION_EXPORT { $$ = new_List(); }
-  | section_export VARIABLE AS VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_EXPORT { $$ = new_NamedList(); }
+  | section_export VARIABLE AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 /* --- composition sections ----------------------------------------------- */
 section_path
@@ -147,15 +152,6 @@ composition
 /* ------------------------------------------------------------------------ */
 
 
-section_type
-  : SECTION_TYPE
-  | section_type IDENTIFIER COUPLE signature
-signature
-  : VARIABLE RARR VARIABLE
-  | '(' signature ')'
-  | signature RARR VARIABLE
-  | signature RARR '(' signature ')'
-
 section_arg
   : SECTION_ARG
   | section_arg IDENTIFIER COUPLE argument
@@ -175,6 +171,36 @@ primitive
   | STR
   | LOG
 
+section_type
+  : SECTION_TYPE
+  | section_type IDENTIFIER COUPLE signature
+signature
+  : VARIABLE RARR VARIABLE
+  | '(' signature ')'
+  | signature RARR VARIABLE
+  | signature RARR '(' signature ')'
+
+/* section_ontology                                                        */
+/*   : SECTION_ONTOLOGY { $$ = new_NamedList(); }                          */
+/*   | section_ontology construction { JOIN($1, $2); $$ = $1; }            */
+/* construction                                                            */
+/*   : IDENTIFIER COUPLE VARIABLE {                                        */
+/*        $$ = new_NamedList();                                            */
+/*        ADD($$, $1, new_NamedList(), NamedList*);                        */
+/*        SET_CHILD($$, name, $3);                                         */
+/*        SET_CHILD($$, value, "");                                        */
+/*     }                                                                   */
+/*   | construction '|' VARIABLE {                                         */
+/*        $$ = $1;                                                         */
+/*        ADD($$, $$->name, new_NamedList(), NamedList*);                  */
+/*        SET_CHILD($$, name, $3);                                         */
+/*        SET_CHILD($$, value, "");                                        */
+/*     }                                                                   */
+/*   | construction VARIABLE {                                             */
+/*        $$ = $1;                                                         */
+/*        ADD(((NamedList*)$$)->value, ((NamedList*)$$)->name, $2, char*); */
+/*     }                                                                   */
+
 section_ontology
   : SECTION_ONTOLOGY
   | section_ontology construction
@@ -184,36 +210,36 @@ construction
   | construction VARIABLE
 
 section_source
-  : SECTION_SOURCE LANG { $$ = new_Source($2); }
-  | section_source LINE { $$ = $1; ADD($1->lines,$2,char*); }
+  : SECTION_SOURCE LANG { $$ = new_NamedList(); $$->name = $2; }
+  | section_source LINE { COUPLET($1, $1->name, $2); $$ = $1; }
 
 section_doc
-  : SECTION_DOC { $$ = new_List(); }
-  | section_doc IDENTIFIER COUPLE STR { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_DOC { $$ = new_NamedList(); }
+  | section_doc IDENTIFIER COUPLE STR { $$ = $1; COUPLET($$, $2, $4); }
 
 section_alias
-  : SECTION_ALIAS { $$ = new_List(); }
-  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_ALIAS { $$ = new_NamedList(); }
+  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_cache
-  : SECTION_CACHE { $$ = new_List(); }
-  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_CACHE { $$ = new_NamedList(); }
+  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pack
-  : SECTION_PACK { $$ = new_List(); }
-  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_PACK { $$ = new_NamedList(); }
+  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_open
-  : SECTION_OPEN { $$ = new_List(); }
-  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_OPEN { $$ = new_NamedList(); }
+  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_fail
-  : SECTION_FAIL { $$ = new_List(); }
-  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_FAIL { $$ = new_NamedList(); }
+  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pass
-  : SECTION_PASS { $$ = new_List(); }
-  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; PUT_COUPLET($$, $2, $4); }
+  : SECTION_PASS { $$ = new_NamedList(); }
+  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 %%
 

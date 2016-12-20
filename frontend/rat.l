@@ -99,6 +99,7 @@ section_type     @type
   }
 <S_SOURCE>^[ \t]*([^\n@].*)?\n {
     LOGV("%s", yytext);
+    yytext[strlen(yytext)-1] = '\0'; /* trim the newline */ 
     yylval.LINE = strdup(yytext);
     return LINE;
 }
