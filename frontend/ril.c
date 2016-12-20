@@ -49,10 +49,8 @@ void print_RIL(RatStack* rs){
     for(List* l = rs->source; l; l = l->next){
         Source* s = (Source*)l->value;
         REWIND(s->lines);
-        printf("SOURCE %s START\n", s->lang);
         for(List* ll = s->lines; ll; ll = ll->next){
-            printf("  %s", (char*)ll->value);
+            printf("SOURCE %s %s", s->lang, (char*)ll->value);
         }
-        printf("SOURCE END\n");
     }
 }
