@@ -27,19 +27,23 @@ char* get_str();
  [x] - export
  [x] - source
  [x] make type and ontology
- [ ] make compositions and args
+ [x] make compositions
+ [ ] add unique manifold ids
+ [ ] add Manifold structures to Composon
+ [ ] allow path specification
+ [ ] pass all couplets down the tree
+ [ ] make args
  [ ] allow multiple occurances of any sections
 2nd TODO:
- [ ] replace output printing with manifold creation
- [ ] write print function for the manifolds
- [ ] add symbol table
- [ ] add label-distinguished variables
+ [ ] write RIL print function for the manifolds
  [ ] add comma separated assignments
  [ ] add positionals and derefs
+ [ ] add conditionals
 3rd TODO:
  [ ] figure out how to do loops
 4th TODO:
- [ ] add error handling
+ [ ] add syntax error handling
+ [ ] add checking of manifold builds
  [ ] pass file and line number from lexer
  [ ] integrate file and line number into error messages
 5th TODO:
@@ -54,7 +58,8 @@ char* get_str();
 
 /* named tokens on the right side (or anywhere else) */
 %token <char*> VARIABLE 
-%token COMPOSON
+%token <char*> GROUP 
+%token <Composon*> COMPOSON
 
 %token <char*> STR
 
@@ -96,8 +101,16 @@ char* get_str();
 %type <NamedList*> section_pass
 %type <NamedList*> section_source
 
+%type <NamedList*> section_path
+%type <NamedList*> section_effect
+%type <NamedList*> section_check
+%type <List*> composition /* list of Composon lists */
+
 %token COUPLE
 %left RARR
+
+%left '.'
+%precedence CONCAT
 
 %%
 
@@ -111,10 +124,10 @@ input
 
 /* TODO: allow multiple sections */
 section
-  : section_export    { rs->export = $1; }
-  | section_path
-  | section_check
-  | section_effect
+  : section_export   { rs->export = $1; }
+  | section_path     { rs->path = $1; }
+  | section_check    { rs->check = $1; }
+  | section_effect   { rs->effect = $1; }
   | section_arg
   | section_type     { rs->type     = $1; }
   | section_ontology { rs->ontology = $1; }
@@ -127,34 +140,44 @@ section
   | section_pass     { rs->pass     = $1; }
   | section_source   { rs->source   = $1; }
 
-
-section_export
-  : SECTION_EXPORT { $$ = new_NamedList(); }
-  | section_export VARIABLE AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
-
 /* --- composition sections ----------------------------------------------- */
 section_path
-  : SECTION_PATH
-  | section_path IDENTIFIER COUPLE composition
+  : SECTION_PATH { $$ = new_NamedList(); }
+  | section_path IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 section_effect
-  : SECTION_EFFECT
-  | section_effect IDENTIFIER COUPLE composition
+  : SECTION_EFFECT { $$ = new_NamedList(); }
+  | section_effect IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 section_check
-  : SECTION_CHECK
-  | section_check IDENTIFIER COUPLE composition
+  : SECTION_CHECK { $$ = new_NamedList(); }
+  | section_check IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 composition
-  : COMPOSON
-  | '(' composition ')'
-  | composition COMPOSON
-  | composition '(' composition ')'
-  | composition '.' COMPOSON
-  | composition '.' '(' composition ')'
-/* ------------------------------------------------------------------------ */
+  : COMPOSON {
+      $$ = new_List();
+      List* l = new_List();
+      LADD(l, $1, Composon*);
+      LADD($$, l, List*);
+  }
+  | '(' composition ')' {
+      $$ = new_List();
+      Composon* c = new_Composon(C_NEST);
+      c->value.nest = $2;
+      LADD($$, c, List*);
+  }
+  | composition composition %prec CONCAT {
+      $$ = $1; 
+      List* child = (List*)$$->value;
+      LADD(child, $2, List*);
+      $$->value = child;
+  }
+  | composition '.' composition {
+      $$ = $1; 
+      LADD($$, $3, List*);
+  }
 
-
+/* --- argument section --------------------------------------------------- */
 section_arg
   : SECTION_ARG
   | section_arg IDENTIFIER COUPLE argument
@@ -173,6 +196,11 @@ primitive
   | DBL
   | STR
   | LOG
+/* ------------------------------------------------------------------------ */
+
+section_export
+  : SECTION_EXPORT { $$ = new_NamedList(); }
+  | section_export VARIABLE AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_type
   : SECTION_TYPE { $$ = new_NamedList(); }

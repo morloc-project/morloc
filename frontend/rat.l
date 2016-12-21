@@ -30,8 +30,9 @@ str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
 ident   {var}[ \t\n\r]*(::|=)
 
-positional \$[1-9][0-9]*    
-cond    \?{ws}*{var}
+positional \$[1-9][0-9]*
+groupref   \*{var}
+cond       \?{ws}*{var}
 
 eos     ;|---+
 couple  ::
@@ -112,20 +113,6 @@ section_type     @type
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-{cond} {
-    /* remove initial '?' */
-    yytext++;
-    /* remove whitespace */
-    while(isspace(yytext[0])) yytext++;
-    LOGV("COND-%s ", yytext);
-    // return COND;
-}
-{positional} {
-    yytext++; /* remove '$' */
-    LOGV("POS-%s", yytext);
-    // return POS;
-}
-
 as        { LOG("AS "         ); return AS;         }
 {logical} { LOG("LOG "        ); return LOG;        }
 {rarrow}  { LOG("RARR "       ); return RARR;       }
@@ -139,8 +126,45 @@ as        { LOG("AS "         ); return AS;         }
     return STR;
 }
 
-<S_COMPOSITION>{var} { LOG("COMPOSON "); return COMPOSON; }
-{var}                { LOG("VARIABLE "); yylval.VARIABLE = strdup(yytext); return VARIABLE; }
+<S_COMPOSITION>{cond} {
+    /* remove initial '?' */
+    yytext++;
+    /* remove whitespace */
+    while(isspace(yytext[0])) yytext++;
+    LOGV("COMPOSON.CONDITIONAL-%s ", yytext);
+    yylval.COMPOSON = new_Composon(C_CONDITIONAL);
+    yylval.COMPOSON->value.name = strdup(yytext);
+    return COMPOSON;
+}
+
+<S_COMPOSITION>{positional} {
+    yytext++; /* remove '$' */
+    LOGV("COMPOSON.C_POSITIONAL-%s", yytext);
+    yylval.COMPOSON = new_Composon(C_POSITIONAL);
+    yylval.COMPOSON->value.name = strdup(yytext);
+    return COMPOSON;
+}
+
+<S_COMPOSITION>{groupref} {
+    yytext++; /* remove '*' */
+    yylval.COMPOSON = new_Composon(C_GROUP);
+    yylval.COMPOSON->value.name = strdup(yytext);
+    LOGV("GROUP-%s", yylval.COMPOSON->value.name);
+    return COMPOSON;
+}
+
+<S_COMPOSITION>{var} {
+    LOG("COMPOSON ");
+    yylval.COMPOSON = new_Composon(C_VARIABLE);
+    yylval.COMPOSON->value.name = strdup(yytext);
+    return COMPOSON;
+}
+
+{var} {
+    LOG("VARIABLE ");
+    yylval.VARIABLE = strdup(yytext);
+    return VARIABLE;
+}
 
 {ident}   {
     char* s = strdup(yytext);

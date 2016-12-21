@@ -103,6 +103,7 @@ syn match s_brk      /[\[\]]/ contained
 syn match s_bar      /|/      contained
 
 syn match s_positional /\$\d\+/ contained
+syn match s_group /\*[a-zA-Z_]\+/ contained
 
 " define constants
 syn keyword s_nil NIL contained
@@ -124,7 +125,7 @@ syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_basic     contains=s_couple,s_varlabel
 syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
 syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
-syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun
+syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun,s_group
 syn cluster c_type      contains=s_nil,s_rarror,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
@@ -191,6 +192,7 @@ hi def link s_todo     Todo
 hi def link s_tag      SpecialComment
 
 hi def link s_positional Identifier
+hi def link s_group      Identifier
 hi def link s_fun        Identifier
 
 hi def link DEFAULT_ERROR Error

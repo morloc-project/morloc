@@ -20,6 +20,18 @@ typedef struct NamedList{
 List* new_List();
 NamedList* new_NamedList();
 
+typedef enum { C_VARIABLE, C_POSITIONAL, C_GROUP, C_CONDITIONAL, C_NEST } ComposonType;
+
+typedef struct Composon{
+    ComposonType type;
+    union {
+        char* name;
+        List* nest;
+    } value;
+} Composon;
+
+Composon* new_Composon(ComposonType type);
+
 #define REWIND(xs) do{ if(xs) {while(xs->prev != NULL) xs = xs->prev;} } while(0)
 #define UPWIND(xs) do{ if(xs) {while(xs->next != NULL) xs = xs->next;} } while(0)
 

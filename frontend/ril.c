@@ -14,6 +14,11 @@ RatStack* new_RatStack(){
 
      rs->ontology = new_NamedList();
      rs->type     = new_NamedList();
+
+     rs->path   = new_NamedList();
+     rs->check  = new_NamedList();
+     rs->effect = new_NamedList();
+
      return rs;
 }
 
