@@ -34,6 +34,9 @@ void rewind_RatStack(RatStack* rs){
     REWIND( rs->source   );
     REWIND( rs->ontology );
     REWIND( rs->type     );
+    REWIND( rs->path     );
+    REWIND( rs->check    );
+    REWIND( rs->effect   );
 }
 
 void print_couplet(NamedList* l, char* cmd){
@@ -57,4 +60,14 @@ void print_RIL(RatStack* rs){
     print_couplet(rs->source,   "SOURCE");
     print_couplet(rs->ontology, "ONTOLOGY");
     print_couplet(rs->type,     "TYPE");
+
+    for(NamedList* l = rs->path; l; l = l->next){
+        printf("PATH %s\n", l->name);
+    }
+    for(NamedList* l = rs->check; l; l = l->next){
+        printf("CHECK %s\n", l->name);
+    }
+    for(NamedList* l = rs->effect; l; l = l->next){
+        printf("EFFECT %s\n", l->name);
+    }
 }

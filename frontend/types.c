@@ -15,3 +15,11 @@ Composon* new_Composon(ComposonType type){
     c->type = type;
     return c;
 }
+
+Manifold* new_Manifold(char* name){
+    static int uid = 0;
+    Manifold* m = (Manifold*)calloc(1, sizeof(Manifold));
+    m->name = name;
+    m->uid = ++uid;
+    return m;
+}

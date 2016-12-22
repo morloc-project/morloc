@@ -157,6 +157,7 @@ as        { LOG("AS "         ); return AS;         }
     LOG("COMPOSON ");
     yylval.COMPOSON = new_Composon(C_VARIABLE);
     yylval.COMPOSON->value.name = strdup(yytext);
+    yylval.COMPOSON->manifold = new_Manifold(strdup(yytext));
     return COMPOSON;
 }
 

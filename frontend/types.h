@@ -20,10 +20,29 @@ typedef struct NamedList{
 List* new_List();
 NamedList* new_NamedList();
 
+typedef struct Manifold{
+    char* name;          /* the name used in the composition (NOT unique) */
+    int uid;             /* a globally unique id */
+    NamedList* function; /* the name of the function (1 per language) */
+    NamedList* cache;    /* only one will be used usually, but it might make sense to have a value both in memory AND persistant storage */
+    NamedList* args;     /* a arguments */
+    NamedList* inputs;   /* b inputs */
+    NamedList* checks;   /* c checks */
+    NamedList* effects;  /* d effects */
+    NamedList* type;     /* b + 1 types */
+    NamedList* unpack;   /* 1 or b */
+    NamedList* run;      /* usually only one, maybe multiples if there are multiple placees it might run, then just use the first that works */
+    NamedList* fail;     /* list of things to do on failure */
+    NamedList* pack;     /* a bit hard to imagine why you would need multiples of these ... */
+} Manifold;
+
+Manifold* new_Manifold(char* name);
+
 typedef enum { C_VARIABLE, C_POSITIONAL, C_GROUP, C_CONDITIONAL, C_NEST } ComposonType;
 
 typedef struct Composon{
     ComposonType type;
+    Manifold* manifold;
     union {
         char* name;
         List* nest;
