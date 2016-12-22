@@ -38,7 +38,7 @@ typedef struct Manifold{
 
 Manifold* new_Manifold(char* name);
 
-typedef enum { C_VARIABLE, C_POSITIONAL, C_GROUP, C_CONDITIONAL, C_NEST } ComposonType;
+typedef enum { C_UNDEFINED, C_VARIABLE, C_POSITIONAL, C_GROUP, C_CONDITIONAL, C_NEST } ComposonType;
 
 typedef struct Composon{
     ComposonType type;
@@ -50,6 +50,8 @@ typedef struct Composon{
 } Composon;
 
 Composon* new_Composon(ComposonType type);
+
+void rewind_path(NamedList* p);
 
 #define REWIND(xs) do{ if(xs) {while(xs->prev != NULL) xs = xs->prev;} } while(0)
 #define UPWIND(xs) do{ if(xs) {while(xs->next != NULL) xs = xs->next;} } while(0)

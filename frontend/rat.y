@@ -162,19 +162,21 @@ composition
   }
   | '(' composition ')' {
       $$ = new_List();
+      List* l = new_List();
       Composon* c = new_Composon(C_NEST);
       c->value.nest = $2;
-      LADD($$, c, List*);
+      LADD(l, c, Composon*);
+      LADD($$, l, List*);
   }
   | composition composition %prec CONCAT {
-      $$ = $1; 
-      List* child = (List*)$$->value;
-      LADD(child, $2, List*);
-      $$->value = child;
+      List* a = (List*)$1->value;
+      List* b = (List*)$2->value;
+      JOIN(a, b);
+      $$ = $1;
   }
   | composition '.' composition {
+      JOIN($1, $3);
       $$ = $1; 
-      LADD($$, $3, List*);
   }
 
 /* --- argument section --------------------------------------------------- */

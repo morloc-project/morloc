@@ -34,14 +34,57 @@ void rewind_RatStack(RatStack* rs){
     REWIND( rs->source   );
     REWIND( rs->ontology );
     REWIND( rs->type     );
-    REWIND( rs->path     );
-    REWIND( rs->check    );
-    REWIND( rs->effect   );
 }
 
 void print_couplet(NamedList* l, char* cmd){
     for( ; l; l = l->next ){
         printf("%s %s %s\n", cmd, l->name, l->value);
+    }
+}
+
+void print_composition_r(List* l, int depth){
+    REWIND(l);
+    int k = 1;
+    for( ; l; l = l->next){
+        for(int i = depth + 1; i > 0; i--) { printf(" -"); }
+        printf(" %d\n", k++);
+        List* ll = (List*)l->value;
+        REWIND(ll);
+        for( ; ll; ll = ll->next){ 
+            Composon* c = (Composon*)ll->value; 
+            for(int i = (2*depth - 1) + 2; i > 0; i--) { printf(" -"); }
+            switch(c->type){
+                case C_VARIABLE:
+                    printf(" VARIABLE:(%s,%d)\n", c->value.name, c->manifold->uid);
+                    break;
+                case C_POSITIONAL:
+                    printf(" POS\n");
+                    break;
+                case C_GROUP:
+                    printf(" GROUP\n");
+                    break;
+                case C_CONDITIONAL:
+                    printf(" CONDITIONAL\n");
+                    break;
+                case C_NEST:
+                    printf(" NEST\n");
+                    print_composition_r((List*)c->value.nest, depth+1);
+                    break;
+                default:
+                    fprintf(stderr, "Invalid composon type\n");
+                    exit(EXIT_FAILURE);
+            }
+        }
+    }
+}
+
+void print_paths(NamedList* p, char* cmd){
+    printf("%s\n", cmd);
+    NamedList* l = p;
+    REWIND(l);
+    for( ; l; l = l->next){
+        printf(" %s\n", l->name);
+        print_composition_r((List*)l->value, 0);
     }
 }
 
@@ -61,13 +104,7 @@ void print_RIL(RatStack* rs){
     print_couplet(rs->ontology, "ONTOLOGY");
     print_couplet(rs->type,     "TYPE");
 
-    for(NamedList* l = rs->path; l; l = l->next){
-        printf("PATH %s\n", l->name);
-    }
-    for(NamedList* l = rs->check; l; l = l->next){
-        printf("CHECK %s\n", l->name);
-    }
-    for(NamedList* l = rs->effect; l; l = l->next){
-        printf("EFFECT %s\n", l->name);
-    }
+    print_paths(rs->path, "PATH");
+    print_paths(rs->effect, "EFFECT");
+    print_paths(rs->check, "CHECK");
 }
