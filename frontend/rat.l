@@ -19,6 +19,7 @@ FILE* toklog;
 %x S_SOURCE
 %x S_COMMENT
 %s S_COMPOSITION
+%s S_ASSIGNMENT
 
 line    ^(\n|[^@]).*
 comment #.*\n
@@ -28,7 +29,7 @@ int     [0-9]|[1-9][0-9]+
 dbl     {int}\.[0-9]+
 str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
-ident   {var}[ \t\n\r]*(::|=)
+ident   {var}(\/{var})*[ \t\n\r]*(::|=)
 
 positional \$[1-9][0-9]*
 groupref   \*{var}
@@ -169,19 +170,19 @@ as        { LOG("AS "         ); return AS;         }
 
 {ident}   {
     char* s = strdup(yytext);
-    int i = strlen(s);
-    while(i--){
+    int i = 0;
+    for(;;i++){
         char c = s[i];
-        if(c == ':' || c == '='){
-            unput(c);
-            s[i] = '\0';
-        }
-        if(isspace(c)){
-            s[i] = '\0';
-        }
+        if(c == '/' || isspace(c) || c == ':' || c == '=')
+            break;
     }
+    for(int j = strlen(s) - 1; j >= i ; j--){
+        unput(s[j]);
+    }
+    s[i] = '\0';
     yylval.IDENTIFIER = s;
     LOGV("IDENTIFIER-%s ", s);
+
     return IDENTIFIER;
 }
 

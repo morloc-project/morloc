@@ -88,6 +88,10 @@ void print_paths(NamedList* p, char* cmd){
     }
 }
 
+void set_manifold_value(char* name, Path* path, size_t index){
+    /* stub */
+}
+
 void print_RIL(RatStack* rs){
 
     rewind_RatStack(rs);

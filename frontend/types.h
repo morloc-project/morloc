@@ -51,6 +51,11 @@ typedef struct Composon{
 
 Composon* new_Composon(ComposonType type);
 
+typedef struct Path{
+    struct Path* next;
+    char* name; 
+} Path;
+
 void rewind_path(NamedList* p);
 
 #define REWIND(xs) do{ if(xs) {while(xs->prev != NULL) xs = xs->prev;} } while(0)

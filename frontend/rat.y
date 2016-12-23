@@ -55,6 +55,7 @@ char* get_str();
 
 /* named tokens on the left side of an assignemt (e.g. x=1) */
 %token <char*> IDENTIFIER
+%type <char*> manifold
 
 /* named tokens on the right side (or anywhere else) */
 %token <char*> VARIABLE 
@@ -147,11 +148,11 @@ section_path
 
 section_effect
   : SECTION_EFFECT { $$ = new_NamedList(); }
-  | section_effect IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
+  | section_effect manifold COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 section_check
   : SECTION_CHECK { $$ = new_NamedList(); }
-  | section_check IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
+  | section_check manifold COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 composition
   : COMPOSON {
@@ -182,7 +183,7 @@ composition
 /* --- argument section --------------------------------------------------- */
 section_arg
   : SECTION_ARG
-  | section_arg IDENTIFIER COUPLE argument
+  | section_arg manifold COUPLE argument
   | section_arg argument
 argument
   : IDENTIFIER '=' primitive
@@ -246,31 +247,38 @@ section_source
 
 section_doc
   : SECTION_DOC { $$ = new_NamedList(); }
-  | section_doc IDENTIFIER COUPLE STR { $$ = $1; COUPLET($$, $2, $4); }
+  | section_doc manifold COUPLE STR { $$ = $1; COUPLET($$, $2, $4); }
 
 section_alias
   : SECTION_ALIAS { $$ = new_NamedList(); }
-  | section_alias IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_alias manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_cache
   : SECTION_CACHE { $$ = new_NamedList(); }
-  | section_cache IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_cache manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pack
   : SECTION_PACK { $$ = new_NamedList(); }
-  | section_pack IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_pack manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_open
   : SECTION_OPEN { $$ = new_NamedList(); }
-  | section_open IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_open manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_fail
   : SECTION_FAIL { $$ = new_NamedList(); }
-  | section_fail IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_fail manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pass
   : SECTION_PASS { $$ = new_NamedList(); }
-  | section_pass IDENTIFIER COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_pass manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+
+
+/* ------------------------------------------------------------------------ */
+/* TODO: currently, I just ignore the path */
+manifold
+  : IDENTIFIER   { $$ = $1; }
+  | manifold '/' IDENTIFIER { $$ = $1; }
 
 %%
 
