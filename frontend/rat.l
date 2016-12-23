@@ -133,7 +133,7 @@ as        { LOG("AS "         ); return AS;         }
     /* remove whitespace */
     while(isspace(yytext[0])) yytext++;
     LOGV("COMPOSON.CONDITIONAL-%s ", yytext);
-    yylval.COMPOSON = new_Composon(C_CONDITIONAL);
+    yylval.COMPOSON = composon_new(C_CONDITIONAL);
     yylval.COMPOSON->value.name = strdup(yytext);
     return COMPOSON;
 }
@@ -141,14 +141,14 @@ as        { LOG("AS "         ); return AS;         }
 <S_COMPOSITION>{positional} {
     yytext++; /* remove '$' */
     LOGV("COMPOSON.C_POSITIONAL-%s", yytext);
-    yylval.COMPOSON = new_Composon(C_POSITIONAL);
+    yylval.COMPOSON = composon_new(C_POSITIONAL);
     yylval.COMPOSON->value.name = strdup(yytext);
     return COMPOSON;
 }
 
 <S_COMPOSITION>{groupref} {
     yytext++; /* remove '*' */
-    yylval.COMPOSON = new_Composon(C_GROUP);
+    yylval.COMPOSON = composon_new(C_GROUP);
     yylval.COMPOSON->value.name = strdup(yytext);
     LOGV("GROUP-%s", yylval.COMPOSON->value.name);
     return COMPOSON;
@@ -156,9 +156,9 @@ as        { LOG("AS "         ); return AS;         }
 
 <S_COMPOSITION>{var} {
     LOG("COMPOSON ");
-    yylval.COMPOSON = new_Composon(C_VARIABLE);
+    yylval.COMPOSON = composon_new(C_VARIABLE);
     yylval.COMPOSON->value.name = strdup(yytext);
-    yylval.COMPOSON->manifold = new_Manifold(strdup(yytext));
+    yylval.COMPOSON->manifold = manifold_new(strdup(yytext));
     return COMPOSON;
 }
 
@@ -180,7 +180,7 @@ as        { LOG("AS "         ); return AS;         }
         unput(s[j]);
     }
     s[i] = '\0';
-    yylval.IDENTIFIER = new_Label(s);
+    yylval.IDENTIFIER = label_new(s);
     LOGV("IDENTIFIER-%s ", s);
 
     return IDENTIFIER;

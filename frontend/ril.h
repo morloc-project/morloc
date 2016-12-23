@@ -1,7 +1,10 @@
 #ifndef __RIL_H__
 #define __RIL_H__
 
-#include "types.h"
+#include "list.h"
+#include "composition.h"
+
+#include <stdio.h>
 
 // Eventually this will be extended to cover all sections
 typedef struct RatStack{
@@ -21,9 +24,9 @@ typedef struct RatStack{
     NamedList* effect;
 } RatStack;
 
-void rewind_RatStack();
+void ratstack_rewind();
 
-RatStack* new_RatStack();
+RatStack* ratstack_new();
 
 void print_RIL(RatStack* rs);
 

@@ -15,7 +15,11 @@ char* get_str();
 %}
 
 %code requires{
-#include "types.h"
+#include "composition.h"
+#include "label.h"
+#include "list.h"
+#include "manifold.h"
+#include "ril.h"
 }
 
 /*
@@ -119,7 +123,7 @@ final
   : input { print_RIL(rs); }
 
 input
-  : %empty { rs = new_RatStack(); }
+  : %empty { rs = ratstack_new(); }
   | input section
 ;
 
@@ -143,42 +147,22 @@ section
 
 /* --- composition sections ----------------------------------------------- */
 section_path
-  : SECTION_PATH { $$ = new_NamedList(); }
+  : SECTION_PATH { $$ = namedlist_new(); }
   | section_path IDENTIFIER COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 section_effect
-  : SECTION_EFFECT { $$ = new_NamedList(); }
+  : SECTION_EFFECT { $$ = namedlist_new(); }
   | section_effect manifold COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 section_check
-  : SECTION_CHECK { $$ = new_NamedList(); }
+  : SECTION_CHECK { $$ = namedlist_new(); }
   | section_check manifold COUPLE composition { $$ = $1; ADD($$, $2, $4, List*); }
 
 composition
-  : COMPOSON {
-      $$ = new_List();
-      List* l = new_List();
-      LADD(l, $1, Composon*);
-      LADD($$, l, List*);
-  }
-  | '(' composition ')' {
-      $$ = new_List();
-      List* l = new_List();
-      Composon* c = new_Composon(C_NEST);
-      c->value.nest = $2;
-      LADD(l, c, Composon*);
-      LADD($$, l, List*);
-  }
-  | composition composition %prec CONCAT {
-      List* a = (List*)$1->value;
-      List* b = (List*)$2->value;
-      JOIN(a, b);
-      $$ = $1;
-  }
-  | composition '.' composition {
-      JOIN($1, $3);
-      $$ = $1; 
-  }
+  : COMPOSON                             { $$ = composition_new($1); }
+  | '(' composition ')'                  { $$ = composition_new_nested($2); }
+  | composition composition %prec CONCAT { $$ = composition_add_down($1, $2); }
+  | composition '.' composition          { $$ = composition_compose($1, $3); }
 
 /* --- argument section --------------------------------------------------- */
 section_arg
@@ -202,13 +186,13 @@ primitive
 /* ------------------------------------------------------------------------ */
 
 section_export
-  : SECTION_EXPORT { $$ = new_NamedList(); }
+  : SECTION_EXPORT { $$ = namedlist_new(); }
   | section_export IDENTIFIER AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_type
-  : SECTION_TYPE { $$ = new_List(); }
+  : SECTION_TYPE { $$ = list_new(); }
   | section_type IDENTIFIER COUPLE signature {
-      List* l = new_List();
+      List* l = list_new();
       l->value = get_str();
       sprintf(l->value, "%s :: %s", $2->name, $4);
       JOIN($$, l);
@@ -219,11 +203,11 @@ signature
   | signature RARR signature { $$ = get_str(); sprintf($$, "%s -> %s", $1, $3); }
 
 section_ontology
-  : SECTION_ONTOLOGY { $$ = new_List(); }
+  : SECTION_ONTOLOGY { $$ = list_new(); }
   | section_ontology construction { JOIN($1,$2); $$ = $1; }
 construction
   : IDENTIFIER COUPLE VARIABLE {
-      $$ = new_List();
+      $$ = list_new();
       char* buffer = (char*)malloc(4096 * sizeof(char));
       sprintf(buffer, "%s :: %s", $1->name, $3);
       $$->value = buffer;
@@ -242,35 +226,35 @@ construction
   }
 
 section_source
-  : SECTION_SOURCE LANG { $$ = new_NamedList(); $$->name = new_Label($2); }
+  : SECTION_SOURCE LANG { $$ = namedlist_new(); $$->name = label_new($2); }
   | section_source LINE { COUPLET($1, $1->name, $2); $$ = $1; }
 
 section_doc
-  : SECTION_DOC { $$ = new_NamedList(); }
+  : SECTION_DOC { $$ = namedlist_new(); }
   | section_doc manifold COUPLE STR { $$ = $1; COUPLET($$, $2, $4); }
 
 section_alias
-  : SECTION_ALIAS { $$ = new_NamedList(); }
+  : SECTION_ALIAS { $$ = namedlist_new(); }
   | section_alias manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_cache
-  : SECTION_CACHE { $$ = new_NamedList(); }
+  : SECTION_CACHE { $$ = namedlist_new(); }
   | section_cache manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pack
-  : SECTION_PACK { $$ = new_NamedList(); }
+  : SECTION_PACK { $$ = namedlist_new(); }
   | section_pack manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_open
-  : SECTION_OPEN { $$ = new_NamedList(); }
+  : SECTION_OPEN { $$ = namedlist_new(); }
   | section_open manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_fail
-  : SECTION_FAIL { $$ = new_NamedList(); }
+  : SECTION_FAIL { $$ = namedlist_new(); }
   | section_fail manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_pass
-  : SECTION_PASS { $$ = new_NamedList(); }
+  : SECTION_PASS { $$ = namedlist_new(); }
   | section_pass manifold COUPLE VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 

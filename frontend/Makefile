@@ -1,9 +1,11 @@
 TARGET=rat
 
+FILES=bufstack.c label.c list.c composition.c manifold.c ril.c
+
 all:
 	flex ${TARGET}.l
 	bison -Wall --report=all -d ${TARGET}.y
-	gcc lex.yy.c ril.c types.c bufstack.c ${TARGET}.tab.c -lfl -o ${TARGET}
+	gcc lex.yy.c ${FILES} ${TARGET}.tab.c -lfl -o ${TARGET}
 
 .PHONY: clean
 clean:
