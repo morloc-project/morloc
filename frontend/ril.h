@@ -14,8 +14,8 @@ typedef struct RatStack{
     NamedList* fail;
     NamedList* pass;
     NamedList* source;
-    NamedList* ontology;
-    NamedList* type;
+    List* ontology;
+    List* type;
     NamedList* path;
     NamedList* check;
     NamedList* effect;

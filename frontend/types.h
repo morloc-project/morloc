@@ -4,6 +4,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+typedef struct Label{
+    struct Label* next;
+    char* name; 
+} Label;
+Label* new_Label(char* name);
+
 typedef struct List{
     struct List* next;
     struct List* prev;
@@ -13,7 +19,7 @@ typedef struct List{
 typedef struct NamedList{
     struct NamedList* next;
     struct NamedList* prev;
-    char* name;
+    Label* name;
     void* value;
 } NamedList;
 
@@ -23,17 +29,17 @@ NamedList* new_NamedList();
 typedef struct Manifold{
     char* name;          /* the name used in the composition (NOT unique) */
     int uid;             /* a globally unique id */
-    NamedList* function; /* the name of the function (1 per language) */
-    NamedList* cache;    /* only one will be used usually, but it might make sense to have a value both in memory AND persistant storage */
-    NamedList* args;     /* a arguments */
-    NamedList* inputs;   /* b inputs */
-    NamedList* checks;   /* c checks */
-    NamedList* effects;  /* d effects */
-    NamedList* type;     /* b + 1 types */
-    NamedList* unpack;   /* 1 or b */
-    NamedList* run;      /* usually only one, maybe multiples if there are multiple placees it might run, then just use the first that works */
-    NamedList* fail;     /* list of things to do on failure */
-    NamedList* pack;     /* a bit hard to imagine why you would need multiples of these ... */
+    List* function; /* the name of the function (1 per language) */
+    List* cache;    /* only one will be used usually, but it might make sense to have a value both in memory AND persistant storage */
+    NamedList* args; /* a arguments */
+    List* inputs;   /* b inputs */
+    List* checks;   /* c checks */
+    List* effects;  /* d effects */
+    List* type;     /* b + 1 types */
+    List* unpack;   /* 1 or b */
+    List* run;      /* usually only one, maybe multiples if there are multiple placees it might run, then just use the first that works */
+    List* fail;     /* list of things to do on failure */
+    List* pack;     /* a bit hard to imagine why you would need multiples of these ... */
 } Manifold;
 
 Manifold* new_Manifold(char* name);
@@ -51,10 +57,6 @@ typedef struct Composon{
 
 Composon* new_Composon(ComposonType type);
 
-typedef struct Path{
-    struct Path* next;
-    char* name; 
-} Path;
 
 void rewind_path(NamedList* p);
 
@@ -112,6 +114,6 @@ do {                                           \
     }                                          \
 } while(0)
 
-#define COUPLET(xs, name, x) ADD(xs, name, x, char*)
+#define COUPLET(xs, name, x) ADD(xs, name, x, Label*)
 
 #endif

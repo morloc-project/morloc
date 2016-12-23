@@ -29,7 +29,7 @@ int     [0-9]|[1-9][0-9]+
 dbl     {int}\.[0-9]+
 str     \'[^']*\'|\"[^"]*\"
 var     [a-zA-Z_][a-zA-Z_0-9]*
-ident   {var}(\/{var})*[ \t\n\r]*(::|=)
+ident   {var}(\/{var})*[ \t\n\r]*(::|=|{ws}as{ws})
 
 positional \$[1-9][0-9]*
 groupref   \*{var}
@@ -180,7 +180,7 @@ as        { LOG("AS "         ); return AS;         }
         unput(s[j]);
     }
     s[i] = '\0';
-    yylval.IDENTIFIER = s;
+    yylval.IDENTIFIER = new_Label(s);
     LOGV("IDENTIFIER-%s ", s);
 
     return IDENTIFIER;

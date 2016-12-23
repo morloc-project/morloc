@@ -28,9 +28,9 @@ char* get_str();
  [x] - source
  [x] make type and ontology
  [x] make compositions
- [ ] add unique manifold ids
- [ ] add Manifold structures to Composon
- [ ] allow path specification
+ [x] add unique manifold ids
+ [x] add Manifold structures to Composon
+ [x] allow path specification
  [ ] pass all couplets down the tree
  [ ] make args
  [ ] allow multiple occurances of any sections
@@ -54,8 +54,8 @@ char* get_str();
 %define api.value.type union
 
 /* named tokens on the left side of an assignemt (e.g. x=1) */
-%token <char*> IDENTIFIER
-%type <char*> manifold
+%token <Label*> IDENTIFIER
+%type <Label*> manifold
 
 /* named tokens on the right side (or anywhere else) */
 %token <char*> VARIABLE 
@@ -86,11 +86,11 @@ char* get_str();
 %token SECTION_FAIL
 %token SECTION_PASS
 
-%type <NamedList*> section_type
-%type <char*>      signature
+%type <List*> section_type
+%type <char*> signature
 
-%type <NamedList*> section_ontology
-%type <NamedList*> construction
+%type <List*> section_ontology
+%type <List*> construction
 
 %type <NamedList*> section_export
 %type <NamedList*> section_doc
@@ -203,15 +203,15 @@ primitive
 
 section_export
   : SECTION_EXPORT { $$ = new_NamedList(); }
-  | section_export VARIABLE AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
+  | section_export IDENTIFIER AS VARIABLE { $$ = $1; COUPLET($$, $2, $4); }
 
 section_type
-  : SECTION_TYPE { $$ = new_NamedList(); }
+  : SECTION_TYPE { $$ = new_List(); }
   | section_type IDENTIFIER COUPLE signature {
-      char* sig = get_str();
-      sprintf(sig, ":: %s", $4);
-      COUPLET($1, $2, sig);
-      $$ = $1;
+      List* l = new_List();
+      l->value = get_str();
+      sprintf(l->value, "%s :: %s", $2->name, $4);
+      JOIN($$, l);
   }
 signature
   : VARIABLE                 { $$ = $1; }
@@ -219,14 +219,14 @@ signature
   | signature RARR signature { $$ = get_str(); sprintf($$, "%s -> %s", $1, $3); }
 
 section_ontology
-  : SECTION_ONTOLOGY { $$ = new_NamedList(); }
+  : SECTION_ONTOLOGY { $$ = new_List(); }
   | section_ontology construction { JOIN($1,$2); $$ = $1; }
 construction
   : IDENTIFIER COUPLE VARIABLE {
-      $$ = new_NamedList();
+      $$ = new_List();
       char* buffer = (char*)malloc(4096 * sizeof(char));
-      sprintf(buffer, "%s ::", $1);
-      COUPLET($$, buffer, $3);
+      sprintf(buffer, "%s :: %s", $1->name, $3);
+      $$->value = buffer;
   }
   | construction '|' VARIABLE {
       char* s = (char*)$1->value;
@@ -242,7 +242,7 @@ construction
   }
 
 section_source
-  : SECTION_SOURCE LANG { $$ = new_NamedList(); $$->name = $2; }
+  : SECTION_SOURCE LANG { $$ = new_NamedList(); $$->name = new_Label($2); }
   | section_source LINE { COUPLET($1, $1->name, $2); $$ = $1; }
 
 section_doc
@@ -275,10 +275,9 @@ section_pass
 
 
 /* ------------------------------------------------------------------------ */
-/* TODO: currently, I just ignore the path */
 manifold
   : IDENTIFIER   { $$ = $1; }
-  | manifold '/' IDENTIFIER { $$ = $1; }
+  | IDENTIFIER '/' manifold { $$ = $1; $$->next = $3; }
 
 %%
 

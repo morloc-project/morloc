@@ -24,6 +24,12 @@ Manifold* new_Manifold(char* name){
     return m;
 }
 
+Label* new_Label(char* name){
+    Label* p = (Label*)malloc(sizeof(Label));
+    p->next = NULL;
+    p->name = name; 
+}
+
 void rewind_path(NamedList* p){
     for(NamedList* l = p; l; l = l->next){
         List* lc = (List*)l->value;

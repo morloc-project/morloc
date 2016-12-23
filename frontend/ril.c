@@ -12,8 +12,8 @@ RatStack* new_RatStack(){
      rs->pass   = new_NamedList();
      rs->source = new_NamedList();
 
-     rs->ontology = new_NamedList();
-     rs->type     = new_NamedList();
+     rs->ontology = new_List();
+     rs->type     = new_List();
 
      rs->path   = new_NamedList();
      rs->check  = new_NamedList();
@@ -37,8 +37,18 @@ void rewind_RatStack(RatStack* rs){
 }
 
 void print_couplet(NamedList* l, char* cmd){
-    for( ; l; l = l->next ){
-        printf("%s %s %s\n", cmd, l->name, l->value);
+    if(l && l->value){
+        for( ; l; l = l->next ){
+            printf("%s %s %s\n", cmd, l->name->name, l->value);
+        }
+    }
+}
+
+void print_list(List* l, char* cmd){
+    if(l && l->value){
+        for( ; l; l = l->next ){
+            printf("%s %s\n", cmd, l->value);
+        }
     }
 }
 
@@ -81,14 +91,16 @@ void print_composition_r(List* l, int depth){
 void print_paths(NamedList* p, char* cmd){
     printf("%s\n", cmd);
     NamedList* l = p;
-    REWIND(l);
-    for( ; l; l = l->next){
-        printf(" %s\n", l->name);
-        print_composition_r((List*)l->value, 0);
+    if(l && l->value){
+        REWIND(l);
+        for( ; l; l = l->next){
+            printf(" %s\n", l->name->name);
+            print_composition_r((List*)l->value, 0);
+        }
     }
 }
 
-void set_manifold_value(char* name, Path* path, size_t index){
+void set_manifold_value(char* name, Label* path, size_t index){
     /* stub */
 }
 
@@ -105,8 +117,9 @@ void print_RIL(RatStack* rs){
     print_couplet(rs->fail,     "FAIL");
     print_couplet(rs->pass,     "PASS");
     print_couplet(rs->source,   "SOURCE");
-    print_couplet(rs->ontology, "ONTOLOGY");
-    print_couplet(rs->type,     "TYPE");
+
+    print_list(rs->ontology, "ONTOLOGY");
+    print_list(rs->type,     "TYPE");
 
     print_paths(rs->path, "PATH");
     print_paths(rs->effect, "EFFECT");

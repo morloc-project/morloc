@@ -2,6 +2,7 @@ lex.yy.*
 *.tab.*
 *.out
 zzz.*
+vgcore.*
 rat
 rat.output
 lexer
