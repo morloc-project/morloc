@@ -1,4 +1,4 @@
-# Rat
+# Language of Composition
 
 A dataflow language that supports loops and conditionals
 

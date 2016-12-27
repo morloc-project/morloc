@@ -1,5 +1,5 @@
-#ifndef __RIL_H__
-#define __RIL_H__
+#ifndef __LIL_H__
+#define __LIL_H__
 
 #include "list.h"
 #include "composition.h"

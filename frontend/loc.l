@@ -1,6 +1,6 @@
 %{
 #include <ctype.h>
-#include "rat.tab.h"
+#include "loc.tab.h"
 
 int newfile(char *fn);
 int popfile(void);

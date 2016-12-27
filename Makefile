@@ -1,4 +1,4 @@
-TARGET=rat
+TARGET=loc
 RTARGET=R
 
 all:
@@ -16,6 +16,6 @@ r:
 .PHONY: install
 install:
 	mkdir -p ~/bin
-	${MAKE} && cp rat ~/bin/rat_frontend
-	${MAKE} r && cp R ~/bin/rat_R_backend
-	cp rat.sh ~/bin/rat
+	${MAKE} && cp loc ~/bin/loc_frontend
+	${MAKE} r && cp R ~/bin/loc_R_backend
+	cp loc.sh ~/bin/loc

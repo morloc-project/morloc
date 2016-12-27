@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "lex.yy.h"
-#include "ril.h"
+#include "lil.h"
 
 void yyerror (char* s);
 
@@ -19,7 +19,7 @@ char* get_str();
 #include "label.h"
 #include "list.h"
 #include "manifold.h"
-#include "ril.h"
+#include "lil.h"
 }
 
 /*

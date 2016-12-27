@@ -1,10 +1,10 @@
 # Notes
 
-This document is a freeform ramble on ratty topics
+This document is a freeform ramble on loki topics
 
 ## Templates
 
-The core functions of rat are manifold. These functions take nothing and return
+The core functions of Loc are manifold. These functions take nothing and return
 nothing. They are conglomerations of the following elements:
 
  1. pure    - pure data transformation function
@@ -126,11 +126,11 @@ def false(...):
 
 My current approach (partially realized) is to
 
- 1. lexical analysis of rat code, descending into imported code with flex
- 2. parse rat tokens into an AST
+ 1. lexical analysis of Loc code, descending into imported code with flex
+ 2. parse Loc tokens into an AST
  3. do syntax and semantic checking on the AST, emitting compile time errors
     and warnings 
- 4. print rat intermediate language (RIL) from the AST.
+ 4. print Loc intermediate language (RIL) from the AST.
  5. tokenize RIL with second flex program
  6. parse the tokenized RIL with a language-specific parser, perhaps loading
     the function space to allow a second level of syntax and semantic checking.
@@ -271,7 +271,7 @@ argument list rather than just the pure value.
 
 ## Conditionals
 
-Partitioning data is an important part of many workflows. `rat` needs a good
+Partitioning data is an important part of many workflows. `Loc` needs a good
 method for expressing binary trees. It isn't hard: `V1 ? V2 ? A, B, V3 ? C, D` etc
 works fine. The grammar is:
 
@@ -349,7 +349,7 @@ V'  :: [Foo] -> Bool    -- e2
 V'' :: [Foo] -> [Bool]  -- e3
 ```
 
-For e1, rat would just have to map V across x in the compiled code. The
+For e1, Loc would just have to map V across x in the compiled code. The
 difference between e2 and e3 is more significant. e2 reduces the entire vector
 to a single boolean. This will result in only a single leaf being selected and
 all data being processed by the one function. e3 maps list to list, leading to
@@ -361,7 +361,7 @@ distinguish them? This brings me back to the ever troublesome loop issue.
 
 ## On inputs, outputs and parameters
 
-Since Rat is a workflow language, a multifurcating relative of linear shell
+Since Loc is a workflow language, a multifurcating relative of linear shell
 pipelines, connecting function inputs to function outputs is of prime
 importance. However their are other inputs to a function, the constant
 parameters. Take for example GNU grep. Grep has the general form
@@ -428,8 +428,8 @@ length . grep (read "world.txt") "waldo"
 unnest . map (grep (read "world.txt")) (read "patterns.txt")
 ```
 
-The last example uses currying, something not implemented in Rat. Also
-something that I can't literally implement at all in Rat since it would require
+The last example uses currying, something not implemented in Loc. Also
+something that I can't literally implement at all in Loc since it would require
 changing client code (maybe, thar be hacks ...). However, if I create a `map`
 builtin, I can compile this with a loop calling `grep (read "world.txt) x` for
 all x in `(read "patterns.txt")`. However, this is inefficient. Grep has
@@ -447,8 +447,8 @@ So it is always vectorized.
 
 # A word on the future
 
-Rat is dependent on infrastructure that does not yet exist. It is a weak
-dependency, since Rat can work with any set of pure functions. But it would be
+Loc is dependent on infrastructure that does not yet exist. It is a weak
+dependency, since Loc can work with any set of pure functions. But it would be
 most powerful in the context of a functional database. Hoogle is the prototype.
 
 The functional database obviously needs to allow lookup based on exact type
@@ -460,27 +460,27 @@ be compose and decompose operations. Slightly unrelated, but we should also
 have methods to store and study typed workflows.
 
 Such a database would consist of the function code, an ontology (specified in
-Rat), and the signatures for each function (also in Rat).
+Loc), and the signatures for each function (also in Loc).
 
 # A word on Galaxy, KBase, IPlant desktop, and their ilk
 
-These are similar to Rat in that they allow linking of functional units and
+These are similar to Loc in that they allow linking of functional units and
 setting of their parameters.
 
 Their point-and-click interfaces present a specialized subset of the
 functionallity of a subset of all programs selected form a subset of all
 fields. They cater to the non-programmer, offering "user friendly" access to
 common workflows within specific fields. They sacrifice power for muggle
-usability. Rat is far more general and allows user-written code. It could serve
+usability. Loc is far more general and allows user-written code. It could serve
 as a basis for a muggle workflow engine, but is still useful to the programmer
 (well, ok, it isn't useful to anyone yet).
 
 The Galaxy class programs focus on linking wrappers for independent programs.
-In contrast, Rat is a metaprogramming language for creating pure code. Since
-Rat functions may be wrappers for standalone programs, Rat supersets the Galaxy
-class. Rat can interface with the entire function set of any language with no
+In contrast, Loc is a metaprogramming language for creating pure code. Since
+Loc functions may be wrappers for standalone programs, Loc supersets the Galaxy
+class. Loc can interface with the entire function set of any language with no
 boilerplate (it isn't safe to do this, since you should at least have a type
-signature). I should temper this by specifying the limitations of Rat,
+signature). I should temper this by specifying the limitations of Loc,
 specifically, it requires pure functions with types that are invariant to
 parameter choise. This may necessitate writing wrappers for functions, for
 example see the discussion of GNU grep above.

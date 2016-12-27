@@ -1,13 +1,13 @@
 " Vim syntax file
-" Language: rat
+" Language: loc
 " Maintainer: Zebulun Arendsee
 " -----------------------------------------------------------------------------
 " INSTALLATION
 " Run the following in your UNIX terminal
 " $ mkdir -p ~/.vim/syntax/
 " $ mkdir -p ~/.vim/ftdetect/
-" $ cp rat.vim ~/.vim/syntax/
-" $ echo 'au BufRead,BufNewFile *.rat set filetype=rat' > ~/.vim/ftdetect/rat.vim
+" $ cp loc.vim ~/.vim/syntax/
+" $ echo 'au BufRead,BufNewFile *.loc set filetype=loc' > ~/.vim/ftdetect/loc.vim
 
 if exists("b:current_syntax")
   finish
@@ -156,7 +156,7 @@ syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Assign colors
 
-let b:current_syntax = "rat"
+let b:current_syntax = "loc"
 
 hi def link s_simple_function Function
 hi def link s_cache_function  Function

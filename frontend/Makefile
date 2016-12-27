@@ -1,6 +1,6 @@
-TARGET=rat
+TARGET=loc
 
-FILES=bufstack.c label.c list.c composition.c manifold.c ril.c
+FILES=bufstack.c label.c list.c composition.c manifold.c lil.c
 
 all:
 	flex ${TARGET}.l
@@ -10,4 +10,4 @@ all:
 .PHONY: clean
 clean:
 	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET} lexer
-	rm -f rat.output tok.log
+	rm -f loc.output tok.log
