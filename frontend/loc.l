@@ -24,6 +24,8 @@ selection {path}(,{path})*{ws}*::
 
 identifier {var}{ws}*::
 
+grpref \*{var}
+
 couple ::
 
 ws        [ \t\n\r]
@@ -58,7 +60,17 @@ comment   #.*\n
 }
 
 <S_PATH>{var} {
-    yylval.COMPOSON = id_from_str(yytext);
+    Id* id = id_from_str(yytext);
+    Manifold* m = manifold_new();
+    m->function = id->name;
+    yylval.COMPOSON = entry_new(id, C_MANIFOLD, m);
+    LOG("COMPOSON");
+    return COMPOSON;
+}
+<S_PATH>{grpref} {
+    char* s = strdup(yytext + 1);
+    Id* id = id_from_str(s);
+    yylval.COMPOSON = entry_new(id, C_GRPREF, s);
     LOG("COMPOSON");
     return COMPOSON;
 }

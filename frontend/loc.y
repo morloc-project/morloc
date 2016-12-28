@@ -16,7 +16,7 @@ Table* table;
 %token <Selection*> SELECTION
 
 %token <Id*> IDENTIFIER
-%token <Id*> COMPOSON
+%token <Entry*> COMPOSON
 
 %token COUPLE
 
@@ -59,10 +59,7 @@ s_effect
 
 composition
     : COMPOSON {
-        Manifold* m = manifold_new();
-        m->function = $1->name;
-        Entry* e = entry_new($1, C_MANIFOLD, m);
-        Entry* c = entry_new(NULL, C_COMPOSON, table_new(e));
+        Entry* c = entry_new(NULL, C_COMPOSON, table_new($1));
         $$ = table_new(c);
     }
     | '(' composition ')' { $$ = $2; }

@@ -14,7 +14,8 @@ typedef enum {
     T_PATH,
     C_COMPOSON,
     C_MANIFOLD,
-    C_NEST
+    C_NEST,
+    C_GRPREF
 } TType;
 
 typedef struct Entry{
@@ -24,6 +25,7 @@ typedef struct Entry{
     union {
         Effect* effect;
         struct Table* table;
+        char* string;
         Manifold* manifold;
     } value;
 } Entry;

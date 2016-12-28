@@ -19,6 +19,8 @@ Entry* entry_new(Id* id, TType type, void* value){
         case C_MANIFOLD:
             e->value.manifold = value;
             break;
+        case C_GRPREF:
+            e->value.string = value;
         case T_EFFECT:
             e->value.effect = value;
             break;

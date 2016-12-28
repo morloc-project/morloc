@@ -1,8 +1,8 @@
 @path
-Death :: x y (foo . bar) . z
+Death :: x . (z . *Peach) fooberries
 
 @path
-Peach :: x z
+Peach :: foo . pie
 
 @effect
-y :: flabergas
+Death/Peach/pie :: flabergas
