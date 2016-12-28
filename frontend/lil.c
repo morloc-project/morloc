@@ -15,6 +15,14 @@ void print_manifold_lil(Manifold* m){
                     case C_POSITIONAL:
                         printf("INPP m%d %d %s\n", m->uid, i++, e->value.string);
                         break;
+                    case C_DEREF:
+                        printf("NORM d%d\n", e->id->uid);
+                        // STUB
+                        // - build the whole graph
+                        // - specify inputs
+                        // - check for singular output
+                        printf("INPD m%d %d d%d\n", m->uid, i++, e->id->uid);
+                        break;
                     default:
                         break;
                 }

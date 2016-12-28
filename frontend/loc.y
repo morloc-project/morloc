@@ -32,6 +32,7 @@ Table* global_table;
 
 %left '.'
 %precedence CONCAT
+%precedence '&'
 
 %%
 
@@ -54,24 +55,37 @@ s_effect
     : SECTION_EFFECT { $$ = NULL; }
     | s_effect SELECTION COUPLE VARIABLE {
         Effect* effect = effect_new($2, $4);
-        Entry* e = entry_new(NULL, T_EFFECT, effect); 
+        Entry* e = entry_new(id_new(), T_EFFECT, effect); 
         $$ = table_add($1, e);
     }
 
 composition
     : COMPOSON {
-        Entry* c = entry_new(NULL, C_COMPOSON, table_new($1));
+        Entry* c = entry_new(id_new(), C_COMPOSON, table_new($1));
         $$ = table_new(c);
     }
     | '(' composition ')' {
-        Entry* e = entry_new(NULL, C_NEST, $2);
-        Entry* c = entry_new(NULL, C_COMPOSON, table_new(e));
+        Entry* e = entry_new(id_new(), C_NEST, $2);
+        Entry* c = entry_new(id_new(), C_COMPOSON, table_new(e));
         $$ = table_new(c);
+    }
+    | '&' COMPOSON {
+        Entry* e = entry_new(id_new(), C_DEREF, table_new($2));
+        Entry* c = entry_new(id_new(), C_COMPOSON, table_new(e));
+        $$ = table_new(c);
+    }
+    | '&' '(' composition ')' {
+        Entry* e = entry_new(id_new(), C_NEST, $3);
+        Entry* d = entry_new(id_new(), C_DEREF, table_new(e));
+        Entry* n = entry_new(id_new(), C_COMPOSON, table_new(d));
+        $$ = table_new(n);
     }
     | composition composition %prec CONCAT {
         $1->tail->value.table = table_join($1->tail->value.table, $2->head->value.table);
     }
-    | composition '.' composition { $$ = table_join($1, $3); }
+    | composition '.' composition {
+        $$ = table_join($1, $3);
+    }
 
 
 %%

@@ -1,6 +1,7 @@
 @path
 # A :: cut . `francis` foo . dandelionpancakeparade
-A :: map . `+` foo . source
+A :: map . &(a . b) foo . &B
+B :: fifi . fofo
 
 # @path
 # Death :: x . (z . *Peach) applepie

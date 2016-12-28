@@ -35,6 +35,7 @@ Table* table_clone(const Table* table){
             case T_PATH:
             case C_COMPOSON:
             case C_NEST:
+            case C_DEREF:
                 eclone->value.table = table_clone(e->value.table);
                 break;
             case C_MANIFOLD:
@@ -113,6 +114,7 @@ Table* _table_composon_io(const Entry* entry, bool is_input){
         switch(e->type){
             case C_MANIFOLD:
             case C_POSITIONAL:
+            case C_DEREF:
                 result = table_add(result, e);
                 break;
             case T_PATH:

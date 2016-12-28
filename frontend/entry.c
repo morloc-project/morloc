@@ -10,6 +10,7 @@ Entry* entry_new(Id* id, TType type, void* value){
         case T_PATH:
         case C_COMPOSON:
         case C_NEST:
+        case C_DEREF:
             e->value.table = value;
             break;
         case C_MANIFOLD:
@@ -57,6 +58,9 @@ char* type_str(const Entry* e){
             break;
         case C_NEST:
             s = strdup("C_NEST");
+            break;
+        case C_DEREF:
+            s = strdup("C_DEREF");
             break;
         case C_MANIFOLD:
             s = strdup("C_MANIFOLD");
