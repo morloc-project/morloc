@@ -7,6 +7,7 @@
 
 %code requires{
 #include "lil.h"
+#include "build.h"
 Table* table;
 }
 

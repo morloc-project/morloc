@@ -24,7 +24,8 @@ FILES =         \
 	selection.c \
 	id.c        \
 	bufstack.c  \
-	util.c
+	util.c      \
+	build.c
 
 all:
 	bison -d --report=all -Wall ${SRC_BISON}

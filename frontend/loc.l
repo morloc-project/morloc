@@ -64,14 +64,14 @@ comment   #.*\n
     Manifold* m = manifold_new();
     m->function = id->name;
     yylval.COMPOSON = entry_new(id, C_MANIFOLD, m);
-    LOG("COMPOSON");
+    LOG("C_MANIFOLD");
     return COMPOSON;
 }
 <S_PATH>{grpref} {
     char* s = strdup(yytext + 1);
     Id* id = id_from_str(s);
     yylval.COMPOSON = entry_new(id, C_GRPREF, s);
-    LOG("COMPOSON");
+    LOG("C_GRPREF");
     return COMPOSON;
 }
 
@@ -114,6 +114,7 @@ int main(int argc, char ** argv){
     if(newfile(argv[1])){
         toklog = fopen("tok.log", "w");
         status = yyparse();
+        build_manifolds(table);
         print_lil(table);
         fclose(toklog);
     }
