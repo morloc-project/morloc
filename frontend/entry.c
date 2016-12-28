@@ -69,6 +69,9 @@ char* type_str(const Entry* e){
         case T_UNDEFINED:
             s = strdup("T_UNDEFINED");
             break;
+        case C_GRPREF:
+            s = strdup("C_GRPREF");
+            break;
         default:
             s = strdup("ILLEGAL");
             break;

@@ -8,7 +8,7 @@
 %code requires{
 #include "lil.h"
 #include "build.h"
-Table* table;
+Table* global_table;
 }
 
 %define api.value.type union 
@@ -36,8 +36,8 @@ Table* table;
 %%
 
 input
-    : section { table = $1;}
-    | input section { table = table_join(table, $2); }
+    : section { global_table = $1;}
+    | input section { global_table = table_join(global_table, $2); }
 
 section
     : s_path

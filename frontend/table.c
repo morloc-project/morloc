@@ -19,6 +19,40 @@ Table* table_new(const Entry* entry){
     return t;
 }
 
+Table* table_clone(const Table* table){
+    if(!table) return NULL;
+
+    Table* clone = NULL;
+
+    for(Entry* e = table->head; e; e = e->next){
+        Id* id = id_clone(e->id);        
+        TType type = e->type;
+        Entry* eclone = entry_new(id, type, NULL);
+
+        switch(type){
+            case T_PATH:
+            case C_COMPOSON:
+            case C_NEST:
+                eclone->value.table = table_clone(e->value.table);
+                break;
+            case C_MANIFOLD:
+                eclone->value.manifold = manifold_new();
+                break;
+            case C_GRPREF:
+                eclone->value.string = strdup(e->value.string);
+                break;
+            default:
+                fprintf(stderr, "ERROR: can't clone this; will only clone paths\n");
+                exit(EXIT_FAILURE);
+                break;
+        }
+
+        clone = table_add(clone, eclone);
+
+    }
+    return clone;
+}
+
 /* checkless attachment */
 void _retail(Table* t, Entry* e){
     t->tail->next = e;
@@ -49,6 +83,7 @@ Table* _table_composon_io(const Entry* entry, bool is_input){
             case C_MANIFOLD:
                 result = table_add(result, e);
                 break;
+            case T_PATH:
             case C_NEST:
                 {
                     // output comes from the first (outermost) composon of the
@@ -58,6 +93,8 @@ Table* _table_composon_io(const Entry* entry, bool is_input){
                     result = table_join(result, _table_composon_io(ne, is_input));
                 }
                 break;
+            case C_GRPREF:
+                fprintf(stderr, "Unresolved group reference at %s::%d\n", __func__, __LINE__);
             default:
                 fprintf(stderr, "Illegal type in composition\n");
         }
@@ -107,6 +144,16 @@ bool is_recursive(TType type){
     return type == T_PATH ||
            type == C_COMPOSON ||
            type == C_NEST;
+}
+
+Table* table_get(const Table* table, Id* id, TType type){
+    Table* out = NULL;
+    for(Entry* e = table->head; e; e = e->next){
+        if(STCMP(e, id, type)){
+            out = table_add(out, e);
+        }
+    }
+    return out;
 }
 
 Table* table_recursive_get(const Table* table, Id* id, TType type){

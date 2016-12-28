@@ -114,8 +114,8 @@ int main(int argc, char ** argv){
     if(newfile(argv[1])){
         toklog = fopen("tok.log", "w");
         status = yyparse();
-        build_manifolds(table);
-        print_lil(table);
+        build_manifolds(global_table);
+        print_lil(global_table);
         fclose(toklog);
     }
     return status;

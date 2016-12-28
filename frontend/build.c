@@ -58,7 +58,43 @@ void link_couplets(Table* t_top, TType type){
     }
 }
 
+/* Requires input of both a global and current table. The global one is the top
+ * level symbol table where all paths should be searched without recursion. The
+ * current table is where group references should be sought.*/
+bool resolve_grprefs_r(Table* global, Table* current){
+    Table* t_ref = table_recursive_get_type(current, C_GRPREF);
+
+    if(!t_ref) return false;
+
+    for(Entry* e_ref = t_ref->head; e_ref; e_ref = e_ref->next){
+        Id* id = id_new();
+        id->name = strdup(e_ref->value.string);
+        Table* t_path = table_get(global, id, T_PATH);
+        if(!t_path){
+            fprintf(stderr, "ERROR: path '%s', not found\n", id->name);
+        }
+        if(t_path->head->next){
+            fprintf(stderr, "ERROR: Ambiguous path, using first\n");
+        }
+        Table* resolved = table_clone(t_path->head->value.table);
+        if(resolved){
+            e_ref->type = T_PATH;
+            e_ref->value.table = resolved;
+            resolve_grprefs_r(global, resolved);
+        } else {
+            fprintf(stderr, "ERROR: group reference '%s' could not be resolved\n", id->name);
+        }
+    }
+
+    return true;
+}
+
+void resolve_grprefs(Table* t_top){
+    resolve_grprefs_r(t_top, t_top);
+}
+
 void build_manifolds(Table* t_top){
+    resolve_grprefs(t_top);
     link_inputs(t_top);
     link_couplets(t_top, T_EFFECT);
 }

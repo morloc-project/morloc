@@ -1,6 +1,6 @@
 TARGET=loc
 CC=gcc
-XXFLAGS=-Wall
+XXFLAGS=-Wall -g
 
 SRC_BISON=${TARGET}.y
 SRC_LEXER=${TARGET}.l

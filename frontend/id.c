@@ -7,6 +7,17 @@ Id* id_new(){
     return i;
 }
 
+Id* id_clone(Id* id){
+
+    if(!id) return NULL;
+
+    Id* newid = id_new();
+    newid->name = id->name ? strdup(id->name) : NULL;
+    newid->label = id->label ? strdup(id->label) : NULL;
+
+    return newid;
+}
+
 Id* id_from_str(char* s){
     Id* id = id_new();
     int i = 0;

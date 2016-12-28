@@ -16,6 +16,8 @@ typedef struct Id{
 
 Id* id_new();
 
+Id* id_clone(Id* id);
+
 Id* id_from_str(char* s);
 
 bool id_cmp(Id* a, Id* b);

@@ -14,6 +14,16 @@ typedef struct Table{
 /* Copies entry and removes its link */
 Table* table_new(const Entry* entry);
 
+/* Recursively copy the input table.
+ *   - Names and labels in Id structs are copied.
+ *   - Type is preserved
+ *   - Group references are NOT resolved, but copied as strings
+ *   - Entry and Manifold objects have new uids.
+ *   - All manifold properties are cleared.
+ *   - Only items in a PATH are cloned, anything else is an error
+ */
+Table* table_clone(const Table* table);
+
 /* Given a composon, get an ordered list of the functions that produce output */
 Table* table_composon_outputs(const Entry* entry);
 
@@ -27,6 +37,8 @@ Table* table_add(Table* table, const Entry* entry);
 
 /* b is destroyed upon join */
 Table* table_join(Table* a, Table* b);
+
+Table* table_get(const Table* table, Id* id, TType type);
 
 Table* table_selection_get(const Table* table, Selection* name, TType type); 
 
