@@ -24,6 +24,9 @@ Table* table_new(const Entry* entry);
  */
 Table* table_clone(const Table* table);
 
+/* recursively print the contents of a table */
+void table_dump(const Table* table);
+
 /* Given a composon, get an ordered list of the functions that produce output */
 Table* table_composon_outputs(const Entry* entry);
 
@@ -37,6 +40,14 @@ Table* table_add(Table* table, const Entry* entry);
 
 /* b is destroyed upon join */
 Table* table_join(Table* a, Table* b);
+
+
+/* ****** NOTE ***************************************************************
+ * For all the *get* functions, the returned Entry's are copies.  Modification
+ * of the returned Entry's will not affect the contents of the input table.
+ * However, the values the Entry's contain are still pointers to the realities,
+ * so they CAN be changed.
+ * **************************************************************************/
 
 Table* table_get(const Table* table, Id* id, TType type);
 

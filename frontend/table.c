@@ -1,5 +1,7 @@
 #include "table.h"
 
+bool is_recursive(TType type);
+
 #define STCMP(e, i, t)           \
     (                            \
         (e)->id && (i) && (t) && \
@@ -51,6 +53,34 @@ Table* table_clone(const Table* table){
 
     }
     return clone;
+}
+
+
+bool _table_dump_r(const Table* table, int depth){
+
+    if(!table) return false;
+
+    for(Entry* e = table->head; e; e = e->next){
+        for(int i = 0; i < depth; i++){
+            if(i%2 == 0){
+                printf("  ");
+            } else {
+                printf(". ");
+            }
+        }
+        entry_print(e);
+        if(is_recursive(e->type)){
+            _table_dump_r(e->value.table, depth + 1);
+        }
+    }
+
+    return true;
+}
+
+void table_dump(const Table* table){
+    printf(" ------------------------------------------- \n");
+    _table_dump_r(table, 0);
+    printf(" ------------------------------------------- \n");
 }
 
 /* checkless attachment */
@@ -171,6 +201,9 @@ Table* table_recursive_get(const Table* table, Id* id, TType type){
 
 Table* table_path_get(const Table* table, Path* path, TType type){
     Table* out = NULL;
+
+    if(!table || !table->head) return NULL;
+
     for(Entry* e = table->head; e; e = e->next){
         if(path_is_base(path)){
             if(STCMP(e, path->id, type)){
@@ -180,7 +213,13 @@ Table* table_path_get(const Table* table, Path* path, TType type){
                 out = table_join(out, table_recursive_get(e->value.table, path->id, type));
             }
         } else {
-            if(SCMP(e, path->id) && is_recursive(e->type)){
+            if(                            // Recurse down if
+              is_recursive(e->type) &&     // 1. this entry is holds a table
+              (                            // 2. the Entry's table is either
+                !(e->id && e->id->name) || //   a) anonymous (nest or composon)
+                SCMP(e, path->id)          //   b) name matches path name
+              )
+            ){
                 out = table_join(out, table_path_get(e->value.table, path->next, type));
             }
         }

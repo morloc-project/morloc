@@ -63,11 +63,13 @@ composition
         Entry* c = entry_new(NULL, C_COMPOSON, table_new($1));
         $$ = table_new(c);
     }
-    | '(' composition ')' { $$ = $2; }
-    | composition composition %prec CONCAT {
+    | '(' composition ')' {
         Entry* e = entry_new(NULL, C_NEST, $2);
-        $1->tail->value.table = table_add($1->tail->value.table, e);
-        $$ = $1;
+        Entry* c = entry_new(NULL, C_COMPOSON, table_new(e));
+        $$ = table_new(c);
+    }
+    | composition composition %prec CONCAT {
+        $1->tail->value.table = table_join($1->tail->value.table, $2->head->value.table);
     }
     | composition '.' composition { $$ = table_join($1, $3); }
 

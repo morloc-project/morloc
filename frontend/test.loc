@@ -1,8 +1,9 @@
 @path
-Death :: x . (z . *Peach) fooberries
+Death :: x . (z . *Peach) applepie
 
 @path
-Peach :: foo . pie
+Peach :: foo . (pie . pop) fluflu
 
 @effect
-Death/Peach/pie :: flabergas
+Death/Peach/foo :: sparkleflowerwondergas
+Peach/foo :: sparklefingers

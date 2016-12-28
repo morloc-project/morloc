@@ -55,7 +55,7 @@ char* type_str(const Entry* e){
             s = strdup("T_PATH");
             break;
         case C_COMPOSON:
-            s = strdup("T_COMPOSON");
+            s = strdup("C_COMPOSON");
             break;
         case C_NEST:
             s = strdup("C_NEST");

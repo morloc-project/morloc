@@ -1,7 +1,21 @@
 #include "build.h"
 
+void _link_inputs(Table* t_top);
+void _link_couplets(Table* t_top, TType type);
+bool _resolve_grprefs_r(Table* global, Table* current);
+void _resolve_grprefs(Table* t_top);
+void _resolve_one_grpref(Table* global, Entry* e_ref);
+
+void _link_default_functions(Table* t_top){
+    Table* t_man = table_recursive_get_type(t_top, C_MANIFOLD);
+    for(Entry* e_man = t_man->head; e_man; e_man = e_man->next){
+        Manifold* m = e_man->value.manifold;
+        m->function = strdup(e_man->id->name);
+    }
+}
+
 // link all top level elements in c_{i+1} as inputs to c_i
-void link_inputs(Table* t_top){
+void _link_inputs(Table* t_top){
     Table* t_path = table_recursive_get_type(t_top, T_PATH);
     t_path = table_join(t_path, table_recursive_get_type(t_top, C_NEST));
     for(Entry* e_path = t_path->head; e_path; e_path = e_path->next){
@@ -27,7 +41,7 @@ void link_inputs(Table* t_top){
  *  3.   Find all manifolds in its path
  *  4.   For each manifold couple the given element
  */
-void link_couplets(Table* t_top, TType type){
+void _link_couplets(Table* t_top, TType type){
     Table* t_couplet = table_recursive_get_type(t_top, type);
     if(t_couplet && t_couplet->head){
         for(Entry* e = t_couplet->head; e; e = e->next){
@@ -40,9 +54,9 @@ void link_couplets(Table* t_top, TType type){
                     fprintf(stderr, "ILLEGAL TYPE\n");
                     exit(EXIT_FAILURE);
             }
-            if(!t_man){
-                continue;
-            }
+
+            if(!t_man) continue;
+
             for(Entry* ee = t_man->head; ee; ee = ee->next){
                 Manifold* m = ee->value.manifold;
                 switch(type){
@@ -58,43 +72,61 @@ void link_couplets(Table* t_top, TType type){
     }
 }
 
+void _resolve_one_grpref(Table* global, Entry* e_ref){
+    Id* id = id_new();
+    id->name = strdup(e_ref->value.string);
+    Table* t_path = table_get(global, id, T_PATH);
+    if(!t_path){
+        fprintf(stderr, "ERROR: path '%s', not found\n", id->name);
+    }
+    if(t_path->head->next){
+        fprintf(stderr, "ERROR: Ambiguous path, using first\n");
+    }
+    Table* resolved = table_clone(t_path->head->value.table);
+    if(resolved){
+        e_ref->type = T_PATH;
+        e_ref->value.table = resolved;
+        _resolve_grprefs_r(global, resolved);
+    } else {
+        fprintf(stderr, "ERROR: group reference '%s' could not be resolved\n", id->name);
+    }
+}
+
 /* Requires input of both a global and current table. The global one is the top
  * level symbol table where all paths should be searched without recursion. The
  * current table is where group references should be sought.*/
-bool resolve_grprefs_r(Table* global, Table* current){
-    Table* t_ref = table_recursive_get_type(current, C_GRPREF);
+bool _resolve_grprefs_r(Table* global, Table* current){
 
-    if(!t_ref) return false;
+    if(!current) return false;
 
-    for(Entry* e_ref = t_ref->head; e_ref; e_ref = e_ref->next){
-        Id* id = id_new();
-        id->name = strdup(e_ref->value.string);
-        Table* t_path = table_get(global, id, T_PATH);
-        if(!t_path){
-            fprintf(stderr, "ERROR: path '%s', not found\n", id->name);
-        }
-        if(t_path->head->next){
-            fprintf(stderr, "ERROR: Ambiguous path, using first\n");
-        }
-        Table* resolved = table_clone(t_path->head->value.table);
-        if(resolved){
-            e_ref->type = T_PATH;
-            e_ref->value.table = resolved;
-            resolve_grprefs_r(global, resolved);
-        } else {
-            fprintf(stderr, "ERROR: group reference '%s' could not be resolved\n", id->name);
+    for(Entry* e_ref = current->head; e_ref; e_ref = e_ref->next){
+        switch(e_ref->type){
+            case T_PATH:
+            case C_COMPOSON:
+            case C_NEST:
+                _resolve_grprefs_r(global, e_ref->value.table);
+                break;
+            case C_GRPREF:
+                _resolve_one_grpref(global, e_ref);
+                break;
+            default:
+                break;
         }
     }
 
     return true;
 }
 
-void resolve_grprefs(Table* t_top){
-    resolve_grprefs_r(t_top, t_top);
+void _resolve_grprefs(Table* t_top){
+    _resolve_grprefs_r(t_top, t_top);
 }
 
 void build_manifolds(Table* t_top){
-    resolve_grprefs(t_top);
-    link_inputs(t_top);
-    link_couplets(t_top, T_EFFECT);
+    _resolve_grprefs(t_top);
+
+    /* table_dump(t_top); */
+
+    _link_default_functions(t_top);
+    _link_inputs(t_top);
+    _link_couplets(t_top, T_EFFECT);
 }
