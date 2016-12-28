@@ -28,7 +28,8 @@ selection {path}(,{path})*{ws}*::
 
 identifier {var}{ws}*::
 
-grpref \*{var}
+grpref     \*{var}
+positional `[^`]+`
 
 couple ::
 
@@ -73,6 +74,16 @@ couple ::
     Id* id = id_from_str(s);
     yylval.COMPOSON = entry_new(id, C_GRPREF, s);
     LOG("C_GRPREF");
+    return COMPOSON;
+}
+<S_PATH>{positional} {
+    // copy the section of the string between the quotation marks
+    int N = strlen(yytext);
+    char* s = (char*)malloc((N-1) * sizeof(char));
+    memcpy(s, yytext+1, (N-2)*sizeof(char));
+    s[N-2] = '\0';
+    yylval.COMPOSON = entry_new(NULL, C_POSITIONAL, s);
+    LOG("C_POSITIONAL");
     return COMPOSON;
 }
 

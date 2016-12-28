@@ -8,7 +8,16 @@ void print_manifold_lil(Manifold* m){
         if(m->inputs){
             int i = 0;
             for(Entry* e = m->inputs->head; e; e = e->next){
-                printf("INPT m%d %d m%d\n", m->uid, i++, e->value.manifold->uid);
+                switch(e->type){
+                    case C_MANIFOLD:
+                        printf("INPM m%d %d m%d\n", m->uid, i++, e->value.manifold->uid);
+                        break;
+                    case C_POSITIONAL:
+                        printf("INPP m%d %d %s\n", m->uid, i++, e->value.string);
+                        break;
+                    default:
+                        break;
+                }
             }
         }
         if(m->effect)

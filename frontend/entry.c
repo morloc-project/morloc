@@ -8,19 +8,17 @@ Entry* entry_new(Id* id, TType type, void* value){
 
     switch(type){
         case T_PATH:
-            e->value.table = value;
-            break;
         case C_COMPOSON:
-            e->value.table = value;
-            break;
         case C_NEST:
             e->value.table = value;
             break;
         case C_MANIFOLD:
             e->value.manifold = value;
             break;
+        case C_POSITIONAL:
         case C_GRPREF:
             e->value.string = value;
+            break;
         case T_EFFECT:
             e->value.effect = value;
             break;
@@ -71,6 +69,9 @@ char* type_str(const Entry* e){
             break;
         case C_GRPREF:
             s = strdup("C_GRPREF");
+            break;
+        case C_POSITIONAL:
+            s = strdup("C_POSITIONAL");
             break;
         default:
             s = strdup("ILLEGAL");

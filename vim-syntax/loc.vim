@@ -78,7 +78,7 @@ syn region s_string start='"' end='"' contained
 
 syn match s_var /[a-zA-Z_][a-zA-Z0-9_]*/         contained
 syn match s_num '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!' contained
-syn match s_fun /&[a-zA-Z0-9_]\+/                 contained
+syn match s_fun /&[a-zA-Z0-9_]\+/                contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
@@ -102,7 +102,7 @@ syn match s_par      /[()]/   contained
 syn match s_brk      /[\[\]]/ contained
 syn match s_bar      /|/      contained
 
-syn match s_positional /\$\d\+/ contained
+syn match s_positional /`[a-zA-Z_0-9]\+`/ contained
 syn match s_group /\*[a-zA-Z_]\+/ contained
 
 " define constants

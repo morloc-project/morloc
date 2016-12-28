@@ -40,6 +40,7 @@ Table* table_clone(const Table* table){
             case C_MANIFOLD:
                 eclone->value.manifold = manifold_new();
                 break;
+            case C_POSITIONAL:
             case C_GRPREF:
                 eclone->value.string = strdup(e->value.string);
                 break;
@@ -111,6 +112,7 @@ Table* _table_composon_io(const Entry* entry, bool is_input){
     for(Entry* e = entry->value.table->head; e; e = e->next){
         switch(e->type){
             case C_MANIFOLD:
+            case C_POSITIONAL:
                 result = table_add(result, e);
                 break;
             case T_PATH:
@@ -125,6 +127,7 @@ Table* _table_composon_io(const Entry* entry, bool is_input){
                 break;
             case C_GRPREF:
                 fprintf(stderr, "Unresolved group reference at %s::%d\n", __func__, __LINE__);
+                break;
             default:
                 fprintf(stderr, "Illegal type in composition\n");
         }

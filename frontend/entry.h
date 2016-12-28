@@ -15,7 +15,8 @@ typedef enum {
     C_COMPOSON,
     C_MANIFOLD,
     C_NEST,
-    C_GRPREF
+    C_GRPREF,
+    C_POSITIONAL
 } TType;
 
 typedef struct Entry{

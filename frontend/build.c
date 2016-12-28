@@ -27,7 +27,9 @@ void _link_inputs(Table* t_top){
             Table* inputs = table_composon_inputs(e_com);
             for(Entry* o = outputs->head; o; o = o->next){
                 for(Entry* i = inputs->head; i; i = i->next){
-                    i->value.manifold->inputs = table_add(i->value.manifold->inputs, o);
+                    if(i->type == C_MANIFOLD){ 
+                        i->value.manifold->inputs = table_add(i->value.manifold->inputs, o);
+                    }
                 }
             }
         }

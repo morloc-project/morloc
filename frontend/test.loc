@@ -1,10 +1,14 @@
 @path
-Death :: x . (z . *Peach) applepie
+# A :: cut . `francis` foo . dandelionpancakeparade
+A :: map . `+` foo . source
 
-@path
-Peach :: foo . (foo:yolo . pop) applesauce
-
-@effect
-Death/Peach/foo :: sparkleflowerwondergas
-Death/Peach/foo:yolo :: dourdonkey
-Peach/foo :: sparklefingers
+# @path
+# Death :: x . (z . *Peach) applepie
+#
+# @path
+# Peach :: foo . (foo:yolo . pop) applesauce
+#
+# @effect
+# Death/Peach/foo :: sparkleflowerwondergas
+# Death/Peach/foo:yolo :: dourdonkey
+# Peach/foo :: sparklefingers
