@@ -22,6 +22,10 @@ Id* id_from_str(char* s){
     id->name = (char*)malloc((i+1) * sizeof(char));
     id->name = memcpy(id->name, s, i*sizeof(char));
     id->name[i] = '\0';
+
+    id->name = trim_ws(id->name);
+    id->label = trim_ws(id->label);
+
     return id;
 }
 

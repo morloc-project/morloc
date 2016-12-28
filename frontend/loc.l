@@ -1,5 +1,6 @@
 %{
 #include <stdio.h>
+#include <ctype.h>
 
 #include "loc.tab.h"
 
@@ -14,39 +15,76 @@ FILE* toklog;
 %option header-file="lex.yy.h"
 %option noyywrap
 
-%x S_SELECTION
+%s S_PATH
+%s S_CPLT
 
 var       [a-zA-Z]+(:[a-zA-Z0-9]+)?
 path      {var}({ws}*\/{ws}*{var})*
-selection {path}(,{path})*
+selection {path}(,{path})*{ws}*::
+
+identifier {var}{ws}*::
+
+couple ::
+
 ws        [ \t\n\r]
 comment   #.*\n
 
 %%
 
-<INITIAL,S_SELECTION>{ws} { LOGV("%s", yytext); }
+^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); return SECTION_PATH;   }
+^@effect { LOG("SECTION_EFFECT"); BEGIN(S_CPLT); return SECTION_EFFECT; }
+
+{ws} { LOGV("%s", yytext); }
 
 {comment} { }
 
-composition {
-    LOG("COMPOSITION ");
-    return COMPOSITION;
+{couple} { LOG("COUPLE"); return COUPLE; }
+
+<S_PATH>{identifier} {
+    char* s = strdup(yytext);
+    int i = 0;
+    for(;;i++){
+        char c = s[i];
+        if(isspace(c) || c == ':')
+            break;
+    }
+    for(int j = strlen(s) - 1; j >= i ; j--){
+        unput(s[j]);
+    }
+    s[i] = '\0';
+    yylval.IDENTIFIER = id_from_str(s);
+    LOG("IDENTIFIER");
+    return IDENTIFIER;
 }
-effect {
-    BEGIN(S_SELECTION);
-    LOG("EFFECT ");
-    return EFFECT;
+
+<S_PATH>{var} {
+    yylval.COMPOSON = id_from_str(yytext);
+    LOG("COMPOSON");
+    return COMPOSON;
 }
-{var} { 
-    LOGV("VARIABLE:%s ", yytext);
-    yylval.VARIABLE = id_from_str(yytext);
-    return VARIABLE;
-}
-<S_SELECTION>{selection} {
-    BEGIN(INITIAL);
-    LOGV("SELECTION:%s ", yytext);
-    yylval.SELECTION = selection_from_str(yytext);
+
+<S_CPLT>{selection} {
+    char* s = strdup(yytext);
+    int i = 0;
+    for(;;i++){
+        char c = s[i];
+        if(isspace(c) || c == ':')
+            break;
+    }
+    for(int j = strlen(s) - 1; j >= i ; j--){
+        unput(s[j]);
+    }
+    s[i] = '\0';
+
+    LOG("SELECTION");
+    yylval.SELECTION = selection_from_str(s);
     return SELECTION;
+}
+
+{var} { 
+    LOG("VARIABLE");
+    yylval.VARIABLE = strdup(yytext);
+    return VARIABLE;
 }
 
 .    { LOGV("%c ", yytext[0]); return yytext[0]; }

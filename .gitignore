@@ -3,8 +3,8 @@ lex.yy.*
 *.out
 zzz.*
 vgcore.*
-rat
-rat.output
+loc
+loc.output
 lexer
 R
 tags

@@ -12,13 +12,22 @@ Table* table;
 
 %define api.value.type union 
 
-%token <Id*> VARIABLE
+%token <char*> VARIABLE
 %token <Selection*> SELECTION
 
-%type <Entry*> exp
+%token <Id*> IDENTIFIER
+%token <Id*> COMPOSON
+
+%token COUPLE
+
+%token SECTION_EFFECT
+%token SECTION_PATH
+
+%type <Table*> section
 %type <Table*> composition
 
-%token EFFECT COMPOSITION
+%type <Table*> s_effect
+%type <Table*> s_path
 
 %left '.'
 %precedence CONCAT
@@ -26,23 +35,30 @@ Table* table;
 %%
 
 input
-    : exp { table = table_new($1); }
-    | input exp { table = table_add(table, $2); }
+    : section { table = $1;}
+    | input section { table = table_join(table, $2); }
 
-exp
-    : COMPOSITION VARIABLE '=' composition {
-        $$ = entry_new($2, T_PATH, $4);
+section
+    : s_path
+    | s_effect
+
+s_path
+    : SECTION_PATH { $$ = NULL; }
+    | s_path IDENTIFIER COUPLE composition {
+        Entry* e = entry_new($2, T_PATH, $4);
+        $$ = table_add($1, e);
     }
-    | EFFECT SELECTION '=' VARIABLE {
-        if($4->label){
-            fprintf(stderr, "WARNING: labels are ignored on rhs of effect\n");
-        }
-        Effect* effect = effect_new($2, $4->name);
-        $$ = entry_new(NULL, T_EFFECT, effect); 
+
+s_effect
+    : SECTION_EFFECT { $$ = NULL; }
+    | s_effect SELECTION COUPLE VARIABLE {
+        Effect* effect = effect_new($2, $4);
+        Entry* e = entry_new(NULL, T_EFFECT, effect); 
+        $$ = table_add($1, e);
     }
 
 composition
-    : VARIABLE {
+    : COMPOSON {
         Manifold* m = manifold_new();
         m->function = $1->name;
         Entry* e = entry_new($1, C_MANIFOLD, m);
@@ -56,6 +72,7 @@ composition
         $$ = $1;
     }
     | composition '.' composition { $$ = table_join($1, $3); }
+
 
 %%
 

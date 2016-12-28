@@ -4,7 +4,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include "stdio.h"
+#include <stdio.h>
+
+#include "util.h"
 
 typedef struct Id{
     char* name;
