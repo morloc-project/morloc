@@ -6,8 +6,9 @@ void print_manifold_lil(Manifold* m){
         if(m->function)
             printf("FUNC m%d %s\n", m->uid, m->function);
         if(m->inputs){
-            for(Entry* i = m->inputs->head; i; i = i->next){
-                printf("INPT m%d m%d\n", m->uid, i->value.manifold->uid);
+            int i = 0;
+            for(Entry* e = m->inputs->head; e; e = e->next){
+                printf("INPT m%d %d m%d\n", m->uid, i++, e->value.manifold->uid);
             }
         }
         if(m->effect)
