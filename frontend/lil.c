@@ -1,63 +1,105 @@
 #include "lil.h"
 
-RatStack* ratstack_new(){
-     RatStack* rs = (RatStack*)calloc(1,sizeof(RatStack));
-     rs->export = namedlist_new();
-     rs->doc    = namedlist_new();
-     rs->alias  = namedlist_new();
-     rs->cache  = namedlist_new();
-     rs->pack   = namedlist_new();
-     rs->open   = namedlist_new();
-     rs->fail   = namedlist_new();
-     rs->pass   = namedlist_new();
-     rs->source = namedlist_new();
+// link all top level elements in c_{i+1} as inputs to c_i
+void lil_link_inputs(Table* t_top){
+    Table* t_path = table_recursive_get_type(t_top, T_PATH);
+    t_path = table_join(t_path, table_recursive_get_type(t_top, C_NEST));
+    for(Entry* e_path = t_path->head; e_path; e_path = e_path->next){
+        for(Entry* e_com = e_path->value.table->head; e_com; e_com = e_com->next){
+            Table* outputs = table_composon_outputs(e_com->next);
 
-     rs->ontology = list_new();
-     rs->type     = list_new();
+            if(!outputs) continue;
 
-     rs->path   = namedlist_new();
-     rs->check  = namedlist_new();
-     rs->effect = namedlist_new();
-
-     return rs;
+            Table* inputs = table_composon_inputs(e_com);
+            for(Entry* o = outputs->head; o; o = o->next){
+                for(Entry* i = inputs->head; i; i = i->next){
+                    i->value.manifold->inputs = table_add(i->value.manifold->inputs, o);
+                }
+            }
+        }
+    }
 }
 
-void ratstack_rewind(RatStack* rs){
-    REWIND( rs->export   );
-    REWIND( rs->doc      );
-    REWIND( rs->alias    );
-    REWIND( rs->cache    );
-    REWIND( rs->pack     );
-    REWIND( rs->open     );
-    REWIND( rs->fail     );
-    REWIND( rs->pass     );
-    REWIND( rs->source   );
-    REWIND( rs->ontology );
-    REWIND( rs->type     );
+/* Mouse has only one couplet type: EFFECT. Rat has a bunch. So the switch
+ * statements will be more populous. This function does the following: 
+ *  1. Find all couplets of the given type
+ *  2. For each couplet:
+ *  3.   Find all manifolds in its path
+ *  4.   For each manifold couple the given element
+ */
+void lil_couplet(Table* t_top, TType type){
+    Table* t_couplet = table_recursive_get_type(t_top, type);
+    if(t_couplet && t_couplet->head){
+        for(Entry* e = t_couplet->head; e; e = e->next){
+            Table* t_man = NULL;
+            switch(type){
+                case T_EFFECT:
+                    t_man = table_selection_get(t_top, e->value.effect->selection, C_MANIFOLD);
+                    break;
+                default:
+                    fprintf(stderr, "ILLEGAL TYPE\n");
+                    exit(EXIT_FAILURE);
+            }
+            if(!t_man){
+                continue;
+            }
+            for(Entry* ee = t_man->head; ee; ee = ee->next){
+                Manifold* m = ee->value.manifold;
+                switch(type){
+                    case T_EFFECT:
+                        m->effect = e->value.effect->function;
+                        break;
+                    default:
+                        fprintf(stderr, "ILLEGAL TYPE\n");
+                        exit(EXIT_FAILURE);
+                }
+            }
+        }
+    }
 }
 
-void set_manifold_value(char* name, Label* path, size_t index){
-    /* stub */
+void print_manifold_lil(Manifold* m){
+    if(m){
+        printf("EMIT m%d\n", m->uid);
+        if(m->function)
+            printf("FUNC m%d %s\n", m->uid, m->function);
+        if(m->inputs){
+            for(Entry* i = m->inputs->head; i; i = i->next){
+                printf("INPT m%d m%d\n", m->uid, i->value.manifold->uid);
+            }
+        }
+        if(m->effect)
+            printf("EFCT m%d %s\n", m->uid, m->effect);
+    }
 }
 
-void print_RIL(RatStack* rs){
+void build_manifolds(Table* t_top){
+    lil_link_inputs(t_top);
+    /* add other couplets, e.g. cache */
+    lil_couplet(t_top, T_EFFECT);
+}
 
-    ratstack_rewind(rs);
+void print_prolog(Table* t_top){ }
 
-    print_couplet(rs->export,   "EXPORT");
-    print_couplet(rs->doc,      "DOC");
-    print_couplet(rs->alias,    "ALIAS");
-    print_couplet(rs->cache,    "CACHE");
-    print_couplet(rs->pack,     "PACK");
-    print_couplet(rs->open,     "OPEN");
-    print_couplet(rs->fail,     "FAIL");
-    print_couplet(rs->pass,     "PASS");
-    print_couplet(rs->source,   "SOURCE");
+void print_manifolds(Table* t_top){
+    Table* t_man = table_recursive_get_type(t_top, C_MANIFOLD);
+    for(Entry* e = t_man->head; e; e = e->next){
+        print_manifold_lil(e->value.manifold);
+        if(e->next){
+            printf("\n");
+        }
+    }
+}
 
-    print_list(rs->ontology, "ONTOLOGY");
-    print_list(rs->type,     "TYPE");
+void print_epilog(Table* t_top){ }
 
-    print_paths(rs->path, "PATH");
-    print_paths(rs->effect, "EFFECT");
-    print_paths(rs->check, "CHECK");
+void print_lil(Table* t_top){
+    if(t_top && t_top->head){
+        print_prolog(t_top);
+        build_manifolds(t_top);
+        print_manifolds(t_top);
+        print_epilog(t_top);
+    } else {
+        fprintf(stderr, "The symbol table is empty - nothing to do\n");
+    }
 }

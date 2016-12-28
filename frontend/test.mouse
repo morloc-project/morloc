@@ -1,0 +1,21 @@
+# composition Ali = (h . lollipop) . g . f
+# composition B = x . (g . lollipop) lollipop:ultra . f . g:yolo
+
+# effect y,g,f = superfluff
+
+# effect h,x,y = foo
+# effect g = bar
+# effect Ali/g:yoko,B/g = baz
+# effect f = lilac
+# effect g:yolo = ladida
+# effect lollipop = stickyhand
+# effect B/lollipop = colortongue
+# effect lollipop:ultra = fabuloussparkleshine
+
+
+# this all works
+# composition A = y . g . f
+# composition B = (foo . bar) . baz
+# composition C = (foo . (bar . cats)) . (baz . treebeard)
+
+composition Death = x y (foo . bar) . z

@@ -1,13 +1,25 @@
 TARGET=loc
+CC=gcc
+XXFLAGS=-Wall
 
-FILES=bufstack.c label.c list.c composition.c manifold.c lil.c
+SRC_BISON=${TARGET}.y
+SRC_LEXER=${TARGET}.l
+
+
+
+C_LEXER=lex.yy.c
+H_LEXER=lex.yy.h
+C_PARSER=${TARGET}.tab.c
+H_PARSER=${TARGET}.tab.h
+
+FILES=${C_PARSER} ${C_LEXER} path.c table.c effect.c manifold.c entry.c lil.c selection.c id.c bufstack.c
 
 all:
-	flex ${TARGET}.l
-	bison -Wall --report=all -d ${TARGET}.y
-	gcc lex.yy.c ${FILES} ${TARGET}.tab.c -lfl -o ${TARGET}
+	bison -d --report=all -Wall ${SRC_BISON}
+	flex ${SRC_LEXER}
+	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET}.out ${FILES}
 
-.PHONY: clean
 clean:
-	rm -f lex.yy.* ${TARGET}.tab.* ${TARGET} lexer
-	rm -f loc.output tok.log
+	rm -f ${TARGET}.out ${C_PARSER} ${H_PARSER} ${C_LEXER} ${H_LEXER}
+	rm -f tok.log loc.output
+	rm -f vgcore*
