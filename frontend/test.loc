@@ -2,8 +2,9 @@
 Death :: x . (z . *Peach) applepie
 
 @path
-Peach :: foo . (pie . pop) fluflu
+Peach :: foo . (foo:yolo . pop) applesauce
 
 @effect
 Death/Peach/foo :: sparkleflowerwondergas
+Death/Peach/foo:yolo :: dourdonkey
 Peach/foo :: sparklefingers

@@ -18,7 +18,11 @@ FILE* toklog;
 %s S_PATH
 %s S_CPLT
 
-var       [a-zA-Z]+(:[a-zA-Z0-9]+)?
+ws        [ \t\n\r]
+comment   #.*\n
+
+name      [a-zA-Z_][a-zA-Z0-9_]*
+var       {name}(:{name})?
 path      {var}({ws}*\/{ws}*{var})*
 selection {path}(,{path})*{ws}*::
 
@@ -27,9 +31,6 @@ identifier {var}{ws}*::
 grpref \*{var}
 
 couple ::
-
-ws        [ \t\n\r]
-comment   #.*\n
 
 %%
 
@@ -77,16 +78,17 @@ comment   #.*\n
 
 <S_CPLT>{selection} {
     char* s = strdup(yytext);
-    int i = 0;
-    for(;;i++){
+    int N = strlen(s);
+    int i = N - 1;
+    for(;;i--){
         char c = s[i];
-        if(isspace(c) || c == ':')
+        if(!(isspace(c) || c == ':'))
             break;
     }
-    for(int j = strlen(s) - 1; j >= i ; j--){
+    for(int j = N - 1; j > i ; j--){
         unput(s[j]);
     }
-    s[i] = '\0';
+    s[i+1] = '\0';
 
     LOG("SELECTION");
     yylval.SELECTION = selection_from_str(s);
