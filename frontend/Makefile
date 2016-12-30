@@ -32,7 +32,8 @@ FILES =        \
 	bufstack.c \
 	lhs.c      \
 	ws.c       \
-	w.c
+	w.c        \
+	types.c
 
 all:
 	# bison -d --report=all -Wall ${SRC_BISON}

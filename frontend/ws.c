@@ -55,10 +55,32 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v){
     return ws;
 }
 
-/* void ws_print_r(const Ws* ws, int depth){       */
-/*                                                 */
-/* }                                               */
-/* void ws_print(const Ws* ws){ ws_print(ws, 0); } */
+Ws* ws_recurse_ws(W* w){
+    Ws* rs = NULL;
+    switch(get_value_type(w->cls)){
+        case V_WS:
+            rs = ws_add_val(rs, P_WS, w->value.ws);
+            break;
+        default:
+            break;
+    }
+    return rs;
+}
+
+void ws_print_r(const Ws* ws, int depth){
+    for(W* w = ws->head; w; w = w->next){
+        for(int i = 0; i < depth; i++){
+           printf("  "); 
+        }
+        printf("%s\n", w_str(w));
+        Ws* rs = ws_recurse_ws(w);
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            ws_print_r(r->value.ws, depth+1);
+        }
+    }
+}
+void ws_print(const Ws* ws){ ws_print_r(ws, 0); }
 
 
 // ==== ASSIMILATE ME =================================================

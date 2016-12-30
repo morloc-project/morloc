@@ -17,7 +17,10 @@ typedef struct Manifold {
     struct Ws* inputs;  // Couplet<Manifold*>
 } Manifold;
 
-
+typedef struct Label{
+    char* name;
+    char* label;
+} Label;
 
 
 // ==== ASSIMILATE ME =================================================

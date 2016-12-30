@@ -1,14 +1,6 @@
 #include "w.h"
 
-typedef enum {
-    V_NONE = 0,
-    V_STRING,
-    V_WS,
-    V_COUPLET,
-    V_LABEL
-} VType;
-
-VType _get_value_type(Class cls){
+VType get_value_type(Class cls){
     VType vtype;
     switch(cls){
         case C_COMPOSON:
@@ -16,6 +8,7 @@ VType _get_value_type(Class cls){
         case C_DEREF:
         case K_LIST:
         case K_PATH:
+        case P_WS:
             vtype = V_WS;
             break;
         case C_POSITIONAL:
@@ -49,7 +42,7 @@ W* w_new(Class cls, void* value){
     w->uid = uid++;
     w->next = NULL;
 
-    switch(_get_value_type(cls)){
+    switch(get_value_type(cls)){
         case V_NONE:
             w->value.none = NULL;
             break;
@@ -82,6 +75,36 @@ W* w_copy(const W* w){
    W* new_w = (W*)malloc(sizeof(W));
    memcpy(new_w, w, sizeof(W));
    return new_w;
+}
+
+char* w_str(const W* w){
+    char* s = (char*)malloc(1024 * sizeof(char));
+    switch(get_value_type(w->cls)){
+        case V_NONE:
+            sprintf(s, "V_NONE");
+            break;
+        case V_STRING:
+            sprintf(s, "V_STRING(%s)", w->value.string);
+            break;
+        case V_WS:
+            sprintf(s, "V_WS");
+            break;
+        case V_COUPLET:
+            sprintf(s, "V_COUPLET");
+            break;
+        case V_LABEL:
+            sprintf(
+                s,
+                "V_LABEL(%s:%s)", 
+                w->value.label->name,
+                w->value.label->label
+            );
+            break;
+        default:
+            sprintf(s, "ERROR: invalid type");
+            break;
+    }
+    return s;
 }
 
 /* void w_free(W* o){ }                                                 */

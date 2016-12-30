@@ -7,11 +7,7 @@
 #include <ctype.h>
 
 #include "ws.h"
-
-typedef struct Label{
-    char* name;
-    char* label;
-} Label;
+#include "types.h"
 
 W* label_from_str(char* s); // W<K_LABEL>
 

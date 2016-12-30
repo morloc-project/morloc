@@ -24,7 +24,7 @@ Ws* ws_add(Ws* ws, const W* w);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
-// Ws* ws_print(ws* ws);
+void ws_print(const Ws* ws);
 
 
 // ==== ASSIMILATE ME =================================================
