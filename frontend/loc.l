@@ -5,13 +5,17 @@
 // ZZZ
 /* #include "loc.tab.h" */
 
+// Move all these to loc.y
+/* #include "ws.h" */
+#include "lhs.h"
+
+
 int newfile(char *fn);
 int popfile(void);
 
 FILE* toklog;
 #define LOG(x) fprintf(toklog, x); fflush(toklog);
 #define LOGV(x,a) fprintf(toklog, x, a); fflush(toklog);
-
 
 /* ^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); return SECTION_PATH;   }   */
 /* ^@effect { LOG("SECTION_EFFECT"); BEGIN(S_CPLT); return SECTION_EFFECT; } */
@@ -88,9 +92,8 @@ FILE* toklog;
 /*     yylval.VARIABLE = strdup(yytext);                                     */
 /*     return VARIABLE;                                                      */
 /* }                                                                         */
-/*                                                    */
-/* .    { LOGV("%c ", yytext[0]); return yytext[0]; } */
-
+/*                                                                           */
+/* .    { LOGV("%c ", yytext[0]); return yytext[0]; }                        */
 
 %}
 
@@ -117,13 +120,60 @@ couple ::
 
 %%
 
-(.|\n) { LOGV("%c", yytext[0]); }
+^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); }
+^@effect { LOG("SECTION_EFFECT"); BEGIN(S_CPLT); }
+
+{ws} { LOGV("%s", yytext); }
+
+{comment} { }
+
+{couple} { LOG("COUPLE"); }
+
+<S_PATH>{identifier} {
+    char* s = strdup(yytext);
+    int i = 0;
+    for(;;i++){
+        char c = s[i];
+        if(isspace(c) || c == ':')
+            break;
+    }
+    for(int j = strlen(s) - 1; j >= i ; j--){
+        unput(s[j]);
+    }
+    s[i] = '\0';
+    Label* l = label_from_str(s);
+    LOGV("IDENTIFIER(%s,", l->name);
+    LOGV("%s) ", l->label);
+}
+
+    /* <S_CPLT>{selection} {                 */
+    /*     char* s = strdup(yytext);         */
+    /*     int N = strlen(s);                */
+    /*     int i = N - 1;                    */
+    /*     for(;;i--){                       */
+    /*         char c = s[i];                */
+    /*         if(!(isspace(c) || c == ':')) */
+    /*             break;                    */
+    /*     }                                 */
+    /*     for(int j = N - 1; j > i ; j--){  */
+    /*         unput(s[j]);                  */
+    /*     }                                 */
+    /*     s[i+1] = '\0';                    */
+    /*                                       */
+    /*     W* ws = selection_from_str(s);    */
+    /*     LOG("SELECTION");                 */
+    /* }                                     */
+
+{var} {
+    LOGV("VARIABLE:%s", yytext);
+}
+
+. { LOGV("%c", yytext[0]); }
+
 
 %%
 
 #include "bufstack.h"
-
-/* #include "ws.h" // ZZZ */
 
 int main(int argc, char ** argv){
     if(argc < 2){
