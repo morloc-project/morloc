@@ -161,7 +161,7 @@ couple ::
     s[i+1] = '\0';
 
     W* w = list_from_str(s);
-    ws_print(w->value.ws);
+    ws_print(w->value.ws, ws_recurse_ws);
     LOG("SELECTION");
 }
 

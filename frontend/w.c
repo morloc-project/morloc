@@ -77,25 +77,48 @@ W* w_copy(const W* w){
    return new_w;
 }
 
+char* class_str(Class cls){
+    char* s;
+    switch(cls){
+        case C_COMPOSON:   s = strdup("C_COMPOSON");   break;
+        case C_NEST:       s = strdup("C_NEST");       break;
+        case C_DEREF:      s = strdup("C_DEREF");      break;
+        case K_LIST:       s = strdup("K_LIST");       break;
+        case K_PATH:       s = strdup("K_PATH");       break;
+        case P_WS:         s = strdup("P_WS");         break;
+        case C_POSITIONAL: s = strdup("C_POSITIONAL"); break;
+        case C_GRPREF:     s = strdup("C_GRPREF");     break;
+        case P_STRING:     s = strdup("P_STRING");     break;
+        case K_NAME:       s = strdup("K_NAME");       break;
+        case T_PATH:       s = strdup("T_PATH");       break;
+        case T_EFFECT:     s = strdup("T_EFFECT");     break;
+        case C_MANIFOLD:   s = strdup("C_MANIFOLD");   break;
+        case X_NONE:       s = strdup("X_NONE");       break;
+        case K_LABEL:      s = strdup("K_LABEL");      break;
+        default:           s = strdup("ERROR!!!");     break;
+    }
+    return s;
+}
+
 char* w_str(const W* w){
     char* s = (char*)malloc(1024 * sizeof(char));
+    char* c = class_str(w->cls);
     switch(get_value_type(w->cls)){
         case V_NONE:
-            sprintf(s, "V_NONE");
+            sprintf(s, "%s", c);
             break;
         case V_STRING:
-            sprintf(s, "V_STRING(%s)", w->value.string);
+            sprintf(s, "%s(%s)", c, w->value.string);
             break;
         case V_WS:
-            sprintf(s, "V_WS");
+            sprintf(s, "%s", c);
             break;
         case V_COUPLET:
-            sprintf(s, "V_COUPLET");
+            sprintf(s, "%s", c);
             break;
         case V_LABEL:
             sprintf(
-                s,
-                "V_LABEL(%s:%s)", 
+                s, "%s(%s:%s)", c,
                 w->value.label->name,
                 w->value.label->label
             );

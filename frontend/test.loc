@@ -5,7 +5,7 @@
 
 @effect
 A/B/C :: hey
-A/B/D:voodoo :: hey
+A/B/D:voodoo,FooFoo/Jane:yoyo :: hey
 
 # @path
 # Death :: x . (z . *Peach) applepie

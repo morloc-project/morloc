@@ -24,7 +24,13 @@ Ws* ws_add(Ws* ws, const W* w);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
-void ws_print(const Ws* ws);
+void ws_print(const Ws* ws, Ws*(*recurse)(W*));
+
+
+// Recursion rules
+Ws* ws_recurse_ws(W* w);
+Ws* ws_recurse_none(W* w);
+
 
 
 // ==== ASSIMILATE ME =================================================
