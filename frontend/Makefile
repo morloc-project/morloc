@@ -12,23 +12,27 @@ H_LEXER=lex.yy.h
 C_PARSER=${TARGET}.tab.c
 H_PARSER=${TARGET}.tab.h
 
-FILES =         \
-	${C_PARSER} \
-	${C_LEXER}  \
-	path.c      \
-	table.c     \
-	effect.c    \
-	manifold.c  \
-	entry.c     \
-	lil.c       \
-	selection.c \
-	id.c        \
-	bufstack.c  \
-	util.c      \
-	build.c
+# FILES =         \
+#     ${C_PARSER} \
+#     ${C_LEXER}  \
+#     path.c      \
+#     table.c     \
+#     effect.c    \
+#     manifold.c  \
+#     entry.c     \
+#     lil.c       \
+#     selection.c \
+#     id.c        \
+#     bufstack.c  \
+#     util.c      \
+#     build.c
+
+FILES =        \
+	${C_LEXER} \
+	bufstack.c \
 
 all:
-	bison -d --report=all -Wall ${SRC_BISON}
+	# bison -d --report=all -Wall ${SRC_BISON}
 	flex ${SRC_LEXER}
 	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET}.out ${FILES}
 
