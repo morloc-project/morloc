@@ -72,15 +72,14 @@ couple ::
     Couplet* c = couplet_new(); 
     c->lhs = w;
     c->rhs = m;
-    W* wc = w_new(C_COMPOSON, c);
+    W* wc = w_new(T_PATH, c);
     yylval.COMPOSON = wc;
     return COMPOSON;
 }
 <S_PATH>{grpref} {
     char* s = strdup(yytext + 1);
     W* w = w_new(C_GRPREF, s);
-    W* c = w_new(C_COMPOSON, w);
-    yylval.COMPOSON = c;
+    yylval.COMPOSON = w;
     LOG("C_GRPREF");
     return COMPOSON;
 }
@@ -91,8 +90,7 @@ couple ::
     memcpy(s, yytext+1, (N-2)*sizeof(char));
     s[N-2] = '\0';
     W* w = w_new(C_POSITIONAL, s);
-    W* c = w_new(C_COMPOSON, w);
-    yylval.COMPOSON = c;
+    yylval.COMPOSON = w;
     LOG("C_POSITIONAL");
     return COMPOSON;
 }

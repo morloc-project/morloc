@@ -1,7 +1,8 @@
 @path
+A :: x y z . t
 # A :: cut . `francis` foo . dandelionpancakeparade
-T :: map . &(a . b) foo . &B
-B :: fifi . fofo
+# T :: map . &(a . b) foo . &B
+# B :: fifi . fofo
 
 # @effect
 # A/B/C :: hey
