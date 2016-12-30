@@ -1,11 +1,11 @@
 @path
-# A :: cut . `francis` foo . dandelionpancakeparade
-# A :: map . &(a . b) foo . &B
-# B :: fifi . fofo
+A :: cut . `francis` foo . dandelionpancakeparade
+A :: map . &(a . b) foo . &B
+B :: fifi . fofo
 
-@effect
-A/B/C :: hey
-A/B/D:voodoo,FooFoo/Jane:yoyo :: hey
+# @effect
+# A/B/C :: hey
+# A/B/D:voodoo,FooFoo/Jane:yoyo :: hey
 
 # @path
 # Death :: x . (z . *Peach) applepie

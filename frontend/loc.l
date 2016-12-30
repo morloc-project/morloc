@@ -146,6 +146,34 @@ couple ::
     LOGV("%s) ", w->value.label->label);
 }
 
+
+<S_PATH>{var} {
+    W* w = label_from_str(yytext);
+    /* Manifold* m = manifold_new();                   */
+    /* yylval.COMPOSON = entry_new(id, C_MANIFOLD, m); */
+    LOG("C_MANIFOLD");
+    printf(" - %s\n", w_str(w));
+}
+<S_PATH>{grpref} {
+    char* s = strdup(yytext + 1);
+    W* w = label_from_str(s);
+    /* yylval.COMPOSON = entry_new(id, C_GRPREF, s); */
+    LOG("C_GRPREF");
+    printf(" - %s\n", w_str(w));
+}
+<S_PATH>{positional} {
+    // copy the section of the string between the quotation marks
+    int N = strlen(yytext);
+    char* s = (char*)malloc((N-1) * sizeof(char));
+    memcpy(s, yytext+1, (N-2)*sizeof(char));
+    s[N-2] = '\0';
+    W* w = w_new(C_POSITIONAL, s);
+    /* yylval.COMPOSON = entry_new(NULL, C_POSITIONAL, s); */
+    LOG("C_POSITIONAL");
+    printf(" - %s\n", w_str(w));
+}
+
+
 <S_CPLT>{selection} {
     char* s = strdup(yytext);
     int N = strlen(s);
@@ -170,7 +198,6 @@ couple ::
 }
 
 . { LOGV("%c", yytext[0]); }
-
 
 %%
 
