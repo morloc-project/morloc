@@ -7,8 +7,8 @@
 #include <stdbool.h>
 
 typedef struct Couplet{
-    struct Ws* lhs;
-    struct Ws* rhs;
+    struct W* lhs;
+    struct W* rhs;
 } Couplet;
 
 typedef struct Manifold {
@@ -21,6 +21,10 @@ typedef struct Label{
     char* name;
     char* label;
 } Label;
+
+Manifold* manifold_new();
+Label* label_new();
+Couplet* couplet_new();
 
 
 // ==== ASSIMILATE ME =================================================

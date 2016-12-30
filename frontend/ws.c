@@ -2,7 +2,7 @@
 
 /* no copy constructor, no reset */
 Ws* _ws_new(W* w){
-    Ws* ws = (Ws*)malloc(sizeof(Ws));
+    Ws* ws = (Ws*)calloc(1, sizeof(Ws));
     ws->head = w;
     ws->tail = w;
     return ws;
@@ -28,7 +28,7 @@ Ws* _ws_add(Ws* ws, W* w){
 }
 
 Ws* ws_new(const W* w){
-    Ws* ws = (Ws*)malloc(sizeof(Ws));
+    Ws* ws = (Ws*)calloc(1, sizeof(Ws));
     W* w2 = w_isolate(w);
     ws->head = w2;
     ws->tail = w2;
@@ -55,14 +55,35 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v){
     return ws;
 }
 
-void ws_print_r(const Ws* ws, Ws*(*recurse)(W*), int depth){
-    for(W* w = ws->head; w; w = w->next){
-        for(int i = 0; i < depth; i++){
-           printf("  "); 
+void _join(Ws* a, Ws* b){
+    a->tail->next = b->head;
+    a->tail = b->tail;
+}
+
+Ws* ws_join(Ws* a, Ws* b){
+    if(b && b->head){
+        if(a && a->head){
+            _join(a, b);
+        } else {
+            a = b;
         }
+    }
+    return a;
+}
+
+
+void ws_print_r(const Ws* ws, Ws*(*recurse)(W*), int depth){
+
+    if(!ws || !ws->head) return;
+
+    for(W* w = ws->head; w; w = w->next){
+        for(int i = 0; i < depth; i++){ printf("  "); }
+
         printf("%s\n", w_str(w));
         Ws* rs = recurse(w);
+
         if(!rs) continue;
+
         for(W* r = rs->head; r; r = r->next){
             ws_print_r(r->value.ws, recurse, depth+1);
         }
@@ -77,7 +98,24 @@ void ws_print(const Ws* ws, Ws*(*recurse)(W*)){
 // === recursion rules ==============================================
 // ------------------------------------------------------------------
 
+Ws* ws_recurse_all(W* w){
+    if(!w) return NULL;
+    Ws* rs = NULL;
+    switch(get_value_type(w->cls)){
+        case V_WS:
+            rs = ws_add_val(rs, P_WS, w->value.ws);
+            break;
+        case V_COUPLET:
+            rs = ws_join(rs, ws_recurse_all(w->value.couplet->lhs));
+            rs = ws_join(rs, ws_recurse_all(w->value.couplet->rhs));
+        default:
+            break;
+    }
+    return rs;
+}
+
 Ws* ws_recurse_ws(W* w){
+    if(!w) return NULL;
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){
         case V_WS:
@@ -224,22 +262,6 @@ Ws* ws_recurse_none(W* w){
 // 
 // Table* table_composon_inputs(const Entry* entry){
 //     return _table_composon_io(entry, true);
-// }
-// 
-// void _join(Table* a, Table* b){
-//     a->tail->next = b->head;
-//     a->tail = b->tail;
-// }
-// 
-// Table* table_join(Table* a, Table* b){
-//     if(b && b->head){
-//         if(a && a->head){
-//             _join(a, b);
-//         } else {
-//             a = b;
-//         }
-//     }
-//     return a;
 // }
 // 
 // bool is_recursive(TType type){

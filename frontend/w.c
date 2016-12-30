@@ -37,7 +37,7 @@ VType get_value_type(Class cls){
 
 W* w_new(Class cls, void* value){
     static int uid = 0;
-    W* w = (W*)malloc(sizeof(W));
+    W* w = (W*)calloc(1, sizeof(W));
     w->cls = cls;     
     w->uid = uid++;
     w->next = NULL;
@@ -101,6 +101,7 @@ char* class_str(Class cls){
 }
 
 char* w_str(const W* w){
+    if(!w) return NULL;
     char* s = (char*)malloc(1024 * sizeof(char));
     char* c = class_str(w->cls);
     switch(get_value_type(w->cls)){
@@ -114,7 +115,11 @@ char* w_str(const W* w){
             sprintf(s, "%s", c);
             break;
         case V_COUPLET:
-            sprintf(s, "%s", c);
+            sprintf(
+                s, "%s :: %s | %s", c,
+                w_str(w->value.couplet->lhs),
+                w_str(w->value.couplet->rhs)
+            );
             break;
         case V_LABEL:
             sprintf(

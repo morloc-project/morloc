@@ -6,29 +6,23 @@
 %}
 
 %code requires{
-#include "lil.h"
-#include "build.h"
-Table* global_table;
+/* #include "lil.h"   */
+/* #include "build.h" */
+#include "ws.h"
+#include "lhs.h"
+Ws* global_table;
 }
 
 %define api.value.type union 
 
-%token <char*> VARIABLE
-%token <Selection*> SELECTION
-
-%token <Id*> IDENTIFIER
-%token <Entry*> COMPOSON
+%token <W*> IDENTIFIER COMPOSON VARIABLE SELECTION
 
 %token COUPLE
 
 %token SECTION_EFFECT
 %token SECTION_PATH
 
-%type <Table*> section
-%type <Table*> composition
-
-%type <Table*> s_effect
-%type <Table*> s_path
+%type <Ws*> section composition s_effect s_path
 
 %left '.'
 %precedence CONCAT
@@ -38,7 +32,7 @@ Table* global_table;
 
 input
     : section { global_table = $1;}
-    | input section { global_table = table_join(global_table, $2); }
+    | input section { global_table = ws_join(global_table, $2); }
 
 section
     : s_path
@@ -47,44 +41,50 @@ section
 s_path
     : SECTION_PATH { $$ = NULL; }
     | s_path IDENTIFIER COUPLE composition {
-        Entry* e = entry_new($2, T_PATH, $4);
-        $$ = table_add($1, e);
+        Couplet* c = couplet_new();
+        c->lhs = $2;
+        c->rhs = w_new(P_WS, $4);
+        W* w = w_new(T_PATH, c);
+        $$ = ws_add($1, w);
     }
 
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
     | s_effect SELECTION COUPLE VARIABLE {
-        Effect* effect = effect_new($2, $4);
-        Entry* e = entry_new(id_new(), T_EFFECT, effect); 
-        $$ = table_add($1, e);
+        Couplet* c = couplet_new();
+        c->lhs = $2;
+        c->rhs = $4;
+        W* w = w_new(T_EFFECT, w); 
+        $$ = ws_add($1, w);
     }
 
 composition
     : COMPOSON {
-        Entry* c = entry_new(id_new(), C_COMPOSON, table_new($1));
-        $$ = table_new(c);
+        Ws* ws = ws_new($1);
+        W* w = w_new(C_COMPOSON, ws);
+        $$ = ws_new(w);
     }
     | '(' composition ')' {
-        Entry* e = entry_new(id_new(), C_NEST, $2);
-        Entry* c = entry_new(id_new(), C_COMPOSON, table_new(e));
-        $$ = table_new(c);
+        W* n = w_new(C_NEST, $2);
+        W* c = w_new(C_COMPOSON, ws_new(n));
+        $$ = ws_new(c);
     }
     | '&' COMPOSON {
-        Entry* e = entry_new(id_new(), C_DEREF, table_new($2));
-        Entry* c = entry_new(id_new(), C_COMPOSON, table_new(e));
-        $$ = table_new(c);
+        W* e = w_new(C_DEREF, ws_new($2));
+        W* c = w_new(C_COMPOSON, ws_new(e));
+        $$ = ws_new(c);
     }
     | '&' '(' composition ')' {
-        Entry* e = entry_new(id_new(), C_NEST, $3);
-        Entry* d = entry_new(id_new(), C_DEREF, table_new(e));
-        Entry* n = entry_new(id_new(), C_COMPOSON, table_new(d));
-        $$ = table_new(n);
+        W* e = w_new(C_NEST, $3);
+        W* d = w_new(C_DEREF, ws_new(e));
+        W* n = w_new(C_COMPOSON, ws_new(d));
+        $$ = ws_new(n);
     }
     | composition composition %prec CONCAT {
-        $1->tail->value.table = table_join($1->tail->value.table, $2->head->value.table);
+        $1->tail->value.ws = ws_join($1->tail->value.ws, $2->head->value.ws);
     }
     | composition '.' composition {
-        $$ = table_join($1, $3);
+        $$ = ws_join($1, $3);
     }
 
 

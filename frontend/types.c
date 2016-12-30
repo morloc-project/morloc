@@ -1,5 +1,17 @@
 #include "types.h"
 
+Manifold* manifold_new(){
+    return (Manifold*)calloc(1, sizeof(Manifold));
+}
+
+Label* label_new(){
+    return (Label*)calloc(1, sizeof(Label));
+}
+
+Couplet* couplet_new(){
+    return (Couplet*)calloc(1, sizeof(Couplet));
+}
+
 
 // ==== ASSIMILATE ME =================================================
 // vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv

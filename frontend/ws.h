@@ -22,14 +22,18 @@ Ws* ws_new(const W* w);
  */
 Ws* ws_add(Ws* ws, const W* w);
 
+/* b is destroyed upon join */
+Ws* ws_join(Ws* a, Ws* b);
+
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
 void ws_print(const Ws* ws, Ws*(*recurse)(W*));
 
 
 // Recursion rules
-Ws* ws_recurse_ws(W* w);
-Ws* ws_recurse_none(W* w);
+Ws* ws_recurse_ws(W* w);   // recurse into P_WS
+Ws* ws_recurse_all(W* w);  // recurse into any component with Ws type
+Ws* ws_recurse_none(W* w); // no recursion
 
 
 

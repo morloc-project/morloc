@@ -1,6 +1,6 @@
 @path
-A :: cut . `francis` foo . dandelionpancakeparade
-A :: map . &(a . b) foo . &B
+# A :: cut . `francis` foo . dandelionpancakeparade
+T :: map . &(a . b) foo . &B
 B :: fifi . fofo
 
 # @effect

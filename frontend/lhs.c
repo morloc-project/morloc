@@ -19,13 +19,11 @@ char* trim_ws(char* s){
     memcpy(newstring, s + a, n);
     newstring[n] = '\0';
 
-    free(s);
-
     return newstring;
 }
 
 W* label_from_str(char* s){
-    Label* id = (Label*)malloc(sizeof(Label));
+    Label* id = (Label*)calloc(1, sizeof(Label));
     int i = 0;
     for(;;i++){
         if(s[i] == '\0'){

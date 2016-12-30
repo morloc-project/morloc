@@ -27,16 +27,17 @@ H_PARSER=${TARGET}.tab.h
 #     util.c      \
 #     build.c
 
-FILES =        \
-	${C_LEXER} \
-	bufstack.c \
-	lhs.c      \
-	ws.c       \
-	w.c        \
+FILES =         \
+	${C_LEXER}  \
+	${C_PARSER} \
+	bufstack.c  \
+	lhs.c       \
+	ws.c        \
+	w.c         \
 	types.c
 
 all:
-	# bison -d --report=all -Wall ${SRC_BISON}
+	bison -d --report=all -Wall ${SRC_BISON}
 	flex ${SRC_LEXER}
 	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET}.out ${FILES}
 
