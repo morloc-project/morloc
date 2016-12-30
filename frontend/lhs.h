@@ -6,22 +6,23 @@
 #include <string.h>
 #include <ctype.h>
 
+#include "ws.h"
+
 typedef struct Label{
     char* name;
     char* label;
 } Label;
 
-Label* label_from_str(char* s);
+W* label_from_str(char* s); // W<K_LABEL>
+
+W* list_from_str(char* s);  // W<K_LIST>
+
+W* path_from_str(char* s);  // W<K_PATH>
+
 
 // ==== ASSIMILATE ME =================================================
 // vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 
-// W* selection_from_str(char* s);
-//
-// W* path_from_selection(W* selection);
-//
-// W* label_from_path(W* path);
-//
 // bool path_is_base(W* path);
 //
 // Id* id_clone(Id* id);

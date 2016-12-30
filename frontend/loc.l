@@ -141,28 +141,28 @@ couple ::
         unput(s[j]);
     }
     s[i] = '\0';
-    Label* l = label_from_str(s);
-    LOGV("IDENTIFIER(%s,", l->name);
-    LOGV("%s) ", l->label);
+    W* w = label_from_str(s);
+    LOGV("IDENTIFIER(%s,", w->value.label->name);
+    LOGV("%s) ", w->value.label->label);
 }
 
-    /* <S_CPLT>{selection} {                 */
-    /*     char* s = strdup(yytext);         */
-    /*     int N = strlen(s);                */
-    /*     int i = N - 1;                    */
-    /*     for(;;i--){                       */
-    /*         char c = s[i];                */
-    /*         if(!(isspace(c) || c == ':')) */
-    /*             break;                    */
-    /*     }                                 */
-    /*     for(int j = N - 1; j > i ; j--){  */
-    /*         unput(s[j]);                  */
-    /*     }                                 */
-    /*     s[i+1] = '\0';                    */
-    /*                                       */
-    /*     W* ws = selection_from_str(s);    */
-    /*     LOG("SELECTION");                 */
-    /* }                                     */
+<S_CPLT>{selection} {
+    char* s = strdup(yytext);
+    int N = strlen(s);
+    int i = N - 1;
+    for(;;i--){
+        char c = s[i];
+        if(!(isspace(c) || c == ':'))
+            break;
+    }
+    for(int j = N - 1; j > i ; j--){
+        unput(s[j]);
+    }
+    s[i+1] = '\0';
+
+    W* w = list_from_str(s);
+    LOG("SELECTION");
+}
 
 {var} {
     LOGV("VARIABLE:%s", yytext);

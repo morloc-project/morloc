@@ -1,6 +1,89 @@
-#include "class.h"
+#include "w.h"
 
-/* W* w_new(Class cls, void* value){ }                                  */
+typedef enum {
+    V_NONE = 0,
+    V_STRING,
+    V_WS,
+    V_COUPLET,
+    V_LABEL
+} VType;
+
+VType _get_value_type(Class cls){
+    VType vtype;
+    switch(cls){
+        case C_COMPOSON:
+        case C_NEST:
+        case C_DEREF:
+        case K_LIST:
+        case K_PATH:
+            vtype = V_WS;
+            break;
+        case C_POSITIONAL:
+        case C_GRPREF:
+        case P_STRING:
+        case K_NAME:
+            vtype = V_STRING;
+            break;
+        case T_PATH:
+        case T_EFFECT:
+        case C_MANIFOLD:
+            vtype = V_COUPLET;
+            break;
+        case X_NONE:
+            vtype = V_NONE;
+            break;
+        case K_LABEL:
+            vtype = V_LABEL;
+            break;
+        default:
+            fprintf(stderr, "Illegal VType: %d\n", cls);
+    }
+    return vtype;
+
+}
+
+W* w_new(Class cls, void* value){
+    static int uid = 0;
+    W* w = (W*)malloc(sizeof(W));
+    w->cls = cls;     
+    w->uid = uid++;
+    w->next = NULL;
+
+    switch(_get_value_type(cls)){
+        case V_NONE:
+            w->value.none = NULL;
+            break;
+        case V_STRING:
+            w->value.string = value;
+            break;
+        case V_WS:
+            w->value.ws = value;
+            break;
+        case V_COUPLET:
+            w->value.couplet = value;
+            break;
+        case V_LABEL:
+            w->value.label = value;
+            break;
+        default:
+            break;
+    }
+
+    return w;
+}
+
+W* w_isolate(const W* w){
+    W* new_w = w_copy(w);
+    new_w->next = NULL;
+    return new_w;
+}
+
+W* w_copy(const W* w){
+   W* new_w = (W*)malloc(sizeof(W));
+   memcpy(new_w, w, sizeof(W));
+   return new_w;
+}
+
 /* void w_free(W* o){ }                                                 */
 /* W* w_set_value(W* o, void* v){ }                                     */
 /* W* w_add_over(W* a, W* b){ }                                         */
@@ -24,14 +107,6 @@
 /* bool w_is_collective(const W* o){ }                                  */
 /* bool w_is_homogenous(const W* o){ }                                  */
 /*                                                                      */
-/*                                                                      */
-/* typedef enum {                                                       */
-/*     V_NONE = 0,                                                      */
-/*     V_STRING,                                                        */
-/*     V_TABLE,                                                         */
-/*     V_MANIFOLD,                                                      */
-/*     V_EFFECT                                                         */
-/* } VType;                                                             */
 /*                                                                      */
 /* typedef enum {                                                       */
 /*     K_ANON   = 0,                                                    */
@@ -87,31 +162,6 @@
 /*             break;                                                   */
 /*     }                                                                */
 /*     return kmask;                                                    */
-/* }                                                                    */
-/*                                                                      */
-/* VType _get_value_type(Class cls){                                    */
-/*     VType vtype;                                                     */
-/*     switch(cls){                                                     */
-/*         case C_PATH:                                                 */
-/*         case C_COMPOSON:                                             */
-/*         case C_NEST:                                                 */
-/*         case C_DEREF:                                                */
-/*             vtype = V_TABLE;                                         */
-/*             break;                                                   */
-/*         case C_MANIFOLD:                                             */
-/*             vtype = V_MANIFOLD;                                      */
-/*             break;                                                   */
-/*         case C_POSITIONAL:                                           */
-/*         case C_GRPREF:                                               */
-/*             vtype = V_STRING;                                        */
-/*             break;                                                   */
-/*         case C_EFFECT:                                               */
-/*             vtype = V_EFFECT;                                        */
-/*             break;                                                   */
-/*         case C_NONE:                                                 */
-/*             vtype = V_NONE;                                          */
-/*     }                                                                */
-/*     return vtype;                                                    */
 /* }                                                                    */
 /*                                                                      */
 /* char* _get_class(const Entry* e){                                    */

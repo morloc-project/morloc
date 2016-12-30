@@ -24,7 +24,7 @@ char* trim_ws(char* s){
     return newstring;
 }
 
-Label* label_from_str(char* s){
+W* label_from_str(char* s){
     Label* id = (Label*)malloc(sizeof(Label));
     int i = 0;
     for(;;i++){
@@ -43,45 +43,52 @@ Label* label_from_str(char* s){
     id->name = trim_ws(id->name);
     id->label = trim_ws(id->label);
 
-    return id;
+    W* w = w_new(K_LABEL, id);
+
+    return w;
 }
 
+W* path_from_str(char* path_str){
+    char* s = path_str;
+    Ws* p = NULL;
+    for(int i = 0; ; i++){
+        if(s[i] == '\0'){
+            p = ws_add(p, label_from_str(s));
+            break;
+        }
+        else if(s[i] == '/'){
+            s[i] = '\0';
+            p = ws_add(p, label_from_str(s));
+            s = s + i + 1;
+            i = 0;
+        }
+    }
 
-/* Ws* path_from_str(char* path_str){               */
-/*     char* s = path_str;                          */
-/*     Ws* p = ws_new();                            */
-/*     for(int i = 0; ; i++){                       */
-/*         if(s[i] == '\0'){                        */
-/*             p = ws_add(p, label_from_str(s));    */
-/*             break;                               */
-/*         }                                        */
-/*         else if(s[i] == '/'){                    */
-/*             s[i] = '\0';                         */
-/*             p = ws_add(p, label_from_str(s));    */
-/*             s = s + i + 1;                       */
-/*             i = 0;                               */
-/*         }                                        */
-/*     }                                            */
-/*     return p;                                    */
-/* }                                                */
-/*                                                  */
-/* Ws* selection_from_str(char* selection_str){     */
-/*     char* s = selection_str;                     */
-/*     Ws* sel = ws_new();                          */
-/*     for(int i = 0; ; i++){                       */
-/*         if(s[i] == '\0'){                        */
-/*             sel = ws_add(sel, path_from_str(s)); */
-/*             break;                               */
-/*         }                                        */
-/*         else if(s[i] == ','){                    */
-/*             s[i] = '\0';                         */
-/*             sel = ws_add(sel, path_from_str(s)); */
-/*             s = s + i + 1;                       */
-/*             i = 0;                               */
-/*         }                                        */
-/*     }                                            */
-/*     return sel;                                  */
-/* }                                                */
+    W* w = w_new(K_PATH, p);
+
+    return w;
+}
+
+W* list_from_str(char* list_str){
+    char* s = list_str;
+    Ws* ws = NULL;
+    for(int i = 0; ; i++){
+        if(s[i] == '\0'){
+            ws = ws_add(ws, path_from_str(s));
+            break;
+        }
+        else if(s[i] == ','){
+            s[i] = '\0';
+            ws = ws_add(ws, path_from_str(s));
+            s = s + i + 1;
+            i = 0;
+        }
+    }
+
+    W* w = w_new(K_LIST, ws);
+
+    return w;
+}
 
 /* bool path_is_base(Path* path){                                                     */
 /*     return path->next == NULL;                                                     */

@@ -30,7 +30,9 @@ H_PARSER=${TARGET}.tab.h
 FILES =        \
 	${C_LEXER} \
 	bufstack.c \
-	lhs.c
+	lhs.c      \
+	ws.c       \
+	w.c
 
 all:
 	# bison -d --report=all -Wall ${SRC_BISON}
