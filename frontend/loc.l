@@ -64,7 +64,6 @@ couple ::
 <S_PATH>{var} {
     Id* id = id_from_str(yytext);
     Manifold* m = manifold_new();
-    m->function = id->name;
     yylval.COMPOSON = entry_new(id, C_MANIFOLD, m);
     LOG("C_MANIFOLD");
     return COMPOSON;
