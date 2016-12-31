@@ -123,7 +123,7 @@ couple ::
     return VARIABLE;
 }
 
-. { LOGV("%c", yytext[0]); }
+. { LOGV("%c", yytext[0]); return yytext[0]; }
 
 %%
 

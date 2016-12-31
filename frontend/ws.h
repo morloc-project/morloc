@@ -29,6 +29,8 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
 void ws_print(const Ws* ws, Ws*(*recurse)(W*));
 
+int ws_length(Ws* ws);
+
 
 // Recursion rules
 Ws* ws_recurse_ws(W* w);   // recurse into P_WS

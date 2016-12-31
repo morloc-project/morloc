@@ -94,6 +94,12 @@ void ws_print(const Ws* ws, Ws*(*recurse)(W*)){
     ws_print_r(ws, recurse, 0);
 }
 
+int ws_length(Ws* ws){
+    if(!ws) return 0;
+    int size = 0;
+    for(W* w = ws->head; w; w = w->next){ size++; }
+    return size;
+}
 
 // === recursion rules ==============================================
 // ------------------------------------------------------------------
@@ -106,8 +112,16 @@ Ws* ws_recurse_all(W* w){
             rs = ws_add_val(rs, P_WS, w->value.ws);
             break;
         case V_COUPLET:
-            rs = ws_join(rs, ws_recurse_all(w->value.couplet->lhs));
-            rs = ws_join(rs, ws_recurse_all(w->value.couplet->rhs));
+            {
+                W* lhs = w->value.couplet->lhs;
+                W* rhs = w->value.couplet->rhs;
+                if(get_value_type(lhs->cls) == V_WS){
+                    rs = ws_add_val(rs, P_WS, lhs->value.ws);
+                }
+                if(get_value_type(rhs->cls) == V_WS){
+                    rs = ws_add_val(rs, P_WS, rhs->value.ws);
+                }
+            }
         default:
             break;
     }

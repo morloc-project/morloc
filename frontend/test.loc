@@ -1,5 +1,7 @@
 @path
 A :: x y z . t
+B :: x . y . z
+C :: x (y . z) . t
 # A :: cut . `francis` foo . dandelionpancakeparade
 # T :: map . &(a . b) foo . &B
 # B :: fifi . fofo
