@@ -71,6 +71,26 @@ Ws* ws_join(Ws* a, Ws* b){
     return a;
 }
 
+void ws_assert_class(const W* w, Class cls){
+    if(w->cls != cls){
+        fprintf(
+            stderr,
+            "Class assertion failed! Got %s, expected %s.\n",
+            w_class_str(w->cls), w_class_str(cls)
+        );
+    }
+}
+
+void ws_assert_type(const W* w, VType type){
+    VType t = get_value_type(w->cls);
+    if(t != type){
+        fprintf(
+            stderr,
+            "Type assertion failed! Got %s, expected %s.\n",
+            w_type_str(t), w_type_str(type)
+        );
+    }
+}
 
 void ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
 
@@ -146,75 +166,67 @@ Ws* ws_prfilter(
     return result;
 }
 
-Ws* ws_map(const Ws* ws, W*(*map)(const W*)){
-    Ws* result = NULL;
-    if(!ws) return NULL;
+void ws_map(const Ws* ws, void(*map)(const W*)){
+    if(!ws) return;
     for(W* w = ws->head; w; w = w->next){
-       result = ws_add(result, map(w)); 
+       map(w); 
     }
-    return result;
 }
 
-Ws* ws_2map(const Ws* xs, const Ws* ys, W*(*map)(const W*, const W*)){
-    Ws* result = NULL;
-    if(!(xs && ys)) return NULL;
+void ws_2map(const Ws* xs, const Ws* ys, void(*map)(const W*, const W*)){
+    if(!(xs && ys)) return;
     for(W* x = xs->head; x; x = x->next){
         for(W* y = ys->head; y; y = y->next){ 
-            result = ws_add(result, map(x, y));
+            map(x, y);
         }
     }
-    return result;
 }
 
-Ws* ws_3map(const Ws* xs, const Ws* ys, const Ws* zs, W*(*map)(const W* x, const W* y, const W* z)){
-    Ws* result = NULL;
-    if(!(xs && ys && zs)) return NULL;
+void ws_3map(const Ws* xs, const Ws* ys, const Ws* zs, void(*map)(const W* x, const W* y, const W* z)){
+    if(!(xs && ys && zs)) return;
     for(W* x = xs->head; x; x = x->next){
         for(W* y = ys->head; y; y = y->next){ 
             for(W* z = zs->head; z; z = z->next){ 
-                result = ws_add(result, map(x, y, z));
+                map(x, y, z);
             }
         }
     }
-    return result;
 }
 
-Ws* ws_pmap(const Ws* ws, const W* p, W*(*map)(const W*, const W*)){
-    Ws* result = NULL;
+void ws_pmap(const Ws* ws, const W* p, void(*map)(const W*, const W*)){
     for(W* w = ws->head; w; w = w->next){
-       result = ws_add(result, map(w, p)); 
+       map(w, p); 
     }
-    return result;
 }
 
-Ws* ws_filter_map(const Ws* top,
+void ws_filter_map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
-    W*(*map)(const W* x)
+    void(*map)(const W* x)
 ){
     Ws* xs = xfilter(top);
-    return ws_map(xs, map);
+    ws_map(xs, map);
 }
 
-Ws* ws_filter_2map(const Ws* top,
+void ws_filter_2map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
-    W*(*map)(const W* x, const W* y)
+    void(*map)(const W* x, const W* y)
 ){
     Ws* xs = xfilter(top);
     Ws* ys = yfilter(top);
-    return ws_2map(xs, ys, map);
+    ws_2map(xs, ys, map);
 }
 
-Ws* ws_filter_3map(const Ws* top,
+void ws_filter_3map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
     Ws*(*zfilter)(const Ws*),
-    W*(*map)(const W* x, const W* y, const W* z)
+    void(*map)(const W* x, const W* y, const W* z)
 ){
     Ws* xs = xfilter(top);
     Ws* ys = yfilter(top);
     Ws* zs = zfilter(top);
-    return ws_3map(xs, ys, zs, map);
+    ws_3map(xs, ys, zs, map);
 }
 
 

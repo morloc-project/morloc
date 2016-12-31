@@ -80,7 +80,20 @@ W* w_copy(const W* w){
    return new_w;
 }
 
-char* class_str(Class cls){
+char* w_type_str(VType type){
+    char* s;
+    switch(type){
+        case V_NONE:     s = strdup("V_NONE"); break;
+        case V_STRING:   s = strdup("V_NONE"); break;
+        case V_WS:       s = strdup("V_NONE"); break;
+        case V_COUPLET:  s = strdup("V_NONE"); break;
+        case V_LABEL:    s = strdup("V_NONE"); break;
+        case V_MANIFOLD: s = strdup("V_NONE"); break;
+    }
+    return s;
+}
+
+char* w_class_str(Class cls){
     char* s;
     switch(cls){
         case C_COMPOSON:   s = strdup("C_COMPOSON");   break;
@@ -107,7 +120,7 @@ char* class_str(Class cls){
 char* w_str(const W* w){
     if(!w) return NULL;
     char* s = (char*)malloc(1024 * sizeof(char));
-    char* c = class_str(w->cls);
+    char* c = w_class_str(w->cls);
     switch(get_value_type(w->cls)){
         case V_NONE:
             sprintf(s, "%s", c);

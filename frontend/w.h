@@ -60,4 +60,8 @@ char* w_str(const W* w);
 
 VType get_value_type(Class cls);
 
+char* w_class_str(Class);
+
+char* w_type_str(VType);
+
 #endif

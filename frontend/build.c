@@ -2,19 +2,26 @@
 
 void _link_inputs(Ws* ws_top);
 void _link_couplets(Ws* ws_top);
-void _link_default_functions(Ws* ws_top);
 bool _resolve_grprefs_r(Ws* global, Ws* current);
 void _resolve_grprefs(Ws* ws_top);
 void _resolve_one_grpref(Ws* global, W* e_ref);
 
-void _link_default_functions(Ws* ws_top){
-    Ws* ws = ws_rfilter(ws_top, ws_recurse_most, w_is_manifold);
-    for(W* w = ws->head; w; w = w->next){
-        W* lhs = w->value.couplet->lhs;
-        W* rhs = w->value.couplet->rhs;
-        Manifold* m = rhs->value.manifold;
+
+// Given the couplet {Label, Manifold}, transfer the name from Label to
+// Manifold->function IFF it is not already defined.
+void _set_default_manifold_function(const W* cm){
+    ws_assert_class(cm, C_MANIFOLD);
+    W* lhs = cm->value.couplet->lhs;
+    W* rhs = cm->value.couplet->rhs;
+    Manifold* m = rhs->value.manifold;
+    if(!m->function){
         m->function = strdup(lhs->value.label->name);
     }
+}
+
+// Find all {label,manifold} couplets
+Ws* _get_manifolds(const Ws* ws){
+    return ws_rfilter(ws, ws_recurse_most, w_is_manifold);
 }
 
 // link all top level elements in c_{i+1} as inputs to c_i
@@ -123,7 +130,8 @@ void _resolve_grprefs(Ws* ws_top){
 void build_manifolds(Ws* ws_top){
     _resolve_grprefs(ws_top);
 
-    _link_default_functions(ws_top);
+    ws_filter_map(ws_top, _get_manifolds, _set_default_manifold_function);
+
     _link_inputs(ws_top);
     _link_couplets(ws_top);
 }

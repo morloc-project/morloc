@@ -14,6 +14,10 @@ typedef struct Ws{
 /* Copies entry and removes its link */
 Ws* ws_new(const W* w);
 
+void ws_assert_class(const W*, Class);
+
+void ws_assert_type(const W*, VType);
+
 /* If ws is NULL, this will create a new Ws.  This basically renders ws_new
  * unnecessary, although I keep it around for symmetry. Also, I do not allow
  * empty Ws. Having this default constructor take an element argument will
@@ -47,28 +51,28 @@ Ws* ws_prfilter(
     W*(*nextval)(const W*)
 );
 
-Ws* ws_map(const Ws*, W*(*map)(const W*));
+void ws_map(const Ws*, void(*map)(const W*));
 
-Ws* ws_map2(const Ws*, const Ws*, W*(*map)(const W*, const W*));
+void ws_map2(const Ws*, const Ws*, void(*map)(const W*, const W*));
 
-Ws* ws_map3(const Ws*, const Ws*, const Ws*, W*(*map)(const W*, const W*, const W*));
+void ws_map3(const Ws*, const Ws*, const Ws*, void(*map)(const W*, const W*, const W*));
 
-Ws* ws_filter_map(const Ws* top,
+void ws_filter_map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
-    W*(*map)(const W* x)
+    void(*map)(const W* x)
 );
 
-Ws* ws_filter_2map(const Ws* top,
+void ws_filter_2map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
-    W*(*map)(const W* x, const W* y)
+    void(*map)(const W* x, const W* y)
 );
 
-Ws* ws_filter_3map(const Ws* top,
+void ws_filter_3map(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
     Ws*(*zfilter)(const Ws*),
-    W*(*map)(const W* x, const W* y, const W* z)
+    void(*map)(const W* x, const W* y, const W* z)
 );
 
 // Removing nesting in a list (as specified by the recursion rule).
