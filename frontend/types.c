@@ -9,7 +9,7 @@ Label* label_new(){
 }
 
 Couplet* couplet_new(struct W* lhs, struct W* rhs){
-    Couplet* c = (Couplet*)calloc(1, sizeof(Couplet));
+    Couplet* c = (Couplet*)malloc(sizeof(Couplet));
     c->lhs = lhs;
     c->rhs = rhs;
     return c;

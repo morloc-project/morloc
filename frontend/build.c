@@ -8,11 +8,20 @@ void _resolve_grprefs(Ws* ws_top);
 void _resolve_one_grpref(Ws* global, W* e_ref);
 
 void _link_default_functions(Ws* ws_top){
-    /* Table* t_man = table_recursive_get_type(t_top, C_MANIFOLD);  */
-    /* for(Entry* e_man = t_man->head; e_man; e_man = e_man->next){ */
-    /*     Manifold* m = e_man->value.manifold;                     */
-    /*     m->function = strdup(e_man->id->name);                   */
-    /* }                                                            */
+    Ws* ws = ws_rfilter(ws_top, ws_recurse_most, w_is_manifold);
+    for(W* w = ws->head; w; w = w->next){
+        W* lhs = w->value.couplet->lhs;
+        W* rhs = w->value.couplet->rhs;
+        Manifold* m = rhs->value.manifold;
+
+printf(" >>l %s\n", w_str(lhs));
+printf(" >>r %s\n", w_str(rhs));
+printf(" >>%s\n", lhs->value.label->name);
+printf(" >>%p\n\n", m);
+
+// TODO: the line below segfaults:
+        /* m->function = strdup(lhs->value.label->name); */
+    }
 }
 
 // link all top level elements in c_{i+1} as inputs to c_i

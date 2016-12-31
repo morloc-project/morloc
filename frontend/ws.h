@@ -27,16 +27,21 @@ Ws* ws_join(Ws* a, Ws* b);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
+int ws_length(Ws* ws);
+
 void ws_print(const Ws* ws, Ws*(*recurse)(W*));
 
-int ws_length(Ws* ws);
+// Recursively moves through a Ws, accumulating W that meet a criterion into a flat list
+Ws* ws_rfilter( const Ws*, Ws*(*recurse)(W*), bool(*criterion)(W*) );
 
 
 // Recursion rules
-Ws* ws_recurse_ws(W* w);   // recurse into P_WS
-Ws* ws_recurse_all(W* w);  // recurse into any component with Ws type
+Ws* ws_recurse_ws(W* w);   // recurse into V_WS
+Ws* ws_recurse_most(W* w); // recurse into V_WS and V_COUPLET (but not manifolds)
 Ws* ws_recurse_none(W* w); // no recursion
 
+// Criteria
+bool w_is_manifold(W* w);
 
 
 // ==== ASSIMILATE ME =================================================

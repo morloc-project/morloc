@@ -101,10 +101,41 @@ int ws_length(Ws* ws){
     return size;
 }
 
+
+
+Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(W*), bool(*criterion)(W*) ){
+
+    Ws* result = NULL;
+
+    if(!ws || !ws->head) return NULL;
+
+    for(W* w = ws->head; w; w = w->next){
+
+        if(criterion(w)){
+            result = ws_add(result, w);
+        }
+
+        Ws* rs = recurse(w);
+
+        if(!rs) continue;
+
+        for(W* r = rs->head; r; r = r->next){
+            Ws* down = ws_rfilter(r->value.ws, recurse, criterion);
+            result = ws_join(result, down);
+        }
+    }
+
+    return result;
+}
+
+bool w_is_manifold(W* w){
+    return w->cls == C_MANIFOLD;
+}
+
 // === recursion rules ==============================================
 // ------------------------------------------------------------------
 
-Ws* ws_recurse_all(W* w){
+Ws* ws_recurse_most(W* w){
     if(!w) return NULL;
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){

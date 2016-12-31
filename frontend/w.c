@@ -61,6 +61,7 @@ W* w_new(Class cls, void* value){
             break;
         case V_MANIFOLD:
             w->value.manifold = value;
+            break;
     }
 
     return w;

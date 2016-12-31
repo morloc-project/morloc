@@ -71,6 +71,9 @@ couple ::
     Couplet* c = couplet_new(l, r); 
     W* wc = w_new(C_MANIFOLD, c);
 
+
+printf(" . %s\n", w_str(r));
+
     LOG("C_MANIFOLD");
     yylval.COMPOSON = wc;
     return COMPOSON;
