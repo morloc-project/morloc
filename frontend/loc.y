@@ -6,8 +6,8 @@
 %}
 
 %code requires{
-/* #include "lil.h"   */
-/* #include "build.h" */
+#include "lil.h"
+#include "build.h"
 #include "ws.h"
 #include "lhs.h"
 Ws* global_table;

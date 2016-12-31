@@ -114,10 +114,10 @@ Ws* ws_recurse_all(W* w){
         case V_COUPLET:
             {
                 W* lhs = w->value.couplet->lhs;
-                W* rhs = w->value.couplet->rhs;
                 if(get_value_type(lhs->cls) == V_WS){
                     rs = ws_add_val(rs, P_WS, lhs->value.ws);
                 }
+                W* rhs = w->value.couplet->rhs;
                 if(get_value_type(rhs->cls) == V_WS){
                     rs = ws_add_val(rs, P_WS, rhs->value.ws);
                 }
