@@ -11,6 +11,8 @@ typedef enum {
     X_NONE=0,     // X for special, I suppose
     P_STRING,     // P for primitive
     P_WS,
+    P_COUPLET,
+    P_MANIFOLD,
     T_EFFECT,     // T for top level
     T_PATH,       
     C_COMPOSON,   // C for composition
@@ -30,7 +32,8 @@ typedef enum {
     V_STRING,
     V_WS,
     V_COUPLET,
-    V_LABEL
+    V_LABEL,
+    V_MANIFOLD
 } VType;
 
 typedef struct W{

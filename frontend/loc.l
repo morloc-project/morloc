@@ -66,13 +66,12 @@ couple ::
 
 
 <S_PATH>{var} {
-    W* w = label_from_str(yytext);
+    W* l = label_from_str(yytext);
+    W* r = w_new(P_MANIFOLD, manifold_new());
+    Couplet* c = couplet_new(l, r); 
+    W* wc = w_new(C_MANIFOLD, c);
+
     LOG("C_MANIFOLD");
-    W* m = w_new(C_MANIFOLD, manifold_new());
-    Couplet* c = couplet_new(); 
-    c->lhs = w;
-    c->rhs = m;
-    W* wc = w_new(T_PATH, c);
     yylval.COMPOSON = wc;
     return COMPOSON;
 }

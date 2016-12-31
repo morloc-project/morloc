@@ -20,16 +20,17 @@ VType get_value_type(Class cls){
         case T_PATH:
         case T_EFFECT:
         case C_MANIFOLD:
+        case P_COUPLET:
             vtype = V_COUPLET;
-            break;
-        case X_NONE:
-            vtype = V_NONE;
             break;
         case K_LABEL:
             vtype = V_LABEL;
             break;
-        default:
-            fprintf(stderr, "Illegal VType: %d\n", cls);
+        case P_MANIFOLD:
+            vtype = V_MANIFOLD;
+        case X_NONE:
+            vtype = V_NONE;
+            break;
     }
     return vtype;
 
@@ -58,8 +59,8 @@ W* w_new(Class cls, void* value){
         case V_LABEL:
             w->value.label = value;
             break;
-        default:
-            break;
+        case V_MANIFOLD:
+            w->value.manifold = value;
     }
 
     return w;
@@ -86,6 +87,8 @@ char* class_str(Class cls){
         case K_LIST:       s = strdup("K_LIST");       break;
         case K_PATH:       s = strdup("K_PATH");       break;
         case P_WS:         s = strdup("P_WS");         break;
+        case P_COUPLET:    s = strdup("P_COUPLET");    break;
+        case P_MANIFOLD:   s = strdup("P_MANIFOLD");   break;
         case C_POSITIONAL: s = strdup("C_POSITIONAL"); break;
         case C_GRPREF:     s = strdup("C_GRPREF");     break;
         case P_STRING:     s = strdup("P_STRING");     break;
@@ -95,7 +98,6 @@ char* class_str(Class cls){
         case C_MANIFOLD:   s = strdup("C_MANIFOLD");   break;
         case X_NONE:       s = strdup("X_NONE");       break;
         case K_LABEL:      s = strdup("K_LABEL");      break;
-        default:           s = strdup("ERROR!!!");     break;
     }
     return s;
 }
@@ -128,8 +130,8 @@ char* w_str(const W* w){
                 w->value.label->label
             );
             break;
-        default:
-            sprintf(s, "ERROR: invalid type");
+        case V_MANIFOLD:
+            sprintf(s, "%s", c);
             break;
     }
     return s;

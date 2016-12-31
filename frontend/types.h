@@ -24,7 +24,7 @@ typedef struct Label{
 
 Manifold* manifold_new();
 Label* label_new();
-Couplet* couplet_new();
+Couplet* couplet_new(struct W* lhs, struct W* rhs);
 
 
 // ==== ASSIMILATE ME =================================================

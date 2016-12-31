@@ -8,8 +8,11 @@ Label* label_new(){
     return (Label*)calloc(1, sizeof(Label));
 }
 
-Couplet* couplet_new(){
-    return (Couplet*)calloc(1, sizeof(Couplet));
+Couplet* couplet_new(struct W* lhs, struct W* rhs){
+    Couplet* c = (Couplet*)calloc(1, sizeof(Couplet));
+    c->lhs = lhs;
+    c->rhs = rhs;
+    return c;
 }
 
 

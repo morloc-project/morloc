@@ -41,9 +41,7 @@ section
 s_path
     : SECTION_PATH { $$ = NULL; }
     | s_path IDENTIFIER COUPLE composition {
-        Couplet* c = couplet_new();
-        c->lhs = $2;
-        c->rhs = w_new(P_WS, $4);
+        Couplet* c = couplet_new($2, w_new(P_WS, $4));
         W* w = w_new(T_PATH, c);
         $$ = ws_add($1, w);
     }
@@ -51,10 +49,8 @@ s_path
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
     | s_effect SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new();
-        c->lhs = $2;
-        c->rhs = $4;
-        W* w = w_new(T_EFFECT, w); 
+        Couplet* c = couplet_new($2, $4);
+        W* w = w_new(T_EFFECT, c); 
         $$ = ws_add($1, w);
     }
 
