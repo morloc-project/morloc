@@ -1,7 +1,7 @@
 #include "build.h"
 
 void _link_inputs(Ws* ws_top);
-void _link_couplets(Ws* ws_top, Class type);
+void _link_couplets(Ws* ws_top);
 void _link_default_functions(Ws* ws_top);
 bool _resolve_grprefs_r(Ws* global, Ws* current);
 void _resolve_grprefs(Ws* ws_top);
@@ -39,42 +39,37 @@ void _link_inputs(Ws* ws_top){
     /* }                                                                                        */
 }
 
-/* Mouse has only one couplet type: EFFECT. Rat has a bunch. So the switch
- * statements will be more populous. This function does the following: 
- *  1. Find all couplets of the given type
- *  2. For each couplet:
- *  3.   Find all manifolds in its path
- *  4.   For each manifold couple the given element
- */
-void _link_couplets(Ws* ws_top, Class type){
-    /* Table* t_couplet = table_recursive_get_type(t_top, type);                                   */
-    /* if(t_couplet && t_couplet->head){                                                           */
-    /*     for(Entry* e = t_couplet->head; e; e = e->next){                                        */
-    /*         Table* t_man = NULL;                                                                */
-    /*         switch(type){                                                                       */
-    /*             case T_EFFECT:                                                                  */
-    /*                 t_man = table_selection_get(t_top, e->value.effect->selection, C_MANIFOLD); */
-    /*                 break;                                                                      */
-    /*             default:                                                                        */
-    /*                 fprintf(stderr, "ILLEGAL TYPE\n");                                          */
-    /*                 exit(EXIT_FAILURE);                                                         */
-    /*         }                                                                                   */
-    /*                                                                                             */
-    /*         if(!t_man) continue;                                                                */
-    /*                                                                                             */
-    /*         for(Entry* ee = t_man->head; ee; ee = ee->next){                                    */
-    /*             Manifold* m = ee->value.manifold;                                               */
-    /*             switch(type){                                                                   */
-    /*                 case T_EFFECT:                                                              */
-    /*                     m->effect = e->value.effect->function;                                  */
-    /*                     break;                                                                  */
-    /*                 default:                                                                    */
-    /*                     fprintf(stderr, "ILLEGAL TYPE\n");                                      */
-    /*                     exit(EXIT_FAILURE);                                                     */
-    /*             }                                                                               */
-    /*         }                                                                                   */
-    /*     }                                                                                       */
-    /* }                                                                                           */
+void _link_couplets(Ws* ws_top){
+    Ws* t_couplet = ws_flatten(ws_top, ws_recurse_most);
+
+    if(!t_couplet) return;
+
+    /* for(Entry* e = t_couplet->head; e; e = e->next){                                        */
+    /*     Table* t_man = NULL;                                                                */
+    /*     switch(type){                                                                       */
+    /*         case T_EFFECT:                                                                  */
+    /*             t_man = table_selection_get(t_top, e->value.effect->selection, C_MANIFOLD); */
+    /*             break;                                                                      */
+    /*         default:                                                                        */
+    /*             fprintf(stderr, "ILLEGAL TYPE\n");                                          */
+    /*             exit(EXIT_FAILURE);                                                         */
+    /*     }                                                                                   */
+    /*                                                                                         */
+    /*     if(!t_man) continue;                                                                */
+    /*                                                                                         */
+    /*     for(Entry* ee = t_man->head; ee; ee = ee->next){                                    */
+    /*         Manifold* m = ee->value.manifold;                                               */
+    /*         switch(type){                                                                   */
+    /*             case T_EFFECT:                                                              */
+    /*                 m->effect = e->value.effect->function;                                  */
+    /*                 break;                                                                  */
+    /*             default:                                                                    */
+    /*                 fprintf(stderr, "ILLEGAL TYPE\n");                                      */
+    /*                 exit(EXIT_FAILURE);                                                     */
+    /*         }                                                                               */
+    /*     }                                                                                   */
+    /* }                                                                                       */
+
 }
 
 void _resolve_one_grpref(Ws* global, W* e_ref){
@@ -130,5 +125,5 @@ void build_manifolds(Ws* ws_top){
 
     _link_default_functions(ws_top);
     _link_inputs(ws_top);
-    _link_couplets(ws_top, T_EFFECT);
+    _link_couplets(ws_top);
 }

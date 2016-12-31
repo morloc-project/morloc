@@ -27,21 +27,70 @@ Ws* ws_join(Ws* a, Ws* b);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
-int ws_length(Ws* ws);
+int ws_length(const Ws* ws);
 
-void ws_print(const Ws* ws, Ws*(*recurse)(W*));
+void ws_print(const Ws* ws, Ws*(*recurse)(const W*));
 
 // Recursively moves through a Ws, accumulating W that meet a criterion into a flat list
-Ws* ws_rfilter( const Ws*, Ws*(*recurse)(W*), bool(*criterion)(W*) );
+Ws* ws_rfilter(
+    const Ws*,
+    Ws*(*recurse)(const W*),
+    bool(*criterion)(const W*)
+);
 
+// Parameterized version of ws_rfilter
+Ws* ws_prfilter(
+    const Ws*,
+    const W*,
+    Ws*(*recurse)(const W*, const W*),
+    bool(*criterion)(const W*, const W*),
+    W*(*nextval)(const W*)
+);
 
-// Recursion rules
-Ws* ws_recurse_ws(W* w);   // recurse into V_WS
-Ws* ws_recurse_most(W* w); // recurse into V_WS and V_COUPLET (but not manifolds)
-Ws* ws_recurse_none(W* w); // no recursion
+Ws* ws_map(const Ws*, W*(*map)(const W*));
 
-// Criteria
-bool w_is_manifold(W* w);
+Ws* ws_map2(const Ws*, const Ws*, W*(*map)(const W*, const W*));
+
+Ws* ws_map3(const Ws*, const Ws*, const Ws*, W*(*map)(const W*, const W*, const W*));
+
+Ws* ws_filter_map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    W*(*map)(const W* x)
+);
+
+Ws* ws_filter_2map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    Ws*(*yfilter)(const Ws*),
+    W*(*map)(const W* x, const W* y)
+);
+
+Ws* ws_filter_3map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    Ws*(*yfilter)(const Ws*),
+    Ws*(*zfilter)(const Ws*),
+    W*(*map)(const W* x, const W* y, const W* z)
+);
+
+// Removing nesting in a list (as specified by the recursion rule).
+// This is just a wrapper for ws_rfilter, with criterion := w_keep_all.
+Ws* ws_flatten(const Ws*, Ws*(*recurse)(const W*));
+
+// recurse rules
+Ws* ws_recurse_ws(const W*);   // recurse into V_WS
+Ws* ws_recurse_most(const W*); // recurse into V_WS and V_COUPLET (but not manifolds)
+Ws* ws_recurse_none(const W*); // no recursion
+// parameterized recurse rules
+Ws* ws_recurse_path(const W*, const W*);
+
+// criteria functions
+bool w_is_manifold(const W*);
+bool w_keep_all(const W*);
+// parameterized criteria functions
+bool w_name_match(const W*, const W*);
+
+// nextval functions
+W* w_next(W*);
+W* w_id(W*);
 
 
 // ==== ASSIMILATE ME =================================================

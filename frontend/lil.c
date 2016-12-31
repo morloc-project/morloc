@@ -16,7 +16,7 @@ void print_manifold_lil(W* c_m){
         for(W* w = m->inputs->head; w; w = w->next){
             switch(w->cls){
                 case C_MANIFOLD:
-                    printf("INPM m%d %d m%d\n", m->uid, i++, w->uid);
+                    printf("INPM m%d %d m%d\n", m->uid, i++, w->value.manifold->uid);
                     break;
                 case C_POSITIONAL:
                     printf("INPP m%d %d %s\n", m->uid, i++, w->value.string);

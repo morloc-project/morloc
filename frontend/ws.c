@@ -72,7 +72,7 @@ Ws* ws_join(Ws* a, Ws* b){
 }
 
 
-void ws_print_r(const Ws* ws, Ws*(*recurse)(W*), int depth){
+void ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
 
     if(!ws || !ws->head) return;
 
@@ -90,11 +90,11 @@ void ws_print_r(const Ws* ws, Ws*(*recurse)(W*), int depth){
     }
 }
 
-void ws_print(const Ws* ws, Ws*(*recurse)(W*)){
+void ws_print(const Ws* ws, Ws*(*recurse)(const W*)){
     ws_print_r(ws, recurse, 0);
 }
 
-int ws_length(Ws* ws){
+int ws_length(const Ws* ws){
     if(!ws) return 0;
     int size = 0;
     for(W* w = ws->head; w; w = w->next){ size++; }
@@ -102,40 +102,147 @@ int ws_length(Ws* ws){
 }
 
 
+Ws* ws_flatten( const Ws* ws, Ws*(*recurse)(const W*) ){
+    return ws_rfilter(ws, recurse, w_keep_all);
+}
 
-Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(W*), bool(*criterion)(W*) ){
-
+Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(const W*), bool(*criterion)(const W*) ){
     Ws* result = NULL;
-
     if(!ws || !ws->head) return NULL;
-
     for(W* w = ws->head; w; w = w->next){
-
         if(criterion(w)){
             result = ws_add(result, w);
         }
-
         Ws* rs = recurse(w);
-
         if(!rs) continue;
-
         for(W* r = rs->head; r; r = r->next){
             Ws* down = ws_rfilter(r->value.ws, recurse, criterion);
             result = ws_join(result, down);
         }
     }
-
     return result;
 }
 
-bool w_is_manifold(W* w){
+Ws* ws_prfilter(
+    const Ws* ws,
+    const W* p,
+    Ws*(*recurse)(const W*, const W*),
+    bool(*criterion)(const W*, const W*),
+    W*(*nextval)(const W*)
+){
+    Ws* result = NULL;
+    if(!ws || !ws->head) return NULL;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w, p)){
+            result = ws_add(result, w);
+        }
+        Ws* rs = recurse(w, p); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            Ws* down = ws_prfilter(r->value.ws, nextval(p), recurse, criterion, nextval);
+            result = ws_join(result, down);
+        }
+    }
+    return result;
+}
+
+Ws* ws_map(const Ws* ws, W*(*map)(const W*)){
+    Ws* result = NULL;
+    if(!ws) return NULL;
+    for(W* w = ws->head; w; w = w->next){
+       result = ws_add(result, map(w)); 
+    }
+    return result;
+}
+
+Ws* ws_2map(const Ws* xs, const Ws* ys, W*(*map)(const W*, const W*)){
+    Ws* result = NULL;
+    if(!(xs && ys)) return NULL;
+    for(W* x = xs->head; x; x = x->next){
+        for(W* y = ys->head; y; y = y->next){ 
+            result = ws_add(result, map(x, y));
+        }
+    }
+    return result;
+}
+
+Ws* ws_3map(const Ws* xs, const Ws* ys, const Ws* zs, W*(*map)(const W* x, const W* y, const W* z)){
+    Ws* result = NULL;
+    if(!(xs && ys && zs)) return NULL;
+    for(W* x = xs->head; x; x = x->next){
+        for(W* y = ys->head; y; y = y->next){ 
+            for(W* z = zs->head; z; z = z->next){ 
+                result = ws_add(result, map(x, y, z));
+            }
+        }
+    }
+    return result;
+}
+
+Ws* ws_pmap(const Ws* ws, const W* p, W*(*map)(const W*, const W*)){
+    Ws* result = NULL;
+    for(W* w = ws->head; w; w = w->next){
+       result = ws_add(result, map(w, p)); 
+    }
+    return result;
+}
+
+Ws* ws_filter_map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    W*(*map)(const W* x)
+){
+    Ws* xs = xfilter(top);
+    return ws_map(xs, map);
+}
+
+Ws* ws_filter_2map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    Ws*(*yfilter)(const Ws*),
+    W*(*map)(const W* x, const W* y)
+){
+    Ws* xs = xfilter(top);
+    Ws* ys = yfilter(top);
+    return ws_2map(xs, ys, map);
+}
+
+Ws* ws_filter_3map(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    Ws*(*yfilter)(const Ws*),
+    Ws*(*zfilter)(const Ws*),
+    W*(*map)(const W* x, const W* y, const W* z)
+){
+    Ws* xs = xfilter(top);
+    Ws* ys = yfilter(top);
+    Ws* zs = zfilter(top);
+    return ws_3map(xs, ys, zs, map);
+}
+
+
+// === nextval functions ============================================
+
+W* w_next(W* w){ return w->next; }
+
+W* w_identity(W* w){ return w; }
+
+// === filter criteria ==============================================
+// ------------------------------------------------------------------
+
+bool w_is_manifold(const W* w){
     return w->cls == C_MANIFOLD;
+}
+
+bool w_keep_all(const W* w){
+    return true;
+}
+
+bool w_name_match(const W* w, const W* p){
+    return false; // STUB
 }
 
 // === recursion rules ==============================================
 // ------------------------------------------------------------------
 
-Ws* ws_recurse_most(W* w){
+Ws* ws_recurse_most(const W* w){
     if(!w) return NULL;
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){
@@ -159,7 +266,7 @@ Ws* ws_recurse_most(W* w){
     return rs;
 }
 
-Ws* ws_recurse_ws(W* w){
+Ws* ws_recurse_ws(const W* w){
     if(!w) return NULL;
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){
@@ -172,7 +279,7 @@ Ws* ws_recurse_ws(W* w){
     return rs;
 }
 
-Ws* ws_recurse_none(W* w){
+Ws* ws_recurse_none(const W* w){
     return NULL;
 }
 

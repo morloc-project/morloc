@@ -6,6 +6,7 @@
 A :: cut . `francis` *T . dandelionpancakeparade
 T :: map . &(a . b) foo . &B
 B :: fifi . fofo
+C :: a ( b ( c ( d ) ) )
 
 # @effect
 # A/B/C :: hey
