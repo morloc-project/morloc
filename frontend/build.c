@@ -13,14 +13,7 @@ void _link_default_functions(Ws* ws_top){
         W* lhs = w->value.couplet->lhs;
         W* rhs = w->value.couplet->rhs;
         Manifold* m = rhs->value.manifold;
-
-printf(" >>l %s\n", w_str(lhs));
-printf(" >>r %s\n", w_str(rhs));
-printf(" >>%s\n", lhs->value.label->name);
-printf(" >>%p\n\n", m);
-
-// TODO: the line below segfaults:
-        /* m->function = strdup(lhs->value.label->name); */
+        m->function = strdup(lhs->value.label->name);
     }
 }
 

@@ -28,6 +28,7 @@ VType get_value_type(Class cls){
             break;
         case P_MANIFOLD:
             vtype = V_MANIFOLD;
+            break;
         case X_NONE:
             vtype = V_NONE;
             break;

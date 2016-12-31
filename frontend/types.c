@@ -1,7 +1,10 @@
 #include "types.h"
 
 Manifold* manifold_new(){
-    return (Manifold*)calloc(1, sizeof(Manifold));
+    static int uid = 0;
+    Manifold* m = (Manifold*)calloc(1, sizeof(Manifold));
+    m->uid = uid++;
+    return m;
 }
 
 Label* label_new(){
