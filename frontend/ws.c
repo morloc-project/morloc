@@ -72,7 +72,13 @@ Ws* ws_join(Ws* a, Ws* b){
 }
 
 void ws_assert_class(const W* w, Class cls){
-    if(w->cls != cls){
+    if(!w){
+        fprintf(
+            stderr,
+            "Class assertion failed! Got NULL, expected %s.\n",
+            w_class_str(cls)
+        );
+    } else if(w->cls != cls){
         fprintf(
             stderr,
             "Class assertion failed! Got %s, expected %s.\n",
@@ -82,13 +88,21 @@ void ws_assert_class(const W* w, Class cls){
 }
 
 void ws_assert_type(const W* w, VType type){
-    VType t = get_value_type(w->cls);
-    if(t != type){
+    if(!w){
         fprintf(
             stderr,
-            "Type assertion failed! Got %s, expected %s.\n",
-            w_type_str(t), w_type_str(type)
+            "Type assertion failed! Got NULL, expected %s.\n",
+            w_type_str(type)
         );
+    } else {
+        VType t = get_value_type(w->cls);
+        if(t != type){
+            fprintf(
+                stderr,
+                "Type assertion failed! Got %s, expected %s.\n",
+                w_type_str(t), w_type_str(type)
+            );
+        }
     }
 }
 
@@ -148,7 +162,7 @@ Ws* ws_prfilter(
     const W* p,
     Ws*(*recurse)(const W*, const W*),
     bool(*criterion)(const W*, const W*),
-    W*(*nextval)(const W*)
+    const W*(*nextval)(const W* p, const W* w)
 ){
     Ws* result = NULL;
     if(!ws || !ws->head) return NULL;
@@ -159,7 +173,7 @@ Ws* ws_prfilter(
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            Ws* down = ws_prfilter(r->value.ws, nextval(p), recurse, criterion, nextval);
+            Ws* down = ws_prfilter(r->value.ws, nextval(p, w), recurse, criterion, nextval);
             result = ws_join(result, down);
         }
     }
@@ -170,21 +184,22 @@ void ws_prmod(
     const Ws* ws,
     const W* p,
     Ws*(*recurse)(const W*, const W*),
-    void(*mod)(const W*),
-    W*(*nextval)(const W*)
+    void(*mod)(const W*, const W*),
+    const W*(*nextval)(const W* p, const W* w)
 ){
     if(!ws || !ws->head) return;
     for(W* w = ws->head; w; w = w->next){
-        mod(w);
+        mod(w, p);
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            ws_prmod(r->value.ws, nextval(p), recurse, mod, nextval);
+            ws_prmod(r->value.ws, nextval(p, w), recurse, mod, nextval);
         }
     }
 }
 
-void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*)){
+void ws_map_pmod(Ws* xs, const Ws* ps, void(*pmod)(Ws*, const W*)){
+    if(!ps) return;
     for(W* p = ps->head; p; p = p->next){
         pmod(xs, p);
     }
@@ -321,55 +336,15 @@ void ws_2cone(const Ws* top,
     }
 }
 
-/*
-
-link . (trace_paths . *B top) *B
-B :: get_paths . get_couplets . top
-
-
-Ws* ws_split_couplet(const W*);
-
-
-void ws_prmod(
-    const Ws* ws,
-    const W* p,
-    Ws*(*recurse)(const W*, const W*),
-    void(*mod)(const W*),
-    W*(*nextval)(const W*)
-);
-
-void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*));
-
-
-
-
-Ws* get_couplets(Ws* top);
-Ws* get_paths(Ws* UUU, W* couplet);
-Ws* trace_paths(Ws* top, W* UUU, W* path)
-void link(Ws* UUU, W* couplet, W* UUU, W* target);
-
-ws_2cone(ws, get_couplets, get_paths, trace_paths, link);
-
-top  - everything
-xfilter - everything -> x:couplets
-yfilter - x -> y:paths
-zfilter - everything -> y -> z:targets
-map - x -> z -> void
-
-
-ws_filter_map(ws, RESOLVE_PATHS, COUPLE);
-
-for each path in list
-    filter out elements that match path
-    map f over them
-
-*/
-
 // === nextval functions ============================================
 
-W* w_next(W* w){ return w->next; }
+const W* w_nextval_always(const W* p, const W* w){ return p->next; }
 
-W* w_identity(W* w){ return w; }
+const W* w_nextval_never(const W* p, const W* w){ return p; }
+
+const W* w_nextval_ifpath(const W* p, const W* w) {
+    return w->cls == T_PATH ? p->next : p;
+}
 
 // === filter criteria ==============================================
 // ------------------------------------------------------------------
@@ -387,6 +362,7 @@ bool w_name_match(const W* w, const W* p){
 }
 
 // === recursion rules ==============================================
+// NOTE: recursion rules are splits
 // ------------------------------------------------------------------
 
 Ws* ws_recurse_most(const W* w){
@@ -399,11 +375,11 @@ Ws* ws_recurse_most(const W* w){
         case V_COUPLET:
             {
                 W* lhs = w->value.couplet->lhs;
-                if(get_value_type(lhs->cls) == V_WS){
+                if(w_is_recursive(lhs)){
                     rs = ws_add_val(rs, P_WS, lhs->value.ws);
                 }
                 W* rhs = w->value.couplet->rhs;
-                if(get_value_type(rhs->cls) == V_WS){
+                if(w_is_recursive(rhs)){
                     rs = ws_add_val(rs, P_WS, rhs->value.ws);
                 }
             }
@@ -430,6 +406,56 @@ Ws* ws_recurse_none(const W* w){
     return NULL;
 }
 
+bool ws_cmp_lhs_to_label(W* lhs, Label* b){
+
+    bool result;
+
+    switch(lhs->cls){
+        case K_NAME:
+            result = false;
+            break;
+        case K_LABEL:
+            result = label_cmp(lhs->value.label, b);
+            break;
+        case K_PATH:
+            result = label_cmp(lhs->value.ws->head->value.label, b);
+            break;
+        case K_LIST:
+            result = false;
+            fprintf(stderr, "Recursion into K_LIST not supported (%s:%d)", __func__, __LINE__);
+            break;
+        default:
+            result = false;
+            fprintf(stderr, "Illegal left hand side (%s:%d)", __func__, __LINE__);
+            break;
+    }
+
+    return result;
+}
+
+Ws* ws_recurse_path(const W* w, const W* p){
+
+    Ws* result;
+
+    ws_assert_type(p, K_LABEL);
+
+    switch(w->cls){
+        case C_NEST:
+            result = w->value.ws;
+            break;
+        case T_PATH:
+            result = ws_cmp_lhs_to_label(w->value.couplet->lhs, p->value.label) ?
+                w->value.ws : NULL;
+            break;
+        default:
+            result = NULL;
+            break;
+    }
+
+    return result;
+}
+
+
 // ------------------------------------------------------------------
 // ==================================================================
 
@@ -439,6 +465,14 @@ Ws* ws_recurse_none(const W* w){
 
 // ==== ASSIMILATE ME =================================================
 // vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+
+/* bool w_is_alone(const W* o);      */
+/*                                   */
+/* bool w_is_iterative(const W* o);  */
+/*                                   */
+/* bool w_is_collective(const W* o); */
+/*                                   */
+/* bool w_is_homogenous(const W* o); */
 
 /* bool is_recursive(TType type);                              */
 /*                                                             */

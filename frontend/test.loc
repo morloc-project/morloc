@@ -8,9 +8,9 @@ T :: map . &(a . b) foo . &B
 B :: fifi . fofo
 C :: a ( b ( c ( d ) ) )
 
-# @effect
-# A/B/C :: hey
-# A/B/D:voodoo,FooFoo/Jane:yoyo :: hey
+@effect
+# A/T/B/fifi :: superfastjellyfish
+foo :: sparklycandyparrot
 
 # @path
 # Death :: x . (z . *Peach) applepie

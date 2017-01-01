@@ -117,6 +117,10 @@ char* w_class_str(Class cls){
     return s;
 }
 
+bool w_is_recursive(const W* w){
+   return get_value_type(w->cls) == V_WS; 
+}
+
 char* w_str(const W* w){
     if(!w) return NULL;
     char* s = (char*)malloc(1024 * sizeof(char));

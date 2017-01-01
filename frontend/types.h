@@ -24,27 +24,13 @@ typedef struct Label{
 } Label;
 
 Manifold* manifold_new();
+
 Label* label_new();
+
+Label* label_new_set(char* name, char* label);
+
 Couplet* couplet_new(struct W* lhs, struct W* rhs);
 
-
-// ==== ASSIMILATE ME =================================================
-// vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
-
-// Couplet* entry_new(W* lhs, W* rhs);
-//
-// [> get an exact copy of an entry <]
-// Couplet* entry_copy(const Couplet* e);
-//
-// [> copy an entry and unlink it <]
-// Couplet* entry_isolate(const Couplet* e);
-//
-// void entry_print(const Couplet* e);
-//
-// Couplet* entry_from_lhs(Class cls, const char* s){
-//
-// Couplet* entry_add_rhs(Couplet* entry, void* rhs){
-
-// ====================================================================
+bool label_cmp(Label* a, Label* b);
 
 #endif
