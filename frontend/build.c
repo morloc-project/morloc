@@ -57,9 +57,7 @@ bool _manifold_modifier(const W* w){
 
 // add the modifier stored in p (rhs of couplet) to w
 void _add_modifier(const W* w, const W* p){
-    if(w->cls != C_MANIFOLD) return;
-    if(!p) return;
-
+    if(!p || w->cls != C_MANIFOLD) return;
     Manifold* m = w->value.couplet->rhs->value.manifold;
     W* rhs = p->value.couplet->rhs;
     switch(p->cls){
@@ -85,34 +83,7 @@ void _link_couplets(Ws* ws_top){
 
     cs = ws_map_split(cs, ws_split_couplet);
 
-    // maps ws_prmod over parameter list ps
     ws_map_pmod(ws_top, cs, _mod_pathwise);
-
-    /* for(Entry* e = t_couplet->head; e; e = e->next){                                        */
-    /*     Table* t_man = NULL;                                                                */
-    /*     switch(type){                                                                       */
-    /*         case T_EFFECT:                                                                  */
-    /*             t_man = table_selection_get(t_top, e->value.effect->selection, C_MANIFOLD); */
-    /*             break;                                                                      */
-    /*         default:                                                                        */
-    /*             fprintf(stderr, "ILLEGAL TYPE\n");                                          */
-    /*             exit(EXIT_FAILURE);                                                         */
-    /*     }                                                                                   */
-    /*                                                                                         */
-    /*     if(!t_man) continue;                                                                */
-    /*                                                                                         */
-    /*     for(Entry* ee = t_man->head; ee; ee = ee->next){                                    */
-    /*         Manifold* m = ee->value.manifold;                                               */
-    /*         switch(type){                                                                   */
-    /*             case T_EFFECT:                                                              */
-    /*                 m->effect = e->value.effect->function;                                  */
-    /*                 break;                                                                  */
-    /*             default:                                                                    */
-    /*                 fprintf(stderr, "ILLEGAL TYPE\n");                                      */
-    /*                 exit(EXIT_FAILURE);                                                     */
-    /*         }                                                                               */
-    /*     }                                                                                   */
-    /* }                                                                                       */
 
 }
 

@@ -134,40 +134,4 @@ const W* w_nextval_ifpath(const W* p, const W* w);
 // Utilities
 bool ws_cmp_lhs_to_label(W* c, Label* b);
 
-
-
-
-// /* Recursively copy the input table.
-//  *   - Names and labels in Id structs are copied.
-//  *   - Type is preserved
-//  *   - Group references are NOT resolved, but copied as strings
-//  *   - Entry and Manifold objects have new uids.
-//  *   - All manifold properties are cleared.
-//  *   - Only items in a PATH are cloned, anything else is an error
-//  */
-// Table* table_clone(const Table* table);
-// 
-// /* Given a composon, get an ordered list of the functions that produce output */
-// Table* table_composon_outputs(const Entry* entry);
-// 
-// /* Given a composon, get a list of manifolds that receive input. This list is
-//  * ordered, but needn't be, since order doesn't matter: each manifold is linked
-//  * to each output of the following coposon. */
-// Table* table_composon_inputs(const Entry* entry);
-// 
-// /* ****** NOTE ***************************************************************
-//  * For all the *get* functions, the returned Entry's are copies.  Modification
-//  * of the returned Entry's will not affect the contents of the input table.
-//  * However, the values the Entry's contain are still pointers to the realities,
-//  * so they CAN be changed.
-//  * **************************************************************************/
-// 
-// Table* table_get(const Table* table, Id* id, TType type);
-// 
-// Table* table_selection_get(const Table* table, Selection* name, TType type); 
-// 
-// Table* table_recursive_get(const Table* table, Id* id, TType type); 
-// 
-// Table* table_recursive_get_type(const Table* table, TType type);
-
 #endif
