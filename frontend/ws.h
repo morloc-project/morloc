@@ -51,28 +51,60 @@ Ws* ws_prfilter(
     W*(*nextval)(const W*)
 );
 
-void ws_map(const Ws*, void(*map)(const W*));
 
-void ws_map2(const Ws*, const Ws*, void(*map)(const W*, const W*));
-
-void ws_map3(const Ws*, const Ws*, const Ws*, void(*map)(const W*, const W*, const W*));
-
-void ws_filter_map(const Ws* top,
-    Ws*(*xfilter)(const Ws*),
-    void(*map)(const W* x)
+// like ws_prfilter, but modifies rather than filtering.
+void Ws_prmod(
+    const Ws* ws,
+    const W* p,
+    Ws*(*recurse)(const W*, const W*),
+    void(*mod)(const W*),
+    W*(*nextval)(const W*)
 );
 
-void ws_filter_2map(const Ws* top,
+// maps ws_prmod over parameter list ps
+void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*));
+
+/* Turns one couplet into a list of couplets, each with a single path (lhs). */
+Ws* ws_split_couplet(const W*);
+
+/* A 'split' takes one thing and returns several:
+ *
+ * split :: a -> [b]
+ *
+ * map_split maps a split over a list and flattens the list:
+ *
+ * map_split :: [a] -> (a -> [b]) -> [b]
+ *
+ * Notice the flattening, the output isn't `[[b]]`
+ *
+ * contrast this to a simple map:
+ *
+ * map :: [a] -> (a -> b) -> [b]
+ */
+Ws* ws_map_split(const Ws* ws, Ws*(*split)(const W*));
+
+void ws_mod(const Ws*, void(*mod)(const W*));
+
+void ws_mod2(const Ws*, const Ws*, void(*mod)(const W*, const W*));
+
+void ws_mod3(const Ws*, const Ws*, const Ws*, void(*mod)(const W*, const W*, const W*));
+
+void ws_filter_mod(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    void(*mod)(const W* x)
+);
+
+void ws_filter_2mod(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
-    void(*map)(const W* x, const W* y)
+    void(*mod)(const W* x, const W* y)
 );
 
-void ws_filter_3map(const Ws* top,
+void ws_filter_3mod(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
     Ws*(*zfilter)(const Ws*),
-    void(*map)(const W* x, const W* y, const W* z)
+    void(*mod)(const W* x, const W* y, const W* z)
 );
 
 // Removing nesting in a list (as specified by the recursion rule).

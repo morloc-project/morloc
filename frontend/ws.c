@@ -166,69 +166,204 @@ Ws* ws_prfilter(
     return result;
 }
 
-void ws_map(const Ws* ws, void(*map)(const W*)){
-    if(!ws) return;
+void ws_prmod(
+    const Ws* ws,
+    const W* p,
+    Ws*(*recurse)(const W*, const W*),
+    void(*mod)(const W*),
+    W*(*nextval)(const W*)
+){
+    if(!ws || !ws->head) return;
     for(W* w = ws->head; w; w = w->next){
-       map(w); 
-    }
-}
-
-void ws_2map(const Ws* xs, const Ws* ys, void(*map)(const W*, const W*)){
-    if(!(xs && ys)) return;
-    for(W* x = xs->head; x; x = x->next){
-        for(W* y = ys->head; y; y = y->next){ 
-            map(x, y);
+        mod(w);
+        Ws* rs = recurse(w, p); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            ws_prmod(r->value.ws, nextval(p), recurse, mod, nextval);
         }
     }
 }
 
-void ws_3map(const Ws* xs, const Ws* ys, const Ws* zs, void(*map)(const W* x, const W* y, const W* z)){
+void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*)){
+    for(W* p = ps->head; p; p = p->next){
+        pmod(xs, p);
+    }
+}
+
+Ws* ws_split_couplet(const W* c){
+    ws_assert_type(c, V_COUPLET);
+    Ws* result = NULL;
+    W* paths = c->value.couplet->lhs;
+    switch(paths->cls){
+        case K_LIST:
+            {
+                for(W* p = paths->value.ws->head; p; p = p->next){
+                    W* nc = w_isolate(c);
+                    nc->value.couplet->lhs = p;
+                    result = ws_add(result, nc); 
+                }
+            }
+            break;
+        case K_PATH:
+        case K_LABEL:
+        case K_NAME:
+            result = ws_add(result, c); 
+            break;
+        default:
+            fprintf(stderr, "ERROR: invalid lhs type in couplet (%s:%d)", __func__, __LINE__);
+            break;
+    }
+    return result;
+}
+
+Ws* ws_map_split(const Ws* ws, Ws*(*split)(const W*)){
+    if(!ws) return NULL;
+    Ws* result = NULL;
+    for(W* w = ws->head; w; w = w->next){
+       result = ws_join(result, split(w)); 
+    }
+    return result;
+}
+
+void ws_mod(const Ws* ws, void(*mod)(const W*)){
+    if(!ws) return;
+    for(W* w = ws->head; w; w = w->next){
+       mod(w); 
+    }
+}
+
+void ws_2mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*)){
+    if(!(xs && ys)) return;
+    for(W* x = xs->head; x; x = x->next){
+        for(W* y = ys->head; y; y = y->next){ 
+            mod(x, y);
+        }
+    }
+}
+
+void ws_3mod(const Ws* xs, const Ws* ys, const Ws* zs, void(*mod)(const W* x, const W* y, const W* z)){
     if(!(xs && ys && zs)) return;
     for(W* x = xs->head; x; x = x->next){
         for(W* y = ys->head; y; y = y->next){ 
             for(W* z = zs->head; z; z = z->next){ 
-                map(x, y, z);
+                mod(x, y, z);
             }
         }
     }
 }
 
-void ws_pmap(const Ws* ws, const W* p, void(*map)(const W*, const W*)){
+void ws_pmod(const Ws* ws, const W* p, void(*mod)(const W*, const W*)){
     for(W* w = ws->head; w; w = w->next){
-       map(w, p); 
+       mod(w, p); 
     }
 }
 
-void ws_filter_map(const Ws* top,
+void ws_filter_mod(const Ws* top,
     Ws*(*xfilter)(const Ws*),
-    void(*map)(const W* x)
+    void(*mod)(const W* x)
 ){
     Ws* xs = xfilter(top);
-    ws_map(xs, map);
+    ws_mod(xs, mod);
 }
 
-void ws_filter_2map(const Ws* top,
+void ws_filter_2mod(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
-    void(*map)(const W* x, const W* y)
+    void(*mod)(const W* x, const W* y)
 ){
     Ws* xs = xfilter(top);
     Ws* ys = yfilter(top);
-    ws_2map(xs, ys, map);
+    ws_2mod(xs, ys, mod);
 }
 
-void ws_filter_3map(const Ws* top,
+void ws_filter_3mod(const Ws* top,
     Ws*(*xfilter)(const Ws*),
     Ws*(*yfilter)(const Ws*),
     Ws*(*zfilter)(const Ws*),
-    void(*map)(const W* x, const W* y, const W* z)
+    void(*mod)(const W* x, const W* y, const W* z)
 ){
     Ws* xs = xfilter(top);
     Ws* ys = yfilter(top);
     Ws* zs = zfilter(top);
-    ws_3map(xs, ys, zs, map);
+    ws_3mod(xs, ys, zs, mod);
 }
 
+
+void ws_cone(const Ws* top,
+    Ws*(*xfilter)(const Ws*),
+    Ws*(*yfilter)(const Ws*, const W*),
+    void(*mod)(const Ws*, const W* x, const W* y)
+){
+    Ws* xs = xfilter(top);
+    for(W* x = xs->head; x; x = x->next){
+        Ws* ys = yfilter(top, x);
+        for(W* y = ys->head; y; y = y->next){ 
+            mod(top, x, y);
+        }
+    }
+}
+
+void ws_2cone(const Ws* top,
+    Ws*(*xfilter)(const Ws* top),
+    Ws*(*yfilter)(const Ws* top, const W* x),
+    Ws*(*zfilter)(const Ws* top, const W* x, const W* y),
+    void(*mod)(const Ws* top, const W* x, const W* y, const W* z)
+){
+    Ws* xs = xfilter(top);
+    for(W* x = xs->head; x; x = x->next){
+        Ws* ys = yfilter(top, x);
+        for(W* y = ys->head; y; y = y->next){ 
+            Ws* zs = zfilter(top, x, y);
+            for(W* z = zs->head; z; z = z->next){ 
+                mod(top, x, y, z);
+            }
+        }
+    }
+}
+
+/*
+
+link . (trace_paths . *B top) *B
+B :: get_paths . get_couplets . top
+
+
+Ws* ws_split_couplet(const W*);
+
+
+void ws_prmod(
+    const Ws* ws,
+    const W* p,
+    Ws*(*recurse)(const W*, const W*),
+    void(*mod)(const W*),
+    W*(*nextval)(const W*)
+);
+
+void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*));
+
+
+
+
+Ws* get_couplets(Ws* top);
+Ws* get_paths(Ws* UUU, W* couplet);
+Ws* trace_paths(Ws* top, W* UUU, W* path)
+void link(Ws* UUU, W* couplet, W* UUU, W* target);
+
+ws_2cone(ws, get_couplets, get_paths, trace_paths, link);
+
+top  - everything
+xfilter - everything -> x:couplets
+yfilter - x -> y:paths
+zfilter - everything -> y -> z:targets
+map - x -> z -> void
+
+
+ws_filter_map(ws, RESOLVE_PATHS, COUPLE);
+
+for each path in list
+    filter out elements that match path
+    map f over them
+
+*/
 
 // === nextval functions ============================================
 

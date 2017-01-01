@@ -130,7 +130,7 @@ void _resolve_grprefs(Ws* ws_top){
 void build_manifolds(Ws* ws_top){
     _resolve_grprefs(ws_top);
 
-    ws_filter_map(ws_top, _get_manifolds, _set_default_manifold_function);
+    ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
 
     _link_inputs(ws_top);
     _link_couplets(ws_top);
