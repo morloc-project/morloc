@@ -32,9 +32,10 @@ VType get_value_type(Class cls){
         case X_NONE:
             vtype = V_NONE;
             break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return vtype;
-
 }
 
 W* w_new(Class cls, void* value){
@@ -63,6 +64,8 @@ W* w_new(Class cls, void* value){
         case V_MANIFOLD:
             w->value.manifold = value;
             break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
 
     return w;
@@ -81,20 +84,22 @@ W* w_copy(const W* w){
 }
 
 char* w_type_str(VType type){
-    char* s;
+    char* s = NULL;
     switch(type){
-        case V_NONE:     s = strdup("V_NONE"); break;
-        case V_STRING:   s = strdup("V_NONE"); break;
-        case V_WS:       s = strdup("V_NONE"); break;
-        case V_COUPLET:  s = strdup("V_NONE"); break;
-        case V_LABEL:    s = strdup("V_NONE"); break;
-        case V_MANIFOLD: s = strdup("V_NONE"); break;
+        case V_NONE:     s = strdup("V_NONE");     break;
+        case V_STRING:   s = strdup("V_STRING");   break;
+        case V_WS:       s = strdup("V_WS");       break;
+        case V_COUPLET:  s = strdup("V_COUPLET");  break;
+        case V_LABEL:    s = strdup("V_LABEL");    break;
+        case V_MANIFOLD: s = strdup("V_MANIFOLD"); break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }
 
 char* w_class_str(Class cls){
-    char* s;
+    char* s = NULL;
     switch(cls){
         case C_COMPOSON:   s = strdup("C_COMPOSON");   break;
         case C_NEST:       s = strdup("C_NEST");       break;
@@ -113,6 +118,8 @@ char* w_class_str(Class cls){
         case C_MANIFOLD:   s = strdup("C_MANIFOLD");   break;
         case X_NONE:       s = strdup("X_NONE");       break;
         case K_LABEL:      s = strdup("K_LABEL");      break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }
@@ -152,6 +159,8 @@ char* w_str(const W* w){
         case V_MANIFOLD:
             sprintf(s, "%s", c);
             break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }

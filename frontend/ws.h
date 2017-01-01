@@ -25,6 +25,9 @@ void ws_assert_type(const W*, VType);
  */
 Ws* ws_add(Ws* ws, const W* w);
 
+/* Make a new table that with the first element dropped */
+Ws* ws_increment(const Ws* ws);
+
 /* b is destroyed upon join */
 Ws* ws_join(Ws* a, Ws* b);
 

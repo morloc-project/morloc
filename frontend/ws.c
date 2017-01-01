@@ -106,6 +106,15 @@ void ws_assert_type(const W* w, VType type){
     }
 }
 
+Ws* ws_increment(const Ws* ws){
+    Ws* n = NULL;
+    if(ws && ws->head != ws->tail){
+        n = (Ws*)malloc(sizeof(Ws));
+        n->head = ws->head->next;
+    }
+    return n;
+}
+
 void ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
 
     if(!ws || !ws->head) return;
@@ -343,7 +352,26 @@ const W* w_nextval_always(const W* p, const W* w){ return p->next; }
 const W* w_nextval_never(const W* p, const W* w){ return p; }
 
 const W* w_nextval_ifpath(const W* p, const W* w) {
-    return w->cls == T_PATH ? p->next : p;
+    W* next = NULL;
+    if(w->cls == T_PATH){
+        W* lhs = p->value.couplet->lhs;
+        switch(lhs->cls){
+            case K_PATH:
+                next = w_isolate(w);
+                next->value.couplet->lhs->value.ws = ws_increment(lhs->value.ws);
+                break;
+            case K_LIST:
+                next = NULL;
+                fprintf(stderr, "Not supported (%s:%d)", __func__, __LINE__);
+                break;
+            default:
+                next = NULL;
+                break;
+        }
+    } else {
+        next = w_isolate(w);
+    }
+    return next;
 }
 
 // === filter criteria ==============================================
@@ -437,7 +465,7 @@ Ws* ws_recurse_path(const W* w, const W* p){
 
     Ws* result;
 
-    ws_assert_type(p, K_LABEL);
+    ws_assert_type(p, V_COUPLET);
 
     switch(w->cls){
         case C_NEST:

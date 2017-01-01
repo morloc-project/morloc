@@ -57,17 +57,22 @@ bool _manifold_modifier(const W* w){
 
 // add the modifier stored in p (rhs of couplet) to w
 void _add_modifier(const W* w, const W* p){
-    /* if(w->cls != C_MANIFOLD) return;                    */
-    /* switch(p->cls){                                     */
-    /*     case T_EFFECT:                                  */
-    /*         w->value.couplet->rhs->value.manifold;      */
-    /*         break;                                      */
-    /*     default:                                        */
-    /*         fprintf(                                    */
-    /*             stderr, "Illegal p (%s) in %s:%d",      */
-    /*             w_class_str(p->cls), __func__, __LINE__ */
-    /*         );                                          */
-    /* }                                                   */
+    if(w->cls != C_MANIFOLD) return;
+    if(!p) return;
+
+    Manifold* m = w->value.couplet->rhs->value.manifold;
+    W* rhs = p->value.couplet->rhs;
+    switch(p->cls){
+        case T_EFFECT:
+            ws_assert_type(rhs, V_STRING);
+            m->effects = ws_add_val(m->effects, P_STRING, rhs->value.string);
+            break;
+        default:
+            fprintf(
+                stderr, "Illegal p (%s) in %s:%d",
+                w_class_str(p->cls), __func__, __LINE__
+            );
+    }
 }
 
 void _mod_pathwise(Ws* ws, const W* p){
@@ -78,13 +83,7 @@ void _link_couplets(Ws* ws_top){
 
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
 
-    // ERROR: this is returning NULL, it shouldn't
     cs = ws_map_split(cs, ws_split_couplet);
-
-    if(!cs){
-        fprintf(stderr, "WARNING: no couplets is NULL (%s:%d)\n", __func__, __LINE__);
-        return;
-    }
 
     // maps ws_prmod over parameter list ps
     ws_map_pmod(ws_top, cs, _mod_pathwise);
