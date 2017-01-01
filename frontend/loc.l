@@ -10,6 +10,7 @@ int popfile(void);
 FILE* toklog;
 #define LOG(x) fprintf(toklog, x); fflush(toklog);
 #define LOGV(x,a) fprintf(toklog, x, a); fflush(toklog);
+
 %}
 
 %option header-file="lex.yy.h"
@@ -35,7 +36,7 @@ couple ::
 
 %%
 
-^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); return SECTION_PATH;   }
+^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); return SECTION_PATH; }
 ^@effect { LOG("SECTION_EFFECT"); BEGIN(S_CPLT); return SECTION_EFFECT; }
 
 {ws} { LOGV("%s", yytext); }
@@ -56,35 +57,43 @@ couple ::
         unput(s[j]);
     }
     s[i] = '\0';
-    yylval.IDENTIFIER = id_from_str(s);
-    LOG("IDENTIFIER");
+    W* w = label_from_str(s);
+    LOGV("IDENTIFIER(%s,", w->value.label->name);
+    LOGV("%s) ", w->value.label->label);
+    yylval.IDENTIFIER = w;
     return IDENTIFIER;
 }
 
+
 <S_PATH>{var} {
-    Id* id = id_from_str(yytext);
     Manifold* m = manifold_new();
-    yylval.COMPOSON = entry_new(id, C_MANIFOLD, m);
+    W* l = label_from_str(yytext);
+    W* r = w_new(P_MANIFOLD, m);
+    Couplet* c = couplet_new(l, r); 
+    W* wc = w_new(C_MANIFOLD, c);
     LOG("C_MANIFOLD");
+    yylval.COMPOSON = wc;
     return COMPOSON;
 }
 <S_PATH>{grpref} {
     char* s = strdup(yytext + 1);
-    Id* id = id_from_str(s);
-    yylval.COMPOSON = entry_new(id, C_GRPREF, s);
+    W* w = w_new(C_GRPREF, s);
+    yylval.COMPOSON = w;
     LOG("C_GRPREF");
     return COMPOSON;
 }
 <S_PATH>{positional} {
     // copy the section of the string between the quotation marks
     int N = strlen(yytext);
-    char* s = (char*)malloc((N-1) * sizeof(char));
+    char* s = (char*)calloc((N-1), sizeof(char));
     memcpy(s, yytext+1, (N-2)*sizeof(char));
     s[N-2] = '\0';
-    yylval.COMPOSON = entry_new(NULL, C_POSITIONAL, s);
+    W* w = w_new(C_POSITIONAL, s);
+    yylval.COMPOSON = w;
     LOG("C_POSITIONAL");
     return COMPOSON;
 }
+
 
 <S_CPLT>{selection} {
     char* s = strdup(yytext);
@@ -100,18 +109,20 @@ couple ::
     }
     s[i+1] = '\0';
 
+    W* w = list_from_str(s);
+    yylval.SELECTION = w;
     LOG("SELECTION");
-    yylval.SELECTION = selection_from_str(s);
     return SELECTION;
 }
 
-{var} { 
-    LOG("VARIABLE");
-    yylval.VARIABLE = strdup(yytext);
+{var} {
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.VARIABLE = w;
+    LOGV("VARIABLE:%s", yytext);
     return VARIABLE;
 }
 
-.    { LOGV("%c ", yytext[0]); return yytext[0]; }
+. { LOGV("%c", yytext[0]); return yytext[0]; }
 
 %%
 

@@ -1,8 +1,8 @@
 #ifndef __LIL_H__
 #define __LIL_H__
 
-#include "table.h"
+#include "ws.h"
 
-void print_lil(Table* t);
+void print_lil(Ws* t);
 
 #endif

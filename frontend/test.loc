@@ -1,7 +1,16 @@
 @path
-# A :: cut . `francis` foo . dandelionpancakeparade
-A :: map . &(a . b) foo . &B
+# A :: x y z . t
+# B :: x . y . z
+# C :: x (y . z) . t
+
+A :: cut . `francis` *T . dandelionpancakeparade
+T :: map . &(a . b) foo . &B
 B :: fifi . fofo
+C :: a ( b ( c ( d ) ) )
+
+@effect
+# A/T/B/fifi :: superfastjellyfish
+foo :: sparklycandyparrot
 
 # @path
 # Death :: x . (z . *Peach) applepie

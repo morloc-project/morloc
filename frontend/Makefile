@@ -13,19 +13,15 @@ C_PARSER=${TARGET}.tab.c
 H_PARSER=${TARGET}.tab.h
 
 FILES =         \
-	${C_PARSER} \
 	${C_LEXER}  \
-	path.c      \
-	table.c     \
-	effect.c    \
-	manifold.c  \
-	entry.c     \
-	lil.c       \
-	selection.c \
-	id.c        \
+	${C_PARSER} \
 	bufstack.c  \
-	util.c      \
-	build.c
+	lhs.c       \
+	ws.c        \
+	w.c         \
+	types.c     \
+	build.c     \
+	lil.c
 
 all:
 	bison -d --report=all -Wall ${SRC_BISON}
