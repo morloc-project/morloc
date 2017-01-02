@@ -163,62 +163,97 @@ void w_assert_type(const W* w, VType type){
     }
 }
 
+bool _is_valid_lhs(const W* w){
+    bool is_valid;
+    switch(w->cls){
+        case K_LIST:
+        case K_PATH:
+        case K_LABEL:
+        case K_NAME:
+            is_valid = true;
+            break;
+        default:
+            is_valid = false;
+            break;
+    }
+    return is_valid;
+}
+
 char* g_string(const W* w) {
-    w_assert_type(w, V_COUPLET);
+    if(!w) return NULL;
+    w_assert_type(w, V_STRING);
     return w->value.string;
 }
 struct Ws* g_ws(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_WS);
     return w->value.ws;
 }
 struct Couplet* g_couplet(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet;
 }
 struct Label* g_label(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_LABEL);
     return w->value.label;
 }
 struct Manifold* g_manifold(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_MANIFOLD);
     return w->value.manifold;
 }
 W* g_lhs(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->lhs;
 }
 W* g_rhs(const W* w) {
+    if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->rhs;
 }
 
 void s_string(W* w, char* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_string"); return;}
     w_assert_type(w, V_STRING);
     w->value.string = v;
 }
 void s_ws(W* w, struct Ws* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_ws"); return;}
     w_assert_type(w, V_WS);
     w->value.ws = v;
 }
 void s_couplet(W* w, Couplet* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_couplet"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet = v;
 }
 void s_label(W* w, Label* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_label"); return;}
     w_assert_type(w, V_LABEL);
     w->value.label = v;
 }
 void s_manifold(W* w, Manifold* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_manifold"); return;}
     w_assert_type(w, V_MANIFOLD);
     w->value.manifold = v;
 }
-
-// TODO assert v is a path
 void s_lhs(W* w, W* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_lhs"); return;}
     w_assert_type(w, V_COUPLET);
+    if(!_is_valid_lhs(v)){
+        fprintf(
+            stderr,
+            "WARNING: illegal value on couplet lhs. Expected K_*, got %s.",
+            w_type_str(v->cls) 
+        );
+    }
     w->value.couplet->lhs = v;
 }
 void s_rhs(W* w, W* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_rhs"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet->rhs = v;
 }

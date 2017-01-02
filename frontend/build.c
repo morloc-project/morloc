@@ -10,11 +10,9 @@ void _resolve_one_grpref(Ws* global, W* e_ref);
 // Given the couplet {Label, Manifold}, transfer the name from Label to
 // Manifold->function IFF it is not already defined.
 void _set_default_manifold_function(const W* cm){
-    W* lhs = g_lhs(cm);
-    W* rhs = g_rhs(cm);
-    Manifold* m = g_manifold(rhs);
+    Manifold* m = g_manifold(g_rhs(cm));
     if(!m->function){
-        m->function = strdup(g_label(lhs)->name);
+        m->function = strdup(g_label(g_lhs(cm))->name);
     }
 }
 

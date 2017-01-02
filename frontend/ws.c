@@ -73,9 +73,10 @@ Ws* ws_join(Ws* a, Ws* b){
 
 Ws* ws_increment(const Ws* ws){
     Ws* n = NULL;
-    if(ws && ws->head != ws->tail){
+    if(ws && ws->head && ws->head->next){
         n = (Ws*)malloc(sizeof(Ws));
         n->head = ws->head->next;
+        n->tail = ws->tail;
     }
     return n;
 }
@@ -356,14 +357,19 @@ const W* w_nextval_always(const W* p, const W* w){ return p->next; }
 
 const W* w_nextval_never(const W* p, const W* w){ return p; }
 
+/* p a modifier (e.g. effect).
+ * w a node into which we are recursing
+ *
+ * if w is a path, we need to pop the top level of p's lhs.
+ */
 const W* w_nextval_ifpath(const W* p, const W* w) {
     W* next = NULL;
-    if(w->cls == T_PATH){
+    if(w->cls == T_PATH){ // this is the only role w plays
         W* lhs = g_lhs(p);
         switch(lhs->cls){
             case K_PATH:
-                next = w_isolate(w);
-                g_lhs(next)->value.ws = ws_increment(g_ws(lhs));
+                next = w_isolate(p);
+                s_ws(g_lhs(next), ws_increment(g_ws(lhs)));
                 break;
             case K_LIST:
                 next = NULL;
@@ -374,7 +380,7 @@ const W* w_nextval_ifpath(const W* p, const W* w) {
                 break;
         }
     } else {
-        next = w_isolate(w);
+        next = w_isolate(p);
     }
     return next;
 }
@@ -440,6 +446,7 @@ Ws* ws_recurse_none(const W* w){
 }
 
 Label* _ws_get_label_from_lhs(W* a){
+    if(!a) return NULL;
     Label* label = NULL;
     switch(a->cls){
         case K_NAME:
@@ -449,7 +456,7 @@ Label* _ws_get_label_from_lhs(W* a){
             label = g_label(a);
             break;
         case K_PATH:
-            label = g_label(g_ws(a)->head);
+            label = g_ws(a) ? g_label(g_ws(a)->head) : NULL;
             break;
         case K_LIST:
             label = NULL;

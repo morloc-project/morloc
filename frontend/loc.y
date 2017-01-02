@@ -77,7 +77,8 @@ composition
         $$ = ws_new(n);
     }
     | composition composition %prec CONCAT {
-        $1->tail->value.ws = ws_join($1->tail->value.ws, $2->head->value.ws);
+        Ws* ws = ws_join(g_ws($1->tail), g_ws($2->head));
+        s_ws($1->tail, ws);
     }
     | composition '.' composition {
         $$ = ws_join($1, $3);
