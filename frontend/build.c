@@ -53,6 +53,9 @@ bool _manifold_modifier(const W* w){
 }
 
 // add the modifier stored in p (rhs of couplet) to w
+// if:
+//   1. the p->lhs contains only one name
+//   2. the name matches the name of w
 void _add_modifier(const W* w, const W* p){
     if(!p || w->cls != C_MANIFOLD) return;
     Manifold* m = g_manifold(g_rhs(w));
@@ -70,8 +73,19 @@ void _add_modifier(const W* w, const W* p){
     }
 }
 
+bool _basename_match(const W* w, const W* p){
+    bool result = false;
+    if(w->cls == C_MANIFOLD){
+        Ws* pws = g_ws(g_lhs(p));
+        result =
+            ws_length(pws) == 1 &&
+            label_cmp(g_label(pws->head), g_label(g_lhs(w)));
+    }
+    return result;
+}
+
 void _mod_pathwise(Ws* ws_top, const W* p){
-    ws_prmod(ws_top, p, ws_recurse_path, _add_modifier, w_nextval_ifpath);
+    ws_prmod(ws_top, p, ws_recurse_path, _basename_match, _add_modifier, w_nextval_ifpath);
 }
 
 void _link_couplets(Ws* ws_top){

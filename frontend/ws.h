@@ -56,6 +56,7 @@ void ws_prmod(
     const Ws* ws,
     const W* p,
     Ws*(*recurse)(const W*, const W*),
+    bool(*criterion)(const W*, const W*),
     void(*mod)(const W*, const W*),
     const W*(*nextval)(const W*, const W*)
 );
@@ -120,8 +121,6 @@ Ws* ws_recurse_path(const W*, const W*);
 // criteria functions
 bool w_is_manifold(const W*);
 bool w_keep_all(const W*);
-// parameterized criteria functions
-bool w_name_match(const W*, const W*);
 
 // nextval functions
 const W* w_nextval_always(const W* p, const W* w);

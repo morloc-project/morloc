@@ -104,7 +104,7 @@ void ws_print(const Ws* ws, Ws*(*recurse)(const W*)){
 }
 
 int ws_length(const Ws* ws){
-    if(!ws) return 0;
+    if(!ws || !ws->head) return 0;
     int size = 0;
     for(W* w = ws->head; w; w = w->next){ size++; }
     return size;
@@ -135,9 +135,9 @@ Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(const W*), bool(*criterion)(const W*
 Ws* ws_prfilter(
     const Ws* ws,
     const W* p,
-    Ws*(*recurse)(const W*, const W*),
-    bool(*criterion)(const W*, const W*),
-    const W*(*nextval)(const W* p, const W* w)
+    Ws*(*recurse)(const W* w, const W* p),
+    bool(*criterion)(const W* w, const W* p),
+    const W*(*nextval)(const W* w, const W* p)
 ){
     Ws* result = NULL;
     if(!ws || !ws->head) return NULL;
@@ -148,7 +148,7 @@ Ws* ws_prfilter(
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            Ws* down = ws_prfilter(g_ws(r), nextval(p, w), recurse, criterion, nextval);
+            Ws* down = ws_prfilter(g_ws(r), nextval(w, p), recurse, criterion, nextval);
             result = ws_join(result, down);
         }
     }
@@ -158,17 +158,20 @@ Ws* ws_prfilter(
 void ws_prmod(
     const Ws* ws,
     const W* p,
-    Ws*(*recurse)(const W*, const W*),
-    void(*mod)(const W*, const W*),
-    const W*(*nextval)(const W* p, const W* w)
+    Ws*(*recurse)(const W* w, const W* p),
+    bool(*criterion)(const W* w, const W* p),
+    void(*mod)(const W* w, const W* p),
+    const W*(*nextval)(const W* w, const W* p)
 ){
     if(!ws || !ws->head) return;
     for(W* w = ws->head; w; w = w->next){
-        mod(w, p);
+        if(criterion(w,p)){
+            mod(w, p);
+        }
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            ws_prmod(g_ws(r), nextval(p, w), recurse, mod, nextval);
+            ws_prmod(g_ws(r), nextval(w, p), recurse, criterion, mod, nextval);
         }
     }
 }
@@ -353,18 +356,18 @@ char* w_str(const W* w){
 
 // === nextval functions ============================================
 
-const W* w_nextval_always(const W* p, const W* w){ return p->next; }
+const W* w_nextval_always(const W* w, const W* p){ return p->next; }
 
-const W* w_nextval_never(const W* p, const W* w){ return p; }
+const W* w_nextval_never(const W* w, const W* p){ return p; }
 
 /* p a modifier (e.g. effect).
  * w a node into which we are recursing
  *
  * if w is a path, we need to pop the top level of p's lhs.
  */
-const W* w_nextval_ifpath(const W* p, const W* w) {
+const W* w_nextval_ifpath(const W* w, const W* p) {
     W* next = NULL;
-    if(w->cls == T_PATH){ // this is the only role w plays
+    if(w->cls == T_PATH && ws_length(g_ws(g_lhs(p))) > 1){
         W* lhs = g_lhs(p);
         switch(lhs->cls){
             case K_PATH:
@@ -396,9 +399,6 @@ bool w_keep_all(const W* w){
     return true;
 }
 
-bool w_name_match(const W* w, const W* p){
-    return false; // STUB
-}
 
 // === recursion rules ==============================================
 // NOTE: recursion rules are splits
@@ -472,43 +472,24 @@ Label* _ws_get_label_from_lhs(W* a){
 
 bool ws_cmp_lhs(const W* a, const W* b){
 
-/* printf(" --- --- ws_cmp_lhs -----------\n"); */
+    Label* a_label = _ws_get_label_from_lhs(g_lhs(a));
+    Label* b_label = _ws_get_label_from_lhs(g_lhs(b));
 
-    W* a_lhs = g_lhs(a);
-    W* b_lhs = g_lhs(b);
-
-    Label* a_label = _ws_get_label_from_lhs(a_lhs);
-    Label* b_label = _ws_get_label_from_lhs(b_lhs);
-
-/* printf(" --- --- a=(%s:%s)\n", a_label->name, a_label->label); */
-/* printf(" --- --- b=(%s:%s)\n", b_label->name, b_label->label); */
-
-
-    bool result = label_cmp(a_label, b_label);
-
-/* printf(" --- --- result=%d\n", result);      */
-/* printf(" --- --- exiting ws_cmp_lhs ---\n"); */
-
-    return result;
+    return label_cmp(a_label, b_label);
 }
 
 Ws* ws_recurse_path(const W* w, const W* p){
-
-    Ws* result;
 
     w_assert_type(p, V_COUPLET);
 
     switch(w->cls){
         case C_NEST:
-            result = g_ws(w);
-            break;
+            return g_ws(w);
         case T_PATH:
-            result = ws_cmp_lhs(w, p) ? g_ws(g_rhs(w)) : NULL;
-            break;
+            return
+                ws_length(g_ws(g_lhs(p))) == 1 || ws_cmp_lhs(w, p) ?
+                g_ws(g_rhs(w)) : NULL;
         default:
-            result = NULL;
-            break;
+            return NULL;
     }
-
-    return result;
 }

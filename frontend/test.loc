@@ -1,18 +1,26 @@
 @path
+# M :: g . f
+
 # A :: x y z . t
 # B :: x . y . z
 # C :: x (y . z) . t
 
-A :: cut . `francis` *T . dandelionpancakeparade
-T :: map . &(a . b) foo . &B
-B :: fifi . fofo
-C :: a ( b ( c ( d ) ) )
+# A :: cut . `francis` *T . dandelionpancakeparade
+# T :: map . &(a . b) foo . &B
+# B :: fifi . fofo
+C :: a ( b ( c ( d b ) ) )
 
 @effect
+# M/g :: yoyopanic
+C/d :: stinkystacy
+b :: dowrap
+
+
 # A/T/B/fifi :: superfastjellyfish
-T/foo :: sparklycandyparrot
-A/T/foo :: pea
-A/cut,T/map :: foofoo
+# B/fifi :: slowcentipede
+# T/foo :: sparklycandyparrot
+# A/T/foo :: pea
+# A/cut,T/map :: foofoo
 
 # @path
 # Death :: x . (z . *Peach) applepie
