@@ -10,7 +10,9 @@ C :: a ( b ( c ( d ) ) )
 
 @effect
 # A/T/B/fifi :: superfastjellyfish
-foo :: sparklycandyparrot
+T/foo :: sparklycandyparrot
+A/T/foo :: pea
+A/cut,T/map :: foofoo
 
 # @path
 # Death :: x . (z . *Peach) applepie

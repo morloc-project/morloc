@@ -1,7 +1,7 @@
 #include "lil.h"
 
 void print_manifold_lil(W* c_m){
-    Manifold* m = c_m->value.couplet->rhs->value.manifold;
+    Manifold* m = g_manifold(g_rhs(c_m));
 
     if(!m) return;
 
@@ -16,10 +16,10 @@ void print_manifold_lil(W* c_m){
         for(W* w = m->inputs->head; w; w = w->next){
             switch(w->cls){
                 case C_MANIFOLD:
-                    printf("INPM m%d %d m%d\n", m->uid, i++, w->value.manifold->uid);
+                    printf("INPM m%d %d m%d\n", m->uid, i++, g_manifold(w)->uid);
                     break;
                 case C_POSITIONAL:
-                    printf("INPP m%d %d %s\n", m->uid, i++, w->value.string);
+                    printf("INPP m%d %d %s\n", m->uid, i++, g_string(w));
                     break;
                 case C_DEREF:
                     printf("NORM d%d\n", w->uid);
@@ -37,7 +37,7 @@ void print_manifold_lil(W* c_m){
 
     if(m->effects){
         for(W* w = m->effects->head; w; w = w->next){
-            printf("EFCT m%d %s\n", m->uid, w->value.string);
+            printf("EFCT m%d %s\n", m->uid, g_string(w));
         }
     }
 }
@@ -59,9 +59,9 @@ void print_epilog(Ws* ws_top){ }
 
 void print_lil(Ws* ws_top){
     if(ws_top && ws_top->head){
-        print_prolog(ws_top);
+        /* print_prolog(ws_top);    */
         print_manifolds(ws_top);
-        print_epilog(ws_top);
+        /* print_epilog(ws_top);    */
     } else {
         fprintf(stderr, "The symbol table is empty - nothing to do\n");
     }

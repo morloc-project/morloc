@@ -56,7 +56,7 @@ W* w_isolate(const W* w);
 
 W* w_copy(const W* w);
 
-char* w_str(const W* w);
+W* w_print(const W* w);
 
 VType get_value_type(Class cls);
 
@@ -65,5 +65,24 @@ char* w_class_str(Class);
 char* w_type_str(VType);
 
 bool w_is_recursive(const W* w);
+
+void w_assert_class(const W*, Class);
+
+void w_assert_type(const W*, VType);
+
+       char*     g_string   (const W* w);
+struct Ws*       g_ws       (const W* w);
+struct Couplet*  g_couplet  (const W* w);
+struct Label*    g_label    (const W* w);
+struct Manifold* g_manifold (const W* w);
+       W*        g_lhs      (const W* w);
+       W*        g_rhs      (const W* w);
+
+void s_ws       (W* w, struct Ws* v);
+void s_couplet  (W* w, Couplet*   v);
+void s_label    (W* w, Label*     v);
+void s_manifold (W* w, Manifold*  v);
+void s_lhs      (W* w, W*         v);
+void s_rhs      (W* w, W*         v);
 
 #endif

@@ -71,41 +71,6 @@ Ws* ws_join(Ws* a, Ws* b){
     return a;
 }
 
-void ws_assert_class(const W* w, Class cls){
-    if(!w){
-        fprintf(
-            stderr,
-            "Class assertion failed! Got NULL, expected %s.\n",
-            w_class_str(cls)
-        );
-    } else if(w->cls != cls){
-        fprintf(
-            stderr,
-            "Class assertion failed! Got %s, expected %s.\n",
-            w_class_str(w->cls), w_class_str(cls)
-        );
-    }
-}
-
-void ws_assert_type(const W* w, VType type){
-    if(!w){
-        fprintf(
-            stderr,
-            "Type assertion failed! Got NULL, expected %s.\n",
-            w_type_str(type)
-        );
-    } else {
-        VType t = get_value_type(w->cls);
-        if(t != type){
-            fprintf(
-                stderr,
-                "Type assertion failed! Got %s, expected %s.\n",
-                w_type_str(t), w_type_str(type)
-            );
-        }
-    }
-}
-
 Ws* ws_increment(const Ws* ws){
     Ws* n = NULL;
     if(ws && ws->head != ws->tail){
@@ -128,7 +93,7 @@ void ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
         if(!rs) continue;
 
         for(W* r = rs->head; r; r = r->next){
-            ws_print_r(r->value.ws, recurse, depth+1);
+            ws_print_r(g_ws(r), recurse, depth+1);
         }
     }
 }
@@ -159,7 +124,7 @@ Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(const W*), bool(*criterion)(const W*
         Ws* rs = recurse(w);
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            Ws* down = ws_rfilter(r->value.ws, recurse, criterion);
+            Ws* down = ws_rfilter(g_ws(r), recurse, criterion);
             result = ws_join(result, down);
         }
     }
@@ -182,7 +147,7 @@ Ws* ws_prfilter(
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            Ws* down = ws_prfilter(r->value.ws, nextval(p, w), recurse, criterion, nextval);
+            Ws* down = ws_prfilter(g_ws(r), nextval(p, w), recurse, criterion, nextval);
             result = ws_join(result, down);
         }
     }
@@ -202,7 +167,7 @@ void ws_prmod(
         Ws* rs = recurse(w, p); 
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
-            ws_prmod(r->value.ws, nextval(p, w), recurse, mod, nextval);
+            ws_prmod(g_ws(r), nextval(p, w), recurse, mod, nextval);
         }
     }
 }
@@ -215,15 +180,14 @@ void ws_map_pmod(Ws* xs, const Ws* ps, void(*pmod)(Ws*, const W*)){
 }
 
 Ws* ws_split_couplet(const W* c){
-    ws_assert_type(c, V_COUPLET);
     Ws* result = NULL;
-    W* paths = c->value.couplet->lhs;
+    W* paths = g_lhs(c);
     switch(paths->cls){
         case K_LIST:
             {
-                for(W* p = paths->value.ws->head; p; p = p->next){
+                for(W* p = g_ws(paths)->head; p; p = p->next){
                     W* nc = w_isolate(c);
-                    nc->value.couplet->lhs = p;
+                    s_lhs(nc, p);
                     result = ws_add(result, nc); 
                 }
             }
@@ -345,6 +309,47 @@ void ws_2cone(const Ws* top,
     }
 }
 
+char* w_str(const W* w){
+    if(!w) return NULL;
+    char* s = (char*)malloc(1024 * sizeof(char));
+    char* c = w_class_str(w->cls);
+    switch(get_value_type(w->cls)){
+        case V_NONE:
+            sprintf(s, "%s", c);
+            break;
+        case V_STRING:
+            sprintf(s, "%s(%s)", c, g_string(w));
+            break;
+        case V_WS:
+            {
+                int n = 0;
+                for(W* a = g_ws(w)->head; a; a = a->next) { n++; }
+                sprintf(s, "%s<n=%d>\n", c, n);
+            }
+            break;
+        case V_COUPLET:
+            sprintf(
+                s, "%s :: %s | %s", c,
+                w_str(g_lhs(w)),
+                w_str(g_rhs(w))
+            );
+            break;
+        case V_LABEL:
+            sprintf(
+                s, "%s(%s:%s)", c,
+                g_label(w)->name,
+                g_label(w)->label
+            );
+            break;
+        case V_MANIFOLD:
+            sprintf(s, "%s", c);
+            break;
+        default:
+            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+    }
+    return s;
+}
+
 // === nextval functions ============================================
 
 const W* w_nextval_always(const W* p, const W* w){ return p->next; }
@@ -354,11 +359,11 @@ const W* w_nextval_never(const W* p, const W* w){ return p; }
 const W* w_nextval_ifpath(const W* p, const W* w) {
     W* next = NULL;
     if(w->cls == T_PATH){
-        W* lhs = p->value.couplet->lhs;
+        W* lhs = g_lhs(p);
         switch(lhs->cls){
             case K_PATH:
                 next = w_isolate(w);
-                next->value.couplet->lhs->value.ws = ws_increment(lhs->value.ws);
+                g_lhs(next)->value.ws = ws_increment(g_ws(lhs));
                 break;
             case K_LIST:
                 next = NULL;
@@ -398,17 +403,17 @@ Ws* ws_recurse_most(const W* w){
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){
         case V_WS:
-            rs = ws_add_val(rs, P_WS, w->value.ws);
+            rs = ws_add_val(rs, P_WS, g_ws(w));
             break;
         case V_COUPLET:
             {
-                W* lhs = w->value.couplet->lhs;
+                W* lhs = g_lhs(w);
                 if(w_is_recursive(lhs)){
-                    rs = ws_add_val(rs, P_WS, lhs->value.ws);
+                    rs = ws_add_val(rs, P_WS, g_ws(lhs));
                 }
-                W* rhs = w->value.couplet->rhs;
+                W* rhs = g_rhs(w);
                 if(w_is_recursive(rhs)){
-                    rs = ws_add_val(rs, P_WS, rhs->value.ws);
+                    rs = ws_add_val(rs, P_WS, g_ws(rhs));
                 }
             }
         default:
@@ -422,7 +427,7 @@ Ws* ws_recurse_ws(const W* w){
     Ws* rs = NULL;
     switch(get_value_type(w->cls)){
         case V_WS:
-            rs = ws_add_val(rs, P_WS, w->value.ws);
+            rs = ws_add_val(rs, P_WS, g_ws(w));
             break;
         default:
             break;
@@ -434,29 +439,48 @@ Ws* ws_recurse_none(const W* w){
     return NULL;
 }
 
-bool ws_cmp_lhs_to_label(W* lhs, Label* b){
-
-    bool result;
-
-    switch(lhs->cls){
+Label* _ws_get_label_from_lhs(W* a){
+    Label* label = NULL;
+    switch(a->cls){
         case K_NAME:
-            result = false;
+            label = label_new_set(strdup(g_string(a)), NULL);
             break;
         case K_LABEL:
-            result = label_cmp(lhs->value.label, b);
+            label = g_label(a);
             break;
         case K_PATH:
-            result = label_cmp(lhs->value.ws->head->value.label, b);
+            label = g_label(g_ws(a)->head);
             break;
         case K_LIST:
-            result = false;
+            label = NULL;
             fprintf(stderr, "Recursion into K_LIST not supported (%s:%d)", __func__, __LINE__);
             break;
         default:
-            result = false;
+            label = NULL;
             fprintf(stderr, "Illegal left hand side (%s:%d)", __func__, __LINE__);
             break;
     }
+    return label;
+}
+
+bool ws_cmp_lhs(const W* a, const W* b){
+
+/* printf(" --- --- ws_cmp_lhs -----------\n"); */
+
+    W* a_lhs = g_lhs(a);
+    W* b_lhs = g_lhs(b);
+
+    Label* a_label = _ws_get_label_from_lhs(a_lhs);
+    Label* b_label = _ws_get_label_from_lhs(b_lhs);
+
+/* printf(" --- --- a=(%s:%s)\n", a_label->name, a_label->label); */
+/* printf(" --- --- b=(%s:%s)\n", b_label->name, b_label->label); */
+
+
+    bool result = label_cmp(a_label, b_label);
+
+/* printf(" --- --- result=%d\n", result);      */
+/* printf(" --- --- exiting ws_cmp_lhs ---\n"); */
 
     return result;
 }
@@ -465,15 +489,14 @@ Ws* ws_recurse_path(const W* w, const W* p){
 
     Ws* result;
 
-    ws_assert_type(p, V_COUPLET);
+    w_assert_type(p, V_COUPLET);
 
     switch(w->cls){
         case C_NEST:
-            result = w->value.ws;
+            result = g_ws(w);
             break;
         case T_PATH:
-            result = ws_cmp_lhs_to_label(w->value.couplet->lhs, p->value.label) ?
-                w->value.ws : NULL;
+            result = ws_cmp_lhs(w, p) ? g_ws(g_rhs(w)) : NULL;
             break;
         default:
             result = NULL;

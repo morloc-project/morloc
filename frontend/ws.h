@@ -14,9 +14,6 @@ typedef struct Ws{
 /* Copies entry and removes its link */
 Ws* ws_new(const W* w);
 
-void ws_assert_class(const W*, Class);
-void ws_assert_type(const W*, VType);
-
 /* If ws is NULL, this will create a new Ws.  This basically renders ws_new
  * unnecessary, although I keep it around for symmetry. Also, I do not allow
  * empty Ws. Having this default constructor take an element argument will
@@ -133,5 +130,7 @@ const W* w_nextval_ifpath(const W* p, const W* w);
 
 // Utilities
 bool ws_cmp_lhs_to_label(W* c, Label* b);
+
+char* w_str(const W* w);
 
 #endif

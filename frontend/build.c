@@ -10,12 +10,11 @@ void _resolve_one_grpref(Ws* global, W* e_ref);
 // Given the couplet {Label, Manifold}, transfer the name from Label to
 // Manifold->function IFF it is not already defined.
 void _set_default_manifold_function(const W* cm){
-    ws_assert_class(cm, C_MANIFOLD);
-    W* lhs = cm->value.couplet->lhs;
-    W* rhs = cm->value.couplet->rhs;
-    Manifold* m = rhs->value.manifold;
+    W* lhs = g_lhs(cm);
+    W* rhs = g_rhs(cm);
+    Manifold* m = g_manifold(rhs);
     if(!m->function){
-        m->function = strdup(lhs->value.label->name);
+        m->function = strdup(g_label(lhs)->name);
     }
 }
 
@@ -58,27 +57,28 @@ bool _manifold_modifier(const W* w){
 // add the modifier stored in p (rhs of couplet) to w
 void _add_modifier(const W* w, const W* p){
     if(!p || w->cls != C_MANIFOLD) return;
-    Manifold* m = w->value.couplet->rhs->value.manifold;
-    W* rhs = p->value.couplet->rhs;
+    Manifold* m = g_manifold(g_rhs(w));
+    W* rhs = g_rhs(p);
     switch(p->cls){
         case T_EFFECT:
-            ws_assert_type(rhs, V_STRING);
-            m->effects = ws_add_val(m->effects, P_STRING, rhs->value.string);
+            m->effects = ws_add_val(m->effects, P_STRING, g_string(rhs));
             break;
         default:
+            break;
             fprintf(
-                stderr, "Illegal p (%s) in %s:%d",
+                stderr, "Illegal p (%s) in %s:%d\n",
                 w_class_str(p->cls), __func__, __LINE__
             );
     }
 }
 
-void _mod_pathwise(Ws* ws, const W* p){
-    ws_prmod(ws, p, ws_recurse_path, _add_modifier, w_nextval_ifpath);
+void _mod_pathwise(Ws* ws_top, const W* p){
+    ws_prmod(ws_top, p, ws_recurse_path, _add_modifier, w_nextval_ifpath);
 }
 
 void _link_couplets(Ws* ws_top){
 
+    // Find all manifolds
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
 
     cs = ws_map_split(cs, ws_split_couplet);

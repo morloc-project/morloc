@@ -128,39 +128,97 @@ bool w_is_recursive(const W* w){
    return get_value_type(w->cls) == V_WS; 
 }
 
-char* w_str(const W* w){
-    if(!w) return NULL;
-    char* s = (char*)malloc(1024 * sizeof(char));
-    char* c = w_class_str(w->cls);
-    switch(get_value_type(w->cls)){
-        case V_NONE:
-            sprintf(s, "%s", c);
-            break;
-        case V_STRING:
-            sprintf(s, "%s(%s)", c, w->value.string);
-            break;
-        case V_WS:
-            sprintf(s, "%s", c);
-            break;
-        case V_COUPLET:
-            sprintf(
-                s, "%s :: %s | %s", c,
-                w_str(w->value.couplet->lhs),
-                w_str(w->value.couplet->rhs)
-            );
-            break;
-        case V_LABEL:
-            sprintf(
-                s, "%s(%s:%s)", c,
-                w->value.label->name,
-                w->value.label->label
-            );
-            break;
-        case V_MANIFOLD:
-            sprintf(s, "%s", c);
-            break;
-        default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+void w_assert_class(const W* w, Class cls){
+    if(!w){
+        fprintf(
+            stderr,
+            "Class assertion failed! Got NULL, expected %s.\n",
+            w_class_str(cls)
+        );
+    } else if(w->cls != cls){
+        fprintf(
+            stderr,
+            "Class assertion failed! Got %s, expected %s.\n",
+            w_class_str(w->cls), w_class_str(cls)
+        );
     }
-    return s;
+}
+
+void w_assert_type(const W* w, VType type){
+    if(!w){
+        fprintf(
+            stderr,
+            "Type assertion failed! Got NULL, expected %s.\n",
+            w_type_str(type)
+        );
+    } else {
+        VType t = get_value_type(w->cls);
+        if(t != type){
+            fprintf(
+                stderr,
+                "Type assertion failed! Got %s, expected %s.\n",
+                w_type_str(t), w_type_str(type)
+            );
+        }
+    }
+}
+
+char* g_string(const W* w) {
+    w_assert_type(w, V_COUPLET);
+    return w->value.string;
+}
+struct Ws* g_ws(const W* w) {
+    w_assert_type(w, V_WS);
+    return w->value.ws;
+}
+struct Couplet* g_couplet(const W* w) {
+    w_assert_type(w, V_COUPLET);
+    return w->value.couplet;
+}
+struct Label* g_label(const W* w) {
+    w_assert_type(w, V_LABEL);
+    return w->value.label;
+}
+struct Manifold* g_manifold(const W* w) {
+    w_assert_type(w, V_MANIFOLD);
+    return w->value.manifold;
+}
+W* g_lhs(const W* w) {
+    w_assert_type(w, V_COUPLET);
+    return w->value.couplet->lhs;
+}
+W* g_rhs(const W* w) {
+    w_assert_type(w, V_COUPLET);
+    return w->value.couplet->rhs;
+}
+
+void s_string(W* w, char* v){
+    w_assert_type(w, V_STRING);
+    w->value.string = v;
+}
+void s_ws(W* w, struct Ws* v){
+    w_assert_type(w, V_WS);
+    w->value.ws = v;
+}
+void s_couplet(W* w, Couplet* v){
+    w_assert_type(w, V_COUPLET);
+    w->value.couplet = v;
+}
+void s_label(W* w, Label* v){
+    w_assert_type(w, V_LABEL);
+    w->value.label = v;
+}
+void s_manifold(W* w, Manifold* v){
+    w_assert_type(w, V_MANIFOLD);
+    w->value.manifold = v;
+}
+
+// TODO assert v is a path
+void s_lhs(W* w, W* v){
+    w_assert_type(w, V_COUPLET);
+    w->value.couplet->lhs = v;
+}
+void s_rhs(W* w, W* v){
+    w_assert_type(w, V_COUPLET);
+    w->value.couplet->rhs = v;
 }
