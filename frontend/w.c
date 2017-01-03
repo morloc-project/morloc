@@ -229,6 +229,11 @@ W* g_rhs(const W* w) {
     return w->value.couplet->rhs;
 }
 
+void s_none(W* w){
+    if(!w) { fprintf(stderr, "Cannot set null in s_none"); return;}
+    w_assert_type(w, V_NONE);
+    w->value.string = NULL;
+}
 void s_string(W* w, char* v){
     if(!w) { fprintf(stderr, "Cannot set null in s_string"); return;}
     w_assert_type(w, V_STRING);
@@ -270,4 +275,55 @@ void s_rhs(W* w, W* v){
     if(!w) { fprintf(stderr, "Cannot set null in s_rhs"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet->rhs = v;
+}
+
+void force_set_none(W* w){
+    if(!w) { fprintf(stderr, "Cannot set null in s_none"); return;}
+    w->cls = X_NONE;
+    s_none(w);
+}
+void force_set_string(W* w, Class c, char* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_string"); return; }
+    if(get_value_type(c) == V_STRING){
+        w->cls = c;
+        s_string(w, v);
+    } else {
+        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+    }
+}
+void force_set_ws(W* w, Class c, struct Ws* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_ws"); return;}
+    if(get_value_type(c) == V_WS){
+        w->cls = c;
+        s_ws(w, v);
+    } else {
+        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+    }
+}
+void force_set_couplet(W* w, Class c, Couplet* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_couplet"); return;}
+    if(get_value_type(c) == V_COUPLET){
+        w->cls = c;
+        s_couplet(w, v);
+    } else {
+        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+    }
+}
+void force_set_label(W* w, Class c, Label* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_label"); return;}
+    if(get_value_type(c) == V_LABEL){
+        w->cls = c;
+        s_label(w, v);
+    } else {
+        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+    }
+}
+void force_set_manifold(W* w, Class c, Manifold* v){
+    if(!w) { fprintf(stderr, "Cannot set null in s_manifold"); return;}
+    if(get_value_type(c) == V_MANIFOLD){
+        w->cls = c;
+        s_manifold(w, v);
+    } else {
+        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+    }
 }

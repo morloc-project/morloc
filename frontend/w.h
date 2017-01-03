@@ -77,6 +77,7 @@ void w_assert_class(const W*, Class);
 
 void w_assert_type(const W*, VType);
 
+// Get the vaue of w
        char*     g_string   (const W* w);
 struct Ws*       g_ws       (const W* w);
 struct Couplet*  g_couplet  (const W* w);
@@ -85,11 +86,23 @@ struct Manifold* g_manifold (const W* w);
        W*        g_lhs      (const W* w);
        W*        g_rhs      (const W* w);
 
+// Set the value of w, fails if v is not compatible with type(w)
+void s_none     (W* w              );
 void s_ws       (W* w, struct Ws* v);
 void s_couplet  (W* w, Couplet*   v);
 void s_label    (W* w, Label*     v);
 void s_manifold (W* w, Manifold*  v);
 void s_lhs      (W* w, W*         v);
 void s_rhs      (W* w, W*         v);
+
+// Set the value of W and change the class
+// The current class of w is ignored
+// These do check to ensure Class c is fits type of v
+void force_set_none     ( W* w                        );
+void force_set_string   ( W* w, Class c, char*      v );
+void force_set_ws       ( W* w, Class c, struct Ws* v );
+void force_set_couplet  ( W* w, Class c, Couplet*   v );
+void force_set_label    ( W* w, Class c, Label*     v );
+void force_set_manifold ( W* w, Class c, Manifold*  v );
 
 #endif
