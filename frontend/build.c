@@ -47,6 +47,12 @@ bool _manifold_modifier(const W* w){
     switch(w->cls){
         case T_EFFECT:
         case T_CACHE:
+        case T_CHECK:
+        case T_OPEN:
+        case T_PACK:
+        case T_PASS:
+        case T_FAIL:
+        case T_DOC:
             return true;         
         default:
             return false;
@@ -63,10 +69,28 @@ void _add_modifier(const W* w, const W* p){
     W* rhs = g_rhs(p);
     switch(p->cls){
         case T_EFFECT:
-            m->effects = ws_add_val(m->effects, P_STRING, g_string(rhs));
+            m->effect = ws_add_val(m->effect, P_STRING, g_string(rhs));
             break;
         case T_CACHE:
-            m->caches = ws_add_val(m->caches, P_STRING, g_string(rhs));
+            m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));
+            break;
+        case T_CHECK:
+            m->check = ws_add_val(m->check, P_STRING, g_string(rhs));
+            break;
+        case T_OPEN:
+            m->open = ws_add_val(m->open, P_STRING, g_string(rhs));
+            break;
+        case T_PACK:
+            m->pack = ws_add_val(m->pack, P_STRING, g_string(rhs));
+            break;
+        case T_PASS:
+            m->pass = ws_add_val(m->pass, P_STRING, g_string(rhs));
+            break;
+        case T_FAIL:
+            m->fail = ws_add_val(m->fail, P_STRING, g_string(rhs));
+            break;
+        case T_DOC:
+            m->doc = ws_add_val(m->doc, P_STRING, g_string(rhs));
             break;
         default:
             break;

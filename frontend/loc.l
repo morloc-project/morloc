@@ -32,13 +32,22 @@ identifier {var}{ws}*::
 grpref     \*{var}
 positional `[^`]+`
 
+string \'[^']*\'|\"[^"]*\"
+
 couple ::
 
 %%
 
 ^@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
+
 ^@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
 ^@cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
+^@check  { LOG( "SECTION_CHECK"  ) ; BEGIN(S_CPLT) ; return SECTION_CHECK  ; }
+^@open   { LOG( "SECTION_OPEN"   ) ; BEGIN(S_CPLT) ; return SECTION_OPEN   ; }
+^@pack   { LOG( "SECTION_PACK"   ) ; BEGIN(S_CPLT) ; return SECTION_PACK   ; }
+^@pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
+^@fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
+^@doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
 
 {ws} { LOGV("%s", yytext); }
 
@@ -121,6 +130,13 @@ couple ::
     yylval.VARIABLE = w;
     LOGV("VARIABLE:%s", yytext);
     return VARIABLE;
+}
+
+{string} {
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.STRING = w;
+    LOG("STRING");
+    return STRING;
 }
 
 . { LOGV("%c", yytext[0]); return yytext[0]; }

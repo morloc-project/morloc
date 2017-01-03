@@ -19,6 +19,12 @@ VType get_value_type(Class cls){
             break;
         case T_PATH:
         case T_EFFECT:
+        case T_CHECK:
+        case T_OPEN:
+        case T_PACK:
+        case T_PASS:
+        case T_FAIL:
+        case T_DOC:
         case T_CACHE:
         case C_MANIFOLD:
         case P_COUPLET:
@@ -116,6 +122,12 @@ char* w_class_str(Class cls){
         case K_NAME:       s = strdup("K_NAME")       ; break;
         case T_PATH:       s = strdup("T_PATH")       ; break;
         case T_EFFECT:     s = strdup("T_EFFECT")     ; break;
+        case T_CHECK:      s = strdup("T_CHECK")      ; break;
+        case T_OPEN:       s = strdup("T_OPEN")       ; break;
+        case T_PACK:       s = strdup("T_PACK")       ; break;
+        case T_PASS:       s = strdup("T_PASS")       ; break;
+        case T_FAIL:       s = strdup("T_FAIL")       ; break;
+        case T_DOC:        s = strdup("T_DOC")        ; break;
         case T_CACHE:      s = strdup("T_CACHE")      ; break;
         case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;

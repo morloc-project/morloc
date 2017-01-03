@@ -14,8 +14,14 @@ typedef struct Couplet{
 typedef struct Manifold {
     int uid;
     char* function;
-    struct Ws* effects; // Couplet<char*>
-    struct Ws* caches;  // Couplet<char*>
+    struct Ws* effect; // Couplet<char*>
+    struct Ws* cache;  // Couplet<char*>
+    struct Ws* check;
+    struct Ws* open;
+    struct Ws* pack;
+    struct Ws* pass;
+    struct Ws* fail;
+    struct Ws* doc;
     struct Ws* inputs;  // Couplet<Manifold*>
 } Manifold;
 

@@ -35,16 +35,54 @@ void print_manifold_lil(W* c_m){
         }
     }
 
-    if(m->effects){
-        for(W* w = m->effects->head; w; w = w->next){
+    if(m->effect){
+        for(W* w = m->effect->head; w; w = w->next){
             printf("EFCT m%d %s\n", m->uid, g_string(w));
         }
     }
-    if(m->caches){
-        for(W* w = m->caches->head; w; w = w->next){
+
+    if(m->cache){
+        for(W* w = m->cache->head; w; w = w->next){
             printf("CACHE m%d %s\n", m->uid, g_string(w));
         }
     }
+
+    if(m->check){
+        for(W* w = m->check->head; w; w = w->next){
+            printf("CHECK m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
+    if(m->open){
+        for(W* w = m->open->head; w; w = w->next){
+            printf("OPEN m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
+    if(m->pack){
+        for(W* w = m->pack->head; w; w = w->next){
+            printf("PACK m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
+    if(m->pass){
+        for(W* w = m->pass->head; w; w = w->next){
+            printf("PASS m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
+    if(m->fail){
+        for(W* w = m->fail->head; w; w = w->next){
+            printf("FAIL m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
+    if(m->doc){
+        for(W* w = m->doc->head; w; w = w->next){
+            printf("DOC m%d %s\n", m->uid, g_string(w));
+        }
+    }
+
 }
 
 void print_prolog(Ws* ws_top){ }
