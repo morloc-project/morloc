@@ -46,6 +46,7 @@ void _link_inputs(Ws* ws_top){
 bool _manifold_modifier(const W* w){
     switch(w->cls){
         case T_EFFECT:
+        case T_CACHE:
             return true;         
         default:
             return false;
@@ -63,6 +64,9 @@ void _add_modifier(const W* w, const W* p){
     switch(p->cls){
         case T_EFFECT:
             m->effects = ws_add_val(m->effects, P_STRING, g_string(rhs));
+            break;
+        case T_CACHE:
+            m->caches = ws_add_val(m->caches, P_STRING, g_string(rhs));
             break;
         default:
             break;

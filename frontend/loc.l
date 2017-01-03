@@ -36,8 +36,9 @@ couple ::
 
 %%
 
-^@path   { LOG("SECTION_PATH"); BEGIN(S_PATH); return SECTION_PATH; }
-^@effect { LOG("SECTION_EFFECT"); BEGIN(S_CPLT); return SECTION_EFFECT; }
+^@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
+^@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
+^@cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
 
 {ws} { LOGV("%s", yytext); }
 

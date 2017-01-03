@@ -15,6 +15,7 @@ typedef struct Manifold {
     int uid;
     char* function;
     struct Ws* effects; // Couplet<char*>
+    struct Ws* caches;  // Couplet<char*>
     struct Ws* inputs;  // Couplet<Manifold*>
 } Manifold;
 

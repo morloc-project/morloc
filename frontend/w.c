@@ -19,6 +19,7 @@ VType get_value_type(Class cls){
             break;
         case T_PATH:
         case T_EFFECT:
+        case T_CACHE:
         case C_MANIFOLD:
         case P_COUPLET:
             vtype = V_COUPLET;
@@ -101,23 +102,24 @@ char* w_type_str(VType type){
 char* w_class_str(Class cls){
     char* s = NULL;
     switch(cls){
-        case C_COMPOSON:   s = strdup("C_COMPOSON");   break;
-        case C_NEST:       s = strdup("C_NEST");       break;
-        case C_DEREF:      s = strdup("C_DEREF");      break;
-        case K_LIST:       s = strdup("K_LIST");       break;
-        case K_PATH:       s = strdup("K_PATH");       break;
-        case P_WS:         s = strdup("P_WS");         break;
-        case P_COUPLET:    s = strdup("P_COUPLET");    break;
-        case P_MANIFOLD:   s = strdup("P_MANIFOLD");   break;
-        case C_POSITIONAL: s = strdup("C_POSITIONAL"); break;
-        case C_GRPREF:     s = strdup("C_GRPREF");     break;
-        case P_STRING:     s = strdup("P_STRING");     break;
-        case K_NAME:       s = strdup("K_NAME");       break;
-        case T_PATH:       s = strdup("T_PATH");       break;
-        case T_EFFECT:     s = strdup("T_EFFECT");     break;
-        case C_MANIFOLD:   s = strdup("C_MANIFOLD");   break;
-        case X_NONE:       s = strdup("X_NONE");       break;
-        case K_LABEL:      s = strdup("K_LABEL");      break;
+        case C_COMPOSON:   s = strdup("C_COMPOSON")   ; break;
+        case C_NEST:       s = strdup("C_NEST")       ; break;
+        case C_DEREF:      s = strdup("C_DEREF")      ; break;
+        case K_LIST:       s = strdup("K_LIST")       ; break;
+        case K_PATH:       s = strdup("K_PATH")       ; break;
+        case P_WS:         s = strdup("P_WS")         ; break;
+        case P_COUPLET:    s = strdup("P_COUPLET")    ; break;
+        case P_MANIFOLD:   s = strdup("P_MANIFOLD")   ; break;
+        case C_POSITIONAL: s = strdup("C_POSITIONAL") ; break;
+        case C_GRPREF:     s = strdup("C_GRPREF")     ; break;
+        case P_STRING:     s = strdup("P_STRING")     ; break;
+        case K_NAME:       s = strdup("K_NAME")       ; break;
+        case T_PATH:       s = strdup("T_PATH")       ; break;
+        case T_EFFECT:     s = strdup("T_EFFECT")     ; break;
+        case T_CACHE:      s = strdup("T_CACHE")      ; break;
+        case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
+        case X_NONE:       s = strdup("X_NONE")       ; break;
+        case K_LABEL:      s = strdup("K_LABEL")      ; break;
         default:
             fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }

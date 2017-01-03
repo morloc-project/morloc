@@ -40,6 +40,11 @@ void print_manifold_lil(W* c_m){
             printf("EFCT m%d %s\n", m->uid, g_string(w));
         }
     }
+    if(m->caches){
+        for(W* w = m->caches->head; w; w = w->next){
+            printf("CACHE m%d %s\n", m->uid, g_string(w));
+        }
+    }
 }
 
 void print_prolog(Ws* ws_top){ }

@@ -14,6 +14,7 @@ typedef enum {
     P_COUPLET,
     P_MANIFOLD,
     T_EFFECT,     // T for top level
+    T_CACHE,
     T_PATH,       
     C_COMPOSON,   // C for composition
     C_MANIFOLD,

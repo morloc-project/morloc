@@ -20,9 +20,13 @@ Ws* global_table;
 %token COUPLE
 
 %token SECTION_EFFECT
+%token SECTION_CACHE
 %token SECTION_PATH
 
-%type <Ws*> section composition s_effect s_path
+%type <Ws*> section composition s_path
+
+%type <Ws*> s_effect
+%type <Ws*> s_cache
 
 %left '.'
 %precedence CONCAT
@@ -37,6 +41,7 @@ input
 section
     : s_path
     | s_effect
+    | s_cache
 
 s_path
     : SECTION_PATH { $$ = NULL; }
@@ -51,6 +56,14 @@ s_effect
     | s_effect SELECTION COUPLE VARIABLE {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_EFFECT, c); 
+        $$ = ws_add($1, w);
+    }
+
+s_cache
+    : SECTION_CACHE { $$ = NULL; }
+    | s_cache SELECTION COUPLE VARIABLE {
+        Couplet* c = couplet_new($2, $4);
+        W* w = w_new(T_CACHE, c); 
         $$ = ws_add($1, w);
     }
 
