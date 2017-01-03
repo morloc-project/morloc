@@ -11,6 +11,9 @@ typedef struct Couplet{
     struct W* rhs;
 } Couplet;
 
+Couplet* couplet_new(struct W* lhs, struct W* rhs);
+
+
 typedef struct Manifold {
     int uid;
     char* function;
@@ -25,18 +28,23 @@ typedef struct Manifold {
     struct Ws* inputs;  // Couplet<Manifold*>
 } Manifold;
 
+Manifold* manifold_new();
+
+// Creates a copy of m with a new uid
+Manifold* manifold_clone(Manifold* m);
+
+
 typedef struct Label{
     char* name;
     char* label;
 } Label;
 
-Manifold* manifold_new();
-
 Label* label_new();
 
-Label* label_new_set(char* name, char* label);
+// creates a new label with copies of the original strings
+Label* label_copy(Label*);
 
-Couplet* couplet_new(struct W* lhs, struct W* rhs);
+Label* label_new_set(char* name, char* label);
 
 bool label_cmp(Label* a, Label* b);
 

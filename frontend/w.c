@@ -45,11 +45,15 @@ VType get_value_type(Class cls){
     return vtype;
 }
 
-W* w_new(Class cls, void* value){
+int _new_uid(){
     static int uid = 0;
+    return uid++;
+}
+
+W* w_new(Class cls, void* value){
     W* w = (W*)calloc(1, sizeof(W));
-    w->cls = cls;     
-    w->uid = uid++;
+    w->cls = cls;
+    w->uid = _new_uid();
     w->next = NULL;
 
     switch(get_value_type(cls)){
@@ -88,6 +92,14 @@ W* w_copy(const W* w){
    W* new_w = (W*)malloc(sizeof(W));
    memcpy(new_w, w, sizeof(W));
    return new_w;
+}
+
+W* w_clone(const W* w){
+    if(!w) return NULL;
+    W* clone = w_isolate(w);
+    clone->uid = _new_uid();
+    clone->next = w_clone(w->next);
+    return clone;
 }
 
 char* w_type_str(VType type){

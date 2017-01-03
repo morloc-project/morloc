@@ -63,6 +63,10 @@ W* w_isolate(const W* w);
 
 W* w_copy(const W* w);
 
+// clone a W while preserving class and value
+// this is recursive, next is cloned as well
+W* w_clone(const W* w);
+
 W* w_print(const W* w);
 
 VType get_value_type(Class cls);
@@ -88,6 +92,7 @@ struct Manifold* g_manifold (const W* w);
 
 // Set the value of w, fails if v is not compatible with type(w)
 void s_none     (W* w              );
+void s_string   (W* w, char* v     );
 void s_ws       (W* w, struct Ws* v);
 void s_couplet  (W* w, Couplet*   v);
 void s_label    (W* w, Label*     v);

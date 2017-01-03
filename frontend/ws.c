@@ -1,31 +1,13 @@
 #include "ws.h"
 
-/* no copy constructor, no reset */
-Ws* _ws_new(W* w){
-    Ws* ws = (Ws*)calloc(1, sizeof(Ws));
-    ws->head = w;
-    ws->tail = w;
-    return ws;
-}
+// ------ local functions -------------------------------------------
+void _join(Ws* a, Ws* b);
+Ws* _ws_new(W* w);
+void _retail(Ws* ws, W* w);
+Ws* _ws_add(Ws* ws, W* w);
+void _ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth);
+// ------------------------------------------------------------------
 
-/* checkless attachment */
-void _retail(Ws* ws, W* w){
-    ws->tail->next = w;
-    ws->tail = w;
-}
-
-Ws* _ws_add(Ws* ws, W* w){
-    if(!ws){
-        ws = _ws_new(w);
-    } else {
-        if(ws->tail){
-            _retail(ws, w);
-        } else {
-            fprintf(stderr, "WARNING: cannot add to tailless table\n");
-        }
-    }
-    return ws;
-}
 
 Ws* ws_new(const W* w){
     Ws* ws = (Ws*)calloc(1, sizeof(Ws));
@@ -33,6 +15,57 @@ Ws* ws_new(const W* w){
     ws->head = w2;
     ws->tail = w2;
     return ws;
+}
+
+
+void w_clone_value(W* w){
+    if(!w) return;
+    switch(get_value_type(w->cls)){
+        case V_NONE:
+            s_none(w);
+            break;
+        case V_STRING:
+            s_string(w, strdup(g_string(w)));
+            break;
+        case V_WS:
+            s_ws(w, ws_clone(g_ws(w)));
+            break;
+        case V_COUPLET:
+            {
+            Couplet* c = couplet_new(w_clone(g_lhs(w)), w_clone(g_rhs(w)));
+            w_clone_value(c->lhs);
+            w_clone_value(c->rhs);
+            s_couplet(w, c);
+            }
+            break;
+        case V_LABEL:
+            s_label(w, label_copy(g_label(w)));
+            break;
+        case V_MANIFOLD:
+            {
+            Manifold* m = manifold_clone(g_manifold(w));
+            m->function = m->function ? strdup(m->function) : NULL;
+            m->effect = ws_clone( m->effect );
+            m->cache  = ws_clone( m->cache  );
+            m->check  = ws_clone( m->check  );
+            m->open   = ws_clone( m->open   );
+            m->pack   = ws_clone( m->pack   );
+            m->pass   = ws_clone( m->pass   );
+            m->fail   = ws_clone( m->fail   );
+            m->doc    = ws_clone( m->doc    );
+            m->inputs = ws_clone( m->inputs );
+            }
+            break;
+    }
+}
+Ws* ws_clone(const Ws* ws){
+    Ws* clone = NULL;
+    if(!ws) return NULL;
+    for(W* w = w_clone(ws->head); w; w = w->next){
+        w_clone_value(w);
+        clone = ws_add(clone, w);
+    }
+    return clone;
 }
 
 Ws* ws_add(Ws* ws, const W* w){
@@ -53,11 +86,6 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v){
     W* w = w_new(cls, v);
     ws = _ws_add(ws, w);
     return ws;
-}
-
-void _join(Ws* a, Ws* b){
-    a->tail->next = b->head;
-    a->tail = b->tail;
 }
 
 Ws* ws_join(Ws* a, Ws* b){
@@ -88,26 +116,8 @@ int ws_length(const Ws* ws){
     return size;
 }
 
-void ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
-
-    if(!ws || !ws->head) return;
-
-    for(W* w = ws->head; w; w = w->next){
-        for(int i = 0; i < depth; i++){ printf("  "); }
-
-        printf("%s\n", w_str(w));
-        Ws* rs = recurse(w);
-
-        if(!rs) continue;
-
-        for(W* r = rs->head; r; r = r->next){
-            ws_print_r(g_ws(r), recurse, depth+1);
-        }
-    }
-}
-
 void ws_print(const Ws* ws, Ws*(*recurse)(const W*)){
-    ws_print_r(ws, recurse, 0);
+    _ws_print_r(ws, recurse, 0);
 }
 
 char* w_str(const W* w){
@@ -149,4 +159,52 @@ char* w_str(const W* w){
             fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
+}
+
+
+// ====== PRIVATE FUNCTIONS ==========================================
+
+void _join(Ws* a, Ws* b){
+    a->tail->next = b->head;
+    a->tail = b->tail;
+}
+
+/* no copy constructor, no reset */
+Ws* _ws_new(W* w){
+    Ws* ws = (Ws*)calloc(1, sizeof(Ws));
+    ws->head = w;
+    ws->tail = w;
+    return ws;
+}
+
+/* checkless attachment */
+void _retail(Ws* ws, W* w){
+    ws->tail->next = w;
+    ws->tail = w;
+}
+
+Ws* _ws_add(Ws* ws, W* w){
+    if(!ws){
+        ws = _ws_new(w);
+    } else {
+        if(ws->tail){
+            _retail(ws, w);
+        } else {
+            fprintf(stderr, "WARNING: cannot add to tailless table\n");
+        }
+    }
+    return ws;
+}
+
+void _ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
+    if(!ws || !ws->head) return;
+    for(W* w = ws->head; w; w = w->next){
+        for(int i = 0; i < depth; i++){ printf("  "); }
+        printf("%s\n", w_str(w));
+        Ws* rs = recurse(w);
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            _ws_print_r(g_ws(r), recurse, depth+1);
+        }
+    }
 }
