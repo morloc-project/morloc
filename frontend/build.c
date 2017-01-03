@@ -4,7 +4,6 @@ void _link_inputs(Ws* ws_top);
 void _link_couplets(Ws* ws_top);
 bool _resolve_grprefs_r(Ws* global, Ws* current);
 void _resolve_grprefs(Ws* ws_top);
-void _resolve_one_grpref(Ws* global, W* e_ref);
 
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
@@ -118,7 +117,6 @@ void _mod_pathwise(Ws* ws_top, const W* p){
 
 void _link_couplets(Ws* ws_top){
 
-    // Find all manifolds
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
 
     cs = ws_map_split(cs, ws_split_couplet);
@@ -127,7 +125,11 @@ void _link_couplets(Ws* ws_top){
 
 }
 
-void _resolve_one_grpref(Ws* global, W* e_ref){
+
+void _resolve_one_grpref(W* e_ref, const Ws* global){
+
+    // TODO complete this function I need to write a ws_clone function
+
     /* Id* id = id_new();                                                                    */
     /* id->name = strdup(e_ref->value.string);                                               */
     /* Table* t_path = table_get(global, id, T_PATH);                                        */
@@ -147,36 +149,36 @@ void _resolve_one_grpref(Ws* global, W* e_ref){
     /* }                                                                                     */
 }
 
+Ws* _recurse_path(const W* w){
+    switch(w->cls){
+        case T_PATH:
+        case C_COMPOSON:
+        case C_NEST:
+            return g_ws(w);
+        default:
+            return NULL;
+    }
+}
+
+bool _is_grpref(const W* c){
+    return c->cls == C_GRPREF;
+}
+
 /* Requires input of both a global and current table. The global one is the top
  * level symbol table where all paths should be searched without recursion. The
  * current table is where group references should be sought.*/
-bool _resolve_grprefs_r(Ws* global, Ws* current){
-    /*                                                                */
-    /* if(!current) return false;                                     */
-    /*                                                                */
-    /* for(Entry* e_ref = current->head; e_ref; e_ref = e_ref->next){ */
-    /*     switch(e_ref->type){                                       */
-    /*         case T_PATH:                                           */
-    /*         case C_COMPOSON:                                       */
-    /*         case C_NEST:                                           */
-    /*             _resolve_grprefs_r(global, e_ref->value.table);    */
-    /*             break;                                             */
-    /*         case C_GRPREF:                                         */
-    /*             _resolve_one_grpref(global, e_ref);                */
-    /*             break;                                             */
-    /*         default:                                               */
-    /*             break;                                             */
-    /*     }                                                          */
-    /* }                                                              */
-    return true;
-}
-
 void _resolve_grprefs(Ws* ws_top){
-    /* _resolve_grprefs_r(t_top, t_top); */
+    ws_ref_rmod(
+        ws_top, // current list over which to recurse
+        ws_top, // global list (passed into _resolve_one_grpref
+        _recurse_path, // recursion rule
+        _is_grpref, // criterion for calling resolve_one_grpref
+        _resolve_one_grpref // main operation
+    );
 }
 
 void build_manifolds(Ws* ws_top){
-    _resolve_grprefs(ws_top);
+    /* _resolve_grprefs(ws_top); */
 
     ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
 

@@ -19,6 +19,7 @@ FILES =         \
 	lhs.c       \
 	ws.c        \
 	w.c         \
+	hof.c       \
 	types.c     \
 	build.c     \
 	lil.c

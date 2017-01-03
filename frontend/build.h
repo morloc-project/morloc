@@ -1,7 +1,7 @@
 #ifndef __BUILD_H__
 #define __BUILD_H__
 
-#include "ws.h"
+#include "hof.h"
 
 void build_manifolds(Ws* ws_top);
 
