@@ -10,3 +10,9 @@ R
 tags
 DELETEME
 tok.log
+
+*.aux
+*.fls
+*.log
+*.pdf
+*.fdb_latexmk
