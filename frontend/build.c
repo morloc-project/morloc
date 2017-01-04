@@ -178,7 +178,7 @@ void build_manifolds(Ws* ws_top){
 
     ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
 
-    ws_print(ws_top, ws_recurse_most);
+    /* ws_print(ws_top, ws_recurse_most); */
 
     _link_couplets(ws_top);
     _link_inputs(ws_top);

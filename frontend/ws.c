@@ -54,6 +54,7 @@ void w_clone_value(W* w){
             m->fail   = ws_clone( m->fail   );
             m->doc    = ws_clone( m->doc    );
             m->inputs = ws_clone( m->inputs );
+            s_manifold(w, m);
             }
             break;
     }
