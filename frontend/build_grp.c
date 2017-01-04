@@ -1,5 +1,11 @@
 #include "build_grp.h"
 
+void _resolve_grprefs_r(Ws* current, const Ws* global);
+bool _is_grpref(const W* c);
+void _resolve_one_grpref(W* e_ref, const Ws* global);
+bool _matches_path(const W* w, const W* p);
+
+
 void resolve_grprefs(Ws* ws){
     _resolve_grprefs_r(ws, ws);
 }

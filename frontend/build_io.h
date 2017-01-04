@@ -3,6 +3,10 @@
 
 #include "hof.h"
 
-void link_inputs(Ws* ws_top);
+void link_inputs(Ws* ws);
+
+Ws* composon_inputs(const W* w);
+
+Ws* composon_outputs(const W* w);
 
 #endif

@@ -57,9 +57,9 @@ Ws* ws_map_split(const Ws* ws, Ws*(*split)(const W*));
 
 void ws_mod(const Ws*, void(*mod)(const W*));
 
-void ws_mod2(const Ws*, const Ws*, void(*mod)(const W*, const W*));
+void ws_2mod(const Ws*, const Ws*, void(*mod)(const W*, const W*));
 
-void ws_mod3(const Ws*, const Ws*, const Ws*, void(*mod)(const W*, const W*, const W*));
+void ws_3mod(const Ws*, const Ws*, const Ws*, void(*mod)(const W*, const W*, const W*));
 
 // Recurse along ws according to `recurse`. Perform function `mod` on all w if
 // `criterion`. ws in `mod` are processed in the context of `ps`, which may,

@@ -1,5 +1,14 @@
 #include "build_mod.h"
 
+Ws* _get_manifolds(const Ws* ws);
+void _set_default_manifold_function(const W* cm);
+bool _manifold_modifier(const W* w);
+void _mod_pathwise(Ws* ws_top, const W* p);
+bool _basename_match(const W* w, const W* p);
+void _add_modifier(const W* w, const W* p);
+
+
+
 void link_modifiers(Ws* ws_top){
 
     // Set default function names for all manifolds

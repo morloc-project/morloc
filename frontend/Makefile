@@ -22,6 +22,9 @@ FILES =         \
 	hof.c       \
 	types.c     \
 	build.c     \
+	build_grp.c \
+	build_io.c  \
+	build_mod.c \
 	lil.c
 
 all:
