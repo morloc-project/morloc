@@ -11,9 +11,11 @@
 # B :: x . y . z
 # C :: x (y . z) . t
 
-A :: cut . `francis` *T . dandelionpancakeparade
-T :: map . &(a . b) foo . *B
-B :: fifi . fofo
+# A :: cut . `francis` *T . dandelionpancakeparade
+# T :: map . &(a . b) foo . *B
+# B :: fifi . fofo
+
+A :: a . b . `foo` &(stickleback . bamboo) . yoyo
 
 # A :: a . *B . a a a
 # B :: b . *C

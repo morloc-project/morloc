@@ -358,6 +358,7 @@ Ws* ws_recurse_composition(const W* w){
     switch(w->cls){
         case C_COMPOSON:
         case C_NEST:
+        case C_DEREF:
             rs = ws_add_val(rs, C_NEST, g_ws(w));
             break;
         case T_PATH:

@@ -4,6 +4,7 @@ void _link_composon(const W* a, const W* b);
 void _link_pair(const W* input, const W* output);
 Ws* _recurse_tail(const W*);
 Ws* _recurse_head(const W*);
+bool _is_emmisive(const W*);
 
 void link_inputs(Ws* ws){
 
@@ -37,16 +38,27 @@ Ws* composon_inputs(const W* w){
     // recurse to the rightmost manifold set
     return ws_rfilter(_extract_ws(w), _recurse_tail, w_is_manifold);
 }
-
 Ws* composon_outputs(const W* w){
     // recurse to the leftmost manifold set
-    return ws_rfilter(_extract_ws(w), _recurse_head, w_is_manifold);
+    return ws_rfilter(_extract_ws(w), _recurse_head, _is_emmisive);
+}
+
+bool _is_emmisive(const W* w){
+    switch(w->cls){
+        case C_MANIFOLD:
+        case C_POSITIONAL:
+        case C_DEREF:
+            return true;
+        default:
+            return false;
+    }
 }
 
 Ws* _recurse_tail(const W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
+        case C_DEREF:
             result = ws_add_val(result, V_WS, g_ws(g_ws(w)->tail));
             break;
         case T_PATH:
@@ -62,6 +74,7 @@ Ws* _recurse_head(const W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
+        case C_DEREF:
             result = ws_add_val(result, V_WS, g_ws(g_ws(w)->head));
             break;
         case T_PATH:
