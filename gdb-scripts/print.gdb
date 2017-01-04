@@ -1,10 +1,11 @@
 define pw
     dont-repeat
+    call printf("-------------------------------\n")
     if $argc == 0
-        print w_str(w)
+        call printf("%s\n", w_str(w))
     end
     if $argc == 1
-        print w_str($arg0)
+        call printf("%s\n", w_str($arg0))
     end
 end
 document pw

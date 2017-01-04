@@ -44,4 +44,10 @@ void ws_print(const Ws* ws, Ws*(*recurse)(const W*));
 
 char* w_str(const W* w);
 
+// --- algorithms ---
+
+Ws* ws_composon_inputs(W* w);
+
+Ws* ws_composon_outputs(W* w);
+
 #endif

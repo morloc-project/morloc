@@ -162,6 +162,15 @@ char* w_str(const W* w){
     return s;
 }
 
+Ws* ws_composon_inputs(W* w){
+    fprintf(stderr, "ZZZ-STUB\n");
+    return NULL;
+}
+
+Ws* ws_composon_outputs(W* w){
+    fprintf(stderr, "ZZZ-STUB\n");
+    return NULL;
+}
 
 // ====== PRIVATE FUNCTIONS ==========================================
 

@@ -274,6 +274,10 @@ bool w_is_manifold(const W* w){
     return w->cls == C_MANIFOLD;
 }
 
+bool w_is_composon(const W* w){
+    return w->cls == C_COMPOSON;
+}
+
 bool w_keep_all(const W* w){
     return true;
 }
