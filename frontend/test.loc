@@ -11,43 +11,45 @@
 # B :: x . y . z
 # C :: x (y . z) . t
 
-# A :: cut . `francis` *T . dandelionpancakeparade
-# T :: map . &(a . b) foo . &B
-# B :: fifi . fofo
-C :: a ( b ( c ( d b ) ) )
+A :: cut . `francis` *T . dandelionpancakeparade
+T :: map . &(a . b) foo . *B
+B :: fifi . fofo
+
+# C :: a ( b ( c ( d b ) ) )
 
 @effect
-# M/g :: yoyopanic
-C/d :: stinkystacy
-b :: dowrap
+A/T/B/fifi :: superfastjellyfish
+A/B/fifi :: THISSHOULDNTWORK
 
-@cache
-c :: nocache
-
-@check
-b :: is_awesome
-
-@pack
-d :: wonderwrap
-
-@open
-c :: voodooundo
-
-@fail
-b :: deathagonizingdeath
-
-@pass
-a :: trippinggandalf
-
-@doc
-b :: "Rubbish, utter rubbish"
-
-
-# A/T/B/fifi :: superfastjellyfish
 # B/fifi :: slowcentipede
 # T/foo :: sparklycandyparrot
 # A/T/foo :: pea
 # A/cut,T/map :: foofoo
+
+# # M/g :: yoyopanic
+# C/d :: stinkystacy
+# b :: dowrap
+#
+# @cache
+# c :: nocache
+#
+# @check
+# b :: is_awesome
+#
+# @pack
+# d :: wonderwrap
+#
+# @open
+# c :: voodooundo
+#
+# @fail
+# b :: deathagonizingdeath
+#
+# @pass
+# a :: trippinggandalf
+#
+# @doc
+# b :: "Rubbish, utter rubbish"
 
 # @path
 # Death :: x . (z . *Peach) applepie

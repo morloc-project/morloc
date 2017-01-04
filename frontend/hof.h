@@ -10,6 +10,9 @@ Ws* ws_rfilter(
     bool(*criterion)(const W*)
 );
 
+// Non-recursive parameterized filter
+Ws* ws_pfilter(const Ws*, const W*, bool(*criterion)(const W*, const W*));
+
 // Parameterized version of ws_rfilter
 Ws* ws_prfilter(
     const Ws*,

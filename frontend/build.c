@@ -2,7 +2,7 @@
 
 void _link_inputs(Ws* ws_top);
 void _link_couplets(Ws* ws_top);
-bool _resolve_grprefs_r(Ws* global, Ws* current);
+void _resolve_grprefs_r(Ws* current, const Ws* global);
 void _resolve_grprefs(Ws* ws_top);
 
 
@@ -126,38 +126,32 @@ void _link_couplets(Ws* ws_top){
 }
 
 
-void _resolve_one_grpref(W* e_ref, const Ws* global){
-
-    // TODO complete this function I need to write a ws_clone function
-
-    /* Id* id = id_new();                                                                    */
-    /* id->name = strdup(e_ref->value.string);                                               */
-    /* Table* t_path = table_get(global, id, T_PATH);                                        */
-    /* if(!t_path){                                                                          */
-    /*     fprintf(stderr, "ERROR: path '%s', not found\n", id->name);                       */
-    /* }                                                                                     */
-    /* if(t_path->head->next){                                                               */
-    /*     fprintf(stderr, "ERROR: Ambiguous path, using first\n");                          */
-    /* }                                                                                     */
-    /* Table* resolved = table_clone(t_path->head->value.table);                             */
-    /* if(resolved){                                                                         */
-    /*     e_ref->type = T_PATH;                                                             */
-    /*     e_ref->value.table = resolved;                                                    */
-    /*     _resolve_grprefs_r(global, resolved);                                             */
-    /* } else {                                                                              */
-    /*     fprintf(stderr, "ERROR: group reference '%s' could not be resolved\n", id->name); */
-    /* }                                                                                     */
+bool _matches_path(const W* w, const W* p){
+    return
+        w->cls == T_PATH &&
+        p->cls == C_GRPREF &&
+        strcmp(g_label(g_lhs(w))->name, g_string(p)) == 0;
 }
 
-Ws* _recurse_path(const W* w){
-    switch(w->cls){
-        case T_PATH:
-        case C_COMPOSON:
-        case C_NEST:
-            return g_ws(w);
-        default:
-            return NULL;
+void _resolve_one_grpref(W* e_ref, const Ws* global){
+
+    Ws* path = ws_pfilter(global, e_ref, _matches_path);
+
+    if(!path){
+        fprintf(stderr, "ERROR: group reference could not be resolved -- path not found\n");
+        return;
     }
+    if(ws_length(path) > 1){
+        fprintf(stderr, "ERROR: group reference could not be resolved -- ambiguous paths\n"); 
+        return;
+    }
+
+    force_set_couplet(e_ref, T_PATH, g_couplet(path->head));
+
+    w_clone_value(e_ref);
+
+    _resolve_grprefs_r(g_ws(g_rhs(e_ref)), global);
+
 }
 
 bool _is_grpref(const W* c){
@@ -167,20 +161,24 @@ bool _is_grpref(const W* c){
 /* Requires input of both a global and current table. The global one is the top
  * level symbol table where all paths should be searched without recursion. The
  * current table is where group references should be sought.*/
-void _resolve_grprefs(Ws* ws_top){
+void _resolve_grprefs(Ws* ws){ _resolve_grprefs_r(ws, ws); }
+void _resolve_grprefs_r(Ws* current, const Ws* global){
     ws_ref_rmod(
-        ws_top, // current list over which to recurse
-        ws_top, // global list (passed into _resolve_one_grpref
-        _recurse_path, // recursion rule
+        current, // current list over which to recurse
+        global,  // global list (passed into _resolve_one_grpref
+        ws_recurse_most, // recursion rule
         _is_grpref, // criterion for calling resolve_one_grpref
         _resolve_one_grpref // main operation
     );
 }
 
 void build_manifolds(Ws* ws_top){
-    /* _resolve_grprefs(ws_top); */
+
+    _resolve_grprefs(ws_top);
 
     ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
+
+    ws_print(ws_top, ws_recurse_most);
 
     _link_couplets(ws_top);
     _link_inputs(ws_top);

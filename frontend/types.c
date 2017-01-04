@@ -36,7 +36,9 @@ Label* label_new_set(char* name, char* label){
 }
 
 Label* label_copy(Label* l){
-    return label_new(strdup(l->name), strdup(l->label));
+    char* name  = l->name  ? strdup(l->name)  : NULL;
+    char* label = l->label ? strdup(l->label) : NULL;
+    return label_new_set(name, label);
 }
 
 bool label_cmp(Label* a, Label* b){

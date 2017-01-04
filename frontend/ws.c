@@ -135,7 +135,7 @@ char* w_str(const W* w){
             {
                 int n = 0;
                 for(W* a = g_ws(w)->head; a; a = a->next) { n++; }
-                sprintf(s, "%s<n=%d>\n", c, n);
+                sprintf(s, "%s<n=%d>", c, n);
             }
             break;
         case V_COUPLET:

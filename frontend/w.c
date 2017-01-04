@@ -177,6 +177,7 @@ void w_assert_type(const W* w, VType type){
             "Type assertion failed! Got NULL, expected %s.\n",
             w_type_str(type)
         );
+        fflush(stderr);
     } else {
         VType t = get_value_type(w->cls);
         if(t != type){
@@ -185,6 +186,10 @@ void w_assert_type(const W* w, VType type){
                 "Type assertion failed! Got %s, expected %s.\n",
                 w_type_str(t), w_type_str(type)
             );
+            if(get_value_type(w->cls) == V_COUPLET){
+                fprintf(stderr, "%s\n", w->value.couplet->lhs->value.label->name);
+            }
+            fflush(stderr);
         }
     }
 }

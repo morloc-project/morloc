@@ -21,6 +21,17 @@ Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(const W*), bool(*criterion)(const W*
     return result;
 }
 
+Ws* ws_pfilter(const Ws* ws, const W* p, bool(*criterion)(const W*, const W*)){
+    Ws* result = NULL;
+    if(!ws || !ws->head) return NULL;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w, p)){
+            result = ws_add(result, w);
+        }
+    }
+    return result;
+}
+
 Ws* ws_prfilter(
     const Ws* ws,
     const W* p,
@@ -266,7 +277,6 @@ bool w_is_manifold(const W* w){
 bool w_keep_all(const W* w){
     return true;
 }
-
 
 // === recursion rules ==============================================
 // NOTE: recursion rules are splits
