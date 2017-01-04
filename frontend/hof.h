@@ -10,6 +10,12 @@ Ws* ws_rfilter(
     bool(*criterion)(const W*)
 );
 
+// Non-recursive filter
+Ws* ws_filter(
+    const Ws*,
+    bool(*criterion)(const W*)
+);
+
 // Non-recursive parameterized filter
 Ws* ws_pfilter(const Ws*, const W*, bool(*criterion)(const W*, const W*));
 
@@ -31,6 +37,14 @@ void ws_prmod(
     bool(*criterion)(const W*, const W*),
     void(*mod)(const W*, const W*),
     const W*(*nextval)(const W*, const W*)
+);
+
+void ws_recursive_reduce_mod(
+    const Ws* ws,
+    Ws*(*recurse)(const W*),
+    bool(*l_criterion)(const W*),
+    bool(*r_criterion)(const W*),
+    void(*mod)(const W*, const W*)
 );
 
 // maps ws_prmod over parameter list ps
@@ -101,6 +115,7 @@ Ws* ws_flatten(const Ws*, Ws*(*recurse)(const W*));
 Ws* ws_recurse_ws(const W*);   // recurse into V_WS
 Ws* ws_recurse_most(const W*); // recurse into V_WS and V_COUPLET (but not manifolds)
 Ws* ws_recurse_none(const W*); // no recursion
+Ws* ws_recurse_composition(const W*); // recurse into T_PATH and C_NEST
 // parameterized recurse rules
 Ws* ws_recurse_path(const W*, const W*);
 

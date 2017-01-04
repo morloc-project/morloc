@@ -11,20 +11,23 @@
 # B :: x . y . z
 # C :: x (y . z) . t
 
-# A :: cut . `francis` *T . dandelionpancakeparade
-# T :: map . &(a . b) foo . *B
-# B :: fifi . fofo
+A :: cut . `francis` *T . dandelionpancakeparade
+T :: map . &(a . b) foo . *B
+B :: fifi . fofo
 
-A :: a . *B
-B :: b . *C
-C :: foo
+# A :: a . *B . a a a
+# B :: b . *C
+# C :: foo
+
+# A :: a . b . c
+# A :: x . a (( b . d ) . c)
 
 # C :: a ( b ( c ( d b ) ) )
 
-@effect
-A/foo :: SHOULD_DIE
-foo :: default
-A/B/C/foo :: yolo
+# @effect
+# A/foo :: SHOULD_DIE
+# foo :: default
+# A/B/C/foo :: yolo
 
 # A/T/B/fifi :: superfastjellyfish
 # A/B/fifi :: THISSHOULDNTWORK

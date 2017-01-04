@@ -1,61 +1,46 @@
 #include "build_io.h"
 
-void _link_composon(const W* composon);
+void _link_composon(const W* a, const W* b);
 void _link_pair(const W* input, const W* output);
 Ws* _recurse_tail(const W*);
 Ws* _recurse_head(const W*);
 
 void link_inputs(Ws* ws){
 
-    // gather all composons
-    Ws* cs = ws_rfilter(ws, ws_recurse_most, w_is_composon);
-
-    // pass each into _link_one
-    ws_mod(cs, _link_composon);
+    ws_recursive_reduce_mod(
+        ws,                     // recurse over full symbol table
+        ws_recurse_composition, // descend into each composition
+        w_is_composon,          // assert e_i must take input
+        w_is_composon,          // assert e_{i+1} must produce output
+        _link_composon          // link output of b to input of a
+    );
 
 }
 
-void _link_composon(const W* w){
-
-    w_assert_class(w, C_COMPOSON);
+void _link_composon(const W* a, const W* b){
 
     // identify the elements within this composon which take input
-    Ws* inputs = composon_inputs(w);
+    Ws* inputs = composon_inputs(a);
 
     // identify the elements in the next composon which produce output
-    Ws* outputs = composon_outputs(w->next);
+    Ws* outputs = composon_outputs(b);
 
     // link each input to each output
     ws_2mod(inputs, outputs, _link_pair);
 }
 
-Ws* composon_inputs(const W* w){
-
+Ws* _extract_ws(const W* w){
     if(!w) return NULL;
-
-    w_assert_class(w, C_COMPOSON);
-
-    return ws_rfilter(g_ws(w), _recurse_tail, w_is_manifold);
+    return w->cls == T_PATH ? g_ws(g_rhs(w)): g_ws(w);
+}
+Ws* composon_inputs(const W* w){
+    // recurse to the rightmost manifold set
+    return ws_rfilter(_extract_ws(w), _recurse_tail, w_is_manifold);
 }
 
 Ws* composon_outputs(const W* w){
-
-    if(!w) return NULL;
-
-    w_assert_class(w, C_COMPOSON);
-
-    return ws_rfilter(g_ws(w), _recurse_head, w_is_manifold);
-}
-
-// link all top level elements in c_{i+1} as inputs to c_i
-void _link_pair(const W* input, const W* output){
-    if(!input || !output) return;
-    // I'm dealing with C_MANIFOLD's not P_MANIFOLD's
-    // A C_MANIFOLD manifold is a couplet with a P_MANIFOLD rhs
-    if(input->cls == C_MANIFOLD){
-        Manifold* m = g_manifold(g_rhs(input));
-        m->inputs = ws_add(m->inputs, output);
-    }
+    // recurse to the leftmost manifold set
+    return ws_rfilter(_extract_ws(w), _recurse_head, w_is_manifold);
 }
 
 Ws* _recurse_tail(const W* w){
@@ -89,4 +74,15 @@ Ws* _recurse_head(const W* w){
         fprintf(stderr, "A nested expression MUST have exactly 1 output.\n");
     }
     return result;
+}
+
+// link all top level elements in c_{i+1} as inputs to c_i
+void _link_pair(const W* input, const W* output){
+    if(!input || !output) return;
+    // I'm dealing with C_MANIFOLD's not P_MANIFOLD's
+    // A C_MANIFOLD manifold is a couplet with a P_MANIFOLD rhs
+    if(input->cls == C_MANIFOLD){
+        Manifold* m = g_manifold(g_rhs(input));
+        m->inputs = ws_add(m->inputs, output);
+    }
 }

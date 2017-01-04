@@ -4,6 +4,10 @@ Ws* ws_flatten( const Ws* ws, Ws*(*recurse)(const W*) ){
     return ws_rfilter(ws, recurse, w_keep_all);
 }
 
+Ws* ws_filter(const Ws* ws, bool(*criterion)(const W*)){
+    return ws_rfilter(ws, ws_recurse_none, criterion);
+}
+
 Ws* ws_rfilter( const Ws* ws, Ws*(*recurse)(const W*), bool(*criterion)(const W*) ){
     Ws* result = NULL;
     if(!ws || !ws->head) return NULL;
@@ -72,6 +76,27 @@ void ws_prmod(
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
             ws_prmod(g_ws(r), nextval(w, p), recurse, criterion, mod, nextval);
+        }
+    }
+}
+
+void ws_recursive_reduce_mod(
+    const Ws* ws,
+    Ws*(*recurse)(const W*),
+    bool(*lc)(const W*),
+    bool(*rc)(const W*),
+    void(*mod)(const W*, const W*)
+){
+    if(!ws || !ws->head) return;
+    for(W* a = ws->head; a; a = a->next){
+        W* b = a->next; 
+        if(lc(a) && rc(b)){
+            mod(a, b);
+        }
+        Ws* rs = recurse(a); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            ws_recursive_reduce_mod(g_ws(r), recurse, lc, rc, mod);
         }
     }
 }
@@ -271,11 +296,11 @@ const W* w_nextval_ifpath(const W* w, const W* p) {
 // ------------------------------------------------------------------
 
 bool w_is_manifold(const W* w){
-    return w->cls == C_MANIFOLD;
+    return w ? w->cls == C_MANIFOLD : false;
 }
 
 bool w_is_composon(const W* w){
-    return w->cls == C_COMPOSON;
+    return w ? w->cls == C_COMPOSON : false;
 }
 
 bool w_keep_all(const W* w){
@@ -325,6 +350,23 @@ Ws* ws_recurse_ws(const W* w){
 
 Ws* ws_recurse_none(const W* w){
     return NULL;
+}
+
+Ws* ws_recurse_composition(const W* w){
+    if(!w) return NULL;
+    Ws* rs = NULL;
+    switch(w->cls){
+        case C_COMPOSON:
+        case C_NEST:
+            rs = ws_add_val(rs, C_NEST, g_ws(w));
+            break;
+        case T_PATH:
+            rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
+            break;
+        default:
+            return NULL;
+    }
+    return rs;
 }
 
 Label* _ws_get_label_from_lhs(W* a){

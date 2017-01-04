@@ -154,6 +154,7 @@ bool w_is_recursive(const W* w){
    return get_value_type(w->cls) == V_WS; 
 }
 
+#define SEGFAULT fflush(stderr);W* x=0;x->next=0;
 void w_assert_class(const W* w, Class cls){
     if(!w){
         fprintf(
@@ -161,12 +162,14 @@ void w_assert_class(const W* w, Class cls){
             "Class assertion failed! Got NULL, expected %s.\n",
             w_class_str(cls)
         );
+SEGFAULT 
     } else if(w->cls != cls){
         fprintf(
             stderr,
             "Class assertion failed! Got %s, expected %s.\n",
             w_class_str(w->cls), w_class_str(cls)
         );
+SEGFAULT 
     }
 }
 
@@ -177,7 +180,7 @@ void w_assert_type(const W* w, VType type){
             "Type assertion failed! Got NULL, expected %s.\n",
             w_type_str(type)
         );
-        fflush(stderr);
+SEGFAULT 
     } else {
         VType t = get_value_type(w->cls);
         if(t != type){
@@ -186,14 +189,14 @@ void w_assert_type(const W* w, VType type){
                 "Type assertion failed! Got %s, expected %s.\n",
                 w_type_str(t), w_type_str(type)
             );
-W* x = NULL;x->next = NULL;
             if(get_value_type(w->cls) == V_COUPLET){
                 fprintf(stderr, "%s\n", w->value.couplet->lhs->value.label->name);
             }
-            fflush(stderr);
+SEGFAULT 
         }
     }
 }
+#undef SEGFAULT
 
 bool _is_valid_lhs(const W* w){
     bool is_valid;
