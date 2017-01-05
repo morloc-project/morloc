@@ -17,6 +17,7 @@ FILE* toklog;
 %option noyywrap pointer yylineno
 
 %s S_IMPORT
+%x X_COMMENT
 %s S_PATH
 %s S_CPLT
 
@@ -40,7 +41,6 @@ couple ::
 %%
 
 
-    /* comment  */
     /* alias    */
     /* arg      */
     /* export   */
@@ -48,18 +48,27 @@ couple ::
     /* type     */
     /* source   */
 
-^@import { LOG( "SECTION_IMPORT" ); BEGIN(S_IMPORT); }
+{comment} { }
 
-^@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
+@comment { LOG( "SECTION_COMMENT" ); BEGIN(X_COMMENT); }
+@import  { LOG( "SECTION_IMPORT" ); BEGIN(S_IMPORT); }
 
-^@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
-^@cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
-^@check  { LOG( "SECTION_CHECK"  ) ; BEGIN(S_CPLT) ; return SECTION_CHECK  ; }
-^@open   { LOG( "SECTION_OPEN"   ) ; BEGIN(S_CPLT) ; return SECTION_OPEN   ; }
-^@pack   { LOG( "SECTION_PACK"   ) ; BEGIN(S_CPLT) ; return SECTION_PACK   ; }
-^@pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
-^@fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
-^@doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
+@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
+
+@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
+@cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
+@check  { LOG( "SECTION_CHECK"  ) ; BEGIN(S_CPLT) ; return SECTION_CHECK  ; }
+@open   { LOG( "SECTION_OPEN"   ) ; BEGIN(S_CPLT) ; return SECTION_OPEN   ; }
+@pack   { LOG( "SECTION_PACK"   ) ; BEGIN(S_CPLT) ; return SECTION_PACK   ; }
+@pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
+@fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
+@doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
+
+{ws} { LOGV("%s", yytext); }
+
+<X_COMMENT>@      { unput('@'); BEGIN INITIAL; }
+<X_COMMENT>(.|\n) { /* toss bodies */ }
+<X_COMMENT>\\@    { /* allow escaped @ */ }
 
 <S_IMPORT>{string} {
     char* s = strdup(yytext);
@@ -69,10 +78,6 @@ couple ::
     if(!newfile(s)) yyterminate();
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
-
-{ws} { LOGV("%s", yytext); }
-
-{comment} { }
 
 <S_PATH,S_CPLT>{couple} { LOG("COUPLE"); return COUPLE; }
 

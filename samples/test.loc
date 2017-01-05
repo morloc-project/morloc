@@ -1,11 +1,10 @@
-# @import
-# @export
-# @type
-# @alias
-# @arg
+@comment
+
+this is a comment section
+
 
 @path
-# M :: g . f
+M :: g . f
 
 # A :: x y z . t
 # B :: x . y . z
@@ -15,7 +14,7 @@
 # T :: map . &(a . b) foo . *B
 # B :: fifi . fofo
 
-A :: a . b . `foo` &(stickleback . bamboo) . yoyo
+# A :: a . b . `foo` &(stickleback . bamboo) . yoyo
 
 # A :: a . *B . a a a
 # B :: b . *C
