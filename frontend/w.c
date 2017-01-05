@@ -31,6 +31,7 @@ VType get_value_type(Class cls){
             vtype = V_COUPLET;
             break;
         case K_LABEL:
+        case T_EXPORT:
             vtype = V_LABEL;
             break;
         case P_MANIFOLD:
@@ -141,6 +142,7 @@ char* w_class_str(Class cls){
         case T_FAIL:       s = strdup("T_FAIL")       ; break;
         case T_DOC:        s = strdup("T_DOC")        ; break;
         case T_CACHE:      s = strdup("T_CACHE")      ; break;
+        case T_EXPORT:     s = strdup("T_EXPORT")     ; break;
         case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;
         case K_LABEL:      s = strdup("K_LABEL")      ; break;

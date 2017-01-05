@@ -17,6 +17,7 @@ FILE* toklog;
 %option noyywrap pointer yylineno
 
 %s S_IMPORT
+%s S_EXPORT
 %x X_COMMENT
 %s S_PATH
 %s S_CPLT
@@ -43,7 +44,6 @@ couple ::
 
     /* alias    */
     /* arg      */
-    /* export   */
     /* ontology */
     /* type     */
     /* source   */
@@ -64,11 +64,20 @@ couple ::
 @fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
 @doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
 
+@export { LOG( "SECTION_EXPORT" ); BEGIN(S_EXPORT); return SECTION_EXPORT; }
+
 {ws} { LOGV("%s", yytext); }
 
 <X_COMMENT>@      { unput('@'); BEGIN INITIAL; }
 <X_COMMENT>(.|\n) { /* toss bodies */ }
 <X_COMMENT>\\@    { /* allow escaped @ */ }
+
+<S_EXPORT>as { LOG("AS"); return AS; }
+<S_EXPORT>{var} {
+    LOGV("STRLIT(%s)", yytext);
+    yylval.STRLIT = strdup(yytext);
+    return STRLIT;
+}
 
 <S_IMPORT>{string} {
     char* s = strdup(yytext);

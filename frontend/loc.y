@@ -18,8 +18,9 @@ Ws* global_table;
 %token <W*> IDENTIFIER COMPOSON VARIABLE SELECTION
 
 %token <W*> STRING
+%token <char*> STRLIT
 
-%token COUPLE
+%token COUPLE AS
 
 %token SECTION_EFFECT
 %token SECTION_CACHE
@@ -30,6 +31,7 @@ Ws* global_table;
 %token SECTION_PASS
 %token SECTION_FAIL
 %token SECTION_DOC
+%token SECTION_EXPORT
 
 %type <Ws*> section composition s_path
 
@@ -41,6 +43,8 @@ Ws* global_table;
 %type <Ws*> s_pass
 %type <Ws*> s_fail
 %type <Ws*> s_doc
+
+%type <Ws*> s_export
 
 %left '.'
 %precedence CONCAT
@@ -62,6 +66,7 @@ section
     | s_pass
     | s_fail
     | s_doc
+    | s_export
 
 s_path
     : SECTION_PATH { $$ = NULL; }
@@ -164,6 +169,19 @@ s_doc
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_DOC, c);
         $$ = ws_add($1, w);
+    }
+
+ /* ======================================= */
+
+
+s_export
+    : SECTION_EXPORT { $$ = NULL; }
+    | s_export STRLIT {
+        Label* e = label_new_set($2, NULL);
+        $$ = ws_add_val($$, T_EXPORT, e);
+    }
+    | s_export AS STRLIT {
+        g_label($$->tail)->label = $3;
     }
 
 %%

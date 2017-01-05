@@ -98,7 +98,17 @@ void print_manifolds(Ws* ws_top){
     }
 }
 
-void print_epilog(Ws* ws_top){ }
+void print_epilog(Ws* ws_top){
+    for(W* e = ws_top->head; e; e = e->next){
+        if(e->cls == T_EXPORT){
+            Label* l = g_label(e);
+            if(l->name){
+                char* alias = l->label ? l->label : l->name;
+                printf("EXPORT %s %s\n", l->name, alias);
+            }
+        }
+    }
+}
 
 void print_lil(Ws* ws_top){
     if(ws_top && ws_top->head){

@@ -1,6 +1,11 @@
-@comment
+# @comment
+#
+# this is a comment section
 
-this is a comment section
+@export
+M as foobear
+fifi as foehammer
+foofoo
 
 
 @path
