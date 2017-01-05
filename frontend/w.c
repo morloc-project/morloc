@@ -30,6 +30,8 @@ VType get_value_type(Class cls){
         case C_MANIFOLD:
         case P_COUPLET:
         case T_SOURCE:
+        case T_ARGUMENT:
+        case P_ARGUMENT:
             vtype = V_COUPLET;
             break;
         case K_LABEL:
@@ -146,6 +148,8 @@ char* w_class_str(Class cls){
         case T_CACHE:      s = strdup("T_CACHE")      ; break;
         case T_EXPORT:     s = strdup("T_EXPORT")     ; break;
         case T_SOURCE:     s = strdup("T_SOURCE")     ; break;
+        case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
+        case P_ARGUMENT:   s = strdup("P_ARGUMENT")   ; break;
         case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;
         case K_LABEL:      s = strdup("K_LABEL")      ; break;

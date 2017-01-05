@@ -83,6 +83,16 @@ void print_manifold_lil(W* c_m){
         }
     }
 
+    if(m->args){
+        for(W* w = m->args->head; w; w = w->next){
+            printf("ARG m%d %s", m->uid, g_string(g_lhs(w)));
+            for(W* a = g_ws(g_rhs(w))->head; a; a = a->next){
+                printf(" %s", g_string(a));
+            }
+            printf("\n");
+        }
+    }
+
 }
 
 void print_prolog(Ws* ws_top){

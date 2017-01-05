@@ -23,21 +23,27 @@ FILE* toklog;
 %s S_LANG
 %s S_PATH
 %s S_CPLT
+%s S_ARG
 
 ws        [ \t\n\r]
 comment   #.*\n
 
-name      [a-zA-Z_][a-zA-Z0-9_]*
-var       {name}(:{name})?
+sym       [a-zA-Z_][a-zA-Z0-9_]*
+var       {sym}(:{sym})?
 path      {var}({ws}*\/{ws}*{var})*
 selection {path}(,{path})*{ws}*::
 
 identifier {var}{ws}*::
 
+parameter {sym}{ws}*=
+
 grpref     \*{var}
 positional `[^`]+`
 
-string \'[^']*\'|\"[^"]*\"
+str \'[^']*\'|\"[^"]*\"
+int [0-9]|[1-9][0-9]+
+dbl {int}\.[0-9]+
+lgc TRUE|FALSE|NULL 
 
 couple ::
 
@@ -47,7 +53,6 @@ couple ::
     /* arg      */
     /* ontology */
     /* type     */
-    /* source   */
 
 {comment} { }
 
@@ -67,6 +72,7 @@ couple ::
 @fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
 @alias  { LOG( "SECTION_ALIAS"  ) ; BEGIN(S_CPLT) ; return SECTION_ALIAS  ; }
 @doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
+@arg    { LOG( "SECTION_ARG"    ) ; BEGIN(S_ARG)  ; return SECTION_ARG    ; }
 
 @export { LOG( "SECTION_EXPORT" ); BEGIN(S_EXPORT); return SECTION_EXPORT; }
 
@@ -77,16 +83,16 @@ couple ::
     BEGIN X_SOURCE;
     while(isspace(yytext[0])) yytext++;
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STRING = w;
-    return STRING;
+    yylval.STR = w;
+    return STR;
   }
 <X_SOURCE>^[ \t]*([^\n@].*)?\n {
     char* s = strdup(yytext);
     LOGV("%s", s);
     s[strlen(s)-1] = '\0'; /* trim the newline */ 
     W* w = w_new(P_STRING, s);
-    yylval.STRING = w;
-    return STRING;
+    yylval.STR = w;
+    return STR;
 }
 <X_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
 
@@ -99,11 +105,11 @@ couple ::
 <S_EXPORT>{var} {
     LOGV("STRING(%s)", yytext);
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STRING = w;
-    return STRING;
+    yylval.STR = w;
+    return STR;
 }
 
-<S_IMPORT>{string} {
+<S_IMPORT>{str} {
     char* s = strdup(yytext);
     s++;
     s[strlen(s)-1]='\0';
@@ -112,7 +118,7 @@ couple ::
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-<S_PATH,S_CPLT>{couple} { LOG("COUPLE"); return COUPLE; }
+<S_PATH,S_CPLT,S_ARG>{couple} { LOG("COUPLE"); return COUPLE; }
 
 <S_PATH>{identifier} {
     char* s = strdup(yytext);
@@ -164,7 +170,7 @@ couple ::
 }
 
 
-<S_CPLT>{selection} {
+<S_CPLT,S_ARG>{selection} {
     char* s = strdup(yytext);
     int N = strlen(s);
     int i = N - 1;
@@ -191,12 +197,30 @@ couple ::
     return VARIABLE;
 }
 
-<S_CPLT>{string} {
+<S_CPLT>{str} {
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STRING = w;
-    LOG("STRING");
-    return STRING;
+    yylval.STR = w;
+    LOGV("STRING:%s", yytext);
+    return STR;
 }
+
+<S_ARG>{parameter} {
+    char* s = strdup(yytext);
+    unput('=');
+    for(int i = 0; i < strlen(s); i++){
+        s[i] = (isspace(s[i]) || s[i] == '=') ? '\0' : s[i];
+    }
+    W* w = w_new(P_STRING, s);
+    yylval.NAME = w;
+    return NAME;
+}
+<S_ARG>{int}|{dbl}|{lgc}|{sym}|{str} {
+    W* w = w_new(P_STRING, strdup(yytext));
+    LOG("PRIMITIVE");
+    yylval.PRIMITIVE = w;
+    return PRIMITIVE;
+}
+
 
 . { LOGV("%c", yytext[0]); return yytext[0]; }
 

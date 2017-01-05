@@ -2,22 +2,26 @@
 #
 # this is a comment section
 
-@source R
+# @source R
+#
+# f <- function(){1}
+# 5 * 7
 
-f <- function(){1}
-5 * 7
-
-@export
-M as foobear
-fifi as foehammer
-foofoo
+# @export
+# M as foobear
+# fifi as foehammer
+# foofoo
 
 
 @path
 M :: g . f
 
-@alias
-g :: psychodefroculate
+# @alias
+# g :: psychodefroculate
+
+@arg
+
+g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
 
 # A :: x y z . t
 # B :: x . y . z

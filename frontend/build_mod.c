@@ -47,6 +47,7 @@ bool _manifold_modifier(const W* w){
         case T_FAIL:
         case T_ALIAS:
         case T_DOC:
+        case T_ARGUMENT:
             return true;         
         default:
             return false;
@@ -103,6 +104,9 @@ void _add_modifier(const W* w, const W* p){
             break;
         case T_DOC:
             m->doc = ws_add_val(m->doc, P_STRING, g_string(rhs));
+            break;
+        case T_ARGUMENT:
+            m->args = ws_add_val(m->args, P_ARGUMENT, g_couplet(rhs));
             break;
         default:
             break;

@@ -19,13 +19,14 @@ typedef struct Manifold {
     char* function;
     struct Ws* effect; // Couplet<char*>
     struct Ws* cache;  // Couplet<char*>
-    struct Ws* check;
-    struct Ws* open;
-    struct Ws* pack;
-    struct Ws* pass;
-    struct Ws* fail;
-    struct Ws* doc;
-    struct Ws* inputs;  // Couplet<Manifold*>
+    struct Ws* check;  // "
+    struct Ws* open;   // "
+    struct Ws* pack;   // "
+    struct Ws* pass;   // "
+    struct Ws* fail;   // "
+    struct Ws* doc;    // "
+    struct Ws* inputs; // Couplet<Manifold*>
+    struct Ws* args;   // Couplet<P_STRING,Ws<P_STRING>>
 } Manifold;
 
 Manifold* manifold_new();

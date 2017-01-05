@@ -15,9 +15,11 @@ Ws* global_table;
 
 %define api.value.type union 
 
-%token <W*> IDENTIFIER COMPOSON VARIABLE SELECTION
+%token <W*> IDENTIFIER /* K_LABEL */
+%token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_POSITIONAL */
+%token <W*> SELECTION  /* K_LIST */
 
-%token <W*> STRING
+%token <W*> STR NAME PRIMITIVE VARIABLE /* P_STRING */
 
 %token COUPLE AS
 
@@ -33,6 +35,7 @@ Ws* global_table;
 %token SECTION_DOC
 %token SECTION_EXPORT
 %token SECTION_SOURCE
+%token SECTION_ARG
 
 %type <Ws*> section composition s_path
 
@@ -45,9 +48,13 @@ Ws* global_table;
 %type <Ws*> s_fail
 %type <Ws*> s_alias
 %type <Ws*> s_doc
+%type <Ws*> s_arg
 
 %type <Ws*> s_export
 %type <Ws*> s_source
+
+%type <W*>  argument   /* P_ARGUMENT:V_COUPLET */
+%type <Ws*> array list /* P_WS of P_STRING     */
 
 %left '.'
 %precedence CONCAT
@@ -72,6 +79,7 @@ section
     | s_doc
     | s_export
     | s_source
+    | s_arg
 
 s_path
     : SECTION_PATH { $$ = NULL; }
@@ -178,7 +186,7 @@ s_alias
 
 s_doc
     : SECTION_DOC { $$ = NULL; }
-    | s_doc SELECTION COUPLE STRING {
+    | s_doc SELECTION COUPLE STR {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_DOC, c);
         $$ = ws_add($1, w);
@@ -189,27 +197,60 @@ s_doc
 
 s_export
     : SECTION_EXPORT { $$ = NULL; }
-    | s_export STRING {
+    | s_export STR {
         Label* e = label_new_set(g_string($2), NULL);
         $$ = ws_add_val($$, T_EXPORT, e);
     }
-    | s_export AS STRING {
+    | s_export AS STR {
         g_label($$->tail)->label = g_string($3);
     }
 
  /* ======================================= */
 
 s_source
-  : SECTION_SOURCE STRING {
+  : SECTION_SOURCE STR {
     Ws* ws = ws_new(w_new(P_STRING, ""));
     Couplet* c = couplet_new($2, w_new(P_WS, ws));
     W* w = w_new(T_SOURCE, c);
     $$ = ws_new(w);
   }
-  | s_source STRING {
+  | s_source STR {
     s_ws(g_rhs($1->head), ws_add(g_ws(g_rhs($1->head)), $2));
     $$ = $1;
   }
+
+ /* ======================================= */
+
+s_arg
+  : SECTION_ARG { $$ = NULL; }
+  | s_arg SELECTION COUPLE argument {
+    Couplet* c = couplet_new($2, $4); 
+    W* w = w_new(T_ARGUMENT, c);
+    $$ = ws_add($$, w);
+  }
+  | s_arg argument {
+    if($$){
+        Couplet* c = couplet_new(g_lhs($$->tail), $2); 
+        W* w = w_new(T_ARGUMENT, c);
+        $$ = ws_add($$, w);
+    } else {
+        fprintf(stderr, "ERROR: missing path in argument declaration\n");
+    }
+  }
+argument
+  : NAME '=' PRIMITIVE {
+    W* w = w_new(P_WS, ws_new($3));
+    $$ = w_new(P_ARGUMENT, couplet_new($1, w));
+  }
+  | NAME '=' array {
+    $$ = w_new(P_ARGUMENT, couplet_new($1, w_new(P_WS, $3)));
+  }
+array
+  : '[' list ']' { $$ = $2;   }
+  | '['      ']' { $$ = NULL; }
+list
+  : PRIMITIVE          { $$ = ws_new($1);     }
+  | list ',' PRIMITIVE { $$ = ws_add($1, $3); }
 
 %%
 
