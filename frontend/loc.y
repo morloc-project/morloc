@@ -18,7 +18,6 @@ Ws* global_table;
 %token <W*> IDENTIFIER COMPOSON VARIABLE SELECTION
 
 %token <W*> STRING
-%token <char*> STRLIT
 
 %token COUPLE AS
 
@@ -33,6 +32,7 @@ Ws* global_table;
 %token SECTION_ALIAS
 %token SECTION_DOC
 %token SECTION_EXPORT
+%token SECTION_SOURCE
 
 %type <Ws*> section composition s_path
 
@@ -47,6 +47,7 @@ Ws* global_table;
 %type <Ws*> s_doc
 
 %type <Ws*> s_export
+%type <Ws*> s_source
 
 %left '.'
 %precedence CONCAT
@@ -70,6 +71,7 @@ section
     | s_alias
     | s_doc
     | s_export
+    | s_source
 
 s_path
     : SECTION_PATH { $$ = NULL; }
@@ -187,13 +189,27 @@ s_doc
 
 s_export
     : SECTION_EXPORT { $$ = NULL; }
-    | s_export STRLIT {
-        Label* e = label_new_set($2, NULL);
+    | s_export STRING {
+        Label* e = label_new_set(g_string($2), NULL);
         $$ = ws_add_val($$, T_EXPORT, e);
     }
-    | s_export AS STRLIT {
-        g_label($$->tail)->label = $3;
+    | s_export AS STRING {
+        g_label($$->tail)->label = g_string($3);
     }
+
+ /* ======================================= */
+
+s_source
+  : SECTION_SOURCE STRING {
+    Ws* ws = ws_new(w_new(P_STRING, ""));
+    Couplet* c = couplet_new($2, w_new(P_WS, ws));
+    W* w = w_new(T_SOURCE, c);
+    $$ = ws_new(w);
+  }
+  | s_source STRING {
+    s_ws(g_rhs($1->head), ws_add(g_ws(g_rhs($1->head)), $2));
+    $$ = $1;
+  }
 
 %%
 

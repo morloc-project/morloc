@@ -85,7 +85,21 @@ void print_manifold_lil(W* c_m){
 
 }
 
-void print_prolog(Ws* ws_top){ }
+void print_prolog(Ws* ws_top){
+    for(W* e = ws_top->head; e; e = e->next){
+        if(e->cls == T_SOURCE){
+            // I add an empty string at the initialization of each
+            // source object, so if there is no code, the length will be 1,
+            // not 0.
+            if(ws_length(g_ws(g_rhs(e))) > 1){
+                printf("SOURCE %s BEGIN\n", g_string(g_lhs(e)));
+                for(W* line = g_ws(g_rhs(e))->head->next; line; line = line->next){
+                    printf("   %s\n", g_string(line));
+                }
+            }
+        }
+    }
+}
 
 void print_manifolds(Ws* ws_top){
     Ws* ws_man = ws_rfilter(ws_top, ws_recurse_most, w_is_manifold);

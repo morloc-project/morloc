@@ -19,6 +19,8 @@ FILE* toklog;
 %s S_IMPORT
 %s S_EXPORT
 %x X_COMMENT
+%x X_SOURCE
+%s S_LANG
 %s S_PATH
 %s S_CPLT
 
@@ -52,6 +54,8 @@ couple ::
 @comment { LOG( "SECTION_COMMENT" ); BEGIN(X_COMMENT); }
 @import  { LOG( "SECTION_IMPORT" ); BEGIN(S_IMPORT); }
 
+@source { LOG( "SECTION_SOURCE" ); BEGIN(S_LANG); return SECTION_SOURCE ; }
+
 @path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
 
 @effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
@@ -68,15 +72,35 @@ couple ::
 
 {ws} { LOGV("%s", yytext); }
 
+<S_LANG>[ ]+{var} {
+    LOG(" LANG");
+    BEGIN X_SOURCE;
+    while(isspace(yytext[0])) yytext++;
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.STRING = w;
+    return STRING;
+  }
+<X_SOURCE>^[ \t]*([^\n@].*)?\n {
+    char* s = strdup(yytext);
+    LOGV("%s", s);
+    s[strlen(s)-1] = '\0'; /* trim the newline */ 
+    W* w = w_new(P_STRING, s);
+    yylval.STRING = w;
+    return STRING;
+}
+<X_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
+
+
 <X_COMMENT>@      { unput('@'); BEGIN INITIAL; }
 <X_COMMENT>(.|\n) { /* toss bodies */ }
 <X_COMMENT>\\@    { /* allow escaped @ */ }
 
 <S_EXPORT>as { LOG("AS"); return AS; }
 <S_EXPORT>{var} {
-    LOGV("STRLIT(%s)", yytext);
-    yylval.STRLIT = strdup(yytext);
-    return STRLIT;
+    LOGV("STRING(%s)", yytext);
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.STRING = w;
+    return STRING;
 }
 
 <S_IMPORT>{string} {

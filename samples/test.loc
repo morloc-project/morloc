@@ -2,6 +2,11 @@
 #
 # this is a comment section
 
+@source R
+
+f <- function(){1}
+5 * 7
+
 @export
 M as foobear
 fifi as foehammer
