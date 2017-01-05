@@ -27,6 +27,7 @@ typedef enum {
     T_SOURCE,
     T_ARGUMENT,
     P_ARGUMENT,
+    T_TYPE,
     C_COMPOSON,   // C for composition
     C_MANIFOLD,
     C_NEST,

@@ -12,6 +12,8 @@
 # fifi as foehammer
 # foofoo
 
+@type
+g :: a -> (a -> b) -> b
 
 @path
 M :: g . f
@@ -19,9 +21,8 @@ M :: g . f
 # @alias
 # g :: psychodefroculate
 
-@arg
-
-g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
+# @arg
+# g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
 
 # A :: x y z . t
 # B :: x . y . z

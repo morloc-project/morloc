@@ -16,6 +16,7 @@ FILE* toklog;
 %option header-file="lex.yy.h"
 %option noyywrap pointer yylineno
 
+%s S_TYPE
 %s S_IMPORT
 %s S_EXPORT
 %x X_COMMENT
@@ -50,9 +51,7 @@ couple ::
 %%
 
 
-    /* arg      */
     /* ontology */
-    /* type     */
 
 {comment} { }
 
@@ -62,6 +61,8 @@ couple ::
 @source { LOG( "SECTION_SOURCE" ); BEGIN(S_LANG); return SECTION_SOURCE ; }
 
 @path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
+
+@type   { LOG( "SECTION_TYPE"   ) ; BEGIN(S_TYPE) ; return SECTION_TYPE   ; }
 
 @effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
 @cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
@@ -118,7 +119,7 @@ couple ::
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-<S_PATH,S_CPLT,S_ARG>{couple} { LOG("COUPLE"); return COUPLE; }
+<S_PATH,S_CPLT,S_ARG,S_TYPE>{couple} { LOG("COUPLE"); return COUPLE; }
 
 <S_PATH>{identifier} {
     char* s = strdup(yytext);
@@ -220,6 +221,25 @@ couple ::
     yylval.PRIMITIVE = w;
     return PRIMITIVE;
 }
+
+<S_TYPE>{sym}{ws}*:: {
+    char* s = strdup(yytext);
+    unput(':');unput(':');
+    for(int i = 0; i < strlen(s); i++){
+        s[i] = (isspace(s[i]) || s[i] == ':') ? '\0' : s[i];
+    }
+    W* w = w_new(P_STRING, s);
+    yylval.NAME = w;
+    LOG("NAME");
+    return NAME;
+}
+<S_TYPE>{sym} {
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.TYPE = w;
+    LOGV("TYPE:%s", yytext);
+    return TYPE;
+}
+<S_TYPE>-> { LOG("->"); return ARROW; }
 
 
 . { LOGV("%c", yytext[0]); return yytext[0]; }
