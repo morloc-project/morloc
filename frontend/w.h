@@ -19,6 +19,7 @@ typedef enum {
     T_PACK,
     T_PASS,
     T_FAIL,
+    T_ALIAS,
     T_DOC,
     T_CACHE,
     T_PATH,       

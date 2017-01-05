@@ -45,6 +45,7 @@ bool _manifold_modifier(const W* w){
         case T_PACK:
         case T_PASS:
         case T_FAIL:
+        case T_ALIAS:
         case T_DOC:
             return true;         
         default:
@@ -76,6 +77,9 @@ void _add_modifier(const W* w, const W* p){
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);
     switch(p->cls){
+        case T_ALIAS:
+            m->function = g_string(rhs);
+            break;
         case T_EFFECT:
             m->effect = ws_add_val(m->effect, P_STRING, g_string(rhs));
             break;

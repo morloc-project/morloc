@@ -30,6 +30,7 @@ Ws* global_table;
 %token SECTION_PACK
 %token SECTION_PASS
 %token SECTION_FAIL
+%token SECTION_ALIAS
 %token SECTION_DOC
 %token SECTION_EXPORT
 
@@ -42,6 +43,7 @@ Ws* global_table;
 %type <Ws*> s_pack
 %type <Ws*> s_pass
 %type <Ws*> s_fail
+%type <Ws*> s_alias
 %type <Ws*> s_doc
 
 %type <Ws*> s_export
@@ -65,6 +67,7 @@ section
     | s_pack
     | s_pass
     | s_fail
+    | s_alias
     | s_doc
     | s_export
 
@@ -160,6 +163,14 @@ s_fail
     | s_fail SELECTION COUPLE VARIABLE {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_FAIL, c);
+        $$ = ws_add($1, w);
+    }
+
+s_alias
+    : SECTION_ALIAS { $$ = NULL; }
+    | s_alias SELECTION COUPLE VARIABLE {
+        Couplet* c = couplet_new($2, $4);
+        W* w = w_new(T_ALIAS, c);
         $$ = ws_add($1, w);
     }
 

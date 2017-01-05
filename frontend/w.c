@@ -24,6 +24,7 @@ VType get_value_type(Class cls){
         case T_PACK:
         case T_PASS:
         case T_FAIL:
+        case T_ALIAS:
         case T_DOC:
         case T_CACHE:
         case C_MANIFOLD:

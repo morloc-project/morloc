@@ -42,7 +42,6 @@ couple ::
 %%
 
 
-    /* alias    */
     /* arg      */
     /* ontology */
     /* type     */
@@ -62,6 +61,7 @@ couple ::
 @pack   { LOG( "SECTION_PACK"   ) ; BEGIN(S_CPLT) ; return SECTION_PACK   ; }
 @pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
 @fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
+@alias  { LOG( "SECTION_ALIAS"  ) ; BEGIN(S_CPLT) ; return SECTION_ALIAS  ; }
 @doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
 
 @export { LOG( "SECTION_EXPORT" ); BEGIN(S_EXPORT); return SECTION_EXPORT; }

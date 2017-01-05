@@ -11,6 +11,9 @@ foofoo
 @path
 M :: g . f
 
+@alias
+g :: psychodefroculate
+
 # A :: x y z . t
 # B :: x . y . z
 # C :: x (y . z) . t
