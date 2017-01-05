@@ -14,8 +14,9 @@ FILE* toklog;
 %}
 
 %option header-file="lex.yy.h"
-%option noyywrap
+%option noyywrap pointer yylineno
 
+%s S_IMPORT
 %s S_PATH
 %s S_CPLT
 
@@ -38,6 +39,17 @@ couple ::
 
 %%
 
+
+    /* comment  */
+    /* alias    */
+    /* arg      */
+    /* export   */
+    /* ontology */
+    /* type     */
+    /* source   */
+
+^@import { LOG( "SECTION_IMPORT" ); BEGIN(S_IMPORT); }
+
 ^@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
 
 ^@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
@@ -49,11 +61,20 @@ couple ::
 ^@fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
 ^@doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
 
+<S_IMPORT>{string} {
+    char* s = strdup(yytext);
+    s++;
+    s[strlen(s)-1]='\0';
+    LOGV("importing(%s)\n", s);
+    if(!newfile(s)) yyterminate();
+  }
+<<EOF>> { if(!popfile()) yyterminate(); }
+
 {ws} { LOGV("%s", yytext); }
 
 {comment} { }
 
-{couple} { LOG("COUPLE"); return COUPLE; }
+<S_PATH,S_CPLT>{couple} { LOG("COUPLE"); return COUPLE; }
 
 <S_PATH>{identifier} {
     char* s = strdup(yytext);
@@ -125,14 +146,14 @@ couple ::
     return SELECTION;
 }
 
-{var} {
+<S_CPLT,S_PATH>{var} {
     W* w = w_new(P_STRING, strdup(yytext));
     yylval.VARIABLE = w;
     LOGV("VARIABLE:%s", yytext);
     return VARIABLE;
 }
 
-{string} {
+<S_CPLT>{string} {
     W* w = w_new(P_STRING, strdup(yytext));
     yylval.STRING = w;
     LOG("STRING");

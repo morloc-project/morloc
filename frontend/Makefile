@@ -30,9 +30,9 @@ FILES =         \
 all:
 	bison -d --report=all -Wall ${SRC_BISON}
 	flex ${SRC_LEXER}
-	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET}.out ${FILES}
+	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET} ${FILES}
 
 clean:
-	rm -f ${TARGET}.out ${C_PARSER} ${H_PARSER} ${C_LEXER} ${H_LEXER}
+	rm -f ${TARGET} ${C_PARSER} ${H_PARSER} ${C_LEXER} ${H_LEXER}
 	rm -f tok.log loc.output
 	rm -f vgcore*

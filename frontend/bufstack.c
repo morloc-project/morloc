@@ -13,8 +13,6 @@ int newfile(char* fn){
         return 0;
     }
 
-    /* printf(" --- %s --- \n", fn); */
-
     struct bufstack *bs = malloc(sizeof(struct bufstack));
     if(bs == NULL){
         fprintf(stderr, "malloc error\n");
@@ -58,8 +56,6 @@ int popfile(void){
 
     yylineno = current_bs->lineno;
     current_filename = current_bs->filename;
-
-    /* printf(" --- %s --- \n", current_filename); */
 
     return 1;
 }

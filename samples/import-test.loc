@@ -1,0 +1,10 @@
+@import
+'import-test-lib.loc'
+
+# @export
+#
+# L0 as runpipeline
+
+@path
+L0 :: A . B
+# L0 :: A . B
