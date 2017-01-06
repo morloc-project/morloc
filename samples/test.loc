@@ -17,14 +17,17 @@
 
 @type
 f :: NULL -> A
-# g :: A    -> B
-g :: T    -> B
-h :: B    -> NULL
+g :: A    -> B
+h :: B -> foo -> Babushka -> NULL
+
+foo :: X -> Baba
+bar :: A -> X
 
 
 
 @path
-M :: h . g . f
+M :: h . g `francis` *N . f
+N :: foo . bar
 # N :: foo . bar
 
 # @alias

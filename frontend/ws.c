@@ -109,10 +109,10 @@ Ws* ws_tail(const Ws* ws){
 
 Ws* ws_init(const Ws* ws){
     if(ws_length(ws) < 2) return NULL;
-    Ws* n = ws_new(w_clone(ws->head));
-    W* last = ws->head;
-    for(; last->next; last = last->next){ }
-    n->last = last;
+    Ws* n = _ws_new(w_clone(ws->head));
+    for(W* last = n->head; last->next; last = last->next){
+        n->last = last;
+    }
     n->last->next = NULL;
     return n;
 }

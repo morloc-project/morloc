@@ -38,10 +38,10 @@ void _typecheck(W* w){
         ); 
     }
 
-    if(n_inputs < n_types){
+    if(n_inputs && n_inputs < n_types){
         fprintf(
             stderr,
-            "ERROR: '%s' is not closed\n",
+            "UNSUPPORTED: '%s' is underspecified; I do not support currying.\n",
             m->function
         );
     }
@@ -57,6 +57,7 @@ void _typecheck(W* w){
     Ws* itypes;
     if(type_is_well(m->type)){
         itypes = NULL;
+        return;
     } else {
         itypes = ws_init(m->type);
     }
@@ -69,6 +70,10 @@ void type_check(const Ws* ws){
 }
 
 void _type_compatible(const W* o, const W* t){
+    if(o->cls == C_DEREF || o->cls == C_POSITIONAL){
+        /* I currently do no type checking on these */
+        return;
+    }
     Manifold *m = g_manifold(g_rhs(o));
     if(!m->type){
         fprintf(
