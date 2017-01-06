@@ -87,37 +87,3 @@ W* list_from_str(char* list_str){
 
     return w;
 }
-
-/* bool path_is_base(Path* path){                                                     */
-/*     return path->next == NULL;                                                     */
-/* }                                                                                  */
-/*                                                                                    */
-/* Id* id_clone(Id* id){                                                              */
-/*                                                                                    */
-/*     if(!id) return NULL;                                                           */
-/*                                                                                    */
-/*     Id* newid = id_new();                                                          */
-/*     newid->name = id->name ? strdup(id->name) : NULL;                              */
-/*     newid->label = id->label ? strdup(id->label) : NULL;                           */
-/*                                                                                    */
-/*     return newid;                                                                  */
-/* }                                                                                  */
-/*                                                                                    */
-/* bool id_cmp(Id* a, Id* b){                                                         */
-/*     if(!a || !b){                                                                  */
-/*         fprintf(stderr, "WARNING: cannot compare null ids\n"); fflush(stderr);     */
-/*     }                                                                              */
-/*     if(!a->name || !b->name){                                                      */
-/*         fprintf(stderr, "WARNING: cannot compare nameless ids\n"); fflush(stderr); */
-/*     }                                                                              */
-/*     bool result =                                                                  */
-/*         strcmp(a->name, b->name) == 0 &&                                           */
-/*         (                                                                          */
-/*             (a->label == NULL && b->label == NULL) ||                              */
-/*             (                                                                      */
-/*                 (a->label != NULL && b->label != NULL) &&                          */
-/*                 strcmp(a->label, b->label) == 0                                    */
-/*             )                                                                      */
-/*         );                                                                         */
-/*     return result;                                                                 */
-/* }                                                                                  */

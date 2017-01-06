@@ -1,28 +1,4 @@
-#include "types.h"
-
-Couplet* couplet_new(struct W* lhs, struct W* rhs){
-    Couplet* c = (Couplet*)malloc(sizeof(Couplet));
-    c->lhs = lhs;
-    c->rhs = rhs;
-    return c;
-}
-
-int _manifold_uid(){
-    static int uid = 0;
-    return uid++;
-}
-Manifold* manifold_new(){
-    Manifold* m = (Manifold*)calloc(1, sizeof(Manifold));
-    m->uid = _manifold_uid();
-    return m;
-}
-
-Manifold* manifold_clone(Manifold* m){
-   Manifold* new_m = (Manifold*)malloc(sizeof(Manifold));
-   memcpy(new_m, m, sizeof(Manifold));
-   new_m->uid = _manifold_uid();
-   return new_m;
-}
+#include "label.h"
 
 Label* label_new(){
     return (Label*)calloc(1, sizeof(Label));

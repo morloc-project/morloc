@@ -20,7 +20,9 @@ FILES =         \
 	ws.c        \
 	w.c         \
 	hof.c       \
-	types.c     \
+	label.c     \
+	couplet.c   \
+	manifold.c  \
 	build.c     \
 	build_grp.c \
 	build_io.c  \

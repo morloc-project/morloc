@@ -1,11 +1,13 @@
 #ifndef __W_H__
 #define __W_H__
 
-#include "stdio.h"
-#include "stdlib.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#include "types.h"
+#include "label.h"
+#include "manifold.h"
+#include "couplet.h"
 
 typedef enum {
     X_NONE=0,     // X for special, I suppose
