@@ -17,14 +17,15 @@
 
 @type
 f :: NULL -> A
-g :: A    -> B
+# g :: A    -> B
+g :: T    -> B
 h :: B    -> NULL
 
 
 
 @path
-M :: h . g . f . zanzibar
-N :: foo . bar
+M :: h . g . f
+# N :: foo . bar
 
 # @alias
 # g :: psychodefroculate

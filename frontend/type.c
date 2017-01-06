@@ -1,5 +1,7 @@
 #include "type.h"
 
+void _type_compatible(const W* i, const W* t);
+
 bool _is_io(W* w){
     return strcmp(g_string(w), __IO__) == 0;
 }
@@ -52,10 +54,39 @@ void _typecheck(W* w){
         );
     }
 
+    Ws* itypes;
+    if(type_is_well(m->type)){
+        itypes = NULL;
+    } else {
+        itypes = ws_init(m->type);
+    }
+    ws_zip_mod(m->inputs, itypes, _type_compatible);
+
 }
 
 void type_check(const Ws* ws){
     ws_rcmod(ws, ws_recurse_composition, w_is_manifold, _typecheck);
+}
+
+void _type_compatible(const W* o, const W* t){
+    Manifold *m = g_manifold(g_rhs(o));
+    if(!m->type){
+        fprintf(
+            stderr,
+            "WARNING: Output of '%s' cannot be checked since it is typeless\n",
+            m->function
+        );
+    } else {
+        char* o_type = g_string(m->type->last);
+        char* i_type = g_string(t); 
+        if(strcmp(o_type, i_type) != 0){
+            fprintf(
+                stderr,
+                "ERROR: output of '%s' incomatible with input\n",
+                m->function
+            );
+        }
+    }
 }
 
 bool type_is_well(const Ws* type){
