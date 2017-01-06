@@ -8,6 +8,7 @@
 %code requires{
 #include "lil.h"
 #include "build.h"
+#include "type.h"
 #include "ws.h"
 #include "lhs.h"
 Ws* global_table;

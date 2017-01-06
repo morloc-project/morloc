@@ -86,6 +86,14 @@ void ws_ref_rmod(
     void(*mod)(W*, const Ws*)
 );
 
+// Recursive Conditional Modifier
+void ws_rcmod(
+    const Ws* ws,
+    Ws*(*recurse)(const W*),
+    bool(*criterion)(const W*),
+    void(*mod)(W*)
+);
+
 void ws_filter_mod(
     const Ws* top,
     Ws*(*xfilter)(const Ws*),

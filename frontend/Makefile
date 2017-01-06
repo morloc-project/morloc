@@ -27,6 +27,7 @@ FILES =         \
 	build_grp.c \
 	build_io.c  \
 	build_mod.c \
+	type.c      \
 	lil.c
 
 all:

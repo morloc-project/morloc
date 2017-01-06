@@ -17,6 +17,7 @@ typedef struct Manifold {
     struct Ws* doc;    // "
     struct Ws* inputs; // Couplet<Manifold*>
     struct Ws* args;   // Couplet<P_STRING,Ws<P_STRING>>
+    struct Ws* type;   // P_STRING | P_WS
 } Manifold;
 
 Manifold* manifold_new();

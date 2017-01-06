@@ -121,6 +121,25 @@ void ws_ref_rmod(
     }
 }
 
+void ws_rcmod(
+    const Ws* ws,
+    Ws*(*recurse)(const W*),
+    bool(*criterion)(const W*),
+    void(*mod)(W*)
+){
+    if(!ws || !ws->head) return;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w)){
+            mod(w);
+        }
+        Ws* rs = recurse(w); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            ws_rcmod(g_ws(r), recurse, criterion, mod);
+        }
+    }
+}
+
 void ws_map_pmod(Ws* xs, const Ws* ps, void(*pmod)(Ws*, const W*)){
     if(!ps) return;
     for(W* p = ps->head; p; p = p->next){

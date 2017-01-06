@@ -266,6 +266,8 @@ int main(int argc, char ** argv){
         status = yyparse();
         build_manifolds(global_table);
         print_lil(global_table);
+printf("\n");
+        typecheck(global_table);
         fclose(toklog);
     }
     return status;
