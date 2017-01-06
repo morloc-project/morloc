@@ -12,15 +12,19 @@
 # fifi as foehammer
 # foofoo
 
-@ontology
+# @ontology
+# M :: a b | c
 
-M :: a b | c
+@type
+f :: NULL -> A
+g :: A    -> B
+h :: B    -> NULL
 
-# @type
-# g :: a -> (a -> b) -> b
+
 
 @path
-M :: g . f
+M :: h . g . f . zanzibar
+N :: foo . bar
 
 # @alias
 # g :: psychodefroculate

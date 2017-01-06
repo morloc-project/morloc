@@ -318,6 +318,10 @@ bool w_is_manifold(const W* w){
     return w ? w->cls == C_MANIFOLD : false;
 }
 
+bool w_is_type(const W* w){
+    return w ? w->cls == T_TYPE : false;
+}
+
 bool w_is_composon(const W* w){
     return w ? w->cls == C_COMPOSON : false;
 }

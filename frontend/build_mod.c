@@ -2,8 +2,9 @@
 
 Ws* _get_manifolds(const Ws* ws);
 void _set_default_manifold_function(const W* cm);
+void _set_manifold_type(const W*, const W*);
 bool _manifold_modifier(const W* w);
-void _mod_pathwise(Ws* ws_top, const W* p);
+void _mod_add_modifiers(Ws* ws_top, const W* p);
 bool _basename_match(const W* w, const W* p);
 void _add_modifier(const W* w, const W* p);
 
@@ -14,11 +15,20 @@ void link_modifiers(Ws* ws_top){
     // Set default function names for all manifolds
     ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
 
+    // Set manifold type based off the default names
+    ws_2mod(
+        // get all manifolds
+        ws_rfilter(ws_top, ws_recurse_composition, w_is_manifold),
+        // get all defined types
+        ws_rfilter(ws_top, ws_recurse_none, w_is_type),
+        // if the names match, add the type to the manifold
+        _set_manifold_type
+    );
+
+    // add modifiers to all manifolds
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
-
     cs = ws_map_split(cs, ws_split_couplet);
-
-    ws_map_pmod(ws_top, cs, _mod_pathwise);
+    ws_map_pmod(ws_top, cs, _mod_add_modifiers);
 
 }
 
@@ -31,8 +41,19 @@ Ws* _get_manifolds(const Ws* ws){
 // Manifold->function IFF it is not already defined.
 void _set_default_manifold_function(const W* cm){
     Manifold* m = g_manifold(g_rhs(cm));
-    if(!m->function){
-        m->function = strdup(g_label(g_lhs(cm))->name);
+    m->function = strdup(g_label(g_lhs(cm))->name);
+}
+
+void _set_manifold_type(const W* mw, const W* tw){
+    char* m_name = g_label(g_lhs(mw))->name;
+    char* t_name = g_string(g_lhs(tw));
+    if(strcmp(m_name, t_name) == 0){
+        Manifold* m = g_manifold(g_rhs(mw));
+        if(m->type){
+            fprintf(stderr, "TYPE ERROR: redeclarations of '%s' type", m_name);
+        } else {
+            m->type = g_ws(g_rhs(tw));
+        }
     }
 }
 
@@ -54,7 +75,7 @@ bool _manifold_modifier(const W* w){
     } 
 }
 
-void _mod_pathwise(Ws* ws_top, const W* p){
+void _mod_add_modifiers(Ws* ws_top, const W* p){
     ws_prmod(ws_top, p, ws_recurse_path, _basename_match, _add_modifier, w_nextval_ifpath);
 }
 

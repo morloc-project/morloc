@@ -129,6 +129,7 @@ Ws* ws_recurse_path(const W*, const W*);
 
 // criteria functions
 bool w_is_manifold(const W*);
+bool w_is_type(const W*);
 bool w_is_composon(const W*);
 bool w_keep_all(const W*);
 
