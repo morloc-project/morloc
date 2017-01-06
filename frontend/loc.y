@@ -19,7 +19,7 @@ Ws* global_table;
 %token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_POSITIONAL */
 %token <W*> SELECTION  /* K_LIST */
 
-%token <W*> STR NAME PRIMITIVE VARIABLE TYPE /* P_STRING */
+%token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 
 %token COUPLE AS ARROW
 
@@ -37,6 +37,7 @@ Ws* global_table;
 %token SECTION_SOURCE
 %token SECTION_ARG
 %token SECTION_TYPE
+%token SECTION_ONTOLOGY
 
 %type <Ws*> section composition s_path
 
@@ -53,9 +54,11 @@ Ws* global_table;
 
 %type <Ws*> s_export
 %type <Ws*> s_type
+%type <Ws*> s_ontology
 %type <Ws*> s_source
 
 %type <Ws*> type
+%type <Ws*> ontology construct
 
 %type <W*>  argument   /* P_ARGUMENT:V_COUPLET */
 %type <Ws*> array list /* P_WS of P_STRING     */
@@ -83,6 +86,7 @@ section
     | s_doc
     | s_export
     | s_type
+    | s_ontology
     | s_source
     | s_arg
 
@@ -236,6 +240,25 @@ type
   : TYPE { $$ = ws_new($1); }
   | '(' type ')' { $$ = ws_new(w_new(P_WS, $2)); }
   | type ARROW type { $$ = ws_join($1, $3); }
+
+ /* ======================================= */
+
+s_ontology
+  : SECTION_ONTOLOGY { $$ = NULL; }
+  | s_ontology NAME COUPLE ontology {
+    Couplet* c = couplet_new($2, w_new(P_WS, $4)); 
+    W* w = w_new(T_ONTOLOGY, c);
+    $$ = ws_add($$, w);
+  }
+
+ontology
+  : construct { $$ = ws_new(w_new(P_WS, $1)); }
+  | ontology '|' construct { $$ = ws_add($1, w_new(P_WS, $3)); }
+
+construct
+  : OTYPE { $$ = ws_new($1); }
+  | construct OTYPE { $$ = ws_add($1, $2); }
+
 
  /* ======================================= */
 

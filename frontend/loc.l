@@ -17,6 +17,7 @@ FILE* toklog;
 %option noyywrap pointer yylineno
 
 %s S_TYPE
+%s S_ONTOLOGY
 %s S_IMPORT
 %s S_EXPORT
 %x X_COMMENT
@@ -51,8 +52,6 @@ couple ::
 %%
 
 
-    /* ontology */
-
 {comment} { }
 
 @comment { LOG( "SECTION_COMMENT" ); BEGIN(X_COMMENT); }
@@ -62,7 +61,8 @@ couple ::
 
 @path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
 
-@type   { LOG( "SECTION_TYPE"   ) ; BEGIN(S_TYPE) ; return SECTION_TYPE   ; }
+@type     { LOG( "SECTION_TYPE"     ) ; BEGIN(S_TYPE)     ; return SECTION_TYPE       ; }
+@ontology { LOG( "SECTION_ONTOLOGY" ) ; BEGIN(S_ONTOLOGY) ; return SECTION_ONTOLOGY   ; }
 
 @effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
 @cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
@@ -119,7 +119,7 @@ couple ::
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-<S_PATH,S_CPLT,S_ARG,S_TYPE>{couple} { LOG("COUPLE"); return COUPLE; }
+<S_PATH,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { LOG("COUPLE"); return COUPLE; }
 
 <S_PATH>{identifier} {
     char* s = strdup(yytext);
@@ -222,7 +222,7 @@ couple ::
     return PRIMITIVE;
 }
 
-<S_TYPE>{sym}{ws}*:: {
+<S_TYPE,S_ONTOLOGY>{sym}{ws}*:: {
     char* s = strdup(yytext);
     unput(':');unput(':');
     for(int i = 0; i < strlen(s); i++){
@@ -240,6 +240,13 @@ couple ::
     return TYPE;
 }
 <S_TYPE>-> { LOG("->"); return ARROW; }
+
+<S_ONTOLOGY>{sym} {
+    W* w = w_new(P_STRING, strdup(yytext));
+    yylval.OTYPE = w;
+    LOGV("OTYPE:%s", yytext);
+    return OTYPE;
+}
 
 
 . { LOGV("%c", yytext[0]); return yytext[0]; }

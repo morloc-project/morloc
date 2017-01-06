@@ -12,8 +12,12 @@
 # fifi as foehammer
 # foofoo
 
-@type
-g :: a -> (a -> b) -> b
+@ontology
+
+M :: a b | c
+
+# @type
+# g :: a -> (a -> b) -> b
 
 @path
 M :: g . f

@@ -33,6 +33,7 @@ VType get_value_type(Class cls){
         case T_ARGUMENT:
         case P_ARGUMENT:
         case T_TYPE:
+        case T_ONTOLOGY:
             vtype = V_COUPLET;
             break;
         case K_LABEL:
@@ -152,6 +153,7 @@ char* w_class_str(Class cls){
         case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
         case P_ARGUMENT:   s = strdup("P_ARGUMENT")   ; break;
         case T_TYPE:       s = strdup("T_TYPE")       ; break;
+        case T_ONTOLOGY:   s = strdup("T_ONTOLOGY")   ; break;
         case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;
         case K_LABEL:      s = strdup("K_LABEL")      ; break;
