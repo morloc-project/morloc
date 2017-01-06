@@ -51,6 +51,7 @@ void _typecheck(W* w){
             m->function, n_types, n_inputs
         );
     }
+
 }
 
 void type_check(const Ws* ws){
@@ -58,13 +59,13 @@ void type_check(const Ws* ws){
 }
 
 bool type_is_well(const Ws* type){
-    return _is_io(type->head) && !_is_io(type->tail);
+    return _is_io(type->head) && !_is_io(type->last);
 }
 
 bool type_is_pipe(const Ws* type){
-    return !_is_io(type->head) && !_is_io(type->tail);
+    return !_is_io(type->head) && !_is_io(type->last);
 }
 
 bool type_is_sink(const Ws* type){
-    return !_is_io(type->head) && _is_io(type->tail);
+    return !_is_io(type->head) && _is_io(type->last);
 }

@@ -13,7 +13,7 @@ Ws* ws_new(const W* w){
     Ws* ws = (Ws*)calloc(1, sizeof(Ws));
     W* w2 = w_isolate(w);
     ws->head = w2;
-    ws->tail = w2;
+    ws->last = w2;
     return ws;
 }
 
@@ -74,7 +74,7 @@ Ws* ws_add(Ws* ws, const W* w){
     if(!ws){
         ws = _ws_new(w2);
     } else {
-        if(ws->tail){
+        if(ws->last){
             _retail(ws, w2);
         } else {
             fprintf(stderr, "WARNING: cannot add to tailless table\n");
@@ -100,14 +100,30 @@ Ws* ws_join(Ws* a, Ws* b){
     return a;
 }
 
-Ws* ws_increment(const Ws* ws){
-    Ws* n = NULL;
-    if(ws && ws->head && ws->head->next){
-        n = (Ws*)malloc(sizeof(Ws));
-        n->head = ws->head->next;
-        n->tail = ws->tail;
-    }
+Ws* ws_tail(const Ws* ws){
+    if(ws_length(ws) < 2) return NULL;
+    Ws* n = ws_new(ws->head->next);
+    n->last = ws->last;
     return n;
+}
+
+Ws* ws_init(const Ws* ws){
+    if(ws_length(ws) < 2) return NULL;
+    Ws* n = ws_new(w_clone(ws->head));
+    W* last = ws->head;
+    for(; last->next; last = last->next){ }
+    n->last = last;
+    n->last->next = NULL;
+    return n;
+}
+
+W* ws_head(const Ws* ws){
+    return ws->head;
+}
+
+/* Get last element of a table */
+W* ws_last(const Ws* ws){
+    return ws->last;
 }
 
 int ws_length(const Ws* ws){
@@ -165,29 +181,29 @@ char* w_str(const W* w){
 // ====== PRIVATE FUNCTIONS ==========================================
 
 void _join(Ws* a, Ws* b){
-    a->tail->next = b->head;
-    a->tail = b->tail;
+    a->last->next = b->head;
+    a->last = b->last;
 }
 
 /* no copy constructor, no reset */
 Ws* _ws_new(W* w){
     Ws* ws = (Ws*)calloc(1, sizeof(Ws));
     ws->head = w;
-    ws->tail = w;
+    ws->last = w;
     return ws;
 }
 
 /* checkless attachment */
 void _retail(Ws* ws, W* w){
-    ws->tail->next = w;
-    ws->tail = w;
+    ws->last->next = w;
+    ws->last = w;
 }
 
 Ws* _ws_add(Ws* ws, W* w){
     if(!ws){
         ws = _ws_new(w);
     } else {
-        if(ws->tail){
+        if(ws->last){
             _retail(ws, w);
         } else {
             fprintf(stderr, "WARNING: cannot add to tailless table\n");

@@ -8,7 +8,7 @@
 
 typedef struct Ws{
     W* head;
-    W* tail;
+    W* last;
 } Ws;
 
 /* Copies entry and removes its link */
@@ -35,8 +35,14 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v);
 /* b is destroyed upon join */
 Ws* ws_join(Ws* a, Ws* b);
 
-/* Make a new table that with the first element dropped */
-Ws* ws_increment(const Ws* ws);
+/* Make table xs[2..k], drop first element */
+Ws* ws_tail(const Ws* ws);
+/* Make table xs[1..k-1], drop last element */
+Ws* ws_init(const Ws* ws);
+/* Get first element of a table */
+W* ws_head(const Ws* ws);
+/* Get last element of a table */
+W* ws_last(const Ws* ws);
 
 int ws_length(const Ws* ws);
 

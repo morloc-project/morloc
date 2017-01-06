@@ -59,10 +59,10 @@ Ws* _recurse_tail(const W* w){
     switch(w->cls){
         case C_NEST:
         case C_DEREF:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(w)->tail));
+            result = ws_add_val(result, V_WS, g_ws(g_ws(w)->last));
             break;
         case T_PATH:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(g_rhs(w))->tail));
+            result = ws_add_val(result, V_WS, g_ws(g_ws(g_rhs(w))->last));
             break;
         default:
             break;

@@ -214,7 +214,9 @@ void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*)){
         fprintf(stderr, "Cannot zipmod over lists of unequal lengths\n");
         return;
     }
-    for(W* x = xs->head, W* y = ys->head; x && y; x = x->next, y = y->next){
+    W* x = xs->head;
+    W* y = ys->head;
+    for(; x && y; x = x->next, y = y->next){
         mod(x, y);
     }
 }
@@ -307,7 +309,7 @@ const W* w_nextval_ifpath(const W* w, const W* p) {
         switch(lhs->cls){
             case K_PATH:
                 next = w_isolate(p);
-                s_ws(g_lhs(next), ws_increment(g_ws(lhs)));
+                s_ws(g_lhs(next), ws_tail(g_ws(lhs)));
                 break;
             case K_LIST:
                 next = NULL;

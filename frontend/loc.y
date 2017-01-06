@@ -122,8 +122,8 @@ composition
         $$ = ws_new(n);
     }
     | composition composition %prec CONCAT {
-        Ws* ws = ws_join(g_ws($1->tail), g_ws($2->head));
-        s_ws($1->tail, ws);
+        Ws* ws = ws_join(g_ws($1->last), g_ws($2->head));
+        s_ws($1->last, ws);
     }
     | composition '.' composition {
         $$ = ws_join($1, $3);
@@ -210,7 +210,7 @@ s_export
         $$ = ws_add_val($$, T_EXPORT, e);
     }
     | s_export AS STR {
-        g_label($$->tail)->label = g_string($3);
+        g_label($$->last)->label = g_string($3);
     }
 
  /* ======================================= */
@@ -273,7 +273,7 @@ s_arg
   }
   | s_arg argument {
     if($$){
-        Couplet* c = couplet_new(g_lhs($$->tail), $2); 
+        Couplet* c = couplet_new(g_lhs($$->last), $2); 
         W* w = w_new(T_ARGUMENT, c);
         $$ = ws_add($$, w);
     } else {
