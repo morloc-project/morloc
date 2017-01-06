@@ -208,6 +208,18 @@ void ws_3mod(const Ws* xs, const Ws* ys, const Ws* zs, void(*mod)(const W* x, co
     }
 }
 
+void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*)){
+    if(!(xs && ys)) return;
+    if(ws_length(xs) != ws_length(ys)){
+        fprintf(stderr, "Cannot zipmod over lists of unequal lengths\n");
+        return;
+    }
+    for(W* x = xs->head, W* y = ys->head; x && y; x = x->next, y = y->next){
+        mod(x, y);
+    }
+}
+
+
 void ws_pmod(const Ws* ws, const W* p, void(*mod)(const W*, const W*)){
     for(W* w = ws->head; w; w = w->next){
        mod(w, p); 

@@ -69,11 +69,14 @@ Ws* ws_split_couplet(const W*);
  */
 Ws* ws_map_split(const Ws* ws, Ws*(*split)(const W*));
 
+// Maps over 1, 2, or 3 variables. All combinations are considered, that is,
+// ws_2mod is quadratic and ws_3mod is cubic.
 void ws_mod(const Ws*, void(*mod)(const W*));
-
 void ws_2mod(const Ws*, const Ws*, void(*mod)(const W*, const W*));
-
 void ws_3mod(const Ws*, const Ws*, const Ws*, void(*mod)(const W*, const W*, const W*));
+
+// calls mod(xs[i], ys[i]) for all i. If as and bs are of unequal length, scream.
+void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*));
 
 // Recurse along ws according to `recurse`. Perform function `mod` on all w if
 // `criterion`. ws in `mod` are processed in the context of `ps`, which may,
