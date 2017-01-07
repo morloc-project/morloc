@@ -264,37 +264,37 @@ W* g_rhs(const W* w) {
 }
 
 void s_none(W* w){
-    if(!w) { fprintf(stderr, "Cannot set null in s_none"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_none\n"); return;}
     w_assert_type(w, V_NONE);
     w->value.string = NULL;
 }
 void s_string(W* w, char* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_string"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_string\n"); return;}
     w_assert_type(w, V_STRING);
     w->value.string = v;
 }
 void s_ws(W* w, struct Ws* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_ws"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_ws\n"); return;}
     w_assert_type(w, V_WS);
     w->value.ws = v;
 }
 void s_couplet(W* w, Couplet* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_couplet"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_couplet\n"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet = v;
 }
 void s_label(W* w, Label* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_label"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_label\n"); return;}
     w_assert_type(w, V_LABEL);
     w->value.label = v;
 }
 void s_manifold(W* w, Manifold* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_manifold"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_manifold\n"); return;}
     w_assert_type(w, V_MANIFOLD);
     w->value.manifold = v;
 }
 void s_lhs(W* w, W* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_lhs"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_lhs\n"); return;}
     w_assert_type(w, V_COUPLET);
     if(!_is_valid_lhs(v)){
         fprintf(
@@ -306,18 +306,18 @@ void s_lhs(W* w, W* v){
     w->value.couplet->lhs = v;
 }
 void s_rhs(W* w, W* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_rhs"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_rhs\n"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet->rhs = v;
 }
 
 void force_set_none(W* w){
-    if(!w) { fprintf(stderr, "Cannot set null in s_none"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_none\n"); return;}
     w->cls = X_NONE;
     s_none(w);
 }
 void force_set_string(W* w, Class c, char* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_string"); return; }
+    if(!w) { fprintf(stderr, "Cannot set null in s_string\n"); return; }
     if(get_value_type(c) == V_STRING){
         w->cls = c;
         s_string(w, v);
@@ -326,7 +326,7 @@ void force_set_string(W* w, Class c, char* v){
     }
 }
 void force_set_ws(W* w, Class c, struct Ws* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_ws"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_ws\n"); return;}
     if(get_value_type(c) == V_WS){
         w->cls = c;
         s_ws(w, v);
@@ -335,7 +335,7 @@ void force_set_ws(W* w, Class c, struct Ws* v){
     }
 }
 void force_set_couplet(W* w, Class c, Couplet* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_couplet"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_couplet\n"); return;}
     if(get_value_type(c) == V_COUPLET){
         w->cls = c;
         s_couplet(w, v);
@@ -344,7 +344,7 @@ void force_set_couplet(W* w, Class c, Couplet* v){
     }
 }
 void force_set_label(W* w, Class c, Label* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_label"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_label\n"); return;}
     if(get_value_type(c) == V_LABEL){
         w->cls = c;
         s_label(w, v);
@@ -353,7 +353,7 @@ void force_set_label(W* w, Class c, Label* v){
     }
 }
 void force_set_manifold(W* w, Class c, Manifold* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_manifold"); return;}
+    if(!w) { fprintf(stderr, "Cannot set null in s_manifold\n"); return;}
     if(get_value_type(c) == V_MANIFOLD){
         w->cls = c;
         s_manifold(w, v);

@@ -140,6 +140,27 @@ void ws_rcmod(
     }
 }
 
+W* ws_scrap(
+    const Ws* ws,
+    W* st,
+    Ws*(*recurse)(const W*),
+    bool(*criterion)(const W*),
+    W*(*mod)(W*, W*)
+){
+    if(!ws || !ws->head) return st;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w)){
+            st = mod(w, st);
+        }
+        Ws* rs = recurse(w); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            st = ws_scrap(g_ws(r), st, recurse, criterion, mod);
+        }
+    }
+    return st;
+}
+
 void ws_map_pmod(Ws* xs, const Ws* ps, void(*pmod)(Ws*, const W*)){
     if(!ps) return;
     for(W* p = ps->head; p; p = p->next){
@@ -221,6 +242,19 @@ void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*)){
     }
 }
 
+W* ws_szap(const Ws* xs, const Ws* ys, W* st, W*(*mod)(const W*, const W*, W*)){
+    if(!(xs && ys)) return st;
+    if(ws_length(xs) != ws_length(ys)){
+        fprintf(stderr, "Cannot zipmod over lists of unequal lengths\n");
+        return st;
+    }
+    W* x = xs->head;
+    W* y = ys->head;
+    for(; x && y; x = x->next, y = y->next){
+        st = mod(x, y, st);
+    }
+    return st;
+}
 
 void ws_pmod(const Ws* ws, const W* p, void(*mod)(const W*, const W*)){
     for(W* w = ws->head; w; w = w->next){

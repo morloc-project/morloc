@@ -20,6 +20,6 @@ bool type_is_effectful(const Ws* type);
  * - check consistency of inferred types
  * - honor syntax for IO
  */
-void type_check(const Ws* ws);
+W* type_check(const Ws* ws);
 
 #endif

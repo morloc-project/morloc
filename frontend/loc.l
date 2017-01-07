@@ -260,13 +260,29 @@ int main(int argc, char ** argv){
         perror("Please provide a filename\n");
         return 1;
     }
+    bool run_typechecker = false;
+    if(argc == 3 && strcmp(argv[1], "-c") == 0){
+       run_typechecker = true; 
+       argc--;argv++;
+    }
     int status = 1;
     if(newfile(argv[1])){
         toklog = fopen("tok.log", "w");
         status = yyparse();
         build_manifolds(global_table);
         print_lil(global_table);
-        type_check(global_table);
+        if(run_typechecker){
+            W* msg = type_check(global_table);
+            if(msg){
+                for(W* w = g_ws(msg)->head; w; w = w->next){
+                    printf(
+                        "TYPE ERROR in %s: %s\n",
+                        g_manifold(g_rhs(g_lhs(w)))->function,
+                        g_string(g_rhs(w))
+                    );
+                }
+            }
+        }
         fclose(toklog);
     }
     return status;

@@ -76,7 +76,9 @@ void ws_2mod(const Ws*, const Ws*, void(*mod)(const W*, const W*));
 void ws_3mod(const Ws*, const Ws*, const Ws*, void(*mod)(const W*, const W*, const W*));
 
 // calls mod(xs[i], ys[i]) for all i. If as and bs are of unequal length, scream.
-void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W*, const W*));
+void ws_zip_mod(const Ws* xs, const Ws* ys, void(*mod)(const W* x, const W* y));
+// stateful zip apply
+W* ws_szap(const Ws* xs, const Ws* ys, W* st, W*(*mod)(const W* x, const W* y, W* st));
 
 // Recurse along ws according to `recurse`. Perform function `mod` on all w if
 // `criterion`. ws in `mod` are processed in the context of `ps`, which may,
@@ -95,6 +97,15 @@ void ws_rcmod(
     Ws*(*recurse)(const W*),
     bool(*criterion)(const W*),
     void(*mod)(W*)
+);
+
+// Stateful Conditional Recursive Apply
+W* ws_scrap(
+    const Ws* ws,
+    W* st,
+    Ws*(*recurse)(const W*),
+    bool(*criterion)(const W*),
+    W*(*mod)(W* w, W* st)
 );
 
 void ws_filter_mod(
