@@ -2,21 +2,19 @@
 #
 # this is a comment section
 
-# @source R
-#
-# f <- function(){1}
-# 5 * 7
+@source R
 
-# @export
-# M as foobear
-# fifi as foehammer
-# foofoo
+f <- function(){1}
+5 * 7
 
-# @ontology
-# M :: a b | c
+@export
+foo as foobear
+
+@ontology
+M :: a b | c
 
 @type
-f :: NULL -> A
+f :: NULL -> yomama
 g :: A    -> B
 h :: B -> foo -> Babushka -> NULL
 
@@ -28,13 +26,34 @@ bar :: A -> X
 @path
 M :: h . g `francis` *N . f
 N :: foo . bar
-# N :: foo . bar
 
-# @alias
-# g :: psychodefroculate
+@cache
+h :: fukishima
 
-# @arg
-# g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
+@alias
+h :: psychodefroculate
+
+@arg
+g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
+
+@check
+h :: is_awesome
+h :: is_super_awesome
+
+@effect
+h :: make_awesomer
+
+@pack
+h :: zipitup
+
+@open
+h :: unzipit
+
+@fail
+h :: horrible_death
+
+@pass
+h :: tentative_success
 
 # A :: x y z . t
 # B :: x . y . z

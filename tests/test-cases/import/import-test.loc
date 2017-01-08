@@ -1,0 +1,5 @@
+@import
+'import-test-lib.loc'
+
+@effect
+g :: foo
