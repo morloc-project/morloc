@@ -3,6 +3,8 @@
 
 #include "hof.h"
 
-void print_lil(Ws* t);
+void print_lil(Ws* lil);
+
+Ws* build_lil(Ws* t);
 
 #endif

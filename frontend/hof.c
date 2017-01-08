@@ -229,6 +229,24 @@ void ws_3mod(Ws* xs, Ws* ys, Ws* zs, void(*mod)(W* x, W* y, W* z)){
     }
 }
 
+Ws* ws_map(Ws*  xs, W*(*fun)(W*)){
+    Ws* ys = NULL;
+    if(!xs) return ys;
+    for(W* w = xs->head; w; w = w->next){
+       ys = ws_add(xs, fun(w));
+    }
+    return ys;
+}
+
+Ws* ws_m2n_map(Ws* xs, Ws* ys, Ws*(*fun)(W* x, Ws* ys)){
+    if(!xs) return NULL;
+
+    for(W* x = xs->head; x; x = x->next){
+        ys = fun(x, ys);
+    }
+    return ys;
+}
+
 void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W*, W*)){
     if(!(xs && ys)) return;
     if(ws_length(xs) != ws_length(ys)){
@@ -255,6 +273,7 @@ W* ws_szap(Ws* xs, Ws* ys, W* st, W*(*mod)(W*, W*, W*)){
     }
     return st;
 }
+
 
 void ws_pmod(Ws* ws, W* p, void(*mod)(W*, W*)){
     for(W* w = ws->head; w; w = w->next){

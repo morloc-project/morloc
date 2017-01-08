@@ -343,13 +343,16 @@ int main(int argc, char ** argv){
     //  - link manifolds inputs to manifold outputs 
     build_manifolds(global_table);
 
+    // extract LIL as list of lists
+    Ws* lil = build_lil(global_table);
+
     // check the types of all manifolds
     W* msg = type_check(global_table);
 
 
     // === print statements =========================================
     if(   dump_table      ) ws_print(global_table, ws_recurse_most);
-    if( ! suppress_lil    ) print_lil(global_table);
+    if( ! suppress_lil    ) print_lil(lil);
     if(   run_typechecker ) print_error(msg);
     // --------------------------------------------------------------
 

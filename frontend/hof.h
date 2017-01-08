@@ -75,6 +75,9 @@ void ws_mod(Ws*, void(*mod)(W*));
 void ws_2mod(Ws*, Ws*, void(*mod)(W*, W*));
 void ws_3mod(Ws*, Ws*, Ws*, void(*mod)(W*, W*, W*));
 
+// Map each element in X to one element in Y
+Ws* ws_map(Ws* xs, W*(*fun)(W*));
+
 // calls mod(xs[i], ys[i]) for all i. If as and bs are of unequal length, scream.
 void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W* x, W* y));
 // stateful zip apply
