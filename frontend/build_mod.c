@@ -1,12 +1,12 @@
 #include "build_mod.h"
 
-Ws* _get_manifolds(const Ws* ws);
-void _set_default_manifold_function(const W* cm);
-void _set_manifold_type(const W*, const W*);
-bool _manifold_modifier(const W* w);
-void _mod_add_modifiers(Ws* ws_top, const W* p);
-bool _basename_match(const W* w, const W* p);
-void _add_modifier(const W* w, const W* p);
+Ws* _get_manifolds(Ws* ws);
+void _set_default_manifold_function(W* cm);
+void _set_manifold_type(W*, W*);
+bool _manifold_modifier(W* w);
+void _mod_add_modifiers(Ws* ws_top, W* p);
+bool _basename_match(W* w, W* p);
+void _add_modifier(W* w, W* p);
 
 
 
@@ -33,18 +33,18 @@ void link_modifiers(Ws* ws_top){
 }
 
 // Find all {label,manifold} couplets
-Ws* _get_manifolds(const Ws* ws){
+Ws* _get_manifolds(Ws* ws){
     return ws_rfilter(ws, ws_recurse_most, w_is_manifold);
 }
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
 // Manifold->function IFF it is not already defined.
-void _set_default_manifold_function(const W* cm){
+void _set_default_manifold_function(W* cm){
     Manifold* m = g_manifold(g_rhs(cm));
     m->function = strdup(g_label(g_lhs(cm))->name);
 }
 
-void _set_manifold_type(const W* mw, const W* tw){
+void _set_manifold_type(W* mw, W* tw){
     char* m_name = g_label(g_lhs(mw))->name;
     char* t_name = g_string(g_lhs(tw));
     if(strcmp(m_name, t_name) == 0){
@@ -57,7 +57,7 @@ void _set_manifold_type(const W* mw, const W* tw){
     }
 }
 
-bool _manifold_modifier(const W* w){
+bool _manifold_modifier(W* w){
     switch(w->cls){
         case T_EFFECT:
         case T_CACHE:
@@ -75,11 +75,11 @@ bool _manifold_modifier(const W* w){
     } 
 }
 
-void _mod_add_modifiers(Ws* ws_top, const W* p){
+void _mod_add_modifiers(Ws* ws_top, W* p){
     ws_prmod(ws_top, p, ws_recurse_path, _basename_match, _add_modifier, w_nextval_ifpath);
 }
 
-bool _basename_match(const W* w, const W* p){
+bool _basename_match(W* w, W* p){
     bool result = false;
     if(w->cls == C_MANIFOLD){
         Ws* pws = g_ws(g_lhs(p));
@@ -94,7 +94,7 @@ bool _basename_match(const W* w, const W* p){
 // if:
 //   1. the p->lhs contains only one name
 //   2. the name matches the name of w
-void _add_modifier(const W* w, const W* p){
+void _add_modifier(W* w, W* p){
     if(!p || w->cls != C_MANIFOLD) return;
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);

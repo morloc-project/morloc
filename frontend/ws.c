@@ -5,11 +5,11 @@ void _join(Ws* a, Ws* b);
 Ws* _ws_new(W* w);
 void _retail(Ws* ws, W* w);
 Ws* _ws_add(Ws* ws, W* w);
-void _ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth);
+void _ws_print_r(Ws* ws, Ws*(*recurse)(W*), int depth);
 // ------------------------------------------------------------------
 
 
-Ws* ws_new(const W* w){
+Ws* ws_new(W* w){
     Ws* ws = (Ws*)calloc(1, sizeof(Ws));
     W* w2 = w_isolate(w);
     ws->head = w2;
@@ -59,7 +59,7 @@ void w_clone_value(W* w){
             break;
     }
 }
-Ws* ws_clone(const Ws* ws){
+Ws* ws_clone(Ws* ws){
     Ws* clone = NULL;
     if(!ws) return NULL;
     for(W* w = w_clone(ws->head); w; w = w->next){
@@ -69,7 +69,7 @@ Ws* ws_clone(const Ws* ws){
     return clone;
 }
 
-Ws* ws_add(Ws* ws, const W* w){
+Ws* ws_add(Ws* ws, W* w){
     W* w2 = w_isolate(w);
     if(!ws){
         ws = _ws_new(w2);
@@ -100,14 +100,14 @@ Ws* ws_join(Ws* a, Ws* b){
     return a;
 }
 
-Ws* ws_tail(const Ws* ws){
+Ws* ws_tail(Ws* ws){
     if(ws_length(ws) < 2) return NULL;
     Ws* n = ws_new(ws->head->next);
     n->last = ws->last;
     return n;
 }
 
-Ws* ws_init(const Ws* ws){
+Ws* ws_init(Ws* ws){
     if(ws_length(ws) < 2) return NULL;
     Ws* n = _ws_new(w_clone(ws->head));
     for(W* last = n->head; last->next; last = last->next){
@@ -117,27 +117,27 @@ Ws* ws_init(const Ws* ws){
     return n;
 }
 
-W* ws_head(const Ws* ws){
+W* ws_head(Ws* ws){
     return ws->head;
 }
 
 /* Get last element of a table */
-W* ws_last(const Ws* ws){
+W* ws_last(Ws* ws){
     return ws->last;
 }
 
-int ws_length(const Ws* ws){
+int ws_length(Ws* ws){
     if(!ws || !ws->head) return 0;
     int size = 0;
     for(W* w = ws->head; w; w = w->next){ size++; }
     return size;
 }
 
-void ws_print(const Ws* ws, Ws*(*recurse)(const W*)){
+void ws_print(Ws* ws, Ws*(*recurse)(W*)){
     _ws_print_r(ws, recurse, 0);
 }
 
-char* w_str(const W* w){
+char* w_str(W* w){
     if(!w) return NULL;
     char* s = (char*)malloc(1024 * sizeof(char));
     char* c = w_class_str(w->cls);
@@ -212,7 +212,7 @@ Ws* _ws_add(Ws* ws, W* w){
     return ws;
 }
 
-void _ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
+void _ws_print_r(Ws* ws, Ws*(*recurse)(W*), int depth){
     if(!ws || !ws->head) return;
     for(W* w = ws->head; w; w = w->next){
         for(int i = 0; i < depth; i++){ printf("  "); }
@@ -223,4 +223,51 @@ void _ws_print_r(const Ws* ws, Ws*(*recurse)(const W*), int depth){
             _ws_print_r(g_ws(r), recurse, depth+1);
         }
     }
+}
+
+
+W* wws_new(W* w){
+    return w_new(P_WS, ws_new(w));
+}
+W* wws_clone(W* wws){
+    if(!wws) return NULL;
+    s_ws(wws, ws_clone(g_ws(wws)));
+    return wws;
+}
+W* wws_add(W* wws, W* w){
+    if(!wws) return wws;
+    s_ws(wws, ws_add(g_ws(wws), w));
+    return wws;
+}
+W* wws_add_val(W* wws, Class cls, void* v){
+    Ws* ws = wws ? g_ws(wws): NULL;
+    ws = ws_add_val(ws, cls, v); 
+    if(!wws){
+        wws = w_new(P_WS, ws);
+    } else {
+        s_ws(wws, ws);
+    }
+    return wws;
+}
+W* wws_join(W* a, W* b){
+    s_ws(a, ws_join(g_ws(a), g_ws(b)));
+    return a;
+}
+W* wws_tail(W* w){
+   return w_new(P_WS, ws_tail(g_ws(w))); 
+}
+W* wws_init(W* w){
+    return w_new(P_WS, ws_init(g_ws(w)));
+}
+W* wws_head(W* w){
+    return ws_head(g_ws(w));
+}
+W* wws_last(W* w){
+    return ws_last(g_ws(w));
+}
+int wws_length(W* w){
+    return ws_length(g_ws(w));
+}
+void wws_print(W* w, Ws*(*recurse)(W*)){
+    ws_print(g_ws(w), recurse);
 }

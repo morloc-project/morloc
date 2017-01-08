@@ -1,10 +1,10 @@
 #include "build_io.h"
 
-void _link_composon(const W* a, const W* b);
-void _link_pair(const W* input, const W* output);
-Ws* _recurse_tail(const W*);
-Ws* _recurse_head(const W*);
-bool _is_emmisive(const W*);
+void _link_composon(W* a, W* b);
+void _link_pair(W* input, W* output);
+Ws* _recurse_tail(W*);
+Ws* _recurse_head(W*);
+bool _is_emmisive(W*);
 
 void link_inputs(Ws* ws){
 
@@ -18,7 +18,7 @@ void link_inputs(Ws* ws){
 
 }
 
-void _link_composon(const W* a, const W* b){
+void _link_composon(W* a, W* b){
 
     // identify the elements within this composon which take input
     Ws* inputs = composon_inputs(a);
@@ -30,20 +30,20 @@ void _link_composon(const W* a, const W* b){
     ws_2mod(inputs, outputs, _link_pair);
 }
 
-Ws* _extract_ws(const W* w){
+Ws* _extract_ws(W* w){
     if(!w) return NULL;
     return w->cls == T_PATH ? g_ws(g_rhs(w)): g_ws(w);
 }
-Ws* composon_inputs(const W* w){
+Ws* composon_inputs(W* w){
     // recurse to the rightmost manifold set
     return ws_rfilter(_extract_ws(w), _recurse_tail, w_is_manifold);
 }
-Ws* composon_outputs(const W* w){
+Ws* composon_outputs(W* w){
     // recurse to the leftmost manifold set
     return ws_rfilter(_extract_ws(w), _recurse_head, _is_emmisive);
 }
 
-bool _is_emmisive(const W* w){
+bool _is_emmisive(W* w){
     switch(w->cls){
         case C_MANIFOLD:
         case C_POSITIONAL:
@@ -54,7 +54,7 @@ bool _is_emmisive(const W* w){
     }
 }
 
-Ws* _recurse_tail(const W* w){
+Ws* _recurse_tail(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
@@ -70,7 +70,7 @@ Ws* _recurse_tail(const W* w){
     return result;
 }
 
-Ws* _recurse_head(const W* w){
+Ws* _recurse_head(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
@@ -90,7 +90,7 @@ Ws* _recurse_head(const W* w){
 }
 
 // link all top level elements in c_{i+1} as inputs to c_i
-void _link_pair(const W* input, const W* output){
+void _link_pair(W* input, W* output){
     if(!input || !output) return;
     // I'm dealing with C_MANIFOLD's not P_MANIFOLD's
     // A C_MANIFOLD manifold is a couplet with a P_MANIFOLD rhs

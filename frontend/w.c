@@ -89,19 +89,19 @@ W* w_new(Class cls, void* value){
     return w;
 }
 
-W* w_isolate(const W* w){
+W* w_isolate(W* w){
     W* new_w = w_copy(w);
     new_w->next = NULL;
     return new_w;
 }
 
-W* w_copy(const W* w){
+W* w_copy(W* w){
    W* new_w = (W*)malloc(sizeof(W));
    memcpy(new_w, w, sizeof(W));
    return new_w;
 }
 
-W* w_clone(const W* w){
+W* w_clone(W* w){
     if(!w) return NULL;
     W* clone = w_isolate(w);
     clone->uid = _new_uid();
@@ -163,12 +163,12 @@ char* w_class_str(Class cls){
     return s;
 }
 
-bool w_is_recursive(const W* w){
+bool w_is_recursive(W* w){
    return get_value_type(w->cls) == V_WS; 
 }
 
 #define SEGFAULT fflush(stderr);W* x=0;x->next=0;
-void w_assert_class(const W* w, Class cls){
+void w_assert_class(W* w, Class cls){
     if(!w){
         fprintf(
             stderr,
@@ -186,7 +186,7 @@ SEGFAULT
     }
 }
 
-void w_assert_type(const W* w, VType type){
+void w_assert_type(W* w, VType type){
     if(!w){
         fprintf(
             stderr,
@@ -211,7 +211,7 @@ SEGFAULT
 }
 #undef SEGFAULT
 
-bool _is_valid_lhs(const W* w){
+bool _is_valid_lhs(W* w){
     bool is_valid;
     switch(w->cls){
         case K_LIST:
@@ -227,37 +227,37 @@ bool _is_valid_lhs(const W* w){
     return is_valid;
 }
 
-char* g_string(const W* w) {
+char* g_string(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_STRING);
     return w->value.string;
 }
-struct Ws* g_ws(const W* w) {
+struct Ws* g_ws(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_WS);
     return w->value.ws;
 }
-struct Couplet* g_couplet(const W* w) {
+struct Couplet* g_couplet(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet;
 }
-struct Label* g_label(const W* w) {
+struct Label* g_label(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_LABEL);
     return w->value.label;
 }
-struct Manifold* g_manifold(const W* w) {
+struct Manifold* g_manifold(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_MANIFOLD);
     return w->value.manifold;
 }
-W* g_lhs(const W* w) {
+W* g_lhs(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->lhs;
 }
-W* g_rhs(const W* w) {
+W* g_rhs(W* w) {
     if(!w) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->rhs;

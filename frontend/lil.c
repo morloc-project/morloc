@@ -138,7 +138,7 @@ void print_lil(Ws* ws_top){
     if(ws_top && ws_top->head){
 /* ws_print(ws_top, ws_recurse_most); */
         print_prolog(ws_top);
-        /* print_manifolds(ws_top); */
+        print_manifolds(ws_top);
         print_epilog(ws_top);
     } else {
         fprintf(stderr, "The symbol table is empty - nothing to do\n");

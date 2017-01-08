@@ -68,15 +68,15 @@ typedef struct W{
 
 W* w_new(Class cls, void* value);
 
-W* w_isolate(const W* w);
+W* w_isolate(W* w);
 
-W* w_copy(const W* w);
+W* w_copy(W* w);
 
 // clone a W while preserving class and value
 // this is recursive, next is cloned as well
-W* w_clone(const W* w);
+W* w_clone(W* w);
 
-W* w_print(const W* w);
+W* w_print(W* w);
 
 VType get_value_type(Class cls);
 
@@ -84,20 +84,20 @@ char* w_class_str(Class);
 
 char* w_type_str(VType);
 
-bool w_is_recursive(const W* w);
+bool w_is_recursive(W* w);
 
-void w_assert_class(const W*, Class);
+void w_assert_class(W*, Class);
 
-void w_assert_type(const W*, VType);
+void w_assert_type(W*, VType);
 
 // Get the vaue of w
-       char*     g_string   (const W* w);
-struct Ws*       g_ws       (const W* w);
-struct Couplet*  g_couplet  (const W* w);
-struct Label*    g_label    (const W* w);
-struct Manifold* g_manifold (const W* w);
-       W*        g_lhs      (const W* w);
-       W*        g_rhs      (const W* w);
+       char*     g_string   (W* w);
+struct Ws*       g_ws       (W* w);
+struct Couplet*  g_couplet  (W* w);
+struct Label*    g_label    (W* w);
+struct Manifold* g_manifold (W* w);
+       W*        g_lhs      (W* w);
+       W*        g_rhs      (W* w);
 
 // Set the value of w, fails if v is not compatible with type(w)
 void s_none     (W* w              );

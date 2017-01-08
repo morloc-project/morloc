@@ -13,17 +13,17 @@
         }                                              \
     } while(0)
 
-W* _type_compatible(const W* i, const W* t, W* msg);
+W* _type_compatible(W* i, W* t, W* msg);
 
 bool _is_io(W* w){
     return strcmp(g_string(w), __IO__) == 0;
 }
 
-void set_default_types(const Ws* ws){
+void set_default_types(Ws* ws){
     /* STUB */
 }
 
-Ws* infertype(const Ws* ws){
+Ws* infertype(Ws* ws){
     /* STUB */
     return NULL;
 }
@@ -63,11 +63,11 @@ W* _typecheck(W* w, W* msg){
     return msg;
 }
 
-W* type_check(const Ws* ws){
+W* type_check(Ws* ws){
     return ws_scrap(ws, NULL, ws_recurse_composition, w_is_manifold, _typecheck);
 }
 
-W* _type_compatible(const W* o, const W* t, W* msg){
+W* _type_compatible(W* o, W* t, W* msg){
     if(o->cls == C_DEREF || o->cls == C_POSITIONAL){
         /* I currently do no type checking on these */
         return msg;
@@ -85,14 +85,14 @@ W* _type_compatible(const W* o, const W* t, W* msg){
     return msg;
 }
 
-bool type_is_well(const Ws* type){
+bool type_is_well(Ws* type){
     return _is_io(type->head) && !_is_io(type->last);
 }
 
-bool type_is_pipe(const Ws* type){
+bool type_is_pipe(Ws* type){
     return !_is_io(type->head) && !_is_io(type->last);
 }
 
-bool type_is_sink(const Ws* type){
+bool type_is_sink(Ws* type){
     return !_is_io(type->head) && _is_io(type->last);
 }

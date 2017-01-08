@@ -6,20 +6,20 @@
 #include "ws.h"
 #include "hof.h"
 
-void set_default_types(const Ws* ws);
+void set_default_types(Ws* ws);
 
-Ws* type_infer(const Ws* ws);
+Ws* type_infer(Ws* ws);
 
-bool type_is_well(const Ws* type);
-bool type_is_pipe(const Ws* type);
-bool type_is_sink(const Ws* type);
-bool type_is_effectful(const Ws* type);
+bool type_is_well(Ws* type);
+bool type_is_pipe(Ws* type);
+bool type_is_sink(Ws* type);
+bool type_is_effectful(Ws* type);
 
 /* - pairwise compare inputs and types
  * - warn of missing type
  * - check consistency of inferred types
  * - honor syntax for IO
  */
-W* type_check(const Ws* ws);
+W* type_check(Ws* ws);
 
 #endif

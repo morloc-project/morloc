@@ -1,9 +1,9 @@
 #include "build_grp.h"
 
-void _resolve_grprefs_r(Ws* current, const Ws* global);
-bool _is_grpref(const W* c);
-void _resolve_one_grpref(W* e_ref, const Ws* global);
-bool _matches_path(const W* w, const W* p);
+void _resolve_grprefs_r(Ws* current, Ws* global);
+bool _is_grpref(W* c);
+void _resolve_one_grpref(W* e_ref, Ws* global);
+bool _matches_path(W* w, W* p);
 
 
 void resolve_grprefs(Ws* ws){
@@ -13,7 +13,7 @@ void resolve_grprefs(Ws* ws){
 /* Requires input of both a global and current table. The global one is the top
  * level symbol table where all paths should be searched without recursion. The
  * current table is where group references should be sought.*/
-void _resolve_grprefs_r(Ws* current, const Ws* global){
+void _resolve_grprefs_r(Ws* current, Ws* global){
     ws_ref_rmod(
         current, // current list over which to recurse
         global,  // global list (passed into _resolve_one_grpref
@@ -23,11 +23,11 @@ void _resolve_grprefs_r(Ws* current, const Ws* global){
     );
 }
 
-bool _is_grpref(const W* c){
+bool _is_grpref(W* c){
     return c->cls == C_GRPREF;
 }
 
-void _resolve_one_grpref(W* e_ref, const Ws* global){
+void _resolve_one_grpref(W* e_ref, Ws* global){
 
     Ws* path = ws_pfilter(global, e_ref, _matches_path);
 
@@ -48,7 +48,7 @@ void _resolve_one_grpref(W* e_ref, const Ws* global){
 
 }
 
-bool _matches_path(const W* w, const W* p){
+bool _matches_path(W* w, W* p){
     return
         w->cls == T_PATH &&
         p->cls == C_GRPREF &&
