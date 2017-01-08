@@ -258,11 +258,13 @@ couple ::
 void print_usage_and_exit(int exit_status){
     fprintf(stderr,
 "LOC compiler\n"
-"Usage: loc [options] myfile.loc"
+"Usage: loc [options] myfile.loc\n"
 "Arguments:\n"
 "  -c  run the typechecker on manifolds\n"
 "  -t  print tokens to a token file (tok.log)\n"
 "  -h  print this help message and exit\n"
+"  -l  suppress normal LIL output\n"
+"  -d  recursively dump symbol table\n"
     );
     exit(exit_status);
 }
@@ -273,6 +275,8 @@ int main(int argc, char ** argv){
     // === flags ====================================================
     bool run_typechecker = false; // type check the manifolds
     bool log_tokens = false;      // write tokens to 'tok.log'
+    bool suppress_lil = false;    // don't print LIL
+    bool dump_table = false;      // recursively dump symbol table
     // --------------------------------------------------------------
 
     // has the loc source file been loaded successfully
@@ -291,6 +295,12 @@ int main(int argc, char ** argv){
                         break;
                     case 't':
                         log_tokens = true;
+                        break;
+                    case 'l':
+                        suppress_lil = true;
+                        break;
+                    case 'd':
+                        dump_table = true;
                         break;
                     case 'h':
                         print_usage_and_exit(0);
@@ -317,28 +327,34 @@ int main(int argc, char ** argv){
         fprintf(stderr, "No readable loc file found\n");
         print_usage_and_exit(1);
     }
-
-    int status = 1;
     if(log_tokens){
         toklog = fopen("tok.log", "w");
     } else {
         toklog = fopen("/dev/null", "w");
     }
-    status = yyparse();
+
+
+    // parse the grammar
+    int status = yyparse();
+
+    // build manifolds
+    //  - resolve group references
+    //  - link manifolds to their modifiers
+    //  - link manifolds inputs to manifold outputs 
     build_manifolds(global_table);
-    print_lil(global_table);
-    if(run_typechecker){
-        W* msg = type_check(global_table);
-        if(msg){
-            for(W* w = g_ws(msg)->head; w; w = w->next){
-                printf(
-                    "TYPE ERROR in %s: %s\n",
-                    g_manifold(g_rhs(g_lhs(w)))->function,
-                    g_string(g_rhs(w))
-                );
-            }
-        }
-    }
+
+    // check the types of all manifolds
+    W* msg = type_check(global_table);
+
+
+    // === print statements =========================================
+    if(   dump_table      ) ws_print(global_table, ws_recurse_most);
+    if( ! suppress_lil    ) print_lil(global_table);
+    if(   run_typechecker ) print_error(msg);
+    // --------------------------------------------------------------
+
+
     fclose(toklog);
+
     return status;
 }

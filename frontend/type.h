@@ -22,4 +22,6 @@ bool type_is_effectful(Ws* type);
  */
 W* type_check(Ws* ws);
 
+void print_error(W*);
+
 #endif
