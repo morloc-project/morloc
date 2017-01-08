@@ -7,3 +7,7 @@ all:
 clean:
 	rm -f ${TARGET}
 	cd frontend && ${MAKE} clean
+
+.PHONY: install
+install:
+	cp loc ~/bin # TODO - depersonalize this

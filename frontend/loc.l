@@ -255,35 +255,90 @@ couple ::
 
 #include "bufstack.h"
 
+void print_usage_and_exit(int exit_status){
+    fprintf(stderr,
+"LOC compiler\n"
+"Usage: loc [options] myfile.loc"
+"Arguments:\n"
+"  -c  run the typechecker on manifolds\n"
+"  -t  print tokens to a token file (tok.log)\n"
+"  -h  print this help message and exit\n"
+    );
+    exit(exit_status);
+}
+
+
 int main(int argc, char ** argv){
-    if(argc < 2){
-        perror("Please provide a filename\n");
-        return 1;
-    }
-    bool run_typechecker = false;
-    if(argc == 3 && strcmp(argv[1], "-c") == 0){
-       run_typechecker = true; 
-       argc--;argv++;
-    }
-    int status = 1;
-    if(newfile(argv[1])){
-        toklog = fopen("tok.log", "w");
-        status = yyparse();
-        build_manifolds(global_table);
-        print_lil(global_table);
-        if(run_typechecker){
-            W* msg = type_check(global_table);
-            if(msg){
-                for(W* w = g_ws(msg)->head; w; w = w->next){
-                    printf(
-                        "TYPE ERROR in %s: %s\n",
-                        g_manifold(g_rhs(g_lhs(w)))->function,
-                        g_string(g_rhs(w))
-                    );
+
+    // === flags ====================================================
+    bool run_typechecker = false; // type check the manifolds
+    bool log_tokens = false;      // write tokens to 'tok.log'
+    // --------------------------------------------------------------
+
+    // has the loc source file been loaded successfully
+    int file_loaded = 0;
+
+    // Process arguments
+    //  - only one source file is allowed
+    //  - flags may be bundled
+    //  - flags and source files can be in any order
+    do{
+        if(argv[1][0] == '-'){
+            while(++argv[1] && argv[1][0] != '\0'){
+                switch(argv[1][0]){
+                    case 'c':
+                        run_typechecker = true; 
+                        break;
+                    case 't':
+                        log_tokens = true;
+                        break;
+                    case 'h':
+                        print_usage_and_exit(0);
+                        break;
+                    default:
+                        fprintf(stderr, "Argument '%c' not supported\n", argv[1][0]); 
+                        break;
+                }
+            }
+        } else {
+            if(file_loaded){
+                fprintf(stderr, "Cannot process multiple files\n");            
+                print_usage_and_exit(1);
+            } else {
+                file_loaded = newfile(argv[1]);
+                if(!file_loaded){
+                    fprintf(stderr, "Could not open file '%s', skipping\n", argv[1]);
                 }
             }
         }
-        fclose(toklog);
+    } while(argc-- > 2 && argv++);
+
+    if(!file_loaded) {
+        fprintf(stderr, "No readable loc file found\n");
+        print_usage_and_exit(1);
     }
+
+    int status = 1;
+    if(log_tokens){
+        toklog = fopen("tok.log", "w");
+    } else {
+        toklog = fopen("/dev/null", "w");
+    }
+    status = yyparse();
+    build_manifolds(global_table);
+    print_lil(global_table);
+    if(run_typechecker){
+        W* msg = type_check(global_table);
+        if(msg){
+            for(W* w = g_ws(msg)->head; w; w = w->next){
+                printf(
+                    "TYPE ERROR in %s: %s\n",
+                    g_manifold(g_rhs(g_lhs(w)))->function,
+                    g_string(g_rhs(w))
+                );
+            }
+        }
+    }
+    fclose(toklog);
     return status;
 }
