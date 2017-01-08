@@ -153,8 +153,22 @@ Ws* build_lil_epilog(Ws* ws_top){
 void print_lil(Ws* lil){
     if(!lil) return;
     for(W* w = lil->head; w; w = w->next){
-        for(W* ww = wws_head(w); ww; ww = ww->next){
-            printf("%s ", g_string(ww));
+        W* ww = wws_head(w);
+        if(wws_length(w) > 3 && strcmp("SOURCE", g_string(ww)) == 0){
+            printf(
+                "%s %s %s\n",
+                g_string(ww),
+                g_string(ww->next),
+                g_string(ww->next->next)
+            );
+            ww = ww->next->next->next;
+            for(; ww; ww = ww->next){
+                printf("    %s\n", g_string(ww));
+            }
+        } else {
+            for(; ww; ww = ww->next){
+                printf("%s ", g_string(ww));
+            }
         }
         printf("\n");
     }
