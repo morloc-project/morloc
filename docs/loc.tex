@@ -4,8 +4,8 @@
 
 \section{Templates}
 
-The core functions of Loc are manifold. These functions take nothing and return
-nothing. They are conglomerations of the following elements:
+The core functions of Loc are manifold. These functions take not arguments.
+They are conglomerations of the following elements:
 
 \begin{table}[htpb]
   \centering
@@ -18,13 +18,33 @@ pure    & pure data transformation function                                     
 cache   & cache output with 4 operations: 'has', 'get', 'put', and 'del'            \\
 inputs  & list of other manifolds from which input is requested                     \\
 checks  & list of validator manifolds, which return booleans                        \\
-unpack  & function that extracts list of inputs from list of input containers       \\
-run     & executes the pure function (locally, send to a cluster, whatever you say) \\
+open    & function that extracts list of inputs from list of input containers       \\
+pass    & executes the pure function (locally, send to a cluster, whatever you say) \\
 pack    & packs the output in a container                                           \\
 fail    & produces the output in case of an error                                   \\
 effects & list of manifolds to call after caching result
   \end{tabular}
 \end{table}
+
+A manifold itself has the form
+
+\begin{verbatim}
+def manifold():
+    if(cacher('has')):
+        Mb = cacher('get')
+        return Mb
+    if( all( [c() for c in checks] ) ):
+        Ma = [m() for m in inputs]
+        a = [o(m) for o,m in zip(open,Ma)]
+        b = pass(pure, a, args)
+        Mb = pack(Ma, b)
+    else:
+       Mb = fail()
+    cacher('put', Mb)
+    for(effect in effects):
+        effect()
+    return Mb
+\end{verbatim}
 
 The simplest way to make a manifold is with a closure, for example
 
@@ -32,69 +52,14 @@ The simplest way to make a manifold is with a closure, for example
 def make_manifold(
   pure,
   inputs,
-  checks,
-  cache,
-  effects,
-  unpack,
-  pack,
-  run,
-  fail,
-  args
+  checks, cacher,
+  effects, open, pack, pass, fail, args
 ):
     def manifold():
-        if(cacher('has')):
-            Mb = cacher('get')
-        else:
-            Ma = [m() for m in inputs]
-            a = unpack(Ma)
-            if( all([c() for c in checks]) ):
-                b = run(a, args)
-                Mb = pack(Ma, b)
-            else:
-               Mb = fail(Ma)
-            cacher('put', Mb)
-            for(effect in effects):
-                effect()
-        return Mb
+        ...
     return manifold
 \end{verbatim}
 
-However, we will often want to create many manifolds of a certain kind that
-differ only in inputs but that have their own caches, so we might add a layer
-to the maker
-
-\begin{verbatim}
-def make_manifold_class(
-  pure,
-  checks,
-  cache_maker,
-  effects,
-  unpack,
-  pack,
-  run,
-  fail,
-  args
-):
-    def manifold_class(inputs):
-        cache = cache_maker()
-        def manifold():
-            if(cacher('has')):
-                Mb = cacher('get')
-            else:
-                Ma = [m() for m in inputs]
-                a = unpack(Ma)
-                if( all([c() for c in checks]) ):
-                    b = run(a, args)
-                    Mb = pack(Ma, b)
-                else:
-                   Mb = fail(Ma)
-                cacher('put', Mb)
-                for(effect in effects):
-                    effect()
-            return Mb
-        return manifold
-    return manifold_class
-\end{verbatim}
 
 Here is are are examples of how the cache makers might be implemented in
 a backend
@@ -134,8 +99,8 @@ There are a few very simple functions that all backends should have implemented
 (though their names may vary).
 
 \begin{verbatim}
-def run(a, args):
-    b = a(args)
+def run(a, args, kwargs):
+    b = a(*args, **kwargs)
     return b
 
 def id(x, ...):
@@ -479,6 +444,28 @@ Grep :: [Line] -> [Pattern] -> [Line]
 \end{verbatim}
 
 So it is always vectorized.
+
+\section{On effect}
+
+What should be passed to the effect functions. There are several possibilities,
+all of them useful in certain contexts:
+
+Option 1: pass nothing. The effect functions are manifolds, they can be
+elaborate entities, constructed in the LOC path section. In this way, they are
+an orthogonal dimension to the pure path through the data.
+
+Option 2: pass b (the unpackaged output). This would be extremely useful for
+simple effects, like a print statement. Then builtin functions of language can
+be called, without needing to be wrapped in manifolds, without the boilerplate.
+
+Option 3: pass Mb (the packaged output). Useful is dependent on how the state
+being passed in the package is being used in the pipeline.
+
+Option 4: pass [a] and b. Some analyses might want to compare the output and
+input. Of course this could be done with manifold calls.
+
+Option 5: Option 1-4. Allow everything. Build some syntax to specify which
+function should be used.
 
 \section{A word on the future}
 
