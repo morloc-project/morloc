@@ -4,8 +4,12 @@
 
 @source R
 
-f <- function(){1}
-5 * 7
+f <- function(){ 5 * 7 }
+
+@source python
+
+def f():
+    return 5 * 7
 
 @export
 foo as foobear
