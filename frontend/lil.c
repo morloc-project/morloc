@@ -120,7 +120,7 @@ Ws* build_lil_prolog(Ws* ws_top){
             // not 0.
             if(ws_length(g_ws(g_rhs(e))) > 1){
                 W* a = wws_join(
-                    _wthree("SOURCE", g_string(g_lhs(e)), "BEGIN"),
+                    _wtwo("SOURCE", g_string(g_lhs(e))),
                     g_rhs(e)
                 );
                 lil = ws_add(lil, a);
