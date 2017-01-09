@@ -1,0 +1,60 @@
+@comment
+
+This script is a simple test of to ensure all required simple manifold elements
+are present. There are many nuances to the behavior of these modifiers, but
+they are not tested here.
+
+The general form of a manifold is:
+
+function manifold(){
+    if(cache('has')){
+        Mb = cache('get')
+        return Mb
+    }
+    if( all( [c() for c in checks] ) ){
+        Ma = [m() for m in inputs]
+        a = [o(m) for o,m in zip(open,Ma)]
+        b = pass(pure, a, args)
+        Mb = pack(Ma, b)
+    }
+    else {
+       Mb = fail()
+    }
+    cache('put', Mb)
+    for(effect in effects) { effect() }
+    return Mb
+}
+
+@type
+f :: NULL -> A
+g :: A -> NULL
+
+@path
+foo :: g . f
+
+@cache
+g :: cache
+
+@check
+g :: check1
+
+@open
+g :: open1
+
+@pass
+g :: run
+
+@alias
+g :: fun
+
+@arg
+g :: x=1 y=2
+
+@fail
+g :: croak
+
+@pack
+g :: pack
+
+@effect
+g :: effect1
