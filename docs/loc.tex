@@ -29,21 +29,27 @@ effects & list of manifolds to call after caching result
 A manifold itself has the form
 
 \begin{verbatim}
-def manifold():
-    if(cacher('has')):
-        Mb = cacher('get')
-        return Mb
-    if( all( [c() for c in checks] ) ):
-        Ma = [m() for m in inputs]
-        a = [o(m) for o,m in zip(open,Ma)]
-        b = pass(pure, a, args)
-        Mb = pack(Ma, b)
-    else:
-       Mb = fail()
-    cacher('put', Mb)
-    for(effect in effects):
-        effect()
-    return Mb
+manifold =
+    if
+    ( cache_has )
+    ( cache_get )
+    ( 
+        Mb = if
+        ( all map checks )
+        (
+            Ma = map inputs,
+            a = map open Ma,
+            b = pass pure *a **args,
+            map effects b 
+            pack Ma b
+        )
+        (
+           fail
+        ),
+        cache_put Mb,
+        map hooks,
+        Mb
+    )
 \end{verbatim}
 
 The simplest way to make a manifold is with a closure, for example
@@ -116,6 +122,86 @@ def false(...):
     return FALSE
 \end{verbatim}
 
+
+\section{Expectations for the backends}
+
+The Loc compiler translates Loc code into an intermediate language (Loc
+Intermediate Language, LIL) that lists the steps need to build a workflow. It
+is the job of the backend to interpret LIL into working code in an output
+language (OL). The process of adding support for new languages will be
+simplified if there is a roughly one-to-one correlation between instructions in
+LIL and functions in the backend.
+
+The destination language should have an index of typed functions. It should
+also maintain all manifolds in a containter where they can access one another.
+
+The manifolds themselves can be represented in many ways. In languages with
+good metaprograming support, like R, they may be functions which are modified
+as LIL is interpreted. In OOP languages, they may be objects.
+
+\begin{itemize}
+
+  \item EMIT(string ID) - add a new manifold with label ID to the manifold set
+
+  \item FUNC(string ID, string FUNC) - look of FUNC in the function database,
+    set ID to this function
+
+  \item INPM(string ID1, int i, string ID2) - link ID2 as a the ith positional
+    argument of ID1
+
+  \item INPP(string ID1, int i, string ID2) - link the eval(value) as the ith
+    positional argument of ID1
+
+  \item NORM - stub
+
+  \item INPD - stub
+
+  \item CACHE(string ID, string C) - wrap manifold ID in the cache paradigm C
+    (caches are not singular functions, but rather contain at least 3 elements:
+    CHECK, GET, and PUT)
+
+  \item EFCT(string ID, string F) - append function F to the effect list of manifold ID
+
+\begin{verbatim}
+    F :: (a -> *) 
+\end{verbatim}
+
+  \item CHECK(string ID, string F) - append function F to the check list of manifold ID
+
+\begin{verbatim}
+    F :: (a -> Bool)  
+\end{verbatim}
+
+  \item OPEN(string ID, string F) - append function F to open list of manifold
+    ID (which must be of length 0, 1 or the number of input functions)
+
+\begin{verbatim}
+    F :: (Ma -> a) 
+\end{verbatim}
+
+  \item PACK(string ID, string F) - set pack function of manifold ID to F
+    
+\begin{verbatim}
+    F :: (Ma -> b -> Mb)
+\end{verbatim}
+
+  \item PASS(string ID, string F) - set pass function of manifold ID to F
+
+\begin{verbatim}
+    F :: (f -> [inputs] -> [args] -> b)
+\end{verbatim}
+
+  \item FAIL(string ID, string F) - set the failure function of manifold ID to F
+
+\begin{verbatim}
+    F :: (NULL -> Mb)
+\end{verbatim}
+
+  \item DOC(string ID, string doc) - sets the documentation of manifold ID to doc
+
+  \item ARG(string ID, string key, string val) - sets argument key of manifold ID to val
+
+\end{itemize}
 
 \section{Approach}
 
