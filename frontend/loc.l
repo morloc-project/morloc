@@ -72,6 +72,7 @@ couple ::
 @pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
 @fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
 @alias  { LOG( "SECTION_ALIAS"  ) ; BEGIN(S_CPLT) ; return SECTION_ALIAS  ; }
+@lang   { LOG( "SECTION_LANG"   ) ; BEGIN(S_CPLT) ; return SECTION_LANG   ; }
 @doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
 @arg    { LOG( "SECTION_ARG"    ) ; BEGIN(S_ARG)  ; return SECTION_ARG    ; }
 

@@ -67,6 +67,7 @@ bool _manifold_modifier(W* w){
         case T_PASS:
         case T_FAIL:
         case T_ALIAS:
+        case T_LANG:
         case T_DOC:
         case T_ARGUMENT:
             return true;         
@@ -101,6 +102,9 @@ void _add_modifier(W* w, W* p){
     switch(p->cls){
         case T_ALIAS:
             m->function = g_string(rhs);
+            break;
+        case T_LANG:
+            m->lang = g_string(rhs);
             break;
         case T_EFFECT:
             m->effect = ws_add_val(m->effect, P_STRING, g_string(rhs));

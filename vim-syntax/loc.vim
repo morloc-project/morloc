@@ -139,7 +139,8 @@ syn region r_r_source start=/@source python$/ end=/@\@=/ skip=/\\@/ contains=s_s
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
-syn region r_alias    start=/@alias/    end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+syn region r_alias start=/@alias [^ \t\n]\+/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep
 syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
 syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep

@@ -22,6 +22,7 @@ typedef enum {
     T_PASS,
     T_FAIL,
     T_ALIAS,
+    T_LANG,
     T_DOC,
     T_CACHE,
     T_PATH,       

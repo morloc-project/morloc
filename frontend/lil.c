@@ -51,7 +51,7 @@ Ws* _manifold_to_lil(W* cm){
 
     Ws* lil = NULL;
 
-    lil = _two(lil, "EMIT", _mid(m));
+    lil = _three(lil, "EMIT", m->lang ? m->lang : "*", _mid(m));
 
     lil = _three(lil, "FUNC", _mid(m), m->function);
 

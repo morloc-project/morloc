@@ -7,6 +7,7 @@
 typedef struct Manifold {
     int uid;
     char* function;
+    char* lang;
     struct Ws* effect; // Couplet<char*>
     struct Ws* cache;  // Couplet<char*>
     struct Ws* check;  // "

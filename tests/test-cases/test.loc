@@ -31,6 +31,10 @@ bar :: A -> X
 M :: h . g `francis` *N . f
 N :: foo . bar
 
+@lang
+
+f :: python
+
 @cache
 h :: fukishima
 
