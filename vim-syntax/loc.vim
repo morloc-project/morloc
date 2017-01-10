@@ -21,6 +21,9 @@ let b:current_syntax = ''
 unlet b:current_syntax
 syn include @Python syntax/python.vim
 
+let b:current_syntax = ''
+unlet b:current_syntax
+syn include @Shell syntax/sh.vim
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Global syntax - shared between all sections
@@ -136,6 +139,7 @@ syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
 syn region r_r_source start=/@source R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
 syn region r_r_source start=/@source python$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Python
+syn region r_r_source start=/@source \(bash\|sh\)$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Shell
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 

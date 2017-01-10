@@ -296,6 +296,11 @@ argument
     W* w = w_new(P_WS, ws_new($3));
     $$ = w_new(P_ARGUMENT, couplet_new($1, w));
   }
+  | '=' PRIMITIVE {
+    W* w = w_new(P_WS, ws_new($2));
+    W* s = w_new(P_STRING, "");
+    $$ = w_new(P_ARGUMENT, couplet_new(s, w));
+  }
   | NAME '=' array {
     $$ = w_new(P_ARGUMENT, couplet_new($1, w_new(P_WS, $3)));
   }

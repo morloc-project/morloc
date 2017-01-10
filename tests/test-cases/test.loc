@@ -11,6 +11,12 @@ f <- function(){ 5 * 7 }
 def f():
     return 5 * 7
 
+@source sh
+
+f() {
+    echo $(( 5 * 7 ))
+}
+
 @export
 foo as foobear
 
@@ -33,7 +39,7 @@ N :: foo . bar
 
 @lang
 
-f :: python
+f :: bash
 
 @cache
 h :: fukishima
@@ -43,6 +49,7 @@ h :: psychodefroculate
 
 @arg
 g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
+g ::  ="--foo 5"
 
 @check
 h :: is_awesome
