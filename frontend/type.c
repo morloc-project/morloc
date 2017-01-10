@@ -19,6 +19,13 @@ bool _is_io(W* w){
     return strcmp(g_string(w), __IO__) == 0;
 }
 
+bool _cmp_type(char* a, char* b){
+    return
+           ( strcmp(a,  b ) == 0 ) ||
+           ( strcmp(a, "*") == 0 ) ||
+           ( strcmp(b, "*") == 0 );
+}
+
 void set_default_types(Ws* ws){
     /* STUB */
 }
@@ -78,7 +85,7 @@ W* _type_compatible(W* o, W* t, W* msg){
     } else {
         char* o_type = g_string(m->type->last);
         char* i_type = g_string(t); 
-        if(strcmp(o_type, i_type) != 0){
+        if( ! _cmp_type(o_type, i_type)){
             LOG_ERROR(msg, o, "type conflict with calling manifold");
         }
     }

@@ -234,7 +234,7 @@ couple ::
     LOG("NAME");
     return NAME;
 }
-<S_TYPE>{sym} {
+<S_TYPE>{sym}|\* {
     W* w = w_new(P_STRING, strdup(yytext));
     yylval.TYPE = w;
     LOGV("TYPE:%s", yytext);

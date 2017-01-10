@@ -30,9 +30,9 @@ syn include @Shell syntax/sh.vim
 
 " all symbols, trailing space, and non-standard sections (^@.*) are illegal by
 " default
-syn match DEFAULT_ERROR '@[^ \n\t]*' contained
-syn match DEFAULT_ERROR '[^ \n\t]\+' contained
-syn match DEFAULT_ERROR ' \+$' contained
+syn match DEFAULT_ERROR '@\S*' contained
+syn match DEFAULT_ERROR '\S\+' contained
+syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
 syn keyword DEFAULT_ERROR id null call true false          contained
 syn keyword DEFAULT_ERROR memcache datcache nocache        contained
@@ -66,6 +66,7 @@ syn match s_section '@doc'      contained
 syn match s_section '@effect'   contained
 syn match s_section '@export'   contained
 syn match s_section '@fail'     contained
+syn match s_section '@lang'     contained
 syn match s_section '@import'   contained
 syn match s_section '@ontology' contained
 syn match s_section '@open'     contained
@@ -83,9 +84,9 @@ syn match s_section '@source'   contained
 syn region s_string start="'" end="'" contained
 syn region s_string start='"' end='"' contained
 
-syn match s_var /[a-zA-Z_][a-zA-Z0-9_]*/         contained
+syn match s_var /\h\w*/ contained
 syn match s_num '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!' contained
-syn match s_fun /&[a-zA-Z0-9_]*/                 contained
+syn match s_fun /&\w*/ contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
@@ -108,9 +109,10 @@ syn match s_sep      /,/      contained
 syn match s_par      /[()]/   contained
 syn match s_brk      /[\[\]]/ contained
 syn match s_bar      /|/      contained
+syn match s_star     /\_\W\*\_\W/ contained
 
-syn match s_positional /`[a-zA-Z_0-9]\+`/ contained
-syn match s_group /\*[a-zA-Z_]\+/ contained
+syn match s_positional /`\w\+`/ contained
+syn match s_group /\*\w\+/ contained
 
 " define constants
 syn keyword s_nil NIL contained
@@ -119,7 +121,7 @@ syn keyword s_nil NIL contained
 syn keyword s_export_keyword as contained
 
 " labels
-syn match s_varlabel ':[a-zA-Z0-9.]\+' contained
+syn match s_varlabel ':[\w.]\+' contained
 
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -143,7 +145,7 @@ syn region r_r_source start=/@source \(bash\|sh\)$/ end=/@\@=/ skip=/\\@/ contai
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
-syn region r_alias start=/@alias [^ \t\n]\+/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+syn region r_alias start=/@alias \S\+/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
 
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep
 syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
@@ -152,13 +154,14 @@ syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s
 syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
 syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
+syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s_bar,s_sep,s_par,s_brk
 syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_function,@c_path
-syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_couple
+syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_couple,s_star
 
 
 
