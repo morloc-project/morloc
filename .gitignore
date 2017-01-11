@@ -12,6 +12,7 @@ DELETEME
 tok.log
 
 call-*
+loc_[0-9]*/
 
 *.aux
 *.fls

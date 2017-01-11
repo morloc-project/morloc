@@ -9,15 +9,15 @@ null() {
 }
 
 datcache_chk() {
-    test -f $1.dat
+    test -d cache && test -f cache/$1.dat
 }
 
 datcache_get() {
-    cat $1.dat
+    cat cache/$1.dat
 }
 
 datcache_put() {
-    tee > $1.dat
+    tee > cache/$1.dat
 }
 
 id() {

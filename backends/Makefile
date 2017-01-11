@@ -1,3 +1,3 @@
 .PHONY: clean
 clean:
-	rm -f run.sh
+	rm -rf loc_[0-9]*

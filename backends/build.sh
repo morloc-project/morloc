@@ -2,12 +2,25 @@
 
 set -u
 
+make_temp_dir() {
+    i=0
+    while [[ -d "/tmp/loc_$i" ]]
+    do
+        i=$(( i + 1 ))
+    done
+    tmp=/tmp/loc_$i
+    mkdir $tmp
+    echo $tmp
+}
+
 usage (){
 cat << EOF
 DESC
     Process LOC file into ultimate executable
-REQUIRED ARGUMENTS
-  -l LOC the loc script
+USAGE
+   ./build.sh [options] whatever.loc
+OPTIONAL ARGUMENTS
+  -o DIR build workflow in DIR
   -L print the output LIL (after removing source)
   -G print the m4 text before macro expansion
   -R print the derived macro rules
@@ -18,6 +31,8 @@ EOF
 # print help with no arguments
 [[ $# -eq 0 ]] && usage
 
+tmp=`make_temp_dir`
+outdir=`basename $tmp`
 print_lil=false
 print_m4=false
 print_rules=false
@@ -25,6 +40,8 @@ while getopts "hLGR" opt; do
     case $opt in
         h)
             usage ;;
+        o)
+            outdir=$OPTARG ;;
         L)
             print_lil=true ;;
         G)
@@ -33,6 +50,9 @@ while getopts "hLGR" opt; do
             print_rules=true ;;
     esac 
 done
+
+mkdir $outdir
+mkdir $outdir/cache
 
 locsrc=${@:$OPTIND:1}
 
@@ -53,27 +73,11 @@ fi
 EOF
 }
 
-
-make_temp_dir() {
-    i=0
-    while [[ -d "/tmp/loc_$i" ]]
-    do
-        i=$(( i + 1 ))
-    done
-    tmp=/tmp/loc_$i
-    mkdir $tmp
-    echo $tmp
-}
-
-
 # === synopsis =========================
 # exe . cat . src man
 # man . m4 . cat . grammar rules body
 # rules body . parser . loc
 # ======================================
-
-
-tmp=`make_temp_dir`
 
 lang="bash"
 
@@ -132,8 +136,8 @@ cat $pro $src $man $epi | sed '/^ *$/d;s/ *//' > $exe
 
 
 # Move executable to working folder and set permissions
-cp $exe call-bash.sh
-chmod 755 call-bash.sh
+cp $exe $outdir/call-bash.sh
+chmod 755 $outdir/call-bash.sh
 
 # Optional debugging output
 if $print_lil
