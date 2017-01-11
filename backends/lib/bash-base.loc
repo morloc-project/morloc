@@ -1,5 +1,9 @@
 @source bash
 
+manifold_exists() {
+    type $1 | grep -q 'function'
+}
+
 null() {
     $1 $@ > /dev/null
 }
@@ -13,7 +17,7 @@ datcache_get() {
 }
 
 datcache_put() {
-    cat > $1.dat
+    tee > $1.dat
 }
 
 id() {

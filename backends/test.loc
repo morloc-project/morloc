@@ -4,9 +4,47 @@ f() {
     echo $(( 5 * 7 ))
 }
 
+g() {
+    x=$(cat $1)
+    echo $(( 4 * x ))
+}
+
+diehorribly() {
+    echo "ARRRRGGGGG! I am killed!" > /dev/stderr
+    return 0
+}
+
+isgood() {
+    true
+}
+
+issupergood() {
+    true
+}
+
+openitup() {
+    $@
+}
+
+printit() {
+    cat 
+}
+
+cowsayit() {
+    cowsay
+}
+
+outputzipit() {
+    cat
+}
+
+doit() {
+    $@
+}
+
 @type
-f :: NULL -> a
-g :: * -> NULL
+f :: NULL -> int
+g :: int -> NULL
 
 @path
 A :: g . f
@@ -35,13 +73,9 @@ f :: -x=1 -y=2
 
 @effect
 g :: printit
-g :: scrollit
+g :: cowsayit
 
 @source bash
-
-g() {
-    echo $(( 4 * 5 ))
-}
 
 @cache
 g :: datcache

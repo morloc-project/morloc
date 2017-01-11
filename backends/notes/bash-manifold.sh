@@ -1,7 +1,3 @@
-# This is a sample manifold written in bash. I write this mostly just to hash
-# out my thoughts on the bash backend.
-
-
 m1 (){
     if cache_chk $0
     then

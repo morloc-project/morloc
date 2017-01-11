@@ -11,6 +11,8 @@ tags
 DELETEME
 tok.log
 
+call-*
+
 *.aux
 *.fls
 *.log

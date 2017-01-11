@@ -13,9 +13,9 @@ define(FOREIGN_MANIFOLD,
 define(RETURN, `Mb')
 
 define(DO_CACHE,
-    if CACHE_CHK_$1 $mid
+    if CACHE_CHK_$1 $1
     then
-        CACHE_GET_$1 $mid
+        CACHE_GET_$1 $1
     else
         VALIDATE_$1
     fi
