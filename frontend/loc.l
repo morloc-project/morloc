@@ -37,7 +37,7 @@ selection {path}(,{path})*{ws}*::
 
 identifier {var}{ws}*::
 
-parameter {sym}{ws}*=
+parameter [a-zA-Z0-9_.-]+{ws}*=
 
 grpref     \*{var}
 positional `[^`]+`
