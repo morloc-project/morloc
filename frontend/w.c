@@ -19,6 +19,7 @@ VType get_value_type(Class cls){
             break;
         case T_PATH:
         case T_EFFECT:
+        case T_HOOK:
         case T_CHECK:
         case T_OPEN:
         case T_PACK:
@@ -142,6 +143,7 @@ char* w_class_str(Class cls){
         case K_NAME:       s = strdup("K_NAME")       ; break;
         case T_PATH:       s = strdup("T_PATH")       ; break;
         case T_EFFECT:     s = strdup("T_EFFECT")     ; break;
+        case T_HOOK:       s = strdup("T_HOOK")       ; break;
         case T_CHECK:      s = strdup("T_CHECK")      ; break;
         case T_OPEN:       s = strdup("T_OPEN")       ; break;
         case T_PACK:       s = strdup("T_PACK")       ; break;

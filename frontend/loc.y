@@ -25,6 +25,7 @@ Ws* global_table;
 %token COUPLE AS ARROW
 
 %token SECTION_EFFECT
+%token SECTION_HOOK
 %token SECTION_CACHE
 %token SECTION_PATH
 %token SECTION_CHECK
@@ -44,6 +45,7 @@ Ws* global_table;
 %type <Ws*> section composition s_path
 
 %type <Ws*> s_effect
+%type <Ws*> s_hook
 %type <Ws*> s_cache
 %type <Ws*> s_check
 %type <Ws*> s_open
@@ -79,6 +81,7 @@ input
 section
     : s_path
     | s_effect
+    | s_hook
     | s_cache
     | s_check
     | s_open
@@ -138,6 +141,14 @@ s_effect
     | s_effect SELECTION COUPLE VARIABLE {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_EFFECT, c);
+        $$ = ws_add($1, w);
+    }
+
+s_hook
+    : SECTION_HOOK { $$ = NULL; }
+    | s_hook SELECTION COUPLE VARIABLE {
+        Couplet* c = couplet_new($2, $4);
+        W* w = w_new(T_HOOK, c);
         $$ = ws_add($1, w);
     }
 

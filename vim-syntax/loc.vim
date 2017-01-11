@@ -64,6 +64,7 @@ syn match s_section '@check'    contained
 syn match s_section '@comment'  contained
 syn match s_section '@doc'      contained
 syn match s_section '@effect'   contained
+syn match s_section '@hook'     contained
 syn match s_section '@export'   contained
 syn match s_section '@fail'     contained
 syn match s_section '@lang'     contained
@@ -153,6 +154,7 @@ syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@
 syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string,s_pathsep
 syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep
+syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
 syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep

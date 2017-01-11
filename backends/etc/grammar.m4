@@ -34,10 +34,12 @@ define(DO_VALIDATE,
     else
         FAIL_$1$2
     fi
+    HOOK_$1
 )
 
 define(NO_VALIDATE,
     PASS_$1 FUNC_$1 INPUT_$1 ARG_$1 |
     EFFECT_$1
     PACK_$1 CACHE_PUT_$1
+    HOOK_$1
 )

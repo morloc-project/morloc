@@ -90,6 +90,7 @@ Ws* _manifold_to_lil(W* cm){
     }
 
     lil = _pairlist(lil, m->effect, "EFCT",  m);
+    lil = _pairlist(lil, m->hook,   "HOOK",  m);
     lil = _pairlist(lil, m->cache,  "CACHE", m);
     lil = _pairlist(lil, m->check,  "CHECK", m);
     lil = _pairlist(lil, m->open,   "OPEN",  m);

@@ -60,6 +60,7 @@ void _set_manifold_type(W* mw, W* tw){
 bool _manifold_modifier(W* w){
     switch(w->cls){
         case T_EFFECT:
+        case T_HOOK:
         case T_CACHE:
         case T_CHECK:
         case T_OPEN:
@@ -108,6 +109,9 @@ void _add_modifier(W* w, W* p){
             break;
         case T_EFFECT:
             m->effect = ws_add_val(m->effect, P_STRING, g_string(rhs));
+            break;
+        case T_HOOK:
+            m->hook = ws_add_val(m->hook, P_STRING, g_string(rhs));
             break;
         case T_CACHE:
             m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));

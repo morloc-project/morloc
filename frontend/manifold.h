@@ -9,7 +9,8 @@ typedef struct Manifold {
     char* function;
     char* lang;
     struct Ws* effect; // Couplet<char*>
-    struct Ws* cache;  // Couplet<char*>
+    struct Ws* hook;   // "
+    struct Ws* cache;  // "
     struct Ws* check;  // "
     struct Ws* open;   // "
     struct Ws* pack;   // "

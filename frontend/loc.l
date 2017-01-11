@@ -65,6 +65,7 @@ couple ::
 @ontology { LOG( "SECTION_ONTOLOGY" ) ; BEGIN(S_ONTOLOGY) ; return SECTION_ONTOLOGY   ; }
 
 @effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
+@hook   { LOG( "SECTION_HOOK"   ) ; BEGIN(S_CPLT) ; return SECTION_HOOK   ; }
 @cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
 @check  { LOG( "SECTION_CHECK"  ) ; BEGIN(S_CPLT) ; return SECTION_CHECK  ; }
 @open   { LOG( "SECTION_OPEN"   ) ; BEGIN(S_CPLT) ; return SECTION_OPEN   ; }

@@ -16,6 +16,7 @@ typedef enum {
     P_COUPLET,
     P_MANIFOLD,
     T_EFFECT,     // T for top level
+    T_HOOK,
     T_CHECK,
     T_OPEN,
     T_PACK,

@@ -8,6 +8,7 @@ $1 == "PASS"  { m[$2]["pass"]      = $3 ; next }
 $1 == "FAIL"  { m[$2]["fail"]      = $3 ; next }
 $1 == "PACK"  { m[$2]["pack"]      = $3 ; next }
 $1 == "EFCT"  { m[$2]["efct"][$3]  = 1  ; next }
+$1 == "HOOK"  { m[$2]["hook"][$3]  = 1  ; next }
 $1 == "ARG"   { m[$2]["arg"][$3]   = $4 ; next }
 
 $1 == "INPM"  { m[$2]["m"][$3] = $4 ; next } 
@@ -92,7 +93,7 @@ END{
 
         if(length(m[i]["hook"]) > 0){
             for(k in m[i]["hook"]){
-                hook = hook "tee >(null "k") |"
+                hook = sprintf("%snull %s\n", hook, k)
             }
             printf "define(HOOK_%s, %s)\n", i, hook >> rules
 
