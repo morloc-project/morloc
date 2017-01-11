@@ -1,0 +1,29 @@
+@source bash
+
+null() {
+    $1 $@ > /dev/null
+}
+
+datcache_chk() {
+    test -f $1.dat
+}
+
+datcache_get() {
+    cat $1.dat
+}
+
+datcache_put() {
+    cat > $1.dat
+}
+
+id() {
+    cat $1
+}
+
+run() {
+    $@
+}
+
+nothing() {
+    echo -n
+}

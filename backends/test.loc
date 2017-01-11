@@ -1,0 +1,47 @@
+@source bash
+
+f() {
+    echo $(( 5 * 7 ))
+}
+
+@type
+f :: NULL -> a
+g :: * -> NULL
+
+@path
+A :: g . f
+
+@lang
+f :: bash
+
+@pass
+f :: doit
+
+@fail
+f :: diehorribly
+
+@pack
+f :: outputzipit
+
+@check
+f :: isgood
+f :: issupergood
+
+@open
+g :: openitup
+
+@arg
+f :: -x=1 -y=2
+
+@effect
+g :: printit
+g :: scrollit
+
+@source bash
+
+g() {
+    echo $(( 4 * 5 ))
+}
+
+@cache
+g :: datcache
