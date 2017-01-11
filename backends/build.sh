@@ -28,6 +28,12 @@ EOF
     exit 0
 }
 
+home=~/.loc
+loc_compiler=$home/bin/loc
+grammar=$home/etc/grammar.m4
+parse=$home/bin/parse.awk
+
+
 # print help with no arguments
 [[ $# -eq 0 ]] && usage
 
@@ -56,8 +62,6 @@ mkdir $outdir/cache
 
 locsrc=${@:$OPTIND:1}
 
-grammar=etc/grammar.m4
-
 bash_prologue() {
     echo -n
 }
@@ -81,7 +85,7 @@ EOF
 
 lang="bash"
 
-lib=lib/$lang-base.loc
+lib=$home/lib/$lang-base.loc
 
 loc=$tmp/loc # Full input loc script (including base libraries)
 lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)
@@ -106,7 +110,7 @@ man=$tmp/man
 
 # Parse LOC into LIL
 cat $lib $locsrc > $loc
-loc $loc > $lil
+$loc_compiler $loc > $lil
 
 
 # - Extract LANG source from LIL
@@ -125,7 +129,7 @@ awk -v src="$src" -v red="$red" -v lng="bash" '
 mv $red $lil
 
 # Build macros and rules
-./parse.awk -v rules=$rules -v body=$body -v L='`' -v R="'" < $lil
+$parse -v rules=$rules -v body=$body -v L='`' -v R="'" < $lil
 
 # Merge all rules and macros, expand to manifold functions;
 cat $grammar $rules $body | m4 > $man

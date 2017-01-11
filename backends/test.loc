@@ -27,11 +27,11 @@ openitup() {
 }
 
 printit() {
-    cat 
+    cat >&2
 }
 
 cowsayit() {
-    cowsay
+    cowsay >&2
 }
 
 outputzipit() {
