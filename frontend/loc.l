@@ -284,6 +284,10 @@ int main(int argc, char ** argv){
     // has the loc source file been loaded successfully
     int file_loaded = 0;
 
+    if(argc == 1){
+        print_usage_and_exit(1);
+    }
+
     // Process arguments
     //  - only one source file is allowed
     //  - flags may be bundled
