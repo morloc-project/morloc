@@ -176,8 +176,9 @@ Ws* ws_split_couplet(W* c){
             {
                 for(W* p = g_ws(paths)->head; p; p = p->next){
                     W* nc = w_isolate(c);
+                    w_clone_value(nc); // so s_lhs doesn't change c
                     s_lhs(nc, p);
-                    result = ws_add(result, nc); 
+                    result = ws_add(result, nc);
                 }
             }
             break;

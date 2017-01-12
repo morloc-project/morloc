@@ -13,6 +13,4 @@ grep :: -e=man
 man :: bash
 
 @lang
-wc :: bash
-grep :: bash
-man :: bash
+wc,grep,man :: bash

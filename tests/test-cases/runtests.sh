@@ -96,8 +96,11 @@ runtest(){
     cd - > /dev/null
 }
 
+
 runtest elements "Manifold elements exist"
 runtest import "Basic import"
+runtest list-select "Lists expand on couplet lhs"
+
 
 echo
 if [[ $n_fail == 0 ]]
