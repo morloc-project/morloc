@@ -85,7 +85,7 @@ EOF
 
 lang="bash"
 
-lib=$home/lib/$lang-base.loc
+lib=$home/lib/core/$lang-base.loc
 
 loc=$tmp/loc # Full input loc script (including base libraries)
 lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)

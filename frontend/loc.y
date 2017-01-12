@@ -307,8 +307,8 @@ argument
     W* w = w_new(P_WS, ws_new($3));
     $$ = w_new(P_ARGUMENT, couplet_new($1, w));
   }
-  | '=' PRIMITIVE {
-    W* w = w_new(P_WS, ws_new($2));
+  | PRIMITIVE {
+    W* w = w_new(P_WS, ws_new($1));
     W* s = w_new(P_STRING, "");
     $$ = w_new(P_ARGUMENT, couplet_new(s, w));
   }

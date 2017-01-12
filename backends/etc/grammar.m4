@@ -28,7 +28,7 @@ define(NO_CACHE,
 define(DO_VALIDATE,
     if CHECK_$1
     then
-        PASS_$1 FUNC_$1 INPUT_$1 ARG_$1 |
+        PASS_$1 FUNC_$1 INPUT_$1 ARG_$1
         EFFECT_$1
         PACK_$1 CACHE_PUT_$1
     else
@@ -38,7 +38,7 @@ define(DO_VALIDATE,
 )
 
 define(NO_VALIDATE,
-    PASS_$1 FUNC_$1 INPUT_$1 ARG_$1 |
+    PASS_$1 FUNC_$1 INPUT_$1 ARG_$1
     EFFECT_$1
     PACK_$1 CACHE_PUT_$1
     HOOK_$1

@@ -38,6 +38,7 @@ selection {path}(,{path})*{ws}*::
 identifier {var}{ws}*::
 
 parameter [a-zA-Z0-9_.-]+{ws}*=
+flag [-][a-zA-Z0-9_.-]+
 
 grpref     \*{var}
 positional `[^`]+`
@@ -215,9 +216,10 @@ couple ::
     }
     W* w = w_new(P_STRING, s);
     yylval.NAME = w;
+    LOG("PARAMETER");
     return NAME;
 }
-<S_ARG>{int}|{dbl}|{lgc}|{sym}|{str} {
+<S_ARG>{int}|{dbl}|{lgc}|{sym}|{str}|{flag} {
     W* w = w_new(P_STRING, strdup(yytext));
     LOG("PRIMITIVE");
     yylval.PRIMITIVE = w;

@@ -43,6 +43,7 @@ END{
 
         if(length(m[i]["check"]) > 0){
             printf "define(VALIDATE_%s, DO_VALIDATE(%s))\n", i, i >> rules
+            chech=""
             for(k in m[i]["check"]){
                 check = check " && " k
             }
@@ -54,6 +55,7 @@ END{
 
         if( "m" in m[i] || "p" in m[i] ){
             k=0
+            input=""
             while(1) {
                 if(k in m[i]["m"]){
                     input = input " OPEN_" m[i]["m"][k]
@@ -72,6 +74,7 @@ END{
         }
 
         if(length(m[i]["arg"]) > 0){
+            arg=""
             for(k in m[i]["arg"]){
                 arg = arg " " k " " m[i]["arg"][k]
             }
@@ -82,8 +85,9 @@ END{
         }
 
         if(length(m[i]["efct"]) > 0){
+            effect=""
             for(k in m[i]["efct"]){
-                effect = effect "tee >(null "k") |\n"
+                effect = effect "| tee >(null "k")\n"
             }
             printf "define(EFFECT_%s, %s)\n", i, effect >> rules
 
@@ -92,8 +96,9 @@ END{
         }
 
         if(length(m[i]["hook"]) > 0){
+            hook=""
             for(k in m[i]["hook"]){
-                hook = sprintf("%snull %s\n", hook, k)
+                hook = sprintf("%s| null %s\n", hook, k)
             }
             printf "define(HOOK_%s, %s)\n", i, hook >> rules
 
@@ -110,7 +115,7 @@ END{
         if(m[i]["pass"]){
             printf "define(PASS_%s, %s)\n", i, m[i]["pass"] >> rules
         } else {
-            printf "define(PASS_%s, run)\n", i >> rules
+            printf "define(PASS_%s, %s%s)\n", i,L,R >> rules
         }
 
         if(m[i]["fail"]){
@@ -122,7 +127,7 @@ END{
         if(m[i]["pack"]){
             printf "define(PACK_%s, %s)\n", i, m[i]["pack"] >> rules
         } else {
-            printf "define(PACK_%s, id)\n", i >> rules
+            printf "define(PACK_%s, %s%s)\n", i, L, R >> rules
         }
 
     }
