@@ -9,8 +9,13 @@ bufstack *current_bs = NULL;
 int newfile(char* fn){
     FILE *f = fopen(fn, "r");
     if(f == NULL){
-        fprintf(stderr, "Could not open file '%s'\n", fn);
-        return 0;
+        char* libfn = (char*)malloc(strlen(fn) + 12 * sizeof(char));
+        sprintf(libfn, "%s/%s", "~/.loc/lib", fn);
+        f = fopen(libfn, "r");
+        if(f == NULL){
+            fprintf(stderr, "Could not find '%s'\n", fn);
+            return 0;
+        }
     }
 
     struct bufstack *bs = malloc(sizeof(struct bufstack));
