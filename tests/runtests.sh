@@ -28,14 +28,6 @@ n_fail=0
 n_pass=0
 loc=~/.loc/bin/loc
 
-announce(){
-    if [[ $quiet -eq 0 ]]
-    then
-        [[ -t 1 ]] && o="\e[1;33m$1\e[0m" || o=$1
-        echo -e $o
-    fi
-}
-
 warn(){
     if [[ $quiet -eq 0 ]]
     then
@@ -44,34 +36,10 @@ warn(){
     fi
 }
 
-emphasize_n(){
-    if [[ $quiet -eq 0 ]]
-    then
-        [[ -t 1 ]] && o="\e[1;39m$1\e[0m" || o=$1
-        echo -ne $o
-    fi
-}
-
-emphasize(){
-    if [[ $quiet -eq 0 ]]
-    then
-        emphasize_n "$1" 
-        echo
-    fi
-}
-
-say_n(){
-    [[ $quiet -eq 0 ]] && echo -n "$@"
-}
-
-say(){
-    [[ $quiet -eq 0 ]] && echo "$@"
-}
-
 runtest(){
     dir=$1
     msg=$2
-    cd $dir
+    cd test-cases/$dir
 
     echo -n "$msg ... "
 
