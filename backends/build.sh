@@ -40,7 +40,7 @@ EOF
 
 home=~/.loc
 loc_compiler=$home/bin/loc
-grammar=$home/etc/grammar.m4
+grammar=$home/etc/bash-grammar.m4
 parse=$home/bin/parse.awk
 
 
@@ -82,21 +82,6 @@ done
 
 locsrc=${@:$OPTIND:1}
 
-bash_prologue() {
-    echo -n
-}
-
-bash_epilogue() {
-cat << EOF
-if manifold_exists \$1
-then
-    \$1 
-else
-    exit 1 
-fi
-EOF
-}
-
 # === synopsis =========================
 # exe . cat . src man
 # man . m4 . cat . grammar rules body
@@ -112,11 +97,6 @@ lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)
 exe=$tmp/exe # The final executable for this language
 src=$tmp/src # Source code for this language extracted from LIL
 red=$tmp/red # reduced lil (after removing source code)
-
-pro=$tmp/pro # executable header material (prologue)
-bash_prologue > $pro
-epi=$tmp/epi # executable tail material (epilogue)
-bash_epilogue > $epi
 
 # Production rules - includes rules from the grammar and runtime macros
 rules=$tmp/rules
@@ -162,7 +142,7 @@ cat $grammar $rules $body | m4 > $man
 
 
 # Combine source and manifold functions into final executable
-cat $pro $src $man $epi | sed '/^ *$/d;s/ *//' > $exe
+cat $src $man | sed '/^ *$/d;s/ *//' > $exe
 
 
 # Move executable to working folder and set permissions

@@ -1,3 +1,14 @@
+define(PROLOGUE, `')
+
+define(EPILOGUE,
+`if manifold_exists $`1'
+then
+    $`1' 
+else
+    exit 1 
+fi'
+)
+
 define(MANIFOLD,
     $1(){
         CACHE_$1

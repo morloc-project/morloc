@@ -16,6 +16,7 @@ $1 == "INPP"  { m[$2]["p"][$3] = $4 ; next }
 { }
 
 END{
+    printf "PROLOGUE\n" >> body
     for(i in m){
 
         if(m[i]["lang"] == "bash"){
@@ -131,5 +132,6 @@ END{
         }
 
     }
+    printf "EPILOGUE\n" >> body
 
 }
