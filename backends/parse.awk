@@ -1,6 +1,6 @@
 #!/bin/awk -f 
 
-$1 == "EMIT"  { m[$3]["lang"]      = $2 ; next }
+$1 == "EMIT"  { m[$2]["lang"]      = $3 ; next }
 $1 == "CACHE" { m[$2]["cache"]     = $3 ; next }
 $1 == "CHECK" { m[$2]["check"][$3] = 1  ; next }
 $1 == "FUNC"  { m[$2]["func"]      = $3 ; next }
