@@ -113,7 +113,7 @@ syn match s_brk      /[\[\]]/ contained
 syn match s_bar      /|/      contained
 syn match s_star     /\_\W\*\_\W/ contained
 
-syn match s_positional /`\w\+`/ contained
+syn match s_positional /`[^`]\+`/ contained
 syn match s_group /\*\w\+/ contained
 
 " define constants

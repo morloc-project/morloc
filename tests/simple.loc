@@ -1,0 +1,18 @@
+@comment
+
+This code is equivalent to
+
+$ man bash | grep man | wc -l
+
+@path
+A :: wc . grep . man
+
+@arg
+wc :: -l
+grep :: -e=man
+man :: bash
+
+@lang
+wc :: bash
+grep :: bash
+man :: bash
