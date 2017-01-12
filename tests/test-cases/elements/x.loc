@@ -33,28 +33,31 @@ g :: A -> NULL
 foo :: g . f
 
 @cache
-g :: cache
+g :: _cache
 
 @check
-g :: check1
+g :: _check
 
 @open
-g :: open1
+g :: _open
 
 @pass
-g :: run
+g :: _pass
 
 @alias
-g :: fun
+g :: _alias
 
 @arg
 g :: x=1 y=2
 
 @fail
-g :: croak
+g :: _fail
 
 @pack
-g :: pack
+g :: _pack
 
 @effect
-g :: effect1
+g :: _effect
+
+@hook
+g :: _hook

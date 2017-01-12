@@ -1,5 +1,5 @@
 @import
-'import-test-lib.loc'
+'x-lib.loc'
 
 @effect
 g :: foo

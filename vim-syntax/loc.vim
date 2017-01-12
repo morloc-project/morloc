@@ -147,7 +147,7 @@ syn region r_r_source start=/@source \(bash\|sh\)$/ end=/@\@=/ skip=/\\@/ contai
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
-syn region r_alias start=/@alias \S\+/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
 
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep,s_arg
 syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
