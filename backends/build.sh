@@ -13,17 +13,27 @@ make_temp_dir() {
     echo $tmp
 }
 
+exit_and_clean() {
+    rm -rf $tmp
+    exit $1
+}
+
 usage (){
 cat << EOF
 DESC
     Process LOC file into ultimate executable
 USAGE
    ./build.sh [options] whatever.loc
-OPTIONAL ARGUMENTS
-  -o DIR build workflow in DIR
-  -L print the output LIL (after removing source)
-  -G print the m4 text before macro expansion
-  -R print the derived macro rules
+OPTIONS
+  -o     DIR build workflow in DIR
+  -L     print the output LIL (after removing source)
+  -G     print the m4 text before macro expansion
+  -R     print the derived macro rules
+  -x MID build, call MID, and remove
+COMPILER OPTIONS
+  -c     run the typechecker on manifolds
+  -t     print tokens to a token file
+  -d     recursively dump symbol table
 EOF
     exit 0
 }
@@ -39,10 +49,13 @@ parse=$home/bin/parse.awk
 
 tmp=`make_temp_dir`
 outdir=`basename $tmp`
+flags=
+symdump=false
+execute=false execute_id=
 print_lil=false
 print_m4=false
 print_rules=false
-while getopts "hLGR" opt; do
+while getopts "hLGRctdx:" opt; do
     case $opt in
         h)
             usage ;;
@@ -54,11 +67,18 @@ while getopts "hLGR" opt; do
             print_m4=true ;; 
         R)
             print_rules=true ;;
+        c)
+            flags="$flags -c" ;;
+        t)
+            flags="$flags -t" ;;
+        d)
+            flags="$flags -d"
+            symdump=true ;;
+        x)
+            execute_id=$OPTARG
+            execute=true ;;
     esac 
 done
-
-mkdir $outdir
-mkdir $outdir/cache
 
 locsrc=${@:$OPTIND:1}
 
@@ -110,7 +130,13 @@ man=$tmp/man
 
 # Parse LOC into LIL
 cat $lib $locsrc > $loc
-$loc_compiler $loc > $lil
+
+$symdump && $loc_compiler $flags $loc && exit_and_clean 0
+
+mkdir $outdir
+mkdir $outdir/cache
+
+$loc_compiler $flags $loc > $lil
 
 
 # - Extract LANG source from LIL
@@ -143,6 +169,12 @@ cat $pro $src $man $epi | sed '/^ *$/d;s/ *//' > $exe
 cp $exe $outdir/call-bash.sh
 chmod 755 $outdir/call-bash.sh
 
+if $execute
+then
+    $outdir/call-bash.sh $execute_id
+    rm -rf $outdir
+fi
+
 # Optional debugging output
 if $print_lil
 then
@@ -163,5 +195,4 @@ then
     cat $body
 fi
 
-# cleanup
-rm -rf $tmp
+exit_and_clean 0

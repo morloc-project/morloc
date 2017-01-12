@@ -336,7 +336,7 @@ int main(int argc, char ** argv){
         print_usage_and_exit(1);
     }
     if(log_tokens){
-        toklog = fopen("tok.log", "w");
+        toklog = fopen("/dev/stderr", "w");
     } else {
         toklog = fopen("/dev/null", "w");
     }

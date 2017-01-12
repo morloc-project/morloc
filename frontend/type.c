@@ -107,7 +107,8 @@ bool type_is_sink(Ws* type){
 void print_error(W* msg){
     if(!msg) return;
     for(W* w = g_ws(msg)->head; w; w = w->next){
-        printf(
+        fprintf(
+            stderr,
             "TYPE ERROR in %s: %s\n",
             g_manifold(g_rhs(g_lhs(w)))->function,
             g_string(g_rhs(w))
