@@ -18,6 +18,10 @@ exit_and_clean() {
     exit $1
 }
 
+find_all_languages() {
+    awk '$1 == "EMIT" && $3 != "*" { print $3 }' $1 | sort -u
+}
+
 usage (){
 cat << EOF
 DESC
@@ -88,66 +92,82 @@ locsrc=${@:$OPTIND:1}
 # rules body . parser . loc
 # ======================================
 
-lang="bash"
-
-lib=$home/lib/core/$lang-base.loc
-
 loc=$tmp/loc # Full input loc script (including base libraries)
 lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)
-exe=$tmp/exe # The final executable for this language
-src=$tmp/src # Source code for this language extracted from LIL
-red=$tmp/red # reduced lil (after removing source code)
-
-# Production rules - includes rules from the grammar and runtime macros
-rules=$tmp/rules
-
-# M4 body that will be generated into the body of the ultimate source file
-body=$tmp/body
-
-# manifold functions after macro expansions
-man=$tmp/man
-
-
-# Parse LOC into LIL
-cat $lib $locsrc > $loc
-
-$symdump && $loc_compiler $flags $loc && exit_and_clean 0
 
 mkdir $outdir
 mkdir $outdir/cache
 
-$loc_compiler $flags $loc > $lil
+$loc_compiler $locsrc > $lil
 
+for lang in $(find_all_languages $lil)
+do
+    exe=$tmp/exe # The final executable for this language
+    src=$tmp/src # Source code for this language extracted from LIL
+    red=$tmp/red # reduced lil (after removing source code)
 
-# - Extract LANG source from LIL
-# - Write this source to a temporary `src` file
-# - Write LIL without source to temporary `red` file
->$src >$red
-awk -v src="$src" -v red="$red" -v lng="bash" '
-    BEGIN{ state=0 }
-    $0 ~ /^[^ ]/ { state = 0 }
-    $1 == "SOURCE" && $2 ~ lng { state = 1; next; }
-    state == 1 { print >> src }
-    state == 0 && $0 ~ /^[^ ]/ { print > red }
-' $lil
+    # Production rules - includes rules from the grammar and runtime macros
+    rules=$tmp/rules
 
-# replace original LIL with the sourceless LIL
-mv $red $lil
+    # M4 body that will be generated into the body of the ultimate source file
+    body=$tmp/body
 
-# Build macros and rules
-$parse -v rules=$rules -v body=$body -v L='`' -v R="'" < $lil
+    # manifold functions after macro expansions
+    man=$tmp/man
 
-# Merge all rules and macros, expand to manifold functions;
-cat $grammar $rules $body | m4 > $man
+    >$exe >$src >$red >$rules >$body >$man
 
+    lib=$home/lib/core/$lang-base.loc
 
-# Combine source and manifold functions into final executable
-cat $src $man | sed '/^ *$/d;s/ *//' > $exe
+    # Parse LOC into LIL
+    cat $lib $locsrc > $loc
 
+    $loc_compiler $flags $loc > $lil
 
-# Move executable to working folder and set permissions
-cp $exe $outdir/call-bash.sh
-chmod 755 $outdir/call-bash.sh
+    # symdump only for the first language (???)
+    $symdump && $loc_compiler $flags $loc && exit_and_clean 0
+
+    # - Extract LANG source from LIL
+    # - Write this source to a temporary `src` file
+    # - Write LIL without source to temporary `red` file
+    awk -v src="$src" -v red="$red" -v lng=$lang '
+        BEGIN{ state=0 }
+        $0 ~ /^[^ ]/ { state = 0 }
+        $1 == "SOURCE" && $2 ~ lng { state = 1; next; }
+        state == 1 { print > src }
+        state == 0 && $0 ~ /^[^ ]/ { print > red }
+    ' $lil
+
+    # Build macros and rules
+    $parse -v rules=$rules -v body=$body -v L='`' -v R="'" < $red
+
+    # Merge all rules and macros, expand to manifold functions;
+    cat $grammar $rules $body | m4 > $man
+
+    # Combine source and manifold functions into final executable
+    cat $src $man | sed '/^ *$/d;s/ *//' > $exe
+
+    # Move executable to working folder and set permissions
+    cp $exe $outdir/call-$lang.sh
+    chmod 755 $outdir/call-$lang.sh
+
+    if $print_rules
+    then
+        echo "### $lang rules:"
+        cat $rules
+    fi
+
+    if $print_m4
+    then
+        echo "### $lang m4:"
+        cat $grammar
+        echo
+        cat $rules
+        echo
+        cat $body
+    fi
+
+done
 
 if $execute
 then
@@ -158,21 +178,7 @@ fi
 # Optional debugging output
 if $print_lil
 then
-    cat $lil
-fi
-
-if $print_rules
-then
-    cat $rules
-fi
-
-if $print_m4
-then
-    cat $grammar
-    echo
-    cat $rules
-    echo
-    cat $body
+    cat $red
 fi
 
 exit_and_clean 0
