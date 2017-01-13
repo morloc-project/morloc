@@ -2,15 +2,16 @@
 
 This code is equivalent to
 
-$ man bash | grep man | wc -l
+man ls | grep list | wc -l
+
 
 @path
 A :: wc . grep . man
 
 @arg
 wc :: -l
-grep :: -e=man
-man :: bash
+grep :: list
+man :: ls
 
 @lang
 wc,grep,man :: bash

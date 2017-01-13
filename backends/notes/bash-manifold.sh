@@ -1,44 +1,18 @@
 m1 (){
-    if cache_chk $0
+    if cache_chk "m1"
     then
-        cache_get $0
+        cache_get "m1"
     else
         if check1 && check2
         then
-            run fun args <(open1 m4) <(open2 m5) |
-            tee >(null effect1) |
-            tee >(null effect2) |
-            pack | cache_put $0
+            run fun args <(m4 | o1) <(m5 | o2) |
+            tee >(effect1 | null) |
+            tee >(effect2 | null) |
+            pack | cache_put "m1"
         else
-            fail | cache_put $0
+            fail | cache_put "m1"
         fi
-        null hook1
-        null hook2
+        hook1 | null 
+        hook2 | null 
     fi
 }
-
-
-MID (){
-    if CACHE_CHK $0
-    then
-        CACHE_GET $0
-    else
-        if CHECK
-        then
-            PASS FUN ARGS POSITIONALS |
-            EFFECT 
-            PACK | CACHE_PUT $0
-        else
-            FAIL | CACHE_PUT $0
-        fi
-        HOOK
-    fi
-}
-
-# where
-# CHECK(f)  -->  f && CHECK(f)
-# ARGS(a:args) --> a ARGS(args)
-# POSITIONAL(a:pos) --> <(OPEN(o1) a) POSITIONAL(pos)
-# OPEN(f) --> f
-# PACK(f) --> f
-# CACHE_PUT --> 

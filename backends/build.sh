@@ -59,7 +59,7 @@ execute=false execute_id=
 print_lil=false
 print_m4=false
 print_rules=false
-while getopts "hLGRctdx:" opt; do
+while getopts "hLGRctdx:o:" opt; do
     case $opt in
         h)
             usage ;;
@@ -139,7 +139,7 @@ do
     ' $lil
 
     # Build macros and rules
-    $parse -v rules=$rules -v body=$body -v L='`' -v R="'" < $red
+    $parse -v lang=$lang -v rules=$rules -v body=$body -v L='`' -v R="'" < $red
 
     # Merge all rules and macros, expand to manifold functions;
     cat $grammar $rules $body | m4 > $man
