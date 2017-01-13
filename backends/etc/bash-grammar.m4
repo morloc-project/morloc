@@ -48,6 +48,10 @@ define(DO_VALIDATE,
     fi
 )
 
+define(NOTHING, `echo -n')
+
+define(SIMPLE_FAIL, `return 1')
+
 define(NO_VALIDATE, CORE($1))
 
 define(CHECK, $1)
@@ -71,7 +75,11 @@ define(NO_PUT, `')
 define(DO_PUT, `| BASECACHE_$1`_put' $1')
 
 define(EPILOGUE,
-`if manifold_exists $`1'
+`
+manifold_exists() {
+    type $`1' | grep -q function
+}
+if manifold_exists $`1'
 then
     $`1' 
 else

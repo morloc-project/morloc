@@ -129,7 +129,7 @@ END{
         if(m[i]["func"]){
             printf "define(FUNC_%s, %s)\n", i, m[i]["func"] >> rules
         } else {
-            printf "define(FUNC_%s, nothing)\n", i >> rules
+            printf "define(FUNC_%s, NOTHING)\n", i >> rules
         }
 
         if(m[i]["pass"]){
@@ -148,7 +148,7 @@ END{
         if(m[i]["fail"]){
             printf "define(FAIL_%s, %s)\n", i, m[i]["fail"] >> rules
         } else {
-            printf "define(FAIL_%s, nothing)\n", i >> rules
+            printf "define(FAIL_%s, SIMPLE_FAIL)\n", i >> rules
         }
 
         if(m[i]["pack"]){

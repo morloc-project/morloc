@@ -1,0 +1,19 @@
+@source bash
+
+# Text -> NULL
+null() {
+    cat > /dev/null
+}
+
+id() {
+    cat
+}
+
+# (a -> b) -> c -> a -> Text
+run() {
+    $@
+}
+
+nothing() {
+    echo -n
+}

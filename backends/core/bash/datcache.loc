@@ -1,0 +1,17 @@
+@source bash
+
+# String -> Bool
+datcache_chk() {
+    test -d cache && test -f cache/$1.dat
+}
+
+# NULL -> Text
+datcache_get() {
+    cat cache/$1.dat
+}
+
+# Text -> Text
+datcache_put() {
+    tee > cache/$1.dat
+}
+

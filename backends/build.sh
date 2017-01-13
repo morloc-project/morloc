@@ -86,21 +86,15 @@ done
 
 locsrc=${@:$OPTIND:1}
 
-# === synopsis =========================
-# exe . cat . src man
-# man . m4 . cat . grammar rules body
-# rules body . parser . loc
-# ======================================
+$symdump && $loc_compiler $flags $locsrc && exit_and_clean 0
 
-loc=$tmp/loc # Full input loc script (including base libraries)
 lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)
+$loc_compiler $flags $locsrc > $lil
 
 mkdir $outdir
 mkdir $outdir/cache
 
-$loc_compiler $locsrc > $lil
-
-for lang in $(find_all_languages $lil)
+for lang in $(find_all_languages <($loc_compiler $locsrc))
 do
     exe=$tmp/exe # The final executable for this language
     src=$tmp/src # Source code for this language extracted from LIL
@@ -115,17 +109,9 @@ do
     # manifold functions after macro expansions
     man=$tmp/man
 
+    loc=$tmp/loc
+
     >$exe >$src >$red >$rules >$body >$man
-
-    lib=$home/lib/core/$lang-base.loc
-
-    # Parse LOC into LIL
-    cat $lib $locsrc > $loc
-
-    $loc_compiler $flags $loc > $lil
-
-    # symdump only for the first language (???)
-    $symdump && $loc_compiler $flags $loc && exit_and_clean 0
 
     # - Extract LANG source from LIL
     # - Write this source to a temporary `src` file
@@ -141,7 +127,7 @@ do
     # Build macros and rules
     $parse -v lang=$lang -v rules=$rules -v body=$body -v L='`' -v R="'" < $red
 
-    # Merge all rules and macros, expand to manifold functions;
+    # Merge all rules and macros, expand to manifold functions
     cat $grammar $rules $body | m4 > $man
 
     # Combine source and manifold functions into final executable
