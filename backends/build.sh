@@ -34,6 +34,7 @@ OPTIONS
   -G     print the m4 text before macro expansion
   -R     print the derived macro rules
   -x MID build, call MID, and remove
+  -n NEX manifold nexus file name
 COMPILER OPTIONS
   -c     run the typechecker on manifolds
   -t     print tokens to a token file
@@ -44,8 +45,7 @@ EOF
 
 home=~/.loc
 loc_compiler=$home/bin/loc
-grammar=$home/etc/bash-grammar.m4
-parse=$home/bin/parse.awk
+parse=$home/bin/parse-grammar.awk
 
 
 # print help with no arguments
@@ -59,12 +59,16 @@ execute=false execute_id=
 print_lil=false
 print_m4=false
 print_rules=false
-while getopts "hLGRctdx:o:" opt; do
+nexus_given=false
+while getopts "hLGRctdx:o:n:" opt; do
     case $opt in
         h)
             usage ;;
         o)
             outdir=$OPTARG ;;
+        n)
+            nexus_given=true
+            nexus=$OPTARG ;;
         L)
             print_lil=true ;;
         G)
@@ -94,6 +98,8 @@ $loc_compiler $flags $locsrc > $lil
 mkdir $outdir
 mkdir $outdir/cache
 
+$nexus_given || nexus=$outdir/manifold-nexus.sh
+
 for lang in $(find_all_languages <($loc_compiler $locsrc))
 do
     exe=$tmp/exe # The final executable for this language
@@ -102,6 +108,8 @@ do
 
     # Production rules - includes rules from the grammar and runtime macros
     rules=$tmp/rules
+
+    grammar=$home/etc/grammar/$lang.m4
 
     # M4 body that will be generated into the body of the ultimate source file
     body=$tmp/body
@@ -154,6 +162,17 @@ do
     fi
 
 done
+
+nexus_grammar=$HOME/.loc/etc/nexus.m4
+nexus_rules=$tmp/nexus_rules
+nexus_body=$HOME/.loc/etc/nexus.sh
+build_nexus=$HOME/.loc/bin/build-nexus.awk
+$build_nexus       \
+    -v dir=$outdir \
+    -v name=`basename $nexus` $lil > $nexus_rules
+
+cat $nexus_grammar $nexus_rules $nexus_body | m4 | sed -n '/./,$p' > $nexus
+chmod 755 $nexus
 
 if $execute
 then

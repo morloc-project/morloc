@@ -22,7 +22,8 @@ install:
 	mkdir -p ~/.loc/bin
 	mkdir -p ~/.loc/etc
 	cp frontend/loc ~/.loc/bin
-	cp backends/parse.awk ~/.loc/bin
+	cp backends/parse-grammar.awk ~/.loc/bin
+	cp backends/build-nexus.awk ~/.loc/bin
 	cp -rf backends/core ~/.loc/lib/core
 	cp -rf backends/etc ~/.loc
 	test -d ~/bin || mkdir ~/bin

@@ -1,7 +1,7 @@
 lex.yy.*
 *.tab.*
 *.out
-zzz.*
+zzz*
 vgcore.*
 loc
 loc.output
