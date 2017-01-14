@@ -1,7 +1,7 @@
-EMIT m0 * 
-FUNC m0 g 
-INPM m0 0 m1 
-EFCT m0 e 
-EMIT m1 * 
-FUNC m1 f 
-EFCT m1 e 
+EMIT	m0	*
+FUNC	m0	g
+INPM	m0	0	m1
+EFCT	m0	e
+EMIT	m1	*
+FUNC	m1	f
+EFCT	m1	e

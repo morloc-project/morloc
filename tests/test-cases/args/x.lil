@@ -1,0 +1,11 @@
+EMIT	m0	*
+FUNC	m0	g
+INPM	m0	0	m1
+ARG	m0	a	0
+ARG	m0		b
+ARG	m0		bar
+ARG	m0		-f
+ARG	m0	--far	"out in the boonies"
+ARG	m0	x	1	2	'three and a half'
+EMIT	m1	*
+FUNC	m1	f

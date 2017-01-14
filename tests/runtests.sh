@@ -68,6 +68,7 @@ runtest(){
 runtest elements "Manifold elements exist"
 runtest import "Basic import"
 runtest list-select "Lists expand on couplet lhs"
+runtest args "Handling of arguments"
 
 
 echo
