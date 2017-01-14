@@ -19,7 +19,7 @@ exit_and_clean() {
 }
 
 find_all_languages() {
-    awk '$1 == "EMIT" && $3 != "*" { print $3 }' $1 | sort -u
+    awk -F"\t" '$1 == "EMIT" && $3 != "*" { print $3 }' $1 | sort -u
 }
 
 usage (){
@@ -125,7 +125,7 @@ do
     # - Write this source to a temporary `src` file
     # - Write LIL without source to temporary `red` file
     awk -v src="$src" -v red="$red" -v lng=$lang '
-        BEGIN{ state=0 }
+        BEGIN{ FS="\t" ; state=0 }
         $0 ~ /^[^ ]/ { state = 0 }
         $1 == "SOURCE" && $2 ~ lng { state = 1; next; }
         state == 1 { print > src }

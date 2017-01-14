@@ -1,6 +1,9 @@
 #!/bin/awk -f 
 
 BEGIN {
+
+    FS="\t"
+
     seps["bash"] = " "    
     seps["R"] = ", "
 

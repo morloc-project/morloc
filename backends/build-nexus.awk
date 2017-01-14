@@ -1,6 +1,9 @@
 #!/bin/awk -f 
 
 BEGIN {
+
+    FS="\t"
+
     printf("define(__NAME__, %s)\n", name)
     printf("define(OUTDIR, %s)\n", dir)
 

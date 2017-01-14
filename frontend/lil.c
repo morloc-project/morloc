@@ -157,7 +157,7 @@ void print_lil(Ws* lil){
         W* ww = wws_head(w);
         if(wws_length(w) > 3 && strcmp("SOURCE", g_string(ww)) == 0){
             printf(
-                "%s %s %s\n",
+                "%s\t%s\t%s\n",
                 g_string(ww),
                 g_string(ww->next),
                 g_string(ww->next->next)
@@ -167,8 +167,9 @@ void print_lil(Ws* lil){
                 printf("    %s\n", g_string(ww));
             }
         } else {
-            for(; ww; ww = ww->next){
-                printf("%s ", g_string(ww));
+            printf(g_string(ww));
+            for(ww = ww->next; ww; ww = ww->next){
+                printf("\t%s", g_string(ww));
             }
         }
         printf("\n");
