@@ -7,9 +7,6 @@ BEGIN {
     printf("define(__NAME__, %s)\n", name)
     printf("define(OUTDIR, %s)\n", dir)
 
-    printf("define(__call_r__, `call-r.R')\n")
-    printf("define(__call_bash__, `call-bash.sh')\n")
-
 }
 
 $1 == "EMIT" { m[$2] = $3 }

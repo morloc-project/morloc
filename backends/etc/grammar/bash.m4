@@ -19,7 +19,7 @@ define(UNIVERSAL_MANIFOLD,
 
 define(FOREIGN_MANIFOLD,
     $1(){
-        call_$2 $1
+        call.$2 $1
     }
 )
 
@@ -57,9 +57,20 @@ define(NO_VALIDATE, CORE($1))
 define(CHECK, $1)
 
 define(CORE,
-    PASS_$1 FUNC_$1 ARG_$1 INPUT_$1
+    RUN_$1
     EFFECT_$1
-    PACK_$1 CACHE_PUT_$1
+    PACK_$1
+    CACHE_PUT_$1
+)
+define(DO_PACK, PACKFUN_$1)
+define(NO_PACK, `')
+
+define(DO_PASS,
+    PASS_$1 FUNC_$1 ARG_$1 INPUT_$1
+)
+
+define(NO_PASS,
+    FUNC_$1 ARG_$1 INPUT_$1
 )
 
 define(CALL, <($1) )

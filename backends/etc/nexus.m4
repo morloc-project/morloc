@@ -6,8 +6,6 @@ define(__MANIFOLD__,
 
 define(MANGLE, __manifold__$1)
 
-define(MANIFOLD_POOL, OUTDIR/POOL(LANG_$1) )
-
-define(POOL, __call_$1__)
+define(MANIFOLD_POOL, OUTDIR/call.LANG_$1 )
 
 define(__MANIFOLD_DOC__, FUNCTION_$1(LANG_$1))

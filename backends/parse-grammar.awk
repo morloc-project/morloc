@@ -13,9 +13,6 @@ BEGIN {
     ands["bash"] = "&&"
     ands["R"] = "&&"
 
-    printf("define(call_r, `call-r.R')\n")        >> rules
-    printf("define(call_bash, `call-bash.sh')\n") >> rules
-
     printf("define(SEP, `%s')\n", seps[lang])   >> rules
     printf("define(BIND, `%s')\n", binds[lang]) >> rules
     printf("define(AND, `%s')\n", ands[lang])   >> rules
@@ -83,18 +80,18 @@ END{
             input=""
             while(1) {
                 if(k in m[i]["m"]){
-                    input = sprintf("%s SEP CALL(%s)", input, m[i]["m"][k])
+                    input = sprintf("%sSEP CALL(%s)", input, m[i]["m"][k])
                 }
                 else if(m[i]["p"][k]){
-                    input = input " " m[i]["p"][k]
-                    input = sprintf("%s SEP %s", input, m[i]["p"][k])
+                    input = sprintf("%sSEP %s", input, m[i]["p"][k])
                 }
                 else {
                     break
                 }
                 k = k + 1
             }
-            printf "define(INPUT_%s, %s)\n", i, input >> rules
+            gsub(/^SEP /, "", input) # remove the last sep
+            printf "define(INPUT_%s, `%s')\n", i, input >> rules
         } else {
             printf "define(INPUT_%s, %s%s)\n", i, L, R >> rules
         }
@@ -102,9 +99,10 @@ END{
         if(length(m[i]["arg"]) > 0){
             arg=""
             for(k in m[i]["arg"]){
-                arg = sprintf("%s SEP %s", arg, k)
+                arg = sprintf("%sSEP %s", arg, k)
             }
-            printf "define(ARG_%s, %s)\n", i, arg >> rules
+            gsub(/^SEP /, "", arg) # remove the last sep
+            printf "define(ARG_%s, `%s')\n", i, arg >> rules
         } else {
             printf "define(ARG_%s, %s%s)\n", i, L, R >> rules
         }
@@ -136,9 +134,10 @@ END{
         }
 
         if(m[i]["pass"]){
-            printf "define(PASS_%s, %s)\n", i, m[i]["pass"] >> rules
+            printf "define(PASS_%s, %s)", i, m[i]["pass"] 
+            printf "define(RUN_%s, DO_PASS(%s))", i, i >> rules
         } else {
-            printf "define(PASS_%s, %s%s)\n", i,L,R >> rules
+            printf "define(RUN_%s, NO_PASS(%s))", i, i >> rules
         }
 
         if(m[i]["open"]){
@@ -155,9 +154,10 @@ END{
         }
 
         if(m[i]["pack"]){
-            printf "define(PACK_%s, %s)\n", i, m[i]["pack"] >> rules
+            printf "define(PACKFUN_%s, %s)", m[i]["pack"] >> rules
+            printf "define(PACK_%s, DO_PACK(%s))\n", i >> rules
         } else {
-            printf "define(PACK_%s, %s%s)\n", i, L, R >> rules
+            printf "define(PACK_%s, NO_PACK)\n", i >> rules
         }
 
     }

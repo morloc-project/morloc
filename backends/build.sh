@@ -142,8 +142,8 @@ do
     cat $src $man | sed '/^ *$/d;s/ *//' > $exe
 
     # Move executable to working folder and set permissions
-    cp $exe $outdir/call-$lang.sh
-    chmod 755 $outdir/call-$lang.sh
+    cp $exe $outdir/call.$lang
+    chmod 755 $outdir/call.$lang
 
     if $print_rules
     then
@@ -167,16 +167,18 @@ nexus_grammar=$HOME/.loc/etc/nexus.m4
 nexus_rules=$tmp/nexus_rules
 nexus_body=$HOME/.loc/etc/nexus.sh
 build_nexus=$HOME/.loc/bin/build-nexus.awk
-$build_nexus       \
-    -v dir=$outdir \
-    -v name=`basename $nexus` $lil > $nexus_rules
+$build_nexus                  \
+    -v dir=$outdir            \
+    -v name=`basename $nexus` \
+    -v lang=$lang             \
+    $lil > $nexus_rules
 
 cat $nexus_grammar $nexus_rules $nexus_body | m4 | sed -n '/./,$p' > $nexus
 chmod 755 $nexus
 
 if $execute
 then
-    $outdir/call-bash.sh $execute_id
+    $nexus $execute_id
     rm -rf $outdir
 fi
 

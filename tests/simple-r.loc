@@ -16,4 +16,7 @@ A :: max . runif
 
 @arg
 
-runif :: n=100 min=0 max=10
+runif :: n=100 min=1 max=10
+
+@lang
+max,runif :: R
