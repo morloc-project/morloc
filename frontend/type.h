@@ -3,8 +3,7 @@
 
 #define __IO__ "NULL"
 
-#include "ws.h"
-#include "hof.h"
+#include "ws_access.h"
 
 void set_default_types(Ws* ws);
 

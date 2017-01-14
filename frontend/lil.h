@@ -1,7 +1,7 @@
 #ifndef __LIL_H__
 #define __LIL_H__
 
-#include "hof.h"
+#include "ws_access.h"
 
 void print_lil(Ws* lil);
 

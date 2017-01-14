@@ -1,6 +1,11 @@
 #ifndef __HOF_H__
 #define __HOF_H__
 
+/* The functions declared below are intended to be very general. They should
+ * not contain any type-specific handling. More specific applications are
+ * developed in ws_access.h.
+ */
+
 #include "ws.h"
 
 // Recursively moves through a Ws, accumulating W that meet a criterion into a flat list
@@ -49,9 +54,6 @@ void ws_recursive_reduce_mod(
 
 // maps ws_prmod over parameter list ps
 void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*));
-
-/* Turns one couplet into a list of couplets, each with a single path (lhs). */
-Ws* ws_split_couplet(W*);
 
 /* A 'split' takes one thing and returns several:
  *
@@ -131,29 +133,5 @@ void ws_filter_3mod(
     Ws*(*zfilter)(Ws*),
     void(*mod)(W* x, W* y, W* z)
 );
-
-// Removing nesting in a list (as specified by the recursion rule).
-// This is just a wrapper for ws_rfilter, with criterion := w_keep_all.
-Ws* ws_flatten(Ws*, Ws*(*recurse)(W*));
-
-// recurse rules
-Ws* ws_recurse_ws(W*);   // recurse into V_WS
-Ws* ws_recurse_most(W*); // recurse into V_WS and V_COUPLET (but not manifolds)
-Ws* ws_recurse_none(W*); // no recursion
-Ws* ws_recurse_composition(W*); // recurse into T_PATH and C_NEST
-// parameterized recurse rules
-Ws* ws_recurse_path(W*, W*);
-
-// criteria functions
-bool w_is_manifold(W*);
-bool w_is_type(W*);
-bool w_is_composon(W*);
-bool w_keep_all(W*);
-
-// nextval functions
-W* w_nextval_always(W* p, W* w);
-W* w_nextval_never(W* p, W* w);
-W* w_nextval_ifpath(W* p, W* w);
-
 
 #endif

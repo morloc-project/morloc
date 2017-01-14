@@ -28,6 +28,7 @@ FILES =         \
 	build_io.c  \
 	build_mod.c \
 	type.c      \
+	ws_access.c \
 	lil.c
 
 all:

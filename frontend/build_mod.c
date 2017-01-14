@@ -1,6 +1,5 @@
 #include "build_mod.h"
 
-Ws* _get_manifolds(Ws* ws);
 void _set_default_manifold_function(W* cm);
 void _set_manifold_type(W*, W*);
 bool _manifold_modifier(W* w);
@@ -13,7 +12,7 @@ void _add_modifier(W* w, W* p);
 void link_modifiers(Ws* ws_top){
 
     // Set default function names for all manifolds
-    ws_filter_mod(ws_top, _get_manifolds, _set_default_manifold_function);
+    ws_filter_mod(ws_top, get_manifolds, _set_default_manifold_function);
 
     // Set manifold type based off the default names
     ws_2mod(
@@ -30,11 +29,6 @@ void link_modifiers(Ws* ws_top){
     cs = ws_map_split(cs, ws_split_couplet);
     ws_map_pmod(ws_top, cs, _mod_add_modifiers);
 
-}
-
-// Find all {label,manifold} couplets
-Ws* _get_manifolds(Ws* ws){
-    return ws_rfilter(ws, ws_recurse_most, w_is_manifold);
 }
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
