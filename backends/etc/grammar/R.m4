@@ -1,4 +1,4 @@
-define(PROLOGUE, `')
+define(PROLOGUE, `#!/usr/bin/Rscript --vanilla')
 
 define(NATIVE_MANIFOLD,
     $1 <- function(){
@@ -87,4 +87,16 @@ define(NO_PUT, `')
 
 define(DO_PUT, `BASECACHE_$1`_put'($1)')
 
-define(EPILOGUE, `')
+define(EPILOGUE,
+
+args <- commandArgs(TRUE)
+m <- args[1]
+
+if(exists(m)){
+  f = get(m)
+  cat(f())
+} else {
+  quit(status=1)
+}
+
+)
