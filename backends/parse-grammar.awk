@@ -32,7 +32,7 @@ $1 == "INPM"  { m[$2]["m"][$3]     = $4 ; next }
 $1 == "INPP"  { m[$2]["p"][$3]     = $4 ; next }
 
 $1 == "ARG" {
-    if($4) { arg = $3 " BIND " $4 } else { arg = $3 }
+    if($4 != "") { arg = $3 " BIND " $4 } else { arg = $3 }
     m[$2]["arg"][arg] = 1
     next
 }
