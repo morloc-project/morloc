@@ -4,14 +4,18 @@ This code is equivalent to
 
 man ls | grep list | wc -l
 
+@source R
+cut <- function(x, n=1){ x[[n]] }
+
 
 @path
-A :: wc . grep . man
+A :: hist . cut . uniq `1` . sort . grep . man `sed`
 
 @arg
 wc :: -l
-grep :: list
-man :: ls
+grep :: -Po "'[a-z]+ed'"
+uniq :: -c
 
 @lang
 wc,grep,man :: bash
+hist,cut :: R

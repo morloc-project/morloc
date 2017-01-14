@@ -35,6 +35,8 @@ var       {sym}(:{sym})?
 path      {var}({ws}*\/{ws}*{var})*
 selection {path}(,{path})*{ws}*::
 
+type {sym}|\[{sym}\]|\*
+
 identifier {var}{ws}*::
 
 parameter [a-zA-Z0-9_.-]+{ws}*=
@@ -237,7 +239,7 @@ couple ::
     LOG("NAME");
     return NAME;
 }
-<S_TYPE>{sym}|\* {
+<S_TYPE>{type} {
     W* w = w_new(P_STRING, strdup(yytext));
     yylval.TYPE = w;
     LOGV("TYPE:%s", yytext);

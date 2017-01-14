@@ -1,0 +1,19 @@
+@comment
+
+The equivalent of
+
+R> max(runif(n=100, min=0, max=10))
+
+@type
+
+# max :: [Number] -> Number
+max :: [Number] -> Number
+runif :: NULL -> [Number]
+
+@path
+
+A :: max . runif
+
+@arg
+
+runif :: n=100 min=0 max=10
