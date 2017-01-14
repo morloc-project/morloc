@@ -36,10 +36,10 @@ warn(){
     fi
 }
 
-runtest(){
+frontend_test(){
     dir=$1
     msg=$2
-    cd test-cases/$dir
+    cd frontend-tests/$dir
 
     echo -n "$msg ... "
 
@@ -64,11 +64,45 @@ runtest(){
     cd - > /dev/null
 }
 
+backend_test(){
+    dir=$1
+    cmd=$2
+    msg=$3
 
-runtest elements "Manifold elements exist"
-runtest import "Basic import"
-runtest list-select "Lists expand on couplet lhs"
-runtest args "Handling of arguments"
+    cd backend-tests/$dir
+    
+    echo -n "$msg ... "
+
+    loc -o tst x.loc 2>&1 > /dev/null
+    if [[ $? == 0 ]]
+    then
+        diff <(tst/manifold-nexus.sh $cmd) <(./x) > /dev/null
+        if [[ $? == 0 ]]
+        then
+            echo OK
+            n_pass=$(( n_pass + 1 ))
+        else
+            warn FAIL
+            echo " - unexpected output"
+            n_fail=$(( n_fail + 1 ))
+        fi
+    else
+        warn FAIL
+        echo " - non-zero exit status"
+        n_fail=$(( n_fail + 1 ))
+    fi
+    
+    rm -rf tst
+    cd - > /dev/null
+}
+
+frontend_test elements "Manifold elements exist"
+frontend_test import "Basic import"
+frontend_test list-select "Lists expand on couplet lhs"
+frontend_test args "Handling of arguments"
+
+backend_test bash-simple uniq '(Bash) "uniq . sort . grep . man"'
+backend_test r-simple sqrt    '(R) "sqrt . max . seq"'
 
 
 echo
