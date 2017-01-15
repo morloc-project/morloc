@@ -1,4 +1,7 @@
-define(PROLOGUE, `#!/usr/bin/Rscript --vanilla')
+define(PROLOGUE,
+    `#!/usr/bin/Rscript --vanilla'
+    `library(readr)'
+)
 
 define(NATIVE_MANIFOLD,
     $1 <- function(){
@@ -16,7 +19,12 @@ define(UNIVERSAL_MANIFOLD,
 
 define(FOREIGN_MANIFOLD,
     $2 <- function(){
-        system("OUTDIR/call.$1 $2", intern = TRUE)
+        d <- system("OUTDIR/call.$1 $2", intern = TRUE)
+        d <- read_tsv(d)
+        if(ncol(d) == 1){
+            d <- d[[1]]
+        }
+        d
     }
 )
 
@@ -94,7 +102,12 @@ m <- args[1]
 
 if(exists(m)){
   f = get(m)
-  cat(f())
+  d <- f()
+  if(is.data.frame(d)){
+      write_tsv(d, path="/dev/stdout")
+  } else {
+      write_lines(d, path="/dev/stdout")
+  }
 } else {
   quit(status=1)
 }

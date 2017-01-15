@@ -7,7 +7,6 @@ A :: grep . `42` seq
 
 @arg
 seq :: from=1 to=100
-grep :: -o
 
 @lang
 seq :: R
