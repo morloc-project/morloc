@@ -104,6 +104,7 @@ frontend_test args          "args/         -- [+-]lhs, flags, lists ........... 
 backend_test sh-simple uniq 'sh-simple/    -- uniq . sort . grep . man ........ '
 backend_test sh-cached uniq 'sh-cached/    -- uniq . sort . grep . man ........ '
 backend_test r-simple  sqrt 'r-simple/     -- sqrt . max . seq ................ '
+backend_test r-cached  sqrt 'r-cached/     -- sqrt . max . seq ................ '
 backend_test sh-and-r  grep 'sh-and-r/     -- grep . seq ...................... '
 
 

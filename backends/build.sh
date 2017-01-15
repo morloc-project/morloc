@@ -140,14 +140,13 @@ do
         -v rules=$rules \
         -v body=$body   \
         -v dir=$outdir  \
+        -v src=$src     \
         -v L='`' -v R="'" < $red
 
     # Merge all rules and macros, expand to manifold functions
     cat $grammar $rules $body |
-        m4 $M4_FLAGS > $man
-
-    # Combine source and manifold functions into final executable
-    cat $src $man | sed '/^ *$/d;s/ *//' > $exe
+        m4 $M4_FLAGS |
+        sed '/^ *$/d;s/ *//' > $exe
 
     # Move executable to working folder and set permissions
     cp $exe $outdir/call.$lang

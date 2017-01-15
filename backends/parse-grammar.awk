@@ -42,6 +42,7 @@ $1 == "ARG" {
 END{
 
     printf "PROLOGUE " >> body
+    printf "m4_include(%s)", src >> body
 
     for(i in m){
 

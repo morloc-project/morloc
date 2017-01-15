@@ -35,8 +35,8 @@ m4_define(`RETURN', `Mb')
 
 
 m4_define(`DO_CACHE',
-    if(BASECACHE_$1``_chk''($1)){
-        BASECACHE_$1``_get''($1)
+    if(BASECACHE_$1``_chk''("$1")){
+        BASECACHE_$1``_get''("$1")
     } else {
         VALIDATE_$1
     }
@@ -54,7 +54,7 @@ m4_define(`DO_VALIDATE',
         CORE($1)
     } else {
         Mb <- FAIL_$1`()'
-        m4_dnl missing cache
+        CACHE_PUT_$1
     }
 '
 )
@@ -72,7 +72,7 @@ m4_define(`CORE',
 '
 )
 
-m4_define(`DO_CACHE_PUT', BASECACHE_$1`("$1")')
+m4_define(`DO_CACHE_PUT', BASECACHE_$1`("$1", Mb)')
 
 m4_define(`NO_CACHE_PUT', )
 
@@ -96,7 +96,7 @@ m4_define(`SIMPLE_FAIL', `return NULL')
 
 m4_define(`NO_PUT', )
 
-m4_define(`DO_PUT', `BASECACHE_$1`_put'($1)')
+m4_define(`DO_PUT', `BASECACHE_$1`_put'("$1", Mb)')
 
 m4_define(`EPILOGUE',
 
