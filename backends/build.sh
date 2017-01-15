@@ -2,6 +2,8 @@
 
 set -u
 
+M4_FLAGS="--traditional --prefix-builtins --warn-macro-sequence --hashsize 7919"
+
 make_temp_dir() {
     i=0
     while [[ -d "/tmp/loc_$i" ]]
@@ -141,7 +143,8 @@ do
         -v L='`' -v R="'" < $red
 
     # Merge all rules and macros, expand to manifold functions
-    cat $grammar $rules $body | m4 > $man
+    cat $grammar $rules $body |
+        m4 $M4_FLAGS > $man
 
     # Combine source and manifold functions into final executable
     cat $src $man | sed '/^ *$/d;s/ *//' > $exe
@@ -178,7 +181,9 @@ $build_nexus                  \
     -v lang=$lang             \
     $lil > $nexus_rules
 
-cat $nexus_grammar $nexus_rules $nexus_body | m4 | sed -n '/./,$p' > $nexus
+cat $nexus_grammar $nexus_rules $nexus_body |
+    m4 $M4_FLAGS |
+    sed -n '/./,$p' > $nexus
 chmod 755 $nexus
 
 if $execute
