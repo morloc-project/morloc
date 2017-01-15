@@ -1,0 +1,32 @@
+@comment
+
+This code is equivalent to
+
+man ls | grep -Po "[a-z]+ed" | sort | uniq
+
+@source sh
+
+ls_has_man () {
+    man ls 2> /dev/null 
+    test $? == 0
+}
+
+@import
+"core/sh/datcache.loc"
+
+@path
+A :: uniq . sort . grep . man
+
+@arg
+grep :: -Po "[a-z]+ed"
+man :: ls
+
+@lang
+uniq,sort,grep,man :: sh
+
+@cache
+sort :: datcache
+man :: datcache
+
+@check
+man :: ls_has_man

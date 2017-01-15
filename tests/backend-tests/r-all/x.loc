@@ -1,0 +1,27 @@
+@comment
+
+Same as
+
+R>  sqrt(max(seq(1,9)))
+
+@import
+"core/R/datcache.loc"
+
+@source R
+
+true <- function(){ TRUE }
+
+@path
+A :: sqrt . max . seq
+
+@arg
+seq :: from=1 to=9
+
+@lang
+sqrt,max,seq :: R
+
+@cache
+seq :: datcache
+
+@check
+sqrt :: true
