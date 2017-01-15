@@ -22,6 +22,7 @@ sqrt,max,seq :: R
 
 @cache
 seq :: datcache
+sqrt :: datcache
 
 @check
 sqrt :: true

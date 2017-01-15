@@ -1,21 +1,14 @@
 @comment
 
-The equivalent of
-
-R> max(runif(n=100, min=0, max=10))
-
-@type
-
-max :: [Number] -> Number
-runif :: NULL -> [Number]
+The Max and Min paths should get the max and min of the same random sample
 
 @path
-
-A :: max . runif
-
-@arg
-
-runif :: n=100 min=0 max=10
+Well :: runif . `10`
+Max :: max . <runif>
+Min :: min . <runif>
 
 @lang
-max,runif :: R
+max,min,runif :: R
+
+@cache
+runif :: datcache

@@ -115,6 +115,7 @@ syn match s_star     /\_\W\*\_\W/ contained
 
 syn match s_positional /`[^`]\+`/ contained
 syn match s_group /\*\w\+/ contained
+syn match s_refer /<[^>]\+>/ contained
 
 " define constants
 syn keyword s_nil NIL contained
@@ -136,7 +137,7 @@ syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_basic     contains=s_couple,s_varlabel
 syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
 syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
-syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun,s_group
+syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun,s_group,s_refer
 syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment

@@ -39,6 +39,7 @@ typedef enum {
     C_GRPREF,
     C_POSITIONAL,
     C_DEREF,
+    C_REFER,
     K_LIST,       // K for key
     K_PATH,
     K_LABEL,

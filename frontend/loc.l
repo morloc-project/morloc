@@ -11,6 +11,16 @@ FILE* toklog;
 #define LOG(x) fprintf(toklog, x); fflush(toklog);
 #define LOGV(x,a) fprintf(toklog, x, a); fflush(toklog);
 
+// Remove the first and last characters of a string
+char* unquote(const char* in_str){
+    // copy the section of the string between the quotation marks
+    int N = strlen(in_str);
+    char* s = (char*)calloc((N-1), sizeof(char));
+    memcpy(s, yytext+1, (N-2)*sizeof(char));
+    s[N-2] = '\0';
+    return s;
+}
+
 %}
 
 %option header-file="lex.yy.h"
@@ -44,6 +54,7 @@ flag [-][a-zA-Z0-9_.-]+
 
 grpref     \*{var}
 positional `[^`]+`
+refer      <[^<]+>
 
 str \'[^']*\'|\"[^"]*\"
 int [0-9]|[1-9][0-9]+
@@ -164,14 +175,19 @@ couple ::
     return COMPOSON;
 }
 <S_PATH>{positional} {
-    // copy the section of the string between the quotation marks
-    int N = strlen(yytext);
-    char* s = (char*)calloc((N-1), sizeof(char));
-    memcpy(s, yytext+1, (N-2)*sizeof(char));
-    s[N-2] = '\0';
-    W* w = w_new(C_POSITIONAL, s);
+    W* w = w_new(C_POSITIONAL, unquote(yytext));
     yylval.COMPOSON = w;
     LOG("C_POSITIONAL");
+    return COMPOSON;
+}
+<S_PATH>{refer} {
+    Manifold* m = manifold_new();
+    W* l = label_from_str(unquote(yytext));
+    W* r = w_new(P_MANIFOLD, m);
+    Couplet* c = couplet_new(l, r); 
+    W* wc = w_new(C_REFER, c);
+    LOG("C_REFER");
+    yylval.COMPOSON = wc;
     return COMPOSON;
 }
 
