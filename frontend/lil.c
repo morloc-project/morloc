@@ -55,6 +55,10 @@ Ws* _manifold_to_lil(W* cm){
 
     lil = _three(lil, "FUNC", _mid(m), m->function);
 
+    if(m->type){
+        lil = _three(lil, "TYPE", _mid(m), g_string(m->type->last));
+    }
+
     if(m->inputs){
         int i = 0;
         for(W* w = m->inputs->head; w; w = w->next){

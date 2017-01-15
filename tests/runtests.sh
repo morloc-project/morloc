@@ -41,7 +41,7 @@ frontend_test(){
     msg=$2
     cd frontend-tests/$dir
 
-    echo -n "$msg ... "
+    echo -n "$msg"
 
     $loc x.loc 2>&1 > /dev/null
     if [[ $? == 0 ]]
@@ -71,7 +71,7 @@ backend_test(){
 
     cd backend-tests/$dir
     
-    echo -n "$msg ... "
+    echo -n "$msg"
 
     loc -o tst x.loc 2>&1 > /dev/null
     if [[ $? == 0 ]]
@@ -96,14 +96,14 @@ backend_test(){
     cd - > /dev/null
 }
 
-frontend_test elements "Manifold elements exist"
-frontend_test import "Basic import"
-frontend_test list-select "Lists expand on couplet lhs"
-frontend_test args "Handling of arguments"
+frontend_test elements      "elements/     -- basic manifold elements exist ... "
+frontend_test import        "import/       -- can import files ................ "
+frontend_test list-select   "list-select/  -- lists expand on couplet lhs ..... "
+frontend_test args          "args/         -- [+-]lhs, flags, lists ........... "
 
-backend_test sh-simple uniq '(sh) "uniq . sort . grep . man"'
-backend_test r-simple sqrt '(R) "sqrt . max . seq"'
-backend_test sh-and-r grep '(sh,R) "grep . seq"'
+backend_test sh-simple uniq 'sh-simple/    -- uniq . sort . grep . man ........ '
+backend_test r-simple  sqrt 'r-simple/     -- sqrt . max . seq ................ '
+backend_test sh-and-r  grep 'sh-and-r/     -- grep . seq ...................... '
 
 
 echo

@@ -20,6 +20,7 @@ define(UNIVERSAL_MANIFOLD,
 define(FOREIGN_MANIFOLD,
     $2 <- function(){
         d <- system("OUTDIR/call.$1 $2", intern = TRUE)
+        READ(TYPE_$2)
         d <- read_tsv(d)
         if(ncol(d) == 1){
             d <- d[[1]]
@@ -27,6 +28,8 @@ define(FOREIGN_MANIFOLD,
         d
     }
 )
+
+define(READ, )
 
 define(RETURN, `Mb')
 
