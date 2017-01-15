@@ -1,4 +1,4 @@
-@source bash
+@source sh
 
 # String -> Bool
 datcache_chk() {

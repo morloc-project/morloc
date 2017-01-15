@@ -4,13 +4,13 @@ BEGIN {
 
     FS="\t"
 
-    seps["bash"] = " "    
+    seps["sh"] = " "    
     seps["R"] = ", "
 
-    binds["bash"] = " "
+    binds["sh"] = " "
     binds["R"] = "="
 
-    ands["bash"] = "&&"
+    ands["sh"] = "&&"
     ands["R"] = "&&"
 
     printf("define(SEP, `%s')\n", seps[lang])   >> rules

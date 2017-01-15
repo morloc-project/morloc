@@ -12,4 +12,4 @@ grep :: -Po "[a-z]+ed"
 man :: ls
 
 @lang
-uniq,sort,grep,man :: bash
+uniq,sort,grep,man :: sh

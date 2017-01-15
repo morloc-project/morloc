@@ -101,7 +101,7 @@ frontend_test import "Basic import"
 frontend_test list-select "Lists expand on couplet lhs"
 frontend_test args "Handling of arguments"
 
-backend_test bash-simple uniq '(Bash) "uniq . sort . grep . man"'
+backend_test sh-simple uniq '(sh) "uniq . sort . grep . man"'
 backend_test r-simple sqrt    '(R) "sqrt . max . seq"'
 
 
