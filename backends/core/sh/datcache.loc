@@ -12,6 +12,6 @@ datcache_get() {
 
 # Text -> Text
 datcache_put() {
-    tee > cache/$1.dat
+    tee cache/$1.dat
 }
 

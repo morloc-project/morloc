@@ -38,6 +38,7 @@ function_exists() {
 
 if function_exists MANGLE($1)
 then
+    cd OUTDIR
     MANGLE($1)
 else
     exit 1

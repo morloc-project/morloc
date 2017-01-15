@@ -19,16 +19,16 @@ m4_define(`UNIVERSAL_MANIFOLD',
 
 m4_define(`FOREIGN_MANIFOLD',
     $2(){
-        OUTDIR/call.$1 $2
+        ./call.$1 $2
     }
 )
 
 m4_define(`RETURN', )
 
 m4_define(`DO_CACHE',
-    if BASECACHE_$1`_chk' $1
+    if BASECACHE_$1``_chk'' $1
     then
-        BASECACHE_$1`_get' $1
+        BASECACHE_$1``_get'' $1
     else
         VALIDATE_$1
     fi
@@ -56,26 +56,19 @@ m4_define(`NO_VALIDATE', CORE($1))
 
 m4_define(`CHECK', $1)
 
-m4_define(`CORE',
-    RUN_$1
-    EFFECT_$1
-    PACK_$1
-    CACHE_PUT_$1
-)
+m4_define(`CORE', RUN_$1 EFFECT_$1 PACK_$1 CACHE_PUT_$1)
+
 m4_define(`DO_PACK', PACKFUN_$1)
+
 m4_define(`NO_PACK', )
 
-m4_define(`DO_PASS',
-    PASS_$1 FUNC_$1 ARG_$1 INPUT_$1
-)
+m4_define(`DO_PASS', PASS_$1 FUNC_$1 ARG_$1 INPUT_$1)
 
-m4_define(`NO_PASS',
-    FUNC_$1 ARG_$1 INPUT_$1
-)
+m4_define(`NO_PASS', FUNC_$1 ARG_$1 INPUT_$1)
 
 m4_define(`CALL', <($1) )
 
-m4_define(`EFFECT', `| tee >(NULL($1))\n')
+m4_define(`EFFECT', `| tee >(NULL($1))')
 
 m4_define(`HOOK', `| NULL($1)')
 
@@ -83,7 +76,7 @@ m4_define(`NULL', `$1 > /dev/null')
 
 m4_define(`NO_PUT', )
 
-m4_define(`DO_PUT', `| BASECACHE_$1`_put' $1')
+m4_define(`DO_PUT', `| BASECACHE_$1``_put'' $1')
 
 m4_define(`EPILOGUE',
 `

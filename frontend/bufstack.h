@@ -3,6 +3,10 @@
 
 #include "lex.yy.h"
 
+#include <unistd.h>
+#include <sys/types.h>
+#include <pwd.h>
+
 /* My buffer stack handling code draws heavily from: */
 /* John Levine (2009) 'Flex and Bison'               */
 typedef struct bufstack{

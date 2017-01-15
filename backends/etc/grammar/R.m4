@@ -19,7 +19,7 @@ m4_define(`UNIVERSAL_MANIFOLD',
 
 m4_define(`FOREIGN_MANIFOLD',
     $2 <- function(){
-        d <- system("OUTDIR/call.$1 $2", intern = TRUE)
+        d <- system("./call.$1 $2", intern = TRUE)
         READ(TYPE_$2)
         d <- read_tsv(d)
         if(ncol(d) == 1){
@@ -35,8 +35,8 @@ m4_define(`RETURN', `Mb')
 
 
 m4_define(`DO_CACHE',
-    if`(BASECACHE_$1`_chk'($1))'{
-        BASECACHE_$1`_get'($1)
+    if(BASECACHE_$1``_chk''($1)){
+        BASECACHE_$1``_get''($1)
     } else {
         VALIDATE_$1
     }

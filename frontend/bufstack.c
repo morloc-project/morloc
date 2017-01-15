@@ -8,14 +8,20 @@ bufstack *current_bs = NULL;
 
 int newfile(char* fn){
     FILE *f = fopen(fn, "r");
+
+    char* home = getenv("HOME");
+
     if(f == NULL){
-        char* libfn = (char*)malloc(strlen(fn) + 12 * sizeof(char));
-        sprintf(libfn, "%s/%s", "~/.loc/lib", fn);
+        char* lib = ".loc/lib";
+        int size = strlen(fn) + strlen(home) + strlen(lib) + 3;
+        char* libfn = (char*)malloc(size * sizeof(char));
+        sprintf(libfn, "%s/%s/%s", home, lib, fn);
         f = fopen(libfn, "r");
         if(f == NULL){
-            fprintf(stderr, "Could not find '%s'\n", fn);
-            return 0;
+            fprintf(stderr, "Could not find '%s'\n", libfn);
+            return 1;
         }
+        free(libfn);
     }
 
     struct bufstack *bs = malloc(sizeof(struct bufstack));

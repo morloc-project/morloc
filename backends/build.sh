@@ -176,7 +176,7 @@ nexus_rules=$tmp/nexus_rules
 nexus_body=$HOME/.loc/etc/nexus.sh
 build_nexus=$HOME/.loc/bin/build-nexus.awk
 $build_nexus                  \
-    -v dir=$outdir            \
+    -v dir=$PWD/$outdir       \
     -v name=`basename $nexus` \
     -v lang=$lang             \
     $lil > $nexus_rules
