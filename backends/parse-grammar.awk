@@ -4,6 +4,8 @@ BEGIN {
 
     FS="\t"
 
+    printf("define(OUTDIR, %s)", dir) >> rules
+
     seps["sh"] = " "    
     seps["R"] = ", "
 

@@ -18,8 +18,8 @@ define(UNIVERSAL_MANIFOLD,
 )
 
 define(FOREIGN_MANIFOLD,
-    $1(){
-        call.$2 $1
+    $2(){
+        OUTDIR/call.$1 $2
     }
 )
 

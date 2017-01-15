@@ -133,7 +133,12 @@ do
     ' $lil
 
     # Build macros and rules
-    $parse -v lang=$lang -v rules=$rules -v body=$body -v L='`' -v R="'" < $red
+    $parse              \
+        -v lang=$lang   \
+        -v rules=$rules \
+        -v body=$body   \
+        -v dir=$outdir  \
+        -v L='`' -v R="'" < $red
 
     # Merge all rules and macros, expand to manifold functions
     cat $grammar $rules $body | m4 > $man

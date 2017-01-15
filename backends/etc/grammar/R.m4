@@ -15,8 +15,8 @@ define(UNIVERSAL_MANIFOLD,
 )
 
 define(FOREIGN_MANIFOLD,
-    $1 <- function(){
-        system("call.$2 $1", intern = TRUE)
+    $2 <- function(){
+        system("OUTDIR/call.$1 $2", intern = TRUE)
     }
 )
 

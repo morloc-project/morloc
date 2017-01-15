@@ -102,7 +102,8 @@ frontend_test list-select "Lists expand on couplet lhs"
 frontend_test args "Handling of arguments"
 
 backend_test sh-simple uniq '(sh) "uniq . sort . grep . man"'
-backend_test r-simple sqrt    '(R) "sqrt . max . seq"'
+backend_test r-simple sqrt '(R) "sqrt . max . seq"'
+backend_test sh-and-r grep '(sh,R) "grep . seq"'
 
 
 echo
