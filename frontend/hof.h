@@ -44,6 +44,14 @@ void ws_prmod(
     W*(*nextval)(W*, W*)
 );
 
+void ws_modcrawl(
+    Ws* ws,
+    W* p,
+    Ws*(*recurse)(W*),
+    bool(*criterion)(W*, W*),
+    void(*mod)(W*, W*)
+);
+
 void ws_recursive_reduce_mod(
     Ws* ws,
     Ws*(*recurse)(W*),
@@ -111,6 +119,13 @@ W* ws_scrap(
     Ws*(*recurse)(W*),
     bool(*criterion)(W*),
     W*(*mod)(W* w, W* st)
+);
+
+void ws_cap(
+    Ws* ws,
+    W* m,
+    bool(*criterion)(W*, W*),
+    void(*mod)(W* w, W* m)
 );
 
 void ws_filter_mod(

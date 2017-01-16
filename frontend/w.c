@@ -6,7 +6,6 @@ VType get_value_type(Class cls){
         case C_COMPOSON:
         case C_NEST:
         case C_DEREF:
-        case C_REFER:
         case K_LIST:
         case K_PATH:
         case P_WS:
@@ -31,6 +30,7 @@ VType get_value_type(Class cls){
         case T_DOC:
         case T_CACHE:
         case C_MANIFOLD:
+        case C_REFER:
         case P_COUPLET:
         case T_SOURCE:
         case T_ARGUMENT:
@@ -144,6 +144,7 @@ char* w_class_str(Class cls){
         case P_STRING:     s = strdup("P_STRING")     ; break;
         case K_NAME:       s = strdup("K_NAME")       ; break;
         case T_PATH:       s = strdup("T_PATH")       ; break;
+        case T_LANG:       s = strdup("T_LANG")       ; break;
         case T_EFFECT:     s = strdup("T_EFFECT")     ; break;
         case T_HOOK:       s = strdup("T_HOOK")       ; break;
         case T_CHECK:      s = strdup("T_CHECK")      ; break;

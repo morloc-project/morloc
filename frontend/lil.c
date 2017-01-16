@@ -63,6 +63,7 @@ Ws* _manifold_to_lil(W* cm){
         int i = 0;
         for(W* w = m->inputs->head; w; w = w->next){
             switch(w->cls){
+                case C_REFER:
                 case C_MANIFOLD:
                     lil = _four(
                         lil,

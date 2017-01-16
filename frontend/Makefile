@@ -12,23 +12,23 @@ H_LEXER=lex.yy.h
 C_PARSER=${TARGET}.tab.c
 H_PARSER=${TARGET}.tab.h
 
-FILES =         \
-	${C_LEXER}  \
-	${C_PARSER} \
-	bufstack.c  \
-	lhs.c       \
-	ws.c        \
-	w.c         \
-	hof.c       \
-	label.c     \
-	couplet.c   \
-	manifold.c  \
-	build.c     \
-	build_grp.c \
-	build_io.c  \
-	build_mod.c \
-	type.c      \
-	ws_access.c \
+FILES =          \
+	${C_LEXER}   \
+	${C_PARSER}  \
+	bufstack.c   \
+	lhs.c        \
+	ws.c         \
+	w.c          \
+	hof.c        \
+	label.c      \
+	couplet.c    \
+	manifold.c   \
+	build.c      \
+	build_path.c \
+	build_io.c   \
+	build_mod.c  \
+	type.c       \
+	ws_access.c  \
 	lil.c
 
 all:

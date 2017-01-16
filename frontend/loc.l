@@ -181,7 +181,7 @@ couple ::
     return COMPOSON;
 }
 <S_PATH>{refer} {
-    Manifold* m = manifold_new();
+    Manifold* m = NULL;
     W* l = label_from_str(unquote(yytext));
     W* r = w_new(P_MANIFOLD, m);
     Couplet* c = couplet_new(l, r); 

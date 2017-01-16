@@ -51,6 +51,26 @@ Ws* ws_prfilter(
     return result;
 }
 
+void ws_modcrawl(
+    Ws* ws,
+    W* p,
+    Ws*(*recurse)(W*),
+    bool(*criterion)(W*, W*),
+    void(*mod)(W*, W*)
+){
+    if(!ws || !ws->head) return;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w, p)){
+            mod(w, p);
+        }
+        Ws* rs = recurse(w); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            ws_modcrawl(g_ws(r), p, recurse, criterion, mod);
+        }
+    }
+}
+
 void ws_prmod(
     Ws* ws,
     W* p,
@@ -131,6 +151,18 @@ void ws_rcmod(
         }
     }
 }
+void ws_cmod(
+    Ws* ws,
+    bool(*criterion)(W*),
+    void(*mod)(W*)
+){
+    if(!ws || !ws->head) return;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w)){
+            mod(w);
+        }
+    }
+}
 
 W* ws_scrap(
     Ws* ws,
@@ -151,6 +183,20 @@ W* ws_scrap(
         }
     }
     return st;
+}
+
+void ws_cap(
+    Ws* ws,
+    W* m,
+    bool(*criterion)(W*, W*),
+    void(*mod)(W* w, W* m)
+){
+    if(!ws || !ws->head) return;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w, m)){
+            mod(w, m);
+        }
+    }
 }
 
 void ws_map_pmod(Ws* xs, Ws* ps, void(*pmod)(Ws*, W*)){

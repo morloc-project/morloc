@@ -13,8 +13,20 @@ Ws* get_manifolds(Ws* ws){
     return ws_rfilter(ws, ws_recurse_most, w_is_manifold);
 }
 
+Ws* get_refers(Ws* ws){
+    return ws_rfilter(ws, ws_recurse_most, w_is_refer);
+}
+
 Ws* get_tpaths(Ws* ws){
     return ws_rfilter(ws, ws_recurse_none, w_is_tpath);
+}
+
+bool w_is_grpref(W* w){
+    return  w ? w->cls == C_GRPREF : false;
+}
+
+bool w_is_refer(W* w){
+    return  w ? w->cls == C_REFER : false;
 }
 
 bool w_is_tpath(W* w){
@@ -188,7 +200,7 @@ Label* _ws_get_label_from_lhs(W* a){
     return label;
 }
 
-bool ws_cmp_lhs(W* a, W* b){
+bool w_equal_lhs(W* a, W* b){
 
     Label* a_label = _ws_get_label_from_lhs(g_lhs(a));
     Label* b_label = _ws_get_label_from_lhs(g_lhs(b));
@@ -205,7 +217,7 @@ Ws* ws_recurse_path(W* w, W* p){
             return g_ws(w);
         case T_PATH:
             return
-                ws_length(g_ws(g_lhs(p))) == 1 || ws_cmp_lhs(w, p) ?
+                ws_length(g_ws(g_lhs(p))) == 1 || w_equal_lhs(w, p) ?
                 g_ws(g_rhs(w)) : NULL;
         default:
             return NULL;

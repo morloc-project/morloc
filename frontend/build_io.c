@@ -48,6 +48,7 @@ bool _is_emmisive(W* w){
         case C_MANIFOLD:
         case C_POSITIONAL:
         case C_DEREF:
+        case C_REFER:
             return true;
         default:
             return false;

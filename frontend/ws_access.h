@@ -8,6 +8,7 @@
 Ws* ws_flatten(Ws*, Ws*(*recurse)(W*));
 
 Ws* get_manifolds(Ws* ws);
+Ws* get_refers(Ws* ws);
 
 // Get top-level paths, (e.g. the 'A' in `A :: f . g`, which is a list
 // containing f and g)
@@ -16,9 +17,12 @@ Ws* get_tpaths(Ws* ws);
 W* get_by_name(Ws* ws, W* w);
 
 bool w_is_manifold(W*);
+bool w_is_grpref(W*);
+bool w_is_refer(W*);
 bool w_is_tpath(W*);
 bool w_is_type(W*);
 bool w_is_composon(W*);
+bool w_equal_lhs(W* a, W* b);
 
 /* Turns one couplet into a list of couplets, each with a single path (lhs). */
 Ws* ws_split_couplet(W*);
