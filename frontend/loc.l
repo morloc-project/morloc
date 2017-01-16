@@ -8,18 +8,31 @@ int newfile(char *fn);
 int popfile(void);
 
 FILE* toklog;
+
 #define LOG(x) fprintf(toklog, x); fflush(toklog);
 #define LOGV(x,a) fprintf(toklog, x, a); fflush(toklog);
 
-// Remove the first and last characters of a string
-char* unquote(const char* in_str){
-    // copy the section of the string between the quotation marks
-    int N = strlen(in_str);
-    char* s = (char*)calloc((N-1), sizeof(char));
-    memcpy(s, yytext+1, (N-2)*sizeof(char));
-    s[N-2] = '\0';
-    return s;
-}
+#define RETURN(x, t) \
+    LOG(#t " ");     \
+    yylval.t = x;    \
+    return t;
+
+#define RETURN_TOKEN(t) \
+    LOG(#t " ");        \
+    return t;
+    
+
+// Removes first and last characters around a string
+char* unquote(const char* in_str);
+// Removes leading whitespace and trailing whitspace and c in in_str
+// For example, `trim_back("x ::", ":") --> "x"`
+char* trim_back(const char* in_str, const char* c);
+// Same as `trim_back(x, "")`
+char* trim(const char* in_str);
+// Same as `trim_back(x, ":")`
+char* trim_couple(const char* in_str);
+// After trimming, it is often necessary to put characters back into the buffer:
+#define UNPUT(x) for(int i = strlen(x)-1; i >= 0; i--){ unput(x[i]); }
 
 %}
 
@@ -68,48 +81,38 @@ couple ::
 
 {comment} { }
 
-@comment { LOG( "SECTION_COMMENT" ); BEGIN(X_COMMENT); }
-@import  { LOG( "SECTION_IMPORT" ); BEGIN(S_IMPORT); }
+@comment {  BEGIN(X_COMMENT); }
+@import  {  BEGIN(S_IMPORT); }
 
-@source { LOG( "SECTION_SOURCE" ); BEGIN(S_LANG); return SECTION_SOURCE ; }
-
-@path   { LOG( "SECTION_PATH"   ) ; BEGIN(S_PATH) ; return SECTION_PATH   ; }
-
-@type     { LOG( "SECTION_TYPE"     ) ; BEGIN(S_TYPE)     ; return SECTION_TYPE       ; }
-@ontology { LOG( "SECTION_ONTOLOGY" ) ; BEGIN(S_ONTOLOGY) ; return SECTION_ONTOLOGY   ; }
-
-@effect { LOG( "SECTION_EFFECT" ) ; BEGIN(S_CPLT) ; return SECTION_EFFECT ; }
-@hook   { LOG( "SECTION_HOOK"   ) ; BEGIN(S_CPLT) ; return SECTION_HOOK   ; }
-@cache  { LOG( "SECTION_CACHE"  ) ; BEGIN(S_CPLT) ; return SECTION_CACHE  ; }
-@check  { LOG( "SECTION_CHECK"  ) ; BEGIN(S_CPLT) ; return SECTION_CHECK  ; }
-@open   { LOG( "SECTION_OPEN"   ) ; BEGIN(S_CPLT) ; return SECTION_OPEN   ; }
-@pack   { LOG( "SECTION_PACK"   ) ; BEGIN(S_CPLT) ; return SECTION_PACK   ; }
-@pass   { LOG( "SECTION_PASS"   ) ; BEGIN(S_CPLT) ; return SECTION_PASS   ; }
-@fail   { LOG( "SECTION_FAIL"   ) ; BEGIN(S_CPLT) ; return SECTION_FAIL   ; }
-@alias  { LOG( "SECTION_ALIAS"  ) ; BEGIN(S_CPLT) ; return SECTION_ALIAS  ; }
-@lang   { LOG( "SECTION_LANG"   ) ; BEGIN(S_CPLT) ; return SECTION_LANG   ; }
-@doc    { LOG( "SECTION_DOC"    ) ; BEGIN(S_CPLT) ; return SECTION_DOC    ; }
-@arg    { LOG( "SECTION_ARG"    ) ; BEGIN(S_ARG)  ; return SECTION_ARG    ; }
-
-@export { LOG( "SECTION_EXPORT" ); BEGIN(S_EXPORT); return SECTION_EXPORT; }
+@source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
+@path     { BEGIN(S_PATH)     ; RETURN_TOKEN ( SECTION_PATH     ) ; }
+@effect   { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
+@hook     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_HOOK     ) ; }
+@check    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
+@type     { BEGIN(S_TYPE)     ; RETURN_TOKEN ( SECTION_TYPE     ) ; }
+@ontology { BEGIN(S_ONTOLOGY) ; RETURN_TOKEN ( SECTION_ONTOLOGY ) ; }
+@cache    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CACHE    ) ; }
+@open     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_OPEN     ) ; }
+@pack     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PACK     ) ; }
+@pass     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PASS     ) ; }
+@fail     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_FAIL     ) ; }
+@alias    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_ALIAS    ) ; }
+@lang     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_LANG     ) ; }
+@doc      { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_DOC      ) ; }
+@arg      { BEGIN(S_ARG)      ; RETURN_TOKEN ( SECTION_ARG      ) ; }
+@export   { BEGIN(S_EXPORT)   ; RETURN_TOKEN ( SECTION_EXPORT   ) ; }
 
 {ws} { LOGV("%s", yytext); }
 
 <S_LANG>[ ]+{var} {
-    LOG(" LANG");
     BEGIN X_SOURCE;
-    while(isspace(yytext[0])) yytext++;
-    W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STR = w;
-    return STR;
+    W* w = w_new(P_STRING, trim(yytext));
+    RETURN(w, STR);
   }
 <X_SOURCE>^[ \t]*([^\n@].*)?\n {
-    char* s = strdup(yytext);
-    LOGV("%s", s);
-    s[strlen(s)-1] = '\0'; /* trim the newline */ 
+    char* s = trim(yytext);
     W* w = w_new(P_STRING, s);
-    yylval.STR = w;
-    return STR;
+    RETURN(w, STR);
 }
 <X_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
 
@@ -118,42 +121,25 @@ couple ::
 <X_COMMENT>(.|\n) { /* toss bodies */ }
 <X_COMMENT>\\@    { /* allow escaped @ */ }
 
-<S_EXPORT>as { LOG("AS"); return AS; }
+<S_EXPORT>as { RETURN_TOKEN(AS); }
 <S_EXPORT>{var} {
-    LOGV("STRING(%s)", yytext);
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STR = w;
-    return STR;
+    RETURN(w, STR);
 }
 
 <S_IMPORT>{str} {
-    char* s = strdup(yytext);
-    s++;
-    s[strlen(s)-1]='\0';
+    char* s = unquote(yytext);
     LOGV("importing(%s)\n", s);
     if(!newfile(s)) yyterminate();
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-<S_PATH,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { LOG("COUPLE"); return COUPLE; }
+<S_PATH,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
 
 <S_PATH>{identifier} {
-    char* s = strdup(yytext);
-    int i = 0;
-    for(;;i++){
-        char c = s[i];
-        if(isspace(c) || c == ':')
-            break;
-    }
-    for(int j = strlen(s) - 1; j >= i ; j--){
-        unput(s[j]);
-    }
-    s[i] = '\0';
-    W* w = label_from_str(s);
-    LOGV("IDENTIFIER(%s,", w->value.label->name);
-    LOGV("%s) ", w->value.label->label);
-    yylval.IDENTIFIER = w;
-    return IDENTIFIER;
+    W* w = label_from_str(trim_couple(yytext));
+    UNPUT("::")
+    RETURN(w, IDENTIFIER);
 }
 
 
@@ -163,22 +149,16 @@ couple ::
     W* r = w_new(P_MANIFOLD, m);
     Couplet* c = couplet_new(l, r); 
     W* wc = w_new(C_MANIFOLD, c);
-    LOG("C_MANIFOLD");
-    yylval.COMPOSON = wc;
-    return COMPOSON;
+    RETURN(wc, COMPOSON);
 }
 <S_PATH>{grpref} {
     char* s = strdup(yytext + 1);
     W* w = w_new(C_GRPREF, s);
-    yylval.COMPOSON = w;
-    LOG("C_GRPREF");
-    return COMPOSON;
+    RETURN(w, COMPOSON);
 }
 <S_PATH>{positional} {
     W* w = w_new(C_POSITIONAL, unquote(yytext));
-    yylval.COMPOSON = w;
-    LOG("C_POSITIONAL");
-    return COMPOSON;
+    RETURN(w, COMPOSON);
 }
 <S_PATH>{refer} {
     Manifold* m = NULL;
@@ -186,88 +166,50 @@ couple ::
     W* r = w_new(P_MANIFOLD, m);
     Couplet* c = couplet_new(l, r); 
     W* wc = w_new(C_REFER, c);
-    LOG("C_REFER");
-    yylval.COMPOSON = wc;
-    return COMPOSON;
+    RETURN(wc, COMPOSON);
 }
 
 
 <S_CPLT,S_ARG>{selection} {
-    char* s = strdup(yytext);
-    int N = strlen(s);
-    int i = N - 1;
-    for(;;i--){
-        char c = s[i];
-        if(!(isspace(c) || c == ':'))
-            break;
-    }
-    for(int j = N - 1; j > i ; j--){
-        unput(s[j]);
-    }
-    s[i+1] = '\0';
-
-    W* w = list_from_str(s);
-    yylval.SELECTION = w;
-    LOG("SELECTION");
-    return SELECTION;
+    W* w = list_from_str(trim_couple(yytext));
+    UNPUT("::")
+    RETURN(w, SELECTION);
 }
 
 <S_CPLT,S_PATH>{var} {
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.VARIABLE = w;
-    LOGV("VARIABLE:%s", yytext);
-    return VARIABLE;
+    RETURN(w, VARIABLE);
 }
 
 <S_CPLT>{str} {
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.STR = w;
-    LOGV("STRING:%s", yytext);
-    return STR;
+    RETURN(w, STR);
 }
 
 <S_ARG>{parameter} {
-    char* s = strdup(yytext);
-    unput('=');
-    for(int i = 0; i < strlen(s); i++){
-        s[i] = (isspace(s[i]) || s[i] == '=') ? '\0' : s[i];
-    }
-    W* w = w_new(P_STRING, s);
-    yylval.NAME = w;
-    LOG("PARAMETER");
-    return NAME;
+    W* w = w_new(P_STRING, trim_back(yytext, "="));
+    UNPUT("= ");
+    RETURN(w, NAME);
 }
 <S_ARG>{int}|{dbl}|{lgc}|{sym}|{str}|{flag} {
     W* w = w_new(P_STRING, strdup(yytext));
-    LOG("PRIMITIVE");
-    yylval.PRIMITIVE = w;
-    return PRIMITIVE;
+    RETURN(w, PRIMITIVE);
 }
 
 <S_TYPE,S_ONTOLOGY>{sym}{ws}*:: {
-    char* s = strdup(yytext);
-    unput(':');unput(':');
-    for(int i = 0; i < strlen(s); i++){
-        s[i] = (isspace(s[i]) || s[i] == ':') ? '\0' : s[i];
-    }
-    W* w = w_new(P_STRING, s);
-    yylval.NAME = w;
-    LOG("NAME");
-    return NAME;
+    W* w = w_new(P_STRING, trim_couple(yytext));
+    UNPUT("::")
+    RETURN(w, NAME);
 }
 <S_TYPE>{type} {
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.TYPE = w;
-    LOGV("TYPE:%s", yytext);
-    return TYPE;
+    RETURN(w, TYPE);
 }
-<S_TYPE>-> { LOG("->"); return ARROW; }
+<S_TYPE>-> { RETURN_TOKEN(ARROW); }
 
 <S_ONTOLOGY>{sym} {
     W* w = w_new(P_STRING, strdup(yytext));
-    yylval.OTYPE = w;
-    LOGV("OTYPE:%s", yytext);
-    return OTYPE;
+    RETURN(w, OTYPE);
 }
 
 
@@ -277,13 +219,53 @@ couple ::
 
 #include "bufstack.h"
 
+// Remove the first and last characters of a string
+char* unquote(const char* in_str){
+    // copy the section of the string between the quotation marks
+    int N = strlen(in_str);
+    char* s = (char*)calloc((N-1), sizeof(char));
+    memcpy(s, in_str+1, (N-2)*sizeof(char));
+    s[N-2] = '\0';
+    return s;
+}
+
+char* trim_back(const char* in_str, const char* c) {
+    char* s = strdup(in_str);
+    int k = strlen(c);
+    while(isspace(s[0])) s++;
+    for(int i = strlen(s)-1; i >= 0; i--){
+        if(isspace(s[i])){
+            s[i] = '\0';
+            continue;
+        }
+        for(int j = 0; j < k; j++){
+            if(s[i] == c[j]){
+                s[i] = '\0';
+                goto keep_going;
+            }
+        }
+        break;
+        keep_going:;
+    }
+    return s;
+}
+
+char* trim(const char* in_str) {
+    return trim_back(in_str, "");
+}
+
+char* trim_couple(const char* in_str) {
+    return trim_back(in_str, ":");
+}
+
+
 void print_usage_and_exit(int exit_status){
     fprintf(stderr,
 "LOC compiler\n"
 "Usage: loc [options] myfile.loc\n"
 "Arguments:\n"
 "  -c  run the typechecker on manifolds\n"
-"  -t  print tokens to a token file (tok.log)\n"
+"  -t  print tokens\n"
 "  -h  print this help message and exit\n"
 "  -l  suppress normal LIL output\n"
 "  -d  recursively dump symbol table\n"
@@ -291,12 +273,11 @@ void print_usage_and_exit(int exit_status){
     exit(exit_status);
 }
 
-
 int main(int argc, char ** argv){
 
     // === flags ====================================================
     bool run_typechecker = false; // type check the manifolds
-    bool log_tokens = false;      // write tokens to 'tok.log'
+    bool log_tokens = false;      // print tokens
     bool suppress_lil = false;    // don't print LIL
     bool dump_table = false;      // recursively dump symbol table
     // --------------------------------------------------------------

@@ -84,7 +84,12 @@ backend_test(){
     loc -o tst x.loc 2>&1 > /dev/null
     if [[ $? == 0 ]]
     then
-        diff <(tst/manifold-nexus.sh $cmd) <(./x) > /dev/null
+        obs=/tmp/obs_$RANDOM
+        exp=/tmp/exp_$RANDOM
+        tst/manifold-nexus.sh $cmd > $obs
+        ./x > $exp
+
+        diff $obs $exp > /dev/null
         if [[ $? == 0 ]]
         then
             echo OK
@@ -94,6 +99,7 @@ backend_test(){
             echo " - unexpected output"
             n_fail=$(( n_fail + 1 ))
         fi
+        rm $obs $exp
     else
         warn FAIL
         echo " - non-zero exit status"

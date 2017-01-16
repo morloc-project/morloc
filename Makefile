@@ -3,19 +3,6 @@ TARGET=loc
 all:
 	cd frontend && ${MAKE}
 
-# personal kludge
-.PHONY: asdf
-asdf:
-	${MAKE} install
-	loc -o zzz current.loc
-
-
-.PHONY: clean
-clean:
-	rm -f ${TARGET}
-	cd frontend && ${MAKE} clean
-	cd backends && ${MAKE} clean
-
 .PHONY: install
 install:
 	mkdir -p ~/.loc/bin
@@ -28,3 +15,13 @@ install:
 	cp -rf backends/etc ~/.loc
 	test -d ~/bin || mkdir ~/bin
 	cp backends/build.sh ~/bin/loc
+
+.PHONY: test
+test:
+	cd tests && ./runtests.sh
+
+.PHONY: clean
+clean:
+	rm -f ${TARGET}
+	cd frontend && ${MAKE} clean
+	cd backends && ${MAKE} clean

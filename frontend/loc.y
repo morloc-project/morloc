@@ -325,5 +325,5 @@ list
 %%
 
 void yyerror(char const *s){
-    fprintf(stderr, "Oh no Mr. Wizard! %s\n", s);
+    fprintf(stderr, "ERROR: %s\n", s);
 }
