@@ -1,0 +1,21 @@
+@source sh
+
+random () {
+    echo $RANDOM
+}
+
+@import
+"core/sh/datcache.loc"
+
+@path
+R :: random
+
+# These both give the same output, since <random> is one-line long
+A :: head . <random>
+B :: tail . <random>
+
+@lang
+cat,random :: sh
+
+@cache
+random :: datcache

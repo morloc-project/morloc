@@ -1,0 +1,20 @@
+@comment
+
+The Max and Min paths should get the max and min of the same random sample
+
+@import
+"core/R/datcache.loc"
+
+@path
+Well :: runif . `1`
+Max :: max . <runif>
+Min :: min . <runif>
+
+# # in this context, the above is identical to:
+# max min . runif . `10`
+
+@lang
+max,min,runif :: R
+
+@cache
+runif :: datcache

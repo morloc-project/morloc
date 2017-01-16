@@ -36,7 +36,7 @@ m4_define(`RETURN', `Mb')
 
 m4_define(`DO_CACHE',
     if(BASECACHE_$1``_chk''("$1")){
-        BASECACHE_$1``_get''("$1")
+        Mb = BASECACHE_$1``_get''("$1")
     } else {
         VALIDATE_$1
     }

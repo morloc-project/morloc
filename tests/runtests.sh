@@ -28,6 +28,14 @@ n_fail=0
 n_pass=0
 loc=~/.loc/bin/loc
 
+announce(){
+    if [[ $quiet -eq 0 ]]
+    then
+        [[ -t 1 ]] && o="\e[1;33m$1\e[0m" || o=$1
+        echo -e $o
+    fi
+}
+
 warn(){
     if [[ $quiet -eq 0 ]]
     then
@@ -96,18 +104,26 @@ backend_test(){
     cd - > /dev/null
 }
 
+announce "Backend tests"
 frontend_test elements      "elements/     -- basic manifold elements exist ... "
 frontend_test import        "import/       -- can import files ................ "
 frontend_test list-select   "list-select/  -- lists expand on couplet lhs ..... "
 frontend_test args          "args/         -- [+-]lhs, flags, lists ........... "
 
+announce "Frontend tests"
 backend_test sh-simple uniq 'sh-simple/    -- uniq . sort . grep . man ........ '
 backend_test sh-cached uniq 'sh-cached/    -- uniq . sort . grep . man ........ '
 backend_test sh-all    uniq 'sh-all/       -- uniq . sort . grep . man ........ '
+backend_test sh-refer  head 'sh-refer/     -- head . <runif> .................. '
 backend_test r-simple  sqrt 'r-simple/     -- sqrt . max . seq ................ '
 backend_test r-cached  sqrt 'r-cached/     -- sqrt . max . seq ................ '
 backend_test r-all     sqrt 'r-all/        -- sqrt . max . seq ................ '
+backend_test r-refer   max  'r-refer/      -- max . <runif> ................... '
 backend_test sh-and-r  grep 'sh-and-r/     -- grep . seq ...................... '
+
+announce "Known problems"
+backend_test sh-race  cat   'sh-race/      -- cat . <random> <random> ......... '
+
 
 
 echo

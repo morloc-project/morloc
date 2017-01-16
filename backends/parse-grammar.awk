@@ -82,7 +82,7 @@ END{
             k=0
             input=""
             while(1) {
-                if(k in m[i]["m"]){
+                if(m[i]["m"][k]){
                     input = sprintf("%sSEP CALL(%s)", input, m[i]["m"][k])
                 }
                 else if(m[i]["p"][k]){

@@ -1,0 +1,18 @@
+@source sh
+
+random () {
+    echo $RANDOM
+}
+
+@import
+"core/sh/datcache.loc"
+
+@path
+R :: random
+A :: cat . <random> <random>
+
+@lang
+cat,random :: sh
+
+@cache
+random :: datcache
