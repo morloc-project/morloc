@@ -44,6 +44,14 @@ Ws* _pairlist(Ws* lil, Ws* ws, char* cmd, Manifold* m){
     return lil;
 }
 
+Ws* _pathmod(Ws* lil, Ws* ws, char* cmd, Manifold* m){
+    if(!ws) return lil;
+    for(W* w = ws->head; w; w = w->next){
+        lil = _three(lil, cmd, _mid(m), _mid(g_manifold(g_rhs(w))));
+    }
+    return lil;
+}
+
 Ws* _manifold_to_lil(W* cm){
     Manifold* m = g_manifold(g_rhs(cm));
 
@@ -94,10 +102,11 @@ Ws* _manifold_to_lil(W* cm){
         }
     }
 
-    lil = _pairlist(lil, m->effect, "EFCT",  m);
-    lil = _pairlist(lil, m->hook,   "HOOK",  m);
+    lil = _pathmod(lil, m->effect, "EFCT",  m);
+    lil = _pathmod(lil, m->hook,   "HOOK",  m);
+    lil = _pathmod(lil, m->check,  "CHECK", m);
+
     lil = _pairlist(lil, m->cache,  "CACHE", m);
-    lil = _pairlist(lil, m->check,  "CHECK", m);
     lil = _pairlist(lil, m->open,   "OPEN",  m);
     lil = _pairlist(lil, m->pack,   "PACK",  m);
     lil = _pairlist(lil, m->pass,   "PASS",  m);

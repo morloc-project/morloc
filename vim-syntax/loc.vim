@@ -150,12 +150,14 @@ syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
 syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
 
+syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_function,@c_path
+syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
+syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
+syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
+
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep,s_arg
 syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
-syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string,s_pathsep
-syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
 syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
@@ -164,7 +166,6 @@ syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s
 syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_function,@c_path
 syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_couple,s_star
 
 

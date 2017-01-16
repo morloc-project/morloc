@@ -47,6 +47,7 @@ char* trim_couple(const char* in_str);
 %x X_SOURCE
 %s S_LANG
 %s S_PATH
+%s S_SIDE
 %s S_CPLT
 %s S_ARG
 
@@ -84,11 +85,11 @@ couple ::
 @comment {  BEGIN(X_COMMENT); }
 @import  {  BEGIN(S_IMPORT); }
 
-@source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
 @path     { BEGIN(S_PATH)     ; RETURN_TOKEN ( SECTION_PATH     ) ; }
-@effect   { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
-@hook     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_HOOK     ) ; }
-@check    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
+@effect   { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
+@hook     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_HOOK     ) ; }
+@check    { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
+@source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
 @type     { BEGIN(S_TYPE)     ; RETURN_TOKEN ( SECTION_TYPE     ) ; }
 @ontology { BEGIN(S_ONTOLOGY) ; RETURN_TOKEN ( SECTION_ONTOLOGY ) ; }
 @cache    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CACHE    ) ; }
@@ -134,7 +135,7 @@ couple ::
   }
 <<EOF>> { if(!popfile()) yyterminate(); }
 
-<S_PATH,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
+<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
 
 <S_PATH>{identifier} {
     W* w = label_from_str(trim_couple(yytext));
@@ -143,7 +144,7 @@ couple ::
 }
 
 
-<S_PATH>{var} {
+<S_PATH,S_SIDE>{var} {
     Manifold* m = manifold_new();
     W* l = label_from_str(yytext);
     W* r = w_new(P_MANIFOLD, m);
@@ -151,16 +152,16 @@ couple ::
     W* wc = w_new(C_MANIFOLD, c);
     RETURN(wc, COMPOSON);
 }
-<S_PATH>{grpref} {
+<S_PATH,S_SIDE>{grpref} {
     char* s = strdup(yytext + 1);
     W* w = w_new(C_GRPREF, s);
     RETURN(w, COMPOSON);
 }
-<S_PATH>{positional} {
+<S_PATH,S_SIDE>{positional} {
     W* w = w_new(C_POSITIONAL, unquote(yytext));
     RETURN(w, COMPOSON);
 }
-<S_PATH>{refer} {
+<S_PATH,S_SIDE>{refer} {
     Manifold* m = NULL;
     W* l = label_from_str(unquote(yytext));
     W* r = w_new(P_MANIFOLD, m);
@@ -170,7 +171,7 @@ couple ::
 }
 
 
-<S_CPLT,S_ARG>{selection} {
+<S_CPLT,S_ARG,S_SIDE>{selection} {
     W* w = list_from_str(trim_couple(yytext));
     UNPUT("::")
     RETURN(w, SELECTION);

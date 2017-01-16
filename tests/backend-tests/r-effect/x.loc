@@ -1,0 +1,15 @@
+@source R
+
+is_positive <- function(x){ all(x >= 0) }
+
+@path
+A :: sqrt . max . seq
+
+@arg
+seq :: from=-10 to=-1
+
+@lang
+sqrt,max,seq,is_positive :: R
+
+@check
+sqrt :: is_positive . <max>

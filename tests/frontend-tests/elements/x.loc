@@ -4,26 +4,7 @@ This script is a simple test of to ensure all required simple manifold elements
 are present. There are many nuances to the behavior of these modifiers, but
 they are not tested here.
 
-The general form of a manifold is:
-
-function manifold(){
-    if(cache('has')){
-        Mb = cache('get')
-        return Mb
-    }
-    if( all( [c() for c in checks] ) ){
-        Ma = [m() for m in inputs]
-        a = [o(m) for o,m in zip(open,Ma)]
-        b = pass(pure, a, args)
-        Mb = pack(Ma, b)
-    }
-    else {
-       Mb = fail()
-    }
-    cache('put', Mb)
-    for(effect in effects) { effect() }
-    return Mb
-}
+It does not check the compositional sections effect, hook, and check
 
 @type
 f :: NULL -> A
@@ -34,9 +15,6 @@ foo :: g . f
 
 @cache
 g :: _cache
-
-@check
-g :: _check
 
 @open
 g :: _open
@@ -55,9 +33,3 @@ g :: _fail
 
 @pack
 g :: _pack
-
-@effect
-g :: _effect
-
-@hook
-g :: _hook

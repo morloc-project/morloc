@@ -101,17 +101,20 @@ void _add_modifier(W* w, W* p){
         case T_LANG:
             m->lang = g_string(rhs);
             break;
+
+        /* For compositional modifiers add all ultimate manifolds */
         case T_EFFECT:
-            m->effect = ws_add_val(m->effect, P_STRING, g_string(rhs));
+            m->effect = ws_join(m->effect, g_ws(g_ws(rhs)->head));
             break;
         case T_HOOK:
-            m->hook = ws_add_val(m->hook, P_STRING, g_string(rhs));
-            break;
-        case T_CACHE:
-            m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));
+            m->hook = ws_join(m->hook, g_ws(g_ws(rhs)->head));
             break;
         case T_CHECK:
-            m->check = ws_add_val(m->check, P_STRING, g_string(rhs));
+            m->check = ws_join(m->check, g_ws(g_ws(rhs)->head));
+            break;
+
+        case T_CACHE:
+            m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));
             break;
         case T_OPEN:
             m->open = ws_add_val(m->open, P_STRING, g_string(rhs));

@@ -1,2 +1,3 @@
-@path
-F :: g . f
+@type
+g :: A -> NULL
+f :: NULL -> A

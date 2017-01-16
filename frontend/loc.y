@@ -97,11 +97,38 @@ section
     | s_source
     | s_arg
 
+
+/* ======================================= */
+
 s_path
     : SECTION_PATH { $$ = NULL; }
     | s_path IDENTIFIER COUPLE composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4));
         W* w = w_new(T_PATH, c);
+        $$ = ws_add($1, w);
+    }
+
+s_effect
+    : SECTION_EFFECT { $$ = NULL; }
+    | s_effect SELECTION COUPLE composition {
+        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        W* w = w_new(T_EFFECT, c);
+        $$ = ws_add($1, w);
+    }
+
+s_hook
+    : SECTION_HOOK { $$ = NULL; }
+    | s_hook SELECTION COUPLE composition {
+        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        W* w = w_new(T_HOOK, c);
+        $$ = ws_add($1, w);
+    }
+
+s_check
+    : SECTION_CHECK { $$ = NULL; }
+    | s_check SELECTION COUPLE composition {
+        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        W* w = w_new(T_CHECK, c);
         $$ = ws_add($1, w);
     }
 
@@ -136,35 +163,13 @@ composition
     }
 
 
-s_effect
-    : SECTION_EFFECT { $$ = NULL; }
-    | s_effect SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
-        W* w = w_new(T_EFFECT, c);
-        $$ = ws_add($1, w);
-    }
-
-s_hook
-    : SECTION_HOOK { $$ = NULL; }
-    | s_hook SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
-        W* w = w_new(T_HOOK, c);
-        $$ = ws_add($1, w);
-    }
+/* ======================================= */
 
 s_cache
     : SECTION_CACHE { $$ = NULL; }
     | s_cache SELECTION COUPLE VARIABLE {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_CACHE, c);
-        $$ = ws_add($1, w);
-    }
-
-s_check
-    : SECTION_CHECK { $$ = NULL; }
-    | s_check SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
-        W* w = w_new(T_CHECK, c);
         $$ = ws_add($1, w);
     }
 
@@ -223,6 +228,8 @@ s_doc
         W* w = w_new(T_DOC, c);
         $$ = ws_add($1, w);
     }
+
+
  /* ======================================= */
 
 s_export
@@ -234,6 +241,7 @@ s_export
     | s_export AS STR {
         g_label($$->last)->label = g_string($3);
     }
+
 
  /* ======================================= */
 
@@ -249,6 +257,7 @@ s_source
     $$ = $1;
   }
 
+
  /* ======================================= */
 
 s_type
@@ -263,6 +272,7 @@ type
   : TYPE { $$ = ws_new($1); }
   | '(' type ')' { $$ = ws_new(w_new(P_WS, $2)); }
   | type ARROW type { $$ = ws_join($1, $3); }
+
 
  /* ======================================= */
 
@@ -284,7 +294,6 @@ construct
 
 
  /* ======================================= */
-
 
 s_arg
   : SECTION_ARG { $$ = NULL; }

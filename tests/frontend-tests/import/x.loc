@@ -1,5 +1,5 @@
 @import
 'x-lib.loc'
 
-@effect
-g :: foo
+@path
+F :: g . f

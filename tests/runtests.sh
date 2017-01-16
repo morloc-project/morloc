@@ -135,9 +135,9 @@ backend_test(){
     $instant_death && exit 1
 }
 
-if $test_backend
+if $test_frontend
 then
-announce "Backend tests"
+announce "Frontend tests"
 frontend_test elements      "elements/     -- basic manifold elements exist ... "
 frontend_test import        "import/       -- can import files ................ "
 frontend_test list-select   "list-select/  -- lists expand on couplet lhs ..... "
@@ -145,9 +145,9 @@ frontend_test args          "args/         -- [+-]lhs, flags, lists ........... 
 fi
 
 
-if $test_frontend
+if $test_backend
 then
-announce "Frontend tests"
+announce "Backend tests"
 backend_test sh-simple uniq 'sh-simple/    -- uniq . sort . grep . man ........ '
 backend_test sh-cached uniq 'sh-cached/    -- uniq . sort . grep . man ........ '
 backend_test sh-all    uniq 'sh-all/       -- uniq . sort . grep . man ........ '

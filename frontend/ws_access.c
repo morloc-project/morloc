@@ -33,6 +33,18 @@ bool w_is_tpath(W* w){
     return w ? w->cls == T_PATH : false;
 }
 
+bool w_is_composition(W* w){
+    switch(w->cls){
+        case T_PATH:
+        case T_EFFECT:
+        case T_HOOK:
+        case T_CHECK:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool w_is_manifold(W* w){
     return w ? w->cls == C_MANIFOLD : false;
 }
@@ -53,8 +65,22 @@ Ws* ws_split_couplet(W* c){
             {
                 for(W* p = g_ws(paths)->head; p; p = p->next){
                     W* nc = w_isolate(c);
-                    w_clone_value(nc); // so s_lhs doesn't change c
-                    s_lhs(nc, p);
+                    // This section has caused some tricky bugs
+                    //
+                    // I do not want to change the input W 'c'. So I need to
+                    // copy 'c'. I need to alter the left-hand side (the selection)
+                    // in the copy, but not in the original, so I need to clone
+                    // the left-hand side.
+                    //
+                    // Cloning creates new things, manifolds gain new uids, for
+                    // instance. This function should NOT alter the right-hand
+                    // sides. So I must not clone both sides, e.g. this is not
+                    // OK: `w_clone_value(nc)`
+
+                    Couplet* cnew = couplet_new(p, g_rhs(c));
+
+                    s_couplet(nc, cnew);
+
                     result = ws_add(result, nc);
                 }
             }
@@ -84,7 +110,7 @@ W* w_nextval_never(W* w, W* p){ return p; }
  */
 W* w_nextval_ifpath(W* w, W* p) {
     W* next = NULL;
-    if(w->cls == T_PATH && ws_length(g_ws(g_lhs(p))) > 1){
+    if(w_is_composition(w) && ws_length(g_ws(g_lhs(p))) > 1){
         W* lhs = g_lhs(p);
         switch(lhs->cls){
             case K_PATH:
@@ -167,6 +193,9 @@ Ws* ws_recurse_composition(W* w){
             rs = ws_add_val(rs, C_NEST, g_ws(w));
             break;
         case T_PATH:
+        case T_EFFECT:
+        case T_HOOK:
+        case T_CHECK:
             rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
             break;
         default:
@@ -216,6 +245,9 @@ Ws* ws_recurse_path(W* w, W* p){
         case C_NEST:
             return g_ws(w);
         case T_PATH:
+        case T_EFFECT:
+        case T_HOOK:
+        case T_CHECK:
             return
                 ws_length(g_ws(g_lhs(p))) == 1 || w_equal_lhs(w, p) ?
                 g_ws(g_rhs(w)) : NULL;

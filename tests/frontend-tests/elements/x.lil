@@ -2,10 +2,7 @@ EMIT	m0	*
 FUNC	m0	_alias
 TYPE	m0	NULL
 INPM	m0	0	m1
-EFCT	m0	_effect
-HOOK	m0	_hook
 CACHE	m0	_cache
-CHECK	m0	_check
 OPEN	m0	_open
 PACK	m0	_pack
 PASS	m0	_pass
