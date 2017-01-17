@@ -11,7 +11,7 @@ ls_has_man () {
     test $? == 0
 }
 
-@import
+@include
 "core/sh/datcache.loc"
 
 @path

@@ -161,7 +161,7 @@ if $test_frontend
 then
 announce "Frontend tests"
 frontend_test elements      "elements/          -- basic manifold elements exist ... "
-frontend_test import        "import/            -- can import files ................ "
+frontend_test include       "include/           -- can include files ............... "
 frontend_test list-select   "list-select/       -- lists expand on couplet lhs ..... "
 frontend_test args          "args/              -- [+-]lhs, flags, lists ........... "
 fi
@@ -185,9 +185,10 @@ fi
 if $test_known_problems
 then
 announce "Known problems"
-backend_test sh-race            cat 'sh-race/          -- cat . <random> <random> ......... '
-backend_test r-single-quotes    say 'r-single-quotes/  -- cat . <random> <random> ......... '
+backend_test   sh-race          cat 'sh-race/          -- cat . <random> <random> ......... '
+backend_test   r-single-quotes  say 'r-single-quotes/  -- cat . <random> <random> ......... '
 backend_x_test r-self-reference     'r-self-reference/ -- cat . <random> <random> ......... '
+backend_test   r-import         add 'r-import          -- fanciful import statement ....... '
 fi
 
 

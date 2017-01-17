@@ -37,7 +37,6 @@ syn match DEFAULT_ERROR '\s\+$' contained
 syn keyword DEFAULT_ERROR id null call true false          contained
 syn keyword DEFAULT_ERROR memcache datcache nocache        contained
 syn keyword DEFAULT_ERROR NIL                              contained
-syn keyword DEFAULT_ERROR with split on merge using        contained
 syn keyword DEFAULT_ERROR as                               contained
 
 " define todo highlighting
@@ -68,6 +67,7 @@ syn match s_section '@hook'     contained
 syn match s_section '@export'   contained
 syn match s_section '@fail'     contained
 syn match s_section '@lang'     contained
+syn match s_section '@include'  contained
 syn match s_section '@import'   contained
 syn match s_section '@ontology' contained
 syn match s_section '@open'     contained
@@ -123,6 +123,10 @@ syn keyword s_nil NIL contained
 " keywords
 syn keyword s_export_keyword as contained
 
+syn keyword s_import_keyword from contained
+syn keyword s_import_keyword as contained
+syn keyword s_import_keyword import contained
+
 " labels
 syn match s_varlabel ':[\w.]\+' contained
 
@@ -161,7 +165,8 @@ syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@
 syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string,s_pathsep
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
 syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string
+syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_string
+syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string,s_import_keyword,s_var
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s_bar,s_sep,s_par,s_brk
 syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
@@ -189,6 +194,7 @@ hi def link s_varlabel Special
 hi def link s_section  Label
 
 hi def link s_export_keyword Keyword
+hi def link s_import_keyword Keyword
 
 hi def link s_compose Operator
 hi def link s_rarrow  Operator

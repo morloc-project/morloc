@@ -4,7 +4,7 @@ This code is equivalent to
 
 man ls | grep -Po "[a-z]+ed" | sort | uniq
 
-@import
+@include
 "core/sh/datcache.loc"
 
 @path

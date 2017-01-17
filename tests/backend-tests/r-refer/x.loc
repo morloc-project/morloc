@@ -2,7 +2,7 @@
 
 The Max and Min paths should get the max and min of the same random sample
 
-@import
+@include
 "core/R/datcache.loc"
 
 @path

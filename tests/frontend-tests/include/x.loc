@@ -1,4 +1,4 @@
-@import
+@include
 'x-lib.loc'
 
 @path

@@ -4,7 +4,7 @@ random () {
     echo $RANDOM
 }
 
-@import
+@include
 "core/sh/datcache.loc"
 
 @path

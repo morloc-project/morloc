@@ -41,7 +41,7 @@ char* trim_couple(const char* in_str);
 
 %s S_TYPE
 %s S_ONTOLOGY
-%s S_IMPORT
+%s S_INCLUDE
 %s S_EXPORT
 %x X_COMMENT
 %x X_SOURCE
@@ -83,7 +83,7 @@ couple ::
 {comment} { }
 
 @comment {  BEGIN(X_COMMENT); }
-@import  {  BEGIN(S_IMPORT); }
+@include {  BEGIN(S_INCLUDE); }
 
 @path     { BEGIN(S_PATH)     ; RETURN_TOKEN ( SECTION_PATH     ) ; }
 @effect   { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
@@ -128,12 +128,12 @@ couple ::
     RETURN(w, STR);
 }
 
-<S_IMPORT>{str} {
+<S_INCLUDE>{str} {
     char* s = unquote(yytext);
-    LOGV("importing(%s)\n", s);
+    LOGV("including(%s)\n", s);
     if(!newfile(s)) yyterminate();
   }
-<<EOF>> { if(!popfile()) yyterminate(); UNPUT("\n@import\n"); }
+<<EOF>> { if(!popfile()) yyterminate(); UNPUT("\n@include\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
 

@@ -1,0 +1,10 @@
+@import
+from "x-foo-1.loc" import bar as zzz
+import "x-foo-2.loc"
+
+@source R
+
+add <- function(a, b){ a + b }
+
+@path
+A :: add . zzz baz

@@ -1,0 +1,13 @@
+@source R
+foo <- function() { 2 }
+bar <- function(x) { x * 2 }
+
+@export
+Foo2 as bar
+
+@type
+bar :: Number -> Number
+foo :: NULL -> Number
+
+@path
+Foo2 :: bar . foo

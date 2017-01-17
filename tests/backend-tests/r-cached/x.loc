@@ -4,7 +4,7 @@ Same as
 
 R>  sqrt(max(seq(1,9)))
 
-@import
+@include
 "core/R/datcache.loc"
 
 @path
