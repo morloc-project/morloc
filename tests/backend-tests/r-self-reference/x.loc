@@ -1,0 +1,22 @@
+@import
+"core/R/datcache.loc"
+"core/R/atomic.loc"
+
+@source R
+pdf_hist <- function(x, path){
+    pdf(path)
+    hist(x)
+    dev.off()
+}
+
+@path
+A :: null . runif . `100`
+
+@lang
+pdf_hist,runif :: R
+
+@hook
+runif :: pdf_hist . <runif> `"z.pdf"`
+
+@cache
+runif :: datcache

@@ -28,8 +28,5 @@ g :: _alias
 @arg
 g :: x=1 y=2
 
-@fail
-g :: _fail
-
 @pack
 g :: _pack

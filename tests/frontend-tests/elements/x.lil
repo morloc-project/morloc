@@ -6,7 +6,6 @@ CACHE	m0	_cache
 OPEN	m0	_open
 PACK	m0	_pack
 PASS	m0	_pass
-FAIL	m0	_fail
 ARG	m0	x	1
 ARG	m0	y	2
 EMIT	m1	*

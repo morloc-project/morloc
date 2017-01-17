@@ -133,7 +133,7 @@ couple ::
     LOGV("importing(%s)\n", s);
     if(!newfile(s)) yyterminate();
   }
-<<EOF>> { if(!popfile()) yyterminate(); }
+<<EOF>> { if(!popfile()) yyterminate(); UNPUT("\n@import\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
 

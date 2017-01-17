@@ -1,28 +1,45 @@
-@comment
-
-Same as
-
-R>  sqrt(max(seq(1,9)))
-
 @import
 "core/R/datcache.loc"
+"core/R/atomic.loc"
 
 @source R
 
-true <- function(){ TRUE }
+# Load a builtin R dataset and return
+load_data <- function() {
+  data(iris, envir=environment())
+  iris$Species <- NULL
+  iris
+}
+
+# Normalize numeric columns
+normalize <- function(x) {
+  as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
+}
+
+columns_are_numeric <- function(x) {
+  all(sapply(x, is.numeric)) 
+}
+
+plot_pdf <- function(x, path){
+    pdf(path)
+    plot(x)
+    dev.off()
+}
 
 @path
-A :: sqrt . max . seq
-
-@arg
-seq :: from=1 to=9
+Main :: null . hclust . dist . normalize . load_data
 
 @lang
-sqrt,max,seq :: R
+null,hclust,dist,normalize,load_data :: R
 
 @cache
-seq :: datcache
-sqrt :: datcache
+hclust,dist,normalize :: datcache
 
 @check
-sqrt :: true
+normalize :: columns_are_numeric . <load_data>
+
+@fail
+normalize :: warning . `"Invalid input to _normalize_"`
+
+@hook
+null :: plot_pdf . <hclust> `"z.pdf"`

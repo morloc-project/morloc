@@ -39,6 +39,7 @@ m4_define(`DO_CACHE',
         Mb = BASECACHE_$1``_get''("$1")
     } else {
         VALIDATE_$1
+        HOOK_$1
     }
 )
 
@@ -49,14 +50,12 @@ m4_define(`NO_CACHE',
 
 
 m4_define(`DO_VALIDATE',
-`
     if(CHECK_$1){
         CORE($1)
     } else {
-        Mb <- FAIL_$1``()''
+        Mb <- FAIL_$1 `()'
         CACHE_PUT_$1
     }
-'
 )
 
 m4_define(`NO_VALIDATE', `CORE($1)')
@@ -84,9 +83,10 @@ m4_define(`NO_PASS', FUNC_$1 (ARG_$1 INPUT_$1))
 
 m4_define(`CALL', $1 ())
 
-m4_define(`EFFECT', $1 (b)`\n')
+m4_define(`EFFECT', $1 (b))
 
-m4_define(`HOOK', $1 ()`\n')
+m4_define(`HOOK', $1 ()
+)
 
 m4_define(`NOTHING', NULL)
 
