@@ -18,8 +18,8 @@ ls_has_man () {
 A :: uniq . sort . grep . man
 
 @arg
-grep :: -Po "[a-z]+ed"
-man :: ls
+grep := -Po "[a-z]+ed"
+man := ls
 
 @lang
 uniq,sort,grep,man :: sh
@@ -29,4 +29,4 @@ sort :: datcache
 man :: datcache
 
 @check
-man :: ls_has_man
+man := ls_has_man

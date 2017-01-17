@@ -16,7 +16,7 @@ A :: null . runif . `100`
 pdf_hist,runif :: R
 
 @hook
-runif :: pdf_hist . <runif> `"z.pdf"`
+runif := pdf_hist . <runif> `"z.pdf"`
 
 @cache
 runif :: datcache

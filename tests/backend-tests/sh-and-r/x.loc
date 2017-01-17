@@ -6,7 +6,7 @@ grep :: Text -> * -> *
 A :: grep . `42` seq
 
 @arg
-seq :: from=1 to=100
+seq := from=1 to=100
 
 @lang
 seq :: R

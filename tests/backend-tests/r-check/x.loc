@@ -7,13 +7,13 @@ print_na <- function(...){ "na" }
 A :: sqrt . max . seq
 
 @arg
-seq :: from=-1 to=-10
+seq := from=-1 to=-10
 
 @lang
 sqrt,max,seq,is_positive :: R
 
 @check
-sqrt :: is_positive . <max>
+sqrt := is_positive . <max>
 
 @fail
 sqrt :: print_na

@@ -36,10 +36,10 @@ null,hclust,dist,normalize,load_data :: R
 hclust,dist,normalize :: datcache
 
 @check
-normalize :: columns_are_numeric . <load_data>
+normalize := columns_are_numeric . <load_data>
 
 @fail
 normalize :: warning . `"Invalid input to _normalize_"`
 
 @hook
-null :: plot_pdf . <hclust> `"z.pdf"`
+null := plot_pdf . <hclust> `"z.pdf"`

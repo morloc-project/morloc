@@ -17,16 +17,16 @@ foo :: g . f
 g :: _cache
 
 @open
-g :: _open
+g :+ _open
 
 @pass
-g :: _pass
+g :+ _pass
 
 @alias
 g :: _alias
 
 @arg
-g :: x=1 y=2
+g :+ x=1 y=2
 
 @pack
-g :: _pack
+g :+ _pack

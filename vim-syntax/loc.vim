@@ -99,19 +99,20 @@ syn keyword s_cache_function memcache datcache nocache contained
 syn keyword s_utility undefined contained
 
 " setting operators
-syn match s_compose  /\./     contained
-syn match s_super    /\(\.\*\|\*\.\)/ contained
-syn match s_angel    /[><]/   contained
-syn match s_rarrow   /->/     contained
-syn match s_pathsep  /\//     contained
-syn match s_couple   /::/     contained
-syn match s_equal    /=/      contained
-syn match s_switch   /?/      contained
-syn match s_sep      /,/      contained
-syn match s_par      /[()]/   contained
-syn match s_brk      /[\[\]]/ contained
-syn match s_bar      /|/      contained
-syn match s_star     /\_\W\*\_\W/ contained
+syn match s_compose /\./             contained
+syn match s_super   /\(\.\*\|\*\.\)/ contained
+syn match s_angel   /[><]/           contained
+syn match s_rarrow  /->/             contained
+syn match s_pathsep /\//             contained
+syn match s_couple  /::/             contained
+syn match s_modify  /\(:=\|:-\|:+\)/ contained
+syn match s_equal   /=/              contained
+syn match s_switch  /?/              contained
+syn match s_sep     /,/              contained
+syn match s_par     /[()]/           contained
+syn match s_brk     /[\[\]]/         contained
+syn match s_bar     /|/              contained
+syn match s_star    /\_\W\*\_\W/     contained
 
 syn match s_positional /`[^`]*`/ contained
 syn match s_group /\*\w\+/ contained
@@ -137,10 +138,14 @@ syn match s_varlabel ':[\w.]\+' contained
 syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
 syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical
 
+syn cluster c_couple_nl contains=s_couple
+syn cluster c_modify_nl contains=s_modify,s_pathsep
+syn cluster c_couple    contains=@c_couple_nl,s_varlabel
+syn cluster c_modify    contains=@c_modify_nl,s_varlabel
+
 syn cluster c_equality  contains=s_simple_function,s_equal
-syn cluster c_basic     contains=s_couple,s_varlabel
-syn cluster c_hasarg    contains=@c_basic,s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
-syn cluster c_function  contains=@c_basic,@c_hasarg,s_simple_function,s_sep
+syn cluster c_hasarg    contains=s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
+syn cluster c_function  contains=@c_hasarg,s_simple_function,s_sep
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun,s_group,s_refer
 syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
 
@@ -152,26 +157,26 @@ syn region r_r_source start=/@source \(bash\|sh\)$/ end=/@\@=/ skip=/\\@/ contai
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 
-syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,s_utility
+syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,@c_couple_nl,s_utility
 
-syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_function,@c_path
-syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
-syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
-syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
-syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
+syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_couple,@c_function,@c_path
+syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
+syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
+syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
+syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,@c_couple,@c_path
 
-syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep,s_arg
-syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
-syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string,s_pathsep
-syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
-syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
+syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg
+syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_hasarg,s_cache_function,@c_couple_nl
+syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,s_string,@c_modify_nl
+syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_export_keyword
+syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,@c_couple_nl
 syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string,s_import_keyword,s_var
-syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s_bar,s_sep,s_par,s_brk
-syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
-syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,s_couple,s_star
+syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
+syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
+syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
+syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
+syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
 
 
 
@@ -200,6 +205,7 @@ hi def link s_compose Operator
 hi def link s_rarrow  Operator
 hi def link s_pathsep Operator
 hi def link s_couple  Operator
+hi def link s_modify  Operator
 hi def link s_equal   Operator
 hi def link s_depend  Operator
 hi def link s_switch  Operator

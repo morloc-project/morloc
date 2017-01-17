@@ -185,10 +185,10 @@ fi
 if $test_known_problems
 then
 announce "Known problems"
-backend_test   sh-race          cat 'sh-race/          -- cat . <random> <random> ......... '
-backend_test   r-single-quotes  say 'r-single-quotes/  -- cat . <random> <random> ......... '
-backend_x_test r-self-reference     'r-self-reference/ -- cat . <random> <random> ......... '
-backend_test   r-import         add 'r-import          -- fanciful import statement ....... '
+backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ......... '
+backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ......... '
+backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ......... '
+backend_test   r-import         add 'r-import           -- fanciful import statement ....... '
 fi
 
 

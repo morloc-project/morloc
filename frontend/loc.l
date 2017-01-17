@@ -32,7 +32,14 @@ char* trim(const char* in_str);
 // Same as `trim_back(x, ":")`
 char* trim_couple(const char* in_str);
 // After trimming, it is often necessary to put characters back into the buffer:
-#define UNPUT(x) for(int i = strlen(x)-1; i >= 0; i--){ unput(x[i]); }
+// unput a specific string
+#define UNPUT_S(x) for(int i = strlen(x)-1; i >= 0; i--){ unput(x[i]); }
+// unput k characters
+#define UNPUT_N(k) \
+    char* zs = strdup(yytext); \
+    int zn = strlen(yytext); \
+    for(int zi = 0; zi < k; zi++){ unput(zs[zn - zi - 1]); } \
+    free(zs);
 
 %}
 
@@ -57,11 +64,11 @@ comment   #.*\n
 sym       [a-zA-Z_][a-zA-Z0-9_]*
 var       {sym}(:{sym})?
 path      {var}({ws}*\/{ws}*{var})*
-selection {path}(,{path})*{ws}*::
+selection {path}(,{path})*{ws}*:[:=+-]
 
 type {sym}|\[{sym}\]|\*
 
-identifier {var}{ws}*::
+identifier {var}{ws}*:[:=+-]
 
 parameter [a-zA-Z0-9_.-]+{ws}*=
 flag [-][a-zA-Z0-9_.-]+
@@ -76,6 +83,7 @@ dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
 
 couple ::
+modify :=|:-|:\+
 
 %%
 
@@ -133,13 +141,14 @@ couple ::
     LOGV("including(%s)\n", s);
     if(!newfile(s)) yyterminate();
   }
-<<EOF>> { if(!popfile()) yyterminate(); UNPUT("\n@include\n"); }
+<<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
+<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN_TOKEN(COUPLE); }
 
 <S_PATH>{identifier} {
     W* w = label_from_str(trim_couple(yytext));
-    UNPUT("::")
+    UNPUT_N(2)
     RETURN(w, IDENTIFIER);
 }
 
@@ -173,7 +182,7 @@ couple ::
 
 <S_CPLT,S_ARG,S_SIDE>{selection} {
     W* w = list_from_str(trim_couple(yytext));
-    UNPUT("::")
+    UNPUT_N(2)
     RETURN(w, SELECTION);
 }
 
@@ -189,7 +198,7 @@ couple ::
 
 <S_ARG>{parameter} {
     W* w = w_new(P_STRING, trim_back(yytext, "="));
-    UNPUT("= ");
+    UNPUT_S("= ");
     RETURN(w, NAME);
 }
 <S_ARG>{int}|{dbl}|{lgc}|{sym}|{str}|{flag} {
@@ -199,7 +208,7 @@ couple ::
 
 <S_TYPE,S_ONTOLOGY>{sym}{ws}*:: {
     W* w = w_new(P_STRING, trim_couple(yytext));
-    UNPUT("::")
+    UNPUT_S("::")
     RETURN(w, NAME);
 }
 <S_TYPE>{type} {
@@ -256,7 +265,7 @@ char* trim(const char* in_str) {
 }
 
 char* trim_couple(const char* in_str) {
-    return trim_back(in_str, ":");
+    return trim_back(in_str, ":+-=");
 }
 
 

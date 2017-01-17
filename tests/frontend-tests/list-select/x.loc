@@ -2,4 +2,4 @@
 A :: g . f
 
 @effect
-g,f :: e
+g,f := e

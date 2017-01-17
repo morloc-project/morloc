@@ -48,27 +48,27 @@ h :: fukishima
 h :: psychodefroculate
 
 @arg
-g :: x=[1,2,3,'asdf',TRUE,yolo] y=4
-g ::  ="--foo 5"
+g := x=[1,2,3,'asdf',TRUE,yolo] y=4
+g :=  ="--foo 5"
 
 @check
-h :: is_awesome
-h :: is_super_awesome
+h := is_awesome
+h := is_super_awesome
 
 @effect
-h :: make_awesomer
+h := make_awesomer
 
 @pack
-h :: zipitup
+h := zipitup
 
 @open
-h :: unzipit
+h := unzipit
 
 @fail
 h :: horrible_death
 
 @pass
-h :: tentative_success
+h := tentative_success
 
 # A :: x y z . t
 # B :: x . y . z
