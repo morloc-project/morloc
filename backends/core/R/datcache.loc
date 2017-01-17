@@ -1,0 +1,22 @@
+@source R
+
+require(readr)
+
+datcache_path <- function(mid) {
+    file.path("cache", paste0(mid, ".Rdat"))
+}
+
+# String -> Bool
+datcache_chk <- function(mid) {
+    file.exists(datcache_path(mid))
+}
+
+# NULL -> Text
+datcache_get <- function(mid) {
+    read_rds(datcache_path(mid))
+}
+
+# Text -> Text
+datcache_put <- function(mid, dat) {
+    write_rds(dat, datcache_path(mid))
+}

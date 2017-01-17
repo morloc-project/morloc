@@ -1,0 +1,45 @@
+@comment
+
+Within a comment, if you want \@ you have to escape it
+
+This program should replicate the following R code:
+
+```
+apply(
+    replicate(
+        n=20,
+        sample(letters, size=5, replace=TRUE)
+    ),
+    2, paste, collapse=""
+)
+```
+
+I had to redefine the replicate function, to bypass the funky non-standard
+evaluation it uses.
+
+@source R
+
+replicate <- function(n, f, ...){
+  out <- list() 
+  for(i in 1:n){
+    out[[i]] = f(...)
+  }
+  do.call(cbind, out)
+}
+
+@type
+apply     :: [[a]] -> ([a] -> b) -> [b]
+replicate :: (a -> b) -> [b]
+sample    :: [a] -> [a]
+paste     :: [String] -> String
+
+@export
+Main as run
+
+@path
+Main :: apply . &paste &1 (replicate . sample . &letters)
+
+@arg
+replicate := n=20
+sample    := size=5, replace=TRUE
+apply     := collapse=""
