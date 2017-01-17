@@ -32,6 +32,7 @@ USAGE
    ./build.sh [options] whatever.loc
 OPTIONS
   -o     DIR build workflow in DIR
+  -l     only compile LIL
   -L     print the output LIL (after removing source)
   -G     print the m4 text before macro expansion
   -R     print the derived macro rules
@@ -58,11 +59,12 @@ outdir=`basename $tmp`
 flags=
 symdump=false
 execute=false execute_id=
+only_lil=false
 print_lil=false
 print_m4=false
 print_rules=false
 nexus_given=false
-while getopts "hLGRctdx:o:n:" opt; do
+while getopts "hLGRlctdx:o:n:" opt; do
     case $opt in
         h)
             usage ;;
@@ -71,6 +73,8 @@ while getopts "hLGRctdx:o:n:" opt; do
         n)
             nexus_given=true
             nexus=$OPTARG ;;
+        l)
+            only_lil=true ;;
         L)
             print_lil=true ;;
         G)
@@ -91,6 +95,8 @@ while getopts "hLGRctdx:o:n:" opt; do
 done
 
 locsrc=${@:$OPTIND:1}
+
+$only_lil && $loc_compiler $locsrc && exit_and_clean 0
 
 $symdump && $loc_compiler $flags $locsrc && exit_and_clean 0
 
