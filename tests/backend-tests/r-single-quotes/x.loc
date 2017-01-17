@@ -1,0 +1,9 @@
+@source R
+
+say <- function(x){ cat(x) }
+
+@path
+A :: say . `"'hi'\n"`
+
+@lang
+say :: R
