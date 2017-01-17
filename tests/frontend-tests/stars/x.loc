@@ -1,0 +1,12 @@
+@path
+A :: c . b . a
+
+@effect
+* := foo
+c :- <foo>
+
+@lang
+* :: Haskell
+* :: ruby
+c :: cpp
+foo :: pl

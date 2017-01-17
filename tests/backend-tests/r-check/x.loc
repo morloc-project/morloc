@@ -10,7 +10,7 @@ A :: sqrt . max . seq
 seq := from=-1 to=-10
 
 @lang
-sqrt,max,seq,is_positive :: R
+* :: R
 
 @check
 sqrt := is_positive . <max>

@@ -32,7 +32,7 @@ done
 
 
 __manifold__null () {
-    ./call.*  m0 
+    ./call.R  m0 
 }
 
 __manifold__runif () {

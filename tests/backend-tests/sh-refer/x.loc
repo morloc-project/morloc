@@ -15,7 +15,7 @@ A :: head . <random>
 B :: tail . <random>
 
 @lang
-cat,random :: sh
+* :: sh
 
 @cache
 random :: datcache

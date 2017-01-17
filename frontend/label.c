@@ -19,12 +19,30 @@ Label* label_copy(Label* l){
 
 bool label_cmp(Label* a, Label* b){
     return
-        a && b &&
-        a->name && b->name &&
-        strcmp(a->name, b->name) == 0 &&
+        // both must exist
+        ( a && b )
+        &&
+        // both must have names
+        ( a->name && b->name )
+        // names must match
+        &&
         (
-            (a->label == NULL && b->label == NULL) ||
-            strcmp(a->label, b->label) == 0
+            // EITHER one must be wild
+            (
+                strcmp(a->name, "*") == 0 || strcmp(b->name, "*") == 0
+            )
+            ||
+            // OR
+            (
+                // names are equal
+                strcmp(a->name, b->name) == 0
+                &&
+                // AND labels are either both missing or equal
+                (
+                    (a->label == NULL && b->label == NULL) ||
+                    strcmp(a->label, b->label) == 0
+                )
+            )
         )
     ;
 }

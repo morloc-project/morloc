@@ -12,7 +12,7 @@ R :: random
 A :: cat . <random> <random>
 
 @lang
-cat,random :: sh
+* :: sh
 
 @cache
 random :: datcache

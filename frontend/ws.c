@@ -72,6 +72,7 @@ Ws* ws_clone(Ws* ws){
 
 Ws* ws_copy(Ws* ws){
     Ws* copy = NULL;
+    if(!ws) return copy;
     for(W* w = ws->head; w; w = w->next){
         copy = ws_add(copy, w_isolate(w));
     }

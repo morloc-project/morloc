@@ -11,4 +11,4 @@ A :: sqrt . max . seq
 seq := from=1 to=9
 
 @lang
-sqrt,max,seq :: R
+* :: R

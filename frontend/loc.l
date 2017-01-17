@@ -64,7 +64,7 @@ comment   #.*\n
 sym       [a-zA-Z_][a-zA-Z0-9_]*
 var       {sym}(:{sym})?
 path      {var}({ws}*\/{ws}*{var})*
-selection {path}(,{path})*{ws}*:[:=+-]
+selection ({path}(,{path})*|\*){ws}*:[:=+-]
 
 type {sym}|\[{sym}\]|\*
 

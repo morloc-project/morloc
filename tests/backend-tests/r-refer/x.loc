@@ -14,7 +14,7 @@ Min :: min . <runif>
 # max min . runif . `10`
 
 @lang
-max,min,runif :: R
+* :: R
 
 @cache
 runif :: datcache

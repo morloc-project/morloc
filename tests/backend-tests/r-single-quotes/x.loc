@@ -6,4 +6,4 @@ say <- function(x){ cat(x) }
 A :: say . `"'hi'\n"`
 
 @lang
-say :: R
+* :: R

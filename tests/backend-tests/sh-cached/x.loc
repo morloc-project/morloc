@@ -15,7 +15,7 @@ grep := -Po "[a-z]+ed"
 man := ls
 
 @lang
-uniq,sort,grep,man :: sh
+* :: sh
 
 @cache
 sort :: datcache

@@ -13,7 +13,7 @@ pdf_hist <- function(x, path){
 A :: null . runif . `100`
 
 @lang
-pdf_hist,runif :: R
+* :: R
 
 @hook
 runif := pdf_hist . <runif> `"z.pdf"`

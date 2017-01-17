@@ -112,7 +112,7 @@ syn match s_sep     /,/              contained
 syn match s_par     /[()]/           contained
 syn match s_brk     /[\[\]]/         contained
 syn match s_bar     /|/              contained
-syn match s_star    /\_\W\*\_\W/     contained
+syn match s_star    /\_\W\*\_\W\|^\*\_W\|^\*$/ contained
 
 syn match s_positional /`[^`]*`/ contained
 syn match s_group /\*\w\+/ contained
@@ -138,8 +138,8 @@ syn match s_varlabel ':[\w.]\+' contained
 syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
 syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical
 
-syn cluster c_couple_nl contains=s_couple
-syn cluster c_modify_nl contains=s_modify,s_pathsep
+syn cluster c_couple_nl contains=s_couple,s_star
+syn cluster c_modify_nl contains=s_modify,s_pathsep,s_star
 syn cluster c_couple    contains=@c_couple_nl,s_varlabel
 syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 
