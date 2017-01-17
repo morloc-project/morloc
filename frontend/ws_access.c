@@ -34,6 +34,7 @@ bool w_is_tpath(W* w){
 }
 
 bool w_is_composition(W* w){
+    if(!w) return false;
     switch(w->cls){
         case T_PATH:
         case T_EFFECT:
@@ -44,6 +45,10 @@ bool w_is_composition(W* w){
         default:
             return false;
     }
+}
+
+bool w_is_recursive(W* w){
+    return w ? get_value_type(w->cls) == V_WS : false; 
 }
 
 bool w_is_manifold(W* w){
@@ -59,6 +64,7 @@ bool w_is_composon(W* w){
 }
 
 Ws* ws_split_couplet(W* c){
+    if(!c || !g_couplet(c)) return NULL;
     Ws* result = NULL;
     W* paths = g_lhs(c);
     switch(paths->cls){

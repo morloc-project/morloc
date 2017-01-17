@@ -87,8 +87,6 @@ char* w_class_str(Class);
 
 char* w_type_str(VType);
 
-bool w_is_recursive(W* w);
-
 void w_assert_class(W*, Class);
 
 void w_assert_type(W*, VType);

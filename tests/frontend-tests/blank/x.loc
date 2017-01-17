@@ -1,0 +1,6 @@
+@path
+A :: b . a
+
+@effect
+* := foo
+b := BLANK

@@ -111,7 +111,8 @@ modify :=|:-|:\+
 @arg      { BEGIN(S_ARG)      ; RETURN_TOKEN ( SECTION_ARG      ) ; }
 @export   { BEGIN(S_EXPORT)   ; RETURN_TOKEN ( SECTION_EXPORT   ) ; }
 
-{ws} { LOGV("%s", yytext); }
+{ws}  { LOGV("%s", yytext); }
+BLANK { RETURN_TOKEN(BLANK); } 
 
 <S_LANG>[ ]+{var} {
     BEGIN X_SOURCE;

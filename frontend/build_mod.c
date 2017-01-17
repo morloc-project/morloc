@@ -96,6 +96,7 @@ void _add_modifier(W* w, W* p){
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);
     char op = g_couplet(p)->op;
+
     switch(p->cls){
         case T_ALIAS:
             m->function = g_string(rhs);
@@ -106,16 +107,16 @@ void _add_modifier(W* w, W* p){
 
         /* For compositional modifiers add all ultimate manifolds */
         case T_EFFECT:
-            m->effect = _do_operation(m->effect, g_ws(rhs)->head, op);
-            break;
-        case T_HOOK:
-            m->hook = _do_operation(m->hook, g_ws(rhs)->head, op);
-            break;
-        case T_CHECK:
-            m->check = _do_operation(m->check, g_ws(rhs)->head, op);
-            break;
-        case T_FAIL:
-            m->fail = _do_operation(m->fail, g_ws(rhs)->head, op);
+            m->effect = g_ws(rhs) ? _do_operation( m->effect , g_ws(rhs)->head, op) : NULL;
+            break;                                 
+        case T_HOOK:                               
+            m->hook   = g_ws(rhs) ? _do_operation( m->hook   , g_ws(rhs)->head, op) : NULL;
+            break;                                 
+        case T_CHECK:                              
+            m->check  = g_ws(rhs) ? _do_operation( m->check  , g_ws(rhs)->head, op) : NULL;
+            break;                                 
+        case T_FAIL:                               
+            m->fail   = g_ws(rhs) ? _do_operation( m->fail   , g_ws(rhs)->head, op) : NULL;
             break;
 
         case T_ARGUMENT:

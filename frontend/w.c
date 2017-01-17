@@ -169,10 +169,6 @@ char* w_class_str(Class cls){
     return s;
 }
 
-bool w_is_recursive(W* w){
-   return get_value_type(w->cls) == V_WS; 
-}
-
 #define SEGFAULT fflush(stderr);W* x=0;x->next=0;
 void w_assert_class(W* w, Class cls){
     if(!w){
@@ -259,12 +255,12 @@ struct Manifold* g_manifold(W* w) {
     return w->value.manifold;
 }
 W* g_lhs(W* w) {
-    if(!w) return NULL;
+    if(!w || !w->value.couplet) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->lhs;
 }
 W* g_rhs(W* w) {
-    if(!w) return NULL;
+    if(!w || !w->value.couplet) return NULL;
     w_assert_type(w, V_COUPLET);
     return w->value.couplet->rhs;
 }

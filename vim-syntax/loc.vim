@@ -44,7 +44,7 @@ syn keyword s_todo TODO NOTE FIXME XXX contained
 syn match s_tag /\(Author\|Email\|Github\|Bugs\|Website\|Maintainer\|Description\):/ contained 
 
 " define keywords that will be translated into native equivalents
-syn keyword s_logical TRUE NULL FALSE contained
+syn keyword s_logical TRUE NULL BLANK FALSE contained
 
 " define comments
 " syn match comment '\/\/.*$' contains=tag

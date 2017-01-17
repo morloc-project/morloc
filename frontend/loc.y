@@ -21,8 +21,9 @@ Ws* global_table;
 %token <W*> SELECTION  /* K_LIST */
 
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
+%type <W*> maybe_variable maybe_str
 
-%token COUPLE AS ARROW
+%token COUPLE AS ARROW BLANK
 %token <char> MODIFY
 
 %token SECTION_EFFECT
@@ -43,7 +44,7 @@ Ws* global_table;
 %token SECTION_TYPE
 %token SECTION_ONTOLOGY
 
-%type <Ws*> section composition s_path
+%type <Ws*> section composition maybe_composition s_path
 
 %type <Ws*> s_effect
 %type <Ws*> s_hook
@@ -66,8 +67,8 @@ Ws* global_table;
 %type <Ws*> type
 %type <Ws*> ontology construct
 
-%type <W*>  argument   /* P_ARGUMENT:V_COUPLET */
-%type <Ws*> array list /* P_WS of P_STRING     */
+%type <W*>  maybe_argument /* P_ARGUMENT:V_COUPLET */
+%type <Ws*> array list     /* P_WS of P_STRING     */
 
 %left '.'
 %precedence CONCAT
@@ -111,7 +112,7 @@ s_path
 
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
-    | s_effect SELECTION MODIFY composition {
+    | s_effect SELECTION MODIFY maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_EFFECT, c);
         $$ = ws_add($1, w);
@@ -119,7 +120,7 @@ s_effect
 
 s_hook
     : SECTION_HOOK { $$ = NULL; }
-    | s_hook SELECTION MODIFY composition {
+    | s_hook SELECTION MODIFY maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_HOOK, c);
         $$ = ws_add($1, w);
@@ -127,7 +128,7 @@ s_hook
 
 s_check
     : SECTION_CHECK { $$ = NULL; }
-    | s_check SELECTION MODIFY composition {
+    | s_check SELECTION MODIFY maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_CHECK, c);
         $$ = ws_add($1, w);
@@ -135,12 +136,15 @@ s_check
 
 s_fail
     : SECTION_FAIL { $$ = NULL; }
-    | s_fail SELECTION COUPLE composition {
+    | s_fail SELECTION COUPLE maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
         W* w = w_new(T_FAIL, c);
         $$ = ws_add($1, w);
     }
 
+maybe_composition
+    : composition { $$ = $1;   }
+    | BLANK         { $$ = NULL; }
 
 composition
     : COMPOSON {
@@ -177,7 +181,7 @@ composition
 
 s_cache
     : SECTION_CACHE { $$ = NULL; }
-    | s_cache SELECTION COUPLE VARIABLE {
+    | s_cache SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_CACHE, c);
         $$ = ws_add($1, w);
@@ -185,7 +189,7 @@ s_cache
 
 s_open
     : SECTION_OPEN { $$ = NULL; }
-    | s_open SELECTION MODIFY VARIABLE {
+    | s_open SELECTION MODIFY maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_OPEN, c);
         $$ = ws_add($1, w);
@@ -193,7 +197,7 @@ s_open
 
 s_pack
     : SECTION_PACK { $$ = NULL; }
-    | s_pack SELECTION COUPLE VARIABLE {
+    | s_pack SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_PACK, c);
         $$ = ws_add($1, w);
@@ -201,7 +205,7 @@ s_pack
 
 s_pass
     : SECTION_PASS { $$ = NULL; }
-    | s_pass SELECTION COUPLE VARIABLE {
+    | s_pass SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_PASS, c);
         $$ = ws_add($1, w);
@@ -209,7 +213,7 @@ s_pass
 
 s_alias
     : SECTION_ALIAS { $$ = NULL; }
-    | s_alias SELECTION COUPLE VARIABLE {
+    | s_alias SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_ALIAS, c);
         $$ = ws_add($1, w);
@@ -217,7 +221,7 @@ s_alias
 
 s_lang
     : SECTION_LANG { $$ = NULL; }
-    | s_lang SELECTION COUPLE VARIABLE {
+    | s_lang SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_LANG, c);
         $$ = ws_add($1, w);
@@ -225,11 +229,19 @@ s_lang
 
 s_doc
     : SECTION_DOC { $$ = NULL; }
-    | s_doc SELECTION COUPLE STR {
+    | s_doc SELECTION COUPLE maybe_str {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_DOC, c);
         $$ = ws_add($1, w);
     }
+
+maybe_variable
+    : VARIABLE
+    | BLANK { $$ = NULL; }
+
+maybe_str
+    : STR
+    | BLANK { $$ = NULL; }
 
 
  /* ======================================= */
@@ -299,12 +311,12 @@ construct
 
 s_arg
   : SECTION_ARG { $$ = NULL; }
-  | s_arg SELECTION MODIFY argument {
+  | s_arg SELECTION MODIFY maybe_argument {
     Couplet* c = couplet_new($2, $4, $3); 
     W* w = w_new(T_ARGUMENT, c);
     $$ = ws_add($$, w);
   }
-  | s_arg argument {
+  | s_arg maybe_argument {
     if($$){
         char op = g_couplet($$->head)->op;
         // If multiple arguments are assigned together, the first resets the
@@ -317,8 +329,9 @@ s_arg
         fprintf(stderr, "ERROR: missing path in argument declaration\n");
     }
   }
-argument
-  : NAME '=' PRIMITIVE {
+maybe_argument
+  : BLANK { $$ = NULL; }
+  | NAME '=' PRIMITIVE {
     W* w = w_new(P_WS, ws_new($3));
     $$ = w_new(P_ARGUMENT, couplet_new($1, w, '='));
   }
