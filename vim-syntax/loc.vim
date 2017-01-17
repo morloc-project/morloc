@@ -174,8 +174,8 @@ syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_strin
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string,s_import_keyword,s_var
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
 syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
-syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
-syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
+syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
+syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
 syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
 
 

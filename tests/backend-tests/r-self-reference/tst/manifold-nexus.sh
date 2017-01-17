@@ -53,7 +53,7 @@ function_exists() {
 
 if function_exists __manifold__$1
 then
-    cd /home/shoggoth/src/git/loc/tests/backend-tests/r-self-reference/tst
+    cd /home/rnz/src/git/loc/tests/backend-tests/r-self-reference/tst
     __manifold__$1
 else
     exit 1

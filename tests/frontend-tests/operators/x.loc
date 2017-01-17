@@ -1,0 +1,6 @@
+@path
+A :: d . c . b . a
+
+@effect
+a := foo
+a :+ bar

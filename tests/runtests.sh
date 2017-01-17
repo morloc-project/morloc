@@ -161,6 +161,7 @@ if $test_frontend
 then
 announce "Frontend tests"
 frontend_test elements      "elements/          -- basic manifold elements exist ... "
+frontend_test operators     "operators/         -- test :=, :-, and :+ ............. "
 frontend_test include       "include/           -- can include files ............... "
 frontend_test list-select   "list-select/       -- lists expand on couplet lhs ..... "
 frontend_test args          "args/              -- [+-]lhs, flags, lists ........... "

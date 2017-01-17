@@ -20,7 +20,7 @@ g :: _cache
 g :+ _open
 
 @pass
-g :+ _pass
+g :: _pass
 
 @alias
 g :: _alias
@@ -29,4 +29,4 @@ g :: _alias
 g :+ x=1 y=2
 
 @pack
-g :+ _pack
+g :: _pack

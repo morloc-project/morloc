@@ -70,6 +70,14 @@ Ws* ws_clone(Ws* ws){
     return clone;
 }
 
+Ws* ws_copy(Ws* ws){
+    Ws* copy = NULL;
+    for(W* w = ws->head; w; w = w->next){
+        copy = ws_add(copy, w_isolate(w));
+    }
+    return copy;
+}
+
 Ws* ws_add(Ws* ws, W* w){
     W* w2 = w_isolate(w);
     if(!ws){
@@ -93,9 +101,9 @@ Ws* ws_add_val(Ws* ws, Class cls, void* v){
 Ws* ws_join(Ws* a, Ws* b){
     if(b && b->head){
         if(a && a->head){
-            _join(a, b);
+            _join(a, ws_copy(b));
         } else {
-            a = b;
+            a = ws_copy(b);
         }
     }
     return a;

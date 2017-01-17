@@ -14,6 +14,9 @@ typedef struct Ws{
 /* Copies entry and removes its link */
 Ws* ws_new(W* w);
 
+/* Creates new W containers, but preserves content */
+Ws* ws_copy(Ws* ws);
+
 /* Clone ws calling clone on each element. Elements with uid fields will have
  * unique uids, all pointers will be to new objects. Any changes to the clone,
  * any of its elements or sub-elements, will not affect the original.
@@ -32,7 +35,7 @@ Ws* ws_add(Ws* ws, W* w);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
-/* b is destroyed upon join */
+/* copies b (see ws_copy) and links it to a */
 Ws* ws_join(Ws* a, Ws* b);
 
 /* Make table xs[2..k], drop first element */

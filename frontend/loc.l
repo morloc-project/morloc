@@ -144,7 +144,7 @@ modify :=|:-|:\+
 <<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
-<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN_TOKEN(COUPLE); }
+<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN_TOKEN(MODIFY); }
 
 <S_PATH>{identifier} {
     W* w = label_from_str(trim_couple(yytext));
