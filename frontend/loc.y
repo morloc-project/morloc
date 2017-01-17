@@ -132,6 +132,15 @@ s_check
         $$ = ws_add($1, w);
     }
 
+s_fail
+    : SECTION_FAIL { $$ = NULL; }
+    | s_fail SELECTION COUPLE composition {
+        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        W* w = w_new(T_FAIL, c);
+        $$ = ws_add($1, w);
+    }
+
+
 composition
     : COMPOSON {
         Ws* ws = ws_new($1);
@@ -194,14 +203,6 @@ s_pass
     | s_pass SELECTION COUPLE VARIABLE {
         Couplet* c = couplet_new($2, $4);
         W* w = w_new(T_PASS, c);
-        $$ = ws_add($1, w);
-    }
-
-s_fail
-    : SECTION_FAIL { $$ = NULL; }
-    | s_fail SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
-        W* w = w_new(T_FAIL, c);
         $$ = ws_add($1, w);
     }
 

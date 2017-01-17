@@ -39,6 +39,7 @@ bool w_is_composition(W* w){
         case T_EFFECT:
         case T_HOOK:
         case T_CHECK:
+        case T_FAIL:
             return true;
         default:
             return false;
@@ -196,6 +197,7 @@ Ws* ws_recurse_composition(W* w){
         case T_EFFECT:
         case T_HOOK:
         case T_CHECK:
+        case T_FAIL:
             rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
             break;
         default:
@@ -248,6 +250,7 @@ Ws* ws_recurse_path(W* w, W* p){
         case T_EFFECT:
         case T_HOOK:
         case T_CHECK:
+        case T_FAIL:
             return
                 ws_length(g_ws(g_lhs(p))) == 1 || w_equal_lhs(w, p) ?
                 g_ws(g_rhs(w)) : NULL;

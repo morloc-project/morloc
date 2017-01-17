@@ -21,10 +21,10 @@ VType get_value_type(Class cls){
         case T_EFFECT:
         case T_HOOK:
         case T_CHECK:
+        case T_FAIL:
         case T_OPEN:
         case T_PACK:
         case T_PASS:
-        case T_FAIL:
         case T_ALIAS:
         case T_LANG:
         case T_DOC:

@@ -113,7 +113,7 @@ syn match s_brk      /[\[\]]/ contained
 syn match s_bar      /|/      contained
 syn match s_star     /\_\W\*\_\W/ contained
 
-syn match s_positional /`[^`]\+`/ contained
+syn match s_positional /`[^`]*`/ contained
 syn match s_group /\*\w\+/ contained
 syn match s_refer /<[^>]\+>/ contained
 
@@ -154,12 +154,12 @@ syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_functio
 syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
 syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
 syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
+syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep,@c_path
 
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,s_pathsep,s_arg
 syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_basic,@c_hasarg,s_cache_function,s_pathsep
 syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_basic,s_string,s_pathsep
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_varlabel,s_export_keyword
-syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,s_pathsep
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,s_couple,s_bar,s_sep,s_par,s_brk

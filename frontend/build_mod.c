@@ -112,6 +112,9 @@ void _add_modifier(W* w, W* p){
         case T_CHECK:
             m->check = ws_join(m->check, g_ws(g_ws(rhs)->head));
             break;
+        case T_FAIL:
+            m->fail = ws_join(m->fail, g_ws(g_ws(rhs)->head));
+            break;
 
         case T_CACHE:
             m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));
@@ -124,9 +127,6 @@ void _add_modifier(W* w, W* p){
             break;
         case T_PASS:
             m->pass = ws_add_val(m->pass, P_STRING, g_string(rhs));
-            break;
-        case T_FAIL:
-            m->fail = ws_add_val(m->fail, P_STRING, g_string(rhs));
             break;
         case T_DOC:
             m->doc = ws_add_val(m->doc, P_STRING, g_string(rhs));

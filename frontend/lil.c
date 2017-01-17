@@ -105,12 +105,12 @@ Ws* _manifold_to_lil(W* cm){
     lil = _pathmod(lil, m->effect, "EFCT",  m);
     lil = _pathmod(lil, m->hook,   "HOOK",  m);
     lil = _pathmod(lil, m->check,  "CHECK", m);
+    lil = _pathmod(lil, m->fail,   "FAIL",  m);
 
     lil = _pairlist(lil, m->cache,  "CACHE", m);
     lil = _pairlist(lil, m->open,   "OPEN",  m);
     lil = _pairlist(lil, m->pack,   "PACK",  m);
     lil = _pairlist(lil, m->pass,   "PASS",  m);
-    lil = _pairlist(lil, m->fail,   "FAIL",  m);
     lil = _pairlist(lil, m->doc,    "DOC",   m);
 
     if(m->args){

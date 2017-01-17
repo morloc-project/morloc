@@ -89,6 +89,7 @@ couple ::
 @effect   { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
 @hook     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_HOOK     ) ; }
 @check    { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
+@fail     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_FAIL     ) ; }
 @source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
 @type     { BEGIN(S_TYPE)     ; RETURN_TOKEN ( SECTION_TYPE     ) ; }
 @ontology { BEGIN(S_ONTOLOGY) ; RETURN_TOKEN ( SECTION_ONTOLOGY ) ; }
@@ -96,7 +97,6 @@ couple ::
 @open     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_OPEN     ) ; }
 @pack     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PACK     ) ; }
 @pass     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PASS     ) ; }
-@fail     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_FAIL     ) ; }
 @alias    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_ALIAS    ) ; }
 @lang     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_LANG     ) ; }
 @doc      { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_DOC      ) ; }
