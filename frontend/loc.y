@@ -23,7 +23,7 @@ Ws* global_table;
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 
 %token COUPLE AS ARROW
-%token MODIFY
+%token <char> MODIFY
 
 %token SECTION_EFFECT
 %token SECTION_HOOK
@@ -104,7 +104,7 @@ section
 s_path
     : SECTION_PATH { $$ = NULL; }
     | s_path IDENTIFIER COUPLE composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
         W* w = w_new(T_PATH, c);
         $$ = ws_add($1, w);
     }
@@ -112,7 +112,7 @@ s_path
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
     | s_effect SELECTION MODIFY composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_EFFECT, c);
         $$ = ws_add($1, w);
     }
@@ -120,7 +120,7 @@ s_effect
 s_hook
     : SECTION_HOOK { $$ = NULL; }
     | s_hook SELECTION MODIFY composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_HOOK, c);
         $$ = ws_add($1, w);
     }
@@ -128,7 +128,7 @@ s_hook
 s_check
     : SECTION_CHECK { $$ = NULL; }
     | s_check SELECTION MODIFY composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_CHECK, c);
         $$ = ws_add($1, w);
     }
@@ -136,7 +136,7 @@ s_check
 s_fail
     : SECTION_FAIL { $$ = NULL; }
     | s_fail SELECTION COUPLE composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4));
+        Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
         W* w = w_new(T_FAIL, c);
         $$ = ws_add($1, w);
     }
@@ -178,7 +178,7 @@ composition
 s_cache
     : SECTION_CACHE { $$ = NULL; }
     | s_cache SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_CACHE, c);
         $$ = ws_add($1, w);
     }
@@ -186,7 +186,7 @@ s_cache
 s_open
     : SECTION_OPEN { $$ = NULL; }
     | s_open SELECTION MODIFY VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_OPEN, c);
         $$ = ws_add($1, w);
     }
@@ -194,7 +194,7 @@ s_open
 s_pack
     : SECTION_PACK { $$ = NULL; }
     | s_pack SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_PACK, c);
         $$ = ws_add($1, w);
     }
@@ -202,7 +202,7 @@ s_pack
 s_pass
     : SECTION_PASS { $$ = NULL; }
     | s_pass SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_PASS, c);
         $$ = ws_add($1, w);
     }
@@ -210,7 +210,7 @@ s_pass
 s_alias
     : SECTION_ALIAS { $$ = NULL; }
     | s_alias SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_ALIAS, c);
         $$ = ws_add($1, w);
     }
@@ -218,7 +218,7 @@ s_alias
 s_lang
     : SECTION_LANG { $$ = NULL; }
     | s_lang SELECTION COUPLE VARIABLE {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_LANG, c);
         $$ = ws_add($1, w);
     }
@@ -226,7 +226,7 @@ s_lang
 s_doc
     : SECTION_DOC { $$ = NULL; }
     | s_doc SELECTION COUPLE STR {
-        Couplet* c = couplet_new($2, $4);
+        Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_DOC, c);
         $$ = ws_add($1, w);
     }
@@ -250,7 +250,7 @@ s_export
 s_source
   : SECTION_SOURCE STR {
     Ws* ws = ws_new(w_new(P_STRING, ""));
-    Couplet* c = couplet_new($2, w_new(P_WS, ws));
+    Couplet* c = couplet_new($2, w_new(P_WS, ws), '=');
     W* w = w_new(T_SOURCE, c);
     $$ = ws_new(w);
   }
@@ -265,7 +265,7 @@ s_source
 s_type
   : SECTION_TYPE { $$ = NULL; }
   | s_type NAME COUPLE type {
-    Couplet* c = couplet_new($2, w_new(P_WS, $4)); 
+    Couplet* c = couplet_new($2, w_new(P_WS, $4), '='); 
     W* w = w_new(T_TYPE, c);
     $$ = ws_add($$, w);
   }
@@ -281,7 +281,7 @@ type
 s_ontology
   : SECTION_ONTOLOGY { $$ = NULL; }
   | s_ontology NAME COUPLE ontology {
-    Couplet* c = couplet_new($2, w_new(P_WS, $4)); 
+    Couplet* c = couplet_new($2, w_new(P_WS, $4), '='); 
     W* w = w_new(T_ONTOLOGY, c);
     $$ = ws_add($$, w);
   }
@@ -300,13 +300,17 @@ construct
 s_arg
   : SECTION_ARG { $$ = NULL; }
   | s_arg SELECTION MODIFY argument {
-    Couplet* c = couplet_new($2, $4); 
+    Couplet* c = couplet_new($2, $4, $3); 
     W* w = w_new(T_ARGUMENT, c);
     $$ = ws_add($$, w);
   }
   | s_arg argument {
     if($$){
-        Couplet* c = couplet_new(g_lhs($$->last), $2); 
+        char op = g_couplet($$->head)->op;
+        // If multiple arguments are assigned together, the first resets the
+        // argument list ('='), but subsequent ones are appended ('+').
+        op = op == '=' ? '+' : op;
+        Couplet* c = couplet_new(g_lhs($$->last), $2, op); 
         W* w = w_new(T_ARGUMENT, c);
         $$ = ws_add($$, w);
     } else {
@@ -316,15 +320,15 @@ s_arg
 argument
   : NAME '=' PRIMITIVE {
     W* w = w_new(P_WS, ws_new($3));
-    $$ = w_new(P_ARGUMENT, couplet_new($1, w));
+    $$ = w_new(P_ARGUMENT, couplet_new($1, w, '='));
   }
   | PRIMITIVE {
     W* w = w_new(P_WS, ws_new($1));
     W* s = w_new(P_STRING, "");
-    $$ = w_new(P_ARGUMENT, couplet_new(s, w));
+    $$ = w_new(P_ARGUMENT, couplet_new(s, w, '='));
   }
   | NAME '=' array {
-    $$ = w_new(P_ARGUMENT, couplet_new($1, w_new(P_WS, $3)));
+    $$ = w_new(P_ARGUMENT, couplet_new($1, w_new(P_WS, $3), '='));
   }
 array
   : '[' list ']' { $$ = $2;   }

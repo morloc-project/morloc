@@ -2,7 +2,6 @@ EMIT	m0	*
 FUNC	m0	g
 TYPE	m0	NULL
 INPM	m0	0	m1
-ARG	m0	a	0
 ARG	m0		b
 ARG	m0		bar
 ARG	m0		-f

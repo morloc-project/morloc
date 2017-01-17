@@ -222,6 +222,7 @@ hi def link s_todo     Todo
 hi def link s_tag      SpecialComment
 
 hi def link s_positional Identifier
+hi def link s_refer      Identifier
 hi def link s_group      Identifier
 hi def link s_fun        Identifier
 

@@ -78,7 +78,7 @@ Ws* ws_split_couplet(W* c){
                     // sides. So I must not clone both sides, e.g. this is not
                     // OK: `w_clone_value(nc)`
 
-                    Couplet* cnew = couplet_new(p, g_rhs(c));
+                    Couplet* cnew = couplet_new(p, g_rhs(c), g_couplet(c)->op);
 
                     s_couplet(nc, cnew);
 

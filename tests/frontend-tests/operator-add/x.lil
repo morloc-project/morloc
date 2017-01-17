@@ -4,9 +4,13 @@ INPM	m0	0	m1
 EMIT	m1	*
 FUNC	m1	c
 INPM	m1	0	m2
+HOOK	m1	m8
+HOOK	m1	m9
 EMIT	m2	*
 FUNC	m2	b
 INPM	m2	0	m3
+CHECK	m2	m6
+CHECK	m2	m7
 EMIT	m3	*
 FUNC	m3	a
 EFCT	m3	m4
@@ -15,3 +19,11 @@ EMIT	m4	*
 FUNC	m4	foo
 EMIT	m5	*
 FUNC	m5	bar
+EMIT	m6	*
+FUNC	m6	is_orange
+EMIT	m7	*
+FUNC	m7	is_susumu
+EMIT	m8	*
+FUNC	m8	listen_to_the_music
+EMIT	m9	*
+FUNC	m9	sing_the_song

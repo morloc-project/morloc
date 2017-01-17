@@ -6,8 +6,9 @@
 typedef struct Couplet{
     struct W* lhs;
     struct W* rhs;
+    char op;
 } Couplet;
 
-Couplet* couplet_new(struct W* lhs, struct W* rhs);
+Couplet* couplet_new(struct W* lhs, struct W* rhs, char op);
 
 #endif

@@ -183,7 +183,6 @@ build_nexus=$HOME/.loc/bin/build-nexus.awk
 $build_nexus                  \
     -v dir=$PWD/$outdir       \
     -v name=`basename $nexus` \
-    -v lang=$lang             \
     $lil > $nexus_rules
 
 cat $nexus_grammar $nexus_rules $nexus_body |

@@ -144,7 +144,7 @@ modify :=|:-|:\+
 <<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
-<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN_TOKEN(MODIFY); }
+<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN(yytext[1], MODIFY); }
 
 <S_PATH>{identifier} {
     W* w = label_from_str(trim_couple(yytext));
@@ -157,7 +157,7 @@ modify :=|:-|:\+
     Manifold* m = manifold_new();
     W* l = label_from_str(yytext);
     W* r = w_new(P_MANIFOLD, m);
-    Couplet* c = couplet_new(l, r); 
+    Couplet* c = couplet_new(l, r, '.'); 
     W* wc = w_new(C_MANIFOLD, c);
     RETURN(wc, COMPOSON);
 }
@@ -174,7 +174,7 @@ modify :=|:-|:\+
     Manifold* m = NULL;
     W* l = label_from_str(unquote(yytext));
     W* r = w_new(P_MANIFOLD, m);
-    Couplet* c = couplet_new(l, r); 
+    Couplet* c = couplet_new(l, r, '.'); 
     W* wc = w_new(C_REFER, c);
     RETURN(wc, COMPOSON);
 }

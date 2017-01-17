@@ -1,0 +1,26 @@
+EMIT	m0	*
+FUNC	m0	d
+INPM	m0	0	m1
+EMIT	m1	*
+FUNC	m1	c
+INPM	m1	0	m2
+CHECK	m1	m8
+EMIT	m2	*
+FUNC	m2	b
+INPM	m2	0	m3
+HOOK	m2	m7
+EMIT	m3	*
+FUNC	m3	a
+EFCT	m3	m5
+EMIT	m4	*
+FUNC	m4	foo
+EMIT	m5	*
+FUNC	m5	bar
+EMIT	m6	*
+FUNC	m6	wish_i_were_a_geologist
+EMIT	m7	*
+FUNC	m7	get_back_to_work
+EMIT	m8	*
+FUNC	m8	is_wearing_appropriately_shiny_attire
+EMIT	m9	*
+FUNC	m9	is_wearing_the_sanctioned_shoes

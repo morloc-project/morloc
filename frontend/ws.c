@@ -32,7 +32,7 @@ void w_clone_value(W* w){
             break;
         case V_COUPLET:
             {
-            Couplet* c = couplet_new(w_clone(g_lhs(w)), w_clone(g_rhs(w)));
+            Couplet* c = couplet_new(w_clone(g_lhs(w)), w_clone(g_rhs(w)), g_couplet(w)->op);
             w_clone_value(c->lhs);
             w_clone_value(c->rhs);
             s_couplet(w, c);

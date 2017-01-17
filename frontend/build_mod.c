@@ -6,6 +6,7 @@ bool _manifold_modifier(W* w);
 void _mod_add_modifiers(Ws* ws_top, W* p);
 bool _basename_match(W* w, W* p);
 void _add_modifier(W* w, W* p);
+Ws*  _do_operation(Ws* ws, W* p, char op);
 
 
 
@@ -94,6 +95,7 @@ void _add_modifier(W* w, W* p){
     if(!p || w->cls != C_MANIFOLD) return;
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);
+    char op = g_couplet(p)->op;
     switch(p->cls){
         case T_ALIAS:
             m->function = g_string(rhs);
@@ -104,16 +106,40 @@ void _add_modifier(W* w, W* p){
 
         /* For compositional modifiers add all ultimate manifolds */
         case T_EFFECT:
-            m->effect = ws_join(m->effect, g_ws(g_ws(rhs)->head));
+            m->effect = _do_operation(m->effect, g_ws(rhs)->head, op);
             break;
         case T_HOOK:
-            m->hook = ws_join(m->hook, g_ws(g_ws(rhs)->head));
+            m->hook = _do_operation(m->hook, g_ws(rhs)->head, op);
             break;
         case T_CHECK:
-            m->check = ws_join(m->check, g_ws(g_ws(rhs)->head));
+            m->check = _do_operation(m->check, g_ws(rhs)->head, op);
             break;
         case T_FAIL:
-            m->fail = ws_join(m->fail, g_ws(g_ws(rhs)->head));
+            m->fail = _do_operation(m->fail, g_ws(rhs)->head, op);
+            break;
+
+        case T_ARGUMENT:
+            switch(op){
+                case '-':
+                    fprintf(
+                        stderr, "The ':-' operator is not supported for args."
+                        " Nor will it ever be (%s:%d)\n",
+                        __func__, __LINE__
+                    );
+                    break;
+                case '=':
+                    m->args = ws_new(rhs);
+                    break;
+                case '+':
+                    m->args = ws_add_val(m->args, P_ARGUMENT, g_couplet(rhs));
+                    break;
+                default:
+                    fprintf(
+                        stderr, "Unexpected operator at (%s:%d)\n",
+                        __func__, __LINE__
+                    );
+                    break;
+            }
             break;
 
         case T_CACHE:
@@ -131,9 +157,6 @@ void _add_modifier(W* w, W* p){
         case T_DOC:
             m->doc = ws_add_val(m->doc, P_STRING, g_string(rhs));
             break;
-        case T_ARGUMENT:
-            m->args = ws_add_val(m->args, P_ARGUMENT, g_couplet(rhs));
-            break;
         default:
             break;
             fprintf(
@@ -141,4 +164,37 @@ void _add_modifier(W* w, W* p){
                 w_class_str(p->cls), __func__, __LINE__
             );
     }
+}
+
+bool _none_match(W* w, W* ps){
+    bool result = true;
+    Manifold* mw = g_manifold(g_rhs(w));
+    for(W* p = g_ws(ps)->head; p; p = p->next){
+        if(mw->uid == g_manifold(g_rhs(p))->uid){
+            result = false;
+            break;
+        }
+    }
+    return result;
+}
+
+Ws* _do_operation(Ws* ws, W* p, char op){
+    switch(op){
+        case '+':
+            ws = ws_join(ws, g_ws(p));
+            break;
+        case '=':
+            ws = ws_copy(g_ws(p));
+            break;
+        case '-':
+            ws = ws_pfilter(ws, p, _none_match);
+            break;
+        default:
+            fprintf(
+                stderr, "Unexpected operator (%c) in %s:%d\n",
+                op, __func__, __LINE__
+            );
+            break;
+    }
+    return ws;
 }

@@ -7,7 +7,7 @@ foo :: g . f
 
 @arg
 g := a=0
-g :+ b
+g := b   # this overwrites a=0
 g :+ bar
 g :+ -f
 g :+ --far="out in the boonies"

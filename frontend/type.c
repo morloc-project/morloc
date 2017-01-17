@@ -1,16 +1,16 @@
 #include "type.h"
 
-#define LOG_ERROR(st, w, s)                            \
-    do{                                                \
-        W* wstr = w_new(P_STRING, strdup(s));          \
-        Couplet* cerr = couplet_new(w_clone(w), wstr); \
-        W* werr = w_new(P_COUPLET, cerr);              \
-        if(st){                                        \
-            s_ws(st, ws_add(g_ws(st), werr));          \
-        } else {                                       \
-            Ws* wserr = ws_new(werr);                  \
-            st = w_new(P_WS, wserr);                   \
-        }                                              \
+#define LOG_ERROR(st, w, s)                                 \
+    do{                                                     \
+        W* wstr = w_new(P_STRING, strdup(s));               \
+        Couplet* cerr = couplet_new(w_clone(w), wstr, '='); \
+        W* werr = w_new(P_COUPLET, cerr);                   \
+        if(st){                                             \
+            s_ws(st, ws_add(g_ws(st), werr));               \
+        } else {                                            \
+            Ws* wserr = ws_new(werr);                       \
+            st = w_new(P_WS, wserr);                        \
+        }                                                   \
     } while(0)
 
 W* _type_compatible(W* i, W* t, W* msg);
