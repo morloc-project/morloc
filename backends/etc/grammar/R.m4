@@ -53,7 +53,7 @@ m4_define(`DO_VALIDATE',
     if(CHECK_$1){
         CORE($1)
     } else {
-        Mb <- FAIL_$1`()'
+        Mb <- FAIL_$1``()''
         CACHE_PUT_$1
     }
 '

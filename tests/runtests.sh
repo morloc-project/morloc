@@ -19,7 +19,7 @@ instant_death=false
 test_frontend=true
 test_backend=true
 test_known_problems=true 
-while getopts "hqxFBK" opt; do
+while getopts "hqxFBKE" opt; do
     case $opt in
         h)
             usage ;;
@@ -74,7 +74,7 @@ frontend_test(){
 
     say_n "$msg"
 
-    $loc x.loc 2>&1 > /dev/null
+    $loc x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
         diff <($loc x.loc) x.lil > /dev/null
@@ -91,9 +91,30 @@ frontend_test(){
         warn FAIL
         say " - non-zero exit status"
         n_fail=$(( n_fail + 1 ))
+        $instant_death && exit 1
     fi
-    cd - > /dev/null
-    $instant_death && exit 1
+    cd - &> /dev/null
+}
+
+# Success is determined by exit status of the x function
+frontend_x_test(){
+    dir=$1
+    msg=$2
+    cd frontend-tests/$dir
+
+    say_n "$msg"
+    ./x &> /dev/null
+    if [[ $? == 0 ]]
+    then
+        say OK
+        n_pass=$(( n_pass + 1 ))
+    else
+        warn FAIL
+        n_fail=$(( n_fail + 1 ))
+        $instant_death && exit 1
+    fi
+
+    cd - &> /dev/null
 }
 
 backend_test(){
@@ -105,7 +126,7 @@ backend_test(){
     
     say_n "$msg"
 
-    loc -o tst x.loc 2>&1 > /dev/null
+    loc -o tst x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
@@ -113,7 +134,7 @@ backend_test(){
         tst/manifold-nexus.sh $cmd > $obs
         ./x > $exp
 
-        diff $obs $exp > /dev/null
+        diff $obs $exp &> /dev/null
         if [[ $? == 0 ]]
         then
             say OK
@@ -128,11 +149,11 @@ backend_test(){
         warn FAIL
         say " - non-zero exit status"
         n_fail=$(( n_fail + 1 ))
+        $instant_death && exit 1
     fi
     
     rm -rf tst
-    cd - > /dev/null
-    $instant_death && exit 1
+    cd - &> /dev/null
 }
 
 if $test_frontend
@@ -156,6 +177,7 @@ backend_test r-simple  sqrt 'r-simple/     -- sqrt . max . seq ................ 
 backend_test r-cached  sqrt 'r-cached/     -- sqrt . max . seq ................ '
 backend_test r-all     sqrt 'r-all/        -- sqrt . max . seq ................ '
 backend_test r-refer   max  'r-refer/      -- max . <runif> ................... '
+backend_test r-check   sqrt 'r-check/      -- sqrt . max . seq ................ '
 backend_test sh-and-r  grep 'sh-and-r/     -- grep . seq ...................... '
 fi
 
