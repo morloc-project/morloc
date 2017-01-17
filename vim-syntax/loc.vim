@@ -87,7 +87,7 @@ syn region s_string start='"' end='"' contained
 
 syn match s_var /\h\w*/ contained
 syn match s_arg /--\?\w*/ contained
-syn match s_num '\h\@<!\(\d*\.\d\+\|\d\+\)\h\@!' contained
+syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
 
 " general default functions

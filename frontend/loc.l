@@ -71,8 +71,8 @@ positional `[^`]+`
 refer      <[^<]+>
 
 str \'[^']*\'|\"[^"]*\"
-int [0-9]|[1-9][0-9]+
-dbl {int}\.[0-9]+
+int -?([0-9]|[1-9][0-9]+)
+dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
 
 couple ::
