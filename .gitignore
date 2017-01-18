@@ -10,6 +10,7 @@ tags
 DELETEME
 current.loc
 tst/
+test.loc
 
 call-*
 loc_[0-9]*/

@@ -10,13 +10,13 @@ pdf_hist <- function(x, path){
 }
 
 @path
-null . runif . `100`
+null . runif . 100
 
 @lang
 * :: R
 
 @hook
-runif := pdf_hist . <runif> `"z.pdf"`
+runif := pdf_hist . <runif> 'z.pdf'
 
 @cache
 runif :: datcache

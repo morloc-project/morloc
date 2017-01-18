@@ -6,7 +6,7 @@ The Max and Min paths should get the max and min of the same random sample
 "core/R/datcache.loc"
 
 @path
-Well :: runif . `1`
+Well :: runif . 1
 Max :: max . <runif>
 Min :: min . <runif>
 

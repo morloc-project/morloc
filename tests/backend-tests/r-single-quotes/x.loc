@@ -3,7 +3,7 @@
 say <- function(x){ cat(x) }
 
 @path
-say . `"'hi'\n"`
+say . "'hi'\n"
 
 @lang
 * :: R

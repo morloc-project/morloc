@@ -74,10 +74,10 @@ parameter [a-zA-Z0-9_.-]+{ws}*=
 flag [-][a-zA-Z0-9_.-]+
 
 grpref     \*{var}
-positional `[^`]+`
 refer      <[^<]+>
 
 str \'[^']*\'|\"[^"]*\"
+bak `[^`]*`
 int -?([0-9]|[1-9][0-9]+)
 dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
@@ -169,8 +169,12 @@ RESET { RETURN_TOKEN(RESET); }
     W* w = w_new(C_GRPREF, s);
     RETURN(w, COMPOSON);
 }
-<S_PATH,S_SIDE>{positional} {
+<S_PATH,S_SIDE>{bak} {
     W* w = w_new(C_POSITIONAL, unquote(yytext));
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{int}|{dbl}|{lgc}|{str} {
+    W* w = w_new(C_POSITIONAL, strdup(yytext));
     RETURN(w, COMPOSON);
 }
 <S_PATH,S_SIDE>{refer} {
