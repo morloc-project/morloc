@@ -20,3 +20,7 @@ datcache_get <- function(mid) {
 datcache_put <- function(mid, dat) {
     write_rds(dat, datcache_path(mid))
 }
+
+datcache_del <- function(mid) {
+    file.remove(datcache_path(mid))
+}

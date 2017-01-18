@@ -1,0 +1,19 @@
+@source R
+
+.memcache_data <- new.env()
+
+memcache_chk <- function(mid) {
+    exists(mid, .memcache_data, inherits=FALSE)
+}
+
+memcache_get <- function(mid) {
+    .memcache_data[[mid]]
+}
+
+memcache_put <- function(mid, dat) {
+    .memcache_data[[mid]] = dat
+}
+
+memcache_del <- function(mid) {
+    rm(mid, envir=.memcache_data)
+}

@@ -16,14 +16,20 @@ read_rds(datcache_path(mid))
 datcache_put <- function(mid, dat) {
 write_rds(dat, datcache_path(mid))
 }
-null <- function(...) { NULL }
+datcache_del <- function(mid) {
+file.remove(datcache_path(mid))
+}
+null <- function(...) {
+list(...) # to force evaluation of inputs
+NULL      # but return nothing
+}
 pdf_hist <- function(x, path){
 pdf(path)
 hist(x)
 dev.off()
 }
 m0 <- function(){
-b <- null ( m1 ())
+b <- null ( m1 () ) 
 Mb <- b
 Mb
 }
@@ -31,7 +37,7 @@ m1 <- function(){
 if(datcache_chk("m1")){
 Mb = datcache_get("m1")
 } else {
-b <- runif ( 100)
+b <- runif ( 100 ) 
 Mb <- b
 datcache_put("m1", Mb)
 m2 ()
@@ -39,7 +45,7 @@ m2 ()
 Mb
 }
 m2 <- function(){
-b <- pdf_hist ( m1 (),  "z.pdf")
+b <- pdf_hist ( m1 (),  "z.pdf" ) 
 Mb <- b
 Mb
 }

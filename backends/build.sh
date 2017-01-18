@@ -151,7 +151,7 @@ do
 
     # Merge all rules and macros, expand to manifold functions
     cat $grammar $rules $body |
-        m4 $M4_FLAGS |
+        m4 $M4_FLAGS | sed 's/XXLEFT //g; s/ XXRIGHT//g' |
         sed '/^ *$/d;s/ *//' > $exe
 
     # Move executable to working folder and set permissions

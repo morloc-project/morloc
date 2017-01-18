@@ -1,3 +1,5 @@
+m4_define(`XXRIGHTXXLEFT', ``,'' ) 
+
 m4_define(`PROLOGUE',
     `#!/usr/bin/Rscript --vanilla'
     `library(readr)'
@@ -77,13 +79,13 @@ m4_define(`DO_PACK', Mb <- PACKFUN_$1 (b))
 
 m4_define(`NO_PACK', Mb <- b)
 
-m4_define(`DO_PASS', PASS_$1 (FUNC_$1 ARG_$1 INPUT_$1))
+m4_define(`DO_PASS', PASS_$1 ( FUNC_$1``''INPUT_$1``''ARG_$1 ) )
 
-m4_define(`NO_PASS', FUNC_$1 (ARG_$1 INPUT_$1))
+m4_define(`NO_PASS', FUNC_$1 ( INPUT_$1``''ARG_$1 ) )
 
 m4_define(`CALL', $1 ())
 
-m4_define(`EFFECT', $1 (b))
+m4_define(`EFFECT', $1 ())
 
 m4_define(`HOOK', $1 ()
 )

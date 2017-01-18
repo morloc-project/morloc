@@ -1,3 +1,5 @@
+m4_define(`XXRIGHTXXLEFT', ` ') 
+
 m4_define(`PROLOGUE', )
 
 m4_define(`NATIVE_MANIFOLD',

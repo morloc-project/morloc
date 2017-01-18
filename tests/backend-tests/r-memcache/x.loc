@@ -1,0 +1,23 @@
+@include
+"core/R/memcache.loc"
+"core/R/atomic.loc"
+
+@source R
+require(xtable)
+
+@path
+A :: null  .  xtable  .  data.frame  .  <runif> (runif . `5`)
+
+@lang
+* :: R
+
+@cache
+* :: memcache
+
+@hook
+xtable :: print . <xtable>
+data.frame :: print . nrow . <data.frame>
+
+@arg
+xtable :: label="hi, this is a label"
+runif :: min=2 max=5

@@ -9,6 +9,7 @@ lexer
 tags
 DELETEME
 current.loc
+tst/
 
 call-*
 loc_[0-9]*/

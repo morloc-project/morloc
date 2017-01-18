@@ -85,7 +85,7 @@ syn match s_section '@source'   contained
 syn region s_string start="'" end="'" contained
 syn region s_string start='"' end='"' contained
 
-syn match s_var /\h\w*/ contained
+syn match s_var /\h[\w.]*/ contained
 syn match s_arg /--\?\w*/ contained
 syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
@@ -99,19 +99,19 @@ syn keyword s_cache_function memcache datcache nocache contained
 syn keyword s_utility undefined contained
 
 " setting operators
-syn match s_compose /\./             contained
-syn match s_super   /\(\.\*\|\*\.\)/ contained
-syn match s_angel   /[><]/           contained
-syn match s_rarrow  /->/             contained
-syn match s_pathsep /\//             contained
-syn match s_couple  /::/             contained
-syn match s_modify  /\(:=\|:-\|:+\)/ contained
-syn match s_equal   /=/              contained
-syn match s_switch  /?/              contained
-syn match s_sep     /,/              contained
-syn match s_par     /[()]/           contained
-syn match s_brk     /[\[\]]/         contained
-syn match s_bar     /|/              contained
+syn match s_compose /\_\W\.\_\W\|\_\W\.$/      contained
+syn match s_super   /\(\.\*\|\*\.\)/           contained
+syn match s_angel   /[><]/                     contained
+syn match s_rarrow  /->/                       contained
+syn match s_pathsep /\//                       contained
+syn match s_couple  /::/                       contained
+syn match s_modify  /\(:=\|:-\|:+\)/           contained
+syn match s_equal   /=/                        contained
+syn match s_switch  /?/                        contained
+syn match s_sep     /,/                        contained
+syn match s_par     /[()]/                     contained
+syn match s_brk     /[\[\]]/                   contained
+syn match s_bar     /|/                        contained
 syn match s_star    /\_\W\*\_\W\|^\*\_W\|^\*$/ contained
 
 syn match s_positional /`[^`]*`/ contained
@@ -139,7 +139,7 @@ syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
 syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical
 
 syn cluster c_couple_nl contains=s_couple,s_star
-syn cluster c_modify_nl contains=s_modify,s_pathsep,s_star
+syn cluster c_modify_nl contains=@c_couple_nl,s_modify,s_pathsep
 syn cluster c_couple    contains=@c_couple_nl,s_varlabel
 syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 

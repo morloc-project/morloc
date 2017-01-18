@@ -94,7 +94,7 @@ END{
                 k = k + 1
             }
             gsub(/^SEP /, "", input) # remove the last sep
-            printf "m4_define(`INPUT_%s', `%s')", i, input >> rules
+            printf "m4_define(`INPUT_%s', `XXLEFT %s XXRIGHT')", i, input >> rules
         } else {
             printf "m4_define(`INPUT_%s', %s%s)", i, L, R >> rules
         }
@@ -104,8 +104,8 @@ END{
             for(k in m[i]["arg"]){
                 arg = sprintf("%sSEP %s", arg, k)
             }
-            gsub(/^SEP /, "", arg) # remove the last sep
-            printf "m4_define(`ARG_%s', `%s') ", i, arg >> rules
+            gsub(/^SEP /, "", arg) # remove the initial sep
+            printf "m4_define(`ARG_%s', `XXLEFT %s XXRIGHT') ", i, arg >> rules
         } else {
             printf "m4_define(`ARG_%s', %s%s) ", i, L, R >> rules
         }

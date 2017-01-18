@@ -160,39 +160,40 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
-frontend_test elements      "elements/          -- basic manifold elements exist ... "
-frontend_test operator-add  "operator-add/      -- test :=, and :+ ................. "
-frontend_test operator-sub  "operator-sub/      -- test :=, :+, and :- ............. "
-frontend_test stars         "stars/             -- test * on modifier lhs .......... "
-frontend_test include       "include/           -- can include files ............... "
-frontend_test list-select   "list-select/       -- lists expand on couplet lhs ..... "
-frontend_test args          "args/              -- [+-]lhs, flags, lists ........... "
-frontend_test reset         "reset/             -- test RESET command .............. "
+frontend_test elements           'elements/          -- basic manifold elements exist .................. '
+frontend_test operator-add       'operator-add/      -- test :=, and :+ ................................ '
+frontend_test operator-sub       'operator-sub/      -- test :=, :+, and :- ............................ '
+frontend_test stars              'stars/             -- test * on modifier lhs ......................... '
+frontend_test include            'include/           -- can include files .............................. '
+frontend_test list-select        'list-select/       -- lists expand on couplet lhs .................... '
+frontend_test args               'args/              -- [+-]lhs, flags, lists .......................... '
+frontend_test reset              'reset/             -- test RESET command ............................. '
 fi
 
 
 if $test_backend
 then
 announce "Backend tests"
-backend_test   sh-simple uniq    'sh-simple/         -- uniq . sort . grep . man ........ '
-backend_test   sh-cached uniq    'sh-cached/         -- uniq . sort . grep . man ........ '
-backend_test   sh-all    uniq    'sh-all/            -- uniq . sort . grep . man ........ '
-backend_test   sh-refer  head    'sh-refer/          -- head . <runif> .................. '
-backend_test   r-simple  sqrt    'r-simple/          -- sqrt . max . seq ................ '
-backend_test   r-cached  sqrt    'r-cached/          -- sqrt . max . seq ................ '
-backend_x_test r-all             'r-all/             -- sqrt . max . seq ................ '
-backend_test   r-refer   max     'r-refer/           -- max . <runif> ................... '
-backend_test   r-check   sqrt    'r-check/           -- sqrt . max . seq ................ '
-backend_test   sh-and-r  grep    'sh-and-r/          -- grep . seq ...................... '
-backend_x_test r-self-reference  'r-self-reference/  -- cat . <random> <random> ......... '
+backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
+backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
+backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
+backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
+backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
+backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
+backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
+backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
+backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
+backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
 fi
 
 if $test_known_problems
 then
 announce "Known problems"
-backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ......... '
-backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ......... '
-backend_test   r-import         add 'r-import           -- fanciful import statement ....... '
+backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ........................ '
+backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ........................ '
+backend_test   r-import         add 'r-import           -- fanciful import statement ...................... '
 fi
 
 
