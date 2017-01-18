@@ -92,6 +92,7 @@ syn match s_fun /&\w*/ contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
+syn keyword s_logical_op and or not any all
 
 " default caching functions
 syn keyword s_cache_function memcache datcache nocache contained
@@ -136,7 +137,7 @@ syn match s_varlabel ':[\w.]\+' contained
 " Set a highlighting paradigm for each section
 
 syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
-syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical
+syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical,s_logical_op
 
 syn cluster c_couple_nl contains=s_couple,s_star
 syn cluster c_modify_nl contains=@c_couple_nl,s_modify,s_pathsep
@@ -188,6 +189,7 @@ let b:current_syntax = "loc"
 
 hi def link s_simple_function Function
 hi def link s_cache_function  Function
+hi def link s_logical_op      Function
 
 hi def link s_constant Constant
 hi def link s_logical  Constant

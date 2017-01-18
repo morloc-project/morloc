@@ -4,3 +4,9 @@ null <- function(...) {
     list(...) # to force evaluation of inputs
     NULL      # but return nothing
 }
+
+and <- function(a, b) { a && b }
+
+or  <- function(a, b) { a || b }
+
+not <- function(a) { ! a }
