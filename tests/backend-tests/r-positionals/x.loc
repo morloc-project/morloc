@@ -27,19 +27,18 @@ replicate <- function(n, f, ...){
   do.call(cbind, out)
 }
 
-@type
-apply     :: [[a]] -> ([a] -> b) -> [b]
-replicate :: (a -> b) -> [b]
-sample    :: [a] -> [a]
-paste     :: [String] -> String
-
-@export
-Main as run
+# @type
+# apply     :: [[a]] -> ([a] -> b) -> [b]
+# replicate :: (a -> b) -> [b]
+# sample    :: [a] -> [a]
+# paste     :: [String] -> String
 
 @path
-Main :: apply . &paste &1 (replicate . sample . &letters)
+Main :: apply . (replicate . `20` `sample` `letters`) `1` `paste`
+
+@lang
+* :: R
 
 @arg
-replicate := n=20
-sample    := size=5, replace=TRUE
+replicate := size=5 replace=TRUE
 apply     := collapse=""

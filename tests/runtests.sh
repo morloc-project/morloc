@@ -174,18 +174,19 @@ fi
 if $test_backend
 then
 announce "Backend tests"
-backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
-backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
-backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
-backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
-backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
-backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
-backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
 backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
-backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
-backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
-backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
+backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
+backend_x_test r-positionals        'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
+backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
+backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
+backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
+backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
+backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
+backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
+backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
+backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 fi
 
 if $test_known_problems

@@ -45,7 +45,7 @@ m2 ()
 Mb
 }
 m2 <- function(){
-b <- pdf_hist ( m1 (),  "z.pdf" ) 
+b <- pdf_hist ( m1 () ,  "z.pdf" ) 
 Mb <- b
 Mb
 }

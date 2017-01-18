@@ -83,17 +83,17 @@ END{
             input=""
             while(1) {
                 if(m[i]["m"][k]){
-                    input = sprintf("%sSEP CALL(%s)", input, m[i]["m"][k])
+                    input = sprintf("%s SEP CALL(%s)", input, m[i]["m"][k])
                 }
                 else if(m[i]["p"][k]){
-                    input = sprintf("%sSEP %s", input, m[i]["p"][k])
+                    input = sprintf("%s SEP %s", input, m[i]["p"][k])
                 }
                 else {
                     break
                 }
                 k = k + 1
             }
-            gsub(/^SEP /, "", input) # remove the last sep
+            gsub(/^ SEP /, "", input) # remove the last sep
             printf "m4_define(`INPUT_%s', `XXLEFT %s XXRIGHT')", i, input >> rules
         } else {
             printf "m4_define(`INPUT_%s', %s%s)", i, L, R >> rules
@@ -102,9 +102,9 @@ END{
         if(length(m[i]["arg"]) > 0){
             arg=""
             for(k in m[i]["arg"]){
-                arg = sprintf("%sSEP %s", arg, k)
+                arg = sprintf("%s SEP %s", arg, k)
             }
-            gsub(/^SEP /, "", arg) # remove the initial sep
+            gsub(/^ SEP /, "", arg) # remove the initial sep
             printf "m4_define(`ARG_%s', `XXLEFT %s XXRIGHT') ", i, arg >> rules
         } else {
             printf "m4_define(`ARG_%s', %s%s) ", i, L, R >> rules
