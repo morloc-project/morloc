@@ -4,7 +4,7 @@
 
 \section{Templates}
 
-The core functions of Loc are manifold. These functions take not arguments.
+The core functions of Loc are manifold. These functions take no arguments.
 They are conglomerations of the following elements:
 
 \begin{table}[htpb]
@@ -29,13 +29,13 @@ effects & list of manifolds to call after caching result
 A manifold itself has the form
 
 \begin{verbatim}
-manifold =
+m =
     if
-    ( cache_has )
-    ( cache_get )
+    ( cache_has m )
+    ( cache_get m )
     ( 
         Mb = if
-        ( all map checks )
+        ( [check] )
         (
             Ma = map inputs,
             a = map open Ma,
@@ -52,81 +52,50 @@ manifold =
     )
 \end{verbatim}
 
-The simplest way to make a manifold is with a closure, for example
-
 \begin{verbatim}
-def make_manifold(
-  pure,
-  inputs,
-  checks, cacher,
-  effects, open, pack, pass, fail, args
-):
-    def manifold():
-        ...
-    return manifold
-\end{verbatim}
-
-
-Here is are are examples of how the cache makers might be implemented in
-a backend
-
-\begin{verbatim}
-def make_datcache(filename):
-    def cacher(op, x):
-        switch(op):
-            case 'has':
-                return file_exists(filename)
-            case 'get':
-                return load_file(filename)
-            case 'put':
-                write_file(x, filename)
-            case 'del':
-                remove_file(filename)
-            default:
-                die()
-
-def make_memcache():
-    data = NULL
-    def cacher(op, x):
-        switch(op):
-            case 'has':
-                return is_null(data)
-            case 'get':
-                return data
-            case 'put':
-                data = x
-            case 'del':
-                data = NULL
-            default:
-                die()
-\end{verbatim}
-
-There are a few very simple functions that all backends should have implemented
-(though their names may vary).
-
-\begin{verbatim}
-def run(a, args, kwargs):
-    b = a(*args, **kwargs)
-    return b
-
-def id(x, ...):
-    return x
-
-def null(...):
-    return NULL
-
-def true(...):
-    return TRUE
-
-def false(...):
-    return FALSE
+m =
+  (
+    [begin]
+    (?
+      cache_condition,
+      get_cached,
+      ( 
+        [prehooks]
+        (?
+          [evaluation_condition],
+          (
+            Mb = function( [open input] )
+            b = unpack(Mb)
+            M = context(Mb)
+            [(do_to_context M)]
+            [(do_to_data b)]
+            [(do_to_both Mb)]
+            (?
+              [inner_fail_conditions, b, M],
+              [inner_success, b, M],
+              [inner_fail, b, M]
+              Mb = (inner_fail_output, b, M)
+            )
+          ),
+          (
+            Mb = fail_output
+            [fail_effect]
+            [fail_effect_p Mb]
+          )
+          cache Mb
+        )
+        [posthooks]
+      )
+    )
+    [end]
+  )
 \end{verbatim}
 
 
 \section{Expectations for the backends}
 
 The Loc compiler translates Loc code into an intermediate language (Loc
-Intermediate Language, LIL) that lists the steps need to build a workflow. It
+Intermediate Language, LIL) that lists the steps need to build a program. It
 is the job of the backend to interpret LIL into working code in an output
 language (OL). The process of adding support for new languages will be
 simplified if there is a roughly one-to-one correlation between instructions in
@@ -204,31 +173,6 @@ as LIL is interpreted. In OOP languages, they may be objects.
 \end{itemize}
 
 \section{Approach}
-
-My current approach (partially realized) is to
-
-\begin{itemize}
- \item lexical analysis of Loc code, descending into imported code with flex
- \item parse Loc tokens into an AST
- \item do syntax and semantic checking on the AST, emitting compile time errors
-    and warnings 
- \item print Loc intermediate language (LIL) from the AST.
- \item tokenize LIL with second flex program
- \item parse the tokenized LIL with a language-specific parser, perhaps loading
-    the function space to allow a second level of syntax and semantic checking.
- \item construct the code for the final language
-\end{itemize}
-
-I have a few questions about this.
-
-\begin{itemize}
- \item Should a use a more featureful preprocessor? One that can concatenate all
-    the code into a build file, expand macros, expand ifdefs, etc. Perhaps use
-    C preprocessor before lexical analysis?
-
- \item Is LIL necessary? Maybe it would be easier to convert directly from the AST
-    to the final language.
-\end{itemize}
 
 There are two ways a workflow can be viewed: a graph of functions, or a graph
 of data. Of course the two can also be merged. If the functions are typed, the
