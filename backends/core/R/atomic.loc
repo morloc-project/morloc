@@ -1,3 +1,6 @@
 @source R
 
-null <- function(...) { NULL }
+null <- function(...) {
+    list(...) # to force evaluation of inputs
+    NULL      # but return nothing
+}
