@@ -23,8 +23,8 @@ Ws* global_table;
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 %type <W*> maybe_variable maybe_str
 
-%token COUPLE AS ARROW RESET
-%token <char> MODIFY
+%token AS ARROW RESET
+%token <char> COUPLE
 
 %token SECTION_EFFECT
 %token SECTION_HOOK
@@ -112,7 +112,7 @@ s_path
 
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
-    | s_effect SELECTION MODIFY maybe_composition {
+    | s_effect SELECTION COUPLE maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_EFFECT, c);
         $$ = ws_add($1, w);
@@ -120,7 +120,7 @@ s_effect
 
 s_hook
     : SECTION_HOOK { $$ = NULL; }
-    | s_hook SELECTION MODIFY maybe_composition {
+    | s_hook SELECTION COUPLE maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_HOOK, c);
         $$ = ws_add($1, w);
@@ -128,7 +128,7 @@ s_hook
 
 s_check
     : SECTION_CHECK { $$ = NULL; }
-    | s_check SELECTION MODIFY maybe_composition {
+    | s_check SELECTION COUPLE maybe_composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
         W* w = w_new(T_CHECK, c);
         $$ = ws_add($1, w);
@@ -189,7 +189,7 @@ s_cache
 
 s_open
     : SECTION_OPEN { $$ = NULL; }
-    | s_open SELECTION MODIFY maybe_variable {
+    | s_open SELECTION COUPLE maybe_variable {
         Couplet* c = couplet_new($2, $4, '=');
         W* w = w_new(T_OPEN, c);
         $$ = ws_add($1, w);
@@ -311,7 +311,7 @@ construct
 
 s_arg
   : SECTION_ARG { $$ = NULL; }
-  | s_arg SELECTION MODIFY maybe_argument {
+  | s_arg SELECTION COUPLE maybe_argument {
     Couplet* c = couplet_new($2, $4, $3); 
     W* w = w_new(T_ARGUMENT, c);
     $$ = ws_add($$, w);

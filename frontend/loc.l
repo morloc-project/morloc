@@ -82,8 +82,7 @@ int -?([0-9]|[1-9][0-9]+)
 dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
 
-couple ::
-modify :=|:-|:\+
+couple ::|:=|:-|:\+
 
 %%
 
@@ -144,8 +143,11 @@ RESET { RETURN_TOKEN(RESET); }
   }
 <<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 
-<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} { RETURN_TOKEN(COUPLE); }
-<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{modify} { RETURN(yytext[1], MODIFY); }
+<S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} {
+    char c = yytext[1];
+    c = c == ':' ? '=' : c;
+    RETURN(c, COUPLE);
+}
 
 <S_PATH>{identifier} {
     W* w = label_from_str(trim_couple(yytext));
