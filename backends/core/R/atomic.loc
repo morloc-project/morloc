@@ -1,3 +1,11 @@
+@type
+
+# and ::  Bool  -> Bool -> Bool
+# all :: [Bool] -> Bool
+# or  ::  Bool  -> Bool -> Bool
+# any :: [Bool] -> Bool
+# not ::  Bool  -> Bool
+
 @source R
 
 null <- function(...) {

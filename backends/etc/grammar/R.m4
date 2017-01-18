@@ -92,7 +92,7 @@ m4_define(`HOOK', $1 ()
 
 m4_define(`NOTHING', NULL)
 
-m4_define(`SIMPLE_FAIL', NULL)
+m4_define(`SIMPLE_FAIL', null)
 
 m4_define(`NO_PUT', )
 
