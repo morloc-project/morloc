@@ -23,7 +23,7 @@ Ws* global_table;
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 %type <W*> maybe_variable maybe_str
 
-%token COUPLE AS ARROW BLANK
+%token COUPLE AS ARROW RESET
 %token <char> MODIFY
 
 %token SECTION_EFFECT
@@ -144,7 +144,7 @@ s_fail
 
 maybe_composition
     : composition { $$ = $1;   }
-    | BLANK         { $$ = NULL; }
+    | RESET         { $$ = NULL; }
 
 composition
     : COMPOSON {
@@ -237,11 +237,11 @@ s_doc
 
 maybe_variable
     : VARIABLE
-    | BLANK { $$ = NULL; }
+    | RESET { $$ = NULL; }
 
 maybe_str
     : STR
-    | BLANK { $$ = NULL; }
+    | RESET { $$ = NULL; }
 
 
  /* ======================================= */
@@ -330,7 +330,7 @@ s_arg
     }
   }
 maybe_argument
-  : BLANK { $$ = NULL; }
+  : RESET { $$ = NULL; }
   | NAME '=' PRIMITIVE {
     W* w = w_new(P_WS, ws_new($3));
     $$ = w_new(P_ARGUMENT, couplet_new($1, w, '='));

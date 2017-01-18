@@ -112,7 +112,7 @@ modify :=|:-|:\+
 @export   { BEGIN(S_EXPORT)   ; RETURN_TOKEN ( SECTION_EXPORT   ) ; }
 
 {ws}  { LOGV("%s", yytext); }
-BLANK { RETURN_TOKEN(BLANK); } 
+RESET { RETURN_TOKEN(RESET); } 
 
 <S_LANG>[ ]+{var} {
     BEGIN X_SOURCE;

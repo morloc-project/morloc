@@ -99,10 +99,14 @@ void _add_modifier(W* w, W* p){
 
     switch(p->cls){
         case T_ALIAS:
-            m->function = g_string(rhs);
+            if(g_string(rhs)){
+                m->function = g_string(rhs);
+            } else {
+                _set_default_manifold_function(w);
+            }
             break;
         case T_LANG:
-            m->lang = g_string(rhs);
+            m->lang = g_string(rhs) ? g_string(rhs) : "*";
             break;
 
         /* For compositional modifiers add all ultimate manifolds */
@@ -120,6 +124,7 @@ void _add_modifier(W* w, W* p){
             break;
 
         case T_ARGUMENT:
+            op = g_couplet(rhs) ? op : '!';
             switch(op){
                 case '-':
                     fprintf(
@@ -134,6 +139,9 @@ void _add_modifier(W* w, W* p){
                 case '+':
                     m->args = ws_add_val(m->args, P_ARGUMENT, g_couplet(rhs));
                     break;
+                case '!':
+                    m->args = NULL;
+                    break;
                 default:
                     fprintf(
                         stderr, "Unexpected operator at (%s:%d)\n",
@@ -144,19 +152,19 @@ void _add_modifier(W* w, W* p){
             break;
 
         case T_CACHE:
-            m->cache = ws_add_val(m->cache, P_STRING, g_string(rhs));
+            m->cache = g_string(rhs) ? ws_add_val(m->cache, P_STRING, g_string(rhs)) : NULL;
             break;
         case T_OPEN:
-            m->open = ws_add_val(m->open, P_STRING, g_string(rhs));
+            m->open = g_string(rhs) ? ws_add_val(m->open, P_STRING, g_string(rhs)) : NULL;
             break;
         case T_PACK:
-            m->pack = ws_add_val(m->pack, P_STRING, g_string(rhs));
+            m->pack = g_string(rhs) ? ws_add_val(m->pack, P_STRING, g_string(rhs)) : NULL;
             break;
         case T_PASS:
-            m->pass = ws_add_val(m->pass, P_STRING, g_string(rhs));
+            m->pass = g_string(rhs) ? ws_add_val(m->pass, P_STRING, g_string(rhs)) : NULL;
             break;
         case T_DOC:
-            m->doc = ws_add_val(m->doc, P_STRING, g_string(rhs));
+            m->doc = g_string(rhs) ? ws_add_val(m->doc, P_STRING, g_string(rhs)) : NULL;
             break;
         default:
             break;

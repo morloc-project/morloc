@@ -167,6 +167,7 @@ frontend_test stars         "stars/             -- test * on modifier lhs ......
 frontend_test include       "include/           -- can include files ............... "
 frontend_test list-select   "list-select/       -- lists expand on couplet lhs ..... "
 frontend_test args          "args/              -- [+-]lhs, flags, lists ........... "
+frontend_test reset         "reset/             -- test RESET command .............. "
 fi
 
 

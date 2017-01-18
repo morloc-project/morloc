@@ -93,15 +93,17 @@ W* w_new(Class cls, void* value){
 }
 
 W* w_isolate(W* w){
+    if(!w) return NULL;
     W* new_w = w_copy(w);
     new_w->next = NULL;
     return new_w;
 }
 
 W* w_copy(W* w){
-   W* new_w = (W*)malloc(sizeof(W));
-   memcpy(new_w, w, sizeof(W));
-   return new_w;
+    if(!w) return NULL;
+    W* new_w = (W*)malloc(sizeof(W));
+    memcpy(new_w, w, sizeof(W));
+    return new_w;
 }
 
 W* w_clone(W* w){
