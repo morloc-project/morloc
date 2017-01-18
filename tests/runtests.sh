@@ -179,6 +179,7 @@ backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.
 backend_x_test r-positionals        'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
 backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
+backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
 backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '

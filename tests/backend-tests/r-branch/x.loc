@@ -1,0 +1,42 @@
+@include
+"core/R/atomic.loc"
+
+@source R
+
+load_iris <- function() { iris }
+
+get_species <- function(x, species) { subset(x, Species == species) }
+
+foo <- function(x) { x$Sepal.Length = NULL; x }
+bar <- function(x) { x$Sepal.Width  = NULL; x }
+baz <- function(x) { x$Petal.Length = NULL; x }
+
+is_bazable <- function(x) all(x$Species == "setosa")
+is_barable <- function(x) all(x$Species == "versicolor")
+is_fooable <- function(x) all(x$Species == "virginica")
+
+gelse <- function(...) {
+    for(x in list(...)){
+        if(!is.null(x)){
+            break;
+        }
+    }
+    x
+}
+
+@path
+B :: colnames . gelse . foo bar baz null . get_species . load_iris
+
+@lang
+* :: R
+
+@check
+baz :: is_bazable . <get_species>
+bar :: is_barable . <get_species>
+foo :: is_fooable . <get_species>
+
+@arg
+get_species :: species="setosa"
+
+@fail
+baz,bar,foo :: null

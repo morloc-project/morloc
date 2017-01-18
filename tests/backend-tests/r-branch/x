@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+loc -o zzz x.loc
+
+diff <(zzz/manifold-nexus.sh colnames) <(echo \
+"Sepal.Length
+Sepal.Width
+Petal.Width
+Species") &> /dev/null
+stat=$?
+
+rm -rf zzz
+
+if [[ $stat == 0 ]]
+then
+    exit 0
+else
+    exit 1
+fi
