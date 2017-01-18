@@ -34,7 +34,7 @@ replicate <- function(n, f, ...){
 # paste     :: [String] -> String
 
 @path
-Main :: apply . (replicate . `20` `sample` `letters`) `1` `paste`
+apply . (replicate . `20` `sample` `letters`) `1` `paste`
 
 @lang
 * :: R

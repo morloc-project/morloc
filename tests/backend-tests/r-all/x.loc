@@ -27,7 +27,7 @@ plot_pdf <- function(x, path){
 }
 
 @path
-Main :: null . hclust . dist . normalize . load_data
+null . hclust . dist . normalize . load_data
 
 @lang
 * :: R

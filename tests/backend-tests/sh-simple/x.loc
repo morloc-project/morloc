@@ -5,7 +5,7 @@ This code is equivalent to
 man ls | grep -Po "[a-z]+ed" | sort | uniq
 
 @path
-A :: uniq . sort . grep . man
+uniq . sort . grep . man
 
 @arg
 grep := -Po "[a-z]+ed"

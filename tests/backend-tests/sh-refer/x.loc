@@ -8,7 +8,7 @@ random () {
 "core/sh/datcache.loc"
 
 @path
-R :: random
+random
 
 # These both give the same output, since <random> is one-line long
 A :: head . <random>

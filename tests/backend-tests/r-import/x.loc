@@ -7,4 +7,4 @@ import "x-foo-2.loc"
 add <- function(a, b){ a + b }
 
 @path
-A :: add . zzz baz
+add . zzz baz

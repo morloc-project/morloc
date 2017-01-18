@@ -15,7 +15,7 @@ ls_has_man () {
 "core/sh/datcache.loc"
 
 @path
-A :: uniq . sort . grep . man
+uniq . sort . grep . man
 
 @arg
 grep := -Po "[a-z]+ed"

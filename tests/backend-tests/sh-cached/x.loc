@@ -8,7 +8,7 @@ man ls | grep -Po "[a-z]+ed" | sort | uniq
 "core/sh/datcache.loc"
 
 @path
-A :: uniq . sort . grep . man
+uniq . sort . grep . man
 
 @arg
 grep := -Po "[a-z]+ed"

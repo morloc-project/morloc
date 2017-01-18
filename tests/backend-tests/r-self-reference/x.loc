@@ -10,7 +10,7 @@ pdf_hist <- function(x, path){
 }
 
 @path
-A :: null . runif . `100`
+null . runif . `100`
 
 @lang
 * :: R

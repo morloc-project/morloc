@@ -25,7 +25,7 @@ gelse <- function(...) {
 }
 
 @path
-B :: colnames . gelse . foo bar baz null . get_species . load_iris
+colnames . gelse . foo bar baz null . get_species . load_iris
 
 @lang
 * :: R

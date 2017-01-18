@@ -3,7 +3,7 @@ seq :: NULL -> [Number]
 grep :: Text -> * -> *
 
 @path
-A :: grep . `42` seq
+grep . `42` seq
 
 @arg
 seq := from=1 to=100

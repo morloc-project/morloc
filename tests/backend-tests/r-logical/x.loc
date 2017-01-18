@@ -14,7 +14,7 @@ say_bi <- function() { cat("bi\n") }
 * :: R
 
 @path
-A :: say_hi say_bi
+say_hi say_bi
 
 @check
 say_hi :: and . is_a (any . is_b is_c (not . is_d))

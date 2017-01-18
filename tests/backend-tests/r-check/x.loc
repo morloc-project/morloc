@@ -4,7 +4,7 @@ is_positive <- function(x){ all(x >= 0) }
 print_na <- function(...){ "na" }
 
 @path
-A :: sqrt . max . seq
+sqrt . max . seq
 
 @arg
 seq := from=-1 to=-10

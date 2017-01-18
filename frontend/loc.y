@@ -104,6 +104,12 @@ section
 
 s_path
     : SECTION_PATH { $$ = NULL; }
+    | SECTION_PATH composition {
+        W* label = w_new(P_STRING, "default");
+        Couplet* c = couplet_new(label, w_new(P_WS, $2), '=');
+        W* w = w_new(T_PATH, c);
+        $$ = ws_add(NULL, w);
+    }
     | s_path IDENTIFIER COUPLE composition {
         Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
         W* w = w_new(T_PATH, c);

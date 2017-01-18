@@ -6,7 +6,7 @@
 require(xtable)
 
 @path
-A :: null  .  xtable  .  data.frame  .  <runif> (runif . `5`)
+null  .  xtable  .  data.frame  .  <runif> (runif . `5`)
 
 @lang
 * :: R
