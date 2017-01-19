@@ -38,6 +38,7 @@ typedef enum {
     C_NEST,
     C_GRPREF,
     C_POSITIONAL,
+    C_ARGREF,
     C_DEREF,
     C_REFER,
     K_LIST,       // K for key

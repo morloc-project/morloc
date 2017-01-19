@@ -47,6 +47,7 @@ bool _is_emmisive(W* w){
     switch(w->cls){
         case C_MANIFOLD:
         case C_POSITIONAL:
+        case C_ARGREF:
         case C_DEREF:
         case C_REFER:
             return true;
@@ -59,7 +60,6 @@ Ws* _recurse_tail(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
-        case C_DEREF:
             result = ws_add_val(result, V_WS, g_ws(g_ws(w)->last));
             break;
         case T_PATH:
@@ -75,7 +75,6 @@ Ws* _recurse_head(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
-        case C_DEREF:
             result = ws_add_val(result, V_WS, g_ws(g_ws(w)->head));
             break;
         case T_PATH:

@@ -20,6 +20,7 @@ typedef struct Manifold {
     struct Ws* inputs; // Couplet<Manifold*>
     struct Ws* args;   // Couplet<P_STRING,Ws<P_STRING>>
     struct Ws* type;   // P_STRING | P_WS
+    int nargs;         // args passed to manifold and onto children
 } Manifold;
 
 Manifold* manifold_new();

@@ -75,7 +75,7 @@ W* type_check(Ws* ws){
 }
 
 W* _type_compatible(W* o, W* t, W* msg){
-    if(o->cls == C_DEREF || o->cls == C_POSITIONAL){
+    if(o->cls == C_DEREF || o->cls == C_POSITIONAL || o->cls == C_ARGREF){
         /* I currently do no type checking on these */
         return msg;
     }

@@ -17,7 +17,7 @@ Ws* global_table;
 %define api.value.type union 
 
 %token <W*> IDENTIFIER /* K_LABEL */
-%token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_POSITIONAL */
+%token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_ARGREF | C_POSITIONAL */
 %token <W*> SELECTION  /* K_LIST */
 
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
@@ -169,8 +169,7 @@ composition
         $$ = ws_new(c);
     }
     | '&' '(' composition ')' {
-        W* e = w_new(C_NEST, $3);
-        W* d = w_new(C_DEREF, ws_new(e));
+        W* d = w_new(C_DEREF, $3);
         W* n = w_new(C_COMPOSON, ws_new(d));
         $$ = ws_new(n);
     }

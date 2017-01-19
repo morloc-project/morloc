@@ -21,17 +21,16 @@ Ws* get_tpaths(Ws* ws){
     return ws_rfilter(ws, ws_recurse_none, w_is_tpath);
 }
 
-bool w_is_grpref(W* w){
-    return  w ? w->cls == C_GRPREF : false;
-}
+bool w_is_grpref   ( W* w ){ return w ? w->cls == C_GRPREF   : false; }
+bool w_is_argref   ( W* w ){ return w ? w->cls == C_ARGREF   : false; }
+bool w_is_refer    ( W* w ){ return w ? w->cls == C_REFER    : false; }
+bool w_is_deref    ( W* w ){ return w ? w->cls == C_DEREF    : false; }
+bool w_is_tpath    ( W* w ){ return w ? w->cls == T_PATH     : false; }
+bool w_is_manifold ( W* w ){ return w ? w->cls == C_MANIFOLD : false; }
+bool w_is_type     ( W* w ){ return w ? w->cls == T_TYPE     : false; }
+bool w_is_composon ( W* w ){ return w ? w->cls == C_COMPOSON : false; }
 
-bool w_is_refer(W* w){
-    return  w ? w->cls == C_REFER : false;
-}
-
-bool w_is_tpath(W* w){
-    return w ? w->cls == T_PATH : false;
-}
+bool w_is_recursive(W* w){ return w ? get_value_type(w->cls) == V_WS : false; }
 
 bool w_is_composition(W* w){
     if(!w) return false;
@@ -45,22 +44,6 @@ bool w_is_composition(W* w){
         default:
             return false;
     }
-}
-
-bool w_is_recursive(W* w){
-    return w ? get_value_type(w->cls) == V_WS : false; 
-}
-
-bool w_is_manifold(W* w){
-    return w ? w->cls == C_MANIFOLD : false;
-}
-
-bool w_is_type(W* w){
-    return w ? w->cls == T_TYPE : false;
-}
-
-bool w_is_composon(W* w){
-    return w ? w->cls == C_COMPOSON : false;
 }
 
 Ws* ws_split_couplet(W* c){
@@ -251,6 +234,7 @@ Ws* ws_recurse_path(W* w, W* p){
 
     switch(w->cls){
         case C_NEST:
+        case C_DEREF:
             return g_ws(w);
         case T_PATH:
         case T_EFFECT:

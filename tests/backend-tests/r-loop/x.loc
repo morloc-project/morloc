@@ -37,10 +37,12 @@ map <- function(f, x){
 @path
 # Main :: null . map . `Inner` (c . "iris" "cars" "mtcars")
 
-Main :: null . map . &Inner (c . "iris" "cars" "mtcars")
+# Main :: null . map . &*Inner (c . "iris" "cars" "mtcars")
 
-Inner :: null . hclust . dist . normalize . load_data
-
+null .
+map  .
+    & (null . hclust . dist . normalize . load_data . $1)
+      (c . "iris" "cars" "mtcars")
 
 @lang
 * :: R

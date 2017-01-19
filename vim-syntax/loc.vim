@@ -89,6 +89,7 @@ syn match s_var /\h[\w.0-9]*/ contained
 syn match s_arg /--\?\w*/ contained
 syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
+syn match s_marg /$\d/ contained
 
 " general default functions
 syn keyword s_simple_function id null call true false contained
@@ -147,7 +148,7 @@ syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_hasarg    contains=s_equal,s_string,s_num,s_sep,s_brk,s_par,s_fun
 syn cluster c_function  contains=@c_hasarg,s_simple_function,s_sep
-syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_fun,s_group,s_refer
+syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_marg,s_fun,s_group,s_refer
 syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
@@ -227,5 +228,6 @@ hi def link s_positional Identifier
 hi def link s_refer      Identifier
 hi def link s_group      Identifier
 hi def link s_fun        Identifier
+hi def link s_marg       Identifier
 
 hi def link DEFAULT_ERROR Error

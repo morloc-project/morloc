@@ -1,0 +1,12 @@
+EMIT	m0	*
+FUNC	m0	map
+EMIT	m1	*
+FUNC	m1	f
+NARG	m1	1
+INPM	m1	0	m2
+EMIT	m2	*
+FUNC	m2	g
+NARG	m2	1
+INPA	m2	0	1
+EMIT	m3	*
+FUNC	m3	foo

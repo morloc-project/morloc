@@ -1,0 +1,3 @@
+@path
+
+map . & (f . g . $1) foo

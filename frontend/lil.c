@@ -107,6 +107,12 @@ Ws* _manifold_to_lil(W* cm){
         lil = _three(lil, LIL_TYPE, _mid(m), g_string(m->type->last));
     }
 
+    if(m->nargs > 0){
+        char* s = (char*)malloc(10 * sizeof(char));
+        sprintf(s, "%d", m->nargs);
+        lil = _three(lil, LIL_N_MANIFOLD_ARGS, _mid(m), s);
+    }
+
     if(m->inputs){
         int i = 0;
         for(W* w = m->inputs->head; w; w = w->next){
@@ -130,17 +136,23 @@ Ws* _manifold_to_lil(W* cm){
                         g_string(w)
                     );
                     break;
+                case C_ARGREF:
+                    lil = _four(
+                        lil,
+                        LIL_ARG_INPUT,
+                        _mid(m),
+                        _num(i++),
+                        g_string(w)
+                    );
+                    break;
                 case C_DEREF:
-                    {
-                    char* id = (char*)malloc(20 * sizeof(char));
-                    sprintf(id, "d%d", w->uid);
-                    lil = _two(lil, "NORM", id);
-                    // STUB
-                    // - build the whole graph
-                    // - specify inputs
-                    // - check for singular output
-                    lil = _four(lil, "INPD", _mid(m), _num(i++), id);
-                    }
+                    lil = _four(
+                        lil,
+                        LIL_FUNCTION_INPUT,
+                        _mid(m),  // input id
+                        _num(i++), // position
+                        /*  // output id of sink of deref composition */
+                    );
                     break;
                 default:
                     break;

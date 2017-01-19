@@ -13,6 +13,7 @@ VType get_value_type(Class cls){
             break;
         case C_POSITIONAL:
         case C_GRPREF:
+        case C_ARGREF:
         case P_STRING:
         case K_NAME:
             vtype = V_STRING;
@@ -143,6 +144,7 @@ char* w_class_str(Class cls){
         case P_MANIFOLD:   s = strdup("P_MANIFOLD")   ; break;
         case C_POSITIONAL: s = strdup("C_POSITIONAL") ; break;
         case C_GRPREF:     s = strdup("C_GRPREF")     ; break;
+        case C_ARGREF:     s = strdup("C_ARGREF")     ; break;
         case P_STRING:     s = strdup("P_STRING")     ; break;
         case K_NAME:       s = strdup("K_NAME")       ; break;
         case T_PATH:       s = strdup("T_PATH")       ; break;

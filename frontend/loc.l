@@ -73,14 +73,15 @@ identifier {var}{ws}*:[:=+-]
 parameter [a-zA-Z0-9_.-]+{ws}*=
 flag [-][a-zA-Z0-9_.-]+
 
-grpref     \*{var}
-refer      <[^<]+>
-
 str \'[^']*\'|\"[^"]*\"
 bak `[^`]*`
 int -?([0-9]|[1-9][0-9]+)
 dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
+
+grpref     \*{var}
+argref     ${int}
+refer      <[^<]+>
 
 couple ::|:=|:-|:\+
 
@@ -167,6 +168,11 @@ RESET { RETURN_TOKEN(RESET); }
 <S_PATH,S_SIDE>{grpref} {
     char* s = strdup(yytext + 1);
     W* w = w_new(C_GRPREF, s);
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{argref} {
+    char* s = strdup(yytext + 1);
+    W* w = w_new(C_ARGREF, s);
     RETURN(w, COMPOSON);
 }
 <S_PATH,S_SIDE>{bak} {
