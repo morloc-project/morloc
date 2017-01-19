@@ -15,7 +15,7 @@ make_temp_dir() {
     echo $tmp
 }
 
-exit_and_clean() {
+finish() {
     rm -rf $tmp
     exit $1
 }
@@ -31,17 +31,20 @@ DESC
 USAGE
    ./build.sh [options] whatever.loc
 OPTIONS
+  -c     run the typechecker on manifolds
   -o     DIR build workflow in DIR
+  -n NEX manifold nexus file name
+  -j     clobber existing output directory    
+  -x MID build, call MID, and remove
   -l     only compile LIL
+DEBUG OPTIONS
+  -T     print lexer tokens
+  -D     recursively dump symbol table
+  -V     call valgrind with compiler
+  -M     valgrind memory check
   -L     print the output LIL (after removing source)
   -G     print the m4 text before macro expansion
   -R     print the derived macro rules
-  -x MID build, call MID, and remove
-  -n NEX manifold nexus file name
-COMPILER OPTIONS
-  -c     run the typechecker on manifolds
-  -t     print tokens to a token file
-  -d     recursively dump symbol table
 EOF
     exit 0
 }
@@ -57,6 +60,9 @@ parse=$home/bin/parse-grammar.awk
 tmp=`make_temp_dir`
 outdir=`basename $tmp`
 flags=
+valgrind=false
+valgrind_leak=false
+clobber=false
 symdump=false
 execute=false execute_id=
 only_lil=false
@@ -64,7 +70,7 @@ print_lil=false
 print_m4=false
 print_rules=false
 nexus_given=false
-while getopts "hLGRlctdx:o:n:" opt; do
+while getopts "hLGRjlcTDVMx:o:n:" opt; do
     case $opt in
         h)
             usage ;;
@@ -73,6 +79,12 @@ while getopts "hLGRlctdx:o:n:" opt; do
         n)
             nexus_given=true
             nexus=$OPTARG ;;
+        j)
+            clobber=true ;;
+        V)
+            valgrind=true ;;
+        M)
+            valgrind_leak=true ;;
         l)
             only_lil=true ;;
         L)
@@ -83,9 +95,9 @@ while getopts "hLGRlctdx:o:n:" opt; do
             print_rules=true ;;
         c)
             flags="$flags -c" ;;
-        t)
+        T)
             flags="$flags -t" ;;
-        d)
+        D)
             flags="$flags -d"
             symdump=true ;;
         x)
@@ -96,12 +108,35 @@ done
 
 locsrc=${@:$OPTIND:1}
 
-$only_lil && $loc_compiler $locsrc && exit_and_clean 0
+if $valgrind
+then
+    valgrind $loc_compiler $flags $locsrc > /dev/null
+    finish 0
+fi
 
-$symdump && $loc_compiler $flags $locsrc && exit_and_clean 0
+if $valgrind_leak
+then
+    valgrind --leak-check=full --show-leak-kinds=all -v $loc_compiler $flags $locsrc > /dev/null
+    finish 0
+fi
+
+$only_lil && $loc_compiler $locsrc && finish 0
+
+$symdump && $loc_compiler $flags $locsrc && finish 0
 
 lil=$tmp/lil # Loc Intermediate Language (output of Loc compiler)
 $loc_compiler $flags $locsrc > $lil
+
+if test -d $outdir
+then
+    if $clobber
+    then
+        rm -rf $outdir        
+    else
+        echo "Output directory already exists" > /dev/stderr
+        finish 0
+    fi
+fi
 
 mkdir $outdir
 mkdir $outdir/cache
@@ -202,4 +237,4 @@ then
     cat $red
 fi
 
-exit_and_clean 0
+finish 0

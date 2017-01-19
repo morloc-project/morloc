@@ -84,12 +84,12 @@ frontend_test(){
             n_pass=$(( n_pass + 1 ))
         else
             warn FAIL
-            say " - bad LIL"
+            say " - LIL diff"
             n_fail=$(( n_fail + 1 ))
         fi
     else
         warn FAIL
-        say " - non-zero exit status"
+        say " - runtime"
         n_fail=$(( n_fail + 1 ))
         $instant_death && exit 1
     fi
@@ -110,7 +110,7 @@ backend_x_test(){
         n_pass=$(( n_pass + 1 ))
     else
         warn FAIL
-        say
+        say " - $?"
         n_fail=$(( n_fail + 1 ))
         $instant_death && exit 1
     fi
@@ -142,13 +142,13 @@ backend_test(){
             n_pass=$(( n_pass + 1 ))
         else
             warn FAIL
-            say " - unexpected output"
+            say " - diff"
             n_fail=$(( n_fail + 1 ))
         fi
         rm $obs $exp
     else
         warn FAIL
-        say " - non-zero exit status"
+        say " - runtime"
         n_fail=$(( n_fail + 1 ))
         $instant_death && exit 1
     fi
