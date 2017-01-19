@@ -135,7 +135,7 @@ do
     awk -v src="$src" -v red="$red" -v lng=$lang '
         BEGIN{ FS="\t" ; state=0 }
         $0 ~ /^[^ ]/ { state = 0 }
-        $1 == "SOURCE" && $2 ~ lng { state = 1; next; }
+        $1 == "NSRC" && $2 ~ lng { state = 1; next; }
         state == 1 { print > src }
         state == 0 && $0 ~ /^[^ ]/ { print > red }
     ' $lil

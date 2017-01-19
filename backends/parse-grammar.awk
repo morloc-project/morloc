@@ -21,8 +21,8 @@ BEGIN {
 }
 
 $1 == "EMIT"  { m[$2]["lang"]      = $3 ; next }
-$1 == "CACHE" { m[$2]["cache"]     = $3 ; next }
-$1 == "CHECK" { m[$2]["check"][$3] = 1  ; next }
+$1 == "CACH" { m[$2]["cache"]     = $3 ; next }
+$1 == "CHEK" { m[$2]["check"][$3] = 1  ; next }
 $1 == "FUNC"  { m[$2]["func"]      = $3 ; next }
 $1 == "PASS"  { m[$2]["pass"]      = $3 ; next }
 $1 == "FAIL"  { m[$2]["fail"]      = $3 ; next }
@@ -33,7 +33,7 @@ $1 == "HOOK"  { m[$2]["hook"][$3]  = 1  ; next }
 $1 == "INPM"  { m[$2]["m"][$3]     = $4 ; next }
 $1 == "INPP"  { m[$2]["p"][$3]     = $4 ; next }
 
-$1 == "ARG" {
+$1 == "FARG" {
     if($4 != "") { arg = $3 " BIND " $4 } else { arg = $3 }
     m[$2]["arg"][arg] = 1
     next

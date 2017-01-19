@@ -4,7 +4,7 @@ INPM	m0	0	m1
 EMIT	m1	*
 FUNC	m1	c
 INPM	m1	0	m2
-CHECK	m1	m8
+CHEK	m1	m8
 EMIT	m2	*
 FUNC	m2	b
 INPM	m2	0	m3

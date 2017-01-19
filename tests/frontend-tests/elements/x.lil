@@ -2,12 +2,12 @@ EMIT	m0	*
 FUNC	m0	_alias
 TYPE	m0	NULL
 INPM	m0	0	m1
-CACHE	m0	_cache
+CACH	m0	_cache
 OPEN	m0	_open
 PACK	m0	_pack
 PASS	m0	_pass
-ARG	m0	x	1
-ARG	m0	y	2
+FARG	m0	x	1
+FARG	m0	y	2
 EMIT	m1	*
 FUNC	m1	f
 TYPE	m1	A

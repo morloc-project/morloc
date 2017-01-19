@@ -20,7 +20,7 @@ void print_lil(Ws* lil){
     if(!lil) return;
     for(W* w = lil->head; w; w = w->next){
         W* ww = wws_head(w);
-        if(wws_length(w) > 3 && strcmp("SOURCE", g_string(ww)) == 0){
+        if(wws_length(w) > 3 && strcmp(LIL_SOURCE, g_string(ww)) == 0){
             printf(
                 "%s\t%s\t%s\n",
                 g_string(ww),
@@ -62,7 +62,7 @@ Ws* build_lil_prolog(Ws* ws_top){
             // not 0.
             if(ws_length(g_ws(g_rhs(e))) > 1){
                 W* a = wws_join(
-                    _wtwo("SOURCE", g_string(g_lhs(e))),
+                    _wtwo(LIL_SOURCE, g_string(g_lhs(e))),
                     g_rhs(e)
                 );
                 lil = ws_add(lil, a);
@@ -85,7 +85,7 @@ Ws* build_lil_epilog(Ws* ws_top){
             Label* l = g_label(e);
             if(l->name){
                 char* alias = l->label ? l->label : l->name;
-                lil = _three(lil, "EXPORT", l->name, alias);
+                lil = _three(lil, LIL_EXPORT, l->name, alias);
             }
         }
     }
@@ -99,12 +99,12 @@ Ws* _manifold_to_lil(W* cm){
 
     Ws* lil = NULL;
 
-    lil = _three(lil, "EMIT", _mid(m), m->lang ? m->lang : "*");
+    lil = _three(lil, LIL_EMIT, _mid(m), m->lang ? m->lang : "*");
 
-    lil = _three(lil, "FUNC", _mid(m), m->function);
+    lil = _three(lil, LIL_FUNCTION, _mid(m), m->function);
 
     if(m->type){
-        lil = _three(lil, "TYPE", _mid(m), g_string(m->type->last));
+        lil = _three(lil, LIL_TYPE, _mid(m), g_string(m->type->last));
     }
 
     if(m->inputs){
@@ -115,14 +115,20 @@ Ws* _manifold_to_lil(W* cm){
                 case C_MANIFOLD:
                     lil = _four(
                         lil,
-                        "INPM",
+                        LIL_MANIFOLD_INPUT,
                         _mid(m),  // input id
                         _num(i++), // position
                         _mid(g_manifold(g_rhs(w))) // output id
                     );
                     break;
                 case C_POSITIONAL:
-                    lil = _four(lil, "INPP", _mid(m), _num(i++), g_string(w));
+                    lil = _four(
+                        lil,
+                        LIL_POSITIONAL_INPUT,
+                        _mid(m),
+                        _num(i++),
+                        g_string(w)
+                    );
                     break;
                 case C_DEREF:
                     {
@@ -142,21 +148,21 @@ Ws* _manifold_to_lil(W* cm){
         }
     }
 
-    lil = _pathmod(lil, m->effect, "EFCT",  m);
-    lil = _pathmod(lil, m->hook,   "HOOK",  m);
-    lil = _pathmod(lil, m->check,  "CHECK", m);
-    lil = _pathmod(lil, m->fail,   "FAIL",  m);
+    lil = _pathmod(lil, m->effect, LIL_EFFECT, m);
+    lil = _pathmod(lil, m->hook,   LIL_HOOK,   m);
+    lil = _pathmod(lil, m->check,  LIL_CHECK,  m);
+    lil = _pathmod(lil, m->fail,   LIL_FAIL,   m);
 
-    lil = _pairlist(lil, m->cache,  "CACHE", m);
-    lil = _pairlist(lil, m->open,   "OPEN",  m);
-    lil = _pairlist(lil, m->pack,   "PACK",  m);
-    lil = _pairlist(lil, m->pass,   "PASS",  m);
-    lil = _pairlist(lil, m->doc,    "DOC",   m);
+    lil = _pairlist(lil, m->cache, LIL_CACHE,        m);
+    lil = _pairlist(lil, m->open,  LIL_OPEN,         m);
+    lil = _pairlist(lil, m->pack,  LIL_PACK,         m);
+    lil = _pairlist(lil, m->pass,  LIL_PASS,         m);
+    lil = _pairlist(lil, m->doc,   LIL_MANIFOLD_DOC, m);
 
     if(m->args){
         for(W* w = m->args->head; w; w = w->next){
             W* a = wws_join( 
-                _wthree("ARG", _mid(m), g_string(g_lhs(w))),
+                _wthree(LIL_FUNCTION_ARG, _mid(m), g_string(g_lhs(w))),
                 g_rhs(w)
             );
             lil = ws_add(lil, a);

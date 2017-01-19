@@ -9,8 +9,8 @@ HOOK	m1	m9
 EMIT	m2	*
 FUNC	m2	b
 INPM	m2	0	m3
-CHECK	m2	m6
-CHECK	m2	m7
+CHEK	m2	m6
+CHEK	m2	m7
 EMIT	m3	*
 FUNC	m3	a
 EFCT	m3	m4
