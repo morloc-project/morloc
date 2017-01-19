@@ -9,6 +9,6 @@ then
 else
     status=1
 fi
-# rm -rf tst
+rm -rf tst
 
 exit $status

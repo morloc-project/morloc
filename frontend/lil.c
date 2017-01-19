@@ -122,7 +122,7 @@ Ws* _manifold_to_lil(W* cm){
                     lil = _four(
                         lil,
                         LIL_MANIFOLD_INPUT,
-                        _mid(m),  // input id
+                        _mid(m),   // input id
                         _num(i++), // position
                         _mid(g_manifold(g_rhs(w))) // output id
                     );
@@ -146,13 +146,8 @@ Ws* _manifold_to_lil(W* cm){
                     );
                     break;
                 case C_DEREF:
-                    lil = _four(
-                        lil,
-                        LIL_FUNCTION_INPUT,
-                        _mid(m),  // input id
-                        _num(i++), // position
-                        /*  // output id of sink of deref composition */
-                    );
+                    // build_io will have pointed the manifold to the
+                    // appropriate manifold within the deref path
                     break;
                 default:
                     break;

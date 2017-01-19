@@ -75,6 +75,7 @@ Ws* _recurse_head(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
+        case C_DEREF:
             result = ws_add_val(result, V_WS, g_ws(g_ws(w)->head));
             break;
         case T_PATH:

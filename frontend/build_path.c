@@ -87,10 +87,6 @@ void resolve_refers(Ws* ws){
 void resolve_derefs(Ws* ws){
     // set nargs within the derefs
     ws_rcmod(ws, ws_recurse_most, w_is_deref, _resolve_one_deref);
-    // link manifolds calling derefs
-    // (what if you have multiple compositions?)
-    // e.g.
-    // map2 . &( foo . $1 $2 ) &( bar . $1 $2 ) x y
 }
 
 W* _highest_argref(W* w, W* p){
@@ -106,17 +102,6 @@ bool _w_is_manifold(W* w, W* p){
 }
 
 void _resolve_one_deref(W* w){
-
-    // I know ...
-    W* tmp = w_new(C_NEST, ws_new(w_new(C_NEST, g_ws(w))));
-    Ws* comp_out = composon_outputs(tmp);
-
-    if(ws_length(comp_out) != 1){
-        fprintf(stderr, "Multiple outputs in compositions is undefined\n");
-        return;
-    }
-
-    W* output = comp_out->head;
 
     // Find the highest ARGREF, e.g. 3 in `(g . $3 f . $1 $2 )`
     W* margs = ws_scrap(
