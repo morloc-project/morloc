@@ -4,12 +4,13 @@ set -u
 usage (){
 cat << EOF
 Test suite for the LOC compiler
-  -h  print this help message
-  -q  quiet, print no output
-  -x  stop on first failure
-  -F  skip frontend tests
-  -B  skip backend tests
-  -K  skip tests of known problems
+  -h      print this help message
+  -q      quiet, print no output
+  -x      stop on first failure
+  -F      skip frontend tests
+  -B      skip backend tests
+  -K      skip tests of known problems
+  -l LANG do test for language L
 EOF
     exit 0
 }
@@ -19,7 +20,8 @@ instant_death=false
 test_frontend=true
 test_backend=true
 test_known_problems=true 
-while getopts "hqxFBKE" opt; do
+lang="all"
+while getopts "hqxFBKEl:" opt; do
     case $opt in
         h)
             usage ;;
@@ -33,6 +35,8 @@ while getopts "hqxFBKE" opt; do
             test_backend=false ;;
         K)
             test_known_problems=false ;;
+        l)
+            lang=$OPTARG ;;
         ?)
             warn "Illegal arguments"
             exit 1
@@ -175,6 +179,7 @@ fi
 if $test_backend
 then
 announce "Backend tests"
+if [[ $lang == "all" || $lang == "R" ]] ; then
 backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
 backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
 backend_x_test r-positionals        'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
@@ -185,20 +190,25 @@ backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ....
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
+backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
+fi
+if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 fi
+fi
 
 if $test_known_problems
 then
+if [[ $lang == "all" ]] ; then
 announce "Known problems"
 backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ........................ '
 backend_test   r-import         add 'r-import/          -- fanciful import statement ...................... '
-backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
+fi
 fi
 
 

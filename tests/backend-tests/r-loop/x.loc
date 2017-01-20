@@ -18,7 +18,8 @@ columns_are_numeric <- function(x) {
   all(sapply(x, is.numeric)) 
 }
 
-plot_pdf <- function(x, path){
+plot_pdf <- function(x, name){
+    path <- paste0("f-", name, ".pdf")
     pdf(path)
     plot(x)
     dev.off()
@@ -41,18 +42,17 @@ map <- function(f, x){
 
 null .
 map  .
-    & (null . hclust . dist . normalize . load_data . $1)
+    & (plot_pdf . hclust $1 . dist . normalize . load_data . $1)
       (c . "iris" "cars" "mtcars")
 
 @lang
 * :: R
 
-# @cache
-# hclust,dist,normalize,load_data :: RESET
+@cache
+hclust,dist,normalize,load_data :: RESET
 
 # @check
 # normalize :: columns_are_numeric . <load_data>
-# map :: all . sapply . `exists` c
 #
 # @hook
-# null := plot_pdf . <hclust> `"z.pdf"`
+# hclust := plot_pdf . <hclust> `"z.pdf"`
