@@ -1,42 +1,45 @@
 TARGET=loc
 CC=gcc
 XXFLAGS=-Wall -g
+LINKERFLAGS=-lfl
 
 SRC_BISON=${TARGET}.y
 SRC_LEXER=${TARGET}.l
 
+LEXER=lex.yy
+PARSER=${TARGET}.tab
 
+OBJECTS =         \
+	label.o       \
+	couplet.o     \
+	manifold.o    \
+	w.o           \
+	ws.o          \
+	lhs.o         \
+	hof.o         \
+	ws_access.o   \
+	type.o        \
+	build_io.o    \
+	build_path.o  \
+	build_mod.o   \
+	build.o       \
+	lil.o         \
+	${LEXER}.o    \
+	bufstack.o
 
-C_LEXER=lex.yy.c
-H_LEXER=lex.yy.h
-C_PARSER=${TARGET}.tab.c
-H_PARSER=${TARGET}.tab.h
+${TARGET}: ${OBJECTS} 
+	${CC} -o ${TARGET} ${OBJECTS} ${PARSER}.o ${LINKERFLAGS}
 
-FILES =          \
-	${C_LEXER}   \
-	${C_PARSER}  \
-	bufstack.c   \
-	lhs.c        \
-	ws.c         \
-	w.c          \
-	hof.c        \
-	label.c      \
-	couplet.c    \
-	manifold.c   \
-	build.c      \
-	build_path.c \
-	build_io.c   \
-	build_mod.c  \
-	type.c       \
-	ws_access.c  \
-	lil.c
+%.o: %.c %.h
+	${CC} -c ${XXFLAGS} $< -o $@
 
-all:
-	bison -d --report=all -Wall ${SRC_BISON}
+${LEXER}.o: ${SRC_LEXER} ${SRC_BISON}
 	flex ${SRC_LEXER}
-	${CC} -Wall ${XXFLAGS} -lfl -o ${TARGET} ${FILES}
+	bison -d --report=all -Wall ${SRC_BISON}
+	${CC} -c ${XXFLAGS} ${LEXER}.c ${PARSER}.c
 
 clean:
-	rm -f ${TARGET} ${C_PARSER} ${H_PARSER} ${C_LEXER} ${H_LEXER}
+	rm -f ${TARGET} ${PARSER}.[hc] ${LEXER}.[hc]
+	rm -rf ${OBJECTS} ${PARSER}.o
 	rm -f tok.log loc.output
 	rm -f vgcore*

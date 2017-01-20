@@ -1,14 +1,11 @@
+*.o
+
+loc.output
 lex.yy.*
 *.tab.*
-*.out
-zzz*
 vgcore.*
 loc
-loc.output
-lexer
 tags
-DELETEME
-current.loc
 tst/
 test.loc
 
