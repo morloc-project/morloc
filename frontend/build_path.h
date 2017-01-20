@@ -10,4 +10,6 @@ void resolve_refers(Ws* ws);
 
 void resolve_derefs(Ws* ws);
 
+void propagate_nargs(Ws* ws);
+
 #endif

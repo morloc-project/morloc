@@ -10,6 +10,8 @@ void build_manifolds(Ws* ws_top){
 
     link_modifiers(ws_top);
 
+    propagate_nargs(ws_top);
+
     link_inputs(ws_top);
 
 }

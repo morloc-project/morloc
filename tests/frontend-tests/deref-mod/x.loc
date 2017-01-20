@@ -1,0 +1,10 @@
+@path
+
+map . &(f . g . $1) foo
+
+@lang
+* :: igpay
+
+@effect
+f :: a . b
+map :: c . d

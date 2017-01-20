@@ -173,6 +173,7 @@ frontend_test list-select        'list-select/       -- lists expand on couplet 
 frontend_test args               'args/              -- [+-]lhs, flags, lists .......................... '
 frontend_test reset              'reset/             -- test RESET command ............................. '
 frontend_test deref              'deref/             -- map . & (f . g . $1) . foo ..................... '
+frontend_test deref-mod          'deref-mod/         -- as above, but with effects on f ................ '
 fi
 
 

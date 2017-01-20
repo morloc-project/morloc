@@ -1,0 +1,28 @@
+EMIT	m0	igpay
+FUNC	m0	map
+INPF	m0	0	m1
+INPM	m0	1	m3
+EFCT	m0	m6
+EMIT	m1	igpay
+FUNC	m1	f
+NARG	m1	1
+INPM	m1	0	m2
+EFCT	m1	m4
+EMIT	m2	igpay
+FUNC	m2	g
+NARG	m2	1
+INPA	m2	0	1
+EMIT	m3	igpay
+FUNC	m3	foo
+EMIT	m4	igpay
+FUNC	m4	a
+NARG	m4	1
+INPM	m4	0	m5
+EMIT	m5	igpay
+FUNC	m5	b
+NARG	m5	1
+EMIT	m6	igpay
+FUNC	m6	c
+INPM	m6	0	m7
+EMIT	m7	igpay
+FUNC	m7	d

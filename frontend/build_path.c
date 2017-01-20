@@ -121,3 +121,45 @@ void _resolve_one_deref(W* w){
         _set_nargs
     );
 }
+
+
+// NOTE: this propagates the number of manifold arguments to the head manifold
+// in the given composition. It does not propagate into the rest of the
+// composition. This job is performed when input/oututs are linked.
+void _copy_nargs(W* a, W* b){
+    Manifold* ma = g_manifold(g_rhs(a));
+    Manifold* mb = g_manifold(b);
+    ma->nargs = mb->nargs;
+}
+bool _has_args(W* a, W* b){
+    return g_manifold(b)->nargs != 0;
+}
+void _propagate_one_nargs(W* w){
+    Manifold* m = g_manifold(g_rhs(w));
+    ws_cap(
+        m->effect,
+        g_rhs(w),
+        _has_args,
+        _copy_nargs
+    );
+    ws_cap(
+        m->hook,
+        g_rhs(w),
+        _has_args,
+        _copy_nargs
+    );
+    ws_cap(
+        m->check,
+        g_rhs(w),
+        _has_args,
+        _copy_nargs
+    );
+}
+void propagate_nargs(Ws* ws){
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_manifold,
+        _propagate_one_nargs
+    );
+}

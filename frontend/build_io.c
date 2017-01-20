@@ -112,5 +112,10 @@ void _link_pair(W* input, W* output){
     if(input->cls == C_MANIFOLD){
         Manifold* m = g_manifold(g_rhs(input));
         m->inputs = ws_add(m->inputs, output);
+        // Propagate number of manifold arguments to inputs
+        if(m->nargs != 0 && output->cls == C_MANIFOLD){
+           Manifold* o = g_manifold(g_rhs(output)); 
+           o->nargs = m->nargs;
+        }
     }
 }
