@@ -198,6 +198,7 @@ backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..........
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 fi
 fi
 

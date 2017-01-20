@@ -1,0 +1,19 @@
+@source sh
+
+map () {
+    while read arg
+    do
+        $1 "$arg"
+    done < "$2"
+}
+
+@path
+map . &( cut . wc . grep . $1 ) ls . `*.sh`
+
+@lang
+* :: sh
+
+@arg
+grep :: "a" -o
+wc :: -l
+cut :: --delimiter=" " --fields=1

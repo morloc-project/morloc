@@ -2,6 +2,8 @@ m4_define(`XXRIGHTXXLEFT', ` ')
 
 m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `ARG_LIST(m4_decr($1)) $$1')')
 
+m4_define(`NTH_ARG', $$1)
+
 m4_define(`PROLOGUE', )
 
 m4_define(`NATIVE_MANIFOLD',

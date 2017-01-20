@@ -92,7 +92,7 @@ END{
             input=""
             while(1) {
                 if(m[i]["m"][k]){
-                    input = sprintf("%s SEP CALL(%s, %s)", input, m[i]["m"][k], i)
+                    input = sprintf("%s SEP `CALL(%s, %s)'", input, m[i]["m"][k], i)
                 }
                 else if(m[i]["p"][k]){
                     input = sprintf("%s SEP %s", input, m[i]["p"][k])
@@ -101,7 +101,7 @@ END{
                     input = sprintf("%s SEP %s", input, m[i]["f"][k])
                 }
                 else if(m[i]["a"][k]){
-                    input = sprintf("%s SEP NTH_ARG(%s)", input, m[i]["a"][k])
+                    input = sprintf("%s SEP `NTH_ARG(%s)'", input, m[i]["a"][k])
                 }
                 else {
                     break
