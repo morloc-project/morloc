@@ -37,7 +37,9 @@ OPTIONS
   -j     clobber existing output directory    
   -x MID build, call MID, and remove
   -l     only compile LIL
+  -r     remove all loc_* directories
 DEBUG OPTIONS
+  -X     don't expand macros (will not produce usable code)
   -T     print lexer tokens
   -D     recursively dump symbol table
   -V     call valgrind with compiler
@@ -62,6 +64,7 @@ outdir=`basename $tmp`
 flags=
 valgrind=false
 valgrind_leak=false
+expand_macros=true
 clobber=false
 symdump=false
 execute=false execute_id=
@@ -70,7 +73,7 @@ print_lil=false
 print_m4=false
 print_rules=false
 nexus_given=false
-while getopts "hLGRjlcTDVMx:o:n:" opt; do
+while getopts "hLGRjlcXTDVMrx:o:n:" opt; do
     case $opt in
         h)
             usage ;;
@@ -81,6 +84,12 @@ while getopts "hLGRjlcTDVMx:o:n:" opt; do
             nexus=$OPTARG ;;
         j)
             clobber=true ;;
+        r)
+            rm -rf loc_* /tmp/loc_*
+            exit 0
+            ;;
+        X)
+            expand_macros=false ;;
         V)
             valgrind=true ;;
         M)
@@ -185,9 +194,14 @@ do
         -v L='`' -v R="'" < $red
 
     # Merge all rules and macros, expand to manifold functions
-    cat $grammar $rules $body |
-        m4 $M4_FLAGS | sed 's/XXLEFT //g; s/ XXRIGHT//g' |
-        sed '/^ *$/d;s/ *//' > $exe
+    if $expand_macros
+    then
+        cat $grammar $rules $body |
+            m4 $M4_FLAGS | sed 's/XXLEFT //g; s/ XXRIGHT//g' |
+            sed '/^ *$/d;s/ *//' > $exe
+    else
+        cat $grammar $rules $body > $exe
+    fi
 
     # Move executable to working folder and set permissions
     cp $exe $outdir/call.$lang

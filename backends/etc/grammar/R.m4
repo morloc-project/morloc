@@ -1,7 +1,7 @@
 m4_define(`XXRIGHTXXLEFT', ``,'' ) 
 
-m4_define(R_ARG_LIST, `m4_ifelse($1, `1', `x$1', `R_ARG_LIST(m4_decr($1))`,' x$1')')
-m4_define(ARG_LIST, `m4_ifelse($1, `0', `', `R_ARG_LIST($1)')')
+m4_define(`R_ARG_LIST', `m4_ifelse($1, `1', `x$1', `R_ARG_LIST(m4_decr($1))`,' x$1')')
+m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `R_ARG_LIST($1)')')
 
 m4_define(NTH_ARG, x$1)
 
@@ -25,7 +25,7 @@ m4_define(`UNIVERSAL_MANIFOLD',
 )
 
 m4_define(`FOREIGN_MANIFOLD',
-    $2 <- function(`ARG_LIST(NARG_$1)'){
+    $2 <- function(`ARG_LIST(NARG_$2)'){
         d <- system("./call.$1 $2", intern = TRUE)
         READ(TYPE_$2)
         d <- read_tsv(d)

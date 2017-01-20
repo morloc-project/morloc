@@ -8,8 +8,9 @@ DESC
 USAGE
     __NAME__ [options] MANIFOLD
 
-REQUIRED ARGUMENTS
+ARGUMENTS
     -h print this help message and exit
+    -x remove all loc_* directories
 
 MANIFOLDS
     __MANIFOLD_DOCUMENTATION__
@@ -23,6 +24,9 @@ while getopts "h" opt; do
     case $opt in
         h)
             usage ;;
+        x)
+            rm -rf loc_* /tmp/loc_*
+            exit 0 ;;
     esac 
 done
 
