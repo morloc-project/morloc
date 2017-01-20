@@ -119,13 +119,23 @@ Ws* _manifold_to_lil(W* cm){
             switch(w->cls){
                 case C_REFER:
                 case C_MANIFOLD:
-                    lil = _four(
-                        lil,
-                        LIL_MANIFOLD_INPUT,
-                        _mid(m),   // input id
-                        _num(i++), // position
-                        _mid(g_manifold(g_rhs(w))) // output id
-                    );
+                    if(g_manifold(g_rhs(w))->as_function) {
+                        lil = _four(
+                            lil,
+                            LIL_FUNCTION_INPUT,
+                            _mid(m),   // input id
+                            _num(i++), // position
+                            _mid(g_manifold(g_rhs(w))) // output id
+                        );
+                    } else {
+                        lil = _four(
+                            lil,
+                            LIL_MANIFOLD_INPUT,
+                            _mid(m),   // input id
+                            _num(i++), // position
+                            _mid(g_manifold(g_rhs(w))) // output id
+                        );
+                    }
                     break;
                 case C_POSITIONAL:
                     lil = _four(

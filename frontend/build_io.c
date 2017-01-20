@@ -5,6 +5,8 @@ void _link_pair(W* input, W* output);
 Ws* _recurse_tail(W*);
 Ws* _recurse_head(W*);
 bool _is_emmisive(W*);
+Ws* _extract_ws(W* w);
+void _set_as_function(W* w, W* o);
 
 void link_inputs(Ws* ws){
 
@@ -18,6 +20,7 @@ void link_inputs(Ws* ws){
 
 }
 
+
 void _link_composon(W* a, W* b){
 
     // identify the elements within this composon which take input
@@ -26,14 +29,21 @@ void _link_composon(W* a, W* b){
     // identify the elements in the next composon which produce output
     Ws* outputs = composon_outputs(b);
 
+    // the emmisive function within a dereferenced expression
+    // should be flagged as a literal function
+    ws_zip_mod(_extract_ws(b), outputs, _set_as_function);
+
     // link each input to each output
     ws_2mod(inputs, outputs, _link_pair);
 }
 
-Ws* _extract_ws(W* w){
-    if(!w) return NULL;
-    return w->cls == T_PATH ? g_ws(g_rhs(w)): g_ws(w);
+void _set_as_function(W* w, W* o){
+    if(o->cls == C_MANIFOLD){
+        Manifold* output = g_manifold(g_rhs(o));
+        output->as_function = (w->cls == C_DEREF) ? true : false;
+    }
 }
+
 Ws* composon_inputs(W* w){
     // recurse to the rightmost manifold set
     return ws_rfilter(_extract_ws(w), _recurse_tail, w_is_manifold);
@@ -43,12 +53,16 @@ Ws* composon_outputs(W* w){
     return ws_rfilter(_extract_ws(w), _recurse_head, _is_emmisive);
 }
 
+Ws* _extract_ws(W* w){
+    if(!w) return NULL;
+    return w->cls == T_PATH ? g_ws(g_rhs(w)): g_ws(w);
+}
+
 bool _is_emmisive(W* w){
     switch(w->cls){
         case C_MANIFOLD:
         case C_POSITIONAL:
         case C_ARGREF:
-        case C_DEREF:
         case C_REFER:
             return true;
         default:

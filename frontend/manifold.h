@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 typedef struct Manifold {
     int uid;
@@ -21,6 +22,7 @@ typedef struct Manifold {
     struct Ws* args;   // Couplet<P_STRING,Ws<P_STRING>>
     struct Ws* type;   // P_STRING | P_WS
     int nargs;         // args passed to manifold and onto children
+    bool as_function;
 } Manifold;
 
 Manifold* manifold_new();

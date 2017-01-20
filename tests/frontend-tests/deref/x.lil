@@ -1,6 +1,6 @@
 EMIT	m0	igpay
 FUNC	m0	map
-INPM	m0	0	m1
+INPF	m0	0	m1
 INPM	m0	1	m3
 EMIT	m1	igpay
 FUNC	m1	f

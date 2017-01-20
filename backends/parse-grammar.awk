@@ -20,18 +20,21 @@ BEGIN {
     printf("m4_define(`AND', `%s') ", ands[lang])   >> rules
 }
 
-$1 == "EMIT"  { m[$2]["lang"]      = $3 ; next }
+$1 == "EMIT" { m[$2]["lang"]      = $3 ; next }
 $1 == "CACH" { m[$2]["cache"]     = $3 ; next }
 $1 == "CHEK" { m[$2]["check"][$3] = 1  ; next }
-$1 == "FUNC"  { m[$2]["func"]      = $3 ; next }
-$1 == "PASS"  { m[$2]["pass"]      = $3 ; next }
-$1 == "FAIL"  { m[$2]["fail"]      = $3 ; next }
-$1 == "PACK"  { m[$2]["pack"]      = $3 ; next }
-$1 == "OPEN"  { m[$2]["open"]      = $3 ; next }
-$1 == "EFCT"  { m[$2]["efct"][$3]  = 1  ; next }
-$1 == "HOOK"  { m[$2]["hook"][$3]  = 1  ; next }
-$1 == "INPM"  { m[$2]["m"][$3]     = $4 ; next }
-$1 == "INPP"  { m[$2]["p"][$3]     = $4 ; next }
+$1 == "FUNC" { m[$2]["func"]      = $3 ; next }
+$1 == "PASS" { m[$2]["pass"]      = $3 ; next }
+$1 == "FAIL" { m[$2]["fail"]      = $3 ; next }
+$1 == "PACK" { m[$2]["pack"]      = $3 ; next }
+$1 == "OPEN" { m[$2]["open"]      = $3 ; next }
+$1 == "EFCT" { m[$2]["efct"][$3]  = 1  ; next }
+$1 == "HOOK" { m[$2]["hook"][$3]  = 1  ; next }
+$1 == "INPM" { m[$2]["m"][$3]     = $4 ; next }
+$1 == "INPP" { m[$2]["p"][$3]     = $4 ; next }
+$1 == "INPA" { m[$2]["a"][$3]     = $4 ; next }
+$1 == "INPF" { m[$2]["f"][$3]     = $4 ; next }
+$1 == "NARG" { m[$2]["narg"]      = $3 ; next }
 
 $1 == "FARG" {
     if($4 != "") { arg = $3 " BIND " $4 } else { arg = $3 }
@@ -47,6 +50,12 @@ END{
     for(i in m){
 
         printf "MANIFOLD_%s ", i >> body
+
+        if(m[i]["narg"]){
+            printf "m4_define(NARG_%s, %s)", i, m[i]["narg"] >> rules
+        } else {
+            printf "m4_define(NARG_%s, 0)", i >> rules
+        }
 
         if(m[i]["lang"] == lang){
             printf "m4_define(`MANIFOLD_%s', NATIVE_MANIFOLD(%s)) ", i, i >> rules
@@ -78,15 +87,21 @@ END{
             printf "m4_define(`VALIDATE_%s', NO_VALIDATE(%s)) ", i, i >> rules
         }
 
-        if( "m" in m[i] || "p" in m[i] ){
+        if( "m" in m[i] || "p" in m[i] || "a" in m[i] || "f" in m[i]){
             k=0
             input=""
             while(1) {
                 if(m[i]["m"][k]){
-                    input = sprintf("%s SEP CALL(%s)", input, m[i]["m"][k])
+                    input = sprintf("%s SEP CALL(%s, %s)", input, m[i]["m"][k], i)
                 }
                 else if(m[i]["p"][k]){
                     input = sprintf("%s SEP %s", input, m[i]["p"][k])
+                }
+                else if(m[i]["f"][k]){
+                    input = sprintf("%s SEP %s", input, m[i]["f"][k])
+                }
+                else if(m[i]["a"][k]){
+                    input = sprintf("%s SEP NTH_ARG(%s)", input, m[i]["a"][k])
                 }
                 else {
                     break
