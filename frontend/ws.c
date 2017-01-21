@@ -112,7 +112,7 @@ Ws* ws_join(Ws* a, Ws* b){
 
 Ws* ws_tail(Ws* ws){
     if(ws_length(ws) < 2) return NULL;
-    Ws* n = ws_new(ws->head->next);
+    Ws* n = _ws_new(ws->head->next);
     n->last = ws->last;
     return n;
 }

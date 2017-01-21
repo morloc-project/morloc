@@ -175,6 +175,7 @@ frontend_test reset              'reset/             -- test RESET command .....
 frontend_test deref              'deref/             -- map . & (f . g . $1) . foo ..................... '
 frontend_test deref-mod          'deref-mod/         -- as above, but with effects on f ................ '
 frontend_test selection          'selection/         -- @effect A/foo :+ a_foo ......................... '
+frontend_test deep-path          'deep-path/         -- @effect A/B/foo :+ a_foo ....................... '
 fi
 
 

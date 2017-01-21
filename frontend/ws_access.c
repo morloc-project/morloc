@@ -109,7 +109,7 @@ W* w_nextval_ifpath(W* w, W* p) {
                 // 2) I mustn't clone the manifold (that changes the uid)
                 next = w_isolate(p);
                 s_couplet(next, couplet_copy(g_couplet(next)));                
-                s_lhs(next, w_new(K_LIST, ws_tail(ws_clone(g_ws(g_lhs(next))))));
+                s_lhs(next, w_new(K_PATH, ws_tail(ws_clone(g_ws(g_lhs(next))))));
                 s_rhs(next, w_copy(g_rhs(next)));
                 }
                 break;
