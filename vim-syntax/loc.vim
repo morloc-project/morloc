@@ -132,7 +132,7 @@ syn keyword s_import_keyword as contained
 syn keyword s_import_keyword import contained
 
 " labels
-syn match s_varlabel ':[\w.]\+' contained
+syn match s_varlabel ':\w\+' contained
 
 
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""

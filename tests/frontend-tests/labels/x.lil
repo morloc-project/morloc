@@ -1,0 +1,19 @@
+EMIT	m0	*
+FUNC	m0	f
+INPM	m0	0	m1
+CHEK	m0	m3
+EMIT	m1	*
+FUNC	m1	f
+INPM	m1	0	m2
+CHEK	m1	m3
+CHEK	m1	m4
+EMIT	m2	*
+FUNC	m2	f
+CHEK	m2	m3
+CHEK	m2	m5
+EMIT	m3	*
+FUNC	m3	has_beasty_arms
+EMIT	m4	*
+FUNC	m4	can_burninate
+EMIT	m5	*
+FUNC	m5	is_secretly_vegan

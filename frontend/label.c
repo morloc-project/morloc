@@ -17,6 +17,7 @@ Label* label_copy(Label* l){
     return label_new_set(name, label);
 }
 
+// assume 'a' is being searched against 'b'
 bool label_cmp(Label* a, Label* b){
     return
         // both must exist
@@ -37,10 +38,15 @@ bool label_cmp(Label* a, Label* b){
                 // names are equal
                 strcmp(a->name, b->name) == 0
                 &&
-                // AND labels are either both missing or equal
+                // AND EITHER
                 (
-                    (a->label == NULL && b->label == NULL) ||
-                    strcmp(a->label, b->label) == 0
+                    // the query has no label
+                    a->label == NULL ||
+                    // OR both labeled identically
+                    (
+                        b->label != NULL &&
+                        strcmp(a->label, b->label) == 0
+                    )
                 )
             )
         )

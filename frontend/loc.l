@@ -62,7 +62,7 @@ ws        [ \t\n\r]
 comment   #.*\n
 
 sym       [a-zA-Z_][a-zA-Z0-9_.]*
-var       {sym}(:{sym})?
+var       {sym}(:[a-zA-Z0-9_]+)?
 path      {var}({ws}*\/{ws}*{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]
 

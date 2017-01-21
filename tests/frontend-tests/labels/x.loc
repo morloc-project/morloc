@@ -1,0 +1,7 @@
+@path
+f . f:trogdor . f:1_minotaur
+
+@check
+f :: has_beasty_arms
+f:trogdor :+ can_burninate
+f:1_minotaur :+ is_secretly_vegan
