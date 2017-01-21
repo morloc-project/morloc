@@ -18,7 +18,7 @@ install:
 
 .PHONY: test
 test:
-	cd tests && ./runtests.sh
+	cd tests && ./runtests.sh -K
 
 .PHONY: clean
 clean:
