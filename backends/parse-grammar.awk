@@ -134,7 +134,7 @@ END{
         if(length(m[i]["hook"]) > 0){
             hook=""
             for(k in m[i]["hook"]){
-                hook = sprintf("%s HOOK(%s, %s) \n", hook, k, i)
+                hook = sprintf("%s HOOK(%s, %s) ", hook, k, i)
             }
             printf "m4_define(`HOOK_%s', %s) \n", i, hook >> rules
         } else {

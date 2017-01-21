@@ -2,18 +2,38 @@
 
 .memcache_data <- new.env()
 
-memcache_chk <- function(mid) {
-    exists(mid, .memcache_data, inherits=FALSE)
+memcache_chk <- function(mid, uid=NULL) {
+    if(is.null(uid)){
+        exists(mid, .memcache_data, inherits=FALSE)
+    } else {
+        exists(mid, .memcache_data, inherits=FALSE) &&
+        exists(as.character(uid), .memcache_data[[mid]], inherits=FALSE)
+    }
 }
 
-memcache_get <- function(mid) {
-    .memcache_data[[mid]]
+memcache_get <- function(mid, uid=NULL) {
+    if(is.null(uid)){
+        .memcache_data[[mid]]
+    } else {
+        .memcache_data[[mid]][[as.character(uid)]]
+    }
 }
 
-memcache_put <- function(mid, dat) {
-    .memcache_data[[mid]] = dat
+memcache_put <- function(mid, dat, uid=NULL) {
+    if(is.null(uid)){
+        .memcache_data[[mid]] = dat
+    } else {
+        if(!exists(mid, .memcache_data, inherits=FALSE)){
+            .memcache_data[[mid]] = new.env()
+        }
+        .memcache_data[[mid]][[as.character(uid)]] = dat
+    }
 }
 
-memcache_del <- function(mid) {
-    rm(mid, envir=.memcache_data)
+memcache_del <- function(mid, uid=NULL) {
+    if(is.null(uid)){
+        rm(mid, envir=.memcache_data)
+    } else {
+        rm(list=as.character(uid), envir=.memcache_data[[mid]])
+    }
 }

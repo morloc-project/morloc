@@ -3,7 +3,7 @@ m4_define(`XXRIGHTXXLEFT', ``,'' )
 m4_define(`R_ARG_LIST', `m4_ifelse($1, `1', `x$1', `R_ARG_LIST(m4_decr($1))`,' x$1')')m4_dnl
 m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `R_ARG_LIST($1), uid')')m4_dnl
 m4_dnl
-m4_define(`UID', `m4_ifelse(`NARG_$1', `0', `NULL', `uid')')
+m4_define(`UID_ARG', `m4_ifelse(NARG_$1, `0', `', `, uid=uid')')
 
 m4_define(`MAKE_UID', 
 $1_uid <- 0
@@ -55,8 +55,8 @@ m4_define(`RETURN', `Mb')
 
 
 m4_define(`DO_CACHE',
-    if(BASECACHE_$1``_chk''("$1"`,' uid=UID($1))){
-        Mb = BASECACHE_$1``_get''("$1"`,' uid=UID($1))
+    if(BASECACHE_$1``_chk''("$1"`UID_ARG($1)')){
+        Mb = BASECACHE_$1``_get''("$1"`UID_ARG($1)')
     } else {
         VALIDATE_$1
         HOOK_$1
@@ -87,7 +87,7 @@ m4_define(`CORE',
     CACHE_PUT_$1
 )
 
-m4_define(`DO_CACHE_PUT', BASECACHE_$1 ("$1", Mb, uid=UID($1)))
+m4_define(`DO_CACHE_PUT', BASECACHE_$1 ("$1", Mb `UID_ARG($1)'))
 
 m4_define(`NO_CACHE_PUT', )
 
@@ -111,7 +111,7 @@ m4_define(`SIMPLE_FAIL', null)
 
 m4_define(`NO_PUT', )
 
-m4_define(`DO_PUT', BASECACHE_$1``_put''("$1", Mb, UID($1)))
+m4_define(`DO_PUT', BASECACHE_$1``_put''("$1", Mb `UID_ARG($1)'))
 
 m4_define(`EPILOGUE',
 
