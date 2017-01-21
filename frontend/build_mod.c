@@ -73,7 +73,14 @@ bool _manifold_modifier(W* w){
 }
 
 void _mod_add_modifiers(Ws* ws_top, W* p){
-    ws_prmod(ws_top, p, ws_recurse_path, _basename_match, _add_modifier, w_nextval_ifpath);
+    ws_prmod(
+        ws_top,
+        p,
+        ws_recurse_path,
+        _basename_match,
+        _add_modifier,
+        w_nextval_ifpath
+    );
 }
 
 bool _basename_match(W* w, W* p){

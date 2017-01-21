@@ -32,7 +32,7 @@ bool w_is_composon ( W* w ){ return w ? w->cls == C_COMPOSON : false; }
 
 bool w_is_recursive(W* w){ return w ? get_value_type(w->cls) == V_WS : false; }
 
-bool w_is_composition(W* w){
+bool w_is_named_composition(W* w){
     if(!w) return false;
     switch(w->cls){
         case T_PATH:
@@ -99,24 +99,28 @@ W* w_nextval_never(W* w, W* p){ return p; }
  * if w is a path, we need to pop the top level of p's lhs.
  */
 W* w_nextval_ifpath(W* w, W* p) {
-    W* next = NULL;
-    if(w_is_composition(w) && ws_length(g_ws(g_lhs(p))) > 1){
-        W* lhs = g_lhs(p);
-        switch(lhs->cls){
+    W* next = p;
+    if(w_is_named_composition(w) && ws_length(g_ws(g_lhs(p))) > 1){
+        switch(g_lhs(p)->cls){
             case K_PATH:
+                {
+                // Gah, this is a real pain
+                // 1) I mustn't modify the original p
+                // 2) I mustn't clone the manifold (that changes the uid)
                 next = w_isolate(p);
-                s_ws(g_lhs(next), ws_tail(g_ws(lhs)));
+                s_couplet(next, couplet_copy(g_couplet(next)));                
+                s_lhs(next, w_new(K_LIST, ws_tail(ws_clone(g_ws(g_lhs(next))))));
+                s_rhs(next, w_copy(g_rhs(next)));
+                }
                 break;
             case K_LIST:
                 next = NULL;
-                fprintf(stderr, "Not supported (%s:%d)", __func__, __LINE__);
+                // Not supported
                 break;
             default:
                 next = NULL;
                 break;
         }
-    } else {
-        next = w_isolate(p);
     }
     return next;
 }
@@ -190,7 +194,7 @@ Ws* ws_recurse_composition(W* w){
             rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
             break;
         default:
-            return NULL;
+            rs = NULL;
     }
     return rs;
 }
@@ -210,7 +214,7 @@ Label* _ws_get_label_from_lhs(W* a){
             break;
         case K_LIST:
             label = NULL;
-            fprintf(stderr, "Recursion into K_LIST not supported (%s:%d)", __func__, __LINE__);
+            // Recursion into K_LIST not supported
             break;
         default:
             label = NULL;
@@ -229,12 +233,10 @@ bool w_equal_lhs(W* a, W* b){
 }
 
 Ws* ws_recurse_path(W* w, W* p){
-
-    w_assert_type(p, V_COUPLET);
-
     switch(w->cls){
         case C_NEST:
         case C_DEREF:
+        case C_COMPOSON:
             return g_ws(w);
         case T_PATH:
         case T_EFFECT:
@@ -242,8 +244,9 @@ Ws* ws_recurse_path(W* w, W* p){
         case T_CHECK:
         case T_FAIL:
             return
-                ws_length(g_ws(g_lhs(p))) == 1 || w_equal_lhs(w, p) ?
-                g_ws(g_rhs(w)) : NULL;
+                (wws_length(g_lhs(p)) == 1 || w_equal_lhs(p, w))
+                    ? g_ws(g_rhs(w))
+                    : NULL;
         default:
             return NULL;
     }

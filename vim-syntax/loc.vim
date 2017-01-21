@@ -169,10 +169,10 @@ syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_functio
 syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,@c_couple,@c_path
 
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg
-syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_hasarg,s_cache_function,@c_couple_nl
-syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_modify_nl,s_string
+syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_hasarg,s_cache_function,@c_couple
+syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_modify,s_string
 syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_export_keyword
-syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,@c_couple_nl
+syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
 syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk

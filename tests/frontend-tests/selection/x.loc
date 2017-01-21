@@ -1,0 +1,8 @@
+@path
+A :: foo:1 . *B
+B :: fifi:2 . foo:2
+
+@effect
+A/foo :+ a_foo
+B/foo :+ b_foo
+foo   :+ yolo

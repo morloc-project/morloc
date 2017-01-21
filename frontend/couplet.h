@@ -11,4 +11,6 @@ typedef struct Couplet{
 
 Couplet* couplet_new(struct W* lhs, struct W* rhs, char op);
 
+Couplet* couplet_copy(Couplet* c);
+
 #endif
