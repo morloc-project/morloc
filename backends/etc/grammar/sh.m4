@@ -2,6 +2,20 @@ m4_define(`XXRIGHTXXLEFT', ` ')
 
 m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `ARG_LIST(m4_decr($1)) $$1')')
 
+m4_define(`UID_ARG', `m4_ifelse(NARG_$1, `0', `', `` $uid'')')
+
+m4_define(`MAKE_UID', 
+$1_uid=0
+wrap_$1 () {
+    $1_uid=$(( $1_uid + 1 ))
+    uid=$1_uid
+    $1 `ARG_LIST(NARG_$1)'
+}
+)
+
+m4_define(`UID_WRAP', wrap_$1 )
+
+
 m4_define(`NTH_ARG', $$1)
 
 m4_define(`PROLOGUE', )
@@ -32,9 +46,9 @@ m4_define(`FOREIGN_MANIFOLD',
 m4_define(`RETURN', )
 
 m4_define(`DO_CACHE',
-    if BASECACHE_$1``_chk'' $1
+    if BASECACHE_$1``_chk'' $1 UID_ARG($1)
     then
-        BASECACHE_$1``_get'' $1
+        BASECACHE_$1``_get'' $1 UID_ARG($1)
     else
         VALIDATE_$1
     fi
@@ -82,7 +96,7 @@ m4_define(`NULL', `$1 > /dev/null')
 
 m4_define(`NO_PUT', )
 
-m4_define(`DO_PUT', `| BASECACHE_$1``_put'' $1')
+m4_define(`DO_PUT', `| BASECACHE_$1``_put'' $1' UID_ARG($1))
 
 m4_define(`EPILOGUE',
 `

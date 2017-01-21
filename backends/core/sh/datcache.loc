@@ -2,16 +2,39 @@
 
 # String -> Bool
 datcache_chk() {
-    test -d cache && test -f cache/$1.dat
+    if [[ -z $2 ]]
+    then
+        test -d cache && test -f cache/$1.dat
+    else
+        test -d cache && test -f cache/$1_$2.dat
+    fi
 }
 
 # NULL -> Text
 datcache_get() {
-    cat cache/$1.dat
+    if [[ -z $2 ]]
+    then
+        cat cache/$1.dat
+    else
+        cat cache/$1_$2.dat
+    fi
 }
 
 # Text -> Text
 datcache_put() {
-    tee cache/$1.dat
+    if [[ -z $2 ]]
+    then
+        tee cache/$1.dat
+    else
+        tee cache/$1_$2.dat
+    fi
 }
 
+datcache_del() {
+    if [[ -z $2 ]]
+    then
+        rm cache/$1.dat
+    else
+        rm cache/$1_$2.dat
+    fi
+}

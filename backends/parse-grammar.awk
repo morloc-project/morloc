@@ -94,7 +94,7 @@ END{
                 }
                 else if(m[i]["f"][k]){
                     wrappings[m[i]["f"][k]] = 1
-                    input = sprintf("%s SEP UID_WRAP(%s)", input, m[i]["f"][k])
+                    input = sprintf("%s SEP `UID_WRAP(%s)'", input, m[i]["f"][k])
                 }
                 else if(m[i]["a"][k]){
                     input = sprintf("%s SEP `NTH_ARG(%s)'", input, m[i]["a"][k])

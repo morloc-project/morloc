@@ -8,7 +8,7 @@ map () {
 }
 
 @path
-map . &( cut . wc . grep . $1 ) ls . `*.sh`
+map . &(cat . cut . wc . grep . $1 ) ls . `*.sh`
 
 @lang
 * :: sh
