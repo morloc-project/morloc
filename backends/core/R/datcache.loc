@@ -2,25 +2,29 @@
 
 require(readr)
 
-datcache_path <- function(mid) {
-    file.path("cache", paste0(mid, ".Rdat"))
+datcache_path <- function(mid, uid=null) {
+    if(is.null(uid)){
+        file.path("cache", paste0(mid, ".rdat"))
+    } else {
+        file.path("cache", paste0(mid, "_", uid, ".rdat"))
+    }
 }
 
-# String -> Bool
-datcache_chk <- function(mid) {
-    file.exists(datcache_path(mid))
+# string -> bool
+datcache_chk <- function(mid, uid=null) {
+    file.exists(datcache_path(mid, uid))
 }
 
-# NULL -> Text
-datcache_get <- function(mid) {
-    read_rds(datcache_path(mid))
+# null -> text
+datcache_get <- function(mid, uid=null) {
+    read_rds(datcache_path(mid, uid))
 }
 
-# Text -> Text
-datcache_put <- function(mid, dat) {
-    write_rds(dat, datcache_path(mid))
+# text -> text
+datcache_put <- function(mid, dat, uid=null) {
+    write_rds(dat, datcache_path(mid, uid))
 }
 
-datcache_del <- function(mid) {
-    file.remove(datcache_path(mid))
+datcache_del <- function(mid, uid=null) {
+    file.remove(datcache_path(mid, uid))
 }

@@ -44,12 +44,7 @@ $1 == "FARG" {
 
 END{
 
-    printf "PROLOGUE " >> body
-    printf "m4_include(%s)\n", src >> body
-
     for(i in m){
-
-        printf "MANIFOLD_%s \n", i >> body
 
         if(m[i]["narg"]){
             printf "m4_define(`NARG_%s', %s)\n", i, m[i]["narg"] >> rules
@@ -79,7 +74,7 @@ END{
             printf "m4_define(`VALIDATE_%s', DO_VALIDATE(%s)) \n", i, i >> rules
             check=""
             for(k in m[i]["check"]){
-                check = sprintf("%s AND CHECK(%s)\n", check, k)
+                check = sprintf("%s AND CHECK(%s, %s)\n", check, k, i)
             }
             gsub(/^ AND /, "", check) # remove the last sep
             printf "m4_define(`CHECK_%s', %s) \n", i, check >> rules
@@ -98,7 +93,8 @@ END{
                     input = sprintf("%s SEP %s", input, m[i]["p"][k])
                 }
                 else if(m[i]["f"][k]){
-                    input = sprintf("%s SEP %s", input, m[i]["f"][k])
+                    wrappings[m[i]["f"][k]] = 1
+                    input = sprintf("%s SEP UID_WRAP(%s)", input, m[i]["f"][k])
                 }
                 else if(m[i]["a"][k]){
                     input = sprintf("%s SEP `NTH_ARG(%s)'", input, m[i]["a"][k])
@@ -128,7 +124,7 @@ END{
         if(length(m[i]["efct"]) > 0){
             effect=""
             for(k in m[i]["efct"]){
-                effect = sprintf("%s EFFECT(%s) \n", effect, k)
+                effect = sprintf("%s EFFECT(%s,%s) \n", effect, k, i)
             }
             printf "m4_define(`EFFECT_%s', %s)\n", i, effect >> rules
         } else {
@@ -138,7 +134,7 @@ END{
         if(length(m[i]["hook"]) > 0){
             hook=""
             for(k in m[i]["hook"]){
-                hook = sprintf("%s HOOK(%s) \n", hook, k)
+                hook = sprintf("%s HOOK(%s, %s) \n", hook, k, i)
             }
             printf "m4_define(`HOOK_%s', %s) \n", i, hook >> rules
         } else {
@@ -178,6 +174,16 @@ END{
             printf "m4_define(`PACK_%s', NO_PACK)\n", i >> rules
         }
 
+    }
+
+    printf "PROLOGUE " >> body
+    printf "m4_include(%s)\n", src >> body
+
+    for(i in m){
+        if(i in wrappings){
+            printf sprintf("MAKE_UID(%s)\n", i) >> body
+        }
+        printf "MANIFOLD_%s \n", i >> body
     }
 
     printf "EPILOGUE\n" >> body

@@ -1,9 +1,22 @@
 m4_define(`XXRIGHTXXLEFT', ``,'' ) 
 
-m4_define(`R_ARG_LIST', `m4_ifelse($1, `1', `x$1', `R_ARG_LIST(m4_decr($1))`,' x$1')')
-m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `R_ARG_LIST($1)')')
+m4_define(`R_ARG_LIST', `m4_ifelse($1, `1', `x$1', `R_ARG_LIST(m4_decr($1))`,' x$1')')m4_dnl
+m4_define(`ARG_LIST', `m4_ifelse($1, `0', `', `R_ARG_LIST($1), uid')')m4_dnl
+m4_dnl
+m4_define(`UID', `m4_ifelse(`NARG_$1', `0', `NULL', `uid')')
 
-m4_define(NTH_ARG, x$1)
+m4_define(`MAKE_UID', 
+$1_uid <- 0
+wrap_$1 <- function ( `ARG_LIST(NARG_$1)' ) {
+    $1_uid <<- $1_uid + 1
+    uid <- $1_uid
+    $1 ( `ARG_LIST(NARG_$1)')
+}
+)
+
+m4_define(`UID_WRAP', wrap_$1)
+
+m4_define(`NTH_ARG', x$1)
 
 m4_define(`PROLOGUE',
     `#!/usr/bin/Rscript --vanilla'
@@ -42,8 +55,8 @@ m4_define(`RETURN', `Mb')
 
 
 m4_define(`DO_CACHE',
-    if(BASECACHE_$1``_chk''("$1")){
-        Mb = BASECACHE_$1``_get''("$1")
+    if(BASECACHE_$1``_chk''("$1"`,' uid=UID($1))){
+        Mb = BASECACHE_$1``_get''("$1"`,' uid=UID($1))
     } else {
         VALIDATE_$1
         HOOK_$1
@@ -67,8 +80,6 @@ m4_define(`DO_VALIDATE',
 
 m4_define(`NO_VALIDATE', `CORE($1)')
 
-m4_define(`CHECK', $1 ())
-
 m4_define(`CORE',
     b <- RUN_$1
     EFFECT_$1
@@ -76,7 +87,7 @@ m4_define(`CORE',
     CACHE_PUT_$1
 )
 
-m4_define(`DO_CACHE_PUT', BASECACHE_$1 ("$1", Mb))
+m4_define(`DO_CACHE_PUT', BASECACHE_$1 ("$1", Mb, uid=UID($1)))
 
 m4_define(`NO_CACHE_PUT', )
 
@@ -90,10 +101,9 @@ m4_define(`NO_PASS', FUNC_$1 ( INPUT_$1``''ARG_$1 ) )
 
 m4_define(`CALL', $1 (`ARG_LIST(NARG_$2)'))
 
-m4_define(`EFFECT', $1 ())
-
-m4_define(`HOOK', $1 ()
-)
+m4_define(`EFFECT', $1 (`ARG_LIST(NARG_$2)'))
+m4_define(`HOOK', $1 (`ARG_LIST(NARG_$2)'))
+m4_define(`CHECK', $1 (`ARG_LIST(NARG_$2)'))
 
 m4_define(`NOTHING', NULL)
 
@@ -101,7 +111,7 @@ m4_define(`SIMPLE_FAIL', null)
 
 m4_define(`NO_PUT', )
 
-m4_define(`DO_PUT', BASECACHE_$1``_put''("$1", Mb))
+m4_define(`DO_PUT', BASECACHE_$1``_put''("$1", Mb, UID($1)))
 
 m4_define(`EPILOGUE',
 
