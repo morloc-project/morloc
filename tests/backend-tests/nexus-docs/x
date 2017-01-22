@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+loc -o tst x.loc
+status=
+tst/manifold-nexus.sh | grep -q "get unique values"
+if [[ $? -eq 0 ]]
+then
+    status=0
+else
+    status=1
+fi
+rm -rf tst
+
+exit $status
