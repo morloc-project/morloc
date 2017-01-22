@@ -173,18 +173,21 @@ char* w_class_str(Class cls){
     return s;
 }
 
+#define SEGFAULT fflush(stderr);W* x=0;x->next=0;
 void w_assert_class(W* w, Class cls){
     if(!w){
         warn(
             "Class assertion failed! Got NULL, expected %s.\n",
             w_class_str(cls)
         );
+        SEGFAULT 
     } else if(w->cls != cls){
         warn(
             "Class assertion failed! Got %s, expected %s.\n",
             w_class_str(w->cls),
             w_class_str(cls)
         );
+        SEGFAULT 
     }
 }
 
@@ -194,6 +197,7 @@ void w_assert_type(W* w, VType type){
             "Type assertion failed! Got NULL, expected %s.\n",
             w_type_str(type)
         );
+        SEGFAULT 
     } else {
         VType t = get_value_type(w->cls);
         if(t != type){
@@ -205,9 +209,11 @@ void w_assert_type(W* w, VType type){
             if(get_value_type(w->cls) == V_COUPLET){
                 warn("%s\n", w->value.couplet->lhs->value.label->name);
             }
+            SEGFAULT 
         }
     }
 }
+#undef SEGFAULT
 
 bool _is_valid_lhs(W* w){
     bool is_valid;
