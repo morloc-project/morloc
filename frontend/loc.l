@@ -14,7 +14,7 @@ FILE* toklog;
 
 #define RETURN(x, t) \
     LOG(#t " ");     \
-    yylval.t = x;    \
+    yylval.t = x;      \
     return t;
 
 #define RETURN_TOKEN(t) \
@@ -145,9 +145,11 @@ RESET { RETURN_TOKEN(RESET); }
 <<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 
 <S_PATH,S_SIDE,S_CPLT,S_ARG,S_TYPE,S_ONTOLOGY>{couple} {
-    char c = yytext[1];
-    c = c == ':' ? '=' : c;
-    RETURN(c, COUPLE);
+    char op = yytext[1];
+    op = op == ':' ? '=' : op;
+    Couplet* c = couplet_new(NULL, NULL, op);
+    W* w = w_new(P_COUPLET, c);
+    RETURN(w, COUPLE);
 }
 
 <S_PATH>{identifier} {
@@ -220,7 +222,7 @@ RESET { RETURN_TOKEN(RESET); }
 }
 
 <S_TYPE,S_ONTOLOGY>{sym}{ws}*:: {
-    W* w = w_new(P_STRING, trim_couple(yytext));
+    W* w = w_new(K_NAME, trim_couple(yytext));
     UNPUT_S("::")
     RETURN(w, NAME);
 }

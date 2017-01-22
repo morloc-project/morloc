@@ -1,8 +1,11 @@
 %{
     #include <stdio.h>
     #include "lex.yy.h"
+    #include "ws.h"
 
     void yyerror(const char *);
+    Ws* w_make_couplet(Ws* ws, W* lhs, W*   op, W* rhs, Class cls);
+    Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls);
 %}
 
 %code requires{
@@ -14,7 +17,7 @@
 Ws* global_table;
 }
 
-%define api.value.type union 
+%define api.value.type union
 
 %token <W*> IDENTIFIER /* K_LABEL */
 %token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_ARGREF | C_POSITIONAL */
@@ -24,7 +27,7 @@ Ws* global_table;
 %type <W*> maybe_variable maybe_str
 
 %token AS ARROW RESET
-%token <char> COUPLE
+%token <W*> COUPLE
 
 %token SECTION_EFFECT
 %token SECTION_HOOK
@@ -44,8 +47,9 @@ Ws* global_table;
 %token SECTION_TYPE
 %token SECTION_ONTOLOGY
 
-%type <Ws*> section composition maybe_composition s_path
+%type <Ws*> section composition maybe_composition
 
+%type <Ws*> s_path
 %type <Ws*> s_effect
 %type <Ws*> s_hook
 %type <Ws*> s_cache
@@ -106,51 +110,39 @@ s_path
     : SECTION_PATH { $$ = NULL; }
     | SECTION_PATH composition {
         W* label = w_new(P_STRING, "default");
-        Couplet* c = couplet_new(label, w_new(P_WS, $2), '=');
-        W* w = w_new(T_PATH, c);
-        $$ = ws_add(NULL, w);
+        $$ = c_make_couplet(NULL, label, '=', w_new(P_WS, $2), T_PATH);
     }
     | s_path IDENTIFIER COUPLE composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
-        W* w = w_new(T_PATH, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_PATH);
     }
 
 s_effect
     : SECTION_EFFECT { $$ = NULL; }
     | s_effect SELECTION COUPLE maybe_composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
-        W* w = w_new(T_EFFECT, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_EFFECT);
     }
 
 s_hook
     : SECTION_HOOK { $$ = NULL; }
     | s_hook SELECTION COUPLE maybe_composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
-        W* w = w_new(T_HOOK, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_HOOK);
     }
 
 s_check
     : SECTION_CHECK { $$ = NULL; }
     | s_check SELECTION COUPLE maybe_composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4), $3);
-        W* w = w_new(T_CHECK, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_CHECK);
     }
 
 s_fail
     : SECTION_FAIL { $$ = NULL; }
     | s_fail SELECTION COUPLE maybe_composition {
-        Couplet* c = couplet_new($2, w_new(P_WS, $4), '=');
-        W* w = w_new(T_FAIL, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_FAIL);
     }
 
 maybe_composition
     : composition { $$ = $1;   }
-    | RESET         { $$ = NULL; }
+    | RESET       { $$ = NULL; }
 
 composition
     : COMPOSON {
@@ -187,57 +179,43 @@ composition
 s_cache
     : SECTION_CACHE { $$ = NULL; }
     | s_cache SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_CACHE, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_CACHE);
     }
 
 s_open
     : SECTION_OPEN { $$ = NULL; }
     | s_open SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_OPEN, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_OPEN);
     }
 
 s_pack
     : SECTION_PACK { $$ = NULL; }
     | s_pack SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_PACK, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_PACK);
     }
 
 s_pass
     : SECTION_PASS { $$ = NULL; }
     | s_pass SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_PASS, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_PASS);
     }
 
 s_alias
     : SECTION_ALIAS { $$ = NULL; }
     | s_alias SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_ALIAS, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_ALIAS);
     }
 
 s_lang
     : SECTION_LANG { $$ = NULL; }
     | s_lang SELECTION COUPLE maybe_variable {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_LANG, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_LANG);
     }
 
 s_doc
     : SECTION_DOC { $$ = NULL; }
     | s_doc SELECTION COUPLE maybe_str {
-        Couplet* c = couplet_new($2, $4, '=');
-        W* w = w_new(T_DOC, c);
-        $$ = ws_add($1, w);
+        $$ = w_make_couplet($1, $2, $3, $4, T_DOC);
     }
 
 maybe_variable
@@ -267,9 +245,7 @@ s_export
 s_source
   : SECTION_SOURCE STR {
     Ws* ws = ws_new(w_new(P_STRING, ""));
-    Couplet* c = couplet_new($2, w_new(P_WS, ws), '=');
-    W* w = w_new(T_SOURCE, c);
-    $$ = ws_new(w);
+    $$ = c_make_couplet(NULL, $2, '=', w_new(P_WS, ws), T_SOURCE);
   }
   | s_source STR {
     s_ws(g_rhs($1->head), ws_add(g_ws(g_rhs($1->head)), $2));
@@ -282,9 +258,7 @@ s_source
 s_type
   : SECTION_TYPE { $$ = NULL; }
   | s_type NAME COUPLE type {
-    Couplet* c = couplet_new($2, w_new(P_WS, $4), '='); 
-    W* w = w_new(T_TYPE, c);
-    $$ = ws_add($$, w);
+    $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_TYPE); 
   }
 
 type
@@ -298,9 +272,7 @@ type
 s_ontology
   : SECTION_ONTOLOGY { $$ = NULL; }
   | s_ontology NAME COUPLE ontology {
-    Couplet* c = couplet_new($2, w_new(P_WS, $4), '='); 
-    W* w = w_new(T_ONTOLOGY, c);
-    $$ = ws_add($$, w);
+    $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_ONTOLOGY); 
   }
 
 ontology
@@ -317,9 +289,7 @@ construct
 s_arg
   : SECTION_ARG { $$ = NULL; }
   | s_arg SELECTION COUPLE maybe_argument {
-    Couplet* c = couplet_new($2, $4, $3); 
-    W* w = w_new(T_ARGUMENT, c);
-    $$ = ws_add($$, w);
+    $$ = w_make_couplet($1, $2, $3, $4, T_ARGUMENT);
   }
   | s_arg maybe_argument {
     if($$){
@@ -327,9 +297,7 @@ s_arg
         // If multiple arguments are assigned together, the first resets the
         // argument list ('='), but subsequent ones are appended ('+').
         op = op == '=' ? '+' : op;
-        Couplet* c = couplet_new(g_lhs($$->last), $2, op); 
-        W* w = w_new(T_ARGUMENT, c);
-        $$ = ws_add($$, w);
+        $$ = c_make_couplet($1, g_lhs($$->last), op, $2, T_ARGUMENT);
     } else {
         fprintf(stderr, "ERROR: missing path in argument declaration\n");
     }
@@ -359,4 +327,18 @@ list
 
 void yyerror(char const *s){
     fprintf(stderr, "ERROR: %s\n", s);
+}
+
+
+Ws* w_make_couplet(Ws* ws, W* lhs, W* op, W* rhs, Class cls){
+    s_lhs(op, lhs);
+    s_rhs(op, rhs);
+    op->cls = cls;
+    return ws_add(ws, op);
+}
+
+Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls){
+    Couplet* c = couplet_new(lhs, rhs, op); 
+    W* w = w_new(cls, c);
+    return ws_add(ws, w);
 }
