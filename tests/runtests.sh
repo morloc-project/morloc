@@ -194,6 +194,7 @@ backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ....
 backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
 backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
+backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
 fi
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
