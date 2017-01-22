@@ -338,25 +338,25 @@ int main(int argc, char ** argv){
                         print_usage_and_exit(0);
                         break;
                     default:
-                        fprintf(stderr, "Argument '%c' not supported\n", argv[1][0]); 
+                        warn("Argument '%c' not supported\n", argv[1][0]); 
                         break;
                 }
             }
         } else {
             if(file_loaded){
-                fprintf(stderr, "Cannot process multiple files\n");            
+                warn("Cannot process multiple files\n");            
                 print_usage_and_exit(1);
             } else {
                 file_loaded = newfile(argv[1]);
                 if(!file_loaded){
-                    fprintf(stderr, "Could not open file '%s', skipping\n", argv[1]);
+                    warn("Could not open file '%s', skipping\n", argv[1]);
                 }
             }
         }
     } while(argc-- > 2 && argv++);
 
     if(!file_loaded) {
-        fprintf(stderr, "No readable loc file found\n");
+        warn("No readable loc file found\n");
         print_usage_and_exit(1);
     }
     if(log_tokens){

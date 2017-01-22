@@ -87,7 +87,7 @@ Ws* ws_add(Ws* ws, W* w){
         if(ws->last){
             _retail(ws, w2);
         } else {
-            fprintf(stderr, "WARNING: cannot add to tailless table\n");
+            warn("WARNING: cannot add to tailless table\n");
         }
     }
     return ws;
@@ -183,7 +183,7 @@ char* w_str(W* w){
             sprintf(s, "%s", c);
             break;
         default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }
@@ -216,7 +216,7 @@ Ws* _ws_add(Ws* ws, W* w){
         if(ws->last){
             _retail(ws, w);
         } else {
-            fprintf(stderr, "WARNING: cannot add to tailless table\n");
+            warn("WARNING: cannot add to tailless table\n");
         }
     }
     return ws;

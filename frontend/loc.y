@@ -24,7 +24,7 @@ Ws* global_table;
 %token <W*> SELECTION  /* K_LIST */
 
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
-%type <W*> maybe_variable maybe_str
+%type  <W*> maybe_variable maybe_str
 
 %token AS ARROW RESET
 %token <W*> COUPLE
@@ -166,8 +166,7 @@ composition
         $$ = ws_new(n);
     }
     | composition composition %prec CONCAT {
-        Ws* ws = ws_join(g_ws($1->last), g_ws($2->head));
-        s_ws($1->last, ws);
+        $1->last = wws_join($1->last, $2->head);
     }
     | composition '.' composition {
         $$ = ws_join($1, $3);
@@ -299,7 +298,7 @@ s_arg
         op = op == '=' ? '+' : op;
         $$ = c_make_couplet($1, g_lhs($$->last), op, $2, T_ARGUMENT);
     } else {
-        fprintf(stderr, "ERROR: missing path in argument declaration\n");
+        warn("ERROR: missing path in argument declaration\n");
     }
   }
 maybe_argument
@@ -326,7 +325,7 @@ list
 %%
 
 void yyerror(char const *s){
-    fprintf(stderr, "ERROR: %s\n", s);
+    warn("ERROR: %s\n", s);
 }
 
 

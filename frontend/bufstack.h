@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <err.h>
 
 /* My buffer stack handling code draws heavily from: */
 /* John Levine (2009) 'Flex and Bison'               */

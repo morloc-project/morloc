@@ -99,7 +99,7 @@ Ws* _recurse_head(W* w){
             break;
     }
     if(ws_length(result) > 1){
-        fprintf(stderr, "A nested expression MUST have exactly 1 output.\n");
+        warn("A nested expression MUST have exactly 1 output.\n");
     }
     return result;
 }

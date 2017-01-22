@@ -48,7 +48,7 @@ Ws* build_lil(Ws* ws_top){
          lil = ws_join(lil, build_lil_manifolds(ws_top));
          lil = ws_join(lil, build_lil_epilog(ws_top));
     } else {
-        fprintf(stderr, "The symbol table is empty - nothing to do\n");
+        warn("The symbol table is empty - nothing to do\n");
     }
     return lil;
 }

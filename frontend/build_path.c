@@ -28,11 +28,11 @@ void _resolve_one_grpref(W* e_ref, Ws* global){
     Ws* path = ws_pfilter(global, e_ref, _matches_path);
 
     if(!path){
-        fprintf(stderr, "ERROR: group reference could not be resolved -- path not found\n");
+        warn("ERROR: group reference could not be resolved -- path not found\n");
         return;
     }
     if(ws_length(path) > 1){
-        fprintf(stderr, "ERROR: group reference could not be resolved -- ambiguous paths\n"); 
+        warn("ERROR: group reference could not be resolved -- ambiguous paths\n"); 
         return;
     }
 

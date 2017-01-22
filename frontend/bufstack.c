@@ -18,7 +18,7 @@ int newfile(char* fn){
         sprintf(libfn, "%s/%s/%s", home, lib, fn);
         f = fopen(libfn, "r");
         if(f == NULL){
-            fprintf(stderr, "Could not find '%s'\n", libfn);
+            warn("Could not find '%s'\n", libfn);
             return 1;
         }
         free(libfn);
@@ -26,7 +26,7 @@ int newfile(char* fn){
 
     struct bufstack *bs = malloc(sizeof(struct bufstack));
     if(bs == NULL){
-        fprintf(stderr, "malloc error\n");
+        warn("malloc error\n");
         return 0;
     }
 

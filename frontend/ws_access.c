@@ -81,7 +81,7 @@ Ws* ws_split_couplet(W* c){
             result = ws_add(result, c); 
             break;
         default:
-            fprintf(stderr, "ERROR: invalid lhs type in couplet (%s:%d)", __func__, __LINE__);
+            warn("ERROR: invalid lhs type in couplet (%s:%d)", __func__, __LINE__);
             break;
     }
     return result;
@@ -218,7 +218,7 @@ Label* _ws_get_label_from_lhs(W* a){
             break;
         default:
             label = NULL;
-            fprintf(stderr, "Illegal left hand side (%s:%d)", __func__, __LINE__);
+            warn("Illegal left hand side (%s:%d)", __func__, __LINE__);
             break;
     }
     return label;

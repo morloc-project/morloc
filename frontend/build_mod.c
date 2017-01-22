@@ -45,7 +45,7 @@ void _set_manifold_type(W* mw, W* tw){
     if(strcmp(m_name, t_name) == 0){
         Manifold* m = g_manifold(g_rhs(mw));
         if(m->type){
-            fprintf(stderr, "TYPE ERROR: redeclarations of '%s' type", m_name);
+            warn("TYPE ERROR: redeclarations of '%s' type", m_name);
         } else {
             m->type = g_ws(g_rhs(tw));
         }
@@ -134,8 +134,8 @@ void _add_modifier(W* w, W* p){
             op = g_couplet(rhs) ? op : '!';
             switch(op){
                 case '-':
-                    fprintf(
-                        stderr, "The ':-' operator is not supported for args."
+                    warn(
+                        "The ':-' operator is not supported for args."
                         " Nor will it ever be (%s:%d)\n",
                         __func__, __LINE__
                     );
@@ -150,8 +150,8 @@ void _add_modifier(W* w, W* p){
                     m->args = NULL;
                     break;
                 default:
-                    fprintf(
-                        stderr, "Unexpected operator at (%s:%d)\n",
+                    warn(
+                        "Unexpected operator at (%s:%d)\n",
                         __func__, __LINE__
                     );
                     break;
@@ -175,8 +175,8 @@ void _add_modifier(W* w, W* p){
             break;
         default:
             break;
-            fprintf(
-                stderr, "Illegal p (%s) in %s:%d\n",
+            warn(
+                "Illegal p (%s) in %s:%d\n",
                 w_class_str(p->cls), __func__, __LINE__
             );
     }
@@ -206,8 +206,8 @@ Ws* _do_operation(Ws* ws, W* p, char op){
             ws = ws_pfilter(ws, p, _none_match);
             break;
         default:
-            fprintf(
-                stderr, "Unexpected operator (%c) in %s:%d\n",
+            warn(
+                "Unexpected operator (%c) in %s:%d\n",
                 op, __func__, __LINE__
             );
             break;

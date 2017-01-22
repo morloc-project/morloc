@@ -263,7 +263,7 @@ Ws* ws_m2n_map(Ws* xs, Ws* ys, Ws*(*fun)(W* x, Ws* ys)){
 void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W*, W*)){
     if(!(xs && ys)) return;
     if(ws_length(xs) != ws_length(ys)){
-        fprintf(stderr, "Cannot zipmod over lists of unequal lengths\n");
+        warn("Cannot zipmod over lists of unequal lengths\n");
         return;
     }
     W* x = xs->head;
@@ -276,7 +276,7 @@ void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W*, W*)){
 W* ws_szap(Ws* xs, Ws* ys, W* st, W*(*mod)(W*, W*, W*)){
     if(!(xs && ys)) return st;
     if(ws_length(xs) != ws_length(ys)){
-        fprintf(stderr, "Cannot zipmod over lists of unequal lengths\n");
+        warn("Cannot zipmod over lists of unequal lengths\n");
         return st;
     }
     W* x = xs->head;

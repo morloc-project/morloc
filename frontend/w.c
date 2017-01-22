@@ -51,7 +51,7 @@ VType get_value_type(Class cls){
             vtype = V_NONE;
             break;
         default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return vtype;
 }
@@ -87,7 +87,7 @@ W* w_new(Class cls, void* value){
             w->value.manifold = value;
             break;
         default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
 
     return w;
@@ -125,7 +125,7 @@ char* w_type_str(VType type){
         case V_LABEL:    s = strdup("V_LABEL");    break;
         case V_MANIFOLD: s = strdup("V_MANIFOLD"); break;
         default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }
@@ -168,54 +168,46 @@ char* w_class_str(Class cls){
         case X_NONE:       s = strdup("X_NONE")       ; break;
         case K_LABEL:      s = strdup("K_LABEL")      ; break;
         default:
-            fprintf(stderr, "illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
     return s;
 }
 
-#define SEGFAULT fflush(stderr);W* x=0;x->next=0;
 void w_assert_class(W* w, Class cls){
     if(!w){
-        fprintf(
-            stderr,
+        warn(
             "Class assertion failed! Got NULL, expected %s.\n",
             w_class_str(cls)
         );
-SEGFAULT 
     } else if(w->cls != cls){
-        fprintf(
-            stderr,
+        warn(
             "Class assertion failed! Got %s, expected %s.\n",
-            w_class_str(w->cls), w_class_str(cls)
+            w_class_str(w->cls),
+            w_class_str(cls)
         );
-SEGFAULT 
     }
 }
 
 void w_assert_type(W* w, VType type){
     if(!w){
-        fprintf(
-            stderr,
+        warn(
             "Type assertion failed! Got NULL, expected %s.\n",
             w_type_str(type)
         );
-SEGFAULT 
     } else {
         VType t = get_value_type(w->cls);
         if(t != type){
-            fprintf(
-                stderr,
-                "Type assertion failed! Got %s, expected %s.\n",
-                w_type_str(t), w_type_str(type)
+            warn(
+                "W type error! Got %s, expected %s.\n",
+                w_type_str(t),
+                w_type_str(type)
             );
             if(get_value_type(w->cls) == V_COUPLET){
-                fprintf(stderr, "%s\n", w->value.couplet->lhs->value.label->name);
+                warn("%s\n", w->value.couplet->lhs->value.label->name);
             }
-SEGFAULT 
         }
     }
 }
-#undef SEGFAULT
 
 bool _is_valid_lhs(W* w){
     bool is_valid;
@@ -270,41 +262,41 @@ W* g_rhs(W* w) {
 }
 
 void s_none(W* w){
-    if(!w) { fprintf(stderr, "Cannot set null in s_none\n"); return;}
+    if(!w) { warn("Cannot set null in s_none\n"); return;}
     w_assert_type(w, V_NONE);
     w->value.string = NULL;
 }
 void s_string(W* w, char* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_string\n"); return;}
+    if(!w) { warn("Cannot set null in s_string\n"); return;}
     w_assert_type(w, V_STRING);
     w->value.string = v;
 }
 void s_ws(W* w, struct Ws* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_ws\n"); return;}
+    if(!w) { warn("Cannot set null in s_ws\n"); return;}
     w_assert_type(w, V_WS);
     w->value.ws = v;
 }
 void s_couplet(W* w, Couplet* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_couplet\n"); return;}
+    if(!w) { warn("Cannot set null in s_couplet\n"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet = v;
 }
 void s_label(W* w, Label* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_label\n"); return;}
+    if(!w) { warn("Cannot set null in s_label\n"); return;}
     w_assert_type(w, V_LABEL);
     w->value.label = v;
 }
 void s_manifold(W* w, Manifold* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_manifold\n"); return;}
+    if(!w) { warn("Cannot set null in s_manifold\n"); return;}
     w_assert_type(w, V_MANIFOLD);
     w->value.manifold = v;
 }
 void s_lhs(W* w, W* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_lhs\n"); return;}
+    if(!w) { warn("Cannot set null in s_lhs\n"); return;}
     w_assert_type(w, V_COUPLET);
     if(!_is_valid_lhs(v)){
-        fprintf(
-            stderr,
+        err(
+            1,
             "WARNING: illegal value on couplet lhs. Expected K_*, got %s.",
             w_type_str(v->cls) 
         );
@@ -312,58 +304,58 @@ void s_lhs(W* w, W* v){
     w->value.couplet->lhs = v;
 }
 void s_rhs(W* w, W* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_rhs\n"); return;}
+    if(!w) { warn("Cannot set null in s_rhs\n"); return;}
     w_assert_type(w, V_COUPLET);
     w->value.couplet->rhs = v;
 }
 
 void force_set_none(W* w){
-    if(!w) { fprintf(stderr, "Cannot set null in s_none\n"); return;}
+    if(!w) { warn("Cannot set null in s_none\n"); return;}
     w->cls = X_NONE;
     s_none(w);
 }
 void force_set_string(W* w, Class c, char* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_string\n"); return; }
+    if(!w) { warn("Cannot set null in s_string\n"); return; }
     if(get_value_type(c) == V_STRING){
         w->cls = c;
         s_string(w, v);
     } else {
-        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+        warn("Invalid type in %s:%d\n", __func__, __LINE__);
     }
 }
 void force_set_ws(W* w, Class c, struct Ws* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_ws\n"); return;}
+    if(!w) { warn("Cannot set null in s_ws\n"); return;}
     if(get_value_type(c) == V_WS){
         w->cls = c;
         s_ws(w, v);
     } else {
-        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+        warn("Invalid type in %s:%d\n", __func__, __LINE__);
     }
 }
 void force_set_couplet(W* w, Class c, Couplet* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_couplet\n"); return;}
+    if(!w) { warn("Cannot set null in s_couplet\n"); return;}
     if(get_value_type(c) == V_COUPLET){
         w->cls = c;
         s_couplet(w, v);
     } else {
-        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+        warn("Invalid type in %s:%d\n", __func__, __LINE__);
     }
 }
 void force_set_label(W* w, Class c, Label* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_label\n"); return;}
+    if(!w) { warn("Cannot set null in s_label\n"); return;}
     if(get_value_type(c) == V_LABEL){
         w->cls = c;
         s_label(w, v);
     } else {
-        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+        warn("Invalid type in %s:%d\n", __func__, __LINE__);
     }
 }
 void force_set_manifold(W* w, Class c, Manifold* v){
-    if(!w) { fprintf(stderr, "Cannot set null in s_manifold\n"); return;}
+    if(!w) { warn("Cannot set null in s_manifold\n"); return;}
     if(get_value_type(c) == V_MANIFOLD){
         w->cls = c;
         s_manifold(w, v);
     } else {
-        fprintf(stderr, "Invalid type in %s:%d\n", __func__, __LINE__);
+        warn("Invalid type in %s:%d\n", __func__, __LINE__);
     }
 }
