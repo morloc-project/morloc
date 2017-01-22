@@ -6,3 +6,4 @@ uniq . sort . ls
 
 @doc
 uniq :: "get unique values"
+sort :: "sort (doesn't work on apple)"

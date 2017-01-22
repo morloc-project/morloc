@@ -29,16 +29,7 @@ map <- function(f, x){
     lapply(x, f)
 }
 
-# Inner <- function(x){
-#     pdf(paste0("f-", x, ".pdf"))
-#     plot(hclust(dist(normalize(load_data(x)))))
-#     dev.off()
-# }
-
 @path
-# Main :: null . map . `Inner` (c . "iris" "cars" "mtcars")
-
-# Main :: null . map . &*Inner (c . "iris" "cars" "mtcars")
 
 null .
 map  .
@@ -50,9 +41,3 @@ map  .
 
 @cache
 hclust,dist,normalize,load_data :: RESET
-
-# @check
-# normalize :: columns_are_numeric . <load_data>
-#
-# @hook
-# hclust := plot_pdf . <hclust> `"z.pdf"`

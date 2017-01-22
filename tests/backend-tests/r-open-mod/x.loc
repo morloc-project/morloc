@@ -33,7 +33,7 @@ map <- function(f, x){
 
 @path
 map .
-    & (null . hclust . dist . normalize . load_data . $1 )
+    & ( null . hclust . dist . normalize . load_data . $1 )
     (c . "cars" "mtcars")
 
 @lang
