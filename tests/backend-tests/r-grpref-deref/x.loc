@@ -1,0 +1,51 @@
+@include
+"core/R/datcache.loc"
+"core/R/atomic.loc"
+
+@source R
+
+# Load a builtin R dataset and return
+load_data <- function(x) {
+  eval(parse(text=x))
+}
+
+# Normalize numeric columns
+normalize <- function(x) {
+  as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
+}
+
+columns_are_numeric <- function(x) {
+  all(sapply(x, is.numeric)) 
+}
+
+plot_pdf <- function(x, name){
+    path <- paste0("f-", name, ".pdf")
+    pdf(path)
+    plot(x)
+    dev.off()
+}
+
+map <- function(f, x){
+    lapply(x, f)
+}
+
+@path
+map .
+    *Cluster
+    (c . "cars" "mtcars")
+
+Cluster :: &( null . hclust . dist . normalize . load_data . $1 )
+
+@lang
+* :: R
+
+@cache
+hclust,dist,normalize,load_data :: datcache
+
+@check
+normalize :: columns_are_numeric . <load_data>
+dist :: not . is.null . <normalize>
+hclust :: not . is.null . <dist>
+
+@hook
+hclust := plot_pdf . <hclust> $1

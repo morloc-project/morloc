@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+loc -o tst x.loc &> /dev/null
+tst/manifold-nexus.sh null &> /dev/null
+status=
+if [[ -f tst/f-cars.pdf && -f tst/f-iris.pdf && -f tst/f-mtcars.pdf ]]
+then
+    status=0
+else
+    status=1
+fi
+rm -rf tst
+
+exit $status
