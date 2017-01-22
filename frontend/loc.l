@@ -44,7 +44,7 @@ char* trim_couple(const char* in_str);
 %}
 
 %option header-file="lex.yy.h"
-%option noyywrap pointer yylineno
+%option noyywrap noinput pointer yylineno
 
 %s S_TYPE
 %s S_ONTOLOGY
