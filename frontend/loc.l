@@ -89,6 +89,8 @@ couple ::|:=|:-|:\+
 
 
 {comment} { }
+^{ws}*----+{ws}*$ { }
+; { }
 
 @comment {  BEGIN(X_COMMENT); }
 @include {  BEGIN(S_INCLUDE); }
