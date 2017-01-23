@@ -215,6 +215,7 @@ backend_test   sh-race          cat 'sh-race/           -- cat . <random> <rando
 backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ........................ '
 backend_test   r-import         add 'r-import/          -- fanciful import statement ...................... '
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
+frontend_test  nested-deref         'nested-deref/      -- f . ( &(g . h) ) ............................... '
 fi
 fi
 
