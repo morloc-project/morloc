@@ -1,6 +1,10 @@
 @include
 "core/R/atomic.loc"
 
+@export
+say_hi as hi
+say_bi as bi
+
 @source R
 is_a <- function() { TRUE  }
 is_b <- function() { TRUE  }

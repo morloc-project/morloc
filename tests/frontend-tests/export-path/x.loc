@@ -1,0 +1,7 @@
+@export
+A/g as main
+B/f as second
+
+@path
+A :: g . *B
+B :: g . f

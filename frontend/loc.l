@@ -63,7 +63,7 @@ comment   #.*\n
 
 sym       [a-zA-Z_][a-zA-Z0-9_.]*
 var       {sym}(:[a-zA-Z0-9_]+)?
-path      {var}({ws}*\/{ws}*{var})*
+path      {var}(\/{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]
 
 type {sym}|\[{sym}\]|\*
@@ -134,9 +134,9 @@ RESET { RETURN_TOKEN(RESET); }
 <X_COMMENT>\\@    { /* allow escaped @ */ }
 
 <S_EXPORT>as { RETURN_TOKEN(AS); }
-<S_EXPORT>{var} {
-    W* w = w_new(P_STRING, strdup(yytext));
-    RETURN(w, STR);
+<S_EXPORT>^{ws}*{path} {
+    W* w = path_from_str(trim_couple(yytext));
+    RETURN(w, PATH);
 }
 
 <S_INCLUDE>{str} {
@@ -203,7 +203,7 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, SELECTION);
 }
 
-<S_CPLT,S_PATH>{var} {
+<S_CPLT,S_PATH,S_EXPORT>{var} {
     W* w = w_new(P_STRING, strdup(yytext));
     RETURN(w, VARIABLE);
 }

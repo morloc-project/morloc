@@ -82,10 +82,17 @@ Ws* build_lil_epilog(Ws* ws_top){
     Ws* lil = NULL;
     for(W* e = ws_top->head; e; e = e->next){
         if(e->cls == T_EXPORT){
-            Label* l = g_label(e);
-            if(l->name){
-                char* alias = l->label ? l->label : l->name;
-                lil = _three(lil, LIL_EXPORT, l->name, alias);
+            Ws* exports = get_by_name(ws_top, e);
+            if(ws_length(exports) == 0){
+                warn("Cannot export path\n");
+            } else {
+                Manifold* m = g_manifold(g_rhs(exports->head));
+                char* alias = g_string(g_rhs(e));
+                if(alias){
+                    lil = _three(lil, LIL_EXPORT, _mid(m), alias);
+                } else {
+                    lil = _three(lil, LIL_EXPORT, _mid(m), m->function);
+                }
             }
         }
     }

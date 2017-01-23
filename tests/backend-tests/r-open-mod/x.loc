@@ -29,7 +29,8 @@ map <- function(f, x){
     lapply(x, f)
 }
 
-@path
+@export
+map
 
 @path
 map .

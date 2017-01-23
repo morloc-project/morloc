@@ -9,6 +9,9 @@ pdf_hist <- function(x, path){
     dev.off()
 }
 
+@export
+null as main
+
 @path
 null . runif . 100
 

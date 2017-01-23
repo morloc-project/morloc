@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 loc -o zzz x.loc
-cat <(./zzz/manifold-nexus.sh say_hi) \
-    <(./zzz/manifold-nexus.sh say_bi) |
+cat <(./zzz/manifold-nexus.sh hi) \
+    <(./zzz/manifold-nexus.sh bi) |
     diff /dev/stdin <(echo hi) &> /dev/null
 stat=$?
 rm -rf zzz

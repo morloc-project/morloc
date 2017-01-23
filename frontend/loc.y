@@ -22,6 +22,7 @@ Ws* global_table;
 %token <W*> IDENTIFIER /* K_LABEL */
 %token <W*> COMPOSON   /* C_MANIFOLD | C_GRPREF | C_ARGREF | C_POSITIONAL */
 %token <W*> SELECTION  /* K_LIST */
+%token <W*> PATH       /* K_PATH */
 
 %token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 %type  <W*> maybe_variable maybe_str
@@ -231,12 +232,11 @@ maybe_str
 
 s_export
     : SECTION_EXPORT { $$ = NULL; }
-    | s_export STR {
-        Label* e = label_new_set(g_string($2), NULL);
-        $$ = ws_add_val($$, T_EXPORT, e);
+    | s_export PATH {
+        $$ = c_make_couplet($1, $2, '=', NULL, T_EXPORT);
     }
-    | s_export AS STR {
-        g_label($$->last)->label = g_string($3);
+    | s_export PATH AS VARIABLE {
+        $$ = c_make_couplet($1, $2, '=', $4, T_EXPORT);
     }
 
 

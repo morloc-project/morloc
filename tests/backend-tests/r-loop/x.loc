@@ -29,6 +29,9 @@ map <- function(f, x){
     lapply(x, f)
 }
 
+@export
+null as main
+
 @path
 
 null .

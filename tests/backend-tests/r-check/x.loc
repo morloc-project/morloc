@@ -3,6 +3,9 @@
 is_positive <- function(x){ all(x >= 0) }
 print_na <- function(...){ "na" }
 
+@export
+sqrt
+
 @path
 sqrt . max . seq
 

@@ -14,7 +14,7 @@ Ws* get_refers(Ws* ws);
 // containing f and g)
 Ws* get_tpaths(Ws* ws);
 
-W* get_by_name(Ws* ws, W* w);
+Ws* get_by_name(Ws* ws, W* p);
 
 bool w_is_manifold  ( W* );
 bool w_is_grpref    ( W* );

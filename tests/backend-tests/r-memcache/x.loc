@@ -2,6 +2,9 @@
 "core/R/memcache.loc"
 "core/R/atomic.loc"
 
+@export
+null as main
+
 @source R
 require(xtable)
 

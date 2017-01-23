@@ -38,10 +38,10 @@ VType get_value_type(Class cls){
         case P_ARGUMENT:
         case T_TYPE:
         case T_ONTOLOGY:
+        case T_EXPORT:
             vtype = V_COUPLET;
             break;
         case K_LABEL:
-        case T_EXPORT:
             vtype = V_LABEL;
             break;
         case P_MANIFOLD:

@@ -7,6 +7,9 @@ man ls | grep -Po "[a-z]+ed" | sort | uniq
 @include
 "core/sh/datcache.loc"
 
+@export
+uniq
+
 @path
 uniq . sort . grep . man
 

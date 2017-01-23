@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 loc -o tst x.loc
-tst/manifold-nexus.sh null
+tst/manifold-nexus.sh main
 status=
 if [[ -f tst/z.pdf ]]
 then

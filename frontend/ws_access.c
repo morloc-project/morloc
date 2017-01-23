@@ -21,6 +21,31 @@ Ws* get_tpaths(Ws* ws){
     return ws_rfilter(ws, ws_recurse_none, w_is_tpath);
 }
 
+bool _manifold_match(W* w, W* p){
+    return w_is_manifold(w) && w_equal_lhs(w, p);
+}
+Ws* get_by_name(Ws* ws, W* p){
+    W* p_;
+    switch(p->cls){
+        case K_LABEL:
+        case K_LIST:
+        case K_PATH:
+        case K_NAME:
+            p_ = w_new(P_COUPLET, couplet_new(p, NULL, '='));
+            break;
+        default:
+            p_ = w_isolate(p);
+            break;
+    }
+    return ws_prfilter(
+        ws,
+        p_,
+        ws_recurse_path,
+        _manifold_match,
+        w_nextval_ifpath
+    );
+}
+
 bool w_is_grpref   ( W* w ){ return w ? w->cls == C_GRPREF   : false; }
 bool w_is_argref   ( W* w ){ return w ? w->cls == C_ARGREF   : false; }
 bool w_is_refer    ( W* w ){ return w ? w->cls == C_REFER    : false; }
@@ -225,11 +250,10 @@ Label* _ws_get_label_from_lhs(W* a){
 }
 
 bool w_equal_lhs(W* a, W* b){
-
     Label* a_label = _ws_get_label_from_lhs(g_lhs(a));
     Label* b_label = _ws_get_label_from_lhs(g_lhs(b));
-
-    return label_cmp(a_label, b_label);
+    bool is_equal = label_cmp(a_label, b_label);
+    return is_equal;
 }
 
 Ws* ws_recurse_path(W* w, W* p){

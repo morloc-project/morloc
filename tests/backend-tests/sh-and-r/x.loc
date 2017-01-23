@@ -2,6 +2,9 @@
 seq :: NULL -> [Number]
 grep :: Text -> * -> *
 
+@export
+grep
+
 @path
 grep . 42 seq
 

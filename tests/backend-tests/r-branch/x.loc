@@ -24,6 +24,9 @@ gelse <- function(...) {
     x
 }
 
+@export
+colnames
+
 @path
 colnames . gelse . foo bar baz null . get_species . load_iris
 

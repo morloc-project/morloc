@@ -26,6 +26,9 @@ plot_pdf <- function(x, path){
     dev.off()
 }
 
+@export
+null as main
+
 @path
 null . hclust . dist . normalize . load_data
 

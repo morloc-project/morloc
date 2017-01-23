@@ -7,6 +7,10 @@ random () {
 @include
 "core/sh/datcache.loc"
 
+@export
+tail
+head
+
 @path
 random
 

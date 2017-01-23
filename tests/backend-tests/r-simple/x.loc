@@ -4,6 +4,9 @@ Same as
 
 R>  sqrt(max(seq(1,9)))
 
+@export
+sqrt
+
 @path
 sqrt . max . seq
 

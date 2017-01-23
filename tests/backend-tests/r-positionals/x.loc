@@ -33,6 +33,9 @@ replicate <- function(n, f, ...){
 # sample    :: [a] -> [a]
 # paste     :: [String] -> String
 
+@export
+apply
+
 @path
 apply . (replicate . 20 `sample` `letters`) 1 `paste`
 

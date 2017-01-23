@@ -12,7 +12,7 @@ ARGUMENTS
     -h print this help message and exit
     -x remove all loc_* directories
 
-MANIFOLDS
+COMMANDS
     __MANIFOLD_DOCUMENTATION__
 EOF
     exit 0
