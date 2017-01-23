@@ -6,7 +6,33 @@ Ws* _recurse_tail(W*);
 Ws* _recurse_head(W*);
 bool _is_emmisive(W*);
 Ws* _extract_ws(W* w);
-void _set_as_function(W* w, W* o);
+
+void _set_as_function(W* w);
+
+void set_as_function(Ws* ws){
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_deref,
+        _set_as_function
+    );
+}
+
+void _set_as_function(W* w){
+
+    Ws* outputs = composon_outputs(w_new(C_COMPOSON, ws_new(w)));
+
+    if(ws_length(outputs) > 1){
+        warn("A functionalized composition can have only one output\n");
+    }
+
+    W* o = outputs->head;
+
+    if(o->cls == C_MANIFOLD){
+        Manifold* output = g_manifold(g_rhs(o));
+        output->as_function = (w->cls == C_DEREF) ? true : false;
+    }
+}
 
 void link_inputs(Ws* ws){
 
@@ -29,19 +55,8 @@ void _link_composon(W* a, W* b){
     // identify the elements in the next composon which produce output
     Ws* outputs = composon_outputs(b);
 
-    // the emmisive function within a dereferenced expression
-    // should be flagged as a literal function
-    ws_zip_mod(_extract_ws(b), outputs, _set_as_function);
-
     // link each input to each output
     ws_2mod(inputs, outputs, _link_pair);
-}
-
-void _set_as_function(W* w, W* o){
-    if(o->cls == C_MANIFOLD){
-        Manifold* output = g_manifold(g_rhs(o));
-        output->as_function = (w->cls == C_DEREF) ? true : false;
-    }
 }
 
 Ws* composon_inputs(W* w){

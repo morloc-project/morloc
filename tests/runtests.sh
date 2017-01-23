@@ -177,6 +177,7 @@ frontend_test grpref             'grpref/            -- f . *A ; A :: g ........
 frontend_test deref-mod          'deref-mod/         -- as above, but with effects on f ................ '
 frontend_test selection          'selection/         -- @effect A/foo :+ a_foo ......................... '
 frontend_test deep-path          'deep-path/         -- @effect A/B/foo :+ a_foo ....................... '
+frontend_test nested-deref       'nested-deref/      -- f . ( &(g . h) ) ............................... '
 fi
 
 
@@ -190,6 +191,7 @@ backend_x_test r-positionals        'r-positionals/     -- replicate . `20` `sam
 backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
 backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
+backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
 backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
@@ -214,8 +216,6 @@ announce "Known problems"
 backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ........................ '
 backend_test   r-import         add 'r-import/          -- fanciful import statement ...................... '
-backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
-frontend_test  nested-deref         'nested-deref/      -- f . ( &(g . h) ) ............................... '
 fi
 fi
 

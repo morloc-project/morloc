@@ -12,6 +12,8 @@ void build_manifolds(Ws* ws_top){
 
     propagate_nargs(ws_top);
 
+    set_as_function(ws_top);
+
     link_inputs(ws_top);
 
 }

@@ -15,7 +15,7 @@ normalize <- function(x) {
 }
 
 columns_are_numeric <- function(x) {
-  all(sapply(x, is.numeric)) 
+  all(sapply(x, is.numeric))
 }
 
 plot_pdf <- function(x, name){

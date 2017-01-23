@@ -3,6 +3,8 @@
 
 #include "ws_access.h"
 
+void set_as_function(Ws* ws);
+
 void link_inputs(Ws* ws);
 
 Ws* composon_inputs(W* w);

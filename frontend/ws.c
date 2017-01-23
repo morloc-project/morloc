@@ -144,7 +144,11 @@ int ws_length(Ws* ws){
 }
 
 void ws_print(Ws* ws, Ws*(*recurse)(W*)){
-    _ws_print_r(ws, recurse, 0);
+    if(!ws){
+        fprintf(stderr, "(empty list)\n");
+    } else {
+        _ws_print_r(ws, recurse, 0);
+    }
 }
 
 char* w_str(W* w){
@@ -225,8 +229,8 @@ Ws* _ws_add(Ws* ws, W* w){
 void _ws_print_r(Ws* ws, Ws*(*recurse)(W*), int depth){
     if(!ws || !ws->head) return;
     for(W* w = ws->head; w; w = w->next){
-        for(int i = 0; i < depth; i++){ printf("  "); }
-        printf("%s\n", w_str(w));
+        for(int i = 0; i < depth; i++){ fprintf(stderr, "  "); }
+        fprintf(stderr, "%s\n", w_str(w));
         Ws* rs = recurse(w);
         if(!rs) continue;
         for(W* r = rs->head; r; r = r->next){
