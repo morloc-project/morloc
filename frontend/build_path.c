@@ -102,7 +102,6 @@ bool _w_is_manifold(W* w, W* p){
 }
 
 void _resolve_one_deref(W* w){
-
     // Find the highest ARGREF, e.g. 3 in `(g . $3 f . $1 $2 )`
     W* margs = ws_scrap(
         g_ws(w),
@@ -112,14 +111,16 @@ void _resolve_one_deref(W* w){
         _highest_argref
     );
 
-    // pass ARGREF onto all descendents of this DEREF
-    ws_modcrawl(
-        g_ws(w),
-        margs,
-        ws_recurse_most,
-        _w_is_manifold,
-        _set_nargs
-    );
+    if(margs){
+        // pass ARGREF onto all descendents of this DEREF
+        ws_modcrawl(
+            g_ws(w),
+            margs,
+            ws_recurse_most,
+            _w_is_manifold,
+            _set_nargs
+        );
+    }
 }
 
 
