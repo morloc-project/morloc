@@ -179,6 +179,7 @@ frontend_test selection          'selection/         -- @effect A/foo :+ a_foo .
 frontend_test deep-path          'deep-path/         -- @effect A/B/foo :+ a_foo ....................... '
 frontend_test nested-deref       'nested-deref/      -- f . ( &(g . h) ) ............................... '
 frontend_test export-path        'export-path/       -- @export ; A/g as main .......................... '
+frontend_test variable-names     'variable-names/    -- a2 . A4 . a-r a-14 ............................. '
 fi
 
 

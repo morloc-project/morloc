@@ -61,7 +61,7 @@ char* trim_couple(const char* in_str);
 ws        [ \t\n\r]
 comment   #.*\n
 
-sym       [a-zA-Z_][a-zA-Z0-9_.]*
+sym       [a-zA-Z_][a-zA-Z0-9_.-]*
 var       {sym}(:[a-zA-Z0-9_]+)?
 path      {var}(\/{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]

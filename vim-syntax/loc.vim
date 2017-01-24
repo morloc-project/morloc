@@ -81,7 +81,7 @@ syn match s_section '@source'   contained
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Section specific syntax
 
-syn match s_var /\h[\w.0-9]*/ contained
+syn match s_var /\h[\w.0-9-]*/ contained
 syn match s_arg /--\?\w*/ contained
 syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
