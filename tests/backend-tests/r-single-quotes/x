@@ -1,1 +1,2 @@
-echo "'hi'"
+#!/usr/bin/env bash
+echo "''hi'"

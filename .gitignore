@@ -8,6 +8,7 @@ loc
 tags
 tst/
 test.loc
+zzz/
 
 call-*
 loc_[0-9]*/

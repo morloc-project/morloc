@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+loc -j -o tst x.loc
+for j in tst/*.sh; do grep -o "a" $j | wc -l | awk '{print $1}'; done
+rm -rf tst

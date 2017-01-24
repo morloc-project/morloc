@@ -4,7 +4,7 @@ BEGIN {
 
     FS="\t"
 
-    printf("m4_define(`OUTDIR', %s)\n", dir) >> rules
+    printf("m4_define(<[OUTDIR]>, %s)\n", dir) >> rules
 
     seps["sh"] = " "    
     seps["R"] = ", "
@@ -15,9 +15,9 @@ BEGIN {
     ands["sh"] = "&&"
     ands["R"] = "&&"
 
-    printf("m4_define(`SEP', `%s')\n",  seps[lang])  >> rules
-    printf("m4_define(`BIND', `%s')\n", binds[lang]) >> rules
-    printf("m4_define(`AND', `%s')\n",  ands[lang])  >> rules
+    printf("m4_define(<[SEP]>, <[%s]>)\n",  seps[lang])  >> rules
+    printf("m4_define(<[BIND]>, <[%s]>)\n", binds[lang]) >> rules
+    printf("m4_define(<[AND]>, <[%s]>)\n",  ands[lang])  >> rules
 }
 
 $1 == "EMIT" { m[$2]["lang"]      = $3 ; next }
@@ -47,39 +47,39 @@ END{
     for(i in m){
 
         if(m[i]["narg"]){
-            printf "m4_define(`NARG_%s', %s)\n", i, m[i]["narg"] >> rules
+            printf "m4_define(<[NARG_%s]>, %s)\n", i, m[i]["narg"] >> rules
         } else {
-            printf "m4_define(`NARG_%s', 0)\n", i >> rules
+            printf "m4_define(<[NARG_%s]>, 0)\n", i >> rules
         }
 
         if(m[i]["lang"] == lang){
-            printf "m4_define(`MANIFOLD_%s', NATIVE_MANIFOLD(%s)) \n", i, i >> rules
+            printf "m4_define(<[MANIFOLD_%s]>, NATIVE_MANIFOLD(%s)) \n", i, i >> rules
         } else if(m[i]["lang"] == "*"){
-            printf "m4_define(`MANIFOLD_%s', UNIVERSAL_MANIFOLD(%s)) \n", i, i >> rules
+            printf "m4_define(<[MANIFOLD_%s]>, UNIVERSAL_MANIFOLD(%s)) \n", i, i >> rules
         } else {
-            printf "m4_define(`MANIFOLD_%s', FOREIGN_MANIFOLD(%s,%s)) \n", i, m[i]["lang"], i >> rules
+            printf "m4_define(<[MANIFOLD_%s]>, FOREIGN_MANIFOLD(%s,%s)) \n", i, m[i]["lang"], i >> rules
         }
 
         if(m[i]["cache"]){
             cache = m[i]["cache"]
-            printf "m4_define(`BASECACHE_%s', %s)\n", i, cache >> rules
-            printf "m4_define(`CACHE_%s', DO_CACHE(%s))\n", i, i >> rules
-            printf "m4_define(`CACHE_PUT_%s', DO_PUT(%s))\n", i, i >> rules
+            printf "m4_define(<[BASECACHE_%s]>, %s)\n", i, cache >> rules
+            printf "m4_define(<[CACHE_%s]>, DO_CACHE(%s))\n", i, i >> rules
+            printf "m4_define(<[CACHE_PUT_%s]>, DO_PUT(%s))\n", i, i >> rules
         } else {
-            printf "m4_define(`CACHE_%s', NO_CACHE(%s))\n", i, i >> rules
-            printf "m4_define(`CACHE_PUT_%s', NO_PUT(%s))\n", i, i >> rules
+            printf "m4_define(<[CACHE_%s]>, NO_CACHE(%s))\n", i, i >> rules
+            printf "m4_define(<[CACHE_PUT_%s]>, NO_PUT(%s))\n", i, i >> rules
         }
 
         if(length(m[i]["check"]) > 0){
-            printf "m4_define(`VALIDATE_%s', DO_VALIDATE(%s)) \n", i, i >> rules
+            printf "m4_define(<[VALIDATE_%s]>, DO_VALIDATE(%s)) \n", i, i >> rules
             check=""
             for(k in m[i]["check"]){
                 check = sprintf("%s AND CHECK(%s, %s)\n", check, k, i)
             }
             gsub(/^ AND /, "", check) # remove the last sep
-            printf "m4_define(`CHECK_%s', %s) \n", i, check >> rules
+            printf "m4_define(<[CHECK_%s]>, %s) \n", i, check >> rules
         } else {
-            printf "m4_define(`VALIDATE_%s', NO_VALIDATE(%s)) \n", i, i >> rules
+            printf "m4_define(<[VALIDATE_%s]>, NO_VALIDATE(%s)) \n", i, i >> rules
         }
 
         if( "m" in m[i] || "p" in m[i] || "a" in m[i] || "f" in m[i]){
@@ -87,17 +87,17 @@ END{
             input=""
             while(1) {
                 if(m[i]["m"][k]){
-                    input = sprintf("%s SEP `CALL(%s, %s)'", input, m[i]["m"][k], i)
+                    input = sprintf("%s SEP <[CALL(%s, %s)]>", input, m[i]["m"][k], i)
                 }
                 else if(m[i]["p"][k]){
                     input = sprintf("%s SEP %s", input, m[i]["p"][k])
                 }
                 else if(m[i]["f"][k]){
                     wrappings[m[i]["f"][k]] = 1
-                    input = sprintf("%s SEP `UID_WRAP(%s)'", input, m[i]["f"][k])
+                    input = sprintf("%s SEP <[UID_WRAP(%s)]>", input, m[i]["f"][k])
                 }
                 else if(m[i]["a"][k]){
-                    input = sprintf("%s SEP `NTH_ARG(%s)'", input, m[i]["a"][k])
+                    input = sprintf("%s SEP <[NTH_ARG(%s)]>", input, m[i]["a"][k])
                 }
                 else {
                     break
@@ -105,9 +105,9 @@ END{
                 k = k + 1
             }
             gsub(/^ SEP /, "", input) # remove the last sep
-            printf "m4_define(`INPUT_%s', `XXLEFT %s XXRIGHT')\n", i, input >> rules
+            printf "m4_define(<[INPUT_%s]>, <[XXLEFT %s XXRIGHT]>)\n", i, input >> rules
         } else {
-            printf "m4_define(`INPUT_%s', %s%s)\n", i, L, R >> rules
+            printf "m4_define(<[INPUT_%s]>, <[]>)\n", i >> rules
         }
 
         if(length(m[i]["arg"]) > 0){
@@ -116,9 +116,9 @@ END{
                 arg = sprintf("%s SEP %s", arg, m[i]["arg"][k])
             }
             gsub(/^ SEP /, "", arg) # remove the initial sep
-            printf "m4_define(`ARG_%s', `XXLEFT %s XXRIGHT')\n", i, arg >> rules
+            printf "m4_define(<[ARG_%s]>, <[XXLEFT %s XXRIGHT]>)\n", i, arg >> rules
         } else {
-            printf "m4_define(`ARG_%s', %s%s)\n", i, L, R >> rules
+            printf "m4_define(<[ARG_%s]>, <[]>)\n", i >> rules
         }
 
         if(length(m[i]["efct"]) > 0){
@@ -126,9 +126,9 @@ END{
             for(k in m[i]["efct"]){
                 effect = sprintf("%s EFFECT(%s,%s) \n", effect, k, i)
             }
-            printf "m4_define(`EFFECT_%s', %s)\n", i, effect >> rules
+            printf "m4_define(<[EFFECT_%s]>, %s)\n", i, effect >> rules
         } else {
-            printf "m4_define(`EFFECT_%s', %s%s)\n", i, L, R >> rules
+            printf "m4_define(<[EFFECT_%s]>, <[]>)\n", i >> rules
         }
 
         if(length(m[i]["hook"]) > 0){
@@ -136,42 +136,42 @@ END{
             for(k in m[i]["hook"]){
                 hook = sprintf("%s HOOK(%s, %s) ", hook, k, i)
             }
-            printf "m4_define(`HOOK_%s', %s) \n", i, hook >> rules
+            printf "m4_define(<[HOOK_%s]>, %s) \n", i, hook >> rules
         } else {
-            printf "m4_define(`HOOK_%s', %s%s) \n", i, L, R >> rules
+            printf "m4_define(<[HOOK_%s]>, <[]>) \n", i >> rules
         }
 
         if(m[i]["func"]){
-            printf "m4_define(`FUNC_%s', %s)\n", i, m[i]["func"] >> rules
+            printf "m4_define(<[FUNC_%s]>, %s)\n", i, m[i]["func"] >> rules
         } else {
-            printf "m4_define(`FUNC_%s', NOTHING)\n", i >> rules
+            printf "m4_define(<[FUNC_%s]>, NOTHING)\n", i >> rules
         }
 
         if(m[i]["pass"]){
-            printf "m4_define(`PASS_%s', %s)\n", i, m[i]["pass"] 
-            printf "m4_define(`RUN_%s', DO_PASS(%s))\n", i, i >> rules
+            printf "m4_define(<[PASS_%s]>, %s)\n", i, m[i]["pass"] 
+            printf "m4_define(<[RUN_%s]>, DO_PASS(%s))\n", i, i >> rules
         } else {
-            printf "m4_define(`RUN_%s', NO_PASS(%s))\n", i, i >> rules
+            printf "m4_define(<[RUN_%s]>, NO_PASS(%s))\n", i, i >> rules
         }
 
         if(m[i]["open"]){
             print "WARNING: `open` is not yet supported" >> "/dev/stderr"
-            # printf "m4_define(`OPEN_%s', OPEN(%s)) ", i, i, m[i]["open"] >> rules
+            # printf "m4_define(<[OPEN_%s]>, OPEN(%s)) ", i, i, m[i]["open"] >> rules
         } else {
-            # printf "m4_define(`OPEN_%s', %s%s) ", i,L,R >> rules
+            # printf "m4_define(<[OPEN_%s]> <[]>) ", i >> rules
         }
 
         if(m[i]["fail"]){
-            printf "m4_define(`FAIL_%s', %s)\n", i, m[i]["fail"] >> rules
+            printf "m4_define(<[FAIL_%s]>, %s)\n", i, m[i]["fail"] >> rules
         } else {
-            printf "m4_define(`FAIL_%s', SIMPLE_FAIL)\n", i >> rules
+            printf "m4_define(<[FAIL_%s]>, SIMPLE_FAIL)\n", i >> rules
         }
 
         if(m[i]["pack"]){
-            printf "m4_define(`PACKFUN_%s', %s)\n", m[i]["pack"] >> rules
-            printf "m4_define(`PACK_%s', DO_PACK(%s))\n", i >> rules
+            printf "m4_define(<[PACKFUN_%s]>, %s)\n", m[i]["pack"] >> rules
+            printf "m4_define(<[PACK_%s]>, DO_PACK(%s))\n", i >> rules
         } else {
-            printf "m4_define(`PACK_%s', NO_PACK)\n", i >> rules
+            printf "m4_define(<[PACK_%s]>, NO_PACK)\n", i >> rules
         }
 
     }

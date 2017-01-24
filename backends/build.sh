@@ -190,8 +190,7 @@ do
         -v rules=$rules \
         -v body=$body   \
         -v dir=$outdir  \
-        -v src=$src     \
-        -v L='`' -v R="'" < $red
+        -v src=$src < $red
 
     # Merge all rules and macros, expand to manifold functions
     if $expand_macros

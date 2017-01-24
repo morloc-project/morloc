@@ -1,9 +1,12 @@
 @source R
 
-say <- function(x){ cat(x) }
+say <- function(x){ x }
+
+@export
+say
 
 @path
-say . "'hi'\n"
+say . "''hi'"
 
 @lang
 * :: R

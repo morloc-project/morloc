@@ -123,9 +123,9 @@ backend_x_test(){
 }
 
 backend_test(){
-    dir=$1
-    cmd=$2
-    msg=$3
+    dir="$1"
+    cmd="$2"
+    msg="$3"
 
     cd backend-tests/$dir
     
@@ -136,8 +136,8 @@ backend_test(){
     then
         obs=/tmp/obs_$RANDOM
         exp=/tmp/exp_$RANDOM
-        tst/manifold-nexus.sh $cmd > $obs 2> /dev/null
-        ./x > $exp
+        tst/manifold-nexus.sh "$cmd" > $obs 2> /dev/null
+        ./x > $exp 2> /dev/null
 
         diff $obs $exp &> /dev/null
         if [[ $? == 0 ]]
@@ -200,6 +200,7 @@ backend_test   r-refer   max        'r-refer/           -- max . <runif> .......
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
 backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
 backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
+backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
 fi
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
@@ -215,9 +216,8 @@ if $test_known_problems
 then
 if [[ $lang == "all" ]] ; then
 announce "Known problems"
-backend_test   sh-race          cat 'sh-race/           -- cat . <random> <random> ........................ '
-backend_test   r-single-quotes  say 'r-single-quotes/   -- cat . <random> <random> ........................ '
-backend_test   r-import         add 'r-import/          -- fanciful import statement ...................... '
+backend_test   sh-race         cat 'sh-race/           -- cat . <random> <random> ........................ '
+backend_test   r-import        add 'r-import/          -- fanciful import statement ...................... '
 fi
 fi
 
