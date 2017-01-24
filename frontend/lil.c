@@ -184,9 +184,10 @@ Ws* _manifold_to_lil(W* cm){
     lil = _pairlist(lil, m->doc,   LIL_MANIFOLD_DOC, m);
 
     if(m->args){
+        int i = 0;
         for(W* w = m->args->head; w; w = w->next){
             W* a = wws_join( 
-                _wthree(LIL_FUNCTION_ARG, _mid(m), g_string(g_lhs(w))),
+                _wfour(LIL_FUNCTION_ARG, _mid(m), _num(i++), g_string(g_lhs(w))),
                 g_rhs(w)
             );
             lil = ws_add(lil, a);

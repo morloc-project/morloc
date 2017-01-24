@@ -37,8 +37,8 @@ $1 == "INPF" { m[$2]["f"][$3]     = $4 ; next }
 $1 == "NARG" { m[$2]["narg"]      = $3 ; next }
 
 $1 == "FARG" {
-    if($4 != "") { arg = $3 " BIND " $4 } else { arg = $3 }
-    m[$2]["arg"][arg] = 1
+    if($5 != "") { arg = $4 " BIND " $5 } else { arg = $4 }
+    m[$2]["arg"][$3] = arg
     next
 }
 
@@ -112,8 +112,8 @@ END{
 
         if(length(m[i]["arg"]) > 0){
             arg=""
-            for(k in m[i]["arg"]){
-                arg = sprintf("%s SEP %s", arg, k)
+            for(k=0; k<length(m[i]["arg"]); k++){
+                arg = sprintf("%s SEP %s", arg, m[i]["arg"][k])
             }
             gsub(/^ SEP /, "", arg) # remove the initial sep
             printf "m4_define(`ARG_%s', `XXLEFT %s XXRIGHT')\n", i, arg >> rules

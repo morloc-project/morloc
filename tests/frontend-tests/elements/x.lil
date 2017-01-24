@@ -6,8 +6,8 @@ CACH	m0	_cache
 OPEN	m0	_open
 PACK	m0	_pack
 PASS	m0	_pass
-FARG	m0	x	1
-FARG	m0	y	2
+FARG	m0	0	x	1
+FARG	m0	1	y	2
 EMIT	m1	*
 FUNC	m1	f
 TYPE	m1	A

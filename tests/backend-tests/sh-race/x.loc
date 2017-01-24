@@ -7,6 +7,9 @@ random () {
 @include
 "core/sh/datcache.loc"
 
+@export
+cat
+
 @path
 R :: random
 A :: cat . <random> <random>
