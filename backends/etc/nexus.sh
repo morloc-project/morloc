@@ -43,7 +43,7 @@ function_exists() {
 if function_exists MANGLE($1)
 then
     cd OUTDIR
-    MANGLE($1)
+    MANGLE($1) | more
 else
     exit 1
 fi

@@ -1,0 +1,57 @@
+@include
+"core/R/memcache.loc"
+
+@source R
+
+true <- function() { TRUE }
+
+foo <- function(...) { }
+bar <- function() { 1 }
+
+@export
+foo
+
+@path R
+foo . bar
+
+@arg
+foo :: x=1
+
+@lang
+* :: R
+
+@cache
+foo :: memcache
+
+@check
+foo :: true
+
+@0
+foo :: cat . "0\n"
+
+@1
+foo :: cat . "1\n"
+
+@2
+foo :: cat . "- 2\n"
+
+@3
+foo :: cat . "- 3\n"
+
+@4
+foo :: cat . "- - 4\n"
+
+@5
+foo :: cat . "- - 5\n"
+
+@6
+foo :: cat . "- - 6\n"
+
+@7
+foo :: cat . "- - 7\n"
+
+@8
+foo :: cat . "- 8\n"
+
+@9
+foo :: cat . "- 9\n"

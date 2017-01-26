@@ -20,18 +20,17 @@ BEGIN {
     printf("m4_define(<[AND]>, <[%s]>)\n",  ands[lang])  >> rules
 }
 
-$1 == "EMIT" { m[$2]["lang"]      = $3 ; next }
-$1 == "CACH" { m[$2]["cache"]     = $3 ; next }
-$1 == "CHEK" { m[$2]["check"][$3] = 1  ; next }
-$1 == "FUNC" { m[$2]["func"]      = $3 ; next }
-$1 == "FAIL" { m[$2]["fail"]      = $3 ; next }
-$1 == "EFCT" { m[$2]["efct"][$3]  = 1  ; next }
-$1 == "HOOK" { m[$2]["hook"][$3]  = 1  ; next }
-$1 == "INPM" { m[$2]["m"][$3]     = $4 ; next }
-$1 == "INPP" { m[$2]["p"][$3]     = $4 ; next }
-$1 == "INPA" { m[$2]["a"][$3]     = $4 ; next }
-$1 == "INPF" { m[$2]["f"][$3]     = $4 ; next }
-$1 == "NARG" { m[$2]["narg"]      = $3 ; next }
+$1 == "EMIT" { m[$2]["lang"]         = $3 ; next }
+$1 == "CACH" { m[$2]["cache"]        = $3 ; next }
+$1 == "CHEK" { m[$2]["check"][$3]    = 1  ; next }
+$1 == "FUNC" { m[$2]["func"]         = $3 ; next }
+$1 == "FAIL" { m[$2]["fail"]         = $3 ; next }
+$1 == "HOOK" { m[$2]["hook"][$3][$4] = 1  ; next }
+$1 == "INPM" { m[$2]["m"][$3]        = $4 ; next }
+$1 == "INPP" { m[$2]["p"][$3]        = $4 ; next }
+$1 == "INPA" { m[$2]["a"][$3]        = $4 ; next }
+$1 == "INPF" { m[$2]["f"][$3]        = $4 ; next }
+$1 == "NARG" { m[$2]["narg"]         = $3 ; next }
 
 $1 == "FARG" {
     if($5 != "") { arg = $4 " BIND " $5 } else { arg = $4 }
@@ -42,6 +41,8 @@ $1 == "FARG" {
 END{
 
     for(i in m){
+
+        arg_inp=0
 
         if(m[i]["narg"]){
             printf "m4_define(<[NARG_%s]>, %s)\n", i, m[i]["narg"] >> rules
@@ -71,15 +72,16 @@ END{
             printf "m4_define(<[VALIDATE_%s]>, DO_VALIDATE(%s)) \n", i, i >> rules
             check=""
             for(k in m[i]["check"]){
-                check = sprintf("%s AND CHECK(%s, %s)\n", check, k, i)
+                check = sprintf("%s AND CHECK(%s, %s)", check, k, i)
             }
-            gsub(/^ AND /, "", check) # remove the last sep
+            gsub(/^ AND /, "", check) # remove initial sep
             printf "m4_define(<[CHECK_%s]>, %s) \n", i, check >> rules
         } else {
             printf "m4_define(<[VALIDATE_%s]>, NO_VALIDATE(%s)) \n", i, i >> rules
         }
 
         if( "m" in m[i] || "p" in m[i] || "a" in m[i] || "f" in m[i]){
+            arg_inp++
             k=0
             input=""
             while(1) {
@@ -102,40 +104,39 @@ END{
                 k = k + 1
             }
             gsub(/^ SEP /, "", input) # remove the last sep
-            printf "m4_define(<[INPUT_%s]>, <[XXLEFT %s XXRIGHT]>)\n", i, input >> rules
+            printf "m4_define(<[INPUT_%s]>, %s)\n", i, input >> rules
         } else {
             printf "m4_define(<[INPUT_%s]>, <[]>)\n", i >> rules
         }
 
         if(length(m[i]["arg"]) > 0){
+            arg_inp++
             arg=""
             for(k=0; k<length(m[i]["arg"]); k++){
                 arg = sprintf("%s SEP %s", arg, m[i]["arg"][k])
             }
             gsub(/^ SEP /, "", arg) # remove the initial sep
-            printf "m4_define(<[ARG_%s]>, <[XXLEFT %s XXRIGHT]>)\n", i, arg >> rules
+            printf "m4_define(<[ARG_%s]>, %s)\n", i, arg >> rules
         } else {
             printf "m4_define(<[ARG_%s]>, <[]>)\n", i >> rules
         }
 
-        if(length(m[i]["efct"]) > 0){
-            effect=""
-            for(k in m[i]["efct"]){
-                effect = sprintf("%s EFFECT(%s,%s) \n", effect, k, i)
+        if("hook" in m[i] && length(m[i]["hook"]) > 0){
+            for(k = 0; k < 10; k++){
+                if(k in m[i]["hook"]){
+                    hook=""
+                    for(kk in m[i]["hook"][k]){
+                        hook = sprintf("%s HOOK(%s, %s) ", hook, kk, i)
+                    }
+                    printf "m4_define(<[HOOK%s_%s]>, %s) \n", k, i, hook >> rules
+                } else {
+                    printf "m4_define(<[HOOK%s_%s]>, <[]>) \n", k, i >> rules
+                }
             }
-            printf "m4_define(<[EFFECT_%s]>, %s)\n", i, effect >> rules
         } else {
-            printf "m4_define(<[EFFECT_%s]>, <[]>)\n", i >> rules
-        }
-
-        if(length(m[i]["hook"]) > 0){
-            hook=""
-            for(k in m[i]["hook"]){
-                hook = sprintf("%s HOOK(%s, %s) ", hook, k, i)
+            for(k = 0; k < 10; k++){
+                printf "m4_define(<[HOOK%s_%s]>, <[]>) \n", k, i >> rules
             }
-            printf "m4_define(<[HOOK_%s]>, %s) \n", i, hook >> rules
-        } else {
-            printf "m4_define(<[HOOK_%s]>, <[]>) \n", i >> rules
         }
 
         if(m[i]["func"]){
@@ -144,31 +145,19 @@ END{
             printf "m4_define(<[FUNC_%s]>, NOTHING)\n", i >> rules
         }
 
-        if(m[i]["pass"]){
-            printf "m4_define(<[PASS_%s]>, %s)\n", i, m[i]["pass"] 
-            printf "m4_define(<[RUN_%s]>, DO_PASS(%s))\n", i, i >> rules
-        } else {
-            printf "m4_define(<[RUN_%s]>, NO_PASS(%s))\n", i, i >> rules
-        }
-
-        if(m[i]["open"]){
-            print "WARNING: `open` is not yet supported" >> "/dev/stderr"
-            # printf "m4_define(<[OPEN_%s]>, OPEN(%s)) ", i, i, m[i]["open"] >> rules
-        } else {
-            # printf "m4_define(<[OPEN_%s]> <[]>) ", i >> rules
-        }
-
         if(m[i]["fail"]){
             printf "m4_define(<[FAIL_%s]>, %s)\n", i, m[i]["fail"] >> rules
         } else {
             printf "m4_define(<[FAIL_%s]>, SIMPLE_FAIL)\n", i >> rules
         }
 
-        if(m[i]["pack"]){
-            printf "m4_define(<[PACKFUN_%s]>, %s)\n", m[i]["pack"] >> rules
-            printf "m4_define(<[PACK_%s]>, DO_PACK(%s))\n", i >> rules
+        # This is a hacky way to get a delimiter between the input and
+        # arguments passed to the main function. arg_inp == 2 when both an
+        # input and argument is given.
+        if(arg_inp == 2){
+            printf("m4_define(<[ARG_INP_%s]>, <[SEP]>)", i) >> rules
         } else {
-            printf "m4_define(<[PACK_%s]>, NO_PACK)\n", i >> rules
+            printf("m4_define(<[ARG_INP_%s]>, <[]>)", i) >> rules
         }
 
     }

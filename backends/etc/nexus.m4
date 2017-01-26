@@ -2,7 +2,7 @@ m4_changequote(`<[', `]>')
 
 m4_define(<[__MANIFOLD__]>,
 <[MANGLE(ALIAS_$1) () {
-    MANIFOLD_POOL($1) $1 
+    MANIFOLD_POOL($1) $1
 }]>
 )
 

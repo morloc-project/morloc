@@ -152,7 +152,15 @@ mkdir $outdir/cache
 
 $nexus_given || nexus=$outdir/manifold-nexus.sh
 
-for lang in $(find_all_languages <($loc_compiler $locsrc))
+languages=$(find_all_languages <($loc_compiler $locsrc))
+
+if [[ -z $languages ]]
+then
+    echo "No languages specified for any manifolds" > /dev/stderr
+    finish 1
+fi
+
+for lang in $languages
 do
     exe=$tmp/exe # The final executable for this language
     src=$tmp/src # Source code for this language extracted from LIL
@@ -196,8 +204,7 @@ do
     if $expand_macros
     then
         cat $grammar $rules $body |
-            m4 $M4_FLAGS | sed 's/XXLEFT //g; s/ XXRIGHT//g' |
-            sed '/^ *$/d;s/ *//' > $exe
+            m4 $M4_FLAGS | sed '/^ *$/d;s/ *//' > $exe
     else
         cat $grammar $rules $body > $exe
     fi
