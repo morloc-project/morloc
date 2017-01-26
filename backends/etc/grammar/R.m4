@@ -92,7 +92,7 @@ m4_define(<[NO_VALIDATE]>, CORE($1))
 
 m4_define(<[CORE]>,
     HOOK4_$1
-    b <- FUNC_$1 ( INPUT_$1 ARG_INP_$1 ARG_$1 )
+    b <- FUNC_$1 <[( INPUT_$1 ARG_INP_$1 ARG_$1 )]>
     CACHE_PUT_$1
     HOOK5_$1
 )

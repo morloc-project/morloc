@@ -7,7 +7,7 @@ BEGIN {
     printf("m4_define(<[OUTDIR]>, %s)\n", dir) >> rules
 
     seps["sh"] = " "    
-    seps["R"] = ", "
+    seps["R"] = "<[, ]>"
 
     binds["sh"] = " "
     binds["R"] = "="
@@ -89,7 +89,7 @@ END{
                     input = sprintf("%s SEP <[CALL(%s, %s)]>", input, m[i]["m"][k], i)
                 }
                 else if(m[i]["p"][k]){
-                    input = sprintf("%s SEP %s", input, m[i]["p"][k])
+                    input = sprintf("%s SEP <[%s]>", input, m[i]["p"][k])
                 }
                 else if(m[i]["f"][k]){
                     wrappings[m[i]["f"][k]] = 1
@@ -116,7 +116,7 @@ END{
                 arg = sprintf("%s SEP %s", arg, m[i]["arg"][k])
             }
             gsub(/^ SEP /, "", arg) # remove the initial sep
-            printf "m4_define(<[ARG_%s]>, %s)\n", i, arg >> rules
+            printf "m4_define(<[ARG_%s]>, <[%s]>)\n", i, arg >> rules
         } else {
             printf "m4_define(<[ARG_%s]>, <[]>)\n", i >> rules
         }
@@ -128,7 +128,7 @@ END{
                     for(kk in m[i]["hook"][k]){
                         hook = sprintf("%s HOOK(%s, %s) ", hook, kk, i)
                     }
-                    printf "m4_define(<[HOOK%s_%s]>, %s) \n", k, i, hook >> rules
+                    printf "m4_define(<[HOOK%s_%s]>, <[%s]>) \n", k, i, hook >> rules
                 } else {
                     printf "m4_define(<[HOOK%s_%s]>, <[]>) \n", k, i >> rules
                 }
@@ -140,13 +140,13 @@ END{
         }
 
         if(m[i]["func"]){
-            printf "m4_define(<[FUNC_%s]>, %s)\n", i, m[i]["func"] >> rules
+            printf "m4_define(<[FUNC_%s]>, <[%s]>)\n", i, m[i]["func"] >> rules
         } else {
             printf "m4_define(<[FUNC_%s]>, NOTHING)\n", i >> rules
         }
 
         if(m[i]["fail"]){
-            printf "m4_define(<[FAIL_%s]>, %s)\n", i, m[i]["fail"] >> rules
+            printf "m4_define(<[FAIL_%s]>, <[%s]>)\n", i, m[i]["fail"] >> rules
         } else {
             printf "m4_define(<[FAIL_%s]>, SIMPLE_FAIL)\n", i >> rules
         }
@@ -159,7 +159,6 @@ END{
         } else {
             printf("m4_define(<[ARG_INP_%s]>, <[]>)", i) >> rules
         }
-
     }
 
     printf "PROLOGUE " >> body
