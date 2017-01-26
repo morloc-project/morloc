@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+loc -o tst x.loc &> /dev/null
+diff <(tst/manifold-nexus.sh foo 2>&1) exp.txt
+rm -rf tst
+
+exit $?

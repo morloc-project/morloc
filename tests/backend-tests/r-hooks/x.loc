@@ -11,7 +11,7 @@ bar <- function() { 1 }
 @export
 foo
 
-@path R
+@path
 foo . bar
 
 @arg

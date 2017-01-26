@@ -20,9 +20,12 @@ m4_define(<[NTH_ARG]>, $$1)
 m4_define(<[PROLOGUE]>, )
 
 m4_define(<[NATIVE_MANIFOLD]>,
+    $1_tmp=$1_tmp
     $1(){
+        HOOK0_$1
         CACHE_$1
-        RETURN
+        HOOK1_$1
+        ( cat $1_tmp ; rm $1_tmp )
     }
 )
 
@@ -30,9 +33,12 @@ m4_dnl this currently expands to be the same as the native manifold. I distingui
 m4_dnl between the two because I may eventually use pooled caches for universal
 m4_dnl manifolds.
 m4_define(<[UNIVERSAL_MANIFOLD]>,
+    $1_tmp=$1_tmp
     $1(){
+        HOOK0_$1
         CACHE_$1
-        RETURN
+        HOOK1_$1
+        ( cat $1_tmp ; rm $1_tmp )
     }
 )
 
@@ -42,19 +48,23 @@ m4_define(<[FOREIGN_MANIFOLD]>,
     }
 )
 
-m4_define(<[RETURN]>, )
-
 m4_define(<[DO_CACHE]>,
     if BASECACHE_$1<[<[_chk]>]> $1 UID_ARG($1)
     then
+        HOOK8_$1
         BASECACHE_$1<[<[_get]>]> $1 UID_ARG($1)
+        HOOK9_$1
     else
-        VALIDATE_$1 HOOK_$1
+        HOOK2_$1
+        VALIDATE_$1
+        HOOK3_$1
     fi
 )
 
 m4_define(<[NO_CACHE]>,
-    VALIDATE_$1 HOOK_$1
+    HOOK2_$1
+    VALIDATE_$1
+    HOOK3_$1
 )
 
 m4_define(<[DO_VALIDATE]>,
@@ -62,7 +72,9 @@ m4_define(<[DO_VALIDATE]>,
     then
         CORE($1)
     else
+        HOOK6_$1
         FAIL_$1$2
+        HOOK7_$1
     fi
 )
 
@@ -72,29 +84,24 @@ m4_define(<[SIMPLE_FAIL]>, <[return 1]>)
 
 m4_define(<[NO_VALIDATE]>, CORE($1))
 
-m4_define(<[CHECK]>, $1)
-
-m4_define(<[CORE]>, RUN_$1 EFFECT_$1 PACK_$1 CACHE_PUT_$1)
-
-m4_define(<[DO_PACK]>, PACKFUN_$1)
-
-m4_define(<[NO_PACK]>, )
-
-m4_define(<[DO_PASS]>, PASS_$1 FUNC_$1 ARG_$1 INPUT_$1)
-
-m4_define(<[NO_PASS]>, FUNC_$1 ARG_$1 INPUT_$1)
+m4_define(<[CORE]>,
+    HOOK4_$1
+    FUNC_$1 ARG_$1 INPUT_$1 > $$1_tmp
+    CACHE_PUT_$1
+    HOOK5_$1
+)
 
 m4_define(<[CALL]>, <($1 <[ARG_LIST(NARG_$2)]>) )
 
-m4_define(<[EFFECT]>, <[| tee >(NULL($1))]>)
+m4_define(<[CHECK]>, $1 <[ARG_LIST(NARG_$2)]> )
 
-m4_define(<[HOOK]>, <[| ( wait ; NULL($1) ; cat )]>)
+m4_define(<[HOOK]>, <[NULL($1 <[ARG_LIST(NARG_$2)]>)]>)
 
-m4_define(<[NULL]>, <[$1 | cat > /dev/null]>)
+m4_define(<[NULL]>, <[$1 > /dev/null]>)
 
 m4_define(<[NO_PUT]>, )
 
-m4_define(<[DO_PUT]>, <[| BASECACHE_$1<[<[_put]>]> $1]> UID_ARG($1))
+m4_define(<[DO_PUT]>, <[BASECACHE_$1<[<[_put]>]> $1 $$1_tmp]> UID_ARG($1))
 
 m4_define(<[EPILOGUE]>,
 <[

@@ -72,7 +72,7 @@ END{
             printf "m4_define(<[VALIDATE_%s]>, DO_VALIDATE(%s)) \n", i, i >> rules
             check=""
             for(k in m[i]["check"]){
-                check = sprintf("%s AND CHECK(%s, %s)", check, k, i)
+                check = sprintf("%s AND <[CHECK(%s, %s)]>", check, k, i)
             }
             gsub(/^ AND /, "", check) # remove initial sep
             printf "m4_define(<[CHECK_%s]>, %s) \n", i, check >> rules

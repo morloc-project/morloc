@@ -22,11 +22,11 @@ datcache_get() {
 
 # Text -> Text
 datcache_put() {
-    if [[ -z $2 ]]
+    if [[ -z $3 ]]
     then
-        tee cache/$1.dat
+        ln $PWD/$2 $PWD/cache/$1.dat
     else
-        tee cache/$1_$2.dat
+        ln $PWD/$2 $PWD/cache/$1_$3.dat
     fi
 }
 
