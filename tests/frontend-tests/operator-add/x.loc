@@ -1,7 +1,7 @@
 @path
 A :: d . c . b . a
 
-@effect
+@5
 a := foo
 a :+ bar
 
@@ -9,6 +9,6 @@ a :+ bar
 b := is_orange
 b :+ is_susumu
 
-@hook
+@3
 c := listen_to_the_music
 c :+ sing_the_song

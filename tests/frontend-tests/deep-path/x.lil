@@ -6,7 +6,7 @@ FUNC	m4	fifi
 INPM	m4	0	m5
 EMIT	m5	*
 FUNC	m5	foo
-EFCT	m5	m3
+HOOK	m5	5	m3
 EMIT	m1	*
 FUNC	m1	fifi
 INPM	m1	0	m2

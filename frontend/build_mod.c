@@ -54,13 +54,18 @@ void _set_manifold_type(W* mw, W* tw){
 
 bool _manifold_modifier(W* w){
     switch(w->cls){
-        case T_EFFECT:
-        case T_HOOK:
+        case T_H0:
+        case T_H1:
+        case T_H2:
+        case T_H3:
+        case T_H4:
+        case T_H5:
+        case T_H6:
+        case T_H7:
+        case T_H8:
+        case T_H9:
         case T_CACHE:
         case T_CHECK:
-        case T_OPEN:
-        case T_PACK:
-        case T_PASS:
         case T_FAIL:
         case T_ALIAS:
         case T_LANG:
@@ -117,12 +122,17 @@ void _add_modifier(W* w, W* p){
             break;
 
         /* For compositional modifiers add all ultimate manifolds */
-        case T_EFFECT:
-            m->effect = g_ws(rhs) ? _do_operation( m->effect , g_ws(rhs)->head, op) : NULL;
-            break;                                 
-        case T_HOOK:                               
-            m->hook   = g_ws(rhs) ? _do_operation( m->hook   , g_ws(rhs)->head, op) : NULL;
-            break;                                 
+        case T_H0: m->h0 = g_ws(rhs) ? _do_operation(m->h0, g_ws(rhs)->head, op) : NULL; break; 
+        case T_H1: m->h1 = g_ws(rhs) ? _do_operation(m->h1, g_ws(rhs)->head, op) : NULL; break;
+        case T_H2: m->h2 = g_ws(rhs) ? _do_operation(m->h2, g_ws(rhs)->head, op) : NULL; break;
+        case T_H3: m->h3 = g_ws(rhs) ? _do_operation(m->h3, g_ws(rhs)->head, op) : NULL; break;
+        case T_H4: m->h4 = g_ws(rhs) ? _do_operation(m->h4, g_ws(rhs)->head, op) : NULL; break;
+        case T_H5: m->h5 = g_ws(rhs) ? _do_operation(m->h5, g_ws(rhs)->head, op) : NULL; break;
+        case T_H6: m->h6 = g_ws(rhs) ? _do_operation(m->h6, g_ws(rhs)->head, op) : NULL; break;
+        case T_H7: m->h7 = g_ws(rhs) ? _do_operation(m->h7, g_ws(rhs)->head, op) : NULL; break;
+        case T_H8: m->h8 = g_ws(rhs) ? _do_operation(m->h8, g_ws(rhs)->head, op) : NULL; break;
+        case T_H9: m->h9 = g_ws(rhs) ? _do_operation(m->h9, g_ws(rhs)->head, op) : NULL; break;
+
         case T_CHECK:                              
             m->check  = g_ws(rhs) ? _do_operation( m->check  , g_ws(rhs)->head, op) : NULL;
             break;                                 
@@ -160,15 +170,6 @@ void _add_modifier(W* w, W* p){
 
         case T_CACHE:
             m->cache = g_string(rhs) ? ws_add_val(m->cache, P_STRING, g_string(rhs)) : NULL;
-            break;
-        case T_OPEN:
-            m->open = g_string(rhs) ? ws_add_val(m->open, P_STRING, g_string(rhs)) : NULL;
-            break;
-        case T_PACK:
-            m->pack = g_string(rhs) ? ws_add_val(m->pack, P_STRING, g_string(rhs)) : NULL;
-            break;
-        case T_PASS:
-            m->pass = g_string(rhs) ? ws_add_val(m->pass, P_STRING, g_string(rhs)) : NULL;
             break;
         case T_DOC:
             m->doc = g_string(rhs) ? ws_add_val(m->doc, P_STRING, g_string(rhs)) : NULL;

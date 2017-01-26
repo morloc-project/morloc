@@ -137,24 +137,21 @@ bool _has_args(W* a, W* b){
 }
 void _propagate_one_nargs(W* w){
     Manifold* m = g_manifold(g_rhs(w));
-    ws_cap(
-        m->effect,
-        g_rhs(w),
-        _has_args,
-        _copy_nargs
-    );
-    ws_cap(
-        m->hook,
-        g_rhs(w),
-        _has_args,
-        _copy_nargs
-    );
-    ws_cap(
-        m->check,
-        g_rhs(w),
-        _has_args,
-        _copy_nargs
-    );
+
+    ws_cap(m->check, g_rhs(w), _has_args, _copy_nargs);
+
+    ws_cap(m->h0, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h1, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h2, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h3, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h4, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h5, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h6, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h7, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h8, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->h9, g_rhs(w), _has_args, _copy_nargs);
+
+    ws_cap(m->fail, g_rhs(w), _has_args, _copy_nargs);
 }
 void propagate_nargs(Ws* ws){
     ws_rcmod(

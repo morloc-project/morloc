@@ -15,6 +15,7 @@ Ws* _manifold_to_lil(W* cm);
 Ws* build_lil_prolog(Ws* ws_top);
 Ws* build_lil_manifolds(Ws* ws_top);
 Ws* build_lil_epilog(Ws* ws_top);
+Ws* _hook(Ws* lil, Ws* ws, char* p, Manifold* m);
 
 void print_lil(Ws* lil){
     if(!lil) return;
@@ -172,15 +173,21 @@ Ws* _manifold_to_lil(W* cm){
         }
     }
 
-    lil = _pathmod(lil, m->effect, LIL_EFFECT, m);
-    lil = _pathmod(lil, m->hook,   LIL_HOOK,   m);
     lil = _pathmod(lil, m->check,  LIL_CHECK,  m);
     lil = _pathmod(lil, m->fail,   LIL_FAIL,   m);
 
+    lil = _hook(lil, m->h0,   "0",   m);
+    lil = _hook(lil, m->h1,   "1",   m);
+    lil = _hook(lil, m->h2,   "2",   m);
+    lil = _hook(lil, m->h3,   "3",   m);
+    lil = _hook(lil, m->h4,   "4",   m);
+    lil = _hook(lil, m->h5,   "5",   m);
+    lil = _hook(lil, m->h6,   "6",   m);
+    lil = _hook(lil, m->h7,   "7",   m);
+    lil = _hook(lil, m->h8,   "8",   m);
+    lil = _hook(lil, m->h9,   "9",   m);
+
     lil = _pairlist(lil, m->cache, LIL_CACHE,        m);
-    lil = _pairlist(lil, m->open,  LIL_OPEN,         m);
-    lil = _pairlist(lil, m->pack,  LIL_PACK,         m);
-    lil = _pairlist(lil, m->pass,  LIL_PASS,         m);
     lil = _pairlist(lil, m->doc,   LIL_MANIFOLD_DOC, m);
 
     if(m->args){
@@ -209,6 +216,14 @@ Ws* _pathmod(Ws* lil, Ws* ws, char* cmd, Manifold* m){
     if(!ws) return lil;
     for(W* w = ws->head; w; w = w->next){
         lil = _three(lil, cmd, _mid(m), _mid(g_manifold(g_rhs(w))));
+    }
+    return lil;
+}
+
+Ws* _hook(Ws* lil, Ws* ws, char* p, Manifold* m){
+    if(!ws) return lil;
+    for(W* w = ws->head; w; w = w->next){
+        lil = _four(lil, LIL_HOOK, _mid(m), p, _mid(g_manifold(g_rhs(w))));
     }
     return lil;
 }

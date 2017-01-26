@@ -62,17 +62,13 @@ syn match s_section '@cache'    contained
 syn match s_section '@check'    contained
 syn match s_section '@comment'  contained
 syn match s_section '@doc'      contained
-syn match s_section '@effect'   contained
-syn match s_section '@hook'     contained
+syn match s_section '@[0-9]'    contained
 syn match s_section '@export'   contained
 syn match s_section '@fail'     contained
 syn match s_section '@lang'     contained
 syn match s_section '@include'  contained
 syn match s_section '@import'   contained
 syn match s_section '@ontology' contained
-syn match s_section '@open'     contained
-syn match s_section '@pack'     contained
-syn match s_section '@pass'     contained
 syn match s_section '@path'     contained
 syn match s_section '@type'     contained
 syn match s_section '@source'   contained
@@ -164,8 +160,7 @@ syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_h
 
 syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_couple,@c_function,@c_path
 syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
-syn region r_hook     start=/@hook/     end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
-syn region r_effect   start=/@effect/   end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
+syn region r_effect   start=/@[0-9]/   end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
 syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,@c_couple,@c_path
 
 syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg
@@ -176,9 +171,6 @@ syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_functio
 syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_string
 syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
 syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
-syn region r_open     start=/@open/     end=/@\@=/ contains=@c_global,@c_function,@c_modify
-syn region r_pack     start=/@pack/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
-syn region r_pass     start=/@pass/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
 syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
 
 

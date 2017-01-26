@@ -2,12 +2,42 @@ EMIT	m0	*
 FUNC	m0	_alias
 TYPE	m0	NULL
 INPM	m0	0	m1
+CHEK	m0	m2
+HOOK	m0	0	m3
+HOOK	m0	1	m4
+HOOK	m0	2	m5
+HOOK	m0	3	m6
+HOOK	m0	4	m7
+HOOK	m0	5	m8
+HOOK	m0	6	m9
+HOOK	m0	7	m10
+HOOK	m0	8	m11
+HOOK	m0	9	m12
 CACH	m0	_cache
-OPEN	m0	_open
-PACK	m0	_pack
-PASS	m0	_pass
 FARG	m0	0	x	1
 FARG	m0	1	y	2
 EMIT	m1	*
 FUNC	m1	f
 TYPE	m1	A
+EMIT	m2	*
+FUNC	m2	_check
+EMIT	m3	*
+FUNC	m3	_hook0
+EMIT	m4	*
+FUNC	m4	_hook1
+EMIT	m5	*
+FUNC	m5	_hook2
+EMIT	m6	*
+FUNC	m6	_hook3
+EMIT	m7	*
+FUNC	m7	_hook4
+EMIT	m8	*
+FUNC	m8	_hook5
+EMIT	m9	*
+FUNC	m9	_hook6
+EMIT	m10	*
+FUNC	m10	_hook7
+EMIT	m11	*
+FUNC	m11	_hook8
+EMIT	m12	*
+FUNC	m12	_hook9

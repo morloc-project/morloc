@@ -4,7 +4,7 @@ This script is a simple test of to ensure all required simple manifold elements
 are present. There are many nuances to the behavior of these modifiers, but
 they are not tested here.
 
-It does not check the compositional sections effect, hook, and check
+It does not check the compositional sections effect, _hook, and check
 
 @type
 f :: NULL -> A
@@ -16,11 +16,8 @@ foo :: g . f
 @cache
 g :: _cache
 
-@open
-g :+ _open
-
-@pass
-g :: _pass
+@check
+g :: _check
 
 @alias
 g :: _alias
@@ -28,5 +25,32 @@ g :: _alias
 @arg
 g :+ x=1 y=2
 
-@pack
-g :: _pack
+@0
+g :: _hook0
+
+@1
+g :: _hook1
+
+@2
+g :: _hook2
+
+@3
+g :: _hook3
+
+@4
+g :: _hook4
+
+@5
+g :: _hook5
+
+@6
+g :: _hook6
+
+@7
+g :: _hook7
+
+@8
+g :: _hook8
+
+@9
+g :: _hook9

@@ -19,13 +19,18 @@ VType get_value_type(Class cls){
             vtype = V_STRING;
             break;
         case T_PATH:
-        case T_EFFECT:
-        case T_HOOK:
+        case T_H0:
+        case T_H1:
+        case T_H2:
+        case T_H3:
+        case T_H4:
+        case T_H5:
+        case T_H6:
+        case T_H7:
+        case T_H8:
+        case T_H9:
         case T_CHECK:
         case T_FAIL:
-        case T_OPEN:
-        case T_PACK:
-        case T_PASS:
         case T_ALIAS:
         case T_LANG:
         case T_DOC:
@@ -51,7 +56,7 @@ VType get_value_type(Class cls){
             vtype = V_NONE;
             break;
         default:
-            warn("illegal case (%s:%d)\n", __func__, __LINE__);
+            warn("illegal case %d (%s:%d)\n", cls, __func__, __LINE__);
     }
     return vtype;
 }
@@ -149,12 +154,17 @@ char* w_class_str(Class cls){
         case K_NAME:       s = strdup("K_NAME")       ; break;
         case T_PATH:       s = strdup("T_PATH")       ; break;
         case T_LANG:       s = strdup("T_LANG")       ; break;
-        case T_EFFECT:     s = strdup("T_EFFECT")     ; break;
-        case T_HOOK:       s = strdup("T_HOOK")       ; break;
+        case T_H0:         s = strdup("T_H0")         ; break;
+        case T_H1:         s = strdup("T_H1")         ; break;
+        case T_H2:         s = strdup("T_H2")         ; break;
+        case T_H3:         s = strdup("T_H3")         ; break;
+        case T_H4:         s = strdup("T_H4")         ; break;
+        case T_H5:         s = strdup("T_H5")         ; break;
+        case T_H6:         s = strdup("T_H6")         ; break;
+        case T_H7:         s = strdup("T_H7")         ; break;
+        case T_H8:         s = strdup("T_H8")         ; break;
+        case T_H9:         s = strdup("T_H9")         ; break;
         case T_CHECK:      s = strdup("T_CHECK")      ; break;
-        case T_OPEN:       s = strdup("T_OPEN")       ; break;
-        case T_PACK:       s = strdup("T_PACK")       ; break;
-        case T_PASS:       s = strdup("T_PASS")       ; break;
         case T_FAIL:       s = strdup("T_FAIL")       ; break;
         case T_DOC:        s = strdup("T_DOC")        ; break;
         case T_CACHE:      s = strdup("T_CACHE")      ; break;

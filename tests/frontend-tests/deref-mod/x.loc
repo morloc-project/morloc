@@ -5,6 +5,6 @@ map . &(f . g . $1) foo
 @lang
 * :: igpay
 
-@effect
+@5
 f :: a . b
 map :: c . d

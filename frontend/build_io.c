@@ -89,10 +89,10 @@ Ws* _recurse_tail(W* w){
     Ws* result = NULL;
     switch(w->cls){
         case C_NEST:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(w)->last));
+            result = ws_add_val(result, P_WS, g_ws(g_ws(w)->last));
             break;
         case T_PATH:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(g_rhs(w))->last));
+            result = ws_add_val(result, P_WS, g_ws(g_ws(g_rhs(w))->last));
             break;
         default:
             break;
@@ -105,10 +105,10 @@ Ws* _recurse_head(W* w){
     switch(w->cls){
         case C_NEST:
         case C_DEREF:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(w)->head));
+            result = ws_add_val(result, P_WS, g_ws(g_ws(w)->head));
             break;
         case T_PATH:
-            result = ws_add_val(result, V_WS, g_ws(g_ws(g_rhs(w))->head));
+            result = ws_add_val(result, P_WS, g_ws(g_ws(g_rhs(w))->head));
             break;
         default:
             break;

@@ -8,10 +8,10 @@ CHEK	m1	m8
 EMIT	m2	*
 FUNC	m2	b
 INPM	m2	0	m3
-HOOK	m2	m7
+HOOK	m2	3	m7
 EMIT	m3	*
 FUNC	m3	a
-EFCT	m3	m5
+HOOK	m3	5	m5
 EMIT	m4	*
 FUNC	m4	foo
 EMIT	m5	*

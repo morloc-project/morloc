@@ -4,8 +4,8 @@ INPM	m0	0	m1
 EMIT	m1	*
 FUNC	m1	c
 INPM	m1	0	m2
-HOOK	m1	m8
-HOOK	m1	m9
+HOOK	m1	3	m8
+HOOK	m1	3	m9
 EMIT	m2	*
 FUNC	m2	b
 INPM	m2	0	m3
@@ -13,8 +13,8 @@ CHEK	m2	m6
 CHEK	m2	m7
 EMIT	m3	*
 FUNC	m3	a
-EFCT	m3	m4
-EFCT	m3	m5
+HOOK	m3	5	m4
+HOOK	m3	5	m5
 EMIT	m4	*
 FUNC	m4	foo
 EMIT	m5	*

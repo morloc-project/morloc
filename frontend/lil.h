@@ -18,16 +18,12 @@
 #define LIL_FUNCTION_INPUT   "INPF"
 #define LIL_ARG_INPUT        "INPA"
 #define LIL_N_MANIFOLD_ARGS  "NARG"
-#define LIL_EFFECT           "EFCT"
-#define LIL_HOOK             "HOOK"
 #define LIL_CHECK            "CHEK"
 #define LIL_FAIL             "FAIL"
 #define LIL_CACHE            "CACH"
-#define LIL_OPEN             "OPEN"
-#define LIL_PACK             "PACK"
-#define LIL_PASS             "PASS"
 #define LIL_MANIFOLD_DOC     "MDOC"
 #define LIL_FUNCTION_ARG     "FARG"
+#define LIL_HOOK             "HOOK"
 
 void print_lil(Ws* lil);
 

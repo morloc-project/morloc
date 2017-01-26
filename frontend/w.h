@@ -11,17 +11,22 @@
 #include "couplet.h"
 
 typedef enum {
-    X_NONE=0,     // X for special, I suppose
+    X_NONE=0,
+    T_H0,
+    T_H1,
+    T_H2,
+    T_H3,
+    T_H4,
+    T_H5,
+    T_H6,
+    T_H7,
+    T_H8,
+    T_H9,
     P_STRING,     // P for primitive
     P_WS,
     P_COUPLET,
     P_MANIFOLD,
-    T_EFFECT,     // T for top level
-    T_HOOK,
-    T_CHECK,
-    T_OPEN,
-    T_PACK,
-    T_PASS,
+    T_CHECK, // T for top level
     T_FAIL,
     T_ALIAS,
     T_LANG,

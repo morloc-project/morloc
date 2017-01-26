@@ -17,14 +17,6 @@ foo :: g . f
 g :: hey
 g :: RESET
 
-@open
-g := hey
-g := RESET
-
-@pass
-g :: hey
-g :: RESET
-
 @alias
 g :: hey
 g :: RESET
@@ -32,7 +24,3 @@ g :: RESET
 @arg
 g := hey
 g := RESET
-
-@pack
-g :: hey
-g :: RESET

@@ -24,10 +24,7 @@ $1 == "EMIT" { m[$2]["lang"]      = $3 ; next }
 $1 == "CACH" { m[$2]["cache"]     = $3 ; next }
 $1 == "CHEK" { m[$2]["check"][$3] = 1  ; next }
 $1 == "FUNC" { m[$2]["func"]      = $3 ; next }
-$1 == "PASS" { m[$2]["pass"]      = $3 ; next }
 $1 == "FAIL" { m[$2]["fail"]      = $3 ; next }
-$1 == "PACK" { m[$2]["pack"]      = $3 ; next }
-$1 == "OPEN" { m[$2]["open"]      = $3 ; next }
 $1 == "EFCT" { m[$2]["efct"][$3]  = 1  ; next }
 $1 == "HOOK" { m[$2]["hook"][$3]  = 1  ; next }
 $1 == "INPM" { m[$2]["m"][$3]     = $4 ; next }

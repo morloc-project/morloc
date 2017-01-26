@@ -45,13 +45,20 @@ void w_clone_value(W* w){
             {
             Manifold* m = manifold_clone(g_manifold(w));
             m->function = m->function ? strdup(m->function) : NULL;
-            m->effect = ws_clone( m->effect );
-            m->hook   = ws_clone( m->hook   );
+
+            m->h0   = ws_clone( m->h0   );
+            m->h1   = ws_clone( m->h1   );
+            m->h2   = ws_clone( m->h2   );
+            m->h3   = ws_clone( m->h3   );
+            m->h4   = ws_clone( m->h4   );
+            m->h5   = ws_clone( m->h5   );
+            m->h6   = ws_clone( m->h6   );
+            m->h7   = ws_clone( m->h7   );
+            m->h8   = ws_clone( m->h8   );
+            m->h9   = ws_clone( m->h9   );
+
             m->cache  = ws_clone( m->cache  );
             m->check  = ws_clone( m->check  );
-            m->open   = ws_clone( m->open   );
-            m->pack   = ws_clone( m->pack   );
-            m->pass   = ws_clone( m->pass   );
             m->fail   = ws_clone( m->fail   );
             m->doc    = ws_clone( m->doc    );
             m->inputs = ws_clone( m->inputs );

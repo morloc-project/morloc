@@ -18,7 +18,7 @@ null . runif . 100
 @lang
 * :: R
 
-@hook
+@3
 runif := pdf_hist . <runif> "z.pdf"
 
 @cache

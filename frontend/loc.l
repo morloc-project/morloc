@@ -96,22 +96,25 @@ couple ::|:=|:-|:\+
 @include {  BEGIN(S_INCLUDE); }
 
 @path     { BEGIN(S_PATH)     ; RETURN_TOKEN ( SECTION_PATH     ) ; }
-@effect   { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_EFFECT   ) ; }
-@hook     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_HOOK     ) ; }
 @check    { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
 @fail     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_FAIL     ) ; }
 @source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
 @type     { BEGIN(S_TYPE)     ; RETURN_TOKEN ( SECTION_TYPE     ) ; }
 @ontology { BEGIN(S_ONTOLOGY) ; RETURN_TOKEN ( SECTION_ONTOLOGY ) ; }
 @cache    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CACHE    ) ; }
-@open     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_OPEN     ) ; }
-@pack     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PACK     ) ; }
-@pass     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_PASS     ) ; }
 @alias    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_ALIAS    ) ; }
 @lang     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_LANG     ) ; }
 @doc      { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_DOC      ) ; }
 @arg      { BEGIN(S_ARG)      ; RETURN_TOKEN ( SECTION_ARG      ) ; }
 @export   { BEGIN(S_EXPORT)   ; RETURN_TOKEN ( SECTION_EXPORT   ) ; }
+
+ /* kludge!!! */
+@[0-9]    {
+    BEGIN(S_SIDE);
+    char* s = strdup(yytext + 1);
+    W* w = w_new( P_STRING, s);
+    RETURN(w, SECTION_HOOK);
+}
 
 {ws}  { LOGV("%s", yytext); }
 RESET { RETURN_TOKEN(RESET); } 

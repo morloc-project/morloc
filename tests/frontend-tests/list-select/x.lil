@@ -1,9 +1,9 @@
 EMIT	m0	*
 FUNC	m0	g
 INPM	m0	0	m1
-EFCT	m0	m2
+HOOK	m0	5	m2
 EMIT	m1	*
 FUNC	m1	f
-EFCT	m1	m2
+HOOK	m1	5	m2
 EMIT	m2	*
 FUNC	m2	e

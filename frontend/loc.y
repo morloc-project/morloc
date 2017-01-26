@@ -6,6 +6,7 @@
     void yyerror(const char *);
     Ws* w_make_couplet(Ws* ws, W* lhs, W*   op, W* rhs, Class cls);
     Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls);
+    Class hook_type(W* w);
 %}
 
 %code requires{
@@ -30,14 +31,11 @@ Ws* global_table;
 %token AS ARROW RESET
 %token <W*> COUPLE
 
-%token SECTION_EFFECT
-%token SECTION_HOOK
+%token <W*> SECTION_HOOK /* unforgivable kludge alert */
+
 %token SECTION_CACHE
 %token SECTION_PATH
 %token SECTION_CHECK
-%token SECTION_OPEN
-%token SECTION_PACK
-%token SECTION_PASS
 %token SECTION_FAIL
 %token SECTION_ALIAS
 %token SECTION_LANG
@@ -51,13 +49,9 @@ Ws* global_table;
 %type <Ws*> section composition maybe_composition
 
 %type <Ws*> s_path
-%type <Ws*> s_effect
 %type <Ws*> s_hook
 %type <Ws*> s_cache
 %type <Ws*> s_check
-%type <Ws*> s_open
-%type <Ws*> s_pack
-%type <Ws*> s_pass
 %type <Ws*> s_fail
 %type <Ws*> s_alias
 %type <Ws*> s_lang
@@ -87,13 +81,9 @@ input
 
 section
     : s_path
-    | s_effect
-    | s_hook
+    | s_hook { $$ = ws_tail($$); /* see KLUDGE NOTE below */ } 
     | s_cache
     | s_check
-    | s_open
-    | s_pack
-    | s_pass
     | s_fail
     | s_alias
     | s_lang
@@ -118,16 +108,17 @@ s_path
         $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_PATH);
     }
 
-s_effect
-    : SECTION_EFFECT { $$ = NULL; }
-    | s_effect SELECTION COUPLE maybe_composition {
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_EFFECT);
-    }
-
+/* KLUDGE NOTE: hook is the one section that is comprised of multiple types:
+ * T_H0, T_H1, ... T_H9. These correspond to functions that are called within
+ * a manifold (see notes in R-manifold.R). There is not natural place to put
+ * this information in a Ws. So I add a temporary first element to the list.
+ * It is removed above.
+ */
 s_hook
-    : SECTION_HOOK { $$ = NULL; }
+    : SECTION_HOOK { $$ = ws_new($1); }
     | s_hook SELECTION COUPLE maybe_composition {
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_HOOK);
+        Class c = hook_type($1->head);
+        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), c);
     }
 
 s_check
@@ -181,24 +172,6 @@ s_cache
     : SECTION_CACHE { $$ = NULL; }
     | s_cache SELECTION COUPLE maybe_variable {
         $$ = w_make_couplet($1, $2, $3, $4, T_CACHE);
-    }
-
-s_open
-    : SECTION_OPEN { $$ = NULL; }
-    | s_open SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_OPEN);
-    }
-
-s_pack
-    : SECTION_PACK { $$ = NULL; }
-    | s_pack SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_PACK);
-    }
-
-s_pass
-    : SECTION_PASS { $$ = NULL; }
-    | s_pass SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_PASS);
     }
 
 s_alias
@@ -341,4 +314,22 @@ Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls){
     Couplet* c = couplet_new(lhs, rhs, op); 
     W* w = w_new(cls, c);
     return ws_add(ws, w);
+}
+
+Class hook_type(W* w){
+    switch(g_string(w)[0]){
+        case '0': return T_H0;
+        case '1': return T_H1;
+        case '2': return T_H2;
+        case '3': return T_H3;
+        case '4': return T_H4;
+        case '5': return T_H5;
+        case '6': return T_H6;
+        case '7': return T_H7;
+        case '8': return T_H8;
+        case '9': return T_H9;
+        default:
+            warn("Illegal hook section, expected @0-9\n");
+            return X_NONE;
+    }
 }

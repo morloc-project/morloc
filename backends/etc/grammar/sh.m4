@@ -17,7 +17,6 @@ wrap_$1 () {
 
 m4_define(<[UID_WRAP]>, wrap_$1 )
 
-
 m4_define(<[NTH_ARG]>, $$1)
 
 m4_define(<[PROLOGUE]>, )
@@ -52,13 +51,12 @@ m4_define(<[DO_CACHE]>,
     then
         BASECACHE_$1<[<[_get]>]> $1 UID_ARG($1)
     else
-        VALIDATE_$1
+        VALIDATE_$1 HOOK_$1
     fi
 )
 
 m4_define(<[NO_CACHE]>,
-    VALIDATE_$1
-    HOOK_$1
+    VALIDATE_$1 HOOK_$1
 )
 
 m4_define(<[DO_VALIDATE]>,
@@ -92,9 +90,9 @@ m4_define(<[CALL]>, <($1 <[ARG_LIST(NARG_$2)]>) )
 
 m4_define(<[EFFECT]>, <[| tee >(NULL($1))]>)
 
-m4_define(<[HOOK]>, <[| NULL($1)]>)
+m4_define(<[HOOK]>, <[| ( wait ; NULL($1) ; cat )]>)
 
-m4_define(<[NULL]>, <[$1 > /dev/null]>)
+m4_define(<[NULL]>, <[$1 | cat > /dev/null]>)
 
 m4_define(<[NO_PUT]>, )
 

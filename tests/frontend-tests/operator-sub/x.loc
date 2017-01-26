@@ -1,12 +1,12 @@
 @path
 A :: d . c . b . a
 
-@effect
+@5
 a := foo
 a :+ bar
 a :- <foo>
 
-@hook
+@3
 b := wish_i_were_a_geologist
 b :+ get_back_to_work
 b :- <wish_i_were_a_geologist>

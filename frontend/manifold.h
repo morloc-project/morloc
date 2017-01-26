@@ -9,13 +9,18 @@ typedef struct Manifold {
     int uid;
     char* function;
     char* lang;
-    struct Ws* effect; // Couplet<char*>
-    struct Ws* hook;   // "
+    struct Ws* h0;     // Couplet<char*>
+    struct Ws* h1;     // "
+    struct Ws* h2;     // "
+    struct Ws* h3;     // "
+    struct Ws* h4;     // "
+    struct Ws* h5;     // "
+    struct Ws* h6;     // "
+    struct Ws* h7;     // "
+    struct Ws* h8;     // "
+    struct Ws* h9;     // "
     struct Ws* cache;  // "
     struct Ws* check;  // "
-    struct Ws* open;   // "
-    struct Ws* pack;   // "
-    struct Ws* pass;   // "
     struct Ws* fail;   // "
     struct Ws* doc;    // "
     struct Ws* inputs; // Couplet<Manifold*>

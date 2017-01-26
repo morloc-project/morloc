@@ -44,5 +44,5 @@ normalize := columns_are_numeric . <load_data>
 @fail
 normalize :: warning . "Invalid input to _normalize_"
 
-@hook
+@3
 null := plot_pdf . <hclust> "z.pdf"

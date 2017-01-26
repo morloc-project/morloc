@@ -61,8 +61,16 @@ bool w_is_named_composition(W* w){
     if(!w) return false;
     switch(w->cls){
         case T_PATH:
-        case T_EFFECT:
-        case T_HOOK:
+        case T_H0:
+        case T_H1:
+        case T_H2:
+        case T_H3:
+        case T_H4:
+        case T_H5:
+        case T_H6:
+        case T_H7:
+        case T_H8:
+        case T_H9:
         case T_CHECK:
         case T_FAIL:
             return true;
@@ -118,7 +126,7 @@ W* w_nextval_always(W* w, W* p){ return p->next; }
 
 W* w_nextval_never(W* w, W* p){ return p; }
 
-/* p a modifier (e.g. effect).
+/* p a modifier (e.g. check).
  * w a node into which we are recursing
  *
  * if w is a path, we need to pop the top level of p's lhs.
@@ -212,8 +220,16 @@ Ws* ws_recurse_composition(W* w){
             rs = ws_add_val(rs, C_NEST, g_ws(w));
             break;
         case T_PATH:
-        case T_EFFECT:
-        case T_HOOK:
+        case T_H0:
+        case T_H1:
+        case T_H2:
+        case T_H3:
+        case T_H4:
+        case T_H5:
+        case T_H6:
+        case T_H7:
+        case T_H8:
+        case T_H9:
         case T_CHECK:
         case T_FAIL:
             rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
@@ -263,8 +279,16 @@ Ws* ws_recurse_path(W* w, W* p){
         case C_COMPOSON:
             return g_ws(w);
         case T_PATH:
-        case T_EFFECT:
-        case T_HOOK:
+        case T_H0:
+        case T_H1:
+        case T_H2:
+        case T_H3:
+        case T_H4:
+        case T_H5:
+        case T_H6:
+        case T_H7:
+        case T_H8:
+        case T_H9:
         case T_CHECK:
         case T_FAIL:
             return

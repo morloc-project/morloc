@@ -17,7 +17,7 @@ null  .  xtable  .  data.frame  .  <runif> (runif . 5)
 @cache
 * :: memcache
 
-@hook
+@3
 xtable :: print . <xtable>
 data.frame :: print . nrow . <data.frame>
 

@@ -50,5 +50,5 @@ normalize :: columns_are_numeric . <load_data>
 dist :: not . is.null . <normalize>
 hclust :: not . is.null . <dist>
 
-@hook
+@3
 hclust := plot_pdf . <hclust> $1

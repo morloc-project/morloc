@@ -1,5 +1,5 @@
 @path
 A :: g . f
 
-@effect
+@5
 g,f := e

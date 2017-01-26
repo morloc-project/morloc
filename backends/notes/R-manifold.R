@@ -52,9 +52,7 @@ m1 <- function (){
     return b
 }
 
-
-# numbered effects
-m1 <- function (){
+m1 = function (){
     # @0
     if(cache_chk("m1")){
         # @8

@@ -2,5 +2,5 @@
 A :: foo:1 . *B
 B :: fifi:2 . foo:2
 
-@effect
+@5
 A/B/foo := a_foo
