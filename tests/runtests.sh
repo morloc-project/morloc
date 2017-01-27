@@ -222,6 +222,7 @@ if [[ $lang == "all" ]] ; then
 announce "Known problems"
 backend_test   sh-race         cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-import        add 'r-import/          -- fanciful import statement ...................... '
+backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
 fi
 fi
 

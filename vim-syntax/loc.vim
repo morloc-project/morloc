@@ -23,7 +23,7 @@ syn include @Python syntax/python.vim
 
 let b:current_syntax = ''
 unlet b:current_syntax
-syn include @Perl syntax/python.vim
+syn include @Perl syntax/perl.vim
 
 let b:current_syntax = ''
 unlet b:current_syntax
@@ -154,10 +154,10 @@ syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
-syn region r_r_source start=/@source R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
-syn region r_r_source start=/@source \(py\|python\)$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Python
-syn region r_r_source start=/@source \(pl\|perl\)$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Perl
-syn region r_r_source start=/@source \(bash\|sh\)$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Shell
+syn region r_source start=/@source R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
+syn region r_source start=/@source py$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Python
+syn region r_source start=/@source pl$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Perl
+syn region r_source start=/@source sh$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Shell
 
 syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
 

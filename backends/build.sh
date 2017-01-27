@@ -204,7 +204,7 @@ do
     if $expand_macros
     then
         cat $grammar $rules $body |
-            m4 $M4_FLAGS | sed '/^ *$/d;s/ *//' > $exe
+            m4 $M4_FLAGS > $exe
     else
         cat $grammar $rules $body > $exe
     fi
