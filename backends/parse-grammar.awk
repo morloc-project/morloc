@@ -1,23 +1,8 @@
 #!/bin/awk -f 
 
 BEGIN {
-
     FS="\t"
-
     printf("m4_define(<[OUTDIR]>, %s)\n", dir) >> rules
-
-    seps["sh"] = " "    
-    seps["R"] = "<[, ]>"
-
-    binds["sh"] = " "
-    binds["R"] = "="
-
-    ands["sh"] = "&&"
-    ands["R"] = "&&"
-
-    printf("m4_define(<[SEP]>, <[%s]>)\n",  seps[lang])  >> rules
-    printf("m4_define(<[BIND]>, <[%s]>)\n", binds[lang]) >> rules
-    printf("m4_define(<[AND]>, <[%s]>)\n",  ands[lang])  >> rules
 }
 
 $1 == "EMIT" { m[$2]["lang"]         = $3 ; next }
@@ -33,7 +18,7 @@ $1 == "INPF" { m[$2]["f"][$3]        = $4 ; next }
 $1 == "NARG" { m[$2]["narg"]         = $3 ; next }
 
 $1 == "FARG" {
-    if($5 != "") { arg = $4 " BIND " $5 } else { arg = $4 }
+    if($5 != "") { arg = $4 " __BIND__ " $5 } else { arg = $4 }
     m[$2]["arg"][$3] = arg
     next
 }
@@ -72,9 +57,9 @@ END{
             printf "m4_define(<[VALIDATE_%s]>, DO_VALIDATE(%s)) \n", i, i >> rules
             check=""
             for(k in m[i]["check"]){
-                check = sprintf("%s AND <[CHECK(%s, %s)]>", check, k, i)
+                check = sprintf("%s __AND__ <[CHECK(%s, %s)]>", check, k, i)
             }
-            gsub(/^ AND /, "", check) # remove initial sep
+            gsub(/^ __AND__ /, "", check) # remove initial sep
             printf "m4_define(<[CHECK_%s]>, %s) \n", i, check >> rules
         } else {
             printf "m4_define(<[VALIDATE_%s]>, NO_VALIDATE(%s)) \n", i, i >> rules
@@ -86,24 +71,24 @@ END{
             input=""
             while(1) {
                 if(m[i]["m"][k]){
-                    input = sprintf("%s SEP <[CALL(%s, %s)]>", input, m[i]["m"][k], i)
+                    input = sprintf("%s __SEP__ <[CALL(%s, %s)]>", input, m[i]["m"][k], i)
                 }
                 else if(m[i]["p"][k]){
-                    input = sprintf("%s SEP <[%s]>", input, m[i]["p"][k])
+                    input = sprintf("%s __SEP__ <[%s]>", input, m[i]["p"][k])
                 }
                 else if(m[i]["f"][k]){
                     wrappings[m[i]["f"][k]] = 1
-                    input = sprintf("%s SEP <[UID_WRAP(%s)]>", input, m[i]["f"][k])
+                    input = sprintf("%s __SEP__ <[UID_WRAP(%s)]>", input, m[i]["f"][k])
                 }
                 else if(m[i]["a"][k]){
-                    input = sprintf("%s SEP <[NTH_ARG(%s)]>", input, m[i]["a"][k])
+                    input = sprintf("%s __SEP__ <[NTH_ARG(%s)]>", input, m[i]["a"][k])
                 }
                 else {
                     break
                 }
                 k = k + 1
             }
-            gsub(/^ SEP /, "", input) # remove the last sep
+            gsub(/^ __SEP__ /, "", input) # remove the last sep
             printf "m4_define(<[INPUT_%s]>, %s)\n", i, input >> rules
         } else {
             printf "m4_define(<[INPUT_%s]>, <[]>)\n", i >> rules
@@ -113,9 +98,9 @@ END{
             arg_inp++
             arg=""
             for(k=0; k<length(m[i]["arg"]); k++){
-                arg = sprintf("%s SEP %s", arg, m[i]["arg"][k])
+                arg = sprintf("%s __SEP__ %s", arg, m[i]["arg"][k])
             }
-            gsub(/^ SEP /, "", arg) # remove the initial sep
+            gsub(/^ __SEP__ /, "", arg) # remove the initial sep
             printf "m4_define(<[ARG_%s]>, <[%s]>)\n", i, arg >> rules
         } else {
             printf "m4_define(<[ARG_%s]>, <[]>)\n", i >> rules
@@ -155,7 +140,7 @@ END{
         # arguments passed to the main function. arg_inp == 2 when both an
         # input and argument is given.
         if(arg_inp == 2){
-            printf("m4_define(<[ARG_INP_%s]>, <[SEP]>)\n", i) >> rules
+            printf("m4_define(<[ARG_INP_%s]>, <[__SEP__]>)\n", i) >> rules
         } else {
             printf("m4_define(<[ARG_INP_%s]>, <[]>)\n", i) >> rules
         }

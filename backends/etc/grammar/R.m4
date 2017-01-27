@@ -1,5 +1,9 @@
 m4_changequote(`<[', `]>')
 
+m4_define(<[__SEP__]>, <[<[, ]>]>)
+m4_define(<[__BIND__]>, <[=]>)
+m4_define(<[__AND__]>, <[&&]>)
+
 m4_define(<[R_ARG_LIST]>, <[m4_ifelse($1, <[1]>, <[x$1]>, <[R_ARG_LIST(m4_decr($1))<[,]> x$1]>)]>)m4_dnl
 m4_define(<[ARG_LIST]>, <[m4_ifelse($1, <[0]>, <[]>, <[R_ARG_LIST($1), uid]>)]>)m4_dnl
 m4_dnl
