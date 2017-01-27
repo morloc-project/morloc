@@ -3,12 +3,13 @@
 loc -o tst x.loc &> /dev/null
 tst/manifold-nexus.sh main &> /dev/null
 status=
-if [[ -f tst/f-cars.pdf && -f tst/f-iris.pdf && -f tst/f-mtcars.pdf ]]
+if [[ -f f-cars.pdf && -f f-iris.pdf && -f f-mtcars.pdf ]]
 then
     status=0
 else
     status=1
 fi
 rm -rf tst
+rm *pdf
 
 exit $status

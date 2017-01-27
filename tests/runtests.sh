@@ -196,7 +196,6 @@ backend_x_test r-branch             'r-branch/          -- make if-elif-else ana
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
 backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
-backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
@@ -211,6 +210,7 @@ backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . 
 backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
+backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '
 backend_x_test sh-hooks             'sh-hooks/          -- run with all hooks ............................. '
 backend_x_test sh-open-mod          'sh-open-mod/       -- open manifold caching and modification ......... '
 fi
