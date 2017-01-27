@@ -212,6 +212,7 @@ backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ......
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_x_test sh-hooks             'sh-hooks/          -- run with all hooks ............................. '
+backend_x_test sh-open-mod          'sh-open-mod/       -- open manifold caching and modification ......... '
 fi
 fi
 

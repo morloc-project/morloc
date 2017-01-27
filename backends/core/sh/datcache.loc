@@ -1,6 +1,6 @@
 @source sh
 
-# String -> Bool
+# $1: mid | $2: uid
 datcache_chk() {
     if [[ -z $2 ]]
     then
@@ -10,17 +10,17 @@ datcache_chk() {
     fi
 }
 
-# NULL -> Text
+# $1: mid | $2: uid
 datcache_get() {
     if [[ -z $2 ]]
     then
-        cat cache/$1.dat
+        cat cache/$1.dat | more
     else
-        cat cache/$1_$2.dat
+        cat cache/$1_$2.dat | more
     fi
 }
 
-# Text -> Text
+# $1: mid | $2: tempfile | $3: uid
 datcache_put() {
     if [[ -z $3 ]]
     then
@@ -30,6 +30,7 @@ datcache_put() {
     fi
 }
 
+# $1: mid | $2: uid
 datcache_del() {
     if [[ -z $2 ]]
     then

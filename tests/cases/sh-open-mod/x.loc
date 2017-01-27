@@ -1,0 +1,42 @@
+@include
+"core/sh/control.loc"
+"core/sh/atomic.loc"
+"core/sh/datcache.loc"
+
+@export
+null as main
+
+@path
+null . map . & ( xmlstarlet:sel . xmlstarlet:fo . $1 ) ls . `*.xml`
+
+@arg
+xmlstarlet:sel ::
+    sel
+    --template
+    --match="catalog/book"
+    --value-of="author"
+    --nl
+    --break
+
+xmlstarlet:fo :: fo
+
+ponysay:1 :: --pony=twilight
+
+@cache
+map,ls :: datcache
+
+@0
+null :: cp . `../*.xml` `.`
+
+@4
+xmlstarlet:f0 :: echo . "Reading" $1
+
+@5
+map :: cat . <map>
+
+@1
+null :: rm . `-f` `*.xml`
+null :: ponysay:1 . "all done"
+
+@lang
+* :: sh

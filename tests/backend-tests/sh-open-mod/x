@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+loc -o zzz x.loc
+zzz/manifold-nexus.sh main 2> obs.txt
+
+diff obs.txt exp.txt
+stat=$?
+
+rm -rf zzz obs.txt
+exit $stat

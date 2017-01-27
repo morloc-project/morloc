@@ -1,0 +1,51 @@
+@include
+"core/sh/control.loc"
+"core/sh/atomic.loc"
+"core/sh/datcache.loc"
+
+@path
+
+null . map . & ( cat . wc . grep . $1 ) ls . `*.xml`
+
+
+@export
+null as main
+
+@arg
+grep :: "author"
+wc :: -l
+cut:wc :: -d=' ' -f=1
+cut:map :: -d=' ' -f=1
+
+@cache
+map,grep,wc :: datcache
+
+@0
+grep :: echo . " - 0"
+null :: cp . `../*.xml` `.`
+
+@8
+grep :: echo . " - - 8"
+
+@9
+grep :: echo . " - - 9"
+
+@2
+grep :: echo . " - - 2"
+
+@4
+grep :: echo . " - - - 4"
+
+@5
+wc :: cut:wc . cat . <wc>
+map :: cut:map . cat . <map>
+
+@3
+grep :: echo . " - - 3"
+
+@1
+grep :: echo . " - 1"
+null :: rm . `-f` `*.xml`
+
+@lang
+* :: sh

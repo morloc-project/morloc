@@ -155,9 +155,9 @@ END{
         # arguments passed to the main function. arg_inp == 2 when both an
         # input and argument is given.
         if(arg_inp == 2){
-            printf("m4_define(<[ARG_INP_%s]>, <[SEP]>)", i) >> rules
+            printf("m4_define(<[ARG_INP_%s]>, <[SEP]>)\n", i) >> rules
         } else {
-            printf("m4_define(<[ARG_INP_%s]>, <[]>)", i) >> rules
+            printf("m4_define(<[ARG_INP_%s]>, <[]>)\n", i) >> rules
         }
     }
 

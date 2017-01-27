@@ -2,7 +2,7 @@
 
 # Text -> NULL
 null() {
-    cat > /dev/null
+    cat "$@" > /dev/null
 }
 
 id() {
