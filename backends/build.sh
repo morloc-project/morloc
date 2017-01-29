@@ -188,7 +188,7 @@ do
         BEGIN{ FS="\t" ; state=0 }
         $0 ~ /^[^ ]/ { state = 0 }
         $1 == "NSRC" && $2 ~ lng { state = 1; next; }
-        state == 1 { print > src }
+        state == 1 { sub(/^    /, "") ; print > src }
         state == 0 && $0 ~ /^[^ ]/ { print > red }
     ' $lil
 
@@ -198,7 +198,7 @@ do
         -v rules=$rules \
         -v body=$body   \
         -v dir=$outdir  \
-        -v src=$src < $red
+        -v src=$src $red
 
     # Merge all rules and macros, expand to manifold functions
     if $expand_macros

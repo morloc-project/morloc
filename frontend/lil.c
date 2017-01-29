@@ -30,7 +30,8 @@ void print_lil(Ws* lil){
             );
             ww = ww->next->next->next;
             for(; ww; ww = ww->next){
-                printf("    %s\n", g_string(ww));
+                // no newline needed, since newline from source is preserved
+                printf("    %s", g_string(ww));
             }
         } else {
             printf(g_string(ww));

@@ -125,7 +125,7 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, STR);
   }
 <X_SOURCE>^[ \t]*([^\n@].*)?\n {
-    char* s = trim(yytext);
+    char* s = strdup(yytext);
     W* w = w_new(P_STRING, s);
     RETURN(w, STR);
 }

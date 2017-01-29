@@ -186,6 +186,7 @@ fi
 if $test_backend
 then
 announce "Backend tests"
+
 if [[ $lang == "all" || $lang == "R" ]] ; then
 backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
 backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
@@ -203,6 +204,11 @@ backend_x_test r-loop               'r-loop/            -- use open manifolds in
 backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
 backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
 fi
+
+if [[ $lang == "all" || $lang == "py" ]] ; then
+backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
+fi
+
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
@@ -214,6 +220,7 @@ backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember 
 backend_x_test sh-hooks             'sh-hooks/          -- run with all hooks ............................. '
 backend_x_test sh-open-mod          'sh-open-mod/       -- open manifold caching and modification ......... '
 fi
+
 fi
 
 if $test_known_problems
@@ -222,7 +229,6 @@ if [[ $lang == "all" ]] ; then
 announce "Known problems"
 backend_test   sh-race         cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-import        add 'r-import/          -- fanciful import statement ...................... '
-backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
 fi
 fi
 
