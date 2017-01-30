@@ -2,15 +2,13 @@
 
 import argparse
 import sys
+import os
 
-import grammars
 import lil
+import my_util
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
-
-def err(msg):
-    sys.exit(msg)
 
 def parser():
     parser = argparse.ArgumentParser()
@@ -24,6 +22,12 @@ def parser():
         'f',
         help="LOC source file"
     )
+    parser.add_argument(
+        '-m', '--print-manifolds',
+        help="help",
+        action='store_true',
+        default=False
+    )
     args = parser.parse_args()
     return(args)
 
@@ -34,6 +38,35 @@ if __name__ == '__main__':
     exports = lil.get_exports(raw_lil)
     source = lil.get_src(raw_lil)
     manifolds = lil.get_manifolds(raw_lil)
+    languages = set([l.lang for m,l in manifolds.items()])
 
-    for k,v in manifolds.items():
-        v.print()
+    loc_home = os.path.expanduser("~/.loc")
+    loc_tmp = "%s/tmp" % loc_home
+
+    try:
+        os.mkdir(loc_tmp)
+    except FileExistsError:
+        pass
+
+    for i in range(100):
+        try:
+            outdir="{}/loc_{}".format(loc_tmp, i)
+            os.mkdir(outdir)
+            break
+        except FileExistsError:
+            pass
+    else:
+        err("Too many temporary directories")
+
+    if(args.print_manifolds):
+        for k,m in manifolds.items():
+            m.print()
+
+    #  for language in languages:
+    #      build_manifold_pool(
+    #          language  = language,
+    #          exports   = exports,
+    #          manifolds = manifolds,
+    #          outdir    = outdir
+    #          home      = loc_home
+    #      )
