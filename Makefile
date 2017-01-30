@@ -9,12 +9,10 @@ install:
 	mkdir -p ~/.loc/etc
 	mkdir -p ~/.loc/lib
 	cp frontend/loc ~/.loc/bin
-	cp backends/parse-grammar.awk ~/.loc/bin
-	cp backends/build-nexus.awk ~/.loc/bin
 	cp -rf backends/core ~/.loc/lib
 	cp -rf backends/etc ~/.loc
 	test -d ~/bin || mkdir ~/bin
-	cp backends/build.sh ~/bin/loc
+	cp frontend/loc ~/bin/loc
 
 .PHONY: test
 test:
