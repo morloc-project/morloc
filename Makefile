@@ -6,13 +6,11 @@ all:
 .PHONY: install
 install:
 	mkdir -p ~/.loc/bin
-	mkdir -p ~/.loc/etc
 	mkdir -p ~/.loc/lib
-	cp frontend/loc ~/.loc/bin
-	cp -rf backends/core ~/.loc/lib
-	cp -rf backends/etc ~/.loc
+	cp frontend/loc ~/.loc/bin/locc
+	cp -rf backend/core ~/.loc/lib
 	test -d ~/bin || mkdir ~/bin
-	cp frontend/loc ~/bin/loc
+	ln -sf ${PWD}/backend/src/loc/loc.py ${HOME}/bin/loc
 
 .PHONY: test
 test:
@@ -22,4 +20,4 @@ test:
 clean:
 	rm -f ${TARGET}
 	cd frontend && ${MAKE} clean
-	cd backends && ${MAKE} clean
+	cd backend && ${MAKE} clean

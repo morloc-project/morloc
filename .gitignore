@@ -18,3 +18,5 @@ loc_[0-9]*/
 *.log
 *.pdf
 *.fdb_latexmk
+
+__pycache__
