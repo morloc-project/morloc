@@ -1,3 +1,12 @@
 #!/usr/bin/env bash
 
-tst/manifold-nexus.sh tail
+loc -x zzz x.loc
+./manifold-nexus.py tail > a
+./manifold-nexus.py head > b
+
+diff a b &> /dev/null
+stat=$?
+
+rm -rf zzz manifold-nexus.py a b
+
+exit $stat

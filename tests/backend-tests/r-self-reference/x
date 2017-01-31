@@ -3,7 +3,7 @@
 loc -x tst x.loc
 ./manifold-nexus.py main
 status=
-if [[ -f tst/z.pdf ]]
+if [[ -f z.pdf ]]
 then
     status=0
 else

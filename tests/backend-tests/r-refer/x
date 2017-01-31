@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 loc -x zzz x.loc
-./manifold-nexus.py min
+./manifold-nexus.py min > a
+./manifold-nexus.py max > b
 
-rm -rf zzz manifold-nexus.py
+diff a b &> /dev/null
+stat=$?
+
+rm -rf zzz manifold-nexus.py a b
+
+exit $stat
