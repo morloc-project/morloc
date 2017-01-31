@@ -64,7 +64,7 @@ NATIVE_MANIFOLD['R'] = '''\
 
 FOREIGN_MANIFOLD['R'] = '''\
 {mid} <- function({marg}){{
-  d <- system("{outdir}/call.{lang} {mid} {marg}", intern = TRUE)
+  d <- system("{outdir}/call.{foreign_lang} {mid} {marg}", intern = TRUE)
   d <- read_tsv(d)
   if(ncol(d) == 1){{
     d <- d[[1]]
@@ -175,7 +175,7 @@ NATIVE_MANIFOLD['sh'] = '''\
 
 FOREIGN_MANIFOLD['sh'] = '''\
 {mid} () {{
-    {outdir}/call.{lang} {mid} {marg}
+    {outdir}/call.{foreign_lang} {mid} {marg}
 }}
 '''
 

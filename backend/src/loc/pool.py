@@ -156,7 +156,12 @@ def native_manifold(m, outdir):
 def foreign_manifold(m, lang, outdir, marg=""):
     margs = get_margs(m.narg, lang)
     s = FOREIGN_MANIFOLD[lang]
-    s = s.format(mid=m.mid, lang=lang, outdir=outdir, marg=margs)
+    s = s.format(
+        mid=m.mid,
+        foreign_lang=m.lang,
+        outdir=outdir,
+        marg=margs
+    )
     return s
 
 def build_pool(
