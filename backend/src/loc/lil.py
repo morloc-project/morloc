@@ -1,5 +1,6 @@
 import subprocess
 import os
+import re
 from collections import namedtuple
 
 import manifold
@@ -43,29 +44,34 @@ def compile_loc(loc_src, loc_path="~/.loc/bin/locc"):
     # TODO - lose the kludge
     subprocess.call("{} {} > z.lil".format(loc_path, loc_src), shell=True)
     with open("z.lil", 'r') as f:
-        lil = [s.strip() for s in f.readlines()]
+        lil = [s for s in f.readlines()]
     os.remove("z.lil")
     return lil
 
 def get_src(lil):
-    src = []
+    src = {}
+    lang = ""
     for l in lil:
         if(l[0:4] == "NSRC"):
+            row = l.split('\t')
+            lang = row[1]
             try:
-                src.append( (l.split('\t')[1], []) )
-            except IndexError:
+                if not lang in src:
+                    src[lang] = []
+            except KeyError:
                 err("Misformed LIL: source requires a language")
         elif(len(l) == 0 or l[0] == " "):
             try:
-                src[-1][1].append(l)
-            except IndexError:
+                src[lang].append(l[4:]) # remove first 4 spaces
+            except KeyError:
                 pass # skip whitespace lines preceding source sections
+    src = {k:''.join(v) for k,v in src.items()}
     return src
 
 def get_exports(lil):
     exports = {}
     for l in lil:
-        r = l.split('\t')
+        r = l.strip().split('\t')
         if(r[0] == "EXPT"):
             try:
                 exports[r[1]] = r[2]
@@ -77,12 +83,12 @@ def get_exports(lil):
 def get_manifolds(lil):
     manifolds = {}
     for l in lil:
-        row = l.split('\t')
+        row = l.strip().split('\t')
         if(row[0] == "EMIT"):
             manifolds[row[1]] = manifold.Manifold(row[1], row[2])
 
     for l in lil:
-        row = l.split('\t')
+        row = l.strip().split('\t')
         try:
             mid = row[1]
             try:

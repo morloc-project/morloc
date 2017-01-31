@@ -64,7 +64,7 @@ def arguments(m):
     return s
 
 def validate(m):
-    cache_put = CACHE_PUT[m.lang].format(mid=m.mid),
+    cache_put = CACHE_PUT[m.lang].format(mid=m.mid)
     if(m.check):
         s = DO_VALIDATE[m.lang]
         s = s.format(
@@ -133,6 +133,7 @@ def foreign_manifold(m, lang, outdir, marg=""):
 
 def build_pool(
     lang,
+    source,
     manifolds,
     outdir,
     home
@@ -142,6 +143,11 @@ def build_pool(
     except KeyError:
         err("Language '%s' is not supported" % lang)
 
+    try:
+        src = source[lang]
+    except KeyError:
+        src = ""
+
     mtext = []
     for k,v in manifolds.items():
         if v.lang == lang:
@@ -150,6 +156,9 @@ def build_pool(
             s = foreign_manifold(v, lang, outdir)
         s = clean(s)
         mtext.append(s)
-    p = p.format(manifolds='\n\n'.join(mtext))
+    p = p.format(
+        source=src,
+        manifolds='\n\n'.join(mtext)
+    )
 
     return p

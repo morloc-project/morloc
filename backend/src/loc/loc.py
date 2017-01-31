@@ -99,7 +99,7 @@ if __name__ == '__main__':
     for lang in languages:
         p = pool.build_pool(
             lang      = lang,
-            exports   = exports,
+            source    = source,
             manifolds = manifolds,
             outdir    = outdir,
             home      = loc_home

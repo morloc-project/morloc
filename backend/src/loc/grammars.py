@@ -31,6 +31,8 @@ POOL['R'] = '''\
 #!/usr/bin/Rscript --vanilla
 library(readr)
 
+{source}
+
 {manifolds}
 
 args <- commandArgs(TRUE)
@@ -105,7 +107,9 @@ b = {function}({arguments})
 {hook5}
 '''
 
-CACHE_PUT['R'] = 'cache_put("{mid}", b)'
+CACHE_PUT['R'] = '''\
+cache_put("{mid}", b)
+'''
 
 MARG['R']          = 'x{i}'
 ARGUMENTS['R']     = '{inputs}{sep}{fargs}'
@@ -127,6 +131,8 @@ LIST['sh'] = ' {value} '
 
 POOL['sh'] = '''\
 #!/usr/bin/env bash
+
+{source}
 
 to_stderr () {{
     $@ 1>&2
@@ -203,7 +209,9 @@ NO_VALIDATE['sh'] = '''\
 {hook5}
 '''
 
-CACHE_PUT['sh'] = 'cache_put {mid} b'
+CACHE_PUT['sh'] = '''\
+cache_put {mid} b
+'''
 
 MARG['sh']          = '${i}'
 ARGUMENTS['sh']     = '{inputs} {fargs}'
