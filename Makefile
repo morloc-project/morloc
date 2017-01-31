@@ -17,4 +17,3 @@ test:
 .PHONY: clean
 clean:
 	cd frontend && ${MAKE} clean
-	cd backend && ${MAKE} clean

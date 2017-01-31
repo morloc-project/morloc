@@ -53,7 +53,7 @@ parser_template = '''\
 
 call_template = '''\
 def {mid}():
-    subprocess.call("{outdir}/call.{lang} {mid}", shell=True)
+    subprocess.call("{outdir}/call.{lang} {mid} | more", shell=True)
 '''
 
 def build_manifold_nexus(

@@ -125,8 +125,8 @@ def cache(m, outdir):
         s = s.format(
             cache      = m.cache,
             mid        = m.mid,
-            hook8      = get_hook(m, 2),
-            hook9      = get_hook(m, 2),
+            hook8      = get_hook(m, 8),
+            hook9      = get_hook(m, 9),
             uid_arg    = get_uid(m),
             cache_args = get_cache_args(m, outdir),
             process    = indent(process(m, outdir), n=INDENT[m.lang])
