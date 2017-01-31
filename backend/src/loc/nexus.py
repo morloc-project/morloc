@@ -12,6 +12,7 @@ import subprocess
 def parser():
     parser = argparse.ArgumentParser(
         description="A program generated from a LOC script", 
+        usage='manifold-nexus <mid>',
         prog="manifold-nexus"
     )
     parser.add_argument(
@@ -21,7 +22,9 @@ def parser():
         version='{prog} {version}'
     )
     sub = parser.add_subparsers(
-        help='sub-command help'
+        help='.',
+        metavar='[ for more help: manifold-nexus <subcommand> -h ]',
+        title='manifolds'
     )
 
 {manifold_parsers}
@@ -40,10 +43,10 @@ if __name__ == '__main__':
 parser_template = '''\
 
 {mid}_parser = sub.add_parser(
-    '{mid}',
-    usage="manifold-nexus {mid}",
+    '{alias}',
+    usage="manifold-nexus {alias}",
     description="{doc}",
-    help="({lang}) {func}"
+    help="({lang}) {doc}"
 )
 {mid}_parser.set_defaults(func={mid})
 '''
@@ -66,6 +69,12 @@ def build_manifold_nexus(
     mcalls = []
 
     for k,v in manifolds.items():
+
+        try:
+            alias = exports[k]
+        except KeyError:
+            continue
+
         if v.mdoc:
             doc = v.mdoc[1:-1]
         else:
@@ -74,6 +83,7 @@ def build_manifold_nexus(
         parser_string = indent(
             parser_template.format(
                 mid  = k,
+                alias=alias,
                 func = v.func,
                 lang = v.lang,
                 doc  = doc
@@ -81,7 +91,11 @@ def build_manifold_nexus(
             n=4
         )
 
-        call_string = call_template.format(mid=k, lang=v.lang, outdir=outdir)
+        call_string = call_template.format(
+            mid=k,
+            lang=v.lang,
+            outdir=outdir
+        )
         mcalls.append(call_string)
         mparsers.append(parser_string)
 

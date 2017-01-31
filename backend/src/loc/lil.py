@@ -1,5 +1,6 @@
 import subprocess
 import os
+from collections import namedtuple
 
 import manifold
 from util import err
@@ -62,14 +63,14 @@ def get_src(lil):
     return src
 
 def get_exports(lil):
-    exports = []
+    exports = {}
     for l in lil:
         r = l.split('\t')
         if(r[0] == "EXPT"):
             try:
-                exports.append((r[1], r[2]))
+                exports[r[1]] = r[2]
             except IndexError:
-                exports.append((r[1], None))
+                exports[r[1]] = r[1]
     return exports
 
 

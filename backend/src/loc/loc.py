@@ -98,10 +98,11 @@ if __name__ == '__main__':
 
     for lang in languages:
         p = pool.build_pool(
-            lang=lang,
-            manifolds=manifolds,
-            outdir=outdir,
-            home = loc_home
+            lang      = lang,
+            exports   = exports,
+            manifolds = manifolds,
+            outdir    = outdir,
+            home      = loc_home
         )
         pool_filename = "{}/call.{}".format(outdir, lang)
         with open(pool_filename, 'w') as f:
