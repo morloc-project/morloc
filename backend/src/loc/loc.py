@@ -5,8 +5,9 @@ import sys
 import os
 
 import lil
-import my_util
 import nexus
+import pool
+from util import err
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
@@ -26,6 +27,16 @@ def parser():
     parser.add_argument(
         '-m', '--print-manifolds',
         help="help",
+        action='store_true',
+        default=False
+    )
+    parser.add_argument(
+        '-x', '--execution-path',
+        help="help"
+    )
+    parser.add_argument(
+        '-k', '--clobber',
+        help="Overwrite execution path directory",
         action='store_true',
         default=False
     )
@@ -49,15 +60,27 @@ if __name__ == '__main__':
     except FileExistsError:
         pass
 
-    for i in range(100):
+    if args.execution_path:
+        outdir=os.path.expanduser(args.execution_path)
         try:
-            outdir="{}/loc_{}".format(loc_tmp, i)
             os.mkdir(outdir)
-            break
+        except PermissionError:
+            err("PermissionError: cannot mkdir '%s'" % outdir)
+        except FileNotFoundError:
+            err("Cannot create directory '%s'" % outdir)
         except FileExistsError:
-            pass
+            if not args.clobber:
+                err("Directory '%s' already exists" % outdir)
     else:
-        err("Too many temporary directories")
+        for i in range(100):
+            try:
+                outdir="{}/loc_{}".format(loc_tmp, i)
+                os.mkdir(outdir)
+                break
+            except FileExistsError:
+                pass
+        else:
+            err("Too many temporary directories")
 
     if(args.print_manifolds):
         for k,m in manifolds.items():
@@ -72,6 +95,18 @@ if __name__ == '__main__':
         version   = __version__,
         prog      = __prog__
     )
+
+    for lang in languages:
+        p = pool.build_pool(
+            lang=lang,
+            manifolds=manifolds,
+            outdir=outdir,
+            home = loc_home
+        )
+        pool_filename = "{}/call.{}".format(outdir, lang)
+        with open(pool_filename, 'w') as f:
+            print(p, file=f)
+
 
     with open("manifold-nexus.py", 'w') as f:
         print(manifold_nexus, file=f)

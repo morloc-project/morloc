@@ -1,10 +1,9 @@
 from collections import namedtuple
 
-import my_util
+from util import err
 
 Input = namedtuple("Input", ["kind", "npos", "value"])
 Farg = namedtuple("Marg", ["npos", "key", "value"])
-Check = namedtuple("Check", ["npos", "value"])
 Hook = namedtuple("Hook", ["kind", "mid"])
 
 class Manifold:
@@ -28,15 +27,15 @@ class Manifold:
         except ValueError:
             err("Position must be an integer")
 
-    def add_check(self, npos, value):
+    def add_check(self, value):
         try:
-            self.check.append(Check(int(npos), value))
+            self.check.append(value)
         except ValueError:
             err("Position must be an integer")
 
     def add_farg(self, npos, key, value):
         try:
-            self.farg.append(Farg(kind, int(npos), value))
+            self.farg.append(Farg(int(npos), key, value))
         except ValueError:
             err("Position must be an integer")
 

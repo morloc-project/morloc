@@ -1,6 +1,7 @@
-import manifold
-import my_util
 import re
+
+import manifold
+from util import err,indent
 
 nexus_template = '''\
 #!/usr/bin/env python3
@@ -22,7 +23,9 @@ def parser():
     sub = parser.add_subparsers(
         help='sub-command help'
     )
-    {manifold_parsers}
+
+{manifold_parsers}
+
     args = parser.parse_args()
 
     return(args)
@@ -47,11 +50,8 @@ parser_template = '''\
 
 call_template = '''\
 def {mid}():
-    subprocess.call("./call.{lang} {mid}", shell=True)
+    subprocess.call("{outdir}/call.{lang} {mid}", shell=True)
 '''
-
-def indent(lines):
-    return "\n".join(["    %s" % s for s in lines.split('\n')])
 
 def build_manifold_nexus(
     languages,
@@ -71,14 +71,17 @@ def build_manifold_nexus(
         else:
             doc = ""
 
-        parser_string = indent(parser_template.format(
-            mid=k,
-            func=v.func,
-            lang=v.lang,
-            doc=doc
-        ))
+        parser_string = indent(
+            parser_template.format(
+                mid  = k,
+                func = v.func,
+                lang = v.lang,
+                doc  = doc
+            ),
+            n=4
+        )
 
-        call_string = call_template.format(mid=k, lang=v.lang)
+        call_string = call_template.format(mid=k, lang=v.lang, outdir=outdir)
         mcalls.append(call_string)
         mparsers.append(parser_string)
 

@@ -2,7 +2,7 @@ import subprocess
 import os
 
 import manifold
-import my_util
+from util import err
 
 def add_manifold_line(manifold, row):
     cmd = row[0]
@@ -30,11 +30,11 @@ def add_manifold_line(manifold, row):
             manifold.add_input('a', row[2], row[3])
         # other list attributes
         elif(cmd == "CHEK"):
-            manifold.chek.append(row[2])
-        elif(cmd == "FARG"):
-            manifold.farg.append((row[2], row[3], row[4:]))
+            manifold.add_check(row[2])
         elif(cmd == "HOOK"):
-            manifold.hook.append((row[2], row[3]))
+            manifold.add_hook(row[2], row[3])
+        elif(cmd == "FARG"):
+            manifold.add_farg(npos=row[2], key=row[3], value=row[4:])
     except IndexError:
         err("Malformed LIL, unexpected number of fields")
 
