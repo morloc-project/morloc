@@ -1,5 +1,5 @@
 SEP              = {}
-BND              = {}
+BIND             = {}
 AND              = {}
 POOL             = {}
 NATIVE_MANIFOLD  = {}
@@ -15,6 +15,7 @@ HOOK             = {}
 INDENT           = {}
 CACHE_PUT        = {}
 MARG             = {}
+LIST             = {}
 
 
 
@@ -22,8 +23,9 @@ MARG             = {}
 
 INDENT['R'] = 2
 SEP['R'] = ', '
-BND['R'] = '='
+BIND['R'] = '='
 AND['R'] = ' && '
+LIST['R'] = 'list({values})'
 
 POOL['R'] = '''\
 #!/usr/bin/Rscript --vanilla
@@ -49,7 +51,7 @@ if(exists(m)){{
 NATIVE_MANIFOLD['R'] = '''\
 {mid} = function ({marg}){{
   {hook0}
-  {block}
+{block}
   {hook1}
 }}
 '''
@@ -85,7 +87,7 @@ PROCESS['R'] = '''\
 DO_VALIDATE['R'] = '''\
 if( {checks} ){{
   {hook4}
-  b = {fun}({arguments})
+  b = {function}({arguments})
   {cache_put}
   {hook5}
 }} else {{
@@ -98,7 +100,7 @@ if( {checks} ){{
 
 NO_VALIDATE['R'] = '''\
 {hook4}
-b = {fun}({arguments})
+b = {function}({arguments})
 {cache_put}
 {hook5}
 '''
@@ -119,8 +121,9 @@ HOOK['R']          = '{mid}({margs})'
 
 INDENT['sh'] = 4
 SEP['sh'] = ' '
-BND['sh'] = ' '
+BIND['sh'] = ' '
 AND['sh'] = ' && '
+LIST['sh'] = ' {value} '
 
 POOL['sh'] = '''\
 #!/usr/bin/env bash
@@ -149,7 +152,7 @@ else
 NATIVE_MANIFOLD['sh'] = '''\
 {mid} ({marg}) {{
     {hook0}
-    {block}
+{block}
     {hook1}
 }}
 '''
@@ -182,7 +185,7 @@ DO_VALIDATE['sh'] = '''\
 if {checks}
 then
     {hook4}
-    {fun} {arguments} > {mid}_tmp
+    {function} {arguments} > {mid}_tmp
     {cache_put}
     {hook5}
 else
@@ -195,7 +198,7 @@ fi
 
 NO_VALIDATE['sh'] = '''\
 {hook4}
-{function} {arguments} {inputs} > {mid}_tmp
+{function} {arguments} > {mid}_tmp
 {cache_put}
 {hook5}
 '''
@@ -206,4 +209,4 @@ MARG['sh']          = '${i}'
 ARGUMENTS['sh']     = '{inputs} {fargs}'
 MANIFOLD_CALL['sh'] = '<({mid} {margs})'
 CHECK_CALL['sh']    = '{mid} {margs}'
-HOOK['sh']          = 'to_stderr {mid} {margs}'
+HOOK['sh']          = 'to_stderr {hmid} {margs}'
