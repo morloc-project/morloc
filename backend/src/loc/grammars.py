@@ -32,6 +32,8 @@ POOL['R'] = '''\
 #!/usr/bin/Rscript --vanilla
 library(readr)
 
+# outdir={outdir}
+
 {source}
 
 {manifolds}
@@ -137,6 +139,8 @@ LIST['sh'] = ' {value} '
 POOL['sh'] = '''\
 #!/usr/bin/env bash
 
+outdir=$PWD/{outdir}
+
 {source}
 
 to_stderr () {{
@@ -150,14 +154,15 @@ manifold_exists() {{
 }}
 if manifold_exists $1
 then
-    if [[ -f $1_tmp ]]
+    if [[ -f $outdir/$1_tmp ]]
     then
-        cat $1_tmp
+        cat $outdir/$1_tmp
     else
         $@
     fi
 else
     exit 1 
+fi
 '''
 
 NATIVE_MANIFOLD['sh'] = '''\
@@ -175,36 +180,35 @@ FOREIGN_MANIFOLD['sh'] = '''\
 '''
 
 CACHE['sh'] = '''\
-if {base_cache}_chk {mid}{uid_arg}{cache_args}
+if {cache}_chk {mid}{uid_arg}
 then
     {hook8}
-    {base_cache}_get {mid}{uid_arg}{cache_args}
+    {cache}_get {mid}{uid_arg}
     {hook9}
 else
     {process}
-    ( cat {mid}_tmp ; rm {mid}_tmp )
 fi
 '''
 
-DATCACHE_ARGS['sh'] = '''\
- "{outdir}"'''
+DATCACHE_ARGS['sh'] = ""
 
 PROCESS['sh'] = '''\
 {hook2}
 {validate}
 {hook3}
+( cat $outdir/{mid}_tmp ; rm $outdir/{mid}_tmp )
 '''
 
 DO_VALIDATE['sh'] = '''\
 if {checks}
 then
     {hook4}
-    {function} {arguments} > {mid}_tmp
+    {function} {arguments} > $outdir/{mid}_tmp
     {cache_put}
     {hook5}
 else
     {hook6}
-    fail {margs} > {mid}_tmp
+    fail {margs} > $outdir/{mid}_tmp
     {cache_put}
     {hook7}
 fi
@@ -212,17 +216,17 @@ fi
 
 NO_VALIDATE['sh'] = '''\
 {hook4}
-{function} {arguments} > {mid}_tmp
+{function} {arguments} > $outdir/{mid}_tmp
 {cache_put}
 {hook5}
 '''
 
 CACHE_PUT['sh'] = '''\
-{cache}_put {mid} b {uid_arg} {cache_args}
+{cache}_put {mid} $outdir/{mid}_tmp {uid_arg} {cache_args}
 '''
 
 MARG['sh']          = '${i}'
-ARGUMENTS['sh']     = '{inputs} {fargs}'
+ARGUMENTS['sh']     = '{fargs} {inputs}'
 MANIFOLD_CALL['sh'] = '<({hmid} {margs})'
 CHECK_CALL['sh']    = '{hmid} {margs}'
 HOOK['sh']          = 'to_stderr {hmid} {margs}'

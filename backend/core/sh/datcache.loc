@@ -1,12 +1,18 @@
 @source sh
 
+cachedir=$outdir/cache
+if [[ ! -d $cachedir ]]
+then
+    mkdir $cachedir || echo "Cannot make cache directory" &> /dev/null
+fi
+
 # $1: mid | $2: uid
 datcache_chk() {
     if [[ -z $2 ]]
     then
-        test -d cache && test -f cache/$1.dat
+        test -d $cachedir && test -f $cachedir/$1.dat
     else
-        test -d cache && test -f cache/$1_$2.dat
+        test -d $cachedir && test -f $cachedir/$1_$2.dat
     fi
 }
 
@@ -14,9 +20,9 @@ datcache_chk() {
 datcache_get() {
     if [[ -z $2 ]]
     then
-        cat cache/$1.dat | more
+        cat $cachedir/$1.dat | more
     else
-        cat cache/$1_$2.dat | more
+        cat $cachedir/$1_$2.dat | more
     fi
 }
 
@@ -24,9 +30,9 @@ datcache_get() {
 datcache_put() {
     if [[ -z $3 ]]
     then
-        ln $PWD/$2 $PWD/cache/$1.dat
+        ln $2 $cachedir/$1.dat
     else
-        ln $PWD/$2 $PWD/cache/$1_$3.dat
+        ln $2 $cachedir/$1_$3.dat
     fi
 }
 
@@ -34,8 +40,8 @@ datcache_put() {
 datcache_del() {
     if [[ -z $2 ]]
     then
-        rm cache/$1.dat
+        rm $cachedir/$1.dat
     else
-        rm cache/$1_$2.dat
+        rm $cachedir/$1_$2.dat
     fi
 }

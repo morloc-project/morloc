@@ -114,6 +114,7 @@ def process(m, outdir):
     s = s.format(
         hook2=get_hook(m, 2),
         validate=validate(m, outdir),
+        mid=m.mid,
         hook3=get_hook(m, 3)
     )
     return s
@@ -185,6 +186,7 @@ def build_pool(
         mtext.append(s)
     p = p.format(
         source=src,
+        outdir=outdir,
         manifolds='\n\n'.join(mtext)
     )
 
