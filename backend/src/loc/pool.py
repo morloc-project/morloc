@@ -20,7 +20,7 @@ def checks(m):
     ss = []
     for c in m.check:
         ss.append(CHECK_CALL[m.lang].format(
-            mid=m.mid,
+            hmid=c,
             margs=get_margs(m.narg, m.lang)
         ))
     s = SEP[m.lang].join(ss)
@@ -37,7 +37,7 @@ def arguments(m):
     inputs = []
     for k,n,v in m.input:
         if k == "m":
-            inputs.append(MANIFOLD_CALL[m.lang].format(mid=v, margs=margs))
+            inputs.append(MANIFOLD_CALL[m.lang].format(hmid=v, margs=margs))
         else:
             inputs.append(v)
     inputs = SEP[m.lang].join(inputs)
@@ -64,7 +64,10 @@ def arguments(m):
     return s
 
 def validate(m):
-    cache_put = CACHE_PUT[m.lang].format(mid=m.mid)
+    if(m.cache):
+        cache_put = CACHE_PUT[m.lang].format(cache=m.cache, mid=m.mid)
+    else:
+        cache_put = ""
     if(m.check):
         s = DO_VALIDATE[m.lang]
         s = s.format(
@@ -103,6 +106,7 @@ def process(m):
 def cache(m):
     if(m.cache):
         s = CACHE[m.lang]
+        s.format(cache=m.cache)
     else:
         s = process(m)
     return s

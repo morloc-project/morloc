@@ -107,6 +107,7 @@ if __name__ == '__main__':
         pool_filename = "{}/call.{}".format(outdir, lang)
         with open(pool_filename, 'w') as f:
             print(p, file=f)
+            os.chmod(pool_filename, 0o755)
 
 
     with open("manifold-nexus.py", 'w') as f:

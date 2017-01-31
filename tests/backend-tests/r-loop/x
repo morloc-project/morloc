@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-loc -o tst x.loc &> /dev/null
-tst/manifold-nexus.sh main &> /dev/null
+loc -x tst x.loc &> /dev/null
+./manifold-nexus.py main &> /dev/null
 status=
 if [[ -f f-cars.pdf && -f f-iris.pdf && -f f-mtcars.pdf ]]
 then

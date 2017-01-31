@@ -45,7 +45,8 @@ done
 
 n_fail=0
 n_pass=0
-loc=~/.loc/bin/loc
+loc_front=~/.loc/bin/loc
+loc_back=loc
 
 say(){
     $loud && echo "$@"
@@ -78,10 +79,10 @@ frontend_test(){
 
     say_n "$msg"
 
-    $loc x.loc &> /dev/null
+    $loc_front x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
-        diff <($loc x.loc) x.lil > /dev/null
+        diff <($loc_front x.loc) x.lil > /dev/null
         if [[ $? == 0 ]]
         then
             say OK
@@ -131,12 +132,12 @@ backend_test(){
     
     say_n "$msg"
 
-    loc -o tst x.loc &> /dev/null
+    loc -kx tst x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
         exp=/tmp/exp_$RANDOM
-        tst/manifold-nexus.sh "$cmd" &> $obs
+        ./manifold-nexus.py "$cmd" &> $obs
         ./x > $exp 2> /dev/null
 
         diff $obs $exp &> /dev/null
@@ -157,7 +158,7 @@ backend_test(){
         $instant_death && exit 1
     fi
     
-    rm -rf tst
+    rm -rf tst manifold-nexus.py
     cd - &> /dev/null
 }
 

@@ -1,3 +1,5 @@
 #!/usr/bin/env bash
+loc -x zzz x.loc
+./manifold-nexus.py min
 
-./tst/manifold-nexus.sh min
+rm -rf zzz manifold-nexus.py

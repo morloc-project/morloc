@@ -40,7 +40,7 @@ m <- args[1]
 
 if(exists(m)){{
   f = get(m)
-  d <- do.call(f, list(args[-1]))
+  d <- f()
   if(is.data.frame(d)){{
       write_tsv(d, path="/dev/stdout")
   }} else {{
@@ -70,9 +70,9 @@ FOREIGN_MANIFOLD['R'] = '''\
 '''
 
 CACHE['R'] = '''\
-if(cache_chk("{mid}")){{
+if({cache}_chk("{mid}")){{
   {hook8}
-  b = cache_get("{mid}")
+  b = {cache}_get("{mid}")
   {hook9}
 }}
 else{{
@@ -108,14 +108,14 @@ b = {function}({arguments})
 '''
 
 CACHE_PUT['R'] = '''\
-cache_put("{mid}", b)
+{cache}_put("{mid}", b)
 '''
 
 MARG['R']          = 'x{i}'
 ARGUMENTS['R']     = '{inputs}{sep}{fargs}'
-MANIFOLD_CALL['R'] = '{mid}({margs})'
-CHECK_CALL['R']    = '{mid}({margs})'
-HOOK['R']          = '{mid}({margs})'
+MANIFOLD_CALL['R'] = '{hmid}({margs})'
+CHECK_CALL['R']    = '{hmid}({margs})'
+HOOK['R']          = '{hmid}({margs})'
 
 
 
@@ -210,11 +210,11 @@ NO_VALIDATE['sh'] = '''\
 '''
 
 CACHE_PUT['sh'] = '''\
-cache_put {mid} b
+{cache}_put {mid} b
 '''
 
 MARG['sh']          = '${i}'
 ARGUMENTS['sh']     = '{inputs} {fargs}'
-MANIFOLD_CALL['sh'] = '<({mid} {margs})'
-CHECK_CALL['sh']    = '{mid} {margs}'
+MANIFOLD_CALL['sh'] = '<({hmid} {margs})'
+CHECK_CALL['sh']    = '{hmid} {margs}'
 HOOK['sh']          = 'to_stderr {hmid} {margs}'

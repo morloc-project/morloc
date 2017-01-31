@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-loc -o zzz x.loc
-zzz/manifold-nexus.sh main 2> /dev/null | grep "this is a label" &> /dev/null
+loc -x zzz x.loc
+./manifold-nexus.py main 2> /dev/null | grep "this is a label" &> /dev/null
 status=$?
-rm -rf zzz
+rm -rf zzz manifold-nexus.py
 exit $status
