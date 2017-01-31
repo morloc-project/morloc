@@ -6,6 +6,7 @@ import os
 
 import lil
 import my_util
+import nexus
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
@@ -62,11 +63,17 @@ if __name__ == '__main__':
         for k,m in manifolds.items():
             m.print()
 
-    #  for language in languages:
-    #      build_manifold_pool(
-    #          language  = language,
-    #          exports   = exports,
-    #          manifolds = manifolds,
-    #          outdir    = outdir
-    #          home      = loc_home
-    #      )
+    manifold_nexus = nexus.build_manifold_nexus(
+        languages = languages,
+        exports   = exports,
+        manifolds = manifolds,
+        outdir    = outdir,
+        home      = loc_home,
+        version   = __version__,
+        prog      = __prog__
+    )
+
+    with open("manifold-nexus.py", 'w') as f:
+        print(manifold_nexus, file=f)
+
+    os.chmod("manifold-nexus.py", 0o755)

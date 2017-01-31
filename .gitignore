@@ -10,6 +10,8 @@ tst/
 test.loc
 zzz/
 
+manifold-nexus.py
+
 call-*
 loc_[0-9]*/
 
