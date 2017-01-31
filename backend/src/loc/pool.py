@@ -84,18 +84,28 @@ def validate(m, outdir):
     else:
         cache_put = ""
     if(m.check):
+
+        if m.fail:
+            fail = FAIL[m.lang].format(
+                fail=m.fail,
+                margs=get_margs(m.narg, m.lang)
+            )
+        else:
+            fail = DEFAULT_FAIL[m.lang]
+
         s = DO_VALIDATE[m.lang]
         s = s.format(
-            checks = checks(m),
-            hook4 = get_hook(m, 4),
-            hook5 = get_hook(m, 5),
-            hook6 = get_hook(m, 6),
-            hook7 = get_hook(m, 7),
-            function = m.func,
+            checks    = checks(m),
+            hook4     = get_hook(m, 4),
+            hook5     = get_hook(m, 5),
+            hook6     = get_hook(m, 6),
+            hook7     = get_hook(m, 7),
+            function  = m.func,
             arguments = arguments(m),
-            mid = m.mid,
+            mid       = m.mid,
             cache_put = cache_put,
-            margs = get_margs(m.narg, m.lang)
+            fail      = fail,
+            margs     = get_margs(m.narg, m.lang)
         )
     else:
         s = NO_VALIDATE[m.lang]

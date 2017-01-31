@@ -17,6 +17,8 @@ INDENT           = {}
 CACHE_PUT        = {}
 MARG             = {}
 LIST             = {}
+FAIL             = {}
+DEFAULT_FAIL     = {}
 
 
 
@@ -101,11 +103,14 @@ if( {checks} ){{
   {hook5}
 }} else {{
   {hook6}
-  b = fail({margs})
+  b = {fail}
   {cache_put}
   {hook7}
 }}
 '''
+
+FAIL['R'] = '{fail}({margs})'
+DEFAULT_FAIL['R'] = 'NULL'
 
 NO_VALIDATE['R'] = '''\
 {hook4}
@@ -208,11 +213,14 @@ then
     {hook5}
 else
     {hook6}
-    fail {margs} > $outdir/{mid}_tmp
+    {fail}> $outdir/{mid}_tmp
     {cache_put}
     {hook7}
 fi
 '''
+
+FAIL['sh'] = '''{fail} {margs} '''
+DEFAULT_FAIL['sh'] = ""
 
 NO_VALIDATE['sh'] = '''\
 {hook4}
