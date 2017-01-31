@@ -5,6 +5,7 @@ POOL             = {}
 NATIVE_MANIFOLD  = {}
 FOREIGN_MANIFOLD = {}
 CACHE            = {}
+DATCACHE_ARGS    = {}
 PROCESS          = {}
 DO_VALIDATE      = {}
 NO_VALIDATE      = {}
@@ -55,6 +56,7 @@ NATIVE_MANIFOLD['R'] = '''\
   {hook0}
 {block}
   {hook1}
+  return(b)
 }}
 '''
 
@@ -65,20 +67,23 @@ FOREIGN_MANIFOLD['R'] = '''\
   if(ncol(d) == 1){{
     d <- d[[1]]
   }}
-  d
+  return(d)
 }}
 '''
 
 CACHE['R'] = '''\
-if({cache}_chk("{mid}")){{
+if({cache}_chk("{mid}"{uid_arg}{cache_args})){{
   {hook8}
-  b = {cache}_get("{mid}")
+  b = {cache}_get("{mid}"{uid_arg}{cache_args})
   {hook9}
 }}
 else{{
 {process}
 }}
 '''
+
+DATCACHE_ARGS['R'] = '''\
+, outdir="{outdir}"'''
 
 PROCESS['R'] = '''\
 {hook2}
@@ -108,7 +113,7 @@ b = {function}({arguments})
 '''
 
 CACHE_PUT['R'] = '''\
-{cache}_put("{mid}", b)
+{cache}_put("{mid}", b{uid_arg}{cache_args})
 '''
 
 MARG['R']          = 'x{i}'
@@ -170,16 +175,19 @@ FOREIGN_MANIFOLD['sh'] = '''\
 '''
 
 CACHE['sh'] = '''\
-if {base_cache}_chk {mid} {uid_arg}
+if {base_cache}_chk {mid}{uid_arg}{cache_args}
 then
     {hook8}
-    {base_cache}_get {mid} {uid_arg}
+    {base_cache}_get {mid}{uid_arg}{cache_args}
     {hook9}
 else
     {process}
     ( cat {mid}_tmp ; rm {mid}_tmp )
 fi
 '''
+
+DATCACHE_ARGS['sh'] = '''\
+ "{outdir}"'''
 
 PROCESS['sh'] = '''\
 {hook2}
@@ -210,7 +218,7 @@ NO_VALIDATE['sh'] = '''\
 '''
 
 CACHE_PUT['sh'] = '''\
-{cache}_put {mid} b
+{cache}_put {mid} b {uid_arg} {cache_args}
 '''
 
 MARG['sh']          = '${i}'

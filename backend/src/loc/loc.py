@@ -109,7 +109,6 @@ if __name__ == '__main__':
             print(p, file=f)
             os.chmod(pool_filename, 0o755)
 
-
     with open("manifold-nexus.py", 'w') as f:
         print(manifold_nexus, file=f)
 

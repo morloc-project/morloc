@@ -206,9 +206,9 @@ backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching
 backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
 fi
 
-if [[ $lang == "all" || $lang == "py" ]] ; then
-backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
-fi
+# if [[ $lang == "all" || $lang == "py" ]] ; then
+# backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
+# fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '

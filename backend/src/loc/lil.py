@@ -1,6 +1,6 @@
-import subprocess
 import os
 import re
+import subprocess
 from collections import namedtuple
 
 import manifold
@@ -14,7 +14,7 @@ def add_manifold_line(manifold, row):
         elif(cmd == "FAIL"):
             manifold.fail = row[2]
         elif(cmd == "CACH"):
-            manifold.cach = row[2]
+            manifold.cache = row[2]
         elif(cmd == "MDOC"):
             manifold.mdoc = row[2]
         elif(cmd == "TYPE"):
@@ -40,12 +40,12 @@ def add_manifold_line(manifold, row):
     except IndexError:
         err("Malformed LIL, unexpected number of fields")
 
-def compile_loc(loc_src, loc_path="~/.loc/bin/locc"):
-    # TODO - lose the kludge
-    subprocess.call("{} {} > z.lil".format(loc_path, loc_src), shell=True)
-    with open("z.lil", 'r') as f:
-        lil = [s for s in f.readlines()]
-    os.remove("z.lil")
+def compile_loc(loc_src, loc_path="~/.loc/bin/loc"):
+    lpath = os.path.expanduser(loc_path)
+    lil_byte = subprocess.check_output([lpath, loc_src])
+    lil = lil_byte.decode('utf-8')
+    lil = lil.split('\n')
+    lil = [l + "\n" for l in lil]
     return lil
 
 def get_src(lil):

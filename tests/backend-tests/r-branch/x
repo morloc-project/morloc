@@ -8,7 +8,7 @@ Petal.Width
 Species") &> /dev/null
 stat=$?
 
-rm -rf zzz
+rm -rf zzz manifold-nexus.py
 
 if [[ $stat == 0 ]]
 then

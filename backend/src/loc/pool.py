@@ -8,6 +8,16 @@ def get_margs(n, lang):
     margs = SEP[lang].join(ss)
     return margs
 
+def get_uid(m):
+    return ""
+
+def get_cache_args(m, outdir):
+    if(m.cache == "datcache"):
+        args = DATCACHE_ARGS[m.lang].format(outdir=outdir)
+    else:
+        args = ""
+    return args
+
 def get_hook(m, kind):
     hooks = [h for h in m.hook if h.kind == kind]
     ss = []
@@ -63,9 +73,14 @@ def arguments(m):
     )
     return s
 
-def validate(m):
+def validate(m, outdir):
     if(m.cache):
-        cache_put = CACHE_PUT[m.lang].format(cache=m.cache, mid=m.mid)
+        cache_put = CACHE_PUT[m.lang].format(
+            cache=m.cache,
+            mid=m.mid,
+            uid_arg=get_uid(m),
+            cache_args=get_cache_args(m, outdir)
+        )
     else:
         cache_put = ""
     if(m.check):
@@ -94,38 +109,46 @@ def validate(m):
         )
     return s
 
-def process(m):
+def process(m, outdir):
     s = PROCESS[m.lang]
     s = s.format(
         hook2=get_hook(m, 2),
-        validate=validate(m),
+        validate=validate(m, outdir),
         hook3=get_hook(m, 3)
     )
     return s
 
-def cache(m):
+def cache(m, outdir):
     if(m.cache):
         s = CACHE[m.lang]
-        s.format(cache=m.cache)
+        s = s.format(
+            cache      = m.cache,
+            mid        = m.mid,
+            hook8      = get_hook(m, 2),
+            hook9      = get_hook(m, 2),
+            uid_arg    = get_uid(m),
+            cache_args = get_cache_args(m, outdir),
+            process    = indent(process(m, outdir), n=INDENT[m.lang])
+        )
     else:
-        s = process(m)
+        s = process(m, outdir)
     return s
 
-def native_manifold(m):
+def native_manifold(m, outdir):
     s = NATIVE_MANIFOLD[m.lang]
 
     ind = INDENT[m.lang]
 
-    block = indent(cache(m))
+    block = indent(cache(m, outdir))
 
     margs = get_margs(m.narg, m.lang)
 
     s = s.format(
-        mid=m.mid,
-        marg=margs,
-        hook0=get_hook(m, 0),
-        block=block,
-        hook1=get_hook(m, 1)
+        mid   = m.mid,
+        marg  = margs,
+        hook0 = get_hook(m, 0),
+        block = block,
+        hook1 = get_hook(m, 1)
     )
     return s
 
@@ -155,7 +178,7 @@ def build_pool(
     mtext = []
     for k,v in manifolds.items():
         if v.lang == lang:
-            s = native_manifold(v)
+            s = native_manifold(v, outdir)
         else:
             s = foreign_manifold(v, lang, outdir)
         s = clean(s)
