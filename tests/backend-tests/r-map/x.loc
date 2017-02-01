@@ -1,0 +1,19 @@
+@source R
+
+map <- function(f, x){
+    lapply(x, f)
+}
+
+@path
+
+map . & ( sqrt . $1 ) ( c . 1 4 9 16 )
+
+
+@lang
+
+* :: R
+
+
+@export
+
+map as main

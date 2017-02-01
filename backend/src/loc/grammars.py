@@ -63,7 +63,6 @@ if(exists(m)){{
   quit(status=1)
 }}''',
     NATIVE_MANIFOLD = '''\
-{uid_wrapper}
 {mid} = function ({marg_uid}){{
   {hook0}
 {block}
@@ -73,10 +72,10 @@ if(exists(m)){{
 ''',
     UID_WRAPPER = '''\
 {mid}_uid = 0
-wrap_{mid} <- function( {deref} ){{
+wrap_{mid} <- function( {marg} ){{
     {mid}_uid <<- {mid}_uid + 1 
     uid <- {mid}_uid
-    {function} ( {marg}{sep}uid )
+    {mid} ( {marg_uid} )
 }}
 ''',
     UID = 'uid',

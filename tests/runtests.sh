@@ -196,6 +196,7 @@ backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <rando
 backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
+backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '

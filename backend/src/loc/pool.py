@@ -1,13 +1,6 @@
 import grammars
 from util import err,indent,clean
 
-def takes_function(m):
-    has_wrapper = False
-    for k,a,b in m.input:
-        if k == "f":
-            has_wrapper = True
-    return has_wrapper
-
 def get_margs(n, grm):
     ss = []
     try:
@@ -15,7 +8,7 @@ def get_margs(n, grm):
     except TypeError:
         err("nargs must be integrel")
     for i in range(n):
-        ss.append(grm.MARG.format(i=str(i)))
+        ss.append(grm.MARG.format(i=str(i+1)))
     margs = grm.SEP.join(ss)
     return margs
 
@@ -77,6 +70,10 @@ def arguments(m, grm):
                 hmid=v,
                 marg_uid = get_marg_uid(m, grm)
             ))
+        elif k == "f":
+            inputs.append(grm.WRAPPER_NAME.format(mid=v))
+        elif k == "a":
+            inputs.append(grm.MARG.format(i=v))
         else:
             inputs.append(v)
     inputs = grm.SEP.join(inputs)
@@ -116,13 +113,6 @@ def validate(m, outdir, grm):
     else:
         cache_put = ""
 
-    if takes_function(m):
-        function = grm.WRAPPER_NAME.format(mid=m.mid)
-        args = grm.SEP.join([v for k,p,v in m.input if k == 'f'])
-    else:
-        function = m.func
-        args = arguments(m, grm)
-
     if(m.check):
         if m.fail:
             fail = grm.FAIL.format(
@@ -137,8 +127,8 @@ def validate(m, outdir, grm):
             hook5     = get_hook(m, 5, grm),
             hook6     = get_hook(m, 6, grm),
             hook7     = get_hook(m, 7, grm),
-            function  = function,
-            arguments = args,
+            function  = m.func,
+            arguments = arguments(m, grm),
             mid       = m.mid,
             cache_put = cache_put,
             fail      = fail,
@@ -148,8 +138,8 @@ def validate(m, outdir, grm):
         s = grm.NO_VALIDATE.format(
             hook4     = get_hook(m, 4, grm),
             hook5     = get_hook(m, 5, grm),
-            function  = function,
-            arguments = args,
+            function  = m.func,
+            arguments = arguments(m, grm),
             mid       = m.mid,
             cache_put = cache_put
         )
@@ -181,45 +171,17 @@ def cache(m, outdir, grm):
         s = process(m, outdir, grm)
     return s
 
-def uid_wrapper(m, grm):
-    has_wrapper = takes_function(m)
-
-    if len(m.input) > 1:
-        sep = grm.SEP
-    else:
-        sep = ""
-
-
-    if has_wrapper:
-        wrapper = grm.UID_WRAPPER.format(
-            mid      = m.mid,
-            deref    = grm.SEP.join([v for k,p,v in m.input if k == 'f']),
-            sep      = sep,
-            function = m.func,
-            marg     = arguments(m, grm)
-        )
-    else:
-        wrapper = ""
-    return  wrapper
-
 def native_manifold(m, outdir, grm):
-    s = grm.NATIVE_MANIFOLD
-
-    ind = grm.INDENT
-
-    block = indent(cache(m, outdir, grm))
-
+    ind   = grm.INDENT
+    block = indent(cache(m, outdir, grm), n=ind)
     margs = get_margs(m.narg, grm)
-
-    s = s.format(
-        uid_wrapper = uid_wrapper(m, grm),
+    return grm.NATIVE_MANIFOLD.format(
         mid         = m.mid,
         marg_uid    = get_marg_uid(m, grm),
         hook0       = get_hook(m, 0, grm),
         block       = block,
         hook1       = get_hook(m, 1, grm)
     )
-    return s
 
 def foreign_manifold(m, outdir, grm):
     s = grm.FOREIGN_MANIFOLD.format(
@@ -250,14 +212,28 @@ def build_pool(
     except KeyError:
         src = ""
 
+    wrappers = set()
+    for mid,man in manifolds.items():
+        for k,n,m in man.input:
+            if k == "f":
+                wrappers.add(m)
+
     mtext = []
     for k,v in manifolds.items():
+        if k in wrappers:
+            w = grm.UID_WRAPPER.format(
+                mid      = v.mid,
+                marg     = get_margs(v.narg, grm),
+                marg_uid = get_marg_uid(v, grm)
+            )
+            mtext.append(w)
         if v.lang == lang:
             s = native_manifold(v, outdir, grm)
         else:
             s = foreign_manifold(v, outdir, grm)
         s = clean(s)
         mtext.append(s)
+
     p = p.format(
         source=src,
         outdir=outdir,
