@@ -3,12 +3,12 @@
 loc -x tst x.loc &> /dev/null
 ./manifold-nexus.py map &> /dev/null
 status=
-if [[ -f tst/f-cars.pdf && -f tst/f-mtcars.pdf ]]
+if [[ -f f-cars.pdf && -f f-mtcars.pdf ]]
 then
     status=0
 else
     status=1
 fi
-rm -rf tst
+rm -rf tst *pdf manifold-nexus.py
 
 exit $status

@@ -101,7 +101,7 @@ else{{
 {process}
 }}
 ''',
-    DATCACHE_ARGS = ''', outdir="{outdir}"''',
+    DATCACHE_ARGS = '''outdir="{outdir}"''',
     PROCESS = '''\
 {hook2}
 {validate}
