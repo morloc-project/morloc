@@ -4,11 +4,13 @@ loc.output
 lex.yy.*
 *.tab.*
 vgcore.*
-loc
+frontend/loc
 tags
 tst/
 test.loc
 zzz/
+
+manifold-nexus.py
 
 call-*
 loc_[0-9]*/
@@ -18,3 +20,5 @@ loc_[0-9]*/
 *.log
 *.pdf
 *.fdb_latexmk
+
+__pycache__

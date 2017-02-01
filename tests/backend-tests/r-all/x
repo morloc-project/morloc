@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
-loc -o tst x.loc
-tst/manifold-nexus.sh main
+loc -x tst x.loc
+./manifold-nexus.py main
 status=
-if [[ -f tst/z.pdf ]]
+if [[ -f z.pdf ]]
 then
     status=0
 else
     status=1
 fi
-rm -rf tst
+rm -rf tst manifold-nexus.py z.pdf
 
 exit $status

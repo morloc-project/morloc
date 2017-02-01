@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-loc -o zzz x.loc
+loc -x zzz x.loc
 
-diff <(zzz/manifold-nexus.sh colnames) <(echo \
+diff <(./manifold-nexus.py colnames) <(echo \
 "Sepal.Length
 Sepal.Width
 Petal.Width
 Species") &> /dev/null
 stat=$?
 
-rm -rf zzz
+rm -rf zzz manifold-nexus.py
 
 if [[ $stat == 0 ]]
 then

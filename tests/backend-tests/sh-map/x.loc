@@ -1,0 +1,21 @@
+@path
+
+
+map . & ( echo . $1 $1 ) ( seq . 1 5 )
+
+
+@lang
+* :: sh
+
+
+@export
+map as main
+
+
+@source sh
+map () {
+    while read line
+    do
+        $1 $line
+    done < $2 | more
+}

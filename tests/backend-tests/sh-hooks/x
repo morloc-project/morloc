@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-loc -o tst x.loc &> /dev/null
-diff <(tst/manifold-nexus.sh foo 2>&1) exp.txt
-rm -rf tst
+loc -x tst x.loc &> /dev/null
+diff <(./manifold-nexus.py foo 2>&1) exp.txt
+rm -rf tst manifold-nexus.py
 
 exit $?

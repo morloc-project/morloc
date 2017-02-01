@@ -38,6 +38,7 @@ ${LEXER}.o: ${SRC_LEXER} ${SRC_BISON}
 	bison -d --report=all -Wall ${SRC_BISON}
 	${CC} -c ${XXFLAGS} ${LEXER}.c ${PARSER}.c
 
+.PHONY: clean
 clean:
 	rm -f ${TARGET} ${PARSER}.[hc] ${LEXER}.[hc]
 	rm -rf ${OBJECTS} ${PARSER}.o

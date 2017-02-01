@@ -11,7 +11,7 @@ map () {
 map
 
 @path
-map . &(cat . cut . wc . grep . $1 ) ls . `*.sh`
+map . &(cat . cut . wc . grep . $1 ) ls . `*loc` `*py`
 
 @lang
 * :: sh

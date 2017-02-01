@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-loc -o zzz x.loc
-cat <(./zzz/manifold-nexus.sh hi) \
-    <(./zzz/manifold-nexus.sh bi) |
+loc -x zzz x.loc
+cat <(./manifold-nexus.py hi) \
+    <(./manifold-nexus.py bi) |
     diff /dev/stdin <(echo hi) &> /dev/null
 stat=$?
-rm -rf zzz
+rm -rf zzz manifold-nexus.py
 exit $stat

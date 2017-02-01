@@ -45,7 +45,8 @@ done
 
 n_fail=0
 n_pass=0
-loc=~/.loc/bin/loc
+loc_front=~/.loc/bin/loc
+loc_back=loc
 
 say(){
     $loud && echo "$@"
@@ -78,10 +79,10 @@ frontend_test(){
 
     say_n "$msg"
 
-    $loc x.loc &> /dev/null
+    $loc_front x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
-        diff <($loc x.loc) x.lil > /dev/null
+        diff <($loc_front x.loc) x.lil > /dev/null
         if [[ $? == 0 ]]
         then
             say OK
@@ -131,12 +132,12 @@ backend_test(){
     
     say_n "$msg"
 
-    loc -o tst x.loc &> /dev/null
+    loc -kx tst x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
         exp=/tmp/exp_$RANDOM
-        tst/manifold-nexus.sh "$cmd" &> $obs
+        ./manifold-nexus.py "$cmd" &> $obs
         ./x > $exp 2> /dev/null
 
         diff $obs $exp &> /dev/null
@@ -157,7 +158,7 @@ backend_test(){
         $instant_death && exit 1
     fi
     
-    rm -rf tst
+    rm -rf tst manifold-nexus.py
     cd - &> /dev/null
 }
 
@@ -195,25 +196,28 @@ backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <rando
 backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
+backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
-backend_test   r-refer   max        'r-refer/           -- max . <runif> .................................. '
+backend_x_test r-refer              'r-refer/           -- max . <runif> .................................. '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
 backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
 backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
 backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
 fi
 
-if [[ $lang == "all" || $lang == "py" ]] ; then
-backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
-fi
+# if [[ $lang == "all" || $lang == "py" ]] ; then
+# backend_test   py-hello-world  hi  'py-hello-world/    -- python hello world program ..................... '
+# fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then
+backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
+backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
-backend_test   sh-refer  head       'sh-refer/          -- head . <runif> ................................. '
+backend_x_test sh-refer             'sh-refer/          -- head . <runif> ................................. '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '

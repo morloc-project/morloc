@@ -14,9 +14,6 @@ Well :: runif . 1
 Max :: max . <runif>
 Min :: min . <runif>
 
-# # in this context, the above is identical to:
-# max min . runif . `10`
-
 @lang
 * :: R
 

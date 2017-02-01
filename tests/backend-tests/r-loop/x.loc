@@ -8,7 +8,6 @@ map  .
 
 @export
 null:main as main
-dist
 
 @arg
 hclust :: method="average"
@@ -25,10 +24,6 @@ hclust :: datcache
 
 @5
 hclust :: plot_pdf . <hclust> $1
-
-
-@1
-null:main :: mv . `*pdf` `..`
 
 
 @include

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-loc -o zzz x.loc
-n=$(zzz/manifold-nexus.sh apply 2> /dev/null | wc -l 2> /dev/null)
+loc -x zzz x.loc
+n=$(./manifold-nexus.py apply 2> /dev/null | wc -l 2> /dev/null)
 status=$?
-rm -rf zzz
+rm -rf zzz manifold-nexus.py
 
 if [[ $status -ne 0 ]]
 then
