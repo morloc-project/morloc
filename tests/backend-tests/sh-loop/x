@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
 loc -kx tst x.loc
-for j in tst/*.sh; do grep -o "a" $j | wc -l | awk '{print $1}'; done
-rm -rf tst manifold-nexus.py
+
+for j in manifold-nexus.py x.loc 
+do
+    grep -o "a" $j | wc -l | cut --delimiter=" " --fields=1
+done
