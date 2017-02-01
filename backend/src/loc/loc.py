@@ -12,7 +12,7 @@ from util import err
 __version__ = '0.0.0'
 __prog__ = 'loc'
 
-def parser():
+def parser(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--version',
@@ -40,11 +40,17 @@ def parser():
         action='store_true',
         default=False
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     return(args)
 
 if __name__ == '__main__':
-    args = parser()
+
+    if len(sys.argv) > 1:
+        argv = sys.argv[1:]
+    else:
+        argv = ['-h']
+
+    args = parser(argv)
 
     raw_lil = lil.compile_loc(args.f)
     exports = lil.get_exports(raw_lil)
