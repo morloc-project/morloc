@@ -40,13 +40,39 @@ def add_manifold_line(manifold, row):
     except IndexError:
         err("Malformed LIL, unexpected number of fields")
 
-def compile_loc(loc_src, loc_path="~/.loc/bin/loc"):
+def compile_loc(loc_src, loc_path="~/.loc/bin/loc", flags=[]):
     lpath = os.path.expanduser(loc_path)
-    lil_byte = subprocess.check_output([lpath, loc_src])
+    try:
+        lil_byte = subprocess.check_output(
+            [lpath, loc_src] + flags,
+            stderr=subprocess.STDOUT
+        )
+    except subprocess.CalledProcessError:
+        lil = lil_byte.decode('utf-8')
+        print(lil)
+        err("LOC script failed to compile")
+    else:
+        lil = lil_byte.decode('utf-8')
+        lil = lil.split('\n')
+        lil = [l + "\n" for l in lil]
+    return lil
+
+def typecheck(loc_src, loc_path="~/.loc/bin/loc"):
+    success = True
+    lpath = os.path.expanduser(loc_path)
+    try:
+        lil_byte = subprocess.check_output(
+            [lpath, loc_src, '-c'],
+            stderr=subprocess.STDOUT
+        )
+    except subprocess.CalledProcessError:
+        success = False
+
     lil = lil_byte.decode('utf-8')
     lil = lil.split('\n')
-    lil = [l + "\n" for l in lil]
-    return lil
+    type_errors = '\n'.join([s[5:] for s in lil if s[0:4] == "loc:"])
+
+    return type_errors
 
 def get_src(lil):
     src = {}
