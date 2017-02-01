@@ -176,15 +176,22 @@ else
 fi
 ''',
     NATIVE_MANIFOLD = '''\
-{mid} ({marg_uid}) {{
+{mid} () {{
     {hook0}
 {block}
     {hook1}
 }}
 ''',
-    UID_WRAPPER  = 'stub_wrapper',
-    UID          = 'stub_uid',
-    MARG_UID     = 'stub_marg_uid',
+    UID_WRAPPER  = '''\
+{mid}_uid=0
+wrap_{mid} () {{
+    {mid}_uid=$(( {mid}_uid + 1 ))
+    uid=${mid}_uid
+    {mid} $1 {marg_uid}
+}}
+''',
+    UID          = '${mid}_uid',
+    MARG_UID     = '{marg} {uid}',
     WRAPPER_NAME = 'wrap_{mid}',
     FOREIGN_MANIFOLD = '''\
 {mid} () {{

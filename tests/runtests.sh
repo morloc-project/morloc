@@ -214,6 +214,7 @@ fi
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-all    uniq       'sh-all/            -- uniq . sort . grep . man ....................... '
+backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
 backend_x_test sh-refer             'sh-refer/          -- head . <runif> ................................. '

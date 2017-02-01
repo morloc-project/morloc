@@ -45,7 +45,6 @@ grep :: echo . " - - 3"
 
 @1
 grep :: echo . " - 1"
-null :: rm . `-f` `*.xml`
 
 @lang
 * :: sh
