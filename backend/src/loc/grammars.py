@@ -19,6 +19,10 @@ MARG             = {}
 LIST             = {}
 FAIL             = {}
 DEFAULT_FAIL     = {}
+UID_WRAPPER      = {}
+UID              = {}
+MARG_UID         = {}
+WRAPPER_NAME     = {}
 
 
 
@@ -56,7 +60,8 @@ if(exists(m)){{
 }}'''
 
 NATIVE_MANIFOLD['R'] = '''\
-{mid} = function ({marg}){{
+{uid_wrapper}
+{mid} = function ({marg_uid}){{
   {hook0}
 {block}
   {hook1}
@@ -64,9 +69,21 @@ NATIVE_MANIFOLD['R'] = '''\
 }}
 '''
 
+UID_WRAPPER['R'] = '''\
+{mid}_uid = 0
+wrap_{mid} <- function( {deref} ){{
+    {mid}_uid <<- {mid}_uid + 1 
+    uid <- {mid}_uid
+    {function} ( {marg}{sep}uid )
+}}
+'''
+UID['R'] = 'uid'
+MARG_UID['R'] = '{marg}, {uid}'
+WRAPPER_NAME['R'] = 'wrap_{mid}'
+
 FOREIGN_MANIFOLD['R'] = '''\
-{mid} <- function({marg}){{
-  d <- system("{outdir}/call.{foreign_lang} {mid} {marg}", intern = TRUE)
+{mid} <- function({marg_uid}){{
+  d <- system("{outdir}/call.{foreign_lang} {mid} {marg_uid}", intern = TRUE)
   d <- read_tsv(d)
   if(ncol(d) == 1){{
     d <- d[[1]]
@@ -76,9 +93,9 @@ FOREIGN_MANIFOLD['R'] = '''\
 '''
 
 CACHE['R'] = '''\
-if({cache}_chk("{mid}"{uid_arg}{cache_args})){{
+if({cache}_chk("{mid}"{uid}{cache_args})){{
   {hook8}
-  b = {cache}_get("{mid}"{uid_arg}{cache_args})
+  b = {cache}_get("{mid}"{uid}{cache_args})
   {hook9}
 }}
 else{{
@@ -109,7 +126,7 @@ if( {checks} ){{
 }}
 '''
 
-FAIL['R'] = '{fail}({margs})'
+FAIL['R'] = '{fail}({marg_uid})'
 DEFAULT_FAIL['R'] = 'NULL'
 
 NO_VALIDATE['R'] = '''\
@@ -120,14 +137,14 @@ b = {function}({arguments})
 '''
 
 CACHE_PUT['R'] = '''\
-{cache}_put("{mid}", b{uid_arg}{cache_args})
+{cache}_put("{mid}", b{uid}{cache_args})
 '''
 
 MARG['R']          = 'x{i}'
 ARGUMENTS['R']     = '{inputs}{sep}{fargs}'
-MANIFOLD_CALL['R'] = '{hmid}({margs})'
-CHECK_CALL['R']    = '{hmid}({margs})'
-HOOK['R']          = '{hmid}({margs})'
+MANIFOLD_CALL['R'] = '{hmid}({marg_uid})'
+CHECK_CALL['R']    = '{hmid}({marg_uid})'
+HOOK['R']          = '{hmid}({marg_uid})'
 
 
 
@@ -171,24 +188,31 @@ fi
 '''
 
 NATIVE_MANIFOLD['sh'] = '''\
-{mid} ({marg}) {{
+{mid} ({marg_uid}) {{
     {hook0}
 {block}
     {hook1}
 }}
 '''
 
+UID_WRAPPER['sh'] = '''\
+stub_wrapper
+'''
+UID['sh'] = 'stub_uid'
+MARG_UID['sh'] = 'stub_marg_uid'
+WRAPPER_NAME['sh'] = 'wrap_{mid}'
+
 FOREIGN_MANIFOLD['sh'] = '''\
 {mid} () {{
-    {outdir}/call.{foreign_lang} {mid} {marg}
+    {outdir}/call.{foreign_lang} {mid} {marg_uid}
 }}
 '''
 
 CACHE['sh'] = '''\
-if {cache}_chk {mid}{uid_arg}
+if {cache}_chk {mid}{uid}
 then
     {hook8}
-    {cache}_get {mid}{uid_arg}
+    {cache}_get {mid}{uid}
     {hook9}
 else
     {process}
@@ -219,7 +243,7 @@ else
 fi
 '''
 
-FAIL['sh'] = '''{fail} {margs} '''
+FAIL['sh'] = '''{fail} {marg_uid} '''
 DEFAULT_FAIL['sh'] = ""
 
 NO_VALIDATE['sh'] = '''\
@@ -230,11 +254,11 @@ NO_VALIDATE['sh'] = '''\
 '''
 
 CACHE_PUT['sh'] = '''\
-{cache}_put {mid} $outdir/{mid}_tmp {uid_arg} {cache_args}
+{cache}_put {mid} $outdir/{mid}_tmp {uid} {cache_args}
 '''
 
 MARG['sh']          = '${i}'
 ARGUMENTS['sh']     = '{fargs} {inputs}'
-MANIFOLD_CALL['sh'] = '<({hmid} {margs})'
-CHECK_CALL['sh']    = '{hmid} {margs}'
-HOOK['sh']          = 'to_stderr {hmid} {margs}'
+MANIFOLD_CALL['sh'] = '<({hmid} {marg_uid})'
+CHECK_CALL['sh']    = '{hmid} {marg_uid}'
+HOOK['sh']          = 'to_stderr {hmid} {marg_uid}'
