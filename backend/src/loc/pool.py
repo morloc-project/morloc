@@ -14,7 +14,7 @@ def get_margs(n, grm):
 
 def get_uid(m, grm):
     if m.narg:
-        uid = grm.UID
+        uid = grm.UID.format(nth=str(int(m.narg)+1))
     else:
         uid = ""
     return uid
@@ -221,11 +221,7 @@ def build_pool(
     mtext = []
     for k,v in manifolds.items():
         if k in wrappers:
-            w = grm.UID_WRAPPER.format(
-                mid      = v.mid,
-                marg     = get_margs(v.narg, grm),
-                marg_uid = get_marg_uid(v, grm)
-            )
+            w = grm.UID_WRAPPER.format(mid=v.mid)
             mtext.append(w)
         if v.lang == lang:
             s = native_manifold(v, outdir, grm)

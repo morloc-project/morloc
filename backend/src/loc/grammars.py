@@ -72,10 +72,10 @@ if(exists(m)){{
 ''',
     UID_WRAPPER = '''\
 {mid}_uid = 0
-wrap_{mid} <- function( {marg} ){{
+wrap_{mid} <- function( ... ){{
     {mid}_uid <<- {mid}_uid + 1 
     uid <- {mid}_uid
-    {mid} ( {marg_uid} )
+    {mid} ( ..., uid=uid )
 }}
 ''',
     UID = 'uid',
@@ -186,11 +186,10 @@ fi
 {mid}_uid=0
 wrap_{mid} () {{
     {mid}_uid=$(( {mid}_uid + 1 ))
-    uid=${mid}_uid
-    {mid} $1 {marg_uid}
+    {mid} $@ ${mid}_uid
 }}
 ''',
-    UID          = '${mid}_uid',
+    UID          = '${nth}',
     MARG_UID     = '{marg} {uid}',
     WRAPPER_NAME = 'wrap_{mid}',
     FOREIGN_MANIFOLD = '''\
