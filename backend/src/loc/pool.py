@@ -1,4 +1,4 @@
-from grammars import *
+import grammars
 from util import err,indent,clean
 
 def takes_function(m):
@@ -8,233 +8,225 @@ def takes_function(m):
             has_wrapper = True
     return has_wrapper
 
-def get_margs(n, lang):
+def get_margs(n, grm):
     ss = []
     try:
         n = int(n)
     except TypeError:
         err("nargs must be integrel")
     for i in range(n):
-        ss.append(MARG[lang].format(i=str(i)))
-    margs = SEP[lang].join(ss)
+        ss.append(grm.MARG.format(i=str(i)))
+    margs = grm.SEP.join(ss)
     return margs
 
-def get_uid(m):
+def get_uid(m, grm):
     if m.narg:
-        uid = UID[m.lang]
+        uid = grm.UID
     else:
         uid = ""
     return uid
 
-def get_marg_uid(m):
-    margs = get_margs(m.narg, m.lang)
-    uid = get_uid(m)
+def get_marg_uid(m, grm):
+    margs = get_margs(m.narg, grm)
+    uid = get_uid(m, grm)
     if uid:
-        s = MARG_UID[m.lang].format(marg=margs, uid=uid)
+        s = grm.MARG_UID.format(marg=margs, uid=uid)
     else:
         s = ""
     return s
 
-def get_cache_args(m, outdir):
+def get_cache_args(m, outdir, grm):
     if(m.cache == "datcache"):
-        args = DATCACHE_ARGS[m.lang].format(outdir=outdir)
+        args = grm.DATCACHE_ARGS.format(outdir=outdir)
     else:
         args = ""
     return args
 
-def get_hook(m, kind):
+def get_hook(m, kind, grm):
     hooks = [h for h in m.hook if h.kind == kind]
     ss = []
     for h in hooks:
-        ss.append( HOOK[m.lang].format(
+        ss.append( grm.HOOK.format(
             hmid=h.mid,
-            marg_uid=get_marg_uid(m)
+            marg_uid=get_marg_uid(m, grm)
         ) )
     return '\n'.join(ss)
 
-def checks(m):
+def checks(m, grm):
     ss = []
     for c in m.check:
-        ss.append(CHECK_CALL[m.lang].format(
+        ss.append(grm.CHECK_CALL.format(
             hmid=c,
-            marg_uid=get_marg_uid(m)
+            marg_uid=get_marg_uid(m, grm)
         ))
-    s = SEP[m.lang].join(ss)
+    s = grm.SEP.join(ss)
     return s
 
-def arguments(m):
+def arguments(m, grm):
     if(m.input and m.farg):
-        sep=SEP[m.lang]
+        sep=grm.SEP
     else:
         sep=""
 
-    margs = get_margs(m.narg, m.lang)
+    margs = get_margs(m.narg, grm)
 
     inputs = []
     for k,n,v in m.input:
         if k == "m":
-            inputs.append(MANIFOLD_CALL[m.lang].format(
+            inputs.append(grm.MANIFOLD_CALL.format(
                 hmid=v,
-                marg_uid = get_marg_uid(m)
+                marg_uid = get_marg_uid(m, grm)
             ))
         else:
             inputs.append(v)
-    inputs = SEP[m.lang].join(inputs)
+    inputs = grm.SEP.join(inputs)
 
     fargs = []
     for n,k,vs in m.farg:
-        v = SEP[m.lang].join(vs)
+        v = grm.SEP.join(vs)
         if len(vs) > 1:
-            v = LIST[m.lang].format(values=v)
+            v = grm.LIST.format(values=v)
 
         if k:
-            fargs.append(BIND[m.lang].join((k,v)))
+            fargs.append(grm.BIND.join((k,v)))
         else:
             fargs.append(v)
 
-    fargs = SEP[m.lang].join(fargs)
+    fargs = grm.SEP.join(fargs)
 
-    s = ARGUMENTS[m.lang]
-    s = s.format(
-        inputs=inputs,
-        sep=sep,
-        fargs=fargs
+    s = grm.ARGUMENTS.format(
+        inputs = inputs,
+        sep    = sep,
+        fargs  = fargs
     )
     return s
 
-def validate(m, outdir):
-    uid = get_uid(m)
-    uid = SEP[m.lang] + uid if uid else uid
-    cache_args = get_cache_args(m, outdir)
-    cache_args = SEP[m.lang] + cache_args if cache_args else cache_args
+def validate(m, outdir, grm):
+    uid = get_uid(m, grm)
+    uid = grm.SEP + uid if uid else uid
+    cache_args = get_cache_args(m, outdir, grm)
+    cache_args = grm.SEP + cache_args if cache_args else cache_args
     if(m.cache):
-        cache_put = CACHE_PUT[m.lang].format(
-            cache=m.cache,
-            mid=m.mid,
-            uid=uid,
-            cache_args=cache_args
+        cache_put = grm.CACHE_PUT.format(
+            cache      = m.cache,
+            mid        = m.mid,
+            uid        = uid,
+            cache_args = cache_args
         )
     else:
         cache_put = ""
 
     if takes_function(m):
-        function = WRAPPER_NAME[m.lang].format(mid=m.mid)
-        args = SEP[m.lang].join([v for k,p,v in m.input if k == 'f'])
+        function = grm.WRAPPER_NAME.format(mid=m.mid)
+        args = grm.SEP.join([v for k,p,v in m.input if k == 'f'])
     else:
         function = m.func
-        args = arguments(m)
+        args = arguments(m, grm)
 
     if(m.check):
-
         if m.fail:
-            fail = FAIL[m.lang].format(
+            fail = grm.FAIL.format(
                 fail=m.fail,
-                marg_uid=get_marg_uid(m)
+                marg_uid=get_marg_uid(m, grm)
             )
         else:
-            fail = DEFAULT_FAIL[m.lang]
-
-        s = DO_VALIDATE[m.lang]
-        s = s.format(
-            checks    = checks(m),
-            hook4     = get_hook(m, 4),
-            hook5     = get_hook(m, 5),
-            hook6     = get_hook(m, 6),
-            hook7     = get_hook(m, 7),
+            fail = grm.DEFAULT_FAIL
+        s = grm.DO_VALIDATE.format(
+            checks    = checks(m, grm),
+            hook4     = get_hook(m, 4, grm),
+            hook5     = get_hook(m, 5, grm),
+            hook6     = get_hook(m, 6, grm),
+            hook7     = get_hook(m, 7, grm),
             function  = function,
             arguments = args,
             mid       = m.mid,
             cache_put = cache_put,
             fail      = fail,
-            marg      = get_margs(m.narg, m.lang)
+            marg      = get_margs(m.narg, grm)
         )
     else:
-        s = NO_VALIDATE[m.lang]
-        s = s.format(
-            hook4 = get_hook(m, 4),
-            hook5 = get_hook(m, 5),
+        s = grm.NO_VALIDATE.format(
+            hook4     = get_hook(m, 4, grm),
+            hook5     = get_hook(m, 5, grm),
             function  = function,
             arguments = args,
-            mid = m.mid,
+            mid       = m.mid,
             cache_put = cache_put
         )
     return s
 
-def process(m, outdir):
-    s = PROCESS[m.lang]
-    s = s.format(
-        hook2=get_hook(m, 2),
-        validate=validate(m, outdir),
-        mid=m.mid,
-        hook3=get_hook(m, 3)
+def process(m, outdir, grm):
+    s = grm.PROCESS.format(
+        hook2    = get_hook(m, 2, grm),
+        validate = validate(m, outdir, grm),
+        mid      = m.mid,
+        hook3    = get_hook(m, 3, grm)
     )
     return s
 
-def cache(m, outdir):
-    uid = get_uid(m)
-    cargs = get_cache_args(m, outdir)
+def cache(m, outdir, grm):
+    uid = get_uid(m, grm)
+    cargs = get_cache_args(m, outdir, grm)
     if(m.cache):
-        s = CACHE[m.lang]
-        s = s.format(
+        s = grm.CACHE.format(
             cache      = m.cache,
             mid        = m.mid,
-            hook8      = get_hook(m, 8),
-            hook9      = get_hook(m, 9),
-            uid        = SEP[m.lang] + uid if uid else "",
-            cache_args = SEP[m.lang] + cargs if cargs else "" ,
-            process    = indent(process(m, outdir), n=INDENT[m.lang])
+            hook8      = get_hook(m, 8, grm),
+            hook9      = get_hook(m, 9, grm),
+            uid        = grm.SEP + uid if uid else "",
+            cache_args = grm.SEP + cargs if cargs else "" ,
+            process    = indent(process(m, outdir, grm), n=grm.INDENT)
         )
     else:
-        s = process(m, outdir)
+        s = process(m, outdir, grm)
     return s
 
-def uid_wrapper(m):
+def uid_wrapper(m, grm):
     has_wrapper = takes_function(m)
 
     if len(m.input) > 1:
-        sep = SEP[m.lang]
+        sep = grm.SEP
     else:
         sep = ""
 
 
     if has_wrapper:
-        wrapper = UID_WRAPPER[m.lang].format(
-            mid=m.mid,
-            deref=SEP[m.lang].join([v for k,p,v in m.input if k == 'f']),
-            sep=sep,
-            function=m.func,
-            marg=arguments(m)
+        wrapper = grm.UID_WRAPPER.format(
+            mid      = m.mid,
+            deref    = grm.SEP.join([v for k,p,v in m.input if k == 'f']),
+            sep      = sep,
+            function = m.func,
+            marg     = arguments(m, grm)
         )
     else:
         wrapper = ""
     return  wrapper
 
-def native_manifold(m, outdir):
-    s = NATIVE_MANIFOLD[m.lang]
+def native_manifold(m, outdir, grm):
+    s = grm.NATIVE_MANIFOLD
 
-    ind = INDENT[m.lang]
+    ind = grm.INDENT
 
-    block = indent(cache(m, outdir))
+    block = indent(cache(m, outdir, grm))
 
-    margs = get_margs(m.narg, m.lang)
+    margs = get_margs(m.narg, grm)
 
     s = s.format(
-        uid_wrapper = uid_wrapper(m),
+        uid_wrapper = uid_wrapper(m, grm),
         mid         = m.mid,
-        marg_uid    = get_marg_uid(m),
-        hook0       = get_hook(m, 0),
+        marg_uid    = get_marg_uid(m, grm),
+        hook0       = get_hook(m, 0, grm),
         block       = block,
-        hook1       = get_hook(m, 1)
+        hook1       = get_hook(m, 1, grm)
     )
     return s
 
-def foreign_manifold(m, lang, outdir, marg=""):
-    s = FOREIGN_MANIFOLD[lang]
-    s = s.format(
-        mid=m.mid,
-        foreign_lang=m.lang,
-        outdir=outdir,
-        marg_uid=get_marg_uid(m)
+def foreign_manifold(m, outdir, grm):
+    s = grm.FOREIGN_MANIFOLD.format(
+        mid          = m.mid,
+        foreign_lang = m.lang,
+        outdir       = outdir,
+        marg_uid     = get_marg_uid(m, grm)
     )
     return s
 
@@ -245,10 +237,13 @@ def build_pool(
     outdir,
     home
 ):
+
     try:
-        p = POOL[lang]
+        grm = grammars.grammar[lang]
     except KeyError:
-        err("Language '%s' is not supported" % lang)
+        err("'%s' is not a supported language" % lang)
+
+    p = grm.POOL
 
     try:
         src = source[lang]
@@ -258,9 +253,9 @@ def build_pool(
     mtext = []
     for k,v in manifolds.items():
         if v.lang == lang:
-            s = native_manifold(v, outdir)
+            s = native_manifold(v, outdir, grm)
         else:
-            s = foreign_manifold(v, lang, outdir)
+            s = foreign_manifold(v, outdir, grm)
         s = clean(s)
         mtext.append(s)
     p = p.format(

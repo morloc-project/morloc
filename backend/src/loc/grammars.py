@@ -1,40 +1,44 @@
-SEP              = {}
-BIND             = {}
-AND              = {}
-POOL             = {}
-NATIVE_MANIFOLD  = {}
-FOREIGN_MANIFOLD = {}
-CACHE            = {}
-DATCACHE_ARGS    = {}
-PROCESS          = {}
-DO_VALIDATE      = {}
-NO_VALIDATE      = {}
-ARGUMENTS        = {}
-MANIFOLD_CALL    = {}
-CHECK_CALL       = {}
-HOOK             = {}
-INDENT           = {}
-CACHE_PUT        = {}
-MARG             = {}
-LIST             = {}
-FAIL             = {}
-DEFAULT_FAIL     = {}
-UID_WRAPPER      = {}
-UID              = {}
-MARG_UID         = {}
-WRAPPER_NAME     = {}
+from collections import namedtuple
 
+Grammar = namedtuple("Grammar", [
+    "SEP",
+    "BIND",
+    "AND",
+    "POOL",
+    "NATIVE_MANIFOLD",
+    "FOREIGN_MANIFOLD",
+    "CACHE",
+    "DATCACHE_ARGS",
+    "PROCESS",
+    "DO_VALIDATE",
+    "NO_VALIDATE",
+    "ARGUMENTS",
+    "MANIFOLD_CALL",
+    "CHECK_CALL",
+    "HOOK",
+    "INDENT",
+    "CACHE_PUT",
+    "MARG",
+    "LIST",
+    "FAIL",
+    "DEFAULT_FAIL",
+    "UID_WRAPPER",
+    "UID",
+    "MARG_UID",
+    "WRAPPER_NAME"
+])
 
+grammar = {}
 
 # === R grammar ============================================
 
-INDENT['R'] = 2
-SEP['R'] = ', '
-BIND['R'] = '='
-AND['R'] = ' && '
-LIST['R'] = 'list({values})'
-
-POOL['R'] = '''\
+grammar['R'] = Grammar(
+    INDENT = 2                ,
+    SEP    = ', '             ,
+    BIND   = '='              ,
+    AND    = ' && '           ,
+    LIST   = 'list({values})' ,
+    POOL   = '''\
 #!/usr/bin/Rscript --vanilla
 library(readr)
 
@@ -57,9 +61,8 @@ if(exists(m)){{
   }}
 }} else {{
   quit(status=1)
-}}'''
-
-NATIVE_MANIFOLD['R'] = '''\
+}}''',
+    NATIVE_MANIFOLD = '''\
 {uid_wrapper}
 {mid} = function ({marg_uid}){{
   {hook0}
@@ -67,21 +70,19 @@ NATIVE_MANIFOLD['R'] = '''\
   {hook1}
   return(b)
 }}
-'''
-
-UID_WRAPPER['R'] = '''\
+''',
+    UID_WRAPPER = '''\
 {mid}_uid = 0
 wrap_{mid} <- function( {deref} ){{
     {mid}_uid <<- {mid}_uid + 1 
     uid <- {mid}_uid
     {function} ( {marg}{sep}uid )
 }}
-'''
-UID['R'] = 'uid'
-MARG_UID['R'] = '{marg}, {uid}'
-WRAPPER_NAME['R'] = 'wrap_{mid}'
-
-FOREIGN_MANIFOLD['R'] = '''\
+''',
+    UID = 'uid',
+    MARG_UID = '{marg}, {uid}',
+    WRAPPER_NAME = 'wrap_{mid}',
+    FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
   d <- system("{outdir}/call.{foreign_lang} {mid} {marg_uid}", intern = TRUE)
   d <- read_tsv(d)
@@ -90,9 +91,8 @@ FOREIGN_MANIFOLD['R'] = '''\
   }}
   return(d)
 }}
-'''
-
-CACHE['R'] = '''\
+''',
+    CACHE = '''\
 if({cache}_chk("{mid}"{uid}{cache_args})){{
   {hook8}
   b = {cache}_get("{mid}"{uid}{cache_args})
@@ -101,18 +101,14 @@ if({cache}_chk("{mid}"{uid}{cache_args})){{
 else{{
 {process}
 }}
-'''
-
-DATCACHE_ARGS['R'] = '''\
-, outdir="{outdir}"'''
-
-PROCESS['R'] = '''\
+''',
+    DATCACHE_ARGS = ''', outdir="{outdir}"''',
+    PROCESS = '''\
 {hook2}
 {validate}
 {hook3}
-'''
-
-DO_VALIDATE['R'] = '''\
+''',
+    DO_VALIDATE = '''\
 if( {checks} ){{
   {hook4}
   b = {function}({arguments})
@@ -124,41 +120,35 @@ if( {checks} ){{
   {cache_put}
   {hook7}
 }}
-'''
-
-FAIL['R'] = '{fail}({marg_uid})'
-DEFAULT_FAIL['R'] = 'NULL'
-
-NO_VALIDATE['R'] = '''\
+''',
+    FAIL = '{fail}({marg_uid})',
+    DEFAULT_FAIL = 'NULL',
+    NO_VALIDATE = '''\
 {hook4}
 b = {function}({arguments})
 {cache_put}
 {hook5}
-'''
-
-CACHE_PUT['R'] = '''\
+''',
+    CACHE_PUT = '''\
 {cache}_put("{mid}", b{uid}{cache_args})
-'''
-
-MARG['R']          = 'x{i}'
-ARGUMENTS['R']     = '{inputs}{sep}{fargs}'
-MANIFOLD_CALL['R'] = '{hmid}({marg_uid})'
-CHECK_CALL['R']    = '{hmid}({marg_uid})'
-HOOK['R']          = '{hmid}({marg_uid})'
-
-
-
+''',
+    MARG          = 'x{i}',
+    ARGUMENTS     = '{inputs}{sep}{fargs}',
+    MANIFOLD_CALL = '{hmid}({marg_uid})',
+    CHECK_CALL    = '{hmid}({marg_uid})',
+    HOOK          = '{hmid}({marg_uid})'
+)
 
 
 # === sh grammar ===========================================
 
-INDENT['sh'] = 4
-SEP['sh'] = ' '
-BIND['sh'] = ' '
-AND['sh'] = ' && '
-LIST['sh'] = ' {value} '
-
-POOL['sh'] = '''\
+grammar['sh'] = Grammar(
+    INDENT = 4,
+    SEP    = ' ',
+    BIND   = ' ',
+    AND    = ' && ',
+    LIST   = ' {value} ',
+    POOL   = '''\
 #!/usr/bin/env bash
 
 outdir=$PWD/{outdir}
@@ -185,30 +175,24 @@ then
 else
     exit 1 
 fi
-'''
-
-NATIVE_MANIFOLD['sh'] = '''\
+''',
+    NATIVE_MANIFOLD = '''\
 {mid} ({marg_uid}) {{
     {hook0}
 {block}
     {hook1}
 }}
-'''
-
-UID_WRAPPER['sh'] = '''\
-stub_wrapper
-'''
-UID['sh'] = 'stub_uid'
-MARG_UID['sh'] = 'stub_marg_uid'
-WRAPPER_NAME['sh'] = 'wrap_{mid}'
-
-FOREIGN_MANIFOLD['sh'] = '''\
+''',
+    UID_WRAPPER  = 'stub_wrapper',
+    UID          = 'stub_uid',
+    MARG_UID     = 'stub_marg_uid',
+    WRAPPER_NAME = 'wrap_{mid}',
+    FOREIGN_MANIFOLD = '''\
 {mid} () {{
     {outdir}/call.{foreign_lang} {mid} {marg_uid}
 }}
-'''
-
-CACHE['sh'] = '''\
+''',
+    CACHE = '''\
 if {cache}_chk {mid}{uid}
 then
     {hook8}
@@ -217,18 +201,15 @@ then
 else
     {process}
 fi
-'''
-
-DATCACHE_ARGS['sh'] = ""
-
-PROCESS['sh'] = '''\
+''',
+    DATCACHE_ARGS = "",
+    PROCESS = '''\
 {hook2}
 {validate}
 {hook3}
 ( cat $outdir/{mid}_tmp ; rm $outdir/{mid}_tmp )
-'''
-
-DO_VALIDATE['sh'] = '''\
+''',
+    DO_VALIDATE = '''\
 if {checks}
 then
     {hook4}
@@ -241,24 +222,21 @@ else
     {cache_put}
     {hook7}
 fi
-'''
-
-FAIL['sh'] = '''{fail} {marg_uid} '''
-DEFAULT_FAIL['sh'] = ""
-
-NO_VALIDATE['sh'] = '''\
+''',
+    FAIL = '''{fail} {marg_uid} ''',
+    DEFAULT_FAIL = "",
+    NO_VALIDATE = '''\
 {hook4}
 {function} {arguments} > $outdir/{mid}_tmp
 {cache_put}
 {hook5}
-'''
-
-CACHE_PUT['sh'] = '''\
+''',
+    CACHE_PUT = '''\
 {cache}_put {mid} $outdir/{mid}_tmp {uid} {cache_args}
-'''
-
-MARG['sh']          = '${i}'
-ARGUMENTS['sh']     = '{fargs} {inputs}'
-MANIFOLD_CALL['sh'] = '<({hmid} {marg_uid})'
-CHECK_CALL['sh']    = '{hmid} {marg_uid}'
-HOOK['sh']          = 'to_stderr {hmid} {marg_uid}'
+''',
+    MARG          = '${i}',
+    ARGUMENTS     = '{fargs} {inputs}',
+    MANIFOLD_CALL = '<({hmid} {marg_uid})',
+    CHECK_CALL    = '{hmid} {marg_uid}',
+    HOOK          = 'to_stderr {hmid} {marg_uid}'
+)
