@@ -1,0 +1,6 @@
+@type
+foo,bar,fifi :: tungsten -> light
+zanzi :: NULL -> tungsten
+
+@path
+foo bar fifi . zanzi

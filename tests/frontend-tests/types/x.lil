@@ -1,0 +1,15 @@
+EMIT	m0	*
+FUNC	m0	foo
+TYPE	m0	light
+INPM	m0	0	m3
+EMIT	m1	*
+FUNC	m1	bar
+TYPE	m1	light
+INPM	m1	0	m3
+EMIT	m2	*
+FUNC	m2	fifi
+TYPE	m2	light
+INPM	m2	0	m3
+EMIT	m3	*
+FUNC	m3	zanzi
+TYPE	m3	tungsten

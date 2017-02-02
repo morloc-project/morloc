@@ -67,6 +67,7 @@ path      {var}(\/{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]
 
 type {sym}|\[{sym}\]|\*
+list {sym}({ws}*,{ws}*{sym})*
 
 identifier {var}{ws}*:[:=+-]
 
@@ -226,10 +227,10 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, PRIMITIVE);
 }
 
-<S_TYPE,S_ONTOLOGY>{sym}{ws}*:: {
-    W* w = w_new(K_NAME, trim_couple(yytext));
-    UNPUT_S("::")
-    RETURN(w, NAME);
+<S_TYPE,S_ONTOLOGY>{list}{ws}*:: {
+    W* w = list_from_str(trim_couple(yytext));
+    UNPUT_N(2)
+    RETURN(w, NAMES);
 }
 <S_TYPE>{type} {
     W* w = w_new(P_STRING, strdup(yytext));

@@ -2,6 +2,7 @@
 
 void _set_default_manifold_function(W* cm);
 void _set_manifold_type(W*, W*);
+void _transfer_type(W* type_w, W* man_w);
 bool _manifold_modifier(W* w);
 void _mod_add_modifiers(Ws* ws_top, W* p);
 bool _basename_match(W* w, W* p);
@@ -40,15 +41,22 @@ void _set_default_manifold_function(W* cm){
 }
 
 void _set_manifold_type(W* mw, W* tw){
-    char* m_name = g_label(g_lhs(mw))->name;
-    char* t_name = g_string(g_lhs(tw));
-    if(strcmp(m_name, t_name) == 0){
-        Manifold* m = g_manifold(g_rhs(mw));
-        if(m->type){
-            warn("TYPE ERROR: redeclarations of '%s' type", m_name);
-        } else {
-            m->type = g_ws(g_rhs(tw));
-        }
+
+    Ws* w_types = ws_split_couplet(tw);
+
+    ws_cap(
+        w_types,         // for t in types
+        mw,              //   given manifold m
+        w_string_equal,  //   if name(m) == name(type)
+        _transfer_type   //     m->type = type
+    );
+}
+void _transfer_type(W* type_w, W* man_w){
+    Manifold* m = g_manifold(g_rhs(man_w));
+    if(m->type){
+        warn("TYPE ERROR: redeclarations of '%s' type", m->function);
+    } else {
+        m->type = g_ws(g_rhs(type_w));
     }
 }
 

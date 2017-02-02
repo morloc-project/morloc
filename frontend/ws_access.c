@@ -51,6 +51,7 @@ bool w_is_argref   ( W* w ){ return w ? w->cls == C_ARGREF   : false; }
 bool w_is_refer    ( W* w ){ return w ? w->cls == C_REFER    : false; }
 bool w_is_deref    ( W* w ){ return w ? w->cls == C_DEREF    : false; }
 bool w_is_tpath    ( W* w ){ return w ? w->cls == T_PATH     : false; }
+bool w_is_label    ( W* w ){ return w ? w->cls == K_LABEL    : false; }
 bool w_is_manifold ( W* w ){ return w ? w->cls == C_MANIFOLD : false; }
 bool w_is_type     ( W* w ){ return w ? w->cls == T_TYPE     : false; }
 bool w_is_composon ( W* w ){ return w ? w->cls == C_COMPOSON : false; }
@@ -269,6 +270,50 @@ bool w_equal_lhs(W* a, W* b){
     Label* a_label = _ws_get_label_from_lhs(g_lhs(a));
     Label* b_label = _ws_get_label_from_lhs(g_lhs(b));
     bool is_equal = label_cmp(a_label, b_label);
+    return is_equal;
+}
+
+char* _ws_get_name(W* w){
+    if(!w) return NULL;
+    char* name = NULL;
+    switch(get_value_type(w->cls)){
+        case V_STRING:
+            name = g_string(w);
+            break;
+        case V_COUPLET:
+            name = _ws_get_name(g_lhs(w));
+            break;
+        case V_LABEL:
+            name = g_label(w)->name;
+            break;
+        case V_MANIFOLD:
+            name = g_manifold(w)->function;
+            break;
+        case V_NONE:
+            name = NULL;
+            warn("Cannot get name from V_NONE (%s:%d)", __func__, __LINE__);
+            break;
+        case V_WS:
+            if(wws_length(w) == 1){
+                name = _ws_get_name(wws_head(w));
+            } else {
+                name = NULL;
+                warn(
+                    "Cannot get name from V_WS of length > 1 (%s:%d)",
+                    __func__, __LINE__
+                );
+            }
+            break;
+    }
+    return name;
+}
+
+bool w_string_equal(W* a, W* b){
+    char* a_str = _ws_get_name(a);
+    char* b_str = _ws_get_name(b);
+    bool is_equal = false;
+    if(a_str && b_str)
+        is_equal = strcmp(a_str, b_str) == 0;
     return is_equal;
 }
 

@@ -25,7 +25,7 @@ Ws* global_table;
 %token <W*> SELECTION  /* K_LIST */
 %token <W*> PATH       /* K_PATH */
 
-%token <W*> STR NAME PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
+%token <W*> STR NAME NAMES PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
 %type  <W*> maybe_variable maybe_str
 
 %token AS ARROW RESET
@@ -230,7 +230,7 @@ s_source
 
 s_type
   : SECTION_TYPE { $$ = NULL; }
-  | s_type NAME COUPLE type {
+  | s_type NAMES COUPLE type {
     $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_TYPE); 
   }
 
@@ -244,7 +244,7 @@ type
 
 s_ontology
   : SECTION_ONTOLOGY { $$ = NULL; }
-  | s_ontology NAME COUPLE ontology {
+  | s_ontology NAMES COUPLE ontology {
     $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_ONTOLOGY); 
   }
 

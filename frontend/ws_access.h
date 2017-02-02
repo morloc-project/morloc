@@ -20,6 +20,7 @@ bool w_is_manifold  ( W* );
 bool w_is_grpref    ( W* );
 bool w_is_argref    ( W* );
 bool w_is_refer     ( W* );
+bool w_is_label     ( W* );
 bool w_is_deref     ( W* );
 bool w_is_tpath     ( W* );
 bool w_is_type      ( W* );
@@ -27,6 +28,7 @@ bool w_is_composon  ( W* );
 bool w_is_recursive ( W* );
 
 bool w_equal_lhs    ( W* a, W* b );
+bool w_string_equal ( W* a, W* b );
 
 /* Turns one couplet into a list of couplets, each with a single path (lhs). */
 Ws* ws_split_couplet(W*);

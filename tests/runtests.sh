@@ -165,6 +165,7 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
+frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
 frontend_test operator-add       'operator-add/      -- test :=, and :+ ................................ '
 frontend_test operator-sub       'operator-sub/      -- test :=, :+, and :- ............................ '
