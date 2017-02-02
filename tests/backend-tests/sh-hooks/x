@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
 loc -x tst x.loc &> /dev/null
+locstat=$?
 diff <(./manifold-nexus.py foo 2>&1) exp.txt
+stat=$?
+
 rm -rf tst manifold-nexus.py
 
-exit $?
+exit $(( locstat + stat ))
