@@ -39,10 +39,24 @@ def add_manifold_line(manifold, row):
     except IndexError:
         err("Malformed LIL, unexpected number of fields")
 
-def compile_loc(loc_src, loc_path="~/.loc/bin/loc", flags=[]):
+def compile_loc(
+    loc_src,
+    loc_path="~/.loc/bin/loc",
+    flags=[],
+    valgrind=False,
+    memtest=False
+):
     lpath = os.path.expanduser(loc_path)
+
+    cmds = []
+    if valgrind or memtest:
+        cmds = ['valgrind']
+    if memtest:
+        cmds = cmds + ['--leak-check=full']
+    cmds = cmds + [lpath, loc_src] + flags
+
     result = subprocess.run(
-        [lpath, loc_src] + flags,
+        cmds,
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,
         encoding='utf-8'

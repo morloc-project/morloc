@@ -55,6 +55,18 @@ def parser(argv):
         action='store_true',
         default=False
     )
+    parser.add_argument(
+        '--valgrind',
+        help="Compile with valgrind",
+        action='store_true',
+        default=False
+    )
+    parser.add_argument(
+        '--memtest',
+        help="Compile with valgrind and --leak-check=full",
+        action='store_true',
+        default=False
+    )
     args = parser.parse_args(argv)
     return(args)
 
@@ -71,20 +83,26 @@ if __name__ == '__main__':
     if args.typecheck:
         flags = ['-c']
 
-    compilant = lil.compile_loc(args.f, flags=flags)
+    compilant = lil.compile_loc(
+        args.f,
+        flags=flags,
+        valgrind=args.valgrind,
+        memtest=args.memtest
+    )
+
+    raw_lil = compilant.stdout
 
     if compilant.stderr:
         print(compilant.stderr)
-    
-    if compilant.returncode != 0:
-        err("Failed to compile LOC")
-
-    raw_lil = compilant.stdout
 
     if args.lil_only:
         for line in raw_lil:
             print(line, end="")
         sys.exit(0)
+    
+    if compilant.returncode != 0:
+        print("Failed to compile LOC")
+        sys.exit(compilant.returncode)
 
     exports = lil.get_exports(raw_lil)
     source = lil.get_src(raw_lil)
