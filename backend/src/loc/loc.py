@@ -34,6 +34,12 @@ def parser(argv):
         default=False
     )
     parser.add_argument(
+        '-l', '--lil-only',
+        help="Only run frontend, print LOC Intermediate Language",
+        action='store_true',
+        default=False
+    )
+    parser.add_argument(
         '-m', '--print-manifolds',
         help="Print summaries of all manifolds",
         action='store_true',
@@ -61,15 +67,25 @@ if __name__ == '__main__':
 
     args = parser(argv)
 
+    flags = []
     if args.typecheck:
-        type_errors = lil.typecheck(args.f)
-        if type_errors:
-            print(type_errors)
-            sys.exit(1)
-        else:
-            sys.exit(0)
+        flags = ['-c']
 
-    raw_lil = lil.compile_loc(args.f)
+    compilant = lil.compile_loc(args.f, flags=flags)
+
+    if compilant.stderr:
+        print(compilant.stderr)
+    
+    if compilant.returncode != 0:
+        err("Failed to compile LOC")
+
+    raw_lil = compilant.stdout
+
+    if args.lil_only:
+        for line in raw_lil:
+            print(line, end="")
+        sys.exit(0)
+
     exports = lil.get_exports(raw_lil)
     source = lil.get_src(raw_lil)
     manifolds = lil.get_manifolds(raw_lil)
