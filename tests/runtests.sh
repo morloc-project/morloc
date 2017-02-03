@@ -15,10 +15,14 @@ EOF
     exit 0
 }
 
+loc_flags=
+backend_dir=
+
 loud=true
 instant_death=false
 test_frontend=true
 test_backend=true
+test_types=true
 test_known_problems=true 
 lang="all"
 while getopts "hqxFBKEl:" opt; do
@@ -33,6 +37,8 @@ while getopts "hqxFBKEl:" opt; do
             test_frontend=false ;;
         B)
             test_backend=false ;;
+        T)
+            test_types=false ;;
         K)
             test_known_problems=false ;;
         l)
@@ -45,8 +51,6 @@ done
 
 n_fail=0
 n_pass=0
-loc_front=~/.loc/bin/loc
-loc_back=loc
 
 say(){
     $loud && echo "$@"
@@ -79,10 +83,10 @@ frontend_test(){
 
     say_n "$msg"
 
-    $loc_front x.loc &> /dev/null
+    loc -l $loc_flags x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
-        diff <($loc_front x.loc) x.lil > /dev/null
+        diff <(loc -l $loc_flags x.loc) x.lil > /dev/null
         if [[ $? == 0 ]]
         then
             say OK
@@ -105,7 +109,7 @@ frontend_test(){
 backend_x_test(){
     dir=$1
     msg=$2
-    cd backend-tests/$dir
+    cd $backend_dir/$dir
 
     say_n "$msg"
     ./x &> /dev/null
@@ -128,11 +132,11 @@ backend_test(){
     cmd="$2"
     msg="$3"
 
-    cd backend-tests/$dir
+    cd $backend_dir/$dir
     
     say_n "$msg"
 
-    loc -kx tst x.loc &> /dev/null
+    loc $loc_flags -kx tst x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
@@ -184,7 +188,17 @@ frontend_test export-path        'export-path/       -- @export ; A/g as main ..
 frontend_test variable-names     'variable-names/    -- a2 . A4 . a-r a-14 ............................. '
 fi
 
+loc_flags=" -t "
+backend_dir=type-tests
+if $test_types
+then
+announce "Type tests"
+backend_test sh-r-open main      'sh-r-open/         -- types and lists of types ....................... '
+fi
 
+
+loc_flags=" "
+backend_dir=backend-tests
 if $test_backend
 then
 announce "Backend tests"

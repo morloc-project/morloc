@@ -93,7 +93,9 @@ if __name__ == '__main__':
     raw_lil = compilant.stdout
 
     if compilant.stderr:
-        print(compilant.stderr)
+        print(compilant.stderr, end="")
+        if args.typecheck:
+            sys.exit(1)
 
     if args.lil_only:
         for line in raw_lil:

@@ -1,0 +1,18 @@
+@type
+c   :: * -> [Integer]
+seq :: Integer -> Integer -> [Integer]
+sum :: [Integer] -> Integer
+map :: (a -> b) -> [a] -> [b]
+
+@path
+map . & ( sum . seq . 1 $1) (c . 1 2 3 4 5)
+
+@export
+map as main
+
+@lang
+* :: R
+# seq :: sh
+
+@include
+"core/R/control.loc"

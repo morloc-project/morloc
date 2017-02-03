@@ -61,7 +61,7 @@ def compile_loc(
         stdout=subprocess.PIPE,
         encoding='utf-8'
     )
-    result.stdout = [s + "\n" for s in result.stdout.split('\n')]
+    result.stdout = [s + "\n" for s in result.stdout.strip().split('\n')]
     return result
 
 def typecheck(loc_src, loc_path="~/.loc/bin/loc"):
