@@ -150,7 +150,7 @@ grammar['sh'] = Grammar(
     POOL   = '''\
 #!/usr/bin/env bash
 
-outdir=$PWD/{outdir}
+outdir={outdir}
 
 {source}
 
