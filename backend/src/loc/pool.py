@@ -171,6 +171,14 @@ def cache(m, outdir, grm):
         s = process(m, outdir, grm)
     return s
 
+def simple_manifold(m, grm):
+    return grm.SIMPLE_MANIFOLD.format(
+        mid=m.mid,
+        marg_uid = get_marg_uid(m, grm),
+        function = m.func,
+        arguments = arguments(m, grm)
+    )
+
 def native_manifold(m, outdir, grm):
     ind   = grm.INDENT
     block = indent(cache(m, outdir, grm), n=ind)
@@ -224,7 +232,10 @@ def build_pool(
             w = grm.UID_WRAPPER.format(mid=v.mid)
             mtext.append(w)
         if v.lang == lang:
-            s = native_manifold(v, outdir, grm)
+            if v.cache or v.check or v.hook:
+                s = native_manifold(v, outdir, grm)
+            else:
+                s = simple_manifold(v, grm)
         else:
             s = foreign_manifold(v, outdir, grm)
         s = clean(s)

@@ -5,6 +5,7 @@ Grammar = namedtuple("Grammar", [
     "BIND",
     "AND",
     "POOL",
+    "SIMPLE_MANIFOLD",
     "NATIVE_MANIFOLD",
     "FOREIGN_MANIFOLD",
     "CACHE",
@@ -68,6 +69,11 @@ if(exists(m)){{
 {block}
   {hook1}
   return(b)
+}}
+''',
+    SIMPLE_MANIFOLD = '''\
+{mid} = function ({marg_uid}){{
+  {function}({arguments})
 }}
 ''',
     UID_WRAPPER = '''\
@@ -180,6 +186,11 @@ fi
     {hook0}
 {block}
     {hook1}
+}}
+''',
+    SIMPLE_MANIFOLD = '''
+{mid} () {{
+    {function} {arguments}
 }}
 ''',
     UID_WRAPPER  = '''\
