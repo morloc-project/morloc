@@ -3,6 +3,8 @@
 import argparse
 import sys
 import os
+import subprocess
+import shutil
 
 import lil
 import nexus
@@ -22,6 +24,10 @@ def parser(argv):
         help='Display version',
         action='version',
         version='%(prog)s {}'.format(__version__)
+    )
+    parser.add_argument(
+        '-r', '--run',
+        help='Compile and call CMD in one step, delete temporary files'
     )
     parser.add_argument(
         'f',
@@ -173,3 +179,16 @@ if __name__ == '__main__':
         print(manifold_nexus, file=f)
 
     os.chmod("manifold-nexus.py", 0o755)
+
+    if args.run:
+        result = subprocess.run(
+            ["./manifold-nexus.py", args.run],
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding='utf-8'
+        )
+        print(result.stdout, end="")
+        print(result.stderr, end="")
+        shutil.rmtree(outdir)
+        os.remove("manifold-nexus.py")
+        sys.exit(result.returncode)
