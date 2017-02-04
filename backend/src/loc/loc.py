@@ -160,20 +160,20 @@ def build_project(raw_lil, outdir, home):
 
     os.chmod("manifold-nexus.py", 0o755)
 
-def compile_lil(args):
+def get_lil(args):
     flags = []
     if args.typecheck:
-        flags.append(['-c'])
+        flags.append('-c')
     if args.token_dump:
-        flags.append(['-t'])
+        flags.append('-t')
     if args.table_dump:
-        flags.append(['-d'])
+        flags.append('-d')
 
     compilant = lil.compile_loc(
         args.f,
-        flags=flags,
-        valgrind=args.valgrind,
-        memtest=args.memtest
+        flags    = flags,
+        valgrind = args.valgrind,
+        memtest  = args.memtest
     )
 
     return (compilant.stdout, compilant.stderr, compilant.returncode)
@@ -183,7 +183,7 @@ if __name__ == '__main__':
 
     args = parser()
 
-    raw_lil, err_lil, exitcode = compile_lil(args)
+    raw_lil, err_lil, exitcode = get_lil(args)
 
     if err_lil:
         print(err_lil, file=sys.stderr, end="")

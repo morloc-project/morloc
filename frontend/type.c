@@ -1,5 +1,8 @@
 #include "type.h"
 
+// takes in all data
+W* _typecheck_derefs(Ws* ws_top, W* msg);
+
 #define LOG_ERROR(st, w, s)                                 \
     do{                                                     \
         W* wstr = w_new(P_STRING, strdup(s));               \
@@ -95,6 +98,14 @@ Ws* infertype(Ws* ws){
 W* _typecheck(W* w, W* msg){
     Manifold* m = g_manifold(g_rhs(w));
 
+    if(
+        ws_length(m->type) == 2 &&
+        strcmp(g_string(g_lhs(m->type->head)), "atomic") == 0 &&
+        strcmp(g_string(g_rhs(m->type->head)), "MULTI") == 0
+    ){
+        return msg;
+    }
+
     if(!m->type){
         LOG_ERROR(msg, w, "no declared type");
         return msg;
@@ -115,20 +126,27 @@ W* _typecheck(W* w, W* msg){
         LOG_ERROR(msg, w, "too many inputs");
     }
 
-    /* Ws* itypes;                                              */
-    /* if(type_is_well(m->type)){                               */
-    /*     itypes = NULL;                                       */
-    /*     return msg;                                          */
-    /* } else {                                                 */
-    /*     itypes = ws_init(m->type);                           */
-    /* }                                                        */
-    /* msg = ws_szap(m->inputs, itypes, msg, _type_compatible); */
+    Ws* itypes;
+    if(type_is_well(m->type)){
+        itypes = NULL;
+        return msg;
+    } else {
+        itypes = ws_init(m->type);
+    }
+    msg = ws_szap(m->inputs, itypes, msg, _type_compatible);
 
     return msg;
 }
 
 W* type_check(Ws* ws){
-    return ws_scrap(ws, NULL, ws_recurse_composition, w_is_manifold, _typecheck);
+    W* w = ws_scrap(ws, NULL, ws_recurse_composition, w_is_manifold, _typecheck);
+    w = _typecheck_derefs(ws, w);
+    return w;
+}
+
+W* _typecheck_derefs(Ws* ws, W* msg){
+    /* STUB */
+    return msg;
 }
 
 W* _type_compatible(W* o, W* t, W* msg){
@@ -139,11 +157,16 @@ W* _type_compatible(W* o, W* t, W* msg){
     Manifold *m = g_manifold(g_rhs(o));
     if(!m->type){
         LOG_ERROR(msg, o, "cannot check usage of untyped output");
-    } else {
-        char* o_type = g_string(m->type->last);
-        char* i_type = g_string(t); 
+    }
+    else if(!m->as_function){
+        char* o_type = type_str(m->type->last);
+        char* i_type = type_str(t); 
         if( ! _cmp_type(o_type, i_type)){
-            LOG_ERROR(msg, o, "type conflict with calling manifold");
+            char* fmt = "type conflict '%s' vs '%s'\n";
+            int size = strlen(fmt) - 4 + strlen(o_type) + strlen(i_type) + 1;
+            char* errmsg = (char*)malloc(size * sizeof(char));
+            sprintf(errmsg, fmt, o_type, i_type);
+            LOG_ERROR(msg, o, errmsg);
         }
     }
     return msg;

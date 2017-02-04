@@ -41,10 +41,10 @@ def add_manifold_line(manifold, row):
 
 def compile_loc(
     loc_src,
-    loc_path="~/.loc/bin/loc",
-    flags=[],
-    valgrind=False,
-    memtest=False
+    loc_path = "~/.loc/bin/loc",
+    flags    = [],
+    valgrind = False,
+    memtest  = False
 ):
     lpath = os.path.expanduser(loc_path)
 
@@ -52,8 +52,10 @@ def compile_loc(
     if valgrind or memtest:
         cmds = ['valgrind']
     if memtest:
-        cmds = cmds + ['--leak-check=full']
-    cmds = cmds + [lpath] + flags + [loc_src]
+        cmds.append('--leak-check=full')
+    cmds.append(lpath)
+    cmds += flags
+    cmds.append(loc_src)
 
     result = subprocess.run(
         cmds,

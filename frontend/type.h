@@ -2,6 +2,7 @@
 #define __TYPE_H__
 
 #define __IO__ "NULL"
+#define __MULTI__ "MULTI"
 
 #include "ws_access.h"
 
