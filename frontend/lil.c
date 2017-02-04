@@ -113,7 +113,8 @@ Ws* _manifold_to_lil(W* cm){
     lil = _three(lil, LIL_FUNCTION, _mid(m), m->function);
 
     if(m->type){
-        lil = _three(lil, LIL_TYPE, _mid(m), g_string(m->type->last));
+        char* s = type_str(m->type->last);
+        lil = _three(lil, LIL_TYPE, _mid(m), s);
     }
 
     if(m->nargs > 0){

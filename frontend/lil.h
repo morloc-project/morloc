@@ -2,6 +2,7 @@
 #define __LIL_H__
 
 #include "ws_access.h"
+#include "type.h"
 
 
 // LIL instruction strings

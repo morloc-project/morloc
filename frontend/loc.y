@@ -236,7 +236,14 @@ s_type
 
 type
   : TYPE { $$ = ws_new($1); }
-  | '(' type ')' { $$ = ws_new(w_new(P_WS, $2)); }
+  | '(' type ')' {
+    W* rhs = w_new(P_WS, $2);
+    $$ = c_make_couplet(NULL, w_new(P_STRING, "function"), '=', rhs, P_TYPE);
+  }
+  | '[' type ']' {
+    W* rhs = w_new(P_WS, $2);
+    $$ = c_make_couplet(NULL, w_new(P_STRING, "array"), '=', rhs, P_TYPE);
+  }
   | type ARROW type { $$ = ws_join($1, $3); }
 
 

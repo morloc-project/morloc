@@ -13,10 +13,67 @@
         }                                                   \
     } while(0)
 
+int type_str_r(W* w, char* s, int p){
+#define CHK(x) \
+if((p + x) >= MAX_TYPE_LENGTH) { \
+    warn("Type buffer exceeded, truncating type string\n"); \
+    return p; \
+}
+    if(w->cls == P_WS){
+        int i = 0;
+        for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
+            if(i > 0){
+                CHK(2)
+                s[p++] = '-';
+                s[p++] = '>';
+            }
+            p = type_str_r(wt, s, p);
+            i++;
+        }
+    } else {
+        char* t = g_string(g_lhs(w));
+        if(strcmp(t, "function") == 0){
+            CHK(1)
+            s[p++] = '(';
+            p = type_str_r(g_rhs(w), s, p);
+            CHK(1)
+            s[p++] = ')';
+        }
+        else if(strcmp(t, "array") == 0){
+            CHK(1)
+            s[p++] = '[';
+            p = type_str_r(g_rhs(w), s, p);
+            CHK(1)
+            s[p++] = ']';
+        }
+        else if(strcmp(t, "atomic") == 0){
+            char* atom = g_string(g_rhs(w));
+            int atom_size = strlen(atom);
+            CHK(atom_size)
+            strcpy(s + p, atom);
+            p += atom_size;
+        }
+        else {
+            warn("Type constructor '%s' is not supported", t); 
+        }
+    }
+    return p;
+#undef CHK
+}
+
+char* type_str(W* w){
+   char* s = (char*)malloc(MAX_TYPE_LENGTH * sizeof(char));
+   int p = type_str_r(w, s, 0);
+   s[p] = '\0';
+   char* ss = strdup(s);
+   free(s);
+   return ss;
+}
+
 W* _type_compatible(W* i, W* t, W* msg);
 
 bool _is_io(W* w){
-    return strcmp(g_string(w), __IO__) == 0;
+    return strcmp(g_string(g_lhs(w)), __IO__) == 0;
 }
 
 bool _cmp_type(char* a, char* b){
@@ -58,14 +115,14 @@ W* _typecheck(W* w, W* msg){
         LOG_ERROR(msg, w, "too many inputs");
     }
 
-    Ws* itypes;
-    if(type_is_well(m->type)){
-        itypes = NULL;
-        return msg;
-    } else {
-        itypes = ws_init(m->type);
-    }
-    msg = ws_szap(m->inputs, itypes, msg, _type_compatible);
+    /* Ws* itypes;                                              */
+    /* if(type_is_well(m->type)){                               */
+    /*     itypes = NULL;                                       */
+    /*     return msg;                                          */
+    /* } else {                                                 */
+    /*     itypes = ws_init(m->type);                           */
+    /* }                                                        */
+    /* msg = ws_szap(m->inputs, itypes, msg, _type_compatible); */
 
     return msg;
 }

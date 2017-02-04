@@ -38,6 +38,7 @@ typedef enum {
     T_ARGUMENT,
     P_ARGUMENT,
     T_TYPE,
+    P_TYPE,
     T_ONTOLOGY,
     C_COMPOSON,   // C for composition
     C_MANIFOLD,

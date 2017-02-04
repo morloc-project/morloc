@@ -121,8 +121,8 @@ syn region s_string start=/'/ end=/'/ contained
 syn region s_string start=/"/ end=/"/ contained
 
 
-" define constants
-syn keyword s_nil NIL contained
+" define terms used in types
+syn keyword s_nil NIL MULTI contained
 
 " keywords
 syn keyword s_export_keyword as contained

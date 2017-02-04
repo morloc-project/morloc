@@ -66,7 +66,7 @@ var       {sym}(:[a-zA-Z0-9_]+)?
 path      {var}(\/{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]
 
-type {sym}|\[{sym}\]|\*
+type {sym}|\*
 list {sym}({ws}*,{ws}*{sym})*
 
 identifier {var}{ws}*:[:=+-]
@@ -233,7 +233,10 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, NAMES);
 }
 <S_TYPE>{type} {
-    W* w = w_new(P_STRING, strdup(yytext));
+    W* lhs = w_new(P_STRING, "atomic");
+    W* rhs = w_new(P_STRING, strdup(yytext));
+    Couplet* c = couplet_new(lhs, rhs, '=');
+    W* w = w_new(P_TYPE, c);
     RETURN(w, TYPE);
 }
 <S_TYPE>-> { RETURN_TOKEN(ARROW); }
