@@ -14,7 +14,13 @@ from util import err
 __version__ = '0.0.0'
 __prog__ = 'loc'
 
-def parser(argv):
+def parser():
+
+    if len(sys.argv) > 1:
+        argv = sys.argv[1:]
+    else:
+        argv = ['-h']
+
     parser = argparse.ArgumentParser(
         description="Compile a LOC program",
         usage="loc [options] LOC_SCRIPT"
@@ -73,65 +79,31 @@ def parser(argv):
         action='store_true',
         default=False
     )
+    parser.add_argument(
+        '--token-dump',
+        help="Print the lexer tokens",
+        action='store_true',
+        default=False
+    )
+    parser.add_argument(
+        '--table-dump',
+        help="Dump the parser symbol table",
+        action='store_true',
+        default=False
+    )
     args = parser.parse_args(argv)
     return(args)
 
-if __name__ == '__main__':
 
-    if len(sys.argv) > 1:
-        argv = sys.argv[1:]
-    else:
-        argv = ['-h']
-
-    args = parser(argv)
-
-    flags = []
-    if args.typecheck:
-        flags = ['-c']
-
-    compilant = lil.compile_loc(
-        args.f,
-        flags=flags,
-        valgrind=args.valgrind,
-        memtest=args.memtest
-    )
-
-    raw_lil = compilant.stdout
-
-    if compilant.stderr:
-        print(compilant.stderr, end="")
-        if args.typecheck:
-            sys.exit(1)
-
-    if args.lil_only:
-        for line in raw_lil:
-            print(line, end="")
-        sys.exit(0)
-    
-    if compilant.returncode != 0:
-        print("Failed to compile LOC")
-        sys.exit(compilant.returncode)
-
-    exports = lil.get_exports(raw_lil)
-    source = lil.get_src(raw_lil)
-    manifolds = lil.get_manifolds(raw_lil)
-    languages = set([l.lang for m,l in manifolds.items()])
-
-    if args.print_manifolds:
-        for k,m in manifolds.items():
-            m.print()
-        sys.exit(0)
-
-    loc_home = os.path.expanduser("~/.loc")
-    loc_tmp = "%s/tmp" % loc_home
-
+def get_outdir(home, exe_path=None):
+    loc_tmp = "%s/tmp" % home
     try:
         os.mkdir(loc_tmp)
     except FileExistsError:
         pass
-
-    if args.execution_path:
-        outdir=os.path.expanduser(args.execution_path)
+    outdir = None
+    if exe_path:
+        outdir=os.path.expanduser(exe_path)
         try:
             os.mkdir(outdir)
         except PermissionError:
@@ -151,13 +123,21 @@ if __name__ == '__main__':
                 pass
         else:
             err("Too many temporary directories")
+    return outdir
+
+def build_project(raw_lil, outdir, home):
+
+    exports   = lil.get_exports(raw_lil)
+    source    = lil.get_src(raw_lil)
+    manifolds = lil.get_manifolds(raw_lil)
+    languages = set([l.lang for m,l in manifolds.items()])
 
     manifold_nexus = nexus.build_manifold_nexus(
         languages = languages,
         exports   = exports,
         manifolds = manifolds,
         outdir    = outdir,
-        home      = loc_home,
+        home      = home,
         version   = __version__,
         prog      = __prog__
     )
@@ -168,7 +148,7 @@ if __name__ == '__main__':
             source    = source,
             manifolds = manifolds,
             outdir    = outdir,
-            home      = loc_home
+            home      = home
         )
         pool_filename = "{}/call.{}".format(outdir, lang)
         with open(pool_filename, 'w') as f:
@@ -179,6 +159,55 @@ if __name__ == '__main__':
         print(manifold_nexus, file=f)
 
     os.chmod("manifold-nexus.py", 0o755)
+
+def compile_lil(args):
+    flags = []
+    if args.typecheck:
+        flags.append(['-c'])
+    if args.token_dump:
+        flags.append(['-t'])
+    if args.table_dump:
+        flags.append(['-d'])
+
+    compilant = lil.compile_loc(
+        args.f,
+        flags=flags,
+        valgrind=args.valgrind,
+        memtest=args.memtest
+    )
+
+    return (compilant.stdout, compilant.stderr, compilant.returncode)
+
+
+if __name__ == '__main__':
+
+    args = parser()
+
+    raw_lil, err_lil, exitcode = compile_lil(args)
+
+    if err_lil:
+        print(err_lil, file=sys.stderr, end="")
+        if args.typecheck:
+            sys.exit(1)
+    
+    if exitcode != 0:
+        err("Failed to compile LOC", code=exitcode)
+
+    if args.lil_only:
+        for line in raw_lil:
+            print(line, end="")
+        sys.exit(0)
+
+    loc_home = os.path.expanduser("~/.loc")
+
+    outdir = get_outdir(loc_home, args.execution_path)
+
+    build_project(raw_lil, outdir, loc_home)
+
+    if args.print_manifolds:
+        for k,m in manifolds.items():
+            m.print()
+        sys.exit(0)
 
     if args.run:
         result = subprocess.run(

@@ -1,8 +1,9 @@
 import sys
 import re
 
-def err(msg):
-    sys.exit(msg)
+def err(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
 
 def indent(text, n=4):
     if text:

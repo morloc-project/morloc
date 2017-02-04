@@ -53,7 +53,7 @@ def compile_loc(
         cmds = ['valgrind']
     if memtest:
         cmds = cmds + ['--leak-check=full']
-    cmds = cmds + [lpath, loc_src] + flags
+    cmds = cmds + [lpath] + flags + [loc_src]
 
     result = subprocess.run(
         cmds,
