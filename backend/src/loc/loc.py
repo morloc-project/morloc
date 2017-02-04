@@ -8,7 +8,7 @@ import shutil
 
 import lil
 import nexus
-import pool
+import grammars
 from util import err
 
 __version__ = '0.0.0'
@@ -143,16 +143,23 @@ def build_project(raw_lil, outdir, home):
     )
 
     for lang in languages:
-        p = pool.build_pool(
-            lang      = lang,
-            source    = source,
-            manifolds = manifolds,
-            outdir    = outdir,
-            home      = home
-        )
+        try:
+            src = source[lang]
+        except KeyError:
+            src = ""
+
+        if lang == "sh":
+            grm = grammars.ShGrammar(src, manifolds, outdir, home)
+        elif lang == "R":
+            grm = grammars.RGrammar(src, manifolds, outdir, home)
+        else:
+            err("'%s' is not a supported language" % lang)
+
+        pool = grm.make()
+
         pool_filename = "{}/call.{}".format(outdir, lang)
         with open(pool_filename, 'w') as f:
-            print(p, file=f)
+            print(pool, file=f)
             os.chmod(pool_filename, 0o755)
 
     with open("manifold-nexus.py", 'w') as f:
