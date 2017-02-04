@@ -12,7 +12,6 @@ map as main
 
 @lang
 * :: R
-seq :: sh
 
 @include
 "core/R/control.loc"

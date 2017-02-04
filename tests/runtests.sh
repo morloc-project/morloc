@@ -193,7 +193,8 @@ backend_dir=type-tests
 if $test_types
 then
 announce "Type tests"
-backend_test sh-r-open main      'sh-r-open/         -- types and lists of types ....................... '
+backend_test multi main          'multi/             -- types and lists of types ....................... '
+backend_test sh-r-open main      'sh-r-open/         -- send data from R to sh ......................... '
 fi
 
 
