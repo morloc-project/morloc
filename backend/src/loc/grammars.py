@@ -40,9 +40,10 @@ class Grammar:
         self.MARG_UID         = ""
         self.WRAPPER_NAME     = ""
 
+
     def make(self):
 
-        p = self.POOL
+        p = self.make_pool()
 
         # Find the manifolds that require wrappers for adding
         # manifold arguments and ids
@@ -55,15 +56,15 @@ class Grammar:
         mtext = []
         for k,v in self.manifolds.items():
             if k in wrappers:
-                w = self.make_uid_wrapper(v.mid)
+                w = self.make_uid_wrapper(v)
                 mtext.append(w)
             if v.lang == self.lang:
                 if v.cache or v.check or v.hook:
-                    s = self.native_manifold(v)
+                    s = self.make_native_manifold(v)
                 else:
-                    s = self.simple_manifold(v)
+                    s = self.make_simple_manifold(v)
             else:
-                s = self.foreign_manifold(v)
+                s = self.make_foreign_manifold(v)
             s = clean(s)
             mtext.append(s)
 
@@ -75,107 +76,110 @@ class Grammar:
 
         return p
 
-    def make_uid_wrapper(self, mid):
-        return self.UID_WRAPPER.format(mid=mid)
 
 
-    def simple_manifold(self, m):
+    def make_pool(self):
+        return self.POOL
+
+    def make_simple_manifold(self, m):
         return self.SIMPLE_MANIFOLD.format(
             mid       = m.mid,
-            marg_uid  = self.get_marg_uid(m),
+            marg_uid  = self.make_marg_uid(m),
             function  = m.func,
-            arguments = self.arguments(m)
+            arguments = self.make_arguments(m)
         )
 
-    def native_manifold(self, m):
+    def make_native_manifold(self, m):
         ind   = self.INDENT
-        block = indent(self.cache(m), n=ind)
-        margs = self.get_margs(m.narg)
+        block = indent(self.make_cache(m), n=ind)
+        margs = self.make_marg(m)
         return self.NATIVE_MANIFOLD.format(
             mid         = m.mid,
-            marg_uid    = self.get_marg_uid(m),
-            hook0       = self.get_hook(m, 0),
+            marg_uid    = self.make_marg_uid(m),
+            hook0       = self.make_hook(m, 0),
             block       = block,
-            hook1       = self.get_hook(m, 1)
+            hook1       = self.make_hook(m, 1)
         )
 
-    def foreign_manifold(self, m):
+    def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
             mid          = m.mid,
             foreign_lang = m.lang,
             outdir       = self.outdir,
-            marg_uid     = self.get_marg_uid(m)
+            marg_uid     = self.make_marg_uid(m)
         )
         return s
 
-    def get_margs(self, n):
-        ss = []
-        try:
-            n = int(n)
-        except TypeError:
-            err("nargs must be integrel")
-        for i in range(n):
-            ss.append(self.MARG.format(i=str(i+1)))
-        margs = self.SEP.join(ss)
-        return margs
 
-    def get_uid(self, m):
-        if m.narg:
-            uid = self.UID.format(nth=str(int(m.narg)+1))
-        else:
-            uid = ""
-        return uid
-
-    def get_marg_uid(self, m):
-        margs = self.get_margs(m.narg)
-        uid = self.get_uid(m)
-        if uid:
-            s = self.MARG_UID.format(marg=margs, uid=uid)
-        else:
-            s = ""
-        return s
-
-    def get_cache_args(self, m):
+    def make_cache_args(self, m):
         if(m.cache == "datcache"):
-            args = self.DATCACHE_ARGS.format(outdir=self.outdir)
+            args = self.make_datcache_args()
         else:
             args = ""
         return args
 
-    def get_hook(self, m, kind):
-        hooks = [h for h in m.hook if h.kind == kind]
-        ss = []
-        for h in hooks:
-            ss.append( self.HOOK.format(
-                hmid=h.mid,
-                marg_uid=self.get_marg_uid(m)
-            ) )
-        return '\n'.join(ss)
-
-    def checks(self, m):
-        ss = []
-        for c in m.check:
-            ss.append(self.CHECK_CALL.format(
-                hmid=c,
-                marg_uid=self.get_marg_uid(m)
-            ))
-        s = self.SEP.join(ss)
+    def make_cache(self, m):
+        uid = self.make_uid(m)
+        cargs = self.make_cache_args(m)
+        if(m.cache):
+            s = self.CACHE.format(
+                cache      = m.cache,
+                mid        = m.mid,
+                hook8      = self.make_hook(m, 8),
+                hook9      = self.make_hook(m, 9),
+                uid        = self.SEP + uid if uid else "",
+                cache_args = self.SEP + cargs if cargs else "" ,
+                process    = indent(self.make_process(m), n=self.INDENT)
+            )
+        else:
+            s = self.make_process(m)
         return s
 
-    def arguments(self, m):
+    def make_datcache_args(self):
+        return self.DATCACHE_ARGS.format(outdir=self.outdir)
+
+    def make_process(self):
+        return self.PROCESS
+
+    def make_do_validate(self, m):
+        return self.DO_VALIDATE.format(
+            checks    = self.make_checks(m),
+            hook4     = self.make_hook(m, 4),
+            hook5     = self.make_hook(m, 5),
+            hook6     = self.make_hook(m, 6),
+            hook7     = self.make_hook(m, 7),
+            function  = m.func,
+            arguments = self.make_arguments(m),
+            mid       = m.mid,
+            cache_put = self.make_cache_put(m),
+            fail      = self.make_fail(m),
+            marg      = self.make_marg(m)
+        )
+
+    def make_no_validate(self, m):
+        return self.NO_VALIDATE.format(
+            hook4     = self.make_hook(m, 4),
+            hook5     = self.make_hook(m, 5),
+            function  = m.func,
+            arguments = self.make_arguments(m),
+            mid       = m.mid,
+            cache_put = self.make_cache_put(m)
+        )
+
+    def make_arguments(self, m):
         if(m.input and m.farg):
             sep=self.SEP
         else:
             sep=""
 
-        margs = self.get_margs(m.narg)
+        margs = self.make_marg(m)
 
         inputs = []
         for k,n,v in m.input:
             if k == "m":
                 inputs.append(self.MANIFOLD_CALL.format(
                     hmid=v,
-                    marg_uid = self.get_marg_uid(m)
+                    marg_uid = self.make_marg_uid(m)
                 ))
             elif k == "f":
                 inputs.append(self.WRAPPER_NAME.format(mid=v))
@@ -205,77 +209,120 @@ class Grammar:
         )
         return s
 
-    def validate(self, m):
-        uid = self.get_uid(m)
-        uid = self.SEP + uid if uid else uid
-        cache_args = self.get_cache_args(m)
-        cache_args = self.SEP + cache_args if cache_args else cache_args
+
+    def make_manifold_call(self):
+        return self.MANIFOLD_CALL
+
+    def make_check_call(self):
+        return self.CHECK_CALL
+
+    def make_hook(self, m, kind):
+        hooks = [h for h in m.hook if h.kind == kind]
+        ss = []
+        for h in hooks:
+            ss.append( self.HOOK.format(
+                hmid=h.mid,
+                marg_uid=self.make_marg_uid(m)
+            ) )
+        return '\n'.join(ss)
+
+    def make_indent(self):
+        return self.INDENT
+
+    def make_cache_put(self, m):
         if(m.cache):
+            uid        = self.make_uid(m)
+            cache_args = self.make_cache_args(m)
+            other_args = ""
+            if uid and cache_args:
+                other_args = self.SEP.join((uid, cache_args))
+            else:
+                other_args = uid + cache_args
+            if other_args:
+                other_args = self.SEP + other_args
             cache_put = self.CACHE_PUT.format(
                 cache      = m.cache,
                 mid        = m.mid,
-                uid        = uid,
-                cache_args = cache_args
+                other_args = other_args
             )
         else:
             cache_put = ""
+        return cache_put
 
+    def make_marg(self, m):
+        ss = []
+        try:
+            n = int(m.narg)
+        except TypeError:
+            err("nargs must be integrel")
+        for i in range(n):
+            ss.append(self.MARG.format(i=str(i+1)))
+        margs = self.SEP.join(ss)
+        return margs
+
+
+    def make_list(self):
+        return self.LIST
+
+    def make_fail(self, m):
+        if m.fail:
+            fail = self.FAIL.format(
+                fail=m.fail,
+                marg_uid=self.make_marg_uid(m)
+            )
+        else:
+            fail = self.DEFAULT_FAIL
+        return fail
+
+    def make_default_fail(self):
+        return self.DEFAULT_FAIL
+
+    def make_uid_wrapper(self, m):
+        return self.UID_WRAPPER.format(mid=m.mid)
+
+    def make_uid(self, m):
+        if m.narg:
+            uid = self.UID.format(nth=str(int(m.narg)+1))
+        else:
+            uid = ""
+        return uid
+
+    def make_marg_uid(self, m):
+        margs = self.make_marg(m)
+        uid = self.make_uid(m)
+        if uid:
+            s = self.MARG_UID.format(marg=margs, uid=uid)
+        else:
+            s = ""
+        return s
+
+    def make_wrapper_name(self):
+        return self.WRAPPER_NAME
+
+    def make_checks(self, m):
+        ss = []
+        for c in m.check:
+            ss.append(self.CHECK_CALL.format(
+                hmid=c,
+                marg_uid=self.make_marg_uid(m)
+            ))
+        s = self.SEP.join(ss)
+        return s
+
+    def make_validate(self, m):
         if(m.check):
-            if m.fail:
-                fail = self.FAIL.format(
-                    fail=m.fail,
-                    marg_uid=self.get_marg_uid(m)
-                )
-            else:
-                fail = self.DEFAULT_FAIL
-            s = self.DO_VALIDATE.format(
-                checks    = self.checks(m),
-                hook4     = self.get_hook(m, 4),
-                hook5     = self.get_hook(m, 5),
-                hook6     = self.get_hook(m, 6),
-                hook7     = self.get_hook(m, 7),
-                function  = m.func,
-                arguments = self.arguments(m),
-                mid       = m.mid,
-                cache_put = cache_put,
-                fail      = fail,
-                marg      = self.get_margs(m.narg)
-            )
+            s = self.make_do_validate(m)
         else:
-            s = self.NO_VALIDATE.format(
-                hook4     = self.get_hook(m, 4),
-                hook5     = self.get_hook(m, 5),
-                function  = m.func,
-                arguments = self.arguments(m),
-                mid       = m.mid,
-                cache_put = cache_put
-            )
+            s = self.make_no_validate(m)
         return s
 
-    def process(self, m):
+    def make_process(self, m):
         s = self.PROCESS.format(
-            hook2    = self.get_hook(m, 2),
-            validate = self.validate(m),
+            hook2    = self.make_hook(m, 2),
+            validate = self.make_validate(m),
             mid      = m.mid,
-            hook3    = self.get_hook(m, 3)
+            hook3    = self.make_hook(m, 3)
         )
-        return s
-
-    def cache(self, m):
-        uid = self.get_uid(m)
-        cargs = self.get_cache_args(m)
-        if(m.cache):
-            s = self.CACHE.format(
-                cache      = m.cache,
-                mid        = m.mid,
-                hook8      = self.get_hook(m, 8),
-                hook9      = self.get_hook(m, 9),
-                uid        = self.SEP + uid if uid else "",
-                cache_args = self.SEP + cargs if cargs else "" ,
-                process    = indent(self.process(m), n=self.INDENT)
-            )
-        else:
-            s = self.process(m)
         return s
 
 
@@ -393,7 +440,7 @@ b = {function}({arguments})
 {hook5}
 '''
         self.CACHE_PUT = '''\
-{cache}_put("{mid}", b{uid}{cache_args})
+{cache}_put("{mid}", b{other_args})
 '''
         self.MARG          = 'x{i}'
         self.ARGUMENTS     = '{inputs}{sep}{fargs}'
@@ -517,7 +564,7 @@ fi
 {hook5}
 '''
         self.CACHE_PUT = '''\
-{cache}_put {mid} $outdir/{mid}_tmp {uid} {cache_args}
+{cache}_put {mid} $outdir/{mid}_tmp{other_args}
 '''
         self.MARG          = '${i}'
         self.ARGUMENTS     = '{fargs} {inputs}'

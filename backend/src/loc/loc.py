@@ -116,14 +116,14 @@ def get_outdir(home, exe_path=None):
     else:
         for i in range(100):
             try:
-                outdir="{}/loc_{}".format(loc_tmp, i)
+                outdir=os.path.join(loc_tmp, "loc_{}" % i)
                 os.mkdir(outdir)
                 break
             except FileExistsError:
                 pass
         else:
             err("Too many temporary directories")
-    return outdir
+    return os.path.abspath(outdir)
 
 def build_project(raw_lil, outdir, home):
 
@@ -157,10 +157,13 @@ def build_project(raw_lil, outdir, home):
 
         pool = grm.make()
 
-        pool_filename = "{}/call.{}".format(outdir, lang)
+        pool_filename = os.path.join(outdir, "call.%s" % lang)
         with open(pool_filename, 'w') as f:
             print(pool, file=f)
             os.chmod(pool_filename, 0o755)
+
+    if any([m.cache for m in manifolds.values()]):
+        os.mkdir(os.path.join(outdir, "cache"))
 
     with open("manifold-nexus.py", 'w') as f:
         print(manifold_nexus, file=f)
@@ -209,7 +212,7 @@ if __name__ == '__main__':
 
     outdir = get_outdir(loc_home, args.execution_path)
 
-    build_project(raw_lil, outdir, loc_home)
+    build_project(raw_lil=raw_lil, outdir=outdir, home=loc_home)
 
     if args.print_manifolds:
         for k,m in manifolds.items():
