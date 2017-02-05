@@ -88,6 +88,7 @@ class Grammar:
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
             mid          = m.mid,
+            marg_uid     = self.make_marg_uid(m),
             foreign_lang = m.lang,
             outdir       = self.outdir,
             uni_marg_uid = self.make_marg_uid(m, universal=True)
