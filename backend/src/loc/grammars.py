@@ -298,7 +298,7 @@ class Grammar:
     def make_cast_nat2uni(self, arg):
         return self.CAST_NAT2UNI.format(
             key=arg,
-            type=make_type_access(arg)
+            type=self.make_type_access(arg)
         )
 
     def make_type_access(self, arg):
@@ -338,7 +338,7 @@ class Grammar:
         if uid:
             s = self.MARG_UID.format(marg=margs, uid=uid)
         else:
-            s = ""
+            s = margs
         return s
 
 
@@ -384,10 +384,10 @@ if(exists(m)){{
 }} else {{
   quit(status=1)
 }}'''
-        self.TYPE_MAP         = 'types <- c({pairs})'
-        self.TYPE_ACCESS      = 'types["{key}"]'
-        self.CAST_NAT2UNI     = 'natural_to_universal({key}, {type})'
-        self.CAST_UNI2NAT     = 'universal_to_natural({key}, {type})'
+        self.TYPE_MAP         = '''types <- c({pairs})'''
+        self.TYPE_ACCESS      = '''types["{key}"]'''
+        self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
+        self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
         self.NATIVE_MANIFOLD = '''\
 {mid} = function ({marg_uid}){{
   {hook0}
@@ -415,7 +415,9 @@ wrap_{mid} <- function( ... ){{
         self.FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
   foreign_pool <- file.path(outdir, "call.{foreign_lang}")
-  cmd <- sprintf("%s {mid} {uni_marg_uid}", foreign_pool)
+  cmd <- sprintf(
+    "%s {mid}{arg_var}",
+    foreign_pool{arg_rep})
   raw <- system(cmd, intern = TRUE)
   d <- universal_to_native(raw, types["{mid}"])
   return(d)
@@ -466,6 +468,26 @@ b = {function}({arguments})
         self.MANIFOLD_CALL = '{hmid}({marg_uid})'
         self.CHECK_CALL    = '{hmid}({marg_uid})'
         self.HOOK          = '{hmid}({marg_uid})'
+
+    def make_foreign_manifold(self, m):
+        arg_var = " %s" * (int(m.narg) + 1) if m.narg else ""
+
+        arg_rep = ""
+        for i in range(int(m.narg)):
+            a = self.MARG.format(i=str(i+1))
+            arg_rep += ',\n    native_to_universal(%s, type["%s"])' % (a,a)
+        if m.narg:
+            arg_rep += ",\n    uid"
+
+        s = self.FOREIGN_MANIFOLD.format(
+            mid=m.mid,
+            arg_var=arg_var,
+            arg_rep=arg_rep,
+            cmd='',
+            marg_uid=self.make_marg_uid(m),
+            foreign_lang=m.lang
+        )
+        return s
 
 
 # === sh grammar ===========================================
