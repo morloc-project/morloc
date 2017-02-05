@@ -5,9 +5,9 @@ all:
 
 .PHONY: run
 run:
-	./manifold-nexus.py sqrt
+	./manifold-nexus.py foo
 
 .PHONY: clean
 clean:
 	rm -f manifold-nexus.py
-	rm -rf locout
+	rm -rf locouth

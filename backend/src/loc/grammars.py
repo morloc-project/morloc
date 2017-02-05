@@ -81,26 +81,6 @@ class Grammar:
     def make_pool(self):
         return self.POOL
 
-    def make_simple_manifold(self, m):
-        return self.SIMPLE_MANIFOLD.format(
-            mid       = m.mid,
-            marg_uid  = self.make_marg_uid(m),
-            function  = m.func,
-            arguments = self.make_arguments(m)
-        )
-
-    def make_native_manifold(self, m):
-        ind   = self.INDENT
-        block = indent(self.make_cache(m), n=ind)
-        margs = self.make_marg(m)
-        return self.NATIVE_MANIFOLD.format(
-            mid         = m.mid,
-            marg_uid    = self.make_marg_uid(m),
-            hook0       = self.make_hook(m, 0),
-            block       = block,
-            hook1       = self.make_hook(m, 1)
-        )
-
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
             mid          = m.mid,
@@ -110,13 +90,24 @@ class Grammar:
         )
         return s
 
+    def make_simple_manifold(self, m):
+        return self.SIMPLE_MANIFOLD.format(
+            mid       = m.mid,
+            marg_uid  = self.make_marg_uid(m),
+            function  = m.func,
+            arguments = self.make_arguments(m)
+        )
 
-    def make_cache_args(self, m):
-        if(m.cache == "datcache"):
-            args = self.make_datcache_args()
-        else:
-            args = ""
-        return args
+    def make_native_manifold(self, m):
+        block = indent(self.make_cache(m), n=self.INDENT)
+        margs = self.make_marg(m)
+        return self.NATIVE_MANIFOLD.format(
+            mid         = m.mid,
+            marg_uid    = self.make_marg_uid(m),
+            hook0       = self.make_hook(m, 0),
+            block       = block,
+            hook1       = self.make_hook(m, 1)
+        )
 
     def make_cache(self, m):
         uid = self.make_uid(m)
@@ -135,15 +126,55 @@ class Grammar:
             s = self.make_process(m)
         return s
 
+    def make_cache_put(self, m):
+        if(m.cache):
+            uid        = self.make_uid(m)
+            cache_args = self.make_cache_args(m)
+            other_args = ""
+            if uid and cache_args:
+                other_args = self.SEP.join((uid, cache_args))
+            else:
+                other_args = uid + cache_args
+            if other_args:
+                other_args = self.SEP + other_args
+            cache_put = self.CACHE_PUT.format(
+                cache      = m.cache,
+                mid        = m.mid,
+                other_args = other_args
+            )
+        else:
+            cache_put = ""
+        return cache_put
+
+    def make_cache_args(self, m):
+        if(m.cache == "datcache"):
+            args = self.make_datcache_args()
+        else:
+            args = ""
+        return args
+
     def make_datcache_args(self):
         return self.DATCACHE_ARGS.format(outdir=self.outdir)
 
-    def make_process(self):
-        return self.PROCESS
+    def make_process(self, m):
+        s = self.PROCESS.format(
+            hook2    = self.make_hook(m, 2),
+            validate = self.make_validate(m),
+            mid      = m.mid,
+            hook3    = self.make_hook(m, 3)
+        )
+        return s
+
+    def make_validate(self, m):
+        if(m.check):
+            s = self.make_do_validate(m)
+        else:
+            s = self.make_no_validate(m)
+        return s
 
     def make_do_validate(self, m):
         return self.DO_VALIDATE.format(
-            checks    = self.make_checks(m),
+            checks    = self.make_check(m),
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
             hook6     = self.make_hook(m, 6),
@@ -166,55 +197,74 @@ class Grammar:
             cache_put = self.make_cache_put(m)
         )
 
+    def make_check(self, m):
+        ss = []
+        for c in m.check:
+            ss.append(self.make_check_call(m, c))
+        s = self.SEP.join(ss)
+        return s
+
+    def make_check_call(self, m, c):
+        return self.CHECK_CALL.format(
+            hmid=c,
+            marg_uid=self.make_marg_uid(m)
+        )
+
     def make_arguments(self, m):
-        if(m.input and m.farg):
-            sep=self.SEP
-        else:
-            sep=""
+        inputs = self.make_input(m)
+        fargs = self.make_function_arguments(m)
+        return self.ARGUMENTS.format(
+            inputs = inputs,
+            sep    = self.SEP if (inputs and fargs) else "",
+            fargs  = fargs
+        )
 
-        margs = self.make_marg(m)
-
+    def make_input(self, m):
         inputs = []
-        for k,n,v in m.input:
+        for k,n,v in m.input: 
             if k == "m":
-                inputs.append(self.MANIFOLD_CALL.format(
-                    hmid=v,
-                    marg_uid = self.make_marg_uid(m)
-                ))
+                inputs.append(self.make_input_manifold(m, v))
             elif k == "f":
-                inputs.append(self.WRAPPER_NAME.format(mid=v))
+                inputs.append(self.make_input_function(m, v))
             elif k == "a":
-                inputs.append(self.MARG.format(i=v))
+                inputs.append(self.make_input_argument(m, v))
+            elif k == "p":
+                inputs.append(self.make_input_positional(m, v))
             else:
-                inputs.append(v)
+                err("Unexpected argument type '%s'" % k)
         inputs = self.SEP.join(inputs)
+        return inputs
 
+    def make_input_manifold(self, m, value):
+        return self.MANIFOLD_CALL.format(
+            hmid=value,
+            marg_uid = self.make_marg_uid(m)
+        )
+
+    def make_input_function(self, m, value):
+        return self.WRAPPER_NAME.format(mid=value)
+
+    def make_input_argument(self, m, value):
+        return self.MARG.format(i=value)
+
+    def make_input_positional(self, m, value):
+        return value
+
+    def make_function_arguments(self, m):
         fargs = []
         for n,k,vs in m.farg:
-            v = self.SEP.join(vs)
             if len(vs) > 1:
-                v = self.LIST.format(values=v)
-
+                v = self.make_list(vs)
+            elif vs:
+                v = vs[0]
+            else:
+                continue
             if k:
                 fargs.append(self.BIND.join((k,v)))
             else:
                 fargs.append(v)
-
         fargs = self.SEP.join(fargs)
-
-        s = self.ARGUMENTS.format(
-            inputs = inputs,
-            sep    = sep,
-            fargs  = fargs
-        )
-        return s
-
-
-    def make_manifold_call(self):
-        return self.MANIFOLD_CALL
-
-    def make_check_call(self):
-        return self.CHECK_CALL
+        return fargs
 
     def make_hook(self, m, kind):
         hooks = [h for h in m.hook if h.kind == kind]
@@ -225,29 +275,6 @@ class Grammar:
                 marg_uid=self.make_marg_uid(m)
             ) )
         return '\n'.join(ss)
-
-    def make_indent(self):
-        return self.INDENT
-
-    def make_cache_put(self, m):
-        if(m.cache):
-            uid        = self.make_uid(m)
-            cache_args = self.make_cache_args(m)
-            other_args = ""
-            if uid and cache_args:
-                other_args = self.SEP.join((uid, cache_args))
-            else:
-                other_args = uid + cache_args
-            if other_args:
-                other_args = self.SEP + other_args
-            cache_put = self.CACHE_PUT.format(
-                cache      = m.cache,
-                mid        = m.mid,
-                other_args = other_args
-            )
-        else:
-            cache_put = ""
-        return cache_put
 
     def make_marg(self, m):
         ss = []
@@ -261,8 +288,10 @@ class Grammar:
         return margs
 
 
-    def make_list(self):
-        return self.LIST
+    def make_list(self, xs):
+        x = self.SEP.join(xs)
+        x = self.LIST.format(values=x)
+        return x
 
     def make_fail(self, m):
         if m.fail:
@@ -271,7 +300,7 @@ class Grammar:
                 marg_uid=self.make_marg_uid(m)
             )
         else:
-            fail = self.DEFAULT_FAIL
+            fail = self.make_default_fail()
         return fail
 
     def make_default_fail(self):
@@ -294,35 +323,6 @@ class Grammar:
             s = self.MARG_UID.format(marg=margs, uid=uid)
         else:
             s = ""
-        return s
-
-    def make_wrapper_name(self):
-        return self.WRAPPER_NAME
-
-    def make_checks(self, m):
-        ss = []
-        for c in m.check:
-            ss.append(self.CHECK_CALL.format(
-                hmid=c,
-                marg_uid=self.make_marg_uid(m)
-            ))
-        s = self.SEP.join(ss)
-        return s
-
-    def make_validate(self, m):
-        if(m.check):
-            s = self.make_do_validate(m)
-        else:
-            s = self.make_no_validate(m)
-        return s
-
-    def make_process(self, m):
-        s = self.PROCESS.format(
-            hook2    = self.make_hook(m, 2),
-            validate = self.make_validate(m),
-            mid      = m.mid,
-            hook3    = self.make_hook(m, 3)
-        )
         return s
 
 
