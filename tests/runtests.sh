@@ -9,6 +9,7 @@ Test suite for the LOC compiler
   -x      stop on first failure
   -F      skip frontend tests
   -B      skip backend tests
+  -T      skip type tests
   -K      skip tests of known problems
   -l LANG do test for language L
 EOF
@@ -25,7 +26,7 @@ test_backend=true
 test_types=true
 test_known_problems=true 
 lang="all"
-while getopts "hqxFBKEl:" opt; do
+while getopts "hqxFBKETl:" opt; do
     case $opt in
         h)
             usage ;;
