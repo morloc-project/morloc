@@ -1,10 +1,10 @@
 EMIT	m0	*
 FUNC	m0	a2
-INPM	m0	0	m1
+INPM	m0	0	m1	*
 EMIT	m1	*
 FUNC	m1	A4
-INPM	m1	0	m2
-INPM	m1	1	m3
+INPM	m1	0	m2	*
+INPM	m1	1	m3	*
 EMIT	m2	*
 FUNC	m2	a-r
 EMIT	m3	*

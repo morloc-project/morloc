@@ -1,6 +1,6 @@
 EMIT	m0	*
 FUNC	m0	f
-INPM	m0	0	m2
+INPM	m0	0	m2	*
 EMIT	m2	*
 FUNC	m2	g
 EMIT	m1	*

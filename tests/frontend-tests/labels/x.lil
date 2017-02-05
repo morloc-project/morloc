@@ -1,10 +1,10 @@
 EMIT	m0	*
 FUNC	m0	f
-INPM	m0	0	m1
+INPM	m0	0	m1	*
 CHEK	m0	m3
 EMIT	m1	*
 FUNC	m1	f
-INPM	m1	0	m2
+INPM	m1	0	m2	*
 CHEK	m1	m3
 CHEK	m1	m4
 EMIT	m2	*

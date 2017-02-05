@@ -1,6 +1,6 @@
 EMIT	m0	*
 FUNC	m0	g
-INPM	m0	0	m1
+INPM	m0	0	m1	*
 HOOK	m0	5	m2
 EMIT	m1	*
 FUNC	m1	f
