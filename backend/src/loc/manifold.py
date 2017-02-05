@@ -2,7 +2,7 @@ from collections import namedtuple
 
 from util import err
 
-Input = namedtuple("Input", ["kind", "npos", "value"])
+Input = namedtuple("Input", ["kind", "npos", "value", "type"])
 Farg = namedtuple("Marg", ["npos", "key", "value"])
 Hook = namedtuple("Hook", ["kind", "mid"])
 
@@ -21,9 +21,9 @@ class Manifold:
         self.type = "*"
         self.narg = 0
 
-    def add_input(self, kind, npos, value):
+    def add_input(self, kind, npos, value, vtype):
         try:
-            self.input.append(Input(kind, int(npos), value))
+            self.input.append(Input(kind, int(npos), value, vtype))
         except ValueError:
             err("Position must be an integer")
 

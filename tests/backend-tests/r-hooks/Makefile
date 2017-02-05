@@ -10,4 +10,4 @@ run:
 .PHONY: clean
 clean:
 	rm -f manifold-nexus.py
-	rm -rf locouth
+	rm -rf locout

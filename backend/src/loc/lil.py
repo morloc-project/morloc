@@ -22,13 +22,13 @@ def add_manifold_line(manifold, row):
             manifold.narg = row[2]
         # platonic functions of four kinds
         elif(cmd == "INPM"):
-            manifold.add_input('m', row[2], row[3])
+            manifold.add_input('m', row[2], row[3], row[4])
         elif(cmd == "INPP"):
-            manifold.add_input('p', row[2], row[3])
+            manifold.add_input('p', row[2], row[3], row[4])
         elif(cmd == "INPF"):
-            manifold.add_input('f', row[2], row[3])
+            manifold.add_input('f', row[2], row[3], row[4])
         elif(cmd == "INPA"):
-            manifold.add_input('a', row[2], row[3])
+            manifold.add_input('a', row[2], row[3], row[4])
         # other list attributes
         elif(cmd == "CHEK"):
             manifold.add_check(row[2])

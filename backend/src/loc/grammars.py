@@ -17,6 +17,10 @@ class Grammar:
         self.BIND             = ""
         self.AND              = ""
         self.POOL             = ""
+        self.TYPE_MAP         = ""
+        self.TYPE_ACCESS      = ""
+        self.CAST_NAT2UNI     = ""
+        self.CAST_UNI2NAT     = ""
         self.SIMPLE_MANIFOLD  = ""
         self.NATIVE_MANIFOLD  = ""
         self.FOREIGN_MANIFOLD = ""
@@ -49,7 +53,7 @@ class Grammar:
         # manifold arguments and ids
         wrappers = set()
         for mid,man in self.manifolds.items():
-            for k,n,m in man.input:
+            for k,n,m,t in man.input:
                 if k == "f":
                     wrappers.add(m)
 
@@ -86,7 +90,7 @@ class Grammar:
             mid          = m.mid,
             foreign_lang = m.lang,
             outdir       = self.outdir,
-            marg_uid     = self.make_marg_uid(m)
+            uni_marg_uid = self.make_marg_uid(m, universal=True)
         )
         return s
 
@@ -221,7 +225,7 @@ class Grammar:
 
     def make_input(self, m):
         inputs = []
-        for k,n,v in m.input: 
+        for k,n,v,t in m.input: 
             if k == "m":
                 inputs.append(self.make_input_manifold(m, v))
             elif k == "f":
@@ -276,17 +280,28 @@ class Grammar:
             ) )
         return '\n'.join(ss)
 
-    def make_marg(self, m):
+    def make_marg(self, m, universal=False):
         ss = []
         try:
             n = int(m.narg)
         except TypeError:
             err("nargs must be integrel")
         for i in range(n):
-            ss.append(self.MARG.format(i=str(i+1)))
+            arg = self.MARG.format(i=str(i+1))
+            if universal:
+                arg = self.make_cast_nat2uni(arg)
+            ss.append(arg)
         margs = self.SEP.join(ss)
         return margs
 
+    def make_cast_nat2uni(self, arg):
+        return self.CAST_NAT2UNI.format(
+            key=arg,
+            type=make_type_access(arg)
+        )
+
+    def make_type_access(self, arg):
+        return self.TYPE_ACCESS.format(key=arg)
 
     def make_list(self, xs):
         x = self.SEP.join(xs)
@@ -316,8 +331,8 @@ class Grammar:
             uid = ""
         return uid
 
-    def make_marg_uid(self, m):
-        margs = self.make_marg(m)
+    def make_marg_uid(self, m, universal=False):
+        margs = self.make_marg(m, universal)
         uid = self.make_uid(m)
         if uid:
             s = self.MARG_UID.format(marg=margs, uid=uid)
@@ -348,7 +363,7 @@ class RGrammar(Grammar):
 #!/usr/bin/Rscript --vanilla
 library(readr)
 
-# outdir={outdir}
+outdir <- "{outdir}"
 
 {source}
 
@@ -358,7 +373,7 @@ args <- commandArgs(TRUE)
 m <- args[1]
 
 if(exists(m)){{
-  f = get(m)
+  f <- get(m)
   d <- f()
   if(is.data.frame(d)){{
       write_tsv(d, path="/dev/stdout")
@@ -368,6 +383,10 @@ if(exists(m)){{
 }} else {{
   quit(status=1)
 }}'''
+        self.TYPE_MAP         = 'types <- c({pairs})'
+        self.TYPE_ACCESS      = 'types["{key}"]'
+        self.CAST_NAT2UNI     = 'natural_to_universal({key}, {type})'
+        self.CAST_UNI2NAT     = 'universal_to_natural({key}, {type})'
         self.NATIVE_MANIFOLD = '''\
 {mid} = function ({marg_uid}){{
   {hook0}
@@ -394,18 +413,17 @@ wrap_{mid} <- function( ... ){{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
-  d <- system("{outdir}/call.{foreign_lang} {mid} {marg_uid}", intern = TRUE)
-  d <- read_tsv(d)
-  if(ncol(d) == 1){{
-    d <- d[[1]]
-  }}
+  foreign_pool <- file.path(outdir, "call.{foreign_lang}")
+  cmd <- sprintf("%s {mid} {uni_marg_uid}", foreign_pool)
+  raw <- system(cmd, intern = TRUE)
+  d <- universal_to_native(raw, types["{mid}"])
   return(d)
 }}
 '''
         self.CACHE = '''\
 if({cache}_chk("{mid}"{uid}{cache_args})){{
   {hook8}
-  b = {cache}_get("{mid}"{uid}{cache_args})
+  b <- {cache}_get("{mid}"{uid}{cache_args})
   {hook9}
 }}
 else{{
@@ -421,12 +439,12 @@ else{{
         self.DO_VALIDATE = '''\
 if( {checks} ){{
   {hook4}
-  b = {function}({arguments})
+  b <- {function}({arguments})
   {cache_put}
   {hook5}
 }} else {{
   {hook6}
-  b = {fail}
+  b <- {fail}
   {cache_put}
   {hook7}
 }}
@@ -497,6 +515,10 @@ else
     exit 1 
 fi
 '''
+        self.TYPE_MAP         = '{pairs}'
+        self.TYPE_ACCESS      = '${key}_type'
+        self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
+        self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
     {hook0}
@@ -521,7 +543,7 @@ wrap_{mid} () {{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
-    {outdir}/call.{foreign_lang} {mid} {marg_uid}
+    {outdir}/call.{foreign_lang} {mid} {uni_marg_uid}
 }}
 '''
         self.CACHE = '''\

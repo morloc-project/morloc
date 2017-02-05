@@ -6,9 +6,11 @@ char* _num(int i);
 W* _wtwo(char* c1, char* c2);
 W* _wthree(char* c1, char* c2, char* c3);
 W* _wfour(char* c1, char* c2, char* c3, char* c4);
+W* _wfive(char* c1, char* c2, char* c3, char* c4, char* c5);
 Ws* _two(Ws* ws, char* c1, char* c2);
 Ws* _three(Ws* ws, char* c1, char* c2, char* c3);
 Ws* _four(Ws* ws, char* c1, char* c2, char* c3, char* c4);
+Ws* _five(Ws* ws, char* c1, char* c2, char* c3, char* c4, char* c5);
 Ws* _pairlist(Ws* lil, Ws* ws, char* cmd, Manifold* m);
 Ws* _pathmod(Ws* lil, Ws* ws, char* cmd, Manifold* m);
 Ws* _manifold_to_lil(W* cm);
@@ -124,45 +126,59 @@ Ws* _manifold_to_lil(W* cm){
     }
 
     if(m->inputs){
+        bool is_typed = false;
+        W* type = NULL;
+        char* t_str = NULL;
+        if(m->type && ws_length(m->type) == (ws_length(m->inputs) + 1)){
+            is_typed = true;
+            type = m->type->head;
+        }
         int i = 0;
         for(W* w = m->inputs->head; w; w = w->next){
+            t_str = is_typed ? type_str(type) : "*";
+            if(is_typed)
+                type = type->next;
             switch(w->cls){
                 case C_REFER:
                 case C_MANIFOLD:
                     if(g_manifold(g_rhs(w))->as_function) {
-                        lil = _four(
+                        lil = _five(
                             lil,
                             LIL_FUNCTION_INPUT,
                             _mid(m),   // input id
                             _num(i++), // position
-                            _mid(g_manifold(g_rhs(w))) // output id
+                            _mid(g_manifold(g_rhs(w))), // output id
+                            t_str
                         );
                     } else {
-                        lil = _four(
+                        lil = _five(
                             lil,
                             LIL_MANIFOLD_INPUT,
                             _mid(m),   // input id
                             _num(i++), // position
-                            _mid(g_manifold(g_rhs(w))) // output id
+                            _mid(g_manifold(g_rhs(w))), // output id
+                            t_str
                         );
                     }
                     break;
                 case C_POSITIONAL:
-                    lil = _four(
+                    lil = _five(
                         lil,
                         LIL_POSITIONAL_INPUT,
                         _mid(m),
                         _num(i++),
-                        g_string(w)
+                        g_string(w),
+                        t_str
                     );
                     break;
                 case C_ARGREF:
-                    lil = _four(
+                    lil = _five(
                         lil,
                         LIL_ARG_INPUT,
                         _mid(m),
                         _num(i++),
-                        g_string(w)
+                        g_string(w),
+                        t_str
                     );
                     break;
                 case C_DEREF:
@@ -254,6 +270,9 @@ W* _wthree(char* c1, char* c2, char* c3){
 W* _wfour(char* c1, char* c2, char* c3, char* c4){
     return wws_add(_wthree(c1, c2, c3), w_new(P_STRING, c4)); 
 }
+W* _wfive(char* c1, char* c2, char* c3, char* c4, char* c5){
+    return wws_add(_wfour(c1, c2, c3, c4), w_new(P_STRING, c5)); 
+}
 
 // these just wrappers for the above three
 Ws* _two(Ws* ws, char* c1, char* c2){
@@ -264,4 +283,7 @@ Ws* _three(Ws* ws, char* c1, char* c2, char* c3){
 }
 Ws* _four(Ws* ws, char* c1, char* c2, char* c3, char* c4){
     return ws_add(ws, _wfour(c1, c2, c3, c4));
+}
+Ws* _five(Ws* ws, char* c1, char* c2, char* c3, char* c4, char* c5){
+    return ws_add(ws, _wfive(c1, c2, c3, c4, c5));
 }
