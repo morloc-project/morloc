@@ -2,6 +2,7 @@
 "core/sh/control.loc"
 "core/sh/atomic.loc"
 "core/sh/datcache.loc"
+"core/type.loc"
 
 @path
 

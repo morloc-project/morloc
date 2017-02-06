@@ -1,5 +1,7 @@
 @include
 "core/py/memcache.loc"
+"core/type.loc"
+
 
 @source py
 

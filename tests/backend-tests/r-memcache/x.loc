@@ -1,6 +1,8 @@
 @include
 "core/R/memcache.loc"
 "core/R/atomic.loc"
+"core/type.loc"
+
 
 @export
 null as main

@@ -1,3 +1,6 @@
+@include
+"core/type.loc"
+
 @source sh
 
 map () {

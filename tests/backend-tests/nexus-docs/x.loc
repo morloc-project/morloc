@@ -1,3 +1,6 @@
+@include
+"core/type.loc"
+
 @path
 uniq . sort . ls
 

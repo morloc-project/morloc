@@ -1,6 +1,7 @@
 @include
 "core/R/datcache.loc"
 "core/R/atomic.loc"
+"core/type.loc"
 
 @source R
 

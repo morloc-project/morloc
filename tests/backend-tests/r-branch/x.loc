@@ -1,5 +1,6 @@
 @include
 "core/R/atomic.loc"
+"core/type.loc"
 
 @source R
 

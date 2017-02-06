@@ -1,0 +1,56 @@
+@source R
+
+# Convert native data structure to file or literal
+native_to_universal <- function(x, type, outdir){
+  f <- NULL
+  if(is.atomic(x) && length(x) == 1){
+    f <- as.character(x)
+  } else {
+    fo <- tempfile(pattern="m1_R_", tmpdir=outdir, fileext=".out")
+    require(readr)
+    if(is.data.frame(x)){
+      write_tsv(x, path=fo)
+    } else if(is.list(x)) {
+      warning("List export is not yet supported")
+    } else if(is.vector(x)) {
+      write(x, file=fo, ncolumns=1)
+    } else {
+      msg = sprintf("R: Cannot export object of class '%s'", class(x))
+      warning(msg)
+    }
+  }
+  f
+}
+
+# Convert text or binary to native data structure
+universal_to_native <- function(x, type){
+  if(type == "Int" || type == "[Int]"){
+    d <- as.integer(x)
+  } else {
+    warning("STUB: Only Int is currently supported")
+    # d <- read_tsv(x)
+    # if(ncol(d) == 1){
+    #   d <- d[[1]]
+    # }
+  }
+  d
+}
+
+
+
+@source sh
+
+native_to_universal (){
+    $@
+}
+
+universal_to_native (){
+    x=$1
+    vtype=$2
+    if [[ $vtype == "Int" ]]
+    then
+        echo $x
+    else
+        cat $x
+    fi
+}

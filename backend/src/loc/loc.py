@@ -166,7 +166,7 @@ def build_project(raw_lil, outdir, home):
         os.mkdir(os.path.join(outdir, "cache"))
 
     with open("manifold-nexus.py", 'w') as f:
-        print(manifold_nexus, file=f)
+        print(manifold_nexus, file=f, end="")
 
     os.chmod("manifold-nexus.py", 0o755)
 

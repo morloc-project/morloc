@@ -6,6 +6,7 @@ random () {
 
 @include
 "core/sh/datcache.loc"
+"core/type.loc"
 
 @export
 cat

@@ -8,6 +8,10 @@ nexus_template = '''\
 
 import argparse
 import subprocess
+import sys
+import os
+
+outdir = "{outdir}"
 
 def parser():
     parser = argparse.ArgumentParser(
@@ -35,9 +39,25 @@ def parser():
 
 {manifold_calls}
 
+def show(x, vtype):
+    literal = {{"Int", "String"}}
+    try:
+        if(vtype in literal):
+            print(x, end="")
+        else:
+            subprocess.run(["cat", x], encoding='utf-8')
+    except PermissionError:
+        err("PermissionError: cannot print file '%s'" % x)
+    except FileNotFoundError:
+        err("File '%s' not found" % x)
+
 if __name__ == '__main__':
     args = parser()
-    args.func()
+    result, vtype = args.func()
+    returncode=result.returncode
+    show(result.stdout, vtype=vtype)
+    print(result.stderr, file=sys.stderr, end="")
+    sys.exit(returncode)
 '''
 
 parser_template = '''\
@@ -52,8 +72,15 @@ parser_template = '''\
 '''
 
 call_template = '''\
-def {mid}():
-    subprocess.call("{outdir}/call.{lang} {mid} | more", shell=True)
+def m0():
+    path = os.path.join(outdir, "call.R")
+    result = subprocess.run(
+        [path, "m0"],
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        encoding='utf-8'
+    )
+    return (result, "Int")
 '''
 
 def build_manifold_nexus(
@@ -94,7 +121,7 @@ def build_manifold_nexus(
         call_string = call_template.format(
             mid=k,
             lang=v.lang,
-            outdir=outdir
+            vtype=v.type
         )
         mcalls.append(call_string)
         mparsers.append(parser_string)
@@ -102,6 +129,7 @@ def build_manifold_nexus(
     return nexus_template.format(
         prog=prog,
         version=version,
+        outdir=outdir,
         manifold_parsers='\n'.join(mparsers),
         manifold_calls='\n'.join(mcalls)
     )

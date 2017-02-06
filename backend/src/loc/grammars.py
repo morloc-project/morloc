@@ -230,32 +230,32 @@ class Grammar:
         inputs = []
         for k,n,v,t in m.input: 
             if k == "m":
-                inputs.append(self.make_input_manifold(m, v))
+                inputs.append(self.make_input_manifold(m, n, v, t))
             elif k == "f":
-                inputs.append(self.make_input_function(m, v))
+                inputs.append(self.make_input_function(m, n, v, t))
             elif k == "a":
-                inputs.append(self.make_input_argument(m, v))
+                inputs.append(self.make_input_argument(m, n, v, t))
             elif k == "p":
-                inputs.append(self.make_input_positional(m, v))
+                inputs.append(self.make_input_positional(m, n, v, t))
             else:
                 err("Unexpected argument type '%s'" % k)
         inputs = self.SEP.join(inputs)
         return inputs
 
-    def make_input_manifold(self, m, value):
+    def make_input_manifold(self, m, pos, val, typ):
         return self.MANIFOLD_CALL.format(
-            hmid=value,
+            hmid=val,
             marg_uid = self.make_marg_uid(m)
         )
 
-    def make_input_function(self, m, value):
-        return self.WRAPPER_NAME.format(mid=value)
+    def make_input_function(self, m, pos, val, typ):
+        return self.WRAPPER_NAME.format(mid=val)
 
-    def make_input_argument(self, m, value):
-        return self.MARG.format(i=value)
+    def make_input_argument(self, m, pos, val, typ):
+        return self.MARG.format(i=val)
 
-    def make_input_positional(self, m, value):
-        return value
+    def make_input_positional(self, m, pos, val, typ):
+        return val
 
     def make_function_arguments(self, m):
         fargs = []
@@ -379,12 +379,9 @@ m <- args[1]
 
 if(exists(m)){{
   f <- get(m)
-  d <- f()
-  if(is.data.frame(d)){{
-      write_tsv(d, path="/dev/stdout")
-  }} else {{
-      write_lines(d, path="/dev/stdout")
-  }}
+  d <- do.call(f, as.list(args[-1]))
+  u <- native_to_universal(d, types[m], outdir)
+  write(u, file=stdout())
 }} else {{
   quit(status=1)
 }}'''
@@ -419,12 +416,8 @@ wrap_{mid} <- function( ... ){{
         self.FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
   foreign_pool <- file.path(outdir, "call.{foreign_lang}")
-  cmd <- sprintf(
-    "%s {mid}{arg_var}",
-    foreign_pool{arg_rep})
-  raw <- system(cmd, intern = TRUE)
-  d <- universal_to_native(raw, types["{mid}"])
-  return(d)
+  fo <- system2(foreign_pool, args=c({args}), stdout=TRUE, stderr=FALSE)
+  universal_to_native(fo, types["{mid}"])
 }}
 '''
         self.CACHE = '''\
@@ -476,18 +469,17 @@ b = {function}({arguments})
     def make_foreign_manifold(self, m):
         arg_var = " %s" * (int(m.narg) + 1) if m.narg else ""
 
-        arg_rep = ""
+        arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            arg_rep += ',\n    native_to_universal(%s, types["%s"])' % (a,a)
+            arg_rep += 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
         if m.narg:
-            arg_rep += ",\n    uid"
+            arg_rep += "uid"
+        arg_rep = ',\n    '.join(arg_rep)
 
         s = self.FOREIGN_MANIFOLD.format(
             mid=m.mid,
-            arg_var=arg_var,
-            arg_rep=arg_rep,
-            cmd='',
+            args=arg_rep,
             marg_uid=self.make_marg_uid(m),
             foreign_lang=m.lang
         )
@@ -528,6 +520,8 @@ class ShGrammar(Grammar):
 
 outdir={outdir}
 
+{type_map}
+
 {source}
 
 to_stderr () {{
@@ -549,8 +543,7 @@ then
     fi
 else
     exit 1 
-fi
-'''
+fi'''
         self.TYPE_MAP         = '{pairs}'
         self.TYPE_ACCESS      = '${key}_type'
         self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
@@ -579,7 +572,8 @@ wrap_{mid} () {{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
-    {outdir}/call.{foreign_lang} {mid} {uni_marg_uid}
+    u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
+    universal_to_native $u $type_{mid}
 }}
 '''
         self.CACHE = '''\
@@ -619,13 +613,50 @@ fi
 {hook4}
 {function} {arguments} > $outdir/{mid}_tmp
 {cache_put}
-{hook5}
-'''
+{hook5}'''
         self.CACHE_PUT = '''\
 {cache}_put {mid} $outdir/{mid}_tmp{other_args}
 '''
         self.MARG          = '${i}'
         self.ARGUMENTS     = '{fargs} {inputs}'
-        self.MANIFOLD_CALL = '<({hmid} {marg_uid})'
+        self.MANIFOLD_CALL = '{operator}({hmid} {marg_uid})'
         self.CHECK_CALL    = '{hmid} {marg_uid}'
         self.HOOK          = 'to_stderr {hmid} {marg_uid}'
+
+    def make_input_manifold(self, m, pos, val, typ):
+        # TODO generalize this, extend beyond Int for goodness sake
+        if(typ == "Int"):
+            op = '$'
+        else:
+            op = '<'
+        return self.MANIFOLD_CALL.format(
+            hmid=val,
+            operator=op,
+            marg_uid = self.make_marg_uid(m)
+        )
+
+    def make_foreign_manifold(self, m):
+        arg_rep = ""
+        for i in range(int(m.narg)):
+            a = self.MARG.format(i=str(i+1))
+            arg_rep += '\\\n    $(native_to_universal %s types["%s"] outdir)' % (a,a)
+        if m.narg:
+            arg_rep += "\\\n    ${mid}_uid"
+
+        s = self.FOREIGN_MANIFOLD.format(
+            mid=m.mid,
+            arg_rep=arg_rep,
+            cmd='',
+            marg_uid=self.make_marg_uid(m),
+            foreign_lang=m.lang
+        )
+        return s
+
+    def make_type_map(self):
+        types = []
+        for k,v in self.manifolds.items():
+            types.append("type_%s='%s'" % (k, v.type))
+            for k,n,m,t in v.input:
+                if k == "a":
+                    types.append("type_%s='%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs='\n'.join(types))
