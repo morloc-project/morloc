@@ -74,16 +74,18 @@ class Grammar:
 
         p = p.format(
             source=self.source,
+            type_map=self.make_type_map(),
             outdir=self.outdir,
             manifolds='\n\n'.join(mtext)
         )
 
         return p
 
-
-
     def make_pool(self):
         return self.POOL
+
+    def make_type_map(self):
+        NotImplemented
 
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
@@ -366,6 +368,8 @@ library(readr)
 
 outdir <- "{outdir}"
 
+{type_map}
+
 {source}
 
 {manifolds}
@@ -475,7 +479,7 @@ b = {function}({arguments})
         arg_rep = ""
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            arg_rep += ',\n    native_to_universal(%s, type["%s"])' % (a,a)
+            arg_rep += ',\n    native_to_universal(%s, types["%s"])' % (a,a)
         if m.narg:
             arg_rep += ",\n    uid"
 
@@ -488,6 +492,15 @@ b = {function}({arguments})
             foreign_lang=m.lang
         )
         return s
+
+    def make_type_map(self):
+        types = []
+        for k,v in self.manifolds.items():
+            types.append("%s='%s'" % (k, v.type))
+            for k,n,m,t in v.input:
+                if k == "a":
+                    types.append("x%s='%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs=', '.join(types))
 
 
 # === sh grammar ===========================================
