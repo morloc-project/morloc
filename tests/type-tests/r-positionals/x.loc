@@ -1,7 +1,5 @@
 @comment
 
-Within a comment, if you want \@ you have to escape it
-
 This program should replicate the following R code:
 
 ```
@@ -27,17 +25,22 @@ replicate <- function(n, f, ...){
   do.call(cbind, out)
 }
 
-# @type
-# apply     :: [[a]] -> ([a] -> b) -> [b]
-# replicate :: (a -> b) -> [b]
-# sample    :: [a] -> [a]
-# paste     :: [String] -> String
+@type
+apply     :: [[Char]] -> Int -> ([Char] -> String) -> [String]
+replicate :: Int -> ([Char] -> Int -> [Char]) -> [Char] -> [[Char]]
+sample    :: [Char] -> Int -> [Char]
+paste     :: [Char] -> String
+letters   :: NULL -> [Char]
+set.seed  :: Int -> NULL
 
 @export
-apply
+apply as main
 
 @path
 apply . (replicate . 20 `sample` `letters`) 1 `paste`
+
+@0
+apply :: set.seed . 123
 
 @lang
 * :: R
