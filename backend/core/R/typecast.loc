@@ -1,0 +1,25 @@
+@source R
+
+uniuid=0
+
+# Convert native data structure to STDOUT 
+native_to_universal <- function(x, type){
+  uniuid <<- uniuid + 1
+  f = paste0("uni", uniuid, ".txt")
+  require(readr)
+  if(is.data.frame(x)){
+    write_tsv(x, path=f)
+  } else {
+    write(x, file=f)
+  }
+  f
+}
+
+# Convert text or binary to native data structure
+universal_to_native <- function(x, type){
+  d <- read_tsv(x)
+  if(ncol(d) == 1){
+    d = d[[1]]
+  }
+  d
+}

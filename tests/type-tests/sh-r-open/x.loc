@@ -16,3 +16,4 @@ seq :: sh
 
 @include
 "core/R/control.loc"
+"core/R/typecast.loc"
