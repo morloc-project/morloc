@@ -2,6 +2,15 @@
 "core/R/atomic.loc"
 "core/type.loc"
 
+# @type
+# colnames ::
+# gelse
+# foo
+# bar
+# baz :: [Str]
+# get_species :: Tab -> [Str]
+# load_iris :: NULL -> Tab
+
 @source R
 
 load_iris <- function() { iris }
@@ -26,7 +35,7 @@ gelse <- function(...) {
 }
 
 @export
-colnames
+colnames as main
 
 @path
 colnames . gelse . foo bar baz null . get_species . load_iris

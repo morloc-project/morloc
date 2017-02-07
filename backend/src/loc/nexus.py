@@ -45,7 +45,7 @@ def show(x, vtype):
         if(vtype in literal):
             print(x, end="")
         else:
-            subprocess.run(["cat", x], encoding='utf-8')
+            subprocess.run(["cat", x.rstrip()], encoding='utf-8')
     except PermissionError:
         err("PermissionError: cannot print file '%s'" % x)
     except FileNotFoundError:
@@ -80,7 +80,7 @@ def m0():
         stdout=subprocess.PIPE,
         encoding='utf-8'
     )
-    return (result, "Int")
+    return (result, "{vtype}")
 '''
 
 def build_manifold_nexus(

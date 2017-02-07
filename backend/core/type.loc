@@ -6,14 +6,14 @@ native_to_universal <- function(x, type, outdir){
   if(is.atomic(x) && length(x) == 1){
     f <- as.character(x)
   } else {
-    fo <- tempfile(pattern="m1_R_", tmpdir=outdir, fileext=".out")
+    f <- tempfile(pattern="m1_R_", tmpdir=outdir, fileext=".out")
     require(readr)
     if(is.data.frame(x)){
-      write_tsv(x, path=fo)
+      write_tsv(x, path=f)
     } else if(is.list(x)) {
       warning("List export is not yet supported")
     } else if(is.vector(x)) {
-      write(x, file=fo, ncolumns=1)
+      write(x, file=f, ncolumns=1)
     } else {
       msg = sprintf("R: Cannot export object of class '%s'", class(x))
       warning(msg)

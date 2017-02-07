@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 loc -x zzz x.loc
 
-diff <(./manifold-nexus.py colnames) <(echo \
+diff <(./manifold-nexus.py main) <(echo \
 "Sepal.Length
 Sepal.Width
 Petal.Width
