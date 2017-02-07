@@ -132,6 +132,12 @@ def build_project(raw_lil, outdir, home):
     manifolds = lil.get_manifolds(raw_lil)
     languages = set([l.lang for m,l in manifolds.items()])
 
+    # This allows simple programs to be run without an explicit
+    # export clause. "m0" will be the first manifold that appears
+    # in the script.
+    if not exports and manifolds:
+        exports["m0"] = "main"
+
     manifold_nexus = nexus.build_manifold_nexus(
         languages = languages,
         exports   = exports,
@@ -199,7 +205,7 @@ if __name__ == '__main__':
         print(err_lil, file=sys.stderr, end="")
         if args.typecheck:
             sys.exit(1)
-    
+
     if exitcode != 0:
         err("Failed to compile LOC", code=exitcode)
 
