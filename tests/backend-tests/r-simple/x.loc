@@ -11,10 +11,7 @@ R>  sqrt(max(seq(1,9)))
 sqrt
 
 @path
-sqrt . max . seq
-
-@arg
-seq := from=1 to=9
+sqrt . max . seq . 1 9
 
 @lang
 * :: R

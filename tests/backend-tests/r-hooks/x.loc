@@ -17,6 +17,7 @@ foo . bar
 
 @arg
 foo :: x=1
+cat :: file="/dev/stderr"
 
 @lang
 * :: R

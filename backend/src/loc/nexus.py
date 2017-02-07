@@ -40,20 +40,23 @@ def parser():
 {manifold_calls}
 
 def show(x, vtype):
+    x = x.strip()
     literal = {{"Int", "String"}}
-    try:
-        if(vtype in literal):
-            print(x, end="")
-        else:
+    if(len(x) == 0):
+        pass
+    elif(vtype in literal):
+        print(x)
+    elif(vtype == "NULL"):
+        pass
+    else:
+        if os.path.exists(x):
             subprocess.run(
-                ["cat", x.rstrip()],
+                ["cat", x],
                 stderr=subprocess.PIPE,
                 encoding='utf-8'
             )
-    except PermissionError:
-        err("PermissionError: cannot print file '%s'" % x)
-    except FileNotFoundError:
-        pass
+        else:
+            print(x)
 
 if __name__ == '__main__':
     args = parser()
@@ -76,10 +79,10 @@ parser_template = '''\
 '''
 
 call_template = '''\
-def m0():
-    path = os.path.join(outdir, "call.R")
+def {mid}():
+    path = os.path.join(outdir, "call.{lang}")
     result = subprocess.run(
-        [path, "m0"],
+        [path, "{mid}"],
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,
         encoding='utf-8'

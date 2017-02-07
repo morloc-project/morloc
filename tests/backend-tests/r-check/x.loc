@@ -1,6 +1,13 @@
 @include
 "core/type.loc"
 
+@type
+seq :: Int -> Int -> [Int]
+max :: [Int] -> Int
+sqrt :: Int -> Int # TODO get real
+print_na :: MULTI -> Str
+is_positive :: Int -> Bool
+
 @source R
 
 is_positive <- function(x){ all(x >= 0) }
@@ -10,10 +17,7 @@ print_na <- function(...){ "na" }
 sqrt
 
 @path
-sqrt . max . seq
-
-@arg
-seq := from=-1 to=-10
+sqrt . max . seq . -1 -10
 
 @lang
 * :: R
