@@ -1,9 +1,10 @@
 <!-- [![Build Status](https://travis-ci.org/arendsee/loc.svg?branch=master)](https://travis-ci.org/arendsee/loc) -->
 <!-- The travis build fails because their system has a dated bison version -->
 
-# Language of Composition
+Language of Composition
+=======================
 
-# Installation
+## Installation
 
 ```
 git clone https://github.com/arendsee/loc
@@ -13,7 +14,7 @@ make && make install && make test
 
 The `make install` command builds the LOC home (`$HOME/.loc`) where source code
 and binaries required for building LOC projects is located (among other
-things). It also links the LOC executable (`loc`) to `$HOME/bin`, a fold which
+things). It also links the LOC executable (`loc`) to `$HOME/bin`, a folder which
 is naively assumed to be in `$PATH`.
 
 To install vim syntax highlighting
@@ -25,8 +26,15 @@ cp vim-syntax/loc.vim ~/.vim/syntax/
 echo 'au BufRead,BufNewFile *.loc set filetype=loc' > ~/.vim/ftdetect/loc.vim
 ```
 
-# Dependencies
+## Dependencies
 
  1. bison >=3.0.4
  2. flex
  3. python3
+
+Simple examples
+===============
+
+![hello-world](docs/images/hello-world.png)
+
+![composition](docs/images/composition.png)
