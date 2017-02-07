@@ -21,8 +21,9 @@ null  .  xtable  .  data.frame  .  <runif> (runif . 5)
 
 @3
 xtable :: print . <xtable>
-data.frame :: print . nrow . <data.frame>
+data.frame :: write . nrow . <data.frame>
 
 @arg
 xtable :: label="hi, this is a label"
 runif :: min=2 max=5
+print,write :: file="/dev/stderr"

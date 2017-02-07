@@ -45,11 +45,15 @@ def show(x, vtype):
         if(vtype in literal):
             print(x, end="")
         else:
-            subprocess.run(["cat", x.rstrip()], encoding='utf-8')
+            subprocess.run(
+                ["cat", x.rstrip()],
+                stderr=subprocess.PIPE,
+                encoding='utf-8'
+            )
     except PermissionError:
         err("PermissionError: cannot print file '%s'" % x)
     except FileNotFoundError:
-        err("File '%s' not found" % x)
+        pass
 
 if __name__ == '__main__':
     args = parser()
