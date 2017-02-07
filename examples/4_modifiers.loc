@@ -1,0 +1,27 @@
+@path
+
+rnorm:main .
+    rbinom:n
+    rnorm:mean
+    rnorm:sd
+
+@lang
+* :: R
+
+@check
+rnorm:main :: is.positive . <rnorm:sd>
+
+@arg
+rbinom:n   :: n=1 size=100 prob=0.1
+rnorm:mean :: n=1 mean=0   sd=10
+rnorm:sd   :: n=1 mean=2   sd=1
+
+@cache
+rnorm,rbinom :: memcache
+
+@source R
+is.positive <- function(x){ all(x > 0) }
+
+@include
+"core/R/memcache.loc"
+"core/type.loc"

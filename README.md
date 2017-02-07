@@ -160,3 +160,75 @@ The above could be translated into the following conventional function:
 ```
 a( b(c(z()))), t(r(z())) )
 ```
+
+## Random random number generator
+
+![modifiers](docs/images/modifiers.png)
+
+The above script samples numbers from a normal distribution where all paramters
+are in turn sampled from random distributions.
+
+First of all, I switched to a new language, R. Also I wrote a bit of R source
+code, the `is.positive` function. This code will be passed verbatim to the
+`call.R` executable.
+
+A very important part of any non-trivial pipeline is data validation. This is
+handled by modifiers added in the `@check` section. Above I attach a function
+to the normal sampler that checks whether the standard deviation (which is
+drawn N(2,1) distribution) is positive. If it isn't, no output is printed. The
+checks are limited to accessing the inputs of their parents. Rather, they are
+free manifolds that can query any manifolds in the program with the sole
+restriction that they return a boolean.
+
+I have also added a cache system, specifying that the outputs of all `rnorm`
+and `rbinom` manifolds are stored in memory. I only really need a cache on
+`rnorm:sd`, which would otherwise be called twice: once by `rnorm:main` and
+once by `is.positive`.
+
+The string following the `:` (e.g. `rnorm:main`) is a label used to resolve
+otherwise indistinguishable manifolds. They are not translated into LIL, since
+internally all manifolds get unique ids (e.g. `m0`) and are not referred to by
+they abstract names. The syntax `\<rnorm:sd\>` indicates that a specific
+manifold (the `rnorm:sd` implicitly declared in the `@path` section) is to be
+called, rather than a new `rnorm:sd`.
+
+In the argument section, I am now using named arguments. The `=` is a LOC
+operator, it will be translated into the correct language-specific binder by
+the frontend.
+
+The code will be translated into the LIL (skipping included code):
+
+```
+NSRC  R
+
+    is.positive <- function(x){ all(x > 0) }
+
+EMIT  m0  R
+FUNC  m0  rnorm
+INPM  m0  0  m1  *
+INPM  m0  1  m2  *
+INPM  m0  2  m3  *
+CHEK  m0  m4
+CACH  m0  memcache
+EMIT  m1  R
+FUNC  m1  rbinom
+CACH  m1  memcache
+FARG  m1  0  n  1
+FARG  m1  1  size  100
+FARG  m1  2  prob  0.1
+EMIT  m2  R
+FUNC  m2  rnorm
+CACH  m2  memcache
+FARG  m2  0  n  1
+FARG  m2  1  mean  0
+FARG  m2  2  sd  10
+EMIT  m3  R
+FUNC  m3  rnorm
+CACH  m3  memcache
+FARG  m3  0  n  1
+FARG  m3  1  mean  2
+FARG  m3  2  sd  1
+EMIT  m4  R
+FUNC  m4  is.positive
+INPM  m4  0  m3  *
+```

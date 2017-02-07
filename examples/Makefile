@@ -10,6 +10,11 @@
 3:
 	loc -k -o hooks -x pools 3_hooks.loc	
 
+.PHONY: 4
+4:
+	loc -k -o modifiers -x pools 4_modifiers.loc	
+
 .PHONY: clean
 clean:
-	rm -rf pools hello_world composition hooks *pdf
+	rm -rf pools hello_world composition modifiers \
+		hooks *pdf manifold-nexus.py
