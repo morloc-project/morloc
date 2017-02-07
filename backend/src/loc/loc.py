@@ -119,15 +119,15 @@ def get_outdir(home, exe_path=None):
             if not args.clobber:
                 err("Directory '%s' already exists" % outdir)
     else:
-        for i in range(100):
+        for i in range(500):
             try:
-                outdir=os.path.join(loc_tmp, "loc_{}" % i)
+                outdir=os.path.join(loc_tmp, "loc_%s" % i)
                 os.mkdir(outdir)
                 break
             except FileExistsError:
                 pass
         else:
-            err("Too many temporary directories")
+            err("Too many temporary directories (see ~/.loc/tmp)")
     return os.path.abspath(outdir)
 
 def build_project(raw_lil, outdir, home):
