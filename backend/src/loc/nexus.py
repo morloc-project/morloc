@@ -10,6 +10,7 @@ import argparse
 import subprocess
 import sys
 import os
+import shutil
 
 outdir = "{outdir}"
 
@@ -24,6 +25,12 @@ def parser():
         help='Display version',
         action='version',
         version='{prog} {version}'
+    )
+    parser.add_argument(
+        '-d', '--delete',
+        help="Remove this manifold nexus and temporary directory",
+        action='store_true',
+        default=False
     )
     sub = parser.add_subparsers(
         help='.',
@@ -60,11 +67,15 @@ def show(x, vtype):
 
 if __name__ == '__main__':
     args = parser()
-    result, vtype = args.func()
-    returncode=result.returncode
-    show(result.stdout, vtype=vtype)
-    print(result.stderr, file=sys.stderr, end="")
-    sys.exit(returncode)
+    if args.delete:
+        shutil.rmtree(outdir)
+        os.remove("manifold-nexus.py")
+    else:
+        result, vtype = args.func()
+        returncode=result.returncode
+        show(result.stdout, vtype=vtype)
+        print(result.stderr, file=sys.stderr, end="")
+        sys.exit(returncode)
 '''
 
 parser_template = '''\
