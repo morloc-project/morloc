@@ -26,6 +26,11 @@ def parser():
         usage="loc [options] LOC_SCRIPT"
     )
     parser.add_argument(
+        '-o', '--nexus-name',
+        default="manifold-nexus.py",
+        help="Set the name of the manifold nexus"
+    )
+    parser.add_argument(
         '-v', '--version',
         help='Display version',
         action='version',
@@ -169,12 +174,16 @@ def build_project(raw_lil, outdir, home):
             os.chmod(pool_filename, 0o755)
 
     if any([m.cache for m in manifolds.values()]):
-        os.mkdir(os.path.join(outdir, "cache"))
+        try:
+            os.mkdir(os.path.join(outdir, "cache"))
+        except FileExistsError:
+            # Only make the cache if it doesn't already exist
+            pass
 
-    with open("manifold-nexus.py", 'w') as f:
+    with open(args.nexus_name, 'w') as f:
         print(manifold_nexus, file=f, end="")
 
-    os.chmod("manifold-nexus.py", 0o755)
+    os.chmod(args.nexus_name, 0o755)
 
 def get_lil(args):
     flags = []
