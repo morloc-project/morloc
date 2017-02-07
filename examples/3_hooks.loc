@@ -1,0 +1,44 @@
+@path
+
+null . hclust . dist . normalize . load_data
+
+
+@3
+hclust := plot_pdf . <hclust> "z.pdf"
+normalize := write.table . colSums . <normalize>
+
+@arg
+write.table :: file="/dev/stderr" quote=FALSE col.names=FALSE
+dist :: method="maximum"
+
+@cache
+* :: memcache
+
+@lang
+* :: R
+
+@include
+"core/R/atomic.loc"
+"core/R/memcache.loc"
+"core/type.loc"
+
+@source R
+require(xtable)
+
+# Load a builtin R dataset and return
+load_data <- function() {
+  data(iris, envir=environment())
+  iris$Species <- NULL
+  iris
+}
+
+# Normalize numeric columns
+normalize <- function(x) {
+  as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
+}
+
+plot_pdf <- function(x, path){
+    pdf(path)
+    plot(x)
+    dev.off()
+}

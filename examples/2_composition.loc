@@ -1,0 +1,9 @@
+@path
+uniq . sort . grep . man
+
+@arg
+grep := -Po "[a-z]+ed"
+man := ls
+
+@lang
+* :: sh

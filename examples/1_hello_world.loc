@@ -1,0 +1,5 @@
+@path
+echo . "hello world"
+
+@lang
+* :: sh
