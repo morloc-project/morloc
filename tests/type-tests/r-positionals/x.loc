@@ -15,6 +15,9 @@ apply(
 I had to redefine the replicate function, to bypass the funky non-standard
 evaluation it uses.
 
+@include
+"core/type.loc"
+
 @source R
 
 replicate <- function(n, f, ...){

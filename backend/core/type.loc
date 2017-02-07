@@ -13,7 +13,7 @@ native_to_universal <- function(x, type, outdir){
     if(is.data.frame(x)){
       write_tsv(x, path=f)
     } else if(is.list(x)) {
-      warning("List export is not yet supported")
+      write(unlist(x), file=f, ncolumns=1)
     } else if(is.vector(x)) {
       write(x, file=f, ncolumns=1)
     } else if(is.null(x)) {

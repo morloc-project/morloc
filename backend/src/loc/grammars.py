@@ -404,10 +404,9 @@ if(exists(m)){{
 '''
         self.UID_WRAPPER = '''\
 {mid}_uid = 0
-wrap_{mid} <- function( ... ){{
+wrap_{mid} <- function(...){{
     {mid}_uid <<- {mid}_uid + 1 
-    uid <- {mid}_uid
-    {mid} ( ..., uid=uid )
+    {mid} (..., uid={mid}_uid )
 }}
 '''
         self.UID = 'uid'
@@ -416,7 +415,12 @@ wrap_{mid} <- function( ... ){{
         self.FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
   foreign_pool <- file.path(outdir, "call.{foreign_lang}")
-  fo <- system2(foreign_pool, args=c({args}), stdout=TRUE, stderr=FALSE)
+  fo <- system2(
+    foreign_pool,
+    args=c({args}),
+    stdout=TRUE,
+    stderr=FALSE
+  )
   universal_to_native(fo, types["{mid}"])
 }}
 '''
@@ -472,10 +476,11 @@ b = {function}({arguments})
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            arg_rep += 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
+            s = 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
+            arg_rep.append(s)
         if m.narg:
-            arg_rep += "uid"
-        arg_rep = ',\n    '.join(arg_rep)
+            arg_rep.append("uid")
+        arg_rep = ', '.join(arg_rep)
 
         s = self.FOREIGN_MANIFOLD.format(
             mid=m.mid,

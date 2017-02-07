@@ -15,3 +15,4 @@ map as main
 
 @include
 "core/R/control.loc"
+"core/type.loc"
