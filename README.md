@@ -59,12 +59,29 @@ $ ./manifold-nexus.py main
 hello world
 ```
 
-The LOC compiler builds an executable, named `manifold-nexus.py` by default,
-that is the interface to the LOC program. In this simple hello-world case, it
-contains the sole command `main` (much more on this later).
+The LOC frontend first compiles the script into an intermediate language (LOC
+Intermediate Language, LIL). The simple language specifies the elements of the
+program that will be generated.
 
-The compiler also builds a working directory (by default in `.loc/tmp`) where
-generated code, temporary files, and caches reside.
+```
+EMIT  m0  sh
+FUNC  m0  echo
+INPP  m0  0  "hello world"  *
+```
+
+The instruction `EMIT` declares a new "manifold", with id `m0`, that will
+contain `sh` (Bash) code. `FUNC` links the function `echo` to `m0` (there may
+be multiple manifolds that wrap `echo`, but each will have a unique id). `INPP`
+assigns the literal `"hello world"` to the 0th positional argument slot of
+`echo`. Ignore the star for now.
+
+The LOC backend translates LIL into executable code. It first builds an
+executable, named `manifold-nexus.py` by default, that is the interface to the
+LOC program. In this simple hello-world case, it contains the sole command
+`main` (much more on this later).
+
+Next it builds a working directory (by default in `.loc/tmp`) where generated
+code, temporary files, and caches reside.
 
 For each language used in the LOC script, a file named `call.<lang>` is
 created. Each of these files contains a wrapper for each function used in the
@@ -95,9 +112,51 @@ fi
 
 The `manifold-nexus.py` program passes `m0` to this script when
 `./manifold-nexus.py main` is called. It then takes the output of `call.sh m0`
-and sends it to the user. `m0` is the internal id of the "manifold" that wraps
-the `echo` function.
+and sends it to the user.
 
 ## Composition
 
 ![composition](docs/images/composition.png)
+
+The composition in the function above is identical to the shell command:
+
+``` bash
+man ls | grep -Po "[a-z]+ed" | sort | uniq
+```
+
+Entries in the `@arg` section attach arguments to functions. The composition in
+the `@path` section should be as clean and minimal as possible. It should
+express the pure and abstract sequence of data transforms at the core of the
+analysis. Details, such as parameters, run environments, caching paradigms,
+effects, debugging statements, and checking are all implemented in the modifier
+sections. So far, I have introduced the `@lang` and `@arg` sections, but there
+are many more to come.
+
+Composition in LOC is a bit different from conventional composition in, say,
+Haskell. The `.` operator passes the elements on the right as the inputs to any
+elements of the left that can take inputs.
+
+This can be a simple chain `h . g . f`. But it can also pass multiple
+arguments. For example, in `f . x y z`, the outputs of functions `x`, `y`, and
+`z` are passed as the first three positional arguments of `f`. Importantly, it
+is not the function `x`, or the manifold that wraps it, that is passed to `f`;
+it is the output of `x`.
+
+Here are the legal elements of composition:
+
+ 1. manifolds - `h . g . f`
+ 2. constants - `f . 1 "hello"`
+ 3. literals - ``f . `foo```
+ 4. functions - more on this later
+
+Compositions can also be nested to arbitrary depth
+
+```
+a . (b . c) (t . r) . z
+```
+
+The above could be translated into the following conventional function:
+
+```
+a( b(c(z()))), t(r(z())) )
+```
