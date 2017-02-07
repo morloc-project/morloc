@@ -36,7 +36,7 @@ void print_lil(Ws* lil){
                 printf("    %s", g_string(ww));
             }
         } else {
-            printf(g_string(ww));
+            printf("%s", g_string(ww));
             for(ww = ww->next; ww; ww = ww->next){
                 printf("\t%s", g_string(ww));
             }
