@@ -38,10 +38,10 @@ syn match DEFAULT_ERROR '@\S*' contained
 syn match DEFAULT_ERROR '\S\+' contained
 syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
-syn keyword DEFAULT_ERROR id null call true false          contained
-syn keyword DEFAULT_ERROR memcache datcache nocache        contained
-syn keyword DEFAULT_ERROR NIL                              contained
-syn keyword DEFAULT_ERROR as                               contained
+syn keyword DEFAULT_ERROR id null map true false      contained
+syn keyword DEFAULT_ERROR memcache datcache nocache   contained
+syn keyword DEFAULT_ERROR NIL                         contained
+syn keyword DEFAULT_ERROR as                          contained
 
 " define todo highlighting
 syn keyword s_todo TODO NOTE FIXME XXX contained 
@@ -81,15 +81,15 @@ syn match s_section '@source'   contained
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 " Section specific syntax
 
+" general default functions
+syn keyword s_simple_function id null map true false contained
+syn keyword s_logical_op and or not any all
+
 syn match s_var /\h[\w.0-9-]*/ contained
 syn match s_arg /--\?\w*/ contained
 syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
 syn match s_marg /$\d/ contained
-
-" general default functions
-syn keyword s_simple_function id null call true false contained
-syn keyword s_logical_op and or not any all
 
 " default caching functions
 syn keyword s_cache_function memcache datcache nocache contained
@@ -139,44 +139,42 @@ syn match s_varlabel ':\w\+' contained
 " Set a highlighting paradigm for each section
 
 syn cluster c_subglobal contains=s_comment,s_section,DEFAULT_ERROR
-syn cluster c_global    contains=@c_subglobal,s_var,s_constant,s_logical,s_logical_op
+syn cluster c_global    contains=@c_subglobal,s_simple_function,s_var,s_constant,s_logical,s_logical_op
 
 syn cluster c_couple_nl contains=s_couple,s_star
 syn cluster c_modify_nl contains=@c_couple_nl,s_modify,s_pathsep
 syn cluster c_couple    contains=@c_couple_nl,s_varlabel
 syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 
-syn cluster c_equality  contains=s_simple_function,s_equal
 syn cluster c_hasarg    contains=s_equal,s_num,s_sep,s_brk,s_par,s_fun,s_string
-syn cluster c_function  contains=@c_hasarg,s_simple_function,s_sep
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_marg,s_fun,s_group,s_refer
 syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
-syn region r_source start=/@source R$/ end=/@\@=/ skip=/\\@/ contains=s_section,@R
-syn region r_source start=/@source py$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Python
-syn region r_source start=/@source pl$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Perl
-syn region r_source start=/@source sh$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Shell
+syn region r_source   start=/@source R$/  end=/@\@=/ skip=/\\@/ contains=s_section,@R
+syn region r_source   start=/@source py$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Python
+syn region r_source   start=/@source pl$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Perl
+syn region r_source   start=/@source sh$/ end=/@\@=/ skip=/\\@/ contains=s_section,@Shell
 
-syn region r_comment  start=/@comment/  end=/@\@=/ skip=/\\@/
-
-syn region r_alias start=/@alias/ end=/@\@=/ contains=@c_global,@c_equality,@c_hasarg,@c_couple_nl,s_utility
-
-syn region r_path     start=/@path/     end=/@\@=/ contains=@c_global,@c_couple,@c_function,@c_path
-syn region r_check    start=/@check/    end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
-syn region r_effect   start=/@[0-9]/   end=/@\@=/ contains=@c_global,@c_function,@c_modify,@c_path
-syn region r_fail     start=/@fail/     end=/@\@=/ contains=@c_global,@c_function,@c_couple,@c_path
-
-syn region r_arg      start=/@arg/      end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg
-syn region r_cache    start=/@cache/    end=/@\@=/ contains=@c_global,@c_hasarg,s_cache_function,@c_couple
-syn region r_doc      start=/@doc/      end=/@\@=/ contains=@c_global,@c_modify,s_string
-syn region r_export   start=/@export/   end=/@\@=/ contains=@c_global,s_export_keyword,s_pathsep,s_varlabel,s_simple_function
-syn region r_lang     start=/@lang/     end=/@\@=/ contains=@c_global,@c_function,@c_couple
-syn region r_include  start=/@include/  end=/@\@=/ contains=@c_subglobal,s_string
-syn region r_import   start=/@import/   end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
-syn region r_ontology start=/@ontology/ end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
-syn region r_type     start=/@type/     end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
+syn region r_comment  start=/@comment/    end=/@\@=/ skip=/\\@/
+                                          
+syn region r_alias    start=/@alias/      end=/@\@=/ contains=@c_global,c_equal,@c_hasarg,@c_couple_nl,s_utility
+                                          
+syn region r_path     start=/@path/       end=/@\@=/ contains=@c_global,@c_couple,@c_hasarg,@c_path
+syn region r_check    start=/@check/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
+syn region r_effect   start=/@[0-9]/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
+syn region r_fail     start=/@fail/       end=/@\@=/ contains=@c_global,@c_hasarg,@c_couple,@c_path
+                                          
+syn region r_arg      start=/@arg/        end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg
+syn region r_cache    start=/@cache/      end=/@\@=/ contains=@c_global,@c_hasarg,s_cache_function,@c_couple
+syn region r_doc      start=/@doc/        end=/@\@=/ contains=@c_global,@c_modify,s_string
+syn region r_export   start=/@export/     end=/@\@=/ contains=@c_global,s_export_keyword,s_pathsep,s_varlabel
+syn region r_lang     start=/@lang/       end=/@\@=/ contains=@c_global,@c_hasarg,@c_couple
+syn region r_include  start=/@include/    end=/@\@=/ contains=@c_subglobal,s_string
+syn region r_import   start=/@import/     end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
+syn region r_ontology start=/@ontology/   end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
+syn region r_type     start=/@type/       end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
 
 
 
