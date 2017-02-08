@@ -238,3 +238,62 @@ INPM  m4  0  m3  *
 ## Hooks and loops
 
 ![hooks](docs/images/hooks.png)
+
+LOC has no explicit syntax for any control structures. Instead it relies on
+high-order functions defined in the source code. The above example demonstrates
+the LOC equivalent of a `for` loop. The `&(...)` phrase effectively takes
+a composition and transforms it into a function that is passed as an argument
+to `map`. Arguments passed into this composition are accessed with `$N` calls.
+The `map` function is required to be defined in the source language (it is
+imported here with `"core/R/control.R"`).
+
+This script converts the previous random number generator into a function that
+is mapped across a sequence of numbers. Note that is uses two language: R and
+Bash ('sh').
+
+The rather cryptic `@5` and `@1` sections attach arbitrary code to a manifold.
+
+Below is a template R function with the locations of all 9 possible hooks.
+
+```R
+m1 = function (){
+    # @0 e.g. m7()
+    if(cache_chk("m1")){
+        # @8
+        b = cache_get("m1")
+        # @9
+    }
+    else{
+        # @2
+        if( check() ){
+            # @4
+            b = fun([input], [arg])
+            cache_put("m1", b)
+            # @5
+        } else {
+            # @6
+            b = fail()
+            cache_put("m1", b)
+            # @7
+        }
+        # @3
+    }
+    # @1
+    return b
+}
+```
+
+If a function is attached to the `@5` slot of a manifold, it will be executed
+after the pure function is run but will not be called if a value is taken from
+the cache. I use this above to 1) plot the output after the loop and 2) log the
+results of each sampling.
+
+`@1` is always called on exit. In the example above, the line
+
+```
+@1
+null :: cleanup
+```
+
+calls the Bash `cleanup` function after the entire program is complete (`null`
+is the terminal manifold).
