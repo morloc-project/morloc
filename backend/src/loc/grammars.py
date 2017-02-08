@@ -281,7 +281,8 @@ class Grammar:
                 hmid=h.mid,
                 marg_uid=self.make_marg_uid(m)
             ) )
-        return '\n'.join(ss)
+        sep = '\n%s' % (' ' * self.INDENT)
+        return sep.join(ss)
 
     def make_marg(self, m, universal=False):
         ss = []

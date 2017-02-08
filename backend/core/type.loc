@@ -32,6 +32,7 @@ universal_to_native <- function(x, type){
     d <- as.integer(x)
   } else {
     warning("STUB: Only Int is currently supported")
+    d <- NULL
     # d <- read_tsv(x)
     # if(ncol(d) == 1){
     #   d <- d[[1]]

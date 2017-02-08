@@ -13,6 +13,8 @@ null <- function(...) {
     NULL      # but return nothing
 }
 
+id <- function(x) { x }
+
 and <- function(a, b) { a && b }
 
 or  <- function(a, b) { a || b }
