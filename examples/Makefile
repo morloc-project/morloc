@@ -10,13 +10,16 @@
 3:
 	loc -k -o modifiers -x pools 3_modifiers.loc	
 
-
 .PHONY: 4
 4:
 	loc -k -o hooks -x pools 4_hooks.loc	
+
+.PHONY: 5
+5:
+	loc -k -o types -x pools 5_types.loc	
 
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
 		hooks *pdf manifold-nexus.py \
-		sample* results
+		sample* results types

@@ -251,7 +251,8 @@ This script converts the previous random number generator into a function that
 is mapped across a sequence of numbers. Note that is uses two language: R and
 Bash ('sh').
 
-The rather cryptic `@5` and `@1` sections attach arbitrary code to a manifold.
+The rather cryptic `@5` and `@1` sections attach arbitrary code (hooks) to
+a manifold.
 
 Below is a template R function with the locations of all 9 possible hooks.
 
@@ -297,3 +298,9 @@ null :: cleanup
 
 calls the Bash `cleanup` function after the entire program is complete (`null`
 is the terminal manifold).
+
+## Types and ontologies
+
+![types](docs/images/types.png)
+
+
