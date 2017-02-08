@@ -303,4 +303,32 @@ is the terminal manifold).
 
 ![types](docs/images/types.png)
 
+LOC currently supports simple types. The syntax is nearly identical to Haskell,
+with the addition of two keywords: MULTI and NULL. MULTI matches any number of
+inputs of any type. NULL implies no output (if on the right) or input (if on
+the left).
 
+LOC does not yet support generic types, type constructors, algebraic types and
+all that. But it will in the future.
+
+Types are important for several reasons.
+
+First, typechecking can catch incorrect connections at compile time. Indeed,
+a fully typed workflow can be proven to be correct at a high level, assuming of
+course the the user has correctly entered the type (unlike Haskell, LOC cannot
+typecheck "all the way down").
+
+Also, the type signatures are a formal documentation succinctly describing the
+behaviour of a function.
+
+In the context of LOC, however, the greatest value of types is that
+a well-desiged type system can transcend language barriers. Two functions with
+the same signature can, in theory, be swapped without altering the correctness
+of the pipeline (at the type level), regardless of their language. 
+
+LOC distinguishes between "universal" and "native" forms of data. Calls between
+manifolds of the same language, can transfer data using native data structures,
+as they would in a conventional program. However, foreign calls require the
+data is first transformed to a "universal" form, passed to the foreign
+language, and then transformed into the foreign "native" form. Types direct
+these transforms.
