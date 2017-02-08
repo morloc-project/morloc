@@ -47,7 +47,7 @@ is a purely metaprogramming language.
 The Hello World example above uses the Bash function `echo`, which is given the
 input string "Hello World".
 
-LOC scripts are partioned into sections, each with its own syntax. Only
+LOC scripts are partitioned into sections, each with its own syntax. Only
 compositions can be written in the `@path` section. Languages are specified in
 the `@lang` section.
 
@@ -168,17 +168,19 @@ a( b(c(z()))), t(r(z())) )
 The above script samples numbers from a normal distribution where all paramters
 are in turn sampled from random distributions.
 
+This example introduces several new things.
+
 First of all, I switched to a new language, R. Also I wrote a bit of R source
-code, the `is.positive` function. This code will be passed verbatim to the
+code (see the `is.positive` function). This code will be passed verbatim to the
 `call.R` executable.
 
 A very important part of any non-trivial pipeline is data validation. This is
-handled by modifiers added in the `@check` section. Above I attach a function
-to the normal sampler that checks whether the standard deviation (which is
-drawn N(2,1) distribution) is positive. If it isn't, no output is printed. The
-checks are limited to accessing the inputs of their parents. Rather, they are
-free manifolds that can query any manifolds in the program with the sole
-restriction that they return a boolean.
+handled in LOC by entries in the `@check` section. Above I attach a function to
+the normal sampler that checks whether the standard deviation (which is drawn
+N(2,1) distribution) is positive. If it isn't, no output is printed. The checks
+not are limited to accessing the inputs of their parents. Rather, they are free
+manifolds that can query any manifolds in the program with the sole restriction
+that they return a boolean.
 
 I have also added a cache system, specifying that the outputs of all `rnorm`
 and `rbinom` manifolds are stored in memory. I only really need a cache on
@@ -188,7 +190,7 @@ once by `is.positive`.
 The string following the `:` (e.g. `rnorm:main`) is a label used to resolve
 otherwise indistinguishable manifolds. They are not translated into LIL, since
 internally all manifolds get unique ids (e.g. `m0`) and are not referred to by
-they abstract names. The syntax `\<rnorm:sd\>` indicates that a specific
+they abstract names. The syntax `<rnorm:sd>` indicates that a specific
 manifold (the `rnorm:sd` implicitly declared in the `@path` section) is to be
 called, rather than a new `rnorm:sd`.
 
@@ -196,7 +198,7 @@ In the argument section, I am now using named arguments. The `=` is a LOC
 operator, it will be translated into the correct language-specific binder by
 the frontend.
 
-The code will be translated into the LIL (skipping included code):
+The code will be translated into the following LIL (skipping included code):
 
 ```
 NSRC  R
@@ -232,3 +234,7 @@ EMIT  m4  R
 FUNC  m4  is.positive
 INPM  m4  0  m3  *
 ```
+
+## Hooks and loops
+
+![hooks](docs/images/hooks.png)
