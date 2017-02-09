@@ -12,5 +12,5 @@ map . & ( sum . seq . 1 $1) (c . 1 2 3 4 5)
 seq :: sh
 
 @include
-"core/R/control.loc"
-"core/type.loc"
+core/control
+core/type

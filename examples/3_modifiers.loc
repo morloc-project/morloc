@@ -23,5 +23,5 @@ rnorm,rbinom :: memcache
 is.positive <- function(x){ all(x > 0) }
 
 @include
-"core/R/memcache.loc"
-"core/type.loc"
+core/memcache
+core/type

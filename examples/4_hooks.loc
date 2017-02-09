@@ -56,7 +56,7 @@ cleanup () {
 }
 
 @include
-"core/R/memcache.loc"
-"core/R/atomic.loc"
-"core/R/control.loc"
-"core/type.loc"
+core/memcache
+core/atomic
+core/control
+core/type

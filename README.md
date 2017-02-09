@@ -245,7 +245,7 @@ the LOC equivalent of a `for` loop. The `&(...)` phrase effectively takes
 a composition and transforms it into a function that is passed as an argument
 to `map`. Arguments passed into this composition are accessed with `$N` calls.
 The `map` function is required to be defined in the source language (it is
-imported here with `"core/R/control.R"`).
+imported here with `core/control`).
 
 This script converts the previous random number generator into a function that
 is mapped across a sequence of numbers. Note that is uses two language: R and
