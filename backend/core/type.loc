@@ -27,10 +27,16 @@ native_to_universal <- function(x, type, outdir){
 }
 
 # Convert text or binary to native data structure
+number_types <- c("Int", "[Int]")
+string_types <- c("Str", "[Str]", "Txt", "File")
 universal_to_native <- function(x, type){
-  if(type == "Int" || type == "[Int]"){
+  if( any(type %in% number_types) ){
     d <- as.integer(x)
-  } else {
+  }
+  else if( any(type %in% string_types) ){
+    d <- as.character(x)
+  }
+  else {
     warning("STUB: Only Int is currently supported")
     d <- NULL
     # d <- read_tsv(x)
@@ -52,7 +58,10 @@ native_to_universal (){
 universal_to_native (){
     x=$1
     vtype=$2
-    if [[ $vtype == "Int" ]]
+    if [[ $vtype == "Int" ||
+          $vtype == "Str" ||
+          $vtype == "Num" ||
+          $vtype == "File" ]]
     then
         echo $x
     else

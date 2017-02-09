@@ -630,8 +630,7 @@ fi
         self.HOOK          = 'to_stderr {hmid} {marg_uid}'
 
     def make_input_manifold(self, m, pos, val, typ):
-        # TODO generalize this, extend beyond Int for goodness sake
-        if(typ == "Int"):
+        if(typ in ("Int", "Str", "Txt", "File")):
             op = '$'
         else:
             op = '<'

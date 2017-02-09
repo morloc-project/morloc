@@ -21,4 +21,4 @@ inc (){
 }
 
 @include
-"core/type.loc"
+core/type

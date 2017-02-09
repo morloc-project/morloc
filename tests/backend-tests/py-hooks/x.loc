@@ -1,6 +1,6 @@
 @include
-"core/memcache.loc"
-"core/type.loc"
+core/memcache
+core/type
 
 
 @source py

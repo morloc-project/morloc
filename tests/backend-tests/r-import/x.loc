@@ -1,5 +1,5 @@
 @include
-"core/type.loc"
+core/type
 
 @import
 from "x-foo-1.loc" import bar as zzz

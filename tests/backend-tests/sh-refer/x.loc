@@ -5,8 +5,8 @@ random () {
 }
 
 @include
-"core/datcache.loc"
-"core/type.loc"
+core/datcache
+core/type
 
 @export
 tail

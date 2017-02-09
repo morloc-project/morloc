@@ -14,5 +14,5 @@ map as main
 * :: R
 
 @include
-"core/control.loc"
-"core/type.loc"
+core/control
+core/type

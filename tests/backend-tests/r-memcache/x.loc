@@ -1,7 +1,7 @@
 @include
-"core/memcache.loc"
-"core/atomic.loc"
-"core/type.loc"
+core/memcache
+core/atomic
+core/type
 
 
 @export

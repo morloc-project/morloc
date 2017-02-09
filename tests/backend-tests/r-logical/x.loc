@@ -1,6 +1,6 @@
 @include
-"core/atomic.loc"
-"core/type.loc"
+core/atomic
+core/type
 
 @export
 say_hi

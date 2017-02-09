@@ -16,7 +16,7 @@ I had to redefine the replicate function, to bypass the funky non-standard
 evaluation it uses.
 
 @include
-"core/type.loc"
+core/type
 
 @source R
 

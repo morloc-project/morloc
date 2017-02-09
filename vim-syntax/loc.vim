@@ -90,6 +90,7 @@ syn match s_arg /--\?\w*/ contained
 syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
 syn match s_fun /&\w*/ contained
 syn match s_marg /$\d/ contained
+syn match s_file /\w\+\(\/\w\+\)*/ contained
 
 " default caching functions
 syn keyword s_cache_function memcache datcache nocache contained
@@ -171,7 +172,7 @@ syn region r_cache    start=/@cache/      end=/@\@=/ contains=@c_global,@c_hasar
 syn region r_doc      start=/@doc/        end=/@\@=/ contains=@c_global,@c_modify,s_string
 syn region r_export   start=/@export/     end=/@\@=/ contains=@c_global,s_export_keyword,s_pathsep,s_varlabel
 syn region r_lang     start=/@lang/       end=/@\@=/ contains=@c_global,@c_hasarg,@c_couple
-syn region r_include  start=/@include/    end=/@\@=/ contains=@c_subglobal,s_string
+syn region r_include  start=/@include/    end=/@\@=/ contains=@c_subglobal,s_file
 syn region r_import   start=/@import/     end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
 syn region r_ontology start=/@ontology/   end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
 syn region r_type     start=/@type/       end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star

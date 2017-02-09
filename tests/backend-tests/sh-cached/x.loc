@@ -5,8 +5,8 @@ This code is equivalent to
 man ls | grep -Po "[a-z]+ed" | sort | uniq
 
 @include
-"core/datcache.loc"
-"core/type.loc"
+core/datcache
+core/type
 
 @export
 uniq

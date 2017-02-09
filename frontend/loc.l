@@ -80,6 +80,8 @@ int -?([0-9]|[1-9][0-9]+)
 dbl -?{int}\.[0-9]+
 lgc TRUE|FALSE|NULL 
 
+file {sym}(\/{sym})*
+
 grpref     \*{var}
 argref     ${int}
 refer      <[^<]+>
@@ -143,10 +145,12 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, PATH);
 }
 
-<S_INCLUDE>{str} {
-    char* s = unquote(yytext);
-    LOGV("including(%s)\n", s);
-    if(!newfile(s)) yyterminate();
+<S_INCLUDE>{file} {
+    char* s = trim(yytext);
+    char* filename = (char*)malloc((strlen(s) + 5) * sizeof(char));
+    sprintf(filename, "%s.loc", s);
+    LOGV("including(%s)\n", filename);
+    if(!newfile(filename)) yyterminate();
   }
 <<EOF>> { if(!popfile()) yyterminate(); UNPUT_S("\n@include\n"); }
 

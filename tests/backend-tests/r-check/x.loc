@@ -1,5 +1,5 @@
 @include
-"core/type.loc"
+core/type
 
 @type
 seq :: Int -> Int -> [Int]

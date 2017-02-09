@@ -1,6 +1,6 @@
 @include
-"core/datcache.loc"
-"core/type.loc"
+core/datcache
+core/type
 
 @source sh
 

@@ -1,8 +1,8 @@
 @include
-"core/control.loc"
-"core/atomic.loc"
-"core/datcache.loc"
-"core/type.loc"
+core/control
+core/atomic
+core/datcache
+core/type
 
 @path
 

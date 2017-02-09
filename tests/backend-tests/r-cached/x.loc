@@ -5,8 +5,8 @@ Same as
 R>  sqrt(max(seq(1,9)))
 
 @include
-"core/datcache.loc"
-"core/type.loc"
+core/datcache
+core/type
 
 @type
 seq :: Int -> Int -> [Int]
