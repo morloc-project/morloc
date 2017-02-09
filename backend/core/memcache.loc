@@ -1,3 +1,9 @@
+@type
+datcache_chk :: Str -> Int -> Bool
+datcache_get :: Str -> Int -> *
+datcache_put :: Str -> Int -> * -> NULL
+datcache_del :: Str -> Int -> NULL
+
 @source R
 
 .memcache_data <- new.env()

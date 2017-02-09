@@ -5,7 +5,7 @@ random () {
 }
 
 @include
-"core/sh/datcache.loc"
+"core/datcache.loc"
 "core/type.loc"
 
 @export

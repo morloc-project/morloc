@@ -27,8 +27,8 @@ hclust :: plot_pdf . <hclust> $1
 
 
 @include
-"core/R/datcache.loc"
-"core/R/atomic.loc"
+"core/datcache.loc"
+"core/atomic.loc"
 "core/type.loc"
 
 

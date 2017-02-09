@@ -1,7 +1,7 @@
 @include
-"core/sh/control.loc"
-"core/sh/atomic.loc"
-"core/sh/datcache.loc"
+"core/control.loc"
+"core/atomic.loc"
+"core/datcache.loc"
 "core/type.loc"
 
 @path

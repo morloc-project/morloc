@@ -12,7 +12,7 @@ ls_has_man () {
 }
 
 @include
-"core/sh/datcache.loc"
+"core/datcache.loc"
 "core/type.loc"
 
 @export

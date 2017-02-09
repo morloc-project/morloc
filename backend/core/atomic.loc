@@ -1,0 +1,79 @@
+@type
+null :: MULTI -> NULL
+id :: * -> *
+
+and ::  Bool  -> Bool -> Bool
+all :: [Bool] -> Bool
+or  ::  Bool  -> Bool -> Bool
+any :: [Bool] -> Bool
+not ::  Bool  -> Bool
+
+@source R
+
+null <- function(...) {
+    list(...) # to force evaluation of inputs
+    NULL      # but return nothing
+}
+
+id <- function(x) { x }
+
+nothing <- function() { NULL }
+
+and <- function(a, b) { a && b }
+
+or  <- function(a, b) { a || b }
+
+not <- function(a) { ! a }
+
+@source sh
+
+# Text -> NULL
+null() {
+    cat "$@" > /dev/null
+}
+
+id() {
+    cat
+}
+
+nothing() {
+    echo -n
+}
+
+and() {
+    $1 && $2
+}
+
+or() {
+    $1 || $3
+}
+
+not() {
+    test ! $1
+}
+
+all() {
+    is_true=1
+    for j in $@
+    do
+        if ! $j 
+        then
+            is_true=0
+            break
+        fi
+    done
+    test $is_true -eq 1
+}
+
+any() {
+    is_true=0
+    for j in $@
+    do
+        if $j
+        then
+            is_true=1
+            break
+        fi
+    done
+    test $is_true -eq 1
+}

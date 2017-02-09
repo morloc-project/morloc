@@ -1,5 +1,5 @@
 @include
-"core/R/atomic.loc"
+"core/atomic.loc"
 "core/type.loc"
 
 # @type

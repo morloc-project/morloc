@@ -1,0 +1,20 @@
+# @type
+# # I need generics
+# map :: (a -> b) -> [a] -> [b]
+
+@source R
+
+map <- function(f, x){
+    lapply(x, f)
+}
+
+@source sh
+
+map (){
+    fun=$1
+    file=$2
+    while read x
+    do
+        $fun $x
+    done < $file
+}

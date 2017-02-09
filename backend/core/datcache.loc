@@ -1,0 +1,87 @@
+@type
+datcache_chk :: Str -> Int -> Bool
+datcache_get :: Str -> Int -> *
+datcache_put :: Str -> Int -> * -> NULL
+datcache_del :: Str -> Int -> NULL
+
+
+@source R
+
+require(readr)
+
+datcache_path <- function(mid, uid=NULL, outdir="cache") {
+    if(is.null(uid)){
+        file.path(outdir, paste0(mid, ".rdat"))
+    } else {
+        file.path(outdir, paste0(mid, "_", uid, ".rdat"))
+    }
+}
+
+# string -> bool
+datcache_chk <- function(mid, uid=NULL, ...) {
+    file.exists(datcache_path(mid, uid, ...))
+}
+
+# null -> text
+datcache_get <- function(mid, uid=NULL, ...) {
+    read_rds(datcache_path(mid, uid, ...))
+}
+
+# text -> text
+datcache_put <- function(mid, dat, uid=NULL, ...) {
+    write_rds(dat, datcache_path(mid, uid, ...))
+}
+
+datcache_del <- function(mid, uid=NULL, ...) {
+    file.remove(datcache_path(mid, uid, ...))
+}
+
+
+
+@source sh
+
+cachedir=$outdir/cache
+if [[ ! -d $cachedir ]]
+then
+    mkdir $cachedir || echo "Cannot make cache directory" &> /dev/null
+fi
+
+# $1: mid | $2: uid
+datcache_chk() {
+    if [[ -z $2 ]]
+    then
+        test -d $cachedir && test -f $cachedir/$1.dat
+    else
+        test -d $cachedir && test -f $cachedir/$1_$2.dat
+    fi
+}
+
+# $1: mid | $2: uid
+datcache_get() {
+    if [[ -z $2 ]]
+    then
+        cat $cachedir/$1.dat | more
+    else
+        cat $cachedir/$1_$2.dat | more
+    fi
+}
+
+# $1: mid | $2: tempfile | $3: uid
+datcache_put() {
+    if [[ -z $3 ]]
+    then
+        ln $2 $cachedir/$1.dat
+    else
+        ln $2 $cachedir/$1_$3.dat
+    fi
+}
+
+# $1: mid | $2: uid
+datcache_del() {
+    if [[ -z $2 ]]
+    then
+        rm $cachedir/$1.dat
+    else
+        rm $cachedir/$1_$2.dat
+    fi
+}

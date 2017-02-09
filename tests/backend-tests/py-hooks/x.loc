@@ -1,5 +1,5 @@
 @include
-"core/py/memcache.loc"
+"core/memcache.loc"
 "core/type.loc"
 
 

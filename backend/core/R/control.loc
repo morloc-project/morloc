@@ -1,5 +1,0 @@
-@source R
-
-map <- function(f, x){
-    lapply(x, f)
-}

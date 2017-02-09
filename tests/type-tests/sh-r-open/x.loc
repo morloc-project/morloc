@@ -15,5 +15,5 @@ map as main
 seq :: sh
 
 @include
-"core/R/control.loc"
+"core/control.loc"
 "core/type.loc"

@@ -1,6 +1,6 @@
 @include
-"core/R/memcache.loc"
-"core/R/atomic.loc"
+"core/memcache.loc"
+"core/atomic.loc"
 "core/type.loc"
 
 
