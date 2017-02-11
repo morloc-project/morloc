@@ -48,7 +48,7 @@ def parser():
 
 def show(x, vtype):
     x = x.strip()
-    literal = {{"Int", "String"}}
+    literal = {{"Int", "Num", "Str", "File"}}
     if(len(x) == 0):
         pass
     elif(vtype in literal):
