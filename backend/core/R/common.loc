@@ -1,0 +1,14 @@
+@type
+# dunif(x, min = 0, max = 1, log = FALSE)
+dunif :: [Num] -> Num -> Num -> [Num]
+
+# punif(q, min = 0, max = 1, lower.tail = TRUE, log.p = FALSE)
+punif :: [Num] -> Num -> Num -> [Num]
+
+# qunif(p, min = 0, max = 1, lower.tail = TRUE, log.p = FALSE)
+qunif :: [Num] -> Num -> Num -> [Num]
+
+# runif(n, min = 0, max = 1)
+runif :: Int -> Num -> Num -> [Num]
+
+c :: MULTI -> *
