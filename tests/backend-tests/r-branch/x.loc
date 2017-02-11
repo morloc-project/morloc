@@ -7,8 +7,8 @@ core/type
 # gelse
 # foo
 # bar
-# baz :: [Str]
-# get_species :: Tab -> [Str]
+# baz :: [String]
+# get_species :: Tab -> [String]
 # load_iris :: NULL -> Tab
 
 @source R

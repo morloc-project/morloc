@@ -1,6 +1,8 @@
-# @type
-# # I need generics
-# map :: (a -> b) -> [a] -> [b]
+@type
+# The type signature of map SHOULD be:
+#   map :: (a -> b) -> [a] -> [b]
+# However, I don't yet support generics
+map :: * -> * -> *
 
 @source R
 
