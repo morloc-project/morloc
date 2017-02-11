@@ -27,8 +27,9 @@ native_to_universal <- function(x, type, outdir){
 }
 
 # Convert text or binary to native data structure
-number_types <- c("Int", "[Int]")
-string_types <- c("Str", "[Str]", "Txt", "File")
+number_types  <- c("Int", "[Int]")
+string_types  <- c("Str", "[Str]", "Text", "File")
+logical_types <- c("Bool", "[Bool]")
 universal_to_native <- function(x, type){
   if( any(type %in% number_types) ){
     d <- as.integer(x)
@@ -36,13 +37,18 @@ universal_to_native <- function(x, type){
   else if( any(type %in% string_types) ){
     d <- as.character(x)
   }
-  else {
-    warning("STUB: Only Int is currently supported")
+  else if( any(type %in% logical_types) ){
+    d <- as.logical(x)
+  }
+  else if( type == "NULL" ){
     d <- NULL
-    # d <- read_tsv(x)
-    # if(ncol(d) == 1){
-    #   d <- d[[1]]
-    # }
+  }
+  else {
+    warning("Blindly reading unknown type as Table or Vector")
+    d <- read_tsv(x)
+    if(ncol(d) == 1){
+      d <- d[[1]]
+    }
   }
   d
 }
@@ -58,9 +64,10 @@ native_to_universal (){
 universal_to_native (){
     x=$1
     vtype=$2
-    if [[ $vtype == "Int" ||
-          $vtype == "Str" ||
-          $vtype == "Num" ||
+    if [[ $vtype == "Int"  ||
+          $vtype == "Str"  ||
+          $vtype == "Num"  ||
+          $vtype == "Bool" ||
           $vtype == "File" ]]
     then
         echo $x
