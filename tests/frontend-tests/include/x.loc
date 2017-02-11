@@ -1,5 +1,5 @@
 @include
-'x-lib.loc'
+x-lib
 
 @path
 F :: g . f
