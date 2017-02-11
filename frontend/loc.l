@@ -84,7 +84,7 @@ file {sym}(\/{sym})*
 
 grpref     \*{var}
 argref     ${int}
-refer      <[^<]+>
+refer      <{var}>
 
 couple ::|:=|:-|:\+
 

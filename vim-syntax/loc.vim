@@ -115,7 +115,7 @@ syn match s_star    /\_\W\*\_\W\|^\*\_W\|^\*$/ contained
 
 syn match s_positional /`[^`]*`/ contained
 syn match s_group /\*\w\+/ contained
-syn match s_refer /<[^>]\+>/ contained
+syn match s_refer /<[A-Za-z0-9_./:-]\+>/ contained
 
 " strings
 syn region s_string start=/'/ end=/'/ contained
