@@ -28,7 +28,7 @@ native_to_universal <- function(x, type, outdir){
 
 # Convert text or binary to native data structure
 number_types  <- c("Int", "[Int]")
-string_types  <- c("Str", "[Str]", "Text", "File")
+string_types  <- c("String", "[String]", "Text", "File")
 logical_types <- c("Bool", "[Bool]")
 universal_to_native <- function(x, type){
   if( any(type %in% number_types) ){
@@ -65,7 +65,7 @@ universal_to_native (){
     x=$1
     vtype=$2
     if [[ $vtype == "Int"  ||
-          $vtype == "Str"  ||
+          $vtype == "String"  ||
           $vtype == "Num"  ||
           $vtype == "Bool" ||
           $vtype == "File" ]]
