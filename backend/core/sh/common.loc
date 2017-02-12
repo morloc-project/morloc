@@ -15,8 +15,8 @@ mkdir :: File -> NULL
 # But the output is non-standard, it would require some parsing.
 ls :: File -> [File]
 
-cat ::  File -> Text
+cat :: File -> Text
 # cat :: [File] -> Text
 
-@alias
+@arg
 ls :: -1 # this forces 1 file per line
