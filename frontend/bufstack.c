@@ -1,9 +1,7 @@
 #include "bufstack.h"
 
-/* global variable for storing filename */
-char* current_filename = NULL;
+char* yyfilename = NULL;
 
-/* global variable for storing buffer stack */
 bufstack *current_bs = NULL;
 
 int newfile(char* fn){
@@ -41,7 +39,7 @@ int newfile(char* fn){
     yy_switch_to_buffer(bs->bs);
 
     current_bs = bs;
-    current_filename = bs->filename;
+    yyfilename = bs->filename;
     yylineno = 1;
 
     return 1;
@@ -66,7 +64,7 @@ int popfile(void){
     current_bs = prevbs;
 
     yylineno = current_bs->lineno;
-    current_filename = current_bs->filename;
+    yyfilename = current_bs->filename;
 
     return 1;
 }

@@ -1,6 +1,7 @@
 %{
     #include <stdio.h>
     #include "lex.yy.h"
+    #include "bufstack.h"
     #include "ws.h"
 
     void yyerror(const char *);
@@ -306,7 +307,7 @@ list
 %%
 
 void yyerror(char const *s){
-    warn("ERROR: %s\n", s);
+    warn("(%s:%d) %s\n", yyfilename, yylineno, s);
 }
 
 

@@ -24,4 +24,10 @@ int newfile(char *fn);
 /* leave a file */
 int popfile(void);
 
+/* global variable for storing filename */
+extern char* yyfilename;
+
+/* global variable for storing buffer stack */
+extern bufstack *current_bs;
+
 #endif
