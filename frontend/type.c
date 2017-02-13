@@ -1,5 +1,7 @@
 #include "type.h"
 
+void _infer_multi_type(W* w);
+
 // takes in all data
 W* _typecheck_derefs(Ws* ws_top, W* msg);
 
@@ -90,9 +92,38 @@ void set_default_types(Ws* ws){
     /* STUB */
 }
 
-Ws* infertype(Ws* ws){
-    /* STUB */
-    return NULL;
+void infer_multi_types(Ws* ws){
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_manifold,
+        _infer_multi_type
+    );
+}
+void _infer_multi_type(W* w){
+    Manifold *wm, *im;
+    wm = g_manifold(g_rhs(w));
+    if(wm->type &&
+       strcmp(g_string(g_lhs(wm->type->head)), "atomic") == 0 &&
+       strcmp(g_string(g_rhs(wm->type->head)), "MULTI") == 0 &&
+       ws_length(wm->type) == 2 &&
+       ws_length(wm->inputs) > 1
+    ){
+        W* output = w_isolate(wm->type->last); 
+        wm->type = NULL;
+        for(W* i = wm->inputs->head; i != NULL; i = i->next){
+            im = g_manifold(g_rhs(i));
+            if(ws_length(im->type) > 1){
+                wm->type = ws_add(wm->type, w_clone(im->type->last));
+            } else {
+                W* lhs = w_new(P_STRING, "atomic");
+                W* rhs = w_new(P_STRING, "*");
+                Couplet* c = couplet_new(lhs, rhs, '=');
+                wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+            }
+        }
+        wm->type = ws_add(wm->type, output);
+    }
 }
 
 W* _typecheck(W* w, W* msg){

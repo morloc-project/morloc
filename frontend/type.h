@@ -10,7 +10,7 @@
 
 void set_default_types(Ws* ws);
 
-Ws* type_infer(Ws* ws);
+void infer_multi_types(Ws* ws);
 
 char* type_str(W* w);
 
