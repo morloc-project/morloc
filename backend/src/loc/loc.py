@@ -9,6 +9,7 @@ import shutil
 import lil
 import nexus
 import grammars
+import type_inference
 from util import err
 
 __version__ = '0.0.0'
@@ -136,6 +137,8 @@ def build_project(raw_lil, outdir, home):
     source    = lil.get_src(raw_lil)
     manifolds = lil.get_manifolds(raw_lil)
     languages = set([l.lang for m,l in manifolds.items()])
+
+    type_inference.infer_types(manifolds)
 
     # This allows simple programs to be run without an explicit
     # export clause. "m0" will be the first manifold that appears
