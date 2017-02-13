@@ -237,6 +237,7 @@ backend_test   sh-map    main       'sh-map/            -- simple test of lambda
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
 backend_x_test sh-refer             'sh-refer/          -- head . <runif> ................................. '
+backend_x_test sh-logical           'sh-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '

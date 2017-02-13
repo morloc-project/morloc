@@ -2,11 +2,11 @@
 null :: MULTI -> NULL
 id :: * -> *
 
-and ::  Bool  -> Bool -> Bool
-all :: [Bool] -> Bool
-or  ::  Bool  -> Bool -> Bool
-any :: [Bool] -> Bool
-not ::  Bool  -> Bool
+and :: Bool  -> Bool -> Bool
+all :: MULTI -> Bool
+or  :: Bool  -> Bool -> Bool
+any :: MULTI -> Bool
+not :: Bool  -> Bool
 
 @source R
 

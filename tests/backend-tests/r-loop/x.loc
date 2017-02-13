@@ -30,6 +30,8 @@ hclust :: plot_pdf . <hclust> $1
 core/datcache
 core/atomic
 core/type
+core/control
+core/R/common
 
 
 @source R
@@ -53,8 +55,4 @@ plot_pdf <- function(x, name){
     pdf(path)
     plot(x)
     dev.off()
-}
-
-map <- function(f, x){
-    lapply(x, f)
 }

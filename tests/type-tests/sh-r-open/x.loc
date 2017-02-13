@@ -2,7 +2,6 @@
 c   :: MULTI -> [Int]
 seq :: Int -> Int -> [Int]
 sum :: [Int] -> Int
-map :: ( Int -> Int ) -> [Int] -> [Int]
 
 @path
 map . & ( sum . seq . 1 $1) (c . 1 2 3 4 5)

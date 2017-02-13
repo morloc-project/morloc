@@ -1,0 +1,47 @@
+@include
+core/atomic
+core/type
+
+@type
+is_a :: NULL -> Bool
+is_b :: NULL -> Bool
+is_c :: NULL -> Bool
+is_d :: NULL -> Bool
+say_hi :: NULL -> String
+say_bi :: NULL -> String
+
+@export
+say_hi
+say_bi
+
+@source sh
+
+is_a () {
+    true
+}
+is_b () {
+    true
+}
+is_c () {
+    false
+}
+is_d () {
+    false
+}
+
+say_hi () {
+    echo "hi"
+}
+say_bi () {
+    echo "bi"
+}
+
+@lang
+* :: sh
+
+@path
+say_hi say_bi
+
+@check
+say_hi :: and . is_a (any . is_b is_c (not . is_d))
+say_bi :: not . and . is_a (any . is_b is_c (not . is_d))

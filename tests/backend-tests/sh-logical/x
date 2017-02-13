@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+loc -x zzz x.loc
+./manifold-nexus.py say_hi 2> a > /dev/null
+./manifold-nexus.py say_bi 2> b > /dev/null
+cat a b | diff /dev/stdin <(echo hi) &> /dev/null
+stat=$?
+rm -rf zzz manifold-nexus.py a b
+exit $stat

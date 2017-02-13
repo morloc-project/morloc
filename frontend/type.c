@@ -112,14 +112,31 @@ void _infer_multi_type(W* w){
         W* output = w_isolate(wm->type->last); 
         wm->type = NULL;
         for(W* i = wm->inputs->head; i != NULL; i = i->next){
-            im = g_manifold(g_rhs(i));
-            if(ws_length(im->type) > 1){
-                wm->type = ws_add(wm->type, w_clone(im->type->last));
-            } else {
-                W* lhs = w_new(P_STRING, "atomic");
-                W* rhs = w_new(P_STRING, "*");
-                Couplet* c = couplet_new(lhs, rhs, '=');
-                wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+            switch(i->cls){
+                case C_ARGREF:
+                case C_POSITIONAL:
+                    {
+                        W* lhs = w_new(P_STRING, "atomic");
+                        W* rhs = w_new(P_STRING, g_string(i));
+                        Couplet* c = couplet_new(lhs, rhs, '=');
+                        wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+                    }
+                    break;
+                case C_MANIFOLD:
+                    {
+                        im = g_manifold(g_rhs(i));
+                        if(ws_length(im->type) > 1){
+                            wm->type = ws_add(wm->type, w_clone(im->type->last));
+                        } else {
+                            W* lhs = w_new(P_STRING, "atomic");
+                            W* rhs = w_new(P_STRING, "*");
+                            Couplet* c = couplet_new(lhs, rhs, '=');
+                            wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+                        }
+                    }
+                    break;
+                default:
+                    warn("Unexpected input type (%s:%d)\n", __func__, __LINE__);
             }
         }
         wm->type = ws_add(wm->type, output);
