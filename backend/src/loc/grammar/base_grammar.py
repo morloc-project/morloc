@@ -208,7 +208,7 @@ class Grammar:
         ss = []
         for c in m.check:
             ss.append(self.make_check_call(m, c))
-        s = self.SEP.join(ss)
+        s = self.AND.join(ss)
         return s
 
     def make_check_call(self, m, c):
