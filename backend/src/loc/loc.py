@@ -8,9 +8,10 @@ import shutil
 
 import lil
 import nexus
-import grammars
-import type_inference
 from util import err
+
+import grammar.R
+import grammar.sh
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
@@ -138,8 +139,6 @@ def build_project(raw_lil, outdir, home):
     manifolds = lil.get_manifolds(raw_lil)
     languages = set([l.lang for m,l in manifolds.items()])
 
-    type_inference.infer_types(manifolds)
-
     # This allows simple programs to be run without an explicit
     # export clause. "m0" will be the first manifold that appears
     # in the script.
@@ -163,9 +162,9 @@ def build_project(raw_lil, outdir, home):
             src = ""
 
         if lang == "sh":
-            grm = grammars.ShGrammar(src, manifolds, outdir, home)
+            grm = grammar.sh.ShGrammar(src, manifolds, outdir, home)
         elif lang == "R":
-            grm = grammars.RGrammar(src, manifolds, outdir, home)
+            grm = grammar.R.RGrammar(src, manifolds, outdir, home)
         else:
             err("'%s' is not a supported language" % lang)
 

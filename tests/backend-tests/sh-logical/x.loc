@@ -30,10 +30,10 @@ is_d () {
 }
 
 say_hi () {
-    echo "hi"
+    echo "hi" > /dev/stderr
 }
 say_bi () {
-    echo "bi"
+    echo "bi" > /dev/stderr
 }
 
 @lang
