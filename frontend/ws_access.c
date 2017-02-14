@@ -289,6 +289,9 @@ char* _ws_get_name(W* w){
         case V_MANIFOLD:
             name = g_manifold(w)->function;
             break;
+        case V_SECTION:
+            name = g_section(w)->name;
+            break;
         case V_NONE:
             name = NULL;
             warn("Cannot get name from V_NONE (%s:%d)", __func__, __LINE__);

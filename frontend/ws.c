@@ -65,6 +65,9 @@ void w_clone_value(W* w){
             s_manifold(w, m);
             }
             break;
+        case V_SECTION:
+            s_section(w, section_copy(g_section(w)));
+            break;
     }
 }
 Ws* ws_clone(Ws* ws){
@@ -192,6 +195,12 @@ char* w_str(W* w){
             break;
         case V_MANIFOLD:
             sprintf(s, "%s", c);
+            break;
+        case V_SECTION:
+            {
+                Section* sec = g_section(w);
+                sprintf(s, "%s<%s, %s>", c, sec->name, sec->lang);
+            }
             break;
         default:
             warn("illegal case (%s:%d)\n", __func__, __LINE__);

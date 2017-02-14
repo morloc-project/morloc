@@ -9,6 +9,7 @@
 #include "label.h"
 #include "manifold.h"
 #include "couplet.h"
+#include "section.h"
 
 typedef enum {
     X_NONE=0,
@@ -26,6 +27,7 @@ typedef enum {
     P_WS,
     P_COUPLET,
     P_MANIFOLD,
+    P_SECTION,
     T_CHECK, // T for top level
     T_FAIL,
     T_ALIAS,
@@ -42,6 +44,7 @@ typedef enum {
     T_ONTOLOGY,
     C_COMPOSON,   // C for composition
     C_MANIFOLD,
+    T_SECTION,
     C_NEST,
     C_GRPREF,
     C_POSITIONAL,
@@ -60,7 +63,8 @@ typedef enum {
     V_WS,
     V_COUPLET,
     V_LABEL,
-    V_MANIFOLD
+    V_MANIFOLD,
+    V_SECTION
 } VType;
 
 typedef struct W{
@@ -74,6 +78,7 @@ typedef struct W{
         struct Couplet* couplet;
         struct Label* label;
         struct Manifold* manifold;
+        struct Section* section;
     } value;
 } W;
 
@@ -105,6 +110,7 @@ struct Ws*       g_ws       (W* w);
 struct Couplet*  g_couplet  (W* w);
 struct Label*    g_label    (W* w);
 struct Manifold* g_manifold (W* w);
+struct Section*  g_section  (W* w);
        W*        g_lhs      (W* w);
        W*        g_rhs      (W* w);
 
@@ -115,6 +121,7 @@ void s_ws       (W* w, struct Ws* v);
 void s_couplet  (W* w, Couplet*   v);
 void s_label    (W* w, Label*     v);
 void s_manifold (W* w, Manifold*  v);
+void s_section  (W* w, Section*   v);
 void s_lhs      (W* w, W*         v);
 void s_rhs      (W* w, W*         v);
 

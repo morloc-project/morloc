@@ -111,7 +111,7 @@ s_path
 
 /* KLUDGE NOTE: hook is the one section that is comprised of multiple types:
  * T_H0, T_H1, ... T_H9. These correspond to functions that are called within
- * a manifold (see notes in R-manifold.R). There is not natural place to put
+ * a manifold (see notes in R-manifold.R). There is no natural place to put
  * this information in a Ws. So I add a temporary first element to the list.
  * It is removed above.
  */

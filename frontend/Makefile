@@ -17,6 +17,7 @@ OBJECTS =         \
 	label.o       \
 	couplet.o     \
 	manifold.o    \
+	section.o     \
 	w.o           \
 	ws.o          \
 	lhs.o         \

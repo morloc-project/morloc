@@ -36,6 +36,7 @@ VType get_value_type(Class cls){
         case T_DOC:
         case T_CACHE:
         case C_MANIFOLD:
+        case T_SECTION:
         case C_REFER:
         case P_COUPLET:
         case T_SOURCE:
@@ -52,6 +53,9 @@ VType get_value_type(Class cls){
             break;
         case P_MANIFOLD:
             vtype = V_MANIFOLD;
+            break;
+        case P_SECTION:
+            vtype = V_SECTION;
             break;
         case X_NONE:
             vtype = V_NONE;
@@ -92,6 +96,9 @@ W* w_new(Class cls, void* value){
         case V_MANIFOLD:
             w->value.manifold = value;
             break;
+        case V_SECTION:
+            w->value.section = value;
+            break;
         default:
             warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
@@ -130,6 +137,7 @@ char* w_type_str(VType type){
         case V_COUPLET:  s = strdup("V_COUPLET");  break;
         case V_LABEL:    s = strdup("V_LABEL");    break;
         case V_MANIFOLD: s = strdup("V_MANIFOLD"); break;
+        case V_SECTION:  s = strdup("V_SECTION");  break;
         default:
             warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }
@@ -148,6 +156,7 @@ char* w_class_str(Class cls){
         case P_WS:         s = strdup("P_WS")         ; break;
         case P_COUPLET:    s = strdup("P_COUPLET")    ; break;
         case P_MANIFOLD:   s = strdup("P_MANIFOLD")   ; break;
+        case P_SECTION:    s = strdup("P_SECTION")    ; break;
         case C_POSITIONAL: s = strdup("C_POSITIONAL") ; break;
         case C_GRPREF:     s = strdup("C_GRPREF")     ; break;
         case C_ARGREF:     s = strdup("C_ARGREF")     ; break;
@@ -177,6 +186,7 @@ char* w_class_str(Class cls){
         case P_TYPE:       s = strdup("P_TYPE")       ; break;
         case T_ONTOLOGY:   s = strdup("T_ONTOLOGY")   ; break;
         case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
+        case T_SECTION:    s = strdup("T_SECTION")    ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;
         case K_LABEL:      s = strdup("K_LABEL")      ; break;
         default:
@@ -268,6 +278,11 @@ struct Manifold* g_manifold(W* w) {
     w_assert_type(w, V_MANIFOLD);
     return w->value.manifold;
 }
+struct Section* g_section(W* w) {
+    if(!w) return NULL;
+    w_assert_type(w, V_SECTION);
+    return w->value.section;
+}
 W* g_lhs(W* w) {
     if(!w || !w->value.couplet) return NULL;
     w_assert_type(w, V_COUPLET);
@@ -308,6 +323,11 @@ void s_manifold(W* w, Manifold* v){
     if(!w) { warn("Cannot set null in s_manifold\n"); return;}
     w_assert_type(w, V_MANIFOLD);
     w->value.manifold = v;
+}
+void s_section(W* w, Section* v){
+    if(!w) { warn("Cannot set null in s_section\n"); return;}
+    w_assert_type(w, V_SECTION);
+    w->value.section = v;
 }
 void s_lhs(W* w, W* v){
     if(!w) { warn("Cannot set null in s_lhs\n"); return;}
