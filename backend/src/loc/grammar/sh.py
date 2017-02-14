@@ -53,62 +53,83 @@ fi'''
         self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
-    {hook0}
-{block}
-    {hook1}
+{blk}
 }}
+'''
+        self.NATIVE_MANIFOLD_BLK = '''\
+{hook0}
+{cache}
+{hook1}\
 '''
         self.SIMPLE_MANIFOLD = '''
 {mid} () {{
-    {function} {arguments} {wrapper}
+{blk}
 }}
+'''
+        self.SIMPLE_MANIFOLD_BLK = '''\
+{function} {arguments} {wrapper}\
 '''
         self.UID_WRAPPER  = '''\
 {mid}_uid=0
 wrap_{mid} () {{
-    {mid}_uid=$(( {mid}_uid + 1 ))
-    {mid} $@ ${mid}_uid
+{blk}
 }}
+'''
+        self.UID_WRAPPER_BLK  = '''\
+{mid}_uid=$(( {mid}_uid + 1 ))
+{mid} $@ ${mid}_uid\
 '''
         self.UID          = '${nth}'
         self.MARG_UID     = '{marg} {uid}'
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
-    u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-    universal_to_native $u $type_{mid}
+{blk}
 }}
+'''
+        self.FOREIGN_MANIFOLD_BLK = '''\
+u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
+universal_to_native $u $type_{mid}\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}
 then
-    {hook8}
-    {cache}_get {mid}{uid}
-    {hook9}
+{if_blk}
 else
-    {process}
+{else_blk}
 fi
 '''
-        self.DATCACHE_ARGS = ""
-        self.PROCESS = '''\
+        self.CACHE_IF = '''\
+{hook8}
+{cache}_get {mid}{uid}
+{hook9}
+'''
+        self.CACHE_ELSE = '''\
 {hook2}
 {validate}
 {hook3}
-( cat $outdir/{mid}_tmp ; rm $outdir/{mid}_tmp )
+( cat $outdir/{mid}_tmp ; rm $outdir/{mid}_tmp )\
 '''
+        self.DATCACHE_ARGS = ""
         self.DO_VALIDATE = '''\
 if [[ {checks} ]]
 then
-    {hook4}
-    {function} {arguments}{wrapper} > $outdir/{mid}_tmp
-    {cache_put}
-    {hook5}
+{if_blk}
 else
-    {hook6}
-    {fail}> $outdir/{mid}_tmp
-    {cache_put}
-    {hook7}
+{else_blk}
 fi
+'''
+        self.DO_VALIDATE_IF = '''\
+{hook4}
+{function} {arguments}{wrapper} > $outdir/{mid}_tmp
+{cache_put}
+{hook5}\
+'''
+        self.DO_VALIDATE_ELSE = '''\
+{hook6}
+{fail}> $outdir/{mid}_tmp
+{cache_put}
+{hook7}\
 '''
         self.FAIL = '''{fail} {marg_uid} '''
         self.DEFAULT_FAIL = ""
@@ -128,17 +149,15 @@ fi
 
         self.BOOL_WRAPPER = '&> /dev/null && echo 1 || echo 0'
 
-    def make_simple_manifold(self, m):
+    def make_simple_manifold_blk(self, m):
         if m.type == "Bool":
             wrapper = self.BOOL_WRAPPER
         else:
             wrapper = ""
-        return self.SIMPLE_MANIFOLD.format(
-            mid       = m.mid,
-            marg_uid  = self.make_marg_uid(m),
+        return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,
-            wrapper   = wrapper,
-            arguments = self.make_arguments(m)
+            arguments = self.make_arguments(m),
+            wrapper   = wrapper
         )
 
     def make_input_manifold(self, m, pos, val, typ):
@@ -152,27 +171,22 @@ fi
             marg_uid = self.make_marg_uid(m)
         )
 
-    def make_do_validate(self, m):
+    def make_do_validate_if(self, m):
         if m.type == "Bool":
             wrapper = self.BOOL_WRAPPER
         else:
             wrapper = ""
-        return self.DO_VALIDATE.format(
-            checks    = self.make_check(m),
+        return self.DO_VALIDATE_IF.format(
+            mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
-            hook6     = self.make_hook(m, 6),
-            hook7     = self.make_hook(m, 7),
             function  = m.func,
             wrapper   = wrapper,
             arguments = self.make_arguments(m),
-            mid       = m.mid,
-            cache_put = self.make_cache_put(m),
-            fail      = self.make_fail(m),
-            marg      = self.make_marg(m)
+            cache_put = self.make_cache_put(m)
         )
 
-    def make_foreign_manifold(self, m):
+    def make_foreign_manifold_blk(self, m):
         arg_rep = ""
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
@@ -180,30 +194,12 @@ fi
         if m.narg:
             arg_rep += "\\\n    ${mid}_uid"
 
-        s = self.FOREIGN_MANIFOLD.format(
+        s = self.FOREIGN_MANIFOLD_BLK.format(
+            foreign_lang=m.lang,
             mid=m.mid,
-            arg_rep=arg_rep,
-            cmd='',
-            marg_uid=self.make_marg_uid(m),
-            foreign_lang=m.lang
+            arg_rep=arg_rep
         )
         return s
-
-    def make_no_validate(self, m):
-        if m.type == "Bool":
-            wrapper = self.BOOL_WRAPPER
-        else:
-            wrapper = ""
-        return self.NO_VALIDATE.format(
-            hook4     = self.make_hook(m, 4),
-            hook5     = self.make_hook(m, 5),
-            function  = m.func,
-            wrapper   = wrapper,
-            arguments = self.make_arguments(m),
-            mid       = m.mid,
-            cache_put = self.make_cache_put(m)
-        )
-
 
     def make_type_map(self):
         types = []

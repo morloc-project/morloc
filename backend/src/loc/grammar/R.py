@@ -83,7 +83,7 @@ wrap_{mid} <- function(...){{
 }}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-foreign_pool <- file.path({outdir}, "call.{foreign_lang}")
+foreign_pool <- file.path("{outdir}", "call.{foreign_lang}")
 fo <- system2(
   foreign_pool,
   args=c({args}),

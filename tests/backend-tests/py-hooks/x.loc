@@ -54,6 +54,9 @@ foo :+ print . ". 8"
 foo :+ print . "- 9"
 foo :+ print . ". 9"
 
+@arg
+print :: file=sys.stderr
+
 
 @include
 core/memcache

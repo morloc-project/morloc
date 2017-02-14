@@ -114,8 +114,8 @@ def native_to_universal(x, typ):
             else:
                 tmp.write("\t".join([str(xx) for xx in x]))
     else:
-      msg = sprintf("Py: Cannot export object of class '%s'", class(x))
-      warning(msg)
+      msg = "Py: Cannot export object of class '%s'" % type(x)
+      print(msg, file=sys.stderr)
   return f
 
 # Convert text or binary to native data structure

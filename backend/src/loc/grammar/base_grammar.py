@@ -220,6 +220,7 @@ class Grammar:
 
     def make_do_validate_if(self, m):
         return self.DO_VALIDATE_IF.format(
+            mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
             function  = m.func,
@@ -229,6 +230,7 @@ class Grammar:
 
     def make_do_validate_else(self, m):
         return self.DO_VALIDATE_ELSE.format(
+            mid       = m.mid,
             hook6     = self.make_hook(m, 6),
             hook7     = self.make_hook(m, 7),
             fail      = self.make_fail(m),

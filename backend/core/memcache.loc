@@ -64,21 +64,21 @@ def memcache_chk(mid, uid=None):
     return True
 
 # datcache_get :: String -> Int -> *
-def memcache_get(mid, uid=NULL):
+def memcache_get(mid, uid=None):
     if uid:
         return memcache_data[mid][uid] 
     else:
         return memcache_data[mid]
 
 # datcache_put :: String -> Int -> * -> NULL
-memcache_put <- function(mid, dat, uid=None):
+def memcache_put(mid, dat, uid=None):
     if uid:
         memcache_data[mid][uid] = dat
     else:
         memcache_data[mid] = dat
 
 # datcache_del :: String -> Int -> NULL
-def memcache_del (mid, uid=NULL):
+def memcache_del (mid, uid=None):
     if uid:
         memcache_data[mid][uid] = None
     else:

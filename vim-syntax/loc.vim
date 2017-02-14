@@ -34,8 +34,8 @@ syn include @Shell syntax/sh.vim
 
 " all symbols, trailing space, and non-standard sections (^@.*) are illegal by
 " default
-syn match DEFAULT_ERROR '@\S*' contained
-syn match DEFAULT_ERROR '\S\+' contained
+syn match DEFAULT_ERROR '@\S*'  contained
+syn match DEFAULT_ERROR '\S\+'  contained
 syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
 syn keyword DEFAULT_ERROR id null map true false      contained
@@ -55,9 +55,9 @@ syn keyword s_logical TRUE NULL RESET FALSE contained
 " syn region comment start='\/\*' end='\*\/' contains=tag
 syn match s_comment '#.*' contains=s_todo,s_tag contained
 
-syn match s_break '^---\+$' contained
-syn match s_break ';\+' contained
-syn keyword s_constant __all__ contained
+syn match   s_break    '^---\+$' contained
+syn match   s_break    ';\+'     contained
+syn keyword s_constant __all__   contained
 
 " section headers
 syn match s_section '@alias'    contained
@@ -83,14 +83,14 @@ syn match s_section '@source'   contained
 
 " general default functions
 syn keyword s_simple_function id null map true false contained
-syn keyword s_logical_op and or not any all
+syn keyword s_logical_op and or not any all          contained
 
-syn match s_var /\h[\w.0-9-]*/ contained
-syn match s_arg /--\?\w*/ contained
-syn match s_num '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
-syn match s_fun /&\w*/ contained
-syn match s_marg /$\d/ contained
-syn match s_file /[A-Za-z_-]\+\(\/[A-Za-z_-]\+\)*/ contained
+syn match s_var  /\h[\w.0-9-]*/                      contained
+syn match s_arg  /--\?\w*/                           contained
+syn match s_num  '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!' contained
+syn match s_fun  /&\w*/                              contained
+syn match s_marg /$\d/                               contained
+syn match s_file /[A-Za-z_-]\+\(\/[A-Za-z_-]\+\)*/   contained
 
 " default caching functions
 syn keyword s_cache_function memcache datcache nocache contained
@@ -113,9 +113,9 @@ syn match s_brk     /[\[\]]/                   contained
 syn match s_bar     /|/                        contained
 syn match s_star    /\_\W\*\_\W\|^\*\_W\|^\*$/ contained
 
-syn match s_positional /`[^`]*`/ contained
-syn match s_group /\*\w\+/ contained
-syn match s_refer /<[A-Za-z0-9_./:-]\+>/ contained
+syn match s_positional /`[^`]*`/              contained
+syn match s_group      /\*\w\+/               contained
+syn match s_refer      /<[A-Za-z0-9_./:-]\+>/ contained
 
 " strings
 syn region s_string start=/'/ end=/'/ contained
@@ -128,8 +128,8 @@ syn keyword s_nil NIL MULTI contained
 " keywords
 syn keyword s_export_keyword as contained
 
-syn keyword s_import_keyword from contained
-syn keyword s_import_keyword as contained
+syn keyword s_import_keyword from   contained
+syn keyword s_import_keyword as     contained
 syn keyword s_import_keyword import contained
 
 " labels
