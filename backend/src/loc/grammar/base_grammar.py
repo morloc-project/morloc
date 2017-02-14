@@ -13,36 +13,43 @@ class Grammar:
         self.outdir    = outdir
         self.home      = home
         self.lang      = None
-        self.SEP              = ""
-        self.BIND             = ""
-        self.AND              = ""
-        self.POOL             = ""
-        self.TYPE_MAP         = ""
-        self.TYPE_ACCESS      = ""
-        self.CAST_NAT2UNI     = ""
-        self.CAST_UNI2NAT     = ""
-        self.SIMPLE_MANIFOLD  = ""
-        self.NATIVE_MANIFOLD  = ""
-        self.FOREIGN_MANIFOLD = ""
-        self.CACHE            = ""
-        self.DATCACHE_ARGS    = ""
-        self.PROCESS          = ""
-        self.DO_VALIDATE      = ""
-        self.NO_VALIDATE      = ""
-        self.ARGUMENTS        = ""
-        self.MANIFOLD_CALL    = ""
-        self.CHECK_CALL       = ""
-        self.HOOK             = ""
-        self.INDENT           = ""
-        self.CACHE_PUT        = ""
-        self.MARG             = ""
-        self.LIST             = ""
-        self.FAIL             = ""
-        self.DEFAULT_FAIL     = ""
-        self.UID_WRAPPER      = ""
-        self.UID              = ""
-        self.MARG_UID         = ""
-        self.WRAPPER_NAME     = ""
+        self.SEP                  = ""
+        self.BIND                 = ""
+        self.AND                  = ""
+        self.POOL                 = ""
+        self.TYPE_MAP             = ""
+        self.TYPE_ACCESS          = ""
+        self.CAST_NAT2UNI         = ""
+        self.CAST_UNI2NAT         = ""
+        self.SIMPLE_MANIFOLD      = ""
+        self.SIMPLE_MANIFOLD_BLK  = ""
+        self.NATIVE_MANIFOLD      = ""
+        self.NATIVE_MANIFOLD_BLK  = ""
+        self.FOREIGN_MANIFOLD     = ""
+        self.FOREIGN_MANIFOLD_BLK = ""
+        self.CACHE                = ""
+        self.CACHE_IF             = ""
+        self.CACHE_ELSE           = ""
+        self.DATCACHE_ARGS        = ""
+        self.CACHE_ELSE           = ""
+        self.DO_VALIDATE          = ""
+        self.DO_VALIDATE_IF       = ""
+        self.DO_VALIDATE_ELSE     = ""
+        self.NO_VALIDATE          = ""
+        self.ARGUMENTS            = ""
+        self.MANIFOLD_CALL        = ""
+        self.CHECK_CALL           = ""
+        self.HOOK                 = ""
+        self.INDENT               = None
+        self.CACHE_PUT            = ""
+        self.MARG                 = ""
+        self.LIST                 = ""
+        self.FAIL                 = ""
+        self.DEFAULT_FAIL         = ""
+        self.UID_WRAPPER          = ""
+        self.UID                  = ""
+        self.MARG_UID             = ""
+        self.WRAPPER_NAME         = ""
 
 
     def make(self):
@@ -89,8 +96,15 @@ class Grammar:
 
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
+            mid      = m.mid,
+            marg_uid = self.make_marg_uid(m),
+            blk      = indent(self.make_foreign_manifold_blk(m), n=self.INDENT)
+        )
+        return s
+
+    def make_foreign_manifold_blk(self, m):
+        s = self.FOREIGN_MANIFOLD_BLK.format(
             mid          = m.mid,
-            marg_uid     = self.make_marg_uid(m),
             foreign_lang = m.lang,
             outdir       = self.outdir,
             uni_marg_uid = self.make_marg_uid(m, universal=True)
@@ -101,19 +115,26 @@ class Grammar:
         return self.SIMPLE_MANIFOLD.format(
             mid       = m.mid,
             marg_uid  = self.make_marg_uid(m),
+            blk       = indent(self.make_simple_manifold_blk(m), n=self.INDENT)
+        )
+    def make_simple_manifold_blk(self, m):
+        return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,
             arguments = self.make_arguments(m)
         )
 
     def make_native_manifold(self, m):
-        block = indent(self.make_cache(m), n=self.INDENT)
-        margs = self.make_marg(m)
         return self.NATIVE_MANIFOLD.format(
-            mid         = m.mid,
-            marg_uid    = self.make_marg_uid(m),
-            hook0       = self.make_hook(m, 0),
-            block       = block,
-            hook1       = self.make_hook(m, 1)
+            mid      = m.mid,
+            marg_uid = self.make_marg_uid(m),
+            blk      = indent(self.make_native_manifold_blk(m), n=self.INDENT)
+        )
+
+    def make_native_manifold_blk(self, m):
+        return self.NATIVE_MANIFOLD_BLK.format(
+            hook0 = self.make_hook(m, 0),
+            cache = self.make_cache(m),
+            hook1 = self.make_hook(m, 1)
         )
 
     def make_cache(self, m):
@@ -123,14 +144,34 @@ class Grammar:
             s = self.CACHE.format(
                 cache      = m.cache,
                 mid        = m.mid,
-                hook8      = self.make_hook(m, 8),
-                hook9      = self.make_hook(m, 9),
                 uid        = self.SEP + uid if uid else "",
                 cache_args = self.SEP + cargs if cargs else "" ,
-                process    = indent(self.make_process(m), n=self.INDENT)
+                if_blk = indent(self.make_cache_if(m), n=self.INDENT),
+                else_blk = indent(self.make_cache_else(m), n=self.INDENT)
             )
         else:
-            s = self.make_process(m)
+            s = self.make_cache_else(m)
+        return s
+
+    def make_cache_if(self, m):
+        uid = self.make_uid(m)
+        cargs = self.make_cache_args(m)
+        return self.CACHE_IF.format(
+            cache      = m.cache,
+            mid        = m.mid,
+            hook8      = self.make_hook(m, 8),
+            hook9      = self.make_hook(m, 9),
+            uid        = self.SEP + uid if uid else "",
+            cache_args = self.SEP + cargs if cargs else "" ,
+        )
+
+    def make_cache_else(self, m):
+        s = self.CACHE_ELSE.format(
+            hook2    = self.make_hook(m, 2),
+            validate = self.make_validate(m),
+            mid      = m.mid,
+            hook3    = self.make_hook(m, 3)
+        )
         return s
 
     def make_cache_put(self, m):
@@ -163,15 +204,6 @@ class Grammar:
     def make_datcache_args(self):
         return self.DATCACHE_ARGS.format(outdir=self.outdir)
 
-    def make_process(self, m):
-        s = self.PROCESS.format(
-            hook2    = self.make_hook(m, 2),
-            validate = self.make_validate(m),
-            mid      = m.mid,
-            hook3    = self.make_hook(m, 3)
-        )
-        return s
-
     def make_validate(self, m):
         if(m.check):
             s = self.make_do_validate(m)
@@ -181,28 +213,30 @@ class Grammar:
 
     def make_do_validate(self, m):
         return self.DO_VALIDATE.format(
-            checks    = self.make_check(m),
+            checks   = self.make_check(m),
+            if_blk   = indent(self.make_do_validate_if(m), n=self.INDENT),
+            else_blk = indent(self.make_do_validate_else(m), n=self.INDENT)
+        )
+
+    def make_do_validate_if(self, m):
+        return self.DO_VALIDATE_IF.format(
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
-            hook6     = self.make_hook(m, 6),
-            hook7     = self.make_hook(m, 7),
             function  = m.func,
             arguments = self.make_arguments(m),
-            mid       = m.mid,
-            cache_put = self.make_cache_put(m),
+            cache_put = self.make_cache_put(m)
+        )
+
+    def make_do_validate_else(self, m):
+        return self.DO_VALIDATE_ELSE.format(
+            hook6     = self.make_hook(m, 6),
+            hook7     = self.make_hook(m, 7),
             fail      = self.make_fail(m),
-            marg      = self.make_marg(m)
+            cache_put = self.make_cache_put(m),
         )
 
     def make_no_validate(self, m):
-        return self.NO_VALIDATE.format(
-            hook4     = self.make_hook(m, 4),
-            hook5     = self.make_hook(m, 5),
-            function  = m.func,
-            arguments = self.make_arguments(m),
-            mid       = m.mid,
-            cache_put = self.make_cache_put(m)
-        )
+        return self.make_do_validate_if(m)
 
     def make_check(self, m):
         ss = []
@@ -281,8 +315,7 @@ class Grammar:
                 hmid=h.mid,
                 marg_uid=self.make_marg_uid(m)
             ) )
-        sep = '\n%s' % (' ' * self.INDENT)
-        return sep.join(ss)
+        return '\n'.join(ss)
 
     def make_marg(self, m, universal=False):
         ss = []
@@ -326,7 +359,13 @@ class Grammar:
         return self.DEFAULT_FAIL
 
     def make_uid_wrapper(self, m):
-        return self.UID_WRAPPER.format(mid=m.mid)
+        return self.UID_WRAPPER.format(
+            mid = m.mid,
+            blk = indent(self.make_uid_wrapper_blk(m), n=self.INDENT)
+        )
+
+    def make_uid_wrapper_blk(self, m):
+        return self.UID_WRAPPER_BLK.format( mid = m.mid )
 
     def make_uid(self, m):
         if m.narg:

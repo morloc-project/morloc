@@ -12,6 +12,7 @@ from util import err
 
 import grammar.R
 import grammar.sh
+import grammar.py
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
@@ -165,6 +166,8 @@ def build_project(raw_lil, outdir, home):
             grm = grammar.sh.ShGrammar(src, manifolds, outdir, home)
         elif lang == "R":
             grm = grammar.R.RGrammar(src, manifolds, outdir, home)
+        elif lang == "py":
+            grm = grammar.py.PyGrammar(src, manifolds, outdir, home)
         else:
             err("'%s' is not a supported language" % lang)
 

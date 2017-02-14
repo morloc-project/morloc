@@ -1,6 +1,6 @@
 from grammar.base_grammar import Grammar
 
-class RGrammar(Grammar):
+class PyGrammar(Grammar):
     def __init__(
         self,
         source,
@@ -12,17 +12,16 @@ class RGrammar(Grammar):
         self.manifolds = manifolds
         self.outdir    = outdir
         self.home      = home
-        self.lang      = "R"
-        self.INDENT = 2                
-        self.SEP    = ', '             
-        self.BIND   = '='              
-        self.AND    = ' && '           
-        self.LIST   = 'list({values})' 
-        self.POOL   = '''\
-#!/usr/bin/Rscript --vanilla
-library(readr)
+        self.lang      = "py"
+        self.INDENT    = 4
+        self.SEP       = ', '
+        self.BIND      = '='
+        self.AND       = ' && '
+        self.LIST      = 'list({values})'
+        self.POOL      = '''\
+#!/usr/bin/env python3
 
-outdir <- "{outdir}"
+outdir = "{outdir}"
 
 {type_map}
 
@@ -30,80 +29,75 @@ outdir <- "{outdir}"
 
 {manifolds}
 
-args <- commandArgs(TRUE)
-m <- args[1]
-
-if(exists(m)){{
-  f <- get(m)
-  d <- do.call(f, as.list(args[-1]))
-  u <- native_to_universal(d, types[m], outdir)
-  write(u, file=stdout())
-}} else {{
-  quit(status=1)
-}}'''
-        self.TYPE_MAP         = '''types <- c({pairs})'''
+if __name__ == '__main__':
+    args = sys.argv
+    cmd_str = "{{function}}({{args}})"
+    arg_str = ', '.join(args[1:])
+    cmd = cmd_str.format(function=args[0], args=arg_str)
+    print(cmd)\
+'''
+        self.TYPE_MAP         = '''\
+types = {{
+{pairs}
+}}
+'''
         self.TYPE_ACCESS      = '''types["{key}"]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
         self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
         self.NATIVE_MANIFOLD = '''\
-{mid} = function ({marg_uid}){{
+def {mid}({marg_uid}):
 {blk}
-}}
 '''
         self.NATIVE_MANIFOLD_BLK = '''\
 {hook0}
 {cache}
 {hook1}
-return(b)\
+return b\
 '''
         self.SIMPLE_MANIFOLD = '''\
-{mid} = function ({marg_uid}){{
+def {mid}({marg_uid}):
 {blk}
-}}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
 {function}({arguments})\
 '''
         self.UID_WRAPPER = '''\
 {mid}_uid = 0
-wrap_{mid} <- function(...){{
+def wrap_{mid}(*args, **kwargs):
 {blk}
-}}
 '''
         self.UID_WRAPPER_BLK = '''\
-{mid}_uid <<- {mid}_uid + 1 
-{mid} (..., uid={mid}_uid )
+{mid}_uid = {mid}_uid + 1
+{mid} (*args, **kwargs, uid={mid}_uid )\
 '''
         self.UID = 'uid'
         self.MARG_UID = '{marg}, {uid}'
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
-{mid} <- function({marg_uid}){{
+def {mid}({marg_uid}):
 {blk}
-}}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-foreign_pool <- file.path({outdir}, "call.{foreign_lang}")
-fo <- system2(
-  foreign_pool,
-  args=c({args}),
-  stdout=TRUE,
-  stderr=FALSE
-)
-universal_to_native(fo, types["{mid}"])\
+pass
+# foreign_pool = file.path(outdir, "call.{foreign_lang}")
+# fo = system2(
+#   foreign_pool,
+#   args=c({args}),
+#   stdout=TRUE,
+#   stderr=FALSE
+# )
+# universal_to_native(fo, types["{mid}"])\
 '''
         self.CACHE = '''\
-if({cache}_chk("{mid}"{uid}{cache_args})){{
+if({cache}_chk("{mid}"{uid}{cache_args})):
 {if_blk}
-}}
-else{{
+else:
 {else_blk}
-}}
 '''
         self.CACHE_IF = '''\
 {hook8}
-b <- {cache}_get("{mid}"{uid}{cache_args})
-{hook9}
+b = {cache}_get("{mid}"{uid}{cache_args})
+{hook9}\
 '''
         self.CACHE_ELSE = '''\
 {hook2}
@@ -112,26 +106,25 @@ b <- {cache}_get("{mid}"{uid}{cache_args})
 '''
         self.DATCACHE_ARGS = '''outdir="{outdir}"'''
         self.DO_VALIDATE = '''\
-if( {checks} ){{
+if( {checks} ):
 {if_blk}
-}} else {{
+else:
 {else_blk}
-}}
 '''
         self.DO_VALIDATE_IF = '''\
 {hook4}
-b <- {function}({arguments})
+b = {function}({arguments})
 {cache_put}
 {hook5}
 '''
         self.DO_VALIDATE_ELSE = '''\
 {hook6}
-b <- {fail}
+b = {fail}
 {cache_put}
-{hook7}
+{hook7}\
 '''
         self.FAIL = '{fail}({marg_uid})'
-        self.DEFAULT_FAIL = 'NULL'
+        self.DEFAULT_FAIL = 'None'
         self.NO_VALIDATE = '''\
 {hook4}
 b = {function}({arguments})
@@ -147,7 +140,9 @@ b = {function}({arguments})
         self.CHECK_CALL    = '{hmid}({marg_uid})'
         self.HOOK          = '{hmid}({marg_uid})'
 
-    def make_foreign_manifold_blk(self, m):
+    def make_foreign_manifold(self, m):
+        arg_var = " %s" * (int(m.narg) + 1) if m.narg else ""
+
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
@@ -156,20 +151,20 @@ b = {function}({arguments})
         if m.narg:
             arg_rep.append("uid")
         arg_rep = ', '.join(arg_rep)
-        s = self.FOREIGN_MANIFOLD_BLK.format(
-            mid          = m.mid,
-            args         = arg_rep,
-            marg_uid     = self.make_marg_uid(m),
-            outdir       = self.outdir,
-            foreign_lang = m.lang,
+
+        s = self.FOREIGN_MANIFOLD.format(
+            mid=m.mid,
+            args=arg_rep,
+            marg_uid=self.make_marg_uid(m),
+            foreign_lang=m.lang
         )
         return s
 
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("%s='%s'" % (k, v.type))
+            types.append("    %s:'%s'" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("x%s='%s'" % (m, t))
-        return self.TYPE_MAP.format(pairs=', '.join(types))
+                    types.append("x%s:'%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs=',\n'.join(types))

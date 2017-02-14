@@ -1,27 +1,8 @@
-@include
-core/memcache
-core/type
-
-
-@source py
-
-def true():
-    return True
-
-def foo(x):
-    return None
-
-def bar():
-    return 1
-
-@export
-foo
-
 @path
 foo . bar
 
 @arg
-foo :: x=1
+bar :: x=1 y=2
 
 @lang
 * :: py
@@ -30,34 +11,62 @@ foo :: x=1
 foo :: memcache
 
 @check
-foo :: true
+foo :+ true
+foo :+ true
 
 @0
-foo :: print . "0"
+foo :+ print . "0"
+foo :+ print . "0"
 
 @1
-foo :: print . "1"
+foo :+ print . "1"
+foo :+ print . "1"
 
 @2
-foo :: print . "- 2"
+foo :+ print . "- 2"
+foo :+ print . ". 2"
 
 @3
-foo :: print . "- 3"
+foo :+ print . "- 3"
+foo :+ print . ". 3"
 
 @4
-foo :: print . "- - 4"
+foo :+ print . "- - 4"
+foo :+ print . ". . 4"
 
 @5
-foo :: print . "- - 5"
+foo :+ print . "- - 5"
+foo :+ print . ". . 5"
 
 @6
-foo :: print . "- - 6"
+foo :+ print . "- - 6"
+foo :+ print . ". . 6"
 
 @7
-foo :: print . "- - 7"
+foo :+ print . "- - 7"
+foo :+ print . ". . 7"
 
 @8
-foo :: print . "- 8"
+foo :+ print . "- 8"
+foo :+ print . ". 8"
 
 @9
-foo :: print . "- 9"
+foo :+ print . "- 9"
+foo :+ print . ". 9"
+
+
+@include
+core/memcache
+core/type
+
+@source py
+
+def true():
+    return True
+
+def foo(x, y):
+    return 1
+
+def bar():
+    return x + y
+
