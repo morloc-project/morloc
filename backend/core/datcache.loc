@@ -37,6 +37,40 @@ datcache_del <- function(mid, uid=NULL, ...) {
 }
 
 
+@source py
+
+import pickle
+
+def datcache_path(mid, uid=None, outdir=""):
+    if uid:
+        path = os.path.join(outdir, "%s_%s.pickle" % (mid, str(uid)))
+    else:
+        path = os.path.join(outdir, "%s.pickle" % mid)
+    return path
+
+# datcache_chk :: String -> Int -> Bool
+def datcache_chk(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
+    return os.path.exists(path)
+
+# datcache_get :: String -> Int -> *
+def datcache_get(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
+    with open(path, 'rb') as f:
+        dat = pickle.load(f)
+    return dat
+
+# datcache_put :: String -> Int -> * -> NULL
+def datcache_put(mid, dat, **kwargs):
+    path = datcache_path(mid, **kwargs)
+    with open(path, 'wb') as f:
+        pickle.dump(dat, f, pickle.HIGHEST_PROTOCOL)
+
+# datcache_del :: String -> Int -> NULL
+def datcache_del(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
+    os.remove(path)
+
 
 @source sh
 
@@ -85,3 +119,5 @@ datcache_del() {
         rm $cachedir/$1_$2.dat
     fi
 }
+
+

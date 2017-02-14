@@ -20,3 +20,8 @@ map (){
         $fun $x
     done < $file
 }
+
+@source py
+
+def loc_map(f, xs):
+    list( map(f, xs) )

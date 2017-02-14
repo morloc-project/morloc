@@ -2,8 +2,8 @@
 null :: MULTI -> NULL
 id :: * -> *
 
-true :: * -> Bool
-false :: * -> Bool
+true :: MULTI -> Bool
+false :: MULTI -> Bool
 
 and :: Bool  -> Bool -> Bool
 all :: MULTI -> Bool
@@ -19,6 +19,10 @@ null <- function(...) {
 }
 
 id <- function(x) { x }
+
+true <- function(...) { TRUE }
+
+false <- function(...) { TRUE }
 
 nothing <- function() { NULL }
 
@@ -80,3 +84,41 @@ any() {
     done
     test $is_true -eq 1
 }
+
+@source py
+
+# null :: MULTI -> NULL
+def null(args*, kwargs**):
+    return None
+
+# id :: * -> *
+def id(x):
+    return x
+
+# true :: MULTI -> Bool
+def true(args*, kwargs**):
+    return True
+
+# false :: MULTI -> Bool
+def false(args*, kwargs**):
+    return False
+
+# and :: Bool  -> Bool -> Bool
+def loc_and(a, b):
+    return( bool(a) and bool(b) )
+
+# all :: MULTI -> Bool
+def loc_all(*args):
+    return all(args)
+
+# or  :: Bool  -> Bool -> Bool
+def loc_or(a, b):
+    return( bool(a) or bool(b) )
+
+# any :: MULTI -> Bool
+def loc_any(*args):
+    return any(args)
+
+# not :: Bool  -> Bool
+def loc_not(a):
+    return (not a)

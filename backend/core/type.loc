@@ -78,3 +78,70 @@ universal_to_native (){
         cat $x
     fi
 }
+
+
+
+@source py
+
+import tempfile
+
+# Convert native data structure to file or literal
+def native_to_universal(x, typ):
+  f = None
+  if typ in ("String", "File"):
+    f = str(x)
+  elif typ == "Int":
+    f = int(x)
+  elif typ == "Num":
+    f = float(x)
+  elif typ == "Bool":
+    f = 1 if x else 0
+  else:
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="py_%s" % typ,
+        dir=outdir,
+        delete=False
+    )
+    f <- tmp.name
+
+    if isinstance(x, dict):
+        x = x.items()
+
+    if isinstance(x, (list, set)):
+        for e in x:
+            if(isinstance(e, str)):
+                tmp.write(e)
+            else:
+                tmp.write("\t".join([str(xx) for xx in x]))
+    else:
+      msg = sprintf("Py: Cannot export object of class '%s'", class(x))
+      warning(msg)
+  return f
+
+# Convert text or binary to native data structure
+number_types  = ("Int", "[Int]")
+string_types  = ("String", "[String]", "File")
+logical_types = ("Bool", "[Bool]")
+caster = {
+    "Int":int,
+    "Num":float,
+    "String":str,
+    "File":str,
+    "Bool":bool
+}
+def universal_to_native(x, type):
+    if typ in caster:
+        d = caster[typ](x)
+    elif typ == "Text":
+        with open(x, "r") as f:
+            d = f.readlines()
+    elif typ[0] == '[':
+        with open(x, "r") as f:
+            d = f.readlines()
+        typ = typ[1:-1]
+        if typ in caster:
+            cast = caster[typ]
+            d = [cast(e) for e in d]
+    else:
+        d = str(x)
+    return d

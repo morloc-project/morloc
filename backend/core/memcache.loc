@@ -43,3 +43,43 @@ memcache_del <- function(mid, uid=NULL) {
         rm(list=as.character(uid), envir=.memcache_data[[mid]])
     }
 }
+
+
+@source py
+
+memcache_data = {}
+
+# datcache_chk :: String -> Int -> Bool
+def memcache_chk(mid, uid=None):
+    if uid:
+        try:
+            memcache_data[mid][uid]
+        except:
+            return False
+    else:
+        try:
+            memcache_data[mid] 
+        except:
+            return False
+    return True
+
+# datcache_get :: String -> Int -> *
+def memcache_get(mid, uid=NULL):
+    if uid:
+        return memcache_data[mid][uid] 
+    else:
+        return memcache_data[mid]
+
+# datcache_put :: String -> Int -> * -> NULL
+memcache_put <- function(mid, dat, uid=None):
+    if uid:
+        memcache_data[mid][uid] = dat
+    else:
+        memcache_data[mid] = dat
+
+# datcache_del :: String -> Int -> NULL
+def memcache_del (mid, uid=NULL):
+    if uid:
+        memcache_data[mid][uid] = None
+    else:
+        memcache_data[mid] = None
