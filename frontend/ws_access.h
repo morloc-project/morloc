@@ -38,6 +38,7 @@ Ws* ws_recurse_ws(W*);   // recurse into V_WS
 Ws* ws_recurse_most(W*); // recurse into V_WS and V_COUPLET (but not manifolds)
 Ws* ws_recurse_none(W*); // no recursion
 Ws* ws_recurse_composition(W*); // recurse into T_PATH and C_NEST
+Ws* ws_recurse_section(W*); // recurse only into sections
 // parameterized recurse rules
 Ws* ws_recurse_path(W*, W*);
 

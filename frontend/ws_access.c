@@ -207,6 +207,14 @@ Ws* ws_recurse_ws(W* w){
     return rs;
 }
 
+Ws* ws_recurse_section(W* w){
+    Ws* rs = NULL;
+    if(w->cls == T_SECTION){
+        rs = ws_add_val(rs, P_WS, g_ws(g_rhs(w)));
+    }
+    return rs;
+}
+
 Ws* ws_recurse_none(W* w){
     return NULL;
 }
@@ -219,6 +227,9 @@ Ws* ws_recurse_composition(W* w){
         case C_NEST:
         case C_DEREF:
             rs = ws_add_val(rs, C_NEST, g_ws(w));
+            break;
+        case T_SECTION:
+            rs = ws_add_val(rs, P_WS, g_ws(g_rhs(w)));
             break;
         case T_PATH:
         case T_H0:
@@ -326,6 +337,9 @@ Ws* ws_recurse_path(W* w, W* p){
         case C_DEREF:
         case C_COMPOSON:
             return g_ws(w);
+        case T_SECTION:
+            return ws_new(w_new(P_WS, g_ws(g_rhs(w))));
+            break;
         case T_PATH:
         case T_H0:
         case T_H1:

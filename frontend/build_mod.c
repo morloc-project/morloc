@@ -21,7 +21,7 @@ void link_modifiers(Ws* ws_top){
         // get all manifolds
         ws_rfilter(ws_top, ws_recurse_composition, w_is_manifold),
         // get all defined types
-        ws_rfilter(ws_top, ws_recurse_none, w_is_type),
+        ws_rfilter(ws_top, ws_recurse_section, w_is_type),
         // if the names match, add the type to the manifold
         _set_manifold_type
     );
