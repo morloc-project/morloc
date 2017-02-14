@@ -16,10 +16,12 @@ class PyGrammar(Grammar):
         self.INDENT    = 4
         self.SEP       = ', '
         self.BIND      = '='
-        self.AND       = ' && '
-        self.LIST      = 'list({values})'
+        self.AND       = ' and '
+        self.LIST      = '[{values}]'
         self.POOL      = '''\
 #!/usr/bin/env python3
+
+import sys
 
 outdir = "{outdir}"
 
@@ -32,16 +34,12 @@ outdir = "{outdir}"
 if __name__ == '__main__':
     args = sys.argv
     cmd_str = "{{function}}({{args}})"
-    arg_str = ', '.join(args[1:])
-    cmd = cmd_str.format(function=args[0], args=arg_str)
-    print(cmd)\
+    arg_str = ', '.join(args[2:])
+    cmd = cmd_str.format(function=args[1], args=arg_str)
+    eval(cmd)
 '''
-        self.TYPE_MAP         = '''\
-types = {{
-{pairs}
-}}
-'''
-        self.TYPE_ACCESS      = '''types["{key}"]'''
+        self.TYPE_MAP         = '''{pairs}'''
+        self.TYPE_ACCESS      = '''{key}_type'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
         self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
         self.NATIVE_MANIFOLD = '''\
@@ -86,10 +84,10 @@ pass
 #   stdout=TRUE,
 #   stderr=FALSE
 # )
-# universal_to_native(fo, types["{mid}"])\
+# universal_to_native(fo, {mid}_type)\
 '''
         self.CACHE = '''\
-if({cache}_chk("{mid}"{uid}{cache_args})):
+if {cache}_chk("{mid}"{uid}{cache_args}):
 {if_blk}
 else:
 {else_blk}
@@ -106,7 +104,7 @@ b = {cache}_get("{mid}"{uid}{cache_args})
 '''
         self.DATCACHE_ARGS = '''outdir="{outdir}"'''
         self.DO_VALIDATE = '''\
-if( {checks} ):
+if {checks}:
 {if_blk}
 else:
 {else_blk}
@@ -146,7 +144,7 @@ b = {function}({arguments})
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            s = 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
+            s = 'native_to_universal(%s, %s_type, outdir)' % (a,a)
             arg_rep.append(s)
         if m.narg:
             arg_rep.append("uid")
@@ -163,8 +161,8 @@ b = {function}({arguments})
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("    %s:'%s'" % (k, v.type))
+            types.append("%s_type = '%s'" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("x%s:'%s'" % (m, t))
-        return self.TYPE_MAP.format(pairs=',\n'.join(types))
+                    types.append("x%s = '%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs='\n'.join(types))
