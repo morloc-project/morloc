@@ -212,10 +212,9 @@ s_export
  /* ======================================= */
 
 s_source
-  : SECTION_SOURCE STR {
-    W* s = w_new(P_STRING, $2);
-    s_rhs($1, s);
-    $$ = $1;
+  : SECTION_SOURCE STR { $$ = $1; s_rhs($1, wws_new($2)); }
+  | s_source STR {
+    s_rhs($1, wws_add(g_rhs($1), $2));
   }
 
 
