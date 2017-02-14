@@ -265,8 +265,11 @@ W* wws_clone(W* wws){
     return wws;
 }
 W* wws_add(W* wws, W* w){
-    if(!wws) return wws;
-    s_ws(wws, ws_add(g_ws(wws), w));
+    if(!wws){
+        wws = wws_new(w);
+    } else {
+        s_ws(wws, ws_add(g_ws(wws), w));
+    }
     return wws;
 }
 W* wws_add_val(W* wws, Class cls, void* v){

@@ -20,7 +20,6 @@ FILE* toklog;
 #define RETURN_TOKEN(t) \
     LOG(#t " ");        \
     return t;
-    
 
 // Removes first and last characters around a string
 char* unquote(const char* in_str);
@@ -41,6 +40,17 @@ char* trim_couple(const char* in_str);
     for(int zi = 0; zi < k; zi++){ unput(zs[zn - zi - 1]); } \
     free(zs);
 
+#define RETURN_SECTION(s)                                       \
+    LOG(#s " ");                                                \
+    char* name = (char*)calloc(16, sizeof(char));               \
+    char* lang = (char*)calloc(16, sizeof(char));               \
+    int n = sscanf(yytext, "@%s %s", name, lang);               \
+    lang = (n == 2) ? lang : NULL;                              \
+    Section* sec = section_new(name, lang);                     \
+    Couplet* c = couplet_new(w_new(P_SECTION, sec), NULL, '='); \
+    yylval.s = w_new(T_SECTION, c);                             \
+    return s;
+
 %}
 
 %option header-file="lex.yy.h"
@@ -51,8 +61,7 @@ char* trim_couple(const char* in_str);
 %s S_INCLUDE
 %s S_EXPORT
 %x X_COMMENT
-%x X_SOURCE
-%s S_LANG
+%s X_SOURCE
 %s S_PATH
 %s S_SIDE
 %s S_CPLT
@@ -88,6 +97,8 @@ refer      <{var}>
 
 couple ::|:=|:-|:\+
 
+lang ([ ]+[^ \t\n\r]+)?
+
 %%
 
 
@@ -98,35 +109,23 @@ couple ::|:=|:-|:\+
 @comment {  BEGIN(X_COMMENT); }
 @include {  BEGIN(S_INCLUDE); }
 
-@path     { BEGIN(S_PATH)     ; RETURN_TOKEN ( SECTION_PATH     ) ; }
-@check    { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_CHECK    ) ; }
-@fail     { BEGIN(S_SIDE)     ; RETURN_TOKEN ( SECTION_FAIL     ) ; }
-@source   { BEGIN(S_LANG)     ; RETURN_TOKEN ( SECTION_SOURCE   ) ; }
-@type     { BEGIN(S_TYPE)     ; RETURN_TOKEN ( SECTION_TYPE     ) ; }
-@ontology { BEGIN(S_ONTOLOGY) ; RETURN_TOKEN ( SECTION_ONTOLOGY ) ; }
-@cache    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_CACHE    ) ; }
-@alias    { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_ALIAS    ) ; }
-@lang     { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_LANG     ) ; }
-@doc      { BEGIN(S_CPLT)     ; RETURN_TOKEN ( SECTION_DOC      ) ; }
-@arg      { BEGIN(S_ARG)      ; RETURN_TOKEN ( SECTION_ARG      ) ; }
-@export   { BEGIN(S_EXPORT)   ; RETURN_TOKEN ( SECTION_EXPORT   ) ; }
-
- /* kludge!!! */
-@[0-9]    {
-    BEGIN(S_SIDE);
-    char* s = strdup(yytext + 1);
-    W* w = w_new( P_STRING, s);
-    RETURN(w, SECTION_HOOK);
-}
+@path{lang}     { BEGIN(S_PATH)     ; RETURN_SECTION ( SECTION_PATH     ) ; }
+@check{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_CHECK    ) ; }
+@fail{lang}     { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_FAIL     ) ; }
+@[0-9]{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_HOOK     ) ; } 
+@source{lang}   { BEGIN(X_SOURCE)   ; RETURN_SECTION ( SECTION_SOURCE   ) ; }
+@type{lang}     { BEGIN(S_TYPE)     ; RETURN_SECTION ( SECTION_TYPE     ) ; }
+@ontology{lang} { BEGIN(S_ONTOLOGY) ; RETURN_SECTION ( SECTION_ONTOLOGY ) ; }
+@cache{lang}    { BEGIN(S_CPLT)     ; RETURN_SECTION ( SECTION_CACHE    ) ; }
+@alias{lang}    { BEGIN(S_CPLT)     ; RETURN_SECTION ( SECTION_ALIAS    ) ; }
+@lang{lang}     { BEGIN(S_CPLT)     ; RETURN_SECTION ( SECTION_LANG     ) ; }
+@doc{lang}      { BEGIN(S_CPLT)     ; RETURN_SECTION ( SECTION_DOC      ) ; }
+@arg{lang}      { BEGIN(S_ARG)      ; RETURN_SECTION ( SECTION_ARG      ) ; }
+@export{lang}   { BEGIN(S_EXPORT)   ; RETURN_SECTION ( SECTION_EXPORT   ) ; }
 
 {ws}  { LOGV("%s", yytext); }
 RESET { RETURN_TOKEN(RESET); } 
 
-<S_LANG>[ ]+{var} {
-    BEGIN X_SOURCE;
-    W* w = w_new(P_STRING, trim(yytext));
-    RETURN(w, STR);
-  }
 <X_SOURCE>^[ \t]*([^\n@].*)?\n {
     char* s = strdup(yytext);
     W* w = w_new(P_STRING, s);

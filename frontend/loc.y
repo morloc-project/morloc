@@ -5,9 +5,9 @@
     #include "ws.h"
 
     void yyerror(const char *);
-    Ws* w_make_couplet(Ws* ws, W* lhs, W*   op, W* rhs, Class cls);
-    Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls);
-    Class hook_type(W* w);
+    void w_make_couplet(W* w, W* lhs, W*   op, W* rhs, Class cls);
+    void c_make_couplet(W* w, W* lhs, char op, W* rhs, Class cls);
+    Class hook_type(char);
 %}
 
 %code requires{
@@ -32,39 +32,40 @@ Ws* global_table;
 %token AS ARROW RESET
 %token <W*> COUPLE
 
-%token <W*> SECTION_HOOK /* unforgivable kludge alert */
+%token <W*> SECTION_HOOK
+%token <W*> SECTION_CACHE
+%token <W*> SECTION_PATH
+%token <W*> SECTION_CHECK
+%token <W*> SECTION_FAIL
+%token <W*> SECTION_ALIAS
+%token <W*> SECTION_LANG
+%token <W*> SECTION_DOC
+%token <W*> SECTION_EXPORT
+%token <W*> SECTION_SOURCE
+%token <W*> SECTION_ARG
+%token <W*> SECTION_TYPE
+%token <W*> SECTION_ONTOLOGY
 
-%token SECTION_CACHE
-%token SECTION_PATH
-%token SECTION_CHECK
-%token SECTION_FAIL
-%token SECTION_ALIAS
-%token SECTION_LANG
-%token SECTION_DOC
-%token SECTION_EXPORT
-%token SECTION_SOURCE
-%token SECTION_ARG
-%token SECTION_TYPE
-%token SECTION_ONTOLOGY
+%type <Ws*> composition maybe_composition
 
-%type <Ws*> section composition maybe_composition
+%type <W*> section
 
-%type <Ws*> s_path
-%type <Ws*> s_hook
-%type <Ws*> s_cache
-%type <Ws*> s_check
-%type <Ws*> s_fail
-%type <Ws*> s_alias
-%type <Ws*> s_lang
-%type <Ws*> s_doc
-%type <Ws*> s_arg
+%type <W*> s_path
+%type <W*> s_hook
+%type <W*> s_cache
+%type <W*> s_check
+%type <W*> s_fail
+%type <W*> s_alias
+%type <W*> s_lang
+%type <W*> s_doc
+%type <W*> s_arg
 
-%type <Ws*> s_export
-%type <Ws*> s_type
-%type <Ws*> s_ontology
-%type <Ws*> s_source
+%type <W*> s_export
+%type <W*> s_type
+%type <W*> s_ontology
+%type <W*> s_source
 
-%type <Ws*> type
+%type <W*> type
 %type <Ws*> ontology construct
 
 %type <W*>  maybe_argument /* P_ARGUMENT:V_COUPLET */
@@ -77,12 +78,12 @@ Ws* global_table;
 %%
 
 input
-    : section { global_table = $1;}
-    | input section { global_table = ws_join(global_table, $2); }
+    : section { global_table = ws_new($1);}
+    | input section { global_table = ws_add(global_table, $2); }
 
 section
     : s_path
-    | s_hook { $$ = ws_tail($$); /* see KLUDGE NOTE below */ } 
+    | s_hook
     | s_cache
     | s_check
     | s_fail
@@ -99,39 +100,33 @@ section
 /* ======================================= */
 
 s_path
-    : SECTION_PATH { $$ = NULL; }
+    : SECTION_PATH { $$ = $1; }
     | SECTION_PATH composition {
         Label* l = label_new_set("default", NULL);
         W* label = w_new(K_LABEL, l);
-        $$ = c_make_couplet(NULL, label, '=', w_new(P_WS, $2), T_PATH);
+        c_make_couplet($1, label, '=', w_new(P_WS, $2), T_PATH);
     }
     | s_path IDENTIFIER COUPLE composition {
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_PATH);
+        w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_PATH);
     }
 
-/* KLUDGE NOTE: hook is the one section that is comprised of multiple types:
- * T_H0, T_H1, ... T_H9. These correspond to functions that are called within
- * a manifold (see notes in R-manifold.R). There is no natural place to put
- * this information in a Ws. So I add a temporary first element to the list.
- * It is removed above.
- */
 s_hook
-    : SECTION_HOOK { $$ = ws_new($1); }
+    : SECTION_HOOK { $$ = $1; }
     | s_hook SELECTION COUPLE maybe_composition {
-        Class c = hook_type($1->head);
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), c);
+        Class c = hook_type(g_section(g_lhs($1))->name[0]);
+        w_make_couplet($1, $2, $3, w_new(P_WS, $4), c);
     }
 
 s_check
-    : SECTION_CHECK { $$ = NULL; }
+    : SECTION_CHECK { $$ = $1; }
     | s_check SELECTION COUPLE maybe_composition {
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_CHECK);
+        w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_CHECK);
     }
 
 s_fail
-    : SECTION_FAIL { $$ = NULL; }
+    : SECTION_FAIL { $$ = $1; }
     | s_fail SELECTION COUPLE maybe_composition {
-        $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_FAIL);
+        w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_FAIL);
     }
 
 maybe_composition
@@ -170,27 +165,27 @@ composition
 /* ======================================= */
 
 s_cache
-    : SECTION_CACHE { $$ = NULL; }
+    : SECTION_CACHE { $$ = $1; }
     | s_cache SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_CACHE);
+        w_make_couplet($1, $2, $3, $4, T_CACHE);
     }
 
 s_alias
-    : SECTION_ALIAS { $$ = NULL; }
+    : SECTION_ALIAS { $$ = $1; }
     | s_alias SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_ALIAS);
+        w_make_couplet($1, $2, $3, $4, T_ALIAS);
     }
 
 s_lang
-    : SECTION_LANG { $$ = NULL; }
+    : SECTION_LANG { $$ = $1; }
     | s_lang SELECTION COUPLE maybe_variable {
-        $$ = w_make_couplet($1, $2, $3, $4, T_LANG);
+        w_make_couplet($1, $2, $3, $4, T_LANG);
     }
 
 s_doc
-    : SECTION_DOC { $$ = NULL; }
+    : SECTION_DOC { $$ = $1; }
     | s_doc SELECTION COUPLE maybe_str {
-        $$ = w_make_couplet($1, $2, $3, $4, T_DOC);
+        w_make_couplet($1, $2, $3, $4, T_DOC);
     }
 
 maybe_variable
@@ -205,12 +200,12 @@ maybe_str
  /* ======================================= */
 
 s_export
-    : SECTION_EXPORT { $$ = NULL; }
+    : SECTION_EXPORT { $$ = $1; }
     | s_export PATH {
-        $$ = c_make_couplet($1, $2, '=', NULL, T_EXPORT);
+        c_make_couplet($1, $2, '=', NULL, T_EXPORT);
     }
     | s_export PATH AS VARIABLE {
-        $$ = c_make_couplet($1, $2, '=', $4, T_EXPORT);
+        c_make_couplet($1, $2, '=', $4, T_EXPORT);
     }
 
 
@@ -218,11 +213,8 @@ s_export
 
 s_source
   : SECTION_SOURCE STR {
-    Ws* ws = ws_new(w_new(P_STRING, ""));
-    $$ = c_make_couplet(NULL, $2, '=', w_new(P_WS, ws), T_SOURCE);
-  }
-  | s_source STR {
-    s_ws(g_rhs($1->head), ws_add(g_ws(g_rhs($1->head)), $2));
+    W* s = w_new(P_STRING, $2);
+    s_rhs($1, s);
     $$ = $1;
   }
 
@@ -230,30 +222,34 @@ s_source
  /* ======================================= */
 
 s_type
-  : SECTION_TYPE { $$ = NULL; }
+  : SECTION_TYPE { $$ = $1; }
   | s_type NAMES COUPLE type {
-    $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_TYPE); 
+    w_make_couplet($1, $2, $3, $4, T_TYPE); 
   }
 
 type
-  : TYPE { $$ = ws_new($1); }
+  : TYPE { $$ = w_new(P_WS, ws_new($1)); }
   | '(' type ')' {
     W* rhs = w_new(P_WS, $2);
-    $$ = c_make_couplet(NULL, w_new(P_STRING, "function"), '=', rhs, P_TYPE);
+    W* lhs = w_new(P_STRING, "function");
+    Couplet* c = couplet_new(lhs, rhs, '=');
+    $$ = wws_add($$, w_new(P_TYPE, c));
   }
   | '[' type ']' {
     W* rhs = w_new(P_WS, $2);
-    $$ = c_make_couplet(NULL, w_new(P_STRING, "array"), '=', rhs, P_TYPE);
+    W* lhs = w_new(P_STRING, "array");
+    Couplet* c = couplet_new(lhs, rhs, '=');
+    $$ = wws_add($$, w_new(P_TYPE, c));
   }
-  | type ARROW type { $$ = ws_join($1, $3); }
+  | type ARROW type { $$ = wws_join($1, $3); }
 
 
  /* ======================================= */
 
 s_ontology
-  : SECTION_ONTOLOGY { $$ = NULL; }
+  : SECTION_ONTOLOGY { $$ = $1; }
   | s_ontology NAMES COUPLE ontology {
-    $$ = w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_ONTOLOGY); 
+    w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_ONTOLOGY); 
   }
 
 ontology
@@ -268,17 +264,17 @@ construct
  /* ======================================= */
 
 s_arg
-  : SECTION_ARG { $$ = NULL; }
+  : SECTION_ARG { $$ = $1; }
   | s_arg SELECTION COUPLE maybe_argument {
-    $$ = w_make_couplet($1, $2, $3, $4, T_ARGUMENT);
+    w_make_couplet($1, $2, $3, $4, T_ARGUMENT);
   }
   | s_arg maybe_argument {
     if($$){
-        char op = g_couplet($$->head)->op;
+        char op = g_couplet(g_ws(g_rhs($$))->head)->op;
         // If multiple arguments are assigned together, the first resets the
         // argument list ('='), but subsequent ones are appended ('+').
         op = op == '=' ? '+' : op;
-        $$ = c_make_couplet($1, g_lhs($$->last), op, $2, T_ARGUMENT);
+        c_make_couplet($1, g_lhs(wws_last(g_rhs($$))), op, $2, T_ARGUMENT);
     } else {
         warn("ERROR: missing path in argument declaration\n");
     }
@@ -310,22 +306,22 @@ void yyerror(char const *s){
     warn("(%s:%d) %s\n", yyfilename, yylineno, s);
 }
 
-
-Ws* w_make_couplet(Ws* ws, W* lhs, W* op, W* rhs, Class cls){
+void w_make_couplet(W* w, W* lhs, W* op, W* rhs, Class cls){
     s_lhs(op, lhs);
     s_rhs(op, rhs);
     op->cls = cls;
-    return ws_add(ws, op);
+    W* wc = wws_add(g_rhs(w), op);
+    s_rhs(w, wc);
 }
 
-Ws* c_make_couplet(Ws* ws, W* lhs, char op, W* rhs, Class cls){
+void c_make_couplet(W* w, W* lhs, char op, W* rhs, Class cls){
     Couplet* c = couplet_new(lhs, rhs, op); 
-    W* w = w_new(cls, c);
-    return ws_add(ws, w);
+    W* cw = w_new(cls, c);
+    s_rhs(w, wws_add(g_rhs(w), cw));
 }
 
-Class hook_type(W* w){
-    switch(g_string(w)[0]){
+Class hook_type(char c){
+    switch(c){
         case '0': return T_H0;
         case '1': return T_H1;
         case '2': return T_H2;
