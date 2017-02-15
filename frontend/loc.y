@@ -227,18 +227,18 @@ s_type
   }
 
 type
-  : TYPE { $$ = w_new(P_WS, ws_new($1)); }
+  : TYPE { $$ = wws_new($1); }
   | '(' type ')' {
-    W* rhs = w_new(P_WS, $2);
+    W* rhs = $2;
     W* lhs = w_new(P_STRING, "function");
     Couplet* c = couplet_new(lhs, rhs, '=');
-    $$ = wws_add($$, w_new(P_TYPE, c));
+    $$ = wws_new(w_new(P_TYPE, c));
   }
   | '[' type ']' {
-    W* rhs = w_new(P_WS, $2);
+    W* rhs = $2;
     W* lhs = w_new(P_STRING, "array");
     Couplet* c = couplet_new(lhs, rhs, '=');
-    $$ = wws_add($$, w_new(P_TYPE, c));
+    $$ = wws_new(w_new(P_TYPE, c));
   }
   | type ARROW type { $$ = wws_join($1, $3); }
 

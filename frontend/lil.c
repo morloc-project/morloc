@@ -25,12 +25,11 @@ void print_lil(Ws* lil){
         W* ww = wws_head(w);
         if(wws_length(w) > 2 && strcmp(LIL_SOURCE, g_string(ww)) == 0){
             printf(
-                "%s\t%s\n    %s",
+                "%s\t%s\n",
                 g_string(ww),
-                g_string(ww->next),
-                g_string(ww->next->next)
+                g_string(ww->next)
             );
-            ww = ww->next->next->next;
+            ww = ww->next->next;
             for(; ww; ww = ww->next){
                 // no newline needed, since newline from source is preserved
                 printf("    %s", g_string(ww));
