@@ -1,0 +1,12 @@
+@path
+
+foo . bar
+
+@alias sh
+foo :: sh_foo
+
+@alias R
+foo :: r_foo
+
+@lang
+foo :: sh
