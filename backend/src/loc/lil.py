@@ -74,17 +74,16 @@ def get_src(lil):
     lang = ""
     for l in lil:
         if(l[0:4] == "NSRC"):
-            row = l.split('\t')
-            lang = row[1]
-            try:
-                if not lang in src:
-                    src[lang] = []
-            except KeyError:
+            row = l.rstrip().split('\t')
+            if len(row) != 2:
                 err("Misformed LIL: source requires a language")
+            lang = row[1]
+            if not lang in src:
+                src[lang] = []
         elif(len(l) == 0 or l[0] == " "):
             try:
                 src[lang].append(l[4:]) # remove first 4 spaces
-            except KeyError:
+            except IndexError:
                 pass # skip whitespace lines preceding source sections
     src = {k:''.join(v) for k,v in src.items()}
     return src

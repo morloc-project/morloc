@@ -54,6 +54,7 @@ bool w_is_tpath    ( W* w ){ return w ? w->cls == T_PATH     : false; }
 bool w_is_label    ( W* w ){ return w ? w->cls == K_LABEL    : false; }
 bool w_is_manifold ( W* w ){ return w ? w->cls == C_MANIFOLD : false; }
 bool w_is_export   ( W* w ){ return w ? w->cls == T_EXPORT   : false; }
+bool w_is_source   ( W* w ){ return w ? w->cls == T_SOURCE   : false; }
 bool w_is_type     ( W* w ){ return w ? w->cls == T_TYPE     : false; }
 bool w_is_composon ( W* w ){ return w ? w->cls == C_COMPOSON : false; }
 

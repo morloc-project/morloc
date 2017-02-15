@@ -83,7 +83,7 @@ wrap_{mid} <- function(...){{
 }}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-foreign_pool <- file.path("{outdir}", "call.{foreign_lang}")
+foreign_pool <- file.path(outdir, "call.{foreign_lang}")
 fo <- system2(
   foreign_pool,
   args=c({args}),
@@ -110,7 +110,7 @@ b <- {cache}_get("{mid}"{uid}{cache_args})
 {validate}
 {hook3}\
 '''
-        self.DATCACHE_ARGS = '''outdir="{outdir}"'''
+        self.DATCACHE_ARGS = '''outdir=outdir'''
         self.DO_VALIDATE = '''\
 if( {checks} ){{
 {if_blk}

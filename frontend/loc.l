@@ -123,9 +123,6 @@ lang ([ ]+[^ \t\n\r]+)?
 @arg{lang}      { BEGIN(S_ARG)      ; RETURN_SECTION ( SECTION_ARG      ) ; }
 @export{lang}   { BEGIN(S_EXPORT)   ; RETURN_SECTION ( SECTION_EXPORT   ) ; }
 
-{ws}  { LOGV("%s", yytext); }
-RESET { RETURN_TOKEN(RESET); } 
-
 <X_SOURCE>^[ \t]*([^\n@].*)?\n {
     char* s = strdup(yytext);
     W* w = w_new(P_STRING, s);
@@ -133,6 +130,8 @@ RESET { RETURN_TOKEN(RESET); }
 }
 <X_SOURCE>@ { unput('@'); BEGIN INITIAL; } /* allow @ anywhere except ^ */
 
+{ws}  { LOGV("%s", yytext); }
+RESET { RETURN_TOKEN(RESET); } 
 
 <X_COMMENT>@      { unput('@'); BEGIN INITIAL; }
 <X_COMMENT>(.|\n) { /* toss bodies */ }

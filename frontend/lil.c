@@ -23,9 +23,9 @@ void print_lil(Ws* lil){
     if(!lil) return;
     for(W* w = lil->head; w; w = w->next){
         W* ww = wws_head(w);
-        if(wws_length(w) > 3 && strcmp(LIL_SOURCE, g_string(ww)) == 0){
+        if(wws_length(w) > 2 && strcmp(LIL_SOURCE, g_string(ww)) == 0){
             printf(
-                "%s\t%s\t%s\n",
+                "%s\t%s\n    %s",
                 g_string(ww),
                 g_string(ww->next),
                 g_string(ww->next->next)
@@ -57,20 +57,25 @@ Ws* build_lil(Ws* ws_top){
     return lil;
 }
 
+bool _is_source(W* w){
+    return w->cls == T_SECTION &&
+    g_lhs(w)->cls == P_SECTION &&
+    strcmp(g_section(g_lhs(w))->name, "source") == 0;
+}
 Ws* build_lil_prolog(Ws* ws_top){
     Ws* lil = NULL;
-    for(W* e = ws_top->head; e; e = e->next){
-        if(e->cls == T_SOURCE){
-            // I add an empty string at the initialization of each
-            // source object, so if there is no code, the length will be 1,
-            // not 0.
-            if(ws_length(g_ws(g_rhs(e))) > 1){
-                W* a = wws_join(
-                    _wtwo(LIL_SOURCE, g_string(g_lhs(e))),
-                    g_rhs(e)
-                );
-                lil = ws_add(lil, a);
-            }
+
+    Ws* src = ws_rfilter(ws_top, ws_recurse_section, _is_source);
+
+    if(!src) return lil;
+
+    for(W* e = src->head; e; e = e->next){
+        if(wws_length(g_rhs(e)) > 0){
+            W* a = wws_join(
+                _wtwo(LIL_SOURCE, g_section(g_lhs(e))->lang),
+                g_rhs(e)
+            );
+            lil = ws_add(lil, a);
         }
     }
     return lil;
