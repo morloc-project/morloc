@@ -51,6 +51,29 @@ Ws* ws_prfilter(
     return result;
 }
 
+Ws* ws_yaf(
+    Ws* ws,
+    W* p,
+    Ws*(*recurse)(W* w),
+    bool(*criterion)(W* w, W* p)
+){
+    Ws* result = NULL;
+    if(!ws || !ws->head) return NULL;
+    for(W* w = ws->head; w; w = w->next){
+        if(criterion(w, p)){
+            result = ws_add(result, w);
+        }
+        Ws* rs = recurse(w); 
+        if(!rs) continue;
+        for(W* r = rs->head; r; r = r->next){
+            Ws* down = ws_yaf(g_ws(r), p, recurse, criterion);
+            result = ws_join(result, down);
+        }
+    }
+    return result;
+}
+
+
 void ws_modcrawl(
     Ws* ws,
     W* p,

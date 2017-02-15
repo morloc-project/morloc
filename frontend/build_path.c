@@ -25,7 +25,7 @@ void _resolve_grprefs_r(Ws* current, Ws* global){
 
 void _resolve_one_grpref(W* e_ref, Ws* global){
 
-    Ws* path = ws_pfilter(global, e_ref, _matches_path);
+    Ws* path = ws_yaf(global, e_ref, ws_recurse_section, _matches_path);
 
     if(!path){
         warn("ERROR: group reference could not be resolved -- path not found\n");

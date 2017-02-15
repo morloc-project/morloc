@@ -84,19 +84,22 @@ Ws* build_lil_manifolds(Ws* ws_top){
 
 Ws* build_lil_epilog(Ws* ws_top){
     Ws* lil = NULL;
-    for(W* e = ws_top->head; e; e = e->next){
-        if(e->cls == T_EXPORT){
-            Ws* exports = get_by_name(ws_top, e);
-            if(ws_length(exports) == 0){
-                warn("Cannot export path\n");
+
+    Ws* exp = ws_rfilter(ws_top, ws_recurse_section, w_is_export);
+
+    if(!exp) return lil;
+
+    for(W* e = exp->head; e; e = e->next){
+        Ws* exports = get_by_name(ws_top, e);
+        if(ws_length(exports) == 0){
+            warn("Cannot export path\n");
+        } else {
+            Manifold* m = g_manifold(g_rhs(exports->head));
+            char* alias = g_string(g_rhs(e));
+            if(alias){
+                lil = _three(lil, LIL_EXPORT, _mid(m), alias);
             } else {
-                Manifold* m = g_manifold(g_rhs(exports->head));
-                char* alias = g_string(g_rhs(e));
-                if(alias){
-                    lil = _three(lil, LIL_EXPORT, _mid(m), alias);
-                } else {
-                    lil = _three(lil, LIL_EXPORT, _mid(m), m->function);
-                }
+                lil = _three(lil, LIL_EXPORT, _mid(m), m->function);
             }
         }
     }

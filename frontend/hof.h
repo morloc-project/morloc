@@ -33,6 +33,14 @@ Ws* ws_prfilter(
     W*(*nextval)(W*, W*)
 );
 
+// Yet Another Filter
+Ws* ws_yaf(
+    Ws* ws,
+    W* p,
+    Ws*(*recurse)(W* w),
+    bool(*criterion)(W* w, W* p)
+);
+
 
 // like ws_prfilter, but modifies rather than filtering.
 void ws_prmod(
