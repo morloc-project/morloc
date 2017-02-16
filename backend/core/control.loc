@@ -4,15 +4,20 @@
 # However, I don't yet support generics
 map :: * -> * -> *
 
+@alias
+map :: loc_map
+
+
 @source R
 
-map <- function(f, x){
+loc_map <- function(f, x){
     lapply(x, f)
 }
 
+
 @source sh
 
-map (){
+loc_map (){
     fun=$1
     file=$2
     while read x
@@ -21,7 +26,9 @@ map (){
     done < $file
 }
 
+
 @source py
 
+# aliased as map
 def loc_map(f, xs):
     list( map(f, xs) )
