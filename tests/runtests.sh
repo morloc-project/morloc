@@ -171,6 +171,7 @@ if $test_frontend
 then
 announce "Frontend tests"
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
+frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
 frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
 frontend_test operator-add       'operator-add/      -- test :=, and :+ ................................ '

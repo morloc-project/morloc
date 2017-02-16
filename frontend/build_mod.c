@@ -1,6 +1,6 @@
 #include "build_mod.h"
 
-void _set_default_manifold_function(W* cm);
+void _set_manifold_defaults(W* cm);
 void _set_manifold_type(W*, W*);
 void _transfer_type(W* type_w, W* man_w);
 bool _manifold_modifier(W* w);
@@ -12,7 +12,7 @@ Ws*  _do_operation(Ws* ws, W* p, char op);
 void link_modifiers(Ws* ws_top){
 
     // Set default function names for all manifolds
-    ws_filter_mod(ws_top, get_manifolds, _set_default_manifold_function);
+    ws_filter_mod(ws_top, get_manifolds, _set_manifold_defaults);
 
     // Set manifold type based off the manifold names
     ws_2mod(
@@ -39,9 +39,12 @@ void link_modifiers(Ws* ws_top){
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
 // Manifold->function IFF it is not already defined.
-void _set_default_manifold_function(W* cm){
+void _set_manifold_defaults(W* cm){
     Manifold* m = g_manifold(g_rhs(cm));
-    m->function = strdup(g_label(g_lhs(cm))->name);
+    char* name = g_label(g_lhs(cm))->name;
+    char* lang = g_label(g_lhs(cm))->lang;
+    m->function = strdup(name);
+    m->lang = lang ? strdup(lang) : NULL;
 }
 
 void _set_manifold_type(W* mw, W* tw){
@@ -155,7 +158,7 @@ void _add_modifier(W* w, W* p){
             if(g_string(rhs)){
                 m->function = g_string(rhs);
             } else {
-                _set_default_manifold_function(w);
+                _set_manifold_defaults(w);
             }
             break;
         case T_LANG:

@@ -1,0 +1,5 @@
+EMIT	m0	lollipop
+FUNC	m0	foo
+INPM	m0	0	m1	*
+EMIT	m1	french
+FUNC	m1	bar
