@@ -40,6 +40,7 @@ W* label_from_str(char* s){
 
     id->name = trim_ws(id->name);
     id->label = trim_ws(id->label);
+    id->lang = NULL;
 
     W* w = w_new(K_LABEL, id);
 

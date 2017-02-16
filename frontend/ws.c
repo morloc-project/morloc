@@ -188,9 +188,10 @@ char* w_str(W* w){
             break;
         case V_LABEL:
             sprintf(
-                s, "%s(%s:%s)", c,
+                s, "%s(name=%s:label=%s:lang=%s)", c,
                 g_label(w)->name,
-                g_label(w)->label
+                g_label(w)->label,
+                g_label(w)->lang
             );
             break;
         case V_MANIFOLD:

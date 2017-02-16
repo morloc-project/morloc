@@ -16,6 +16,7 @@ Ws* get_tpaths(Ws* ws);
 
 Ws* get_by_name(Ws* ws, W* p);
 
+bool w_is_lang      ( W* );
 bool w_is_export    ( W* );
 bool w_is_source    ( W* );
 bool w_is_manifold  ( W* );

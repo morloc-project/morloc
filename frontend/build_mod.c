@@ -8,15 +8,30 @@ void _mod_add_modifiers(Ws* ws_top, W* p);
 bool _basename_match(W* w, W* p);
 void _add_modifier(W* w, W* p);
 Ws*  _do_operation(Ws* ws, W* p, char op);
-
-
+void _set_lang(W* section, W* manifold);
+bool _always_do(W*, W*);
 
 void link_modifiers(Ws* ws_top){
+
+    // set languages
+    for(W* sec = ws_top->head; sec; sec = sec->next){
+        if(get_value_type(g_rhs(sec)->cls) == V_WS){
+            ws_modcrawl(
+               g_ws(g_rhs(sec)),
+               g_lhs(sec),
+               ws_recurse_most,
+               _always_do,
+               _set_lang
+            );
+        }
+    }
+
+ws_print(ws_top, ws_recurse_most);
 
     // Set default function names for all manifolds
     ws_filter_mod(ws_top, get_manifolds, _set_default_manifold_function);
 
-    // Set manifold type based off the default names
+    // Set manifold type based off the manifold names
     ws_2mod(
         // get all manifolds
         ws_rfilter(ws_top, ws_recurse_composition, w_is_manifold),
@@ -31,6 +46,35 @@ void link_modifiers(Ws* ws_top){
     cs = ws_map_split(cs, ws_split_couplet);
     ws_map_pmod(ws_top, cs, _mod_add_modifiers);
 
+}
+
+void _set_lang(W* w, W* section){
+    char* lang = g_section(section)->lang;
+    switch(get_value_type(w->cls)){
+        case V_LABEL:
+            g_label(w)->lang = lang;
+            break;
+        case V_COUPLET:
+            _set_lang(g_lhs(w), section);
+            _set_lang(g_rhs(w), section);
+            break;
+        case V_MANIFOLD:
+            g_manifold(w)->lang = lang;
+            break;
+        case V_NONE:
+            // nothing to do
+        case V_STRING:
+            // nothing to do 
+        case V_WS:
+            // the recursion function handles this 
+        case V_SECTION:
+            // this can't happen
+            break;
+    }
+}
+
+bool _always_do(W* a, W* b){
+    return true;
 }
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
@@ -76,10 +120,11 @@ bool _manifold_modifier(W* w){
         case T_CHECK:
         case T_FAIL:
         case T_ALIAS:
-        case T_LANG:
         case T_DOC:
         case T_ARGUMENT:
             return true;         
+        case T_LANG: // Language must be set first
+            return false;
         default:
             return false;
     } 

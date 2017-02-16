@@ -46,6 +46,7 @@ Ws* get_by_name(Ws* ws, W* p){
     );
 }
 
+bool w_is_lang     ( W* w ){ return w ? w->cls == T_LANG     : false; }
 bool w_is_grpref   ( W* w ){ return w ? w->cls == C_GRPREF   : false; }
 bool w_is_argref   ( W* w ){ return w ? w->cls == C_ARGREF   : false; }
 bool w_is_refer    ( W* w ){ return w ? w->cls == C_REFER    : false; }
@@ -259,7 +260,7 @@ Label* _ws_get_label_from_lhs(W* a){
     Label* label = NULL;
     switch(a->cls){
         case K_NAME:
-            label = label_new_set(strdup(g_string(a)), NULL);
+            label = label_new_set(strdup(g_string(a)), NULL, NULL);
             break;
         case K_LABEL:
             label = g_label(a);
@@ -334,13 +335,15 @@ bool w_string_equal(W* a, W* b){
 }
 
 Ws* ws_recurse_path(W* w, W* p){
+    Ws* rs = NULL;
     switch(w->cls){
         case C_NEST:
         case C_DEREF:
         case C_COMPOSON:
-            return g_ws(w);
+            rs = g_ws(w);
+            break;
         case T_SECTION:
-            return ws_new(w_new(P_WS, g_ws(g_rhs(w))));
+            rs = ws_new(w_new(P_WS, g_ws(g_rhs(w))));
             break;
         case T_PATH:
         case T_H0:
@@ -355,11 +358,13 @@ Ws* ws_recurse_path(W* w, W* p){
         case T_H9:
         case T_CHECK:
         case T_FAIL:
-            return
+            rs =
                 (wws_length(g_lhs(p)) == 1 || w_equal_lhs(p, w))
                     ? g_ws(g_rhs(w))
                     : NULL;
+            break;
         default:
-            return NULL;
+            break;
     }
+    return rs;
 }
