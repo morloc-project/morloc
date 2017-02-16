@@ -1,22 +1,22 @@
 .PHONY: 1
 1:
-	loc -k -o hello_world -x pools 1_hello_world.loc	
+	loc -k -o hello_world -x pools 1_hello_world.loc
 
 .PHONY: 2
 2:
-	loc -k -o composition -x pools 2_composition.loc	
+	loc -k -o composition -x pools 2_composition.loc
 
 .PHONY: 3
 3:
-	loc -k -o modifiers -x pools 3_modifiers.loc	
+	loc -k -o modifiers -x pools 3_modifiers.loc
 
 .PHONY: 4
 4:
-	loc -k -o hooks -x pools 4_hooks.loc	
+	loc -k -o hooks -x pools 4_hooks.loc
 
 .PHONY: 5
 5:
-	loc -k -o types -x pools 5_types.loc	
+	loc -k -o types -x pools 5_types.loc
 
 .PHONY: clean
 clean:

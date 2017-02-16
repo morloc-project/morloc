@@ -61,7 +61,27 @@ universal_to_native <- function(x, type){
 @source sh
 
 native_to_universal (){
-    $@
+    x=$1
+    vtype=$2
+    outdir=$3
+    if [[ $vtype == "Int"    ||
+          $vtype == "String" ||
+          $vtype == "Num"    ||
+          $vtype == "Bool"   ||
+          $vtype == "File" ]]
+    then
+        echo "$x"
+    else
+        tmpfile=$outdir/sh_$RANDOM$RANDOM
+        touch $tmpfile || echo "Cannot write to temporary file $tmpfile" >&2
+        if [[ -r $x ]]
+        then
+            cat $x > $tmpfile
+            echo "$tmpfile"
+        else
+            echo "Type ($vtype) input error, expected file" >&2
+        fi
+    fi
 }
 
 universal_to_native (){
@@ -73,9 +93,9 @@ universal_to_native (){
           $vtype == "Bool"   ||
           $vtype == "File" ]]
     then
-        echo $x
+        echo "$x"
     else
-        cat $x
+        cat "$x" || echo "(sh) cannot cat file '$x' (type='$2')" >&2
     fi
 }
 

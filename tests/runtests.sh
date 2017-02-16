@@ -233,6 +233,7 @@ backend_test   py-hooks  main       'py-hooks/          -- python hello world pr
 fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then
+backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition into a bash map command ..... '
 backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-all    main       'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '

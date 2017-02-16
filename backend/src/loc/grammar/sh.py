@@ -89,7 +89,7 @@ wrap_{mid} () {{
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-universal_to_native $u $type_{mid}\
+universal_to_native "$u" $type_{mid}\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}
@@ -189,10 +189,10 @@ fi
     def make_foreign_manifold_blk(self, m):
         arg_rep = ""
         for i in range(int(m.narg)):
-            a = self.MARG.format(i=str(i+1))
-            arg_rep += '\\\n    $(native_to_universal %s types["%s"] outdir)' % (a,a)
+            i_str = str(i+1)
+            arg_rep += '\\\n    $(native_to_universal "$%s" "$type_%s" "$outdir")' % (i_str,i_str)
         if m.narg:
-            arg_rep += "\\\n    ${mid}_uid"
+            arg_rep += '\\\n    "$%s_uid"' % m.mid
 
         s = self.FOREIGN_MANIFOLD_BLK.format(
             foreign_lang=m.lang,
