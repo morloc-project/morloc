@@ -1,5 +1,5 @@
 @type
-c   :: MULTI -> [Int]
+c   :: ? -> [Int]
 seq :: Int -> Int -> [Int]
 sum :: [Int] -> Int
 

@@ -78,7 +78,7 @@ var       {sym}(:[a-zA-Z0-9_]+)?
 path      {var}(\/{var})*
 selection ({path}(,{path})*|\*){ws}*:[:=+-]
 
-type {sym}|\*
+type {sym}|\*|\?
 list {sym}({ws}*,{ws}*{sym})*
 
 identifier {var}{ws}*:[:=+-]

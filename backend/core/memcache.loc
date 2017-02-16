@@ -1,91 +1,91 @@
 @type
 memcache_chk :: String -> Int -> Bool
 memcache_get :: String -> Int -> *
-memcache_put :: String -> Int -> * -> NULL
-memcache_del :: String -> Int -> NULL
+memcache_put :: String -> Int -> * -> void
+memcache_del :: String -> Int -> void
 
 @alias
-memcache_chk :: loc_memcache_chk
-memcache_get :: loc_memcache_get
-memcache_put :: loc_memcache_put
-memcache_del :: loc_memcache_del
+memcache_chk :: memcache_chk
+memcache_get :: memcache_get
+memcache_put :: memcache_put
+memcache_del :: memcache_del
 
 @source R
 
-.loc_memcache_data <- new.env()
+.memcache_data <- new.env()
 
-loc_memcache_chk <- function(mid, uid=NULL) {
+memcache_chk <- function(mid, uid=NULL) {
     if(is.null(uid)){
-        exists(mid, .loc_memcache_data, inherits=FALSE)
+        exists(mid, .memcache_data, inherits=FALSE)
     } else {
-        exists(mid, .loc_memcache_data, inherits=FALSE) &&
-        exists(as.character(uid), .loc_memcache_data[[mid]], inherits=FALSE)
+        exists(mid, .memcache_data, inherits=FALSE) &&
+        exists(as.character(uid), .memcache_data[[mid]], inherits=FALSE)
     }
 }
 
-loc_memcache_get <- function(mid, uid=NULL) {
+memcache_get <- function(mid, uid=NULL) {
     if(is.null(uid)){
-        .loc_memcache_data[[mid]]
+        .memcache_data[[mid]]
     } else {
-        .loc_memcache_data[[mid]][[as.character(uid)]]
+        .memcache_data[[mid]][[as.character(uid)]]
     }
 }
 
-loc_memcache_put <- function(mid, dat, uid=NULL) {
+memcache_put <- function(mid, dat, uid=NULL) {
     if(is.null(uid)){
-        .loc_memcache_data[[mid]] = dat
+        .memcache_data[[mid]] = dat
     } else {
-        if(!exists(mid, .loc_memcache_data, inherits=FALSE)){
-            .loc_memcache_data[[mid]] = new.env()
+        if(!exists(mid, .memcache_data, inherits=FALSE)){
+            .memcache_data[[mid]] = new.env()
         }
-        .loc_memcache_data[[mid]][[as.character(uid)]] = dat
+        .memcache_data[[mid]][[as.character(uid)]] = dat
     }
 }
 
-loc_memcache_del <- function(mid, uid=NULL) {
+memcache_del <- function(mid, uid=NULL) {
     if(is.null(uid)){
-        rm(mid, envir=.loc_memcache_data)
+        rm(mid, envir=.memcache_data)
     } else {
-        rm(list=as.character(uid), envir=.loc_memcache_data[[mid]])
+        rm(list=as.character(uid), envir=.memcache_data[[mid]])
     }
 }
 
 
 @source py
 
-loc_memcache_data = {}
+memcache_data = {}
 
 # datcache_chk :: String -> Int -> Bool
-def loc_memcache_chk(mid, uid=None):
+def memcache_chk(mid, uid=None):
     if uid:
         try:
-            loc_memcache_data[mid][uid]
+            memcache_data[mid][uid]
         except:
             return False
     else:
         try:
-            loc_memcache_data[mid] 
+            memcache_data[mid] 
         except:
             return False
     return True
 
 # datcache_get :: String -> Int -> *
-def loc_memcache_get(mid, uid=None):
+def memcache_get(mid, uid=None):
     if uid:
-        return loc_memcache_data[mid][uid] 
+        return memcache_data[mid][uid] 
     else:
-        return loc_memcache_data[mid]
+        return memcache_data[mid]
 
 # datcache_put :: String -> Int -> * -> NULL
-def loc_memcache_put(mid, dat, uid=None):
+def memcache_put(mid, dat, uid=None):
     if uid:
-        loc_memcache_data[mid][uid] = dat
+        memcache_data[mid][uid] = dat
     else:
-        loc_memcache_data[mid] = dat
+        memcache_data[mid] = dat
 
 # datcache_del :: String -> Int -> NULL
-def loc_memcache_del (mid, uid=None):
+def memcache_del (mid, uid=None):
     if uid:
-        loc_memcache_data[mid][uid] = None
+        memcache_data[mid][uid] = None
     else:
-        loc_memcache_data[mid] = None
+        memcache_data[mid] = None

@@ -38,10 +38,11 @@ syn match DEFAULT_ERROR '@\S*'  contained
 syn match DEFAULT_ERROR '\S\+'  contained
 syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
-syn keyword DEFAULT_ERROR id null map true false      contained
-syn keyword DEFAULT_ERROR memcache datcache nocache   contained
-syn keyword DEFAULT_ERROR NIL                         contained
-syn keyword DEFAULT_ERROR as                          contained
+syn keyword DEFAULT_ERROR id null map true false nothing contained
+syn keyword DEFAULT_ERROR and or not any all             contained
+syn keyword DEFAULT_ERROR memcache datcache nocache      contained
+syn keyword DEFAULT_ERROR TRUE NULL RESET FALSE ?        contained
+syn keyword DEFAULT_ERROR as                             contained
 
 " define todo highlighting
 syn keyword s_todo TODO NOTE FIXME XXX contained 
@@ -123,7 +124,8 @@ syn region s_string start=/"/ end=/"/ contained
 
 
 " define terms used in types
-syn keyword s_nil NIL MULTI contained
+syn keyword s_type void contained
+syn match   s_type /?/  contained
 
 " keywords
 syn keyword s_export_keyword as contained
@@ -149,7 +151,7 @@ syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 
 syn cluster c_hasarg    contains=s_equal,s_num,s_sep,s_brk,s_par,s_fun,s_string
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_marg,s_fun,s_group,s_refer
-syn cluster c_type      contains=s_nil,s_rarrow,s_sep,s_par,s_brk
+syn cluster c_type      contains=@c_subglobal,@c_couple_nl,s_type,s_rarrow,s_sep,s_par,s_brk,s_var
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
@@ -174,8 +176,8 @@ syn region r_export   start=/@export/     end=/@\@=/ contains=@c_global,s_export
 syn region r_lang     start=/@lang/       end=/@\@=/ contains=@c_global,@c_hasarg,@c_couple
 syn region r_include  start=/@include/    end=/@\@=/ contains=@c_subglobal,s_file
 syn region r_import   start=/@import/     end=/@\@=/ contains=@c_subglobal,s_import_keyword,s_var,s_string
-syn region r_ontology start=/@ontology/   end=/@\@=/ contains=@c_global,@c_couple_nl,s_bar,s_sep,s_par,s_brk
-syn region r_type     start=/@type/       end=/@\@=/ contains=@c_global,@c_type,@c_couple_nl,s_star
+syn region r_ontology start=/@ontology/   end=/@\@=/ contains=@c_type,s_bar,s_sep,s_par,s_brk
+syn region r_type     start=/@type/       end=/@\@=/ contains=@c_type,s_star
 
 
 
@@ -191,7 +193,7 @@ hi def link s_logical_op      Function
 
 hi def link s_constant Constant
 hi def link s_logical  Constant
-hi def link s_nil      Constant
+hi def link s_type     Constant
 hi def link s_utility  Constant 
 
 hi def link s_break    Underlined
