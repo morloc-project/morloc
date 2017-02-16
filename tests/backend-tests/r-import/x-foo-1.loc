@@ -7,7 +7,7 @@ Foo1 as baz
 
 @type
 baz :: Number -> Number
-foo :: NULL -> Number
+foo :: void -> Number
 
 @path
 Foo1 :: baz . foo

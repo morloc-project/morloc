@@ -1,8 +1,8 @@
 #ifndef __TYPE_H__
 #define __TYPE_H__
 
-#define __IO__ "NULL"
-#define __MULTI__ "MULTI"
+#define __IO__ "void"
+#define __MULTI__ "?"
 
 #include "ws_access.h"
 

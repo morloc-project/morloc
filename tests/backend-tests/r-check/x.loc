@@ -5,7 +5,7 @@ core/type
 seq :: Int -> Int -> [Int]
 max :: [Int] -> Int
 sqrt :: Int -> Int # TODO get real
-print_na :: MULTI -> String
+print_na :: ? -> String
 is_positive :: Int -> Bool
 
 @source R

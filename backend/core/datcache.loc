@@ -1,20 +1,14 @@
 @type
 datcache_chk :: String -> Int -> Bool
 datcache_get :: String -> Int -> *
-datcache_put :: String -> Int -> * -> NULL
-datcache_del :: String -> Int -> NULL
-
-@alias
-datcache_chk :: loc_datcache_chk
-datcache_get :: loc_datcache_get
-datcache_put :: loc_datcache_put
-datcache_del :: loc_datcache_del
+datcache_put :: String -> Int -> * -> void
+datcache_del :: String -> Int -> void
 
 @source R
 
 require(readr)
 
-loc_datcache_path <- function(mid, uid=NULL, outdir="cache") {
+datcache_path <- function(mid, uid=NULL, outdir="cache") {
     if(is.null(uid)){
         file.path(outdir, paste0(mid, ".rdat"))
     } else {
@@ -22,20 +16,20 @@ loc_datcache_path <- function(mid, uid=NULL, outdir="cache") {
     }
 }
 
-loc_datcache_chk <- function(mid, uid=NULL, ...) {
-    file.exists(loc_datcache_path(mid, uid, ...))
+datcache_chk <- function(mid, uid=NULL, ...) {
+    file.exists(datcache_path(mid, uid, ...))
 }
 
-loc_datcache_get <- function(mid, uid=NULL, ...) {
-    read_rds(loc_datcache_path(mid, uid, ...))
+datcache_get <- function(mid, uid=NULL, ...) {
+    read_rds(datcache_path(mid, uid, ...))
 }
 
-loc_datcache_put <- function(mid, dat, uid=NULL, ...) {
-    write_rds(dat, loc_datcache_path(mid, uid, ...))
+datcache_put <- function(mid, dat, uid=NULL, ...) {
+    write_rds(dat, datcache_path(mid, uid, ...))
 }
 
-loc_datcache_del <- function(mid, uid=NULL, ...) {
-    file.remove(loc_datcache_path(mid, uid, ...))
+datcache_del <- function(mid, uid=NULL, ...) {
+    file.remove(datcache_path(mid, uid, ...))
 }
 
 
@@ -43,30 +37,30 @@ loc_datcache_del <- function(mid, uid=NULL, ...) {
 
 import pickle
 
-def loc_datcache_path(mid, uid=None, outdir=""):
+def datcache_path(mid, uid=None, outdir=""):
     if uid:
         path = os.path.join(outdir, "%s_%s.pickle" % (mid, str(uid)))
     else:
         path = os.path.join(outdir, "%s.pickle" % mid)
     return path
 
-def loc_datcache_chk(*args, **kwargs):
-    path = loc_datcache_path(*args, **kwargs)
+def datcache_chk(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
     return os.path.exists(path)
 
-def loc_datcache_get(*args, **kwargs):
-    path = loc_datcache_path(*args, **kwargs)
+def datcache_get(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
     with open(path, 'rb') as f:
         dat = pickle.load(f)
     return dat
 
-def loc_datcache_put(mid, dat, **kwargs):
-    path = loc_datcache_path(mid, **kwargs)
+def datcache_put(mid, dat, **kwargs):
+    path = datcache_path(mid, **kwargs)
     with open(path, 'wb') as f:
         pickle.dump(dat, f, pickle.HIGHEST_PROTOCOL)
 
-def loc_datcache_del(*args, **kwargs):
-    path = loc_datcache_path(*args, **kwargs)
+def datcache_del(*args, **kwargs):
+    path = datcache_path(*args, **kwargs)
     os.remove(path)
 
 
@@ -79,7 +73,7 @@ then
 fi
 
 # $1: mid | $2: uid
-loc_datcache_chk() {
+datcache_chk() {
     if [[ -z $2 ]]
     then
         test -d $cachedir && test -f $cachedir/$1.dat
@@ -89,7 +83,7 @@ loc_datcache_chk() {
 }
 
 # $1: mid | $2: uid
-loc_datcache_get() {
+datcache_get() {
     if [[ -z $2 ]]
     then
         cat $cachedir/$1.dat | more
@@ -99,7 +93,7 @@ loc_datcache_get() {
 }
 
 # $1: mid | $2: tempfile | $3: uid
-loc_datcache_put() {
+datcache_put() {
     if [[ -z $3 ]]
     then
         ln $2 $cachedir/$1.dat
@@ -109,7 +103,7 @@ loc_datcache_put() {
 }
 
 # $1: mid | $2: uid
-loc_datcache_del() {
+datcache_del() {
     if [[ -z $2 ]]
     then
         rm $cachedir/$1.dat

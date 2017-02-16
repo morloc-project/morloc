@@ -1,14 +1,14 @@
 @type
-null    :: MULTI -> NULL
+null    :: ? -> void
 id      :: * -> *
-true    :: MULTI -> Bool
-false   :: MULTI -> Bool
+true    :: ? -> Bool
+false   :: ? -> Bool
 and     :: Bool  -> Bool -> Bool
 or      :: Bool  -> Bool -> Bool
 not     :: Bool  -> Bool
-any     :: MULTI -> Bool
-all     :: MULTI -> Bool
-nothing :: NULL -> NULL
+any     :: ? -> Bool
+all     :: ? -> Bool
+nothing :: void -> void
 
 @alias
 null    :: loc_null

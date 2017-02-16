@@ -105,7 +105,7 @@ void _infer_multi_type(W* w){
     wm = g_manifold(g_rhs(w));
     if(wm->type &&
        strcmp(g_string(g_lhs(wm->type->head)), "atomic") == 0 &&
-       strcmp(g_string(g_rhs(wm->type->head)), "MULTI") == 0 &&
+       strcmp(g_string(g_rhs(wm->type->head)), __MULTI__) == 0 &&
        ws_length(wm->type) == 2 &&
        ws_length(wm->inputs) > 1
     ){
@@ -149,7 +149,7 @@ W* _typecheck(W* w, W* msg){
     if(
         ws_length(m->type) == 2 &&
         strcmp(g_string(g_lhs(m->type->head)), "atomic") == 0 &&
-        strcmp(g_string(g_rhs(m->type->head)), "MULTI") == 0
+        strcmp(g_string(g_rhs(m->type->head)), __MULTI__) == 0
     ){
         return msg;
     }

@@ -304,8 +304,8 @@ is the terminal manifold).
 ![types](docs/images/types.png)
 
 LOC currently supports simple types. The syntax is nearly identical to Haskell,
-with the addition of two keywords: MULTI and NULL. MULTI matches any number of
-inputs of any type. NULL implies no output (if on the right) or input (if on
+with the addition of two keywords: `?` and `void`. `?` matches any number of
+inputs of any type. `void` implies no output (if on the right) or input (if on
 the left).
 
 LOC does not yet support generic types, type constructors, algebraic types and
