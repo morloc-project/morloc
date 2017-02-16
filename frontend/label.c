@@ -4,17 +4,19 @@ Label* label_new(){
     return (Label*)calloc(1, sizeof(Label));
 }
 
-Label* label_new_set(char* name, char* label){
+Label* label_new_set(char* name, char* label, char* lang){
     Label* l = (Label*)malloc(sizeof(Label));
     l->name = name;
     l->label = label;
+    l->lang = lang;
     return l;
 }
 
 Label* label_copy(Label* l){
     char* name  = l->name  ? strdup(l->name)  : NULL;
     char* label = l->label ? strdup(l->label) : NULL;
-    return label_new_set(name, label);
+    char* lang  = l->lang  ? strdup(l->lang)  : NULL;
+    return label_new_set(name, label, lang);
 }
 
 // assume 'a' is being searched against 'b'
@@ -48,6 +50,17 @@ bool label_cmp(Label* a, Label* b){
                         strcmp(a->label, b->label) == 0
                     )
                 )
+            )
+        )
+        &&
+        // languages must be compatible
+        (
+            // Either language is unspecified for either
+            (! a->lang || ! b->lang)
+            ||
+            // Or language is specified and equal for both
+            (
+                strcmp(a->lang, b->lang) == 0
             )
         )
     ;

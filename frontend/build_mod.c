@@ -9,14 +9,12 @@ bool _basename_match(W* w, W* p);
 void _add_modifier(W* w, W* p);
 Ws*  _do_operation(Ws* ws, W* p, char op);
 
-
-
 void link_modifiers(Ws* ws_top){
 
     // Set default function names for all manifolds
     ws_filter_mod(ws_top, get_manifolds, _set_default_manifold_function);
 
-    // Set manifold type based off the default names
+    // Set manifold type based off the manifold names
     ws_2mod(
         // get all manifolds
         ws_rfilter(ws_top, ws_recurse_composition, w_is_manifold),
@@ -25,6 +23,12 @@ void link_modifiers(Ws* ws_top){
         // if the names match, add the type to the manifold
         _set_manifold_type
     );
+
+    // set manifold languages
+    // this must be done prior to setting other modifiers
+    Ws* langs = ws_rfilter(ws_top, ws_recurse_most, w_is_lang);
+    langs = ws_map_split(langs, ws_split_couplet);
+    ws_map_pmod(ws_top, langs, _mod_add_modifiers);
 
     // add modifiers to all manifolds
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
@@ -76,10 +80,11 @@ bool _manifold_modifier(W* w){
         case T_CHECK:
         case T_FAIL:
         case T_ALIAS:
-        case T_LANG:
         case T_DOC:
         case T_ARGUMENT:
             return true;         
+        case T_LANG: // Language must be set first
+            return false;
         default:
             return false;
     } 
@@ -107,6 +112,27 @@ bool _basename_match(W* w, W* p){
     return result;
 }
 
+char* get_lang(W* w){
+    W* lhs = g_lhs(w);
+    char* lang = NULL;
+    switch(lhs->cls){
+        case K_LABEL:
+            lang = g_label(lhs)->lang; 
+            break;
+        case K_LIST:
+        case K_PATH:
+            lang = g_label(g_ws(lhs)->head)->lang; 
+            break;
+        case K_NAME:
+            lang = NULL; 
+            break;
+        default:
+            lang = NULL; 
+            break;
+    }
+    return lang;
+}
+
 // add the modifier stored in p (rhs of couplet) to w
 // if:
 //   1. the p->lhs contains only one name
@@ -116,6 +142,13 @@ void _add_modifier(W* w, W* p){
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);
     char op = g_couplet(p)->op;
+
+    char* mod_lang = get_lang(p);
+    char* man_lang = m->lang;
+
+    if(mod_lang &&
+       man_lang &&
+       strcmp(mod_lang, man_lang) != 0) return;
 
     switch(p->cls){
         case T_ALIAS:

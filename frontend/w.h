@@ -13,6 +13,32 @@
 
 typedef enum {
     X_NONE=0,
+    C_ARGREF,
+    C_COMPOSON,   // C for composition
+    C_DEREF,
+    C_GRPREF,
+    C_MANIFOLD,
+    C_NEST,
+    C_POSITIONAL,
+    C_REFER,
+    K_LABEL,
+    K_LIST,       // K for key
+    K_NAME,
+    K_PATH,
+    P_ARGUMENT,
+    P_COUPLET,
+    P_MANIFOLD,
+    P_SECTION,
+    P_STRING,     // P for primitive
+    P_TYPE,
+    P_WS,
+    T_ALIAS,
+    T_ARGUMENT,
+    T_CACHE,
+    T_CHECK, // T for top level
+    T_DOC,
+    T_EXPORT,
+    T_FAIL,
     T_H0,
     T_H1,
     T_H2,
@@ -23,38 +49,12 @@ typedef enum {
     T_H7,
     T_H8,
     T_H9,
-    P_STRING,     // P for primitive
-    P_WS,
-    P_COUPLET,
-    P_MANIFOLD,
-    P_SECTION,
-    T_CHECK, // T for top level
-    T_FAIL,
-    T_ALIAS,
     T_LANG,
-    T_DOC,
-    T_CACHE,
-    T_PATH,       
-    T_EXPORT,
-    T_SOURCE,
-    T_ARGUMENT,
-    P_ARGUMENT,
-    T_TYPE,
-    P_TYPE,
     T_ONTOLOGY,
-    C_COMPOSON,   // C for composition
-    C_MANIFOLD,
+    T_PATH,       
     T_SECTION,
-    C_NEST,
-    C_GRPREF,
-    C_POSITIONAL,
-    C_ARGREF,
-    C_DEREF,
-    C_REFER,
-    K_LIST,       // K for key
-    K_PATH,
-    K_LABEL,
-    K_NAME
+    T_SOURCE,
+    T_TYPE
 } Class;
 
 typedef enum {

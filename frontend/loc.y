@@ -102,7 +102,7 @@ section
 s_path
     : SECTION_PATH { $$ = $1; }
     | SECTION_PATH composition {
-        Label* l = label_new_set("default", NULL);
+        Label* l = label_new_set("default", NULL, NULL);
         W* label = w_new(K_LABEL, l);
         c_make_couplet($1, label, '=', w_new(P_WS, $2), T_PATH);
     }
