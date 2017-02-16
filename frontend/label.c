@@ -55,12 +55,12 @@ bool label_cmp(Label* a, Label* b){
         &&
         // languages must be compatible
         (
-            // Either language is unspecified for both 
-            (! a->lang && ! b->lang)
+            // Either language is unspecified for either
+            (! a->lang || ! b->lang)
             ||
             // Or language is specified and equal for both
             (
-                a->lang && b->lang && ( strcmp(a->lang, b->lang) == 0 )
+                strcmp(a->lang, b->lang) == 0
             )
         )
     ;

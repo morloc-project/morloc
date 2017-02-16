@@ -147,23 +147,32 @@ char* w_type_str(VType type){
 char* w_class_str(Class cls){
     char* s = NULL;
     switch(cls){
+        case C_ARGREF:     s = strdup("C_ARGREF")     ; break;
         case C_COMPOSON:   s = strdup("C_COMPOSON")   ; break;
-        case C_NEST:       s = strdup("C_NEST")       ; break;
         case C_DEREF:      s = strdup("C_DEREF")      ; break;
+        case C_GRPREF:     s = strdup("C_GRPREF")     ; break;
+        case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
+        case C_NEST:       s = strdup("C_NEST")       ; break;
+        case C_POSITIONAL: s = strdup("C_POSITIONAL") ; break;
         case C_REFER:      s = strdup("C_REFER")      ; break;
+        case K_LABEL:      s = strdup("K_LABEL")      ; break;
         case K_LIST:       s = strdup("K_LIST")       ; break;
+        case K_NAME:       s = strdup("K_NAME")       ; break;
         case K_PATH:       s = strdup("K_PATH")       ; break;
-        case P_WS:         s = strdup("P_WS")         ; break;
+        case P_ARGUMENT:   s = strdup("P_ARGUMENT")   ; break;
         case P_COUPLET:    s = strdup("P_COUPLET")    ; break;
         case P_MANIFOLD:   s = strdup("P_MANIFOLD")   ; break;
         case P_SECTION:    s = strdup("P_SECTION")    ; break;
-        case C_POSITIONAL: s = strdup("C_POSITIONAL") ; break;
-        case C_GRPREF:     s = strdup("C_GRPREF")     ; break;
-        case C_ARGREF:     s = strdup("C_ARGREF")     ; break;
         case P_STRING:     s = strdup("P_STRING")     ; break;
-        case K_NAME:       s = strdup("K_NAME")       ; break;
-        case T_PATH:       s = strdup("T_PATH")       ; break;
-        case T_LANG:       s = strdup("T_LANG")       ; break;
+        case P_TYPE:       s = strdup("P_TYPE")       ; break;
+        case P_WS:         s = strdup("P_WS")         ; break;
+        case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
+        case T_ALIAS:      s = strdup("T_ALIAS")      ; break;
+        case T_CACHE:      s = strdup("T_CACHE")      ; break;
+        case T_CHECK:      s = strdup("T_CHECK")      ; break;
+        case T_DOC:        s = strdup("T_DOC")        ; break;
+        case T_EXPORT:     s = strdup("T_EXPORT")     ; break;
+        case T_FAIL:       s = strdup("T_FAIL")       ; break;
         case T_H0:         s = strdup("T_H0")         ; break;
         case T_H1:         s = strdup("T_H1")         ; break;
         case T_H2:         s = strdup("T_H2")         ; break;
@@ -174,21 +183,13 @@ char* w_class_str(Class cls){
         case T_H7:         s = strdup("T_H7")         ; break;
         case T_H8:         s = strdup("T_H8")         ; break;
         case T_H9:         s = strdup("T_H9")         ; break;
-        case T_CHECK:      s = strdup("T_CHECK")      ; break;
-        case T_FAIL:       s = strdup("T_FAIL")       ; break;
-        case T_DOC:        s = strdup("T_DOC")        ; break;
-        case T_CACHE:      s = strdup("T_CACHE")      ; break;
-        case T_EXPORT:     s = strdup("T_EXPORT")     ; break;
-        case T_SOURCE:     s = strdup("T_SOURCE")     ; break;
-        case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
-        case P_ARGUMENT:   s = strdup("P_ARGUMENT")   ; break;
-        case T_TYPE:       s = strdup("T_TYPE")       ; break;
-        case P_TYPE:       s = strdup("P_TYPE")       ; break;
+        case T_LANG:       s = strdup("T_LANG")       ; break;
         case T_ONTOLOGY:   s = strdup("T_ONTOLOGY")   ; break;
-        case C_MANIFOLD:   s = strdup("C_MANIFOLD")   ; break;
+        case T_PATH:       s = strdup("T_PATH")       ; break;
         case T_SECTION:    s = strdup("T_SECTION")    ; break;
+        case T_SOURCE:     s = strdup("T_SOURCE")     ; break;
+        case T_TYPE:       s = strdup("T_TYPE")       ; break;
         case X_NONE:       s = strdup("X_NONE")       ; break;
-        case K_LABEL:      s = strdup("K_LABEL")      ; break;
         default:
             warn("illegal case (%s:%d)\n", __func__, __LINE__);
     }

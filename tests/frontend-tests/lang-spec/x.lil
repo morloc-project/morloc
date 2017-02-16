@@ -1,5 +1,5 @@
 EMIT	m0	sh
 FUNC	m0	sh_foo
 INPM	m0	0	m1	*
-EMIT	m1	*
-FUNC	m1	bar
+EMIT	m1	R
+FUNC	m1	r_bar

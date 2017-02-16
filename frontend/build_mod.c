@@ -8,25 +8,8 @@ void _mod_add_modifiers(Ws* ws_top, W* p);
 bool _basename_match(W* w, W* p);
 void _add_modifier(W* w, W* p);
 Ws*  _do_operation(Ws* ws, W* p, char op);
-void _set_lang(W* section, W* manifold);
-bool _always_do(W*, W*);
 
 void link_modifiers(Ws* ws_top){
-
-    // set languages
-    for(W* sec = ws_top->head; sec; sec = sec->next){
-        if(get_value_type(g_rhs(sec)->cls) == V_WS){
-            ws_modcrawl(
-               g_ws(g_rhs(sec)),
-               g_lhs(sec),
-               ws_recurse_most,
-               _always_do,
-               _set_lang
-            );
-        }
-    }
-
-ws_print(ws_top, ws_recurse_most);
 
     // Set default function names for all manifolds
     ws_filter_mod(ws_top, get_manifolds, _set_default_manifold_function);
@@ -41,40 +24,17 @@ ws_print(ws_top, ws_recurse_most);
         _set_manifold_type
     );
 
+    // set manifold languages
+    // this must be done prior to setting other modifiers
+    Ws* langs = ws_rfilter(ws_top, ws_recurse_most, w_is_lang);
+    langs = ws_map_split(langs, ws_split_couplet);
+    ws_map_pmod(ws_top, langs, _mod_add_modifiers);
+
     // add modifiers to all manifolds
     Ws* cs = ws_rfilter(ws_top, ws_recurse_most, _manifold_modifier);
     cs = ws_map_split(cs, ws_split_couplet);
     ws_map_pmod(ws_top, cs, _mod_add_modifiers);
 
-}
-
-void _set_lang(W* w, W* section){
-    char* lang = g_section(section)->lang;
-    switch(get_value_type(w->cls)){
-        case V_LABEL:
-            g_label(w)->lang = lang;
-            break;
-        case V_COUPLET:
-            _set_lang(g_lhs(w), section);
-            _set_lang(g_rhs(w), section);
-            break;
-        case V_MANIFOLD:
-            g_manifold(w)->lang = lang;
-            break;
-        case V_NONE:
-            // nothing to do
-        case V_STRING:
-            // nothing to do 
-        case V_WS:
-            // the recursion function handles this 
-        case V_SECTION:
-            // this can't happen
-            break;
-    }
-}
-
-bool _always_do(W* a, W* b){
-    return true;
 }
 
 // Given the couplet {Label, Manifold}, transfer the name from Label to
@@ -152,6 +112,27 @@ bool _basename_match(W* w, W* p){
     return result;
 }
 
+char* get_lang(W* w){
+    W* lhs = g_lhs(w);
+    char* lang = NULL;
+    switch(lhs->cls){
+        case K_LABEL:
+            lang = g_label(lhs)->lang; 
+            break;
+        case K_LIST:
+        case K_PATH:
+            lang = g_label(g_ws(lhs)->head)->lang; 
+            break;
+        case K_NAME:
+            lang = NULL; 
+            break;
+        default:
+            lang = NULL; 
+            break;
+    }
+    return lang;
+}
+
 // add the modifier stored in p (rhs of couplet) to w
 // if:
 //   1. the p->lhs contains only one name
@@ -161,6 +142,13 @@ void _add_modifier(W* w, W* p){
     Manifold* m = g_manifold(g_rhs(w));
     W* rhs = g_rhs(p);
     char op = g_couplet(p)->op;
+
+    char* mod_lang = get_lang(p);
+    char* man_lang = m->lang;
+
+    if(mod_lang &&
+       man_lang &&
+       strcmp(mod_lang, man_lang) != 0) return;
 
     switch(p->cls){
         case T_ALIAS:

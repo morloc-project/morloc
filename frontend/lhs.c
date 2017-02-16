@@ -22,7 +22,7 @@ char* trim_ws(char* s){
     return newstring;
 }
 
-W* label_from_str(char* s){
+W* label_from_str(char* s, char* lang){
     Label* id = (Label*)calloc(1, sizeof(Label));
     int i = 0;
     for(;;i++){
@@ -40,24 +40,24 @@ W* label_from_str(char* s){
 
     id->name = trim_ws(id->name);
     id->label = trim_ws(id->label);
-    id->lang = NULL;
+    id->lang = lang;
 
     W* w = w_new(K_LABEL, id);
 
     return w;
 }
 
-W* path_from_str(char* path_str){
+W* path_from_str(char* path_str, char* lang){
     char* s = path_str;
     Ws* p = NULL;
     for(int i = 0; ; i++){
         if(s[i] == '\0'){
-            p = ws_add(p, label_from_str(s));
+            p = ws_add(p, label_from_str(s, lang));
             break;
         }
         else if(s[i] == '/'){
             s[i] = '\0';
-            p = ws_add(p, label_from_str(s));
+            p = ws_add(p, label_from_str(s, lang));
             s = s + i + 1;
             i = 0;
         }
@@ -68,17 +68,17 @@ W* path_from_str(char* path_str){
     return w;
 }
 
-W* list_from_str(char* list_str){
+W* list_from_str(char* list_str, char* lang){
     char* s = list_str;
     Ws* ws = NULL;
     for(int i = 0; ; i++){
         if(s[i] == '\0'){
-            ws = ws_add(ws, path_from_str(s));
+            ws = ws_add(ws, path_from_str(s, lang));
             break;
         }
         else if(s[i] == ','){
             s[i] = '\0';
-            ws = ws_add(ws, path_from_str(s));
+            ws = ws_add(ws, path_from_str(s, lang));
             s = s + i + 1;
             i = 0;
         }

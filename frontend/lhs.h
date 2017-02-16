@@ -9,10 +9,10 @@
 #include "ws.h"
 #include "label.h"
 
-W* label_from_str(char* s); // W<K_LABEL>
+W* label_from_str(char* s, char* lang); // W<K_LABEL>
 
-W* list_from_str(char* s);  // W<K_LIST>
+W* list_from_str(char* s, char* lang);  // W<K_LIST>
 
-W* path_from_str(char* s);  // W<K_PATH>
+W* path_from_str(char* s, char* lang);  // W<K_PATH>
 
 #endif

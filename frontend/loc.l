@@ -9,6 +9,8 @@ int popfile(void);
 
 FILE* toklog;
 
+char* current_lang = NULL;
+
 #define LOG(x) fprintf(toklog, x); fflush(toklog);
 #define LOGV(x,a) fprintf(toklog, x, a); fflush(toklog);
 
@@ -49,6 +51,7 @@ char* trim_couple(const char* in_str);
     Section* sec = section_new(name, lang);                     \
     Couplet* c = couplet_new(w_new(P_SECTION, sec), NULL, '='); \
     yylval.s = w_new(T_SECTION, c);                             \
+    current_lang = lang;                                        \
     return s;
 
 %}
@@ -139,7 +142,7 @@ RESET { RETURN_TOKEN(RESET); }
 
 <S_EXPORT>as { RETURN_TOKEN(AS); }
 <S_EXPORT>^{ws}*{path} {
-    W* w = path_from_str(trim_couple(yytext));
+    W* w = path_from_str(trim_couple(yytext), current_lang);
     RETURN(w, PATH);
 }
 
@@ -161,7 +164,7 @@ RESET { RETURN_TOKEN(RESET); }
 }
 
 <S_PATH>{identifier} {
-    W* w = label_from_str(trim_couple(yytext));
+    W* w = label_from_str(trim_couple(yytext), current_lang);
     UNPUT_N(2)
     RETURN(w, IDENTIFIER);
 }
@@ -169,7 +172,7 @@ RESET { RETURN_TOKEN(RESET); }
 
 <S_PATH,S_SIDE>{var} {
     Manifold* m = manifold_new();
-    W* l = label_from_str(yytext);
+    W* l = label_from_str(yytext, current_lang);
     W* r = w_new(P_MANIFOLD, m);
     Couplet* c = couplet_new(l, r, '.'); 
     W* wc = w_new(C_MANIFOLD, c);
@@ -195,7 +198,7 @@ RESET { RETURN_TOKEN(RESET); }
 }
 <S_PATH,S_SIDE>{refer} {
     Manifold* m = NULL;
-    W* l = label_from_str(unquote(yytext));
+    W* l = label_from_str(unquote(yytext), current_lang);
     W* r = w_new(P_MANIFOLD, m);
     Couplet* c = couplet_new(l, r, '.'); 
     W* wc = w_new(C_REFER, c);
@@ -204,7 +207,7 @@ RESET { RETURN_TOKEN(RESET); }
 
 
 <S_CPLT,S_ARG,S_SIDE>{selection} {
-    W* w = list_from_str(trim_couple(yytext));
+    W* w = list_from_str(trim_couple(yytext), current_lang);
     UNPUT_N(2)
     RETURN(w, SELECTION);
 }
@@ -230,7 +233,7 @@ RESET { RETURN_TOKEN(RESET); }
 }
 
 <S_TYPE,S_ONTOLOGY>{list}{ws}*:: {
-    W* w = list_from_str(trim_couple(yytext));
+    W* w = list_from_str(trim_couple(yytext), current_lang);
     UNPUT_N(2)
     RETURN(w, NAMES);
 }
