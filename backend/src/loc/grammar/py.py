@@ -36,10 +36,12 @@ if __name__ == '__main__':
     cmd_str = "{{function}}({{args}})"
     arg_str = ', '.join(args[2:])
     cmd = cmd_str.format(function=args[1], args=arg_str)
-    eval(cmd)
+    x = eval(cmd)
+    result = native_to_universal(x, output_type[args[1]], outdir)
+    print(result)
 '''
-        self.TYPE_MAP         = '''{pairs}'''
-        self.TYPE_ACCESS      = '''{key}_type'''
+        self.TYPE_MAP         = '''output_type = {{\n{pairs}\n}}'''
+        self.TYPE_ACCESS      = '''output_type[{key}]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
         self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
         self.NATIVE_MANIFOLD = '''\
@@ -57,7 +59,7 @@ def {mid}({marg_uid}):
 {blk}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
-{function}({arguments})\
+return {function}({arguments})\
 '''
         self.UID_WRAPPER = '''\
 {mid}_uid = 0
@@ -109,15 +111,29 @@ if {checks}:
 else:
 {else_blk}
 '''
-        self.DO_VALIDATE_IF = '''\
+        self.RUN_BLK = '''\
 {hook4}
 b = {function}({arguments})
 {cache_put}
 {hook5}
 '''
-        self.DO_VALIDATE_ELSE = '''\
+        self.RUN_BLK_VOID = '''\
+{hook4}
+{function}({arguments})
+b = None
+{cache_put}
+{hook5}
+'''
+        self.FAIL_BLK = '''\
 {hook6}
 b = {fail}
+{cache_put}
+{hook7}\
+'''
+        self.FAIL_BLK_VOID = '''\
+{hook6}
+{fail}
+b = None
 {cache_put}
 {hook7}\
 '''
@@ -161,8 +177,8 @@ b = {function}({arguments})
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("%s_type = '%s'" % (k, v.type))
+            types.append("    '%s' : '%s'" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("x%s = '%s'" % (m, t))
-        return self.TYPE_MAP.format(pairs='\n'.join(types))
+                    types.append("x%s : '%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs=',\n'.join(types))

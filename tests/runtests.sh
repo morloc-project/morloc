@@ -230,6 +230,7 @@ fi
 
 if [[ $lang == "all" || $lang == "py" ]] ; then
 backend_test   py-hooks  main       'py-hooks/          -- python hello world program ..................... '
+backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then

@@ -1,3 +1,8 @@
+@type
+foo :: Int -> void
+bar :: void -> Int
+print :: * -> void
+
 @path
 foo . bar
 
@@ -67,9 +72,8 @@ core/type
 def true():
     return True
 
-def foo(x, y):
-    return 1
+def foo(x):
+    pass
 
-def bar():
+def bar(x=None, y=None):
     return x + y
-

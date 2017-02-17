@@ -5,9 +5,10 @@ all:
 
 .PHONY: run
 run:
-	./manifold-nexus.py main
+	./manifold-nexus.py a
+	./manifold-nexus.py b
 
 .PHONY: clean
 clean:
 	rm -f manifold-nexus.py
-	rm -rf locout z.pdf
+	rm -rf locout
