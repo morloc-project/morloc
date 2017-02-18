@@ -1,0 +1,16 @@
+@type
+gentab :: void -> [[Int]]
+
+@path py
+gentab
+
+@include
+core/type
+
+@source py
+
+def gentab():
+    d = []
+    for i in range(5):
+        d.append(tuple(range(i, i+3)))
+    return d 

@@ -11,16 +11,10 @@ core/type
 @type
 seq :: Int -> Int -> [Int]
 max :: [Int] -> Int
-sqrt :: Int -> Int # TODO get real
+sqrt :: Int -> Num
 
-@export
-sqrt
-
-@path
+@path R
 sqrt . max . seq . 1 9
-
-@lang
-* :: R
 
 @cache
 seq :: datcache

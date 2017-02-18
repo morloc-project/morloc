@@ -219,7 +219,7 @@ backend_x_test r-branch             'r-branch/          -- make if-elif-else ana
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
 backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
-backend_test   r-cached  sqrt       'r-cached/          -- sqrt . max . seq ............................... '
+backend_test   r-cached  main       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_x_test r-refer              'r-refer/           -- max . <runif> .................................. '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
@@ -231,6 +231,7 @@ fi
 if [[ $lang == "all" || $lang == "py" ]] ; then
 backend_test   py-hooks  main       'py-hooks/          -- python hello world program ..................... '
 backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
+backend_test py-table main          'py-table/          -- test printing of type `[[Int]]` ................ '
 fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then

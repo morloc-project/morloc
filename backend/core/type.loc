@@ -120,6 +120,22 @@ universal_to_native (){
 
 import tempfile
 
+def __loc_parse_list(x, typ, sep="\n"):
+    if not isinstance(x, (list, tuple, set)):
+        msg = "Expected iterable class for input of type '%s', got '%s'"
+        print(msg % (str(type(x))), file=sys.stderr)
+
+    typ = typ[1:-1]
+    if typ[0] == '[':
+        x = ["\t".join([str(s) for s in ss]) for ss in x]
+        typ = typ[1:-1]
+
+    if typ[0] == '[':
+        msg = "Arrays of dimension greater than 2 are not supported (in type '[[%s]]')"
+        print(msg % typ, file=sys.stderr)
+
+    return '\n'.join((str(s) for s in x))
+
 # Convert native data structure to file or literal
 def native_to_universal(x, typ, outdir):
     f = None
@@ -139,20 +155,25 @@ def native_to_universal(x, typ, outdir):
             dir    = outdir,
             delete = False
         )
-        f <- tmp.name
+        f = tmp.name
 
         if isinstance(x, dict):
             x = x.items()
 
-        if isinstance(x, (list, set)):
-            for e in x:
-                if(isinstance(e, str)):
-                    tmp.write(e)
-                else:
-                    tmp.write("\t".join([str(xx) for xx in x]))
+        data = None
+
+        if typ[0] == '[':
+            data = __loc_parse_list(x, typ)
+        elif typ == "Text" and isinstance(x, (list,tuple,set)):
+            data = "\n".join((str(s) for s in x))
         else:
-            msg = "Py: Cannot export object of class '%s'" % type(x)
+            msg = "Py: Cannot export object of class '%s', guessing" % type(x)
             print(msg, file=sys.stderr)
+            data = str(x)
+
+        tmp.write(data.encode("ASCII"))
+        tmp.write("\n".encode("ASCII"))
+
     return str(f)
 
 # Convert text or binary to native data structure
