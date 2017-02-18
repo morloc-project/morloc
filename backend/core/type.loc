@@ -185,11 +185,20 @@ caster = {
     "Num":float,
     "String":str,
     "File":str,
-    "Bool":bool
+    "Bool":bool,
+    "*":str
 }
-def universal_to_native(x, type):
+def universal_to_native(x, typ):
     if typ in caster:
         d = caster[typ](x)
+    elif typ[0] == '[':
+        d = x.rstrip().split("\n")
+        if typ[1] == '[':
+            cast = caster[typ[2:-2]]
+            d = [[cast(s) for s in ss.split("\t")] for ss in d]
+        else:
+            cast = caster[typ[1:-1]]
+            d = [cast(s) for s in d]
     elif typ == "void":
         d = ""
     elif typ == "Text":

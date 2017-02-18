@@ -231,7 +231,8 @@ fi
 if [[ $lang == "all" || $lang == "py" ]] ; then
 backend_test   py-hooks  main       'py-hooks/          -- python hello world program ..................... '
 backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
-backend_test py-table main          'py-table/          -- test printing of type `[[Int]]` ................ '
+backend_test   py-table main        'py-table/          -- test printing of type `[[Int]]` ................ '
+backend_test   py-sh main           'py-sh/             -- python [[Int]] to shell `sort` back to python .. '
 fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then

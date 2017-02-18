@@ -22,6 +22,8 @@ class PyGrammar(Grammar):
 #!/usr/bin/env python3
 
 import sys
+import os
+import subprocess
 
 outdir = "{outdir}"
 
@@ -78,15 +80,14 @@ def {mid}({marg_uid}):
 {blk}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-pass
-# foreign_pool = file.path(outdir, "call.{foreign_lang}")
-# fo = system2(
-#   foreign_pool,
-#   args=c({args}),
-#   stdout=TRUE,
-#   stderr=FALSE
-# )
-# universal_to_native(fo, {mid}_type)\
+foreign_pool = os.path.join(outdir, "call.{foreign_lang}")
+result = subprocess.run(
+    [foreign_pool] + [{args}],
+    stderr=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    encoding='utf-8'
+)
+return universal_to_native(result.stdout, output_type["{mid}"])
 '''
         self.CACHE = '''\
 if {cache}_chk("{mid}"{uid}{cache_args}):
@@ -154,23 +155,21 @@ b = {function}({arguments})
         self.CHECK_CALL    = '{hmid}({marg_uid})'
         self.HOOK          = '{hmid}({marg_uid})'
 
-    def make_foreign_manifold(self, m):
-        arg_var = " %s" * (int(m.narg) + 1) if m.narg else ""
-
+    def make_foreign_manifold_blk(self, m):
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            s = 'native_to_universal(%s, %s_type, outdir)' % (a,a)
+            s = 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
             arg_rep.append(s)
         if m.narg:
             arg_rep.append("uid")
         arg_rep = ', '.join(arg_rep)
-
-        s = self.FOREIGN_MANIFOLD.format(
-            mid=m.mid,
-            args=arg_rep,
-            marg_uid=self.make_marg_uid(m),
-            foreign_lang=m.lang
+        s = self.FOREIGN_MANIFOLD_BLK.format(
+            mid          = m.mid,
+            args         = arg_rep,
+            marg_uid     = self.make_marg_uid(m),
+            outdir       = self.outdir,
+            foreign_lang = m.lang,
         )
         return s
 
