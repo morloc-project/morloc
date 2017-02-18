@@ -6,9 +6,6 @@ sum :: [Int] -> Int
 @path
 map . & ( sum . seq . 1 $1) (c . 1 2 3 4 5)
 
-@export
-map as main
-
 @lang
 * :: R
 seq :: sh
