@@ -198,6 +198,7 @@ if $test_types
 then
 announce "Type tests"
 backend_test multi         main 'multi/             -- types and lists of types ....................... '
+backend_test all           main 'all/               -- pass each atomic type through all language ..... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 fi
@@ -218,7 +219,7 @@ backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_
 backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
 backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
-backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
+backend_test   r-hooks   main       'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-cached  main       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
 backend_x_test r-refer              'r-refer/           -- max . <runif> .................................. '
@@ -237,7 +238,7 @@ fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition into a bash map command ..... '
-backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-simple main       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-all    main       'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '

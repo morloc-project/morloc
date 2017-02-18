@@ -15,7 +15,7 @@ IntTest    :: iid:py . iid:sh . iid:R . iid:py . 42
 NumTest    :: nid:py . nid:sh . nid:R . nid:py . 0.42
 StringTest :: sid:py . sid:sh . sid:R . sid:py . "fourty-two"
 BoolTest   :: bid:py . bid:sh . bid:R . bid:py . 1
-TextTest   :: tid:py . tid:R . tid:py . read . "test.txt"
+TextTest   :: tid:py . tid:sh . tid:R .  tid:py . read . "test.txt"
 
 @export
 IntTest/iid:py    as Int

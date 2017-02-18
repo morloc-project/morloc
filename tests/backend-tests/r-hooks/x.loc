@@ -1,22 +1,22 @@
 @include
 core/memcache
 core/type
+core/atomic
 
-@source R
-
-true <- function() { TRUE }
-
-foo <- function(...) { }
-bar <- function() { 1 }
-
-@export
-foo
+@type
+bar :: void -> Int
+foo :: Int -> void
+cat :: String -> void
 
 @path
 foo . bar
 
+@source R
+foo <- function(x, y=0) { NULL }
+bar <- function() { 1 }
+
 @arg
-foo :: x=1
+foo :: y=1
 cat :: file="/dev/stderr"
 
 @lang

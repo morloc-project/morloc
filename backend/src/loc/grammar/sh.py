@@ -42,13 +42,27 @@ then
     then
         cat $outdir/$1_tmp
     else
-        $@
+        vtype=${{typemap[$1]}}
+        if [[ $vtype == "Int"    ||
+              $vtype == "String" ||
+              $vtype == "Num"    ||
+              $vtype == "Bool"   ||
+              $vtype == "File" ]]
+        then
+            d=$( native_to_universal $( $@ ) $vtype $outdir )
+        else
+            d=$( native_to_universal <( $@ ) $vtype $outdir )
+        fi
+        echo $d
     fi
 else
     exit 1 
 fi'''
-        self.TYPE_MAP         = '{pairs}'
-        self.TYPE_ACCESS      = '${key}_type'
+        self.TYPE_MAP         = '''\
+declare -A typemap
+{pairs}
+'''
+        self.TYPE_ACCESS      = '${{typemap[{mid}]}}'
         self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
         self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
         self.NATIVE_MANIFOLD = '''\
@@ -89,7 +103,7 @@ wrap_{mid} () {{
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-universal_to_native "$u" $type_{mid}\
+universal_to_native "$u" ${{typemap[{mid}]}}\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}
@@ -209,7 +223,7 @@ fi
         arg_rep = ""
         for i in range(int(m.narg)):
             i_str = str(i+1)
-            arg_rep += '\\\n    $(native_to_universal "$%s" "$type_%s" "$outdir")' % (i_str,i_str)
+            arg_rep += '\\\n    $(native_to_universal "$%s" "${{typemap[%s]}}" "$outdir")' % (i_str,i_str)
         if m.narg:
             arg_rep += '\\\n    "$%s_uid"' % m.mid
 
@@ -223,8 +237,8 @@ fi
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("type_%s='%s'" % (k, v.type))
+            types.append("typemap[%s]=%s" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("type_%s='%s'" % (m, t))
+                    types.append("typemap[%s]=%s" % (m, t))
         return self.TYPE_MAP.format(pairs='\n'.join(types))
