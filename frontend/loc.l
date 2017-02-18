@@ -231,6 +231,11 @@ RESET { RETURN_TOKEN(RESET); }
     W* w = w_new(P_STRING, strdup(yytext));
     RETURN(w, PRIMITIVE);
 }
+<S_ARG>{bak} {
+    W* w = w_new(C_POSITIONAL, unquote(yytext));
+    // TODO - this isn't primitive
+    RETURN(w, PRIMITIVE);
+}
 
 <S_TYPE,S_ONTOLOGY>{list}{ws}*:: {
     W* w = list_from_str(trim_couple(yytext), current_lang);

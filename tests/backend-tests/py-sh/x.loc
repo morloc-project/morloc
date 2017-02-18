@@ -1,0 +1,28 @@
+@type
+gentab :: void -> [[Int]]
+sort :: [[Int]] -> [[Int]]
+topthree :: [[Int]] -> [[Int]]
+
+@path
+topthree . sort . gentab
+
+@lang
+sort :: sh
+gentab,topthree :: py
+
+@arg
+sort :: -r
+
+@include
+core/type
+
+@source py
+
+def gentab():
+    d = []
+    for i in range(5):
+        d.append(tuple(range(i, i+3)))
+    return d 
+
+def topthree(x):
+    return x[0:3]

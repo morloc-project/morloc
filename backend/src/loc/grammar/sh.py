@@ -119,15 +119,29 @@ else
 {else_blk}
 fi
 '''
-        self.DO_VALIDATE_IF = '''\
+        self.RUN_BLK = '''\
 {hook4}
 {function} {arguments}{wrapper} > $outdir/{mid}_tmp
 {cache_put}
 {hook5}\
 '''
-        self.DO_VALIDATE_ELSE = '''\
+        self.RUN_BLK_VOID = '''\
+{hook4}
+{function} {arguments}{wrapper} > /dev/null
+> $outdir/{mid}_tmp
+{cache_put}
+{hook5}\
+'''
+        self.FAIL_BLK = '''\
 {hook6}
 {fail}> $outdir/{mid}_tmp
+{cache_put}
+{hook7}\
+'''
+        self.FAIL_BLK_VOID = '''\
+{hook6}
+{fail} > /dev/null
+> $outdir/{mid}_tmp
 {cache_put}
 {hook7}\
 '''
@@ -172,11 +186,16 @@ fi
         )
 
     def make_do_validate_if(self, m):
+        if m.type == "void":
+            template = self.RUN_BLK_VOID
+        else:
+            template = self.RUN_BLK
+
         if m.type == "Bool":
             wrapper = self.BOOL_WRAPPER
         else:
             wrapper = ""
-        return self.DO_VALIDATE_IF.format(
+        return template.format(
             mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),

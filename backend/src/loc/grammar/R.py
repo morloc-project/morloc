@@ -35,7 +35,12 @@ m <- args[1]
 
 if(exists(m)){{
   f <- get(m)
-  d <- do.call(f, as.list(args[-1]))
+  if(types[m] == "void"){{
+    do.call(f, as.list(args[-1]))
+    d = ""
+  }} else {{
+    d <- do.call(f, as.list(args[-1]))
+  }}
   u <- native_to_universal(d, types[m], outdir)
   write(u, file=stdout())
 }} else {{
@@ -118,15 +123,29 @@ if( {checks} ){{
 {else_blk}
 }}
 '''
-        self.DO_VALIDATE_IF = '''\
+        self.RUN_BLK = '''\
 {hook4}
 b <- {function}({arguments})
 {cache_put}
 {hook5}
 '''
-        self.DO_VALIDATE_ELSE = '''\
+        self.RUN_BLK_VOID = '''\
+{hook4}
+{function}({arguments})
+b <- NULL
+{cache_put}
+{hook5}
+'''
+        self.FAIL_BLK = '''\
 {hook6}
 b <- {fail}
+{cache_put}
+{hook7}
+'''
+        self.FAIL_BLK_VOID = '''\
+{hook6}
+{fail}
+b <- NULL
 {cache_put}
 {hook7}
 '''

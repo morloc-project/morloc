@@ -1,12 +1,17 @@
+@type
+native_to_universal :: * -> String -> File -> String
+universal_to_native :: String -> String -> *
+
+
 @source R
 
 # Convert native data structure to file or literal
 native_to_universal <- function(x, type, outdir){
-  f <- NULL
+  f <- ""
   if(is.atomic(x) && length(x) == 1){
     f <- as.character(x)
-  } else if(type == "NULL"){
-    f <- NULL
+  } else if(type == "void"){
+    f <- ""
   } else {
     f <- tempfile(pattern="m1_R_", tmpdir=outdir, fileext=".out")
     require(readr)
@@ -17,7 +22,7 @@ native_to_universal <- function(x, type, outdir){
     } else if(is.vector(x)) {
       write(x, file=f, ncolumns=1)
     } else if(is.null(x)) {
-      f <- NULL 
+      f <- ""
     } else {
       msg = sprintf("R: Cannot export object of class '%s'", class(x))
       warning(msg)
@@ -40,7 +45,7 @@ universal_to_native <- function(x, type){
   else if( any(type %in% logical_types) ){
     d <- as.logical(x)
   }
-  else if( type == "NULL" ){
+  else if( type == "void" ){
     d <- NULL
   }
   else if( type == "Text" ){
@@ -71,6 +76,9 @@ native_to_universal (){
           $vtype == "File" ]]
     then
         echo "$x"
+    elif [[ $vtype == "void" ]]
+    then
+        echo -n ""
     else
         tmpfile=$outdir/sh_$RANDOM$RANDOM
         touch $tmpfile || echo "Cannot write to temporary file $tmpfile" >&2
@@ -94,49 +102,79 @@ universal_to_native (){
           $vtype == "File" ]]
     then
         echo "$x"
+    elif [[ $vtype == "void" ]]
+    then
+        echo -n ""
     else
-        cat "$x" || echo "(sh) cannot cat file '$x' (type='$2')" >&2
+        if [[ -r "$x" ]]
+        then
+            cat "$x"
+        else
+            echo "(sh) cannot cat file '$x' (type='$2')" >&2
+        fi
     fi
 }
-
 
 
 @source py
 
 import tempfile
 
+def __loc_parse_list(x, typ, sep="\n"):
+    if not isinstance(x, (list, tuple, set)):
+        msg = "Expected iterable class for input of type '%s', got '%s'"
+        print(msg % (str(type(x))), file=sys.stderr)
+
+    typ = typ[1:-1]
+    if typ[0] == '[':
+        x = ["\t".join([str(s) for s in ss]) for ss in x]
+        typ = typ[1:-1]
+
+    if typ[0] == '[':
+        msg = "Arrays of dimension greater than 2 are not supported (in type '[[%s]]')"
+        print(msg % typ, file=sys.stderr)
+
+    return '\n'.join((str(s) for s in x))
+
 # Convert native data structure to file or literal
-def native_to_universal(x, typ):
-  f = None
-  if typ in ("String", "File"):
-    f = str(x)
-  elif typ == "Int":
-    f = int(x)
-  elif typ == "Num":
-    f = float(x)
-  elif typ == "Bool":
-    f = 1 if x else 0
-  else:
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="py_%s" % typ,
-        dir=outdir,
-        delete=False
-    )
-    f <- tmp.name
-
-    if isinstance(x, dict):
-        x = x.items()
-
-    if isinstance(x, (list, set)):
-        for e in x:
-            if(isinstance(e, str)):
-                tmp.write(e)
-            else:
-                tmp.write("\t".join([str(xx) for xx in x]))
+def native_to_universal(x, typ, outdir):
+    f = None
+    if typ in ("String", "File"):
+        f = str(x)
+    elif typ == "Int":
+        f = int(x)
+    elif typ == "Num":
+        f = float(x)
+    elif typ == "Bool":
+        f = 1 if x else 0
+    elif typ == "void":
+        f = ""
     else:
-      msg = "Py: Cannot export object of class '%s'" % type(x)
-      print(msg, file=sys.stderr)
-  return f
+        tmp = tempfile.NamedTemporaryFile(
+            prefix = "py_%s" % typ,
+            dir    = outdir,
+            delete = False
+        )
+        f = tmp.name
+
+        if isinstance(x, dict):
+            x = x.items()
+
+        data = None
+
+        if typ[0] == '[':
+            data = __loc_parse_list(x, typ)
+        elif typ == "Text" and isinstance(x, (list,tuple,set)):
+            data = "\n".join((str(s) for s in x))
+        else:
+            msg = "Py: Cannot export object of class '%s', guessing" % type(x)
+            print(msg, file=sys.stderr)
+            data = str(x)
+
+        tmp.write(data.encode("ASCII"))
+        tmp.write("\n".encode("ASCII"))
+
+    return str(f)
 
 # Convert text or binary to native data structure
 number_types  = ("Int", "[Int]")
@@ -147,11 +185,22 @@ caster = {
     "Num":float,
     "String":str,
     "File":str,
-    "Bool":bool
+    "Bool":bool,
+    "*":str
 }
-def universal_to_native(x, type):
+def universal_to_native(x, typ):
     if typ in caster:
         d = caster[typ](x)
+    elif typ[0] == '[':
+        d = x.rstrip().split("\n")
+        if typ[1] == '[':
+            cast = caster[typ[2:-2]]
+            d = [[cast(s) for s in ss.split("\t")] for ss in d]
+        else:
+            cast = caster[typ[1:-1]]
+            d = [cast(s) for s in d]
+    elif typ == "void":
+        d = ""
     elif typ == "Text":
         with open(x, "r") as f:
             d = f.readlines()

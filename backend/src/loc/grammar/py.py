@@ -22,6 +22,8 @@ class PyGrammar(Grammar):
 #!/usr/bin/env python3
 
 import sys
+import os
+import subprocess
 
 outdir = "{outdir}"
 
@@ -36,10 +38,12 @@ if __name__ == '__main__':
     cmd_str = "{{function}}({{args}})"
     arg_str = ', '.join(args[2:])
     cmd = cmd_str.format(function=args[1], args=arg_str)
-    eval(cmd)
+    x = eval(cmd)
+    result = native_to_universal(x, output_type[args[1]], outdir)
+    print(result)
 '''
-        self.TYPE_MAP         = '''{pairs}'''
-        self.TYPE_ACCESS      = '''{key}_type'''
+        self.TYPE_MAP         = '''output_type = {{\n{pairs}\n}}'''
+        self.TYPE_ACCESS      = '''output_type[{key}]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
         self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
         self.NATIVE_MANIFOLD = '''\
@@ -57,7 +61,7 @@ def {mid}({marg_uid}):
 {blk}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
-{function}({arguments})\
+return {function}({arguments})\
 '''
         self.UID_WRAPPER = '''\
 {mid}_uid = 0
@@ -76,15 +80,14 @@ def {mid}({marg_uid}):
 {blk}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-pass
-# foreign_pool = file.path(outdir, "call.{foreign_lang}")
-# fo = system2(
-#   foreign_pool,
-#   args=c({args}),
-#   stdout=TRUE,
-#   stderr=FALSE
-# )
-# universal_to_native(fo, {mid}_type)\
+foreign_pool = os.path.join(outdir, "call.{foreign_lang}")
+result = subprocess.run(
+    [foreign_pool] + [{args}],
+    stderr=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    encoding='utf-8'
+)
+return universal_to_native(result.stdout, output_type["{mid}"])
 '''
         self.CACHE = '''\
 if {cache}_chk("{mid}"{uid}{cache_args}):
@@ -109,15 +112,29 @@ if {checks}:
 else:
 {else_blk}
 '''
-        self.DO_VALIDATE_IF = '''\
+        self.RUN_BLK = '''\
 {hook4}
 b = {function}({arguments})
 {cache_put}
 {hook5}
 '''
-        self.DO_VALIDATE_ELSE = '''\
+        self.RUN_BLK_VOID = '''\
+{hook4}
+{function}({arguments})
+b = None
+{cache_put}
+{hook5}
+'''
+        self.FAIL_BLK = '''\
 {hook6}
 b = {fail}
+{cache_put}
+{hook7}\
+'''
+        self.FAIL_BLK_VOID = '''\
+{hook6}
+{fail}
+b = None
 {cache_put}
 {hook7}\
 '''
@@ -138,31 +155,29 @@ b = {function}({arguments})
         self.CHECK_CALL    = '{hmid}({marg_uid})'
         self.HOOK          = '{hmid}({marg_uid})'
 
-    def make_foreign_manifold(self, m):
-        arg_var = " %s" * (int(m.narg) + 1) if m.narg else ""
-
+    def make_foreign_manifold_blk(self, m):
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            s = 'native_to_universal(%s, %s_type, outdir)' % (a,a)
+            s = 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
             arg_rep.append(s)
         if m.narg:
             arg_rep.append("uid")
         arg_rep = ', '.join(arg_rep)
-
-        s = self.FOREIGN_MANIFOLD.format(
-            mid=m.mid,
-            args=arg_rep,
-            marg_uid=self.make_marg_uid(m),
-            foreign_lang=m.lang
+        s = self.FOREIGN_MANIFOLD_BLK.format(
+            mid          = m.mid,
+            args         = arg_rep,
+            marg_uid     = self.make_marg_uid(m),
+            outdir       = self.outdir,
+            foreign_lang = m.lang,
         )
         return s
 
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("%s_type = '%s'" % (k, v.type))
+            types.append("    '%s' : '%s'" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("x%s = '%s'" % (m, t))
-        return self.TYPE_MAP.format(pairs='\n'.join(types))
+                    types.append("x%s : '%s'" % (m, t))
+        return self.TYPE_MAP.format(pairs=',\n'.join(types))

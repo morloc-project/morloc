@@ -112,16 +112,16 @@ loc_nothing() {
 
 @source py
 
-def loc_null(args*, kwargs**):
+def loc_null(*args, **kwargs):
     pass
 
 def loc_id(x):
     return x
 
-def loc_true(args*, kwargs**):
+def loc_true(*args, **kwargs):
     return True
 
-def loc_false(args*, kwargs**):
+def loc_false(*args, **kwargs):
     return False
 
 def loc_and(a, b):

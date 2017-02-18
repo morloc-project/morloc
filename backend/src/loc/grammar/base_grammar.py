@@ -31,11 +31,13 @@ class Grammar:
         self.CACHE_IF             = ""
         self.CACHE_ELSE           = ""
         self.DATCACHE_ARGS        = ""
-        self.CACHE_ELSE           = ""
         self.DO_VALIDATE          = ""
-        self.DO_VALIDATE_IF       = ""
-        self.DO_VALIDATE_ELSE     = ""
         self.NO_VALIDATE          = ""
+        self.RUN_BLK              = ""
+        self.RUN_BLK_VOID         = self.RUN_BLK
+        self.FAIL_BLK             = ""
+        self.FAIL_BLK_VOID        = self.FAIL_BLK
+        self.RETURN               = ""
         self.ARGUMENTS            = ""
         self.MANIFOLD_CALL        = ""
         self.CHECK_CALL           = ""
@@ -219,7 +221,12 @@ class Grammar:
         )
 
     def make_do_validate_if(self, m):
-        return self.DO_VALIDATE_IF.format(
+        if m.type == "void":
+            template = self.RUN_BLK_VOID
+        else:
+            template = self.RUN_BLK
+
+        return template.format(
             mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
@@ -229,7 +236,14 @@ class Grammar:
         )
 
     def make_do_validate_else(self, m):
-        return self.DO_VALIDATE_ELSE.format(
+        template = self.FAIL_BLK
+        try:
+            if m.fail.type == "void":
+                template = self.FAIL_BLK_VOID
+        except AttributeError:
+            pass
+
+        return template.format(
             mid       = m.mid,
             hook6     = self.make_hook(m, 6),
             hook7     = self.make_hook(m, 7),
@@ -239,6 +253,12 @@ class Grammar:
 
     def make_no_validate(self, m):
         return self.make_do_validate_if(m)
+
+    def make_return(self, m):
+        pass
+
+    def make_return_void(self,m):
+        pass
 
     def make_check(self, m):
         ss = []
