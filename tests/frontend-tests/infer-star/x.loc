@@ -1,0 +1,6 @@
+@type
+foo :: * -> void
+bar :: void -> A
+
+@path
+foo . bar

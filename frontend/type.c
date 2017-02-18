@@ -2,6 +2,9 @@
 
 void _infer_multi_type(W* w);
 
+void _infer_star_type(W* w);
+void _transfer_star_type(W* type, W* input);
+
 // takes in all data
 W* _typecheck_derefs(Ws* ws_top, W* msg);
 
@@ -91,6 +94,31 @@ bool _cmp_type(char* a, char* b){
 void set_default_types(Ws* ws){
     /* STUB */
 }
+
+void infer_star_types(Ws* ws){
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_manifold,
+        _infer_star_type
+    );
+}
+void _infer_star_type(W* w){
+    Manifold* m = g_manifold(g_rhs(w));
+    ws_zip_mod(
+        ws_init(m->type),
+        m->inputs,
+        _transfer_star_type
+    );
+}
+void _transfer_star_type(W* type, W* input){
+    W* itype = g_manifold(g_rhs(input))->type->last;
+    if(strcmp(g_string(g_rhs(type)), "*") == 0){
+        s_lhs(type, g_lhs(itype));
+        s_rhs(type, g_rhs(itype));
+    }
+}
+
 
 void infer_multi_types(Ws* ws){
     ws_rcmod(

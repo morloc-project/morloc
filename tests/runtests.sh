@@ -178,6 +178,7 @@ frontend_test lang-spec          'lang-spec/         -- language specific sectio
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
 frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
+frontend_test infer-star         'infer-star/        -- infer type of * generics ....................... '
 frontend_test operator-add       'operator-add/      -- test :=, and :+ ................................ '
 frontend_test operator-sub       'operator-sub/      -- test :=, :+, and :- ............................ '
 frontend_test stars              'stars/             -- test * on modifier lhs ......................... '
