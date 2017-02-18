@@ -18,3 +18,4 @@ uniq . sort . grep . man . "ls"
 
 @arg
 grep := -Po "[a-z]+ed"
+man :: --no-hyphenation
