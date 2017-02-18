@@ -1,5 +1,10 @@
 @include
 core/control
+core/type
+
+@type
+echo :: String -> String -> String
+seq :: Int -> Int -> [Int]
 
 @path sh
 

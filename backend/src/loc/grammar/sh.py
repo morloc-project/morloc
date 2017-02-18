@@ -38,9 +38,9 @@ manifold_exists() {{
 }}
 if manifold_exists $1
 then
-    if [[ -f $outdir/$1_tmp ]]
+    if [[ -f "$outdir/$1_tmp" ]]
     then
-        cat $outdir/$1_tmp
+        cat "$outdir/$1_tmp"
     else
         vtype=${{typemap[$1]}}
         if [[ $vtype == "Int"    ||
@@ -49,9 +49,9 @@ then
               $vtype == "Bool"   ||
               $vtype == "File" ]]
         then
-            d=$( native_to_universal $( $@ ) $vtype $outdir )
+            d=$( native_to_universal "$( $@ )" "$vtype" "$outdir" )
         else
-            d=$( native_to_universal <( $@ ) $vtype $outdir )
+            d=$( native_to_universal <( $@ ) "$vtype" "$outdir" )
         fi
         echo $d
     fi
@@ -122,7 +122,7 @@ fi
 {hook2}
 {validate}
 {hook3}
-( cat $outdir/{mid}_tmp ; rm $outdir/{mid}_tmp )\
+( cat "$outdir/{mid}_tmp" ; rm "$outdir/{mid}_tmp" )\
 '''
         self.DATCACHE_ARGS = ""
         self.DO_VALIDATE = '''\
@@ -135,27 +135,27 @@ fi
 '''
         self.RUN_BLK = '''\
 {hook4}
-{function} {arguments}{wrapper} > $outdir/{mid}_tmp
+{function} {arguments}{wrapper} > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
 '''
         self.RUN_BLK_VOID = '''\
 {hook4}
 {function} {arguments}{wrapper} > /dev/null
-> $outdir/{mid}_tmp
+> "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
 '''
         self.FAIL_BLK = '''\
 {hook6}
-{fail}> $outdir/{mid}_tmp
+{fail}> "$outdir/{mid}_tmp"
 {cache_put}
 {hook7}\
 '''
         self.FAIL_BLK_VOID = '''\
 {hook6}
 {fail} > /dev/null
-> $outdir/{mid}_tmp
+> "$outdir/{mid}_tmp"
 {cache_put}
 {hook7}\
 '''
@@ -163,11 +163,11 @@ fi
         self.DEFAULT_FAIL = ""
         self.NO_VALIDATE = '''\
 {hook4}
-{function} {arguments}{wrapper} > $outdir/{mid}_tmp
+{function} {arguments}{wrapper} > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}'''
         self.CACHE_PUT = '''\
-{cache}_put {mid} $outdir/{mid}_tmp{other_args}
+{cache}_put {mid} "$outdir/{mid}_tmp"{other_args}
 '''
         self.MARG          = '${i}'
         self.ARGUMENTS     = '{fargs} {inputs}'
@@ -223,7 +223,7 @@ fi
         arg_rep = ""
         for i in range(int(m.narg)):
             i_str = str(i+1)
-            arg_rep += '\\\n    $(native_to_universal "$%s" "${{typemap[%s]}}" "$outdir")' % (i_str,i_str)
+            arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
         if m.narg:
             arg_rep += '\\\n    "$%s_uid"' % m.mid
 
@@ -240,5 +240,5 @@ fi
             types.append("typemap[%s]=%s" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
-                    types.append("typemap[%s]=%s" % (m, t))
+                    types.append("typemap[x%s]=%s" % (m, t))
         return self.TYPE_MAP.format(pairs='\n'.join(types))
