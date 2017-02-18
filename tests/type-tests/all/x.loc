@@ -74,7 +74,7 @@ tid(){
 @source py
 def read(x):
     with open(x, "r") as f:
-        d = f.readlines()
+        d = [s.rstrip() for s in f.readlines()]
     return d
 def iid(x):
     return x
