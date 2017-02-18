@@ -136,7 +136,7 @@ loc_caster = {
     "*":str
 }
 
-def __loc_parse_list(x, typ, sep="\n"):
+def __loc_parse_list(x, typ):
     if not isinstance(x, (list, tuple, set)):
         msg = "Expected iterable class for input of type '%s', got '%s'"
         print(msg % (str(type(x))), file=sys.stderr)
@@ -150,7 +150,7 @@ def __loc_parse_list(x, typ, sep="\n"):
         msg = "Arrays of dimension greater than 2 are not supported (in type '[[%s]]')"
         print(msg % typ, file=sys.stderr)
 
-    return ''.join((str(s) for s in x))
+    return '\n'.join((str(s) for s in x))
 
 # Convert native data structure to file or literal
 def native_to_universal(x, typ, outdir):
@@ -182,7 +182,7 @@ def native_to_universal(x, typ, outdir):
             data = __loc_parse_list(x, typ)
         elif typ == "Text":
             if isinstance(x, (list,tuple,set)):
-                data = "".join((str(s) for s in x))
+                data = "\n".join((str(s) for s in x))
             else:
                 data = str(x)
         else:
@@ -191,6 +191,7 @@ def native_to_universal(x, typ, outdir):
             data = str(x)
 
         tmp.write(data.encode("ASCII"))
+        tmp.write(data.encode("\n"))
 
     return str(f)
 
@@ -209,10 +210,10 @@ def universal_to_native(x, typ):
         d = ""
     elif typ == "Text":
         with open(x.rstrip(), "r") as f:
-            d = f.readlines()
+            d = [s.rstrip() for s in f.readlines()]
     elif typ[0] == '[':
         with open(x.rstrip(), "r") as f:
-            d = f.readlines()
+            d = [s.rstrip() for s in f.readlines()]
         typ = typ[1:-1]
         if typ in loc_caster:
             cast = loc_caster[typ]
