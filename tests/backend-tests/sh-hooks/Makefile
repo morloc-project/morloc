@@ -5,7 +5,7 @@ all:
 
 .PHONY: run
 run:
-	./manifold-nexus.py foo
+	./manifold-nexus.py main
 
 .PHONY: clean
 clean:

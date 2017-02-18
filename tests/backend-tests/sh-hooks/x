@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
-loc -x tst x.loc &> /dev/null
+make clean &> /dev/null
+make && make run 2> z
 locstat=$?
-diff <(./manifold-nexus.py foo 2>&1) exp.txt
+diff z exp.txt
 stat=$?
 
-rm -rf tst manifold-nexus.py
+make clean
+rm z
 
 exit $(( locstat + stat ))
