@@ -5,11 +5,19 @@ universal_to_native :: String -> String -> *
 
 @source R
 
+# Convert text or binary to native data structure
+loc_number_types  <- c("Int", "[Int]", "Num", "[Num]")
+loc_string_types  <- c("String", "[String]", "File")
+loc_logical_types <- c("Bool", "[Bool]")
+
 # Convert native data structure to file or literal
 native_to_universal <- function(x, type, outdir){
   f <- ""
-  if(is.atomic(x) && length(x) == 1){
+
+  if(type %in% c("Int", "Num", "String", "File")){
     f <- as.character(x)
+  } else if(type == "Bool"){
+    f <- as.character(as.integer(x))
   } else if(type == "void"){
     f <- ""
   } else {
@@ -21,29 +29,24 @@ native_to_universal <- function(x, type, outdir){
       write(unlist(x), file=f, ncolumns=1)
     } else if(is.vector(x)) {
       write(x, file=f, ncolumns=1)
-    } else if(is.null(x)) {
-      f <- ""
     } else {
       msg = sprintf("R: Cannot export object of class '%s'", class(x))
       warning(msg)
+      f = ""
     }
   }
   f
 }
 
-# Convert text or binary to native data structure
-number_types  <- c("Int", "[Int]")
-string_types  <- c("String", "[String]", "File")
-logical_types <- c("Bool", "[Bool]")
 universal_to_native <- function(x, type){
-  if( any(type %in% number_types) ){
+  if( any(type %in% loc_number_types) ){
     d <- as.numeric(x)
   }
-  else if( any(type %in% string_types) ){
+  else if( any(type %in% loc_string_types) ){
     d <- as.character(x)
   }
-  else if( any(type %in% logical_types) ){
-    d <- as.logical(x)
+  else if( any(type %in% loc_logical_types) ){
+    d <- as.logical(as.integer(x))
   }
   else if( type == "void" ){
     d <- NULL
@@ -120,6 +123,19 @@ universal_to_native (){
 
 import tempfile
 
+# Convert text or binary to native data structure
+loc_number_types  = ("Int", "[Int]")
+loc_string_types  = ("String", "[String]", "File")
+loc_logical_types = ("Bool", "[Bool]")
+loc_caster = {
+    "Int":int,
+    "Num":float,
+    "String":str,
+    "File":str,
+    "Bool":bool,
+    "*":str
+}
+
 def __loc_parse_list(x, typ, sep="\n"):
     if not isinstance(x, (list, tuple, set)):
         msg = "Expected iterable class for input of type '%s', got '%s'"
@@ -134,7 +150,7 @@ def __loc_parse_list(x, typ, sep="\n"):
         msg = "Arrays of dimension greater than 2 are not supported (in type '[[%s]]')"
         print(msg % typ, file=sys.stderr)
 
-    return '\n'.join((str(s) for s in x))
+    return ''.join((str(s) for s in x))
 
 # Convert native data structure to file or literal
 def native_to_universal(x, typ, outdir):
@@ -151,7 +167,7 @@ def native_to_universal(x, typ, outdir):
         f = ""
     else:
         tmp = tempfile.NamedTemporaryFile(
-            prefix = "py_%s" % typ,
+            prefix = "py_%s_" % typ,
             dir    = outdir,
             delete = False
         )
@@ -164,52 +180,42 @@ def native_to_universal(x, typ, outdir):
 
         if typ[0] == '[':
             data = __loc_parse_list(x, typ)
-        elif typ == "Text" and isinstance(x, (list,tuple,set)):
-            data = "\n".join((str(s) for s in x))
+        elif typ == "Text":
+            if isinstance(x, (list,tuple,set)):
+                data = "".join((str(s) for s in x))
+            else:
+                data = str(x)
         else:
-            msg = "Py: Cannot export object of class '%s', guessing" % type(x)
-            print(msg, file=sys.stderr)
+            msg = "Py: Cannot object of type '%s' ('%s'), guessing"
+            print(msg % (typ, type(x)), file=sys.stderr)
             data = str(x)
 
         tmp.write(data.encode("ASCII"))
-        tmp.write("\n".encode("ASCII"))
 
     return str(f)
 
-# Convert text or binary to native data structure
-number_types  = ("Int", "[Int]")
-string_types  = ("String", "[String]", "File")
-logical_types = ("Bool", "[Bool]")
-caster = {
-    "Int":int,
-    "Num":float,
-    "String":str,
-    "File":str,
-    "Bool":bool,
-    "*":str
-}
 def universal_to_native(x, typ):
-    if typ in caster:
-        d = caster[typ](x)
+    if typ in loc_caster:
+        d = loc_caster[typ](x)
     elif typ[0] == '[':
         d = x.rstrip().split("\n")
         if typ[1] == '[':
-            cast = caster[typ[2:-2]]
+            cast = loc_caster[typ[2:-2]]
             d = [[cast(s) for s in ss.split("\t")] for ss in d]
         else:
-            cast = caster[typ[1:-1]]
+            cast = loc_caster[typ[1:-1]]
             d = [cast(s) for s in d]
     elif typ == "void":
         d = ""
     elif typ == "Text":
-        with open(x, "r") as f:
+        with open(x.rstrip(), "r") as f:
             d = f.readlines()
     elif typ[0] == '[':
-        with open(x, "r") as f:
+        with open(x.rstrip(), "r") as f:
             d = f.readlines()
         typ = typ[1:-1]
-        if typ in caster:
-            cast = caster[typ]
+        if typ in loc_caster:
+            cast = loc_caster[typ]
             d = [cast(e) for e in d]
     else:
         d = str(x)

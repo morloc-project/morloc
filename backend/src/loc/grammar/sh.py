@@ -175,7 +175,7 @@ fi
         )
 
     def make_input_manifold(self, m, pos, val, typ):
-        if(typ in ("Int", "String", "File", "Bool")):
+        if(typ in ("Int", "Num", "String", "File", "Bool")):
             op = '$'
         else:
             op = '<'
