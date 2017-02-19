@@ -174,6 +174,7 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
+frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
 frontend_test types              'types/             -- types and lists of types ....................... '

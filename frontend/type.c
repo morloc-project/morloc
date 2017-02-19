@@ -1,5 +1,9 @@
 #include "type.h"
 
+#define IS_ATOMIC(t) (strcmp(g_string(g_lhs((t))), "atomic") == 0)
+#define IS_ARRAY(t) (strcmp(g_string(g_lhs((t))), "array") == 0)
+#define IS_STAR(t) (strcmp(g_string(g_rhs((t))), "*") == 0)
+
 void _set_default_type(W* w);
 
 void _infer_multi_type(W* w);
@@ -140,7 +144,7 @@ void _infer_star_type(W* w){
 void _transfer_star_type(W* type, W* input){
     if(input->cls == C_MANIFOLD){
         W* itype = g_manifold(g_rhs(input))->type->last;
-        if(strcmp(g_string(g_rhs(type)), "*") == 0){
+        if(IS_ATOMIC(type) && IS_STAR(type)){
             s_lhs(type, g_lhs(itype));
             s_rhs(type, g_rhs(itype));
         }
