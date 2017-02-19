@@ -1,16 +1,22 @@
 EMIT	m0	*
 FUNC	m0	foo
+TYPE	m0	*
 INPM	m0	0	m4	*
 EMIT	m4	*
 FUNC	m4	fifi
+TYPE	m4	*
 INPM	m4	0	m5	*
 EMIT	m5	*
 FUNC	m5	foo
+TYPE	m5	*
 HOOK	m5	5	m3
 EMIT	m1	*
 FUNC	m1	fifi
+TYPE	m1	*
 INPM	m1	0	m2	*
 EMIT	m2	*
 FUNC	m2	foo
+TYPE	m2	*
 EMIT	m3	*
 FUNC	m3	a_foo
+TYPE	m3	*

@@ -1,11 +1,15 @@
 EMIT	m0	*
 FUNC	m0	a2
+TYPE	m0	*
 INPM	m0	0	m1	*
 EMIT	m1	*
 FUNC	m1	A4
+TYPE	m1	*
 INPM	m1	0	m2	*
 INPM	m1	1	m3	*
 EMIT	m2	*
 FUNC	m2	a-r
+TYPE	m2	*
 EMIT	m3	*
 FUNC	m3	a-14
+TYPE	m3	*

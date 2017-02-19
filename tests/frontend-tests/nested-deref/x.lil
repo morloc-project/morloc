@@ -1,11 +1,14 @@
 EMIT	m0	*
 FUNC	m0	f
+TYPE	m0	*
 INPF	m0	0	m1	*
 EMIT	m1	*
 FUNC	m1	g
+TYPE	m1	*
 NARG	m1	1
 INPM	m1	0	m2	*
 EMIT	m2	*
 FUNC	m2	h
+TYPE	m2	*
 NARG	m2	1
 INPA	m2	0	1	*

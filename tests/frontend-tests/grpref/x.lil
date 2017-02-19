@@ -1,7 +1,10 @@
 EMIT	m0	*
 FUNC	m0	f
+TYPE	m0	*
 INPM	m0	0	m2	*
 EMIT	m2	*
 FUNC	m2	g
+TYPE	m2	*
 EMIT	m1	*
 FUNC	m1	g
+TYPE	m1	*

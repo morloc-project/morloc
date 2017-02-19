@@ -1,15 +1,20 @@
 EMIT	m0	*
 FUNC	m0	g
+TYPE	m0	*
 INPM	m0	0	m3	*
 EMIT	m3	*
 FUNC	m3	g
+TYPE	m3	*
 INPM	m3	0	m4	*
 EMIT	m4	*
 FUNC	m4	f
+TYPE	m4	*
 EMIT	m1	*
 FUNC	m1	g
+TYPE	m1	*
 INPM	m1	0	m2	*
 EMIT	m2	*
 FUNC	m2	f
+TYPE	m2	*
 EXPT	m0	main
 EXPT	m2	second

@@ -1,13 +1,17 @@
 EMIT	m0	cpp
 FUNC	m0	c
+TYPE	m0	*
 INPM	m0	0	m1	*
 EMIT	m1	ruby
 FUNC	m1	b
+TYPE	m1	*
 INPM	m1	0	m2	*
 HOOK	m1	5	m3
 EMIT	m2	ruby
 FUNC	m2	a
+TYPE	m2	*
 HOOK	m2	5	m3
 EMIT	m3	pl
 FUNC	m3	foo
+TYPE	m3	*
 HOOK	m3	5	m3
