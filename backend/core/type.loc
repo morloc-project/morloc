@@ -50,12 +50,17 @@ loc_types <- list(
 
 loc_is_list <- function(type){ grepl("^\\[[^[]", type) }
 loc_is_table <- function(type){ grepl("^\\[\\[[^[]", type) }
+loc_base_type <- function(type){ gsub("(^\\[*|\\]*$)", "", type) }
+
+loc_col_types <- c("Int"="i","String"="c","Num"="d","Bool"="l")
 
 universal_to_native <- function(x, type){
   if(loc_is_list(type)){
-    d <- read_tsv(x, col_names=FALSE)[[1]]
+    col_type <- loc_col_types[loc_base_type(type)]
+    d <- read_tsv(x, col_names=FALSE, col_types=col_type)[[1]]
   } else if (loc_is_table(type)){
-    d <- read_tsv(x, col_names=FALSE)
+    col_type <- loc_col_types[loc_base_type(type)]
+    d <- read_tsv(x, col_names=FALSE, col_types=col_type)
   } else if(type %in% names(loc_types)){
     d <- loc_types[[type]](x)
   } else {
