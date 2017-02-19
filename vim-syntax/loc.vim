@@ -151,7 +151,7 @@ syn cluster c_modify    contains=@c_modify_nl,s_varlabel
 
 syn cluster c_hasarg    contains=s_equal,s_num,s_sep,s_brk,s_par,s_fun,s_string
 syn cluster c_path      contains=s_compose,s_switch,s_par,s_break,s_super,s_angel,s_positional,s_marg,s_fun,s_group,s_refer
-syn cluster c_type      contains=@c_subglobal,@c_couple_nl,s_type,s_rarrow,s_sep,s_par,s_brk,s_var
+syn cluster c_type      contains=@c_subglobal,@c_couple_nl,s_type,s_rarrow,s_sep,s_par,s_brk,s_var,s_simple_function,s_logical_op
 
 syn region r_top start=/\%^/ end=/@\@=/ skip=/\\@/ contains=s_comment
 
