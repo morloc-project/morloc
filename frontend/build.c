@@ -16,6 +16,8 @@ void build_manifolds(Ws* ws_top){
 
     link_inputs(ws_top);
 
+    set_default_types(ws_top);
+
     infer_multi_types(ws_top);
 
     infer_star_types(ws_top);

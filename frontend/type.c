@@ -1,5 +1,7 @@
 #include "type.h"
 
+void _set_default_type(W* w);
+
 void _infer_multi_type(W* w);
 
 void _infer_star_type(W* w);
@@ -92,7 +94,31 @@ bool _cmp_type(char* a, char* b){
 }
 
 void set_default_types(Ws* ws){
-    /* STUB */
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_manifold,
+        _set_default_type
+    );
+}
+void _set_default_type(W* w){
+    Manifold* m = g_manifold(g_rhs(w));
+    if(!m->type){
+        int ninputs = ws_length(m->inputs);
+        int ntypes = ninputs ? ninputs + 1 : 2;
+        for(int i = 0; i < ntypes; i++){
+            W *lhs,*rhs;
+            lhs = w_new(P_STRING, "atomic");
+            if(i == 0 && ninputs == 0){
+                rhs = w_new(P_STRING, "void");
+            } else {
+                rhs = w_new(P_STRING, "*");
+            }
+            Couplet* c = couplet_new(lhs, rhs, '=');
+            W* star = w_new(P_TYPE, c);
+            m->type = ws_add(m->type, star);
+        } 
+    }
 }
 
 void infer_star_types(Ws* ws){
@@ -112,10 +138,12 @@ void _infer_star_type(W* w){
     );
 }
 void _transfer_star_type(W* type, W* input){
-    W* itype = g_manifold(g_rhs(input))->type->last;
-    if(strcmp(g_string(g_rhs(type)), "*") == 0){
-        s_lhs(type, g_lhs(itype));
-        s_rhs(type, g_rhs(itype));
+    if(input->cls == C_MANIFOLD){
+        W* itype = g_manifold(g_rhs(input))->type->last;
+        if(strcmp(g_string(g_rhs(type)), "*") == 0){
+            s_lhs(type, g_lhs(itype));
+            s_rhs(type, g_rhs(itype));
+        }
     }
 }
 
