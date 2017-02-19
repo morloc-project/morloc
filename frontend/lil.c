@@ -174,7 +174,7 @@ Ws* _manifold_to_lil(W* cm){
                         LIL_POSITIONAL_INPUT,
                         _mid(m),
                         _num(i++),
-                        g_string(w),
+                        g_string(g_rhs(w)),
                         t_str
                     );
                     break;

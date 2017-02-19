@@ -32,6 +32,7 @@ char* trim_back(const char* in_str, const char* c);
 char* trim(const char* in_str);
 // Same as `trim_back(x, ":")`
 char* trim_couple(const char* in_str);
+W* couplet_str_str(char* lhs, char* rhs, Class cls);
 // After trimming, it is often necessary to put characters back into the buffer:
 // unput a specific string
 #define UNPUT_S(x) for(int i = strlen(x)-1; i >= 0; i--){ unput(x[i]); }
@@ -188,14 +189,28 @@ RESET { RETURN_TOKEN(RESET); }
     W* w = w_new(C_ARGREF, s);
     RETURN(w, COMPOSON);
 }
+
 <S_PATH,S_SIDE>{bak} {
-    W* w = w_new(C_POSITIONAL, unquote(yytext));
+    W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL);
     RETURN(w, COMPOSON);
 }
-<S_PATH,S_SIDE>{int}|{dbl}|{lgc}|{str} {
-    W* w = w_new(C_POSITIONAL, strdup(yytext));
+<S_PATH,S_SIDE>{int} {
+    W* w = couplet_str_str("Int", strdup(yytext), C_POSITIONAL);
     RETURN(w, COMPOSON);
 }
+<S_PATH,S_SIDE>{dbl} {
+    W* w = couplet_str_str("Num", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{lgc} {
+    W* w = couplet_str_str("Bool", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{str} {
+    W* w = couplet_str_str("String", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+
 <S_PATH,S_SIDE>{refer} {
     Manifold* m = NULL;
     W* l = label_from_str(unquote(yytext), current_lang);
@@ -232,7 +247,7 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, PRIMITIVE);
 }
 <S_ARG>{bak} {
-    W* w = w_new(C_POSITIONAL, unquote(yytext));
+    W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL);
     // TODO - this isn't primitive
     RETURN(w, PRIMITIVE);
 }
@@ -302,6 +317,11 @@ char* trim_couple(const char* in_str) {
     return trim_back(in_str, ":+-=");
 }
 
+W* couplet_str_str(char* lhs, char* rhs, Class cls){
+    Couplet* c = couplet_new(w_new(P_STRING, lhs), w_new(P_STRING, rhs), '=');
+    W* w = w_new(cls, c);
+    return w;
+}
 
 void print_usage_and_exit(int exit_status){
     fprintf(stderr,

@@ -11,7 +11,6 @@ VType get_value_type(Class cls){
         case P_WS:
             vtype = V_WS;
             break;
-        case C_POSITIONAL:
         case C_GRPREF:
         case C_ARGREF:
         case P_STRING:
@@ -29,6 +28,7 @@ VType get_value_type(Class cls){
         case T_H7:
         case T_H8:
         case T_H9:
+        case C_POSITIONAL: // Couplet<type:P_STRING,value:P_STRING>
         case T_CHECK:
         case T_FAIL:
         case T_ALIAS:
