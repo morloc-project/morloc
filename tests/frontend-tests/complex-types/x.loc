@@ -1,0 +1,8 @@
+@type
+map  :: (a -> b) -> [a] -> [b]
+squ  :: Int -> Num
+yolo :: * -> [Int]
+seq  :: Int -> Int -> [Int]
+
+@path
+map . &( squ . $1 ) (yolo . seq . 1 5)

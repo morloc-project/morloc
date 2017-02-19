@@ -11,6 +11,7 @@ Test suite for the LOC compiler
   -B      skip backend tests
   -T      skip type tests
   -K      skip tests of known problems
+  -d      print diff statements
   -l LANG do test for language L
 EOF
     exit 0
@@ -25,8 +26,9 @@ test_frontend=true
 test_backend=true
 test_types=true
 test_known_problems=true 
+difflog=/dev/null
 lang="all"
-while getopts "hqxFBKETl:" opt; do
+while getopts "hqxdFBKETl:" opt; do
     case $opt in
         h)
             usage ;;
@@ -34,6 +36,8 @@ while getopts "hqxFBKETl:" opt; do
             loud=false ;;
         x)
             instant_death=true ;;
+        d)
+            difflog=/dev/stdout ;;
         F)
             test_frontend=false ;;
         B)
@@ -87,7 +91,7 @@ frontend_test(){
     loc -l $loc_flags x.loc &> /dev/null
     if [[ $? == 0 ]]
     then
-        diff <(loc -l $loc_flags x.loc) x.lil > /dev/null
+        diff <(loc -l $loc_flags x.loc) x.lil &> $difflog 
         if [[ $? == 0 ]]
         then
             say OK
@@ -145,7 +149,7 @@ backend_test(){
         ./manifold-nexus.py "$cmd" &> $obs
         ./x > $exp 2> /dev/null
 
-        diff $obs $exp &> /dev/null
+        diff $obs $exp &> $difflog
         if [[ $? == 0 ]]
         then
             say OK
@@ -170,10 +174,12 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
+frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
 frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
+frontend_test infer-star         'infer-star/        -- infer type of * generics ....................... '
 frontend_test operator-add       'operator-add/      -- test :=, and :+ ................................ '
 frontend_test operator-sub       'operator-sub/      -- test :=, :+, and :- ............................ '
 frontend_test stars              'stars/             -- test * on modifier lhs ......................... '
@@ -198,6 +204,7 @@ if $test_types
 then
 announce "Type tests"
 backend_test multi         main 'multi/             -- types and lists of types ....................... '
+backend_x_test all              'all/               -- pass each atomic type through all language ..... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 fi
@@ -210,45 +217,43 @@ then
 announce "Backend tests"
 
 if [[ $lang == "all" || $lang == "R" ]] ; then
-backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
-backend_test r-sh-bounce main       'r-sh-bounce/       -- pass values between R and sh several times ..... '
-backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
-backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
-backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
-backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
-backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
-backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
-backend_test   r-hooks   foo        'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-cached  main       'r-cached/          -- sqrt . max . seq ............................... '
 backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
-backend_x_test r-refer              'r-refer/           -- max . <runif> .................................. '
+backend_test   r-hooks   main       'r-hooks/           -- run with all hooks ............................. '
+backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
-backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
-backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
 backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
+backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
+backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
+backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '
+backend_x_test r-logical            'r-logical/         -- and . is_a (any . is_b is_c (not . is_d)) ...... '
+backend_x_test r-loop               'r-loop/            -- use open manifolds in map ...................... '
+backend_x_test r-memcache           'r-memcache/        -- null . xtable . data.frame . <runif> <runif> ... '
+backend_x_test r-open-mod           'r-open-mod/        -- open manifold caching and modification ......... '
+backend_x_test r-refer              'r-refer/           -- max . <runif> .................................. '
+backend_x_test r-self-reference     'r-self-reference/  -- cat . <random> <random> ........................ '
 fi
 
 if [[ $lang == "all" || $lang == "py" ]] ; then
 backend_test   py-hooks  main       'py-hooks/          -- python hello world program ..................... '
-backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
-backend_test   py-table main        'py-table/          -- test printing of type `[[Int]]` ................ '
 backend_test   py-sh main           'py-sh/             -- python [[Int]] to shell `sort` back to python .. '
+backend_test   py-table main        'py-table/          -- test printing of type `[[Int]]` ................ '
+backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 fi
 
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition into a bash map command ..... '
-backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-all    main       'sh-all/            -- uniq . sort . grep . man ....................... '
-backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
-backend_x_test sh-refer             'sh-refer/          -- head . <runif> ................................. '
-backend_x_test sh-logical           'sh-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
-backend_test   sh-simple uniq       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
+backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
+backend_test   sh-simple main       'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '
 backend_x_test sh-hooks             'sh-hooks/          -- run with all hooks ............................. '
+backend_x_test sh-logical           'sh-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 backend_x_test sh-open-mod          'sh-open-mod/       -- open manifold caching and modification ......... '
+backend_x_test sh-refer             'sh-refer/          -- head . <runif> ................................. '
 fi
 
 fi

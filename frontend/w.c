@@ -333,13 +333,6 @@ void s_section(W* w, Section* v){
 void s_lhs(W* w, W* v){
     if(!w) { warn("Cannot set null in s_lhs\n"); return;}
     w_assert_type(w, V_COUPLET);
-    if(!_is_valid_lhs(v)){
-        err(
-            1,
-            "WARNING: illegal value on couplet lhs. Expected K_*, got %s.",
-            w_type_str(v->cls) 
-        );
-    }
     w->value.couplet->lhs = v;
 }
 void s_rhs(W* w, W* v){

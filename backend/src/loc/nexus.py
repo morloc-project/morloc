@@ -1,5 +1,4 @@
 import re
-
 import manifold
 from util import err,indent
 
@@ -49,6 +48,7 @@ def parser():
 def show(x, vtype):
     x = x.strip()
     literal = {{"Int", "Num", "String", "File", "Bool"}}
+    filed = {{"Text", "[Int]", "[Num]", "[String]", "[File]", "[Bool]"}}
     if(len(x) == 0):
         pass
     elif(vtype in literal):
@@ -56,14 +56,19 @@ def show(x, vtype):
     elif(vtype == "NULL"):
         pass
     else:
-        if os.path.exists(x):
+        try:
             subprocess.run(
                 ["cat", x],
                 stderr=subprocess.PIPE,
                 encoding='utf-8'
             )
-        else:
-            print(x)
+        except FileNotFoundError:
+            if(vtype in filed):
+                msg = "Type '%s' should be passed as a file, but file cannot be read"
+                print(msg % vtype, file=sys.stderr)
+            else:
+                print(x)
+
 
 if __name__ == '__main__':
     args = parser()

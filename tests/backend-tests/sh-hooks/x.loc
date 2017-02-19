@@ -15,9 +15,6 @@ echoerr () {
     echo $1 > /dev/stderr
 }
 
-@export
-foo
-
 @path
 foo . bar
 
