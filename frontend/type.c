@@ -174,10 +174,11 @@ void _infer_multi_type(W* w){
         for(W* i = wm->inputs->head; i != NULL; i = i->next){
             switch(i->cls){
                 case C_ARGREF:
+                    break;
                 case C_POSITIONAL:
                     {
                         W* lhs = w_new(P_STRING, "atomic");
-                        W* rhs = w_new(P_STRING, g_string(i));
+                        W* rhs = w_new(P_STRING, g_string(g_lhs(i)));
                         Couplet* c = couplet_new(lhs, rhs, '=');
                         wm->type = ws_add(wm->type, w_new(P_TYPE, c));
                     }
@@ -258,24 +259,57 @@ W* _typecheck_derefs(Ws* ws, W* msg){
 }
 
 W* _type_compatible(W* o, W* t, W* msg){
-    if(o->cls == C_DEREF || o->cls == C_POSITIONAL || o->cls == C_ARGREF){
-        /* I currently do no type checking on these */
-        return msg;
-    }
-    Manifold *m = g_manifold(g_rhs(o));
-    if(!m->type){
-        LOG_ERROR(msg, o, "cannot check usage of untyped output");
-    }
-    else if(!m->as_function){
-        char* o_type = type_str(m->type->last);
-        char* i_type = type_str(t); 
-        if( ! _cmp_type(o_type, i_type)){
-            char* fmt = "type conflict '%s' vs '%s'\n";
-            int size = strlen(fmt) - 4 + strlen(o_type) + strlen(i_type) + 1;
-            char* errmsg = (char*)malloc(size * sizeof(char));
-            sprintf(errmsg, fmt, o_type, i_type);
-            LOG_ERROR(msg, o, errmsg);
+    switch(o->cls){
+        case C_DEREF:
+        case C_REFER:
+        case C_ARGREF:
+            /* I currently do no type checking on these */
+            break;
+        case C_MANIFOLD:
+        {
+            Manifold *m = g_manifold(g_rhs(o));
+            if(!m->type){
+                LOG_ERROR(msg, o, "cannot check usage of untyped output");
+            }
+            else if(!m->as_function){
+                char* o_type = type_str(m->type->last);
+                char* i_type = type_str(t); 
+                if( ! _cmp_type(o_type, i_type)){
+                    char* fmt = "type conflict '%s' vs '%s'\n";
+                    int size =
+                        strlen(fmt)    - // length of format string
+                        4              + // subtract the '%s'
+                        strlen(o_type) + // string lengths
+                        strlen(i_type) + // ''
+                        1;               // add 1 for \0
+                    char* errmsg = (char*)malloc(size * sizeof(char));
+                    sprintf(errmsg, fmt, o_type, i_type);
+                    LOG_ERROR(msg, o, errmsg);
+                }
+            }
         }
+            break;
+        case C_POSITIONAL:
+        {
+            char* o_type = g_string(g_lhs(o));
+            char* i_type = type_str(t);
+            if( ! _cmp_type(o_type, i_type)){
+                char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";
+                int size =
+                    strlen(fmt)                - // length of the format string
+                    6                          + // subtract the '%s'
+                    strlen(o_type)             + // add length of type string
+                    strlen(g_string(g_rhs(o))) + // ''
+                    strlen(i_type)             + // ''
+                    1;                           // add 1 for \0
+                char* errmsg = (char*)malloc(size * sizeof(char));
+                sprintf(errmsg, fmt, o_type, g_string(g_rhs(o)), i_type);
+                LOG_ERROR(msg, o, errmsg);
+            }
+        }
+            break;
+        default: 
+            break;
     }
     return msg;
 }
@@ -295,10 +329,26 @@ bool type_is_sink(Ws* type){
 void print_error(W* msg){
     if(!msg) return;
     for(W* w = g_ws(msg)->head; w; w = w->next){
-        warn(
-            "TYPE ERROR in %s: %s\n",
-            g_manifold(g_rhs(g_lhs(w)))->function,
-            g_string(g_rhs(w))
-        );
+        switch(g_lhs(w)->cls){
+            case C_MANIFOLD:
+            {
+                warn(
+                    "TYPE ERROR in %s: %s\n",
+                    g_manifold(g_rhs(g_lhs(w)))->function,
+                    g_string(g_rhs(w))
+                );
+            }
+                break;
+            case C_POSITIONAL:
+            {
+                warn(
+                    "TYPE ERROR: positional is of type %s, but got %s\n",
+                    g_string(g_lhs(g_lhs(w))),
+                    g_string(g_rhs(w))
+                );
+            }
+            default:
+                break;
+        }
     }
 }

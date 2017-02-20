@@ -1,0 +1,11 @@
+EMIT	m0	*
+FUNC	m0	foo
+TYPE	m0	A
+INPM	m0	0	m1	G
+INPM	m0	1	m2	H
+EMIT	m1	*
+FUNC	m1	bar
+TYPE	m1	G
+EMIT	m2	*
+FUNC	m2	baz
+TYPE	m2	H
