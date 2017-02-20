@@ -178,7 +178,7 @@ void _infer_multi_type(W* w){
                 case C_POSITIONAL:
                     {
                         W* lhs = w_new(P_STRING, "atomic");
-                        W* rhs = w_new(P_STRING, g_lhs(i));
+                        W* rhs = w_new(P_STRING, g_string(g_lhs(i)));
                         Couplet* c = couplet_new(lhs, rhs, '=');
                         wm->type = ws_add(wm->type, w_new(P_TYPE, c));
                     }
