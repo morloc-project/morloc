@@ -276,7 +276,12 @@ W* _type_compatible(W* o, W* t, W* msg){
                 char* i_type = type_str(t); 
                 if( ! _cmp_type(o_type, i_type)){
                     char* fmt = "type conflict '%s' vs '%s'\n";
-                    int size = strlen(fmt) - 4 + strlen(o_type) + strlen(i_type) + 1;
+                    int size =
+                        strlen(fmt)    - // length of format string
+                        4              + // subtract the '%s'
+                        strlen(o_type) + // string lengths
+                        strlen(i_type) + // ''
+                        1;               // add 1 for \0
                     char* errmsg = (char*)malloc(size * sizeof(char));
                     sprintf(errmsg, fmt, o_type, i_type);
                     LOG_ERROR(msg, o, errmsg);
@@ -290,7 +295,13 @@ W* _type_compatible(W* o, W* t, W* msg){
             char* i_type = type_str(t);
             if( ! _cmp_type(o_type, i_type)){
                 char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";
-                int size = strlen(fmt) - 6 + strlen(o_type) + strlen(i_type) + 1;
+                int size =
+                    strlen(fmt)                - // length of the format string
+                    6                          + // subtract the '%s'
+                    strlen(o_type)             + // add length of type string
+                    strlen(g_string(g_rhs(o))) + // ''
+                    strlen(i_type)             + // ''
+                    1;                           // add 1 for \0
                 char* errmsg = (char*)malloc(size * sizeof(char));
                 sprintf(errmsg, fmt, o_type, g_string(g_rhs(o)), i_type);
                 LOG_ERROR(msg, o, errmsg);
