@@ -174,6 +174,7 @@ void _infer_multi_type(W* w){
         for(W* i = wm->inputs->head; i != NULL; i = i->next){
             switch(i->cls){
                 case C_ARGREF:
+                    break;
                 case C_POSITIONAL:
                     {
                         W* lhs = w_new(P_STRING, "atomic");
