@@ -329,10 +329,26 @@ bool type_is_sink(Ws* type){
 void print_error(W* msg){
     if(!msg) return;
     for(W* w = g_ws(msg)->head; w; w = w->next){
-        warn(
-            "TYPE ERROR in %s: %s\n",
-            g_manifold(g_rhs(g_lhs(w)))->function,
-            g_string(g_rhs(w))
-        );
+        switch(g_lhs(w)->cls){
+            case C_MANIFOLD:
+            {
+                warn(
+                    "TYPE ERROR in %s: %s\n",
+                    g_manifold(g_rhs(g_lhs(w)))->function,
+                    g_string(g_rhs(w))
+                );
+            }
+                break;
+            case C_POSITIONAL:
+            {
+                warn(
+                    "TYPE ERROR: positional is of type %s, but got %s\n",
+                    g_string(g_lhs(g_lhs(w))),
+                    g_string(g_rhs(w))
+                );
+            }
+            default:
+                break;
+        }
     }
 }
