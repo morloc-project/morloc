@@ -176,6 +176,7 @@ then
 announce "Frontend tests"
 frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
+frontend_test multi              'multi/             -- test multi manifold type inference ............. '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
 frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
