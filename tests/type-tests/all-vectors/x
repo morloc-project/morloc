@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 cat <<EOF > z
-./manifold-nexus.py Int
 42
 42
-./manifold-nexus.py Num
 0.42
 0.42
-./manifold-nexus.py String
 fourty-two
 fourty-two
-./manifold-nexus.py Bool
-True
-True
+1
+1
 EOF
 stat=0
-make && make run > y || stat=1
-diff y z || stat=1
-rm y z
-make clean
+loc -kx locout x.loc || stat=1
+./manifold-nexus.py Int    >> y
+./manifold-nexus.py Num    >> y
+./manifold-nexus.py String >> y
+./manifold-nexus.py Bool   >> y
+diff z y || stat=1
+&> /dev/null
+rm -rf locout z y manifold-nexus.py
 exit $stat
