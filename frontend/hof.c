@@ -285,10 +285,6 @@ Ws* ws_m2n_map(Ws* xs, Ws* ys, Ws*(*fun)(W* x, Ws* ys)){
 
 void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W*, W*)){
     if(!(xs && ys)) return;
-    if(ws_length(xs) != ws_length(ys)){
-        warn("Cannot zipmod over lists of unequal lengths (%s:%d)\n", __func__, __LINE__);
-        return;
-    }
     W* x = xs->head;
     W* y = ys->head;
     for(; x && y; x = x->next, y = y->next){

@@ -258,17 +258,14 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, NAMES);
 }
 <S_TYPE>{type} {
-    W* lhs = w_new(P_STRING, "atomic");
-    W* rhs = w_new(P_STRING, strdup(yytext));
-    Couplet* c = couplet_new(lhs, rhs, '=');
-    W* w = w_new(P_TYPE, c);
+    W* w = w_new(FT_ATOMIC, strdup(yytext));
     RETURN(w, TYPE);
 }
 <S_TYPE>-> { RETURN_TOKEN(ARROW); }
 
 <S_ONTOLOGY>{sym} {
     W* w = w_new(P_STRING, strdup(yytext));
-    RETURN(w, OTYPE);
+    RETURN(w, TYPE);
 }
 
 

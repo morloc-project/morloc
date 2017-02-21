@@ -30,7 +30,10 @@ typedef enum {
     P_MANIFOLD,
     P_SECTION,
     P_STRING,     // P for primitive
-    P_TYPE,
+    FT_FUNCTION,
+    FT_ATOMIC,
+    FT_ARRAY,
+    FT_TUPLE,
     P_WS,
     T_ALIAS,
     T_ARGUMENT,

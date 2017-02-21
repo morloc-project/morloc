@@ -260,6 +260,13 @@ void _ws_print_r(Ws* ws, Ws*(*recurse)(W*), int depth){
 W* wws_new(W* w){
     return w_new(P_WS, ws_new(w));
 }
+W* wws_new_cls(W* w, Class ws_cls){
+    if(get_value_type(ws_cls) != V_WS){
+        warn("Cannot create Ws with VTYPE != V_WS (%s:%d)", __func__, __LINE__);
+        return NULL;
+    }
+    return w_new(ws_cls, ws_new(w));
+}
 W* wws_clone(W* wws){
     if(!wws) return NULL;
     s_ws(wws, ws_clone(g_ws(wws)));
@@ -288,10 +295,12 @@ W* wws_join(W* a, W* b){
     return a;
 }
 W* wws_tail(W* w){
-   return w_new(P_WS, ws_tail(g_ws(w))); 
+    Class cls = w ? w->cls : P_WS;
+    return w_new(cls, ws_tail(g_ws(w))); 
 }
 W* wws_init(W* w){
-    return w_new(P_WS, ws_init(g_ws(w)));
+    Class cls = w ? w->cls : P_WS;
+    return w_new(cls, ws_init(g_ws(w)));
 }
 W* wws_head(W* w){
     return ws_head(g_ws(w));

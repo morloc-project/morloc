@@ -9,12 +9,16 @@ VType get_value_type(Class cls){
         case K_LIST:
         case K_PATH:
         case P_WS:
+        case FT_FUNCTION:
+        case FT_TUPLE:
+        case FT_ARRAY:
             vtype = V_WS;
             break;
         case C_GRPREF:
         case C_ARGREF:
         case P_STRING:
         case K_NAME:
+        case FT_ATOMIC:
             vtype = V_STRING;
             break;
         case T_PATH:
@@ -43,7 +47,6 @@ VType get_value_type(Class cls){
         case T_ARGUMENT:
         case P_ARGUMENT:
         case T_TYPE:
-        case P_TYPE:
         case T_ONTOLOGY:
         case T_EXPORT:
             vtype = V_COUPLET;
@@ -164,7 +167,10 @@ char* w_class_str(Class cls){
         case P_MANIFOLD:   s = strdup("P_MANIFOLD")   ; break;
         case P_SECTION:    s = strdup("P_SECTION")    ; break;
         case P_STRING:     s = strdup("P_STRING")     ; break;
-        case P_TYPE:       s = strdup("P_TYPE")       ; break;
+        case FT_FUNCTION:  s = strdup("FT_FUNCTION")  ; break;
+        case FT_TUPLE:     s = strdup("FT_TUPLE")     ; break;
+        case FT_ARRAY:     s = strdup("FT_ARRAY")     ; break;
+        case FT_ATOMIC:    s = strdup("FT_ATOMIC")    ; break;
         case P_WS:         s = strdup("P_WS")         ; break;
         case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
         case T_ALIAS:      s = strdup("T_ALIAS")      ; break;

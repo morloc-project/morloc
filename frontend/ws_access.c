@@ -47,6 +47,7 @@ Ws* get_by_name(Ws* ws, W* p){
 }
 
 bool w_is_lang     ( W* w ){ return w ? w->cls == T_LANG     : false; }
+bool w_is_type     ( W* w ){ return w ? w->cls == T_TYPE     : false; }
 bool w_is_grpref   ( W* w ){ return w ? w->cls == C_GRPREF   : false; }
 bool w_is_argref   ( W* w ){ return w ? w->cls == C_ARGREF   : false; }
 bool w_is_refer    ( W* w ){ return w ? w->cls == C_REFER    : false; }
@@ -56,8 +57,19 @@ bool w_is_label    ( W* w ){ return w ? w->cls == K_LABEL    : false; }
 bool w_is_manifold ( W* w ){ return w ? w->cls == C_MANIFOLD : false; }
 bool w_is_export   ( W* w ){ return w ? w->cls == T_EXPORT   : false; }
 bool w_is_source   ( W* w ){ return w ? w->cls == T_SOURCE   : false; }
-bool w_is_type     ( W* w ){ return w ? w->cls == T_TYPE     : false; }
 bool w_is_composon ( W* w ){ return w ? w->cls == C_COMPOSON : false; }
+
+bool w_is_ptype ( W* w ){
+    switch(w->cls){
+        case FT_FUNCTION:
+        case FT_ATOMIC:
+        case FT_ARRAY:
+        case FT_TUPLE:
+            return true;
+        default:
+            return false;
+    }
+}
 
 bool w_is_recursive(W* w){ return w ? get_value_type(w->cls) == V_WS : false; }
 

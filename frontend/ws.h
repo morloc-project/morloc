@@ -58,6 +58,8 @@ char* w_str(W* w);
 // act on Ws in a W container. A Ws might be wrapped in a W when complete
 // polymorphism is required. As in some of the higher-order functions.
 W* wws_new(W*);
+// Create new W->Ws but with Class other than P_WS
+W* wws_new_cls(W*, Class ws_cls);
 W* wws_clone(W*);
 W* wws_add(W*, W*);
 W* wws_add_val(W*, Class cls, void* v);

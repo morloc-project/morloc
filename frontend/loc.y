@@ -26,7 +26,7 @@ Ws* global_table;
 %token <W*> SELECTION  /* K_LIST */
 %token <W*> PATH       /* K_PATH */
 
-%token <W*> STR NAME NAMES PRIMITIVE VARIABLE TYPE OTYPE /* P_STRING */
+%token <W*> STR NAME NAMES PRIMITIVE VARIABLE TYPE /* P_STRING */
 %type  <W*> maybe_variable maybe_str
 
 %token AS ARROW RESET
@@ -227,20 +227,21 @@ s_type
   }
 
 type
-  : TYPE { $$ = wws_new($1); }
+  : TYPE         { $$ = wws_new_cls($1, FT_FUNCTION); }
   | '(' type ')' {
-    W* rhs = $2;
-    W* lhs = w_new(P_STRING, "function");
-    Couplet* c = couplet_new(lhs, rhs, '=');
-    $$ = wws_new(w_new(P_TYPE, c));
+    $$ = wws_new_cls($2, FT_FUNCTION);
   }
   | '[' type ']' {
-    W* rhs = $2;
-    W* lhs = w_new(P_STRING, "array");
-    Couplet* c = couplet_new(lhs, rhs, '=');
-    $$ = wws_new(w_new(P_TYPE, c));
+    $2->cls = FT_ARRAY;
+    $$ = wws_new_cls($2, FT_FUNCTION);
   }
-  | type ARROW type { $$ = wws_join($1, $3); }
+  | type ARROW type {
+    $$ = wws_join($1, $3);
+  }
+  | type ',' type {
+    $$ = wws_join($1, $3);
+    $$->cls = FT_TUPLE;
+  }
 
 
  /* ======================================= */
@@ -256,8 +257,8 @@ ontology
   | ontology '|' construct { $$ = ws_add($1, w_new(P_WS, $3)); }
 
 construct
-  : OTYPE { $$ = ws_new($1); }
-  | construct OTYPE { $$ = ws_add($1, $2); }
+  : TYPE { $$ = ws_new($1); }
+  | construct TYPE { $$ = ws_add($1, $2); }
 
 
  /* ======================================= */
