@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 cat <<EOF > z
-this is an example text
-that covers
- several
-   lines
-42
-0.42
-fourty-two
-1
+42	42
+42	42
+42	42
+0.42	0.42
+0.42	0.42
+0.42	0.42
+fourty-two	fourty-two
+fourty-two	fourty-two
+fourty-two	fourty-two
+1	1
+1	1
+1	1
 EOF
 stat=0
 loc -kx locout x.loc || stat=1
-./manifold-nexus.py Text   >  y
 ./manifold-nexus.py Int    >> y
 ./manifold-nexus.py Num    >> y
 ./manifold-nexus.py String >> y

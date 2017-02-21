@@ -12,6 +12,7 @@ Test suite for the LOC compiler
   -T      skip type tests
   -K      skip tests of known problems
   -d      print diff statements
+  -e      print error messages
   -l LANG do test for language L
 EOF
     exit 0
@@ -27,8 +28,9 @@ test_backend=true
 test_types=true
 test_known_problems=true 
 difflog=/dev/null
+errlog=/dev/null
 lang="all"
-while getopts "hqxdFBKETl:" opt; do
+while getopts "hqxdeFBKETl:" opt; do
     case $opt in
         h)
             usage ;;
@@ -38,6 +40,8 @@ while getopts "hqxdFBKETl:" opt; do
             instant_death=true ;;
         d)
             difflog=/dev/stdout ;;
+        e)
+            errlog=/dev/stdout ;;
         F)
             test_frontend=false ;;
         B)
@@ -88,7 +92,7 @@ frontend_test(){
 
     say_n "$msg"
 
-    loc -l $loc_flags x.loc &> /dev/null
+    loc -l $loc_flags x.loc &> $errlog 
     if [[ $? == 0 ]]
     then
         diff <(loc -l $loc_flags x.loc) x.lil &> $difflog 
@@ -117,7 +121,7 @@ backend_x_test(){
     cd $backend_dir/$dir
 
     say_n "$msg"
-    ./x &> /dev/null
+    ./x &> $errlog 
     if [[ $? == 0 ]]
     then
         say OK
@@ -141,7 +145,7 @@ backend_test(){
     
     say_n "$msg"
 
-    loc $loc_flags -kx tst x.loc &> /dev/null
+    loc $loc_flags -kx tst x.loc &> $errlog 
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
@@ -206,6 +210,8 @@ then
 announce "Type tests"
 backend_test multi         main 'multi/             -- types and lists of types ....................... '
 backend_x_test all              'all/               -- pass each atomic type through all language ..... '
+backend_x_test all-vectors      'all-vectors/       -- pass each vector type through all language ..... '
+backend_x_test all-tables       'all-tables/        -- pass each table type through all language ...... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 fi
