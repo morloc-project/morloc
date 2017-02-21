@@ -206,6 +206,7 @@ then
 announce "Type tests"
 backend_test multi         main 'multi/             -- types and lists of types ....................... '
 backend_x_test all              'all/               -- pass each atomic type through all language ..... '
+backend_x_test all-vectors      'all-vectors/       -- pass each vector type through all language ..... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 fi

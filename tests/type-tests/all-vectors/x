@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+cat <<EOF > z
+./manifold-nexus.py Int
+42
+42
+./manifold-nexus.py Num
+0.42
+0.42
+./manifold-nexus.py String
+fourty-two
+fourty-two
+./manifold-nexus.py Bool
+True
+True
+EOF
+stat=0
+make && make run > y || stat=1
+diff y z || stat=1
+rm y z
+make clean
+exit $stat
