@@ -1,0 +1,5 @@
+@type
+foo :: ? -> String
+
+@path py
+foo . 12 "hi there" -2.3 TRUE FALSE

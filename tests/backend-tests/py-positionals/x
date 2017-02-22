@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo '12|hi there|-2.3|1|0'

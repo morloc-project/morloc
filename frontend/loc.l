@@ -91,7 +91,7 @@ str \'[^']*\'|\"[^"]*\"
 bak `[^`]*`
 int -?([0-9]|[1-9][0-9]+)
 dbl -?{int}\.[0-9]+
-lgc TRUE|FALSE|NULL 
+lgc TRUE|FALSE 
 
 file {sym}(\/{sym})*
 
@@ -170,6 +170,29 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, IDENTIFIER);
 }
 
+<S_PATH,S_SIDE>{bak} {
+    W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{int} {
+    W* w = couplet_str_str("Int", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+<S_PATH,S_SIDE>{dbl} {
+    W* w = couplet_str_str("Num", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+
+<S_PATH,S_SIDE>{lgc} {
+    char* s = (strcmp(yytext, "TRUE") == 0) ? "1" : "0";
+    W* w = couplet_str_str("Bool", strdup(s), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
+
+<S_PATH,S_SIDE>{str} {
+    W* w = couplet_str_str("String", strdup(yytext), C_POSITIONAL);
+    RETURN(w, COMPOSON);
+}
 
 <S_PATH,S_SIDE>{var} {
     Manifold* m = manifold_new();
@@ -187,27 +210,6 @@ RESET { RETURN_TOKEN(RESET); }
 <S_PATH,S_SIDE>{argref} {
     char* s = strdup(yytext + 1);
     W* w = w_new(C_ARGREF, s);
-    RETURN(w, COMPOSON);
-}
-
-<S_PATH,S_SIDE>{bak} {
-    W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL);
-    RETURN(w, COMPOSON);
-}
-<S_PATH,S_SIDE>{int} {
-    W* w = couplet_str_str("Int", strdup(yytext), C_POSITIONAL);
-    RETURN(w, COMPOSON);
-}
-<S_PATH,S_SIDE>{dbl} {
-    W* w = couplet_str_str("Num", strdup(yytext), C_POSITIONAL);
-    RETURN(w, COMPOSON);
-}
-<S_PATH,S_SIDE>{lgc} {
-    W* w = couplet_str_str("Bool", strdup(yytext), C_POSITIONAL);
-    RETURN(w, COMPOSON);
-}
-<S_PATH,S_SIDE>{str} {
-    W* w = couplet_str_str("String", strdup(yytext), C_POSITIONAL);
     RETURN(w, COMPOSON);
 }
 

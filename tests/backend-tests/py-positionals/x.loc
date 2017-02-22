@@ -1,0 +1,12 @@
+@type
+foo :: ? -> String
+
+@path py
+foo . 12 "hi there" -2.3 TRUE FALSE
+
+@source py
+def foo(*args):
+    return("|".join(str(s) for s in args))
+
+@include
+core/type
