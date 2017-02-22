@@ -215,6 +215,7 @@ backend_x_test all-vectors      'all-vectors/       -- pass each vector type thr
 backend_x_test all-tables       'all-tables/        -- pass each table type through all language ...... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
+backend_test tuples main        'tuples/            -- pass tuple across all languages ................ '
 fi
 
 
