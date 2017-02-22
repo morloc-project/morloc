@@ -3,6 +3,7 @@
 #define IS_ATOMIC(t) ((t)->cls == FT_ATOMIC)
 #define IS_ARRAY(t) ((t)->cls == FT_ARRAY)
 #define IS_STAR(t) (strcmp(g_string((t)), "*") == 0)
+#define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
 
 void _set_default_type(W* w);
 
@@ -163,9 +164,19 @@ void _infer_star_type(W* w){
 void _transfer_star_type(W* type, W* input){
     if(input->cls == C_MANIFOLD){
         W* itype = g_manifold(g_rhs(input))->type->last;
-        if(IS_ATOMIC(type) && IS_STAR(type)){
+        if(
+                IS_ATOMIC(type) && IS_STAR(type) &&
+                ! (IS_ATOMIC(itype) && ( IS_STAR(itype) || IS_MULTI(itype)))
+          ){
             type->value = itype->value;
             type->cls = itype->cls;
+        }
+        if(
+                IS_ATOMIC(itype) && IS_STAR(itype) &&
+                ! (IS_ATOMIC(type) && ( IS_STAR(type) || IS_MULTI(type)))
+          ){
+            itype->value = type->value;
+            itype->cls = type->cls;
         }
     }
 }
