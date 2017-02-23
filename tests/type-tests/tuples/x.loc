@@ -1,0 +1,34 @@
+@include
+core/type
+
+@type
+fourple :: (Int,Bool,String,Num) -> (Int,Bool,String,Num)
+tuplify :: ? -> *
+
+@path
+fourple:py . fourple:sh . fourple:R . fourple:py .
+    tuplify . 42 TRUE "give me back my hat" 2.8
+
+@lang
+tuplify :: py
+
+fourple:py :: py
+fourple:R :: R
+fourple:sh :: sh
+
+@source py
+def tuplify(*args):
+    return(args)
+
+def fourple(x):
+    return(x)
+
+@source R
+fourple <- function(x){
+    x
+}
+
+@source sh
+fourple (){
+    cat "$1"
+}

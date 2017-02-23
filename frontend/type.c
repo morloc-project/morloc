@@ -1,8 +1,9 @@
 #include "type.h"
 
-#define IS_ATOMIC(t) (strcmp(g_string(g_lhs((t))), "atomic") == 0)
-#define IS_ARRAY(t) (strcmp(g_string(g_lhs((t))), "array") == 0)
-#define IS_STAR(t) (strcmp(g_string(g_rhs((t))), "*") == 0)
+#define IS_ATOMIC(t) ((t)->cls == FT_ATOMIC)
+#define IS_ARRAY(t) ((t)->cls == FT_ARRAY)
+#define IS_STAR(t) (strcmp(g_string((t)), "*") == 0)
+#define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
 
 void _set_default_type(W* w);
 
@@ -28,48 +29,68 @@ W* _typecheck_derefs(Ws* ws_top, W* msg);
     } while(0)
 
 int type_str_r(W* w, char* s, int p){
-#define CHK(x) \
-if((p + x) >= MAX_TYPE_LENGTH) { \
+
+#define CHK(x)                                              \
+if((p + x) >= MAX_TYPE_LENGTH) {                            \
     warn("Type buffer exceeded, truncating type string\n"); \
-    return p; \
+    return p;                                               \
 }
-    if(w->cls == P_WS){
-        int i = 0;
-        for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
-            if(i > 0){
-                CHK(2)
-                s[p++] = '-';
-                s[p++] = '>';
-            }
-            p = type_str_r(wt, s, p);
-            i++;
-        }
-    } else {
-        char* t = g_string(g_lhs(w));
-        if(strcmp(t, "function") == 0){
+
+    switch(w->cls){
+        case FT_FUNCTION:
+        {
+            int i = 0;
             CHK(1)
             s[p++] = '(';
-            p = type_str_r(g_rhs(w), s, p);
+            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
+                if(i > 0){
+                    CHK(2)
+                    s[p++] = '-';
+                    s[p++] = '>';
+                }
+                p = type_str_r(wt, s, p);
+                i++;
+            }
             CHK(1)
             s[p++] = ')';
         }
-        else if(strcmp(t, "array") == 0){
+            break;
+        case FT_TUPLE:
+        {
+            int i = 0;
+            s[p++] = '(';
+            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
+                if(i > 0){
+                    CHK(1)
+                    s[p++] = ',';
+                }
+                p = type_str_r(wt, s, p);
+                i++;
+            }
+            s[p++] = ')';
+        }
+            break;
+        case FT_ARRAY:
+        {
             CHK(1)
             s[p++] = '[';
-            p = type_str_r(g_rhs(w), s, p);
+            p = type_str_r(wws_head(w), s, p);
             CHK(1)
             s[p++] = ']';
         }
-        else if(strcmp(t, "atomic") == 0){
-            char* atom = g_string(g_rhs(w));
+            break;
+        case FT_ATOMIC:
+        {
+            char* atom = g_string(w);
             int atom_size = strlen(atom);
             CHK(atom_size)
             strcpy(s + p, atom);
             p += atom_size;
         }
-        else {
-            warn("Type constructor '%s' is not supported", t); 
-        }
+            break;
+        default:
+            warn("Unusual error (%s:%d)", __func__, __LINE__); 
+            break;
     }
     return p;
 #undef CHK
@@ -87,7 +108,9 @@ char* type_str(W* w){
 W* _type_compatible(W* i, W* t, W* msg);
 
 bool _is_io(W* w){
-    return strcmp(g_string(g_lhs(w)), __IO__) == 0;
+    return
+        w->cls == FT_ATOMIC &&
+        strcmp(g_string(w), __IO__) == 0;
 }
 
 bool _cmp_type(char* a, char* b){
@@ -111,15 +134,12 @@ void _set_default_type(W* w){
         int ninputs = ws_length(m->inputs);
         int ntypes = ninputs ? ninputs + 1 : 2;
         for(int i = 0; i < ntypes; i++){
-            W *lhs,*rhs;
-            lhs = w_new(P_STRING, "atomic");
+            W* star;
             if(i == 0 && ninputs == 0){
-                rhs = w_new(P_STRING, "void");
+                star = w_new(FT_ATOMIC, "void");
             } else {
-                rhs = w_new(P_STRING, "*");
+                star = w_new(FT_ATOMIC, "*");
             }
-            Couplet* c = couplet_new(lhs, rhs, '=');
-            W* star = w_new(P_TYPE, c);
             m->type = ws_add(m->type, star);
         } 
     }
@@ -136,7 +156,7 @@ void infer_star_types(Ws* ws){
 void _infer_star_type(W* w){
     Manifold* m = g_manifold(g_rhs(w));
     ws_zip_mod(
-        ws_init(m->type),
+        m->type,
         m->inputs,
         _transfer_star_type
     );
@@ -144,9 +164,19 @@ void _infer_star_type(W* w){
 void _transfer_star_type(W* type, W* input){
     if(input->cls == C_MANIFOLD){
         W* itype = g_manifold(g_rhs(input))->type->last;
-        if(IS_ATOMIC(type) && IS_STAR(type)){
-            s_lhs(type, g_lhs(itype));
-            s_rhs(type, g_rhs(itype));
+        if(
+                IS_ATOMIC(type) && IS_STAR(type) &&
+                ! (IS_ATOMIC(itype) && ( IS_STAR(itype) || IS_MULTI(itype)))
+          ){
+            type->value = itype->value;
+            type->cls = itype->cls;
+        }
+        if(
+                IS_ATOMIC(itype) && IS_STAR(itype) &&
+                ! (IS_ATOMIC(type) && ( IS_STAR(type) || IS_MULTI(type)))
+          ){
+            itype->value = type->value;
+            itype->cls = type->cls;
         }
     }
 }
@@ -164,8 +194,8 @@ void _infer_multi_type(W* w){
     Manifold *wm, *im;
     wm = g_manifold(g_rhs(w));
     if(wm->type &&
-       strcmp(g_string(g_lhs(wm->type->head)), "atomic") == 0 &&
-       strcmp(g_string(g_rhs(wm->type->head)), __MULTI__) == 0 &&
+       wm->type->head->cls == FT_ATOMIC &&
+       strcmp(g_string(wm->type->head), __MULTI__) == 0 &&
        ws_length(wm->type) == 2 &&
        ws_length(wm->inputs) > 1
     ){
@@ -177,10 +207,8 @@ void _infer_multi_type(W* w){
                     break;
                 case C_POSITIONAL:
                     {
-                        W* lhs = w_new(P_STRING, "atomic");
-                        W* rhs = w_new(P_STRING, g_string(g_lhs(i)));
-                        Couplet* c = couplet_new(lhs, rhs, '=');
-                        wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+                        char* ptype = g_string(g_lhs(i));
+                        wm->type = ws_add(wm->type, w_new(FT_ATOMIC, ptype));
                     }
                     break;
                 case C_MANIFOLD:
@@ -189,10 +217,7 @@ void _infer_multi_type(W* w){
                         if(ws_length(im->type) > 1){
                             wm->type = ws_add(wm->type, w_clone(im->type->last));
                         } else {
-                            W* lhs = w_new(P_STRING, "atomic");
-                            W* rhs = w_new(P_STRING, "*");
-                            Couplet* c = couplet_new(lhs, rhs, '=');
-                            wm->type = ws_add(wm->type, w_new(P_TYPE, c));
+                            wm->type = ws_add(wm->type, w_new(FT_ATOMIC, "*"));
                         }
                     }
                     break;
@@ -209,8 +234,8 @@ W* _typecheck(W* w, W* msg){
 
     if(
         ws_length(m->type) == 2 &&
-        strcmp(g_string(g_lhs(m->type->head)), "atomic") == 0 &&
-        strcmp(g_string(g_rhs(m->type->head)), __MULTI__) == 0
+        m->type->head->cls == FT_ATOMIC &&
+        strcmp(g_string(m->type->head), __MULTI__) == 0
     ){
         return msg;
     }
@@ -219,6 +244,7 @@ W* _typecheck(W* w, W* msg){
         LOG_ERROR(msg, w, "no declared type");
         return msg;
     }
+
 
     int n_types = ws_length(m->type) - 1 - type_is_well(m->type);
     int n_inputs = ws_length(m->inputs);

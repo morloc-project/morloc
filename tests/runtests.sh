@@ -182,6 +182,7 @@ frontend_test complex-types      'complex-types/     -- test array, function and
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
 frontend_test multi              'multi/             -- test multi manifold type inference ............. '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
+frontend_test positional-types   'positional-types/  -- test type inference of positional arguments .... '
 frontend_test types              'types/             -- types and lists of types ....................... '
 frontend_test elements           'elements/          -- basic manifold elements exist .................. '
 frontend_test infer-star         'infer-star/        -- infer type of * generics ....................... '
@@ -214,6 +215,7 @@ backend_x_test all-vectors      'all-vectors/       -- pass each vector type thr
 backend_x_test all-tables       'all-tables/        -- pass each table type through all language ...... '
 backend_test sh-r-open     main 'sh-r-open/         -- send data from R to sh ......................... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
+backend_test tuples main        'tuples/            -- pass tuple across all languages ................ '
 fi
 
 
@@ -245,6 +247,7 @@ if [[ $lang == "all" || $lang == "py" ]] ; then
 backend_test   py-hooks  main       'py-hooks/          -- python hello world program ..................... '
 backend_test   py-sh main           'py-sh/             -- python [[Int]] to shell `sort` back to python .. '
 backend_test   py-table main        'py-table/          -- test printing of type `[[Int]]` ................ '
+backend_test   py-positionals main  'py-positionals/    -- test type inference of positionals ............. '
 backend_x_test py-logical           'py-logical/        -- and . is_a (any . is_b is_c (not . is_d)) ...... '
 fi
 
