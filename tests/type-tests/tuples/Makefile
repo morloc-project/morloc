@@ -5,11 +5,7 @@ all:
 
 .PHONY: run
 run:
-	./manifold-nexus.py Text
-	./manifold-nexus.py Int
-	./manifold-nexus.py Num
-	./manifold-nexus.py String
-	./manifold-nexus.py Bool
+	./manifold-nexus.py main
 
 .PHONY: clean
 clean:

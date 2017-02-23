@@ -237,7 +237,7 @@ fi
     def make_type_map(self):
         types = []
         for k,v in self.manifolds.items():
-            types.append("typemap[%s]=%s" % (k, v.type))
+            types.append("typemap[%s]='%s'" % (k, v.type))
             for k,n,m,t in v.input:
                 if k == "a":
                     types.append("typemap[x%s]=%s" % (m, t))

@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-echo -e "42\t1\tgive me back my hat\t2.80"
+echo -e "42\t1\tgive me back my hat\t2.8"

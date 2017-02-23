@@ -12,13 +12,41 @@ loc_universal_form <- function(x){
                 x[[i]] <- as.integer(x[[i]])
             }
         }
-    } else if(is.list(x)) {
-        x <- unlist(x)
-    }
-    if(is.vector(x) && is.logical(x)) {
+    } else if(!is.list(x) && is.vector(x) && is.logical(x)) {
         x <- as.integer(x)
     }
     x
+}
+
+# Convert text or binary to native data structure
+loc_number_types  <- c("Int", "[Int]", "Num", "[Num]")
+loc_string_types  <- c("String", "[String]", "File")
+loc_logical_types <- c("Bool", "[Bool]")
+
+loc_primitive <- c("Int", "Num", "String", "File", "Bool")
+
+loc_cast_native <- list(
+    "Int"    = as.integer,
+    "Num"    = as.numeric,
+    "String" = as.character,
+    "File"   = as.character,
+    "Bool"   = function(x) { as.logical(as.integer(x)) },
+    "Text"   = read_lines,
+    "void"   = function(x) { NULL }
+)
+
+
+loc_is_tuple <- function(t){
+    grepl("^\\(.*\\)$", t)
+}
+
+loc_split_tuple <- function(t){
+    unlist(strsplit(gsub("^\\(|\\)$", "", t), ","))
+}
+
+loc_is_primitive_tuple <- function(t){
+    loc_is_tuple(t) &&
+        all(loc_split_tuple(t) %in% loc_primitive)
 }
 
 # Convert native data structure to file or literal
@@ -35,12 +63,20 @@ native_to_universal <- function(x, type, outdir){
     f <- tempfile(pattern="m1_R_", tmpdir=outdir, fileext=".out")
     require(readr)
     x <- loc_universal_form(x)
-    if(is.data.frame(x)){
+    if(is.data.frame(x) || is.matrix(x)){
       write_tsv(x, path=f, col_names=FALSE)
     } else if(is.list(x)) {
-      write(unlist(x), file=f, ncolumns=1)
+      if(loc_is_primitive_tuple(type)){
+        ts <- loc_split_tuple(type)
+        boolids <- which(ts == "Bool")
+        x[boolids] <- lapply(x[boolids], as.integer)
+        x <- paste(unlist(x), collapse="\t")
+        write(x, append=TRUE, file=f, ncolumns=1)
+      } else {
+        write(unlist(x), append=TRUE, file=f, ncolumns=1)
+      }
     } else if(is.vector(x)) {
-      write(x, file=f, ncolumns=1)
+      write(x, append=TRUE, file=f, ncolumns=1)
     } else {
       msg = sprintf("R: Cannot export object of class '%s'", class(x))
       warning(msg)
@@ -49,21 +85,6 @@ native_to_universal <- function(x, type, outdir){
   }
   f
 }
-
-# Convert text or binary to native data structure
-loc_number_types  <- c("Int", "[Int]", "Num", "[Num]")
-loc_string_types  <- c("String", "[String]", "File")
-loc_logical_types <- c("Bool", "[Bool]")
-
-loc_cast_native <- list(
-    "Int"    = as.integer,
-    "Num"    = as.numeric,
-    "String" = as.character,
-    "File"   = as.character,
-    "Bool"   = function(x) { as.logical(as.integer(x)) },
-    "Text"   = read_lines,
-    "void"   = function(x) { NULL }
-)
 
 loc_is_list <- function(type){ grepl("^\\[[^[]", type) }
 loc_is_table <- function(type){ grepl("^\\[\\[[^[]", type) }
@@ -87,6 +108,15 @@ universal_to_native <- function(x, type){
         col_names=FALSE,
         col_types=cols(.default = col_type)
     )
+  } else if(loc_is_primitive_tuple(type)) {
+    col_types <- paste(loc_col_types[loc_split_tuple(type)], collapse="")
+    d <- read_tsv(
+        x,
+        col_names=FALSE,
+        col_types=col_types
+    )
+    d <- as.list(d[1, ])
+    names(d) <- NULL
   } else if(type %in% names(loc_cast_native)){
     d <- loc_cast_native[[type]](x)
   } else {
@@ -208,6 +238,13 @@ def __loc_parse_list(x, typ):
 
     return d
 
+def loc_is_tuple(typ):
+    return typ[0] == '(' and ',' in typ
+
+def is_primitive_tuple(typ):
+    typ = typ[1:-1].split(',')
+    return all((t in loc_cast_universal) for t in typ)
+
 # Convert native data structure to file or literal
 def native_to_universal(x, typ, outdir):
     f = None
@@ -216,7 +253,7 @@ def native_to_universal(x, typ, outdir):
         f = caster(x)
     else:
         tmp = tempfile.NamedTemporaryFile(
-            prefix = "py_%s_" % typ,
+            prefix = "py_",
             dir    = outdir,
             delete = False
         )
@@ -229,13 +266,20 @@ def native_to_universal(x, typ, outdir):
 
         if typ[0] == '[':
             data = '\n'.join(__loc_parse_list(x, typ))
+        elif loc_is_tuple(typ):
+            if is_primitive_tuple(typ):
+                data = "\t".join((str(s) for s in x))
+            else:
+                msg = "Py: No handler complex tuples '%s'"
+                print(msg % typ, file=sys.stderr)
+                data = str(x)
         elif typ == "Text":
             if isinstance(x, (list,tuple,set)):
                 data = "\n".join((str(s) for s in x))
             else:
                 data = str(x)
         else:
-            msg = "Py: Cannot object of type '%s' ('%s'), guessing"
+            msg = "Py: No handler for type '%s' ('%s'), guessing"
             print(msg % (typ, type(x)), file=sys.stderr)
             data = str(x)
 
@@ -252,6 +296,18 @@ def universal_to_native(x, typ):
     elif typ == "Text":
         with open(x.rstrip(), "r") as f:
             d = [s.rstrip() for s in f.readlines()]
+    elif loc_is_tuple(typ):
+        if is_primitive_tuple(typ):
+            with open(x.strip(), "r") as f:
+                d = f.readlines()
+                if(len(d) != 1):
+                    print("Expected primitive tuple to be 1 line", file=sys.stderr)
+                d = d[0].rstrip()
+            d = tuple(d.split("\t"))
+        else:
+            msg = "Py: No handler for reading complex tuple '%s'"
+            print(msg % typ, file=sys.stderr)
+            d = str(x)
     elif typ[0] == '[':
         with open(x.strip(), "r") as f:
             d = [s.rstrip() for s in f.readlines()]
