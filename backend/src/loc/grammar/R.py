@@ -30,6 +30,10 @@ outdir <- "{outdir}"
 
 {manifolds}
 
+{nat2uni}
+
+{uni2nat}
+
 args <- commandArgs(TRUE)
 m <- args[1]
 

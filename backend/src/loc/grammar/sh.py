@@ -29,6 +29,10 @@ outdir={outdir}
 
 {manifolds}
 
+{nat2uni}
+
+{uni2nat}
+
 manifold_exists() {{
     type $1 | grep -q function
 }}

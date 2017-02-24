@@ -10,9 +10,13 @@ import lil
 import nexus
 from util import err
 
-import grammar.R
-import grammar.sh
-import grammar.py
+from grammar.R import RGrammar
+from grammar.sh import ShGrammar
+from grammar.py import PyGrammar
+             
+from mogrifier.R import RMogrifier
+from mogrifier.sh import ShMogrifier
+from mogrifier.py import PyMogrifier
 
 __version__ = '0.0.0'
 __prog__ = 'loc'
@@ -163,15 +167,20 @@ def build_project(raw_lil, outdir, home):
             src = ""
 
         if lang == "sh":
-            grm = grammar.sh.ShGrammar(src, manifolds, outdir, home)
+            grm = ShGrammar(src, manifolds, outdir, home)
+            mog = ShMogrifier(manifolds)
         elif lang == "R":
-            grm = grammar.R.RGrammar(src, manifolds, outdir, home)
+            grm = RGrammar(src, manifolds, outdir, home)
+            mog = RMogrifier(manifolds)
         elif lang == "py":
-            grm = grammar.py.PyGrammar(src, manifolds, outdir, home)
+            grm = PyGrammar(src, manifolds, outdir, home)
+            mog = PyMogrifier(manifolds)
         else:
             err("'%s' is not a supported language" % lang)
 
         pool = grm.make()
+        # pool.format(uni2nat=mog.build_uni2nat(pool))
+        # pool.format(nat2uni=mog.build_nat2uni(pool))
 
         pool_filename = os.path.join(outdir, "call.%s" % lang)
         with open(pool_filename, 'w') as f:

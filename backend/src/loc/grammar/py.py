@@ -33,6 +33,10 @@ outdir = "{outdir}"
 
 {manifolds}
 
+{nat2uni}
+
+{uni2nat}
+
 if __name__ == '__main__':
     args = sys.argv
     cmd_str = "{{function}}({{args}})"
