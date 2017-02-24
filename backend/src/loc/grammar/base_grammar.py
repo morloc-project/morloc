@@ -94,7 +94,16 @@ class Grammar:
         return self.POOL
 
     def make_type_map(self):
-        NotImplemented
+        types = []
+        for k,v in self.manifolds.items():
+            pair = self.TYPE_MAP_PAIR.format(key=k, type=v.type)
+            types.append(pair)
+            for k,n,m,t in v.input:
+                if k == "a":
+                    pair = self.TYPE_MAP_PAIR.format(key=("x" + m), type=t)
+                    types.append(pair)
+        sep = self.SEP + "\n"
+        return self.TYPE_MAP.format(pairs=sep.join(types))
 
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(

@@ -58,10 +58,13 @@ then
 else
     exit 1 
 fi'''
-        self.TYPE_MAP         = '''\
+        self.TYPE_MAP = '''\
 declare -A typemap
+typemap=(
 {pairs}
+)
 '''
+        self.TYPE_MAP_PAIR    = "    [{key}]='{type}'"
         self.TYPE_ACCESS      = '${{typemap[{mid}]}}'
         self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
         self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
@@ -233,12 +236,3 @@ fi
             arg_rep=arg_rep
         )
         return s
-
-    def make_type_map(self):
-        types = []
-        for k,v in self.manifolds.items():
-            types.append("typemap[%s]='%s'" % (k, v.type))
-            for k,n,m,t in v.input:
-                if k == "a":
-                    types.append("typemap[x%s]=%s" % (m, t))
-        return self.TYPE_MAP.format(pairs='\n'.join(types))

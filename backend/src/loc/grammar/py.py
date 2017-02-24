@@ -43,6 +43,7 @@ if __name__ == '__main__':
     print(result)
 '''
         self.TYPE_MAP         = '''output_type = {{\n{pairs}\n}}'''
+        self.TYPE_MAP_PAIR    = "    '{key}' : '{type}'"
         self.TYPE_ACCESS      = '''output_type[{key}]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
         self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
@@ -172,12 +173,3 @@ b = {function}({arguments})
             foreign_lang = m.lang,
         )
         return s
-
-    def make_type_map(self):
-        types = []
-        for k,v in self.manifolds.items():
-            types.append("    '%s' : '%s'" % (k, v.type))
-            for k,n,m,t in v.input:
-                if k == "a":
-                    types.append("x%s : '%s'" % (m, t))
-        return self.TYPE_MAP.format(pairs=',\n'.join(types))
