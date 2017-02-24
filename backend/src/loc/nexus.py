@@ -77,9 +77,12 @@ if __name__ == '__main__':
         os.remove("manifold-nexus.py")
     else:
         result, vtype = args.func()
-        returncode=result.returncode
-        show(result.stdout, vtype=vtype)
-        print(result.stderr, file=sys.stderr, end="")
+        if result == None:
+            returncode = 1 
+        else:
+            returncode = result.returncode
+            show(result.stdout, vtype=vtype)
+            print(result.stderr, file=sys.stderr, end="")
         sys.exit(returncode)
 '''
 
@@ -97,13 +100,19 @@ parser_template = '''\
 call_template = '''\
 def {mid}():
     path = os.path.join(outdir, "call.{lang}")
-    result = subprocess.run(
-        [path, "{mid}"],
-        stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        encoding='utf-8'
-    )
-    return (result, "{vtype}")
+    try:
+        cmd = ' '.join([path, "{mid}"])
+        result = subprocess.run(
+            [path, "{mid}"],
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding='utf-8'
+        )
+        return (result, "{vtype}")
+    except OSError as e:
+        print("OSError in '%s': %s" % (cmd, e), file=sys.stderr)
+        print("Check the hashbang", file=sys.stderr)
+        return (None, "{vtype}")
 '''
 
 def build_manifold_nexus(

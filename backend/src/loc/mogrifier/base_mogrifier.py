@@ -1,7 +1,10 @@
 from util import err,indent,clean
+import sys
 
 class Mogrifier:
     def __init__(self, manifolds):
+        self.manifolds = manifolds
+
         # key: name of atomic type
         # val: a function that maps between universal and native
         self.universal_to_atom = dict()
@@ -12,10 +15,24 @@ class Mogrifier:
         self.natural_to_universal = None
 
     def build_uni2nat(self):
-        raise NotImplemented
+        out = []
+        for m in self.manifolds.values():
+            function_name = "read_" + m.mid
+            s = self.universal_to_natural.format(
+                name=function_name
+            )
+            out.append(s)
+        return '\n'.join(out)
 
     def build_nat2uni(self):
-        raise NotImplemented
+        out = []
+        for m in self.manifolds.values():
+            function_name = "show_" + m.mid
+            s = self.natural_to_universal.format(
+                name=function_name
+            )
+            out.append(s)
+        return '\n'.join(out)
 
     def _parse_type(self):
         raise NotImplemented

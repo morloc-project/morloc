@@ -54,7 +54,7 @@ class Grammar:
         self.WRAPPER_NAME         = ""
 
 
-    def make(self):
+    def make(self, uni2nat, nat2uni):
 
         p = self.make_pool()
 
@@ -82,10 +82,12 @@ class Grammar:
             mtext.append(s)
 
         p = p.format(
-            source=self.source,
-            type_map=self.make_type_map(),
-            outdir=self.outdir,
-            manifolds='\n\n'.join(mtext)
+            source    = self.source,
+            type_map  = self.make_type_map(),
+            outdir    = self.outdir,
+            manifolds = '\n\n'.join(mtext),
+            uni2nat   = uni2nat,
+            nat2uni   = nat2uni,
         )
 
         return p

@@ -42,9 +42,12 @@ if __name__ == '__main__':
     cmd_str = "{{function}}({{args}})"
     arg_str = ', '.join(args[2:])
     cmd = cmd_str.format(function=args[1], args=arg_str)
-    x = eval(cmd)
-    result = native_to_universal(x, output_type[args[1]], outdir)
-    print(result)
+    try:
+        x = eval(cmd)
+        result = native_to_universal(x, output_type[args[1]], outdir)
+        print(result)
+    except SyntaxError as e:
+        print("Syntax error in:\\n%s\\n%s" % (cmd, e), file=sys.stderr)
 '''
         self.TYPE_MAP         = '''output_type = {{\n{pairs}\n}}'''
         self.TYPE_MAP_PAIR    = "    '{key}' : '{type}'"
@@ -86,13 +89,23 @@ def {mid}({marg_uid}):
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 foreign_pool = os.path.join(outdir, "call.{foreign_lang}")
-result = subprocess.run(
-    [foreign_pool] + [{args}],
-    stderr=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    encoding='utf-8'
-)
-return universal_to_native(result.stdout, output_type["{mid}"])
+try:
+    cmd = " ".join([foreign_pool] + [{args}])
+    result = subprocess.run(
+        [foreign_pool] + [{args}],
+        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        encoding='utf-8',
+        check=True
+    )
+    return universal_to_native(result.stdout, output_type["{mid}"])
+except subprocess.CalledProcessError as e:
+    print("ERROR: '%s' returned non-zero exit status", file=sys.stderr)
+    print("       %s" % e, file=sys.stderr)
+    return None
+except:
+    print("Unknown error upon calling '%s'" % cmd, file=sys.stderr)
+    return None
 '''
         self.CACHE = '''\
 if {cache}_chk("{mid}"{uid}{cache_args}):

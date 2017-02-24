@@ -13,11 +13,11 @@ class RGrammar(Grammar):
         self.outdir    = outdir
         self.home      = home
         self.lang      = "R"
-        self.INDENT = 2                
-        self.SEP    = ', '             
-        self.BIND   = '='              
-        self.AND    = ' && '           
-        self.LIST   = 'list({values})' 
+        self.INDENT = 2
+        self.SEP    = ', '
+        self.BIND   = '='
+        self.AND    = ' && '
+        self.LIST   = 'list({values})'
         self.POOL   = '''\
 #!/usr/bin/Rscript --vanilla
 library(readr)
@@ -50,7 +50,11 @@ if(exists(m)){{
 }} else {{
   quit(status=1)
 }}'''
-        self.TYPE_MAP         = '''types <- c({pairs})'''
+        self.TYPE_MAP         = '''\
+types <- c(
+{pairs}
+)
+'''
         self.TYPE_MAP_PAIR    = "    {key}='{type}'"
         self.TYPE_ACCESS      = '''types["{key}"]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
@@ -81,7 +85,7 @@ wrap_{mid} <- function(...){{
 }}
 '''
         self.UID_WRAPPER_BLK = '''\
-{mid}_uid <<- {mid}_uid + 1 
+{mid}_uid <<- {mid}_uid + 1
 {mid} (..., uid={mid}_uid )
 '''
         self.UID = 'uid'

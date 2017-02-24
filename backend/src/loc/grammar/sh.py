@@ -56,7 +56,7 @@ then
         echo $d
     fi
 else
-    exit 1 
+    exit 1
 fi'''
         self.TYPE_MAP = '''\
 declare -A typemap

@@ -178,9 +178,10 @@ def build_project(raw_lil, outdir, home):
         else:
             err("'%s' is not a supported language" % lang)
 
-        pool = grm.make()
-        # pool.format(uni2nat=mog.build_uni2nat(pool))
-        # pool.format(nat2uni=mog.build_nat2uni(pool))
+        pool = grm.make(
+            uni2nat=mog.build_uni2nat(),
+            nat2uni=mog.build_nat2uni()
+        )
 
         pool_filename = os.path.join(outdir, "call.%s" % lang)
         with open(pool_filename, 'w') as f:
