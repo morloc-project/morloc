@@ -166,21 +166,3 @@ b = {function}({arguments})
         self.MANIFOLD_CALL = '{hmid}({marg_uid})'
         self.CHECK_CALL    = '{hmid}({marg_uid})'
         self.HOOK          = '{hmid}({marg_uid})'
-
-    def make_foreign_manifold_blk(self, m):
-        arg_rep = ["'%s'" % m.mid]
-        for i in range(int(m.narg)):
-            a = self.MARG.format(i=str(i+1))
-            s = 'native_to_universal(%s, types["%s"], outdir)' % (a,a)
-            arg_rep.append(s)
-        if m.narg:
-            arg_rep.append("uid")
-        arg_rep = ', '.join(arg_rep)
-        s = self.FOREIGN_MANIFOLD_BLK.format(
-            mid          = m.mid,
-            args         = arg_rep,
-            marg_uid     = self.make_marg_uid(m),
-            outdir       = self.outdir,
-            foreign_lang = m.lang,
-        )
-        return s

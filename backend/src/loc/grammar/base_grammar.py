@@ -114,11 +114,22 @@ class Grammar:
         return s
 
     def make_foreign_manifold_blk(self, m):
+        arg_rep = ["'%s'" % m.mid]
+        for i in range(int(m.narg)):
+            a = self.MARG.format(i=str(i+1))
+            s = 'native_to_universal({mid}, {temp}, outdir)' 
+            s = s.format(mid=a, temp=self.TYPE_ACCESS)
+            s = s.format(key=a)
+            arg_rep.append(s)
+        if m.narg:
+            arg_rep.append("uid")
+        arg_rep = self.SEP.join(arg_rep)
         s = self.FOREIGN_MANIFOLD_BLK.format(
             mid          = m.mid,
-            foreign_lang = m.lang,
+            args         = arg_rep,
+            marg_uid     = self.make_marg_uid(m),
             outdir       = self.outdir,
-            uni_marg_uid = self.make_marg_uid(m, universal=True)
+            foreign_lang = m.lang,
         )
         return s
 
