@@ -27,10 +27,6 @@ outdir={outdir}
 
 {source}
 
-to_stderr () {{
-    $@ 1>&2
-}}
-
 {manifolds}
 
 manifold_exists() {{
@@ -176,7 +172,7 @@ fi
         self.ARGUMENTS     = '{fargs} {inputs}'
         self.MANIFOLD_CALL = '{operator}({hmid} {marg_uid})'
         self.CHECK_CALL    = '$({hmid} {marg_uid}) -eq 1'
-        self.HOOK          = 'to_stderr {hmid} {marg_uid}'
+        self.HOOK          = '{hmid} {marg_uid} 1>&2'
 
         self.BOOL_WRAPPER = '&> /dev/null && echo 1 || echo 0'
 
