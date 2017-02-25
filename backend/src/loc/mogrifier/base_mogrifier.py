@@ -1,6 +1,20 @@
 from util import err,indent,clean
 import sys
 
+# type : ATOM
+#      | ( type )
+#      | ( list )
+#      | ( func )
+#      | [ type ]
+#
+# list : type , type
+#      | list , type
+#
+# func : type -> type
+#      | list -> type
+#
+# * where ATOM is [A-Za-z][A-Za-z0-9_]*
+
 class Mogrifier:
     def __init__(self, manifolds):
         self.manifolds = manifolds
@@ -10,12 +24,16 @@ class Mogrifier:
         self.universal_to_atom = dict()
         self.atom_to_universal = dict()
 
+        # any code that required for the mogrifier
+        self.uni2nat_top = "" 
+        self.nat2uni_top = ""
+
         # templates for conversion functions
         self.universal_to_natural = None
         self.natural_to_universal = None
 
     def build_uni2nat(self):
-        out = []
+        out = [self.uni2nat_top]
         for m in self.manifolds.values():
             function_name = "read_" + m.mid
             s = self.universal_to_natural.format(
@@ -25,7 +43,7 @@ class Mogrifier:
         return '\n'.join(out)
 
     def build_nat2uni(self):
-        out = []
+        out = [self.nat2uni_top]
         for m in self.manifolds.values():
             function_name = "show_" + m.mid
             s = self.natural_to_universal.format(
