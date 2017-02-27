@@ -12,42 +12,25 @@ def typeFunc():  return '(', typeExpr, OneOrMore('->', typeExpr), ')'
 def typeExpr():  return [typeIdent, typeTuple, typeArray, typeFunc]
 def typeType():  return typeExpr, EOF
 
+
 class typeTypeVisitor(PTNodeVisitor):
 
-    def __init__(
-        self,      # boiplate
-        mog,       # an object holding all required template strings
-        direction  # ["uni2nat", "nat2uni"]
-    ):
-        super().__init__()
-        self.mog = mog
-        self.direction = direction
-
     def visit_typeIdent(self, node, children):
-        # TODO I am given type, but need to produce a nested function that takes 'x'
-        # TODO need to extend this elsewhere
-        ident = node.value
-        if ident in self.mog.universal_to_atom.keys():
-            return(self.mog.universal_to_atom[ident] % "x")
+        return(("atomic", node.value))
 
     def visit_typeTuple(self, node, children):
-        # TODO replace
-        return("tuple(%s)" % ','.join(children))
+        return(("tuple", children))
 
     def visit_typeArray(self, node, children):
-        # TODO replace
-        return("array(%s)" % children[0])
+        return(("array", children[0]))
 
     def visit_typeFunc(self, node, children):
-        # TODO replace
-        return("function(%s)" % ','.join(children))
+        return(("function", children))
 
     def visit_typeExpr(self, node, children):
-        # TODO replace
         return(children[0])
 
     def visit_typeType(self, node, children):
-        # TODO replace
         return(children[0])
 
 class Mogrifier:
@@ -69,18 +52,58 @@ class Mogrifier:
 
         self.parser = ParserPython(typeType)
 
-        #  # TODO: this needs to go wherever the type is processed 
-        #  parse_tree = parser.parse(t)
-        #
-        #  result = visit_parse_tree(parse_tree, typeTypeVisitor())
+    def build_function(self, tree, direction):
+
+        function = None
+
+        if(tree[0] == "tuple"):
+            if(all(s[0] == "atomic" for s in tree[1])):
+                # primitive tuple, as TAB delimited list
+            else:
+                # general tuple, requires JSON
+        elif(tree[0] == "atomic"):
+            if tree[1] in literal:
+                # atomic, as literal
+            else:
+                # atomic, as file
+        elif(tree[0] == "array"):
+            tree = tree[1]
+            if(tree[0] == "array"):
+                tree = tree[1]
+                if tree[0] == "atomic":
+                    # homogenous list of lists as TSV
+                else:
+                    # higher dimensional or complex matrix, requires JSON
+            elif tree[0] == "tuple":
+                tree = tree[1]
+                if(all(s[0] == "atomic" for s in tree[1])):
+                    # heterogenous proper table (headerless)
+                else:
+                    # complex table, requires JSON
+            elif tree[0] == "atomic":
+                # newline delimited list
+            else:
+                # error
+        elif(tree[0] == "function"):
+            # function
+        else:
+            # error
+
+        return(function)
 
     def build_uni2nat(self):
         out = [self.uni2nat_top]
         for m in self.manifolds.values():
+            tree = self._parse_type(m.type)
+
+            function = build_function(tree, "uni2nat")
+
             function_name = "read_" + m.mid
             s = self.universal_to_natural.format(
-                name=function_name
+                name=function_name,
+                function=function
             )
+
             out.append(s)
         return '\n'.join(out)
 
@@ -88,17 +111,23 @@ class Mogrifier:
         out = [self.nat2uni_top]
         for m in self.manifolds.values():
             function_name = "show_" + m.mid
+
+            type_tree = self._parse_type(m.type)
+
+            function = build_function(tree, "nat2uni")
+
             s = self.natural_to_universal.format(
-                name=function_name
+                name=function_name,
+                caster=caster
             )
+
             out.append(s)
         return '\n'.join(out)
 
-    def _parse_type(self):
-        raise NotImplemented
-
-    def _category(self):
-        raise NotImplemented
+    def _parse_type(self, otype):
+        parse_tree = self.parser.parse(otype)
+        type_tree = visit_parse_tree(parse_tree, typeTypeVisitor())
+        return(type_tree)
 
     def _universal_to_primitive(self, typ):
         raise NotImplemented
