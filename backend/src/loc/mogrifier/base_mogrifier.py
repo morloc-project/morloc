@@ -1,19 +1,54 @@
 from util import err,indent,clean
 import sys
 
-# type : ATOM
-#      | ( type )
-#      | ( list )
-#      | ( func )
-#      | [ type ]
-#
-# list : type , type
-#      | list , type
-#
-# func : type -> type
-#      | list -> type
-#
-# * where ATOM is [A-Za-z][A-Za-z0-9_]*
+# The PEG grammar parser for parsing types
+from arpeggio import *
+from arpeggio import RegExMatch as _
+
+def typeIdent(): return _('[A-Za-z0-9_]+')
+def typeTuple(): return '(', typeExpr, OneOrMore(',', typeExpr), ')'
+def typeArray(): return '[', typeExpr, ']'
+def typeFunc():  return '(', typeExpr, OneOrMore('->', typeExpr), ')'
+def typeExpr():  return [typeIdent, typeTuple, typeArray, typeFunc]
+def typeType():  return typeExpr, EOF
+
+class typeTypeVisitor(PTNodeVisitor):
+
+    def __init__(
+        self,      # boiplate
+        mog,       # an object holding all required template strings
+        direction  # ["uni2nat", "nat2uni"]
+    ):
+        super().__init__()
+        self.mog = mog
+        self.direction = direction
+
+    def visit_typeIdent(self, node, children):
+        # TODO I am given type, but need to produce a nested function that takes 'x'
+        # TODO need to extend this elsewhere
+        ident = node.value
+        if ident in self.mog.universal_to_atom.keys():
+            return(self.mog.universal_to_atom[ident] % "x")
+
+    def visit_typeTuple(self, node, children):
+        # TODO replace
+        return("tuple(%s)" % ','.join(children))
+
+    def visit_typeArray(self, node, children):
+        # TODO replace
+        return("array(%s)" % children[0])
+
+    def visit_typeFunc(self, node, children):
+        # TODO replace
+        return("function(%s)" % ','.join(children))
+
+    def visit_typeExpr(self, node, children):
+        # TODO replace
+        return(children[0])
+
+    def visit_typeType(self, node, children):
+        # TODO replace
+        return(children[0])
 
 class Mogrifier:
     def __init__(self, manifolds):
@@ -31,6 +66,13 @@ class Mogrifier:
         # templates for conversion functions
         self.universal_to_natural = None
         self.natural_to_universal = None
+
+        self.parser = ParserPython(typeType)
+
+        #  # TODO: this needs to go wherever the type is processed 
+        #  parse_tree = parser.parse(t)
+        #
+        #  result = visit_parse_tree(parse_tree, typeTypeVisitor())
 
     def build_uni2nat(self):
         out = [self.uni2nat_top]
