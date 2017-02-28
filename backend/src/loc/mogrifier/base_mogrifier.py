@@ -67,43 +67,48 @@ class Mogrifier:
 
         self.parser = ParserPython(typeType)
 
-    def build_function(self, tree, direction):
+    def _parse_type(self, otype):
+        parse_tree = self.parser.parse(otype)
+        type_tree = visit_parse_tree(parse_tree, typeTypeVisitor())
+        return(type_tree)
+
+    def nat2uni(self, tree):
+        '''
+        Generate a JSON file from a native data structure
+        '''
 
         function = None
 
-        def is_simple(s):
-            return s[0] == "atomic" and s[1] in primitive
+        if tree[0] == "atomic":
+            function = self._primitive_to_universal[tree[1]]
+        elif tree[0] == "tuple":
+            inner = [nat2uni(s) for s in tree[1]]
+            function = self._tuple_to_universal.format(inner)
+        elif tree[0] == "array":
+            inner = nat2uni(tree[1])
+            function = self._array_to_universal(inner)
+        else:
+            print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
+
+        return function
+
+    def uni2nat(self, tree):
+        '''
+        Generate a native datastructure from a JSON file
+        '''
+
+        function = None
 
         if tree[0] == "atomic":
-            if tree[1] in primitive:
-                # atomic, as literal
-            else:
-                # atomic, as file
+            function = self._universal_to_primitive[tree[1]]
         elif tree[0] == "tuple":
-            if all(is_simple(s) for s in tree[1]):
-                # primitive tuple, as TAB delimited list
-            else:
-                # general tuple, requires JSON
+            inner = [uni2nat(s) for s in tree[1]]
+            function = self._universal_to_tuple.format(inner)
         elif tree[0] == "array":
-            if tree[1][0] == "atomic":
-                if tree[1][1] in primitive: 
-                    # newline delimited list
-                else:
-                    # complex list, JSON
-            elif tree[1][0] == "tuple":
-                if all(is_simple(s) for s in tree[1][1]):
-                    # [(a,b,c,...)] - heterogenous proper table (headerless)
-                else:
-                    # complex table, requires JSON
-            elif tree[1][0] == "array":
-                if is_simple(tree[1][1]):
-                    # [[a]] - homogenous list of lists as TSV
-                else:
-                    # [[[...a...]]] - higher dimensional or complex matrix, requires JSON
-            else:
-                # ERROR: unsupported constructor
+            inner = uni2nat(tree[1])
+            function = self._universal_to_array(inner)
         else:
-            # ERROR: unsupported constructor
+            print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
 
         return function
 
@@ -111,50 +116,32 @@ class Mogrifier:
         out = [self.uni2nat_top]
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
-
-            function = build_function(tree, "uni2nat")
-
+            function = uni2nat(tree)
             function_name = "read_" + m.mid
             s = self.universal_to_natural.format(
                 name=function_name,
                 function=function
             )
-
             out.append(s)
         return '\n'.join(out)
 
     def build_nat2uni(self):
         out = [self.nat2uni_top]
         for m in self.manifolds.values():
+            tree = self._parse_type(m.type)
+            function = nat2uni(tree)
             function_name = "show_" + m.mid
-
-            type_tree = self._parse_type(m.type)
-
-            function = build_function(tree, "nat2uni")
-
             s = self.natural_to_universal.format(
                 name=function_name,
-                caster=caster
+                function=function
             )
-
             out.append(s)
         return '\n'.join(out)
-
-    def _parse_type(self, otype):
-        parse_tree = self.parser.parse(otype)
-        type_tree = visit_parse_tree(parse_tree, typeTypeVisitor())
-        return(type_tree)
 
     def _universal_to_primitive(self, typ):
         raise NotImplemented
 
     def _primitive_to_universal(self, typ):
-        raise NotImplemented
-
-    def _universal_to_primitive_tuple(self, typ):
-        raise NotImplemented
-
-    def _primitive_tuple_to_universal(self, typ):
         raise NotImplemented
 
     def _tuple_to_universal(self, typ):
