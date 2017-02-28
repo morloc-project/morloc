@@ -5,13 +5,26 @@ import sys
 from arpeggio import *
 from arpeggio import RegExMatch as _
 
+
+# =============================================================================
+# --- Type parser
+# Reads a Haskell style type definition. It reads a single type, not a type
+# signature. The result is a tuple of form '(<constructor>, <value>)'. The
+# constructor can currently be any of the following: "atomic", "tuple",
+# "array", or "function". The value can be nested. For example,
+#    ("tuple", (("atomic", "Int"), ("array", ("tuple", ("String", "String")))))
+# which would correspond to
+#    (Int, [(String, String)])
+# This tuple is used to determine which conversion functions should be used in
+# the output code. 
+# =============================================================================
+
 def typeIdent(): return _('[A-Za-z0-9_]+')
 def typeTuple(): return '(', typeExpr, OneOrMore(',', typeExpr), ')'
 def typeArray(): return '[', typeExpr, ']'
 def typeFunc():  return '(', typeExpr, OneOrMore('->', typeExpr), ')'
 def typeExpr():  return [typeIdent, typeTuple, typeArray, typeFunc]
 def typeType():  return typeExpr, EOF
-
 
 class typeTypeVisitor(PTNodeVisitor):
 
@@ -32,6 +45,8 @@ class typeTypeVisitor(PTNodeVisitor):
 
     def visit_typeType(self, node, children):
         return(children[0])
+
+
 
 class Mogrifier:
     def __init__(self, manifolds):
@@ -56,40 +71,41 @@ class Mogrifier:
 
         function = None
 
-        if(tree[0] == "tuple"):
-            if(all(s[0] == "atomic" for s in tree[1])):
-                # primitive tuple, as TAB delimited list
-            else:
-                # general tuple, requires JSON
-        elif(tree[0] == "atomic"):
-            if tree[1] in literal:
+        def is_simple(s):
+            return s[0] == "atomic" and s[1] in primitive
+
+        if tree[0] == "atomic":
+            if tree[1] in primitive:
                 # atomic, as literal
             else:
                 # atomic, as file
-        elif(tree[0] == "array"):
-            tree = tree[1]
-            if(tree[0] == "array"):
-                tree = tree[1]
-                if tree[0] == "atomic":
-                    # homogenous list of lists as TSV
+        elif tree[0] == "tuple":
+            if all(is_simple(s) for s in tree[1]):
+                # primitive tuple, as TAB delimited list
+            else:
+                # general tuple, requires JSON
+        elif tree[0] == "array":
+            if tree[1][0] == "atomic":
+                if tree[1][1] in primitive: 
+                    # newline delimited list
                 else:
-                    # higher dimensional or complex matrix, requires JSON
-            elif tree[0] == "tuple":
-                tree = tree[1]
-                if(all(s[0] == "atomic" for s in tree[1])):
-                    # heterogenous proper table (headerless)
+                    # complex list, JSON
+            elif tree[1][0] == "tuple":
+                if all(is_simple(s) for s in tree[1][1]):
+                    # [(a,b,c,...)] - heterogenous proper table (headerless)
                 else:
                     # complex table, requires JSON
-            elif tree[0] == "atomic":
-                # newline delimited list
+            elif tree[1][0] == "array":
+                if is_simple(tree[1][1]):
+                    # [[a]] - homogenous list of lists as TSV
+                else:
+                    # [[[...a...]]] - higher dimensional or complex matrix, requires JSON
             else:
-                # error
-        elif(tree[0] == "function"):
-            # function
+                # ERROR: unsupported constructor
         else:
-            # error
+            # ERROR: unsupported constructor
 
-        return(function)
+        return function
 
     def build_uni2nat(self):
         out = [self.uni2nat_top]
