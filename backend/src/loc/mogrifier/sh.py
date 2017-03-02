@@ -1,21 +1,21 @@
 from mogrifier.base_mogrifier import Mogrifier
 
 universal_to_atom = {
-    "Int"    : 'echo "${x}"',
-    "Num"    : 'echo "${x}"',
-    "String" : 'echo "${x}"',
-    "File"   : 'echo "${x}"',
-    "Bool"   : 'echo "${x}"',
+    "Int"    : 'echo ${x}',
+    "Num"    : 'echo ${x}',
+    "String" : 'echo ${x}',
+    "File"   : 'echo ${x}',
+    "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n'
 }
 
 atom_to_universal = {
-    "Int"    : 'echo "${x}"',
-    "Num"    : 'echo "${x}"',
-    "String" : 'echo "${x}"',
-    "File"   : 'echo "${x}"',
-    "Bool"   : 'echo "${x}"',
+    "Int"    : 'echo ${x}',
+    "Num"    : 'echo ${x}',
+    "String" : 'echo ${x}',
+    "File"   : 'echo ${x}',
+    "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n'
 }
@@ -65,13 +65,15 @@ class ShMogrifier(Mogrifier):
 
     def _primitive_to_universal(self, typ):
         val = self.atom_to_universal[typ].format(x="x")
-        s = 'printf \'%s\' "$(%s)"' % ((self.json_template % typ), val)
+        s = self.primitive_json_template % typ
+        s = 'printf \'%s\' "$(%s)"' % (s, val)
         return s
 
     def _tuple_to_universal(self, typ, inner):
-        val = "[" + ','.join(inner) + "]"
-        return self.json_template % (typ, val)
+        pass
 
-    def _array_to_universal(self, typ):
-        typ = "[" + ','.join(inner) + "]"
-        return self.json_template % (typ, val)
+    def _array_to_universal(self, typ, inner):
+        typ = '[%s]' % typ
+        s = "s='%s' %% val" % (self.json_template % typ)
+        val = """val = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
+        s = val + "\n    " + s

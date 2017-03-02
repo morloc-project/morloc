@@ -67,7 +67,8 @@ class Mogrifier:
 
         self.parser = ParserPython(typeType)
 
-        self.json_template = '{"type":"%s", "value":"%%s"}'
+        self.json_template = '{"type":"%s", "value":%%s}'
+        self.primitive_json_template = '{"type":"%s", "value":"%%s"}'
 
     def _parse_type(self, otype):
         parse_tree = self.parser.parse(otype)
@@ -85,10 +86,10 @@ class Mogrifier:
             function = self._primitive_to_universal(tree[1])
         elif tree[0] == "tuple":
             inner = [self.nat2uni(s) for s in tree[1]]
-            function = self._tuple_to_universal.format(tree[1], inner)
+            function = self._tuple_to_universal.format(tree[1][1], inner)
         elif tree[0] == "array":
             inner = self.nat2uni(tree[1])
-            function = self._array_to_universal(tree[1], inner)
+            function = self._array_to_universal(tree[1][1], inner)
         else:
             print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
 

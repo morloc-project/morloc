@@ -1,4 +1,5 @@
 from mogrifier.base_mogrifier import Mogrifier
+import sys
 
 universal_to_atom = {
     "String" : "str({x})",
@@ -70,14 +71,17 @@ class PyMogrifier(Mogrifier):
         pass
 
     def _primitive_to_universal(self, typ):
+        s = self.primitive_json_template % typ
         val = self.atom_to_universal[typ].format(x="x")
-        s = "s = '%s' %% %s" % ((self.json_template % typ), val)
-        return s
+        return "s = '%s' %% %s" % (s, val)
 
     def _tuple_to_universal(self, typ, inner):
-        val = "[" + ','.join(inner) + "]"
-        return self.json_template % (typ, val)
+        pass
 
-    def _array_to_universal(self, typ):
-        typ = "[" + ','.join(inner) + "]"
-        return self.json_template % (typ, val)
+
+    def _array_to_universal(self, typ, inner):
+        typ = '[%s]' % typ
+        s = "s = '%s' %% val" % (self.json_template % typ)
+        val = """val = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
+        s = val + "\n    " + s
+        return s
