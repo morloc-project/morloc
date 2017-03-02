@@ -21,7 +21,7 @@ natural_to_universal = '''
 class ShMogrifier(Mogrifier):
     def __init__(self, manifolds):
 
-        self.manifolds = manifolds
+        super().__init__(manifolds) 
 
         # key: name of atomic type
         # val: a function that maps between universal and native
@@ -34,3 +34,21 @@ class ShMogrifier(Mogrifier):
         # templates for conversion functions
         self.universal_to_natural = universal_to_natural
         self.natural_to_universal = natural_to_universal
+
+    def _universal_to_primitive(self, typ):
+        raise NotImplemented
+
+    def _primitive_to_universal(self, typ):
+        raise NotImplemented
+
+    def _tuple_to_universal(self, typ):
+        raise NotImplemented
+
+    def _universal_to_tuple(self, typ):
+        raise NotImplemented
+
+    def _universal_to_array(self, typ):
+        raise NotImplemented
+
+    def _array_to_universal(self, typ):
+        raise NotImplemented

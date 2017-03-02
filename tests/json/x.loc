@@ -1,0 +1,13 @@
+@type
+foo :: void -> Int
+bar :: Int -> Int
+
+@path py
+bar . foo
+
+@source py
+def foo():
+    return 5
+
+def bar(x):
+    return x * 2

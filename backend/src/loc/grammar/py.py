@@ -41,11 +41,9 @@ if __name__ == '__main__':
     args = sys.argv
     cmd_str = "{{function}}({{args}})"
     arg_str = ', '.join(args[2:])
-    cmd = cmd_str.format(function=args[1], args=arg_str)
+    cmd = cmd_str.format(function="show_" + args[1], args=arg_str)
     try:
-        x = eval(cmd)
-        result = native_to_universal(x, output_type[args[1]], outdir)
-        print(result)
+        print(eval(cmd))
     except SyntaxError as e:
         print("Syntax error in:\\n%s\\n%s" % (cmd, e), file=sys.stderr)
 '''

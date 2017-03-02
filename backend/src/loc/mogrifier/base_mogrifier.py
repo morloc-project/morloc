@@ -67,6 +67,8 @@ class Mogrifier:
 
         self.parser = ParserPython(typeType)
 
+        self.json_template = '{"type":"%s", "value":"%%s"}'
+
     def _parse_type(self, otype):
         parse_tree = self.parser.parse(otype)
         type_tree = visit_parse_tree(parse_tree, typeTypeVisitor())
@@ -80,13 +82,13 @@ class Mogrifier:
         function = None
 
         if tree[0] == "atomic":
-            function = self._primitive_to_universal[tree[1]]
+            function = self._primitive_to_universal(tree[1])
         elif tree[0] == "tuple":
-            inner = [nat2uni(s) for s in tree[1]]
-            function = self._tuple_to_universal.format(inner)
+            inner = [self.nat2uni(s) for s in tree[1]]
+            function = self._tuple_to_universal.format(tree[1], inner)
         elif tree[0] == "array":
-            inner = nat2uni(tree[1])
-            function = self._array_to_universal(inner)
+            inner = self.nat2uni(tree[1])
+            function = self._array_to_universal(tree[1], inner)
         else:
             print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
 
@@ -100,12 +102,12 @@ class Mogrifier:
         function = None
 
         if tree[0] == "atomic":
-            function = self._universal_to_primitive[tree[1]]
+            function = self._universal_to_primitive(tree[1])
         elif tree[0] == "tuple":
-            inner = [uni2nat(s) for s in tree[1]]
+            inner = [self.uni2nat(s) for s in tree[1]]
             function = self._universal_to_tuple.format(inner)
         elif tree[0] == "array":
-            inner = uni2nat(tree[1])
+            inner = self.uni2nat(tree[1])
             function = self._universal_to_array(inner)
         else:
             print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
@@ -116,11 +118,10 @@ class Mogrifier:
         out = [self.uni2nat_top]
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
-            function = uni2nat(tree)
-            function_name = "read_" + m.mid
+            function = self.uni2nat(tree)
             s = self.universal_to_natural.format(
-                name=function_name,
-                function=function
+                mid=m.mid,
+                cast=function
             )
             out.append(s)
         return '\n'.join(out)
@@ -129,11 +130,10 @@ class Mogrifier:
         out = [self.nat2uni_top]
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
-            function = nat2uni(tree)
-            function_name = "show_" + m.mid
+            function = self.nat2uni(tree)
             s = self.natural_to_universal.format(
-                name=function_name,
-                function=function
+                mid=m.mid,
+                cast=function
             )
             out.append(s)
         return '\n'.join(out)

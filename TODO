@@ -1,0 +1,9 @@
+ [ ] add generics
+ [ ] build data structure for types
+ [ ] perform Curry implicit typing
+ [ ] insert explicit cases 
+ [ ] generate linkers to resolve type incompatibilities
+ [ ] add linkers to backend
+ [ ] add tuples
+ [ ] add type constructors
+ [ ] cross-reference existing types against an ontology of types
