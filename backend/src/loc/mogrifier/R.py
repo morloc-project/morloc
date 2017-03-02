@@ -37,14 +37,18 @@ atom_to_universal = {
 }
 
 universal_to_natural = '''
-{name} <- function(x){{
-    x
+read_{mid} <- function(){{
+    x <- {mid}()
+    {cast}
+    s
 }}
 '''
 
 natural_to_universal = '''
-{name} <- function(x){{
-    x
+show_{mid} <- function(x){{
+    x <- {mid}()
+    {cast}
+    s
 }}
 '''
 
@@ -68,19 +72,23 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        raise NotImplemented
-
-    def _primitive_to_universal(self, typ):
-        raise NotImplemented
-
-    def _tuple_to_universal(self, typ):
-        raise NotImplemented
+        pass
 
     def _universal_to_tuple(self, typ):
-        raise NotImplemented
+        pass
 
     def _universal_to_array(self, typ):
-        raise NotImplemented
+        pass
+
+    def _primitive_to_universal(self, typ):
+        val = self.atom_to_universal[typ].format(x="x")
+        s = "s <- sprintf('%s', %s)" % ((self.json_template % typ), val)
+        return s
+
+    def _tuple_to_universal(self, typ, inner):
+        val = "[" + ','.join(inner) + "]"
+        return self.json_template % (typ, val)
 
     def _array_to_universal(self, typ):
-        raise NotImplemented
+        typ = "[" + ','.join(inner) + "]"
+        return self.json_template % (typ, val)

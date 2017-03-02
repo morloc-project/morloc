@@ -38,15 +38,15 @@ args <- commandArgs(TRUE)
 m <- args[1]
 
 if(exists(m)){{
-  f <- get(m)
+  cmd = paste0("show_", m)
+  f <- get(cmd)
   if(types[m] == "void"){{
     do.call(f, as.list(args[-1]))
     d = ""
   }} else {{
     d <- do.call(f, as.list(args[-1]))
   }}
-  u <- native_to_universal(d, types[m], outdir)
-  write(u, file=stdout())
+  write(d, file=stdout())
 }} else {{
   quit(status=1)
 }}'''

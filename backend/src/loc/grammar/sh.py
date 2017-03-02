@@ -49,9 +49,9 @@ then
               $vtype == "Bool"   ||
               $vtype == "File" ]]
         then
-            d=$( native_to_universal "$( $@ )" "$vtype" "$outdir" )
+            d=$( show_$1 "$( $@ )" )
         else
-            d=$( native_to_universal <( $@ ) "$vtype" "$outdir" )
+            d=$( show_$1  <( $@ ) )
         fi
         echo $d
     fi

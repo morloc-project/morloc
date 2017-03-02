@@ -1,20 +1,39 @@
 from mogrifier.base_mogrifier import Mogrifier
 
-universal_to_atom = dict()
-atom_to_universal = dict()
+universal_to_atom = {
+    "Int"    : 'echo "${x}"',
+    "Num"    : 'echo "${x}"',
+    "String" : 'echo "${x}"',
+    "File"   : 'echo "${x}"',
+    "Bool"   : 'echo "${x}"',
+    "Text"   : 'cat "${x}"',
+    "void"   : 'echo -n'
+}
+
+atom_to_universal = {
+    "Int"    : 'echo "${x}"',
+    "Num"    : 'echo "${x}"',
+    "String" : 'echo "${x}"',
+    "File"   : 'echo "${x}"',
+    "Bool"   : 'echo "${x}"',
+    "Text"   : 'cat "${x}"',
+    "void"   : 'echo -n'
+}
 
 uni2nat_top = ''
 nat2uni_top = ''
 
 universal_to_natural = '''
-{name} (){{
-    cat "$1" 2> /dev/null || echo "$1"
+read_{mid} (){{
+    x=$({mid})
+    {cast}
 }}
 '''
 
 natural_to_universal = '''
-{name} (){{
-    cat "$1" 2> /dev/null || echo "$1"
+show_{mid} (){{
+    x=$({mid})
+    {cast}
 }}
 '''
 
@@ -36,19 +55,23 @@ class ShMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        raise NotImplemented
-
-    def _primitive_to_universal(self, typ):
-        raise NotImplemented
-
-    def _tuple_to_universal(self, typ):
-        raise NotImplemented
+        pass
 
     def _universal_to_tuple(self, typ):
-        raise NotImplemented
+        pass
 
     def _universal_to_array(self, typ):
-        raise NotImplemented
+        pass
+
+    def _primitive_to_universal(self, typ):
+        val = self.atom_to_universal[typ].format(x="x")
+        s = 'printf \'%s\' "$(%s)"' % ((self.json_template % typ), val)
+        return s
+
+    def _tuple_to_universal(self, typ, inner):
+        val = "[" + ','.join(inner) + "]"
+        return self.json_template % (typ, val)
 
     def _array_to_universal(self, typ):
-        raise NotImplemented
+        typ = "[" + ','.join(inner) + "]"
+        return self.json_template % (typ, val)

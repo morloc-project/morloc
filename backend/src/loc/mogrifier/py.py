@@ -1,24 +1,24 @@
 from mogrifier.base_mogrifier import Mogrifier
 
 universal_to_atom = {
-    "String" : "str(%s)",
-    "File"   : "str(%s)",
-    "Int"    : "int(%s)",
-    "Num"    : "float(%s)",
-    "Bool"   : "bool(%s)",
-    "*"      : "str(%s)",
-    "Text"   : "read_text(%s)",
+    "String" : "str({x})",
+    "File"   : "str({x})",
+    "Int"    : "int({x})",
+    "Num"    : "float({x})",
+    "Bool"   : "bool({x})",
+    "*"      : "str({x})",
+    "Text"   : "read_text({x})",
     "void"   : "None"
 }
 
 atom_to_universal = {
-    "String" : "str(%s)",
-    "File"   : "str(%s)",
-    "Int"    : "str(%s)",
-    "Num"    : "str(%s)",
-    "Bool"   : "str(int(%s))",
-    "*"      : "str(%s)",
-    "Text"   : "write_text(%s)",
+    "String" : "str({x})",
+    "File"   : "str({x})",
+    "Int"    : "str({x})",
+    "Num"    : "str({x})",
+    "Bool"   : "str(int({x}))",
+    "*"      : "str({x})",
+    "Text"   : "write_text({x})",
     "void"   : "None"
 }
 
@@ -70,8 +70,8 @@ class PyMogrifier(Mogrifier):
         pass
 
     def _primitive_to_universal(self, typ):
-        val = self.atom_to_universal[typ] % "x"
-        s = ("s = '%s'" % (self.json_template % typ)) + (" %% %s" % val)
+        val = self.atom_to_universal[typ].format(x="x")
+        s = "s = '%s' %% %s" % ((self.json_template % typ), val)
         return s
 
     def _tuple_to_universal(self, typ, inner):
