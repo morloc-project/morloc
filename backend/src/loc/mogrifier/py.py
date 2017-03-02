@@ -62,13 +62,13 @@ class PyMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        pass
+        return "return 'ladida'"
 
     def _universal_to_tuple(self, typ):
-        pass
+        return "return 'ladida'"
 
     def _universal_to_array(self, typ):
-        pass
+        return "return 'ladida'"
 
     def _primitive_to_universal(self, typ):
         s = self.primitive_json_template % typ
@@ -76,8 +76,7 @@ class PyMogrifier(Mogrifier):
         return "s = '%s' %% %s" % (s, val)
 
     def _tuple_to_universal(self, typ, inner):
-        pass
-
+        return "return 'ladida'"
 
     def _array_to_universal(self, typ, inner):
         typ = '[%s]' % typ

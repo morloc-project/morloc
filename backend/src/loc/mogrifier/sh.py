@@ -55,13 +55,13 @@ class ShMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        pass
+        return "echo 'ladida'"
 
     def _universal_to_tuple(self, typ):
-        pass
+        return "echo 'ladida'"
 
     def _universal_to_array(self, typ):
-        pass
+        return "echo 'ladida'"
 
     def _primitive_to_universal(self, typ):
         val = self.atom_to_universal[typ].format(x="x")
@@ -70,10 +70,7 @@ class ShMogrifier(Mogrifier):
         return s
 
     def _tuple_to_universal(self, typ, inner):
-        pass
+        return "echo 'ladida'"
 
     def _array_to_universal(self, typ, inner):
-        typ = '[%s]' % typ
-        s = "s='%s' %% val" % (self.json_template % typ)
-        val = """val = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
-        s = val + "\n    " + s
+        return "echo 'ladida'"

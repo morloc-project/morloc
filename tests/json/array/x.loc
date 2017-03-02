@@ -1,0 +1,33 @@
+@type
+arr :: void -> [Int]
+
+
+@path
+arr:py arr:sh arr:R
+
+
+@export
+arr:py as py
+arr:sh as sh
+arr:R  as r
+
+
+@lang
+arr:py :: py
+arr:sh :: sh
+arr:R :: R
+
+
+@source py
+def arr():
+    return [1,2]
+
+@source sh
+arr (){
+    echo -e "1\n2"
+}
+
+@source R
+arr <- function(){
+    c(1,2)
+}
