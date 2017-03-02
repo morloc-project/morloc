@@ -5,7 +5,12 @@ all:
 
 .PHONY: run
 run:
-	./manifold-nexus.py main
+	./manifold-nexus.py int_py
+	./manifold-nexus.py str_py
+	./manifold-nexus.py int_sh
+	./manifold-nexus.py str_sh
+	./manifold-nexus.py int_R
+	./manifold-nexus.py str_R
 
 .PHONY: clean
 clean:

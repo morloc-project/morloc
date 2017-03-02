@@ -1,13 +1,52 @@
 @type
-foo :: void -> Int
-bar :: Int -> Int
+a_int :: void -> Int
+a_str :: void -> String
 
-@path py
-bar . foo
+
+@path
+a_int:py a_str:py
+a_int:sh a_str:sh
+a_int:R  a_str:R
+
+
+@export
+a_int:py as int_py
+a_str:py as str_py
+a_int:sh as int_sh
+a_str:sh as str_sh
+a_int:R as int_R
+a_str:R as str_R
+
+
+@lang
+a_int:py,a_str:py :: py
+a_int:sh,a_str:sh :: sh
+a_int:R,a_str:R :: R
+
 
 @source py
-def foo():
+def a_int():
     return 5
 
-def bar(x):
-    return x * 2
+def a_str():
+    return "hi"
+
+
+@source sh
+a_int (){
+    echo 5
+}
+
+a_str (){
+    echo "hi"
+}
+
+
+@source R
+a_int <- function(){
+    5
+}
+
+a_str <- function(){
+    "hi"
+}
