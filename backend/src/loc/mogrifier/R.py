@@ -90,4 +90,8 @@ class RMogrifier(Mogrifier):
         return "s <- 'ladida'"
 
     def _array_to_universal(self, typ, inner):
-        return "s <- 'ladida'"
+        typ = '[%s]' % typ
+        val = """val <- sprintf('[%s]', paste((sprintf('"%s"', x)), collapse=','))"""
+        s = "s <- sprintf('%s', val)" % (self.json_template % typ)
+        s = val + "\n    " + s
+        return s

@@ -73,4 +73,10 @@ class ShMogrifier(Mogrifier):
         return "echo 'ladida'"
 
     def _array_to_universal(self, typ, inner):
-        return "echo 'ladida'"
+        typ = '[%s]' % typ
+        s = '''
+    echo -n '{"type":"%s", "value":[' 
+    echo -n $(echo $x | sed 's/\([^ ]\)/"\\1"/g' | tr ' ' ',')
+    echo ']}'
+        ''' % typ
+        return s
