@@ -65,18 +65,15 @@ class ShMogrifier(Mogrifier):
 
     def _primitive_to_universal(self, typ):
         val = self.atom_to_universal[typ].format(x="x")
-        s = self.primitive_json_template % typ
-        s = 'printf \'%s\' "$(%s)"' % (s, val)
+        s = '''printf '"%%s"' $(%s)''' % val
         return s
 
     def _tuple_to_universal(self, typ, inner):
         return "echo 'ladida'"
 
     def _array_to_universal(self, typ, inner):
-        typ = '[%s]' % typ
-        s = '''
-    echo -n '{"type":"%s", "value":[' 
+        return '''
+    echo -n '['
     echo -n $(echo $x | sed 's/\([^ ]\)/"\\1"/g' | tr ' ' ',')
-    echo ']}'
-        ''' % typ
-        return s
+    echo ']'
+        '''

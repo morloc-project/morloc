@@ -67,9 +67,6 @@ class Mogrifier:
 
         self.parser = ParserPython(typeType)
 
-        self.json_template = '{"type":"%s", "value":%%s}'
-        self.primitive_json_template = '{"type":"%s", "value":"%%s"}'
-
     def _parse_type(self, otype):
         parse_tree = self.parser.parse(otype)
         type_tree = visit_parse_tree(parse_tree, typeTypeVisitor())

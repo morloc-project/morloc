@@ -81,17 +81,13 @@ class RMogrifier(Mogrifier):
         return "'ladida'"
 
     def _primitive_to_universal(self, typ):
-        val = self.atom_to_universal[typ].format(x="x")
-        s = (self.primitive_json_template % typ)
-        s = "s <- sprintf('%s', %s)" % (s, val)
+        s = '''s <- sprintf('"%%s"', %s)'''
+        s = s % self.atom_to_universal[typ].format(x="x")
         return s
 
     def _tuple_to_universal(self, typ, inner):
         return "s <- 'ladida'"
 
     def _array_to_universal(self, typ, inner):
-        typ = '[%s]' % typ
-        val = """val <- sprintf('[%s]', paste((sprintf('"%s"', x)), collapse=','))"""
-        s = "s <- sprintf('%s', val)" % (self.json_template % typ)
-        s = val + "\n    " + s
+        s = """s <- sprintf('[%s]', paste((sprintf('"%s"', x)), collapse=','))"""
         return s

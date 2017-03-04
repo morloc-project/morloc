@@ -71,17 +71,14 @@ class PyMogrifier(Mogrifier):
         return "return 'ladida'"
 
     def _primitive_to_universal(self, typ):
-        s = self.primitive_json_template % typ
-        val = self.atom_to_universal[typ].format(x="x")
-        return "s = '%s' %% %s" % (s, val)
+        s = '''s = '"%%s"' %% %s'''
+        s = s % self.atom_to_universal[typ].format(x="x")
+        return s
 
     def _tuple_to_universal(self, typ, inner):
         return "return 'ladida'"
 
     def _array_to_universal(self, typ, inner):
         # NOTE: this only works for primitive types (need inner)
-        typ = '[%s]' % typ
-        val = """val = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
-        s = "s = '%s' %% val" % (self.json_template % typ)
-        s = val + "\n    " + s
+        s = """s = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
         return s
