@@ -7,7 +7,8 @@ universal_to_atom = {
     "File"   : """printf '"%s"' ${x}""",
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
-    "void"   : 'echo -n'
+    "void"   : 'echo -n',
+    "*"      : 'cat "${x}" || echo ${x}'
 }
 
 atom_to_universal = {
@@ -17,7 +18,8 @@ atom_to_universal = {
     "File"   : """printf '"%s"' ${x}""",
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
-    "void"   : 'echo -n'
+    "void"   : 'echo -n',
+    "*"      : 'cat "${x}" || echo ${x}'
 }
 
 uni2nat_top = ''
