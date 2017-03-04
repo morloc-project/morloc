@@ -19,7 +19,7 @@ from arpeggio import RegExMatch as _
 # the output code. 
 # =============================================================================
 
-def typeIdent(): return _('[A-Za-z0-9_]+')
+def typeIdent(): return _('\*|[A-Za-z0-9_]+|void')
 def typeTuple(): return '(', typeExpr, OneOrMore(',', typeExpr), ')'
 def typeArray(): return '[', typeExpr, ']'
 def typeFunc():  return '(', typeExpr, OneOrMore('->', typeExpr), ')'
