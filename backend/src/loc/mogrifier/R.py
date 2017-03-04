@@ -15,6 +15,8 @@ universal_to_atom = {
 }
 
 nat2uni_top = '''
+library(jsonlite)
+
 get_tmpfile <- function(){
     tempfile(pattern="R_", tmpdir=outdir, fileext=".out")
 }
@@ -72,22 +74,25 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return "'ladida'"
+        s = 's <- fromJSON(x)'
+        return s
 
-    def _universal_to_tuple(self, typ):
-        return "'ladida'"
+    def _universal_from_tuple(self, typ):
+        s = 's <- fromJSON(x)'
+        return s
 
-    def _universal_to_array(self, typ):
-        return "'ladida'"
+    def _universal_from_array(self, typ):
+        s = 's <- fromJSON(x)'
+        return s
 
     def _primitive_to_universal(self, typ):
-        s = '''s <- sprintf('"%%s"', %s)'''
-        s = s % self.atom_to_universal[typ].format(x="x")
+        s = 's <- toJSON(x, auto_unbox=TRUE)'
         return s
 
     def _tuple_to_universal(self, typ, inner):
-        return "s <- 'ladida'"
+        s = 's <- toJSON(x, auto_unbox=TRUE)'
+        return s
 
     def _array_to_universal(self, typ, inner):
-        s = """s <- sprintf('[%s]', paste((sprintf('"%s"', x)), collapse=','))"""
+        s = 's <- toJSON(x, auto_unbox=TRUE)'
         return s

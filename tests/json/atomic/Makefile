@@ -17,4 +17,4 @@ all:
 clean:
 	rm -f manifold-nexus.py
 	rm -rf locout
-	rm obs
+	rm -f obs

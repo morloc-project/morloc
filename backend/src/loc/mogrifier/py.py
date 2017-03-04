@@ -23,7 +23,7 @@ atom_to_universal = {
     "void"   : "None"
 }
 
-uni2nat_top = ''
+uni2nat_top = 'import json'
 
 nat2uni_top = ''
 
@@ -62,23 +62,19 @@ class PyMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return "return 'ladida'"
+        return 's = json.read(x)'
 
     def _universal_to_tuple(self, typ):
-        return "return 'ladida'"
+        return 's = json.read(x)'
 
     def _universal_to_array(self, typ):
-        return "return 'ladida'"
+        return 's = json.read(x)'
 
     def _primitive_to_universal(self, typ):
-        s = '''s = '"%%s"' %% %s'''
-        s = s % self.atom_to_universal[typ].format(x="x")
-        return s
+        return 's = json.dumps(x)'
 
     def _tuple_to_universal(self, typ, inner):
-        return "return 'ladida'"
+        return 's = json.dumps(x)'
 
     def _array_to_universal(self, typ, inner):
-        # NOTE: this only works for primitive types (need inner)
-        s = """s = '[{}]'.format(','.join('"%s"' % str(y) for y in x))"""
-        return s
+        return 's = json.dumps(x)'

@@ -83,7 +83,7 @@ class Mogrifier:
             function = self._primitive_to_universal(tree[1])
         elif tree[0] == "tuple":
             inner = [self.nat2uni(s) for s in tree[1]]
-            function = self._tuple_to_universal.format(tree[1][1], inner)
+            function = self._tuple_to_universal(tree[1][1], inner)
         elif tree[0] == "array":
             inner = self.nat2uni(tree[1])
             function = self._array_to_universal(tree[1][1], inner)
@@ -103,7 +103,7 @@ class Mogrifier:
             function = self._universal_to_primitive(tree[1])
         elif tree[0] == "tuple":
             inner = [self.uni2nat(s) for s in tree[1]]
-            function = self._universal_to_tuple.format(inner)
+            function = self._universal_to_tuple(inner)
         elif tree[0] == "array":
             inner = self.uni2nat(tree[1])
             function = self._universal_to_array(inner)

@@ -3,8 +3,8 @@ from mogrifier.base_mogrifier import Mogrifier
 universal_to_atom = {
     "Int"    : 'echo ${x}',
     "Num"    : 'echo ${x}',
-    "String" : 'echo ${x}',
-    "File"   : 'echo ${x}',
+    "String" : """printf '"%s"' ${x}""",
+    "File"   : """printf '"%s"' ${x}""",
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n'
@@ -13,8 +13,8 @@ universal_to_atom = {
 atom_to_universal = {
     "Int"    : 'echo ${x}',
     "Num"    : 'echo ${x}',
-    "String" : 'echo ${x}',
-    "File"   : 'echo ${x}',
+    "String" : """printf '"%s"' ${x}""",
+    "File"   : """printf '"%s"' ${x}""",
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n'
@@ -65,7 +65,7 @@ class ShMogrifier(Mogrifier):
 
     def _primitive_to_universal(self, typ):
         val = self.atom_to_universal[typ].format(x="x")
-        s = '''printf '"%%s"' $(%s)''' % val
+        s = '''printf '%%s' $(%s)''' % val
         return s
 
     def _tuple_to_universal(self, typ, inner):
@@ -74,6 +74,6 @@ class ShMogrifier(Mogrifier):
     def _array_to_universal(self, typ, inner):
         return '''
     echo -n '['
-    echo -n $(echo $x | sed 's/\([^ ]\)/"\\1"/g' | tr ' ' ',')
+    echo -n $(echo $x | sed 's/\([^ ]\)/\\1/g' | tr ' ' ',')
     echo ']'
         '''

@@ -7,3 +7,7 @@ cd ..
 cd atomic
 make clean
 cd ..
+
+cd tuple
+make clean
+cd ..

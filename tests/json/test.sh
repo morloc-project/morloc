@@ -20,3 +20,13 @@ echo
 cd array
 make
 cd ..
+
+echo
+echo '=============='
+echo 'Testing tuples'
+echo '=============='
+echo
+
+cd tuple
+make
+cd ..
