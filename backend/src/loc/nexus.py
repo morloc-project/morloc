@@ -56,7 +56,7 @@ if __name__ == '__main__':
             returncode = 1 
         else:
             returncode = result.returncode
-            print(result.stdout)
+            print(result.stdout, end="")
             print(result.stderr, file=sys.stderr, end="")
         sys.exit(returncode)
 '''
