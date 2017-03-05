@@ -1,22 +1,7 @@
 @include
 core/type
+core/control
 
-@source R
-
-map <- function(f, x){
-    lapply(x, f)
-}
-
-@path
+@path R
 
 map . & ( sqrt . $1 ) ( c . 1 4 9 16 )
-
-
-@lang
-
-* :: R
-
-
-@export
-
-map as main

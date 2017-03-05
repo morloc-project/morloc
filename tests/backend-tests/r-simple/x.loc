@@ -7,11 +7,5 @@ R>  sqrt(max(seq(1,9)))
 @include
 core/type
 
-@export
-sqrt
-
-@path
+@path R
 sqrt . max . seq . 1 9
-
-@lang
-* :: R

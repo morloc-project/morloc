@@ -226,12 +226,12 @@ then
 announce "Backend tests"
 
 if [[ $lang == "all" || $lang == "R" ]] ; then
-backend_test   r-cached  main       'r-cached/          -- sqrt . max . seq ............................... '
-backend_test   r-check   sqrt       'r-check/           -- sqrt . max . seq ............................... '
-backend_test   r-hooks   main       'r-hooks/           -- run with all hooks ............................. '
-backend_test   r-map     main       'r-map/             -- simple test of lambda functions and map ........ '
-backend_test   r-simple  sqrt       'r-simple/          -- sqrt . max . seq ............................... '
-backend_test   r-single-quotes say  'r-single-quotes/   -- test nested single quotes ...................... '
+backend_test  r-cached  main        'r-cached/          -- sqrt . max . seq ............................... '
+backend_test  r-check   sqrt        'r-check/           -- sqrt . max . seq ............................... '
+backend_test  r-hooks   main        'r-hooks/           -- run with all hooks ............................. '
+backend_test  r-map     main        'r-map/             -- simple test of lambda functions and map ........ '
+backend_test  r-simple  main        'r-simple/          -- sqrt . max . seq ............................... '
+backend_test  r-single-quotes main  'r-single-quotes/   -- test nested single quotes ...................... '
 backend_x_test r-all                'r-all/             -- sqrt . max . seq ............................... '
 backend_x_test r-branch             'r-branch/          -- make if-elif-else analog with check ............ '
 backend_x_test r-grpref-deref       'r-grpref-deref/    -- *X where X :: &( f . g . $1) ................... '

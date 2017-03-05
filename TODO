@@ -7,3 +7,5 @@
  [ ] add tuples
  [ ] add type constructors
  [ ] cross-reference existing types against an ontology of types
+
+ [ ] R - silence messages
