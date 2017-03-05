@@ -6,20 +6,13 @@ man ls | grep -Po "[a-z]+ed" | sort | uniq
 
 @include
 core/datcache
-core/type
 
-@export
-uniq
-
-@path
+@path sh
 uniq . sort . grep . man
 
 @arg
 grep := -Po "[a-z]+ed"
 man := ls
-
-@lang
-* :: sh
 
 @cache
 sort :: datcache

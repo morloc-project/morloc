@@ -1,6 +1,3 @@
-@include
-core/type
-
 @source sh
 
 map () {

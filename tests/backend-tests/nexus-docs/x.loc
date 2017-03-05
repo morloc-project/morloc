@@ -1,11 +1,5 @@
-@include
-core/type
-
-@path
+@path sh
 uniq . sort . ls
-
-@lang
-* :: sh
 
 @doc
 uniq :: "get unique values"

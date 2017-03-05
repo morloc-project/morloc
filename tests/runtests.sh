@@ -254,8 +254,8 @@ fi
 if [[ $lang == "all" || $lang == "sh" ]] ; then
 backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition into a bash map command ..... '
 backend_test   sh-all    main       'sh-all/            -- uniq . sort . grep . man ....................... '
-backend_test   sh-and-r  grep       'sh-and-r/          -- grep . seq ..................................... '
-backend_test   sh-cached uniq       'sh-cached/         -- uniq . sort . grep . man ....................... '
+backend_test   sh-and-r  main       'sh-and-r/          -- grep . seq ..................................... '
+backend_test   sh-cached main       'sh-cached/         -- uniq . sort . grep . man ....................... '
 backend_test   sh-loop   map        'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_test   sh-map    main       'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-simple main       'sh-simple/         -- uniq . sort . grep . man ....................... '

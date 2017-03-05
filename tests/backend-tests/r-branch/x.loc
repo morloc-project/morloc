@@ -1,6 +1,5 @@
 @include
 core/atomic
-core/type
 
 # @type
 # colnames ::

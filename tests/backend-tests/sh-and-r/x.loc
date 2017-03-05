@@ -1,9 +1,3 @@
-@include
-core/type
-
-@export
-grep
-
 @path
 grep . 42 seq
 

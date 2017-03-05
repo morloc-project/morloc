@@ -1,6 +1,5 @@
 @include
 core/control
-core/type
 
 @type
 echo :: String -> String -> String

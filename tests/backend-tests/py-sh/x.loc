@@ -13,9 +13,6 @@ gentab,topthree :: py
 @arg
 sort :: -r
 
-@include
-core/type
-
 @source py
 
 def gentab():

@@ -14,4 +14,3 @@ map as main
 
 @include
 core/control
-core/type

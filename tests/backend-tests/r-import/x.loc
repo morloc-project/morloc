@@ -1,6 +1,3 @@
-@include
-core/type
-
 @import
 from "x-foo-1.loc" import bar as zzz
 import "x-foo-2.loc"

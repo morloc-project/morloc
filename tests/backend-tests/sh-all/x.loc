@@ -26,7 +26,6 @@ man := has_man . "ls"
 
 @include
 core/datcache
-core/type
 
 @source sh
 

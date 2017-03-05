@@ -4,8 +4,5 @@ Same as
 
 R>  sqrt(max(seq(1,9)))
 
-@include
-core/type
-
 @path R
 sqrt . max . seq . 1 9

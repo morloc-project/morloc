@@ -65,7 +65,6 @@ print :: file=sys.stderr
 
 @include
 core/memcache
-core/type
 
 @source py
 

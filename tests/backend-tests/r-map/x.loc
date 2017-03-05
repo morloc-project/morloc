@@ -1,5 +1,4 @@
 @include
-core/type
 core/control
 
 @path R

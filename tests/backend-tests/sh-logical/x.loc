@@ -1,6 +1,5 @@
 @include
 core/atomic
-core/type
 
 @type
 is_a :: void -> Bool
