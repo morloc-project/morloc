@@ -6,6 +6,10 @@ man ls | grep -Po "[a-z]+ed" | sort | uniq
 
 @type
 has_man :: String -> Bool
+man :: String -> [String]
+grep :: [String] -> [String]
+sort :: [String] -> [String]
+uniq :: [String] -> [String]
 
 @path
 uniq . sort . grep . man . "ls"

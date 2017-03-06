@@ -8,7 +8,7 @@ universal_to_atom = {
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n',
-    "*"      : 'cat "${x}" || echo ${x}'
+    "*"      : 'cat <(${x}) || echo ${x}'
 }
 
 atom_to_universal = {
@@ -19,7 +19,7 @@ atom_to_universal = {
     "Bool"   : 'echo ${x}',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n',
-    "*"      : 'cat "${x}" || echo ${x}'
+    "*"      : 'cat <(${x}) || echo ${x}'
 }
 
 uni2nat_top = ''
@@ -65,12 +65,15 @@ class ShMogrifier(Mogrifier):
         return "echo 'ladida'"
 
     def _primitive_to_universal(self, typ):
-        val = self.atom_to_universal[typ].format(x="x")
-        s = '''printf '%%s' $(%s)''' % val
+        s = self.atom_to_universal[typ].format(x="x")
         return s
 
     def _tuple_to_universal(self, typ, inner):
-        return "echo 'ladida'"
+        return '''
+    echo -n '['
+    sed 's/.*/"&"/' <($x) | tr '\n' ',' | sed 's/.$//'
+    echo ']'
+        '''
 
     def _array_to_universal(self, typ, inner):
         return '''
