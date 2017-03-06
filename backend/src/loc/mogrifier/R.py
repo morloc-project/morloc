@@ -15,7 +15,7 @@ universal_to_atom = {
 }
 
 nat2uni_top = '''
-library(jsonlite)
+suppressPackageStartupMessages(library("jsonlite"))
 
 get_tmpfile <- function(){
     tempfile(pattern="R_", tmpdir=outdir, fileext=".out")
@@ -86,13 +86,13 @@ class RMogrifier(Mogrifier):
         return s
 
     def _primitive_to_universal(self, typ):
-        s = 's <- toJSON(x, auto_unbox=TRUE)'
+        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
         return s
 
     def _tuple_to_universal(self, typ, inner):
-        s = 's <- toJSON(x, auto_unbox=TRUE)'
+        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
         return s
 
     def _array_to_universal(self, typ, inner):
-        s = 's <- toJSON(x, auto_unbox=TRUE)'
+        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
         return s

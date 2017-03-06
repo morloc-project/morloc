@@ -40,12 +40,7 @@ m <- args[1]
 if(exists(m)){{
   cmd = paste0("show_", m)
   f <- get(cmd)
-  if(types[m] == "void"){{
-    do.call(f, as.list(args[-1]))
-    d = ""
-  }} else {{
-    d <- do.call(f, as.list(args[-1]))
-  }}
+  d <- do.call(f, as.list(args[-1]))
   write(d, file=stdout())
 }} else {{
   quit(status=1)
