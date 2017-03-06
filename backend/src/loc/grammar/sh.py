@@ -38,23 +38,7 @@ manifold_exists() {{
 }}
 if manifold_exists $1
 then
-    if [[ -f "$outdir/$1_tmp" ]]
-    then
-        cat "$outdir/$1_tmp"
-    else
-        vtype=${{typemap[$1]}}
-        if [[ $vtype == "Int"    ||
-              $vtype == "String" ||
-              $vtype == "Num"    ||
-              $vtype == "Bool"   ||
-              $vtype == "File" ]]
-        then
-            d=$( show_$1 "$( $@ )" )
-        else
-            d=$( show_$1  <( $@ ) )
-        fi
-        echo $d
-    fi
+    show_$1
 else
     exit 1
 fi'''

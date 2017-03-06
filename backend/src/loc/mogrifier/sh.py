@@ -27,14 +27,13 @@ nat2uni_top = ''
 
 universal_to_natural = '''
 read_{mid} (){{
-    x=$({mid})
     {cast}
 }}
 '''
 
 natural_to_universal = '''
 show_{mid} (){{
-    x=$({mid})
+    x={mid}
     {cast}
 }}
 '''
@@ -76,6 +75,6 @@ class ShMogrifier(Mogrifier):
     def _array_to_universal(self, typ, inner):
         return '''
     echo -n '['
-    echo -n $(echo $x | sed 's/\([^ ]\)/\\1/g' | tr ' ' ',')
+    sed 's/.*/"&"/' <($x) | tr '\n' ',' | sed 's/.$//'
     echo ']'
         '''
