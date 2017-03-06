@@ -45,11 +45,7 @@ if(exists(m)){{
 }} else {{
   quit(status=1)
 }}'''
-        self.TYPE_MAP         = '''\
-types <- c(
-{pairs}
-)
-'''
+        self.TYPE_MAP         = '''# skipping type map'''
         self.TYPE_MAP_PAIR    = "    {key}='{type}'"
         self.TYPE_ACCESS      = '''types["{key}"]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
@@ -99,7 +95,7 @@ fo <- system2(
   stdout=TRUE,
   stderr=FALSE
 )
-universal_to_native(fo, types["{mid}"])\
+read_{mid}(fo)\
 '''
         self.CACHE = '''\
 if({cache}_chk("{mid}"{uid}{cache_args})){{

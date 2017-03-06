@@ -1,25 +1,25 @@
 from mogrifier.base_mogrifier import Mogrifier
 
 universal_to_atom = {
-    "Int"    : 'echo ${x}',
-    "Num"    : 'echo ${x}',
-    "String" : """printf '"%s"' ${x}""",
-    "File"   : """printf '"%s"' ${x}""",
-    "Bool"   : 'echo ${x}',
+    "Int"    : 'echo $(${x})',
+    "Num"    : 'echo $(${x})',
+    "String" : """printf '"%s"' $(${x})""",
+    "File"   : """printf '"%s"' $(${x})""",
+    "Bool"   : 'echo $({x})',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n',
-    "*"      : 'cat <(${x}) || echo ${x}'
+    "*"      : 'cat <(${x}) || echo $(${x})'
 }
 
 atom_to_universal = {
-    "Int"    : 'echo ${x}',
-    "Num"    : 'echo ${x}',
-    "String" : """printf '"%s"' ${x}""",
-    "File"   : """printf '"%s"' ${x}""",
-    "Bool"   : 'echo ${x}',
+    "Int"    : 'echo $(${x})',
+    "Num"    : 'echo $(${x})',
+    "String" : """printf '"%s"' $(${x})""",
+    "File"   : """printf '"%s"' $(${x})""",
+    "Bool"   : 'echo $({x})',
     "Text"   : 'cat "${x}"',
     "void"   : 'echo -n',
-    "*"      : 'cat <(${x}) || echo ${x}'
+    "*"      : 'cat <(${x}) || echo $(${x})'
 }
 
 uni2nat_top = ''
@@ -56,13 +56,13 @@ class ShMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return "echo 'ladida'"
+        return "echo $1"
 
     def _universal_to_tuple(self, typ):
-        return "echo 'ladida'"
+        return "echo $1"
 
     def _universal_to_array(self, typ):
-        return "echo 'ladida'"
+        return "echo $1"
 
     def _primitive_to_universal(self, typ):
         s = self.atom_to_universal[typ].format(x="x")

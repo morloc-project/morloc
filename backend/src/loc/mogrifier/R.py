@@ -39,15 +39,14 @@ atom_to_universal = {
 }
 
 universal_to_natural = '''
-read_{mid} <- function(){{
-    x <- {mid}()
+read_{mid} <- function(x){{
     {cast}
     s
 }}
 '''
 
 natural_to_universal = '''
-show_{mid} <- function(x){{
+show_{mid} <- function(){{
     x <- {mid}()
     {cast}
     s

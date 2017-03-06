@@ -50,8 +50,8 @@ typemap=(
 '''
         self.TYPE_MAP_PAIR    = "    [{key}]='{type}'"
         self.TYPE_ACCESS      = '${{typemap[{mid}]}}'
-        self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
-        self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
+        self.CAST_NAT2UNI     = 'show_{key} {key}'
+        self.CAST_UNI2NAT     = 'read_{key} {key}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
 {blk}
@@ -90,7 +90,7 @@ wrap_{mid} () {{
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-universal_to_native "$u" ${{typemap[{mid}]}}\
+read_{mid} "$u"\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}
@@ -210,6 +210,7 @@ fi
         arg_rep = ""
         for i in range(int(m.narg)):
             i_str = str(i+1)
+            # TODO
             arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
         if m.narg:
             arg_rep += '\\\n    "$%s_uid"' % m.mid

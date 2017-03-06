@@ -47,7 +47,7 @@ if __name__ == '__main__':
     except SyntaxError as e:
         print("Syntax error in:\\n%s\\n%s" % (cmd, e), file=sys.stderr)
 '''
-        self.TYPE_MAP         = '''output_type = {{\n{pairs}\n}}'''
+        self.TYPE_MAP         = '''# skipping type map'''
         self.TYPE_MAP_PAIR    = "    '{key}' : '{type}'"
         self.TYPE_ACCESS      = '''output_type[{key}]'''
         self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
@@ -96,13 +96,17 @@ try:
         encoding='utf-8',
         check=True
     )
-    return universal_to_native(result.stdout, output_type["{mid}"])
 except subprocess.CalledProcessError as e:
     print("ERROR: '%s' returned non-zero exit status", file=sys.stderr)
     print("       %s" % e, file=sys.stderr)
     return None
 except:
     print("Unknown error upon calling '%s'" % cmd, file=sys.stderr)
+    return None
+try:
+    return read_{mid}(result.stdout)
+except:
+    print("read_{mid} failed", file=sys.stderr)
     return None
 '''
         self.CACHE = '''\

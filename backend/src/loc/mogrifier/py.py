@@ -28,8 +28,7 @@ uni2nat_top = 'import json'
 nat2uni_top = ''
 
 universal_to_natural = '''
-def read_{mid}():
-    x = {mid}()
+def read_{mid}(x):
     {cast}
     return s
 '''
@@ -62,13 +61,13 @@ class PyMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return 's = json.read(x)'
+        return 's = json.loads(x)'
 
     def _universal_to_tuple(self, typ):
-        return 's = json.read(x)'
+        return 's = json.loads(x)'
 
     def _universal_to_array(self, typ):
-        return 's = json.read(x)'
+        return 's = json.loads(x)'
 
     def _primitive_to_universal(self, typ):
         return 's = json.dumps(x)'
