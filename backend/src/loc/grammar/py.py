@@ -87,6 +87,7 @@ def {mid}({marg_uid}):
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 foreign_pool = os.path.join(outdir, "call.{foreign_lang}")
+out,result = None, None
 try:
     cmd = " ".join([foreign_pool] + [{args}])
     result = subprocess.run(
@@ -97,17 +98,17 @@ try:
         check=True
     )
 except subprocess.CalledProcessError as e:
-    print("ERROR: '%s' returned non-zero exit status", file=sys.stderr)
-    print("       %s" % e, file=sys.stderr)
-    return None
+    print("ERROR: non-zero exist status from call.py::{mid}", file=sys.stderr)
+    print("   %s" % e, file=sys.stderr)
 except:
-    print("Unknown error upon calling '%s'" % cmd, file=sys.stderr)
-    return None
+    print("ERROR: unknown error in call.py::{mid}", file=sys.stderr)
 try:
-    return read_{mid}(result.stdout)
+    out = read_{mid}(result.stdout)
 except:
-    print("read_{mid} failed", file=sys.stderr)
-    return None
+    print("ERROR: read_{mid} failed in call.py::{mid}", file=sys.stderr)
+if result:
+    print(result.stderr, file=sys.stderr, end="")
+return out 
 '''
         self.CACHE = '''\
 if {cache}_chk("{mid}"{uid}{cache_args}):

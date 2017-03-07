@@ -1,25 +1,25 @@
 from mogrifier.base_mogrifier import Mogrifier
 
 universal_to_atom = {
-    "Int"    : 'echo $(${x})',
-    "Num"    : 'echo $(${x})',
-    "String" : """printf '"%s"' $(${x})""",
-    "File"   : """printf '"%s"' $(${x})""",
-    "Bool"   : 'echo $({x})',
-    "Text"   : 'cat "${x}"',
+    "Int"    : 'echo "$(${x})"',
+    "Num"    : 'echo "$(${x})"',
+    "String" : '''printf '%s' "$(${x})"''',
+    "File"   : '''printf '%s' "$(${x})"''',
+    "Bool"   : 'test $(${x}) == "true" && echo 1 || echo 0 ',
+    "Text"   : 'cat <(${x})',
     "void"   : 'echo -n',
-    "*"      : 'cat <(${x}) || echo $(${x})'
+    "*"      : 'cat <(${x}) || echo "$(${x})"'
 }
 
 atom_to_universal = {
-    "Int"    : 'echo $(${x})',
-    "Num"    : 'echo $(${x})',
-    "String" : """printf '"%s"' $(${x})""",
-    "File"   : """printf '"%s"' $(${x})""",
-    "Bool"   : 'echo $({x})',
-    "Text"   : 'cat "${x}"',
+    "Int"    : 'echo "$(${x})"',
+    "Num"    : 'echo "$(${x})"',
+    "String" : '''printf '%s' "$(${x})"''',
+    "File"   : '''printf '%s' "$(${x})"''',
+    "Bool"   : """test $(${x}) -eq 1 && echo '"true"' || echo '"false"'""",
+    "Text"   : 'cat <(${x})',
     "void"   : 'echo -n',
-    "*"      : 'cat <(${x}) || echo $(${x})'
+    "*"      : 'cat <(${x}) || echo "$(${x})"'
 }
 
 uni2nat_top = ''

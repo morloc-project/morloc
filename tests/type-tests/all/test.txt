@@ -1,4 +1,4 @@
 this is an example text
 that covers
- several
-   lines
+several
+lines

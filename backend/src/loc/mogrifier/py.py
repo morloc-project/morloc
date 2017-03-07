@@ -6,7 +6,7 @@ universal_to_atom = {
     "File"   : "str({x})",
     "Int"    : "int({x})",
     "Num"    : "float({x})",
-    "Bool"   : "bool({x})",
+    "Bool"   : "True if x == 'true' else False",
     "*"      : "str({x})",
     "Text"   : "read_text({x})",
     "void"   : "None"
@@ -17,7 +17,7 @@ atom_to_universal = {
     "File"   : "str({x})",
     "Int"    : "str({x})",
     "Num"    : "str({x})",
-    "Bool"   : "str(int({x}))",
+    "Bool"   : "('true' if {x} else 'false')",
     "*"      : "str({x})",
     "Text"   : "write_text({x})",
     "void"   : "None"

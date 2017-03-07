@@ -42,12 +42,7 @@ then
 else
     exit 1
 fi'''
-        self.TYPE_MAP = '''\
-declare -A typemap
-typemap=(
-{pairs}
-)
-'''
+        self.TYPE_MAP = '''# typemap no longer needed'''
         self.TYPE_MAP_PAIR    = "    [{key}]='{type}'"
         self.TYPE_ACCESS      = '${{typemap[{mid}]}}'
         self.CAST_NAT2UNI     = 'show_{key} {key}'

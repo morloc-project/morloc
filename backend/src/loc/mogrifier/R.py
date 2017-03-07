@@ -9,7 +9,7 @@ universal_to_atom = {
     "Num"    : "as.numeric({x})",
     "String" : "as.character({x})",
     "File"   : "as.character({x})",
-    "Bool"   : "as.logical(as.integer({x}))",
+    "Bool"   : "switch(x, true=TRUE, false=FALSE, NA)",
     "Text"   : "read_lines({x})",
     "void"   : "NULL"
 }
@@ -33,7 +33,7 @@ atom_to_universal = {
     "Num"    : "as.character({x})",
     "String" : "{x}",
     "File"   : "{x}",
-    "Bool"   : "as.integer({x})",
+    "Bool"   : "if({x}){{ 'true' }} else {{ 'false' }}",
     "Text"   : "as_file({x})",
     "void"   : "NULL"
 }
