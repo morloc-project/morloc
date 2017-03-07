@@ -84,8 +84,7 @@ wrap_{mid} () {{
 }}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-read_{mid} "$u"\
+read_{mid} <($outdir/call.{foreign_lang} {mid}{arg_rep})\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}

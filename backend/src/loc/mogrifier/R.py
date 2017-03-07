@@ -39,18 +39,15 @@ atom_to_universal = {
 }
 
 universal_to_natural = '''
-read_{mid} <- function(x){{
+read_{{mid}} <- function(x){{{{
     {cast}
-    s
-}}
+}}}}
 '''
 
 natural_to_universal = '''
-show_{mid} <- function(){{
-    x <- {mid}()
+show_{{mid}} <- function(){{{{
     {cast}
-    s
-}}
+}}}}
 '''
 
 class RMogrifier(Mogrifier):
@@ -73,25 +70,25 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        s = 's <- fromJSON(x)'
+        s = 'fromJSON(x)'
         return s
 
     def _universal_from_tuple(self, typ):
-        s = 's <- fromJSON(x)'
+        s = 'fromJSON(x)'
         return s
 
     def _universal_from_array(self, typ):
-        s = 's <- fromJSON(x)'
+        s = 'fromJSON(x)'
         return s
 
     def _primitive_to_universal(self, typ):
-        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
         return s
 
-    def _tuple_to_universal(self, typ, inner):
-        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
+    def _tuple_to_universal(self, typ):
+        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
         return s
 
-    def _array_to_universal(self, typ, inner):
-        s = 's <- toJSON(x, auto_unbox=TRUE, null="null")'
+    def _array_to_universal(self, typ):
+        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
         return s

@@ -16,6 +16,7 @@ uniq . sort . grep . man . "ls"
 
 @arg
 grep := -Po "[a-z]+ed"
+man := --no-hyphenation
 
 @lang
 * :: sh
@@ -26,7 +27,6 @@ man :: datcache
 
 @check
 man := has_man . "ls"
-
 
 @include
 core/datcache

@@ -82,11 +82,9 @@ class Mogrifier:
         if tree[0] == "atomic":
             function = self._primitive_to_universal(tree[1])
         elif tree[0] == "tuple":
-            inner = [self.nat2uni(s) for s in tree[1]]
-            function = self._tuple_to_universal(tree[1][1], inner)
+            function = self._tuple_to_universal(tree[1])
         elif tree[0] == "array":
-            inner = self.nat2uni(tree[1])
-            function = self._array_to_universal(tree[1][1], inner)
+            function = self._array_to_universal(tree[1])
         else:
             print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
 
@@ -102,11 +100,9 @@ class Mogrifier:
         if tree[0] == "atomic":
             function = self._universal_to_primitive(tree[1])
         elif tree[0] == "tuple":
-            inner = [self.uni2nat(s) for s in tree[1]]
-            function = self._universal_to_tuple(inner)
+            function = self._universal_to_tuple(tree[1])
         elif tree[0] == "array":
-            inner = self.uni2nat(tree[1])
-            function = self._universal_to_array(inner)
+            function = self._universal_to_array(tree[1])
         else:
             print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
 
@@ -117,10 +113,11 @@ class Mogrifier:
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
             function = self.uni2nat(tree)
-            s = self.universal_to_natural.format(
-                mid=m.mid,
-                cast=function
-            )
+            # unpeal first level
+            s = self.universal_to_natural.format(cast=function)
+            # unpeal second - this allows {mid} to be expanded inside
+            # the casting function
+            s = s.format(mid=m.mid)
             out.append(s)
         return '\n'.join(out)
 
@@ -129,10 +126,8 @@ class Mogrifier:
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
             function = self.nat2uni(tree)
-            s = self.natural_to_universal.format(
-                mid=m.mid,
-                cast=function
-            )
+            s = self.natural_to_universal.format(cast=function)
+            s = s.format(mid=m.mid)
             out.append(s)
         return '\n'.join(out)
 
