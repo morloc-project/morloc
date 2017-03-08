@@ -4,8 +4,8 @@ import sys
 universal_to_atom = {
     "Int"    : 'echo "$({x})"',
     "Num"    : 'echo "$({x})"',
-    "String" : """{x} | sed 's/^"|"$//g'""",
-    "File"   : """{x} | sed 's/^"|"$//g'""",
+    "String" : """{x} | sed 's/^"\|"$//g'""",
+    "File"   : """{x} | sed 's/^"\|"$//g'""",
     "Bool"   : 'test $({x}) == "true" && echo 1 || echo 0 ',
     "Text"   : 'cat <({x})',
     "void"   : 'echo -n',
