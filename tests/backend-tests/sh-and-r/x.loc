@@ -1,5 +1,9 @@
+@type
+seq :: void -> [String]
+grep :: String -> [String] -> [String]
+
 @path
-grep . 42 seq
+grep . "42" seq
 
 @arg
 seq := from=1 to=100
