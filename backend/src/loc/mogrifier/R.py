@@ -73,11 +73,11 @@ class RMogrifier(Mogrifier):
         s = 'fromJSON(x)'
         return s
 
-    def _universal_from_tuple(self, typ):
+    def _universal_to_tuple(self, typ):
         s = 'fromJSON(x)'
         return s
 
-    def _universal_from_array(self, typ):
+    def _universal_to_array(self, typ):
         s = 'fromJSON(x)'
         return s
 
