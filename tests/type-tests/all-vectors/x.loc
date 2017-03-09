@@ -31,6 +31,7 @@ itov ,
 ntov ,
 stov ,
 btov :: sh
+itov :: sh
 
 iid:R  :: R
 iid:sh :: sh

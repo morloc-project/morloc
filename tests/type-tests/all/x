@@ -4,7 +4,7 @@ cat <<EOF > z
 42
 0.42
 "fourty-two"
-"true"
+true
 EOF
 stat=0
 loc -kx locout x.loc || stat=1

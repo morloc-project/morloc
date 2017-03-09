@@ -17,7 +17,7 @@ atom_to_universal = {
     "Num"    : 'echo "$({x})"',
     "String" : '''printf '"%s"' "$({x})"''',
     "File"   : '''printf '"%s"' "$({x})"''',
-    "Bool"   : """test $({x}) -eq 1 && echo '"true"' || echo '"false"'""",
+    "Bool"   : """test $({x}) -eq 1 && echo 'true' || echo 'false'""",
     "Text"   : 'cat <({x})',
     "void"   : 'echo -n',
     "*"      : 'cat <({x}) || echo "$({x})"'
@@ -63,7 +63,10 @@ class ShMogrifier(Mogrifier):
 
     def _universal_to_array(self, typ):
         if(typ[0] == "atomic"):
-            return """jq -r 'map(tostring) | join("\\n")' $1"""
+            if(typ[1] == "Bool"):
+                return """jq -r 'map(tostring) | join("\\n")' $1 | sed 's/true/1/; s/false/0/'"""
+            else:
+                return """jq -r 'map(tostring) | join("\\n")' $1"""
         elif(typ[0] == "array"):
             return """jq -r 'map(@tsv) | join("\\n")' $1"""
         else:
@@ -76,7 +79,7 @@ class ShMogrifier(Mogrifier):
     def _tuple_to_universal(self, typ):
         return '''
     echo -n '['
-    sed 's/.*/"&"/' <($x) | tr '\n' ',' | sed 's/.$//'
+    sed 's/.*/"&"/' <($x) | tr '\n' ',' | sed 's/,$//'
     echo ']'
 '''
 
@@ -88,9 +91,9 @@ class ShMogrifier(Mogrifier):
     do
         %s
         echo -n ','
-    done < <({mid}) | sed 's/.$//'
+    done < <({mid}) | sed 's/,$//'
     echo ']'
-''' % atom_to_universal[typ[1]].format(x='echo -n $line')
+''' % atom_to_universal[typ[1]].format(x='echo $line')
         elif(typ[0] == "array"):
             return '''
     echo -n '['
