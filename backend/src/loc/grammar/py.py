@@ -12,6 +12,8 @@ class PyGrammar(Grammar):
         self.manifolds = manifolds
         self.outdir    = outdir
         self.home      = home
+        self.TRUE      = "True"
+        self.FALSE     = "False"
         self.lang      = "py"
         self.INDENT    = 4
         self.SEP       = ', '

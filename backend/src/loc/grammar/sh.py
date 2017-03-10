@@ -12,6 +12,8 @@ class ShGrammar(Grammar):
         self.manifolds = manifolds
         self.outdir    = outdir
         self.home      = home
+        self.TRUE      = "true"
+        self.FALSE     = "false"
         self.lang      = "sh"
         self.INDENT = 4
         self.SEP    = ' '
@@ -63,7 +65,7 @@ fi'''
 }}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
-{function} {arguments} {wrapper}\
+{function} {arguments}\
 '''
         self.UID_WRAPPER  = '''\
 {mid}_uid=0
@@ -116,13 +118,13 @@ fi
 '''
         self.RUN_BLK = '''\
 {hook4}
-{function} {arguments}{wrapper} > "$outdir/{mid}_tmp"
+{function} {arguments} > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
 '''
         self.RUN_BLK_VOID = '''\
 {hook4}
-{function} {arguments}{wrapper} > /dev/null
+{function} {arguments} > /dev/null
 > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
@@ -153,20 +155,13 @@ fi
         self.MARG          = '${i}'
         self.ARGUMENTS     = '{fargs} {inputs}'
         self.MANIFOLD_CALL = '{operator}({hmid} {marg_uid})'
-        self.CHECK_CALL    = '$({hmid} {marg_uid}) -eq 1'
+        self.CHECK_CALL    = '$({hmid} {marg_uid}) == "true"'
         self.HOOK          = '{hmid} {marg_uid} 1>&2'
 
-        self.BOOL_WRAPPER = '&> /dev/null && echo 1 || echo 0'
-
     def make_simple_manifold_blk(self, m):
-        if m.type == "Bool":
-            wrapper = self.BOOL_WRAPPER
-        else:
-            wrapper = ""
         return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,
-            arguments = self.make_arguments(m),
-            wrapper   = wrapper
+            arguments = self.make_arguments(m)
         )
 
     def make_input_manifold(self, m, pos, val, typ):
@@ -186,16 +181,11 @@ fi
         else:
             template = self.RUN_BLK
 
-        if m.type == "Bool":
-            wrapper = self.BOOL_WRAPPER
-        else:
-            wrapper = ""
         return template.format(
             mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
             function  = m.func,
-            wrapper   = wrapper,
             arguments = self.make_arguments(m),
             cache_put = self.make_cache_put(m)
         )

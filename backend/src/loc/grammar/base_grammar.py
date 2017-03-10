@@ -333,6 +333,15 @@ class Grammar:
         return self.MARG.format(i=val)
 
     def make_input_positional(self, m, pos, val, typ):
+        if typ == "Bool":
+            if val == "true":
+                val = self.TRUE
+            elif val == "false":
+                val = self.FALSE
+            else:
+                msg = "Error: Expected Bool to be either 'true' or 'false' (found '%s')" 
+                err(msg % val)
+                val = None
         return val
 
     def make_function_arguments(self, m):

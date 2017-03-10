@@ -12,6 +12,8 @@ class RGrammar(Grammar):
         self.manifolds = manifolds
         self.outdir    = outdir
         self.home      = home
+        self.TRUE      = "TRUE"
+        self.FALSE     = "FALSE"
         self.lang      = "R"
         self.INDENT = 2
         self.SEP    = ', '

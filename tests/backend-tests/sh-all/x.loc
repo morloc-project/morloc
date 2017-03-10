@@ -34,6 +34,5 @@ core/datcache
 @source sh
 
 has_man () {
-    man $1 2> /dev/null 
-    test $? == 0
+    man $1 &> /dev/null && echo true || echo false
 }

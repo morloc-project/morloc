@@ -4,5 +4,5 @@ TYPE	m0	String
 INPP	m0	0	12	Int
 INPP	m0	1	"hi there"	String
 INPP	m0	2	-2.3	Num
-INPP	m0	3	1	Bool
-INPP	m0	4	0	Bool
+INPP	m0	3	true	Bool
+INPP	m0	4	false	Bool

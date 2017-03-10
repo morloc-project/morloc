@@ -6,7 +6,7 @@ universal_to_atom = {
     "Num"    : 'echo "$({x})"',
     "String" : """{x} | sed 's/^"\|"$//g'""",
     "File"   : """{x} | sed 's/^"\|"$//g'""",
-    "Bool"   : 'test $({x}) == "true" && echo 1 || echo 0 ',
+    "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
     "void"   : 'echo -n',
     "*"      : 'cat <({x}) || echo "$({x})"'
@@ -17,7 +17,7 @@ atom_to_universal = {
     "Num"    : 'echo "$({x})"',
     "String" : '''printf '"%s"' "$({x})"''',
     "File"   : '''printf '"%s"' "$({x})"''',
-    "Bool"   : """test $({x}) -eq 1 && echo 'true' || echo 'false'""",
+    "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
     "void"   : 'echo -n',
     "*"      : 'cat <({x}) || echo "$({x})"'
@@ -62,15 +62,13 @@ class ShMogrifier(Mogrifier):
         return "jq -r '@tsv' $1"
 
     def _universal_to_array(self, typ):
-        if(typ[0] == "atomic"):
-            if(typ[1] == "Bool"):
-                return """jq -r 'map(tostring) | join("\\n")' $1 | sed 's/true/1/; s/false/0/'"""
-            else:
-                return """jq -r 'map(tostring) | join("\\n")' $1"""
-        elif(typ[0] == "array"):
-            return """jq -r 'map(@tsv) | join("\\n")' $1"""
+        if typ[0] == "atomic":
+            s = """jq -r 'map(tostring) | join("\\n")' $1"""
+        elif typ[0] == "array":
+            s = """jq -r 'map(@tsv) | join("\\n")' $1"""
         else:
-            return "echo $1"
+            s = "echo $1"
+        return s
 
     def _primitive_to_universal(self, typ):
         s = self.atom_to_universal[typ].format(x="{mid}")
@@ -95,11 +93,12 @@ class ShMogrifier(Mogrifier):
     echo ']'
 ''' % atom_to_universal[typ[1]].format(x='echo $line')
         elif(typ[0] == "array"):
+            cast = ""
+            if (typ[1][0] == "atomic") and (typ[1][1] in ("String", "File", "Text")):
+                cast = 'for(i=1; i<=NF; i++){{$i = "\\""$i"\\""}};'
             return '''
-    echo -n '['
-    while read line
-    do
-        printf '[%s],' $(tr '\\t' ',' <<< $line)
-    done < <({mid}) | sed 's/.$//'
-    echo ']'
-'''
+    awk '
+        BEGIN{{FS="\\t"; OFS="\\t"; ORS=","}}
+        {{%s print "[" $0 "]" }}
+    ' <({mid}) | sed 's/\\t/,/g; s/\(.*\),/[\\1]/'
+''' % cast

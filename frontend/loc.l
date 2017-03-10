@@ -184,7 +184,7 @@ RESET { RETURN_TOKEN(RESET); }
 }
 
 <S_PATH,S_SIDE>{lgc} {
-    char* s = (strcmp(yytext, "TRUE") == 0) ? "1" : "0";
+    char* s = (strcmp(yytext, "TRUE") == 0) ? "true" : "false";
     W* w = couplet_str_str("Bool", strdup(s), C_POSITIONAL);
     RETURN(w, COMPOSON);
 }
