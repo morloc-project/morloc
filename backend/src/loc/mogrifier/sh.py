@@ -75,11 +75,7 @@ class ShMogrifier(Mogrifier):
         return s
 
     def _tuple_to_universal(self, typ):
-        return '''
-    echo -n '['
-    sed 's/.*/"&"/' <($x) | tr '\n' ',' | sed 's/,$//'
-    echo ']'
-'''
+        return '''{mid} | jq -R -s -c 'split("\\t")' '''
 
     def _array_to_universal(self, typ):
         if(typ[0] == "atomic"):

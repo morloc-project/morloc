@@ -29,8 +29,8 @@ as_file <- function(x){
 '''
 
 atom_to_universal = {
-    "Int"    : "as.character({x})",
-    "Num"    : "as.character({x})",
+    "Int"    : "{x}",
+    "Num"    : "{x}",
     "String" : "{x}",
     "File"   : "{x}",
     "Bool"   : "if({x}){{ 'true' }} else {{ 'false' }}",
@@ -70,15 +70,15 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        s = 'fromJSON(x)'
+        s = 'fromJSON(x, simplifyVector=TRUE)'
         return s
 
     def _universal_to_tuple(self, typ):
-        s = 'fromJSON(x)'
+        s = 'fromJSON(x, simplifyVector=FALSE)'
         return s
 
     def _universal_to_array(self, typ):
-        s = 'fromJSON(x)'
+        s = 'fromJSON(x, simplifyVector=TRUE)'
         return s
 
     def _primitive_to_universal(self, typ):
