@@ -1,0 +1,6 @@
+#!/usr/bin/bash
+cat << EOL
+1
+1
+1
+EOL

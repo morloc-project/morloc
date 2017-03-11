@@ -1,0 +1,33 @@
+@type
+echo :: (Int -> Int) -> Int -> Int
+say :: Int -> Int
+
+# # Minimal example for testing
+# # Just comment out everything else
+# @path
+# echo . &(say . $1) 1
+# @lang
+# echo :: sh
+# say :: R
+
+@path sh
+A :: *Foo
+B :: *Foo
+C :: *Foo
+
+Foo :: echo . &(say . $1) 1
+
+@export
+A/echo as py
+B/echo as sh
+C/echo as r
+
+@lang
+A/say :: py
+B/say :: R
+C/say :: sh
+
+@alias
+A/say :: print
+B/say :: cat
+C/say :: echo
