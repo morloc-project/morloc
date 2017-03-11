@@ -81,6 +81,14 @@ class RMogrifier(Mogrifier):
         s = 'fromJSON(x, simplifyVector=TRUE)'
         return s
 
+    def _universal_to_wtf(self, typ):
+        s = 'fromJSON(x, simplifyVector=TRUE)'
+        return s
+
+    def _wtf_to_universal(self, typ):
+        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
+        return s
+
     def _primitive_to_universal(self, typ):
         s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
         return s

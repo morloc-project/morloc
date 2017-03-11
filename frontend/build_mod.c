@@ -61,7 +61,7 @@ void _set_manifold_type(W* mw, W* tw){
 void _transfer_type(W* type_w, W* man_w){
     Manifold* m = g_manifold(g_rhs(man_w));
     if(m->type){
-        warn("TYPE WARNING: redeclaration of '%s' type", m->function);
+        fprintf(stderr, "TYPE WARNING: redeclaration of '%s' type\n", m->function);
     }
     m->type = g_ws(g_rhs(type_w));
 }

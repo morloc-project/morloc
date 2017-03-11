@@ -6,18 +6,18 @@ from arpeggio import *
 from arpeggio import RegExMatch as _
 
 
-# =============================================================================
-# --- Type parser
-# Reads a Haskell style type definition. It reads a single type, not a type
-# signature. The result is a tuple of form '(<constructor>, <value>)'. The
-# constructor can currently be any of the following: "atomic", "tuple",
-# "array", or "function". The value can be nested. For example,
-#    ("tuple", (("atomic", "Int"), ("array", ("tuple", ("String", "String")))))
-# which would correspond to
-#    (Int, [(String, String)])
-# This tuple is used to determine which conversion functions should be used in
-# the output code. 
-# =============================================================================
+# ============================================================================ #
+# --- Type parser                                                              #
+# Reads a Haskell style type definition. It reads a single type, not a type    #
+# signature. The result is a tuple of form '(<constructor>, <value>)'. The     #
+# constructor can currently be any of the following: "atomic", "tuple",        #
+# "array", or "function". The value can be nested. For example,                #
+#   ("tuple", (("atomic", "Int"), ("array", ("tuple", ("String", "String"))))) #
+# which would correspond to                                                    #
+#    (Int, [(String, String)])                                                 #
+# This tuple is used to determine which conversion functions should be used in #
+# the output code.                                                             #
+# ============================================================================ #
 
 def typeIdent(): return _('\*|[A-Za-z0-9_]+|void')
 def typeTuple(): return '(', typeExpr, OneOrMore(',', typeExpr), ')'
@@ -86,7 +86,9 @@ class Mogrifier:
         elif tree[0] == "array":
             function = self._array_to_universal(tree[1])
         else:
-            print("Constructor '%s' is not supported" % str(tree), file=sys.stderr)
+            # TODO This implementation is trash
+            function = self._wtf_to_universal(tree[1])
+            print("WARNING: kludge handling of functions (type:%s)" % str(tree[1]), file=sys.stderr)
 
         return function
 
@@ -147,6 +149,12 @@ class Mogrifier:
         raise NotImplemented
 
     def _universal_to_tuple(self, typ):
+        raise NotImplemented
+
+    def _wtf_to_universal(self, typ):
+        raise NotImplemented
+
+    def _universal_to_wtf(self, typ):
         raise NotImplemented
 
     def _universal_to_array(self, typ):

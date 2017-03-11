@@ -66,6 +66,12 @@ class PyMogrifier(Mogrifier):
     def _universal_to_array(self, typ):
         return 'return json.loads(x)'
 
+    def _universal_to_wtf(self, typ):
+        return 'return json.loads(x)'
+
+    def _wtf_to_universal(self, typ):
+        return 'return json.dumps({mid}())'
+
     def _primitive_to_universal(self, typ):
         return 'return json.dumps({mid}())'
 

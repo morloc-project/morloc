@@ -64,6 +64,12 @@ class ShMogrifier(Mogrifier):
     def _universal_to_tuple(self, typ):
         return "jq -r '@tsv' $1"
 
+    def _wtf_to_universal(self, typ):
+        return "# WTF, I can't do this"
+
+    def _universal_to_wtf(self, typ):
+        return "# WTF, I can't do this"
+
     def _universal_to_array(self, typ):
         if typ[0] == "atomic":
             s = """jq -r 'map(tostring) | join("\\n")' $1"""

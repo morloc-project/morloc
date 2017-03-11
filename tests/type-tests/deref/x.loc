@@ -1,21 +1,24 @@
 @type
 echo :: (Int -> Int) -> Int -> Int
-say :: Int -> Int
+id :: Int -> Int
+
+@include
+core/atomic
 
 # # Minimal example for testing
-# # Just comment out everything else
+# # Just comment out everything else (don't forget the Makefile)
 # @path
-# echo . &(say . $1) 1
+# echo . &(id . $1) 7
 # @lang
 # echo :: sh
-# say :: R
+# id :: R
 
 @path sh
 A :: *Foo
 B :: *Foo
 C :: *Foo
 
-Foo :: echo . &(say . $1) 1
+Foo :: echo . &(id . $1) 1
 
 @export
 A/echo as py
@@ -23,11 +26,11 @@ B/echo as sh
 C/echo as r
 
 @lang
-A/say :: py
-B/say :: R
-C/say :: sh
+A/id :: py
+B/id :: R
+C/id :: sh
 
 @alias
-A/say :: print
-B/say :: cat
-C/say :: echo
+A/id :: print
+B/id :: cat
+C/id :: echo

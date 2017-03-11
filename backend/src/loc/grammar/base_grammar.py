@@ -1,4 +1,5 @@
 from util import err,indent,clean
+import sys
 
 class Grammar:
     def __init__(
@@ -141,6 +142,7 @@ class Grammar:
             marg_uid  = self.make_marg_uid(m),
             blk       = indent(self.make_simple_manifold_blk(m), n=self.INDENT)
         )
+
     def make_simple_manifold_blk(self, m):
         return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,

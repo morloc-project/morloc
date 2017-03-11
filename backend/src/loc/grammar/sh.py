@@ -51,6 +51,7 @@ fi'''
         self.CAST_UNI2NAT     = 'read_{key} {key}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
+# native manifold
 {blk}
 }}
 '''
@@ -61,6 +62,7 @@ fi'''
 '''
         self.SIMPLE_MANIFOLD = '''
 {mid} () {{
+# simple manifold
 {blk}
 }}
 '''
@@ -82,6 +84,7 @@ wrap_{mid} () {{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
+# foreign manfold
 {blk}
 }}
 '''
@@ -199,9 +202,8 @@ fi
         if m.narg:
             arg_rep += '\\\n    "$%s_uid"' % m.mid
 
-        s = self.FOREIGN_MANIFOLD_BLK.format(
+        return self.FOREIGN_MANIFOLD_BLK.format(
             foreign_lang=m.lang,
             mid=m.mid,
             arg_rep=arg_rep
         )
-        return s

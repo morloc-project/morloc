@@ -1,14 +1,14 @@
 TARGET=x.loc
 
 all:
-	loc -tkx locout ${TARGET}
+	loc -kx locout ${TARGET}
 
 .PHONY: run
 run:
-	./manifold-nexus.py main
-	# ./manifold-nexus.py py
-	# ./manifold-nexus.py R
-	# ./manifold-nexus.py sh
+	# ./manifold-nexus.py main
+	./manifold-nexus.py py
+	./manifold-nexus.py R
+	./manifold-nexus.py sh
 
 .PHONY: clean
 clean:
