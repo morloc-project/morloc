@@ -52,7 +52,7 @@ loc_nothing <- function() { NULL }
 @source sh
 
 loc_null() {
-    echo -n
+    cat "$1" || echo "$1" > /dev/null 
 }
 
 loc_id() {

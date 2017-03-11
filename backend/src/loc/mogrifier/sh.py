@@ -8,7 +8,7 @@ universal_to_atom = {
     "File"   : """{x} | sed 's/^"\|"$//g'""",
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
-    "void"   : 'echo -n',
+    "void"   : 'cat <({x}) || echo "$({x})"',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
 
@@ -19,7 +19,7 @@ atom_to_universal = {
     "File"   : '''printf '"%s"' "$({x})"''',
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
-    "void"   : 'echo -n',
+    "void"   : 'cat <({x}) || echo "$({x})" > /dev/null',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
 
@@ -56,7 +56,10 @@ class ShMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return self.universal_to_atom[typ].format(x="cat $1")
+        if typ == "void":
+            return "{mid} $@ > /dev/null"
+        else:
+            return self.universal_to_atom[typ].format(x="cat $1")
 
     def _universal_to_tuple(self, typ):
         return "jq -r '@tsv' $1"

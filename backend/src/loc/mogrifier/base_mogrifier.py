@@ -109,6 +109,9 @@ class Mogrifier:
         return function
 
     def build_uni2nat(self):
+        '''
+        Build a read_* function
+        '''
         out = [self.uni2nat_top]
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
@@ -122,6 +125,9 @@ class Mogrifier:
         return '\n'.join(out)
 
     def build_nat2uni(self):
+        '''
+        Build a show_* function
+        '''
         out = [self.nat2uni_top]
         for m in self.manifolds.values():
             tree = self._parse_type(m.type)
