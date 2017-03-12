@@ -77,7 +77,8 @@ def wrap_{mid}(*args, **kwargs):
 {blk}
 '''
         self.UID_WRAPPER_BLK = '''\
-{mid}_uid = {mid}_uid + 1
+global {mid}_uid
+{mid}_uid += 1
 {mid} (*args, **kwargs, uid={mid}_uid )\
 '''
         self.UID = 'uid'
