@@ -1,5 +1,5 @@
 @type
-echo :: (Int -> Int) -> Int -> Int
+echo :: * -> Int -> Int
 id :: Int -> Int
 
 @include
@@ -18,7 +18,7 @@ A :: *Foo
 B :: *Foo
 C :: *Foo
 
-Foo :: echo . &(id . $1) 1
+Foo :: echo . &(id . $1) 7
 
 @export
 A/echo as py

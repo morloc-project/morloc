@@ -7,7 +7,7 @@ all:
 run:
 	# ./manifold-nexus.py main
 	./manifold-nexus.py py
-	./manifold-nexus.py R
+	./manifold-nexus.py r
 	./manifold-nexus.py sh
 
 .PHONY: clean
