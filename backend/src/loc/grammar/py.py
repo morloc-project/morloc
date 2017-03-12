@@ -92,23 +92,30 @@ def {mid}({marg_uid}):
 foreign_pool = os.path.join(outdir, "call.{foreign_lang}")
 out,result = None, None
 try:
-    cmd = " ".join([foreign_pool] + [{args}])
+    cmd = [foreign_pool] + [{args}]
+    cmd = [str(s) for s in cmd]
+    cmd_str = " ".join(cmd)
     result = subprocess.run(
-        [foreign_pool] + [{args}],
+        cmd,
         stderr=subprocess.PIPE,
         stdout=subprocess.PIPE,
         encoding='utf-8',
         check=True
     )
 except subprocess.CalledProcessError as e:
-    print("ERROR: non-zero exist status from call.py::{mid}", file=sys.stderr)
+    msg = "ERROR: non-zero exist status from call.py::{mid}, cmd='%s'"
+    print(msg % cmd_str, file=sys.stderr)
     print("   %s" % e, file=sys.stderr)
-except:
-    print("ERROR: unknown error in call.py::{mid}", file=sys.stderr)
+except Exception as e:
+    msg = "ERROR: unknown error in call.py::{mid}, cmd='%s'"
+    print(msg % cmd_str, file=sys.stderr)
+    print("   %s" % e, file=sys.stderr)
 try:
     out = read_{mid}(result.stdout)
-except:
-    print("ERROR: read_{mid} failed in call.py::{mid}", file=sys.stderr)
+except Exception as e:
+    msg = "ERROR: read_{mid} failed in call.py::{mid}, cmd='%s'"
+    print(msg % cmd_str, file=sys.stderr)
+    print("   %s" % e, file=sys.stderr)
 if result:
     print(result.stderr, file=sys.stderr, end="")
 return out 
