@@ -120,9 +120,11 @@ class Grammar:
         arg_rep = ["'%s'" % m.mid]
         for i in range(int(m.narg)):
             a = self.MARG.format(i=str(i+1))
-            s = 'native_to_universal({mid}, {temp}, outdir)' 
-            s = s.format(mid=a, temp=self.TYPE_ACCESS)
-            s = s.format(key=a)
+            #  s = 'native_to_universal({mid}, {temp}, outdir)'
+            #  s = s.format(mid=a, temp=self.TYPE_ACCESS)
+            #  s = s.format(key=a)
+            # # TODO: can I do this?
+            s = a
             arg_rep.append(s)
         if m.narg:
             arg_rep.append("uid")

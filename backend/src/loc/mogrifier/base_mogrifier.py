@@ -131,11 +131,11 @@ class Mogrifier:
         Build a show_* function
         '''
         out = [self.nat2uni_top]
-        for m in self.manifolds.values():
+        for k,m in self.manifolds.items():
             tree = self._parse_type(m.type)
             function = self.nat2uni(tree)
             s = self.natural_to_universal.format(cast=function)
-            s = s.format(mid=m.mid)
+            s = s.format(mid=k)
             out.append(s)
         return '\n'.join(out)
 

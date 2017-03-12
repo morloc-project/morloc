@@ -80,11 +80,11 @@ class ShMogrifier(Mogrifier):
         return s
 
     def _primitive_to_universal(self, typ):
-        s = self.atom_to_universal[typ].format(x="{mid}")
+        s = self.atom_to_universal[typ].format(x="{mid} $@")
         return s
 
     def _tuple_to_universal(self, typ):
-        return '''{mid} | jq -R -s -c 'split("\\t")' '''
+        return '''{mid} $@ | jq -R -s -c 'split("\\t")' '''
 
     def _array_to_universal(self, typ):
         if(typ[0] == "atomic"):
@@ -94,7 +94,7 @@ class ShMogrifier(Mogrifier):
     do
         %s
         echo -n ','
-    done < <({mid}) | sed 's/,$//'
+    done < <({mid} $@) | sed 's/,$//'
     echo ']'
 ''' % atom_to_universal[typ[1]].format(x='echo $line')
         elif(typ[0] == "array"):
@@ -105,5 +105,5 @@ class ShMogrifier(Mogrifier):
     awk '
         BEGIN{{FS="\\t"; OFS="\\t"; ORS=","}}
         {{%s print "[" $0 "]" }}
-    ' <({mid}) | sed 's/\\t/,/g; s/\(.*\),/[\\1]/'
+    ' <({mid} $@) | sed 's/\\t/,/g; s/\(.*\),/[\\1]/'
 ''' % cast

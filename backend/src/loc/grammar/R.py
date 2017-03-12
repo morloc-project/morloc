@@ -50,8 +50,10 @@ if(exists(m)){{
         self.TYPE_MAP         = '''# skipping type map'''
         self.TYPE_MAP_PAIR    = "    {key}='{type}'"
         self.TYPE_ACCESS      = '''types["{key}"]'''
-        self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
-        self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
+#        self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
+#        self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
+        self.CAST_NAT2UNI     = '''{key}'''
+        self.CAST_UNI2NAT     = '''{key}'''
         self.NATIVE_MANIFOLD = '''\
 {mid} = function ({marg_uid}){{
 {blk}

@@ -45,7 +45,7 @@ read_{{mid}} <- function(x){{{{
 '''
 
 natural_to_universal = '''
-show_{{mid}} <- function(){{{{
+show_{{mid}} <- function(...){{{{
     {cast}
 }}}}
 '''
@@ -86,17 +86,17 @@ class RMogrifier(Mogrifier):
         return s
 
     def _wtf_to_universal(self, typ):
-        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
         return s
 
     def _primitive_to_universal(self, typ):
-        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
         return s
 
     def _tuple_to_universal(self, typ):
-        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
         return s
 
     def _array_to_universal(self, typ):
-        s = 'toJSON({mid}(), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
         return s

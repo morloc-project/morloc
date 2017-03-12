@@ -52,8 +52,10 @@ if __name__ == '__main__':
         self.TYPE_MAP         = '''# skipping type map'''
         self.TYPE_MAP_PAIR    = "    '{key}' : '{type}'"
         self.TYPE_ACCESS      = '''output_type[{key}]'''
-        self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
-        self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
+#        self.CAST_NAT2UNI     = '''natural_to_universal({key}, {type})'''
+#        self.CAST_UNI2NAT     = '''universal_to_natural({key}, {type})'''
+        self.CAST_NAT2UNI     = '''{key}'''
+        self.CAST_UNI2NAT     = '''{key}'''
         self.NATIVE_MANIFOLD = '''\
 def {mid}({marg_uid}):
 {blk}
@@ -79,7 +81,7 @@ def wrap_{mid}(*args, **kwargs):
         self.UID_WRAPPER_BLK = '''\
 global {mid}_uid
 {mid}_uid += 1
-{mid} (*args, **kwargs, uid={mid}_uid )\
+return {mid} (*args, **kwargs, uid={mid}_uid )\
 '''
         self.UID = 'uid'
         self.MARG_UID = '{marg}, {uid}'

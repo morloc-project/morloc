@@ -33,7 +33,7 @@ def read_{{mid}}(x):
 '''
 
 natural_to_universal = '''
-def show_{{mid}}():
+def show_{{mid}}(*args):
     {cast}
 '''
 
@@ -70,13 +70,13 @@ class PyMogrifier(Mogrifier):
         return 'return json.loads(x)'
 
     def _wtf_to_universal(self, typ):
-        return 'return json.dumps({mid}())'
+        return 'return json.dumps({mid}(*args))'
 
     def _primitive_to_universal(self, typ):
-        return 'return json.dumps({mid}())'
+        return 'return json.dumps({mid}(*args))'
 
     def _tuple_to_universal(self, typ):
-        return 'return json.dumps({mid}())'
+        return 'return json.dumps({mid}(*args))'
 
     def _array_to_universal(self, typ):
-        return 'return json.dumps({mid}())'
+        return 'return json.dumps({mid}(*args))'

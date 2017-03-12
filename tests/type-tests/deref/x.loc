@@ -2,14 +2,6 @@
 core/control
 core/atomic
 
-# # Minimal example for testing
-# # Just comment out everything else (don't forget the Makefile)
-# @path
-# echo . &(do . $1) 7
-# @lang
-# echo :: sh
-# do :: R
-
 @path sh
 A :: *Foo
 B :: *Foo
