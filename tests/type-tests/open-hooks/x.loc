@@ -1,0 +1,57 @@
+@type
+echo :: (Int -> Int) -> Int -> Int
+id :: Int -> Int
+
+@include
+core/atomic
+
+@path sh
+A :: *Foo
+B :: *Foo
+C :: *Foo
+
+Foo :: null . &(id . $1) 1
+
+@5 py
+A/id :+ tostderr . $1
+B/id :+ tostderr . $1
+C/id :+ tostderr . $1
+
+@5 sh
+A/id :+ tostderr . $1
+B/id :+ tostderr . $1
+C/id :+ tostderr . $1
+
+@5 R
+A/id :+ tostderr . $1
+B/id :+ tostderr . $1
+C/id :+ tostderr . $1
+
+@export
+A/echo as py
+B/echo as sh
+C/echo as r
+
+@lang
+A/id :: py
+B/id :: R
+C/id :: sh
+
+@alias
+A/id :: print
+B/id :: cat
+C/id :: echo
+
+@source R
+tostderr <- function(x){
+    cat(sprintf("R : %s\n", x), file=stderr())
+}
+
+@source py
+def tostderr(x):
+    print("py : %s" % x, file=sys.stderr)
+
+@source sh
+tostderr (){
+    echo "sh : $1" > /dev/stderr
+}

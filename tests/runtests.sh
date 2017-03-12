@@ -214,6 +214,7 @@ backend_x_test all              'all/               -- pass each atomic type thr
 backend_x_test all-vectors      'all-vectors/       -- pass each vector type through all language ..... '
 backend_x_test all-tables       'all-tables/        -- pass each table type through all language ...... '
 backend_test deref         main 'deref/             -- send data from each language to sh ............. '
+backend_test open-hook     main 'open-hook/         -- combinations of open manifolds with hooks ...... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
 backend_test tuples        main 'tuples/            -- pass tuple across all languages ................ '
 fi
