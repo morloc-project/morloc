@@ -40,7 +40,9 @@ manifold_exists() {{
 }}
 if manifold_exists $1
 then
-    show_$1
+    fun=show_$1
+    shift
+    $fun $@
 else
     exit 1
 fi'''
