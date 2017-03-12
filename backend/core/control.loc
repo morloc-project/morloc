@@ -3,15 +3,22 @@
 #   map :: (a -> b) -> [a] -> [b]
 # However, I don't yet support generics
 map :: * -> * -> *
+do  :: ? -> *  # should be: * -> ? -> *
+               # or better: (? -> a) -> ? -> a
 
 @alias
 map :: loc_map
+do  :: loc_do
 
 
 @source R
 
 loc_map <- function(f, x){
     lapply(x, f)
+}
+
+loc_do <- function(FUN, ...){
+    FUN(...)
 }
 
 
@@ -26,9 +33,16 @@ loc_map (){
     done < $file
 }
 
+loc_do() {
+    $@
+}
+
 
 @source py
 
 # aliased as map
 def loc_map(f, xs):
     list( map(f, xs) )
+
+def loc_do(FUN, *args):
+    return FUN(*args)

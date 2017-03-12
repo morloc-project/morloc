@@ -1,36 +1,28 @@
-@type
-echo :: * -> Int -> Int
-id :: Int -> Int
-
 @include
+core/control
 core/atomic
 
 # # Minimal example for testing
 # # Just comment out everything else (don't forget the Makefile)
 # @path
-# echo . &(id . $1) 7
+# echo . &(do . $1) 7
 # @lang
 # echo :: sh
-# id :: R
+# do :: R
 
 @path sh
 A :: *Foo
 B :: *Foo
 C :: *Foo
 
-Foo :: echo . &(id . $1) 7
+Foo :: do . &(id . $1) 7
 
 @export
-A/echo as py
-B/echo as sh
-C/echo as r
+A/do as py
+B/do as sh
+C/do as r
 
 @lang
-A/id :: py
-B/id :: R
-C/id :: sh
-
-@alias
-A/id :: print
-B/id :: cat
-C/id :: echo
+A/do :: py
+B/do :: R
+C/do :: sh

@@ -109,7 +109,6 @@ loc_nothing() {
     echo -n
 }
 
-
 @source py
 
 def loc_null(*args, **kwargs):
