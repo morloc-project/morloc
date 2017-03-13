@@ -34,7 +34,12 @@ def read_{{mid}}(x):
 
 natural_to_universal = '''
 def show_{{mid}}(*args):
-    {cast}
+    try:
+        {cast}
+    except Exception as e:
+        print("failure in call.py::show_{{mid}}", file=sys.stderr)
+        print("   %s" % e, file=sys.stderr)
+        return None
 '''
 
 
