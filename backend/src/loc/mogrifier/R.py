@@ -70,33 +70,33 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        s = 'fromJSON(x, simplifyVector=TRUE)'
+        s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=FALSE) }}'
         return s
 
     def _universal_to_tuple(self, typ):
-        s = 'fromJSON(x, simplifyVector=FALSE)'
+        s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=FALSE) }}'
         return s
 
     def _universal_to_array(self, typ):
-        s = 'fromJSON(x, simplifyVector=TRUE)'
+        s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=FALSE) }}'
         return s
 
     def _universal_to_wtf(self, typ):
-        s = 'fromJSON(x, simplifyVector=TRUE)'
+        s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=FALSE) }}'
         return s
 
     def _wtf_to_universal(self, typ):
-        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
         return s
 
     def _primitive_to_universal(self, typ):
-        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
         return s
 
     def _tuple_to_universal(self, typ):
-        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
         return s
 
     def _array_to_universal(self, typ):
-        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null")'
+        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
         return s
