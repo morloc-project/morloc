@@ -52,7 +52,7 @@ loc_nothing <- function() { NULL }
 @source sh
 
 loc_null() {
-    cat "$1" || echo "$1" > /dev/null 
+    cat "$1" &> /dev/null || echo "$1" > /dev/null
 }
 
 loc_id() {
@@ -96,7 +96,7 @@ loc_all() {
     is_true=1
     for j in $@
     do
-        if [[ $j == "false" ]] 
+        if [[ $j == "false" ]]
         then
             is_true=0
             break
