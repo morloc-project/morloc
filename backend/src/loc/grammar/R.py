@@ -56,6 +56,7 @@ if(exists(m)){{
         self.CAST_UNI2NAT     = '''{key}'''
         self.NATIVE_MANIFOLD = '''\
 {mid} = function ({marg_uid}){{
+# {comment}
 {blk}
 }}
 '''
@@ -67,6 +68,7 @@ return(b)\
 '''
         self.SIMPLE_MANIFOLD = '''\
 {mid} = function ({marg_uid}){{
+# {comment}
 {blk}
 }}
 '''
@@ -88,6 +90,7 @@ wrap_{mid} <- function(...){{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} <- function({marg_uid}){{
+# {comment}
 {blk}
 }}
 '''

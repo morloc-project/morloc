@@ -58,6 +58,7 @@ if __name__ == '__main__':
         self.CAST_UNI2NAT     = '''{key}'''
         self.NATIVE_MANIFOLD = '''\
 def {mid}({marg_uid}):
+# {comment}
 {blk}
 '''
         self.NATIVE_MANIFOLD_BLK = '''\
@@ -68,6 +69,7 @@ return b\
 '''
         self.SIMPLE_MANIFOLD = '''\
 def {mid}({marg_uid}):
+# {comment}
 {blk}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
@@ -88,6 +90,7 @@ return {mid} (*args, **kwargs, uid={mid}_uid )\
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 def {mid}({marg_uid}):
+# {comment}
 {blk}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\

@@ -53,7 +53,7 @@ fi'''
         self.CAST_UNI2NAT     = 'read_{key} {key}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
-# native manifold
+# {comment}
 {blk}
 }}
 '''
@@ -64,7 +64,7 @@ fi'''
 '''
         self.SIMPLE_MANIFOLD = '''
 {mid} () {{
-# simple manifold
+# {comment}
 {blk}
 }}
 '''
@@ -86,7 +86,7 @@ wrap_{mid} () {{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
-# foreign manfold
+# {comment}
 {blk}
 }}
 '''

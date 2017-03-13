@@ -111,10 +111,15 @@ class Grammar:
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
             mid      = m.mid,
+            comment  = self.make_foreign_manifold_comment(m),
             marg_uid = self.make_marg_uid(m),
             blk      = indent(self.make_foreign_manifold_blk(m), n=self.INDENT)
         )
         return s
+
+    def make_foreign_manifold_comment(self, m):
+        return "foreign manifold - type=%s" % m.type
+
 
     def make_foreign_manifold_blk(self, m):
         arg_rep = ["'%s'" % m.mid]
@@ -141,9 +146,13 @@ class Grammar:
     def make_simple_manifold(self, m):
         return self.SIMPLE_MANIFOLD.format(
             mid       = m.mid,
+            comment   = self.make_simple_manifold_comment(m),
             marg_uid  = self.make_marg_uid(m),
             blk       = indent(self.make_simple_manifold_blk(m), n=self.INDENT)
         )
+
+    def make_simple_manifold_comment(self, m):
+        return "simple manifold - type=%s" % m.type
 
     def make_simple_manifold_blk(self, m):
         return self.SIMPLE_MANIFOLD_BLK.format(
@@ -153,10 +162,14 @@ class Grammar:
 
     def make_native_manifold(self, m):
         return self.NATIVE_MANIFOLD.format(
+            comment  = self.make_native_manifold_comment(m),
             mid      = m.mid,
             marg_uid = self.make_marg_uid(m),
             blk      = indent(self.make_native_manifold_blk(m), n=self.INDENT)
         )
+
+    def make_native_manifold_comment(self, m):
+        return "native manifold - type=%s" % m.type
 
     def make_native_manifold_blk(self, m):
         return self.NATIVE_MANIFOLD_BLK.format(
