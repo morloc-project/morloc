@@ -28,12 +28,14 @@ nat2uni_top = ''
 
 universal_to_natural = '''
 read_{{mid}} (){{{{
+    # {comment}
     {cast}
 }}}}
 '''
 
 natural_to_universal = '''
 show_{{mid}} (){{{{
+    # {comment}
     {cast}
 }}}}
 '''

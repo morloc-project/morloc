@@ -40,12 +40,14 @@ atom_to_universal = {
 
 universal_to_natural = '''
 read_{{mid}} <- function(x){{{{
+    # {comment}
     {cast}
 }}}}
 '''
 
 natural_to_universal = '''
 show_{{mid}} <- function(...){{{{
+    # {comment}
     {cast}
 }}}}
 '''

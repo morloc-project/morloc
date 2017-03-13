@@ -29,11 +29,13 @@ nat2uni_top = ''
 
 universal_to_natural = '''
 def read_{{mid}}(x):
+    # {comment}
     {cast}
 '''
 
 natural_to_universal = '''
 def show_{{mid}}(*args):
+    # {comment}
     try:
         {cast}
     except Exception as e:

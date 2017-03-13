@@ -89,7 +89,7 @@ class Mogrifier:
             # TODO This implementation is trash
             function = self._wtf_to_universal(tree[1])
             print("WARNING: kludge handling of functions (type:%s)" % str(tree[1]), file=sys.stderr)
-
+ 
         return function
 
     def uni2nat(self, tree):
@@ -119,7 +119,11 @@ class Mogrifier:
             tree = self._parse_type(m.type)
             function = self.uni2nat(tree)
             # unpeal first level
-            s = self.universal_to_natural.format(cast=function)
+            comment = "type: %s" % str(tree)
+            s = self.universal_to_natural.format(
+                cast=function,
+                comment=comment
+            )
             # unpeal second - this allows {mid} to be expanded inside
             # the casting function
             s = s.format(mid=m.mid)
@@ -134,7 +138,11 @@ class Mogrifier:
         for k,m in self.manifolds.items():
             tree = self._parse_type(m.type)
             function = self.nat2uni(tree)
-            s = self.natural_to_universal.format(cast=function)
+            comment = "type: %s" % str(tree)
+            s = self.natural_to_universal.format(
+                cast=function,
+                comment=comment
+            )
             s = s.format(mid=k)
             out.append(s)
         return '\n'.join(out)
