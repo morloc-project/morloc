@@ -43,7 +43,16 @@ if(exists(m)){{
   cmd = paste0("show_", m)
   f <- get(cmd)
   d <- do.call(f, as.list(args[-1]))
-  write(d, file=stdout())
+  result <- tryCatch({{
+      write(d, file="")
+    }}, warning = function(w) {{
+      write("null", file="")
+    }}, error = function(e) {{
+      write("null", file="")
+    }}, finally = {{
+    
+    }}
+  )
 }} else {{
   quit(status=1)
 }}'''
@@ -96,12 +105,23 @@ wrap_{mid} <- function(...){{
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
 foreign_pool <- file.path(outdir, "call.{foreign_lang}")
-fo <- system2(
-  foreign_pool,
-  args=c({args}),
-  stdout=TRUE, # capture STDOUT
-  stderr=""    # let STDERR pass
+fo <- "null"
+fo <- tryCatch({{
+    system2(
+      foreign_pool,
+      args=c({args}),
+      stdout=TRUE, # capture STDOUT
+      stderr=""    # let STDERR pass
+    )
+  }}, warning = function(w) {{
+    "null" 
+  }}, error = function(e) {{
+    "null" 
+  }}, finally = {{
+  
+  }}
 )
+
 read_{mid}(fo)\
 '''
         self.CACHE = '''\

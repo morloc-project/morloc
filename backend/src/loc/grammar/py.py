@@ -26,6 +26,7 @@ class PyGrammar(Grammar):
 import sys
 import os
 import subprocess
+import signal 
 
 outdir = "{outdir}"
 
@@ -40,6 +41,7 @@ outdir = "{outdir}"
 {uni2nat}
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     args = sys.argv
     cmd_str = "{{function}}({{args}})"
     arg_str = ', '.join(args[2:])

@@ -7,22 +7,6 @@ null :: Int -> void
 do :: * -> Int -> void
 tostderr :: Int -> void
 
-# @path
-# Foo :: do . &(null . $1) 7
-#
-# @5
-# null :+ tostderr . $1
-#
-# @lang
-# do :: sh
-# null :: R
-# tostderr :: sh
-#
-# @source sh
-# tostderr(){
-#     echo "sh : $1" > /dev/stderr
-# }
-
 @path sh
 A :: *Foo
 B :: *Foo
@@ -31,14 +15,16 @@ C :: *Foo
 Foo :: do . &(null . $1) 7
 
 @5
-A/null :+ tostderr:py . $1
-B/null :+ tostderr:py . $1
-C/null :+ tostderr:py . $1
+A/null := tostderr:py . $1
 A/null :+ tostderr:sh . $1
-B/null :+ tostderr:sh . $1
-C/null :+ tostderr:sh . $1
 A/null :+ tostderr:r  . $1
+
+B/null := tostderr:py . $1
+B/null :+ tostderr:sh . $1
 B/null :+ tostderr:r  . $1
+
+C/null := tostderr:py . $1
+C/null :+ tostderr:sh . $1
 C/null :+ tostderr:r  . $1
 
 @export

@@ -1,12 +1,31 @@
 #!/usr/bin/env bash
-cat << END
+
+stat=0
+
+make || stat=1
+
+> a
+./manifold-nexus.py py 2>> a
+./manifold-nexus.py sh 2>> a
+./manifold-nexus.py r  2>> a
+
+# TODO: The order bash prints is wrong
+cat > b << END
 py : 7
 sh : 7
 R : 7
-py : 7
 sh : 7
+py : 7
 R : 7
 py : 7
 sh : 7
 R : 7
 END
+
+make clean
+
+diff a b || stat=1
+
+rm a b
+
+exit $stat
