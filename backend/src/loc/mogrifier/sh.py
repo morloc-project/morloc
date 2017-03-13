@@ -59,7 +59,7 @@ class ShMogrifier(Mogrifier):
 
     def _universal_to_primitive(self, typ):
         if typ == "void":
-            return "{mid} $@ > /dev/null"
+            return "echo -n"
         else:
             return self.universal_to_atom[typ].format(x="cat $1")
 

@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+cat << END
 py : 7
 sh : 7
 R : 7
@@ -7,3 +9,4 @@ R : 7
 py : 7
 sh : 7
 R : 7
+END

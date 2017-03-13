@@ -1,46 +1,59 @@
-@type
-echo :: (Int -> Int) -> Int -> Int
-id :: Int -> Int
-
 @include
 core/atomic
+core/control
+
+@type
+null :: Int -> void
+do :: * -> Int -> void
+tostderr :: Int -> void
+
+# @path
+# Foo :: do . &(null . $1) 7
+#
+# @5
+# null :+ tostderr . $1
+#
+# @lang
+# do :: sh
+# null :: R
+# tostderr :: sh
+#
+# @source sh
+# tostderr(){
+#     echo "sh : $1" > /dev/stderr
+# }
 
 @path sh
 A :: *Foo
 B :: *Foo
 C :: *Foo
 
-Foo :: null . &(id . $1) 1
+Foo :: do . &(null . $1) 7
 
-@5 py
-A/id :+ tostderr . $1
-B/id :+ tostderr . $1
-C/id :+ tostderr . $1
-
-@5 sh
-A/id :+ tostderr . $1
-B/id :+ tostderr . $1
-C/id :+ tostderr . $1
-
-@5 R
-A/id :+ tostderr . $1
-B/id :+ tostderr . $1
-C/id :+ tostderr . $1
+@5
+A/null :+ tostderr:py . $1
+B/null :+ tostderr:py . $1
+C/null :+ tostderr:py . $1
+A/null :+ tostderr:sh . $1
+B/null :+ tostderr:sh . $1
+C/null :+ tostderr:sh . $1
+A/null :+ tostderr:r  . $1
+B/null :+ tostderr:r  . $1
+C/null :+ tostderr:r  . $1
 
 @export
-A/echo as py
-B/echo as sh
-C/echo as r
+A/do as py
+B/do as r
+C/do as sh
 
 @lang
-A/id :: py
-B/id :: R
-C/id :: sh
-
-@alias
-A/id :: print
-B/id :: cat
-C/id :: echo
+do :: sh
+A/null :: py
+B/null :: R
+C/null :: sh
+tostderr:r :: R
+tostderr:sh :: sh
+tostderr:py :: py
 
 @source R
 tostderr <- function(x){
