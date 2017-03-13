@@ -83,7 +83,7 @@ wrap_{mid} <- function(...){{
 '''
         self.UID_WRAPPER_BLK = '''\
 {mid}_uid <<- {mid}_uid + 1
-{mid} (..., uid={mid}_uid )
+{mid} (..., uid={mid}_uid )\
 '''
         self.UID = 'uid'
         self.MARG_UID = '{marg}, {uid}'
@@ -99,8 +99,8 @@ foreign_pool <- file.path(outdir, "call.{foreign_lang}")
 fo <- system2(
   foreign_pool,
   args=c({args}),
-  stdout=TRUE,
-  stderr=FALSE
+  stdout=TRUE, # capture STDOUT
+  stderr=""    # let STDERR pass
 )
 read_{mid}(fo)\
 '''
@@ -138,7 +138,9 @@ b <- {function}({arguments})
 '''
         self.RUN_BLK_VOID = '''\
 {hook4}
-{function}({arguments})
+# force evaluation
+b <- {function}({arguments})
+# throw away the result
 b <- NULL
 {cache_put}
 {hook5}
@@ -171,4 +173,7 @@ b = {function}({arguments})
         self.ARGUMENTS     = '{inputs}{sep}{fargs}'
         self.MANIFOLD_CALL = '{hmid}({marg_uid})'
         self.CHECK_CALL    = '{hmid}({marg_uid})'
-        self.HOOK          = '{hmid}({marg_uid})'
+        self.HOOK          = '''\
+# {comment}
+{hmid}({marg_uid})\
+'''

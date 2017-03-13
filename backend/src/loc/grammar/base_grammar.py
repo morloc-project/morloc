@@ -382,10 +382,14 @@ class Grammar:
         ss = []
         for h in hooks:
             ss.append( self.HOOK.format(
+                comment=self.make_hook_comment(h),
                 hmid=h.mid,
                 marg_uid=self.make_marg_uid(m)
             ) )
         return '\n'.join(ss)
+
+    def make_hook_comment(self, h):
+        return "hook, position %s" % str(h.kind)
 
     def make_marg(self, m, universal=False):
         ss = []

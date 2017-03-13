@@ -161,7 +161,10 @@ fi
         self.ARGUMENTS     = '{fargs} {inputs}'
         self.MANIFOLD_CALL = '{operator}({hmid} {marg_uid})'
         self.CHECK_CALL    = '$({hmid} {marg_uid}) == "true"'
-        self.HOOK          = '{hmid} {marg_uid} 1>&2'
+        self.HOOK          = '''\
+# {comment}
+{hmid} {marg_uid} 1>&2\
+'''
 
     def make_simple_manifold_blk(self, m):
         return self.SIMPLE_MANIFOLD_BLK.format(
@@ -201,9 +204,9 @@ fi
             i_str = str(i+1)
             # TODO
             #  arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
-            arg_rep += '\\\n    "$%s"' % i_str
+            arg_rep += ' "$%s"' % i_str
         if m.narg:
-            arg_rep += '\\\n    "$%s_uid"' % m.mid
+            arg_rep += ' "$%s_uid"' % m.mid
 
         return self.FOREIGN_MANIFOLD_BLK.format(
             foreign_lang=m.lang,

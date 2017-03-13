@@ -189,4 +189,7 @@ b = {function}({arguments})
         self.ARGUMENTS     = '{inputs}{sep}{fargs}'
         self.MANIFOLD_CALL = '{hmid}({marg_uid})'
         self.CHECK_CALL    = '{hmid}({marg_uid})'
-        self.HOOK          = '{hmid}({marg_uid})'
+        self.HOOK          = '''\
+# {comment}
+{hmid}({marg_uid})\
+'''
