@@ -29,7 +29,6 @@ hclust :: plot_pdf . <hclust> $1
 @include
 core/datcache
 core/atomic
-core/type
 core/control
 core/R/common
 

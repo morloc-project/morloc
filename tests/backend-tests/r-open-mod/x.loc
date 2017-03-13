@@ -1,7 +1,6 @@
 @include
 core/datcache
 core/atomic
-core/type
 
 @source R
 

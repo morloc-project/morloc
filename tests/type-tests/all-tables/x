@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
 cat <<EOF > z
-42	42
-42	42
-42	42
-0.42	0.42
-0.42	0.42
-0.42	0.42
-fourty-two	fourty-two
-fourty-two	fourty-two
-fourty-two	fourty-two
-1	1
-1	1
-1	1
+[[42, 42], [42, 42], [42, 42]]
+[[0.42, 0.42], [0.42, 0.42], [0.42, 0.42]]
+[["fourty-two", "fourty-two"], ["fourty-two", "fourty-two"], ["fourty-two", "fourty-two"]]
+[[true, true], [true, true], [true, true]]
 EOF
 stat=0
 loc -kx locout x.loc || stat=1

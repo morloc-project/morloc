@@ -52,7 +52,7 @@ loc_nothing <- function() { NULL }
 @source sh
 
 loc_null() {
-    echo -n
+    cat "$1" &> /dev/null || echo "$1" > /dev/null
 }
 
 loc_id() {
@@ -60,55 +60,54 @@ loc_id() {
 }
 
 loc_true() {
-    true
+    echo true
 }
 
 loc_false() {
-    false
+    echo false
 }
 
 loc_and() {
-    test $1 -eq 1 && test $2 -eq 1
+    [[ $1 == "true" && $2 == "true" ]] && echo true || echo false
 }
 
 loc_or() {
-    test $1 -eq 1 || test $2 -eq 1
+    [[ $1 == "true" || $2 == "true" ]] && echo true || echo false
 }
 
 loc_not() {
-    test $1 -ne 1
+    [[ $1 == "true" ]] && echo false || echo true
 }
 
 loc_any() {
     is_true=0
     for j in "$@"
     do
-        if test $j -eq 1
+        if [[ $j == "true" ]]
         then
             is_true=1
             break
         fi
     done
-    test $is_true -eq 1
+    [[ $is_true -eq 1 ]] && echo true || echo false
 }
 
 loc_all() {
     is_true=1
     for j in $@
     do
-        if test $j -eq 0 
+        if [[ $j == "false" ]]
         then
             is_true=0
             break
         fi
     done
-    test $is_true -eq 1
+    [[ $is_true -eq 1 ]] && echo true || echo false
 }
 
 loc_nothing() {
     echo -n
 }
-
 
 @source py
 

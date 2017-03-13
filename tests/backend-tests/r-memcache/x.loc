@@ -1,7 +1,6 @@
 @include
 core/memcache
 core/atomic
-core/type
 
 
 @export

@@ -1,6 +1,5 @@
 @include
 core/atomic
-core/type
 
 @type
 is_a :: void -> Bool
@@ -17,16 +16,16 @@ say_bi
 @source sh
 
 is_a () {
-    true
+    echo true
 }
 is_b () {
-    true
+    echo true
 }
 is_c () {
-    false
+    echo false
 }
 is_d () {
-    false
+    echo false
 }
 
 say_hi () {

@@ -6,12 +6,17 @@ man ls | grep -Po "[a-z]+ed" | sort | uniq
 
 @type
 has_man :: String -> Bool
+man :: String -> [String]
+grep :: [String] -> [String]
+sort :: [String] -> [String]
+uniq :: [String] -> [String]
 
 @path
 uniq . sort . grep . man . "ls"
 
 @arg
 grep := -Po "[a-z]+ed"
+man := --no-hyphenation
 
 @lang
 * :: sh
@@ -23,14 +28,11 @@ man :: datcache
 @check
 man := has_man . "ls"
 
-
 @include
 core/datcache
-core/type
 
 @source sh
 
 has_man () {
-    man $1 2> /dev/null 
-    test $? == 0
+    man $1 &> /dev/null && echo true || echo false
 }

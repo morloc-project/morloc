@@ -25,7 +25,6 @@ plot_pdf <- function(x, path){
 @include
 core/datcache
 core/atomic
-core/type
 
 @path
 null . hclust . dist . normalize . load_data

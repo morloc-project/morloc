@@ -1,0 +1,56 @@
+@include
+core/atomic
+core/control
+
+@type
+null :: Int -> void
+do :: * -> Int -> void
+tostderr :: Int -> void
+
+@path sh
+A :: *Foo
+B :: *Foo
+C :: *Foo
+
+Foo :: do . &(null . $1) 7
+
+@5
+A/null := tostderr:py . $1
+A/null :+ tostderr:sh . $1
+A/null :+ tostderr:r  . $1
+
+B/null := tostderr:py . $1
+B/null :+ tostderr:sh . $1
+B/null :+ tostderr:r  . $1
+
+C/null := tostderr:py . $1
+C/null :+ tostderr:sh . $1
+C/null :+ tostderr:r  . $1
+
+@export
+A/do as py
+B/do as r
+C/do as sh
+
+@lang
+do :: sh
+A/null :: py
+B/null :: R
+C/null :: sh
+tostderr:r :: R
+tostderr:sh :: sh
+tostderr:py :: py
+
+@source R
+tostderr <- function(x){
+    cat(sprintf("R : %s\n", x), file=stderr())
+}
+
+@source py
+def tostderr(x):
+    print("py : %s" % x, file=sys.stderr)
+
+@source sh
+tostderr (){
+    echo "sh : $1" > /dev/stderr
+}

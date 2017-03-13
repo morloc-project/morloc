@@ -4,9 +4,6 @@ gentab :: void -> [[Int]]
 @path py
 gentab
 
-@include
-core/type
-
 @source py
 
 def gentab():

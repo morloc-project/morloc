@@ -1,15 +1,5 @@
-@include
-core/type
-
 @source R
-
 say <- function(x){ x }
 
-@export
-say
-
-@path
+@path R
 say . "''hi'"
-
-@lang
-* :: R

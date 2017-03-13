@@ -6,7 +6,6 @@ R>  sqrt(max(seq(1,9)))
 
 @include
 core/datcache
-core/type
 
 @type
 seq :: Int -> Int -> [Int]

@@ -1,12 +1,12 @@
-@include
-core/type
-
 @type
 fourple :: (Int,Bool,String,Num) -> (Int,Bool,String,Num)
 tuplify :: ? -> *
 
 @path
-fourple:py . fourple:sh . fourple:R . fourple:py .
+fourple:py .
+# fourple:sh .
+fourple:R  .
+fourple:py .
     tuplify . 42 TRUE "give me back my hat" 2.8
 
 @lang
@@ -14,7 +14,7 @@ tuplify :: py
 
 fourple:py :: py
 fourple:R :: R
-fourple:sh :: sh
+# fourple:sh :: sh
 
 @source py
 def tuplify(*args):
@@ -28,7 +28,7 @@ fourple <- function(x){
     x
 }
 
-@source sh
-fourple (){
-    cat "$1"
-}
+# @source sh
+# fourple (){
+#     cat "$1"
+# }

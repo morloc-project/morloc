@@ -1,10 +1,7 @@
 @include
-"core/sh/control.loc"
-"core/sh/atomic.loc"
-"core/sh/datcache.loc"
-
-@export
-null as main
+core/control
+core/atomic
+core/datcache
 
 @path
 null . map . & ( xmlstarlet:sel . xmlstarlet:fo . $1 ) ls . `*.xml`

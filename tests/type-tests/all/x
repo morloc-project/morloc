@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 cat <<EOF > z
-this is an example text
-that covers
- several
-   lines
+["this is an example text", "that covers", "several", "lines"]
 42
 0.42
-fourty-two
-1
+"fourty-two"
+true
 EOF
 stat=0
 loc -kx locout x.loc || stat=1

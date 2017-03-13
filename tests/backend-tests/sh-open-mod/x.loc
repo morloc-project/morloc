@@ -2,7 +2,6 @@
 core/control
 core/atomic
 core/datcache
-core/type
 
 @path
 

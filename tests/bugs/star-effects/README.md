@@ -10,7 +10,7 @@ foo
 * :: hahaha
 ```
 
-The hook `hahaha` calls the hook `hahaha`, forwever
+The hook `hahaha` calls the hook `hahaha`, forever
 
 Possible solutions:
  1. only apply the rhs to manifolds in @path section.

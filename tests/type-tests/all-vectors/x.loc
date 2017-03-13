@@ -1,5 +1,4 @@
 @include
-core/type
 core/atomic
 
 @type
@@ -17,7 +16,7 @@ btov :: Bool -> [Bool]
 IntTest    :: iid:py . iid:sh . iid:R . iid:py . itov . 42
 NumTest    :: nid:py . nid:sh . nid:R . nid:py . ntov . 0.42
 StringTest :: sid:py . sid:sh . sid:R . sid:py . stov . "fourty-two"
-BoolTest   :: bid:py . bid:sh . bid:R . bid:py . btov . 1
+BoolTest   :: bid:py . bid:sh . bid:R . bid:py . btov . TRUE
 
 @export
 IntTest/iid:py    as Int
@@ -32,6 +31,7 @@ itov ,
 ntov ,
 stov ,
 btov :: sh
+itov :: sh
 
 iid:R  :: R
 iid:sh :: sh

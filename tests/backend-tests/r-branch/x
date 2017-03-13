@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 loc -x zzz x.loc
 
-diff <(./manifold-nexus.py main) <(echo \
-"Sepal.Length
-Sepal.Width
-Petal.Width
-Species") &> /dev/null
+diff <(./manifold-nexus.py main) \
+     <(echo '["Sepal.Length","Sepal.Width","Petal.Width","Species"]') \
+     &> /dev/null
 stat=$?
 
 rm -rf zzz manifold-nexus.py

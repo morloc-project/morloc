@@ -12,6 +12,8 @@ class ShGrammar(Grammar):
         self.manifolds = manifolds
         self.outdir    = outdir
         self.home      = home
+        self.TRUE      = "true"
+        self.FALSE     = "false"
         self.lang      = "sh"
         self.INDENT = 4
         self.SEP    = ' '
@@ -27,46 +29,31 @@ outdir={outdir}
 
 {source}
 
-to_stderr () {{
-    $@ 1>&2
-}}
-
 {manifolds}
+
+{nat2uni}
+
+{uni2nat}
 
 manifold_exists() {{
     type $1 | grep -q function
 }}
 if manifold_exists $1
 then
-    if [[ -f "$outdir/$1_tmp" ]]
-    then
-        cat "$outdir/$1_tmp"
-    else
-        vtype=${{typemap[$1]}}
-        if [[ $vtype == "Int"    ||
-              $vtype == "String" ||
-              $vtype == "Num"    ||
-              $vtype == "Bool"   ||
-              $vtype == "File" ]]
-        then
-            d=$( native_to_universal "$( $@ )" "$vtype" "$outdir" )
-        else
-            d=$( native_to_universal <( $@ ) "$vtype" "$outdir" )
-        fi
-        echo $d
-    fi
+    fun=show_$1
+    shift
+    $fun $@
 else
-    exit 1 
+    exit 1
 fi'''
-        self.TYPE_MAP         = '''\
-declare -A typemap
-{pairs}
-'''
+        self.TYPE_MAP = '''# typemap no longer needed'''
+        self.TYPE_MAP_PAIR    = "    [{key}]='{type}'"
         self.TYPE_ACCESS      = '${{typemap[{mid}]}}'
-        self.CAST_NAT2UNI     = 'natural_to_universal {key} {type}'
-        self.CAST_UNI2NAT     = 'universal_to_natural {key} {type}'
+        self.CAST_NAT2UNI     = 'show_{key} {key}'
+        self.CAST_UNI2NAT     = 'read_{key} {key}'
         self.NATIVE_MANIFOLD = '''\
 {mid} () {{
+# {comment}
 {blk}
 }}
 '''
@@ -77,11 +64,12 @@ declare -A typemap
 '''
         self.SIMPLE_MANIFOLD = '''
 {mid} () {{
+# {comment}
 {blk}
 }}
 '''
         self.SIMPLE_MANIFOLD_BLK = '''\
-{function} {arguments} {wrapper}\
+{function} {arguments}\
 '''
         self.UID_WRAPPER  = '''\
 {mid}_uid=0
@@ -98,12 +86,13 @@ wrap_{mid} () {{
         self.WRAPPER_NAME = 'wrap_{mid}'
         self.FOREIGN_MANIFOLD = '''\
 {mid} () {{
+# {comment}
 {blk}
 }}
 '''
         self.FOREIGN_MANIFOLD_BLK = '''\
-u=$($outdir/call.{foreign_lang} {mid}{arg_rep})
-universal_to_native "$u" ${{typemap[{mid}]}}\
+{comment}\
+read_{mid} <($outdir/call.{foreign_lang} {mid}{arg_rep})\
 '''
         self.CACHE = '''\
 if {cache}_chk {mid}{uid}
@@ -135,13 +124,13 @@ fi
 '''
         self.RUN_BLK = '''\
 {hook4}
-{function} {arguments}{wrapper} > "$outdir/{mid}_tmp"
+{function} {arguments} > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
 '''
         self.RUN_BLK_VOID = '''\
 {hook4}
-{function} {arguments}{wrapper} > /dev/null
+{function} {arguments} > /dev/null
 > "$outdir/{mid}_tmp"
 {cache_put}
 {hook5}\
@@ -172,20 +161,16 @@ fi
         self.MARG          = '${i}'
         self.ARGUMENTS     = '{fargs} {inputs}'
         self.MANIFOLD_CALL = '{operator}({hmid} {marg_uid})'
-        self.CHECK_CALL    = '$({hmid} {marg_uid}) -eq 1'
-        self.HOOK          = 'to_stderr {hmid} {marg_uid}'
-
-        self.BOOL_WRAPPER = '&> /dev/null && echo 1 || echo 0'
+        self.CHECK_CALL    = '$({hmid} {marg_uid}) == "true"'
+        self.HOOK          = '''\
+# {comment}
+{hmid} {marg_uid} 1>&2\
+'''
 
     def make_simple_manifold_blk(self, m):
-        if m.type == "Bool":
-            wrapper = self.BOOL_WRAPPER
-        else:
-            wrapper = ""
         return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,
-            arguments = self.make_arguments(m),
-            wrapper   = wrapper
+            arguments = self.make_arguments(m)
         )
 
     def make_input_manifold(self, m, pos, val, typ):
@@ -205,40 +190,33 @@ fi
         else:
             template = self.RUN_BLK
 
-        if m.type == "Bool":
-            wrapper = self.BOOL_WRAPPER
-        else:
-            wrapper = ""
         return template.format(
             mid       = m.mid,
             hook4     = self.make_hook(m, 4),
             hook5     = self.make_hook(m, 5),
             function  = m.func,
-            wrapper   = wrapper,
             arguments = self.make_arguments(m),
             cache_put = self.make_cache_put(m)
         )
 
     def make_foreign_manifold_blk(self, m):
         arg_rep = ""
+        comment = []
         for i in range(int(m.narg)):
+            comment.append('# $%s : arg' % str(i+1)) 
             i_str = str(i+1)
-            arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
+            arg_rep += ' "$%s"' % i_str
         if m.narg:
-            arg_rep += '\\\n    "$%s_uid"' % m.mid
+            i = str(int(m.narg)+1)
+            comment.append('# $%s : uid' % i) 
+            arg_rep += ' $%s' % i
+        comment = '\n'.join(comment)
+        if comment:
+            comment += '\n'
 
-        s = self.FOREIGN_MANIFOLD_BLK.format(
+        return self.FOREIGN_MANIFOLD_BLK.format(
+            comment=comment,
             foreign_lang=m.lang,
             mid=m.mid,
             arg_rep=arg_rep
         )
-        return s
-
-    def make_type_map(self):
-        types = []
-        for k,v in self.manifolds.items():
-            types.append("typemap[%s]='%s'" % (k, v.type))
-            for k,n,m,t in v.input:
-                if k == "a":
-                    types.append("typemap[x%s]=%s" % (m, t))
-        return self.TYPE_MAP.format(pairs='\n'.join(types))

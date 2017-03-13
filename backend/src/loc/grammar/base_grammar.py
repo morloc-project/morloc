@@ -1,4 +1,5 @@
 from util import err,indent,clean
+import sys
 
 class Grammar:
     def __init__(
@@ -54,7 +55,7 @@ class Grammar:
         self.WRAPPER_NAME         = ""
 
 
-    def make(self):
+    def make(self, uni2nat, nat2uni):
 
         p = self.make_pool()
 
@@ -82,10 +83,12 @@ class Grammar:
             mtext.append(s)
 
         p = p.format(
-            source=self.source,
-            type_map=self.make_type_map(),
-            outdir=self.outdir,
-            manifolds='\n\n'.join(mtext)
+            source    = self.source,
+            type_map  = self.make_type_map(),
+            outdir    = self.outdir,
+            manifolds = '\n\n'.join(mtext),
+            uni2nat   = uni2nat,
+            nat2uni   = nat2uni,
         )
 
         return p
@@ -94,31 +97,63 @@ class Grammar:
         return self.POOL
 
     def make_type_map(self):
-        NotImplemented
+        types = []
+        for k,v in self.manifolds.items():
+            pair = self.TYPE_MAP_PAIR.format(key=k, type=v.type)
+            types.append(pair)
+            for k,n,m,t in v.input:
+                if k == "a":
+                    pair = self.TYPE_MAP_PAIR.format(key=("x" + m), type=t)
+                    types.append(pair)
+        sep = self.SEP + "\n"
+        return self.TYPE_MAP.format(pairs=sep.join(types))
 
     def make_foreign_manifold(self, m):
         s = self.FOREIGN_MANIFOLD.format(
             mid      = m.mid,
+            comment  = self.make_foreign_manifold_comment(m),
             marg_uid = self.make_marg_uid(m),
             blk      = indent(self.make_foreign_manifold_blk(m), n=self.INDENT)
         )
         return s
 
+    def make_foreign_manifold_comment(self, m):
+        return "foreign manifold - type=%s" % m.type
+
+
     def make_foreign_manifold_blk(self, m):
+        arg_rep = ["'%s'" % m.mid]
+        for i in range(int(m.narg)):
+            a = self.MARG.format(i=str(i+1))
+            #  s = 'native_to_universal({mid}, {temp}, outdir)'
+            #  s = s.format(mid=a, temp=self.TYPE_ACCESS)
+            #  s = s.format(key=a)
+            # # TODO: can I do this?
+            s = a
+            arg_rep.append(s)
+        if m.narg:
+            arg_rep.append("uid")
+        arg_rep = self.SEP.join(arg_rep)
         s = self.FOREIGN_MANIFOLD_BLK.format(
             mid          = m.mid,
-            foreign_lang = m.lang,
+            args         = arg_rep,
+            marg_uid     = self.make_marg_uid(m),
             outdir       = self.outdir,
-            uni_marg_uid = self.make_marg_uid(m, universal=True)
+            foreign_lang = m.lang,
         )
         return s
 
     def make_simple_manifold(self, m):
         return self.SIMPLE_MANIFOLD.format(
             mid       = m.mid,
+            comment   = self.make_simple_manifold_comment(m),
             marg_uid  = self.make_marg_uid(m),
             blk       = indent(self.make_simple_manifold_blk(m), n=self.INDENT)
         )
+
+    def make_simple_manifold_comment(self, m):
+        return "simple manifold - type=%s" % m.type
+
     def make_simple_manifold_blk(self, m):
         return self.SIMPLE_MANIFOLD_BLK.format(
             function  = m.func,
@@ -127,10 +162,14 @@ class Grammar:
 
     def make_native_manifold(self, m):
         return self.NATIVE_MANIFOLD.format(
+            comment  = self.make_native_manifold_comment(m),
             mid      = m.mid,
             marg_uid = self.make_marg_uid(m),
             blk      = indent(self.make_native_manifold_blk(m), n=self.INDENT)
         )
+
+    def make_native_manifold_comment(self, m):
+        return "native manifold - type=%s" % m.type
 
     def make_native_manifold_blk(self, m):
         return self.NATIVE_MANIFOLD_BLK.format(
@@ -311,6 +350,15 @@ class Grammar:
         return self.MARG.format(i=val)
 
     def make_input_positional(self, m, pos, val, typ):
+        if typ == "Bool":
+            if val == "true":
+                val = self.TRUE
+            elif val == "false":
+                val = self.FALSE
+            else:
+                msg = "Error: Expected Bool to be either 'true' or 'false' (found '%s')" 
+                err(msg % val)
+                val = None
         return val
 
     def make_function_arguments(self, m):
@@ -334,10 +382,14 @@ class Grammar:
         ss = []
         for h in hooks:
             ss.append( self.HOOK.format(
+                comment=self.make_hook_comment(h),
                 hmid=h.mid,
                 marg_uid=self.make_marg_uid(m)
             ) )
         return '\n'.join(ss)
+
+    def make_hook_comment(self, h):
+        return "hook, position %s" % str(h.kind)
 
     def make_marg(self, m, universal=False):
         ss = []

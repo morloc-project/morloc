@@ -1,6 +1,3 @@
-@include
-core/type
-
 @source sh
 
 map () {
@@ -9,9 +6,6 @@ map () {
         $1 "$arg"
     done < "$2"
 }
-
-@export
-map
 
 @path
 map . &(cat . cut . wc . grep . $1 ) ls . `*.sh`
