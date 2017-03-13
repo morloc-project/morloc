@@ -65,16 +65,16 @@ class PyMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return 'return json.loads(x)'
+        return 'return json.loads(x) if x else "null"'
 
     def _universal_to_tuple(self, typ):
-        return 'return json.loads(x)'
+        return 'return json.loads(x) if x else "null"'
 
     def _universal_to_array(self, typ):
-        return 'return json.loads(x)'
+        return 'return json.loads(x) if x else "null"'
 
     def _universal_to_wtf(self, typ):
-        return 'return json.loads(x)'
+        return 'return json.loads(x) if x else "null"'
 
     def _wtf_to_universal(self, typ):
         return 'return json.dumps({mid}(*args))'
