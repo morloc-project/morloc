@@ -200,7 +200,8 @@ fi
         for i in range(int(m.narg)):
             i_str = str(i+1)
             # TODO
-            arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
+            #  arg_rep += '\\\n    $(native_to_universal "$%s" "${typemap[x%s]}" "$outdir")' % (i_str,i_str)
+            arg_rep += '\\\n    "$%s"' % i_str
         if m.narg:
             arg_rep += '\\\n    "$%s_uid"' % m.mid
 
