@@ -7,7 +7,7 @@
     void yyerror(const char *);
     void w_make_couplet(W* w, W* lhs, W*   op, W* rhs, Class cls);
     void c_make_couplet(W* w, W* lhs, char op, W* rhs, Class cls);
-    Class hook_type(char);
+    Class hook_type(char*);
 %}
 
 %code requires{
@@ -113,7 +113,7 @@ s_path
 s_hook
     : SECTION_HOOK { $$ = $1; }
     | s_hook SELECTION COUPLE maybe_composition {
-        Class c = hook_type(g_section(g_lhs($1))->name[0]);
+        Class c = hook_type(g_section(g_lhs($1))->name);
         w_make_couplet($1, $2, $3, w_new(P_WS, $4), c);
     }
 
@@ -320,7 +320,18 @@ void c_make_couplet(W* w, W* lhs, char op, W* rhs, Class cls){
     s_rhs(w, wws_add(g_rhs(w), cw));
 }
 
-Class hook_type(char c){
+Class hook_type(char* name){
+    char c;
+    if(strcmp(name, "before") == 0){
+        c = '4';
+    }
+    else if(strcmp(name, "after") == 0){
+        c = '5';
+    }
+    else {
+        c = name[0];
+    }
+
     switch(c){
         case '0': return T_H0;
         case '1': return T_H1;
