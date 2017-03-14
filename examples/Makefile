@@ -22,6 +22,10 @@
 6:
 	loc -kt -o filesize -x pools 6_filesize.loc
 
+.PHONY: 7
+7:
+	loc -kt -o times -x pools 7_times.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
