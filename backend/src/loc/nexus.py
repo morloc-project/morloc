@@ -31,6 +31,12 @@ def parser():
         action='store_true',
         default=False
     )
+    parser.add_argument(
+        '-s', '--silent',
+        help="Do not print the output of the final manifold",
+        action='store_true',
+        default=False
+    )
     sub = parser.add_subparsers(
         help='.',
         metavar='[ for more help: manifold-nexus <subcommand> -h ]',
@@ -56,7 +62,8 @@ if __name__ == '__main__':
             returncode = 1 
         else:
             returncode = result.returncode
-            print(result.stdout, end="")
+            if not args.silent:
+                print(result.stdout, end="")
             print(result.stderr, file=sys.stderr, end="")
         sys.exit(returncode)
 '''

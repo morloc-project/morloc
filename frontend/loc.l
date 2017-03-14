@@ -116,7 +116,11 @@ lang ([ ]+[^ \t\n\r]+)?
 @path{lang}     { BEGIN(S_PATH)     ; RETURN_SECTION ( SECTION_PATH     ) ; }
 @check{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_CHECK    ) ; }
 @fail{lang}     { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_FAIL     ) ; }
+
 @[0-9]{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_HOOK     ) ; } 
+@before{lang}   { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_HOOK     ) ; }
+@after{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_HOOK     ) ; }
+
 @source{lang}   { BEGIN(X_SOURCE)   ; RETURN_SECTION ( SECTION_SOURCE   ) ; }
 @type{lang}     { BEGIN(S_TYPE)     ; RETURN_SECTION ( SECTION_TYPE     ) ; }
 @ontology{lang} { BEGIN(S_ONTOLOGY) ; RETURN_SECTION ( SECTION_ONTOLOGY ) ; }

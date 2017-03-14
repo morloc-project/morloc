@@ -68,6 +68,8 @@ syn match s_section '@check'    contained
 syn match s_section '@comment'  contained
 syn match s_section '@doc'      contained
 syn match s_section '@[0-9]'    contained
+syn match s_section '@before'   contained
+syn match s_section '@after'    contained
 syn match s_section '@export'   contained
 syn match s_section '@fail'     contained
 syn match s_section '@lang'     contained
@@ -84,6 +86,7 @@ syn match s_section '@source'   contained
 
 " general default functions
 syn keyword s_simple_function id null map true false contained
+syn keyword s_simple_function nothing do             contained
 syn keyword s_logical_op and or not any all          contained
 
 syn match s_var  /\h[\w.0-9-]*/                      contained
@@ -167,6 +170,8 @@ syn region r_alias    start=/@alias/      end=/@\@=/ contains=@c_global,c_equal,
 syn region r_path     start=/@path/       end=/@\@=/ contains=@c_global,@c_couple,@c_hasarg,@c_path
 syn region r_check    start=/@check/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
 syn region r_effect   start=/@[0-9]/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
+syn region r_effect   start=/@before/     end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
+syn region r_effect   start=/@after/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
 syn region r_fail     start=/@fail/       end=/@\@=/ contains=@c_global,@c_hasarg,@c_couple,@c_path
                                           
 syn region r_arg      start=/@arg/        end=/@\@=/ contains=@c_global,@c_hasarg,s_positional,s_angel,@c_modify,s_arg

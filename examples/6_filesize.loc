@@ -1,0 +1,31 @@
+@comment
+
+Here is an alternative script written in Shell and R
+
+====  p l o t . R  ====
+#!/usr/bin/Rscript --vanilla
+f <- commandArgs(trailingOnly=TRUE)[1]
+x <- read.table(f)$V1
+hist(log2(x))
+
+====  m a i n . s h  ====
+#!/usr/bin/env bash
+filesizes (){
+    ls -s $1 | awk 'NR > 2 && $1 > 0 { print $1 }'
+}
+./plot.R <(filesizes /usr/bin)
+
+@type
+log2 :: [Int] -> [Num]
+
+@path
+hist . log2 . filesizes . '/usr/bin'
+
+@lang
+log2,hist :: R
+filesizes :: sh
+
+@source sh
+filesizes (){
+    ls -s $1 | awk 'NR > 1 && $1 > 0 { print $1 }'
+}
