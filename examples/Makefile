@@ -26,8 +26,13 @@
 7:
 	loc -kt -o times -x pools 7_times.loc
 
+.PHONY: 8
+8:
+	loc -kt -o glue -x pools 8_glue.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
 		hooks *pdf manifold-nexus.py \
-		sample* results types filesize times
+		sample* results types filesize times \
+		glue *gff3 result.txt
