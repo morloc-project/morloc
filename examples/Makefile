@@ -30,9 +30,14 @@
 8:
 	loc -kt -o glue -x pools 8_glue.loc
 
+.PHONY: 9
+9:
+	loc -kt -o better_r -x pools 9_better_r.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
 		hooks *pdf manifold-nexus.py \
 		sample* results types filesize times \
-		glue *gff3 result.txt
+		glue *gff3 result.txt \
+		better_r

@@ -1,0 +1,5 @@
+@path R
+print . summary . `iris`
+
+@source R
+sink('/dev/stderr')
