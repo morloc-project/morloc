@@ -34,10 +34,14 @@
 9:
 	loc -kt -o better_r -x pools 9_better_r.loc
 
+.PHONY: 10
+10:
+	loc -kt -o wc -x pools 10_wc.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
 		hooks *pdf manifold-nexus.py \
 		sample* results types filesize times \
 		glue *gff3 result.txt \
-		better_r
+		better_r wc [abc].txt

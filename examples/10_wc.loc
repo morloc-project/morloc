@@ -1,0 +1,70 @@
+@comment
+
+This is an implementation of the cannonical wc problem.
+
+I am adapting the R code from the Cuniform paper (Brandt 2013) for a clean
+side-by-side comparison.
+
+```
+deftask wc( csv( File ) : txt( File ) )in r *{
+    dtm <- table( scan( txt, what='character' ) )
+    df <- as.data.frame( dtm )
+    write.table( df, csv, col.names=FALSE,row.names=FALSE )
+}*
+
+deftask groupby
+    ( result( File ) : <csv( File )> )in r *{
+    library( plyr )
+    all <- NULL
+    for( i in csv )
+    all <- rbind( all,
+    read.table( i, header=FALSE ) )
+    x <- ddply( all, .( V1 ), summarize,
+    count=sum( V2 ) )
+    write.table( x, result, col.names=FALSE,
+    row.names=FALSE )
+}*
+
+deftask untar
+ ( <list( File )> : tar( File ) )in bash *{
+ tar xf $tar
+ list=`tar tf $tar`
+}*
+
+txt = untar( tar: 'corpus.tar' );
+csv = wc( txt: txt );
+result = groupby( csv: csv );
+result;
+```
+
+@path
+groupby . map . &(wc . $1) (untar . '10_data.tar')
+
+@source R
+library(plyr)
+
+wc <- function(txt){
+    dtm <- table(scan(txt, what='character'))
+    as.data.frame(dtm)
+}
+
+groupby <- function(csvs){
+    all <- do.call(rbind, csvs)
+    ddply(all, .( Var1 ), summarize, count=sum( Freq ))
+}
+
+@source sh
+untar (){
+    tar xf $1
+    tar tf $1
+}
+
+@lang
+* :: R
+untar :: sh
+
+@include
+core/control
+
+@type
+untar :: String -> [String]
