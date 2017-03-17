@@ -1,0 +1,64 @@
+@type
+load_data       :: void  -> Table
+select_features :: Table -> Table
+normalize       :: Table -> Table
+dist            :: Table -> Table
+kmeans          :: Table -> *
+get_labels      :: Table -> [String]
+
+@path R
+null .
+  (cluster:kmeans . <dist>)
+  # (cluster:svm . <dist> <labels>)
+
+_ :: dist . normalize . select_features . <load_data>
+_ :: get_labels . <load_data>
+_ :: load_data
+
+@arg
+cluster:kmeans :: centers=3
+select_features :: cols=['Sepal.Width','Sepal.Length'] # or: cols=[3,4]
+
+
+@alias
+cluster:kmeans :: kmeans
+
+@check R
+normalize :: columns_are_numeric . <load_data>
+
+@fail R
+normalize :: warning . "Invalid input to _normalize_"
+
+@after R
+null :: plot_pdf . <load_data> <cluster:kmeans> "z.pdf"
+
+@include
+core/atomic
+
+@source R
+
+# Load a builtin R dataset and return
+load_data <- function() {
+  data(iris, envir=environment())
+  iris
+}
+
+select_features <- function(x, cols=1:4) {
+  x[, unlist(cols)]
+}
+
+# Normalize numeric columns
+normalize <- function(x) {
+  as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
+}
+
+columns_are_numeric <- function(x) {
+    TRUE
+  # all(sapply(x, is.numeric))
+}
+
+plot_pdf <- function(x, cl, path){
+    pdf(path)
+    plot(x, col=cl$cluster)
+    dev.off()
+}

@@ -42,10 +42,14 @@
 11:
 	loc -kt -o filter -x pools 11_filter.loc
 
+.PHONY: 12
+12:
+	loc -kt -o cluster -x pools 12_cluster.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
 		hooks *pdf manifold-nexus.py \
 		sample* results types filesize times \
 		glue *gff3 result.txt \
-		better_r wc [abc].txt filter
+		better_r wc [abc].txt filter cluster
