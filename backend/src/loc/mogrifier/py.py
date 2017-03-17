@@ -9,6 +9,7 @@ universal_to_atom = {
     "Bool"   : "True if x == 'true' else False",
     "*"      : "str({x})",
     "Text"   : "read_text({x})",
+    "Table"  : "read_table({x})",
     "void"   : "None"
 }
 
@@ -20,10 +21,20 @@ atom_to_universal = {
     "Bool"   : "('true' if {x} else 'false')",
     "*"      : "str({x})",
     "Text"   : "write_text({x})",
+    "Table"  : "write_table({x})",
     "void"   : "None"
 }
 
-uni2nat_top = 'import json'
+uni2nat_top = '''
+import json
+
+def read_table(x):
+    with open(x, 'r') as f:
+        return (s.split("\\t") for s in f)
+
+def write_table(x):
+    return '\\n'.join(['\\t'.join([str(s) for s in line]) for line in x])
+'''
 
 nat2uni_top = ''
 
@@ -43,7 +54,6 @@ def show_{{mid}}(*args):
         print("   %s" % e, file=sys.stderr)
         return None
 '''
-
 
 class PyMogrifier(Mogrifier):
     def __init__(self, manifolds):
@@ -65,7 +75,11 @@ class PyMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        return 'return json.loads(x) if x else "null"'
+        if typ == 'Table':
+            s = 'return read_table(x)'
+        else:
+            s = 'return json.loads(x) if x else "null"'
+        return s
 
     def _universal_to_tuple(self, typ):
         return 'return json.loads(x) if x else "null"'
@@ -80,7 +94,11 @@ class PyMogrifier(Mogrifier):
         return 'return json.dumps({mid}(*args))'
 
     def _primitive_to_universal(self, typ):
-        return 'return json.dumps({mid}(*args))'
+        if typ == 'Table':
+            s = 'return write_table({mid}(*args))'
+        else:
+            s = 'return json.dumps({mid}(*args))'
+        return s
 
     def _tuple_to_universal(self, typ):
         return 'return json.dumps({mid}(*args))'

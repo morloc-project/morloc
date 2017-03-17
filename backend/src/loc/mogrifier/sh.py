@@ -8,6 +8,7 @@ universal_to_atom = {
     "File"   : """{x} | sed 's/^"\|"$//g'""",
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
+    "Table"  : 'cat <({x})',
     "void"   : 'cat <({x}) || echo "$({x})"',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
@@ -19,6 +20,7 @@ atom_to_universal = {
     "File"   : '''printf '"%s"' "$({x})"''',
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
+    "Table"  : 'cat <({x})',
     "void"   : 'cat <({x}) || echo "$({x})" > /dev/null',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
