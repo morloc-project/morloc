@@ -42,7 +42,7 @@ syn keyword DEFAULT_ERROR id null map true false nothing contained
 syn keyword DEFAULT_ERROR and or not any all             contained
 syn keyword DEFAULT_ERROR memcache datcache nocache      contained
 syn keyword DEFAULT_ERROR TRUE NULL RESET FALSE ?        contained
-syn keyword DEFAULT_ERROR as                             contained
+" syn keyword DEFAULT_ERROR as                             contained
 
 " define todo highlighting
 syn keyword s_todo TODO NOTE FIXME XXX contained 
