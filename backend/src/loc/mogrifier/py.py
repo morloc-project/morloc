@@ -29,8 +29,10 @@ uni2nat_top = '''
 import json
 
 def read_table(x):
-    with open(x, 'r') as f:
-        return (s.split("\\t") for s in f)
+    table = []
+    for row in x.rstrip().split("\\n"):
+        table.append([float(n) for n in row.split()])
+    return table
 
 def write_table(x):
     return '\\n'.join(['\\t'.join([str(s) for s in line]) for line in x])

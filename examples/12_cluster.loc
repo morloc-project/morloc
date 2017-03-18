@@ -19,7 +19,9 @@ cluster:spectral :: py
 
 @arg
 cluster:kmeans :: centers=3
-select_features :: cols=['Sepal.Width','Sepal.Length'] # or: cols=[3,4]
+cluster:spectral :: n_clusters=3
+# select_features :: cols=['Sepal.Width','Sepal.Length']
+select_features :: cols=[1,2,3,4]
 
 
 @alias
@@ -33,7 +35,8 @@ normalize :: columns_are_numeric . <select_features>
 normalize :: warning . "Invalid input to _normalize_"
 
 @after R
-null :: plot_pdf . <load_data> <cluster:kmeans> "z.pdf"
+null :+ plot_pdf . <load_data> <cluster:kmeans> "kmeans.pdf"
+null :+ plot_pdf . <load_data> <cluster:spectral> "spectral.pdf"
 
 @include
 core/atomic
@@ -56,7 +59,7 @@ normalize <- function(x) {
 }
 
 distance <- function(x) {
-    as.matrix(dist(x))
+    as.data.frame(as.matrix(dist(x)))
 }
 
 columns_are_numeric <- function(x) {
@@ -81,8 +84,9 @@ def spectral_cluster(X, *args, **kwargs):
     '''
     X - nXm matrix, where n is number of sample, m number of features
     '''
+    X = [[float(j) for j in i] for i in X]
     classifier = cluster.SpectralClustering(*args, **kwargs)
     classifier.fit(X)
-    pred = classifier.predict(X)
+    pred = classifier.fit_predict(X)
+    pred = [int(x) for x in pred]
     return pred
-
