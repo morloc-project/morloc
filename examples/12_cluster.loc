@@ -2,18 +2,20 @@
 load_data       :: void  -> Table
 select_features :: Table -> Table
 normalize       :: Table -> Table
-dist            :: Table -> Table
-kmeans          :: Table -> *
-get_labels      :: Table -> [String]
+distance        :: Table -> Table
+cluster         :: Table -> [String]
 
 @path R
 null .
-  (cluster:kmeans . <dist>)
-  # (cluster:svm . <dist> <labels>)
+  (cluster:kmeans . <distance>)
+  (cluster:spectral . <distance>)
 
-_ :: dist . normalize . select_features . <load_data>
+_ :: distance . normalize . select_features . <load_data>
 _ :: get_labels . <load_data>
 _ :: load_data
+
+@lang
+cluster:spectral :: py
 
 @arg
 cluster:kmeans :: centers=3
@@ -21,7 +23,8 @@ select_features :: cols=['Sepal.Width','Sepal.Length'] # or: cols=[3,4]
 
 
 @alias
-cluster:kmeans :: kmeans
+cluster:kmeans :: kmeans_cluster
+cluster:spectral :: spectral_cluster
 
 @check R
 normalize :: columns_are_numeric . <select_features>
@@ -52,12 +55,34 @@ normalize <- function(x) {
   as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
 }
 
+distance <- function(x) {
+    as.matrix(dist(x))
+}
+
 columns_are_numeric <- function(x) {
   all(sapply(x, is.numeric))
 }
 
+kmeans_cluster <- function(mat, ...) {
+    kmeans(mat, ...)$cluster
+}
+
 plot_pdf <- function(x, cl, path){
     pdf(path)
-    plot(x, col=cl$cluster)
+    plot(x, col=cl)
     dev.off()
 }
+
+@source py
+
+from sklearn import cluster
+
+def spectral_cluster(X, *args, **kwargs):
+    '''
+    X - nXm matrix, where n is number of sample, m number of features
+    '''
+    classifier = cluster.SpectralClustering(*args, **kwargs)
+    classifier.fit(X)
+    pred = classifier.predict(X)
+    return pred
+
