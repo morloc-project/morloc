@@ -282,8 +282,12 @@ class Grammar:
         except AttributeError:
             pass
 
+        msg = "WARNING: Check failed on manifold %s (function '%s' in %s)" \
+            % (m.mid, m.func, m.lang)
+
         return template.format(
             mid       = m.mid,
+            msg       = msg,
             hook6     = self.make_hook(m, 6),
             hook7     = self.make_hook(m, 7),
             fail      = self.make_fail(m),

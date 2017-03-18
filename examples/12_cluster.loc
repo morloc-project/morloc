@@ -1,0 +1,92 @@
+@type
+load_data       :: void  -> Table
+select_features :: Table -> Table
+normalize       :: Table -> Table
+distance        :: Table -> Table
+cluster         :: Table -> [String]
+
+@path R
+null .
+  (cluster:kmeans . <distance>)
+  (cluster:spectral . <distance>)
+
+_ :: distance . normalize . select_features . <load_data>
+_ :: get_labels . <load_data>
+_ :: load_data
+
+@lang
+cluster:spectral :: py
+
+@arg
+cluster:kmeans :: centers=3
+cluster:spectral :: n_clusters=3
+# select_features :: cols=['Sepal.Width','Sepal.Length']
+select_features :: cols=[1,2,3,4]
+
+
+@alias
+cluster:kmeans :: kmeans_cluster
+cluster:spectral :: spectral_cluster
+
+@check R
+normalize :: columns_are_numeric . <select_features>
+
+@fail R
+normalize :: warning . "Invalid input to _normalize_"
+
+@after R
+null :+ plot_pdf . <load_data> <cluster:kmeans> "kmeans.pdf"
+null :+ plot_pdf . <load_data> <cluster:spectral> "spectral.pdf"
+
+@include
+core/atomic
+
+@source R
+
+# Load a builtin R dataset and return
+load_data <- function() {
+  data(iris, envir=environment())
+  iris
+}
+
+select_features <- function(x, cols=1:4) {
+  x[, unlist(cols)]
+}
+
+# Normalize numeric columns
+normalize <- function(x) {
+  as.data.frame(lapply(x, function(x) (x - mean(x)) / sd(x)))
+}
+
+distance <- function(x) {
+    as.data.frame(as.matrix(dist(x)))
+}
+
+columns_are_numeric <- function(x) {
+  all(sapply(x, is.numeric))
+}
+
+kmeans_cluster <- function(mat, ...) {
+    kmeans(mat, ...)$cluster
+}
+
+plot_pdf <- function(x, cl, path){
+    pdf(path)
+    plot(x, col=cl)
+    dev.off()
+}
+
+@source py
+
+from sklearn import cluster
+
+def spectral_cluster(X, *args, **kwargs):
+    '''
+    X - nXm matrix, where n is number of sample, m number of features
+    '''
+    X = [[float(j) for j in i] for i in X]
+    classifier = cluster.SpectralClustering(*args, **kwargs)
+    classifier.fit(X)
+    pred = classifier.fit_predict(X)
+    pred = [int(x) for x in pred]
+    return pred

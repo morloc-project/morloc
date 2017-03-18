@@ -42,7 +42,7 @@ syn keyword DEFAULT_ERROR id null map true false nothing contained
 syn keyword DEFAULT_ERROR and or not any all             contained
 syn keyword DEFAULT_ERROR memcache datcache nocache      contained
 syn keyword DEFAULT_ERROR TRUE NULL RESET FALSE ?        contained
-syn keyword DEFAULT_ERROR as                             contained
+" syn keyword DEFAULT_ERROR as                             contained
 
 " define todo highlighting
 syn keyword s_todo TODO NOTE FIXME XXX contained 
@@ -165,7 +165,7 @@ syn region r_source   start=/@source sh$/ end=/@\@=/ skip=/\\@/ contains=s_secti
 
 syn region r_comment  start=/@comment/    end=/@\@=/ skip=/\\@/
                                           
-syn region r_alias    start=/@alias/      end=/@\@=/ contains=@c_global,c_equal,@c_hasarg,@c_modify_nl,s_utility
+syn region r_alias    start=/@alias/      end=/@\@=/ contains=@c_global,c_equal,@c_hasarg,@c_modify,s_utility
                                           
 syn region r_path     start=/@path/       end=/@\@=/ contains=@c_global,@c_couple,@c_hasarg,@c_path
 syn region r_check    start=/@check/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
