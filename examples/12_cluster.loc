@@ -24,7 +24,7 @@ select_features :: cols=['Sepal.Width','Sepal.Length'] # or: cols=[3,4]
 cluster:kmeans :: kmeans
 
 @check R
-normalize :: columns_are_numeric . <load_data>
+normalize :: columns_are_numeric . <select_features>
 
 @fail R
 normalize :: warning . "Invalid input to _normalize_"
@@ -53,8 +53,7 @@ normalize <- function(x) {
 }
 
 columns_are_numeric <- function(x) {
-    TRUE
-  # all(sapply(x, is.numeric))
+  all(sapply(x, is.numeric))
 }
 
 plot_pdf <- function(x, cl, path){

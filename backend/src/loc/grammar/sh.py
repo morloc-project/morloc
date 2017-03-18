@@ -144,6 +144,7 @@ fi
         self.FAIL_BLK_VOID = '''\
 {hook6}
 {fail} > /dev/null
+echo "{msg}" >&2
 > "$outdir/{mid}_tmp"
 {cache_put}
 {hook7}\

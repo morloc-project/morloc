@@ -230,7 +230,7 @@ announce "Backend tests"
 
 if [[ $lang == "all" || $lang == "R" ]] ; then
 backend_test   r-cached        main 'r-cached/          -- sqrt . max . seq ............................... '
-backend_test   r-check         sqrt 'r-check/           -- sqrt . max . seq ............................... '
+backend_x_test r-check              'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-hooks         main 'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-map           main 'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-simple        main 'r-simple/          -- sqrt . max . seq ............................... '

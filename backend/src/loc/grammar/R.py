@@ -169,6 +169,7 @@ b <- NULL
 '''
         self.FAIL_BLK = '''\
 {hook6}
+cat("{msg}\\n", file=stderr())
 b <- {fail}
 {cache_put}
 {hook7}

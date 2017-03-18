@@ -172,6 +172,7 @@ b = {fail}
         self.FAIL_BLK_VOID = '''\
 {hook6}
 {fail}
+print("{msg}", file=sys.stderr, end="")
 b = None
 {cache_put}
 {hook7}\
