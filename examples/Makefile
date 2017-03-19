@@ -52,4 +52,5 @@ clean:
 		hooks *pdf manifold-nexus.py \
 		sample* results types filesize times \
 		glue *gff3 result.txt \
-		better_r wc [abc].txt filter cluster
+		better_r wc [abc].txt filter cluster \
+		__pycache__

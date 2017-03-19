@@ -40,6 +40,10 @@ null :+ plot_pdf . <load_data> <cluster:spectral> "spectral.pdf"
 
 @include
 core/atomic
+core/datcache
+
+@cache
+cluster :: datcache
 
 @source R
 
@@ -88,5 +92,5 @@ def spectral_cluster(X, *args, **kwargs):
     classifier = cluster.SpectralClustering(*args, **kwargs)
     classifier.fit(X)
     pred = classifier.fit_predict(X)
-    pred = [int(x) for x in pred]
+    pred = [int(x)+1 for x in pred]
     return pred
