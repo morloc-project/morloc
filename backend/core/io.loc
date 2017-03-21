@@ -2,11 +2,13 @@
 readable   :: File -> Bool
 writable   :: File -> Bool
 executable :: File -> Bool
+record     :: File -> String -> void
 
 @alias
 readable   :: loc_readable
 writable   :: loc_writable
 executable :: loc_executable
+record     :: loc_record
 
 @source R
 loc_readable <- function(f){
@@ -19,6 +21,10 @@ loc_writable <- function(f){
 
 loc_executable <- function(f){
     file.access(f, mode=1) == 0
+}
+
+loc_record <- function(f, x){
+    cat(sprintf("%s\n", x), file=f, append=TRUE)
 }
 
 @source sh
@@ -34,6 +40,10 @@ loc_executable (){
     [[ -x $1 ]] && echo "true" || echo "false"
 }
 
+loc_record (){
+    echo $2 >> $1
+}
+
 @source py
 import os
 
@@ -45,3 +55,7 @@ def loc_writablefunction(f):
 
 def loc_executable(f):
     os.access(f, mode=1)
+
+def loc_record(f, x):
+    with open(f, 'a') as fh:
+        fh.write("%s\n" % x)

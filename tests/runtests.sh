@@ -228,6 +228,10 @@ if $test_backend
 then
 announce "Backend tests"
 
+if [[ $lang == "all" ]]; then
+backend_x_test record              'record/             -- foo :: record . "z.txt" "this is a message" ... '
+fi
+
 if [[ $lang == "all" || $lang == "R" ]] ; then
 backend_test   r-cached        main 'r-cached/          -- sqrt . max . seq ............................... '
 backend_x_test r-check              'r-check/           -- sqrt . max . seq ............................... '
