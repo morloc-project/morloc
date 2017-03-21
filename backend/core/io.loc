@@ -1,0 +1,61 @@
+@type
+readable   :: File -> Bool
+writable   :: File -> Bool
+executable :: File -> Bool
+record     :: File -> String -> void
+
+@alias
+readable   :: loc_readable
+writable   :: loc_writable
+executable :: loc_executable
+record     :: loc_record
+
+@source R
+loc_readable <- function(f){
+    file.access(f, mode=4) == 0
+}
+
+loc_writable <- function(f){
+    file.access(f, mode=2) == 0
+}
+
+loc_executable <- function(f){
+    file.access(f, mode=1) == 0
+}
+
+loc_record <- function(f, x){
+    cat(sprintf("%s\n", x), file=f, append=TRUE)
+}
+
+@source sh
+loc_readable (){
+    [[ -r $1 ]] && echo "true" || echo "false"
+}
+
+loc_writable (){
+    [[ -w $1 ]] && echo "true" || echo "false"
+}
+
+loc_executable (){
+    [[ -x $1 ]] && echo "true" || echo "false"
+}
+
+loc_record (){
+    echo $2 >> $1
+}
+
+@source py
+import os
+
+def loc_readable(f):
+    os.access(f, mode=4)
+
+def loc_writablefunction(f):
+    os.access(f, mode=2)
+
+def loc_executable(f):
+    os.access(f, mode=1)
+
+def loc_record(f, x):
+    with open(f, 'a') as fh:
+        fh.write("%s\n" % x)

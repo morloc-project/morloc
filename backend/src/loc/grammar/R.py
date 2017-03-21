@@ -43,16 +43,18 @@ if(exists(m)){{
   cmd = paste0("show_", m)
   f <- get(cmd)
   d <- do.call(f, as.list(args[-1]))
-  result <- tryCatch({{
-      write(d, file="")
-    }}, warning = function(w) {{
-      write("null", file="")
-    }}, error = function(e) {{
-      write("null", file="")
-    }}, finally = {{
-    
-    }}
-  )
+  if(!is.null(d)){{
+    result <- tryCatch({{
+        write(d, file="")
+      }}, warning = function(w) {{
+        write("null", file="")
+      }}, error = function(e) {{
+        write("null", file="")
+      }}, finally = {{
+      
+      }}
+    )
+  }}
 }} else {{
   quit(status=1)
 }}'''
@@ -167,6 +169,7 @@ b <- NULL
 '''
         self.FAIL_BLK = '''\
 {hook6}
+cat("{msg}\\n", file=stderr())
 b <- {fail}
 {cache_put}
 {hook7}

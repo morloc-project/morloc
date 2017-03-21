@@ -214,6 +214,7 @@ backend_test multi         main 'multi/             -- types and lists of types 
 backend_x_test all              'all/               -- pass each atomic type through all language ..... '
 backend_x_test all-vectors      'all-vectors/       -- pass each vector type through all language ..... '
 backend_x_test all-tables       'all-tables/        -- pass each table type through all language ...... '
+backend_x_test table-types      'table-types/       -- test coersion of Table type .................... '
 backend_x_test deref            'deref/             -- send data from each language to sh ............. '
 backend_x_test open-hooks       'open-hooks/        -- combinations of open manifolds with hooks ...... '
 backend_test r-positionals main 'r-positionals/     -- replicate . `20` `sample` `letters` ............ '
@@ -227,9 +228,13 @@ if $test_backend
 then
 announce "Backend tests"
 
+if [[ $lang == "all" ]]; then
+backend_x_test record              'record/             -- foo :: record . "z.txt" "this is a message" ... '
+fi
+
 if [[ $lang == "all" || $lang == "R" ]] ; then
 backend_test   r-cached        main 'r-cached/          -- sqrt . max . seq ............................... '
-backend_test   r-check         sqrt 'r-check/           -- sqrt . max . seq ............................... '
+backend_x_test r-check              'r-check/           -- sqrt . max . seq ............................... '
 backend_test   r-hooks         main 'r-hooks/           -- run with all hooks ............................. '
 backend_test   r-map           main 'r-map/             -- simple test of lambda functions and map ........ '
 backend_test   r-simple        main 'r-simple/          -- sqrt . max . seq ............................... '

@@ -72,7 +72,10 @@ class RMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=TRUE) }}'
+        if typ == "Table":
+            s = 'read.delim(x, sep="\\t", stringsAsFactors=FALSE)'
+        else:
+            s = 'if(length(x) == 0){{ "null" }} else {{ fromJSON(x, simplifyVector=TRUE) }}'
         return s
 
     def _universal_to_tuple(self, typ):
@@ -92,7 +95,10 @@ class RMogrifier(Mogrifier):
         return s
 
     def _primitive_to_universal(self, typ):
-        s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
+        if typ == "Table":
+            s = 'write.table({mid}(...), quote=FALSE, sep="\\t", col.names=FALSE, row.names=FALSE); NULL' 
+        else:
+            s = 'toJSON({mid}(...), auto_unbox=TRUE, null="null", na="null")'
         return s
 
     def _tuple_to_universal(self, typ):

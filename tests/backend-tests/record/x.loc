@@ -1,0 +1,16 @@
+@path sh
+null
+
+@after
+null :+ record:R  . 'obs' 'hi from R'
+null :+ record:sh . 'obs' 'hi from sh'
+null :+ record:py . 'obs' 'hi from py'
+
+@lang
+record:R  :: R
+record:sh :: sh
+record:py :: py
+
+@include
+core/io
+core/atomic
