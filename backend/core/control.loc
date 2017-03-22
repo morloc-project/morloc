@@ -6,9 +6,17 @@ map :: * -> * -> *
 do  :: ? -> *  # should be: * -> ? -> *
                # or better: (? -> a) -> ? -> a
 
+# ternary :: Bool -> (a -> b) -> (a -> b) -> a -> b
+ternary :: Bool -> * -> * -> * -> *
+
+# filter :: (a -> Bool) -> [a] -> [a]
+filter :: * -> * -> *
+
 @alias
-map :: loc_map
-do  :: loc_do
+map     :: loc_map
+do      :: loc_do
+ternary :: loc_ternary
+filter  :: loc_filter
 
 
 @source R
@@ -21,6 +29,15 @@ loc_do <- function(FUN, ...){
     FUN(...)
 }
 
+loc_ternary <- function(x, f, g, ...){
+    if(x){
+        f(...)
+    } else {
+        g(...)
+    }
+}
+
+loc_filter <- Filter
 
 @source sh
 
@@ -37,12 +54,40 @@ loc_do() {
     $@
 }
 
+loc_ternary() {
+    condition=$1 ; shift
+    a=$1         ; shift
+    b=$1         ; shift
+    if [[ $condition == "true" ]]
+    then
+        fun=$a
+    else
+        fun=$b
+    fi
+    shift
+    shift
+    shift
+    $fun $@
+}
+
+loc_filter() {
+    # TODO: a line needn't always represent an element in a list
+    while read line
+    do
+       [[ $($1 $line) == 'true' ]] && echo $line 
+    done < $2
+}
 
 @source py
 
-# aliased as map
-def loc_map(f, xs):
-    list( map(f, xs) )
+loc_map = map
 
 def loc_do(FUN, *args):
     return FUN(*args)
+
+def loc_ternary(x, f, g, *args, **kwargs):
+    fun = f if x else g
+    return fun(*args, **kwargs)
+
+def loc_filter(f, xs):
+    return list(filter(f,xs))

@@ -103,7 +103,7 @@ class PyMogrifier(Mogrifier):
         return s
 
     def _tuple_to_universal(self, typ):
-        return 'return json.dumps({mid}(*args))'
+        return 'return json.dumps(tuple({mid}(*args)))'
 
     def _array_to_universal(self, typ):
-        return 'return json.dumps({mid}(*args))'
+        return 'return json.dumps(list({mid}(*args)))'

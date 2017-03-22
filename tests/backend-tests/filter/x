@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+cat <<EOF > z
+[1,3,5]
+[1,3,5]
+[1, 3, 5]
+EOF
+stat=0
+loc -kx locout x.loc || stat=1
+./manifold-nexus.py R   > y
+./manifold-nexus.py sh >> y
+./manifold-nexus.py py >> y
+diff z y &> /dev/null || stat=1
+rm -rf locout z y manifold-nexus.py
+exit $stat

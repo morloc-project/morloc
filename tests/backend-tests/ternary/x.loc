@@ -1,0 +1,6 @@
+@include
+core/control
+core/atomic
+
+@path R
+ternary . true &( sqrt . $1 ) &( id . $1 ) 16
