@@ -93,13 +93,11 @@ class ShMogrifier(Mogrifier):
     def _array_to_universal(self, typ):
         if(typ[0] == "atomic"):
             return '''
-    echo -n '['
     while read line
     do
         %s
         echo -n ','
-    done < <({mid} $@) | sed 's/,$//'
-    echo ']'
+    done < <({mid} $@) | sed 's/,$//; 1s/^/[/; $s/$/]/' | jq -c '.'
 ''' % atom_to_universal[typ[1]].format(x='echo $line')
         elif(typ[0] == "array"):
             cast = ""

@@ -230,6 +230,7 @@ announce "Backend tests"
 
 if [[ $lang == "all" ]]; then
 backend_x_test record              'record/             -- foo :: record . "z.txt" "this is a message" ... '
+backend_x_test filter              'filter/             -- filter for all languages ...................... '
 fi
 
 if [[ $lang == "all" || $lang == "R" ]] ; then
