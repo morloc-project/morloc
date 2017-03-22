@@ -1,7 +1,7 @@
 @type
-divide    :: String -> [(String,String)]
-filter    :: [(String,String)] -> [(String,String)]
-transform :: [(String,String)] -> [a]
+divide    :: File -> Table
+filter    :: Table -> Table
+transform :: Table -> [a]
 join      :: [a] -> b
 format    :: b -> String
 

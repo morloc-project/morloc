@@ -34,7 +34,7 @@ loc_id <- function(x) { x }
 
 loc_true <- function(...) { TRUE }
 
-loc_false <- function(...) { TRUE }
+loc_false <- function(...) { FALSE }
 
 loc_and <- function(a, b) { a && b }
 

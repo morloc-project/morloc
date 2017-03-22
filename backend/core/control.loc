@@ -6,8 +6,8 @@ map :: * -> * -> *
 do  :: ? -> *  # should be: * -> ? -> *
                # or better: (? -> a) -> ? -> a
 
-# ternary :: Bool -> (? -> a) -> (? -> a) -> a
-ternary :: Bool -> * -> * -> *
+# ternary :: Bool -> (a -> b) -> (a -> b) -> a -> b
+ternary :: Bool -> * -> * -> * -> *
 
 # filter :: (a -> Bool) -> [a] -> [a]
 filter :: * -> * -> *
