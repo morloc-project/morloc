@@ -1,0 +1,6 @@
+@include
+core/control
+core/atomic
+
+@path R
+ternary . true &( c . 1 ) &( c . 2 )
