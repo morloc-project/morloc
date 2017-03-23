@@ -231,6 +231,21 @@ Ws* ws_recurse_section(W* w){
     return rs;
 }
 
+Ws* ws_recurse_type(W* w){
+    if(!w) return NULL;
+    Ws* rs = NULL;
+    switch(w->cls){
+        case FT_FUNCTION:
+        case FT_TUPLE:
+        case FT_ARRAY:
+            rs = ws_add_val(rs, P_WS, g_ws(w));
+            break;
+        default:
+            rs = NULL;
+    }
+    return rs;
+}
+
 Ws* ws_recurse_none(W* w){
     return NULL;
 }

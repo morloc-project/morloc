@@ -1,5 +1,5 @@
 @type
-foo :: a -> a
+foo :: a -> (a -> [a])
 bar :: Void -> Int
 
 @path

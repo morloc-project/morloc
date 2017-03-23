@@ -298,9 +298,10 @@ W* _transfer_generic_type(W* tw, W* iw, W* m){
 }
 void _horizontal_generic_propagation(W* t, Ws* types){
 
-    ws_cap(
+    ws_modcrawl(
         types,                 // Ws* ws
         t,                     // W* m <FT_*>
+        ws_recurse_type,       //
         _is_entangled_generic, // bool(*criterion)(W*, W*)
         _resolve_entangled     // void(*mod)(W* w, W* m)
     );
