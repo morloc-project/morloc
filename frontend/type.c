@@ -13,7 +13,11 @@ void _infer_generic_type(W* w);
 void _infer_star_type(W* w);
 
 void _transfer_star_type(W* type, W* input);
+
 W* _transfer_generic_type(W* t, W* i, W* m);
+void _horizontal_generic_propagation(W* t, Ws* types);
+void _resolve_entangled(W* w, W* m);
+bool _is_entangled_generic(W* t, W* g);
 
 // takes in all data
 W* _typecheck_derefs(Ws* ws_top, W* msg);
@@ -258,13 +262,8 @@ void _infer_generic_type(W* w){
     );
 }
 W* _transfer_generic_type(W* tw, W* iw, W* m){
-    //zzz(stderr, " tw:-- %s --\n", w_str(tw));
-    //zzz(stderr, " iw:-- %s --\n", w_str(iw));
     if(tw->cls != FT_GENERIC){
-        //zzz(stderr, " skipping\n");
         return m;
-    } else {
-        //zzz(stderr, " doing it\n");
     }
 
     W* t = g_rhs(tw);
@@ -285,30 +284,68 @@ W* _transfer_generic_type(W* tw, W* iw, W* m){
             man->function, man->uid, man->lang, t_str, i_str);
     }
 
-    //zzz(stderr, " i:-- %s --\n", w_str(i));
-    //zzz(stderr, " t:-- %s --\n", w_str(t));
-
     // transfer type
     t->value = i->value;
     t->cls   = i->cls;
 
-    //zzz(stderr, " z:-- %s --\n", w_str(t));
-    //zzz(stderr, "\n");
-
-    // TODO implement the rest of this
-    
     // 4) for each inferred generic propagate types, die on conflict
+    _horizontal_generic_propagation(tw, man->type);
 
+    free(t_str);
+    free(i_str);
+
+    return m;
+}
+void _horizontal_generic_propagation(W* t, Ws* types){
+
+    ws_cap(
+        types,                 // Ws* ws
+        t,                     // W* m <FT_*>
+        _is_entangled_generic, // bool(*criterion)(W*, W*)
+        _resolve_entangled     // void(*mod)(W* w, W* m)
+    );
     // 5) for each inferred generic 1..(k-1) transfer type to input, if needed
 
     // 6) if k is an inferred generic,
     //    a. transfer it to its outputs
     //    b. if the output is generic, call #2 on it
 
-    free(t_str);
-    free(i_str);
+}
+bool _is_entangled_generic(W* tw, W* gw){
+    // don't transfer if t ...
+    if(
+            // isn't a generic type
+            tw->cls != FT_GENERIC
+            // OR is a different generic type
+            || strcmp(g_string(g_lhs(tw)), g_string(g_lhs(gw))) != 0
+    )
+        return false;
 
-    return m;
+    W* t = g_rhs(tw);
+    W* g = g_rhs(gw);
+
+    char* t_str = type_str(t);
+    char* g_str = type_str(g);
+
+    // don't transfer if they already match (nothing to do)
+    if(strcmp(t_str, g_str) == 0){
+        return false;
+    }
+
+    if(strcmp(t_str, "*") != 0){
+        fprintf(stderr,
+            "TYPE ERROR: during generic propagation, "
+            "expected type '%s', but got '%s'",
+            g_str, t_str);
+        return false;
+    }
+
+    return true;
+}
+void _resolve_entangled(W* t, W* g){
+    // transfer type
+    t->value = g->value;
+    t->cls   = g->cls;
 }
 
 W* _typecheck(W* w, W* msg){
