@@ -1,0 +1,4 @@
+EMIT	m0	*
+FUNC	m0	foo
+TYPE	m0	Int
+INPP	m0	0	7	Int

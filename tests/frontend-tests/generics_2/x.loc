@@ -1,0 +1,6 @@
+@type
+foo :: a -> (a -> [a])
+bar :: void -> Int
+
+@path
+foo . bar

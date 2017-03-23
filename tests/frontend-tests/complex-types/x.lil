@@ -1,8 +1,8 @@
 EMIT	m0	*
 FUNC	m0	map
-TYPE	m0	[b]
-INPF	m0	0	m1	(a->b)
-INPM	m0	1	m2	[a]
+TYPE	m0	[Num]
+INPF	m0	0	m1	(Int->Num)
+INPM	m0	1	m2	[Int]
 EMIT	m1	*
 FUNC	m1	squ
 TYPE	m1	Num

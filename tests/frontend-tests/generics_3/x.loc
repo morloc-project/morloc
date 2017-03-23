@@ -1,0 +1,5 @@
+@type
+foo :: a -> a
+
+@path
+foo . 7

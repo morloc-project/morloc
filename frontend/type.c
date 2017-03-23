@@ -266,33 +266,56 @@ W* _transfer_generic_type(W* tw, W* iw, W* m){
         return m;
     }
 
-    W* t = g_rhs(tw);
-    W* i = ws_last(g_manifold(g_rhs(iw))->type);
+    W* old_type = g_rhs(tw);
+
+    W* new_type = NULL;
+
+    switch(iw->cls){
+        case C_MANIFOLD:
+            new_type = ws_last(g_manifold(g_rhs(iw))->type);
+            break;
+        case C_POSITIONAL:
+            new_type = w_new(FT_ATOMIC, g_string(g_lhs(iw)));
+            break;
+        case C_ARGREF:
+            fprintf(stderr, "ARGREF is not yet handled by %s\n", __func__);
+            break;
+        case C_DEREF:
+        case C_GRPREF:
+        case C_NEST:
+        case C_REFER:
+            fprintf(stderr, "These should have been resolved %s:%d\n",
+                    __func__, __LINE__);
+            break;
+        default:
+            fprintf(stderr, "Weird case at %s:%d\n", __func__, __LINE__);
+            break;
+    } 
+
     Manifold* man = g_manifold(g_rhs(m));
 
     // 3) transfer types from input to type
-    char* t_str = type_str(t);
-    char* i_str = type_str(i);
+    char* old_str = type_str(old_type);
+    char* new_str = type_str(new_type);
 
     if(
-        strcmp(i_str, __WILD__) != 0 &&
-        strcmp(t_str, __WILD__) != 0 &&
-        strcmp(i_str, t_str) != 0
+        strcmp(new_str, __WILD__) != 0 &&
+        strcmp(old_str, __WILD__) != 0 &&
+        strcmp(new_str, old_str) != 0
     ){
         fprintf(stderr,
             "TYPE ERROR: in '%s'(m%d in %s) expected type '%s', but got '%s'",
-            man->function, man->uid, man->lang, t_str, i_str);
+            man->function, man->uid, man->lang, old_str, new_str);
     }
 
     // transfer type
-    t->value = i->value;
-    t->cls   = i->cls;
+    s_rhs(tw, new_type);
 
     // 4) for each inferred generic propagate types, die on conflict
     _horizontal_generic_propagation(tw, man->type);
 
-    free(t_str);
-    free(i_str);
+    free(old_str);
+    free(new_str);
 
     return m;
 }
