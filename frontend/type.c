@@ -1,6 +1,7 @@
 #include "type.h"
 
 #define IS_ATOMIC(t) ((t)->cls == FT_ATOMIC)
+#define IS_GENERIC(t) ((t)->cls == FT_GENERIC)
 #define IS_ARRAY(t) ((t)->cls == FT_ARRAY)
 #define IS_STAR(t) (strcmp(g_string((t)), "*") == 0)
 #define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
@@ -8,8 +9,9 @@
 void _set_default_type(W* w);
 
 void _infer_multi_type(W* w);
-
+void _infer_generic_type(W* w);
 void _infer_star_type(W* w);
+
 void _transfer_star_type(W* type, W* input);
 
 // takes in all data
@@ -79,6 +81,12 @@ if((p + x) >= MAX_TYPE_LENGTH) {                            \
             s[p++] = ']';
         }
             break;
+        case FT_GENERIC:
+            // - The lhs holds the generic label (e.g. 'a')
+            // - The rhs of a generic holds the inferred type it will be of type
+            // FT_*, so can be thrown into the next cycle
+            p = type_str_r(g_rhs(w), s, p);
+            break;
         case FT_ATOMIC:
         {
             char* atom = g_string(w);
@@ -86,8 +94,8 @@ if((p + x) >= MAX_TYPE_LENGTH) {                            \
             CHK(atom_size)
             strcpy(s + p, atom);
             p += atom_size;
-        }
             break;
+        }
         default:
             warn("Unusual error (%s:%d)", __func__, __LINE__); 
             break;
@@ -226,6 +234,22 @@ void _infer_multi_type(W* w){
             }
         }
         wm->type = ws_add(wm->type, output);
+    }
+}
+
+void infer_generic_types(Ws* ws){
+    ws_rcmod(
+        ws,
+        ws_recurse_most,
+        w_is_manifold,
+        _infer_generic_type
+    );
+}
+// TODO This stub function simply reduces generics to star types
+//      I need to implement real handling
+void _infer_generic_type(W* w){
+    if(w->cls == FT_GENERIC){
+        force_set_string(w, FT_ATOMIC, "*");
     }
 }
 

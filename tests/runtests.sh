@@ -178,6 +178,7 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
+frontend_test generics           'generics/          -- resolve generics given typed input ............. '
 frontend_test advice             'advice/            -- equivalence of (@before, @after) to (@4, @5) ... '
 frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '

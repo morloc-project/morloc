@@ -49,6 +49,7 @@ VType get_value_type(Class cls){
         case T_TYPE:
         case T_ONTOLOGY:
         case T_EXPORT:
+        case FT_GENERIC: // Couplet<name:P_STRING,type:FT_*=FT_ATOMIC<'*'>>
             vtype = V_COUPLET;
             break;
         case K_LABEL:
@@ -171,6 +172,7 @@ char* w_class_str(Class cls){
         case FT_TUPLE:     s = strdup("FT_TUPLE")     ; break;
         case FT_ARRAY:     s = strdup("FT_ARRAY")     ; break;
         case FT_ATOMIC:    s = strdup("FT_ATOMIC")    ; break;
+        case FT_GENERIC:   s = strdup("FT_GENERIC")   ; break;
         case P_WS:         s = strdup("P_WS")         ; break;
         case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
         case T_ALIAS:      s = strdup("T_ALIAS")      ; break;

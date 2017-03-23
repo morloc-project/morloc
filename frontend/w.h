@@ -32,6 +32,7 @@ typedef enum {
     P_STRING,     // P for primitive
     FT_FUNCTION,
     FT_ATOMIC,
+    FT_GENERIC,
     FT_ARRAY,
     FT_TUPLE,
     P_WS,

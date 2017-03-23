@@ -63,6 +63,7 @@ bool w_is_ptype ( W* w ){
     switch(w->cls){
         case FT_FUNCTION:
         case FT_ATOMIC:
+        case FT_GENERIC:
         case FT_ARRAY:
         case FT_TUPLE:
             return true;
