@@ -13,6 +13,7 @@ void _infer_generic_type(W* w);
 void _infer_star_type(W* w);
 
 void _transfer_star_type(W* type, W* input);
+W* _transfer_generic_type(W* t, W* i, W* m);
 
 // takes in all data
 W* _typecheck_derefs(Ws* ws_top, W* msg);
@@ -238,6 +239,7 @@ void _infer_multi_type(W* w){
 }
 
 void infer_generic_types(Ws* ws){
+    // 1) find all manifolds and infer their generic types
     ws_rcmod(
         ws,
         ws_recurse_most,
@@ -245,12 +247,68 @@ void infer_generic_types(Ws* ws){
         _infer_generic_type
     );
 }
-// TODO This stub function simply reduces generics to star types
-//      I need to implement real handling
 void _infer_generic_type(W* w){
-    if(w->cls == FT_GENERIC){
-        force_set_string(w, FT_ATOMIC, __WILD__);
+    Manifold* m = g_manifold(g_rhs(w));
+    // 2) iterate through each type/input pair
+    ws_szap(
+        m->type,
+        m->inputs,
+        w, // this handle is needed to propagate types
+        _transfer_generic_type
+    );
+}
+W* _transfer_generic_type(W* tw, W* iw, W* m){
+    //zzz(stderr, " tw:-- %s --\n", w_str(tw));
+    //zzz(stderr, " iw:-- %s --\n", w_str(iw));
+    if(tw->cls != FT_GENERIC){
+        //zzz(stderr, " skipping\n");
+        return m;
+    } else {
+        //zzz(stderr, " doing it\n");
     }
+
+    W* t = g_rhs(tw);
+    W* i = ws_last(g_manifold(g_rhs(iw))->type);
+    Manifold* man = g_manifold(g_rhs(m));
+
+    // 3) transfer types from input to type
+    char* t_str = type_str(t);
+    char* i_str = type_str(i);
+
+    if(
+        strcmp(i_str, __WILD__) != 0 &&
+        strcmp(t_str, __WILD__) != 0 &&
+        strcmp(i_str, t_str) != 0
+    ){
+        fprintf(stderr,
+            "TYPE ERROR: in '%s'(m%d in %s) expected type '%s', but got '%s'",
+            man->function, man->uid, man->lang, t_str, i_str);
+    }
+
+    //zzz(stderr, " i:-- %s --\n", w_str(i));
+    //zzz(stderr, " t:-- %s --\n", w_str(t));
+
+    // transfer type
+    t->value = i->value;
+    t->cls   = i->cls;
+
+    //zzz(stderr, " z:-- %s --\n", w_str(t));
+    //zzz(stderr, "\n");
+
+    // TODO implement the rest of this
+    
+    // 4) for each inferred generic propagate types, die on conflict
+
+    // 5) for each inferred generic 1..(k-1) transfer type to input, if needed
+
+    // 6) if k is an inferred generic,
+    //    a. transfer it to its outputs
+    //    b. if the output is generic, call #2 on it
+
+    free(t_str);
+    free(i_str);
+
+    return m;
 }
 
 W* _typecheck(W* w, W* msg){

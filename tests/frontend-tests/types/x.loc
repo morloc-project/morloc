@@ -1,6 +1,6 @@
 @type
-foo,bar,fifi :: tungsten -> light
-zanzi :: Void -> tungsten
+foo,bar,fifi :: Tungsten -> Light
+zanzi :: Void -> Tungsten
 
 @path
 foo bar fifi . zanzi

@@ -1,6 +1,6 @@
 EMIT	m0	*
 FUNC	m0	g
-TYPE	m0	void
+TYPE	m0	Void
 INPM	m0	0	m1	A
 FARG	m0	0		b
 FARG	m0	1		bar

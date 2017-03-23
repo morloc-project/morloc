@@ -1,3 +1,3 @@
 @type
-g :: A -> void
-f :: void -> A
+g :: A -> Void
+f :: Void -> A

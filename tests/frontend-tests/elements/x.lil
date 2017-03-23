@@ -1,6 +1,6 @@
 EMIT	m0	*
 FUNC	m0	_alias
-TYPE	m0	void
+TYPE	m0	Void
 INPM	m0	0	m1	A
 CHEK	m0	m2
 HOOK	m0	0	m3
