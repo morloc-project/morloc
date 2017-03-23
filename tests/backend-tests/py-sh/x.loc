@@ -1,5 +1,5 @@
 @type
-gentab :: void -> [[Int]]
+gentab :: Void -> [[Int]]
 sort :: [[Int]] -> [[Int]]
 topthree :: [[Int]] -> [[Int]]
 

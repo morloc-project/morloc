@@ -3,7 +3,7 @@
 #define IS_ATOMIC(t) ((t)->cls == FT_ATOMIC)
 #define IS_GENERIC(t) ((t)->cls == FT_GENERIC)
 #define IS_ARRAY(t) ((t)->cls == FT_ARRAY)
-#define IS_STAR(t) (strcmp(g_string((t)), "*") == 0)
+#define IS_STAR(t) (strcmp(g_string((t)), __WILD__) == 0)
 #define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
 
 void _set_default_type(W* w);
@@ -124,8 +124,8 @@ bool _is_io(W* w){
 bool _cmp_type(char* a, char* b){
     return
            ( strcmp(a,  b ) == 0 ) ||
-           ( strcmp(a, "*") == 0 ) ||
-           ( strcmp(b, "*") == 0 );
+           ( strcmp(a, __WILD__) == 0 ) ||
+           ( strcmp(b, __WILD__) == 0 );
 }
 
 void set_default_types(Ws* ws){
@@ -144,9 +144,9 @@ void _set_default_type(W* w){
         for(int i = 0; i < ntypes; i++){
             W* star;
             if(i == 0 && ninputs == 0){
-                star = w_new(FT_ATOMIC, "void");
+                star = w_new(FT_ATOMIC, __IO__);
             } else {
-                star = w_new(FT_ATOMIC, "*");
+                star = w_new(FT_ATOMIC, __WILD__);
             }
             m->type = ws_add(m->type, star);
         } 
@@ -225,7 +225,7 @@ void _infer_multi_type(W* w){
                         if(ws_length(im->type) > 1){
                             wm->type = ws_add(wm->type, w_clone(im->type->last));
                         } else {
-                            wm->type = ws_add(wm->type, w_new(FT_ATOMIC, "*"));
+                            wm->type = ws_add(wm->type, w_new(FT_ATOMIC, __WILD__));
                         }
                     }
                     break;
@@ -249,7 +249,7 @@ void infer_generic_types(Ws* ws){
 //      I need to implement real handling
 void _infer_generic_type(W* w){
     if(w->cls == FT_GENERIC){
-        force_set_string(w, FT_ATOMIC, "*");
+        force_set_string(w, FT_ATOMIC, __WILD__);
     }
 }
 

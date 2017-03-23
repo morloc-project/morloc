@@ -260,7 +260,7 @@ class Grammar:
         )
 
     def make_do_validate_if(self, m):
-        if m.type == "void":
+        if m.type == "Void":
             template = self.RUN_BLK_VOID
         else:
             template = self.RUN_BLK
@@ -277,7 +277,7 @@ class Grammar:
     def make_do_validate_else(self, m):
         template = self.FAIL_BLK
         try:
-            if m.fail.type == "void":
+            if m.fail.type == "Void":
                 template = self.FAIL_BLK_VOID
         except AttributeError:
             pass

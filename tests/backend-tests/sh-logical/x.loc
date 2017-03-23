@@ -2,12 +2,12 @@
 core/atomic
 
 @type
-is_a :: void -> Bool
-is_b :: void -> Bool
-is_c :: void -> Bool
-is_d :: void -> Bool
-say_hi :: void -> String
-say_bi :: void -> String
+is_a :: Void -> Bool
+is_b :: Void -> Bool
+is_c :: Void -> Bool
+is_d :: Void -> Bool
+say_hi :: Void -> String
+say_bi :: Void -> String
 
 @export
 say_hi

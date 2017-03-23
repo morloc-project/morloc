@@ -3,9 +3,9 @@ core/memcache
 core/atomic
 
 @type
-bar :: void -> Int
-foo :: Int -> void
-cat :: String -> void
+bar :: Void -> Int
+foo :: Int -> Void
+cat :: String -> Void
 
 @path
 foo . bar

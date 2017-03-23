@@ -10,7 +10,7 @@ universal_to_atom = {
     "*"      : "str({x})",
     "Text"   : "read_text({x})",
     "Table"  : "read_table({x})",
-    "void"   : "None"
+    "Void"   : "None"
 }
 
 atom_to_universal = {
@@ -22,7 +22,7 @@ atom_to_universal = {
     "*"      : "str({x})",
     "Text"   : "write_text({x})",
     "Table"  : "write_table({x})",
-    "void"   : "None"
+    "Void"   : "None"
 }
 
 uni2nat_top = '''

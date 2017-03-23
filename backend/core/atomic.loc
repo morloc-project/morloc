@@ -1,5 +1,5 @@
 @type
-null    :: ? -> void
+null    :: ? -> Void
 id      :: * -> *
 true    :: ? -> Bool
 false   :: ? -> Bool
@@ -8,7 +8,7 @@ or      :: Bool -> Bool -> Bool
 not     :: Bool -> Bool
 any     :: ? -> Bool
 all     :: ? -> Bool
-nothing :: void -> void
+nothing :: Void -> Void
 
 @alias
 null    :: loc_null

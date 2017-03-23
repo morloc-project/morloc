@@ -9,10 +9,10 @@ say_bi
 is_a ,
 is_b ,
 is_c ,
-is_d :: void -> Bool
+is_d :: Void -> Bool
 
 say_hi ,
-say_bi :: void -> String
+say_bi :: Void -> String
 
 @path
 say_hi say_bi

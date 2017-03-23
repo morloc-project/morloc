@@ -1,8 +1,8 @@
 @type
 datcache_chk :: String -> Int -> Bool
 datcache_get :: String -> Int -> *
-datcache_put :: String -> Int -> * -> void
-datcache_del :: String -> Int -> void
+datcache_put :: String -> Int -> * -> Void
+datcache_del :: String -> Int -> Void
 
 @source R
 

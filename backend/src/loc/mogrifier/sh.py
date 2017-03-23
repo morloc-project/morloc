@@ -9,7 +9,7 @@ universal_to_atom = {
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
     "Table"  : 'cat <({x})',
-    "void"   : 'cat <({x}) || echo "$({x})"',
+    "Void"   : 'cat <({x}) || echo "$({x})"',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
 
@@ -21,7 +21,7 @@ atom_to_universal = {
     "Bool"   : 'echo "$({x})"',
     "Text"   : 'cat <({x})',
     "Table"  : 'cat <({x})',
-    "void"   : 'cat <({x}) || echo "$({x})" > /dev/null',
+    "Void"   : 'cat <({x}) || echo "$({x})" > /dev/null',
     "*"      : 'cat <({x}) || echo "$({x})"'
 }
 
@@ -60,7 +60,7 @@ class ShMogrifier(Mogrifier):
         self.natural_to_universal = natural_to_universal
 
     def _universal_to_primitive(self, typ):
-        if typ == "void":
+        if typ == "Void":
             return "echo -n"
         else:
             return self.universal_to_atom[typ].format(x="cat $1")

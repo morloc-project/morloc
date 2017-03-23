@@ -1,6 +1,6 @@
 @type
 foo :: a -> a
-bar :: void -> Int
+bar :: Void -> Int
 
 @path
 foo . bar

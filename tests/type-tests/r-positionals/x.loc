@@ -30,8 +30,8 @@ apply     :: [[Char]] -> Int -> ([Char] -> String) -> [String]
 replicate :: Int -> ([Char] -> Int -> [Char]) -> [Char] -> [[Char]]
 sample    :: [Char] -> Int -> [Char]
 paste     :: [Char] -> String
-letters   :: void -> [Char]
-set.seed  :: Int -> void
+letters   :: Void -> [Char]
+set.seed  :: Int -> Void
 
 @export
 apply as main
