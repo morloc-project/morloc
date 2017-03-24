@@ -266,10 +266,11 @@ RESET { RETURN_TOKEN(RESET); }
 <S_TYPE>{type} {
     W* w = NULL;
 
-    // Types are considered to be generic if they begin with a lowercase
-    // letter. The inferred type, on the lhs of the couplet, defaults to the
-    // untyped FT_ATOMIC<'*'>. The explicit type may be inferred later. 
-    if(islower(yytext[0])){
+    // Types are considered to be generic if they begin with a lowercase letter
+    // AND have a length of 1. The inferred type, on the lhs of the couplet,
+    // defaults to the untyped FT_ATOMIC<'*'>. The explicit type may be
+    // inferred later. 
+    if(islower(yytext[0]) && strlen(yytext) == 1){
         W* lhs = w_new(P_STRING, strdup(yytext));
         W* rhs = w_new(FT_ATOMIC, "*");
         Couplet* c = couplet_new(lhs, rhs, '=');
