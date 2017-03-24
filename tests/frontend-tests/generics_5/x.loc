@@ -1,6 +1,6 @@
 @type
-foo :: a -> b -> (a, b)
-bad :: (a,(a,a)) -> a
+foo :: a -> b -> (a, a)
+bad :: (a,[a]) -> a
 bar :: a -> a
 baz :: (c, d) -> [(c,d)]
 
