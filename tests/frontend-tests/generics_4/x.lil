@@ -1,0 +1,8 @@
+EMIT	m0	*
+FUNC	m0	bar
+TYPE	m0	Int
+INPM	m0	0	m1	Int
+EMIT	m1	*
+FUNC	m1	foo
+TYPE	m1	Int
+INPP	m1	0	7	Int

@@ -181,6 +181,7 @@ announce "Frontend tests"
 frontend_test generics_1         'generics_1/        -- resolve generics: a -> a ....................... '
 frontend_test generics_2         'generics_2/        -- resolve generics: a -> (a -> [a]) .............. '
 frontend_test generics_3         'generics_3/        -- resolve generics: from positional .............. '
+frontend_test generics_4         'generics_4/        -- resolve generics: propagate horizontal ......... '
 frontend_test advice             'advice/            -- equivalence of (@before, @after) to (@4, @5) ... '
 frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '

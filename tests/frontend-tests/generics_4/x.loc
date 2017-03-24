@@ -1,0 +1,6 @@
+@type
+foo :: b -> b
+bar :: a -> a
+
+@path
+bar . foo . 7
