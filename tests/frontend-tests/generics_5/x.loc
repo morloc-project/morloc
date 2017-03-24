@@ -1,9 +1,11 @@
 @type
-x :: Void -> A
-y :: Void -> B
 foo :: a -> b -> (a, b)
+bad :: (a,(a,a)) -> a
 bar :: a -> a
 baz :: (c, d) -> [(c,d)]
+
+@path
+baz . bar . bad . foo . 1 2
 
 @comment
 the following should be a type error:
@@ -18,6 +20,3 @@ In the above, the following resolved signatures should obtain:
   foo :: A -> B -> (A, B)
   bar :: (A, B) -> (A, B)
   baz :: (A, B) -> [(A, B)]
-
-@path
-baz . bar . foo . x y

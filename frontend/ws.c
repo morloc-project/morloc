@@ -138,12 +138,20 @@ Ws* ws_init(Ws* ws){
 }
 
 W* ws_head(Ws* ws){
-    return ws->head;
+    if(ws){
+        return ws->head;
+    } else {
+        return NULL;
+    }
 }
 
 /* Get last element of a table */
 W* ws_last(Ws* ws){
-    return ws->last;
+    if(ws){
+        return ws->last;
+    } else {
+        return NULL;
+    }
 }
 
 int ws_length(Ws* ws){

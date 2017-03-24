@@ -6,6 +6,13 @@
 #define IS_STAR(t) (strcmp(g_string((t)), __WILD__) == 0)
 #define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
 
+#define EQUAL_ATOMICS(a,b)                                \
+    (                                                     \
+      IS_ATOMIC(a) && IS_ATOMIC(b)                        \
+      &&                                                  \
+      strcmp(g_string(g_rhs(a)), g_string(g_rhs(a))) == 0 \
+    )
+
 
 // ================================================================== //
 //                                                                    //
@@ -72,6 +79,9 @@ other elements in its group. If a given manifold is present in two groups, the
 groups may be merged.
 ---------------------------------------------------------------------------- */
 
+bool _constructor_compatible(W* a, W* b);
+bool _types_are_compatible(W* a, W* b);
+
 size_t get_max_uid(Ws* man){
     size_t id = 0;
     for(W* w = ws_head(man); w; w = w->next){
@@ -81,9 +91,91 @@ size_t get_max_uid(Ws* man){
     return id;
 }
 
-// TODO continue from here
+void _scream_about_compatibility(W* a, W* b){
+    char* a_str = type_str(a);
+    char* b_str = type_str(b);
+    fprintf(stderr, "Types '%s' and '%s' are not compatible\n", a_str, b_str);
+}
+void all_io_types_are_compatible(Ws* ws_top){
+    Ws* man = get_manifolds(ws_top);
+    for(W* w = ws_head(man); w; w = w->next){
+        Manifold* m = g_manifold(g_rhs(w));
+        W* x = ws_head(m->inputs);
+        W* b = ws_head(m->type);
+        for(; x && b; x = x->next, b = b->next){
+            W* a = x;
+            if(x->cls == C_MANIFOLD){
+                a = ws_last(g_manifold(g_rhs(x))->type);    
+            }
+            if(! _types_are_compatible(a,b) ){
+                _scream_about_compatibility(a,b);
+            }
+        }
+    }
+}
 
-/* Ws* man = get_manifold(Ws* ws_top); */
+
+// Let a and b be nodes in a type tree.
+// Where
+//   Node :: Generic | Primitive | Constructor [Node]
+// The Constructor nodes have 1 or more Node children
+//
+// a and b are compatible if they are specifications of a common Node
+//
+// comp a b =
+//   | Generic _ = TRUE
+//   | _ Generic = TRUE 
+//   | Primitive Primitive = a == b
+//   | Constructor Constructor = class(a) == class(b) AND all (map (zip a b))
+//   | otherwise = FALSE
+bool _types_are_compatible(W* a, W* b){
+    return
+       ( IS_GENERIC(a) || IS_GENERIC(b) )
+       ||
+       EQUAL_ATOMICS(a,b)
+       ||
+       _constructor_compatible(a,b)
+    ;
+}
+bool _constructor_compatible(W* a, W* b){
+    bool compatible = false;
+    if( a->cls == b->cls ){
+        if( wws_length(a) == wws_length(b) ){
+            W* aa = wws_head(a);
+            W* bb = wws_head(b);
+            for(;
+                aa && bb;
+                aa = aa->next, bb = bb->next)
+            {
+                if(! _types_are_compatible(aa, bb)){
+                    return false;
+                }
+            }
+            compatible = true;
+        }
+    }
+    return compatible;
+}
+
+/* // a single type, an element, or subelement, of a function signature */
+/* typedef struct IType{                                                */
+/*     unsigned char                                                    */
+/*           generic:1                                                  */
+/*         , atomic:1                                                   */
+/*         , constructor:1                                              */
+/*     ;                                                                */
+/* } IType;                                                             */
+/*                                                                      */
+/* typedef struct IProt{                                                */
+/*     size_t size;                                                     */
+/*     IType ** itypes;                                                 */
+/*     W* generics[26];                                                 */
+/* } IProt;                                                             */
+/*                                                                      */
+/* typedef struct IComp{                                                */
+/*     size_t size;                                                     */
+/*     IProt ** prot;                                                   */
+/* } IComp;                                                             */
 
 // ========================================================================= //
 //                                                                           //
