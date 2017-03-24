@@ -1,0 +1,23 @@
+@type
+x :: Void -> A
+y :: Void -> B
+foo :: a -> b -> (a, b)
+bar :: a -> a
+baz :: (c, d) -> [(c,d)]
+
+@comment
+the following should be a type error:
+
+ baz :: (c, d, e) -> void
+
+since (a,b) !== (a,b,c), the structures are different
+
+but (a,b) == (a,(b,c)), where b == (b,c)
+
+In the above, the following resolved signatures should obtain:
+  foo :: A -> B -> (A, B)
+  bar :: (A, B) -> (A, B)
+  baz :: (A, B) -> [(A, B)]
+
+@path
+baz . bar . foo . x y
