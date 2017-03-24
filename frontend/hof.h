@@ -97,9 +97,18 @@ void ws_3mod(Ws*, Ws*, Ws*, void(*mod)(W*, W*, W*));
 Ws* ws_map(Ws* xs, W*(*fun)(W*));
 
 // calls mod(xs[i], ys[i]) for all i. Stop when first list ends
-void ws_zip_mod(Ws* xs, Ws* ys, void(*mod)(W* x, W* y));
+void ws_zip_mod(
+    Ws* xs,
+    Ws* ys,
+    void(*mod)(W* x, W* y)
+);
 // stateful zip apply
-W* ws_szap(Ws* xs, Ws* ys, W* st, W*(*mod)(W* x, W* y, W* st));
+W* ws_szap(
+    Ws* xs,
+    Ws* ys,
+    W* st,
+    W*(*mod)(W* x, W* y, W* st)
+);
 
 // Recurse along ws according to `recurse`. Perform function `mod` on all w if
 // `criterion`. ws in `mod` are processed in the context of `ps`, which may,

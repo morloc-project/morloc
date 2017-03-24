@@ -11,9 +11,9 @@
 
 void set_default_types(Ws* ws);
 
-void infer_multi_types(Ws* ws);
-void infer_star_types(Ws* ws);
-void infer_generic_types(Ws* ws);
+// void infer_multi_types(Ws* ws);
+// void infer_star_types(Ws* ws);
+// void infer_generic_types(Ws* ws);
 
 char* type_str(W* w);
 
