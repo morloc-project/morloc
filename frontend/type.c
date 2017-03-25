@@ -79,6 +79,55 @@ other elements in its group. If a given manifold is present in two groups, the
 groups may be merged.
 ---------------------------------------------------------------------------- */
 
+typedef struct ManifoldList{
+    size_t size;
+    Manifold ** list;
+} ManifoldList;
+ManifoldList* _create_ManifoldList(Ws* ws_top);
+Manifold* _access_ManifoldList(int mid);
+
+// LL of elements with equivalent type
+// Reasons for joining
+// 1. The elements are IO linked
+// 2. The elements are stars at the same position within the same function,
+// though different manifolds
+typedef struct HomoSet{
+   // Types a and b must be unified, of form FT_*
+   W* type;
+   // modifiers for accessing generics
+   // they will have the value `(m->uid * 26) - 97`, thus adding the character
+   // numeric value will result in a value of range 0-MAX_INT.
+   int gmod;
+   HomoSet* next;
+   HomoSet* prev;
+} HomoSet;
+typedef struct HomoSetList{
+    HomoSet* set;
+    HomoSetList* next;
+    HomoSetList* prev;
+} HomoSetList;
+HomoSetList* _create_HomoSetList(Ws* ws_top);
+
+typedef struct Generic{
+    W* type;
+    Ws* list;
+} Generic;
+typedef struct GenericList{
+    size_t size;
+    Generic ** list;
+} GenericList;
+GenericList* _create_GenericList(Ws* ws_top);
+Generic* _access_GenericList(int gid);
+
+// U(*,*)      --> *
+// U(_,*)      --> _
+// U(T,_)      --> T | Error
+// U(a,b)      --> c'
+// U(M a, b)   --> M c' | Error
+// U(M a, M b) --> M c'
+// U(M a, N b) --> Error
+W* _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist);
+
 bool _constructor_compatible(W* a, W* b);
 bool _types_are_compatible(W* a, W* b);
 
@@ -114,6 +163,10 @@ void all_io_types_are_compatible(Ws* ws_top){
     }
 }
 
+int _get_generic_id(W* w, char c){
+    Manifold* m = g_manifold(g_rhs(w));
+    return (m->uid * 26) + (c - 97);
+}
 
 // Let a and b be nodes in a type tree.
 // Where
@@ -128,6 +181,8 @@ void all_io_types_are_compatible(Ws* ws_top){
 //   | Primitive Primitive = a == b
 //   | Constructor Constructor = class(a) == class(b) AND all (map (zip a b))
 //   | otherwise = FALSE
+// TODO: This is broken for 1) non-terminating cases `(a,(a,b)) | ((c,d),c)`
+//       and 2) cases with multi-use generics, e.g. `(a,a) | (Int,Num)`
 bool _types_are_compatible(W* a, W* b){
     return
        ( IS_GENERIC(a) || IS_GENERIC(b) )
@@ -156,26 +211,6 @@ bool _constructor_compatible(W* a, W* b){
     }
     return compatible;
 }
-
-/* // a single type, an element, or subelement, of a function signature */
-/* typedef struct IType{                                                */
-/*     unsigned char                                                    */
-/*           generic:1                                                  */
-/*         , atomic:1                                                   */
-/*         , constructor:1                                              */
-/*     ;                                                                */
-/* } IType;                                                             */
-/*                                                                      */
-/* typedef struct IProt{                                                */
-/*     size_t size;                                                     */
-/*     IType ** itypes;                                                 */
-/*     W* generics[26];                                                 */
-/* } IProt;                                                             */
-/*                                                                      */
-/* typedef struct IComp{                                                */
-/*     size_t size;                                                     */
-/*     IProt ** prot;                                                   */
-/* } IComp;                                                             */
 
 // ========================================================================= //
 //                                                                           //
