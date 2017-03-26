@@ -115,33 +115,19 @@ typedef struct Generic{
     W* type;
     Ws* list;
 } Generic;
+void _print_Generic(Generic* g);
 typedef struct GenericList{
     size_t size;
     Generic ** list;
 } GenericList;
-GenericList* _create_GenericList(Ws* ws_top);
+GenericList* _create_GenericList(ManifoldList* ml);
 Generic* _access_GenericList(int gid);
+void _print_GenericList(GenericList* gl);
 
-// U(*,*)      --> *
-// U(_,*)      --> _
-// U(T,_)      --> T | Error
-// U(a,b)      --> c'
-// U(M a, b)   --> M c' | Error
-// U(M a, M b) --> M c'
-// U(M a, N b) --> Error
 W* _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist);
 
 bool _constructor_compatible(W* a, W* b);
 bool _types_are_compatible(W* a, W* b);
-
-size_t get_max_uid(Ws* man){
-    size_t id = 0;
-    for(W* w = ws_head(man); w; w = w->next){
-        size_t this_id = g_manifold(g_rhs(w))->uid;
-        id = this_id > id ? this_id : id;
-    }
-    return id;
-}
 
 void _scream_about_compatibility(W* a, W* b){
     char* a_str = type_str(a);
@@ -168,7 +154,7 @@ void all_io_types_are_compatible(Ws* ws_top){
 
 int _get_generic_id(W* w, char c){
     Manifold* m = g_manifold(g_rhs(w));
-    return (m->uid * 26) + (c - 97);
+    return (m->uid * ('z'-'a'+1)) + (c - 'a');
 }
 
 W* r_wws_add(W* m, W* ms){
@@ -218,7 +204,7 @@ void _print_ManifoldList(ManifoldList* ml){
 HomoSet* _append_HomoSet(HomoSet* hs, W* type, Manifold* m){
     HomoSet* x = (HomoSet*)malloc(sizeof(HomoSet));
     x->type = type;
-    x->gmod = (26 * m->uid) + 97;
+    x->gmod = (m->uid * ('z'-'a'+1)) + 'a';
     x->next = NULL;
     x->prev = hs;
     if(hs)
@@ -275,11 +261,103 @@ void _print_HomoSetList(HomoSetList* hsl){
     }
 }
 
+
+size_t get_max_uid(ManifoldList* ml){
+    size_t id = 0;
+    for(size_t i = 0; i < ml->size; i++){
+        size_t this_id = ml->list[i]->uid; 
+        id = this_id > id ? this_id : id;
+    }
+    return id;
+}
+Generic* _append_Generic(Generic* g, W* type, Manifold* m){
+    if(!g){
+        g = (Generic*)malloc(sizeof(Generic));
+        g->type = type;
+        g->list = NULL;
+    }
+    g->list = ws_add_val(g->list, P_MANIFOLD, m);
+    return g;
+}
+void _r_load_generics(GenericList* gl, W* w, Manifold* m, size_t gmod){
+    switch(w->cls){
+        case FT_FUNCTION:
+        case FT_TUPLE:
+        case FT_ARRAY:
+        {
+            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
+                _r_load_generics(gl, wt, m, gmod);
+            }
+            break;
+        }
+        case FT_GENERIC:
+        {
+            // - The lhs holds the generic label (e.g. 'a')
+            // - The rhs of a generic holds the inferred type it will be of type
+            size_t gid = gmod + g_string(g_lhs(w))[0];
+            gl->list[gid] = _append_Generic(gl->list[gid], w, m);
+            break;
+        }
+        case FT_ATOMIC:
+        case C_POSITIONAL:
+            // Always explicit types
+            break;
+        default:
+            warn("Expected FT_* at (%s:%d), got %s", __func__, __LINE__, w_str(w)); 
+            break;
+    }
+}
+GenericList* _create_GenericList(ManifoldList* ml){ 
+    GenericList* gl = (GenericList*)malloc(sizeof(GenericList));
+    gl->size = (get_max_uid(ml)+1) * ('z'-'a'+1);
+    gl->list = (Generic**)calloc(gl->size, sizeof(Generic*));
+    for(size_t i = 0; i < ml->size; i++){
+        Manifold* m = ml->list[i]; 
+        for(W* type = ws_head(m->type); type; type = type->next){
+            _r_load_generics(gl, type, m, (m->uid*('z'-'a'+1))+'a');
+        }
+    }
+    return gl; 
+}
+/* Generic{             */
+/*     W* type;         */
+/*     Ws* list;        */
+/* }                    */
+/* GenericList          */
+/*     size_t size;     */
+/*     Generic ** list; */
+/* }                    */
+void _print_Generic(Generic* g){
+    fprintf(stderr, type_str(g->type)); 
+    for(W* w = ws_head(g->list); w; w = w->next){
+        Manifold* m = g_manifold(w);
+        fprintf(stderr, "m%lu(%s)", m->uid, m->function);
+        if(w->next)
+            fprintf(stderr, " | ");
+    }
+    fprintf(stderr, "\n");
+}
+// TODO continue from here, this function seems to be broken
+void _print_GenericList(GenericList* gl){
+    fprintf(stderr, "Generic List\n");
+    for(size_t i = 0; i < gl->size; i++){
+        if(gl->list[i]){
+            fprintf(stderr, " - ");
+            _print_Generic(gl->list[i]);
+        }
+    }
+}
+
+Generic* _access_GenericList(int gid){ return NULL; }
+
+
 void test_ManifoldList(Ws* ws_top){
     ManifoldList* ml = _create_ManifoldList(ws_top);
     _print_ManifoldList(ml);
     HomoSetList* hsl = _create_HomoSetList(ml);
     _print_HomoSetList(hsl);
+    GenericList* gl = _create_GenericList(ml);
+    _print_GenericList(gl);
 }
 
 
