@@ -116,6 +116,18 @@ if((p + x) >= MAX_TYPE_LENGTH) {                            \
             p += atom_size;
             break;
         }
+        case C_ARGREF:
+        {
+            CHK(1)
+            s[p++] = '*';
+            break;
+        }
+        case C_REFER:
+        {
+            w = ws_last(g_manifold(g_rhs(w))->type);
+            p = type_str_r(w, s, p);
+            break;
+        }
         default:
             warn("Expected FT_* at (%s:%d), got %s", __func__, __LINE__, w_str(w)); 
             break;
