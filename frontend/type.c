@@ -79,50 +79,6 @@ other elements in its group. If a given manifold is present in two groups, the
 groups may be merged.
 ---------------------------------------------------------------------------- */
 
-typedef struct ManifoldList{
-    size_t size;
-    Manifold ** list;
-} ManifoldList;
-ManifoldList* _create_ManifoldList(Ws* ws_top);
-void _print_ManifoldList(ManifoldList*);
-
-// LL of elements with equivalent type
-// Reasons for joining
-// 1. The elements are IO linked
-// 2. The elements are stars at the same position within the same function,
-// though different manifolds
-typedef struct HomoSet{
-   // Types a and b must be unified, of form FT_*
-   W* type;
-   // modifiers for accessing generics
-   // they will have the value `(m->uid * 26) - 97`, thus adding the character
-   // numeric value will result in a value of range 0-MAX_INT.
-   int gmod;
-   struct HomoSet* next;
-   struct HomoSet* prev;
-} HomoSet;
-void _print_HomoSet(HomoSet* hs);
-
-typedef struct HomoSetList{
-    HomoSet* set;
-    struct HomoSetList* next;
-    struct HomoSetList* prev;
-} HomoSetList;
-HomoSetList* _create_HomoSetList(ManifoldList*);
-void _print_HomoSetList(HomoSetList* hsl);
-
-typedef struct Generic{
-    W* type;
-    Ws* list;
-} Generic;
-void _print_Generic(Generic* g);
-typedef struct GenericList{
-    size_t size;
-    Generic ** list;
-} GenericList;
-GenericList* _create_GenericList(ManifoldList* ml);
-Generic* _access_GenericList(int gid);
-void _print_GenericList(GenericList* gl);
 
 W* _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist);
 
@@ -152,228 +108,13 @@ void all_io_types_are_compatible(Ws* ws_top){
     }
 }
 
-size_t _get_generic_id_from_uid(size_t uid, char c){
-    return uid * ('z'-'a'+1) + (c - 'a');
-}
-
-size_t _get_generic_size(int max_uid){
-    return max_uid * ('z'-'a'+1);
-}
-
-size_t _get_generic_id(W* w, char c){
-    Manifold* m = g_manifold(g_rhs(w));
-    return _get_generic_id_from_uid(m->uid, c);
-}
-
-size_t _get_generic_id_offset(size_t uid){
-    return _get_generic_id_from_uid(uid, 0);
-}
-
-
-
-W* r_wws_add(W* m, W* ms){
-    // This is an add function that does not copy the value It is important to
-    // use reference semantics here, so that the changes I make in the type
-    // inferrence data structure are reflected in the original.
-    return _wws_add(ms, m);
-}
-ManifoldList* _create_ManifoldList(Ws* ws_top){
-    W* ms = ws_scrap(
-        ws_top,
-        NULL,
-        ws_recurse_most,
-        w_is_manifold,
-        r_wws_add
-    );
-
-    ManifoldList* ml = (ManifoldList*)malloc(1 * sizeof(ManifoldList));
-    ml->size = wws_length(ms);
-    ml->list = (Manifold**)calloc(ml->size, sizeof(Manifold*));
-    for(W* w = wws_head(ms); w; w = w->next){
-        Manifold* m = g_manifold(g_rhs(w));
-        if(m->uid < ml->size){
-            ml->list[m->uid] = m;
-        } else {
-            fprintf(stderr, "Aww, shucks, that shouldn't have happened");
-        }
-    }
-
-    return ml;
-}
-
-void _print_ManifoldList(ManifoldList* ml){
-    fprintf(stderr, "Manifold List\n");
-    for(size_t i = 0; i < ml->size; i++){
-        fprintf(stderr, " - ");
-        manifold_print(ml->list[i]); 
-    }
-}
-
-/* HomoSet{                      */
-/*    W* type;                   */
-/*    int gmod;                  */
-/*    struct HomoSet* next;      */
-/*    struct HomoSet* prev;      */
-/* }                             */
-HomoSet* _append_HomoSet(HomoSet* hs, W* type, Manifold* m){
-    HomoSet* x = (HomoSet*)malloc(sizeof(HomoSet));
-    x->type = type;
-    x->gmod = _get_generic_id_offset(m->uid);
-    x->next = NULL;
-    x->prev = hs;
-    if(hs)
-        hs->next = x;
-    return x;
-}
-/* HomoSetList{                  */
-/*     HomoSet* set;             */
-/*     struct HomoSetList* next; */
-/*     struct HomoSetList* prev; */
-/* }                             */
-HomoSetList* _append_HomoSetList(HomoSetList* hsl, HomoSet* hs){
-    HomoSetList* x = (HomoSetList*)malloc(sizeof(HomoSetList));
-    x->set = hs; 
-    x->next = NULL;
-    x->prev = hsl;
-    if(hsl)
-        hsl->next = x;
-    return x;
-}
-HomoSetList* _create_HomoSetList(ManifoldList* ml){
-    HomoSetList* hsl = NULL;
-    for(size_t i = 0; i < ml->size; i++){
-        Manifold* m = ml->list[i];
-        W* x = ws_head(m->inputs);
-        W* b = ws_head(m->type);
-        for(; x && b; x = x->next, b = b->next){
-            W* a = x;
-            if(x->cls == C_MANIFOLD){
-                a = ws_last(g_manifold(g_rhs(x))->type);
-            }
-            HomoSet* hs = _append_HomoSet(NULL, a, m);
-            hs = _append_HomoSet(hs, b, m);
-            hsl = _append_HomoSetList(hsl, hs);
-        }
-    } 
-    return hsl;
-}
-void _print_HomoSet(HomoSet* hs){
-    while(hs->prev){ hs = hs->prev; }
-    for(; hs; hs = hs->next){
-        fprintf(stderr, "%s", type_str(hs->type));
-        if(hs->next)
-            fprintf(stderr, " | ");
-    }
-    fprintf(stderr, "\n");
-}
-void _print_HomoSetList(HomoSetList* hsl){
-    while(hsl->prev){ hsl = hsl->prev; }
-    fprintf(stderr, "Homogenous Sets\n");
-    for(; hsl; hsl = hsl->next){
-        fprintf(stderr, " - ");
-        _print_HomoSet(hsl->set);
-    }
-}
-
-
-size_t get_max_uid(ManifoldList* ml){
-    size_t id = 0;
-    for(size_t i = 0; i < ml->size; i++){
-        size_t this_id = ml->list[i]->uid; 
-        id = this_id > id ? this_id : id;
-    }
-    return id;
-}
-Generic* _append_Generic(Generic* g, W* type, Manifold* m){
-    if(!g){
-        g = (Generic*)malloc(sizeof(Generic));
-        g->type = type;
-        g->list = NULL;
-    }
-    g->list = ws_add_val(g->list, P_MANIFOLD, m);
-    return g;
-}
-void _r_load_generics(GenericList* gl, W* w, Manifold* m, int gmod){
-    switch(w->cls){
-        case FT_FUNCTION:
-        case FT_TUPLE:
-        case FT_ARRAY:
-        {
-            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
-                _r_load_generics(gl, wt, m, gmod);
-            }
-            break;
-        }
-        case FT_GENERIC:
-        {
-            // - The lhs holds the generic label (e.g. 'a')
-            // - The rhs of a generic holds the inferred type it will be of type
-            size_t gid = gmod + g_string(g_lhs(w))[0];
-            if(gl->size <= gid){
-                fprintf(stderr, "Invalid id at %s:%d\n", __func__, __LINE__);
-            }
-            gl->list[gid] = _append_Generic(gl->list[gid], w, m);
-            break;
-        }
-        case FT_ATOMIC:
-        case C_POSITIONAL:
-            // Always explicit types
-            break;
-        default:
-            warn("Expected FT_* at (%s:%d), got %s", __func__, __LINE__, w_str(w)); 
-            break;
-    }
-}
-GenericList* _create_GenericList(ManifoldList* ml){ 
-    GenericList* gl = (GenericList*)malloc(sizeof(GenericList));
-    gl->size = _get_generic_size(get_max_uid(ml)+1);
-    gl->list = (Generic**)calloc(gl->size, sizeof(Generic*));
-    for(size_t i = 0; i < ml->size; i++){
-        Manifold* m = ml->list[i]; 
-        for(W* type = ws_head(m->type); type; type = type->next){
-            _r_load_generics(gl, type, m, _get_generic_id_offset(m->uid));
-        }
-    }
-    return gl; 
-}
-/* Generic{             */
-/*     W* type;         */
-/*     Ws* list;        */
-/* }                    */
-/* GenericList          */
-/*     size_t size;     */
-/*     Generic ** list; */
-/* }                    */
-void _print_Generic(Generic* g){
-    fprintf(stderr, "%s :: ", type_str(g->type)); 
-    for(W* w = ws_head(g->list); w; w = w->next){
-        Manifold* m = g_manifold(w);
-        fprintf(stderr, "m%lu(%s)", m->uid, m->function);
-        if(w->next)
-            fprintf(stderr, " | ");
-    }
-    fprintf(stderr, "\n");
-}
-void _print_GenericList(GenericList* gl){
-    fprintf(stderr, "Generic List\n");
-    for(size_t i = 0; i < gl->size; i++){
-        if(gl->list[i]){
-            fprintf(stderr, " - ");
-            _print_Generic(gl->list[i]);
-        }
-    }
-}
-
-Generic* _access_GenericList(int gid){ return NULL; }
-
-
 void test_ManifoldList(Ws* ws_top){
-    ManifoldList* ml = _create_ManifoldList(ws_top);
-    _print_ManifoldList(ml);
-    HomoSetList* hsl = _create_HomoSetList(ml);
-    _print_HomoSetList(hsl);
-    GenericList* gl = _create_GenericList(ml);
-    _print_GenericList(gl);
+    ManifoldList* ml = create_ManifoldList(ws_top);
+    print_ManifoldList(ml);
+    HomoSetList* hsl = create_HomoSetList(ml);
+    print_HomoSetList(hsl);
+    GenericList* gl = create_GenericList(ml);
+    print_GenericList(gl);
 }
 
 
@@ -429,8 +170,6 @@ bool _constructor_compatible(W* a, W* b){
 
 // takes in all data
 W* _typecheck_derefs(Ws* ws_top, W* msg);
-
-bool _cmp_type(char* a, char* b);
 
 W* _type_compatible(W* i, W* t, W* msg);
 
@@ -518,7 +257,7 @@ W* _type_compatible(W* o, W* t, W* msg){
             else if(!m->as_function){
                 char* o_type = type_str(m->type->last);
                 char* i_type = type_str(t); 
-                if( ! _cmp_type(o_type, i_type)){
+                if( ! cmp_type(o_type, i_type)){
                     char* fmt = "type conflict '%s' vs '%s'\n";
                     size_t size =
                         strlen(fmt)    - // length of format string
@@ -537,7 +276,7 @@ W* _type_compatible(W* o, W* t, W* msg){
         {
             char* o_type = g_string(g_lhs(o));
             char* i_type = type_str(t);
-            if( ! _cmp_type(o_type, i_type)){
+            if( ! cmp_type(o_type, i_type)){
                 char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";
                 size_t size =
                     strlen(fmt)                - // length of the format string
@@ -556,31 +295,6 @@ W* _type_compatible(W* o, W* t, W* msg){
             break;
     }
     return msg;
-}
-
-bool _cmp_type(char* a, char* b){
-    return
-           ( strcmp(a,  b ) == 0 ) ||
-           ( strcmp(a, __WILD__) == 0 ) ||
-           ( strcmp(b, __WILD__) == 0 );
-}
-
-bool _is_io(W* w){
-    return
-        w->cls == FT_ATOMIC &&
-        strcmp(g_string(w), __IO__) == 0;
-}
-
-bool type_is_well(Ws* type){
-    return _is_io(type->head) && !_is_io(type->last);
-}
-
-bool type_is_pipe(Ws* type){
-    return !_is_io(type->head) && !_is_io(type->last);
-}
-
-bool type_is_sink(Ws* type){
-    return !_is_io(type->head) && _is_io(type->last);
 }
 
 void print_error(W* msg){
@@ -616,98 +330,6 @@ void print_error(W* msg){
 //                        T Y P E S T R I N G                         //
 //                                                                    //
 // ================================================================== //
-
-int type_str_r(W* w, char* s, int p){
-#define CHK(x)                                              \
-if((p + x) >= MAX_TYPE_LENGTH) {                            \
-    warn("Type buffer exceeded, truncating type string\n"); \
-    return p;                                               \
-}
-
-    switch(w->cls){
-        case FT_FUNCTION:
-        {
-            int i = 0;
-            CHK(1)
-            s[p++] = '(';
-            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
-                if(i > 0){
-                    CHK(2)
-                    s[p++] = '-';
-                    s[p++] = '>';
-                }
-                p = type_str_r(wt, s, p);
-                i++;
-            }
-            CHK(1)
-            s[p++] = ')';
-        }
-            break;
-        case FT_TUPLE:
-        {
-            int i = 0;
-            s[p++] = '(';
-            for(W* wt = wws_head(w); wt != NULL; wt = wt->next){
-                if(i > 0){
-                    CHK(1)
-                    s[p++] = ',';
-                }
-                p = type_str_r(wt, s, p);
-                i++;
-            }
-            s[p++] = ')';
-        }
-            break;
-        case FT_ARRAY:
-        {
-            CHK(1)
-            s[p++] = '[';
-            p = type_str_r(wws_head(w), s, p);
-            CHK(1)
-            s[p++] = ']';
-        }
-            break;
-        case FT_GENERIC:
-            // - The lhs holds the generic label (e.g. 'a')
-            // - The rhs of a generic holds the inferred type it will be of type
-            // FT_*, so can be thrown into the next cycle
-            p = type_str_r(g_rhs(w), s, p);
-            break;
-        case FT_ATOMIC:
-        {
-            char* atom = g_string(w);
-            size_t atom_size = strlen(atom);
-            CHK(atom_size)
-            strcpy(s + p, atom);
-            p += atom_size;
-            break;
-        }
-        case C_POSITIONAL:
-        {
-            char* atom = g_string(g_lhs(w));
-            size_t atom_size = strlen(atom);
-            CHK(atom_size)
-            strcpy(s + p, atom);
-            p += atom_size;
-            break;
-        }
-        default:
-            warn("Expected FT_* at (%s:%d), got %s", __func__, __LINE__, w_str(w)); 
-            break;
-    }
-    return p;
-#undef CHK
-}
-
-char* type_str(W* w){
-   char* s = (char*)malloc(MAX_TYPE_LENGTH * sizeof(char));
-   int p = type_str_r(w, s, 0);
-   s[p] = '\0';
-   char* ss = strdup(s);
-   free(s);
-   return ss;
-}
-
 
 /* void _infer_multi_type(W* w);                                                          */
 /* void _infer_generic_type(W* w);                                                        */
