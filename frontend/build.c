@@ -18,11 +18,6 @@ void build_manifolds(Ws* ws_top){
 
     set_default_types(ws_top);
 
-
-    // TODO remove this temporary stuff
-    all_io_types_are_compatible(ws_top);
-    test_ManifoldList(ws_top);
-
     /* infer_multi_types(ws_top);   */
     /*                              */
     /* infer_star_types(ws_top);    */

@@ -9,19 +9,7 @@
 
 void set_default_types(Ws* ws);
 
-// void infer_multi_types(Ws* ws);
-// void infer_star_types(Ws* ws);
-// void infer_generic_types(Ws* ws);
-//
-void all_io_types_are_compatible(Ws* ws_top);
-void test_ManifoldList(Ws* ws_top);
-
-/* - pairwise compare inputs and types
- * - warn of missing type
- * - check consistency of inferred types
- * - honor syntax for IO
- */
-W* type_check(Ws* ws);
+void print_type_debug_info(Ws* ws_top);
 
 void print_error(W*);
 

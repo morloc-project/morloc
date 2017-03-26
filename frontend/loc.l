@@ -347,6 +347,7 @@ void print_usage_and_exit(int exit_status){
 "Usage: loc [options] myfile.loc\n"
 "Arguments:\n"
 "  -c  run the typechecker on manifolds\n"
+"  -z  print type debugging info"
 "  -t  print tokens\n"
 "  -h  print this help message and exit\n"
 "  -l  suppress normal LIL output\n"
@@ -358,10 +359,11 @@ void print_usage_and_exit(int exit_status){
 int main(int argc, char ** argv){
 
     // === flags ====================================================
-    bool run_typechecker = false; // type check the manifolds
-    bool log_tokens = false;      // print tokens
-    bool suppress_lil = false;    // don't print LIL
-    bool dump_table = false;      // recursively dump symbol table
+    bool run_typechecker = false;  // type check the manifolds
+    bool print_type_debug = false; // print type debugging info
+    bool log_tokens = false;       // print tokens
+    bool suppress_lil = false;     // don't print LIL
+    bool dump_table = false;       // recursively dump symbol table
     // --------------------------------------------------------------
 
     // has the loc source file been loaded successfully
@@ -379,6 +381,9 @@ int main(int argc, char ** argv){
         if(argv[1][0] == '-'){
             while(++argv[1] && argv[1][0] != '\0'){
                 switch(argv[1][0]){
+                    case 'z':
+                        print_type_debug = true;
+                        break;
                     case 'c':
                         run_typechecker = true; 
                         break;
@@ -435,14 +440,10 @@ int main(int argc, char ** argv){
     // extract LIL as list of lists
     Ws* lil = build_lil(global_table);
 
-    // check the types of all manifolds
-    W* msg = type_check(global_table);
-
-
     // === print statements =========================================
     if(   dump_table      ) ws_print(global_table, ws_recurse_most);
+    if( print_type_debug  ) print_type_debug_info(global_table);
     if( ! suppress_lil    ) print_lil(lil);
-    if(   run_typechecker ) print_error(msg);
     // --------------------------------------------------------------
 
 

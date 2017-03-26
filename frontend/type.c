@@ -82,33 +82,7 @@ groups may be merged.
 
 W* _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist);
 
-bool _constructor_compatible(W* a, W* b);
-bool _types_are_compatible(W* a, W* b);
-
-void _scream_about_compatibility(W* a, W* b){
-    char* a_str = type_str(a);
-    char* b_str = type_str(b);
-    fprintf(stderr, "Types '%s' and '%s' are not compatible\n", a_str, b_str);
-}
-void all_io_types_are_compatible(Ws* ws_top){
-    Ws* man = get_manifolds(ws_top);
-    for(W* w = ws_head(man); w; w = w->next){
-        Manifold* m = g_manifold(g_rhs(w));
-        W* x = ws_head(m->inputs);
-        W* b = ws_head(m->type);
-        for(; x && b; x = x->next, b = b->next){
-            W* a = x;
-            if(x->cls == C_MANIFOLD){
-                a = ws_last(g_manifold(g_rhs(x))->type);    
-            }
-            if(! _types_are_compatible(a,b) ){
-                _scream_about_compatibility(a,b);
-            }
-        }
-    }
-}
-
-void test_ManifoldList(Ws* ws_top){
+void print_type_debug_info(Ws* ws_top){
     ManifoldList* ml = create_ManifoldList(ws_top);
     print_ManifoldList(ml);
     HomoSetList* hsl = create_HomoSetList(ml);
@@ -118,218 +92,195 @@ void test_ManifoldList(Ws* ws_top){
 }
 
 
-// Let a and b be nodes in a type tree.
-// Where
-//   Node :: Generic | Primitive | Constructor [Node]
-// The Constructor nodes have 1 or more Node children
-//
-// a and b are compatible if they are specifications of a common Node
-//
-// comp a b =
-//   | Generic _ = TRUE
-//   | _ Generic = TRUE 
-//   | Primitive Primitive = a == b
-//   | Constructor Constructor = class(a) == class(b) AND all (map (zip a b))
-//   | otherwise = FALSE
-// TODO: This is broken for 1) non-terminating cases `(a,(a,b)) | ((c,d),c)`
-//       and 2) cases with multi-use generics, e.g. `(a,a) | (Int,Num)`
-bool _types_are_compatible(W* a, W* b){
-    return
-       ( IS_GENERIC(a) || IS_GENERIC(b) )
-       ||
-       EQUAL_ATOMICS(a,b)
-       ||
-       _constructor_compatible(a,b)
-    ;
-}
-bool _constructor_compatible(W* a, W* b){
-    bool compatible = false;
-    if( a->cls == b->cls ){
-        if( wws_length(a) == wws_length(b) ){
-            W* aa = wws_head(a);
-            W* bb = wws_head(b);
-            for(;
-                aa && bb;
-                aa = aa->next, bb = bb->next)
-            {
-                if(! _types_are_compatible(aa, bb)){
-                    return false;
-                }
-            }
-            compatible = true;
-        }
-    }
-    return compatible;
-}
-
-// ========================================================================= //
-//                                                                           //
-//                             T Y P E C H E C K                             //
-//                                                                           //
-// ========================================================================= //
-
-// takes in all data
-W* _typecheck_derefs(Ws* ws_top, W* msg);
-
-W* _type_compatible(W* i, W* t, W* msg);
-
-#define LOG_ERROR(st, w, s)                                 \
-    do{                                                     \
-        W* wstr = w_new(P_STRING, strdup(s));               \
-        Couplet* cerr = couplet_new(w_clone(w), wstr, '='); \
-        W* werr = w_new(P_COUPLET, cerr);                   \
-        if(st){                                             \
-            s_ws(st, ws_add(g_ws(st), werr));               \
-        } else {                                            \
-            Ws* wserr = ws_new(werr);                       \
-            st = w_new(P_WS, wserr);                        \
-        }                                                   \
-    } while(0)
-
-W* _typecheck(W* w, W* msg){
-    Manifold* m = g_manifold(g_rhs(w));
-
-    if(
-        ws_length(m->type) == 2 &&
-        m->type->head->cls == FT_ATOMIC &&
-        strcmp(g_string(m->type->head), __MULTI__) == 0
-    ){
-        return msg;
-    }
-
-    if(!m->type){
-        LOG_ERROR(msg, w, "no declared type");
-        return msg;
-    }
+/* bool _constructor_compatible(W* a, W* b);                                      */
+/* bool _types_are_compatible(W* a, W* b);                                        */
+/*                                                                                */
+/* void _scream_about_compatibility(W* a, W* b){                                  */
+/*     char* a_str = type_str(a);                                                 */
+/*     char* b_str = type_str(b);                                                 */
+/*     fprintf(stderr, "Types '%s' and '%s' are not compatible\n", a_str, b_str); */
+/* }                                                                              */
+/* void all_io_types_are_compatible(Ws* ws_top){                                  */
+/*     Ws* man = get_manifolds(ws_top);                                           */
+/*     for(W* w = ws_head(man); w; w = w->next){                                  */
+/*         Manifold* m = g_manifold(g_rhs(w));                                    */
+/*         W* x = ws_head(m->inputs);                                             */
+/*         W* b = ws_head(m->type);                                               */
+/*         for(; x && b; x = x->next, b = b->next){                               */
+/*             W* a = x;                                                          */
+/*             if(x->cls == C_MANIFOLD){                                          */
+/*                 a = ws_last(g_manifold(g_rhs(x))->type);                       */
+/*             }                                                                  */
+/*             if(! _types_are_compatible(a,b) ){                                 */
+/*                 _scream_about_compatibility(a,b);                              */
+/*             }                                                                  */
+/*         }                                                                      */
+/*     }                                                                          */
+/* }                                                                              */
 
 
-    int n_types = ws_length(m->type) - 1 - type_is_well(m->type);
-    int n_inputs = ws_length(m->inputs);
+/* // ========================================================================= //   */
+/* //                                                                           //   */
+/* //                             T Y P E C H E C K                             //   */
+/* //                                                                           //   */
+/* // ========================================================================= //   */
+/*                                                                                   */
+/* // takes in all data                                                              */
+/* W* _typecheck_derefs(Ws* ws_top, W* msg);                                         */
+/*                                                                                   */
+/* W* _type_compatible(W* i, W* t, W* msg);                                          */
+/*                                                                                   */
+/* #define LOG_ERROR(st, w, s)                                 \                     */
+/*     do{                                                     \                     */
+/*         W* wstr = w_new(P_STRING, strdup(s));               \                     */
+/*         Couplet* cerr = couplet_new(w_clone(w), wstr, '='); \                     */
+/*         W* werr = w_new(P_COUPLET, cerr);                   \                     */
+/*         if(st){                                             \                     */
+/*             s_ws(st, ws_add(g_ws(st), werr));               \                     */
+/*         } else {                                            \                     */
+/*             Ws* wserr = ws_new(werr);                       \                     */
+/*             st = w_new(P_WS, wserr);                        \                     */
+/*         }                                                   \                     */
+/*     } while(0)                                                                    */
+/*                                                                                   */
+/* W* _typecheck(W* w, W* msg){                                                      */
+/*     Manifold* m = g_manifold(g_rhs(w));                                           */
+/*                                                                                   */
+/*     if(                                                                           */
+/*         ws_length(m->type) == 2 &&                                                */
+/*         m->type->head->cls == FT_ATOMIC &&                                        */
+/*         strcmp(g_string(m->type->head), __MULTI__) == 0                           */
+/*     ){                                                                            */
+/*         return msg;                                                               */
+/*     }                                                                             */
+/*                                                                                   */
+/*     if(!m->type){                                                                 */
+/*         LOG_ERROR(msg, w, "no declared type");                                    */
+/*         return msg;                                                               */
+/*     }                                                                             */
+/*                                                                                   */
+/*                                                                                   */
+/*     int n_types = ws_length(m->type) - 1 - type_is_well(m->type);                 */
+/*     int n_inputs = ws_length(m->inputs);                                          */
+/*                                                                                   */
+/*     if(ws_length(m->type) < 2){                                                   */
+/*         LOG_ERROR(msg, w, "fewer than 2 terms in type");                          */
+/*     }                                                                             */
+/*                                                                                   */
+/*     if(n_inputs && n_inputs < n_types){                                           */
+/*         LOG_ERROR(msg, w, "too few inputs (currying is not supported)");          */
+/*     }                                                                             */
+/*                                                                                   */
+/*     if(n_inputs > n_types){                                                       */
+/*         LOG_ERROR(msg, w, "too many inputs");                                     */
+/*     }                                                                             */
+/*                                                                                   */
+/*     Ws* itypes;                                                                   */
+/*     if(type_is_well(m->type)){                                                    */
+/*         itypes = NULL;                                                            */
+/*         return msg;                                                               */
+/*     } else {                                                                      */
+/*         itypes = ws_init(m->type);                                                */
+/*     }                                                                             */
+/*     msg = ws_szap(m->inputs, itypes, msg, _type_compatible);                      */
+/*                                                                                   */
+/*     return msg;                                                                   */
+/* }                                                                                 */
+/*                                                                                   */
+/* W* type_check(Ws* ws){                                                            */
+/*     W* w = ws_scrap(ws, NULL, ws_recurse_composition, w_is_manifold, _typecheck); */
+/*     w = _typecheck_derefs(ws, w);                                                 */
+/*     return w;                                                                     */
+/* }                                                                                 */
+/*                                                                                   */
+/* W* _typecheck_derefs(Ws* ws, W* msg){                                             */
+/*     [> STUB <]                                                                    */
+/*     return msg;                                                                   */
+/* }                                                                                 */
+/*                                                                                   */
+/* W* _type_compatible(W* o, W* t, W* msg){                                          */
+/*     switch(o->cls){                                                               */
+/*         case C_DEREF:                                                             */
+/*         case C_REFER:                                                             */
+/*         case C_ARGREF:                                                            */
+/*             [> I currently do no type checking on these <]                        */
+/*             break;                                                                */
+/*         case C_MANIFOLD:                                                          */
+/*         {                                                                         */
+/*             Manifold *m = g_manifold(g_rhs(o));                                   */
+/*             if(!m->type){                                                         */
+/*                 LOG_ERROR(msg, o, "cannot check usage of untyped output");        */
+/*             }                                                                     */
+/*             else if(!m->as_function){                                             */
+/*                 char* o_type = type_str(m->type->last);                           */
+/*                 char* i_type = type_str(t);                                       */
+/*                 if( ! cmp_type(o_type, i_type)){                                  */
+/*                     char* fmt = "type conflict '%s' vs '%s'\n";                   */
+/*                     size_t size =                                                 */
+/*                         strlen(fmt)    - // length of format string               */
+/*                         4              + // subtract the '%s'                     */
+/*                         strlen(o_type) + // string lengths                        */
+/*                         strlen(i_type) + // ''                                    */
+/*                         1;               // add 1 for \0                          */
+/*                     char* errmsg = (char*)malloc(size * sizeof(char));            */
+/*                     sprintf(errmsg, fmt, o_type, i_type);                         */
+/*                     LOG_ERROR(msg, o, errmsg);                                    */
+/*                 }                                                                 */
+/*             }                                                                     */
+/*         }                                                                         */
+/*             break;                                                                */
+/*         case C_POSITIONAL:                                                        */
+/*         {                                                                         */
+/*             char* o_type = g_string(g_lhs(o));                                    */
+/*             char* i_type = type_str(t);                                           */
+/*             if( ! cmp_type(o_type, i_type)){                                      */
+/*                 char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";     */
+/*                 size_t size =                                                     */
+/*                     strlen(fmt)                - // length of the format string   */
+/*                     6                          + // subtract the '%s'             */
+/*                     strlen(o_type)             + // add length of type string     */
+/*                     strlen(g_string(g_rhs(o))) + // ''                            */
+/*                     strlen(i_type)             + // ''                            */
+/*                     1;                           // add 1 for \0                  */
+/*                 char* errmsg = (char*)malloc(size * sizeof(char));                */
+/*                 sprintf(errmsg, fmt, o_type, g_string(g_rhs(o)), i_type);         */
+/*                 LOG_ERROR(msg, o, errmsg);                                        */
+/*             }                                                                     */
+/*         }                                                                         */
+/*             break;                                                                */
+/*         default:                                                                  */
+/*             break;                                                                */
+/*     }                                                                             */
+/*     return msg;                                                                   */
+/* }                                                                                 */
+/*                                                                                   */
+/* void print_error(W* msg){                                                         */
+/*     if(!msg) return;                                                              */
+/*     for(W* w = g_ws(msg)->head; w; w = w->next){                                  */
+/*         switch(g_lhs(w)->cls){                                                    */
+/*             case C_MANIFOLD:                                                      */
+/*             {                                                                     */
+/*                 warn(                                                             */
+/*                     "TYPE ERROR in %s: %s\n",                                     */
+/*                     g_manifold(g_rhs(g_lhs(w)))->function,                        */
+/*                     g_string(g_rhs(w))                                            */
+/*                 );                                                                */
+/*             }                                                                     */
+/*                 break;                                                            */
+/*             case C_POSITIONAL:                                                    */
+/*             {                                                                     */
+/*                 warn(                                                             */
+/*                     "TYPE ERROR: positional is of type %s, but got %s\n",         */
+/*                     g_string(g_lhs(g_lhs(w))),                                    */
+/*                     g_string(g_rhs(w))                                            */
+/*                 );                                                                */
+/*             }                                                                     */
+/*             default:                                                              */
+/*                 break;                                                            */
+/*         }                                                                         */
+/*     }                                                                             */
+/* }                                                                                 */
 
-    if(ws_length(m->type) < 2){
-        LOG_ERROR(msg, w, "fewer than 2 terms in type");
-    }
-
-    if(n_inputs && n_inputs < n_types){
-        LOG_ERROR(msg, w, "too few inputs (currying is not supported)");
-    }
-
-    if(n_inputs > n_types){
-        LOG_ERROR(msg, w, "too many inputs");
-    }
-
-    Ws* itypes;
-    if(type_is_well(m->type)){
-        itypes = NULL;
-        return msg;
-    } else {
-        itypes = ws_init(m->type);
-    }
-    msg = ws_szap(m->inputs, itypes, msg, _type_compatible);
-
-    return msg;
-}
-
-W* type_check(Ws* ws){
-    W* w = ws_scrap(ws, NULL, ws_recurse_composition, w_is_manifold, _typecheck);
-    w = _typecheck_derefs(ws, w);
-    return w;
-}
-
-W* _typecheck_derefs(Ws* ws, W* msg){
-    /* STUB */
-    return msg;
-}
-
-W* _type_compatible(W* o, W* t, W* msg){
-    switch(o->cls){
-        case C_DEREF:
-        case C_REFER:
-        case C_ARGREF:
-            /* I currently do no type checking on these */
-            break;
-        case C_MANIFOLD:
-        {
-            Manifold *m = g_manifold(g_rhs(o));
-            if(!m->type){
-                LOG_ERROR(msg, o, "cannot check usage of untyped output");
-            }
-            else if(!m->as_function){
-                char* o_type = type_str(m->type->last);
-                char* i_type = type_str(t); 
-                if( ! cmp_type(o_type, i_type)){
-                    char* fmt = "type conflict '%s' vs '%s'\n";
-                    size_t size =
-                        strlen(fmt)    - // length of format string
-                        4              + // subtract the '%s'
-                        strlen(o_type) + // string lengths
-                        strlen(i_type) + // ''
-                        1;               // add 1 for \0
-                    char* errmsg = (char*)malloc(size * sizeof(char));
-                    sprintf(errmsg, fmt, o_type, i_type);
-                    LOG_ERROR(msg, o, errmsg);
-                }
-            }
-        }
-            break;
-        case C_POSITIONAL:
-        {
-            char* o_type = g_string(g_lhs(o));
-            char* i_type = type_str(t);
-            if( ! cmp_type(o_type, i_type)){
-                char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";
-                size_t size =
-                    strlen(fmt)                - // length of the format string
-                    6                          + // subtract the '%s'
-                    strlen(o_type)             + // add length of type string
-                    strlen(g_string(g_rhs(o))) + // ''
-                    strlen(i_type)             + // ''
-                    1;                           // add 1 for \0
-                char* errmsg = (char*)malloc(size * sizeof(char));
-                sprintf(errmsg, fmt, o_type, g_string(g_rhs(o)), i_type);
-                LOG_ERROR(msg, o, errmsg);
-            }
-        }
-            break;
-        default: 
-            break;
-    }
-    return msg;
-}
-
-void print_error(W* msg){
-    if(!msg) return;
-    for(W* w = g_ws(msg)->head; w; w = w->next){
-        switch(g_lhs(w)->cls){
-            case C_MANIFOLD:
-            {
-                warn(
-                    "TYPE ERROR in %s: %s\n",
-                    g_manifold(g_rhs(g_lhs(w)))->function,
-                    g_string(g_rhs(w))
-                );
-            }
-                break;
-            case C_POSITIONAL:
-            {
-                warn(
-                    "TYPE ERROR: positional is of type %s, but got %s\n",
-                    g_string(g_lhs(g_lhs(w))),
-                    g_string(g_rhs(w))
-                );
-            }
-            default:
-                break;
-        }
-    }
-}
-
-
-// ================================================================== //
-//                                                                    //
-//                        T Y P E S T R I N G                         //
-//                                                                    //
-// ================================================================== //
 
 /* void _infer_multi_type(W* w);                                                          */
 /* void _infer_generic_type(W* w);                                                        */
@@ -575,3 +526,48 @@ void print_error(W* msg){
 /* }                                                                                      */
 /*                                                                                        */
 /*                                                                                        */
+
+
+/* // Let a and b be nodes in a type tree.                                       */
+/* // Where                                                                      */
+/* //   Node :: Generic | Primitive | Constructor [Node]                         */
+/* // The Constructor nodes have 1 or more Node children                         */
+/* //                                                                            */
+/* // a and b are compatible if they are specifications of a common Node         */
+/* //                                                                            */
+/* // comp a b =                                                                 */
+/* //   | Generic _ = TRUE                                                       */
+/* //   | _ Generic = TRUE                                                       */
+/* //   | Primitive Primitive = a == b                                           */
+/* //   | Constructor Constructor = class(a) == class(b) AND all (map (zip a b)) */
+/* //   | otherwise = FALSE                                                      */
+/* // TODO: This is broken for 1) non-terminating cases `(a,(a,b)) | ((c,d),c)`  */
+/* //       and 2) cases with multi-use generics, e.g. `(a,a) | (Int,Num)`       */
+/* bool _types_are_compatible(W* a, W* b){                                       */
+/*     return                                                                    */
+/*        ( IS_GENERIC(a) || IS_GENERIC(b) )                                     */
+/*        ||                                                                     */
+/*        EQUAL_ATOMICS(a,b)                                                     */
+/*        ||                                                                     */
+/*        _constructor_compatible(a,b)                                           */
+/*     ;                                                                         */
+/* }                                                                             */
+/* bool _constructor_compatible(W* a, W* b){                                     */
+/*     bool compatible = false;                                                  */
+/*     if( a->cls == b->cls ){                                                   */
+/*         if( wws_length(a) == wws_length(b) ){                                 */
+/*             W* aa = wws_head(a);                                              */
+/*             W* bb = wws_head(b);                                              */
+/*             for(;                                                             */
+/*                 aa && bb;                                                     */
+/*                 aa = aa->next, bb = bb->next)                                 */
+/*             {                                                                 */
+/*                 if(! _types_are_compatible(aa, bb)){                          */
+/*                     return false;                                             */
+/*                 }                                                             */
+/*             }                                                                 */
+/*             compatible = true;                                                */
+/*         }                                                                     */
+/*     }                                                                         */
+/*     return compatible;                                                        */
+/* }                                                                             */
