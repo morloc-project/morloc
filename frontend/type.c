@@ -66,7 +66,10 @@ void _set_default_type(W* w){
             }
             m->type = ws_add(m->type, output);
         } else {
-            m->type = ws_add(NULL, w_new(FT_ATOMIC, __IO__));
+            // TODO: for legacy reasons, I have to use __WILD__ here, because
+            // the grammars downstream are stupid. But this really should be
+            // __VOID__
+            m->type = ws_add(NULL, w_new(FT_ATOMIC, __WILD__));
         }
     }
 }

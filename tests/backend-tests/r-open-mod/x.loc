@@ -29,9 +29,6 @@ map <- function(f, x){
     lapply(x, f)
 }
 
-@export
-map
-
 @path
 map .
     & ( null . hclust . dist . normalize . load_data . $1 )
