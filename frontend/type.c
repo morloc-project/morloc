@@ -101,12 +101,15 @@ typedef struct HomoSet{
    struct HomoSet* next;
    struct HomoSet* prev;
 } HomoSet;
+void _print_HomoSet(HomoSet* hs);
+
 typedef struct HomoSetList{
     HomoSet* set;
     struct HomoSetList* next;
     struct HomoSetList* prev;
 } HomoSetList;
-HomoSetList* _create_HomoSetList(Ws* ws_top);
+HomoSetList* _create_HomoSetList(ManifoldList*);
+void _print_HomoSetList(HomoSetList* hsl);
 
 typedef struct Generic{
     W* type;
@@ -206,10 +209,79 @@ void _print_ManifoldList(ManifoldList* ml){
     }
 }
 
+/* HomoSet{                      */
+/*    W* type;                   */
+/*    int gmod;                  */
+/*    struct HomoSet* next;      */
+/*    struct HomoSet* prev;      */
+/* }                             */
+HomoSet* _append_HomoSet(HomoSet* hs, W* type, Manifold* m){
+    HomoSet* x = (HomoSet*)malloc(sizeof(HomoSet));
+    x->type = type;
+    x->gmod = (26 * m->uid) + 97;
+    x->next = NULL;
+    x->prev = hs;
+    if(hs)
+        hs->next = x;
+    return x;
+}
+/* HomoSetList{                  */
+/*     HomoSet* set;             */
+/*     struct HomoSetList* next; */
+/*     struct HomoSetList* prev; */
+/* }                             */
+HomoSetList* _append_HomoSetList(HomoSetList* hsl, HomoSet* hs){
+    HomoSetList* x = (HomoSetList*)malloc(sizeof(HomoSetList));
+    x->set = hs; 
+    x->next = NULL;
+    x->prev = hsl;
+    if(hsl)
+        hsl->next = x;
+    return x;
+}
+HomoSetList* _create_HomoSetList(ManifoldList* ml){
+    HomoSetList* hsl = NULL;
+    for(size_t i = 0; i < ml->size; i++){
+        Manifold* m = ml->list[i];
+        W* x = ws_head(m->inputs);
+        W* b = ws_head(m->type);
+        for(; x && b; x = x->next, b = b->next){
+            W* a = x;
+            if(x->cls == C_MANIFOLD){
+                a = ws_last(g_manifold(g_rhs(x))->type);
+            }
+            HomoSet* hs = _append_HomoSet(NULL, a, m);
+            hs = _append_HomoSet(hs, b, m);
+            hsl = _append_HomoSetList(hsl, hs);
+        }
+    } 
+    return hsl;
+}
+void _print_HomoSet(HomoSet* hs){
+    while(hs->prev){ hs = hs->prev; }
+    for(; hs; hs = hs->next){
+        fprintf(stderr, "%s", type_str(hs->type));
+        if(hs->next)
+            fprintf(stderr, " | ");
+    }
+    fprintf(stderr, "\n");
+}
+void _print_HomoSetList(HomoSetList* hsl){
+    while(hsl->prev){ hsl = hsl->prev; }
+    fprintf(stderr, "Homogenous Sets\n");
+    for(; hsl; hsl = hsl->next){
+        fprintf(stderr, " - ");
+        _print_HomoSet(hsl->set);
+    }
+}
+
 void test_ManifoldList(Ws* ws_top){
     ManifoldList* ml = _create_ManifoldList(ws_top);
     _print_ManifoldList(ml);
+    HomoSetList* hsl = _create_HomoSetList(ml);
+    _print_HomoSetList(hsl);
 }
+
 
 // Let a and b be nodes in a type tree.
 // Where
@@ -516,8 +588,17 @@ if((p + x) >= MAX_TYPE_LENGTH) {                            \
             p += atom_size;
             break;
         }
+        case C_POSITIONAL:
+        {
+            char* atom = g_string(g_lhs(w));
+            size_t atom_size = strlen(atom);
+            CHK(atom_size)
+            strcpy(s + p, atom);
+            p += atom_size;
+            break;
+        }
         default:
-            warn("Unusual error (%s:%d)", __func__, __LINE__); 
+            warn("Expected FT_* at (%s:%d), got %s", __func__, __LINE__, w_str(w)); 
             break;
     }
     return p;
