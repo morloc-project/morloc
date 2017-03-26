@@ -169,6 +169,14 @@ void ws_print(Ws* ws, Ws*(*recurse)(W*)){
     }
 }
 
+void manifold_print(Manifold* m){
+    fprintf(
+        stderr,
+        "m%lu %s in %s\n",
+        m->uid, m->function, m->lang
+    );
+}
+
 char* w_str(W* w){
     if(!w) return NULL;
     char* s = (char*)malloc(1024 * sizeof(char));
@@ -268,6 +276,9 @@ void _ws_print_r(Ws* ws, Ws*(*recurse)(W*), int depth){
 W* wws_new(W* w){
     return w_new(P_WS, ws_new(w));
 }
+W* _wws_new(W* w){
+    return w_new(P_WS, _ws_new(w));
+}
 W* wws_new_cls(W* w, Class ws_cls){
     if(get_value_type(ws_cls) != V_WS){
         warn("Cannot create Ws with VTYPE != V_WS (%s:%d)", __func__, __LINE__);
@@ -285,6 +296,14 @@ W* wws_add(W* wws, W* w){
         wws = wws_new(w);
     } else {
         s_ws(wws, ws_add(g_ws(wws), w));
+    }
+    return wws;
+}
+W* _wws_add(W* wws, W* w){
+    if(!wws){
+        wws = _wws_new(w);
+    } else {
+        s_ws(wws, _ws_add(g_ws(wws), w));
     }
     return wws;
 }

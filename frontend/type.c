@@ -84,7 +84,7 @@ typedef struct ManifoldList{
     Manifold ** list;
 } ManifoldList;
 ManifoldList* _create_ManifoldList(Ws* ws_top);
-Manifold* _access_ManifoldList(int mid);
+void _print_ManifoldList(ManifoldList*);
 
 // LL of elements with equivalent type
 // Reasons for joining
@@ -98,13 +98,13 @@ typedef struct HomoSet{
    // they will have the value `(m->uid * 26) - 97`, thus adding the character
    // numeric value will result in a value of range 0-MAX_INT.
    int gmod;
-   HomoSet* next;
-   HomoSet* prev;
+   struct HomoSet* next;
+   struct HomoSet* prev;
 } HomoSet;
 typedef struct HomoSetList{
     HomoSet* set;
-    HomoSetList* next;
-    HomoSetList* prev;
+    struct HomoSetList* next;
+    struct HomoSetList* prev;
 } HomoSetList;
 HomoSetList* _create_HomoSetList(Ws* ws_top);
 
@@ -166,6 +166,49 @@ void all_io_types_are_compatible(Ws* ws_top){
 int _get_generic_id(W* w, char c){
     Manifold* m = g_manifold(g_rhs(w));
     return (m->uid * 26) + (c - 97);
+}
+
+W* r_wws_add(W* m, W* ms){
+    // This is an add function that does not copy the value It is important to
+    // use reference semantics here, so that the changes I make in the type
+    // inferrence data structure are reflected in the original.
+    return _wws_add(ms, m);
+}
+ManifoldList* _create_ManifoldList(Ws* ws_top){
+    W* ms = ws_scrap(
+        ws_top,
+        NULL,
+        ws_recurse_most,
+        w_is_manifold,
+        r_wws_add
+    );
+
+    ManifoldList* ml = (ManifoldList*)malloc(1 * sizeof(ManifoldList));
+    ml->size = wws_length(ms);
+    ml->list = (Manifold**)calloc(ml->size, sizeof(Manifold*));
+    for(W* w = wws_head(ms); w; w = w->next){
+        Manifold* m = g_manifold(g_rhs(w));
+        if(m->uid < ml->size){
+            ml->list[m->uid] = m;
+        } else {
+            fprintf(stderr, "Aww, shucks, that shouldn't have happened");
+        }
+    }
+
+    return ml;
+}
+
+void _print_ManifoldList(ManifoldList* ml){
+    fprintf(stderr, "Manifold List\n");
+    for(size_t i = 0; i < ml->size; i++){
+        fprintf(stderr, " - ");
+        manifold_print(ml->list[i]); 
+    }
+}
+
+void test_ManifoldList(Ws* ws_top){
+    ManifoldList* ml = _create_ManifoldList(ws_top);
+    _print_ManifoldList(ml);
 }
 
 // Let a and b be nodes in a type tree.
@@ -311,7 +354,7 @@ W* _type_compatible(W* o, W* t, W* msg){
                 char* i_type = type_str(t); 
                 if( ! _cmp_type(o_type, i_type)){
                     char* fmt = "type conflict '%s' vs '%s'\n";
-                    int size =
+                    size_t size =
                         strlen(fmt)    - // length of format string
                         4              + // subtract the '%s'
                         strlen(o_type) + // string lengths
@@ -330,7 +373,7 @@ W* _type_compatible(W* o, W* t, W* msg){
             char* i_type = type_str(t);
             if( ! _cmp_type(o_type, i_type)){
                 char* fmt = "type conflict positional ('%s') '%s' vs '%s'\n";
-                int size =
+                size_t size =
                     strlen(fmt)                - // length of the format string
                     6                          + // subtract the '%s'
                     strlen(o_type)             + // add length of type string
@@ -467,7 +510,7 @@ if((p + x) >= MAX_TYPE_LENGTH) {                            \
         case FT_ATOMIC:
         {
             char* atom = g_string(w);
-            int atom_size = strlen(atom);
+            size_t atom_size = strlen(atom);
             CHK(atom_size)
             strcpy(s + p, atom);
             p += atom_size;
