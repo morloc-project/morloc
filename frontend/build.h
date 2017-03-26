@@ -5,6 +5,6 @@
 #include "build_path.h"
 #include "build_mod.h"
 
-void build_manifolds(Ws* ws_top);
+void build_manifolds(Ws* ws_top, bool infer_verbose);
 
 #endif

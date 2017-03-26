@@ -1,6 +1,6 @@
 #include "build.h"
 
-void build_manifolds(Ws* ws_top){
+void build_manifolds(Ws* ws_top, bool verbose_infer){
 
     resolve_grprefs(ws_top);
 
@@ -16,11 +16,5 @@ void build_manifolds(Ws* ws_top){
 
     link_inputs(ws_top);
 
-    set_default_types(ws_top);
-
-    /* infer_multi_types(ws_top);   */
-    /*                              */
-    /* infer_star_types(ws_top);    */
-    /*                              */
-    /* infer_generic_types(ws_top); */
+    infer_types(ws_top, verbose_infer);
 }

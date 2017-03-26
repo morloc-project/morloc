@@ -1,15 +1,9 @@
 #include "type_HomoSet.h"
 
-/* HomoSet{                      */
-/*    W* type;                   */
-/*    int gmod;                  */
-/*    struct HomoSet* next;      */
-/*    struct HomoSet* prev;      */
-/* }                             */
 HomoSet* append_HomoSet(HomoSet* hs, W* type, Manifold* m){
     HomoSet* x = (HomoSet*)malloc(sizeof(HomoSet));
     x->type = type;
-    x->gmod = get_generic_id_offset(m->uid);
+    x->mid = m ? m->uid : -1;
     x->next = NULL;
     x->prev = hs;
     if(hs)

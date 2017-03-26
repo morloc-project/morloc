@@ -13,10 +13,8 @@
 typedef struct HomoSet{
    // Types a and b must be unified, of form FT_*
    W* type;
-   // modifiers for accessing generics
-   // they will have the value `(m->uid * 26) - 97`, thus adding the character
-   // numeric value will result in a value of range 0-MAX_INT.
-   int gmod;
+   // manifold ID
+   int mid;
    struct HomoSet* next;
    struct HomoSet* prev;
 } HomoSet;

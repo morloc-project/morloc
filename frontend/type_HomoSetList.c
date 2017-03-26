@@ -23,14 +23,19 @@ HomoSetList* create_HomoSetList(ManifoldList* ml){
         W* b = ws_head(m->type);
         for(; x && b; x = x->next, b = b->next){
             W* a = x;
+            Manifold* man_input = NULL;
             if(x->cls == C_MANIFOLD){
-                a = ws_last(g_manifold(g_rhs(x))->type);
+                man_input = g_manifold(g_rhs(x));
+                a = ws_last(man_input->type);
             }
-            HomoSet* hs = append_HomoSet(NULL, a, m);
+            // Add the input type
+            HomoSet* hs = append_HomoSet(NULL, a, man_input);
+            // Add the explicitly given type
             hs = append_HomoSet(hs, b, m);
+            // Add this set to the set list
             hsl = append_HomoSetList(hsl, hs);
         }
-    } 
+    }
     return hsl;
 }
 

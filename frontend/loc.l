@@ -435,14 +435,13 @@ int main(int argc, char ** argv){
     //  - resolve group references
     //  - link manifolds to their modifiers
     //  - link manifolds inputs to manifold outputs 
-    build_manifolds(global_table);
+    build_manifolds(global_table, print_type_debug);
 
     // extract LIL as list of lists
     Ws* lil = build_lil(global_table);
 
     // === print statements =========================================
-    if(   dump_table      ) ws_print(global_table, ws_recurse_most);
-    if( print_type_debug  ) print_type_debug_info(global_table);
+    if(   dump_table      ) ws_print(global_table, ws_recurse_most); 
     if( ! suppress_lil    ) print_lil(lil);
     // --------------------------------------------------------------
 

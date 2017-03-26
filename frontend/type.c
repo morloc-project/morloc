@@ -3,7 +3,7 @@
 #define IS_ATOMIC(t) ((t)->cls == FT_ATOMIC)
 #define IS_GENERIC(t) ((t)->cls == FT_GENERIC)
 #define IS_ARRAY(t) ((t)->cls == FT_ARRAY)
-#define IS_STAR(t) (strcmp(g_string((t)), __WILD__) == 0)
+#define IS_STAR(t) (IS_ATOMIC((t)) && strcmp(g_string((t)), __WILD__) == 0)
 #define IS_MULTI(t) (strcmp(g_string((t)), __MULTI__) == 0)
 
 #define EQUAL_ATOMICS(a,b)                                \
@@ -22,7 +22,7 @@
 
 void _set_default_type(W* w);
 
-void set_default_types(Ws* ws){
+void _set_default_types(Ws* ws){
     ws_rcmod(
         ws,
         ws_recurse_most,
@@ -33,18 +33,41 @@ void set_default_types(Ws* ws){
 
 void _set_default_type(W* w){
     Manifold* m = g_manifold(g_rhs(w));
+    // If the manifold is completely untyped
     if(!m->type){
         int ninputs = ws_length(m->inputs);
         int ntypes = ninputs ? ninputs + 1 : 2;
         for(int i = 0; i < ntypes; i++){
-            W* star;
+            W* star = NULL;
             if(i == 0 && ninputs == 0){
                 star = w_new(FT_ATOMIC, __IO__);
             } else {
                 star = w_new(FT_ATOMIC, __WILD__);
             }
             m->type = ws_add(m->type, star);
-        } 
+        }
+    }
+    // TODO: deprecate the MULTI feature
+    // If the manifold has the form `? -> a`
+    // Then expand `?` to stars according to number of inputs, e.g.
+    //   `? -> a` with 2 inputs (of any kind) --> `* -> * -> a`
+    // (Currently all other usage of `?` is illegal)
+    else if(
+       m->type &&
+       m->type->head->cls == FT_ATOMIC &&
+       strcmp(g_string(m->type->head), __MULTI__) == 0 &&
+       ws_length(m->type) == 2
+    ){
+        if(ws_length(m->inputs) > 1){
+            W* output = w_isolate(m->type->last);
+            m->type = NULL;
+            for(W* i = m->inputs->head; i != NULL; i = i->next){
+                m->type = ws_add(m->type, w_new(FT_ATOMIC, __WILD__));
+            }
+            m->type = ws_add(m->type, output);
+        } else {
+            m->type = ws_add(NULL, w_new(FT_ATOMIC, __IO__));
+        }
     }
 }
 
@@ -80,15 +103,49 @@ groups may be merged.
 ---------------------------------------------------------------------------- */
 
 
-W* _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist);
+void _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist){
 
-void print_type_debug_info(Ws* ws_top){
-    ManifoldList* ml = create_ManifoldList(ws_top);
-    print_ManifoldList(ml);
-    HomoSetList* hsl = create_HomoSetList(ml);
-    print_HomoSetList(hsl);
-    GenericList* gl = create_GenericList(ml);
-    print_GenericList(gl);
+    // If the a is a star, swap it with b
+    if(IS_STAR(a)){
+       W* c = a; a = b; b = c;
+    }
+
+    if(IS_STAR(b)){
+        // transfer type from a to b
+        b->cls = a->cls;
+        b->value = a->value;
+    }
+
+    // TODO: add generic support
+}
+
+void infer_types(Ws* ws_top, bool verbose){
+    // If untyped --> star inputs with appropriate number of arguments
+    // This also expands `?` types to many stars
+    _set_default_types(ws_top);
+
+    ManifoldList * ml  = create_ManifoldList(ws_top);
+    HomoSetList  * hsl = create_HomoSetList(ml);
+    GenericList  * gl  = create_GenericList(ml);
+
+    if(hsl){
+        while(hsl->prev) { hsl = hsl->prev; }
+        HomoSetList* hsl_root = hsl;
+
+        for(; hsl; hsl = hsl->next ){
+            // This works for pairs, which is all I currently use
+            HomoSet* hs = hsl->set;
+            while(hs->prev) { hs = hs->prev; }
+            _unify(hs->type, hs->next->type, ml, gl);
+        }
+        hsl = hsl_root;
+    }
+
+    if(verbose){
+        print_ManifoldList(ml);
+        print_HomoSetList(hsl);
+        print_GenericList(gl);
+    }
 }
 
 

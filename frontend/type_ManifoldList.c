@@ -4,7 +4,7 @@ W* r_wws_add(W* m, W* ms){
     // This is an add function that does not copy the value It is important to
     // use reference semantics here, so that the changes I make in the type
     // inferrence data structure are reflected in the original.
-    return _wws_add(ms, m);
+    return wws_add_val(ms, P_MANIFOLD, g_manifold(g_rhs(m)));
 }
 ManifoldList* create_ManifoldList(Ws* ws_top){
     W* ms = ws_scrap(
@@ -19,7 +19,7 @@ ManifoldList* create_ManifoldList(Ws* ws_top){
     ml->size = wws_length(ms);
     ml->list = (Manifold**)calloc(ml->size, sizeof(Manifold*));
     for(W* w = wws_head(ms); w; w = w->next){
-        Manifold* m = g_manifold(g_rhs(w));
+        Manifold* m = g_manifold(w);
         if(m->uid < ml->size){
             ml->list[m->uid] = m;
         } else {

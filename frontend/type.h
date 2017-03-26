@@ -7,10 +7,6 @@
 #include "type_HomoSetList.h"
 #include "type_ManifoldList.h"
 
-void set_default_types(Ws* ws);
-
-void print_type_debug_info(Ws* ws_top);
-
-void print_error(W*);
+void infer_types(Ws* ws_top, bool verbose);
 
 #endif
