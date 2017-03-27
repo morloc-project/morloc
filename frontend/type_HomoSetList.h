@@ -11,6 +11,7 @@ typedef struct HomoSetList{
     struct HomoSetList* prev;
 } HomoSetList;
 
+HomoSetList* append_HomoSetList(HomoSetList* hsl, HomoSet* hs);
 HomoSetList* create_HomoSetList(ManifoldList*);
 
 void print_HomoSetList(HomoSetList* hsl);

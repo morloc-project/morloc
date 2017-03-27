@@ -106,8 +106,13 @@ groups may be merged.
 ---------------------------------------------------------------------------- */
 
 
-void _unify(HomoSet* a, HomoSet* b, ManifoldList* mlist, GenericList* glist){
-
+void _unify(
+    HomoSet* a,
+    HomoSet* b,
+    ManifoldList* mlist,
+    GenericList* glist,
+    HomoSetList* hlist
+){
     // If the a is a star, swap it with b
     if(IS_STAR(a->type)){
        HomoSet* c = a; a = b; b = c;
@@ -137,6 +142,13 @@ void _unify(HomoSet* a, HomoSet* b, ManifoldList* mlist, GenericList* glist){
                b_glist = ws_join(b_glist, a_glist);
                a_glist = b_glist;
             }
+            W* a_head = g_rhs(ws_head(a_glist));
+            W* b_head = g_rhs(ws_head(b_glist));
+            W* unity = IS_STAR(a_head) ? b_head : a_head;
+            for(W* g = ws_head(b_glist); g; g = g->next){
+                // TODO: assert it hasn't been differently inferred
+                s_rhs(g, unity);
+            }
         }
 
         // one is generic, transfer type
@@ -145,10 +157,40 @@ void _unify(HomoSet* a, HomoSet* b, ManifoldList* mlist, GenericList* glist){
             // FT_GENERIC have the form (generic_label, inferred_type), e.g.
             // (a, Int), so we just have to set the rhs of all b to type(a)
             for(W* g = ws_head(b_glist); g; g = g->next){
+                // TODO: assert it hasn't been differently inferred
                 s_rhs(g, a->type);
             }
         }
     }
+
+    /* if( a->type->cls == FT_TUPLE ||                                   */
+    /*     a->type->cls == FT_ARRAY ||                                   */
+    /*     a->type->cls == FT_FUNCTION                                   */
+    /* ){                                                                */
+    /*     if(b->type->cls != a->type->cls ||                            */
+    /*        wws_length(a->type) != wws_length(b->type)                 */
+    /*     ){                                                            */
+    /*         fprintf(stderr, "Type incompatibility: '%s' vs '%s'\n",   */
+    /*             type_str(b->type), type_str(a->type));                */
+    /*         fprintf(stderr, " --a %s --\n", w_str(a->type));          */
+    /*         fprintf(stderr, " --b %s --\n", w_str(b->type));          */
+    /*     } else {                                                      */
+    /*         W* as = wws_head(a->type);                                */
+    /*         W* bs = wws_head(b->type);                                */
+    /*         for(; as && bs; as = as->next, bs = bs->next){            */
+    /*             HomoSet* a_hs = (HomoSet*)calloc(1, sizeof(HomoSet)); */
+    /*             HomoSet* b_hs = (HomoSet*)calloc(1, sizeof(HomoSet)); */
+    /*             a_hs->type = as;                                      */
+    /*             a_hs->mid = a->mid;                                   */
+    /*             a_hs->next = b_hs;                                    */
+    /*             b_hs->prev = a_hs;                                    */
+    /*             b_hs->type = bs;                                      */
+    /*             b_hs->mid = b->mid;                                   */
+    /*             hlist = append_HomoSetList(hlist, a_hs);              */
+    /*         }                                                         */
+    /*     }                                                             */
+    /* }                                                                 */
+
 }
 
 void infer_types(Ws* ws_top, bool verbose){
@@ -162,15 +204,12 @@ void infer_types(Ws* ws_top, bool verbose){
 
     if(hsl){
         while(hsl->prev) { hsl = hsl->prev; }
-        HomoSetList* hsl_root = hsl;
-
         for(; hsl; hsl = hsl->next ){
             // This works for pairs, which is all I currently use
             HomoSet* hs = hsl->set;
             while(hs->prev) { hs = hs->prev; }
-            _unify(hs, hs->next, ml, gl);
+            _unify(hs, hs->next, ml, gl, hsl);
         }
-        hsl = hsl_root;
     }
 
     if(verbose){

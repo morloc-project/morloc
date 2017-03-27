@@ -270,7 +270,7 @@ backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition in
 backend_test   sh-all        main   'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-and-r      main   'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached     main   'sh-cached/         -- uniq . sort . grep . man ....................... '
-backend_test   sh-loop       map    'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
+backend_test   sh-loop       main   'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_test   sh-map        main   'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-simple     main   'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '

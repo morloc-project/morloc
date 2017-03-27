@@ -1,6 +1,6 @@
 @type
 null    :: ? -> Void
-id      :: * -> *
+id      :: a -> a
 true    :: ? -> Bool
 false   :: ? -> Bool
 and     :: Bool -> Bool -> Bool

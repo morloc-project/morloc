@@ -2,6 +2,10 @@
 core/control
 core/atomic
 
+@type
+sqrt :: Int -> Int
+id :: a -> a
+
 @path R
 ternary .
     true            # Condition block

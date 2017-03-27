@@ -1,1 +1,17 @@
-I wonder why this doesn't work
+EMIT	m0	*
+FUNC	m0	baz
+TYPE	m0	[(Int,Int)]
+INPM	m0	0	m1	(Int,Int)
+EMIT	m1	*
+FUNC	m1	bar
+TYPE	m1	(Int,Int)
+INPM	m1	0	m2	(Int,Int)
+EMIT	m2	*
+FUNC	m2	bad
+TYPE	m2	(Int,Int)
+INPM	m2	0	m3	(Int,Int)
+EMIT	m3	*
+FUNC	m3	foo
+TYPE	m3	(Int,Int)
+INPP	m3	0	1	Int
+INPP	m3	1	2	Int

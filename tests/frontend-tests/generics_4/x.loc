@@ -1,6 +1,8 @@
 @type
-foo :: b -> b
-bar :: a -> a
+foo :: a -> a
+bar :: b -> b
+baz :: c -> c
+fiz :: d -> (d,[d])
 
 @path
-bar . foo . 7
+fiz . baz . bar . foo . 7
