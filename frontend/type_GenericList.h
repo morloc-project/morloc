@@ -6,12 +6,10 @@
 
 typedef struct GenericList{
     size_t size;
-    Generic ** list;
+    Ws ** list;
 } GenericList;
 
 GenericList* create_GenericList(ManifoldList* ml);
-
-Generic* access_GenericList(int gid);
 
 void print_GenericList(GenericList* gl);
 

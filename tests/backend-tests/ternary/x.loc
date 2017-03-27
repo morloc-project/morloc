@@ -3,4 +3,8 @@ core/control
 core/atomic
 
 @path R
-ternary . true &( sqrt . $1 ) &( id . $1 ) 16
+ternary .
+    true            # Condition block
+    &( sqrt . $1 )  # if block
+    &( id . $1 )    # else block
+    16              # input

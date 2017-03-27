@@ -4,8 +4,7 @@ void print_GenericList(GenericList* gl){
     fprintf(stderr, "Generic List\n");
     for(size_t i = 0; i < gl->size; i++){
         if(gl->list[i]){
-            fprintf(stderr, " - ");
-            print_Generic(gl->list[i]);
+            fprintf(stderr, " - %s\n", w_str(ws_head(gl->list[i])));
         }
     }
 }
@@ -29,7 +28,8 @@ void _r_load_generics(GenericList* gl, W* w, Manifold* m, int gmod){
             if(gl->size <= gid){
                 fprintf(stderr, "Invalid id at %s:%d\n", __func__, __LINE__);
             }
-            gl->list[gid] = append_Generic(gl->list[gid], w, m);
+            /* gl->list[gid] = append_Generic(gl->list[gid], w, m); */
+            gl->list[gid] = ws_add(gl->list[gid], w);
             break;
         }
         case FT_ATOMIC:
@@ -45,7 +45,7 @@ void _r_load_generics(GenericList* gl, W* w, Manifold* m, int gmod){
 GenericList* create_GenericList(ManifoldList* ml){ 
     GenericList* gl = (GenericList*)malloc(sizeof(GenericList));
     gl->size = get_generic_size(get_max_uid(ml)+1);
-    gl->list = (Generic**)calloc(gl->size, sizeof(Generic*));
+    gl->list = (Ws**)calloc(gl->size, sizeof(Ws*));
     for(size_t i = 0; i < ml->size; i++){
         Manifold* m = ml->list[i]; 
         for(W* type = ws_head(m->type); type; type = type->next){

@@ -106,20 +106,49 @@ groups may be merged.
 ---------------------------------------------------------------------------- */
 
 
-void _unify(W* a, W* b, ManifoldList* mlist, GenericList* glist){
+void _unify(HomoSet* a, HomoSet* b, ManifoldList* mlist, GenericList* glist){
 
     // If the a is a star, swap it with b
-    if(IS_STAR(a)){
-       W* c = a; a = b; b = c;
+    if(IS_STAR(a->type)){
+       HomoSet* c = a; a = b; b = c;
     }
 
-    if(IS_STAR(b)){
+    if(IS_STAR(b->type)){
         // transfer type from a to b
-        b->cls = a->cls;
-        b->value = a->value;
+        b->type->cls = a->type->cls;
+        b->type->value = a->type->value;
     }
 
-    // TODO: add generic support
+    if(IS_GENERIC(a->type)){
+       HomoSet* c = a; a = b; b = c;
+    }
+
+    if(IS_GENERIC(b->type)){
+        char b_symbol = g_string(g_lhs(b->type))[0];
+        size_t b_gid = get_generic_id_from_uid(b->mid, b_symbol);
+        Ws* b_glist = glist->list[b_gid];
+        /* both are generic, merge */
+        if(IS_GENERIC(a->type)){
+            char a_symbol = g_string(g_lhs(a->type))[0];
+            size_t a_gid = get_generic_id_from_uid(a->mid, a_symbol);
+            Ws* a_glist = glist->list[a_gid];
+            // If they are equal, then they have already been merged, don't repeat
+            if(a_glist != b_glist){
+               b_glist = ws_join(b_glist, a_glist);
+               a_glist = b_glist;
+            }
+        }
+
+        // one is generic, transfer type
+        else {
+            // transfer types from a to all instances of b
+            // FT_GENERIC have the form (generic_label, inferred_type), e.g.
+            // (a, Int), so we just have to set the rhs of all b to type(a)
+            for(W* g = ws_head(b_glist); g; g = g->next){
+                s_rhs(g, a->type);
+            }
+        }
+    }
 }
 
 void infer_types(Ws* ws_top, bool verbose){
@@ -139,7 +168,7 @@ void infer_types(Ws* ws_top, bool verbose){
             // This works for pairs, which is all I currently use
             HomoSet* hs = hsl->set;
             while(hs->prev) { hs = hs->prev; }
-            _unify(hs->type, hs->next->type, ml, gl);
+            _unify(hs, hs->next, ml, gl);
         }
         hsl = hsl_root;
     }
