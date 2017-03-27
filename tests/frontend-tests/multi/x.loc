@@ -1,7 +1,7 @@
 @type
 foo :: ? -> A
-bar :: void -> G
-baz :: void -> H
+bar :: Void -> G
+baz :: Void -> H
 
 @path
 foo . bar baz

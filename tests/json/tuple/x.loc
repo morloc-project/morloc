@@ -1,5 +1,5 @@
 @type
-tup :: void -> (Int, (Int, [Int]))
+tup :: Void -> (Int, (Int, [Int]))
 
 
 @path

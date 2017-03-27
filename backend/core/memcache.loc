@@ -1,8 +1,8 @@
 @type
 memcache_chk :: String -> Int -> Bool
 memcache_get :: String -> Int -> *
-memcache_put :: String -> Int -> * -> void
-memcache_del :: String -> Int -> void
+memcache_put :: String -> Int -> * -> Void
+memcache_del :: String -> Int -> Void
 
 @alias
 memcache_chk :: memcache_chk

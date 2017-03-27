@@ -1,5 +1,5 @@
 @type
-seq :: void -> [String]
+seq :: Void -> [String]
 grep :: String -> [String] -> [String]
 
 @path

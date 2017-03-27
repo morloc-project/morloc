@@ -1,5 +1,5 @@
 @type
-load_data       :: void  -> Table
+load_data       :: Void  -> Table
 select_features :: Table -> Table
 normalize       :: Table -> Table
 distance        :: Table -> Table

@@ -1,7 +1,7 @@
 @type
-foo :: Int -> void
-bar :: void -> Int
-print :: * -> void
+foo :: Int -> Void
+bar :: Void -> Int
+print :: * -> Void
 
 @path
 foo . bar

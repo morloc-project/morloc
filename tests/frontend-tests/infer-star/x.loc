@@ -1,7 +1,7 @@
 @type
-foo :: * -> void
+foo :: * -> Void
 bar :: B -> A
-baz :: void -> *
+baz :: Void -> *
 
 @path
 foo . bar . baz

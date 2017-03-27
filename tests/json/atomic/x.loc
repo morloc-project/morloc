@@ -1,6 +1,6 @@
 @type
-a_int :: void -> Int
-a_str :: void -> String
+a_int :: Void -> Int
+a_str :: Void -> String
 
 
 @path

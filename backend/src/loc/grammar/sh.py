@@ -186,7 +186,7 @@ echo "{msg}" >&2
         )
 
     def make_do_validate_if(self, m):
-        if m.type == "void":
+        if m.type == "Void":
             template = self.RUN_BLK_VOID
         else:
             template = self.RUN_BLK

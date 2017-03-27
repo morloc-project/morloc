@@ -7,9 +7,6 @@ map () {
     done < "$2"
 }
 
-@export
-map
-
 @path
 map . &(cat . cut . wc . grep . $1 ) ls . `*loc` `*py`
 

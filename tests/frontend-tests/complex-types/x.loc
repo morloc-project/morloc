@@ -1,7 +1,7 @@
 @type
 map  :: (a -> b) -> [a] -> [b]
 squ  :: Int -> Num
-yolo :: * -> [Int]
+yolo :: a -> [a]
 seq  :: Int -> Int -> [Int]
 
 @path

@@ -178,8 +178,11 @@ backend_test(){
 if $test_frontend
 then
 announce "Frontend tests"
+frontend_test generics_1         'generics_1/        -- resolve generics: a -> a ....................... '
+frontend_test generics_2         'generics_2/        -- resolve generics: a -> (a -> [a]) .............. '
+frontend_test generics_3         'generics_3/        -- resolve generics: from positional .............. '
+frontend_test generics_4         'generics_4/        -- resolve generics: propagate horizontal ......... '
 frontend_test advice             'advice/            -- equivalence of (@before, @after) to (@4, @5) ... '
-frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
 frontend_test multi              'multi/             -- test multi manifold type inference ............. '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
@@ -265,7 +268,7 @@ backend_test   r-sh-parallel main   'r-sh-parallel/     -- feed R composition in
 backend_test   sh-all        main   'sh-all/            -- uniq . sort . grep . man ....................... '
 backend_test   sh-and-r      main   'sh-and-r/          -- grep . seq ..................................... '
 backend_test   sh-cached     main   'sh-cached/         -- uniq . sort . grep . man ....................... '
-backend_test   sh-loop       map    'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
+backend_test   sh-loop       main   'sh-loop/           -- map . &( cut . wc . grep . $1 ) ls . `*.sh` .... '
 backend_test   sh-map        main   'sh-map/            -- simple test of lambda functions and map ........ '
 backend_test   sh-simple     main   'sh-simple/         -- uniq . sort . grep . man ....................... '
 backend_x_test sh-arg-and-pos       'sh-arg-and-pos/    -- umm, I dont remember why I need this one ....... '
@@ -283,6 +286,8 @@ if [[ $lang == "all" ]] ; then
 announce "Known problems"
 backend_test   sh-race         cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-import        add 'r-import/          -- fanciful import statement ...................... '
+frontend_test generics_5           'generics_5/        -- resolve generics: polytypes .................... '
+frontend_test complex-types        'complex-types/     -- test array, function and type inference ........ '
 fi
 fi
 

@@ -1,7 +1,7 @@
 #include "manifold.h"
 
-int _manifold_uid(){
-    static int uid = 0;
+size_t _manifold_uid(){
+    static size_t uid = 0;
     return uid++;
 }
 

@@ -1,0 +1,8 @@
+@type
+foo :: a -> a
+bar :: b -> b
+baz :: c -> c
+fiz :: d -> (d,[d])
+
+@path
+fiz . baz . bar . foo . 7

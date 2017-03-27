@@ -32,6 +32,8 @@ void w_clone_value(W* w);
  * default constructor.
  */
 Ws* ws_add(Ws* ws, W* w);
+// add without copy
+Ws* _ws_add(Ws* ws, W* w);
 
 Ws* ws_add_val(Ws* ws, Class cls, void* v);
 
@@ -51,6 +53,11 @@ int ws_length(Ws* ws);
 
 void ws_print(Ws* ws, Ws*(*recurse)(W*));
 
+/* This function is in ws.h instead of manifold.h because it
+ * contains many Ws and W structures, but manifold.h does not
+ * import the respective headers */
+void manifold_print(Manifold* m);
+
 char* w_str(W* w);
 
 
@@ -62,6 +69,8 @@ W* wws_new(W*);
 W* wws_new_cls(W*, Class ws_cls);
 W* wws_clone(W*);
 W* wws_add(W*, W*);
+// add without copy
+W* _wws_add(W*, W*);
 W* wws_add_val(W*, Class cls, void* v);
 W* wws_join(W*, W*);
 W* wws_tail(W*);

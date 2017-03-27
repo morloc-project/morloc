@@ -1,11 +1,18 @@
+Immediate goals
  [ ] add generics
- [ ] build data structure for types
+ [ ] allow positional arrays in path
+ [ ] allow functions in arrays
+ [ ] replace `&` with `\`
+ [ ] repeal and replace multiple composition
+ [ ] add currying
+
+Coming goals
+ [ ] allow data structures for types
  [ ] perform Curry implicit typing
- [ ] insert explicit cases 
  [ ] generate linkers to resolve type incompatibilities
  [ ] add linkers to backend
- [ ] add tuples
+ [ ] add `U x -> Bool` automatic checking
+
+Distant goals
  [ ] add type constructors
  [ ] cross-reference existing types against an ontology of types
-
- [ ] R - silence messages

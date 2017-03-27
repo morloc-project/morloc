@@ -63,6 +63,7 @@ bool w_is_ptype ( W* w ){
     switch(w->cls){
         case FT_FUNCTION:
         case FT_ATOMIC:
+        case FT_GENERIC:
         case FT_ARRAY:
         case FT_TUPLE:
             return true;
@@ -226,6 +227,21 @@ Ws* ws_recurse_section(W* w){
     Ws* rs = NULL;
     if(w->cls == T_SECTION){
         rs = ws_add_val(rs, P_WS, g_ws(g_rhs(w)));
+    }
+    return rs;
+}
+
+Ws* ws_recurse_type(W* w){
+    if(!w) return NULL;
+    Ws* rs = NULL;
+    switch(w->cls){
+        case FT_FUNCTION:
+        case FT_TUPLE:
+        case FT_ARRAY:
+            rs = ws_add_val(rs, P_WS, g_ws(w));
+            break;
+        default:
+            rs = NULL;
     }
     return rs;
 }

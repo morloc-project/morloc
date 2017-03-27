@@ -6,7 +6,7 @@
 #include <stdbool.h>
 
 typedef struct Manifold {
-    int uid;
+    size_t uid;
     char* function;
     char* lang;
     struct Ws* h0;     // Couplet<char*>

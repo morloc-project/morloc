@@ -1,5 +1,5 @@
 @type
-gentab :: void -> [[Int]]
+gentab :: Void -> [[Int]]
 
 @path py
 gentab

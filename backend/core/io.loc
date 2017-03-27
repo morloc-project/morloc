@@ -2,7 +2,7 @@
 readable   :: File -> Bool
 writable   :: File -> Bool
 executable :: File -> Bool
-record     :: File -> String -> void
+record     :: File -> String -> Void
 
 @alias
 readable   :: loc_readable

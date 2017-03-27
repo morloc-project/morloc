@@ -13,23 +13,29 @@ SRC_LEXER=${TARGET}.l
 LEXER=lex.yy
 PARSER=${TARGET}.tab
 
-OBJECTS =         \
-	label.o       \
-	couplet.o     \
-	manifold.o    \
-	section.o     \
-	w.o           \
-	ws.o          \
-	lhs.o         \
-	hof.o         \
-	ws_access.o   \
-	type.o        \
-	build_io.o    \
-	build_path.o  \
-	build_mod.o   \
-	build.o       \
-	lil.o         \
-	${LEXER}.o    \
+OBJECTS =               \
+	label.o             \
+	couplet.o           \
+	manifold.o          \
+	section.o           \
+	w.o                 \
+	ws.o                \
+	lhs.o               \
+	hof.o               \
+	ws_access.o         \
+	type_util.o         \
+	type_Generic.o      \
+	type_GenericList.o  \
+	type_HomoSet.o      \
+	type_HomoSetList.o  \
+	type_ManifoldList.o \
+	type.o              \
+	build_io.o          \
+	build_path.o        \
+	build_mod.o         \
+	build.o             \
+	lil.o               \
+	${LEXER}.o          \
 	bufstack.o
 
 ${TARGET}: ${OBJECTS} 

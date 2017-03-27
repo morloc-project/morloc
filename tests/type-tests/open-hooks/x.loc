@@ -3,9 +3,9 @@ core/atomic
 core/control
 
 @type
-null :: Int -> void
-do :: * -> Int -> void
-tostderr :: Int -> void
+null :: Int -> Void
+do :: * -> Int -> Void
+tostderr :: Int -> Void
 
 @path sh
 A :: *Foo

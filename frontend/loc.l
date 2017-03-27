@@ -264,7 +264,22 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, NAMES);
 }
 <S_TYPE>{type} {
-    W* w = w_new(FT_ATOMIC, strdup(yytext));
+    W* w = NULL;
+
+    // Types are considered to be generic if they begin with a lowercase letter
+    // AND have a length of 1. The inferred type, on the lhs of the couplet,
+    // defaults to the untyped FT_ATOMIC<'*'>. The explicit type may be
+    // inferred later. 
+    if(islower(yytext[0]) && strlen(yytext) == 1){
+        W* lhs = w_new(P_STRING, strdup(yytext));
+        W* rhs = w_new(FT_ATOMIC, "*");
+        Couplet* c = couplet_new(lhs, rhs, '=');
+        w = w_new(FT_GENERIC, c);
+    // If the type symbol is not lower case, it is considered a primitive
+    // type, e.g. Int, Bool, or Table.
+    } else {
+        w = w_new(FT_ATOMIC, strdup(yytext));
+    }
     RETURN(w, TYPE);
 }
 <S_TYPE>-> { RETURN_TOKEN(ARROW); }
@@ -332,6 +347,7 @@ void print_usage_and_exit(int exit_status){
 "Usage: loc [options] myfile.loc\n"
 "Arguments:\n"
 "  -c  run the typechecker on manifolds\n"
+"  -z  print type debugging info"
 "  -t  print tokens\n"
 "  -h  print this help message and exit\n"
 "  -l  suppress normal LIL output\n"
@@ -343,10 +359,11 @@ void print_usage_and_exit(int exit_status){
 int main(int argc, char ** argv){
 
     // === flags ====================================================
-    bool run_typechecker = false; // type check the manifolds
-    bool log_tokens = false;      // print tokens
-    bool suppress_lil = false;    // don't print LIL
-    bool dump_table = false;      // recursively dump symbol table
+    bool run_typechecker = false;  // type check the manifolds
+    bool print_type_debug = false; // print type debugging info
+    bool log_tokens = false;       // print tokens
+    bool suppress_lil = false;     // don't print LIL
+    bool dump_table = false;       // recursively dump symbol table
     // --------------------------------------------------------------
 
     // has the loc source file been loaded successfully
@@ -364,6 +381,9 @@ int main(int argc, char ** argv){
         if(argv[1][0] == '-'){
             while(++argv[1] && argv[1][0] != '\0'){
                 switch(argv[1][0]){
+                    case 'z':
+                        print_type_debug = true;
+                        break;
                     case 'c':
                         run_typechecker = true; 
                         break;
@@ -415,19 +435,14 @@ int main(int argc, char ** argv){
     //  - resolve group references
     //  - link manifolds to their modifiers
     //  - link manifolds inputs to manifold outputs 
-    build_manifolds(global_table);
+    build_manifolds(global_table, print_type_debug);
 
     // extract LIL as list of lists
     Ws* lil = build_lil(global_table);
 
-    // check the types of all manifolds
-    W* msg = type_check(global_table);
-
-
     // === print statements =========================================
-    if(   dump_table      ) ws_print(global_table, ws_recurse_most);
+    if(   dump_table      ) ws_print(global_table, ws_recurse_most); 
     if( ! suppress_lil    ) print_lil(lil);
-    if(   run_typechecker ) print_error(msg);
     // --------------------------------------------------------------
 
 

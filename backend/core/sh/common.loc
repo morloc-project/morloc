@@ -2,9 +2,9 @@
 
 echo :: MULTI -> String
 
-cp :: File -> File -> void
+cp :: File -> File -> Void
 
-mkdir :: File -> void
+mkdir :: File -> Void
 
 # === problematic types ===
 

@@ -1,6 +1,6 @@
 @type
-f :: void -> A
-g :: A -> void
+f :: Void -> A
+g :: A -> Void
 
 @path
 foo :: g . f

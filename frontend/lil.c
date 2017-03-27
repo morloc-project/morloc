@@ -255,7 +255,7 @@ Ws* _hook(Ws* lil, Ws* ws, char* p, Manifold* m){
 
 char* _mid(Manifold* m){
     char* s = (char*)calloc(20, sizeof(char));
-    sprintf(s, "m%d", m->uid);
+    sprintf(s, "m%lu", m->uid);
     return s;
 }
 

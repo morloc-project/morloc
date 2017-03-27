@@ -11,7 +11,7 @@ universal_to_atom = {
     "File"   : "as.character({x})",
     "Bool"   : "switch(x, true=TRUE, false=FALSE, NA)",
     "Text"   : "read_lines({x})",
-    "void"   : "NULL"
+    "Void"   : "NULL"
 }
 
 nat2uni_top = '''
@@ -35,7 +35,7 @@ atom_to_universal = {
     "File"   : "{x}",
     "Bool"   : "if({x}){{ 'true' }} else {{ 'false' }}",
     "Text"   : "as_file({x})",
-    "void"   : "NULL"
+    "Void"   : "NULL"
 }
 
 universal_to_natural = '''

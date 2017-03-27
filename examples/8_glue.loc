@@ -9,8 +9,8 @@ write: `read_tsv(url, comment="#", col_names=FALSE)` and bypass the shell
 function altogether.
 
 @type
-prepare :: void -> File
-analyze :: File -> void
+prepare :: Void -> File
+analyze :: File -> Void
 
 @path
 analyze . prepare
