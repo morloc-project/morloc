@@ -10,12 +10,9 @@ core/datcache
 @export
 cat
 
-@path
+@path sh
 R :: random
 A :: cat . <random> <random>
-
-@lang
-* :: sh
 
 @cache
 random :: datcache

@@ -182,9 +182,7 @@ frontend_test generics_1         'generics_1/        -- resolve generics: a -> a
 frontend_test generics_2         'generics_2/        -- resolve generics: a -> (a -> [a]) .............. '
 frontend_test generics_3         'generics_3/        -- resolve generics: from positional .............. '
 frontend_test generics_4         'generics_4/        -- resolve generics: propagate horizontal ......... '
-frontend_test generics_5         'generics_5/        -- resolve generics: polytypes .................... '
 frontend_test advice             'advice/            -- equivalence of (@before, @after) to (@4, @5) ... '
-frontend_test complex-types      'complex-types/     -- test array, function and type inference ........ '
 frontend_test lang-spec          'lang-spec/         -- language specific sections ..................... '
 frontend_test multi              'multi/             -- test multi manifold type inference ............. '
 frontend_test path-lang          'path-lang/         -- @path german ... @lang french .................. '
@@ -288,6 +286,8 @@ if [[ $lang == "all" ]] ; then
 announce "Known problems"
 backend_test   sh-race         cat 'sh-race/           -- cat . <random> <random> ........................ '
 backend_test   r-import        add 'r-import/          -- fanciful import statement ...................... '
+frontend_test generics_5           'generics_5/        -- resolve generics: polytypes .................... '
+frontend_test complex-types        'complex-types/     -- test array, function and type inference ........ '
 fi
 fi
 
