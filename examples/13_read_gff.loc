@@ -1,0 +1,125 @@
+@comment
+
+function readGFF(
+    filename,
+    print_comments=FALSE
+    print_stats=FALSE
+    plot_lengths=FALSE
+    write_logs=FALSE
+    validate_column_types=FALSE
+    start_lt_stop=FALSE
+    has_CDS=FALSE
+){
+    if(!file.exists(filename)){
+        ....
+    }
+
+    if(print_comments){
+        # system call to grep
+    }
+
+    # read gff
+
+    if(print_stats){ ... }
+    if(plot_lengths){ ... }
+    if(write_logs){ ... }
+    if(validate_column_types){ ... }
+    if(start_lt_stop){ ... }
+    if(has_CDS){ ... }
+    
+    gff
+}
+
+@path
+analysis . readGFF . *gff
+
+gff :: "al.gff"
+
+
+@check
+readGFF :: file.exists . *gff
+
+@before
+analysis :: print_comments . *gff "comments.txt"
+analysis :: print_stats    . *gff "stats.txt"
+analysis :: plot_lengths   . <readGFF> "lengths.pdf"
+analysis :: write_logs     . <readGFF> "gff.log"
+
+@check
+analysis :: validate_column_types . <readGFF>
+analysis :: start_lt_stop         . <readGFF>
+analysis :: has_feature           . "CDS" <readGFF>
+
+@lang
+* :: R
+print_comments :: sh
+
+@source R
+
+gff_colnames = c(
+  "seqname", "source", "feature", "start", "end",
+  "score", "strand", "frame", "attributes")
+
+analysis <- function(x) {
+  # do stuff
+}
+
+readGFF <- function(x) {
+  gff = read.table(
+    gffFile,
+    sep="\t",
+    stringsAsFactors=FALSE,
+    quote="",
+    header=FALSE,
+    comment.char="#",
+  )
+  colnames(gff) = gff_colnames
+  gff
+}
+
+validate_columns <- function(x) {
+    valid <- TRUE
+    if(ncol(x) != 9){
+        warning("GFF expected to have 9 columns")
+        valid <- FALSE
+    }
+    if(!all(names(x) == gff_colnames)){
+        msg <- "Expected column names: %s"
+        warning(sprintf(msg, paste(gff_colnames, collapse=", ")))
+        valid <- FALSE
+    }
+    if(!is.numeric(x$start) || !is.numeric(x$end)){
+        warning("start and end fields in GFF must be numeric")
+        valid <- FALSE
+    }
+    if(!all(x$strand %in% c("+", "-", "."))){
+        warning("strand expected to only have characters [+-.]")
+        valid <- FALSE
+    }
+    valid
+}
+
+start_lt_stop <- function(x){
+    if(all(x$start > x$end)){
+        TRUE
+    } else {
+        warning("GFF start > end")
+        FALSE
+    }
+}
+
+has_feature <- function(feature, x){
+    if(feature %in% x$feature){
+        TRUE
+    } else {
+        msg <- "features '%s' is missing in GFF"
+        warning(sprintf(msg, feature))
+        FALSE
+    }
+}
+
+
+@source sh
+print_comments (){
+    grep '^#' $1 > $2
+}
