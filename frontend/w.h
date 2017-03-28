@@ -39,7 +39,7 @@ typedef enum {
     T_ALIAS,
     T_ARGUMENT,
     T_CACHE,
-    T_CHECK, // T for top level
+    T_ASSERT, // T for top level
     T_DOC,
     T_EXPORT,
     T_FAIL,

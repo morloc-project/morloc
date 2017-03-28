@@ -35,7 +35,7 @@ Ws* global_table;
 %token <W*> SECTION_HOOK
 %token <W*> SECTION_CACHE
 %token <W*> SECTION_PATH
-%token <W*> SECTION_CHECK
+%token <W*> SECTION_ASSERT
 %token <W*> SECTION_FAIL
 %token <W*> SECTION_ALIAS
 %token <W*> SECTION_LANG
@@ -53,7 +53,7 @@ Ws* global_table;
 %type <W*> s_path
 %type <W*> s_hook
 %type <W*> s_cache
-%type <W*> s_check
+%type <W*> s_assert
 %type <W*> s_fail
 %type <W*> s_alias
 %type <W*> s_lang
@@ -85,7 +85,7 @@ section
     : s_path
     | s_hook
     | s_cache
-    | s_check
+    | s_assert
     | s_fail
     | s_alias
     | s_lang
@@ -117,10 +117,10 @@ s_hook
         w_make_couplet($1, $2, $3, w_new(P_WS, $4), c);
     }
 
-s_check
-    : SECTION_CHECK { $$ = $1; }
-    | s_check SELECTION COUPLE maybe_composition {
-        w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_CHECK);
+s_assert
+    : SECTION_ASSERT { $$ = $1; }
+    | s_assert SELECTION COUPLE maybe_composition {
+        w_make_couplet($1, $2, $3, w_new(P_WS, $4), T_ASSERT);
     }
 
 s_fail

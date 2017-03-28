@@ -20,7 +20,7 @@ typedef struct Manifold {
     struct Ws* h8;     // "
     struct Ws* h9;     // "
     struct Ws* cache;  // "
-    struct Ws* check;  // "
+    struct Ws* assert; // "
     struct Ws* fail;   // "
     struct Ws* doc;    // "
     struct Ws* inputs; // Couplet<Manifold*>

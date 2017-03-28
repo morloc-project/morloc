@@ -36,7 +36,7 @@ analysis . readGFF . *gff
 gff :: "al.gff"
 
 
-@check
+@assert
 readGFF :: file.exists . *gff
 
 @before
@@ -45,7 +45,7 @@ analysis :: print_stats    . *gff "stats.txt"
 analysis :: plot_lengths   . <readGFF> "lengths.pdf"
 analysis :: write_logs     . <readGFF> "gff.log"
 
-@check
+@assert
 analysis :: validate_column_types . <readGFF>
 analysis :: start_lt_stop         . <readGFF>
 analysis :: has_feature           . "CDS" <readGFF>

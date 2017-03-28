@@ -28,7 +28,7 @@ select_features :: cols=[1,2,3,4]
 cluster:kmeans :: kmeans_cluster
 cluster:spectral :: spectral_cluster
 
-@check R
+@assert R
 normalize :: columns_are_numeric . <select_features>
 
 @fail R

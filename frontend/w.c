@@ -33,7 +33,7 @@ VType get_value_type(Class cls){
         case T_H8:
         case T_H9:
         case C_POSITIONAL: // Couplet<type:P_STRING,value:P_STRING>
-        case T_CHECK:
+        case T_ASSERT:
         case T_FAIL:
         case T_ALIAS:
         case T_LANG:
@@ -177,7 +177,7 @@ char* w_class_str(Class cls){
         case T_ARGUMENT:   s = strdup("T_ARGUMENT")   ; break;
         case T_ALIAS:      s = strdup("T_ALIAS")      ; break;
         case T_CACHE:      s = strdup("T_CACHE")      ; break;
-        case T_CHECK:      s = strdup("T_CHECK")      ; break;
+        case T_ASSERT:     s = strdup("T_ASSERT")     ; break;
         case T_DOC:        s = strdup("T_DOC")        ; break;
         case T_EXPORT:     s = strdup("T_EXPORT")     ; break;
         case T_FAIL:       s = strdup("T_FAIL")       ; break;

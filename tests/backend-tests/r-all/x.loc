@@ -35,7 +35,7 @@ null . hclust . dist . normalize . load_data
 @cache
 hclust,dist,normalize :: datcache
 
-@check
+@assert
 normalize := columns_are_numeric . <load_data>
 
 @fail

@@ -114,7 +114,7 @@ lang ([ ]+[^ \t\n\r]+)?
 @include {  BEGIN(S_INCLUDE); }
 
 @path{lang}     { BEGIN(S_PATH)     ; RETURN_SECTION ( SECTION_PATH     ) ; }
-@check{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_CHECK    ) ; }
+@assert{lang}   { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_ASSERT   ) ; }
 @fail{lang}     { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_FAIL     ) ; }
 
 @[0-9]{lang}    { BEGIN(S_SIDE)     ; RETURN_SECTION ( SECTION_HOOK     ) ; } 

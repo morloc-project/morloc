@@ -88,7 +88,7 @@ bool w_is_named_composition(W* w){
         case T_H7:
         case T_H8:
         case T_H9:
-        case T_CHECK:
+        case T_ASSERT:
         case T_FAIL:
             return true;
         default:
@@ -273,7 +273,7 @@ Ws* ws_recurse_composition(W* w){
         case T_H7:
         case T_H8:
         case T_H9:
-        case T_CHECK:
+        case T_ASSERT:
         case T_FAIL:
             rs = ws_add_val(rs, C_NEST, g_ws(g_rhs(w)));
             break;
@@ -384,7 +384,7 @@ Ws* ws_recurse_path(W* w, W* p){
         case T_H7:
         case T_H8:
         case T_H9:
-        case T_CHECK:
+        case T_ASSERT:
         case T_FAIL:
             rs =
                 (wws_length(g_lhs(p)) == 1 || w_equal_lhs(p, w))

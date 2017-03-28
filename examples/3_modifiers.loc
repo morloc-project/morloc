@@ -8,7 +8,7 @@ rnorm:main .
 @lang
 * :: R
 
-@check
+@assert
 rnorm:main :: is.positive . <rnorm:sd>
 
 @arg

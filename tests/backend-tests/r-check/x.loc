@@ -16,7 +16,7 @@ sqrt . max . seq . -1 -10
 @lang
 * :: R
 
-@check
+@assert
 sqrt := is_positive . <max>
 
 @fail

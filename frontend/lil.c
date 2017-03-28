@@ -198,7 +198,7 @@ Ws* _manifold_to_lil(W* cm){
         }
     }
 
-    lil = _pathmod(lil, m->check,  LIL_CHECK,  m);
+    lil = _pathmod(lil, m->assert,  LIL_ASSERT,  m);
     lil = _pathmod(lil, m->fail,   LIL_FAIL,   m);
 
     lil = _hook(lil, m->h0,   "0",   m);

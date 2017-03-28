@@ -24,7 +24,7 @@ cat :: file="/dev/stderr"
 @cache
 foo :: memcache
 
-@check
+@assert
 foo :: true
 
 @0

@@ -79,7 +79,7 @@ bool _manifold_modifier(W* w){
         case T_H8:
         case T_H9:
         case T_CACHE:
-        case T_CHECK:
+        case T_ASSERT:
         case T_FAIL:
         case T_ALIAS:
         case T_DOC:
@@ -176,11 +176,11 @@ void _add_modifier(W* w, W* p){
         case T_H8: m->h8 = g_ws(rhs) ? _do_operation(m->h8, g_ws(rhs)->head, op) : NULL; break;
         case T_H9: m->h9 = g_ws(rhs) ? _do_operation(m->h9, g_ws(rhs)->head, op) : NULL; break;
 
-        case T_CHECK:                              
-            m->check  = g_ws(rhs) ? _do_operation( m->check  , g_ws(rhs)->head, op) : NULL;
+        case T_ASSERT:                              
+            m->assert  = g_ws(rhs) ? _do_operation(m->assert, g_ws(rhs)->head, op) : NULL;
             break;                                 
         case T_FAIL:                               
-            m->fail   = g_ws(rhs) ? _do_operation( m->fail   , g_ws(rhs)->head, op) : NULL;
+            m->fail   = g_ws(rhs) ? _do_operation(m->fail, g_ws(rhs)->head, op) : NULL;
             break;
 
         case T_ARGUMENT:
