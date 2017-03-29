@@ -19,7 +19,7 @@
 #define LIL_FUNCTION_INPUT   "INPF"
 #define LIL_ARG_INPUT        "INPA"
 #define LIL_N_MANIFOLD_ARGS  "NARG"
-#define LIL_CHECK            "CHEK"
+#define LIL_ASSERT           "CHEK"
 #define LIL_FAIL             "FAIL"
 #define LIL_CACHE            "CACH"
 #define LIL_MANIFOLD_DOC     "MDOC"

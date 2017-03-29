@@ -1,0 +1,99 @@
+##gff-version 3
+#!gff-spec-version 1.21
+#!processor NCBI annotwriter
+#!genome-build v.1.0
+#!genome-build-accession NCBI_Assembly:GCF_000004255.1
+##sequence-region NW_003302555.1 1 33132539
+##species http://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=81972
+NW_003302555.1	RefSeq	gene	47	2523	.	-	.	ID=gene0;Dbxref=GeneID:9330760;Name=ARALYDRAFT_887207;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_887207
+NW_003302555.1	RefSeq	mRNA	47	2523	.	-	.	ID=rna0;Parent=gene0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;Name=XM_002891972.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	2444	2523	.	-	.	ID=id1;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	2124	2347	.	-	.	ID=id2;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	1803	2035	.	-	.	ID=id3;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	1423	1642	.	-	.	ID=id4;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	407	782	.	-	.	ID=id5;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	exon	47	252	.	-	.	ID=id6;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
+NW_003302555.1	RefSeq	CDS	2444	2503	.	-	0	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	CDS	2124	2347	.	-	0	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	CDS	1803	2035	.	-	1	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	CDS	1423	1642	.	-	2	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	CDS	407	782	.	-	1	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	CDS	67	252	.	-	0	ID=cds0;Parent=rna0;Dbxref=InterPro:IPR006088,JGIDB:Araly1_887207,Genbank:XP_002892018.1,GeneID:9330760;Name=XP_002892018.1;Note=similar to possible aldehyde decarbonylase%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892018.1
+NW_003302555.1	RefSeq	gene	3311	6198	.	-	.	ID=gene1;Dbxref=GeneID:9328081;Name=ARALYDRAFT_470048;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_470048
+NW_003302555.1	RefSeq	mRNA	3311	6198	.	-	.	ID=rna1;Parent=gene1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;Name=XM_002891973.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	5631	6198	.	-	.	ID=id7;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	5319	5538	.	-	.	ID=id8;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	4851	5228	.	-	.	ID=id9;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	4730	4736	.	-	.	ID=id10;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	4483	4590	.	-	.	ID=id11;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	4164	4364	.	-	.	ID=id12;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	3810	4082	.	-	.	ID=id13;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	3513	3708	.	-	.	ID=id14;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	exon	3311	3490	.	-	.	ID=id15;Parent=rna1;Dbxref=Genbank:XM_002891973.1,GeneID:9328081;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891973.1
+NW_003302555.1	RefSeq	CDS	5631	6123	.	-	0	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	5319	5538	.	-	2	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	4851	5228	.	-	1	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	4730	4736	.	-	1	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	4483	4590	.	-	0	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	4164	4364	.	-	0	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	3810	4082	.	-	0	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	CDS	3529	3708	.	-	0	ID=cds1;Parent=rna1;Dbxref=InterPro:IPR006088,JGIDB:Araly1_470048,Genbank:XP_002892019.1,GeneID:9328081;Name=XP_002892019.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892019.1
+NW_003302555.1	RefSeq	gene	7429	7630	.	+	.	ID=gene2;Dbxref=GeneID:9328082;Name=ARALYDRAFT_887209;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_887209
+NW_003302555.1	RefSeq	mRNA	7429	7630	.	+	.	ID=rna2;Parent=gene2;Dbxref=Genbank:XM_002889282.1,GeneID:9328082;Name=XM_002889282.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889282.1
+NW_003302555.1	RefSeq	exon	7429	7630	.	+	.	ID=id16;Parent=rna2;Dbxref=Genbank:XM_002889282.1,GeneID:9328082;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889282.1
+NW_003302555.1	RefSeq	CDS	7449	7610	.	+	0	ID=cds2;Parent=rna2;Dbxref=JGIDB:Araly1_887209,Genbank:XP_002889328.1,GeneID:9328082;Name=XP_002889328.1;Note=similar to unnamed protein product%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002889328.1
+NW_003302555.1	RefSeq	gene	9512	10567	.	+	.	ID=gene3;Dbxref=GeneID:9325393;Name=ARALYDRAFT_470049;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_470049
+NW_003302555.1	RefSeq	mRNA	9512	10567	.	+	.	ID=rna3;Parent=gene3;Dbxref=Genbank:XM_002889283.1,GeneID:9325393;Name=XM_002889283.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889283.1
+NW_003302555.1	RefSeq	exon	9512	9564	.	+	.	ID=id17;Parent=rna3;Dbxref=Genbank:XM_002889283.1,GeneID:9325393;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889283.1
+NW_003302555.1	RefSeq	exon	9576	9657	.	+	.	ID=id18;Parent=rna3;Dbxref=Genbank:XM_002889283.1,GeneID:9325393;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889283.1
+NW_003302555.1	RefSeq	exon	9873	10567	.	+	.	ID=id19;Parent=rna3;Dbxref=Genbank:XM_002889283.1,GeneID:9325393;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002889283.1
+NW_003302555.1	RefSeq	CDS	9576	9657	.	+	0	ID=cds3;Parent=rna3;Dbxref=JGIDB:Araly1_470049,Genbank:XP_002889329.1,GeneID:9325393;Name=XP_002889329.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002889329.1
+NW_003302555.1	RefSeq	CDS	9873	10471	.	+	2	ID=cds3;Parent=rna3;Dbxref=JGIDB:Araly1_470049,Genbank:XP_002889329.1,GeneID:9325393;Name=XP_002889329.1;Note=conserved hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002889329.1
+NW_003302555.1	RefSeq	gene	10652	11944	.	-	.	ID=gene4;Dbxref=GeneID:9325394;Name=ARALYDRAFT_677681;end_range=11944,.;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_677681;partial=true;start_range=.,10652
+NW_003302555.1	RefSeq	mRNA	10652	11944	.	-	.	ID=rna4;Parent=gene4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;Name=XM_002891974.1;end_range=11944,.;gbkey=mRNA;partial=true;product=predicted protein;start_range=.,10652;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	exon	11813	11944	.	-	.	ID=id20;Parent=rna4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;end_range=11944,.;gbkey=mRNA;partial=true;product=predicted protein;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	exon	11260	11619	.	-	.	ID=id21;Parent=rna4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;gbkey=mRNA;partial=true;product=predicted protein;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	exon	11044	11202	.	-	.	ID=id22;Parent=rna4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;gbkey=mRNA;partial=true;product=predicted protein;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	exon	10782	11006	.	-	.	ID=id23;Parent=rna4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;gbkey=mRNA;partial=true;product=predicted protein;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	exon	10652	10711	.	-	.	ID=id24;Parent=rna4;Dbxref=Genbank:XM_002891974.1,GeneID:9325394;gbkey=mRNA;partial=true;product=predicted protein;start_range=.,10652;transcript_id=XM_002891974.1
+NW_003302555.1	RefSeq	CDS	11813	11944	.	-	0	ID=cds4;Parent=rna4;Dbxref=JGIDB:Araly1_677681,Genbank:XP_002892020.1,GeneID:9325394;Name=XP_002892020.1;end_range=11944,.;gbkey=CDS;partial=true;product=hypothetical protein;protein_id=XP_002892020.1
+NW_003302555.1	RefSeq	CDS	11260	11619	.	-	0	ID=cds4;Parent=rna4;Dbxref=JGIDB:Araly1_677681,Genbank:XP_002892020.1,GeneID:9325394;Name=XP_002892020.1;gbkey=CDS;partial=true;product=hypothetical protein;protein_id=XP_002892020.1
+NW_003302555.1	RefSeq	CDS	11044	11202	.	-	0	ID=cds4;Parent=rna4;Dbxref=JGIDB:Araly1_677681,Genbank:XP_002892020.1,GeneID:9325394;Name=XP_002892020.1;gbkey=CDS;partial=true;product=hypothetical protein;protein_id=XP_002892020.1
+NW_003302555.1	RefSeq	CDS	10782	11006	.	-	0	ID=cds4;Parent=rna4;Dbxref=JGIDB:Araly1_677681,Genbank:XP_002892020.1,GeneID:9325394;Name=XP_002892020.1;gbkey=CDS;partial=true;product=hypothetical protein;protein_id=XP_002892020.1
+NW_003302555.1	RefSeq	CDS	10652	10711	.	-	0	ID=cds4;Parent=rna4;Dbxref=JGIDB:Araly1_677681,Genbank:XP_002892020.1,GeneID:9325394;Name=XP_002892020.1;gbkey=CDS;partial=true;product=hypothetical protein;protein_id=XP_002892020.1
+NW_003302555.1	RefSeq	gene	12552	13416	.	-	.	ID=gene5;Dbxref=GeneID:9328083;Name=ARALYDRAFT_470051;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_470051
+NW_003302555.1	RefSeq	mRNA	12552	13416	.	-	.	ID=rna5;Parent=gene5;Dbxref=Genbank:XM_002891975.1,GeneID:9328083;Name=XM_002891975.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891975.1
+NW_003302555.1	RefSeq	exon	13395	13416	.	-	.	ID=id25;Parent=rna5;Dbxref=Genbank:XM_002891975.1,GeneID:9328083;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891975.1
+NW_003302555.1	RefSeq	exon	13267	13382	.	-	.	ID=id26;Parent=rna5;Dbxref=Genbank:XM_002891975.1,GeneID:9328083;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891975.1
+NW_003302555.1	RefSeq	exon	12873	12949	.	-	.	ID=id27;Parent=rna5;Dbxref=Genbank:XM_002891975.1,GeneID:9328083;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891975.1
+NW_003302555.1	RefSeq	exon	12552	12843	.	-	.	ID=id28;Parent=rna5;Dbxref=Genbank:XM_002891975.1,GeneID:9328083;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891975.1
+NW_003302555.1	RefSeq	CDS	13267	13357	.	-	0	ID=cds5;Parent=rna5;Dbxref=InterPro:IPR010625,JGIDB:Araly1_470051,Genbank:XP_002892021.1,GeneID:9328083;Name=XP_002892021.1;Note=similar to unknown protein%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892021.1
+NW_003302555.1	RefSeq	CDS	12873	12949	.	-	2	ID=cds5;Parent=rna5;Dbxref=InterPro:IPR010625,JGIDB:Araly1_470051,Genbank:XP_002892021.1,GeneID:9328083;Name=XP_002892021.1;Note=similar to unknown protein%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892021.1
+NW_003302555.1	RefSeq	CDS	12739	12843	.	-	0	ID=cds5;Parent=rna5;Dbxref=InterPro:IPR010625,JGIDB:Araly1_470051,Genbank:XP_002892021.1,GeneID:9328083;Name=XP_002892021.1;Note=similar to unknown protein%3B expressed hypothetical protein;gbkey=CDS;product=hypothetical protein;protein_id=XP_002892021.1
+NW_003302555.1	RefSeq	gene	13702	15386	.	-	.	ID=gene6;Dbxref=GeneID:9328084;Name=ARALYDRAFT_887213;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_887213
+NW_003302555.1	RefSeq	mRNA	13702	15386	.	-	.	ID=rna6;Parent=gene6;Dbxref=Genbank:XM_002891976.1,GeneID:9328084;Name=XM_002891976.1;gbkey=mRNA;product=pentatricopeptide repeat-containing protein;transcript_id=XM_002891976.1
+NW_003302555.1	RefSeq	exon	15007	15386	.	-	.	ID=id29;Parent=rna6;Dbxref=Genbank:XM_002891976.1,GeneID:9328084;gbkey=mRNA;product=pentatricopeptide repeat-containing protein;transcript_id=XM_002891976.1
+NW_003302555.1	RefSeq	exon	13702	14936	.	-	.	ID=id30;Parent=rna6;Dbxref=Genbank:XM_002891976.1,GeneID:9328084;gbkey=mRNA;product=pentatricopeptide repeat-containing protein;transcript_id=XM_002891976.1
+NW_003302555.1	RefSeq	CDS	15007	15363	.	-	0	ID=cds6;Parent=rna6;Dbxref=InterPro:IPR002885,JGIDB:Araly1_887213,Genbank:XP_002892022.1,GeneID:9328084;Name=XP_002892022.1;gbkey=CDS;product=pentatricopeptide repeat-containing protein;protein_id=XP_002892022.1
+NW_003302555.1	RefSeq	CDS	13722	14936	.	-	0	ID=cds6;Parent=rna6;Dbxref=InterPro:IPR002885,JGIDB:Araly1_887213,Genbank:XP_002892022.1,GeneID:9328084;Name=XP_002892022.1;gbkey=CDS;product=pentatricopeptide repeat-containing protein;protein_id=XP_002892022.1
+NW_003302555.1	RefSeq	gene	15665	19464	.	-	.	ID=gene7;Dbxref=GeneID:9328085;Name=ARALYDRAFT_887214;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_887214
+NW_003302555.1	RefSeq	mRNA	15665	19464	.	-	.	ID=rna7;Parent=gene7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;Name=XM_002891977.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	19419	19464	.	-	.	ID=id31;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	19254	19339	.	-	.	ID=id32;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	19143	19184	.	-	.	ID=id33;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	19010	19055	.	-	.	ID=id34;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	18847	18933	.	-	.	ID=id35;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	18687	18742	.	-	.	ID=id36;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	18425	18542	.	-	.	ID=id37;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	18246	18304	.	-	.	ID=id38;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	18062	18133	.	-	.	ID=id39;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	17884	17947	.	-	.	ID=id40;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	17676	17779	.	-	.	ID=id41;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	17403	17474	.	-	.	ID=id42;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	17206	17292	.	-	.	ID=id43;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	17048	17115	.	-	.	ID=id44;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	16813	16881	.	-	.	ID=id45;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	16652	16734	.	-	.	ID=id46;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	16343	16442	.	-	.	ID=id47;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	16032	16097	.	-	.	ID=id48;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1
+NW_003302555.1	RefSeq	exon	15841	15934	.	-	.	ID=id49;Parent=rna7;Dbxref=Genbank:XM_002891977.1,GeneID:9328085;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891977.1

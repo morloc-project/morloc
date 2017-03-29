@@ -11,7 +11,7 @@ b := wish_i_were_a_geologist
 b :+ get_back_to_work
 b :- <wish_i_were_a_geologist>
 
-@check
+@assert
 c := is_wearing_appropriately_shiny_attire
 c :+ is_wearing_the_sanctioned_shoes
 c :- <is_wearing_the_sanctioned_shoes>

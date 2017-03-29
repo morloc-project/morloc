@@ -38,10 +38,12 @@ syn match DEFAULT_ERROR '@\S*'  contained
 syn match DEFAULT_ERROR '\S\+'  contained
 syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
-syn keyword DEFAULT_ERROR id null map true false nothing contained
-syn keyword DEFAULT_ERROR and or not any all             contained
-syn keyword DEFAULT_ERROR memcache datcache nocache      contained
-syn keyword DEFAULT_ERROR TRUE NULL RESET FALSE ?        contained
+syn keyword DEFAULT_ERROR id null true false nothing          contained
+syn keyword DEFAULT_ERROR filter ternary map                  contained
+syn keyword DEFAULT_ERROR readable writable executable record contained
+syn keyword DEFAULT_ERROR and or not any all                  contained
+syn keyword DEFAULT_ERROR memcache datcache nocache           contained
+syn keyword DEFAULT_ERROR TRUE NULL RESET FALSE ?             contained
 " syn keyword DEFAULT_ERROR as                             contained
 
 " define todo highlighting
@@ -64,7 +66,7 @@ syn keyword s_constant __all__   contained
 syn match s_section '@alias'    contained
 syn match s_section '@arg'      contained
 syn match s_section '@cache'    contained
-syn match s_section '@check'    contained
+syn match s_section '@assert'   contained
 syn match s_section '@comment'  contained
 syn match s_section '@doc'      contained
 syn match s_section '@[0-9]'    contained
@@ -85,9 +87,10 @@ syn match s_section '@source'   contained
 " Section specific syntax
 
 " general default functions
-syn keyword s_simple_function id null map true false contained
-syn keyword s_simple_function nothing do             contained
-syn keyword s_logical_op and or not any all          contained
+syn keyword s_simple_function id null true false nothing          contained
+syn keyword s_simple_function filter ternary map                  contained
+syn keyword s_simple_function readable writable executable record contained
+syn keyword s_logical_op and or not any all                       contained
 
 syn match s_var  /\h[\w.0-9-]*/                      contained
 syn match s_arg  /--\?\w*/                           contained
@@ -127,7 +130,7 @@ syn region s_string start=/"/ end=/"/ contained
 
 
 " define terms used in types
-syn keyword s_type void contained
+syn keyword s_type Void contained
 syn match   s_type /?/  contained
 
 " keywords
@@ -168,7 +171,7 @@ syn region r_comment  start=/@comment/    end=/@\@=/ skip=/\\@/
 syn region r_alias    start=/@alias/      end=/@\@=/ contains=@c_global,c_equal,@c_hasarg,@c_modify,s_utility
                                           
 syn region r_path     start=/@path/       end=/@\@=/ contains=@c_global,@c_couple,@c_hasarg,@c_path
-syn region r_check    start=/@check/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
+syn region r_assert   start=/@assert/     end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
 syn region r_effect   start=/@[0-9]/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
 syn region r_effect   start=/@before/     end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path
 syn region r_effect   start=/@after/      end=/@\@=/ contains=@c_global,@c_hasarg,@c_modify,@c_path

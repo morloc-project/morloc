@@ -16,7 +16,7 @@ foo :: g . f
 @cache
 g :: _cache
 
-@check
+@assert
 g :: _check
 
 @alias

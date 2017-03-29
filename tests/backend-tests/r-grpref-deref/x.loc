@@ -45,7 +45,7 @@ Cluster :: &( null . hclust . dist . normalize . load_data . $1 )
 @cache
 hclust,dist,normalize,load_data :: datcache
 
-@check
+@assert
 normalize :: columns_are_numeric . <load_data>
 dist :: not . is.null . <normalize>
 hclust :: not . is.null . <dist>

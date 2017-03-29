@@ -1,0 +1,162 @@
+@comment
+
+function readGFF(
+    filename,
+    print_comments=FALSE
+    print_stats=FALSE
+    plot_lengths=FALSE
+    validate_columns=FALSE
+    start_lt_stop=FALSE
+    has_CDS=FALSE
+){
+    if(!file.exists(filename)){
+        ....
+    }
+
+    if(print_comments){
+        # system call to grep
+    }
+
+    # read gff
+
+    if(print_stats){ ... }
+    if(plot_lengths){ ... }
+    if(validate_columns){ ... }
+    if(start_lt_stop){ ... }
+    if(has_CDS){ ... }
+    
+    gff
+}
+
+@type
+get_outdir :: File -> File
+
+@path
+_ :: analysis . readGFF . *gff
+_ :: get_outdir . *gff
+
+gff :: "al.gff"
+
+out_comments :: "comments.txt"
+out_stats :: "stats.txt"
+out_lengths :: "lengths.pdf"
+
+@assert
+readGFF :: file.exists . *gff
+
+@before
+analysis :+ print_comments . *gff *out_comments
+analysis :+ print_stats    . <readGFF> *out_stats
+analysis :+ plot_lengths   . <readGFF> *out_lengths
+
+@after
+analysis :+ mkdir . <get_outdir>
+analysis :+ mv .
+    *out_comments
+    *out_stats
+    *out_lengths
+    <get_outdir>
+
+@assert
+analysis :+ validate_columns . <readGFF>
+analysis :+ start_lt_stop    . <readGFF>
+analysis :+ has_feature      . "CDS" <readGFF>
+
+@lang
+* :: R
+print_comments ,
+mkdir          ,
+mv             ,
+get_outdir     :: sh
+
+@source R
+
+gff_colnames = c(
+  "seqname", "source", "feature", "start", "end",
+  "score", "strand", "frame", "attributes")
+
+analysis <- function(x) {
+  # do stuff
+}
+
+print_stats <- function(gff, outfile){
+    sink(outfile)
+    gff$feature <- as.factor(gff$feature)
+    gff$strand  <- as.factor(gff$strand)
+    gff$frame   <- as.factor(gff$frame)
+    gff$source  <- as.factor(gff$source)
+    gff$seqname <- as.factor(gff$seqname)
+    print(summary(gff))
+    sink()
+}
+
+plot_lengths <- function(gff, outfile){
+    pdf(outfile)
+    hist(log2(gff$end - gff$start + 1))
+    dev.off()
+}
+
+readGFF <- function(x) {
+  gff = read.table(
+    x,
+    sep="\t",
+    stringsAsFactors=FALSE,
+    quote="",
+    header=FALSE,
+    comment.char="#",
+  )
+  colnames(gff) = gff_colnames
+  gff
+}
+
+validate_columns <- function(x) {
+    valid <- TRUE
+    if(ncol(x) != 9){
+        warning("GFF expected to have 9 columns")
+        valid <- FALSE
+    }
+    if(!all(names(x) == gff_colnames)){
+        msg <- "Expected column names: %s"
+        warning(sprintf(msg, paste(gff_colnames, collapse=", ")))
+        valid <- FALSE
+    }
+    if(!is.numeric(x$start) || !is.numeric(x$end)){
+        warning("start and end fields in GFF must be numeric")
+        valid <- FALSE
+    }
+    if(!all(x$strand %in% c("+", "-", "."))){
+        warning("strand expected to only have characters [+-.]")
+        valid <- FALSE
+    }
+    valid
+}
+
+start_lt_stop <- function(x){
+    if(all(x$start <= x$end)){
+        TRUE
+    } else {
+        warning("GFF start > end")
+        FALSE
+    }
+}
+
+has_feature <- function(feature, x){
+    if(feature %in% x$feature){
+        TRUE
+    } else {
+        msg <- "features '%s' is missing in GFF"
+        warning(sprintf(msg, feature))
+        FALSE
+    }
+}
+
+
+@source sh
+print_comments (){
+    grep '^#' $1 > $2
+}
+
+get_outdir (){
+    gfffile=$1
+    echo ${gfffile%.gff}
+}

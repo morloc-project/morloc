@@ -58,7 +58,7 @@ void w_clone_value(W* w){
             m->h9   = ws_clone( m->h9   );
 
             m->cache  = ws_clone( m->cache  );
-            m->check  = ws_clone( m->check  );
+            m->assert = ws_clone( m->assert );
             m->fail   = ws_clone( m->fail   );
             m->doc    = ws_clone( m->doc    );
             m->inputs = ws_clone( m->inputs );

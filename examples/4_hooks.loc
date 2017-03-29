@@ -18,7 +18,7 @@ null . map .
 * :: R
 cleanup :: sh
 
-@check
+@assert
 rnorm:main :: is.positive . <rnorm:sd>
 to_table :: is.numeric . $1
 

@@ -138,7 +138,7 @@ bool _has_args(W* a, W* b){
 void _propagate_one_nargs(W* w){
     Manifold* m = g_manifold(g_rhs(w));
 
-    ws_cap(m->check, g_rhs(w), _has_args, _copy_nargs);
+    ws_cap(m->assert, g_rhs(w), _has_args, _copy_nargs);
 
     ws_cap(m->h0, g_rhs(w), _has_args, _copy_nargs);
     ws_cap(m->h1, g_rhs(w), _has_args, _copy_nargs);

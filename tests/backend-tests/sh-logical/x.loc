@@ -41,6 +41,6 @@ say_bi () {
 @path
 say_hi say_bi
 
-@check
+@assert
 say_hi :: and . is_a (any . is_b is_c (not . is_d))
 say_bi :: not . and . is_a (any . is_b is_c (not . is_d))

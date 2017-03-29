@@ -15,7 +15,7 @@ bar :: x=1 y=2
 @cache
 foo :: memcache
 
-@check
+@assert
 foo :+ true
 foo :+ true
 

@@ -46,6 +46,10 @@
 12:
 	loc -kt -o cluster -x pools 12_cluster.loc
 
+.PHONY: 13
+13:
+	loc -kt -o gff -x pools 13_read_gff.loc
+
 .PHONY: clean
 clean:
 	rm -rf pools hello_world composition modifiers \
@@ -53,4 +57,5 @@ clean:
 		sample* results types filesize times \
 		glue *gff3 result.txt \
 		better_r wc [abc].txt filter cluster \
+		gff al/ \
 		__pycache__

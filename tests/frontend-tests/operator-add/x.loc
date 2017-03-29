@@ -5,7 +5,7 @@ A :: d . c . b . a
 a := foo
 a :+ bar
 
-@check
+@assert
 b := is_orange
 b :+ is_susumu
 

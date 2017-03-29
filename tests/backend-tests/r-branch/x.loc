@@ -42,7 +42,7 @@ colnames . gelse . foo bar baz null . get_species . load_iris
 @lang
 * :: R
 
-@check
+@assert
 baz :: is_bazable . <get_species>
 bar :: is_barable . <get_species>
 foo :: is_fooable . <get_species>
