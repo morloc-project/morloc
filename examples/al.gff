@@ -5,7 +5,6 @@
 #!genome-build-accession NCBI_Assembly:GCF_000004255.1
 ##sequence-region NW_003302555.1 1 33132539
 ##species http://www.ncbi.nlm.nih.gov/Taxonomy/Browser/wwwtax.cgi?id=81972
-NW_003302555.1	RefSeq	region	1	33132539	.	+	.	ID=id0;Dbxref=taxon:81972;Name=Unknown;bio-material=NASC<UK>:donor number MN47;chromosome=Unknown;gbkey=Src;genome=genomic;mol_type=genomic DNA;sub-species=lyrata
 NW_003302555.1	RefSeq	gene	47	2523	.	-	.	ID=gene0;Dbxref=GeneID:9330760;Name=ARALYDRAFT_887207;gbkey=Gene;gene_biotype=protein_coding;locus_tag=ARALYDRAFT_887207
 NW_003302555.1	RefSeq	mRNA	47	2523	.	-	.	ID=rna0;Parent=gene0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;Name=XM_002891972.1;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1
 NW_003302555.1	RefSeq	exon	2444	2523	.	-	.	ID=id1;Parent=rna0;Dbxref=Genbank:XM_002891972.1,GeneID:9330760;gbkey=mRNA;product=hypothetical protein;transcript_id=XM_002891972.1

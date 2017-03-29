@@ -5,8 +5,7 @@ function readGFF(
     print_comments=FALSE
     print_stats=FALSE
     plot_lengths=FALSE
-    write_logs=FALSE
-    validate_column_types=FALSE
+    validate_columns=FALSE
     start_lt_stop=FALSE
     has_CDS=FALSE
 ){
@@ -22,37 +21,53 @@ function readGFF(
 
     if(print_stats){ ... }
     if(plot_lengths){ ... }
-    if(write_logs){ ... }
-    if(validate_column_types){ ... }
+    if(validate_columns){ ... }
     if(start_lt_stop){ ... }
     if(has_CDS){ ... }
     
     gff
 }
 
+@type
+get_outdir :: File -> File
+
 @path
-analysis . readGFF . *gff
+_ :: analysis . readGFF . *gff
+_ :: get_outdir . *gff
 
 gff :: "al.gff"
 
+out_comments :: "comments.txt"
+out_stats :: "stats.txt"
+out_lengths :: "lengths.pdf"
 
 @assert
 readGFF :: file.exists . *gff
 
 @before
-analysis :: print_comments . *gff "comments.txt"
-analysis :: print_stats    . *gff "stats.txt"
-analysis :: plot_lengths   . <readGFF> "lengths.pdf"
-analysis :: write_logs     . <readGFF> "gff.log"
+analysis :+ print_comments . *gff *out_comments
+analysis :+ print_stats    . <readGFF> *out_stats
+analysis :+ plot_lengths   . <readGFF> *out_lengths
+
+@after
+analysis :+ mkdir . <get_outdir>
+analysis :+ mv .
+    *out_comments
+    *out_stats
+    *out_lengths
+    <get_outdir>
 
 @assert
-analysis :: validate_column_types . <readGFF>
-analysis :: start_lt_stop         . <readGFF>
-analysis :: has_feature           . "CDS" <readGFF>
+analysis :+ validate_columns . <readGFF>
+analysis :+ start_lt_stop    . <readGFF>
+analysis :+ has_feature      . "CDS" <readGFF>
 
 @lang
 * :: R
-print_comments :: sh
+print_comments ,
+mkdir          ,
+mv             ,
+get_outdir     :: sh
 
 @source R
 
@@ -64,9 +79,26 @@ analysis <- function(x) {
   # do stuff
 }
 
+print_stats <- function(gff, outfile){
+    sink(outfile)
+    gff$feature <- as.factor(gff$feature)
+    gff$strand  <- as.factor(gff$strand)
+    gff$frame   <- as.factor(gff$frame)
+    gff$source  <- as.factor(gff$source)
+    gff$seqname <- as.factor(gff$seqname)
+    print(summary(gff))
+    sink()
+}
+
+plot_lengths <- function(gff, outfile){
+    pdf(outfile)
+    hist(log2(gff$end - gff$start + 1))
+    dev.off()
+}
+
 readGFF <- function(x) {
   gff = read.table(
-    gffFile,
+    x,
     sep="\t",
     stringsAsFactors=FALSE,
     quote="",
@@ -100,7 +132,7 @@ validate_columns <- function(x) {
 }
 
 start_lt_stop <- function(x){
-    if(all(x$start > x$end)){
+    if(all(x$start <= x$end)){
         TRUE
     } else {
         warning("GFF start > end")
@@ -122,4 +154,9 @@ has_feature <- function(feature, x){
 @source sh
 print_comments (){
     grep '^#' $1 > $2
+}
+
+get_outdir (){
+    gfffile=$1
+    echo ${gfffile%.gff}
 }
