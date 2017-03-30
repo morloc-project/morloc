@@ -3,12 +3,12 @@ all:
 
 .PHONY: install
 install:
-	mkdir -p ~/.loc/bin
-	mkdir -p ~/.loc/lib
-	cp frontend/loc ~/.loc/bin/loc
-	cp -rf backend/core ~/.loc/lib
+	mkdir -p ~/.morloc/bin
+	mkdir -p ~/.morloc/lib
+	cp frontend/morloc ~/.morloc/bin/morloc
+	cp -rf backend/core ~/.morloc/lib
 	test -d ~/bin || mkdir ~/bin
-	ln -sf ${PWD}/backend/src/loc/loc.py ${HOME}/bin/loc
+	ln -sf ${PWD}/backend/src/morloc/morloc.py ${HOME}/bin/morloc
 
 .PHONY: test
 test:

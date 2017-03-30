@@ -1,4 +1,4 @@
-TARGET=loc
+TARGET=morloc
 CC=gcc
 XXFLAGS=-Wall -Wextra -Wno-unused-parameter -g -std=gnu99
 # XXFLAGS=-Wall -Wextra -Wno-unused-parameter \
@@ -53,5 +53,5 @@ ${LEXER}.o: ${SRC_LEXER} ${SRC_BISON}
 clean:
 	rm -f ${TARGET} ${PARSER}.[hc] ${LEXER}.[hc]
 	rm -rf ${OBJECTS} ${PARSER}.o
-	rm -f tok.log loc.output
+	rm -f tok.log morloc.output
 	rm -f vgcore*

@@ -15,7 +15,7 @@ outdir = "{outdir}"
 
 def parser():
     parser = argparse.ArgumentParser(
-        description="A program generated from a LOC script", 
+        description="A program generated from a Morloc script", 
         usage='manifold-nexus <mid>',
         prog="manifold-nexus"
     )

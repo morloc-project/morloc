@@ -1,21 +1,23 @@
-<!-- [![Build Status](https://travis-ci.org/arendsee/loc.svg?branch=master)](https://travis-ci.org/arendsee/loc) -->
+<!-- [![Build Status](https://travis-ci.org/arendsee/morloc.svg?branch=master)](https://travis-ci.org/arendsee/morloc) -->
 <!-- The travis build fails because their system has a dated bison version -->
 
-Language of Composition
-=======================
+Morloc
+======
+
+Morloc is a typed, language-agnostic, functional workflow language.
 
 ## Installation
 
 ```
-git clone https://github.com/arendsee/loc
-cd loc
+git clone https://github.com/arendsee/morloc
+cd morloc
 make && make install && make test
 ```
 
-The `make install` command builds the LOC home (`$HOME/.loc`) where source code
-and binaries required for building LOC projects is located (among other
-things). It also links the LOC executable (`loc`) to `$HOME/bin`, a folder which
-is naively assumed to be in `$PATH`.
+The `make install` command builds the Morloc home (`$HOME/.loc`) where source
+code and binaries required for building Morloc projects is located (among other
+things). It also links the Morloc executable (`loc`) to `$HOME/bin`, a folder
+which is naively assumed to be in `$PATH`.
 
 To install vim syntax highlighting
 
@@ -39,27 +41,27 @@ Examples
 
 ![hello-world](docs/images/hello-world.png)
 
-No executable program can be written in pure LOC. There are no print
+No executable program can be written in pure Morloc. There are no print
 statements, no conditionals, no variables, no functions, no arithmetic
-operators. Rather, programs are composed of functions from other languages. LOC
-is a purely metaprogramming language.
+operators. Rather, programs are composed of functions from other languages.
+Morloc is a purely metaprogramming language.
 
 The Hello World example above uses the Bash function `echo`, which is given the
 input string "Hello World".
 
-LOC scripts are partitioned into sections, each with its own syntax. Only
+Morloc scripts are partitioned into sections, each with its own syntax. Only
 compositions can be written in the `@path` section. Languages are specified in
 the `@lang` section.
 
-To run a LOC script:
+To run a Morloc script:
 
 ```
-$ loc hello-world.loc
+$ morloc hello-world.loc
 $ ./manifold-nexus.py main
 hello world
 ```
 
-The LOC frontend first compiles the script into an intermediate language (LOC
+The Morloc frontend first compiles the script into an intermediate language (Morloc
 Intermediate Language, LIL). The simple language specifies the elements of the
 program that will be generated.
 
@@ -75,17 +77,17 @@ be multiple manifolds that wrap `echo`, but each will have a unique id). `INPP`
 assigns the literal `"hello world"` to the 0th positional argument slot of
 `echo`. Ignore the star for now.
 
-The LOC backend translates LIL into executable code. It first builds an
+The Morloc backend translates LIL into executable code. It first builds an
 executable, named `manifold-nexus.py` by default, that is the interface to the
-LOC program. In this simple hello-world case, it contains the sole command
+Morloc program. In this simple hello-world case, it contains the sole command
 `main` (much more on this later).
 
-Next it builds a working directory (by default in `.loc/tmp`) where generated
+Next it builds a working directory (by default in `.morloc/tmp`) where generated
 code, temporary files, and caches reside.
 
-For each language used in the LOC script, a file named `call.<lang>` is
+For each language used in the Morloc script, a file named `call.<lang>` is
 created. Each of these files contains a wrapper for each function used in the
-LOC script.
+Morloc script.
 
 For this hello-world program, the following (somewhat simplified) `call.sh`
 script is generated
@@ -93,7 +95,7 @@ script is generated
 ``` bash
 #!/usr/bin/env bash
 
-outdir=$HOME/.loc/tmp/loc_0
+outdir=$HOME/.morloc/tmp/morloc_0
 
 m0 () {
     echo  "hello world"
@@ -132,7 +134,7 @@ effects, debugging statements, and checking are all implemented in the modifier
 sections. So far, I have introduced the `@lang` and `@arg` sections, but there
 are many more to come.
 
-Composition in LOC is a bit different from conventional composition in, say,
+Composition in Morloc is a bit different from conventional composition in, say,
 Haskell. The `.` operator passes the elements on the right as the inputs to any
 elements of the left that can take inputs.
 
@@ -175,7 +177,7 @@ code (see the `is.positive` function). This code will be passed verbatim to the
 `call.R` executable.
 
 A very important part of any non-trivial pipeline is data validation. This is
-handled in LOC by entries in the `@check` section. Above I attach a function to
+handled in Morloc by entries in the `@check` section. Above I attach a function to
 the normal sampler that checks whether the standard deviation (which is drawn
 N(2,1) distribution) is positive. If it isn't, no output is printed. The checks
 not are limited to accessing the inputs of their parents. Rather, they are free
@@ -194,7 +196,7 @@ they abstract names. The syntax `<rnorm:sd>` indicates that a specific
 manifold (the `rnorm:sd` implicitly declared in the `@path` section) is to be
 called, rather than a new `rnorm:sd`.
 
-In the argument section, I am now using named arguments. The `=` is a LOC
+In the argument section, I am now using named arguments. The `=` is a Morloc
 operator, it will be translated into the correct language-specific binder by
 the frontend.
 
@@ -239,9 +241,9 @@ INPM  m4  0  m3  *
 
 ![hooks](docs/images/hooks.png)
 
-LOC has no explicit syntax for any control structures. Instead it relies on
+Morloc has no explicit syntax for any control structures. Instead it relies on
 high-order functions defined in the source code. The above example demonstrates
-the LOC equivalent of a `for` loop. The `&(...)` phrase effectively takes
+the Morloc equivalent of a `for` loop. The `&(...)` phrase effectively takes
 a composition and transforms it into a function that is passed as an argument
 to `map`. Arguments passed into this composition are accessed with `$N` calls.
 The `map` function is required to be defined in the source language (it is
@@ -303,32 +305,32 @@ is the terminal manifold).
 
 ![types](docs/images/types.png)
 
-LOC currently supports simple types. The syntax is nearly identical to Haskell,
+Morloc currently supports simple types. The syntax is nearly identical to Haskell,
 with the addition of two keywords: `?` and `void`. `?` matches any number of
 inputs of any type. `void` implies no output (if on the right) or input (if on
 the left).
 
-LOC does not yet support generic types, type constructors, algebraic types and
+Morloc does not yet support generic types, type constructors, algebraic types and
 all that. But it will in the future.
 
 Types are important for several reasons.
 
 First, typechecking can catch incorrect connections at compile time. Indeed,
 a fully typed workflow can be proven to be correct at a high level, assuming of
-course the the user has correctly entered the type (unlike Haskell, LOC cannot
-typecheck "all the way down").
+course the the user has correctly entered the type (unlike Haskell, Morloc
+cannot typecheck "all the way down").
 
 Also, the type signatures are a formal documentation succinctly describing the
 behaviour of a function.
 
-In the context of LOC, however, the greatest value of types is that
+In the context of Morloc, however, the greatest value of types is that
 a well-desiged type system can transcend language barriers. Two functions with
 the same signature can, in theory, be swapped without altering the correctness
 of the pipeline (at the type level), regardless of their language. 
 
-LOC distinguishes between "universal" and "native" forms of data. Calls between
-manifolds of the same language, can transfer data using native data structures,
-as they would in a conventional program. However, foreign calls require the
-data is first transformed to a "universal" form, passed to the foreign
-language, and then transformed into the foreign "native" form. Types direct
-these transforms.
+Morloc distinguishes between "universal" and "native" forms of data. Calls
+between manifolds of the same language, can transfer data using native data
+structures, as they would in a conventional program. However, foreign calls
+require the data is first transformed to a "universal" form, passed to the
+foreign language, and then transformed into the foreign "native" form. Types
+direct these transforms.

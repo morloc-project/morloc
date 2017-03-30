@@ -6,7 +6,7 @@ cat <<EOF > z
 [true, true]
 EOF
 stat=0
-loc -kx locout x.loc || stat=1
+morloc -kx locout x.loc || stat=1
 ./manifold-nexus.py Int    >> y
 ./manifold-nexus.py Num    >> y
 ./manifold-nexus.py String >> y

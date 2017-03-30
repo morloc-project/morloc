@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-loc -x zzz x.loc
+morloc -x zzz x.loc
 
 diff <(./manifold-nexus.py main) \
      <(echo '["Sepal.Length","Sepal.Width","Petal.Width","Species"]') \

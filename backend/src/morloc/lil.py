@@ -39,14 +39,14 @@ def add_manifold_line(manifold, row):
     except IndexError:
         err("Malformed LIL, unexpected number of fields")
 
-def compile_loc(
-    loc_src,
-    loc_path = "~/.loc/bin/loc",
+def compile_morloc(
+    morloc_src,
+    morloc_path = "~/.morloc/bin/morloc",
     flags    = [],
     valgrind = False,
     memtest  = False
 ):
-    lpath = os.path.expanduser(loc_path)
+    lpath = os.path.expanduser(morloc_path)
 
     cmds = []
     if valgrind or memtest:
@@ -55,7 +55,7 @@ def compile_loc(
         cmds.append('--leak-check=full')
     cmds.append(lpath)
     cmds += flags
-    cmds.append(loc_src)
+    cmds.append(morloc_src)
 
     result = subprocess.run(
         cmds,
@@ -66,8 +66,8 @@ def compile_loc(
     result.stdout = [s + "\n" for s in result.stdout.strip().split('\n')]
     return result
 
-def typecheck(loc_src, loc_path="~/.loc/bin/loc"):
-    return compile_loc(loc_src, loc_path, flags=['-c'])
+def typecheck(morloc_src, morloc_path="~/.morloc/bin/morloc"):
+    return compile_morloc(morloc_src, morloc_path, flags=['-c'])
 
 def get_src(lil):
     src = {}

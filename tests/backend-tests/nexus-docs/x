@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-loc -x tst x.loc
+morloc -x tst x.loc
 status=
 ./manifold-nexus.py | grep -q "get unique values"
 if [[ $? -eq 0 ]]

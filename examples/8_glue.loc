@@ -1,6 +1,6 @@
 @comment
 
-Another usage of LOC is simply as a glue for connecting scripts of
+Another usage of Morloc is simply as a glue for connecting scripts of
 different languages into an single script with a nice interface.
 
 R has really good libraries for reading files from online. readr can read URLs

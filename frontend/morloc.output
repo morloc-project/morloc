@@ -1,0 +1,1571 @@
+State 57 conflicts: 2 shift/reduce
+State 73 conflicts: 2 shift/reduce
+State 112 conflicts: 2 shift/reduce
+State 113 conflicts: 2 shift/reduce
+
+
+Grammar
+
+    0 $accept: input $end
+
+    1 input: section
+    2      | input section
+
+    3 section: s_path
+    4        | s_hook
+    5        | s_cache
+    6        | s_assert
+    7        | s_fail
+    8        | s_alias
+    9        | s_lang
+   10        | s_doc
+   11        | s_export
+   12        | s_type
+   13        | s_ontology
+   14        | s_source
+   15        | s_arg
+
+   16 s_path: SECTION_PATH
+   17       | SECTION_PATH composition
+   18       | s_path IDENTIFIER COUPLE composition
+
+   19 s_hook: SECTION_HOOK
+   20       | s_hook SELECTION COUPLE maybe_composition
+
+   21 s_assert: SECTION_ASSERT
+   22         | s_assert SELECTION COUPLE maybe_composition
+
+   23 s_fail: SECTION_FAIL
+   24       | s_fail SELECTION COUPLE maybe_composition
+
+   25 maybe_composition: composition
+   26                  | RESET
+
+   27 composition: COMPOSON
+   28            | '(' composition ')'
+   29            | '&' COMPOSON
+   30            | '&' '(' composition ')'
+   31            | composition composition
+   32            | composition '.' composition
+
+   33 s_cache: SECTION_CACHE
+   34        | s_cache SELECTION COUPLE maybe_variable
+
+   35 s_alias: SECTION_ALIAS
+   36        | s_alias SELECTION COUPLE maybe_variable
+
+   37 s_lang: SECTION_LANG
+   38       | s_lang SELECTION COUPLE maybe_variable
+
+   39 s_doc: SECTION_DOC
+   40      | s_doc SELECTION COUPLE maybe_str
+
+   41 maybe_variable: VARIABLE
+   42               | RESET
+
+   43 maybe_str: STR
+   44          | RESET
+
+   45 s_export: SECTION_EXPORT
+   46         | s_export PATH
+   47         | s_export PATH AS VARIABLE
+
+   48 s_source: SECTION_SOURCE STR
+   49         | s_source STR
+
+   50 s_type: SECTION_TYPE
+   51       | s_type NAMES COUPLE type
+
+   52 type: TYPE
+   53     | '(' type ')'
+   54     | '[' type ']'
+   55     | type ARROW type
+   56     | type ',' type
+
+   57 s_ontology: SECTION_ONTOLOGY
+   58           | s_ontology NAMES COUPLE ontology
+
+   59 ontology: construct
+   60         | ontology '|' construct
+
+   61 construct: TYPE
+   62          | construct TYPE
+
+   63 s_arg: SECTION_ARG
+   64      | s_arg SELECTION COUPLE maybe_argument
+   65      | s_arg maybe_argument
+
+   66 maybe_argument: RESET
+   67               | NAME '=' PRIMITIVE
+   68               | PRIMITIVE
+   69               | NAME '=' array
+
+   70 array: '[' list ']'
+   71      | '[' ']'
+
+   72 list: PRIMITIVE
+   73     | list ',' PRIMITIVE
+
+
+Terminals, with rules where they appear
+
+$end (0) 0
+'&' (38) 29 30
+'(' (40) 28 30 53
+')' (41) 28 30 53
+',' (44) 56 73
+'.' (46) 32
+'=' (61) 67 69
+'[' (91) 54 70 71
+']' (93) 54 70 71
+'|' (124) 60
+error (256)
+IDENTIFIER (258) 18
+COMPOSON (259) 27 29
+SELECTION (260) 20 22 24 34 36 38 40 64
+PATH (261) 46 47
+STR (262) 43 48 49
+NAME (263) 67 69
+NAMES (264) 51 58
+PRIMITIVE (265) 67 68 72 73
+VARIABLE (266) 41 47
+TYPE (267) 52 61 62
+AS (268) 47
+ARROW (269) 55
+RESET (270) 26 42 44 66
+COUPLE (271) 18 20 22 24 34 36 38 40 51 58 64
+SECTION_HOOK (272) 19
+SECTION_CACHE (273) 33
+SECTION_PATH (274) 16 17
+SECTION_ASSERT (275) 21
+SECTION_FAIL (276) 23
+SECTION_ALIAS (277) 35
+SECTION_LANG (278) 37
+SECTION_DOC (279) 39
+SECTION_EXPORT (280) 45
+SECTION_SOURCE (281) 48
+SECTION_ARG (282) 63
+SECTION_TYPE (283) 50
+SECTION_ONTOLOGY (284) 57
+CONCAT (285)
+
+
+Nonterminals, with rules where they appear
+
+$accept (40)
+    on left: 0
+input (41)
+    on left: 1 2, on right: 0 2
+section (42)
+    on left: 3 4 5 6 7 8 9 10 11 12 13 14 15, on right: 1 2
+s_path (43)
+    on left: 16 17 18, on right: 3 18
+s_hook (44)
+    on left: 19 20, on right: 4 20
+s_assert (45)
+    on left: 21 22, on right: 6 22
+s_fail (46)
+    on left: 23 24, on right: 7 24
+maybe_composition (47)
+    on left: 25 26, on right: 20 22 24
+composition (48)
+    on left: 27 28 29 30 31 32, on right: 17 18 25 28 30 31 32
+s_cache (49)
+    on left: 33 34, on right: 5 34
+s_alias (50)
+    on left: 35 36, on right: 8 36
+s_lang (51)
+    on left: 37 38, on right: 9 38
+s_doc (52)
+    on left: 39 40, on right: 10 40
+maybe_variable (53)
+    on left: 41 42, on right: 34 36 38
+maybe_str (54)
+    on left: 43 44, on right: 40
+s_export (55)
+    on left: 45 46 47, on right: 11 46 47
+s_source (56)
+    on left: 48 49, on right: 14 49
+s_type (57)
+    on left: 50 51, on right: 12 51
+type (58)
+    on left: 52 53 54 55 56, on right: 51 53 54 55 56
+s_ontology (59)
+    on left: 57 58, on right: 13 58
+ontology (60)
+    on left: 59 60, on right: 58 60
+construct (61)
+    on left: 61 62, on right: 59 60 62
+s_arg (62)
+    on left: 63 64 65, on right: 15 64 65
+maybe_argument (63)
+    on left: 66 67 68 69, on right: 64 65
+array (64)
+    on left: 70 71, on right: 69
+list (65)
+    on left: 72 73, on right: 70 73
+
+
+State 0
+
+    0 $accept: . input $end
+    1 input: . section
+    2      | . input section
+    3 section: . s_path
+    4        | . s_hook
+    5        | . s_cache
+    6        | . s_assert
+    7        | . s_fail
+    8        | . s_alias
+    9        | . s_lang
+   10        | . s_doc
+   11        | . s_export
+   12        | . s_type
+   13        | . s_ontology
+   14        | . s_source
+   15        | . s_arg
+   16 s_path: . SECTION_PATH
+   17       | . SECTION_PATH composition
+   18       | . s_path IDENTIFIER COUPLE composition
+   19 s_hook: . SECTION_HOOK
+   20       | . s_hook SELECTION COUPLE maybe_composition
+   21 s_assert: . SECTION_ASSERT
+   22         | . s_assert SELECTION COUPLE maybe_composition
+   23 s_fail: . SECTION_FAIL
+   24       | . s_fail SELECTION COUPLE maybe_composition
+   33 s_cache: . SECTION_CACHE
+   34        | . s_cache SELECTION COUPLE maybe_variable
+   35 s_alias: . SECTION_ALIAS
+   36        | . s_alias SELECTION COUPLE maybe_variable
+   37 s_lang: . SECTION_LANG
+   38       | . s_lang SELECTION COUPLE maybe_variable
+   39 s_doc: . SECTION_DOC
+   40      | . s_doc SELECTION COUPLE maybe_str
+   45 s_export: . SECTION_EXPORT
+   46         | . s_export PATH
+   47         | . s_export PATH AS VARIABLE
+   48 s_source: . SECTION_SOURCE STR
+   49         | . s_source STR
+   50 s_type: . SECTION_TYPE
+   51       | . s_type NAMES COUPLE type
+   57 s_ontology: . SECTION_ONTOLOGY
+   58           | . s_ontology NAMES COUPLE ontology
+   63 s_arg: . SECTION_ARG
+   64      | . s_arg SELECTION COUPLE maybe_argument
+   65      | . s_arg maybe_argument
+
+    SECTION_HOOK      shift, and go to state 1
+    SECTION_CACHE     shift, and go to state 2
+    SECTION_PATH      shift, and go to state 3
+    SECTION_ASSERT    shift, and go to state 4
+    SECTION_FAIL      shift, and go to state 5
+    SECTION_ALIAS     shift, and go to state 6
+    SECTION_LANG      shift, and go to state 7
+    SECTION_DOC       shift, and go to state 8
+    SECTION_EXPORT    shift, and go to state 9
+    SECTION_SOURCE    shift, and go to state 10
+    SECTION_ARG       shift, and go to state 11
+    SECTION_TYPE      shift, and go to state 12
+    SECTION_ONTOLOGY  shift, and go to state 13
+
+    input       go to state 14
+    section     go to state 15
+    s_path      go to state 16
+    s_hook      go to state 17
+    s_assert    go to state 18
+    s_fail      go to state 19
+    s_cache     go to state 20
+    s_alias     go to state 21
+    s_lang      go to state 22
+    s_doc       go to state 23
+    s_export    go to state 24
+    s_source    go to state 25
+    s_type      go to state 26
+    s_ontology  go to state 27
+    s_arg       go to state 28
+
+
+State 1
+
+   19 s_hook: SECTION_HOOK .
+
+    $default  reduce using rule 19 (s_hook)
+
+
+State 2
+
+   33 s_cache: SECTION_CACHE .
+
+    $default  reduce using rule 33 (s_cache)
+
+
+State 3
+
+   16 s_path: SECTION_PATH .  [$end, IDENTIFIER, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   17       | SECTION_PATH . composition
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    $default  reduce using rule 16 (s_path)
+
+    composition  go to state 32
+
+
+State 4
+
+   21 s_assert: SECTION_ASSERT .
+
+    $default  reduce using rule 21 (s_assert)
+
+
+State 5
+
+   23 s_fail: SECTION_FAIL .
+
+    $default  reduce using rule 23 (s_fail)
+
+
+State 6
+
+   35 s_alias: SECTION_ALIAS .
+
+    $default  reduce using rule 35 (s_alias)
+
+
+State 7
+
+   37 s_lang: SECTION_LANG .
+
+    $default  reduce using rule 37 (s_lang)
+
+
+State 8
+
+   39 s_doc: SECTION_DOC .
+
+    $default  reduce using rule 39 (s_doc)
+
+
+State 9
+
+   45 s_export: SECTION_EXPORT .
+
+    $default  reduce using rule 45 (s_export)
+
+
+State 10
+
+   48 s_source: SECTION_SOURCE . STR
+
+    STR  shift, and go to state 33
+
+
+State 11
+
+   63 s_arg: SECTION_ARG .
+
+    $default  reduce using rule 63 (s_arg)
+
+
+State 12
+
+   50 s_type: SECTION_TYPE .
+
+    $default  reduce using rule 50 (s_type)
+
+
+State 13
+
+   57 s_ontology: SECTION_ONTOLOGY .
+
+    $default  reduce using rule 57 (s_ontology)
+
+
+State 14
+
+    0 $accept: input . $end
+    2 input: input . section
+    3 section: . s_path
+    4        | . s_hook
+    5        | . s_cache
+    6        | . s_assert
+    7        | . s_fail
+    8        | . s_alias
+    9        | . s_lang
+   10        | . s_doc
+   11        | . s_export
+   12        | . s_type
+   13        | . s_ontology
+   14        | . s_source
+   15        | . s_arg
+   16 s_path: . SECTION_PATH
+   17       | . SECTION_PATH composition
+   18       | . s_path IDENTIFIER COUPLE composition
+   19 s_hook: . SECTION_HOOK
+   20       | . s_hook SELECTION COUPLE maybe_composition
+   21 s_assert: . SECTION_ASSERT
+   22         | . s_assert SELECTION COUPLE maybe_composition
+   23 s_fail: . SECTION_FAIL
+   24       | . s_fail SELECTION COUPLE maybe_composition
+   33 s_cache: . SECTION_CACHE
+   34        | . s_cache SELECTION COUPLE maybe_variable
+   35 s_alias: . SECTION_ALIAS
+   36        | . s_alias SELECTION COUPLE maybe_variable
+   37 s_lang: . SECTION_LANG
+   38       | . s_lang SELECTION COUPLE maybe_variable
+   39 s_doc: . SECTION_DOC
+   40      | . s_doc SELECTION COUPLE maybe_str
+   45 s_export: . SECTION_EXPORT
+   46         | . s_export PATH
+   47         | . s_export PATH AS VARIABLE
+   48 s_source: . SECTION_SOURCE STR
+   49         | . s_source STR
+   50 s_type: . SECTION_TYPE
+   51       | . s_type NAMES COUPLE type
+   57 s_ontology: . SECTION_ONTOLOGY
+   58           | . s_ontology NAMES COUPLE ontology
+   63 s_arg: . SECTION_ARG
+   64      | . s_arg SELECTION COUPLE maybe_argument
+   65      | . s_arg maybe_argument
+
+    $end              shift, and go to state 34
+    SECTION_HOOK      shift, and go to state 1
+    SECTION_CACHE     shift, and go to state 2
+    SECTION_PATH      shift, and go to state 3
+    SECTION_ASSERT    shift, and go to state 4
+    SECTION_FAIL      shift, and go to state 5
+    SECTION_ALIAS     shift, and go to state 6
+    SECTION_LANG      shift, and go to state 7
+    SECTION_DOC       shift, and go to state 8
+    SECTION_EXPORT    shift, and go to state 9
+    SECTION_SOURCE    shift, and go to state 10
+    SECTION_ARG       shift, and go to state 11
+    SECTION_TYPE      shift, and go to state 12
+    SECTION_ONTOLOGY  shift, and go to state 13
+
+    section     go to state 35
+    s_path      go to state 16
+    s_hook      go to state 17
+    s_assert    go to state 18
+    s_fail      go to state 19
+    s_cache     go to state 20
+    s_alias     go to state 21
+    s_lang      go to state 22
+    s_doc       go to state 23
+    s_export    go to state 24
+    s_source    go to state 25
+    s_type      go to state 26
+    s_ontology  go to state 27
+    s_arg       go to state 28
+
+
+State 15
+
+    1 input: section .
+
+    $default  reduce using rule 1 (input)
+
+
+State 16
+
+    3 section: s_path .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   18 s_path: s_path . IDENTIFIER COUPLE composition
+
+    IDENTIFIER  shift, and go to state 36
+
+    $default  reduce using rule 3 (section)
+
+
+State 17
+
+    4 section: s_hook .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   20 s_hook: s_hook . SELECTION COUPLE maybe_composition
+
+    SELECTION  shift, and go to state 37
+
+    $default  reduce using rule 4 (section)
+
+
+State 18
+
+    6 section: s_assert .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   22 s_assert: s_assert . SELECTION COUPLE maybe_composition
+
+    SELECTION  shift, and go to state 38
+
+    $default  reduce using rule 6 (section)
+
+
+State 19
+
+    7 section: s_fail .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   24 s_fail: s_fail . SELECTION COUPLE maybe_composition
+
+    SELECTION  shift, and go to state 39
+
+    $default  reduce using rule 7 (section)
+
+
+State 20
+
+    5 section: s_cache .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   34 s_cache: s_cache . SELECTION COUPLE maybe_variable
+
+    SELECTION  shift, and go to state 40
+
+    $default  reduce using rule 5 (section)
+
+
+State 21
+
+    8 section: s_alias .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   36 s_alias: s_alias . SELECTION COUPLE maybe_variable
+
+    SELECTION  shift, and go to state 41
+
+    $default  reduce using rule 8 (section)
+
+
+State 22
+
+    9 section: s_lang .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   38 s_lang: s_lang . SELECTION COUPLE maybe_variable
+
+    SELECTION  shift, and go to state 42
+
+    $default  reduce using rule 9 (section)
+
+
+State 23
+
+   10 section: s_doc .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   40 s_doc: s_doc . SELECTION COUPLE maybe_str
+
+    SELECTION  shift, and go to state 43
+
+    $default  reduce using rule 10 (section)
+
+
+State 24
+
+   11 section: s_export .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   46 s_export: s_export . PATH
+   47         | s_export . PATH AS VARIABLE
+
+    PATH  shift, and go to state 44
+
+    $default  reduce using rule 11 (section)
+
+
+State 25
+
+   14 section: s_source .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   49 s_source: s_source . STR
+
+    STR  shift, and go to state 45
+
+    $default  reduce using rule 14 (section)
+
+
+State 26
+
+   12 section: s_type .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   51 s_type: s_type . NAMES COUPLE type
+
+    NAMES  shift, and go to state 46
+
+    $default  reduce using rule 12 (section)
+
+
+State 27
+
+   13 section: s_ontology .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   58 s_ontology: s_ontology . NAMES COUPLE ontology
+
+    NAMES  shift, and go to state 47
+
+    $default  reduce using rule 13 (section)
+
+
+State 28
+
+   15 section: s_arg .  [$end, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   64 s_arg: s_arg . SELECTION COUPLE maybe_argument
+   65      | s_arg . maybe_argument
+   66 maybe_argument: . RESET
+   67               | . NAME '=' PRIMITIVE
+   68               | . PRIMITIVE
+   69               | . NAME '=' array
+
+    SELECTION  shift, and go to state 48
+    NAME       shift, and go to state 49
+    PRIMITIVE  shift, and go to state 50
+    RESET      shift, and go to state 51
+
+    $default  reduce using rule 15 (section)
+
+    maybe_argument  go to state 52
+
+
+State 29
+
+   27 composition: COMPOSON .
+
+    $default  reduce using rule 27 (composition)
+
+
+State 30
+
+   29 composition: '&' . COMPOSON
+   30            | '&' . '(' composition ')'
+
+    COMPOSON  shift, and go to state 53
+    '('       shift, and go to state 54
+
+
+State 31
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   28            | '(' . composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    composition  go to state 55
+
+
+State 32
+
+   17 s_path: SECTION_PATH composition .  [$end, IDENTIFIER, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '.'       shift, and go to state 56
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    $default  reduce using rule 17 (s_path)
+
+    composition  go to state 57
+
+
+State 33
+
+   48 s_source: SECTION_SOURCE STR .
+
+    $default  reduce using rule 48 (s_source)
+
+
+State 34
+
+    0 $accept: input $end .
+
+    $default  accept
+
+
+State 35
+
+    2 input: input section .
+
+    $default  reduce using rule 2 (input)
+
+
+State 36
+
+   18 s_path: s_path IDENTIFIER . COUPLE composition
+
+    COUPLE  shift, and go to state 58
+
+
+State 37
+
+   20 s_hook: s_hook SELECTION . COUPLE maybe_composition
+
+    COUPLE  shift, and go to state 59
+
+
+State 38
+
+   22 s_assert: s_assert SELECTION . COUPLE maybe_composition
+
+    COUPLE  shift, and go to state 60
+
+
+State 39
+
+   24 s_fail: s_fail SELECTION . COUPLE maybe_composition
+
+    COUPLE  shift, and go to state 61
+
+
+State 40
+
+   34 s_cache: s_cache SELECTION . COUPLE maybe_variable
+
+    COUPLE  shift, and go to state 62
+
+
+State 41
+
+   36 s_alias: s_alias SELECTION . COUPLE maybe_variable
+
+    COUPLE  shift, and go to state 63
+
+
+State 42
+
+   38 s_lang: s_lang SELECTION . COUPLE maybe_variable
+
+    COUPLE  shift, and go to state 64
+
+
+State 43
+
+   40 s_doc: s_doc SELECTION . COUPLE maybe_str
+
+    COUPLE  shift, and go to state 65
+
+
+State 44
+
+   46 s_export: s_export PATH .  [$end, PATH, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   47         | s_export PATH . AS VARIABLE
+
+    AS  shift, and go to state 66
+
+    $default  reduce using rule 46 (s_export)
+
+
+State 45
+
+   49 s_source: s_source STR .
+
+    $default  reduce using rule 49 (s_source)
+
+
+State 46
+
+   51 s_type: s_type NAMES . COUPLE type
+
+    COUPLE  shift, and go to state 67
+
+
+State 47
+
+   58 s_ontology: s_ontology NAMES . COUPLE ontology
+
+    COUPLE  shift, and go to state 68
+
+
+State 48
+
+   64 s_arg: s_arg SELECTION . COUPLE maybe_argument
+
+    COUPLE  shift, and go to state 69
+
+
+State 49
+
+   67 maybe_argument: NAME . '=' PRIMITIVE
+   69               | NAME . '=' array
+
+    '='  shift, and go to state 70
+
+
+State 50
+
+   68 maybe_argument: PRIMITIVE .
+
+    $default  reduce using rule 68 (maybe_argument)
+
+
+State 51
+
+   66 maybe_argument: RESET .
+
+    $default  reduce using rule 66 (maybe_argument)
+
+
+State 52
+
+   65 s_arg: s_arg maybe_argument .
+
+    $default  reduce using rule 65 (s_arg)
+
+
+State 53
+
+   29 composition: '&' COMPOSON .
+
+    $default  reduce using rule 29 (composition)
+
+
+State 54
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   30            | '&' '(' . composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    composition  go to state 71
+
+
+State 55
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   28            | '(' composition . ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '.'       shift, and go to state 56
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+    ')'       shift, and go to state 72
+
+    composition  go to state 57
+
+
+State 56
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+   32            | composition '.' . composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    composition  go to state 73
+
+
+State 57
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   31            | composition composition .  [$end, IDENTIFIER, COMPOSON, SELECTION, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, '.', '(', ')']
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    COMPOSON  [reduce using rule 31 (composition)]
+    '('       [reduce using rule 31 (composition)]
+    $default  reduce using rule 31 (composition)
+
+    composition  go to state 57
+
+    Conflict between rule 31 and token '.' resolved as reduce ('.' < CONCAT).
+    Conflict between rule 31 and token '&' resolved as shift (CONCAT < '&').
+
+
+State 58
+
+   18 s_path: s_path IDENTIFIER COUPLE . composition
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    composition  go to state 74
+
+
+State 59
+
+   20 s_hook: s_hook SELECTION COUPLE . maybe_composition
+   25 maybe_composition: . composition
+   26                  | . RESET
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    RESET     shift, and go to state 75
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    maybe_composition  go to state 76
+    composition        go to state 77
+
+
+State 60
+
+   22 s_assert: s_assert SELECTION COUPLE . maybe_composition
+   25 maybe_composition: . composition
+   26                  | . RESET
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    RESET     shift, and go to state 75
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    maybe_composition  go to state 78
+    composition        go to state 77
+
+
+State 61
+
+   24 s_fail: s_fail SELECTION COUPLE . maybe_composition
+   25 maybe_composition: . composition
+   26                  | . RESET
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   32            | . composition '.' composition
+
+    COMPOSON  shift, and go to state 29
+    RESET     shift, and go to state 75
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    maybe_composition  go to state 79
+    composition        go to state 77
+
+
+State 62
+
+   34 s_cache: s_cache SELECTION COUPLE . maybe_variable
+   41 maybe_variable: . VARIABLE
+   42               | . RESET
+
+    VARIABLE  shift, and go to state 80
+    RESET     shift, and go to state 81
+
+    maybe_variable  go to state 82
+
+
+State 63
+
+   36 s_alias: s_alias SELECTION COUPLE . maybe_variable
+   41 maybe_variable: . VARIABLE
+   42               | . RESET
+
+    VARIABLE  shift, and go to state 80
+    RESET     shift, and go to state 81
+
+    maybe_variable  go to state 83
+
+
+State 64
+
+   38 s_lang: s_lang SELECTION COUPLE . maybe_variable
+   41 maybe_variable: . VARIABLE
+   42               | . RESET
+
+    VARIABLE  shift, and go to state 80
+    RESET     shift, and go to state 81
+
+    maybe_variable  go to state 84
+
+
+State 65
+
+   40 s_doc: s_doc SELECTION COUPLE . maybe_str
+   43 maybe_str: . STR
+   44          | . RESET
+
+    STR    shift, and go to state 85
+    RESET  shift, and go to state 86
+
+    maybe_str  go to state 87
+
+
+State 66
+
+   47 s_export: s_export PATH AS . VARIABLE
+
+    VARIABLE  shift, and go to state 88
+
+
+State 67
+
+   51 s_type: s_type NAMES COUPLE . type
+   52 type: . TYPE
+   53     | . '(' type ')'
+   54     | . '[' type ']'
+   55     | . type ARROW type
+   56     | . type ',' type
+
+    TYPE  shift, and go to state 89
+    '('   shift, and go to state 90
+    '['   shift, and go to state 91
+
+    type  go to state 92
+
+
+State 68
+
+   58 s_ontology: s_ontology NAMES COUPLE . ontology
+   59 ontology: . construct
+   60         | . ontology '|' construct
+   61 construct: . TYPE
+   62          | . construct TYPE
+
+    TYPE  shift, and go to state 93
+
+    ontology   go to state 94
+    construct  go to state 95
+
+
+State 69
+
+   64 s_arg: s_arg SELECTION COUPLE . maybe_argument
+   66 maybe_argument: . RESET
+   67               | . NAME '=' PRIMITIVE
+   68               | . PRIMITIVE
+   69               | . NAME '=' array
+
+    NAME       shift, and go to state 49
+    PRIMITIVE  shift, and go to state 50
+    RESET      shift, and go to state 51
+
+    maybe_argument  go to state 96
+
+
+State 70
+
+   67 maybe_argument: NAME '=' . PRIMITIVE
+   69               | NAME '=' . array
+   70 array: . '[' list ']'
+   71      | . '[' ']'
+
+    PRIMITIVE  shift, and go to state 97
+    '['        shift, and go to state 98
+
+    array  go to state 99
+
+
+State 71
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   30            | '&' '(' composition . ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '.'       shift, and go to state 56
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+    ')'       shift, and go to state 100
+
+    composition  go to state 57
+
+
+State 72
+
+   28 composition: '(' composition ')' .
+
+    $default  reduce using rule 28 (composition)
+
+
+State 73
+
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+   32            | composition '.' composition .  [$end, IDENTIFIER, COMPOSON, SELECTION, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, '.', '(', ')']
+
+    COMPOSON  shift, and go to state 29
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    COMPOSON  [reduce using rule 32 (composition)]
+    '('       [reduce using rule 32 (composition)]
+    $default  reduce using rule 32 (composition)
+
+    composition  go to state 57
+
+    Conflict between rule 32 and token '.' resolved as reduce (%left '.').
+    Conflict between rule 32 and token '&' resolved as shift ('.' < '&').
+
+
+State 74
+
+   18 s_path: s_path IDENTIFIER COUPLE composition .  [$end, IDENTIFIER, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '.'       shift, and go to state 56
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    $default  reduce using rule 18 (s_path)
+
+    composition  go to state 57
+
+
+State 75
+
+   26 maybe_composition: RESET .
+
+    $default  reduce using rule 26 (maybe_composition)
+
+
+State 76
+
+   20 s_hook: s_hook SELECTION COUPLE maybe_composition .
+
+    $default  reduce using rule 20 (s_hook)
+
+
+State 77
+
+   25 maybe_composition: composition .  [$end, SELECTION, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   27 composition: . COMPOSON
+   28            | . '(' composition ')'
+   29            | . '&' COMPOSON
+   30            | . '&' '(' composition ')'
+   31            | . composition composition
+   31            | composition . composition
+   32            | . composition '.' composition
+   32            | composition . '.' composition
+
+    COMPOSON  shift, and go to state 29
+    '.'       shift, and go to state 56
+    '&'       shift, and go to state 30
+    '('       shift, and go to state 31
+
+    $default  reduce using rule 25 (maybe_composition)
+
+    composition  go to state 57
+
+
+State 78
+
+   22 s_assert: s_assert SELECTION COUPLE maybe_composition .
+
+    $default  reduce using rule 22 (s_assert)
+
+
+State 79
+
+   24 s_fail: s_fail SELECTION COUPLE maybe_composition .
+
+    $default  reduce using rule 24 (s_fail)
+
+
+State 80
+
+   41 maybe_variable: VARIABLE .
+
+    $default  reduce using rule 41 (maybe_variable)
+
+
+State 81
+
+   42 maybe_variable: RESET .
+
+    $default  reduce using rule 42 (maybe_variable)
+
+
+State 82
+
+   34 s_cache: s_cache SELECTION COUPLE maybe_variable .
+
+    $default  reduce using rule 34 (s_cache)
+
+
+State 83
+
+   36 s_alias: s_alias SELECTION COUPLE maybe_variable .
+
+    $default  reduce using rule 36 (s_alias)
+
+
+State 84
+
+   38 s_lang: s_lang SELECTION COUPLE maybe_variable .
+
+    $default  reduce using rule 38 (s_lang)
+
+
+State 85
+
+   43 maybe_str: STR .
+
+    $default  reduce using rule 43 (maybe_str)
+
+
+State 86
+
+   44 maybe_str: RESET .
+
+    $default  reduce using rule 44 (maybe_str)
+
+
+State 87
+
+   40 s_doc: s_doc SELECTION COUPLE maybe_str .
+
+    $default  reduce using rule 40 (s_doc)
+
+
+State 88
+
+   47 s_export: s_export PATH AS VARIABLE .
+
+    $default  reduce using rule 47 (s_export)
+
+
+State 89
+
+   52 type: TYPE .
+
+    $default  reduce using rule 52 (type)
+
+
+State 90
+
+   52 type: . TYPE
+   53     | . '(' type ')'
+   53     | '(' . type ')'
+   54     | . '[' type ']'
+   55     | . type ARROW type
+   56     | . type ',' type
+
+    TYPE  shift, and go to state 89
+    '('   shift, and go to state 90
+    '['   shift, and go to state 91
+
+    type  go to state 101
+
+
+State 91
+
+   52 type: . TYPE
+   53     | . '(' type ')'
+   54     | . '[' type ']'
+   54     | '[' . type ']'
+   55     | . type ARROW type
+   56     | . type ',' type
+
+    TYPE  shift, and go to state 89
+    '('   shift, and go to state 90
+    '['   shift, and go to state 91
+
+    type  go to state 102
+
+
+State 92
+
+   51 s_type: s_type NAMES COUPLE type .  [$end, NAMES, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   55 type: type . ARROW type
+   56     | type . ',' type
+
+    ARROW  shift, and go to state 103
+    ','    shift, and go to state 104
+
+    $default  reduce using rule 51 (s_type)
+
+
+State 93
+
+   61 construct: TYPE .
+
+    $default  reduce using rule 61 (construct)
+
+
+State 94
+
+   58 s_ontology: s_ontology NAMES COUPLE ontology .  [$end, NAMES, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY]
+   60 ontology: ontology . '|' construct
+
+    '|'  shift, and go to state 105
+
+    $default  reduce using rule 58 (s_ontology)
+
+
+State 95
+
+   59 ontology: construct .  [$end, NAMES, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, '|']
+   62 construct: construct . TYPE
+
+    TYPE  shift, and go to state 106
+
+    $default  reduce using rule 59 (ontology)
+
+
+State 96
+
+   64 s_arg: s_arg SELECTION COUPLE maybe_argument .
+
+    $default  reduce using rule 64 (s_arg)
+
+
+State 97
+
+   67 maybe_argument: NAME '=' PRIMITIVE .
+
+    $default  reduce using rule 67 (maybe_argument)
+
+
+State 98
+
+   70 array: '[' . list ']'
+   71      | '[' . ']'
+   72 list: . PRIMITIVE
+   73     | . list ',' PRIMITIVE
+
+    PRIMITIVE  shift, and go to state 107
+    ']'        shift, and go to state 108
+
+    list  go to state 109
+
+
+State 99
+
+   69 maybe_argument: NAME '=' array .
+
+    $default  reduce using rule 69 (maybe_argument)
+
+
+State 100
+
+   30 composition: '&' '(' composition ')' .
+
+    $default  reduce using rule 30 (composition)
+
+
+State 101
+
+   53 type: '(' type . ')'
+   55     | type . ARROW type
+   56     | type . ',' type
+
+    ARROW  shift, and go to state 103
+    ')'    shift, and go to state 110
+    ','    shift, and go to state 104
+
+
+State 102
+
+   54 type: '[' type . ']'
+   55     | type . ARROW type
+   56     | type . ',' type
+
+    ARROW  shift, and go to state 103
+    ']'    shift, and go to state 111
+    ','    shift, and go to state 104
+
+
+State 103
+
+   52 type: . TYPE
+   53     | . '(' type ')'
+   54     | . '[' type ']'
+   55     | . type ARROW type
+   55     | type ARROW . type
+   56     | . type ',' type
+
+    TYPE  shift, and go to state 89
+    '('   shift, and go to state 90
+    '['   shift, and go to state 91
+
+    type  go to state 112
+
+
+State 104
+
+   52 type: . TYPE
+   53     | . '(' type ')'
+   54     | . '[' type ']'
+   55     | . type ARROW type
+   56     | . type ',' type
+   56     | type ',' . type
+
+    TYPE  shift, and go to state 89
+    '('   shift, and go to state 90
+    '['   shift, and go to state 91
+
+    type  go to state 113
+
+
+State 105
+
+   60 ontology: ontology '|' . construct
+   61 construct: . TYPE
+   62          | . construct TYPE
+
+    TYPE  shift, and go to state 93
+
+    construct  go to state 114
+
+
+State 106
+
+   62 construct: construct TYPE .
+
+    $default  reduce using rule 62 (construct)
+
+
+State 107
+
+   72 list: PRIMITIVE .
+
+    $default  reduce using rule 72 (list)
+
+
+State 108
+
+   71 array: '[' ']' .
+
+    $default  reduce using rule 71 (array)
+
+
+State 109
+
+   70 array: '[' list . ']'
+   73 list: list . ',' PRIMITIVE
+
+    ']'  shift, and go to state 115
+    ','  shift, and go to state 116
+
+
+State 110
+
+   53 type: '(' type ')' .
+
+    $default  reduce using rule 53 (type)
+
+
+State 111
+
+   54 type: '[' type ']' .
+
+    $default  reduce using rule 54 (type)
+
+
+State 112
+
+   55 type: type . ARROW type
+   55     | type ARROW type .  [$end, NAMES, ARROW, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, ')', ']', ',']
+   56     | type . ',' type
+
+    ARROW  shift, and go to state 103
+    ','    shift, and go to state 104
+
+    ARROW     [reduce using rule 55 (type)]
+    ','       [reduce using rule 55 (type)]
+    $default  reduce using rule 55 (type)
+
+
+State 113
+
+   55 type: type . ARROW type
+   56     | type . ',' type
+   56     | type ',' type .  [$end, NAMES, ARROW, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, ')', ']', ',']
+
+    ARROW  shift, and go to state 103
+    ','    shift, and go to state 104
+
+    ARROW     [reduce using rule 56 (type)]
+    ','       [reduce using rule 56 (type)]
+    $default  reduce using rule 56 (type)
+
+
+State 114
+
+   60 ontology: ontology '|' construct .  [$end, NAMES, SECTION_HOOK, SECTION_CACHE, SECTION_PATH, SECTION_ASSERT, SECTION_FAIL, SECTION_ALIAS, SECTION_LANG, SECTION_DOC, SECTION_EXPORT, SECTION_SOURCE, SECTION_ARG, SECTION_TYPE, SECTION_ONTOLOGY, '|']
+   62 construct: construct . TYPE
+
+    TYPE  shift, and go to state 106
+
+    $default  reduce using rule 60 (ontology)
+
+
+State 115
+
+   70 array: '[' list ']' .
+
+    $default  reduce using rule 70 (array)
+
+
+State 116
+
+   73 list: list ',' . PRIMITIVE
+
+    PRIMITIVE  shift, and go to state 117
+
+
+State 117
+
+   73 list: list ',' PRIMITIVE .
+
+    $default  reduce using rule 73 (list)

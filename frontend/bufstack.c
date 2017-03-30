@@ -10,7 +10,7 @@ int newfile(char* fn){
     char* home = getenv("HOME");
 
     if(f == NULL){
-        char* lib = ".loc/lib";
+        char* lib = ".morloc/lib";
         int size = strlen(fn) + strlen(home) + strlen(lib) + 3;
         char* libfn = (char*)malloc(size * sizeof(char));
         sprintf(libfn, "%s/%s/%s", home, lib, fn);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 stat=0
-loc -kx tst x.loc || stat=1
+morloc -kx tst x.loc || stat=1
 for j in tst/*.sh; do grep -o "a" $j | wc -l | awk '{print $1}'; done
 rm -rf tst manifold-nexus.py
 exit $stat

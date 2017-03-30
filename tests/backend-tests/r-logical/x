@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-loc -x zzz x.loc
+morloc -x zzz x.loc
 ./manifold-nexus.py say_hi > a
 ./manifold-nexus.py say_bi > b
 cat a b | diff /dev/stdin <(echo '"hi"'; echo "null") &> /dev/null

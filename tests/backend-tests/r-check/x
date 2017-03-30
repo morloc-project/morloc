@@ -4,7 +4,7 @@ cat << EOF > z
 EOF
 
 stat=0
-loc -kx locout x.loc || stat=1
+morloc -kx locout x.loc || stat=1
 ./manifold-nexus.py main > y 2> /dev/null
 diff z y || stat=1
 &> /dev/null

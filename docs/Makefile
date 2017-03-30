@@ -1,4 +1,4 @@
-TARGET=loc
+TARGET=morloc
 
 ${TARGET}.pdf: ${TARGET}.tex
 	latexmk -pdf ${TARGET}.tex

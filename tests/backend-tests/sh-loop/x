@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-loc -kx tst x.loc
+morloc -kx tst x.loc
 
 for j in manifold-nexus.py x.loc 
 do

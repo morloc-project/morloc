@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 locstat=0
-loc -x zzz x.loc || locstat=1
+morloc -x zzz x.loc || locstat=1
 ./manifold-nexus.py tail > a || locstat=1
 ./manifold-nexus.py head > b || locstat=1
 

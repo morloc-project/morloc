@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-loc -x zzz x.loc
+morloc -x zzz x.loc
 ./manifold-nexus.py main 2> obs.txt
 
 diff obs.txt exp.txt

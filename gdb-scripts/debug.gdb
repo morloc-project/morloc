@@ -1,4 +1,4 @@
-file frontend/loc
+file frontend/morloc
 
 set print repeats 100
 

@@ -1,3 +1,3 @@
 #!/usr/bin/bash
 
-loc -l x.loc
+morloc -l x.loc

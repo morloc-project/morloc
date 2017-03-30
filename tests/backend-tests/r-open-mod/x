@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-loc -x tst x.loc &> /dev/null
+morloc -x tst x.loc &> /dev/null
 ./manifold-nexus.py main &> /dev/null
 status=
 if [[ -f f-cars.pdf && -f f-mtcars.pdf ]]

@@ -1,7 +1,7 @@
 TARGET=x.loc
 
 all:
-	loc -ktx locout ${TARGET}
+	morloc -ktx locout ${TARGET}
 
 .PHONY: run
 run:

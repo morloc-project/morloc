@@ -3,7 +3,7 @@ set -u
 
 usage (){
 cat << EOF
-Test suite for the LOC compiler
+Test suite for the Morloc compiler
   -h      print this help message
   -q      quiet, print no output
   -x      stop on first failure
@@ -18,7 +18,7 @@ EOF
     exit 0
 }
 
-loc_flags=
+morloc_flags=
 backend_dir=
 
 loud=true
@@ -92,10 +92,10 @@ frontend_test(){
 
     say_n "$msg"
 
-    loc -l $loc_flags x.loc &> $errlog 
+    morloc -l $morloc_flags x.loc &> $errlog 
     if [[ $? == 0 ]]
     then
-        diff <(loc -l $loc_flags x.loc) x.lil &> $difflog 
+        diff <(morloc -l $morloc_flags x.loc) x.lil &> $difflog 
         if [[ $? == 0 ]]
         then
             say OK
@@ -145,7 +145,7 @@ backend_test(){
     
     say_n "$msg"
 
-    loc $loc_flags -kx tst x.loc &> $errlog 
+    morloc $morloc_flags -kx tst x.loc &> $errlog 
     if [[ $? == 0 ]]
     then
         obs=/tmp/obs_$RANDOM
@@ -208,7 +208,7 @@ frontend_test variable-names     'variable-names/    -- a2 . A4 . a-r a-14 .....
 frontend_test issue-2            'issue-2/           -- github issue #2 ................................ '
 fi
 
-loc_flags=" -t "
+morloc_flags=" -t "
 backend_dir=type-tests
 if $test_types
 then
@@ -225,7 +225,7 @@ backend_test tuples        main 'tuples/            -- pass tuple across all lan
 fi
 
 
-loc_flags=" "
+morloc_flags=" "
 backend_dir=backend-tests
 if $test_backend
 then

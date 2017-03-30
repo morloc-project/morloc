@@ -5,7 +5,7 @@ hi from py
 hi from R
 EOF
 stat=0
-loc -kx locout x.loc || stat=1
+morloc -kx locout x.loc || stat=1
 ./manifold-nexus.py main
 diff exp obs || stat=1
 

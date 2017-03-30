@@ -302,7 +302,7 @@ argument list rather than just the pure value.
 
 \section{Conditionals}
 
-Partitioning data is an important part of many workflows. LOC needs a good
+Partitioning data is an important part of many workflows. Morloc needs a good
 method for expressing binary trees. It isn't hard: $V1 ? V2 ? A, B, V3 ? C, D$ etc
 works fine. The grammar is:
 
@@ -481,7 +481,7 @@ What should be passed to the effect functions. There are several possibilities,
 all of them useful in certain contexts:
 
 Option 1: pass nothing. The effect functions are manifolds, they can be
-elaborate entities, constructed in the LOC path section. In this way, they are
+elaborate entities, constructed in the Morloc path section. In this way, they are
 an orthogonal dimension to the pure path through the data.
 
 Option 2: pass b (the unpackaged output). This would be extremely useful for
@@ -539,11 +539,11 @@ example see the discussion of GNU grep above.
 
 \section{Relation to lambda calculus}
 
-Lambda calculus distinguishes between variables and expressions. In LOC there
+Lambda calculus distinguishes between variables and expressions. In Morloc there
 are no variables. But there are expressions that take no inputs, these play the
 role of variables.
 
-The grammar of LOC is
+The grammar of Morloc is
 
 \begin{verbatim}
   E = m|(E)|EE|E.E
@@ -573,7 +573,7 @@ The outputs of an expression are:
 
 The outputs are the manifolds themselves.
 
-NOTE: I do not allow a nested expression to produce multiple outputs in LOC.
+NOTE: I do not allow a nested expression to produce multiple outputs in Morloc.
 
 Likewise, the receivers of input to an expression are:
 

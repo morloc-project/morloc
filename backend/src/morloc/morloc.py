@@ -19,7 +19,7 @@ from mogrifier.sh import ShMogrifier
 from mogrifier.py import PyMogrifier
 
 __version__ = '0.0.0'
-__prog__ = 'loc'
+__prog__ = 'morloc'
 
 def parser():
 
@@ -29,8 +29,8 @@ def parser():
         argv = ['-h']
 
     parser = argparse.ArgumentParser(
-        description="Compile a LOC program",
-        usage="loc [options] LOC_SCRIPT"
+        description="Compile a Morloc program",
+        usage="morloc [options] MORLOC_SCRIPT"
     )
     parser.add_argument(
         '-o', '--nexus-name',
@@ -49,17 +49,17 @@ def parser():
     )
     parser.add_argument(
         'f',
-        help="LOC source file"
+        help="Morloc source file"
     )
     parser.add_argument(
         '-t', '--typecheck',
-        help="Typecheck the LOC script (do not build)",
+        help="Typecheck the Morloc script (do not build)",
         action='store_true',
         default=False
     )
     parser.add_argument(
         '-l', '--lil-only',
-        help="Only run frontend, print LOC Intermediate Language",
+        help="Only run frontend, print Morloc Intermediate Language",
         action='store_true',
         default=False
     )
@@ -108,9 +108,9 @@ def parser():
 
 
 def get_outdir(home, exe_path=None):
-    loc_tmp = "%s/tmp" % home
+    morloc_tmp = "%s/tmp" % home
     try:
-        os.mkdir(loc_tmp)
+        os.mkdir(morloc_tmp)
     except FileExistsError:
         pass
     outdir = None
@@ -128,13 +128,13 @@ def get_outdir(home, exe_path=None):
     else:
         for i in range(500):
             try:
-                outdir=os.path.join(loc_tmp, "loc_%s" % i)
+                outdir=os.path.join(morloc_tmp, "morloc_%s" % i)
                 os.mkdir(outdir)
                 break
             except FileExistsError:
                 pass
         else:
-            err("Too many temporary directories (see ~/.loc/tmp)")
+            err("Too many temporary directories (see ~/.morloc/tmp)")
     return os.path.abspath(outdir)
 
 def build_project(raw_lil, outdir, home):
@@ -209,7 +209,7 @@ def get_lil(args):
     if args.table_dump:
         flags.append('-d')
 
-    compilant = lil.compile_loc(
+    compilant = lil.compile_morloc(
         args.f,
         flags    = flags,
         valgrind = args.valgrind,
@@ -231,18 +231,18 @@ if __name__ == '__main__':
             sys.exit(1)
 
     if exitcode != 0:
-        err("Failed to compile LOC", code=exitcode)
+        err("Failed to compile Morloc", code=exitcode)
 
     if args.lil_only:
         for line in raw_lil:
             print(line, end="")
         sys.exit(0)
 
-    loc_home = os.path.expanduser("~/.loc")
+    morloc_home = os.path.expanduser("~/.morloc")
 
-    outdir = get_outdir(loc_home, args.execution_path)
+    outdir = get_outdir(morloc_home, args.execution_path)
 
-    build_project(raw_lil=raw_lil, outdir=outdir, home=loc_home)
+    build_project(raw_lil=raw_lil, outdir=outdir, home=morloc_home)
 
     if args.print_manifolds:
         for k,m in manifolds.items():

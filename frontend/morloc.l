@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <ctype.h>
 
-#include "loc.tab.h"
+#include "morloc.tab.h"
 
 int newfile(char *fn);
 int popfile(void);
@@ -343,8 +343,8 @@ W* couplet_str_str(char* lhs, char* rhs, Class cls){
 
 void print_usage_and_exit(int exit_status){
     fprintf(stderr,
-"LOC compiler\n"
-"Usage: loc [options] myfile.loc\n"
+"Morloc compiler\n"
+"Usage: morloc [options] myfile.loc\n"
 "Arguments:\n"
 "  -c  run the typechecker on manifolds\n"
 "  -z  print type debugging info"
@@ -418,7 +418,7 @@ int main(int argc, char ** argv){
     } while(argc-- > 2 && argv++);
 
     if(!file_loaded) {
-        warn("No readable loc file found\n");
+        warn("No readable morloc file found\n");
         print_usage_and_exit(1);
     }
     if(log_tokens){

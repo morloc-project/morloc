@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-loc -x tst x.loc
+morloc -x tst x.loc
 ./manifold-nexus.py main
 status=
 if [[ -f z.pdf ]]

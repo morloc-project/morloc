@@ -11,75 +11,75 @@ all     :: ? -> Bool
 nothing :: Void -> Void
 
 @alias
-null    :: loc_null
-id      :: loc_id
-true    :: loc_true
-false   :: loc_false
-and     :: loc_and
-or      :: loc_or
-not     :: loc_not
-any     :: loc_any
-all     :: loc_all
-nothing :: loc_nothing
+null    :: morloc_null
+id      :: morloc_id
+true    :: morloc_true
+false   :: morloc_false
+and     :: morloc_and
+or      :: morloc_or
+not     :: morloc_not
+any     :: morloc_any
+all     :: morloc_all
+nothing :: morloc_nothing
 
 
 @source R
 
-loc_null <- function(...) {
+morloc_null <- function(...) {
     list(...) # to force evaluation of inputs
     NULL      # but return nothing
 }
 
-loc_id <- function(x) { x }
+morloc_id <- function(x) { x }
 
-loc_true <- function(...) { TRUE }
+morloc_true <- function(...) { TRUE }
 
-loc_false <- function(...) { FALSE }
+morloc_false <- function(...) { FALSE }
 
-loc_and <- function(a, b) { a && b }
+morloc_and <- function(a, b) { a && b }
 
-loc_or  <- function(a, b) { a || b }
+morloc_or  <- function(a, b) { a || b }
 
-loc_not <- function(a) { ! a }
+morloc_not <- function(a) { ! a }
 
-loc_any <- any
+morloc_any <- any
 
-loc_all <- all
+morloc_all <- all
 
-loc_nothing <- function() { NULL }
+morloc_nothing <- function() { NULL }
 
 
 @source sh
 
-loc_null() {
+morloc_null() {
     cat "$1" &> /dev/null || echo "$1" > /dev/null
 }
 
-loc_id() {
+morloc_id() {
     cat "$1" 2> /dev/null || echo "$1"
 }
 
-loc_true() {
+morloc_true() {
     echo true
 }
 
-loc_false() {
+morloc_false() {
     echo false
 }
 
-loc_and() {
+morloc_and() {
     [[ $1 == "true" && $2 == "true" ]] && echo true || echo false
 }
 
-loc_or() {
+morloc_or() {
     [[ $1 == "true" || $2 == "true" ]] && echo true || echo false
 }
 
-loc_not() {
+morloc_not() {
     [[ $1 == "true" ]] && echo false || echo true
 }
 
-loc_any() {
+morloc_any() {
     is_true=0
     for j in "$@"
     do
@@ -92,7 +92,7 @@ loc_any() {
     [[ $is_true -eq 1 ]] && echo true || echo false
 }
 
-loc_all() {
+morloc_all() {
     is_true=1
     for j in $@
     do
@@ -105,38 +105,38 @@ loc_all() {
     [[ $is_true -eq 1 ]] && echo true || echo false
 }
 
-loc_nothing() {
+morloc_nothing() {
     echo -n
 }
 
 @source py
 
-def loc_null(*args, **kwargs):
+def morloc_null(*args, **kwargs):
     pass
 
-def loc_id(x):
+def morloc_id(x):
     return x
 
-def loc_true(*args, **kwargs):
+def morloc_true(*args, **kwargs):
     return True
 
-def loc_false(*args, **kwargs):
+def morloc_false(*args, **kwargs):
     return False
 
-def loc_and(a, b):
+def morloc_and(a, b):
     return( bool(a) and bool(b) )
 
-def loc_or(a, b):
+def morloc_or(a, b):
     return( bool(a) or bool(b) )
 
-def loc_not(a):
+def morloc_not(a):
     return (not a)
 
-def loc_all(*args):
+def morloc_all(*args):
     return all(args)
 
-def loc_any(*args):
+def morloc_any(*args):
     return any(args)
 
-def loc_nothing():
+def morloc_nothing():
     pass

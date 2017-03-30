@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-loc -x zzz x.loc
+morloc -x zzz x.loc
 ./manifold-nexus.py main 2>&1 | grep "this is a label" > /dev/null
 status=$?
 rm -rf zzz manifold-nexus.py
