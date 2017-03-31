@@ -4,7 +4,7 @@
 
 \section{Templates}
 
-The core functions of Loc are manifold. These functions take no arguments.
+The core functions of Morloc are manifold. These functions take no arguments.
 They are conglomerations of the following elements:
 
 \begin{table}[htpb]
@@ -94,10 +94,10 @@ m =
 
 \section{Expectations for the backends}
 
-The Loc compiler translates Loc code into an intermediate language (Loc
-Intermediate Language, LIL) that lists the steps need to build a program. It
-is the job of the backend to interpret LIL into working code in an output
-language (OL). The process of adding support for new languages will be
+The Morloc compiler translates Morloc code into an intermediate language
+(Morloc Intermediate Language, LIL) that lists the steps need to build a
+program. It is the job of the backend to interpret LIL into working code in an
+output language (OL). The process of adding support for new languages will be
 simplified if there is a roughly one-to-one correlation between instructions in
 LIL and functions in the backend.
 
@@ -303,8 +303,13 @@ argument list rather than just the pure value.
 \section{Conditionals}
 
 Partitioning data is an important part of many workflows. Morloc needs a good
+<<<<<<< Updated upstream
 method for expressing binary trees. It isn't hard: $V1 ? V2 ? A, B, V3 ? C, D$ etc
 works fine. The grammar is:
+=======
+method for expressing binary trees. It isn't hard: $V1 ? V2 ? A, B, V3 ? C, D$
+etc works fine. The grammar is:
+>>>>>>> Stashed changes
 
 \begin{verbatim}
 cexp
@@ -377,7 +382,7 @@ V'  :: [Foo] -> Bool    -- e2
 V'' :: [Foo] -> [Bool]  -- e3
 \end{verbatim}
 
-For e1, Loc would just have to map V across x in the compiled code. The
+For e1, Morloc would just have to map V across x in the compiled code. The
 difference between e2 and e3 is more significant. e2 reduces the entire vector
 to a single boolean. This will result in only a single leaf being selected and
 all data being processed by the one function. e3 maps list to list, leading to
@@ -389,7 +394,7 @@ distinguish them? This brings me back to the ever troublesome loop issue.
 
 \section{On inputs, outputs and parameters}
 
-Since Loc is a workflow language, a multifurcating relative of linear shell
+Since Morloc is a workflow language, a multifurcating relative of linear shell
 pipelines, connecting function inputs to function outputs is of prime
 importance. However their are other inputs to a function, the constant
 parameters. Take for example GNU grep. Grep has the general form
@@ -458,8 +463,8 @@ length . grep (read "world.txt") "waldo"
 unnest . map (grep (read "world.txt")) (read "patterns.txt")
 \end{verbatim}
 
-The last example uses currying, something not implemented in Loc. Also
-something that I can't literally implement at all in Loc since it would require
+The last example uses currying, something not implemented in Morloc. Also
+something that I can't literally implement at all in Morloc since it would require
 changing client code (maybe, thar be hacks ...). However, if I create a `map`
 builtin, I can compile this with a loop calling `grep (read "world.txt) x` for
 all x in `(read "patterns.txt")`. However, this is inefficient. Grep has
@@ -481,8 +486,13 @@ What should be passed to the effect functions. There are several possibilities,
 all of them useful in certain contexts:
 
 Option 1: pass nothing. The effect functions are manifolds, they can be
+<<<<<<< Updated upstream
 elaborate entities, constructed in the Morloc path section. In this way, they are
 an orthogonal dimension to the pure path through the data.
+=======
+elaborate entities, constructed in the Morloc path section. In this way, they
+are an orthogonal dimension to the pure path through the data.
+>>>>>>> Stashed changes
 
 Option 2: pass b (the unpackaged output). This would be extremely useful for
 simple effects, like a print statement. Then builtin functions of language can
@@ -499,9 +509,10 @@ function should be used.
 
 \section{A word on the future}
 
-Loc is dependent on infrastructure that does not yet exist. It is a weak
-dependency, since Loc can work with any set of pure functions. But it would be
-most powerful in the context of a functional database. Hoogle is the prototype.
+Morloc is dependent on infrastructure that does not yet exist. It is a weak
+dependency, since Morloc can work with any set of pure functions. But it would
+be most powerful in the context of a functional database. Hoogle is the
+prototype.
 
 The functional database obviously needs to allow lookup based on exact type
 signatures. It also needs to understand the ontology, inheritance of types,
@@ -512,36 +523,42 @@ be compose and decompose operations. Slightly unrelated, but we should also
 have methods to store and study typed workflows.
 
 Such a database would consist of the function code, an ontology (specified in
-Loc), and the signatures for each function (also in Loc).
+Morloc), and the signatures for each function (also in Morloc).
 
 \section{A word on Galaxy, KBase, IPlant desktop, and their ilk}
 
-These are similar to Loc in that they allow linking of functional units and
+These are similar to Morloc in that they allow linking of functional units and
 setting of their parameters.
 
 Their point-and-click interfaces present a specialized subset of the
 functionallity of a subset of all programs selected form a subset of all
 fields. They cater to the non-programmer, offering "user friendly" access to
 common workflows within specific fields. They sacrifice power for muggle
-usability. Loc is far more general and allows user-written code. It could serve
-as a basis for a muggle workflow engine, but is still useful to the programmer
-(well, ok, it isn't useful to anyone yet).
+usability. Morloc is far more general and allows user-written code. It could
+serve as a basis for a muggle workflow engine, but is still useful to the
+programmer (well, ok, it isn't useful to anyone yet).
 
 The Galaxy class programs focus on linking wrappers for independent programs.
-In contrast, Loc is a metaprogramming language for creating pure code. Since
-Loc functions may be wrappers for standalone programs, Loc supersets the Galaxy
-class. Loc can interface with the entire function set of any language with no
-boilerplate (it isn't safe to do this, since you should at least have a type
-signature). I should temper this by specifying the limitations of Loc,
+In contrast, Morloc is a metaprogramming language for creating pure code. Since
+Morloc functions may be wrappers for standalone programs, Morloc supersets the
+Galaxy class. Morloc can interface with the entire function set of any language
+with no boilerplate (it isn't safe to do this, since you should at least have a
+type signature). I should temper this by specifying the limitations of Morloc,
 specifically, it requires pure functions with types that are invariant to
 parameter choice. This may necessitate writing wrappers for functions, for
 example see the discussion of GNU grep above.
 
 \section{Relation to lambda calculus}
 
+<<<<<<< Updated upstream
 Lambda calculus distinguishes between variables and expressions. In Morloc there
 are no variables. But there are expressions that take no inputs, these play the
 role of variables.
+=======
+Lambda calculus distinguishes between variables and expressions. In Morloc
+there are no variables. But there are expressions that take no inputs, these
+play the role of variables.
+>>>>>>> Stashed changes
 
 The grammar of Morloc is
 

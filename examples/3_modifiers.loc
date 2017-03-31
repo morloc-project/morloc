@@ -24,4 +24,3 @@ is.positive <- function(x){ all(x > 0) }
 
 @include
 core/memcache
-core/type

@@ -59,4 +59,3 @@ cleanup () {
 core/memcache
 core/atomic
 core/control
-core/type

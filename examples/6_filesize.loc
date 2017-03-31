@@ -17,6 +17,7 @@ filesizes (){
 
 @type
 log2 :: [Int] -> [Num]
+hist :: [Num] -> Void
 
 @path
 hist . log2 . filesizes . '/usr/bin'

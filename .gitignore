@@ -1,10 +1,10 @@
 *.o
 
-loc.output
+morloc.output
 lex.yy.*
 *.tab.*
 vgcore.*
-frontend/loc
+frontend/morloc
 tags
 tst/
 locout
