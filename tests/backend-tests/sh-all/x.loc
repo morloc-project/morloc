@@ -15,7 +15,7 @@ uniq :: [String] -> [String]
 uniq . sort . grep . man . "ls"
 
 @arg
-grep := -Po "[a-z]+ed"
+grep := -Po -e "[a-z]+ed"
 man := --no-hyphenation
 
 @lang

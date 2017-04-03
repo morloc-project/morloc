@@ -1,5 +1,6 @@
 *.o
 
+morloc
 morloc.output
 lex.yy.*
 *.tab.*

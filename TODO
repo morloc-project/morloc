@@ -1,5 +1,5 @@
 Immediate goals
- [ ] add generics
+ [x] add generics
  [ ] allow positional arrays in path
  [ ] allow functions in arrays
  [ ] replace `&` with `\`
@@ -16,3 +16,9 @@ Coming goals
 Distant goals
  [ ] add type constructors
  [ ] cross-reference existing types against an ontology of types
+
+
+
+# ML reimplementation notes.
+
+I need to cleanly separate the code into modular pieces. There are the standard lexer and parser pieces.
