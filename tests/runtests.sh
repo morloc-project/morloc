@@ -234,6 +234,7 @@ announce "Backend tests"
 if [[ $lang == "all" ]]; then
 backend_x_test record               'record/            -- foo :: record . "z.txt" "this is a message" .... '
 backend_x_test filter               'filter/            -- filter for all languages ....................... '
+backend_x_test table-ops            'table-ops/         -- test nthcol for all ............................ '
 backend_test ternary main           'ternary/           -- ternary . true &(c . 1) &(c . 2) ............... '
 fi
 

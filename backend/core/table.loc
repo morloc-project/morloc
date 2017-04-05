@@ -1,0 +1,58 @@
+@type
+nthcol :: Int -> Table -> *
+read_table :: File -> Table
+write_table :: Table -> File -> Void
+
+@alias
+nthcol :: morloc_nthcol
+read_table :: morloc_read_table
+
+@source sh
+morloc_nthcol (){
+    cut -f $1 $2 
+}
+
+morloc_read_table (){
+    cat $1
+}
+
+morloc_write_table (){
+    cat $1
+}
+
+@source R
+morloc_nthcol <- function(i, x){
+   x[[i]] 
+}
+
+morloc_read_table <- function(f){
+    read.table(
+        f,
+        header=FALSE,
+        sep="\t",
+        quote="",
+        stringsAsFactors=FALSE
+    )
+}
+
+morloc_write_table <- function(
+    x, f,
+    sep="\t",
+    quote="",
+    col.names=TRUE,
+    row.names=FALSE,
+    stringsAsFactors=FALSE,
+    ...
+){
+    write.table(x, file=f, ...)
+}
+
+@source py
+def morloc_nthcol(i, x):
+    return [r[i-1] for r in x]
+
+def morloc_read_table(filename):
+    raise NotImplemented
+
+def morloc_write_table(filename):
+    raise NotImplemented

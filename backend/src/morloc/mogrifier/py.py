@@ -28,10 +28,26 @@ atom_to_universal = {
 uni2nat_top = '''
 import json
 
-def read_table(x):
+def read_table(xs):
+    # ----- TODO remove the stupid kludge -----
+    ## === BEGIN stupid kludge === ##
+    n = len(xs[1])
+    trans = [str] * n
+    for i in range(n):
+        try:
+            x=int(xs[i])
+            trans[i] = int
+        except TypeError:
+            try:
+                x=float(xs[i])
+                trans[i] = float
+            except TypeError:
+                pass
+    ## === END stupid kludge === ##
+
     table = []
-    for row in x.rstrip().split("\\n"):
-        table.append([float(n) for n in row.split()])
+    for row in xs.rstrip().split("\\n"):
+        table.append([t(x) for x,t in zip(row.split(),trans)])
     return table
 
 def write_table(x):
