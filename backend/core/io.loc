@@ -2,12 +2,14 @@
 readable   :: File -> Bool
 writable   :: File -> Bool
 executable :: File -> Bool
+check_url  :: File -> Bool
 record     :: File -> String -> Void
 
 @alias
 readable   :: morloc_readable
 writable   :: morloc_writable
 executable :: morloc_executable
+check_url  :: morloc_check_url
 record     :: morloc_record
 
 @source R
@@ -27,6 +29,11 @@ morloc_record <- function(f, x){
     cat(sprintf("%s\n", x), file=f, append=TRUE)
 }
 
+morloc_check_url <- function(f){
+    warning("check_url is not implemented in R, use Bash")
+    NULL
+}
+
 @source sh
 morloc_readable (){
     [[ -r $1 ]] && echo "true" || echo "false"
@@ -44,6 +51,10 @@ morloc_record (){
     echo $2 >> $1
 }
 
+morloc_check_url (){
+    wget --spider -q $1 && echo "true" || echo "false"
+}
+
 @source py
 import os
 
@@ -59,3 +70,6 @@ def morloc_executable(f):
 def morloc_record(f, x):
     with open(f, 'a') as fh:
         fh.write("%s\n" % x)
+
+def morloc_check_url:
+    raise NotImplemented
