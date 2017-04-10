@@ -81,9 +81,7 @@ plot_pdf <- function(x, cl, path){
 }
 
 @source py
-
 from sklearn import cluster
-
 def spectral_cluster(X, *args, **kwargs):
     '''
     X - nXm matrix, where n is number of sample, m number of features
