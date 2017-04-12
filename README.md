@@ -305,17 +305,10 @@ is the terminal manifold).
 
 ![types](docs/images/types.png)
 
-<<<<<<< Updated upstream
-Morloc currently supports simple types. The syntax is nearly identical to Haskell,
-with the addition of two keywords: `?` and `void`. `?` matches any number of
-inputs of any type. `void` implies no output (if on the right) or input (if on
-the left).
-=======
 Morloc currently supports simple types. The syntax is nearly identical to
 Haskell, with the addition of two keywords: `?` and `Void`. `?` matches any
 number of inputs of any type. `Void` implies no output (if on the right) or
 input (if on the left).
->>>>>>> Stashed changes
 
 Morloc does not yet support generic types, type constructors, algebraic types and
 all that. But it will in the future.
