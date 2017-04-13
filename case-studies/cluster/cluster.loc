@@ -17,16 +17,15 @@ _ :: load_data
 @lang
 cluster:spectral :: py
 
+@alias
+cluster:kmeans :: kmeans_cluster
+cluster:spectral :: spectral_cluster
+
 @arg
 cluster:kmeans :: centers=3
 cluster:spectral :: n_clusters=3
 # select_features :: cols=['Sepal.Width','Sepal.Length']
 select_features :: cols=[1,2,3,4]
-
-
-@alias
-cluster:kmeans :: kmeans_cluster
-cluster:spectral :: spectral_cluster
 
 @assert R
 normalize :: columns_are_numeric . <select_features>
