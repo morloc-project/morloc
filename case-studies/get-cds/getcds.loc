@@ -1,0 +1,32 @@
+@type
+split :: Table -> [Table]
+extract :: Table -> String
+merge :: [String] -> String
+translate :: String -> String
+
+@path
+null . translate . merge . map .
+  &( extract . $1 *genome )
+   ( split_models . id . *models )
+
+protein :: 'foo.faa'
+genome  :: 'foo.fna'
+models  :: 'foo.gff'
+
+@source R
+library(magrittr)
+split_models <- function(x){
+    cds <- subset(x, V3 == "CDS")
+    models <- factor(sub('.*Parent=([^;]+).*', '\\1', cds$V9))
+    cds <- split(cds, models)
+    lapply(cds, function(x) x[order(x$V4), ])
+}
+
+@source sh
+extract () {
+    bedtools getfasta -fi $1 -bed $2 -fo /dev/stdout -s    
+}
+
+merge () {
+    cat $@
+}
