@@ -1,11 +1,11 @@
 @type
-readG   :: File  -> Table
-nameG   :: Table -> Table
-extract   :: Table -> File -> Text
+read_tsv     :: File  -> Table
+subset,nameG :: Table -> Table
+extract      :: Table -> File -> Text
 
 @path
 null . extract .
-    ( nameG . subset . readG . 'foo.gff' )
+    ( nameG . subset . read_tsv . 'foo.gff' )
     'foo.fna'
 
 @lang
@@ -22,19 +22,18 @@ null :: cp . <extract> 'z.fna'
 cp :: sh
 
 @arg
-nameG :: tag="ID"
-subset :: subset=`name == "gene" & stop - start < 1200`
+nameG  :: tag="ID"
+subset :: `name == "gene" & stop - start < 1200`
+read_tsv ::
+    na = '.'
+    col_types = 'ccciinccc'
+    col_names =
+    ['seqid'  , 'source' , 'name'  ,
+     'start'  , 'stop'   , 'score' ,
+     'strand' , 'phase'  , 'attr'  ]
 
 @source R
-library(magrittr)
-
-readG <- function(x){
-    require(readr)
-    gff_cols <- c('seqid', 'source', 'name', 'start',
-    'stop', 'score', 'strand', 'phase', 'attr')
-    read_tsv(x, col_names=gff_cols, na='.', col_types='ccciinccc')
-}
-
+require(readr)
 nameG <- function(x, tag="ID"){
     pat <- sprintf('.*%s=([^;]+).*', tag)
     x$name <- sub(pat, '\\1', x$attr, perl=TRUE)
