@@ -253,7 +253,8 @@ RESET { RETURN_TOKEN(RESET); }
     RETURN(w, PRIMITIVE);
 }
 <S_ARG>{bak} {
-    W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL);
+    /* W* w = couplet_str_str("*", unquote(yytext), C_POSITIONAL); */
+    W* w = w_new(P_STRING, unquote(yytext));
     // TODO - this isn't primitive
     RETURN(w, PRIMITIVE);
 }
