@@ -29,25 +29,26 @@ uni2nat_top = '''
 import json
 
 def read_table(xs):
-    # ----- TODO remove the stupid kludge -----
-    ## === BEGIN stupid kludge === ##
-    n = len(xs[1])
-    trans = [str] * n
-    for i in range(n):
-        try:
-            x=int(xs[i])
-            trans[i] = int
-        except TypeError:
-            try:
-                x=float(xs[i])
-                trans[i] = float
-            except TypeError:
-                pass
-    ## === END stupid kludge === ##
-
     table = []
     for row in xs.rstrip().split("\\n"):
-        table.append([t(x) for x,t in zip(row.split(),trans)])
+        table.append(row.split())
+
+    n = len(table[0])
+    if not all([len(r) for r in table]):
+        print("Unequal row lengths in table, dying", file=sys.stderr)
+        
+    for i in range(n):
+        trans = int
+        for r in table:
+            try:
+                if float(r[i]) % 1 != 0:
+                    trans = float
+            except ValueError:
+                break
+        else:
+            for r in table:
+                r[i] = trans(r[i])
+
     return table
 
 def write_table(x):
