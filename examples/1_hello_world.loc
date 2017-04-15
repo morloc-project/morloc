@@ -1,6 +1,3 @@
-@path
+@path sh
 
 echo . "hello world"
-
-@lang
-* :: sh

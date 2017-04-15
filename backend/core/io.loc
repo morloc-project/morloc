@@ -71,5 +71,5 @@ def morloc_record(f, x):
     with open(f, 'a') as fh:
         fh.write("%s\n" % x)
 
-def morloc_check_url:
+def morloc_check_url():
     raise NotImplemented

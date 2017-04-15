@@ -1,0 +1,73 @@
+@type
+load_data       :: Void  -> Table
+select_features ,
+scale           ,
+dist            :: Table -> Table
+cluster         :: Table -> [String]
+
+@path R
+null                                .
+    cluster:kmeans cluster:spectral .
+    ( as.matrix . dist )            .
+    scale                           .
+    select_features                 .
+    `iris`
+
+@lang
+cluster:spectral :: py
+
+@alias
+cluster:kmeans :: kmeans_cluster
+cluster:spectral :: spectral_cluster
+
+@arg
+cluster:kmeans   :: centers=3
+cluster:spectral :: n_clusters=3
+dist             :: method="euclidean"
+select_features  :: cols=[1,2,3,4]
+
+@assert R
+scale :: columns_are_numeric . <select_features>
+
+@fail R
+scale :: warning . "Invalid input to _normalize_"
+
+@after R
+null :+ plot_pdf . `iris` <cluster:kmeans> "kmeans.pdf"
+null :+ plot_pdf . `iris` <cluster:spectral> "spectral.pdf"
+
+@include
+core/atomic
+core/datcache
+
+@cache
+as.matrix,cluster :: datcache
+
+@source R
+
+select_features <- function(x, cols=1:4) {
+  x[, unlist(cols)]
+}
+
+columns_are_numeric <- function(x) {
+  all(sapply(x, is.numeric))
+}
+
+kmeans_cluster <- function(mat, ...) {
+    kmeans(mat, ...)$cluster
+}
+
+plot_pdf <- function(x, cl, path, ...){
+    pdf(path)
+    plot(x, col=cl, ...)
+    dev.off()
+}
+
+@source py
+from sklearn import cluster
+def spectral_cluster(X, *args, **kwargs):
+    classifier = cluster.SpectralClustering(*args, **kwargs)
+    classifier.fit(X)
+    pred = classifier.fit_predict(X)
+    pred = [int(x)+1 for x in pred]
+    return pred

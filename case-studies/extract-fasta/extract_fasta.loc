@@ -1,0 +1,38 @@
+@type
+readG   :: File  -> Table
+extract :: Table -> File -> Text
+
+@path
+null . extract .
+    ( subset . readG . 'foo.gff' )
+    'foo.fna'
+
+@lang
+* :: R
+extract,null :: sh
+
+@include
+core/atomic
+
+@after
+null :: cp . <extract> 'z.fna'
+
+@lang
+cp :: sh
+
+@arg
+subset :: subset=`name == "gene" & stop - start < 1200`
+
+@source R
+library(magrittr)
+readG <- function(x){
+    require(readr)
+    gff_cols <- c('seqid', 'source', 'name', 'start',
+    'stop', 'score', 'strand', 'phase', 'attr')
+    read_tsv(x, col_names=gff_cols, na='.', col_types='ccciinccc')
+}
+
+@source sh
+extract () {
+    bedtools getfasta -fi $2 -bed $1 -fo /dev/stdout -s -name
+}

@@ -44,11 +44,7 @@
 
 .PHONY: 12
 12:
-	morloc -kt -o cluster -x pools 12_cluster.loc
-
-.PHONY: 13
-13:
-	morloc -kt -o gff -x pools 13_read_gff.loc
+	morloc -kt -o gff -x pools 12_read_gff.loc
 
 .PHONY: clean
 clean:
@@ -56,6 +52,6 @@ clean:
 		hooks *pdf manifold-nexus.py \
 		sample* results types filesize times \
 		glue *gff3 result.txt \
-		better_r wc [abc].txt filter cluster \
+		better_r wc [abc].txt filter \
 		gff al/ \
 		__pycache__

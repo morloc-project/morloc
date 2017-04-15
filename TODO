@@ -12,6 +12,7 @@ Coming goals
  [ ] generate linkers to resolve type incompatibilities
  [ ] add linkers to backend
  [ ] add `U x -> Bool` automatic checking
+ [ ] add proper `import` sections
 
 Distant goals
  [ ] add type constructors

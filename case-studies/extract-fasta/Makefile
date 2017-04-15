@@ -1,4 +1,4 @@
-TARGET=x.loc
+TARGET=extract_fasta.loc
 
 all:
 	morloc -kx locout ${TARGET}
@@ -9,5 +9,5 @@ run:
 
 .PHONY: clean
 clean:
-	rm -f manifold-nexus.py
-	rm -rf locout obs
+	rm -f manifold-nexus.py *fai
+	rm -rf locout result z.fna

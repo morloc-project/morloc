@@ -1,0 +1,32 @@
+@type
+blastp :: File -> File -> Table
+plot   :: Table -> Void
+
+@path
+plot . blastp . *query *database
+
+query    :: 'human.fa'
+database :: 'chimp_db'
+
+@arg
+blastp :: -outfmt '6 score length'
+          -num_threads 6
+          -word_size 4
+makeblastdb :: -in 'chimp.fa'
+               -out 'chimp_db'
+               -dbtype 'nucl'
+
+@lang
+blastp :: sh
+plot :: R
+
+@before
+blastp :: makeblastdb
+
+@after sh
+blastp :: cleanup
+
+@source sh
+cleanup () {
+    rm chimp_db.*
+}

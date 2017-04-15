@@ -1,0 +1,46 @@
+@type
+read_tsv     :: File  -> Table
+subset,nameG :: Table -> Table
+extract      :: Table -> File -> Text
+
+@path
+null . extract .
+    ( nameG . subset . read_tsv . 'foo.gff' )
+    'foo.fna'
+
+@lang
+* :: R
+extract,null :: sh
+
+@include
+core/atomic
+
+@after
+null :: cp . <extract> 'z.fna'
+
+@lang
+cp :: sh
+
+@arg
+nameG  :: tag="ID"
+subset :: `name == "gene" & stop - start < 1200`
+read_tsv ::
+    na = '.'
+    col_types = 'ccciinccc'
+    col_names =
+    ['seqid'  , 'source' , 'name'  ,
+     'start'  , 'stop'   , 'score' ,
+     'strand' , 'phase'  , 'attr'  ]
+
+@source R
+require(readr)
+nameG <- function(x, tag="ID"){
+    pat <- sprintf('.*%s=([^;]+).*', tag)
+    x$name <- sub(pat, '\\1', x$attr, perl=TRUE)
+    x
+}
+
+@source sh
+extract () {
+    bedtools getfasta -fi $2 -bed $1 -fo /dev/stdout -s -name
+}
