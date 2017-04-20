@@ -39,7 +39,7 @@ syn match DEFAULT_ERROR '\S\+'  contained
 syn match DEFAULT_ERROR '\s\+$' contained
 " as are all keywords
 syn keyword DEFAULT_ERROR id null true false nothing          contained
-syn keyword DEFAULT_ERROR filter ternary map                  contained
+syn keyword DEFAULT_ERROR filter if map                       contained
 syn keyword DEFAULT_ERROR readable writable executable record contained
 syn keyword DEFAULT_ERROR and or not any all                  contained
 syn keyword DEFAULT_ERROR memcache datcache nocache           contained

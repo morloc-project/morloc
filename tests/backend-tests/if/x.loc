@@ -7,7 +7,7 @@ sqrt :: Int -> Int
 id :: a -> a
 
 @path R
-ternary .
+if .
     true            # Condition block
     &( sqrt . $1 )  # if block
     &( id . $1 )    # else block
