@@ -1,3 +1,6 @@
+@type
+map :: (Int -> [Int]) -> [Int] -> [[Int]]
+
 @path
 
 null . map .
