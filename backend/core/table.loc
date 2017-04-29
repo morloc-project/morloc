@@ -2,10 +2,12 @@
 nthcol :: Int -> Table -> *
 read_table :: File -> Table
 write_table :: Table -> File -> Void
+merge :: Int -> Int -> Table -> Table -> Table
 
 @alias
 nthcol :: morloc_nthcol
 read_table :: morloc_read_table
+merge :: morloc_merge
 
 @source sh
 morloc_nthcol (){
@@ -18,6 +20,10 @@ morloc_read_table (){
 
 morloc_write_table (){
     cat $1
+}
+
+morloc_merge () {
+    join -1 $1 -2 $2 -t $'\t' <( sort $3 ) <( sort $4 )
 }
 
 @source R
@@ -47,6 +53,10 @@ morloc_write_table <- function(
     write.table(x, file=f, ...)
 }
 
+# morloc_merge <- function(x, y, by.x, by.y) {
+#     merge(x, y, by.x=names(x)[by.x], by.y=names(y)[by.y])
+# }
+
 @source py
 def morloc_nthcol(i, x):
     return [r[i-1] for r in x]
@@ -55,4 +65,7 @@ def morloc_read_table(filename):
     raise NotImplemented
 
 def morloc_write_table(filename):
+    raise NotImplemented
+
+def morloc_merge(x, y, x_ind, y_ind):
     raise NotImplemented
