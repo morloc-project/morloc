@@ -4,7 +4,8 @@ Immediate goals
  [ ] allow functions in arrays
  [ ] replace `&` with `\`
  [ ] repeal and replace multiple composition
- [ ] add currying
+ [ ] add positional currying
+ [ ] disallow single quotes
 
 Coming goals
  [ ] allow data structures for types
@@ -14,16 +15,40 @@ Coming goals
  [ ] add `U x -> Bool` automatic checking
  [ ] add proper `import` sections
 
+ [ ] add typed parameters to function signature
+ [ ] add typedef
+ [ ] add algebraic types
+ [ ] rewrite syntax, no more sections
+ [ ] formal handling for incomplete compositions
+
 Distant goals
  [ ] add type constructors
  [ ] cross-reference existing types against an ontology of types
 
+Unsolved Problems
+ [ ] source code scope, each source section should have its own scope, but then
+     I need a way to link to a specific source.
+ [ ] import statements, needs to build self-contained Morloc packages
+ [ ] modularize Morloc
+ [ ] elevating parameters, adding generalized parameters to the type without
 
+# Principles
 
-# ML reimplementation notes.
+Add strictness as needed
 
-I need to cleanly separate the code into modular pieces. There are the standard
-lexer and parser pieces.
+Idiomatic code before purity
+
+# ML reimplementation notes
+
+I need to cleanly separate the code into modular pieces. First, the lexer
+handles all the particulars of the syntax, any syntactic sugar, surface
+details. Second, the parser integrates this information into the function graph
+and associates the appropriate information with each node. Third, the type
+checker navigates the graph, inserting nodes where they are needed, killing the
+program if this fails. Fourth, the top level generator builds the manifold
+nexus. Fifth, for each namespace create a set of generated scripts: manifold
+pools. Sixth, parse the edge types, generating linking code as needed, dying at
+compile time when not possible. 
 
 Go back to my toy compilers. Reimplement each, in increasing order of
 difficulty, in Haskell. Then implement Mouse in Haskell. Add full typechecking.
@@ -34,13 +59,12 @@ system from the grammar. The type system should operate at the function graph
 level of abstraction; it should be independent of the particular method used to
 build the function graph (e.g. whether I write Old Morloc or in Haskell).
 
-I should replace LIL with DOT. A Morloc program can be well-represented by
-a graph with attributes. This will simplify typing and also allow me to use all
-the existing tools for working with and visualizing graphs.
-
-I should not replace LIL with DOT. No, they serve different purposes. LIL is
-a set of atomic instructions for building a program. DOT is higher level. I can
-derive a LIL file from a DOT file (and vice versa).
+I should first compile Morloc programs into DOT. A program can be most
+reasonably represented as a graph with attributes. This will simplify typing
+and also allow me to use all the existing tools for working with and
+visualizing graphs. DOT will not replace LIL. The latter is a set of atomic
+instructions for building a program. DOT is higher level. I can derive a LIL
+file from a DOT file (and vice versa).
 
 Next I can expand the function graph to include language transitions and
 assertions. If a slot of type `M x` connects to an input of type `N x`, I need
