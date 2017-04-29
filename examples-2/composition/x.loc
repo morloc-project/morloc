@@ -1,0 +1,13 @@
+@type
+printf :: String -> String -> String
+
+@path
+printf . "reverse:%s\n" (reverse . 'hello')
+
+@lang
+printf :: sh
+reverse :: py
+
+@source py
+def reverse(x):
+    return x[::-1] 

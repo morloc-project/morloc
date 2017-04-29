@@ -12,7 +12,7 @@
 
 .PHONY: 4
 4:
-	morloc -kt -o hooks -x pools 4_hooks.loc
+	morloc -k -o hooks -x pools 4_hooks.loc
 
 .PHONY: 5
 5:

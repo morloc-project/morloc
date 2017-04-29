@@ -1,0 +1,8 @@
+@path R
+roll
+@arg
+roll :: prob = [0.1,0.1,0.1,0.1,0.1,0.5]
+@source R
+roll <- function(...) {
+  sum(sample.int(6,3,replace=TRUE,...))
+}

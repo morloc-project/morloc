@@ -2,8 +2,9 @@
 core/control
 
 @type
-echo :: String -> String -> String
+echo :: ? -> String
 seq :: Int -> Int -> [Int]
+map :: (Int -> String) -> [Int] -> [String]
 
 @path sh
 
