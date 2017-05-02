@@ -1,6 +1,0 @@
-@type
-foo,bar,fifi :: Tungsten -> Light
-zanzi :: Void -> Tungsten
-
-@path
-foo bar fifi . zanzi

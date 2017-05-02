@@ -1,9 +1,0 @@
-@type
-head :: Table -> Table
-@path
-head . foo
-@lang
-foo :: R
-head :: sh
-@source R
-foo <- function() { iris }

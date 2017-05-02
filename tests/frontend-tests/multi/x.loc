@@ -1,7 +1,0 @@
-@type
-foo :: ? -> A
-bar :: Void -> G
-baz :: Void -> H
-
-@path
-foo . bar baz

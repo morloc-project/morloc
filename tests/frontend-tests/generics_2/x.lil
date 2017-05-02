@@ -1,7 +1,0 @@
-EMIT	m0	*
-FUNC	m0	foo
-TYPE	m0	(Int->[Int])
-INPM	m0	0	m1	Int
-EMIT	m1	*
-FUNC	m1	bar
-TYPE	m1	Int

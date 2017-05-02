@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-
-morloc -kx tst x.loc
-
-for j in manifold-nexus.py x.loc 
-do
-    grep -o "a" $j | wc -l | cut --delimiter=" " --fields=1
-done

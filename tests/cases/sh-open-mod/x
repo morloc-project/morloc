@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-xmlstarlet sel -t -m "catalog/book" -v "author" -n -b *xml

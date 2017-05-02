@@ -1,7 +1,0 @@
-@type
-foo :: * -> Void
-bar :: B -> A
-baz :: Void -> *
-
-@path
-foo . bar . baz

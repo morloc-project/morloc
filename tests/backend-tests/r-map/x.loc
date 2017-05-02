@@ -1,6 +1,0 @@
-@include
-core/control
-
-@path R
-
-map . & ( sqrt . $1 ) ( c . 1 4 9 16 )

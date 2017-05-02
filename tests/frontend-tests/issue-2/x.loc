@@ -1,6 +1,0 @@
-@path
-foo . bar <bar>
-
-@source sh
-
-> x

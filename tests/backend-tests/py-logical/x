@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-morloc -x zzz x.loc
-./manifold-nexus.py a &> a
-./manifold-nexus.py b &> b
-cat a b | diff /dev/stdin <(echo -e "true\nfalse") &> /dev/null
-stat=$?
-rm -rf zzz manifold-nexus.py a b
-exit $stat

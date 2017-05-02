@@ -1,6 +1,0 @@
-@type
-foo :: a -> a
-bar :: Void -> Int
-
-@path
-foo . bar

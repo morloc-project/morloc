@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-morloc -x zzz x.loc
-./manifold-nexus.py main 2> obs.txt
-
-diff obs.txt exp.txt
-stat=$?
-
-rm -rf zzz obs.txt manifold-nexus.py
-exit $stat
