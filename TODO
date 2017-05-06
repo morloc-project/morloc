@@ -1,0 +1,45 @@
+This is a staged TODO list. I will work on specifying the language (S) and then
+implementing it (I).
+
+Frontend
+  S   I  
+ [ ] [ ]  composition
+ [ ] [ ]  functions
+ [ ] [ ]  primitives
+ [ ] [ ]  data 
+ [ ] [ ]  labels
+ [ ] [ ]  parameter setting
+ [ ] [ ]  layer interaction
+ [ ] [ ]  invisible listeners
+ [ ] [ ]  output filters (type a -> a) (e.g. cache)
+ [ ] [ ]  input filters (type a -> a) (e.g. input specific validators)
+ [ ] [ ]  early validators
+ [ ] [ ]  late validators
+ [ ] [ ]  higher order functions
+ [ ] [ ]  edge functions
+ [ ] [ ]  modules
+ [ ] [ ]  include
+ [ ] [ ]  imports
+ [ ] [ ]  documentation
+ [ ] [ ]  node signatures
+ [ ] [ ]  parameter typing
+ [ ] [ ]  specialization
+
+Backend
+  S   I
+ [ ] [ ]  type checking
+ [ ] [ ]  type inference
+ [ ] [ ]  nexus generation
+ [ ] [ ]  code generation
+ [ ] [ ]  data IO conversion generation
+ [ ] [ ]  command line argument passing
+ [ ] [ ]  help messages
+
+Environment
+  S   I
+ [ ] [ ]  literate programming support
+ [ ] [ ]  syntax error reporting
+ [ ] [ ]  type error reporting
+ [ ] [ ]  runtime error reporting
+ [ ] [ ]  automatic progress logging
+ [ ] [ ]  graph visualization
