@@ -129,3 +129,41 @@ be resolved by specifying the namespace (name of the imported module).
 
 A module exports a specific set of nodes and specifies which parameters may be
 set. Node attributes cannot be overridden.
+
+
+ * node signature
+
+The general type signature for the function in the node. It is general, in that
+this signature is language-independent. The type system is a direct subset of
+Haskell.
+
+
+ * parameter type
+
+This is experimental. Currently, in old Morloc, parameters are expressed freely
+without compile time checking. But this is pretty loose and highly language
+dependent. The parameter typing allows tighter control of the functions and may
+be used to provide automated documentation of parameters.
+
+
+ * specialization
+
+Ideally the type signature is all that is needed to generate required IO. But
+often more is needed. Should a table passed to R, for example, be
+a `data.frame`, a `data.table`, a list of vectors, a `matrix`, a `tibble`, etc.
+In such cases, hints must be passed to the compiler. The specialization syntax
+needs to be general enough to allow great flexibility in meeting the needs of
+wildly different languages. Perhaps it can be a YAML block.
+
+
+ * primitives
+
+Primitives are terminal values in a workflow that are not modifiable, e.g.
+numbers, strings.
+
+
+ * Workflow Intermediate Language
+
+This is a simple language designed to be easy to parse by a machine. It
+contains all the information needed to build the Morloc executable, but is
+abstracted away from the particular syntax used for specification.
