@@ -49,7 +49,13 @@ syn keyword reserved do
 syn keyword reserved set
 syn keyword reserved from
 syn keyword reserved import
+syn keyword reserved export
+syn keyword reserved as
+syn keyword reserved include
 syn keyword reserved alias
+syn keyword reserved where
+syn keyword reserved data
+syn keyword reserved typedef
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
 
@@ -60,7 +66,7 @@ hi def link reserved Keyword
 " -----------------------------------------------------------------------------
 syn region s_string start=/'/ end=/'/
 syn region s_string start=/"/ end=/"/
-syn match s_number /\d+/
+syn match s_num  '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!'
 " -----------------------------------------------------------------------------
 hi def link s_num      Number
 hi def link s_string   String

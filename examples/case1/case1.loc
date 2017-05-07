@@ -1,0 +1,68 @@
+from core/atomic import null
+from core/table import merge
+
+
+export main as run
+
+typedef CName  :: String
+typedef FBioSeq :: File
+
+Table :: table Record
+
+typedef BlastResult :: Table
+    {
+        qseqid   = String,
+        sseqid   = String,
+        qlen     = Int,
+        slen     = Int,
+        qstart   = Int,
+        qstop    = Int,
+        sstart   = Int,
+        sstop    = Int,
+        bitscore = Num,
+        pident   = Num,
+        positive = Num,
+        evalue   = Num
+    }
+
+type aggregate          :: CName -> Table -> Table
+type ref2name           :: File -> Table
+type tblastn            :: File -> File -> BlastResult
+type makeblastdb        :: File -> File
+type fastq2fasta        :: File -> File
+type cat                :: [File] -> File
+type gunzip             :: File -> File
+type wget               :: URL -> File
+type get_children       :: Int -> File -> File
+type fasta_grep         :: [String] -> File -> File
+type taxid2sciname      :: Void -> Table
+type get_taxid_children :: Int -> Table
+
+
+main = null $ aggregate 2 8 $ merge 1 1 ( ref2name prot ) blastresult
+
+blastresult = tblastn prot blastdb
+
+blastdb = makeblastdb (fastaq2fasta $ cat db)
+
+prot =
+  fasta_grep
+    ( cut 2 $ merge 1 1 taxid2sciname (get_taxid_children focal_taxid) )
+    ( gunzip $ wget dataurl )
+
+db      = "reads.fastq"
+taxid   = 6656
+dataurl = 'ftp://ftp.ncbi.nlm.nih.gov/refseq/release/mitochondrion/mitochondrion.1.protein.faa.gz'
+
+before main :: setup_litade
+before main :: setup_smof
+
+after main :: hist $ nthcol 2 <aggregate>
+
+after prot/merge :: hist $ nthcol 2 <aggregate> where
+    set arg hist ::
+        breaks=50
+        main="A plot of prot/merge"
+
+alias tblastn     :: morloc_tblastn
+alias makeblastdb :: morloc_makeblastdb
