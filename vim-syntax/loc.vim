@@ -41,22 +41,15 @@ let b:current_syntax = "loc"
 " =============================================================================
 "                             K E Y W O R D S                                  
 " -----------------------------------------------------------------------------
-syn keyword reserved alias
-syn keyword reserved arg
-syn keyword reserved cache
-syn keyword reserved assert
-syn keyword reserved doc
+syn keyword reserved type
+syn keyword reserved around
 syn keyword reserved before
 syn keyword reserved after
-syn keyword reserved export
-syn keyword reserved fail
-syn keyword reserved lang
-syn keyword reserved include
+syn keyword reserved do
+syn keyword reserved set
+syn keyword reserved from
 syn keyword reserved import
-syn keyword reserved ontology
-syn keyword reserved path
-syn keyword reserved type
-syn keyword reserved source
+syn keyword reserved alias
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
 
@@ -67,6 +60,7 @@ hi def link reserved Keyword
 " -----------------------------------------------------------------------------
 syn region s_string start=/'/ end=/'/
 syn region s_string start=/"/ end=/"/
+syn match s_number /\d+/
 " -----------------------------------------------------------------------------
 hi def link s_num      Number
 hi def link s_string   String
@@ -74,9 +68,23 @@ hi def link s_string   String
 
 
 " =============================================================================
+"                            O P E R A T O R S                                 
+" -----------------------------------------------------------------------------
+syn match operator /\$/ 
+syn match operator /\./ 
+syn match operator /::/ 
+syn match operator /->/ 
+syn match operator /=/ 
+" -----------------------------------------------------------------------------
+hi def link operator Operator
+
+
+
+" =============================================================================
 "                          M I S C E L L A N I A                               
 " -----------------------------------------------------------------------------
 syn match s_varlabel ':\w\+'
+syn match s_varlabel '<\w\+>'
 " -----------------------------------------------------------------------------
 hi def link s_varlabel Special
 
