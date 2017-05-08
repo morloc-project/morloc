@@ -137,6 +137,12 @@ The general type signature for the function in the node. It is general, in that
 this signature is language-independent. The type system is a direct subset of
 Haskell.
 
+In languages like Haskell (or other ML variants), type signatures are optional.
+Though these languages are statically typed, explicit signatures are not
+necessary since the type can be inferred from the code. However, in Morloc the
+code is inside foreign languages, which are black boxes. This makes type
+inference impossible in general. So explicit types are required.
+
 
  * parameter type
 
@@ -167,3 +173,13 @@ numbers, strings.
 This is a simple language designed to be easy to parse by a machine. It
 contains all the information needed to build the Morloc executable, but is
 abstracted away from the particular syntax used for specification.
+
+
+ * Void, wells and sinks
+
+A node that either writes to or reads from something outside the program will
+have type `Void`. Functions with a void input are *wells*, they produce data,
+but take nothing from other nodes. Functions that have a void output, take data
+and do something with it, passing nothing on. Since functions are black boxes
+in Morloc, there is no guarantee that a function without a void in its type
+signature doesn't interact impurely with the system.
