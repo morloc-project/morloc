@@ -23,7 +23,7 @@ maintainer:         arendsee@iastate.edu
 extra-source-files: README.md TODO CONFIG
                     data/*.json
                     tests-suite/*.hs
-cabal-version:      >= 1.24
+cabal-version:      >= 1.8
 bug-reports:        https://github.com/arendsee/morloc/issues
 build-type:         Simple
 
@@ -59,7 +59,7 @@ executable morloc
 
 
 test-suite hspec
-    build-depends:    base, morloc, hspec == 2.4.*, QuickCheck
+    build-depends:    base, morloc, hspec, QuickCheck
     default-language: Haskell2010
     hs-source-dirs:   test-suite
     main-is:          Spec.hs
@@ -67,7 +67,7 @@ test-suite hspec
 
 
 test-suite hlint
-    build-depends:    base, hlint == 2.0.*
+    build-depends:    base, hlint
     default-language: Haskell2010
     hs-source-dirs:   test-suite
     main-is:          HLint.hs
