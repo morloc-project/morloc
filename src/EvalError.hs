@@ -1,6 +1,5 @@
 module EvalError where
 
-import Control.Monad.Except
 import Text.Parsec
 
 data MorlocError

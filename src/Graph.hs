@@ -19,8 +19,6 @@ module Graph
 ) where
 
 import qualified Data.List as DL
-import qualified Control.Monad as CM
-import qualified Data.Foldable as DF
 
 data Graph a = Leaf a | Node a [Graph a] deriving(Show, Eq)
 
@@ -30,9 +28,9 @@ values = map v where
   v (Leaf x  ) = x 
   v (Node x _) = x 
 
-kids :: Graph a -> [a] 
-kids (Leaf _) = []
-kids (Node _ xs) = values xs
+{- kids :: Graph a -> [a]       -}
+{- kids (Leaf _) = []           -}
+{- kids (Node _ xs) = values xs -}
 -----------------------------------------------------------
 
 
@@ -51,7 +49,7 @@ zipWithG f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithG f) xs ys)
 
 isomorphic :: Graph a -> Graph b -> Bool
 isomorphic (Leaf _) (Leaf _) = True
-isomorphic (Node a xs) (Node b ys) = cmp_this && cmp_kids where
+isomorphic (Node _ xs) (Node _ ys) = cmp_this && cmp_kids where
   cmp_this = length xs == length ys
   cmp_kids = foldr (&&) True $ zipWith isomorphic xs ys
 isomorphic _ _ = False
@@ -70,7 +68,7 @@ safeZipG :: Graph a -> Graph b -> Maybe (Graph (a,b))
 safeZipG = safeZipWithG (,)
 
 pullG :: (a -> a -> a) -> Graph a -> Graph a
-pullG f (Leaf x) = Leaf x
+pullG _ (Leaf x) = Leaf x
 pullG f (Node x xs) = Node (foldr f x (values xs')) xs' where
   xs' = map (pullG f) xs
 
@@ -119,27 +117,27 @@ childMap f (Node _ ts) = Node new_val new_kids where
 
 -- replace node values with parent/child relation lists
 parentChildMap :: (a -> a -> b) -> Graph a -> Graph [b]
-parentChildMap f (Leaf _) = Leaf []
+parentChildMap _ (Leaf _) = Leaf []
 parentChildMap f (Node t ts) = Node new_val new_kids where
   new_val = map (f t) (values ts)
   new_kids = map (parentChildMap f) ts
   
 -- like parentChildMap, but includes child order index
 parentChildMapI :: (a -> (Int, a) -> b) -> Graph a -> Graph [b]
-parentChildMapI f (Leaf _) = Leaf []
+parentChildMapI _ (Leaf _) = Leaf []
 parentChildMapI f (Node t ts) = Node new_val new_kids where
   new_val = map (f t) (zip [1..] (values ts))
   new_kids = map (parentChildMapI f) ts
 
-popChild :: Graph a -> Maybe (Graph a)
-popChild (Leaf v)    = Nothing
-popChild (Node n []) = Nothing
-popChild (Node n ts) = Just $ Node n (init ts)
-
-topChild :: Graph a -> Maybe (Graph a)
-topChild (Leaf v)    = Nothing
-topChild (Node n []) = Nothing
-topChild (Node n ts) = Just $ head $ reverse ts
+{- popChild :: Graph a -> Maybe (Graph a)          -}
+{- popChild (Leaf _)    = Nothing                  -}
+{- popChild (Node _ []) = Nothing                  -}
+{- popChild (Node n ts) = Just $ Node n (init ts)  -}
+{-                                                 -}
+{- topChild :: Graph a -> Maybe (Graph a)          -}
+{- topChild (Leaf _)    = Nothing                  -}
+{- topChild (Node n []) = Nothing                  -}
+{- topChild (Node n ts) = Just $ head $ reverse ts -}
 
 
 {- -- DF.concat :: t [a] -> [a]                                  -}

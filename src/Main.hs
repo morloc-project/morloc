@@ -1,10 +1,7 @@
 module Main where
 
-import qualified Data.List as DL
-
 import Parser
 import Interpreter as I
-import Graph
 
 import Control.Monad.Trans
 import System.Console.Haskeline

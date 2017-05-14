@@ -32,9 +32,9 @@ float' = T.float lexer
 
 string' :: Parser String
 string' = do
-  char '"'
+  _ <- char '"'
   s <- many ((char '\\' >> char '"' ) <|> noneOf "\"")
-  char '"'
+  _ <- char '"'
   return s
 
 identifier' :: Parser String

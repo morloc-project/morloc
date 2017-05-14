@@ -5,7 +5,6 @@ module Interpreter
 ) where
 
 import qualified Data.List as DL
-import qualified Data.Foldable as DF
 import qualified Control.Monad as CM
 import qualified Control.Monad.Except as CE
 
@@ -59,8 +58,8 @@ setid :: Graph NodeAttr -> Graph NodeAttr
 setid g = fmap fst $ propagate base (zipG zeroed gcount) where
   zeroed = fmap (\attr -> attr { node_id = Just 0 }) g
   -- base :: a -> [a] -> [a]
-  base (x,i) gs' = zipWith set_child_id gs' child_ids where
-    set_child_id (attr,k) j = (attr { node_id = Just j }, j)
+  base (_,i) gs' = zipWith set_child_id gs' child_ids where
+    set_child_id (attr,_) j = (attr { node_id = Just j }, j)
     child_ids = map (+ i) $ scanl1 (+) (map snd gs')
   -- gcount :: Graph Int -- graph with descendent counts
   gcount = pullG (+) $ ifelseG (isTerminal g) (const 1) (const 0) g
@@ -101,7 +100,7 @@ toLIL g = unlines $ foldr1 (++) $ parentChildMapI topLIL g where
         Just x -> x
         Nothing -> "NO_VALUE" -- should throw error
       pid' = case node_id p of
-        Just i -> show i
+        Just s -> show s
         Nothing -> "NO_ID" -- should throw error
       pos' = show i
       typ' = case node_type c of
