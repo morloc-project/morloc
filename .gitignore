@@ -1,6 +1,8 @@
 morloc
-frontend/morloc
 tags
 Main
 *.hi
 *.o
+.cabal-sandbox/
+cabal.sandbox.config
+dist/

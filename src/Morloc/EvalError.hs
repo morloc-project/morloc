@@ -1,4 +1,4 @@
-module EvalError where
+module Morloc.EvalError where
 
 import Text.Parsec
 
@@ -17,7 +17,3 @@ morlocShow (SyntaxError    err) = "Syntax error: "   ++ show err
 morlocShow (UnknownError      ) = "Damn, you broke it good"
 
 type ThrowsError = Either MorlocError
-
-extractValue :: ThrowsError a -> a
--- Left not defined, so that we die immediately on an error
-extractValue (Right val) = val

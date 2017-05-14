@@ -1,4 +1,4 @@
-module NodeAttribute
+module Morloc.NodeAttribute
 (
     NodeAttr(..)
   , nodeAttrS

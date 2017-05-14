@@ -1,4 +1,4 @@
-module Generate 
+module Morloc.Generate 
 (
     Type(..)
   , validateE

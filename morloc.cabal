@@ -1,0 +1,33 @@
+name:          morloc
+version:       0.0.0
+build-type:    Simple
+cabal-version: >= 1.24
+
+library
+    default-language: Haskell2010
+    hs-source-dirs: src 
+    exposed-modules:  Morloc
+                      Morloc.EvalError
+                      Morloc.Graph
+                      Morloc.Interpreter
+                      Morloc.Lexer
+                      Morloc.NodeAttribute
+                      Morloc.Parser
+                      Morloc.Syntax
+
+    build-depends: base,
+                   parsec,
+                   mtl
+
+    ghc-options: -Wall
+
+executable morloc
+    default-language: Haskell2010
+    main-is: Main.hs
+    build-depends: base,
+                   haskeline,
+                   mtl,
+                   parsec,
+                   morloc
+
+    ghc-options: -Wall

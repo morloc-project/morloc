@@ -1,4 +1,4 @@
-module Graph
+module Morloc.Graph
 (
       Graph(..)
     , toList

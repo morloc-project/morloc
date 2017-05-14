@@ -1,4 +1,4 @@
-module Syntax where
+module Morloc.Syntax where
 
 type Node = String
 

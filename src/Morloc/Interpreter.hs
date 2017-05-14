@@ -1,4 +1,4 @@
-module Interpreter
+module Morloc.Interpreter
 (
     eval
   , toLIL
@@ -8,10 +8,10 @@ import qualified Data.List as DL
 import qualified Control.Monad as CM
 import qualified Control.Monad.Except as CE
 
-import qualified Syntax as S
-import qualified EvalError as E
-import Graph
-import NodeAttribute
+import qualified Morloc.Syntax as S
+import qualified Morloc.EvalError as E
+import Morloc.Graph
+import Morloc.NodeAttribute
 
 
 eval :: S.Expr -> E.ThrowsError (Graph NodeAttr)

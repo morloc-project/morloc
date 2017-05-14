@@ -1,4 +1,4 @@
-module Parser where
+module Morloc.Parser where
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
@@ -7,9 +7,9 @@ import qualified Text.Parsec.Expr as E
 import qualified Text.Parsec.Token as T
 import qualified Control.Monad.Except as CE
 
-import Lexer
-import Syntax
-import EvalError
+import Morloc.Lexer
+import Morloc.Syntax
+import Morloc.EvalError
 
 -- parses the entire given program, returns a list of expressions on success,
 -- or a error statement on failure.
