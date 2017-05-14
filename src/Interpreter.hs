@@ -77,10 +77,10 @@ expr2tree (S.BinOp S.Dot (S.Node s) e) =
 expr2tree (S.BinOp S.Dot (S.Apply (S.Node s) es) e) =
   CM.liftM (Node $ nodeAttrS s) $ CM.sequence $ CM.liftM expr2tree $ es ++ [e]
 -- singletons
-expr2tree (S.Node    x) = return $ Leaf $ nodeAttrS x
-expr2tree (S.Float   x) = return $ Leaf $ (nodeAttrS $ show x) {node_type = Just "Float",   primitive = True}
-expr2tree (S.Integer x) = return $ Leaf $ (nodeAttrS $ show x) {node_type = Just "Integer", primitive = True}
-expr2tree (S.String  x) = return $ Leaf $ (nodeAttrS        x) {node_type = Just "String",  primitive = True}
+expr2tree (S.Node    x) = return $ Node (nodeAttrS x) []
+expr2tree (S.Float   x) = return $ Node ((nodeAttrS $ show x) {node_type = Just "Float",   primitive = True}) []
+expr2tree (S.Integer x) = return $ Node ((nodeAttrS $ show x) {node_type = Just "Integer", primitive = True}) []
+expr2tree (S.String  x) = return $ Node ((nodeAttrS        x) {node_type = Just "String",  primitive = True}) []
 -- throw error on all kinds of compositions not handled above
 expr2tree (S.BinOp S.Dot _ _) = CE.throwError $ E.BadComposition msg where
   msg = "Primitives cannot be on the left side of a composition"
