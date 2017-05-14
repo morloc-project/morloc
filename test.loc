@@ -1,0 +1,51 @@
+
+foo bar baz . bif
+
+
+                .--- (b)
+  (foo) --- (a) ---- (c) --- (d) --- (e)
+                `--------------------'
+
+# old morloc
+foo . a . b (c . d . <e>) e
+
+# haskell application
+foo $ a b (c d <e>) e
+
+# function definition
+foo = a $ b (c $1) (d $2 $1) 1
+
+
+# partial application
+bar' = bar - 1 -
+
+bar  :: a -> b -> c -> d
+bar' :: a -> c -> d
+
+
+
+     .--- (foo) ----   .--- (b)
+(baz)               `(a) ---- (c) --- (d) --- (e)
+     `--- (bar) ----'   `--------------------'
+
+# old morloc
+baz . foo bar . a . b (c . d . <e>) e
+
+# hask
+baz (foo <a>) (bar $ a b (c d <e>) e) 
+
+
+ foo ----.
+ bar ----- (a)
+ baz ----'
+
+# old morloc
+foo bar baz . a
+
+# hask
+foo  a
+bar <a>
+baz <a>
+
+# extended hask
+foo , bar , baz $ a

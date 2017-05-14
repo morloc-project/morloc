@@ -11,18 +11,18 @@ Table :: table Record
 
 typedef BlastResult :: Table
     {
-        qseqid   = String,
-        sseqid   = String,
-        qlen     = Int,
-        slen     = Int,
-        qstart   = Int,
-        qstop    = Int,
-        sstart   = Int,
-        sstop    = Int,
-        bitscore = Num,
-        pident   = Num,
-        positive = Num,
-        evalue   = Num
+        qseqid   :: String,
+        sseqid   :: String,
+        qlen     :: Int,
+        slen     :: Int,
+        qstart   :: Int,
+        qstop    :: Int,
+        sstart   :: Int,
+        sstop    :: Int,
+        bitscore :: Num,
+        pident   :: Num,
+        positive :: Num,
+        evalue   :: Num
     }
 
 type aggregate          :: CName -> Table -> Table

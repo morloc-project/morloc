@@ -1,15 +1,24 @@
+module Generate 
+(
+    Type(..)
+  , validateE
+  , generateO
+  , generateI
+  , convertE
+) where
+
 -- Eventually I will need to use JSON, for that I can use the Aeson library:
 -- http://hackage.haskell.org/package/aeson-1.2.0.0/docs/Data-Aeson.html
 -- But for now I will use raw strings
 
-main :: IO ()
-main = do
-    -- putStrLn $ show $ generateI R (M_Vector M_Int) []
-    putStrLn $ show $ validateE M_Int [] (Raw "123")
-    putStrLn $ show $ validateE M_Int [] (Raw "wer")
-    putStrLn $ show $ validateE M_String [] (Raw "wer")
-    putStrLn $ show $ validateE M_Num [] (Raw "wer")
-    putStrLn $ show $ validateE M_Num [] (Raw "1.123")
+{- main :: IO ()                                            -}
+{- main = do                                                -}
+{-     -- putStrLn $ show $ generateI R (M_Vector M_Int) [] -}
+{-     putStrLn $ show $ validateE M_Int [] (Raw "123")     -}
+{-     putStrLn $ show $ validateE M_Int [] (Raw "wer")     -}
+{-     putStrLn $ show $ validateE M_String [] (Raw "wer")  -}
+{-     putStrLn $ show $ validateE M_Num [] (Raw "wer")     -}
+{-     putStrLn $ show $ validateE M_Num [] (Raw "1.123")   -}
 
 data ColumnSpec = ColumnSpec {name::String, kind::Type} deriving (Show)
 data TableSpec = TableSpec {columns::[ColumnSpec], rownames::Bool} deriving (Show)
@@ -52,7 +61,7 @@ data Common = Raw String | Jason String
 -- ========================================================================= --
 --------------------------- C O N V E R T E R S -------------------------------
 -- ========================================================================= --
-convertE  :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
+  convertE  :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
 -------------------------------------------------------------------------------
 
 convertE _ _ _ _ = Nothing
