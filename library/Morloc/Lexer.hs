@@ -1,4 +1,12 @@
-module Morloc.Lexer where
+module Morloc.Lexer (
+    lexer
+  , parseInteger
+  , parseFloat
+  , parseString
+  , parseIdentifier
+  , parseReserved
+  , parseReservedOp
+) where
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
@@ -22,26 +30,24 @@ lexer = Token.makeTokenParser style
           , Token.caseSensitive   = True
           }
 
--- Below we build all the base combinators
+parseInteger :: Parser Integer
+parseInteger = Token.integer lexer
 
-integer' :: Parser Integer
-integer' = Token.integer lexer
+parseFloat :: Parser Double
+parseFloat = Token.float lexer
 
-float' :: Parser Double
-float' = Token.float lexer
-
-string' :: Parser String
-string' = do
+parseString :: Parser String
+parseString = do
   _ <- char '"'
   s <- many ((char '\\' >> char '"' ) <|> noneOf "\"")
   _ <- char '"'
   return s
 
-identifier' :: Parser String
-identifier' = Token.identifier lexer
+parseIdentifier :: Parser String
+parseIdentifier = Token.identifier lexer
 
-reserved' :: String -> Parser ()
-reserved' = Token.reserved lexer
+parseReserved :: String -> Parser ()
+parseReserved = Token.reserved lexer
 
-reservedOp' :: String -> Parser ()
-reservedOp' = Token.reservedOp lexer
+parseReservedOp :: String -> Parser ()
+parseReservedOp = Token.reservedOp lexer

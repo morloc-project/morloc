@@ -82,7 +82,7 @@ ifelseG gcond fa fb gx = zipWithG ternary' gx gcond where
 
 -- Graph to list, just a list of all a
 toList :: Eq a => Graph a -> [a]
-toList (Node x xs) = union [x] (xs >>= toList)
+toList (Node x xs) = [x] `union` (xs >>= toList)
 
 -- modify parent by comparing to children
 familyMap :: (a -> [a] -> b) -> Graph a -> Graph b

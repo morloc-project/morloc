@@ -1,4 +1,7 @@
-module Morloc.Syntax where
+module Morloc.Syntax (
+    Expr(..)
+  , Op(..)
+) where
 
 type Node = String
 

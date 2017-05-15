@@ -18,6 +18,6 @@ morlocShow :: MorlocError -> String
 morlocShow (BadApplication msg) = "BadApplication: " ++ msg 
 morlocShow (BadComposition msg) = "BadComposition: " ++ msg
 morlocShow (SyntaxError    err) = "Syntax error: "   ++ show err
-morlocShow (UnknownError      ) = "Damn, you broke it good"
+morlocShow  UnknownError        = "Damn, you broke it good"
 
 type ThrowsError = Either MorlocError

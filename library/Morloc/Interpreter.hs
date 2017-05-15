@@ -4,11 +4,9 @@ module Morloc.Interpreter
   , toLIL
 ) where
 
-import Data.List (intersperse)
+import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
-import Control.Monad (liftM, sequence)
 import Control.Monad.Except (throwError)
-import Control.Applicative
 
 import Morloc.Syntax as Syntax
 import Morloc.EvalError as Error
@@ -59,11 +57,11 @@ eval e = fmap setid (expr2tree e)
 setid :: Graph NodeAttr -> Graph NodeAttr
 setid g = fst <$> propagate base (zipG zeroed gcount) where
 
-  zeroed = fmap (\attr -> attr { node_id = Just 0 }) g
+  zeroed = fmap (\attr -> attr { nodeId = Just 0 }) g
 
   -- base :: a -> [a] -> [a]
   base (_,i) gs' = zipWith set_child_id gs' child_ids where
-    set_child_id (attr,_) j = (attr { node_id = Just j }, j)
+    set_child_id (attr,_) j = (attr { nodeId = Just j }, j)
     child_ids = map (+ i) $ scanl1 (+) (map snd gs')
 
   -- gcount :: Graph Int -- graph with descendent counts
@@ -74,18 +72,18 @@ setid g = fst <$> propagate base (zipG zeroed gcount) where
 expr2tree :: Syntax.Expr -> Error.ThrowsError (Graph NodeAttr)
 -- curried nodes outside of compositions
 expr2tree (Syntax.Apply (Syntax.Node s) es) =
-  fmap (Graph.Node $ nodeAttrS s) $ sequence $ fmap expr2tree $ es where
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree es
 -- simple nodes, composition without application
 expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Node s) e) =
-  Graph.Node (nodeAttrS s) <$> sequence [expr2tree e]
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree [e]
 -- simple nodes, composition with application
 expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Node s) es) e) =
-  Graph.Node (nodeAttrS s) <$> sequence (expr2tree <$> es ++ [e])
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree (es ++ [e])
 -- singletons
 expr2tree (Syntax.Node    x) = return $ Graph.Node (nodeAttrS x) []
-expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {node_type = Just "Float",   primitive = True}) []
-expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {node_type = Just "Integer", primitive = True}) []
-expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {node_type = Just "String",  primitive = True}) []
+expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = True}) []
+expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = True}) []
+expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = True}) []
 -- throw error on all kinds of compositions not handled above
 expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
   msg = "Primitives cannot be on the left side of a composition"
@@ -99,17 +97,15 @@ toLIL g = unlines $ foldr1 (++) $ parentChildMapI topLIL g where
   -- connect the parent to the top child 
   -- this function will be used by Graph.familyMap
   topLIL :: NodeAttr -> (Int, NodeAttr) -> String
-  topLIL p (i, c) = join [pval', pid', pos', typ', nam']
+  topLIL p (i, c) = intercalate "\t" [pval', pid', pos', typ', nam']
     where
     pos'  = show i
-    pval' = fromMaybe "NO_VALUE" (node_value p)
-    typ'  = fromMaybe "*"        (node_type  c)
-    nam'  = fromMaybe "NO_VALUE" (node_value c)
-    pid'  = case node_id p of
+    pval' = fromMaybe "NO_VALUE" (nodeValue p)
+    typ'  = fromMaybe "*"        (nodeType  c)
+    nam'  = fromMaybe "NO_VALUE" (nodeValue c)
+    pid'  = case nodeId p of
       Just x  -> show x
       Nothing -> "NO_ID"
-    join :: [String] -> String
-    join = concat . intersperse "\t"
 
 {- Note
 

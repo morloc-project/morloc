@@ -6,18 +6,18 @@ module Morloc.NodeAttribute
 
 data NodeAttr =
   NodeAttr {
-      node_id    :: Maybe Int
-    , node_value :: Maybe String
-    , node_type  :: Maybe String
+      nodeId    :: Maybe Int
+    , nodeValue :: Maybe String
+    , nodeType  :: Maybe String
     , primitive  :: Bool
   }
   deriving(Show,Eq,Ord)
 
 nodeAttrS :: String -> NodeAttr
 nodeAttrS s = NodeAttr {
-    node_id    = Nothing
-  , node_value = Just s
-  , node_type  = Nothing
+    nodeId    = Nothing
+  , nodeValue = Just s
+  , nodeType  = Nothing
   , primitive  = False
 }
 

@@ -1,4 +1,4 @@
-module Morloc.Parser where
+module Morloc.Parser (parseTopLevel) where
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
@@ -16,17 +16,15 @@ import Morloc.EvalError (ThrowsError, MorlocError(..))
 -- * I assume "<stdin>" means we are reading from STDIN. But what exactly is it
 --   that we are reading from STDIN? I suppose this could also be a file name?
 -- * I don't know what `s` means here
-parseToplevel :: String -> ThrowsError [Expr]
-parseToplevel s =
+parseTopLevel :: String -> ThrowsError [Expr]
+parseTopLevel s =
   case parse (contents toplevel) "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
   where
   -- parse a list of semi-colon delimited expressions
   toplevel :: Parser [Expr]
-  toplevel = many $ do
-    def <- expr
-    return def
+  toplevel = many expr
 
 -- this is needed to parse individual Expr, but it doesn't seem to be called by
 -- name anywhere. I don't know how it is connected to everything else.
@@ -70,19 +68,19 @@ expr = buildExpressionParser table factor
   table =
     [[binary "." Dot AssocRight]]
     where
-    binary s f assoc = Infix (reservedOp' s >> return (BinOp f)) assoc
+    binary s f = Infix $ parseReservedOp s >> return (BinOp f)
 
 num :: Parser Expr
-num = float' >>= return . Float 
+num = fmap Float parseFloat
 
 int :: Parser Expr
-int = integer' >>= return . Integer
+int = fmap Integer parseInteger
 
 str :: Parser Expr
-str = string' >>= return . String
+str = fmap String parseString
 
 node :: Parser Expr
-node = identifier' >>= return . Node
+node = fmap Node parseIdentifier
 
 apply :: Parser Expr
 apply = do
