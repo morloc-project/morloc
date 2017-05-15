@@ -18,11 +18,11 @@ eval x = setid <$> (parseExpr x >>= expr2tree)
 setid :: Graph NodeAttr -> Graph NodeAttr
 setid g = fst <$> propagate base (zipG zeroed gcount) where
 
-  zeroed = fmap (\attr -> attr { nodeId = Just 0 }) g
+  zeroed = fmap (\attr -> attr { nodeID = Just 0 }) g
 
   -- base :: a -> [a] -> [a]
   base (_,i) gs' = zipWith set_child_id gs' child_ids where
-    set_child_id (attr,_) j = (attr { nodeId = Just j }, j)
+    set_child_id (attr,_) j = (attr { nodeID = Just j }, j)
     child_ids = map (+ i) $ scanl1 (+) (map snd gs')
 
   -- gcount :: Graph Int -- graph with descendent counts
@@ -42,9 +42,9 @@ expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Node s) es) e) =
   Graph.Node (nodeAttrS s) <$> traverse expr2tree (es ++ [e])
 -- singletons
 expr2tree (Syntax.Node    x) = return $ Graph.Node (nodeAttrS x) []
-expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = True}) []
-expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = True}) []
-expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = True}) []
+expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = Just True}) []
+expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = Just True}) []
+expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = Just True}) []
 -- throw error on all kinds of compositions not handled above
 expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
   msg = "Primitives cannot be on the left side of a composition"
