@@ -1,4 +1,4 @@
-module Morloc.Interpreter (eval) where
+module Morloc.Evaluator (eval) where
 
 import Control.Monad.Except (throwError)
 
@@ -6,10 +6,13 @@ import Morloc.Syntax as Syntax
 import Morloc.EvalError as Error
 import Morloc.Graph as Graph
 import Morloc.NodeAttribute
+import Morloc.Parser (parseExpr)
 
 
-eval :: Syntax.Expr -> Error.ThrowsError (Graph NodeAttr)
-eval e = fmap setid (expr2tree e)
+-- see Note 0
+eval :: String -> Error.ThrowsError (Graph NodeAttr)
+eval x = setid <$> (parseExpr x >>= expr2tree)
+
 
 -- see Note 1
 setid :: Graph NodeAttr -> Graph NodeAttr
@@ -49,6 +52,25 @@ expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg 
 expr2tree (Syntax.Apply _ _) = throwError $ Error.BadApplication msg where
   msg = "Primitives cannot take arguments"
 
+
+------- NOTE 0 ------------------------------------------------------
+-- parseExpr :: String -> ThrowsError Expr
+-- expr2tree :: Expr -> ThrowsError (Graph NodeAttr)
+-- setid :: Graph NodeAttr -> GraphNodeAttr
+--
+--    a -> e c
+-- ===========================
+--    (1) parseExpr :: a -> e b
+--    (2) expr2tree :: b -> e c
+--    (3) setid     :: c -> c
+-- ---------------------------
+--    (4) fmap 3 :: e c -> e c
+--    (5) bind :: e b -> (b -> e c) -> e c
+-- ------------------------------------------
+--    (6) 5 (1 a) 2 :: e c
+--    (7) 4 6 :: e c
+-- > setid <$> parseExpr x >>= expr2tree
+---------------------------------------------------------------------
 
 
 ------- NOTE 1 ------------------------------------------------------

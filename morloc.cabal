@@ -34,7 +34,7 @@ library
                       Morloc.EvalError
                       Morloc.Graph
                       Morloc.Mode
-                      Morloc.Interpreter
+                      Morloc.Evaluator
                       Morloc.Lexer
                       Morloc.NodeAttribute
                       Morloc.Parser

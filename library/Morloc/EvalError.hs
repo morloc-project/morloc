@@ -4,7 +4,7 @@ module Morloc.EvalError
   , ThrowsError
 ) where
 
-import Text.Parsec
+import Text.Parsec (ParseError)
 
 data MorlocError
   = BadApplication String

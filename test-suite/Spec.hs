@@ -5,32 +5,35 @@ import Test.Hspec
 import Test.QuickCheck
 import Control.Exception (evaluate)
 import Data.List (intercalate)
-import Data.Either (either)
+import Data.Either (either, isLeft)
 import Control.Applicative
 
 import Morloc (interpret)
+import Morloc.Evaluator (eval)
 import Morloc.Mode (asLIL)
-
-readLIL s = either l r (interpret asLIL s) where
-  l = const Nothing
-  r = Just . map words . lines
 
 main :: IO ()
 main = hspec $ do
 
-  {- describe "parse morloc code" $ do                   -}
-  {-                                                     -}
-  {-   it "dies on weird input" $ do                     -}
-  {-     evaluate (eval) `shouldThrow` anyException      -}
-  {-                                                     -}
-  {- describe "evaluate morloc code" $ do                -}
-  {-                                                     -}
-  {-   it "doesn't allow application to primitives" $ do -}
-  {-     evaluate (eval) `shouldThrow` anyException      -}
-    
-  describe "interpret asLIL" $ do
+  describe "parse morloc code" $ do
 
-    it "handles node application (a b c)" $ do
+    it "dies on syntax errors" $ do
+      (isLeft . eval) "a b . %" `shouldBe` True
+      (isLeft . eval) ". a"     `shouldBe` True
+
+    it "doesn't allow application to primitives" $ do
+      (isLeft . eval) "1 1" `shouldBe` True
+      (isLeft . eval) "a . 1 1" `shouldBe` True
+    
+  describe "interpret asLIL" $
+
+    it "handles node application (a b)" $
       shouldBe
         (readLIL "a b")
-        (Just [["a", "0", "1", "*", "b"]])
+        (Right [["a", "0", "1", "*", "b"]])
+
+  where
+    readLIL :: String -> Either String [[String]]
+    readLIL s = either l r (interpret asLIL s) where
+      l = Left . show
+      r = Right . map words . lines
