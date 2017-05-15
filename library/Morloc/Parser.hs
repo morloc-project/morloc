@@ -3,13 +3,13 @@ module Morloc.Parser where
 import Text.Parsec
 import Text.Parsec.String (Parser)
 
-import qualified Text.Parsec.Expr as E
-import qualified Text.Parsec.Token as T
-import qualified Control.Monad.Except as CE
+import Text.Parsec.Expr (Operator(..), Assoc(..), buildExpressionParser)
+import Text.Parsec.Token (whiteSpace)
+import Control.Monad.Except (throwError)
 
 import Morloc.Lexer
 import Morloc.Syntax
-import Morloc.EvalError
+import Morloc.EvalError (ThrowsError, MorlocError(..))
 
 -- parses the entire given program, returns a list of expressions on success,
 -- or a error statement on failure.
@@ -19,7 +19,7 @@ import Morloc.EvalError
 parseToplevel :: String -> ThrowsError [Expr]
 parseToplevel s =
   case parse (contents toplevel) "<stdin>" s of
-    Left err  -> CE.throwError $ SyntaxError err
+    Left err  -> throwError $ SyntaxError err
     Right val -> return val
   where
   -- parse a list of semi-colon delimited expressions
@@ -33,7 +33,7 @@ parseToplevel s =
 parseExpr :: String -> ThrowsError Expr
 parseExpr s =
   case parse (contents expr) "<stdin>" s of
-    Left err  -> CE.throwError $ SyntaxError err
+    Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
 
@@ -45,7 +45,7 @@ contents p = do
   -- `lexer` here, is defined in Lexer.hs.  What does the inclusion of this
   -- lexer do for us?  I suppose this is removing space, but it seems like
   -- something else is going on ...
-  T.whiteSpace lexer
+  whiteSpace lexer
   -- next we take everything in the input
   r <- p
   -- up until the end of file
@@ -56,7 +56,7 @@ contents p = do
 
 -- parse an expression, handles precedence and associativity
 expr :: Parser Expr
-expr = E.buildExpressionParser table factor
+expr = buildExpressionParser table factor
   where
   -- all expressions that evaluate to a legal element in an expression
   factor :: Parser Expr
@@ -68,12 +68,9 @@ expr = E.buildExpressionParser table factor
     <|>     str
   -- binary operators, listed in order of precedence
   table =
-    [[binary "." Dot E.AssocRight]]
+    [[binary "." Dot AssocRight]]
     where
-    -- s     string e.g. "*"
-    -- f     symbol e.g. Times
-    -- assoc associativity [E.AssocLeft, E.AssocRight]
-    binary s f assoc = E.Infix (reservedOp' s >> return (BinOp f)) assoc
+    binary s f assoc = Infix (reservedOp' s >> return (BinOp f)) assoc
 
 num :: Parser Expr
 num = float' >>= return . Float 

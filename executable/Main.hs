@@ -16,4 +16,4 @@ main = runInputT defaultSettings loop
       -- process input - parse the input line
       -- liftIO - do it in the IO monad
       -- `>>` - jump to the next loop, discarding current value
-      Just input -> (liftIO $ interpret input) >> loop
+      Just input -> liftIO (interpret input) >> loop

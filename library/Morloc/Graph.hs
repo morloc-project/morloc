@@ -18,7 +18,7 @@ module Morloc.Graph
     , replaceValue
 ) where
 
-import qualified Data.List as DL
+import Data.List (union)
 
 data Graph a = Node a [Graph a] deriving(Show, Eq)
 
@@ -45,7 +45,7 @@ zipWithG f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithG f) xs ys)
 isomorphic :: Graph a -> Graph b -> Bool
 isomorphic (Node _ xs) (Node _ ys) = cmp_this && cmp_kids where
   cmp_this = length xs == length ys
-  cmp_kids = foldr (&&) True $ zipWith isomorphic xs ys
+  cmp_kids = and $ zipWith isomorphic xs ys
 
 safeZipWithG :: (a -> b -> c) -> Graph a -> Graph b -> Maybe (Graph c)
 safeZipWithG f a b =
@@ -82,7 +82,7 @@ ifelseG gcond fa fb gx = zipWithG ternary' gx gcond where
 
 -- Graph to list, just a list of all a
 toList :: Eq a => Graph a -> [a]
-toList (Node x xs) = DL.union [x] (xs >>= toList)
+toList (Node x xs) = union [x] (xs >>= toList)
 
 -- modify parent by comparing to children
 familyMap :: (a -> [a] -> b) -> Graph a -> Graph b

@@ -23,7 +23,7 @@ maintainer:         arendsee@iastate.edu
 extra-source-files: README.md TODO CONFIG
                     data/*.json
                     tests-suite/*.hs
-cabal-version:      >= 1.8
+cabal-version:      >= 1.10
 bug-reports:        https://github.com/arendsee/morloc/issues
 build-type:         Simple
 

@@ -1,4 +1,8 @@
-module Morloc.EvalError where
+module Morloc.EvalError
+(
+    MorlocError(..)
+  , ThrowsError
+) where
 
 import Text.Parsec
 

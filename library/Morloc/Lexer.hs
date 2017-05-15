@@ -3,32 +3,32 @@ module Morloc.Lexer where
 import Text.Parsec
 import Text.Parsec.String (Parser)
 import Text.Parsec.Language
-import qualified Text.Parsec.Token as T
+import Text.Parsec.Token as Token
 
-lexer :: T.TokenParser ()
-lexer = T.makeTokenParser style
+lexer :: Token.TokenParser ()
+lexer = Token.makeTokenParser style
   where
   style = emptyDef {
-            T.commentLine     = "#"
-          , T.commentStart    = ""
-          , T.commentEnd      = ""
-          , T.nestedComments  = False
-          , T.identStart      = letter <|> char '_'
-          , T.identLetter     = alphaNum <|> oneOf "_'"
-          , T.opStart         = T.opLetter emptyDef
-          , T.opLetter        = oneOf ":!#$%&*+./<=>?@\\^|-~"
-          , T.reservedOpNames = ["."]
-          , T.reservedNames   = []
-          , T.caseSensitive   = True
+            Token.commentLine     = "#"
+          , Token.commentStart    = ""
+          , Token.commentEnd      = ""
+          , Token.nestedComments  = False
+          , Token.identStart      = letter <|> char '_'
+          , Token.identLetter     = alphaNum <|> oneOf "_'"
+          , Token.opStart         = Token.opLetter emptyDef
+          , Token.opLetter        = oneOf ":!#$%&*+./<=>?@\\^|-~"
+          , Token.reservedOpNames = ["."]
+          , Token.reservedNames   = []
+          , Token.caseSensitive   = True
           }
 
 -- Below we build all the base combinators
 
 integer' :: Parser Integer
-integer' = T.integer lexer
+integer' = Token.integer lexer
 
 float' :: Parser Double
-float' = T.float lexer
+float' = Token.float lexer
 
 string' :: Parser String
 string' = do
@@ -38,10 +38,10 @@ string' = do
   return s
 
 identifier' :: Parser String
-identifier' = T.identifier lexer
+identifier' = Token.identifier lexer
 
 reserved' :: String -> Parser ()
-reserved' = T.reserved lexer
+reserved' = Token.reserved lexer
 
 reservedOp' :: String -> Parser ()
-reservedOp' = T.reservedOp lexer
+reservedOp' = Token.reservedOp lexer
