@@ -4,16 +4,33 @@
 import Test.Hspec
 import Test.QuickCheck
 import Control.Exception (evaluate)
+import Data.List (intercalate)
+import Data.Either (either)
+import Control.Applicative
+
+import Morloc (interpret)
+import Morloc.Mode (asLIL)
+
+readLIL s = either l r (interpret asLIL s) where
+  l = const Nothing
+  r = Just . map words . lines
 
 main :: IO ()
 main = hspec $ do
-  describe "Prelude.head" $ do
 
-    it "returns the first element of a list" $ do
-      head [23 ..] `shouldBe` (23 :: Int)
+  {- describe "parse morloc code" $ do                   -}
+  {-                                                     -}
+  {-   it "dies on weird input" $ do                     -}
+  {-     evaluate (eval) `shouldThrow` anyException      -}
+  {-                                                     -}
+  {- describe "evaluate morloc code" $ do                -}
+  {-                                                     -}
+  {-   it "doesn't allow application to primitives" $ do -}
+  {-     evaluate (eval) `shouldThrow` anyException      -}
+    
+  describe "interpret asLIL" $ do
 
-    it "returns the first element of an *arbitrary* list" $
-      property $ \x xs -> head (x:xs) == (x :: Int)
-
-    it "throws an exception if used with an empty list" $ do
-      evaluate (head []) `shouldThrow` anyException
+    it "handles node application (a b c)" $ do
+      shouldBe
+        (readLIL "a b")
+        (Just [["a", "0", "1", "*", "b"]])

@@ -17,4 +17,4 @@ interpret mode morloc_code = do
     Right ex -> case traverse eval ex of
       Left  err  -> Left $ pack err
       -- mode :: Graph NodeAttr -> String 
-      Right gs -> Right $ concat $ map mode gs
+      Right gs -> Right $ concatMap mode gs
