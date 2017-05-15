@@ -33,6 +33,7 @@ library
     exposed-modules:  Morloc
                       Morloc.EvalError
                       Morloc.Graph
+                      Morloc.Mode
                       Morloc.Interpreter
                       Morloc.Lexer
                       Morloc.NodeAttribute

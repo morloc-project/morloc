@@ -1,11 +1,5 @@
-module Morloc.Interpreter
-(
-    eval
-  , toLIL
-) where
+module Morloc.Interpreter (eval) where
 
-import Data.List (intercalate)
-import Data.Maybe (fromMaybe)
 import Control.Monad.Except (throwError)
 
 import Morloc.Syntax as Syntax
@@ -17,6 +11,47 @@ import Morloc.NodeAttribute
 eval :: Syntax.Expr -> Error.ThrowsError (Graph NodeAttr)
 eval e = fmap setid (expr2tree e)
 
+-- see Note 1
+setid :: Graph NodeAttr -> Graph NodeAttr
+setid g = fst <$> propagate base (zipG zeroed gcount) where
+
+  zeroed = fmap (\attr -> attr { nodeId = Just 0 }) g
+
+  -- base :: a -> [a] -> [a]
+  base (_,i) gs' = zipWith set_child_id gs' child_ids where
+    set_child_id (attr,_) j = (attr { nodeId = Just j }, j)
+    child_ids = map (+ i) $ scanl1 (+) (map snd gs')
+
+  -- gcount :: Graph Int -- graph with descendent counts
+  gcount = pullG (+) $ ifelseG (isTerminal g) (const 1) (const 0) g
+
+
+-- see Note 2
+expr2tree :: Syntax.Expr -> Error.ThrowsError (Graph NodeAttr)
+-- curried nodes outside of compositions
+expr2tree (Syntax.Apply (Syntax.Node s) es) =
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree es
+-- simple nodes, composition without application
+expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Node s) e) =
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree [e]
+-- simple nodes, composition with application
+expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Node s) es) e) =
+  Graph.Node (nodeAttrS s) <$> traverse expr2tree (es ++ [e])
+-- singletons
+expr2tree (Syntax.Node    x) = return $ Graph.Node (nodeAttrS x) []
+expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = True}) []
+expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = True}) []
+expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = True}) []
+-- throw error on all kinds of compositions not handled above
+expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
+  msg = "Primitives cannot be on the left side of a composition"
+-- throw error on all kinds of applicaitons not handled above
+expr2tree (Syntax.Apply _ _) = throwError $ Error.BadApplication msg where
+  msg = "Primitives cannot take arguments"
+
+
+
+------- NOTE 1 ------------------------------------------------------
 --   s0 := setid :: Graph NodeAttr -> Graph NodeAttr
 --   ===============================================
 --   s1 := zipG   :: Graph a -> Graph b -> Graph (a,b)
@@ -53,97 +88,47 @@ eval e = fmap setid (expr2tree e)
 --            Graph NodeAttr -> Graph Int
 --   ----------------------------------------------------------
 -- < s16 g := Graph Int
---   ==========================================================
-setid :: Graph NodeAttr -> Graph NodeAttr
-setid g = fst <$> propagate base (zipG zeroed gcount) where
-
-  zeroed = fmap (\attr -> attr { nodeId = Just 0 }) g
-
-  -- base :: a -> [a] -> [a]
-  base (_,i) gs' = zipWith set_child_id gs' child_ids where
-    set_child_id (attr,_) j = (attr { nodeId = Just j }, j)
-    child_ids = map (+ i) $ scanl1 (+) (map snd gs')
-
-  -- gcount :: Graph Int -- graph with descendent counts
-  gcount = pullG (+) $ ifelseG (isTerminal g) (const 1) (const 0) g
+---------------------------------------------------------------------
 
 
--- see Note
-expr2tree :: Syntax.Expr -> Error.ThrowsError (Graph NodeAttr)
--- curried nodes outside of compositions
-expr2tree (Syntax.Apply (Syntax.Node s) es) =
-  Graph.Node (nodeAttrS s) <$> traverse expr2tree es
--- simple nodes, composition without application
-expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Node s) e) =
-  Graph.Node (nodeAttrS s) <$> traverse expr2tree [e]
--- simple nodes, composition with application
-expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Node s) es) e) =
-  Graph.Node (nodeAttrS s) <$> traverse expr2tree (es ++ [e])
--- singletons
-expr2tree (Syntax.Node    x) = return $ Graph.Node (nodeAttrS x) []
-expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = True}) []
-expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = True}) []
-expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = True}) []
--- throw error on all kinds of compositions not handled above
-expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
-  msg = "Primitives cannot be on the left side of a composition"
--- throw error on all kinds of applicaitons not handled above
-expr2tree (Syntax.Apply _ _) = throwError $ Error.BadApplication msg where
-  msg = "Primitives cannot take arguments"
 
-
-toLIL :: Graph NodeAttr -> String 
-toLIL g = unlines $ foldr1 (++) $ parentChildMapI topLIL g where
-  -- connect the parent to the top child 
-  -- this function will be used by Graph.familyMap
-  topLIL :: NodeAttr -> (Int, NodeAttr) -> String
-  topLIL p (i, c) = intercalate "\t" [pval', pid', pos', typ', nam']
-    where
-    pos'  = show i
-    pval' = fromMaybe "NO_VALUE" (nodeValue p)
-    typ'  = fromMaybe "*"        (nodeType  c)
-    nam'  = fromMaybe "NO_VALUE" (nodeValue c)
-    pid'  = case nodeId p of
-      Just x  -> show x
-      Nothing -> "NO_ID"
-
-{- Note
-
-     [MorlocError a], if any element in the list is a failure, return a failure
-     otherwise, extract the pure list, e.g. [MorlocError a] -> [a]
-     The [a] is fed as input to the Node constructor
-
-  let
-    a := Expr
-    b := Graph
-    l := list monad
-    e := error monad
-
-  Overall:
-      (0)    l a -> e b
-
-  Simple components:
-      (1)    l b -> b
-      (2)    a -> e a
-
-  (1) is the constructor Node (builds a node from inputs). I'll ignore the
-      String argument (it can just be partially applied away)
-  (2) is a expr2tree itself
-
-  Derived:
-      (3)    l a -> l (e b)
-      (4)    l (e b) -> e (l b)
-      (5)    e (l b) -> e b
-
-  (3) is expr2tree lifted into l
-  (4) matches the general case (Data.Traversable):
-        sequenceA :: (Traversable t, Applicative f) => t (f a) -> f (t a)
-      It also matches the more specific function from Control.Monad:
-        sequence :: Monad m => [m a] -> m [a]
-  (5) is just (1) lifted into e
-
-  Putting all this together:
-       (5) . (4) . (3) :: (0)
-  filling in the functions we get:
-  (liftM Node) . sequence . (liftM expr2tree)
--}
+------- NOTE 2 ------------------------------------------------------
+--
+--     [MorlocError a], if any element in the list is a failure, return a failure
+--     otherwise, extract the pure list, e.g. [MorlocError a] -> [a]
+--     The [a] is fed as input to the Node constructor
+--
+--  let
+--    a := Expr
+--    b := Graph
+--    l := list monad
+--    e := error monad
+--
+--  Overall:
+--      (0)    l a -> e b
+--
+--  Simple components:
+--      (1)    l b -> b
+--      (2)    a -> e a
+--
+--  (1) is the constructor Node (builds a node from inputs). I'll ignore the
+--      String argument (it can just be partially applied away)
+--  (2) is a expr2tree itself
+--
+--  Derived:
+--      (3)    l a -> l (e b)
+--      (4)    l (e b) -> e (l b)
+--      (5)    e (l b) -> e b
+--
+--  (3) is expr2tree lifted into l
+--  (4) matches the general case (Data.Traversable):
+--        sequenceA :: (Traversable t, Applicative f) => t (f a) -> f (t a)
+--      It also matches the more specific function from Control.Monad:
+--        sequence :: Monad m => [m a] -> m [a]
+--  (5) is just (1) lifted into e
+--
+--  Putting all this together:
+--       (5) . (4) . (3) :: (0)
+--  filling in the functions we get:
+--  (liftM Node) . sequence . (liftM expr2tree)
+---------------------------------------------------------------------
