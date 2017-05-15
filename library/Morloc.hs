@@ -1,3 +1,7 @@
+-- Morloc.hs
+
+-- | A module for pure interpretation of morloc
+
 module Morloc (interpret) where
 
 import Morloc.Parser as Parser
