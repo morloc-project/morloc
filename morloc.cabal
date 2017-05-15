@@ -16,7 +16,7 @@ description:
     the funtion gaph, and the compiler does the rest.
 
 category:           Compiler
-license:            GGPL-3
+license:            GPL-3
 license-file:       LICENSE
 author:             Zebulun Arendsee 
 maintainer:         arendsee@iastate.edu
