@@ -20,12 +20,12 @@ import qualified GHC.Read as R
 
 {- main :: IO ()                                            -}
 {- main = do                                                -}
-{-     -- putStrLn $ show $ generateI R (M_Vector M_Int) [] -}
-{-     putStrLn $ show $ validateE M_Int [] (Raw "123")     -}
-{-     putStrLn $ show $ validateE M_Int [] (Raw "wer")     -}
-{-     putStrLn $ show $ validateE M_String [] (Raw "wer")  -}
-{-     putStrLn $ show $ validateE M_Num [] (Raw "wer")     -}
-{-     putStrLn $ show $ validateE M_Num [] (Raw "1.123")   -}
+{-     -- putStrLn $ show $ generateI R (MVector MInt) [] -}
+{-     putStrLn $ show $ validateE MInt [] (Raw "123")     -}
+{-     putStrLn $ show $ validateE MInt [] (Raw "wer")     -}
+{-     putStrLn $ show $ validateE MString [] (Raw "wer")  -}
+{-     putStrLn $ show $ validateE MNum [] (Raw "wer")     -}
+{-     putStrLn $ show $ validateE MNum [] (Raw "1.123")   -}
 
 data ColumnSpec = ColumnSpec {name    :: String       , kind     :: Type} deriving (Show,Read)
 data TableSpec  = TableSpec  {columns :: [ColumnSpec] , rownames :: Bool} deriving (Show,Read)
@@ -33,22 +33,22 @@ data HashSpec   = HashSpec   {key     :: Type         , value    :: Type} derivi
 data TreeSpec   = TreeSpec   {leaf    :: Type         , node     :: Type} deriving (Show,Read)
 
 data Type 
-    = M_Void
-    | M_Int
-    | M_Num
-    | M_Char
-    | M_String
-    | M_Bool
-    | M_Text
-    | M_File
-    | M_Binary
-    | M_Table   TableSpec
-    | M_Matrix  Type
-    | M_Vector  Type
-    | M_Tuple   [Type]
-    | M_Set     Type
-    | M_Hash    HashSpec
-    | M_Tree    TreeSpec
+    = MVoid
+    | MInt
+    | MNum
+    | MChar
+    | MString
+    | MBool
+    | MText
+    | MFile
+    | MBinary
+    | MTable   TableSpec
+    | MMatrix  Type
+    | MVector  Type
+    | MTuple   [Type]
+    | MSet     Type
+    | MHash    HashSpec
+    | MTree    TreeSpec
     deriving (Show, Read)
 
 data Lang
@@ -75,8 +75,8 @@ data Lang
 {-     parens                             -}
 {-     ( do L.Ident s <- R.lexP           -}
 {-          case s of                     -}
-{-            "Int"    -> return M_Int    -}
-{-            "String" -> return M_String -}
+{-            "Int"    -> return MInt    -}
+{-            "String" -> return MString -}
 {-            _        -> pfail           -}
 {-     )                                  -}
 {-   readListPrec = R.readListPrecDefault -}
@@ -133,24 +133,24 @@ generateO R       _ _ = Nothing
 validateE :: Type -> EdgeSpec -> Common -> Bool 
 -------------------------------------------------------------------------------
 
-validateE M_Int    _ (Raw x) =
-    case ((reads x) :: [(Int, String)]) of
+validateE MInt    _ (Raw x) =
+    case (reads x :: [(Int, String)]) of
         [(a, "")] -> True
         _         -> False
 
-validateE M_Num    _ (Raw x) =
-    case ((reads x) :: [(Float, String)]) of
+validateE MNum    _ (Raw x) =
+    case (reads x :: [(Float, String)]) of
         [(a, "")] -> True
         _         -> False
 
-validateE M_Char   _ (Raw x) = length x == 1
-validateE M_Bool   _ (Raw x)
+validateE MChar    _ (Raw x) = length x == 1
+validateE MBool    _ (Raw x)
     | x == "true"  = True
     | x == "false" = True
     | otherwise    = False
 
-validateE M_Void   _ _ = True
-validateE M_String _ _ = True
-validateE M_Text   _ _ = True
-validateE M_File   _ _ = True
-validateE _        _ _ = False
+validateE MVoid   _ _ = True
+validateE MString _ _ = True
+validateE MText   _ _ = True
+validateE MFile   _ _ = True
+validateE _       _ _ = False
