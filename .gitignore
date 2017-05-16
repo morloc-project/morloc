@@ -6,3 +6,4 @@ Main
 .cabal-sandbox/
 cabal.sandbox.config
 dist/
+.history

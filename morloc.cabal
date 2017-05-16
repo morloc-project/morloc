@@ -35,6 +35,7 @@ library
     hs-source-dirs: library
     exposed-modules:  Morloc
                       Morloc.EvalError
+                      Morloc.Generator
                       Morloc.Graph
                       Morloc.Mode
                       Morloc.Evaluator

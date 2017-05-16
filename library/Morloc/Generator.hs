@@ -1,11 +1,18 @@
-module Morloc.Generate 
+module Morloc.Generator
 (
     Type(..)
+  , Common(..)
   , validateE
   , generateO
   , generateI
   , convertE
 ) where
+
+
+
+import Text.ParserCombinators.ReadP (pfail)
+import qualified Text.Read.Lex as L
+import qualified GHC.Read as R
 
 -- Eventually I will need to use JSON, for that I can use the Aeson library:
 -- http://hackage.haskell.org/package/aeson-1.2.0.0/docs/Data-Aeson.html
@@ -20,10 +27,10 @@ module Morloc.Generate
 {-     putStrLn $ show $ validateE M_Num [] (Raw "wer")     -}
 {-     putStrLn $ show $ validateE M_Num [] (Raw "1.123")   -}
 
-data ColumnSpec = ColumnSpec {name::String, kind::Type} deriving (Show)
-data TableSpec = TableSpec {columns::[ColumnSpec], rownames::Bool} deriving (Show)
-data HashSpec = HashSpec {key::Type, value::Type} deriving (Show)
-data TreeSpec = TreeSpec {leaf::Type, node::Type} deriving (Show)
+data ColumnSpec = ColumnSpec {name    :: String       , kind     :: Type} deriving (Show,Read)
+data TableSpec  = TableSpec  {columns :: [ColumnSpec] , rownames :: Bool} deriving (Show,Read)
+data HashSpec   = HashSpec   {key     :: Type         , value    :: Type} deriving (Show,Read)
+data TreeSpec   = TreeSpec   {leaf    :: Type         , node     :: Type} deriving (Show,Read)
 
 data Type 
     = M_Void
@@ -42,13 +49,38 @@ data Type
     | M_Set     Type
     | M_Hash    HashSpec
     | M_Tree    TreeSpec
-    deriving (Show)
+    deriving (Show, Read)
 
 data Lang
     = R
     | Bash
     | Haskell
-    deriving(Show)
+    deriving(Show, Read)
+
+{- instance Read Lang where               -}
+{-   readPrec =                           -}
+{-     parens                             -}
+{-     ( do L.Ident s <- R.lexP           -}
+{-          case s of                     -}
+{-            "R"  -> return R            -}
+{-            "sh" -> return Bash         -}
+{-            "hs" -> return Haskell      -}
+{-            _    -> pfail               -}
+{-     )                                  -}
+{-   readListPrec = R.readListPrecDefault -}
+{-   readList     = R.readListDefault     -}
+
+{- instance Read Type where               -}
+{-   readPrec =                           -}
+{-     parens                             -}
+{-     ( do L.Ident s <- R.lexP           -}
+{-          case s of                     -}
+{-            "Int"    -> return M_Int    -}
+{-            "String" -> return M_String -}
+{-            _        -> pfail           -}
+{-     )                                  -}
+{-   readListPrec = R.readListPrecDefault -}
+{-   readList     = R.readListDefault     -}
 
 type Key   = String
 type Value = String
@@ -57,11 +89,15 @@ type TypeSpec = [(Lang, Key, Value)]
 type EdgeSpec = [(Key, Value)]
 data Common = Raw String | Jason String
 
+instance Show Common where
+  show (Raw   x) = x
+  show (Jason x) = x
+
 
 -- ========================================================================= --
 --------------------------- C O N V E R T E R S -------------------------------
 -- ========================================================================= --
-  convertE  :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
+convertE :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
 -------------------------------------------------------------------------------
 
 convertE _ _ _ _ = Nothing
@@ -70,7 +106,7 @@ convertE _ _ _ _ = Nothing
 -- ========================================================================= --
 -------------------- O U T P U T   G E N E R A T O R S ------------------------
 -- ========================================================================= --
-  generateI :: Lang -> Type -> TypeSpec -> Maybe Code
+generateI :: Lang -> Type -> TypeSpec -> Maybe Code
 -------------------------------------------------------------------------------
 
 generateI Bash    _ _ = Nothing
@@ -82,7 +118,7 @@ generateI R       _ _ = Nothing
 -- ========================================================================= --
 --------------------- I N P U T   G E N E R A T O R S -------------------------
 -- ========================================================================= --
-  generateO :: Lang -> Type -> TypeSpec -> Maybe Code
+generateO :: Lang -> Type -> TypeSpec -> Maybe Code
 -------------------------------------------------------------------------------
 
 generateO Bash    _ _ = Nothing
@@ -94,7 +130,7 @@ generateO R       _ _ = Nothing
 -- ========================================================================= --
 ---------------------- E D G E   V A L I D A T O R S --------------------------
 -- ========================================================================= --
-  validateE :: Type -> EdgeSpec -> Common -> Bool 
+validateE :: Type -> EdgeSpec -> Common -> Bool 
 -------------------------------------------------------------------------------
 
 validateE M_Int    _ (Raw x) =
