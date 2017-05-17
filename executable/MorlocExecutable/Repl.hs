@@ -5,7 +5,7 @@ import Control.Monad.State.Strict
 import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 
-import qualified Morloc.Generator as Gen
+import qualified Morloc.Type as Type
 
 type Repl a = HaskelineT IO a
 
@@ -30,15 +30,15 @@ says = liftIO . print
 
 -- validateE :: Type -> EdgeSpec -> Common -> Bool 
 wrapValidateE :: [String] -> Repl ()
-wrapValidateE [s1,s2,s3] = says . Gen.validateE typ spec $ input where
-  typ   = read    s1
-  spec  = read    s2
-  input = Gen.Raw s3
+wrapValidateE [s1,s2,s3] = says . Type.validateE typ spec $ input where
+  typ   = read     s1
+  spec  = read     s2
+  input = Type.Raw s3
 wrapValidateE _ = say "ERROR: could not parse command"
 
 -- generateO :: Lang -> Type -> TypeSpec -> Maybe Code
 wrapGenerateO :: [String] -> Repl ()
-wrapGenerateO [s1,s2,s3] = say . fromMaybe msg . Gen.generateO lang typ $ spec where
+wrapGenerateO [s1,s2,s3] = say . fromMaybe msg . Type.generateO lang typ $ spec where
   msg  = "Failed to generate code"
   lang = read s1
   typ  = read s2
@@ -47,7 +47,7 @@ wrapGenerateO _ = say "ERROR: could not parse command"
 
 -- generateI :: Lang -> Type -> TypeSpec -> Maybe Code
 wrapGenerateI :: [String] -> Repl ()
-wrapGenerateI [s1,s2,s3] = say . fromMaybe msg . Gen.generateI lang typ $ spec where
+wrapGenerateI [s1,s2,s3] = say . fromMaybe msg . Type.generateI lang typ $ spec where
   msg  = "Failed to generate code"
   lang = read s1
   typ  = read s2
@@ -56,12 +56,12 @@ wrapGenerateI _ = say "ERROR: could not parse command"
 
 -- convertE :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
 wrapConvertE :: [String] -> Repl ()
-wrapConvertE [s1,s2,s3,s4] = says . fromMaybe msg . Gen.convertE typ1 typ2 spec $ common where
-  msg    = Gen.Raw "Failed to convert code"
+wrapConvertE [s1,s2,s3,s4] = says . fromMaybe msg . Type.convertE typ1 typ2 spec $ common where
+  msg    = Type.Raw "Failed to convert code"
   typ1   = read s1
   typ2   = read s2
   spec   = read s3
-  common = Gen.Raw s4
+  common = Type.Raw s4
 wrapConvertE _ = say "ERROR: could not parse command"
 
 catFiles :: [String] -> Repl ()

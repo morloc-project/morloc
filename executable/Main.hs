@@ -4,8 +4,8 @@ import Morloc (interpret)
 import qualified Morloc.Mode as Mode
 import MorlocExecutable.Repl (repl)
 
--- eventually there will be other modes
-mode = Mode.asLIL
+-- mode = Mode.asLIL
+mode = Mode.asCode
 
 process :: Mode.Mode -> String -> String
 process mode s = case interpret mode s of

@@ -1,156 +1,52 @@
-module Morloc.Generator
-(
-    Type(..)
-  , Common(..)
-  , validateE
-  , generateO
-  , generateI
-  , convertE
-) where
+-- Generator.hs
 
+{-|
 
+Generate target code
 
-import Text.ParserCombinators.ReadP (pfail)
-import qualified Text.Read.Lex as L
-import qualified GHC.Read as R
+The role of the generator is the reverse of the role of the parser. A
+parser takes a string and builds a data structure. The generator takes a
+data structure and builds a string.
 
--- Eventually I will need to use JSON, for that I can use the Aeson library:
--- http://hackage.haskell.org/package/aeson-1.2.0.0/docs/Data-Aeson.html
--- But for now I will use raw strings
+-}
 
-{- main :: IO ()                                            -}
-{- main = do                                                -}
-{-     -- putStrLn $ show $ generateI R (MVector MInt) [] -}
-{-     putStrLn $ show $ validateE MInt [] (Raw "123")     -}
-{-     putStrLn $ show $ validateE MInt [] (Raw "wer")     -}
-{-     putStrLn $ show $ validateE MString [] (Raw "wer")  -}
-{-     putStrLn $ show $ validateE MNum [] (Raw "wer")     -}
-{-     putStrLn $ show $ validateE MNum [] (Raw "1.123")   -}
+module Morloc.Generator (generate) where
 
-data ColumnSpec = ColumnSpec {name    :: String       , kind     :: Type} deriving (Show,Read)
-data TableSpec  = TableSpec  {columns :: [ColumnSpec] , rownames :: Bool} deriving (Show,Read)
-data HashSpec   = HashSpec   {key     :: Type         , value    :: Type} deriving (Show,Read)
-data TreeSpec   = TreeSpec   {leaf    :: Type         , node     :: Type} deriving (Show,Read)
+import Morloc.Evaluator (eval)
+import Morloc.Type (Lang(..))
+import Morloc.NodeAttribute (NodeAttr)
+import Morloc.Graph
 
-data Type 
-    = MVoid
-    | MInt
-    | MNum
-    | MChar
-    | MString
-    | MBool
-    | MText
-    | MFile
-    | MBinary
-    | MTable   TableSpec
-    | MMatrix  Type
-    | MVector  Type
-    | MTuple   [Type]
-    | MSet     Type
-    | MHash    HashSpec
-    | MTree    TreeSpec
-    deriving (Show, Read)
-
-data Lang
-    = R
-    | Bash
-    | Haskell
-    deriving(Show, Read)
-
-{- instance Read Lang where               -}
-{-   readPrec =                           -}
-{-     parens                             -}
-{-     ( do L.Ident s <- R.lexP           -}
-{-          case s of                     -}
-{-            "R"  -> return R            -}
-{-            "sh" -> return Bash         -}
-{-            "hs" -> return Haskell      -}
-{-            _    -> pfail               -}
-{-     )                                  -}
-{-   readListPrec = R.readListPrecDefault -}
-{-   readList     = R.readListDefault     -}
-
-{- instance Read Type where               -}
-{-   readPrec =                           -}
-{-     parens                             -}
-{-     ( do L.Ident s <- R.lexP           -}
-{-          case s of                     -}
-{-            "Int"    -> return MInt    -}
-{-            "String" -> return MString -}
-{-            _        -> pfail           -}
-{-     )                                  -}
-{-   readListPrec = R.readListPrecDefault -}
-{-   readList     = R.readListDefault     -}
-
-type Key   = String
-type Value = String
 type Code  = String
-type TypeSpec = [(Lang, Key, Value)]
-type EdgeSpec = [(Key, Value)]
-data Common = Raw String | Jason String
+type Nexus = Code
+type Pool  = (Lang, Code)
 
-instance Show Common where
-  show (Raw   x) = x
-  show (Jason x) = x
+generate :: Graph NodeAttr -> (Nexus, [Pool])
+generate _ = (
+    "this is the nexus code",
+    [
+      (R,    "this is R code"),
+      (Bash, "this is Bash code")
+    ]
+  )
 
-
--- ========================================================================= --
---------------------------- C O N V E R T E R S -------------------------------
--- ========================================================================= --
-convertE :: Type -> Type -> EdgeSpec -> Common -> Maybe Common
--------------------------------------------------------------------------------
-
-convertE _ _ _ _ = Nothing
-
-
--- ========================================================================= --
--------------------- O U T P U T   G E N E R A T O R S ------------------------
--- ========================================================================= --
-generateI :: Lang -> Type -> TypeSpec -> Maybe Code
--------------------------------------------------------------------------------
-
-generateI Bash    _ _ = Nothing
-generateI Haskell _ _ = Nothing
-generateI R       _ _ = Nothing 
-
-
-
--- ========================================================================= --
---------------------- I N P U T   G E N E R A T O R S -------------------------
--- ========================================================================= --
-generateO :: Lang -> Type -> TypeSpec -> Maybe Code
--------------------------------------------------------------------------------
-
-generateO Bash    _ _ = Nothing
-generateO Haskell _ _ = Nothing
-generateO R       _ _ = Nothing
-
-
-
--- ========================================================================= --
----------------------- E D G E   V A L I D A T O R S --------------------------
--- ========================================================================= --
-validateE :: Type -> EdgeSpec -> Common -> Bool 
--------------------------------------------------------------------------------
-
-validateE MInt    _ (Raw x) =
-    case (reads x :: [(Int, String)]) of
-        [(a, "")] -> True
-        _         -> False
-
-validateE MNum    _ (Raw x) =
-    case (reads x :: [(Float, String)]) of
-        [(a, "")] -> True
-        _         -> False
-
-validateE MChar    _ (Raw x) = length x == 1
-validateE MBool    _ (Raw x)
-    | x == "true"  = True
-    | x == "false" = True
-    | otherwise    = False
-
-validateE MVoid   _ _ = True
-validateE MString _ _ = True
-validateE MText   _ _ = True
-validateE MFile   _ _ = True
-validateE _       _ _ = False
+{-
+ - data Arg = Positional String | Keyword String String
+ -
+ - argstr :: String -> Arg -> String
+ - argstr sep (Keyword k  v) = k ++ sep ++ v
+ - argstr _   (Positional v) = v
+ -
+ - generateFunction :: Lang -> String -> [Args] -> Code -> Code
+ - generateFunction R name args body = name ++ " <- function(" ++ concatMap (argstr "=") args ++ ") {" ++ body ++ "}"
+ -
+ -
+ - Program :: Program Prologue Source [Function] Epilogue
+ - Function :: Function Name [Arg] Body
+ - Name :: Name Prefix String Suffix
+ - Arg :: Positional String | Keyword String String
+ - Body :: Body Input
+ -
+ -
+ - Input :: (Lang, Source, [Function]) -> Code
+ -}
