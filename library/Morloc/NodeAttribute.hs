@@ -39,6 +39,7 @@ showNodeValue x = fromMaybe "NO_VALUE" (nodeValue x)
 showNodeType :: NodeAttr -> String
 showNodeType x = fromMaybe "*" (nodeType  x)
 
+showNodePrimitive :: NodeAttr -> String
 showNodePrimitive x = case primitive x of
   Just s  -> show s
   Nothing -> "UNSET"
