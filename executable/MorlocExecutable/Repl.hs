@@ -6,12 +6,22 @@ import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
 
 import qualified Morloc.Type as Type
+import Morloc (interpret)
+import MorlocExecutable.Mode (asLIL, asCode)
 
 type Repl a = HaskelineT IO a
 
+say :: MonadIO m => String -> m ()
+say = liftIO . putStrLn
+
+says :: (MonadIO m, Show a) => a -> m ()
+says = liftIO . print
+
 -- main command, interpret Morloc
-cmd :: (String -> String) -> String -> Repl()
-cmd process line = liftIO $ putStr $ process line
+cmd :: String -> Repl()
+cmd line = case interpret line of
+  (Left err)  -> say err
+  (Right res) -> liftIO . asLIL $ res
 
 opts :: [(String, [String] -> Repl ())]
 opts = [
@@ -21,12 +31,6 @@ opts = [
   , ( "convert-json" , wrapConvertE  )
   , ( "cat"          , catFiles      )
   ]
-
-say :: MonadIO m => String -> m ()
-say = liftIO . putStrLn
-
-says :: (MonadIO m, Show a) => a -> m ()
-says = liftIO . print
 
 -- validateE :: Type -> EdgeSpec -> Common -> Bool 
 wrapValidateE :: [String] -> Repl ()
@@ -69,11 +73,9 @@ catFiles args = liftIO $ do
   contents <- readFile (unwords args)
   putStrLn contents
 
-repl f = evalRepl prompt eval opts autocomplete start where
+repl = evalRepl prompt cmd opts autocomplete start where
 
   prompt = "morloc> "
-
-  eval = cmd f
 
   matcher :: MonadIO m => [(String, CompletionFunc m)]
   matcher = [

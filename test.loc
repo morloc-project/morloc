@@ -1,4 +1,3 @@
-
 foo bar baz . bif
 
 
@@ -49,3 +48,28 @@ baz <a>
 
 # extended hask
 foo , bar , baz $ a
+
+
+
+
+# allow keyword arguments
+foo x y k=1 r=2 . bar a b r=[2,3,4]
+
+# rather than having the argument section, we can just use partial application
+foo' := foo k=1 r=2
+
+foo' x y . bar
+
+# I also want to increase the versatility of the functions by allowing
+# promotion of parameters
+
+foo :: X -> Y  {a=1::Int, b=2::Num, c=[1,2]::[Int]}
+
+bar := foo ^a  ::  X -> a -> Y
+
+# This could be used to, for example, perform a parameter sweep
+
+
+# Do I want dependent types? Yes.
+
+foo :: (Int:x,Int:y) where x < y # hmm, I really can't do this

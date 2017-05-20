@@ -38,7 +38,6 @@ library
                       Morloc.Generator
                       Morloc.Type
                       Morloc.Graph
-                      Morloc.Mode
                       Morloc.Evaluator
                       Morloc.Lexer
                       Morloc.NodeAttribute
