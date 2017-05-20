@@ -45,26 +45,32 @@ encodeNodes :: Graph Attr.NodeAttr -> Graph (Lang, UniqName, Code)
 encodeNodes = familyMap translate
 
 translate :: Attr.NodeAttr -> [Attr.NodeAttr] -> (Lang, UniqName, Code)
-translate p inputs = (lang, name, code) where
-  lang = R  -- hard-coded for now
-  name = Attr.showNodeValue p
-  args = []
-  body = generateFunctionCall name (map makeFunctionName inputs)
-  code = generateFunction (makeFunctionName p) args body
+translate p inputs  = case Attr.primitive p of
+  (Just False) -> (lang, name, code) where
+    lang = R  -- hard-coded for now
+    name = Attr.showNodeValue p
+    args = []
+    body = generateFunctionCall name (map makeName inputs)
+    code = generateFunction (makeName p) args body
+  _ -> (R, Attr.showNodeValue p, "")
 
 -- | Make a function name for a node. This name needs to be a valid identifier
 -- in the target language. Usually just prefixing the node id with a character
 -- works fine. Alternatively I could use a more descriptive name, such as the
 -- bound function.
-makeFunctionName :: Attr.NodeAttr -> UniqName
-makeFunctionName g = "m" ++ Attr.showNodeID g
+makeName :: Attr.NodeAttr -> UniqName
+makeName g = case Attr.primitive g of
+  (Just False) -> "m" ++ Attr.showNodeID g ++ "()"
+  (Just True) -> Attr.showNodeValue g
+  Nothing -> Attr.showNodeValue g -- this shouldn't ever happen
+                                  -- indeed, why is primitive a Maybe?
 
 -- | Create a script that calls the root node
 generateNexus :: Graph Attr.NodeAttr -> Nexus
 generateNexus _ = unlines [
       "#!/usr/bin/bash"
     , ""
-    , "./pool.R"
+    , "./pool.R m0"
   ]
 
 -- | Create the code for each function pool
@@ -101,8 +107,6 @@ generateFunction :: String -> [Arg] -> Code -> Code
 generateFunction name args body = concat [name, " <- function(", arglist, ") {", body, "}"] where
   arglist = intercalate "," . map (argstr "=") $ args
 
--- | Generate a function call where all arguments are function calls. For
--- example, `foo(bar(),baz())`.
+-- | Generate a function call. For example, `foo(bar(),1)`.
 generateFunctionCall :: String -> [String] -> Code
-generateFunctionCall s ss = concat [s, "(", funlist ss, ")"] where
-  funlist = intercalate "," . map (++ "()")
+generateFunctionCall s ss = concat [s, "(", intercalate "," ss, ")"]
