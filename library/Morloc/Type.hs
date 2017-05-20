@@ -11,8 +11,8 @@ module Morloc.Type
 
 
 
-import Text.ParserCombinators.ReadP (pfail)
-import qualified Text.Read.Lex as L
+-- import Text.ParserCombinators.ReadP (pfail)
+-- import qualified Text.Read.Lex as L
 import qualified GHC.Read as R
 
 
