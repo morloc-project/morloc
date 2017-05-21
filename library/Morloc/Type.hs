@@ -10,12 +10,6 @@ module Morloc.Type
 ) where
 
 
-
--- import Text.ParserCombinators.ReadP (pfail)
--- import qualified Text.Read.Lex as L
-import qualified GHC.Read as R
-
-
 {- data ColumnSpec = ColumnSpec {name    :: String       , kind     :: Type} deriving (Show,Read) -}
 {- data TableSpec  = TableSpec  {columns :: [ColumnSpec] , rownames :: Bool} deriving (Show,Read) -}
 {- data HashSpec   = HashSpec   {key     :: Type         , value    :: Type} deriving (Show,Read) -}

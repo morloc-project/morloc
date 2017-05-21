@@ -24,7 +24,6 @@ module Morloc.Generator (generate) where
 
 import Data.List (intercalate)
 
-import Morloc.Evaluator (eval)
 import Morloc.Type (Lang(..))
 import qualified Morloc.NodeAttribute as Attr
 import Morloc.Graph
@@ -32,8 +31,8 @@ import Morloc.Graph
 -- These types are mostly for readability
 type Code = String
 type Nexus = Code
-type Pool = (Lang, Code)
 type UniqName = String
+type Pool = (UniqName, Code)
 
 data Arg = Positional String | Keyword String String
 
@@ -50,7 +49,7 @@ translate p inputs  = case Attr.primitive p of
     lang = R  -- hard-coded for now
     name = Attr.showNodeValue p
     args = []
-    body = generateFunctionCall name (map makeName inputs)
+    body = generateFunctionCall name (map callNode inputs)
     code = generateFunction (makeName p) args body
   _ -> (R, Attr.showNodeValue p, "")
 
@@ -60,10 +59,16 @@ translate p inputs  = case Attr.primitive p of
 -- bound function.
 makeName :: Attr.NodeAttr -> UniqName
 makeName g = case Attr.primitive g of
-  (Just False) -> "m" ++ Attr.showNodeID g ++ "()"
+  (Just False) -> "m" ++ Attr.showNodeID g
   (Just True) -> Attr.showNodeValue g
   Nothing -> Attr.showNodeValue g -- this shouldn't ever happen
                                   -- indeed, why is primitive a Maybe?
+
+callNode :: Attr.NodeAttr -> String
+callNode g = case Attr.primitive g of
+  (Just False) -> (makeName g) ++ "()"
+  (Just True) -> makeName g
+  Nothing -> makeName g
 
 -- | Create a script that calls the root node
 generateNexus :: Graph Attr.NodeAttr -> Nexus
@@ -75,10 +80,10 @@ generateNexus _ = unlines [
 
 -- | Create the code for each function pool
 generatePools :: Graph Attr.NodeAttr -> [Pool]
-generatePools g = [(R, collapse g)] where
+generatePools g = [("pool.R", collapse g)] where
 
   collapse :: Graph Attr.NodeAttr -> String
-  collapse g = unlines [prologue, extractFunctions g, epilogue]
+  collapse node = unlines [prologue, extractFunctions node, epilogue]
 
   prologue = "#!/usr/bin/Rscript --vanilla\n"
 

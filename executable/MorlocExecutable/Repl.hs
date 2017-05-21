@@ -7,7 +7,7 @@ import Data.Maybe (fromMaybe)
 
 import qualified Morloc.Type as Type
 import Morloc (interpret)
-import MorlocExecutable.Mode (asLIL, asCode)
+import MorlocExecutable.Mode (asLIL, asCode, asResult)
 
 type Repl a = HaskelineT IO a
 
@@ -21,7 +21,7 @@ says = liftIO . print
 cmd :: String -> Repl()
 cmd line = case interpret line of
   (Left err)  -> say err
-  (Right res) -> liftIO . asLIL $ res
+  (Right res) -> liftIO . asResult $ res
 
 opts :: [(String, [String] -> Repl ())]
 opts = [

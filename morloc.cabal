@@ -61,6 +61,8 @@ executable morloc
                    repline,
                    mtl,
                    parsec,
+                   process,
+                   directory,
                    morloc
 
     ghc-options: -Wall
