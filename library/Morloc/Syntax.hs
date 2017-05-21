@@ -3,13 +3,12 @@ module Morloc.Syntax (
   , Op(..)
 ) where
 
-type Node = String
-
 data Expr
   = Float   Double
   | Integer Integer
   | String  String
-  | Node    Node
+  | Node    String
+  | Bool    Bool
   | BinOp   Op Expr Expr
   | Apply   Expr [Expr]
   deriving (Eq, Ord, Show)

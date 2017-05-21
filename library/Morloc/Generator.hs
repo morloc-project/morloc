@@ -67,7 +67,11 @@ makeName g = case Attr.primitive g of
 generateValue :: Attr.NodeAttr -> String
 generateValue a
   | Attr.showNodeType a == "String" = "\"" ++ Attr.showNodeValue a ++ "\""
-  | otherwise                       =        Attr.showNodeValue a
+  | Attr.showNodeType a == "Bool" = case Attr.showNodeValue a of
+      "True"  -> "TRUE"
+      "False" -> "FALSE"
+      _       -> "NA" -- TODO: replace value strings with something sane
+  | otherwise = Attr.showNodeValue a
   
 
 callNode :: Attr.NodeAttr -> String

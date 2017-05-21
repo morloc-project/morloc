@@ -3,6 +3,7 @@ module Morloc.Lexer (
   , parseInteger
   , parseFloat
   , parseString
+  , parseBoolean
   , parseIdentifier
   , parseReserved
   , parseReservedOp
@@ -45,6 +46,11 @@ parseString = do
 
 parseIdentifier :: Parser String
 parseIdentifier = Token.identifier lexer
+
+parseBoolean :: Parser Bool
+parseBoolean = do
+  s <- string "True" <|> string "False"
+  return (read s)
 
 parseReserved :: String -> Parser ()
 parseReserved = Token.reserved lexer

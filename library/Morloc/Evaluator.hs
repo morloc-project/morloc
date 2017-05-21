@@ -45,6 +45,7 @@ expr2tree (Syntax.Node    x) = return $ Graph.Node (nodeAttrS x) []
 expr2tree (Syntax.Float   x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Float",   primitive = Just True}) []
 expr2tree (Syntax.Integer x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Integer", primitive = Just True}) []
 expr2tree (Syntax.String  x) = return $ Graph.Node ((nodeAttrS        x) {nodeType = Just "String",  primitive = Just True}) []
+expr2tree (Syntax.Bool    x) = return $ Graph.Node ((nodeAttrS $ show x) {nodeType = Just "Bool",    primitive = Just True}) []
 -- throw error on all kinds of compositions not handled above
 expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
   msg = "Primitives cannot be on the left side of a composition"

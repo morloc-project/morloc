@@ -33,6 +33,7 @@ expr = buildExpressionParser table factor
   factor :: Parser Expr
   factor =
         try apply
+    <|> try bool
     <|> try node
     <|> try num
     <|> try int
@@ -55,6 +56,10 @@ str = fmap String parseString
 node :: Parser Expr
 node = fmap Node parseIdentifier
 
+bool :: Parser Expr
+bool = fmap Bool parseBoolean
+
+
 apply :: Parser Expr
 apply = do
   name <- composon -- NOTE: I'll allow anything to compose here,
@@ -63,7 +68,8 @@ apply = do
   return $ Apply name args
   where
   composon =
-        try node
+        try bool
+    <|> try node
     <|> try str
     -- num before int, else "." is parsed as COMPOSE
     <|> try num
