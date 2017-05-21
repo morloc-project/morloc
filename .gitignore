@@ -7,3 +7,5 @@ Main
 cabal.sandbox.config
 dist/
 .history
+nexus.sh
+pool.*

@@ -55,9 +55,10 @@ asResult g = case generate g of
     -- execute nexus, recording STDOUT to string
     rawSystem "./nexus.sh" []
 
-    -- cleanup
-    removeFile "nexus.sh"
-    mapM_ (removeFile . fst) pools
+    putStr ""
+    {- -- cleanup                     -}
+    {- removeFile "nexus.sh"          -}
+    {- mapM_ (removeFile . fst) pools -}
 
 setExecutable :: FilePath -> IO ()
 setExecutable f = do

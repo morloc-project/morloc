@@ -60,9 +60,15 @@ translate p inputs  = case Attr.primitive p of
 makeName :: Attr.NodeAttr -> UniqName
 makeName g = case Attr.primitive g of
   (Just False) -> "m" ++ Attr.showNodeID g
-  (Just True) -> Attr.showNodeValue g
-  Nothing -> Attr.showNodeValue g -- this shouldn't ever happen
-                                  -- indeed, why is primitive a Maybe?
+  (Just True) -> generateValue g
+  Nothing -> generateValue g -- this shouldn't ever happen
+                             -- indeed, why is primitive a Maybe?
+
+generateValue :: Attr.NodeAttr -> String
+generateValue a
+  | Attr.showNodeType a == "String" = "\"" ++ Attr.showNodeValue a ++ "\""
+  | otherwise                       =        Attr.showNodeValue a
+  
 
 callNode :: Attr.NodeAttr -> String
 callNode g = case Attr.primitive g of
