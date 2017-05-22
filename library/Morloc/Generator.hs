@@ -83,15 +83,15 @@ generateFunctionCall :: String -> [String] -> Code
 generateFunctionCall s ss = concat [s, "(", intercalate "," ss, ")"]
 
 generateArgs :: [Arg] -> String
-generateArgs args = intercalate "," . map (argstr "=") $ args where
+generateArgs = intercalate "," . map (argstr "=") where
   argstr :: String -> Arg -> String
   argstr sep (Keyword    k v) = k ++ sep ++ v
   argstr _   (Positional   v) = v
 
 -- | This is a wrapper for generateValue, only MFunc needs the node id
 callNode :: (Int, MData) -> String
-callNode (i, (MFunc _)) = generateNode i ++ "()"
-callNode (_, x        ) = generateValue x
+callNode (i, MFunc _) = generateNode i ++ "()"
+callNode (_, x      ) = generateValue x
 
 -- | Make a function name for a node. This name needs to be a valid identifier
 -- in the target language. Usually just prefixing the node id with a character
@@ -105,10 +105,10 @@ generateValue (MInt     x) = generateInt    x
 generateValue (MNum     x) = generateNum    x
 generateValue (MString  x) = generateString x
 generateValue (MBool    x) = generateBool   x
-{- generateValue (MInts    x) = generateArray $ map MInt    x -}
-{- generateValue (MNums    x) = generateArray $ map MNum    x -}
-{- generateValue (MStrings x) = generateArray $ map MString x -}
-{- generateValue (MBools   x) = generateArray $ map MBool   x -}
+generateValue (MInts    x) = generateArray $ map MInt    x
+generateValue (MNums    x) = generateArray $ map MNum    x
+generateValue (MStrings x) = generateArray $ map MString x
+generateValue (MBools   x) = generateArray $ map MBool   x
 generateValue _            = "WTF???" -- I'll fix this ... 
 
 generateArray :: [MData] -> String

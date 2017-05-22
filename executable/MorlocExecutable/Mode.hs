@@ -1,7 +1,5 @@
 module MorlocExecutable.Mode (asCode, asResult) where
 
-import Data.List (intercalate)
-import System.IO
 import System.Directory
 import System.Process
 
@@ -27,15 +25,12 @@ asResult g = case generate g of
   (nexus, pools) -> do
 
     -- write nexus to a file
-    writeFile "nexus.sh" nexus
+    writeExeFile ("nexus.sh", nexus)
 
-    -- make nexus executable
-    setExecutable "nexus.sh"
-
-    mapM_ writePool pools
+    mapM_ writeExeFile pools
 
     -- execute nexus, recording STDOUT to string
-    rawSystem "./nexus.sh" []
+    _ <- rawSystem "./nexus.sh" []
 
     -- cleanup
     removeFile "nexus.sh"
@@ -46,8 +41,8 @@ setExecutable f = do
   p <- getPermissions f
   setPermissions f (p {executable = True})
 
-writePool :: (String,String) -> IO ()
-writePool (name,code) = do
+writeExeFile :: (String,String) -> IO ()
+writeExeFile (name,code) = do
   -- write pools to files
   writeFile name code
   -- make poosl executable

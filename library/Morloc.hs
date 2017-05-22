@@ -4,7 +4,6 @@
 
 module Morloc (interpret) where
 
-import Morloc.Parser as Parser
 import Morloc.Graph (Graph)
 import Morloc.Evaluator (eval)
 import Morloc.Data

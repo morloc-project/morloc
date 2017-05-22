@@ -1,10 +1,10 @@
 module Morloc.Parser (parseExpr) where
 
 import Text.Parsec
+import qualified Text.Parsec.Combinator as C
 import Text.Parsec.String (Parser)
 
 import Text.Parsec.Expr (Operator(..), Assoc(..), buildExpressionParser)
-{- import Text.Parsec.Token (whiteSpace, commaSep, brackets) -}
 import Text.Parsec.Token (whiteSpace)
 import Control.Monad.Except (throwError)
 
@@ -29,11 +29,9 @@ parseExpr s =
     return r
 
 
--- parser for nodes
 node :: Parser Expr
 node = fmap ( Value . MFunc ) parseIdentifier
 
--- parsers for single elements
 num :: Parser Expr
 num  = fmap ( Value . MNum    ) parseFloat
 
@@ -46,24 +44,33 @@ str  = fmap ( Value . MString ) parseString
 bool :: Parser Expr
 bool = fmap ( Value . MBool   ) parseBoolean
 
-{- -- parsers for homogenous arrays -}
-{- parseArray p f = do              -}
-{-   m <- brackets lexer            -}
-{-   n <- commaSep lexer p          -}
-{-   return $ fmap (Value . f)      -}
+-- parsers for homogenous arrays
+parseArray :: Parser a -> ([a] -> MData) -> Parser Expr
+parseArray p f = do
+  _ <- char '['
+  m <- C.sepBy p (char ',')
+  _ <- char ']'
+  return $ Value $ f m
 
-{- narray = parseArray parseFloat    MNums    -}
-{- iarray = parseArray parseInteger  MInts    -}
-{- sarray = parseArray parseString   MStrings -}
-{- barray = parseArray parseBoolean  MBools   -}
+narray :: Parser Expr
+narray = parseArray parseFloat    MNums
+
+iarray :: Parser Expr
+iarray = parseArray parseInteger  MInts
+
+sarray :: Parser Expr
+sarray = parseArray parseString   MStrings
+
+barray :: Parser Expr
+barray = parseArray parseBoolean  MBools
 
 factor :: Parser Expr
 factor = 
-    {-     try narray -}
-    {- <|> try iarray -}
-    {- <|> try sarray -}
-    {- <|> try barray -}
-        try bool
+        try narray
+    <|> try iarray
+    <|> try sarray
+    <|> try barray
+    <|> try bool
     <|> try num -- num before int, else "." parsed as COMPOSE
     <|> try int
     <|> try str
