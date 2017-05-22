@@ -16,6 +16,7 @@ module Morloc.Graph
     , pullG
     , propagate
     , replaceValue
+    , suczip
 ) where
 
 import Data.List (union)
@@ -26,6 +27,9 @@ data Graph a = Node a [Graph a] deriving(Show, Eq)
 values :: [Graph a] -> [a]
 values = map v where
   v (Node x _) = x 
+
+value :: Graph a -> a
+value (Node x _) = x
 
 {- kids :: Graph a -> [a]       -}
 {- kids (Node _ xs) = values xs -}
@@ -68,7 +72,6 @@ propagate :: (a -> [a] -> [a]) -> Graph a -> Graph a
 propagate f (Node x xs) = Node x (map (propagate f) newkids) where
   newkids = zipWith replaceValue (f x (values xs)) xs
 
--- this is a `return` function ...
 replaceValue :: a -> Graph a -> Graph a 
 replaceValue x (Node _ xs) = Node x xs
 
@@ -80,43 +83,40 @@ ifelseG :: Graph Bool -> (a -> b) -> (a -> b) -> Graph a -> Graph b
 ifelseG gcond fa fb gx = zipWithG ternary' gx gcond where
   ternary' x cond = if cond then fa x else fb x
 
--- Graph to list, just a list of all a
+-- | graph to list, just a list of all a
 toList :: Eq a => Graph a -> [a]
 toList (Node x xs) = [x] `union` (xs >>= toList)
 
--- modify parent by comparing to children
+-- | modify parent by comparing to children
 familyMap :: (a -> [a] -> b) -> Graph a -> Graph b
 familyMap f (Node t ts) = Node new_val new_kids  where
   new_val = f t $ values ts
   new_kids = map (familyMap f) ts
 
--- modify parents based only on children
+-- | modify parents based only on children
 childMap :: ([a] -> b) -> Graph a -> Graph b
 childMap f (Node _ ts) = Node new_val new_kids where
   new_val = f $ values ts
   new_kids = map (childMap f) ts
 
--- replace node values with parent/child relation lists
+-- | replace node values with parent/child relation lists
 parentChildMap :: (a -> a -> b) -> Graph a -> Graph [b]
 parentChildMap f (Node t ts) = Node new_val new_kids where
   new_val = map (f t) (values ts)
   new_kids = map (parentChildMap f) ts
   
--- like parentChildMap, but includes child order index
+-- | like parentChildMap, but includes child order index
 parentChildMapI :: (a -> (Int, a) -> b) -> Graph a -> Graph [b]
 parentChildMapI f (Node t ts) = Node new_val new_kids where
   new_val = map (f t) (zip [1..] (values ts))
   new_kids = map (parentChildMapI f) ts
 
-{- -- DF.concat :: t [a] -> [a]                                  -}
-{- -- CM.liftM :: (a -> r) -> m a -> m r                         -}
-{- -- g :: Graph -> [String]                                     -}
-{- -- return :: a -> m a                                         -}
-{- -- (>>=) :: m a -> (a -> m b) -> m b                          -}
-{- showGraph :: (Graph a -> Maybe String) -> Graph a -> [String] -}
-{- showGraph f t =                                               -}
-{-      (DF.toList . f) t                                        -}
-{-   ++ (DF.concat . g) (return t >>= popChild)                  -}
-{-   ++ (DF.concat . g) (return t >>= topChild)                  -}
-{-   where                                                       -}
-{-     g = CM.liftM (showGraph f)                                -}
+-- | A zip function that zips elements from a series (defined by a successor
+-- function and an initial element) to elements of the graph. This function can
+-- be used to map unique ids to nodes: `suczip (+ 1) 1 g`.
+suczip :: (a -> a) -> a -> Graph b -> Graph (a,b)
+suczip f x (Node y kids) = Node (x,y) (mapzip' f (f x) kids) where
+  mapzip' :: (a -> a) -> a -> [Graph b] -> [Graph (a,b)]
+  mapzip' _ _ [] = []
+  mapzip' f' x' (t:ts) = [top] ++ mapzip' f' (fst . value $ top) ts where
+    top = suczip f' x' t

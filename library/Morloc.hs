@@ -6,11 +6,11 @@ module Morloc (interpret) where
 
 import Morloc.Parser as Parser
 import Morloc.Graph (Graph)
-import Morloc.NodeAttribute (NodeAttr)
 import Morloc.Evaluator (eval)
+import Morloc.Data
 import Data.Either (either)
 
-interpret :: String -> Either String (Graph NodeAttr)
+interpret :: String -> Either String (Graph MData)
 interpret code = either err res (eval code) where
   err = Left . unlines . lines . show
   res = Right

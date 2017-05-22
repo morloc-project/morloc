@@ -1,9 +1,4 @@
-module MorlocExecutable.Mode
-(
-    asLIL
-  , asCode
-  , asResult
-) where
+module MorlocExecutable.Mode (asCode, asResult) where
 
 import Data.List (intercalate)
 import System.IO
@@ -11,23 +6,10 @@ import System.Directory
 import System.Process
 
 import Morloc.Graph
-import Morloc.NodeAttribute
+import Morloc.Data
 import Morloc.Generator (generate)
 
-asLIL :: Graph NodeAttr -> IO ()
-asLIL = putStr . unlines . concat . toList . parentChildMapI link where
-  link :: NodeAttr -> (Int, NodeAttr) -> String
-  link parent (position, child) = 
-    intercalate "\t"
-    [ 
-        showNodeValue parent
-      , showNodeID    parent
-      , show          position
-      , showNodeType  child
-      , showNodeValue child
-    ]
-
-asCode :: Graph NodeAttr -> IO ()
+asCode :: Graph MData -> IO ()
 asCode g = case generate g of
   (nexus, pools) -> putStr $ nexusCode ++ poolCode where
     nexusCode = unlines ["NEXUS", indent nexus]
@@ -40,7 +22,7 @@ asCode g = case generate g of
     writePool (l,c) = unlines [show l, indent c]
 
 
-asResult :: Graph NodeAttr -> IO ()
+asResult :: Graph MData -> IO ()
 asResult g = case generate g of
   (nexus, pools) -> do
 
@@ -55,10 +37,9 @@ asResult g = case generate g of
     -- execute nexus, recording STDOUT to string
     rawSystem "./nexus.sh" []
 
-    putStr ""
-    {- -- cleanup                     -}
-    {- removeFile "nexus.sh"          -}
-    {- mapM_ (removeFile . fst) pools -}
+    -- cleanup
+    removeFile "nexus.sh"
+    mapM_ (removeFile . fst) pools
 
 setExecutable :: FilePath -> IO ()
 setExecutable f = do

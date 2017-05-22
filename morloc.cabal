@@ -36,11 +36,10 @@ library
     exposed-modules:  Morloc
                       Morloc.EvalError
                       Morloc.Generator
-                      Morloc.Type
                       Morloc.Graph
+                      Morloc.Data
                       Morloc.Evaluator
                       Morloc.Lexer
-                      Morloc.NodeAttribute
                       Morloc.Parser
                       Morloc.Syntax
 

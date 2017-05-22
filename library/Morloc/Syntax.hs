@@ -1,16 +1,11 @@
-module Morloc.Syntax (
-    Expr(..)
-  , Op(..)
-) where
+module Morloc.Syntax ( Expr(..) , Op(..) ) where
+
+import Morloc.Data (MData)
 
 data Expr
-  = Float   Double
-  | Integer Integer
-  | String  String
-  | Node    String
-  | Bool    Bool
-  | BinOp   Op Expr Expr
-  | Apply   Expr [Expr]
+  = Value  MData
+  | BinOp  Op Expr Expr
+  | Apply  Expr [Expr]
   deriving (Eq, Ord, Show)
 
 data Op

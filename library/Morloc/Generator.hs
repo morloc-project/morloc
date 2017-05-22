@@ -1,8 +1,6 @@
 -- Generator.hs
 
-{-|
-
-Generate target code
+{-| Generate target code
 
 The role of the generator is the reverse of the role of the parser. A
 parser takes a string and builds a data structure. The generator takes a
@@ -17,16 +15,14 @@ Around statement.
  * cache  - output is cached ? return cache : run function
  * filter - perform a function on the output
 Since these wrap the function, they can be applied seperately
-
 -}
 
 module Morloc.Generator (generate) where
 
 import Data.List (intercalate)
 
-import Morloc.Type (Lang(..))
-import qualified Morloc.NodeAttribute as Attr
 import Morloc.Graph
+import Morloc.Data
 
 -- These types are mostly for readability
 type Code = String
@@ -36,63 +32,22 @@ type Pool = (UniqName, Code)
 
 data Arg = Positional String | Keyword String String
 
-generate :: Graph Attr.NodeAttr -> (Nexus, [Pool])
+generate :: Graph MData -> (Nexus, [Pool])
 generate g = (generateNexus g, generatePools g)
 
--- | Transform each node into a funtion in the target language
-encodeNodes :: Graph Attr.NodeAttr -> Graph (Lang, UniqName, Code)
-encodeNodes = familyMap translate
-
-translate :: Attr.NodeAttr -> [Attr.NodeAttr] -> (Lang, UniqName, Code)
-translate p inputs  = case Attr.primitive p of
-  (Just False) -> (lang, name, code) where
-    lang = R  -- hard-coded for now
-    name = Attr.showNodeValue p
-    args = []
-    body = generateFunctionCall name (map callNode inputs)
-    code = generateFunction (makeName p) args body
-  _ -> (R, Attr.showNodeValue p, "")
-
--- | Make a function name for a node. This name needs to be a valid identifier
--- in the target language. Usually just prefixing the node id with a character
--- works fine. Alternatively I could use a more descriptive name, such as the
--- bound function.
-makeName :: Attr.NodeAttr -> UniqName
-makeName g = case Attr.primitive g of
-  (Just False) -> "m" ++ Attr.showNodeID g
-  (Just True) -> generateValue g
-  Nothing -> generateValue g -- this shouldn't ever happen
-                             -- indeed, why is primitive a Maybe?
-
-generateValue :: Attr.NodeAttr -> String
-generateValue a
-  | Attr.showNodeType a == "String" = "\"" ++ Attr.showNodeValue a ++ "\""
-  | Attr.showNodeType a == "Bool" = case Attr.showNodeValue a of
-      "True"  -> "TRUE"
-      "False" -> "FALSE"
-      _       -> "NA" -- TODO: replace value strings with something sane
-  | otherwise = Attr.showNodeValue a
-  
-
-callNode :: Attr.NodeAttr -> String
-callNode g = case Attr.primitive g of
-  (Just False) -> (makeName g) ++ "()"
-  (Just True) -> makeName g
-  Nothing -> makeName g
-
 -- | Create a script that calls the root node
-generateNexus :: Graph Attr.NodeAttr -> Nexus
+generateNexus :: Graph MData -> Nexus
 generateNexus _ = unlines [
       "#!/usr/bin/bash"
     , ""
-    , "./pool.R m0"
+    , "./pool.R m1"
   ]
 
 -- | Create the code for each function pool
-generatePools :: Graph Attr.NodeAttr -> [Pool]
+generatePools :: Graph MData -> [Pool]
 generatePools g = [("pool.R", collapse g)] where
 
-  collapse :: Graph Attr.NodeAttr -> String
+  collapse :: Graph MData -> String
   collapse node = unlines [prologue, extractFunctions node, epilogue]
 
   prologue = "#!/usr/bin/Rscript --vanilla\n"
@@ -108,20 +63,119 @@ generatePools g = [("pool.R", collapse g)] where
       , "}"
     ]
 
-  extractFunctions :: Graph Attr.NodeAttr -> String
-  extractFunctions = unlines . toList . fmap third . encodeNodes
+  extractFunctions :: Graph MData -> String
+  extractFunctions = unlines . toList . encodeNodes
 
-  third :: (a,b,c) -> c
-  third (_,_,x) = x
-
-argstr :: String -> Arg -> String
-argstr sep (Keyword    k v) = k ++ sep ++ v
-argstr _   (Positional   v) = v
+  -- | Transform each node into a funtion in the target language
+  encodeNodes :: Graph MData -> Graph Code
+  encodeNodes = familyMap translate . suczip (+ 1) 1 where
+    translate :: (Int, MData) -> [(Int, MData)] -> Code
+    translate (i, MFunc name) inputs = code where
+        code = generateFunction (generateNode i) [] body
+        body = generateFunctionCall name (map callNode inputs)
+    translate _ _ = []
 
 generateFunction :: String -> [Arg] -> Code -> Code
-generateFunction name args body = concat [name, " <- function(", arglist, ") {", body, "}"] where
-  arglist = intercalate "," . map (argstr "=") $ args
+generateFunction name args body = concat [name, " <- function(", generateArgs args, ") {", body, "}"]
 
 -- | Generate a function call. For example, `foo(bar(),1)`.
 generateFunctionCall :: String -> [String] -> Code
 generateFunctionCall s ss = concat [s, "(", intercalate "," ss, ")"]
+
+generateArgs :: [Arg] -> String
+generateArgs args = intercalate "," . map (argstr "=") $ args where
+  argstr :: String -> Arg -> String
+  argstr sep (Keyword    k v) = k ++ sep ++ v
+  argstr _   (Positional   v) = v
+
+-- | This is a wrapper for generateValue, only MFunc needs the node id
+callNode :: (Int, MData) -> String
+callNode (i, (MFunc _)) = generateNode i ++ "()"
+callNode (_, x        ) = generateValue x
+
+-- | Make a function name for a node. This name needs to be a valid identifier
+-- in the target language. Usually just prefixing the node id with a character
+-- works fine. Alternatively I could use a more descriptive name, such as the
+-- wrapped function with a suffix.
+generateNode :: Int -> String
+generateNode i = "m" ++ show i
+
+generateValue :: MData -> String
+generateValue (MInt     x) = generateInt    x
+generateValue (MNum     x) = generateNum    x
+generateValue (MString  x) = generateString x
+generateValue (MBool    x) = generateBool   x
+{- generateValue (MInts    x) = generateArray $ map MInt    x -}
+{- generateValue (MNums    x) = generateArray $ map MNum    x -}
+{- generateValue (MStrings x) = generateArray $ map MString x -}
+{- generateValue (MBools   x) = generateArray $ map MBool   x -}
+generateValue _            = "WTF???" -- I'll fix this ... 
+
+generateArray :: [MData] -> String
+generateArray xs = "c(" ++ (intercalate ", " . map generateValue) xs ++ ")"
+
+generateBool :: Bool -> String
+generateBool b = if b then "TRUE" else "FALSE"
+
+generateString :: String -> String
+generateString s = "\"" ++ s ++ "\""
+
+generateNum :: Double -> String
+generateNum = show
+
+generateInt :: Integer -> String
+generateInt = show
+
+
+{- -- see Note 1                                                       -}
+{- setid :: Graph NodeAttr -> Graph NodeAttr                           -}
+{- setid g = fst <$> propagate base (zipG zeroed gcount) where         -}
+{-                                                                     -}
+{-   zeroed = fmap (\attr -> attr { nodeID = Just 0 }) g               -}
+{-                                                                     -}
+{-   -- base :: a -> [a] -> [a]                                        -}
+{-   base (_,i) gs' = zipWith set_child_id gs' child_ids where         -}
+{-     set_child_id (attr,_) j = (attr { nodeID = Just j }, j)         -}
+{-     child_ids = map (+ i) $ scanl1 (+) (map snd gs')                -}
+{-                                                                     -}
+{-   -- gcount :: Graph Int -- graph with descendent counts            -}
+{-   gcount = pullG (+) $ ifelseG (isTerminal g) (const 1) (const 0) g -}
+
+------- NOTE 1 ------------------------------------------------------
+--   s0 := setid :: Graph NodeAttr -> Graph NodeAttr
+--   ===============================================
+--   s1 := zipG   :: Graph a -> Graph b -> Graph (a,b)
+-- > s2 := g      :: Graph NodeAttr
+--   s3 := gcount :: Graph Int
+--   -----------------------------------------------
+--   a :: NodeAttr  ;  b :: Int
+--   -----------------------------------------------
+--   s4 := propagate :: (a -> [a] -> [a]) -> Graph a -> Graph a
+--   s5 := base      :: a -> [a] -> [a]
+--   s6 := s1 s2 s3  :: Graph (NodeAttr, Int)
+--   -----------------------------------------------
+--   s7 := s4 s5 s6 :: Graph (NodeAttr, Int)
+-- < s8 := fmap fst :: Graph (NodeAttr, Int) -> Graph NodeAttr
+--   -----------------------------------------------
+--   s8 s6 :: Graph NodeAttr  
+--   ===============================================
+--
+--
+--   gcount :: Graph Int
+--   ==========================================================
+--   s9  := pullG      :: Monoid a => (a -> a -> a) -> Graph a -> Graph a
+--   s10 := ifelseG    :: Graph Bool -> (a -> b) -> (a -> b) -> Graph a -> Graph b
+--   s11 := isTerminal :: Graph a -> Graph Bool
+--   s12 := const      :: a -> b -> a
+--   ----------------------------------------------------------
+--   s13 := pullG (+)    :: Num a => Graph a -> Graph a
+--   s14 := isTerminal g :: Bool
+--   s15 := const 1      :: b -> Int
+--   ----------------------------------------------------------
+--                       b :: Int
+--   ----------------------------------------------------------
+--   s16 := ifelseG (isTermiminal g) (const 1) (const 0) ::
+--            Graph NodeAttr -> Graph Int
+--   ----------------------------------------------------------
+-- < s16 g := Graph Int
+---------------------------------------------------------------------
