@@ -33,16 +33,16 @@ node :: Parser Expr
 node = fmap ( Value . MFunc ) parseIdentifier
 
 num :: Parser Expr
-num  = fmap ( Value . MNum    ) parseFloat
+num = fmap ( Value . MNum ) parseFloat
 
 int :: Parser Expr
-int  = fmap ( Value . MInt    ) parseInteger
+int = fmap ( Value . MInt ) parseInteger
 
 str :: Parser Expr
-str  = fmap ( Value . MString ) parseString
+str = fmap ( Value . MString ) parseString
 
 bool :: Parser Expr
-bool = fmap ( Value . MBool   ) parseBoolean
+bool = fmap ( Value . MBool ) parseBoolean
 
 -- Parsers for heterogenous arrays
 -- The evaluator will trim the possibilities. Currently only homogenous arrays
@@ -50,16 +50,21 @@ bool = fmap ( Value . MBool   ) parseBoolean
 array :: Parser Expr
 array = do
   _ <- char '['
+  _ <- whiteSpace lexer
   m <- C.sepBy element (char ',')
+  _ <- whiteSpace lexer
   _ <- char ']'
   return $ Array m
 
 element :: Parser Expr
-element =
-        try bool
+element = do
+  _ <- whiteSpace lexer
+  p <-  try bool
     <|> try num
     <|> try int
     <|> try str
+  _ <- whiteSpace lexer
+  return p
 
 factor :: Parser Expr
 factor =

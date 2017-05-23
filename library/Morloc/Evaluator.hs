@@ -41,8 +41,10 @@ expr2tree (Syntax.Array xs)
   | all (atype "String") xs = return $ Graph.Node ( MStrings $ mapMaybe e2mstrings xs ) []
   | all (atype "Bool")   xs = return $ Graph.Node ( MBools   $ mapMaybe e2mbools   xs ) []
   | all (atype "Num")    xs = return $ Graph.Node ( MNums    $ mapMaybe e2mnums    xs ) []
-  | otherwise = throwError $ Error.BadArray "Arrays must be homogenous atomic collections"
+  | otherwise = throwError $ Error.BadArray msg
   where
+    msg = "Arrays must be homogenous atomic collections"
+
     e2mints :: Expr -> Maybe Integer
     e2mints (Value (MInt x)) = Just x
     e2mints _                = Nothing
