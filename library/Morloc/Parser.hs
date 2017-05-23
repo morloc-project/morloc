@@ -44,32 +44,26 @@ str  = fmap ( Value . MString ) parseString
 bool :: Parser Expr
 bool = fmap ( Value . MBool   ) parseBoolean
 
--- parsers for homogenous arrays
-parseArray :: Parser a -> ([a] -> MData) -> Parser Expr
-parseArray p f = do
+-- Parsers for heterogenous arrays
+-- The evaluator will trim the possibilities. Currently only homogenous arrays
+-- of primitives are allows.
+array :: Parser Expr
+array = do
   _ <- char '['
-  m <- C.sepBy p (char ',')
+  m <- C.sepBy element (char ',')
   _ <- char ']'
-  return $ Value $ f m
+  return $ Array m
 
-narray :: Parser Expr
-narray = parseArray parseFloat    MNums
-
-iarray :: Parser Expr
-iarray = parseArray parseInteger  MInts
-
-sarray :: Parser Expr
-sarray = parseArray parseString   MStrings
-
-barray :: Parser Expr
-barray = parseArray parseBoolean  MBools
+element :: Parser Expr
+element =
+        try bool
+    <|> try num
+    <|> try int
+    <|> try str
 
 factor :: Parser Expr
-factor = 
-        try narray
-    <|> try iarray
-    <|> try sarray
-    <|> try barray
+factor =
+        try array
     <|> try bool
     <|> try num -- num before int, else "." parsed as COMPOSE
     <|> try int

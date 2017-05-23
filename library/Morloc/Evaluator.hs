@@ -1,6 +1,7 @@
 module Morloc.Evaluator (eval) where
 
 import Control.Monad.Except (throwError)
+import Data.Maybe (mapMaybe)
 
 import Morloc.Data
 import Morloc.Syntax as Syntax
@@ -30,9 +31,43 @@ expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Value (MFunc s)) e) =
 expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Value (MFunc s)) es) e) =
   Graph.Node (MFunc s) <$> traverse expr2tree (es ++ [e])
 
--- data
---   e.g.  [1,2,3]
+-- atomic data - Int, Num, Str, Bool, etc
 expr2tree (Syntax.Value d) = return $ Graph.Node d []
+
+-- array
+--   e.g. [1,1.4,12], [True,False],  etc
+expr2tree (Syntax.Array xs)
+  | all (atype "Int")    xs = return $ Graph.Node ( MInts    $ mapMaybe e2mints    xs ) []
+  | all (atype "String") xs = return $ Graph.Node ( MStrings $ mapMaybe e2mstrings xs ) []
+  | all (atype "Bool")   xs = return $ Graph.Node ( MBools   $ mapMaybe e2mbools   xs ) []
+  | all (atype "Num")    xs = return $ Graph.Node ( MNums    $ mapMaybe e2mnums    xs ) []
+  | otherwise = throwError $ Error.BadArray "Arrays must be homogenous atomic collections"
+  where
+    e2mints :: Expr -> Maybe Integer
+    e2mints (Value (MInt x)) = Just x
+    e2mints _                = Nothing
+
+    e2mstrings :: Expr -> Maybe String
+    e2mstrings (Value (MString x)) = Just x
+    e2mstrings _                   = Nothing
+
+    e2mbools :: Expr -> Maybe Bool
+    e2mbools (Value (MBool x)) = Just x
+    e2mbools _                 = Nothing
+
+    e2mnums :: Expr -> Maybe Double
+    e2mnums (Value (MInt x)) = Just (read $ show x :: Double)
+    e2mnums (Value (MNum x)) = Just x
+    e2mnums _                = Nothing
+
+    atype :: String -> Expr -> Bool
+    atype "Int"    (Value (MInt    _)) = True
+    atype "Num"    (Value (MInt    _)) = True
+    atype "Num"    (Value (MNum    _)) = True
+    atype "String" (Value (MString _)) = True
+    atype "Bool"   (Value (MBool   _)) = True
+    atype _ _ = False
+
 
 -- throw error on all kinds of compositions not handled above
 --   e.g.  foo . 1
