@@ -38,7 +38,7 @@ generate g = (generateNexus g, generatePools g)
 -- | Create a script that calls the root node
 generateNexus :: Graph MData -> Nexus
 generateNexus _ = unlines [
-      "#!/usr/bin/bash"
+      "#!/usr/bin/env bash"
     , ""
     , "./pool.R m1"
   ]
