@@ -49,11 +49,14 @@ bool = fmap ( Value . MBool ) parseBoolean
 -- of primitives are allows.
 array :: Parser Expr
 array = do
+  -- TODO I think there is a clean way to neatly tokenize away the whitespace
+  _ <- whiteSpace lexer
   _ <- char '['
   _ <- whiteSpace lexer
   m <- C.sepBy element (char ',')
   _ <- whiteSpace lexer
   _ <- char ']'
+  _ <- whiteSpace lexer
   return $ Array m
 
 element :: Parser Expr
