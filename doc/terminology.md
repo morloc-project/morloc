@@ -45,7 +45,7 @@ features (like laziness). They can also use types that are not supported by
 Morloc. No types even need to be specified for them. However, this allows
 language-inflexibility, where two nodes become coupled such that they have to
 be in the same language. This goes against the Morloc philosophy of double
-oblivion, where neither programer or composer needs to know about the other.
+blindness, where neither programer or composer needs to know about the other.
 
 *trans* calls are easy to control. The results always pass through the common
 type. In a *trans* connection, `foo` would have to make a system call to the
@@ -60,6 +60,7 @@ of errors, you can know exactly where the failure occurs and handle in a clean
 uniform way. This also forces double-blindness by preventing reliance on
 language specific features.
 
+
  * functions of nodes
 
 This is a composition that is indistinguishable from a normal node, with the
@@ -68,7 +69,7 @@ hiding of the particular nodes used inside. It also allows inputs to be freely
 distributed inside the internal composition.
 
 
- * cacheing
+ * caching
 
 The output of node with caching toggled will run exactly once. Any subsequent
 calls to it will receive only the cache result. The caching is persistent.
@@ -86,6 +87,7 @@ from the node they validate.
 These filters take the data flowing through an edge, and access it, possibly
 modifying it. They could be used to create log messages. Or they could be used to sample from or subset the data flow.
 
+
  * layer
 
 A layer is an environment where nodes can be composed. They can link only to
@@ -97,20 +99,20 @@ Layers define scope.
 
  * anonymous layer
 
-Layer don't have to have names. If they do not have names, then nothing can
+Layers don't have to have names. If they do not have names, then nothing can
 inherit from them.
 
 
  * master nodes, slave node, and slave layers
 
-A master node is a node that takes nother nodes as input and uses them
+A master node is a node that takes other nodes as input and uses them
 internally as functions. The slave is the node so used. Masters can pass
 arguments to slaves. They may call a slave many times with different arguments.
 The entire graph of nodes downstream of the slaves, all filters, listeners, and
 anything touching the slave, is wrapped into a slave layer. Nodes in the slave
-layer link to eachother or to arguments passed from the master.
+layer link to each other or to arguments passed from the master.
 
-A new slave layer is generated everytime the top slave node is called. Each
+A new slave layer is generated every time the top slave node is called. Each
 slave layer possesses a globally unique id. 
 
 Slaves may have slaves. In which case, the unique id of a slave of a slave
@@ -157,9 +159,17 @@ be used to provide automated documentation of parameters.
 Ideally the type signature is all that is needed to generate required IO. But
 often more is needed. Should a table passed to R, for example, be
 a `data.frame`, a `data.table`, a list of vectors, a `matrix`, a `tibble`, etc.
-In such cases, hints must be passed to the compiler. The specialization syntax
-needs to be general enough to allow great flexibility in meeting the needs of
-wildly different languages. Perhaps it can be a YAML block.
+Or should a string sent to Haskell be a String, ByteString or Text? In such
+cases, hints must be passed to the compiler. The specialization syntax needs to
+be general enough to allow great flexibility in meeting the needs of wildly
+different languages. Perhaps it can be a YAML block.
+
+Where should this block be? On the composer's side or the programmer's side? Or
+both? The programmer needs to be able to specialize the types. The composer
+never needs to see these specializations. But there could be information that
+the composer needs to pass to the programmer, for example performance
+requirements or type specializations of a more general type (e.g.
+distributions).
 
 
  * primitives
