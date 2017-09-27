@@ -1,7 +1,0 @@
-EMIT	m0	*
-FUNC	m0	g
-TYPE	m0	Void
-INPM	m0	0	m1	A
-EMIT	m1	*
-FUNC	m1	f
-TYPE	m1	A

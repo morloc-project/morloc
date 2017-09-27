@@ -1,5 +1,1 @@
-language: c
-
-dist: trusty
-
-script: make && make install && make test
+language: haskell

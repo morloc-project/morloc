@@ -1,81 +1,45 @@
-Immediate goals
- [x] add generics
- [ ] allow positional arrays in path
- [ ] allow functions in arrays
- [ ] replace `&` with `\`
- [ ] repeal and replace multiple composition
- [ ] add positional currying
- [ ] disallow single quotes
+This is a staged TODO list. I will work on specifying the language (S) and then
+implementing it (I).
 
-Coming goals
- [ ] allow data structures for types
- [ ] perform Curry implicit typing
- [ ] generate linkers to resolve type incompatibilities
- [ ] add linkers to backend
- [ ] add `U x -> Bool` automatic checking
- [ ] add proper `import` sections
+Frontend
+  S   I  
+ [ ] [ ]  composition
+ [ ] [ ]  functions
+ [ ] [ ]  primitives
+ [ ] [ ]  data 
+ [ ] [ ]  labels
+ [ ] [ ]  parameter setting
+ [ ] [ ]  layer interaction
+ [ ] [ ]  invisible listeners
+ [ ] [ ]  output filters (type a -> a) (e.g. cache)
+ [ ] [ ]  input filters (type a -> a) (e.g. input specific validators)
+ [ ] [ ]  early validators
+ [ ] [ ]  late validators
+ [ ] [ ]  higher order functions
+ [ ] [ ]  edge functions
+ [ ] [ ]  modules
+ [ ] [ ]  include
+ [ ] [ ]  imports
+ [ ] [ ]  documentation
+ [ ] [ ]  node signatures
+ [ ] [ ]  parameter typing
+ [ ] [ ]  specialization
 
- [ ] add typed parameters to function signature
- [ ] add typedef
- [ ] add algebraic types
- [ ] rewrite syntax, no more sections
- [ ] formal handling for incomplete compositions
+Backend
+  S   I
+ [ ] [ ]  type checking
+ [ ] [ ]  type inference
+ [ ] [ ]  nexus generation
+ [ ] [ ]  code generation
+ [ ] [ ]  data IO conversion generation
+ [ ] [ ]  command line argument passing
+ [ ] [ ]  help messages
 
-Distant goals
- [ ] add type constructors
- [ ] cross-reference existing types against an ontology of types
-
-Unsolved Problems
- [ ] source code scope, each source section should have its own scope, but then
-     I need a way to link to a specific source.
- [ ] import statements, needs to build self-contained Morloc packages
- [ ] modularize Morloc
- [ ] elevating parameters, adding generalized parameters to the type without
-
-# Principles
-
-Add strictness as needed
-
-Idiomatic code before purity
-
-# ML reimplementation notes
-
-I need to cleanly separate the code into modular pieces. First, the lexer
-handles all the particulars of the syntax, any syntactic sugar, surface
-details. Second, the parser integrates this information into the function graph
-and associates the appropriate information with each node. Third, the type
-checker navigates the graph, inserting nodes where they are needed, killing the
-program if this fails. Fourth, the top level generator builds the manifold
-nexus. Fifth, for each namespace create a set of generated scripts: manifold
-pools. Sixth, parse the edge types, generating linking code as needed, dying at
-compile time when not possible. 
-
-Go back to my toy compilers. Reimplement each, in increasing order of
-difficulty, in Haskell. Then implement Mouse in Haskell. Add full typechecking.
-Add generics, parameterized types, everything. Formally express the type
-checking and inference systems. Integrate the ontology. Add a way to add new
-types. Add both import and include statements. Take care to separate the type
-system from the grammar. The type system should operate at the function graph
-level of abstraction; it should be independent of the particular method used to
-build the function graph (e.g. whether I write Old Morloc or in Haskell).
-
-I should first compile Morloc programs into DOT. A program can be most
-reasonably represented as a graph with attributes. This will simplify typing
-and also allow me to use all the existing tools for working with and
-visualizing graphs. DOT will not replace LIL. The latter is a set of atomic
-instructions for building a program. DOT is higher level. I can derive a LIL
-file from a DOT file (and vice versa).
-
-Next I can expand the function graph to include language transitions and
-assertions. If a slot of type `M x` connects to an input of type `N x`, I need
-to generate two linking functions: `N x -> U x` and `U x -> M x`. Additionally,
-I may want to add a runtime type checker, `U x -> Bool`. I should also add an
-option to explode every call into a faux foreign call, so every call is
-converted to universal and checked at runtime. This might be useful for
-debugging. Now, it is important that these generated types be specified and
-interwoven in the frontend, prior to generating LIL. This should not be the
-backend's problem.
-
-After all the typing is done, I can generate the manifold nexus and manifold
-pools. The backend needs to know how to make `M x -> U x`, `U x -> M x` and
-`U x -> Bool`.
+Environment
+  S   I
+ [ ] [ ]  literate programming support
+ [ ] [ ]  syntax error reporting
+ [ ] [ ]  type error reporting
+ [ ] [ ]  runtime error reporting
+ [ ] [ ]  automatic progress logging
+ [ ] [ ]  graph visualization

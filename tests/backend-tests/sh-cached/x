@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-
-man ls | grep -Po "[a-z]+ed" | sort | uniq

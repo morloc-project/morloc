@@ -1,9 +1,0 @@
-#!/usr/bin/bash
-stat=0
-make || stat=1
-
-diff <(echo -e "7\n7\n7") <(make -s run) || stat=1
-
-make clean
-
-exit $stat

@@ -1,8 +1,0 @@
-@path
-foo
-
-@before
-foo :: before_effect
-
-@after
-foo :: after_effect

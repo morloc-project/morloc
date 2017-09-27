@@ -1,19 +1,14 @@
 all:
-	cd frontend && ${MAKE}
-
-.PHONY: install
-install:
-	mkdir -p ~/.morloc/bin
-	mkdir -p ~/.morloc/lib
-	cp frontend/morloc ~/.morloc/bin/morloc
-	cp -rf backend/core ~/.morloc/lib
-	test -d ~/bin || mkdir ~/bin
-	ln -sf ${PWD}/backend/src/morloc/morloc.py ${HOME}/bin/morloc
+	cabal install --enable-tests
 
 .PHONY: test
 test:
-	cd tests && ./runtests.sh -K
+	cabal test
+
+.PHONY: run
+run:
+	cabal run
 
 .PHONY: clean
 clean:
-	cd frontend && ${MAKE} clean
+	rm -f nexus.sh pool.R

@@ -1,3 +1,0 @@
-@type
-g :: A -> Void
-f :: Void -> A

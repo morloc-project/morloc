@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-
-tst/manifold-nexus.sh cat

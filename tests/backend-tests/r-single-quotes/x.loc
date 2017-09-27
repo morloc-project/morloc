@@ -1,5 +1,0 @@
-@source R
-say <- function(x){ x }
-
-@path R
-say . "''hi'"

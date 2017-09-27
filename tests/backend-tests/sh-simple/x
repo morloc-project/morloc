@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-cat << END
-["allocated","augmented","connected","designed","dired","disabled","implied","interpreted","listed","omitted","permitted","prefixed","red","separated","specified"]
-END
