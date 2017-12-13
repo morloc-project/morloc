@@ -1,3 +1,12 @@
+ * node
+
+A wrapper around a function or composition of functions. It may carry state and
+effects can be attached to it. For example, arbitrary functions of its output
+can be attached to it (leading to out-of-plane branching). Or conditions can be
+set that must be met before the contained function is run. Or caching functions
+may be added.
+
+
  * programmer versus composer
 
 Where I say `programmer`, I mean the one who writes the functions in a
@@ -29,36 +38,33 @@ an API.
 A data form that is used everywhere between functions, and is independent of
 any particular language. It is a data representation such as JSON, YAML, ASCII
 text, or whatever (the details depend on the implementation and should not
-normally be the concern of either the programmer of composer).
-Let's say you have nodes the composition `foo . bar`.
+normally be the concern of either the programmer or composer).
 
 
  * cis and trans connections
 
-In old Morloc, this could generate two forms of code. If both were in the same
-language, it would form a *cis* connection. The code generated would be
-something like `foo(bar())`. If the functions were in different languages,
-there would be a *trans* connection.
+A *cis* connection is a call between two functions of the same language.
+A *trans* connection is between two different languages.
 
-*cis* connections are completely idiomatic. They can use language-specific
-features (like laziness). They can also use types that are not supported by
-Morloc. No types even need to be specified for them. However, this allows
+*cis* connections are completely idiomatic. They compile to something like
+`foo(bar())` in the target language. They can use language-specific features
+(like laziness). They can also use types that are not supported by Morloc. No
+types even need to be specified for them. However, this allows
 language-inflexibility, where two nodes become coupled such that they have to
 be in the same language. This goes against the Morloc philosophy of double
 blindness, where neither programer or composer needs to know about the other.
 
 *trans* calls are easy to control. The results always pass through the common
-type. In a *trans* connection, `foo` would have to make a system call to the
-program that has `bar` (unless the implementation optimizes this). This is
-likely slow. Also the generated code is less concise.
-
+type (barring future optimizations). In a *trans* connection, `foo` would have
+to make a system call to the program that has `bar` (optimizations aside). This
+is likely slow. Also the generated code is less concise.
 
  * strict versus non-strict mode
 
 In strict mode, all connections must be *trans*. This provides fine granularity
-of errors, you can know exactly where the failure occurs and handle in a clean
-uniform way. This also forces double-blindness by preventing reliance on
-language specific features.
+of errors, you can know exactly where the failure occurs and handle it in
+a clean uniform way. This also forces double-blindness by preventing reliance
+on language specific features.
 
 
  * functions of nodes
@@ -85,7 +91,8 @@ from the node they validate.
  * output and input filter
 
 These filters take the data flowing through an edge, and access it, possibly
-modifying it. They could be used to create log messages. Or they could be used to sample from or subset the data flow.
+modifying it. They could be used to create log messages. Or they could be used
+to sample from or subset the data flow.
 
 
  * layer
@@ -95,6 +102,17 @@ other nodes in the layer and to nodes in any layer their parent layer inherits
 from.
 
 Layers define scope.
+
+Layers are important when adding modifications to a node, for examle:
+
+```
+A = (foo . bar) x y z 
+
+after A :: baz
+```
+
+Which calls baz on the output of `foo . bar` after it has take the inputs `x`,
+`y`, `z`.
 
 
  * anonymous layer
@@ -136,14 +154,46 @@ set. Node attributes cannot be overridden.
  * node signature
 
 The general type signature for the function in the node. It is general, in that
-this signature is language-independent. The type system is a direct subset of
-Haskell.
+this signature is language-independent. See *type system* for details.
+
+A node signature plays the role of a specification. The signature, along with
+a human language description of what it should do, should be all that is needed
+to implement the function. But there are additional formal constraints that
+could reasonably be added. For example, time and space runtime properties.
 
 In languages like Haskell (or other ML variants), type signatures are optional.
 Though these languages are statically typed, explicit signatures are not
 necessary since the type can be inferred from the code. However, in Morloc the
-code is inside foreign languages, which are black boxes. This makes type
-inference impossible in general. So explicit types are required.
+code is inside foreign languages, and thus are black boxes. This makes type
+inference impossible in general. So explicit types are required (except in
+non-strict *cis* calls).
+
+ * type system
+
+The type system is under development. It is the core of the Morloc ecosystem,
+but so far is modeled heavily after the Haskell system. I want type classes so
+that I can specify the properties of a type. However, I also want to be able to
+layer on "soft" types. Whereas the "hard" types would be formally checked at
+compile time, the soft-types would have more runtime use. Or be used to testing
+specification and testing. Or used to generate random instances of the type.
+Soft types would include type dependencies, dependencies between types in
+a function signature, and the distribution of a type. 
+
+ * type random model 
+
+For every type there is a random generative model. These random models may be
+automatically generated. Or they may be specified in detail in the "soft" type.
+They may be simple, such as a uniform distribution between 2^-63 and 2^+63, or
+complex, such as Markov model for generating random English text. The
+generative models are used to test and optimize a workflow.
+
+
+ * parameter
+
+A parameter is an keyword argument to a target language function and the may be
+optional. Not all languages have parameters. R and python do; Haskell doesn't.
+UNIX commands do (as `-*` flags). Parameterization can be modularized into
+configuration scripts.
 
 
  * parameter type
@@ -164,12 +214,9 @@ cases, hints must be passed to the compiler. The specialization syntax needs to
 be general enough to allow great flexibility in meeting the needs of wildly
 different languages. Perhaps it can be a YAML block.
 
-Where should this block be? On the composer's side or the programmer's side? Or
-both? The programmer needs to be able to specialize the types. The composer
-never needs to see these specializations. But there could be information that
-the composer needs to pass to the programmer, for example performance
-requirements or type specializations of a more general type (e.g.
-distributions).
+Providing this information is the responsibility of the programmer, since it is
+language specific. The composer can pass hints to the programmer in the form of
+soft types (such as the distribution of data and time/space complexity).
 
 
  * primitives
