@@ -1,0 +1,10 @@
+<owl:Class rdf:ID="MO_v0.0.0"/>
+    <owl:Restriction>
+        <owl:onProperty rdf:resource="#Type" />
+    </owl:Restriction>
+    <owl:oneOf rdf:parseType="Type">
+        <owl:Thing rdf:about="#Integer"/>
+        <owl:Thing rdf:about="#String"/>
+        <owl:Thing rdf:about="#Num"/>
+    </owl:oneOf>
+</owl:Class>

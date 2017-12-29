@@ -54,3 +54,15 @@ compiler can use to add functions to the graph. Once all this preprocessing and
 checking is done, the base type can be checked at compile-time using GHC, along
 with a Morloc-side check that typeclass functions are implemented where
 expected. 
+
+
+
+
+OWL as a type system, beyond correctness. Imposing semantic meaning on
+functions. This allows them to be organized and searched in databases.
+
+Google is trying to organize all of human knowledge. The semantic web.
+
+The base type can be derived from the semantic type and vice versa. The
+semantic type is more specific and contains much information that would never
+go into the base type (and that would not be used in type checking).
