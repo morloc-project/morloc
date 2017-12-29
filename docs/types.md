@@ -66,3 +66,9 @@ Google is trying to organize all of human knowledge. The semantic web.
 The base type can be derived from the semantic type and vice versa. The
 semantic type is more specific and contains much information that would never
 go into the base type (and that would not be used in type checking).
+
+Ontologies have been springing up all over. Perhaps the largest and most
+developed are the biology ones, but there are many more:
+[physics](https://www.astro.umd.edu/~eshaya/astro-onto/ontologies/physics.html),
+[statistics](http://stato-ontology.org/),
+[chemistry](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2867191/).
