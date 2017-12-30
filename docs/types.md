@@ -9,6 +9,8 @@ function database. The types are the contract between functions.
 
 Components of a type
 
+## Check at compile time
+
  1. Semantic/ontological types - Orthogonal to the base type, is the semantic
     type system. It is an ontology. I will likely base it on OWL. The semantic
     type system expands upon the base type. For example, the base type might be
@@ -25,13 +27,22 @@ Components of a type
     according to property (e.g. all the functor, monoid, foldable, etc wonders
     of Haskell).
 
+## Check at runtime
+
  3. Invariants/runtime dependencies - This includes dependencies between
     sub-units of a type (e.g. arguments in a functional signature or members of
     a tuple). It is probably not practical to have true, compile-time checked,
     dependent types in Morloc, since functions are black boxes. So these
     dependencies will be checked at runtime (unless compiled without checking).
 
- 4. Performance expectation - There are two layers to this "type" (we are not
+ 4. Distribution - A random model of the data. All data should be modeled. This
+    allows random values to be generated and used in automatic testing. The
+    distribution can also be handled in real-time to find outliers and possibly
+    pathological behaviour.
+
+## Annotation
+
+ 5. Performance expectation - There are two layers to this "type" (we are not
     really in type-world anymore, perhaps). First is a performance contract for
     a function signature, where all implementations of the function must meet
     the specified standards. A second layer is a parameterized function for
@@ -41,10 +52,50 @@ Components of a type
     limits on the time and space of the program and halt if a node is predicted
     to exceed them.
 
- 5. Distribution - A random model of the data. All data should be modeled. This
-    allows random values to be generated and used in automatic testing. The
-    distribution can also be handled in real-time to find outliers and possibly
-    pathological behaviour.
+
+
+The right way and the fast way. 
+
+ 1. semantic type system
+    - **Right Way**: Consider category theory (groups, semigroups, algebras),
+      search literature, base the ontology on theory. Prove that everything
+      works.
+    - **Fast Way**: Implement the top-level, less-controversial types. Implement
+      deeper ontologies for case studies (e.g. in bioinformatics).
+    - Make the type system robust. Equivalent types. Assume graph `is_a`
+      relations rather than trees. This allows multiple hierarchies to coexist.
+
+ 2. base type
+    - **Fast Way**: Follow Haskell conventions. Implement the safe stuff. Use
+      the GHC typechecker for handling containers.
+    - **Right Way**: Learn from Haskell mistakes. Do Prelude right. Use richer
+      algebras. Do not use GHC. Do everything through logical inference. Encode
+      containers through the knowledge system. The latter transition from the
+      "Fast Way" to the "Right Way" here should be mostly in the backend.
+
+ 3. Invariants/runtime dependencies
+    - **Fast Way**: Make these annotations, which link to functions that can be
+      run in the common language to test data.
+    - **Right Way**: Find a formal representation of dependencies. Allow the
+      reasoner to work on them.
+
+ 4. Distribution
+    - **Fast Way**: As with runtime dependencies, add distributions as links to
+      generative functions.
+    - **Right Way**: Find a formal representation for models. Build a statistical
+      reasoning machine to work with them. Test consistency between functions
+      across the type system. Allow function instances to specialize the
+      models.
+
+ 5. Performance expectation
+    - **Fast Way**: Add as an informal note in the Annotation
+    - **Right Way**: Formally express as a mathematical functions of the
+      features derived from the inputs (and the input distributions) and
+      possibly the architecture. If the distributions for the inputs are
+      specified, then inputs can be sampled and the function timed for each
+      input set. The resulting data can be fed into a symbolic regression
+      machine to infer an analytic solution to the time and space behaviour.
+
 
 Making all of this work together is a tricky task. The semantic types can be
 used to promote semantic types according to rules, insert conversion functions
@@ -55,8 +106,27 @@ checking is done, the base type can be checked at compile-time using GHC, along
 with a Morloc-side check that typeclass functions are implemented where
 expected. 
 
+The type properties (Haskell typeclasses) describe what can be done to a type.
+For example: Orderable, Foldable, Traversable, Monoid, Semigroup.
 
+Machines need to learn how to use tools. The statistical deel learning approach
+gives them data, and then trains a network to recognize patterns. But whether
+this will ever be a substitute for knowledge is uncertain. There are other
+approaches to machine learning. Symbolic regression. Logic. Knowledge
+representation systems allow them to reason and give them common sense. But how
+can they use tools and other resources? How can they find them? They need to be
+able to reason about functions. Deep learning can be used to create predicates
+in a knowledge representation system.
 
+`[Image] -> PhysicalObject -> [Bool]`
+`[(Image, Bool)] -> ([Image] -> PhysicalObject -> [Bool])`
+
+Functions are premises. The reasoner can prove that the program is correct, but
+the functions are blackboxes, they may not do what their types suggest. The
+functions are premises. If the premises are invalid, then the program is
+invalid.
+
+Training data, but for testing. Alternatively, have a generative model.
 
 OWL as a type system, beyond correctness. Imposing semantic meaning on
 functions. This allows them to be organized and searched in databases.

@@ -1,9 +1,10 @@
 # Parts of the Morloc ecosystem
 
  1. semantic type system (OWL)
- 2. database (SPARQL)
- 3. functional scripting language
+ 2. semantic network of functions (SPARQL)
+ 3. functional scripting language - compiles to OWL
  4. generative compiler
+ 5. GUI - node-based
 
 
 Singular types
