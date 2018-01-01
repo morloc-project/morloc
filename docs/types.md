@@ -128,6 +128,19 @@ invalid.
 
 Training data, but for testing. Alternatively, have a generative model.
 
+Advantages of a semantic type system.
+
+OWL2 is based on a formal logic system, Description Logics (DL). It is good for
+describing the relations between types and what properties types have. The
+types and the type constraints (corresponding to Haskell typeclasses) are
+axioms. Morloc code can be translated into a list of facts. If the facts are
+consistent, the type checker passes. This will allow highly expressive types.
+Strictly supersetting, I believe, the Haskell system (need a proof of this,
+does DL superset Hask?).
+
+Individuals are "instances" from the type "classes" (not to be confused with
+typeclasses ala Haskell, which are class properties).
+
 OWL as a type system, beyond correctness. Imposing semantic meaning on
 functions. This allows them to be organized and searched in databases.
 
