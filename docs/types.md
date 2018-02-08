@@ -155,3 +155,57 @@ developed are the biology ones, but there are many more:
 [physics](https://www.astro.umd.edu/~eshaya/astro-onto/ontologies/physics.html),
 [statistics](http://stato-ontology.org/),
 [chemistry](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2867191/).
+
+## Mapping to conventional types
+
+A minimal functionallity of ST is to emulate conventional primitive types and
+containers. What information do I need to store about each type?
+
+### Number
+
+ * bounds
+
+### String
+
+ * encoding
+ * length
+
+### Boolean
+
+### Enum
+
+### Maybe
+
+ * type
+
+Syntactically, I will probably use a '?' for Maybe, for example: `?Int`
+
+### List
+
+ * length
+ * element type
+
+### Tuple
+
+ * discrete number of types
+
+### Matrix
+
+ * dimension
+ * element type
+
+### Structure
+
+ * list of (name,type) pairs (recursive)
+
+### Table
+
+ * dimension
+ * column types
+ * ? column dependencies
+ * ? column names
+ * ? row names
+ * ? table metadata
+ * ? column metadata
+ * ? row metadata
+ * ? cell metadata
