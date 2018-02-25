@@ -209,3 +209,55 @@ Syntactically, I will probably use a '?' for Maybe, for example: `?Int`
  * ? column metadata
  * ? row metadata
  * ? cell metadata
+
+### Parameterized Boolean
+
+This is a odd type, but something important I want to express: a boolean with
+semantic annotation. For example:
+
+```
+Filename -> Is Readable
+Image    -> Is Dog
+String   -> Is Integer
+Integer  -> Is Odd
+Audio    -> Is HipHop
+```
+
+```
+-- general
+filterImage :: (Image -> Is Thing) -> [Image] -> [Image]
+
+-- more specific
+filterImage :: (Image -> Is Airplane) -> [Image] -> [Image]
+
+-- most specific
+filterImage :: (Image -> Is Boeing747) -> [Image] -> [Image]
+```
+
+These would have the more general types:
+
+```
+Filename -> Bool
+Image    -> Bool
+String   -> Bool
+Integer  -> Bool
+Audio    -> Bool
+```
+
+But these lack semantic meaning.
+
+'Is' implies an equivalence of some sort. 'Has' implies a `has_part` relation.
+For example: 
+
+```
+[Integer] -> Has 45
+Image -> Has Dog
+```
+
+### Parameterized Probability
+
+First there is the `ChanceOf` type
+
+```
+FeatureTable -> ChanceOf Win
+```
