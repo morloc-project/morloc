@@ -6,14 +6,14 @@ description:
 
     Morloc is a generative, metaprogamming language that composes functions
     from other languages (e.g. Bash, R, Python) into multi-lingual workflows.
-    The central goal of Morloc eliminate the boundaries between the many
-    languages used for data analysis, unifying all through a common type
-    system. Each node in the workflow wraps an explicitly typed function (the
-    type system  is a subset of the Haskell's).  Based on these types, the
-    compiler generates linking code, wraps the functions in executable scripts,
-    and checks the high-level correctness of the program.  The Morloc
-    programmer tells the Morloc compiler the function signature and specifies
-    the funtion gaph, and the compiler does the rest.
+    The central goal of Morloc eliminate the boundaries between languages,
+    unifying all through a common type system. Each node in the workflow wraps
+    an explicitly typed function (the type system is a subset of the
+    Haskell's). Based on these types, the compiler generates linking code,
+    wraps the functions in executable scripts, and checks the high-level
+    correctness of the program. The Morloc programmer tells the Morloc compiler
+    the function signature and specifies the funtion gaph, and the compiler
+    does the rest.
 
 category:           Compiler
 license:            GPL-3
