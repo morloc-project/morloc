@@ -7,12 +7,36 @@ Haskell Morloc (not yet complete)
 =================================
 
 This is a Haskell refactor of Morloc. The C branch of Morloc is much more
-complete (though now unmaintained). The following documentation is relevant
-only to the old C version (Morloc v0.10.0).
+complete (though now unmaintained).
+
+You can compile and install the package as so:
+
+```sh
+git clone https://github.com/arendsee/morloc
+cd morloc
+stack build
+stack install
+```
+
+You can enter the shell by calling `morloc`, and run calls such as:
+
+```sh
+morloc> sqrt . runif 5 100 1000
+[1] 28.72607 13.75368 13.52110 23.39841 30.65631
+```
+
+This generates the R code for the composed functions, builds an Rscript,
+executes it, and returns the result (in this case, the square root of
+5 uniformly distributed random numbers between 100 and 1000).
+
+This is of course a very minimal prototype. More will come soon.
 
 
 Old Morloc (no longer maintained)
 =================================
+
+The following documentation is relevant only to the old C version (Morloc
+v0.10.0).
 
 Morloc is a typed, language-agnostic, functional workflow language.
 
