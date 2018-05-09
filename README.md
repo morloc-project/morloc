@@ -1,4 +1,7 @@
-[![Build Status](https://travis-ci.org/arendsee/morloc.svg?branch=master)](https://travis-ci.org/arendsee/morloc)
+[![travis build status](https://travis-ci.org/arendsee/morloc.svg?branch=master)](https://travis-ci.org/arendsee/morloc)
+[![github release](https://img.shields.io/github/release/arendsee/morloc.svg?label=current+release)](https://github.com/arendsee/morloc/releases)
+[![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 
 Haskell Morloc (not yet complete)
 =================================
