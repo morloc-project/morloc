@@ -21,8 +21,8 @@ license-file:       LICENSE
 author:             Zebulun Arendsee 
 maintainer:         arendsee@iastate.edu
 extra-source-files: README.md TODO CONFIG
-                    data/*.json
-                    tests-suite/*.hs
+                    data/common/*.json
+                    test-suite/*.hs
 cabal-version:      >= 1.10
 bug-reports:        https://github.com/arendsee/morloc/issues
 build-type:         Simple
@@ -42,9 +42,13 @@ library
                       Morloc.Lexer
                       Morloc.Parser
                       Morloc.Syntax
+                      Morloc.Core
+                      MorlocExecutable.Repl
+                      MorlocExecutable.Mode
 
     build-depends: base,
                    parsec,
+                   text,
                    mtl
 
     ghc-options: -Wall
@@ -63,7 +67,6 @@ executable morloc
                    process,
                    directory,
                    morloc
-
     ghc-options: -Wall
 
 
