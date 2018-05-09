@@ -53,21 +53,21 @@ type Type = XXX
 
 
 -- stubs for config records for each configurable thingy
-data OptCompile   = OptCompile   { optCompile_foo   :: Int }
-data OptSource    = OptSource    { optSource_foo    :: Int }
-data OptScript    = OptScript    { optScript_foo    :: Int }
-data OptSignature = OptSignature { optSignature_foo :: Int }
-data OptTypecheck = OptTypecheck { optTypecheck_foo :: Int }
+newtype OptCompile   = OptCompile   { optCompileFoo   :: Int }
+newtype OptSource    = OptSource    { optSourceFoo    :: Int }
+newtype OptScript    = OptScript    { optScriptFoo    :: Int }
+newtype OptSignature = OptSignature { optSignatureFoo :: Int }
+newtype OptTypecheck = OptTypecheck { optTypecheckFoo :: Int }
 
 
 -- Each language has its own dedicated set of configurations
-data OptR         = OptR         { optR_foo         :: Int }
-data OptPython    = OptPython    { optPython_foo    :: Int }
-data OptHaskell   = OptHaskell   { optHaskell_foo   :: Int }
+newtype OptR         = OptR         { optRFoo         :: Int }
+newtype OptPython    = OptPython    { optPythonFoo    :: Int }
+newtype OptHaskell   = OptHaskell   { optHaskellFoo   :: Int }
 
 -- These are options common to all languages, or passed when the language is
 -- inferred. The ZZZ is a standin for something more creative. 
-data OptZZZ   = OptZZZ   { optZZZ_foo   :: Int }
+newtype OptZZZ   = OptZZZ   { optZZZFoo   :: Int }
 
 data Source = SourceR       OptR       Code 
             | SourcePython  OptPython  Code 

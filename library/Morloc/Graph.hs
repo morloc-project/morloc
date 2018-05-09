@@ -118,5 +118,5 @@ suczip :: (a -> a) -> a -> Graph b -> Graph (a,b)
 suczip f x (Node y kids) = Node (x,y) (mapzip' f (f x) kids) where
   mapzip' :: (a -> a) -> a -> [Graph b] -> [Graph (a,b)]
   mapzip' _ _ [] = []
-  mapzip' f' x' (t:ts) = [top] ++ mapzip' f' (fst . value $ top) ts where
+  mapzip' f' x' (t:ts) = top : mapzip' f' (fst . value $ top) ts where
     top = suczip f' x' t
