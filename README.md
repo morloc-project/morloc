@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/arendsee/morloc.svg?branch=haskell)](https://travis-ci.org/arendsee/morloc)
+[![Build Status](https://travis-ci.org/arendsee/morloc.svg?branch=master)](https://travis-ci.org/arendsee/morloc)
 
 Haskell Morloc (not yet complete)
 =================================
