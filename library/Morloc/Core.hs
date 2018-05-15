@@ -14,7 +14,7 @@ type Name = String
 -- A Object, Predicate, Object logical triple
 type Triple = (String, String, String)
 
-type Language = LanguageR | LanguageHaskell | LanguageOther
+data Language = LanguageR | LanguageHaskell | LanguageOther
 
 -- A constraint on a function
 type Constraint = XXX
