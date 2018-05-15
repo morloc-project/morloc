@@ -9,16 +9,32 @@ type XXX = String
 
 -- the unique name of a function
 -- NOTE: this should eventually include the namespace
-type FunctionName = String
+type Name = String
 
 -- A Object, Predicate, Object logical triple
 type Triple = (String, String, String)
+
+type Language = LanguageR | LanguageHaskell | LanguageOther
+
+-- A constraint on a function
+type Constraint = XXX
+
+type Type = XXX
+
+data Signature = Signature Name [Constraint] [Type]
+
+type Function = (Signature, Language, Name)
+
 
 -- All the general processed data needed to compile a Morloc program. But not
 -- system-specific info. That is, a package should by invariant across systems.
 -- It may also contain multiple versions of a function, with the function
 -- choice made at compile time.
-type Package = XXX
+data Package = Package {
+    packageCode      :: Code
+  , packageFunctions :: Function
+  , packageLanguage  :: Language
+}
 
 -- A link to a Morloc graph database
 type DB = XXX
@@ -45,12 +61,6 @@ type Script = Code
 -- The executable produced by the compiler
 type Executable = XXX
 
--- A constraint on a function
-type Constraint = XXX
-
---
-type Type = XXX
-
 
 -- stubs for config records for each configurable thingy
 newtype OptCompile   = OptCompile   { optCompileFoo   :: Int }
@@ -74,8 +84,6 @@ data Source = SourceR       OptR       Code
             | SourceHaskell OptHaskell Code 
             | SourceOther   OptZZZ     Code
 
-data Signature = Signature FunctionName [Constraint] [Type]
-
 data FileFeature = FileFeatureFunction Signature Body
                  | FileFeatureDocumentation T.Text
                  | FileFeatureRelation Triple
@@ -92,7 +100,7 @@ compileScript = undefined
 typecheck :: [OptTypecheck] -> Package -> Either T.Text T.Text
 typecheck = undefined
 
-packageSubset :: Package -> [FunctionName] -> Package
+packageSubset :: Package -> [Name] -> Package
 packageSubset = undefined
 
 test :: (a -> b) -> (a, b) -> Either T.Text T.Text  
