@@ -1,1 +1,1 @@
-{ "type":"Tuple [Int, String]" , "value":[42, "foo"] }
+{ "type":"(Int, String)" , "value":[42, "foo"] }
