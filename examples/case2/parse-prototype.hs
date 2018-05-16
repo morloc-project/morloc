@@ -1,23 +1,42 @@
 module Main where
 
 import System.Environment (getArgs)
+import Data.List (intersperse)
 import Data.List.Split (splitOn)
+
+newtype FileS = FileS {unFileS :: String}   deriving Show
+newtype CodeS = CodeS {unCodeS :: [String]} deriving Show
+newtype NameS = NameS {unNameS :: String}   deriving Show
+newtype TypeS = TypeS {unTypeS :: String}   deriving Show
 
 data Language
   = LangHaskell
   | LangR
-  deriving Show
+
+instance Show Language where
+  show LangHaskell = "haskell"
+  show LangR       = "R"
 
 data Package = Package {
-      packageName      :: String
-    , packageCode      :: [String]
+      packageName      :: NameS 
+    , packageCode      :: CodeS
     , packageLanguage  :: Maybe Language 
-    , packageFunctions :: [(String, String)]
-  } deriving Show
+    , packageFunctions :: [(NameS, TypeS)]
+  }
+
+instance Show Package where
+  show (Package (NameS filename) (CodeS code) lang fs) =
+    "source filename: " ++ filename ++ "\n" ++
+    "language: " ++ show lang ++ "\n" ++
+    "exported functions: " ++ listExports ++ "\n" ++
+    "source code:\n" ++ sourceCode
+    where
+      listExports = (concat . intersperse ", ") (map (unNameS . fst) fs)
+      sourceCode = (unlines . map (\s -> "  " ++ s)) code
 
 interactWith function inputFiles = do
   inputs <- mapM readFile inputFiles
-  print (map function (zip inputFiles inputs))
+  putStrLn ((concat . map function) (zip inputFiles inputs))
 
 main = mainWith (show . parseCode) 
   where mainWith function = do
@@ -27,17 +46,19 @@ main = mainWith (show . parseCode)
             xs -> interactWith function xs
 
 parseCode :: (String, String) -> Package 
-parseCode (name, src) = Package {
-      packageName      = name
-    , packageCode      = lines src 
-    , packageLanguage  = guessLanguage (name, src)
-    , packageFunctions = [("a", "b")]
-  }
+parseCode (filename, source) = Package {
+      packageName      = filename' 
+    , packageCode      = source'
+    , packageLanguage  = guessLanguage (filename', source')
+    , packageFunctions = [(NameS "a", TypeS "b")]
+  } where
+    filename' = NameS filename 
+    source' = CodeS (lines source)
 
 -- guess what language we are working with based on extension
 -- TODO: instead of relying on the extension, parse the file itself
-guessLanguage :: (String, String) -> Maybe Language
-guessLanguage (name, _) =
+guessLanguage :: (NameS, CodeS) -> Maybe Language
+guessLanguage (NameS name, _) =
   case (splitOn "." name) of
     [] -> Nothing
     xs -> lookup (last xs) [
@@ -45,3 +66,6 @@ guessLanguage (name, _) =
         , ("r", LangR)
         , ("hs", LangHaskell)
       ]
+
+findExportedFunctions :: Language -> CodeS -> [(NameS, TypeS)] 
+findExportedFunctions = undefined
