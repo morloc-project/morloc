@@ -1,6 +1,11 @@
 This is a staged TODO list. I will work on specifying the language (S) and then
 implementing it (I).
 
+Meta
+ [ ] Rebuild my TODO-list based around the new architecture ideas 
+ [ ] Prioritize the TODO-list
+
+
 Frontend
   S   I  
  [ ] [ ]  composition
@@ -43,3 +48,10 @@ Environment
  [ ] [ ]  runtime error reporting
  [ ] [ ]  automatic progress logging
  [ ] [ ]  graph visualization
+
+Database
+  S   I
+ [ ] [ ]  parse source code into structured packages 
+ [ ] [ ] store functions and metadata in a graph database
+ [ ] [ ] simple query system integrated with build environment
+ [ ] [ ] remote
