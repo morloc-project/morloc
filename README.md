@@ -2,14 +2,28 @@
 [![github release](https://img.shields.io/github/release/arendsee/morloc.svg?label=current+release)](https://github.com/arendsee/morloc/releases)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
+# Morloc: a typed meta-programming language 
 
-Haskell Morloc (not yet complete)
-=================================
+The goal of Morloc is provide a universal interface to functions across
+computer languages that will allow programmers to share snippets of code that
+anyone can snap together like Legos to make their own custom applications. The
+common interface is a semantic type system that describes the relationships
+between language-specific types, data formats, and abstract concepts. Based on
+the types, the compiler generates the code needed to link functions between
+languages and also to direct automation of mundane tasks such as data
+validation, type/format conversions, data caching, distributed computing, and
+file reading/writing. I am also designing a cross-language database that makes
+functions searchable by type (a little like Hoogle). Ultimately, I hope to
+build a GitHub-like community portal around Morloc where users can upload
+packages of functions or import them into their own programs.
 
-This is a Haskell refactor of Morloc. The C branch of Morloc is much more
-complete (though now unmaintained).
+So far I have written two prototypes, described below.
 
-You can compile and install the package as so:
+
+Haskell prototype
+=================
+
+Compile and install the package as so (requires the Haskell utility `stack`):
 
 ```sh
 git clone https://github.com/arendsee/morloc
@@ -29,16 +43,13 @@ This generates the R code for the composed functions, builds an Rscript,
 executes it, and returns the result (in this case, the square root of
 5 uniformly distributed random numbers between 100 and 1000).
 
-This is of course a very minimal prototype. More will come soon.
+This is a very minimal prototype. More will come soon.
 
 
-Old Morloc (no longer maintained)
-=================================
+C prototype
+===========
 
-The following documentation is relevant only to the old C version (Morloc
-v0.10.0).
-
-Morloc is a typed, language-agnostic, functional workflow language.
+The following documentation is relevant only to Morloc v0.10.0.
 
 ## Installation
 
