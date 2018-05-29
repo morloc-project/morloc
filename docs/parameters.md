@@ -13,6 +13,14 @@ input and output.
 
 Enumerating all combinations of types would be a naming nightmare. 
 
+Allowing function overloading reduces this problem somewhat.
+
+We could infer the output type, then attempt to cast it to the expected output
+type. For example, suppose we have a function that returns a list of integers
+if the list is longer than 1 and a single integer otherwise. Morloc could
+generate a code in the manifold that checks the type of the output function,
+then casts it as needed.
+
 Some of these issues may need to be solved by workarounds in the wrapper (such
 as hard-coding certain parameters or processing the output or input).
 

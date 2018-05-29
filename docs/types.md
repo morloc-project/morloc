@@ -109,7 +109,7 @@ expected.
 The type properties (Haskell typeclasses) describe what can be done to a type.
 For example: Orderable, Foldable, Traversable, Monoid, Semigroup.
 
-Machines need to learn how to use tools. The statistical deel learning approach
+Machines need to learn how to use tools. The statistical deep learning approach
 gives them data, and then trains a network to recognize patterns. But whether
 this will ever be a substitute for knowledge is uncertain. There are other
 approaches to machine learning. Symbolic regression. Logic. Knowledge

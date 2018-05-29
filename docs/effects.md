@@ -38,7 +38,7 @@ histogram :: [Num] -> Bytestream PDF
 histogram :: [Num] -> PDF
 ```
 
-But this still does not capture the fact a file was created. More clearly,
+But this still does not capture the fact that a file was created. More clearly,
 imagine a robotic function that calculates a movement vector from the original
 position, moves the robot, and then returns the new position. The signature
 might be:
