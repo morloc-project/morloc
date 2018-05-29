@@ -19,6 +19,7 @@ data Language = LanguageR | LanguageHaskell | LanguageOther
 -- A constraint on a function
 type Constraint = XXX
 
+-- A Morloc type - fundamentally, this is a list of triples.
 type Type = XXX
 
 data Signature = Signature Name [Constraint] [Type]
@@ -111,6 +112,9 @@ parseFunctionSignature = undefined
 
 parseFile :: T.Text -> [FileFeature]
 parseFile = undefined
+
+-- inferType :: Filename -> Type
+-- inferType :: Text -> Type
 
 -- instance Monoid Package where
 --   --
