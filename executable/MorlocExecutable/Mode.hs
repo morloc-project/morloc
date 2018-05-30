@@ -30,7 +30,7 @@ asResult g = case generate g of
     mapM_ writeExeFile pools
 
     -- execute nexus, recording STDOUT to string
-    _ <- rawSystem "./nexus.sh" []
+    _ <- rawSystem "bash" ["nexus.sh"]
 
     -- cleanup
     removeFile "nexus.sh"

@@ -38,9 +38,9 @@ generate g = (generateNexus g, generatePools g)
 -- | Create a script that calls the root node
 generateNexus :: Graph MData -> Nexus
 generateNexus _ = unlines [
-      "#!/usr/bin/env bash"
+      "# Bash"
     , ""
-    , "./pool.R m1"
+    , "Rscript pool.R m1"
   ]
 
 -- | Create the code for each function pool
@@ -50,7 +50,7 @@ generatePools g = [("pool.R", collapse g)] where
   collapse :: Graph MData -> String
   collapse node = unlines [prologue, extractFunctions node, epilogue]
 
-  prologue = "#!/usr/bin/Rscript --vanilla\n"
+  prologue = "# Rscript"
 
   epilogue = unlines
     [
