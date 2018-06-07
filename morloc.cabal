@@ -58,7 +58,6 @@ executable morloc
     main-is: Main.hs
     hs-source-dirs: executable
     build-depends: base,
-                   repline,
                    mtl,
                    parsec,
                    process,
