@@ -4,11 +4,12 @@ module Morloc.Data (
   , Statement(..)
   , Source(..)
   , Expression(..)
-  , Primitive(..)
+  , MData(..)
   , BExpr(..)
   , AExpr(..)
   , MType(..)
   , Name
+  , Tag
 ) where
 
 import Data.List (intersperse)
@@ -34,6 +35,16 @@ data MType
   | MEmpty
   deriving(Show, Ord, Eq)
 
+data MData
+  = MInt Integer
+  | MNum Double
+  | MLog Bool
+  | MLst [MData]
+  | MTup [MData]
+  | MRec [(Name, MData)]
+  | MStr String
+  deriving(Show, Ord, Eq)
+
 data Statement
   = Signature
       Name           -- lhs
@@ -47,16 +58,9 @@ data Statement
   deriving(Show, Ord, Eq)
 
 data Expression
-  = ExprPrimitive Primitive
+  = ExprData MData
   | ExprApplication Name Tag [Expression]
   | ExprComposition Expression Expression
-  deriving(Show, Ord, Eq)
-
-data Primitive
-  = PrimitiveInt    Integer
-  | PrimitiveReal   Double
-  | PrimitiveBool   Bool
-  | PrimitiveString String
   deriving(Show, Ord, Eq)
 
 data BExpr

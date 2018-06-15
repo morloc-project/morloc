@@ -94,16 +94,8 @@ expression =
 
 primitiveExpr :: Parser Expression
 primitiveExpr = do
-  x <- primitive
-  return $ ExprPrimitive x
-
-primitive :: Parser Primitive
-primitive =
-      try Tok.floatP -- this must go before integer
-  <|> try Tok.integerP
-  <|> try Tok.booleanP
-  <|> try Tok.stringLiteralP
-  <?> "a primitive"
+  x <- Tok.mdata 
+  return $ ExprData x
 
 application :: Parser Expression
 application = do
@@ -263,7 +255,7 @@ arithmeticTerm
   <?> "simple expression. Currently only integers are allowed"
   where
     val' = do
-      x <- primitive
+      x <- Tok.mdata
       return $ toExpr' x
 
     var' = do
@@ -276,9 +268,9 @@ arithmeticTerm
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
       return $ AExprAccess x ids
 
-    toExpr' :: Primitive -> AExpr
-    toExpr' (PrimitiveInt x) = AExprInt x
-    toExpr' (PrimitiveReal x) = AExprReal x
+    toExpr' :: MData -> AExpr
+    toExpr' (MInt x) = AExprInt x
+    toExpr' (MNum x) = AExprReal x
     toExpr' _ = undefined
 
 arithmeticTable

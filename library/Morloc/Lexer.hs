@@ -3,17 +3,11 @@ module Morloc.Lexer (
   , float
   , stringLiteral
   , boolean
-
-  -- fuck this shit
-  , integerP
-  , floatP
-  , stringLiteralP
-  , booleanP
-
   , whiteSpace
   , op
   , reserved
   , name
+  , mdata
   , tag
   , specificType
   , genericType
@@ -38,7 +32,7 @@ import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
-import qualified Morloc.Data as D
+import qualified Morloc.Data as MD
 
 lexer :: Token.TokenParser ()
 lexer = Token.makeTokenParser style
@@ -119,26 +113,58 @@ boolean = do
   whiteSpace
   return $ (read s :: Bool)
 
+mdata :: Parser MD.MData
+mdata = do
+      try boolean'       -- True | False
+  <|> try float'         -- 1.1
+  <|> try integer'       -- 1
+  <|> try stringLiteral' -- "yolo"
+  <|> try list'          -- [ ...
+  <|> try tuple'         -- ( ...
+  <|> try record'        -- { ...
+  <?> "literal data"
+  where
 
-integerP :: Parser D.Primitive
-integerP = do
-  x <- integer
-  return $ D.PrimitiveInt x
+    integer' = do
+      x <- integer
+      return $ MD.MInt x
 
-floatP :: Parser D.Primitive
-floatP = do
-  x <- float
-  return $ D.PrimitiveReal x
+    float' = do
+      x <- float
+      return $ MD.MNum x
 
-stringLiteralP :: Parser D.Primitive 
-stringLiteralP = do
-  s <- stringLiteral
-  return $ D.PrimitiveString s
+    stringLiteral' = do
+      s <- stringLiteral
+      return $ MD.MStr s
 
-booleanP :: Parser D.Primitive
-booleanP = do
-  s <- boolean
-  return $ D.PrimitiveBool s
+    boolean' = do
+      s <- boolean
+      return $ MD.MLog s
+
+    list' = do
+      xs <- brackets (sepBy mdata comma)
+      return $ MD.MLst xs
+
+    tuple' = do
+      xs <- parens tuple'' 
+      return $ MD.MTup xs
+
+    tuple'' = do
+      x <- mdata
+      comma
+      xs <- sepBy1 mdata comma
+      return $ x:xs
+
+    record' = do
+      xs <- braces (sepBy1 recordEntry' comma)
+      return $ MD.MRec xs
+
+    recordEntry' = do
+      n <- name
+      op "="
+      t <- mdata
+      return (n, t)
+
 
 -- | a legal non-generic type name
 specificType :: Parser String
