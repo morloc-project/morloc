@@ -32,7 +32,7 @@ import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
-import qualified Morloc.Data as MD
+import qualified Morloc.Syntax as MS
 
 lexer :: Token.TokenParser ()
 lexer = Token.makeTokenParser style
@@ -113,7 +113,7 @@ boolean = do
   whiteSpace
   return $ (read s :: Bool)
 
-mdata :: Parser MD.MData
+mdata :: Parser MS.MData
 mdata = do
       try boolean'       -- True | False
   <|> try float'         -- 1.1
@@ -127,27 +127,27 @@ mdata = do
 
     integer' = do
       x <- integer
-      return $ MD.MInt x
+      return $ MS.MInt x
 
     float' = do
       x <- float
-      return $ MD.MNum x
+      return $ MS.MNum x
 
     stringLiteral' = do
       s <- stringLiteral
-      return $ MD.MStr s
+      return $ MS.MStr s
 
     boolean' = do
       s <- boolean
-      return $ MD.MLog s
+      return $ MS.MLog s
 
     list' = do
       xs <- brackets (sepBy mdata comma)
-      return $ MD.MLst xs
+      return $ MS.MLst xs
 
     tuple' = do
       xs <- parens tuple'' 
-      return $ MD.MTup xs
+      return $ MS.MTup xs
 
     tuple'' = do
       x <- mdata
@@ -157,7 +157,7 @@ mdata = do
 
     record' = do
       xs <- braces (sepBy1 recordEntry' comma)
-      return $ MD.MRec xs
+      return $ MS.MRec xs
 
     recordEntry' = do
       n <- name

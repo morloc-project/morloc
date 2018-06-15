@@ -4,12 +4,21 @@ import Text.Parsec hiding (State)
 import qualified Text.Parsec.Expr as TPE
 import Text.Parsec.String (Parser)
 import Control.Monad.State
+import Control.Monad.Except (throwError)
 
-import Morloc.Data
+import Morloc.EvalError
+import Morloc.Syntax
 import qualified Morloc.Lexer as Tok
 
-morlocScript :: Parser [Top]
-morlocScript = do
+-- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
+morlocScript :: String -> ThrowsError [Top]
+morlocScript s =
+  case parse contents "<stdin>" s of
+    Left err  -> throwError $ SyntaxError err
+    Right val -> return val
+
+contents :: Parser [Top]
+contents = do
   Tok.whiteSpace
   result <- many top
   eof
