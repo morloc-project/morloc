@@ -29,8 +29,8 @@ parseExpr s =
     return r
 
 
-node :: Parser Expr
-node = fmap ( Value . MFunc ) parseIdentifier
+identifier :: Parser Expr
+identifier = fmap ( Value . MFunc ) parseIdentifier
 
 num :: Parser Expr
 num = fmap ( Value . MNum ) parseFloat
@@ -76,7 +76,43 @@ factor =
     <|> try num -- num before int, else "." parsed as COMPOSE
     <|> try int
     <|> try str
-    <|> try node
+    <|> try identifier 
+
+constDeclaration :: Parser Expr
+constDeclaration = do
+  name <- identifier 
+  _    <- whiteSpace lexer
+  _    <- char '='
+  _    <- whiteSpace lexer
+  val  <- factor
+  return $ ConstDecl name val
+
+funcDeclaration :: Parser Expr
+funcDeclaration = do
+  name <- identifier
+  _    <- whiteSpace lexer
+  pars <- C.sepBy parseIdentifier (char ',')
+  _    <- whiteSpace lexer
+  _    <- char '='
+  _    <- whiteSpace lexer
+  val  <- factor
+  return $ FuncDecl name (map (Value . MString) pars) val
+
+typeDeclaration :: Parser Expr
+typeDeclaration = do
+  name   <- identifier
+  _      <- whiteSpace lexer
+  _      <- char ':'
+  _      <- char ':'
+  _      <- whiteSpace lexer
+  inputs <- C.sepBy typestring (char ',')
+  _      <- char '-'
+  _      <- char '>'
+  output <- typestring
+  return $ TypeDecl name inputs output
+
+typestring :: Parser Expr
+typestring = fmap (Array . (map (Value . MString))) (many parseIdentifier)
 
 -- parse an expression, handles precedence and associativity
 expr :: Parser Expr
@@ -84,7 +120,7 @@ expr = buildExpressionParser table (try apply <|> factor)
   where
   -- binary operators, listed in order of precedence
   table =
-    [[binary "." Dot AssocRight]]
+    [[binary "." OpDot AssocRight]]
     where
     binary s f = Infix $ parseReservedOp s >> return (BinOp f)
 

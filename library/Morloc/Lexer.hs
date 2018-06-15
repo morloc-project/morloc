@@ -25,8 +25,8 @@ lexer = Token.makeTokenParser style
           , Token.identStart      = letter <|> char '_'
           , Token.identLetter     = alphaNum <|> oneOf "_.'"
           , Token.opStart         = Token.opLetter emptyDef
-          , Token.opLetter        = oneOf ":!#$%&*+./<=>?@\\^|-~"
-          , Token.reservedOpNames = ["."]
+          , Token.opLetter        = oneOf ":!$%&*+./<=>?@\\^|-~"
+          , Token.reservedOpNames = [".", "=", "::"]
           , Token.reservedNames   = []
           , Token.caseSensitive   = True
           }

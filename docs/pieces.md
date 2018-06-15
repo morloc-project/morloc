@@ -1,4 +1,4 @@
-# Parts of the Morloc ecosystem
+ Parts of the Morloc ecosystem
 
  1. semantic type system (OWL)
  2. semantic network of functions (SPARQL)

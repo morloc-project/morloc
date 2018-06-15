@@ -23,12 +23,12 @@ expr2tree (Syntax.Apply (Syntax.Value (MFunc s)) es) =
 
 -- simple nodes, composition without application
 --   e.g.  foo . bar
-expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Value (MFunc s)) e) =
+expr2tree (Syntax.BinOp Syntax.OpDot (Syntax.Value (MFunc s)) e) =
   Graph.Node (MFunc s) <$> traverse expr2tree [e]
 
 -- simple nodes, composition with application
 --   e.g.  foo x y . bar z
-expr2tree (Syntax.BinOp Syntax.Dot (Syntax.Apply (Syntax.Value (MFunc s)) es) e) =
+expr2tree (Syntax.BinOp Syntax.OpDot (Syntax.Apply (Syntax.Value (MFunc s)) es) e) =
   Graph.Node (MFunc s) <$> traverse expr2tree (es ++ [e])
 
 -- atomic data - Int, Num, Str, Bool, etc
@@ -57,6 +57,8 @@ expr2tree (Syntax.Array xs)
     e2mbools (Value (MBool x)) = Just x
     e2mbools _                 = Nothing
 
+    -- Here I am doing a little sneaky type promotion
+    -- I should be more explicit, since this is an important language decision
     e2mnums :: Expr -> Maybe Double
     e2mnums (Value (MInt x)) = Just (read $ show x :: Double)
     e2mnums (Value (MNum x)) = Just x
@@ -73,7 +75,7 @@ expr2tree (Syntax.Array xs)
 
 -- throw error on all kinds of compositions not handled above
 --   e.g.  foo . 1
-expr2tree (Syntax.BinOp Syntax.Dot _ _) = throwError $ Error.BadComposition msg where
+expr2tree (Syntax.BinOp Syntax.OpDot _ _) = throwError $ Error.BadComposition msg where
   msg = "Primitives cannot be on the left side of a composition"
 
 -- throw error on all kinds of applications not handled above

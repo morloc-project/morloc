@@ -6,6 +6,7 @@ module Morloc.EvalError
 
 import Text.Parsec (ParseError)
 
+-- TODO add declaration errors
 data MorlocError
   = BadApplication String
   | BadComposition String
