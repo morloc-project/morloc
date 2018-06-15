@@ -1,132 +1,304 @@
-module Morloc.Parser (parseExpr) where
+module Morloc.Parser (morlocScript) where
 
-import Text.Parsec
-import qualified Text.Parsec.Combinator as C
+import Text.Parsec hiding (State)
+import qualified Text.Parsec.Expr as TPE
 import Text.Parsec.String (Parser)
+import Control.Monad.State
 
-import Text.Parsec.Expr (Operator(..), Assoc(..), buildExpressionParser)
-import Text.Parsec.Token (whiteSpace)
-import Control.Monad.Except (throwError)
-
-import Morloc.Lexer
-import Morloc.Syntax
 import Morloc.Data
-import Morloc.EvalError (ThrowsError, MorlocError(..))
+import qualified Morloc.Lexer as Tok
 
--- | Parse a string of Morloc text into an expression that may be passed to
--- Morloc.Evaluator.eval. Catch lexical syntax errors.
-parseExpr :: String -> ThrowsError Expr
-parseExpr s =
-  case parse (contents expr) "<stdin>" s of
-    Left err  -> throwError $ SyntaxError err
-    Right val -> return val
+morlocScript :: Parser [Top]
+morlocScript = do
+  Tok.whiteSpace
+  result <- many top
+  eof
+  return result
+
+top :: Parser Top
+top =
+      try topSource 
+  <|> try topStatement
+  <|> try topImport
+  <?> "Top. Maybe you are missing a semicolon?"
+
+topSource :: Parser Top
+topSource = do
+  s <- source
+  return $ TopSource s
+
+topStatement :: Parser Top
+topStatement = do
+  s <- statement
+  return $ TopStatement s
+
+topImport :: Parser Top
+topImport = do
+  i <-  try restrictedImport
+    <|> try simpleImport
+  return $ TopImport i
+
+statement :: Parser Statement
+statement = do
+  s <-  try signature
+    <|> try declaration
+  Tok.op ";"
+  return $ s
+
+simpleImport :: Parser Import
+simpleImport = do
+  Tok.reserved "import" 
+  path <- Tok.path
+  qual <- optionMaybe (Tok.op "as" >> Tok.name)
+  return $ Import path qual Nothing
+
+restrictedImport :: Parser Import
+restrictedImport = do
+  Tok.reserved "from"
+  path <- Tok.path
+  Tok.reserved "import"
+  -- TODO: I am also importing ontologies, how should that be handled?
+  -- TODO: at very least, I am also importing types
+  functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
+  return $ Import path Nothing (Just functions)
+
+-- | parses a 'source' header, returning the language
+source :: Parser Source
+source = do
+  Tok.reserved "source"
+  lang <- many1 Tok.nonSpace
+  Tok.chop
+  source <- many Tok.line
+  Tok.whiteSpace
+  return $ Source lang source
+
+declaration :: Parser Statement
+declaration = do
+  varname <- Tok.name
+  bndvars <- many Tok.name
+  Tok.op "="
+  value <- expression
+  return $ Declaration varname bndvars value 
+
+expression :: Parser Expression
+expression =
+      -- currently this just handles "."
+      try (TPE.buildExpressionParser functionTable term')
+  <|> term'
+  <?> "an expression"
   where
-  contents :: Parser a -> Parser a
-  contents p = do
-    whiteSpace lexer
-    r <- p
-    eof
-    return r
+    term' =
+          try (Tok.parens expression)
+      <|> try application
+      <|> try primitiveExpr
 
+primitiveExpr :: Parser Expression
+primitiveExpr = do
+  x <- primitive
+  return $ ExprPrimitive x
 
-identifier :: Parser Expr
-identifier = fmap ( Value . MFunc ) parseIdentifier
+primitive :: Parser Primitive
+primitive =
+      try Tok.floatP -- this must go before integer
+  <|> try Tok.integerP
+  <|> try Tok.booleanP
+  <|> try Tok.stringLiteralP
+  <?> "a primitive"
 
-num :: Parser Expr
-num = fmap ( Value . MNum ) parseFloat
+application :: Parser Expression
+application = do
+  tag' <- Tok.tag Tok.name
+  function <- Tok.name
+  arguments <- sepBy expression Tok.whiteSpace
+  return $ ExprApplication function tag' arguments
 
-int :: Parser Expr
-int = fmap ( Value . MInt ) parseInteger
+-- | function :: [input] -> output constraints 
+signature :: Parser Statement
+signature = do
+  function <- Tok.name
+  Tok.op "::"
+  inputs <- sepBy1 mtype Tok.comma
+  output <- optionMaybe (
+      Tok.op "->" >>
+      mtype
+    )
+  constraints <- option [] (
+      Tok.reserved "where" >>
+      Tok.parens (sepBy1 booleanExpr Tok.comma)
+    )
+  return $ Signature function inputs output constraints
 
-str :: Parser Expr
-str = fmap ( Value . MString ) parseString
-
-bool :: Parser Expr
-bool = fmap ( Value . MBool ) parseBoolean
-
--- Parsers for heterogenous arrays
--- The evaluator will trim the possibilities. Currently only homogenous arrays
--- of primitives are allows.
-array :: Parser Expr
-array = do
-  -- TODO I think there is a clean way to neatly tokenize away the whitespace
-  _ <- whiteSpace lexer
-  _ <- char '['
-  _ <- whiteSpace lexer
-  m <- C.sepBy element (char ',')
-  _ <- whiteSpace lexer
-  _ <- char ']'
-  _ <- whiteSpace lexer
-  return $ Array m
-
-element :: Parser Expr
-element = do
-  _ <- whiteSpace lexer
-  p <-  try bool
-    <|> try num
-    <|> try int
-    <|> try str
-  _ <- whiteSpace lexer
-  return p
-
-factor :: Parser Expr
-factor =
-        try array
-    <|> try bool
-    <|> try num -- num before int, else "." parsed as COMPOSE
-    <|> try int
-    <|> try str
-    <|> try identifier 
-
-constDeclaration :: Parser Expr
-constDeclaration = do
-  name <- identifier 
-  _    <- whiteSpace lexer
-  _    <- char '='
-  _    <- whiteSpace lexer
-  val  <- factor
-  return $ ConstDecl name val
-
-funcDeclaration :: Parser Expr
-funcDeclaration = do
-  name <- identifier
-  _    <- whiteSpace lexer
-  pars <- C.sepBy parseIdentifier (char ',')
-  _    <- whiteSpace lexer
-  _    <- char '='
-  _    <- whiteSpace lexer
-  val  <- factor
-  return $ FuncDecl name (map (Value . MString) pars) val
-
-typeDeclaration :: Parser Expr
-typeDeclaration = do
-  name   <- identifier
-  _      <- whiteSpace lexer
-  _      <- char ':'
-  _      <- char ':'
-  _      <- whiteSpace lexer
-  inputs <- C.sepBy typestring (char ',')
-  _      <- char '-'
-  _      <- char '>'
-  output <- typestring
-  return $ TypeDecl name inputs output
-
-typestring :: Parser Expr
-typestring = fmap (Array . (map (Value . MString))) (many parseIdentifier)
-
--- parse an expression, handles precedence and associativity
-expr :: Parser Expr
-expr = buildExpressionParser table (try apply <|> factor)
+mtype :: Parser MType
+mtype =
+      list'       -- [a]
+  <|> paren'      -- () | (a) | (a,b,...)
+  <|> try record' -- Foo {a :: t, ...}
+  <|> specific'   -- Foo
+  <|> generic'    -- foo
+  <?> "type"
   where
-  -- binary operators, listed in order of precedence
-  table =
-    [[binary "." OpDot AssocRight]]
-    where
-    binary s f = Infix $ parseReservedOp s >> return (BinOp f)
+    -- [ <type> ]
+    list' :: Parser MType
+    list' = do
+      l <- Tok.tag (char '[')
+      s <- Tok.brackets mtype
+      return $ MList s l
 
-apply :: Parser Expr
-apply = do
-  name <- factor -- NOTE: I'll allow anything to compose here,
-                 -- I'll catch the errors in the evaluator 
-  args <- many1 factor 
-  return $ Apply name args
+    -- ( <type>, <type>, ... )
+    paren' :: Parser MType
+    paren' = do
+      l <- Tok.tag (char '(')
+      s <- Tok.parens (sepBy mtype (Tok.comma)) 
+      return $ case s of
+        []  -> MEmpty
+        [x] -> x
+        xs  -> MTuple xs l
+
+    -- <name> <type> <type> ...
+    specific' :: Parser MType
+    specific' = do
+      l <- Tok.tag Tok.specificType
+      s <- Tok.specificType
+      ss <- many mtype 
+      return $ MSpecific s ss l
+
+    -- <name> <type> <type> ...
+    generic' :: Parser MType
+    generic' = do
+      -- TODO - the genericType should automatically fail on keyword conflict
+      notFollowedBy (Tok.reserved "where")
+      l <- Tok.tag Tok.genericType
+      s <- Tok.genericType
+      ss <- many mtype 
+      return $ MGeneric s ss l
+
+    -- <name> { <name> :: <type>, <name> :: <type>, ... }
+    record' :: Parser MType
+    record' = do
+      l <- Tok.tag Tok.specificType
+      n <- Tok.specificType
+      xs <- Tok.braces (sepBy1 recordEntry' Tok.comma)
+      return $ MRecord n xs l
+
+    -- (<name> = <type>)
+    recordEntry' :: Parser (Name, MType)
+    recordEntry' = do
+      n <- Tok.name
+      Tok.op "::"
+      t <- mtype
+      return (n, t)
+
+
+booleanExpr :: Parser BExpr
+booleanExpr =
+      try booleanBinOp
+  <|> try relativeExpr
+  <|> try not'
+  <|> try (Tok.parens booleanExpr)
+  <|> try application'
+  <?> "an expression that reduces to True/False"
+  where
+    not' = do
+      Tok.reserved "not"
+      e <- booleanExpr
+      return $ NOT e
+
+    application' = do
+      n <- Tok.name
+      ns <- many Tok.name
+      return $ BExprFunc n ns
+
+booleanBinOp :: Parser BExpr
+booleanBinOp = do
+  a <- bterm'
+  op <- Tok.logicalBinOp
+  b <- bterm'
+  return $ binop' op a b
+  where
+    bterm' = do
+      s <-  application'
+        <|> bool'
+        <|> Tok.parens booleanExpr
+        <?> "boolean expression"
+      return s
+
+    application' = do
+      n <- Tok.name
+      ns <- many Tok.name
+      return $ BExprFunc n ns
+
+    bool' = do
+      s <- Tok.boolean
+      return $ BExprBool s
+
+    binop' op a b
+      | op == "and" = AND a b
+      | op == "or"  = OR  a b
+
+relativeExpr :: Parser BExpr
+relativeExpr = do
+  a <- arithmeticExpr
+  op <- Tok.relativeBinOp
+  b <- arithmeticExpr
+  return $ relop' op a b
+  where
+    relop' op a b
+      | op == "==" = EQ' a b
+      | op == "!=" = NE' a b
+      | op == ">"  = GT' a b
+      | op == "<"  = LT' a b
+      | op == ">=" = GE' a b
+      | op == "<=" = LE' a b
+
+arithmeticExpr
+  = TPE.buildExpressionParser arithmeticTable arithmeticTerm
+  <?> "expression"
+
+arithmeticTerm
+  = do
+      Tok.parens arithmeticExpr
+  <|> try access'
+  <|> val'
+  <|> var'
+  <?> "simple expression. Currently only integers are allowed"
+  where
+    val' = do
+      x <- primitive
+      return $ toExpr' x
+
+    var' = do
+      x <- Tok.name
+      xs <- option [] (many Tok.name)
+      return $ AExprFunc x xs
+
+    access' = do
+      x <- Tok.name
+      ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
+      return $ AExprAccess x ids
+
+    toExpr' :: Primitive -> AExpr
+    toExpr' (PrimitiveInt x) = AExprInt x
+    toExpr' (PrimitiveReal x) = AExprReal x
+    toExpr' _ = undefined
+
+arithmeticTable
+  = [
+      [ prefix "-" Neg
+      , prefix "+" Pos
+      ]             
+    , [ binary "^"  Pow TPE.AssocRight
+      ]
+    , [ binary "*"  Mul TPE.AssocLeft
+      , binary "/"  Div TPE.AssocLeft
+      , binary "%"  Mod TPE.AssocLeft
+      , binary "//" Quo TPE.AssocLeft
+      ]
+    , [ binary "+"  Add TPE.AssocLeft
+      , binary "-"  Sub TPE.AssocLeft
+      ]
+  ]
+
+functionTable = [[ binary "."  ExprComposition TPE.AssocRight]]
+
+binary name fun assoc = TPE.Infix  (do{ Tok.op name; return fun }) assoc
+prefix name fun       = TPE.Prefix (do{ Tok.op name; return fun })

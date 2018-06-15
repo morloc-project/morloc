@@ -1,0 +1,53 @@
+import Foo/Bar as FB
+import Foo/Biz
+from Foo/Baz import (foo, bar, baz)
+from Foo/Baz import (foo)
+
+Index :: x:Int where (
+    x > 0
+);
+
+foo :: Matrix, Matrix -> Matrix where (
+    (n1 and m2) or (n2 and x)
+  , m3 or (isgood m1)
+  , n3 and n2
+);
+
+matrixMult :: Matrix, Matrix -> Matrix where (
+    a > ((b - 2) ^ 5)
+  , c < d
+);
+
+foo :: Matrix;
+
+x1 :: zanzibar:[a], (), groovy:(Int,b,(a)) -> bob:Man {foo :: bill:Int};
+
+subseq :: x:[a], i:Index, j:Index -> y:[a] where (
+    j <= len x
+  , i <= j
+  , len y == j - i + 1
+  , y[k] == x[k + i - 1]
+);
+
+foo a b = bar . (baz . boo t);
+
+x = 5;
+
+x = (beelzebub:foo 5);
+
+x yolo = foo (bar 4) (baz 6.5);
+
+source R
+  
+  library(magrittr)
+  runif(10) %>%
+    sum
+
+source python
+    
+    def foo(x):
+        x * 2
+    
+    #: index2int :: Cast => Index -> Int
+    def index2int(i):
+        return (i - 1)
