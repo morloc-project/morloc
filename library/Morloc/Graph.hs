@@ -19,6 +19,8 @@ module Morloc.Graph
     , suczip
 ) where
 
+-- TODO: This is not a Graph, it is clearly a tree.
+
 import Data.List (union)
 
 data Graph a = Node a [Graph a] deriving(Show, Eq)

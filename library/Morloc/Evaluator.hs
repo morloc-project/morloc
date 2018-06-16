@@ -5,28 +5,61 @@ import Data.Maybe (mapMaybe)
 import Control.Applicative
 
 import Morloc.Data
-import qualified Morloc.Syntax as Syntax
-import qualified Morloc.EvalError as Error
+import qualified Morloc.Syntax as S
+import qualified Morloc.EvalError as E
 
-import qualified Morloc.Graph as Graph
+import qualified Morloc.Graph as G
 import Morloc.Parser (morlocScript)
 
-eval :: String -> Error.ThrowsError Program
+eval :: String -> E.ThrowsError Program
 eval s = morlocScript s >>= script2program
 
-script2program :: [Syntax.Top] -> Error.ThrowsError Program
+script2program :: [S.Top] -> E.ThrowsError Program
 script2program xs
   =   Program
   <$> workflow' xs
   <*> ontology' xs
   <*> packages' xs
+
+ontology' :: [S.Top] -> E.ThrowsError [(String, TNode)]
+ontology' xs
+  = pure [
+    (n, TNodeSignature i o c) |
+    S.TopStatement (S.Signature n i o c) <- xs
+  ]
+
+packages' :: [S.Top] -> E.ThrowsError [S.Import]
+packages' xs = pure [x | (S.TopImport x) <- xs]
+
+workflow' :: [S.Top] -> E.ThrowsError [FunctionTree]
+workflow' xs = sequence $
+  [FunctionTree <$> pure n <*> pure args <*> callTree expr |
+    (S.TopStatement (S.Declaration n args expr)) <- xs]
   where
 
-  workflow' :: [Syntax.Top] -> Error.ThrowsError (Graph.Graph WNode)
-  workflow' = undefined
+  callTree :: S.Expression -> E.ThrowsError (G.Graph WNode)
 
-  ontology' :: [Syntax.Top] -> Error.ThrowsError [(String, TNode)]
-  ontology' = undefined
+  -- TODO: currently I allow heterogenous lists and only allows primitive data
+  -- in Morloc containers. For example, `{ a = foo "yolo" }`, is illegal.
+  -- Having workflows nested in Morloc containers is something that should be
+  -- legal. But for now I won't allow it. 
+  -- Anyway, as it is, the following will never raise an error. 
+  callTree (S.ExprData mdata)
+    = pure $ G.Node (WNodeData mdata) []
 
-  packages' :: [Syntax.Top] -> Error.ThrowsError [Syntax.Import]
-  packages' = undefined
+  -- parse an application
+  callTree (S.ExprApplication name tag xs)
+    = G.Node <$> pure (WNodeVar name tag) <*> sequence (map callTree xs) 
+
+  -- parse composition
+  callTree (S.ExprComposition g f)
+    = case (callTree g) of 
+      Right (G.Node (WNodeData _) _)
+        -> Left (E.BadComposition "Only functions can be composed")
+      Right (G.Node v kids)
+        -> G.Node <$> pure v <*> (app <$> pure kids <*> callTree f)
+      err -> err
+
+  -- add an element to the end of a list
+  app :: [a] -> a -> [a]
+  app xs x = xs ++ [x]
