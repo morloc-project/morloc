@@ -28,8 +28,8 @@ ontology' xs
     S.TopStatement (S.Signature n i o c) <- xs
   ]
 
-packages' :: [S.Top] -> E.ThrowsError [S.Import]
-packages' xs = pure [x | (S.TopImport x) <- xs]
+packages' :: [S.Top] -> E.ThrowsError [S.Source]
+packages' xs = pure [x | (S.TopSource x) <- xs]
 
 workflow' :: [S.Top] -> E.ThrowsError [FunctionTree]
 workflow' xs = sequence $

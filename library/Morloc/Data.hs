@@ -6,7 +6,7 @@ module Morloc.Data (
 ) where
 
 import Morloc.Graph (Graph)
-import Morloc.Syntax (Import, MType, MData, BExpr)
+import Morloc.Syntax (Source, MType, MData, BExpr)
 
 data WNode
   = WNodeVar
@@ -41,9 +41,9 @@ data Program = Program {
             String -- type name
           , TNode  -- type
         )]
-      -- TODO these aren't really packages, just the in-script imported code,
+      -- TODO these aren't really packages, just the in-script sourced code,
       -- with none of the metadata, export lists, and other info that a real
       -- package should have.
-    , packages :: [Import]
+    , packages :: [Source]
   }
   deriving(Show, Eq)

@@ -14,6 +14,7 @@ module Morloc.Syntax (
 
 import Data.List (intersperse)
 import Data.Maybe (maybe)
+import Morloc.Language
 
 type Name = String
 type Tag = String
