@@ -20,8 +20,9 @@ data TNode
       [BExpr]        -- constraints
   deriving(Show, Ord, Eq)
 
-data Program
-  = Workflow (Graph WNode)
-  | Ontology [(String, TNode)]
-  | Packages [Import]
+data Program = Program {
+      workflow :: (Graph WNode)
+    , ontology :: [(String, TNode)]
+    , packages :: [Import]
+  }
   deriving(Show, Eq)
