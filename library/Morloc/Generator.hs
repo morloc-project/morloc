@@ -28,14 +28,13 @@ import qualified Data.Char as DC
 
 import Morloc.Graph
 import Morloc.Data
-import Morloc.Language
 import Morloc.Syntax
 import Morloc.EvalError
 
 data Script = Script {
-      scriptBasename :: String     -- script basename (no extension)
-    , scriptLang :: Lang
-    , scriptCode :: String
+      scriptBase :: String -- script basename (no extension)
+    , scriptLang :: String -- script language
+    , scriptCode :: String -- full script source code
   }
   deriving(Show, Ord, Eq)
 
@@ -48,33 +47,28 @@ generate p = return $ (generateNexus p, generatePools p)
 -- | Create a script that calls the root node
 generateNexus :: Program -> Nexus
 generateNexus p = Script {
-      scriptBasename    = "nexus"
-    , scriptLang        = LangBash
-    , scriptCode        = nexusCode' p
+      scriptBase = "nexus"
+    , scriptLang = "bash"
+    , scriptCode = nexusCode' p
   }
   where
     nexusCode' :: Program -> String
-    nexusCode' _ = "hello world"
+    nexusCode' _ =  unlines [
+          "# Bash"
+        , ""
+        , "Rscript pool.R m1"
+      ]
 
 -- | Create the code for each function pool
 generatePools :: Program -> [Pool]
-generatePools (Program _ _ ps) = map generatePool' (zip ps [1..])
-  where
-    generatePool' :: (Source, Integer) -> Pool 
-    generatePool' ((Source lang lines), i) = Script {
-          scriptBasename = "pool" ++ show i
-        , scriptLang = parseLang lang
-        , scriptCode = unlines lines
-      }
+generatePools (Program w _ ps) = map (generatePool w) (zip ps [1..])
 
-    lower = map DC.toLower
+generatePool :: [FunctionTree] -> (Source, Integer) -> Pool 
+generatePool fs ((Source lang lines), i) = Script {
+      scriptBase = "pool" ++ show i
+    , scriptLang = lang
+    , scriptCode = poolCode lang fs lines
+  }
 
-    parseLang :: String -> Lang
-    parseLang s
-      | lower s == "r"       = LangR
-      | lower s == "python"  = LangPython3
-      | lower s == "python3" = LangPython3
-      | lower s == "py"      = LangPython3
-      | lower s == "sh"      = LangBash
-      | lower s == "bash"    = LangBash
-      | otherwise            = LangOther s
+poolCode :: String -> [FunctionTree] -> [String] -> String
+poolCode = undefined
