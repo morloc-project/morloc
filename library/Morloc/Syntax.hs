@@ -24,7 +24,13 @@ data Top
   | TopSource Source
   deriving(Show, Ord, Eq)
 
-data Source = Source Name [String] deriving(Ord, Eq)
+data Source
+  = Source
+    Name -- source language (e.g. R or python)
+    (Maybe [String]) -- path to file or nothing
+                     -- if nothing, then work from the base language
+    [(String, Maybe String)] -- functions to import, with optional aliases
+    deriving(Show, Ord, Eq)
 
 -- TODO allow function types
 data MType
@@ -101,6 +107,3 @@ data Import = Import {
     , importQualifier :: Maybe Name
     , importRestriction :: Maybe [Name]
   } deriving(Show, Ord, Eq)
-
-instance Show Source where
-  show (Source n ls) = unlines (("source " ++ n) : ls)

@@ -64,11 +64,17 @@ generatePools :: Program -> [Pool]
 generatePools (Program w _ ps) = map (generatePool w) (zip ps [1..])
 
 generatePool :: [FunctionTree] -> (Source, Integer) -> Pool 
-generatePool fs ((Source lang lines), i) = Script {
+generatePool fs ((Source lang path imports), i) = Script {
       scriptBase = "pool" ++ show i
     , scriptLang = lang
-    , scriptCode = poolCode lang fs lines
+    , scriptCode = poolCode lang fs path imports
   }
 
-poolCode :: String -> [FunctionTree] -> [String] -> String
+-- generate the code required for a specific `source` statement
+poolCode
+  :: String                   -- language
+  -> [FunctionTree]           -- list of functions
+  -> Maybe [String]           -- path to source code (if needed)
+  -> [(String, Maybe String)] -- list of imported functions
+  -> String  -- complete code for the pool
 poolCode = undefined

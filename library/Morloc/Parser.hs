@@ -75,11 +75,24 @@ restrictedImport = do
 source :: Parser Source
 source = do
   Tok.reserved "source"
-  lang <- many1 Tok.nonSpace
-  Tok.chop
-  source <- many Tok.line
-  Tok.whiteSpace
-  return $ Source lang source
+  -- get the language of the imported source
+  lang <- Tok.stringLiteral
+  -- get the path to the srouce file, if Nothing, then assume "vanilla"
+  path <- optionMaybe Tok.path
+  -- get the function imports with with optional aliases
+  fs <- Tok.parens (sepBy importAs' Tok.comma)
+  return $ Source lang path fs
+  where
+    importAs' :: Parser (String, Maybe String)
+    importAs' = do
+      -- quoting the function names allows them to have more arbitrary values,
+      -- perhaps even including expressions that return functions (though this
+      -- is probably bad practice).
+      func <- Tok.stringLiteral
+      -- the alias is especially important when the native function name is not
+      -- legal Morloc syntax, for example an R function with a '.' in the name.
+      alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
+      return $ (func, alias)
 
 declaration :: Parser Statement
 declaration = do

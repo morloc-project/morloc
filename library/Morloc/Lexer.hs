@@ -44,7 +44,7 @@ lexer = Token.makeTokenParser style
           , Token.nestedComments  = False
           , Token.caseSensitive   = True
           , Token.identStart      = letter <|> char '_'
-          , Token.identLetter     = alphaNum <|> oneOf "_.'"
+          , Token.identLetter     = alphaNum <|> oneOf "_'"
           , Token.opStart         = Token.opLetter Lang.emptyDef
           , Token.opLetter        = oneOf ":!$%&*+./<=>?@\\^|-~"
           , Token.reservedOpNames = [
@@ -59,6 +59,7 @@ lexer = Token.makeTokenParser style
               , "from"
               , "as"
               , "source"
+              , "export"
               , "True"
               , "False"
               , "and"
