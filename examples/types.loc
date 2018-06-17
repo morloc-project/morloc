@@ -1,0 +1,35 @@
+# I still have not settled on a type system. I want to be able to specify input
+# constraints in the type signatutes, but I don't want the full weight of a
+# dependent type system. If we give up the static guarantee of correctness, we
+# can assert these constraints at runtime.  In effect, this is just a
+# formalization of the ad hoc assert statements we would add to the body of a
+# function. These assumptions about the input, or properties of the output, are
+# important enough to merit being specified at a high-level; they need to be
+# considered carefully at the specification stage of development, also they are
+# required for modeling the data.
+
+Index :: x:Int where (
+    x > 0
+);
+
+foo :: Matrix, Matrix -> Matrix where (
+    (n1 and m2) or (n2 and x)
+  , m3 or (isgood m1)
+  , n3 and n2
+);
+
+matrixMult :: Matrix, Matrix -> Matrix where (
+    a > ((b - 2) ^ 5)
+  , c < d
+);
+
+foo :: Matrix;
+
+x1 :: zanzibar:[a], (), groovy:(Int,b,(a)) -> bob:Man {foo :: bill:Int};
+
+subseq :: x:[a], i:Index, j:Index -> y:[a] where (
+    j <= len x
+  , i <= j
+  , len y == j - i + 1
+  , y[k] == x[k + i - 1]
+);
