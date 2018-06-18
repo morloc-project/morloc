@@ -6,7 +6,7 @@ import Text.Parsec.String (Parser)
 import Control.Monad.State
 import Control.Monad.Except (throwError)
 
-import Morloc.EvalError
+import Morloc.Error
 import Morloc.Syntax
 import qualified Morloc.Lexer as Tok
 

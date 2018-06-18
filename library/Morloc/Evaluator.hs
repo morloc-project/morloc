@@ -6,7 +6,7 @@ import Control.Applicative
 
 import Morloc.Data
 import qualified Morloc.Syntax as S
-import qualified Morloc.EvalError as E
+import qualified Morloc.Error as E
 
 import qualified Morloc.Graph as G
 import Morloc.Parser (morlocScript)

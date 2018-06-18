@@ -2,7 +2,7 @@ module Morloc (ast, build) where
 
 import Morloc.Data (Program)
 import Morloc.Evaluator (eval)
-import Morloc.EvalError
+import Morloc.Error
 import Morloc.Generator (generate, Nexus, Pool)
 import Text.Parsec (SourceName, parse)
 

@@ -1,4 +1,4 @@
-module Morloc.EvalError
+module Morloc.Error
 (
     MorlocError(..)
   , ThrowsError
@@ -12,11 +12,15 @@ data MorlocError
   | BadComposition String
   | SyntaxError    ParseError
   | BadArray       String
+  | NotImplemented String
+  | NotSupported   String
   | UnknownError
   deriving(Eq)
 
 
-instance Show MorlocError where show = morlocShow
+instance Show MorlocError
+  where
+    show = morlocShow
 
 morlocShow :: MorlocError -> String
 morlocShow (BadApplication msg) = "BadApplication: " ++ msg 

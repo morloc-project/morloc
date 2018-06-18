@@ -17,11 +17,12 @@ module Morloc.Graph
     , propagate
     , replaceValue
     , suczip
+    , combineG
 ) where
 
 -- TODO: This is not a Graph, it is clearly a tree.
 
-import Data.List (union)
+import Data.List (union, transpose)
 
 data Graph a = Node a [Graph a] deriving(Show, Eq)
 
@@ -33,8 +34,8 @@ values = map v where
 value :: Graph a -> a
 value (Node x _) = x
 
-{- kids :: Graph a -> [a]       -}
-{- kids (Node _ xs) = values xs -}
+kids :: Graph a -> [Graph a]
+kids (Node _ xs) = xs
 -----------------------------------------------------------
 
 
@@ -92,7 +93,7 @@ toList (Node x xs) = [x] `union` (xs >>= toList)
 -- | modify parent by comparing to children
 familyMap :: (a -> [a] -> b) -> Graph a -> Graph b
 familyMap f (Node t ts) = Node new_val new_kids  where
-  new_val = f t $ values ts
+  new_val = f t (values ts)
   new_kids = map (familyMap f) ts
 
 -- | modify parents based only on children
@@ -122,3 +123,7 @@ suczip f x (Node y kids) = Node (x,y) (mapzip' f (f x) kids) where
   mapzip' _ _ [] = []
   mapzip' f' x' (t:ts) = top : mapzip' f' (fst . value $ top) ts where
     top = suczip f' x' t
+
+-- | Given a list of isomorphic graphs, combine all into a single graph.
+combineG :: [Graph a] -> Graph [a]
+combineG gs = Node (map value gs) (map combineG . transpose . map kids $ gs)
