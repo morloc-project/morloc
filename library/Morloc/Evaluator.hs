@@ -31,7 +31,7 @@ ontology' xs
 packages' :: [S.Top] -> E.ThrowsError [S.Source]
 packages' xs = pure [x | (S.TopSource x) <- xs]
 
-workflow' :: [S.Top] -> E.ThrowsError [FunctionTree a]
+workflow' :: [S.Top] -> E.ThrowsError [FunctionTree WNode]
 workflow' xs = sequence $
   [FunctionTree <$> pure n <*> pure args <*> callTree expr |
     (S.TopStatement (S.Declaration n args expr)) <- xs]
@@ -45,16 +45,16 @@ workflow' xs = sequence $
   -- legal. But for now I won't allow it. 
   -- Anyway, as it is, the following will never raise an error. 
   callTree (S.ExprData mdata)
-    = pure $ G.Node (WNodeData mdata) []
+    = pure $ G.Node (WLeaf mdata) []
 
   -- parse an application
   callTree (S.ExprApplication name tag xs)
-    = G.Node <$> pure (WNodeVar name tag) <*> sequence (map callTree xs) 
+    = G.Node <$> pure (WNode name tag) <*> sequence (map callTree xs) 
 
   -- parse composition
   callTree (S.ExprComposition g f)
     = case (callTree g) of 
-      Right (G.Node (WNodeData _) _)
+      Right (G.Node (WLeaf _) _)
         -> Left (E.BadComposition "Only functions can be composed")
       Right (G.Node v kids)
         -> G.Node <$> pure v <*> (app <$> pure kids <*> callTree f)

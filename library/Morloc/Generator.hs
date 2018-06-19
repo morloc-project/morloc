@@ -24,6 +24,7 @@ module Morloc.Generator (
   ) where
 
 import Data.List (intercalate)
+import Data.Maybe (catMaybes)
 import qualified Data.Char as DC 
 import Safe (atMay)
 
@@ -31,6 +32,7 @@ import Morloc.Graph
 import Morloc.Data
 import Morloc.Syntax
 import Morloc.Error
+import Morloc.Util (which)
 
 data Script = Script {
       scriptBase :: String -- script basename (no extension)
@@ -61,42 +63,35 @@ generateNexus p = pure $ Script {
       ]
 
 generatePools :: Program -> ThrowsError [Pool]
-generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
+-- generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
+generatePools (Program ws _ ss) = undefined
   where
 
-    makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
+    -- makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
+    makePooler :: [FunctionTree WNode] -> [Source] -> [ThrowsError (Graph (Maybe Source))]
     makePooler ws ss =
-        fmap map                     -- ThrowsError ([Source] -> [Pool])
-      . fmap generatePool            -- ThrowsError (Source -> Pool)
-      . fmap (map (replaceGraph ws)) -- ThrowsError [FunctionTree SNode]
-      . fmap (map (familyMap SNode)) -- ThrowsError [Graph [SNode]]
-      . fmap (map (zipG ws))         -- ThrowsError [Graph (WNode, Source)]
-      .     sequence                 -- ThrowsError [Graph Source]
-      . map sequence                 -- [ThrowsError (Graph Source)]
-      . map (getSource ss)           -- [Graph (ThrowsError Source)]
-      . map which                    -- [Graph [Int]]
-      . map (isFromSource ss)        -- [Graph [Bool]]
+      --   fmap map                       -- ThrowsError ([Source] -> [Pool])
+      -- . fmap generatePool              -- ThrowsError (Source -> Pool)
+      -- . fmap (map replaceGraph)        -- ThrowsError [FunctionTree SNode]
+      -- . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph [SNode])]
+      -- . fmap (map (familyMap toSNode)) -- ThrowsError [Graph [SNode]]
+      -- . fmap (map (zipG ws))           -- ThrowsError [Graph (WNode, Maybe Source)]
+      -- . sequence                       -- ThrowsError [Graph (Maybe Source)]
+
+        map (toSource ss)              -- [ThrowsError (Graph (Maybe Source))]
+      $ [g | (FunctionTree _ _ g) <- ws]
+
+    toSNode :: (WNode, Maybe Source) -> [(WNode, Maybe Source)] -> ThrowsError SNode
+    toSNode (WLeaf x, Nothing) [] = Right (SLeaf x)
+    toSNode (WLeaf _, Nothing) _  = Left (BadApplication "Data cannot be given arguments")
+    toSNode (WLeaf _, _      ) _  = Left (VeryBadBug "Data was associated with a source")
+    toSNode x kids = Right (SNode x kids)
 
     generatePool :: [FunctionTree SNode] -> Source -> Pool
     generatePool = undefined
 
-    replaceGraph :: FunctionTree a -> b -> FunctionTree b
-    replaceGraph (FunctionTree s ss _) = FunctionTree s ss
-
-    getSource :: [Source] -> [Int] -> ThrowsError Source
-    getSource ss [i] = case atMay ss i of
-      -- x is exported from exactly one source
-      Just x  -> Right x
-      -- no import exposes x 
-      Nothing -> Left (CouldNotFind x)
-    getSource _ is = case (sourceLangs ss is) of
-      -- the x is available from multiple sources
-      Just pkgs -> Left (NameConflict x pkgs)
-      -- this should never happen
-      Nothing   -> Left (VeryBadBug "invalid index") 
-
-    sourceLangs :: [Source] -> [Int] -> Maybe [String]
-    sourceLangs ss = fmap (\Source n _ _ -> n) . sequence . map (atMay ss)
+    replaceGraph :: (FunctionTree a, Graph b) -> FunctionTree b
+    replaceGraph (FunctionTree s ss _, x) = FunctionTree s ss x
 
 
 
@@ -134,24 +129,30 @@ poolCode "R" _ (Just _) _
 poolCode lang _ Nothing  _
   = Left $ NotSupported ("the language '" ++ lang ++ "' is not yet supported")
 
-toSource :: [Source] -> Graph WNode -> ThrowsError (Graph Source)
-toSource srcs g = sequence . fmap (source' srcs) $ isFromSources srcs g
+toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
+toSource srcs =
+      sequence              -- ThrowsError (Graph (Maybe Source)) 
+    . fmap (toSource' srcs) -- Graph (ThrowsError (Maybe Source))
   where
-    source' :: [Source] -> [Bool] -> ThrowsError Source
-    source' ss bs = (which bs)
 
-isFromSources :: [Source] -> Graph WNode -> Graph [Bool]
-isFromSources srcs g = combineG $ map (isFromSource g) srcs
-  where
-    isFromSource :: Graph WNode -> Source -> Graph Bool 
-    isFromSource g (Source _ _ names) = fmap (elem' $ functionNames names) g
+    toSource' :: [Source] -> WNode -> ThrowsError (Maybe Source)
+    toSource' ss (WNode n a) = case catMaybes (map (mSource (WNode n a)) ss) of
+      []  -> Right Nothing
+      [s] -> Right (Just s)
+      ss  -> Left (NameConflict n [n' | (Source n' _ _) <- ss])
+      
+    mSource :: WNode -> Source -> Maybe Source
+    mSource node src 
+      | elem' node src = Just src
+      | otherwise = Nothing
+    mSource _ _ = Nothing
 
-    elem' :: [String] -> WNode -> Bool
-    elem' names (WNodeVar name _) = elem name names
+    elem' :: WNode -> Source -> Bool
+    elem' (WNode name _) (Source _ _ ns) = elem name (functionNames ns)
 
 isVar :: Graph WNode -> Graph Bool
 isVar = fmap isVar' where
-  isVar' (WNodeVar _ _) = True
+  isVar' (WNode _ _) = True
   isVar' _ = False
 
 functionNames :: Functor f => f (String, Maybe String) -> f String

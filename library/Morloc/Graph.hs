@@ -46,6 +46,11 @@ instance Foldable Graph where
   foldr f z (Node a []) = f a z
   foldr f z (Node a (x:xs)) = foldr f (foldr f z x) (Node a xs)
 
+instance Traversable Graph where
+-- traverse :: Applicative f => (a -> f b) -> Graph a -> f (Graph b)
+   traverse f (Node x xs) = Node <$> f x <*> (traverse . traverse) f xs
+
+
 zipWithG :: (a -> b -> c) -> Graph a -> Graph b -> Graph c
 zipWithG f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithG f) xs ys)
 

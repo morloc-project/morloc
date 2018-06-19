@@ -10,23 +10,24 @@ import Morloc.Graph (Graph)
 import Morloc.Syntax (Source, MType, MData, BExpr)
 
 data WNode
-  = WNodeVar
+  = WNode
       String -- name
       String -- tag
-  | WNodeData MData 
+  | WLeaf MData 
   deriving(Show, Ord, Eq)
+
+data SNode
+  = SNode
+    (WNode, Maybe Source)   -- parent
+    [(WNode, Maybe Source)] -- children
+  | SLeaf MData
+  deriving(Show, Eq)
 
 data FunctionTree a
   = FunctionTree
     String    -- name
     [String]  -- bound variables
     (Graph a) -- function composition tree
-  deriving(Show, Eq)
-
-data SNode
-  = SNode
-    (WNode, Source)   -- parent
-    [(WNode, Source)] -- children
   deriving(Show, Eq)
 
 data TNode
