@@ -31,7 +31,7 @@ ontology' xs
 packages' :: [S.Top] -> E.ThrowsError [S.Source]
 packages' xs = pure [x | (S.TopSource x) <- xs]
 
-workflow' :: [S.Top] -> E.ThrowsError [FunctionTree]
+workflow' :: [S.Top] -> E.ThrowsError [FunctionTree a]
 workflow' xs = sequence $
   [FunctionTree <$> pure n <*> pure args <*> callTree expr |
     (S.TopStatement (S.Declaration n args expr)) <- xs]

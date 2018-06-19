@@ -25,6 +25,7 @@ module Morloc.Generator (
 
 import Data.List (intercalate)
 import qualified Data.Char as DC 
+import Safe (atMay)
 
 import Morloc.Graph
 import Morloc.Data
@@ -59,39 +60,85 @@ generateNexus p = pure $ Script {
         , "Rscript pool.R m1"
       ]
 
--- | Create the code for each function pool
 generatePools :: Program -> ThrowsError [Pool]
-generatePools (Program w _ ps)
-  = sequence $ map
-      (generatePool w)
-      (zip ps [1..]) -- associate each source with a number for uniquely
-                     -- identifying the pool that will be created around it
+generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
+  where
 
-generatePool :: [FunctionTree] -> (Source, Integer) -> ThrowsError Pool
-generatePool fs ((Source lang path imports), i)
-  = Script
-  <$> pure ("pool" ++ show i)        -- scriptBase
-  <*> pure lang                      -- scriptLang
-  <*> poolCode lang fs path imports  -- scriptCode
+    makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
+    makePooler ws ss =
+        fmap map                     -- ThrowsError ([Source] -> [Pool])
+      . fmap generatePool            -- ThrowsError (Source -> Pool)
+      . fmap (map (replaceGraph ws)) -- ThrowsError [FunctionTree SNode]
+      . fmap (map (familyMap SNode)) -- ThrowsError [Graph [SNode]]
+      . fmap (map (zipG ws))         -- ThrowsError [Graph (WNode, Source)]
+      .     sequence                 -- ThrowsError [Graph Source]
+      . map sequence                 -- [ThrowsError (Graph Source)]
+      . map (getSource ss)           -- [Graph (ThrowsError Source)]
+      . map which                    -- [Graph [Int]]
+      . map (isFromSource ss)        -- [Graph [Bool]]
 
--- generate the code required for a specific `source` statement
-poolCode
-  :: String                   -- language
-  -> [FunctionTree]           -- list of functions
-  -> Maybe [String]           -- path to source code (if needed)
-  -> [(String, Maybe String)] -- list of imported functions
-  -> ThrowsError String       -- complete code for the pool
-poolCode "R" ftree Nothing flist
-  = undefined
-  -- TODO
-  -- Map each node in each workflow to a pool
-  -- Map parents and children to build code for each function call
-  -- Write the function calls into the pool templates
+    generatePool :: [FunctionTree SNode] -> Source -> Pool
+    generatePool = undefined
+
+    replaceGraph :: FunctionTree a -> b -> FunctionTree b
+    replaceGraph (FunctionTree s ss _) = FunctionTree s ss
+
+    getSource :: [Source] -> [Int] -> ThrowsError Source
+    getSource ss [i] = case atMay ss i of
+      -- x is exported from exactly one source
+      Just x  -> Right x
+      -- no import exposes x 
+      Nothing -> Left (CouldNotFind x)
+    getSource _ is = case (sourceLangs ss is) of
+      -- the x is available from multiple sources
+      Just pkgs -> Left (NameConflict x pkgs)
+      -- this should never happen
+      Nothing   -> Left (VeryBadBug "invalid index") 
+
+    sourceLangs :: [Source] -> [Int] -> Maybe [String]
+    sourceLangs ss = fmap (\Source n _ _ -> n) . sequence . map (atMay ss)
+
+
+
+-- -- | Create the code for each function pool
+-- generatePools :: Program -> ThrowsError [Pool]
+-- generatePools (Program w _ ps)
+--   = sequence $ map
+--       (generatePool w)
+--       (zip ps [1..]) -- associate each source with a number for uniquely
+--                      -- identifying the pool that will be created around it
+--
+-- generatePool :: [FunctionTree] -> (Source, Integer) -> ThrowsError Pool
+-- generatePool fs ((Source lang path imports), i)
+--   = Script
+--   <$> pure ("pool" ++ show i)        -- scriptBase
+--   <*> pure lang                      -- scriptLang
+--   <*> poolCode lang fs path imports  -- scriptCode
+--
+-- -- generate the code required for a specific `source` statement
+-- poolCode
+--   :: String                   -- language
+--   -> [FunctionTree]           -- list of functions
+--   -> Maybe [String]           -- path to source code (if needed)
+--   -> [(String, Maybe String)] -- list of imported functions
+--   -> ThrowsError String       -- complete code for the pool
+-- poolCode "R" ftree Nothing flist
+--   = undefined
+--   -- TODO
+--   -- Map each node in each workflow to a pool
+--   -- Map parents and children to build code for each function call
+--   -- Write the function calls into the pool templates
 
 poolCode "R" _ (Just _) _
   = Left $ NotImplemented "cannot yet read source"
 poolCode lang _ Nothing  _
   = Left $ NotSupported ("the language '" ++ lang ++ "' is not yet supported")
+
+toSource :: [Source] -> Graph WNode -> ThrowsError (Graph Source)
+toSource srcs g = sequence . fmap (source' srcs) $ isFromSources srcs g
+  where
+    source' :: [Source] -> [Bool] -> ThrowsError Source
+    source' ss bs = (which bs)
 
 isFromSources :: [Source] -> Graph WNode -> Graph [Bool]
 isFromSources srcs g = combineG $ map (isFromSource g) srcs

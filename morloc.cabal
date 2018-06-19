@@ -46,6 +46,7 @@ library
                       -- Morloc.Core
 
     build-depends: base,
+                   safe,
                    parsec,
                    text,
                    mtl

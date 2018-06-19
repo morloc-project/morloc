@@ -5,15 +5,19 @@ module Morloc.Error
 ) where
 
 import Text.Parsec (ParseError)
+import Data.List (intercalate)
 
 -- TODO add declaration errors
 data MorlocError
-  = BadApplication String
-  | BadComposition String
-  | SyntaxError    ParseError
-  | BadArray       String
-  | NotImplemented String
-  | NotSupported   String
+  = BadApplication   String
+  | BadComposition   String
+  | SyntaxError      ParseError
+  | BadArray         String
+  | NotImplemented   String
+  | NotSupported     String
+  | CouldNotFind     String
+  | NameConflict     String [String]
+  | VeryBadBug       String
   | UnknownError
   deriving(Eq)
 
@@ -23,10 +27,23 @@ instance Show MorlocError
     show = morlocShow
 
 morlocShow :: MorlocError -> String
-morlocShow (BadApplication msg) = "BadApplication: " ++ msg 
-morlocShow (BadComposition msg) = "BadComposition: " ++ msg
-morlocShow (SyntaxError    err) = "SyntaxError: "    ++ show err
-morlocShow (BadArray       err) = "BadArray: "       ++ show err
-morlocShow  UnknownError        = "Damn, you broke it good"
+morlocShow (BadApplication msg)  = "BadApplication: "      ++ show msg 
+morlocShow (BadComposition msg)  = "BadComposition: "      ++ show msg
+morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
+morlocShow (BadArray       err)  = "BadArray: "            ++ show err
+morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
+morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
+morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?" 
+morlocShow (NameConflict x pkgs) = "NameConflict: "  ++ q x ++ " is imported from " ++ l pkgs
+morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
+morlocShow  UnknownError         = "Damn, you broke it good"
+
+-- show a list as: [<item>, <item>, ...]
+l :: [String] -> String
+l xs = "[" ++ (intercalate ", ") xs ++ "]"
+
+-- quote a string
+q :: Show a => a -> String
+q x = "'" ++ show x ++ "'"
 
 type ThrowsError = Either MorlocError

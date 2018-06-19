@@ -1,6 +1,7 @@
 module Morloc.Data (
     WNode(..)
   , TNode(..)
+  , SNode(..) -- WTF 'sup with this name?
   , Program(..)
   , FunctionTree(..)
 ) where
@@ -15,11 +16,17 @@ data WNode
   | WNodeData MData 
   deriving(Show, Ord, Eq)
 
-data FunctionTree
+data FunctionTree a
   = FunctionTree
-    String        -- name
-    [String]      -- bound variables
-    (Graph WNode) -- function composition tree
+    String    -- name
+    [String]  -- bound variables
+    (Graph a) -- function composition tree
+  deriving(Show, Eq)
+
+data SNode
+  = SNode
+    (WNode, Source)   -- parent
+    [(WNode, Source)] -- children
   deriving(Show, Eq)
 
 data TNode
@@ -34,7 +41,7 @@ data Program = Program {
       -- TODO this isn't really the workflow, but rather a list of functions.
       -- Each function may link to values inside other functions. It is these
       -- linkes that create the workflow.
-      workflow :: [FunctionTree]
+      workflow :: [FunctionTree WNode]
       -- TODO this isn't really the ontology, but rather just a list of type
       -- signatures. The ontology will hold the relations between them.
     , ontology :: [(
