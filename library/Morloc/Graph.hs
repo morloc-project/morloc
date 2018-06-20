@@ -18,12 +18,12 @@ module Morloc.Graph
     , replaceValue
     , suczip
     , combineG
+    , numberG
 ) where
-
--- TODO: This is not a Graph, it is clearly a tree.
 
 import Data.List (union, transpose)
 
+-- TODO: This is not a Graph, it is clearly a tree.
 data Graph a = Node a [Graph a] deriving(Show, Eq)
 
 instance Functor Graph where
@@ -36,6 +36,15 @@ instance Foldable Graph where
 instance Traversable Graph where
 -- traverse :: Applicative f => (a -> f b) -> Graph a -> f (Graph b)
    traverse f (Node x xs) = Node <$> f x <*> (traverse . traverse) f xs
+
+-- TODO this algorithm skips numbers sometimes, don't know why ...
+-- need to fix the damn thing
+numberG :: Int -> Graph a -> Graph (Int, a)
+numberG i (Node x [])     = Node (i, x) []
+numberG i (Node x (k:ks)) = Node (i, x) (kids' (i+1) k ks) where
+  kids' i x [] = [numberG i x]
+  kids' i x (y:ys) = case numberG i x of 
+    g' -> g' : kids' (length g' + i) y ys
 
 -- utilities ----------------------------------------------
 values :: [Graph a] -> [a]

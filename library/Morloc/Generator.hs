@@ -116,17 +116,31 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
       . map getGraph  -- [Graph (SNode)]
       $ fs
 
+
     getGraph :: Function SNode -> Graph SNode
     getGraph (Function _ _ g) = g
 
     function' :: (Int, SNode) -> String
-    function' (i, n) = (makeFunction g) (makeNode g $ i) "args" "body"
+    function' (i, (SNode (w, Just s) ss))
+      | s == src  = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
+      | otherwise = (makeFunction g) (makeNode g $ i) (arguments' ss) "foreign call"
+    function' (i, (SNode (w, Nothing) ss))
+      = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
+    function' (i, SLeaf d) = (makeAssignment g) (makeNode g $ i) (makeMData g $ d)
+    function' x = show x
 
-    -- , makeFunction
-    --     :: String  -- function name
-    --     -> String  -- argument string (output of `makeArgs`)
-    --     -> String  -- body
-    --     -> String  -- complete function
+    -- TODO I need to keep track of the node indices for all the data,
+    -- including the children. Maybe I should just ditch the indexing and use
+    -- mangled names? Why do I use them anyway? Just legacy, really.
+    
+    arguments' _ = "args"
+
+    -- arguments' :: [(Int, WNode)] -> String
+    -- arguments' ss = (makeArgs g) $ map argument' ss
+    --
+    -- argument' :: (Int, WNode) -> Arg
+    -- argument' (i, SNode _ _) = Positional "function_call"
+    -- argument' (i, SLeaf _)   = Positional "data_variable"
 
 toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
 toSource srcs =
@@ -139,6 +153,7 @@ toSource srcs =
       []  -> Right Nothing
       [s] -> Right (Just s)
       ss  -> Left (NameConflict n [n' | (Source n' _ _) <- ss])
+    toSource' _ (WLeaf _) = Right Nothing
       
     mSource :: WNode -> Source -> Maybe Source
     mSource node src 
@@ -166,6 +181,6 @@ numberTrees gs = numberTrees' 1 gs
   where
     numberTrees' :: Int -> [Graph a] -> [Graph (Int, a)]
     numberTrees' _ [] = []
-    numberTrees' i [g] = [suczip (+ 1) i g]
-    numberTrees' i (g:gs) = case (suczip (+ 1) i g) of
+    numberTrees' i [g] = [numberG i g]
+    numberTrees' i (g:gs) = case (numberG i g) of
       g' -> g' : (numberTrees' (i + length g' + 1) gs)

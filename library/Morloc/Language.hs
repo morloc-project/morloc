@@ -49,6 +49,11 @@ data CodeGenerator = CodeGenerator {
         :: Int    -- the index of a node
         -> String -- the function name of the node
 
+    , makeAssignment
+        :: String -- lhs
+        -> String -- rhs
+        -> String -- assignment expression
+
     , makeMData :: MData -> String
   }
 
@@ -59,6 +64,7 @@ rCodeGenerator = CodeGenerator {
   , makeFunctionCall = \f args -> f ++ "(" ++ args ++ ")"
   , makeArgs         = intercalate ", " . map showArg
   , makeNode         = \i -> "m" ++ show i
+  , makeAssignment   = \l r -> l ++ " <- " ++ r
   , makeMData        = showRData
   }
   where
