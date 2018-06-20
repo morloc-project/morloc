@@ -27,6 +27,7 @@ import Data.List (intercalate)
 import Data.Maybe (catMaybes)
 import qualified Data.Char as DC 
 import Safe (atMay)
+import Control.Monad (join)
 
 import Morloc.Graph
 import Morloc.Data
@@ -67,19 +68,24 @@ generatePools :: Program -> ThrowsError [Pool]
 generatePools (Program ws _ ss) = undefined
   where
 
-    -- makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
-    makePooler :: [FunctionTree WNode] -> [Source] -> [ThrowsError (Graph (Maybe Source))]
+    makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
     makePooler ws ss =
-      --   fmap map                       -- ThrowsError ([Source] -> [Pool])
-      -- . fmap generatePool              -- ThrowsError (Source -> Pool)
-      -- . fmap (map replaceGraph)        -- ThrowsError [FunctionTree SNode]
-      -- . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph [SNode])]
-      -- . fmap (map (familyMap toSNode)) -- ThrowsError [Graph [SNode]]
-      -- . fmap (map (zipG ws))           -- ThrowsError [Graph (WNode, Maybe Source)]
-      -- . sequence                       -- ThrowsError [Graph (Maybe Source)]
-
-        map (toSource ss)              -- [ThrowsError (Graph (Maybe Source))]
+        fmap map                       -- ThrowsError ([Source] -> [Pool])
+      . fmap generatePool              -- ThrowsError (Source -> Pool)
+      . fmap (map replaceGraph)        -- ThrowsError [FunctionTree SNode]
+      . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph SNode)]
+      . join                           -- ThrowsError [Graph SNode]
+      . fmap sequence                  -- ThrowsError ThrowsError [Graph SNode]
+      . fmap (map sequence)            -- ThrowsError [ThrowsError (Graph SNode]
+      . fmap (map (familyMap toSNode)) -- ThrowsError [Graph (ThrowsError SNode)]
+      . fmap (map foo)                 -- ThrowsError [Graph (WNode, Maybe Source)]
+      . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph (Maybe Source))]
+      . sequence                       -- ThrowsError [Graph (Maybe Source)]
+      . map (toSource ss)              -- [ThrowsError (Graph (Maybe Source))]
       $ [g | (FunctionTree _ _ g) <- ws]
+
+    foo :: (FunctionTree WNode, Graph (Maybe Source)) -> Graph (WNode, Maybe Source)
+    foo ((FunctionTree _ _ gnode), gsrc) = zipG gnode gsrc
 
     toSNode :: (WNode, Maybe Source) -> [(WNode, Maybe Source)] -> ThrowsError SNode
     toSNode (WLeaf x, Nothing) [] = Right (SLeaf x)
