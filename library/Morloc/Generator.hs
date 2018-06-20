@@ -112,13 +112,13 @@ generatePool fs src
 
     poolCode' fs (Source _ Nothing _ )
       = Left $ NotImplemented "cannot yet read source"
-    poolCode' fs (Source "R" (Just _) _) = generatePoolR fs rCodeGenerator 
+    poolCode' fs (Source "R" (Just _) _) = generatePoolCode fs rCodeGenerator 
     poolCode' fs (Source lang   _ _)
       = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
 
 -- The top level
 generatePoolCode :: [Function SNode] -> CodeGenerator -> ThrowsError String
-generatePoolCode = undefined
+generatePoolCode _ _ = Right "hello!" 
 
 toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
 toSource srcs =
