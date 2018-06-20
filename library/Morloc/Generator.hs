@@ -35,13 +35,6 @@ import Morloc.Syntax
 import Morloc.Error
 import Morloc.Util (which)
 
-data Script = Script {
-      scriptBase :: String -- script basename (no extension)
-    , scriptLang :: String -- script language
-    , scriptCode :: String -- full script source code
-  }
-  deriving(Show, Ord, Eq)
-
 type Nexus = Script
 type Pool  = Script
 
@@ -96,33 +89,31 @@ generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
     replaceGraph (Function s ss _, x) = Function s ss x
 
 generatePool :: [Function SNode] -> Source -> Pool
-generatePool = undefined
+generatePool fs src
+  = Script
+    (poolName'    src)
+    (poolLang'    src)
+    (poolCode' fs src)
+  where
+    poolName' :: Source -> String
+    poolName' (Source lang (Just path) _) = intercalate "." path
+    poolName' (Source _     Nothing    _) = "base"
 
--- generatePool :: [Function] -> (Source, Integer) -> ThrowsError Pool
--- generatePool fs ((Source lang path imports), i)
---   = Script
---   <$> pure ("pool" ++ show i)        -- scriptBase
---   <*> pure lang                      -- scriptLang
---   <*> poolCode lang fs path imports  -- scriptCode
---
--- -- generate the code required for a specific `source` statement
--- poolCode
---   :: String                   -- language
---   -> [Function]               -- list of functions
---   -> Maybe [String]           -- path to source code (if needed)
---   -> [(String, Maybe String)] -- list of imported functions
---   -> ThrowsError String       -- complete code for the pool
--- poolCode "R" ftree Nothing flist
---   = undefined
---   -- TODO
---   -- Map each node in each workflow to a pool
---   -- Map parents and children to build code for each function call
---   -- Write the function calls into the pool templates
+    poolLang' :: Source -> String
+    poolLang' (Source lang _ _) = lang
 
-poolCode "R" _ (Just _) _
-  = Left $ NotImplemented "cannot yet read source"
-poolCode lang _ Nothing  _
-  = Left $ NotSupported ("the language '" ++ lang ++ "' is not yet supported")
+
+    -- generate the code required for a specific `source` statement
+    poolCode
+      :: [Function SNode]         -- list of functions
+      -> Source
+      -> ThrowsError String       -- complete code for the pool
+
+    poolCode fs (Source _ Nothing _ )
+      = Left $ NotImplemented "cannot yet read source"
+    poolCode fs (Source "R" (Just _) _) = undefined
+    poolCode fs (Source _   _ _)
+      = NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
 
 toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
 toSource srcs =

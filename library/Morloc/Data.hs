@@ -2,6 +2,7 @@ module Morloc.Data (
     WNode(..)
   , TNode(..)
   , SNode(..) -- WTF 'sup with this name?
+  , Script(..)
   , Program(..)
   , Function(..)
 ) where
@@ -40,6 +41,14 @@ data TNode
       (Maybe MType)  -- optional output
       [BExpr]        -- constraints
   deriving(Show, Ord, Eq)
+
+data Script = Script {
+      scriptBase :: String -- script basename (no extension)
+    , scriptLang :: String -- script language
+    , scriptCode :: String -- full script source code
+  }
+  deriving(Show, Ord, Eq)
+
 
 data Program = Program {
       -- TODO this isn't really the workflow, but rather a list of functions.
