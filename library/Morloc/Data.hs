@@ -3,7 +3,7 @@ module Morloc.Data (
   , TNode(..)
   , SNode(..) -- WTF 'sup with this name?
   , Program(..)
-  , FunctionTree(..)
+  , Function(..)
 ) where
 
 import Morloc.Graph (Graph)
@@ -23,12 +23,15 @@ data SNode
   | SLeaf MData
   deriving(Show, Eq)
 
-data FunctionTree a
-  = FunctionTree
+data Function a
+  = Function
     String    -- name
     [String]  -- bound variables
     (Graph a) -- function composition tree
   deriving(Show, Eq)
+
+instance Functor Function where
+  fmap f (Function x xs g) = Function x xs (fmap f g)
 
 data TNode
   = TNodeType MType
@@ -42,7 +45,7 @@ data Program = Program {
       -- TODO this isn't really the workflow, but rather a list of functions.
       -- Each function may link to values inside other functions. It is these
       -- linkes that create the workflow.
-      workflow :: [FunctionTree WNode]
+      workflow :: [Function WNode]
       -- TODO this isn't really the ontology, but rather just a list of type
       -- signatures. The ontology will hold the relations between them.
     , ontology :: [(

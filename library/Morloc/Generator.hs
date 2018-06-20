@@ -64,28 +64,27 @@ generateNexus p = pure $ Script {
       ]
 
 generatePools :: Program -> ThrowsError [Pool]
--- generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
-generatePools (Program ws _ ss) = undefined
+generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
   where
 
-    makePooler :: [FunctionTree WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
+    makePooler :: [Function WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
     makePooler ws ss =
-        fmap map                       -- ThrowsError ([Source] -> [Pool])
-      . fmap generatePool              -- ThrowsError (Source -> Pool)
-      . fmap (map replaceGraph)        -- ThrowsError [FunctionTree SNode]
-      . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph SNode)]
-      . join                           -- ThrowsError [Graph SNode]
-      . fmap sequence                  -- ThrowsError ThrowsError [Graph SNode]
-      . fmap (map sequence)            -- ThrowsError [ThrowsError (Graph SNode]
-      . fmap (map (familyMap toSNode)) -- ThrowsError [Graph (ThrowsError SNode)]
-      . fmap (map foo)                 -- ThrowsError [Graph (WNode, Maybe Source)]
-      . fmap (zip ws)                  -- ThrowsError [(FunctionTree WNode, Graph (Maybe Source))]
-      . sequence                       -- ThrowsError [Graph (Maybe Source)]
-      . map (toSource ss)              -- [ThrowsError (Graph (Maybe Source))]
-      $ [g | (FunctionTree _ _ g) <- ws]
+        fmap map                          -- ThrowsError ([Source] -> [Pool])
+      . fmap generatePool                 -- ThrowsError (Source -> Pool)
+      . (fmap . fmap) replaceGraph        -- ThrowsError [Function SNode]
+      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Graph SNode)]
+      . join                              -- ThrowsError [Graph SNode]
+      . fmap sequence                     -- ThrowsError ThrowsError [Graph SNode]
+      . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Graph SNode)]
+      . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Graph (ThrowsError SNode)]
+      . (fmap . fmap) foo                 -- ThrowsError [Graph (WNode, Maybe Source)]
+      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Graph (Maybe Source))]
+      . sequence                          -- ThrowsError [Graph (Maybe Source)]
+      . map (toSource ss)                 -- [ThrowsError (Graph (Maybe Source))]
+      $ [g | (Function _ _ g) <- ws]
 
-    foo :: (FunctionTree WNode, Graph (Maybe Source)) -> Graph (WNode, Maybe Source)
-    foo ((FunctionTree _ _ gnode), gsrc) = zipG gnode gsrc
+    foo :: (Function WNode, Graph (Maybe Source)) -> Graph (WNode, Maybe Source)
+    foo ((Function _ _ gnode), gsrc) = zipG gnode gsrc
 
     toSNode :: (WNode, Maybe Source) -> [(WNode, Maybe Source)] -> ThrowsError SNode
     toSNode (WLeaf x, Nothing) [] = Right (SLeaf x)
@@ -93,23 +92,13 @@ generatePools (Program ws _ ss) = undefined
     toSNode (WLeaf _, _      ) _  = Left (VeryBadBug "Data was associated with a source")
     toSNode x kids = Right (SNode x kids)
 
-    generatePool :: [FunctionTree SNode] -> Source -> Pool
-    generatePool = undefined
+    replaceGraph :: (Function a, Graph b) -> Function b
+    replaceGraph (Function s ss _, x) = Function s ss x
 
-    replaceGraph :: (FunctionTree a, Graph b) -> FunctionTree b
-    replaceGraph (FunctionTree s ss _, x) = FunctionTree s ss x
+generatePool :: [Function SNode] -> Source -> Pool
+generatePool = undefined
 
-
-
--- -- | Create the code for each function pool
--- generatePools :: Program -> ThrowsError [Pool]
--- generatePools (Program w _ ps)
---   = sequence $ map
---       (generatePool w)
---       (zip ps [1..]) -- associate each source with a number for uniquely
---                      -- identifying the pool that will be created around it
---
--- generatePool :: [FunctionTree] -> (Source, Integer) -> ThrowsError Pool
+-- generatePool :: [Function] -> (Source, Integer) -> ThrowsError Pool
 -- generatePool fs ((Source lang path imports), i)
 --   = Script
 --   <$> pure ("pool" ++ show i)        -- scriptBase
@@ -119,7 +108,7 @@ generatePools (Program ws _ ss) = undefined
 -- -- generate the code required for a specific `source` statement
 -- poolCode
 --   :: String                   -- language
---   -> [FunctionTree]           -- list of functions
+--   -> [Function]               -- list of functions
 --   -> Maybe [String]           -- path to source code (if needed)
 --   -> [(String, Maybe String)] -- list of imported functions
 --   -> ThrowsError String       -- complete code for the pool

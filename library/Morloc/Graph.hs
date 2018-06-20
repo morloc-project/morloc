@@ -26,19 +26,6 @@ import Data.List (union, transpose)
 
 data Graph a = Node a [Graph a] deriving(Show, Eq)
 
--- utilities ----------------------------------------------
-values :: [Graph a] -> [a]
-values = map v where
-  v (Node x _) = x 
-
-value :: Graph a -> a
-value (Node x _) = x
-
-kids :: Graph a -> [Graph a]
-kids (Node _ xs) = xs
------------------------------------------------------------
-
-
 instance Functor Graph where
   fmap f (Node x xs) = Node (f x) (fmap (fmap f) xs)
 
@@ -50,6 +37,17 @@ instance Traversable Graph where
 -- traverse :: Applicative f => (a -> f b) -> Graph a -> f (Graph b)
    traverse f (Node x xs) = Node <$> f x <*> (traverse . traverse) f xs
 
+-- utilities ----------------------------------------------
+values :: [Graph a] -> [a]
+values = map v where
+  v (Node x _) = x 
+
+value :: Graph a -> a
+value (Node x _) = x
+
+kids :: Graph a -> [Graph a]
+kids (Node _ xs) = xs
+-----------------------------------------------------------
 
 zipWithG :: (a -> b -> c) -> Graph a -> Graph b -> Graph c
 zipWithG f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithG f) xs ys)
