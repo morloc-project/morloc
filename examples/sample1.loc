@@ -2,7 +2,7 @@ source "R" (
     "runif"
   , "sample.int" as roll
   , "sum"
-)
+);
 
 runif :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
     n > 0

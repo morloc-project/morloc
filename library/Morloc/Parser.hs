@@ -34,6 +34,7 @@ top =
 topSource :: Parser Top
 topSource = do
   s <- source
+  optional (Tok.op ";")
   return $ TopSource s
 
 topStatement :: Parser Top
@@ -45,6 +46,7 @@ topImport :: Parser Top
 topImport = do
   i <-  try restrictedImport
     <|> try simpleImport
+  optional (Tok.op ";")
   return $ TopImport i
 
 statement :: Parser Statement
