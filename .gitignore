@@ -5,5 +5,5 @@ Main
 *.o
 .stack-work/
 .history
-nexus.sh
+nexus.*
 pool.*

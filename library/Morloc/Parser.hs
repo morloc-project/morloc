@@ -80,7 +80,7 @@ source = do
   -- get the language of the imported source
   lang <- Tok.stringLiteral
   -- get the path to the srouce file, if Nothing, then assume "vanilla"
-  path <- optionMaybe Tok.path
+  path <- optionMaybe (Tok.reserved "from" >> Tok.path)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
   return $ Source lang path fs

@@ -1,22 +1,3 @@
--- Generator.hs
-
-{-| Generate target code
-
-The role of the generator is the reverse of the role of the parser. A
-parser takes a string and builds a data structure. The generator takes a
-data structure and builds a string.
-
-Around statements - wrap the function, can be nested to arbitrary depth.
-assertions, effects, caches, filters -- all these are subsets of the
-Around statement.
- * assert - determine whether to run the funtion
- * before - do something before running the function
- * after  - do something after
- * cache  - output is cached ? return cache : run function
- * filter - perform a function on the output
-Since these wrap the function, they can be applied seperately
--}
-
 module Morloc.Generator (
       generate
     , Nexus
@@ -97,8 +78,7 @@ generatePool fs src
   <*> poolCode' fs src
   where
     poolName' :: Source -> String
-    poolName' (Source lang (Just path) _) = intercalate "." path
-    poolName' (Source _     Nothing    _) = "base"
+    poolName' _ = "pool" -- TODO append a number to make unique
 
     poolLang' :: Source -> String
     poolLang' (Source lang _ _) = lang
@@ -110,15 +90,43 @@ generatePool fs src
       -> Source
       -> ThrowsError String       -- complete code for the pool
 
-    poolCode' fs (Source _ Nothing _ )
+    poolCode' fs (Source _ (Just _) _ )
       = Left $ NotImplemented "cannot yet read source"
-    poolCode' fs (Source "R" (Just _) _) = generatePoolCode fs rCodeGenerator 
+    poolCode' fs (Source "R" Nothing i)
+      = generatePoolCode (Source "R" Nothing i) fs rCodeGenerator 
     poolCode' fs (Source lang   _ _)
       = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
 
 -- The top level
-generatePoolCode :: [Function SNode] -> CodeGenerator -> ThrowsError String
-generatePoolCode _ _ = Right "hello!" 
+generatePoolCode :: Source -> [Function SNode] -> CodeGenerator -> ThrowsError String
+generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
+  where
+    global' :: [String]
+    global' = []
+
+    source' :: [String]
+    source' = [(makeSource g) src]
+
+    functions' :: [Function SNode] -> [String]
+    functions' fs
+      = map function' -- [String]
+      . concat        -- [(Int, SNode)]
+      . map toList    -- [[(Int, Snode)]] 
+      . numberTrees   -- [Graph (Int, SNode)]
+      . map getGraph  -- [Graph (SNode)]
+      $ fs
+
+    getGraph :: Function SNode -> Graph SNode
+    getGraph (Function _ _ g) = g
+
+    function' :: (Int, SNode) -> String
+    function' (i, n) = (makeFunction g) (makeNode g $ i) "args" "body"
+
+    -- , makeFunction
+    --     :: String  -- function name
+    --     -> String  -- argument string (output of `makeArgs`)
+    --     -> String  -- body
+    --     -> String  -- complete function
 
 toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
 toSource srcs =

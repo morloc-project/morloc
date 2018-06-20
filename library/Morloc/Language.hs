@@ -21,6 +21,10 @@ data CodeGenerator = CodeGenerator {
         -> [String] -- the node function declarations
         -> String   -- entire pool script
 
+    , makeSource
+        :: Source
+        -> String
+
     , makeFunction
         :: String  -- function name
         -> String  -- argument string (output of `makeArgs`)
@@ -50,6 +54,7 @@ data CodeGenerator = CodeGenerator {
 
 rCodeGenerator = CodeGenerator {
     makePool         = \gs is fs -> unlines . concat $ [begin', gs, is, fs, end']
+  , makeSource       = rSource
   , makeFunction     = \f a b -> f ++ " function(" ++ a ++ "){" ++ (indent 2 b) ++ "}"
   , makeFunctionCall = \f args -> f ++ "(" ++ args ++ ")"
   , makeArgs         = intercalate ", " . map showArg
@@ -57,6 +62,10 @@ rCodeGenerator = CodeGenerator {
   , makeMData        = showRData
   }
   where
+
+    rSource :: Source -> String
+    rSource (Source _ (Just path) _) = "source(" ++ (intercalate "/" path) ++ ")"
+    rSource (Source _ Nothing _)     = ""
 
     begin' = []
     end'   = []

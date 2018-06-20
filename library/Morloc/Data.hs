@@ -47,7 +47,7 @@ data Script = Script {
     , scriptLang :: String -- script language
     , scriptCode :: String -- full script source code
   }
-  deriving(Show, Ord, Eq)
+  deriving(Ord, Eq)
 
 
 data Program = Program {
@@ -67,3 +67,6 @@ data Program = Program {
     , packages :: [Source]
   }
   deriving(Show, Eq)
+
+instance Show Script where
+  show (Script base lang code) = code 
