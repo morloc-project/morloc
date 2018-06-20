@@ -34,6 +34,7 @@ import Morloc.Data
 import Morloc.Syntax
 import Morloc.Error
 import Morloc.Util (which)
+import Morloc.Language
 
 type Nexus = Script
 type Pool  = Script
@@ -57,13 +58,13 @@ generateNexus p = pure $ Script {
       ]
 
 generatePools :: Program -> ThrowsError [Pool]
-generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
+generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pure ss
   where
 
-    makePooler :: [Function WNode] -> [Source] -> ThrowsError ([Source] -> [Pool])
+    makePooler :: [Function WNode] -> [Source] -> ThrowsError ([Source] -> [ThrowsError Pool])
     makePooler ws ss =
-        fmap map                          -- ThrowsError ([Source] -> [Pool])
-      . fmap generatePool                 -- ThrowsError (Source -> Pool)
+        fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
+      . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
       . (fmap . fmap) replaceGraph        -- ThrowsError [Function SNode]
       . fmap (zip ws)                     -- ThrowsError [(Function WNode, Graph SNode)]
       . join                              -- ThrowsError [Graph SNode]
@@ -88,12 +89,12 @@ generatePools (Program ws _ ss) = makePooler ws ss <*> pure ss
     replaceGraph :: (Function a, Graph b) -> Function b
     replaceGraph (Function s ss _, x) = Function s ss x
 
-generatePool :: [Function SNode] -> Source -> Pool
+generatePool :: [Function SNode] -> Source -> ThrowsError Pool
 generatePool fs src
-  = Script
-    (poolName'    src)
-    (poolLang'    src)
-    (poolCode' fs src)
+  =   Script
+  <$> pure (poolName'    src)
+  <*> pure (poolLang'    src)
+  <*> poolCode' fs src
   where
     poolName' :: Source -> String
     poolName' (Source lang (Just path) _) = intercalate "." path
@@ -104,16 +105,20 @@ generatePool fs src
 
 
     -- generate the code required for a specific `source` statement
-    poolCode
+    poolCode'
       :: [Function SNode]         -- list of functions
       -> Source
       -> ThrowsError String       -- complete code for the pool
 
-    poolCode fs (Source _ Nothing _ )
+    poolCode' fs (Source _ Nothing _ )
       = Left $ NotImplemented "cannot yet read source"
-    poolCode fs (Source "R" (Just _) _) = undefined
-    poolCode fs (Source _   _ _)
-      = NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
+    poolCode' fs (Source "R" (Just _) _) = generatePoolR fs rCodeGenerator 
+    poolCode' fs (Source lang   _ _)
+      = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
+
+-- The top level
+generatePoolCode :: [Function SNode] -> CodeGenerator -> ThrowsError String
+generatePoolCode = undefined
 
 toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
 toSource srcs =
