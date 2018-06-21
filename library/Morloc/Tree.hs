@@ -36,6 +36,11 @@ instance Traversable Tree where
 -- traverse :: Applicative f => (a -> f b) -> Tree a -> f (Tree b)
    traverse f (Node x xs) = Node <$> f x <*> (traverse . traverse) f xs
 
+instance Applicative Tree where
+  pure x = Node x []
+  -- (<*>) :: f (a -> b) -> f a -> f b
+  (Node f fs) <*> (Node x xs) = Node (f x) (zipWith (<*>) fs xs)
+
 -- TODO this algorithm skips numbers sometimes, don't know why ...
 -- need to fix the damn thing
 numberT :: Int -> Tree a -> Tree (Int, a)
