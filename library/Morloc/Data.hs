@@ -23,6 +23,7 @@ data WNode
 data SNode
   = SNode
     (WNode, Source)   -- parent
+    [String]          -- bound arguments
     [(WNode, Source)] -- children
   | SLeaf
     (Maybe Int)

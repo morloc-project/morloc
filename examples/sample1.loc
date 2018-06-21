@@ -28,4 +28,4 @@ rollSum n s = sum (roll s n);
 x = sum 34 [1,2,3] 5.6;
 
 # Get the minimum for rolling n s-sided dice
-rollMin n s = min (roll s n);
+rollMin ee rr = min (roll ee rr);

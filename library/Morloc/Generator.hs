@@ -5,6 +5,7 @@ module Morloc.Generator (
   ) where
 
 import Control.Monad (join)
+import Data.List (intersect)
 
 import Morloc.Tree
 import Morloc.Data
@@ -42,6 +43,7 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
     makePooler
       = fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
       . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
+      . (fmap . map) setBoundVar          -- ThrowsError [Function SNode]
       . (fmap . fmap) replaceTree         -- ThrowsError [Function SNode]
       . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree SNode)]
       . join                              -- ThrowsError [Tree SNode]
@@ -72,11 +74,19 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
     foo :: (Function WNode, Tree Source) -> Tree (WNode, Source)
     foo ((Function _ _ gnode), gsrc) = zipTree gnode gsrc
 
+    -- TODO fix this ugliness ...
+    setBoundVar :: Function SNode -> Function SNode
+    setBoundVar (Function n vars tree) = Function n vars (fmap (setBoundVar' vars) tree)
+
+    setBoundVar' :: [String] -> SNode -> SNode
+    setBoundVar' vars (SNode x _ xs) = SNode x vars xs 
+    setBoundVar' _ n = n
+
     toSNode :: (WNode, Source) -> [(WNode, Source)] -> ThrowsError SNode
     toSNode (WLeaf i x, SourceLocal) [] = Right (SLeaf i x)
     toSNode (WLeaf _ _, SourceLocal) _  = Left (BadApplication "Data cannot be given arguments")
     toSNode (WLeaf _ _, _      ) _      = Left (VeryBadBug "Data was associated with a source")
-    toSNode x kids = Right (SNode x kids)
+    toSNode x kids = Right (SNode x [] kids)
 
     replaceTree :: (Function a, Tree b) -> Function b
     replaceTree (Function s ss _, x) = Function s ss x
@@ -131,29 +141,55 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     getTree :: Function SNode -> Tree SNode
     getTree (Function _ _ g) = g
 
+    getBoundVars :: [Function SNode] -> [[String]]
+    getBoundVars fs' = [xs | (Function _ xs _) <- fs']
+
     function' :: SNode -> String
-    function' (SNode (w, SourceLocal) ss)
-      = (makeFunction g) (makeNode g $ w) "" (cisBody' w ss)
-    function' (SNode (w, s) ss)
-      | s == src  = (makeFunction g) (makeNode g $ w) "" (cisBody' w ss)
-      | otherwise = (makeFunction g) (makeNode g $ w) "" (transBody' w ss)
-    function' (SLeaf i d) = (makeAssignment g) (makeNode g $ WLeaf i d) (makeMData g $ d)
+    function' (SNode (w, SourceLocal) vars ss)
+      = (makeFunction g)
+        (makeNode g $ w)
+        (manifoldArgs vars)
+        (cisBody' w vars ss)
+    function' (SNode (w, s) vars ss)
+      | s == src = (makeFunction g)
+                   (makeNode g $ w)
+                   (manifoldArgs vars)
+                   (cisBody' w vars ss)
+      | otherwise = (makeFunction g)
+                    (makeNode g $ w)
+                    (manifoldArgs vars)
+                    (transBody' w vars ss)
+    function' (SLeaf i d)
+      = (makeAssignment g)
+        (makeNode g $ WLeaf i d)
+        (makeMData g $ d)
     function' x = show x
 
-    cisBody' (WNode _ n _) ss = (makeFunctionCall g) n (arguments' ss)
+    manifoldArgs :: [String] -> String
+    manifoldArgs ss = makeArgs g . map Positional $ ss 
 
-    transBody' _ _ = "TRANS_STUB"
+    cisBody' :: WNode -> [String] -> [(WNode, Source)] -> String
+    cisBody' (WNode _ n _) vars ss
+      | elem n vars = n
+      | otherwise   = (makeFunctionCall g) n (arguments' vars ss) -- the pure function call
 
-    arguments' :: [(WNode, Source)] -> String
-    arguments' ss = (makeArgs g) $ map argument' (map fst ss)
+    transBody' :: WNode -> [String] -> [(WNode, Source)] -> String
+    transBody' _ _ _ = "TRANS_STUB"
+
+    arguments' :: [String] -> [(WNode, Source)] -> String
+    arguments' vars ss = makeArgs g $ map (argument' vars) (map fst ss)
 
     -- TODO need error handling
-    argument' :: WNode -> Arg
-    argument' (WNode (Just i) n a)
-      = Positional ((makeFunctionCall g) (makeNode g $ WNode (Just i) n a) "")
-    argument' (WLeaf (Just i) d)
+    argument' :: [String] -> WNode -> Arg
+    argument' vars (WNode (Just i) n a)
+      | elem n vars = Positional n
+      | otherwise   = Positional $
+          (makeFunctionCall g)
+          (makeNode g $ WNode (Just i) n a)
+          (makeArgs g $ map Positional vars)
+    argument' _ (WLeaf (Just i) d)
       = Positional (makeNode g $ WLeaf (Just i) d)
-    argument' _ = Positional "ERROR"
+    argument' _ _ = Positional "ERROR"
 
 toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
 toSource srcs =
