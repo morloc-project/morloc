@@ -42,8 +42,8 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pu
   where
 
     makePooler :: [Function WNode] -> [Source] -> ThrowsError ([Source] -> [ThrowsError Pool])
-    makePooler ws ss =
-        fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
+    makePooler ws ss
+      = fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
       . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
       . (fmap . fmap) replaceTree         -- ThrowsError [Function SNode]
       . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree SNode)]
@@ -51,27 +51,34 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pu
       . fmap sequence                     -- ThrowsError ThrowsError [Tree SNode]
       . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Tree SNode)]
       . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Tree (ThrowsError SNode)]
-      . (fmap . fmap) foo                 -- ThrowsError [Tree (WNode, Source)]
-      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree (Source))]
-      . sequence                          -- ThrowsError [Tree (Source)]
-      . map (toSource ss)                 -- [ThrowsError (Tree (Source))]
-      $ [g | (Function _ _ g) <- ws]
+      $ zipWith zipTree
+        <$> pure wTrees
+        <*> sTrees                        -- ThrowsError [Tree (WNode, Source)]
 
-    -- tWNode' :: [Tree WNode]
-    -- tWNode' = [t | (Function _ _ t) <- ws]
-    --
-    -- tSource' :: ThrowsError [Tree (Maybe Source)]
-    -- tSource' = map (toSource ss) ws
-    --
-    -- tNumber' ::
+    sTrees :: ThrowsError [Tree Source]
+    sTrees = sequence $ map (toSource ss) wTrees
+
+    idTrees :: [Tree Int]
+    idTrees = numberTrees wTrees
+
+    wTrees :: [Tree WNode]
+    wTrees
+      = zipWith                      -- (a -> b -> c) -> [a] -> [b] -> [c]
+        (zipWithTree setID)          -- Tree Wnode -> Tree Int -> Tree Wnode
+        idTrees                      -- [Tree Int]
+        [t | (Function _ _ t) <- ws] -- [Tree WNode]
+
+    setID :: Int -> WNode -> WNode
+    setID i (WNode _ x y) = WNode (Just i) x y 
+    setID i (WLeaf _ x  ) = WLeaf (Just i) x  
 
     foo :: (Function WNode, Tree Source) -> Tree (WNode, Source)
-    foo ((Function _ _ gnode), gsrc) = zipT gnode gsrc
+    foo ((Function _ _ gnode), gsrc) = zipTree gnode gsrc
 
     toSNode :: (WNode, Source) -> [(WNode, Source)] -> ThrowsError SNode
-    toSNode (WLeaf x, SourceLocal) [] = Right (SLeaf x)
-    toSNode (WLeaf _, SourceLocal) _  = Left (BadApplication "Data cannot be given arguments")
-    toSNode (WLeaf _, _      ) _      = Left (VeryBadBug "Data was associated with a source")
+    toSNode (WLeaf i x, SourceLocal) [] = Right (SLeaf i x)
+    toSNode (WLeaf _ _, SourceLocal) _  = Left (BadApplication "Data cannot be given arguments")
+    toSNode (WLeaf _ _, _      ) _      = Left (VeryBadBug "Data was associated with a source")
     toSNode x kids = Right (SNode x kids)
 
     replaceTree :: (Function a, Tree b) -> Function b
@@ -119,29 +126,29 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     functions' :: [Function SNode] -> [String]
     functions' fs
       = map function' -- [String]
-      . concat        -- [(Int, SNode)]
-      . map toList    -- [[(Int, Snode)]] 
-      . numberTrees   -- [Tree (Int, SNode)]
-      . map getTree  -- [Tree (SNode)]
+      . concat        -- [SNode]
+      . map toList    -- [[Snode]] 
+      . map getTree   -- [Tree SNode] 
       $ fs
 
+    snTrees :: [Tree SNode]
+    snTrees = map getTree fs 
+
+    idTrees :: [Tree Int]
+    idTrees = numberTrees snTrees
 
     getTree :: Function SNode -> Tree SNode
     getTree (Function _ _ g) = g
 
-    function' :: (Int, SNode) -> String
-    function' (i, (SNode (w, SourceLocal) ss))
-      = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
-    function' (i, (SNode (w, s) ss))
-      | s == src  = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
-      | otherwise = (makeFunction g) (makeNode g $ i) (arguments' ss) "foreign call"
-    function' (i, SLeaf d) = (makeAssignment g) (makeNode g $ i) (makeMData g $ d)
+    function' :: SNode -> String
+    function' (SNode (w, SourceLocal) ss)
+      = (makeFunction g) (makeNode g $ w) (arguments' ss) "internal call"
+    function' (SNode (w, s) ss)
+      | s == src  = (makeFunction g) (makeNode g $ w) (arguments' ss) "internal call"
+      | otherwise = (makeFunction g) (makeNode g $ w) (arguments' ss) "foreign call"
+    function' (SLeaf i d) = (makeAssignment g) (makeNode g $ WLeaf i d) (makeMData g $ d)
     function' x = show x
 
-    -- TODO I need to keep track of the node indices for all the data,
-    -- including the children. Maybe I should just ditch the indexing and use
-    -- mangled names? Why do I use them anyway? Just legacy, really.
-    
     arguments' _ = "args"
 
     -- arguments' :: [(Int, WNode)] -> String
@@ -149,7 +156,7 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     --
     -- argument' :: (Int, WNode) -> Arg
     -- argument' (i, SNode _ _) = Positional "function_call"
-    -- argument' (i, SLeaf _)   = Positional "data_variable"
+    -- argument' (i, SLeaf _ _)   = Positional "data_variable"
 
 toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
 toSource srcs =
@@ -158,11 +165,11 @@ toSource srcs =
   where
 
     toSource' :: [Source] -> WNode -> ThrowsError Source
-    toSource' ss (WNode n a) = case map (mSource (WNode n a)) ss of
+    toSource' ss (WNode i n a) = case map (mSource (WNode i n a)) ss of
       []  -> Right SourceLocal  -- the contents of WNode where not imported
       [s] -> Right s
       ss  -> Left (NameConflict n (map sourceNames ss))
-    toSource' _ (WLeaf _) = Right SourceLocal
+    toSource' _ (WLeaf _ _) = Right SourceLocal
 
     sourceNames :: Source -> String 
     sourceNames (SourceLang n _)   = n
@@ -176,13 +183,13 @@ toSource srcs =
     mSource _ _ = SourceLocal
 
     elem' :: WNode -> Source -> Bool
-    elem' (WNode name _) (SourceLang _   ns) = elem name (functionNames ns)
-    elem' (WNode name _) (SourceFile _ _ ns) = elem name (functionNames ns)
+    elem' (WNode _ name _) (SourceLang _   ns) = elem name (functionNames ns)
+    elem' (WNode _ name _) (SourceFile _ _ ns) = elem name (functionNames ns)
     elem' _              _                   = False
 
 isVar :: Tree WNode -> Tree Bool
 isVar = fmap isVar' where
-  isVar' (WNode _ _) = True
+  isVar' (WNode _ _ _) = True
   isVar' _ = False
 
 functionNames :: Functor f => f (String, Maybe String) -> f String
@@ -192,11 +199,11 @@ functionNames = fmap f
     f (_, Just s) = s -- if there is an alias, use it
     f (s, _     ) = s -- otherwise use the original name
 
-numberTrees :: [Tree a] -> [Tree (Int, a)]
+numberTrees :: [Tree a] -> [Tree Int]
 numberTrees gs = numberTrees' 1 gs
   where
-    numberTrees' :: Int -> [Tree a] -> [Tree (Int, a)]
+    numberTrees' :: Int -> [Tree a] -> [Tree Int]
     numberTrees' _ [] = []
-    numberTrees' i [g] = [numberT i g]
-    numberTrees' i (g:gs) = case (numberT i g) of
+    numberTrees' i [g] = [indexTree i g]
+    numberTrees' i (g:gs) = case (indexTree i g) of
       g' -> g' : (numberTrees' (i + length g' + 1) gs)

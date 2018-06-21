@@ -7,18 +7,18 @@ module Morloc.Tree
     , parentChildMap
     , parentChildMapI
     , isomorphic
-    , zipWithT
-    , safeZipWithT
-    , zipT
-    , safeZipT
+    , zipWithTree
+    , safeZipWithTree
+    , zipTree
+    , safeZipTree
     , isTerminal
-    , ifelseT
-    , pullT
+    , ifelseTree
+    , pullTree
     , propagate
     , replaceValue
     , suczip
-    , combinT
-    , numberT
+    , combinTree
+    , indexTree
 ) where
 
 import Data.List (union, transpose)
@@ -43,11 +43,11 @@ instance Applicative Tree where
 
 -- TODO this algorithm skips numbers sometimes, don't know why ...
 -- need to fix the damn thing
-numberT :: Int -> Tree a -> Tree (Int, a)
-numberT i (Node x [])     = Node (i, x) []
-numberT i (Node x (k:ks)) = Node (i, x) (kids' (i+1) k ks) where
-  kids' i x [] = [numberT i x]
-  kids' i x (y:ys) = case numberT i x of 
+indexTree :: Int -> Tree a -> Tree Int
+indexTree i (Node x [])     = Node i []
+indexTree i (Node x (k:ks)) = Node i (kids' (i+1) k ks) where
+  kids' i x [] = [indexTree i x]
+  kids' i x (y:ys) = case indexTree i x of 
     g' -> g' : kids' (length g' + i) y ys
 
 -- utilities ----------------------------------------------
@@ -62,30 +62,30 @@ kids :: Tree a -> [Tree a]
 kids (Node _ xs) = xs
 -----------------------------------------------------------
 
-zipWithT :: (a -> b -> c) -> Tree a -> Tree b -> Tree c
-zipWithT f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithT f) xs ys)
+zipWithTree :: (a -> b -> c) -> Tree a -> Tree b -> Tree c
+zipWithTree f (Node x xs) (Node y ys) = Node (f x y) (zipWith (zipWithTree f) xs ys)
 
 isomorphic :: Tree a -> Tree b -> Bool
 isomorphic (Node _ xs) (Node _ ys) = cmp_this && cmp_kids where
   cmp_this = length xs == length ys
   cmp_kids = and $ zipWith isomorphic xs ys
 
-safeZipWithT :: (a -> b -> c) -> Tree a -> Tree b -> Maybe (Tree c)
-safeZipWithT f a b =
+safeZipWithTree :: (a -> b -> c) -> Tree a -> Tree b -> Maybe (Tree c)
+safeZipWithTree f a b =
   if isomorphic a b then
-    Just (zipWithT f a b)
+    Just (zipWithTree f a b)
   else
     Nothing
 
-zipT :: Tree a -> Tree b -> Tree (a,b)
-zipT = zipWithT (,)
+zipTree :: Tree a -> Tree b -> Tree (a,b)
+zipTree = zipWithTree (,)
 
-safeZipT :: Tree a -> Tree b -> Maybe (Tree (a,b))
-safeZipT = safeZipWithT (,)
+safeZipTree :: Tree a -> Tree b -> Maybe (Tree (a,b))
+safeZipTree = safeZipWithTree (,)
 
-pullT :: (a -> a -> a) -> Tree a -> Tree a
-pullT f (Node x xs) = Node (foldr f x (values xs')) xs' where
-  xs' = map (pullT f) xs
+pullTree :: (a -> a -> a) -> Tree a -> Tree a
+pullTree f (Node x xs) = Node (foldr f x (values xs')) xs' where
+  xs' = map (pullTree f) xs
 
 propagate :: (a -> [a] -> [a]) -> Tree a -> Tree a
 propagate f (Node x xs) = Node x (map (propagate f) newkids) where
@@ -98,8 +98,8 @@ isTerminal :: Tree a -> Tree Bool
 isTerminal (Node _ []) = Node True []
 isTerminal (Node _ xs) = Node False (map isTerminal xs)
 
-ifelseT :: Tree Bool -> (a -> b) -> (a -> b) -> Tree a -> Tree b
-ifelseT gcond fa fb gx = zipWithT ternary' gx gcond where
+ifelseTree :: Tree Bool -> (a -> b) -> (a -> b) -> Tree a -> Tree b
+ifelseTree gcond fa fb gx = zipWithTree ternary' gx gcond where
   ternary' x cond = if cond then fa x else fb x
 
 -- | tree to list, just a list of all a
@@ -141,5 +141,5 @@ suczip f x (Node y kids) = Node (x,y) (mapzip' f (f x) kids) where
     top = suczip f' x' t
 
 -- | Given a list of isomorphic trees, combine all into a single tree.
-combinT :: [Tree a] -> Tree [a]
-combinT gs = Node (map value gs) (map combinT . transpose . map kids $ gs)
+combinTree :: [Tree a] -> Tree [a]
+combinTree gs = Node (map value gs) (map combinTree . transpose . map kids $ gs)

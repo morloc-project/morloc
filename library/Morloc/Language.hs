@@ -5,6 +5,7 @@ module Morloc.Language (
 ) where
 
 import Morloc.Syntax
+import Morloc.Data
 import Data.List (intercalate)
 
 indent :: Int -> String -> String
@@ -46,7 +47,7 @@ data CodeGenerator = CodeGenerator {
       -- works fine. Alternatively I could use a more descriptive name, such as the
       -- wrapped function with a suffix.
     , makeNode
-        :: Int    -- the index of a node
+        :: WNode
         -> String -- the function name of the node
 
     , makeAssignment
@@ -63,11 +64,15 @@ rCodeGenerator = CodeGenerator {
   , makeFunction     = \f a b -> f ++ " function(" ++ a ++ "){" ++ (indent 2 b) ++ "}"
   , makeFunctionCall = \f args -> f ++ "(" ++ args ++ ")"
   , makeArgs         = intercalate ", " . map showArg
-  , makeNode         = \i -> "m" ++ show i
+  , makeNode         = makeNode'
   , makeAssignment   = \l r -> l ++ " <- " ++ r
   , makeMData        = showRData
   }
   where
+
+    makeNode' (WNode (Just i) _ _) = "m" ++ show i
+    makeNode' (WLeaf (Just i)   _) = "m" ++ show i
+    makeNode' _                    = "FUUUUUUUCK!"
 
     rSource :: Source -> String
     rSource (SourceFile _ path _) = "source(" ++ (intercalate "/" path) ++ ")"

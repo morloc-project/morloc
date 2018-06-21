@@ -45,16 +45,16 @@ workflow' xs = sequence $
   -- legal. But for now I won't allow it. 
   -- Anyway, as it is, the following will never raise an error. 
   callTree (S.ExprData mdata)
-    = pure $ G.Node (WLeaf mdata) []
+    = pure $ G.Node (WLeaf Nothing mdata) []
 
   -- parse an application
   callTree (S.ExprApplication name tag xs)
-    = G.Node <$> pure (WNode name tag) <*> sequence (map callTree xs) 
+    = G.Node <$> pure (WNode Nothing name tag) <*> sequence (map callTree xs) 
 
   -- parse composition
   callTree (S.ExprComposition g f)
     = case (callTree g) of 
-      Right (G.Node (WLeaf _) _)
+      Right (G.Node (WLeaf _ _) _)
         -> Left (E.BadComposition "Only functions can be composed")
       Right (G.Node v kids)
         -> G.Node <$> pure v <*> (app <$> pure kids <*> callTree f)

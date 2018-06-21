@@ -12,16 +12,21 @@ import Morloc.Syntax (Source, MType, MData, BExpr)
 
 data WNode
   = WNode
-      String -- name
-      String -- tag
-  | WLeaf MData 
+      (Maybe Int) -- manifold id
+      String      -- name
+      String      -- tag
+  | WLeaf
+      (Maybe Int) -- manifold id
+      MData 
   deriving(Show, Ord, Eq)
 
 data SNode
   = SNode
     (WNode, Source)   -- parent
     [(WNode, Source)] -- children
-  | SLeaf MData
+  | SLeaf
+    (Maybe Int)
+    MData
   deriving(Show, Eq)
 
 data Function a
