@@ -4,9 +4,6 @@ module Morloc.Generator (
     , Pool
   ) where
 
-import Data.List (intercalate)
-import qualified Data.Char as DC 
-import Safe (atMay)
 import Control.Monad (join)
 
 import Morloc.Tree
@@ -38,11 +35,11 @@ generateNexus p = pure $ Script {
       ]
 
 generatePools :: Program -> ThrowsError [Pool]
-generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pure ss
+generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
   where
 
-    makePooler :: [Function WNode] -> [Source] -> ThrowsError ([Source] -> [ThrowsError Pool])
-    makePooler ws ss
+    makePooler :: ThrowsError ([Source] -> [ThrowsError Pool])
+    makePooler
       = fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
       . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
       . (fmap . fmap) replaceTree         -- ThrowsError [Function SNode]
@@ -127,36 +124,36 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     functions' fs
       = map function' -- [String]
       . concat        -- [SNode]
-      . map toList    -- [[Snode]] 
-      . map getTree   -- [Tree SNode] 
+      . map toList    -- [[Snode]]
+      . map getTree   -- [Tree SNode]
       $ fs
-
-    snTrees :: [Tree SNode]
-    snTrees = map getTree fs 
-
-    idTrees :: [Tree Int]
-    idTrees = numberTrees snTrees
 
     getTree :: Function SNode -> Tree SNode
     getTree (Function _ _ g) = g
 
     function' :: SNode -> String
     function' (SNode (w, SourceLocal) ss)
-      = (makeFunction g) (makeNode g $ w) (arguments' ss) "internal call"
+      = (makeFunction g) (makeNode g $ w) "" (cisBody' w ss)
     function' (SNode (w, s) ss)
-      | s == src  = (makeFunction g) (makeNode g $ w) (arguments' ss) "internal call"
-      | otherwise = (makeFunction g) (makeNode g $ w) (arguments' ss) "foreign call"
+      | s == src  = (makeFunction g) (makeNode g $ w) "" (cisBody' w ss)
+      | otherwise = (makeFunction g) (makeNode g $ w) "" (transBody' w ss)
     function' (SLeaf i d) = (makeAssignment g) (makeNode g $ WLeaf i d) (makeMData g $ d)
     function' x = show x
 
-    arguments' _ = "args"
+    cisBody' (WNode _ n _) ss = (makeFunctionCall g) n "..."
 
-    -- arguments' :: [(Int, WNode)] -> String
-    -- arguments' ss = (makeArgs g) $ map argument' ss
+    transBody' _ _ = "TRANS_STUB"
+
+    -- arguments' :: [(WNode, Source)] -> String
+    -- arguments' ss = (makeArgs g) $ map argument' (map fst ss)
     --
-    -- argument' :: (Int, WNode) -> Arg
-    -- argument' (i, SNode _ _) = Positional "function_call"
-    -- argument' (i, SLeaf _ _)   = Positional "data_variable"
+    -- -- TODO need error handling
+    -- argument' :: WNode -> Arg
+    -- argument' (WNode (Just i) n a)
+    --   = Positional ((makeFunctionCall g) (makeNode g $ WNode (Just i) n a) "")
+    -- argument' (WLeaf (Just i) d)
+    --   = Positional (makeNode g $ WLeaf (Just i) d)
+    -- argument' _ = Positional "ERROR"
 
 toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
 toSource srcs =
@@ -168,7 +165,7 @@ toSource srcs =
     toSource' ss (WNode i n a) = case map (mSource (WNode i n a)) ss of
       []  -> Right SourceLocal  -- the contents of WNode where not imported
       [s] -> Right s
-      ss  -> Left (NameConflict n (map sourceNames ss))
+      xs -> Left (NameConflict n (map sourceNames xs))
     toSource' _ (WLeaf _ _) = Right SourceLocal
 
     sourceNames :: Source -> String 
@@ -180,17 +177,11 @@ toSource srcs =
     mSource node src 
       | elem' node src = src
       | otherwise = SourceLocal
-    mSource _ _ = SourceLocal
 
     elem' :: WNode -> Source -> Bool
     elem' (WNode _ name _) (SourceLang _   ns) = elem name (functionNames ns)
     elem' (WNode _ name _) (SourceFile _ _ ns) = elem name (functionNames ns)
     elem' _              _                   = False
-
-isVar :: Tree WNode -> Tree Bool
-isVar = fmap isVar' where
-  isVar' (WNode _ _ _) = True
-  isVar' _ = False
 
 functionNames :: Functor f => f (String, Maybe String) -> f String
 functionNames = fmap f
@@ -205,5 +196,5 @@ numberTrees gs = numberTrees' 1 gs
     numberTrees' :: Int -> [Tree a] -> [Tree Int]
     numberTrees' _ [] = []
     numberTrees' i [g] = [indexTree i g]
-    numberTrees' i (g:gs) = case (indexTree i g) of
-      g' -> g' : (numberTrees' (i + length g' + 1) gs)
+    numberTrees' i (g:gs') = case (indexTree i g) of
+      g' -> g' : (numberTrees' (i + length g' + 1) gs')

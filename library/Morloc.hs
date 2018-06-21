@@ -1,10 +1,8 @@
 module Morloc (ast, build) where
 
-import Morloc.Data (Program)
 import Morloc.Evaluator (eval)
 import Morloc.Error
 import Morloc.Generator (generate, Nexus, Pool)
-import Text.Parsec (SourceName, parse)
 
 build :: String -> ThrowsError (Nexus, [Pool]) 
 build s = eval s >>= generate

@@ -13,7 +13,10 @@ indent i s
   | i <= 0    = s
   | otherwise = unlines . map ((++) (take i (repeat ' '))) . lines $ s
 
-data Arg = Positional String | Keyword String String
+data Arg
+  = Positional String
+  | Keyword String String
+  | NoArgument
 
 data CodeGenerator = CodeGenerator {
       makePool
@@ -84,7 +87,8 @@ rCodeGenerator = CodeGenerator {
     -- data Arg = Positional String | Keyword String String
 
     showArg (Positional s) = s
-    showArg (Keyword n s) = n ++ "=" ++ s
+    showArg (Keyword n s)  = n ++ "=" ++ s
+    showArg NoArgument     = ""
 
     showRData :: MData -> String
     showRData (MInt x)     = show x

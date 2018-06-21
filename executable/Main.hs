@@ -15,6 +15,7 @@ writeScript :: Script -> IO ()
 writeScript (Script base lang code) =
   writeFile (base ++ "." ++ lang) code
 
+main :: IO ()
 main = do
   args <- getArgs
   case args of
