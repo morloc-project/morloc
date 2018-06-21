@@ -31,7 +31,7 @@ generateNexus p = pure $ Script {
     nexusCode' _ =  unlines [
           "# Bash"
         , ""
-        , "Rscript pool.R m1"
+        , "Rscript pool.R $@"
       ]
 
 

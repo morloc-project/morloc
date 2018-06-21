@@ -32,18 +32,25 @@ stack build
 stack install
 ```
 
-You can enter the shell by calling `morloc`, and run calls such as:
+Then you can run a Morloc script, you might start with the example in
+`examples/sample1.loc`. This is just a toy script and I will have a better demo
+soon. Also the type signatures in this demo are currently ignored by the
+compiler.
+
+This script can be complied as follows:
 
 ```sh
-morloc> sqrt . runif 5 100 1000
-[1] 28.72607 13.75368 13.52110 23.39841 30.65631
+morloc examples/sample1.loc
 ```
 
-This generates the R code for the composed functions, builds an Rscript,
-executes it, and returns the result (in this case, the square root of
-5 uniformly distributed random numbers between 100 and 1000).
+This will generate two files, `nexus.bash` and `pool.R`. Data from specific
+nodes can now be accessed.
 
-This is a very minimal prototype. More will come soon.
+```sh
+bash nexus.bash m3 23 5
+```
+
+I will clean up this interface soon.
 
 
 C prototype
