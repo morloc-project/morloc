@@ -56,7 +56,7 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
     sTrees = sequence $ map (toSource ss) wTrees
 
     idTrees :: [Tree Int]
-    idTrees = numberTrees wTrees
+    idTrees = numberTrees [t | (Function _ _ t) <- ws]
 
     wTrees :: [Tree WNode]
     wTrees
@@ -66,8 +66,8 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
         [t | (Function _ _ t) <- ws] -- [Tree WNode]
 
     setID :: Int -> WNode -> WNode
-    setID i (WNode _ x y) = WNode (Just i) x y 
-    setID i (WLeaf _ x  ) = WLeaf (Just i) x  
+    setID i (WNode _ x y) = WNode (Just i) x y
+    setID i (WLeaf _ x  ) = WLeaf (Just i) x
 
     foo :: (Function WNode, Tree Source) -> Tree (WNode, Source)
     foo ((Function _ _ gnode), gsrc) = zipTree gnode gsrc
@@ -102,7 +102,7 @@ generatePool fs src
       -> Source
       -> ThrowsError String       -- complete code for the pool
     poolCode' fs (SourceLang "R" i)
-      = generatePoolCode (SourceLang "R" i) fs rCodeGenerator 
+      = generatePoolCode (SourceLang "R" i) fs rCodeGenerator
     poolCode' _  (SourceFile _ _ _ )
       = Left $ NotImplemented "cannot yet read source"
     poolCode' _  (SourceLang lang   _)
