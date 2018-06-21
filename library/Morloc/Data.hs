@@ -7,7 +7,7 @@ module Morloc.Data (
   , Function(..)
 ) where
 
-import Morloc.Graph (Graph)
+import Morloc.Tree (Tree)
 import Morloc.Syntax (Source, MType, MData, BExpr)
 
 data WNode
@@ -26,9 +26,9 @@ data SNode
 
 data Function a
   = Function
-    String    -- name
-    [String]  -- bound variables
-    (Graph a) -- function composition tree
+    String   -- name
+    [String] -- bound variables
+    (Tree a) -- function composition tree
   deriving(Show, Eq)
 
 instance Functor Function where

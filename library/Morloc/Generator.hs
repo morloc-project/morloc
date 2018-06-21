@@ -10,7 +10,7 @@ import qualified Data.Char as DC
 import Safe (atMay)
 import Control.Monad (join)
 
-import Morloc.Graph
+import Morloc.Tree
 import Morloc.Data
 import Morloc.Syntax
 import Morloc.Error
@@ -46,20 +46,20 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pu
     makePooler ws ss =
         fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
       . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
-      . (fmap . fmap) replaceGraph        -- ThrowsError [Function SNode]
-      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Graph SNode)]
-      . join                              -- ThrowsError [Graph SNode]
-      . fmap sequence                     -- ThrowsError ThrowsError [Graph SNode]
-      . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Graph SNode)]
-      . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Graph (ThrowsError SNode)]
-      . (fmap . fmap) foo                 -- ThrowsError [Graph (WNode, Maybe Source)]
-      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Graph (Maybe Source))]
-      . sequence                          -- ThrowsError [Graph (Maybe Source)]
-      . map (toSource ss)                 -- [ThrowsError (Graph (Maybe Source))]
+      . (fmap . fmap) replaceTree        -- ThrowsError [Function SNode]
+      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree SNode)]
+      . join                              -- ThrowsError [Tree SNode]
+      . fmap sequence                     -- ThrowsError ThrowsError [Tree SNode]
+      . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Tree SNode)]
+      . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Tree (ThrowsError SNode)]
+      . (fmap . fmap) foo                 -- ThrowsError [Tree (WNode, Maybe Source)]
+      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree (Maybe Source))]
+      . sequence                          -- ThrowsError [Tree (Maybe Source)]
+      . map (toSource ss)                 -- [ThrowsError (Tree (Maybe Source))]
       $ [g | (Function _ _ g) <- ws]
 
-    foo :: (Function WNode, Graph (Maybe Source)) -> Graph (WNode, Maybe Source)
-    foo ((Function _ _ gnode), gsrc) = zipG gnode gsrc
+    foo :: (Function WNode, Tree (Maybe Source)) -> Tree (WNode, Maybe Source)
+    foo ((Function _ _ gnode), gsrc) = zipT gnode gsrc
 
     toSNode :: (WNode, Maybe Source) -> [(WNode, Maybe Source)] -> ThrowsError SNode
     toSNode (WLeaf x, Nothing) [] = Right (SLeaf x)
@@ -67,8 +67,8 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pu
     toSNode (WLeaf _, _      ) _  = Left (VeryBadBug "Data was associated with a source")
     toSNode x kids = Right (SNode x kids)
 
-    replaceGraph :: (Function a, Graph b) -> Function b
-    replaceGraph (Function s ss _, x) = Function s ss x
+    replaceTree :: (Function a, Tree b) -> Function b
+    replaceTree (Function s ss _, x) = Function s ss x
 
 generatePool :: [Function SNode] -> Source -> ThrowsError Pool
 generatePool fs src
@@ -112,13 +112,13 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
       = map function' -- [String]
       . concat        -- [(Int, SNode)]
       . map toList    -- [[(Int, Snode)]] 
-      . numberTrees   -- [Graph (Int, SNode)]
-      . map getGraph  -- [Graph (SNode)]
+      . numberTrees   -- [Tree (Int, SNode)]
+      . map getTree  -- [Tree (SNode)]
       $ fs
 
 
-    getGraph :: Function SNode -> Graph SNode
-    getGraph (Function _ _ g) = g
+    getTree :: Function SNode -> Tree SNode
+    getTree (Function _ _ g) = g
 
     function' :: (Int, SNode) -> String
     function' (i, (SNode (w, Just s) ss))
@@ -142,10 +142,10 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     -- argument' (i, SNode _ _) = Positional "function_call"
     -- argument' (i, SLeaf _)   = Positional "data_variable"
 
-toSource :: [Source] -> Graph WNode -> ThrowsError (Graph (Maybe Source))
+toSource :: [Source] -> Tree WNode -> ThrowsError (Tree (Maybe Source))
 toSource srcs =
-      sequence              -- ThrowsError (Graph (Maybe Source)) 
-    . fmap (toSource' srcs) -- Graph (ThrowsError (Maybe Source))
+      sequence              -- ThrowsError (Tree (Maybe Source)) 
+    . fmap (toSource' srcs) -- Tree (ThrowsError (Maybe Source))
   where
 
     toSource' :: [Source] -> WNode -> ThrowsError (Maybe Source)
@@ -164,7 +164,7 @@ toSource srcs =
     elem' :: WNode -> Source -> Bool
     elem' (WNode name _) (Source _ _ ns) = elem name (functionNames ns)
 
-isVar :: Graph WNode -> Graph Bool
+isVar :: Tree WNode -> Tree Bool
 isVar = fmap isVar' where
   isVar' (WNode _ _) = True
   isVar' _ = False
@@ -176,11 +176,11 @@ functionNames = fmap f
     f (_, Just s) = s -- if there is an alias, use it
     f (s, _     ) = s -- otherwise use the original name
 
-numberTrees :: [Graph a] -> [Graph (Int, a)]
+numberTrees :: [Tree a] -> [Tree (Int, a)]
 numberTrees gs = numberTrees' 1 gs
   where
-    numberTrees' :: Int -> [Graph a] -> [Graph (Int, a)]
+    numberTrees' :: Int -> [Tree a] -> [Tree (Int, a)]
     numberTrees' _ [] = []
-    numberTrees' i [g] = [numberG i g]
-    numberTrees' i (g:gs) = case (numberG i g) of
+    numberTrees' i [g] = [numberT i g]
+    numberTrees' i (g:gs) = case (numberT i g) of
       g' -> g' : (numberTrees' (i + length g' + 1) gs)

@@ -36,7 +36,7 @@ library
                       Morloc.Error
                       Morloc.Generator
                       Morloc.Language
-                      Morloc.Graph
+                      Morloc.Tree
                       Morloc.Data
                       Morloc.Evaluator
                       Morloc.Lexer

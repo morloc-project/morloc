@@ -8,7 +8,7 @@ import Morloc.Data
 import qualified Morloc.Syntax as S
 import qualified Morloc.Error as E
 
-import qualified Morloc.Graph as G
+import qualified Morloc.Tree as G
 import Morloc.Parser (morlocScript)
 
 eval :: String -> E.ThrowsError Program
@@ -37,7 +37,7 @@ workflow' xs = sequence $
     (S.TopStatement (S.Declaration n args expr)) <- xs]
   where
 
-  callTree :: S.Expression -> E.ThrowsError (G.Graph WNode)
+  callTree :: S.Expression -> E.ThrowsError (G.Tree WNode)
 
   -- TODO: currently I allow heterogenous lists and only allows primitive data
   -- in Morloc containers. For example, `{ a = foo "yolo" }`, is illegal.
