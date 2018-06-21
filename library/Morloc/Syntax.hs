@@ -17,6 +17,7 @@ import Data.Maybe (maybe)
 
 type Name = String
 type Tag = String
+type Alias = Maybe String
 
 data Top
   = TopImport Import 
@@ -25,12 +26,15 @@ data Top
   deriving(Show, Ord, Eq)
 
 data Source
-  = Source
-    Name -- source language (e.g. R or python)
-    (Maybe [String]) -- path to file or nothing
-                     -- if nothing, then work from the base language
-    [(String, Maybe String)] -- functions to import, with optional aliases
-    deriving(Show, Ord, Eq)
+  = SourceLang
+      Name            -- language name 
+      [(Name, Alias)] -- things to import
+  | SourceFile
+      Name            -- language name
+      [String]        -- path to file
+      [(Name, Alias)] -- things to import
+  | SourceLocal -- local goods
+  deriving(Show, Ord, Eq)
 
 -- TODO allow function types
 data MType

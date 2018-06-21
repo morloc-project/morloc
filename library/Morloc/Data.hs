@@ -19,8 +19,8 @@ data WNode
 
 data SNode
   = SNode
-    (WNode, Maybe Source)   -- parent
-    [(WNode, Maybe Source)] -- children
+    (WNode, Source)   -- parent
+    [(WNode, Source)] -- children
   | SLeaf MData
   deriving(Show, Eq)
 
@@ -70,3 +70,24 @@ data Program = Program {
 
 instance Show Script where
   show (Script base lang code) = code 
+
+
+-- -- TODO eventually I should unify everything through a key-value system
+--
+-- data Triple = Triple Key Relation Value
+--
+-- type Key = Int
+--
+-- data Relation
+--   = RIsA
+--   | RPositional Int  -- the nth positional parameter
+--   | RHasValue
+--   | RHasConstraint
+--   | ...
+--
+-- data Value
+--   = VFunction
+--   | VSource
+--   | VConstraint
+--   | ValueData MData
+--   | ...

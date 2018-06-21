@@ -5,7 +5,6 @@ module Morloc.Generator (
   ) where
 
 import Data.List (intercalate)
-import Data.Maybe (catMaybes)
 import qualified Data.Char as DC 
 import Safe (atMay)
 import Control.Monad (join)
@@ -46,25 +45,33 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler ws ss <*> pu
     makePooler ws ss =
         fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
       . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
-      . (fmap . fmap) replaceTree        -- ThrowsError [Function SNode]
+      . (fmap . fmap) replaceTree         -- ThrowsError [Function SNode]
       . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree SNode)]
       . join                              -- ThrowsError [Tree SNode]
       . fmap sequence                     -- ThrowsError ThrowsError [Tree SNode]
       . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Tree SNode)]
       . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Tree (ThrowsError SNode)]
-      . (fmap . fmap) foo                 -- ThrowsError [Tree (WNode, Maybe Source)]
-      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree (Maybe Source))]
-      . sequence                          -- ThrowsError [Tree (Maybe Source)]
-      . map (toSource ss)                 -- [ThrowsError (Tree (Maybe Source))]
+      . (fmap . fmap) foo                 -- ThrowsError [Tree (WNode, Source)]
+      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree (Source))]
+      . sequence                          -- ThrowsError [Tree (Source)]
+      . map (toSource ss)                 -- [ThrowsError (Tree (Source))]
       $ [g | (Function _ _ g) <- ws]
 
-    foo :: (Function WNode, Tree (Maybe Source)) -> Tree (WNode, Maybe Source)
+    -- tWNode' :: [Tree WNode]
+    -- tWNode' = [t | (Function _ _ t) <- ws]
+    --
+    -- tSource' :: ThrowsError [Tree (Maybe Source)]
+    -- tSource' = map (toSource ss) ws
+    --
+    -- tNumber' ::
+
+    foo :: (Function WNode, Tree Source) -> Tree (WNode, Source)
     foo ((Function _ _ gnode), gsrc) = zipT gnode gsrc
 
-    toSNode :: (WNode, Maybe Source) -> [(WNode, Maybe Source)] -> ThrowsError SNode
-    toSNode (WLeaf x, Nothing) [] = Right (SLeaf x)
-    toSNode (WLeaf _, Nothing) _  = Left (BadApplication "Data cannot be given arguments")
-    toSNode (WLeaf _, _      ) _  = Left (VeryBadBug "Data was associated with a source")
+    toSNode :: (WNode, Source) -> [(WNode, Source)] -> ThrowsError SNode
+    toSNode (WLeaf x, SourceLocal) [] = Right (SLeaf x)
+    toSNode (WLeaf _, SourceLocal) _  = Left (BadApplication "Data cannot be given arguments")
+    toSNode (WLeaf _, _      ) _      = Left (VeryBadBug "Data was associated with a source")
     toSNode x kids = Right (SNode x kids)
 
     replaceTree :: (Function a, Tree b) -> Function b
@@ -74,28 +81,30 @@ generatePool :: [Function SNode] -> Source -> ThrowsError Pool
 generatePool fs src
   =   Script
   <$> pure (poolName'    src)
-  <*> pure (poolLang'    src)
+  <*> poolLang'    src
   <*> poolCode' fs src
   where
     poolName' :: Source -> String
     poolName' _ = "pool" -- TODO append a number to make unique
 
-    poolLang' :: Source -> String
-    poolLang' (Source lang _ _) = lang
-
+    poolLang' :: Source -> ThrowsError String
+    poolLang' (SourceLang lang   _) = Right lang
+    poolLang' (SourceFile lang _ _) = Right lang
+    poolLang' _                     = Left $ VeryBadBug "Cannot build script from local source"
 
     -- generate the code required for a specific `source` statement
     poolCode'
       :: [Function SNode]         -- list of functions
       -> Source
       -> ThrowsError String       -- complete code for the pool
-
-    poolCode' fs (Source _ (Just _) _ )
+    poolCode' fs (SourceLang "R" i)
+      = generatePoolCode (SourceLang "R" i) fs rCodeGenerator 
+    poolCode' _  (SourceFile _ _ _ )
       = Left $ NotImplemented "cannot yet read source"
-    poolCode' fs (Source "R" Nothing i)
-      = generatePoolCode (Source "R" Nothing i) fs rCodeGenerator 
-    poolCode' fs (Source lang   _ _)
+    poolCode' _  (SourceLang lang   _)
       = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
+    poolCode' _ SourceLocal
+      = Left $ VeryBadBug "Cannot build script from local source"
 
 -- The top level
 generatePoolCode :: Source -> [Function SNode] -> CodeGenerator -> ThrowsError String
@@ -121,11 +130,11 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     getTree (Function _ _ g) = g
 
     function' :: (Int, SNode) -> String
-    function' (i, (SNode (w, Just s) ss))
+    function' (i, (SNode (w, SourceLocal) ss))
+      = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
+    function' (i, (SNode (w, s) ss))
       | s == src  = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
       | otherwise = (makeFunction g) (makeNode g $ i) (arguments' ss) "foreign call"
-    function' (i, (SNode (w, Nothing) ss))
-      = (makeFunction g) (makeNode g $ i) (arguments' ss) "internal call"
     function' (i, SLeaf d) = (makeAssignment g) (makeNode g $ i) (makeMData g $ d)
     function' x = show x
 
@@ -142,27 +151,34 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     -- argument' (i, SNode _ _) = Positional "function_call"
     -- argument' (i, SLeaf _)   = Positional "data_variable"
 
-toSource :: [Source] -> Tree WNode -> ThrowsError (Tree (Maybe Source))
+toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
 toSource srcs =
-      sequence              -- ThrowsError (Tree (Maybe Source)) 
-    . fmap (toSource' srcs) -- Tree (ThrowsError (Maybe Source))
+      sequence              -- ThrowsError (Tree Source) 
+    . fmap (toSource' srcs) -- Tree (ThrowsError Source)
   where
 
-    toSource' :: [Source] -> WNode -> ThrowsError (Maybe Source)
-    toSource' ss (WNode n a) = case catMaybes (map (mSource (WNode n a)) ss) of
-      []  -> Right Nothing
-      [s] -> Right (Just s)
-      ss  -> Left (NameConflict n [n' | (Source n' _ _) <- ss])
-    toSource' _ (WLeaf _) = Right Nothing
-      
-    mSource :: WNode -> Source -> Maybe Source
+    toSource' :: [Source] -> WNode -> ThrowsError Source
+    toSource' ss (WNode n a) = case map (mSource (WNode n a)) ss of
+      []  -> Right SourceLocal  -- the contents of WNode where not imported
+      [s] -> Right s
+      ss  -> Left (NameConflict n (map sourceNames ss))
+    toSource' _ (WLeaf _) = Right SourceLocal
+
+    sourceNames :: Source -> String 
+    sourceNames (SourceLang n _)   = n
+    sourceNames (SourceFile n _ _) = n
+    sourceNames SourceLocal        = "<local>"
+
+    mSource :: WNode -> Source -> Source
     mSource node src 
-      | elem' node src = Just src
-      | otherwise = Nothing
-    mSource _ _ = Nothing
+      | elem' node src = src
+      | otherwise = SourceLocal
+    mSource _ _ = SourceLocal
 
     elem' :: WNode -> Source -> Bool
-    elem' (WNode name _) (Source _ _ ns) = elem name (functionNames ns)
+    elem' (WNode name _) (SourceLang _   ns) = elem name (functionNames ns)
+    elem' (WNode name _) (SourceFile _ _ ns) = elem name (functionNames ns)
+    elem' _              _                   = False
 
 isVar :: Tree WNode -> Tree Bool
 isVar = fmap isVar' where

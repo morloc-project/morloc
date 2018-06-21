@@ -70,8 +70,8 @@ rCodeGenerator = CodeGenerator {
   where
 
     rSource :: Source -> String
-    rSource (Source _ (Just path) _) = "source(" ++ (intercalate "/" path) ++ ")"
-    rSource (Source _ Nothing _)     = ""
+    rSource (SourceFile _ path _) = "source(" ++ (intercalate "/" path) ++ ")"
+    rSource (SourceLang _      _) = ""
 
     begin' = []
     end'   = []

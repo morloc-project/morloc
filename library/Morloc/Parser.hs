@@ -83,7 +83,9 @@ source = do
   path <- optionMaybe (Tok.reserved "from" >> Tok.path)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
-  return $ Source lang path fs
+  return $ case path of
+    (Just p) -> SourceFile lang p fs
+    Nothing  -> SourceLang lang fs
   where
     importAs' :: Parser (String, Maybe String)
     importAs' = do
