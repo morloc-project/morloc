@@ -114,5 +114,21 @@ rCodeGenerator = CodeGenerator {
     genEq :: (b -> String) -> (String, b) -> String
     genEq f (n, b) = n ++ " = " ++ f b
 
-    begin' = []
-    end'   = []
+    begin' = ["#!/usr/bin/env Rscript"]
+    end'   =
+      [ "args <- commandArgs(trailingOnly=TRUE)"
+      , "if(length(args) == 0){"
+      , "  stop(\"Expected 1 or more arguments\")"
+      , "} else if(exists(args[[1]])){"
+      , "  x <- get(args[[1]])"
+      , "  result <- if(class(x) == \"function\"){"
+      , "    par <- lapply(args[-1], function(s) eval(parse(text=s)))"
+      , "    do.call(get(args[[1]]), par)"
+      , "  } else {"
+      , "    x"
+      , "  }"
+      , "  cat(result, \"\\n\")"
+      , "} else {"
+      , "  stop(\"Could not find function '\", f, \"'\")"
+      , "}"
+      ]
