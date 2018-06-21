@@ -61,43 +61,58 @@ data CodeGenerator = CodeGenerator {
     , makeMData :: MData -> String
   }
 
+rCodeGenerator :: CodeGenerator
 rCodeGenerator = CodeGenerator {
-    makePool         = \gs is fs -> unlines . concat $ [begin', gs, is, fs, end']
-  , makeSource       = rSource
-  , makeFunction     = \f a b -> f ++ " <- function(" ++ a ++ "){\n" ++ (indent 2 b) ++ "}\n"
-  , makeFunctionCall = \f args -> f ++ "(" ++ args ++ ")"
-  , makeArgs         = intercalate ", " . map showArg
+    makePool         = makePool'
+  , makeSource       = makeSource'
+  , makeFunction     = makeFunction'
+  , makeFunctionCall = makeFunctionCall'
+  , makeArgs         = makeArgs'
   , makeNode         = makeNode'
-  , makeAssignment   = \l r -> l ++ " <- " ++ r
-  , makeMData        = showRData
+  , makeAssignment   = makeAssignment'
+  , makeMData        = makeMData'
   }
   where
 
-    makeNode' (WNode (Just i) _ _) = "m" ++ show i
-    makeNode' (WLeaf (Just i)   _) = "m" ++ show i
-    makeNode' _                    = "FUUUUUUUCK!"
+    makePool' :: [String] -> [String] -> [String] -> String
+    makePool' gs is fs = unlines . concat $ [begin', gs, is, fs, end']
 
-    rSource :: Source -> String
-    rSource (SourceFile _ path _) = "source(" ++ (intercalate "/" path) ++ ")"
-    rSource (SourceLang _      _) = ""
+    makeSource' :: Source -> String
+    makeSource' (SourceFile _ path _) = "source(" ++ (intercalate "/" path) ++ ")"
+    makeSource' _ = ""
 
-    begin' = []
-    end'   = []
+    makeFunction' :: String -> String -> String -> String
+    makeFunction' f a b = f ++ " <- function(" ++ a ++ "){\n" ++ (indent 2 b) ++ "}\n"
 
-    -- data Arg = Positional String | Keyword String String
+    makeFunctionCall' :: String -> String -> String
+    makeFunctionCall' f args = f ++ "(" ++ args ++ ")"
+
+    makeArgs' :: [Arg] -> String
+    makeArgs' = intercalate ", " . map showArg
 
     showArg (Positional s) = s
     showArg (Keyword n s)  = n ++ "=" ++ s
     showArg NoArgument     = ""
 
-    showRData :: MData -> String
-    showRData (MInt x)     = show x ++ "L" -- longs in R are formatted as: 42L
-    showRData (MNum x)     = show x
-    showRData (MLog True)  = "TRUE"
-    showRData (MLog False) = "FALSE"
-    showRData (MLst xs)    = "c(" ++ (intercalate ", " . map showRData) xs ++ ")"
-    showRData (MRec rs)    = "list(" ++ (intercalate ", " . map (genEq showRData) $ rs) ++ ")"
-    showRData (MStr s)     = "\"" ++ s ++ "\""
+    makeNode' (WNode (Just i) _ _) = "m" ++ show i
+    makeNode' (WLeaf (Just i)   _) = "m" ++ show i
+    makeNode' _                    = "FUUUUUUUCK!"
+
+    makeAssignment' :: String -> String -> String
+    makeAssignment' l r = l ++ " <- " ++ r
+
+    makeMData' :: MData -> String
+    makeMData' (MInt x)     = show x ++ "L" -- longs in R are formatted as: 42L
+    makeMData' (MNum x)     = show x
+    makeMData' (MLog True)  = "TRUE"
+    makeMData' (MLog False) = "FALSE"
+    makeMData' (MLst xs)    = "c(" ++ (intercalate ", " . map makeMData') xs ++ ")"
+    makeMData' (MTup xs)    = "list(" ++ (intercalate ", " . map makeMData') xs ++ ")"
+    makeMData' (MRec rs)    = "list(" ++ (intercalate ", " . map (genEq makeMData') $ rs) ++ ")"
+    makeMData' (MStr s)     = "\"" ++ s ++ "\""
 
     genEq :: (b -> String) -> (String, b) -> String
     genEq f (n, b) = n ++ " = " ++ f b
+
+    begin' = []
+    end'   = []
