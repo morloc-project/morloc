@@ -140,20 +140,20 @@ generatePoolCode src fs g = Right $ (makePool g) global' source' (functions' fs)
     function' (SLeaf i d) = (makeAssignment g) (makeNode g $ WLeaf i d) (makeMData g $ d)
     function' x = show x
 
-    cisBody' (WNode _ n _) ss = (makeFunctionCall g) n "..."
+    cisBody' (WNode _ n _) ss = (makeFunctionCall g) n (arguments' ss)
 
     transBody' _ _ = "TRANS_STUB"
 
-    -- arguments' :: [(WNode, Source)] -> String
-    -- arguments' ss = (makeArgs g) $ map argument' (map fst ss)
-    --
-    -- -- TODO need error handling
-    -- argument' :: WNode -> Arg
-    -- argument' (WNode (Just i) n a)
-    --   = Positional ((makeFunctionCall g) (makeNode g $ WNode (Just i) n a) "")
-    -- argument' (WLeaf (Just i) d)
-    --   = Positional (makeNode g $ WLeaf (Just i) d)
-    -- argument' _ = Positional "ERROR"
+    arguments' :: [(WNode, Source)] -> String
+    arguments' ss = (makeArgs g) $ map argument' (map fst ss)
+
+    -- TODO need error handling
+    argument' :: WNode -> Arg
+    argument' (WNode (Just i) n a)
+      = Positional ((makeFunctionCall g) (makeNode g $ WNode (Just i) n a) "")
+    argument' (WLeaf (Just i) d)
+      = Positional (makeNode g $ WLeaf (Just i) d)
+    argument' _ = Positional "ERROR"
 
 toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
 toSource srcs =

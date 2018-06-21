@@ -64,7 +64,7 @@ data CodeGenerator = CodeGenerator {
 rCodeGenerator = CodeGenerator {
     makePool         = \gs is fs -> unlines . concat $ [begin', gs, is, fs, end']
   , makeSource       = rSource
-  , makeFunction     = \f a b -> f ++ " function(" ++ a ++ "){" ++ (indent 2 b) ++ "}"
+  , makeFunction     = \f a b -> f ++ " function(" ++ a ++ "){\n" ++ (indent 2 b) ++ "}"
   , makeFunctionCall = \f args -> f ++ "(" ++ args ++ ")"
   , makeArgs         = intercalate ", " . map showArg
   , makeNode         = makeNode'
@@ -91,7 +91,7 @@ rCodeGenerator = CodeGenerator {
     showArg NoArgument     = ""
 
     showRData :: MData -> String
-    showRData (MInt x)     = show x
+    showRData (MInt x)     = show x ++ "L" -- longs in R are formatted as: 42L
     showRData (MNum x)     = show x
     showRData (MLog True)  = "TRUE"
     showRData (MLog False) = "FALSE"
