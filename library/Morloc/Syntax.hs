@@ -71,6 +71,7 @@ data Statement
 data Expression
   = ExprData MData
   | ExprApplication Name Tag [Expression]
+  | ExprVariable Name
   | ExprComposition Expression Expression
   deriving(Show, Ord, Eq)
 

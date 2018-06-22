@@ -173,8 +173,10 @@ generateCisBody g (WNode _ n _) src vars ss
     getTrueName :: String -> Source -> String
     getTrueName s (SourceLang _   ns) = lookupByAlias s ns 
     getTrueName s (SourceFile _ _ ns) = lookupByAlias s ns
-    getTrueName s SourceLocal = s
+    getTrueName s SourceLocal         =               s
 
+    -- Is the name stored in WNode the true name or a Morloc alias?
+    -- If it is an alias, switch it for the real name.
     lookupByAlias :: String -> [(String, Maybe String)] -> String
     lookupByAlias name ss = case lookup (Just name) (map swap ss) of
       Just name' -> name'

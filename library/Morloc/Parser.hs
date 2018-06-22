@@ -116,19 +116,32 @@ expression =
     term' =
           try (Tok.parens expression)
       <|> try application
-      <|> try primitiveExpr
+      <|> try primitiveExpr'
 
-primitiveExpr :: Parser Expression
-primitiveExpr = do
-  x <- Tok.mdata 
-  return $ ExprData x
+    primitiveExpr' :: Parser Expression
+    primitiveExpr' = do
+      x <- try Tok.mdata 
+      return $ ExprData x
 
 application :: Parser Expression
 application = do
   tag' <- Tok.tag Tok.name
   function <- Tok.name
-  arguments <- sepBy expression Tok.whiteSpace
+  arguments <- sepBy term' Tok.whiteSpace
   return $ ExprApplication function tag' arguments
+  where
+    term' = do 
+          try (Tok.parens expression)
+      <|> try var'
+      <|> try dat'
+
+    var' = do
+      x <- Tok.name
+      return $ ExprVariable x
+
+    dat' = do
+      x <- try Tok.mdata
+      return $ ExprData x
 
 -- | function :: [input] -> output constraints 
 signature :: Parser Statement

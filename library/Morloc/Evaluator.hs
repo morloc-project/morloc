@@ -53,6 +53,9 @@ workflow' xs
     callTree (S.ExprApplication name tag xs)
       = G.Node <$> pure (WNode Nothing name tag) <*> sequence (map callTree xs) 
 
+    callTree (S.ExprVariable name)
+      = G.Node <$> pure (WNode Nothing name "") <*> pure []
+
     -- parse composition
     callTree (S.ExprComposition g f)
       = case (callTree g) of 
