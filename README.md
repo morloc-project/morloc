@@ -50,11 +50,65 @@ nodes can now be accessed.
 bash nexus.bash m3 23 5
 ```
 
-I will clean up this interface soon.
+I am currently working on cleaning up this interface. Soon it will generate
+a nice Perl program with automatically generated documentation and good
+argument handling.
 
 
-C prototype
-===========
+The Morloc Type System
+======================
+
+The type system and the syntax for specifying the type ontologies is still
+under construction. But here is a little information on how it will work.
+
+Morloc unifies all programming languages under a common type system. This is
+a *semantic* type system, where the types, and the relations between them, are
+described using ontologies.
+
+One relation that can be defined between types is `a maps_to b`, which states
+that any variable of type `a` can be uniquely converted to a variable of type
+`b`, for example, `Int maps_to Double`. Some languages, such as Perl and
+Javascript, do extensive automatic conversions. Perl will happily evaluate the
+term `"42" + 1` to 43, for example. In Morloc, these sorts of automatic
+conversions are defined in ontologies that can be customized by the programmer.
+
+Types can also be specialized with constrains, for example:
+
+```
+Count :: x:Int where ( x > 0 )
+```
+
+This is can also be sued to place constraints on functions. A function is
+a compound type that is composed of the types of its inputs, outputs, and
+a list of constraints. Here is a signature for a function that generates *n*
+random numbers between *a* and *b*.
+
+```
+rand :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
+    n > 0
+  , len xs == n
+  , c >= a
+  , c <= b
+);
+```
+
+The constraints are optional, and `rand` could instead just be written as:
+
+```
+rand :: Int, Num, Num -> [Num]
+```
+
+The addition of the constraints allows
+
+ * Static analysis of the correctness of the program. 
+ * Runtime checks of input (if desired, this will be a compiler flag)
+ * Formal documentation of the behavior of the function
+
+The type system is essential for specifying how data is passed between
+languages. I'll elaborate more on this soon.
+
+C prototype (obsolete)
+======================
 
 The following documentation is relevant only to Morloc v0.10.0.
 
