@@ -21,11 +21,10 @@ roll :: n:Int, size:Int -> xs:[x:Int] where (
 
 sum :: [Num] -> Num;
 
+x = sum [1,2,3];
+
+rand n = runif n 0 1;
+
 # Sum of a roll of n dice with s sides
 # For example, 2d20, would be `rollSum 2 20`
 rollSum n s = sum (roll s n);
-
-x = sum 34 [1,2,3] 5.6;
-
-# Get the minimum for rolling n s-sided dice
-rollMin ee rr = min (roll ee rr);

@@ -32,34 +32,64 @@ packages' :: [S.Top] -> E.ThrowsError [S.Source]
 packages' xs = pure [x | (S.TopSource x) <- xs]
 
 workflow' :: [S.Top] -> E.ThrowsError [Function WNode]
-workflow' xs = sequence $
-  [Function <$> pure n <*> pure args <*> callTree expr |
-    (S.TopStatement (S.Declaration n args expr)) <- xs]
+workflow' xs
+  = fmap addIDs
+  . sequence
+  $ [Function <$> pure n <*> pure args <*> callTree expr |
+      (S.TopStatement (S.Declaration n args expr)) <- xs]
   where
 
-  callTree :: S.Expression -> E.ThrowsError (G.Tree WNode)
+    callTree :: S.Expression -> E.ThrowsError (G.Tree WNode)
 
-  -- TODO: currently I allow heterogenous lists and only allows primitive data
-  -- in Morloc containers. For example, `{ a = foo "yolo" }`, is illegal.
-  -- Having workflows nested in Morloc containers is something that should be
-  -- legal. But for now I won't allow it. 
-  -- Anyway, as it is, the following will never raise an error. 
-  callTree (S.ExprData mdata)
-    = pure $ G.Node (WLeaf Nothing mdata) []
+    -- TODO: currently I allow heterogenous lists and only allows primitive data
+    -- in Morloc containers. For example, `{ a = foo "yolo" }`, is illegal.
+    -- Having workflows nested in Morloc containers is something that should be
+    -- legal. But for now I won't allow it. 
+    -- Anyway, as it is, the following will never raise an error. 
+    callTree (S.ExprData mdata)
+      = pure $ G.Node (WLeaf Nothing mdata) []
 
-  -- parse an application
-  callTree (S.ExprApplication name tag xs)
-    = G.Node <$> pure (WNode Nothing name tag) <*> sequence (map callTree xs) 
+    -- parse an application
+    callTree (S.ExprApplication name tag xs)
+      = G.Node <$> pure (WNode Nothing name tag) <*> sequence (map callTree xs) 
 
-  -- parse composition
-  callTree (S.ExprComposition g f)
-    = case (callTree g) of 
-      Right (G.Node (WLeaf _ _) _)
-        -> Left (E.BadComposition "Only functions can be composed")
-      Right (G.Node v kids)
-        -> G.Node <$> pure v <*> (app <$> pure kids <*> callTree f)
-      err -> err
+    -- parse composition
+    callTree (S.ExprComposition g f)
+      = case (callTree g) of 
+        Right (G.Node (WLeaf _ _) _)
+          -> Left (E.BadComposition "Only functions can be composed")
+        Right (G.Node v kids)
+          -> G.Node <$> pure v <*> (app <$> pure kids <*> callTree f)
+        err -> err
 
-  -- add an element to the end of a list
-  app :: [a] -> a -> [a]
-  app xs x = xs ++ [x]
+    -- add an element to the end of a list
+    app :: [a] -> a -> [a]
+    app xs x = xs ++ [x]
+
+    addIDs :: [Function WNode] -> [Function WNode]
+    addIDs fs'
+      = zipWith
+        (\(Function n vs _) tree -> Function n vs tree)
+        fs'
+        (addIDs' fs')
+
+    addIDs' :: [Function WNode] -> [G.Tree WNode]
+    addIDs' ws'
+      = zipWith                         -- (a -> b -> c) -> [a] -> [b] -> [c]
+        (G.zipWithTree setID)           -- (Tree Wnode -> Tree Int -> Tree Wnode)
+        (numberTrees
+          [t | (Function _ _ t) <- ws']) -- [Tree Int]
+        [t | (Function _ _ t) <- ws']    -- [Tree WNode]
+
+    setID :: Int -> WNode -> WNode
+    setID i (WNode _ x y) = WNode (Just i) x y
+    setID i (WLeaf _ x  ) = WLeaf (Just i) x
+
+    numberTrees :: [G.Tree a] -> [G.Tree Int]
+    numberTrees gs = numberTrees' 1 gs
+      where
+        numberTrees' :: Int -> [G.Tree a] -> [G.Tree Int]
+        numberTrees' _ [] = []
+        numberTrees' i [g] = [G.indexTree i g]
+        numberTrees' i (g:gs') = case (G.indexTree i g) of
+          g' -> g' : (numberTrees' (i + length g' + 1) gs')

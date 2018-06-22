@@ -54,24 +54,12 @@ generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
         <$> pure wTrees
         <*> sTrees                        -- ThrowsError [Tree (WNode, Source)]
 
+    wTrees :: [Tree WNode]
+    wTrees = [t | (Function _ _ t) <- ws]
+
     sTrees :: ThrowsError [Tree Source]
     sTrees = sequence $ map (toSource ss) wTrees
 
-    idTrees :: [Tree Int]
-    idTrees = numberTrees [t | (Function _ _ t) <- ws]
-
-    wTrees :: [Tree WNode]
-    wTrees
-      = zipWith                      -- (a -> b -> c) -> [a] -> [b] -> [c]
-        (zipWithTree setID)          -- Tree Wnode -> Tree Int -> Tree Wnode
-        idTrees                      -- [Tree Int]
-        [t | (Function _ _ t) <- ws] -- [Tree WNode]
-
-    setID :: Int -> WNode -> WNode
-    setID i (WNode _ x y) = WNode (Just i) x y
-    setID i (WLeaf _ x  ) = WLeaf (Just i) x
-
-    -- TODO fix this ugliness ...
     setBoundVar :: Function SNode -> Function SNode
     setBoundVar (Function n vars tree) = Function n vars (fmap (setBoundVar' vars) tree)
 
@@ -232,13 +220,3 @@ functionNames = fmap f
     f :: (String, Maybe String) -> String
     f (_, Just s) = s -- if there is an alias, use it
     f (s, _     ) = s -- otherwise use the original name
-
-
-numberTrees :: [Tree a] -> [Tree Int]
-numberTrees gs = numberTrees' 1 gs
-  where
-    numberTrees' :: Int -> [Tree a] -> [Tree Int]
-    numberTrees' _ [] = []
-    numberTrees' i [g] = [indexTree i g]
-    numberTrees' i (g:gs') = case (indexTree i g) of
-      g' -> g' : (numberTrees' (i + length g' + 1) gs')
