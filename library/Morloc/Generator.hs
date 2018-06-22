@@ -6,6 +6,9 @@ module Morloc.Generator (
 
 import Control.Monad (join)
 
+import Data.Tuple (swap)
+import Data.Maybe (fromMaybe)
+
 import Morloc.Tree
 import Morloc.Data
 import Morloc.Syntax
@@ -139,12 +142,12 @@ generateFunctions g src fs
       = (makeFunction g)
         (makeNode g $ w)
         (generateManifoldArgs g vars)
-        (generateCisBody g w vars ss)
+        (generateCisBody g w SourceLocal vars ss)
     generateFunction (SNode (w, s) vars ss)
       | s == src = (makeFunction g)
                    (makeNode g $ w)
                    (generateManifoldArgs g vars)
-                   (generateCisBody g w vars ss)
+                   (generateCisBody g w s vars ss)
       | otherwise = (makeFunction g)
                     (makeNode g $ w)
                     (generateManifoldArgs g vars)
@@ -159,11 +162,26 @@ generateManifoldArgs :: CodeGenerator -> [String] -> String
 generateManifoldArgs g ss = makeArgs g . map Positional $ ss 
 
 
-generateCisBody :: CodeGenerator -> WNode -> [String] -> [(WNode, Source)] -> String
-generateCisBody g (WNode _ n _) vars ss
+generateCisBody :: CodeGenerator -> WNode -> Source -> [String] -> [(WNode, Source)] -> String
+generateCisBody g (WNode _ n _) src vars ss
   | elem n vars = n
-  | otherwise   = (makeFunctionCall g) n (generateArguments g vars ss) -- the pure function call
-generateCisBody _ _ _ _ = undefined
+  | otherwise
+      = (makeFunctionCall g)
+        (getTrueName n src)
+        (generateArguments g vars ss) -- the pure function call
+  where
+    getTrueName :: String -> Source -> String
+    getTrueName s (SourceLang _   ns) = lookupByAlias s ns 
+    getTrueName s (SourceFile _ _ ns) = lookupByAlias s ns
+    getTrueName s SourceLocal = s
+
+    lookupByAlias :: String -> [(String, Maybe String)] -> String
+    lookupByAlias name ss = case lookup (Just name) (map swap ss) of
+      Just name' -> name'
+      Nothing    -> name
+
+
+generateCisBody _ _ _ _ _ = undefined
 
 
 generateTransBody :: CodeGenerator -> WNode -> [String] -> [(WNode, Source)] -> String
