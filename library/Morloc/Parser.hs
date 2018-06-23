@@ -125,10 +125,10 @@ expression =
 
 application :: Parser Expression
 application = do
-  tag' <- Tok.tag Tok.name
-  function <- Tok.name
+  -- this should be either a function or a composition
+  function <- Tok.parens expression <|> var'
   arguments <- sepBy term' Tok.whiteSpace
-  return $ ExprApplication function tag' arguments
+  return $ ExprApplication function arguments
   where
     term' = do 
           try (Tok.parens expression)
@@ -136,8 +136,9 @@ application = do
       <|> try dat'
 
     var' = do
-      x <- Tok.name
-      return $ ExprVariable x
+      x    <- Tok.name
+      tag' <- Tok.tag Tok.name
+      return $ ExprVariable x tag'
 
     dat' = do
       x <- try Tok.mdata

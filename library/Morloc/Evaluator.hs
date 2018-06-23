@@ -50,11 +50,21 @@ workflow' xs
       = pure $ G.Node (WLeaf Nothing mdata) []
 
     -- parse an application
-    callTree (S.ExprApplication name tag xs)
+    callTree (S.ExprApplication (S.ExprVariable name tag) xs)
       = G.Node <$> pure (WNode Nothing name tag) <*> sequence (map callTree xs) 
 
-    callTree (S.ExprVariable name)
-      = G.Node <$> pure (WNode Nothing name "") <*> pure []
+    -- TODO: Make it work. I will need to recurse to the rightmost node in the
+    -- composition and then set its children to `xs`. The the leftmost node
+    -- will be the top WNode object that is returned by callTree.
+    callTree (S.ExprApplication (S.ExprComposition l r) xs)
+      = Left $ E.NotImplemented "Compositions cannot yet take arguments"
+
+    callTree (S.ExprApplication _ _)
+      = Left $ E.BadApplication "Must start with a function or composition" 
+
+    -- parse a variable
+    callTree (S.ExprVariable name tag)
+      = G.Node <$> pure (WNode Nothing name tag) <*> pure []
 
     -- parse composition
     callTree (S.ExprComposition g f)

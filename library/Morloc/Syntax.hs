@@ -46,6 +46,7 @@ data MType
   | MEmpty
   deriving(Show, Ord, Eq)
 
+-- TODO add MBin for binary data
 data MData
   = MInt Integer
   | MNum Double
@@ -70,8 +71,8 @@ data Statement
 
 data Expression
   = ExprData MData
-  | ExprApplication Name Tag [Expression]
-  | ExprVariable Name
+  | ExprApplication Expression [Expression]
+  | ExprVariable Name Tag
   | ExprComposition Expression Expression
   deriving(Show, Ord, Eq)
 

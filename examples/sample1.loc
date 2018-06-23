@@ -35,6 +35,12 @@ ceiling :: xs:[Num] -> ys:[Int] where (
   #   )
 );
 
-sample_index n size = ceiling (rand_uniform n 0 size);
+# This should not be legal: compositions with pure data on one side.
+sample_index n size = ceiling . rand_uniform n size;
+# # This should also work:
+# sample_index n size = (ceiling . rand_uniform n) size;
+# # TODO I should instead be able to write:
+# sample_index n size = ceiling . rand_uniform;
+# # But making this work will have to await type handling implementation
 
 rand n = rand_uniform n 0 1;
