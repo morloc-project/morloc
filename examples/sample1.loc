@@ -36,7 +36,7 @@ ceiling :: xs:[Num] -> ys:[Int] where (
 );
 
 # This should not be legal: compositions with pure data on one side.
-sample_index n size = ceiling . rand_uniform n size;
+sample_index n size = ceiling . rand_uniform n 0 size;
 # # This should also work:
 # sample_index n size = (ceiling . rand_uniform n) size;
 # # TODO I should instead be able to write:
