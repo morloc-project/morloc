@@ -299,7 +299,7 @@ arithmeticTerm
 
     var' = do
       x <- Tok.name
-      xs <- option [] (many Tok.name)
+      xs <- option [] (many arithmeticTerm)
       return $ AExprFunc x xs
 
     access' = do

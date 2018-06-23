@@ -1,30 +1,40 @@
 source "R" (
-    "runif"
-  , "sample.int" as roll
-  , "sum"
+    "runif" as rand_uniform
+  , "sample.int" as sample_index
+  , "ceiling"
 );
 
-runif :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
+rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
     n > 0
   , len xs == n
   , c >= a
   , c <= b
 );
 
-roll :: n:Int, size:Int -> xs:[x:Int] where (
-    n > 0
-  , size > 0
-  , len xs == n
-  , x > 0
-  , x <= size
+#' sample integers without replacement
+sample_index
+  :: n:Int      #' number of elements to sample
+  ,  size:Int   #' maximum value
+  -> xs:[x:Int] #' list of unique integers
+  where (
+      n >= 0
+    , size >= n
+    , len xs == n
+    , x > 0
+    , x <= size
+    , len (uniq xs) == len xs
+  )
+;
+
+# The vectorization of R makes these functions needlessly complicated
+ceiling :: xs:[Num] -> ys:[Int] where (
+    len xs == len ys 
+  # , forall i (indices xs)(
+  #       ys[i] - xs[i] >= 0
+  #     , ys[i] - xs[i] <  1
+  #   )
 );
 
-sum :: [Num] -> Num;
+sample_index n size = ceiling (rand_uniform n 0 size);
 
-x = sum [1,2,3];
-
-rand n = runif n 0 1;
-
-# Sum of a roll of n dice with s sides
-# For example, 2d20, would be `rollSum 2 20`
-rollSum n s = sum (roll s n);
+rand n = rand_uniform n 0 1;

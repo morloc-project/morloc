@@ -92,7 +92,7 @@ data BExpr
   deriving(Show, Ord, Eq)
 
 data AExpr
-  = AExprFunc Name [Name]
+  = AExprFunc Name [AExpr]
   | AExprInt Integer
   | AExprReal Double
   | AExprAccess Name [AExpr]
