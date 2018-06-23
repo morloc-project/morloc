@@ -47,7 +47,7 @@ This will generate two files, `nexus.bash` and `pool.R`. Data from specific
 nodes can now be accessed.
 
 ```sh
-bash nexus.bash m3 23 5
+bash nexus.bash m1 5 10
 ```
 
 I am currently working on cleaning up this interface. Soon it will generate
