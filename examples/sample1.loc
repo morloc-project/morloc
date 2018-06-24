@@ -1,9 +1,9 @@
 source "R" (
     "runif" as rand_uniform
-  , "sample.int" as sample_index
   , "ceiling"
 );
 
+# impose a type signature on the imported function rand_uniform
 rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
     n > 0
   , len xs == n
@@ -11,11 +11,15 @@ rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
   , c <= b
 );
 
-#' sample integers without replacement
+# type signatures for ceiling (NOTE: adding constraints is optional) 
+ceiling :: [Num] -> [Int];
+
+
+# A type signature for the Morloc function sample_index 
 sample_index
-  :: n:Int      #' number of elements to sample
-  ,  size:Int   #' maximum value
-  -> xs:[x:Int] #' list of unique integers
+  :: n:Int      # number of elements to sample
+  ,  size:Int   # maximum value
+  -> xs:[x:Int] # list of unique integers
   where (
       n >= 0
     , size >= n
@@ -23,24 +27,9 @@ sample_index
     , x > 0
     , x <= size
     , len (uniq xs) == len xs
-  )
-;
-
-# The vectorization of R makes these functions needlessly complicated
-ceiling :: xs:[Num] -> ys:[Int] where (
-    len xs == len ys 
-  # , forall i (indices xs)(
-  #       ys[i] - xs[i] >= 0
-  #     , ys[i] - xs[i] <  1
-  #   )
-);
-
-# This should not be legal: compositions with pure data on one side.
+  );
 sample_index n size = ceiling . rand_uniform n 0 size;
-# # This should also work:
-# sample_index n size = (ceiling . rand_uniform n) size;
-# # TODO I should instead be able to write:
-# sample_index n size = ceiling . rand_uniform;
-# # But making this work will have to await type handling implementation
 
-rand n = rand_uniform n 0 ;
+# A simple wrapper specializing the imported rand_uniform function
+rand :: Int -> [Int]
+rand n = rand_uniform n 0 1;

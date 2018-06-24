@@ -41,11 +41,10 @@ compiler.
 # examples/sample1.loc
 source "R" (
     "runif" as rand_uniform
-  , "sample.int" as sample_index
   , "ceiling"
 );
 
-# signature for function generating n uniform random values between a and b
+# impose a type signature on the imported function rand_uniform
 rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
     n > 0
   , len xs == n
@@ -53,10 +52,15 @@ rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
   , c <= b
 );
 
+# type signatures for ceiling (NOTE: adding constraints is optional) 
+ceiling :: [Num] -> [Int];
+
+
+# A type signature for the Morloc function sample_index 
 sample_index
-  :: n:Int
-  ,  size:Int
-  -> xs:[x:Int]
+  :: n:Int      # number of elements to sample
+  ,  size:Int   # maximum value
+  -> xs:[x:Int] # list of unique integers
   where (
       n >= 0
     , size >= n
@@ -64,12 +68,12 @@ sample_index
     , x > 0
     , x <= size
     , len (uniq xs) == len xs
-  )
-;
+  );
+sample_index n size = ceiling . rand_uniform n 0 size;
 
-sample_index n size = ceiling (rand_uniform n 0 size);
-
-rand n = rand_uniform n 0;
+# A simple wrapper specializing the imported rand_uniform function
+rand :: Int -> [Int]
+rand n = rand_uniform n 0 1;
 ```
 
 This script can be complied as follows:
@@ -78,7 +82,7 @@ This script can be complied as follows:
 morloc examples/sample1.loc
 ```
 
-This will generate two files, `nexus.bash` and `pool.R`. Data from specific
+This will generate two files, `nexus.perl` and `pool.R`. Data from specific
 nodes can now be accessed.
 
 ```sh
