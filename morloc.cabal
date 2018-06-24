@@ -40,6 +40,7 @@ library
                       Morloc.Tree
                       Morloc.Data
                       Morloc.Evaluator
+                      Morloc.Check
                       Morloc.Lexer
                       Morloc.Parser
                       Morloc.Syntax
