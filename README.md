@@ -37,6 +37,41 @@ Then you can run a Morloc script, you might start with the example in
 soon. Also the type signatures in this demo are currently ignored by the
 compiler.
 
+```
+# examples/sample1.loc
+source "R" (
+    "runif" as rand_uniform
+  , "sample.int" as sample_index
+  , "ceiling"
+);
+
+# signature for function generating n uniform random values between a and b
+rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
+    n > 0
+  , len xs == n
+  , c >= a
+  , c <= b
+);
+
+sample_index
+  :: n:Int
+  ,  size:Int
+  -> xs:[x:Int]
+  where (
+      n >= 0
+    , size >= n
+    , len xs == n
+    , x > 0
+    , x <= size
+    , len (uniq xs) == len xs
+  )
+;
+
+sample_index n size = ceiling (rand_uniform n 0 size);
+
+rand n = rand_uniform n 0;
+```
+
 This script can be complied as follows:
 
 ```sh

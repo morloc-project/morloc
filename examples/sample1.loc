@@ -43,4 +43,4 @@ sample_index n size = ceiling . rand_uniform n 0 size;
 # sample_index n size = ceiling . rand_uniform;
 # # But making this work will have to await type handling implementation
 
-rand n = rand_uniform n 0 1;
+rand n = rand_uniform n 0 ;
