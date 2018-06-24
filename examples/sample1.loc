@@ -31,5 +31,5 @@ sample_index
 sample_index n size = ceiling . rand_uniform n 0 size;
 
 # A simple wrapper specializing the imported rand_uniform function
-rand :: Int -> [Int]
+rand :: Int -> [Int];
 rand n = rand_uniform n 0 1;
