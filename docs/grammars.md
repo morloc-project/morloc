@@ -1,3 +1,15 @@
+There are several grammars to consider in Morloc, the main ones are the script,
+pool, and nexus grammars.
+
+Conventions:
+
+ * `[a ","]` indicates a comma separated list of `a`.
+
+
+# Script Grammar
+
+This is the grammar for the Morloc language.
+
 ```
 program
     = import
@@ -102,7 +114,13 @@ package    = filename
 identifier = function | constant
 ```
 
-`[a ","]` indicates a comma separated list of `a`.
+# Pool Grammar
 
-Source code from other languages can also be nested in a Morloc script, however
-this will be extracted into packages in preprocessing.
+This is the general grammar for the language-specific programs that are
+generated. Support for new languages is added by making instances of this
+grammar.
+
+
+# Nexus Grammar
+
+    

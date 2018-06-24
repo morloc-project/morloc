@@ -14,6 +14,7 @@ import Morloc.Data
 import Morloc.Syntax
 import Morloc.Error
 import Morloc.Language
+import Morloc.Nexus
 
 type Nexus = Script
 type Pool  = Script
@@ -26,16 +27,23 @@ generate p = (,) <$> generateNexus p <*> generatePools p
 generateNexus :: Program -> ThrowsError Nexus
 generateNexus p = pure $ Script {
       scriptBase = "nexus"
-    , scriptLang = "bash"
+    , scriptLang = lang
     , scriptCode = nexusCode' p
   }
   where
-    nexusCode' :: Program -> String
-    nexusCode' _ =  unlines [
-          "# Bash"
-        , ""
-        , "Rscript pool.R $@"
+    -- TODO allow user to choose a generator
+    -- Eventually these will include, for example, a CWL generator
+    g = perlCliNexusGenerator
+    lang = "perl"
+
+    nexusCode' p = unlines
+      [ (nexusPrologue g)
+      , (nexusPrint g) ""
+      , (nexusDispatch g) [n | (Function n _ _) <- (workflow p)]
+      , (nexusHelp g) (workflow p) 
       ]
+      ++ unlines (map ((nexusCall g) "Rscript" "pool.R") (workflow p))
+      ++ nexusEpilogue g
 
 
 generatePools :: Program -> ThrowsError [Pool]

@@ -20,7 +20,7 @@ license:            GPL-3
 license-file:       LICENSE
 author:             Zebulun Arendsee 
 maintainer:         arendsee@iastate.edu
-extra-source-files: README.md TODO
+extra-source-files: README.md
                     data/common/*.json
 cabal-version:      >= 1.10
 bug-reports:        https://github.com/arendsee/morloc/issues
@@ -35,6 +35,7 @@ library
     exposed-modules:  Morloc
                       Morloc.Error
                       Morloc.Generator
+                      Morloc.Nexus
                       Morloc.Language
                       Morloc.Tree
                       Morloc.Data

@@ -7,11 +7,7 @@ module Morloc.Language (
 import Morloc.Syntax
 import Morloc.Data
 import Data.List (intercalate)
-
-indent :: Int -> String -> String
-indent i s
-  | i <= 0    = s
-  | otherwise = unlines . map ((++) (take i (repeat ' '))) . lines $ s
+import Morloc.Util (indent)
 
 data Arg
   = Positional String

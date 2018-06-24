@@ -2,6 +2,7 @@ module Morloc.Util
 (
     which
   , zipA
+  , indent
 ) where
 
 -- Find the 1-based indices of all true values
@@ -13,3 +14,8 @@ which = map fst . filter snd . zip [0..]
 zipA :: [(a -> b)] -> [a] -> [b]
 zipA (f:fs) (x:xs) = (f x):(zipA fs xs)
 zipA _ _ = []
+
+indent :: Int -> String -> String
+indent i s
+  | i <= 0    = s
+  | otherwise = unlines . map ((++) (take i (repeat ' '))) . lines $ s
