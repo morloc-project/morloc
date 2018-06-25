@@ -28,7 +28,7 @@ sample_index
     , x <= size
     , len (uniq xs) == len xs
   );
-sample_index n size = ceiling . rand_uniform n 0 size;
+sample_index n size = ceiling (rand_uniform n 0 size);
 
 # A simple wrapper specializing the imported rand_uniform function
 rand :: Int -> [Int];

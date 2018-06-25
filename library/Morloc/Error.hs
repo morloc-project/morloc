@@ -17,6 +17,8 @@ data MorlocError
   | NotSupported     String
   | CouldNotFind     String
   | NameConflict     String [String]
+  | TypeError        String
+  | TypeMismatch     String String String -- name, obs type, exp type
   | VeryBadBug       String
   | UnknownError
   deriving(Eq)
@@ -35,6 +37,10 @@ morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
 morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?" 
 morlocShow (NameConflict x pkgs) = "NameConflict: "  ++ q x ++ " is imported from " ++ l pkgs
+morlocShow (TypeError s)         = "TypeError: " ++ s
+morlocShow (TypeMismatch n o e)  = "Type mismatch in '" ++ n ++ "':\n" 
+                                   ++ "  Expected type: '" ++ e ++ "'\n"
+                                   ++ "  Observed type: '" ++ o ++ "'"
 morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
 morlocShow  UnknownError         = "Damn, you broke it good"
 

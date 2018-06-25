@@ -44,6 +44,7 @@ data MType
   | MTuple [MType] Tag 
   | MRecord Name [(Name, MType)] Tag
   | MEmpty
+  | MBound
   deriving(Show, Ord, Eq)
 
 -- TODO add MBin for binary data
