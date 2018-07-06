@@ -45,6 +45,7 @@ library
                       Morloc.Parser
                       Morloc.Syntax
                       Morloc.Util
+                      Morloc.Triple
                       -- Morloc.Core
 
     build-depends: base,

@@ -41,9 +41,9 @@ data MType
   = MSpecific Name [MType] Tag
   | MGeneric Name [MType] Tag
   | MList MType Tag
-  | MTuple [MType] Tag 
-  | MRecord Name [(Name, MType)] Tag
-  | MEmpty
+  | MTuple [MType] Tag  -- like record but without name
+  | MRecord Name [(Name, MType)] Tag -- same as algebraic type
+  | MEmpty -- like `MTuple []`
   | MBound
   deriving(Show, Ord, Eq)
 
