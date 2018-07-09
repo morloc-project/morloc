@@ -6,6 +6,9 @@ module Morloc.Triple (
   , Key
 ) where
 
+import Morloc.Syntax
+import Morloc.Data
+
 type Key = Int
 
 data Triple = Triple Key Relation

@@ -109,10 +109,7 @@ stringLiteral = do
   return s
 
 boolean :: Parser Bool 
-boolean = do
-  s <- string "True" <|> string "False"
-  whiteSpace
-  return $ (read s :: Bool)
+boolean = fmap read ((string "True" <|> string "False") <* whiteSpace)
 
 mdata :: Parser MS.MData
 mdata = do
@@ -126,40 +123,22 @@ mdata = do
   <?> "literal data"
   where
 
-    integer' = do
-      x <- integer
-      return $ MS.MInt x
+    integer'       = fmap MS.MInt integer
+    float'         = fmap MS.MNum float
+    stringLiteral' = fmap MS.MStr stringLiteral
+    boolean'       = fmap MS.MLog boolean
+    list'          = fmap MS.MLst (brackets (sepBy mdata comma))
+    tuple'         = fmap MS.MTup (parens tuple'')
+    record'        = fmap MS.MRec (braces (sepBy1 recordEntry' comma))
 
-    float' = do
-      x <- float
-      return $ MS.MNum x
-
-    stringLiteral' = do
-      s <- stringLiteral
-      return $ MS.MStr s
-
-    boolean' = do
-      s <- boolean
-      return $ MS.MLog s
-
-    list' = do
-      xs <- brackets (sepBy mdata comma)
-      return $ MS.MLst xs
-
-    tuple' = do
-      xs <- parens tuple'' 
-      return $ MS.MTup xs
-
+    -- must have at least two elements
     tuple'' = do
       x <- mdata
       comma
       xs <- sepBy1 mdata comma
       return $ x:xs
 
-    record' = do
-      xs <- braces (sepBy1 recordEntry' comma)
-      return $ MS.MRec xs
-
+    -- parse a tag/value pair
     recordEntry' = do
       n <- name
       op "="
