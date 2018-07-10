@@ -17,12 +17,10 @@ morlocScript s =
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
+-- (>>) :: f a -> f b -> f a
+-- (<*) :: f a -> (a -> f b) -> f a
 contents :: Parser [Top]
-contents = do
-  Tok.whiteSpace
-  result <- many top
-  eof
-  return result
+contents = Tok.whiteSpace >> many top <* eof
 
 top :: Parser Top
 top =
@@ -130,7 +128,7 @@ application = do
   arguments <- sepBy term' Tok.whiteSpace
   return $ ExprApplication function arguments
   where
-    term' = do 
+    term' =
           try (Tok.parens expression)
       <|> try var'
       <|> try dat'
@@ -140,9 +138,7 @@ application = do
       tag' <- Tok.tag Tok.name
       return $ ExprVariable x tag'
 
-    dat' = do
-      x <- try Tok.mdata
-      return $ ExprData x
+    dat' = fmap ExprData (try Tok.mdata)
 
 -- | function :: [input] -> output constraints 
 signature :: Parser Statement
@@ -230,11 +226,7 @@ booleanExpr =
   <|> try application'
   <?> "an expression that reduces to True/False"
   where
-    not' = do
-      Tok.reserved "not"
-      e <- booleanExpr
-      return $ NOT e
-
+    not' = fmap NOT (Tok.reserved "not" >> booleanExpr)
     application' = do
       n <- Tok.name
       ns <- many Tok.name
@@ -247,21 +239,18 @@ booleanBinOp = do
   b <- bterm'
   return $ binop' op a b
   where
-    bterm' = do
-      s <-  application'
+    bterm' =
+            application'
         <|> bool'
         <|> Tok.parens booleanExpr
         <?> "boolean expression"
-      return s
 
     application' = do
       n <- Tok.name
       ns <- many Tok.name
       return $ BExprFunc n ns
 
-    bool' = do
-      s <- Tok.boolean
-      return $ BExprBool s
+    bool' = fmap BExprBool Tok.boolean
 
     binop' op a b
       | op == "and" = AND a b
@@ -287,16 +276,14 @@ arithmeticExpr
   <?> "expression"
 
 arithmeticTerm
-  = do
+  =
       Tok.parens arithmeticExpr
   <|> try access'
   <|> val'
   <|> var'
   <?> "simple expression. Currently only integers are allowed"
   where
-    val' = do
-      x <- Tok.mdata
-      return $ toExpr' x
+    val' = fmap toExpr' Tok.mdata
 
     var' = do
       x <- Tok.name
