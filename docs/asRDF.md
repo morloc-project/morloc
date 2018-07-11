@@ -17,15 +17,23 @@ Object
 Productions:
 
 ```
-<0> :type :Module
+<0> :isa :Module
 <0> :name "Base"
-<1> :type :Module
+<1> :isa :Module
 <1> :name "Prelude"
 <1> :parent <0>
 
+    [
+        (0, IsA' Module')
+      , (0, Name' "Base")
+      , (1, IsA' Module')
+      , (1, Name' "Prelude")
+      , (1, Parent' 0)
+    ]
+
 $ source "R" "file" ("foo" as fooyolo, "bar")
-<p1>  :type :Module
-<p1>  :type :Source
+<p1>  :isa :Module
+<p1>  :isa :Source
 <p1>  :lang "R"
 <p1>  :parent <1>   -- the imported code inherits from, and may mask Prelude
 <p1>  :file "file"
@@ -36,12 +44,12 @@ $ source "R" "file" ("foo" as fooyolo, "bar")
 
 -- more packages may be stacked
 
-<global> :type :Module
+<global> :isa :Module
 <global> :lang "Morloc"
 <global> :parent <p1>   -- the gobal environment inherits from the last package
 
 $ fname :: [r?] => i1 [, i?] -> o1 [, o?] where ( [constraint?] )
-<id1> :type :Signature
+<id1> :isa :FunctionSignature
 <id1> :parent <global>
 <id1> :name "fname"
 <id1> :role <id2>
@@ -52,16 +60,15 @@ $ fname :: [r?] => i1 [, i?] -> o1 [, o?] where ( [constraint?] )
 <id1> :cons <id9>
 
 $ typename :: [r?] => i:t1 [n?:t?] where ([constraint?])
-<id2> :type :Signature
+<id2> :isa :TypeSignature
 <id1> :parent <global>
 <id2> :name "typename"
 <id2> :role <id3>
 <id2> :role <id4>
-<id2> :args (<id5> <id6> ...)
-<id2> :outs (<id7> <id8> ...)
-<id2> :cons <id9>
-<id2> :cons <id10>
+<id5> :parameters (<id6>, ...)
 <id5> :name "i"
+<id2> :cons <id7>
+<id2> :cons <id8>
 
 $ a operator b
 <id3> <binop> <id4>
@@ -78,7 +85,7 @@ $ len xs == n
 <id5> :name "xs"
 
 $ foo x y = bar (baz x y)
-<id1> :type :Declaration
+<id1> :isa :Declaration
 <id1> :parent <global>
 <id1> :name "foo"
 <id1> :args (<id2> <id3>)
