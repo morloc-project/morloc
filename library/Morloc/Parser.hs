@@ -2,7 +2,6 @@ module Morloc.Parser (morlocScript) where
 
 import Text.Parsec hiding (State)
 import qualified Text.Parsec.Expr as TPE
-import Text.Parsec.String (Parser)
 import Control.Monad.State
 import Control.Monad.Except (throwError)
 
@@ -13,55 +12,55 @@ import qualified Morloc.Lexer as Tok
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 morlocScript :: String -> ThrowsError [Top]
 morlocScript s =
-  case parse contents "<stdin>" s of
+  case runParser contents 0 "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
-contents :: Parser [Top]
+contents :: Tok.Parser [Top]
 contents = Tok.whiteSpace >> many top <* eof
 
-top :: Parser Top
+top :: Tok.Parser Top
 top =
       try topSource 
   <|> try topStatement
   <|> try topImport
   <?> "Top. Maybe you are missing a semicolon?"
 
-topSource :: Parser Top
+topSource :: Tok.Parser Top
 topSource = do
   s <- source
   optional (Tok.op ";")
   return $ TopSource s
 
-topStatement :: Parser Top
+topStatement :: Tok.Parser Top
 topStatement = do
   s <- statement
   return $ TopStatement s
 
-topImport :: Parser Top
+topImport :: Tok.Parser Top
 topImport = do
   i <-  try restrictedImport
     <|> try simpleImport
   optional (Tok.op ";")
   return $ TopImport i
 
-statement :: Parser Statement
+statement :: Tok.Parser Statement
 statement = do
   s <-  try signature
     <|> try declaration
   Tok.op ";"
   return $ s
 
-simpleImport :: Parser Import
+simpleImport :: Tok.Parser Import
 simpleImport = do
   Tok.reserved "import" 
   path <- Tok.path
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
   return $ Import path qual Nothing
 
-restrictedImport :: Parser Import
+restrictedImport :: Tok.Parser Import
 restrictedImport = do
   Tok.reserved "from"
   path <- Tok.path
@@ -72,7 +71,7 @@ restrictedImport = do
   return $ Import path Nothing (Just functions)
 
 -- | parses a 'source' header, returning the language
-source :: Parser Source
+source :: Tok.Parser Source
 source = do
   Tok.reserved "source"
   -- get the language of the imported source
@@ -85,7 +84,7 @@ source = do
     (Just p) -> SourceFile lang p fs
     Nothing  -> SourceLang lang fs
   where
-    importAs' :: Parser (String, Maybe String)
+    importAs' :: Tok.Parser (String, Maybe String)
     importAs' = do
       -- quoting the function names allows them to have more arbitrary values,
       -- perhaps even including expressions that return functions (though this
@@ -96,7 +95,7 @@ source = do
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
       return $ (func, alias)
 
-declaration :: Parser Statement
+declaration :: Tok.Parser Statement
 declaration = do
   varname <- Tok.name
   bndvars <- many Tok.name
@@ -104,7 +103,7 @@ declaration = do
   value <- expression
   return $ Declaration varname bndvars value 
 
-expression :: Parser Expression
+expression :: Tok.Parser Expression
 expression =
       -- currently this just handles "."
       try (TPE.buildExpressionParser functionTable term')
@@ -116,12 +115,12 @@ expression =
       <|> try application
       <|> try primitiveExpr'
 
-    primitiveExpr' :: Parser Expression
+    primitiveExpr' :: Tok.Parser Expression
     primitiveExpr' = do
       x <- try Tok.mdata 
       return $ ExprData x
 
-application :: Parser Expression
+application :: Tok.Parser Expression
 application = do
   -- this should be either a function or a composition
   function <- Tok.parens expression <|> var'
@@ -141,7 +140,7 @@ application = do
     dat' = fmap ExprData (try Tok.mdata)
 
 -- | function :: [input] -> output constraints 
-signature :: Parser Statement
+signature :: Tok.Parser Statement
 signature = do
   function <- Tok.name
   Tok.op "::"
@@ -156,7 +155,7 @@ signature = do
     )
   return $ Signature function inputs output constraints
 
-mtype :: Parser MType
+mtype :: Tok.Parser MType
 mtype =
       list'       -- [a]
   <|> paren'      -- () | (a) | (a,b,...)
@@ -166,14 +165,14 @@ mtype =
   <?> "type"
   where
     -- [ <type> ]
-    list' :: Parser MType
+    list' :: Tok.Parser MType
     list' = do
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
       return $ MList s l
 
     -- ( <type>, <type>, ... )
-    paren' :: Parser MType
+    paren' :: Tok.Parser MType
     paren' = do
       l <- Tok.tag (char '(')
       s <- Tok.parens (sepBy mtype (Tok.comma)) 
@@ -183,7 +182,7 @@ mtype =
         xs  -> MTuple xs l
 
     -- <name> <type> <type> ...
-    specific' :: Parser MType
+    specific' :: Tok.Parser MType
     specific' = do
       l <- Tok.tag Tok.specificType
       s <- Tok.specificType
@@ -191,7 +190,7 @@ mtype =
       return $ MSpecific s ss l
 
     -- <name> <type> <type> ...
-    generic' :: Parser MType
+    generic' :: Tok.Parser MType
     generic' = do
       -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
@@ -201,7 +200,7 @@ mtype =
       return $ MGeneric s ss l
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
-    record' :: Parser MType
+    record' :: Tok.Parser MType
     record' = do
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
@@ -209,7 +208,7 @@ mtype =
       return $ MRecord n xs l
 
     -- (<name> = <type>)
-    recordEntry' :: Parser (Name, MType)
+    recordEntry' :: Tok.Parser (Name, MType)
     recordEntry' = do
       n <- Tok.name
       Tok.op "::"
@@ -217,7 +216,7 @@ mtype =
       return (n, t)
 
 
-booleanExpr :: Parser BExpr
+booleanExpr :: Tok.Parser BExpr
 booleanExpr =
       try booleanBinOp
   <|> try relativeExpr
@@ -232,7 +231,7 @@ booleanExpr =
       ns <- many Tok.name
       return $ BExprFunc n ns
 
-booleanBinOp :: Parser BExpr
+booleanBinOp :: Tok.Parser BExpr
 booleanBinOp = do
   a <- bterm'
   op <- Tok.logicalBinOp
@@ -256,7 +255,7 @@ booleanBinOp = do
       | op == "and" = AND a b
       | op == "or"  = OR  a b
 
-relativeExpr :: Parser BExpr
+relativeExpr :: Tok.Parser BExpr
 relativeExpr = do
   a <- arithmeticExpr
   op <- Tok.relativeBinOp

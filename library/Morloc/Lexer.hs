@@ -1,5 +1,6 @@
 module Morloc.Lexer (
-    integer
+    Parser
+  , integer
   , float
   , stringLiteral
   , boolean
@@ -26,7 +27,6 @@ module Morloc.Lexer (
 ) where
 
 import Text.Parsec hiding (State)
-import Text.Parsec.String (Parser)
 import Control.Monad.State
 import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
@@ -34,7 +34,24 @@ import qualified Text.Parsec.Token as Token
 
 import qualified Morloc.Syntax as MS
 
-lexer :: Token.TokenParser ()
+-- For now, the passed parser state is just an counter
+type ParserState = Integer
+
+-- data ParsecT s u m a
+-- where
+--   s := stream type
+--   u := user state type
+--   m := underlying monad
+--   a := return type
+--
+-- type Parsec s u = ParsecT s u Identity
+-- type Parser = Parsec String ()
+-- 
+-- Here, MorlocParser deviates from Parser (defined in Text.Parsec.String) by
+-- passing Integer state.
+type Parser = Parsec String ParserState
+
+lexer :: Token.TokenParser ParserState
 lexer = Token.makeTokenParser style
   where
   style = Lang.emptyDef {
