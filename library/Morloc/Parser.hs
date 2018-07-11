@@ -12,7 +12,8 @@ import qualified Morloc.Lexer as Tok
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 morlocScript :: String -> ThrowsError [Top]
 morlocScript s =
-  case runParser contents 0 "<stdin>" s of
+  -- (0, []) is the empty state, I should make this a Monoid
+  case runParser contents (0, []) "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
@@ -58,7 +59,7 @@ simpleImport = do
   Tok.reserved "import" 
   path <- Tok.path
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
-  return $ Import path qual Nothing
+  return $ Import path (fmap snd qual) Nothing
 
 restrictedImport :: Tok.Parser Import
 restrictedImport = do
@@ -68,7 +69,7 @@ restrictedImport = do
   -- TODO: I am also importing ontologies, how should that be handled?
   -- TODO: at very least, I am also importing types
   functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
-  return $ Import path Nothing (Just functions)
+  return $ Import path Nothing (Just (map snd functions))
 
 -- | parses a 'source' header, returning the language
 source :: Tok.Parser Source
@@ -93,7 +94,7 @@ source = do
       -- the alias is especially important when the native function name is not
       -- legal Morloc syntax, for example an R function with a '.' in the name.
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
-      return $ (func, alias)
+      return $ (func, (fmap snd alias))
 
 declaration :: Tok.Parser Statement
 declaration = do
@@ -101,7 +102,7 @@ declaration = do
   bndvars <- many Tok.name
   Tok.op "="
   value <- expression
-  return $ Declaration varname bndvars value 
+  return $ Declaration (snd varname) (map snd bndvars) value 
 
 expression :: Tok.Parser Expression
 expression =
@@ -135,7 +136,7 @@ application = do
     var' = do
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
-      return $ ExprVariable x tag'
+      return $ ExprVariable (snd x) tag'
 
     dat' = fmap ExprData (try Tok.mdata)
 
@@ -153,7 +154,7 @@ signature = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
-  return $ Signature function inputs output constraints
+  return $ Signature (snd function) inputs output constraints
 
 mtype :: Tok.Parser MType
 mtype =
@@ -213,7 +214,7 @@ mtype =
       n <- Tok.name
       Tok.op "::"
       t <- mtype
-      return (n, t)
+      return (snd n, t)
 
 
 booleanExpr :: Tok.Parser BExpr
@@ -229,7 +230,7 @@ booleanExpr =
     application' = do
       n <- Tok.name
       ns <- many Tok.name
-      return $ BExprFunc n ns
+      return $ BExprFunc (snd n) (map snd ns)
 
 booleanBinOp :: Tok.Parser BExpr
 booleanBinOp = do
@@ -247,7 +248,7 @@ booleanBinOp = do
     application' = do
       n <- Tok.name
       ns <- many Tok.name
-      return $ BExprFunc n ns
+      return $ BExprFunc (snd n) (map snd ns)
 
     bool' = fmap BExprBool Tok.boolean
 
@@ -287,12 +288,12 @@ arithmeticTerm
     var' = do
       x <- Tok.name
       xs <- option [] (many arithmeticTerm)
-      return $ AExprFunc x xs
+      return $ AExprFunc (snd x) xs
 
     access' = do
       x <- Tok.name
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
-      return $ AExprAccess x ids
+      return $ AExprAccess (snd x) ids
 
     toExpr' :: MData -> AExpr
     toExpr' (MInt x) = AExprInt x

@@ -1,5 +1,6 @@
 module Morloc.Lexer (
     Parser
+  , T
   , integer
   , float
   , stringLiteral
@@ -33,9 +34,13 @@ import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
 import qualified Morloc.Syntax as MS
+import qualified Morloc.Triple as Triple
 
 -- For now, the passed parser state is just an counter
-type ParserState = Integer
+type ParserState = (Int, [Triple.Triple])
+
+-- A numbered token
+type T a = (Int, a)
 
 -- data ParsecT s u m a
 -- where
@@ -87,6 +92,13 @@ lexer = Token.makeTokenParser style
             ]
           }
 
+withCount :: Parser a -> Parser (T a)
+withCount p = do 
+  x <- p
+  modifyState (\(i, ts) -> (i+1,ts))
+  stat <- getState
+  return (fst stat, x)
+
 parens = Token.parens lexer
 braces = Token.braces lexer
 brackets = Token.brackets lexer
@@ -96,16 +108,16 @@ float      :: Parser Double
 whiteSpace :: Parser ()
 op         :: String -> Parser ()
 reserved   :: String -> Parser ()
-name       :: Parser String
 comma      :: Parser String
+name       :: Parser (T String)
 
-integer    = Token.integer lexer
-float      = Token.float lexer
+integer    = Token.integer    lexer
+float      = Token.float      lexer
 whiteSpace = Token.whiteSpace lexer
 op         = Token.reservedOp lexer
 reserved   = Token.reserved   lexer
-name       = Token.identifier lexer
 comma      = Token.comma      lexer
+name       = withCount (Token.identifier lexer)
 
 tag p =
   option "" (try tag')
@@ -160,7 +172,7 @@ mdata = do
       n <- name
       op "="
       t <- mdata
-      return (n, t)
+      return (snd n, t)
 
 
 -- | a legal non-generic type name
@@ -182,7 +194,7 @@ path :: Parser [String]
 path = do
   path <- sepBy name (char '/')
   whiteSpace
-  return path
+  return (map snd path)
 
 -- | matches all trailing space
 chop :: Parser String
