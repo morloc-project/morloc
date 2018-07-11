@@ -1,23 +1,53 @@
 -- I want to translate the entire Morloc program into an RDF triplet store.
 
 module Morloc.Triple (
-    Triple(..)
-  , Relation(..)
-  , Key
+    Triple
+  , Subject
+  , RelObj(..)
+  , Thing(..)
+  , Primitive(..)
 ) where
 
 import Morloc.Syntax
 import Morloc.Data
 
-type Key = Int
+type Triple = (Subject, RelObj)
 
-data Triple = Triple Key Relation
+type Subject = Integer
 
-data Relation 
-  = RIsA String -- replace string with some algebraic type describing all
-                -- possible language types
-  | RPosArg Int MData  -- the nth positional parameter
-  | RKeyArg Int MData
-  | RHasValue MData
-  | RType MType
-  | RConstraint
+data RelObj
+  = IsA'     Thing
+  | Name'    String
+  | Parent'  Subject
+  | Lang'    String
+  | File'    String
+  | Alias'   String
+  | Role'    String
+  | Cons'    Subject
+  | Binop'   Subject
+  | LHS'     Subject
+  | RHS'     Subject
+  | Appl'    [Subject]
+  | Args'    [Subject]
+  | Param'   [Subject]
+  | Value'   Primitive 
+  deriving (Ord, Eq, Show)
+
+data Thing
+  = FunctionSignature'
+  | TypeSignature'
+  | Declaration'
+  | Import'
+  | Module'
+  | List'
+  | Tuple'
+  | Record'
+  deriving (Ord, Eq, Show)
+
+data Primitive 
+  = Int' Integer
+  | Num' Double
+  | Log' Bool
+  | Str' String
+  | Arr' [Subject]
+  deriving (Ord, Eq, Show)
