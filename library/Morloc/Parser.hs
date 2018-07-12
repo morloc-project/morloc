@@ -1,7 +1,4 @@
-module Morloc.Parser (
-    morlocScript
-  , morlocRDF
-) where
+module Morloc.Parser (morlocScript) where
 
 import Text.Parsec hiding (State, Parser)
 import qualified Text.Parsec.Expr as TPE
@@ -11,87 +8,31 @@ import Control.Monad.Except (throwError)
 import Morloc.Error
 import Morloc.Syntax
 import Morloc.State
-import Morloc.Triple as Triple
+import Morloc.Triple
 import qualified Morloc.Lexer as Tok
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocScript :: String -> ThrowsError [Top]
+morlocScript :: String -> ThrowsError [Triple]
 morlocScript s =
   case runParser contents parserStateEmpty "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
--- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocRDF :: String -> ThrowsError [Triple.Triple]
-morlocRDF s =
-  -- (0, []) is the empty state, I should make this a Monoid
-  case runParser (unstate contents) parserStateEmpty "<stdin>" s of
-    Left err  -> throwError $ SyntaxError err
-    Right (_, s) -> return (stateTriple s)
-
-unstate :: Parser a -> Parser (a, ParserState)
-unstate p = do
-  x <- p
-  s <- getState
-  return $ (x, s)
-
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
-contents :: Parser [Top]
-contents = Tok.whiteSpace >> many top <* eof
+contents :: Parser [Triple]
+contents = fmap concat (Tok.whiteSpace >> many top <* eof)
 
-top :: Parser Top
+top :: Parser [Triple]
 top =
-      try topSource 
-  <|> try topStatement
-  <|> try topImport
+      try (source'    <* optional (Tok.op ";") )
+  <|> try (statement' <*           Tok.op ";"  )
+  <|> try (import'    <* optional (Tok.op ";") )
   <?> "Top. Maybe you are missing a semicolon?"
 
-topSource :: Parser Top
-topSource = do
-  s <- source
-  optional (Tok.op ";")
-  return $ TopSource s
-
-topStatement :: Parser Top
-topStatement = do
-  s <- statement
-  return $ TopStatement s
-
-topImport :: Parser Top
-topImport = do
-  i <-  try restrictedImport
-    <|> try simpleImport
-  optional (Tok.op ";")
-  return $ TopImport i
-
-statement :: Parser Statement
-statement = do
-  s <-  try signature
-    <|> try declaration
-  Tok.op ";"
-  return $ s
-
-simpleImport :: Parser Import
-simpleImport = do
-  Tok.reserved "import" 
-  path <- Tok.path
-  qual <- optionMaybe (Tok.op "as" >> Tok.name)
-  return $ Import path (fmap snd qual) Nothing
-
-restrictedImport :: Parser Import
-restrictedImport = do
-  Tok.reserved "from"
-  path <- Tok.path
-  Tok.reserved "import"
-  -- TODO: I am also importing ontologies, how should that be handled?
-  -- TODO: at very least, I am also importing types
-  functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
-  return $ Import path Nothing (Just (map snd functions))
-
 -- | parses a 'source' header, returning the language
-source :: Parser Source
-source = do
+source' :: Parser [Triple]
+source' = do
   Tok.reserved "source"
   -- get the language of the imported source
   lang <- Tok.stringLiteral
@@ -100,11 +41,14 @@ source = do
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
 
-  
+  -- the statement is unambiguous even without a semicolon
+  optional (Tok.op ";")
 
-  return $ case path of
-    (Just p) -> SourceFile lang p fs
-    Nothing  -> SourceLang lang fs
+  return $ [(42, ":source", Id' 666)]
+
+  -- return $ case path of
+  --   (Just p) -> SourceFile lang p fs
+  --   Nothing  -> SourceLang lang fs
   where
     importAs' :: Parser (String, Maybe String)
     importAs' = do
@@ -115,15 +59,72 @@ source = do
       -- the alias is especially important when the native function name is not
       -- legal Morloc syntax, for example an R function with a '.' in the name.
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
-      return $ (func, (fmap snd alias))
+      return $ (func, alias)
 
-declaration :: Parser Statement
+statement' :: Parser [Triple]
+statement' =
+      try signature
+  <|> try declaration
+
+import' :: Parser [Triple]
+import' =
+      try restrictedImport
+  <|> try simpleImport
+
+simpleImport :: Parser [Triple]
+simpleImport = do
+  Tok.reserved "import"
+  path <- Tok.path
+  qual <- optionMaybe (Tok.op "as" >> Tok.name)
+
+  return $ [(42, ":simpleImport", Id' 666)]
+  -- return $ Import path qual Nothing
+
+restrictedImport :: Parser [Triple]
+restrictedImport = do
+  Tok.reserved "from"
+  path <- Tok.path
+  Tok.reserved "import"
+  -- TODO: I am also importing ontologies, how should that be handled?
+  -- TODO: at very least, I am also importing types
+  functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
+
+  return $ [(42, ":restrictedImport", Id' 666)]
+  -- return $ Import path Nothing (Just functions)
+
+declaration :: Parser [Triple]
 declaration = do
   varname <- Tok.name
   bndvars <- many Tok.name
   Tok.op "="
   value <- expression
-  return $ Declaration (snd varname) (map snd bndvars) value 
+
+  return $ [(42, ":declaration", Id' 666)]
+  -- return $ Declaration varname bndvars value
+
+-- | function :: [input] -> output constraints
+signature :: Parser [Triple]
+signature = do
+  function <- Tok.name
+  Tok.op "::"
+  inputs <- sepBy1 mtype Tok.comma
+  output <- optionMaybe (
+      Tok.op "->" >>
+      mtype
+    )
+  constraints <- option [] (
+      Tok.reserved "where" >>
+      Tok.parens (sepBy1 booleanExpr Tok.comma)
+    )
+
+  -- -- Record this function signature
+  -- pushTriple      function (Triple.IsA' Triple.Signature')
+  -- pushTriple      function (Triple.Name' function)
+  -- pushTriple      function (Triple.Params' constraints)
+
+  return $ [(42, ":signature", Id' 666)]
+  -- return $ Signature function inputs output constraints
+
 
 expression :: Parser Expression
 expression =
@@ -139,7 +140,7 @@ expression =
 
     primitiveExpr' :: Parser Expression
     primitiveExpr' = do
-      x <- try mdata 
+      x <- try mdata
       return $ ExprData x
 
 application :: Parser Expression
@@ -157,31 +158,9 @@ application = do
     var' = do
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
-      return $ ExprVariable (snd x) tag'
+      return $ ExprVariable x tag'
 
     dat' = fmap ExprData (try mdata)
-
--- | function :: [input] -> output constraints 
-signature :: Parser Statement
-signature = do
-  function <- Tok.name
-  Tok.op "::"
-  inputs <- sepBy1 mtype Tok.comma
-  output <- optionMaybe (
-      Tok.op "->" >>
-      mtype
-    )
-  constraints <- option [] (
-      Tok.reserved "where" >>
-      Tok.parens (sepBy1 (withCount booleanExpr) Tok.comma)
-    )
-
-  -- Record this function signature
-  pushTriple      (fst function) (Triple.IsA' Triple.Signature')
-  pushTriple      (fst function) (Triple.Name' (snd function))
-  pushTriple      (fst function) (Triple.Params' (map fst constraints))
-
-  return $ Signature (snd function) inputs output (map snd constraints)
 
 mtype :: Parser MType
 mtype =
@@ -203,7 +182,7 @@ mtype =
     paren' :: Parser MType
     paren' = do
       l <- Tok.tag (char '(')
-      s <- Tok.parens (sepBy mtype (Tok.comma)) 
+      s <- Tok.parens (sepBy mtype (Tok.comma))
       return $ case s of
         []  -> MEmpty
         [x] -> x
@@ -214,7 +193,7 @@ mtype =
     specific' = do
       l <- Tok.tag Tok.specificType
       s <- Tok.specificType
-      ss <- many mtype 
+      ss <- many mtype
       return $ MSpecific s ss l
 
     -- <name> <type> <type> ...
@@ -224,7 +203,7 @@ mtype =
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       s <- Tok.genericType
-      ss <- many mtype 
+      ss <- many mtype
       return $ MGeneric s ss l
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
@@ -241,7 +220,7 @@ mtype =
       n <- Tok.name
       Tok.op "::"
       t <- mtype
-      return (snd n, t)
+      return (n, t)
 
 mdata :: Parser MData
 mdata = do
@@ -275,7 +254,7 @@ mdata = do
       n <- Tok.name
       Tok.op "="
       t <- mdata
-      return (snd n, t)
+      return (n, t)
 
 booleanExpr :: Parser BExpr
 booleanExpr =
@@ -290,7 +269,7 @@ booleanExpr =
     application' = do
       n <- Tok.name
       ns <- many Tok.name
-      return $ BExprFunc (snd n) (map snd ns)
+      return $ BExprFunc n ns
 
 booleanBinOp :: Parser BExpr
 booleanBinOp = do
@@ -308,7 +287,7 @@ booleanBinOp = do
     application' = do
       n <- Tok.name
       ns <- many Tok.name
-      return $ BExprFunc (snd n) (map snd ns)
+      return $ BExprFunc n ns
 
     bool' = fmap BExprBool Tok.boolean
 
@@ -348,12 +327,12 @@ arithmeticTerm
     var' = do
       x <- Tok.name
       xs <- option [] (many arithmeticTerm)
-      return $ AExprFunc (snd x) xs
+      return $ AExprFunc x xs
 
     access' = do
       x <- Tok.name
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
-      return $ AExprAccess (snd x) ids
+      return $ AExprAccess x ids
 
     toExpr' :: MData -> AExpr
     toExpr' (MInt x) = AExprInt x
@@ -364,7 +343,7 @@ arithmeticTable
   = [
       [ prefix "-" Neg
       , prefix "+" Pos
-      ]             
+      ]
     , [ binary "^"  Pow TPE.AssocRight
       ]
     , [ binary "*"  Mul TPE.AssocLeft
@@ -381,3 +360,32 @@ functionTable = [[ binary "."  ExprComposition TPE.AssocRight]]
 
 binary name fun assoc = TPE.Infix  (do{ Tok.op name; return fun }) assoc
 prefix name fun       = TPE.Prefix (do{ Tok.op name; return fun })
+
+
+concatOrderedTriples :: [[Triple]] -> [Triple]
+concatOrderedTriples tss
+  =  concat tss
+  ++ map (\((i,_,_):_,j) -> (i, ":position", Id' j)) (zip tss [0..])
+
+triplePrimitive :: String -> Parser a -> (a -> Object) -> Parser [Triple]
+triplePrimitive isa p f = do
+  i <- getId
+  n <- p
+  s <- getState
+  return $ [
+        (i, ":isa", Str' isa)
+      , (i, ":value", f n)
+      , (i, ":parent", Id' (stateScope s))
+    ]
+
+tripleInteger       :: Parser [Triple]
+tripleFloat         :: Parser [Triple]
+tripleName          :: Parser [Triple]
+tripleStringLiteral :: Parser [Triple]
+tripleBool          :: Parser [Triple]
+
+tripleInteger       = triplePrimitive ":integer" Tok.integer       Int'
+tripleFloat         = triplePrimitive ":number"  Tok.float         Num'
+tripleName          = triplePrimitive ":name"    Tok.name          Str'
+tripleStringLiteral = triplePrimitive ":string"  Tok.stringLiteral Str'
+tripleBool          = triplePrimitive ":boolean" Tok.boolean       Log'

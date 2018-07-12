@@ -12,7 +12,8 @@ import qualified Morloc.Tree as G
 import Morloc.Parser (morlocScript)
 
 eval :: String -> E.ThrowsError Program
-eval s = morlocScript s >>= script2program
+eval = undefined
+-- eval s = morlocScript s >>= script2program
 
 script2program :: [S.Top] -> E.ThrowsError Program
 script2program xs

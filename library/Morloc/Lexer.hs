@@ -80,7 +80,7 @@ whiteSpace :: Parser ()
 op         :: String -> Parser ()
 reserved   :: String -> Parser ()
 comma      :: Parser String
-name       :: Parser (T String)
+name       :: Parser String
 
 integer    = Token.integer    lexer
 float      = Token.float      lexer
@@ -88,7 +88,7 @@ whiteSpace = Token.whiteSpace lexer
 op         = Token.reservedOp lexer
 reserved   = Token.reserved   lexer
 comma      = Token.comma      lexer
-name       = withCount (Token.identifier lexer)
+name       = Token.identifier lexer
 
 tag p =
   option "" (try tag')
@@ -130,7 +130,7 @@ path :: Parser [String]
 path = do
   path <- sepBy name (char '/')
   whiteSpace
-  return (map snd path)
+  return path
 
 -- | matches all trailing space
 chop :: Parser String

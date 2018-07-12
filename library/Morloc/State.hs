@@ -3,31 +3,24 @@ module Morloc.State
     ParserState(..)
   , parserStateEmpty
   , Parser
-  , T
-  , withCount
-  , pushTriple
+  , getId
 ) where
 
 import Text.Parsec hiding (Parser, State)
 
-import Morloc.Triple
-
 -- For now, the passed parser state is just an counter
 data ParserState = ParserState {
-    stateCount :: Int
-  , stateScope :: Int
-  , stateTriple :: [Triple]
+    -- A program unique ID
+    stateCount :: Int 
+    -- The parent ID
+  , stateScope :: Int 
 }
 
 parserStateEmpty :: ParserState
 parserStateEmpty = ParserState {
     stateCount  = 0
   , stateScope  = 0
-  , stateTriple = []
 }
-
--- A numbered token
-type T a = (Int, a)
 
 -- data ParsecT s u m a
 -- where
@@ -43,13 +36,10 @@ type T a = (Int, a)
 -- passing Integer state.
 type Parser = Parsec String ParserState
 
-withCount :: Parser a -> Parser (T a)
-withCount p = do 
-  x <- p
+-- setScope = modifyState (\s -> s {stateScope = stateCount s})
+
+getId :: Parser Int
+getId = do
   modifyState (\s -> s {stateCount = (stateCount s) + 1})
   s <- getState
-  return (stateCount s, x)
-
-pushTriple :: Subject -> RelObj -> Parser ()
-pushTriple i r = do
-  modifyState (\s -> s {stateTriple = (i, r):(stateTriple s)})
+  return $ stateCount s

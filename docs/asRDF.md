@@ -12,32 +12,24 @@ Object
  1. WUID - workflow unique identifier, used to identify elements, such as nodes
     in the application graph, that are unique to the workflow.
  2. UUID - universally unique identifiers, such as functions or types from Morloc.IO.
-```
 
 Productions:
 
 ```
 <0> :isa :Module
-<0> :name "Base"
+<0> :has_name "Base"
 <1> :isa :Module
-<1> :name "Prelude"
-<1> :parent <0>
-
-    [
-        (0, IsA' Module')
-      , (0, Name' "Base")
-      , (1, IsA' Module')
-      , (1, Name' "Prelude")
-      , (1, Parent' 0)
-    ]
+<1> :has_name "Prelude"
+<1> :has_parent <0>
 
 $ source "R" "file" ("foo" as fooyolo, "bar")
 <p1>  :isa :Module
 <p1>  :isa :Source
 <p1>  :lang "R"
-<p1>  :parent <1>   -- the imported code inherits from, and may mask Prelude
+<p1>  :has_parent <1>   -- the imported code inherits from, and may mask Prelude
 <p1>  :file "file"
-<p1>  :import (<id2> <id3>)
+<p1>  :import <id2>
+<p1>  :import <id3>
 <id2> :name "foo"
 <id2> :alias "fooyolo"
 <id3> :name "bar"
@@ -46,18 +38,28 @@ $ source "R" "file" ("foo" as fooyolo, "bar")
 
 <global> :isa :Module
 <global> :lang "Morloc"
-<global> :parent <p1>   -- the gobal environment inherits from the last package
+<global> :has_parent <p1>   -- the gobal environment inherits from the last package
 
 $ fname :: [r?] => i1 [, i?] -> o1 [, o?] where ( [constraint?] )
 <id1> :isa :FunctionSignature
-<id1> :parent <global>
-<id1> :name "fname"
+<id1> :has_parent <global>
+<id1> :has_name "fname"
+
 <id1> :role <id2>
 <id1> :role <id3>
-<id1> :args (<id4> <id5> ...)
-<id1> :outs (<id6> <id7> ...)
-<id1> :cons <id8>
-<id1> :cons <id9>
+
+<id2> :role <id1>
+
+<id4> :isa :PositionalArgument
+<id4> :parent <id1>
+<id4> :position 1
+<id5> :isa :PositionalArgument
+<id5> :parent <id1>
+<id5> :position 2
+<id6> :isa :Output
+<id6> :parent <id1>
+<id8> :cons <id1>
+<id9> :cons <id1>
 
 $ typename :: [r?] => i:t1 [n?:t?] where ([constraint?])
 <id2> :isa :TypeSignature
@@ -65,7 +67,11 @@ $ typename :: [r?] => i:t1 [n?:t?] where ([constraint?])
 <id2> :name "typename"
 <id2> :role <id3>
 <id2> :role <id4>
-<id5> :parameters (<id6>, ...)
+
+<id6> :parent <id5>
+<id6> :isA :TypeParameter
+<id6> :position 1
+
 <id5> :name "i"
 <id2> :cons <id7>
 <id2> :cons <id8>
