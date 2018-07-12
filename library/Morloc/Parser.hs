@@ -100,6 +100,9 @@ source = do
   path <- optionMaybe (Tok.reserved "from" >> Tok.path)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
+
+  
+
   return $ case path of
     (Just p) -> SourceFile lang p fs
     Nothing  -> SourceLang lang fs
@@ -137,7 +140,7 @@ expression =
 
     primitiveExpr' :: Parser Expression
     primitiveExpr' = do
-      x <- try Tok.mdata 
+      x <- try mdata 
       return $ ExprData x
 
 application :: Parser Expression
@@ -157,7 +160,7 @@ application = do
       tag' <- Tok.tag Tok.name
       return $ ExprVariable (snd x) tag'
 
-    dat' = fmap ExprData (try Tok.mdata)
+    dat' = fmap ExprData (try mdata)
 
 -- | function :: [input] -> output constraints 
 signature :: Parser Statement
@@ -241,6 +244,39 @@ mtype =
       t <- mtype
       return (snd n, t)
 
+mdata :: Parser MData
+mdata = do
+      try boolean'       -- True | False
+  <|> try float'         -- 1.1
+  <|> try integer'       -- 1
+  <|> try stringLiteral' -- "yolo"
+  <|> try list'          -- [ ...
+  <|> try tuple'         -- ( ...
+  <|> try record'        -- { ...
+  <?> "literal data"
+  where
+
+    integer'       = fmap MInt Tok.integer
+    float'         = fmap MNum Tok.float
+    stringLiteral' = fmap MStr Tok.stringLiteral
+    boolean'       = fmap MLog Tok.boolean
+    list'          = fmap MLst (Tok.brackets (sepBy mdata Tok.comma))
+    tuple'         = fmap MTup (Tok.parens tuple'')
+    record'        = fmap MRec (Tok.braces (sepBy1 recordEntry' Tok.comma))
+
+    -- must have at least two elements
+    tuple'' = do
+      x <- mdata
+      Tok.comma
+      xs <- sepBy1 mdata Tok.comma
+      return $ x:xs
+
+    -- parse a tag/value pair
+    recordEntry' = do
+      n <- Tok.name
+      Tok.op "="
+      t <- mdata
+      return (snd n, t)
 
 booleanExpr :: Parser BExpr
 booleanExpr =
@@ -308,7 +344,7 @@ arithmeticTerm
   <|> var'
   <?> "simple expression. Currently only integers are allowed"
   where
-    val' = fmap toExpr' Tok.mdata
+    val' = fmap toExpr' mdata
 
     var' = do
       x <- Tok.name

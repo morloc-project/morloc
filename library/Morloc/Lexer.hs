@@ -7,7 +7,6 @@ module Morloc.Lexer (
   , op
   , reserved
   , name
-  , mdata
   , tag
   , specificType
   , genericType
@@ -111,41 +110,6 @@ stringLiteral = do
 
 boolean :: Parser Bool 
 boolean = fmap read ((string "True" <|> string "False") <* whiteSpace)
-
-mdata :: Parser MS.MData
-mdata = do
-      try boolean'       -- True | False
-  <|> try float'         -- 1.1
-  <|> try integer'       -- 1
-  <|> try stringLiteral' -- "yolo"
-  <|> try list'          -- [ ...
-  <|> try tuple'         -- ( ...
-  <|> try record'        -- { ...
-  <?> "literal data"
-  where
-
-    integer'       = fmap MS.MInt integer
-    float'         = fmap MS.MNum float
-    stringLiteral' = fmap MS.MStr stringLiteral
-    boolean'       = fmap MS.MLog boolean
-    list'          = fmap MS.MLst (brackets (sepBy mdata comma))
-    tuple'         = fmap MS.MTup (parens tuple'')
-    record'        = fmap MS.MRec (braces (sepBy1 recordEntry' comma))
-
-    -- must have at least two elements
-    tuple'' = do
-      x <- mdata
-      comma
-      xs <- sepBy1 mdata comma
-      return $ x:xs
-
-    -- parse a tag/value pair
-    recordEntry' = do
-      n <- name
-      op "="
-      t <- mdata
-      return (snd n, t)
-
 
 -- | a legal non-generic type name
 specificType :: Parser String
