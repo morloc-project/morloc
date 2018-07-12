@@ -171,13 +171,15 @@ signature = do
     )
   constraints <- option [] (
       Tok.reserved "where" >>
-      Tok.parens (sepBy1 booleanExpr Tok.comma)
+      Tok.parens (sepBy1 (withCount booleanExpr) Tok.comma)
     )
 
   -- Record this function signature
-  pushTriple (fst function, Triple.IsA' Triple.FunctionSignature')
+  pushTriple      (fst function) (Triple.IsA' Triple.Signature')
+  pushTriple      (fst function) (Triple.Name' (snd function))
+  pushTriple      (fst function) (Triple.Params' (map fst constraints))
 
-  return $ Signature (snd function) inputs output constraints
+  return $ Signature (snd function) inputs output (map snd constraints)
 
 mtype :: Parser MType
 mtype =

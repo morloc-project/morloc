@@ -38,6 +38,12 @@ withCount p = do
   stat <- getState
   return (fst stat, x)
 
-pushTriple :: Triple -> Parser ()
-pushTriple t = do
-  modifyState (\(i, ts) -> (i, t:ts))
+pushTriple :: Subject -> RelObj -> Parser ()
+pushTriple s t = do
+  modifyState (\(i, ts) -> (i, (s, t):ts))
+
+pushTripleMaybe :: Subject -> Maybe RelObj -> Parser ()
+pushTripleMaybe s (Just t) = do
+  modifyState (\(i, ts) -> (i, (s, t):ts))
+pushTripleMaybe _ Nothing = do
+  modifyState (\x -> x)
