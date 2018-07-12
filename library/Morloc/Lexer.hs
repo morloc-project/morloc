@@ -1,7 +1,5 @@
 module Morloc.Lexer (
-    Parser
-  , T
-  , integer
+    integer
   , float
   , stringLiteral
   , boolean
@@ -35,26 +33,7 @@ import qualified Text.Parsec.Token as Token
 
 import qualified Morloc.Syntax as MS
 import qualified Morloc.Triple as Triple
-
--- For now, the passed parser state is just an counter
-type ParserState = (Int, [Triple.Triple])
-
--- A numbered token
-type T a = (Int, a)
-
--- data ParsecT s u m a
--- where
---   s := stream type
---   u := user state type
---   m := underlying monad
---   a := return type
---
--- type Parsec s u = ParsecT s u Identity
--- type Parser = Parsec String ()
--- 
--- Here, MorlocParser deviates from Parser (defined in Text.Parsec.String) by
--- passing Integer state.
-type Parser = Parsec String ParserState
+import Morloc.State
 
 lexer :: Token.TokenParser ParserState
 lexer = Token.makeTokenParser style
@@ -91,13 +70,6 @@ lexer = Token.makeTokenParser style
               , "not"
             ]
           }
-
-withCount :: Parser a -> Parser (T a)
-withCount p = do 
-  x <- p
-  modifyState (\(i, ts) -> (i+1,ts))
-  stat <- getState
-  return (fst stat, x)
 
 parens = Token.parens lexer
 braces = Token.braces lexer

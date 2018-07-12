@@ -13,7 +13,7 @@ import Morloc.Data
 
 type Triple = (Subject, RelObj)
 
-type Subject = Integer
+type Subject = Int
 
 data RelObj
   = IsA'     Thing

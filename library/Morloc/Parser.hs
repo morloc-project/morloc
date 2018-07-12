@@ -1,12 +1,17 @@
-module Morloc.Parser (morlocScript) where
+module Morloc.Parser (
+    morlocScript
+  , morlocRDF
+) where
 
-import Text.Parsec hiding (State)
+import Text.Parsec hiding (State, Parser)
 import qualified Text.Parsec.Expr as TPE
 import Control.Monad.State
 import Control.Monad.Except (throwError)
 
 import Morloc.Error
 import Morloc.Syntax
+import Morloc.State
+import Morloc.Triple as Triple
 import qualified Morloc.Lexer as Tok
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
@@ -17,51 +22,65 @@ morlocScript s =
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
+-- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
+morlocRDF :: String -> ThrowsError [Triple.Triple]
+morlocRDF s =
+  -- (0, []) is the empty state, I should make this a Monoid
+  case runParser (unstate contents) (0, []) "<stdin>" s of
+    Left err  -> throwError $ SyntaxError err
+    Right (_, (_, rdf)) -> return rdf
+
+unstate :: Parser a -> Parser (a, ParserState)
+unstate p = do
+  x <- p
+  s <- getState
+  return $ (x, s)
+
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
-contents :: Tok.Parser [Top]
+contents :: Parser [Top]
 contents = Tok.whiteSpace >> many top <* eof
 
-top :: Tok.Parser Top
+top :: Parser Top
 top =
       try topSource 
   <|> try topStatement
   <|> try topImport
   <?> "Top. Maybe you are missing a semicolon?"
 
-topSource :: Tok.Parser Top
+topSource :: Parser Top
 topSource = do
   s <- source
   optional (Tok.op ";")
   return $ TopSource s
 
-topStatement :: Tok.Parser Top
+topStatement :: Parser Top
 topStatement = do
   s <- statement
   return $ TopStatement s
 
-topImport :: Tok.Parser Top
+topImport :: Parser Top
 topImport = do
   i <-  try restrictedImport
     <|> try simpleImport
   optional (Tok.op ";")
   return $ TopImport i
 
-statement :: Tok.Parser Statement
+statement :: Parser Statement
 statement = do
   s <-  try signature
     <|> try declaration
   Tok.op ";"
   return $ s
 
-simpleImport :: Tok.Parser Import
+simpleImport :: Parser Import
 simpleImport = do
   Tok.reserved "import" 
   path <- Tok.path
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
   return $ Import path (fmap snd qual) Nothing
 
-restrictedImport :: Tok.Parser Import
+restrictedImport :: Parser Import
 restrictedImport = do
   Tok.reserved "from"
   path <- Tok.path
@@ -72,7 +91,7 @@ restrictedImport = do
   return $ Import path Nothing (Just (map snd functions))
 
 -- | parses a 'source' header, returning the language
-source :: Tok.Parser Source
+source :: Parser Source
 source = do
   Tok.reserved "source"
   -- get the language of the imported source
@@ -85,7 +104,7 @@ source = do
     (Just p) -> SourceFile lang p fs
     Nothing  -> SourceLang lang fs
   where
-    importAs' :: Tok.Parser (String, Maybe String)
+    importAs' :: Parser (String, Maybe String)
     importAs' = do
       -- quoting the function names allows them to have more arbitrary values,
       -- perhaps even including expressions that return functions (though this
@@ -96,7 +115,7 @@ source = do
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
       return $ (func, (fmap snd alias))
 
-declaration :: Tok.Parser Statement
+declaration :: Parser Statement
 declaration = do
   varname <- Tok.name
   bndvars <- many Tok.name
@@ -104,7 +123,7 @@ declaration = do
   value <- expression
   return $ Declaration (snd varname) (map snd bndvars) value 
 
-expression :: Tok.Parser Expression
+expression :: Parser Expression
 expression =
       -- currently this just handles "."
       try (TPE.buildExpressionParser functionTable term')
@@ -116,12 +135,12 @@ expression =
       <|> try application
       <|> try primitiveExpr'
 
-    primitiveExpr' :: Tok.Parser Expression
+    primitiveExpr' :: Parser Expression
     primitiveExpr' = do
       x <- try Tok.mdata 
       return $ ExprData x
 
-application :: Tok.Parser Expression
+application :: Parser Expression
 application = do
   -- this should be either a function or a composition
   function <- Tok.parens expression <|> var'
@@ -141,7 +160,7 @@ application = do
     dat' = fmap ExprData (try Tok.mdata)
 
 -- | function :: [input] -> output constraints 
-signature :: Tok.Parser Statement
+signature :: Parser Statement
 signature = do
   function <- Tok.name
   Tok.op "::"
@@ -154,9 +173,13 @@ signature = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
+
+  -- Record this function signature
+  pushTriple (fst function, Triple.IsA' Triple.FunctionSignature')
+
   return $ Signature (snd function) inputs output constraints
 
-mtype :: Tok.Parser MType
+mtype :: Parser MType
 mtype =
       list'       -- [a]
   <|> paren'      -- () | (a) | (a,b,...)
@@ -166,14 +189,14 @@ mtype =
   <?> "type"
   where
     -- [ <type> ]
-    list' :: Tok.Parser MType
+    list' :: Parser MType
     list' = do
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
       return $ MList s l
 
     -- ( <type>, <type>, ... )
-    paren' :: Tok.Parser MType
+    paren' :: Parser MType
     paren' = do
       l <- Tok.tag (char '(')
       s <- Tok.parens (sepBy mtype (Tok.comma)) 
@@ -183,7 +206,7 @@ mtype =
         xs  -> MTuple xs l
 
     -- <name> <type> <type> ...
-    specific' :: Tok.Parser MType
+    specific' :: Parser MType
     specific' = do
       l <- Tok.tag Tok.specificType
       s <- Tok.specificType
@@ -191,7 +214,7 @@ mtype =
       return $ MSpecific s ss l
 
     -- <name> <type> <type> ...
-    generic' :: Tok.Parser MType
+    generic' :: Parser MType
     generic' = do
       -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
@@ -201,7 +224,7 @@ mtype =
       return $ MGeneric s ss l
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
-    record' :: Tok.Parser MType
+    record' :: Parser MType
     record' = do
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
@@ -209,7 +232,7 @@ mtype =
       return $ MRecord n xs l
 
     -- (<name> = <type>)
-    recordEntry' :: Tok.Parser (Name, MType)
+    recordEntry' :: Parser (Name, MType)
     recordEntry' = do
       n <- Tok.name
       Tok.op "::"
@@ -217,7 +240,7 @@ mtype =
       return (snd n, t)
 
 
-booleanExpr :: Tok.Parser BExpr
+booleanExpr :: Parser BExpr
 booleanExpr =
       try booleanBinOp
   <|> try relativeExpr
@@ -232,7 +255,7 @@ booleanExpr =
       ns <- many Tok.name
       return $ BExprFunc (snd n) (map snd ns)
 
-booleanBinOp :: Tok.Parser BExpr
+booleanBinOp :: Parser BExpr
 booleanBinOp = do
   a <- bterm'
   op <- Tok.logicalBinOp
@@ -256,7 +279,7 @@ booleanBinOp = do
       | op == "and" = AND a b
       | op == "or"  = OR  a b
 
-relativeExpr :: Tok.Parser BExpr
+relativeExpr :: Parser BExpr
 relativeExpr = do
   a <- arithmeticExpr
   op <- Tok.relativeBinOp

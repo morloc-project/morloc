@@ -41,6 +41,7 @@ library
                       Morloc.Data
                       Morloc.Evaluator
                       Morloc.Check
+                      Morloc.State
                       Morloc.Lexer
                       Morloc.Parser
                       Morloc.Syntax
