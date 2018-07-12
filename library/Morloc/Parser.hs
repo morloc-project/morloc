@@ -17,8 +17,7 @@ import qualified Morloc.Lexer as Tok
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 morlocScript :: String -> ThrowsError [Top]
 morlocScript s =
-  -- (0, []) is the empty state, I should make this a Monoid
-  case runParser contents (0, []) "<stdin>" s of
+  case runParser contents parserStateEmpty "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
     Right val -> return val
 
@@ -26,9 +25,9 @@ morlocScript s =
 morlocRDF :: String -> ThrowsError [Triple.Triple]
 morlocRDF s =
   -- (0, []) is the empty state, I should make this a Monoid
-  case runParser (unstate contents) (0, []) "<stdin>" s of
+  case runParser (unstate contents) parserStateEmpty "<stdin>" s of
     Left err  -> throwError $ SyntaxError err
-    Right (_, (_, rdf)) -> return rdf
+    Right (_, s) -> return (stateTriple s)
 
 unstate :: Parser a -> Parser (a, ParserState)
 unstate p = do

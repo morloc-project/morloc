@@ -1,6 +1,7 @@
 module Morloc.State
 (
-    ParserState
+    ParserState(..)
+  , parserStateEmpty
   , Parser
   , T
   , withCount
@@ -12,7 +13,18 @@ import Text.Parsec hiding (Parser, State)
 import Morloc.Triple
 
 -- For now, the passed parser state is just an counter
-type ParserState = (Int, [Triple])
+data ParserState = ParserState {
+    stateCount :: Int
+  , stateScope :: Int
+  , stateTriple :: [Triple]
+}
+
+parserStateEmpty :: ParserState
+parserStateEmpty = ParserState {
+    stateCount  = 0
+  , stateScope  = 0
+  , stateTriple = []
+}
 
 -- A numbered token
 type T a = (Int, a)
@@ -34,16 +46,10 @@ type Parser = Parsec String ParserState
 withCount :: Parser a -> Parser (T a)
 withCount p = do 
   x <- p
-  modifyState (\(i, ts) -> (i+1,ts))
-  stat <- getState
-  return (fst stat, x)
+  modifyState (\s -> s {stateCount = (stateCount s) + 1})
+  s <- getState
+  return (stateCount s, x)
 
 pushTriple :: Subject -> RelObj -> Parser ()
-pushTriple s t = do
-  modifyState (\(i, ts) -> (i, (s, t):ts))
-
-pushTripleMaybe :: Subject -> Maybe RelObj -> Parser ()
-pushTripleMaybe s (Just t) = do
-  modifyState (\(i, ts) -> (i, (s, t):ts))
-pushTripleMaybe _ Nothing = do
-  modifyState (\x -> x)
+pushTriple i r = do
+  modifyState (\s -> s {stateTriple = (i, r):(stateTriple s)})
