@@ -3,6 +3,7 @@ module Morloc.State
     Parser
   , ParserState(..)
   , parserStateEmpty
+  , nest
   , getId
   , getScope
   , setScope
@@ -47,6 +48,15 @@ getScope = do
 setScope' :: Parser ()
 setScope' = do
   modifyState (\s -> s {stateScope = stateCount s})
+
+-- parsers need to be wrapped in `nest` when they contain internal linked lists
+-- that need to be terminated. `nest` returns to the original scope.
+nest :: Parser a -> Parser a
+nest p = do
+  i <- getScope
+  x <- p
+  setScope i
+  return x
 
 getId :: Parser Int
 getId = do

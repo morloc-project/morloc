@@ -1,1 +1,1 @@
-Pinky :: ((A,B), C);
+Pinky :: ((A,B), (C,(D,E)));

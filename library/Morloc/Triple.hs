@@ -1,10 +1,16 @@
 module Morloc.Triple (
-    Triple(..)
+    RDF(..)
+  , Triple(..)
   , Subject
   , Relation
   , Object(..)
   , showRDF
 ) where
+
+data RDF = RDF
+  Subject  -- the top element
+  [Triple] -- RDF list
+  deriving(Ord, Eq, Show)
 
 type Triple = (Subject, Relation, Object)
 type Subject  = Int

@@ -189,98 +189,103 @@ application = do
     dat' = fmap ExprData (try mdata)
 
 mtype :: Parser [Triple]
-mtype =
-      list'         -- [a]
-  <|> paren'        -- () | (a) | (a,b,...)
-  <|> try (record') -- Foo {a :: t, ...}
-  <|> specific'     -- Foo
-  <|> generic'      -- foo
-  <?> "type"
+mtype = fmap (\(RDF _ xs) -> xs) mtype'
   where
 
-    tripler :: Parser (
-           [Triple]             -- triples from below
-        -> [(Relation, Object)] -- info for this element
-        -> [Triple]
-      ) 
-    tripler = do
-      parent <- getScope
-      i      <- getId <* setScope'
-      return
-        (\cs ps -> ( map (\(r,o) -> (i, r, o)) ps
-          ++ [(i, ":has_parent", Id' parent)]
-          ++ cs
-        ))
+    mtype' :: Parser RDF
+    mtype' =
+          list'         -- [a]
+      <|> paren'        -- () | (a) | (a,b,...)
+      <|> try record'   -- Foo {a :: t, ...}
+      <|> try specific' -- Foo
+      <|> try generic'  -- foo
+      <?> "type"
 
-    listTag :: Maybe String -> [(Relation, Object)] 
-    listTag tag = maybe [] (\t -> [(":label", Str' t)]) tag
+    listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
+    listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
+
+    adopt :: Subject -> [RDF] -> [Triple]
+    adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)
 
     -- [ <type> ]
-    list' :: Parser [Triple]
+    list' :: Parser RDF
     list' = do
-      tripler' <- tripler
+      i <- getId
       l <- Tok.tag (char '[')
-      s <- Tok.brackets mtype
-      return $ tripler' s ((":isa", Str' ":list") : listTag l)
+      s <- Tok.brackets mtype'
+      return $ RDF i ([(i, ":isa", Str' ":list")] ++ listTag i l ++ adopt i [s])
     
     -- ( <type>, <type>, ... )
-    paren' :: Parser [Triple]
+    paren' :: Parser RDF
     paren' = do
-      tripler' <- tripler
+      i <- getId
       l <- Tok.tag (char '(')
-      nss <- Tok.parens (sepBy mtype (Tok.comma))
-      return $ tripler' (concat nss) (handleParen l nss)
+      ns <- Tok.parens $ sepBy mtype' (Tok.comma)
+      return $ handleParen i l ns
 
-    handleParen :: Maybe String -> [[Triple]] -> [(Relation, Object)]
-    handleParen _ [ ] = [(":isa", Str' ":empty")]
-    handleParen _ [_] = [] 
-    handleParen l  _  = [(":isa", Str' ":tuple")] ++ listTag l
+    handleParen :: Int -> Maybe String -> [RDF] -> RDF
+    handleParen i _ [ ] = RDF i [(i, ":isa", Str' ":empty")]
+    handleParen _ _ [RDF i xs] = RDF i xs 
+    handleParen i l xs = RDF i (
+           [(i, ":isa", Str' ":tuple")]
+        ++ listTag i l
+        ++ adopt i xs
+      )
 
     -- <name> <type> <type> ...
-    specific' :: Parser [Triple]
+    specific' :: Parser RDF
     specific' = do
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
-      tripler' <- tripler
-      nss <- many mtype
-      return $ tripler' (concat nss) (
-          [   (":isa", Str' ":type")
-            , (":name", Str' n)
-          ] ++ listTag l
+      i <- getId
+      ns <- many mtype'
+      return $ RDF i (
+          [   (i, ":isa", Str' ":type")
+            , (i, ":name", Str' n)
+          ] ++ listTag i l ++
+          adopt i ns
         )
 
     -- <name> <type> <type> ...
-    generic' :: Parser [Triple]
+    generic' :: Parser RDF
     generic' = do
       -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
-      tripler' <- tripler
-      nss <- many mtype
-      return $ tripler' (concat nss) (
-          [ (":isa", Str' ":generic")
-          , (":name", Str' n)] ++ listTag l)
+      i <- getId
+      ns <- many mtype'
+      return $ RDF i (
+             [(i, ":isa", Str' ":generic"), (i, ":name", Str' n)]
+          ++ (listTag i l)
+          ++ (adopt i ns)
+        )
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
-    record' :: Parser [Triple]
+    record' :: Parser RDF
     record' = do
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
-      tripler' <- tripler
-      xss <- Tok.braces (sepBy1 recordEntry' Tok.comma)
-      return $ tripler' (concat xss) (
-          [ (":isa", Str' ":record")
-          , (":name", Str' n)] ++ listTag l)
+      i <- getId
+      ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
+      return $ RDF i (
+             [ (i, ":isa", Str' ":record"), (i, ":name", Str' n)]
+          ++ listTag i l
+          ++ adopt i ns
+        )
 
     -- (<name> = <type>)
-    recordEntry' :: Parser [Triple]
+    recordEntry' :: Parser RDF
     recordEntry' = do
-      tripler' <- tripler
+      i <- getId
       n <- Tok.name
       Tok.op "::"
-      ts <- mtype
-      return $ tripler' ts [(":isa", Str' ":tag"), (":name", Str' n)]
+      ts <- mtype'
+      return $ RDF i (
+          [(i, ":isa", Str' ":tag"), (i, ":name", Str' n)] ++ adopt i [ts]
+        )
+
+      -- return $ tripler' ts [(":isa", Str' ":tag"), (":name", Str' n)]
 
 mdata :: Parser MData
 mdata = do
