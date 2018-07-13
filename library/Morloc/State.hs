@@ -4,6 +4,7 @@ module Morloc.State
   , ParserState(..)
   , parserStateEmpty
   , getId
+  , getScope
   , setScope
   , setScope'
 ) where
@@ -37,6 +38,11 @@ parserStateEmpty = ParserState {
 setScope :: Int -> Parser ()
 setScope i = do
   modifyState (\s -> s {stateScope = i})
+
+getScope :: Parser Int
+getScope = do
+  s <- getState
+  return $ stateScope s
 
 setScope' :: Parser ()
 setScope' = do

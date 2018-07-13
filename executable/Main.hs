@@ -30,7 +30,7 @@ main = do
     -- TODO: this should NOT be the default
     [x] -> do
       input <- readFile x
-      putStrLn (rdf input)
+      putStr (rdf input)
 
     -- ["writeRDF", x] -> do
     --   input <- readFile x

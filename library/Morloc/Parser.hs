@@ -124,13 +124,13 @@ declaration = do
   return $ [
         (i, ":isa", Str' "declaration")
       , (i, ":name", Str' varname)
-    ] ++ (concat bndvars)
-      ++ (concatOrderedTriples bndvars)
+    ] ++ concat bndvars
     -- ++ value
 
 -- | function :: [input] -> output constraints
 signature :: Parser [Triple]
 signature = do
+  i <- getId <* setScope'
   function <- Tok.name
   Tok.op "::"
   inputs <- sepBy1 mtype Tok.comma
@@ -143,20 +143,13 @@ signature = do
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
 
-  -- -- Record this function signature
-  -- pushTriple      function (Triple.IsA' Triple.Signature')
-  -- pushTriple      function (Triple.Name' function)
-  -- pushTriple      function (Triple.Params' constraints)
-
-  i <- getId
   return $ [
         (i, ":isa", Str' ":signature")
-      -- , ()
+      , (i, ":name", Str' function)
     ]
+    ++ concat inputs
+    ++ maybe [] (\x->x) output
     -- ++ constraints
-    -- ++ inputs
-    -- ++ output
-  -- return $ Signature function inputs output constraints
 
 
 expression :: Parser Expression
@@ -191,11 +184,11 @@ application = do
     var' = do
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
-      return $ ExprVariable x tag'
+      return $ ExprVariable x (maybe "" (\x->x) tag')
 
     dat' = fmap ExprData (try mdata)
 
-mtype :: Parser MType
+mtype :: Parser [Triple]
 mtype =
       list'       -- [a]
   <|> paren'      -- () | (a) | (a,b,...)
@@ -204,56 +197,99 @@ mtype =
   <|> generic'    -- foo
   <?> "type"
   where
+
     -- [ <type> ]
-    list' :: Parser MType
+    list' :: Parser [Triple]
     list' = do
+      parent <- getScope
+      i      <- getId <* setScope'
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
-      return $ MList s l
+      return $ [
+            (i, ":isa", Str' ":list")
+          , (i, ":has_parent", Id' parent)
+        ] ++ s
+          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
 
     -- ( <type>, <type>, ... )
-    paren' :: Parser MType
+    paren' :: Parser [Triple]
     paren' = do
+      parent <- getScope
+      i      <- getId <* setScope'
       l <- Tok.tag (char '(')
-      s <- Tok.parens (sepBy mtype (Tok.comma))
-      return $ case s of
-        []  -> MEmpty
-        [x] -> x
-        xs  -> MTuple xs l
+      ns <- Tok.parens (sepBy mtype (Tok.comma))
+      return $ handleParen parent i l ns
+
+    handleParen :: Int -> Int -> Maybe String -> [[Triple]] -> [Triple]
+    handleParen i p _ [] = [(i, ":isa", Str' ":empty"), (i, ":has_parent", Id' p)]
+    handleParen _ _ _ [ts] = ts 
+    handleParen i p l tss = [
+          (i, ":isa", Str' ":tuple")
+        , (i, ":has_parent", Id' p)
+      ] ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
+        ++ concat tss
 
     -- <name> <type> <type> ...
-    specific' :: Parser MType
+    specific' :: Parser [Triple]
     specific' = do
+      parent <- getScope
+      i      <- getId <* setScope'
       l <- Tok.tag Tok.specificType
-      s <- Tok.specificType
-      ss <- many mtype
-      return $ MSpecific s ss l
+      n <- Tok.specificType
+      nss <- many mtype
+      return $ [
+            (i, ":isa", Str' ":type")
+          , (i, ":name", Str' n)
+          , (i, ":has_parent", Id' parent)
+        ] ++ concat nss
+          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
 
     -- <name> <type> <type> ...
-    generic' :: Parser MType
+    generic' :: Parser [Triple]
     generic' = do
       -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
-      s <- Tok.genericType
-      ss <- many mtype
-      return $ MGeneric s ss l
+      n <- Tok.genericType
+      parent <- getScope
+      i      <- getId <* setScope'
+      nss <- many mtype
+      return $ [
+            (i, ":isa", Str' ":generic")
+          , (i, ":name", Str' n)
+          , (i, ":has_parent", Id' parent)
+        ] ++ concat nss
+          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
-    record' :: Parser MType
+    record' :: Parser [Triple]
     record' = do
+      parent <- getScope
+      i      <- getId <* setScope'
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
-      xs <- Tok.braces (sepBy1 recordEntry' Tok.comma)
-      return $ MRecord n xs l
+      xss <- Tok.braces (sepBy1 recordEntry' Tok.comma)
+      return $ [
+            (i, ":isa", Str' ":record")
+          , (i, ":name", Str' n)
+          , (i, ":has_parent", Id' parent)
+        ] ++ concat xss
+          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
 
     -- (<name> = <type>)
-    recordEntry' :: Parser (Name, MType)
+    recordEntry' :: Parser [Triple]
     recordEntry' = do
+      i <- getId
+      parent <- getScope
+      value <- getId <* setScope'
       n <- Tok.name
       Tok.op "::"
-      t <- mtype
-      return (n, t)
+      ts <- mtype
+      return $ [
+            (i, ":isa", Str' ":tag") 
+          , (i, ":parent", Id' parent) 
+          , (i, ":value", Id' value)
+        ] ++ ts
 
 mdata :: Parser MData
 mdata = do
@@ -394,11 +430,6 @@ functionTable = [[ binary "."  ExprComposition TPE.AssocRight]]
 binary name fun assoc = TPE.Infix  (do{ Tok.op name; return fun }) assoc
 prefix name fun       = TPE.Prefix (do{ Tok.op name; return fun })
 
-
-concatOrderedTriples :: [[Triple]] -> [Triple]
-concatOrderedTriples tss
-  =  concat tss
-  ++ map (\((i,_,_):_,j) -> (i, ":position", Id' j)) (zip tss [0..])
 
 triplePrimitive :: String -> Parser a -> (a -> Object) -> Parser [Triple]
 triplePrimitive isa p f = do

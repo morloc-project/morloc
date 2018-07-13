@@ -91,7 +91,7 @@ comma      = Token.comma      lexer
 name       = Token.identifier lexer
 
 tag p =
-  option "" (try tag')
+  optionMaybe (try tag')
   where
     tag' = do
       l <- many1 alphaNum
