@@ -92,8 +92,11 @@ simpleImport = do
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
 
   i <- getId
-  return $ [(i, ":simpleImport", Id' 666)]
-  -- return $ Import path qual Nothing
+  return $ [
+        (i, ":isa", Str' ":import")
+      , (i, ":name", Str' (intercalate "." path))
+    ] ++
+    maybe [] (\q -> [(i, ":namespace", Str' q)]) qual
 
 restrictedImport :: Parser [Triple]
 restrictedImport = do
@@ -102,22 +105,28 @@ restrictedImport = do
   Tok.reserved "import"
   -- TODO: I am also importing ontologies, how should that be handled?
   -- TODO: at very least, I am also importing types
-  functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
+  i <- getId <* setScope'
+  functions <- Tok.parens (sepBy1 tripleName Tok.comma)
 
-  i <- getId
-  return $ [(i, ":restrictedImport", Id' 666)]
-  -- return $ Import path Nothing (Just functions)
+  return $ [
+        (i, ":isa", Str' ":restricted_import")
+      , (i, ":name", Str' (intercalate "." path))
+    ] ++ (concat functions)
 
 declaration :: Parser [Triple]
 declaration = do
   varname <- Tok.name
-  bndvars <- many Tok.name
+  bndvars <- many tripleName
   Tok.op "="
   value <- expression
 
   i <- getId
-  return $ [(i, ":declaration", Id' 666)]
-  -- return $ Declaration varname bndvars value
+  return $ [
+        (i, ":isa", Str' "declaration")
+      , (i, ":name", Str' varname)
+    ] ++ (concat bndvars)
+      ++ (concatOrderedTriples bndvars)
+    -- ++ value
 
 -- | function :: [input] -> output constraints
 signature :: Parser [Triple]
@@ -140,7 +149,13 @@ signature = do
   -- pushTriple      function (Triple.Params' constraints)
 
   i <- getId
-  return $ [(i, ":signature", Id' 666)]
+  return $ [
+        (i, ":isa", Str' ":signature")
+      -- , ()
+    ]
+    -- ++ constraints
+    -- ++ inputs
+    -- ++ output
   -- return $ Signature function inputs output constraints
 
 

@@ -40,7 +40,7 @@ setScope i = do
 
 setScope' :: Parser ()
 setScope' = do
-  modifyState (\s -> s {stateScope = (stateCount s) - 1})
+  modifyState (\s -> s {stateScope = stateCount s})
 
 getId :: Parser Int
 getId = do
