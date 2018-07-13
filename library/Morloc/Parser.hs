@@ -190,59 +190,64 @@ application = do
 
 mtype :: Parser [Triple]
 mtype =
-      list'       -- [a]
-  <|> paren'      -- () | (a) | (a,b,...)
-  <|> try record' -- Foo {a :: t, ...}
-  <|> specific'   -- Foo
-  <|> generic'    -- foo
+      list'         -- [a]
+  <|> paren'        -- () | (a) | (a,b,...)
+  <|> try (record') -- Foo {a :: t, ...}
+  <|> specific'     -- Foo
+  <|> generic'      -- foo
   <?> "type"
   where
+
+    tripler :: Parser (
+           [Triple]             -- triples from below
+        -> [(Relation, Object)] -- info for this element
+        -> [Triple]
+      ) 
+    tripler = do
+      parent <- getScope
+      i      <- getId <* setScope'
+      return
+        (\cs ps -> ( map (\(r,o) -> (i, r, o)) ps
+          ++ [(i, ":has_parent", Id' parent)]
+          ++ cs
+        ))
+
+    listTag :: Maybe String -> [(Relation, Object)] 
+    listTag tag = maybe [] (\t -> [(":label", Str' t)]) tag
 
     -- [ <type> ]
     list' :: Parser [Triple]
     list' = do
-      parent <- getScope
-      i      <- getId <* setScope'
+      tripler' <- tripler
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
-      return $ [
-            (i, ":isa", Str' ":list")
-          , (i, ":has_parent", Id' parent)
-        ] ++ s
-          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
-
+      return $ tripler' s ((":isa", Str' ":list") : listTag l)
+    
     -- ( <type>, <type>, ... )
     paren' :: Parser [Triple]
     paren' = do
-      parent <- getScope
-      i      <- getId <* setScope'
+      tripler' <- tripler
       l <- Tok.tag (char '(')
-      ns <- Tok.parens (sepBy mtype (Tok.comma))
-      return $ handleParen parent i l ns
+      nss <- Tok.parens (sepBy mtype (Tok.comma))
+      return $ tripler' (concat nss) (handleParen l nss)
 
-    handleParen :: Int -> Int -> Maybe String -> [[Triple]] -> [Triple]
-    handleParen i p _ [] = [(i, ":isa", Str' ":empty"), (i, ":has_parent", Id' p)]
-    handleParen _ _ _ [ts] = ts 
-    handleParen i p l tss = [
-          (i, ":isa", Str' ":tuple")
-        , (i, ":has_parent", Id' p)
-      ] ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
-        ++ concat tss
+    handleParen :: Maybe String -> [[Triple]] -> [(Relation, Object)]
+    handleParen _ [ ] = [(":isa", Str' ":empty")]
+    handleParen _ [_] = [] 
+    handleParen l  _  = [(":isa", Str' ":tuple")] ++ listTag l
 
     -- <name> <type> <type> ...
     specific' :: Parser [Triple]
     specific' = do
-      parent <- getScope
-      i      <- getId <* setScope'
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
+      tripler' <- tripler
       nss <- many mtype
-      return $ [
-            (i, ":isa", Str' ":type")
-          , (i, ":name", Str' n)
-          , (i, ":has_parent", Id' parent)
-        ] ++ concat nss
-          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
+      return $ tripler' (concat nss) (
+          [   (":isa", Str' ":type")
+            , (":name", Str' n)
+          ] ++ listTag l
+        )
 
     -- <name> <type> <type> ...
     generic' :: Parser [Triple]
@@ -251,45 +256,31 @@ mtype =
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
-      parent <- getScope
-      i      <- getId <* setScope'
+      tripler' <- tripler
       nss <- many mtype
-      return $ [
-            (i, ":isa", Str' ":generic")
-          , (i, ":name", Str' n)
-          , (i, ":has_parent", Id' parent)
-        ] ++ concat nss
-          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
+      return $ tripler' (concat nss) (
+          [ (":isa", Str' ":generic")
+          , (":name", Str' n)] ++ listTag l)
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
     record' :: Parser [Triple]
     record' = do
-      parent <- getScope
-      i      <- getId <* setScope'
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
+      tripler' <- tripler
       xss <- Tok.braces (sepBy1 recordEntry' Tok.comma)
-      return $ [
-            (i, ":isa", Str' ":record")
-          , (i, ":name", Str' n)
-          , (i, ":has_parent", Id' parent)
-        ] ++ concat xss
-          ++ maybe [] (\t -> [(i, ":label", Str' t)]) l
+      return $ tripler' (concat xss) (
+          [ (":isa", Str' ":record")
+          , (":name", Str' n)] ++ listTag l)
 
     -- (<name> = <type>)
     recordEntry' :: Parser [Triple]
     recordEntry' = do
-      i <- getId
-      parent <- getScope
-      value <- getId <* setScope'
+      tripler' <- tripler
       n <- Tok.name
       Tok.op "::"
       ts <- mtype
-      return $ [
-            (i, ":isa", Str' ":tag") 
-          , (i, ":parent", Id' parent) 
-          , (i, ":value", Id' value)
-        ] ++ ts
+      return $ tripler' ts [(":isa", Str' ":tag"), (":name", Str' n)]
 
 mdata :: Parser MData
 mdata = do

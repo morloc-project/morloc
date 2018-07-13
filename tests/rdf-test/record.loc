@@ -1,1 +1,5 @@
-Stuff :: Materia { ruby :: Shine };
+Stuff :: Materia {
+    ruby :: Shine
+  , rock :: Bonk {star :: Sparkle}
+  , pleb :: Poor
+};
