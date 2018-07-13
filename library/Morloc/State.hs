@@ -1,12 +1,24 @@
 module Morloc.State
 (
-    ParserState(..)
+    Parser
+  , ParserState(..)
   , parserStateEmpty
-  , Parser
   , getId
+  , setScope
+  , setScope'
 ) where
 
 import Text.Parsec hiding (Parser, State)
+
+-- data ParsecT s u m a
+-- where
+--   s := stream type
+--   u := user state type
+--   m := underlying monad
+--   a := return type
+--
+-- type Parsec s u = ParsecT s u Identity
+type Parser = Parsec String ParserState
 
 -- For now, the passed parser state is just an counter
 data ParserState = ParserState {
@@ -22,21 +34,13 @@ parserStateEmpty = ParserState {
   , stateScope  = 0
 }
 
--- data ParsecT s u m a
--- where
---   s := stream type
---   u := user state type
---   m := underlying monad
---   a := return type
---
--- type Parsec s u = ParsecT s u Identity
--- type Parser = Parsec String ()
--- 
--- Here, MorlocParser deviates from Parser (defined in Text.Parsec.String) by
--- passing Integer state.
-type Parser = Parsec String ParserState
+setScope :: Int -> Parser ()
+setScope i = do
+  modifyState (\s -> s {stateScope = i})
 
--- setScope = modifyState (\s -> s {stateScope = stateCount s})
+setScope' :: Parser ()
+setScope' = do
+  modifyState (\s -> s {stateScope = (stateCount s) - 1})
 
 getId :: Parser Int
 getId = do

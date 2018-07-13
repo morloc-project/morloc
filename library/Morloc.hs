@@ -5,6 +5,7 @@ import Morloc.Check (typecheck)
 import Morloc.Error
 import Morloc.Generator (generate, Nexus, Pool)
 import Morloc.Parser (morlocScript)
+import Morloc.Triple (showRDF)
 
 -- build :: String -> ThrowsError (Nexus, [Pool])
 -- build s = eval s >>= typecheck >>= generate
@@ -18,4 +19,4 @@ import Morloc.Parser (morlocScript)
 rdf :: String -> String
 rdf s = case morlocScript s of
   Left err -> show err ++ "\n"
-  Right result -> show result ++ "\n"
+  Right result -> showRDF result

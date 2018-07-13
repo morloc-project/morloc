@@ -1,10 +1,9 @@
--- I want to translate the entire Morloc program into an RDF triplet store.
-
 module Morloc.Triple (
     Triple(..)
   , Subject
   , Relation
   , Object(..)
+  , showRDF
 ) where
 
 type Triple = (Subject, Relation, Object)
@@ -24,3 +23,7 @@ instance Show Object where
   show (Num' x ) = show x
   show (Log' x ) = if x then "true" else "false"
   show (Str' x ) = x
+
+-- write triplets in TAB-delimited format
+showRDF :: [Triple] -> String 
+showRDF = unlines . map (\(i,r,o) -> show i ++ "\t" ++ r ++ "\t" ++ show o)

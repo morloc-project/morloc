@@ -4,6 +4,7 @@ import Text.Parsec hiding (State, Parser)
 import qualified Text.Parsec.Expr as TPE
 import Control.Monad.State
 import Control.Monad.Except (throwError)
+import Data.List (intercalate)
 
 import Morloc.Error
 import Morloc.Syntax
@@ -33,24 +34,30 @@ top =
 -- | parses a 'source' header, returning the language
 source' :: Parser [Triple]
 source' = do
+  -- id for this source
   Tok.reserved "source"
   -- get the language of the imported source
   lang <- Tok.stringLiteral
-  -- get the path to the srouce file, if Nothing, then assume "vanilla"
-  path <- optionMaybe (Tok.reserved "from" >> Tok.path)
+  -- get the path to the source file, if Nothing, then assume "vanilla"
+  i <- getId <* setScope'
+  path <- optionMaybe (Tok.reserved "from" >> Tok.stringLiteral)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
-
   -- the statement is unambiguous even without a semicolon
   optional (Tok.op ";")
 
-  return $ [(42, ":source", Id' 666)]
+  return $ [
+        (i, ":isa",  Str' ":source")
+      , (i, ":lang", Str' lang)
+    ] ++
+      concat fs ++
+      maybe [] (\p -> [(i, ":path", Str' p)]) path
 
   -- return $ case path of
   --   (Just p) -> SourceFile lang p fs
   --   Nothing  -> SourceLang lang fs
   where
-    importAs' :: Parser (String, Maybe String)
+    importAs' :: Parser [Triple] -- (String, Maybe String)
     importAs' = do
       -- quoting the function names allows them to have more arbitrary values,
       -- perhaps even including expressions that return functions (though this
@@ -59,7 +66,14 @@ source' = do
       -- the alias is especially important when the native function name is not
       -- legal Morloc syntax, for example an R function with a '.' in the name.
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
-      return $ (func, alias)
+      s <- getState
+      j <- getId
+
+      return $ [
+            (j, ":imported_from", Id' (stateScope s))
+          , (j, ":name", Str' func)
+        ] ++
+        maybe [] (\x -> [(j, ":alias", Str' x)]) alias
 
 statement' :: Parser [Triple]
 statement' =
@@ -77,7 +91,8 @@ simpleImport = do
   path <- Tok.path
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
 
-  return $ [(42, ":simpleImport", Id' 666)]
+  i <- getId
+  return $ [(i, ":simpleImport", Id' 666)]
   -- return $ Import path qual Nothing
 
 restrictedImport :: Parser [Triple]
@@ -89,7 +104,8 @@ restrictedImport = do
   -- TODO: at very least, I am also importing types
   functions <- Tok.parens (sepBy1 Tok.name Tok.comma)
 
-  return $ [(42, ":restrictedImport", Id' 666)]
+  i <- getId
+  return $ [(i, ":restrictedImport", Id' 666)]
   -- return $ Import path Nothing (Just functions)
 
 declaration :: Parser [Triple]
@@ -99,7 +115,8 @@ declaration = do
   Tok.op "="
   value <- expression
 
-  return $ [(42, ":declaration", Id' 666)]
+  i <- getId
+  return $ [(i, ":declaration", Id' 666)]
   -- return $ Declaration varname bndvars value
 
 -- | function :: [input] -> output constraints
@@ -122,7 +139,8 @@ signature = do
   -- pushTriple      function (Triple.Name' function)
   -- pushTriple      function (Triple.Params' constraints)
 
-  return $ [(42, ":signature", Id' 666)]
+  i <- getId
+  return $ [(i, ":signature", Id' 666)]
   -- return $ Signature function inputs output constraints
 
 
