@@ -124,13 +124,12 @@ declaration = do
   Tok.op "="
   rhs <- expression
   return $ RDF i (
-      [
-        (i, ":isa", Str' ":declaration")
-      , (i, ":lhs", Id' (rdfId lhs))
-      , (i, ":rhs", Id' (rdfId rhs))
-      ] ++ adoptAs ":parameter" i bndvars
-        ++ (rdfTriple lhs)
-        ++ (rdfTriple rhs)
+         [(i, ":isa", Str' ":declaration")]
+      ++ [(i, ":lhs", Id' (rdfId lhs))]
+      ++ (rdfTriple lhs)
+      ++ adoptAs ":parameter" i bndvars
+      ++ [(i, ":rhs", Id' (rdfId rhs))]
+      ++ (rdfTriple rhs)
     )
 
 -- | function :: [input] -> output constraints
