@@ -349,12 +349,13 @@ expression =
           try (Tok.parens expression)
       <|> try application
       <|> try mdata
+      <|> try tripleName
 
 application :: Parser RDF
 application = do
   i <- getId
   function <- Tok.parens expression <|> identifier'
-  arguments <- many term'
+  arguments <- many1 term'
   return $ RDF i (
          [(i, ":isa", Str' ":application")]
       ++ adopt i [function]
