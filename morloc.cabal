@@ -69,3 +69,17 @@ executable morloc
       , morloc 
     default-language: Haskell2010
  
+test-suite morloc-test-suite
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
+      Paths_morloc
+  hs-source-dirs:
+      test-suite
+  ghc-options: -Wall -rtsopts -threaded -with-rtsopts=-N
+  build-depends:
+      base
+    , tasty
+    , tasty-hspec
+    , morloc
+  default-language: Haskell2010
