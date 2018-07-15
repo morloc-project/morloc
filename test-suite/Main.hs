@@ -26,3 +26,22 @@ spec = parallel $ do
         , (4, ":value", Int' 1              )
         ]
       )
+
+  it "f x = x;" $ do
+    shouldBe
+      (morlocScript "f x = x;")
+      (Right $ RDF 1
+        [ (1, ":isa",       Str' ":script"      )
+        , (1, ":child",     Id'  2              )
+        , (2, ":isa",       Str' ":declaration" )
+        , (2, ":lhs",       Id'  3              )
+        , (2, ":parameter", Id'  4              )
+        , (2, ":rhs",       Id'  5              )
+        , (3, ":isa",       Str' ":name"        )
+        , (3, ":value",     Str' "f"            )
+        , (4, ":isa",       Str' ":name"        )
+        , (4, ":value",     Int' "x"            )
+        , (5, ":isa",       Str' ":name"        )
+        , (5, ":value",     Int' "x"            )
+        ]
+      )
