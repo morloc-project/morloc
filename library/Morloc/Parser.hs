@@ -357,9 +357,9 @@ application = do
   function <- Tok.parens expression <|> identifier'
   arguments <- many1 term'
   return $ RDF i (
-         [(i, ":isa", Str' ":application")]
-      ++ adopt i [function]
-      ++ adopt i arguments
+         [ (i, ":isa", Str' ":application")]
+      ++ adoptAs ":function" i [function]
+      ++ adoptAs ":argument" i arguments
     )
   where
     term' =
@@ -371,7 +371,10 @@ application = do
       i    <- getId
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
-      return $ RDF i ([(i, ":isa", Str' "XXX")] ++ listTag i tag')
+      return $ RDF i (
+          [ (i, ":isa", Str' ":name")
+          , (i, ":value", Str' x)
+          ] ++ listTag i tag')
 
 -- application of only simple named elements (TODO: am I nuts?) 
 simpleApplication :: Parser RDF
