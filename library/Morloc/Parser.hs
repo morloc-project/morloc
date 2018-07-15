@@ -151,12 +151,12 @@ signature = do
     ++ maybe [] (\x->x) output
     -- ++ constraints
 
+listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
+listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
+
 mtype :: Parser [Triple]
 mtype = fmap (\(RDF _ xs) -> xs) mtype'
   where
-
-    listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
-    listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
 
     mtype' :: Parser RDF
     mtype' =
@@ -336,38 +336,39 @@ mdata =  do
 expression :: Parser RDF
 expression = do
   i <- getId
+  x <- term'
   -- -- currently this just handles "."
   -- try (TPE.buildExpressionParser functionTable term')
   --     <|> term'
   --     <?> "an expression"
   return $ RDF i [(i, ":isa", Str' ":expression")]
-  -- where
-  --   term' =
-  --         try (Tok.parens expression)
-  --     <|> try application
-  --     <|> try mdata
+  where
+    term' =
+          try (Tok.parens expression)
+      <|> try application
+      <|> try mdata
 
 application :: Parser RDF
 application = do
   i <- getId
-  -- function <- Tok.parens expression <|> identifier'
-  -- arguments <- sepBy term' Tok.whiteSpace
-  return $ RDF i [(i, ":isa", Str' ":application")]
-  -- return $ ExprApplication function arguments
-  --
-  -- where
-  --
-  --   term' =
-  --         try (Tok.parens expression)
-  --     <|> try identifier'
-  --     <|> try dat'
-  --
-  --   identifier' = do
-  --     x    <- Tok.name
-  --     tag' <- Tok.tag Tok.name
-  --     return $ ExprVariable x (maybe "" (\x->x) tag')
-  --
-  --   dat' = fmap ExprData (try mdata)
+  function <- Tok.parens expression <|> identifier'
+  arguments <- sepBy term' Tok.whiteSpace
+  return $ RDF i (
+         [(i, ":isa", Str' ":application")]
+      ++ adopt i [function]
+      ++ adopt i arguments
+    )
+  where
+    term' =
+          try (Tok.parens expression)
+      <|> try identifier'
+      <|> try mdata
+
+    identifier' = do
+      i    <- getId
+      x    <- Tok.name
+      tag' <- Tok.tag Tok.name
+      return $ RDF i ([(i, ":isa", Str' "XXX")] ++ listTag i tag')
 
 booleanExpr :: Parser BExpr
 booleanExpr =
