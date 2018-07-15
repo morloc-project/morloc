@@ -192,45 +192,28 @@ mtype :: Parser [Triple]
 mtype = fmap (\(RDF _ xs) -> xs) mtype'
   where
 
-    mtype' :: Parser RDF
-    mtype' =
-          list'         -- [a]
-      <|> paren'        -- () | (a) | (a,b,...)
-      <|> try record'   -- Foo {a :: t, ...}
-      <|> try specific' -- Foo
-      <|> try generic'  -- foo
-      <?> "type"
-
     listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
     listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
 
     adopt :: Subject -> [RDF] -> [Triple]
     adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)
 
-    -- [ <type> ]
-    list' :: Parser RDF
-    list' = do
-      i <- getId
-      l <- Tok.tag (char '[')
-      s <- Tok.brackets mtype'
-      return $ RDF i ([(i, ":isa", Str' ":list")] ++ listTag i l ++ adopt i [s])
-    
-    -- ( <type>, <type>, ... )
-    paren' :: Parser RDF
-    paren' = do
-      i <- getId
-      l <- Tok.tag (char '(')
-      ns <- Tok.parens $ sepBy mtype' (Tok.comma)
-      return $ handleParen i l ns
+    mtype' :: Parser RDF
+    mtype' =
+            try specific' -- A ...
+        <|> try generic'  -- a ...
+        <|> try record'   -- A { ... }
+        <|> try unambiguous'
+        <?> "type"
 
-    handleParen :: Int -> Maybe String -> [RDF] -> RDF
-    handleParen i _ [ ] = RDF i [(i, ":isa", Str' ":empty")]
-    handleParen _ _ [RDF i xs] = RDF i xs 
-    handleParen i l xs = RDF i (
-           [(i, ":isa", Str' ":tuple")]
-        ++ listTag i l
-        ++ adopt i xs
-      )
+    unambiguous' :: Parser RDF
+    unambiguous' =
+            try empty' -- ()
+        <|> try paren' -- (a)
+        <|> try tuple' -- (a, ...)
+        <|> specific1  -- A
+        <|> generic1   -- a
+        <|> list'      -- [a]
 
     -- <name> <type> <type> ...
     specific' :: Parser RDF
@@ -238,14 +221,17 @@ mtype = fmap (\(RDF _ xs) -> xs) mtype'
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
       i <- getId
-      ns <- many mtype'
+      ns <- many1 unambiguous'
       return $ RDF i (
-          [   (i, ":isa", Str' ":type")
-            , (i, ":name", Str' n)
-          ] ++ listTag i l ++
-          adopt i ns
+             [(i, ":isa", Str' ":type"), (i, ":name", Str' n)]
+          ++ listTag i l
+          ++ adopt i ns
         )
 
+    -- Does parameterized generic even make sense?  Yes, say `f Int` where `f`
+    -- is a generic collection of integers. Then you can map across it with any
+    -- function of an Int.
+    --
     -- <name> <type> <type> ...
     generic' :: Parser RDF
     generic' = do
@@ -254,12 +240,67 @@ mtype = fmap (\(RDF _ xs) -> xs) mtype'
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
       i <- getId
-      ns <- many mtype'
+      ns <- many1 unambiguous'
       return $ RDF i (
              [(i, ":isa", Str' ":generic"), (i, ":name", Str' n)]
           ++ (listTag i l)
           ++ (adopt i ns)
         )
+
+    -- <name> <type> <type> ...
+    specific1 :: Parser RDF
+    specific1 = do
+      l <- Tok.tag Tok.specificType
+      n <- Tok.specificType
+      i <- getId
+      return $ RDF i (
+             [(i, ":isa", Str' ":type"), (i, ":name", Str' n)]
+          ++ listTag i l
+        )
+
+    -- <name> <type> <type> ...
+    generic1 :: Parser RDF
+    generic1 = do
+      -- TODO - the genericType should automatically fail on keyword conflict
+      notFollowedBy (Tok.reserved "where")
+      l <- Tok.tag Tok.genericType
+      n <- Tok.genericType
+      i <- getId
+      return $ RDF i (
+             [(i, ":isa", Str' ":generic"), (i, ":name", Str' n)]
+          ++ (listTag i l)
+        )
+
+    empty' :: Parser RDF
+    empty' = do
+      Tok.op "("
+      Tok.op ")"
+      i <- getId
+      return $ RDF i [(i, ":isa", Str' ":empty")]
+
+    paren' :: Parser RDF 
+    paren' = Tok.parens mtype'
+
+    tuple' :: Parser RDF
+    tuple' = Tok.parens $ do
+      i <- getId
+      l <- Tok.tag (char '(')
+      x <- mtype'
+      Tok.op ","
+      xs <- sepBy1 mtype' Tok.comma
+      return $ RDF i (
+             [(i, ":isa", Str' ":tuple")]
+          ++ listTag i l
+          ++ adopt i (x:xs)
+        )
+
+    -- [ <type> ]
+    list' :: Parser RDF
+    list' = do
+      i <- getId
+      l <- Tok.tag (char '[')
+      s <- Tok.brackets mtype'
+      return $ RDF i ([(i, ":isa", Str' ":list")] ++ listTag i l ++ adopt i [s])
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
     record' :: Parser RDF
@@ -285,7 +326,6 @@ mtype = fmap (\(RDF _ xs) -> xs) mtype'
           [(i, ":isa", Str' ":tag"), (i, ":name", Str' n)] ++ adopt i [ts]
         )
 
-      -- return $ tripler' ts [(":isa", Str' ":tag"), (":name", Str' n)]
 
 mdata :: Parser MData
 mdata = do
