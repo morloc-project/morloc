@@ -5,6 +5,7 @@ module Morloc.Triple (
   , Relation
   , Object(..)
   , showRDF
+  , adopt
 ) where
 
 data RDF = RDF
@@ -33,3 +34,6 @@ instance Show Object where
 -- write triplets in TAB-delimited format
 showRDF :: [Triple] -> String 
 showRDF = unlines . map (\(i,r,o) -> show i ++ "\t" ++ r ++ "\t" ++ show o)
+
+adopt :: Subject -> [RDF] -> [Triple]
+adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)

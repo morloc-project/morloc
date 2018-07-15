@@ -111,7 +111,7 @@ restrictedImport = do
   return $ [
         (i, ":isa", Str' ":restricted_import")
       , (i, ":name", Str' (intercalate "." path))
-    ] ++ (concat functions)
+    ] ++ adopt i functions
 
 declaration :: Parser [Triple]
 declaration = do
@@ -124,7 +124,7 @@ declaration = do
   return $ [
         (i, ":isa", Str' "declaration")
       , (i, ":name", Str' varname)
-    ] ++ concat bndvars
+    ] ++ adopt i bndvars
     -- ++ value
 
 -- | function :: [input] -> output constraints
@@ -151,52 +151,12 @@ signature = do
     ++ maybe [] (\x->x) output
     -- ++ constraints
 
-
-expression :: Parser Expression
-expression =
-      -- currently this just handles "."
-      try (TPE.buildExpressionParser functionTable term')
-  <|> term'
-  <?> "an expression"
-  where
-    term' =
-          try (Tok.parens expression)
-      <|> try application
-      <|> try primitiveExpr'
-
-    primitiveExpr' :: Parser Expression
-    primitiveExpr' = do
-      x <- try mdata
-      return $ ExprData x
-
-application :: Parser Expression
-application = do
-  -- this should be either a function or a composition
-  function <- Tok.parens expression <|> var'
-  arguments <- sepBy term' Tok.whiteSpace
-  return $ ExprApplication function arguments
-  where
-    term' =
-          try (Tok.parens expression)
-      <|> try var'
-      <|> try dat'
-
-    var' = do
-      x    <- Tok.name
-      tag' <- Tok.tag Tok.name
-      return $ ExprVariable x (maybe "" (\x->x) tag')
-
-    dat' = fmap ExprData (try mdata)
-
 mtype :: Parser [Triple]
 mtype = fmap (\(RDF _ xs) -> xs) mtype'
   where
 
     listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
     listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
-
-    adopt :: Subject -> [RDF] -> [Triple]
-    adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)
 
     mtype' :: Parser RDF
     mtype' =
@@ -327,6 +287,7 @@ mtype = fmap (\(RDF _ xs) -> xs) mtype'
         )
 
 
+-- TODO murder this function
 mdata :: Parser MData
 mdata = do
       try boolean'       -- True | False
@@ -360,6 +321,91 @@ mdata = do
       Tok.op "="
       t <- mdata
       return (n, t)
+
+-- TODO rename this 'mdata' and kill the original
+mdataTriple :: Parser [Triple]
+mdataTriple = fmap (\(RDF _ xs) -> xs) mdataTriple' where
+
+  mdataTriple' = do
+        try tripleBool          -- True | False
+    <|> try tripleFloat         -- 1.1
+    <|> try tripleInteger       -- 1
+    <|> try tripleStringLiteral -- "yolo"
+    <|> try list'               -- [ ...
+    <|> try tuple'              -- ( ...
+    <|> try record'             -- { ...
+    <?> "literal data"
+
+  list' :: Parser RDF
+  list' = do
+    i <- getId
+    xs <- Tok.brackets (sepBy mdataTriple' Tok.comma)
+    return $ RDF i ([(i, ":isa", Str' "list")] ++ adopt i xs)
+
+  tuple' = do
+    i <- getId
+    xs <- Tok.parens tuple''
+    return $ RDF i ([(i, ":isa", Str' "tuple")] ++ adopt i xs)
+
+  record' = do
+    i <- getId
+    xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
+    return $ RDF i ([(i, ":isa", Str' "record")] ++ adopt i xs)
+
+  -- must have at least two elements
+  tuple'' = do
+    x <- mdataTriple'
+    Tok.comma
+    xs <- sepBy1 mdataTriple' Tok.comma
+    return $ x:xs
+
+  -- parse a tag/value pair
+  recordEntry' = do
+    i <- getId
+    n <- Tok.name
+    Tok.op "="
+    t <- mdataTriple'
+    return $ RDF i (
+        [ (i, ":isa", Str' "recordEntry") 
+        , (i, ":name", Str' n)
+        ] ++ adopt i [t]
+      )
+
+expression :: Parser Expression
+expression =
+      -- currently this just handles "."
+      try (TPE.buildExpressionParser functionTable term')
+  <|> term'
+  <?> "an expression"
+  where
+    term' =
+          try (Tok.parens expression)
+      <|> try application
+      <|> try primitiveExpr'
+
+    primitiveExpr' :: Parser Expression
+    primitiveExpr' = do
+      x <- try mdata
+      return $ ExprData x
+
+application :: Parser Expression
+application = do
+  -- this should be either a function or a composition
+  function <- Tok.parens expression <|> var'
+  arguments <- sepBy term' Tok.whiteSpace
+  return $ ExprApplication function arguments
+  where
+    term' =
+          try (Tok.parens expression)
+      <|> try var'
+      <|> try dat'
+
+    var' = do
+      x    <- Tok.name
+      tag' <- Tok.tag Tok.name
+      return $ ExprVariable x (maybe "" (\x->x) tag')
+
+    dat' = fmap ExprData (try mdata)
 
 booleanExpr :: Parser BExpr
 booleanExpr =
@@ -466,23 +512,17 @@ functionTable = [[ binary "."  ExprComposition TPE.AssocRight]]
 binary name fun assoc = TPE.Infix  (do{ Tok.op name; return fun }) assoc
 prefix name fun       = TPE.Prefix (do{ Tok.op name; return fun })
 
-
-triplePrimitive :: String -> Parser a -> (a -> Object) -> Parser [Triple]
+triplePrimitive :: String -> Parser a -> (a -> Object) -> Parser RDF
 triplePrimitive isa p f = do
   i <- getId
   n <- p
-  s <- getState
-  return $ [
-        (i, ":isa", Str' isa)
-      , (i, ":value", f n)
-      , (i, ":parent", Id' (stateScope s))
-    ]
+  return $ RDF i [(i, ":isa", Str' isa), (i, ":value", f n)]
 
-tripleInteger       :: Parser [Triple]
-tripleFloat         :: Parser [Triple]
-tripleName          :: Parser [Triple]
-tripleStringLiteral :: Parser [Triple]
-tripleBool          :: Parser [Triple]
+tripleInteger       :: Parser RDF
+tripleFloat         :: Parser RDF
+tripleName          :: Parser RDF
+tripleStringLiteral :: Parser RDF
+tripleBool          :: Parser RDF
 
 tripleInteger       = triplePrimitive ":integer" Tok.integer       Int'
 tripleFloat         = triplePrimitive ":number"  Tok.float         Num'
