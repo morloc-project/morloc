@@ -149,7 +149,7 @@ signature = do
     ]
     ++ concat inputs
     ++ maybe [] (\x->x) output
-    -- ++ constraints
+    ++ adopt i constraints
 
 listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
 listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
@@ -336,13 +336,13 @@ mdata =  do
 expression :: Parser RDF
 expression = do
   i <- getId
-  x <- term'
-  -- -- currently this just handles "."
-  -- try (TPE.buildExpressionParser functionTable term')
-  --     <|> term'
-  --     <?> "an expression"
-  return $ RDF i [(i, ":isa", Str' ":expression")]
+  -- currently this just handles "."
+  x <-  try (TPE.buildExpressionParser functionTable term')
+    <|> term'
+    <?> "an expression"
+  return $ RDF i ([(i, ":isa", Str' ":expression")] ++ adopt i [x])
   where
+    term' :: Parser RDF
     term' =
           try (Tok.parens expression)
       <|> try application
@@ -352,7 +352,7 @@ application :: Parser RDF
 application = do
   i <- getId
   function <- Tok.parens expression <|> identifier'
-  arguments <- sepBy term' Tok.whiteSpace
+  arguments <- many term'
   return $ RDF i (
          [(i, ":isa", Str' ":application")]
       ++ adopt i [function]
@@ -370,110 +370,149 @@ application = do
       tag' <- Tok.tag Tok.name
       return $ RDF i ([(i, ":isa", Str' "XXX")] ++ listTag i tag')
 
-booleanExpr :: Parser BExpr
-booleanExpr =
-      try booleanBinOp
-  <|> try relativeExpr
-  <|> try not'
-  <|> try (Tok.parens booleanExpr)
-  <|> try application'
-  <?> "an expression that reduces to True/False"
-  where
-    not' = fmap NOT (Tok.reserved "not" >> booleanExpr)
-    application' = do
-      n <- Tok.name
-      ns <- many Tok.name
-      return $ BExprFunc n ns
+-- application of only simple named elements (TODO: am I nuts?) 
+simpleApplication :: Parser RDF
+simpleApplication = do
+  i <- getId
+  n <- Tok.name
+  ns <- many tripleName
+  return $ RDF i (
+         [(i, ":isa", Str' ":application"), (i, ":name", Str' n)]
+      ++ adopt i ns
+    )
 
-booleanBinOp :: Parser BExpr
+booleanExpr :: Parser RDF
+booleanExpr = do
+    i <- getId
+    e <-  try booleanBinOp
+      <|> try relativeExpr
+      <|> try (not' i)
+      <|> try (Tok.parens booleanExpr)
+      <|> try simpleApplication 
+      <?> "an expression that reduces to True/False"
+    return $ RDF i ([(i, ":isa", Str' ":boolExpr")] ++ adopt i [e])
+  where
+    not' i = fmap (unaryOp "NOT" i) (Tok.reserved "not" >> booleanExpr)
+
+booleanBinOp :: Parser RDF
 booleanBinOp = do
+  i <- getId
   a <- bterm'
   op <- Tok.logicalBinOp
   b <- bterm'
-  return $ binop' op a b
+  return $ binOp op i a b
   where
     bterm' =
-            application'
-        <|> bool'
+            simpleApplication
+        <|> tripleBool
         <|> Tok.parens booleanExpr
         <?> "boolean expression"
 
-    application' = do
-      n <- Tok.name
-      ns <- many Tok.name
-      return $ BExprFunc n ns
-
-    bool' = fmap BExprBool Tok.boolean
-
-    binop' op a b
-      | op == "and" = AND a b
-      | op == "or"  = OR  a b
-
-relativeExpr :: Parser BExpr
+relativeExpr :: Parser RDF
 relativeExpr = do
+  i <- getId
   a <- arithmeticExpr
   op <- Tok.relativeBinOp
   b <- arithmeticExpr
-  return $ relop' op a b
+  return $ relop' i op a b
   where
-    relop' op a b
-      | op == "==" = EQ' a b
-      | op == "!=" = NE' a b
-      | op == ">"  = GT' a b
-      | op == "<"  = LT' a b
-      | op == ">=" = GE' a b
-      | op == "<=" = LE' a b
+    relop' i op a b
+      | op == "==" = (binOp "EQ" i a b)
+      | op == "!=" = (binOp "NE" i a b)
+      | op == ">"  = (binOp "GT" i a b)
+      | op == "<"  = (binOp "LT" i a b)
+      | op == ">=" = (binOp "GE" i a b)
+      | op == "<=" = (binOp "LE" i a b)
 
+arithmeticExpr :: Parser RDF
 arithmeticExpr
-  = TPE.buildExpressionParser arithmeticTable arithmeticTerm
+  =   TPE.buildExpressionParser arithmeticTable arithmeticTerm
   <?> "expression"
 
-arithmeticTerm
-  =
-      Tok.parens arithmeticExpr
-  <|> try access'
-  -- <|> val'
-  <|> var'
-  <?> "simple expression. Currently only integers are allowed"
+arithmeticTerm :: Parser RDF
+arithmeticTerm = do
+  i <- getId
+  e <-  Tok.parens arithmeticExpr
+    <|> try access'
+    <|> mdata
+    <|> var'
+    <?> "simple expression. Currently only integers are allowed"
+  return $ RDF i ((i, ":isa", Str' ":term"):(adopt i [e]))
   where
-    -- val' = fmap toExpr' mdata
 
     var' = do
+      i <- getId
       x <- Tok.name
       xs <- option [] (many arithmeticTerm)
-      return $ AExprFunc x xs
+      return $ RDF i (
+          [ (i, ":isa", Str' ":call")
+          , (i, ":name", Str' x)
+          ] ++ adopt i xs
+        )
 
     access' = do
+      i <- getId
       x <- Tok.name
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
-      return $ AExprAccess x ids
-
-    toExpr' :: MData -> AExpr
-    toExpr' (MInt x) = AExprInt x
-    toExpr' (MNum x) = AExprReal x
-    toExpr' _ = undefined
+      return $ RDF i (
+          [ (i, ":isa", Str' ":access")
+          , (i, ":name", Str' x)
+          ] ++ adopt i ids
+        )
 
 arithmeticTable
   = [
-      [ prefix "-" Neg
-      , prefix "+" Pos
+      [ prefix "-" (unaryOp "Neg")
+      , prefix "+" (unaryOp "Pos")
       ]
-    , [ binary "^"  Pow TPE.AssocRight
+    , [ binary "^"  (binOp "Pow") TPE.AssocRight
       ]
-    , [ binary "*"  Mul TPE.AssocLeft
-      , binary "/"  Div TPE.AssocLeft
-      , binary "%"  Mod TPE.AssocLeft
-      , binary "//" Quo TPE.AssocLeft
-      ]
-    , [ binary "+"  Add TPE.AssocLeft
-      , binary "-"  Sub TPE.AssocLeft
+    , [ binary "*"  (binOp "Mul") TPE.AssocLeft
+      , binary "/"  (binOp "Div") TPE.AssocLeft
+      , binary "%"  (binOp "Mod") TPE.AssocLeft
+      , binary "//" (binOp "Quo") TPE.AssocLeft
+      ]                     
+    , [ binary "+"  (binOp "Add") TPE.AssocLeft
+      , binary "-"  (binOp "Sub") TPE.AssocLeft
       ]
   ]
 
-functionTable = [[ binary "."  ExprComposition TPE.AssocRight]]
+unaryOp :: String -> Subject -> RDF -> RDF
+unaryOp s i (RDF j xs) = RDF i (
+     [ (i, ":isa", Str' s) 
+     , (i, ":child", Id' j)
+     ] ++ xs
+  )
 
-binary name fun assoc = TPE.Infix  (do{ Tok.op name; return fun }) assoc
-prefix name fun       = TPE.Prefix (do{ Tok.op name; return fun })
+binOp :: String -> Subject -> RDF -> RDF -> RDF
+binOp s i (RDF j xs) (RDF k ys) = RDF i (
+     [ (i, ":isa", Str' s) 
+     , (i, ":lhs", Id' j)
+     , (i, ":rhs", Id' k)
+     ] ++ xs ++ ys
+  )
+
+functionTable = [[ binary "."  exprComposition TPE.AssocRight ]]
+
+exprComposition :: Subject -> RDF -> RDF -> RDF
+exprComposition i (RDF j xs) (RDF k ys) = RDF i (
+     [ (i, ":isa", Str' ":composition") 
+     , (i, ":lhs", Id' j)
+     , (i, ":rhs", Id' k)
+     ] ++ xs ++ ys
+  )
+
+binary name fun assoc = TPE.Infix (do {
+    Tok.op name;
+    i <- getId;
+    return (fun i);
+  }) assoc
+
+prefix name fun = TPE.Prefix (do {
+    Tok.op name;
+    i <- getId;
+    return (fun i);
+  })
 
 triplePrimitive :: String -> Parser a -> (a -> Object) -> Parser RDF
 triplePrimitive isa p f = do
