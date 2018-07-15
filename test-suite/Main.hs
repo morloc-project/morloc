@@ -46,7 +46,6 @@ spec = parallel $ do
         ]
       )
 
-
   it "f = g 42 66;" $ do
     shouldBe
       (morlocScript "f = g 42 66;")
@@ -68,5 +67,26 @@ spec = parallel $ do
         , (4, ":argument", Id'  7              )
         , (7, ":isa",      Str' ":integer"     )
         , (7, ":value",    Int' 66             )
+        ]
+      )
+
+  it "(x = (5)) == (x = 5)" $ do
+    shouldBe
+      (morlocScript "x = (5);")
+      (morlocScript "x = 5;")
+
+  it "(1,2);" $ do
+    shouldBe
+      (morlocScript "(1,2);")
+      (Right $ RDF 1
+        [ (1, ":isa",   Str' ":script"      )
+        , (1, ":child", Id'  2              )
+        , (2, ":isa",   Str' ":tuple"       )
+        , (2, ":child", Id'  3              )
+        , (3, ":isa",   Str' ":integer"     )
+        , (3, ":value", Int' 1              )
+        , (2, ":child", Id'  4              )
+        , (4, ":isa",   Str' ":integer"     )
+        , (4, ":value", Int' 2              )
         ]
       )

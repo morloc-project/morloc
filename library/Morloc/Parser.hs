@@ -38,6 +38,7 @@ top =
       try (source'    <* optional (Tok.op ";") )
   <|> try (statement' <*           Tok.op ";"  )
   <|> try (import'    <* optional (Tok.op ";") )
+  <|> try (expression <*           Tok.op ";"  )
   <?> "Top. Maybe you are missing a semicolon?"
 
 -- | parses a 'source' header, returning the language
@@ -306,17 +307,17 @@ mdata =  do
       list' = do
         i <- getId
         xs <- Tok.brackets (sepBy mdata Tok.comma)
-        return $ RDF i ([(i, ":isa", Str' "list")] ++ adopt i xs)
+        return $ RDF i ([(i, ":isa", Str' ":list")] ++ adopt i xs)
 
       tuple' = do
         i <- getId
         xs <- Tok.parens tuple''
-        return $ RDF i ([(i, ":isa", Str' "tuple")] ++ adopt i xs)
+        return $ RDF i ([(i, ":isa", Str' ":tuple")] ++ adopt i xs)
 
       record' = do
         i <- getId
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
-        return $ RDF i ([(i, ":isa", Str' "record")] ++ adopt i xs)
+        return $ RDF i ([(i, ":isa", Str' ":record")] ++ adopt i xs)
 
       -- must have at least two elements
       tuple'' = do
