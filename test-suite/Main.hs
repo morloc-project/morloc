@@ -75,18 +75,21 @@ spec = parallel $ do
       (morlocScript "x = (5);")
       (morlocScript "x = 5;")
 
-  it "(1,2);" $ do
+  it "(1,\"foo\",1.1);" $ do
     shouldBe
-      (morlocScript "(1,2);")
+      (morlocScript "(1,\"foo\",1.1);")
       (Right $ RDF 1
-        [ (1, ":isa",   Str' ":script"      )
-        , (1, ":child", Id'  2              )
-        , (2, ":isa",   Str' ":tuple"       )
-        , (2, ":child", Id'  3              )
-        , (3, ":isa",   Str' ":integer"     )
-        , (3, ":value", Int' 1              )
-        , (2, ":child", Id'  4              )
-        , (4, ":isa",   Str' ":integer"     )
-        , (4, ":value", Int' 2              )
+        [ (1, ":isa",   Str' ":script"  )
+        , (1, ":child", Id'  2          )
+        , (2, ":isa",   Str' ":tuple"   )
+        , (2, ":child", Id'  3          )
+        , (3, ":isa",   Str' ":integer" )
+        , (3, ":value", Int' 1          )
+        , (2, ":child", Id'  4          )
+        , (4, ":isa",   Str' ":string"  )
+        , (4, ":value", Str' "foo"      )
+        , (2, ":child", Id'  5          )
+        , (5, ":isa",   Str' ":number"  )
+        , (5, ":value", Num' 1.1        )
         ]
       )
