@@ -122,7 +122,7 @@ declaration = do
   value <- expression
   return $ RDF i (
       [
-        (i, ":isa", Str' "declaration")
+        (i, ":isa", Str' ":declaration")
       , (i, ":name", Str' varname)
       ] ++ adopt i bndvars
         ++ adopt i [value]
