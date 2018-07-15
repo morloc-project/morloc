@@ -32,8 +32,10 @@ instance Show Object where
   show (Str' x ) = x
 
 -- write triplets in TAB-delimited format
-showRDF :: [Triple] -> String 
-showRDF = unlines . map (\(i,r,o) -> show i ++ "\t" ++ r ++ "\t" ++ show o)
+showRDF :: RDF -> String 
+showRDF (RDF _ xs) = unlines . map writeTriple $ xs where
+  writeTriple :: (Subject, Relation, Object) -> String
+  writeTriple (i, r, o) = show i ++ "\t" ++ r ++ "\t" ++ show o
 
 adopt :: Subject -> [RDF] -> [Triple]
 adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)
