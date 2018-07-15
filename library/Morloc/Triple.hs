@@ -4,8 +4,10 @@ module Morloc.Triple (
   , Subject
   , Relation
   , Object(..)
+  , rdfId
+  , rdfTriple
   , showRDF
-  , adopt
+  , adoptAs
 ) where
 
 data RDF = RDF
@@ -37,5 +39,11 @@ showRDF (RDF _ xs) = unlines . map writeTriple $ xs where
   writeTriple :: (Subject, Relation, Object) -> String
   writeTriple (i, r, o) = show i ++ "\t" ++ r ++ "\t" ++ show o
 
-adopt :: Subject -> [RDF] -> [Triple]
-adopt i = concat . map (\(RDF j xs) -> (j, ":has_parent", Id' i):xs)
+rdfId :: RDF -> Subject
+rdfId (RDF i _) = i
+
+rdfTriple :: RDF -> [Triple]
+rdfTriple (RDF _ xs) = xs
+
+adoptAs :: Relation -> Subject -> [RDF] -> [Triple]
+adoptAs r i = concat . map (\(RDF j xs) -> (i, r, Id' j):xs)

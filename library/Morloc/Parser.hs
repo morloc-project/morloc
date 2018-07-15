@@ -12,6 +12,9 @@ import Morloc.State
 import Morloc.Triple
 import qualified Morloc.Lexer as Tok
 
+adopt :: Subject -> [RDF] -> [Triple]
+adopt = adoptAs ":child"
+
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 morlocScript :: String -> ThrowsError RDF
 morlocScript s =
@@ -116,16 +119,18 @@ restrictedImport = do
 declaration :: Parser RDF
 declaration = do
   i <- getId
-  varname <- Tok.name
+  lhs <- tripleName 
   bndvars <- many tripleName
   Tok.op "="
-  value <- expression
+  rhs <- expression
   return $ RDF i (
       [
         (i, ":isa", Str' ":declaration")
-      , (i, ":name", Str' varname)
-      ] ++ adopt i bndvars
-        ++ adopt i [value]
+      , (i, ":lhs", Id' (rdfId lhs))
+      , (i, ":rhs", Id' (rdfId rhs))
+      ] ++ adoptAs ":parameter" i bndvars
+        ++ (rdfTriple lhs)
+        ++ (rdfTriple rhs)
     )
 
 -- | function :: [input] -> output constraints
@@ -334,13 +339,11 @@ mdata =  do
           )
 
 expression :: Parser RDF
-expression = do
-  i <- getId
+expression =
   -- currently this just handles "."
-  x <-  try (TPE.buildExpressionParser functionTable term')
-    <|> term'
-    <?> "an expression"
-  return $ RDF i ([(i, ":isa", Str' ":expression")] ++ adopt i [x])
+      try (TPE.buildExpressionParser functionTable term')
+  <|> term'
+  <?> "an expression"
   where
     term' :: Parser RDF
     term' =
