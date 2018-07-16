@@ -108,14 +108,14 @@ spec = parallel $ do
         , (4, ":isa",        Str' ":type"            ) -- i:Int -> Num where (i > 0)
         , (4, ":input",      Id'  5                  )
         , (5, ":isa",        Str' ":type"            ) -- i:Int
-        , (5, "value",       Str' "Int"              )
+        , (5, ":name",       Str' "Int"              )
         , (5, ":label",      Str' "i"                )
         , (4, ":output",     Id'  6                  ) -- Num
         , (6, ":isa",        Str' ":type"            )
-        , (6, "value",       Str' "Num"              )
+        , (6, ":name",       Str' "Num"              )
         , (4, ":constraint", Id'  7                  )
-        , (7, ":isa",        Str' ":relativeExpr"    ) -- "i > 0"
-        , (7, ":operator",   Str' "GT"               )
+        , (7, ":isa",        Str' ":binop"           ) -- "i > 0"
+        , (7, ":name",       Str' "GT"               )
         , (7, ":lhs",        Id'  8                  )
         , (7, ":rhs",        Id'  9                  )
         , (8, ":isa",        Str' ":name"            )

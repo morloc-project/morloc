@@ -82,7 +82,7 @@ source' = do
 
 statement' :: Parser RDF
 statement' =
-      try signature
+      try typeDeclaration
   <|> try declaration
 
 import' :: Parser RDF
@@ -126,19 +126,27 @@ declaration = do
   rhs <- expression
   return $ RDF i (
          [(i, ":isa", Str' ":declaration")]
-      ++ [(i, ":lhs", Id' (rdfId lhs))]
-      ++ (rdfTriple lhs)
+      ++ adoptAs ":lhs"       i [lhs]
       ++ adoptAs ":parameter" i bndvars
-      ++ [(i, ":rhs", Id' (rdfId rhs))]
-      ++ (rdfTriple rhs)
+      ++ adoptAs ":rhs"       i [rhs]
     )
 
 -- | function :: [input] -> output constraints
-signature :: Parser RDF
-signature = do
+typeDeclaration :: Parser RDF
+typeDeclaration = do
   i <- getId
-  function <- Tok.name
+  lhs <- tripleName
   Tok.op "::"
+  rhs <- compoundType 
+  return $ RDF i (
+         [(i, ":isa", Str' ":typeDeclaration")]
+      ++ adoptAs ":lhs" i [lhs]
+      ++ adoptAs ":rhs" i [rhs]
+    )
+
+compoundType :: Parser RDF
+compoundType = do
+  i <- getId
   inputs <- sepBy1 mtype Tok.comma
   output <- optionMaybe (
       Tok.op "->" >>
@@ -148,16 +156,13 @@ signature = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
-
   return $ RDF i (
-        [
-          (i, ":isa", Str' ":signature")
-        , (i, ":name", Str' function)
-        ]
-      ++ adopt i inputs
-      ++ adopt i (maybe [RDF 0 []] (\x->[x]) output)
-      ++ adopt i constraints
+         [(i, ":isa", Str' ":type")]
+      ++ adoptAs ":input" i inputs
+      ++ adoptAs ":output" i (maybe [RDF 0 []] (\x->[x]) output)
+      ++ adoptAs ":constraint" i constraints
     )
+
 
 listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
 listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
@@ -390,16 +395,19 @@ simpleApplication = do
 
 booleanExpr :: Parser RDF
 booleanExpr = do
-    i <- getId
-    e <-  try booleanBinOp
-      <|> try relativeExpr
-      <|> try (not' i)
-      <|> try (Tok.parens booleanExpr)
-      <|> try simpleApplication 
-      <?> "an expression that reduces to True/False"
-    return $ RDF i ([(i, ":isa", Str' ":boolExpr")] ++ adopt i [e])
+      try booleanBinOp
+  <|> try relativeExpr
+  <|> try not'
+  <|> try (Tok.parens booleanExpr)
+  <|> try simpleApplication 
+  <?> "an expression that reduces to True/False"
   where
-    not' i = fmap (unaryOp "NOT" i) (Tok.reserved "not" >> booleanExpr)
+    not' :: Parser RDF
+    not' = do
+      Tok.reserved "not"
+      i <- getId
+      e <- booleanExpr
+      return $ RDF i (adoptAs ":not" i [e]) 
 
 booleanBinOp :: Parser RDF
 booleanBinOp = do
@@ -438,19 +446,18 @@ arithmeticExpr
 
 arithmeticTerm :: Parser RDF
 arithmeticTerm = do
-  i <- getId
-  e <-  Tok.parens arithmeticExpr
-    <|> try access'
-    <|> mdata
-    <|> var'
-    <?> "simple expression. Currently only integers are allowed"
-  return $ RDF i ((i, ":isa", Str' ":term"):(adopt i [e]))
+      Tok.parens arithmeticExpr
+  <|> try access'
+  <|> try mdata
+  <|> try call'
+  <|> tripleName
+  <?> "simple expression. Currently only integers are allowed"
   where
 
-    var' = do
+    call' = do
       i <- getId
       x <- Tok.name
-      xs <- option [] (many arithmeticTerm)
+      xs <- many1 arithmeticTerm
       return $ RDF i (
           [ (i, ":isa", Str' ":call")
           , (i, ":name", Str' x)
@@ -493,7 +500,8 @@ unaryOp s i (RDF j xs) = RDF i (
 
 binOp :: String -> Subject -> RDF -> RDF -> RDF
 binOp s i (RDF j xs) (RDF k ys) = RDF i (
-     [ (i, ":isa", Str' s) 
+     [ (i, ":isa", Str' ":binop") 
+     , (i, ":name", Str' s)
      , (i, ":lhs", Id' j)
      , (i, ":rhs", Id' k)
      ] ++ xs ++ ys

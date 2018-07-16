@@ -1,1 +1,1 @@
-Cn :: i:Int -> Num where (i > 0);
+foo :: i:Int -> Num where (i > 0);
