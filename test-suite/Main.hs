@@ -4,10 +4,27 @@ import Test.Tasty.Hspec
 import Morloc.Parser (morlocScript)
 import Morloc.Triple
 
+-- TODO: test the following
+-- [x] arithmetic
+-- [ ] boolean operators
+-- [ ] unary operators (+/-)
+-- [ ] functions in constraints
+-- [ ] composition
+-- [ ] each explicit data type
+-- [ ] source
+-- [ ] simple import
+-- [ ] restricted import
+-- [ ] error throwing?
+
 main :: IO ()
 main = do
   test <- testSpec "morloc" spec
   Test.Tasty.defaultMain test
+
+rmId :: [Int] -> RDF -> RDF
+rmId is (RDF i ts) = RDF i (filter (rmId' is) ts) where
+  rmId' :: [Int] -> Triple -> Bool 
+  rmId' is' (i, _, _) = all (\x -> x /= i) is'
 
 spec :: Spec
 spec = parallel $ do
@@ -122,5 +139,26 @@ spec = parallel $ do
         , (8, ":value",      Str' "i"                )
         , (9, ":isa",        Str' ":integer"         )
         , (9, ":value",      Int' 0                  )
+        ]
+      )
+
+  it "foo :: Int where (1.1 + 1.2 > 2.0);" $ do
+    shouldBe
+      (fmap (rmId [1..5]) (morlocScript "foo :: Int where (1.1 + 1.2 > 2.0);"))
+      (Right $ RDF 1
+        [ (6,  ":isa",   Str' ":binop"  )
+        , (6,  ":name",  Str' "GT"      )
+        , (6,  ":lhs",   Id'  8         )
+        , (6,  ":rhs",   Id'  10        )
+        , (8,  ":isa",   Str' ":binop"  )
+        , (8,  ":name",  Str' "Add"     )
+        , (8,  ":lhs",   Id'  7         )
+        , (8,  ":rhs",   Id'  9         )
+        , (7,  ":isa",   Str' ":number" )
+        , (7,  ":value", Num' 1.1       )
+        , (9,  ":isa",   Str' ":number" )
+        , (9,  ":value", Num' 1.2       )
+        , (10, ":isa",   Str' ":number" )
+        , (10, ":value", Num' 2.0       )
         ]
       )
