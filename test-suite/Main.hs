@@ -93,3 +93,34 @@ spec = parallel $ do
         , (5, ":value", Num' 1.1        )
         ]
       )
+
+  it "foo :: i:Int -> Num where (i > 0);" $ do
+    shouldBe
+      (morlocScript "foo :: i:Int -> Num where (i > 0);")
+      (Right $ RDF 1
+        [ (1, ":isa",        Str' ":script"          )
+        , (1, ":child",      Id'  2                  )
+        , (2, ":isa",        Str' ":typeDeclaration" )
+        , (2, ":lhs",        Id'  3                  )
+        , (3, ":isa",        Str' ":name"            )
+        , (3, ":value",      Str' "foo"              )
+        , (2, ":rhs",        Id'  4                  )
+        , (4, ":isa",        Str' ":type"            ) -- i:Int -> Num where (i > 0)
+        , (4, ":input",      Id'  5                  )
+        , (5, ":isa",        Str' ":type"            ) -- i:Int
+        , (5, "value",       Str' "Int"              )
+        , (5, ":label",      Str' "i"                )
+        , (4, ":output",     Id'  6                  ) -- Num
+        , (6, ":isa",        Str' ":type"            )
+        , (6, "value",       Str' "Num"              )
+        , (4, ":constraint", Id'  7                  )
+        , (7, ":isa",        Str' ":relativeExpr"    ) -- "i > 0"
+        , (7, ":operator",   Str' "GT"               )
+        , (7, ":lhs",        Id'  8                  )
+        , (7, ":rhs",        Id'  9                  )
+        , (8, ":isa",        Str' ":name"            )
+        , (8, ":value",      Str' "i"                )
+        , (9, ":isa",        Str' ":integer"         )
+        , (9, ":value",      Int' 0                  )
+        ]
+      )
