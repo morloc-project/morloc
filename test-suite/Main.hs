@@ -142,9 +142,9 @@ spec = parallel $ do
         ]
       )
 
-  it "foo :: Int" $ do
+  it "foo :: Int;" $ do
     shouldBe
-      (morlocScript "foo :: Int")
+      (morlocScript "foo :: Int;")
       (Right $ RDF 1
         [ (1, ":isa",        Str' ":script"          )
         , (1, ":child",      Id'  2                  )
@@ -158,23 +158,23 @@ spec = parallel $ do
         ]
       )
 
-  it "foo :: Int where (1.1 + 1.2 > 2.0);" $ do
+  it "foo :: X -> Y where (1.1 + 1.2 > 2.0);" $ do
     shouldBe
-      (fmap (rmId [1..5]) (morlocScript "foo :: Int where (1.1 + 1.2 > 2.0);"))
+      (fmap (rmId [1..6]) (morlocScript "foo :: X -> Y where (1.1 + 1.2 > 2.0);"))
       (Right $ RDF 1
-        [ (6,  ":isa",   Str' ":binop"  )
-        , (6,  ":name",  Str' "GT"      )
-        , (6,  ":lhs",   Id'  8         )
-        , (6,  ":rhs",   Id'  10        )
-        , (8,  ":isa",   Str' ":binop"  )
-        , (8,  ":name",  Str' "Add"     )
-        , (8,  ":lhs",   Id'  7         )
-        , (8,  ":rhs",   Id'  9         )
-        , (7,  ":isa",   Str' ":number" )
-        , (7,  ":value", Num' 1.1       )
-        , (9,  ":isa",   Str' ":number" )
-        , (9,  ":value", Num' 1.2       )
+        [ (7,  ":isa",   Str' ":binop"  )
+        , (7,  ":name",  Str' "GT"      )
+        , (7,  ":lhs",   Id'  9         )
+        , (7,  ":rhs",   Id'  11        )
+        , (9,  ":isa",   Str' ":binop"  )
+        , (9,  ":name",  Str' "Add"     )
+        , (9,  ":lhs",   Id'  8         )
+        , (9,  ":rhs",   Id'  10        )
+        , (8,  ":isa",   Str' ":number" )
+        , (8,  ":value", Num' 1.1       )
         , (10, ":isa",   Str' ":number" )
-        , (10, ":value", Num' 2.0       )
+        , (10, ":value", Num' 1.2       )
+        , (11, ":isa",   Str' ":number" )
+        , (11, ":value", Num' 2.0       )
         ]
       )

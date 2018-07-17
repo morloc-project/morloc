@@ -137,36 +137,34 @@ typeDeclaration = do
   i <- getId
   lhs <- tripleName
   Tok.op "::"
-  rhs <- compoundType 
-  return $ RDF i (
-         [(i, ":isa", Str' ":typeDeclaration")]
-      ++ adoptAs ":lhs" i [lhs]
-      ++ adoptAs ":rhs" i [rhs]
-    )
-
-compoundType :: Parser RDF
-compoundType = do
-  i <- getId
-  inputs <- sepBy1 mtype Tok.comma
-  output <- optionMaybe (
-      Tok.op "->" >>
-      mtype
-    )
+  rhs <- try function <|> mtype
   constraints <- option [] (
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
   return $ RDF i (
-         [(i, ":isa", Str' ":type")]
-      ++ adoptAs ":input" i inputs
-      ++ adoptAs ":output" i (maybe [RDF 0 []] (\x->[x]) output)
-      ++ adoptAs ":constraint" i constraints
+         [(i, ":isa", Str' ":typeDeclaration")]
+      ++ adoptAs ":lhs" i [lhs]
+      ++ adoptAs ":rhs" i [rhs]
+      ++ adoptAs ":constraint" (rdfId rhs) constraints
     )
 
+function :: Parser RDF
+function = do
+  i <- getId
+  inputs <- sepBy1 mtype Tok.comma
+  Tok.op "->"
+  output <- mtype
+  return $ RDF i (
+         [(i, ":isa", Str' ":type")]
+      ++ adoptAs ":input" i inputs
+      ++ adoptAs ":output" i [output]
+    )
 
 listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
 listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
 
+-- TODO: 'function' should be a type here, but where do constrains go?
 mtype :: Parser RDF
 mtype =
         try specific' -- A ...
