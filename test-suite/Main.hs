@@ -4,19 +4,6 @@ import Test.Tasty.Hspec
 import Morloc.Parser (morlocScript)
 import Morloc.Triple
 
--- TODO: test the following
--- [x] [x] arithmetic
--- [x] [x] higher order functions
--- [ ] [ ] boolean operators
--- [ ] [ ] unary operators (+/-)
--- [ ] [ ] functions in constraints
--- [ ] [ ] composition
--- [ ] [ ] each explicit data type
--- [ ] [x] source
--- [ ] [ ] simple import
--- [ ] [ ] restricted import
--- [ ] [ ] error throwing?
-
 main :: IO ()
 main = do
   test <- testSpec "morloc" spec
@@ -197,3 +184,42 @@ spec = parallel $ do
     , (9, ":isa",    Str' ":generic"         )
     , (9, ":value",  Str' "d"                )
     ]
+
+  testRdfCodeWith
+    (rmId [1..4])
+    "foo :: A where ((1 == 1) and (2 == 2));"
+    [ (5,  ":isa",   Str' ":binop"   )
+    , (5,  ":value", Str' "and"      )
+    , (5,  ":lhs",   Id'  6          )
+    , (5,  ":rhs",   Id'  9          )
+    , (6,  ":isa",   Str' ":binop"   )
+    , (6,  ":value", Str' "EQ"       )
+    , (6,  ":lhs",   Id'  7          )
+    , (6,  ":rhs",   Id'  8          )
+    , (7,  ":isa",   Str' ":integer" )
+    , (7,  ":value", Int' 1          )
+    , (8,  ":isa",   Str' ":integer" )
+    , (8,  ":value", Int' 1          )
+    , (9,  ":isa",   Str' ":binop"   )
+    , (9,  ":value", Str' "EQ"       )
+    , (9,  ":lhs",   Id'  10         )
+    , (9,  ":rhs",   Id'  11         )
+    , (10, ":isa",   Str' ":integer" )
+    , (10, ":value", Int' 2          )
+    , (11, ":isa",   Str' ":integer" )
+    , (11, ":value", Int' 2          )
+
+    ]
+
+-- TODO: test the following
+-- [x] [x] arithmetic
+-- [x] [x] higher order functions
+-- [x] [x] boolean operators
+-- [ ] [ ] unary operators (+/-)
+-- [ ] [ ] functions in constraints
+-- [ ] [ ] composition
+-- [ ] [ ] each explicit data type
+-- [ ] [x] source
+-- [ ] [ ] simple import
+-- [ ] [ ] restricted import
+-- [ ] [ ] error throwing?
