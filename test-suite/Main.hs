@@ -178,3 +178,33 @@ spec = parallel $ do
         , (11, ":value", Num' 2.0       )
         ]
       )
+
+  it "exe :: a, (a -> b) -> b;" $ do
+      (morlocScript "exe :: a, (a -> b) -> b;")
+      (Right $ RDF 1
+        [ (1, ":isa",        Str' ":script"          )
+        , (1, ":child",      Id'  2                  )
+        , (2, ":isa",        Str' ":typeDeclaration" )
+        , (2, ":lhs",        Id'  3                  )
+        , (3, ":isa",        Str' ":name"            )
+        , (3, ":value",      Str' "exe"              )
+        , (2, ":rhs",        Id'  4                  )
+        , (4, ":isa",        Str' ":type"            )
+        , (4, ":input",      Id'  5                  )
+        , (5, ":isa",        Str' ":type"            )
+        , (5, ":name",       Str' "Int"              )
+        , (5, ":label",      Str' "i"                )
+        , (4, ":output",     Id'  6                  )
+        , (6, ":isa",        Str' ":type"            )
+        , (6, ":name",       Str' "Num"              )
+        , (4, ":constraint", Id'  7                  )
+        , (7, ":isa",        Str' ":binop"           )
+        , (7, ":name",       Str' "GT"               )
+        , (7, ":lhs",        Id'  8                  )
+        , (7, ":rhs",        Id'  9                  )
+        , (8, ":isa",        Str' ":name"            )
+        , (8, ":value",      Str' "i"                )
+        , (9, ":isa",        Str' ":integer"         )
+        , (9, ":value",      Int' 0                  )
+        ]
+      )
