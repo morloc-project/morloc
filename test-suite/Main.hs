@@ -142,6 +142,22 @@ spec = parallel $ do
         ]
       )
 
+  it "foo :: Int" $ do
+    shouldBe
+      (morlocScript "foo :: Int")
+      (Right $ RDF 1
+        [ (1, ":isa",        Str' ":script"          )
+        , (1, ":child",      Id'  2                  )
+        , (2, ":isa",        Str' ":typeDeclaration" )
+        , (2, ":lhs",        Id'  3                  )
+        , (3, ":isa",        Str' ":name"            )
+        , (3, ":value",      Str' "foo"              )
+        , (2, ":rhs",        Id'  4                  )
+        , (4, ":isa",        Str' ":type"            )
+        , (4, ":name",       Str' "Int"              )
+        ]
+      )
+
   it "foo :: Int where (1.1 + 1.2 > 2.0);" $ do
     shouldBe
       (fmap (rmId [1..5]) (morlocScript "foo :: Int where (1.1 + 1.2 > 2.0);"))
