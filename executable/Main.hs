@@ -27,6 +27,9 @@ main = do
     --   input <- readFile x
     --   (writeProgram . build) input
 
+    -- TODO: also NOT the right default
+    ["-e", text] -> putStr (rdf text)
+
     -- TODO: this should NOT be the default
     [x] -> do
       input <- readFile x
