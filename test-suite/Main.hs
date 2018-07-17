@@ -6,6 +6,7 @@ import Morloc.Triple
 
 -- TODO: test the following
 -- [x] arithmetic
+-- [x] higher order functions
 -- [ ] boolean operators
 -- [ ] unary operators (+/-)
 -- [ ] functions in constraints
@@ -122,17 +123,17 @@ spec = parallel $ do
         , (3, ":isa",        Str' ":name"            )
         , (3, ":value",      Str' "foo"              )
         , (2, ":rhs",        Id'  4                  )
-        , (4, ":isa",        Str' ":type"            ) -- i:Int -> Num where (i > 0)
+        , (4, ":isa",        Str' ":function"        ) -- i:Int -> Num where (i > 0)
         , (4, ":input",      Id'  5                  )
         , (5, ":isa",        Str' ":type"            ) -- i:Int
-        , (5, ":name",       Str' "Int"              )
+        , (5, ":value",      Str' "Int"              )
         , (5, ":label",      Str' "i"                )
         , (4, ":output",     Id'  6                  ) -- Num
         , (6, ":isa",        Str' ":type"            )
-        , (6, ":name",       Str' "Num"              )
+        , (6, ":value",      Str' "Num"              )
         , (4, ":constraint", Id'  7                  )
         , (7, ":isa",        Str' ":binop"           ) -- "i > 0"
-        , (7, ":name",       Str' "GT"               )
+        , (7, ":value",      Str' "GT"               )
         , (7, ":lhs",        Id'  8                  )
         , (7, ":rhs",        Id'  9                  )
         , (8, ":isa",        Str' ":name"            )
@@ -154,7 +155,7 @@ spec = parallel $ do
         , (3, ":value",      Str' "foo"              )
         , (2, ":rhs",        Id'  4                  )
         , (4, ":isa",        Str' ":type"            )
-        , (4, ":name",       Str' "Int"              )
+        , (4, ":value",      Str' "Int"              )
         ]
       )
 
@@ -163,11 +164,11 @@ spec = parallel $ do
       (fmap (rmId [1..6]) (morlocScript "foo :: X -> Y where (1.1 + 1.2 > 2.0);"))
       (Right $ RDF 1
         [ (7,  ":isa",   Str' ":binop"  )
-        , (7,  ":name",  Str' "GT"      )
+        , (7,  ":value", Str' "GT"      )
         , (7,  ":lhs",   Id'  9         )
         , (7,  ":rhs",   Id'  11        )
         , (9,  ":isa",   Str' ":binop"  )
-        , (9,  ":name",  Str' "Add"     )
+        , (9,  ":value", Str' "Add"     )
         , (9,  ":lhs",   Id'  8         )
         , (9,  ":rhs",   Id'  10        )
         , (8,  ":isa",   Str' ":number" )
@@ -179,32 +180,31 @@ spec = parallel $ do
         ]
       )
 
-  it "exe :: a, (a -> b) -> b;" $ do
-      (morlocScript "exe :: a, (a -> b) -> b;")
+  it "foo :: a, (b -> c) -> d;" $ do
+    shouldBe
+      (morlocScript "foo :: a, (b -> c) -> d;")
       (Right $ RDF 1
-        [ (1, ":isa",        Str' ":script"          )
-        , (1, ":child",      Id'  2                  )
-        , (2, ":isa",        Str' ":typeDeclaration" )
-        , (2, ":lhs",        Id'  3                  )
-        , (3, ":isa",        Str' ":name"            )
-        , (3, ":value",      Str' "exe"              )
-        , (2, ":rhs",        Id'  4                  )
-        , (4, ":isa",        Str' ":type"            )
-        , (4, ":input",      Id'  5                  )
-        , (5, ":isa",        Str' ":type"            )
-        , (5, ":name",       Str' "Int"              )
-        , (5, ":label",      Str' "i"                )
-        , (4, ":output",     Id'  6                  )
-        , (6, ":isa",        Str' ":type"            )
-        , (6, ":name",       Str' "Num"              )
-        , (4, ":constraint", Id'  7                  )
-        , (7, ":isa",        Str' ":binop"           )
-        , (7, ":name",       Str' "GT"               )
-        , (7, ":lhs",        Id'  8                  )
-        , (7, ":rhs",        Id'  9                  )
-        , (8, ":isa",        Str' ":name"            )
-        , (8, ":value",      Str' "i"                )
-        , (9, ":isa",        Str' ":integer"         )
-        , (9, ":value",      Int' 0                  )
+        [ (1, ":isa",    Str' ":script"          )
+        , (1, ":child",  Id'  2                  )
+        , (2, ":isa",    Str' ":typeDeclaration" )
+        , (2, ":lhs",    Id'  3                  )
+        , (3, ":isa",    Str' ":name"            )
+        , (3, ":value",  Str' "foo"              )
+        , (2, ":rhs",    Id'  4                  )
+        , (4, ":isa",    Str' ":function"        )
+        , (4, ":input",  Id'  5                  )
+        , (5, ":isa",    Str' ":generic"         )
+        , (5, ":value",  Str' "a"                )
+        , (4, ":input",  Id'  6                  )
+        , (6, ":isa",    Str' ":function"        )
+        , (6, ":input",  Id'  7                  )
+        , (7, ":isa",    Str' ":generic"         )
+        , (7, ":value",  Str' "b"                )
+        , (6, ":output", Id'  8                  )
+        , (8, ":isa",    Str' ":generic"         )
+        , (8, ":value",  Str' "c"                )
+        , (4, ":output", Id'  9                  )
+        , (9, ":isa",    Str' ":generic"         )
+        , (9, ":value",  Str' "d"                )
         ]
       )

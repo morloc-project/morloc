@@ -137,7 +137,7 @@ typeDeclaration = do
   i <- getId
   lhs <- tripleName
   Tok.op "::"
-  rhs <- try function <|> mtype
+  rhs <- mtype
   constraints <- option [] (
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
@@ -149,25 +149,13 @@ typeDeclaration = do
       ++ adoptAs ":constraint" (rdfId rhs) constraints
     )
 
-function :: Parser RDF
-function = do
-  i <- getId
-  inputs <- sepBy1 mtype Tok.comma
-  Tok.op "->"
-  output <- mtype
-  return $ RDF i (
-         [(i, ":isa", Str' ":type")]
-      ++ adoptAs ":input" i inputs
-      ++ adoptAs ":output" i [output]
-    )
-
 listTag :: Subject -> Maybe String -> [(Subject, Relation, Object)] 
 listTag i tag = maybe [] (\t -> [(i, ":label", Str' t)]) tag
 
--- TODO: 'function' should be a type here, but where do constrains go?
 mtype :: Parser RDF
 mtype =
-        try specific' -- A ...
+        try function' -- a [, *] -> b [where (*)]
+    <|> try specific' -- A ...
     <|> try generic'  -- a ...
     <|> try record'   -- A { ... }
     <|> try unambiguous'
@@ -191,7 +179,7 @@ mtype =
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
-             [(i, ":isa", Str' ":type"), (i, ":name", Str' n)]
+             [(i, ":isa", Str' ":type"), (i, ":value", Str' n)]
           ++ listTag i l
           ++ adopt i ns
         )
@@ -210,7 +198,7 @@ mtype =
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
-             [(i, ":isa", Str' ":generic"), (i, ":name", Str' n)]
+             [(i, ":isa", Str' ":generic"), (i, ":value", Str' n)]
           ++ (listTag i l)
           ++ (adopt i ns)
         )
@@ -222,7 +210,7 @@ mtype =
       n <- Tok.specificType
       i <- getId
       return $ RDF i (
-             [(i, ":isa", Str' ":type"), (i, ":name", Str' n)]
+             [(i, ":isa", Str' ":type"), (i, ":value", Str' n)]
           ++ listTag i l
         )
 
@@ -235,7 +223,7 @@ mtype =
       n <- Tok.genericType
       i <- getId
       return $ RDF i (
-             [(i, ":isa", Str' ":generic"), (i, ":name", Str' n)]
+             [(i, ":isa", Str' ":generic"), (i, ":value", Str' n)]
           ++ (listTag i l)
         )
 
@@ -291,8 +279,21 @@ mtype =
       Tok.op "::"
       ts <- mtype
       return $ RDF i (
-          [(i, ":isa", Str' ":tag"), (i, ":name", Str' n)] ++ adopt i [ts]
+          [(i, ":isa", Str' ":tag"), (i, ":value", Str' n)] ++ adopt i [ts]
         )
+
+    function' :: Parser RDF
+    function' = do
+      i <- getId
+      inputs <- sepBy1 unambiguous' Tok.comma
+      Tok.op "->"
+      output <- unambiguous'
+      return $ RDF i (
+             [(i, ":isa", Str' ":function")]
+          ++ adoptAs ":input" i inputs
+          ++ adoptAs ":output" i [output]
+        )
+
 
 mdata :: Parser RDF
 mdata =  do
@@ -499,7 +500,7 @@ unaryOp s i (RDF j xs) = RDF i (
 binOp :: String -> Subject -> RDF -> RDF -> RDF
 binOp s i (RDF j xs) (RDF k ys) = RDF i (
      [ (i, ":isa", Str' ":binop") 
-     , (i, ":name", Str' s)
+     , (i, ":value", Str' s)
      , (i, ":lhs", Id' j)
      , (i, ":rhs", Id' k)
      ] ++ xs ++ ys
