@@ -396,24 +396,13 @@ application = do
           , (i, ":value", Str' x)
           ] ++ listTag i tag')
 
--- application of only simple named elements (TODO: am I nuts?) 
-simpleApplication :: Parser RDF
-simpleApplication = do
-  i <- getId
-  n <- Tok.name
-  ns <- many tripleName
-  return $ RDF i (
-         [(i, ":isa", Str' ":application"), (i, ":name", Str' n)]
-      ++ adopt i ns
-    )
-
 booleanExpr :: Parser RDF
 booleanExpr = do
       try booleanBinOp
   <|> try relativeExpr
   <|> try not'
   <|> try (Tok.parens booleanExpr)
-  <|> try simpleApplication 
+  <|> try call'
   <?> "an expression that reduces to True/False"
   where
     not' :: Parser RDF
@@ -422,6 +411,23 @@ booleanExpr = do
       i <- getId
       e <- booleanExpr
       return $ RDF i (adoptAs ":not" i [e]) 
+
+    call' :: Parser RDF
+    call' = do
+      i <- getId
+      n <- Tok.name
+      ns <- many1 argument'
+      return $ RDF i (
+             [(i, ":isa", Str' ":call"), (i, ":name", Str' n)]
+          ++ adoptAs ":argument" i ns
+        )
+
+    argument' :: Parser RDF
+    argument' =
+          (Tok.parens booleanExpr)
+      <|> try tripleBool
+      <|> tripleName
+      <?> "expect an argument"
 
 booleanBinOp :: Parser RDF
 booleanBinOp = do
@@ -432,8 +438,8 @@ booleanBinOp = do
   return $ binOp op i a b
   where
     bterm' =
-            simpleApplication
-        <|> tripleBool
+            tripleBool
+        <|> tripleName
         <|> Tok.parens booleanExpr
         <?> "boolean expression"
 
