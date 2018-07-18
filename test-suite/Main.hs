@@ -17,9 +17,9 @@ rmId is ts = filter (rmId' is) ts where
 testRdfCodeWith :: ([Triple] -> [Triple]) -> String -> [Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
   (Right ts') -> it s $ do shouldBe ts ts'
-  (Left _) -> error "Compilation failed"
+  (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
-    run' f' s' = (fmap (\(RDF _ ts') -> f' ts') (morlocScript s'))
+    run' f' s' = (fmap (\(RDF _ ts') -> f' ts') (morlocScript (s' ++ ";")))
 
 testRdfCode :: String -> [Triple] -> Spec
 testRdfCode = testRdfCodeWith id
@@ -29,7 +29,7 @@ spec :: Spec
 spec = parallel $ do
 
   testRdfCode
-    "x = 1;"
+    "x = 1"
     [ (1, ":isa",   Str' ":script"      )
     , (1, ":child", Id'  2              )
     , (2, ":isa",   Str' ":declaration" )
@@ -42,7 +42,7 @@ spec = parallel $ do
     ]
 
   testRdfCode
-    "f x = x;"
+    "f x = x"
     [ (1, ":isa",       Str' ":script"      )
     , (1, ":child",     Id'  2              )
     , (2, ":isa",       Str' ":declaration" )
@@ -58,7 +58,7 @@ spec = parallel $ do
     ]
 
   testRdfCode
-    "f = g 42 66;"
+    "f = g 42 66"
     [ (1, ":isa",      Str' ":script"      )
     , (1, ":child",    Id'  2              )
     , (2, ":isa",      Str' ":declaration" )
@@ -84,7 +84,7 @@ spec = parallel $ do
       (morlocScript "x = 5;")
 
   testRdfCode
-    "(1,\"foo\",1.1);"
+    "(1,\"foo\",1.1)"
     [ (1, ":isa",      Str' ":script"  )
     , (1, ":child",    Id'  2          )
     , (2, ":isa",      Str' ":tuple"   )
@@ -100,7 +100,7 @@ spec = parallel $ do
     ]
 
   testRdfCode
-    "foo :: i:Int -> Num where (i > 0);"
+    "foo :: i:Int -> Num where (i > 0)"
     [ (1, ":isa",        Str' ":script"          )
     , (1, ":child",      Id'  2                  )
     , (2, ":isa",        Str' ":typeDeclaration" )
@@ -128,7 +128,7 @@ spec = parallel $ do
     ]
 
   testRdfCode
-    "foo :: Int;"
+    "foo :: Int"
     [ (1, ":isa",        Str' ":script"          )
     , (1, ":child",      Id'  2                  )
     , (2, ":isa",        Str' ":typeDeclaration" )
@@ -142,7 +142,7 @@ spec = parallel $ do
 
   testRdfCodeWith
     (rmId [1..6])
-    "foo :: X -> Y where (1.1 + 1.2 > 2.0);"
+    "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
     [ (7,  ":isa",   Str' ":binop"  )
     , (7,  ":value", Str' "GT"      )
     , (7,  ":lhs",   Id'  9         )
@@ -160,7 +160,7 @@ spec = parallel $ do
     ]
 
   testRdfCode
-    "foo :: a, (b -> c) -> d;"
+    "foo :: a, (b -> c) -> d"
     [ (1, ":isa",    Str' ":script"          )
     , (1, ":child",  Id'  2                  )
     , (2, ":isa",    Str' ":typeDeclaration" )
@@ -187,7 +187,7 @@ spec = parallel $ do
 
   testRdfCodeWith
     (rmId [1..4])
-    "foo :: A where ((1 == 1) and (2 == 2));"
+    "foo :: A where ((1 == 1) and (2 == 2))"
     [ (5,  ":isa",   Str' ":binop"   )
     , (5,  ":value", Str' "and"      )
     , (5,  ":lhs",   Id'  6          )
@@ -210,13 +210,27 @@ spec = parallel $ do
     , (11, ":value", Int' 2          )
     ]
 
+  testRdfCode
+    "f . g"
+    [ (1, ":isa",   Str' ":script"      )
+    , (1, ":child", Id'  3              )
+    , (3, ":isa",   Str' ":composition" )
+    , (3, ":lhs",   Id'  2              )
+    , (3, ":rhs",   Id'  4              )
+    , (2, ":isa",   Str' ":name"        )
+    , (2, ":value", Str' "f"            )
+    , (4, ":isa",   Str' ":name"        )
+    , (4, ":value", Str' "g"            )
+    ]
+
+
 -- TODO: test the following
 -- [x] [x] arithmetic
 -- [x] [x] higher order functions
 -- [x] [x] boolean operators
 -- [ ] [ ] unary operators (+/-)
 -- [ ] [ ] functions in constraints
--- [ ] [ ] composition
+-- [x] [x] composition
 -- [ ] [ ] each explicit data type
 -- [ ] [x] source
 -- [ ] [ ] simple import
