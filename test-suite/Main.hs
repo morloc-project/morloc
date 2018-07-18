@@ -28,6 +28,76 @@ testRdfCode = testRdfCodeWith id
 spec :: Spec
 spec = parallel $ do
 
+  testRdfCodeWith
+    (rmId [1])
+    "42"
+    [ (2, ":isa",   Str' ":integer" )
+    , (2, ":value", Int' 42         )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "-42"
+    [ (2, ":isa",   Str' ":integer" )
+    , (2, ":value", Int' (-42)      )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "4.2"
+    [ (2, ":isa",   Str' ":number" )
+    , (2, ":value", Num' 4.2       )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "True"
+    [ (2, ":isa",   Str' ":boolean" )
+    , (2, ":value", Log' True       )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "[42,99]"
+    [ (2, ":isa",      Str' ":list"    )
+    , (2, ":contains", Id'  3          )
+    , (3, ":isa",      Str' ":integer" )
+    , (3, ":value",    Int' 42         )
+    , (2, ":contains", Id'  4          )
+    , (4, ":isa",      Str' ":integer" )
+    , (4, ":value",    Int' 99         )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "[42,\"foo\"]"
+    [ (2, ":isa",      Str' ":list"    )
+    , (2, ":contains", Id'  3          )
+    , (3, ":isa",      Str' ":integer" )
+    , (3, ":value",    Int' 42         )
+    , (2, ":contains", Id'  4          )
+    , (4, ":isa",      Str' ":string"  )
+    , (4, ":value",    Str' "foo"      )
+    ]
+
+  testRdfCodeWith
+    (rmId [1])
+    "{job = \"poopsmith\", age = 34}"
+    [ (2, ":isa",      Str' ":record"     )
+    , (2, ":contains", Id'  3             )
+    , (3, ":isa",      Str' "recordEntry" )
+    , (3, ":lhs",      Str' "job"         )
+    , (3, ":rhs",      Id'  4             )
+    , (4, ":isa",      Str' ":string"     )
+    , (4, ":value",    Str' "poopsmith"   )
+    , (2, ":contains", Id'  5             )
+    , (5, ":isa",      Str' "recordEntry" )
+    , (5, ":lhs",      Str' "age"         )
+    , (5, ":rhs",      Id'  6             )
+    , (6, ":isa",      Str' ":integer"    )
+    , (6, ":value",    Int' 34            )
+    ]
+
   testRdfCode
     "x = 1"
     [ (1, ":isa",   Str' ":script"      )
@@ -267,7 +337,6 @@ spec = parallel $ do
     , (8, ":value",    Str' "y"     )
     ]
 
-
 -- TODO: test the following
 -- [x] [x] arithmetic
 -- [x] [x] higher order functions
@@ -276,7 +345,7 @@ spec = parallel $ do
 -- [x] [x] functions in arithmetic constraints
 -- [x] [x] functions in boolean constraints
 -- [x] [x] composition
--- [ ] [ ] each explicit data type
+-- [x] [x] each explicit data type
 -- [ ] [x] source
 -- [ ] [ ] simple import
 -- [ ] [ ] restricted import
