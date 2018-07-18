@@ -471,12 +471,20 @@ arithmeticTerm = do
     call' = do
       i <- getId
       x <- Tok.name
-      xs <- many1 arithmeticTerm
+      xs <- many1 argument'
       return $ RDF i (
           [ (i, ":isa", Str' ":call")
           , (i, ":name", Str' x)
-          ] ++ adopt i xs
+          ] ++ adoptAs ":argument" i xs
         )
+
+    argument' :: Parser RDF
+    argument' =
+          Tok.parens arithmeticExpr
+      <|> try access'
+      <|> try mdata
+      <|> tripleName
+      <?> "a function argument"
 
     access' = do
       i <- getId
@@ -490,7 +498,10 @@ arithmeticTerm = do
 
 arithmeticTable
   = [
-      [ binary "^"  (binOp "Pow") TPE.AssocRight
+      [ prefix "-" (unaryOp "Neg")
+      , prefix "+" (unaryOp "Pos")
+      ]
+    , [ binary "^"  (binOp "Pow") TPE.AssocRight
       ]
     , [ binary "*"  (binOp "Mul") TPE.AssocLeft
       , binary "/"  (binOp "Div") TPE.AssocLeft
@@ -501,6 +512,13 @@ arithmeticTable
       , binary "-"  (binOp "Sub") TPE.AssocLeft
       ]
   ]
+
+unaryOp :: String -> Subject -> RDF -> RDF
+unaryOp s i (RDF j xs) = RDF i (
+     [ (i, ":isa", Str' s) 
+     , (i, ":contains", Id' j)
+     ] ++ xs
+  )
 
 binOp :: String -> Subject -> RDF -> RDF -> RDF
 binOp s i (RDF j xs) (RDF k ys) = RDF i (

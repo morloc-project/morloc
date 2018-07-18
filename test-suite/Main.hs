@@ -223,13 +223,37 @@ spec = parallel $ do
     , (4, ":value", Str' "g"            )
     ]
 
+  testRdfCodeWith
+    (rmId ([1..7] ++ [10]))
+    -- this will fail later, since x,k, and t are undefined.
+    "X :: Y where (x^(-k) == 1)"
+    [ (8, ":isa",      Str' "Neg"   )
+    , (8, ":contains", Id'  9       )
+    , (9, ":isa",      Str' ":name" )
+    , (9, ":value",    Str' "k"     )
+    ]
+
+  testRdfCodeWith
+    (rmId ([1..5] ++ [9]))
+    -- this will fail later, since x,k, and t are undefined.
+    "X :: Y where (f x y == 1)"
+    [ (6, ":isa",      Str' ":call" )
+    , (6, ":name",     Str' "f"     )
+    , (6, ":argument", Id'  7       )
+    , (7, ":isa",      Str' ":name" )
+    , (7, ":value",    Str' "x"     )
+    , (6, ":argument", Id'  8       )
+    , (8, ":isa",      Str' ":name" )
+    , (8, ":value",    Str' "y"     )
+    ]
+
 
 -- TODO: test the following
 -- [x] [x] arithmetic
 -- [x] [x] higher order functions
 -- [x] [x] boolean operators
--- [ ] [ ] unary operators (+/-)
--- [ ] [ ] functions in constraints
+-- [x] [x] unary operators (+/-)
+-- [ ] [ ] arithmetic functions in constraints
 -- [x] [x] composition
 -- [ ] [ ] each explicit data type
 -- [ ] [x] source
