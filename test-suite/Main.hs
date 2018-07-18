@@ -85,18 +85,18 @@ spec = parallel $ do
 
   testRdfCode
     "(1,\"foo\",1.1);"
-    [ (1, ":isa",   Str' ":script"  )
-    , (1, ":child", Id'  2          )
-    , (2, ":isa",   Str' ":tuple"   )
-    , (2, ":child", Id'  3          )
-    , (3, ":isa",   Str' ":integer" )
-    , (3, ":value", Int' 1          )
-    , (2, ":child", Id'  4          )
-    , (4, ":isa",   Str' ":string"  )
-    , (4, ":value", Str' "foo"      )
-    , (2, ":child", Id'  5          )
-    , (5, ":isa",   Str' ":number"  )
-    , (5, ":value", Num' 1.1        )
+    [ (1, ":isa",      Str' ":script"  )
+    , (1, ":child",    Id'  2          )
+    , (2, ":isa",      Str' ":tuple"   )
+    , (2, ":contains", Id'  3          )
+    , (3, ":isa",      Str' ":integer" )
+    , (3, ":value",    Int' 1          )
+    , (2, ":contains", Id'  4          )
+    , (4, ":isa",      Str' ":string"  )
+    , (4, ":value",    Str' "foo"      )
+    , (2, ":contains", Id'  5          )
+    , (5, ":isa",      Str' ":number"  )
+    , (5, ":value",    Num' 1.1        )
     ]
 
   testRdfCode
@@ -208,7 +208,6 @@ spec = parallel $ do
     , (10, ":value", Int' 2          )
     , (11, ":isa",   Str' ":integer" )
     , (11, ":value", Int' 2          )
-
     ]
 
 -- TODO: test the following

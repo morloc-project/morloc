@@ -247,7 +247,7 @@ mtype =
       return $ RDF i (
              [(i, ":isa", Str' ":tuple")]
           ++ listTag i l
-          ++ adopt i (x:xs)
+          ++ adoptAs ":contains" i (x:xs)
         )
 
     -- [ <type> ]
@@ -256,7 +256,11 @@ mtype =
       i <- getId
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
-      return $ RDF i ([(i, ":isa", Str' ":list")] ++ listTag i l ++ adopt i [s])
+      return $ RDF i (
+             [(i, ":isa", Str' ":list")]
+          ++ listTag i l
+          ++ adoptAs ":contains" i [s]
+        )
 
     -- <name> { <name> :: <type>, <name> :: <type>, ... }
     record' :: Parser RDF
@@ -268,7 +272,7 @@ mtype =
       return $ RDF i (
              [ (i, ":isa", Str' ":record"), (i, ":name", Str' n)]
           ++ listTag i l
-          ++ adopt i ns
+          ++ adoptAs ":contains" i ns
         )
 
     -- (<name> = <type>)
@@ -277,9 +281,11 @@ mtype =
       i <- getId
       n <- Tok.name
       Tok.op "::"
-      ts <- mtype
+      t <- mtype
       return $ RDF i (
-          [(i, ":isa", Str' ":tag"), (i, ":value", Str' n)] ++ adopt i [ts]
+          [ (i, ":isa", Str' ":recordEntry")
+          , (i, ":lhs", Str' n)
+          ] ++ adoptAs ":rhs" i [t]
         )
 
     function' :: Parser RDF
@@ -311,17 +317,26 @@ mdata =  do
       list' = do
         i <- getId
         xs <- Tok.brackets (sepBy mdata Tok.comma)
-        return $ RDF i ([(i, ":isa", Str' ":list")] ++ adopt i xs)
+        return $ RDF i (
+               [(i, ":isa", Str' ":list")]
+            ++ adoptAs ":contains" i xs
+          )
 
       tuple' = do
         i <- getId
         xs <- Tok.parens tuple''
-        return $ RDF i ([(i, ":isa", Str' ":tuple")] ++ adopt i xs)
+        return $ RDF i (
+               [(i, ":isa", Str' ":tuple")]
+            ++ adoptAs ":contains" i xs
+          )
 
       record' = do
         i <- getId
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
-        return $ RDF i ([(i, ":isa", Str' ":record")] ++ adopt i xs)
+        return $ RDF i (
+               [(i, ":isa", Str' ":record")]
+            ++ adoptAs ":contains" i xs
+          )
 
       -- must have at least two elements
       tuple'' = do
@@ -338,8 +353,8 @@ mdata =  do
         t <- mdata
         return $ RDF i (
             [ (i, ":isa", Str' "recordEntry") 
-            , (i, ":name", Str' n)
-            ] ++ adopt i [t]
+            , (i, ":lhs", Str' n)
+            ] ++ adoptAs ":rhs" i [t]
           )
 
 expression :: Parser RDF
@@ -493,7 +508,7 @@ arithmeticTable
 unaryOp :: String -> Subject -> RDF -> RDF
 unaryOp s i (RDF j xs) = RDF i (
      [ (i, ":isa", Str' s) 
-     , (i, ":child", Id' j)
+     , (i, ":contains", Id' j)
      ] ++ xs
   )
 
