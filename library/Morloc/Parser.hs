@@ -490,10 +490,7 @@ arithmeticTerm = do
 
 arithmeticTable
   = [
-      [ prefix "-" (unaryOp "Neg")
-      , prefix "+" (unaryOp "Pos")
-      ]
-    , [ binary "^"  (binOp "Pow") TPE.AssocRight
+      [ binary "^"  (binOp "Pow") TPE.AssocRight
       ]
     , [ binary "*"  (binOp "Mul") TPE.AssocLeft
       , binary "/"  (binOp "Div") TPE.AssocLeft
@@ -504,13 +501,6 @@ arithmeticTable
       , binary "-"  (binOp "Sub") TPE.AssocLeft
       ]
   ]
-
-unaryOp :: String -> Subject -> RDF -> RDF
-unaryOp s i (RDF j xs) = RDF i (
-     [ (i, ":isa", Str' s) 
-     , (i, ":contains", Id' j)
-     ] ++ xs
-  )
 
 binOp :: String -> Subject -> RDF -> RDF -> RDF
 binOp s i (RDF j xs) (RDF k ys) = RDF i (
