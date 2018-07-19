@@ -22,11 +22,11 @@ morlocScript s =
 -- (<*) :: f a -> (a -> f b) -> f a
 contents :: Parser RDF
 contents = do
-  i <- getId
+  let i = 0
   xs <- Tok.whiteSpace >> many top <* eof
-  return $ RDF i (
-         [(i, ":isa", Str' ":script")]
-      ++ adoptAs ":child" i xs
+  return $ RDF 0 (
+         [(0, ":isa", Str' ":script")]
+      ++ adoptAs ":child" 0 xs
     )
 
 top :: Parser RDF 
