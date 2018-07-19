@@ -12,9 +12,6 @@ import Morloc.State
 import Morloc.Triple
 import qualified Morloc.Lexer as Tok
 
-adopt :: Subject -> [RDF] -> [Triple]
-adopt = adoptAs ":child"
-
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 morlocScript :: String -> ThrowsError RDF
 morlocScript s =
@@ -30,7 +27,7 @@ contents = do
   xs <- Tok.whiteSpace >> many top <* eof
   return $ RDF i (
          [(i, ":isa", Str' ":script")]
-      ++ adopt i xs
+      ++ adoptAs ":child" i xs
     )
 
 top :: Parser RDF 
@@ -60,7 +57,7 @@ source' = do
           (i, ":isa",  Str' ":source")
         , (i, ":lang", Str' lang)
       ] ++
-        adopt i fs ++
+        adoptAs ":import" i fs ++
         maybe [] (\p -> [(i, ":path", Str' p)]) path
     )
 
@@ -114,7 +111,7 @@ restrictedImport = do
       [
         (i, ":isa", Str' ":restricted_import")
       , (i, ":name", Str' (intercalate "." path))
-      ] ++ adopt i functions
+      ] ++ adoptAs ":import" i functions
     )
 
 declaration :: Parser RDF
@@ -181,7 +178,7 @@ mtype =
       return $ RDF i (
              [(i, ":isa", Str' ":type"), (i, ":value", Str' n)]
           ++ listTag i l
-          ++ adopt i ns
+          ++ adoptAs ":child" i ns
         )
 
     -- Does parameterized generic even make sense?  Yes, say `f Int` where `f`
@@ -200,7 +197,7 @@ mtype =
       return $ RDF i (
              [(i, ":isa", Str' ":generic"), (i, ":value", Str' n)]
           ++ (listTag i l)
-          ++ (adopt i ns)
+          ++ (adoptAs ":child" i ns)
         )
 
     -- <name> <type> <type> ...
@@ -499,7 +496,7 @@ arithmeticTerm = do
       return $ RDF i (
           [ (i, ":isa", Str' ":access")
           , (i, ":name", Str' x)
-          ] ++ adopt i ids
+          ] ++ adoptAs ":child" i ids
         )
 
 arithmeticTable

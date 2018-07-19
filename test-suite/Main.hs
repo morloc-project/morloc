@@ -28,6 +28,40 @@ testRdfCode = testRdfCodeWith id
 spec :: Spec
 spec = parallel $ do
 
+  testRdfCode
+    "source \"R\" (\"fo.o\" as foo)"
+    [ (1, ":isa",     Str' ":script" )
+    , (1, ":child",  Id'  2         )
+    , (2, ":isa",    Str' ":source" )
+    , (2, ":lang",   Str' "R"       )
+    , (2, ":import", Id'  3         )
+    , (3, ":name",   Str' "fo.o"    )
+    , (3, ":alias",  Str' "foo"     )
+    ]
+
+  testRdfCode
+    "from bob/foo import (bar, baz)"
+    [ (1, ":isa",    Str' ":script"            )
+    , (1, ":child",  Id'  2                    )
+    , (2, ":isa",    Str' ":restricted_import" )
+    , (2, ":name",   Str' "bob.foo"            )
+    , (2, ":import", Id'  3                    )
+    , (3, ":isa",    Str' ":name"              )
+    , (3, ":value",  Str' "bar"                )
+    , (2, ":import", Id'  4                    )
+    , (4, ":isa",    Str' ":name"              )
+    , (4, ":value",  Str' "baz"                )
+    ]
+
+  testRdfCode
+    "import bob/foo as foo"
+    [ (1, ":isa",       Str' ":script" )
+    , (1, ":child",     Id'  2         )
+    , (2, ":isa",       Str' ":import" )
+    , (2, ":name",      Str' "bob.foo" )
+    , (2, ":namespace", Str' "foo"     )
+    ]
+
   testRdfCodeWith
     (rmId [1])
     "42"
@@ -336,17 +370,3 @@ spec = parallel $ do
     , (8, ":isa",      Str' ":name" )
     , (8, ":value",    Str' "y"     )
     ]
-
--- TODO: test the following
--- [x] [x] arithmetic
--- [x] [x] higher order functions
--- [x] [x] boolean operators
--- [x] [x] unary operators (+/-)
--- [x] [x] functions in arithmetic constraints
--- [x] [x] functions in boolean constraints
--- [x] [x] composition
--- [x] [x] each explicit data type
--- [ ] [x] source
--- [ ] [ ] simple import
--- [ ] [ ] restricted import
--- [ ] [ ] error throwing?
