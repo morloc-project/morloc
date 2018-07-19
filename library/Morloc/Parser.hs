@@ -7,7 +7,6 @@ import Control.Monad.Except (throwError)
 import Data.List (intercalate)
 
 import Morloc.Error
-import Morloc.Syntax
 import Morloc.State
 import Morloc.Triple
 import qualified Morloc.Lexer as Tok

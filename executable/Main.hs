@@ -2,7 +2,6 @@ module Main (main) where
 
 import Morloc 
 import Morloc.Error
-import Morloc.Data
 import System.Environment (getArgs)
 
 -- writeProgram :: ThrowsError (Script, [Script]) -> IO ()
@@ -22,11 +21,6 @@ main = do
     -- no input
     []  -> putStrLn "You must provide at least one argument"
 
-    -- -- default if given one file
-    -- [x] -> do
-    --   input <- readFile x
-    --   (writeProgram . build) input
-
     -- TODO: also NOT the right default
     ["-e", text] -> putStr (rdf text)
 
@@ -34,10 +28,6 @@ main = do
     [x] -> do
       input <- readFile x
       putStr (rdf input)
-
-    -- ["writeRDF", x] -> do
-    --   input <- readFile x
-    --   print (rdf input)
 
     -- wrong input
     _   -> putStrLn "Please provide a single filename"

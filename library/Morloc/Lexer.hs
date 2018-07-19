@@ -30,7 +30,6 @@ import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
-import qualified Morloc.Syntax as MS
 import qualified Morloc.Triple as Triple
 import Morloc.State
 

@@ -34,20 +34,10 @@ library
     hs-source-dirs: library
     exposed-modules:  Morloc
                       Morloc.Error
-                      Morloc.Generator
-                      Morloc.Nexus
-                      Morloc.Language
-                      Morloc.Tree
-                      Morloc.Data
-                      Morloc.Evaluator
-                      Morloc.Check
                       Morloc.State
                       Morloc.Lexer
                       Morloc.Parser
-                      Morloc.Syntax
-                      Morloc.Util
                       Morloc.Triple
-                      -- Morloc.Core
 
     build-depends: base,
                    safe,
