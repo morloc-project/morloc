@@ -132,6 +132,18 @@ spec = parallel $ do
     , (5, ":value",    Int' 34            )
     ]
 
+  testRdfCodeWith
+    (rmId [0])
+    "A :: Bool"
+    [ (1, ":isa", Str' ":typeDeclaration" )
+    , (1, ":lhs", Id' 2 )
+    , (2, ":isa", Str' ":name" )
+    , (2, ":value", Str' "A" )
+    , (1, ":rhs", Id' 3 )
+    , (3, ":isa", Str' ":atomicType" )
+    , (3, ":value", Str' "Bool" )
+    ]
+
   testRdfCode
     "x = 1"
     [ (0, ":isa",   Str' ":script"      )
@@ -212,13 +224,13 @@ spec = parallel $ do
     , (2, ":isa",        Str' ":name"            )
     , (2, ":value",      Str' "foo"              )
     , (1, ":rhs",        Id'  3                  )
-    , (3, ":isa",        Str' ":function"        ) -- i:Int -> Num where (i > 0)
+    , (3, ":isa",        Str' ":functionType"    ) -- i:Int -> Num where (i > 0)
     , (3, ":input",      Id'  4                  )
-    , (4, ":isa",        Str' ":type"            ) -- i:Int
+    , (4, ":isa",        Str' ":atomicType"      ) -- i:Int
     , (4, ":value",      Str' "Int"              )
     , (4, ":label",      Str' "i"                )
     , (3, ":output",     Id'  5                  ) -- Num
-    , (5, ":isa",        Str' ":type"            )
+    , (5, ":isa",        Str' ":atomicType"      )
     , (5, ":value",      Str' "Num"              )
     , (3, ":constraint", Id'  6                  )
     , (6, ":isa",        Str' ":binop"           ) -- "i > 0"
@@ -240,7 +252,7 @@ spec = parallel $ do
     , (2, ":isa",        Str' ":name"            )
     , (2, ":value",      Str' "foo"              )
     , (1, ":rhs",        Id'  3                  )
-    , (3, ":isa",        Str' ":type"            )
+    , (3, ":isa",        Str' ":atomicType"      )
     , (3, ":value",      Str' "Int"              )
     ]
 
@@ -272,20 +284,20 @@ spec = parallel $ do
     , (2, ":isa",    Str' ":name"            )
     , (2, ":value",  Str' "foo"              )
     , (1, ":rhs",    Id'  3                  )
-    , (3, ":isa",    Str' ":function"        )
+    , (3, ":isa",    Str' ":functionType"    )
     , (3, ":input",  Id'  4                  )
-    , (4, ":isa",    Str' ":generic"         )
+    , (4, ":isa",    Str' ":atomicGeneric"   )
     , (4, ":value",  Str' "a"                )
     , (3, ":input",  Id'  5                  )
-    , (5, ":isa",    Str' ":function"        )
+    , (5, ":isa",    Str' ":functionType"    )
     , (5, ":input",  Id'  6                  )
-    , (6, ":isa",    Str' ":generic"         )
+    , (6, ":isa",    Str' ":atomicGeneric"   )
     , (6, ":value",  Str' "b"                )
     , (5, ":output", Id'  7                  )
-    , (7, ":isa",    Str' ":generic"         )
+    , (7, ":isa",    Str' ":atomicGeneric"   )
     , (7, ":value",  Str' "c"                )
     , (3, ":output", Id'  8                  )
-    , (8, ":isa",    Str' ":generic"         )
+    , (8, ":isa",    Str' ":atomicGeneric"   )
     , (8, ":value",  Str' "d"                )
     ]
 

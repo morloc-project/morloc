@@ -175,9 +175,9 @@ mtype =
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
-             [(i, ":isa", Str' ":type"), (i, ":value", Str' n)]
+             [(i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' n)]
           ++ listTag i l
-          ++ adoptAs ":child" i ns
+          ++ adoptAs ":parameter" i ns
         )
 
     -- Does parameterized generic even make sense?  Yes, say `f Int` where `f`
@@ -194,9 +194,9 @@ mtype =
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
-             [(i, ":isa", Str' ":generic"), (i, ":value", Str' n)]
+             [(i, ":isa", Str' ":parameterizedGeneric"), (i, ":value", Str' n)]
           ++ (listTag i l)
-          ++ (adoptAs ":child" i ns)
+          ++ (adoptAs ":parameter" i ns)
         )
 
     -- <name> <type> <type> ...
@@ -206,7 +206,7 @@ mtype =
       n <- Tok.specificType
       i <- getId
       return $ RDF i (
-             [(i, ":isa", Str' ":type"), (i, ":value", Str' n)]
+             [(i, ":isa", Str' ":atomicType"), (i, ":value", Str' n)]
           ++ listTag i l
         )
 
@@ -219,7 +219,7 @@ mtype =
       n <- Tok.genericType
       i <- getId
       return $ RDF i (
-             [(i, ":isa", Str' ":generic"), (i, ":value", Str' n)]
+             [(i, ":isa", Str' ":atomicGeneric"), (i, ":value", Str' n)]
           ++ (listTag i l)
         )
 
@@ -241,9 +241,9 @@ mtype =
       Tok.op ","
       xs <- sepBy1 mtype Tok.comma
       return $ RDF i (
-             [(i, ":isa", Str' ":tuple")]
+             [(i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' "Tuple")]
           ++ listTag i l
-          ++ adoptAs ":contains" i (x:xs)
+          ++ adoptAs ":parameter" i (x:xs)
         )
 
     -- [ <type> ]
@@ -253,22 +253,21 @@ mtype =
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
       return $ RDF i (
-             [(i, ":isa", Str' ":list")]
+             [(i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' "List")]
           ++ listTag i l
-          ++ adoptAs ":contains" i [s]
+          ++ adoptAs ":parameter" i [s]
         )
 
-    -- <name> { <name> :: <type>, <name> :: <type>, ... }
+    -- { <name> :: <type>, <name> :: <type>, ... }
     record' :: Parser RDF
     record' = do
-      l <- Tok.tag Tok.specificType
-      n <- Tok.specificType
       i <- getId
+      l <- Tok.tag (char '{')
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
       return $ RDF i (
-             [ (i, ":isa", Str' ":record"), (i, ":name", Str' n)]
+             [ (i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' "Record")]
           ++ listTag i l
-          ++ adoptAs ":contains" i ns
+          ++ adoptAs ":parameter" i ns
         )
 
     -- (<name> = <type>)
@@ -279,9 +278,9 @@ mtype =
       Tok.op "::"
       t <- mtype
       return $ RDF i (
-          [ (i, ":isa", Str' ":recordEntry")
-          , (i, ":lhs", Str' n)
-          ] ++ adoptAs ":rhs" i [t]
+          [ (i, ":isa", Str' ":namedType")
+          , (i, ":name", Str' n)
+          ] ++ adoptAs ":value" i [t]
         )
 
     function' :: Parser RDF
@@ -291,7 +290,7 @@ mtype =
       Tok.op "->"
       output <- unambiguous'
       return $ RDF i (
-             [(i, ":isa", Str' ":function")]
+             [(i, ":isa", Str' ":functionType")]
           ++ adoptAs ":input" i inputs
           ++ adoptAs ":output" i [output]
         )
