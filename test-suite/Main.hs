@@ -144,6 +144,63 @@ spec = parallel $ do
     , (3, ":value", Str' "Bool" )
     ]
 
+  testRdfCodeWith
+    (rmId [0])
+    "A :: [Bool]"
+    [ (1, ":isa", Str' ":typeDeclaration" )
+    , (1, ":lhs", Id' 2 )
+    , (2, ":isa", Str' ":name" )
+    , (2, ":value", Str' "A" )
+    , (1, ":rhs", Id' 3 )
+    , (3, ":isa", Str' ":parameterizedType" )
+    , (3, ":value", Str' "List" )
+    , (3, ":parameter", Id' 4 )
+    , (4, ":isa", Str' ":atomicType" )
+    , (4, ":value", Str' "Bool" )
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: (Bool, Fool)"
+    [ (1, ":isa", Str' ":typeDeclaration" )
+    , (1, ":lhs", Id' 2 )
+    , (2, ":isa", Str' ":name" )
+    , (2, ":value", Str' "A" )
+    , (1, ":rhs", Id' 3 )
+    , (3, ":isa", Str' ":parameterizedType" )
+    , (3, ":value", Str' "Tuple" )
+    , (3, ":parameter", Id' 4 )
+    , (4, ":isa", Str' ":atomicType" )
+    , (4, ":value", Str' "Bool" )
+    , (3, ":parameter", Id' 5 )
+    , (5, ":isa", Str' ":atomicType" )
+    , (5, ":value", Str' "Fool" )
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: {B :: Bool, C :: Fool}"
+    [ (1, ":isa", Str' ":typeDeclaration" )
+    , (1, ":lhs", Id' 2 )
+    , (2, ":isa", Str' ":name" )
+    , (2, ":value", Str' "A" )
+    , (1, ":rhs", Id' 3 )
+    , (3, ":isa", Str' ":parameterizedType" )
+    , (3, ":value", Str' "Record" )
+    , (3, ":parameter", Id' 4 )
+    , (4, ":isa", Str' ":namedType" )
+    , (4, ":name", Str' "B" )
+    , (4, ":value", Id' 5 )
+    , (5, ":isa", Str' ":atomicType" )
+    , (5, ":value", Str' "Bool" )
+    , (3, ":parameter", Id' 6 )
+    , (6, ":isa", Str' ":namedType" )
+    , (6, ":name", Str' "C" )
+    , (6, ":value", Id' 7 )
+    , (7, ":isa", Str' ":atomicType" )
+    , (7, ":value", Str' "Fool" )
+    ]
+
   testRdfCode
     "x = 1"
     [ (0, ":isa",   Str' ":script"      )
