@@ -38,6 +38,7 @@ library
                       Morloc.Lexer
                       Morloc.Parser
                       Morloc.Triple
+                      Morloc.Tree
 
     build-depends: base,
                    safe,

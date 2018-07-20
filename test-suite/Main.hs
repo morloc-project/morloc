@@ -30,7 +30,7 @@ spec = parallel $ do
 
   testRdfCode
     "source \"R\" (\"fo.o\" as foo)"
-    [ (0, ":isa",     Str' ":script" )
+    [ (0, ":isa",    Str' ":script" )
     , (0, ":child",  Id'  1         )
     , (1, ":isa",    Str' ":source" )
     , (1, ":lang",   Str' "R"       )

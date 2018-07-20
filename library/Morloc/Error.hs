@@ -20,6 +20,7 @@ data MorlocError
   | TypeError        String
   | TypeMismatch     String String String -- name, obs type, exp type
   | VeryBadBug       String
+  | InvalidRDF       String
   | UnknownError
   deriving(Eq)
 
@@ -42,6 +43,7 @@ morlocShow (TypeMismatch n o e)  = "Type mismatch in '" ++ n ++ "':\n"
                                    ++ "  Expected type: '" ++ e ++ "'\n"
                                    ++ "  Observed type: '" ++ o ++ "'"
 morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
+morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow  UnknownError         = "Damn, you broke it good"
 
 -- show a list as: [<item>, <item>, ...]
