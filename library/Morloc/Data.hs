@@ -1,16 +1,31 @@
 module Morloc.Data
 (
-    MType(..)
+    Program(..)
+  , MType(..)
   , MData(..)
   , TypeDecl(..)
   , Constraint(..)
   , DataDecl(..)
+  , Source(..)
   , Tag
   , Name
+  , Alias
+  , Language
+  , Path
 ) where
 
-type Tag = Maybe String
-type Name = String
+type Tag      = Maybe String
+type Name     = String
+type Alias    = String
+type Language = String
+type Path     = String
+
+data Program = Program {
+      programTypes   :: [TypeDecl]
+    , programData    :: [DataDecl]
+    , programSources :: [Source]
+  }
+  deriving(Show, Ord, Eq)
 
 data MType
   = TypeSpc Tag Name [MType]
@@ -33,9 +48,28 @@ data MData
   | DataVar Name
   deriving(Show, Ord, Eq)
 
+data Source
+  = Source
+    Language
+    (Maybe Path)
+    [(Name, Maybe Alias)]
+    deriving(Show, Ord, Eq)
+
+data TypeDecl
+  = TypeDecl
+    Name
+    MType
+    [Constraint]
+    deriving(Show, Ord, Eq)
+
 data Constraint
-  = Constraint String
+  = Constraint
+    String
   deriving(Show, Ord, Eq)
 
-data TypeDecl = TypeDecl Name MType deriving(Show, Ord, Eq)
-data DataDecl = DataDecl Name [String] MData deriving(Show, Ord, Eq)
+data DataDecl
+  = DataDecl
+    Name
+    [String]
+    MData
+    deriving(Show, Ord, Eq)

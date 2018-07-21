@@ -3,6 +3,10 @@ import Test.Tasty.Hspec
 
 import Morloc.Parser (morlocScript)
 import Morloc.Triple
+import Morloc.Data
+import Morloc.Eval (buildProgram)
+import Morloc.Tree (rdf2tree)
+import Morloc.Error
 
 main :: IO ()
 main = do
@@ -10,9 +14,10 @@ main = do
   Test.Tasty.defaultMain test
 
 rmId :: [Int] -> [Triple] -> [Triple]
-rmId is ts = filter (rmId' is) ts where
-  rmId' :: [Int] -> Triple -> Bool 
-  rmId' is' (i, _, _) = all (\x -> x /= i) is'
+rmId is ts = filter (rmId' is) ts
+  where
+    rmId' :: [Int] -> Triple -> Bool 
+    rmId' is' (i, _, _) = all (\x -> x /= i) is'
 
 testRdfCodeWith :: ([Triple] -> [Triple]) -> String -> [Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
@@ -24,9 +29,43 @@ testRdfCodeWith f s ts = case (run' f s) of
 testRdfCode :: String -> [Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
+testProgram :: String -> String -> ThrowsError Program -> Spec
+testProgram s code expected = it s $ do
+  shouldBe
+    (fmap rdf2tree (morlocScript code) >>= buildProgram)
+    expected
 
 spec :: Spec
 spec = parallel $ do
+
+  testProgram
+    "Test RDF to Program conversion"
+    "source \"R\" from \"bob/stuff\" (\"fOO\" as foo); foo :: [Int] -> (X,Y); bar xs = foo xs;" 
+    (Right ( 
+      Program {
+        programTypes = [
+            (TypeDecl
+              "foo"
+              (TypeFun
+                  Nothing
+                  [TypeSpc Nothing "List" [TypeSpc Nothing "Int" []]]
+                  (TypeSpc Nothing "Tuple" [
+                        (TypeSpc Nothing "X" [])
+                      , (TypeSpc Nothing "Y" [])
+                    ])
+                )
+              []
+            )
+          ]
+      , programData = [
+            DataDecl
+              "bar"
+              ["xs"]
+              (DataFun "foo" [DataStr "xs"])
+          ]
+      , programSources = [Source "R" (Just "bob/stuff") [("fOO", Just "foo")]]
+      }
+    ))
 
   testRdfCode
     "source \"R\" (\"fo.o\" as foo)"

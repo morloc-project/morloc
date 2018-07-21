@@ -1,21 +1,32 @@
-module Morloc.Eval
-(
-    getTypeDeclarations  
-  , getDataDeclarations
-) where
+module Morloc.Eval (buildProgram) where
 
 import Morloc.Data
 import Morloc.Tree
 import Morloc.Error
 import Morloc.Triple
 
+buildProgram :: Tree -> ThrowsError Program
+buildProgram t
+  =   Program 
+  <$> getTypeDeclarations t
+  <*> getDataDeclarations t
+  <*> getSources t
+
 toOne :: [a] -> ThrowsError a
 toOne [x] = Right x 
-toOne [] = Left (InvalidRDF "Expected one object, found none")
-toOne _ = Left (InvalidRDF "Expected one object for this relation, found many")
+toOne [] = Left (InvalidRDF "Expected 1 object, found 0")
+toOne _ = Left (InvalidRDF "Expected 1 object for this relation, found many")
+
+toMaybe :: [a] -> ThrowsError (Maybe a)
+toMaybe [ ] = Right Nothing
+toMaybe [x] = Right (Just x)
+toMaybe  _  = Left (InvalidRDF "Expected 0 or 1 elements")
 
 getString :: Relation -> Tree -> ThrowsError String
 getString r t = getStrings r t >>= toOne
+
+getStringMaybe :: Relation -> Tree -> ThrowsError (Maybe String)
+getStringMaybe r t = getStrings r t >>= toMaybe
 
 getKid :: Relation -> Tree -> ThrowsError Tree
 getKid r t = toOne $ getKids r t
@@ -28,6 +39,7 @@ getTypeDeclarations = sequence . recursiveApply cond' fun'
       =   TypeDecl
       <$> (getKid ":lhs" t >>= getString ":value") 
       <*> (getKid ":rhs" t >>= tree2mtype)
+      <*> pure []
 
 getDataDeclarations :: Tree -> ThrowsError [DataDecl]
 getDataDeclarations = sequence . recursiveApply cond' fun'
@@ -38,6 +50,24 @@ getDataDeclarations = sequence . recursiveApply cond' fun'
       <$> (getKid ":lhs" t >>= getString ":value") 
       <*> (sequence . map (getString ":value") $ getKids ":parameter" t)
       <*> (getKid ":rhs" t >>= tree2mdata)
+
+getSources :: Tree -> ThrowsError [Source]
+getSources = sequence . recursiveApply cond' fun'
+  where
+    cond' = hasRelation ":isa" (Leaf $ Str' ":source")
+    fun' t = Source <$> language' t <*> path' t <*> imports' t
+
+    language' :: Tree -> ThrowsError Language
+    language' = getString ":lang"
+
+    path' :: Tree -> ThrowsError (Maybe Path)
+    path' = getStringMaybe ":path"
+
+    imports' :: Tree -> ThrowsError [(Name, Maybe Alias)]
+    imports' t = sequence $ map getImport' (getKids ":import" t)
+
+    getImport' :: Tree -> ThrowsError (Name, Maybe Alias)
+    getImport' t = (,) <$> getString ":name" t <*> getStringMaybe ":alias" t
 
 tree2mtype :: Tree -> ThrowsError MType
 tree2mtype t = case getString ":isa" t of
@@ -101,12 +131,13 @@ tree2mdata t = case (getString ":isa" t) of
 
     asMData :: Tree -> ThrowsError MData
     asMData (Leaf o) = case o of
-      (Int' x) -> Right (DataInt x)
-      (Num' x) -> Right (DataNum x)
-      (Log' x) -> Right (DataLog x)
-      (Str' x) -> Right (DataStr x)
-      (Str' x) -> Right (DataVar x)
+      (Int' x)   -> Right (DataInt x)
+      (Num' x)   -> Right (DataNum x)
+      (Log' x)   -> Right (DataLog x)
+      (Str' x)   -> Right (DataStr x)
+      -- (Str' x)   -> Right (DataVar x) -- FIXME: distinguish between Str and Var
       _ -> Left (InvalidRDF "Oh no Mr. Wizard!")
+    asMData node = tree2mdata node
 
     list' :: Tree -> ThrowsError [MData]
     list' = sequence . map asMData . getKids ":contains"
