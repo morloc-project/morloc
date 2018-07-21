@@ -121,7 +121,7 @@ declaration = do
   Tok.op "="
   rhs <- expression
   return $ RDF i (
-         [(i, ":isa", Str' ":declaration")]
+         [(i, ":isa", Str' ":dataDeclaration")]
       ++ adoptAs ":lhs"       i [lhs]
       ++ adoptAs ":parameter" i bndvars
       ++ adoptAs ":rhs"       i [rhs]

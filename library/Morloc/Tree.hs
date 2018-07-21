@@ -1,52 +1,18 @@
-module Morloc.Tree 
+module Morloc.Tree
 (
     Tree(..)
   , rdf2tree
-  , getTypes
+  , getTypeDeclarations
 ) where
 
 import Morloc.Triple
 import Morloc.Error
+import Morloc.Data
 
 data Tree
   = Node Subject [(Relation, Tree)]
   | Leaf Object
   deriving(Ord, Eq, Show)
-
-type Tag = Maybe String
-type Name = String
-
-data MType
-  = TypeSpc Tag Name [MType]
-  | TypeGen Tag Name [MType]
-  | TypeFun Tag [MType] MType
-  | TypeKwd Name MType
-  | TypeEmp Tag
-  deriving(Show, Ord, Eq)
-
-data Constraint
-  = Constraint String
-  deriving(Show, Ord, Eq)
-
-data MData
-  = DataInt Integer
-  | DataNum Double
-  | DataLog Bool
-  | DataLst [MData]
-  | DataTup [MData]
-  | DataRec [(Name, MData)]
-  | DataStr String
-  | DataFun Name [MData]
-  | DataVar Name
-  deriving(Show, Ord, Eq)
-
-data MDecl
-  = MDecl Name [String] MData 
-  deriving(Show, Ord, Eq)
-
-ifelse :: Bool -> a -> a -> a
-ifelse True  x _ = x
-ifelse False _ y = y
 
 rdf2tree :: RDF -> Tree
 rdf2tree (RDF i ts) = Node i [(r, f ts o) | (j,r,o) <- ts, j == i]
@@ -55,9 +21,24 @@ rdf2tree (RDF i ts) = Node i [(r, f ts o) | (j,r,o) <- ts, j == i]
     f ts' (Id' j) = rdf2tree (RDF j ts')
     f _    o'     = Leaf o'
 
+ifelse :: Bool -> a -> a -> a
+ifelse True  x _ = x
+ifelse False _ y = y
+
+getChild :: Relation -> Tree -> [Tree]
+getChild r (Node _ xs) = [t | (r', t) <- xs, r == r']
+getChild _ _ = []
+
+getStr :: String -> Tree -> ThrowsError [String]
+getStr s' t' = sequence . map getStr' $ getChild s' t' where
+  getStr' :: Tree -> ThrowsError String
+  getStr' (Leaf (Str' s)) = Right s
+  getStr' _ = Left (InvalidRDF ("Expected a string"))
+    
 toOne :: [a] -> ThrowsError a
-toOne [a] = Right a 
-toOne _ = Left (InvalidRDF "Expected only one object for this relation")
+toOne [x] = Right x 
+toOne [] = Left (InvalidRDF "Expected one object, found none")
+toOne _ = Left (InvalidRDF "Expected one object for this relation, found many")
 
 recursiveApply
   :: (Tree -> Bool) -- Is this the subtree we are looking for?
@@ -71,27 +52,24 @@ recursiveApply cond f (Node i xs)
       [f (Node i xs)]
       (concat . map (recursiveApply cond f . snd) $ xs)
 
-getTypes :: Tree -> ThrowsError [MType]
-getTypes = sequence . recursiveApply cond' f
+hasRelation :: Relation -> Tree -> Tree -> Bool
+hasRelation r o (Node _ xs) = any (\(r', o') -> r' == r && o' == o) xs
+hasRelation _ _ _ = False
+
+getTypeDeclarations :: Tree -> ThrowsError [TypeDecl]
+getTypeDeclarations = sequence . recursiveApply cond' fun'
   where
-    f :: Tree -> ThrowsError MType
-    f t = getRhs t >>= tree2mtype
-    
-    cond' :: Tree -> Bool
-    cond' (Leaf _) = False
-    cond' (Node _ xs) = any cond'' xs
+    cond' = hasRelation ":isa" (Leaf $ Str' ":typeDeclaration")
+    fun' t = TypeDecl <$> (toOne (getChild ":lhs" t) >>= getStr ":value" >>= toOne) 
+                      <*> (toOne (getChild ":rhs" t) >>= tree2mtype)
 
-    cond'' :: (Relation, Tree) -> Bool
-    cond'' (":isa", Leaf (Str' ":typeDeclaration")) = True 
-    cond'' _ = False
-
-    getRhs :: Tree -> ThrowsError Tree
-    getRhs (Node _ xs) = toOne [o | (r,o) <- xs, r == ":rhs"]
-    getRhs _ = Left (InvalidRDF "Expected a node")
-
-getChild :: Relation -> Tree -> [Tree]
-getChild r (Node _ xs) = [t | (r', t) <- xs, r == r']
-getChild _ _ = []
+getDataDeclarations :: Tree -> ThrowsError [DataDecl]
+getDataDeclarations = sequence . recursiveApply cond' fun'
+  where
+    cond' = hasRelation ":isa" (Leaf $ Str' ":dataDeclaration")
+    fun' t = DataDecl <$> (toOne (getChild ":lhs" t) >>= getStr ":value" >>= toOne) 
+                      <*> (sequence . map (\t' -> getStr ":value" t >>= toOne) $ getChild ":parameter" t)
+                      <*> (toOne (getChild ":rhs" t) >>= tree2mdata)
 
 tree2mtype :: Tree -> ThrowsError MType
 tree2mtype t = case isa' t of
@@ -114,7 +92,7 @@ tree2mtype t = case isa' t of
     namedtype' :: Tree -> ThrowsError MType
     namedtype' t'
       =   TypeKwd
-      <$> (getStr t' ":name" >>= toOne)
+      <$> (getStr ":name" t' >>= toOne)
       <*> (toOne (getChild ":value" t') >>= tree2mtype)
 
     function' :: Tree -> ThrowsError MType
@@ -123,12 +101,8 @@ tree2mtype t = case isa' t of
       <*> (sequence . map tree2mtype $ getChild ":input" t')
       <*> ((sequence . map tree2mtype $ getChild ":output" t') >>= toOne)
 
-    getStr :: Tree -> String -> ThrowsError [String]
-    getStr t' s' = sequence . map getStr' $ getChild s' t'
+    isa'  t' = getStr ":isa" t' >>= toOne
+    val'  t' = getStr ":value" t' >>= toOne
 
-    getStr' :: Tree -> ThrowsError String
-    getStr' (Leaf (Str' s)) = Right s
-    getStr' _ = Left (InvalidRDF ("Expected a string"))
-    
-    isa'  t' = getStr t' ":isa" >>= toOne
-    val'  t' = getStr t' ":value" >>= toOne
+tree2mdata :: Tree -> ThrowsError MData
+tree2mdata = undefined

@@ -39,6 +39,7 @@ library
                       Morloc.Parser
                       Morloc.Triple
                       Morloc.Tree
+                      Morloc.Data
 
     build-depends: base,
                    safe,
