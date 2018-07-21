@@ -79,7 +79,7 @@ source' = do
 statement' :: Parser RDF
 statement' =
       try typeDeclaration
-  <|> try declaration
+  <|> try dataDeclaration
 
 import' :: Parser RDF
 import' =
@@ -113,8 +113,8 @@ restrictedImport = do
       ] ++ adoptAs ":import" i functions
     )
 
-declaration :: Parser RDF
-declaration = do
+dataDeclaration :: Parser RDF
+dataDeclaration = do
   i <- getId
   lhs <- tripleName 
   bndvars <- many tripleName
@@ -372,8 +372,8 @@ application = do
   function <- Tok.parens expression <|> identifier'
   arguments <- many1 term'
   return $ RDF i (
-         [ (i, ":isa", Str' ":application")]
-      ++ adoptAs ":function" i [function]
+         [ (i, ":isa", Str' ":call")]
+      ++ adoptAs ":value" i [function]
       ++ adoptAs ":argument" i arguments
     )
   where
