@@ -4,7 +4,7 @@ import Test.Tasty.Hspec
 import Morloc.Parser (morlocScript)
 import Morloc.Triple
 import Morloc.Data
-import Morloc.Eval (buildProgram)
+import Morloc.Eval (tree2program)
 import Morloc.Tree (rdf2tree)
 import Morloc.Error
 
@@ -32,7 +32,7 @@ testRdfCode = testRdfCodeWith id
 testProgram :: String -> String -> ThrowsError Program -> Spec
 testProgram s code expected = it s $ do
   shouldBe
-    (fmap rdf2tree (morlocScript code) >>= buildProgram)
+    (fmap rdf2tree (morlocScript code) >>= tree2program)
     expected
 
 spec :: Spec

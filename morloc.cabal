@@ -40,7 +40,10 @@ library
                       Morloc.Triple
                       Morloc.Tree
                       Morloc.Util
-                      Morloc.Eval
+                      Morloc.Evaluator
+                      Morloc.Processor
+                      Morloc.Generator
+                      Morloc.Builder
                       Morloc.Data
 
     build-depends: base,

@@ -1,12 +1,12 @@
-module Morloc.Eval (buildProgram) where
+module Morloc.Evaluator (tree2program) where
 
 import Morloc.Data
 import Morloc.Tree
 import Morloc.Error
 import Morloc.Triple
 
-buildProgram :: Tree -> ThrowsError Program
-buildProgram t
+tree2program :: Tree -> ThrowsError Program
+tree2program t
   =   Program 
   <$> getTypeDeclarations t
   <*> getDataDeclarations t
