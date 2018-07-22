@@ -4,7 +4,7 @@ import Test.Tasty.Hspec
 import Morloc.Parser (morlocScript)
 import Morloc.Triple
 import Morloc.Data
-import Morloc.Eval (tree2program)
+import Morloc.Evaluator (tree2program)
 import Morloc.Tree (rdf2tree)
 import Morloc.Processor (process)
 import Morloc.Error
