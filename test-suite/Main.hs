@@ -6,6 +6,7 @@ import Morloc.Triple
 import Morloc.Data
 import Morloc.Eval (tree2program)
 import Morloc.Tree (rdf2tree)
+import Morloc.Processor (process)
 import Morloc.Error
 
 main :: IO ()
@@ -34,6 +35,14 @@ testProgram s code expected = it s $ do
   shouldBe
     (fmap rdf2tree (morlocScript code) >>= tree2program)
     expected
+
+-- testProcessor :: String -> String -> ThrowsError Program -> Spec
+-- testProcessor s code expected = it s $ do
+--   shouldBe
+--     (fmap rdf2tree (morlocScript code) >>= tree2program >>= process)
+--     expected
+
+-- code2 = "source \"R\" (\"foo\"); foo :: Int -> Int; bar :: Int; bar = foo 1 True;"
 
 spec :: Spec
 spec = parallel $ do

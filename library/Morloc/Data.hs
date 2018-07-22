@@ -27,12 +27,25 @@ data Program = Program {
   }
   deriving(Show, Ord, Eq)
 
+instance Monoid Program where
+  mempty = Program {
+        programTypes   = []
+      , programData    = []
+      , programSources = []
+    }
+  mappend p1 p2 = Program {
+        programTypes   = programTypes   p1 ++ programTypes   p2
+      , programData    = programData    p1 ++ programData    p2
+      , programSources = programSources p1 ++ programSources p2
+    }
+
 data MType
   = TypeSpc Tag Name [MType]
   | TypeGen Tag Name [MType]
   | TypeFun Tag [MType] MType
   | TypeKwd Name MType
   | TypeEmp Tag
+  | TypeUnk -- for example in `x = []`, where `[]` may contain anything 
   deriving(Show, Ord, Eq)
 
 -- This includes everything that can be on the rhs of a declaration
