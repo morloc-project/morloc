@@ -36,16 +36,24 @@ testProgram s code expected = it s $ do
     (fmap rdf2tree (morlocScript code) >>= tree2program)
     expected
 
--- testProcessor :: String -> String -> ThrowsError Program -> Spec
--- testProcessor s code expected = it s $ do
---   shouldBe
---     (fmap rdf2tree (morlocScript code) >>= tree2program >>= process)
---     expected
-
--- code2 = "source \"R\" (\"foo\"); foo :: Int -> Int; bar :: Int; bar = foo 1 True;"
+testCheckFail :: String -> String -> MorlocError -> Spec
+testCheckFail s code err = it s $ do
+  shouldBe
+    (fmap rdf2tree (morlocScript code) >>= tree2program >>= process)
+    (Left err)
 
 spec :: Spec
 spec = parallel $ do
+
+  testCheckFail 
+    "Catch type error"
+    (unlines [
+          "source \"R\" (\"foo\");"
+        , "foo :: Int -> Int;"
+        , "bar :: Int;"
+        , "bar = foo 1 True;"
+      ])
+    (TypeError "Observed and expected types differ")
 
   testProgram
     "Test RDF to Program conversion"
