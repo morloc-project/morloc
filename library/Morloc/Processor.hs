@@ -66,6 +66,51 @@ uniqueDeclarations p = return p >>= uniqueData >>= uniqueType
 
 typecheckAll :: Program -> ThrowsError Program
 typecheckAll = return
+
+-- typecheckAll :: Program -> ThrowsError Program
+-- typecheckAll p = checkEach >> return p
+--   where
+--     checkEach :: ThrowsError ()
+--     checkEach = sequence . map (typecheck (programTypes p)) $ (calls p)
+--
+--     typecheck :: [TypeDecl] -> (Name, [MData]) -> ThrowsError MType
+--     typecheck ts (n,fs) = typecheck' <$> (findType ts n) <*> pure fs
+--
+--     typecheck' :: MType -> [MData] -> ThrowsError ()
+--     typecheck' (TypeFun _ ts) fs
+--       | (length fs) > (length ts) = Left (TypeError "Too many arguments")
+--       | otherwise = sequence $ zipWith cmpType ts fs
+--     typecheck' _ _ = Left (TypeError "Expected call to be a function")
+--
+-- cmpType
+--   :: MType -- expected type, based on type signature
+--   -> MData -- given data
+--   -> ThrowsError () -- this function is run only to catch errors
+-- cmpType (TypeSpc _ "Int" []) (DataInt _) = Right ()
+-- cmpType (TypeSpc _ "Num" []) (DataNum _) = Right ()
+-- cmpType (TypeSpc _ "Bool" []) (DataLog _) = Right ()
+-- cmpType (TypeSpc _ "List" [t]) (DataLst xs) = sequence $ map (cmpType t) xs
+-- cmpType (TypeSpc _ "Tuple" ts) (DataTup xs) = zipWithError cmpType ts xs
+-- cmpType (TypeSpc _ "Record" ts) (DataRec xs) = zipWithError cmpKwd ts xs
+--   where
+--     cmpKwd :: MType -> (Name, MData) -> ThrowsError ()
+--     cmpKwd (TypeKwd n1 t1) (n2, t2)
+--       | (n1 == n2) = cmpType t1 t2
+--       | otherwise = Left (TypeError "Record has invalid field")
+-- cmpType (TypeSpc _ "String" []) (DataStr _) = Right ()
+-- cmpType (TypeFun _ ts _) (DataFun _ xs) = sequence $ zipWith cmpType ts xs
+-- cmpType () (DataVar n) = undefined
+--
+-- -- Require [a] and [b] be of the same length
+-- zipWithError :: (a -> b -> ThrowsError c) -> [a] -> [b] -> ThrowsError [c]
+-- zipWitherror f xs ys
+--   | length xs == length ys = sequence $ zipWithError f xs ys
+--   | otherwise = Left (TypeError "Expected equal length vectors")
+--
+-- findType :: [TypeDecl] -> Name -> ThrowsError MType
+-- findType ((TypeDecl n t _):ts) m = ifelse (n == m) (Right t) (findType ts m)
+-- findType [] m = Left (TypeError ("No type signature found for " ++ m))
+
 -- resolve :: MType -> MType -> ThrowsError (MType -> MType)
 -- resolve _ _ = Left (TypeError "Unresolvable mismatch")
 
@@ -104,3 +149,13 @@ functionNames p = concat [n:(f t \\ args) | (DataDecl n args t) <- programData p
     f (DataRec xs) = conmap f (map snd xs)
     f (DataFun n xs) = n:(conmap f xs)
     f _ = []
+
+-- calls :: Program -> [(Name, [MData])]
+-- calls p = concat [n:(f t \\ args) | (DataDecl n args t) <- programData p]
+--   where
+--     f :: MData -> [(Name, [MData])]
+--     f (DataLst xs) = conmap f xs
+--     f (DataTup xs) = conmap f xs
+--     f (DataRec xs) = conmap f (map snd xs)
+--     f (DataFun n xs) = (n, xs):(conmap f xs)
+--     f _ = []
