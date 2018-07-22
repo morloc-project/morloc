@@ -33,13 +33,13 @@ testRdfCode = testRdfCodeWith id
 testProgram :: String -> String -> ThrowsError Program -> Spec
 testProgram s code expected = it s $ do
   shouldBe
-    (fmap rdf2tree (morlocScript code) >>= tree2program)
+    (morlocScript code >>= rdf2tree >>= tree2program)
     expected
 
 testCheckFail :: String -> String -> MorlocError -> Spec
 testCheckFail s code err = it s $ do
   shouldBe
-    (fmap rdf2tree (morlocScript code) >>= tree2program >>= process)
+    (morlocScript code >>= rdf2tree >>= tree2program >>= process)
     (Left err)
 
 spec :: Spec

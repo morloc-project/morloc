@@ -17,11 +17,18 @@ data Tree
   | Leaf Object
   deriving(Ord, Eq, Show)
 
-rdf2tree :: RDF -> Tree
-rdf2tree (RDF i ts) = Node i [(r, f ts o) | (j,r,o) <- ts, j == i]
-  where
+-- For the moment, this never fails. I wrap it the error monad to
+-- 1) make space for extensions later to check the conversion to RDF
+-- 2) be compatibile with the monadic pipeline
+
+rdf2tree :: RDF -> ThrowsError Tree
+rdf2tree rdf = Right $ rdf2tree' rdf
+  where 
+    rdf2tree' :: RDF -> Tree
+    rdf2tree' (RDF i ts) = Node i [(r, f ts o) | (j,r,o) <- ts, j == i]
+
     f :: [Triple] -> Object -> Tree
-    f ts' (Id' j) = rdf2tree (RDF j ts')
+    f ts' (Id' j) = rdf2tree' (RDF j ts')
     f _    o'     = Leaf o'
 
 getKids :: Relation -> Tree -> [Tree]

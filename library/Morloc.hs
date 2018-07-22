@@ -15,9 +15,11 @@ rdf s = case morlocScript s of
   Right result -> showRDF result
 
 compile :: String -> ThrowsError (IO String)
-compile s
-  =   fmap rdf2tree (morlocScript s)
-  >>= tree2program
-  >>= process
-  >>= generate
-  >>= build
+compile s =
+      return s
+  >>= morlocScript  -- parse the script
+  >>= rdf2tree      -- convert the RDF into a tree
+  >>= tree2program  -- extract data structures
+  >>= process       -- typecheck
+  >>= generate      -- generate the nexus and pool code
+  >>= build         -- write the files
