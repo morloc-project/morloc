@@ -43,6 +43,7 @@ library
                       Morloc.Evaluator
                       Morloc.Processor
                       Morloc.Generator
+                      Morloc.Language
                       Morloc.Builder
                       Morloc.Data
 

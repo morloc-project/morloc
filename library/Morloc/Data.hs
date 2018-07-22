@@ -7,6 +7,7 @@ module Morloc.Data
   , Constraint(..)
   , DataDecl(..)
   , Source(..)
+  , Script(..)
   , Tag
   , Name
   , Alias
@@ -26,6 +27,16 @@ data Program = Program {
     , programSources :: [Source]
   }
   deriving(Show, Ord, Eq)
+
+data Script = Script {
+      scriptBase :: String -- script basename (no extension)
+    , scriptLang :: String -- script language
+    , scriptCode :: String -- full script source code
+  }
+  deriving(Ord, Eq)
+
+instance Show Script where
+  show (Script base lang code) = code 
 
 instance Monoid Program where
   mempty = Program {
