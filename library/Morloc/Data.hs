@@ -28,16 +28,6 @@ data Program = Program {
   }
   deriving(Show, Ord, Eq)
 
-data Script = Script {
-      scriptBase :: String -- script basename (no extension)
-    , scriptLang :: String -- script language
-    , scriptCode :: String -- full script source code
-  }
-  deriving(Ord, Eq)
-
-instance Show Script where
-  show (Script base lang code) = code 
-
 instance Monoid Program where
   mempty = Program {
         programTypes   = []
@@ -49,6 +39,16 @@ instance Monoid Program where
       , programData    = programData    p1 ++ programData    p2
       , programSources = programSources p1 ++ programSources p2
     }
+
+data Script = Script {
+      scriptBase :: String -- script basename (no extension)
+    , scriptLang :: String -- script language
+    , scriptCode :: String -- full script source code
+  }
+  deriving(Ord, Eq)
+
+instance Show Script where
+  show (Script base lang code) = code 
 
 data MType
   = TypeSpc Tag Name [MType]

@@ -96,7 +96,14 @@ typecheckAll p = (join . fmap (sequence . map checkPair) $ obsVsExp) >> return p
     checkPair :: (MType, MType) -> ThrowsError ()
     checkPair (o, e)
       | o == e = Right ()
-      | otherwise = Left (TypeError "Observed and expected types differ")
+      | otherwise = Left (TypeError (unlines [
+            "Observed and expected types differ"
+          , "Expected:"
+          , "> " ++ show e
+          , "Observed:"
+          , "> " ++ show o
+          ])
+        )
 
 mdata2mtype :: Program -> MData -> ThrowsError MType
 mdata2mtype _ (DataInt _) = Right $ TypeSpc Nothing "Int" [] 

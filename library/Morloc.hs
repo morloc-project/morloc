@@ -12,7 +12,7 @@ import Morloc.Data
 
 writeProgram :: ThrowsError (Script, [Script]) -> IO ()
 writeProgram (Right x) = build x
-writeProgram (Left err) = putStr (show err)
+writeProgram (Left err) = putStrLn (show err)
 
 rdf :: String -> String
 rdf s = case morlocScript s of
