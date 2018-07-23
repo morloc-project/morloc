@@ -8,6 +8,7 @@ module Morloc.Triple (
   , rdfTriple
   , showRDF
   , adoptAs
+  , addTriples
 ) where
 
 data RDF = RDF
@@ -47,3 +48,6 @@ rdfTriple (RDF _ xs) = xs
 
 adoptAs :: Relation -> Subject -> [RDF] -> [Triple]
 adoptAs r i = concat . map (\(RDF j xs) -> (i, r, Id' j):xs)
+
+addTriples :: RDF -> [Triple] -> RDF
+addTriples (RDF i xs) ys = RDF i (xs ++ ys)

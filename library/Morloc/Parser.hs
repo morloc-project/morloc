@@ -158,6 +158,15 @@ mtype =
     <?> "type"
   where
 
+    -- any type other than a naked function
+    notFunction' :: Parser RDF
+    notFunction' =
+          try specific' -- A ...
+      <|> try generic'  -- a ...
+      <|> try record'   -- A { ... }
+      <|> try unambiguous'
+      <?> "type"
+
     unambiguous' :: Parser RDF
     unambiguous' =
             try empty' -- ()
@@ -170,13 +179,11 @@ mtype =
     -- <name> <type> <type> ...
     specific' :: Parser RDF
     specific' = do
-      l <- Tok.tag Tok.specificType
       n <- Tok.specificType
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
              [(i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' n)]
-          ++ listTag i l
           ++ adoptAs ":parameter" i ns
         )
 
@@ -286,9 +293,9 @@ mtype =
     function' :: Parser RDF
     function' = do
       i <- getId
-      inputs <- sepBy1 unambiguous' Tok.comma
+      inputs <- sepBy1 notFunction' Tok.comma
       Tok.op "->"
-      output <- unambiguous'
+      output <- notFunction'
       return $ RDF i (
              [(i, ":isa", Str' ":functionType")]
           ++ adoptAs ":input" i inputs

@@ -415,6 +415,24 @@ spec = parallel $ do
     ]
 
   testRdfCodeWith
+    (rmId [0..2])
+    "foo :: A B -> C D"
+    [ (3, ":isa",       Str' ":functionType"      )
+    , (3, ":input",     Id'  4                    )
+    , (4, ":isa",       Str' ":parameterizedType" )
+    , (4, ":value",     Str' "A"                  )
+    , (4, ":parameter", Id'  5                    )
+    , (5, ":isa",       Str' ":atomicType"        )
+    , (5, ":value",     Str' "B"                  )
+    , (3, ":output",    Id'  6                    )
+    , (6, ":isa",       Str' ":parameterizedType" )
+    , (6, ":value",     Str' "C"                  )
+    , (6, ":parameter", Id'  7                    )
+    , (7, ":isa",       Str' ":atomicType"        )
+    , (7, ":value",     Str' "D"                  )
+    ]
+
+  testRdfCodeWith
     (rmId [0..3])
     "foo :: A where ((1 == 1) and (2 == 2))"
     [ (4,  ":isa",   Str' ":binop"   )

@@ -45,6 +45,7 @@ library
                       Morloc.Generator
                       Morloc.Language
                       Morloc.Builder
+                      Morloc.Nexus
                       Morloc.Data
 
     build-depends: base,
