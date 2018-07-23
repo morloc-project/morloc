@@ -328,6 +328,20 @@ spec = parallel $ do
     , (4, ":value",    Num' 1.1        )
     ]
 
+  testRdfCodeWith
+    (rmId [0..3])
+    "foo :: i:Int -> j:[A]"
+    [ (4, ":isa",       Str' ":atomicType"        )
+    , (4, ":value",     Str' "Int"                )
+    , (4, ":label",     Str' "i"                  )
+    , (5, ":isa",       Str' ":parameterizedType" )
+    , (5, ":value",     Str' "List"               )
+    , (5, ":label",     Str' "j"                  )
+    , (5, ":parameter", Id'  6                    )
+    , (6, ":isa",       Str' ":atomicType"        )
+    , (6, ":value",     Str' "A"                  )
+    ]
+
   testRdfCode
     "foo :: i:Int -> Num where (i > 0)"
     [ (0, ":isa",        Str' ":script"          )

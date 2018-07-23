@@ -172,18 +172,20 @@ mtype =
             try empty' -- ()
         <|> try paren' -- (a)
         <|> try tuple' -- (a, ...)
+        <|> list'      -- [a]
         <|> specific1  -- A
         <|> generic1   -- a
-        <|> list'      -- [a]
 
     -- <name> <type> <type> ...
     specific' :: Parser RDF
     specific' = do
+      l <- Tok.tag Tok.genericType
       n <- Tok.specificType
       i <- getId
       ns <- many1 unambiguous'
       return $ RDF i (
              [(i, ":isa", Str' ":parameterizedType"), (i, ":value", Str' n)]
+          ++ (listTag i l)
           ++ adoptAs ":parameter" i ns
         )
 
@@ -194,7 +196,6 @@ mtype =
     -- <name> <type> <type> ...
     generic' :: Parser RDF
     generic' = do
-      -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
@@ -220,7 +221,6 @@ mtype =
     -- <name> <type> <type> ...
     generic1 :: Parser RDF
     generic1 = do
-      -- TODO - the genericType should automatically fail on keyword conflict
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
