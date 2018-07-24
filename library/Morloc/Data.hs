@@ -28,6 +28,19 @@ data Program = Program {
   }
   deriving(Show, Ord, Eq)
 
+-- -- TODO: make this
+-- data Manifold = Manifold {
+--       manifoldAlias      :: Name             -- name in Morlc script
+--     , manifoldSrcName    :: String           -- name in source language
+--     , manifoldId         :: Int              -- a unique ID
+--     , manifoldInput      :: [(MType, Input)] -- type and value of each input
+--     , manifoldType       :: MType            -- output type
+--     , manifoldSource     :: Maybe Source     -- source file
+--     , manifoldParameter  :: [Parameter]      -- function parameters
+--     , manifoldConstraint :: [Constraint]     -- constrains on input and output
+--     , manifoldOther      :: [Triple]         -- additional information
+--   }
+
 instance Monoid Program where
   mempty = Program {
         programTypes   = []
