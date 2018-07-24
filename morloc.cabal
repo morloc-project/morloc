@@ -52,6 +52,7 @@ library
                    safe,
                    parsec,
                    text,
+                   rdf4h,
                    mtl
 
     ghc-options: -Wall
@@ -65,6 +66,7 @@ executable morloc
     ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
     build-depends:
         base >=4.7 && <5
+      , rdf4h
       , morloc 
     default-language: Haskell2010
  
