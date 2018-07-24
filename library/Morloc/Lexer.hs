@@ -25,12 +25,10 @@ module Morloc.Lexer (
 ) where
 
 import Text.Parsec hiding (State)
-import Control.Monad.State
 import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
-import qualified Morloc.Triple as Triple
 import Morloc.State
 
 lexer :: Token.TokenParser ParserState

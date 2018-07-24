@@ -1,157 +1,160 @@
 module Morloc.Evaluator (tree2program) where
 
-import Morloc.Data
-import Morloc.Tree
-import Morloc.Error
-import Morloc.Triple
+import qualified Morloc.Data as MD
+import qualified Morloc.Tree as MT
+import qualified Morloc.Error as ME
+import qualified Morloc.Triple as M3
 
-tree2program :: Tree -> ThrowsError Program
+tree2program :: MT.Tree -> ME.ThrowsError MD.Program
 tree2program t
-  =   Program 
+  =   MD.Program 
   <$> getTypeDeclarations t
   <*> getDataDeclarations t
   <*> getSources t
 
-toOne :: [a] -> ThrowsError a
+toOne :: [a] -> ME.ThrowsError a
 toOne [x] = Right x 
-toOne [] = Left (InvalidRDF "Expected 1 object, found 0")
-toOne _ = Left (InvalidRDF "Expected 1 object for this relation, found many")
+toOne [] = Left (ME.InvalidRDF "Expected 1 object, found 0")
+toOne _ = Left (ME.InvalidRDF "Expected 1 object for this relation, found many")
 
-toMaybe :: [a] -> ThrowsError (Maybe a)
+toMaybe :: [a] -> ME.ThrowsError (Maybe a)
 toMaybe [ ] = Right Nothing
 toMaybe [x] = Right (Just x)
-toMaybe  _  = Left (InvalidRDF "Expected 0 or 1 elements")
+toMaybe  _  = Left (ME.InvalidRDF "Expected 0 or 1 elements")
 
-getString :: Relation -> Tree -> ThrowsError String
-getString r t = getStrings r t >>= toOne
+getString :: M3.Relation -> MT.Tree -> ME.ThrowsError String
+getString r t = MT.getStrings r t >>= toOne
 
-getStringMaybe :: Relation -> Tree -> ThrowsError (Maybe String)
-getStringMaybe r t = getStrings r t >>= toMaybe
+getStringMaybe :: M3.Relation -> MT.Tree -> ME.ThrowsError (Maybe String)
+getStringMaybe r t = MT.getStrings r t >>= toMaybe
 
-getKid :: Relation -> Tree -> ThrowsError Tree
-getKid r t = toOne $ getKids r t
+getKid :: M3.Relation -> MT.Tree -> ME.ThrowsError MT.Tree
+getKid r t = toOne $ MT.getKids r t
 
-getTypeDeclarations :: Tree -> ThrowsError [TypeDecl]
-getTypeDeclarations = sequence . recursiveApply cond' fun'
+getTypeDeclarations :: MT.Tree -> ME.ThrowsError [MD.TypeDecl]
+getTypeDeclarations = sequence . MT.recursiveApply cond' fun'
   where
-    cond' = hasRelation ":isa" (Leaf $ Str' ":typeDeclaration")
+    cond' = MT.hasRelation ":isa" (MT.Leaf $ M3.Str' ":typeDeclaration")
     fun' t
-      =   TypeDecl
+      =   MD.TypeDecl
       <$> (getKid ":lhs" t >>= getString ":value") 
       <*> (getKid ":rhs" t >>= tree2mtype)
       <*> pure []
 
-getDataDeclarations :: Tree -> ThrowsError [DataDecl]
-getDataDeclarations = sequence . recursiveApply cond' fun'
+getDataDeclarations :: MT.Tree -> ME.ThrowsError [MD.DataDecl]
+getDataDeclarations = sequence . MT.recursiveApply cond' fun'
   where
-    cond' = hasRelation ":isa" (Leaf $ Str' ":dataDeclaration")
+    cond' = MT.hasRelation ":isa" (MT.Leaf $ M3.Str' ":dataDeclaration")
     fun' t
-      =   DataDecl
+      =   MD.DataDecl
       <$> (getKid ":lhs" t >>= getString ":value") 
-      <*> (sequence . map (getString ":value") $ getKids ":parameter" t)
+      <*> (sequence . map (getString ":value") $ MT.getKids ":parameter" t)
       <*> (getKid ":rhs" t >>= tree2mdata)
 
-getSources :: Tree -> ThrowsError [Source]
-getSources = sequence . recursiveApply cond' fun'
+getSources :: MT.Tree -> ME.ThrowsError [MD.Source]
+getSources = sequence . MT.recursiveApply cond' fun'
   where
-    cond' = hasRelation ":isa" (Leaf $ Str' ":source")
-    fun' t = Source <$> language' t <*> path' t <*> imports' t
+    cond' = MT.hasRelation ":isa" (MT.Leaf $ M3.Str' ":source")
+    fun' t = MD.Source <$> language' t <*> path' t <*> imports' t
 
-    language' :: Tree -> ThrowsError Language
+    language' :: MT.Tree -> ME.ThrowsError MD.Language
     language' = getString ":lang"
 
-    path' :: Tree -> ThrowsError (Maybe Path)
+    path' :: MT.Tree -> ME.ThrowsError (Maybe MD.Path)
     path' = getStringMaybe ":path"
 
-    imports' :: Tree -> ThrowsError [(Name, Maybe Alias)]
-    imports' t = sequence $ map getImport' (getKids ":import" t)
+    imports' :: MT.Tree -> ME.ThrowsError [(MD.Name, Maybe MD.Alias)]
+    imports' t = sequence $ map getImport' (MT.getKids ":import" t)
 
-    getImport' :: Tree -> ThrowsError (Name, Maybe Alias)
+    getImport' :: MT.Tree -> ME.ThrowsError (MD.Name, Maybe MD.Alias)
     getImport' t = (,) <$> getString ":name" t <*> getStringMaybe ":alias" t
 
-tree2mtype :: Tree -> ThrowsError MType
+tree2mtype :: MT.Tree -> ME.ThrowsError MD.MType
 tree2mtype t = case getString ":isa" t of
-  (Right ":atomicType"           ) -> parsetype' t TypeSpc
-  (Right ":atomicGeneric"        ) -> parsetype' t TypeGen
-  (Right ":parameterizedType"    ) -> parsetype' t TypeSpc
-  (Right ":parameterizedGeneric" ) -> parsetype' t TypeGen
+  (Right ":atomicType"           ) -> parsetype' t MD.TypeSpc
+  (Right ":atomicGeneric"        ) -> parsetype' t MD.TypeGen
+  (Right ":parameterizedType"    ) -> parsetype' t MD.TypeSpc
+  (Right ":parameterizedGeneric" ) -> parsetype' t MD.TypeGen
   (Right ":namedType"            ) -> namedtype' t
   (Right ":functionType"         ) -> function' t
   (Left err) -> Left err
-  _ -> Left (InvalidRDF "Expected type, none found")
+  _ -> Left (ME.InvalidRDF "Expected type, none found")
   where
 
-    parsetype' :: Tree -> (Tag -> Name -> [MType] -> MType) -> ThrowsError MType
+    parsetype'
+      :: MT.Tree
+      -> (MD.Tag -> MD.Name -> [MD.MType] -> MD.MType)
+      -> ME.ThrowsError MD.MType
     parsetype' t' f = f
       <$> pure Nothing
       <*> getString ":value" t'
-      <*> (sequence . map tree2mtype $ getKids ":parameter" t')
+      <*> (sequence . map tree2mtype $ MT.getKids ":parameter" t')
 
-    namedtype' :: Tree -> ThrowsError MType
+    namedtype' :: MT.Tree -> ME.ThrowsError MD.MType
     namedtype' t'
-      =   TypeKwd
+      =   MD.TypeKwd
       <$> (getString ":name" t')
       <*> (getKid ":value" t' >>= tree2mtype)
 
-    function' :: Tree -> ThrowsError MType
-    function' t' = TypeFun
+    function' :: MT.Tree -> ME.ThrowsError MD.MType
+    function' t' = MD.TypeFun
       <$> pure Nothing
-      <*> (sequence . map tree2mtype $ getKids ":input" t')
+      <*> (sequence . map tree2mtype $ MT.getKids ":input" t')
       <*> (getKid ":output" t' >>= tree2mtype)
 
-tree2mdata :: Tree -> ThrowsError MData
+tree2mdata :: MT.Tree -> ME.ThrowsError MD.MData
 tree2mdata t = case (getString ":isa" t) of
   (Right ":integer"  ) -> getKid ":value" t >>= getInt
   (Right ":number"   ) -> getKid ":value" t >>= getNum
   (Right ":boolean"  ) -> getKid ":value" t >>= getLog
   (Right ":string"   ) -> getKid ":value" t >>= getStr
   (Right ":name"     ) -> getKid ":value" t >>= getStr
-  (Right ":list"     ) -> fmap DataLst (list' t)
-  (Right ":tuple"    ) -> fmap DataTup (list' t)
+  (Right ":list"     ) -> fmap MD.DataLst (list' t)
+  (Right ":tuple"    ) -> fmap MD.DataTup (list' t)
   (Right ":record"   ) -> record' t
   (Right ":call"     ) -> call' t
-  _                    -> Left (InvalidRDF "Expected MData")
+  _                    -> Left (ME.InvalidRDF "Expected MData")
   where
 
-    getInt :: Tree -> ThrowsError MData
-    getInt (Leaf (Int' x)) = Right (DataInt x)
-    getInt _ = Left (InvalidRDF "Expected an integer")
+    getInt :: MT.Tree -> ME.ThrowsError MD.MData
+    getInt (MT.Leaf (M3.Int' x)) = Right (MD.DataInt x)
+    getInt _ = Left (ME.InvalidRDF "Expected an integer")
 
-    getNum :: Tree -> ThrowsError MData
-    getNum (Leaf (Num' x)) = Right (DataNum x)
-    getNum _ = Left (InvalidRDF "Expected an number")
+    getNum :: MT.Tree -> ME.ThrowsError MD.MData
+    getNum (MT.Leaf (M3.Num' x)) = Right (MD.DataNum x)
+    getNum _ = Left (ME.InvalidRDF "Expected an number")
 
-    getLog :: Tree -> ThrowsError MData
-    getLog (Leaf (Log' x)) = Right (DataLog x)
-    getLog _ = Left (InvalidRDF "Expected an boolean")
+    getLog :: MT.Tree -> ME.ThrowsError MD.MData
+    getLog (MT.Leaf (M3.Log' x)) = Right (MD.DataLog x)
+    getLog _ = Left (ME.InvalidRDF "Expected an boolean")
 
-    getStr :: Tree -> ThrowsError MData
-    getStr (Leaf (Str' x)) = Right (DataStr x)
-    getStr _ = Left (InvalidRDF "Expected an string")
+    getStr :: MT.Tree -> ME.ThrowsError MD.MData
+    getStr (MT.Leaf (M3.Str' x)) = Right (MD.DataStr x)
+    getStr _ = Left (ME.InvalidRDF "Expected an string")
 
-    asMData :: Tree -> ThrowsError MData
-    asMData (Leaf o) = case o of
-      (Int' x)   -> Right (DataInt x)
-      (Num' x)   -> Right (DataNum x)
-      (Log' x)   -> Right (DataLog x)
-      (Str' x)   -> Right (DataStr x)
-      -- (Str' x)   -> Right (DataVar x) -- FIXME: distinguish between Str and Var
-      _ -> Left (InvalidRDF "Oh no Mr. Wizard!")
+    asMData :: MT.Tree -> ME.ThrowsError MD.MData
+    asMData (MT.Leaf o) = case o of
+      (M3.Int' x)   -> Right (MD.DataInt x)
+      (M3.Num' x)   -> Right (MD.DataNum x)
+      (M3.Log' x)   -> Right (MD.DataLog x)
+      (M3.Str' x)   -> Right (MD.DataStr x)
+      -- (M3.Str' x)   -> Right (MD.DataVar x) -- FIXME: distinguish between Str and Var
+      _ -> Left (ME.InvalidRDF "Oh no Mr. Wizard!")
     asMData node = tree2mdata node
 
-    list' :: Tree -> ThrowsError [MData]
-    list' = sequence . map asMData . getKids ":contains"
+    list' :: MT.Tree -> ME.ThrowsError [MD.MData]
+    list' = sequence . map asMData . MT.getKids ":contains"
 
     -- convert one record entry
-    record' :: Tree -> ThrowsError MData
-    record' t = DataRec <$> (sequence . map recordEntry' $ getKids ":contains" t)
+    record' :: MT.Tree -> ME.ThrowsError MD.MData
+    record' t = MD.DataRec <$> (sequence . map recordEntry' $ MT.getKids ":contains" t)
       where
         recordEntry' t
           =   (,)
           <$> getString ":lhs" t
           <*> (getKid ":rhs" t >>= asMData)
 
-    call' :: Tree -> ThrowsError MData
-    call' t = DataFun 
+    call' :: MT.Tree -> ME.ThrowsError MD.MData
+    call' t = MD.DataFun 
       <$> (getKid ":value" t >>= getString ":value")
-      <*> (sequence . map asMData $ getKids ":argument" t)
+      <*> (sequence . map asMData $ MT.getKids ":argument" t)

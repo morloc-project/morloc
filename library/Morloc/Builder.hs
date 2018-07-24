@@ -3,16 +3,16 @@ module Morloc.Builder
   build
 ) where
 
-import Morloc.Generator
-import Morloc.Error
-import Morloc.Data
+import qualified Morloc.Generator as MG
+import qualified Morloc.Error as ME
+import qualified Morloc.Data as MD
 
-writeScript :: Script -> IO ()
-writeScript (Script base lang code) =
+writeScript :: MD.Script -> IO ()
+writeScript (MD.Script base lang code) =
   writeFile (base ++ "." ++ lang) code
 
 -- builds the Morloc program and returns the name of the executable
-build :: (Nexus, [Pool]) -> IO ()
+build :: (MG.Nexus, [MG.Pool]) -> IO ()
 build (nexus, pools) = do
   writeScript nexus
   mapM_ writeScript pools 

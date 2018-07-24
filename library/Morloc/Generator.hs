@@ -4,69 +4,69 @@ module Morloc.Generator (
   , Pool
 ) where
 
-import Morloc.Data
-import Morloc.Error
-import Morloc.Language
-import Morloc.Nexus
+import qualified Morloc.Data as MD
+import qualified Morloc.Error as ME
+import qualified Morloc.Language as ML
+import qualified Morloc.Nexus as MN
 
-type Nexus = Script
-type Pool = Script
+type Nexus = MD.Script
+type Pool = MD.Script
 
-generate :: Program -> ThrowsError (Nexus, [Pool])
+generate :: MD.Program -> ME.ThrowsError (Nexus, [Pool])
 generate p = (,) <$> generateNexus p <*> generatePools p
 
-generateNexus :: Program -> ThrowsError Nexus
-generateNexus p = pure $ Script {
-      scriptBase = "nexus"
-    , scriptLang = lang
-    , scriptCode = nexusCode' p
+generateNexus :: MD.Program -> ME.ThrowsError Nexus
+generateNexus p = pure $ MD.Script {
+      MD.scriptBase = "nexus"
+    , MD.scriptLang = lang
+    , MD.scriptCode = nexusCode' p
   }
   where
     -- TODO allow user to choose a generator
     -- Eventually these will include, for example, a CWL generator
-    g = perlCliNexusGenerator
+    g = MN.perlCliNexusGenerator
     lang = "perl"
 
     nexusCode' p = unlines
-      [ (nexusPrologue g)
-      , (nexusPrint g) ""
-      , (nexusDispatch g) [n | (DataDecl n _ _) <- programData p]
-      , (nexusHelp g) []
+      [ (MN.nexusPrologue g)
+      , (MN.nexusPrint g) ""
+      , (MN.nexusDispatch g) [n | (MD.DataDecl n _ _) <- MD.programData p]
+      , (MN.nexusHelp g) []
       ]
-      ++ unlines (map ((nexusCall g) "Rscript" "pool.R") [])
-      ++ nexusEpilogue g
+      ++ unlines (map ((MN.nexusCall g) "Rscript" "pool.R") [])
+      ++ MN.nexusEpilogue g
 
-generatePools :: Program -> ThrowsError [Pool]
-generatePools p = sequence $ map (generatePool p) (programSources p)
+generatePools :: MD.Program -> ME.ThrowsError [Pool]
+generatePools p = sequence $ map (generatePool p) (MD.programSources p)
 
-generatePool :: Program -> Source -> ThrowsError Pool
+generatePool :: MD.Program -> MD.Source -> ME.ThrowsError Pool
 generatePool p src
-  =   Script
+  =   MD.Script
   <$> pure "pool"
   <*> pure "R"
   <*> generatePoolCode p src
 
 -- complete code for the pool
-generatePoolCode :: Program -> Source -> ThrowsError String
-generatePoolCode p (Source "R" Nothing funs)
+generatePoolCode :: MD.Program -> MD.Source -> ME.ThrowsError String
+generatePoolCode p (MD.Source "R" Nothing funs)
   = Right $
-    (makePool g)
+    (ML.makePool g)
     (generateGlobal g)
     (generateSource g src)
     (generateFunctions g src p)
   where
-    g   = rCodeGenerator
-    src = Source "R" Nothing funs
-generatePoolCode _  (Source _ (Just _) _ )
-  = Left $ NotImplemented "cannot yet read source"
-generatePoolCode _  (Source lang _ _)
-  = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
+    g   = ML.rCodeGenerator
+    src = MD.Source "R" Nothing funs
+generatePoolCode _  (MD.Source _ (Just _) _ )
+  = Left $ ME.NotImplemented "cannot yet read source"
+generatePoolCode _  (MD.Source lang _ _)
+  = Left $ ME.NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
 
-generateGlobal :: CodeGenerator -> [String]
+generateGlobal :: ML.CodeGenerator -> [String]
 generateGlobal _ = ["<stub global>"]
 
-generateSource :: CodeGenerator -> Source -> [String]
+generateSource :: ML.CodeGenerator -> MD.Source -> [String]
 generateSource _ _ = ["<stub source>"]
 
-generateFunctions :: CodeGenerator -> Source -> Program -> [String]
+generateFunctions :: ML.CodeGenerator -> MD.Source -> MD.Program -> [String]
 generateFunctions _ _ _ = ["<stub functions>"]

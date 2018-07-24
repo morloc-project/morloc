@@ -1,12 +1,12 @@
 module Morloc.Processor (process) where
 
-import Morloc.Error
-import Morloc.Data
-import Morloc.Util (repeated, conmap, ifelse)
+import qualified Morloc.Error as ME
+import qualified Morloc.Data as MD
+import qualified Morloc.Util as MU
 import Data.List ((\\))
-import Control.Monad (join)
+import qualified Control.Monad as CM
 
-process :: Program -> ThrowsError Program
+process :: MD.Program -> ME.ThrowsError MD.Program
 process p
   =   return p
   >>= validateSources
@@ -15,88 +15,88 @@ process p
   >>= uniqueDeclarations  -- ensure that there are no reassignments
   >>= typecheckAll        -- typecheck with resolutions
 
-validateSources :: Program -> ThrowsError Program
+validateSources :: MD.Program -> ME.ThrowsError MD.Program
 validateSources p = return p >>= uniquePaths >>= uniqueImports
   where
-    paths = [n | (Source _ (Just n) _) <- programSources p]
+    paths = [n | (MD.Source _ (Just n) _) <- MD.programSources p]
 
-    uniquePaths :: Program -> ThrowsError Program
-    uniquePaths p' = case repeated paths of
+    uniquePaths :: MD.Program -> ME.ThrowsError MD.Program
+    uniquePaths p' = case MU.repeated paths of
       [] -> Right p'
-      xs -> Left (NameConflict ("Non-unique import paths: " ++ unwords xs))
+      xs -> Left (ME.NameConflict ("Non-unique import paths: " ++ unwords xs))
 
-    uniqueImports :: Program -> ThrowsError Program
-    uniqueImports p' = case (repeated (sourceNames p')) of
+    uniqueImports :: MD.Program -> ME.ThrowsError MD.Program
+    uniqueImports p' = case (MU.repeated (sourceNames p')) of
       [] -> Right p'
-      xs -> Left (NameConflict ("Non-unique imports: " ++ unwords xs))
+      xs -> Left (ME.NameConflict ("Non-unique imports: " ++ unwords xs))
 
-variablesAreDefined :: Program -> ThrowsError Program
+variablesAreDefined :: MD.Program -> ME.ThrowsError MD.Program
 variablesAreDefined p = case (varNames p \\ definedNames p) of
   [] -> Right p
-  xs -> Left (UndefinedValue xs)
+  xs -> Left (ME.UndefinedValue xs)
   where
     definedNames p' = sourceNames p' ++ dataDeclarationNames p'
 
-functionsHaveTypes :: Program -> ThrowsError Program
+functionsHaveTypes :: MD.Program -> ME.ThrowsError MD.Program
 functionsHaveTypes p = case (functionNames p \\ typeDeclarationNames p) of
   [] -> Right p
-  _  -> Left (TypeError "No type signature found for this function")
+  _  -> Left (ME.TypeError "No type signature found for this function")
 
-uniqueDeclarations :: Program -> ThrowsError Program
+uniqueDeclarations :: MD.Program -> ME.ThrowsError MD.Program
 uniqueDeclarations p = return p >>= uniqueData >>= uniqueType
   where
-    uniqueData :: Program -> ThrowsError Program
-    uniqueData p' = case (repeated (dataDeclarationNames p')) of
+    uniqueData :: MD.Program -> ME.ThrowsError MD.Program
+    uniqueData p' = case (MU.repeated (dataDeclarationNames p')) of
       [] -> Right p'
-      xs -> Left (NameConflict ("Repeated data declaration: " ++ unwords xs))
+      xs -> Left (ME.NameConflict ("Repeated data declaration: " ++ unwords xs))
 
-    uniqueType :: Program -> ThrowsError Program
-    uniqueType p' = case (repeated (typeDeclarationNames p')) of
+    uniqueType :: MD.Program -> ME.ThrowsError MD.Program
+    uniqueType p' = case (MU.repeated (typeDeclarationNames p')) of
       [] -> Right p'
-      xs -> Left (NameConflict ("Repeated type declaration: " ++ unwords xs))
+      xs -> Left (ME.NameConflict ("Repeated type declaration: " ++ unwords xs))
 
-typecheckAll :: Program -> ThrowsError Program
-typecheckAll p = (join . fmap (sequence . map checkPair) $ obsVsExp) >> return p
+typecheckAll :: MD.Program -> ME.ThrowsError MD.Program
+typecheckAll p = (CM.join . fmap (sequence . map checkPair) $ obsVsExp) >> return p
   where
 
     -- get all calls
     cs = calls p 
 
     -- transform each call to an observed type signature
-    obsTypes :: ThrowsError [TypeDecl]
+    obsTypes :: ME.ThrowsError [MD.TypeDecl]
     obsTypes = sequence . map namedData2TypeDecl $ cs
 
-    namedData2TypeDecl :: (Name, [MData]) -> ThrowsError TypeDecl
+    namedData2TypeDecl :: (MD.Name, [MD.MData]) -> ME.ThrowsError MD.TypeDecl
     namedData2TypeDecl (n,xs)
-      =   TypeDecl
+      =   MD.TypeDecl
       <$> pure n
-      <*> (     TypeFun
+      <*> (     MD.TypeFun
             <$> pure Nothing
             <*> (sequence . map (mdata2mtype p) $ xs)
-            <*> pure TypeUnk
+            <*> pure MD.TypeUnk
           )
       <*> pure []
 
     -- expected type signatures
-    expTypes :: [TypeDecl]
-    expTypes = programTypes p
+    expTypes :: [MD.TypeDecl]
+    expTypes = MD.programTypes p
 
     -- map observed to expected types
-    obsVsExp :: ThrowsError [(MType, MType)]
+    obsVsExp :: ME.ThrowsError [(MD.MType, MD.MType)]
     obsVsExp = getObsVsExp <$> obsTypes <*> pure expTypes
 
-    getObsVsExp :: [TypeDecl] -> [TypeDecl] -> [(MType, MType)]
+    getObsVsExp :: [MD.TypeDecl] -> [MD.TypeDecl] -> [(MD.MType, MD.MType)]
     getObsVsExp os es = [(o,e) |
-          (TypeDecl m o _) <- os
-        , (TypeDecl n e _) <- es
+          (MD.TypeDecl m o _) <- os
+        , (MD.TypeDecl n e _) <- es
         , m == n
       ] 
 
     -- compare observed to expected types
-    checkPair :: (MType, MType) -> ThrowsError ()
+    checkPair :: (MD.MType, MD.MType) -> ME.ThrowsError ()
     checkPair (o, e)
       | o == e = Right ()
-      | otherwise = Left (TypeError (unlines [
+      | otherwise = Left (ME.TypeError (unlines [
             "Observed and expected types differ"
           , "Expected:"
           , "> " ++ show e
@@ -105,101 +105,101 @@ typecheckAll p = (join . fmap (sequence . map checkPair) $ obsVsExp) >> return p
           ])
         )
 
-mdata2mtype :: Program -> MData -> ThrowsError MType
-mdata2mtype _ (DataInt _) = Right $ TypeSpc Nothing "Int" [] 
-mdata2mtype _ (DataNum _) = Right $ TypeSpc Nothing "Num" [] 
-mdata2mtype _ (DataLog _) = Right $ TypeSpc Nothing "Bool" []
-mdata2mtype p (DataLst xs) =
-  fmap (TypeSpc Nothing "List") (sequence [findListType p xs])
-mdata2mtype p (DataTup xs) =
-  fmap (TypeSpc Nothing "Tuple") (sequence . map (mdata2mtype p) $ xs)
-mdata2mtype p (DataRec xs) =
-  fmap (TypeSpc Nothing "Record") (sequence . map (kwd2mtype p) $ xs)
+mdata2mtype :: MD.Program -> MD.MData -> ME.ThrowsError MD.MType
+mdata2mtype _ (MD.DataInt _) = Right $ MD.TypeSpc Nothing "Int" [] 
+mdata2mtype _ (MD.DataNum _) = Right $ MD.TypeSpc Nothing "Num" [] 
+mdata2mtype _ (MD.DataLog _) = Right $ MD.TypeSpc Nothing "Bool" []
+mdata2mtype p (MD.DataLst xs) =
+  fmap (MD.TypeSpc Nothing "List") (sequence [findListType p xs])
+mdata2mtype p (MD.DataTup xs) =
+  fmap (MD.TypeSpc Nothing "Tuple") (sequence . map (mdata2mtype p) $ xs)
+mdata2mtype p (MD.DataRec xs) =
+  fmap (MD.TypeSpc Nothing "Record") (sequence . map (kwd2mtype p) $ xs)
     where
-      kwd2mtype :: Program -> (Name, MData) -> ThrowsError MType
-      kwd2mtype p' (n, x) = TypeKwd <$> pure n <*> mdata2mtype p' x
-mdata2mtype _ (DataStr _)   = Right $ TypeSpc Nothing "String" []
-mdata2mtype p (DataFun x _) = getFunctionOutput p x
-mdata2mtype p (DataVar x) = getTypeByName p x
+      kwd2mtype :: MD.Program -> (MD.Name, MD.MData) -> ME.ThrowsError MD.MType
+      kwd2mtype p' (n, x) = MD.TypeKwd <$> pure n <*> mdata2mtype p' x
+mdata2mtype _ (MD.DataStr _)   = Right $ MD.TypeSpc Nothing "String" []
+mdata2mtype p (MD.DataFun x _) = getFunctionOutput p x
+mdata2mtype p (MD.DataVar x) = getTypeByName p x
 
-getFunctionOutput :: Program -> String -> ThrowsError MType
+getFunctionOutput :: MD.Program -> String -> ME.ThrowsError MD.MType
 getFunctionOutput p s = case outs of
-  []  -> Left (CouldNotFind s)
+  []  -> Left (ME.CouldNotFind s)
   [x] -> Right x
-  xs -> Left (NameConflict ("multiple definitions for " ++ s))
+  xs -> Left (ME.NameConflict ("multiple definitions for " ++ s))
   where
-    outs = [t | (TypeDecl n (TypeFun _ _ t) []) <- programTypes p, n == s] 
+    outs = [t | (MD.TypeDecl n (MD.TypeFun _ _ t) []) <- MD.programTypes p, n == s] 
 
-getTypeByName :: Program -> String -> ThrowsError MType
-getTypeByName p s = case [t | (TypeDecl n t _) <- programTypes p, n == s] of
-  [ ] -> Left (CouldNotFind s)
+getTypeByName :: MD.Program -> String -> ME.ThrowsError MD.MType
+getTypeByName p s = case [t | (MD.TypeDecl n t _) <- MD.programTypes p, n == s] of
+  [ ] -> Left (ME.CouldNotFind s)
   [x] -> Right x
-  _   -> Left (NameConflict ("multiple type signatures for " ++ s))
+  _   -> Left (ME.NameConflict ("multiple type signatures for " ++ s))
 
-findListType :: Program -> [MData] -> ThrowsError MType
-findListType _ [] = Right TypeUnk
+findListType :: MD.Program -> [MD.MData] -> ME.ThrowsError MD.MType
+findListType _ [] = Right MD.TypeUnk
 findListType p (x:[]) = mdata2mtype p x
 findListType p (x:xs)
   | all ((==) x) xs = mdata2mtype p x
-  | otherwise = Left (TypeError "Heterogenous lists are not supported")
+  | otherwise = Left (ME.TypeError "Heterogenous lists are not supported")
 
 -- Require [a] and [b] be of the same length
-zipWithError :: (a -> b -> ThrowsError c) -> [a] -> [b] -> ThrowsError [c]
+zipWithError :: (a -> b -> ME.ThrowsError c) -> [a] -> [b] -> ME.ThrowsError [c]
 zipWithError f xs ys
   | length xs == length ys = sequence $ zipWith f xs ys
-  | otherwise = Left (TypeError "Expected equal length vectors")
+  | otherwise = Left (ME.TypeError "Expected equal length vectors")
 
-findType :: [TypeDecl] -> Name -> ThrowsError MType
-findType ((TypeDecl n t _):ts) m = ifelse (n == m) (Right t) (findType ts m)
-findType [] m = Left (TypeError ("No type signature found for " ++ m))
+findType :: [MD.TypeDecl] -> MD.Name -> ME.ThrowsError MD.MType
+findType ((MD.TypeDecl n t _):ts) m = MU.ifelse (n == m) (Right t) (findType ts m)
+findType [] m = Left (ME.TypeError ("No type signature found for " ++ m))
 
--- resolve :: MType -> MType -> ThrowsError (MType -> MType)
--- resolve _ _ = Left (TypeError "Unresolvable mismatch")
+-- resolve :: MD.MType -> MD.MType -> ME.ThrowsError (MD.MType -> MD.MType)
+-- resolve _ _ = Left (ME.TypeError "Unresolvable mismatch")
 
-sourceNames :: Program -> [String]
-sourceNames p = concat [sourceNames' s | s <- programSources p] where
-  sourceNames' :: Source -> [String]
-  sourceNames' (Source _ _ ns) = [unalias n | n <- ns]
+sourceNames :: MD.Program -> [String]
+sourceNames p = concat [sourceNames' s | s <- MD.programSources p] where
+  sourceNames' :: MD.Source -> [String]
+  sourceNames' (MD.Source _ _ ns) = [unalias n | n <- ns]
 
-  unalias :: (Name, Maybe Alias) -> String
+  unalias :: (MD.Name, Maybe MD.Alias) -> String
   unalias (_, Just x) = x
   unalias (x, _     ) = x
 
-dataDeclarationNames :: Program -> [String]
-dataDeclarationNames p = [n | (DataDecl n _ _) <- programData p]
+dataDeclarationNames :: MD.Program -> [String]
+dataDeclarationNames p = [n | (MD.DataDecl n _ _) <- MD.programData p]
 
-typeDeclarationNames :: Program -> [String]
-typeDeclarationNames p = [n | (TypeDecl n _ _) <- programTypes p]
+typeDeclarationNames :: MD.Program -> [String]
+typeDeclarationNames p = [n | (MD.TypeDecl n _ _) <- MD.programTypes p]
 
-varNames :: Program -> [String]
-varNames p = concat [n:(f t \\ args) | (DataDecl n args t) <- programData p]
+varNames :: MD.Program -> [String]
+varNames p = concat [n:(f t \\ args) | (MD.DataDecl n args t) <- MD.programData p]
   where
-    f :: MData -> [String]
-    f (DataLst xs) = conmap f xs
-    f (DataTup xs) = conmap f xs
-    f (DataRec xs) = conmap f (map snd xs)
-    f (DataFun n xs) = n:(conmap f xs)
-    f (DataVar n) = [n]
+    f :: MD.MData -> [String]
+    f (MD.DataLst xs) = MU.conmap f xs
+    f (MD.DataTup xs) = MU.conmap f xs
+    f (MD.DataRec xs) = MU.conmap f (map snd xs)
+    f (MD.DataFun n xs) = n:(MU.conmap f xs)
+    f (MD.DataVar n) = [n]
     f _ = []
 
-functionNames :: Program -> [String]
-functionNames p = concat [n:(f t \\ args) | (DataDecl n args t) <- programData p]
+functionNames :: MD.Program -> [String]
+functionNames p = concat [n:(f t \\ args) | (MD.DataDecl n args t) <- MD.programData p]
   where
-    f :: MData -> [String]
-    f (DataLst xs) = conmap f xs
-    f (DataTup xs) = conmap f xs
-    f (DataRec xs) = conmap f (map snd xs)
-    f (DataFun n xs) = n:(conmap f xs)
+    f :: MD.MData -> [String]
+    f (MD.DataLst xs) = MU.conmap f xs
+    f (MD.DataTup xs) = MU.conmap f xs
+    f (MD.DataRec xs) = MU.conmap f (map snd xs)
+    f (MD.DataFun n xs) = n:(MU.conmap f xs)
     f _ = []
 
-calls :: Program -> [(Name, [MData])]
-calls p = concat [winnow args (f t) | (DataDecl n args t) <- programData p]
+calls :: MD.Program -> [(MD.Name, [MD.MData])]
+calls p = concat [winnow args (f t) | (MD.DataDecl n args t) <- MD.programData p]
   where
-    f :: MData -> [(Name, [MData])]
-    f (DataLst xs) = conmap f xs
-    f (DataTup xs) = conmap f xs
-    f (DataRec xs) = conmap f (map snd xs)
-    f (DataFun n xs) = (n, xs):(conmap f xs)
+    f :: MD.MData -> [(MD.Name, [MD.MData])]
+    f (MD.DataLst xs) = MU.conmap f xs
+    f (MD.DataTup xs) = MU.conmap f xs
+    f (MD.DataRec xs) = MU.conmap f (map snd xs)
+    f (MD.DataFun n xs) = (n, xs):(MU.conmap f xs)
     f _ = []
 
     winnow :: (Eq a, Eq b) => [a] -> [(a, b)] -> [(a, b)]

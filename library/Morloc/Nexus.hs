@@ -3,11 +3,9 @@ module Morloc.Nexus (
     , perlCliNexusGenerator
   ) where
 
-import Morloc.Data
-import Morloc.Tree
-import Morloc.Util
-
-import Data.List (intercalate) 
+import qualified Morloc.Data as MD
+import qualified Morloc.Util as MU
+import qualified Data.List as DL 
 
 data NexusGenerator = NexusGenerator {
     nexusPrologue    
@@ -20,7 +18,7 @@ data NexusGenerator = NexusGenerator {
     :: [String]
     -> String
   , nexusHelp
-    :: [(DataDecl, TypeDecl)]
+    :: [(MD.DataDecl, MD.TypeDecl)]
     -> String
     -- make a funtion that calls a function in a particular pool 
   , nexusCall
@@ -86,9 +84,9 @@ perlCliNexusGenerator = NexusGenerator {
       , "}"
       ]
 
-    makeCmdHash fs = indent 4 . unlines $
+    makeCmdHash fs = MU.indent 4 . unlines $
       [ "my %cmds = ("
-      , indent 4 . intercalate ",\n" . map makeHashEntry $ fs
+      , MU.indent 4 . DL.intercalate ",\n" . map makeHashEntry $ fs
       , ");"
       ]
 
@@ -121,6 +119,6 @@ perlCliNexusGenerator = NexusGenerator {
 
     makeManifoldName i = "m" ++ show i
 
-    makeFunction name body = "sub " ++ name ++ "{\n" ++ indent 4 body ++ "\n}"
+    makeFunction name body = "sub " ++ name ++ "{\n" ++ MU.indent 4 body ++ "\n}"
 
     nexusEpilogue' = ""

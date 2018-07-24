@@ -4,9 +4,9 @@ module Morloc.Language (
   , rCodeGenerator
 ) where
 
-import Morloc.Data
-import Data.List (intercalate)
-import Morloc.Util (indent)
+import qualified Morloc.Data as MD
+import qualified Data.List as DL
+import qualified Morloc.Util as U
 
 data Arg
   = Positional String
@@ -21,7 +21,7 @@ data CodeGenerator = CodeGenerator {
         -> String   -- entire pool script
 
     , makeSource
-        :: Source
+        :: MD.Source
         -> String
 
     , makeFunction
@@ -53,7 +53,7 @@ data CodeGenerator = CodeGenerator {
         -> String -- rhs
         -> String -- assignment expression
 
-    , makeMData :: MData -> String
+    , makeMData :: MD.MData -> String
   }
 
 rCodeGenerator :: CodeGenerator
@@ -72,18 +72,18 @@ rCodeGenerator = CodeGenerator {
     makePool' :: [String] -> [String] -> [String] -> String
     makePool' gs is fs = unlines . concat $ [begin', gs, is, fs, end']
 
-    makeSource' :: Source -> String
-    makeSource' (Source _ (Just path) _) = "source(" ++ path ++ ")"
+    makeSource' :: MD.Source -> String
+    makeSource' (MD.Source _ (Just path) _) = "source(" ++ path ++ ")"
     makeSource' _ = ""
 
     makeFunction' :: String -> String -> String -> String
-    makeFunction' f a b = f ++ " <- function(" ++ a ++ "){\n" ++ (indent 2 b) ++ "}\n"
+    makeFunction' f a b = f ++ " <- function(" ++ a ++ "){\n" ++ (U.indent 2 b) ++ "}\n"
 
     makeFunctionCall' :: String -> String -> String
     makeFunctionCall' f args = f ++ "(" ++ args ++ ")"
 
     makeArgs' :: [Arg] -> String
-    makeArgs' = intercalate ", " . map showArg
+    makeArgs' = DL.intercalate ", " . map showArg
 
     showArg (Positional s) = s
     showArg (Keyword n s)  = n ++ "=" ++ s
@@ -94,17 +94,17 @@ rCodeGenerator = CodeGenerator {
     makeAssignment' :: String -> String -> String
     makeAssignment' l r = l ++ " <- " ++ r
 
-    makeMData' :: MData -> String
-    makeMData' (DataInt x)     = show x ++ "L" -- longs in R are formatted as: 42L
-    makeMData' (DataNum x)     = show x
-    makeMData' (DataLog True)  = "TRUE"
-    makeMData' (DataLog False) = "FALSE"
-    makeMData' (DataLst xs)    = "c(" ++ (intercalate ", " . map makeMData') xs ++ ")"
-    makeMData' (DataTup xs)    = "list(" ++ (intercalate ", " . map makeMData') xs ++ ")"
-    makeMData' (DataRec rs)    = "list(" ++ (intercalate ", " . map (genEq makeMData') $ rs) ++ ")"
-    makeMData' (DataStr s)     = "\"" ++ s ++ "\""
-    makeMData' (DataFun _ _)   = "<stub function>"
-    makeMData' (DataVar _)     = "<stub variable>"
+    makeMData' :: MD.MData -> String
+    makeMData' (MD.DataInt x)     = show x ++ "L" -- longs in R are formatted as: 42L
+    makeMData' (MD.DataNum x)     = show x
+    makeMData' (MD.DataLog True)  = "TRUE"
+    makeMData' (MD.DataLog False) = "FALSE"
+    makeMData' (MD.DataLst xs)    = "c(" ++ (DL.intercalate ", " . map makeMData') xs ++ ")"
+    makeMData' (MD.DataTup xs)    = "list(" ++ (DL.intercalate ", " . map makeMData') xs ++ ")"
+    makeMData' (MD.DataRec rs)    = "list(" ++ (DL.intercalate ", " . map (genEq makeMData') $ rs) ++ ")"
+    makeMData' (MD.DataStr s)     = "\"" ++ s ++ "\""
+    makeMData' (MD.DataFun _ _)   = "<stub function>"
+    makeMData' (MD.DataVar _)     = "<stub variable>"
 
     genEq :: (b -> String) -> (String, b) -> String
     genEq f (n, b) = n ++ " = " ++ f b

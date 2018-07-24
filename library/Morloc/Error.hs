@@ -4,14 +4,15 @@ module Morloc.Error
   , ThrowsError
 ) where
 
-import Text.Parsec (ParseError)
-import Data.List (intercalate)
+import qualified Text.Parsec as TP
+import qualified Data.List as DL
 
--- TODO add declaration errors
+type ThrowsError = Either MorlocError
+
 data MorlocError
   = BadApplication   String
   | BadComposition   String
-  | SyntaxError      ParseError
+  | SyntaxError      TP.ParseError
   | BadArray         String
   | UndefinedValue   [String]
   | NotImplemented   String
@@ -24,7 +25,6 @@ data MorlocError
   | InvalidRDF       String
   | UnknownError
   deriving(Eq)
-
 
 instance Show MorlocError
   where
@@ -48,12 +48,6 @@ morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
 morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow  UnknownError         = "Damn, you broke it good"
 
--- show a list as: [<item>, <item>, ...]
-l :: [String] -> String
-l xs = "[" ++ (intercalate ", ") xs ++ "]"
-
 -- quote a string
 q :: Show a => a -> String
 q x = "'" ++ show x ++ "'"
-
-type ThrowsError = Either MorlocError
