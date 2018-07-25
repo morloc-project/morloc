@@ -3,6 +3,7 @@
 import qualified Test.Tasty
 import Test.Tasty.Hspec
 import qualified Data.RDF as DR
+import qualified Data.Sort as DS
 
 import qualified Morloc.Parser as MP
 import qualified Morloc.Triple as M3
@@ -22,7 +23,7 @@ rmId is ts = filter (rmId' is) ts
 
 testRdfCodeWith :: ([DR.Triple] -> [DR.Triple]) -> String -> [DR.Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
-  (Right ts') -> it s $ do shouldBe ts ts'
+  (Right ts') -> it s $ do shouldBe (DS.sort ts) (DS.sort ts')
   (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
     run' f s = fmap (mapTriples f) (MP.morlocScript (s ++ ";"))
@@ -88,15 +89,15 @@ spec = parallel $ do
     "True"
     [ M3.tripleL 1 ":isa" "boolean" "True" ]
 
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "[42,99]"
-  --   [ M3.tripleL 1 ":isa"      "string" ":list"
-  --   , M3.tripleN 1 ":contains" (DR.UNode "2")
-  --   , M3.tripleL 2 ":isa"      "integer" "42"
-  --   , M3.tripleN 1 ":contains" (DR.UNode "3")
-  --   , M3.tripleL 3 ":isa"      "integer" "99"
-  --   ]
+  testRdfCodeWith
+    (rmId [0])
+    "[42,99]"
+    [ M3.tripleL 1 ":isa"      "string" ":list"
+    , M3.tripleN 1 ":contains" (DR.UNode "2")
+    , M3.tripleL 2 ":isa"      "integer" "42"
+    , M3.tripleN 1 ":contains" (DR.UNode "3")
+    , M3.tripleL 3 ":isa"      "integer" "99"
+    ]
 
   -- testRdfCodeWith
   --   (rmId [0])
