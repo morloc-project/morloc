@@ -371,7 +371,7 @@ mdata =  do
         t <- mdata
         return $ M3.makeTopRDF i (
             [ M3.tripleN' i "morloc:isa" "morloc:recordEntry"
-            , M3.tripleL i "morloc:lhs" "morloc:string" n
+            , M3.tripleL i "morloc:lhs" "morloc:name" n
             ] ++ M3.adoptAs "morloc:rhs" i [t]
           )
 

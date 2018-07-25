@@ -108,38 +108,34 @@ spec = parallel $ do
     , iut 3 "morloc:isa"        "morloc:integer" "99"
     ]
 
+  testRdfCodeWith
+    (rmId [0])
+    "[42,\"foo\"]"
+    [ iuu 1 "morloc:isa"      "morloc:list"
+    , iui 1 "morloc:contains_0" 2
+    , iut 2 "morloc:isa"      "morloc:integer" "42"
+    , iui 1 "morloc:contains_1" 3
+    , iut 3 "morloc:isa"      "morloc:string" "foo"
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "{job = \"poopsmith\", age = 34}"
+    [ iuu 1 "morloc:isa"      "morloc:record"
+    , iui 1 "morloc:contains_0" 2
+    , iuu 2 "morloc:isa"      "morloc:recordEntry"
+    , iut 2 "morloc:lhs"      "morloc:name"    "job"
+    , iui 2 "morloc:rhs"      3
+    , iut 3 "morloc:isa"      "morloc:string"  "poopsmith"
+    , iui 1 "morloc:contains_1" 4
+    , iuu 4 "morloc:isa"      "morloc:recordEntry"
+    , iut 4 "morloc:lhs"      "morloc:name"    "age"
+    , iui 4 "morloc:rhs"      5
+    , iut 5 "morloc:isa"      "morloc:integer" "34"
+    ]
+
   -- testRdfCodeWith
-  --   (rmId [0]
-  --   "[42,\"foo\"]"
-  --   [ (1, "morloc:isa",      Str' "morloc:list"
-  --   , (1, "morloc:contains", Id'  2
-  --   , (2, "morloc:isa",      Str' "morloc:integer"
-  --   , (2, "morloc:value",    Int' 42
-  --   , (1, "morloc:contains", Id'  3
-  --   , (3, "morloc:isa",      Str' "morloc:string"
-  --   , (3, "morloc:value",    Str' "foo"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0]
-  --   "{job = \"poopsmith\", age = 34}"
-  --   [ (1, "morloc:isa",      Str' "morloc:record"
-  --   , (1, "morloc:contains", Id'  2
-  --   , (2, "morloc:isa",      Str' "recordEntry"
-  --   , (2, "morloc:lhs",      Str' "job"
-  --   , (2, "morloc:rhs",      Id'  3
-  --   , (3, "morloc:isa",      Str' "morloc:string"
-  --   , (3, "morloc:value",    Str' "poopsmith"
-  --   , (1, "morloc:contains", Id'  4
-  --   , (4, "morloc:isa",      Str' "recordEntry"
-  --   , (4, "morloc:lhs",      Str' "age"
-  --   , (4, "morloc:rhs",      Id'  5
-  --   , (5, "morloc:isa",      Str' "morloc:integer"
-  --   , (5, "morloc:value",    Int' 34
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0]
+  --   (rmId [0])
   --   "A :: Bool"
   --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
   --   , (1, "morloc:lhs", Id' 2
@@ -151,7 +147,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0]
+  --   (rmId [0])
   --   "A :: [Bool]"
   --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
   --   , (1, "morloc:lhs", Id' 2
@@ -166,7 +162,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0]
+  --   (rmId [0])
   --   "A :: (Bool, Fool)"
   --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
   --   , (1, "morloc:lhs", Id' 2
@@ -184,7 +180,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0]
+  --   (rmId [0])
   --   "A :: {B :: Bool, C :: Fool}"
   --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
   --   , (1, "morloc:lhs", Id' 2
@@ -279,7 +275,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..3]
+  --   (rmId [0..3])
   --   "foo :: i:Int -> j:[A]"
   --   [ (4, "morloc:isa",       Str' "morloc:atomicType"
   --   , (4, "morloc:value",     Str' "Int"
@@ -334,7 +330,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..5]
+  --   (rmId [0..5])
   --   "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
   --   [ (6,  "morloc:isa",   Str' "morloc:binop"
   --   , (6,  "morloc:value", Str' "GT"
@@ -379,7 +375,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..2]
+  --   (rmId [0..2])
   --   "foo :: A B -> C D"
   --   [ (3, "morloc:isa",       Str' "morloc:functionType"
   --   , (3, "morloc:input",     Id'  4
@@ -397,7 +393,7 @@ spec = parallel $ do
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..3]
+  --   (rmId [0..3])
   --   "foo :: A where ((1 == 1) and (2 == 2))"
   --   [ (4,  "morloc:isa",   Str' "morloc:binop"
   --   , (4,  "morloc:value", Str' "and"
