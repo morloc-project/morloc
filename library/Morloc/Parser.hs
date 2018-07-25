@@ -577,13 +577,13 @@ prefix name fun = TPE.Prefix (do {
     return (fun i);
   })
 
-triplePrimitive :: Show a => String -> MS.Parser a -> MS.Parser M3.TopRDF
-triplePrimitive isa p = do
+triplePrimitive :: String -> MS.Parser a -> (a -> String) -> MS.Parser M3.TopRDF
+triplePrimitive isa p show' = do
   i <- MS.getId
   n <- p
   -- TODO: the separation of "isa" and "value" is now redundant, since the
   -- primitives are typed
-  return $ M3.makeTopRDF i [M3.tripleL i "morloc:isa" isa (show n)]
+  return $ M3.makeTopRDF i [M3.tripleL i "morloc:isa" isa (show' n)]
 
 tripleInteger       :: MS.Parser M3.TopRDF
 tripleFloat         :: MS.Parser M3.TopRDF
@@ -591,8 +591,8 @@ tripleName          :: MS.Parser M3.TopRDF
 tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
 
-tripleInteger       = triplePrimitive "integer" Tok.integer
-tripleFloat         = triplePrimitive "number"  Tok.float
-tripleName          = triplePrimitive "name"    Tok.name
-tripleStringLiteral = triplePrimitive "string"  Tok.stringLiteral
-tripleBool          = triplePrimitive "boolean" Tok.boolean
+tripleInteger       = triplePrimitive "morloc:integer" Tok.integer       show
+tripleFloat         = triplePrimitive "morloc:number"  Tok.float         show
+tripleName          = triplePrimitive "morloc:name"    Tok.name          id
+tripleStringLiteral = triplePrimitive "morloc:string"  Tok.stringLiteral id
+tripleBool          = triplePrimitive "morloc:boolean" Tok.boolean       show
