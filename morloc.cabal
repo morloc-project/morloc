@@ -77,4 +77,5 @@ test-suite morloc-test-suite
     , tasty
     , tasty-hspec
     , morloc
+    , rdf4h
   default-language: Haskell2010

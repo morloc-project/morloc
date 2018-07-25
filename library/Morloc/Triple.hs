@@ -6,7 +6,6 @@ module Morloc.Triple (
   , tripleL -- make leaf triple (value object)
   , tripleN -- make node triple (URI object)
   , asId
-  , fromId
   , adoptAs
   , rdfId
   , showTopRDF
@@ -28,9 +27,6 @@ makeRDF xs = DR.mkRdf xs Nothing (DR.PrefixMappings DMS.empty)
 
 asId :: Int -> DR.Node
 asId i = DR.UNode (DT.pack . show $ i)
-
-fromId :: DR.Node -> Int
-fromId (DR.UNode s) = read . show $ s
 
 tripleL :: Show a => Int -> String -> String -> a -> DR.Triple
 tripleL s r t o = DR.Triple

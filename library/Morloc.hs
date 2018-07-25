@@ -11,4 +11,6 @@ turtle :: String -> IO ()
 turtle s = case MP.morlocScript s of
   Left err -> putStr $ show err ++ "\n"
   Right (M3.TopRDF _ rdfOutput) ->
-    DR.writeRdf (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty)) rdfOutput
+    DR.writeRdf
+      (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
+      rdfOutput
