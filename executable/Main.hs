@@ -1,28 +1,18 @@
 module Main (main) where
 
-import Morloc 
-import Morloc.Error
-import System.Environment (getArgs)
+import qualified Morloc as M
+import qualified System.Environment as SE
 
 main :: IO ()
 main = do
-  args <- getArgs
+  args <- SE.getArgs
   case args of
     -- no input
     []  -> putStrLn "You must provide at least one argument"
 
-    -- also NOT the right default
-    ["--rdf", "-e", text] -> putStr (rdf text)
+    ["-e", text] -> M.turtle text
 
-    ["--rdf", x] -> do
-      input <- readFile x
-      putStr (rdf input)
-
-    [x] -> do
-      input <- readFile x
-      make input
-
-    ["-e", text] -> make text
+    [x] -> readFile x >>= M.turtle
 
     -- wrong input
     _   -> putStrLn "Please provide a single filename"

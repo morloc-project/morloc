@@ -1,53 +1,65 @@
 module Morloc.Triple (
-    RDF(..)
-  , Triple(..)
-  , Subject
-  , Relation
-  , Object(..)
-  , rdfId
-  , rdfTriple
-  , showRDF
+    TopRDF(..)
+  , RDF
+  , DR.Triple
+  , makeTopRDF
+  , tripleL -- make leaf triple (value object)
+  , tripleN -- make node triple (URI object)
+  , asId
+  , fromId
   , adoptAs
-  , addTriples
+  , rdfId
+  , showTopRDF
 ) where
 
-data RDF = RDF
-  Subject  -- the top element
-  [Triple] -- RDF list
-  deriving(Ord, Eq, Show)
+import qualified Data.RDF as DR
+import qualified Data.Text as DT
+import qualified Data.Map.Strict as DMS
 
-type Triple = (Subject, Relation, Object)
-type Subject  = Int
-type Relation = String
-data Object
-  = Id' Subject
-  | Int' Integer
-  | Num' Double
-  | Log' Bool
-  | Str' String
-  deriving(Ord, Eq)
+type RDF = DR.RDF DR.AdjHashMap
 
-instance Show Object where
-  show (Id'  x ) = show x
-  show (Int' x ) = show x
-  show (Num' x ) = show x
-  show (Log' x ) = if x then "true" else "false"
-  show (Str' x ) = x
+data TopRDF = TopRDF DR.Node RDF deriving(Show)
 
--- write triplets in TAB-delimited format
-showRDF :: RDF -> String 
-showRDF (RDF _ xs) = unlines . map writeTriple $ xs where
-  writeTriple :: (Subject, Relation, Object) -> String
-  writeTriple (i, r, o) = show i ++ "\t" ++ r ++ "\t" ++ show o
+makeTopRDF :: Int -> [DR.Triple] -> TopRDF
+makeTopRDF i ts = TopRDF (asId i) (makeRDF ts)
 
-rdfId :: RDF -> Subject
-rdfId (RDF i _) = i
+makeRDF :: [DR.Triple] -> RDF
+makeRDF xs = DR.mkRdf xs Nothing (DR.PrefixMappings DMS.empty)
 
-rdfTriple :: RDF -> [Triple]
-rdfTriple (RDF _ xs) = xs
+asId :: Int -> DR.Node
+asId i = DR.UNode (DT.pack . show $ i)
 
-adoptAs :: Relation -> Subject -> [RDF] -> [Triple]
-adoptAs r i = concat . map (\(RDF j xs) -> (i, r, Id' j):xs)
+fromId :: DR.Node -> Int
+fromId (DR.UNode s) = read . show $ s
 
-addTriples :: RDF -> [Triple] -> RDF
-addTriples (RDF i xs) ys = RDF i (xs ++ ys)
+tripleL :: Show a => Int -> String -> String -> a -> DR.Triple
+tripleL s r t o = DR.Triple
+  (DR.UNode (DT.pack $ show s))
+  (DR.UNode (DT.pack r))
+  (DR.LNode (DR.TypedL (DT.pack t) (DT.pack $ show o)))
+
+tripleN :: Int -> String -> DR.Node -> DR.Triple
+tripleN s r o = DR.Triple
+  (DR.UNode (DT.pack $ show s)) -- URI of the subject
+  (DR.UNode (DT.pack r))        -- relation
+  o                             -- URI of the object
+
+rdfAppend :: RDF -> RDF -> RDF
+rdfAppend x y = DR.mkRdf
+  (DR.triplesOf x ++ DR.triplesOf y)
+  Nothing
+  (DR.PrefixMappings DMS.empty)
+
+adoptAs :: String -> Int -> [TopRDF] -> [DR.Triple]
+adoptAs r i ys =
+       map (link r i) ys
+    ++ concat (map (\(TopRDF _ y) -> DR.triplesOf y) ys)
+  where
+    link :: String -> Int -> TopRDF -> DR.Triple
+    link r' i' (TopRDF s _) = tripleN i' r' s
+
+showTopRDF :: TopRDF -> String
+showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
+  
+rdfId :: TopRDF -> Int
+rdfId (TopRDF (DR.UNode s) _) = read (show s)

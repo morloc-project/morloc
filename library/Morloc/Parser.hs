@@ -1,6 +1,9 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Morloc.Parser (morlocScript) where
 
 import Text.Parsec hiding (State, Parser)
+import qualified Data.RDF as DR
 import qualified Text.Parsec.Expr as TPE
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
@@ -11,7 +14,7 @@ import qualified Morloc.Triple as M3
 import qualified Morloc.Lexer as Tok
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocScript :: String -> ME.ThrowsError M3.RDF
+morlocScript :: String -> ME.ThrowsError M3.TopRDF
 morlocScript s =
   case runParser contents MS.parserStateEmpty "<stdin>" s of
     Left err  -> CME.throwError $ ME.SyntaxError err
@@ -19,16 +22,17 @@ morlocScript s =
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
-contents :: MS.Parser M3.RDF
+contents :: MS.Parser M3.TopRDF
 contents = do
   let i = 0
+  let emptyGraph = M3.TopRDF (M3.asId i) (DR.empty :: DR.RDF DR.AdjHashMap)
   xs <- Tok.whiteSpace >> many top <* eof
-  return $ M3.RDF 0 (
-         [(0, ":isa", M3.Str' ":script")]
-      ++ M3.adoptAs ":child" 0 xs
+  return $ M3.makeTopRDF i (
+         [M3.tripleL i ":isa" "string" ":script"]
+      ++ M3.adoptAs ":child" i xs
     )
 
-top :: MS.Parser M3.RDF 
+top :: MS.Parser M3.TopRDF 
 top =
       try (source'    <* optional (Tok.op ";") )
   <|> try (statement' <*           Tok.op ";"  )
@@ -37,7 +41,7 @@ top =
   <?> "Top. Maybe you are missing a semicolon?"
 
 -- | parses a 'source' header, returning the language
-source' :: MS.Parser M3.RDF
+source' :: MS.Parser M3.TopRDF
 source' = do
   -- id for this source
   Tok.reserved "source"
@@ -51,16 +55,16 @@ source' = do
   -- the statement is unambiguous even without a semicolon
   optional (Tok.op ";")
 
-  return $ M3.RDF i ([
-          (i, ":isa",  M3.Str' ":source")
-        , (i, ":lang", M3.Str' lang)
+  return $ M3.makeTopRDF i ([
+          (M3.tripleL i ":isa" "string" ":source")
+        , (M3.tripleL i ":lang" "string" lang)
       ] ++
         M3.adoptAs ":import" i fs ++
-        maybe [] (\p -> [(i, ":path", M3.Str' p)]) path
+        maybe [] (\p -> [M3.tripleL i ":path" "string" p]) path
     )
 
   where
-    importAs' :: MS.Parser M3.RDF
+    importAs' :: MS.Parser M3.TopRDF
     importAs' = do
       i <- MS.getId
       -- quoting the function names allows them to have more arbitrary values,
@@ -70,64 +74,64 @@ source' = do
       -- the alias is especially important when the native function name is not
       -- legal Morloc syntax, for example an R function with a '.' in the name.
       alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
-      return $ M3.RDF i (
-           [(i, ":name", M3.Str' func)] ++
-            maybe [] (\x -> [(i, ":alias", M3.Str' x)]) alias
+      return $ M3.makeTopRDF i (
+           [M3.tripleL i ":name" "string" func] ++
+            maybe [] (\x -> [M3.tripleL i ":alias" "string" x]) alias
         )
 
-statement' :: MS.Parser M3.RDF
+statement' :: MS.Parser M3.TopRDF
 statement' =
       try typeDeclaration
   <|> try dataDeclaration
 
-import' :: MS.Parser M3.RDF
+import' :: MS.Parser M3.TopRDF
 import' =
       try restrictedImport
   <|> try simpleImport
 
-simpleImport :: MS.Parser M3.RDF
+simpleImport :: MS.Parser M3.TopRDF
 simpleImport = do
   i <- MS.getId
   Tok.reserved "import"
   path <- Tok.path
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
-  return $ M3.RDF i (
+  return $ M3.makeTopRDF i (
       [
-        (i, ":isa", M3.Str' ":import")
-      , (i, ":name", M3.Str' (DL.intercalate "." path))
-      ] ++ maybe [] (\q -> [(i, ":namespace", M3.Str' q)]) qual
+        (M3.tripleL i ":isa" "string" ":import")
+      , (M3.tripleL i ":name" "string" (DL.intercalate "." path))
+      ] ++ maybe [] (\q -> [M3.tripleL i ":namespace" "string" q]) qual
     )
 
-restrictedImport :: MS.Parser M3.RDF
+restrictedImport :: MS.Parser M3.TopRDF
 restrictedImport = do
   i <- MS.getId
   Tok.reserved "from"
   path <- Tok.path
   Tok.reserved "import"
   functions <- Tok.parens (sepBy1 tripleName Tok.comma)
-  return $ M3.RDF i (
+  return $ M3.makeTopRDF i (
       [
-        (i, ":isa", M3.Str' ":restricted_import")
-      , (i, ":name", M3.Str' (DL.intercalate "." path))
+        M3.tripleL i ":isa" "string" ":restricted_import"
+      , M3.tripleL i ":name" "string" (DL.intercalate "." path)
       ] ++ M3.adoptAs ":import" i functions
     )
 
-dataDeclaration :: MS.Parser M3.RDF
+dataDeclaration :: MS.Parser M3.TopRDF
 dataDeclaration = do
   i <- MS.getId
   lhs <- tripleName 
   bndvars <- many tripleName
   Tok.op "="
   rhs <- expression
-  return $ M3.RDF i (
-         [(i, ":isa", M3.Str' ":dataDeclaration")]
+  return $ M3.makeTopRDF i (
+         [M3.tripleL i ":isa" "string" ":dataDeclaration"]
       ++ M3.adoptAs ":lhs"       i [lhs]
       ++ M3.adoptAs ":parameter" i bndvars
       ++ M3.adoptAs ":rhs"       i [rhs]
     )
 
 -- | function :: [input] -> output constraints
-typeDeclaration :: MS.Parser M3.RDF
+typeDeclaration :: MS.Parser M3.TopRDF
 typeDeclaration = do
   i <- MS.getId
   lhs <- tripleName
@@ -137,17 +141,17 @@ typeDeclaration = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
-  return $ M3.RDF i (
-         [(i, ":isa", M3.Str' ":typeDeclaration")]
+  return $ M3.makeTopRDF i (
+         [M3.tripleL i ":isa" "string" ":typeDeclaration"]
       ++ M3.adoptAs ":lhs" i [lhs]
       ++ M3.adoptAs ":rhs" i [rhs]
       ++ M3.adoptAs ":constraint" (M3.rdfId rhs) constraints
     )
 
-listTag :: M3.Subject -> Maybe String -> [(M3.Subject, M3.Relation, M3.Object)] 
-listTag i tag = maybe [] (\t -> [(i, ":label", M3.Str' t)]) tag
+listTag :: Int -> Maybe String -> [M3.Triple]
+listTag i tag = maybe [] (\t -> [M3.tripleL i ":label" "string" t]) tag
 
-mtype :: MS.Parser M3.RDF
+mtype :: MS.Parser M3.TopRDF
 mtype =
         try function' -- a [, *] -> b [where (*)]
     <|> try specific' -- A ...
@@ -158,7 +162,7 @@ mtype =
   where
 
     -- any type other than a naked function
-    notFunction' :: MS.Parser M3.RDF
+    notFunction' :: MS.Parser M3.TopRDF
     notFunction' =
           try specific' -- A ...
       <|> try generic'  -- a ...
@@ -166,7 +170,7 @@ mtype =
       <|> try unambiguous'
       <?> "type"
 
-    unambiguous' :: MS.Parser M3.RDF
+    unambiguous' :: MS.Parser M3.TopRDF
     unambiguous' =
             try empty' -- ()
         <|> try paren' -- (a)
@@ -176,14 +180,16 @@ mtype =
         <|> generic1   -- a
 
     -- <name> <type> <type> ...
-    specific' :: MS.Parser M3.RDF
+    specific' :: MS.Parser M3.TopRDF
     specific' = do
       l <- Tok.tag Tok.genericType
       n <- Tok.specificType
       i <- MS.getId
       ns <- many1 unambiguous'
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":parameterizedType"), (i, ":value", M3.Str' n)]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":parameterizedType"
+             , M3.tripleL i ":value" "string" n
+             ]
           ++ (listTag i l)
           ++ M3.adoptAs ":parameter" i ns
         )
@@ -193,116 +199,128 @@ mtype =
     -- function of an Int.
     --
     -- <name> <type> <type> ...
-    generic' :: MS.Parser M3.RDF
+    generic' :: MS.Parser M3.TopRDF
     generic' = do
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
       i <- MS.getId
       ns <- many1 unambiguous'
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":parameterizedGeneric"), (i, ":value", M3.Str' n)]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":parameterizedGeneric"
+             , M3.tripleL i ":value" "string" n
+             ]
           ++ (listTag i l)
           ++ (M3.adoptAs ":parameter" i ns)
         )
 
     -- <name> <type> <type> ...
-    specific1 :: MS.Parser M3.RDF
+    specific1 :: MS.Parser M3.TopRDF
     specific1 = do
       l <- Tok.tag Tok.specificType
       n <- Tok.specificType
       i <- MS.getId
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":atomicType"), (i, ":value", M3.Str' n)]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":atomicType"
+             , M3.tripleL i ":value" "string" n
+             ]
           ++ listTag i l
         )
 
     -- <name> <type> <type> ...
-    generic1 :: MS.Parser M3.RDF
+    generic1 :: MS.Parser M3.TopRDF
     generic1 = do
       notFollowedBy (Tok.reserved "where")
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
       i <- MS.getId
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":atomicGeneric"), (i, ":value", M3.Str' n)]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":atomicGeneric"
+             , M3.tripleL i ":value" "string" n
+             ]
           ++ (listTag i l)
         )
 
-    empty' :: MS.Parser M3.RDF
+    empty' :: MS.Parser M3.TopRDF
     empty' = do
       Tok.op "("
       Tok.op ")"
       i <- MS.getId
-      return $ M3.RDF i [(i, ":isa", M3.Str' ":empty")]
+      return $ M3.makeTopRDF i [M3.tripleL i ":isa" "string" ":empty"]
 
-    paren' :: MS.Parser M3.RDF 
+    paren' :: MS.Parser M3.TopRDF 
     paren' = Tok.parens mtype
 
-    tuple' :: MS.Parser M3.RDF
+    tuple' :: MS.Parser M3.TopRDF
     tuple' = Tok.parens $ do
       i <- MS.getId
       l <- Tok.tag (char '(')
       x <- mtype
       Tok.op ","
       xs <- sepBy1 mtype Tok.comma
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":parameterizedType"), (i, ":value", M3.Str' "Tuple")]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":parameterizedType"
+             , M3.tripleL i ":value" "string" "Tuple"
+             ]
           ++ listTag i l
           ++ M3.adoptAs ":parameter" i (x:xs)
         )
 
     -- [ <type> ]
-    list' :: MS.Parser M3.RDF
+    list' :: MS.Parser M3.TopRDF
     list' = do
       i <- MS.getId
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":parameterizedType"), (i, ":value", M3.Str' "List")]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":parameterizedType"
+             , M3.tripleL i ":value" "string" "List"
+             ]
           ++ listTag i l
           ++ M3.adoptAs ":parameter" i [s]
         )
 
     -- { <name> :: <type>, <name> :: <type>, ... }
-    record' :: MS.Parser M3.RDF
+    record' :: MS.Parser M3.TopRDF
     record' = do
       i <- MS.getId
       l <- Tok.tag (char '{')
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
-      return $ M3.RDF i (
-             [ (i, ":isa", M3.Str' ":parameterizedType"), (i, ":value", M3.Str' "Record")]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":parameterizedType"
+             , M3.tripleL i ":value" "string" "Record"
+             ]
           ++ listTag i l
           ++ M3.adoptAs ":parameter" i ns
         )
 
     -- (<name> = <type>)
-    recordEntry' :: MS.Parser M3.RDF
+    recordEntry' :: MS.Parser M3.TopRDF
     recordEntry' = do
       i <- MS.getId
       n <- Tok.name
       Tok.op "::"
       t <- mtype
-      return $ M3.RDF i (
-          [ (i, ":isa", M3.Str' ":namedType")
-          , (i, ":name", M3.Str' n)
+      return $ M3.makeTopRDF i (
+          [ M3.tripleL i ":isa" "string" ":namedType"
+          , M3.tripleL i ":name" "string" n
           ] ++ M3.adoptAs ":value" i [t]
         )
 
-    function' :: MS.Parser M3.RDF
+    function' :: MS.Parser M3.TopRDF
     function' = do
       i <- MS.getId
       inputs <- sepBy1 notFunction' Tok.comma
       Tok.op "->"
       output <- notFunction'
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":functionType")]
+      return $ M3.makeTopRDF i (
+             [M3.tripleL i ":isa" "string" ":functionType"]
           ++ M3.adoptAs ":input" i inputs
           ++ M3.adoptAs ":output" i [output]
         )
 
 
-mdata :: MS.Parser M3.RDF
+mdata :: MS.Parser M3.TopRDF
 mdata =  do
         try tripleBool          -- True | False
     <|> try tripleFloat         -- 1.1
@@ -314,28 +332,28 @@ mdata =  do
     <?> "literal data"
     where
 
-      list' :: MS.Parser M3.RDF
+      list' :: MS.Parser M3.TopRDF
       list' = do
         i <- MS.getId
         xs <- Tok.brackets (sepBy mdata Tok.comma)
-        return $ M3.RDF i (
-               [(i, ":isa", M3.Str' ":list")]
+        return $ M3.makeTopRDF i (
+               [M3.tripleL i ":isa" "string" ":list"]
             ++ M3.adoptAs ":contains" i xs
           )
 
       tuple' = do
         i <- MS.getId
         xs <- Tok.parens tuple''
-        return $ M3.RDF i (
-               [(i, ":isa", M3.Str' ":tuple")]
+        return $ M3.makeTopRDF i (
+               [M3.tripleL i ":isa" "string" ":tuple"]
             ++ M3.adoptAs ":contains" i xs
           )
 
       record' = do
         i <- MS.getId
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
-        return $ M3.RDF i (
-               [(i, ":isa", M3.Str' ":record")]
+        return $ M3.makeTopRDF i (
+               [M3.tripleL i ":isa" "string" ":record"]
             ++ M3.adoptAs ":contains" i xs
           )
 
@@ -352,33 +370,33 @@ mdata =  do
         n <- Tok.name
         Tok.op "="
         t <- mdata
-        return $ M3.RDF i (
-            [ (i, ":isa", M3.Str' "recordEntry") 
-            , (i, ":lhs", M3.Str' n)
+        return $ M3.makeTopRDF i (
+            [ M3.tripleL i ":isa" "string" "recordEntry"
+            , M3.tripleL i ":lhs" "string" n
             ] ++ M3.adoptAs ":rhs" i [t]
           )
 
-expression :: MS.Parser M3.RDF
+expression :: MS.Parser M3.TopRDF
 expression =
   -- currently this just handles "."
       try (TPE.buildExpressionParser functionTable term')
   <|> term'
   <?> "an expression"
   where
-    term' :: MS.Parser M3.RDF
+    term' :: MS.Parser M3.TopRDF
     term' =
           try (Tok.parens expression)
       <|> try application
       <|> try mdata
       <|> try tripleName
 
-application :: MS.Parser M3.RDF
+application :: MS.Parser M3.TopRDF
 application = do
   i <- MS.getId
   function <- Tok.parens expression <|> identifier'
   arguments <- many1 term'
-  return $ M3.RDF i (
-         [ (i, ":isa", M3.Str' ":call")]
+  return $ M3.makeTopRDF i (
+         [M3.tripleL i ":isa" "string" ":call"]
       ++ M3.adoptAs ":value" i [function]
       ++ M3.adoptAs ":argument" i arguments
     )
@@ -392,12 +410,12 @@ application = do
       i    <- MS.getId
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
-      return $ M3.RDF i (
-          [ (i, ":isa", M3.Str' ":name")
-          , (i, ":value", M3.Str' x)
+      return $ M3.makeTopRDF i (
+          [ M3.tripleL i ":isa" "string" ":name"
+          , M3.tripleL i ":value" "string" x
           ] ++ listTag i tag')
 
-booleanExpr :: MS.Parser M3.RDF
+booleanExpr :: MS.Parser M3.TopRDF
 booleanExpr = do
       try booleanBinOp
   <|> try relativeExpr
@@ -406,31 +424,33 @@ booleanExpr = do
   <|> try call'
   <?> "an expression that reduces to True/False"
   where
-    not' :: MS.Parser M3.RDF
+    not' :: MS.Parser M3.TopRDF
     not' = do
       Tok.reserved "not"
       i <- MS.getId
       e <- booleanExpr
-      return $ M3.RDF i (M3.adoptAs ":not" i [e]) 
+      return $ M3.makeTopRDF i (M3.adoptAs ":not" i [e]) 
 
-    call' :: MS.Parser M3.RDF
+    call' :: MS.Parser M3.TopRDF
     call' = do
       i <- MS.getId
       n <- Tok.name
       ns <- many1 argument'
-      return $ M3.RDF i (
-             [(i, ":isa", M3.Str' ":call"), (i, ":name", M3.Str' n)]
+      return $ M3.makeTopRDF i (
+             [ M3.tripleL i ":isa" "string" ":call"
+             , M3.tripleL i ":name" "string" n
+             ]
           ++ M3.adoptAs ":argument" i ns
         )
 
-    argument' :: MS.Parser M3.RDF
+    argument' :: MS.Parser M3.TopRDF
     argument' =
           (Tok.parens booleanExpr)
       <|> try tripleBool
       <|> tripleName
       <?> "expect an argument"
 
-booleanBinOp :: MS.Parser M3.RDF
+booleanBinOp :: MS.Parser M3.TopRDF
 booleanBinOp = do
   i <- MS.getId
   a <- bterm'
@@ -444,7 +464,7 @@ booleanBinOp = do
         <|> Tok.parens booleanExpr
         <?> "boolean expression"
 
-relativeExpr :: MS.Parser M3.RDF
+relativeExpr :: MS.Parser M3.TopRDF
 relativeExpr = do
   i <- MS.getId
   a <- arithmeticExpr
@@ -460,12 +480,12 @@ relativeExpr = do
       | op == ">=" = (binOp "GE" i a b)
       | op == "<=" = (binOp "LE" i a b)
 
-arithmeticExpr :: MS.Parser M3.RDF
+arithmeticExpr :: MS.Parser M3.TopRDF
 arithmeticExpr
   =   TPE.buildExpressionParser arithmeticTable arithmeticTerm
   <?> "expression"
 
-arithmeticTerm :: MS.Parser M3.RDF
+arithmeticTerm :: MS.Parser M3.TopRDF
 arithmeticTerm = do
       Tok.parens arithmeticExpr
   <|> try access'
@@ -479,13 +499,13 @@ arithmeticTerm = do
       i <- MS.getId
       x <- Tok.name
       xs <- many1 argument'
-      return $ M3.RDF i (
-          [ (i, ":isa", M3.Str' ":call")
-          , (i, ":name", M3.Str' x)
+      return $ M3.makeTopRDF i (
+          [ M3.tripleL i ":isa" "string" ":call"
+          , M3.tripleL i ":name" "string" x
           ] ++ M3.adoptAs ":argument" i xs
         )
 
-    argument' :: MS.Parser M3.RDF
+    argument' :: MS.Parser M3.TopRDF
     argument' =
           Tok.parens arithmeticExpr
       <|> try access'
@@ -497,9 +517,9 @@ arithmeticTerm = do
       i <- MS.getId
       x <- Tok.name
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
-      return $ M3.RDF i (
-          [ (i, ":isa", M3.Str' ":access")
-          , (i, ":name", M3.Str' x)
+      return $ M3.makeTopRDF i (
+          [ M3.tripleL i ":isa" "string" ":access"
+          , M3.tripleL i ":name" "string" x
           ] ++ M3.adoptAs ":child" i ids
         )
 
@@ -520,30 +540,30 @@ arithmeticTable
       ]
   ]
 
-unaryOp :: String -> M3.Subject -> M3.RDF -> M3.RDF
-unaryOp s i (M3.RDF j xs) = M3.RDF i (
-     [ (i, ":isa", M3.Str' s) 
-     , (i, ":contains", M3.Id' j)
-     ] ++ xs
+unaryOp :: String -> Int -> M3.TopRDF -> M3.TopRDF
+unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
+     [ M3.tripleL i ":isa" "string" s
+     , M3.tripleN i ":contains" j
+     ] ++ (DR.triplesOf xs)
   )
 
-binOp :: String -> M3.Subject -> M3.RDF -> M3.RDF -> M3.RDF
-binOp s i (M3.RDF j xs) (M3.RDF k ys) = M3.RDF i (
-     [ (i, ":isa", M3.Str' ":binop") 
-     , (i, ":value", M3.Str' s)
-     , (i, ":lhs", M3.Id' j)
-     , (i, ":rhs", M3.Id' k)
-     ] ++ xs ++ ys
+binOp :: String -> Int -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
+binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
+     [ M3.tripleL i ":isa" "string" ":binop"
+     , M3.tripleL i ":value" "string" s
+     , M3.tripleN i ":lhs" j
+     , M3.tripleN i ":rhs" k
+     ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
 functionTable = [[ binary "."  exprComposition TPE.AssocRight ]]
 
-exprComposition :: M3.Subject -> M3.RDF -> M3.RDF -> M3.RDF
-exprComposition i (M3.RDF j xs) (M3.RDF k ys) = M3.RDF i (
-     [ (i, ":isa", M3.Str' ":composition") 
-     , (i, ":lhs", M3.Id' j)
-     , (i, ":rhs", M3.Id' k)
-     ] ++ xs ++ ys
+exprComposition :: Int -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
+exprComposition i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
+     [ M3.tripleL i ":isa" "string" ":composition"
+     , M3.tripleN i ":lhs" j
+     , M3.tripleN i ":rhs" k
+     ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
 binary name fun assoc = TPE.Infix (do {
@@ -558,20 +578,23 @@ prefix name fun = TPE.Prefix (do {
     return (fun i);
   })
 
-triplePrimitive :: String -> MS.Parser a -> (a -> M3.Object) -> MS.Parser M3.RDF
-triplePrimitive isa p f = do
+triplePrimitive :: Show a => String -> MS.Parser a -> MS.Parser M3.TopRDF
+triplePrimitive isa p = do
   i <- MS.getId
   n <- p
-  return $ M3.RDF i [(i, ":isa", M3.Str' isa), (i, ":value", f n)]
+  -- TODO: the separation of "isa" and "value" is now redundant, since the
+  -- primitives are typed
+  return $ M3.makeTopRDF i [M3.tripleL i ":isa" "string" isa,
+                            M3.tripleL i ":value" isa (show n)]
 
-tripleInteger       :: MS.Parser M3.RDF
-tripleFloat         :: MS.Parser M3.RDF
-tripleName          :: MS.Parser M3.RDF
-tripleStringLiteral :: MS.Parser M3.RDF
-tripleBool          :: MS.Parser M3.RDF
+tripleInteger       :: MS.Parser M3.TopRDF
+tripleFloat         :: MS.Parser M3.TopRDF
+tripleName          :: MS.Parser M3.TopRDF
+tripleStringLiteral :: MS.Parser M3.TopRDF
+tripleBool          :: MS.Parser M3.TopRDF
 
-tripleInteger       = triplePrimitive ":integer" Tok.integer       M3.Int'
-tripleFloat         = triplePrimitive ":number"  Tok.float         M3.Num'
-tripleName          = triplePrimitive ":name"    Tok.name          M3.Str'
-tripleStringLiteral = triplePrimitive ":string"  Tok.stringLiteral M3.Str'
-tripleBool          = triplePrimitive ":boolean" Tok.boolean       M3.Log'
+tripleInteger       = triplePrimitive ":integer" Tok.integer
+tripleFloat         = triplePrimitive ":number"  Tok.float
+tripleName          = triplePrimitive ":name"    Tok.name
+tripleStringLiteral = triplePrimitive ":string"  Tok.stringLiteral
+tripleBool          = triplePrimitive ":boolean" Tok.boolean

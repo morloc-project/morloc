@@ -1,29 +1,14 @@
-module Morloc (rdf, make) where
+module Morloc (turtle) where
 
-import Morloc.Error
-import Morloc.Parser (morlocScript)
-import Morloc.Tree (rdf2tree)
-import Morloc.Evaluator (tree2program)
-import Morloc.Processor (process)
-import Morloc.Generator (generate, Nexus, Pool)
-import Morloc.Builder (build)
-import Morloc.Triple (showRDF)
-import Morloc.Data
+import qualified Data.RDF as DR
+import qualified Data.Map.Strict as DMS
+import qualified Morloc.Error as ME
+import qualified Morloc.Triple as M3
+import qualified Morloc.Parser as MP
+import qualified Morloc.Data as MD
 
-writeProgram :: ThrowsError (Script, [Script]) -> IO ()
-writeProgram (Right x) = build x
-writeProgram (Left err) = putStrLn (show err)
-
-rdf :: String -> String
-rdf s = case morlocScript s of
-  Left err -> show err ++ "\n"
-  Right result -> showRDF result
-
-make :: String -> IO ()
-make s = writeProgram $
-      return s
-  >>= morlocScript  -- parse the script
-  >>= rdf2tree      -- convert the RDF into a tree
-  >>= tree2program  -- extract data structures
-  >>= process       -- typecheck
-  >>= generate      -- generate the nexus and pool code
+turtle :: String -> IO ()
+turtle s = case MP.morlocScript s of
+  Left err -> putStr $ show err ++ "\n"
+  Right (M3.TopRDF _ rdfOutput) ->
+    DR.writeRdf (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty)) rdfOutput
