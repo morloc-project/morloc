@@ -79,4 +79,5 @@ test-suite morloc-test-suite
     , morloc
     , rdf4h
     , sort
+    , text
   default-language: Haskell2010

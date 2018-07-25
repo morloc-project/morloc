@@ -4,6 +4,7 @@ import qualified Test.Tasty
 import Test.Tasty.Hspec
 import qualified Data.RDF as DR
 import qualified Data.Sort as DS
+import qualified Data.Text as DT
 
 import qualified Morloc.Parser as MP
 import qualified Morloc.Triple as M3
@@ -32,70 +33,79 @@ testRdfCodeWith f s ts = case (run' f s) of
 testRdfCode :: String -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
+iuu :: Int -> String -> String -> DR.Triple
+iuu s p o = M3.tripleN' s p o
+
+iui :: Int -> String -> Int -> DR.Triple
+iui s p o = M3.tripleN s p (DR.UNode (DT.pack . show $ o))  
+
+iut :: Int -> String -> String -> String -> DR.Triple
+iut s p t o = M3.tripleL s p t o
+
 spec :: Spec
 spec = parallel $ do
 
-  -- testRdfCode
-  --   "source \"R\" (\"fo.o\" as foo)"
-  --   [ (0, "morloc:isa",    Str' "morloc:script"
-  --   , (0, "morloc:child",  Id'  1
-  --   , (1, "morloc:isa",    Str' "morloc:source"
-  --   , (1, "morloc:lang",   Str' "R"
-  --   , (1, "morloc:import", Id'  2
-  --   , (2, "morloc:name",   Str' "fo.o"
-  --   , (2, "morloc:alias",  Str' "foo"
-  --   ]
+  testRdfCode
+    "source \"R\" (\"fo.o\" as foo)"
+    [ iuu 0 "morloc:isa"     "morloc:script"
+    , iui 0 "morloc:child_0" 1
+    , iuu 1 "morloc:isa"     "morloc:source"
+    , iut 1 "morloc:lang"    "morloc:string" "R"
+    , iui 1 "morloc:import"  2
+    , iut 2 "morloc:name"    "morloc:string" "fo.o"
+    , iut 2 "morloc:alias"   "morloc:string" "foo"
+    ]
 
   testRdfCode
     "from bob/foo import (bar, baz)"
-    [ M3.tripleN' 0 "morloc:isa"     "morloc:script"
-    , M3.tripleN  0 "morloc:child_0" (DR.UNode "1")
-    , M3.tripleN' 1 "morloc:isa"     "morloc:restricted_import"
-    , M3.tripleL  1 "morloc:name"    "morloc:string" "bob.foo"
-    , M3.tripleN  1 "morloc:import"  (DR.UNode "2")
-    , M3.tripleL  2 "morloc:isa"   "morloc:name" "bar"
-    , M3.tripleN  1 "morloc:import"  (DR.UNode "3")
-    , M3.tripleL  3 "morloc:isa"   "morloc:name" "baz"
+    [ iuu 0 "morloc:isa"     "morloc:script"
+    , iui 0 "morloc:child_0" 1
+    , iuu 1 "morloc:isa"     "morloc:restricted_import"
+    , iut 1 "morloc:name"    "morloc:string" "bob.foo"
+    , iui 1 "morloc:import"  2
+    , iut 2 "morloc:isa"     "morloc:name"   "bar"
+    , iui 1 "morloc:import"  3
+    , iut 3 "morloc:isa"     "morloc:name"   "baz"
     ]
 
   testRdfCode
     "import bob/foo as foo"
-    [ M3.tripleN' 0 "morloc:isa"       "morloc:script"
-    , M3.tripleN  0 "morloc:child_0"   (DR.UNode "1")
-    , M3.tripleN' 1 "morloc:isa"       "morloc:import"
-    , M3.tripleL  1 "morloc:name"      "morloc:string" "bob.foo"
-    , M3.tripleL  1 "morloc:namespace" "morloc:string" "foo"
+    [ iuu 0 "morloc:isa"       "morloc:script"
+    , iui 0 "morloc:child_0"   1
+    , iuu 1 "morloc:isa"       "morloc:import"
+    , iut 1 "morloc:name"      "morloc:string" "bob.foo"
+    , iut 1 "morloc:namespace" "morloc:string" "foo"
     ]
 
   testRdfCodeWith
     (rmId [0])
     "42"
-    [ M3.tripleL 1 "morloc:isa" "morloc:integer" "42" ]
+    [ iut 1 "morloc:isa" "morloc:integer" "42" ]
 
 
   testRdfCodeWith
     (rmId [0])
     "-42"
-    [ M3.tripleL 1 "morloc:isa" "morloc:integer" "-42" ]
+    [ iut 1 "morloc:isa" "morloc:integer" "-42" ]
 
   testRdfCodeWith
     (rmId [0])
     "4.2"
-    [ M3.tripleL 1 "morloc:isa" "morloc:number" "4.2" ]
+    [ iut 1 "morloc:isa" "morloc:number" "4.2" ]
 
   testRdfCodeWith
     (rmId [0])
     "True"
-    [ M3.tripleL 1 "morloc:isa" "morloc:boolean" "True" ]
+    [ iut 1 "morloc:isa" "morloc:boolean" "True" ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,99]"
-    [ M3.tripleN' 1 "morloc:isa"        "morloc:list"
-    , M3.tripleN  1 "morloc:contains_0" (DR.UNode "2")
-    , M3.tripleL  2 "morloc:isa"        "morloc:integer" "42"
-    , M3.tripleN  1 "morloc:contains_1" (DR.UNode "3")
-    , M3.tripleL  3 "morloc:isa"        "morloc:integer" "99"
+    [ iuu 1 "morloc:isa"        "morloc:list"
+    , iui 1 "morloc:contains_0" 2
+    , iut 2 "morloc:isa"        "morloc:integer" "42"
+    , iui 1 "morloc:contains_1" 3
+    , iut 3 "morloc:isa"        "morloc:integer" "99"
     ]
 
   -- testRdfCodeWith
