@@ -73,39 +73,31 @@ spec = parallel $ do
     "42"
     [ M3.tripleL 1 ":isa" "integer" "42" ]
 
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "-42"
-  --   [ (1, ":isa",   Str' ":integer" )
-  --   , (1, ":value", Int' (-42)      )
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "4.2"
-  --   [ (1, ":isa",   Str' ":number" )
-  --   , (1, ":value", Num' 4.2       )
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "True"
-  --   [ (1, ":isa",   Str' ":boolean" )
-  --   , (1, ":value", Log' True       )
-  --   ]
-  --
+  testRdfCodeWith
+    (rmId [0])
+    "-42"
+    [ M3.tripleL 1 ":isa" "integer" "-42" ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "4.2"
+    [ M3.tripleL 1 ":isa" "number" "4.2" ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "True"
+    [ M3.tripleL 1 ":isa" "boolean" "True" ]
+
   -- testRdfCodeWith
   --   (rmId [0])
   --   "[42,99]"
-  --   [ (1, ":isa",      Str' ":list"    )
-  --   , (1, ":contains", Id'  2          )
-  --   , (2, ":isa",      Str' ":integer" )
-  --   , (2, ":value",    Int' 42         )
-  --   , (1, ":contains", Id'  3          )
-  --   , (3, ":isa",      Str' ":integer" )
-  --   , (3, ":value",    Int' 99         )
+  --   [ M3.tripleL 1 ":isa"      "string" ":list"
+  --   , M3.tripleN 1 ":contains" (DR.UNode "2")
+  --   , M3.tripleL 2 ":isa"      "integer" "42"
+  --   , M3.tripleN 1 ":contains" (DR.UNode "3")
+  --   , M3.tripleL 3 ":isa"      "integer" "99"
   --   ]
-  --
+
   -- testRdfCodeWith
   --   (rmId [0])
   --   "[42,\"foo\"]"
