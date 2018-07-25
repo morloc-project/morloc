@@ -72,31 +72,31 @@ spec = parallel $ do
   testRdfCodeWith
     (rmId [0])
     "42"
-    [ M3.tripleL 1 ":isa" "integer" "42" ]
+    [ M3.tripleL 1 "morloc:isa" "integer" "42" ]
 
   testRdfCodeWith
     (rmId [0])
     "-42"
-    [ M3.tripleL 1 ":isa" "integer" "-42" ]
+    [ M3.tripleL 1 "morloc:isa" "integer" "-42" ]
 
   testRdfCodeWith
     (rmId [0])
     "4.2"
-    [ M3.tripleL 1 ":isa" "number" "4.2" ]
+    [ M3.tripleL 1 "morloc:isa" "number" "4.2" ]
 
   testRdfCodeWith
     (rmId [0])
     "True"
-    [ M3.tripleL 1 ":isa" "boolean" "True" ]
+    [ M3.tripleL 1 "morloc:isa" "boolean" "True" ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,99]"
-    [ M3.tripleL 1 ":isa"      "string" ":list"
-    , M3.tripleN 1 ":contains" (DR.UNode "2")
-    , M3.tripleL 2 ":isa"      "integer" "42"
-    , M3.tripleN 1 ":contains" (DR.UNode "3")
-    , M3.tripleL 3 ":isa"      "integer" "99"
+    [ M3.tripleN' 1 "morloc:isa"        "morloc:list"
+    , M3.tripleN  1 "morloc:contains_0" (DR.UNode "2")
+    , M3.tripleL  2 "morloc:isa"        "integer" "42"
+    , M3.tripleN  1 "morloc:contains_1" (DR.UNode "3")
+    , M3.tripleL  3 "morloc:isa"        "integer" "99"
     ]
 
   -- testRdfCodeWith
