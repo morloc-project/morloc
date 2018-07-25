@@ -36,11 +36,14 @@ testProgram s code expected = it s $ do
     (morlocScript code >>= rdf2tree >>= tree2program)
     expected
 
-testCheckFail :: String -> String -> MorlocError -> Spec
-testCheckFail s code err = it s $ do
-  shouldBe
+testCheckFail :: String -> String -> Spec
+testCheckFail s code = it s $ do
+  shouldSatisfy
     (morlocScript code >>= rdf2tree >>= tree2program >>= process)
-    (Left err)
+    (\x -> case x of
+      Right _ -> False 
+      Left _ -> True
+    )
 
 spec :: Spec
 spec = parallel $ do
@@ -53,7 +56,6 @@ spec = parallel $ do
         , "bar :: Int;"
         , "bar = foo 1 True;"
       ])
-    (TypeError "Observed and expected types differ")
 
   testProgram
     "Test RDF to Program conversion"
