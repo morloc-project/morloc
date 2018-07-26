@@ -79,4 +79,4 @@ showTopRDF :: TopRDF -> String
 showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
 
 rdfId :: TopRDF -> Int
-rdfId (TopRDF (DR.UNode s) _) = read (show s)
+rdfId (TopRDF (DR.UNode s) _) = read (DT.unpack s)

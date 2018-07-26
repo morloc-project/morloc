@@ -144,11 +144,11 @@ typeDeclaration = do
          [M3.tripleN' i "morloc:isa" "morloc:typeDeclaration"]
       ++ M3.adoptAs "morloc:lhs" i [lhs]
       ++ M3.adoptAs "morloc:rhs" i [rhs]
-      ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
+      ++ M3.adoptAs' "morloc:constraint" (M3.rdfId rhs) constraints
     )
 
 listTag :: Int -> Maybe String -> [M3.Triple]
-listTag i tag = maybe [] (\t -> [M3.tripleL i "morloc:label" "morloc:string" t]) tag
+listTag i tag = maybe [] (\t -> [M3.tripleL i "morloc:label" "morloc:name" t]) tag
 
 mtype :: MS.Parser M3.TopRDF
 mtype =
@@ -186,9 +186,7 @@ mtype =
       i <- MS.getId
       ns <- many1 unambiguous'
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:parameterizedType"
-             , M3.tripleL i "morloc:value" "morloc:string" n
-             ]
+             [ M3.tripleL i "morloc:isa" "morloc:parameterizedType" n ]
           ++ (listTag i l)
           ++ M3.adoptAs' "morloc:parameter" i ns
         )
@@ -293,7 +291,7 @@ mtype =
       t <- mtype
       return $ M3.makeTopRDF i (
           [ M3.tripleN' i "morloc:isa" "morloc:namedType"
-          , M3.tripleL i "morloc:name" "morloc:string" n
+          , M3.tripleL i "morloc:key" "morloc:name" n
           ] ++ M3.adoptAs "morloc:value" i [t]
         )
 
@@ -401,8 +399,7 @@ application = do
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
       return $ M3.makeTopRDF i (
-          [ M3.tripleN' i "morloc:isa" "morloc:name"
-          , M3.tripleL i "morloc:value" "morloc:string" x
+          [ M3.tripleL i "morloc:isa" "morloc:name" x
           ] ++ listTag i tag')
 
 booleanExpr :: MS.Parser M3.TopRDF
@@ -428,7 +425,7 @@ booleanExpr = do
       ns <- many1 argument'
       return $ M3.makeTopRDF i (
              [ M3.tripleN' i "morloc:isa" "morloc:call"
-             , M3.tripleL i "morloc:name" "morloc:string" n
+             , M3.tripleL i "morloc:value" "morloc:name" n
              ]
           ++ M3.adoptAs' "morloc:argument" i ns
         )
@@ -491,7 +488,7 @@ arithmeticTerm = do
       xs <- many1 argument'
       return $ M3.makeTopRDF i (
           [ M3.tripleN' i "morloc:isa" "morloc:call"
-          , M3.tripleL i "morloc:name" "morloc:string" x
+          , M3.tripleL i "morloc:value" "morloc:name" x
           ] ++ M3.adoptAs' "morloc:argument" i xs
         )
 
@@ -532,15 +529,14 @@ arithmeticTable
 
 unaryOp :: String -> Int -> M3.TopRDF -> M3.TopRDF
 unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
-     [ M3.tripleL i "morloc:isa" "string" s
-     , M3.tripleN i "morloc:contains" j
+     [ M3.tripleL i "morloc:isa" "morloc:unaryOp" s
+     , M3.tripleN i "morloc:contains_0" j
      ] ++ (DR.triplesOf xs)
   )
 
 binOp :: String -> Int -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
-     [ M3.tripleN' i "morloc:isa" "morloc:binop"
-     , M3.tripleL i "morloc:value" "morloc:string" s
+     [ M3.tripleL i "morloc:isa" "morloc:binop" s
      , M3.tripleN i "morloc:lhs" j
      , M3.tripleN i "morloc:rhs" k
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
