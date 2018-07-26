@@ -28,7 +28,7 @@ testRdfCodeWith f s ts = case (run' f s) of
   (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
     run' f s = fmap (mapTriples f) (MP.morlocScript (s ++ ";"))
-    mapTriples f (M3.TopRDF _ rdf) = f (DR.triplesOf rdf)
+    mapTriples f rdf = f (DR.triplesOf rdf)
 
 testRdfCode :: String -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id

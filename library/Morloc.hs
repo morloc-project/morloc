@@ -10,7 +10,7 @@ import qualified Morloc.Data as MD
 turtle :: String -> IO ()
 turtle s = case MP.morlocScript s of
   Left err -> putStr $ show err ++ "\n"
-  Right (M3.TopRDF _ rdfOutput) ->
+  Right rdfOutput ->
     DR.writeRdf
       (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
       rdfOutput

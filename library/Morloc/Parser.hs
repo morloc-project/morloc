@@ -20,11 +20,11 @@ iun = M3.iun
 iut = M3.iut
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocScript :: String -> ME.ThrowsError M3.TopRDF
+morlocScript :: String -> ME.ThrowsError M3.RDF
 morlocScript s =
   case runParser contents MS.parserStateEmpty "<stdin>" s of
     Left err  -> CME.throwError $ ME.SyntaxError err
-    Right val -> return val
+    Right (M3.TopRDF _ val) -> return val
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
