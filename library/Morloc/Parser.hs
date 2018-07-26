@@ -29,7 +29,7 @@ contents = do
   xs <- Tok.whiteSpace >> many top <* eof
   return $ M3.makeTopRDF i (
          [M3.uss i "rdf:type" "morloc:script"]
-      ++ M3.adoptAs' "morloc:child" i xs
+      ++ M3.adopt i xs
     )
 
 top :: MS.Parser M3.TopRDF 
@@ -125,9 +125,9 @@ dataDeclaration = do
   rhs <- expression
   return $ M3.makeTopRDF i (
          [M3.uss i "rdf:type" "morloc:dataDeclaration"]
-      ++ M3.adoptAs  "morloc:lhs"       i [lhs]
-      ++ M3.adoptAs' "morloc:parameter" i bndvars
-      ++ M3.adoptAs  "morloc:rhs"       i [rhs]
+      ++ M3.adoptAs "morloc:lhs" i [lhs]
+      ++ M3.adopt i bndvars
+      ++ M3.adoptAs "morloc:rhs" i [rhs]
     )
 
 -- | function :: [input] -> output constraints
@@ -145,7 +145,7 @@ typeDeclaration = do
          [M3.uss i "rdf:type" "morloc:typeDeclaration"]
       ++ M3.adoptAs "morloc:lhs" i [lhs]
       ++ M3.adoptAs "morloc:rhs" i [rhs]
-      ++ M3.adoptAs' "morloc:constraint" (M3.rdfId rhs) constraints
+      ++ M3.adopt (M3.rdfId rhs) constraints
     )
 
 listTag :: DR.Node -> Maybe String -> [M3.Triple]
@@ -189,7 +189,7 @@ mtype =
       return $ M3.makeTopRDF i (
              [ M3.ust i "rdf:type" "morloc:parameterizedType" n ]
           ++ (listTag i l)
-          ++ M3.adoptAs' "morloc:parameter" i ns
+          ++ M3.adopt i ns
         )
 
     -- Does parameterized generic even make sense?  Yes, say `f Int` where `f`
@@ -209,7 +209,7 @@ mtype =
              , M3.ust i "morloc:value" "morloc:string" n
              ]
           ++ listTag i l
-          ++ M3.adoptAs' "morloc:parameter" i ns
+          ++ M3.adopt i ns
         )
 
     -- <name> <type> <type> ...
@@ -256,7 +256,7 @@ mtype =
       return $ M3.makeTopRDF i (
              [ M3.ust i "rdf:type" "morloc:parameterizedType" "Tuple" ]
           ++ listTag i l
-          ++ M3.adoptAs' "morloc:parameter" i (x:xs)
+          ++ M3.adopt i (x:xs)
         )
 
     -- [ <type> ]
@@ -268,7 +268,7 @@ mtype =
       return $ M3.makeTopRDF i (
              [ M3.ust i "rdf:type" "morloc:parameterizedType" "List" ]
           ++ listTag i l
-          ++ M3.adoptAs' "morloc:parameter" i [s]
+          ++ M3.adopt i [s]
         )
 
     -- { <name> :: <type>, <name> :: <type>, ... }
@@ -280,7 +280,7 @@ mtype =
       return $ M3.makeTopRDF i (
              [ M3.ust i "rdf:type" "morloc:parameterizedType" "Record" ]
           ++ listTag i l
-          ++ M3.adoptAs' "morloc:parameter" i ns
+          ++ M3.adopt i ns
         )
 
     -- (<name> = <type>)
@@ -304,7 +304,7 @@ mtype =
       output <- notFunction'
       return $ M3.makeTopRDF i (
              [M3.uss i "rdf:type" "morloc:functionType"]
-          ++ M3.adoptAs' "morloc:input" i inputs
+          ++ M3.adopt i inputs
           ++ M3.adoptAs "morloc:output" i [output]
         )
 
@@ -327,7 +327,7 @@ mdata =  do
         xs <- Tok.brackets (sepBy mdata Tok.comma)
         return $ M3.makeTopRDF i (
                [M3.uss i "rdf:type" "morloc:list"]
-            ++ M3.adoptAs' "morloc:contains" i xs
+            ++ M3.adopt i xs
           )
 
       tuple' = do
@@ -335,7 +335,7 @@ mdata =  do
         xs <- Tok.parens tuple''
         return $ M3.makeTopRDF i (
                [M3.uss i "rdf:type" "morloc:tuple"]
-            ++ M3.adoptAs' "morloc:contains" i xs
+            ++ M3.adopt i xs
           )
 
       record' = do
@@ -343,7 +343,7 @@ mdata =  do
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
         return $ M3.makeTopRDF i (
                [M3.uss i "rdf:type" "morloc:record"]
-            ++ M3.adoptAs' "morloc:contains" i xs
+            ++ M3.adopt i xs
           )
 
       -- must have at least two elements
@@ -387,7 +387,7 @@ application = do
   return $ M3.makeTopRDF i (
          [M3.uss i "rdf:type" "morloc:call"]
       ++ M3.adoptAs  "morloc:value" i [function]
-      ++ M3.adoptAs' "morloc:argument" i arguments
+      ++ M3.adopt i arguments
     )
   where
     term' =
@@ -428,7 +428,7 @@ booleanExpr = do
              [ M3.uss i "rdf:type" "morloc:call"
              , M3.ust i "morloc:value" "morloc:name" n
              ]
-          ++ M3.adoptAs' "morloc:argument" i ns
+          ++ M3.adopt i ns
         )
 
     argument' :: MS.Parser M3.TopRDF
@@ -490,7 +490,7 @@ arithmeticTerm = do
       return $ M3.makeTopRDF i (
           [ M3.uss i "rdf:type" "morloc:call"
           , M3.ust i "morloc:value" "morloc:name" x
-          ] ++ M3.adoptAs' "morloc:argument" i xs
+          ] ++ M3.adopt i xs
         )
 
     argument' :: MS.Parser M3.TopRDF
@@ -508,7 +508,7 @@ arithmeticTerm = do
       return $ M3.makeTopRDF i (
           [ M3.uss i "rdf:type" "morloc:access"
           , M3.ust i "morloc:name" "morloc:string" x
-          ] ++ M3.adoptAs' "morloc:index" i ids
+          ] ++ M3.adopt i ids
         )
 
 arithmeticTable
@@ -531,7 +531,7 @@ arithmeticTable
 unaryOp :: String -> DR.Node -> M3.TopRDF -> M3.TopRDF
 unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
      [ M3.ust i "rdf:type" "morloc:unaryOp" s
-     , M3.usu i "morloc:contains_0" j
+     , M3.usu j "rdf:_0" i
      ] ++ (DR.triplesOf xs)
   )
 

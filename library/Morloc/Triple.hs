@@ -11,7 +11,7 @@ module Morloc.Triple (
   , idUri
   , rdfId
   , adoptAs
-  , adoptAs'
+  , adopt
   , showTopRDF
 ) where
 
@@ -46,13 +46,13 @@ adoptAs rel sbj objs =
     link :: String -> DR.Node -> TopRDF -> DR.Triple
     link rel' sbj' (TopRDF obj' _) = usu sbj' rel' obj'
 
-adoptAs' :: String -> DR.Node -> [TopRDF] -> [DR.Triple]
-adoptAs' rel sbj objs =
-       zipWith (link rel sbj) [0..] objs
+adopt :: DR.Node -> [TopRDF] -> [DR.Triple]
+adopt sbj objs =
+       zipWith (link sbj) [0..] objs
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
-    link :: String -> DR.Node -> Int -> TopRDF -> DR.Triple
-    link rel' sbj' index (TopRDF obj' _) = usu sbj' (rel' ++ "_" ++ show index) obj'
+    link :: DR.Node -> Int -> TopRDF -> DR.Triple
+    link sbj' index (TopRDF obj' _) = usu obj' ("rdf:_" ++ show index) sbj'
 
 showTopRDF :: TopRDF -> String
 showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
