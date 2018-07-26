@@ -33,14 +33,10 @@ testRdfCodeWith f s ts = case (run' f s) of
 testRdfCode :: String -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
-iuu :: Int -> String -> String -> DR.Triple
-iuu s p o = M3.tripleN' s p o
-
-iui :: Int -> String -> Int -> DR.Triple
-iui s p o = M3.tripleN s p (DR.UNode (DT.pack . show $ o))  
-
-iut :: Int -> String -> String -> String -> DR.Triple
-iut s p t o = M3.tripleL s p t o
+-- triple making convenience functions
+iuu = M3.iuu
+iui = M3.iui
+iut = M3.iut
 
 spec :: Spec
 spec = parallel $ do
