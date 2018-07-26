@@ -1,6 +1,6 @@
 module Morloc.Data
 (
-    Program(..)
+    Manifold(..)
   , MType(..)
   , MData(..)
   , TypeDecl(..)
@@ -15,43 +15,24 @@ module Morloc.Data
   , Path
 ) where
 
+import qualified Data.RDF as DR
+
 type Tag      = Maybe String
 type Name     = String
 type Alias    = String
 type Language = String
 type Path     = String
 
-data Program = Program {
-      programTypes   :: [TypeDecl]
-    , programData    :: [DataDecl]
-    , programSources :: [Source]
+data Manifold = Manifold {
+      manifoldAlias      :: Name             -- name in Morlc script
+    , manifoldSrcName    :: String           -- name in source language
+    , manifoldRdfId      :: DR.Node          -- a unique ID
+    , manifoldInput      :: [(MType, MData)] -- type and value of each input
+    , manifoldType       :: MType            -- output type
+    , manifoldSource     :: Maybe Source     -- source file
+    , manifoldParameter  :: [Parameter]      -- function parameters
+    , manifoldConstraint :: [Constraint]     -- constrains on input and output
   }
-  deriving(Show, Ord, Eq)
-
--- -- TODO: make this
--- data Manifold = Manifold {
---       manifoldAlias      :: Name             -- name in Morlc script
---     , manifoldSrcName    :: String           -- name in source language
---     , manifoldId         :: Int              -- a unique ID
---     , manifoldInput      :: [(MType, Input)] -- type and value of each input
---     , manifoldType       :: MType            -- output type
---     , manifoldSource     :: Maybe Source     -- source file
---     , manifoldParameter  :: [Parameter]      -- function parameters
---     , manifoldConstraint :: [Constraint]     -- constrains on input and output
---     , manifoldOther      :: [Triple]         -- additional information
---   }
-
-instance Monoid Program where
-  mempty = Program {
-        programTypes   = []
-      , programData    = []
-      , programSources = []
-    }
-  mappend p1 p2 = Program {
-        programTypes   = programTypes   p1 ++ programTypes   p2
-      , programData    = programData    p1 ++ programData    p2
-      , programSources = programSources p1 ++ programSources p2
-    }
 
 data Script = Script {
       scriptBase :: String -- script basename (no extension)
@@ -59,6 +40,14 @@ data Script = Script {
     , scriptCode :: String -- full script source code
   }
   deriving(Ord, Eq)
+
+data Parameter = Parameter {
+      parameterName    :: String
+    , parameterType    :: MType
+    , parameterDefault :: Maybe MData
+    , parameterValue   :: Maybe MData
+    , parameterDoc     :: Maybe String
+  }
 
 instance Show Script where
   show (Script base lang code) = code 

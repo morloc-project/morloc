@@ -35,6 +35,7 @@ library
     exposed-modules:  Morloc
                       Morloc.Data
                       Morloc.Error
+                      Morloc.Evaluator
                       Morloc.Lexer
                       Morloc.Parser
                       Morloc.State
