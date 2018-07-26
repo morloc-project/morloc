@@ -20,7 +20,7 @@ rmId :: [Int] -> [DR.Triple] -> [DR.Triple]
 rmId is ts = filter (rmId' is) ts
   where
     rmId' :: [Int] -> DR.Triple -> Bool 
-    rmId' is' (DR.Triple s _ _) = all (\x -> (M3.asId x) /= s) is'
+    rmId' is' (DR.Triple s _ _) = all (\x -> (M3.idUri x) /= s) is'
 
 testRdfCodeWith :: ([DR.Triple] -> [DR.Triple]) -> String -> [DR.Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
@@ -34,9 +34,9 @@ testRdfCode :: String -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
 -- triple making convenience functions
-iuu = M3.iuu
-iui = M3.iui
-iut = M3.iut
+iuu s r o = M3.uss (M3.idUri s) r o 
+iui s r o = M3.usu (M3.idUri s) r (M3.idUri o)
+iut s r t o = M3.ust (M3.idUri s) r t o
 
 spec :: Spec
 spec = parallel $ do

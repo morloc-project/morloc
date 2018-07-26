@@ -5,14 +5,13 @@ module Morloc.Triple (
   , RDF
   , DR.Triple
   , makeTopRDF
-  , iuu
-  , iun
-  , iui
-  , iut
-  , asId
+  , uss
+  , usu
+  , ust
+  , idUri
+  , rdfId
   , adoptAs
   , adoptAs'
-  , rdfId
   , showTopRDF
 ) where
 
@@ -30,62 +29,52 @@ type RDF = DR.RDF DR.TList
 
 data TopRDF = TopRDF DR.Node RDF deriving(Show)
 
-makeTopRDF :: Int -> [DR.Triple] -> TopRDF
-makeTopRDF i ts = TopRDF (asId i) (makeRDF ts)
+makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
+makeTopRDF i ts = TopRDF i (makeRDF ts)
 
 makeRDF :: [DR.Triple] -> RDF
 makeRDF xs = DR.mkRdf xs Nothing prefixMap
 
-asId :: Int -> DR.Node
-asId i = DR.UNode (DT.pack . show $ i)
-
 rdfAppend :: RDF -> RDF -> RDF
 rdfAppend x y = makeRDF (DR.triplesOf x ++ DR.triplesOf y)
 
-adoptAs :: String -> Int -> [TopRDF] -> [DR.Triple]
-adoptAs r i ys =
-       map (link r i) ys
-    ++ concat (map (\(TopRDF _ y) -> DR.triplesOf y) ys)
+adoptAs :: String -> DR.Node -> [TopRDF] -> [DR.Triple]
+adoptAs rel sbj objs =
+       map (link rel sbj) objs
+    ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
-    link :: String -> Int -> TopRDF -> DR.Triple
-    link r' i' (TopRDF s _) = iun i' r' s
+    link :: String -> DR.Node -> TopRDF -> DR.Triple
+    link rel' sbj' (TopRDF obj' _) = usu sbj' rel' obj'
 
-adoptAs' :: String -> Int -> [TopRDF] -> [DR.Triple]
-adoptAs' r i ys =
-       zipWith (link r i) [0..] ys
-    ++ concat (map (\(TopRDF _ y) -> DR.triplesOf y) ys)
+adoptAs' :: String -> DR.Node -> [TopRDF] -> [DR.Triple]
+adoptAs' rel sbj objs =
+       zipWith (link rel sbj) [0..] objs
+    ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
-    link :: String -> Int -> Int -> TopRDF -> DR.Triple
-    link r' i' index (TopRDF s _) = iun i' (r' ++ "_" ++ show index) s
+    link :: String -> DR.Node -> Int -> TopRDF -> DR.Triple
+    link rel' sbj' index (TopRDF obj' _) = usu sbj' (rel' ++ "_" ++ show index) obj'
 
 showTopRDF :: TopRDF -> String
 showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
 
-rdfId :: TopRDF -> Int
-rdfId (TopRDF (DR.UNode s) _) = read (DT.unpack s)
+idUri :: Int -> DR.Node
+idUri = DR.UNode . DT.pack . (++) "mid:" . show
+
+rdfId :: TopRDF -> DR.Node
+rdfId (TopRDF i _) = i
 
 -- convenience functions for building triples
 -- * URI object
-iuu :: Int -> String -> String -> DR.Triple
-iuu s r o = DR.triple
-  (DR.UNode (DT.pack $ show s)) -- URI of the subject
-  (DR.UNode (DT.pack r))        -- relation
-  (DR.UNode (DT.pack o))        -- URI of the object
+uss :: DR.Node -> String -> String -> DR.Triple
+uss s r o = DR.triple s (DR.UNode (DT.pack r)) (DR.UNode (DT.pack o))
 
 -- * indexed URI object as a UNode
-iun :: Int -> String -> DR.Node -> DR.Triple
-iun s r o = DR.Triple
-  (DR.UNode (DT.pack $ show s)) -- URI of the subject
-  (DR.UNode (DT.pack r))        -- relation
-  o                             -- URI of the object
-
--- * indexed URI object
-iui :: Int -> String -> Int -> DR.Triple
-iui s p o = iun s p (DR.UNode (DT.pack . show $ o))
+usu :: DR.Node -> String -> DR.Node -> DR.Triple
+usu s r o = DR.triple s (DR.UNode (DT.pack r)) o
 
 -- * typed object
-iut :: Int -> String -> String -> String -> DR.Triple
-iut s r t o = DR.triple
-  (DR.UNode (DT.pack $ show s))
+ust :: DR.Node -> String -> String -> String -> DR.Triple
+ust s r t o = DR.triple
+  s
   (DR.UNode (DT.pack r))
   (DR.LNode (DR.TypedL (DT.pack t) (DT.pack $ show o)))
