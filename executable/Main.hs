@@ -10,9 +10,13 @@ main = do
     -- no input
     []  -> putStrLn "You must provide at least one argument"
 
-    ["-e", text] -> M.turtle text
+    ["--rdf-turtle", "-e", text] -> M.writeTurtle text
 
-    [x] -> readFile x >>= M.turtle
+    ["--rdf-triple", "-e", text] -> M.writeTriple text
+
+    ["--rdf-turtle", x] -> readFile x >>= M.writeTurtle
+
+    ["--rdf-triple", x] -> readFile x >>= M.writeTriple
 
     -- wrong input
     _   -> putStrLn "Please provide a single filename"
