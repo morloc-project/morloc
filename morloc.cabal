@@ -38,6 +38,7 @@ library
                       Morloc.Evaluator
                       Morloc.Lexer
                       Morloc.Parser
+                      Morloc.RdfSchema
                       Morloc.State
                       Morloc.Triple
                       Morloc.Util
