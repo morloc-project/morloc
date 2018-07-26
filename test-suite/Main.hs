@@ -134,342 +134,321 @@ spec = parallel $ do
     , iut 5 "morloc:isa"      "morloc:integer" "34"
     ]
 
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: Bool"
+    [ iuu 1 "morloc:isa" "morloc:typeDeclaration"
+    , iui 1 "morloc:lhs" 2
+    , iut 2 "morloc:isa" "morloc:name" "A"
+    , iui 1 "morloc:rhs" 3
+    , iut 3 "morloc:isa" "morloc:atomicType" "Bool"
+    ]
+
   -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: Bool"
-  --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs", Id' 2
-  --   , (2, "morloc:isa", Str' "morloc:name"
-  --   , (2, "morloc:value", Str' "A"
-  --   , (1, "morloc:rhs", Id' 3
-  --   , (3, "morloc:isa", Str' "morloc:atomicType"
-  --   , (3, "morloc:value", Str' "Bool"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
+  --   iuu rmId [0])
   --   "A :: [Bool]"
-  --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs", Id' 2
-  --   , (2, "morloc:isa", Str' "morloc:name"
-  --   , (2, "morloc:value", Str' "A"
-  --   , (1, "morloc:rhs", Id' 3
-  --   , (3, "morloc:isa", Str' "morloc:parameterizedType"
-  --   , (3, "morloc:value", Str' "List"
-  --   , (3, "morloc:parameter", Id' 4
-  --   , (4, "morloc:isa", Str' "morloc:atomicType"
-  --   , (4, "morloc:value", Str' "Bool"
+  --   [ iuu 1 "morloc:isa" "morloc:typeDeclaration"
+  --   , iui 1 "morloc:lhs" 2
+  --   , iuu 2 "morloc:isa" "morloc:name" "A"
+  --   , iui 1 "morloc:rhs" 3
+  --   , iuu 3 "morloc:isa" "morloc:parameterizedType" "List"
+  --   , iui 3 "morloc:parameter" 4
+  --   , iuu 4 "morloc:isa" "morloc:atomicType" "Bool"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: (Bool, Fool)"
-  --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs", Id' 2
-  --   , (2, "morloc:isa", Str' "morloc:name"
-  --   , (2, "morloc:value", Str' "A"
-  --   , (1, "morloc:rhs", Id' 3
-  --   , (3, "morloc:isa", Str' "morloc:parameterizedType"
-  --   , (3, "morloc:value", Str' "Tuple"
-  --   , (3, "morloc:parameter", Id' 4
-  --   , (4, "morloc:isa", Str' "morloc:atomicType"
-  --   , (4, "morloc:value", Str' "Bool"
-  --   , (3, "morloc:parameter", Id' 5
-  --   , (5, "morloc:isa", Str' "morloc:atomicType"
-  --   , (5, "morloc:value", Str' "Fool"
+  --   iuu rmId [0])
+  --   "A :: iuu Bool, Fool)"
+  --   [ iuu1 "morloc:isa" "morloc:typeDeclaration"
+  --   , iui 1 "morloc:lhs" 2
+  --   , iuu 2 "morloc:isa" "morloc:name" "A"
+  --   , iui 1 "morloc:rhs" 3
+  --   , iuu 3 "morloc:isa" "morloc:parameterizedType" "Tuple"
+  --   , iui 3 "morloc:parameter" 4
+  --   , iuu 4 "morloc:isa" "morloc:atomicType" "Bool"
+  --   , iu. 3 "morloc:parameter" 5
+  --   , iuu 5 "morloc:isa" "morloc:atomicType" "Fool"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0])
+  --   iuu rmId [0])
   --   "A :: {B :: Bool, C :: Fool}"
-  --   [ (1, "morloc:isa", Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs", Id' 2
-  --   , (2, "morloc:isa", Str' "morloc:name"
-  --   , (2, "morloc:value", Str' "A"
-  --   , (1, "morloc:rhs", Id' 3
-  --   , (3, "morloc:isa", Str' "morloc:parameterizedType"
-  --   , (3, "morloc:value", Str' "Record"
-  --   , (3, "morloc:parameter", Id' 4
-  --   , (4, "morloc:isa", Str' "morloc:namedType"
-  --   , (4, "morloc:name", Str' "B"
-  --   , (4, "morloc:value", Id' 5
-  --   , (5, "morloc:isa", Str' "morloc:atomicType"
-  --   , (5, "morloc:value", Str' "Bool"
-  --   , (3, "morloc:parameter", Id' 6
-  --   , (6, "morloc:isa", Str' "morloc:namedType"
-  --   , (6, "morloc:name", Str' "C"
-  --   , (6, "morloc:value", Id' 7
-  --   , (7, "morloc:isa", Str' "morloc:atomicType"
-  --   , (7, "morloc:value", Str' "Fool"
+  --   [ iuu 1 "morloc:isa" "morloc:typeDeclaration"
+  --   , iui 1 "morloc:lhs" 2
+  --   , iuu 2 "morloc:isa" "morloc:name" "A"
+  --   , iui 1 "morloc:rhs" 3
+  --   , iuu 3 "morloc:isa" "morloc:parameterizedType" "Record"
+  --   , iui 3 "morloc:parameter" 4
+  --   , iuu 4 "morloc:isa" "morloc:namedType"
+  --   , iuu 4 "morloc:name" Str' "B"
+  --   , iui 4 "morloc:value" 5
+  --   , iuu 5 "morloc:isa" "morloc:atomicType" "Bool"
+  --   , iui 3 "morloc:parameter" 6
+  --   , iuu 6 "morloc:isa" "morloc:namedType"
+  --   , iuu 6 "morloc:name" Str' "C"
+  --   , iui 6 "morloc:value" 7
+  --   , iuu 7 "morloc:isa" "morloc:atomicType" "Fool"
   --   ]
   --
   -- testRdfCode
   --   "x = 1"
-  --   [ (0, "morloc:isa",   Str' "morloc:script"
-  --   , (0, "morloc:child", Id'  1
-  --   , (1, "morloc:isa",   Str' "morloc:dataDeclaration"
-  --   , (1, "morloc:lhs",   Id'  2
-  --   , (2, "morloc:isa",   Str' "morloc:name"
-  --   , (2, "morloc:value", Str' "x"
-  --   , (1, "morloc:rhs",   Id'  3
-  --   , (3, "morloc:isa",   Str' "morloc:integer"
-  --   , (3, "morloc:value", Int' 1
+  --   [ iuu 0 "morloc:isa"   "morloc:script"
+  --   , iui 0 "morloc:child"  1
+  --   , iuu 1 "morloc:isa"   "morloc:dataDeclaration"
+  --   , iui 1 "morloc:lhs"    2
+  --   , iuu 2 "morloc:isa"   "morloc:name" "x"
+  --   , iui 1 "morloc:rhs"    3
+  --   , iut 3 "morloc:isa"   "morloc:integer" "1"
   --   ]
   --
   -- testRdfCode
   --   "f x = x"
-  --   [ (0, "morloc:isa",       Str' "morloc:script"
-  --   , (0, "morloc:child",     Id'  1
-  --   , (1, "morloc:isa",       Str' "morloc:dataDeclaration"
-  --   , (1, "morloc:lhs",       Id'  2
-  --   , (2, "morloc:isa",       Str' "morloc:name"
-  --   , (2, "morloc:value",     Str' "f"
-  --   , (1, "morloc:parameter", Id'  3
-  --   , (3, "morloc:isa",       Str' "morloc:name"
-  --   , (3, "morloc:value",     Str' "x"
-  --   , (1, "morloc:rhs",       Id'  4
-  --   , (4, "morloc:isa",       Str' "morloc:name"
-  --   , (4, "morloc:value",     Str' "x"
+  --   [ iuu 0 "morloc:isa"       "morloc:script"
+  --   , iuu 0 "morloc:child"      1
+  --   , iuu 1 "morloc:isa"       "morloc:dataDeclaration"
+  --   , iuu 1 "morloc:lhs"        2
+  --   , iuu 2 "morloc:isa"       "morloc:name"
+  --   , iuu 2 "morloc:value"     Str' "f"
+  --   , iuu 1 "morloc:parameter"  3
+  --   , iuu 3 "morloc:isa"       "morloc:name"
+  --   , iuu 3 "morloc:value"     Str' "x"
+  --   , iuu 1 "morloc:rhs"        4
+  --   , iuu 4 "morloc:isa"       "morloc:name"
+  --   , iuu 4 "morloc:value"     Str' "x"
   --   ]
   --
   -- testRdfCode
   --   "f = g 42 66"
-  --   [ (0, "morloc:isa",      Str' "morloc:script"
-  --   , (0, "morloc:child",    Id'  1
-  --   , (1, "morloc:isa",      Str' "morloc:dataDeclaration"
-  --   , (1, "morloc:lhs",      Id'  2
-  --   , (2, "morloc:isa",      Str' "morloc:name"
-  --   , (2, "morloc:value",    Str' "f"
-  --   , (1, "morloc:rhs",      Id'  3
-  --   , (3, "morloc:isa",      Str' "morloc:call"
-  --   , (3, "morloc:value",    Id' 4
-  --   , (4, "morloc:isa",      Str' "morloc:name"
-  --   , (4, "morloc:value",    Str' "g"
-  --   , (3, "morloc:argument", Id'  5
-  --   , (5, "morloc:isa",      Str' "morloc:integer"
-  --   , (5, "morloc:value",    Int' 42
-  --   , (3, "morloc:argument", Id'  6
-  --   , (6, "morloc:isa",      Str' "morloc:integer"
-  --   , (6, "morloc:value",    Int' 66
+  --   [ iuu 0 "morloc:isa"      "morloc:script"
+  --   , iuu 0 "morloc:child"     1
+  --   , iuu 1 "morloc:isa"      "morloc:dataDeclaration"
+  --   , iuu 1 "morloc:lhs"       2
+  --   , iuu 2 "morloc:isa"      "morloc:name"
+  --   , iuu 2 "morloc:value"    Str' "f"
+  --   , iuu 1 "morloc:rhs"       3
+  --   , iuu 3 "morloc:isa"      "morloc:call"
+  --   , iuu 3 "morloc:value"    4
+  --   , iuu 4 "morloc:isa"      "morloc:name"
+  --   , iuu 4 "morloc:value"    Str' "g"
+  --   , iuu 3 "morloc:argument"  5
+  --   , iuu 5 "morloc:isa"      "morloc:integer"
+  --   , iuu 5 "morloc:value"    Int' 42
+  --   , iuu 3 "morloc:argument"  6
+  --   , iuu 6 "morloc:isa"      "morloc:integer"
+  --   , iuu 6 "morloc:value"    Int' 66
   --   ]
   --
-  -- it "(x = (5)) == (x = 5)" $ do
+  -- it "iuu x = (5)) == (x = 5)" $ do
   --   shouldBe
-  --     (morlocScript "x = (5);"
-  --     (morlocScript "x = 5;"
+  --     iuu morlocScript "x = (5);"
+  --     iuu morlocScript "x = 5;"
   --
   -- testRdfCode
-  --   "(1,\"foo\",1.1)"
-  --   [ (0, "morloc:isa",      Str' "morloc:script"
-  --   , (0, "morloc:child",    Id'  1
-  --   , (1, "morloc:isa",      Str' "morloc:tuple"
-  --   , (1, "morloc:contains", Id'  2
-  --   , (2, "morloc:isa",      Str' "morloc:integer"
-  --   , (2, "morloc:value",    Int' 1
-  --   , (1, "morloc:contains", Id'  3
-  --   , (3, "morloc:isa",      Str' "morloc:string"
-  --   , (3, "morloc:value",    Str' "foo"
-  --   , (1, "morloc:contains", Id'  4
-  --   , (4, "morloc:isa",      Str' "morloc:number"
-  --   , (4, "morloc:value",    Num' 1.1
+  --   "iuu 1,\"foo\"1.1)"
+  --   [ iuu 0 "morloc:isa"      "morloc:script"
+  --   , iuu 0 "morloc:child"     1
+  --   , iuu 1 "morloc:isa"      "morloc:tuple"
+  --   , iuu 1 "morloc:contains"  2
+  --   , iuu 2 "morloc:isa"      "morloc:integer"
+  --   , iuu 2 "morloc:value"    Int' 1
+  --   , iuu 1 "morloc:contains"  3
+  --   , iuu 3 "morloc:isa"      "morloc:string"
+  --   , iuu 3 "morloc:value"    Str' "foo"
+  --   , iuu 1 "morloc:contains"  4
+  --   , iuu 4 "morloc:isa"      "morloc:number"
+  --   , iuu 4 "morloc:value"    Num' 1.1
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..3])
+  --   iuu rmId [0..3])
   --   "foo :: i:Int -> j:[A]"
-  --   [ (4, "morloc:isa",       Str' "morloc:atomicType"
-  --   , (4, "morloc:value",     Str' "Int"
-  --   , (4, "morloc:label",     Str' "i"
-  --   , (5, "morloc:isa",       Str' "morloc:parameterizedType"
-  --   , (5, "morloc:value",     Str' "List"
-  --   , (5, "morloc:label",     Str' "j"
-  --   , (5, "morloc:parameter", Id'  6
-  --   , (6, "morloc:isa",       Str' "morloc:atomicType"
-  --   , (6, "morloc:value",     Str' "A"
+  --   [ iuu 4 "morloc:isa"       "morloc:atomicType"
+  --   , iuu 4 "morloc:value"     Str' "Int"
+  --   , iuu 4 "morloc:label"     Str' "i"
+  --   , iuu 5 "morloc:isa"       "morloc:parameterizedType"
+  --   , iuu 5 "morloc:value"     Str' "List"
+  --   , iuu 5 "morloc:label"     Str' "j"
+  --   , iuu 5 "morloc:parameter"  6
+  --   , iuu 6 "morloc:isa"       "morloc:atomicType"
+  --   , iuu 6 "morloc:value"     Str' "A"
   --   ]
   --
   -- testRdfCode
-  --   "foo :: i:Int -> Num where (i > 0)"
-  --   [ (0, "morloc:isa",        Str' "morloc:script"
-  --   , (0, "morloc:child",      Id'  1
-  --   , (1, "morloc:isa",        Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs",        Id'  2
-  --   , (2, "morloc:isa",        Str' "morloc:name"
-  --   , (2, "morloc:value",      Str' "foo"
-  --   , (1, "morloc:rhs",        Id'  3
-  --   , (3, "morloc:isa",        Str' "morloc:functionType"    ) -- i:Int -> Num where (i > 0
-  --   , (3, "morloc:input",      Id'  4
-  --   , (4, "morloc:isa",        Str' "morloc:atomicType"      ) -- i:Int
-  --   , (4, "morloc:value",      Str' "Int"
-  --   , (4, "morloc:label",      Str' "i"
-  --   , (3, "morloc:output",     Id'  5                  ) -- Num
-  --   , (5, "morloc:isa",        Str' "morloc:atomicType"
-  --   , (5, "morloc:value",      Str' "Num"
-  --   , (3, "morloc:constraint", Id'  6
-  --   , (6, "morloc:isa",        Str' "morloc:binop"           ) -- "i > 0"
-  --   , (6, "morloc:value",      Str' "GT"
-  --   , (6, "morloc:lhs",        Id'  7
-  --   , (6, "morloc:rhs",        Id'  8
-  --   , (7, "morloc:isa",        Str' "morloc:name"
-  --   , (7, "morloc:value",      Str' "i"
-  --   , (8, "morloc:isa",        Str' "morloc:integer"
-  --   , (8, "morloc:value",      Int' 0
+  --   "foo :: i:Int -> Num where iuu i > 0)"
+  --   [ iuu 0 "morloc:isa"        "morloc:script"
+  --   , iuu 0 "morloc:child"       1
+  --   , iuu 1 "morloc:isa"        "morloc:typeDeclaration"
+  --   , iuu 1 "morloc:lhs"         2
+  --   , iuu 2 "morloc:isa"        "morloc:name"
+  --   , iuu 2 "morloc:value"      Str' "foo"
+  --   , iuu 1 "morloc:rhs"         3
+  --   , iuu 3 "morloc:isa"        "morloc:functionType"    ) -- i:Int -> Num where iuu i > 0
+  --   , iuu 3 "morloc:input"       4
+  --   , iuu 4 "morloc:isa"        "morloc:atomicType"      ) -- i:Int
+  --   , iuu 4 "morloc:value"      Str' "Int"
+  --   , iuu 4 "morloc:label"      Str' "i"
+  --   , iuu 3 "morloc:output"      5                  ) -- Num
+  --   , iuu 5 "morloc:isa"        "morloc:atomicType"
+  --   , iuu 5 "morloc:value"      Str' "Num"
+  --   , iuu 3 "morloc:constraint"  6
+  --   , iuu 6 "morloc:isa"        "morloc:binop"           ) -- "i > 0"
+  --   , iuu 6 "morloc:value"      Str' "GT"
+  --   , iuu 6 "morloc:lhs"         7
+  --   , iuu 6 "morloc:rhs"         8
+  --   , iuu 7 "morloc:isa"        "morloc:name"
+  --   , iuu 7 "morloc:value"      Str' "i"
+  --   , iuu 8 "morloc:isa"        "morloc:integer"
+  --   , iuu 8 "morloc:value"      Int' 0
   --   ]
   --
   -- testRdfCode
   --   "foo :: Int"
-  --   [ (0, "morloc:isa",        Str' "morloc:script"
-  --   , (0, "morloc:child",      Id'  1
-  --   , (1, "morloc:isa",        Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs",        Id'  2
-  --   , (2, "morloc:isa",        Str' "morloc:name"
-  --   , (2, "morloc:value",      Str' "foo"
-  --   , (1, "morloc:rhs",        Id'  3
-  --   , (3, "morloc:isa",        Str' "morloc:atomicType"
-  --   , (3, "morloc:value",      Str' "Int"
+  --   [ iuu 0 "morloc:isa"        "morloc:script"
+  --   , iuu 0 "morloc:child"       1
+  --   , iuu 1 "morloc:isa"        "morloc:typeDeclaration"
+  --   , iuu 1 "morloc:lhs"         2
+  --   , iuu 2 "morloc:isa"        "morloc:name"
+  --   , iuu 2 "morloc:value"      Str' "foo"
+  --   , iuu 1 "morloc:rhs"         3
+  --   , iuu 3 "morloc:isa"        "morloc:atomicType"
+  --   , iuu 3 "morloc:value"      Str' "Int"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..5])
-  --   "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
-  --   [ (6,  "morloc:isa",   Str' "morloc:binop"
-  --   , (6,  "morloc:value", Str' "GT"
-  --   , (6,  "morloc:lhs",   Id'  8
-  --   , (6,  "morloc:rhs",   Id'  10
-  --   , (8,  "morloc:isa",   Str' "morloc:binop"
-  --   , (8,  "morloc:value", Str' "Add"
-  --   , (8,  "morloc:lhs",   Id'  7
-  --   , (8,  "morloc:rhs",   Id'  9
-  --   , (7,  "morloc:isa",   Str' "morloc:number"
-  --   , (7,  "morloc:value", Num' 1.1
-  --   , (9, "morloc:isa",   Str' "morloc:number"
-  --   , (9, "morloc:value", Num' 1.2
-  --   , (10, "morloc:isa",   Str' "morloc:number"
-  --   , (10, "morloc:value", Num' 2.0
+  --   iuu rmId [0..5])
+  --   "foo :: X -> Y where iuu 1.1 + 1.2 > 2.0)"
+  --   [ iuu 6,  "morloc:isa"   "morloc:binop" "GT"
+  --   , iuu 6,  "morloc:lhs"    8
+  --   , iuu 6,  "morloc:rhs"    10
+  --   , iuu 8,  "morloc:isa"   "morloc:binop" "Add"
+  --   , iuu 8,  "morloc:lhs"    7
+  --   , iuu 8,  "morloc:rhs"    9
+  --   , iuu 7,  "morloc:isa"   "morloc:number"
+  --   , iuu 7,  "morloc:value" Num' 1.1
+  --   , iuu 9 "morloc:isa"   "morloc:number"
+  --   , iuu 9 "morloc:value" Num' 1.2
+  --   , iuu 10 "morloc:isa"   "morloc:number"
+  --   , iuu 10 "morloc:value" Num' 2.0
   --   ]
   --
   -- testRdfCode
-  --   "foo :: a, (b -> c) -> d"
-  --   [ (0, "morloc:isa",    Str' "morloc:script"
-  --   , (0, "morloc:child",  Id'  1
-  --   , (1, "morloc:isa",    Str' "morloc:typeDeclaration"
-  --   , (1, "morloc:lhs",    Id'  2
-  --   , (2, "morloc:isa",    Str' "morloc:name"
-  --   , (2, "morloc:value",  Str' "foo"
-  --   , (1, "morloc:rhs",    Id'  3
-  --   , (3, "morloc:isa",    Str' "morloc:functionType"
-  --   , (3, "morloc:input",  Id'  4
-  --   , (4, "morloc:isa",    Str' "morloc:atomicGeneric"
-  --   , (4, "morloc:value",  Str' "a"
-  --   , (3, "morloc:input",  Id'  5
-  --   , (5, "morloc:isa",    Str' "morloc:functionType"
-  --   , (5, "morloc:input",  Id'  6
-  --   , (6, "morloc:isa",    Str' "morloc:atomicGeneric"
-  --   , (6, "morloc:value",  Str' "b"
-  --   , (5, "morloc:output", Id'  7
-  --   , (7, "morloc:isa",    Str' "morloc:atomicGeneric"
-  --   , (7, "morloc:value",  Str' "c"
-  --   , (3, "morloc:output", Id'  8
-  --   , (8, "morloc:isa",    Str' "morloc:atomicGeneric"
-  --   , (8, "morloc:value",  Str' "d"
+  --   "foo :: a, iuu b -> c) -> d"
+  --   [ iuu 0 "morloc:isa"    "morloc:script"
+  --   , iuu 0 "morloc:child"   1
+  --   , iuu 1 "morloc:isa"    "morloc:typeDeclaration"
+  --   , iuu 1 "morloc:lhs"     2
+  --   , iuu 2 "morloc:isa"    "morloc:name"
+  --   , iuu 2 "morloc:value"  Str' "foo"
+  --   , iuu 1 "morloc:rhs"     3
+  --   , iuu 3 "morloc:isa"    "morloc:functionType"
+  --   , iuu 3 "morloc:input"   4
+  --   , iuu 4 "morloc:isa"    "morloc:atomicGeneric"
+  --   , iuu 4 "morloc:value"  Str' "a"
+  --   , iuu 3 "morloc:input"   5
+  --   , iuu 5 "morloc:isa"    "morloc:functionType"
+  --   , iuu 5 "morloc:input"   6
+  --   , iuu 6 "morloc:isa"    "morloc:atomicGeneric"
+  --   , iuu 6 "morloc:value"  Str' "b"
+  --   , iuu 5 "morloc:output"  7
+  --   , iuu 7 "morloc:isa"    "morloc:atomicGeneric"
+  --   , iuu 7 "morloc:value"  Str' "c"
+  --   , iuu 3 "morloc:output"  8
+  --   , iuu 8 "morloc:isa"    "morloc:atomicGeneric"
+  --   , iuu 8 "morloc:value"  Str' "d"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..2])
+  --   iuu rmId [0..2])
   --   "foo :: A B -> C D"
-  --   [ (3, "morloc:isa",       Str' "morloc:functionType"
-  --   , (3, "morloc:input",     Id'  4
-  --   , (4, "morloc:isa",       Str' "morloc:parameterizedType"
-  --   , (4, "morloc:value",     Str' "A"
-  --   , (4, "morloc:parameter", Id'  5
-  --   , (5, "morloc:isa",       Str' "morloc:atomicType"
-  --   , (5, "morloc:value",     Str' "B"
-  --   , (3, "morloc:output",    Id'  6
-  --   , (6, "morloc:isa",       Str' "morloc:parameterizedType"
-  --   , (6, "morloc:value",     Str' "C"
-  --   , (6, "morloc:parameter", Id'  7
-  --   , (7, "morloc:isa",       Str' "morloc:atomicType"
-  --   , (7, "morloc:value",     Str' "D"
+  --   [ iuu 3 "morloc:isa"       "morloc:functionType"
+  --   , iuu 3 "morloc:input"      4
+  --   , iuu 4 "morloc:isa"       "morloc:parameterizedType"
+  --   , iuu 4 "morloc:value"     Str' "A"
+  --   , iuu 4 "morloc:parameter"  5
+  --   , iuu 5 "morloc:isa"       "morloc:atomicType"
+  --   , iuu 5 "morloc:value"     Str' "B"
+  --   , iuu 3 "morloc:output"     6
+  --   , iuu 6 "morloc:isa"       "morloc:parameterizedType"
+  --   , iuu 6 "morloc:value"     Str' "C"
+  --   , iuu 6 "morloc:parameter"  7
+  --   , iuu 7 "morloc:isa"       "morloc:atomicType"
+  --   , iuu 7 "morloc:value"     Str' "D"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId [0..3])
-  --   "foo :: A where ((1 == 1) and (2 == 2))"
-  --   [ (4,  "morloc:isa",   Str' "morloc:binop"
-  --   , (4,  "morloc:value", Str' "and"
-  --   , (4,  "morloc:lhs",   Id'  5
-  --   , (4,  "morloc:rhs",   Id'  8
-  --   , (5,  "morloc:isa",   Str' "morloc:binop"
-  --   , (5,  "morloc:value", Str' "EQ"
-  --   , (5,  "morloc:lhs",   Id'  6
-  --   , (5,  "morloc:rhs",   Id'  7
-  --   , (6,  "morloc:isa",   Str' "morloc:integer"
-  --   , (6,  "morloc:value", Int' 1
-  --   , (7,  "morloc:isa",   Str' "morloc:integer"
-  --   , (7,  "morloc:value", Int' 1
-  --   , (8,  "morloc:isa",   Str' "morloc:binop"
-  --   , (8,  "morloc:value", Str' "EQ"
-  --   , (8,  "morloc:lhs",   Id'  9
-  --   , (8,  "morloc:rhs",   Id'  10
-  --   , (9, "morloc:isa",   Str' "morloc:integer"
-  --   , (9, "morloc:value", Int' 2
-  --   , (10, "morloc:isa",   Str' "morloc:integer"
-  --   , (10, "morloc:value", Int' 2
+  --   iuu rmId [0..3])
+  --   "foo :: A where iuu (1 == 1) and (2 == 2))"
+  --   [ iuu 4,  "morloc:isa"   "morloc:binop" "and"
+  --   , iuu 4,  "morloc:lhs"    5
+  --   , iuu 4,  "morloc:rhs"    8
+  --   , iuu 5,  "morloc:isa"   "morloc:binop" "EQ"
+  --   , iuu 5,  "morloc:lhs"    6
+  --   , iuu 5,  "morloc:rhs"    7
+  --   , iuu 6,  "morloc:isa"   "morloc:integer"
+  --   , iuu 6,  "morloc:value" Int' 1
+  --   , iuu 7,  "morloc:isa"   "morloc:integer"
+  --   , iuu 7,  "morloc:value" Int' 1
+  --   , iuu 8,  "morloc:isa"   "morloc:binop" "EQ"
+  --   , iuu 8,  "morloc:lhs"    9
+  --   , iuu 8,  "morloc:rhs"    10
+  --   , iuu 9 "morloc:isa"   "morloc:integer"
+  --   , iuu 9 "morloc:value" Int' 2
+  --   , iuu 10 "morloc:isa"   "morloc:integer"
+  --   , iuu 10 "morloc:value" Int' 2
   --   ]
   --
   -- testRdfCode
   --   "f . g"
-  --   [ (0, "morloc:isa",   Str' "morloc:script"
-  --   , (0, "morloc:child", Id'  2
-  --   , (2, "morloc:isa",   Str' "morloc:composition"
-  --   , (2, "morloc:lhs",   Id'  1
-  --   , (2, "morloc:rhs",   Id'  3
-  --   , (1, "morloc:isa",   Str' "morloc:name"
-  --   , (1, "morloc:value", Str' "f"
-  --   , (3, "morloc:isa",   Str' "morloc:name"
-  --   , (3, "morloc:value", Str' "g"
+  --   [ iuu 0 "morloc:isa"   "morloc:script"
+  --   , iuu 0 "morloc:child"  2
+  --   , iuu 2 "morloc:isa"   "morloc:composition"
+  --   , iuu 2 "morloc:lhs"    1
+  --   , iuu 2 "morloc:rhs"    3
+  --   , iuu 1 "morloc:isa"   "morloc:name" "f"
+  --   , iuu 3 "morloc:isa"   "morloc:name" "g"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId ([0..6] ++ [9])
+  --   iuu rmId ([0..6] ++ [9])
   --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (x^(-k) == 1)"
-  --   [ (7, "morloc:isa",      Str' "Neg"
-  --   , (7, "morloc:contains", Id'  8
-  --   , (8, "morloc:isa",      Str' "morloc:name"
-  --   , (8, "morloc:value",    Str' "k"
+  --   "X :: Y where iuu x^(-k) == 1)"
+  --   [ iuu 7 "morloc:isa"      Str' "Neg"
+  --   , iuu 7 "morloc:contains"  8
+  --   , iuu 8 "morloc:isa"      "morloc:name"
+  --   , iuu 8 "morloc:value"    Str' "k"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId ([0..3])
+  --   iuu rmId ([0..3])
   --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (f x (g y z))"
-  --   [ (4, "morloc:isa",      Str' "morloc:call"
-  --   , (4, "morloc:name",     Str' "f"
-  --   , (4, "morloc:argument", Id'  5
-  --   , (5, "morloc:isa",      Str' "morloc:name"
-  --   , (5, "morloc:value",    Str' "x"
-  --   , (4, "morloc:argument", Id'  6
-  --   , (6, "morloc:isa",      Str' "morloc:call"
-  --   , (6, "morloc:name",     Str' "g"
-  --   , (6, "morloc:argument", Id'  7
-  --   , (7, "morloc:isa",      Str' "morloc:name"
-  --   , (7, "morloc:value",    Str' "y"
-  --   , (6, "morloc:argument", Id'  8
-  --   , (8, "morloc:isa",      Str' "morloc:name"
-  --   , (8, "morloc:value",    Str' "z"
+  --   "X :: Y where iuu f x (g y z))"
+  --   [ iuu 4 "morloc:isa"      "morloc:call"
+  --   , iuu 4 "morloc:name"     Str' "f"
+  --   , iui 4 "morloc:argument"  5
+  --   , iuu 5 "morloc:isa"      "morloc:name"
+  --   , iuu 5 "morloc:value"    Str' "x"
+  --   , iui 4 "morloc:argument" 6
+  --   , iuu 6 "morloc:isa"      "morloc:call"
+  --   , iuu 6 "morloc:name"     Str' "g"
+  --   , iui 6 "morloc:argument"  7
+  --   , iuu 7 "morloc:isa"      "morloc:name"
+  --   , iuu 7 "morloc:value"    Str' "y"
+  --   , iui 6 "morloc:argument"  8
+  --   , iuu 8 "morloc:isa"      "morloc:name"
+  --   , iuu 8 "morloc:value"    Str' "z"
   --   ]
   --
   -- testRdfCodeWith
-  --   (rmId ([0..4] ++ [8])
+  --   iuu rmId ([0..4] ++ [8])
   --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (f x y == 1)"
-  --   [ (5, "morloc:isa",      Str' "morloc:call"
-  --   , (5, "morloc:name",     Str' "f"
-  --   , (5, "morloc:argument", Id'  6
-  --   , (6, "morloc:isa",      Str' "morloc:name"
-  --   , (6, "morloc:value",    Str' "x"
-  --   , (5, "morloc:argument", Id'  7
-  --   , (7, "morloc:isa",      Str' "morloc:name"
-  --   , (7, "morloc:value",    Str' "y"
+  --   "X :: Y where iuu f x y == 1)"
+  --   [ iuu 5 "morloc:isa"      "morloc:call"
+  --   , iuu 5 "morloc:name"     Str' "f"
+  --   , iui 5 "morloc:argument" 6
+  --   , iuu 6 "morloc:isa"      "morloc:name"
+  --   , iuu 6 "morloc:value"    Str' "x"
+  --   , iui 5 "morloc:argument"  7
+  --   , iuu 7 "morloc:isa"      "morloc:name"
+  --   , iuu 7 "morloc:value"    Str' "y"
   --   ]

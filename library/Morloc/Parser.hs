@@ -220,9 +220,7 @@ mtype =
       n <- Tok.specificType
       i <- MS.getId
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:atomicType"
-             , M3.tripleL i "morloc:value" "morloc:string" n
-             ]
+             [ M3.tripleL i "morloc:isa" "morloc:atomicType" n ]
           ++ listTag i l
         )
 
@@ -234,8 +232,7 @@ mtype =
       n <- Tok.genericType
       i <- MS.getId
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:atomicGeneric"
-             , M3.tripleL i "morloc:value" "morloc:string" n
+             [ M3.tripleL i "morloc:isa" "morloc:atomicGeneric" n
              ]
           ++ (listTag i l)
         )
@@ -258,9 +255,7 @@ mtype =
       Tok.op ","
       xs <- sepBy1 mtype Tok.comma
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:parameterizedType"
-             , M3.tripleL i "morloc:value" "morloc:string" "Tuple"
-             ]
+             [ M3.tripleL i "morloc:isa" "morloc:parameterizedType" "Tuple" ]
           ++ listTag i l
           ++ M3.adoptAs' "morloc:parameter" i (x:xs)
         )
@@ -272,9 +267,7 @@ mtype =
       l <- Tok.tag (char '[')
       s <- Tok.brackets mtype
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:parameterizedType"
-             , M3.tripleL i "morloc:value" "morloc:string" "List"
-             ]
+             [ M3.tripleL i "morloc:isa" "morloc:parameterizedType" "List" ]
           ++ listTag i l
           ++ M3.adoptAs' "morloc:parameter" i [s]
         )
@@ -286,9 +279,7 @@ mtype =
       l <- Tok.tag (char '{')
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
       return $ M3.makeTopRDF i (
-             [ M3.tripleN' i "morloc:isa" "morloc:parameterizedType"
-             , M3.tripleL i "morloc:value" "morloc:string" "Record"
-             ]
+             [ M3.tripleL i "morloc:isa" "morloc:parameterizedType" "Record" ]
           ++ listTag i l
           ++ M3.adoptAs' "morloc:parameter" i ns
         )
