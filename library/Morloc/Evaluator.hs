@@ -6,6 +6,9 @@ module Morloc.Evaluator
   , position
   , elements
   , fetchType
+  , getKids
+  , haveKid
+  , hasThese
   -- probably not worth exporting
   , p
   , o
@@ -68,27 +71,49 @@ maybe2bool :: Maybe a -> Bool
 maybe2bool (Just _) = True
 maybe2bool Nothing = False
 
--- get a type declaration by name
--- TODO: this is an insane amount of work for something so simple
+
+getKids :: DR.Rdf a
+  => DR.RDF a
+  -> DR.Predicate
+  -> DR.Subject    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Object]   -- /  chain function, allows searching in parallel
+getKids rdf p s = map DR.objectOf (DR.query rdf (Just s) (Just p) Nothing)
+
+haveKid :: DR.Rdf a
+  => DR.RDF a
+  -> DR.Predicate
+  -> DR.Object
+  -> DR.Subject
+  -> [DR.Subject]
+haveKid rdf p o s = case DR.query rdf (Just s) (Just p) (Just o) of 
+  [] -> [ ] -- if nothing is found, the subject is filtered out 
+  _  -> [s] -- if anything is found, the subject is kept
+
+hasThese :: DR.Rdf a
+  => DR.RDF a
+  -> (DR.RDF a -> DR.Node -> [DR.Node])
+  -> DR.Subject
+  -> [DR.Subject]
+hasThese rdf f x = case f rdf x of
+  [] -> []
+  _ -> [x]
+
 fetchType :: DR.Rdf a => DR.RDF a -> DT.Text -> Maybe DR.Node
 fetchType rdf name
+  -- require the final result contain only a single node
   = requireOne
-  . map DR.objectOf
-  . concat
-  . map (\o -> DR.query rdf (Just o) (Just $ p "morloc:rhs") Nothing)
-  . filter (lhsName rdf (v (Just "morloc:name") name))
-  . map DR.subjectOf
-  $ DR.query rdf Nothing (Just $ p "rdf:type") (Just $ o "morloc:typeDeclaration")
-  where
-    lhsName :: DR.Rdf a => DR.RDF a -> DR.Object -> DR.Subject -> Bool 
-    lhsName rdf' exp' s' =
-      case
-        DR.query rdf' (Just s') (Just $ p "morloc:lhs") Nothing 
-      of
-        [DR.Triple _ _ lhs'] ->
-          case
-            DR.query rdf' (Just lhs') (Just $ p "rdf:type") Nothing 
-          of
-            [DR.Triple _ _ obs'] -> obs' == exp'
-            _ -> False
-        _ -> False
+  -- get the IDs for all type declarations
+  $ (map DR.subjectOf)
+    (DR.query
+      rdf
+      Nothing
+      (Just $ p "rdf:type")
+      (Just $ o "morloc:typeDeclaration")
+    )
+  -- remove any IDs that do not have the appropriate lhs name
+  >>= hasThese rdf (\r' x ->
+            getKids r' (p "morloc:lhs") x
+        >>= haveKid r' (p "rdf:type") (v (Just "morloc:name") name)
+      )
+  -- get the rhs value
+  >>= getKids rdf (p "morloc:rhs")
