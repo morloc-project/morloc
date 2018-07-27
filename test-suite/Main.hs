@@ -3,7 +3,6 @@
 import qualified Test.Tasty
 import Test.Tasty.Hspec
 import qualified Data.RDF as DR
-import qualified Data.Sort as DS
 import qualified Data.Text as DT
 
 import qualified Morloc.Parser as MP
@@ -24,7 +23,7 @@ rmId is ts = filter (rmId' is) ts
 
 testRdfCodeWith :: ([DR.Triple] -> [DR.Triple]) -> String -> [DR.Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
-  (Right ts') -> it s $ do shouldBe (DS.sort ts) (DS.sort ts')
+  (Right ts') -> it s $ do shouldBe (DR.uordered ts) (DR.uordered ts')
   (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
     run' f s = fmap (mapTriples f) (MP.morlocScript (s ++ ";"))
