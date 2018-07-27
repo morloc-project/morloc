@@ -48,7 +48,7 @@ morlocShow (TypeMismatch n o e)  = "Type mismatch in '" ++ n ++ "':\n"
                                    ++ "  Observed type: '" ++ o ++ "'"
 morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
 morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
-morlocShow  UnknownError         = "Damn, you broke it good"
+morlocShow  UnknownError         = "UnknownError"
 
 -- quote a string
 q :: Show a => a -> String
