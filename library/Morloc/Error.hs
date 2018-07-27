@@ -18,6 +18,7 @@ data MorlocError
   | NotImplemented   String
   | NotSupported     String
   | CouldNotFind     String
+  | MissingType      String
   | NameConflict     String
   | TypeError        String
   | TypeMismatch     String String String -- name, obs type, exp type
@@ -35,10 +36,11 @@ morlocShow (BadApplication msg)  = "BadApplication: "      ++ show msg
 morlocShow (BadComposition msg)  = "BadComposition: "      ++ show msg
 morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
 morlocShow (BadArray       err)  = "BadArray: "            ++ show err
-morlocShow (UndefinedValue xs)   = "Undefined value(s): " ++ unwords xs 
+morlocShow (UndefinedValue xs)   = "Undefined value(s): " ++ unwords xs
 morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
-morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?" 
+morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?"
+morlocShow (MissingType x)       = "Could not find type signature for " ++ q x
 morlocShow (NameConflict msg)    = "NameConflict: " ++ show msg
 morlocShow (TypeError s)         = "TypeError: " ++ s
 morlocShow (TypeMismatch n o e)  = "Type mismatch in '" ++ n ++ "':\n" 
