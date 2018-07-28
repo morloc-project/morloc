@@ -18,5 +18,7 @@ main = do
 
     ["--rdf-triple", x] -> readFile x >>= M.writeTriple
 
+    [x] -> readFile x >>= M.writeProgram
+
     -- wrong input
     _   -> putStrLn "Please provide a single filename"

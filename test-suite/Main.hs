@@ -9,7 +9,7 @@ import qualified Morloc.Parser as MP
 import qualified Morloc.Triple as M3
 import qualified Morloc.Data as MD
 import qualified Morloc.Error as ME
-import qualified Morloc.Evaluator as MEval
+import qualified Morloc.Walker as MW
 import Morloc.Operators ((|>>))
 
 main :: IO ()
@@ -39,34 +39,34 @@ iuu s r o = M3.uss (M3.idUri s) r o
 iui s r o = M3.usu (M3.idUri s) r (M3.idUri o)
 iut s r t o = M3.ust (M3.idUri s) r t o
 
-testEvaluator :: (Show a, Eq a) => String -> String -> (M3.RDF -> a) -> a -> Spec
-testEvaluator desc code f exp = case MP.morlocScript code of 
+testWalker :: (Show a, Eq a) => String -> String -> (M3.RDF -> a) -> a -> Spec
+testWalker desc code f exp = case MP.morlocScript code of 
   (Right rdf) -> it desc $ do shouldBe (f rdf) exp
   (Left err) -> error (unlines ["Failure:", ">>>" ++ show err])
 
 spec :: Spec
 spec = parallel $ do
 
-  ----- Evaluator code: TODO - separate these
+  ----- Walker code: TODO - separate these
 
-  testEvaluator
+  testWalker
     "fetchType"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf -> MEval.fetchType rdf "foo")
+    (\rdf -> MW.fetchType rdf "foo")
     [DR.UNode "mid:3"]
 
-  testEvaluator
+  testWalker
     "fetchType >>= elements"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf -> MEval.fetchType rdf "foo" >>= MEval.elements rdf)
+    (\rdf -> MW.fetchType rdf "foo" >>= MW.elements rdf)
     [DR.UNode "mid:4", DR.UNode "mid:5"]
 
-  testEvaluator
+  testWalker
     "map position (fetchType >>= elements)"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf ->  MEval.fetchType rdf "foo"
-          >>= MEval.elements rdf
-          |>> MEval.position rdf
+    (\rdf ->  MW.fetchType rdf "foo"
+          >>= MW.elements rdf
+          |>> MW.position rdf
       )
     [Just 0, Just 1]
 

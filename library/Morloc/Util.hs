@@ -11,7 +11,10 @@ module Morloc.Util
   , maybeOne
 ) where
 
+import Morloc.Operators
+
 import qualified Data.List as DL
+import qualified Data.Text as DT
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
@@ -29,10 +32,11 @@ sort = DL.sort
 repeated :: Ord a => [a] -> [a]
 repeated xs = [y | (y:(_:_)) <- (DL.group . DL.sort) xs]
 
-indent :: Int -> String -> String
+indent :: Int -> DT.Text -> DT.Text
 indent i s
   | i <= 0    = s
-  | otherwise = unlines . map ((++) (take i (repeat ' '))) . lines $ s
+  -- TODO: this the String -> Text transform here is slow and unnecessary
+  | otherwise = DT.unlines . map ((<>) (DT.pack (take i (repeat ' ')))) . DT.lines $ s
 
 maybe2bool :: Maybe a -> Bool
 maybe2bool (Just _) = True

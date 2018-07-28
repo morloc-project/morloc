@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Morloc.Evaluator
+module Morloc.Walker
 (
     down
   , downOn
@@ -12,6 +12,10 @@ module Morloc.Evaluator
   , countElements
   , fetchType
   , fetchConstraints
+  , allDataDeclarations
+  , value
+  , lhs
+  , rhs
   , p
   , o
   , v
@@ -41,10 +45,15 @@ v Nothing  s = DR.LNode (DR.PlainL s)
 -- Operations
 --
 -- End :: [Node] -> a
-valueOf :: DR.Node -> Maybe DT.Text
-valueOf (DR.LNode (DR.TypedL _ s)) = Just s
-valueOf (DR.LNode (DR.PlainL s)) = Just s
-valueOf _ = Nothing 
+maybeValue :: DR.Node -> Maybe DT.Text
+maybeValue (DR.LNode (DR.TypedL _ s)) = Just s
+maybeValue (DR.LNode (DR.PlainL s)) = Just s
+maybeValue _ = Nothing 
+
+value :: DR.Node -> [DT.Text]
+value (DR.LNode (DR.TypedL _ s)) = [s]
+value (DR.LNode (DR.PlainL s)) = [s]
+value _ = []
 
 -- Down :: Subject -> [Object]
 down :: DR.Rdf a
@@ -87,8 +96,6 @@ hasThese rdf f x = case f rdf x of
   _ -> [x]
 
 
--- Morloc specific functions ----------------------------------------
-
 isElement :: DR.Node -> Bool
 isElement (DR.UNode s)
   = maybe False id             -- Bool
@@ -125,6 +132,8 @@ elements rdf obj
       (Just isElement)
       (Just ((==) obj))
 
+-- Morloc specific functions ----------------------------------------
+
 fetchType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 fetchType rdf name
   -- get Triples for all type declarations
@@ -146,3 +155,17 @@ fetchType rdf name
 -- fetchConstraints x "foo"
 fetchConstraints :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 fetchConstraints rdf n = fetchType rdf n >>= down rdf (p "morloc:constraint")
+
+allDataDeclarations :: DR.Rdf a => DR.RDF a -> [DR.Node]
+allDataDeclarations rdf
+  = DR.query rdf
+    Nothing 
+    (Just $ p "rdf:type")
+    (Just $ o "morloc:dataDeclaration")
+  |>> DR.subjectOf
+
+lhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
+lhs rdf s = down rdf (p "morloc:lhs") s
+
+rhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
+rhs rdf s = down rdf (p "morloc:rhs") s
