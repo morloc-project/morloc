@@ -42,6 +42,7 @@ library
                       Morloc.State
                       Morloc.Triple
                       Morloc.Util
+                      Morloc.Operators
 
     build-depends: base,
                    safe,

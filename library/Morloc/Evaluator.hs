@@ -9,6 +9,7 @@ module Morloc.Evaluator
   , isElement
   , position
   , elements
+  , countElements
   , fetchType
   , p
   , o
@@ -19,9 +20,11 @@ import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.Char as DC
 import qualified Control.Monad as CM
+import qualified Data.Text.Read as DTR
 
 import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
+import Morloc.Operators ((|>>))
 
 -- Convenience functions
 p :: DT.Text -> DR.Predicate
@@ -93,13 +96,23 @@ isElement (DR.UNode s)
   $ s
 isElement _ = False
 
-position :: DR.Node -> Maybe Int
-position (DR.UNode s) = case DT.stripPrefix "rdf:_" s of
-  Just str_int -> case (reads (show str_int) :: [(Int, String)]) of
-    [(i, "")] -> Just i
+toIndex :: DR.Node -> Maybe Int
+toIndex (DR.UNode n) = DT.stripPrefix "rdf:_" n >>= decimal' where
+  decimal' :: DT.Text -> Maybe Int
+  decimal' s = case DTR.decimal s of
+    (Right (i, "")) -> Just i
     _ -> Nothing
-  _ -> Nothing
-position _ = Nothing
+
+position :: DR.Rdf a => DR.RDF a -> DR.Node -> Maybe Int
+position rdf sbj
+  = CM.join
+  . MU.maybeOne 
+  . map toIndex
+  . map DR.predicateOf
+  $ DR.select rdf (Just $ (==) sbj) (Just isElement) Nothing
+
+countElements :: DR.Rdf a => DR.RDF a -> DR.Node -> Int
+countElements rdf sbj = length $ downOn rdf isElement sbj
 
 elements :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Node]
 elements rdf obj
@@ -111,18 +124,15 @@ elements rdf obj
       (Just isElement)
       (Just ((==) obj))
 
-fetchType :: DR.Rdf a => DR.RDF a -> DT.Text -> Maybe DR.Node
+fetchType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 fetchType rdf name
-  -- require the final result contain only a single node
-  = MU.maybeOne
-  -- get the IDs for all type declarations
-  $ (map DR.subjectOf)
-    (DR.query
-      rdf
-      Nothing
-      (Just $ p "rdf:type")
-      (Just $ o "morloc:typeDeclaration")
-    )
+  -- get Triples for all type declarations
+  =   DR.query rdf
+        Nothing
+        (Just $ p "rdf:type")
+        (Just $ o "morloc:typeDeclaration")
+  -- Get the subject node from each triple
+  |>> DR.subjectOf
   -- remove any IDs that do not have the appropriate lhs name
   >>= hasThese rdf (\r' x ->
             down r' (p "morloc:lhs") x

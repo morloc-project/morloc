@@ -10,6 +10,7 @@ import qualified Morloc.Triple as M3
 import qualified Morloc.Data as MD
 import qualified Morloc.Error as ME
 import qualified Morloc.Evaluator as MEval
+import Morloc.Operators ((|>>))
 
 main :: IO ()
 main = do
@@ -52,7 +53,22 @@ spec = parallel $ do
     "fetchType"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
     (\rdf -> MEval.fetchType rdf "foo")
-    (Just (DR.UNode "mid:3"))
+    [DR.UNode "mid:3"]
+
+  testEvaluator
+    "fetchType >>= elements"
+    "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
+    (\rdf -> MEval.fetchType rdf "foo" >>= MEval.elements rdf)
+    [DR.UNode "mid:4", DR.UNode "mid:5"]
+
+  testEvaluator
+    "map position (fetchType >>= elements)"
+    "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
+    (\rdf ->  MEval.fetchType rdf "foo"
+          >>= MEval.elements rdf
+          |>> MEval.position rdf
+      )
+    [Just 0, Just 1]
 
   ----- RDF code
 
