@@ -9,6 +9,7 @@ import qualified Morloc.Parser as MP
 import qualified Morloc.Triple as M3
 import qualified Morloc.Data as MD
 import qualified Morloc.Error as ME
+import qualified Morloc.Evaluator as MEval
 
 main :: IO ()
 main = do
@@ -37,8 +38,23 @@ iuu s r o = M3.uss (M3.idUri s) r o
 iui s r o = M3.usu (M3.idUri s) r (M3.idUri o)
 iut s r t o = M3.ust (M3.idUri s) r t o
 
+testEvaluator :: (Show a, Eq a) => String -> String -> (M3.RDF -> a) -> a -> Spec
+testEvaluator desc code f exp = case MP.morlocScript code of 
+  (Right rdf) -> it desc $ do shouldBe (f rdf) exp
+  (Left err) -> error (unlines ["Failure:", ">>>" ++ show err])
+
 spec :: Spec
 spec = parallel $ do
+
+  ----- Evaluator code: TODO - separate these
+
+  testEvaluator
+    "fetchType"
+    "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
+    (\rdf -> MEval.fetchType rdf "foo")
+    (Just (DR.UNode "mid:3"))
+
+  ----- RDF code
 
   testRdfCode
     "source \"R\" (\"fo.o\" as foo)"
