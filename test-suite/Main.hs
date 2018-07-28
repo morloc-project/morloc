@@ -306,7 +306,7 @@ spec = parallel $ do
     , iut 4 "morloc:label" "morloc:name" "i"
     , iui 3 "morloc:output" 5
     , iut 5 "rdf:type" "morloc:atomicType" "Num"
-    , iui 6 "rdf:_0" 3
+    , iui 3 "morloc:constraint" 6
     , iut 6 "rdf:type" "morloc:binop" "GT"
     , iui 6 "morloc:lhs" 7
     , iui 6 "morloc:rhs" 8
@@ -328,8 +328,7 @@ spec = parallel $ do
   testRdfCodeWith
     (rmId [0..5])
     "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
-    [ iui 6 "rdf:_0" 3
-    , iut 6 "rdf:type" "morloc:binop" "GT"
+    [ iut 6 "rdf:type" "morloc:binop" "GT"
     , iui 6 "morloc:lhs" 8
     , iui 6 "morloc:rhs" 10
     , iut 8 "rdf:type" "morloc:binop" "Add"
@@ -376,9 +375,10 @@ spec = parallel $ do
     ]
 
   testRdfCodeWith
-    (rmId [0..3])
+    (rmId [0..2])
     "foo :: A where ((1 == 1) and (2 == 2))"
-    [ iui 4 "rdf:_0" 3
+    [ iut 3 "rdf:type" "morloc:atomicType" "A"
+    , iui 3 "morloc:constraint" 4
     , iut 4 "rdf:type" "morloc:binop" "and"
     , iui 4 "morloc:lhs" 5
     , iui 4 "morloc:rhs" 8
@@ -418,8 +418,7 @@ spec = parallel $ do
     (rmId [0..3])
     -- this will fail later, since x,k, and t are undefined.
     "X :: Y where (f x (g y z))"
-    [ iui 4 "rdf:_0" 3
-    , iuu 4 "rdf:type" "morloc:call"
+    [ iuu 4 "rdf:type" "morloc:call"
     , iut 4 "morloc:value" "morloc:name" "f"
     , iui 5 "rdf:_0" 4
     , iut 5 "rdf:type" "morloc:name" "x"

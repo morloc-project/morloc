@@ -11,6 +11,7 @@ module Morloc.Evaluator
   , elements
   , countElements
   , fetchType
+  , fetchConstraints
   , p
   , o
   , v
@@ -140,3 +141,8 @@ fetchType rdf name
       )
   -- get the rhs
   >>= down rdf (p "morloc:rhs")
+
+-- x = (\(Right z) -> z) $ morlocScript "foo :: x:A, y:B -> z:C where (x > y);"
+-- fetchConstraints x "foo"
+fetchConstraints :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
+fetchConstraints rdf n = fetchType rdf n >>= down rdf (p "morloc:constraint")

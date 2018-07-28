@@ -145,7 +145,7 @@ typeDeclaration = do
          [M3.uss i "rdf:type" "morloc:typeDeclaration"]
       ++ M3.adoptAs "morloc:lhs" i [lhs]
       ++ M3.adoptAs "morloc:rhs" i [rhs]
-      ++ M3.adopt (M3.rdfId rhs) constraints
+      ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
     )
 
 listTag :: DR.Node -> Maybe String -> [M3.Triple]
