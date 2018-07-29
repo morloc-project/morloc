@@ -73,13 +73,15 @@ test-suite morloc-test-suite
   main-is: Main.hs
   other-modules:
       Paths_morloc
+      ParserTests
+      WalkerTests
   hs-source-dirs:
       test-suite
   ghc-options: -Wall -rtsopts -threaded -with-rtsopts=-N
   build-depends:
       base
     , tasty
-    , tasty-hspec
+    , tasty-hspec >= 0.1
     , morloc
     , rdf4h
     , text
