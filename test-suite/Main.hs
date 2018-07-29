@@ -7,7 +7,6 @@ import qualified Data.Text as DT
 
 import qualified Morloc.Parser as MP
 import qualified Morloc.Triple as M3
-import qualified Morloc.Data as MD
 import qualified Morloc.Error as ME
 import qualified Morloc.Walker as MW
 import Morloc.Operators ((|>>))
