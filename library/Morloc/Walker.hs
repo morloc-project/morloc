@@ -10,9 +10,11 @@ module Morloc.Walker
   , position
   , elements
   , countElements
-  , fetchType
-  , fetchConstraints
-  , allDataDeclarations
+  , getType
+  , getConstraints
+  , getSources
+  , getDataDeclarations
+  , imports
   , value
   , lhs
   , rhs
@@ -70,7 +72,6 @@ downOn :: DR.Rdf a
   -> [DR.Object]
 downOn rdf pf s = map DR.objectOf
   (DR.select rdf (Just $ (==) s) (Just pf) Nothing)
-
 
 -- Require :: Subject:x -> xs:[Subject]
 -- -- Where (i == xs[0] and len xs == 1) or (len xs == 0)
@@ -134,8 +135,30 @@ elements rdf obj
 
 -- Morloc specific functions ----------------------------------------
 
-fetchType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
-fetchType rdf name
+lhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
+lhs rdf s = down rdf (p "morloc:lhs") s
+
+rhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
+rhs rdf s = down rdf (p "morloc:rhs") s
+
+lang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
+lang rdf s = down rdf (p "morloc:lang") s
+
+imports :: DR.Rdf a => DR.RDF a -> DR.Subject -> [(DT.Text, Maybe DT.Text)]
+imports rdf s = down rdf (p "morloc:import") s >>= names'
+  where
+    names' :: DR.Subject -> [(DT.Text, Maybe DT.Text)]
+    names' i =
+      case
+        ( MU.maybeOne (down rdf (p "morloc:name" ) i >>= value)
+        , MU.maybeOne (down rdf (p "morloc:alias") i >>= value)
+        )
+      of
+        (Just name, alias) -> [(name, alias)]
+        _ -> []
+
+getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
+getType rdf name
   -- get Triples for all type declarations
   =   DR.query rdf
         Nothing
@@ -152,20 +175,22 @@ fetchType rdf name
   >>= down rdf (p "morloc:rhs")
 
 -- x = (\(Right z) -> z) $ morlocScript "foo :: x:A, y:B -> z:C where (x > y);"
--- fetchConstraints x "foo"
-fetchConstraints :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
-fetchConstraints rdf n = fetchType rdf n >>= down rdf (p "morloc:constraint")
+-- getConstraints x "foo"
+getConstraints :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
+getConstraints rdf n = getType rdf n >>= down rdf (p "morloc:constraint")
 
-allDataDeclarations :: DR.Rdf a => DR.RDF a -> [DR.Node]
-allDataDeclarations rdf
+getDataDeclarations :: DR.Rdf a => DR.RDF a -> [DR.Node]
+getDataDeclarations rdf
   = DR.query rdf
     Nothing 
     (Just $ p "rdf:type")
     (Just $ o "morloc:dataDeclaration")
   |>> DR.subjectOf
 
-lhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
-lhs rdf s = down rdf (p "morloc:lhs") s
-
-rhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
-rhs rdf s = down rdf (p "morloc:rhs") s
+getSources :: DR.Rdf a => DR.RDF a -> [DR.Node]
+getSources rdf
+  = DR.query rdf
+    Nothing
+    (Just $ p "rdf:type")
+    (Just $ o "morloc:source")
+  |>> DR.subjectOf

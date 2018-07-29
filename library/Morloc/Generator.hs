@@ -45,17 +45,14 @@ generateNexus rdf = pure $ Script {
     nexusCode' = DT.unlines
       [ (MN.nexusPrologue g)
       , (MN.nexusPrint g) ""
-      , (MN.nexusDispatch g) (allDataDeclarations rdf >>= lhs rdf >>= value)
+      , (MN.nexusDispatch g) (getDataDeclarations rdf >>= lhs rdf >>= value)
       , (MN.nexusHelp g) []
       ]
       <> DT.unlines (map ((MN.nexusCall g) "Rscript" "pool.R") [])
       <> MN.nexusEpilogue g
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
-generatePools r = sequence $ map (generatePool r) (fetchSources r)
+generatePools r = sequence $ map (generatePool r) (getSources r)
 
 generatePool :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError Pool
 generatePool = undefined
-
-fetchSources :: DR.Rdf a => DR.RDF a -> [DR.Node]
-fetchSources = undefined
