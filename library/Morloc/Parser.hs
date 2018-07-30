@@ -34,11 +34,21 @@ contents = do
 
 top :: MS.Parser M3.TopRDF 
 top =
-      try (source'    <* optional (Tok.op ";") )
+      try (export'    <* optional (Tok.op ";") )
+  <|> try (source'    <* optional (Tok.op ";") )
   <|> try (statement' <*           Tok.op ";"  )
   <|> try (import'    <* optional (Tok.op ";") )
   <|> try (expression <*           Tok.op ";"  )
   <?> "Top. Maybe you are missing a semicolon?"
+
+export' :: MS.Parser M3.TopRDF
+export' = do
+  Tok.reserved "export"
+  i <- MS.getId
+  n <- Tok.name
+  return $ M3.makeTopRDF i ([
+      M3.ust i "rdf:type" "morloc:export" n
+    ])
 
 -- | parses a 'source' header, returning the language
 source' :: MS.Parser M3.TopRDF
