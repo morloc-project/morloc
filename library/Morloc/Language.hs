@@ -64,7 +64,7 @@ rCodeGenerator = CodeGenerator {
 
     makeManifoldName' :: DT.Text -> DT.Text
     makeManifoldName' t = case DT.splitOn ":" t of
-      [p, i] -> ".morlocId_" <> i
+      [p, i] -> "m" <> i
       _ -> "XXX"
 
     begin' = ["#!/usr/bin/env Rscript"]

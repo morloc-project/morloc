@@ -63,12 +63,13 @@ generateFunction rdf src g n =
         value rdf n >>= rdftype rdf >>= valueOf
         -- FIXME: this only works for primitives
       , elements rdf n >>= rdftype rdf >>= valueOf
+      , getScope rdf n >>= elements rdf >>= rdftype rdf >>= valueOf 
       , idOf n
     )
   of
-  ([name], args, [mid]) ->
+  ([name], args, bndvars, [mid]) ->
     (ML.makeFunction g)
-      ((ML.makeManifoldName g) mid) 
-      []
+      ((ML.makeManifoldName g) mid)
+      bndvars
       ((ML.makeCall g) name args)
   _ -> "XXX"

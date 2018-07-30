@@ -5,6 +5,7 @@ module Morloc.Walker
   -- general RDF access functions
     down
   , downOn
+  , up
   , has
   , hasThese
   , isElement
@@ -25,6 +26,7 @@ module Morloc.Walker
   , getSources
   , getDataDeclarations
   , getCalls
+  , getScope
   -- morloc specific step functions
   , imports
   , lang
@@ -79,6 +81,13 @@ down :: DR.Rdf a
   -> DR.Subject    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Object]   -- /  chain function, allows searching in parallel
 down rdf p s = map DR.objectOf (DR.query rdf (Just s) (Just p) Nothing)
+
+up :: DR.Rdf a
+  => DR.RDF a
+  -> DR.Predicate
+  -> DR.Object    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Subject]   -- /  chain function, allows searching in parallel
+up rdf p o = map DR.subjectOf (DR.query rdf Nothing (Just p) (Just o))
 
 downOn :: DR.Rdf a
   => DR.RDF a
@@ -148,6 +157,14 @@ elements rdf obj
       (Just isElement)
       (Just ((==) obj))
 
+parent :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
+parent rdf kid = map DR.subjectOf $
+  DR.select
+    rdf
+    (Just $ (==) kid)
+    (Just isElement)
+    Nothing
+
 -- Morloc specific functions ----------------------------------------
 
 lhs :: DR.Rdf a => DR.RDF a -> DR.Subject -> [DR.Object]
@@ -184,38 +201,6 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         (Just name, alias) -> [(name, alias)]
         _ -> []
 
--- -- TODO add getters for all of these
--- "morloc:list"                 "rdfs:subClassOf" "rdfs:Seq" -- elements
--- "morloc:tuple"                "rdfs:subClassOf" "rdfs:Seq" -- elements
--- "morloc:record"               "rdfs:subClassOf" "rdfs:Bag" -- tag/value pairs
--- "morloc:script"               "rdfs:subClassOf" "rdfs:Bag" -- statements
--- "morloc:call"                 "rdfs:subClassOf" "rdfs:Seq" -- arguments
--- "morloc:parameterizedType"    "rdfs:subClassOf" "rdfs:Seq" -- type parameters
--- "morloc:parameterizedGeneric" "rdfs:subClassOf" "rdfs:Seq" -- type parameters
--- "morloc:restricted_import"    "rdfs:subClassOf" "rdfs:Bag" -- imports
--- "morloc:import"               "rdfs:subClassOf" "rdfs:Bag" -- imports
--- "morloc:source"               "rdfs:subClassOf" "rdfs:Bag" -- imports
--- "morloc:functionType"         "rdfs:subClassOf" "rdfs:Seq" -- inputs
---   -- primitives
--- "morloc:alias"         "rdf:type" "xsd:string"
--- "morloc:atomicGeneric" "rdf:type" "xsd:string"
--- "morloc:atomicType"    "rdf:type" "xsd:string"
--- "morloc:integer"       "rdf:type" "xsd:integer"
--- "morloc:boolean"       "rdf:type" "xsd:boolean"
--- "morloc:number"        "rdf:type" "xsd:float"
--- "morloc:key"           "rdf:type" "xsd:string"
--- "morloc:label"         "rdf:type" "xsd:string"
--- "morloc:lang"          "rdf:type" "xsd:string"
--- "morloc:name"          "rdf:type" "xsd:string"
--- "morloc:string"        "rdf:type" "xsd:string"
--- "morloc:namespace"     "rdf:type" "xsd:string"
---   -- generic value tags
--- "morloc:value"  "rdf:type" "rdf:value"
--- "morloc:output" "rdf:type" "rdf:value"
--- "morloc:lhs"    "rdf:type" "rdf:value"
--- "morloc:rhs"    "rdf:type" "rdf:value"
-
-
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getType rdf name
   -- get Triples for all type declarations
@@ -245,6 +230,20 @@ getDataDeclarations rdf
     (Just $ p "rdf:type")
     (Just $ o "morloc:dataDeclaration")
   |>> DR.subjectOf
+
+-- for an element in a DataDeclaration or TypeDeclaration, get the top node
+getScope :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
+getScope rdf n = getScope' rdf n
+  where 
+    getScope' rdf n
+      | (rdftype rdf n >>= valueOf) == ["morloc:dataDeclaration"] = [n]
+      | (rdftype rdf n >>= valueOf) == ["morloc:typeDeclaration"] = [n]
+      | length (rhsOf rdf n) == 1 = rhsOf rdf n 
+      | otherwise = parent rdf n >>= has rdf (p "rdf:type") (v Nothing "morloc:call")
+
+rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
+rhsOf rdf o = up rdf (p "morloc:rhs") o
+  
 
 getCalls :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getCalls rdf
