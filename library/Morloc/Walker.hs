@@ -2,6 +2,7 @@
 
 module Morloc.Walker
 (
+  -- general RDF access functions
     down
   , downOn
   , has
@@ -10,17 +11,22 @@ module Morloc.Walker
   , position
   , elements
   , countElements
+  , value
+  -- node builder convenience functions
+  , p
+  , o
+  , v
+  -- morloc specific query functions
   , getType
   , getConstraints
   , getSources
   , getDataDeclarations
+  -- morloc specific step functions
   , imports
-  , value
+  , lang
+  , path
   , lhs
   , rhs
-  , p
-  , o
-  , v
 ) where
 
 import qualified Data.RDF as DR
@@ -143,6 +149,9 @@ rhs rdf s = down rdf (p "morloc:rhs") s
 
 lang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
 lang rdf s = down rdf (p "morloc:lang") s
+
+path :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
+path rdf s = down rdf (p "morloc:path") s
 
 imports :: DR.Rdf a => DR.RDF a -> DR.Subject -> [(DT.Text, Maybe DT.Text)]
 imports rdf s = down rdf (p "morloc:import") s >>= names'

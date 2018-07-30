@@ -12,6 +12,7 @@ import Morloc.Walker
 import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Nexus as MN
+import qualified Morloc.Pool as MP
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
@@ -55,8 +56,12 @@ generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)
 
 generatePool :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError Pool
-generatePool rdf n = pure $ Script {
-      scriptBase = "pool"
-    , scriptLang = "French"
-    , scriptCode = "yolo"
-  }
+generatePool rdf n = Script
+  <$> pure "pool"
+  <*> getLang rdf n
+  <*> MP.generatePoolCode rdf n
+  where
+    getLang :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError String
+    getLang rdf' n' = case lang rdf' n' >>= value of
+      [x] -> Right (DT.unpack x)
+      _   -> Left $ ME.InvalidRDF "A source must have exactly one language"

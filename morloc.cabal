@@ -35,6 +35,8 @@ library
     exposed-modules:  Morloc
                       Morloc.Error
                       Morloc.Generator
+                      Morloc.Language
+                      Morloc.Pool
                       Morloc.Lexer
                       Morloc.Nexus
                       Morloc.Operators
