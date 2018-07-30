@@ -422,14 +422,19 @@ booleanExpr = do
     call' :: MS.Parser M3.TopRDF
     call' = do
       i <- MS.getId
-      n <- Tok.name
+      f <- Tok.parens expression <|> identifier'
       ns <- many1 argument'
       return $ M3.makeTopRDF i (
-             [ M3.uss i "rdf:type" "morloc:call"
-             , M3.ust i "morloc:value" "morloc:name" n
-             ]
+             [ M3.uss i "rdf:type" "morloc:call" ]
+          ++ M3.adoptAs  "morloc:value" i [f]
           ++ M3.adopt i ns
         )
+
+    identifier' :: MS.Parser M3.TopRDF
+    identifier' = do
+      i <- MS.getId
+      n <- Tok.name
+      return $ M3.makeTopRDF i [M3.ust i "rdf:type" "morloc:name" n]
 
     argument' :: MS.Parser M3.TopRDF
     argument' =
@@ -485,13 +490,19 @@ arithmeticTerm = do
 
     call' = do
       i <- MS.getId
-      x <- Tok.name
-      xs <- many1 argument'
+      f <- Tok.parens expression <|> identifier'
+      args <- many1 argument'
       return $ M3.makeTopRDF i (
-          [ M3.uss i "rdf:type" "morloc:call"
-          , M3.ust i "morloc:value" "morloc:name" x
-          ] ++ M3.adopt i xs
+             [M3.uss i "rdf:type" "morloc:call"]
+          ++ M3.adoptAs "morloc:value" i [f]
+          ++ M3.adopt i args
         )
+
+    identifier' :: MS.Parser M3.TopRDF
+    identifier' = do
+      i <- MS.getId
+      n <- Tok.name
+      return $ M3.makeTopRDF i [M3.ust i "rdf:type" "morloc:name" n]
 
     argument' :: MS.Parser M3.TopRDF
     argument' =

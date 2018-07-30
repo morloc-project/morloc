@@ -6,19 +6,24 @@ import qualified Data.RDF as DR
 import qualified Data.Text as DT
 
 import Morloc.Walker
+import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Language as ML
 import qualified Morloc.Util as MU
 
--- A RDF node which is assumed to be for a source import
+-- RDF node representing a source import
 type Source = DR.Node 
+-- RDF node representing an exported function
+type Export = DR.Node
+-- RDF node representing a function call
+type Call = DR.Node
 
 generatePoolCode :: DR.Rdf a => DR.RDF a -> Source -> ME.ThrowsError DT.Text
 generatePoolCode rdf src =
   case
     (
-        MU.maybeOne $ lang rdf src >>= value
-      , MU.maybeOne $ path rdf src >>= value
+        MU.maybeOne $ lang rdf src >>= valueOf
+      , MU.maybeOne $ path rdf src >>= valueOf
     )
   of
   (Just "R", Nothing) -> generateWith rdf src ML.rCodeGenerator
@@ -38,10 +43,32 @@ generateWith rdf src g = Right $
     (generateFunctions rdf src g)
 
 generateGlobal :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateGlobal _ _ _ = ["<stub global>"]
+generateGlobal _ _ _ = []
 
 generateSource :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateSource _ _ _ = ["<stub source>"]
+generateSource rdf src g = path rdf src >>= valueOf |>> ML.makeSource g
 
 generateFunctions :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateFunctions _ _ _ = ["<stub functions>"]
+generateFunctions rdf src g = map (generateFunction rdf src g) (getCalls rdf)
+
+generateFunction :: DR.Rdf a
+  => DR.RDF a
+  -> Source -- needed to decide whether this is an internal or external function
+  -> ML.CodeGenerator
+  -> Call 
+  -> DT.Text 
+generateFunction rdf src g n =
+  case
+    (
+        value rdf n >>= rdftype rdf >>= valueOf
+        -- FIXME: this only works for primitives
+      , elements rdf n >>= rdftype rdf >>= valueOf
+      , idOf n
+    )
+  of
+  ([name], args, [mid]) ->
+    (ML.makeFunction g)
+      ((ML.makeManifoldName g) mid) 
+      []
+      ((ML.makeCall g) name args)
+  _ -> "XXX"

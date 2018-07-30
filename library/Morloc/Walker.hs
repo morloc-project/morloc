@@ -11,7 +11,10 @@ module Morloc.Walker
   , position
   , elements
   , countElements
+  , rdftype
   , value
+  , valueOf
+  , idOf
   -- node builder convenience functions
   , p
   , o
@@ -21,10 +24,12 @@ module Morloc.Walker
   , getConstraints
   , getSources
   , getDataDeclarations
+  , getCalls
   -- morloc specific step functions
   , imports
   , lang
   , path
+  , name
   , lhs
   , rhs
 ) where
@@ -58,10 +63,14 @@ maybeValue (DR.LNode (DR.TypedL _ s)) = Just s
 maybeValue (DR.LNode (DR.PlainL s)) = Just s
 maybeValue _ = Nothing 
 
-value :: DR.Node -> [DT.Text]
-value (DR.LNode (DR.TypedL _ s)) = [s]
-value (DR.LNode (DR.PlainL s)) = [s]
-value _ = []
+valueOf :: DR.Node -> [DT.Text]
+valueOf (DR.LNode (DR.TypedL _ s)) = [s]
+valueOf (DR.LNode (DR.PlainL s)) = [s]
+valueOf _ = []
+
+idOf :: DR.Node -> [DT.Text]
+idOf (DR.UNode s) = [s]
+idOr _ = []
 
 -- Down :: Subject -> [Object]
 down :: DR.Rdf a
@@ -153,14 +162,23 @@ lang rdf s = down rdf (p "morloc:lang") s
 path :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
 path rdf s = down rdf (p "morloc:path") s
 
+name :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
+name rdf s = down rdf (p "morloc:name") s
+
+value :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
+value rdf s = down rdf (p "morloc:value") s
+
+rdftype :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
+rdftype rdf s = down rdf (p "rdf:type") s
+
 imports :: DR.Rdf a => DR.RDF a -> DR.Subject -> [(DT.Text, Maybe DT.Text)]
 imports rdf s = down rdf (p "morloc:import") s >>= names'
   where
     names' :: DR.Subject -> [(DT.Text, Maybe DT.Text)]
     names' i =
       case
-        ( MU.maybeOne (down rdf (p "morloc:name" ) i >>= value)
-        , MU.maybeOne (down rdf (p "morloc:alias") i >>= value)
+        ( MU.maybeOne (down rdf (p "morloc:name" ) i >>= valueOf)
+        , MU.maybeOne (down rdf (p "morloc:alias") i >>= valueOf)
         )
       of
         (Just name, alias) -> [(name, alias)]
@@ -226,6 +244,14 @@ getDataDeclarations rdf
     Nothing 
     (Just $ p "rdf:type")
     (Just $ o "morloc:dataDeclaration")
+  |>> DR.subjectOf
+
+getCalls :: DR.Rdf a => DR.RDF a -> [DR.Node]
+getCalls rdf
+  = DR.query rdf
+    Nothing 
+    (Just $ p "rdf:type")
+    (Just $ o "morloc:call")
   |>> DR.subjectOf
 
 getSources :: DR.Rdf a => DR.RDF a -> [DR.Node]

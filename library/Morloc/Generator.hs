@@ -46,7 +46,7 @@ generateNexus rdf = pure $ Script {
     nexusCode' = DT.unlines
       [ (MN.nexusPrologue g)
       , (MN.nexusPrint g) ""
-      , (MN.nexusDispatch g) (getDataDeclarations rdf >>= lhs rdf >>= value)
+      , (MN.nexusDispatch g) (getDataDeclarations rdf >>= lhs rdf >>= valueOf)
       , (MN.nexusHelp g) []
       ]
       <> DT.unlines (map ((MN.nexusCall g) "Rscript" "pool.R") [])
@@ -62,6 +62,6 @@ generatePool rdf n = Script
   <*> MP.generatePoolCode rdf n
   where
     getLang :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError String
-    getLang rdf' n' = case lang rdf' n' >>= value of
+    getLang rdf' n' = case lang rdf' n' >>= valueOf of
       [x] -> Right (DT.unpack x)
       _   -> Left $ ME.InvalidRDF "A source must have exactly one language"
