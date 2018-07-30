@@ -55,4 +55,8 @@ generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)
 
 generatePool :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError Pool
-generatePool = undefined
+generatePool rdf n = pure $ Script {
+      scriptBase = "pool"
+    , scriptLang = "French"
+    , scriptCode = "yolo"
+  }

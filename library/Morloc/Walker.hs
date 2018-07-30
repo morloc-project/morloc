@@ -157,6 +157,38 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         (Just name, alias) -> [(name, alias)]
         _ -> []
 
+-- -- TODO add getters for all of these
+-- "morloc:list"                 "rdfs:subClassOf" "rdfs:Seq" -- elements
+-- "morloc:tuple"                "rdfs:subClassOf" "rdfs:Seq" -- elements
+-- "morloc:record"               "rdfs:subClassOf" "rdfs:Bag" -- tag/value pairs
+-- "morloc:script"               "rdfs:subClassOf" "rdfs:Bag" -- statements
+-- "morloc:call"                 "rdfs:subClassOf" "rdfs:Seq" -- arguments
+-- "morloc:parameterizedType"    "rdfs:subClassOf" "rdfs:Seq" -- type parameters
+-- "morloc:parameterizedGeneric" "rdfs:subClassOf" "rdfs:Seq" -- type parameters
+-- "morloc:restricted_import"    "rdfs:subClassOf" "rdfs:Bag" -- imports
+-- "morloc:import"               "rdfs:subClassOf" "rdfs:Bag" -- imports
+-- "morloc:source"               "rdfs:subClassOf" "rdfs:Bag" -- imports
+-- "morloc:functionType"         "rdfs:subClassOf" "rdfs:Seq" -- inputs
+--   -- primitives
+-- "morloc:alias"         "rdf:type" "xsd:string"
+-- "morloc:atomicGeneric" "rdf:type" "xsd:string"
+-- "morloc:atomicType"    "rdf:type" "xsd:string"
+-- "morloc:integer"       "rdf:type" "xsd:integer"
+-- "morloc:boolean"       "rdf:type" "xsd:boolean"
+-- "morloc:number"        "rdf:type" "xsd:float"
+-- "morloc:key"           "rdf:type" "xsd:string"
+-- "morloc:label"         "rdf:type" "xsd:string"
+-- "morloc:lang"          "rdf:type" "xsd:string"
+-- "morloc:name"          "rdf:type" "xsd:string"
+-- "morloc:string"        "rdf:type" "xsd:string"
+-- "morloc:namespace"     "rdf:type" "xsd:string"
+--   -- generic value tags
+-- "morloc:value"  "rdf:type" "rdf:value"
+-- "morloc:output" "rdf:type" "rdf:value"
+-- "morloc:lhs"    "rdf:type" "rdf:value"
+-- "morloc:rhs"    "rdf:type" "rdf:value"
+
+
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getType rdf name
   -- get Triples for all type declarations

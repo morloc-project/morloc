@@ -18,21 +18,21 @@ testIt desc code f exp = case MP.morlocScript code of
 testWalker :: Spec
 testWalker = parallel $ do
   testIt
-    "fetchType"
+    "getType"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf -> MW.fetchType rdf "foo")
+    (\rdf -> MW.getType rdf "foo")
     [DR.UNode "mid:3"]
 
   testIt
-    "fetchType >>= elements"
+    "getType >>= elements"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf -> MW.fetchType rdf "foo" >>= MW.elements rdf)
+    (\rdf -> MW.getType rdf "foo" >>= MW.elements rdf)
     [DR.UNode "mid:4", DR.UNode "mid:5"]
 
   testIt
-    "map position (fetchType >>= elements)"
+    "map position (getType >>= elements)"
     "foo :: Int, [Bar] -> Num; bar :: GGG; foo a b = bar [12,23,45];"
-    (\rdf ->  MW.fetchType rdf "foo"
+    (\rdf ->  MW.getType rdf "foo"
           >>= MW.elements rdf
           |>> MW.position rdf
       )
