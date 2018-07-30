@@ -379,16 +379,18 @@ testParser = parallel $ do
     -- this will fail later, since x,k, and t are undefined.
     "X :: Y where (f x (g y z))"
     [ iuu 4 "rdf:type" "morloc:call"
-    , iut 4 "morloc:value" "morloc:name" "f"
-    , iui 5 "rdf:_0" 4
-    , iut 5 "rdf:type" "morloc:name" "x"
-    , iui 6 "rdf:_1" 4
-    , iuu 6 "rdf:type" "morloc:call"
-    , iut 6 "morloc:value" "morloc:name" "g"
-    , iui 7 "rdf:_0" 6
-    , iut 7 "rdf:type" "morloc:name" "y"
-    , iui 8 "rdf:_1" 6
-    , iut 8 "rdf:type" "morloc:name" "z"
+    , iui 4 "morloc:value" 5
+    , iut 5 "rdf:type" "morloc:name" "f"
+    , iui 6 "rdf:_0" 4
+    , iut 6 "rdf:type" "morloc:name" "x"
+    , iui 7 "morloc:value" 8
+    , iui 7 "rdf:_1" 4
+    , iuu 7 "rdf:type" "morloc:call"
+    , iut 8 "rdf:type" "morloc:name" "g"
+    , iui 9 "rdf:_0" 7
+    , iut 9 "rdf:type" "morloc:name" "y"
+    , iui 10 "rdf:_1" 7
+    , iut 10 "rdf:type" "morloc:name" "z"
     ]
 
   testRdfCodeWith
@@ -396,9 +398,9 @@ testParser = parallel $ do
     -- this will fail later, since x,k, and t are undefined.
     "X :: Y where (f x y == 1)"
     [ iuu 5 "rdf:type" "morloc:call"
-    , iut 5 "morloc:value" "morloc:name" "f"
-    , iui 6 "rdf:_0" 5
-    , iut 6 "rdf:type" "morloc:name" "x"
-    , iui 7 "rdf:_1" 5
-    , iut 7 "rdf:type" "morloc:name" "y"
+    , iui 5 "morloc:value" 6
+    , iut 6 "rdf:type" "morloc:name" "f"
+    , iui 7 "rdf:_0" 5
+    , iut 7 "rdf:type" "morloc:name" "x"
+    , iut 9 "rdf:type" "morloc:integer" "1"
     ]
