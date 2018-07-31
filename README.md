@@ -39,6 +39,9 @@ compiler.
 
 ```
 # examples/sample1.loc
+export ceiling
+export rand_uniform
+
 source "R" (
     "runif" as rand_uniform
   , "ceiling"
@@ -52,28 +55,12 @@ rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
   , c <= b
 );
 
-# type signatures for ceiling (NOTE: adding constraints is optional) 
+# type signatures for ceiling (NOTE: adding constraints is optional)
 ceiling :: [Num] -> [Int];
 
-
-# A type signature for the Morloc function sample_index 
-sample_index
-  :: n:Int      # number of elements to sample
-  ,  size:Int   # maximum value
-  -> xs:[x:Int] # list of unique integers
-  where (
-      n >= 0
-    , size >= n
-    , len xs == n
-    , x > 0
-    , x <= size
-    , len (uniq xs) == len xs
-  );
-sample_index n size = ceiling . rand_uniform n 0 size;
-
 # A simple wrapper specializing the imported rand_uniform function
-rand :: Int -> [Int]
-rand n = rand_uniform n 0 1;
+rand :: Int -> [Num];
+rand n = rand_uniform n 0.0 1.0;
 ```
 
 This script can be complied as follows:
@@ -86,7 +73,8 @@ This will generate two files, `nexus.perl` and `pool.R`. Data from specific
 nodes can now be accessed.
 
 ```sh
-perl nexus.perl sample_index 5 10
+perl nexus.perl ceiling 4.3
+perl nexus.perl rand_uniform 10 0 3
 ```
 
 I am currently working on cleaning up this interface. Soon it will generate

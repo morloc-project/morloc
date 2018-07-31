@@ -1,36 +1,50 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+{-|
+Module      : Morloc.Nexus
+Description : Code generators for the user interface
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Nexus (
       NexusGenerator(..)
     , perlCliNexusGenerator
   ) where
 
-import Morloc.Data
-import Morloc.Tree
-import Morloc.Util
-
-import Data.List (intercalate) 
+import Morloc.Operators
+import qualified Morloc.Util as MU
+import qualified Data.Text as DT
 
 data NexusGenerator = NexusGenerator {
     nexusPrologue    
-    :: String
-    -- make a help function
+    :: DT.Text
   , nexusPrint
-    :: String
-    -> String
+    :: DT.Text
+    -> DT.Text
   , nexusDispatch
-    :: [String]
-    -> String
+    :: [DT.Text]
+    -> DT.Text
+    -- make a help function
   , nexusHelp
-    :: [Function WNode]
-    -> String
+    :: [DT.Text] -- TODO: make this more expressive
+    -> DT.Text
     -- make a funtion that calls a function in a particular pool 
   , nexusCall
-    :: String         -- the command for calling the pool (e.g. Rscript or python)
-    -> String         -- the pool name
-    -> Function WNode -- function name
-    -> String         -- call function
+    :: DT.Text -- the command for calling the pool (e.g. Rscript or python)
+    -> DT.Text -- the pool name
+    -> DT.Text -- function name
+    -> DT.Text -- manifold name
+    -> Int     -- number of arguments
+    -> DT.Text -- call function
   , nexusEpilogue
-    :: String
+    :: DT.Text
 }
+
+show' :: Show a => a -> DT.Text
+show' x = DT.pack (show x)
 
 perlCliNexusGenerator :: NexusGenerator
 perlCliNexusGenerator = NexusGenerator {
@@ -42,7 +56,7 @@ perlCliNexusGenerator = NexusGenerator {
     , nexusEpilogue = nexusEpilogue'
   }
   where
-    nexusPrologue' = unlines
+    nexusPrologue' = DT.unlines
       [ "#!/usr/bin/env perl"
       , "use strict;"
       , "use warnings;"
@@ -50,15 +64,14 @@ perlCliNexusGenerator = NexusGenerator {
       , "&printResult(&dispatch(@ARGV));"
       ]
 
-    nexusPrint' _ = unlines
+    nexusPrint' _ = DT.unlines
       [ "sub printResult {"
       , "    my $result = shift;"
       , "    print \"$result\";"
       , "}"
       ]
 
-
-    nexusDispatch' functions = unlines
+    nexusDispatch' functions = DT.unlines
       [ "sub dispatch {"
       , "    if(scalar(@_) == 0){"
       , "        &usage();"
@@ -83,47 +96,47 @@ perlCliNexusGenerator = NexusGenerator {
       , "}"
       ]
 
-    makeCmdHash fs = indent 4 . unlines $
+    makeCmdHash :: [DT.Text] -> DT.Text
+    makeCmdHash fs = MU.indent 4 . DT.unlines $
       [ "my %cmds = ("
-      , indent 4 . intercalate ",\n" . map makeHashEntry $ fs
+      , MU.indent 4 . DT.intercalate ",\n" . map makeHashEntry $ fs
       , ");"
       ]
 
-    makeHashEntry f = f ++ " => \\&" ++ makeCallName f
+    makeHashEntry :: DT.Text -> DT.Text
+    makeHashEntry f = f <> " => \\&" <> makeCallName f
 
-    makeCallName f = "call_" ++ f
+    makeCallName :: DT.Text -> DT.Text
+    makeCallName f = "call_" <> f
 
-    nexusHelp' _ = makeFunction "usage" $ unlines
+    nexusHelp' :: [DT.Text] -> DT.Text
+    nexusHelp' _ = makeFunction "usage" $ DT.unlines
       [ "print STDERR \"this is a help message\\n\";"
       , "exit 0;"
       ]
 
-    nexusCall' prog filename (Function name args (Node (WNode (Just i) _ _) _)) =
-      nexusCall'' name i args prog filename
-    nexusCall' prog filename (Function name args (Node (WLeaf (Just i) _  ) _)) =
-      nexusCall'' name i args prog filename
-    nexusCall' _ _ _ = undefined
-
-    nexusCall'' name i args prog filename =
-      makeFunction (makeCallName name) $ unlines
-        [ "if(scalar(@_) != " ++ show (length args) ++ "){"
-        , "    print STDERR \"Expected "
-          ++ show (length args)
-          ++ " arguments to 'sample_index', given \" . "
-        , "    scalar(@_) . \"\\n\";"
-        , "    exit 1;"
-        , "}"
-        , "return `" ++ makePoolCall prog filename (makeManifoldName i) (length args) ++ "`"
-        ]
+    nexusCall' prog filename name mid nargs =
+      makeFunction
+        (makeCallName name)
+        (DT.unlines
+          [ "if(scalar(@_) != " <> show' nargs <> "){"
+          , "    print STDERR \"Expected "
+            <> show' nargs
+            <> " arguments to 'sample_index', given \" . "
+          , "    scalar(@_) . \"\\n\";"
+          , "    exit 1;"
+          , "}"
+          , "return `" <> makePoolCall prog filename mid nargs <> "`"
+          ]
+        )
 
     makePoolCall prog filename manifold j
-      = unwords [prog, filename, manifold, makePoolArgList j]
+      = DT.unwords [prog, filename, manifold, makePoolArgList j]
 
     makePoolArgList 0 = ""
-    makePoolArgList j = unwords ["$_[" ++ show j ++ "]" | j <- [0..(j-1)]]
+    makePoolArgList j = DT.unwords ["$_[" <> show' k <> "]" | k <- [0..(j-1)]]
 
-    makeManifoldName i = "m" ++ show i
-
-    makeFunction name body = "sub " ++ name ++ "{\n" ++ indent 4 body ++ "\n}"
+    makeFunction :: DT.Text -> DT.Text -> DT.Text
+    makeFunction name body = "sub " <> name <> "{\n" <> MU.indent 4 body <> "\n}"
 
     nexusEpilogue' = ""

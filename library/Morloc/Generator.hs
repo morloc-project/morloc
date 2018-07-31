@@ -1,250 +1,118 @@
-module Morloc.Generator (
-      generate
-    , Nexus
-    , Pool
-  ) where
+{-# LANGUAGE OverloadedStrings #-}
 
-import Control.Monad (join)
+{-|
+Module      : Morloc.Generator
+Description : Generate code from the RDF representation of a Morloc script 
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
 
-import Data.Tuple (swap)
-import Data.Maybe (fromMaybe)
+module Morloc.Generator
+(
+    Script(..)
+  , Nexus
+  , Pool
+  , generate  
+) where
 
-import Morloc.Tree
-import Morloc.Data
-import Morloc.Syntax
-import Morloc.Error
-import Morloc.Language
-import Morloc.Nexus
+import Morloc.Walker
+import Morloc.Operators
+import qualified Morloc.Error as ME
+import qualified Morloc.Nexus as MN
+import qualified Morloc.Pool as MP
+import qualified Morloc.Util as MU
+
+import qualified Data.RDF as DR
+import qualified Data.Text as DT
+
+data Script = Script {
+      scriptBase :: String -- ^ script basename (no extension)
+    , scriptLang :: String -- ^ script language
+    , scriptCode :: DT.Text -- ^ full script source code
+  }
+  deriving(Ord, Eq)
 
 type Nexus = Script
-type Pool  = Script
+type Pool = Script
 
-generate :: Program -> ThrowsError (Nexus, [Pool])
-generate p = (,) <$> generateNexus p <*> generatePools p
+generate :: DR.Rdf a => DR.RDF a -> ME.ThrowsError (Nexus, [Pool]) 
+generate r = (,) <$> generateNexus r <*> generatePools r
 
-
--- | Create a script that calls the root node
-generateNexus :: Program -> ThrowsError Nexus
-generateNexus p = pure $ Script {
+generateNexus :: DR.Rdf a => DR.RDF a -> ME.ThrowsError Nexus
+generateNexus rdf = pure $ Script {
       scriptBase = "nexus"
-    , scriptLang = lang
-    , scriptCode = nexusCode' p
+    , scriptLang = lang'
+    , scriptCode = nexusCode'
   }
   where
     -- TODO allow user to choose a generator
     -- Eventually these will include, for example, a CWL generator
-    g = perlCliNexusGenerator
-    lang = "perl"
+    g = MN.perlCliNexusGenerator
+    lang' = "perl"
+    nexusCode' = case exports rdf of
+      exports' -> DT.unlines
+        [ (MN.nexusPrologue g)
+        , (MN.nexusPrint g) ""
+        , (MN.nexusDispatch g) exports'
+        , (MN.nexusHelp g) []
+        , DT.unlines (map (generateNexusCall rdf g) exports')
+        , MN.nexusEpilogue g
+        ]
 
-    nexusCode' p = unlines
-      [ (nexusPrologue g)
-      , (nexusPrint g) ""
-      , (nexusDispatch g) [n | (Function n _ _) <- (workflow p)]
-      , (nexusHelp g) (workflow p) 
-      ]
-      ++ unlines (map ((nexusCall g) "Rscript" "pool.R") (workflow p))
-      ++ nexusEpilogue g
+generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
+generateNexusCall rdf g exp' = case (
+      getType rdf exp' >>= elements rdf -- inputs
+    , getImportByName rdf exp'
+    , getDataDeclarationByName rdf exp'
+  ) of
+    (inputs', [import'], []) -> (MN.nexusCall g)
+      (lang2prog (importLang rdf import'))
+      (poolName
+        (MU.maybeOne $ importLang rdf import')
+        (MU.maybeOne $ importPath rdf import'))
+      exp'
+      (makeManifoldName (idOf import'))
+      (length inputs')
 
+    (inputs', [], [decl]) -> (MN.nexusCall g)
+      -- FIXME: I need to find the first sourced call and use the source info
+      -- from that to choose a command and pool name.
+      "Rscript"
+      "pool.R"
+      exp'
+      (makeManifoldName (return decl >>= rhs rdf >>= idOf))
+      (length inputs')
 
-generatePools :: Program -> ThrowsError [Pool]
-generatePools (Program ws _ ss) = join . fmap sequence $ makePooler <*> pure ss
+    _ -> "XXX"
+
+-- FIXME: Obviously need something more sophisticated here. Eventually, I need
+-- to load a config file. Dependency handling will be a pain in the future.
+lang2prog :: [DT.Text] -> DT.Text
+lang2prog _ = "Rscript"
+
+poolName :: Maybe DT.Text -> Maybe DT.Text -> DT.Text
+poolName (Just lang') Nothing = "pool." <> lang'
+poolName _ (Just path') = path'
+poolName _ _ = "pool.WTF"
+
+makeManifoldName :: [DT.Text] -> DT.Text
+makeManifoldName [t] = case DT.splitOn ":" t of
+  [_, i] -> "m" <> i
+  _ -> "XXX"
+makeManifoldName _ = "XXX"
+
+generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
+generatePools r = sequence $ map (generatePool r) (getSources r)
+
+generatePool :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError Pool
+generatePool rdf n = Script
+  <$> pure "pool"
+  <*> getLang rdf n
+  <*> MP.generatePoolCode rdf n
   where
-
-    makePooler :: ThrowsError ([Source] -> [ThrowsError Pool])
-    makePooler
-      = fmap map                          -- ThrowsError ([Source] -> [ThrowsError Pool])
-      . fmap generatePool                 -- ThrowsError (Source -> ThrowsError Pool)
-      . (fmap . map) setBoundVar          -- ThrowsError [Function SNode]
-      . (fmap . fmap) replaceTree         -- ThrowsError [Function SNode]
-      . fmap (zip ws)                     -- ThrowsError [(Function WNode, Tree SNode)]
-      . join                              -- ThrowsError [Tree SNode]
-      . fmap sequence                     -- ThrowsError ThrowsError [Tree SNode]
-      . (fmap . fmap) sequence            -- ThrowsError [ThrowsError (Tree SNode)]
-      . (fmap . fmap) (familyMap toSNode) -- ThrowsError [Tree (ThrowsError SNode)]
-      $ zipWith zipTree
-        <$> pure wTrees
-        <*> sTrees                        -- ThrowsError [Tree (WNode, Source)]
-
-    wTrees :: [Tree WNode]
-    wTrees = [t | (Function _ _ t) <- ws]
-
-    sTrees :: ThrowsError [Tree Source]
-    sTrees = sequence $ map (toSource ss) wTrees
-
-    setBoundVar :: Function SNode -> Function SNode
-    setBoundVar (Function n vars tree) = Function n vars (fmap (setBoundVar' vars) tree)
-
-    setBoundVar' :: [String] -> SNode -> SNode
-    setBoundVar' vars (SNode x _ xs) = SNode x vars xs 
-    setBoundVar' _ n = n
-
-    toSNode :: (WNode, Source) -> [(WNode, Source)] -> ThrowsError SNode
-    toSNode (WLeaf i x, SourceLocal) [] = Right (SLeaf i x)
-    toSNode (WLeaf _ _, SourceLocal) _  = Left (BadApplication "Data cannot be given arguments")
-    toSNode (WLeaf _ _, _      ) _      = Left (VeryBadBug "Data was associated with a source")
-    toSNode x kids = Right (SNode x [] kids)
-
-    replaceTree :: (Function a, Tree b) -> Function b
-    replaceTree (Function s ss' _, x) = Function s ss' x
-
-
-generatePool :: [Function SNode] -> Source -> ThrowsError Pool
-generatePool fs src
-  =   Script
-  <$> pure (poolName'    src)
-  <*> poolLang'    src
-  <*> generatePoolCode fs src
-  where
-    poolName' :: Source -> String
-    poolName' _ = "pool" -- TODO append a number to make unique
-
-    poolLang' :: Source -> ThrowsError String
-    poolLang' (SourceLang lang   _) = Right lang
-    poolLang' (SourceFile lang _ _) = Right lang
-    poolLang' _                     = Left $ VeryBadBug "Cannot build script from local source"
-
-
--- generate the code required for a specific `source` statement
-generatePoolCode
-  :: [Function SNode]         -- list of functions
-  -> Source
-  -> ThrowsError String       -- complete code for the pool
-generatePoolCode fs (SourceLang "R" i)
-  = Right $
-    (makePool g)
-    (generateGlobal g)
-    (generateSource g src)
-    (generateFunctions g src fs)
-  where
-    g   = rCodeGenerator
-    src = (SourceLang "R" i)
-generatePoolCode _  (SourceFile _ _ _ )
-  = Left $ NotImplemented "cannot yet read source"
-generatePoolCode _  (SourceLang lang   _)
-  = Left $ NotSupported ("ERROR: the language '" ++ lang ++ "' is not yet supported")
-generatePoolCode _ SourceLocal
-  = Left $ VeryBadBug "Cannot build script from local source"
-
-
-generateGlobal :: CodeGenerator -> [String]
-generateGlobal _ = []
-
-
-generateSource :: CodeGenerator -> Source -> [String]
-generateSource g src = [(makeSource g) src]
-
-
-generateFunctions :: CodeGenerator -> Source -> [Function SNode] -> [String]
-generateFunctions g src fs
-  = map generateFunction -- [String]
-  . concat               -- [SNode]
-  . map toList           -- [[Snode]]
-  . map getTree          -- [Tree SNode]
-  $ fs
-  where
-    getTree :: Function SNode -> Tree SNode
-    getTree (Function _ _ tree) = tree
-
-    generateFunction :: SNode -> String
-    generateFunction (SNode (w, SourceLocal) vars ss)
-      = (makeFunction g)
-        (makeNode g $ w)
-        (generateManifoldArgs g vars)
-        (generateCisBody g w SourceLocal vars ss)
-    generateFunction (SNode (w, s) vars ss)
-      | s == src = (makeFunction g)
-                   (makeNode g $ w)
-                   (generateManifoldArgs g vars)
-                   (generateCisBody g w s vars ss)
-      | otherwise = (makeFunction g)
-                    (makeNode g $ w)
-                    (generateManifoldArgs g vars)
-                    (generateTransBody g w vars ss)
-    generateFunction (SLeaf i d)
-      = (makeAssignment g)
-        (makeNode g $ WLeaf i d)
-        (makeMData g $ d)
-
-
-generateManifoldArgs :: CodeGenerator -> [String] -> String
-generateManifoldArgs g ss = makeArgs g . map Positional $ ss 
-
-
-generateCisBody :: CodeGenerator -> WNode -> Source -> [String] -> [(WNode, Source)] -> String
-generateCisBody g (WNode _ n _) src vars ss
-  | elem n vars = n
-  | otherwise
-      = (makeFunctionCall g)
-        (getTrueName n src)
-        (generateArguments g vars ss) -- the pure function call
-  where
-    getTrueName :: String -> Source -> String
-    getTrueName s (SourceLang _   ns) = lookupByAlias s ns 
-    getTrueName s (SourceFile _ _ ns) = lookupByAlias s ns
-    getTrueName s SourceLocal         =               s
-
-    -- Is the name stored in WNode the true name or a Morloc alias?
-    -- If it is an alias, switch it for the real name.
-    lookupByAlias :: String -> [(String, Maybe String)] -> String
-    lookupByAlias name ss = case lookup (Just name) (map swap ss) of
-      Just name' -> name'
-      Nothing    -> name
-
-
-generateCisBody _ _ _ _ _ = undefined
-
-
-generateTransBody :: CodeGenerator -> WNode -> [String] -> [(WNode, Source)] -> String
-generateTransBody _ _ _ _ = "TRANS_STUB"
-
-
-generateArguments :: CodeGenerator -> [String] -> [(WNode, Source)] -> String
-generateArguments g vars ss = makeArgs g $ map (argument') (map fst ss)
-  where
-    argument' :: WNode -> Arg
-    argument' (WNode (Just i) n a)
-      | elem n vars = Positional n
-      | otherwise   = Positional $
-          (makeFunctionCall g)
-          (makeNode g $ WNode (Just i) n a)
-          (makeArgs g $ map Positional vars)
-    argument' (WLeaf (Just i) d)
-      = Positional (makeNode g $ WLeaf (Just i) d)
-    argument' _ = Positional "ERROR"
-
-
-toSource :: [Source] -> Tree WNode -> ThrowsError (Tree Source)
-toSource srcs =
-      sequence              -- ThrowsError (Tree Source) 
-    . fmap (toSource' srcs) -- Tree (ThrowsError Source)
-  where
-
-    toSource' :: [Source] -> WNode -> ThrowsError Source
-    toSource' ss (WNode i n a) = case map (mSource (WNode i n a)) ss of
-      []  -> Right SourceLocal  -- the contents of WNode where not imported
-      [s] -> Right s
-      xs -> Left (NameConflict n (map sourceNames xs))
-    toSource' _ (WLeaf _ _) = Right SourceLocal
-
-    sourceNames :: Source -> String 
-    sourceNames (SourceLang n _)   = n
-    sourceNames (SourceFile n _ _) = n
-    sourceNames SourceLocal        = "<local>"
-
-    mSource :: WNode -> Source -> Source
-    mSource node src 
-      | elem' node src = src
-      | otherwise = SourceLocal
-
-    elem' :: WNode -> Source -> Bool
-    elem' (WNode _ name _) (SourceLang _   ns) = elem name (functionNames ns)
-    elem' (WNode _ name _) (SourceFile _ _ ns) = elem name (functionNames ns)
-    elem' _              _                   = False
-
-
-functionNames :: Functor f => f (String, Maybe String) -> f String
-functionNames = fmap f
-  where
-    f :: (String, Maybe String) -> String
-    f (_, Just s) = s -- if there is an alias, use it
-    f (s, _     ) = s -- otherwise use the original name
+    getLang :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError String
+    getLang rdf' n' = case lang rdf' n' >>= valueOf of
+      [x] -> Right (DT.unpack x)
+      _   -> Left $ ME.InvalidRDF "A source must have exactly one language"

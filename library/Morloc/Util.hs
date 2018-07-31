@@ -1,21 +1,60 @@
+{-|
+Module      : Morloc.Util
+Description : Miscellaneous small utility functions
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Util
 (
-    which
-  , zipA
+    ifelse
+  , conmap
+  , unique
+  , sort
+  , repeated
   , indent
+  , maybe2bool
+  , either2bool
+  , maybeOne
 ) where
 
--- Find the 1-based indices of all true values
-which :: [Bool] -> [Int]
-which = map fst . filter snd . zip [0..]
+import Morloc.Operators
 
--- This function has the same form as an applicative <*>, but is NOT the same,
--- since the applicative list typeclass takes the product of fs and xs.
-zipA :: [(a -> b)] -> [a] -> [b]
-zipA (f:fs) (x:xs) = (f x):(zipA fs xs)
-zipA _ _ = []
+import qualified Data.List as DL
+import qualified Data.Text as DT
 
-indent :: Int -> String -> String
+conmap :: (a -> [b]) -> [a] -> [b]
+conmap f = concat . map f
+
+ifelse :: Bool -> a -> a -> a
+ifelse True  x _ = x
+ifelse False _ y = y
+
+unique :: Eq a => [a] -> [a]
+unique = DL.nub
+
+sort :: Ord a => [a] -> [a]
+sort = DL.sort
+
+repeated :: Ord a => [a] -> [a]
+repeated xs = [y | (y:(_:_)) <- (DL.group . DL.sort) xs]
+
+indent :: Int -> DT.Text -> DT.Text
 indent i s
   | i <= 0    = s
-  | otherwise = unlines . map ((++) (take i (repeat ' '))) . lines $ s
+  -- TODO: this the String -> Text transform here is slow and unnecessary
+  | otherwise = DT.unlines . map ((<>) (DT.pack (take i (repeat ' ')))) . DT.lines $ s
+
+maybe2bool :: Maybe a -> Bool
+maybe2bool (Just _) = True
+maybe2bool Nothing = False
+
+either2bool :: Either a b -> Bool
+either2bool (Left _) = False
+either2bool (Right _) = True
+
+maybeOne :: [a] -> Maybe a
+maybeOne [x] = Just x
+maybeOne _  = Nothing

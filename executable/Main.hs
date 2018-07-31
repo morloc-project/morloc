@@ -1,26 +1,24 @@
 module Main (main) where
 
-import Morloc 
-import Morloc.Error
-import Morloc.Data
-import System.Environment (getArgs)
-
-writeProgram :: ThrowsError (Script, [Script]) -> IO ()
-writeProgram (Right (n, ps)) = do
-  writeScript n
-  mapM_ writeScript ps
-writeProgram (Left err) = putStr (show err)
-  
-writeScript :: Script -> IO ()
-writeScript (Script base lang code) =
-  writeFile (base ++ "." ++ lang) code
+import qualified Morloc as M
+import qualified System.Environment as SE
 
 main :: IO ()
 main = do
-  args <- getArgs
+  args <- SE.getArgs
   case args of
+    -- no input
     []  -> putStrLn "You must provide at least one argument"
-    [x] -> do
-      input <- readFile x
-      (writeProgram . build) input
+
+    ["--rdf-turtle", "-e", text] -> M.writeTurtle text
+
+    ["--rdf-triple", "-e", text] -> M.writeTriple text
+
+    ["--rdf-turtle", x] -> readFile x >>= M.writeTurtle
+
+    ["--rdf-triple", x] -> readFile x >>= M.writeTriple
+
+    [x] -> readFile x >>= M.writeProgram
+
+    -- wrong input
     _   -> putStrLn "Please provide a single filename"

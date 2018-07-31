@@ -1,3 +1,12 @@
+{-|
+Module      : Morloc.Lexer
+Description : Lexer for Morloc script
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Lexer (
     integer
   , float
@@ -7,16 +16,11 @@ module Morloc.Lexer (
   , op
   , reserved
   , name
-  , mdata
   , tag
   , specificType
   , genericType
-  , nonSpace
   , path
   , comma
-  , chop
-  , space'
-  , line
   , parens
   , braces
   , brackets
@@ -26,15 +30,13 @@ module Morloc.Lexer (
 ) where
 
 import Text.Parsec hiding (State)
-import Text.Parsec.String (Parser)
-import Control.Monad.State
 import qualified Data.Char as DC
 import qualified Text.Parsec.Language as Lang
 import qualified Text.Parsec.Token as Token
 
-import qualified Morloc.Syntax as MS
+import Morloc.State
 
-lexer :: Token.TokenParser ()
+lexer :: Token.TokenParser ParserState
 lexer = Token.makeTokenParser style
   where
   style = Lang.emptyDef {
@@ -70,8 +72,13 @@ lexer = Token.makeTokenParser style
             ]
           }
 
+parens :: Parser a -> Parser a
 parens = Token.parens lexer
+
+braces :: Parser a -> Parser a
 braces = Token.braces lexer
+
+brackets :: Parser a -> Parser a
 brackets = Token.brackets lexer
 
 integer    :: Parser Integer
@@ -79,27 +86,30 @@ float      :: Parser Double
 whiteSpace :: Parser ()
 op         :: String -> Parser ()
 reserved   :: String -> Parser ()
-name       :: Parser String
 comma      :: Parser String
+name       :: Parser String
 
-integer    = Token.integer lexer
-float      = Token.float lexer
+integer    = Token.integer    lexer
+float      = Token.float      lexer
 whiteSpace = Token.whiteSpace lexer
 op         = Token.reservedOp lexer
 reserved   = Token.reserved   lexer
-name       = Token.identifier lexer
 comma      = Token.comma      lexer
+name       = Token.identifier lexer
 
+-- | match an optional tag that precedes some construction
+tag :: Parser a -> Parser (Maybe String)
 tag p =
-  option "" (try tag')
+  optionMaybe (try tag')
   where
     tag' = do
       l <- many1 alphaNum
       whiteSpace
       op ":"
-      lookAhead p
+      _ <- lookAhead p
       return l
 
+-- | match a double-quoted literal string
 stringLiteral :: Parser String
 stringLiteral = do
   _ <- char '"'
@@ -108,66 +118,11 @@ stringLiteral = do
   whiteSpace
   return s
 
+-- | match a boolean written as "True" or "False"
 boolean :: Parser Bool 
-boolean = do
-  s <- string "True" <|> string "False"
-  whiteSpace
-  return $ (read s :: Bool)
+boolean = fmap read ((string "True" <|> string "False") <* whiteSpace)
 
-mdata :: Parser MS.MData
-mdata = do
-      try boolean'       -- True | False
-  <|> try float'         -- 1.1
-  <|> try integer'       -- 1
-  <|> try stringLiteral' -- "yolo"
-  <|> try list'          -- [ ...
-  <|> try tuple'         -- ( ...
-  <|> try record'        -- { ...
-  <?> "literal data"
-  where
-
-    integer' = do
-      x <- integer
-      return $ MS.MInt x
-
-    float' = do
-      x <- float
-      return $ MS.MNum x
-
-    stringLiteral' = do
-      s <- stringLiteral
-      return $ MS.MStr s
-
-    boolean' = do
-      s <- boolean
-      return $ MS.MLog s
-
-    list' = do
-      xs <- brackets (sepBy mdata comma)
-      return $ MS.MLst xs
-
-    tuple' = do
-      xs <- parens tuple'' 
-      return $ MS.MTup xs
-
-    tuple'' = do
-      x <- mdata
-      comma
-      xs <- sepBy1 mdata comma
-      return $ x:xs
-
-    record' = do
-      xs <- braces (sepBy1 recordEntry' comma)
-      return $ MS.MRec xs
-
-    recordEntry' = do
-      n <- name
-      op "="
-      t <- mdata
-      return (n, t)
-
-
--- | a legal non-generic type name
+-- | match a non-generic type (alphanumeric with initial uppercase character)
 specificType :: Parser String
 specificType = do
   s <- satisfy DC.isUpper
@@ -175,70 +130,53 @@ specificType = do
   whiteSpace
   return (s : ss)
 
+-- | match a generic type (alphanumeric with initial lowercase character)
 genericType :: Parser String
-genericType = Token.identifier lexer 
+genericType = do
+  s <- satisfy DC.isLower
+  ss <- many alphaNum
+  whiteSpace
+  return (s : ss)
 
--- | match any non-space character
-nonSpace :: Parser Char
-nonSpace = noneOf " \n\t\r\v"
-
+-- | match a UNIX style path ('/' delimited)
 path :: Parser [String]
 path = do
-  path <- sepBy name (char '/')
+  path' <- sepBy name (char '/')
   whiteSpace
-  return path
-
--- | matches all trailing space
-chop :: Parser String
-chop = do
-  ss <- many space'
-  optional newline
-  return ss
-
--- | non-newline space
-space' :: Parser Char
-space' = char ' ' <|> char '\t'
-
--- | a raw line with spaces
-line :: Parser String
-line = do
-  s <- many1 space'
-  l <- many (noneOf "\n")
-  newline
-  return $ (s ++ l)
+  return path'
 
 relativeBinOp :: Parser String
 relativeBinOp = do
-  op <-  (string "==")
-     <|> try (string "<=")
-     <|> try (string ">=")
-     <|> (string "<")
-     <|> (string ">")
-     <|> (string "!=")
-     <?> "a numeric comparison operator" 
+  op' <-  (string "==")
+      <|> try (string "<=")
+      <|> try (string ">=")
+      <|> (string "<")
+      <|> (string ">")
+      <|> (string "!=")
+      <?> "a numeric comparison operator" 
   whiteSpace
-  return op 
+  return op' 
 
 logicalBinOp :: Parser String
 logicalBinOp = do
-  op <-  (string "and")
-     <|> (string "or")
-     <|> (string "xor")
-     <|> (string "nand")
-     <|> (string "not")
-     <?> "a logical operator" 
+  op' <-  (string "and")
+      <|> (string "or")
+      <|> (string "xor")
+      <|> (string "nand")
+      <|> (string "not")
+      <?> "a logical operator" 
   whiteSpace
-  return op 
+  return op'
 
 arithmeticBinOp :: Parser String
 arithmeticBinOp = do
-  op <-  (string "+")
-     <|> (string "-")
-     <|> (string "*")
-     <|> (string "^")
-     <|> (string "%")
-     <|> try (string "//")
-     <|> (string "/")
-     <?> "a numeric operator" 
+  op' <-  (string "+")
+      <|> (string "-")
+      <|> (string "*")
+      <|> (string "^")
+      <|> (string "%")
+      <|> try (string "//")
+      <|> (string "/")
+      <?> "a numeric operator" 
   whiteSpace
-  return op 
+  return op' 

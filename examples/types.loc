@@ -33,3 +33,14 @@ subseq :: x:[a], i:Index, j:Index -> y:[a] where (
   , len y == j - i + 1
   , y[k] == x[k + i - 1]
 );
+
+sort :: xs:[a] -> ys:[a] where (
+    exists (a > a)
+    length xs == length ys
+    length ys < 2 or (all [ys[i] <= ys[i+1] | i <- [1..(length ys)]])
+);
+
+sample :: xs:[a], i:Int -> ys:[a] where (
+    i >= 0 
+    length ys == min(i, length xs)
+);

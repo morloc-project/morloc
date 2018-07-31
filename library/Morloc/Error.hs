@@ -1,49 +1,45 @@
+{-|
+Module      : Morloc.Error
+Description : Error handling
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+
+The MorlocError type is used to handle all forms of errors across the entire
+program. New entries can be added to describe new types of error.
+-}
+
 module Morloc.Error
 (
     MorlocError(..)
   , ThrowsError
 ) where
 
-import Text.Parsec (ParseError)
-import Data.List (intercalate)
+import qualified Text.Parsec as TP
 
--- TODO add declaration errors
+type ThrowsError = Either MorlocError
+
 data MorlocError
-  = BadApplication   String
-  | BadComposition   String
-  | SyntaxError      ParseError
-  | BadArray         String
-  | NotImplemented   String
-  | NotSupported     String
-  | CouldNotFind     String
-  | NameConflict     String [String]
-  | VeryBadBug       String
+  -- | Raised when assumptions about the input RDF are broken. This should not
+  -- occur for RDF that has been validated.
+  = InvalidRDF String
+  -- | Raised for calls to unimplemented features
+  | NotImplemented String
+  -- | Raised for unsupported features (such as specific languages)
+  | NotSupported String
+  -- | Raised by parsec on parse errors
+  | SyntaxError TP.ParseError
+  -- | Raised when someone didn't customize their error messages
   | UnknownError
   deriving(Eq)
 
-
-instance Show MorlocError
-  where
-    show = morlocShow
+instance Show MorlocError where
+  show = morlocShow
 
 morlocShow :: MorlocError -> String
-morlocShow (BadApplication msg)  = "BadApplication: "      ++ show msg 
-morlocShow (BadComposition msg)  = "BadComposition: "      ++ show msg
-morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
-morlocShow (BadArray       err)  = "BadArray: "            ++ show err
+morlocShow  UnknownError         = "UnknownError"
+morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
-morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?" 
-morlocShow (NameConflict x pkgs) = "NameConflict: "  ++ q x ++ " is imported from " ++ l pkgs
-morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
-morlocShow  UnknownError         = "Damn, you broke it good"
-
--- show a list as: [<item>, <item>, ...]
-l :: [String] -> String
-l xs = "[" ++ (intercalate ", ") xs ++ "]"
-
--- quote a string
-q :: Show a => a -> String
-q x = "'" ++ show x ++ "'"
-
-type ThrowsError = Either MorlocError
+morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err

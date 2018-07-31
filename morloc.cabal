@@ -1,5 +1,5 @@
 name:     morloc
-version:  0.12.0
+version:  0.13.0
 homepage: https://github.com/arendsee/morloc
 synopsis: A multi-lingual, typed, workflow language
 description:
@@ -35,25 +35,32 @@ library
     exposed-modules:  Morloc
                       Morloc.Error
                       Morloc.Generator
-                      Morloc.Nexus
                       Morloc.Language
-                      Morloc.Tree
-                      Morloc.Data
-                      Morloc.Evaluator
+                      Morloc.Pool
                       Morloc.Lexer
+                      Morloc.Nexus
+                      Morloc.Operators
                       Morloc.Parser
-                      Morloc.Syntax
+                      Morloc.RdfSchema
+                      Morloc.State
+                      Morloc.Triple
                       Morloc.Util
-                      -- Morloc.Core
-
+                      Morloc.Walker
     build-depends: base,
                    safe,
                    parsec,
                    text,
+                   rdf4h,
+                   containers,
                    mtl
-
     ghc-options: -Wall
-
+                 -Wno-missing-signatures
+                 -Wno-type-defaults
+                 -Wcompat
+                 -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns
+                 -Wredundant-constraints
+                 -Werror
     if flag(documentation)
         build-depends: hscolour
 
@@ -61,8 +68,42 @@ executable morloc
     main-is: Main.hs
     hs-source-dirs: executable
     ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+                 -Wno-missing-signatures
+                 -Wno-type-defaults
+                 -Wcompat
+                 -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns
+                 -Wredundant-constraints
+                 -Werror
     build-depends:
         base >=4.7 && <5
+      , rdf4h
       , morloc 
     default-language: Haskell2010
  
+test-suite morloc-test-suite
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
+      Paths_morloc
+      ParserTests
+      WalkerTests
+  hs-source-dirs:
+      test-suite
+  ghc-options: -rtsopts -threaded -with-rtsopts=-N
+               -Wall
+               -Wno-missing-signatures
+               -Wno-type-defaults
+               -Wcompat
+               -Wincomplete-record-updates
+               -Wincomplete-uni-patterns
+               -Wredundant-constraints
+               -Werror
+  build-depends:
+      base
+    , tasty
+    , tasty-hspec >= 0.1
+    , morloc
+    , rdf4h
+    , text
+  default-language: Haskell2010
