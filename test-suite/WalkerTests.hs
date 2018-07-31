@@ -38,4 +38,8 @@ testWalker = parallel $ do
       )
     [Just 0, Just 1]
 
-
+  testIt
+    "sourceExports"
+    "export foo; source \"R\" (\"f.o.o\" as foo, \"bar\");"
+    (\rdf -> MW.getSources rdf >>= MW.sourceExports rdf)
+    [DR.UNode "mid:3"]

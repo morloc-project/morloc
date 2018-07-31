@@ -217,7 +217,7 @@ exports rdf
 -- find the imports from a source that are exported
 sourceExports :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
 sourceExports rdf n
-  = filter isExported (down rdf n (p "morloc:import"))
+  = filter isExported (down rdf (p "morloc:import") n)
   where
     isExported :: DR.Node -> Bool
     isExported imp = case importAlias rdf imp of
