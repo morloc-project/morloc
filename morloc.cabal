@@ -46,7 +46,6 @@ library
                       Morloc.Triple
                       Morloc.Util
                       Morloc.Walker
-
     build-depends: base,
                    safe,
                    parsec,
@@ -54,9 +53,14 @@ library
                    rdf4h,
                    containers,
                    mtl
-
-    ghc-options: -Wall -Wno-missing-signatures -Wno-type-defaults -Werror
-
+    ghc-options: -Wall
+                 -Wno-missing-signatures
+                 -Wno-type-defaults
+                 -Wcompat
+                 -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns
+                 -Wredundant-constraints
+                 -Werror
     if flag(documentation)
         build-depends: hscolour
 
@@ -64,6 +68,13 @@ executable morloc
     main-is: Main.hs
     hs-source-dirs: executable
     ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+                 -Wno-missing-signatures
+                 -Wno-type-defaults
+                 -Wcompat
+                 -Wincomplete-record-updates
+                 -Wincomplete-uni-patterns
+                 -Wredundant-constraints
+                 -Werror
     build-depends:
         base >=4.7 && <5
       , rdf4h
@@ -79,7 +90,15 @@ test-suite morloc-test-suite
       WalkerTests
   hs-source-dirs:
       test-suite
-  ghc-options: -Wall -rtsopts -threaded -with-rtsopts=-N
+  ghc-options: -rtsopts -threaded -with-rtsopts=-N
+               -Wall
+               -Wno-missing-signatures
+               -Wno-type-defaults
+               -Wcompat
+               -Wincomplete-record-updates
+               -Wincomplete-uni-patterns
+               -Wredundant-constraints
+               -Werror
   build-depends:
       base
     , tasty

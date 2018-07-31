@@ -17,8 +17,8 @@ testRdfCodeWith f s ts = case (run' f s) of
   (Right ts') -> it s $ do shouldBe (DR.uordered ts) (DR.uordered ts')
   (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
-    run' f s = fmap (mapTriples f) (MP.morlocScript (s ++ ";"))
-    mapTriples f rdf = f (DR.triplesOf rdf)
+    run' f' s' = fmap (mapTriples f') (MP.morlocScript (s' ++ ";"))
+    mapTriples f' rdf = f' (DR.triplesOf rdf)
 
 
 testRdfCode :: String -> [DR.Triple] -> Spec

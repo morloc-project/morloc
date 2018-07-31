@@ -116,8 +116,8 @@ has rdf p' o' s' = case DR.query rdf (Just s') (Just p') (Just o') of
 
 
 -- Filter :: (Node -> [Node]) -> Subject -> [Subject]
-hasThese :: DR.Rdf a
-  => DR.RDF a
+hasThese
+  :: DR.RDF a
   -> (DR.RDF a -> DR.Node -> [b])
   -> DR.Subject
   -> [DR.Subject]

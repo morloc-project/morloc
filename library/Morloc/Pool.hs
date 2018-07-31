@@ -43,7 +43,7 @@ generateWith rdf src g = Right $
     (generateSource rdf src g)
     ((generateSourceFunctions rdf src g) ++ (generateFunctions rdf src g))
 
-generateGlobal :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
+generateGlobal :: DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
 generateGlobal _ _ _ = []
 
 generateSource :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
