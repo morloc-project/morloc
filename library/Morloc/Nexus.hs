@@ -117,7 +117,7 @@ perlCliNexusGenerator = NexusGenerator {
           , "    scalar(@_) . \"\\n\";"
           , "    exit 1;"
           , "}"
-          , "return `" <> makePoolCall prog filename (makeManifoldName mid) nargs <> "`"
+          , "return `" <> makePoolCall prog filename mid nargs <> "`"
           ]
         )
 
@@ -126,9 +126,6 @@ perlCliNexusGenerator = NexusGenerator {
 
     makePoolArgList 0 = ""
     makePoolArgList j = DT.unwords ["$_[" <> show' j <> "]" | j <- [0..(j-1)]]
-
-    makeManifoldName :: DT.Text -> DT.Text
-    makeManifoldName mid = "m" <> mid
 
     makeFunction :: DT.Text -> DT.Text -> DT.Text
     makeFunction name body = "sub " <> name <> "{\n" <> MU.indent 4 body <> "\n}"

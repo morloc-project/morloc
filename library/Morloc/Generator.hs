@@ -56,14 +56,43 @@ generateNexus rdf = pure $ Script {
 generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
 generateNexusCall rdf g exp = case (
       getType rdf exp >>= elements rdf -- inputs
+    , getImportByName rdf exp
+    , getDataDeclarationByName rdf exp
   ) of
-    (inputs) -> (MN.nexusCall g)
-      "<prog>"
-      "<file>"
+    (inputs', [import'], []) -> (MN.nexusCall g)
+      (lang2prog (importLang rdf import'))
+      (poolName
+        (MU.maybeOne $ importLang rdf import')
+        (MU.maybeOne $ importPath rdf import'))
       exp
-      "<mid>"
-      (length inputs)
+      (makeManifoldName (idOf import'))
+      (length inputs')
+
+    (inputs', [], [decl]) -> (MN.nexusCall g)
+      -- FIXME: I need to find the first sourced call and use the source info
+      -- from that to choose a command and pool name.
+      "Rscript"
+      "pool.R"
+      exp
+      (makeManifoldName (return decl >>= rhs rdf >>= idOf))
+      (length inputs')
+
     _ -> "XXX"
+
+-- FIXME: Obviously need something more sophisticated here. Eventually, I need
+-- to load a config file. Dependency handling will be a pain in the future.
+lang2prog :: [DT.Text] -> DT.Text
+lang2prog _ = "Rscript"
+
+poolName :: Maybe DT.Text -> Maybe DT.Text -> DT.Text
+poolName (Just lang') Nothing = "pool." <> lang'
+poolName _ (Just path) = path
+poolName _ _ = "pool.WTF"
+
+makeManifoldName :: [DT.Text] -> DT.Text
+makeManifoldName [t] = case DT.splitOn ":" t of
+  [p, i] -> "m" <> i
+  _ -> "XXX"
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)

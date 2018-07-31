@@ -25,6 +25,7 @@ module Morloc.Walker
   , getConstraints
   , getSources
   , getDataDeclarations
+  , getDataDeclarationByName
   , getCalls
   , getScope
   -- import handling
@@ -222,14 +223,19 @@ getImports rdf
   = DR.query rdf Nothing (Just $ p "morloc:import") Nothing
   |>> DR.objectOf
 
+-- Examples:
+-- getImportByName rdf "foo" >>= importName
+-- getImportByName rdf "foo" >>= importAlias
+-- getImportByName rdf "foo" >>= importLang
+-- getImportByName rdf "foo" >>= importPath
 getImportByName :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getImportByName rdf s
   =   getImports rdf
-  >>= hasThese rdf
+  >>= hasThese rdf 
     (\r' x -> DR.query r'
       (Just x)
-      (Just $ p "morloc:import")
-      (Just $ v (Just "morloc:name") s))
+      (Just $ p "morloc:alias")
+      (Just $ v (Just "morloc:string") s))
 
 importLang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importLang rdf n
@@ -280,6 +286,12 @@ getDataDeclarations rdf
     (Just $ p "rdf:type")
     (Just $ o "morloc:dataDeclaration")
   |>> DR.subjectOf
+
+getDataDeclarationByName :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
+getDataDeclarationByName rdf s
+  = getDataDeclarations rdf
+  >>= hasThese rdf 
+    (\r' x -> return x >>= lhs r' >>= has r' (p "rdf:type") (v (Just "morloc:name") s))
 
 -- for an element in a DataDeclaration or TypeDeclaration, get the top node
 getScope :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
