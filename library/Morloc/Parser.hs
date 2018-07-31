@@ -84,10 +84,12 @@ source' = do
       func <- Tok.stringLiteral
       -- the alias is especially important when the native function name is not
       -- legal Morloc syntax, for example an R function with a '.' in the name.
-      alias <- optionMaybe (Tok.reserved "as" >> Tok.name)
+      -- If no alias is given, the alias is set to be the same as the name.
+      alias <- option func (Tok.reserved "as" >> Tok.name)
       return $ M3.makeTopRDF i (
-           [M3.ust i "morloc:name" "morloc:string" func] ++
-            maybe [] (\x -> [M3.ust i "morloc:alias" "morloc:string" x]) alias
+           [ M3.ust i "morloc:name" "morloc:string" func
+           , M3.ust i "morloc:alias" "morloc:string" alias
+           ]
         )
 
 statement' :: MS.Parser M3.TopRDF
