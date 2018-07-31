@@ -1,5 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Morloc.RdfSchema
+Description : Contains the OWL schema for a Morloc scripts
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+
+Currently nothing is done with this schema. Eventually all the logic needed for
+typechecking a Morloc script will be declared here using OWL. Then a standard
+reasoner can be used to validate the program and infer missing information
+(such as calls that need a conversion). 
+-}
+
 module Morloc.RdfSchema
 (
   rdfSchema

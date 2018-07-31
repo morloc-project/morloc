@@ -1,5 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Morloc.Nexus
+Description : Code generators for the user interface
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Nexus (
       NexusGenerator(..)
     , perlCliNexusGenerator

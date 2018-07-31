@@ -1,3 +1,12 @@
+{-|
+Module      : Morloc.Lexer
+Description : Lexer for Morloc script
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Lexer (
     integer
   , float

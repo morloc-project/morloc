@@ -1,3 +1,15 @@
+{-|
+Module      : Morloc.Error
+Description : Error handling
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+
+The MorlocError type is used to handle all forms of errors across the entire
+program. New entries can be added to describe new types of error.
+-}
+
 module Morloc.Error
 (
     MorlocError(..)
@@ -9,46 +21,25 @@ import qualified Text.Parsec as TP
 type ThrowsError = Either MorlocError
 
 data MorlocError
-  = BadApplication   String
-  | BadComposition   String
-  | SyntaxError      TP.ParseError
-  | BadArray         String
-  | UndefinedValue   [String]
-  | NotImplemented   String
-  | NotSupported     String
-  | CouldNotFind     String
-  | MissingType      String
-  | NameConflict     String
-  | TypeError        String
-  | TypeMismatch     String String String -- name, obs type, exp type
-  | VeryBadBug       String
-  | InvalidRDF       String
+  -- | Raised when assumptions about the input RDF are broken. This should not
+  -- occur for RDF that has been validated.
+  = InvalidRDF String
+  -- | Raised for calls to unimplemented features
+  | NotImplemented String
+  -- | Raised for unsupported features (such as specific languages)
+  | NotSupported String
+  -- | Raised by parsec on parse errors
+  | SyntaxError TP.ParseError
+  -- | Raised when someone didn't customize their error messages
   | UnknownError
   deriving(Eq)
 
-instance Show MorlocError
-  where
-    show = morlocShow
+instance Show MorlocError where
+  show = morlocShow
 
 morlocShow :: MorlocError -> String
-morlocShow (BadApplication msg)  = "BadApplication: "      ++ show msg 
-morlocShow (BadComposition msg)  = "BadComposition: "      ++ show msg
-morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
-morlocShow (BadArray       err)  = "BadArray: "            ++ show err
-morlocShow (UndefinedValue xs)   = "Undefined value(s): " ++ unwords xs
+morlocShow  UnknownError         = "UnknownError"
+morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
-morlocShow (CouldNotFind x)      = "Could not find " ++ q x ++ ", missing import?"
-morlocShow (MissingType x)       = "Could not find type signature for " ++ q x
-morlocShow (NameConflict msg)    = "NameConflict: " ++ show msg
-morlocShow (TypeError s)         = "TypeError: " ++ s
-morlocShow (TypeMismatch n o e)  = "Type mismatch in '" ++ n ++ "':\n" 
-                                   ++ "  Expected type: '" ++ e ++ "'\n"
-                                   ++ "  Observed type: '" ++ o ++ "'"
-morlocShow (VeryBadBug msg)      = "BUG IN MORLOC CORE: " ++ show msg
-morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
-morlocShow  UnknownError         = "UnknownError"
-
--- quote a string
-q :: Show a => a -> String
-q x = "'" ++ show x ++ "'"
+morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err

@@ -1,5 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Morloc.Triple
+Description : Convenience functions for working with triples
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Triple (
     TopRDF(..)
   , RDF

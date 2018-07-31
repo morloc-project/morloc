@@ -1,5 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Morloc.Walker
+Description : Functions for accessing and traversing RDF graphs
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+
+This module should serve as the interface to Morloc RDF.
+-}
+
 module Morloc.Walker
 (
   -- * General RDF access functions

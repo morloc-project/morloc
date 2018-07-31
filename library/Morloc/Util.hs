@@ -1,3 +1,12 @@
+{-|
+Module      : Morloc.Util
+Description : Miscellaneous small utility functions
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Util
 (
     ifelse

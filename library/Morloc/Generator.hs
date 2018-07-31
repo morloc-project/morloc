@@ -1,5 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
+{-|
+Module      : Morloc.Generator
+Description : Generate code from the RDF representation of a Morloc script 
+Copyright   : (c) Zebulun Arendsee, 2018
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
+
 module Morloc.Generator
 (
     Script(..)
@@ -19,9 +28,9 @@ import qualified Data.RDF as DR
 import qualified Data.Text as DT
 
 data Script = Script {
-      scriptBase :: String -- script basename (no extension)
-    , scriptLang :: String -- script language
-    , scriptCode :: DT.Text -- full script source code
+      scriptBase :: String -- ^ script basename (no extension)
+    , scriptLang :: String -- ^ script language
+    , scriptCode :: DT.Text -- ^ full script source code
   }
   deriving(Ord, Eq)
 
