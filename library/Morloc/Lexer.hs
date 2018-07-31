@@ -10,12 +10,8 @@ module Morloc.Lexer (
   , tag
   , specificType
   , genericType
-  , nonSpace
   , path
   , comma
-  , chop
-  , space'
-  , line
   , parens
   , braces
   , brackets
@@ -92,6 +88,7 @@ reserved   = Token.reserved   lexer
 comma      = Token.comma      lexer
 name       = Token.identifier lexer
 
+-- | match an optional tag that precedes some construction
 tag :: Parser a -> Parser (Maybe String)
 tag p =
   optionMaybe (try tag')
@@ -103,6 +100,7 @@ tag p =
       _ <- lookAhead p
       return l
 
+-- | match a double-quoted literal string
 stringLiteral :: Parser String
 stringLiteral = do
   _ <- char '"'
@@ -111,10 +109,11 @@ stringLiteral = do
   whiteSpace
   return s
 
+-- | match a boolean written as "True" or "False"
 boolean :: Parser Bool 
 boolean = fmap read ((string "True" <|> string "False") <* whiteSpace)
 
--- | a legal non-generic type name
+-- | match a non-generic type (alphanumeric with initial uppercase character)
 specificType :: Parser String
 specificType = do
   s <- satisfy DC.isUpper
@@ -122,37 +121,20 @@ specificType = do
   whiteSpace
   return (s : ss)
 
+-- | match a generic type (alphanumeric with initial lowercase character)
 genericType :: Parser String
-genericType = Token.identifier lexer 
+genericType = do
+  s <- satisfy DC.isLower
+  ss <- many alphaNum
+  whiteSpace
+  return (s : ss)
 
--- | match any non-space character
-nonSpace :: Parser Char
-nonSpace = noneOf " \n\t\r\v"
-
+-- | match a UNIX style path ('/' delimited)
 path :: Parser [String]
 path = do
   path' <- sepBy name (char '/')
   whiteSpace
   return path'
-
--- | matches all trailing space
-chop :: Parser String
-chop = do
-  ss <- many space'
-  optional newline
-  return ss
-
--- | non-newline space
-space' :: Parser Char
-space' = char ' ' <|> char '\t'
-
--- | a raw line with spaces
-line :: Parser String
-line = do
-  s <- many1 space'
-  l <- many (noneOf "\n")
-  _ <- newline
-  return $ (s ++ l)
 
 relativeBinOp :: Parser String
 relativeBinOp = do

@@ -11,32 +11,38 @@ import Morloc.Operators
 import qualified Morloc.Util as MU
 
 data CodeGenerator = CodeGenerator {
+      -- | The top level pool constructor for the given language
       makePool
-        :: [DT.Text] -- any required global declarations
-        -> [DT.Text] -- any input source code
-        -> [DT.Text] -- the node function declarations
-        -> DT.Text   -- entire pool script
+        :: [DT.Text] --   any required global declarations
+        -> [DT.Text] --   any input source code
+        -> [DT.Text] --   the node function declarations
+        -> DT.Text   --   entire pool script
 
+    -- | Generator of importing source code
     , makeSource
-        :: DT.Text -- path
+        :: DT.Text --   path
         -> DT.Text
 
+    -- | Generator for building a function call
     , makeCall
-        :: DT.Text   -- function name
-        -> [DT.Text] -- arguments
+        :: DT.Text   --   function name
+        -> [DT.Text] --   arguments
         -> DT.Text
 
+    -- | Generator for building a function
     , makeFunction
-        :: DT.Text   -- function name
-        -> [DT.Text] -- function arguments
-        -> DT.Text   -- function body
+        :: DT.Text   --   function name
+        -> [DT.Text] --   function arguments
+        -> DT.Text   --   function body
         -> DT.Text
 
+    -- | Generator for building a manifold name from some base name
     , makeManifoldName
-        :: DT.Text -- RDF unique ID (e.g. "mid:42")
+        :: DT.Text --   RDF unique ID (e.g. "mid:42")
         -> DT.Text
   }
 
+-- | An experimental generator for the R language
 rCodeGenerator :: CodeGenerator
 rCodeGenerator = CodeGenerator {
       makePool     = makePool'

@@ -2,7 +2,7 @@
 
 module Morloc.Walker
 (
-  -- general RDF access functions
+  -- * General RDF access functions
     down
   , downOn
   , up
@@ -16,11 +16,12 @@ module Morloc.Walker
   , value
   , valueOf
   , idOf
-  -- node builder convenience functions
+  -- * Node builder convenience functions
   , p
   , o
   , v
-  -- morloc specific query functions
+  -- * Morloc specific functions
+  -- ** Get everyting in a class
   , getType
   , getConstraints
   , getSources
@@ -28,7 +29,7 @@ module Morloc.Walker
   , getDataDeclarationByName
   , getCalls
   , getScope
-  -- import handling
+  -- ** Imports and Exports;
   , sourceExports
   , getImports
   , getImportByName
@@ -36,7 +37,7 @@ module Morloc.Walker
   , importPath
   , importName
   , importAlias
-  -- morloc specific step functions
+  -- ** step functions
   , imports
   , exports
   , lang

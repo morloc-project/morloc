@@ -11,8 +11,8 @@ import Morloc.Operators ((|>>))
 
 
 testIt :: (Show a, Eq a) => String -> String -> (M3.RDF -> a) -> a -> Spec
-testIt desc code f exp = case MP.morlocScript code of 
-  (Right rdf) -> it desc $ do shouldBe (f rdf) exp
+testIt desc code f exp' = case MP.morlocScript code of 
+  (Right rdf) -> it desc $ do shouldBe (f rdf) exp'
   (Left err) -> error (unlines ["Failure:", ">>>" ++ show err])
 
 testWalker :: Spec
