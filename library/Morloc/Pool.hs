@@ -60,8 +60,8 @@ generateSourceFunction
   -> ML.CodeGenerator
   -> Import
   -> [DT.Text]
-generateSourceFunction rdf g imp = case (importAlias rdf imp) of
-  [alias'] -> case (
+generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp) of
+  ([alias'], [name']) -> case (
         idOf imp
       , asPositional (getType rdf alias' >>= elements rdf)
     ) of
@@ -69,7 +69,7 @@ generateSourceFunction rdf g imp = case (importAlias rdf imp) of
         [(ML.makeFunction g)
            ((ML.makeManifoldName g) mid')
            args'
-           ((ML.makeCall g) alias' args')
+           ((ML.makeCall g) name' args')
         ]
       _ -> []
   _ -> []
