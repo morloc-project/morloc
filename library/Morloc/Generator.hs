@@ -13,6 +13,7 @@ import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Nexus as MN
 import qualified Morloc.Pool as MP
+import qualified Morloc.Util as MU
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
@@ -53,13 +54,16 @@ generateNexus rdf = pure $ Script {
         ]
 
 generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
-generateNexusCall rdf g exp = (MN.nexusCall g) prog' file' name' mid' narg'
-  where
-    prog' = "<prog>"
-    file' = "<file>"
-    name' = exp
-    mid'  = "<mid>"
-    narg' = 2
+generateNexusCall rdf g exp = case (
+      getType rdf exp >>= elements rdf -- inputs
+  ) of
+    (inputs) -> (MN.nexusCall g)
+      "<prog>"
+      "<file>"
+      exp
+      "<mid>"
+      (length inputs)
+    _ -> "XXX"
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)
