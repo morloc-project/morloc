@@ -29,6 +29,7 @@ module Morloc.Walker
   , getCalls
   , getScope
   -- import handling
+  , sourceExports
   , getImports
   , getImportByName
   , importLang
@@ -197,26 +198,35 @@ value rdf s = down rdf (p "morloc:value") s
 rdftype :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Object]
 rdftype rdf s = down rdf (p "rdf:type") s
 
-imports :: DR.Rdf a => DR.RDF a -> DR.Subject -> [(DT.Text, Maybe DT.Text)]
+imports :: DR.Rdf a => DR.RDF a -> DR.Subject -> [(DT.Text, DT.Text)]
 imports rdf s = down rdf (p "morloc:import") s >>= names'
   where
-    names' :: DR.Subject -> [(DT.Text, Maybe DT.Text)]
+    names' :: DR.Subject -> [(DT.Text, DT.Text)]
     names' i =
       case
-        ( MU.maybeOne (down rdf (p "morloc:name" ) i >>= valueOf)
-        , MU.maybeOne (down rdf (p "morloc:alias") i >>= valueOf)
+        ( down rdf (p "morloc:name" ) i >>= valueOf
+        , down rdf (p "morloc:alias") i >>= valueOf
         )
       of
-        (Just name, alias) -> [(name, alias)]
+        ([name], [alias]) -> [(name, alias)]
         _ -> []
 
 -- x = (\(Right z) -> z) $ morlocScript "export foo"
 exports :: DR.Rdf a => DR.RDF a -> [DT.Text]
 exports rdf
-  =   DR.query rdf Nothing (Just $ p "rdf:type") (Just $ o "morloc:export")
-  |>> DR.subjectOf
+  =   up rdf (p "rdf:type") (o "morloc:export")
   >>= down rdf (p "rdf:value")
   >>= valueOf
+
+-- find the imports from a source that are exported
+sourceExports :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
+sourceExports rdf n
+  = filter isExported (down rdf n (p "morloc:import"))
+  where
+    isExported :: DR.Node -> Bool
+    isExported imp = case importAlias rdf imp of
+      [x] -> any (== x) (exports rdf)
+      _   -> False
 
 getImports :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getImports rdf

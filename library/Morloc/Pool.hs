@@ -17,6 +17,8 @@ type Source = DR.Node
 type Export = DR.Node
 -- RDF node representing a function call
 type Call = DR.Node
+-- RDF node representing a an imported function
+type Import = DR.Node
 
 generatePoolCode :: DR.Rdf a => DR.RDF a -> Source -> ME.ThrowsError DT.Text
 generatePoolCode rdf src =
@@ -40,7 +42,7 @@ generateWith rdf src g = Right $
   (ML.makePool g)
     (generateGlobal rdf src g)
     (generateSource rdf src g)
-    (generateFunctions rdf src g)
+    ((generateSourceFunctions rdf src g) ++ (generateFunctions rdf src g))
 
 generateGlobal :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
 generateGlobal _ _ _ = []
@@ -50,6 +52,31 @@ generateSource rdf src g = path rdf src >>= valueOf |>> ML.makeSource g
 
 generateFunctions :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
 generateFunctions rdf src g = map (generateFunction rdf src g) (getCalls rdf)
+
+generateSourceFunctions :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
+generateSourceFunctions rdf src g = concat $ map (generateSourceFunction rdf g) (sourceExports rdf src) 
+generateSourceFunction
+  :: DR.Rdf a
+  => DR.RDF a
+  -> ML.CodeGenerator
+  -> Import
+  -> [DT.Text]
+generateSourceFunction rdf g imp = case (importAlias rdf imp) of
+  [alias'] -> case (
+        idOf imp
+      , asPositional (getType rdf alias' >>= elements rdf)
+    ) of
+      ([mid'], args') ->
+        [(ML.makeFunction g)
+           ((ML.makeManifoldName g) mid')
+           args'
+           ((ML.makeCall g) alias' args')
+        ]
+      _ -> []
+  _ -> []
+  where
+    asPositional :: [a] -> [DT.Text]
+    asPositional xs = map (\(_,i) -> "x" <> (DT.pack $ show i)) (zip xs [1..])
 
 generateFunction :: DR.Rdf a
   => DR.RDF a
