@@ -57,7 +57,7 @@ generateNexusCall rdf g exp = (MN.nexusCall g) prog' file' name' mid' narg'
   where
     prog' = "<prog>"
     file' = "<file>"
-    name' = "<name>"
+    name' = exp
     mid'  = "<mid>"
     narg' = 2
 

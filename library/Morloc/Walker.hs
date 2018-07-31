@@ -209,10 +209,12 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         (Just name, alias) -> [(name, alias)]
         _ -> []
 
+-- x = (\(Right z) -> z) $ morlocScript "export foo"
 exports :: DR.Rdf a => DR.RDF a -> [DT.Text]
 exports rdf
-  =   DR.query rdf Nothing (Just $ p "rdf:type") (Just $ v Nothing "morloc:export")
+  =   DR.query rdf Nothing (Just $ p "rdf:type") (Just $ o "morloc:export")
   |>> DR.subjectOf
+  >>= down rdf (p "rdf:value")
   >>= valueOf
 
 getImports :: DR.Rdf a => DR.RDF a -> [DR.Node]
