@@ -27,8 +27,16 @@ module Morloc.Walker
   , getDataDeclarations
   , getCalls
   , getScope
+  -- import handling
+  , getImports
+  , getImportByName
+  , importLang
+  , importPath
+  , importName
+  , importAlias
   -- morloc specific step functions
   , imports
+  , exports
   , lang
   , path
   , name
@@ -113,7 +121,7 @@ has rdf p o s = case DR.query rdf (Just s) (Just p) (Just o) of
 -- Filter :: (Node -> [Node]) -> Subject -> [Subject]
 hasThese :: DR.Rdf a
   => DR.RDF a
-  -> (DR.RDF a -> DR.Node -> [DR.Node])
+  -> (DR.RDF a -> DR.Node -> [b])
   -> DR.Subject
   -> [DR.Subject]
 hasThese rdf f x = case f rdf x of
@@ -201,6 +209,46 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         (Just name, alias) -> [(name, alias)]
         _ -> []
 
+exports :: DR.Rdf a => DR.RDF a -> [DT.Text]
+exports rdf
+  =   DR.query rdf Nothing (Just $ p "rdf:type") (Just $ v Nothing "morloc:export")
+  |>> DR.subjectOf
+  >>= valueOf
+
+getImports :: DR.Rdf a => DR.RDF a -> [DR.Node]
+getImports rdf
+  = DR.query rdf Nothing (Just $ p "morloc:import") Nothing
+  |>> DR.objectOf
+
+getImportByName :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
+getImportByName rdf s
+  =   getImports rdf
+  >>= hasThese rdf
+    (\r' x -> DR.query r'
+      (Just x)
+      (Just $ p "morloc:import")
+      (Just $ v (Just "morloc:name") s))
+
+importLang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
+importLang rdf n
+  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
+  |>> DR.subjectOf
+  >>= down rdf (p "morloc:lang")
+  >>= valueOf
+
+importPath :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
+importPath rdf n
+  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
+  |>> DR.subjectOf
+  >>= down rdf (p "morloc:path")
+  >>= valueOf
+
+importName :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
+importName rdf n = down rdf (p "morloc:name") n >>= valueOf
+
+importAlias :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
+importAlias rdf n = down rdf (p "morloc:alias") n >>= valueOf
+
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getType rdf name
   -- get Triples for all type declarations
@@ -244,7 +292,6 @@ getScope rdf n = getScope' rdf n
 rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
 rhsOf rdf o = up rdf (p "morloc:rhs") o
   
-
 getCalls :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getCalls rdf
   = DR.query rdf

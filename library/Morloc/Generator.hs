@@ -42,15 +42,24 @@ generateNexus rdf = pure $ Script {
     -- Eventually these will include, for example, a CWL generator
     g = MN.perlCliNexusGenerator
     lang = "perl"
+    nexusCode' = case exports rdf of
+      exports' -> DT.unlines
+        [ (MN.nexusPrologue g)
+        , (MN.nexusPrint g) ""
+        , (MN.nexusDispatch g) exports'
+        , (MN.nexusHelp g) []
+        , DT.unlines (map (generateNexusCall rdf g) exports')
+        , MN.nexusEpilogue g
+        ]
 
-    nexusCode' = DT.unlines
-      [ (MN.nexusPrologue g)
-      , (MN.nexusPrint g) ""
-      , (MN.nexusDispatch g) (getDataDeclarations rdf >>= lhs rdf >>= valueOf)
-      , (MN.nexusHelp g) []
-      ]
-      <> DT.unlines (map ((MN.nexusCall g) "Rscript" "pool.R") [])
-      <> MN.nexusEpilogue g
+generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
+generateNexusCall rdf g exp = (MN.nexusCall g) prog' file' name' mid' narg'
+  where
+    prog' = "<prog>"
+    file' = "<file>"
+    name' = "<name>"
+    mid'  = "<mid>"
+    narg' = 2
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)

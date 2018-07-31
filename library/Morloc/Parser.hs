@@ -47,7 +47,8 @@ export' = do
   i <- MS.getId
   n <- Tok.name
   return $ M3.makeTopRDF i ([
-      M3.ust i "rdf:type" "morloc:export" n
+        M3.uss i "rdf:type" "morloc:export"
+      , M3.ust i "rdf:value" "morloc:string" n
     ])
 
 -- | parses a 'source' header, returning the language

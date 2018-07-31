@@ -26,10 +26,9 @@ data NexusGenerator = NexusGenerator {
   , nexusCall
     :: DT.Text -- the command for calling the pool (e.g. Rscript or python)
     -> DT.Text -- the pool name
-    -> ( DT.Text   -- function name
-       , DT.Text   -- manifold id
-       , [DT.Text] -- arguments
-       )
+    -> DT.Text -- function name
+    -> DT.Text -- manifold name
+    -> Int     -- number of arguments
     -> DT.Text -- call function
   , nexusEpilogue
     :: DT.Text
@@ -107,18 +106,18 @@ perlCliNexusGenerator = NexusGenerator {
       , "exit 0;"
       ]
 
-    nexusCall' prog filename (name, mid, args) =
+    nexusCall' prog filename name mid nargs =
       makeFunction
         (makeCallName name)
         (DT.unlines
-          [ "if(scalar(@_) != " <> show' (length args) <> "){"
+          [ "if(scalar(@_) != " <> show' nargs <> "){"
           , "    print STDERR \"Expected "
-            <> show' (length args)
+            <> show' nargs
             <> " arguments to 'sample_index', given \" . "
           , "    scalar(@_) . \"\\n\";"
           , "    exit 1;"
           , "}"
-          , "return `" <> makePoolCall prog filename (makeManifoldName mid) (length args) <> "`"
+          , "return `" <> makePoolCall prog filename (makeManifoldName mid) nargs <> "`"
           ]
         )
 
