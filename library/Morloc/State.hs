@@ -6,7 +6,7 @@ module Morloc.State
   , getId
 ) where
 
-import Text.Parsec hiding (Parser, State)
+import Text.Parsec hiding (State)
 import qualified Data.RDF as DR
 import qualified Morloc.Triple as M3
 
@@ -33,5 +33,5 @@ parserStateEmpty = ParserState {
 getId :: Parser DR.Node
 getId = do
   s <- getState
-  modifyState (\s -> s {stateCount = (stateCount s) + 1})
+  modifyState (\s' -> s' {stateCount = (stateCount s') + 1})
   return $ M3.idUri (stateCount s)

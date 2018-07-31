@@ -10,7 +10,6 @@ import qualified Data.Text.IO as DTIO
 
 import Morloc.Operators
 import qualified Morloc.Error as ME
-import qualified Morloc.Triple as M3
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
 

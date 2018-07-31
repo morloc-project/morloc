@@ -13,8 +13,6 @@ import qualified Morloc.Util as MU
 
 -- RDF node representing a source import
 type Source = DR.Node 
--- RDF node representing an exported function
-type Export = DR.Node
 -- RDF node representing a function call
 type Call = DR.Node
 -- RDF node representing a an imported function
@@ -31,6 +29,7 @@ generatePoolCode rdf src =
   (Just "R", Nothing) -> generateWith rdf src ML.rCodeGenerator
   (_, Just _) -> Left $ ME.NotImplemented "cannot yet read source"
   (Just s, _) -> Left $ ME.NotSupported ("no support for '" ++ DT.unpack s ++ "'")
+  (Nothing, _) -> Left $ ME.InvalidRDF "No language specified for source"
 
 generateWith
   :: DR.Rdf a
@@ -84,7 +83,8 @@ generateFunction :: DR.Rdf a
   -> ML.CodeGenerator
   -> Call 
   -> DT.Text 
-generateFunction rdf src g n =
+-- TODO: use src to separate internal/external functions
+generateFunction rdf _ g n =
   case
     (
         value rdf n >>= rdftype rdf >>= valueOf
@@ -94,9 +94,9 @@ generateFunction rdf src g n =
       , idOf n
     )
   of
-  ([name], args, bndvars, [mid]) ->
+  ([name'], args', bndvars', [mid']) ->
     (ML.makeFunction g)
-      ((ML.makeManifoldName g) mid)
-      bndvars
-      ((ML.makeCall g) name args)
+      ((ML.makeManifoldName g) mid')
+      bndvars'
+      ((ML.makeCall g) name' args')
   _ -> "XXX"

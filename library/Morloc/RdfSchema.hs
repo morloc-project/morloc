@@ -11,6 +11,7 @@ import qualified Data.Text as DT
 sss :: DT.Text -> DT.Text -> DT.Text -> DR.Triple
 sss s p o = DR.triple (DR.UNode s) (DR.UNode p) (DR.UNode o)
 
+rdfSchema :: [DR.Triple]
 rdfSchema =
   [
   -- collections

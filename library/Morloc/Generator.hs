@@ -17,7 +17,6 @@ import qualified Morloc.Util as MU
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
-import qualified Data.Maybe as DM
 
 data Script = Script {
       scriptBase :: String -- script basename (no extension)
@@ -35,14 +34,14 @@ generate r = (,) <$> generateNexus r <*> generatePools r
 generateNexus :: DR.Rdf a => DR.RDF a -> ME.ThrowsError Nexus
 generateNexus rdf = pure $ Script {
       scriptBase = "nexus"
-    , scriptLang = lang
+    , scriptLang = lang'
     , scriptCode = nexusCode'
   }
   where
     -- TODO allow user to choose a generator
     -- Eventually these will include, for example, a CWL generator
     g = MN.perlCliNexusGenerator
-    lang = "perl"
+    lang' = "perl"
     nexusCode' = case exports rdf of
       exports' -> DT.unlines
         [ (MN.nexusPrologue g)
@@ -54,17 +53,17 @@ generateNexus rdf = pure $ Script {
         ]
 
 generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
-generateNexusCall rdf g exp = case (
-      getType rdf exp >>= elements rdf -- inputs
-    , getImportByName rdf exp
-    , getDataDeclarationByName rdf exp
+generateNexusCall rdf g exp' = case (
+      getType rdf exp' >>= elements rdf -- inputs
+    , getImportByName rdf exp'
+    , getDataDeclarationByName rdf exp'
   ) of
     (inputs', [import'], []) -> (MN.nexusCall g)
       (lang2prog (importLang rdf import'))
       (poolName
         (MU.maybeOne $ importLang rdf import')
         (MU.maybeOne $ importPath rdf import'))
-      exp
+      exp'
       (makeManifoldName (idOf import'))
       (length inputs')
 
@@ -73,7 +72,7 @@ generateNexusCall rdf g exp = case (
       -- from that to choose a command and pool name.
       "Rscript"
       "pool.R"
-      exp
+      exp'
       (makeManifoldName (return decl >>= rhs rdf >>= idOf))
       (length inputs')
 
@@ -86,13 +85,14 @@ lang2prog _ = "Rscript"
 
 poolName :: Maybe DT.Text -> Maybe DT.Text -> DT.Text
 poolName (Just lang') Nothing = "pool." <> lang'
-poolName _ (Just path) = path
+poolName _ (Just path') = path'
 poolName _ _ = "pool.WTF"
 
 makeManifoldName :: [DT.Text] -> DT.Text
 makeManifoldName [t] = case DT.splitOn ":" t of
-  [p, i] -> "m" <> i
+  [_, i] -> "m" <> i
   _ -> "XXX"
+makeManifoldName _ = "XXX"
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getSources r)

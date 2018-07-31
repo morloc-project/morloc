@@ -67,8 +67,13 @@ lexer = Token.makeTokenParser style
             ]
           }
 
+parens :: Parser a -> Parser a
 parens = Token.parens lexer
+
+braces :: Parser a -> Parser a
 braces = Token.braces lexer
+
+brackets :: Parser a -> Parser a
 brackets = Token.brackets lexer
 
 integer    :: Parser Integer
@@ -87,6 +92,7 @@ reserved   = Token.reserved   lexer
 comma      = Token.comma      lexer
 name       = Token.identifier lexer
 
+tag :: Parser a -> Parser (Maybe String)
 tag p =
   optionMaybe (try tag')
   where
@@ -94,7 +100,7 @@ tag p =
       l <- many1 alphaNum
       whiteSpace
       op ":"
-      lookAhead p
+      _ <- lookAhead p
       return l
 
 stringLiteral :: Parser String
@@ -125,9 +131,9 @@ nonSpace = noneOf " \n\t\r\v"
 
 path :: Parser [String]
 path = do
-  path <- sepBy name (char '/')
+  path' <- sepBy name (char '/')
   whiteSpace
-  return path
+  return path'
 
 -- | matches all trailing space
 chop :: Parser String
@@ -145,41 +151,41 @@ line :: Parser String
 line = do
   s <- many1 space'
   l <- many (noneOf "\n")
-  newline
+  _ <- newline
   return $ (s ++ l)
 
 relativeBinOp :: Parser String
 relativeBinOp = do
-  op <-  (string "==")
-     <|> try (string "<=")
-     <|> try (string ">=")
-     <|> (string "<")
-     <|> (string ">")
-     <|> (string "!=")
-     <?> "a numeric comparison operator" 
+  op' <-  (string "==")
+      <|> try (string "<=")
+      <|> try (string ">=")
+      <|> (string "<")
+      <|> (string ">")
+      <|> (string "!=")
+      <?> "a numeric comparison operator" 
   whiteSpace
-  return op 
+  return op' 
 
 logicalBinOp :: Parser String
 logicalBinOp = do
-  op <-  (string "and")
-     <|> (string "or")
-     <|> (string "xor")
-     <|> (string "nand")
-     <|> (string "not")
-     <?> "a logical operator" 
+  op' <-  (string "and")
+      <|> (string "or")
+      <|> (string "xor")
+      <|> (string "nand")
+      <|> (string "not")
+      <?> "a logical operator" 
   whiteSpace
-  return op 
+  return op'
 
 arithmeticBinOp :: Parser String
 arithmeticBinOp = do
-  op <-  (string "+")
-     <|> (string "-")
-     <|> (string "*")
-     <|> (string "^")
-     <|> (string "%")
-     <|> try (string "//")
-     <|> (string "/")
-     <?> "a numeric operator" 
+  op' <-  (string "+")
+      <|> (string "-")
+      <|> (string "*")
+      <|> (string "^")
+      <|> (string "%")
+      <|> try (string "//")
+      <|> (string "/")
+      <?> "a numeric operator" 
   whiteSpace
-  return op 
+  return op' 

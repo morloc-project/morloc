@@ -125,7 +125,7 @@ perlCliNexusGenerator = NexusGenerator {
       = DT.unwords [prog, filename, manifold, makePoolArgList j]
 
     makePoolArgList 0 = ""
-    makePoolArgList j = DT.unwords ["$_[" <> show' j <> "]" | j <- [0..(j-1)]]
+    makePoolArgList j = DT.unwords ["$_[" <> show' k <> "]" | k <- [0..(j-1)]]
 
     makeFunction :: DT.Text -> DT.Text -> DT.Text
     makeFunction name body = "sub " <> name <> "{\n" <> MU.indent 4 body <> "\n}"

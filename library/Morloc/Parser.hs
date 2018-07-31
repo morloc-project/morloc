@@ -2,9 +2,8 @@
 
 module Morloc.Parser (morlocScript) where
 
-import Text.Parsec hiding (State, Parser)
+import Text.Parsec hiding (State)
 import qualified Data.RDF as DR
-import qualified Data.Text as DT
 import qualified Text.Parsec.Expr as TPE
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
@@ -362,7 +361,7 @@ mdata =  do
       -- must have at least two elements
       tuple'' = do
         x <- mdata
-        Tok.comma
+        _ <- Tok.comma
         xs <- sepBy1 mdata Tok.comma
         return $ x:xs
 
@@ -485,6 +484,7 @@ relativeExpr = do
       | op == "<"  = (binOp "LT" i a b)
       | op == ">=" = (binOp "GE" i a b)
       | op == "<=" = (binOp "LE" i a b)
+      | otherwise = error "Unsupported operator" 
 
 arithmeticExpr :: MS.Parser M3.TopRDF
 arithmeticExpr

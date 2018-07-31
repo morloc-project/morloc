@@ -5,7 +5,6 @@ module Morloc.Error
 ) where
 
 import qualified Text.Parsec as TP
-import qualified Data.List as DL
 
 type ThrowsError = Either MorlocError
 

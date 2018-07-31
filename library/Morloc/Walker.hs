@@ -52,7 +52,6 @@ import qualified Data.Char as DC
 import qualified Control.Monad as CM
 import qualified Data.Text.Read as DTR
 
-import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
 import Morloc.Operators ((|>>))
 
@@ -70,10 +69,6 @@ v Nothing  s = DR.LNode (DR.PlainL s)
 -- Operations
 --
 -- End :: [Node] -> a
-maybeValue :: DR.Node -> Maybe DT.Text
-maybeValue (DR.LNode (DR.TypedL _ s)) = Just s
-maybeValue (DR.LNode (DR.PlainL s)) = Just s
-maybeValue _ = Nothing 
 
 valueOf :: DR.Node -> [DT.Text]
 valueOf (DR.LNode (DR.TypedL _ s)) = [s]
@@ -82,7 +77,7 @@ valueOf _ = []
 
 idOf :: DR.Node -> [DT.Text]
 idOf (DR.UNode s) = [s]
-idOr _ = []
+idOf _ = []
 
 -- Down :: Subject -> [Object]
 down :: DR.Rdf a
@@ -90,14 +85,14 @@ down :: DR.Rdf a
   -> DR.Predicate
   -> DR.Subject    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Object]   -- /  chain function, allows searching in parallel
-down rdf p s = map DR.objectOf (DR.query rdf (Just s) (Just p) Nothing)
+down rdf p' s' = map DR.objectOf (DR.query rdf (Just s') (Just p') Nothing)
 
 up :: DR.Rdf a
   => DR.RDF a
   -> DR.Predicate
   -> DR.Object    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Subject]   -- /  chain function, allows searching in parallel
-up rdf p o = map DR.subjectOf (DR.query rdf Nothing (Just p) (Just o))
+up rdf p' o' = map DR.subjectOf (DR.query rdf Nothing (Just p') (Just o'))
 
 downOn :: DR.Rdf a
   => DR.RDF a
@@ -115,9 +110,9 @@ has :: DR.Rdf a
   -> DR.Object
   -> DR.Subject
   -> [DR.Subject]
-has rdf p o s = case DR.query rdf (Just s) (Just p) (Just o) of 
-  [] -> [ ] -- if nothing is found, the subject is filtered out 
-  _  -> [s] -- if anything is found, the subject is kept
+has rdf p' o' s' = case DR.query rdf (Just s') (Just p') (Just o') of 
+  [] -> [  ] -- if nothing is found, the subject is filtered out 
+  _  -> [s'] -- if anything is found, the subject is kept
 
 
 -- Filter :: (Node -> [Node]) -> Subject -> [Subject]
@@ -145,6 +140,7 @@ toIndex (DR.UNode n) = DT.stripPrefix "rdf:_" n >>= decimal' where
   decimal' s = case DTR.decimal s of
     (Right (i, "")) -> Just i
     _ -> Nothing
+toIndex _ = Nothing
 
 position :: DR.Rdf a => DR.RDF a -> DR.Node -> Maybe Int
 position rdf sbj
@@ -208,7 +204,7 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         , down rdf (p "morloc:alias") i >>= valueOf
         )
       of
-        ([name], [alias]) -> [(name, alias)]
+        ([name'], [alias']) -> [(name', alias')]
         _ -> []
 
 -- x = (\(Right z) -> z) $ morlocScript "export foo"
@@ -268,7 +264,7 @@ importAlias :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importAlias rdf n = down rdf (p "morloc:alias") n >>= valueOf
 
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
-getType rdf name
+getType rdf name'
   -- get Triples for all type declarations
   =   DR.query rdf
         Nothing
@@ -279,7 +275,7 @@ getType rdf name
   -- remove any IDs that do not have the appropriate lhs name
   >>= hasThese rdf (\r' x ->
             down r' (p "morloc:lhs") x
-        >>= has r' (p "rdf:type") (v (Just "morloc:name") name)
+        >>= has r' (p "rdf:type") (v (Just "morloc:name") name')
       )
   -- get the rhs
   >>= down rdf (p "morloc:rhs")
@@ -307,14 +303,14 @@ getDataDeclarationByName rdf s
 getScope :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
 getScope rdf n = getScope' rdf n
   where 
-    getScope' rdf n
-      | (rdftype rdf n >>= valueOf) == ["morloc:dataDeclaration"] = [n]
-      | (rdftype rdf n >>= valueOf) == ["morloc:typeDeclaration"] = [n]
-      | length (rhsOf rdf n) == 1 = rhsOf rdf n 
-      | otherwise = parent rdf n >>= has rdf (p "rdf:type") (v Nothing "morloc:call")
+    getScope' rdf' n'
+      | (rdftype rdf' n' >>= valueOf) == ["morloc:dataDeclaration"] = [n']
+      | (rdftype rdf' n' >>= valueOf) == ["morloc:typeDeclaration"] = [n']
+      | length (rhsOf rdf' n') == 1 = rhsOf rdf' n' 
+      | otherwise = parent rdf' n' >>= has rdf' (p "rdf:type") (v Nothing "morloc:call")
 
 rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
-rhsOf rdf o = up rdf (p "morloc:rhs") o
+rhsOf rdf obj = up rdf (p "morloc:rhs") obj
   
 getCalls :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getCalls rdf

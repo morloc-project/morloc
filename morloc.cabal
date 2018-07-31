@@ -55,7 +55,7 @@ library
                    containers,
                    mtl
 
-    ghc-options: -Wall
+    ghc-options: -Wall -Wno-missing-signatures -Wno-type-defaults -Werror
 
     if flag(documentation)
         build-depends: hscolour

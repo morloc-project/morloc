@@ -52,7 +52,6 @@ rCodeGenerator = CodeGenerator {
 
     makeSource' :: DT.Text -> DT.Text 
     makeSource' path = "source(" <> path <> ")"
-    makeSource' _ = ""
 
     makeCall' :: DT.Text -> [DT.Text] -> DT.Text
     makeCall' fname args = fname <> "(" <> DT.intercalate ", " args <> ")" 
@@ -64,7 +63,7 @@ rCodeGenerator = CodeGenerator {
 
     makeManifoldName' :: DT.Text -> DT.Text
     makeManifoldName' t = case DT.splitOn ":" t of
-      [p, i] -> "m" <> i
+      [_, i] -> "m" <> i
       _ -> "XXX"
 
     begin' = ["#!/usr/bin/env Rscript"]

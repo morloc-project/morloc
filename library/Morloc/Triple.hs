@@ -13,13 +13,12 @@ module Morloc.Triple (
   , adoptAs
   , adopt
   , showTopRDF
+  , rdfAppend
 ) where
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
-
-import qualified Morloc.Util as MU
 
 prefixMap :: DR.PrefixMappings
 prefixMap = DR.PrefixMappings $
