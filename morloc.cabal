@@ -54,13 +54,6 @@ library
                    containers,
                    mtl
     ghc-options: -Wall
-                 -Wno-missing-signatures
-                 -Wno-type-defaults
-                 -Wcompat
-                 -Wincomplete-record-updates
-                 -Wincomplete-uni-patterns
-                 -Wredundant-constraints
-                 -Werror
     if flag(documentation)
         build-depends: hscolour
 
@@ -68,13 +61,6 @@ executable morloc
     main-is: Main.hs
     hs-source-dirs: executable
     ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
-                 -Wno-missing-signatures
-                 -Wno-type-defaults
-                 -Wcompat
-                 -Wincomplete-record-updates
-                 -Wincomplete-uni-patterns
-                 -Wredundant-constraints
-                 -Werror
     build-depends:
         base >=4.7 && <5
       , rdf4h
@@ -90,15 +76,7 @@ test-suite morloc-test-suite
       WalkerTests
   hs-source-dirs:
       test-suite
-  ghc-options: -rtsopts -threaded -with-rtsopts=-N
-               -Wall
-               -Wno-missing-signatures
-               -Wno-type-defaults
-               -Wcompat
-               -Wincomplete-record-updates
-               -Wincomplete-uni-patterns
-               -Wredundant-constraints
-               -Werror
+  ghc-options: -Wall -rtsopts -threaded -with-rtsopts=-N
   build-depends:
       base
     , tasty
