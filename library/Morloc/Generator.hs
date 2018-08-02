@@ -56,7 +56,7 @@ generateNexus rdf = pure $ Script {
         [ (MN.nexusPrologue g)
         , (MN.nexusPrint g) ""
         , (MN.nexusDispatch g) exports'
-        , (MN.nexusHelp g) []
+        , (MN.nexusHelp g) "prologue" ["foo", "bar"] "epilogue"
         , DT.unlines (map (generateNexusCall rdf g) exports')
         , MN.nexusEpilogue g
         ]

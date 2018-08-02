@@ -57,4 +57,4 @@ sub call_rand {
         exit 1;
     }
     return `Rscript pool.R m7 $_[0]`;
-}
+
