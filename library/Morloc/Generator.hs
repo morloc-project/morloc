@@ -56,10 +56,16 @@ generateNexus rdf = pure $ Script {
         [ (MN.nexusPrologue g)
         , (MN.nexusPrint g) ""
         , (MN.nexusDispatch g) exports'
-        , (MN.nexusHelp g) "prologue" ["foo", "bar"] "epilogue"
+        , nexusHelp rdf g
         , DT.unlines (map (generateNexusCall rdf g) exports')
         , MN.nexusEpilogue g
         ]
+
+nexusHelp :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text
+nexusHelp rdf g = (MN.nexusHelp g) prologue' exports' epilogue' where
+  prologue' = ["The following commands are exported:"]
+  exports' = map (\s -> "    " <> s) (exports rdf)
+  epilogue' = []
 
 generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
 generateNexusCall rdf g exp' = case (

@@ -1,32 +1,20 @@
 #!/usr/bin/env Rscript
-
-m1 <- function(n, size){
-  ceiling(m2(n, size))
+m4 <- function (x1, x2, x3){
+  runif(x1, x2, x3)
 }
 
-m2 <- function(n, size){
-  runif(n, m4, size)
+m5 <- function (x1){
+  ceiling(x1)
 }
 
-m3 <- function(n, size){
-  n
+m18 <- function (){
+  len(xs)
 }
 
-m4 <- 0L
-m5 <- function(n, size){
-  size
+m44 <- function (n){
+  rand_uniform(n, 0.0, 1.0)
 }
 
-m7 <- function(n){
-  runif(n, m9, m10)
-}
-
-m8 <- function(n){
-  n
-}
-
-m9 <- 0L
-m10 <- 1L
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
   stop("Expected 1 or more arguments")

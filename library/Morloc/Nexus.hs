@@ -29,9 +29,9 @@ data NexusGenerator = NexusGenerator {
     -> DT.Text
     -- make a help function
   , nexusHelp
-    :: DT.Text   -- prologue
+    :: [DT.Text] -- prologue
     -> [DT.Text] -- functions
-    -> DT.Text   -- epilogue
+    -> [DT.Text] -- epilogue
     -> DT.Text
     -- make a funtion that calls a function in a particular pool 
   , nexusCall
@@ -111,11 +111,11 @@ perlCliNexusGenerator = NexusGenerator {
     makeCallName :: DT.Text -> DT.Text
     makeCallName f = "call_" <> f
 
-    nexusHelp' :: DT.Text -> [DT.Text] -> DT.Text -> DT.Text
+    nexusHelp' :: [DT.Text] -> [DT.Text] -> [DT.Text] -> DT.Text
     nexusHelp' prologue xs epilogue = makeFunction "usage" (msg <> "exit 0;")
       where
         msg = (DT.concat . map (\s -> "print STDERR \"" <> s <> "\\n\";\n"))
-                ([prologue] ++ xs ++ [epilogue])
+                (prologue ++ xs ++ epilogue)
 
     nexusCall' prog filename name mid nargs =
       makeFunction
