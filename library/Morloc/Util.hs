@@ -43,7 +43,7 @@ repeated xs = [y | (y:(_:_)) <- (DL.group . DL.sort) xs]
 
 indent :: Int -> DT.Text -> DT.Text
 indent i s
-  | i <= 0    = s
+  | i <= 0 = s
   -- TODO: this the String -> Text transform here is slow and unnecessary
   | otherwise = DT.unlines . map ((<>) (DT.pack (take i (repeat ' ')))) . DT.lines $ s
 
