@@ -20,8 +20,8 @@ packages of functions or import them into their own programs.
 So far I have written two prototypes, described below.
 
 
-Haskell prototype
-=================
+Minimal Example
+===============
 
 Compile and install the package as so (requires the Haskell utility `stack`):
 
