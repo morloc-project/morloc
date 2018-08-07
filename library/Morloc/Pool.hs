@@ -27,42 +27,39 @@ type Call = DR.Node
 -- RDF node representing a an imported function
 type Import = DR.Node
 
-generatePoolCode :: DR.Rdf a => DR.RDF a -> Source -> ME.ThrowsError DT.Text
-generatePoolCode rdf src =
-  case
-    (
-        MU.maybeOne $ lang rdf src >>= valueOf
-      , MU.maybeOne $ path rdf src >>= valueOf
-    )
-  of
-  (Just "R", Nothing) -> generateWith rdf src ML.rCodeGenerator
-  (_, Just _) -> Left $ ME.NotImplemented "cannot yet read source"
-  (Just s, _) -> Left $ ME.NotSupported ("no support for '" ++ DT.unpack s ++ "'")
-  (Nothing, _) -> Left $ ME.InvalidRDF "No language specified for source"
+generatePoolCode :: DR.Rdf a => DR.RDF a -> [Source] -> ME.ThrowsError DT.Text
+generatePoolCode rdf (s:ss) = case (MU.maybeOne $ lang rdf s >>= valueOf) of
+  (Just "R") -> generateWith rdf (s:ss) ML.rCodeGenerator
+  (Just l) -> Left $ ME.NotSupported ("No support for " ++ DT.unpack l)
+  (Nothing) -> Left $ ME.InvalidRDF "No language specified for source"
 
 generateWith
   :: DR.Rdf a
   => DR.RDF a
-  -> Source
+  -> [Source]
   -> ML.CodeGenerator
   -> ME.ThrowsError DT.Text
-generateWith rdf src g = Right $
+generateWith rdf srcs g = Right $
   (ML.makePool g)
-    (generateGlobal rdf src g)
-    (generateSource rdf src g)
-    ((generateSourceFunctions rdf src g) ++ (generateFunctions rdf src g))
+    (generateGlobal rdf srcs g)
+    (generateSource rdf srcs g)
+    ((generateSourceFunctions rdf srcs g) ++ (generateFunctions rdf srcs g))
 
-generateGlobal :: DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
+generateGlobal :: DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
 generateGlobal _ _ _ = []
 
-generateSource :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateSource rdf src g = path rdf src >>= valueOf |>> ML.makeSource g
+generateSource :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
+generateSource rdf srcs g = srcs >>= path rdf >>= valueOf |>> ML.makeSource g
 
-generateFunctions :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateFunctions rdf src g = map (generateFunction rdf src g) (getCalls rdf)
+generateFunctions :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
+generateFunctions rdf srcs g = map (generateFunction rdf srcs g) (getCalls rdf)
 
-generateSourceFunctions :: DR.Rdf a => DR.RDF a -> Source -> ML.CodeGenerator -> [DT.Text]
-generateSourceFunctions rdf src g = concat $ map (generateSourceFunction rdf g) (sourceExports rdf src) 
+generateSourceFunctions :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
+generateSourceFunctions rdf srcs g
+  = concat
+  $ map (generateSourceFunction rdf g)
+        (srcs >>= sourceExports rdf)
+
 generateSourceFunction
   :: DR.Rdf a
   => DR.RDF a
@@ -88,7 +85,7 @@ generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp
 
 generateFunction :: DR.Rdf a
   => DR.RDF a
-  -> Source -- needed to decide whether this is an internal or external function
+  -> [Source] -- needed to decide whether this is an internal or external function
   -> ML.CodeGenerator
   -> Call 
   -> DT.Text 

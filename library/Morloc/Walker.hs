@@ -36,6 +36,7 @@ module Morloc.Walker
   , getType
   , getConstraints
   , getSources
+  , getGroupedSources
   , getDataDeclarations
   , getDataDeclarationByName
   , getCalls
@@ -63,6 +64,7 @@ import qualified Data.Text as DT
 import qualified Data.Char as DC
 import qualified Control.Monad as CM
 import qualified Data.Text.Read as DTR
+import qualified Data.List as DL
 
 import qualified Morloc.Util as MU
 import Morloc.Operators ((|>>))
@@ -339,3 +341,20 @@ getSources rdf
     (Just $ p "rdf:type")
     (Just $ o "morloc:source")
   |>> DR.subjectOf
+
+getGroupedSources :: DR.Rdf a => DR.RDF a -> [[DR.Node]]
+getGroupedSources rdf = map toNodes grouped'
+  where
+    grouped' :: [[DR.Triple]]
+    grouped' = DL.groupBy
+      (\a b -> lang rdf (DR.objectOf a) == lang rdf (DR.objectOf b))
+      (DL.sort . map reverseTriple $
+         DR.query rdf Nothing (Just $ p "morloc:lang") Nothing)
+
+    toNodes :: [DR.Triple] -> [DR.Node]
+    toNodes ts = ts |>> DR.objectOf >>= parent rdf
+
+    -- this will create an invalid Triple, with a subject that is an LNode
+    reverseTriple :: DR.Triple -> DR.Triple
+    reverseTriple (DR.Triple s p o) = DR.Triple o p s
+

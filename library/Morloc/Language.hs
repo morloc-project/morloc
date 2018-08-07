@@ -66,7 +66,7 @@ rCodeGenerator = CodeGenerator {
     makePool' gs is fs = DT.unlines . concat $ [begin', gs, is, fs, end']
 
     makeSource' :: DT.Text -> DT.Text 
-    makeSource' path = "source(" <> path <> ")"
+    makeSource' path = "source(\"" <> path <> "\")"
 
     makeCall' :: DT.Text -> [DT.Text] -> DT.Text
     makeCall' fname args = fname <> "(" <> DT.intercalate ", " args <> ")" 
@@ -97,6 +97,6 @@ rCodeGenerator = CodeGenerator {
       , "  }"
       , "  cat(result, \"\\n\")"
       , "} else {"
-      , "  stop(\"Could not find function '\", f, \"'\")"
+      , "  stop(\"Could not find function '\", args[[1]], \"'\")"
       , "}"
       ]

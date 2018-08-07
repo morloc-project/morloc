@@ -26,6 +26,7 @@ import qualified Morloc.Util as MU
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
+import qualified Data.List as DL
 
 data Script = Script {
       scriptBase :: String -- ^ script basename (no extension)
@@ -75,9 +76,7 @@ generateNexusCall rdf g exp' = case (
   ) of
     (inputs', [import'], []) -> (MN.nexusCall g)
       (lang2prog (importLang rdf import'))
-      (poolName
-        (MU.maybeOne $ importLang rdf import')
-        (MU.maybeOne $ importPath rdf import'))
+      (poolName . MU.maybeOne . importLang rdf $ import')
       exp'
       (makeManifoldName (idOf import'))
       (length inputs')
@@ -96,29 +95,31 @@ generateNexusCall rdf g exp' = case (
 -- FIXME: Obviously need something more sophisticated here. Eventually, I need
 -- to load a config file. Dependency handling will be a pain in the future.
 lang2prog :: [DT.Text] -> DT.Text
-lang2prog _ = "Rscript"
+lang2prog ["R"] = "Rscript"
+lang2prog _ = "echo" -- TODO: handle error
 
-poolName :: Maybe DT.Text -> Maybe DT.Text -> DT.Text
-poolName (Just lang') Nothing = "pool." <> lang'
-poolName _ (Just path') = path'
-poolName _ _ = "pool.WTF"
+poolName :: Maybe DT.Text -> DT.Text
+poolName (Just lang') = "pool." <> lang'
+poolName _ = "pool.WTF" -- TODO: handle error
 
 makeManifoldName :: [DT.Text] -> DT.Text
 makeManifoldName [t] = case DT.splitOn ":" t of
   [_, i] -> "m" <> i
   _ -> "XXX"
-makeManifoldName _ = "XXX"
+makeManifoldName _ = "XXX" -- TODO: handle error
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
-generatePools r = sequence $ map (generatePool r) (getSources r)
+generatePools r = sequence $ map (generatePool r) (getGroupedSources r)
 
-generatePool :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError Pool
-generatePool rdf n = Script
+generatePool :: DR.Rdf a => DR.RDF a -> [DR.Node] -> ME.ThrowsError Pool
+generatePool rdf ns = Script
   <$> pure "pool"
-  <*> getLang rdf n
-  <*> MP.generatePoolCode rdf n
+  <*> getLang rdf ns
+  <*> MP.generatePoolCode rdf ns
   where
-    getLang :: DR.Rdf a => DR.RDF a -> DR.Node -> ME.ThrowsError String
-    getLang rdf' n' = case lang rdf' n' >>= valueOf of
-      [x] -> Right (DT.unpack x)
-      _   -> Left $ ME.InvalidRDF "A source must have exactly one language"
+    getLang :: DR.Rdf a => DR.RDF a -> [DR.Node] -> ME.ThrowsError String
+    -- TODO: might want to ensure that all the inputs are indeed of the same language
+    -- they *should* be ...
+    getLang rdf' n' = case n' >>= lang rdf' >>= valueOf of
+      (x:_) -> Right (DT.unpack x)
+      []  -> Left $ ME.InvalidRDF "A source must have exactly one language"
