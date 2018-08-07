@@ -26,7 +26,6 @@ import qualified Morloc.Util as MU
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
-import qualified Data.List as DL
 
 data Script = Script {
       scriptBase :: String -- ^ script basename (no extension)
@@ -90,7 +89,12 @@ generateNexusCall rdf g exp' = case (
       (makeManifoldName (return decl >>= rhs rdf >>= idOf))
       (length inputs')
 
-    _ -> "XXX"
+    ([],  _,  _) -> error $ errorMsg "missing type signature"
+    (_ , [], []) -> error $ errorMsg "no info"
+    (_ ,  _,  _) -> error $ errorMsg "duplicated name or type"
+    where
+      errorMsg :: String -> String
+      errorMsg msg = "Bad RDF for export '" ++ DT.unpack exp' ++ "': " ++ msg
 
 -- FIXME: Obviously need something more sophisticated here. Eventually, I need
 -- to load a config file. Dependency handling will be a pain in the future.
@@ -105,8 +109,8 @@ poolName _ = "pool.WTF" -- TODO: handle error
 makeManifoldName :: [DT.Text] -> DT.Text
 makeManifoldName [t] = case DT.splitOn ":" t of
   [_, i] -> "m" <> i
-  _ -> "XXX"
-makeManifoldName _ = "XXX" -- TODO: handle error
+  _ -> error "Bad RDF: expected manifold id of form 'mid:<int>'"
+makeManifoldName _ = error "Bug: expected `makeManifoldName` input length of 1"
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
 generatePools r = sequence $ map (generatePool r) (getGroupedSources r)

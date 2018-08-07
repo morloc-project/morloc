@@ -1,6 +1,7 @@
 export ceiling
 export rand_uniform
 export sayhi
+export increment
 
 source "R" (
     "runif" as rand_uniform

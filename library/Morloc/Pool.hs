@@ -32,6 +32,7 @@ generatePoolCode rdf (s:ss) = case (MU.maybeOne $ lang rdf s >>= valueOf) of
   (Just "R") -> generateWith rdf (s:ss) ML.rCodeGenerator
   (Just l) -> Left $ ME.NotSupported ("No support for " ++ DT.unpack l)
   (Nothing) -> Left $ ME.InvalidRDF "No language specified for source"
+generatePoolCode _ [] = Left $ ME.InvalidRDF "No source given for the pool"
 
 generateWith
   :: DR.Rdf a
@@ -105,4 +106,6 @@ generateFunction rdf _ g n =
       ((ML.makeManifoldName g) mid')
       bndvars'
       ((ML.makeCall g) name' args')
-  _ -> "XXX"
+  ([], _, _, _) -> error "Invalid RDF: no name for function"
+  (_, _, _, []) -> error "Invalid RDF: no id for function"
+  _ -> error "Invalid RDF: failed to generate function"

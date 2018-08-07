@@ -79,7 +79,7 @@ rCodeGenerator = CodeGenerator {
     makeManifoldName' :: DT.Text -> DT.Text
     makeManifoldName' t = case DT.splitOn ":" t of
       [_, i] -> "m" <> i
-      _ -> "XXX"
+      _ -> error "R generator error: unexpected manifold ID"
 
     begin' = ["#!/usr/bin/env Rscript"]
 
