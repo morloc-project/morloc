@@ -66,12 +66,28 @@ mdata2aeson rdf x = case MW.down rdf (MW.p "rdf:type") x of
 aeson2mdata :: DR.Rdf a => DA.Value -> DR.RDF a
 aeson2mdata = undefined
 
--- build a type template from a type (used in nexus and pool generators)
-mtype2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
-mtype2aeson = undefined
+typeDeclaration2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
+typeDeclaration2aeson rdf x =
+  case
+    ( MW.lhs rdf x >>= MW.down rdf (MW.p "rdf:type") >>= MW.valueOf
+    , MW.rhs rdf x)
+  of
+    ([name], [t]) -> DA.Object $ DHS.singleton name (mtype2aeson rdf t)
+    _ -> error "Cannot convert type declaration to JSON"
 
--- infer the type of a JSON
+-- | build a type template from a type (used in nexus and pool generators)
+mtype2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
+mtype2aeson rdf x = case MW.down rdf (MW.p "rdf:type") x of
+  [DR.UNode "morloc:functionType"] -> toArray (DT.pack "Function")
+  [DR.LNode (DR.TypedL "morloc:parameterizedType" s)] -> toArray s
+  [DR.LNode (DR.TypedL "morloc:atomicType" s)] -> DA.String s
+  _ -> error "Cannot parse this type"
+  where
+    toArray typename = DA.Object $
+      DHS.singleton
+        typename
+        (DA.Array $ DV.map (mtype2aeson rdf) (DV.fromList $ MW.elements rdf x))
+
+-- | infer the type of a JSON
 aeson2mtype :: DR.Rdf a => DR.RDF a -> DA.Value -> DR.Node
 aeson2mtype = undefined
-
--- see JSON schema: http://json-schema.org/
