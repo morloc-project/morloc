@@ -99,22 +99,21 @@ down :: DR.Rdf a
   -> DR.Predicate
   -> DR.Subject    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Object]   -- /  chain function, allows searching in parallel
-down rdf p' s' = map DR.objectOf (DR.query rdf (Just s') (Just p') Nothing)
+down rdf p' s' = DR.query rdf (Just s') (Just p') Nothing |>> DR.objectOf
 
 up :: DR.Rdf a
   => DR.RDF a
   -> DR.Predicate
   -> DR.Object    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Subject]   -- /  chain function, allows searching in parallel
-up rdf p' o' = map DR.subjectOf (DR.query rdf Nothing (Just p') (Just o'))
+up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
 
 downOn :: DR.Rdf a
   => DR.RDF a
   -> (DR.Predicate -> Bool)
   -> DR.Subject
   -> [DR.Object]
-downOn rdf pf s = map DR.objectOf
-  (DR.select rdf (Just $ (==) s) (Just pf) Nothing)
+downOn rdf pf s = DR.select rdf (Just $ (==) s) (Just pf) Nothing |>> DR.objectOf
 
 -- Require :: Subject:x -> xs:[Subject]
 -- -- Where (i == xs[0] and len xs == 1) or (len xs == 0)

@@ -53,7 +53,10 @@ library
                    text,
                    rdf4h,
                    aeson,
+                   scientific,
                    containers,
+                   unordered-containers,
+                   vector,
                    mtl
     ghc-options: -Wall
     if flag(documentation)
