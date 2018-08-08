@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MultiWayIf #-}
 
 {-|
 Module      : Morloc.Language
@@ -15,6 +16,9 @@ module Morloc.Language (
 ) where
 
 import qualified Data.Text as DT
+import qualified Data.Aeson as DA
+import qualified Data.HashMap.Strict as DHS
+import qualified Data.Vector as DV
 
 import Morloc.Operators
 import qualified Morloc.Util as MU
@@ -49,6 +53,10 @@ data CodeGenerator = CodeGenerator {
     , makeManifoldName
         :: DT.Text --   RDF unique ID (e.g. "mid:42")
         -> DT.Text
+
+    , makeData
+        :: DA.Value --   Literal data from the Morloc script
+        -> DT.Text
   }
 
 -- | An experimental generator for the R language
@@ -59,6 +67,7 @@ rCodeGenerator = CodeGenerator {
     , makeCall     = makeCall'
     , makeFunction = makeFunction'
     , makeManifoldName = makeManifoldName'
+    , makeData = makeData'
   }
   where
 
@@ -80,6 +89,35 @@ rCodeGenerator = CodeGenerator {
     makeManifoldName' t = case DT.splitOn ":" t of
       [_, i] -> "m" <> i
       _ -> error "R generator error: unexpected manifold ID"
+
+    makeData' :: DA.Value -> DT.Text
+    makeData' (DA.Object x) = case DHS.toList x of
+      [("List", DA.Array l)] -> case findCaster (DV.toList l) of
+        (Just caster) -> caster <> "("
+          <> "c(" <> DT.intercalate ", " (map makeData' (DV.toList l)) <> ")" 
+          <> ")"
+        Nothing -> error "Heterogenous lists are not supported" 
+      [("Tuple", x)] -> makeData' x 
+      xs -> "list("
+         <> DT.intercalate ", " (map (\(k, v) -> k <> " = " <> makeData' v) xs)
+         <> ")"
+    makeData' (DA.Array xs) = "list(" <> DT.intercalate ", " (map makeData' (DV.toList xs)) <> ")"
+    makeData' (DA.String x) = x
+    makeData' (DA.Number x) = DT.pack (show x)
+    makeData' (DA.Bool True) = "True"
+    makeData' (DA.Bool False) = "False"
+    makeData' DA.Null = "NULL"
+
+    findCaster :: [DA.Value] -> Maybe DT.Text
+    -- Either it is a single primitive value
+    findCaster [DA.Number _] = Just "as.numeric"
+    findCaster [DA.Bool   _] = Just "as.logical"
+    findCaster [DA.String _] = Just "as.character"
+    -- Or it is a list of the same primitive values
+    findCaster (DA.Number _:(DA.Number y:xs)) = findCaster (DA.Number y:xs)
+    findCaster (DA.Bool   _:(DA.Bool   y:xs)) = findCaster (DA.Bool   y:xs)
+    findCaster (DA.String _:(DA.String y:xs)) = findCaster (DA.String y:xs)
+    findCaster _ = Nothing
 
     begin' = ["#!/usr/bin/env Rscript"]
 
