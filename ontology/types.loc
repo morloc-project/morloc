@@ -1,0 +1,9 @@
+toMissing :: cast => a -> ?a;
+fromMissing :: cast, mayDie => ?a -> a;
+
+toMissings :: cast, functor f => f a -> f ?a;
+fromMissings :: cast, functor f, mayDie => f ?a -> f a;
+
+a2String :: cast, show a => a -> String;
+
+int2num :: cast => Int -> Num;
