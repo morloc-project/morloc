@@ -1,1 +1,1 @@
-{ "type":"Tree Int Int" , "value":{4,{5,{12},{10}},{6}} }
+{"type":"Tree Int Int","value":{4,{5,{12},{10}},{6}}}
