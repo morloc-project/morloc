@@ -158,6 +158,7 @@ typeDeclaration = do
   lhs <- tripleName
   lang <- option "Morloc" Tok.name
   Tok.op "::"
+  properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
   rhs <- mtype
   constraints <- option [] (
       Tok.reserved "where" >>
@@ -167,6 +168,7 @@ typeDeclaration = do
          [M3.ust i "rdf:type" "morloc:typeDeclaration" lang]
       ++ M3.adoptAs "morloc:lhs" i [lhs]
       ++ M3.adoptAs "morloc:rhs" i [rhs]
+      ++ M3.adoptAs "morloc:property" (M3.rdfId rhs) properties
       ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
     )
 
