@@ -37,10 +37,11 @@ unpackMatrix    R :: unpacks => JSON -> Matrix
 unpackDataFrame R :: unpacks => JSON -> DataFrame
 unpackDataTable R :: unpacks => JSON -> DataTable
 
-# For each general function, there are zero or more specific functions:
-foo   :: A -> B  # general form of the function
-foo L :: X -> Y  # specialization for language L, using L types X and Y
-foo M :: _ -> Z  # for language M, using default type for A and M type Z
+# # For each general function, there are zero or more specific functions:
+# foo   :: A -> B  # general form of the function
+# foo L :: X -> Y  # specialization for language L, using L types X and Y
+# foo M :: _ -> Z  # for language M, using default type for A and M type Z
+# # currently _ is not supported
 
 # These specialized declarations are not always necessary. They may be omitted
 # if a function does not interact with foreigners or if all the types it uses

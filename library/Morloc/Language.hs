@@ -42,11 +42,24 @@ data CodeGenerator = CodeGenerator {
         -> [DT.Text] --   arguments
         -> DT.Text
 
+    , makeComment
+        :: [DT.Text] --   lines to be added as a comment
+        -> DT.Text
+
     -- | Generator for building a function
     , makeFunction
         :: DT.Text   --   function name
         -> [DT.Text] --   function arguments
         -> DT.Text   --   function body
+        -> DT.Text
+
+    , makeAssignment
+        :: DT.Text --   lhs
+        -> DT.Text --   rhs
+        -> DT.Text --   result, e.g.: x = 1
+
+    , makeReturn
+        :: DT.Text --   value to return
         -> DT.Text
 
     -- | Generator for building a manifold name from some base name
@@ -65,9 +78,12 @@ rCodeGenerator = CodeGenerator {
       makePool     = makePool'
     , makeSource   = makeSource'
     , makeCall     = makeCall'
+    , makeComment  = makeComment'
     , makeFunction = makeFunction'
     , makeManifoldName = makeManifoldName'
     , makeData = makeData'
+    , makeAssignment = makeAssignment'
+    , makeReturn = makeReturn'
   }
   where
 
@@ -79,6 +95,8 @@ rCodeGenerator = CodeGenerator {
 
     makeCall' :: DT.Text -> [DT.Text] -> DT.Text
     makeCall' fname args = fname <> "(" <> DT.intercalate ", " args <> ")" 
+
+    makeComment' xs = DT.concat $ map ((<>) "# ") xs
 
     makeFunction' :: DT.Text -> [DT.Text] -> DT.Text -> DT.Text
     makeFunction' name args body
@@ -108,6 +126,10 @@ rCodeGenerator = CodeGenerator {
     makeData' (DA.Bool False) = "False"
     makeData' DA.Null = "NULL"
 
+    makeAssignment' l r = l <> " <- " <> r 
+
+    makeReturn' x = makeCall' "return" [x]
+
     findCaster :: [DA.Value] -> Maybe DT.Text
     -- Either it is a single primitive value
     findCaster [DA.Number _] = Just "as.numeric"
@@ -128,8 +150,7 @@ rCodeGenerator = CodeGenerator {
       , "} else if(exists(args[[1]])){"
       , "  x <- get(args[[1]])"
       , "  result <- if(class(x) == \"function\"){"
-      , "    par <- lapply(args[-1], function(s) eval(parse(text=s)))"
-      , "    do.call(get(args[[1]]), par)"
+      , "    do.call(get(args[[1]]), args[-1])"
       , "  } else {"
       , "    x"
       , "  }"

@@ -76,13 +76,28 @@ generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp
         [(ML.makeFunction g)
            ((ML.makeManifoldName g) mid')
            args'
-           ((ML.makeCall g) name' args')
+           (generateBody rdf g name' args')
         ]
       _ -> []
   _ -> []
   where
     asPositional :: [a] -> [DT.Text]
     asPositional xs = map (\(_,i) -> "x" <> (DT.pack $ show i)) (zip xs [1..])
+
+generateBody :: DR.Rdf a
+  => DR.RDF a
+  -> ML.CodeGenerator
+  -> DT.Text   -- function name
+  -> [DT.Text] -- JSON argument inputs
+  -> DT.Text   -- function body
+generateBody rdf g name' args' =
+  DT.unlines
+    [ (ML.makeAssignment g) "output" ((ML.makeCall g) name' (map (castInput rdf g) args'))
+    , (ML.makeReturn g) "output"
+    ]
+
+castInput :: DR.Rdf a => DR.RDF a -> ML.CodeGenerator -> DT.Text -> DT.Text
+castInput rdf g arg = (ML.makeCall g) "unpackGeneric" [arg]
 
 generateFunction :: DR.Rdf a
   => DR.RDF a
