@@ -1,54 +1,48 @@
 source "R" from "R-base.R" (
   # unpackers
     "unpackTable"
-  , "unpackVector"
+  , "unpackNumeric"
+  , "unpackCharacter"
+  , "unpackLogical"
   , "unpackList"
   , "unpackMatrix"
   # packers
   , "packTable"
-  , "packVector"
+  , "packNumeric"
+  , "packCharacter"
+  , "packLogical"
   , "packList"
   , "packMatrix"
 )
 
-# foo :: A -> B        -- general function
-# l foo :: l A -> l B  -- function in language l
-# packA :: l A -> A    -- pack function
-# unpackA :: A -> l A  -- unpack function
+# For each of these language-specific types, exactly one packing and unpacking
+# function must exist:
 
-packList      :: packs => R/List      -> Common
-packNumeric   :: packs => R/Numeric   -> Common
-packCharacter :: packs => R/Character -> Common
-packLogical   :: packs => R/Logical   -> Common
+packList      R :: packs => List      -> JSON
+packNumeric   R :: packs => Numeric   -> JSON
+packCharacter R :: packs => Character -> JSON
+packLogical   R :: packs => Logical   -> JSON
+packMatrix    R :: packs => Matrix    -> JSON
+packDataFrame R :: packs => DataFrame -> JSON
+packDataTable R :: packs => DataTable -> JSON
 
-packNumericMatrix :: packs => R/Matrix    -> Common
-packDataFrame     :: packs => R/DataFrame -> Common
-packDataTable     :: packs => R/DataTable -> Common
+packGeneric   R :: packs   => a    -> JSON
+unpackGeneric R :: unpacks => JSON -> a
 
-unpackNumeric   :: unpacks => Common -> R/Numeric
-unpackCharacter :: unpacks => Common -> R/Character
-unpackLogical   :: unpacks => Common -> R/Logical
-unpackMatrix    :: unpacks => Common -> R/Matrix
-unpackDataFrame :: unpacks => Common -> R/DataFrame
-unpackDataTable :: unpacks => Common -> R/DataTable
+unpackList      R :: unpacks => JSON -> List
+unpackNumeric   R :: unpacks => JSON -> Numeric
+unpackCharacter R :: unpacks => JSON -> Character
+unpackLogical   R :: unpacks => JSON -> Logical
+unpackMatrix    R :: unpacks => JSON -> Matrix
+unpackDataFrame R :: unpacks => JSON -> DataFrame
+unpackDataTable R :: unpacks => JSON -> DataTable
 
-{:
-# R doesn't have scalars, generally everything is a vector
-    R/Numeric   isa R/Vector .
-    R/Integer   isa R/Vector .
-    R/Character isa R/Vector .
-    R/Logical   isa R/Vector .
-# R vectors are arrays of primitives that allow missing values
-    R/Numeric   isa [?Number]  .
-    R/Integer   isa [?Integer] .
-    R/Character isa [?String]  .
-    R/Logical   isa [?Boolean] .
-# Other R types
-    R/List isa Structure .
-    R/Matrix isa (Matrix a) .
-    R/DataFrame isa Table .
-    R/DataTable isa Table .
-:}
+# For each general function, there are zero or more specific functions:
+foo   :: A -> B  # general form of the function
+foo L :: X -> Y  # specialization for language L, using L types X and Y
+foo M :: _ -> Z  # for language M, using default type for A and M type Z
 
-# Structure: a named, heterogenous list
-# Structure:Record :: List:Tuple
+# These specialized declarations are not always necessary. They may be omitted
+# if a function does not interact with foreigners or if all the types it uses
+# follow the default patterns (i.e., can be packed and unpcked with the generic
+# serializers).

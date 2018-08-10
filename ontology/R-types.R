@@ -4,7 +4,9 @@ library(data.table)
 # Extract R objects from JSON text
 unpackDataFrame <- function(json){ as.data.frame(fromJSON(json)) }
 unpackDataTable <- function(json){ as.data.table(fromJSON(json)) }
-unpackVector <- fromJSON
+unpackCharacter <- fromJSON
+unpackNumeric   <- fromJSON
+unpackLogical   <- fromJSON
 unpackList <- function(json) {fromJSON(json, simplifyVector = FALSE)}
 unpackMatrix <- function(json){
   fromJSON(json, simplifyVector = FALSE, simplifyMatrix = TRUE)
@@ -13,6 +15,6 @@ unpackMatrix <- function(json){
 # Serialize R objects into JSON text
 packDataFrame <- function(json){ toJSON(json, dataframe="columns") }
 packDataTable <- packDataFrame
-packVector    <- toJSON
-packList      <- toJSON
-packMatrix    <- toJSON
+packCharacter <- toJSON
+packNumeric   <- toJSON
+packLogical   <- toJSON
