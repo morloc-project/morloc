@@ -11,56 +11,44 @@ source "R" from "R-base.R" (
   , "packMatrix"
 )
 
-relations {
-    # R doesn't have scalars, generally everything is a vector
+# foo :: A -> B        -- general function
+# l foo :: l A -> l B  -- function in language l
+# packA :: l A -> A    -- pack function
+# unpackA :: A -> l A  -- unpack function
+
+packList      :: packs => R/List      -> Common
+packNumeric   :: packs => R/Numeric   -> Common
+packCharacter :: packs => R/Character -> Common
+packLogical   :: packs => R/Logical   -> Common
+
+packNumericMatrix :: packs => R/Matrix    -> Common
+packDataFrame     :: packs => R/DataFrame -> Common
+packDataTable     :: packs => R/DataTable -> Common
+
+unpackNumeric   :: unpacks => Common -> R/Numeric
+unpackCharacter :: unpacks => Common -> R/Character
+unpackLogical   :: unpacks => Common -> R/Logical
+unpackMatrix    :: unpacks => Common -> R/Matrix
+unpackDataFrame :: unpacks => Common -> R/DataFrame
+unpackDataTable :: unpacks => Common -> R/DataTable
+
+{:
+# R doesn't have scalars, generally everything is a vector
     R/Numeric   isa R/Vector .
     R/Integer   isa R/Vector .
     R/Character isa R/Vector .
     R/Logical   isa R/Vector .
-    # R vectors are arrays of primitives that allow missing values
+# R vectors are arrays of primitives that allow missing values
     R/Numeric   isa [?Number]  .
     R/Integer   isa [?Integer] .
     R/Character isa [?String]  .
     R/Logical   isa [?Boolean] .
-}
+# Other R types
+    R/List isa Structure .
+    R/Matrix isa (Matrix a) .
+    R/DataFrame isa Table .
+    R/DataTable isa Table .
+:}
 
-# 'Structure' is a named, heterogenous list. The same as a structure in C.
-packList
-    :: packs Structure
-    => R/List -> JSON
-
-packVector
-    :: packs [?Number]
-    ,  packs [?String]
-    ,  packs [?Boolean]
-    => R/Vector -> JSON
-
-packMatrix
-    :: packs (Matrix ?Number  )
-    ,  packs (Matrix ?String  )
-    ,  packs (Matrix ?Boolean )
-    => R/Matrix -> JSON
-
-packDataFrame :: (packs Table) => R/DataFrame -> JSON
-packDataTable :: (packs Table) => R/DataTable -> JSON
-
-unpackNumeric :: unpacks [?Number]
-               , unpacks [ Number] => JSON -> R/Numeric
-
-unpackCharacter :: unpacks [?String]
-                ,  unpacks [ String] => JSON -> R/Character
-
-unpackLogical :: unpacks [?Boolean]
-              ,  unpacks [ Boolean] => JSON -> R/Logical
-
-unpackMatrix
-  :: unpacks (Matrix ?Number  )
-  ,  unpacks (Matrix ?String  )
-  ,  unpacks (Matrix ?Boolean )
-  ,  unpacks (Matrix  Number  )
-  ,  unpacks (Matrix  String  )
-  ,  unpacks (Matrix  Boolean )
-  => JSON -> R/Matrix;
-
-unpackDataFrame :: (unpacks Table) => JSON -> R/DataFrame;
-unpackDataTable :: (unpacks Table) => JSON -> R/DataTable;
+# Structure: a named, heterogenous list
+# Structure:Record :: List:Tuple
