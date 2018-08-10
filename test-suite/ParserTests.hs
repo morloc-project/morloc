@@ -135,7 +135,7 @@ testParser = parallel $ do
     (rmId [0])
     "A :: Bool"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "A"
     , iui 1 "morloc:rhs" 3
@@ -146,7 +146,7 @@ testParser = parallel $ do
     (rmId [0])
     "A :: [Bool]"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "A"
     , iui 1 "morloc:rhs" 3
@@ -159,7 +159,7 @@ testParser = parallel $ do
     (rmId [0])
     "A :: (Bool, Fool)"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "A"
     , iui 1 "morloc:rhs" 3
@@ -174,7 +174,7 @@ testParser = parallel $ do
     (rmId [0])
     "A :: {B :: Bool, C :: Fool}"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "A"
     , iui 1 "morloc:rhs" 3
@@ -278,7 +278,7 @@ testParser = parallel $ do
     (rmId [0])
     "foo :: Int"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "foo"
     , iui 1 "morloc:rhs" 3
@@ -303,7 +303,7 @@ testParser = parallel $ do
     (rmId [0])
     "foo :: a, (b -> c) -> d"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:typeDeclaration"
+    , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
     , iui 1 "morloc:lhs" 2
     , iut 2 "rdf:type" "morloc:name" "foo"
     , iui 1 "morloc:rhs" 3

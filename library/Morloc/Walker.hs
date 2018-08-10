@@ -89,6 +89,10 @@ valueOf (DR.LNode (DR.TypedL _ s)) = [s]
 valueOf (DR.LNode (DR.PlainL s)) = [s]
 valueOf _ = []
 
+typeOf :: DR.Node -> [DT.Text]
+typeOf (DR.LNode (DR.TypedL s _)) = [s]
+typeOf _ = []
+
 idOf :: DR.Node -> [DT.Text]
 idOf (DR.UNode s) = [s]
 idOf _ = []
@@ -282,7 +286,7 @@ getType rdf name'
   =   DR.query rdf
         Nothing
         (Just $ p "rdf:type")
-        (Just $ o "morloc:typeDeclaration")
+        (Just $ v (Just "morloc:typeDeclaration") "Morloc")
   -- Get the subject node from each triple
   |>> DR.subjectOf
   -- remove any IDs that do not have the appropriate lhs name
@@ -318,7 +322,7 @@ getScope rdf n = getScope' rdf n
   where 
     getScope' rdf' n'
       | (rdftype rdf' n' >>= valueOf) == ["morloc:dataDeclaration"] = [n']
-      | (rdftype rdf' n' >>= valueOf) == ["morloc:typeDeclaration"] = [n']
+      | (rdftype rdf' n' >>= typeOf ) == ["morloc:typeDeclaration"] = [n']
       | length (rhsOf rdf' n') == 1 = rhsOf rdf' n' 
       | otherwise = parent rdf' n' >>= has rdf' (p "rdf:type") (v Nothing "morloc:call")
 

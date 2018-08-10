@@ -156,6 +156,7 @@ typeDeclaration :: MS.Parser M3.TopRDF
 typeDeclaration = do
   i <- MS.getId
   lhs <- tripleName
+  lang <- option "Morloc" Tok.name
   Tok.op "::"
   rhs <- mtype
   constraints <- option [] (
@@ -163,7 +164,7 @@ typeDeclaration = do
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
   return $ M3.makeTopRDF i (
-         [M3.uss i "rdf:type" "morloc:typeDeclaration"]
+         [M3.ust i "rdf:type" "morloc:typeDeclaration" lang]
       ++ M3.adoptAs "morloc:lhs" i [lhs]
       ++ M3.adoptAs "morloc:rhs" i [rhs]
       ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
