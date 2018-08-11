@@ -76,7 +76,7 @@ generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp
         [(ML.makeFunction g)
            ((ML.makeManifoldName g) mid')
            args'
-           (generateBody rdf g name' args')
+           (generateBody rdf g alias' name' args')
         ]
       _ -> []
   _ -> []
@@ -87,17 +87,45 @@ generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp
 generateBody :: DR.Rdf a
   => DR.RDF a
   -> ML.CodeGenerator
+  -> DT.Text   -- function alias
   -> DT.Text   -- function name
   -> [DT.Text] -- JSON argument inputs
   -> DT.Text   -- function body
-generateBody rdf g name' args' =
+generateBody rdf g alias' name' args' =
   DT.unlines
-    [ (ML.makeAssignment g) "output" ((ML.makeCall g) name' (map (castInput rdf g) args'))
+    [ (ML.makeAssignment g) "output" ((ML.makeCall g) name' castFunctions)
     , (ML.makeReturn g) "output"
     ]
+  where
+    castFunctions = MU.zipWithOrDie
+      (ML.makeCall g)
+      (seekCasters rdf (ML.languageName g) alias')
+      (map (\x -> [x]) args')
 
-castInput :: DR.Rdf a => DR.RDF a -> ML.CodeGenerator -> DT.Text -> DT.Text
-castInput rdf g arg = (ML.makeCall g) "unpackGeneric" [arg]
+seekCasters :: DR.Rdf a
+  => DR.RDF a
+  -> DT.Text   -- the foreign language
+  -> DT.Text   -- the function name
+  -> [DT.Text] -- the casting function for each input to the functions
+seekCasters rdf lang' func' = case (
+      getTypeDeclaration rdf func' "Morloc"
+    , getTypeDeclaration rdf func' lang'
+  ) of
+    -- seek a special caster for each argument
+    ([generalForm], [specialForm]) ->
+      map (seekCaster rdf lang') (elements rdf specialForm)
+    -- seek a generic caster
+    ([generalForm], []) -> case elements rdf generalForm of
+      types -> take (length types) (repeat (seekGenericCaster rdf lang'))
+    ([], _) -> error ("Cast failure: No general type found for '" ++ DT.unpack func' ++ "'")
+
+-- | seek `<func> <lang> :: unpack => JSON -> <type>`
+seekCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DR.Node -> DT.Text
+seekCaster rdf lang' form' = undefined
+
+-- | seek `<func'> <lang'> :: unpack => JSON -> a`
+seekGenericCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text
+seekGenericCaster rdf lang' = "unpackGeneric"
 
 generateFunction :: DR.Rdf a
   => DR.RDF a

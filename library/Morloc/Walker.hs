@@ -40,6 +40,7 @@ module Morloc.Walker
   , getGroupedSources
   , getDataDeclarations
   , getDataDeclarationByName
+  , getTypeDeclaration
   , getCalls
   , getScope
   -- ** Imports and Exports;
@@ -250,7 +251,7 @@ sourceExports rdf n
 
 getImports :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getImports rdf
-  = DR.query rdf Nothing (Just $ p "morloc:import") Nothing
+  =   DR.query rdf Nothing (Just $ p "morloc:import") Nothing
   |>> DR.objectOf
 
 -- Examples:
@@ -269,15 +270,13 @@ getImportByName rdf s
 
 importLang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importLang rdf n
-  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
-  |>> DR.subjectOf
+  =   up rdf (p "morloc:import") n
   >>= down rdf (p "morloc:lang")
   >>= valueOf
 
 importPath :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importPath rdf n
-  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
-  |>> DR.subjectOf
+  =   up rdf (p "morloc:import") n
   >>= down rdf (p "morloc:path")
   >>= valueOf
 
@@ -290,12 +289,7 @@ importAlias rdf n = down rdf (p "morloc:alias") n >>= valueOf
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getType rdf name'
   -- get Triples for all type declarations
-  =   DR.query rdf
-        Nothing
-        (Just $ p "rdf:type")
-        (Just $ v (Just "morloc:typeDeclaration") "Morloc")
-  -- Get the subject node from each triple
-  |>> DR.subjectOf
+  = up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") "Morloc")
   -- remove any IDs that do not have the appropriate lhs name
   >>= hasThese rdf (\r' x ->
             down r' (p "morloc:lhs") x
@@ -322,6 +316,13 @@ getDataDeclarationByName rdf s
   = getDataDeclarations rdf
   >>= hasThese rdf 
     (\r' x -> return x >>= lhs r' >>= has r' (p "rdf:type") (v (Just "morloc:name") s))
+
+getTypeDeclaration :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text -> [DR.Node]
+getTypeDeclaration rdf name' lang'
+  =   up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") lang') 
+  >>= hasThese rdf 
+    (\r' x -> return x >>= lhs r' >>= has r' (p "rdf:type") (v (Just "morloc:name") name'))
+  >>= rhs rdf
 
 -- for an element in a DataDeclaration or TypeDeclaration, get the top node
 getScope :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]

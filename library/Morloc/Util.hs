@@ -18,6 +18,7 @@ module Morloc.Util
   , maybe2bool
   , either2bool
   , maybeOne
+  , zipWithOrDie
 ) where
 
 import Morloc.Operators
@@ -58,3 +59,8 @@ either2bool (Right _) = True
 maybeOne :: [a] -> Maybe a
 maybeOne [x] = Just x
 maybeOne _  = Nothing
+
+zipWithOrDie :: (a -> b -> c) -> [a] -> [b] -> [c]
+zipWithOrDie f xs ys
+  | length xs == length ys = zipWith f xs ys
+  | otherwise = error "Expected lists of equal length"

@@ -24,8 +24,14 @@ import Morloc.Operators
 import qualified Morloc.Util as MU
 
 data CodeGenerator = CodeGenerator {
+      -- | Store the name of the language
+      languageName :: DT.Text
+
+      -- | A version condition for the language
+    , languageVersion :: DT.Text
+
       -- | The top level pool constructor for the given language
-      makePool
+    , makePool
         :: [DT.Text] --   any required global declarations
         -> [DT.Text] --   any input source code
         -> [DT.Text] --   the node function declarations
@@ -75,7 +81,9 @@ data CodeGenerator = CodeGenerator {
 -- | An experimental generator for the R language
 rCodeGenerator :: CodeGenerator
 rCodeGenerator = CodeGenerator {
-      makePool     = makePool'
+      languageName = "R"
+    , languageVersion = ">=3.0.0"
+    , makePool     = makePool'
     , makeSource   = makeSource'
     , makeCall     = makeCall'
     , makeComment  = makeComment'

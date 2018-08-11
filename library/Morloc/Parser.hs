@@ -153,13 +153,13 @@ restrictedImport :: MS.Parser M3.TopRDF
 restrictedImport = do
   i <- MS.getId
   Tok.reserved "from"
-  path <- Tok.path
+  path <- Tok.stringLiteral
   Tok.reserved "import"
   functions <- Tok.parens (sepBy1 tripleName Tok.comma)
   return $ M3.makeTopRDF i (
       [
         M3.uss i "rdf:type" "morloc:restricted_import"
-      , M3.ust i "morloc:name" "morloc:string" (DL.intercalate "." path)
+      , M3.ust i "morloc:name" "morloc:string" (path ++ ".loc")
       ] ++ M3.adoptAs "morloc:import" i functions
     )
 

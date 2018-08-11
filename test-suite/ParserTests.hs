@@ -46,11 +46,11 @@ testParser = parallel $ do
     ]
 
   testRdfCode
-    "from bob/foo import (bar, baz)"
+    "from \"bob/foo\" import (bar, baz)"
     [ iuu 0 "rdf:type" "morloc:script"
     , iui 1 "rdf:_0" 0
     , iuu 1 "rdf:type" "morloc:restricted_import"
-    , iut 1 "morloc:name" "morloc:string" "bob.foo"
+    , iut 1 "morloc:name" "morloc:string" "bob/foo.loc"
     , iui 1 "morloc:import" 2
     , iut 2 "rdf:type" "morloc:name" "bar"
     , iui 1 "morloc:import" 3
@@ -58,7 +58,7 @@ testParser = parallel $ do
     ]
 
   testRdfCode
-    "import bob/foo as foo"
+    "import \"bob/foo\" as foo"
     [ iuu 0 "rdf:type" "morloc:script"
     , iui 1 "rdf:_0" 0
     , iuu 1 "rdf:type" "morloc:import"
