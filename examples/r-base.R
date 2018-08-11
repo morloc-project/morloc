@@ -18,3 +18,7 @@ packDataTable <- packDataFrame
 packCharacter <- toJSON
 packNumeric   <- toJSON
 packLogical   <- toJSON
+
+# Generic pack/unpack functions
+packGeneric   <- toJSON
+unpackGeneric <- fromJSON

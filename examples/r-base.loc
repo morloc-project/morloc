@@ -1,0 +1,40 @@
+source "R" from "R-base.R" (
+  # unpackers
+    "unpackCharacter"
+  , "unpackDataFrame"
+  , "unpackDataTable"
+  , "unpackList"
+  , "unpackLogical"
+  , "unpackMatrix"
+  , "unpackNumeric"
+  # packers
+  , "packCharacter"
+  , "packDataFrame"
+  , "packDataTable"
+  , "packList"
+  , "packLogical"
+  , "packMatrix"
+  , "packNumeric"
+  # generic
+  , "packGeneric"
+  , "unpackGeneric"
+)
+
+packCharacter R :: packs => Character -> JSON
+packDataFrame R :: packs => DataFrame -> JSON
+packDataTable R :: packs => DataTable -> JSON
+packList      R :: packs => List      -> JSON
+packLogical   R :: packs => Logical   -> JSON
+packMatrix    R :: packs => Matrix    -> JSON
+packNumeric   R :: packs => Numeric   -> JSON
+
+packGeneric   R :: packs   => a    -> JSON
+unpackGeneric R :: unpacks => JSON -> a
+
+unpackCharacter R :: unpacks => JSON -> Character
+unpackDataFrame R :: unpacks => JSON -> DataFrame
+unpackDataTable R :: unpacks => JSON -> DataTable
+unpackList      R :: unpacks => JSON -> List
+unpackLogical   R :: unpacks => JSON -> Logical
+unpackMatrix    R :: unpacks => JSON -> Matrix
+unpackNumeric   R :: unpacks => JSON -> Numeric
