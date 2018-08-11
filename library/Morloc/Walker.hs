@@ -227,7 +227,7 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
 
 getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
 getImportedFiles rdf
-  =   up rdf (p "rdf:type") (p "morloc:import")
+  =   up rdf (p "rdf:type") (o "morloc:import")
   >>= down rdf (p "morloc:name")
   >>= valueOf
 

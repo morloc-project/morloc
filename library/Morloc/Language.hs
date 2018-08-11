@@ -150,7 +150,7 @@ rCodeGenerator = CodeGenerator {
       , "} else if(exists(args[[1]])){"
       , "  x <- get(args[[1]])"
       , "  result <- if(class(x) == \"function\"){"
-      , "    do.call(get(args[[1]]), args[-1])"
+      , "    do.call(get(args[[1]]), as.list(args[-1, drop=FALSE]))"
       , "  } else {"
       , "    x"
       , "  }"

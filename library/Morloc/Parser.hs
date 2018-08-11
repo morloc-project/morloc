@@ -33,8 +33,8 @@ parse srcfile code = case (parseShallow srcfile code) of
 
 joinRDF :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)] -> IO (ME.ThrowsError M3.RDF)
 joinRDF rdf xs
-  = (fmap . fmap)                      -- raise to IO (ME.ThrowsError a)
-      (foldl M3.rdfAppend rdf)         -- ([M3.RDF] -> M3.RDF)
+  = (fmap . fmap)                         -- raise to IO (ME.ThrowsError a)
+      (foldl M3.rdfAppend rdf)            -- ([M3.RDF] -> M3.RDF)
       ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [M3.RDF])
 
 parseImports :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)]
@@ -140,12 +140,12 @@ simpleImport :: MS.Parser M3.TopRDF
 simpleImport = do
   i <- MS.getId
   Tok.reserved "import"
-  path <- Tok.path
+  path <- Tok.stringLiteral
   qual <- optionMaybe (Tok.op "as" >> Tok.name)
   return $ M3.makeTopRDF i (
       [
         (M3.uss i "rdf:type" "morloc:import")
-      , (M3.ust i "morloc:name" "morloc:string" ((DL.intercalate "/" path) ++ ".loc"))
+      , (M3.ust i "morloc:name" "morloc:string" (path ++ ".loc"))
       ] ++ maybe [] (\q -> [M3.ust i "morloc:namespace" "morloc:string" q]) qual
     )
 
