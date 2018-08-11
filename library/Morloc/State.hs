@@ -25,12 +25,14 @@ type Parser = Parsec String ParserState
 data ParserState = ParserState {
     -- | Stores the current node number. This will be unique within a program.
     stateCount :: Int 
+  , stateFile :: Maybe String
 }
 
 -- | The empty parser state, with the ID initialized to 0
 parserStateEmpty :: ParserState
 parserStateEmpty = ParserState {
     stateCount  = 0
+  , stateFile = Nothing
 }
 
 -- | Get an RDF URI and increment the internal counter
@@ -38,4 +40,4 @@ getId :: Parser DR.Node
 getId = do
   s <- getState
   modifyState (\s' -> s' {stateCount = (stateCount s') + 1})
-  return $ M3.idUri (stateCount s)
+  return $ M3.idUri (stateFile s) (stateCount s)

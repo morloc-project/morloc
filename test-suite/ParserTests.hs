@@ -6,28 +6,30 @@ import qualified Data.RDF as DR
 import qualified Morloc.Triple as M3
 import qualified Morloc.Parser as MP
 
+uri :: Int -> DR.Node
+uri = M3.idUri Nothing
+
 rmId :: [Int] -> [DR.Triple] -> [DR.Triple]
 rmId is ts = filter (rmId' is) ts
   where
     rmId' :: [Int] -> DR.Triple -> Bool 
-    rmId' is' (DR.Triple s _ _) = all (\x -> (M3.idUri x) /= s) is'
+    rmId' is' (DR.Triple s _ _) = all (\x -> uri x /= s) is'
 
 testRdfCodeWith :: ([DR.Triple] -> [DR.Triple]) -> String -> [DR.Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
   (Right ts') -> it s $ do shouldBe (DR.uordered ts) (DR.uordered ts')
   (Left err) -> error (unlines ["Failure in:", s, ">>>" ++ show err])
   where
-    run' f' s' = fmap (mapTriples f') (MP.morlocScript (s' ++ ";"))
+    run' f' s' = fmap (mapTriples f') (MP.parseShallow Nothing (s' ++ ";"))
     mapTriples f' rdf = f' (DR.triplesOf rdf)
-
 
 testRdfCode :: String -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
 -- triple making convenience functions
-iuu s r o = M3.uss (M3.idUri s) r o 
-iui s r o = M3.usu (M3.idUri s) r (M3.idUri o)
-iut s r t o = M3.ust (M3.idUri s) r t o
+iuu s r o = M3.uss (uri s) r o 
+iui s r o = M3.usu (uri s) r (uri o)
+iut s r t o = M3.ust (uri s) r t o
 
 testParser :: Spec
 testParser = parallel $ do
@@ -60,7 +62,7 @@ testParser = parallel $ do
     [ iuu 0 "rdf:type" "morloc:script"
     , iui 1 "rdf:_0" 0
     , iuu 1 "rdf:type" "morloc:import"
-    , iut 1 "morloc:name" "morloc:string" "bob.foo"
+    , iut 1 "morloc:name" "morloc:string" "bob/foo.loc"
     , iut 1 "morloc:namespace" "morloc:string" "foo"
     ]
 

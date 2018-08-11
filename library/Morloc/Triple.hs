@@ -65,8 +65,9 @@ adopt sbj objs =
 showTopRDF :: TopRDF -> String
 showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
 
-idUri :: Int -> DR.Node
-idUri = DR.UNode . DT.pack . (++) "mid:" . show
+idUri :: Maybe String -> Int -> DR.Node
+idUri Nothing  i = DR.UNode . DT.pack $ "mid:" ++ show i
+idUri (Just s) i = DR.UNode . DT.pack $ "mid_" ++ s ++ ":" ++ show i
 
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i

@@ -36,6 +36,7 @@ module Morloc.Walker
   , getType
   , getConstraints
   , getSources
+  , getImportedFiles
   , getGroupedSources
   , getDataDeclarations
   , getDataDeclarationByName
@@ -223,6 +224,12 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
       of
         ([name'], [alias']) -> [(name', alias')]
         _ -> []
+
+getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
+getImportedFiles rdf
+  =   up rdf (p "rdf:type") (p "morloc:import")
+  >>= down rdf (p "morloc:name")
+  >>= valueOf
 
 -- x = (\(Right z) -> z) $ morlocScript "export foo"
 exports :: DR.Rdf a => DR.RDF a -> [DT.Text]

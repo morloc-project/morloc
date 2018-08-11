@@ -9,25 +9,51 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Parser (morlocScript) where
+module Morloc.Parser (parse, parseShallow) where
 
-import Text.Parsec hiding (State)
+import Text.Parsec hiding (parse, State)
 import qualified Data.RDF as DR
 import qualified Text.Parsec.Expr as TPE
+import qualified Control.Monad as CM
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
+import qualified Data.Text as DT
 
 import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
 import qualified Morloc.Triple as M3
 import qualified Morloc.Lexer as Tok
 
+import qualified Morloc.Walker as MW
+
+parse :: Maybe String -> String -> IO (ME.ThrowsError M3.RDF)
+parse srcfile code = case (parseShallow srcfile code) of
+  (Right rdf) -> joinRDF rdf (parseImports rdf)
+  err         -> return err
+
+joinRDF :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)] -> IO (ME.ThrowsError M3.RDF)
+joinRDF rdf xs
+  = (fmap . fmap)                      -- raise to IO (ME.ThrowsError a)
+      (foldl M3.rdfAppend rdf)         -- ([M3.RDF] -> M3.RDF)
+      ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [M3.RDF])
+
+parseImports :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)]
+parseImports rdf = map morlocScriptFromFile (map DT.unpack (MW.getImportedFiles rdf))
+
+morlocScriptFromFile :: String -> IO (ME.ThrowsError M3.RDF)
+morlocScriptFromFile s = CM.join . fmap (parse (Just s)) $ readFile s
+
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocScript :: String -> ME.ThrowsError M3.RDF
-morlocScript s =
-  case runParser contents MS.parserStateEmpty "<stdin>" s of
+parseShallow :: Maybe String -> String -> ME.ThrowsError M3.RDF
+parseShallow srcfile code =
+  case runParser contents pstate input' code of
     Left err  -> CME.throwError $ ME.SyntaxError err
     Right (M3.TopRDF _ val) -> return val
+  where
+    pstate = MS.ParserState { MS.stateCount = 0, MS.stateFile = srcfile}
+    input' = case srcfile of
+      Just s  -> s
+      Nothing -> "<stdin>"
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
@@ -119,7 +145,7 @@ simpleImport = do
   return $ M3.makeTopRDF i (
       [
         (M3.uss i "rdf:type" "morloc:import")
-      , (M3.ust i "morloc:name" "morloc:string" (DL.intercalate "." path))
+      , (M3.ust i "morloc:name" "morloc:string" ((DL.intercalate "/" path) ++ ".loc"))
       ] ++ maybe [] (\q -> [M3.ust i "morloc:namespace" "morloc:string" q]) qual
     )
 
