@@ -2,12 +2,14 @@ export ceiling
 export rand_uniform
 export sum
 export transpose
+export nrow
 
 source "R" (
     "runif" as rand_uniform
   , "sum"
   , "ceiling"
   , "t" as transpose
+  , "nrow"
 );
 
 import "r-base";
@@ -27,6 +29,9 @@ ceiling :: [Num] -> [Int];
 
 transpose :: Matrix a -> Matrix a;
 transpose R :: Matrix -> Matrix;
+
+nrow :: Table -> Int;
+nrow R :: DataFrame -> Numeric;
 
 # A simple wrapper specializing the imported rand_uniform function
 rand :: Int -> [Num];
