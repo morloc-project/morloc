@@ -162,7 +162,7 @@ rCodeGenerator = CodeGenerator {
       , "  } else {"
       , "    x"
       , "  }"
-      , "  cat(result, \"\\n\")"
+      , "  cat(packGeneric(result))" -- FIXME: switch to the right on
       , "} else {"
       , "  stop(\"Could not find function '\", args[[1]], \"'\")"
       , "}"

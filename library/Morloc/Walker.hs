@@ -102,6 +102,7 @@ idOf :: DR.Node -> [DT.Text]
 idOf (DR.UNode s) = [s]
 idOf _ = []
 
+
 -- Down :: Subject -> [Object]
 down :: DR.Rdf a
   => DR.RDF a
@@ -397,4 +398,3 @@ getGroupedSources rdf = map toNodes grouped'
     -- this will create an invalid Triple, with a subject that is an LNode
     reverseTriple :: DR.Triple -> DR.Triple
     reverseTriple (DR.Triple s p o) = DR.Triple o p s
-

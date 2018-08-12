@@ -1,11 +1,13 @@
 export ceiling
 export rand_uniform
 export sum
+export transpose
 
 source "R" (
     "runif" as rand_uniform
   , "sum"
   , "ceiling"
+  , "t" as transpose
 );
 
 import "r-base";
@@ -22,6 +24,9 @@ rand_uniform R :: Numeric, Numeric, Numeric -> Numeric;
 
 # type signatures for ceiling (NOTE: adding constraints is optional)
 ceiling :: [Num] -> [Int];
+
+transpose :: Matrix a -> Matrix a;
+transpose R :: Matrix -> Matrix;
 
 # A simple wrapper specializing the imported rand_uniform function
 rand :: Int -> [Num];
