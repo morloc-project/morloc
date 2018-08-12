@@ -45,7 +45,7 @@ module Morloc.Walker
   , getCalls
   , getScope
   -- * serialization handling
-  , getGenericUnpack
+  , getUnpack
   -- ** Imports and Exports;
   , sourceExports
   , getImports
@@ -337,11 +337,12 @@ getScope rdf n = getScope' rdf n
       | length (rhsOf rdf' n') == 1 = rhsOf rdf' n' 
       | otherwise = parent rdf' n' >>= has rdf' (p "rdf:type") (v Nothing "morloc:call")
 
-getGenericUnpack :: DR.Rdf a
+getUnpack :: DR.Rdf a
   => DR.RDF a
   -> DT.Text   -- ^ foreign language
+  -> DR.Node   -- ^ top-level type to match (no recursion into parameters, yet)
   -> [DT.Text] -- ^ function name
-getGenericUnpack rdf lang'
+getUnpack rdf lang' form'
   =   up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") lang')
   >>= hasThese rdf  (\r' x
       ->  return x
@@ -352,7 +353,7 @@ getGenericUnpack rdf lang'
       ->  return x
       >>= rhs rdf
       >>= down r' (p "morloc:output")
-      >>= has r' (p "rdf:type") (v (Just "morloc:atomicGeneric") "a")) -- FIXME: name shouldn't matter
+      >>= has r' (p "rdf:type") form')
   >>= hasThese rdf  (\r' x
       ->  return x
       >>= rhs rdf
@@ -361,39 +362,6 @@ getGenericUnpack rdf lang'
   >>= lhs rdf
   >>= down rdf (p "rdf:type")
   >>= valueOf
-
--- -- This is reaching an insane level of complexity, where I really should be using SPARQL
--- getFunction :: DR.Rdf a
---   => DR.RDF a
---   -> Maybe DT.Text   -- ^ function name
---   -> Maybe DT.Text   -- ^ function language
---   -> Maybe [DT.Text] -- ^ function properties
---   -> Maybe [DR.Node] -- ^ input types
---   -> Maybe DR.Node   -- ^ output type
---   -> Maybe [DR.Node] -- ^ constraints
---   -> [DR.Node]
--- getFunction rdf n' l' ps' is' o' cs' = MU.initChain
---   []
---   [ (functionByName, Nothing               ) -- nothing to filter yet
---   , (functionByLang, fmap winnowByLang l'  )
---   , (functionByProp, fmap winnowByProp ps' )
---   , (functionByInps, fmap winnowByInps is' )
---   , (functionByOutp, fmap winnowByOutp o'  )
---   , (functionByCons, fmap winnowByCons cs' )
---   ]
---   where
---     functionByName = undefined
---     functionByLang = undefined
---     functionByProp = undefined
---     functionByInps = undefined
---     functionByOutp = undefined
---     functionByCons = undefined
---
---     winnowByLang x  = undefined
---     winnowByProp xs = undefined
---     winnowByInps xs = undefined
---     winnowByOutp x  = undefined
---     winnowByCons xs = undefined
 
 rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
 rhsOf rdf obj = up rdf (p "morloc:rhs") obj

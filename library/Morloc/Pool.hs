@@ -112,23 +112,29 @@ seekCasters rdf lang' func' = case (
     , getTypeDeclaration rdf func' lang'
   ) of
     -- seek a special caster for each argument
-    ([generalForm], [specialForm]) ->
-      map (seekCaster rdf lang') (elements rdf specialForm)
+    ([_], [specialForm]) ->
+      map (seekCaster rdf lang') (elements rdf specialForm >>= down rdf (o "rdf:type"))
     -- seek a generic caster
     ([generalForm], []) -> case elements rdf generalForm of
       types -> take (length types) (repeat (seekGenericCaster rdf lang'))
     ([], _) -> error ("Cast failure: No general type found for '" ++ DT.unpack func' ++ "'")
+    _ -> error "Ambiguous types"
 
 -- | seek `<func> <lang> :: unpack => JSON -> <type>`
 seekCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DR.Node -> DT.Text
-seekCaster rdf lang' form' = undefined
+seekCaster rdf lang' form' = case getUnpack rdf lang' form' of
+  [f] -> f
+  [] -> error ("No unpacker found for " ++ DT.unpack lang' ++ ":(" ++ show form' ++ ")")
+  _ -> error ("Ambiguous unpacker for " ++ DT.unpack lang' ++ ":(" ++ show form' ++ ")")
 
 -- | seek `<func'> <lang'> :: unpack => JSON -> a`
 seekGenericCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text
-seekGenericCaster rdf lang' = case getGenericUnpack rdf lang' of
+seekGenericCaster rdf lang' = case getUnpack rdf lang' to of
   [f] -> f
   [] -> error ("No generic unpacker found for '" ++ DT.unpack lang' ++ "'")
   _ -> error ("Ambiguous generic unpacker for '" ++ DT.unpack lang' ++ "'")
+  where
+    to = v (Just "morloc:atomicGeneric") "a"
 
 generateFunction :: DR.Rdf a
   => DR.RDF a
