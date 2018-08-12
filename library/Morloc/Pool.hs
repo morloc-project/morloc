@@ -125,7 +125,10 @@ seekCaster rdf lang' form' = undefined
 
 -- | seek `<func'> <lang'> :: unpack => JSON -> a`
 seekGenericCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text
-seekGenericCaster rdf lang' = "unpackGeneric"
+seekGenericCaster rdf lang' = case getGenericUnpack rdf lang' of
+  [f] -> f
+  [] -> error ("No generic unpacker found for '" ++ DT.unpack lang' ++ "'")
+  _ -> error ("Ambiguous generic unpacker for '" ++ DT.unpack lang' ++ "'")
 
 generateFunction :: DR.Rdf a
   => DR.RDF a

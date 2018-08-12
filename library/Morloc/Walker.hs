@@ -26,6 +26,7 @@ module Morloc.Walker
   , rdftype
   , value
   , valueOf
+  , typeOf
   , idOf
   -- * Node builder convenience functions
   , p
@@ -43,6 +44,8 @@ module Morloc.Walker
   , getTypeDeclaration
   , getCalls
   , getScope
+  -- * serialization handling
+  , getGenericUnpack
   -- ** Imports and Exports;
   , sourceExports
   , getImports
@@ -333,6 +336,64 @@ getScope rdf n = getScope' rdf n
       | (rdftype rdf' n' >>= typeOf ) == ["morloc:typeDeclaration"] = [n']
       | length (rhsOf rdf' n') == 1 = rhsOf rdf' n' 
       | otherwise = parent rdf' n' >>= has rdf' (p "rdf:type") (v Nothing "morloc:call")
+
+getGenericUnpack :: DR.Rdf a
+  => DR.RDF a
+  -> DT.Text   -- ^ foreign language
+  -> [DT.Text] -- ^ function name
+getGenericUnpack rdf lang'
+  =   up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") lang')
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= down r' (p "morloc:property")
+      >>= has r' (p "rdf:type") (v (Just "morloc:name") "unpacks"))
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= down r' (p "morloc:output")
+      >>= has r' (p "rdf:type") (v (Just "morloc:atomicGeneric") "a")) -- FIXME: name shouldn't matter
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= up r' (p "rdf:_0")
+      >>= has r' (p "rdf:type") (v (Just "morloc:atomicType") "JSON"))
+  >>= lhs rdf
+  >>= down rdf (p "rdf:type")
+  >>= valueOf
+
+-- -- This is reaching an insane level of complexity, where I really should be using SPARQL
+-- getFunction :: DR.Rdf a
+--   => DR.RDF a
+--   -> Maybe DT.Text   -- ^ function name
+--   -> Maybe DT.Text   -- ^ function language
+--   -> Maybe [DT.Text] -- ^ function properties
+--   -> Maybe [DR.Node] -- ^ input types
+--   -> Maybe DR.Node   -- ^ output type
+--   -> Maybe [DR.Node] -- ^ constraints
+--   -> [DR.Node]
+-- getFunction rdf n' l' ps' is' o' cs' = MU.initChain
+--   []
+--   [ (functionByName, Nothing               ) -- nothing to filter yet
+--   , (functionByLang, fmap winnowByLang l'  )
+--   , (functionByProp, fmap winnowByProp ps' )
+--   , (functionByInps, fmap winnowByInps is' )
+--   , (functionByOutp, fmap winnowByOutp o'  )
+--   , (functionByCons, fmap winnowByCons cs' )
+--   ]
+--   where
+--     functionByName = undefined
+--     functionByLang = undefined
+--     functionByProp = undefined
+--     functionByInps = undefined
+--     functionByOutp = undefined
+--     functionByCons = undefined
+--
+--     winnowByLang x  = undefined
+--     winnowByProp xs = undefined
+--     winnowByInps xs = undefined
+--     winnowByOutp x  = undefined
+--     winnowByCons xs = undefined
 
 rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
 rhsOf rdf obj = up rdf (p "morloc:rhs") obj
