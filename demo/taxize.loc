@@ -1,0 +1,36 @@
+source "R" from "demo.R" (
+    "taxid2name"
+  , "name2taxid"
+  , "classification"
+  , "children"
+  , "downstream"
+  , "taxid2rank"
+)
+
+Taxid :: i:Integer where {i >= 0}
+
+taxid2name :: [Taxid] -> [String]
+taxid2name R :: Integer -> Character
+
+name2taxid :: [String] -> [Taxid]
+name2taxid R :: Character -> Integer
+
+classification :: Taxid -> Table {
+    name :: String,
+    rank :: String,
+    id :: Taxid
+}
+classification R :: AtomicInteger -> DataFrame
+
+children :: Taxid -> [Taxid]
+children R :: AtomicInteger -> Integer
+
+downstream :: Taxid -> [Taxid]
+downstream R :: AtomicInteger -> Integer
+
+taxid2rank :: Taxid -> Table {
+    childtaxa_id :: Taxid,
+    childtaxa_name :: String,
+    childtaxa_rank :: String
+}
+taxid2tank R :: AtomicInteger -> DataFrame
