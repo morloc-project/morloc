@@ -17,6 +17,10 @@ source "R" from "demo.R" (
 # wrap :: a -> f a
 # unwrap :: f a -> a
 
+# triple NcbiTaxId property Show;
+
+show :: Show => NcbiTaxId -> String 
+
 interface (NcbiTaxon a) where {
     lineage    :: x:a -> ys:[a] where {x == ys[1]};
     children   :: a -> [a];

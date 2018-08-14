@@ -29,3 +29,39 @@ WHERE {
     ?import <morloc:name> ?file
     FILTER (regex(str(?file), ".loc", "i"))
 }
+
+
+# <function> <lang> :: packs => <from> -> JSON
+SELECT ?lang ?function_name ?morloc_name ?from
+WHERE {
+  ?type <rdf:type> ?lang ;
+        <morloc:lhs> ?type_lhs ;
+        <morloc:rhs> ?type_rhs .
+
+  ?type_rhs <rdf:type> <morloc:functionType> ;
+      <morloc:property> ?property .
+
+  ?property <rdf:type> "packs"^^<morloc:name> .
+
+  ?input <rdf:_0> ?type_rhs ;
+         <rdf:type> ?from .
+
+  ?type_rhs <morloc:output> ?output .
+  
+  ?output <rdf:type> "JSON"^^<morloc:atomicType> .
+
+  # The morloc name of the function
+  ?type_lhs <rdf:type> ?morloc_name .
+
+  # If the function was sourced, then the morloc name may be an alias for the
+  # real name. So here find the real name.
+  OPTIONAL
+  {
+    ?source <rdf:type> <morloc:source> ;
+            <morloc:lang> ?lang ;
+            <morloc:import> ?import .
+
+    ?import <morloc:name>  ?function_name
+            <morloc:alias> ?morloc_name
+  }
+}
