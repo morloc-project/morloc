@@ -30,8 +30,10 @@ import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 
 prefixMap :: DR.PrefixMappings
-prefixMap = DR.PrefixMappings $
-  DMS.singleton "morloc" "http://www.morloc.io/ontology/000/" 
+prefixMap = DR.PrefixMappings $ DMS.fromList
+  [("morloc", "http://www.morloc.io/ontology/000/"),
+   ("mid", "http://www.morloc.io/XXX/mid/")
+  ]
 
 type RDF = DR.RDF DR.TList
 
@@ -67,7 +69,7 @@ showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
 
 idUri :: Maybe String -> Int -> DR.Node
 idUri Nothing  i = DR.UNode . DT.pack $ "mid:" ++ show i
-idUri (Just s) i = DR.UNode . DT.pack $ "mid_" ++ s ++ ":" ++ show i
+idUri (Just s) i = DR.UNode . DT.pack $ "mid:" ++ s ++ "_" ++ show i
 
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i
