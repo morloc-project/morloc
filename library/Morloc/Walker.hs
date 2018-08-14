@@ -82,7 +82,7 @@ o :: DT.Text -> DR.Object
 o s = DR.UNode s
 
 v :: Maybe DT.Text -> DT.Text -> DR.Object
-v (Just t) s = DR.LNode (DR.TypedL t s)
+v (Just t) s = DR.LNode (DR.TypedL s t)
 v Nothing  s = DR.LNode (DR.PlainL s)
 
 -- Operations
@@ -90,12 +90,12 @@ v Nothing  s = DR.LNode (DR.PlainL s)
 -- End :: [Node] -> a
 
 valueOf :: DR.Node -> [DT.Text]
-valueOf (DR.LNode (DR.TypedL _ s)) = [s]
+valueOf (DR.LNode (DR.TypedL s _)) = [s]
 valueOf (DR.LNode (DR.PlainL s)) = [s]
 valueOf _ = []
 
 typeOf :: DR.Node -> [DT.Text]
-typeOf (DR.LNode (DR.TypedL s _)) = [s]
+typeOf (DR.LNode (DR.TypedL _ s)) = [s]
 typeOf _ = []
 
 idOf :: DR.Node -> [DT.Text]

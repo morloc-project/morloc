@@ -88,4 +88,4 @@ ust :: DR.Node -> String -> String -> String -> DR.Triple
 ust s r t o = DR.triple
   s
   (DR.UNode (DT.pack r))
-  (DR.LNode (DR.TypedL (DT.pack t) (DT.pack o)))
+  (DR.LNode (DR.TypedL (DT.pack o) (DT.pack t)))

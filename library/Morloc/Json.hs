@@ -31,10 +31,10 @@ import Morloc.Operators
 mdata2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
 mdata2aeson rdf x = case MW.down rdf (MW.p "rdf:type") x of
   [] -> error "mdata2aeson error: the given node does not represent a type"
-  [DR.LNode (DR.TypedL "morloc:integer" s)] -> toScientific s
-  [DR.LNode (DR.TypedL "morloc:number"  s)] -> toScientific s
-  [DR.LNode (DR.TypedL "morloc:string"  s)] -> DA.String s
-  [DR.LNode (DR.TypedL "morloc:boolean" s)] -> toBool s
+  [DR.LNode (DR.TypedL s "morloc:integer")] -> toScientific s
+  [DR.LNode (DR.TypedL s "morloc:number" )] -> toScientific s
+  [DR.LNode (DR.TypedL s "morloc:string" )] -> DA.String s
+  [DR.LNode (DR.TypedL s "morloc:boolean")] -> toBool s
   [DR.UNode "morloc:list"]   -> toArray  "List"
   [DR.UNode "morloc:tuple"]  -> toArray  "Tuple"
   [DR.UNode "morloc:record"] -> toObject "Record"
@@ -79,8 +79,8 @@ typeDeclaration2aeson rdf x =
 mtype2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
 mtype2aeson rdf x = case MW.down rdf (MW.p "rdf:type") x of
   [DR.UNode "morloc:functionType"] -> toArray (DT.pack "Function")
-  [DR.LNode (DR.TypedL "morloc:parameterizedType" s)] -> toArray s
-  [DR.LNode (DR.TypedL "morloc:atomicType" s)] -> DA.String s
+  [DR.LNode (DR.TypedL s "morloc:parameterizedType")] -> toArray s
+  [DR.LNode (DR.TypedL s "morloc:atomicType")] -> DA.String s
   _ -> error "Cannot parse this type"
   where
     toArray typename = DA.Object $
