@@ -1,0 +1,31 @@
+# prefixes
+PREFIX morloc: <http://www.morloc.io/ontology/000>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+
+# find the names of all types
+SELECT ?typename
+WHERE {
+  ?s <rdf:type> "Morloc"^^<morloc:typeDeclaration> .
+  ?s <morloc:lhs> ?lhs_id .
+  ?lhs_id <rdf:type> ?typename
+}
+
+# find all predicates associated with a specific type declaration
+SELECT ?p
+WHERE {
+  ?s <rdf:type> "Morloc"^^<morloc:typeDeclaration> .
+  ?s <morloc:lhs> ?lhs_id
+  ?lhs_id <rdf:type> "rand_uniform"^^<morloc:name>
+  ?s ?p ?o .
+}
+
+# find imports with the ".loc" extension
+# TODO: be strict with strings, if it is a string, make the type "xsd:string".
+# The `regex` function assumes the input is a of this type 
+SELECT ?file
+WHERE {
+    ?import <rdf:type> <morloc:import>
+    ?import <morloc:name> ?file
+    FILTER (regex(str(?file), ".loc", "i"))
+}
