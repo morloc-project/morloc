@@ -17,6 +17,7 @@ module Morloc.Triple (
   , uss
   , usu
   , ust
+  , usp
   , idUri
   , rdfId
   , adoptAs
@@ -85,7 +86,11 @@ usu s r o = DR.triple s (DR.UNode (DT.pack r)) o
 
 -- * typed object
 ust :: DR.Node -> String -> String -> String -> DR.Triple
-ust s r t o = DR.triple
+ust s r o t = DR.triple
   s
   (DR.UNode (DT.pack r))
   (DR.LNode (DR.TypedL (DT.pack o) (DT.pack t)))
+
+-- * plain object
+usp :: DR.Node -> String -> String -> DR.Triple
+usp s r o = DR.triple s (DR.UNode (DT.pack r)) (DR.LNode (DR.PlainL (DT.pack o)))

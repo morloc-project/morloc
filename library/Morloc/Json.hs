@@ -32,7 +32,7 @@ mdata2aeson :: DR.Rdf a => DR.RDF a -> DR.Node -> DA.Value
 mdata2aeson rdf x = case MW.down rdf (MW.p "rdf:type") x of
   [] -> error "mdata2aeson error: the given node does not represent a type"
   [DR.LNode (DR.TypedL s "morloc:integer")] -> toScientific s
-  [DR.LNode (DR.TypedL s "morloc:number" )] -> toScientific s
+  [DR.LNode (DR.TypedL s "morloc:decimal" )] -> toScientific s
   [DR.LNode (DR.TypedL s "morloc:string" )] -> DA.String s
   [DR.LNode (DR.TypedL s "morloc:boolean")] -> toBool s
   [DR.UNode "morloc:list"]   -> toArray  "List"

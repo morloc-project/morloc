@@ -65,3 +65,12 @@ WHERE {
             <morloc:alias> ?morloc_name
   }
 }
+
+CONSTRUCT (?datadec <morloc:type> ?typedec)
+WHERE {
+    ?datadec <rdf:type> <morloc:dataDeclaration> 
+    ?datadec <morloc:lhs> ?lhs
+    ?lhs <rdf:type> ?dataname
+
+    ?type <rdf:type> <
+}

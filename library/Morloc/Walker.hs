@@ -270,7 +270,7 @@ getImportByName rdf s
     (\r' x -> DR.query r'
       (Just x)
       (Just $ p "morloc:alias")
-      (Just $ v (Just "morloc:string") s))
+      (Just $ v Nothing s))
 
 importLang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importLang rdf n
