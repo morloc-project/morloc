@@ -8,4 +8,4 @@ main :: IO ()
 main = do
   t1 <- TTH.testSpec "Parser: Morloc script to RDF" testParser
   -- t2 <- TTH.testSpec "Walker: RDF graph operations" testWalker
-  TT.defaultMain $ TT.testGroup "Unit Tests" [t1, t2]
+  TT.defaultMain $ TT.testGroup "Unit Tests" [t1] -- [t1, t2]

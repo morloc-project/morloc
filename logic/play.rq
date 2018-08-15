@@ -1,6 +1,7 @@
 # prefixes
 PREFIX morloc: <http://www.morloc.io/ontology/000>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 
 
 # find the names of all types
@@ -61,16 +62,49 @@ WHERE {
             <morloc:lang> ?lang ;
             <morloc:import> ?import .
 
-    ?import <morloc:name>  ?function_name
-            <morloc:alias> ?morloc_name
+    ?import <morloc:name>  ?function_name ;
+            <morloc:alias> ?morloc_name .
   }
 }
 
-CONSTRUCT (?datadec <morloc:type> ?typedec)
+# is this is Morloc script?
+ASK
 WHERE {
-    ?datadec <rdf:type> <morloc:dataDeclaration> 
-    ?datadec <morloc:lhs> ?lhs
-    ?lhs <rdf:type> ?dataname
+    ?source <rdf:type> <morloc:script> ;
+}
 
-    ?type <rdf:type> <
+# get info on all exported functions
+SELECT ?morloc_name ?foreign_name 
+WHERE {
+
+}
+
+# Find all triples where types are not URIs
+CONSTRUCT {
+    ?s ?p ?o
+}
+WHERE {
+    ?s <rdf:type> ?o .
+    FILTER(!(isURI(?o)))
+}
+
+# Find all subjects/objects where object is not a URI
+SELECT ?s ?o
+WHERE {
+    ?s <rdf:type> ?o .
+    FILTER(!(isURI(?o)))
+}
+
+# Assert the object of any `rdf:type` predicate is a URI 
+# This is a check of the Morloc implementation, not user input
+ASK
+WHERE {
+    ?s <rdf:type> ?o .
+    FILTER(!(isURI(?o)))
+}
+
+ASK
+WHERE {
+    ?s <rdf:lhs> ?o
+    FILTER((isURI ?s) && (!isURI ?o))
 }

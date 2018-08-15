@@ -39,7 +39,7 @@ testParser = parallel $ do
     (rmId [0])
     "42"
     [ iui 1 "rdf:_0" 0
-    , iup 1 "rdf:type" "morloc:integer"
+    , iuu 1 "rdf:type" "morloc:integer"
     , iut 1 "rdf:value" "xsd:integer" "42"
     ]
 
@@ -47,7 +47,7 @@ testParser = parallel $ do
     (rmId [0])
     "-42"
     [ iui 1 "rdf:_0" 0
-    , iup 1 "rdf:type" "morloc:integer"
+    , iuu 1 "rdf:type" "morloc:integer"
     , iut 1 "rdf:value" "xsd:integer" "-42"
     ]
 
@@ -55,7 +55,7 @@ testParser = parallel $ do
     (rmId [0])
     "4.2"
     [ iui 1 "rdf:_0" 0
-    , iup 1 "rdf:type" "morloc:number"
+    , iuu 1 "rdf:type" "morloc:number"
     , iut 1 "rdf:value" "xsd:decimal" "4.2"
     ]
 
@@ -63,7 +63,7 @@ testParser = parallel $ do
     (rmId [0])
     "True"
     [ iui 1 "rdf:_0" 0
-    , iup 1 "rdf:type" "morloc:boolean"
+    , iuu 1 "rdf:type" "morloc:boolean"
     , iut 1 "rdf:value" "xsd:boolean" "True"
     ]
 
@@ -73,10 +73,10 @@ testParser = parallel $ do
     [ iui 1 "rdf:_0" 0
     , iuu 1 "rdf:type" "morloc:list"
     , iui 2 "rdf:_0" 1
-    , iup 2 "rdf:type" "morloc:integer"
+    , iuu 2 "rdf:type" "morloc:integer"
     , iut 2 "rdf:value" "xsd:integer" "42"
     , iui 3 "rdf:_1" 1
-    , iup 3 "rdf:type" "morloc:integer"
+    , iuu 3 "rdf:type" "morloc:integer"
     , iut 3 "rdf:value" "xsd:integer" "99"
     ]
 
@@ -86,10 +86,10 @@ testParser = parallel $ do
     [ iui 1 "rdf:_0" 0
     , iuu 1 "rdf:type" "morloc:list"
     , iui 2 "rdf:_0" 1
-    , iup 2 "rdf:type" "morloc:integer"
+    , iuu 2 "rdf:type" "morloc:integer"
     , iut 2 "rdf:value" "xsd:integer" "42"
     , iui 3 "rdf:_1" 1
-    , iup 3 "rdf:type" "morloc:string"
+    , iuu 3 "rdf:type" "morloc:string"
     , iut 3 "rdf:value" "xsd:string" "foo"
     ]
 
@@ -100,15 +100,15 @@ testParser = parallel $ do
     , iuu 1 "rdf:type" "morloc:record"
     , iui 2 "rdf:_0" 1 
     , iuu 2 "rdf:type" "morloc:recordEntry"
-    , iut 2 "morloc:lhs" "morloc:name" "job"
+    , iup 2 "morloc:lhs" "job"
     , iui 2 "morloc:rhs" 3
-    , iup 3 "rdf:type" "morloc:string"
+    , iuu 3 "rdf:type" "morloc:string"
     , iut 3 "rdf:value" "xsd:string" "poopsmith"
     , iui 4 "rdf:_1" 1
     , iuu 4 "rdf:type" "morloc:recordEntry"
-    , iut 4 "morloc:lhs" "morloc:name" "age"
+    , iup 4 "morloc:lhs" "age"
     , iui 4 "morloc:rhs" 5
-    , iup 5 "rdf:type" "morloc:integer"
+    , iuu 5 "rdf:type" "morloc:integer"
     , iut 5 "rdf:value" "xsd:integer" "34"
     ]
 
