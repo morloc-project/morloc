@@ -173,8 +173,8 @@ dataDeclaration = do
   return $ M3.makeTopRDF i (
          [ M3.uss i "rdf:type" "morloc:dataDeclaration"
          , M3.usp i "morloc:lhs" lhs
-         , M3.usu i "morloc:rhs" (M3.rdfId rhs)
          ]
+      ++ M3.adoptAs "morloc:rhs" i [rhs]
       ++ M3.adopt i bndvars
     )
 
@@ -194,9 +194,9 @@ typeDeclaration = do
   return $ M3.makeTopRDF i (
          [ M3.uss i "rdf:type" "morloc:typeDeclaration"
          , M3.usp i "morloc:lhs" lhs
-         , M3.usu i "morloc:rhs" (M3.rdfId rhs)
          , M3.usp i "morloc:lang" lang
          ]
+      ++ M3.adoptAs "morloc:rhs" i [rhs]
       ++ M3.adoptAs "morloc:property" (M3.rdfId rhs) properties
       ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
     )
