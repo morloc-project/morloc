@@ -7,52 +7,52 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 # find the names of all types
 SELECT ?typename
 WHERE {
-  ?s <rdf:type> "Morloc"^^<morloc:typeDeclaration> .
-  ?s <morloc:lhs> ?lhs_id .
-  ?lhs_id <rdf:type> ?typename
+  ?s <rdf:type> <morloc:typeDeclaration> ;
+     <morloc:lang> "Morloc" ;
+     <morloc:lhs> ?typename .
 }
 
 # find all predicates associated with a specific type declaration
 SELECT ?p
 WHERE {
-  ?s <rdf:type> "Morloc"^^<morloc:typeDeclaration> .
-  ?s <morloc:lhs> ?lhs_id
-  ?lhs_id <rdf:type> "rand_uniform"^^<morloc:name>
+  ?s <rdf:type> <morloc:typeDeclaration> ;
+     <morloc:lhs> "rand_uniform" .
   ?s ?p ?o .
 }
 
 # find imports with the ".loc" extension
-# TODO: be strict with strings, if it is a string, make the type "xsd:string".
-# The `regex` function assumes the input is a of this type 
 SELECT ?file
 WHERE {
-    ?import <rdf:type> <morloc:import>
-    ?import <morloc:name> ?file
-    FILTER (regex(str(?file), ".loc", "i"))
+    ?import <rdf:type> <morloc:import> ;
+            <morloc:name> ?file .
+    FILTER (regex(?file, ".loc", "i"))
 }
 
-
+# Find all packers
 # <function> <lang> :: packs => <from> -> JSON
-SELECT ?lang ?function_name ?morloc_name ?from
+SELECT DISTINCT ?lang ?morloc_name ?function_name ?pack_type ?pack_value
 WHERE {
-  ?type <rdf:type> ?lang ;
-        <morloc:lhs> ?type_lhs ;
+  # find language-specific type declarations
+  ?type <rdf:type> <morloc:typeDeclaration> ;
+        <morloc:lang> ?lang ;
+        <morloc:lhs> ?morloc_name ;
         <morloc:rhs> ?type_rhs .
-
+  # that have the property "packs"
   ?type_rhs <rdf:type> <morloc:functionType> ;
-      <morloc:property> ?property .
+            <morloc:property> ?property .
+  # properties may by compound (e.g. when used to specify type constraints)
+  ?property <rdf:type> <morloc:name> ;
+            <rdf:value> "packs" .
 
-  ?property <rdf:type> "packs"^^<morloc:name> .
+  ?input <rdf:_0> ?type_rhs;
+         <rdf:type> ?pack_type .
 
-  ?input <rdf:_0> ?type_rhs ;
-         <rdf:type> ?from .
+  ?output <rdf:type> <morloc:atomicType> ;
+          <rdf:value> "JSON" .
 
-  ?type_rhs <morloc:output> ?output .
-  
-  ?output <rdf:type> "JSON"^^<morloc:atomicType> .
-
-  # The morloc name of the function
-  ?type_lhs <rdf:type> ?morloc_name .
+  OPTIONAL {
+    ?input <rdf:value> ?pack_value
+  }
 
   # If the function was sourced, then the morloc name may be an alias for the
   # real name. So here find the real name.
@@ -67,25 +67,45 @@ WHERE {
   }
 }
 
-# is this is Morloc script?
+# Link Morloc types to language-specific packer functions
+# SELECT ?minput ?linput ?element ?lang ?name
+CONSTRUCT { ?minput <morloc:packsInto> ?linput }
+WHERE {
+    # Morloc type declarations
+    ?mtypedec <rdf:type> <morloc:typeDeclaration> ;
+              <morloc:lang> "Morloc" ;
+              <morloc:lhs> ?name ;
+              <morloc:rhs> ?mrhs .
+    # Corresponding language-specific type declarations
+    ?ltypedec <rdf:type> <morloc:typeDeclaration> ;
+              <morloc:lang> ?lang ;
+              <morloc:lhs> ?name ;
+              <morloc:rhs> ?lrhs .
+    FILTER(?lang != "Morloc")
+    # get the language-specific input types
+    ?linput ?element ?lrhs .
+    # map the elements to Morloc types
+    ?minput ?element ?mrhs .
+    # Require the elements really represent elements (should be a better way)
+    FILTER(regex(str(?element), "_[0-9]+$", "i"))
+}
+
+# is this is morloc script?
 ASK
 WHERE {
     ?source <rdf:type> <morloc:script> ;
 }
 
-# get info on all exported functions
-SELECT ?morloc_name ?foreign_name 
-WHERE {
-
-}
-
-# Find all triples where types are not URIs
+# Link all function to their morloc types
 CONSTRUCT {
-    ?s ?p ?o
+    ?datadec <morloc:type> ?typedec
 }
 WHERE {
-    ?s <rdf:type> ?o .
-    FILTER(!(isURI(?o)))
+    ?typedec <rdf:type> <morloc:typeDeclaration> ;
+             <morloc:lhs> ?name ;
+             <morloc:lang> "Morloc" .
+    ?datadec <rdf:type> <morloc:dataDeclaration> ;
+             <morloc:lhs> ?name .
 }
 
 # Find all subjects/objects where object is not a URI
@@ -103,8 +123,35 @@ WHERE {
     FILTER(!(isURI(?o)))
 }
 
+# Find any bad assignments (where the lhs is not a literal)
 ASK
 WHERE {
-    ?s <rdf:lhs> ?o
-    FILTER((isURI ?s) && (!isURI ?o))
+  ?s <rdf:lhs> ?o
+  # find assignments
+  { ?s <rdf:type> <morloc:typeDeclaration> }
+  UNION
+  { ?s <rdf:type> <morloc:dataDeclaration> }
+  UNION
+  { ?s <rdf:type> <morloc:recordEntry> }
+  # remove triples where the lhs is not a literal
+  FILTER(!isLiteral (?o))
 }
+
+# find any cases where there is a lhs but no rhs, or vice versa
+SELECT ?s
+WHERE {
+  {
+    { ?s <morloc:lhs> ?lhs }
+    MINUS
+    { ?s <morloc:rhs> ?rhs }
+  }
+  UNION
+  {
+    { ?s <morloc:rhs> ?lhs }
+    MINUS
+    { ?s <morloc:lhs> ?rhs }
+  }
+}
+
+# # find cases
+# SELECT ?lang ?function ?langType ?morlocType
