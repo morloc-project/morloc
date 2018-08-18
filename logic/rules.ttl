@@ -1,0 +1,85 @@
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix morloc: <http://www.morloc.io/ontology/000/> .
+
+# Typeclass declarations
+
+morloc:TypeClass rdfs:type owl:Class . 
+morloc:Functor rdfs:subClassOf morloc:TypeClass . 
+
+# Type declarations
+
+morloc:Type                 rdf:type        owl:Class   .
+morloc:ParameterizedType    rdfs:subClassOf morloc:Type .
+morloc:ParameterizedGeneric rdfs:subClassOf morloc:Type .
+morloc:AtomicType           rdfs:subClassOf morloc:Type .
+morloc:AtomicGeneric        rdfs:subClassOf morloc:Type .
+
+morloc:Function rdfs:subClassOf morloc:Type .
+
+morloc:Constraint rdf:type owl:Class .
+
+morloc:hasConstraint rdfs:type owl:ObjectProperty ;
+                     rdfs:domain morloc:Function ;
+                     rdfs:range morloc:Constraint .
+
+morloc:Real rdfs:subClassOf morloc:AtomicType .
+morloc:Bool rdfs:subClassOf morloc:AtomicType .
+morloc:Text rdfs:subClassOf morloc:AtomicType .
+
+# Records and tuples are neither functors nor collections
+morloc:Record rdfs:subClassOf morloc:ParameterizedType  .
+morloc:Tuple  rdfs:subClassOf morloc:ParameterizedType .
+
+morloc:Collection rdfs:subClassOf morloc:ParameterizedType ; 
+                  morloc:property morloc:Functor .
+
+rdfs:Seq rdfs:subClassOf morloc:Collection .
+rdfs:Bag rdfs:subClassOf morloc:Collection .
+
+morloc:List rdfs:subClassOf rdfs:Seq .
+
+morloc:Script rdfs:subClassOf rdfs:Bag .
+
+morloc:Call rdfs:type owl:Class .
+
+morloc:Lhs owl:inversOf morloc:Rhs ;
+           owl:disjoinWith morloc:Rhs .
+
+morloc:keyOf rdf:type owl:FunctionalProperty .
+
+
+# --- specific example ---
+
+local:Foo rdfs:subClassOf morloc:Function
+
+  # , sss "morloc:call"                 "rdfs:subClassOf" "rdfs:Seq" -- arguments
+  # , sss "morloc:restricted_import"    "rdfs:subClassOf" "rdfs:Bag" -- imports
+  # , sss "morloc:import"               "rdfs:subClassOf" "rdfs:Bag" -- imports
+  # , sss "morloc:source"               "rdfs:subClassOf" "rdfs:Bag" -- imports
+  # , sss "morloc:functionType"         "rdfs:subClassOf" "rdfs:Seq" -- inputs
+  # -- primitives
+  # , sss "morloc:alias"         "rdf:type" "xsd:string"
+  # , sss "morloc:integer"       "rdf:type" "xsd:integer"
+  # , sss "morloc:key"           "rdf:type" "xsd:string"
+  # , sss "morloc:label"         "rdf:type" "xsd:string"
+  # , sss "morloc:lang"          "rdf:type" "xsd:string"
+  # , sss "morloc:name"          "rdf:type" "xsd:string"
+  # , sss "morloc:namespace"     "rdf:type" "xsd:string"
+  # -- generic value tags
+  # , sss "morloc:value"  "rdf:type" "rdf:value"
+  # , sss "morloc:output" "rdf:type" "rdf:value"
+  # , sss "morloc:lhs"    "rdf:type" "rdf:value"
+  # , sss "morloc:rhs"    "rdf:type" "rdf:value"
+  # -- -- things with a left and right hand side (binary operators)
+  # -- "morloc:binop"
+  # -- "morloc:composition"
+  # -- "morloc:dataDeclaration"
+  # -- "morloc:namedType"
+  # -- "morloc:recordEntry"
+  # -- "morloc:typeDeclaration"
+  # --
+  # -- -- unary operators
+  # -- "morloc:unaryOp"

@@ -42,7 +42,6 @@ library
                       Morloc.Nexus
                       Morloc.Operators
                       Morloc.Parser
-                      Morloc.RdfSchema
                       Morloc.State
                       Morloc.Triple
                       Morloc.Util
