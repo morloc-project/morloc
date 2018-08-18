@@ -7,9 +7,9 @@ PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 # find the names of all types
 SELECT ?typename
 WHERE {
-  ?s <rdf:type> <morloc:typeDeclaration> ;
-     <morloc:lang> "Morloc" ;
-     <morloc:lhs> ?typename .
+  ?s rdf:type morloc:typeDeclaration ;
+     morloc:lang "Morloc" ;
+     morloc:lhs ?typename .
 }
 
 # find all predicates associated with a specific type declaration

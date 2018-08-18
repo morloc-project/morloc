@@ -46,7 +46,7 @@ midPre = "http://www.morloc.io/XXX/mid/"
 rdfPre :: DT.Text
 rdfPre = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 
-xsdPrd :: DT.Text
+xsdPre :: DT.Text
 xsdPre = "http://www.w3.org/2001/XMLSchema#"
 
 prefixMap :: DR.PrefixMappings
@@ -84,7 +84,7 @@ adopt sbj objs =
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
     link :: DR.Node -> Int -> TopRDF -> DR.Triple
-    link sbj' index (TopRDF obj' _) = usu obj' (rdfPre .:. show index) sbj'
+    link sbj' index (TopRDF obj' _) = usu obj' ("rdf:" ++ show index) sbj'
 
 showTopRDF :: TopRDF -> String
 showTopRDF (TopRDF _ rdf) = DR.showGraph rdf
