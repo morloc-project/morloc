@@ -42,6 +42,7 @@ library
                       Morloc.Nexus
                       Morloc.Operators
                       Morloc.Parser
+                      Morloc.Query
                       Morloc.State
                       Morloc.Triple
                       Morloc.Util
@@ -51,6 +52,7 @@ library
                    parsec,
                    text,
                    rdf4h,
+                   hsparql,
                    aeson,
                    scientific,
                    containers,

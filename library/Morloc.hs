@@ -2,16 +2,24 @@ module Morloc (
     writeTurtle
   , writeTriple
   , writeProgram
+  , doit -- FIXME this is only a test
 ) where
 
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS
 import qualified Data.Text.IO as DTIO
+import qualified Database.HSparql.Connection as DHC
 
 import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
+import qualified Morloc.Query as MQ
+
+doit :: DHC.EndPoint -> IO ()
+doit ep = do
+  (Just result) <- DHC.selectQuery ep MQ.findallTypes
+  putStrLn . show $ result
 
 writeProgram :: String -> IO ()
 writeProgram s = fmap ((=<<) MG.generate) (MP.parse Nothing s) >>= writeProgram'
