@@ -9,6 +9,7 @@ import qualified Data.Text as DT
 import qualified Morloc.Triple as M3
 import qualified Morloc.Parser as MP
 import Morloc.Operators
+import Morloc.Util (show')
 
 uri :: Int -> DR.Node
 uri = M3.idUri Nothing
@@ -31,10 +32,12 @@ testRdfCode :: DT.Text -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
 -- triple making convenience functions
-iuu s r   o = M3.uss (uri s) r o 
-iui s r   o = M3.usu (uri s) r (uri o)
-iup s r   o = M3.usp (uri s) r o
-iut s r t o = M3.ust (uri s) r o t
+iuu i r o = DR.triple (M3.midPre .:. show' i) r o
+iui i r j = DR.triple (M3.midPre .:. show' i) r (M3.midPre .:. show' j)
+
+-- a little helper function for making plain nodes
+plain :: DT.Text -> DR.Node
+plain s = DR.LNode (DR.PlainL s)
 
 testParser :: Spec
 testParser = parallel $ do
@@ -42,78 +45,78 @@ testParser = parallel $ do
   testRdfCodeWith
     (rmId [0])
     "42"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:number"
-    , iut 1 "rdf:value" "xsd:decimal" "42.0"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 1 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "-42"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:number"
-    , iut 1 "rdf:value" "xsd:decimal" "-42.0"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 1 (M3.rdfPre .:. "value") ("-42.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "4.2"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:number"
-    , iut 1 "rdf:value" "xsd:decimal" "4.2"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 1 (M3.rdfPre .:. "value") ("4.2" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "True"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:boolean"
-    , iut 1 "rdf:value" "xsd:boolean" "True"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "boolean")
+    , iuu 1 (M3.rdfPre .:. "value") ("True" .^^. M3.xsdPre .:. "boolean")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,99]"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:list"
-    , iui 2 "rdf:_0" 1
-    , iuu 2 "rdf:type" "morloc:number"
-    , iut 2 "rdf:value" "xsd:decimal" "42.0"
-    , iui 3 "rdf:_1" 1
-    , iuu 3 "rdf:type" "morloc:number"
-    , iut 3 "rdf:value" "xsd:decimal" "99.0"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "list")
+    , iui 2 (M3.rdfPre .:. "_0") 1
+    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 2 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
+    , iui 3 (M3.rdfPre .:. "_1") 1
+    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 3 (M3.rdfPre .:. "value") ("99.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,\"foo\"]"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:list"
-    , iui 2 "rdf:_0" 1
-    , iuu 2 "rdf:type" "morloc:number"
-    , iut 2 "rdf:value" "xsd:decimal" "42.0"
-    , iui 3 "rdf:_1" 1
-    , iuu 3 "rdf:type" "morloc:string"
-    , iut 3 "rdf:value" "xsd:string" "foo"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "list")
+    , iui 2 (M3.rdfPre .:. "_0") 1
+    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 2 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
+    , iui 3 (M3.rdfPre .:. "_1") 1
+    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "string")
+    , iuu 3 (M3.rdfPre .:. "value") ("foo" .^^. M3.xsdPre .:. "string")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "{job = \"poopsmith\", age = 34}"
-    [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:record"
-    , iui 2 "rdf:_0" 1
-    , iuu 2 "rdf:type" "morloc:recordEntry"
-    , iup 2 "morloc:lhs" "job"
-    , iui 2 "morloc:rhs" 3
-    , iuu 3 "rdf:type" "morloc:string"
-    , iut 3 "rdf:value" "xsd:string" "poopsmith"
-    , iui 4 "rdf:_1" 1
-    , iuu 4 "rdf:type" "morloc:recordEntry"
-    , iup 4 "morloc:lhs" "age"
-    , iui 4 "morloc:rhs" 5
-    , iuu 5 "rdf:type" "morloc:number"
-    , iut 5 "rdf:value" "xsd:decimal" "34.0"
+    [ iui 1 (M3.rdfPre .:. "_0") 0
+    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "record")
+    , iui 2 (M3.rdfPre .:. "_0") 1
+    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "recordEntry")
+    , iuu 2 (M3.mlcPre .:. "lhs") (plain "job")
+    , iui 2 (M3.mlcPre .:. "rhs") 3
+    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "string")
+    , iuu 3 (M3.rdfPre .:. "value") ("poopsmith" .^^. M3.xsdPre .:. "string")
+    , iui 4 (M3.rdfPre .:. "_1") 1
+    , iuu 4 (M3.rdfPre .:. "type") (M3.mlcPre .:. "recordEntry")
+    , iuu 4 (M3.mlcPre .:. "lhs") (plain "age")
+    , iui 4 (M3.mlcPre .:. "rhs") 5
+    , iuu 5 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
+    , iuu 5 (M3.rdfPre .:. "value") ("34.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   -- testRdfCode
