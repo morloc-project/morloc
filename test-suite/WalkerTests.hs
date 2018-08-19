@@ -3,6 +3,7 @@
 module WalkerTests (testWalker) where
 
 import Test.Tasty.Hspec
+import qualified Data.Text as DT
 import qualified Data.RDF as DR
 import qualified Morloc.Walker as MW
 import qualified Morloc.Parser as MP
@@ -11,7 +12,7 @@ import Morloc.Operators ((|>>))
 
 
 testIt :: (Show a, Eq a) => String -> String -> (M3.RDF -> a) -> a -> Spec
-testIt desc code f exp' = case MP.parseShallow Nothing code of 
+testIt desc code f exp' = case MP.parseShallow Nothing (DT.pack code) of 
   (Right rdf) -> it desc $ do shouldBe (f rdf) exp'
   (Left err) -> error (unlines ["Failure:", ">>>" ++ show err])
 

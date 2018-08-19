@@ -85,7 +85,7 @@ adopt sbj objs =
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
     link :: DR.Node -> Int -> TopRDF -> DR.Triple
-    link sbj' index (TopRDF obj' _) = usu obj' ("rdf:" <> show' index) sbj'
+    link sbj' index (TopRDF obj' _) = usu obj' ("rdf:_" <> show' index) sbj'
 
 showTopRDF :: TopRDF -> DT.Text
 showTopRDF (TopRDF _ rdf) = DT.pack $ DR.showGraph rdf
