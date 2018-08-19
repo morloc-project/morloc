@@ -22,7 +22,11 @@ rmId is ts = filter (rmId' is) ts
 
 testRdfCodeWith :: ([DR.Triple] -> [DR.Triple]) -> DT.Text -> [DR.Triple] -> Spec 
 testRdfCodeWith f s ts = case (run' f s) of
-  (Right ts') -> it (DT.unpack s) $ do shouldBe (DR.uordered ts) (DR.uordered ts')
+  (Right ts') -> it (DT.unpack s) $
+    do
+      shouldBe
+        (map (DR.expandTriple M3.prefixMap) (DR.uordered ts))
+        (DR.uordered ts')
   (Left err) -> error (unlines ["Failure in:", DT.unpack s, ">>>" ++ show err])
   where
     run' f' s' = fmap (mapTriples f') (MP.parseShallow Nothing (s' <> ";"))
@@ -32,8 +36,9 @@ testRdfCode :: DT.Text -> [DR.Triple] -> Spec
 testRdfCode = testRdfCodeWith id
 
 -- triple making convenience functions
-iuu i r o = DR.triple (M3.midPre .:. show' i) r o
-iui i r j = DR.triple (M3.midPre .:. show' i) r (M3.midPre .:. show' j)
+isu i r o = DR.triple (M3.midPre .:. show' i) (DR.UNode r) o
+iss i r o = DR.triple (M3.midPre .:. show' i) (DR.UNode r) (DR.UNode o)
+isi i r j = DR.triple (M3.midPre .:. show' i) (DR.UNode r) (M3.midPre .:. show' j)
 
 -- a little helper function for making plain nodes
 plain :: DT.Text -> DR.Node
@@ -45,78 +50,78 @@ testParser = parallel $ do
   testRdfCodeWith
     (rmId [0])
     "42"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 1 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:number"
+    , isu 1 "rdf:value" ("42.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "-42"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 1 (M3.rdfPre .:. "value") ("-42.0" .^^. M3.xsdPre .:. "decimal")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:number"
+    , isu 1 "rdf:value" ("-42.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "4.2"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 1 (M3.rdfPre .:. "value") ("4.2" .^^. M3.xsdPre .:. "decimal")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:number"
+    , isu 1 "rdf:value" ("4.2" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "True"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "boolean")
-    , iuu 1 (M3.rdfPre .:. "value") ("True" .^^. M3.xsdPre .:. "boolean")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:boolean"
+    , isu 1 "rdf:value" ("True" .^^. M3.xsdPre .:. "boolean")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,99]"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "list")
-    , iui 2 (M3.rdfPre .:. "_0") 1
-    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 2 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
-    , iui 3 (M3.rdfPre .:. "_1") 1
-    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 3 (M3.rdfPre .:. "value") ("99.0" .^^. M3.xsdPre .:. "decimal")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:list"
+    , isi 2 "rdf:_0" 1
+    , iss 2 "rdf:type" "mlc:number"
+    , isu 2 "rdf:value" ("42.0" .^^. M3.xsdPre .:. "decimal")
+    , isi 3 "rdf:_1" 1
+    , iss 3 "rdf:type" "mlc:number"
+    , isu 3 "rdf:value" ("99.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "[42,\"foo\"]"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "list")
-    , iui 2 (M3.rdfPre .:. "_0") 1
-    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 2 (M3.rdfPre .:. "value") ("42.0" .^^. M3.xsdPre .:. "decimal")
-    , iui 3 (M3.rdfPre .:. "_1") 1
-    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "string")
-    , iuu 3 (M3.rdfPre .:. "value") ("foo" .^^. M3.xsdPre .:. "string")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:list"
+    , isi 2 "rdf:_0" 1
+    , iss 2 "rdf:type" "mlc:number"
+    , isu 2 "rdf:value" ("42.0" .^^. M3.xsdPre .:. "decimal")
+    , isi 3 "rdf:_1" 1
+    , iss 3 "rdf:type" "mlc:string"
+    , isu 3 "rdf:value" ("foo" .^^. M3.xsdPre .:. "string")
     ]
 
   testRdfCodeWith
     (rmId [0])
     "{job = \"poopsmith\", age = 34}"
-    [ iui 1 (M3.rdfPre .:. "_0") 0
-    , iuu 1 (M3.rdfPre .:. "type") (M3.mlcPre .:. "record")
-    , iui 2 (M3.rdfPre .:. "_0") 1
-    , iuu 2 (M3.rdfPre .:. "type") (M3.mlcPre .:. "recordEntry")
-    , iuu 2 (M3.mlcPre .:. "lhs") (plain "job")
-    , iui 2 (M3.mlcPre .:. "rhs") 3
-    , iuu 3 (M3.rdfPre .:. "type") (M3.mlcPre .:. "string")
-    , iuu 3 (M3.rdfPre .:. "value") ("poopsmith" .^^. M3.xsdPre .:. "string")
-    , iui 4 (M3.rdfPre .:. "_1") 1
-    , iuu 4 (M3.rdfPre .:. "type") (M3.mlcPre .:. "recordEntry")
-    , iuu 4 (M3.mlcPre .:. "lhs") (plain "age")
-    , iui 4 (M3.mlcPre .:. "rhs") 5
-    , iuu 5 (M3.rdfPre .:. "type") (M3.mlcPre .:. "number")
-    , iuu 5 (M3.rdfPre .:. "value") ("34.0" .^^. M3.xsdPre .:. "decimal")
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:record"
+    , isi 2 "rdf:_0" 1
+    , iss 2 "rdf:type" "mlc:recordEntry"
+    , isu 2 "mlc:lhs" (plain "job")
+    , isi 2 "mlc:rhs" 3
+    , iss 3 "rdf:type" "mlc:string"
+    , isu 3 "rdf:value" ("poopsmith" .^^. M3.xsdPre .:. "string")
+    , isi 4 "rdf:_1" 1
+    , iss 4 "rdf:type" "mlc:recordEntry"
+    , isu 4 "mlc:lhs" (plain "age")
+    , isi 4 "mlc:rhs" 5
+    , iss 5 "rdf:type" "mlc:number"
+    , isu 5 "rdf:value" ("34.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
   -- testRdfCode

@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.Triple (
     TopRDF(..)
   , RDF
+  , prefixMap
   , DR.Triple
   , makeTopRDF
   , idUri
