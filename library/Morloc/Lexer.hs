@@ -68,7 +68,7 @@ reserved w = (lexeme . try) (string w <* notFollowedBy alphaNumChar)
 name :: Parser DT.Text
 name = (lexeme . try) (p >>= check)
   where
-    p       = fmap DT.pack $ (:) <$> letterChar <*> many alphaNumChar
+    p       = fmap DT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
     check x = if elem x reservedWords
                 then failure Nothing DS.empty -- TODO: error message
                 else return x
@@ -77,23 +77,23 @@ op :: DT.Text -> Parser DT.Text
 op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
 parens :: Parser a -> Parser a
-parens = between (symbol "(") (symbol ")")
+parens p = lexeme $ between (symbol "(") (symbol ")") p
 
 brackets :: Parser a -> Parser a
-brackets = between (symbol "[") (symbol "]")
+brackets p = lexeme $ between (symbol "[") (symbol "]") p
 
 braces :: Parser a -> Parser a
-braces = between (symbol "{") (symbol "}")
+braces p = lexeme $ between (symbol "{") (symbol "}") p
 
 number :: Parser DS.Scientific
-number = L.signed sc L.scientific -- `empty` because no space is allowed
+number = lexeme $ L.signed sc L.scientific -- `empty` because no space is allowed
 
 comma :: Parser ()
 comma = symbol "," >> return ()
 
 -- | match a double-quoted literal string
 stringLiteral :: Parser DT.Text
-stringLiteral = fmap DT.pack $ char '"' >> manyTill L.charLiteral (char '"')
+stringLiteral = lexeme $ fmap DT.pack $ char '"' >> manyTill L.charLiteral (char '"')
 
 
 -- | match an optional tag that precedes some construction
