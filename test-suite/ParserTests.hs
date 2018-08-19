@@ -43,25 +43,25 @@ testParser = parallel $ do
     (rmId [0])
     "42"
     [ iui 1 "rdf:_0" 0
-    , iuu 1 "rdf:type" "morloc:integer"
-    , iut 1 "rdf:value" "xsd:integer" "42"
+    , iuu 1 "rdf:type" "morloc:number"
+    , iut 1 "rdf:value" "xsd:decimal" "42.0"
     ]
 
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "-42"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:integer"
-  --   , iut 1 "rdf:value" "xsd:integer" "-42"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "4.2"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:number"
-  --   , iut 1 "rdf:value" "xsd:decimal" "4.2"
-  --   ]
+  testRdfCodeWith
+    (rmId [0])
+    "-42"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:number"
+    , iut 1 "rdf:value" "xsd:decimal" "-42.0"
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "4.2"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:number"
+    , iut 1 "rdf:value" "xsd:decimal" "4.2"
+    ]
 
   -- testRdfCodeWith
   --   (rmId [0])
@@ -71,50 +71,50 @@ testParser = parallel $ do
   --   , iut 1 "rdf:value" "xsd:boolean" "True"
   --   ]
 
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "[42,99]"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:list"
-  --   , iui 2 "rdf:_0" 1
-  --   , iuu 2 "rdf:type" "morloc:integer"
-  --   , iut 2 "rdf:value" "xsd:integer" "42"
-  --   , iui 3 "rdf:_1" 1
-  --   , iuu 3 "rdf:type" "morloc:integer"
-  --   , iut 3 "rdf:value" "xsd:integer" "99"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "[42,\"foo\"]"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:list"
-  --   , iui 2 "rdf:_0" 1
-  --   , iuu 2 "rdf:type" "morloc:integer"
-  --   , iut 2 "rdf:value" "xsd:integer" "42"
-  --   , iui 3 "rdf:_1" 1
-  --   , iuu 3 "rdf:type" "morloc:string"
-  --   , iut 3 "rdf:value" "xsd:string" "foo"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "{job = \"poopsmith\", age = 34}"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:record"
-  --   , iui 2 "rdf:_0" 1
-  --   , iuu 2 "rdf:type" "morloc:recordEntry"
-  --   , iup 2 "morloc:lhs" "job"
-  --   , iui 2 "morloc:rhs" 3
-  --   , iuu 3 "rdf:type" "morloc:string"
-  --   , iut 3 "rdf:value" "xsd:string" "poopsmith"
-  --   , iui 4 "rdf:_1" 1
-  --   , iuu 4 "rdf:type" "morloc:recordEntry"
-  --   , iup 4 "morloc:lhs" "age"
-  --   , iui 4 "morloc:rhs" 5
-  --   , iuu 5 "rdf:type" "morloc:integer"
-  --   , iut 5 "rdf:value" "xsd:integer" "34"
-  --   ]
+  testRdfCodeWith
+    (rmId [0])
+    "[42,99]"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:list"
+    , iui 2 "rdf:_0" 1
+    , iuu 2 "rdf:type" "morloc:number"
+    , iut 2 "rdf:value" "xsd:decimal" "42.0"
+    , iui 3 "rdf:_1" 1
+    , iuu 3 "rdf:type" "morloc:number"
+    , iut 3 "rdf:value" "xsd:decimal" "99.0"
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "[42,\"foo\"]"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:list"
+    , iui 2 "rdf:_0" 1
+    , iuu 2 "rdf:type" "morloc:number"
+    , iut 2 "rdf:value" "xsd:decimal" "42.0"
+    , iui 3 "rdf:_1" 1
+    , iuu 3 "rdf:type" "morloc:string"
+    , iut 3 "rdf:value" "xsd:string" "foo"
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "{job = \"poopsmith\", age = 34}"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:record"
+    , iui 2 "rdf:_0" 1
+    , iuu 2 "rdf:type" "morloc:recordEntry"
+    , iup 2 "morloc:lhs" "job"
+    , iui 2 "morloc:rhs" 3
+    , iuu 3 "rdf:type" "morloc:string"
+    , iut 3 "rdf:value" "xsd:string" "poopsmith"
+    , iui 4 "rdf:_1" 1
+    , iuu 4 "rdf:type" "morloc:recordEntry"
+    , iup 4 "morloc:lhs" "age"
+    , iui 4 "morloc:rhs" 5
+    , iuu 5 "rdf:type" "morloc:number"
+    , iut 5 "rdf:value" "xsd:decimal" "34.0"
+    ]
 
   -- testRdfCode
   --   "source \"R\" (\"fo.o\" as foo)"

@@ -375,8 +375,7 @@ mtype =
 mdata :: MS.Parser M3.TopRDF
 mdata =  do
         try tripleBool          -- True | False
-    <|> try tripleReal          -- scientific number of arbitrary precision
-    <|> try tripleInteger       -- arbitrary length integer
+    <|> try tripleNumber        -- scientific number of arbitrary precision
     <|> try tripleStringLiteral -- "yolo"
     <|> try list'               -- [ ...
     <|> try tuple'              -- ( ...
@@ -662,8 +661,7 @@ triplePrimitive cast t p = do
     , DR.triple i (DR.UNode "rdf:value") (cast n)
     ]
 
-tripleReal          :: MS.Parser M3.TopRDF
-tripleInteger       :: MS.Parser M3.TopRDF
+tripleNumber        :: MS.Parser M3.TopRDF
 tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
 tripleName          :: MS.Parser M3.TopRDF
@@ -671,15 +669,10 @@ tripleName          :: MS.Parser M3.TopRDF
 tnode :: DT.Text -> DT.Text -> DR.Node
 tnode n t = DR.LNode (DR.TypedL n t)
 
-tripleReal = triplePrimitive
+tripleNumber = triplePrimitive
   (\n -> tnode (DT.pack . show $ n) "xsd:decimal")
-  "morloc:real"
-  Tok.real
-
-tripleInteger = triplePrimitive
-  (\n -> tnode (DT.pack . show $ n) "xsd:integer")
-  "morloc:integer"
-  Tok.integer
+  "morloc:number"
+  Tok.number
 
 tripleStringLiteral = triplePrimitive
   (\n -> tnode n  "xsd:string")

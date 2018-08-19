@@ -10,8 +10,7 @@ Stability   : experimental
 -}
 
 module Morloc.Lexer (
-    integer
-  , real 
+    number
   , stringLiteral
   , boolean
   , sc
@@ -85,11 +84,8 @@ brackets = between (symbol "[") (symbol "]")
 braces :: Parser a -> Parser a
 braces = between (symbol "{") (symbol "}")
 
-integer :: Parser Integer
-integer = L.signed sc (lexeme L.decimal)
-
-real :: Parser DS.Scientific
-real = L.signed sc L.scientific -- `empty` because no space is allowed
+number :: Parser DS.Scientific
+number = L.signed sc L.scientific -- `empty` because no space is allowed
 
 comma :: Parser ()
 comma = symbol "," >> return ()
