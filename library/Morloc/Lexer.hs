@@ -34,6 +34,7 @@ import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Data.Scientific as DS
 import qualified Data.Text as DT
+import qualified Data.Set as DS
 
 import Morloc.State
 
@@ -69,7 +70,7 @@ name = (lexeme . try) (p >>= check)
   where
     p       = fmap DT.pack $ (:) <$> letterChar <*> many alphaNumChar
     check x = if elem x reservedWords
-                then error $ "keyword " ++ show x ++ " cannot be an identifier"
+                then failure Nothing DS.empty -- TODO: error message
                 else return x
 
 op :: DT.Text -> Parser DT.Text

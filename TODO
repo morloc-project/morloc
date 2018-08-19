@@ -2,9 +2,13 @@
 
 Use the right tool for the right job
 
- [ ] Move from `parsec` to `megaparsec`
- [ ] Move to `Text` as my sole string representation
+ [x] Move from `parsec` to `megaparsec`
+ [x] Move to `Text` as my sole string representation
  [ ] Use a builder combinator (e.g. wl-pprint-text) for code generation
  [ ] Replace ad hoc RDF querying with SPARQL (via hsparql for now)
  [ ] Add graph names and a reliable import system
  [ ] Test for all v0.13.1 functionallity
+
+# RDF representation
+
+ [ ] Fix prefix handeling

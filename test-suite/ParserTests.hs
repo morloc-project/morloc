@@ -63,13 +63,13 @@ testParser = parallel $ do
     , iut 1 "rdf:value" "xsd:decimal" "4.2"
     ]
 
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "True"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:boolean"
-  --   , iut 1 "rdf:value" "xsd:boolean" "True"
-  --   ]
+  testRdfCodeWith
+    (rmId [0])
+    "True"
+    [ iui 1 "rdf:_0" 0
+    , iuu 1 "rdf:type" "morloc:boolean"
+    , iut 1 "rdf:value" "xsd:boolean" "True"
+    ]
 
   testRdfCodeWith
     (rmId [0])
