@@ -96,9 +96,9 @@ stringLiteral = fmap DT.pack $ char '"' >> manyTill L.charLiteral (char '"')
 
 
 -- | match an optional tag that precedes some construction
-tag :: Parser a -> Parser DT.Text
+tag :: Parser a -> Parser (Maybe DT.Text)
 tag p =
-  option "" (try tag')
+  optional (try tag')
   where
     tag' = do
       l <- name

@@ -6,6 +6,7 @@ module Morloc (
 ) where
 
 import qualified Data.RDF as DR
+import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 import qualified Data.Text.IO as DTIO
 import qualified Database.HSparql.Connection as DHC
@@ -21,7 +22,7 @@ doit ep = do
   (Just result) <- DHC.selectQuery ep MQ.findallTypes
   putStrLn . show $ result
 
-writeProgram :: String -> IO ()
+writeProgram :: DT.Text -> IO ()
 writeProgram s = fmap ((=<<) MG.generate) (MP.parse Nothing s) >>= writeProgram'
   where
     writeProgram' :: ME.ThrowsError (MG.Script, [MG.Script]) -> IO ()
@@ -34,7 +35,7 @@ writeProgram s = fmap ((=<<) MG.generate) (MP.parse Nothing s) >>= writeProgram'
     writeScript' (MG.Script base lang code) =
       DTIO.writeFile (base <> "." <> lang) code
 
-writeRDF' :: DR.RdfSerializer s => s -> String -> IO ()
+writeRDF' :: DR.RdfSerializer s => s -> DT.Text -> IO ()
 writeRDF' serializer code
   =   MP.parse Nothing code
   >>= doOrDie (DR.writeRdf serializer)
@@ -47,8 +48,8 @@ doOrDie :: (a -> IO ()) -> ME.ThrowsError a -> IO ()
 doOrDie f (Right x) = f x
 doOrDie _ (Left err) = putStr $ show err ++ "\n"
 
-writeTurtle :: String -> IO ()
+writeTurtle :: DT.Text -> IO ()
 writeTurtle = writeRDF' (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
 
-writeTriple :: String -> IO ()
+writeTriple :: DT.Text -> IO ()
 writeTriple = writeRDF' DR.NTriplesSerializer

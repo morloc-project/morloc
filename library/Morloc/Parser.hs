@@ -12,8 +12,9 @@ Stability   : experimental
 module Morloc.Parser (parse, parseShallow) where
 
 import Text.Megaparsec hiding (parse, State)
-import qualified Data.RDF as DR
 import qualified Text.Megaparsec.Expr as TPE
+import qualified Text.Megaparsec.Char as TMC
+import qualified Data.RDF as DR
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
@@ -25,8 +26,9 @@ import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
 import qualified Morloc.Triple as M3
 import qualified Morloc.Lexer as Tok
-
+import qualified Morloc.Util as MU
 import qualified Morloc.Walker as MW
+import Morloc.Operators
 
 parse :: Maybe DT.Text -> DT.Text -> IO (ME.ThrowsError M3.RDF)
 parse srcfile code = case (parseShallow srcfile code) of
@@ -96,7 +98,7 @@ source' = do
   lang <- Tok.stringLiteral
   -- get the path to the source file, if Nothing, then assume "vanilla"
   i <- MS.getId
-  path <- optionMaybe (Tok.reserved "from" >> Tok.stringLiteral)
+  path <- optional (Tok.reserved "from" >> Tok.stringLiteral)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
   -- the statement is unambiguous even without a semicolon
@@ -143,11 +145,11 @@ simpleImport = do
   i <- MS.getId
   Tok.reserved "import"
   path <- Tok.stringLiteral
-  qual <- optionMaybe (Tok.op "as" >> Tok.name)
+  qual <- optional (Tok.op "as" >> Tok.name)
   return $ M3.makeTopRDF i (
       [
         (M3.uss i "rdf:type" "morloc:import")
-      , (M3.usp i "morloc:name" (path ++ ".loc"))
+      , (M3.usp i "morloc:name" (path <> ".loc"))
       ] ++ maybe [] (\q -> [M3.usp i "morloc:namespace" q]) qual
     )
 
@@ -161,7 +163,7 @@ restrictedImport = do
   return $ M3.makeTopRDF i (
       [
         M3.uss i "rdf:type" "morloc:restricted_import"
-      , M3.usp i "morloc:name" (path ++ ".loc")
+      , M3.usp i "morloc:name" (path <> ".loc")
       ] ++ M3.adoptAs "morloc:import" i functions
     )
 
@@ -204,8 +206,8 @@ typeDeclaration = do
     )
 
 listTag :: DR.Node -> Maybe DT.Text -> [M3.Triple]
-listTag i "" = []
-listTag i tag = [M3.usp i "morloc:label" t]
+listTag i Nothing    = []
+listTag i (Just tag) = [M3.usp i "morloc:label" tag]
 
 mtype :: MS.Parser M3.TopRDF
 mtype =
@@ -307,7 +309,7 @@ mtype =
     tuple' :: MS.Parser M3.TopRDF
     tuple' = Tok.parens $ do
       i <- MS.getId
-      l <- Tok.tag (char '(')
+      l <- Tok.tag (TMC.char '(')
       x <- mtype
       Tok.op ","
       xs <- sepBy1 mtype Tok.comma
@@ -322,7 +324,7 @@ mtype =
     list' :: MS.Parser M3.TopRDF
     list' = do
       i <- MS.getId
-      l <- Tok.tag (char '[')
+      l <- Tok.tag (TMC.char '[')
       s <- Tok.brackets mtype
       return $ M3.makeTopRDF i (
              [ M3.uss i "rdf:type" "morloc:parameterizedType"
@@ -335,7 +337,7 @@ mtype =
     record' :: MS.Parser M3.TopRDF
     record' = do
       i <- MS.getId
-      l <- Tok.tag (char '{')
+      l <- Tok.tag (TMC.char '{')
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
       return $ M3.makeTopRDF i (
              [ M3.uss i "rdf:type" "morloc:parameterizedType"
@@ -428,7 +430,7 @@ mdata =  do
 expression :: MS.Parser M3.TopRDF
 expression =
   -- currently this just handles "."
-      try (TPE.makeExprParser functionTable term')
+      try (TPE.makeExprParser term' functionTable)
   <|> term'
   <?> "an expression"
   where
@@ -539,7 +541,7 @@ relativeExpr = do
 
 arithmeticExpr :: MS.Parser M3.TopRDF
 arithmeticExpr
-  =   TPE.makeExprParser arithmeticTable arithmeticTerm
+  =   TPE.makeExprParser arithmeticTerm arithmeticTable
   <?> "expression"
 
 arithmeticTerm :: MS.Parser M3.TopRDF
