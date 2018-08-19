@@ -49,7 +49,7 @@ library
                       Morloc.Walker
     build-depends: base,
                    safe,
-                   parsec,
+                   megaparsec,
                    text,
                    rdf4h,
                    hsparql,

@@ -11,9 +11,9 @@ Stability   : experimental
 
 module Morloc.Parser (parse, parseShallow) where
 
-import Text.Parsec hiding (parse, State)
+import Text.Megaparsec hiding (parse, State)
 import qualified Data.RDF as DR
-import qualified Text.Parsec.Expr as TPE
+import qualified Text.Megaparsec.Expr as TPE
 import qualified Control.Monad as CM
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
@@ -60,7 +60,7 @@ parseShallow srcfile code =
 contents :: MS.Parser M3.TopRDF
 contents = do
   i <- MS.getId
-  xs <- Tok.whiteSpace >> many top <* eof
+  xs <- Tok.sc >> many top <* eof
   return $ M3.makeTopRDF i (
          [M3.uss i "rdf:type" "morloc:script"]
       ++ M3.adopt i xs
@@ -202,7 +202,8 @@ typeDeclaration = do
     )
 
 listTag :: DR.Node -> Maybe String -> [M3.Triple]
-listTag i tag = maybe [] (\t -> [M3.usp i "morloc:label" t]) tag
+listTag i "" = []
+listTag i tag = [M3.usp i "morloc:label" t]
 
 mtype :: MS.Parser M3.TopRDF
 mtype =
@@ -238,7 +239,7 @@ mtype =
       l <- Tok.tag Tok.genericType
       n <- Tok.specificType
       i <- MS.getId
-      ns <- many1 unambiguous'
+      ns <- some unambiguous'
       return $ M3.makeTopRDF i (
              [ M3.uss i "rdf:type" "morloc:parameterizedType"
              , M3.usp i "rdf:value" n]
@@ -257,7 +258,7 @@ mtype =
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
       i <- MS.getId
-      ns <- many1 unambiguous'
+      ns <- some unambiguous'
       return $ M3.makeTopRDF i (
              [ M3.uss i "rdf:type" "morloc:parameterizedGeneric"
              , M3.usp i "morloc:value" n
@@ -370,8 +371,7 @@ mtype =
 mdata :: MS.Parser M3.TopRDF
 mdata =  do
         try tripleBool          -- True | False
-    <|> try tripleFloat         -- 1.1
-    <|> try tripleInteger       -- 1
+    <|> try tripleNumber        -- 1.1, 42, -1e-100
     <|> try tripleStringLiteral -- "yolo"
     <|> try list'               -- [ ...
     <|> try tuple'              -- ( ...
@@ -426,7 +426,7 @@ mdata =  do
 expression :: MS.Parser M3.TopRDF
 expression =
   -- currently this just handles "."
-      try (TPE.buildExpressionParser functionTable term')
+      try (TPE.makeExprParser functionTable term')
   <|> term'
   <?> "an expression"
   where
@@ -441,7 +441,7 @@ application :: MS.Parser M3.TopRDF
 application = do
   i <- MS.getId
   function <- Tok.parens expression <|> identifier'
-  arguments <- many1 term'
+  arguments <- some term'
   return $ M3.makeTopRDF i (
          [M3.uss i "rdf:type" "morloc:call"]
       ++ M3.adoptAs  "morloc:value" i [function]
@@ -482,7 +482,7 @@ booleanExpr = do
     call' = do
       i <- MS.getId
       f <- Tok.parens expression <|> identifier'
-      ns <- many1 argument'
+      ns <- some argument'
       return $ M3.makeTopRDF i (
              [ M3.uss i "rdf:type" "morloc:call" ]
           ++ M3.adoptAs  "morloc:value" i [f]
@@ -537,7 +537,7 @@ relativeExpr = do
 
 arithmeticExpr :: MS.Parser M3.TopRDF
 arithmeticExpr
-  =   TPE.buildExpressionParser arithmeticTable arithmeticTerm
+  =   TPE.makeExprParser arithmeticTable arithmeticTerm
   <?> "expression"
 
 arithmeticTerm :: MS.Parser M3.TopRDF
@@ -553,7 +553,7 @@ arithmeticTerm = do
     call' = do
       i <- MS.getId
       f <- Tok.parens expression <|> identifier'
-      args <- many1 argument'
+      args <- some argument'
       return $ M3.makeTopRDF i (
              [M3.uss i "rdf:type" "morloc:call"]
           ++ M3.adoptAs "morloc:value" i [f]
@@ -591,15 +591,15 @@ arithmeticTable
       [ prefix "-" (unaryOp "Neg")
       , prefix "+" (unaryOp "Pos")
       ]
-    , [ binary "^"  (binOp "Pow") TPE.AssocRight
+    , [ binaryR "^"  (binOp "Pow")
       ]
-    , [ binary "*"  (binOp "Mul") TPE.AssocLeft
-      , binary "/"  (binOp "Div") TPE.AssocLeft
-      , binary "%"  (binOp "Mod") TPE.AssocLeft
-      , binary "//" (binOp "Quo") TPE.AssocLeft
-      ]                     
-    , [ binary "+"  (binOp "Add") TPE.AssocLeft
-      , binary "-"  (binOp "Sub") TPE.AssocLeft
+    , [ binaryL "*"  (binOp "Mul")
+      , binaryL "/"  (binOp "Div")
+      , binaryL "%"  (binOp "Mod")
+      , binaryL "//" (binOp "Quo")
+      ]
+    , [ binaryL "+"  (binOp "Add")
+      , binaryL "-"  (binOp "Sub")
       ]
   ]
 
@@ -620,7 +620,7 @@ binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
-functionTable = [[ binary "."  exprComposition TPE.AssocRight ]]
+functionTable = [[ binaryR "."  exprComposition ]]
 
 exprComposition :: DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 exprComposition i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
@@ -630,11 +630,17 @@ exprComposition i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
-binary name fun assoc = TPE.Infix (do {
+binaryR name fun = TPE.InfixR (do {
     Tok.op name;
     i <- MS.getId;
     return (fun i);
-  }) assoc
+  })
+
+binaryL name fun = TPE.InfixL (do {
+    Tok.op name;
+    i <- MS.getId;
+    return (fun i);
+  })
 
 prefix name fun = TPE.Prefix (do {
     Tok.op name;
@@ -651,8 +657,7 @@ triplePrimitive cast t p = do
     , DR.triple i (DR.UNode "rdf:value") (cast n)
     ]
 
-tripleInteger       :: MS.Parser M3.TopRDF
-tripleFloat         :: MS.Parser M3.TopRDF
+tripleNumber        :: MS.Parser M3.TopRDF
 tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
 tripleName          :: MS.Parser M3.TopRDF
@@ -660,8 +665,7 @@ tripleName          :: MS.Parser M3.TopRDF
 tnode :: String -> String -> DR.Node
 tnode n t = DR.LNode (DR.TypedL (DT.pack n) (DT.pack t))
 
-tripleInteger       = triplePrimitive (\n -> tnode (show n) "xsd:integer" ) "morloc:integer" Tok.integer
-tripleFloat         = triplePrimitive (\n -> tnode (show n) "xsd:decimal" ) "morloc:number"  Tok.float
+tripleNumber        = triplePrimitive (\n -> tnode (show n) "xsd:decimal" ) "morloc:number"  Tok.number
 tripleStringLiteral = triplePrimitive (\n -> tnode       n  "xsd:string"  ) "morloc:string"  Tok.stringLiteral
 tripleBool          = triplePrimitive (\n -> tnode (show n) "xsd:boolean" ) "morloc:boolean" Tok.boolean
 tripleName          = triplePrimitive (\n -> DR.LNode . DR.PlainL . DT.pack $ n) "morloc:name" Tok.name

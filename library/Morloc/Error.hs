@@ -16,7 +16,8 @@ module Morloc.Error
   , ThrowsError
 ) where
 
-import qualified Text.Parsec as TP
+import qualified Text.Megaparsec.Error as PE
+import Data.Void
 
 type ThrowsError = Either MorlocError
 
@@ -29,7 +30,7 @@ data MorlocError
   -- | Raised for unsupported features (such as specific languages)
   | NotSupported String
   -- | Raised by parsec on parse errors
-  | SyntaxError TP.ParseError
+  | SyntaxError (PE.ParseError Char Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
   deriving(Eq)
