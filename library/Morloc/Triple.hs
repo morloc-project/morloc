@@ -14,10 +14,6 @@ module Morloc.Triple (
   , RDF
   , DR.Triple
   , makeTopRDF
-  , uss
-  , usu
-  , ust
-  , usp
   , idUri
   , rdfId
   , adoptAs
@@ -71,13 +67,13 @@ makeRDF xs = DR.mkRdf xs Nothing prefixMap
 rdfAppend :: RDF -> RDF -> RDF
 rdfAppend x y = makeRDF (DR.triplesOf x ++ DR.triplesOf y)
 
-adoptAs :: DT.Text -> DR.Node -> [TopRDF] -> [DR.Triple]
+adoptAs :: DR.Node -> DR.Node -> [TopRDF] -> [DR.Triple]
 adoptAs rel sbj objs =
        map (link rel sbj) objs
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
-    link :: DT.Text -> DR.Node -> TopRDF -> DR.Triple
-    link rel' sbj' (TopRDF obj' _) = usu sbj' rel' obj'
+    link :: DR.Node -> DR.Node -> TopRDF -> DR.Triple
+    link rel' sbj' (TopRDF obj' _) = DR.triple sbj' rel' obj'
 
 adopt :: DR.Node -> [TopRDF] -> [DR.Triple]
 adopt sbj objs =
@@ -85,34 +81,15 @@ adopt sbj objs =
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
     link :: DR.Node -> Int -> TopRDF -> DR.Triple
-    link sbj' index (TopRDF obj' _) = usu obj' ("rdf:_" <> show' index) sbj'
+    link sbj' index (TopRDF obj' _)
+      = DR.triple obj' (rdfPre .:. ("_" <> show' index)) sbj'
 
 showTopRDF :: TopRDF -> DT.Text
 showTopRDF (TopRDF _ rdf) = DT.pack $ DR.showGraph rdf
 
 idUri :: Maybe DT.Text -> Int -> DR.Node
-idUri Nothing  i = DR.UNode $ "mid:" <> show' i
-idUri (Just s) i = DR.UNode $ "mid:" <> s <> "_" <> show' i
+idUri Nothing  i = midPre .:. show' i
+idUri (Just s) i = midPre .:. (s <> "_" <> show' i)
 
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i
-
--- convenience functions for building triples
--- * URI object
-uss :: DR.Node -> DT.Text -> DT.Text -> DR.Triple
-uss s r o = DR.triple s (DR.UNode r) (DR.UNode o)
-
--- * indexed URI object as a UNode
-usu :: DR.Node -> DT.Text -> DR.Node -> DR.Triple
-usu s r o = DR.triple s (DR.UNode r) o
-
--- * typed object
-ust :: DR.Node -> DT.Text -> DT.Text -> DT.Text -> DR.Triple
-ust s r o t = DR.triple
-  s
-  (DR.UNode r)
-  (DR.LNode (DR.TypedL o t))
-
--- * plain object
-usp :: DR.Node -> DT.Text -> DT.Text -> DR.Triple
-usp s r o = DR.triple s (DR.UNode r) (DR.LNode (DR.PlainL o))
