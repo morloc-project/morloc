@@ -15,9 +15,11 @@ import Text.Megaparsec hiding (parse, State)
 import qualified Data.RDF as DR
 import qualified Text.Megaparsec.Expr as TPE
 import qualified Control.Monad as CM
+import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
 import qualified Data.Text as DT
+import qualified Data.Text.IO as DTO
 
 import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
@@ -26,7 +28,7 @@ import qualified Morloc.Lexer as Tok
 
 import qualified Morloc.Walker as MW
 
-parse :: Maybe String -> String -> IO (ME.ThrowsError M3.RDF)
+parse :: Maybe DT.Text -> DT.Text -> IO (ME.ThrowsError M3.RDF)
 parse srcfile code = case (parseShallow srcfile code) of
   (Right rdf) -> joinRDF rdf (parseImports rdf)
   err         -> return err
@@ -38,17 +40,17 @@ joinRDF rdf xs
       ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [M3.RDF])
 
 parseImports :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)]
-parseImports rdf = map morlocScriptFromFile (map DT.unpack (MW.getImportedFiles rdf))
+parseImports rdf = map morlocScriptFromFile (MW.getImportedFiles rdf)
 
-morlocScriptFromFile :: String -> IO (ME.ThrowsError M3.RDF)
-morlocScriptFromFile s = CM.join . fmap (parse (Just s)) $ readFile s
+morlocScriptFromFile :: DT.Text -> IO (ME.ThrowsError M3.RDF)
+morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . DTO.readFile $ DT.unpack s
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-parseShallow :: Maybe String -> String -> ME.ThrowsError M3.RDF
+parseShallow :: Maybe DT.Text -> DT.Text -> ME.ThrowsError M3.RDF
 parseShallow srcfile code =
-  case runParser contents pstate input' code of
+  case runParser (CMS.runStateT contents pstate) (DT.unpack input') code of
     Left err  -> CME.throwError $ ME.SyntaxError err
-    Right (M3.TopRDF _ val) -> return val
+    Right ((M3.TopRDF _ val), s) -> return val
   where
     pstate = MS.ParserState { MS.stateCount = 0, MS.stateFile = srcfile}
     input' = case srcfile of
@@ -201,7 +203,7 @@ typeDeclaration = do
       ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
     )
 
-listTag :: DR.Node -> Maybe String -> [M3.Triple]
+listTag :: DR.Node -> Maybe DT.Text -> [M3.Triple]
 listTag i "" = []
 listTag i tag = [M3.usp i "morloc:label" t]
 
@@ -603,7 +605,7 @@ arithmeticTable
       ]
   ]
 
-unaryOp :: String -> DR.Node -> M3.TopRDF -> M3.TopRDF
+unaryOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF
 unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
      [ M3.uss i "rdf:type" "morloc:unaryOp"
      , M3.usp i "rdf:value" s
@@ -611,7 +613,7 @@ unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
      ] ++ (DR.triplesOf xs)
   )
 
-binOp :: String -> DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
+binOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
      [ M3.uss i "rdf:type" "morloc:binop"
      , M3.usp i "rdf:value" s
@@ -648,7 +650,7 @@ prefix name fun = TPE.Prefix (do {
     return (fun i);
   })
 
-triplePrimitive :: (a -> DR.Node) -> String -> MS.Parser a -> MS.Parser M3.TopRDF
+triplePrimitive :: (a -> DR.Node) -> DT.Text -> MS.Parser a -> MS.Parser M3.TopRDF
 triplePrimitive cast t p = do
   i <- MS.getId
   n <- p
@@ -662,10 +664,25 @@ tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
 tripleName          :: MS.Parser M3.TopRDF
 
-tnode :: String -> String -> DR.Node
-tnode n t = DR.LNode (DR.TypedL (DT.pack n) (DT.pack t))
+tnode :: DT.Text -> DT.Text -> DR.Node
+tnode n t = DR.LNode (DR.TypedL n t)
 
-tripleNumber        = triplePrimitive (\n -> tnode (show n) "xsd:decimal" ) "morloc:number"  Tok.number
-tripleStringLiteral = triplePrimitive (\n -> tnode       n  "xsd:string"  ) "morloc:string"  Tok.stringLiteral
-tripleBool          = triplePrimitive (\n -> tnode (show n) "xsd:boolean" ) "morloc:boolean" Tok.boolean
-tripleName          = triplePrimitive (\n -> DR.LNode . DR.PlainL . DT.pack $ n) "morloc:name" Tok.name
+tripleNumber = triplePrimitive
+  (\n -> tnode (DT.pack . show $ n) "xsd:decimal")
+  "morloc:number"
+  Tok.number
+
+tripleStringLiteral = triplePrimitive
+  (\n -> tnode n  "xsd:string")
+  "morloc:string"
+  Tok.stringLiteral
+
+tripleBool = triplePrimitive
+  (\n -> tnode (DT.pack . show $ n) "xsd:boolean")
+  "morloc:boolean"
+  Tok.boolean
+
+tripleName = triplePrimitive
+  (\n -> DR.LNode . DR.PlainL $ n)
+  "morloc:name"
+  Tok.name

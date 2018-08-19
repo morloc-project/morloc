@@ -31,7 +31,7 @@ type Parser a = CMS.StateT ParserState (Parsec Void DT.Text) a
 data ParserState = ParserState {
     -- | Stores the current node number. This will be unique within a program.
     stateCount :: Int 
-  , stateFile :: Maybe String
+  , stateFile :: Maybe DT.Text
 }
 
 -- | The empty parser state, with the ID initialized to 0

@@ -9,7 +9,8 @@ Stability   : experimental
 
 module Morloc.Util
 (
-    ifelse
+    show'
+  , ifelse
   , conmap
   , unique
   , sort
@@ -27,6 +28,9 @@ import Morloc.Operators
 import qualified Data.List as DL
 import qualified Data.Text as DT
 import qualified Control.Monad as CM
+
+show' :: Show a => a -> DT.Text
+show' = DT.pack . show
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
