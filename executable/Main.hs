@@ -22,7 +22,7 @@ main = do
 
     ["--rdf", "--triple", x] -> DTI.readFile x >>= M.writeTriple
 
-    [x] -> DTI.readFile x >>= M.writeProgram
+    [endpoint] -> M.writeProgram endpoint
 
     -- wrong input
     _   -> putStrLn "Please provide a single filename"

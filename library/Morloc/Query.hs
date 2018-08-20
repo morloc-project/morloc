@@ -10,26 +10,45 @@ Stability   : experimental
 -}
 
 module Morloc.Query (
-  findallTypes
+    exports
+  , exportsQ
 ) where
 
 import Database.HSparql.Connection
 import Database.HSparql.QueryGenerator
+import Data.RDF hiding (Query)
 
 import qualified Data.Text as DT
 
--- find the names of all types
-findallTypes :: Query SelectQuery
-findallTypes = do
+valueOf :: BindingValue -> [DT.Text]
+valueOf (Bound (LNode (PlainL  s  ))) = [s]
+valueOf (Bound (LNode (PlainLL s _))) = [s]
+valueOf (Bound (LNode (TypedL  s _))) = [s]
+valueOf _ = []
+
+-- remove all the unsafe operation
+extractListText :: Maybe [[BindingValue]] -> [DT.Text]
+extractListText (Just xs) = concat $ map extractOne xs where
+  extractOne :: [BindingValue] -> [DT.Text]
+  extractOne [x] = valueOf x 
+  extractOne _ = error "Expected just one"
+extractListText (Just []) = [] 
+extractListText Nothing   = []
+extractListText _ = error "Bad RDF or SPARQL query: expected list of LNode"
+
+exports :: EndPoint -> IO [DT.Text]
+exports e = fmap extractListText (selectQuery e exportsQ)
+
+exportsQ :: Query SelectQuery
+exportsQ = do
   xsd <- prefix "xsd" (iriRef "http://www.w3.org/2001/XMLSchema#")
   rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
   mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
 
-  s        <- var
-  typename <- var
+  s <- var
+  o <- var
 
-  triple_ s (rdf .:. "type") (mlc .:. "typeDeclaration")
-  triple_ s (mlc .:. "lang") (DT.pack "Morloc")
-  triple_ s (mlc .:. "lhs") typename
+  triple_ s (rdf .:. "type") (mlc .:. "export")
+  triple_ s (rdf .:. "value") o
 
-  selectVars [typename]
+  selectVars [o]

@@ -2,7 +2,6 @@ module Morloc (
     writeTurtle
   , writeTriple
   , writeProgram
-  , doit -- FIXME this is only a test
 ) where
 
 import qualified Data.RDF as DR
@@ -15,21 +14,15 @@ import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
-import qualified Morloc.Query as MQ
 
-doit :: DHC.EndPoint -> IO ()
-doit ep = do
-  (Just result) <- DHC.selectQuery ep MQ.findallTypes
-  putStrLn . show $ result
 
-writeProgram :: DT.Text -> IO ()
-writeProgram s = fmap ((=<<) MG.generate) (MP.parse Nothing s) >>= writeProgram'
+writeProgram :: DHC.EndPoint -> IO ()
+writeProgram e = MG.generate e >>= writeProgram'
   where
-    writeProgram' :: ME.ThrowsError (MG.Script, [MG.Script]) -> IO ()
-    writeProgram' (Right (n, ps)) = do
+    writeProgram' :: (MG.Script, [MG.Script]) -> IO ()
+    writeProgram' (n, ps) = do
       writeScript' n
       mapM_ writeScript' ps
-    writeProgram' (Left err) = putStr (show err)
       
     writeScript' :: MG.Script -> IO ()
     writeScript' (MG.Script base lang code) =
