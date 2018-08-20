@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.State
 Description : Parsec state
@@ -13,6 +15,7 @@ module Morloc.State
   , ParserState(..)
   , parserStateEmpty
   , getId
+  , getSourceUri
 ) where
 
 import Text.Megaparsec
@@ -31,14 +34,14 @@ type Parser a = CMS.StateT ParserState (Parsec Void DT.Text) a
 data ParserState = ParserState {
     -- | Stores the current node number. This will be unique within a program.
     stateCount :: Int 
-  , stateFile :: Maybe DT.Text
+  , stateSourceUri :: Maybe DT.Text
 }
 
 -- | The empty parser state, with the ID initialized to 0
 parserStateEmpty :: ParserState
 parserStateEmpty = ParserState {
     stateCount  = 0
-  , stateFile = Nothing
+  , stateSourceUri = Nothing
 }
 
 -- | Get an RDF URI and increment the internal counter
@@ -46,4 +49,9 @@ getId :: Parser DR.Node
 getId = do
   s <- CMS.get
   CMS.put (s {stateCount = (stateCount s) + 1})
-  return $ M3.idUri (stateFile s) (stateCount s)
+  return $ M3.idUri (stateSourceUri s) (stateCount s)
+
+getSourceUri :: Parser DT.Text
+getSourceUri = do
+  s <- CMS.get
+  return $ maybe "<stdin>" id (stateSourceUri s) 

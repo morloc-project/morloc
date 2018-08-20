@@ -58,7 +58,7 @@ parseShallow srcfile code =
     Left err  -> CME.throwError $ ME.SyntaxError err
     Right ((M3.TopRDF _ val), s) -> return val
   where
-    pstate = MS.ParserState { MS.stateCount = 0, MS.stateFile = srcfile}
+    pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}
     input' = case srcfile of
       Just s  -> s
       Nothing -> "<stdin>"
@@ -68,9 +68,12 @@ parseShallow srcfile code =
 contents :: MS.Parser M3.TopRDF
 contents = do
   i <- MS.getId
+  srcUri <- MS.getSourceUri
   xs <- Tok.sc >> many top <* eof
   return $ M3.makeTopRDF i (
-         [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "script")]
+         [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "script")
+         , DR.triple i (M3.rdfPre .:. "value") (plain srcUri) 
+         ]
       ++ M3.adopt i xs
     )
 

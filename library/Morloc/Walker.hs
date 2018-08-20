@@ -72,7 +72,8 @@ import qualified Data.Text.Read as DTR
 import qualified Data.List as DL
 
 import qualified Morloc.Util as MU
-import Morloc.Operators ((|>>))
+import qualified Morloc.Triple as M3
+import Morloc.Operators
 
 -- Convenience functions
 p :: DT.Text -> DR.Predicate
@@ -232,8 +233,8 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
 
 getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
 getImportedFiles rdf
-  =   up rdf (p "rdf:type") (o "morloc:import")
-  >>= down rdf (p "morloc:name")
+  =   up rdf (M3.rdfPre .:. "type") (M3.mlcPre .:. "import")
+  >>= down rdf (M3.mlcPre .:. "name")
   >>= valueOf
 
 -- x = (\(Right z) -> z) $ morlocScript "export foo"
