@@ -21,9 +21,9 @@ import qualified Data.Text as DT
 -- find the names of all types
 findallTypes :: Query SelectQuery
 findallTypes = do
-  xsd <- prefix "xsd"    (iriRef "http://www.w3.org/2001/XMLSchema#")
-  rdf <- prefix "rdf"    (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-  mlc <- prefix "morloc" (iriRef "http://www.morloc.io/ontology/000")
+  xsd <- prefix "xsd" (iriRef "http://www.w3.org/2001/XMLSchema#")
+  rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+  mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
 
   s        <- var
   typename <- var
@@ -33,18 +33,3 @@ findallTypes = do
   triple_ s (mlc .:. "lhs") typename
 
   selectVars [typename]
-
-{-
-
-prefix xsd:    <http://www.w3.org/2001/XMLSchema#>
-prefix rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-prefix morloc: <http://www.morloc.io/ontology/000>
-
-SELECT typename
-WHERE {
-  s rdf:type mlc:typeDeclaration
-  s mlc:lang "Morloc"
-  s mlc:lhs typename
-}
-
--}
