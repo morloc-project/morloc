@@ -14,7 +14,7 @@ module Morloc.Pool (generatePoolCode) where
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 
-import Morloc.Walker
+import qualified Morloc.Walker as MW
 import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Language as ML
@@ -28,7 +28,7 @@ type Call = DR.Node
 type Import = DR.Node
 
 generatePoolCode :: DR.Rdf a => DR.RDF a -> [Source] -> ME.ThrowsError DT.Text
-generatePoolCode rdf (s:ss) = case (MU.maybeOne $ lang rdf s >>= valueOf) of
+generatePoolCode rdf (s:ss) = case (MU.maybeOne $ MW.lang rdf s >>= MW.valueOf) of
   (Just "R") -> generateWith rdf (s:ss) ML.rCodeGenerator
   (Just l) -> Left $ ME.NotSupported ("No support for " ++ DT.unpack l)
   (Nothing) -> Left $ ME.InvalidRDF "No language specified for source"
@@ -50,16 +50,16 @@ generateGlobal :: DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
 generateGlobal _ _ _ = []
 
 generateSource :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
-generateSource rdf srcs g = srcs >>= path rdf >>= valueOf |>> ML.makeSource g
+generateSource rdf srcs g = srcs >>= MW.path rdf >>= MW.valueOf |>> ML.makeSource g
 
 generateFunctions :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
-generateFunctions rdf srcs g = map (generateFunction rdf srcs g) (getCalls rdf)
+generateFunctions rdf srcs g = map (generateFunction rdf srcs g) (MW.getCalls rdf)
 
 generateSourceFunctions :: DR.Rdf a => DR.RDF a -> [Source] -> ML.CodeGenerator -> [DT.Text]
 generateSourceFunctions rdf srcs g
   = concat
   $ map (generateSourceFunction rdf g)
-        (srcs >>= sourceExports rdf)
+        (srcs >>= MW.sourceExports rdf)
 
 generateSourceFunction
   :: DR.Rdf a
@@ -67,10 +67,10 @@ generateSourceFunction
   -> ML.CodeGenerator
   -> Import
   -> [DT.Text]
-generateSourceFunction rdf g imp = case (importAlias rdf imp, importName rdf imp) of
+generateSourceFunction rdf g imp = case (MW.importAlias rdf imp, MW.importName rdf imp) of
   ([alias'], [name']) -> case (
-        idOf imp
-      , asPositional (getType rdf alias' >>= elements rdf)
+        MW.idOf imp
+      , asPositional (MW.getType rdf alias' >>= MW.elements rdf)
     ) of
       ([mid'], args') ->
         [(ML.makeFunction g)
@@ -108,33 +108,33 @@ seekCasters :: DR.Rdf a
   -> DT.Text   -- the function name
   -> [DT.Text] -- the casting function for each input to the functions
 seekCasters rdf lang' func' = case (
-      getTypeDeclaration rdf func' "Morloc"
-    , getTypeDeclaration rdf func' lang'
+      MW.getTypeDeclaration rdf func' "Morloc"
+    , MW.getTypeDeclaration rdf func' lang'
   ) of
     -- seek a special caster for each argument
     ([_], [specialForm]) ->
-      map (seekCaster rdf lang') (elements rdf specialForm >>= down rdf (o "rdf:type"))
+      map (seekCaster rdf lang') (MW.elements rdf specialForm >>= MW.down rdf (MW.o "rdf:type"))
     -- seek a generic caster
-    ([generalForm], []) -> case elements rdf generalForm of
+    ([generalForm], []) -> case MW.elements rdf generalForm of
       types -> take (length types) (repeat (seekGenericCaster rdf lang'))
     ([], _) -> error ("Cast failure: No general type found for '" ++ DT.unpack func' ++ "'")
     _ -> error "Ambiguous types"
 
 -- | seek `<func> <lang> :: unpack => JSON -> <type>`
 seekCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DR.Node -> DT.Text
-seekCaster rdf lang' form' = case getUnpack rdf lang' form' of
+seekCaster rdf lang' form' = case MW.getUnpack rdf lang' form' of
   [f] -> f
   [] -> error ("No unpacker found for " ++ DT.unpack lang' ++ ":(" ++ show form' ++ ")")
   _ -> error ("Ambiguous unpacker for " ++ DT.unpack lang' ++ ":(" ++ show form' ++ ")")
 
 -- | seek `<func'> <lang'> :: unpack => JSON -> a`
 seekGenericCaster :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text
-seekGenericCaster rdf lang' = case getUnpack rdf lang' to of
+seekGenericCaster rdf lang' = case MW.getUnpack rdf lang' to of
   [f] -> f
   [] -> error ("No generic unpacker found for '" ++ DT.unpack lang' ++ "'")
   _ -> error ("Ambiguous generic unpacker for '" ++ DT.unpack lang' ++ "'")
   where
-    to = v (Just "morloc:atomicGeneric") "a"
+    to = MW.v (Just "morloc:atomicGeneric") "a"
 
 generateFunction :: DR.Rdf a
   => DR.RDF a
@@ -146,11 +146,11 @@ generateFunction :: DR.Rdf a
 generateFunction rdf _ g n =
   case
     (
-        value rdf n >>= rdftype rdf >>= valueOf
+        MW.value rdf n >>= MW.rdftype rdf >>= MW.valueOf
         -- FIXME: this only works for primitives
-      , elements rdf n >>= rdftype rdf >>= valueOf
-      , getScope rdf n >>= elements rdf >>= rdftype rdf >>= valueOf 
-      , idOf n
+      , MW.elements rdf n >>= MW.rdftype rdf >>= MW.valueOf
+      , MW.getScope rdf n >>= MW.elements rdf >>= MW.rdftype rdf >>= MW.valueOf 
+      , MW.idOf n
     )
   of
   ([name'], args', bndvars', [mid']) ->

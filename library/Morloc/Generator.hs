@@ -17,7 +17,7 @@ module Morloc.Generator
   , generate  
 ) where
 
-import Morloc.Walker
+import qualified Morloc.Walker as MW
 import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Nexus as MN
@@ -51,7 +51,7 @@ generateNexus rdf = pure $ Script {
     -- Eventually these will include, for example, a CWL generator
     g = MN.perlCliNexusGenerator
     lang' = "perl"
-    nexusCode' = case exports rdf of
+    nexusCode' = case MW.exports rdf of
       exports' -> DT.unlines
         [ (MN.nexusPrologue g)
         , (MN.nexusPrint g) ""
@@ -64,20 +64,20 @@ generateNexus rdf = pure $ Script {
 nexusHelp :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text
 nexusHelp rdf g = (MN.nexusHelp g) prologue' exports' epilogue' where
   prologue' = ["The following commands are exported:"]
-  exports' = map (\s -> "    " <> s) (exports rdf)
+  exports' = map (\s -> "    " <> s) (MW.exports rdf)
   epilogue' = []
 
 generateNexusCall :: DR.Rdf a => DR.RDF a -> MN.NexusGenerator -> DT.Text -> DT.Text
 generateNexusCall rdf g exp' = case (
-      getType rdf exp' >>= elements rdf -- inputs
-    , getImportByName rdf exp'
-    , getDataDeclarationByName rdf exp'
+      MW.getType rdf exp' >>= MW.elements rdf -- inputs
+    , MW.getImportByName rdf exp'
+    , MW.getDataDeclarationByName rdf exp'
   ) of
     (inputs', [import'], []) -> (MN.nexusCall g)
-      (lang2prog (importLang rdf import'))
-      (poolName . MU.maybeOne . importLang rdf $ import')
+      (lang2prog (MW.importLang rdf import'))
+      (poolName . MU.maybeOne . MW.importLang rdf $ import')
       exp'
-      (makeManifoldName (idOf import'))
+      (makeManifoldName (MW.idOf import'))
       (length inputs')
 
     (inputs', [], [decl]) -> (MN.nexusCall g)
@@ -86,7 +86,7 @@ generateNexusCall rdf g exp' = case (
       "Rscript"
       "pool.R"
       exp'
-      (makeManifoldName (return decl >>= rhs rdf >>= idOf))
+      (makeManifoldName (return decl >>= MW.rhs rdf >>= MW.idOf))
       (length inputs')
 
     ([],  _,  _) -> error $ errorMsg "missing type signature"
@@ -113,7 +113,7 @@ makeManifoldName [t] = case DT.splitOn ":" t of
 makeManifoldName _ = error "Bug: expected `makeManifoldName` input length of 1"
 
 generatePools :: DR.Rdf a => DR.RDF a -> ME.ThrowsError [Pool]
-generatePools r = sequence $ map (generatePool r) (getGroupedSources r)
+generatePools r = sequence $ map (generatePool r) (MW.getGroupedSources r)
 
 generatePool :: DR.Rdf a => DR.RDF a -> [DR.Node] -> ME.ThrowsError Pool
 generatePool rdf ns = Script
@@ -124,6 +124,6 @@ generatePool rdf ns = Script
     getLang :: DR.Rdf a => DR.RDF a -> [DR.Node] -> ME.ThrowsError String
     -- TODO: might want to ensure that all the inputs are indeed of the same language
     -- they *should* be ...
-    getLang rdf' n' = case n' >>= lang rdf' >>= valueOf of
+    getLang rdf' n' = case n' >>= MW.lang rdf' >>= MW.valueOf of
       (x:_) -> Right (DT.unpack x)
       []  -> Left $ ME.InvalidRDF "A source must have exactly one language"
