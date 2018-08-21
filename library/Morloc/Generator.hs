@@ -107,9 +107,9 @@ generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
   (nargs)                -- number of arguments
 
 makeManifoldName :: DT.Text -> DT.Text
-makeManifoldName x = case reverse (DT.splitOn ":" x) of
-  (x:xs) -> "m" <> x
-  _ -> error "Manifold uri does not match the pattern `.*:\\d+$`"
+makeManifoldName x = case reverse (DT.splitOn "/" x) of
+  (y:ys) -> "m" <> y
+  _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
   
   
 generatePools :: DHC.SparqlEndPoint -> IO [Pool]
