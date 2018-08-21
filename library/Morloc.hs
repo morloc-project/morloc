@@ -8,7 +8,7 @@ import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 import qualified Data.Text.IO as DTIO
-import qualified Database.HSparql.Connection as DHC
+import qualified Morloc.Database.HSparql.Connection as DHC
 
 import Morloc.Operators
 import qualified Morloc.Error as ME
@@ -16,7 +16,7 @@ import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
 
 
-writeProgram :: DHC.EndPoint -> IO ()
+writeProgram :: DHC.SparqlEndPoint -> IO ()
 writeProgram e = MG.generate e >>= writeProgram'
   where
     writeProgram' :: (MG.Script, [MG.Script]) -> IO ()

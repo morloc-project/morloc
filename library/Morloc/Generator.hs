@@ -23,12 +23,13 @@ import qualified Morloc.Pool as MP
 import qualified Morloc.Util as MU
 import Morloc.Operators
 
-import qualified Database.HSparql.Connection as DHC
+import qualified Morloc.Database.HSparql.Connection as DHC
 import qualified Morloc.Query as Q
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 
+-- | Stores everything needed to build one file
 data Script = Script {
       scriptBase :: String  -- ^ script basename (no extension)
     , scriptLang :: String  -- ^ script language
@@ -39,10 +40,13 @@ data Script = Script {
 type Nexus = Script
 type Pool = Script
 
-generate :: DHC.EndPoint -> IO (Nexus, [Pool])
+-- | Given a SPARQL endpoint, generate an executable program
+generate :: DHC.SparqlEndPoint -> IO (Nexus, [Pool])
 generate e = (,) <$> generateNexus e <*> generatePools e
 
-generateNexus :: DHC.EndPoint -> IO Nexus
+-- | Generate the nexus, which is a program that coordinates the execution of
+-- the language-specific function pools.
+generateNexus :: DHC.SparqlEndPoint -> IO Nexus
 generateNexus e
   =   Script
   <$> pure "nexus"
@@ -59,16 +63,12 @@ generateNexus e
         , return ((MN.nexusPrint g) "")
         , fmap (MN.nexusDispatch g) exports' 
         , nexusHelp e g
-        , exports' >>= (\xs ->
-               fmap DT.unlines
-            .  sequence
-            .  map (generateNexusCall e g)
-            $  xs
-          )
+        , fmap DT.unlines (generateNexusCalls e g)
         , return (MN.nexusEpilogue g)
         ]
 
-nexusHelp :: DHC.EndPoint -> MN.NexusGenerator -> IO DT.Text
+-- | Generate a help message for each exported function
+nexusHelp :: DHC.SparqlEndPoint -> MN.NexusGenerator -> IO DT.Text
 nexusHelp e g
   =   (MN.nexusHelp g)
   <$> pure prologue'
@@ -79,8 +79,38 @@ nexusHelp e g
     exports' = fmap (map (\s -> "    " <> s)) (Q.exports e)
     epilogue' = []
 
-generateNexusCall :: DHC.EndPoint -> MN.NexusGenerator -> DT.Text -> IO DT.Text
-generateNexusCall _ _ _ = return ""
+-- | Generate functions that call specific functions in specific pools.
+-- Here is an example for a Perl nexus:
+-- @
+--   if(scalar(@_) != 2 ){
+--     print STDERR "Expected 2 arguments to `foo`, given X";
+--     exit 1;
+--   }
+--   return `Rscript foo.R m2 3`
+-- @
+generateNexusCalls :: DHC.SparqlEndPoint -> MN.NexusGenerator -> IO [DT.Text]
+generateNexusCalls e g = (fmap . map) (generateNexusCall g) (Q.forNexusCall e)
 
-generatePools :: DHC.EndPoint -> IO [Pool]
+generateNexusCall
+  :: MN.NexusGenerator
+  -> ( DT.Text -- ^ function's Morloc name (not necessarily it's native name)
+     , DT.Text -- ^ function's native language
+     , DT.Text -- ^ Morloc ID for the type declaration for this function
+     , Int     -- ^ number of arguments (according to the type signature)
+     )
+  -> DT.Text
+generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
+  ("Rscript")            -- command -- FIXME: generalize
+  ("pool." <> flang)     -- pool filename
+  (fname)                -- function name
+  (makeManifoldName fid) -- manifold name made form type URI
+  (nargs)                -- number of arguments
+
+makeManifoldName :: DT.Text -> DT.Text
+makeManifoldName x = case reverse (DT.splitOn ":" x) of
+  (x:xs) -> "m" <> x
+  _ -> error "Manifold uri does not match the pattern `.*:\\d+$`"
+  
+  
+generatePools :: DHC.SparqlEndPoint -> IO [Pool]
 generatePools e = return []

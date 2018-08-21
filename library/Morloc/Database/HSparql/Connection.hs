@@ -8,6 +8,7 @@ This module is adapted from Rob Steward's HSparql module. The only changes are t
 
 module Morloc.Database.HSparql.Connection
     ( BindingValue(..)
+    , SparqlEndPoint
     -- * submit queries using raw SPARQL strings
     , selectQuery'
     , constructQuery'
@@ -28,6 +29,8 @@ import qualified Data.Text.Encoding as E
 import qualified Data.ByteString.Char8 as B
 
 import Network.URI hiding (URI)
+
+type SparqlEndPoint = String
 
 -- |Local representations of incoming XML results.
 data BindingValue = Bound RDF.Node    -- ^RDF Node (UNode, BNode, LNode)
@@ -86,7 +89,7 @@ parseUpdate s
   | otherwise = error $ "Unexpected Update response: " ++ s
 
 
-selectQuery' :: String -> String -> IO (Maybe [[BindingValue]])
+selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
 selectQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
       h1 = mkHeader HdrAccept "application/sparql-results+xml"
@@ -99,7 +102,7 @@ selectQuery' ep q = do
   response <- simpleHTTP request >>= getResponseBody
   return $ structureContent response
 
-askQuery' :: String -> String -> IO Bool
+askQuery' :: SparqlEndPoint -> String -> IO Bool
 askQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
       hdr1 = Header HdrUserAgent "hsparql-client"
@@ -110,7 +113,7 @@ askQuery' ep q = do
   response <- simpleHTTP request >>= getResponseBody
   return $ parseAsk response
 
-updateQuery' :: String -> String -> IO Bool
+updateQuery' :: SparqlEndPoint -> String -> IO Bool
 updateQuery' ep q = do
   let uri = ep
       body = q
@@ -126,7 +129,7 @@ updateQuery' ep q = do
 --    return $ structureContent response
   return $ parseUpdate response
 
-constructQuery' :: (RDF.Rdf a) => String -> String -> IO (RDF.RDF a)
+constructQuery' :: (RDF.Rdf a) => SparqlEndPoint -> String -> IO (RDF.RDF a)
 constructQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
   rdfGraph <- httpCallForRdf uri
@@ -134,7 +137,7 @@ constructQuery' ep q = do
     Left e -> error $ show e
     Right graph -> return graph
 
-describeQuery' :: (RDF.Rdf a) => String -> String -> IO (RDF.RDF a)
+describeQuery' :: (RDF.Rdf a) => SparqlEndPoint -> String -> IO (RDF.RDF a)
 describeQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
   rdfGraph <- httpCallForRdf uri

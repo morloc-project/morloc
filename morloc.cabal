@@ -55,6 +55,7 @@ library
                    network-uri,
                    text,
                    rdf4h,
+                   raw-strings-qq,
                    HTTP,
                    aeson,
                    scientific,
