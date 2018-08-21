@@ -33,6 +33,7 @@ library
     default-language: Haskell2010
     hs-source-dirs: library
     exposed-modules:  Morloc
+                      Morloc.Database.HSparql.Connection
                       Morloc.Json
                       Morloc.Error
                       Morloc.Generator
@@ -48,17 +49,20 @@ library
                       Morloc.Util
                       Morloc.Walker
     build-depends: base,
+                   bytestring,
                    safe,
                    megaparsec,
+                   network-uri,
                    text,
                    rdf4h,
-                   hsparql,
+                   HTTP,
                    aeson,
                    scientific,
                    containers,
                    unordered-containers,
                    vector,
-                   mtl
+                   mtl,
+                   xml
     ghc-options: -Wall
     if flag(documentation)
         build-depends: hscolour
