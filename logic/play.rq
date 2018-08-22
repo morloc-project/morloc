@@ -1,85 +1,24 @@
-# prefixes
-PREFIX morloc: <http://www.morloc.io/ontology/000>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-
-
-# find the names of all types
-SELECT ?typename
-WHERE {
-  ?s rdf:type morloc:typeDeclaration ;
-     morloc:lang "Morloc" ;
-     morloc:lhs ?typename .
-}
-
-# find all predicates associated with a specific type declaration
-SELECT ?p
-WHERE {
-  ?s <rdf:type> <morloc:typeDeclaration> ;
-     <morloc:lhs> "rand_uniform" .
-  ?s ?p ?o .
-}
-
 # find imports with the ".loc" extension
 SELECT ?file
 WHERE {
-    ?import <rdf:type> <morloc:import> ;
-            <morloc:name> ?file .
+    ?import rdf:type morloc:import ;
+            morloc:name ?file .
     FILTER (regex(?file, ".loc", "i"))
 }
 
-# Find all packers
-# <function> <lang> :: packs => <from> -> JSON
-SELECT DISTINCT ?lang ?morloc_name ?function_name ?pack_type ?pack_value
-WHERE {
-  # find language-specific type declarations
-  ?type <rdf:type> <morloc:typeDeclaration> ;
-        <morloc:lang> ?lang ;
-        <morloc:lhs> ?morloc_name ;
-        <morloc:rhs> ?type_rhs .
-  # that have the property "packs"
-  ?type_rhs <rdf:type> <morloc:functionType> ;
-            <morloc:property> ?property .
-  # properties may by compound (e.g. when used to specify type constraints)
-  ?property <rdf:type> <morloc:name> ;
-            <rdf:value> "packs" .
-
-  ?input <rdf:_0> ?type_rhs;
-         <rdf:type> ?pack_type .
-
-  ?output <rdf:type> <morloc:atomicType> ;
-          <rdf:value> "JSON" .
-
-  OPTIONAL {
-    ?input <rdf:value> ?pack_value
-  }
-
-  # If the function was sourced, then the morloc name may be an alias for the
-  # real name. So here find the real name.
-  OPTIONAL
-  {
-    ?source <rdf:type> <morloc:source> ;
-            <morloc:lang> ?lang ;
-            <morloc:import> ?import .
-
-    ?import <morloc:name>  ?function_name ;
-            <morloc:alias> ?morloc_name .
-  }
-}
-
 # Link Morloc types to language-specific types
-CONSTRUCT { ?minput <morloc:packsInto> ?linput }
+CONSTRUCT { ?minput morloc:packsInto ?linput }
 WHERE {
     # Morloc type declarations
-    ?mtypedec <rdf:type> <morloc:typeDeclaration> ;
-              <morloc:lang> "Morloc" ;
-              <morloc:lhs> ?name ;
-              <morloc:rhs> ?mrhs .
+    ?mtypedec rdf:type morloc:typeDeclaration ;
+              morloc:lang "Morloc" ;
+              morloc:lhs ?name ;
+              morloc:rhs ?mrhs .
     # Corresponding language-specific type declarations
-    ?ltypedec <rdf:type> <morloc:typeDeclaration> ;
-              <morloc:lang> ?lang ;
-              <morloc:lhs> ?name ;
-              <morloc:rhs> ?lrhs .
+    ?ltypedec rdf:type morloc:typeDeclaration ;
+              morloc:lang ?lang ;
+              morloc:lhs ?name ;
+              morloc:rhs ?lrhs .
     FILTER(?lang != "Morloc")
     # get the language-specific input types
     ?linput ?element ?lrhs .
@@ -89,33 +28,13 @@ WHERE {
     FILTER(regex(str(?element), "_[0-9]+$", "i"))
 }
 
-# Map the arguments in a call to their types
-SELECT ?fname ?element ?argvalue ?argtype ?argform ?argname
-WHERE {
-    ?call <rdf:type> <morloc:call> ;
-       <morloc:value> ?value .  
-    ?value <rdf:type> ?value_type .
-    ?value <rdf:value> ?fname .
-    ?argvalue ?element ?call .
-    ?typedec <rdf:type> <morloc:typeDeclaration> ;
-             <morloc:lang> "Morloc" ;
-             <morloc:lhs> ?fname ;
-             <morloc:rhs> ?ftype .
-    ?ftype <rdf:type> <morloc:functionType> .
-    ?argtype ?element ?ftype .
-    OPTIONAL { ?argtype <rdf:type> ?argform . }
-    OPTIONAL { ?argtype <rdf:value> ?argname . }
-
-    FILTER(regex(str(?element), "_[0-9]+$", "i"))
-}
-
 # Map arg to its use within scope
 SELECT ?argname ?arguse
 WHERE {
-    ?datadec <rdf:type> <morloc:dataDeclaration> .
+    ?datadec rdf:type morloc:dataDeclaration .
     ?parameter ?element ?datadec ;
-               <rdf:type> <morloc:name> ;
-               <rdf:value> ?parameter_name .
+               rdf:type morloc:name ;
+               rdf:value ?parameter_name .
 
     # TODO: this will require recursion down the call stack
 
@@ -125,25 +44,25 @@ WHERE {
 # is this is morloc script?
 ASK
 WHERE {
-    ?source <rdf:type> <morloc:script> ;
+    ?source rdf:type morloc:script ;
 }
 
 # Link all function to their morloc types
 CONSTRUCT {
-    ?datadec <morloc:type> ?typedec
+    ?datadec morloc:type ?typedec
 }
 WHERE {
-    ?typedec <rdf:type> <morloc:typeDeclaration> ;
-             <morloc:lhs> ?name ;
-             <morloc:lang> "Morloc" .
-    ?datadec <rdf:type> <morloc:dataDeclaration> ;
-             <morloc:lhs> ?name .
+    ?typedec rdf:type morloc:typeDeclaration ;
+             morloc:lhs ?name ;
+             morloc:lang "Morloc" .
+    ?datadec rdf:type morloc:dataDeclaration ;
+             morloc:lhs ?name .
 }
 
 # Find all subjects/objects where object is not a URI
 SELECT ?s ?o
 WHERE {
-    ?s <rdf:type> ?o .
+    ?s rdf:type ?o .
     FILTER(!(isURI(?o)))
 }
 
@@ -151,20 +70,20 @@ WHERE {
 # This is a check of the Morloc implementation, not user input
 ASK
 WHERE {
-    ?s <rdf:type> ?o .
+    ?s rdf:type ?o .
     FILTER(!(isURI(?o)))
 }
 
 # Find any bad assignments (where the lhs is not a literal)
 ASK
 WHERE {
-  ?s <rdf:lhs> ?o
+  ?s rdf:lhs ?o
   # find assignments
-  { ?s <rdf:type> <morloc:typeDeclaration> }
+  { ?s rdf:type morloc:typeDeclaration }
   UNION
-  { ?s <rdf:type> <morloc:dataDeclaration> }
+  { ?s rdf:type morloc:dataDeclaration }
   UNION
-  { ?s <rdf:type> <morloc:recordEntry> }
+  { ?s rdf:type morloc:recordEntry }
   # remove triples where the lhs is not a literal
   FILTER(!isLiteral (?o))
 }
@@ -173,25 +92,25 @@ WHERE {
 SELECT ?s
 WHERE {
   {
-    { ?s <morloc:lhs> ?lhs }
+    { ?s morloc:lhs ?lhs }
     MINUS
-    { ?s <morloc:rhs> ?rhs }
+    { ?s morloc:rhs ?rhs }
   }
   UNION
   {
-    { ?s <morloc:rhs> ?lhs }
+    { ?s morloc:rhs ?lhs }
     MINUS
-    { ?s <morloc:lhs> ?rhs }
+    { ?s morloc:lhs ?rhs }
   }
 }
 
 # passing on False: forall A where p exists B where p
 ASK {
-  ?type <morloc:property> ?p ;
-        <rdf:type> <morloc:type> .
+  ?type morloc:property ?p ;
+        rdf:type morloc:type .
 
   NOT EXISTS {
-    ?function <morloc:property> ?p 
-              <rdf:type> <morloc:functionType>
+    ?function morloc:property ?p 
+              rdf:type morloc:functionType
   }
 }

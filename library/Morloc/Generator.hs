@@ -101,7 +101,7 @@ generateNexusCall
   -> DT.Text
 generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
   ("Rscript")            -- command -- FIXME: generalize
-  ("pool." <> flang)     -- pool filename
+  ("pool." <> flang)     -- pool filename -- FIXME: generalize/customize
   (fname)                -- function name
   (makeManifoldName fid) -- manifold name made form type URI
   (read (show nargs) :: Int) -- number of arguments
@@ -110,7 +110,7 @@ makeManifoldName :: DT.Text -> DT.Text
 makeManifoldName x = case reverse (DT.splitOn "/" x) of
   (y:ys) -> "m" <> y
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
-  
-  
+
 generatePools :: DHC.SparqlEndPoint -> IO [Pool]
-generatePools e = return []
+generatePools = undefined
+-- generatePools e = forGeneratePools e >>= (sequence . map (generatePool e))
