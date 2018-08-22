@@ -15,12 +15,13 @@ module Morloc.Generator
   , Nexus
   , Pool
   , generate  
+  , generatePools -- DO NOT EXPORT
 ) where
 
 import qualified Morloc.Error as ME
 import qualified Morloc.Nexus as MN
-import qualified Morloc.Pool as MP
 import qualified Morloc.Util as MU
+import qualified Morloc.Language as ML
 import Morloc.Operators
 
 import qualified Morloc.Database.HSparql.Connection as DHC
@@ -28,6 +29,8 @@ import qualified Morloc.Query as Q
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
+import qualified Data.List.Extra as DLE
+import qualified Data.Maybe as DM
 
 -- | Stores everything needed to build one file
 data Script = Script {
@@ -112,5 +115,29 @@ makeManifoldName x = case reverse (DT.splitOn "/" x) of
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
 
 generatePools :: DHC.SparqlEndPoint -> IO [Pool]
-generatePools = undefined
--- generatePools e = forGeneratePools e >>= (sequence . map (generatePool e))
+generatePools e = fmap (map generatePool . makeDict) (Q.sources e)
+
+makeDict :: Ord a => [[a]] -> [(a, [[a]])] 
+makeDict = DLE.groupSort . map enkey where
+  enkey :: [a] -> (a, [a])
+  enkey (x:xs) = (x, xs)
+  enkey _ = error "Bad RDF" 
+
+-- SELECT ?fname ?alias ?path
+generatePool :: (Maybe DT.Text, [[Maybe DT.Text]]) -> Pool
+generatePool (Just "R", xss) = Script {
+      scriptBase = "pool"
+    , scriptLang = "R"
+    , scriptCode = generatePoolCode g xss
+  } where
+    g = ML.rCodeGenerator
+
+generatePoolCode :: ML.CodeGenerator -> [[Maybe DT.Text]] -> DT.Text 
+generatePoolCode g xss =
+  (ML.makePool g)
+    --   any required global declarations
+    [] 
+    --   any input source code
+    (DM.catMaybes $ map ((flip (!!)) 2) xss) 
+    --   the node function declarations
+    [] 

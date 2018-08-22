@@ -85,7 +85,7 @@ sources e = fmap values (selectQuery' e sparql) where
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-    SELECT ?lang ?path ?fname ?alias
+    SELECT ?lang ?fname ?alias ?path 
     WHERE {
       ?s rdf:type mlc:source ;
          mlc:lang ?lang ;

@@ -38,7 +38,6 @@ library
                       Morloc.Error
                       Morloc.Generator
                       Morloc.Language
-                      Morloc.Pool
                       Morloc.Lexer
                       Morloc.Nexus
                       Morloc.Operators
@@ -50,6 +49,7 @@ library
                       Morloc.Walker
     build-depends: base,
                    bytestring,
+                   extra,
                    safe,
                    megaparsec,
                    network-uri,
