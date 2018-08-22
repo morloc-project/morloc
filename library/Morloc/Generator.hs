@@ -99,7 +99,7 @@ generateNexusCall
   -> ( DT.Text -- ^ function's Morloc name (not necessarily it's native name)
      , DT.Text -- ^ function's native language
      , DT.Text -- ^ Morloc ID for the type declaration for this function
-     , DT.Text -- ^ number of arguments (according to the type signature)
+     , Int     -- ^ number of arguments (according to the type signature)
      )
   -> DT.Text
 generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
@@ -107,7 +107,7 @@ generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
   ("pool." <> flang)     -- pool filename -- FIXME: generalize/customize
   (fname)                -- function name
   (makeManifoldName fid) -- manifold name made form type URI
-  (read (show nargs) :: Int) -- number of arguments
+  (nargs)                -- number of arguments
 
 makeManifoldName :: DT.Text -> DT.Text
 makeManifoldName x = case reverse (DT.splitOn "/" x) of

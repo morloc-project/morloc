@@ -54,8 +54,8 @@ exports e = fmap (concat . values') (selectQuery' e sparql) where
          rdf:value ?o
   |]
 
-forNexusCall :: SparqlEndPoint -> IO [(DT.Text, DT.Text, DT.Text, DT.Text)]
-forNexusCall e = fmap (map four . values') (selectQuery' e sparql) where
+forNexusCall :: SparqlEndPoint -> IO [(DT.Text, DT.Text, DT.Text, Int)]
+forNexusCall e = fmap (map toInt . map four . values') (selectQuery' e sparql) where
   sparql = [r|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
@@ -78,6 +78,11 @@ forNexusCall e = fmap (map four . values') (selectQuery' e sparql) where
     }
     GROUP BY ?typedec ?fname ?lang
   |]
+
+  toInt :: (a, a, a, DT.Text) -> (a, a, a, Int)
+  toInt (a,b,c,i) = case (reads (DT.unpack i) :: [(Int, String)]) of
+    [(i, "")] -> (a,b,c,i)
+    _ -> error ("Failed to parse number of arguments. Exected integer, got: " ++ show i)
 
 sources :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 sources e = fmap values (selectQuery' e sparql) where
