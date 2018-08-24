@@ -88,7 +88,6 @@ parseUpdate s
   | s == "" = True
   | otherwise = error $ "Unexpected Update response: " ++ s
 
-
 selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
 selectQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]

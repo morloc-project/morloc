@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Query
@@ -12,39 +12,34 @@ Stability   : experimental
 module Morloc.Query (
     exports
   , forNexusCall
-  , sources
-  , packers
-  , arg2type
+  , sourcesQ
+  , packersQ
+  , arg2typeQ
 ) where
 
-import Text.RawString.QQ
-import Data.RDF hiding (Query)
 import qualified Data.Text as DT
 import qualified Data.Maybe as DM
 
+import Morloc.Quasi
 import Morloc.Database.HSparql.Connection
-
-maybeValue :: BindingValue -> Maybe DT.Text
-maybeValue (Bound (LNode (PlainL  s  ))) = Just s
-maybeValue (Bound (LNode (PlainLL s _))) = Just s
-maybeValue (Bound (LNode (TypedL  s _))) = Just s
-maybeValue (Bound (UNode s))             = Just s
-maybeValue _ = Nothing
-
-values :: Maybe [[BindingValue]] -> [[Maybe DT.Text]]
-values Nothing = []
-values (Just xss) = (fmap . fmap) maybeValue xss
-
-values' :: Maybe [[BindingValue]] -> [[DT.Text]]
-values' = map DM.catMaybes . values 
 
 four :: [a] -> (a,a,a,a)
 four [a,b,c,d] = (a,b,c,d)
 four _ = error "Expected 4 element list"
 
 exports :: SparqlEndPoint -> IO [DT.Text]
-exports e = fmap (concat . values') (selectQuery' e sparql) where
-  sparql = [r|
+exports e = fmap (concat . map DM.catMaybes) (exportsQ e) where
+
+forNexusCall :: SparqlEndPoint -> IO [(DT.Text, DT.Text, DT.Text, Int)]
+forNexusCall e = fmap (map toInt . map four . map DM.catMaybes) (forNexusCallQ e) where
+  toInt :: (a, a, a, DT.Text) -> (a, a, a, Int)
+  toInt (a,b,c,i) = case (reads (DT.unpack i) :: [(Int, String)]) of
+    [(i, "")] -> (a,b,c,i)
+    _ -> error ("Failed to parse number of arguments. Exected integer, got: " ++ show i)
+
+
+exportsQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+exportsQ = [sparql|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
@@ -52,11 +47,10 @@ exports e = fmap (concat . values') (selectQuery' e sparql) where
     WHERE {
       ?s rdf:type mlc:export ;
          rdf:value ?o
-  |]
+|]
 
-forNexusCall :: SparqlEndPoint -> IO [(DT.Text, DT.Text, DT.Text, Int)]
-forNexusCall e = fmap (map toInt . map four . values') (selectQuery' e sparql) where
-  sparql = [r|
+forNexusCallQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+forNexusCallQ = [sparql|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
@@ -77,16 +71,10 @@ forNexusCall e = fmap (map toInt . map four . values') (selectQuery' e sparql) w
          rdf:value ?fname .
     }
     GROUP BY ?typedec ?fname ?lang
-  |]
+|]
 
-  toInt :: (a, a, a, DT.Text) -> (a, a, a, Int)
-  toInt (a,b,c,i) = case (reads (DT.unpack i) :: [(Int, String)]) of
-    [(i, "")] -> (a,b,c,i)
-    _ -> error ("Failed to parse number of arguments. Exected integer, got: " ++ show i)
-
-sources :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-sources e = fmap values (selectQuery' e sparql) where
-  sparql = [r|
+sourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+sourcesQ = [sparql|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
@@ -99,19 +87,18 @@ sources e = fmap values (selectQuery' e sparql) where
          mlc:alias ?alias .
       OPTIONAL { ?s mlc:path ?path }
     }
-  |]
+|]
 
 -- | Find all packers
 -- @
 --   <function> <lang> :: packs => <from> -> JSON
 -- @
-packers :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-packers e = fmap values (selectQuery' e sparql) where
-  sparql = [r|
+packersQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+packersQ = [sparql|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
-    SELECT DISTINCT ?lang ?mlc_name ?function_name ?pack_type ?pack_value
+    SELECT ?lang ?mlc_name ?function_name ?pack_type ?pack_value
     WHERE {
       # find language-specific type declarations
       ?type rdf:type mlc:typeDeclaration ;
@@ -142,12 +129,11 @@ packers e = fmap values (selectQuery' e sparql) where
                 mlc:alias ?mlc_name .
       }
     }
-  |]
+|]
 
 -- | Map the arguments in a call to their types
-arg2type :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-arg2type e = fmap values (selectQuery' e sparql) where
-  sparql = [r|
+arg2typeQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+arg2typeQ = [sparql|
     PREFIX mlc: <http://www.morloc.io/ontology/000/>
     PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 
@@ -168,4 +154,4 @@ arg2type e = fmap values (selectQuery' e sparql) where
         OPTIONAL { ?argtype rdf:value ?argname . }
         FILTER(regex(str(?element), "_[0-9]+$", "i"))
     }
-  |]
+|]

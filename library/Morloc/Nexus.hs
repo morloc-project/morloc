@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Nexus
@@ -15,8 +15,10 @@ module Morloc.Nexus (
   ) where
 
 import Morloc.Operators
+import Morloc.Quasi
 import qualified Morloc.Util as MU
 import qualified Data.Text as DT
+import qualified Text.PrettyPrint.Leijen.Text as Gen
 
 data NexusGenerator = NexusGenerator {
     nexusPrologue    
@@ -58,13 +60,13 @@ perlCliNexusGenerator = NexusGenerator {
     , nexusEpilogue = nexusEpilogue'
   }
   where
-    nexusPrologue' = DT.unlines
-      [ "#!/usr/bin/env perl"
-      , "use strict;"
-      , "use warnings;"
-      , ""
-      , "&printResult(&dispatch(@ARGV));"
-      ]
+    nexusPrologue' = render [s|
+#!/usr/bin/env perl
+use strict;
+use warnings;
+
+&printResult(&dispatch(@ARGV));
+|]
 
     nexusPrint' _ = DT.unlines
       [ "sub printResult {"

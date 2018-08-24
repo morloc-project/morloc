@@ -18,16 +18,13 @@ module Morloc.Generator
   , generatePools -- DO NOT EXPORT
 ) where
 
-import qualified Morloc.Error as ME
 import qualified Morloc.Nexus as MN
-import qualified Morloc.Util as MU
 import qualified Morloc.Language as ML
 import Morloc.Operators
 
 import qualified Morloc.Database.HSparql.Connection as DHC
 import qualified Morloc.Query as Q
 
-import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.List.Extra as DLE
 import qualified Data.Maybe as DM
@@ -115,7 +112,7 @@ makeManifoldName x = case reverse (DT.splitOn "/" x) of
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
 
 generatePools :: DHC.SparqlEndPoint -> IO [Pool]
-generatePools e = fmap (map generatePool . makeDict) (Q.sources e)
+generatePools e = fmap (map generatePool . makeDict) (Q.sourcesQ e)
 
 makeDict :: Ord a => [[a]] -> [(a, [[a]])] 
 makeDict = DLE.groupSort . map enkey where

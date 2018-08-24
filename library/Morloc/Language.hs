@@ -1,5 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Language
@@ -21,6 +20,7 @@ import qualified Data.HashMap.Strict as DHS
 import qualified Data.Vector as DV
 
 import Morloc.Operators
+import Morloc.Quasi
 import qualified Morloc.Util as MU
 
 data CodeGenerator = CodeGenerator {
@@ -96,7 +96,7 @@ rCodeGenerator = CodeGenerator {
   where
 
     makePool' :: [DT.Text] -> [DT.Text] -> [DT.Text] -> DT.Text
-    makePool' gs is fs = DT.unlines . concat $ [begin', gs, is, fs, end']
+    makePool' gs is fs = DT.unlines . concat $ [begin', gs, is, fs, [end']]
 
     makeSource' :: DT.Text -> DT.Text 
     makeSource' path = "source(\"" <> path <> "\")"
@@ -151,19 +151,20 @@ rCodeGenerator = CodeGenerator {
 
     begin' = ["#!/usr/bin/env Rscript"]
 
-    end'   =
-      [ "args <- commandArgs(trailingOnly=TRUE)"
-      , "if(length(args) == 0){"
-      , "  stop(\"Expected 1 or more arguments\")"
-      , "} else if(exists(args[[1]])){"
-      , "  x <- get(args[[1]])"
-      , "  result <- if(class(x) == \"function\"){"
-      , "    do.call(get(args[[1]]), as.list(args[-1, drop=FALSE]))"
-      , "  } else {"
-      , "    x"
-      , "  }"
-      , "  cat(packGeneric(result))" -- FIXME: switch to the right on
-      , "} else {"
-      , "  stop(\"Could not find function '\", args[[1]], \"'\")"
-      , "}"
-      ]
+    end' = render
+      [s|
+args <- commandArgs(trailingOnly=TRUE)
+if(length(args) == 0){
+  stop("Expected 1 or more arguments")
+} else if(exists(args[[1]])){
+  x <- get(args[[1]])
+  result <- if(class(x) == "function"){
+    do.call(get(args[[1]]), as.list(args[-1, drop=FALSE]))
+  } else {
+    x
+  }
+  cat(packGeneric(result))" -- FIXME: switch to the right on
+} else {
+  stop("Could not find function '", args[[1]], "'")
+}
+      |]

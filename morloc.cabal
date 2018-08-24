@@ -43,6 +43,7 @@ library
                       Morloc.Operators
                       Morloc.Parser
                       Morloc.Query
+                      Morloc.Quasi
                       Morloc.State
                       Morloc.Triple
                       Morloc.Util
@@ -52,17 +53,19 @@ library
                    extra,
                    safe,
                    megaparsec,
+                   parsec,
                    network-uri,
                    text,
                    rdf4h,
-                   raw-strings-qq,
                    HTTP,
                    aeson,
                    scientific,
                    containers,
                    unordered-containers,
                    vector,
+                   template-haskell,
                    mtl,
+                   wl-pprint-text,
                    xml
     ghc-options: -Wall
     if flag(documentation)
