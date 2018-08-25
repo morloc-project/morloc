@@ -14,11 +14,17 @@ import Morloc.Types
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
+import qualified Morloc.Database.HSparql.Upload as Up
 
-
-writeProgram :: SparqlEndPoint -> IO ()
-writeProgram e = MG.generate e >>= writeProgram'
+writeProgram :: SparqlEndPoint -> DT.Text -> IO ()
+writeProgram ep code = do
+  MP.parse Nothing code >>= doOrDie >>= Up.uploadRDF ep >>= stateResult
+  MG.generate ep >>= writeProgram'
   where
+    stateResult :: Bool -> IO ()
+    stateResult False = fail ("Failed to upload RDF to" ++ ep)
+    stateResult True = return ()
+
     writeProgram' :: (MG.Script, [MG.Script]) -> IO ()
     writeProgram' (n, ps) = do
       writeScript' n
@@ -27,19 +33,17 @@ writeProgram e = MG.generate e >>= writeProgram'
     writeScript' :: MG.Script -> IO ()
     writeScript' (MG.Script base lang code) =
       DTIO.writeFile (base <> "." <> lang) code
+  
 
 writeRDF' :: DR.RdfSerializer s => s -> DT.Text -> IO ()
 writeRDF' serializer code
   =   MP.parse Nothing code
-  >>= doOrDie (DR.writeRdf serializer)
+  >>= doOrDie
+  >>= DR.writeRdf serializer
 
--- writeRDF' serializer code = case MP.parse code of
---   Left err -> putStr $ show err ++ "\n"
---   Right rdfOutput -> DR.writeRdf serializer rdfOutput
-
-doOrDie :: (a -> IO ()) -> ME.ThrowsError a -> IO ()
-doOrDie f (Right x) = f x
-doOrDie _ (Left err) = putStr $ show err ++ "\n"
+doOrDie :: ME.ThrowsError a -> IO a
+doOrDie (Right x) = return x
+doOrDir (Left err) = fail $ show err ++ "\n"
 
 writeTurtle :: DT.Text -> IO ()
 writeTurtle = writeRDF' (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))

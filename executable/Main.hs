@@ -7,12 +7,22 @@ import qualified System.Environment as SE
 import qualified Data.Text as DT
 import qualified Data.Text.IO as DTI
 
+usage :: IO ()
+usage = putStr $ unlines [
+      "The morloc CLI is under development, try one of these patterns:"
+    , "  morloc --rdf -e <code>"
+    , "  morloc --rdf --triple -e <code>"
+    , "  morloc --rdf -e <filename>"
+    , "  morloc --rdf --triple -e <filename>"
+    , "  morloc <filename> <sparql-endpoint>"
+  ]
+
 main :: IO ()
 main = do
   args <- SE.getArgs
   case args of
     -- no input
-    []  -> putStrLn "You must provide at least one argument"
+    []  -> usage
 
     ["--rdf", "-e", text] -> M.writeTurtle (DT.pack text)
 
@@ -22,7 +32,7 @@ main = do
 
     ["--rdf", "--triple", x] -> DTI.readFile x >>= M.writeTriple
 
-    [endpoint] -> M.writeProgram endpoint
+    [x, endpoint] -> DTI.readFile x >>= M.writeProgram endpoint
 
     -- wrong input
-    _   -> putStrLn "Please provide a single filename"
+    _   -> usage
