@@ -3,12 +3,12 @@ Module      : Morloc.Database.HSparql.Connection
 Description : Connect to SPARQL endpoint
 Stability   : experimental
 
-This module is adapted from Rob Steward's HSparql module. The only changes are the addition of the `*Query'` functions that take a raw String. My goal 
+This module is adapted from Rob Steward's HSparql module. The main changes are
+the addition of the `*Query'` functions that take a raw String.
 -}
 
 module Morloc.Database.HSparql.Connection
     ( BindingValue(..)
-    , SparqlEndPoint
     -- * submit queries using raw SPARQL strings
     , selectQuery'
     , constructQuery'
@@ -30,7 +30,7 @@ import qualified Data.ByteString.Char8 as B
 
 import Network.URI hiding (URI)
 
-type SparqlEndPoint = String
+import Morloc.Types (SparqlEndPoint)
 
 -- |Local representations of incoming XML results.
 data BindingValue = Bound RDF.Node    -- ^RDF Node (UNode, BNode, LNode)

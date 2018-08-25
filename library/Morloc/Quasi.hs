@@ -15,6 +15,8 @@ import qualified Morloc.Database.HSparql.Connection as Conn
 import qualified Data.Text as DT
 import Text.Parsec
 
+import Morloc.Types (SparqlEndPoint)
+
 render :: Gen.Doc -> DT.Text
 render = Gen.displayTStrict . Gen.renderPretty 0.5 70
 
@@ -67,7 +69,7 @@ values :: Maybe [[Conn.BindingValue]] -> [[Maybe DT.Text]]
 values Nothing = []
 values (Just xss) = (fmap . fmap) maybeValue xss
 
-simpleSelect :: Gen.Doc -> Conn.SparqlEndPoint -> IO ([[Maybe DT.Text]])
+simpleSelect :: Gen.Doc -> SparqlEndPoint -> IO ([[Maybe DT.Text]])
 -- selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
 simpleSelect d e = fmap values $ (flip Conn.selectQuery') (render' d) e
 
@@ -84,13 +86,13 @@ sparql = QuasiQuoter {
       Left err -> error $ show err
       Right xs -> return $
         LamE [VarP (mkName "e")] (
-            AppE (
-              AppE (VarE 'simpleSelect) (
-                  AppE
-                    (VarE 'Gen.hcat)
-                    (ListE (map qI xs))
-                )
-              ) (VarE (mkName "e"))
+          AppE (
+            AppE (VarE 'simpleSelect) (
+                AppE
+                  (VarE 'Gen.hcat)
+                  (ListE (map qI xs))
+              )
+            ) (VarE (mkName "e"))
           )
         where
           qI :: I -> Exp

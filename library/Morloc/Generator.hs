@@ -20,6 +20,7 @@ module Morloc.Generator
 
 import qualified Morloc.Nexus as MN
 import qualified Morloc.Language as ML
+import Morloc.Types (SparqlEndPoint)
 import Morloc.Operators
 
 import qualified Morloc.Database.HSparql.Connection as DHC
@@ -41,12 +42,12 @@ type Nexus = Script
 type Pool = Script
 
 -- | Given a SPARQL endpoint, generate an executable program
-generate :: DHC.SparqlEndPoint -> IO (Nexus, [Pool])
+generate :: SparqlEndPoint -> IO (Nexus, [Pool])
 generate e = (,) <$> generateNexus e <*> generatePools e
 
 -- | Generate the nexus, which is a program that coordinates the execution of
 -- the language-specific function pools.
-generateNexus :: DHC.SparqlEndPoint -> IO Nexus
+generateNexus :: SparqlEndPoint -> IO Nexus
 generateNexus e
   =   Script
   <$> pure "nexus"
@@ -68,7 +69,7 @@ generateNexus e
         ]
 
 -- | Generate a help message for each exported function
-nexusHelp :: DHC.SparqlEndPoint -> MN.NexusGenerator -> IO DT.Text
+nexusHelp :: SparqlEndPoint -> MN.NexusGenerator -> IO DT.Text
 nexusHelp e g
   =   (MN.nexusHelp g)
   <$> pure prologue'
@@ -88,7 +89,7 @@ nexusHelp e g
 --   }
 --   return `Rscript foo.R m2 3`
 -- @
-generateNexusCalls :: DHC.SparqlEndPoint -> MN.NexusGenerator -> IO [DT.Text]
+generateNexusCalls :: SparqlEndPoint -> MN.NexusGenerator -> IO [DT.Text]
 generateNexusCalls e g = (fmap . map) (generateNexusCall g) (Q.forNexusCall e)
 
 generateNexusCall
@@ -111,7 +112,7 @@ makeManifoldName x = case reverse (DT.splitOn "/" x) of
   (y:ys) -> "m" <> y
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
 
-generatePools :: DHC.SparqlEndPoint -> IO [Pool]
+generatePools :: SparqlEndPoint -> IO [Pool]
 generatePools e = fmap (map generatePool . makeDict) (Q.sourcesQ e)
 
 makeDict :: Ord a => [[a]] -> [(a, [[a]])] 

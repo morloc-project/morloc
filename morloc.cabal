@@ -4,7 +4,7 @@ cabal-version: >= 1.10
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: b9bc62615d409a9e74bc6e72b648f5e132dc186560a9c8e9af3e94c0a70de857
+-- hash: 2c8ff1730b275cda819b6e7b0fd4fac1b6a0671cdaa0d3712320898d45ad928f
 
 name:           morloc
 version:        0.13.1
@@ -46,6 +46,7 @@ library
   exposed-modules:
       Morloc
       Morloc.Database.HSparql.Connection
+      Morloc.Database.HSparql.Upload
       Morloc.Error
       Morloc.Generator
       Morloc.Json
@@ -58,6 +59,7 @@ library
       Morloc.Query
       Morloc.State
       Morloc.Triple
+      Morloc.Types
       Morloc.Util
       Morloc.Walker
   other-modules:
