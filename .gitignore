@@ -8,3 +8,4 @@ Main
 nexus.*
 pool.*
 run/
+morloc.cabal

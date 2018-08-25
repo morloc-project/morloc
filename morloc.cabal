@@ -1,102 +1,152 @@
-name:     morloc
-version:  0.13.1
-homepage: https://github.com/arendsee/morloc
-synopsis: A multi-lingual, typed, workflow language
-description:
+cabal-version: >= 1.10
 
-    Morloc is a generative, metaprogamming language that composes functions
-    from other languages (e.g. Bash, R, Python) into multi-lingual workflows.
-    The central goal of Morloc eliminate the boundaries between languages,
-    unifying all through a common type system. Each node in the workflow wraps
-    an explicitly typed function (the type system is a subset of the
-    Haskell's). Based on these types, the compiler generates linking code,
-    wraps the functions in executable scripts, and checks the high-level
-    correctness of the program. The Morloc programmer tells the Morloc compiler
-    the function signature and specifies the funtion gaph, and the compiler
-    does the rest.
+-- This file has been generated from package.yaml by hpack version 0.29.5.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: b9bc62615d409a9e74bc6e72b648f5e132dc186560a9c8e9af3e94c0a70de857
 
-category:           Compiler
-license:            GPL-3
-license-file:       LICENSE
-author:             Zebulun Arendsee 
-maintainer:         arendsee@iastate.edu
-extra-source-files: README.md
-                    data/common/*.json
-cabal-version:      >= 1.10
-bug-reports:        https://github.com/arendsee/morloc/issues
-build-type:         Simple
+name:           morloc
+version:        0.13.1
+synopsis:       A multi-lingual, typed, workflow language
+description:    See GitHub README <https://github.com/githubuser/morloc#readme>
+category:       Compiler
+homepage:       https://github.com/arendsee/morloc
+bug-reports:    https://github.com/arendsee/morloc/issues
+author:         Zebulun Arendsee
+maintainer:     zbwrbz@gmail.com
+copyright:      2018 Zebulun Arendsee
+license:        GPL-3
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    data/common/binary.json
+    data/common/bool.json
+    data/common/char.json
+    data/common/file.json
+    data/common/graph.json
+    data/common/hash-string-int.json
+    data/common/int.json
+    data/common/matrix-int.json
+    data/common/num.json
+    data/common/set-string.json
+    data/common/string.json
+    data/common/table-String-Int-Int.json
+    data/common/text.json
+    data/common/tree-int-int.json
+    data/common/tuple-string-int.json
+    data/common/vector-int.json
+    README.md
 
-flag documentation
-    default: False
+source-repository head
+  type: git
+  location: https://github.com/arendsee/morloc
 
 library
-    default-language: Haskell2010
-    hs-source-dirs: library
-    exposed-modules:  Morloc
-                      Morloc.Database.HSparql.Connection
-                      Morloc.Json
-                      Morloc.Error
-                      Morloc.Generator
-                      Morloc.Language
-                      Morloc.Lexer
-                      Morloc.Nexus
-                      Morloc.Operators
-                      Morloc.Parser
-                      Morloc.Query
-                      Morloc.Quasi
-                      Morloc.State
-                      Morloc.Triple
-                      Morloc.Util
-                      Morloc.Walker
-    build-depends: base,
-                   bytestring,
-                   extra,
-                   safe,
-                   megaparsec,
-                   parsec,
-                   network-uri,
-                   text,
-                   rdf4h,
-                   HTTP,
-                   aeson,
-                   scientific,
-                   containers,
-                   unordered-containers,
-                   vector,
-                   template-haskell,
-                   mtl,
-                   wl-pprint-text,
-                   xml
-    ghc-options: -Wall
-    if flag(documentation)
-        build-depends: hscolour
+  exposed-modules:
+      Morloc
+      Morloc.Database.HSparql.Connection
+      Morloc.Error
+      Morloc.Generator
+      Morloc.Json
+      Morloc.Language
+      Morloc.Lexer
+      Morloc.Nexus
+      Morloc.Operators
+      Morloc.Parser
+      Morloc.Quasi
+      Morloc.Query
+      Morloc.State
+      Morloc.Triple
+      Morloc.Util
+      Morloc.Walker
+  other-modules:
+      Paths_morloc
+  hs-source-dirs:
+      library
+  build-depends:
+      HTTP
+    , aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , extra
+    , megaparsec
+    , mtl
+    , network-uri
+    , parsec
+    , rdf4h
+    , safe
+    , scientific
+    , template-haskell
+    , text
+    , unordered-containers
+    , vector
+    , wl-pprint-text
+    , xml
+  default-language: Haskell2010
 
 executable morloc
-    main-is: Main.hs
-    hs-source-dirs: executable
-    ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
-    build-depends:
-        base >=4.7 && <5
-      , rdf4h
-      , text
-      , morloc 
-    default-language: Haskell2010
- 
-test-suite morloc-test-suite
-  type: exitcode-stdio-1.0
   main-is: Main.hs
   other-modules:
       Paths_morloc
+  hs-source-dirs:
+      executable
+  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      HTTP
+    , aeson
+    , base >=4.7 && <5
+    , bytestring
+    , containers
+    , extra
+    , megaparsec
+    , morloc
+    , mtl
+    , network-uri
+    , parsec
+    , rdf4h
+    , safe
+    , scientific
+    , template-haskell
+    , text
+    , unordered-containers
+    , vector
+    , wl-pprint-text
+    , xml
+  default-language: Haskell2010
+
+test-suite morloc-test
+  type: exitcode-stdio-1.0
+  main-is: Main.hs
+  other-modules:
       ParserTests
       WalkerTests
+      Paths_morloc
   hs-source-dirs:
       test-suite
-  ghc-options: -Wall -rtsopts -threaded -with-rtsopts=-N
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base
-    , tasty
-    , tasty-hspec >= 0.1
+      HTTP
+    , aeson
+    , base
+    , bytestring
+    , containers
+    , extra
+    , megaparsec
     , morloc
+    , mtl
+    , network-uri
+    , parsec
     , rdf4h
+    , safe
+    , scientific
+    , tasty
+    , tasty-hspec >=0.1
+    , template-haskell
     , text
+    , unordered-containers
+    , vector
+    , wl-pprint-text
+    , xml
   default-language: Haskell2010
