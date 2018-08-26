@@ -25,6 +25,7 @@ dependencies:
   - parsec
   - network-uri
   - text
+  - haskell-src-meta
   - rdf4h
   - HTTP
   - aeson

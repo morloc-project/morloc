@@ -13,6 +13,8 @@ import qualified Text.PrettyPrint.Leijen.Text as Gen
 import qualified Data.RDF as DR
 import qualified Morloc.Database.HSparql.Connection as Conn
 import qualified Data.Text as DT
+import qualified Language.Haskell.Meta.Parse as MP
+
 import Text.Parsec
 
 import Morloc.Types (SparqlEndPoint)
@@ -55,7 +57,9 @@ s = QuasiQuoter {
       Right xs -> return $ AppE (VarE 'Gen.hcat) (ListE (map qI xs)) where
         qI :: I -> Exp
         qI (S x) = AppE (VarE 'Gen.string) (LitE (StringL x))
-        qI (V x) = VarE (mkName x)
+        qI (V x) = case MP.parseExp x of
+          (Right hask) -> hask -- a Haskell expression
+          (Left err) -> error err
 
 
 maybeValue :: Conn.BindingValue -> Maybe DT.Text
