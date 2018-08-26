@@ -43,7 +43,7 @@ writeRDF' serializer code
 
 doOrDie :: ME.ThrowsError a -> IO a
 doOrDie (Right x) = return x
-doOrDir (Left err) = fail $ show err ++ "\n"
+doOrDie (Left err) = fail $ show err ++ "\n"
 
 writeTurtle :: DT.Text -> IO ()
 writeTurtle = writeRDF' (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))

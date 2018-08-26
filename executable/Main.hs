@@ -12,8 +12,8 @@ usage = putStr $ unlines [
       "The morloc CLI is under development, try one of these patterns:"
     , "  morloc --rdf -e <code>"
     , "  morloc --rdf --triple -e <code>"
-    , "  morloc --rdf -e <filename>"
-    , "  morloc --rdf --triple -e <filename>"
+    , "  morloc --rdf <filename>"
+    , "  morloc --rdf --triple <filename>"
     , "  morloc <filename> <sparql-endpoint>"
   ]
 
