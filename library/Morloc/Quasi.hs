@@ -1,10 +1,11 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 module Morloc.Quasi (
-    s
+    idoc
   , sparql
   , render
   , render'
+  , text'
 ) where
 
 import Language.Haskell.TH
@@ -13,6 +14,7 @@ import qualified Text.PrettyPrint.Leijen.Text as Gen
 import qualified Data.RDF as DR
 import qualified Morloc.Database.HSparql.Connection as Conn
 import qualified Data.Text as DT
+import qualified Data.Text.Lazy as DL
 import qualified Language.Haskell.Meta.Parse as MP
 
 import Text.Parsec
@@ -24,6 +26,9 @@ render = Gen.displayTStrict . Gen.renderPretty 0.5 70
 
 render' :: Gen.Doc -> String
 render' = DT.unpack . render
+
+text' :: DT.Text -> Gen.Doc
+text' = (Gen.text . DL.fromStrict)
 
 type Parser = Parsec String ()
 
@@ -43,8 +48,9 @@ pE :: Parser I
 pE = fmap (S . return) $ char '$' <* notFollowedBy (char '}')
 
 
-s :: QuasiQuoter
-s = QuasiQuoter {
+-- | __i__nterpolated __doc__ument
+idoc :: QuasiQuoter
+idoc = QuasiQuoter {
     quoteExp  = compile
   , quotePat  = error "Can't handle patterns"
   , quoteType = error "Can't handle types"

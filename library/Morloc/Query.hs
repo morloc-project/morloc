@@ -13,6 +13,7 @@ module Morloc.Query (
     exportsQ
   , forNexusCallQ
   , sourcesQ
+  , languagesQ
   , packersQ
   , arg2typeQ
 ) where
@@ -118,6 +119,18 @@ packersQ = [sparql|
       ?import mlc:name  ?function_name ;
               mlc:alias ?mlc_name .
     }
+  }
+|]
+
+languagesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+languagesQ = [sparql|
+  PREFIX mlc: <http://www.morloc.io/ontology/000/>
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+  SELECT DISTINCT ?lang
+  WHERE {
+    ?i rdf:type mlc:source ;
+       mlc:lang ?lang .
   }
 |]
 

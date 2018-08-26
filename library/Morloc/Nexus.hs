@@ -9,26 +9,28 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Nexus (
-      perlNexus
-  ) where
+module Morloc.Nexus (generate) where
 
 import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Query as Q
 import qualified Morloc.System as MS
-import qualified Morloc.Util as MU
 import qualified Data.Text as DT
-import qualified Data.Text.Lazy as DL
-import qualified Data.Maybe as DM
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
+
+
+-- | Generate the nexus, which is a program that coordinates the execution of
+-- the language-specific function pools.
+generate :: SparqlEndPoint -> IO Script
+generate e
+  =   Script
+  <$> pure "nexus"
+  <*> pure "perl"
+  <*> perlNexus e
 
 perlNexus :: SparqlEndPoint -> IO DT.Text
 perlNexus e = perlNexus' e Q.exportsQ Q.forNexusCallQ where
-
-text' :: DT.Text -> Doc
-text' = (text . DL.fromStrict)
 
 perlNexus'
   :: SparqlEndPoint
@@ -71,7 +73,7 @@ perlNexus' ep f g = fmap render (main <$> f' <*> g') where
 
 
 main :: [Doc] -> [(Doc, Doc, Doc, Doc, Doc)] -> Doc
-main names fdata = [s|#!/usr/bin/env perl
+main names fdata = [idoc|#!/usr/bin/env perl
 
 use strict;
 use warnings;
@@ -112,11 +114,11 @@ ${usageT names}
 ${vsep (map functionT fdata)}
 |]
 
-hashmapT names = [s|my %cmds = ${tupled (map hashmapEntryT names)};|]
+hashmapT names = [idoc|my %cmds = ${tupled (map hashmapEntryT names)};|]
 
-hashmapEntryT n = [s|${n} => \&call_${n}|]
+hashmapEntryT n = [idoc|${n} => \&call_${n}|]
 
-usageT names = [s|
+usageT names = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
     ${vsep (map usageLineT names)}
@@ -124,9 +126,9 @@ sub usage{
 }
 |]
 
-usageLineT n = [s|print STDERR "  ${n}\n";|]
+usageLineT n = [idoc|print STDERR "  ${n}\n";|]
 
-functionT (name, nargs, prog, pool, mid) = [s|
+functionT (name, nargs, prog, pool, mid) = [idoc|
 sub call_${name}{
     if(scalar(@_) != ${nargs}){
         print STDERR "Expected ${nargs} arguments to '${name}', given " . 

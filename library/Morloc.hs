@@ -25,13 +25,13 @@ writeProgram ep code = do
     stateResult False = fail ("Failed to upload RDF to" ++ ep)
     stateResult True = return ()
 
-    writeProgram' :: (MG.Script, [MG.Script]) -> IO ()
+    writeProgram' :: (Script, [Script]) -> IO ()
     writeProgram' (n, ps) = do
       writeScript' n
       mapM_ writeScript' ps
       
-    writeScript' :: MG.Script -> IO ()
-    writeScript' (MG.Script base lang code) =
+    writeScript' :: Script -> IO ()
+    writeScript' (Script base lang code) =
       DTIO.writeFile (base <> "." <> lang) code
   
 
