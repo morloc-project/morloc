@@ -13,12 +13,14 @@ module Morloc.Query (
     exportsQ
   , forNexusCallQ
   , sourcesQ
+  , sourcesByLangQ
   , languagesQ
   , packersQ
   , arg2typeQ
 ) where
 
 import qualified Data.Text as DT
+import qualified Text.PrettyPrint.Leijen.Text as Gen
 
 import Morloc.Quasi
 import Morloc.Database.HSparql.Connection
@@ -34,6 +36,36 @@ exportsQ = [sparql|
     ?s rdf:type mlc:export ;
        rdf:value ?o
 |]
+
+sourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+sourcesQ = [sparql|
+  PREFIX mlc: <http://www.morloc.io/ontology/000/>
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+  SELECT ?lang ?fname ?alias ?path 
+  WHERE {
+    ?s rdf:type mlc:source ;
+       mlc:lang ?lang ;
+       mlc:import ?i .
+    ?i mlc:name ?fname ;
+       mlc:alias ?alias .
+    OPTIONAL { ?s mlc:path ?path }
+  }
+|]
+
+sourcesByLangQ :: Gen.Doc -> SparqlEndPoint -> IO [[Maybe DT.Text]]
+sourcesByLangQ lang = [sparql|
+  PREFIX mlc: <http://www.morloc.io/ontology/000/>
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+  SELECT DISTINCT ?path
+  WHERE {
+    ?s rdf:type mlc:source ;
+       mlc:lang ${lang} ;
+       mlc:path ?path .
+  }
+|]
+
 
 -- | This query returns the following:
 --   1. name - name of an exported Morloc function
@@ -62,22 +94,6 @@ forNexusCallQ = [sparql|
        rdf:value ?fname .
   }
   GROUP BY ?typedec ?fname ?lang
-|]
-
-sourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-sourcesQ = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-  SELECT ?lang ?fname ?alias ?path 
-  WHERE {
-    ?s rdf:type mlc:source ;
-       mlc:lang ?lang ;
-       mlc:import ?i .
-    ?i mlc:name ?fname ;
-       mlc:alias ?alias .
-    OPTIONAL { ?s mlc:path ?path }
-  }
 |]
 
 -- | Find all packers

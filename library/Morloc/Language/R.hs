@@ -13,6 +13,7 @@ module Morloc.Language.R (generate) where
 
 import Morloc.Quasi
 import Morloc.Types
+import qualified Morloc.Util as MU
 import qualified Morloc.Query as Q
 
 import qualified Data.Text as DT 
@@ -29,8 +30,13 @@ generateCode :: SparqlEndPoint -> IO DT.Text
 generateCode e = fmap render (main <$> srcs' <*> names')
   where
     srcs' :: IO [Doc]
-    -- srcs' = fmap (map srcParse) (Q.sourcesQ e)
-    srcs' = return ["sourceX"]
+    srcs' = fmap (map toOne) (Q.sourcesByLangQ (dquotes "R") e)
+
+    toOne :: [Maybe DT.Text] -> Doc
+    toOne [Just x] = text' x
+    toOne _ = error "Bad SPARQL return"
+    
+    toRSources xs = MU.unique [p | (x,_,_,p) <- xs , x == "R"] 
 
     names' :: IO [Doc]
     names' = return ["foo"]
