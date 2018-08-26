@@ -16,44 +16,62 @@ module Morloc.Nexus (
 import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
+import Morloc.Query as Q
+import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Data.Text as DT
 import qualified Data.Text.Lazy as DL
+import qualified Data.Maybe as DM
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
-toLazy :: [[Maybe DT.Text]] -> [[Maybe DL.Text]]
-toLazy = map (map (fmap DL.fromStrict)) 
-
 perlNexus :: SparqlEndPoint -> IO DT.Text
-perlNexus = perlNexus' f g where
-  f = undefined
-  g = undefined
+perlNexus e = perlNexus' e Q.exportsQ Q.forNexusCallQ where
+
+text' :: DT.Text -> Doc
+text' = (text . DL.fromStrict)
 
 perlNexus'
-  :: (SparqlEndPoint -> IO [[Maybe DT.Text]]) -- SPARQL query to get morloc names
-  -> (SparqlEndPoint -> IO [[Maybe DT.Text]]) -- SPARQL query to get data needed to build function calls
-  -> SparqlEndPoint
+  :: SparqlEndPoint
+  -> (SparqlEndPoint -> IO [[Maybe DT.Text]]) 
+      -- ^ SPARQL query to get morloc names
+  -> (SparqlEndPoint -> IO [[Maybe DT.Text]]) 
+      -- ^ SPARQL query to get data needed to build function calls
   -> IO DT.Text
-perlNexus' f g ep = fmap render (main <$> f' <*> g') where
+perlNexus' ep f g = fmap render (main <$> f' <*> g') where
   f' :: IO [Doc]
-  f' = fmap  (map prepf . toLazy) (f ep)
+  f' = fmap (map prepf) (f ep)
 
   g' :: IO [(Doc, Doc, Doc, Doc, Doc)]
-  g' = fmap (map prepg . toLazy) (g ep)
+  g' = fmap (map prepg) (g ep)
 
-  prepf :: [Maybe DL.Text] -> Doc
-  prepf [Just x] = text x
+  prepf :: [Maybe DT.Text] -> Doc
+  prepf [Just x] = text' x
   prepf _ = error "Invalid SPARQL return"
 
-  prepg :: [Maybe DL.Text] -> (Doc, Doc, Doc, Doc, Doc)
-  prepg [Just name, Just nargs, Just prog, Just pool, Just mid]
-    =   (text name, text nargs, text prog, text pool, text mid)
+  -- The input from the SPARQL query is:
+  --   1. name - name of an exported Morloc function
+  --   2. lang - the language the function is exported from
+  --   3. mid - id of the specific morloc manifold (id of the type declaration)
+  --   4. nargs - number of arguments the function takes
+  -- The output tuple has the following fields
+  --   1. name - name of an exported Morloc function
+  --   2. nargs - number of arguments the function takes
+  --   3. prog - name of the program the will execute the pool
+  --   4. pool - name of the pool
+  --   5. mid - id of the specific morloc manifold (id of the type declaration)
+  prepg :: [Maybe DT.Text] -> (Doc, Doc, Doc, Doc, Doc)
+  prepg [Just name, Just lang, Just uid, Just nargs]
+    =   ( text' name
+        , text' nargs
+        , text' (MS.findExecutor lang)
+        , text' (MS.makePoolName lang)
+        , text' (MS.makeManifoldName uid)
+        )
   prepg _ = error "Invalid SPARQL return"
 
 
 main :: [Doc] -> [(Doc, Doc, Doc, Doc, Doc)] -> Doc
-main names fdata = [s|
-#!/usr/bin/env perl
+main names fdata = [s|#!/usr/bin/env perl
 
 use strict;
 use warnings;

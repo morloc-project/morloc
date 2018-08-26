@@ -54,11 +54,6 @@ generateNexus e
   <*> pure "perl"
   <*> MN.perlNexus e
 
-makeManifoldName :: DT.Text -> DT.Text
-makeManifoldName x = case reverse (DT.splitOn "/" x) of
-  (y:ys) -> "m" <> y
-  _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
-
 generatePools :: SparqlEndPoint -> IO [Pool]
 generatePools e = fmap (map generatePool . makeDict) (Q.sourcesQ e)
 

@@ -10,34 +10,18 @@ Stability   : experimental
 -}
 
 module Morloc.Query (
-    exports
-  , forNexusCall
+    exportsQ
+  , forNexusCallQ
   , sourcesQ
   , packersQ
   , arg2typeQ
 ) where
 
 import qualified Data.Text as DT
-import qualified Data.Maybe as DM
 
 import Morloc.Quasi
 import Morloc.Database.HSparql.Connection
 import Morloc.Types (SparqlEndPoint)
-
-four :: [a] -> (a,a,a,a)
-four [a,b,c,d] = (a,b,c,d)
-four _ = error "Expected 4 element list"
-
-exports :: SparqlEndPoint -> IO [DT.Text]
-exports e = fmap (concat . map DM.catMaybes) (exportsQ e) where
-
-forNexusCall :: SparqlEndPoint -> IO [(DT.Text, DT.Text, DT.Text, Int)]
-forNexusCall e = fmap (map toInt . map four . map DM.catMaybes) (forNexusCallQ e) where
-  toInt :: (a, a, a, DT.Text) -> (a, a, a, Int)
-  toInt (a,b,c,i) = case (reads (DT.unpack i) :: [(Int, String)]) of
-    [(i, "")] -> (a,b,c,i)
-    _ -> error ("Failed to parse number of arguments. Exected integer, got: " ++ show i)
-
 
 exportsQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 exportsQ = [sparql|
@@ -50,6 +34,11 @@ exportsQ = [sparql|
        rdf:value ?o
 |]
 
+-- | This query returns the following:
+--   1. name - name of an exported Morloc function
+--   2. lang - the language the function is exported from
+--   3. mid - id of the specific morloc manifold (id of the type declaration)
+--   4. nargs - number of arguments the function takes
 forNexusCallQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 forNexusCallQ = [sparql|
   PREFIX mlc: <http://www.morloc.io/ontology/000/>
