@@ -51,61 +51,8 @@ generateNexus :: SparqlEndPoint -> IO Nexus
 generateNexus e
   =   Script
   <$> pure "nexus"
-  <*> pure lang'
-  <*> nexusCode'
-  where
-    -- TODO allow user to choose a generator
-    -- The generator be stored in the endpoint SPARQL db 
-    g = MN.perlCliNexusGenerator
-    lang' = "perl"
-    nexusCode' = case Q.exports e of
-      exports' -> fmap DT.unlines $ sequence
-        [ return (MN.nexusPrologue g)
-        , return ((MN.nexusPrint g) "")
-        , fmap (MN.nexusDispatch g) exports' 
-        , nexusHelp e g
-        , fmap DT.unlines (generateNexusCalls e g)
-        , return (MN.nexusEpilogue g)
-        ]
-
--- | Generate a help message for each exported function
-nexusHelp :: SparqlEndPoint -> MN.NexusGenerator -> IO DT.Text
-nexusHelp e g
-  =   (MN.nexusHelp g)
-  <$> pure prologue'
-  <*> exports'
-  <*> pure epilogue'
-  where
-    prologue' = ["The following commands are exported:"]
-    exports' = fmap (map (\s -> "    " <> s)) (Q.exports e)
-    epilogue' = []
-
--- | Generate functions that call specific functions in specific pools.
--- Here is an example for a Perl nexus:
--- @
---   if(scalar(@_) != 2 ){
---     print STDERR "Expected 2 arguments to `foo`, given X";
---     exit 1;
---   }
---   return `Rscript foo.R m2 3`
--- @
-generateNexusCalls :: SparqlEndPoint -> MN.NexusGenerator -> IO [DT.Text]
-generateNexusCalls e g = (fmap . map) (generateNexusCall g) (Q.forNexusCall e)
-
-generateNexusCall
-  :: MN.NexusGenerator
-  -> ( DT.Text -- ^ function's Morloc name (not necessarily it's native name)
-     , DT.Text -- ^ function's native language
-     , DT.Text -- ^ Morloc ID for the type declaration for this function
-     , Int     -- ^ number of arguments (according to the type signature)
-     )
-  -> DT.Text
-generateNexusCall g (fname, flang, fid, nargs) = (MN.nexusCall g)
-  ("Rscript")            -- command -- FIXME: generalize
-  ("pool." <> flang)     -- pool filename -- FIXME: generalize/customize
-  (fname)                -- function name
-  (makeManifoldName fid) -- manifold name made form type URI
-  (nargs)                -- number of arguments
+  <*> pure "perl"
+  <*> MN.perlNexus e
 
 makeManifoldName :: DT.Text -> DT.Text
 makeManifoldName x = case reverse (DT.splitOn "/" x) of
