@@ -4,11 +4,33 @@ Use the right tool for the right job
 
  [x] Move from `parsec` to `megaparsec`
  [x] Move to `Text` as my sole string representation
- [ ] Use a builder combinator (e.g. wl-pprint-text) for code generation
- [ ] Replace ad hoc RDF querying with SPARQL (via hsparql for now)
+ [x] Use a builder combinator (e.g. wl-pprint-text) for code generation
+ [x] Replace ad hoc RDF querying with SPARQL (via hsparql for now)
  [ ] Add graph names and a reliable import system
  [ ] Test for all v0.13.1 functionallity
 
 # RDF representation
 
- [x] Fix prefix handeling
+ [x] Fix prefix handling
+
+# To catch up with the old C implementation
+
+ [ ] implement good documentation, caching, and effect handling systems
+ [ ] add support for python and bash
+ [ ] demonstrate parameter handling
+ [ ] add higher-order functions
+ [ ] implement the constraint system (as assertions)
+ [ ] add full type checking
+
+# Documentation
+
+ [ ] Write taxonomy library. Port functions from `taxize` and define types and
+     their conversions.
+
+ [ ] Extend README with
+     - [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
+     - [ ] A deeper discussion of the type system
+     - [ ] More examples
+     - [ ] A contribution and future work section
+
+ [ ] Add haddock for every function
