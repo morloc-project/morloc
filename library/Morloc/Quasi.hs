@@ -76,7 +76,7 @@ maybeValue (Conn.Bound (DR.UNode x))             = Just x
 maybeValue _ = Nothing
 
 values :: Maybe [[Conn.BindingValue]] -> [[Maybe DT.Text]]
-values Nothing = []
+values Nothing = error "SPARQL command failed"
 values (Just xss) = (fmap . fmap) maybeValue xss
 
 simpleSelect :: Gen.Doc -> SparqlEndPoint -> IO ([[Maybe DT.Text]])

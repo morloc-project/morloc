@@ -35,6 +35,7 @@ exportsQ = [sparql|
   WHERE {
     ?s rdf:type mlc:export ;
        rdf:value ?o
+  }
 |]
 
 sourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]

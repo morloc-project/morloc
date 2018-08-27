@@ -121,7 +121,7 @@ hashmapEntryT n = [idoc|${n} => \&call_${n}|]
 usageT names = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
-    ${vsep (map usageLineT names)}
+    ${align $ vsep (map usageLineT names)}
     exit 0;
 }
 |]
