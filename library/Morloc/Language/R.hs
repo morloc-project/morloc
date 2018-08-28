@@ -148,7 +148,7 @@ if(length(args) == 0){
   } else {
     x
   }
-  cat(packGeneric(result))
+  cat(packGeneric(result), "\n")
 } else {
   stop("Could not find function '", args[[1]], "'")
 }
