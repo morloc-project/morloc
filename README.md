@@ -6,10 +6,10 @@
 
 The goal of Morloc is provide a universal interface to functions across
 computer languages that will allow programmers to share snippets of code that
-anyone can snap together like Legos to make their own custom applications. The
-common interface is a semantic type system that describes the relationships
-between language-specific types, data formats, and abstract concepts. Based on
-the types, the compiler generates the code needed to link functions between
+anyone can snap together to make their own custom applications. The common
+interface is a semantic type system that describes the relationships between
+language-specific types, data formats, and abstract concepts. Based on the
+types, the compiler generates the code needed to link functions between
 languages and also to direct automation of mundane tasks such as data
 validation, type/format conversions, data caching, distributed computing, and
 file reading/writing. I am also designing a cross-language database that makes
@@ -105,7 +105,7 @@ Types can also be specialized with constrains, for example:
 Count :: x:Int where ( x > 0 )
 ```
 
-This is can also be sued to place constraints on functions. A function is
+This is can also be used to place constraints on functions. A function is
 a compound type that is composed of the types of its inputs, outputs, and
 a list of constraints. Here is a signature for a function that generates *n*
 random numbers between *a* and *b*.
