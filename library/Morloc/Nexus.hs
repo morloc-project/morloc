@@ -43,7 +43,7 @@ perlNexus' ep f g = fmap render (main <$> f' <*> g') where
   f' :: IO [Doc]
   f' = fmap (map prepf) (f ep)
 
-  g' :: IO [(Doc, Doc, Doc, Doc, Doc)]
+  g' :: IO [(Doc, Int, Doc, Doc, Doc)]
   g' = fmap (map prepg) (g ep)
 
   prepf :: [Maybe DT.Text] -> Doc
@@ -61,10 +61,10 @@ perlNexus' ep f g = fmap render (main <$> f' <*> g') where
   --   3. prog - name of the program the will execute the pool
   --   4. pool - name of the pool
   --   5. mid - id of the specific morloc manifold (id of the type declaration)
-  prepg :: [Maybe DT.Text] -> (Doc, Doc, Doc, Doc, Doc)
+  prepg :: [Maybe DT.Text] -> (Doc, Int, Doc, Doc, Doc)
   prepg [Just name, Just lang, Just uid, Just nargs]
     =   ( text' name
-        , text' nargs
+        , (read (DT.unpack nargs) :: Int)
         , text' (MS.findExecutor lang)
         , text' (MS.makePoolName lang)
         , text' (MS.makeManifoldName uid)
@@ -72,7 +72,7 @@ perlNexus' ep f g = fmap render (main <$> f' <*> g') where
   prepg _ = error "Invalid SPARQL return"
 
 
-main :: [Doc] -> [(Doc, Doc, Doc, Doc, Doc)] -> Doc
+main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc
 main names fdata = [idoc|#!/usr/bin/env perl
 
 use strict;
@@ -130,11 +130,13 @@ usageLineT n = [idoc|print STDERR "  ${n}\n";|]
 
 functionT (name, nargs, prog, pool, mid) = [idoc|
 sub call_${name}{
-    if(scalar(@_) != ${nargs}){
-        print STDERR "Expected ${nargs} arguments to '${name}', given " . 
+    if(scalar(@_) != ${int nargs}){
+        print STDERR "Expected ${int nargs} arguments to '${name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
-    return `${prog} ${pool} ${mid} '$_[0]'`
+    return `${prog} ${pool} ${mid} ${hsep $ map argT [0..(nargs-1)]}`
 }
 |]
+
+argT i = [idoc|'$_[${int i}]'|]
