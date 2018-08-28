@@ -272,7 +272,7 @@ mtype =
       ns <- some unambiguous'
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedGeneric")
-             , DR.triple i (M3.mlcPre .:. "value") (plain n)
+             , DR.triple i (M3.rdfPre .:. "value") (plain n)
              ]
           ++ listTag i l
           ++ M3.adopt i ns
@@ -364,7 +364,7 @@ mtype =
       return $ M3.makeTopRDF i (
           [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "namedType")
           , DR.triple i (M3.mlcPre .:. "key") (plain n)
-          ] ++ M3.adoptAs (M3.mlcPre .:. "value") i [t]
+          ] ++ M3.adoptAs (M3.rdfPre .:. "value") i [t]
         )
 
     function' :: MS.Parser M3.TopRDF
@@ -456,7 +456,7 @@ application = do
   arguments <- some term'
   return $ M3.makeTopRDF i (
          [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call")]
-      ++ M3.adoptAs  (M3.mlcPre .:. "value") i [function]
+      ++ M3.adoptAs  (M3.rdfPre .:. "value") i [function]
       ++ M3.adopt i arguments
     )
   where
@@ -497,7 +497,7 @@ booleanExpr = do
       ns <- some argument'
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call") ]
-          ++ M3.adoptAs  (M3.mlcPre .:. "value") i [f]
+          ++ M3.adoptAs  (M3.rdfPre .:. "value") i [f]
           ++ M3.adopt i ns
         )
 
@@ -568,7 +568,7 @@ arithmeticTerm = do
       args <- some argument'
       return $ M3.makeTopRDF i (
              [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call")]
-          ++ M3.adoptAs (M3.mlcPre .:. "value") i [f]
+          ++ M3.adoptAs (M3.rdfPre .:. "value") i [f]
           ++ M3.adopt i args
         )
 

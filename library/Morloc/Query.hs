@@ -11,7 +11,6 @@ Stability   : experimental
 
 module Morloc.Query (
     exportsQ
-  , forNexusCallQ
   , sourcesQ
   , sourcesByLangQ
   , languagesQ
@@ -65,36 +64,6 @@ sourcesByLangQ lang = [sparql|
        mlc:lang ${lang} ;
        mlc:path ?path .
   }
-|]
-
-
--- | This query returns the following:
---   1. name - name of an exported Morloc function
---   2. lang - the language the function is exported from
---   3. mid - id of the specific morloc manifold (id of the type declaration)
---   4. nargs - number of arguments the function takes
-forNexusCallQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-forNexusCallQ = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-  SELECT ?fname ?lang ?typedec (count (distinct ?element) as ?nargs)
-  WHERE {
-    ?typedec rdf:type mlc:typeDeclaration ;
-       mlc:lang "Morloc" ;
-       mlc:lhs ?fname ;
-       mlc:rhs ?type .
-    ?type rdf:type mlc:functionType .
-    ?arg ?element ?type .
-    FILTER(regex(str(?element), "_[0-9]+$", "i"))
-    ?src rdf:type mlc:source ;
-         mlc:lang ?lang ;
-         mlc:import ?i .
-    ?i mlc:alias ?fname .
-    ?e rdf:type mlc:export ;
-       rdf:value ?fname .
-  }
-  GROUP BY ?typedec ?fname ?lang
 |]
 
 -- | Find all packers
@@ -160,7 +129,7 @@ arg2typeQ = [sparql|
   SELECT ?fname ?element ?argvalue ?argtype ?argform ?argname
   WHERE {
       ?call rdf:type mlc:call ;
-         mlc:value ?value .  
+            rdf:value ?value .  
       ?value rdf:type ?value_type .
       ?value rdf:value ?fname .
       ?argvalue ?element ?call .
