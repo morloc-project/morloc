@@ -21,6 +21,62 @@ import qualified Data.HashMap.Strict as Map
 import qualified Data.List as DL
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
+
+-- PREFIX mlc: <http://www.morloc.io/ontology/000/>
+-- PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+-- SELECT ?declaredName ?callName ?lang ?mid ?nargs ?exported
+--
+-- WHERE {
+--   # count the arguments
+--   {
+--     SELECT ?declaredName (count (distinct ?element) as ?nargs)
+--     WHERE {
+--       ?mid rdf:type mlc:typeDeclaration ;
+--          mlc:lang "Morloc" ;
+--          mlc:lhs ?declaredName ;
+--          mlc:rhs ?type .
+--       ?type rdf:type mlc:functionType .
+--       ?arg ?element ?type .
+--       FILTER(regex(str(?element), "_[0-9]+$", "i"))
+--     }
+--     GROUP BY ?declaredName
+--   }
+--   # determine whether the function is exported
+--   OPTIONAL {
+--       ?e rdf:type mlc:export ;
+--          rdf:value ?declaredName .
+--   }
+--   BIND(bound(?e) AS ?exported)
+--   # map language to name
+--   {
+--     ?mid rdf:type mlc:dataDeclaration ;
+--        mlc:lhs ?declaredName ;
+--        mlc:rhs ?rhs .
+--     ?rhs rdf:type mlc:call ;
+--          rdf:value ?callid .
+--     ?callid rdf:type mlc:name ;
+--             rdf:value ?callName .
+--     OPTIONAL {
+--       ?src rdf:type mlc:source ;
+--            mlc:lang ?lang ;
+--            mlc:import ?i .
+--       ?i mlc:alias ?callName .
+--     }
+--   } UNION {
+--     ?mid rdf:type mlc:typeDeclaration ;
+--       mlc:lang "Morloc" ;
+--       mlc:lhs ?declaredName ;
+--       mlc:rhs ?type .
+--     ?type rdf:type mlc:functionType .
+--     ?src rdf:type mlc:source ;
+--          mlc:lang ?lang ;
+--          mlc:import ?i .
+--     ?i mlc:alias ?declaredName .
+--   }
+-- }
+-- ORDER BY ?lang DESC(?callName)
+
+
 -- | Generate the nexus, which is a program that coordinates the execution of
 -- the language-specific function pools.
 generate :: SparqlEndPoint -> IO Script

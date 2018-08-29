@@ -42,13 +42,16 @@ WHERE {
   ?type rdf:type mlc:functionType .
   ?arg ?element ?type .
   FILTER(regex(str(?element), "_[0-9]+$", "i"))
-  ?src rdf:type mlc:source ;
-       mlc:lang "R" ;
-       mlc:import ?i .
-  ?i mlc:alias ?alias ;
-     mlc:name ?fname .
   ?e rdf:type mlc:export ;
      rdf:value ?alias .
+  # ---- get source name, if this was a sourced file
+  OPTIONAL {
+    ?src rdf:type mlc:source ;
+         mlc:lang "R" ;
+         mlc:import ?i .
+    ?i mlc:alias ?alias ;
+       mlc:name ?fname .
+  }
   # ---- find generic unpacker -----------------------------
   ?genericDec rdf:type mlc:typeDeclaration ;
               mlc:lang "R" ;

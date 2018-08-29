@@ -27,6 +27,7 @@ dependencies:
   - text
   - haskell-src-meta
   - rdf4h
+  - hashable
   - HTTP
   - aeson
   - scientific
