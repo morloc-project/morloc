@@ -32,7 +32,7 @@ expsQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 expsQ = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?alias ?fname ?typedec ?generic ?element ?unpackerName ?langtype ?callid
+SELECT ?alias ?fname ?typedec ?generic ?element ?unpackerName ?langtype ?rhsid
 WHERE {
   # ---- find Morloc function ------------------------------
   ?typedec rdf:type mlc:typeDeclaration ;
@@ -104,13 +104,25 @@ WHERE {
 
 cisQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 cisQ = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-  SELECT ?callid
-  WHERE {
-    ?callid rdf:type mlc:call
+PREFIX mlc: <http://www.morloc.io/ontology/000/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?callid (count (distinct ?element) as ?nargs) ?fid ?falias ?fname
+WHERE {
+  ?callid rdf:type mlc:call ;
+          rdf:value ?fid .
+  OPTIONAL {
+    ?fid rdf:type mlc:name ;
+            rdf:value ?falias .
+    ?source rdf:type mlc:source ;
+            mlc:lang "R" ;
+            mlc:import ?import .
+    ?import mlc:alias ?falias ;
+            mlc:name ?fname
   }
+  ?arg ?element ?callid .
+  FILTER(regex(str(?element), "_[0-9]+$", "i"))
+}
+GROUP BY ?callid ?fid ?falias ?fname
 |]
 
 generateCode :: SparqlEndPoint -> IO DT.Text
@@ -167,27 +179,48 @@ generateCode e = fmap render (main <$> srcs' <*> exps' <*> cis')
       "[Just alias, Just fname, Just typedec, Just generic, Just el, unpacker, ltype]\n" ++
       "got: " ++ show e)
 
-    cis' :: IO [Doc]
+    cis' :: IO [(Doc, Doc, Int, Maybe (Doc, Doc))]
     cis' = fmap (map prepCis) (cisQ e)
 
-    prepCis :: [Maybe DT.Text] -> Doc
-    prepCis [Just callid] = text' callid
+    prepCis :: [Maybe DT.Text] -> (Doc, Doc, Int, Maybe (Doc, Doc))
+    prepCis [Just callid, Just nargs, Just fid, falias, fname] =
+        ( text' (MS.makeManifoldName callid)
+        , text' (MS.makeManifoldName fid)
+        , ((read . DT.unpack) nargs :: Int)
+        , fmap (\xs -> (text' (xs !! 0), text' (xs !! 1))) (sequence [falias, fname])
+        ) 
     prepCis e = error ("Bad SPARQL, expected: [Just callid]\ngot: " ++ show e)
 
+commaSep :: [Doc] -> Doc
+commaSep = hcat . punctuate ", "
+
+nameArgs :: [a] -> [Doc]
+nameArgs xs = map ((<>) "x") (map int [1 .. length xs])
+
+iArgs :: Int -> [Doc]
+iArgs i = map ((<>) "x") (map int [1 .. i])
 
 main
   :: [Doc] 
   -- ^ Pass to retrieve sources
   -> [((Doc, Doc, Doc, Doc), [Maybe (Doc, Doc)])]
   -- ^ Pass to exported functions
-  -> [Doc]
+  -> [(Doc, Doc, Int, Maybe (Doc, Doc))]
   -- ^ Pass to cis functions
   -> Doc
 main srcs exps ciss = [idoc|#!/usr/bin/env Rscript
 
 ${vsep (map sourceT srcs)}
 
+# ------------------
+# Exported functions
+# ------------------
+
 ${vsep (map exportedT exps)}
+
+# --------------
+# Internal calls
+# --------------
 
 ${vsep (map cisT ciss)}
 
@@ -212,14 +245,11 @@ sourceT s = [idoc|source("${s}")|]
 exportedT ((alias, fname, uid, generic), args) = [idoc|
 # ${alias}
 
-${uid} <- function(${hcat (punctuate ", " (nameArgs args))}){
-  ${fname}(${hcat (punctuate ", " (castArgs (generic, args)))})
+${uid} <- function(${commaSep (nameArgs args)}){
+  ${fname}(${commaSep (castArgs (generic, args))})
 }
 |]
   where
-    nameArgs :: [a] -> [Doc]
-    nameArgs xs = map ((<>) "x") (map int [1 .. length xs])
-
     castArgs :: (Doc, [Maybe (Doc, Doc)]) -> [Doc]
     castArgs (generic, xss) = zipWith
       (\w i -> [idoc|${w}(x${i})|])
@@ -230,6 +260,19 @@ ${uid} <- function(${hcat (punctuate ", " (nameArgs args))}){
     wrapper _ (Just (specific, _)) = specific
     wrapper generic _ = generic
 
-cisT callid = [idoc|
+
+cisT (callid, fid, nargs, Just (falias, fname)) = [idoc|
+# ${falias}
+
+${callid} <- function(${commaSep (iArgs nargs)}){
+  ${fname}(${commaSep (iArgs nargs)})
+}
+|]
+
+cisT (callid, fid, nargs, Nothing) = [idoc|
 # ${callid}
+
+${callid} <- function(${commaSep (iArgs nargs)}){
+  ${fid}(${commaSep (iArgs nargs)})
+}
 |]
