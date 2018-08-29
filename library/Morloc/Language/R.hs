@@ -102,8 +102,19 @@ WHERE {
 }
 |]
 
+cisQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+cisQ = [sparql|
+  PREFIX mlc: <http://www.morloc.io/ontology/000/>
+  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+  SELECT ?callid
+  WHERE {
+    ?callid rdf:type mlc:call
+  }
+|]
+
 generateCode :: SparqlEndPoint -> IO DT.Text
-generateCode e = fmap render (main <$> srcs' <*> exps')
+generateCode e = fmap render (main <$> srcs' <*> exps' <*> cis')
   where
     srcs' :: IO [Doc]
     srcs' = fmap (map toOne) (Q.sourcesByLangQ (dquotes "R") e)
@@ -156,13 +167,29 @@ generateCode e = fmap render (main <$> srcs' <*> exps')
       "[Just alias, Just fname, Just typedec, Just generic, Just el, unpacker, ltype]\n" ++
       "got: " ++ show e)
 
+    cis' :: IO [Doc]
+    cis' = fmap (map prepCis) (cisQ e)
 
-main :: [Doc] -> [((Doc, Doc, Doc, Doc), [Maybe (Doc, Doc)])] -> Doc
-main srcs exps = [idoc|#!/usr/bin/env Rscript
+    prepCis :: [Maybe DT.Text] -> Doc
+    prepCis [Just callid] = text' callid
+    prepCis e = error ("Bad SPARQL, expected: [Just callid]\ngot: " ++ show e)
+
+
+main
+  :: [Doc] 
+  -- ^ Pass to retrieve sources
+  -> [((Doc, Doc, Doc, Doc), [Maybe (Doc, Doc)])]
+  -- ^ Pass to exported functions
+  -> [Doc]
+  -- ^ Pass to cis functions
+  -> Doc
+main srcs exps ciss = [idoc|#!/usr/bin/env Rscript
 
 ${vsep (map sourceT srcs)}
 
 ${vsep (map exportedT exps)}
+
+${vsep (map cisT ciss)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
@@ -202,3 +229,7 @@ ${uid} <- function(${hcat (punctuate ", " (nameArgs args))}){
     wrapper :: Doc -> (Maybe (Doc, Doc)) -> Doc
     wrapper _ (Just (specific, _)) = specific
     wrapper generic _ = generic
+
+cisT callid = [idoc|
+# ${callid}
+|]
