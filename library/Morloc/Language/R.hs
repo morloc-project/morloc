@@ -127,11 +127,21 @@ generateCode e = fmap render (main <$> srcs' <*> exps')
     genericGrp _ = Nothing
 
     toExp :: [Maybe DT.Text] -> ((DT.Text, Doc, Doc, Doc), (DT.Text, Maybe Doc, Maybe Doc))
-    toExp [Just alias, Just fname, Just typedec, Just generic, Just el, unpacker, ltype] =
-      ( (alias, text' fname, text' (MS.makeManifoldName typedec), text' generic)
-      , (el, fmap text' unpacker, fmap text' ltype)
+    toExp [Just alias, fname, Just typedec, Just generic, Just el, unpacker, ltype] =
+      ( ( alias
+        , text' (maybe alias id fname)
+        , text' (MS.makeManifoldName typedec)
+        , text' generic
+        )
+      , ( el
+        , fmap text' unpacker
+        , fmap text' ltype
+        )
       )
-    toExp _ = error "Bad SPARQL"
+    toExp e = error (
+      "Bad SPARQL, expected: " ++
+      "[Just alias, Just fname, Just typedec, Just generic, Just el, unpacker, ltype]\n" ++
+      "got: " ++ show e)
 
 
 main :: [Doc] -> [((Doc, Doc, Doc, Doc), [Maybe (Doc, Doc)])] -> Doc
