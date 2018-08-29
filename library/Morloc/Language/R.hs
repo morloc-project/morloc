@@ -32,7 +32,7 @@ expsQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 expsQ = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?alias ?fname ?typedec ?generic ?element ?unpackerName ?langtype
+SELECT ?alias ?fname ?typedec ?generic ?element ?unpackerName ?langtype ?callid
 WHERE {
   # ---- find Morloc function ------------------------------
   ?typedec rdf:type mlc:typeDeclaration ;
@@ -91,6 +91,14 @@ WHERE {
    ?packerOutput rdf:type mlc:atomicType ;
                  rdf:value ?langtype .
   }
+  # ---- find called function (for Morloc functions) ------
+  OPTIONAL {
+    ?dataid rdf:type mlc:dataDeclaration ; 
+            mlc:lhs ?alias ;
+            mlc:rhs ?rhsid .
+    ?rhsid rdf:type mlc:call ;
+           rdf:value ?callid
+  }
 }
 |]
 
@@ -127,9 +135,14 @@ generateCode e = fmap render (main <$> srcs' <*> exps')
     genericGrp _ = Nothing
 
     toExp :: [Maybe DT.Text] -> ((DT.Text, Doc, Doc, Doc), (DT.Text, Maybe Doc, Maybe Doc))
-    toExp [Just alias, fname, Just typedec, Just generic, Just el, unpacker, ltype] =
+    toExp [Just alias, fname, Just typedec, Just generic, Just el, unpacker, ltype, callid] =
       ( ( alias
-        , text' (maybe alias id fname)
+        , text' (
+            maybe
+              (maybe alias id fname) -- use source name if is sourced
+              (MS.makeManifoldName) -- if is Morloc function, use call id
+              callid
+          )
         , text' (MS.makeManifoldName typedec)
         , text' generic
         )
