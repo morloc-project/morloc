@@ -444,8 +444,8 @@ expression =
   where
     term' :: MS.Parser M3.TopRDF
     term' =
-          try (Tok.parens expression)
-      <|> try application
+          try application -- must go first to allow, e.g. `(g . f) x`
+      <|> try (Tok.parens expression)
       <|> try mdata
       <|> try tripleName
 
