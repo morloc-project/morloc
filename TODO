@@ -7,7 +7,7 @@ Use the right tool for the right job
  [x] Use a builder combinator (e.g. wl-pprint-text) for code generation
  [x] Replace ad hoc RDF querying with SPARQL (via hsparql for now)
  [ ] Add graph names and a reliable import system
- [ ] Test for all v0.13.1 functionallity
+ [x] Test for all v0.13.1 functionallity
 
 # RDF representation
 
