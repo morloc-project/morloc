@@ -124,308 +124,368 @@ testParser = parallel $ do
     , isu 5 "rdf:value" ("34.0" .^^. M3.xsdPre .:. "decimal")
     ]
 
-  -- testRdfCode
-  --   "source \"R\" (\"fo.o\" as foo)"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:source"
-  --   , iup 1 "morloc:lang" "R"
-  --   , iui 1 "morloc:import" 2
-  --   , iup 2 "morloc:name" "fo.o"
-  --   , iup 2 "morloc:alias" "foo"
-  --   ]
-  --
-  -- testRdfCode
-  --   "from \"bob/foo\" import (bar, baz)"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:restricted_import"
-  --   , iup 1 "morloc:name" "bob/foo.loc"
-  --   , iui 1 "morloc:import" 2
-  --   , iut 2 "rdf:type" "morloc:name" "bar"
-  --   , iui 1 "morloc:import" 3
-  --   , iut 3 "rdf:type" "morloc:name" "baz"
-  --   ]
-  --
-  -- testRdfCode
-  --   "import \"bob/foo\" as foo"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:import"
-  --   , iup 1 "morloc:name" "bob/foo.loc"
-  --   , iup 1 "morloc:namespace" "foo"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: Bool"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "A"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:atomicType" "Bool"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: [Bool]"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "A"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:parameterizedType" "List"
-  --   , iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:atomicType" "Bool"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: (Bool, Fool)"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "A"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:parameterizedType" "Tuple"
-  --   , iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:atomicType" "Bool"
-  --   , iui 5 "rdf:_1" 3
-  --   , iut 5 "rdf:type" "morloc:atomicType" "Fool"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "A :: {B :: Bool, C :: Fool}"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "A"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:parameterizedType" "Record"
-  --   , iui 4 "rdf:_0" 3
-  --   , iuu 4 "rdf:type" "morloc:namedType"
-  --   , iut 4 "morloc:key" "morloc:name" "B"
-  --   , iui 4 "morloc:value" 5
-  --   , iut 5 "rdf:type" "morloc:atomicType" "Bool"
-  --   , iui 6 "rdf:_1" 3
-  --   , iuu 6 "rdf:type" "morloc:namedType"
-  --   , iut 6 "morloc:key" "morloc:name" "C"
-  --   , iui 6 "morloc:value" 7
-  --   , iut 7 "rdf:type" "morloc:atomicType" "Fool"
-  --   ]
-  --
-  -- testRdfCode
-  --   "x = 1"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:dataDeclaration"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "x"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:integer" "1"
-  --   ]
-  --
-  -- testRdfCode
-  --   "f x = x"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:dataDeclaration"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "f"
-  --   , iui 3 "rdf:_0" 1
-  --   , iut 3 "rdf:type" "morloc:name" "x"
-  --   , iui 1 "morloc:rhs" 4
-  --   , iut 4 "rdf:type" "morloc:name" "x"
-  --   ]
-  --
-  -- testRdfCode
-  --   "f = g 42 66"
-  --   [ iuu 0 "rdf:type" "morloc:script"
-  --   , iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:dataDeclaration"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "f"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iuu 3 "rdf:type" "morloc:call"
-  --   , iui 3 "morloc:value" 4
-  --   , iut 4 "rdf:type" "morloc:name" "g"
-  --   , iui 5 "rdf:_0" 3
-  --   , iut 5 "rdf:type" "morloc:integer" "42"
-  --   , iui 6 "rdf:_1" 3
-  --   , iut 6 "rdf:type" "morloc:integer" "66"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "(1, \"foo\", 1.1)"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iuu 1 "rdf:type" "morloc:tuple"
-  --   , iui 2 "rdf:_0" 1
-  --   , iut 2 "rdf:type" "morloc:integer" "1"
-  --   , iui 3 "rdf:_1" 1
-  --   , iut 3 "rdf:type" "morloc:string" "foo"
-  --   , iui 4 "rdf:_2" 1
-  --   , iut 4 "rdf:type" "morloc:number" "1.1"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..3])
-  --   "foo :: i:Int -> j:[A]"
-  --   [ iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:atomicType" "Int"
-  --   , iut 4 "morloc:label" "morloc:name" "i"
-  --   , iut 5 "rdf:type" "morloc:parameterizedType" "List"
-  --   , iut 5 "morloc:label" "morloc:name" "j"
-  --   , iui 6 "rdf:_0" 5
-  --   , iut 6 "rdf:type" "morloc:atomicType" "A"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..2])
-  --   "foo :: i:Int -> Num where (i > 0)"
-  --   [ iuu 3 "rdf:type" "morloc:functionType"
-  --   , iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:atomicType" "Int"
-  --   , iut 4 "morloc:label" "morloc:name" "i"
-  --   , iui 3 "morloc:output" 5
-  --   , iut 5 "rdf:type" "morloc:atomicType" "Num"
-  --   , iui 3 "morloc:constraint" 6
-  --   , iut 6 "rdf:type" "morloc:binop" "GT"
-  --   , iui 6 "morloc:lhs" 7
-  --   , iui 6 "morloc:rhs" 8
-  --   , iut 7 "rdf:type" "morloc:name" "i"
-  --   , iut 8 "rdf:type" "morloc:integer" "0"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "foo :: Int"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "foo"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iut 3 "rdf:type" "morloc:atomicType" "Int"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..5])
-  --   "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
-  --   [ iut 6 "rdf:type" "morloc:binop" "GT"
-  --   , iui 6 "morloc:lhs" 8
-  --   , iui 6 "morloc:rhs" 10
-  --   , iut 8 "rdf:type" "morloc:binop" "Add"
-  --   , iui 8 "morloc:lhs" 7
-  --   , iui 8 "morloc:rhs" 9
-  --   , iut 7 "rdf:type" "morloc:number" "1.1"
-  --   , iut 9 "rdf:type" "morloc:number" "1.2"
-  --   , iut 10 "rdf:type" "morloc:number" "2.0"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "foo :: a, (b -> c) -> d"
-  --   [ iui 1 "rdf:_0" 0
-  --   , iut 1 "rdf:type" "morloc:typeDeclaration" "Morloc"
-  --   , iui 1 "morloc:lhs" 2
-  --   , iut 2 "rdf:type" "morloc:name" "foo"
-  --   , iui 1 "morloc:rhs" 3
-  --   , iuu 3 "rdf:type" "morloc:functionType"
-  --   , iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:atomicGeneric" "a"
-  --   , iui 5 "rdf:_1" 3
-  --   , iuu 5 "rdf:type" "morloc:functionType"
-  --   , iui 6 "rdf:_0" 5
-  --   , iut 6 "rdf:type" "morloc:atomicGeneric" "b"
-  --   , iui 5 "morloc:output" 7
-  --   , iut 7 "rdf:type" "morloc:atomicGeneric" "c"
-  --   , iui 3 "morloc:output" 8
-  --   , iut 8 "rdf:type" "morloc:atomicGeneric" "d"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..2])
-  --   "foo :: A B -> C D"
-  --   [ iuu 3 "rdf:type" "morloc:functionType"
-  --   , iui 4 "rdf:_0" 3
-  --   , iut 4 "rdf:type" "morloc:parameterizedType" "A"
-  --   , iui 5 "rdf:_0" 4
-  --   , iut 5 "rdf:type" "morloc:atomicType" "B"
-  --   , iui 3 "morloc:output" 6
-  --   , iut 6 "rdf:type" "morloc:parameterizedType" "C"
-  --   , iui 7 "rdf:_0" 6
-  --   , iut 7 "rdf:type" "morloc:atomicType" "D"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..2])
-  --   "foo :: A where ((1 == 1) and (2 == 2))"
-  --   [ iut 3 "rdf:type" "morloc:atomicType" "A"
-  --   , iui 3 "morloc:constraint" 4
-  --   , iut 4 "rdf:type" "morloc:binop" "and"
-  --   , iui 4 "morloc:lhs" 5
-  --   , iui 4 "morloc:rhs" 8
-  --   , iut 5 "rdf:type" "morloc:binop" "EQ"
-  --   , iui 5 "morloc:lhs" 6
-  --   , iui 5 "morloc:rhs" 7
-  --   , iut 6 "rdf:type" "morloc:integer" "1"
-  --   , iut 7 "rdf:type" "morloc:integer" "1"
-  --   , iut 8 "rdf:type" "morloc:binop" "EQ"
-  --   , iui 8 "morloc:lhs" 9
-  --   , iui 8 "morloc:rhs" 10
-  --   , iut 9 "rdf:type" "morloc:integer" "2"
-  --   , iut 10 "rdf:type" "morloc:integer" "2"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0])
-  --   "f . g"
-  --   [ iui 2 "rdf:_0" 0
-  --   , iuu 2 "rdf:type" "morloc:composition"
-  --   , iui 2 "morloc:lhs" 1
-  --   , iui 2 "morloc:rhs" 3
-  --   , iut 1 "rdf:type" "morloc:name" "f"
-  --   , iut 3 "rdf:type" "morloc:name" "g"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId ([0..6] ++ [9]))
-  --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (x^(-k) == 1)"
-  --   [ iut 7 "rdf:type" "morloc:unaryOp" "Neg"
-  --   , iui 8 "rdf:_0" 7
-  --   , iut 8 "rdf:type" "morloc:name" "k"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId [0..3])
-  --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (f x (g y z))"
-  --   [ iuu 4 "rdf:type" "morloc:call"
-  --   , iui 4 "morloc:value" 5
-  --   , iut 5 "rdf:type" "morloc:name" "f"
-  --   , iui 6 "rdf:_0" 4
-  --   , iut 6 "rdf:type" "morloc:name" "x"
-  --   , iui 7 "morloc:value" 8
-  --   , iui 7 "rdf:_1" 4
-  --   , iuu 7 "rdf:type" "morloc:call"
-  --   , iut 8 "rdf:type" "morloc:name" "g"
-  --   , iui 9 "rdf:_0" 7
-  --   , iut 9 "rdf:type" "morloc:name" "y"
-  --   , iui 10 "rdf:_1" 7
-  --   , iut 10 "rdf:type" "morloc:name" "z"
-  --   ]
-  --
-  -- testRdfCodeWith
-  --   (rmId ([0..4] ++ [8]))
-  --   -- this will fail later, since x,k, and t are undefined.
-  --   "X :: Y where (f x y == 1)"
-  --   [ iuu 5 "rdf:type" "morloc:call"
-  --   , iui 5 "morloc:value" 6
-  --   , iut 6 "rdf:type" "morloc:name" "f"
-  --   , iui 7 "rdf:_0" 5
-  --   , iut 7 "rdf:type" "morloc:name" "x"
-  --   , iut 9 "rdf:type" "morloc:integer" "1"
-  --   ]
+  testRdfCode
+    "source \"R\" (\"fo.o\" as foo)"
+    [ iss 0 "rdf:type" "mlc:script"
+    , isu 0 "rdf:value" (plain "<stdin>")
+    , isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:source"
+    , isu 1 "mlc:lang" (plain "R")
+    , isi 1 "mlc:import" 2
+    , isu 2 "mlc:name" (plain "fo.o")
+    , isu 2 "mlc:alias" (plain "foo")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "from \"bob/foo\" import (bar, baz)"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:restricted_import"
+    , isu 1 "mlc:name" (plain "bob/foo.loc")
+    , isi 1 "mlc:import" 2
+    , iss 2 "rdf:type" "mlc:name"
+    , isu 2 "rdf:value" (plain "bar")
+    , isi 1 "mlc:import" 3
+    , iss 3 "rdf:type" "mlc:name"
+    , isu 3 "rdf:value" (plain "baz")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "import \"bob/foo\" as foo"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:import"
+    , isu 1 "mlc:name" (plain "bob/foo.loc")
+    , isu 1 "mlc:namespace" (plain "foo")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: Bool"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "A")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:atomicType"
+    , isu 2 "rdf:value" (plain "Bool")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: [Bool]"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "A")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:parameterizedType"
+    , isu 2 "rdf:value" (plain "List")
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:atomicType"
+    , isu 3 "rdf:value" (plain "Bool")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: (Bool, Fool)"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "A")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:parameterizedType"
+    , isu 2 "rdf:value" (plain "Tuple")
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:atomicType"
+    , isu 3 "rdf:value" (plain "Bool")
+    , isi 4 "rdf:_1" 2
+    , iss 4 "rdf:type" "mlc:atomicType"
+    , isu 4 "rdf:value" (plain "Fool")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "A :: {B :: Bool, C :: Fool}"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "A")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:parameterizedType"
+    , isu 2 "rdf:value" (plain "Record")
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:namedType"
+    , isu 3 "mlc:key" (plain "B")
+    , isi 3 "rdf:value" 4
+    , iss 4 "rdf:type" "mlc:atomicType"
+    , isu 4 "rdf:value" (plain "Bool")
+    , isi 5 "rdf:_1" 2
+    , iss 5 "rdf:type" "mlc:namedType"
+    , isu 5 "mlc:key" (plain "C")
+    , isi 5 "rdf:value" 6
+    , iss 6 "rdf:type" "mlc:atomicType"
+    , isu 6 "rdf:value" (plain "Fool")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "x = 1"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:dataDeclaration"
+    , isu 1 "mlc:lhs" (plain "x")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:number"
+    , isu 2 "rdf:value" ("1.0" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "f x = x"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:dataDeclaration"
+    , isu 1 "mlc:lhs" (plain "f")
+    , isi 2 "rdf:_0" 1
+    , iss 2 "rdf:type" "mlc:name"
+    , isu 2 "rdf:value" (plain "x")
+    , isi 1 "mlc:rhs" 3
+    , iss 3 "rdf:type" "mlc:name"
+    , isu 3 "rdf:value" (plain "x")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "f = g 42 66"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:dataDeclaration"
+    , isu 1 "mlc:lhs" (plain "f")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:call"
+    , isi 2 "rdf:value" 3
+    , iss 3 "rdf:type" "mlc:name"
+    , isu 3 "rdf:value" (plain "g")
+    , isi 4 "rdf:_0" 2
+    , iss 4 "rdf:type" "mlc:number"
+    , isu 4 "rdf:value" ("42.0" .^^. M3.xsdPre .:. "decimal")
+    , isi 5 "rdf:_1" 2
+    , iss 5 "rdf:type" "mlc:number"
+    , isu 5 "rdf:value" ("66.0" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "(1, \"foo\", 1.1)"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:tuple"
+    , isi 2 "rdf:_0" 1
+    , iss 2 "rdf:type" "mlc:number"
+    , isu 2 "rdf:value" ("1.0" .^^. M3.xsdPre .:. "decimal")
+    , isi 3 "rdf:_1" 1
+    , iss 3 "rdf:type" "mlc:string"
+    , isu 3 "rdf:value" ("foo" .^^. M3.xsdPre .:. "string")
+    , isi 4 "rdf:_2" 1
+    , iss 4 "rdf:type" "mlc:number"
+    , isu 4 "rdf:value" ("1.1" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..2])
+    "foo :: i:Int -> j:[A]"
+    [ isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:atomicType"
+    , isu 3 "rdf:value" (plain "Int")
+    , isu 3 "mlc:label" (plain "i")
+    , iss 4 "rdf:type" "mlc:parameterizedType"
+    , isu 4 "rdf:value" (plain "List")
+    , isu 4 "mlc:label" (plain "j")
+    , isi 5 "rdf:_0" 4
+    , iss 5 "rdf:type" "mlc:atomicType"
+    , isu 5 "rdf:value" (plain "A")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..1])
+    "foo :: i:Int -> Num where (i > 0)"
+    [ iss 2 "rdf:type" "mlc:functionType"
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:atomicType"
+    , isu 3 "rdf:value" (plain "Int")
+    , isu 3 "mlc:label" (plain "i")
+    , isi 2 "mlc:output" 4
+    , iss 4 "rdf:type" "mlc:atomicType"
+    , isu 4 "rdf:value" (plain "Num")
+    , isi 2 "mlc:constraint" 5
+    , iss 5 "rdf:type" "mlc:binop"
+    , isu 5 "rdf:value" (plain "GT")
+    , isi 5 "mlc:lhs" 6
+    , isi 5 "mlc:rhs" 7
+    , iss 6 "rdf:type" "mlc:name"
+    , isu 6 "rdf:value" (plain "i")
+    , iss 7 "rdf:type" "mlc:number"
+    , isu 7 "rdf:value" ("0.0" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "foo :: Int"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "foo")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:atomicType"
+    , isu 2 "rdf:value" (plain "Int")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..4])
+    "foo :: X -> Y where (1.1 + 1.2 > 2.0)"
+    [ iss 5 "rdf:type" "mlc:binop"
+    , isu 5 "rdf:value" (plain "GT")
+    , isi 5 "mlc:lhs" 7
+    , isi 5 "mlc:rhs" 9
+    , iss 7 "rdf:type" "mlc:binop"
+    , isu 7 "rdf:value" (plain "Add")
+    , isi 7 "mlc:lhs" 6
+    , isi 7 "mlc:rhs" 8
+    , iss 6 "rdf:type" "mlc:number"
+    , isu 6 "rdf:value" ("1.1" .^^. M3.xsdPre .:. "decimal")
+    , iss 8 "rdf:type" "mlc:number"
+    , isu 8 "rdf:value" ("1.2" .^^. M3.xsdPre .:. "decimal")
+    , iss 9 "rdf:type" "mlc:number"
+    , isu 9 "rdf:value" ("2.0" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "foo :: a, (b -> c) -> d"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:typeDeclaration"
+    , isu 1 "mlc:lang" (plain "Morloc")
+    , isu 1 "mlc:lhs" (plain "foo")
+    , isi 1 "mlc:rhs" 2
+    , iss 2 "rdf:type" "mlc:functionType"
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:atomicGeneric"
+    , isu 3 "rdf:value" (plain "a")
+    , isi 4 "rdf:_1" 2
+    , iss 4 "rdf:type" "mlc:functionType"
+    , isi 5 "rdf:_0" 4
+    , iss 5 "rdf:type" "mlc:atomicGeneric"
+    , isu 5 "rdf:value" (plain "b")
+    , isi 4 "mlc:output" 6
+    , iss 6 "rdf:type" "mlc:atomicGeneric"
+    , isu 6 "rdf:value" (plain "c")
+    , isi 2 "mlc:output" 7
+    , iss 7 "rdf:type" "mlc:atomicGeneric"
+    , isu 7 "rdf:value" (plain "d")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..1])
+    "foo :: A B -> C D"
+    [ iss 2 "rdf:type" "mlc:functionType"
+    , isi 3 "rdf:_0" 2
+    , iss 3 "rdf:type" "mlc:parameterizedType"
+    , isu 3 "rdf:value" (plain "A")
+    , isi 4 "rdf:_0" 3
+    , iss 4 "rdf:type" "mlc:atomicType"
+    , isu 4 "rdf:value" (plain "B")
+    , isi 2 "mlc:output" 5
+    , iss 5 "rdf:type" "mlc:parameterizedType"
+    , isu 5 "rdf:value" (plain "C")
+    , isi 6 "rdf:_0" 5
+    , iss 6 "rdf:type" "mlc:atomicType"
+    , isu 6 "rdf:value" (plain "D")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..1])
+    "foo :: A where ((1 == 1) and (2 == 2))"
+    [ iss 2 "rdf:type" "mlc:atomicType"
+    , isu 2 "rdf:value" (plain "A")
+    , isi 2 "mlc:constraint" 3
+    , iss 3 "rdf:type" "mlc:binop"
+    , isu 3 "rdf:value" (plain "and")
+    , isi 3 "mlc:lhs" 4
+    , isi 3 "mlc:rhs" 7
+    , iss 4 "rdf:type" "mlc:binop"
+    , isu 4 "rdf:value" (plain "EQ")
+    , isi 4 "mlc:lhs" 5
+    , isi 4 "mlc:rhs" 6
+    , iss 5 "rdf:type" "mlc:number"
+    , isu 5 "rdf:value" ("1.0" .^^. M3.xsdPre .:. "decimal")
+    , iss 6 "rdf:type" "mlc:number"
+    , isu 6 "rdf:value" ("1.0" .^^. M3.xsdPre .:. "decimal")
+    , iss 7 "rdf:type" "mlc:binop"
+    , isu 7 "rdf:value" (plain "EQ")
+    , isi 7 "mlc:lhs" 8
+    , isi 7 "mlc:rhs" 9
+    , iss 8 "rdf:type" "mlc:number"
+    , isu 8 "rdf:value" ("2.0" .^^. M3.xsdPre .:. "decimal")
+    , iss 9 "rdf:type" "mlc:number"
+    , isu 9 "rdf:value" ("2.0" .^^. M3.xsdPre .:. "decimal")
+    ]
+
+  testRdfCodeWith
+    (rmId [0])
+    "f . g"
+    [ isi 2 "rdf:_0" 0
+    , iss 2 "rdf:type" "mlc:composition"
+    , isi 2 "mlc:lhs" 1
+    , isi 2 "mlc:rhs" 3
+    , iss 1 "rdf:type" "mlc:name"
+    , isu 1 "rdf:value" (plain "f")
+    , iss 3 "rdf:type" "mlc:name"
+    , isu 3 "rdf:value" (plain "g")
+    ]
+
+  testRdfCodeWith
+    (rmId ([0..5] ++ [8]))
+    -- this will fail later, since x,k, and t are undefined.
+    "X :: Y where (x^(-k) == 1)"
+    [ iss 6 "rdf:type" "mlc:unaryOp"
+    , isu 6 "rdf:value" (plain "Neg")
+    , isi 7 "rdf:_0" 6
+    , iss 7 "rdf:type" "mlc:name"
+    , isu 7 "rdf:value" (plain "k")
+    ]
+
+  testRdfCodeWith
+    (rmId [0..2])
+    -- this will fail later, since x,k, and t are undefined.
+    "X :: Y where (f x (g y z))"
+    [ iss 3 "rdf:type" "mlc:call"
+    , isi 3 "rdf:value" 4
+    , iss 4 "rdf:type" "mlc:name"
+    , isu 4 "rdf:value" (plain "f")
+    , isi 5 "rdf:_0" 3
+    , iss 5 "rdf:type" "mlc:name"
+    , isu 5 "rdf:value" (plain "x")
+    , isi 6 "rdf:_1" 3
+    , iss 6 "rdf:type" "mlc:call"
+    , isi 6 "rdf:value" 7
+    , iss 7 "rdf:type" "mlc:name"
+    , isu 7 "rdf:value" (plain "g")
+    , isi 8 "rdf:_0" 6
+    , iss 8 "rdf:type" "mlc:name"
+    , isu 8 "rdf:value" (plain "y")
+    , isi 9 "rdf:_1" 6
+    , iss 9 "rdf:type" "mlc:name"
+    , isu 9 "rdf:value" (plain "z")
+    ]
+
+  testRdfCodeWith
+    (rmId ([0..3] ++ [7]))
+    -- this will fail later, since x,k, and t are undefined.
+    "X :: Y where (f x y == 1)"
+    [ iss 4 "rdf:type" "mlc:call"
+    , isi 4 "rdf:value" 5
+    , iss 5 "rdf:type" "mlc:name"
+    , isu 5 "rdf:value" (plain "f")
+    , isi 6 "rdf:_0" 4
+    , iss 6 "rdf:type" "mlc:name"
+    , isu 6 "rdf:value" (plain "x")
+    , iss 8 "rdf:type" "mlc:number"
+    , isu 8 "rdf:value" ("1.0" .^^. M3.xsdPre .:. "decimal")
+    ]
