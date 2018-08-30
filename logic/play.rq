@@ -1,3 +1,64 @@
+# ----------------------------------------------------------------------------------------------------------
+# | decname | dargs | callid  | falias         | element | argname | argcallname    | datatype   | dataval |
+# ==========================================================================================================
+# | "bar"   | "y"   | mlc:101 | "baz"          | rdf:_0  | "y"     |                |            |         |
+# | "foo"   | "x"   | mlc:110 | "bar"          | rdf:_0  | "x"     |                |            |         |
+# |         |       | mlc:25  | "len"          | rdf:_0  | "xs"    |                |            |         |
+# | "roll"  | "d,n" | mlc:79  | "ceiling"      | rdf:_0  |         | "rand_uniform" |            |         |
+# |         |       | mlc:81  | "rand_uniform" | rdf:_0  | "n"     |                |            |         |
+# |         |       | mlc:81  | "rand_uniform" | rdf:_1  |         |                | mlc:number | 0.0     |
+# |         |       | mlc:81  | "rand_uniform" | rdf:_2  | "d"     |                |            |         |
+# | "baz"   | "z"   | mlc:92  | "ceiling"      | rdf:_0  | "z"     |                |            |         |
+# ----------------------------------------------------------------------------------------------------------
+PREFIX mlc: <http://www.morloc.io/ontology/000/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX mid: <http://www.morloc.io/XXX/mid/>
+SELECT ?decname
+       (group_concat(?darg; separator=",") as ?dargs)
+       ?callid ?falias ?element ?argname ?argcallname ?datatype ?dataval
+WHERE {
+    ?callid rdf:type mlc:call ; 
+            rdf:value ?fid .
+    ?fid rdf:type mlc:name ;
+         rdf:value ?falias .
+    ?arg ?element ?callid .
+    FILTER(regex(str(?element), "_[0-9]+$", "i"))
+    OPTIONAL {
+        ?datadec rdf:type mlc:dataDeclaration ;
+                 mlc:lhs ?decname ;
+                 mlc:rhs ?callid .
+        ?dargid ?delement ?datadec ;
+                rdf:type mlc:name ;
+                rdf:value ?darg .
+        FILTER(regex(str(?delement), "_[0-9]+$", "i"))
+    }
+    # A argument must be one of the following:
+    #  1. raw data
+    OPTIONAL {
+        ?arg rdf:type mlc:data;
+             rdf:type ?datatype ;
+             rdf:value ?dataval .
+        FILTER(?datatype != mlc:data)
+    }
+    #  2. a function call
+    OPTIONAL {
+        ?arg rdf:type mlc:name ; 
+             rdf:value ?argname .
+    }
+    #  3. a name - the name can only come from 
+    OPTIONAL {
+        ?arg rdf:type mlc:call ;
+             rdf:value ?argcallid .
+        ?argcallid rdf:type mlc:name ;
+                   rdf:value ?argcallname .
+    }
+}
+GROUP BY ?decname ?dargs ?callid ?falias ?element ?argname ?argcallname ?datatype ?dataval
+ORDER BY ?callid ?element
+
+
+
+
 # find imports with the ".loc" extension
 SELECT ?file
 WHERE {
