@@ -228,6 +228,26 @@ testParser = parallel $ do
     , isu 6 "rdf:value" (plain "Fool")
     ]
 
+  -- TODO: resolve to simple calls
+  --       instead I should test RDF equality of: (g . f) x == g (f x)
+  testRdfCodeWith
+    (rmId [0])
+    "(g . f) x"
+    [ isi 1 "rdf:_0" 0
+    , iss 1 "rdf:type" "mlc:call"
+    , isi 1 "rdf:value" 3
+    , iss 3 "rdf:type" "mlc:composition"
+    , isi 3 "mlc:lhs" 2
+    , isi 3 "mlc:rhs" 4
+    , iss 2 "rdf:type" "mlc:name"
+    , isu 2 "rdf:value" (plain "g")
+    , iss 4 "rdf:type" "mlc:name"
+    , isu 4 "rdf:value" (plain "f")
+    , isi 5 "rdf:_0" 1
+    , iss 5 "rdf:type" "mlc:name"
+    , isu 5 "rdf:value" (plain "x")
+    ]
+
   testRdfCodeWith
     (rmId [0])
     "x = 1"
