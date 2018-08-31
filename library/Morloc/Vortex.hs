@@ -9,7 +9,12 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Vortex (buildManifolds) where
+module Morloc.Vortex (
+    buildManifolds
+  , Argument(..)
+  , Manifold(..)
+  , MData(..)
+) where
 
 import Morloc.Types
 import Morloc.Quasi
@@ -33,7 +38,7 @@ data Argument
 
 data Manifold = Manifold {
       mCallId      :: Key
-    , mTypeId      :: Key
+    , mTypeId      :: Maybe Key
     , mExported    :: Bool
     , mCalled      :: Bool
     , mSourced     :: Bool
@@ -63,7 +68,7 @@ buildManifolds e = fmap (setLangs . map setArgs . DLE.groupSort . map asTuple) (
 
 asTuple :: [Maybe DT.Text] ->  (Manifold, Argument)
 asTuple [ Just callId'
-        , Just typeId'
+        , typeId'
         , element'
         , Just morlocName'
         , sourceName'

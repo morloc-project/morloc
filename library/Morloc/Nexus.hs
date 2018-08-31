@@ -14,7 +14,7 @@ module Morloc.Nexus (generate) where
 import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
-import Morloc.Query as Q
+import qualified Morloc.Vortex as V
 import Morloc.Util as MU
 import qualified Morloc.System as MS
 import qualified Data.Text as DT
@@ -31,92 +31,32 @@ generate e
   <*> pure "perl"
   <*> perlNexus e
 
--- | This query returns the following:
---   1. name - name of an exported Morloc function
---   2. mid - id of the specific morloc manifold (id of the type declaration)
---   3. nargs - number of arguments the function takes
-forNexusCallQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-forNexusCallQ = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-  SELECT ?fname ?typedec (count (distinct ?element) as ?nargs)
-  WHERE {
-    ?typedec rdf:type mlc:typeDeclaration ;
-       mlc:lang "Morloc" ;
-       mlc:lhs ?fname ;
-       mlc:rhs ?type .
-    ?type rdf:type mlc:functionType .
-    ?arg ?element ?type .
-    FILTER(regex(str(?element), "_[0-9]+$", "i"))
-    ?e rdf:type mlc:export ;
-       rdf:value ?fname .
-  }
-  GROUP BY ?typedec ?fname ?lang
-|]
-
-declaration2lang :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-declaration2lang = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-  SELECT ?declaredName ?callName ?lang
-  WHERE {
-    {
-      ?typedec rdf:type mlc:dataDeclaration ;
-         mlc:lhs ?declaredName ;
-         mlc:rhs ?rhs .
-      ?rhs rdf:type mlc:call ;
-           rdf:value ?callid .
-      ?callid rdf:type mlc:name ; 
-              rdf:value ?callName .
-      OPTIONAL { 
-        ?src rdf:type mlc:source ;
-             mlc:lang ?lang ;
-             mlc:import ?i .
-        ?i mlc:alias ?callName .
-      }
-    } UNION {
-      ?typedec rdf:type mlc:typeDeclaration ;
-        mlc:lang "Morloc" ;
-        mlc:lhs ?declaredName ;
-        mlc:rhs ?type .
-      ?type rdf:type mlc:functionType .
-      ?src rdf:type mlc:source ;
-           mlc:lang ?lang ;
-           mlc:import ?i .
-      ?i mlc:alias ?declaredName .
-    }
-  }
-|]
-
-langMap :: SparqlEndPoint -> IO (Map.HashMap Name Lang)
-langMap e = fmap (MU.spreadAttr . map toThree) (declaration2lang e) where
-  toThree :: [Maybe DT.Text] -> (Name, Maybe Name, Maybe Lang)
-  toThree [Just name, callName, lang] = (name, callName, lang) 
-  toThree _ = error "Unexpected SPARQL return value"
-
 perlNexus :: SparqlEndPoint -> IO DT.Text
-perlNexus ep = do
-  f <- Q.exportsQ ep
-  g <- forNexusCallQ ep
-  lmap <- langMap ep
-  (return . render) $ main (map prepf f) (map (prepg lmap) g)
-  where
-    prepf :: [Maybe DT.Text] -> Doc
-    prepf [Just x] = text' x
-    prepf _ = error "Invalid SPARQL return"
+perlNexus ep = fmap render $ main <$> names <*> fdata where
 
-    prepg
-      :: Map.HashMap Name Lang
-      -> [Maybe DT.Text]
-      -> (Doc, Int, Doc, Doc, Doc)
-    prepg hash [Just name, Just uid, Just nargs] = case (Map.lookup name hash) of
-      Just lang -> ( text' name
-                   , (read (DT.unpack nargs) :: Int)
-                   , text' (MS.findExecutor lang)
-                   , text' (MS.makePoolName lang)
-                   , text' (MS.makeManifoldName uid)
-                   )
-    prepg _ _ = error "Invalid SPARQL return"
+  manifolds :: IO [V.Manifold]
+  manifolds = fmap (filter isExported) (V.buildManifolds ep)
+
+  names :: IO [Doc]
+  names = fmap (map (text' . V.mMorlocName)) manifolds
+
+  fdata :: IO [(Doc, Int, Doc, Doc, Doc)]
+  fdata = fmap (map getFData) manifolds
+
+  getFData :: V.Manifold -> (Doc, Int, Doc, Doc, Doc)
+  getFData m = case V.mLang m of
+    (Just lang) ->
+      ( text' (V.mMorlocName m)
+      , length (V.mArgs m)
+      , text' (MS.findExecutor lang)
+      , text' (MS.makePoolName lang)
+      , text' (MS.makeManifoldName (V.mCallId m))
+      )
+    Nothing -> error "A language must be defined"
+
+  isExported :: V.Manifold -> Bool
+  isExported m = V.mExported m && not (V.mCalled m)
+
 
 main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc
 main names fdata = [idoc|#!/usr/bin/env perl

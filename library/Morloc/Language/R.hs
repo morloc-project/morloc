@@ -112,7 +112,7 @@ WHERE {
           rdf:value ?fid .
   OPTIONAL {
     ?fid rdf:type mlc:name ;
-            rdf:value ?falias .
+         rdf:value ?falias .
     ?source rdf:type mlc:source ;
             mlc:lang "R" ;
             mlc:import ?import .
