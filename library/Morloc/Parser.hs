@@ -396,7 +396,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.brackets (sepBy mdata Tok.comma)
         return $ M3.makeTopRDF i (
-               [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "list")]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "list") 
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -404,7 +405,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.parens tuple''
         return $ M3.makeTopRDF i (
-               [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "tuple")]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "tuple") 
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -412,7 +414,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
         return $ M3.makeTopRDF i (
-               [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "record")]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "record")
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -660,19 +663,28 @@ prefix name fun = TPE.Prefix (do {
     return (fun i);
   })
 
+tripleName :: MS.Parser M3.TopRDF
+tripleName = do
+  i <- MS.getId
+  n <- Tok.name
+  return $ M3.makeTopRDF i
+    [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "name")
+    , DR.triple i (M3.rdfPre .:. "value") (DR.LNode . DR.PlainL $ n)
+    ]
+
 triplePrimitive :: (a -> DR.Node) -> DR.Node -> MS.Parser a -> MS.Parser M3.TopRDF
 triplePrimitive cast t p = do
   i <- MS.getId
   n <- p
   return $ M3.makeTopRDF i
     [ DR.triple i (M3.rdfPre .:. "type") t
+    , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")
     , DR.triple i (M3.rdfPre .:. "value") (cast n)
     ]
 
 tripleNumber        :: MS.Parser M3.TopRDF
 tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
-tripleName          :: MS.Parser M3.TopRDF
 
 tnode :: DT.Text -> DT.Text -> DR.Node
 tnode n t = DR.LNode (DR.TypedL n t)
@@ -691,8 +703,3 @@ tripleBool = triplePrimitive
   (\n -> tnode (DT.pack . show $ n) (M3.xsdPre <> "boolean"))
   (M3.mlcPre .:. "boolean")
   Tok.boolean
-
-tripleName = triplePrimitive
-  (\n -> DR.LNode . DR.PlainL $ n)
-  (M3.mlcPre .:. "name")
-  Tok.name
