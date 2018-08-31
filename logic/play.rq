@@ -1,36 +1,63 @@
-# ----------------------------------------------------------------------------------------------------------
-# | decname | dargs | callid  | falias         | element | argname | argcallname    | datatype   | dataval |
-# ==========================================================================================================
-# | "bar"   | "y"   | mlc:101 | "baz"          | rdf:_0  | "y"     |                |            |         |
-# | "foo"   | "x"   | mlc:110 | "bar"          | rdf:_0  | "x"     |                |            |         |
-# |         |       | mlc:25  | "len"          | rdf:_0  | "xs"    |                |            |         |
-# | "roll"  | "d,n" | mlc:79  | "ceiling"      | rdf:_0  |         | "rand_uniform" |            |         |
-# |         |       | mlc:81  | "rand_uniform" | rdf:_0  | "n"     |                |            |         |
-# |         |       | mlc:81  | "rand_uniform" | rdf:_1  |         |                | mlc:number | 0.0     |
-# |         |       | mlc:81  | "rand_uniform" | rdf:_2  | "d"     |                |            |         |
-# | "baz"   | "z"   | mlc:92  | "ceiling"      | rdf:_0  | "z"     |                |            |         |
-# ----------------------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------
+# | call_id | type_id | element | morloc_name    | source_name | composition | bvars | lang | lang_type | argname | argcallname    | datatype   | dataval |
+# =========================================================================================================================================================
+# | mid:101 | mid:86  | rdf:_0  | "baz"          |             | "bar"       | "y"   |      |           | "y"     |                |            |         |
+# | mid:110 | mid:95  | rdf:_0  | "bar"          |             | "foo"       | "x"   |      |           | "x"     |                |            |         |
+# | mid:25  |         | rdf:_0  | "len"          |             |             |       |      |           | "xs"    |                |            |         |
+# | mid:79  | mid:46  | rdf:_0  | "ceiling"      | "ceiling"   | "roll"      | "d,n" | "R"  |           |         | "rand_uniform" |            |         |
+# | mid:81  | mid:14  | rdf:_0  | "rand_uniform" | "runif"     |             |       | "R"  | "Numeric" | "n"     |                |            |         |
+# | mid:81  | mid:14  | rdf:_1  | "rand_uniform" | "runif"     |             |       | "R"  | "Numeric" |         |                | mlc:number | 0.0     |
+# | mid:81  | mid:14  | rdf:_2  | "rand_uniform" | "runif"     |             |       | "R"  | "Numeric" | "d"     |                |            |         |
+# | mid:92  | mid:46  | rdf:_0  | "ceiling"      | "ceiling"   | "baz"       | "z"   | "R"  |           | "z"     |                |            |         |
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT ?decname
-       (group_concat(?darg; separator=",") as ?dargs)
-       ?callid ?falias ?element ?argname ?argcallname ?datatype ?dataval
+SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
+       (group_concat(?bnd; separator=",") as ?bvars)
+       ?lang ?lang_type
+       ?argname ?argcallname ?datatype ?dataval
 WHERE {
-    ?callid rdf:type mlc:call ; 
+    ?call_id rdf:type mlc:call ; 
             rdf:value ?fid .
     ?fid rdf:type mlc:name ;
-         rdf:value ?falias .
-    ?arg ?element ?callid .
+         rdf:value ?morloc_name .
+    ?arg ?element ?call_id .
     FILTER(regex(str(?element), "_[0-9]+$", "i"))
+    # Find the bound variables
     OPTIONAL {
         ?datadec rdf:type mlc:dataDeclaration ;
-                 mlc:lhs ?decname ;
-                 mlc:rhs ?callid .
-        ?dargid ?delement ?datadec ;
-                rdf:type mlc:name ;
-                rdf:value ?darg .
+                 mlc:lhs ?composition ;
+                 mlc:rhs ?call_id .
+        ?bndid ?delement ?datadec ;
+               rdf:type mlc:name ;
+               rdf:value ?bnd . # bound variables
         FILTER(regex(str(?delement), "_[0-9]+$", "i"))
+    }
+    # Find the source language
+    OPTIONAL {
+        ?source_id rdf:type mlc:source ;
+                   mlc:lang ?lang ;
+                   mlc:import ?import_id .
+        ?import_id mlc:name ?source_name ;
+                   mlc:alias ?morloc_name .
+    }
+    # Find language-specific type signature, packer, and unpacker
+    OPTIONAL {
+       ?lang_typedec rdf:type mlc:typeDeclaration ; 
+                     mlc:lang ?lang ;
+                     mlc:lhs ?morloc_name ;
+                     mlc:rhs ?lang_typeid .
+       FILTER(!regex(str(?lang), "Morloc", "i"))
+       ?lang_inid ?element ?lang_typeid ;
+                  rdf:type mlc:atomicType ; # for now only support atomic
+                  rdf:value ?lang_type .
+    }
+    # Find the type delcaration ID
+    OPTIONAL {
+        ?type_id rdf:type mlc:typeDeclaration ;
+                 mlc:lang "Morloc" ;
+                 mlc:lhs ?morloc_name .
     }
     # A argument must be one of the following:
     #  1. raw data
@@ -45,133 +72,131 @@ WHERE {
         ?arg rdf:type mlc:name ; 
              rdf:value ?argname .
     }
-    #  3. a name - the name can only come from 
+    #  3. a name - the name can only come from one of the bound variables
     OPTIONAL {
         ?arg rdf:type mlc:call ;
-             rdf:value ?argcallid .
-        ?argcallid rdf:type mlc:name ;
+             rdf:value ?argcall_id .
+        ?argcall_id rdf:type mlc:name ;
                    rdf:value ?argcallname .
     }
 }
-GROUP BY ?decname ?dargs ?callid ?falias ?element ?argname ?argcallname ?datatype ?dataval
-ORDER BY ?callid ?element
+GROUP BY ?call_id ?type_id ?composition ?lang ?lang_type ?morloc_name ?element ?argname ?argcallname ?datatype ?dataval ?source_name
+ORDER BY ?call_id ?element
 
 
-
-
-# find imports with the ".loc" extension
-SELECT ?file
-WHERE {
-    ?import rdf:type morloc:import ;
-            morloc:name ?file .
-    FILTER (regex(?file, ".loc", "i"))
-}
-
-# Link Morloc types to language-specific types
-CONSTRUCT { ?minput morloc:packsInto ?linput }
-WHERE {
-    # Morloc type declarations
-    ?mtypedec rdf:type morloc:typeDeclaration ;
-              morloc:lang "Morloc" ;
-              morloc:lhs ?name ;
-              morloc:rhs ?mrhs .
-    # Corresponding language-specific type declarations
-    ?ltypedec rdf:type morloc:typeDeclaration ;
-              morloc:lang ?lang ;
-              morloc:lhs ?name ;
-              morloc:rhs ?lrhs .
-    FILTER(?lang != "Morloc")
-    # get the language-specific input types
-    ?linput ?element ?lrhs .
-    # map the elements to Morloc types
-    ?minput ?element ?mrhs .
-    # Require the elements really represent elements (should be a better way)
-    FILTER(regex(str(?element), "_[0-9]+$", "i"))
-}
-
-# Map arg to its use within scope
-SELECT ?argname ?arguse
-WHERE {
-    ?datadec rdf:type morloc:dataDeclaration .
-    ?parameter ?element ?datadec ;
-               rdf:type morloc:name ;
-               rdf:value ?parameter_name .
-
-    # TODO: this will require recursion down the call stack
-
-    FILTER(regex(str(?element), "_[0-9]+$", "i"))
-}
-
-# is this is morloc script?
-ASK
-WHERE {
-    ?source rdf:type morloc:script ;
-}
-
-# Link all function to their morloc types
-CONSTRUCT {
-    ?datadec morloc:type ?typedec
-}
-WHERE {
-    ?typedec rdf:type morloc:typeDeclaration ;
-             morloc:lhs ?name ;
-             morloc:lang "Morloc" .
-    ?datadec rdf:type morloc:dataDeclaration ;
-             morloc:lhs ?name .
-}
-
-# Find all subjects/objects where object is not a URI
-SELECT ?s ?o
-WHERE {
-    ?s rdf:type ?o .
-    FILTER(!(isURI(?o)))
-}
-
-# Assert the object of any `rdf:type` predicate is a URI 
-# This is a check of the Morloc implementation, not user input
-ASK
-WHERE {
-    ?s rdf:type ?o .
-    FILTER(!(isURI(?o)))
-}
-
-# Find any bad assignments (where the lhs is not a literal)
-ASK
-WHERE {
-  ?s rdf:lhs ?o
-  # find assignments
-  { ?s rdf:type morloc:typeDeclaration }
-  UNION
-  { ?s rdf:type morloc:dataDeclaration }
-  UNION
-  { ?s rdf:type morloc:recordEntry }
-  # remove triples where the lhs is not a literal
-  FILTER(!isLiteral (?o))
-}
-
-# find any cases where there is a lhs but no rhs, or vice versa
-SELECT ?s
-WHERE {
-  {
-    { ?s morloc:lhs ?lhs }
-    MINUS
-    { ?s morloc:rhs ?rhs }
-  }
-  UNION
-  {
-    { ?s morloc:rhs ?lhs }
-    MINUS
-    { ?s morloc:lhs ?rhs }
-  }
-}
-
-# passing on False: forall A where p exists B where p
-ASK {
-  ?type morloc:property ?p ;
-        rdf:type morloc:type .
-
-  NOT EXISTS {
-    ?function morloc:property ?p 
-              rdf:type morloc:functionType
-  }
-}
+# # find imports with the ".loc" extension
+# SELECT ?file
+# WHERE {
+#     ?import rdf:type morloc:import ;
+#             morloc:name ?file .
+#     FILTER (regex(?file, ".loc", "i"))
+# }
+#
+# # Link Morloc types to language-specific types
+# CONSTRUCT { ?minput morloc:packsInto ?linput }
+# WHERE {
+#     # Morloc type declarations
+#     ?mtypedec rdf:type morloc:typeDeclaration ;
+#               morloc:lang "Morloc" ;
+#               morloc:lhs ?name ;
+#               morloc:rhs ?mrhs .
+#     # Corresponding language-specific type declarations
+#     ?ltypedec rdf:type morloc:typeDeclaration ;
+#               morloc:lang ?lang ;
+#               morloc:lhs ?name ;
+#               morloc:rhs ?lrhs .
+#     FILTER(?lang != "Morloc")
+#     # get the language-specific input types
+#     ?linput ?element ?lrhs .
+#     # map the elements to Morloc types
+#     ?minput ?element ?mrhs .
+#     # Require the elements really represent elements (should be a better way)
+#     FILTER(regex(str(?element), "_[0-9]+$", "i"))
+# }
+#
+# # Map arg to its use within scope
+# SELECT ?argname ?arguse
+# WHERE {
+#     ?datadec rdf:type morloc:dataDeclaration .
+#     ?parameter ?element ?datadec ;
+#                rdf:type morloc:name ;
+#                rdf:value ?parameter_name .
+#
+#     # TODO: this will require recursion down the call stack
+#
+#     FILTER(regex(str(?element), "_[0-9]+$", "i"))
+# }
+#
+# # is this is morloc script?
+# ASK
+# WHERE {
+#     ?source rdf:type morloc:script ;
+# }
+#
+# # Link all function to their morloc types
+# CONSTRUCT {
+#     ?datadec morloc:type ?typedec
+# }
+# WHERE {
+#     ?typedec rdf:type morloc:typeDeclaration ;
+#              morloc:lhs ?name ;
+#              morloc:lang "Morloc" .
+#     ?datadec rdf:type morloc:dataDeclaration ;
+#              morloc:lhs ?name .
+# }
+#
+# # Find all subjects/objects where object is not a URI
+# SELECT ?s ?o
+# WHERE {
+#     ?s rdf:type ?o .
+#     FILTER(!(isURI(?o)))
+# }
+#
+# # Assert the object of any `rdf:type` predicate is a URI
+# # This is a check of the Morloc implementation, not user input
+# ASK
+# WHERE {
+#     ?s rdf:type ?o .
+#     FILTER(!(isURI(?o)))
+# }
+#
+# # Find any bad assignments (where the lhs is not a literal)
+# ASK
+# WHERE {
+#   ?s rdf:lhs ?o
+#   # find assignments
+#   { ?s rdf:type morloc:typeDeclaration }
+#   UNION
+#   { ?s rdf:type morloc:dataDeclaration }
+#   UNION
+#   { ?s rdf:type morloc:recordEntry }
+#   # remove triples where the lhs is not a literal
+#   FILTER(!isLiteral (?o))
+# }
+#
+# # find any cases where there is a lhs but no rhs, or vice versa
+# SELECT ?s
+# WHERE {
+#   {
+#     { ?s morloc:lhs ?lhs }
+#     MINUS
+#     { ?s morloc:rhs ?rhs }
+#   }
+#   UNION
+#   {
+#     { ?s morloc:rhs ?lhs }
+#     MINUS
+#     { ?s morloc:lhs ?rhs }
+#   }
+# }
+#
+# # passing on False: forall A where p exists B where p
+# ASK {
+#   ?type morloc:property ?p ;
+#         rdf:type morloc:type .
+#
+#   NOT EXISTS {
+#     ?function morloc:property ?p
+#               rdf:type morloc:functionType
+#   }
+# }
