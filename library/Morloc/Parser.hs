@@ -272,6 +272,7 @@ mtype =
       ns <- some unambiguous'
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedGeneric")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain n)
              ]
           ++ listTag i l
@@ -286,6 +287,7 @@ mtype =
       i <- MS.getId
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "atomicType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain n)
              ]
           ++ listTag i l
@@ -300,6 +302,7 @@ mtype =
       i <- MS.getId
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "atomicGeneric")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain n)]
           ++ (listTag i l)
         )
@@ -309,7 +312,10 @@ mtype =
       Tok.op "("
       Tok.op ")"
       i <- MS.getId
-      return $ M3.makeTopRDF i [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "empty")]
+      return $ M3.makeTopRDF i
+        [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "empty")
+        , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+        ]
 
     paren' :: MS.Parser M3.TopRDF 
     paren' = Tok.parens mtype
@@ -323,6 +329,7 @@ mtype =
       xs <- sepBy1 mtype Tok.comma
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain "Tuple")]
           ++ listTag i l
           ++ M3.adopt i (x:xs)
@@ -336,6 +343,7 @@ mtype =
       s <- Tok.brackets mtype
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain "List")]
           ++ listTag i l
           ++ M3.adopt i [s]
@@ -349,6 +357,7 @@ mtype =
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain "Record")]
           ++ listTag i l
           ++ M3.adopt i ns
@@ -374,9 +383,11 @@ mtype =
       Tok.op "->"
       output <- notFunction'
       return $ M3.makeTopRDF i (
-             [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "functionType")]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "functionType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             ]
           ++ M3.adopt i inputs
-          ++ M3.adoptAs (M3.mlcPre .:. "output") i [output]
+          ++ M3.adoptAs (M3.mlcPre .:. "output") (M3.rdfId output) [output]
         )
 
 
@@ -628,6 +639,10 @@ unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
 
 binOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
+     -- TODO: The `binop` classification should not appear in the Morloc RDF.
+     -- These binary expression should resolve into perfectly normal functions.
+     -- No special handling should be needed (except to integrate them into the
+     -- manifolds).
      [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "binop")
      , DR.triple i (M3.rdfPre .:. "value") (plain s)
      , DR.triple i (M3.mlcPre .:. "lhs") j
