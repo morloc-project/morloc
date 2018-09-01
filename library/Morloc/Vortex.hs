@@ -11,9 +11,11 @@ Stability   : experimental
 
 module Morloc.Vortex (
     buildManifolds
+  , buildPackHash
   , Argument(..)
   , Manifold(..)
   , MData(..)
+  , PackHash(..)
 ) where
 
 import Morloc.Types
@@ -61,6 +63,15 @@ data MData
   | Rec' [(Name, MData)]
   | Tup' [MData]
   deriving(Show, Eq, Ord)
+
+data PackHash = PackHash {
+      packer   :: Map.HashMap Type Name
+    , unpacker :: Map.HashMap Type Name
+    , genericPacker   :: Name
+    , genericUnpacker :: Name
+    , sources :: [Path] -- Later, I might want to link the source files to
+                        -- each function, but for now that isn't needed.
+  }
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
@@ -144,6 +155,33 @@ setLangs ms = map (setLang hash) ms where
 
   hash :: Map.HashMap Name Lang
   hash = MU.spreadAttr (map (\m -> (mMorlocName m, mComposition m, mLang m)) ms)
+
+-- TODO: update this to limit results to one language
+-- OR return a hash of hashes by language
+buildPackHash :: SparqlEndPoint -> IO PackHash
+buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
+  where
+    tuplify :: [Maybe DT.Text] -> (Type, Name, Bool, Name, Path)
+    -- typename | property | is_generic | name | path
+    tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
+    tuplify e = error ("Unexpected SPARQL result: " ++ show e)
+
+    toPackHash :: [(Type, Name, Bool, Name, Path)] -> PackHash
+    toPackHash xs = case
+      ( Map.fromList [(t,p) | (t, "packs"  , False, p, _) <- xs]
+      , Map.fromList [(t,p) | (t, "unpacks", False, p, _) <- xs]
+      , [p | (_, "packs"  , True, p, _) <- xs]
+      , [p | (_, "unpacks", True, p, _) <- xs]
+      , MU.unique [s | (_, _, _, _, s) <- xs]
+      ) of
+        (phash, uhash, [p], [u], srcs) -> PackHash
+          { packer = phash
+          , unpacker = uhash
+          , genericPacker = p
+          , genericUnpacker = u
+          , sources = srcs
+          }
+        e -> error ("Expected exactly one generic packer and one generic unpacker: " ++ show e)
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|
@@ -253,4 +291,48 @@ WHERE {
 }
 GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type ?morloc_name ?element ?argname ?argcallname ?datatype ?dataval ?source_name
 ORDER BY ?call_id ?element
+|]
+
+serializationQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+serializationQ = [sparql|
+PREFIX mlc: <http://www.morloc.io/ontology/000/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX mid: <http://www.morloc.io/XXX/mid/>
+SELECT DISTINCT ?typename ?property ?is_generic ?name ?path
+WHERE {
+        # Get serialization functions of type `a -> JSON`
+        ?id rdf:type mlc:typeDeclaration ;
+              mlc:lang "R" ;
+              mlc:lhs ?name ;
+              mlc:rhs ?rhs .
+        ?rhs rdf:type mlc:functionType ;
+                  mlc:property ?property_id ;
+                  mlc:output ?output .
+        ?property_id rdf:type mlc:name .
+        {
+            ?property_id rdf:value ?property .
+            ?output rdf:type mlc:atomicType ;
+                    rdf:value "JSON" .
+            ?packer_input rdf:_0 ?rhs;
+                          rdf:value ?typename .
+            BIND(exists{?packer_input rdf:type mlc:atomicGeneric} AS ?is_generic)
+            FILTER(?property = "packs")
+        } UNION {
+            ?property_id rdf:value ?property .
+            ?unpacker_input rdf:_0 ?rhs ;
+                            rdf:type mlc:atomicType ;
+                            rdf:value "JSON" .
+            ?output rdf:value ?typename .
+            BIND(exists{?output rdf:type mlc:atomicGeneric} AS ?is_generic)
+            FILTER(?property = "unpacks")
+        }
+        OPTIONAL{
+           ?source_id rdf:type mlc:source ;
+                      mlc:lang "R" ;
+                      mlc:path ?path ;
+                      mlc:import ?import_id .
+           ?import_id mlc:alias ?name .
+        }
+}
+ORDER BY ?property ?typename
 |]
