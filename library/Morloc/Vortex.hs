@@ -19,6 +19,7 @@ module Morloc.Vortex (
 ) where
 
 import Morloc.Types
+import Morloc.Operators
 import Morloc.Quasi
 import qualified Morloc.Util as MU
 import qualified Morloc.Triple as M3
@@ -79,7 +80,12 @@ data PackHash = PackHash {
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
-buildManifolds e = fmap (setLangs . map setArgs . DLE.groupSort . map asTuple) (manifoldQ e)
+buildManifolds e = fmap ( propagateBnds
+                        . setLangs
+                        . map setArgs
+                        . DLE.groupSort
+                        . map asTuple
+                        ) (manifoldQ e)
 
 asTuple :: [Maybe DT.Text] ->  (Manifold, Argument)
 asTuple [ Just callId'
@@ -139,18 +145,21 @@ makeArgument (_ , t, Just x  , _       , _       , _ ) = ArgName x t
 makeArgument (l , t, _       , Just x  , _       , _ ) = ArgCall x t l
 makeArgument (_ , t, _       , _       , Just x  , _ ) = ArgData x t
 makeArgument (_ , t, Nothing , Nothing , Nothing , Just e) =
-  case (DT.stripPrefix M3.rdfPre e) >>= (Safe.readMay . DT.unpack) of
+  case (DT.stripPrefix (M3.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
     Just i -> ArgPosi i t
     _ -> error ("Unexpected value for element: " ++ show e)
 
 makeData :: Name -> DT.Text -> MData
-makeData "number"  x = Num' x
-makeData "string"  x = Str' x
-makeData "boolean" x = Log' (x == "true")
-makeData "list"    x = error "lists are not yet supported"
-makeData "tuple"   x = error "typles are not yet supported"
-makeData "record"  x = error "records are not yet supported"
-makeData typename _ = error ("Data type " ++ (DT.unpack typename) ++ " not supported")
+makeData t n = case DT.stripPrefix M3.mlcPre t of
+  Nothing -> error ("Exected Morloc data type (mlc prefix), got: " ++ show t)
+  Just t -> makeData' t n where
+    makeData' "number"  x = Num' x
+    makeData' "string"  x = Str' x
+    makeData' "boolean" x = Log' (x == "true")
+    makeData' "list"    x = error "lists are not yet supported"
+    makeData' "tuple"   x = error "typles are not yet supported"
+    makeData' "record"  x = error "records are not yet supported"
+    makeData' typename _ = error ("Data type " ++ (DT.unpack typename) ++ " not supported")
 
 setArgs
   :: (Manifold, [Argument])
@@ -164,6 +173,9 @@ setLangs ms = map (setLang hash) ms where
 
   hash :: Map.HashMap Name Lang
   hash = MU.spreadAttr (map (\m -> (mMorlocName m, mComposition m, mLang m)) ms)
+
+propagateBnds :: [Manifold] -> [Manifold]
+propagateBnds = id
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language

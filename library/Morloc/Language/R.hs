@@ -34,7 +34,7 @@ generateCode e = do
   manifolds <- buildManifolds e
   packHash <- buildPackHash e
   let srcs = map text' (sources packHash)
-  (return . render) $ main srcs manifolds
+  (return . render) $ main srcs manifolds packHash
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
@@ -64,12 +64,12 @@ writeData (Rec' xs) = "list" <> (parens . commaSep . map writeEntry) xs
     writeEntry (key, val) = text' key <> "=" <> writeData val 
 
 main
-  :: [Doc] -> [Manifold] -> Doc
-main srcs manifolds = [idoc|#!/usr/bin/env Rscript
+  :: [Doc] -> [Manifold] -> PackHash -> Doc
+main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
 ${vsep (map sourceT srcs)}
 
-${vsep (map manifoldT manifolds)}
+${vsep (map (manifoldT hash) manifolds)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
@@ -89,41 +89,24 @@ if(length(args) == 0){
 
 sourceT s = [idoc|source("${s}")|]
 
-manifoldT m = [idoc|
-XXX
-|]
+manifoldT h m
+  | mExported m && (not (mCalled m)) = exportedT m h
+  | otherwise = "XXX"
 
--- exportedT ((alias, fname, uid, generic), args) = [idoc|
--- # ${alias}
---
--- ${uid} <- function(${commaSep (nameArgs args)}){
---   ${fname}(${commaSep (castArgs (generic, args))})
--- }
--- |]
---   where
---     castArgs :: (Doc, [Maybe (Doc, Doc)]) -> [Doc]
---     castArgs (generic, xss) = zipWith
---       (\w i -> [idoc|${w}(x${i})|])
---       (map (wrapper generic) xss)
---       (map int [1..])
---
---     wrapper :: Doc -> (Maybe (Doc, Doc)) -> Doc
---     wrapper _ (Just (specific, _)) = specific
---     wrapper generic _ = generic
---
---
--- cisT (callid, fid, nargs, Just (falias, fname)) = [idoc|
--- # ${falias}
---
--- ${callid} <- function(${commaSep (iArgs nargs)}){
---   ${fname}(${commaSep (iArgs nargs)})
--- }
--- |]
---
--- cisT (callid, fid, nargs, Nothing) = [idoc|
--- # ${callid}
---
--- ${callid} <- function(${commaSep (iArgs nargs)}){
---   ${fid}(${commaSep (iArgs nargs)})
--- }
--- |]
+exportedT m h = [idoc|
+# ${text' $ mMorlocName m}
+
+${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep (map text' (mBoundVars m))}){
+  ${fname}(${commaSep (map castArg (mArgs m))})
+}
+|]
+  where
+    castArg :: Argument -> Doc
+    castArg arg = case arg of
+      (ArgName n (Just t)) -> "unpacker" <> parens (writeArgument arg)
+      (ArgName n Nothing)  -> "genericUnpacker" <> parens (writeArgument arg)
+      _ -> writeArgument arg
+
+    fname = text' $ maybe (mMorlocName m) id (mSourceName m)
+
+    generic = genericUnpacker h
