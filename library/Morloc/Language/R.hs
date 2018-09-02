@@ -13,7 +13,7 @@ module Morloc.Language.R (generate) where
 
 import Morloc.Quasi
 import Morloc.Types
-import qualified Morloc.Vortex as V
+import Morloc.Vortex
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Morloc.Query as Q
@@ -31,10 +31,10 @@ generate e
 
 generateCode :: SparqlEndPoint -> IO DT.Text
 generateCode e = do
-  manifolds <- V.buildManifolds e
-  packHash <- V.buildPackHash e
-  let srcs = map text' (V.sources packHash)
-  (return . render) $ main srcs [] []
+  manifolds <- buildManifolds e
+  packHash <- buildPackHash e
+  let srcs = map text' (sources packHash)
+  (return . render) $ main srcs manifolds
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
@@ -45,29 +45,31 @@ nameArgs xs = map ((<>) "x") (map int [1 .. length xs])
 iArgs :: Int -> [Doc]
 iArgs i = map ((<>) "x") (map int [1 .. i])
 
+-- | writes an argument sans serialization 
+writeArgument :: Argument -> Doc
+writeArgument (ArgName n _  ) = text' n
+writeArgument (ArgCall n _ _) = text' n
+writeArgument (ArgData d _  ) = writeData d
+writeArgument (ArgPosi i _  ) = "x" <> int i
+
+writeData :: MData -> Doc
+writeData (Num' x) = text' x
+writeData (Str' x) = dquotes (text' x) -- FIXME: need to escape
+writeData (Log' True) = "TRUE"
+writeData (Log' False) = "FALSE"
+writeData (Lst' xs) = "c" <> (parens . commaSep . map writeData) xs
+writeData (Tup' xs) = "list" <> (parens . commaSep . map writeData) xs
+writeData (Rec' xs) = "list" <> (parens . commaSep . map writeEntry) xs
+  where
+    writeEntry (key, val) = text' key <> "=" <> writeData val 
+
 main
-  :: [Doc] 
-  -- ^ Pass to retrieve sources
-  -> [((Doc, Doc, Doc, Doc), [Maybe (Doc, Doc)])]
-  -- ^ Pass to exported functions
-  -> [(Doc, Doc, Int, Maybe (Doc, Doc))]
-  -- ^ Pass to cis functions
-  -> Doc
-main srcs exps ciss = [idoc|#!/usr/bin/env Rscript
+  :: [Doc] -> [Manifold] -> Doc
+main srcs manifolds = [idoc|#!/usr/bin/env Rscript
 
 ${vsep (map sourceT srcs)}
 
-# ------------------
-# Exported functions
-# ------------------
-
-${vsep (map exportedT exps)}
-
-# --------------
-# Internal calls
-# --------------
-
-${vsep (map cisT ciss)}
+${vsep (map manifoldT manifolds)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
@@ -87,37 +89,41 @@ if(length(args) == 0){
 
 sourceT s = [idoc|source("${s}")|]
 
-exportedT ((alias, fname, uid, generic), args) = [idoc|
-# ${alias}
-
-${uid} <- function(${commaSep (nameArgs args)}){
-  ${fname}(${commaSep (castArgs (generic, args))})
-}
-|]
-  where
-    castArgs :: (Doc, [Maybe (Doc, Doc)]) -> [Doc]
-    castArgs (generic, xss) = zipWith
-      (\w i -> [idoc|${w}(x${i})|])
-      (map (wrapper generic) xss)
-      (map int [1..])
-
-    wrapper :: Doc -> (Maybe (Doc, Doc)) -> Doc
-    wrapper _ (Just (specific, _)) = specific
-    wrapper generic _ = generic
-
-
-cisT (callid, fid, nargs, Just (falias, fname)) = [idoc|
-# ${falias}
-
-${callid} <- function(${commaSep (iArgs nargs)}){
-  ${fname}(${commaSep (iArgs nargs)})
-}
+manifoldT m = [idoc|
+XXX
 |]
 
-cisT (callid, fid, nargs, Nothing) = [idoc|
-# ${callid}
-
-${callid} <- function(${commaSep (iArgs nargs)}){
-  ${fid}(${commaSep (iArgs nargs)})
-}
-|]
+-- exportedT ((alias, fname, uid, generic), args) = [idoc|
+-- # ${alias}
+--
+-- ${uid} <- function(${commaSep (nameArgs args)}){
+--   ${fname}(${commaSep (castArgs (generic, args))})
+-- }
+-- |]
+--   where
+--     castArgs :: (Doc, [Maybe (Doc, Doc)]) -> [Doc]
+--     castArgs (generic, xss) = zipWith
+--       (\w i -> [idoc|${w}(x${i})|])
+--       (map (wrapper generic) xss)
+--       (map int [1..])
+--
+--     wrapper :: Doc -> (Maybe (Doc, Doc)) -> Doc
+--     wrapper _ (Just (specific, _)) = specific
+--     wrapper generic _ = generic
+--
+--
+-- cisT (callid, fid, nargs, Just (falias, fname)) = [idoc|
+-- # ${falias}
+--
+-- ${callid} <- function(${commaSep (iArgs nargs)}){
+--   ${fname}(${commaSep (iArgs nargs)})
+-- }
+-- |]
+--
+-- cisT (callid, fid, nargs, Nothing) = [idoc|
+-- # ${callid}
+--
+-- ${callid} <- function(${commaSep (iArgs nargs)}){
+--   ${fid}(${commaSep (iArgs nargs)})
+-- }
+-- |]

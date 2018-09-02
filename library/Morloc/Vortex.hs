@@ -21,12 +21,14 @@ module Morloc.Vortex (
 import Morloc.Types
 import Morloc.Quasi
 import qualified Morloc.Util as MU
+import qualified Morloc.Triple as M3
 import Morloc.Database.HSparql.Connection
 import qualified Data.HashMap.Strict as Map
 import qualified Data.List.Extra as DLE
 import qualified Data.Text as DT
 import qualified Data.Scientific as DS
 import qualified System.IO as IO
+import qualified Safe as Safe
 
 type Key  = DT.Text
 type Type = DT.Text
@@ -36,7 +38,7 @@ data Argument
   = ArgName Name (Maybe Type)
   | ArgCall Name (Maybe ReturnType) (Maybe Lang)
   | ArgData MData (Maybe Type)
-  | ArgPosi (Maybe Type)
+  | ArgPosi Int (Maybe Type)
   deriving(Show, Eq, Ord)
 
 data Manifold = Manifold {
@@ -119,6 +121,7 @@ asTuple [ Just callId'
     , argname'
     , argcallname'
     , makeData <$> datatype' <*> dataval'
+    , element'
     )
   )
 asTuple x = error ("Unexpected SPARQL row:\n" ++ show x)
@@ -129,12 +132,16 @@ makeArgument
      , Maybe Name -- argument name (if it is a bound argument)
      , Maybe Name -- argument call name (if it is a function call)
      , Maybe MData -- argument data (if this is data)
+     , Maybe DT.Text -- the element (rdf:_<num>)
      )
   -> Argument
-makeArgument (_ , t, Just x  , _       , _       ) = ArgName x t
-makeArgument (l , t, _       , Just x  , _       ) = ArgCall x t l
-makeArgument (_ , t, _       , _       , Just x  ) = ArgData x t
-makeArgument (_ , t, Nothing , Nothing , Nothing ) = ArgPosi t
+makeArgument (_ , t, Just x  , _       , _       , _ ) = ArgName x t
+makeArgument (l , t, _       , Just x  , _       , _ ) = ArgCall x t l
+makeArgument (_ , t, _       , _       , Just x  , _ ) = ArgData x t
+makeArgument (_ , t, Nothing , Nothing , Nothing , Just e) =
+  case (DT.stripPrefix M3.rdfPre e) >>= (Safe.readMay . DT.unpack) of
+    Just i -> ArgPosi i t
+    _ -> error ("Unexpected value for element: " ++ show e)
 
 makeData :: Name -> DT.Text -> MData
 makeData "number"  x = Num' x
