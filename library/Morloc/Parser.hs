@@ -387,7 +387,7 @@ mtype =
              , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              ]
           ++ M3.adopt i inputs
-          ++ M3.adoptAs (M3.mlcPre .:. "output") (M3.rdfId output) [output]
+          ++ M3.adoptAs (M3.mlcPre .:. "output") i [output]
         )
 
 

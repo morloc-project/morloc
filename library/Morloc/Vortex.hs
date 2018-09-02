@@ -26,6 +26,7 @@ import qualified Data.HashMap.Strict as Map
 import qualified Data.List.Extra as DLE
 import qualified Data.Text as DT
 import qualified Data.Scientific as DS
+import qualified System.IO as IO
 
 type Key  = DT.Text
 type Type = DT.Text
@@ -72,6 +73,7 @@ data PackHash = PackHash {
     , sources :: [Path] -- Later, I might want to link the source files to
                         -- each function, but for now that isn't needed.
   }
+  deriving(Show, Eq, Ord)
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
@@ -181,7 +183,7 @@ buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
           , genericUnpacker = u
           , sources = srcs
           }
-        e -> error ("Expected exactly one generic packer and one generic unpacker: " ++ show e)
+        e -> error ("Expected exactly one generic packer/unpacker: " ++ show e)
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|
