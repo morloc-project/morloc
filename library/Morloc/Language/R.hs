@@ -20,6 +20,7 @@ import qualified Morloc.Query as Q
 
 import qualified Data.Text as DT 
 import qualified Data.List as DL
+import qualified Data.HashMap.Strict as Map
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate :: SparqlEndPoint -> IO Script
@@ -40,17 +41,25 @@ commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
 
 nameArgs :: [a] -> [Doc]
-nameArgs xs = map ((<>) "x") (map int [1 .. length xs])
+nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
 
 iArgs :: Int -> [Doc]
 iArgs i = map ((<>) "x") (map int [1 .. i])
 
+writeCall' :: DT.Text -> [DT.Text] -> Doc
+writeCall' x xs = text' x <> tupled (map text' xs)
+
+unpack :: PackHash -> Maybe Name -> Doc -> Doc
+unpack h n d = case (n >>= (flip Map.lookup) (unpacker h)) of 
+  (Just f) -> text' f <> parens d
+  Nothing  -> text' (genericUnpacker h) <> parens d
+
 -- | writes an argument sans serialization 
-writeArgument :: Argument -> Doc
-writeArgument (ArgName n _  ) = text' n
-writeArgument (ArgCall n _ _) = text' n
-writeArgument (ArgData d _  ) = writeData d
-writeArgument (ArgPosi i _  ) = "x" <> int i
+writeArgument :: [DT.Text] -> Argument -> Doc
+writeArgument _ (ArgName n _  ) = text' n
+writeArgument xs (ArgCall n _ _) = writeCall' (MS.makeManifoldName n) xs
+writeArgument _ (ArgData d _  ) = writeData d
+writeArgument _ (ArgPosi i _  ) = "x" <> int i
 
 writeData :: MData -> Doc
 writeData (Num' x) = text' x
@@ -90,10 +99,28 @@ if(length(args) == 0){
 sourceT s = [idoc|source("${s}")|]
 
 manifoldT h m
-  | mExported m && (not (mCalled m)) = exportedT m h
-  | otherwise = "XXX"
+  | not (mCalled m) && mSourced m && mExported m = sourceWrapperManifold h m
+  | not (mCalled m) && mExported m = compositionWrapperManifold h m
+  | otherwise = standardManifoldT h m
 
-exportedT m h = [idoc|
+sourceWrapperManifold h m = [idoc|
+# ${text' $ mMorlocName m}
+
+${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep $ nameArgs (mArgs m)}){
+  ${fname}(${commaSep (map castArg (mArgs m))})
+}
+|]
+  where
+    castArg :: Argument -> Doc
+    castArg arg = case arg of
+      (ArgPosi i t) -> unpack h t ("x" <> int i)
+      _ -> error "Expected only user arguments"
+
+    fname = text' $ maybe (mMorlocName m) id (mSourceName m)
+
+compositionWrapperManifold h m = [idoc|# FLUFF|]
+
+standardManifoldT h m = [idoc|
 # ${text' $ mMorlocName m}
 
 ${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep (map text' (mBoundVars m))}){
@@ -103,10 +130,7 @@ ${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep (map text' (mB
   where
     castArg :: Argument -> Doc
     castArg arg = case arg of
-      (ArgName n (Just t)) -> "unpacker" <> parens (writeArgument arg)
-      (ArgName n Nothing)  -> "genericUnpacker" <> parens (writeArgument arg)
-      _ -> writeArgument arg
+      (ArgName _ t) -> unpack h t (writeArgument (mBoundVars m) arg)
+      _ -> writeArgument (mBoundVars m) arg
 
     fname = text' $ maybe (mMorlocName m) id (mSourceName m)
-
-    generic = genericUnpacker h

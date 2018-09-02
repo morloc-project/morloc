@@ -20,6 +20,7 @@ import qualified Morloc.System as MS
 import qualified Data.Text as DT
 import qualified Data.HashMap.Strict as Map
 import qualified Data.List as DL
+import qualified Data.Maybe as DM
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 -- | Generate the nexus, which is a program that coordinates the execution of
@@ -38,7 +39,15 @@ perlNexus ep = fmap render $ main <$> names <*> fdata where
   manifolds = fmap (filter isExported) (V.buildManifolds ep)
 
   names :: IO [Doc]
-  names = fmap (map (text' . V.mMorlocName)) manifolds
+  names = fmap (map (text' . getName)) manifolds
+
+  getName :: V.Manifold -> DT.Text
+  getName m = maybe (V.mMorlocName m) id (V.mComposition m)
+
+  getNArgs :: V.Manifold -> Int
+  getNArgs m
+    | DM.isJust (V.mComposition m) = length (V.mBoundVars m)
+    | otherwise = length (V.mArgs m)
 
   fdata :: IO [(Doc, Int, Doc, Doc, Doc)]
   fdata = fmap (map getFData) manifolds
@@ -46,8 +55,8 @@ perlNexus ep = fmap render $ main <$> names <*> fdata where
   getFData :: V.Manifold -> (Doc, Int, Doc, Doc, Doc)
   getFData m = case V.mLang m of
     (Just lang) ->
-      ( text' (V.mMorlocName m)
-      , length (V.mArgs m)
+      ( text' (getName m)
+      , getNArgs m
       , text' (MS.findExecutor lang)
       , text' (MS.makePoolName lang)
       , text' (MS.makeManifoldName (V.mCallId m))
@@ -55,7 +64,11 @@ perlNexus ep = fmap render $ main <$> names <*> fdata where
     Nothing -> error "A language must be defined"
 
   isExported :: V.Manifold -> Bool
-  isExported m = V.mExported m && not (V.mCalled m)
+  isExported m =
+    -- shallow wrappers around a source function
+    (V.mExported m && not (V.mCalled m) && V.mSourced m)
+    || -- compositions
+    (V.mExported m && DM.isJust (V.mComposition m))
 
 
 main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc

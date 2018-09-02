@@ -27,6 +27,7 @@ import Morloc.Database.HSparql.Connection
 import qualified Data.HashMap.Strict as Map
 import qualified Data.List.Extra as DLE
 import qualified Data.Text as DT
+import qualified Data.Maybe as DM
 import qualified Data.Scientific as DS
 import qualified System.IO as IO
 import qualified Safe as Safe
@@ -37,9 +38,13 @@ type ReturnType = DT.Text -- TODO: extend support to non-atomics
 
 data Argument
   = ArgName Name (Maybe Type)
-  | ArgCall Name (Maybe ReturnType) (Maybe Lang)
+  -- ^ Morloc variables that are defined in scope
+  | ArgCall Key (Maybe ReturnType) (Maybe Lang)
+  -- ^ A call to some function
   | ArgData MData (Maybe Type)
+  -- ^ Raw data defined in one of the Morloc internal types
   | ArgPosi Int (Maybe Type)
+  -- ^ A manifold positional argument (passed into a function assignment)
   deriving(Show, Eq, Ord)
 
 data Manifold = Manifold {
@@ -80,10 +85,10 @@ data PackHash = PackHash {
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
-buildManifolds e = fmap ( propagateBnds
-                        . setLangs
+buildManifolds e = fmap ( setLangs
                         . map setArgs
                         . DLE.groupSort
+                        . propadateBoundVariables
                         . map asTuple
                         ) (manifoldQ e)
 
@@ -102,7 +107,7 @@ asTuple [ Just callId'
         , Just exported'
         , langType'
         , argname'
-        , argcallname'
+        , argcall_id'
         , datatype'
         , dataval'
         ] =
@@ -125,7 +130,7 @@ asTuple [ Just callId'
       sourceLang'
     , langType'
     , argname'
-    , argcallname'
+    , argcall_id'
     , makeData <$> datatype' <*> dataval'
     , element'
     )
@@ -136,7 +141,7 @@ makeArgument
   :: ( Maybe Lang -- lang
      , Maybe Name -- language-specific type
      , Maybe Name -- argument name (if it is a bound argument)
-     , Maybe Name -- argument call name (if it is a function call)
+     , Maybe Key  -- argument callId (if it is a function call)
      , Maybe MData -- argument data (if this is data)
      , Maybe DT.Text -- the element (rdf:_<num>)
      )
@@ -174,8 +179,23 @@ setLangs ms = map (setLang hash) ms where
   hash :: Map.HashMap Name Lang
   hash = MU.spreadAttr (map (\m -> (mMorlocName m, mComposition m, mLang m)) ms)
 
-propagateBnds :: [Manifold] -> [Manifold]
-propagateBnds = id
+propadateBoundVariables :: [(Manifold, Argument)] -> [(Manifold, Argument)]
+propadateBoundVariables ms = map setBoundVars ms 
+  where
+    setBoundVars :: (Manifold, Argument) -> (Manifold, Argument)
+    setBoundVars (m, a) = (m { mBoundVars = maybe [] id (Map.lookup (mCallId m) hash) }, a)
+
+    -- map from mcallId to mBoundVars
+    hash :: Map.HashMap Key [Name]
+    hash = MU.spreadAttr (map toTriple ms)
+
+    toTriple :: (Manifold, Argument) -> (Key, Maybe Key, Maybe [Name])
+    toTriple (m, ArgCall k _ _) = (mCallId m, Just k, toMaybe (mBoundVars m))
+    toTriple (m, _) = (mCallId m, Nothing, toMaybe (mBoundVars m))
+
+    toMaybe :: [a] -> Maybe [a]
+    toMaybe [] = Nothing
+    toMaybe xs = Just xs
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
@@ -212,7 +232,7 @@ PREFIX mid: <http://www.morloc.io/XXX/mid/>
 SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
        (group_concat(?bnd; separator=",") as ?bvars)
        ?source_lang ?source_path ?called ?sourced ?exported ?lang_type
-       ?argname ?argcallname ?datatype ?dataval
+       ?argname ?argcall_id ?datatype ?dataval
 WHERE {
     {
         ?call_id rdf:type mlc:call ;
@@ -298,19 +318,17 @@ WHERE {
     #  2. a function call
     OPTIONAL {
         FILTER(bound(?arg))
-        ?arg rdf:type mlc:name ;
-             rdf:value ?argname .
+        ?arg rdf:type mlc:call .
+        BIND(?arg AS ?argcall_id)
     }
     #  3. a name - the name can only come from one of the bound variables
     OPTIONAL {
         FILTER(bound(?arg))
-        ?arg rdf:type mlc:call ;
-             rdf:value ?argcall_id .
-        ?argcall_id rdf:type mlc:name ;
-                   rdf:value ?argcallname .
+        ?arg rdf:type mlc:name ;
+             rdf:value ?argname .
     }
 }
-GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type ?morloc_name ?element ?argname ?argcallname ?datatype ?dataval ?source_name
+GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type ?morloc_name ?element ?argname ?argcall_id ?datatype ?dataval ?source_name
 ORDER BY ?call_id ?element
 |]
 
