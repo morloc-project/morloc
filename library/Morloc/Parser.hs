@@ -253,6 +253,7 @@ mtype =
       ns <- some unambiguous'
       return $ M3.makeTopRDF i (
              [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
              , DR.triple i (M3.rdfPre .:. "value") (plain n)]
           ++ (listTag i l)
           ++ M3.adopt i ns
