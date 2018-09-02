@@ -9,34 +9,71 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Parser (morlocScript) where
+module Morloc.Parser (parse, parseShallow) where
 
-import Text.Parsec hiding (State)
+import Text.Megaparsec hiding (parse, State)
+import qualified Text.Megaparsec.Expr as TPE
+import qualified Text.Megaparsec.Char as TMC
 import qualified Data.RDF as DR
-import qualified Text.Parsec.Expr as TPE
+import qualified Control.Monad as CM
+import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
+import qualified Data.Text as DT
+import qualified Data.Text.IO as DTO
 
 import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
 import qualified Morloc.Triple as M3
 import qualified Morloc.Lexer as Tok
+import qualified Morloc.Util as MU
+import qualified Morloc.Walker as MW
+import Morloc.Operators
+
+-- a little helper function for making plain nodes
+plain :: DT.Text -> DR.Node
+plain s = DR.LNode (DR.PlainL s)
+
+parse :: Maybe DT.Text -> DT.Text -> IO (ME.ThrowsError M3.RDF)
+parse srcfile code = case (parseShallow srcfile code) of
+  (Right rdf) -> joinRDF rdf (parseImports rdf)
+  err         -> return err
+
+joinRDF :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)] -> IO (ME.ThrowsError M3.RDF)
+joinRDF rdf xs
+  = (fmap . fmap)                         -- raise to IO (ME.ThrowsError a)
+      (foldl M3.rdfAppend rdf)            -- ([M3.RDF] -> M3.RDF)
+      ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [M3.RDF])
+
+parseImports :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)]
+parseImports rdf = map morlocScriptFromFile (MW.getImportedFiles rdf)
+
+morlocScriptFromFile :: DT.Text -> IO (ME.ThrowsError M3.RDF)
+morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . DTO.readFile $ DT.unpack s
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-morlocScript :: String -> ME.ThrowsError M3.RDF
-morlocScript s =
-  case runParser contents MS.parserStateEmpty "<stdin>" s of
+parseShallow :: Maybe DT.Text -> DT.Text -> ME.ThrowsError M3.RDF
+parseShallow srcfile code =
+  case runParser (CMS.runStateT contents pstate) (DT.unpack input') code of
     Left err  -> CME.throwError $ ME.SyntaxError err
-    Right (M3.TopRDF _ val) -> return val
+    Right ((M3.TopRDF _ val), s) -> return val
+  where
+    pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}
+    input' = case srcfile of
+      Just s  -> s
+      Nothing -> "<stdin>"
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
 contents :: MS.Parser M3.TopRDF
 contents = do
   i <- MS.getId
-  xs <- Tok.whiteSpace >> many top <* eof
+  srcUri <- MS.getSourceUri
+  xs <- Tok.sc >> many top <* eof
   return $ M3.makeTopRDF i (
-         [M3.uss i "rdf:type" "morloc:script"]
+         [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "script")
+         , DR.triple i (M3.rdfPre .:. "value") (plain srcUri) 
+         ]
       ++ M3.adopt i xs
     )
 
@@ -55,8 +92,8 @@ export' = do
   i <- MS.getId
   n <- Tok.name
   return $ M3.makeTopRDF i ([
-        M3.uss i "rdf:type" "morloc:export"
-      , M3.ust i "rdf:value" "morloc:string" n
+        DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "export")
+      , DR.triple i (M3.rdfPre .:. "value") (plain n)
     ])
 
 -- | parses a 'source' header, returning the language
@@ -68,18 +105,18 @@ source' = do
   lang <- Tok.stringLiteral
   -- get the path to the source file, if Nothing, then assume "vanilla"
   i <- MS.getId
-  path <- optionMaybe (Tok.reserved "from" >> Tok.stringLiteral)
+  path <- optional (Tok.reserved "from" >> Tok.stringLiteral)
   -- get the function imports with with optional aliases
   fs <- Tok.parens (sepBy importAs' Tok.comma)
   -- the statement is unambiguous even without a semicolon
   optional (Tok.op ";")
 
   return $ M3.makeTopRDF i ([
-          (M3.uss i "rdf:type" "morloc:source")
-        , (M3.ust i "morloc:lang" "morloc:string" lang)
+          DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "source")
+        , DR.triple i (M3.mlcPre .:. "lang") (plain lang)
       ] ++
-        M3.adoptAs "morloc:import" i fs ++
-        maybe [] (\p -> [M3.ust i "morloc:path" "morloc:string" p]) path
+        M3.adoptAs (M3.mlcPre .:. "import") i fs ++
+        maybe [] (\p -> [DR.triple i (M3.mlcPre .:. "path") (plain p)]) path
     )
 
   where
@@ -95,8 +132,8 @@ source' = do
       -- If no alias is given, the alias is set to be the same as the name.
       alias <- option func (Tok.reserved "as" >> Tok.name)
       return $ M3.makeTopRDF i (
-           [ M3.ust i "morloc:name" "morloc:string" func
-           , M3.ust i "morloc:alias" "morloc:string" alias
+           [ DR.triple i (M3.mlcPre .:. "name") (plain func)
+           , DR.triple i (M3.mlcPre .:. "alias") (plain alias)
            ]
         )
 
@@ -114,63 +151,70 @@ simpleImport :: MS.Parser M3.TopRDF
 simpleImport = do
   i <- MS.getId
   Tok.reserved "import"
-  path <- Tok.path
-  qual <- optionMaybe (Tok.op "as" >> Tok.name)
+  path <- Tok.stringLiteral
+  qual <- optional (Tok.op "as" >> Tok.name)
   return $ M3.makeTopRDF i (
       [
-        (M3.uss i "rdf:type" "morloc:import")
-      , (M3.ust i "morloc:name" "morloc:string" (DL.intercalate "." path))
-      ] ++ maybe [] (\q -> [M3.ust i "morloc:namespace" "morloc:string" q]) qual
+        DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "import")
+      , DR.triple i (M3.mlcPre .:. "name") (plain $ path <> ".loc")
+      ] ++ maybe [] (\q -> [DR.triple i (M3.mlcPre .:. "namespace") (plain q)]) qual
     )
 
 restrictedImport :: MS.Parser M3.TopRDF
 restrictedImport = do
   i <- MS.getId
   Tok.reserved "from"
-  path <- Tok.path
+  path <- Tok.stringLiteral
   Tok.reserved "import"
   functions <- Tok.parens (sepBy1 tripleName Tok.comma)
   return $ M3.makeTopRDF i (
       [
-        M3.uss i "rdf:type" "morloc:restricted_import"
-      , M3.ust i "morloc:name" "morloc:string" (DL.intercalate "." path)
-      ] ++ M3.adoptAs "morloc:import" i functions
+        DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "restricted_import")
+      , DR.triple i (M3.mlcPre .:. "name") (plain $ path <> ".loc")
+      ] ++ M3.adoptAs (M3.mlcPre .:. "import") i functions
     )
 
 dataDeclaration :: MS.Parser M3.TopRDF
 dataDeclaration = do
   i <- MS.getId
-  lhs <- tripleName 
+  lhs <- Tok.name
   bndvars <- many tripleName
   Tok.op "="
   rhs <- expression
   return $ M3.makeTopRDF i (
-         [M3.uss i "rdf:type" "morloc:dataDeclaration"]
-      ++ M3.adoptAs "morloc:lhs" i [lhs]
+         [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "dataDeclaration")
+         , DR.triple i (M3.mlcPre .:. "lhs") (plain lhs)
+         ]
+      ++ M3.adoptAs (M3.mlcPre .:. "rhs") i [rhs]
       ++ M3.adopt i bndvars
-      ++ M3.adoptAs "morloc:rhs" i [rhs]
     )
 
 -- | function :: [input] -> output constraints
 typeDeclaration :: MS.Parser M3.TopRDF
 typeDeclaration = do
   i <- MS.getId
-  lhs <- tripleName
+  lhs <- Tok.name
+  lang <- option "Morloc" Tok.name
   Tok.op "::"
+  properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
   rhs <- mtype
   constraints <- option [] (
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
   return $ M3.makeTopRDF i (
-         [M3.uss i "rdf:type" "morloc:typeDeclaration"]
-      ++ M3.adoptAs "morloc:lhs" i [lhs]
-      ++ M3.adoptAs "morloc:rhs" i [rhs]
-      ++ M3.adoptAs "morloc:constraint" (M3.rdfId rhs) constraints
+         [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "typeDeclaration")
+         , DR.triple i (M3.mlcPre .:. "lhs") (plain lhs)
+         , DR.triple i (M3.mlcPre .:. "lang") (plain lang)
+         ]
+      ++ M3.adoptAs (M3.mlcPre .:. "rhs") i [rhs]
+      ++ M3.adoptAs (M3.mlcPre .:. "property") (M3.rdfId rhs) properties
+      ++ M3.adoptAs (M3.mlcPre .:. "constraint") (M3.rdfId rhs) constraints
     )
 
-listTag :: DR.Node -> Maybe String -> [M3.Triple]
-listTag i tag = maybe [] (\t -> [M3.ust i "morloc:label" "morloc:name" t]) tag
+listTag :: DR.Node -> Maybe DT.Text -> [M3.Triple]
+listTag i Nothing    = []
+listTag i (Just tag) = [DR.triple i (M3.mlcPre .:. "label") (plain tag)]
 
 mtype :: MS.Parser M3.TopRDF
 mtype =
@@ -206,9 +250,11 @@ mtype =
       l <- Tok.tag Tok.genericType
       n <- Tok.specificType
       i <- MS.getId
-      ns <- many1 unambiguous'
+      ns <- some unambiguous'
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:parameterizedType" n ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain n)]
           ++ (listTag i l)
           ++ M3.adopt i ns
         )
@@ -224,10 +270,11 @@ mtype =
       l <- Tok.tag Tok.genericType
       n <- Tok.genericType
       i <- MS.getId
-      ns <- many1 unambiguous'
+      ns <- some unambiguous'
       return $ M3.makeTopRDF i (
-             [ M3.uss i "rdf:type" "morloc:parameterizedGeneric"
-             , M3.ust i "morloc:value" "morloc:string" n
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedGeneric")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain n)
              ]
           ++ listTag i l
           ++ M3.adopt i ns
@@ -240,7 +287,10 @@ mtype =
       n <- Tok.specificType
       i <- MS.getId
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:atomicType" n ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "atomicType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain n)
+             ]
           ++ listTag i l
         )
 
@@ -252,8 +302,9 @@ mtype =
       n <- Tok.genericType
       i <- MS.getId
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:atomicGeneric" n
-             ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "atomicGeneric")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain n)]
           ++ (listTag i l)
         )
 
@@ -262,7 +313,10 @@ mtype =
       Tok.op "("
       Tok.op ")"
       i <- MS.getId
-      return $ M3.makeTopRDF i [M3.uss i "rdf:type" "morloc:empty"]
+      return $ M3.makeTopRDF i
+        [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "empty")
+        , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+        ]
 
     paren' :: MS.Parser M3.TopRDF 
     paren' = Tok.parens mtype
@@ -270,12 +324,14 @@ mtype =
     tuple' :: MS.Parser M3.TopRDF
     tuple' = Tok.parens $ do
       i <- MS.getId
-      l <- Tok.tag (char '(')
+      l <- Tok.tag (TMC.char '(')
       x <- mtype
       Tok.op ","
       xs <- sepBy1 mtype Tok.comma
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:parameterizedType" "Tuple" ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain "Tuple")]
           ++ listTag i l
           ++ M3.adopt i (x:xs)
         )
@@ -284,10 +340,12 @@ mtype =
     list' :: MS.Parser M3.TopRDF
     list' = do
       i <- MS.getId
-      l <- Tok.tag (char '[')
+      l <- Tok.tag (TMC.char '[')
       s <- Tok.brackets mtype
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:parameterizedType" "List" ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain "List")]
           ++ listTag i l
           ++ M3.adopt i [s]
         )
@@ -296,10 +354,12 @@ mtype =
     record' :: MS.Parser M3.TopRDF
     record' = do
       i <- MS.getId
-      l <- Tok.tag (char '{')
+      l <- Tok.tag (TMC.char '{')
       ns <- Tok.braces $ sepBy1 recordEntry' Tok.comma
       return $ M3.makeTopRDF i (
-             [ M3.ust i "rdf:type" "morloc:parameterizedType" "Record" ]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "parameterizedType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             , DR.triple i (M3.rdfPre .:. "value") (plain "Record")]
           ++ listTag i l
           ++ M3.adopt i ns
         )
@@ -312,9 +372,9 @@ mtype =
       Tok.op "::"
       t <- mtype
       return $ M3.makeTopRDF i (
-          [ M3.uss i "rdf:type" "morloc:namedType"
-          , M3.ust i "morloc:key" "morloc:name" n
-          ] ++ M3.adoptAs "morloc:value" i [t]
+          [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "namedType")
+          , DR.triple i (M3.mlcPre .:. "key") (plain n)
+          ] ++ M3.adoptAs (M3.rdfPre .:. "value") i [t]
         )
 
     function' :: MS.Parser M3.TopRDF
@@ -324,17 +384,18 @@ mtype =
       Tok.op "->"
       output <- notFunction'
       return $ M3.makeTopRDF i (
-             [M3.uss i "rdf:type" "morloc:functionType"]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "functionType")
+             , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "type")
+             ]
           ++ M3.adopt i inputs
-          ++ M3.adoptAs "morloc:output" i [output]
+          ++ M3.adoptAs (M3.mlcPre .:. "output") i [output]
         )
 
 
 mdata :: MS.Parser M3.TopRDF
 mdata =  do
         try tripleBool          -- True | False
-    <|> try tripleFloat         -- 1.1
-    <|> try tripleInteger       -- 1
+    <|> try tripleNumber        -- scientific number of arbitrary precision
     <|> try tripleStringLiteral -- "yolo"
     <|> try list'               -- [ ...
     <|> try tuple'              -- ( ...
@@ -347,7 +408,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.brackets (sepBy mdata Tok.comma)
         return $ M3.makeTopRDF i (
-               [M3.uss i "rdf:type" "morloc:list"]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "list") 
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -355,7 +417,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.parens tuple''
         return $ M3.makeTopRDF i (
-               [M3.uss i "rdf:type" "morloc:tuple"]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "tuple") 
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -363,7 +426,8 @@ mdata =  do
         i <- MS.getId
         xs <- Tok.braces (sepBy1 recordEntry' Tok.comma) 
         return $ M3.makeTopRDF i (
-               [M3.uss i "rdf:type" "morloc:record"]
+               [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "record")
+               , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")]
             ++ M3.adopt i xs
           )
 
@@ -381,22 +445,22 @@ mdata =  do
         Tok.op "="
         t <- mdata
         return $ M3.makeTopRDF i (
-            [ M3.uss i "rdf:type" "morloc:recordEntry"
-            , M3.ust i "morloc:lhs" "morloc:name" n
-            ] ++ M3.adoptAs "morloc:rhs" i [t]
+            [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "recordEntry")
+            , DR.triple i (M3.mlcPre .:. "lhs") (plain n)
+            ] ++ M3.adoptAs (M3.mlcPre .:. "rhs") i [t]
           )
 
 expression :: MS.Parser M3.TopRDF
 expression =
   -- currently this just handles "."
-      try (TPE.buildExpressionParser functionTable term')
+      try (TPE.makeExprParser term' functionTable)
   <|> term'
   <?> "an expression"
   where
     term' :: MS.Parser M3.TopRDF
     term' =
-          try (Tok.parens expression)
-      <|> try application
+          try application -- must go first to allow, e.g. `(g . f) x`
+      <|> try (Tok.parens expression)
       <|> try mdata
       <|> try tripleName
 
@@ -404,10 +468,10 @@ application :: MS.Parser M3.TopRDF
 application = do
   i <- MS.getId
   function <- Tok.parens expression <|> identifier'
-  arguments <- many1 term'
+  arguments <- some term'
   return $ M3.makeTopRDF i (
-         [M3.uss i "rdf:type" "morloc:call"]
-      ++ M3.adoptAs  "morloc:value" i [function]
+         [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call")]
+      ++ M3.adoptAs  (M3.rdfPre .:. "value") i [function]
       ++ M3.adopt i arguments
     )
   where
@@ -421,7 +485,8 @@ application = do
       x    <- Tok.name
       tag' <- Tok.tag Tok.name
       return $ M3.makeTopRDF i (
-          [ M3.ust i "rdf:type" "morloc:name" x
+          [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "name")
+          , DR.triple i (M3.rdfPre .:. "value") (plain x)
           ] ++ listTag i tag')
 
 booleanExpr :: MS.Parser M3.TopRDF
@@ -438,16 +503,16 @@ booleanExpr = do
       Tok.reserved "not"
       i <- MS.getId
       e <- booleanExpr
-      return $ M3.makeTopRDF i (M3.adoptAs "morloc:not" i [e]) 
+      return $ M3.makeTopRDF i (M3.adoptAs (M3.mlcPre .:. "not") i [e]) 
 
     call' :: MS.Parser M3.TopRDF
     call' = do
       i <- MS.getId
       f <- Tok.parens expression <|> identifier'
-      ns <- many1 argument'
+      ns <- some argument'
       return $ M3.makeTopRDF i (
-             [ M3.uss i "rdf:type" "morloc:call" ]
-          ++ M3.adoptAs  "morloc:value" i [f]
+             [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call") ]
+          ++ M3.adoptAs  (M3.rdfPre .:. "value") i [f]
           ++ M3.adopt i ns
         )
 
@@ -455,7 +520,9 @@ booleanExpr = do
     identifier' = do
       i <- MS.getId
       n <- Tok.name
-      return $ M3.makeTopRDF i [M3.ust i "rdf:type" "morloc:name" n]
+      return $ M3.makeTopRDF i
+        [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "name")
+        , DR.triple i (M3.rdfPre .:. "value") (plain n)]
 
     argument' :: MS.Parser M3.TopRDF
     argument' =
@@ -473,7 +540,7 @@ booleanBinOp = do
   return $ binOp op i a b
   where
     bterm' =
-            tripleBool
+            try tripleBool
         <|> tripleName
         <|> Tok.parens booleanExpr
         <?> "boolean expression"
@@ -497,7 +564,7 @@ relativeExpr = do
 
 arithmeticExpr :: MS.Parser M3.TopRDF
 arithmeticExpr
-  =   TPE.buildExpressionParser arithmeticTable arithmeticTerm
+  =   TPE.makeExprParser arithmeticTerm arithmeticTable
   <?> "expression"
 
 arithmeticTerm :: MS.Parser M3.TopRDF
@@ -513,10 +580,10 @@ arithmeticTerm = do
     call' = do
       i <- MS.getId
       f <- Tok.parens expression <|> identifier'
-      args <- many1 argument'
+      args <- some argument'
       return $ M3.makeTopRDF i (
-             [M3.uss i "rdf:type" "morloc:call"]
-          ++ M3.adoptAs "morloc:value" i [f]
+             [DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "call")]
+          ++ M3.adoptAs (M3.rdfPre .:. "value") i [f]
           ++ M3.adopt i args
         )
 
@@ -524,7 +591,9 @@ arithmeticTerm = do
     identifier' = do
       i <- MS.getId
       n <- Tok.name
-      return $ M3.makeTopRDF i [M3.ust i "rdf:type" "morloc:name" n]
+      return $ M3.makeTopRDF i
+        [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "name")
+        , DR.triple i (M3.rdfPre .:. "value") (plain n)]
 
     argument' :: MS.Parser M3.TopRDF
     argument' =
@@ -539,8 +608,8 @@ arithmeticTerm = do
       x <- Tok.name
       ids <- Tok.brackets (sepBy1 arithmeticExpr Tok.comma)
       return $ M3.makeTopRDF i (
-          [ M3.uss i "rdf:type" "morloc:access"
-          , M3.ust i "morloc:name" "morloc:string" x
+          [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "access")
+          , DR.triple i (M3.mlcPre .:. "name") (plain x)
           ] ++ M3.adopt i ids
         )
 
@@ -549,48 +618,60 @@ arithmeticTable
       [ prefix "-" (unaryOp "Neg")
       , prefix "+" (unaryOp "Pos")
       ]
-    , [ binary "^"  (binOp "Pow") TPE.AssocRight
+    , [ binaryR "^"  (binOp "Pow")
       ]
-    , [ binary "*"  (binOp "Mul") TPE.AssocLeft
-      , binary "/"  (binOp "Div") TPE.AssocLeft
-      , binary "%"  (binOp "Mod") TPE.AssocLeft
-      , binary "//" (binOp "Quo") TPE.AssocLeft
-      ]                     
-    , [ binary "+"  (binOp "Add") TPE.AssocLeft
-      , binary "-"  (binOp "Sub") TPE.AssocLeft
+    , [ binaryL "*"  (binOp "Mul")
+      , binaryL "/"  (binOp "Div")
+      , binaryL "%"  (binOp "Mod")
+      , binaryL "//" (binOp "Quo")
+      ]
+    , [ binaryL "+"  (binOp "Add")
+      , binaryL "-"  (binOp "Sub")
       ]
   ]
 
-unaryOp :: String -> DR.Node -> M3.TopRDF -> M3.TopRDF
+unaryOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF
 unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
-     [ M3.ust i "rdf:type" "morloc:unaryOp" s
-     , M3.usu j "rdf:_0" i
+     [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "unaryOp")
+     , DR.triple i (M3.rdfPre .:. "value") (plain s)
+     , DR.triple j (M3.rdfPre .:. "_0") i
      ] ++ (DR.triplesOf xs)
   )
 
-binOp :: String -> DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
+binOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
-     [ M3.ust i "rdf:type" "morloc:binop" s
-     , M3.usu i "morloc:lhs" j
-     , M3.usu i "morloc:rhs" k
+     -- TODO: The `binop` classification should not appear in the Morloc RDF.
+     -- These binary expression should resolve into perfectly normal functions.
+     -- No special handling should be needed (except to integrate them into the
+     -- manifolds).
+     [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "binop")
+     , DR.triple i (M3.rdfPre .:. "value") (plain s)
+     , DR.triple i (M3.mlcPre .:. "lhs") j
+     , DR.triple i (M3.mlcPre .:. "rhs") k
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
-functionTable = [[ binary "."  exprComposition TPE.AssocRight ]]
+functionTable = [[ binaryR "."  exprComposition ]]
 
 exprComposition :: DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
 exprComposition i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
-     [ M3.uss i "rdf:type" "morloc:composition"
-     , M3.usu i "morloc:lhs" j
-     , M3.usu i "morloc:rhs" k
+     [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "composition")
+     , DR.triple i (M3.mlcPre .:. "lhs") j
+     , DR.triple i (M3.mlcPre .:. "rhs") k
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
   )
 
-binary name fun assoc = TPE.Infix (do {
+binaryR name fun = TPE.InfixR (do {
     Tok.op name;
     i <- MS.getId;
     return (fun i);
-  }) assoc
+  })
+
+binaryL name fun = TPE.InfixL (do {
+    Tok.op name;
+    i <- MS.getId;
+    return (fun i);
+  })
 
 prefix name fun = TPE.Prefix (do {
     Tok.op name;
@@ -598,22 +679,43 @@ prefix name fun = TPE.Prefix (do {
     return (fun i);
   })
 
-triplePrimitive :: String -> MS.Parser a -> (a -> String) -> MS.Parser M3.TopRDF
-triplePrimitive isa p show' = do
+tripleName :: MS.Parser M3.TopRDF
+tripleName = do
+  i <- MS.getId
+  n <- Tok.name
+  return $ M3.makeTopRDF i
+    [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "name")
+    , DR.triple i (M3.rdfPre .:. "value") (DR.LNode . DR.PlainL $ n)
+    ]
+
+triplePrimitive :: (a -> DR.Node) -> DR.Node -> MS.Parser a -> MS.Parser M3.TopRDF
+triplePrimitive cast t p = do
   i <- MS.getId
   n <- p
-  -- TODO: the separation of "isa" and "value" is now redundant, since the
-  -- primitives are typed
-  return $ M3.makeTopRDF i [M3.ust i "rdf:type" isa (show' n)]
+  return $ M3.makeTopRDF i
+    [ DR.triple i (M3.rdfPre .:. "type") t
+    , DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "data")
+    , DR.triple i (M3.rdfPre .:. "value") (cast n)
+    ]
 
-tripleInteger       :: MS.Parser M3.TopRDF
-tripleFloat         :: MS.Parser M3.TopRDF
-tripleName          :: MS.Parser M3.TopRDF
+tripleNumber        :: MS.Parser M3.TopRDF
 tripleStringLiteral :: MS.Parser M3.TopRDF
 tripleBool          :: MS.Parser M3.TopRDF
 
-tripleInteger       = triplePrimitive "morloc:integer" Tok.integer       show
-tripleFloat         = triplePrimitive "morloc:number"  Tok.float         show
-tripleName          = triplePrimitive "morloc:name"    Tok.name          id
-tripleStringLiteral = triplePrimitive "morloc:string"  Tok.stringLiteral id
-tripleBool          = triplePrimitive "morloc:boolean" Tok.boolean       show
+tnode :: DT.Text -> DT.Text -> DR.Node
+tnode n t = DR.LNode (DR.TypedL n t)
+
+tripleNumber = triplePrimitive
+  (\n -> tnode (DT.pack . show $ n) (M3.xsdPre <> "decimal"))
+  (M3.mlcPre .:. "number")
+  Tok.number
+
+tripleStringLiteral = triplePrimitive
+  (\n -> tnode n (M3.xsdPre <> "string"))
+  (M3.mlcPre .:. "string")
+  Tok.stringLiteral
+
+tripleBool = triplePrimitive
+  (\n -> tnode (DT.pack . show $ n) (M3.xsdPre <> "boolean"))
+  (M3.mlcPre .:. "boolean")
+  Tok.boolean

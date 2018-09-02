@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Nexus
@@ -9,136 +9,133 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Nexus (
-      NexusGenerator(..)
-    , perlCliNexusGenerator
-  ) where
+module Morloc.Nexus (generate) where
 
 import Morloc.Operators
-import qualified Morloc.Util as MU
+import Morloc.Types
+import Morloc.Quasi
+import qualified Morloc.Vortex as V
+import Morloc.Util as MU
+import qualified Morloc.System as MS
 import qualified Data.Text as DT
+import qualified Data.HashMap.Strict as Map
+import qualified Data.List as DL
+import qualified Data.Maybe as DM
+import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
-data NexusGenerator = NexusGenerator {
-    nexusPrologue    
-    :: DT.Text
-  , nexusPrint
-    :: DT.Text
-    -> DT.Text
-  , nexusDispatch
-    :: [DT.Text]
-    -> DT.Text
-    -- make a help function
-  , nexusHelp
-    :: [DT.Text] -- prologue
-    -> [DT.Text] -- functions
-    -> [DT.Text] -- epilogue
-    -> DT.Text
-    -- make a funtion that calls a function in a particular pool 
-  , nexusCall
-    :: DT.Text -- the command for calling the pool (e.g. Rscript or python)
-    -> DT.Text -- the pool name
-    -> DT.Text -- function name
-    -> DT.Text -- manifold name
-    -> Int     -- number of arguments
-    -> DT.Text -- call function
-  , nexusEpilogue
-    :: DT.Text
+-- | Generate the nexus, which is a program that coordinates the execution of
+-- the language-specific function pools.
+generate :: SparqlEndPoint -> IO Script
+generate e
+  =   Script
+  <$> pure "nexus"
+  <*> pure "perl"
+  <*> perlNexus e
+
+perlNexus :: SparqlEndPoint -> IO DT.Text
+perlNexus ep = fmap render $ main <$> names <*> fdata where
+
+  manifolds :: IO [V.Manifold]
+  manifolds = fmap (filter isExported) (V.buildManifolds ep)
+
+  names :: IO [Doc]
+  names = fmap (map (text' . getName)) manifolds
+
+  getName :: V.Manifold -> DT.Text
+  getName m = maybe (V.mMorlocName m) id (V.mComposition m)
+
+  getNArgs :: V.Manifold -> Int
+  getNArgs m
+    | DM.isJust (V.mComposition m) = length (V.mBoundVars m)
+    | otherwise = length (V.mArgs m)
+
+  fdata :: IO [(Doc, Int, Doc, Doc, Doc)]
+  fdata = fmap (map getFData) manifolds
+
+  getFData :: V.Manifold -> (Doc, Int, Doc, Doc, Doc)
+  getFData m = case V.mLang m of
+    (Just lang) ->
+      ( text' (getName m)
+      , getNArgs m
+      , text' (MS.findExecutor lang)
+      , text' (MS.makePoolName lang)
+      , text' (MS.makeManifoldName (V.mCallId m))
+      )
+    Nothing -> error "A language must be defined"
+
+  isExported :: V.Manifold -> Bool
+  isExported m =
+    -- shallow wrappers around a source function
+    (V.mExported m && not (V.mCalled m) && V.mSourced m)
+    || -- compositions
+    (V.mExported m && DM.isJust (V.mComposition m))
+
+
+main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc
+main names fdata = [idoc|#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+&printResult(&dispatch(@ARGV));
+
+sub printResult {
+    my $result = shift;
+    print "$result";
 }
 
-show' :: Show a => a -> DT.Text
-show' x = DT.pack (show x)
+sub dispatch {
+    if(scalar(@_) == 0){
+        &usage();
+    }
 
-perlCliNexusGenerator :: NexusGenerator
-perlCliNexusGenerator = NexusGenerator {
-      nexusPrologue = nexusPrologue'
-    , nexusPrint    = nexusPrint'
-    , nexusDispatch = nexusDispatch'
-    , nexusHelp     = nexusHelp'
-    , nexusCall     = nexusCall'
-    , nexusEpilogue = nexusEpilogue'
-  }
-  where
-    nexusPrologue' = DT.unlines
-      [ "#!/usr/bin/env perl"
-      , "use strict;"
-      , "use warnings;"
-      , ""
-      , "&printResult(&dispatch(@ARGV));"
-      ]
+    my $cmd = shift;
+    my $result = undef;
 
-    nexusPrint' _ = DT.unlines
-      [ "sub printResult {"
-      , "    my $result = shift;"
-      , "    print \"$result\";"
-      , "}"
-      ]
+    ${hashmapT names}
 
-    nexusDispatch' functions = DT.unlines
-      [ "sub dispatch {"
-      , "    if(scalar(@_) == 0){"
-      , "        &usage();"
-      , "    }"
-      , ""
-      , makeCmdHash functions
-      , ""
-      , "    my $cmd = shift;"
-      , "    my $result = undef;"
-      , ""
-      , "    if($cmd eq '-h' || $cmd eq '-?' || $cmd eq '--help' || $cmd eq '?'){"
-      , "        &usage();"
-      , "    }"
-      , "    if(exists($cmds{$cmd})){"
-      , "        $result = $cmds{$cmd}(@_);"
-      , "    } else {"
-      , "        print STDERR \"Command '$cmd' not found\";"
-      , "        &usage();"
-      , "    }"
-      , ""
-      , "    return $result;"
-      , "}"
-      ]
+    if($cmd eq '-h' || $cmd eq '-?' || $cmd eq '--help' || $cmd eq '?'){
+        &usage();
+    }
 
-    makeCmdHash :: [DT.Text] -> DT.Text
-    makeCmdHash fs = MU.indent 4 . DT.unlines $
-      [ "my %cmds = ("
-      , MU.indent 4 . DT.intercalate ",\n" . map makeHashEntry $ fs
-      , ");"
-      ]
+    if(exists($cmds{$cmd})){
+        $result = $cmds{$cmd}(@_);
+    } else {
+        print STDERR "Command '$cmd' not found";
+        &usage();
+    }
 
-    makeHashEntry :: DT.Text -> DT.Text
-    makeHashEntry f = f <> " => \\&" <> makeCallName f
+    return $result;
+}
 
-    makeCallName :: DT.Text -> DT.Text
-    makeCallName f = "call_" <> f
+${usageT names}
 
-    nexusHelp' :: [DT.Text] -> [DT.Text] -> [DT.Text] -> DT.Text
-    nexusHelp' prologue xs epilogue = makeFunction "usage" (msg <> "exit 0;")
-      where
-        msg = (DT.concat . map (\s -> "print STDERR \"" <> s <> "\\n\";\n"))
-                (prologue ++ xs ++ epilogue)
+${vsep (map functionT fdata)}
+|]
 
-    nexusCall' prog filename name mid nargs =
-      makeFunction
-        (makeCallName name)
-        (DT.unlines
-          [ "if(scalar(@_) != " <> show' nargs <> "){"
-          , "    print STDERR \"Expected "
-            <> show' nargs
-            <> " arguments to 'sample_index', given \" . "
-          , "    scalar(@_) . \"\\n\";"
-          , "    exit 1;"
-          , "}"
-          , "return `" <> makePoolCall prog filename mid nargs <> "`"
-          ]
-        )
+hashmapT names = [idoc|my %cmds = ${tupled (map hashmapEntryT names)};|]
 
-    makePoolCall prog filename manifold j
-      = DT.unwords [prog, filename, manifold, makePoolArgList j]
+hashmapEntryT n = [idoc|${n} => \&call_${n}|]
 
-    makePoolArgList 0 = ""
-    makePoolArgList j = DT.unwords ["$_[" <> show' k <> "]" | k <- [0..(j-1)]]
+usageT names = [idoc|
+sub usage{
+    print STDERR "The following commands are exported:\n";
+    ${align $ vsep (map usageLineT names)}
+    exit 0;
+}
+|]
 
-    makeFunction :: DT.Text -> DT.Text -> DT.Text
-    makeFunction name body = "sub " <> name <> "{\n" <> MU.indent 4 body <> "\n}"
+usageLineT n = [idoc|print STDERR "  ${n}\n";|]
 
-    nexusEpilogue' = ""
+functionT (name, nargs, prog, pool, mid) = [idoc|
+sub call_${name}{
+    if(scalar(@_) != ${int nargs}){
+        print STDERR "Expected ${int nargs} arguments to '${name}', given " . 
+        scalar(@_) . "\n";
+        exit 1;
+    }
+    return `${prog} ${pool} ${mid} ${hsep $ map argT [0..(nargs-1)]}`
+}
+|]
+
+argT i = [idoc|'$_[${int i}]'|]

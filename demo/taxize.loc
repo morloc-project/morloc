@@ -1,0 +1,83 @@
+export taxid2name
+export name2taxid
+export taxid2rank
+export classification
+export children
+export downstream
+
+source "R" from "demo.R" (
+    "taxid2name"
+  , "name2taxid"
+  , "lineage"
+  , "children"
+  , "downstream"
+  , "taxid2rank"
+)
+
+# wrap :: a -> f a
+# unwrap :: f a -> a
+
+# triple NcbiTaxId property Show;
+
+show :: Show => NcbiTaxId -> String 
+
+interface (NcbiTaxon a) where {
+    lineage    :: x:a -> ys:[a] where {x == ys[1]};
+    children   :: a -> [a];
+    downstream :: a -> [a];
+    taxid2rank :: [Maybe a] -> [Maybe a]
+}
+
+instance (NcbiTaxon Integer) where {
+    lineage = lineage
+}
+
+NcbiTaxId :: i:Integer where {i >= 0};
+
+
+wrapList :: casts => x:a -> ys:[y:a]
+    where {
+        x == y
+        len ys == 1
+    };
+
+unwrapList :: casts, mayDie => xs:[a] -> x:a
+    where {
+        len xs == 1
+        xs[1] == x
+    }
+
+
+wrapMaybe :: casts => x:a -> Maybe y:a
+    where { x == y }
+
+unwrapMaybe :: casts, mayDie => Maybe x:a -> y:a
+    where { x == y }
+
+
+taxids2names R :: Integer -> Character;
+taxids2names :: casts => xs:[Maybe NcbiTaxId] -> ys:[Maybe String]
+    where {size xs == size ys};
+
+
+names2taxids R :: Character -> Integer;
+names2taxids :: casts => xs:[Maybe String] -> ys:[Maybe NcbiTaxId]
+    where {size xs == size ys};
+
+
+# NCBI lineage of a taxon. Ordered from youngest to oldest. Inclusive of the input.
+lineage R :: AtomicInteger -> DataFrame;
+lineage :: x:NcbiTaxId -> ys:[NcbiTaxId]
+    where {x == ys[1]};
+
+
+children R :: AtomicInteger -> Integer;
+children :: NcbiTaxId -> [NcbiTaxId];
+
+
+downstream R :: AtomicInteger -> Integer;
+downstream :: NcbiTaxId -> [NcbiTaxId];
+
+
+taxid2tank R :: Integer -> Character;
+taxid2rank :: [Maybe NcbiTaxId] -> [Maybe String]

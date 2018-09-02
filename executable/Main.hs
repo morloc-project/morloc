@@ -1,24 +1,38 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Main (main) where
 
 import qualified Morloc as M
 import qualified System.Environment as SE
+import qualified Data.Text as DT
+import qualified Data.Text.IO as DTI
+
+usage :: IO ()
+usage = putStr $ unlines [
+      "The morloc CLI is under development, try one of these patterns:"
+    , "  morloc --rdf -e <code>"
+    , "  morloc --rdf --triple -e <code>"
+    , "  morloc --rdf <filename>"
+    , "  morloc --rdf --triple <filename>"
+    , "  morloc <filename> <sparql-endpoint>"
+  ]
 
 main :: IO ()
 main = do
   args <- SE.getArgs
   case args of
     -- no input
-    []  -> putStrLn "You must provide at least one argument"
+    []  -> usage
 
-    ["--rdf-turtle", "-e", text] -> M.writeTurtle text
+    ["--rdf", "-e", text] -> M.writeTurtle (DT.pack text)
 
-    ["--rdf-triple", "-e", text] -> M.writeTriple text
+    ["--rdf", "--triple", "-e", text] -> M.writeTriple (DT.pack text)
 
-    ["--rdf-turtle", x] -> readFile x >>= M.writeTurtle
+    ["--rdf", x] -> DTI.readFile x >>= M.writeTurtle
 
-    ["--rdf-triple", x] -> readFile x >>= M.writeTriple
+    ["--rdf", "--triple", x] -> DTI.readFile x >>= M.writeTriple
 
-    [x] -> readFile x >>= M.writeProgram
+    [x, endpoint] -> DTI.readFile x >>= M.writeProgram endpoint
 
     -- wrong input
-    _   -> putStrLn "Please provide a single filename"
+    _   -> usage

@@ -26,6 +26,7 @@ module Morloc.Walker
   , rdftype
   , value
   , valueOf
+  , typeOf
   , idOf
   -- * Node builder convenience functions
   , p
@@ -36,11 +37,15 @@ module Morloc.Walker
   , getType
   , getConstraints
   , getSources
+  , getImportedFiles
   , getGroupedSources
   , getDataDeclarations
   , getDataDeclarationByName
+  , getTypeDeclaration
   , getCalls
   , getScope
+  -- * serialization handling
+  , getUnpack
   -- ** Imports and Exports;
   , sourceExports
   , getImports
@@ -67,7 +72,8 @@ import qualified Data.Text.Read as DTR
 import qualified Data.List as DL
 
 import qualified Morloc.Util as MU
-import Morloc.Operators ((|>>))
+import qualified Morloc.Triple as M3
+import Morloc.Operators
 
 -- Convenience functions
 p :: DT.Text -> DR.Predicate
@@ -77,7 +83,7 @@ o :: DT.Text -> DR.Object
 o s = DR.UNode s
 
 v :: Maybe DT.Text -> DT.Text -> DR.Object
-v (Just t) s = DR.LNode (DR.TypedL t s)
+v (Just t) s = DR.LNode (DR.TypedL s t)
 v Nothing  s = DR.LNode (DR.PlainL s)
 
 -- Operations
@@ -85,13 +91,18 @@ v Nothing  s = DR.LNode (DR.PlainL s)
 -- End :: [Node] -> a
 
 valueOf :: DR.Node -> [DT.Text]
-valueOf (DR.LNode (DR.TypedL _ s)) = [s]
+valueOf (DR.LNode (DR.TypedL s _)) = [s]
 valueOf (DR.LNode (DR.PlainL s)) = [s]
 valueOf _ = []
+
+typeOf :: DR.Node -> [DT.Text]
+typeOf (DR.LNode (DR.TypedL _ s)) = [s]
+typeOf _ = []
 
 idOf :: DR.Node -> [DT.Text]
 idOf (DR.UNode s) = [s]
 idOf _ = []
+
 
 -- Down :: Subject -> [Object]
 down :: DR.Rdf a
@@ -99,22 +110,21 @@ down :: DR.Rdf a
   -> DR.Predicate
   -> DR.Subject    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Object]   -- /  chain function, allows searching in parallel
-down rdf p' s' = map DR.objectOf (DR.query rdf (Just s') (Just p') Nothing)
+down rdf p' s' = DR.query rdf (Just s') (Just p') Nothing |>> DR.objectOf
 
 up :: DR.Rdf a
   => DR.RDF a
   -> DR.Predicate
   -> DR.Object    -- -- (Dr.Subject -> [Dr.Object]) is the monadic
   -> [DR.Subject]   -- /  chain function, allows searching in parallel
-up rdf p' o' = map DR.subjectOf (DR.query rdf Nothing (Just p') (Just o'))
+up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
 
 downOn :: DR.Rdf a
   => DR.RDF a
   -> (DR.Predicate -> Bool)
   -> DR.Subject
   -> [DR.Object]
-downOn rdf pf s = map DR.objectOf
-  (DR.select rdf (Just $ (==) s) (Just pf) Nothing)
+downOn rdf pf s = DR.select rdf (Just $ (==) s) (Just pf) Nothing |>> DR.objectOf
 
 -- Require :: Subject:x -> xs:[Subject]
 -- -- Where (i == xs[0] and len xs == 1) or (len xs == 0)
@@ -221,6 +231,12 @@ imports rdf s = down rdf (p "morloc:import") s >>= names'
         ([name'], [alias']) -> [(name', alias')]
         _ -> []
 
+getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
+getImportedFiles rdf
+  =   up rdf (M3.rdfPre .:. "type") (M3.mlcPre .:. "import")
+  >>= down rdf (M3.mlcPre .:. "name")
+  >>= valueOf
+
 -- x = (\(Right z) -> z) $ morlocScript "export foo"
 exports :: DR.Rdf a => DR.RDF a -> [DT.Text]
 exports rdf
@@ -240,7 +256,7 @@ sourceExports rdf n
 
 getImports :: DR.Rdf a => DR.RDF a -> [DR.Node]
 getImports rdf
-  = DR.query rdf Nothing (Just $ p "morloc:import") Nothing
+  =   DR.query rdf Nothing (Just $ p "morloc:import") Nothing
   |>> DR.objectOf
 
 -- Examples:
@@ -255,19 +271,17 @@ getImportByName rdf s
     (\r' x -> DR.query r'
       (Just x)
       (Just $ p "morloc:alias")
-      (Just $ v (Just "morloc:string") s))
+      (Just $ v Nothing s))
 
 importLang :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importLang rdf n
-  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
-  |>> DR.subjectOf
+  =   up rdf (p "morloc:import") n
   >>= down rdf (p "morloc:lang")
   >>= valueOf
 
 importPath :: DR.Rdf a => DR.RDF a -> DR.Node -> [DT.Text]
 importPath rdf n
-  =   DR.query rdf Nothing (Just $ p "morloc:import") (Just n)
-  |>> DR.subjectOf
+  =   up rdf (p "morloc:import") n
   >>= down rdf (p "morloc:path")
   >>= valueOf
 
@@ -280,12 +294,7 @@ importAlias rdf n = down rdf (p "morloc:alias") n >>= valueOf
 getType :: DR.Rdf a => DR.RDF a -> DT.Text -> [DR.Node]
 getType rdf name'
   -- get Triples for all type declarations
-  =   DR.query rdf
-        Nothing
-        (Just $ p "rdf:type")
-        (Just $ o "morloc:typeDeclaration")
-  -- Get the subject node from each triple
-  |>> DR.subjectOf
+  = up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") "Morloc")
   -- remove any IDs that do not have the appropriate lhs name
   >>= hasThese rdf (\r' x ->
             down r' (p "morloc:lhs") x
@@ -313,15 +322,48 @@ getDataDeclarationByName rdf s
   >>= hasThese rdf 
     (\r' x -> return x >>= lhs r' >>= has r' (p "rdf:type") (v (Just "morloc:name") s))
 
+getTypeDeclaration :: DR.Rdf a => DR.RDF a -> DT.Text -> DT.Text -> [DR.Node]
+getTypeDeclaration rdf name' lang'
+  =   up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") lang') 
+  >>= hasThese rdf 
+    (\r' x -> return x >>= lhs r' >>= has r' (p "rdf:type") (v (Just "morloc:name") name'))
+  >>= rhs rdf
+
 -- for an element in a DataDeclaration or TypeDeclaration, get the top node
 getScope :: DR.Rdf a => DR.RDF a -> DR.Node -> [DR.Node]
 getScope rdf n = getScope' rdf n
   where 
     getScope' rdf' n'
       | (rdftype rdf' n' >>= valueOf) == ["morloc:dataDeclaration"] = [n']
-      | (rdftype rdf' n' >>= valueOf) == ["morloc:typeDeclaration"] = [n']
+      | (rdftype rdf' n' >>= typeOf ) == ["morloc:typeDeclaration"] = [n']
       | length (rhsOf rdf' n') == 1 = rhsOf rdf' n' 
       | otherwise = parent rdf' n' >>= has rdf' (p "rdf:type") (v Nothing "morloc:call")
+
+getUnpack :: DR.Rdf a
+  => DR.RDF a
+  -> DT.Text   -- ^ foreign language
+  -> DR.Node   -- ^ top-level type to match (no recursion into parameters, yet)
+  -> [DT.Text] -- ^ function name
+getUnpack rdf lang' form'
+  =   up rdf (p "rdf:type") (v (Just "morloc:typeDeclaration") lang')
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= down r' (p "morloc:property")
+      >>= has r' (p "rdf:type") (v (Just "morloc:name") "unpacks"))
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= down r' (p "morloc:output")
+      >>= has r' (p "rdf:type") form')
+  >>= hasThese rdf  (\r' x
+      ->  return x
+      >>= rhs rdf
+      >>= up r' (p "rdf:_0")
+      >>= has r' (p "rdf:type") (v (Just "morloc:atomicType") "JSON"))
+  >>= lhs rdf
+  >>= down rdf (p "rdf:type")
+  >>= valueOf
 
 rhsOf :: DR.Rdf a => DR.RDF a -> DR.Object -> [DR.Subject]
 rhsOf rdf obj = up rdf (p "morloc:rhs") obj
@@ -357,4 +399,3 @@ getGroupedSources rdf = map toNodes grouped'
     -- this will create an invalid Triple, with a subject that is an LNode
     reverseTriple :: DR.Triple -> DR.Triple
     reverseTriple (DR.Triple s p o) = DR.Triple o p s
-

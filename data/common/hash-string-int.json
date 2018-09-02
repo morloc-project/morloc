@@ -1,1 +1,1 @@
-{ "type":"Hash String Int", "value":{"foo":12,"bar":24} }
+{"type":"Hash String Int","value":{"foo":12,"bar":-2e34}}

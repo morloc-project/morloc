@@ -5,33 +5,48 @@ module Morloc (
 ) where
 
 import qualified Data.RDF as DR
+import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 import qualified Data.Text.IO as DTIO
 
 import Morloc.Operators
+import Morloc.Types
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
+import qualified Morloc.Database.HSparql.Upload as Up
 
-writeProgram :: String -> IO ()
-writeProgram s = writeProgram' (MP.morlocScript s >>= MG.generate) where
-  writeProgram' :: ME.ThrowsError (MG.Script, [MG.Script]) -> IO ()
-  writeProgram' (Right (n, ps)) = do
-    writeScript' n
-    mapM_ writeScript' ps
-  writeProgram' (Left err) = putStr (show err)
-    
-  writeScript' :: MG.Script -> IO ()
-  writeScript' (MG.Script base lang code) =
-    DTIO.writeFile (base <> "." <> lang) code
+writeProgram :: SparqlEndPoint -> DT.Text -> IO ()
+writeProgram ep code = do
+  MP.parse Nothing code >>= doOrDie >>= Up.uploadRDF ep >>= stateResult
+  MG.generate ep >>= writeProgram'
+  where
+    stateResult :: Bool -> IO ()
+    stateResult False = fail ("Failed to upload RDF to" ++ ep)
+    stateResult True = return ()
 
-writeRDF' :: DR.RdfSerializer s => s -> String -> IO ()
-writeRDF' serializer code = case MP.morlocScript code of
-  Left err -> putStr $ show err ++ "\n"
-  Right rdfOutput -> DR.writeRdf serializer rdfOutput
+    writeProgram' :: (Script, [Script]) -> IO ()
+    writeProgram' (n, ps) = do
+      writeScript' n
+      mapM_ writeScript' ps
+      
+    writeScript' :: Script -> IO ()
+    writeScript' (Script base lang code) =
+      DTIO.writeFile (base <> "." <> lang) code
+  
 
-writeTurtle :: String -> IO ()
+writeRDF' :: DR.RdfSerializer s => s -> DT.Text -> IO ()
+writeRDF' serializer code
+  =   MP.parse Nothing code
+  >>= doOrDie
+  >>= DR.writeRdf serializer
+
+doOrDie :: ME.ThrowsError a -> IO a
+doOrDie (Right x) = return x
+doOrDie (Left err) = fail $ show err ++ "\n"
+
+writeTurtle :: DT.Text -> IO ()
 writeTurtle = writeRDF' (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
 
-writeTriple :: String -> IO ()
+writeTriple :: DT.Text -> IO ()
 writeTriple = writeRDF' DR.NTriplesSerializer

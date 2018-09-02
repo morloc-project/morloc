@@ -9,7 +9,8 @@ Stability   : experimental
 
 module Morloc.Util
 (
-    ifelse
+    show'
+  , ifelse
   , conmap
   , unique
   , sort
@@ -18,12 +19,23 @@ module Morloc.Util
   , maybe2bool
   , either2bool
   , maybeOne
+  , zipWithOrDie
+  , initChain
+  , shareAttr
+  , spreadAttr
 ) where
 
 import Morloc.Operators
 
 import qualified Data.List as DL
 import qualified Data.Text as DT
+import qualified Control.Monad as CM
+import qualified Data.Set as Set
+import qualified Data.HashMap.Strict as Map
+import qualified Data.Hashable as H
+
+show' :: Show a => a -> DT.Text
+show' = DT.pack . show
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
@@ -58,3 +70,60 @@ either2bool (Right _) = True
 maybeOne :: [a] -> Maybe a
 maybeOne [x] = Just x
 maybeOne _  = Nothing
+
+zipWithOrDie :: (a -> b -> c) -> [a] -> [b] -> [c]
+zipWithOrDie f xs ys
+  | length xs == length ys = zipWith f xs ys
+  | otherwise = error "Expected lists of equal length"
+
+initChain
+  :: CM.MonadPlus m
+  => m a
+  -> [(m a, Maybe (a -> m a))]
+  -> m a
+initChain x [] = x
+initChain mempty ((x , _      ):fs) = initChain x         fs
+initChain x      ((_ , Just g ):fs) = initChain (x >>= g) fs
+initChain x      ((_ , Nothing):fs) = initChain x         fs
+
+spreadAttr
+  :: (Ord a, Ord b, H.Hashable a, H.Hashable b)
+  => [(a, Maybe a, Maybe b)]
+  -> Map.HashMap a b
+spreadAttr xs = asHash [(Set.toList sx, Set.toList sy) | (sx, sy) <- shareAttr xs]
+  where
+    asHash
+      :: (Ord a, Ord b, H.Hashable a, H.Hashable b)
+      => [([a], [b])] -> Map.HashMap a b
+    asHash xys = (Map.fromList . concat) [[(x, y) | x <- xs, y <- ys] | (xs, ys) <- xys]
+
+-- | For the list of tuples (l,r,c), find missing data that is present in a
+-- related member. All l and r that are linked are considered to be in the same
+-- group. At least one must have a defined c. This c is then assigned to all
+-- other members of the set.
+shareAttr :: (Ord a, Ord b) => [(a, Maybe a, Maybe b)] -> [(Set.Set a, Set.Set b)]
+shareAttr xs = foldl f [] xs where
+
+  f :: (Ord a, Ord b) => [(Set.Set a, Set.Set b)]
+    -> (a, Maybe a, Maybe b)
+    -> [(Set.Set a, Set.Set b)]
+  f ((s, c):ss) (x, y, z) =
+    if
+      Set.member x s || maybeMember y s
+    then
+      (maybeInsert y (Set.insert x s), maybeInsert z c):ss
+    else
+      (s, c):(f ss (x,y,z))
+  f [] (x, y, z) = [(maybeInsert y (Set.singleton x), maybeSingleton z)]
+
+  maybeMember :: Ord a => Maybe a -> Set.Set a -> Bool
+  maybeMember (Just x) s = Set.member x s
+  maybeMember _ _ = False
+
+  maybeInsert :: Ord a => Maybe a -> Set.Set a -> Set.Set a
+  maybeInsert (Just x) s = Set.insert x s 
+  maybeInsert _ s = s
+
+  maybeSingleton :: Ord c => Maybe c -> Set.Set c
+  maybeSingleton (Just x) = Set.singleton x
+  maybeSingleton _ = Set.empty
