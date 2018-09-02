@@ -32,13 +32,17 @@ stack build
 stack install
 ```
 
+`morloc` has a temporary dependency on a local SPARQL database. You may try
+`fuseki`, though any will do. Eventually I will remove this dependency and
+provide a local embedded graph database and remote SPARQL endpoint at
+Morloc.IO.
+
 Then you can run a Morloc script, you might start with the example in
 `examples/sample1.loc`. This is just a toy script and I will have a better demo
 soon. Also the type signatures in this demo are currently ignored by the
 compiler.
 
 ```
-# examples/sample1.loc
 export ceiling
 export rand_uniform
 
@@ -66,8 +70,11 @@ rand n = rand_uniform n 0.0 1.0;
 This script can be complied as follows:
 
 ```sh
-morloc examples/sample1.loc
+morloc examples/sample1.loc http://localhost:3030/morloc
 ```
+
+Replacing the SPARQL endpoint above with your local endpoint (again, sorry for
+the temporary inconvenience).
 
 This will generate two files, `nexus.perl` and `pool.R`. Data from specific
 nodes can now be accessed.
@@ -76,11 +83,6 @@ nodes can now be accessed.
 perl nexus.perl ceiling 4.3
 perl nexus.perl rand_uniform 10 0 3
 ```
-
-I am currently working on cleaning up this interface. Soon it will generate
-a nice Perl program with automatically generated documentation and good
-argument handling.
-
 
 The Morloc Type System
 ======================

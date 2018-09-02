@@ -36,15 +36,5 @@ transpose R :: Matrix -> Matrix;
 nrow :: Table -> Int;
 nrow R :: DataFrame -> Numeric;
 
-
 roll :: Int, Int -> [Int];
 roll n d = ceiling (rand_uniform n 0.0 d);
-
-baz :: Num -> Int;
-baz z = ceiling z;
-
-bar :: Num -> Int;
-bar y = baz y;
-
-foo :: Num -> Int;
-foo x = bar x;
