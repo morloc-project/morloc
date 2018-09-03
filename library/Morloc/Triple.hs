@@ -31,6 +31,8 @@ module Morloc.Triple (
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
+import qualified Data.Maybe as DM
+import qualified Safe
 
 import Morloc.Operators
 import Morloc.Util (show')

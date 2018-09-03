@@ -1,5 +1,4 @@
 # I need to dissolve this a bit
-(g . f) x;
 f1 :: i:Int -> j:[A];
 f2 :: i:Int -> Num where (i > 0);
 f3 :: Int;
@@ -7,7 +6,6 @@ f4 :: X -> Y where (1.1 + 1.2 > 2.0);
 f5 :: a, (b -> c) -> d;
 f6 :: A B -> C D;
 f7 :: A where ((1 == 1) and (2 == 2));
-f8 . g;
 X1 :: Y where (x^(-k) == 1);
 X2 :: Y where (f x (g y z));
 X3 :: Y where (f x y == 1);

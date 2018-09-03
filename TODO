@@ -28,7 +28,7 @@ Use the right tool for the right job
 # Nexus help and usability
 
  * in the top-level usage printout:
- [ ] print the number of arguments taken by each exported function
+ [x] print the number of arguments taken by each exported function
  [ ] print the short doc string
 
  * in the function-specific detailed printout:

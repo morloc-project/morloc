@@ -15,30 +15,32 @@ mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>" .
 mid:1 rdf:_0 mid:0 .
 mid:6 rdf:_1 mid:0 .
-mid:11 rdf:_2 mid:0 .
-mid:18 rdf:_3 mid:0 .
-mid:20 rdf:_4 mid:0 .
-mid:29 rdf:_5 mid:0 .
-mid:36 rdf:_6 mid:0 .
-mid:42 rdf:_7 mid:0 .
-mid:52 rdf:_8 mid:0 .
-mid:54 rdf:_9 mid:0 .
-mid:62 rdf:_10 mid:0 .
-mid:71 rdf:_11 mid:0 .
-mid:1 rdf:type mlc:call;
-	rdf:value mid:3 .
-mid:3 rdf:type mlc:composition;
-	mlc:lhs mid:2;
-	mlc:rhs mid:4 .
-mid:2 rdf:type mlc:name;
-	rdf:value "g" .
-mid:4 rdf:type mlc:name;
-	rdf:value "f" .
-mid:5 rdf:_0 mid:1;
-	rdf:type mlc:name;
-	rdf:value "x" .
-mid:6 rdf:type mlc:typeDeclaration;
+mid:13 rdf:_2 mid:0 .
+mid:15 rdf:_3 mid:0 .
+mid:24 rdf:_4 mid:0 .
+mid:31 rdf:_5 mid:0 .
+mid:37 rdf:_6 mid:0 .
+mid:46 rdf:_7 mid:0 .
+mid:54 rdf:_8 mid:0 .
+mid:63 rdf:_9 mid:0 .
+mid:1 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f1";
+	mlc:lang "Morloc";
+	mlc:rhs mid:2 .
+mid:2 rdf:type mlc:functionType, mlc:type .
+mid:3 rdf:_0 mid:2;
+	rdf:type mlc:atomicType, mlc:type;
+	rdf:value "Int";
+	mlc:label "i" .
+mid:2 mlc:output mid:4 .
+mid:4 rdf:type mlc:parameterizedType, mlc:type;
+	rdf:value "List";
+	mlc:label "j" .
+mid:5 rdf:_0 mid:4;
+	rdf:type mlc:atomicType, mlc:type;
+	rdf:value "A" .
+mid:6 rdf:type mlc:typeDeclaration;
+	mlc:lhs "f2";
 	mlc:lang "Morloc";
 	mlc:rhs mid:7 .
 mid:7 rdf:type mlc:functionType, mlc:type .
@@ -47,205 +49,182 @@ mid:8 rdf:_0 mid:7;
 	rdf:value "Int";
 	mlc:label "i" .
 mid:7 mlc:output mid:9 .
-mid:9 rdf:type mlc:parameterizedType, mlc:type;
-	rdf:value "List";
-	mlc:label "j" .
-mid:10 rdf:_0 mid:9;
-	rdf:type mlc:atomicType, mlc:type;
-	rdf:value "A" .
-mid:11 rdf:type mlc:typeDeclaration;
-	mlc:lhs "f2";
-	mlc:lang "Morloc";
-	mlc:rhs mid:12 .
-mid:12 rdf:type mlc:functionType, mlc:type .
-mid:13 rdf:_0 mid:12;
-	rdf:type mlc:atomicType, mlc:type;
-	rdf:value "Int";
-	mlc:label "i" .
-mid:12 mlc:output mid:14 .
-mid:14 rdf:type mlc:atomicType, mlc:type;
+mid:9 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Num" .
-mid:12 mlc:constraint mid:15 .
-mid:15 rdf:type mlc:binop;
+mid:7 mlc:constraint mid:10 .
+mid:10 rdf:type mlc:binop;
 	rdf:value "GT";
-	mlc:lhs mid:16;
-	mlc:rhs mid:17 .
-mid:16 rdf:type mlc:name;
+	mlc:lhs mid:11;
+	mlc:rhs mid:12 .
+mid:11 rdf:type mlc:name;
 	rdf:value "i" .
-mid:17 rdf:type mlc:number, mlc:data;
+mid:12 rdf:type mlc:number, mlc:data;
 	rdf:value "0.0"^^xsd:decimal .
-mid:18 rdf:type mlc:typeDeclaration;
+mid:13 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f3";
 	mlc:lang "Morloc";
-	mlc:rhs mid:19 .
-mid:19 rdf:type mlc:atomicType, mlc:type;
+	mlc:rhs mid:14 .
+mid:14 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int" .
-mid:20 rdf:type mlc:typeDeclaration;
+mid:15 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f4";
 	mlc:lang "Morloc";
-	mlc:rhs mid:21 .
-mid:21 rdf:type mlc:functionType, mlc:type .
-mid:22 rdf:_0 mid:21;
+	mlc:rhs mid:16 .
+mid:16 rdf:type mlc:functionType, mlc:type .
+mid:17 rdf:_0 mid:16;
 	rdf:type mlc:atomicType, mlc:type;
 	rdf:value "X" .
-mid:21 mlc:output mid:23 .
-mid:23 rdf:type mlc:atomicType, mlc:type;
+mid:16 mlc:output mid:18 .
+mid:18 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y" .
-mid:21 mlc:constraint mid:24 .
-mid:24 rdf:type mlc:binop;
+mid:16 mlc:constraint mid:19 .
+mid:19 rdf:type mlc:binop;
 	rdf:value "GT";
-	mlc:lhs mid:26;
-	mlc:rhs mid:28 .
-mid:26 rdf:type mlc:binop;
+	mlc:lhs mid:21;
+	mlc:rhs mid:23 .
+mid:21 rdf:type mlc:binop;
 	rdf:value "Add";
-	mlc:lhs mid:25;
-	mlc:rhs mid:27 .
-mid:25 rdf:type mlc:number, mlc:data;
+	mlc:lhs mid:20;
+	mlc:rhs mid:22 .
+mid:20 rdf:type mlc:number, mlc:data;
 	rdf:value "1.1"^^xsd:decimal .
-mid:27 rdf:type mlc:number, mlc:data;
+mid:22 rdf:type mlc:number, mlc:data;
 	rdf:value "1.2"^^xsd:decimal .
-mid:28 rdf:type mlc:number, mlc:data;
+mid:23 rdf:type mlc:number, mlc:data;
 	rdf:value "2.0"^^xsd:decimal .
-mid:29 rdf:type mlc:typeDeclaration;
+mid:24 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f5";
 	mlc:lang "Morloc";
-	mlc:rhs mid:30 .
-mid:30 rdf:type mlc:functionType, mlc:type .
-mid:31 rdf:_0 mid:30 .
-mid:32 rdf:_1 mid:30 .
-mid:31 rdf:type mlc:atomicGeneric, mlc:type;
+	mlc:rhs mid:25 .
+mid:25 rdf:type mlc:functionType, mlc:type .
+mid:26 rdf:_0 mid:25 .
+mid:27 rdf:_1 mid:25 .
+mid:26 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "a" .
-mid:32 rdf:type mlc:functionType, mlc:type .
-mid:33 rdf:_0 mid:32;
+mid:27 rdf:type mlc:functionType, mlc:type .
+mid:28 rdf:_0 mid:27;
 	rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "b" .
-mid:32 mlc:output mid:34 .
-mid:34 rdf:type mlc:atomicGeneric, mlc:type;
+mid:27 mlc:output mid:29 .
+mid:29 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "c" .
-mid:30 mlc:output mid:35 .
-mid:35 rdf:type mlc:atomicGeneric, mlc:type;
+mid:25 mlc:output mid:30 .
+mid:30 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "d" .
-mid:36 rdf:type mlc:typeDeclaration;
+mid:31 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f6";
 	mlc:lang "Morloc";
-	mlc:rhs mid:37 .
-mid:37 rdf:type mlc:functionType, mlc:type .
-mid:38 rdf:_0 mid:37;
+	mlc:rhs mid:32 .
+mid:32 rdf:type mlc:functionType, mlc:type .
+mid:33 rdf:_0 mid:32;
 	rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "A" .
-mid:39 rdf:_0 mid:38;
+mid:34 rdf:_0 mid:33;
 	rdf:type mlc:atomicType, mlc:type;
 	rdf:value "B" .
-mid:37 mlc:output mid:40 .
-mid:40 rdf:type mlc:parameterizedType, mlc:type;
+mid:32 mlc:output mid:35 .
+mid:35 rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "C" .
-mid:41 rdf:_0 mid:40;
+mid:36 rdf:_0 mid:35;
 	rdf:type mlc:atomicType, mlc:type;
 	rdf:value "D" .
-mid:42 rdf:type mlc:typeDeclaration;
+mid:37 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f7";
 	mlc:lang "Morloc";
-	mlc:rhs mid:43 .
-mid:43 rdf:type mlc:atomicType, mlc:type;
+	mlc:rhs mid:38 .
+mid:38 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "A";
-	mlc:constraint mid:44 .
-mid:44 rdf:type mlc:binop;
+	mlc:constraint mid:39 .
+mid:39 rdf:type mlc:binop;
 	rdf:value "and";
-	mlc:lhs mid:45;
-	mlc:rhs mid:48 .
-mid:45 rdf:type mlc:binop;
+	mlc:lhs mid:40;
+	mlc:rhs mid:43 .
+mid:40 rdf:type mlc:binop;
 	rdf:value "EQ";
-	mlc:lhs mid:46;
+	mlc:lhs mid:41;
+	mlc:rhs mid:42 .
+mid:41 rdf:type mlc:number, mlc:data;
+	rdf:value "1.0"^^xsd:decimal .
+mid:42 rdf:type mlc:number, mlc:data;
+	rdf:value "1.0"^^xsd:decimal .
+mid:43 rdf:type mlc:binop;
+	rdf:value "EQ";
+	mlc:lhs mid:44;
+	mlc:rhs mid:45 .
+mid:44 rdf:type mlc:number, mlc:data;
+	rdf:value "2.0"^^xsd:decimal .
+mid:45 rdf:type mlc:number, mlc:data;
+	rdf:value "2.0"^^xsd:decimal .
+mid:46 rdf:type mlc:typeDeclaration;
+	mlc:lhs "X1";
+	mlc:lang "Morloc";
 	mlc:rhs mid:47 .
-mid:46 rdf:type mlc:number, mlc:data;
-	rdf:value "1.0"^^xsd:decimal .
-mid:47 rdf:type mlc:number, mlc:data;
-	rdf:value "1.0"^^xsd:decimal .
+mid:47 rdf:type mlc:atomicType, mlc:type;
+	rdf:value "Y";
+	mlc:constraint mid:48 .
 mid:48 rdf:type mlc:binop;
 	rdf:value "EQ";
-	mlc:lhs mid:49;
-	mlc:rhs mid:50 .
-mid:49 rdf:type mlc:number, mlc:data;
-	rdf:value "2.0"^^xsd:decimal .
-mid:50 rdf:type mlc:number, mlc:data;
-	rdf:value "2.0"^^xsd:decimal .
-mid:52 rdf:type mlc:composition;
-	mlc:lhs mid:51;
+	mlc:lhs mid:50;
 	mlc:rhs mid:53 .
-mid:51 rdf:type mlc:name;
-	rdf:value "f8" .
-mid:53 rdf:type mlc:name;
-	rdf:value "g" .
+mid:50 rdf:type mlc:binop;
+	rdf:value "Pow";
+	mlc:lhs mid:49;
+	mlc:rhs mid:51 .
+mid:49 rdf:type mlc:name;
+	rdf:value "x" .
+mid:51 rdf:type mlc:unaryOp;
+	rdf:value "Neg" .
+mid:52 rdf:_0 mid:51;
+	rdf:type mlc:name;
+	rdf:value "k" .
+mid:53 rdf:type mlc:number, mlc:data;
+	rdf:value "1.0"^^xsd:decimal .
 mid:54 rdf:type mlc:typeDeclaration;
-	mlc:lhs "X1";
+	mlc:lhs "X2";
 	mlc:lang "Morloc";
 	mlc:rhs mid:55 .
 mid:55 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
 	mlc:constraint mid:56 .
-mid:56 rdf:type mlc:binop;
-	rdf:value "EQ";
-	mlc:lhs mid:58;
-	mlc:rhs mid:61 .
-mid:58 rdf:type mlc:binop;
-	rdf:value "Pow";
-	mlc:lhs mid:57;
-	mlc:rhs mid:59 .
+mid:56 rdf:type mlc:call;
+	rdf:value mid:57 .
 mid:57 rdf:type mlc:name;
-	rdf:value "x" .
-mid:59 rdf:type mlc:unaryOp;
-	rdf:value "Neg" .
-mid:60 rdf:_0 mid:59;
-	rdf:type mlc:name;
-	rdf:value "k" .
-mid:61 rdf:type mlc:number, mlc:data;
-	rdf:value "1.0"^^xsd:decimal .
-mid:62 rdf:type mlc:typeDeclaration;
-	mlc:lhs "X2";
-	mlc:lang "Morloc";
-	mlc:rhs mid:63 .
-mid:63 rdf:type mlc:atomicType, mlc:type;
-	rdf:value "Y";
-	mlc:constraint mid:64 .
-mid:64 rdf:type mlc:call;
-	rdf:value mid:65 .
-mid:65 rdf:type mlc:name;
 	rdf:value "f" .
-mid:66 rdf:_0 mid:64 .
-mid:67 rdf:_1 mid:64 .
-mid:66 rdf:type mlc:name;
+mid:58 rdf:_0 mid:56 .
+mid:59 rdf:_1 mid:56 .
+mid:58 rdf:type mlc:name;
 	rdf:value "x" .
-mid:67 rdf:type mlc:call;
-	rdf:value mid:68 .
-mid:68 rdf:type mlc:name;
+mid:59 rdf:type mlc:call;
+	rdf:value mid:60 .
+mid:60 rdf:type mlc:name;
 	rdf:value "g" .
-mid:69 rdf:_0 mid:67 .
-mid:70 rdf:_1 mid:67 .
-mid:69 rdf:type mlc:name;
+mid:61 rdf:_0 mid:59 .
+mid:62 rdf:_1 mid:59 .
+mid:61 rdf:type mlc:name;
 	rdf:value "y" .
-mid:70 rdf:type mlc:name;
+mid:62 rdf:type mlc:name;
 	rdf:value "z" .
-mid:71 rdf:type mlc:typeDeclaration;
+mid:63 rdf:type mlc:typeDeclaration;
 	mlc:lhs "X3";
 	mlc:lang "Morloc";
-	mlc:rhs mid:72 .
-mid:72 rdf:type mlc:atomicType, mlc:type;
+	mlc:rhs mid:64 .
+mid:64 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
-	mlc:constraint mid:73 .
-mid:73 rdf:type mlc:binop;
+	mlc:constraint mid:65 .
+mid:65 rdf:type mlc:binop;
 	rdf:value "EQ";
-	mlc:lhs mid:74;
-	mlc:rhs mid:78 .
-mid:74 rdf:type mlc:call;
-	rdf:value mid:75 .
-mid:75 rdf:type mlc:name;
+	mlc:lhs mid:66;
+	mlc:rhs mid:70 .
+mid:66 rdf:type mlc:call;
+	rdf:value mid:67 .
+mid:67 rdf:type mlc:name;
 	rdf:value "f" .
-mid:76 rdf:_0 mid:74 .
-mid:77 rdf:_1 mid:74 .
-mid:76 rdf:type mlc:name;
+mid:68 rdf:_0 mid:66 .
+mid:69 rdf:_1 mid:66 .
+mid:68 rdf:type mlc:name;
 	rdf:value "x" .
-mid:77 rdf:type mlc:name;
+mid:69 rdf:type mlc:name;
 	rdf:value "y" .
-mid:78 rdf:type mlc:number, mlc:data;
+mid:70 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 

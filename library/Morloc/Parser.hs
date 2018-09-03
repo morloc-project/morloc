@@ -452,13 +452,6 @@ mdata =  do
 
 expression :: MS.Parser M3.TopRDF
 expression =
-  -- currently this just handles "."
-      try (TPE.makeExprParser term' functionTable)
-  <|> term'
-  <?> "an expression"
-  where
-    term' :: MS.Parser M3.TopRDF
-    term' =
           try application -- must go first to allow, e.g. `(g . f) x`
       <|> try (Tok.parens expression)
       <|> try mdata
@@ -646,16 +639,6 @@ binOp s i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
      -- manifolds).
      [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "binop")
      , DR.triple i (M3.rdfPre .:. "value") (plain s)
-     , DR.triple i (M3.mlcPre .:. "lhs") j
-     , DR.triple i (M3.mlcPre .:. "rhs") k
-     ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
-  )
-
-functionTable = [[ binaryR "."  exprComposition ]]
-
-exprComposition :: DR.Node -> M3.TopRDF -> M3.TopRDF -> M3.TopRDF
-exprComposition i (M3.TopRDF j xs) (M3.TopRDF k ys) = M3.makeTopRDF i (
-     [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "composition")
      , DR.triple i (M3.mlcPre .:. "lhs") j
      , DR.triple i (M3.mlcPre .:. "rhs") k
      ] ++ (DR.triplesOf xs) ++ (DR.triplesOf ys)
