@@ -108,7 +108,7 @@ sub dispatch {
     return $result;
 }
 
-${usageT names}
+${usageT fdata}
 
 ${vsep (map functionT fdata)}
 |]
@@ -117,15 +117,15 @@ hashmapT names = [idoc|my %cmds = ${tupled (map hashmapEntryT names)};|]
 
 hashmapEntryT n = [idoc|${n} => \&call_${n}|]
 
-usageT names = [idoc|
+usageT fdata = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
-    ${align $ vsep (map usageLineT names)}
+    ${align $ vsep (map usageLineT fdata)}
     exit 0;
 }
 |]
 
-usageLineT n = [idoc|print STDERR "  ${n}\n";|]
+usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  ${name} [${int nargs}]\n";|]
 
 functionT (name, nargs, prog, pool, mid) = [idoc|
 sub call_${name}{
