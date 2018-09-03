@@ -21,6 +21,7 @@ dependencies:
   - bytestring
   - docopt
   - extra
+  - filepath
   - safe
   - megaparsec
   - parsec
@@ -70,6 +71,9 @@ tests:
       - base
       - tasty
       - tasty-hspec >= 0.1
+      - tasty-golden
+      - temporary
+      - directory
       - morloc
       - rdf4h
       - text
