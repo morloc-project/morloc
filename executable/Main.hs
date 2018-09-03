@@ -10,17 +10,7 @@ import qualified Data.Text.IO as DTI
 import qualified System.Environment as SE
 
 patterns :: Docopt
-patterns = [docopt|
-morloc version 0.14.0
-
-Usage:
-  morloc make [--expression] <script> <sparql-endpoint>
-  morloc rdf [--triple] [--expression] <script>
-
-Options:
-  -t, --triple       print RDF graph in triple format, rather than the turtle
-  -e, --expression   read script as string rather than file
-|]
+patterns = [docoptFile|USAGE|]
 
 getArgOrExit = getArgOrExitWith patterns
 
