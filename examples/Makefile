@@ -3,7 +3,7 @@
 all:
 	stack install
 	rm -f nexus.perl pool.R
-	morloc sample.loc http://localhost:3030/morloc 	
+	morloc make sample.loc http://localhost:3030/morloc
 
 .PHONY: clean
 clean:
