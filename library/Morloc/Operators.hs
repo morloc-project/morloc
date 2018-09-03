@@ -15,9 +15,12 @@ module Morloc.Operators
   -- * RDF operators (inspired from those defined in HSparql)
   , (.:.)
   , (.^^.)
+  -- * Filesystem utility operators from System.FilePath
+  , (</>) -- ^ join paths 
 ) where
 
 import Data.Monoid
+import System.FilePath
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 

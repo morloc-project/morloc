@@ -7,6 +7,7 @@ import qualified Data.Text.IO as DTI
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS
 
+import Morloc.Operators
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 
@@ -24,9 +25,13 @@ doOrDie :: ME.ThrowsError a -> IO a
 doOrDie (Right x) = return x
 doOrDie (Left err) = fail $ show err ++ "\n"
 
+-- add a dot to a base filename
+hideFile :: FilePath -> FilePath
+hideFile f = SF.replaceBaseName f ("." ++ SF.takeBaseName f)
+
 goldenTests :: IO TestTree
 goldenTests = do
-  locFiles <- Golden.findByExtension [".loc"] "test-suite/loc2rdf-cases"
+  locFiles <- Golden.findByExtension [".loc"] ("test-suite" </> "loc2rdf-cases")
   return $ testGroup "morloc to RDF golden tests"
     [ Golden.goldenVsFile
           (SF.takeBaseName locFile) -- test name
@@ -34,6 +39,6 @@ goldenTests = do
           obsFile
           (loc2ttl' locFile obsFile)
     | locFile <- locFiles
-    , let obsFile = SF.replaceExtension locFile ".obs.ttl"
+    , let obsFile = SF.replaceExtension (hideFile locFile) ".obs.ttl"
     , let ttlFile = SF.replaceExtension locFile ".ttl"
     ]
