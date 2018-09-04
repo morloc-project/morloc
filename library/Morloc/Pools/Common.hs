@@ -72,10 +72,10 @@ nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
 iArgs :: Int -> [Doc]
 iArgs i = map ((<>) "x") (map int [1 .. i])
 
-unpack :: PackHash -> Maybe Name -> Doc -> Doc
-unpack h n d = case (n >>= (flip Map.lookup) (unpacker h)) of 
-  (Just f) -> text' f <> parens d
-  Nothing  -> text' (genericUnpacker h) <> parens d
+unpack :: Grammar -> PackHash -> Maybe Name -> Doc -> Doc
+unpack g h n d = case (n >>= (flip Map.lookup) (unpacker h)) of 
+  (Just f) -> (gCall g) (text' f) [d]
+  Nothing  -> (gCall g) (text' (genericUnpacker h)) [d]
 
 callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
@@ -88,25 +88,32 @@ srcLangDoc m = case mLang m of
 fname :: Manifold -> Doc
 fname m = text' $ maybe (mMorlocName m) id (mSourceName m)
 
-castArgsPosi :: PackHash -> Manifold -> [Doc]
-castArgsPosi h m = map cast (mArgs m)
+castArgsPosi :: Grammar -> PackHash -> Manifold -> [Doc]
+castArgsPosi g h m = map cast (mArgs m)
   where
-    cast (ArgPosi i t) = unpack h t ("x" <> int i)
+    cast (ArgPosi i t) = unpack g h t ("x" <> int i)
     cast _ = error "Expected only user arguments"
 
 castArgsName :: Grammar -> PackHash -> Manifold -> [Doc]
 castArgsName g h m = map cast (mArgs m)
   where
     cast arg = case arg of
-      (ArgName _ t) -> unpack h t (writeArgument g (mBoundVars m) arg)
+      (ArgName _ t) -> unpack g h t (writeArgument g (mBoundVars m) arg)
+      (ArgCall n t (Just l)) -> if (Just l) == mLang m
+                                then writeArgument g (mBoundVars m) arg
+                                else unpack g h t (writeArgument g (mBoundVars m) arg)
       _ -> writeArgument g (mBoundVars m) arg
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
 writeArgument _ _ (ArgName n _  )  = text' n
-writeArgument g xs (ArgCall n _ (Just l))
+writeArgument g xs (ArgCall n t (Just l))
   | l == gLang g = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
-  | otherwise = "XXX"
+  | otherwise = (gSysCall g) ([
+        (gQuote g) $ text' (MS.findExecutor l)
+      , (gQuote g) $ text' (MS.makePoolName l)
+      , (gQuote g) $ text' (MS.makeManifoldName n)
+      ] ++ (map text' xs))
   -- | ArgCall Key (Maybe ReturnType) (Maybe Lang)
 writeArgument g _ (ArgData d _  )  = writeData g d
 writeArgument _ _ (ArgPosi i _  )  = "x" <> int i
@@ -136,7 +143,7 @@ defaultSourceWrapperManifold g h m
   <> (gFunction g)
         (callIdToName m)
         (nameArgs (mArgs m))
-        ((gReturn g) ((gCall g) (fname m) (castArgsPosi h m)))
+        ((gReturn g) ((gCall g) (fname m) (castArgsPosi g h m)))
 
 defaultCisManifold :: Grammar -> PackHash -> Manifold -> Doc
 defaultCisManifold g h m

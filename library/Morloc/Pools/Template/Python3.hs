@@ -67,19 +67,20 @@ g = Grammar {
     gRecord' :: [(Doc,Doc)] -> Doc
     gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
+    -- FIXME: qualify the calls (I don't have handling for this yet ...)
     gSource' :: Doc -> Doc
-    gSource' s = "import " <> s
+    gSource' s = [idoc|from ${s} import *|]
 
     gSysCall' :: [Doc] -> Doc
-    gSysCall' xs = [idoc|"run(${args}, stdout=PIPE).stdout"|] where
-      args = gList' (map dquotes xs)
+    gSysCall' xs = [idoc|subprocess.run(${args}, stdout=subprocess.PIPE).stdout|] where
+      args = gList' xs
     
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
-from subprocess import call
+import subprocess
 
 
 ${vsep (map (gSource g) srcs) <> line}
@@ -87,6 +88,6 @@ ${vsep (map (gSource g) srcs) <> line}
 ${vsep (map (defaultManifold g hash) manifolds)}
 
 if __name__ == '__main__':
-  f = eval(sys.argv[0])
-  print(f[sys.argv[1:]])
+  f = eval(sys.argv[1])
+  print(f(*sys.argv[2:]))
 |]
