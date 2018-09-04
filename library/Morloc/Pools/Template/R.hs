@@ -18,10 +18,11 @@ import Morloc.Pools.Common
 import qualified Data.Text as DT 
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
-generate = makeGenerator "R" (defaultCodeGenerator "R" text' main)
+generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {
-      gCall     = call'
+      gLang     = "R"
+    , gCall     = call'
     , gFunction = function'
     , gComment  = comment'
     , gReturn   = return'
@@ -32,6 +33,7 @@ g = Grammar {
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
+    , gSysCall  = gSysCall'
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
@@ -58,6 +60,10 @@ g = Grammar {
     gSource' :: Doc -> Doc
     gSource' s = call' "source" [dquotes s]
 
+    gSysCall' :: [Doc] -> Doc
+    gSysCall' (cmd:[]) = [idoc|"run(${dquotes cmd}, stdout=TRUE)"|]
+    gSysCall' (cmd:xs) = [idoc|"run(${dquotes cmd}, ${args}, stdout=TRUE)"|] where
+      args = gList' (map dquotes xs)
 
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc

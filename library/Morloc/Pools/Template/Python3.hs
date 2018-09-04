@@ -20,7 +20,7 @@ import qualified System.FilePath as SF
 import qualified Data.Char as DC
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
-generate = makeGenerator "py" (defaultCodeGenerator "py" asImport main)
+generate = makeGenerator g (defaultCodeGenerator g asImport main)
 
 asImport :: DT.Text -> Doc
 asImport s = text' $ case DT.uncons s of
@@ -31,7 +31,8 @@ asImport s = text' $ case DT.uncons s of
   _ -> error "Expected import to have at least length 1"
 
 g = Grammar {
-      gCall     = call'
+      gLang     = "py"
+    , gCall     = call'
     , gFunction = function'
     , gComment  = comment'
     , gReturn   = return'
@@ -42,6 +43,7 @@ g = Grammar {
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
+    , gSysCall  = gSysCall'
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
@@ -68,6 +70,10 @@ g = Grammar {
     gSource' :: Doc -> Doc
     gSource' s = "import " <> s
 
+    gSysCall' :: [Doc] -> Doc
+    gSysCall' xs = [idoc|"run(${args}, stdout=PIPE).stdout"|] where
+      args = gList' (map dquotes xs)
+    
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env python

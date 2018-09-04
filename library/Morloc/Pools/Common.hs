@@ -26,7 +26,8 @@ import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 import qualified Data.HashMap.Strict as Map
 
 data Grammar = Grammar {
-      gCall     :: Doc -> [Doc] -> Doc
+      gLang     :: DT.Text
+    , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
     , gComment  :: Doc -> Doc
     , gReturn   :: Doc -> Doc
@@ -37,27 +38,28 @@ data Grammar = Grammar {
     , gRecord   :: [(Doc,Doc)] -> Doc
     , gTrue     :: Doc
     , gFalse    :: Doc
+    , gSysCall  :: [Doc] -> Doc
   }
 
 makeGenerator
-  :: Lang
+  :: Grammar
   -> CodeGenerator
   -> ScriptGenerator
-makeGenerator lang gen
+makeGenerator g gen
   = \ep ->
           Script
       <$> pure "pool"
-      <*> pure (DT.unpack lang)
+      <*> pure (DT.unpack (gLang g))
       <*> gen ep
 
 defaultCodeGenerator
-  :: Lang
+  :: Grammar
   -> (DT.Text -> Doc) -- source name parser
   -> ([Doc] -> [Manifold] -> PackHash -> Doc) -- main
   -> CodeGenerator 
-defaultCodeGenerator lang f main ep = do
+defaultCodeGenerator g f main ep = do
   manifolds <- buildManifolds ep
-  packHash <- buildPackHash lang ep
+  packHash <- buildPackHash (gLang g) ep
   let srcs = map f (sources packHash)
   (return . render) $ main srcs manifolds packHash
 
@@ -117,9 +119,13 @@ writeData g (Rec' xs)    = (gRecord g) (map (\(k, v) -> (text' k, writeData g v)
 
 defaultManifold :: Grammar -> PackHash -> Manifold -> Doc
 defaultManifold g h m
-  | not (mCalled m) && mSourced m && mExported m = defaultSourceWrapperManifold g h m
+  | mLang m == Just (gLang g)
+      && not (mCalled m)
+      && mSourced m
+      && mExported m = defaultSourceWrapperManifold g h m
   | not (mCalled m) && mExported m = "" -- this is not a thing
-  | otherwise = defaultStandardManifold g h m
+  | mLang m == Just (gLang g) = defaultCisManifold g h m
+  | otherwise = "" -- FIXME: add handling for cis calls
 
 defaultSourceWrapperManifold :: Grammar -> PackHash -> Manifold -> Doc
 defaultSourceWrapperManifold g h m
@@ -129,8 +135,8 @@ defaultSourceWrapperManifold g h m
         (nameArgs (mArgs m))
         ((gReturn g) ((gCall g) (fname m) (castArgsPosi h m)))
 
-defaultStandardManifold :: Grammar -> PackHash -> Manifold -> Doc
-defaultStandardManifold g h m
+defaultCisManifold :: Grammar -> PackHash -> Manifold -> Doc
+defaultCisManifold g h m
   =  (gComment g) (srcLangDoc m <> ": " <> text' (mMorlocName m) <> " standard manifold") <> line
   <> (gFunction g)
         (callIdToName m)
