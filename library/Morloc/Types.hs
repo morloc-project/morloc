@@ -8,11 +8,14 @@ Stability   : experimental
 -}
 
 module Morloc.Types ( 
-    SparqlEndPoint  
+    Script(..)
+  , SparqlEndPoint  
   , Name
   , Lang
   , Path
-  , Script(..)
+  , Code
+  , ScriptGenerator
+  , CodeGenerator
 ) where
 
 import qualified Data.Text as DT
@@ -20,9 +23,14 @@ import qualified Data.Text as DT
 type Name = DT.Text
 type Lang = DT.Text
 type Path = DT.Text
+type Code = DT.Text
 
 -- | Stores a URL for a SPARQL endpoint (e.g. "http://localhost:3030/morloc")
 type SparqlEndPoint = String
+
+-- | A code generator
+type ScriptGenerator = SparqlEndPoint -> IO Script
+type CodeGenerator = SparqlEndPoint -> IO Code
 
 -- | Stores everything needed to build one file
 data Script = Script {

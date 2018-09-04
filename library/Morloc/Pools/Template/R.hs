@@ -12,73 +12,60 @@ Stability   : experimental
 module Morloc.Pools.Template.R (generate) where
 
 import Morloc.Quasi
-import Morloc.Types
 import Morloc.Vortex
-import qualified Morloc.System as MS
-import qualified Morloc.Util as MU
-import qualified Morloc.Query as Q
+import Morloc.Pools.Common
 
 import qualified Data.Text as DT 
-import qualified Data.List as DL
-import qualified Data.HashMap.Strict as Map
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
-generate :: SparqlEndPoint -> IO Script
-generate e
-  =   Script
-  <$> pure "pool"
-  <*> pure "R"
-  <*> generateCode e
+generate = makeGenerator "R" (defaultCodeGenerator "R" text' main)
 
-generateCode :: SparqlEndPoint -> IO DT.Text
-generateCode e = do
-  manifolds <- buildManifolds e
-  packHash <- buildPackHash "R" e
-  let srcs = map text' (sources packHash)
-  (return . render) $ main srcs manifolds packHash
+g = Grammar {
+      gCall     = call'
+    , gFunction = function'
+    , gComment  = comment'
+    , gReturn   = return'
+    , gQuote    = dquotes
+    , gSource   = gSource'
+    , gTrue     = "TRUE"
+    , gFalse    = "FALSE"
+    , gList     = gList'
+    , gTuple    = gTuple'
+    , gRecord   = gRecord'
+  } where
+    call' :: Doc -> [Doc] -> Doc
+    call' n args = n <> tupled args
 
-commaSep :: [Doc] -> Doc
-commaSep = hcat . punctuate ", "
+    function' :: Doc -> [Doc] -> Doc -> Doc
+    function' name args body
+      = name <> " <- function" <> tupled args <> braces (line <> indent 2 body <> line) <> line
 
-nameArgs :: [a] -> [Doc]
-nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
+    comment' :: Doc -> Doc
+    comment' d = "# " <> d
 
-iArgs :: Int -> [Doc]
-iArgs i = map ((<>) "x") (map int [1 .. i])
+    return' :: Doc -> Doc
+    return' = id
 
-writeCall' :: DT.Text -> [DT.Text] -> Doc
-writeCall' x xs = text' x <> tupled (map text' xs)
+    gList' :: [Doc] -> Doc
+    gList' xs = "c" <> tupled xs
 
-unpack :: PackHash -> Maybe Name -> Doc -> Doc
-unpack h n d = case (n >>= (flip Map.lookup) (unpacker h)) of 
-  (Just f) -> text' f <> parens d
-  Nothing  -> text' (genericUnpacker h) <> parens d
+    gTuple' :: [Doc] -> Doc
+    gTuple' xs = "list" <> tupled xs
 
--- | writes an argument sans serialization 
-writeArgument :: [DT.Text] -> Argument -> Doc
-writeArgument _ (ArgName n _  ) = text' n
-writeArgument xs (ArgCall n _ _) = writeCall' (MS.makeManifoldName n) xs
-writeArgument _ (ArgData d _  ) = writeData d
-writeArgument _ (ArgPosi i _  ) = "x" <> int i
+    gRecord' :: [(Doc,Doc)] -> Doc
+    gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-writeData :: MData -> Doc
-writeData (Num' x) = text' x
-writeData (Str' x) = dquotes (text' x) -- FIXME: need to escape
-writeData (Log' True) = "TRUE"
-writeData (Log' False) = "FALSE"
-writeData (Lst' xs) = "c" <> (parens . commaSep . map writeData) xs
-writeData (Tup' xs) = "list" <> (parens . commaSep . map writeData) xs
-writeData (Rec' xs) = "list" <> (parens . commaSep . map writeEntry) xs
-  where
-    writeEntry (key, val) = text' key <> "=" <> writeData val 
+    gSource' :: Doc -> Doc
+    gSource' s = call' "source" [dquotes s]
+
 
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc
-main srcs manifolds hash = [idoc|# R pool
+main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-${vsep (map sourceT srcs)}
+${line <> vsep (map (gSource g) srcs) <> line}
 
-${vsep (map (manifoldT hash) manifolds)}
+${vsep (map (defaultManifold g hash) manifolds)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
@@ -95,42 +82,3 @@ if(length(args) == 0){
   stop("Could not find function '", args[[1]], "'")
 }
 |]
-
-sourceT s = [idoc|source("${s}")|]
-
-manifoldT h m
-  | not (mCalled m) && mSourced m && mExported m = sourceWrapperManifold h m
-  | not (mCalled m) && mExported m = compositionWrapperManifold h m
-  | otherwise = standardManifoldT h m
-
-sourceWrapperManifold h m = [idoc|
-# ${text' $ mMorlocName m}
-
-${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep $ nameArgs (mArgs m)}){
-  ${fname}(${commaSep (map castArg (mArgs m))})
-}
-|]
-  where
-    castArg :: Argument -> Doc
-    castArg arg = case arg of
-      (ArgPosi i t) -> unpack h t ("x" <> int i)
-      _ -> error "Expected only user arguments"
-
-    fname = text' $ maybe (mMorlocName m) id (mSourceName m)
-
-compositionWrapperManifold h m = [idoc|# FLUFF|]
-
-standardManifoldT h m = [idoc|
-# ${text' $ mMorlocName m}
-
-${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep (map text' (mBoundVars m))}){
-  ${fname}(${commaSep (map castArg (mArgs m))})
-}
-|]
-  where
-    castArg :: Argument -> Doc
-    castArg arg = case arg of
-      (ArgName _ t) -> unpack h t (writeArgument (mBoundVars m) arg)
-      _ -> writeArgument (mBoundVars m) arg
-
-    fname = text' $ maybe (mMorlocName m) id (mSourceName m)
