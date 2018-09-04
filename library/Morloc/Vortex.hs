@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.Vortex (
     buildManifolds
   , buildPackHash
+  , findSources
   , Argument(..)
   , Manifold(..)
   , MData(..)
@@ -21,6 +22,7 @@ module Morloc.Vortex (
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
+import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Triple as M3
 import Morloc.Database.HSparql.Connection
@@ -199,13 +201,15 @@ propadateBoundVariables ms = map setBoundVars ms
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
-buildPackHash :: SparqlEndPoint -> IO PackHash
-buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
+buildPackHash :: Lang -> SparqlEndPoint -> IO PackHash
+buildPackHash lang se = toPackHash <$> (map tuplify <$> serializationQ lang' se)
   where
     tuplify :: [Maybe DT.Text] -> (Type, Name, Bool, Name, Path)
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
     tuplify e = error ("Unexpected SPARQL result: " ++ show e)
+
+    lang' = dquotes (text' lang)
 
     toPackHash :: [(Type, Name, Bool, Name, Path)] -> PackHash
     toPackHash xs = case
@@ -222,7 +226,7 @@ buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
           , genericUnpacker = u
           , sources = srcs
           }
-        e -> error ("Expected exactly one generic packer/unpacker: " ++ show e)
+        e -> error ("Expected exactly one generic packer/unpacker: " ++ show xs)
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|
@@ -332,8 +336,8 @@ GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourc
 ORDER BY ?call_id ?element
 |]
 
-serializationQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-serializationQ = [sparql|
+serializationQ :: Doc -> SparqlEndPoint -> IO [[Maybe DT.Text]]
+serializationQ lang = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX mid: <http://www.morloc.io/XXX/mid/>
@@ -341,7 +345,7 @@ SELECT DISTINCT ?typename ?property ?is_generic ?name ?path
 WHERE {
         # Get serialization functions of type `a -> JSON`
         ?id rdf:type mlc:typeDeclaration ;
-              mlc:lang "R" ;
+              mlc:lang ${lang} ;
               mlc:lhs ?name ;
               mlc:rhs ?rhs .
         ?rhs rdf:type mlc:functionType ;
@@ -367,11 +371,30 @@ WHERE {
         }
         OPTIONAL{
            ?source_id rdf:type mlc:source ;
-                      mlc:lang "R" ;
+                      mlc:lang ${lang} ;
                       mlc:path ?path ;
                       mlc:import ?import_id .
            ?import_id mlc:alias ?name .
         }
 }
 ORDER BY ?property ?typename
+|]
+
+findSources :: SparqlEndPoint -> IO [(DT.Text,Lang)]
+findSources e = fmap (map tuplify) (findSourcesQ e) where
+  tuplify :: [Maybe DT.Text] -> (DT.Text, Lang)
+  tuplify [Just x, Just y] = (x,y)
+  tuplify x = error ("Unexpected SPARQL result: " ++ show x)
+
+findSourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+findSourcesQ = [sparql|
+PREFIX mlc: <http://www.morloc.io/ontology/000/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX mid: <http://www.morloc.io/XXX/mid/>
+SELECT ?path ?lang
+WHERE {
+  ?s rdf:type mlc:source ;
+     mlc:lang ?lang ;
+     mlc:name ?path ;
+}
 |]

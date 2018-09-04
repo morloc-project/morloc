@@ -7,4 +7,4 @@ all:
 
 .PHONY: clean
 clean:
-	rm -f nexus.perl pool.R
+	rm -f nexus.* pool.*

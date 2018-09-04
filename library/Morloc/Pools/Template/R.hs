@@ -33,7 +33,7 @@ generate e
 generateCode :: SparqlEndPoint -> IO DT.Text
 generateCode e = do
   manifolds <- buildManifolds e
-  packHash <- buildPackHash e
+  packHash <- buildPackHash "R" e
   let srcs = map text' (sources packHash)
   (return . render) $ main srcs manifolds packHash
 

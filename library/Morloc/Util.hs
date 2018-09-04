@@ -22,7 +22,7 @@ module Morloc.Util
   , zipWithOrDie
   , initChain
   , shareAttr
-  , spreadAttr
+ , spreadAttr
 ) where
 
 import Morloc.Operators

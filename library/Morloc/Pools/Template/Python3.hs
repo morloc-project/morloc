@@ -21,6 +21,9 @@ import qualified Morloc.Query as Q
 import qualified Data.Text as DT 
 import qualified Data.List as DL
 import qualified Data.HashMap.Strict as Map
+import qualified System.FilePath as SF
+import qualified Data.Maybe as DM
+import qualified Data.Char as DC
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate :: SparqlEndPoint -> IO Script
@@ -33,9 +36,18 @@ generate e
 generateCode :: SparqlEndPoint -> IO DT.Text
 generateCode e = do
   manifolds <- buildManifolds e
-  packHash <- buildPackHash e
-  let srcs = map text' (sources packHash)
+  packHash <- buildPackHash "py" e
+  srcsRaw <- findSources e
+  let srcs = [(text' . asImport) s | (s, "py") <- srcsRaw]
   (return . render) $ main srcs manifolds packHash
+
+asImport :: DT.Text -> DT.Text
+asImport s = case DT.uncons s of
+  (Just (x, xs)) -> DT.cons
+    (DC.toLower x)
+    -- FIXME: generalize this to work with any path separator
+    ((DT.replace "/" ".") ((DT.pack . SF.dropExtensions . DT.unpack) xs)) 
+  _ -> error "Expected import to have at least length 1"
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
@@ -74,7 +86,7 @@ writeData (Rec' xs) = "dict" <> (parens . commaSep . map writeEntry) xs
 
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc
-main srcs manifolds hash = [idoc|# Python pool
+main srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
 
@@ -83,24 +95,11 @@ ${vsep (map sourceT srcs)}
 ${vsep (map (manifoldT hash) manifolds)}
 
 if __name__ == '__main__':
-  args
-
-if(len(sys.argv) == 0){
-  sys.exit("Expected 1 or more arguments")
-} else if(exists(args[[1]])){
-  x <- get(args[[1]])
-  result <- if(class(x) == "function"){
-    do.call(get(args[[1]]), as.list(args[-1, drop=FALSE]))
-  } else {
-    x
-  }
-  cat(packGeneric(result), "\n")
-} else {
-  stop("Could not find function '", args[[1]], "'")
-}
+  f = eval(sys.argv[0])
+  print(f[sys.argv[1:]])
 |]
 
-sourceT s = [idoc|source("${s}")|]
+sourceT s = [idoc|import "${s}")|]
 
 manifoldT h m
   | not (mCalled m) && mSourced m && mExported m = sourceWrapperManifold h m
@@ -109,10 +108,8 @@ manifoldT h m
 
 sourceWrapperManifold h m = [idoc|
 # ${text' $ mMorlocName m}
-
-${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep $ nameArgs (mArgs m)}){
-  ${fname}(${commaSep (map castArg (mArgs m))})
-}
+def ${text' $ MS.makeManifoldName (mCallId m)}(${commaSep $ nameArgs (mArgs m)}):
+  return(${fname}(${commaSep (map castArg (mArgs m))}))
 |]
   where
     castArg :: Argument -> Doc
@@ -122,14 +119,12 @@ ${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep $ nameArgs (mA
 
     fname = text' $ maybe (mMorlocName m) id (mSourceName m)
 
-compositionWrapperManifold h m = [idoc|# FLUFF|]
+compositionWrapperManifold h m = [idoc| |]
 
 standardManifoldT h m = [idoc|
 # ${text' $ mMorlocName m}
-
-${text' $ MS.makeManifoldName (mCallId m)} <- function(${commaSep (map text' (mBoundVars m))}){
-  ${fname}(${commaSep (map castArg (mArgs m))})
-}
+def ${text' $ MS.makeManifoldName (mCallId m)}(${commaSep (map text' (mBoundVars m))}):
+  return(${fname}(${commaSep (map castArg (mArgs m))}))
 |]
   where
     castArg :: Argument -> Doc
