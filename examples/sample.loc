@@ -45,3 +45,6 @@ source "py" ("len")
 
 # I should add a typeclass for things with length
 len :: a -> Int;
+
+test :: Int, Int -> Int;
+test n d = len (roll n d); 

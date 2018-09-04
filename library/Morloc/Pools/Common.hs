@@ -104,7 +104,10 @@ castArgsName g h m = map cast (mArgs m)
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
 writeArgument _ _ (ArgName n _  )  = text' n
-writeArgument g xs (ArgCall n _ _) = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
+writeArgument g xs (ArgCall n _ (Just l))
+  | l == gLang g = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
+  | otherwise = "XXX"
+  -- | ArgCall Key (Maybe ReturnType) (Maybe Lang)
 writeArgument g _ (ArgData d _  )  = writeData g d
 writeArgument _ _ (ArgPosi i _  )  = "x" <> int i
 
@@ -125,7 +128,7 @@ defaultManifold g h m
       && mExported m = defaultSourceWrapperManifold g h m
   | not (mCalled m) && mExported m = "" -- this is not a thing
   | mLang m == Just (gLang g) = defaultCisManifold g h m
-  | otherwise = "" -- FIXME: add handling for cis calls
+  | otherwise = ""
 
 defaultSourceWrapperManifold :: Grammar -> PackHash -> Manifold -> Doc
 defaultSourceWrapperManifold g h m

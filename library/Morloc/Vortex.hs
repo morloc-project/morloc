@@ -129,7 +129,7 @@ asTuple [ Just callId'
       , mArgs        = [] -- this will be set in the next step
       }
   , makeArgument (
-      sourceLang'
+      Nothing -- to set the language, I need to look up the argname
     , langType'
     , argname'
     , argcall_id'
@@ -174,9 +174,24 @@ setArgs
 setArgs (m, xs) = m { mArgs = xs }
 
 setLangs :: [Manifold] -> [Manifold]
-setLangs ms = map (setLang hash) ms where
+setLangs ms = map setArgs ms' where
+
+  ms' = map (setLang hash) ms
+
   setLang :: (Map.HashMap Name Lang) -> Manifold -> Manifold
   setLang h m = m { mLang = Map.lookup (mMorlocName m) h }
+
+  setArgs m = m { mArgs = map setArgLang (mArgs m) } 
+
+  setArgLang :: Argument -> Argument
+  setArgLang arg = case arg of
+    (ArgCall k t _) -> ArgCall k t (findLang k ms')
+    _ -> arg
+
+  findLang :: Key -> [Manifold] -> Maybe Lang
+  findLang k ms = case filter (\m -> mCallId m == k) ms of
+    [m] -> mLang m
+    _ -> error "Could not find language of foreign call" 
 
   hash :: Map.HashMap Name Lang
   hash = MU.spreadAttr (map (\m -> (mMorlocName m, mComposition m, mLang m)) ms)
