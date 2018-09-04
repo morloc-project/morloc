@@ -21,8 +21,9 @@ import Morloc.Operators
 import qualified Data.Text as DT
 
 findExecutor :: DT.Text -> DT.Text
-findExecutor "R" = "Rscript"
-findExecutor _ = error "Only R is currently supported"
+findExecutor "R" = "Rscript" -- this is a safe bet
+findExecutor "py" = "python"  -- this isn't, due to python 2 versus 3 issues
+findExecutor l = error ("Language not supported: " ++ show l)
 
 makePoolName :: DT.Text -> DT.Text
 makePoolName lang = "pool." <> lang

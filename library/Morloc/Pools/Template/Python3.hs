@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : Morloc.R
+Module      : Morloc.Pools.Template.Python3
 Description : R language generation
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Language.R (generate) where
+module Morloc.Pools.Template.Python3 (generate) where
 
 import Morloc.Quasi
 import Morloc.Types
@@ -27,7 +27,7 @@ generate :: SparqlEndPoint -> IO Script
 generate e
   =   Script
   <$> pure "pool"
-  <*> pure "R"
+  <*> pure "py3"
   <*> generateCode e
 
 generateCode :: SparqlEndPoint -> IO DT.Text
@@ -64,25 +64,29 @@ writeArgument _ (ArgPosi i _  ) = "x" <> int i
 writeData :: MData -> Doc
 writeData (Num' x) = text' x
 writeData (Str' x) = dquotes (text' x) -- FIXME: need to escape
-writeData (Log' True) = "TRUE"
-writeData (Log' False) = "FALSE"
-writeData (Lst' xs) = "c" <> (parens . commaSep . map writeData) xs
-writeData (Tup' xs) = "list" <> (parens . commaSep . map writeData) xs
-writeData (Rec' xs) = "list" <> (parens . commaSep . map writeEntry) xs
+writeData (Log' True) = "True"
+writeData (Log' False) = "False"
+writeData (Lst' xs) = (brackets . commaSep . map writeData) xs
+writeData (Tup' xs) = (parens . commaSep . map writeData) xs
+writeData (Rec' xs) = "dict" <> (parens . commaSep . map writeEntry) xs
   where
     writeEntry (key, val) = text' key <> "=" <> writeData val 
 
 main
   :: [Doc] -> [Manifold] -> PackHash -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+main srcs manifolds hash = [idoc|# Python pool
+
+import sys
 
 ${vsep (map sourceT srcs)}
 
 ${vsep (map (manifoldT hash) manifolds)}
 
-args <- commandArgs(trailingOnly=TRUE)
-if(length(args) == 0){
-  stop("Expected 1 or more arguments")
+if __name__ == '__main__':
+  args
+
+if(len(sys.argv) == 0){
+  sys.exit("Expected 1 or more arguments")
 } else if(exists(args[[1]])){
   x <- get(args[[1]])
   result <- if(class(x) == "function"){

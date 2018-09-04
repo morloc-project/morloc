@@ -4,6 +4,7 @@ export sum
 export transpose
 export nrow
 export roll
+export len
 
 source "R" (
     "runif" as rand_uniform
@@ -38,3 +39,8 @@ nrow R :: DataFrame -> Numeric;
 
 roll :: Int, Int -> [Int];
 roll n d = ceiling (rand_uniform n 0.0 d);
+
+source "py" ("len")
+
+# I should add a typeclass for things with length
+len :: a -> Int;
