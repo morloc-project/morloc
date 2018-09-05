@@ -20,9 +20,8 @@ module Morloc.Util
   , either2bool
   , maybeOne
   , zipWithOrDie
-  , initChain
   , shareAttr
- , spreadAttr
+  , spreadAttr
 ) where
 
 import Morloc.Operators
@@ -75,16 +74,6 @@ zipWithOrDie :: (a -> b -> c) -> [a] -> [b] -> [c]
 zipWithOrDie f xs ys
   | length xs == length ys = zipWith f xs ys
   | otherwise = error "Expected lists of equal length"
-
-initChain
-  :: CM.MonadPlus m
-  => m a
-  -> [(m a, Maybe (a -> m a))]
-  -> m a
-initChain x [] = x
-initChain mempty ((x , _      ):fs) = initChain x         fs
-initChain x      ((_ , Just g ):fs) = initChain (x >>= g) fs
-initChain x      ((_ , Nothing):fs) = initChain x         fs
 
 spreadAttr
   :: (Ord a, Ord b, H.Hashable a, H.Hashable b)

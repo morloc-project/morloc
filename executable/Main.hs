@@ -12,6 +12,7 @@ import qualified System.Environment as SE
 patterns :: Docopt
 patterns = [docoptFile|USAGE|]
 
+getArgOrExit :: Arguments -> Option -> IO String
 getArgOrExit = getArgOrExitWith patterns
 
 main :: IO ()
