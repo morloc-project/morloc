@@ -262,7 +262,7 @@ unroll ms = concat $ map unroll' ms
     unrollPair :: Manifold -> Manifold -> [Manifold]
     unrollPair m r = [m'] ++ unroll' r' where
       signedKey = signKey (mCallId m) (mCallId r)
-      r' = r { mCallId = signedKey }
+      r' = r { mCallId = signedKey, mExported = False }
       m' = m { mCallName = MS.makeManifoldName signedKey }
 
     signKey :: Key -> Key -> Key
@@ -275,23 +275,6 @@ unroll ms = concat $ map unroll' ms
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
-
--- m = Manifold {
---   mCallId = "http://www.morloc.io/XXX/mid/104",
---   mTypeId = Just "http://www.morloc.io/XXX/mid/72",
---   mExported = True,
---   mCalled = True,
---   mSourced = False,
---   mMorlocName = "roll",
---   mSourcePath = Nothing,
---   mSourceName = Nothing,
---   mComposition = Nothing,
---   mBoundVars = ["n","d"],
---   mLang = Just "R",
---   mArgs = [ArgName "n" Nothing,ArgName "d" Nothing]
--- }
-
-
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|
