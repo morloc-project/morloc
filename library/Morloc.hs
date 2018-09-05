@@ -13,12 +13,18 @@ import Morloc.Operators
 import Morloc.Types
 import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
-import qualified Morloc.Generator as MG
 import qualified Morloc.Database.HSparql.Upload as Up
+import qualified Morloc.Generator as MG
+import Morloc.Database.Configure
+import Morloc.Database.Typecheck
+import Morloc.Database.Construct
 
 writeProgram :: SparqlEndPoint -> DT.Text -> IO ()
 writeProgram ep code = do
+  configure ep 
   MP.parse Nothing code >>= doOrDie >>= Up.uploadRDF ep >>= stateResult
+  construct ep
+  typecheck ep
   MG.generate ep >>= writeProgram'
   where
     stateResult :: Bool -> IO ()
