@@ -6,6 +6,7 @@ Use the right tool for the right job
  [ ] Add graph names and a reliable import system
  [ ] Add tests for generated output
  [ ] Remove dependency on local SPARQL server
+ [ ] Purge Walker
 
 # RDF representation
 

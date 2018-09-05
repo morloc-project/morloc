@@ -22,6 +22,7 @@ module Morloc.Vortex (
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
+import qualified Morloc.System as MS
 import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Triple as M3
@@ -87,7 +88,8 @@ data PackHash = PackHash {
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
-buildManifolds e = fmap ( setLangs
+buildManifolds e = fmap ( unroll
+                        . setLangs
                         . map setArgs
                         . DLE.groupSort
                         . propadateBoundVariables
@@ -242,6 +244,35 @@ buildPackHash lang se = toPackHash <$> (map tuplify <$> serializationQ lang' se)
           , sources = srcs
           }
         e -> error ("Expected exactly one generic packer/unpacker: " ++ show xs)
+
+-- | This function creates a tree of new manifolds to represent the call tree
+-- of a called Morloc composition.
+unroll :: [Manifold] -> [Manifold]
+unroll ms = concat $ map unroll' ms
+  where
+    unroll' :: Manifold -> [Manifold]
+    unroll' m
+      | not ((mCalled m) && (not $ mSourced m)) = [m]
+      | otherwise = [m] ++
+          case filter (declaringManifold m) ms of
+            [r] -> unrollPair m r
+            _ -> error "Expected exactly one declaration"
+
+    unrollPair :: Manifold -> Manifold -> [Manifold]
+    unrollPair m r = unroll' r' where
+      signedKey = signKey (mCallId m) (mCallId r)
+      r' = r { mCallId = signedKey } -- FIXME - need to handle arguments
+
+    signKey :: Key -> Key -> Key
+    signKey m r =
+      case
+        (DT.stripPrefix M3.midPre m, DT.stripPrefix M3.midPre r)
+      of
+        (Just mKey, Just rKey) -> M3.midPre <> mKey <> "_" <> rKey
+        _ -> error ("callId of invalid form: " ++ show (m, r))
+
+    declaringManifold :: Manifold -> Manifold -> Bool
+    declaringManifold m n = (Just (mMorlocName m) == mComposition n)
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|

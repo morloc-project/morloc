@@ -7,4 +7,4 @@ all:
 
 .PHONY: clean
 clean:
-	rm -f nexus.* pool.*
+	rm -rf nexus.* pool.* __pycache__ 
