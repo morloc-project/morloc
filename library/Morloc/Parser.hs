@@ -27,7 +27,6 @@ import qualified Morloc.State as MS
 import qualified Morloc.Triple as M3
 import qualified Morloc.Lexer as Tok
 import qualified Morloc.Util as MU
-import qualified Morloc.Walker as MW
 import Morloc.Operators
 
 -- a little helper function for making plain nodes
@@ -46,7 +45,7 @@ joinRDF rdf xs
       ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [M3.RDF])
 
 parseImports :: M3.RDF -> [IO (ME.ThrowsError M3.RDF)]
-parseImports rdf = map morlocScriptFromFile (MW.getImportedFiles rdf)
+parseImports rdf = map morlocScriptFromFile (M3.getImportedFiles rdf)
 
 morlocScriptFromFile :: DT.Text -> IO (ME.ThrowsError M3.RDF)
 morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . DTO.readFile $ DT.unpack s

@@ -31,7 +31,6 @@ dependencies:
   - rdf4h
   - hashable
   - HTTP
-  - aeson
   - scientific
   - containers
   - unordered-containers
