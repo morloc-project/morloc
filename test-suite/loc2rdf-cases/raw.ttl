@@ -1,0 +1,37 @@
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dct: <http://purl.org/dc/terms/> .
+@prefix ex: <http://www.example.org/> .
+@prefix ex2: <http://www2.example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix mid: <http://www.morloc.io/XXX/mid/> .
+@prefix mlc: <http://www.morloc.io/ontology/000/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+mid:0 rdf:type mlc:script;
+	rdf:value "<stdin>" .
+mid:1 rdf:_0 mid:0 .
+mid:2 rdf:_1 mid:0 .
+mid:3 rdf:_2 mid:0 .
+mid:4 rdf:_3 mid:0 .
+mid:5 rdf:_4 mid:0 .
+mid:6 rdf:_5 mid:0 .
+mid:7 rdf:_6 mid:0 .
+mid:1 rdf:type mlc:number, mlc:data;
+	rdf:value "42.0"^^xsd:decimal .
+mid:2 rdf:type mlc:number, mlc:data;
+	rdf:value "-42.0"^^xsd:decimal .
+mid:3 rdf:type mlc:number, mlc:data;
+	rdf:value "4.2"^^xsd:decimal .
+mid:4 rdf:type mlc:number, mlc:data;
+	rdf:value "-4.2"^^xsd:decimal .
+mid:5 rdf:type mlc:boolean, mlc:data;
+	rdf:value "True"^^xsd:boolean .
+mid:6 rdf:type mlc:boolean, mlc:data;
+	rdf:value "False"^^xsd:boolean .
+mid:7 rdf:type mlc:number, mlc:data;
+	rdf:value "1.2345678901234567890123456789012345678901234567890123456789e59"^^xsd:decimal .
+

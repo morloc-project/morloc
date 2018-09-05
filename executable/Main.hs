@@ -1,38 +1,38 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 
-module Main (main) where
+module Main where
 
 import qualified Morloc as M
-import qualified System.Environment as SE
+import System.Console.Docopt
+import Control.Monad (when)
 import qualified Data.Text as DT
 import qualified Data.Text.IO as DTI
+import qualified System.Environment as SE
 
-usage :: IO ()
-usage = putStr $ unlines [
-      "The morloc CLI is under development, try one of these patterns:"
-    , "  morloc --rdf -e <code>"
-    , "  morloc --rdf --triple -e <code>"
-    , "  morloc --rdf <filename>"
-    , "  morloc --rdf --triple <filename>"
-    , "  morloc <filename> <sparql-endpoint>"
-  ]
+patterns :: Docopt
+patterns = [docoptFile|USAGE|]
+
+getArgOrExit = getArgOrExitWith patterns
 
 main :: IO ()
 main = do
-  args <- SE.getArgs
-  case args of
-    -- no input
-    []  -> usage
+  args <- parseArgsOrExit patterns =<< SE.getArgs
 
-    ["--rdf", "-e", text] -> M.writeTurtle (DT.pack text)
+  -- do the following if we are processing Morloc code
+  when (isPresent args (argument "script")) $ do
+    -- handle the code, either from a file or a raw string
+    script <- if isPresent args (longOption "expression")
+              then (fmap DT.pack $ getArgOrExit args (argument "script"))
+              else getArgOrExit args (argument "script") >>= DTI.readFile
 
-    ["--rdf", "--triple", "-e", text] -> M.writeTriple (DT.pack text)
+    -- build a Morloc program, generating the nexus and pool files
+    when (isPresent args (command "make")) $ do
+      ep <- getArgOrExit args (argument "sparql-endpoint")
+      M.writeProgram ep script
 
-    ["--rdf", x] -> DTI.readFile x >>= M.writeTurtle
-
-    ["--rdf", "--triple", x] -> DTI.readFile x >>= M.writeTriple
-
-    [x, endpoint] -> DTI.readFile x >>= M.writeProgram endpoint
-
-    -- wrong input
-    _   -> usage
+    -- compile a Morloc script to RDF (turtle format by default)
+    when (isPresent args (command "rdf")) $ do
+      let writer = if isPresent args (longOption "triple") 
+                   then M.writeTriple
+                   else M.writeTurtle
+      writer script

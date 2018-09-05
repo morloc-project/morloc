@@ -1,0 +1,46 @@
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dct: <http://purl.org/dc/terms/> .
+@prefix ex: <http://www.example.org/> .
+@prefix ex2: <http://www2.example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix mid: <http://www.morloc.io/XXX/mid/> .
+@prefix mlc: <http://www.morloc.io/ontology/000/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+mid:0 rdf:type mlc:script;
+	rdf:value "<stdin>" .
+mid:1 rdf:_0 mid:0 .
+mid:4 rdf:_1 mid:0 .
+mid:7 rdf:_2 mid:0 .
+mid:1 rdf:type mlc:tuple, mlc:data .
+mid:2 rdf:_0 mid:1 .
+mid:3 rdf:_1 mid:1 .
+mid:2 rdf:type mlc:number, mlc:data;
+	rdf:value "1.0"^^xsd:decimal .
+mid:3 rdf:type mlc:string, mlc:data;
+	rdf:value "hi"^^xsd:string .
+mid:4 rdf:type mlc:list, mlc:data .
+mid:5 rdf:_0 mid:4 .
+mid:6 rdf:_1 mid:4 .
+mid:5 rdf:type mlc:number, mlc:data;
+	rdf:value "1.0"^^xsd:decimal .
+mid:6 rdf:type mlc:number, mlc:data;
+	rdf:value "2.0"^^xsd:decimal .
+mid:7 rdf:type mlc:record, mlc:data .
+mid:8 rdf:_0 mid:7 .
+mid:10 rdf:_1 mid:7 .
+mid:8 rdf:type mlc:recordEntry;
+	mlc:lhs "person";
+	mlc:rhs mid:9 .
+mid:9 rdf:type mlc:string, mlc:data;
+	rdf:value "Frodo"^^xsd:string .
+mid:10 rdf:type mlc:recordEntry;
+	mlc:lhs "age";
+	mlc:rhs mid:11 .
+mid:11 rdf:type mlc:number, mlc:data;
+	rdf:value "55.0"^^xsd:decimal .
+

@@ -26,11 +26,15 @@ module Morloc.Triple (
   , midPre
   , rdfPre
   , xsdPre
+  -- * RDF access
+  , getImportedFiles
 ) where
 
 import qualified Data.RDF as DR
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
+import qualified Data.Maybe as DM
+import qualified Safe
 
 import Morloc.Operators
 import Morloc.Util (show')
@@ -94,3 +98,33 @@ idUri (Just s) i = midPre .:. (s <> "_" <> show' i)
 
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i
+
+
+-- The last survivors of the Walker module
+-- =======================================
+
+valueOf :: DR.Node -> [DT.Text]
+valueOf (DR.LNode (DR.TypedL s _)) = [s]
+valueOf (DR.LNode (DR.PlainL s)) = [s]
+valueOf _ = []
+
+-- Down :: Subject -> [Object]
+down :: DR.Rdf a
+  => DR.RDF a
+  -> DR.Predicate
+  -> DR.Subject    -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Object]   -- chain function, allows searching in parallel
+down rdf p' s' = DR.query rdf (Just s') (Just p') Nothing |>> DR.objectOf
+
+up :: DR.Rdf a
+  => DR.RDF a
+  -> DR.Predicate
+  -> DR.Object      -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Subject]   -- chain function, allows searching in parallel
+up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
+
+getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
+getImportedFiles rdf
+  =   up rdf (rdfPre .:. "type") (mlcPre .:. "import")
+  >>= down rdf (mlcPre .:. "name")
+  >>= valueOf

@@ -1,15 +1,15 @@
 {-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : Morloc.Nexus
-Description : Code generators for the user interface
+Module      : Morloc.Nexus.Template.Perl
+Description : Templates for generating a Perl nexus
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Nexus (generate) where
+module Morloc.Nexus.Template.Perl (generate) where
 
 import Morloc.Operators
 import Morloc.Types
@@ -23,17 +23,14 @@ import qualified Data.List as DL
 import qualified Data.Maybe as DM
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
--- | Generate the nexus, which is a program that coordinates the execution of
--- the language-specific function pools.
-generate :: SparqlEndPoint -> IO Script
 generate e
   =   Script
   <$> pure "nexus"
   <*> pure "perl"
-  <*> perlNexus e
+  <*> makeNexus e
 
-perlNexus :: SparqlEndPoint -> IO DT.Text
-perlNexus ep = fmap render $ main <$> names <*> fdata where
+makeNexus :: SparqlEndPoint -> IO DT.Text
+makeNexus ep = fmap render $ main <$> names <*> fdata where
 
   manifolds :: IO [V.Manifold]
   manifolds = fmap (filter isExported) (V.buildManifolds ep)
@@ -108,7 +105,7 @@ sub dispatch {
     return $result;
 }
 
-${usageT names}
+${usageT fdata}
 
 ${vsep (map functionT fdata)}
 |]
@@ -117,15 +114,15 @@ hashmapT names = [idoc|my %cmds = ${tupled (map hashmapEntryT names)};|]
 
 hashmapEntryT n = [idoc|${n} => \&call_${n}|]
 
-usageT names = [idoc|
+usageT fdata = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
-    ${align $ vsep (map usageLineT names)}
+    ${align $ vsep (map usageLineT fdata)}
     exit 0;
 }
 |]
 
-usageLineT n = [idoc|print STDERR "  ${n}\n";|]
+usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  ${name} [${int nargs}]\n";|]
 
 functionT (name, nargs, prog, pool, mid) = [idoc|
 sub call_${name}{

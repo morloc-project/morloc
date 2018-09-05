@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.14.0
+version:          0.15.0
 homepage:         https://github.com/arendsee/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/githubuser/morloc#readme>
@@ -14,12 +14,15 @@ copyright:        "2018 Zebulun Arendsee"
 
 extra-source-files:
   - README.md
+  - ChangeLog.md
   - data/common/*.json
 
 dependencies:
   - base >= 4.7 && < 5
   - bytestring
+  - docopt
   - extra
+  - filepath
   - safe
   - megaparsec
   - parsec
@@ -29,7 +32,6 @@ dependencies:
   - rdf4h
   - hashable
   - HTTP
-  - aeson
   - scientific
   - containers
   - unordered-containers
@@ -69,6 +71,9 @@ tests:
       - base
       - tasty
       - tasty-hspec >= 0.1
+      - tasty-golden
+      - temporary
+      - directory
       - morloc
       - rdf4h
       - text

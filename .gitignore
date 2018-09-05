@@ -1,11 +1,8 @@
-morloc
 tags
-Main
 *.hi
 *.o
 .stack-work/
 .history
 nexus.*
 pool.*
-run/
 morloc.cabal

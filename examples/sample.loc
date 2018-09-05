@@ -4,6 +4,7 @@ export sum
 export transpose
 export nrow
 export roll
+export len
 
 source "R" (
     "runif" as rand_uniform
@@ -13,7 +14,9 @@ source "R" (
   , "nrow"
 );
 
-import "r-base";
+import "rbase";
+import "pybase";
+source "py" ("len")
 
 # impose a type signature on the imported function rand_uniform
 rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
@@ -38,3 +41,9 @@ nrow R :: DataFrame -> Numeric;
 
 roll :: Int, Int -> [Int];
 roll n d = ceiling (rand_uniform n 0.0 d);
+
+# I should add a typeclass for things with length
+len :: a -> Int;
+
+test :: Int, Int -> Int;
+test n d = len (roll n d); 

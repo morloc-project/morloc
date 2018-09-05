@@ -1,31 +1,59 @@
 # Infrastructure
 
-Use the right tool for the right job
-
- [x] Move from `parsec` to `megaparsec`
- [x] Move to `Text` as my sole string representation
- [x] Use a builder combinator (e.g. wl-pprint-text) for code generation
- [x] Replace ad hoc RDF querying with SPARQL (via hsparql for now)
+ [x] Write docopt based argument handler
  [ ] Add graph names and a reliable import system
- [x] Test for all v0.13.1 functionallity
+ [ ] Add tests for generated output
+ [ ] Remove dependency on local SPARQL server
+
+# Refactoring
+
+ [x] Purge Walker
 
 # RDF representation
 
- [x] Fix prefix handling
+ [ ] Unify call representations
+     [ ] `binop`
+     [ ] `composition`
 
 # To catch up with the old C implementation
 
- [ ] implement good documentation, caching, and effect handling systems
- [ ] add support for python and bash
+ [ ] allow function docstrings
+ [ ] allow caching
+ [ ] allow effect handling hooks
+ [.] add support for more languages
+     [x] python
+     [ ] bash
  [ ] demonstrate parameter handling
  [ ] add higher-order functions
- [ ] implement the constraint system (as assertions)
  [ ] add full type checking
+
+# Beyond C
+
+ [ ] implement constraint system
+
+# Nexus help and usability
+
+ * in the top-level usage printout:
+ [x] print the number of arguments taken by each exported function
+ [ ] print the short doc string
+
+ * in the function-specific detailed printout:
+ [ ] print the type signature of each exported function
+ [ ] print the long doc string
+
+# Libraries
+
+ [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
+ This will require handling for choosing a concrete function from among many
+ language-specific alternatives. In C-morloc, the user specified the language
+ of each function. I want to automate the choice.
 
 # Documentation
 
  [ ] Write taxonomy library. Port functions from `taxize` and define types and
      their conversions.
+
+ [ ] Write python TensorFlow example
 
  [ ] Extend README with
      - [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)

@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.Vortex (
     buildManifolds
   , buildPackHash
+  , findSources
   , Argument(..)
   , Manifold(..)
   , MData(..)
@@ -21,6 +22,8 @@ module Morloc.Vortex (
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
+import qualified Morloc.System as MS
+import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Triple as M3
 import Morloc.Database.HSparql.Connection
@@ -54,6 +57,7 @@ data Manifold = Manifold {
     , mCalled      :: Bool
     , mSourced     :: Bool
     , mMorlocName  :: Name
+    , mCallName    :: Name
     , mSourcePath  :: Maybe Path
     , mSourceName  :: Maybe Name
     , mComposition :: Maybe Name
@@ -85,7 +89,8 @@ data PackHash = PackHash {
 
 -- | Collect most of the info needed to build all manifolds
 buildManifolds :: SparqlEndPoint -> IO [Manifold]
-buildManifolds e = fmap ( setLangs
+buildManifolds e = fmap ( unroll
+                        . setLangs
                         . map setArgs
                         . DLE.groupSort
                         . propadateBoundVariables
@@ -116,6 +121,7 @@ asTuple [ Just callId'
       { mCallId      = callId'
       , mTypeId      = typeId'
       , mMorlocName  = morlocName'
+      , mCallName    = maybe morlocName' id sourceName'
       , mSourceName  = sourceName'
       , mComposition = composition'
       , mCalled      = called'   == "true"
@@ -127,7 +133,7 @@ asTuple [ Just callId'
       , mArgs        = [] -- this will be set in the next step
       }
   , makeArgument (
-      sourceLang'
+      Nothing -- to set the language, I need to look up the argname
     , langType'
     , argname'
     , argcall_id'
@@ -172,9 +178,24 @@ setArgs
 setArgs (m, xs) = m { mArgs = xs }
 
 setLangs :: [Manifold] -> [Manifold]
-setLangs ms = map (setLang hash) ms where
+setLangs ms = map setArgs ms' where
+
+  ms' = map (setLang hash) ms
+
   setLang :: (Map.HashMap Name Lang) -> Manifold -> Manifold
   setLang h m = m { mLang = Map.lookup (mMorlocName m) h }
+
+  setArgs m = m { mArgs = map setArgLang (mArgs m) } 
+
+  setArgLang :: Argument -> Argument
+  setArgLang arg = case arg of
+    (ArgCall k t _) -> ArgCall k t (findLang k ms')
+    _ -> arg
+
+  findLang :: Key -> [Manifold] -> Maybe Lang
+  findLang k ms = case filter (\m -> mCallId m == k) ms of
+    [m] -> mLang m
+    _ -> error "Could not find language of foreign call" 
 
   hash :: Map.HashMap Name Lang
   hash = MU.spreadAttr (map (\m -> (mMorlocName m, mComposition m, mLang m)) ms)
@@ -199,13 +220,15 @@ propadateBoundVariables ms = map setBoundVars ms
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
-buildPackHash :: SparqlEndPoint -> IO PackHash
-buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
+buildPackHash :: Lang -> SparqlEndPoint -> IO PackHash
+buildPackHash lang se = toPackHash <$> (map tuplify <$> serializationQ lang' se)
   where
     tuplify :: [Maybe DT.Text] -> (Type, Name, Bool, Name, Path)
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
     tuplify e = error ("Unexpected SPARQL result: " ++ show e)
+
+    lang' = dquotes (text' lang)
 
     toPackHash :: [(Type, Name, Bool, Name, Path)] -> PackHash
     toPackHash xs = case
@@ -222,7 +245,36 @@ buildPackHash se = toPackHash <$> (map tuplify <$> serializationQ se)
           , genericUnpacker = u
           , sources = srcs
           }
-        e -> error ("Expected exactly one generic packer/unpacker: " ++ show e)
+        e -> error ("Expected exactly one generic packer/unpacker: " ++ show xs)
+
+-- | This function creates a tree of new manifolds to represent the call tree
+-- of a called Morloc composition.
+unroll :: [Manifold] -> [Manifold]
+unroll ms = concat $ map unroll' ms
+  where
+    unroll' :: Manifold -> [Manifold]
+    unroll' m
+      | not ((mCalled m) && (not $ mSourced m)) = [m]
+      | otherwise = case filter (declaringManifold m) ms of
+         [r] -> unrollPair m r
+         _ -> error "Expected exactly one declaration"
+
+    unrollPair :: Manifold -> Manifold -> [Manifold]
+    unrollPair m r = [m'] ++ unroll' r' where
+      signedKey = signKey (mCallId m) (mCallId r)
+      r' = r { mCallId = signedKey, mExported = False }
+      m' = m { mCallName = MS.makeManifoldName signedKey }
+
+    signKey :: Key -> Key -> Key
+    signKey m r =
+      case
+        (DT.stripPrefix M3.midPre m, DT.stripPrefix M3.midPre r)
+      of
+        (Just mKey, Just rKey) -> M3.midPre <> mKey <> "_" <> rKey
+        _ -> error ("callId of invalid form: " ++ show (m, r))
+
+    declaringManifold :: Manifold -> Manifold -> Bool
+    declaringManifold m n = (Just (mMorlocName m) == mComposition n)
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|
@@ -332,8 +384,8 @@ GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourc
 ORDER BY ?call_id ?element
 |]
 
-serializationQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-serializationQ = [sparql|
+serializationQ :: Doc -> SparqlEndPoint -> IO [[Maybe DT.Text]]
+serializationQ lang = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX mid: <http://www.morloc.io/XXX/mid/>
@@ -341,7 +393,7 @@ SELECT DISTINCT ?typename ?property ?is_generic ?name ?path
 WHERE {
         # Get serialization functions of type `a -> JSON`
         ?id rdf:type mlc:typeDeclaration ;
-              mlc:lang "R" ;
+              mlc:lang ${lang} ;
               mlc:lhs ?name ;
               mlc:rhs ?rhs .
         ?rhs rdf:type mlc:functionType ;
@@ -367,11 +419,30 @@ WHERE {
         }
         OPTIONAL{
            ?source_id rdf:type mlc:source ;
-                      mlc:lang "R" ;
+                      mlc:lang ${lang} ;
                       mlc:path ?path ;
                       mlc:import ?import_id .
            ?import_id mlc:alias ?name .
         }
 }
 ORDER BY ?property ?typename
+|]
+
+findSources :: SparqlEndPoint -> IO [(DT.Text,Lang)]
+findSources e = fmap (map tuplify) (findSourcesQ e) where
+  tuplify :: [Maybe DT.Text] -> (DT.Text, Lang)
+  tuplify [Just x, Just y] = (x,y)
+  tuplify x = error ("Unexpected SPARQL result: " ++ show x)
+
+findSourcesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+findSourcesQ = [sparql|
+PREFIX mlc: <http://www.morloc.io/ontology/000/>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX mid: <http://www.morloc.io/XXX/mid/>
+SELECT ?path ?lang
+WHERE {
+  ?s rdf:type mlc:source ;
+     mlc:lang ?lang ;
+     mlc:name ?path ;
+}
 |]
