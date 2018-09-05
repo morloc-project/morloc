@@ -57,6 +57,7 @@ data Manifold = Manifold {
     , mCalled      :: Bool
     , mSourced     :: Bool
     , mMorlocName  :: Name
+    , mCallName    :: Name
     , mSourcePath  :: Maybe Path
     , mSourceName  :: Maybe Name
     , mComposition :: Maybe Name
@@ -120,6 +121,7 @@ asTuple [ Just callId'
       { mCallId      = callId'
       , mTypeId      = typeId'
       , mMorlocName  = morlocName'
+      , mCallName    = maybe morlocName' id sourceName'
       , mSourceName  = sourceName'
       , mComposition = composition'
       , mCalled      = called'   == "true"
@@ -253,15 +255,15 @@ unroll ms = concat $ map unroll' ms
     unroll' :: Manifold -> [Manifold]
     unroll' m
       | not ((mCalled m) && (not $ mSourced m)) = [m]
-      | otherwise = [m] ++
-          case filter (declaringManifold m) ms of
-            [r] -> unrollPair m r
-            _ -> error "Expected exactly one declaration"
+      | otherwise = case filter (declaringManifold m) ms of
+         [r] -> unrollPair m r
+         _ -> error "Expected exactly one declaration"
 
     unrollPair :: Manifold -> Manifold -> [Manifold]
-    unrollPair m r = unroll' r' where
+    unrollPair m r = [m'] ++ unroll' r' where
       signedKey = signKey (mCallId m) (mCallId r)
-      r' = r { mCallId = signedKey } -- FIXME - need to handle arguments
+      r' = r { mCallId = signedKey }
+      m' = m { mCallName = MS.makeManifoldName signedKey }
 
     signKey :: Key -> Key -> Key
     signKey m r =
@@ -273,6 +275,23 @@ unroll ms = concat $ map unroll' ms
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
+
+-- m = Manifold {
+--   mCallId = "http://www.morloc.io/XXX/mid/104",
+--   mTypeId = Just "http://www.morloc.io/XXX/mid/72",
+--   mExported = True,
+--   mCalled = True,
+--   mSourced = False,
+--   mMorlocName = "roll",
+--   mSourcePath = Nothing,
+--   mSourceName = Nothing,
+--   mComposition = Nothing,
+--   mBoundVars = ["n","d"],
+--   mLang = Just "R",
+--   mArgs = [ArgName "n" Nothing,ArgName "d" Nothing]
+-- }
+
+
 
 manifoldQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 manifoldQ = [sparql|

@@ -86,7 +86,7 @@ srcLangDoc m = case mLang m of
   Nothing -> text' "Undefined"
 
 fname :: Manifold -> Doc
-fname m = text' $ maybe (mMorlocName m) id (mSourceName m)
+fname m = text' (mCallName m)
 
 castArgsPosi :: Grammar -> PackHash -> Manifold -> [Doc]
 castArgsPosi g h m = map cast (mArgs m)
@@ -95,14 +95,17 @@ castArgsPosi g h m = map cast (mArgs m)
     cast _ = error "Expected only user arguments"
 
 castArgsName :: Grammar -> PackHash -> Manifold -> [Doc]
-castArgsName g h m = map cast (mArgs m)
+castArgsName g h m = map (\a -> (pack a) (cast a)) (mArgs m)
   where
-    cast arg = case arg of
-      (ArgName _ t) -> unpack g h t (writeArgument g (mBoundVars m) arg)
+    cast arg = writeArgument g (mBoundVars m) arg
+    pack arg d = case arg of
+      (ArgName _ t) -> if (mCalled m) && not (mSourced m)
+                       then d
+                       else unpack g h t d
       (ArgCall n t (Just l)) -> if (Just l) == mLang m
-                                then writeArgument g (mBoundVars m) arg
-                                else unpack g h t (writeArgument g (mBoundVars m) arg)
-      _ -> writeArgument g (mBoundVars m) arg
+                                then d
+                                else unpack g h t d
+      _ -> d
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
