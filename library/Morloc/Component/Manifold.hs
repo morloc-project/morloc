@@ -266,14 +266,12 @@ WHERE {
     # A argument must be one of the following:
     #  1. raw data
     OPTIONAL {
-        FILTER(bound(?arg))
         ?arg rdf:type mlc:data.
-        BIND(?arg AS ?argdata_id
+        BIND(?arg AS ?argdata_id)
         FILTER(?datatype != mlc:data)
     }
     #  2. a function call
     OPTIONAL {
-        FILTER(bound(?arg))
         ?arg rdf:type mlc:call .
         BIND(?arg AS ?argcall_id)
     }

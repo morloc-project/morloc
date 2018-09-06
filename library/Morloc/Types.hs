@@ -78,7 +78,9 @@ data MData
   | Tup' [MData]
   deriving(Show, Eq, Ord)
 
-data MType = MType Name [MType]
+data MType
+  = MDataType Name [MType]
+  | MFuncType [MType] MType -- TODO: add constraints
   deriving(Show, Eq, Ord)
 
 data SerialMap = SerialMap {
