@@ -72,7 +72,7 @@ SELECT DISTINCT ?type_id ?property ?is_generic ?name ?path
 WHERE {
         # Get serialization functions of type `a -> JSON`
         ?id rdf:type mlc:typeDeclaration ;
-              mlc:lang ${lang} ;
+              mlc:lang "R" ;
               mlc:lhs ?name ;
               mlc:rhs ?rhs .
         ?rhs rdf:type mlc:functionType ;
@@ -89,16 +89,17 @@ WHERE {
             FILTER(?property = "packs")
         } UNION {
             ?property_id rdf:value ?property .
-            ?rhs rdf:_0 ?unpacker_input .
+            ?rhs rdf:_0 ?unpacker_input ;
+                 mlc:output ?unpacker_output .
             ?unpacker_input rdf:type mlc:atomicType ;
                             rdf:value "JSON" .
-            BIND(exists{?output rdf:type mlc:atomicGeneric} AS ?is_generic)
+            BIND(exists{?unpacker_output rdf:type mlc:atomicGeneric} AS ?is_generic)
             BIND(?unpacker_input as ?type_id)
             FILTER(?property = "unpacks")
         }
         OPTIONAL{
            ?source_id rdf:type mlc:source ;
-                      mlc:lang ${lang} ;
+                      mlc:lang "R" ;
                       mlc:path ?path ;
                       mlc:import ?import_id .
            ?import_id mlc:alias ?name .
