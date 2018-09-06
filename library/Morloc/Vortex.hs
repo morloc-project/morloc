@@ -288,24 +288,25 @@ SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
 WHERE {
     {
         ?call_id rdf:type mlc:call ;
-                rdf:value ?fid .
+                rdf:value ?fid ;
+                ?element ?arg .
+        FILTER(regex(str(?element), "_[0-9]+$", "i"))
         ?fid rdf:type mlc:name ;
              rdf:value ?morloc_name .
-        ?arg ?element ?call_id .
-        FILTER(regex(str(?element), "_[0-9]+$", "i"))
     } UNION {
         # Find exported values
         ?call_id rdf:type mlc:export ;
                  rdf:value ?morloc_name .
         # This is exported from the global environment
-        ?call_id ?script_element ?script .
-        ?script rdf:type mlc:script ;
-                rdf:value "<stdin>" .
+        ?script_id rdf:type mlc:script ;
+                   rdf:value "<stdin>" ;
+                   ?script_element ?call_id .
+        FILTER(regex(str(?script_element), "_[0-9]+$", "i"))
         ?typedec rdf:type mlc:typeDeclaration ;
                  mlc:lang "Morloc" ;
                  mlc:lhs ?morloc_name ;
                  mlc:rhs ?typeid .
-        ?arg ?element ?typeid ;
+        ?typeid ?element ?arg;
         FILTER(regex(str(?element), "_[0-9]+$", "i"))
         # Keep only the values that are NOT calls (to avoid duplication)
         MINUS {
@@ -323,11 +324,11 @@ WHERE {
     OPTIONAL {
         ?datadec rdf:type mlc:dataDeclaration ;
                  mlc:lhs ?composition ;
-                 mlc:rhs ?call_id .
-        ?bndid ?delement ?datadec ;
-               rdf:type mlc:name ;
-               rdf:value ?bnd . # bound variables
+                 mlc:rhs ?call_id ;
+                 ?delement ?bnd_id .
         FILTER(regex(str(?delement), "_[0-9]+$", "i"))
+        ?bnd_id rdf:type mlc:name ;
+               rdf:value ?bnd . # bound variables
     }
     # Find the source language
     OPTIONAL {
@@ -348,8 +349,8 @@ WHERE {
                      mlc:lhs ?morloc_name ;
                      mlc:rhs ?lang_typeid .
        FILTER(!regex(str(?source_lang), "Morloc", "i"))
-       ?lang_inid ?element ?lang_typeid ;
-                  rdf:type mlc:atomicType ; # for now only support atomic
+       ?lang_typeid ?element ?lang_inid .
+       ?lang_inid rdf:type mlc:atomicType ; # for now only support atomic
                   rdf:value ?lang_type .
     }
     # Find the type delcaration ID
@@ -404,14 +405,14 @@ WHERE {
             ?property_id rdf:value ?property .
             ?output rdf:type mlc:atomicType ;
                     rdf:value "JSON" .
-            ?packer_input rdf:_0 ?rhs;
-                          rdf:value ?typename .
+            ?rhs rdf:_0 ?packer_input .
+            ?packer_input rdf:value ?typename .
             BIND(exists{?packer_input rdf:type mlc:atomicGeneric} AS ?is_generic)
             FILTER(?property = "packs")
         } UNION {
             ?property_id rdf:value ?property .
-            ?unpacker_input rdf:_0 ?rhs ;
-                            rdf:type mlc:atomicType ;
+            ?rhs rdf:_0 ?unpacker_input .
+            ?unpacker_input rdf:type mlc:atomicType ;
                             rdf:value "JSON" .
             ?output rdf:value ?typename .
             BIND(exists{?output rdf:type mlc:atomicGeneric} AS ?is_generic)
@@ -443,6 +444,6 @@ SELECT ?path ?lang
 WHERE {
   ?s rdf:type mlc:source ;
      mlc:lang ?lang ;
-     mlc:name ?path ;
+     mlc:path ?path .
 }
 |]
