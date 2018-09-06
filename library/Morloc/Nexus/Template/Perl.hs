@@ -14,11 +14,11 @@ module Morloc.Nexus.Template.Perl (generate) where
 import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
-import qualified Morloc.Vortex as V
 import Morloc.Util as MU
+import Morloc.Component.Manifold as MCM
 import qualified Morloc.System as MS
 import qualified Data.Text as DT
-import qualified Data.HashMap.Strict as Map
+import qualified Data.Map.Strict as Map
 import qualified Data.List as DL
 import qualified Data.Maybe as DM
 import Text.PrettyPrint.Leijen.Text hiding ((<$>))
@@ -32,40 +32,40 @@ generate e
 makeNexus :: SparqlEndPoint -> IO DT.Text
 makeNexus ep = fmap render $ main <$> names <*> fdata where
 
-  manifolds :: IO [V.Manifold]
-  manifolds = fmap (filter isExported) (V.buildManifolds ep)
+  manifolds :: IO [Manifold]
+  manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)
 
   names :: IO [Doc]
   names = fmap (map (text' . getName)) manifolds
 
-  getName :: V.Manifold -> DT.Text
-  getName m = maybe (V.mMorlocName m) id (V.mComposition m)
+  getName :: Manifold -> DT.Text
+  getName m = maybe (mMorlocName m) id (mComposition m)
 
-  getNArgs :: V.Manifold -> Int
+  getNArgs :: Manifold -> Int
   getNArgs m
-    | DM.isJust (V.mComposition m) = length (V.mBoundVars m)
-    | otherwise = length (V.mArgs m)
+    | DM.isJust (mComposition m) = length (mBoundVars m)
+    | otherwise = length (mArgs m)
 
   fdata :: IO [(Doc, Int, Doc, Doc, Doc)]
   fdata = fmap (map getFData) manifolds
 
-  getFData :: V.Manifold -> (Doc, Int, Doc, Doc, Doc)
-  getFData m = case V.mLang m of
+  getFData :: Manifold -> (Doc, Int, Doc, Doc, Doc)
+  getFData m = case mLang m of
     (Just lang) ->
       ( text' (getName m)
       , getNArgs m
       , text' (MS.findExecutor lang)
       , text' (MS.makePoolName lang)
-      , text' (MS.makeManifoldName (V.mCallId m))
+      , text' (MS.makeManifoldName (mCallId m))
       )
     Nothing -> error "A language must be defined"
 
-  isExported :: V.Manifold -> Bool
+  isExported :: Manifold -> Bool
   isExported m =
     -- shallow wrappers around a source function
-    (V.mExported m && not (V.mCalled m) && V.mSourced m)
+    (mExported m && not (mCalled m) && mSourced m)
     || -- compositions
-    (V.mExported m && DM.isJust (V.mComposition m))
+    (mExported m && DM.isJust (mComposition m))
 
 
 main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc
@@ -89,7 +89,7 @@ sub dispatch {
     my $cmd = shift;
     my $result = undef;
 
-    ${hashmapT names}
+    ${mapT names}
 
     if($cmd eq '-h' || $cmd eq '-?' || $cmd eq '--help' || $cmd eq '?'){
         &usage();
@@ -110,9 +110,9 @@ ${usageT fdata}
 ${vsep (map functionT fdata)}
 |]
 
-hashmapT names = [idoc|my %cmds = ${tupled (map hashmapEntryT names)};|]
+mapT names = [idoc|my %cmds = ${tupled (map mapEntryT names)};|]
 
-hashmapEntryT n = [idoc|${n} => \&call_${n}|]
+mapEntryT n = [idoc|${n} => \&call_${n}|]
 
 usageT fdata = [idoc|
 sub usage{

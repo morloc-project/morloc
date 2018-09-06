@@ -11,8 +11,8 @@ Stability   : experimental
 
 module Morloc.Pools.Template.R (generate) where
 
+import Morloc.Types
 import Morloc.Quasi
-import Morloc.Vortex
 import Morloc.Pools.Common
 
 import qualified Data.Text as DT 
@@ -66,7 +66,7 @@ g = Grammar {
       args = gList' (map dquotes xs)
 
 main
-  :: [Doc] -> [Manifold] -> PackHash -> Doc
+  :: [Doc] -> [Manifold] -> SerialMap -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
 ${line <> vsep (map (gSource g) srcs) <> line}
