@@ -12,9 +12,13 @@ Stability   : experimental
 module Morloc.Pools.Common
 (
     Grammar(..)
+  , TransManifoldDoc(..)
+  , commaSep
   , makeGenerator
   , defaultCodeGenerator
   , defaultManifold
+  , makeTransManifolds
+  , getUsedManifolds
 ) where
 
 import qualified Morloc.Component.Serializer as Serializer
@@ -40,7 +44,23 @@ data Grammar = Grammar {
     , gRecord   :: [(Doc,Doc)] -> Doc
     , gTrue     :: Doc
     , gFalse    :: Doc
-    , gSysCall  :: [Doc] -> Doc
+    , gTrans    :: TransManifoldDoc -> Doc
+  }
+
+data ManifoldClass
+  = Cis -- ^ Wrapper around a Morloc composition
+  | Trans
+  | SourceWrapper -- ^ Wrapper around a source function
+  | Uncalled -- ^ Does not need to be built in current language
+  deriving(Show, Ord, Eq)
+
+data TransManifoldDoc = TransManifoldDoc {
+      transCallId :: Doc
+    , transCaller :: Doc 
+    , transPool :: Doc 
+    , transCallingPool :: Doc
+    , transArgs :: [Doc]
+    , transUnpacker :: Doc 
   }
 
 makeGenerator
@@ -74,10 +94,13 @@ nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
 iArgs :: Int -> [Doc]
 iArgs i = map ((<>) "x") (map int [1 .. i])
 
+unpackerName :: Grammar -> SerialMap -> Maybe MType -> Doc 
+unpackerName g h n = case (n >>= (flip Map.lookup) (serialUnpacker h)) of 
+  (Just f) -> text' f
+  Nothing  -> text' (serialGenericUnpacker h)
+
 unpack :: Grammar -> SerialMap -> Maybe MType -> Doc -> Doc
-unpack g h n d = case (n >>= (flip Map.lookup) (serialUnpacker h)) of 
-  (Just f) -> (gCall g) (text' f) [d]
-  Nothing  -> (gCall g) (text' (serialGenericUnpacker h)) [d]
+unpack g h n d = (gCall g) (unpackerName g h n) [d]
 
 callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
@@ -104,22 +127,13 @@ castArgsName g h m = map (\a -> (pack a) (cast a)) (mArgs m)
       (ArgName _ t) -> if (mCalled m) && not (mSourced m)
                        then d
                        else unpack g h t d
-      (ArgCall n t (Just l)) -> if (Just l) == mLang m
-                                then d
-                                else unpack g h t d
       _ -> d
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
 writeArgument _ _ (ArgName n _  )  = text' n
 writeArgument g xs (ArgCall n t (Just l))
-  | l == gLang g = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
-  | otherwise = (gSysCall g) ([
-        (gQuote g) $ text' (MS.findExecutor l)
-      , (gQuote g) $ text' (MS.makePoolName l)
-      , (gQuote g) $ text' (MS.makeManifoldName n)
-      ] ++ (map text' xs))
-  -- | ArgCall Key (Maybe ReturnType) (Maybe Lang)
+  = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
 writeArgument g _ (ArgData d _  )  = writeData g d
 writeArgument _ _ (ArgPosi i _  )  = "x" <> int i
 
@@ -132,15 +146,32 @@ writeData g (Lst' xs)    = (gList g) (map (writeData g) xs)
 writeData g (Tup' xs)    = (gTuple g) (map (writeData g) xs)
 writeData g (Rec' xs)    = (gRecord g) (map (\(k, v) -> (text' k, writeData g v)) xs)
 
-defaultManifold :: Grammar -> SerialMap -> Manifold -> Doc
-defaultManifold g h m
+determineManifoldClass :: Grammar -> Manifold -> ManifoldClass
+determineManifoldClass g m
   | mLang m == Just (gLang g)
       && not (mCalled m)
       && mSourced m
-      && mExported m = defaultSourceWrapperManifold g h m
-  | not (mCalled m) && mExported m = "" -- this is not a thing
-  | mLang m == Just (gLang g) = defaultCisManifold g h m
-  | otherwise = ""
+      && mExported m = SourceWrapper
+  | not (mCalled m) && mExported m = Uncalled
+  | mLang m == Just (gLang g) = Cis 
+  | (mLang m /= Just (gLang g)) && mCalled m = Trans
+  | otherwise = error "Unexpected manifold class"
+
+getUsedManifolds :: Grammar -> [Manifold] -> [Doc]
+getUsedManifolds g ms = map callIdToName (filter isBuilt ms)
+  where
+    isBuilt :: Manifold -> Bool
+    isBuilt m = case determineManifoldClass g m of
+      Cis -> True
+      SourceWrapper -> True
+      _ -> False
+
+defaultManifold :: Grammar -> SerialMap -> Manifold -> Doc
+defaultManifold g h m = case determineManifoldClass g m of
+  Cis           -> defaultCisManifold g h m
+  SourceWrapper -> defaultSourceWrapperManifold g h m
+  Trans         -> "" -- trans calls will be made elsewhere (depends on [Manifold])
+  Uncalled      -> ""
 
 defaultSourceWrapperManifold :: Grammar -> SerialMap -> Manifold -> Doc
 defaultSourceWrapperManifold g h m
@@ -157,3 +188,23 @@ defaultCisManifold g h m
         (callIdToName m)
         (map text' (mBoundVars m))
         ((gReturn g) ((gCall g) (fname m) (castArgsName g h m)))
+
+makeTransManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+makeTransManifolds g h ms
+  = vsep . concat . concat
+  $ map (\m -> map (makeTransManifold g h m) (mArgs m)) ms
+
+makeTransManifold :: Grammar -> SerialMap -> Manifold -> Argument -> [Doc]
+makeTransManifold g h m (ArgCall k t (Just lang))
+  | (lang /= (gLang g)) && (mLang m == Just (gLang g))
+    = return . gTrans g $ TransManifoldDoc {
+        transCallId = text' (MS.makeManifoldName k)
+      , transCaller = text' (MS.findExecutor lang)
+      , transPool = text' (MS.makePoolName lang)
+      , transCallingPool = maybe "" text' (fmap MS.makePoolName (mLang m))
+      , transArgs = map text' (mBoundVars m)
+      , transUnpacker = unpackerName g h t
+
+    }
+  | otherwise = []
+makeTransManifold _ _ _ _ = []

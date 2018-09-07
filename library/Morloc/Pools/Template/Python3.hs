@@ -43,14 +43,14 @@ g = Grammar {
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
-    , gSysCall  = gSysCall'
+    , gTrans    = transManifoldT
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
-      = "def " <> name <> tupled args <> ":" <> line <> indent 2 body <> line
+      = "def " <> name <> tupled args <> ":" <> line <> indent 4 body <> line
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -71,9 +71,40 @@ g = Grammar {
     gSource' :: Doc -> Doc
     gSource' s = [idoc|from ${s} import *|]
 
-    gSysCall' :: [Doc] -> Doc
-    gSysCall' xs = [idoc|subprocess.run(${args}, stdout=subprocess.PIPE).stdout|] where
-      args = gList' xs
+transManifoldT :: TransManifoldDoc -> Doc
+transManifoldT t = [idoc| 
+# trans manifold 
+def ${transCallId t}(${commaSep (transArgs t)}):
+    try:
+        sysObj = subprocess.run(
+            ${args},
+            capture_output=True,
+            check=True
+        )
+    except subprocess.CalledProcessError as e:
+        sys.exit(str(e))
+
+    jsonString = sysObj.stdout
+    jsonLog = sysObj.stderr
+
+    try:
+        pyObj = ${transUnpacker t}(jsonString)
+    except json.decoder.JSONDecodeError as e:
+        msg = "Error in ${transCallingPool t}::${transCallId t} - JSON parse failure"
+        if(len(e.doc) == 0):
+            msg += ": empty document"
+        else:
+            msg += ", bad document:\n%s" % str(e.doc)
+        sys.exit(msg)
+
+    return(pyObj)
+|]
+  where
+    args = list ([
+          dquotes (transCaller t)
+        , dquotes (transPool t)
+        , dquotes (transCallId t)
+      ] ++ transArgs t)
     
 main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
@@ -81,13 +112,32 @@ main srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
-
+import json
 
 ${vsep (map (gSource g) srcs) <> line}
 
+${makeTransManifolds g hash manifolds}
+
+
 ${vsep (map (defaultManifold g hash) manifolds)}
 
+dispatch = dict${tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
+
 if __name__ == '__main__':
-  f = eval(sys.argv[1])
-  print(f(*sys.argv[2:]))
+    script_name = sys.argv[0] 
+
+    try:
+        cmd = sys.argv[1]
+    except IndexError:
+        sys.exit("Internal error in {}: no manifold id found".format(script))
+
+    try:
+        function = dispatch[cmd]
+    except KeyError:
+        sys.exit("Internal error in {}: expected manifold id (e.g. m34), got {}".format(script, cmd))
+
+    args = sys.argv[2:]
+
+    print(function(*args))
+
 |]

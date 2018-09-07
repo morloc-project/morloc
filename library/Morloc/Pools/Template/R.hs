@@ -33,7 +33,7 @@ g = Grammar {
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
-    , gSysCall  = gSysCall'
+    , gTrans    = transManifoldT
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
@@ -60,10 +60,8 @@ g = Grammar {
     gSource' :: Doc -> Doc
     gSource' s = call' "source" [dquotes s]
 
-    gSysCall' :: [Doc] -> Doc
-    gSysCall' (cmd:[]) = [idoc|"run(${dquotes cmd}, stdout=TRUE)"|]
-    gSysCall' (cmd:xs) = [idoc|"run(${dquotes cmd}, ${args}, stdout=TRUE)"|] where
-      args = gList' (map dquotes xs)
+transManifoldT :: TransManifoldDoc -> Doc
+transManifoldT t = [idoc| XXX |]
 
 main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
