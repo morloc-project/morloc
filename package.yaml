@@ -20,26 +20,27 @@ extra-source-files:
 dependencies:
   - base >= 4.7 && < 5
   - bytestring
+  - containers
+  - directory
   - docopt
   - extra
   - filepath
-  - safe
-  - megaparsec
-  - parsec
-  - network-uri
-  - text
-  - haskell-src-meta
-  - rdf4h
   - hashable
-  - HTTP
+  - haskell-src-meta
+  - megaparsec
+  - mtl
+  - network-uri
+  - parsec
+  - rdf4h
+  - safe
   - scientific
-  - containers
+  - template-haskell
+  - text
   - unordered-containers
   - vector
-  - template-haskell
-  - mtl
   - wl-pprint-text
   - xml
+  - HTTP
 
 library:
   source-dirs: library
@@ -54,10 +55,10 @@ executables:
       - -rtsopts
       - -with-rtsopts=-N
     dependencies:
-      - base >=4.7 && <5
+      - base >= 4.7 && < 5
+      - morloc 
       - rdf4h
       - text
-      - morloc 
 
 tests:
   morloc-test:
@@ -69,11 +70,11 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - base
-      - tasty
-      - tasty-hspec >= 0.1
-      - tasty-golden
-      - temporary
       - directory
       - morloc
       - rdf4h
+      - tasty
+      - tasty-golden
+      - tasty-hspec >= 0.1
+      - temporary
       - text

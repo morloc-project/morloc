@@ -11,6 +11,7 @@ import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 import qualified Data.Text.IO as DTIO
 import qualified System.IO as SIO
+import qualified System.Directory as SD
 
 import Morloc.Operators
 import Morloc.Types
@@ -42,12 +43,15 @@ writeProgram ep code = do
   where
     writeProgram' :: (Script, [Script]) -> IO ()
     writeProgram' (n, ps) = do
-      writeScript' n
-      mapM_ writeScript' ps
+      writeScript' True n
+      mapM_ (writeScript' False) ps
       
-    writeScript' :: Script -> IO ()
-    writeScript' (Script base lang code) =
-      DTIO.writeFile (base <> "." <> lang) code
+    writeScript' :: Bool -> Script -> IO ()
+    writeScript' isExe (Script base lang code) = do
+      let f = base <> "." <> lang
+      DTIO.writeFile f code
+      p <- SD.getPermissions f
+      SD.setPermissions f (p {SD.executable = isExe})
 
 -- | Compile a program to RDF. Does not depend on a local SPARQL database. It
 -- also does not consider the local configuration or postprocessing and
