@@ -72,7 +72,7 @@ SELECT DISTINCT ?type_id ?property ?is_generic ?name ?path
 WHERE {
         # Get serialization functions of type `a -> JSON`
         ?id rdf:type mlc:typeDeclaration ;
-              mlc:lang "R" ;
+              mlc:lang ${lang} ;
               mlc:lhs ?name ;
               mlc:rhs ?rhs .
         ?rhs rdf:type mlc:functionType ;
@@ -99,7 +99,7 @@ WHERE {
         }
         OPTIONAL{
            ?source_id rdf:type mlc:source ;
-                      mlc:lang "R" ;
+                      mlc:lang ${lang} ;
                       mlc:path ?path ;
                       mlc:import ?import_id .
            ?import_id mlc:alias ?name .
