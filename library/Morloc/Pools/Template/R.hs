@@ -27,13 +27,15 @@ g = Grammar {
     , gComment  = comment'
     , gReturn   = return'
     , gQuote    = dquotes
-    , gSource   = gSource'
+    , gImport   = gImport'
     , gTrue     = "TRUE"
     , gFalse    = "FALSE"
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
     , gTrans    = transManifoldT
+    , gCis      = cisManifoldT
+    , gSource   = sourceManifoldT
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
@@ -57,19 +59,88 @@ g = Grammar {
     gRecord' :: [(Doc,Doc)] -> Doc
     gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    gSource' :: Doc -> Doc
-    gSource' s = call' "source" [dquotes s]
+    gImport' :: Doc -> Doc
+    gImport' s = call' "source" [dquotes s]
 
 transManifoldT :: TransManifoldDoc -> Doc
 transManifoldT t = [idoc| XXX |]
+
+sourceManifoldT :: SourceManifoldDoc -> Doc
+sourceManifoldT s = [idoc|
+# R: ${srcName s} source manifold
+
+${srcCallId s} <- function(${commaSep (srcBndArgs s)}){
+  ${run}$result
+}
+|] where
+  run = "catchyEval" <> (
+      tupled $
+           [srcName s]
+        ++ srcFunArgs s
+        ++ [ ".pool=" <> dquotes (srcPool s)
+           , ".name=" <> dquotes (srcCallId s)]
+    )
+
+cisManifoldT :: CisManifoldDoc -> Doc
+cisManifoldT c = [idoc|
+# R: ${cisName c} cis manifold
+
+${cisCallId c} <- function(${commaSep (cisBndArgs c)}){
+  ${run}$result
+}
+|] where
+  run = "catchyEval" <> (
+      tupled $
+           [cisName c]
+        ++ cisFunArgs c
+        ++ [ ".pool=" <> dquotes (cisPool c)
+           , ".name=" <> dquotes (cisCallId c)]
+    )
 
 main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-${line <> vsep (map (gSource g) srcs) <> line}
+${line <> vsep (map (gImport g) srcs) <> line}
 
-${vsep (map (defaultManifold g hash) manifolds)}
+catchyEval <- function(f, ..., .pool="_", .name="_"){
+  fails <- ""
+  isOK <- TRUE
+  warns <- list()
+  notes <- capture.output(
+    {
+      value <- withCallingHandlers(
+        tryCatch(
+          f(...),
+          error = function(e) {
+            fails <<- e$message;
+            isOK <<- FALSE
+          }
+        ),
+        warning = function(w){
+          warns <<- append(warns, w$message)
+          invokeRestart("muffleWarning")
+        }
+      )
+    },
+    type="message"
+  )
+  if(! isOK){
+    msg <- sprintf("Error in %s::%s:\n %s", .pool, .name, x$errmsg)
+    stop(msg) 
+  }
+  return(list(
+    result = value,
+    warns  = warns,
+    notes  = noes
+  ))
+}
+
+${makeSourceManifolds g hash manifolds}
+
+${makeTransManifolds g hash manifolds}
+
+${makeCisManifolds g hash manifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

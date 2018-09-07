@@ -37,13 +37,15 @@ g = Grammar {
     , gComment  = comment'
     , gReturn   = return'
     , gQuote    = dquotes
-    , gSource   = gSource'
+    , gImport   = gImport'
     , gTrue     = "True"
     , gFalse    = "False"
     , gList     = gList'
     , gTuple    = gTuple'
     , gRecord   = gRecord'
     , gTrans    = transManifoldT
+    , gCis      = cisManifoldT
+    , gSource   = sourceManifoldT
   } where
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
@@ -68,8 +70,15 @@ g = Grammar {
     gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
     -- FIXME: qualify the calls (I don't have handling for this yet ...)
-    gSource' :: Doc -> Doc
-    gSource' s = [idoc|from ${s} import *|]
+    gImport' :: Doc -> Doc
+    gImport' s = [idoc|from ${s} import *|]
+
+sourceManifoldT :: SourceManifoldDoc -> Doc
+sourceManifoldT s = [idoc|
+# src manifold
+def ${srcCallId s}(${commaSep (srcBndArgs s)}):
+  return(${srcName s}(${commaSep (srcFunArgs s)}))
+|]
 
 transManifoldT :: TransManifoldDoc -> Doc
 transManifoldT t = [idoc| 
@@ -86,6 +95,9 @@ def ${transCallId t}(${commaSep (transArgs t)}):
 
     jsonString = sysObj.stdout
     jsonLog = sysObj.stderr
+
+    if(len(jsonLog) > 0):
+      print(jsonLog, file=sys.stderr)
 
     try:
         pyObj = ${transUnpacker t}(jsonString)
@@ -105,6 +117,13 @@ def ${transCallId t}(${commaSep (transArgs t)}):
         , dquotes (transPool t)
         , dquotes (transCallId t)
       ] ++ transArgs t)
+
+cisManifoldT :: CisManifoldDoc -> Doc
+cisManifoldT c = [idoc|
+# cis manifold
+def ${cisCallId c}(${commaSep (cisBndArgs c)}):
+  return(${cisName c}(${commaSep (cisFunArgs c)}))
+|]
     
 main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
@@ -114,12 +133,13 @@ import sys
 import subprocess
 import json
 
-${vsep (map (gSource g) srcs) <> line}
+${vsep (map (gImport g) srcs) <> line}
+
+${makeSourceManifolds g hash manifolds}
 
 ${makeTransManifolds g hash manifolds}
 
-
-${vsep (map (defaultManifold g hash) manifolds)}
+${makeCisManifolds g hash manifolds}
 
 dispatch = dict${tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
 
