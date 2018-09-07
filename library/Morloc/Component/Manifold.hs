@@ -58,7 +58,6 @@ asTuple typemap datamap [ Just callId'
                         , langType'
                         , argname'
                         , argcall_id'
-                        , datatype'
                         , argdata_id'
                         ] =
   (
@@ -82,7 +81,7 @@ asTuple typemap datamap [ Just callId'
     , langType' >>= (flip Map.lookup) typemap
     , argname'
     , argcall_id'
-    , argdata_id' >>= (flip Map.lookup) datamap 
+    , argdata_id' >>= (flip Map.lookup) datamap
     , element'
     )
   )
@@ -190,7 +189,7 @@ PREFIX mid: <http://www.morloc.io/XXX/mid/>
 SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
        (group_concat(?bnd; separator=",") as ?bvars)
        ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
-       ?argname ?argcall_id ?datatype ?argdata_id
+       ?argname ?argcall_id ?argdata_id
 WHERE {
     {
         ?call_id rdf:type mlc:call ;
@@ -268,7 +267,6 @@ WHERE {
     OPTIONAL {
         ?arg rdf:type mlc:data.
         BIND(?arg AS ?argdata_id)
-        FILTER(?datatype != mlc:data)
     }
     #  2. a function call
     OPTIONAL {
@@ -282,6 +280,6 @@ WHERE {
              rdf:value ?argname .
     }
 }
-GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type_id ?morloc_name ?element ?argname ?argcall_id ?datatype ?argdata_id ?source_name
+GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type_id ?morloc_name ?element ?argname ?argcall_id ?argdata_id ?source_name
 ORDER BY ?call_id ?element
 |]
