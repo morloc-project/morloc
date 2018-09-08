@@ -21,28 +21,35 @@ import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {
-      gLang     = "R"
-    , gCall     = call'
-    , gFunction = function'
-    , gComment  = comment'
-    , gReturn   = return'
-    , gQuote    = dquotes
-    , gImport   = gImport'
-    , gTrue     = "TRUE"
-    , gFalse    = "FALSE"
-    , gList     = gList'
-    , gTuple    = gTuple'
-    , gRecord   = gRecord'
-    , gTrans    = transManifoldT
-    , gCis      = cisManifoldT
-    , gSource   = sourceManifoldT
+      gLang        = "R"
+    , gAssign      = assign'
+    , gCall        = call'
+    , gFunction    = function'
+    , gComment     = comment'
+    , gReturn      = return'
+    , gQuote       = dquotes
+    , gImport      = import'
+    , gTrue        = "TRUE"
+    , gFalse       = "FALSE"
+    , gList        = list'
+    , gTuple       = tuple'
+    , gRecord      = record'
+    , gIndent      = indent'
+    , gTry         = try'
+    , gUnpacker    = unpacker'
+    , gForeignCall = foreignCall'
   } where
+
+    assign' l r = l <> " <- " <> r 
+
+    indent' = indent 4
+
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
-      = name <> " <- function" <> tupled args <> braces (line <> indent 2 body <> line) <> line
+      = name <> " <- function" <> tupled args <> braces (line <> indent' body <> line) <> line
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -50,60 +57,48 @@ g = Grammar {
     return' :: Doc -> Doc
     return' = id
 
-    gList' :: [Doc] -> Doc
-    gList' xs = "c" <> tupled xs
+    list' :: [Doc] -> Doc
+    list' xs = "c" <> tupled xs
 
-    gTuple' :: [Doc] -> Doc
-    gTuple' xs = "list" <> tupled xs
+    tuple' :: [Doc] -> Doc
+    tuple' xs = "list" <> tupled xs
 
-    gRecord' :: [(Doc,Doc)] -> Doc
-    gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
+    record' :: [(Doc,Doc)] -> Doc
+    record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    gImport' :: Doc -> Doc
-    gImport' s = call' "source" [dquotes s]
+    import' :: Doc -> Doc
+    import' s = call' "source" [dquotes s]
 
-transManifoldT :: TransManifoldDoc -> Doc
-transManifoldT t = [idoc| XXX |]
+    try' :: TryDoc -> Doc
+    try' t = call' ".morloc_try" $
+      [tryCmd t] ++ (tryArgs t) ++ [ ".name=" <> dquotes (tryMid t)
+                                   , ".file=" <> dquotes (tryFile t)]
 
-sourceManifoldT :: SourceManifoldDoc -> Doc
-sourceManifoldT s = [idoc|
-# R: ${srcName s} source manifold
+    unpacker' :: UnpackerDoc -> Doc
+    unpacker' u = call' ".morloc_unpack"
+      [ udUnpacker u
+      , udValue u
+      , ".name=" <> dquotes (udMid u)
+      , ".pool=" <> dquotes (udFile u)
+      ]
 
-${srcCallId s} <- function(${commaSep (srcBndArgs s)}){
-  ${run}$result
-}
-|] where
-  run = "catchyEval" <> (
-      tupled $
-           [srcName s]
-        ++ srcFunArgs s
-        ++ [ ".pool=" <> dquotes (srcPool s)
-           , ".name=" <> dquotes (srcCallId s)]
-    )
-
-cisManifoldT :: CisManifoldDoc -> Doc
-cisManifoldT c = [idoc|
-# R: ${cisName c} cis manifold
-
-${cisCallId c} <- function(${commaSep (cisBndArgs c)}){
-  ${run}$result
-}
-|] where
-  run = "catchyEval" <> (
-      tupled $
-           [cisName c]
-        ++ cisFunArgs c
-        ++ [ ".pool=" <> dquotes (cisPool c)
-           , ".name=" <> dquotes (cisCallId c)]
-    )
+    foreignCall' :: ForeignCallDoc -> Doc
+    foreignCall' f = call' ".morloc_foreign_call"
+      [ dquotes (fcdForeignProg f)
+      , dquotes (fcdForeignPool f)
+      , dquotes (fcdMid f)
+      , list' (fcdArgs f)
+      , ".pool=" <> dquotes (fcdFile f)
+      , ".name=" <> dquotes (fcdMid f)
+      ]
 
 main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-${line <> vsep (map (gImport g) srcs) <> line}
+${line <> vsep (map (gImport g) srcs)}
 
-catchyEval <- function(f, ..., .pool="_", .name="_"){
+.morloc_run <- function(f, ...){
   fails <- ""
   isOK <- TRUE
   warns <- list()
@@ -125,20 +120,49 @@ catchyEval <- function(f, ..., .pool="_", .name="_"){
     },
     type="message"
   )
-  if(! isOK){
-    msg <- sprintf("Error in %s::%s:\n %s", .pool, .name, x$errmsg)
-    stop(msg) 
-  }
-  return(list(
-    result = value,
-    warns  = warns,
-    notes  = noes
-  ))
+  list(
+    value = value,
+    isOK  = isOK,
+    fails = fails,
+    warns = warns,
+    notes = notes
+  )
 }
 
-${makeSourceManifolds g hash manifolds}
+# dies on error, ignores warnings and messages
+.morloc_try <- function(..., .log=stderr(), .pool="_", .name="_"){
+  x <- .morloc_run(...)
+  location <- sprintf("%s::%s", .pool, .name)
+  if(! x$isOK){
+    cat("** R errors in ", location, file=stderr())
+    cat(x$fails, file=stderr())
+    stop(sprintf(msg, .pool, .name, x$fails))
+  }
+  if(! is.null(.log)){
+    lines = c()
+    if(length(x$warns) > 0){
+      cat("** R warnings in ", location, file=stderr())
+      cat(paste(unlist(x$warns), sep="\n"), file=stderr())
+    }
+    if(length(x$notes) > 0){
+      cat("** R messages in ", location, file=stderr())
+      cat(paste(unlist(x$notes), sep="\n"), file=stderr())
+    }
+  }
+  x$value
+}
 
-${makeTransManifolds g hash manifolds}
+.morloc_unpack <- function(x, unpacker, ...){
+  x <- .morloc_try(unpacker, x, ...)  
+  return(x)
+}
+
+.morloc_foreign_call <- function(cmd, args, .pool, .name){
+  .morloc_try(.system2(cmd, args, stdout=TRUE), .pool=.pool, .pool=.pool)
+}
+
+
+${makeSourceManifolds g hash manifolds}
 
 ${makeCisManifolds g hash manifolds}
 

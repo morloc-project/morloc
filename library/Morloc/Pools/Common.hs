@@ -12,13 +12,11 @@ Stability   : experimental
 module Morloc.Pools.Common
 (
     Grammar(..)
-  , TransManifoldDoc(..)
-  , CisManifoldDoc(..)
-  , SourceManifoldDoc(..)
-  , commaSep
+  , TryDoc(..)
+  , UnpackerDoc(..)
+  , ForeignCallDoc(..)
   , makeGenerator
   , defaultCodeGenerator
-  , makeTransManifolds
   , makeCisManifolds
   , makeSourceManifolds
   , getUsedManifolds
@@ -36,6 +34,7 @@ import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {
       gLang     :: DT.Text
+    , gAssign   :: Doc -> Doc -> Doc
     , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
     , gComment  :: Doc -> Doc
@@ -47,9 +46,10 @@ data Grammar = Grammar {
     , gRecord   :: [(Doc,Doc)] -> Doc
     , gTrue     :: Doc
     , gFalse    :: Doc
-    , gTrans    :: TransManifoldDoc -> Doc
-    , gCis      :: CisManifoldDoc -> Doc
-    , gSource   :: SourceManifoldDoc -> Doc
+    , gIndent   :: Doc -> Doc
+    , gUnpacker :: UnpackerDoc -> Doc
+    , gTry      :: TryDoc -> Doc
+    , gForeignCall :: ForeignCallDoc -> Doc
   }
 
 data ManifoldClass
@@ -59,29 +59,27 @@ data ManifoldClass
   | Uncalled -- ^ Does not need to be built in current language
   deriving(Show, Ord, Eq)
 
-data TransManifoldDoc = TransManifoldDoc {
-      transCallId :: Doc
-    , transCaller :: Doc 
-    , transPool :: Doc 
-    , transCallingPool :: Doc
-    , transArgs :: [Doc]
-    , transUnpacker :: Doc 
+data TryDoc = TryDoc {
+      tryCmd :: Doc
+    , tryRet :: Doc
+    , tryArgs :: [Doc]
+    , tryMid :: Doc
+    , tryFile :: Doc
   }
 
-data CisManifoldDoc = CisManifoldDoc {
-      cisCallId :: Doc
-    , cisName :: Doc
-    , cisBndArgs :: [Doc]
-    , cisFunArgs :: [Doc]
-    , cisPool :: Doc
+data UnpackerDoc = UnpackerDoc {
+      udValue :: Doc
+    , udUnpacker :: Doc
+    , udMid :: Doc
+    , udFile :: Doc
   }
 
-data SourceManifoldDoc = SourceManifoldDoc {
-      srcCallId :: Doc
-    , srcName :: Doc
-    , srcBndArgs :: [Doc]
-    , srcFunArgs :: [Doc]
-    , srcPool :: Doc
+data ForeignCallDoc = ForeignCallDoc {
+      fcdForeignProg :: Doc
+    , fcdForeignPool :: Doc
+    , fcdMid :: Doc
+    , fcdArgs :: [Doc]
+    , fcdFile :: Doc
   }
 
 makeGenerator
@@ -106,14 +104,61 @@ defaultCodeGenerator g f main ep = do
   let srcs = map f (serialSources packMap)
   (return . render) $ main srcs manifolds packMap
 
+makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+makeSourceManifolds g h ms
+  = vsep . concat $ map (decide' g h) ms
+  where
+    decide' g h m = case determineManifoldClass g m of
+      Source -> return $ makeSourceManifold g h m
+      _ -> []
+
+-- | inifinite list of named variables
+iArgs :: Doc -> [Doc]
+iArgs prefix = zipWith (<>) (repeat prefix) (map int [0..])
+
+makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+makeCisManifolds g h ms
+  = vsep . concat $ map (decide' g h) ms
+  where
+    decide' g h m = case determineManifoldClass g m of
+      Cis -> return $ makeCisManifold g h m
+      _ -> []
+
+
+makeSourceManifold :: Grammar -> SerialMap -> Manifold -> Doc
+makeSourceManifold g h m
+  = (gFunction g)
+      (callIdToName m)
+      (take n (iArgs "x"))
+      (
+           vsep (zipWith3 unpack' (iArgs "a") (mArgs m) (iArgs "x")) <> line
+        <> (gCall g) (fname m) (take n (iArgs "a"))
+      )
+  where
+    n = length (mArgs m)
+
+    unpack' :: Doc -> Argument -> Doc -> Doc
+    unpack' lhs (ArgPosi _ t) x
+      = (gAssign g) lhs ((gUnpacker g) (UnpackerDoc {
+              udValue = x   
+            , udUnpacker = unpackerName g h t
+            , udMid = callIdToName m
+            , udFile = text' (MS.makePoolName (gLang g))
+          }))
+
+
+makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
+makeCisManifold g s m
+  = (gFunction g)
+      (callIdToName m)
+      (map text' (mBoundVars m))
+      ((gCall g) (fname m) (map makeArg (mArgs m)))
+  where
+    makeArg :: Argument -> Doc
+    makeArg a = writeArgument g (mBoundVars m) a
+
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
-
-nameArgs :: [a] -> [Doc]
-nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
-
-iArgs :: Int -> [Doc]
-iArgs i = map ((<>) "x") (map int [1 .. i])
 
 unpackerName :: Grammar -> SerialMap -> Maybe MType -> Doc 
 unpackerName g h n = case (n >>= (flip Map.lookup) (serialUnpacker h)) of 
@@ -130,25 +175,6 @@ srcLangDoc :: Manifold -> Doc
 srcLangDoc m = case mLang m of
   Just l -> text' l
   Nothing -> text' "Undefined"
-
-fname :: Manifold -> Doc
-fname m = text' (mCallName m)
-
-castArgsPosi :: Grammar -> SerialMap -> Manifold -> [Doc]
-castArgsPosi g h m = map cast (mArgs m)
-  where
-    cast (ArgPosi i t) = unpack g h t ("x" <> int i)
-    cast _ = error "Expected only user arguments"
-
-castArgsName :: Grammar -> SerialMap -> Manifold -> [Doc]
-castArgsName g h m = map (\a -> (pack a) (cast a)) (mArgs m)
-  where
-    cast arg = writeArgument g (mBoundVars m) arg
-    pack arg d = case arg of
-      (ArgName _ t) -> if (mCalled m) && not (mSourced m)
-                       then d
-                       else unpack g h t d
-      _ -> d
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
@@ -187,51 +213,76 @@ getUsedManifolds g ms = map callIdToName (filter isBuilt ms)
       Source -> True
       _ -> False
 
-makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
-makeCisManifolds g h ms
-  = vsep . concat $ map (makeCisManifold g h) ms
+-- nameArgs :: [a] -> [Doc]
+-- nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
+--
+-- iArgs :: Int -> [Doc]
+-- iArgs i = map ((<>) "x") (map int [1 .. i])
 
-makeCisManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
-makeCisManifold g h m = case determineManifoldClass g m of
-  Cis -> return $ (gCis g) (CisManifoldDoc {
-        cisCallId = callIdToName m
-      , cisName = text' (mCallName m)
-      , cisBndArgs = map text' (mBoundVars m)
-      , cisFunArgs = castArgsName g h m
-      , cisPool = text' (MS.makePoolName (gLang g))
-    })
-  _ -> []
+fname :: Manifold -> Doc
+fname m = text' (mCallName m)
 
-makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
-makeSourceManifolds g h ms
-  = vsep . concat $ map (makeSourceManifold g h) ms
+-- castArgsPosi :: Grammar -> SerialMap -> Manifold -> [Doc]
+-- castArgsPosi g h m = map cast (mArgs m)
+--   where
+--     cast (ArgPosi i t) = unpack g h t ("x" <> int i)
+--     cast _ = error "Expected only user arguments"
+--
+-- castArgsName :: Grammar -> SerialMap -> Manifold -> [Doc]
+-- castArgsName g h m = map (\a -> (pack a) (cast a)) (mArgs m)
+--   where
+--     cast arg = writeArgument g (mBoundVars m) arg
+--     pack arg d = case arg of
+--       (ArgName _ t) -> if (mCalled m) && not (mSourced m)
+--                        then d
+--                        else unpack g h t d
+--       _ -> d
 
-makeSourceManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
-makeSourceManifold g h m = case determineManifoldClass g m of
-  Source -> return $ (gSource g) (SourceManifoldDoc {
-        srcCallId = callIdToName m
-      , srcName = text' (mCallName m)
-      , srcBndArgs = iArgs (length (mArgs m))
-      , srcFunArgs = castArgsPosi g h m
-      , srcPool = text' (MS.makePoolName (gLang g))
-    })
-  _ -> []
+-- makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+-- makeCisManifolds g h ms
+--   = vsep . concat $ map (makeCisManifold g h) ms
+--
+-- makeCisManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
+-- makeCisManifold g h m = case determineManifoldClass g m of
+--   Cis -> return $ (gCis g) (CisManifoldDoc {
+--         cisCallId = callIdToName m
+--       , cisName = text' (mCallName m)
+--       , cisBndArgs = map text' (mBoundVars m)
+--       , cisFunArgs = castArgsName g h m
+--       , cisPool = text' (MS.makePoolName (gLang g))
+--     })
+--   _ -> []
 
-makeTransManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
-makeTransManifolds g h ms
-  = vsep . concat . concat
-  $ map (\m -> map (makeTransManifold g h m) (mArgs m)) ms
+-- makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+-- makeSourceManifolds g h ms
+--   = vsep . concat $ map (makeSourceManifold g h) ms
+--
+-- makeSourceManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
+-- makeSourceManifold g h m = case determineManifoldClass g m of
+--   Source -> return $ (gSource g) (SourceManifoldDoc {
+--         srcCallId = callIdToName m
+--       , srcName = text' (mCallName m)
+--       , srcBndArgs = iArgs (length (mArgs m))
+--       , srcFunArgs = castArgsPosi g h m
+--       , srcPool = text' (MS.makePoolName (gLang g))
+--     })
+--   _ -> []
 
-makeTransManifold :: Grammar -> SerialMap -> Manifold -> Argument -> [Doc]
-makeTransManifold g h m (ArgCall k t (Just lang))
-  | (lang /= (gLang g)) && (mLang m == Just (gLang g))
-    = return . gTrans g $ TransManifoldDoc {
-        transCallId = text' (MS.makeManifoldName k)
-      , transCaller = text' (MS.findExecutor lang)
-      , transPool = text' (MS.makePoolName lang)
-      , transCallingPool = maybe "" text' (fmap MS.makePoolName (mLang m))
-      , transArgs = map text' (mBoundVars m)
-      , transUnpacker = unpackerName g h t
-    }
-  | otherwise = []
-makeTransManifold _ _ _ _ = []
+-- makeTransManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
+-- makeTransManifolds g h ms
+--   = vsep . concat . concat
+--   $ map (\m -> map (makeTransManifold g h m) (mArgs m)) ms
+--
+-- makeTransManifold :: Grammar -> SerialMap -> Manifold -> Argument -> [Doc]
+-- makeTransManifold g h m (ArgCall k t (Just lang))
+--   | (lang /= (gLang g)) && (mLang m == Just (gLang g))
+--     = return . gTrans g $ TransManifoldDoc {
+--         transCallId = text' (MS.makeManifoldName k)
+--       , transCaller = text' (MS.findExecutor lang)
+--       , transPool = text' (MS.makePoolName lang)
+--       , transCallingPool = maybe "" text' (fmap MS.makePoolName (mLang m))
+--       , transArgs = map text' (mBoundVars m)
+--       , transUnpacker = unpackerName g h t
+--     }
+--   | otherwise = []
+-- makeTransManifold _ _ _ _ = []

@@ -31,22 +31,30 @@ asImport s = text' $ case DT.uncons s of
   _ -> error "Expected import to have at least length 1"
 
 g = Grammar {
-      gLang     = "py"
-    , gCall     = call'
-    , gFunction = function'
-    , gComment  = comment'
-    , gReturn   = return'
-    , gQuote    = dquotes
-    , gImport   = gImport'
-    , gTrue     = "True"
-    , gFalse    = "False"
-    , gList     = gList'
-    , gTuple    = gTuple'
-    , gRecord   = gRecord'
-    , gTrans    = transManifoldT
-    , gCis      = cisManifoldT
-    , gSource   = sourceManifoldT
+      gLang        = "py"
+    , gAssign      = assign' 
+    , gCall        = call'
+    , gFunction    = function'
+    , gComment     = comment'
+    , gReturn      = return'
+    , gQuote       = dquotes
+    , gImport      = import'
+    , gTrue        = "True"
+    , gFalse       = "False"
+    , gList        = list'
+    , gTuple       = tuple'
+    , gRecord      = record'
+    , gIndent      = indent'
+    , gTry         = pytry
+    , gUnpacker    = unpacker'
+    , gForeignCall = foreignCall'
+
   } where
+
+    indent' = indent 4
+
+    assign' l r = l <> " = " <> r 
+
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
@@ -60,33 +68,71 @@ g = Grammar {
     return' :: Doc -> Doc
     return' x = call' "return" [x]
 
-    gList' :: [Doc] -> Doc
-    gList' = list
+    list' :: [Doc] -> Doc
+    list' = list
 
-    gTuple' :: [Doc] -> Doc
-    gTuple' = tupled
+    tuple' :: [Doc] -> Doc
+    tuple' = tupled
 
-    gRecord' :: [(Doc,Doc)] -> Doc
-    gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
+    record' :: [(Doc,Doc)] -> Doc
+    record' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
     -- FIXME: qualify the calls (I don't have handling for this yet ...)
-    gImport' :: Doc -> Doc
-    gImport' s = [idoc|from ${s} import *|]
+    import' :: Doc -> Doc
+    import' s = [idoc|from ${s} import *|]
 
-sourceManifoldT :: SourceManifoldDoc -> Doc
-sourceManifoldT s = [idoc|
-# src manifold
-def ${srcCallId s}(${commaSep (srcBndArgs s)}):
-  return(${srcName s}(${commaSep (srcFunArgs s)}))
+    unpacker' :: UnpackerDoc -> Doc
+    unpacker' u = call' "_morloc_unpack"
+      [ udUnpacker u
+      , udValue u
+      , "mid=" <> dquotes (udMid u)
+      , "filename=" <> dquotes (udFile u)
+      ]
+
+    foreignCall' :: ForeignCallDoc -> Doc
+    foreignCall' f = call' ".morloc_foreign_call"
+      [ dquotes (fcdForeignProg f)
+      , dquotes (fcdForeignPool f)
+      , dquotes (fcdMid f)
+      , list' (fcdArgs f)
+      ]
+
+
+pytry :: TryDoc -> Doc
+pytry t = [idoc|
+try:
+    ${tryRet t} = ${tryCmd t}${tupled (tryArgs t)}
+except Exception as e:
+    sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
 
-transManifoldT :: TransManifoldDoc -> Doc
-transManifoldT t = [idoc| 
-# trans manifold 
-def ${transCallId t}(${commaSep (transArgs t)}):
+main
+  :: [Doc] -> [Manifold] -> SerialMap -> Doc
+main srcs manifolds hash = [idoc|#!/usr/bin/env python
+
+import sys
+import subprocess
+import json
+
+${vsep (map (gImport g) srcs)}
+
+
+def _morloc_unpack(unpacker, x, mid, filename):
+    try:
+        pyObj = unpacker(jsonString)
+    except Exception:
+        msg = "Error in %s::%s - JSON parse failure" % (filename, mid)
+        if(len(x) == 0):
+            msg += ": empty document"
+        else:
+            msg += ", bad document:\n%s" % str(x)
+        sys.exit(msg)
+    return(pyObj)
+
+def _morloc_foreign_call(interpreter, pool, mid, args):
     try:
         sysObj = subprocess.run(
-            ${args},
+            [interpreter, pool, mid, *args],
             capture_output=True,
             check=True
         )
@@ -99,45 +145,10 @@ def ${transCallId t}(${commaSep (transArgs t)}):
     if(len(jsonLog) > 0):
       print(jsonLog, file=sys.stderr)
 
-    try:
-        pyObj = ${transUnpacker t}(jsonString)
-    except json.decoder.JSONDecodeError as e:
-        msg = "Error in ${transCallingPool t}::${transCallId t} - JSON parse failure"
-        if(len(e.doc) == 0):
-            msg += ": empty document"
-        else:
-            msg += ", bad document:\n%s" % str(e.doc)
-        sys.exit(msg)
+    return(jsonString)
 
-    return(pyObj)
-|]
-  where
-    args = list ([
-          dquotes (transCaller t)
-        , dquotes (transPool t)
-        , dquotes (transCallId t)
-      ] ++ transArgs t)
-
-cisManifoldT :: CisManifoldDoc -> Doc
-cisManifoldT c = [idoc|
-# cis manifold
-def ${cisCallId c}(${commaSep (cisBndArgs c)}):
-  return(${cisName c}(${commaSep (cisFunArgs c)}))
-|]
-    
-main
-  :: [Doc] -> [Manifold] -> SerialMap -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env python
-
-import sys
-import subprocess
-import json
-
-${vsep (map (gImport g) srcs) <> line}
 
 ${makeSourceManifolds g hash manifolds}
-
-${makeTransManifolds g hash manifolds}
 
 ${makeCisManifolds g hash manifolds}
 
