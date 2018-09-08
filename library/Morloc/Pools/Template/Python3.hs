@@ -90,7 +90,7 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' ".morloc_foreign_call"
+    foreignCall' f = call' "_morloc_foreign_call"
       [ dquotes (fcdForeignProg f)
       , dquotes (fcdForeignPool f)
       , dquotes (fcdMid f)
@@ -117,7 +117,7 @@ import json
 ${vsep (map (gImport g) srcs)}
 
 
-def _morloc_unpack(unpacker, x, mid, filename):
+def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:
         pyObj = unpacker(jsonString)
     except Exception:
@@ -169,6 +169,6 @@ if __name__ == '__main__':
 
     args = sys.argv[2:]
 
-    print(function(*args))
+    print(packGeneric(function(*args)))
 
 |]

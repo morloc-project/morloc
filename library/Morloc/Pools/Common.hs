@@ -127,13 +127,14 @@ makeCisManifolds g h ms
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> Doc
 makeSourceManifold g h m
-  = (gFunction g)
-      (callIdToName m)
-      (take n (iArgs "x"))
-      (
-           vsep (zipWith3 unpack' (iArgs "a") (mArgs m) (iArgs "x")) <> line
-        <> (gCall g) (fname m) (take n (iArgs "a"))
-      )
+  =  ((gComment g) "source manifold") <> line
+  <> ((gFunction g)
+       (callIdToName m)
+       (take n (iArgs "x"))
+       (
+            vsep (zipWith3 unpack' (iArgs "a") (mArgs m) (iArgs "x")) <> line
+         <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+       ))
   where
     n = length (mArgs m)
 
@@ -149,10 +150,11 @@ makeSourceManifold g h m
 
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
 makeCisManifold g h m
-  = (gFunction g)
-      (callIdToName m)
-      (map text' (mBoundVars m))
-      ((gCall g) (fname m) (map makeArg (mArgs m)))
+  =  ((gComment g) "cis manifold") <> line
+  <> ((gFunction g)
+       (callIdToName m)
+       (map text' (mBoundVars m))
+       ((gReturn g) ((gCall g) (fname m) (map makeArg (mArgs m)))))
   where
     makeArg :: Argument -> Doc
     makeArg arg = case ( chooseUnpacker g h arg m
@@ -200,11 +202,18 @@ srcLangDoc m = case mLang m of
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
-writeArgument _ _ (ArgName n _  )  = text' n
-writeArgument g xs (ArgCall n t (Just l))
-  = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
+writeArgument g _ (ArgName n _  )  = text' n
 writeArgument g _ (ArgData d _  )  = writeData g d
 writeArgument _ _ (ArgPosi i _  )  = "x" <> int i
+writeArgument g xs (ArgCall n t (Just l))
+  | l == (gLang g) = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
+  | otherwise = (gForeignCall g) (ForeignCallDoc {
+        fcdForeignProg = text' (MS.findExecutor l)
+      , fcdForeignPool = text' (MS.makePoolName l)
+      , fcdMid = text' $ MS.makeManifoldName n
+      , fcdArgs = map text' xs
+      , fcdFile = text' (MS.makePoolName (gLang g))
+    })
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x

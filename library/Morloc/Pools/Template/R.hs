@@ -70,9 +70,11 @@ g = Grammar {
     import' s = call' "source" [dquotes s]
 
     try' :: TryDoc -> Doc
-    try' t = call' ".morloc_try" $
-      [tryCmd t] ++ (tryArgs t) ++ [ ".name=" <> dquotes (tryMid t)
-                                   , ".file=" <> dquotes (tryFile t)]
+    try' t = call' ".morloc_try"
+      $  ["f=" <> tryCmd t]
+      ++ [("args=" <> tuple' (tryArgs t))]
+      ++ [ ".name=" <> dquotes (tryMid t)
+         , ".file=" <> dquotes (tryFile t)]
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' ".morloc_unpack"
@@ -98,7 +100,7 @@ main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
 ${line <> vsep (map (gImport g) srcs)}
 
-.morloc_run <- function(f, ...){
+.morloc_run <- function(f, args){
   fails <- ""
   isOK <- TRUE
   warns <- list()
@@ -106,7 +108,7 @@ ${line <> vsep (map (gImport g) srcs)}
     {
       value <- withCallingHandlers(
         tryCatch(
-          f(...),
+          do.call(f, args),
           error = function(e) {
             fails <<- e$message;
             isOK <<- FALSE
@@ -134,31 +136,31 @@ ${line <> vsep (map (gImport g) srcs)}
   x <- .morloc_run(...)
   location <- sprintf("%s::%s", .pool, .name)
   if(! x$isOK){
-    cat("** R errors in ", location, file=stderr())
-    cat(x$fails, file=stderr())
-    stop(sprintf(msg, .pool, .name, x$fails))
+    cat(sprintf("** R errors in %s\n", location), file=stderr())
+    cat(x$fails, "\n", file=stderr())
+    stop(1)
   }
   if(! is.null(.log)){
     lines = c()
     if(length(x$warns) > 0){
-      cat("** R warnings in ", location, file=stderr())
+      cat(sprintf("** R warnings in %s\n", location), file=stderr())
       cat(paste(unlist(x$warns), sep="\n"), file=stderr())
     }
     if(length(x$notes) > 0){
-      cat("** R messages in ", location, file=stderr())
+      cat(sprintf("** R messages in %s\n", location), file=stderr())
       cat(paste(unlist(x$notes), sep="\n"), file=stderr())
     }
   }
   x$value
 }
 
-.morloc_unpack <- function(x, unpacker, ...){
-  x <- .morloc_try(unpacker, x, ...)  
+.morloc_unpack <- function(unpacker, x, ...){
+  x <- .morloc_try(f=unpacker, args=list(x), ...)  
   return(x)
 }
 
 .morloc_foreign_call <- function(cmd, args, .pool, .name){
-  .morloc_try(.system2(cmd, args, stdout=TRUE), .pool=.pool, .pool=.pool)
+  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .pool=.pool)
 }
 
 
