@@ -148,14 +148,36 @@ makeSourceManifold g h m
 
 
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
-makeCisManifold g s m
+makeCisManifold g h m
   = (gFunction g)
       (callIdToName m)
       (map text' (mBoundVars m))
       ((gCall g) (fname m) (map makeArg (mArgs m)))
   where
     makeArg :: Argument -> Doc
-    makeArg a = writeArgument g (mBoundVars m) a
+    makeArg arg = case ( chooseUnpacker g h arg m
+                       , writeArgument g (mBoundVars m) arg ) of
+      (Just p, x) -> (gCall g) p [x]
+      (Nothing, x) -> x
+
+chooseUnpacker :: Grammar -> SerialMap -> Argument -> Manifold -> Maybe Doc 
+chooseUnpacker g h (ArgName n t) m =
+  if
+    elem n (mBoundVars m)
+  then
+    Just (unpackerName g h t)
+  else
+    Nothing -- currently manifold parameters are always JSON data from the user
+chooseUnpacker g h (ArgCall _ t (Just l)) m =
+  -- output is coming from another manifold inside this language
+  if
+    l == (gLang g)
+  then
+    Nothing 
+  else
+    Just (unpackerName g h t)
+chooseUnpacker g _ (ArgData d _) _ = Nothing
+chooseUnpacker g h (ArgPosi _ t) _ = Just (unpackerName g h t)
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
@@ -215,74 +237,6 @@ getUsedManifolds g ms = map callIdToName (filter isBuilt ms)
 
 -- nameArgs :: [a] -> [Doc]
 -- nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
---
--- iArgs :: Int -> [Doc]
--- iArgs i = map ((<>) "x") (map int [1 .. i])
 
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
-
--- castArgsPosi :: Grammar -> SerialMap -> Manifold -> [Doc]
--- castArgsPosi g h m = map cast (mArgs m)
---   where
---     cast (ArgPosi i t) = unpack g h t ("x" <> int i)
---     cast _ = error "Expected only user arguments"
---
--- castArgsName :: Grammar -> SerialMap -> Manifold -> [Doc]
--- castArgsName g h m = map (\a -> (pack a) (cast a)) (mArgs m)
---   where
---     cast arg = writeArgument g (mBoundVars m) arg
---     pack arg d = case arg of
---       (ArgName _ t) -> if (mCalled m) && not (mSourced m)
---                        then d
---                        else unpack g h t d
---       _ -> d
-
--- makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
--- makeCisManifolds g h ms
---   = vsep . concat $ map (makeCisManifold g h) ms
---
--- makeCisManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
--- makeCisManifold g h m = case determineManifoldClass g m of
---   Cis -> return $ (gCis g) (CisManifoldDoc {
---         cisCallId = callIdToName m
---       , cisName = text' (mCallName m)
---       , cisBndArgs = map text' (mBoundVars m)
---       , cisFunArgs = castArgsName g h m
---       , cisPool = text' (MS.makePoolName (gLang g))
---     })
---   _ -> []
-
--- makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
--- makeSourceManifolds g h ms
---   = vsep . concat $ map (makeSourceManifold g h) ms
---
--- makeSourceManifold :: Grammar -> SerialMap -> Manifold -> [Doc]
--- makeSourceManifold g h m = case determineManifoldClass g m of
---   Source -> return $ (gSource g) (SourceManifoldDoc {
---         srcCallId = callIdToName m
---       , srcName = text' (mCallName m)
---       , srcBndArgs = iArgs (length (mArgs m))
---       , srcFunArgs = castArgsPosi g h m
---       , srcPool = text' (MS.makePoolName (gLang g))
---     })
---   _ -> []
-
--- makeTransManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
--- makeTransManifolds g h ms
---   = vsep . concat . concat
---   $ map (\m -> map (makeTransManifold g h m) (mArgs m)) ms
---
--- makeTransManifold :: Grammar -> SerialMap -> Manifold -> Argument -> [Doc]
--- makeTransManifold g h m (ArgCall k t (Just lang))
---   | (lang /= (gLang g)) && (mLang m == Just (gLang g))
---     = return . gTrans g $ TransManifoldDoc {
---         transCallId = text' (MS.makeManifoldName k)
---       , transCaller = text' (MS.findExecutor lang)
---       , transPool = text' (MS.makePoolName lang)
---       , transCallingPool = maybe "" text' (fmap MS.makePoolName (mLang m))
---       , transArgs = map text' (mBoundVars m)
---       , transUnpacker = unpackerName g h t
---     }
---   | otherwise = []
--- makeTransManifold _ _ _ _ = []
