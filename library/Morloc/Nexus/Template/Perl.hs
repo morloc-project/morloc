@@ -98,7 +98,7 @@ sub dispatch {
     if(exists($cmds{$cmd})){
         $result = $cmds{$cmd}(@_);
     } else {
-        print STDERR "Command '$cmd' not found";
+        print STDERR "Command '$cmd' not found\n";
         &usage();
     }
 
