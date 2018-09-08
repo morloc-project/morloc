@@ -191,95 +191,101 @@ SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
        ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
        ?argname ?argcall_id ?argdata_id
 WHERE {
-    {
-        ?call_id rdf:type mlc:call ;
-                rdf:value ?fid ;
-                ?element ?arg .
-        FILTER(regex(str(?element), "_[0-9]+$", "i"))
-        ?fid rdf:type mlc:name ;
-             rdf:value ?morloc_name .
-    } UNION {
-        # Find exported values
-        ?call_id rdf:type mlc:export ;
+    SELECT *
+    WHERE {
+        {
+            ?call_id rdf:type mlc:call ;
+                    rdf:value ?fid ;
+                    ?element ?arg .
+            FILTER(regex(str(?element), "_[0-9]+$", "i"))
+            ?fid rdf:type mlc:name ;
                  rdf:value ?morloc_name .
-        # This is exported from the global environment
-        ?script_id rdf:type mlc:script ;
-                   rdf:value "<stdin>" ;
-                   ?script_element ?call_id .
-        FILTER(regex(str(?script_element), "_[0-9]+$", "i"))
-        ?typedec rdf:type mlc:typeDeclaration ;
-                 mlc:lang "Morloc" ;
-                 mlc:lhs ?morloc_name ;
-                 mlc:rhs ?typeid .
-        ?typeid ?element ?arg;
-        FILTER(regex(str(?element), "_[0-9]+$", "i"))
-        # Keep only the values that are NOT calls (to avoid duplication)
-        MINUS {
-            ?call_id rdf:type mlc:call .
-        }
-    }
-    BIND(bound(?fid) AS ?called)
-    # Determine whether this is exported
-    OPTIONAL {
-        ?e rdf:type mlc:export ;
-           rdf:value ?morloc_name .
-    }
-    BIND(bound(?e) AS ?exported)
-    # Find the bound variables
-    OPTIONAL {
-        ?datadec rdf:type mlc:dataDeclaration ;
-                 mlc:lhs ?composition ;
-                 mlc:rhs ?call_id ;
-                 ?delement ?bnd_id .
-        FILTER(regex(str(?delement), "_[0-9]+$", "i"))
-        ?bnd_id rdf:type mlc:name ;
-               rdf:value ?bnd . # bound variables
-    }
-    # Find the source language
-    OPTIONAL {
-        ?source_id rdf:type mlc:source ;
-                   mlc:lang ?source_lang ;
-                   mlc:import ?import_id .
-        ?import_id mlc:name ?source_name ;
-                   mlc:alias ?morloc_name .
-        OPTIONAL {
-            ?source_id mlc:path ?source_path .
-        }
-    }
-    BIND(bound(?source_id) AS ?sourced)
-    # Find language-specific type signature, packer, and unpacker
-    OPTIONAL {
-       ?lang_typedec rdf:type mlc:typeDeclaration ;
-                     mlc:lang ?source_lang ;
+        } UNION {
+            # Find exported values
+            ?call_id rdf:type mlc:export ;
+                     rdf:value ?morloc_name .
+            # This is exported from the global environment
+            ?script_id rdf:type mlc:script ;
+                       rdf:value "<stdin>" ;
+                       ?script_element ?call_id .
+            FILTER(regex(str(?script_element), "_[0-9]+$", "i"))
+            ?typedec rdf:type mlc:typeDeclaration ;
+                     mlc:lang "Morloc" ;
                      mlc:lhs ?morloc_name ;
-                     mlc:rhs ?lang_typeid .
-       FILTER(!regex(str(?source_lang), "Morloc", "i"))
-       ?lang_typeid ?element ?lang_type_id .
+                     mlc:rhs ?typeid .
+            ?typeid ?element ?arg;
+            FILTER(regex(str(?element), "_[0-9]+$", "i"))
+            # Keep only the values that are NOT calls (to avoid duplication)
+            MINUS {
+                ?call_id rdf:type mlc:call .
+            }
+        }
+        BIND(bound(?fid) AS ?called)
+        # Determine whether this is exported
+        OPTIONAL {
+            ?e rdf:type mlc:export ;
+               rdf:value ?morloc_name .
+        }
+        BIND(bound(?e) AS ?exported)
+        # Find the bound variables
+        OPTIONAL {
+            ?datadec rdf:type mlc:dataDeclaration ;
+                     mlc:lhs ?composition ;
+                     mlc:rhs ?call_id ;
+                     ?bnd_element ?bnd_id .
+            FILTER(regex(str(?bnd_element), "_[0-9]+$", "i"))
+            ?bnd_id rdf:type mlc:name ;
+                   rdf:value ?bnd . # bound variables
+        }
+        # Find the source language
+        OPTIONAL {
+            ?source_id rdf:type mlc:source ;
+                       mlc:lang ?source_lang ;
+                       mlc:import ?import_id .
+            ?import_id mlc:name ?source_name ;
+                       mlc:alias ?morloc_name .
+            OPTIONAL {
+                ?source_id mlc:path ?source_path .
+            }
+        }
+        BIND(bound(?source_id) AS ?sourced)
+        # Find language-specific type signature, packer, and unpacker
+        OPTIONAL {
+           ?lang_typedec rdf:type mlc:typeDeclaration ;
+                         mlc:lang ?source_lang ;
+                         mlc:lhs ?morloc_name ;
+                         mlc:rhs ?lang_typeid .
+           FILTER(!regex(str(?source_lang), "Morloc", "i"))
+           ?lang_typeid ?element ?lang_type_id .
+        }
+        # Find the type delcaration ID
+        OPTIONAL {
+            ?type_id rdf:type mlc:typeDeclaration ;
+                     mlc:lang "Morloc" ;
+                     mlc:lhs ?morloc_name .
+        }
+        # A argument must be one of the following:
+        #  1. raw data
+        OPTIONAL {
+            ?arg rdf:type mlc:data.
+            BIND(?arg AS ?argdata_id)
+        }
+        #  2. a function call
+        OPTIONAL {
+            ?arg rdf:type mlc:call .
+            BIND(?arg AS ?argcall_id)
+        }
+        #  3. a name - the name can only come from one of the bound variables
+        OPTIONAL {
+            FILTER(bound(?arg))
+            ?arg rdf:type mlc:name ;
+                 rdf:value ?argname .
+        }
     }
-    # Find the type delcaration ID
-    OPTIONAL {
-        ?type_id rdf:type mlc:typeDeclaration ;
-                 mlc:lang "Morloc" ;
-                 mlc:lhs ?morloc_name .
-    }
-    # A argument must be one of the following:
-    #  1. raw data
-    OPTIONAL {
-        ?arg rdf:type mlc:data.
-        BIND(?arg AS ?argdata_id)
-    }
-    #  2. a function call
-    OPTIONAL {
-        ?arg rdf:type mlc:call .
-        BIND(?arg AS ?argcall_id)
-    }
-    #  3. a name - the name can only come from one of the bound variables
-    OPTIONAL {
-        FILTER(bound(?arg))
-        ?arg rdf:type mlc:name ;
-             rdf:value ?argname .
-    }
+    ORDER BY ?bnd_element 
 }
-GROUP BY ?call_id ?type_id ?called ?composition ?source_lang ?source_path ?sourced ?exported ?lang_type_id ?morloc_name ?element ?argname ?argcall_id ?argdata_id ?source_name
-ORDER BY ?call_id ?element
+GROUP BY ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
+         ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
+         ?argname ?argcall_id ?argdata_id
+ORDER BY ?callid ?element 
 |]
