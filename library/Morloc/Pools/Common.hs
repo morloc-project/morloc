@@ -148,19 +148,48 @@ makeSourceManifold g h m
           }))
 
 
+-- makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
+-- makeCisManifold g h m
+--   =  ((gComment g) "cis manifold") <> line
+--   <> ((gFunction g)
+--        (callIdToName m)
+--        (map text' (mBoundVars m))
+--        ((gReturn g) ((gCall g) (fname m) (map makeArg (mArgs m)))))
+--   where
+--     makeArg :: Argument -> Doc
+--     makeArg arg = case ( chooseUnpacker g h arg m
+--                        , writeArgument g (mBoundVars m) arg ) of
+--       (Just p, x) -> (gCall g) p [x]
+--       (Nothing, x) -> x
+
+
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
 makeCisManifold g h m
   =  ((gComment g) "cis manifold") <> line
   <> ((gFunction g)
        (callIdToName m)
        (map text' (mBoundVars m))
-       ((gReturn g) ((gCall g) (fname m) (map makeArg (mArgs m)))))
+       (
+            vsep (zipWith3 makeArg' (iArgs "a") (mArgs m) (iArgs "x")) <> line
+         <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+       ))
   where
-    makeArg :: Argument -> Doc
-    makeArg arg = case ( chooseUnpacker g h arg m
-                       , writeArgument g (mBoundVars m) arg ) of
-      (Just p, x) -> (gCall g) p [x]
-      (Nothing, x) -> x
+    n = length (mArgs m)
+
+    makeArg' :: Doc -> Argument -> Doc -> Doc
+    makeArg' lhs arg x = case ( chooseUnpacker g h arg m
+                              , writeArgument g (mBoundVars m) arg ) of
+      (Just p, x) -> (gAssign g) lhs (unpack' p x)
+      (Nothing, x) -> (gAssign g) lhs x
+
+    unpack' :: Doc -> Doc -> Doc
+    unpack' p x
+      = ((gUnpacker g) (UnpackerDoc {
+              udValue = x   
+            , udUnpacker = p
+            , udMid = callIdToName m
+            , udFile = text' (MS.makePoolName (gLang g))
+          }))
 
 chooseUnpacker :: Grammar -> SerialMap -> Argument -> Manifold -> Maybe Doc 
 chooseUnpacker g h (ArgName n t) m =

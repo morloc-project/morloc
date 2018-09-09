@@ -1,6 +1,8 @@
 Next
 ----
 
+ * Add error handling and reporting to pools
+
 0.15.0 [2018.09.05]
 -------------------
 
