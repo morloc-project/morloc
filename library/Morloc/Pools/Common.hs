@@ -124,10 +124,10 @@ makeCisManifolds g h ms
       Cis -> return $ makeCisManifold g h m
       _ -> []
 
-
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> Doc
 makeSourceManifold g h m
   =  ((gComment g) "source manifold") <> line
+  <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mType m))) <> line
   <> ((gFunction g)
        (callIdToName m)
        (take n (iArgs "x"))
@@ -140,41 +140,31 @@ makeSourceManifold g h m
 
     unpack' :: Doc -> Argument -> Doc -> Doc
     unpack' lhs (ArgPosi _ t) x
-      = (gAssign g) lhs ((gUnpacker g) (UnpackerDoc {
+      = (gComment g) (maybe "undefined type" mshow t) <> line <>
+        (gAssign g) lhs ((gUnpacker g) (UnpackerDoc {
               udValue = x   
             , udUnpacker = unpackerName g h t
             , udMid = callIdToName m
             , udFile = text' (MS.makePoolName (gLang g))
           }))
 
-
--- makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
--- makeCisManifold g h m
---   =  ((gComment g) "cis manifold") <> line
---   <> ((gFunction g)
---        (callIdToName m)
---        (map text' (mBoundVars m))
---        ((gReturn g) ((gCall g) (fname m) (map makeArg (mArgs m)))))
---   where
---     makeArg :: Argument -> Doc
---     makeArg arg = case ( chooseUnpacker g h arg m
---                        , writeArgument g (mBoundVars m) arg ) of
---       (Just p, x) -> (gCall g) p [x]
---       (Nothing, x) -> x
-
-
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
 makeCisManifold g h m
   =  ((gComment g) "cis manifold") <> line
+  <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mType m))) <> line
   <> ((gFunction g)
        (callIdToName m)
        (map text' (mBoundVars m))
        (
-            vsep (zipWith3 makeArg' (iArgs "a") (mArgs m) (iArgs "x")) <> line
+            vsep (zipWith3 makeArg (iArgs "a") (mArgs m) (iArgs "x")) <> line
          <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
        ))
   where
     n = length (mArgs m)
+
+    makeArg :: Doc -> Argument -> Doc -> Doc
+    makeArg lhs a x = (gComment g) (maybe "undefined type" mshow (argType a)) <> line <>
+                      makeArg' lhs a x
 
     makeArg' :: Doc -> Argument -> Doc -> Doc
     makeArg' lhs arg x = case ( chooseUnpacker g h arg m
@@ -209,6 +199,12 @@ chooseUnpacker g h (ArgCall _ t (Just l)) m =
     Just (unpackerName g h t)
 chooseUnpacker g _ (ArgData d _) _ = Nothing
 chooseUnpacker g h (ArgPosi _ t) _ = Just (unpackerName g h t)
+
+argType :: Argument -> Maybe MType
+argType (ArgName _ t)   = t
+argType (ArgCall _ t _) = t
+argType (ArgData _ t)   = t
+argType (ArgPosi _ t)   = t
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
