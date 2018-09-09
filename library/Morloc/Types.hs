@@ -87,6 +87,7 @@ data MData
 data MType
   = MDataType Name [MType]
   | MFuncType [MType] MType -- TODO: add constraints
+  | MDeclType Name [Name] Lang MType
   deriving(Show, Eq, Ord)
 
 data SerialMap = SerialMap {
