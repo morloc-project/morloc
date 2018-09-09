@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Types
 Description : All types and datastructures
@@ -13,6 +15,7 @@ module Morloc.Types (
   , Argument(..)
   , MData(..)
   , MType(..)
+  , mData2mType -- TODO: this should no be here
   , MTypeMeta(..)
   , MShow(..)
   , SerialMap(..)
@@ -97,6 +100,31 @@ data MTypeMeta = MTypeMeta {
     , metaLang :: Maybe Lang
   }
   deriving(Show, Eq, Ord)
+
+emptyMeta = MTypeMeta {
+      metaName = Nothing
+    , metaProp = []
+    , metaLang = Nothing
+  }
+
+mData2mType :: MData -> MType
+mData2mType (Num' _) = MDataType emptyMeta "Number" []
+mData2mType (Str' _) = MDataType emptyMeta "String" []
+mData2mType (Log' _) = MDataType emptyMeta "Bool" []
+mData2mType (Tup' xs) = MDataType emptyMeta "Tuple" (map mData2mType xs)
+mData2mType (Rec' xs) = MDataType emptyMeta "Tuple" (map record xs) where
+  record (key, value) = MDataType emptyMeta "Tuple" [ MDataType emptyMeta "String" []
+                                                    , mData2mType value]
+mData2mType (Lst' xs) = MDataType emptyMeta "List" [listType xs] where
+  listType [] = MDataType emptyMeta "*" [] -- cannot determine type
+  listType [x] = mData2mType x
+  listType (x:xs) =
+    if
+      all (\a -> mData2mType a == mData2mType x) xs
+    then
+      mData2mType x
+    else
+    error "Lists must be homogenous"
 
 data SerialMap = SerialMap {
       serialLang :: Lang

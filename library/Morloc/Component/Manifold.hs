@@ -38,7 +38,7 @@ fromSparqlDb ep = do
            . setLangs
            . map setArgs
            . DLE.groupSort
-           . propadateBoundVariables
+           . propagateBoundVariables
            . map (asTuple typemap datamap) 
            ) mandata
 
@@ -78,7 +78,7 @@ asTuple typemap datamap [ Just callId'
       }
   , makeArgument (
       Nothing -- to set the language, I need to look up the argname
-    , langType' >>= (flip Map.lookup) typemap
+    , detectArgumentType typemap datamap argcall_id' argdata_id'
     , argname'
     , argcall_id'
     , argdata_id' >>= (flip Map.lookup) datamap
@@ -86,6 +86,16 @@ asTuple typemap datamap [ Just callId'
     )
   )
 asTuple _ _ x = error ("Unexpected SPARQL row:\n" ++ show x)
+
+detectArgumentType
+  :: Map.Map Key MType
+  -> Map.Map Key MData
+  -> Maybe Key
+  -> Maybe Key
+  -> Maybe MType
+detectArgumentType h _ (Just callid) _ = Map.lookup callid h
+detectArgumentType _ d _ (Just dataid) = fmap mData2mType (Map.lookup dataid d)
+detectArgumentType _ _ _ _ = Nothing
 
 makeArgument
   :: ( Maybe Lang -- lang
@@ -127,15 +137,16 @@ setLangs ms = map setArgs ms' where
   findLang :: Key -> [Manifold] -> Maybe Lang
   findLang k ms = case filter (\m -> mCallId m == k) ms of
     [m] -> mLang m
-    _ -> error "Could not find language of foreign call" 
+    [] -> error ("Key not found in manifold list: " ++ show k)
+    _ -> error ("Multiple matches in manifold list to the key:" ++ show k) 
 
   hash :: Map.Map Name Lang
   hash = MU.spreadAttr (map (\m -> ( mMorlocName m
                                    , mComposition m
                                    , mLang m)) ms)
 
-propadateBoundVariables :: [(Manifold, Argument)] -> [(Manifold, Argument)]
-propadateBoundVariables ms = map setBoundVars ms 
+propagateBoundVariables :: [(Manifold, Argument)] -> [(Manifold, Argument)]
+propagateBoundVariables ms = map setBoundVars ms 
   where
     setBoundVars :: (Manifold, Argument) -> (Manifold, Argument)
     setBoundVars (m, a) = (m { mBoundVars = maybe [] id (Map.lookup (mCallId m) hash) }, a)
@@ -288,5 +299,5 @@ WHERE {
 GROUP BY ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
          ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
          ?argname ?argcall_id ?argdata_id
-ORDER BY ?callid ?element 
+ORDER BY ?call_id ?element 
 |]

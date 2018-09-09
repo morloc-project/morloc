@@ -199,6 +199,7 @@ chooseUnpacker g h (ArgCall _ t (Just l)) m =
     Just (unpackerName g h t)
 chooseUnpacker g _ (ArgData d _) _ = Nothing
 chooseUnpacker g h (ArgPosi _ t) _ = Just (unpackerName g h t)
+chooseUnpacker _ _ a m = error ("Could not find unpacker:\n" ++ show a ++ "\n" ++ show m) 
 
 argType :: Argument -> Maybe MType
 argType (ArgName _ t)   = t
