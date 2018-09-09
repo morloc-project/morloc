@@ -70,7 +70,7 @@ data Manifold = Manifold {
 data Argument
   = ArgName Name (Maybe MType)
   -- ^ Morloc variables that are defined in scope
-  | ArgCall Key (Maybe MType) (Maybe Lang)
+  | ArgCall Manifold
   -- ^ A call to some function
   | ArgData MData (Maybe MType)
   -- ^ Raw data defined in one of the Morloc internal types

@@ -122,10 +122,10 @@ def _morloc_unpack(unpacker, jsonString, mid, filename):
         pyObj = unpacker(jsonString)
     except Exception:
         msg = "Error in %s::%s - JSON parse failure" % (filename, mid)
-        if(len(x) == 0):
+        if(len(jsonString) == 0):
             msg += ": empty document"
         else:
-            msg += ", bad document:\n%s" % str(x)
+            msg += ", bad document:\n%s" % str(jsonString)
         sys.exit(msg)
     return(pyObj)
 

@@ -35,14 +35,18 @@ fromSparqlDb ep = do
   datamap <- MCD.fromSparqlDb ep
   mandata <- sparqlQuery ep
   return $ ( unroll
+           . setCalls
            . setLangs
-           . map setArgs
            . DLE.groupSort
            . propagateBoundVariables
            . map (asTuple typemap datamap) 
            ) mandata
 
-asTuple :: Map.Map Key MType -> Map.Map Key MData -> [Maybe DT.Text] -> (Manifold, Argument)
+asTuple
+  :: Map.Map Key MType
+  -> Map.Map Key MData
+  -> [Maybe DT.Text]
+  -> (Manifold, Either Key Argument)
 asTuple typemap datamap [ Just callId'
                         , typeId'
                         , element'
@@ -78,7 +82,7 @@ asTuple typemap datamap [ Just callId'
       }
   , makeArgument (
       Nothing -- to set the language, I need to look up the argname
-    , detectArgumentType typemap datamap argcall_id' argdata_id'
+    , detectArgumentType datamap argdata_id'
     , argname'
     , argcall_id'
     , argdata_id' >>= (flip Map.lookup) datamap
@@ -88,75 +92,64 @@ asTuple typemap datamap [ Just callId'
 asTuple _ _ x = error ("Unexpected SPARQL row:\n" ++ show x)
 
 detectArgumentType
-  :: Map.Map Key MType
-  -> Map.Map Key MData
-  -> Maybe Key
+  :: Map.Map Key MData
   -> Maybe Key
   -> Maybe MType
-detectArgumentType h _ (Just callid) _ = Map.lookup callid h
-detectArgumentType _ d _ (Just dataid) = fmap mData2mType (Map.lookup dataid d)
-detectArgumentType _ _ _ _ = Nothing
+detectArgumentType d (Just dataid) = fmap mData2mType (Map.lookup dataid d)
+detectArgumentType _ _ = Nothing
+
+setCalls :: [(Manifold, [Either Key Argument])] -> [Manifold]
+setCalls xs = map (\(m, args) -> m { mArgs = map (set hash) args }) xs
+  where
+    set :: Map.Map Key Manifold -> Either Key Argument -> Argument
+    set h (Left key) = case Map.lookup key h of
+      (Just m) -> ArgCall m
+      Nothing -> error "Call to non-existing manifold"
+    set _ (Right a) = a
+
+    hash :: Map.Map Key Manifold
+    hash = Map.fromList $ zip (map (mCallId . fst) xs) (map fst xs)
+
+setLangs :: [(Manifold, a)] -> [(Manifold, a)]
+setLangs ms = map (setLang hash) ms
+  where
+    setLang :: (Map.Map Name Lang) -> (Manifold, a) -> (Manifold, a)
+    setLang h (m, a) = (m { mLang = Map.lookup (mMorlocName m) h }, a)
+
+    hash :: Map.Map Name Lang
+    hash = MU.spreadAttr (map (\(m,_) -> ( mMorlocName m
+                                         , mComposition m
+                                         , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Lang -- lang
-     , Maybe MType -- language-specific type
-     , Maybe Name -- argument name (if it is a bound argument)
-     , Maybe Key  -- argument callId (if it is a function call)
-     , Maybe MData -- argument data (if this is data)
+  :: ( Maybe Lang    -- lang
+     , Maybe MType   -- language-specific type
+     , Maybe Name    -- argument name (if it is a bound argument)
+     , Maybe Key     -- argument callId (if it is a function call)
+     , Maybe MData   -- argument data (if this is data)
      , Maybe DT.Text -- the element (rdf:_<num>)
      )
-  -> Argument
-makeArgument (_ , t, Just x  , _       , _       , _ ) = ArgName x t
-makeArgument (l , t, _       , Just x  , _       , _ ) = ArgCall x t l
-makeArgument (_ , t, _       , _       , Just x  , _ ) = ArgData x t
+  -> Either Key Argument
+makeArgument (_ , t, Just x  , _       , _       , _ ) = Right $ ArgName x t
+makeArgument (_ , _, _       , Just x  , _       , _ ) = Left x
+makeArgument (_ , t, _       , _       , Just x  , _ ) = Right $ ArgData x t
 makeArgument (_ , t, Nothing , Nothing , Nothing , Just e) =
   case (DT.stripPrefix (M3.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
-    Just i -> ArgPosi i t
+    Just i -> Right $ ArgPosi i t
     _ -> error ("Unexpected value for element: " ++ show e)
 
-setArgs
-  :: (Manifold, [Argument])
-  -> Manifold
-setArgs (m, xs) = m { mArgs = xs }
-
-setLangs :: [Manifold] -> [Manifold]
-setLangs ms = map setArgs ms' where
-
-  ms' = map (setLang hash) ms
-
-  setLang :: (Map.Map Name Lang) -> Manifold -> Manifold
-  setLang h m = m { mLang = Map.lookup (mMorlocName m) h }
-
-  setArgs m = m { mArgs = map setArgLang (mArgs m) } 
-
-  setArgLang :: Argument -> Argument
-  setArgLang arg = case arg of
-    (ArgCall k t _) -> ArgCall k t (findLang k ms')
-    _ -> arg
-
-  findLang :: Key -> [Manifold] -> Maybe Lang
-  findLang k ms = case filter (\m -> mCallId m == k) ms of
-    [m] -> mLang m
-    [] -> error ("Key not found in manifold list: " ++ show k)
-    _ -> error ("Multiple matches in manifold list to the key:" ++ show k) 
-
-  hash :: Map.Map Name Lang
-  hash = MU.spreadAttr (map (\m -> ( mMorlocName m
-                                   , mComposition m
-                                   , mLang m)) ms)
-
-propagateBoundVariables :: [(Manifold, Argument)] -> [(Manifold, Argument)]
+propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
 propagateBoundVariables ms = map setBoundVars ms 
   where
-    setBoundVars :: (Manifold, Argument) -> (Manifold, Argument)
+    setBoundVars :: (Manifold, Either Key Argument) -> (Manifold, Either Key Argument)
     setBoundVars (m, a) = (m { mBoundVars = maybe [] id (Map.lookup (mCallId m) hash) }, a)
 
     -- map from mcallId to mBoundVars
     hash :: Map.Map Key [Name]
     hash = MU.spreadAttr (map toTriple ms)
 
-    toTriple :: (Manifold, Argument) -> (Key, Maybe Key, Maybe [Name])
-    toTriple (m, ArgCall k _ _) = (mCallId m, Just k, toMaybe (mBoundVars m))
+    toTriple :: (Manifold, Either Key Argument) -> (Key, Maybe Key, Maybe [Name])
+    toTriple (m, Left k) = (mCallId m, Just k, toMaybe (mBoundVars m))
     toTriple (m, _) = (mCallId m, Nothing, toMaybe (mBoundVars m))
 
     toMaybe :: [a] -> Maybe [a]

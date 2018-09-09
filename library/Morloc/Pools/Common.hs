@@ -189,23 +189,23 @@ chooseUnpacker g h (ArgName n t) m =
     Just (unpackerName g h t)
   else
     Nothing -- currently manifold parameters are always JSON data from the user
-chooseUnpacker g h (ArgCall _ t (Just l)) m =
+chooseUnpacker g h (ArgCall m) _ =
   -- output is coming from another manifold inside this language
   if
-    l == (gLang g)
+    (mLang m) == (Just (gLang g))
   then
     Nothing 
   else
-    Just (unpackerName g h t)
+    Just (unpackerName g h (mType m))
 chooseUnpacker g _ (ArgData d _) _ = Nothing
 chooseUnpacker g h (ArgPosi _ t) _ = Just (unpackerName g h t)
 chooseUnpacker _ _ a m = error ("Could not find unpacker:\n" ++ show a ++ "\n" ++ show m) 
 
 argType :: Argument -> Maybe MType
-argType (ArgName _ t)   = t
-argType (ArgCall _ t _) = t
-argType (ArgData _ t)   = t
-argType (ArgPosi _ t)   = t
+argType (ArgName _ t) = t
+argType (ArgCall   m) = mType m
+argType (ArgData _ t) = t
+argType (ArgPosi _ t) = t
 
 commaSep :: [Doc] -> Doc
 commaSep = hcat . punctuate ", "
@@ -231,15 +231,21 @@ writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
 writeArgument g _ (ArgName n _  )  = text' n
 writeArgument g _ (ArgData d _  )  = writeData g d
 writeArgument _ _ (ArgPosi i _  )  = "x" <> int i
-writeArgument g xs (ArgCall n t (Just l))
-  | l == (gLang g) = (gCall g) (text' $ MS.makeManifoldName n) (map text' xs)
-  | otherwise = (gForeignCall g) (ForeignCallDoc {
-        fcdForeignProg = text' (MS.findExecutor l)
-      , fcdForeignPool = text' (MS.makePoolName l)
-      , fcdMid = text' $ MS.makeManifoldName n
-      , fcdArgs = map text' xs
-      , fcdFile = text' (MS.makePoolName (gLang g))
-    })
+writeArgument g xs (ArgCall m) = case mLang m of
+  (Just l) ->
+    if
+      l == gLang g
+    then
+      (gCall g) (fname m) (map text' xs)
+    else
+      (gForeignCall g) (ForeignCallDoc {
+            fcdForeignProg = text' (MS.findExecutor l)
+          , fcdForeignPool = text' (MS.makePoolName l)
+          , fcdMid = text' $ MS.makeManifoldName (mCallId m)
+          , fcdArgs = map text' xs
+          , fcdFile = text' (MS.makePoolName (gLang g))
+        })
+  Nothing -> error ("No language set on: " ++ show m)
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x
@@ -269,9 +275,6 @@ getUsedManifolds g ms = map callIdToName (filter isBuilt ms)
       Cis -> True
       Source -> True
       _ -> False
-
--- nameArgs :: [a] -> [Doc]
--- nameArgs xs = map ((<>) "x") (map int [0 .. (length xs - 1)])
 
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
