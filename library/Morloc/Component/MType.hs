@@ -36,6 +36,12 @@ toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((_, Just v, _), xs)) = MDataType v (map (toMType h) xs)
   toMType' (Just ((_, _, Just o), xs)) = MFuncType (map (toMType h) xs) (toMType h o)
 
+instance MShow MType where
+  mshow (MDataType n []) = text' n
+  mshow (MDataType n ts) = parens $ hsep (text' n:(map mshow ts))
+  mshow (MFuncType ts o) = parens $
+    (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
+
 sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 sparqlQuery = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>

@@ -13,6 +13,7 @@ module Morloc.Types (
   , Argument(..)
   , MData(..)
   , MType(..)
+  , MShow(..)
   , SerialMap(..)
   , SparqlEndPoint  
   , Text
@@ -29,6 +30,11 @@ module Morloc.Types (
 
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as Map
+import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+
+-- | Write into Morloc code
+class MShow a where
+  mshow :: a -> Doc
 
 type Text = DT.Text
 

@@ -48,6 +48,15 @@ toMData h k = toMData' (Map.lookup k h) where
   -- shit happens
   toMData' _ = error "Unexpected type"
 
+instance MShow MData where
+  mshow (Num' x  ) = text' x
+  mshow (Str' x  ) = text' x
+  mshow (Log' x  ) = text' $ DT.pack (show x)
+  mshow (Lst' xs ) = list (map mshow xs)
+  mshow (Tup' xs ) = tupled (map mshow xs)
+  mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")
+                              (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
+
 sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 sparqlQuery = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
