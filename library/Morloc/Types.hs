@@ -13,6 +13,7 @@ module Morloc.Types (
   , Argument(..)
   , MData(..)
   , MType(..)
+  , MTypeMeta(..)
   , MShow(..)
   , SerialMap(..)
   , SparqlEndPoint  
@@ -85,9 +86,16 @@ data MData
   deriving(Show, Eq, Ord)
 
 data MType
-  = MDataType Name [MType]
-  | MFuncType [MType] MType -- TODO: add constraints
-  | MDeclType Name [Name] Lang MType
+  = MDataType MTypeMeta Name [MType]
+  | MFuncType MTypeMeta [MType] MType
+  deriving(Show, Eq, Ord)
+
+-- TODO: add constraints
+data MTypeMeta = MTypeMeta {
+      metaName :: Maybe Name
+    , metaProp :: [Name]
+    , metaLang :: Maybe Lang
+  }
   deriving(Show, Eq, Ord)
 
 data SerialMap = SerialMap {

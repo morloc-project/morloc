@@ -254,15 +254,16 @@ WHERE {
            ?lang_typedec rdf:type mlc:typeDeclaration ;
                          mlc:lang ?source_lang ;
                          mlc:lhs ?morloc_name ;
-                         mlc:rhs ?lang_typeid .
+                         mlc:rhs ?lang_func_id.
            FILTER(!regex(str(?source_lang), "Morloc", "i"))
-           ?lang_typeid ?element ?lang_type_id .
+           ?lang_func_id ?element ?lang_type_id .
         }
         # Find the type delcaration ID
         OPTIONAL {
-            ?type_id rdf:type mlc:typeDeclaration ;
+            ?dectype_id rdf:type mlc:typeDeclaration ;
                      mlc:lang "Morloc" ;
-                     mlc:lhs ?morloc_name .
+                     mlc:lhs ?morloc_name ;
+                     mlc:rhs ?type_id .
         }
         # A argument must be one of the following:
         #  1. raw data
