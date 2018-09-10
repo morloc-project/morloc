@@ -236,7 +236,7 @@ writeArgument g xs (ArgCall m) = case mLang m of
     if
       l == gLang g
     then
-      (gCall g) (fname m) (map text' xs)
+      (gCall g) (callIdToName m) (map text' xs)
     else
       (gForeignCall g) (ForeignCallDoc {
             fcdForeignProg = text' (MS.findExecutor l)
