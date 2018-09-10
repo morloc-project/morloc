@@ -21,6 +21,8 @@ module Morloc.Types (
   , SerialMap(..)
   , SparqlEndPoint  
   , Text
+  , AbstractType -- ^ A universal Morloc type
+  , ConcreteType -- ^ A language-specific type
   , Name
   , Lang
   , Path
@@ -50,31 +52,35 @@ type Key     = Text
 type Value   = Text
 type Element = Text
 
+type AbstractType = MType
+type ConcreteType = MType
+
 data Manifold = Manifold {
-      mCallId      :: Key
-    , mType        :: Maybe MType
-    , mExported    :: Bool
-    , mCalled      :: Bool
-    , mSourced     :: Bool
-    , mMorlocName  :: Name
-    , mCallName    :: Name
-    , mSourcePath  :: Maybe Path
-    , mSourceName  :: Maybe Name
-    , mComposition :: Maybe Name
-    , mBoundVars   :: [Name]
-    , mLang        :: Maybe Lang
-    , mArgs        :: [Argument]
+      mCallId       :: Key
+    , mAbstractType :: Maybe AbstractType
+    , mConcreteType :: Maybe ConcreteType
+    , mExported     :: Bool
+    , mCalled       :: Bool
+    , mSourced      :: Bool
+    , mMorlocName   :: Name
+    , mCallName     :: Name
+    , mSourcePath   :: Maybe Path
+    , mSourceName   :: Maybe Name
+    , mComposition  :: Maybe Name
+    , mBoundVars    :: [Name]
+    , mLang         :: Maybe Lang
+    , mArgs         :: [Argument]
   }
   deriving(Show, Eq, Ord)
 
 data Argument
-  = ArgName Name (Maybe MType)
+  = ArgName Name
   -- ^ Morloc variables that are defined in scope
   | ArgCall Manifold
   -- ^ A call to some function
-  | ArgData MData (Maybe MType)
+  | ArgData MData
   -- ^ Raw data defined in one of the Morloc internal types
-  | ArgPosi Int (Maybe MType)
+  | ArgPosi Int
   -- ^ A manifold positional argument (passed into a function assignment)
   deriving(Show, Eq, Ord)
 

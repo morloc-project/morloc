@@ -24,15 +24,30 @@ import qualified Data.List.Extra as DLE
 import qualified Data.Foldable as DF
 import qualified Data.Text as DT
 
+type ParentData =
+  ( DT.Text       -- type (e.g. mlc:functionType or mlc:atomicGeneric)
+  , Maybe DT.Text -- top-level name of the type (e.g. "List" or "Int")
+  , Maybe Key     -- type id of the output if this is a function
+  , Maybe Lang    -- type language ("Morloc" for a general type)
+  , Maybe Name    -- typename from a typeDeclaration statement
+  , [Name]        -- list of properties (e.g. "packs")
+  )
+
+instance MShow MType where
+  mshow (MDataType _ n []) = text' n
+  mshow (MDataType _ n ts) = parens $ hsep (text' n:(map mshow ts))
+  mshow (MFuncType _ ts o) = parens $
+    (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
+
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MType)
 fromSparqlDb = MCU.simpleGraph toMType getParentData id sparqlQuery
 
-getParentData :: [Maybe DT.Text] -> (DT.Text, Maybe DT.Text, Maybe Key, Maybe Lang, Maybe Name, [Name]) 
+getParentData :: [Maybe DT.Text] -> ParentData 
 getParentData [Just t, v, o, l, n, ps] = (t, v, o, l, n, properties) where
   properties = DF.concat . fmap (DT.splitOn ",") $ ps
 getParentData x = error ("Unexpected SPARQL result: " ++ show x)
 
-toMType :: Map.Map Key ((DT.Text, Maybe DT.Text, Maybe Key, Maybe Lang, Maybe Name, [Name]), [Key]) -> Key -> MType
+toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType
 toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((t, v, o, l, n, ps), xs)) = case makeMeta l n ps of
     meta -> toMType'' meta v o xs
@@ -47,20 +62,6 @@ toMType h k = toMType' (Map.lookup k h) where
       , metaLang = l
     }
 
-instance MShow MType where
-  mshow (MDataType _ n []) = text' n
-  mshow (MDataType _ n ts) = parens $ hsep (text' n:(map mshow ts))
-  mshow (MFuncType _ ts o) = parens $
-    (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
-
-  -- mshow (MDeclType name props lang t) = hsep [ text' name
-  --                                            , text' lang
-  --                                            , "::"
-  --                                            , tupled (map text' props)
-  --                                            , " => "
-  --                                            , mshow t
-  --                                            ]
-
 sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 sparqlQuery = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
@@ -72,18 +73,18 @@ WHERE {
     ?id rdf:type mlc:type ;
         rdf:type ?type .
     FILTER(?type != mlc:type)
-    OPTIONAL { ?id rdf:value ?v }
+    OPTIONAL { ?id rdf:value ?v . }
     OPTIONAL {
-        ?id ?element ?child
+        ?id ?element ?child .
         FILTER(REGEX(STR(?element), "_[0-9]+$", "i"))
     }
-    OPTIONAL { ?id mlc:output ?output }
-    OPTIONAL { ?id mlc:property/rdf:value ?property }
+    OPTIONAL { ?id mlc:output ?output . }
+    OPTIONAL { ?id mlc:property/rdf:value ?property . }
     OPTIONAL {
         ?typedec rdf:type mlc:typeDeclaration ;
                  mlc:lang ?lang ;
                  mlc:lhs ?typename ; 
-                 mlc:rhs ?id
+                 mlc:rhs ?id .
     }
 }
 GROUP BY ?id ?element ?child ?type ?v ?output ?lang ?typename

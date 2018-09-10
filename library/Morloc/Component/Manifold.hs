@@ -48,7 +48,7 @@ asTuple
   -> [Maybe DT.Text]
   -> (Manifold, Either Key Argument)
 asTuple typemap datamap [ Just callId'
-                        , typeId'
+                        , abstractTypeId'
                         , element'
                         , Just morlocName'
                         , sourceName'
@@ -59,44 +59,36 @@ asTuple typemap datamap [ Just callId'
                         , Just called'
                         , Just sourced'
                         , Just exported'
-                        , langType'
+                        , concreteTypeId'
                         , argname'
                         , argcall_id'
                         , argdata_id'
                         ] =
   (
     Manifold
-      { mCallId      = callId'
-      , mType        = typeId' >>= (flip Map.lookup) typemap
-      , mMorlocName  = morlocName'
-      , mCallName    = maybe morlocName' id sourceName'
-      , mSourceName  = sourceName'
-      , mComposition = composition'
-      , mCalled      = called'   == "true"
-      , mExported    = exported' == "true"
-      , mSourced     = sourced'  == "true"
-      , mSourcePath  = sourcePath'
-      , mBoundVars   = maybe [] (DT.splitOn ",") bvars'
-      , mLang        = sourceLang'
-      , mArgs        = [] -- this will be set in the next step
+      { mCallId       = callId'
+      , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
+      , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
+      , mMorlocName   = morlocName'
+      , mCallName     = maybe morlocName' id sourceName'
+      , mSourceName   = sourceName'
+      , mComposition  = composition'
+      , mCalled       = called'   == "true"
+      , mExported     = exported' == "true"
+      , mSourced      = sourced'  == "true"
+      , mSourcePath   = sourcePath'
+      , mBoundVars    = maybe [] (DT.splitOn ",") bvars'
+      , mLang         = sourceLang'
+      , mArgs         = [] -- this will be set in the next step
       }
   , makeArgument (
-      Nothing -- to set the language, I need to look up the argname
-    , detectArgumentType datamap argdata_id'
-    , argname'
+      argname'
     , argcall_id'
     , argdata_id' >>= (flip Map.lookup) datamap
     , element'
     )
   )
 asTuple _ _ x = error ("Unexpected SPARQL row:\n" ++ show x)
-
-detectArgumentType
-  :: Map.Map Key MData
-  -> Maybe Key
-  -> Maybe MType
-detectArgumentType d (Just dataid) = fmap mData2mType (Map.lookup dataid d)
-detectArgumentType _ _ = Nothing
 
 setCalls :: [(Manifold, [Either Key Argument])] -> [Manifold]
 setCalls xs = map (\(m, args) -> m { mArgs = map (set hash) args }) xs
@@ -122,20 +114,18 @@ setLangs ms = map (setLang hash) ms
                                          , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Lang    -- lang
-     , Maybe MType   -- language-specific type
-     , Maybe Name    -- argument name (if it is a bound argument)
+  :: ( Maybe Name    -- argument name (if it is a bound argument)
      , Maybe Key     -- argument callId (if it is a function call)
      , Maybe MData   -- argument data (if this is data)
      , Maybe DT.Text -- the element (rdf:_<num>)
      )
   -> Either Key Argument
-makeArgument (_ , t, Just x  , _       , _       , _ ) = Right $ ArgName x t
-makeArgument (_ , _, _       , Just x  , _       , _ ) = Left x
-makeArgument (_ , t, _       , _       , Just x  , _ ) = Right $ ArgData x t
-makeArgument (_ , t, Nothing , Nothing , Nothing , Just e) =
+makeArgument (Just x  , _       , _       , _ ) = Right $ ArgName x
+makeArgument (_       , Just x  , _       , _ ) = Left x
+makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
+makeArgument (Nothing , Nothing , Nothing , Just e) =
   case (DT.stripPrefix (M3.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
-    Just i -> Right $ ArgPosi i t
+    Just i -> Right $ ArgPosi i
     _ -> error ("Unexpected value for element: " ++ show e)
 
 propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
@@ -185,14 +175,16 @@ unroll ms = concat $ map unroll' ms
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
 
+
+
 sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
 sparqlQuery = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
 PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
+SELECT ?call_id ?abstract_type_id ?element ?morloc_name ?source_name ?composition
        (group_concat(?bnd; separator=",") as ?bvars)
-       ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
+       ?source_lang ?source_path ?called ?sourced ?exported ?concrete_type_id
        ?argname ?argcall_id ?argdata_id
 WHERE {
     SELECT *
@@ -258,16 +250,15 @@ WHERE {
            ?lang_typedec rdf:type mlc:typeDeclaration ;
                          mlc:lang ?source_lang ;
                          mlc:lhs ?morloc_name ;
-                         mlc:rhs ?lang_func_id.
+                         mlc:rhs ?concrete_type_id.
            FILTER(!regex(str(?source_lang), "Morloc", "i"))
-           ?lang_func_id ?element ?lang_type_id .
         }
         # Find the type delcaration ID
         OPTIONAL {
             ?dectype_id rdf:type mlc:typeDeclaration ;
                      mlc:lang "Morloc" ;
                      mlc:lhs ?morloc_name ;
-                     mlc:rhs ?type_id .
+                     mlc:rhs ?abstract_type_id .
         }
         # A argument must be one of the following:
         #  1. raw data
@@ -289,8 +280,8 @@ WHERE {
     }
     ORDER BY ?bnd_element 
 }
-GROUP BY ?call_id ?type_id ?element ?morloc_name ?source_name ?composition
-         ?source_lang ?source_path ?called ?sourced ?exported ?lang_type_id
+GROUP BY ?call_id ?element ?abstract_type_id ?concrete_type_id ?morloc_name ?source_name ?composition
+         ?source_lang ?source_path ?called ?sourced ?exported 
          ?argname ?argcall_id ?argdata_id
 ORDER BY ?call_id ?element 
 |]

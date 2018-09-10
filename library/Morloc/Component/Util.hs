@@ -17,7 +17,7 @@ import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
 import qualified Data.Text as DT
 
--- | This works for building a map based off a simple tree structure based 
+-- | This works for building a map based off a simple tree structure
 simpleGraph
   :: (Ord key, Ord a)
   => (    Map.Map key (a, [key])
