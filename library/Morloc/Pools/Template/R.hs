@@ -155,7 +155,7 @@ ${line <> vsep (map (gImport g) srcs)}
 }
 
 .morloc_unpack <- function(unpacker, x, ...){
-  x <- .morloc_try(f=unpacker, args=list(x), ...)  
+  x <- .morloc_try(f=unpacker, args=list(as.character(x)), ...)  
   return(x)
 }
 

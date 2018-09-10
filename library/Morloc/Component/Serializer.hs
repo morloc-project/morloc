@@ -55,8 +55,8 @@ fromSparqlDb lang ep
       -> [SerialData]
       -> SerialMap
     toSerialMap h xs = case
-      ( Map.fromList [(getOut (lookupOrDie t h), p) | (t, "packs"  , False, p, _) <- xs]
-      , Map.fromList [(getIn  (lookupOrDie t h), p) | (t, "unpacks", False, p, _) <- xs]
+      ( Map.fromList [(getIn  (lookupOrDie t h), p) | (t, "packs"  , False, p, _) <- xs]
+      , Map.fromList [(getOut (lookupOrDie t h), p) | (t, "unpacks", False, p, _) <- xs]
       , [p | (_, "packs"  , True, p, _) <- xs]
       , [p | (_, "unpacks", True, p, _) <- xs]
       , MU.unique [s | (_, _, _, _, s) <- xs]
