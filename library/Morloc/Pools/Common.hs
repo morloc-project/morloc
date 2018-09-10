@@ -209,7 +209,7 @@ getUnpackers g h m = case mConcreteType m of
 
 useUnpacker :: Grammar -> Argument -> Manifold -> Bool
 useUnpacker g (ArgName n) m = elem n (mBoundVars m)
-useUnpacker g (ArgCall m) _ = (mLang m) == (Just (gLang g))
+useUnpacker g (ArgCall m) _ = (mLang m) /= (Just (gLang g))
 useUnpacker _ (ArgData _) _ = False
 useUnpacker _ (ArgPosi _) _ = True
 
