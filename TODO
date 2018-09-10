@@ -14,7 +14,7 @@
    [ ] Print last valid data structure on failure
 
  * In the generated code ...
-   [ ] Catch error within every manifold
+   [x] Catch error within every manifold
    [ ] If an error is caught, report the offending Morloc file and line of
        code. This will require this information be passed added to the
        generated RDF graph (which needs to be done anyway). 
