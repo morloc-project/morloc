@@ -11,8 +11,8 @@ Stability   : experimental
 
 module Morloc.Pools.Template.R (generate) where
 
+import Morloc.Types
 import Morloc.Quasi
-import Morloc.Vortex
 import Morloc.Pools.Common
 
 import qualified Data.Text as DT 
@@ -21,26 +21,35 @@ import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {
-      gLang     = "R"
-    , gCall     = call'
-    , gFunction = function'
-    , gComment  = comment'
-    , gReturn   = return'
-    , gQuote    = dquotes
-    , gSource   = gSource'
-    , gTrue     = "TRUE"
-    , gFalse    = "FALSE"
-    , gList     = gList'
-    , gTuple    = gTuple'
-    , gRecord   = gRecord'
-    , gSysCall  = gSysCall'
+      gLang        = "R"
+    , gAssign      = assign'
+    , gCall        = call'
+    , gFunction    = function'
+    , gComment     = comment'
+    , gReturn      = return'
+    , gQuote       = dquotes
+    , gImport      = import'
+    , gTrue        = "TRUE"
+    , gFalse       = "FALSE"
+    , gList        = list'
+    , gTuple       = tuple'
+    , gRecord      = record'
+    , gIndent      = indent'
+    , gTry         = try'
+    , gUnpacker    = unpacker'
+    , gForeignCall = foreignCall'
   } where
+
+    assign' l r = l <> " <- " <> r 
+
+    indent' = indent 4
+
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
-      = name <> " <- function" <> tupled args <> braces (line <> indent 2 body <> line) <> line
+      = name <> " <- function" <> tupled args <> braces (line <> indent' body <> line) <> line
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -48,30 +57,116 @@ g = Grammar {
     return' :: Doc -> Doc
     return' = id
 
-    gList' :: [Doc] -> Doc
-    gList' xs = "c" <> tupled xs
+    list' :: [Doc] -> Doc
+    list' xs = "c" <> tupled xs
 
-    gTuple' :: [Doc] -> Doc
-    gTuple' xs = "list" <> tupled xs
+    tuple' :: [Doc] -> Doc
+    tuple' xs = "list" <> tupled xs
 
-    gRecord' :: [(Doc,Doc)] -> Doc
-    gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
+    record' :: [(Doc,Doc)] -> Doc
+    record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    gSource' :: Doc -> Doc
-    gSource' s = call' "source" [dquotes s]
+    import' :: Doc -> Doc
+    import' s = call' "source" [dquotes s]
 
-    gSysCall' :: [Doc] -> Doc
-    gSysCall' (cmd:[]) = [idoc|"run(${dquotes cmd}, stdout=TRUE)"|]
-    gSysCall' (cmd:xs) = [idoc|"run(${dquotes cmd}, ${args}, stdout=TRUE)"|] where
-      args = gList' (map dquotes xs)
+    try' :: TryDoc -> Doc
+    try' t = call' ".morloc_try"
+      $  ["f=" <> tryCmd t]
+      ++ [("args=" <> tuple' (tryArgs t))]
+      ++ [ ".name=" <> dquotes (tryMid t)
+         , ".file=" <> dquotes (tryFile t)]
+
+    unpacker' :: UnpackerDoc -> Doc
+    unpacker' u = call' ".morloc_unpack"
+      [ udUnpacker u
+      , udValue u
+      , ".name=" <> dquotes (udMid u)
+      , ".pool=" <> dquotes (udFile u)
+      ]
+
+    foreignCall' :: ForeignCallDoc -> Doc
+    foreignCall' f = call' ".morloc_foreign_call"
+      [ dquotes (fcdForeignProg f)
+      , dquotes (fcdForeignPool f)
+      , dquotes (fcdMid f)
+      , list' (fcdArgs f)
+      , ".pool=" <> dquotes (fcdFile f)
+      , ".name=" <> dquotes (fcdMid f)
+      ]
 
 main
-  :: [Doc] -> [Manifold] -> PackHash -> Doc
+  :: [Doc] -> [Manifold] -> SerialMap -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-${line <> vsep (map (gSource g) srcs) <> line}
+${line <> vsep (map (gImport g) srcs)}
 
-${vsep (map (defaultManifold g hash) manifolds)}
+.morloc_run <- function(f, args){
+  fails <- ""
+  isOK <- TRUE
+  warns <- list()
+  notes <- capture.output(
+    {
+      value <- withCallingHandlers(
+        tryCatch(
+          do.call(f, args),
+          error = function(e) {
+            fails <<- e$message;
+            isOK <<- FALSE
+          }
+        ),
+        warning = function(w){
+          warns <<- append(warns, w$message)
+          invokeRestart("muffleWarning")
+        }
+      )
+    },
+    type="message"
+  )
+  list(
+    value = value,
+    isOK  = isOK,
+    fails = fails,
+    warns = warns,
+    notes = notes
+  )
+}
+
+# dies on error, ignores warnings and messages
+.morloc_try <- function(..., .log=stderr(), .pool="_", .name="_"){
+  x <- .morloc_run(...)
+  location <- sprintf("%s::%s", .pool, .name)
+  if(! x$isOK){
+    cat(sprintf("** R errors in %s\n", location), file=stderr())
+    cat(x$fails, "\n", file=stderr())
+    stop(1)
+  }
+  if(! is.null(.log)){
+    lines = c()
+    if(length(x$warns) > 0){
+      cat(sprintf("** R warnings in %s\n", location), file=stderr())
+      cat(paste(unlist(x$warns), sep="\n"), file=stderr())
+    }
+    if(length(x$notes) > 0){
+      cat(sprintf("** R messages in %s\n", location), file=stderr())
+      cat(paste(unlist(x$notes), sep="\n"), file=stderr())
+    }
+  }
+  x$value
+}
+
+.morloc_unpack <- function(unpacker, x, ...){
+  x <- .morloc_try(f=unpacker, args=list(as.character(x)), ...)  
+  return(x)
+}
+
+.morloc_foreign_call <- function(cmd, args, .pool, .name){
+  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .pool=.pool)
+}
+
+
+${makeSourceManifolds g hash manifolds}
+
+${makeCisManifolds g hash manifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

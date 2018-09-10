@@ -46,4 +46,4 @@ roll n d = ceiling (rand_uniform n 0.0 d);
 len :: a -> Int;
 
 test :: Int, Int -> Int;
-test n d = len (roll n d); 
+test n = len (roll n (sum [1,2,3])); 

@@ -1,64 +1,78 @@
-# Infrastructure
-
- [x] Write docopt based argument handler
- [ ] Add graph names and a reliable import system
- [ ] Add tests for generated output
- [ ] Remove dependency on local SPARQL server
-
-# Refactoring
-
- [x] Purge Walker
-
 # RDF representation
 
- [ ] Unify call representations
-     [ ] `binop`
-     [ ] `composition`
+ [ ] Unify call representations of [ ] `binop` and [ ] `composition`
+ [ ] Add graph names
+ [ ] Handle scoping import scoping (maybe follow R environment model)
+ [ ] Remove dependency on local SPARQL server
 
-# To catch up with the old C implementation
+# Error reporting
 
+ * In the compiler ...
+   [ ] Add meaningful error messages to parser
+   [ ] Replace the naked `error` calls everywhere
+   [ ] Detect syntax errors in SPARQL (use `hsparql` DSL?)
+   [ ] Print last valid data structure on failure
+
+ * In the generated code ...
+   [ ] If an error is caught, report the offending Morloc file and line of
+       code. This will require this information be passed added to the
+       generated RDF graph (which needs to be done anyway). 
+
+# Testing
+
+ [ ] Add golden tests for generated output. This will be a collection of
+     workflows, scripts to call them, and the recorded output.
+ [ ] Add benchmarking
+ [ ] Add code linting
+ [ ] Add test coverage reports
+
+# UI and configuration 
+
+ * in the top-level usage printout:
+   [ ] print the short doc string
+
+ * in the function-specific detailed printout:
+   [ ] print the type signature of each exported function
+   [ ] print the long doc string
+
+ * configuration
+   [ ] specify yaml config file
+   [ ] parse to RDF and upload to local SPARQL database
+   [ ] thread the configuration through the compiler
+
+# Features
+
+ [ ] add full type checking
+ [ ] constraint system
  [ ] allow function docstrings
  [ ] allow caching
  [ ] allow effect handling hooks
- [.] add support for more languages
-     [x] python
-     [ ] bash
  [ ] demonstrate parameter handling
  [ ] add higher-order functions
- [ ] add full type checking
 
-# Beyond C
+ * add support for more languages
+   [ ] bash
+   [ ] C++
+   [ ] Haskell
 
- [ ] implement constraint system
+# Documentation
 
-# Nexus help and usability
+ [ ] Write python TensorFlow example
+ [ ] Add haddock for every function
 
- * in the top-level usage printout:
- [x] print the number of arguments taken by each exported function
- [ ] print the short doc string
-
- * in the function-specific detailed printout:
- [ ] print the type signature of each exported function
- [ ] print the long doc string
+ * Extend README with
+   [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
+   [ ] A deeper discussion of the type system
+   [ ] More examples
+   [ ] A contribution and future work section
 
 # Libraries
 
  [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
- This will require handling for choosing a concrete function from among many
- language-specific alternatives. In C-morloc, the user specified the language
- of each function. I want to automate the choice.
-
-# Documentation
-
- [ ] Write taxonomy library. Port functions from `taxize` and define types and
-     their conversions.
-
- [ ] Write python TensorFlow example
-
- [ ] Extend README with
-     - [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
-     - [ ] A deeper discussion of the type system
-     - [ ] More examples
-     - [ ] A contribution and future work section
-
- [ ] Add haddock for every function
+     This will require handling for choosing a concrete function from among
+     many language-specific alternatives. In C-morloc, the user specified the
+     language of each function. I want to automate the choice.
+ [ ] Add taxonomy library
+ [ ] Add `learning` library for machine learning
+ [ ] Add `stat` library
+ [ ] Add `physics` library

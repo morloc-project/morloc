@@ -12,6 +12,7 @@ import qualified System.Environment as SE
 patterns :: Docopt
 patterns = [docoptFile|USAGE|]
 
+getArgOrExit :: Arguments -> Option -> IO String
 getArgOrExit = getArgOrExitWith patterns
 
 main :: IO ()
@@ -33,6 +34,6 @@ main = do
     -- compile a Morloc script to RDF (turtle format by default)
     when (isPresent args (command "rdf")) $ do
       let writer = if isPresent args (longOption "triple") 
-                   then M.writeTriple
-                   else M.writeTurtle
-      writer script
+                   then M.writeTripleTo
+                   else M.writeTurtleTo
+      writer script "/dev/stdout" -- not the prettiest solution ...

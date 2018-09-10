@@ -12,40 +12,40 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 mid:0 rdf:type mlc:script;
-	rdf:value "<stdin>" .
-mid:1 rdf:_0 mid:0 .
-mid:6 rdf:_1 mid:0 .
-mid:13 rdf:_2 mid:0 .
-mid:15 rdf:_3 mid:0 .
-mid:24 rdf:_4 mid:0 .
-mid:31 rdf:_5 mid:0 .
-mid:37 rdf:_6 mid:0 .
-mid:46 rdf:_7 mid:0 .
-mid:54 rdf:_8 mid:0 .
-mid:63 rdf:_9 mid:0 .
+	rdf:value "<stdin>";
+	rdf:_0 mid:1;
+	rdf:_1 mid:6;
+	rdf:_2 mid:13;
+	rdf:_3 mid:15;
+	rdf:_4 mid:24;
+	rdf:_5 mid:31;
+	rdf:_6 mid:37;
+	rdf:_7 mid:46;
+	rdf:_8 mid:54;
+	rdf:_9 mid:63 .
 mid:1 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f1";
 	mlc:lang "Morloc";
 	mlc:rhs mid:2 .
-mid:2 rdf:type mlc:functionType, mlc:type .
-mid:3 rdf:_0 mid:2;
-	rdf:type mlc:atomicType, mlc:type;
+mid:2 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:3 .
+mid:3 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int";
 	mlc:label "i" .
 mid:2 mlc:output mid:4 .
 mid:4 rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "List";
-	mlc:label "j" .
-mid:5 rdf:_0 mid:4;
-	rdf:type mlc:atomicType, mlc:type;
+	mlc:label "j";
+	rdf:_0 mid:5 .
+mid:5 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "A" .
 mid:6 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f2";
 	mlc:lang "Morloc";
 	mlc:rhs mid:7 .
-mid:7 rdf:type mlc:functionType, mlc:type .
-mid:8 rdf:_0 mid:7;
-	rdf:type mlc:atomicType, mlc:type;
+mid:7 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:8 .
+mid:8 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int";
 	mlc:label "i" .
 mid:7 mlc:output mid:9 .
@@ -70,9 +70,9 @@ mid:15 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f4";
 	mlc:lang "Morloc";
 	mlc:rhs mid:16 .
-mid:16 rdf:type mlc:functionType, mlc:type .
-mid:17 rdf:_0 mid:16;
-	rdf:type mlc:atomicType, mlc:type;
+mid:16 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:17 .
+mid:17 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "X" .
 mid:16 mlc:output mid:18 .
 mid:18 rdf:type mlc:atomicType, mlc:type;
@@ -96,14 +96,14 @@ mid:24 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f5";
 	mlc:lang "Morloc";
 	mlc:rhs mid:25 .
-mid:25 rdf:type mlc:functionType, mlc:type .
-mid:26 rdf:_0 mid:25 .
-mid:27 rdf:_1 mid:25 .
+mid:25 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:26;
+	rdf:_1 mid:27 .
 mid:26 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "a" .
-mid:27 rdf:type mlc:functionType, mlc:type .
-mid:28 rdf:_0 mid:27;
-	rdf:type mlc:atomicGeneric, mlc:type;
+mid:27 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:28 .
+mid:28 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "b" .
 mid:27 mlc:output mid:29 .
 mid:29 rdf:type mlc:atomicGeneric, mlc:type;
@@ -115,18 +115,18 @@ mid:31 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f6";
 	mlc:lang "Morloc";
 	mlc:rhs mid:32 .
-mid:32 rdf:type mlc:functionType, mlc:type .
-mid:33 rdf:_0 mid:32;
-	rdf:type mlc:parameterizedType, mlc:type;
-	rdf:value "A" .
-mid:34 rdf:_0 mid:33;
-	rdf:type mlc:atomicType, mlc:type;
+mid:32 rdf:type mlc:functionType, mlc:type;
+	rdf:_0 mid:33 .
+mid:33 rdf:type mlc:parameterizedType, mlc:type;
+	rdf:value "A";
+	rdf:_0 mid:34 .
+mid:34 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "B" .
 mid:32 mlc:output mid:35 .
 mid:35 rdf:type mlc:parameterizedType, mlc:type;
-	rdf:value "C" .
-mid:36 rdf:_0 mid:35;
-	rdf:type mlc:atomicType, mlc:type;
+	rdf:value "C";
+	rdf:_0 mid:36 .
+mid:36 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "D" .
 mid:37 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f7";
@@ -173,9 +173,9 @@ mid:50 rdf:type mlc:binop;
 mid:49 rdf:type mlc:name;
 	rdf:value "x" .
 mid:51 rdf:type mlc:unaryOp;
-	rdf:value "Neg" .
-mid:52 rdf:_0 mid:51;
-	rdf:type mlc:name;
+	rdf:value "Neg";
+	rdf:_0 mid:52 .
+mid:52 rdf:type mlc:name;
 	rdf:value "k" .
 mid:53 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
@@ -190,16 +190,16 @@ mid:56 rdf:type mlc:call;
 	rdf:value mid:57 .
 mid:57 rdf:type mlc:name;
 	rdf:value "f" .
-mid:58 rdf:_0 mid:56 .
-mid:59 rdf:_1 mid:56 .
+mid:56 rdf:_0 mid:58;
+	rdf:_1 mid:59 .
 mid:58 rdf:type mlc:name;
 	rdf:value "x" .
 mid:59 rdf:type mlc:call;
 	rdf:value mid:60 .
 mid:60 rdf:type mlc:name;
 	rdf:value "g" .
-mid:61 rdf:_0 mid:59 .
-mid:62 rdf:_1 mid:59 .
+mid:59 rdf:_0 mid:61;
+	rdf:_1 mid:62 .
 mid:61 rdf:type mlc:name;
 	rdf:value "y" .
 mid:62 rdf:type mlc:name;
@@ -219,8 +219,8 @@ mid:66 rdf:type mlc:call;
 	rdf:value mid:67 .
 mid:67 rdf:type mlc:name;
 	rdf:value "f" .
-mid:68 rdf:_0 mid:66 .
-mid:69 rdf:_1 mid:66 .
+mid:66 rdf:_0 mid:68;
+	rdf:_1 mid:69 .
 mid:68 rdf:type mlc:name;
 	rdf:value "x" .
 mid:69 rdf:type mlc:name;

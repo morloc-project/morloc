@@ -87,7 +87,8 @@ adopt sbj objs =
   where
     link :: DR.Node -> Int -> TopRDF -> DR.Triple
     link sbj' index (TopRDF obj' _)
-      = DR.triple obj' (rdfPre .:. ("_" <> show' index)) sbj'
+      -- TODO: straighten this out, it is an artefact of my element reversal
+      = DR.triple sbj' (rdfPre .:. ("_" <> show' index)) obj'
 
 showTopRDF :: TopRDF -> DT.Text
 showTopRDF (TopRDF _ rdf) = DT.pack $ DR.showGraph rdf

@@ -626,7 +626,7 @@ unaryOp :: DT.Text -> DR.Node -> M3.TopRDF -> M3.TopRDF
 unaryOp s i (M3.TopRDF j xs) = M3.makeTopRDF i (
      [ DR.triple i (M3.rdfPre .:. "type") (M3.mlcPre .:. "unaryOp")
      , DR.triple i (M3.rdfPre .:. "value") (plain s)
-     , DR.triple j (M3.rdfPre .:. "_0") i
+     , DR.triple i (M3.rdfPre .:. "_0") j
      ] ++ (DR.triplesOf xs)
   )
 

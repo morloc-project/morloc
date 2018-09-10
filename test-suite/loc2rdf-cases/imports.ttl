@@ -12,9 +12,9 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 mid:0 rdf:type mlc:script;
-	rdf:value "<stdin>" .
-mid:1 rdf:_0 mid:0;
-	rdf:type mlc:source;
+	rdf:value "<stdin>";
+	rdf:_0 mid:1 .
+mid:1 rdf:type mlc:source;
 	mlc:lang "R";
 	mlc:import mid:2 .
 mid:2 mlc:name "fo.o";

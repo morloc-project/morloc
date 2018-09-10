@@ -12,14 +12,14 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 mid:0 rdf:type mlc:script;
-	rdf:value "<stdin>" .
-mid:1 rdf:_0 mid:0 .
-mid:2 rdf:_1 mid:0 .
-mid:3 rdf:_2 mid:0 .
-mid:4 rdf:_3 mid:0 .
-mid:5 rdf:_4 mid:0 .
-mid:6 rdf:_5 mid:0 .
-mid:7 rdf:_6 mid:0 .
+	rdf:value "<stdin>";
+	rdf:_0 mid:1;
+	rdf:_1 mid:2;
+	rdf:_2 mid:3;
+	rdf:_3 mid:4;
+	rdf:_4 mid:5;
+	rdf:_5 mid:6;
+	rdf:_6 mid:7 .
 mid:1 rdf:type mlc:number, mlc:data;
 	rdf:value "42.0"^^xsd:decimal .
 mid:2 rdf:type mlc:number, mlc:data;

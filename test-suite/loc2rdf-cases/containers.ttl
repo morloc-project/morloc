@@ -12,27 +12,27 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 mid:0 rdf:type mlc:script;
-	rdf:value "<stdin>" .
-mid:1 rdf:_0 mid:0 .
-mid:4 rdf:_1 mid:0 .
-mid:7 rdf:_2 mid:0 .
-mid:1 rdf:type mlc:tuple, mlc:data .
-mid:2 rdf:_0 mid:1 .
-mid:3 rdf:_1 mid:1 .
+	rdf:value "<stdin>";
+	rdf:_0 mid:1;
+	rdf:_1 mid:4;
+	rdf:_2 mid:7 .
+mid:1 rdf:type mlc:tuple, mlc:data;
+	rdf:_0 mid:2;
+	rdf:_1 mid:3 .
 mid:2 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:3 rdf:type mlc:string, mlc:data;
 	rdf:value "hi"^^xsd:string .
-mid:4 rdf:type mlc:list, mlc:data .
-mid:5 rdf:_0 mid:4 .
-mid:6 rdf:_1 mid:4 .
+mid:4 rdf:type mlc:list, mlc:data;
+	rdf:_0 mid:5;
+	rdf:_1 mid:6 .
 mid:5 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:6 rdf:type mlc:number, mlc:data;
 	rdf:value "2.0"^^xsd:decimal .
-mid:7 rdf:type mlc:record, mlc:data .
-mid:8 rdf:_0 mid:7 .
-mid:10 rdf:_1 mid:7 .
+mid:7 rdf:type mlc:record, mlc:data;
+	rdf:_0 mid:8;
+	rdf:_1 mid:10 .
 mid:8 rdf:type mlc:recordEntry;
 	mlc:lhs "person";
 	mlc:rhs mid:9 .

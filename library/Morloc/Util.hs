@@ -20,9 +20,8 @@ module Morloc.Util
   , either2bool
   , maybeOne
   , zipWithOrDie
-  , initChain
   , shareAttr
- , spreadAttr
+  , spreadAttr
 ) where
 
 import Morloc.Operators
@@ -31,8 +30,7 @@ import qualified Data.List as DL
 import qualified Data.Text as DT
 import qualified Control.Monad as CM
 import qualified Data.Set as Set
-import qualified Data.HashMap.Strict as Map
-import qualified Data.Hashable as H
+import qualified Data.Map.Strict as Map
 
 show' :: Show a => a -> DT.Text
 show' = DT.pack . show
@@ -76,25 +74,15 @@ zipWithOrDie f xs ys
   | length xs == length ys = zipWith f xs ys
   | otherwise = error "Expected lists of equal length"
 
-initChain
-  :: CM.MonadPlus m
-  => m a
-  -> [(m a, Maybe (a -> m a))]
-  -> m a
-initChain x [] = x
-initChain mempty ((x , _      ):fs) = initChain x         fs
-initChain x      ((_ , Just g ):fs) = initChain (x >>= g) fs
-initChain x      ((_ , Nothing):fs) = initChain x         fs
-
 spreadAttr
-  :: (Ord a, Ord b, H.Hashable a, H.Hashable b)
+  :: (Ord a, Ord b)
   => [(a, Maybe a, Maybe b)]
-  -> Map.HashMap a b
+  -> Map.Map a b
 spreadAttr xs = asHash [(Set.toList sx, Set.toList sy) | (sx, sy) <- shareAttr xs]
   where
     asHash
-      :: (Ord a, Ord b, H.Hashable a, H.Hashable b)
-      => [([a], [b])] -> Map.HashMap a b
+      :: (Ord a, Ord b)
+      => [([a], [b])] -> Map.Map a b
     asHash xys = (Map.fromList . concat) [[(x, y) | x <- xs, y <- ys] | (xs, ys) <- xys]
 
 -- | For the list of tuples (l,r,c), find missing data that is present in a

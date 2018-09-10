@@ -13,30 +13,7 @@
 
 mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>";
-	rdf:_0 mid:1;
-	rdf:_1 mid:3;
-	rdf:_2 mid:6 .
-mid:1 rdf:type mlc:dataDeclaration;
-	mlc:lhs "x";
-	mlc:rhs mid:2 .
-mid:2 rdf:type mlc:number, mlc:data;
-	rdf:value "1.0"^^xsd:decimal .
-mid:3 rdf:type mlc:dataDeclaration;
-	mlc:lhs "f";
-	mlc:rhs mid:5 .
-mid:5 rdf:type mlc:name;
-	rdf:value "x" .
-mid:3 rdf:_0 mid:4 .
-mid:4 rdf:type mlc:name;
-	rdf:value "x" .
-mid:6 rdf:type mlc:dataDeclaration;
-	mlc:lhs "g";
-	mlc:rhs mid:7 .
-mid:7 rdf:type mlc:call;
-	rdf:value mid:8 .
-mid:8 rdf:type mlc:name;
-	rdf:value "f" .
-mid:7 rdf:_0 mid:9 .
-mid:9 rdf:type mlc:number, mlc:data;
-	rdf:value "42.0"^^xsd:decimal .
+	rdf:_0 mid:1 .
+mid:1 rdf:type mlc:number, mlc:data;
+	rdf:value "0.0"^^xsd:decimal .
 

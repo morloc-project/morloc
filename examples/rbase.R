@@ -21,4 +21,4 @@ packLogical   <- toJSON
 
 # Generic pack/unpack functions
 packGeneric   <- toJSON
-unpackGeneric <- fromJSON
+unpackGeneric <- function(s) {fromJSON(as.character(s))}
