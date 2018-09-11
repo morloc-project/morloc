@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Component.MData
@@ -11,20 +11,22 @@ Stability   : experimental
 
 module Morloc.Component.MData (fromSparqlDb) where
 
+import qualified Database.HSparql.Connection as Conn
+import Database.HSparql.QueryGenerator
+import qualified Data.RDF as DR
+
 import Morloc.Types
-import Morloc.Operators
+import Morloc.Operators hiding ((.:.))
 import Morloc.Quasi
 import qualified Morloc.Triple as M3
 import qualified Morloc.Component.Util as MCU
 
 import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
-import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
-import qualified Data.List.Extra as DLE
 import qualified Data.Text as DT
 
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MData)
-fromSparqlDb = MCU.simpleGraph toMData getParentData id sparqlQuery
+fromSparqlDb = MCU.simpleGraph toMData getParentData id (MCU.sendQuery hsparql)
 
 getParentData :: [Maybe DT.Text] -> (DT.Text, Maybe DT.Text) 
 getParentData [Just t, v] = (t, v)
@@ -57,22 +59,26 @@ instance MShow MData where
   mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")
                               (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
 
-sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-sparqlQuery = [sparql|
-PREFIX mlc: <http://www.morloc.io/ontology/000/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT ?id ?element ?child ?type ?v 
-WHERE {
-    ?id rdf:type mlc:data ;
-        rdf:type ?type .
-    FILTER(?type != mlc:data)
-    OPTIONAL {
-        ?id rdf:value ?v
-    }
-    OPTIONAL {
-        ?id ?element ?child
-        FILTER(regex(str(?element), "_[0-9]+$", "i"))
-    }
-}
-|]
+hsparql :: Query SelectQuery
+hsparql= do
+  mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
+  rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+  mid <- prefix "mid" (iriRef "http://www.morloc.io/XXX/mid/")
+
+  id_      <- var
+  element_ <- var
+  child_   <- var
+  type_    <- var
+  value_   <- var
+
+  triple_ id_ (rdf .:. "type") (mlc .:. "data")
+  triple_ id_ (rdf .:. "type") type_
+  filterExpr (type_ .!=. (mlc .:. "data"))
+
+  optional_ $ triple_ id_ (rdf .:. "value") value_
+  
+  optional_ $ do
+      triple_ id_ element_ child_
+      MCU.isElement_ element_
+
+  selectVars [id_, element_, child_, type_, value_]
