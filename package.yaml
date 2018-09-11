@@ -27,6 +27,7 @@ dependencies:
   - filepath
   - hashable
   - haskell-src-meta
+  - hsparql
   - megaparsec
   - mtl
   - network-uri
