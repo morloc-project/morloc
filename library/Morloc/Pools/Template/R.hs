@@ -14,9 +14,9 @@ module Morloc.Pools.Template.R (generate) where
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
+import Morloc.Builder hiding ((<$>))
 
 import qualified Data.Text as DT 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 

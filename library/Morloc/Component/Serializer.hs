@@ -21,7 +21,7 @@ import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
 import qualified Data.Maybe as DM
 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Morloc.Builder hiding ((<$>), (<>))
 import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as DT

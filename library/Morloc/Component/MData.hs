@@ -21,7 +21,7 @@ import Morloc.Quasi
 import qualified Morloc.Triple as M3
 import qualified Morloc.Component.Util as MCU
 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Morloc.Builder hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as DT
 

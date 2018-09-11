@@ -14,11 +14,11 @@ module Morloc.Pools.Template.Python3 (generate) where
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
+import Morloc.Builder hiding ((<$>))
 
 import qualified Data.Text as DT 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate = makeGenerator g (defaultCodeGenerator g asImport main)
 

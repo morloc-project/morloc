@@ -16,12 +16,12 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Util as MU
 import Morloc.Component.Manifold as MCM
+import Morloc.Builder hiding ((<$>))
 import qualified Morloc.System as MS
 import qualified Data.Text as DT
 import qualified Data.Map.Strict as Map
 import qualified Data.List as DL
 import qualified Data.Maybe as DM
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate e
   =   Script

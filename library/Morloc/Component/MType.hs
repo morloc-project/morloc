@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Component.MType
@@ -11,13 +11,17 @@ Stability   : experimental
 
 module Morloc.Component.MType (fromSparqlDb) where
 
+import qualified Database.HSparql.Connection as Conn
+import Database.HSparql.QueryGenerator
+import qualified Data.RDF as DR
+
 import Morloc.Types
-import Morloc.Operators
+import Morloc.Operators hiding ((.:.))
 import Morloc.Quasi
 import qualified Morloc.Triple as M3
 import qualified Morloc.Component.Util as MCU
 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Morloc.Builder hiding ((<$>),(<>))
 import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
@@ -40,7 +44,7 @@ instance MShow MType where
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MType)
-fromSparqlDb = MCU.simpleGraph toMType getParentData id sparqlQuery
+fromSparqlDb = MCU.simpleGraph toMType getParentData id (MCU.sendQuery hsparql)
 
 getParentData :: [Maybe DT.Text] -> ParentData 
 getParentData [Just t, v, o, l, n, ps] = (t, v, o, l, n, properties) where
@@ -62,31 +66,61 @@ toMType h k = toMType' (Map.lookup k h) where
       , metaLang = l
     }
 
-sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-sparqlQuery = [sparql|
-PREFIX mlc: <http://www.morloc.io/ontology/000/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT ?id ?element ?child ?type ?v ?output ?lang ?typename
-       (GROUP_CONCAT(?property; separator=",") AS ?properties)
-WHERE {
-    ?id rdf:type mlc:type ;
-        rdf:type ?type .
-    FILTER(?type != mlc:type)
-    OPTIONAL { ?id rdf:value ?v . }
-    OPTIONAL {
-        ?id ?element ?child .
-        FILTER(REGEX(STR(?element), "_[0-9]+$", "i"))
-    }
-    OPTIONAL { ?id mlc:output ?output . }
-    OPTIONAL { ?id mlc:property/rdf:value ?property . }
-    OPTIONAL {
-        ?typedec rdf:type mlc:typeDeclaration ;
-                 mlc:lang ?lang ;
-                 mlc:lhs ?typename ; 
-                 mlc:rhs ?id .
-    }
-}
-GROUP BY ?id ?element ?child ?type ?v ?output ?lang ?typename
-ORDER BY ?id ?element
-|] 
+hsparql :: Query SelectQuery
+hsparql = do
+  mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
+  rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+  mid <- prefix "mid" (iriRef "http://www.morloc.io/XXX/mid/")
+
+  id_ <- var
+  element_ <- var
+  child_ <- var
+  type_ <- var
+  value_ <- var
+  output_ <- var
+  lang_ <- var
+  typename_ <- var
+  property_ <- var
+  properties_ <- var
+
+  triple_ id_ (rdf .:. "type") (mlc .:. "type")
+  triple_ id_ (rdf .:. "type") type_
+  filterExpr (type_ .!=. (mlc .:. "type"))
+
+  optional_ $ triple_ id_ (rdf .:. "value") value_
+  
+  optional_ $ do
+    triple_ id_ element_ child_
+    MCU.isElement_ element_
+
+  optional_ $ triple_ id_ (mlc .:. "output") output_
+  optional_ $ do
+    typedec_ <- var 
+    triple_ typedec_ (rdf .:. "type") (mlc .:. "typeDeclaration")
+    triple_ typedec_ (mlc .:. "lang") lang_
+    triple_ typedec_ (mlc .:. "lhs")  typename_
+    triple_ typedec_ (mlc .:. "rhs")  id_
+
+  groupBy id_
+  groupBy element_
+  groupBy child_
+  groupBy type_
+  groupBy value_
+  groupBy output_
+  groupBy lang_
+  groupBy typename_
+
+  orderNextAsc id_ 
+  orderNextAsc element_ 
+
+  select
+    [ SelectVar id_
+    , SelectVar element_
+    , SelectVar child_
+    , SelectVar type_
+    , SelectVar value_
+    , SelectVar output_
+    , SelectVar lang_
+    , SelectVar typename_
+    , SelectExpr (groupConcat property_ ", ") properties_
+    ]

@@ -27,9 +27,9 @@ import qualified Morloc.Component.Manifold as Manifold
 
 import Morloc.Types
 import Morloc.Quasi
+import Morloc.Builder hiding ((<$>))
 import qualified Morloc.System as MS
 import qualified Data.Text as DT
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {

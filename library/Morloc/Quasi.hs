@@ -3,32 +3,19 @@
 module Morloc.Quasi (
     idoc
   , sparql
-  , render
-  , render'
-  , text'
 ) where
 
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
-import qualified Text.PrettyPrint.Leijen.Text as Gen
+import qualified Morloc.Builder as Gen
 import qualified Data.RDF as DR
 import qualified Morloc.Database.HSparql.Connection as Conn
 import qualified Data.Text as DT
-import qualified Data.Text.Lazy as DL
 import qualified Language.Haskell.Meta.Parse as MP
 
 import Text.Parsec
 
 import Morloc.Types (SparqlEndPoint)
-
-render :: Gen.Doc -> DT.Text
-render = Gen.displayTStrict . Gen.renderPretty 0.5 70
-
-render' :: Gen.Doc -> String
-render' = DT.unpack . render
-
-text' :: DT.Text -> Gen.Doc
-text' = (Gen.text . DL.fromStrict)
 
 type Parser = Parsec String ()
 
@@ -81,7 +68,7 @@ values (Just xss) = (fmap . fmap) maybeValue xss
 
 simpleSelect :: Gen.Doc -> SparqlEndPoint -> IO ([[Maybe DT.Text]])
 -- selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
-simpleSelect d e = fmap values $ (flip Conn.selectQuery') (render' d) e
+simpleSelect d e = fmap values $ (flip Conn.selectQuery') (Gen.render' d) e
 
 sparql :: QuasiQuoter
 sparql = QuasiQuoter {
