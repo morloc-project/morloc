@@ -18,8 +18,8 @@ module Morloc.State
   , getSourceUri
 ) where
 
-import qualified Morloc.RDF as R
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.RDF as R
+import qualified Morloc.Data.Text as MT
 
 import Text.Megaparsec
 import qualified Control.Monad.State as CMS

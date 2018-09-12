@@ -1,3 +1,10 @@
+# Short-term
+
+ [ ] Replace all quasiquoted sparql with `hsparql` DSL
+ [ ] Add typechecking
+ [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
+ [ ] Add local option database (e.g. with `--arq` as an option)
+
 # RDF representation
 
  [ ] Unify call representations of [ ] `binop` and [ ] `composition`

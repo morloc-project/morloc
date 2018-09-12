@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Text
+Module      : Morloc.Data.Text
 Description : All things text
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Stability   : experimental
 This is a general wrapper around all textual representations in Morloc.
 -}
 
-module Morloc.Text
+module Morloc.Data.Text
   ( 
       module Data.Text 
     , DTI.readFile

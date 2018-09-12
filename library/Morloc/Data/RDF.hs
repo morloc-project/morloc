@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
-Module      : Morloc.RDF
+Module      : Morloc.Data.RDF
 Description : Convenience functions for working with triples
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.RDF (
+module Morloc.Data.RDF (
     TopRDF(..)
   , RDF
   , mtriple
@@ -36,7 +36,7 @@ module Morloc.RDF (
   , rdfAppend
 ) where
 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS

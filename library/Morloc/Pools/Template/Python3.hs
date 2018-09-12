@@ -14,8 +14,8 @@ module Morloc.Pools.Template.Python3 (generate) where
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
-import Morloc.Builder hiding ((<$>))
-import qualified Morloc.Text as MT
+import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Data.Text as MT
 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC

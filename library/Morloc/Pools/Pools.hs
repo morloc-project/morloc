@@ -14,7 +14,7 @@ module Morloc.Pools.Pools (generate) where
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3

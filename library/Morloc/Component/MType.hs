@@ -14,9 +14,9 @@ module Morloc.Component.MType (fromSparqlDb) where
 import Morloc.Sparql
 import Morloc.Types
 import Morloc.Operators
-import Morloc.Builder hiding ((<$>),(<>))
+import Morloc.Data.Doc hiding ((<$>),(<>))
 import qualified Morloc.Component.Util as MCU
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE

@@ -14,11 +14,11 @@ module Morloc.Component.MData (fromSparqlDb) where
 import Morloc.Sparql
 import Morloc.Types
 import Morloc.Operators
-import qualified Morloc.Text as MT
-import qualified Morloc.RDF as MR
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.Util as MCU
 
-import Morloc.Builder hiding ((<$>), (<>))
+import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
 
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MData)

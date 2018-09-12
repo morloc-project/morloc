@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Builder
+Module      : Morloc.Data.Doc
 Description : A wrapper around Leijen's text builder
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Stability   : experimental
 This module re-exports Leijen's text builder along with a few other utilities.
 -}
 
-module Morloc.Builder
+module Morloc.Data.Doc
   ( 
       module Text.PrettyPrint.Leijen.Text
     , render

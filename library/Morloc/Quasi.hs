@@ -7,9 +7,9 @@ module Morloc.Quasi (
 
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
-import qualified Morloc.Builder as Gen
-import qualified Morloc.RDF as MR
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Doc as Gen
+import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Data.Text as MT
 
 import qualified Language.Haskell.Meta.Parse as MP
 

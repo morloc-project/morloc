@@ -11,7 +11,7 @@ import qualified Data.Map.Strict as DMS
 import qualified System.IO as SIO
 import qualified System.Directory as SD
 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Types
 import qualified Morloc.Error as ME

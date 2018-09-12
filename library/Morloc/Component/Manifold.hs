@@ -17,12 +17,12 @@ import Morloc.Quasi
 import qualified Morloc.Error as ME
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
-import qualified Morloc.RDF as MR
+import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
-import Morloc.Builder hiding ((<$>), (<>))
+import Morloc.Data.Doc hiding ((<$>), (<>))
 import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE

@@ -29,7 +29,7 @@ module Morloc.Lexer (
   , arithmeticBinOp
 ) where
 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char

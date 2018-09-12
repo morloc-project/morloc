@@ -16,8 +16,8 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Util as MU
 import Morloc.Component.Manifold as MCM
-import Morloc.Builder hiding ((<$>))
-import qualified Morloc.Text as MT
+import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Data.Map.Strict as Map
 import qualified Data.List as DL

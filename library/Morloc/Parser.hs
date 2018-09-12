@@ -20,10 +20,10 @@ import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
 
 import Morloc.Types
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
-import qualified Morloc.RDF as MR
+import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
 import qualified Morloc.Util as MU
 import Morloc.Operators
@@ -627,7 +627,7 @@ unaryOp s i (MR.TopRDF j xs) = MR.makeTopRDF i (
 
 binOp :: MT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF -> MR.TopRDF
 binOp s i (MR.TopRDF j xs) (MR.TopRDF k ys) = MR.makeTopRDF i (
-     -- TODO: The `binop` classification should not appear in the Morloc RDF.
+     -- TODO: The `binop` classification should not appear in the Morloc.Data.RDF.
      -- These binary expression should resolve into perfectly normal functions.
      -- No special handling should be needed (except to integrate them into the
      -- manifolds).

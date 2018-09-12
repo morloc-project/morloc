@@ -18,10 +18,10 @@ import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
 import Morloc.Sparql
-import Morloc.Builder hiding ((<$>), (<>))
+import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map

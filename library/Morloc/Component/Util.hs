@@ -18,8 +18,8 @@ module Morloc.Component.Util (
 
 import Morloc.Types
 import Morloc.Sparql
-import qualified Morloc.RDF as MR
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM

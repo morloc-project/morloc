@@ -17,7 +17,7 @@ module Morloc.Error
   , error'
 ) where
 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 import qualified Text.Megaparsec.Error as PE
 import Data.Void
 

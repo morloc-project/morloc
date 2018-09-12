@@ -27,9 +27,9 @@ import Morloc.Quasi
 import qualified Morloc.Error as ME
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
-import Morloc.Builder hiding ((<$>))
+import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.System as MS
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {

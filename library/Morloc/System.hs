@@ -18,7 +18,7 @@ module Morloc.System
 
 import Morloc.Operators
 
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 
 findExecutor :: MT.Text -> MT.Text
 findExecutor "R" = "Rscript" -- this is a safe bet

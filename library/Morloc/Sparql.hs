@@ -15,7 +15,7 @@ module Morloc.Sparql
   ) where
 
 import Morloc.Types
-import Morloc.RDF () -- just import instances
+import Morloc.Data.RDF () -- just import instances
 
 import Database.HSparql.QueryGenerator
 import Database.HSparql.Connection

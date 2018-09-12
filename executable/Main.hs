@@ -3,7 +3,7 @@
 module Main where
 
 import qualified Morloc as M
-import qualified Morloc.Text as MT
+import qualified Morloc.Data.Text as MT
 import System.Console.Docopt
 import Control.Monad (when)
 import qualified System.Environment as SE
