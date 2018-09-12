@@ -24,6 +24,7 @@ module Morloc.Pools.Common
 
 import Morloc.Types
 import Morloc.Quasi
+import qualified Morloc.Error as ME
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
 import Morloc.Builder hiding ((<$>))
@@ -203,7 +204,7 @@ makeCisManifold g h m
 getUnpackers :: Grammar -> SerialMap -> Manifold -> [Doc]
 getUnpackers g h m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> map (unpackerName g h . return) ts 
-  (Just _) -> error "Expected a function type"
+  (Just _) -> ME.error' ("Expected a function type for:" <> MT.pretty m)
   Nothing -> take (length (mArgs m)) (repeat (unpackerName g h Nothing))
 
 useUnpacker :: Grammar -> Argument -> Manifold -> Bool

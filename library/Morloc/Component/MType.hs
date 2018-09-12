@@ -75,9 +75,9 @@ hsparql = do
 
   triple_ id_ PType OType
   triple_ id_ PType type_
-  filterExpr (type_ .!=. PType)
+  filterExpr (type_ .!=. OType)
 
-  optional_ $ triple_ id_ PType value_
+  optional_ $ triple_ id_ PValue value_
   
   optional_ $ do
     triple_ id_ element_ child_

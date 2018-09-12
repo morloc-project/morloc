@@ -109,37 +109,37 @@ instance MorlocNodeLike Bool where
   fromRdfNode x = error ("Could not derive Bool from node: " ++ show x) 
 
 instance MorlocNodeLike GraphPredicate where
-  asRdfNode (PElem i)  = rdfPre .:. ("_" <> MT.show' i)
-  asRdfNode PLabel     = rdfPre .:. "label"
-  asRdfNode PType      = rdfPre .:. "type"
-  asRdfNode PValue     = rdfPre .:. "value"
-  asRdfNode PAlias     = mlcPre .:. "alias"
+  asRdfNode (PElem i)   = rdfPre .:. ("_" <> MT.show' i)
+  asRdfNode PType       = rdfPre .:. "type"
+  asRdfNode PValue      = rdfPre .:. "value"
+  asRdfNode PAlias      = mlcPre .:. "alias"
   asRdfNode PConstraint = mlcPre .:. "constraint"
-  asRdfNode PLang      = mlcPre .:. "lang"
-  asRdfNode PLeft      = mlcPre .:. "left"
-  asRdfNode PNamespace = mlcPre .:. "namespace"
-  asRdfNode POutput    = mlcPre .:. "output"
-  asRdfNode PPath      = mlcPre .:. "path"
-  asRdfNode PProperty  = mlcPre .:. "property"
-  asRdfNode PRight     = mlcPre .:. "right"
-  asRdfNode PKey       = mlcPre .:. "key"
-  asRdfNode PNot       = mlcPre .:. "not"
-  asRdfNode PName      = mlcPre .:. "name"
-  asRdfNode PImport    = mlcPre .:. "import"
+  asRdfNode PLabel      = mlcPre .:. "label" -- NOT the same as the rdf:label
+  asRdfNode PLang       = mlcPre .:. "lang"
+  asRdfNode PLeft       = mlcPre .:. "lhs"
+  asRdfNode PNamespace  = mlcPre .:. "namespace"
+  asRdfNode POutput     = mlcPre .:. "output"
+  asRdfNode PPath       = mlcPre .:. "path"
+  asRdfNode PProperty   = mlcPre .:. "property"
+  asRdfNode PRight      = mlcPre .:. "rhs"
+  asRdfNode PKey        = mlcPre .:. "key"
+  asRdfNode PNot        = mlcPre .:. "not"
+  asRdfNode PName       = mlcPre .:. "name"
+  asRdfNode PImport     = mlcPre .:. "import"
 
   fromRdfNode n
-    | n == ( rdfPre .:. "label"      ) = PLabel
     | n == ( rdfPre .:. "type"       ) = PType
     | n == ( rdfPre .:. "value"      ) = PValue
     | n == ( mlcPre .:. "alias"      ) = PAlias
     | n == ( mlcPre .:. "constraint" ) = PConstraint
+    | n == ( mlcPre .:. "label"      ) = PLabel
     | n == ( mlcPre .:. "lang"       ) = PLang
-    | n == ( mlcPre .:. "left"       ) = PLeft
+    | n == ( mlcPre .:. "lhs"        ) = PLeft
     | n == ( mlcPre .:. "namespace"  ) = PNamespace
     | n == ( mlcPre .:. "output"     ) = POutput
     | n == ( mlcPre .:. "path"       ) = PPath
     | n == ( mlcPre .:. "property"   ) = PProperty
-    | n == ( mlcPre .:. "right"      ) = PRight
+    | n == ( mlcPre .:. "rhs"        ) = PRight
     | n == ( mlcPre .:. "key"        ) = PKey
     | n == ( mlcPre .:. "not"        ) = PNot
     | n == ( mlcPre .:. "name"       ) = PName
@@ -183,6 +183,7 @@ instance MorlocNodeLike GraphObject where
   asRdfNode OUnaryOp                  = mlcPre .:. "unaryOp"
   asRdfNode OEmpty                    = mlcPre .:. "empty"
   asRdfNode OBinOp                    = mlcPre .:. "binop"
+
   fromRdfNode (DR.LNode (DR.PlainL s)) = OLiteral s
   fromRdfNode n
     | n == ( mlcPre .:. "access"               ) = OAccess

@@ -29,9 +29,9 @@ mid:3 rdf:type mlc:number, mlc:data;
 mid:4 rdf:type mlc:number, mlc:data;
 	rdf:value "-4.2"^^xsd:decimal .
 mid:5 rdf:type mlc:boolean, mlc:data;
-	rdf:value "True"^^xsd:boolean .
+	rdf:value "true"^^xsd:boolean .
 mid:6 rdf:type mlc:boolean, mlc:data;
-	rdf:value "False"^^xsd:boolean .
+	rdf:value "false"^^xsd:boolean .
 mid:7 rdf:type mlc:number, mlc:data;
 	rdf:value "1.2345678901234567890123456789012345678901234567890123456789e59"^^xsd:decimal .
 
