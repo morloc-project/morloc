@@ -17,7 +17,6 @@ import qualified Data.RDF as DR
 
 import Morloc.Types
 import Morloc.Operators hiding ((.:.))
-import Morloc.Quasi
 import qualified Morloc.Triple as M3
 import qualified Morloc.Component.Util as MCU
 

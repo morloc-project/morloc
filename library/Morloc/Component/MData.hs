@@ -17,7 +17,6 @@ import qualified Data.RDF as DR
 
 import Morloc.Types
 import Morloc.Operators hiding ((.:.))
-import Morloc.Quasi
 import qualified Morloc.Triple as M3
 import qualified Morloc.Component.Util as MCU
 
@@ -63,7 +62,6 @@ hsparql :: Query SelectQuery
 hsparql= do
   mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
   rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-  mid <- prefix "mid" (iriRef "http://www.morloc.io/XXX/mid/")
 
   id_      <- var
   element_ <- var
