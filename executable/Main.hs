@@ -3,10 +3,9 @@
 module Main where
 
 import qualified Morloc as M
+import qualified Morloc.Text as MT
 import System.Console.Docopt
 import Control.Monad (when)
-import qualified Data.Text as DT
-import qualified Data.Text.IO as DTI
 import qualified System.Environment as SE
 
 patterns :: Docopt
@@ -23,8 +22,8 @@ main = do
   when (isPresent args (argument "script")) $ do
     -- handle the code, either from a file or a raw string
     script <- if isPresent args (longOption "expression")
-              then (fmap DT.pack $ getArgOrExit args (argument "script"))
-              else getArgOrExit args (argument "script") >>= DTI.readFile
+              then (fmap MT.pack $ getArgOrExit args (argument "script"))
+              else getArgOrExit args (argument "script") >>= MT.readFile
 
     -- build a Morloc program, generating the nexus and pool files
     when (isPresent args (command "make")) $ do

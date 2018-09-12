@@ -21,10 +21,10 @@ import Morloc.Sparql
 import Morloc.Builder hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
+import qualified Morloc.Text as MT
 
 import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map
-import qualified Data.Text as DT
 
 type SerialData =
   ( Key  -- type_id - 
@@ -43,7 +43,7 @@ fromSparqlDb lang ep
   <*> (map tuplify <$> sparqlQuery lang' ep)
   where
 
-    tuplify :: [Maybe DT.Text] -> SerialData
+    tuplify :: [Maybe MT.Text] -> SerialData
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
     tuplify e = error ("Unexpected SPARQL result: " ++ show e)
@@ -83,9 +83,9 @@ fromSparqlDb lang ep
     lookupOrDie k h = case Map.lookup k h of
       (Just x) -> x
       Nothing -> error ("Could not find SerialMap for key: "
-                        ++ show k ++ " for " ++ DT.unpack lang)
+                        ++ show k ++ " for " ++ MT.unpack lang)
 
-sparqlQuery :: Doc -> SparqlEndPoint -> IO [[Maybe DT.Text]]
+sparqlQuery :: Doc -> SparqlEndPoint -> IO [[Maybe MT.Text]]
 sparqlQuery lang = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>

@@ -18,8 +18,6 @@ module Morloc.Operators
 
 import Data.Monoid
 import System.FilePath
-import qualified Data.RDF as DR
-import qualified Data.Text as DT
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

@@ -14,23 +14,23 @@ module Morloc.Component.MData (fromSparqlDb) where
 import Morloc.Sparql
 import Morloc.Types
 import Morloc.Operators
+import qualified Morloc.Text as MT
 import qualified Morloc.RDF as MR
 import qualified Morloc.Component.Util as MCU
 
 import Morloc.Builder hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
-import qualified Data.Text as DT
 
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MData)
 fromSparqlDb = MCU.simpleGraph toMData getParentData id (MCU.sendQuery hsparql)
 
-getParentData :: [Maybe DT.Text] -> (DT.Text, Maybe DT.Text) 
+getParentData :: [Maybe MT.Text] -> (MT.Text, Maybe MT.Text) 
 getParentData [Just t, v] = (t, v)
 getParentData _ = error "Unexpected SPARQL result"
 
-toMData :: Map.Map Key ((DT.Text, Maybe DT.Text), [Key]) -> Key -> MData
+toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MData
 toMData h k = toMData' (Map.lookup k h) where
-  toMData' :: (Maybe ((DT.Text, Maybe DT.Text), [Key])) -> MData
+  toMData' :: (Maybe ((MT.Text, Maybe MT.Text), [Key])) -> MData
   -- primitive "leaf" data
   toMData' (Just ((mtype, Just x), _))
     | mtype == MR.mlcPre <> "number"  = Num' x
@@ -49,7 +49,7 @@ toMData h k = toMData' (Map.lookup k h) where
 instance MShow MData where
   mshow (Num' x  ) = text' x
   mshow (Str' x  ) = text' x
-  mshow (Log' x  ) = text' $ DT.pack (show x)
+  mshow (Log' x  ) = text' $ MT.pack (show x)
   mshow (Lst' xs ) = list (map mshow xs)
   mshow (Tup' xs ) = tupled (map mshow xs)
   mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")

@@ -22,18 +22,17 @@ module Morloc.Pools.Common
   , getUsedManifolds
 ) where
 
-import qualified Morloc.Component.Serializer as Serializer
-import qualified Morloc.Component.Manifold as Manifold
-
 import Morloc.Types
 import Morloc.Quasi
+import qualified Morloc.Component.Serializer as Serializer
+import qualified Morloc.Component.Manifold as Manifold
 import Morloc.Builder hiding ((<$>))
 import qualified Morloc.System as MS
-import qualified Data.Text as DT
+import qualified Morloc.Text as MT
 import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {
-      gLang     :: DT.Text
+      gLang     :: MT.Text
     , gAssign   :: Doc -> Doc -> Doc
     , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
@@ -90,12 +89,12 @@ makeGenerator g gen
   = \ep ->
           Script
       <$> pure "pool"
-      <*> pure (DT.unpack (gLang g))
+      <*> pure (MT.unpack (gLang g))
       <*> gen ep
 
 defaultCodeGenerator
   :: Grammar
-  -> (DT.Text -> Doc) -- source name parser
+  -> (MT.Text -> Doc) -- source name parser
   -> ([Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> CodeGenerator 
 defaultCodeGenerator g f main ep = do
@@ -228,7 +227,7 @@ callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
-writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
+writeArgument :: Grammar -> [MT.Text] -> Argument -> Doc
 writeArgument g _  (ArgName n) = text' n
 writeArgument g _  (ArgData d) = writeData g d
 writeArgument _ _  (ArgPosi i) = "x" <> int i

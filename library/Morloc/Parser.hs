@@ -18,10 +18,9 @@ import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 import qualified Data.List as DL
-import qualified Data.Text as DT
-import qualified Data.Text.IO as DTO
 
 import Morloc.Types
+import qualified Morloc.Text as MT
 import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
 import qualified Morloc.RDF as MR
@@ -29,7 +28,7 @@ import qualified Morloc.Lexer as Tok
 import qualified Morloc.Util as MU
 import Morloc.Operators
 
-parse :: Maybe DT.Text -> DT.Text -> IO (ME.ThrowsError MR.RDF)
+parse :: Maybe MT.Text -> MT.Text -> IO (ME.ThrowsError MR.RDF)
 parse srcfile code = case (parseShallow srcfile code) of
   (Right rdf) -> joinRDF rdf (parseImports rdf)
   err         -> return err
@@ -43,13 +42,13 @@ joinRDF rdf xs
 parseImports :: MR.RDF -> [IO (ME.ThrowsError MR.RDF)]
 parseImports rdf = map morlocScriptFromFile (MR.getImportedFiles rdf)
 
-morlocScriptFromFile :: DT.Text -> IO (ME.ThrowsError MR.RDF)
-morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . DTO.readFile $ DT.unpack s
+morlocScriptFromFile :: MT.Text -> IO (ME.ThrowsError MR.RDF)
+morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ MT.unpack s
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-parseShallow :: Maybe DT.Text -> DT.Text -> ME.ThrowsError MR.RDF
+parseShallow :: Maybe MT.Text -> MT.Text -> ME.ThrowsError MR.RDF
 parseShallow srcfile code =
-  case runParser (CMS.runStateT contents pstate) (DT.unpack input') code of
+  case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
     Left err  -> CME.throwError $ ME.SyntaxError err
     Right ((MR.TopRDF _ val), s) -> return val
   where
@@ -207,7 +206,7 @@ typeDeclaration = do
       ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
     )
 
-listTag :: MR.Node -> Maybe DT.Text -> [MR.Triple]
+listTag :: MR.Node -> Maybe MT.Text -> [MR.Triple]
 listTag i Nothing    = []
 listTag i (Just tag) = [MR.mtriple i PLabel tag]
 
@@ -326,7 +325,7 @@ mtype =
       return $ MR.makeTopRDF i (
              [ MR.mtriple i PType OParameterizedType
              , MR.mtriple i PType OType
-             , MR.mtriple i PValue ("Tuple" :: DT.Text)]
+             , MR.mtriple i PValue ("Tuple" :: MT.Text)]
           ++ listTag i l
           ++ MR.adopt i (x:xs)
         )
@@ -340,7 +339,7 @@ mtype =
       return $ MR.makeTopRDF i (
              [ MR.mtriple i PType OParameterizedType
              , MR.mtriple i PType OType
-             , MR.mtriple i PValue ("List" :: DT.Text)]
+             , MR.mtriple i PValue ("List" :: MT.Text)]
           ++ listTag i l
           ++ MR.adopt i [s]
         )
@@ -354,7 +353,7 @@ mtype =
       return $ MR.makeTopRDF i (
              [ MR.mtriple i PType OParameterizedType
              , MR.mtriple i PType OType
-             , MR.mtriple i PValue ("Record" :: DT.Text)]
+             , MR.mtriple i PValue ("Record" :: MT.Text)]
           ++ listTag i l
           ++ MR.adopt i ns
         )
@@ -618,7 +617,7 @@ arithmeticTable
       ]
   ]
 
-unaryOp :: DT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF
+unaryOp :: MT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF
 unaryOp s i (MR.TopRDF j xs) = MR.makeTopRDF i (
      [ MR.mtriple i PType OUnaryOp
      , MR.mtriple i PValue s
@@ -626,7 +625,7 @@ unaryOp s i (MR.TopRDF j xs) = MR.makeTopRDF i (
      ] ++ (MR.triplesOf xs)
   )
 
-binOp :: DT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF -> MR.TopRDF
+binOp :: MT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF -> MR.TopRDF
 binOp s i (MR.TopRDF j xs) (MR.TopRDF k ys) = MR.makeTopRDF i (
      -- TODO: The `binop` classification should not appear in the Morloc RDF.
      -- These binary expression should resolve into perfectly normal functions.

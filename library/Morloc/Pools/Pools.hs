@@ -14,24 +14,24 @@ module Morloc.Pools.Pools (generate) where
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
-import qualified Data.Text as DT
+import qualified Morloc.Text as MT
 
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 
 generate :: SparqlEndPoint -> IO [Script]
 generate ep = languagesQ ep >>= foo' where 
-  foo' :: [[Maybe DT.Text]] -> IO [Script]
+  foo' :: [[Maybe MT.Text]] -> IO [Script]
   foo' xss = sequence (map (generateLang ep) xss)
 
-generateLang :: SparqlEndPoint -> [Maybe DT.Text] -> IO Script
+generateLang :: SparqlEndPoint -> [Maybe MT.Text] -> IO Script
 generateLang e lang = case lang of
   [Just "R"] -> RLang.generate e
   [Just "py"] -> Py3.generate e
   [Just x] -> error ("The language " ++ show x ++ " is not supported")
   x -> error ("Bad SPARQL query:" ++ show x)
 
-languagesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+languagesQ :: SparqlEndPoint -> IO [[Maybe MT.Text]]
 languagesQ = [sparql|
   PREFIX mlc: <http://www.morloc.io/ontology/000/>
   PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>

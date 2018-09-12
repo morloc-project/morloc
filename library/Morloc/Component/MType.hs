@@ -14,17 +14,17 @@ module Morloc.Component.MType (fromSparqlDb) where
 import Morloc.Sparql
 import Morloc.Types
 import Morloc.Operators
-import qualified Morloc.Component.Util as MCU
-
 import Morloc.Builder hiding ((<$>),(<>))
+import qualified Morloc.Component.Util as MCU
+import qualified Morloc.Text as MT
+
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
 import qualified Data.Foldable as DF
-import qualified Data.Text as DT
 
 type ParentData =
-  ( DT.Text       -- type (e.g. mlc:functionType or mlc:atomicGeneric)
-  , Maybe DT.Text -- top-level name of the type (e.g. "List" or "Int")
+  ( MT.Text       -- type (e.g. mlc:functionType or mlc:atomicGeneric)
+  , Maybe MT.Text -- top-level name of the type (e.g. "List" or "Int")
   , Maybe Key     -- type id of the output if this is a function
   , Maybe Lang    -- type language ("Morloc" for a general type)
   , Maybe Name    -- typename from a typeDeclaration statement
@@ -40,9 +40,9 @@ instance MShow MType where
 fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MType)
 fromSparqlDb = MCU.simpleGraph toMType getParentData id (MCU.sendQuery hsparql)
 
-getParentData :: [Maybe DT.Text] -> ParentData 
+getParentData :: [Maybe MT.Text] -> ParentData 
 getParentData [Just t, v, o, l, n, ps] = (t, v, o, l, n, properties) where
-  properties = DF.concat . fmap (DT.splitOn ",") $ ps
+  properties = DF.concat . fmap (MT.splitOn ",") $ ps
 getParentData x = error ("Unexpected SPARQL result: " ++ show x)
 
 toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType

@@ -7,12 +7,11 @@ module Morloc (
 ) where
 
 import qualified Data.RDF as DR
-import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
-import qualified Data.Text.IO as DTIO
 import qualified System.IO as SIO
 import qualified System.Directory as SD
 
+import qualified Morloc.Text as MT
 import Morloc.Operators
 import Morloc.Types
 import qualified Morloc.Error as ME
@@ -24,7 +23,7 @@ import Morloc.Database.Typecheck
 import Morloc.Database.Construct
 
 -- | Build a Morloc program as a graph stored at a SparqlEndPoint
-buildProgram :: SparqlEndPoint -> DT.Text -> IO SparqlEndPoint
+buildProgram :: SparqlEndPoint -> MT.Text -> IO SparqlEndPoint
 buildProgram ep code = do
   configure ep 
   MP.parse Nothing code >>= doOrDie >>= Up.uploadRDF ep >>= stateResult
@@ -37,7 +36,7 @@ buildProgram ep code = do
     stateResult True = return ()
 
 -- | Build a program as a local executable
-writeProgram :: SparqlEndPoint -> DT.Text -> IO ()
+writeProgram :: SparqlEndPoint -> MT.Text -> IO ()
 writeProgram ep code = do
   buildProgram ep code >>= MG.generate >>= writeProgram'
   where
@@ -49,14 +48,14 @@ writeProgram ep code = do
     writeScript' :: Bool -> Script -> IO ()
     writeScript' isExe (Script base lang code) = do
       let f = base <> "." <> lang
-      DTIO.writeFile f code
+      MT.writeFile f code
       p <- SD.getPermissions f
       SD.setPermissions f (p {SD.executable = isExe})
 
 -- | Compile a program to RDF. Does not depend on a local SPARQL database. It
 -- also does not consider the local configuration or postprocessing and
 -- typechecking.
-writeRdfTo :: DR.RdfSerializer s => s -> DT.Text -> FilePath -> IO ()
+writeRdfTo :: DR.RdfSerializer s => s -> MT.Text -> FilePath -> IO ()
 writeRdfTo s loc ttl = do
   rdf <- MP.parse Nothing loc >>= doOrDie
   handle <- SIO.openFile ttl SIO.WriteMode
@@ -64,11 +63,11 @@ writeRdfTo s loc ttl = do
     <* SIO.hClose handle
 
 -- | Triple serialization wrapper around `writeRdfTo`
-writeTripleTo :: DT.Text -> FilePath -> IO ()
+writeTripleTo :: MT.Text -> FilePath -> IO ()
 writeTripleTo = writeRdfTo DR.NTriplesSerializer
 
 -- | Turtle serialization wrapper around `writeRdfTo`
-writeTurtleTo :: DT.Text -> FilePath -> IO ()
+writeTurtleTo :: MT.Text -> FilePath -> IO ()
 writeTurtleTo = writeRdfTo (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
 
 doOrDie :: ME.ThrowsError a -> IO a

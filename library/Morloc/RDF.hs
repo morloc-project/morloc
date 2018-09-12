@@ -36,18 +36,16 @@ module Morloc.RDF (
   , rdfAppend
 ) where
 
+import qualified Morloc.Text as MT
+
 import qualified Data.RDF as DR
-import qualified Data.Text as DT
 import qualified Data.Map.Strict as DMS
 import qualified Data.Maybe as DM
-import qualified Safe
 import qualified Data.Scientific as DS
 
 import Morloc.Types
 -- TODO: remove this import
 import Morloc.Operators
--- TODO: remove this import
-import Morloc.Util (show')
 
 type RDF = DR.RDF DR.TList
 
@@ -55,19 +53,19 @@ data TopRDF = TopRDF DR.Node RDF deriving(Show)
 
 -- | Join an RDF prefix and base creating a URI node
 infix 9 .:.
-(.:.) :: DT.Text -> DT.Text -> DR.Node
+(.:.) :: MT.Text -> MT.Text -> DR.Node
 prefix .:. base = DR.UNode (prefix <> base)
 
-mlcPre :: DT.Text
+mlcPre :: MT.Text
 mlcPre = "http://www.morloc.io/ontology/000/"
 
-midPre :: DT.Text
+midPre :: MT.Text
 midPre = "http://www.morloc.io/XXX/mid/"
 
-rdfPre :: DT.Text
+rdfPre :: MT.Text
 rdfPre = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 
-xsdPre :: DT.Text
+xsdPre :: MT.Text
 xsdPre = "http://www.w3.org/2001/XMLSchema#"
 
 prefixMap :: DR.PrefixMappings
@@ -82,7 +80,7 @@ instance MorlocNodeLike DR.Node where
   asRdfNode = id
   fromRdfNode = id
 
-instance MorlocNodeLike DT.Text where
+instance MorlocNodeLike MT.Text where
   asRdfNode s = DR.LNode (DR.PlainL s)
   fromRdfNode (DR.LNode (DR.PlainL s)) = s
   fromRdfNode (DR.LNode (DR.PlainLL s _)) = s
@@ -90,12 +88,12 @@ instance MorlocNodeLike DT.Text where
   fromRdfNode (DR.UNode s) = s
   fromRdfNode (DR.BNode s) = s
   -- TODO: match to what rdf4h actually generates
-  fromRdfNode (DR.BNodeGen i) = DT.pack ("auto_" ++ show i)
+  fromRdfNode (DR.BNodeGen i) = MT.pack ("auto_" ++ show i)
 
 instance MorlocNodeLike DS.Scientific where
-  asRdfNode x = DR.LNode (DR.TypedL (show' x) (xsdPre <> "decimal"))
+  asRdfNode x = DR.LNode (DR.TypedL (MT.show' x) (xsdPre <> "decimal"))
   fromRdfNode (DR.LNode (DR.TypedL x t))
-    | t == (xsdPre <> "decimal") = read (DT.unpack x)
+    | t == (xsdPre <> "decimal") = MT.read' x
     | otherwise = error ("Cannot read number from node of type: " ++ show t) 
   fromRdfNode n = error ("Cannot read number from node: " ++ show n)
 
@@ -111,7 +109,7 @@ instance MorlocNodeLike Bool where
   fromRdfNode x = error ("Could not derive Bool from node: " ++ show x) 
 
 instance MorlocNodeLike GraphPredicate where
-  asRdfNode (PElem i)  = rdfPre .:. ("_" <> show' i)
+  asRdfNode (PElem i)  = rdfPre .:. ("_" <> MT.show' i)
   asRdfNode PLabel     = rdfPre .:. "label"
   asRdfNode PType      = rdfPre .:. "type"
   asRdfNode PValue     = rdfPre .:. "value"
@@ -148,7 +146,7 @@ instance MorlocNodeLike GraphPredicate where
     | n == ( mlcPre .:. "import"     ) = PImport
     | otherwise =
         case
-          (DT.stripPrefix (rdfPre <> "_") (fromRdfNode n)) >>= (Safe.readMay . DT.unpack)
+          (MT.stripPrefix (rdfPre <> "_") (fromRdfNode n)) >>= MT.readMay'
         of
           (Just i) -> PElem i
           Nothing -> error ("Unsupported predicate: " ++ show n)
@@ -252,14 +250,14 @@ adopt sbj objs =
       -- TODO: straighten this out, it is an artefact of my element reversal
       = mtriple sbj' (PElem index) obj'
 
-showTopRDF :: TopRDF -> DT.Text
-showTopRDF (TopRDF _ rdf) = DT.pack $ DR.showGraph rdf
+showTopRDF :: TopRDF -> MT.Text
+showTopRDF (TopRDF _ rdf) = MT.pack $ DR.showGraph rdf
 
 -- | Make a UNode from a number, optionall with a prefix. This is used by
 -- Morloc.State to create unique ids.
-idUri :: Maybe DT.Text -> Int -> DR.Node
-idUri Nothing  i = midPre .:. show' i
-idUri (Just s) i = midPre .:. (s <> "_" <> show' i)
+idUri :: Maybe MT.Text -> Int -> DR.Node
+idUri Nothing  i = midPre .:. MT.show' i
+idUri (Just s) i = midPre .:. (s <> "_" <> MT.show' i)
 
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i
@@ -268,7 +266,7 @@ rdfId (TopRDF i _) = i
 -- The last survivors of the Walker module
 -- =======================================
 
-valueOf :: DR.Node -> [DT.Text]
+valueOf :: DR.Node -> [MT.Text]
 valueOf (DR.LNode (DR.TypedL s _)) = [s]
 valueOf (DR.LNode (DR.PlainL s)) = [s]
 valueOf _ = []
@@ -288,7 +286,7 @@ up :: DR.Rdf a
   -> [DR.Subject]   -- chain function, allows searching in parallel
 up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
 
-getImportedFiles :: DR.Rdf a => DR.RDF a -> [DT.Text]
+getImportedFiles :: DR.Rdf a => DR.RDF a -> [MT.Text]
 getImportedFiles rdf
   =   up rdf (rdfPre .:. "type") (mlcPre .:. "import")
   >>= down rdf (mlcPre .:. "name")

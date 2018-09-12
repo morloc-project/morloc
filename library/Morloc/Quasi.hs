@@ -9,7 +9,8 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import qualified Morloc.Builder as Gen
 import qualified Morloc.RDF as MR
-import qualified Data.Text as DT
+import qualified Morloc.Text as MT
+
 import qualified Language.Haskell.Meta.Parse as MP
 
 import Text.Parsec
@@ -55,18 +56,18 @@ idoc = QuasiQuoter {
           (Left err) -> error err
 
 
-maybeValue :: Conn.BindingValue -> Maybe DT.Text
+maybeValue :: Conn.BindingValue -> Maybe MT.Text
 maybeValue (Conn.Bound (MR.LNode (MR.PlainL  x  ))) = Just x
 maybeValue (Conn.Bound (MR.LNode (MR.PlainLL x _))) = Just x
 maybeValue (Conn.Bound (MR.LNode (MR.TypedL  x _))) = Just x
 maybeValue (Conn.Bound (MR.UNode x))             = Just x
 maybeValue _ = Nothing
 
-values :: Maybe [[Conn.BindingValue]] -> [[Maybe DT.Text]]
+values :: Maybe [[Conn.BindingValue]] -> [[Maybe MT.Text]]
 values Nothing = error "SPARQL command failed"
 values (Just xss) = (fmap . fmap) maybeValue xss
 
-simpleSelect :: Gen.Doc -> SparqlEndPoint -> IO ([[Maybe DT.Text]])
+simpleSelect :: Gen.Doc -> SparqlEndPoint -> IO ([[Maybe MT.Text]])
 -- selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
 simpleSelect d e = fmap values $ (flip Conn.selectQuery') (Gen.render' d) e
 

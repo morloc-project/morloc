@@ -16,8 +16,6 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Builder hiding ((<$>))
 
-import qualified Data.Text as DT 
-
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {

@@ -19,12 +19,12 @@ import qualified Morloc.Util as MU
 import qualified Morloc.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
+import qualified Morloc.Text as MT
 
 import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
 import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
-import qualified Data.Text as DT
 import qualified Data.Maybe as DM
 import qualified Safe as Safe
 
@@ -45,7 +45,7 @@ fromSparqlDb ep = do
 asTuple
   :: Map.Map Key MType
   -> Map.Map Key MData
-  -> [Maybe DT.Text]
+  -> [Maybe MT.Text]
   -> (Manifold, Either Key Argument)
 asTuple typemap datamap [ Just callId'
                         , abstractTypeId'
@@ -77,7 +77,7 @@ asTuple typemap datamap [ Just callId'
       , mExported     = exported' == "true"
       , mSourced      = sourced'  == "true"
       , mSourcePath   = sourcePath'
-      , mBoundVars    = maybe [] (DT.splitOn ",") bvars'
+      , mBoundVars    = maybe [] (MT.splitOn ",") bvars'
       , mLang         = sourceLang'
       , mArgs         = [] -- this will be set in the next step
       }
@@ -117,14 +117,14 @@ makeArgument
   :: ( Maybe Name    -- argument name (if it is a bound argument)
      , Maybe Key     -- argument callId (if it is a function call)
      , Maybe MData   -- argument data (if this is data)
-     , Maybe DT.Text -- the element (rdf:_<num>)
+     , Maybe MT.Text -- the element (rdf:_<num>)
      )
   -> Either Key Argument
 makeArgument (Just x  , _       , _       , _ ) = Right $ ArgName x
 makeArgument (_       , Just x  , _       , _ ) = Left x
 makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just e) =
-  case (DT.stripPrefix (MR.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
+  case (MT.stripPrefix (MR.rdfPre <> "_") e) >>= MT.readMay' of
     Just i -> Right $ ArgPosi i
     _ -> error ("Unexpected value for element: " ++ show e)
 
@@ -175,7 +175,7 @@ unroll ms = concat $ map unroll' ms
     signKey :: Key -> Key -> Key
     signKey m r =
       case
-        (DT.stripPrefix MR.midPre m, DT.stripPrefix MR.midPre r)
+        (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
       of
         (Just mKey, Just rKey) -> MR.midPre <> mKey <> "_" <> rKey
         _ -> error ("callId of invalid form: " ++ show (m, r))
@@ -185,7 +185,7 @@ unroll ms = concat $ map unroll' ms
 
 
 
-sparqlQuery :: SparqlEndPoint -> IO [[Maybe DT.Text]]
+sparqlQuery :: SparqlEndPoint -> IO [[Maybe MT.Text]]
 sparqlQuery = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>

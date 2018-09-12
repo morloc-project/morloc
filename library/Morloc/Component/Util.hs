@@ -19,12 +19,12 @@ module Morloc.Component.Util (
 import Morloc.Types
 import Morloc.Sparql
 import qualified Morloc.RDF as MR
+import qualified Morloc.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
 import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
-import qualified Data.Text as DT
 
 -- | This works for building a map based off a simple tree structure
 simpleGraph
@@ -33,9 +33,9 @@ simpleGraph
        -> key
        -> b
      )
-  -> ([Maybe DT.Text] -> a) -- prepare the specific data
-  -> (DT.Text -> key) -- map a text field to an id
-  -> (SparqlEndPoint -> IO [[Maybe DT.Text]])
+  -> ([Maybe MT.Text] -> a) -- prepare the specific data
+  -> (MT.Text -> key) -- map a text field to an id
+  -> (SparqlEndPoint -> IO [[Maybe MT.Text]])
   -> SparqlEndPoint
   -> IO (Map.Map key b)
 simpleGraph f g h query ep
@@ -69,14 +69,14 @@ graphify f xs = Map.fromList $ zip roots (map (f hash) roots)
 withSnd :: (a -> b) -> (c, a) -> (c , b)
 withSnd f (x, y) = (x, f y)
 
-sendQuery :: Query SelectQuery -> SparqlEndPoint -> IO [[Maybe DT.Text]]
+sendQuery :: Query SelectQuery -> SparqlEndPoint -> IO [[Maybe MT.Text]]
 sendQuery query ep = fmap values (selectQuery ep query)
   where
-    values :: Maybe [[BindingValue]] -> [[Maybe DT.Text]]
+    values :: Maybe [[BindingValue]] -> [[Maybe MT.Text]]
     values Nothing = error "SPARQL command failed"
     values (Just xss) = (fmap . fmap) maybeValue xss
 
-    maybeValue :: BindingValue -> Maybe DT.Text
+    maybeValue :: BindingValue -> Maybe MT.Text
     maybeValue (Bound (MR.LNode (MR.PlainL  x  ))) = Just x
     maybeValue (Bound (MR.LNode (MR.PlainLL x _))) = Just x
     maybeValue (Bound (MR.LNode (MR.TypedL  x _))) = Just x
@@ -84,4 +84,4 @@ sendQuery query ep = fmap values (selectQuery ep query)
     maybeValue _ = Nothing
 
 isElement_ :: PredicateTermLike a => a -> Query ()
-isElement_ x = filterExpr_ (regex (str x) ("_[0-9]+$" :: DT.Text))
+isElement_ x = filterExpr_ (regex (str x) ("_[0-9]+$" :: MT.Text))
