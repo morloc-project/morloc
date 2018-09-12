@@ -18,13 +18,12 @@ module Morloc.State
   , getSourceUri
 ) where
 
+import qualified Morloc.RDF as R
+
 import Text.Megaparsec
-import qualified Data.RDF as DR
 import qualified Control.Monad.State as CMS
 import Data.Void
 import qualified Data.Text as DT
-
-import qualified Morloc.Triple as M3
 
 
 
@@ -45,11 +44,11 @@ parserStateEmpty = ParserState {
 }
 
 -- | Get an RDF URI and increment the internal counter
-getId :: Parser DR.Node
+getId :: Parser R.Node
 getId = do
   s <- CMS.get
   CMS.put (s {stateCount = (stateCount s) + 1})
-  return $ M3.idUri (stateSourceUri s) (stateCount s)
+  return $ R.idUri (stateSourceUri s) (stateCount s)
 
 getSourceUri :: Parser DT.Text
 getSourceUri = do

@@ -11,13 +11,10 @@ Stability   : experimental
 
 module Morloc.Component.MData (fromSparqlDb) where
 
-import qualified Database.HSparql.Connection as Conn
-import Database.HSparql.QueryGenerator
-import qualified Data.RDF as DR
-
+import Morloc.Sparql
 import Morloc.Types
-import Morloc.Operators hiding ((.:.))
-import qualified Morloc.Triple as M3
+import Morloc.Operators
+import qualified Morloc.RDF as MR
 import qualified Morloc.Component.Util as MCU
 
 import Morloc.Builder hiding ((<$>), (<>))
@@ -36,15 +33,15 @@ toMData h k = toMData' (Map.lookup k h) where
   toMData' :: (Maybe ((DT.Text, Maybe DT.Text), [Key])) -> MData
   -- primitive "leaf" data
   toMData' (Just ((mtype, Just x), _))
-    | mtype == M3.mlcPre <> "number"  = Num' x
-    | mtype == M3.mlcPre <> "string"  = Str' x
-    | mtype == M3.mlcPre <> "boolean" = Log' (x == "true")
+    | mtype == MR.mlcPre <> "number"  = Num' x
+    | mtype == MR.mlcPre <> "string"  = Str' x
+    | mtype == MR.mlcPre <> "boolean" = Log' (x == "true")
     | otherwise = error "Unexpected type ..."
   -- containers "node" data
   toMData' (Just ((mtype, _), xs))
-    | mtype == M3.mlcPre <> "list"   = Lst' (map (toMData h) xs)
-    | mtype == M3.mlcPre <> "tuple"  = Tup' (map (toMData h) xs)
-    | mtype == M3.mlcPre <> "record" = error "Records not yet supported"
+    | mtype == MR.mlcPre <> "list"   = Lst' (map (toMData h) xs)
+    | mtype == MR.mlcPre <> "tuple"  = Tup' (map (toMData h) xs)
+    | mtype == MR.mlcPre <> "record" = error "Records not yet supported"
     | otherwise = error "Unexpected type ..."
   -- shit happens
   toMData' _ = error "Unexpected type"
@@ -58,22 +55,45 @@ instance MShow MData where
   mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")
                               (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
 
+
+emptyMeta = MTypeMeta {
+      metaName = Nothing
+    , metaProp = []
+    , metaLang = Nothing
+  }
+
+mData2mType :: MData -> MType
+mData2mType (Num' _) = MDataType emptyMeta "Number" []
+mData2mType (Str' _) = MDataType emptyMeta "String" []
+mData2mType (Log' _) = MDataType emptyMeta "Bool" []
+mData2mType (Tup' xs) = MDataType emptyMeta "Tuple" (map mData2mType xs)
+mData2mType (Rec' xs) = MDataType emptyMeta "Tuple" (map record xs) where
+  record (key, value) = MDataType emptyMeta "Tuple" [ MDataType emptyMeta "String" []
+                                                    , mData2mType value]
+mData2mType (Lst' xs) = MDataType emptyMeta "List" [listType xs] where
+  listType [] = MDataType emptyMeta "*" [] -- cannot determine type
+  listType [x] = mData2mType x
+  listType (x:xs) =
+    if
+      all (\a -> mData2mType a == mData2mType x) xs
+    then
+      mData2mType x
+    else
+    error "Lists must be homogenous"
+
 hsparql :: Query SelectQuery
 hsparql= do
-  mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
-  rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-
   id_      <- var
   element_ <- var
   child_   <- var
   type_    <- var
   value_   <- var
 
-  triple_ id_ (rdf .:. "type") (mlc .:. "data")
-  triple_ id_ (rdf .:. "type") type_
-  filterExpr (type_ .!=. (mlc .:. "data"))
+  triple_ id_ PType OData
+  triple_ id_ PType type_
+  filterExpr (type_ .!=. OData)
 
-  optional_ $ triple_ id_ (rdf .:. "value") value_
+  optional_ $ triple_ id_ PValue value_
   
   optional_ $ do
       triple_ id_ element_ child_

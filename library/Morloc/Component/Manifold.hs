@@ -16,7 +16,7 @@ import Morloc.Operators
 import Morloc.Quasi
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
-import qualified Morloc.Triple as M3
+import qualified Morloc.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
 
@@ -124,7 +124,7 @@ makeArgument (Just x  , _       , _       , _ ) = Right $ ArgName x
 makeArgument (_       , Just x  , _       , _ ) = Left x
 makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just e) =
-  case (DT.stripPrefix (M3.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
+  case (DT.stripPrefix (MR.rdfPre <> "_") e) >>= (Safe.readMay . DT.unpack) of
     Just i -> Right $ ArgPosi i
     _ -> error ("Unexpected value for element: " ++ show e)
 
@@ -153,10 +153,18 @@ unroll ms = concat $ map unroll' ms
   where
     unroll' :: Manifold -> [Manifold]
     unroll' m
-      | not ((mCalled m) && (not $ mSourced m)) = [m]
-      | otherwise = case filter (declaringManifold m) ms of
-         [r] -> unrollPair m r
-         _ -> error "Expected exactly one declaration"
+      | (mCalled m) && (not $ mSourced m) =
+          case
+            filter (declaringManifold m) ms
+          of
+            [r] -> unrollPair m r
+            xs  -> error $ unlines
+              [ "In this manifold:"
+              , show m
+              , "Expected to find one associated DataDeclaration, but found:"
+              , show ms
+              ]
+      | otherwise = [m]
 
     unrollPair :: Manifold -> Manifold -> [Manifold]
     unrollPair m r = [m'] ++ unroll' r' where
@@ -167,9 +175,9 @@ unroll ms = concat $ map unroll' ms
     signKey :: Key -> Key -> Key
     signKey m r =
       case
-        (DT.stripPrefix M3.midPre m, DT.stripPrefix M3.midPre r)
+        (DT.stripPrefix MR.midPre m, DT.stripPrefix MR.midPre r)
       of
-        (Just mKey, Just rKey) -> M3.midPre <> mKey <> "_" <> rKey
+        (Just mKey, Just rKey) -> MR.midPre <> mKey <> "_" <> rKey
         _ -> error ("callId of invalid form: " ++ show (m, r))
 
     declaringManifold :: Manifold -> Manifold -> Bool

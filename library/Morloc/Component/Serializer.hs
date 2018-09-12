@@ -17,12 +17,12 @@ module Morloc.Component.Serializer (
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
+import Morloc.Sparql
+import Morloc.Builder hiding ((<$>), (<>))
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
-import qualified Data.Maybe as DM
 
-import Morloc.Builder hiding ((<$>), (<>))
-import Morloc.Database.HSparql.Connection
+import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as DT
 
@@ -43,7 +43,7 @@ fromSparqlDb lang ep
   <*> (map tuplify <$> sparqlQuery lang' ep)
   where
 
-    tuplify :: [Maybe Text] -> SerialData
+    tuplify :: [Maybe DT.Text] -> SerialData
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
     tuplify e = error ("Unexpected SPARQL result: " ++ show e)
@@ -85,7 +85,7 @@ fromSparqlDb lang ep
       Nothing -> error ("Could not find SerialMap for key: "
                         ++ show k ++ " for " ++ DT.unpack lang)
 
-sparqlQuery :: Doc -> SparqlEndPoint -> IO [[Maybe Text]]
+sparqlQuery :: Doc -> SparqlEndPoint -> IO [[Maybe DT.Text]]
 sparqlQuery lang = [sparql|
 PREFIX mlc: <http://www.morloc.io/ontology/000/>
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>

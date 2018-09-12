@@ -8,13 +8,13 @@ module Morloc.Quasi (
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import qualified Morloc.Builder as Gen
-import qualified Data.RDF as DR
-import qualified Morloc.Database.HSparql.Connection as Conn
+import qualified Morloc.RDF as MR
 import qualified Data.Text as DT
 import qualified Language.Haskell.Meta.Parse as MP
 
 import Text.Parsec
 
+import Morloc.Sparql as Conn
 import Morloc.Types (SparqlEndPoint)
 
 type Parser = Parsec String ()
@@ -56,10 +56,10 @@ idoc = QuasiQuoter {
 
 
 maybeValue :: Conn.BindingValue -> Maybe DT.Text
-maybeValue (Conn.Bound (DR.LNode (DR.PlainL  x  ))) = Just x
-maybeValue (Conn.Bound (DR.LNode (DR.PlainLL x _))) = Just x
-maybeValue (Conn.Bound (DR.LNode (DR.TypedL  x _))) = Just x
-maybeValue (Conn.Bound (DR.UNode x))             = Just x
+maybeValue (Conn.Bound (MR.LNode (MR.PlainL  x  ))) = Just x
+maybeValue (Conn.Bound (MR.LNode (MR.PlainLL x _))) = Just x
+maybeValue (Conn.Bound (MR.LNode (MR.TypedL  x _))) = Just x
+maybeValue (Conn.Bound (MR.UNode x))             = Just x
 maybeValue _ = Nothing
 
 values :: Maybe [[Conn.BindingValue]] -> [[Maybe DT.Text]]

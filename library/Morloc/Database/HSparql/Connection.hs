@@ -8,15 +8,17 @@ the addition of the `*Query'` functions that take a raw String.
 -}
 
 module Morloc.Database.HSparql.Connection
-    ( BindingValue(..)
-    -- * submit queries using raw SPARQL strings
-    , selectQuery'
-    , constructQuery'
-    , askQuery'
-    , updateQuery'
-    , describeQuery'
-    )
+  (
+  -- * submit queries using raw SPARQL strings
+    selectQuery'
+  , constructQuery'
+  , askQuery'
+  , updateQuery'
+  , describeQuery'
+  )
 where
+
+import Database.HSparql.Connection (BindingValue(..)) 
 
 import Control.Monad
 import Data.Maybe
@@ -31,11 +33,6 @@ import qualified Data.ByteString.Char8 as B
 import Network.URI hiding (URI)
 
 import Morloc.Types (SparqlEndPoint)
-
--- |Local representations of incoming XML results.
-data BindingValue = Bound RDF.Node    -- ^RDF Node (UNode, BNode, LNode)
-                  | Unbound       -- ^Unbound result value
-                  deriving (Show, Eq)
 
 -- |Base 'QName' for results with a SPARQL-result URI specified.
 sparqlResult :: String -> QName

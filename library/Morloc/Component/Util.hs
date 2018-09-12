@@ -17,9 +17,8 @@ module Morloc.Component.Util (
 ) where
 
 import Morloc.Types
-import qualified Database.HSparql.Connection as Conn
-import qualified Data.RDF as DR
-import Database.HSparql.QueryGenerator
+import Morloc.Sparql
+import qualified Morloc.RDF as MR
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
@@ -71,17 +70,17 @@ withSnd :: (a -> b) -> (c, a) -> (c , b)
 withSnd f (x, y) = (x, f y)
 
 sendQuery :: Query SelectQuery -> SparqlEndPoint -> IO [[Maybe DT.Text]]
-sendQuery query ep = fmap values (Conn.selectQuery ep query)
+sendQuery query ep = fmap values (selectQuery ep query)
   where
-    values :: Maybe [[Conn.BindingValue]] -> [[Maybe DT.Text]]
+    values :: Maybe [[BindingValue]] -> [[Maybe DT.Text]]
     values Nothing = error "SPARQL command failed"
     values (Just xss) = (fmap . fmap) maybeValue xss
 
-    maybeValue :: Conn.BindingValue -> Maybe DT.Text
-    maybeValue (Conn.Bound (DR.LNode (DR.PlainL  x  ))) = Just x
-    maybeValue (Conn.Bound (DR.LNode (DR.PlainLL x _))) = Just x
-    maybeValue (Conn.Bound (DR.LNode (DR.TypedL  x _))) = Just x
-    maybeValue (Conn.Bound (DR.UNode x))             = Just x
+    maybeValue :: BindingValue -> Maybe DT.Text
+    maybeValue (Bound (MR.LNode (MR.PlainL  x  ))) = Just x
+    maybeValue (Bound (MR.LNode (MR.PlainLL x _))) = Just x
+    maybeValue (Bound (MR.LNode (MR.TypedL  x _))) = Just x
+    maybeValue (Bound (MR.UNode x))             = Just x
     maybeValue _ = Nothing
 
 isElement_ :: PredicateTermLike a => a -> Query ()

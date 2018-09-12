@@ -11,17 +11,12 @@ Stability   : experimental
 
 module Morloc.Component.MType (fromSparqlDb) where
 
-import qualified Database.HSparql.Connection as Conn
-import Database.HSparql.QueryGenerator
-import qualified Data.RDF as DR
-
+import Morloc.Sparql
 import Morloc.Types
-import Morloc.Operators hiding ((.:.))
-import qualified Morloc.Triple as M3
+import Morloc.Operators
 import qualified Morloc.Component.Util as MCU
 
 import Morloc.Builder hiding ((<$>),(<>))
-import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
 import qualified Data.Foldable as DF
@@ -67,38 +62,34 @@ toMType h k = toMType' (Map.lookup k h) where
 
 hsparql :: Query SelectQuery
 hsparql = do
-  mlc <- prefix "mlc" (iriRef "http://www.morloc.io/ontology/000/")
-  rdf <- prefix "rdf" (iriRef "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-  mid <- prefix "mid" (iriRef "http://www.morloc.io/XXX/mid/")
-
-  id_ <- var
-  element_ <- var
-  child_ <- var
-  type_ <- var
-  value_ <- var
-  output_ <- var
-  lang_ <- var
-  typename_ <- var
-  property_ <- var
+  id_         <- var
+  element_    <- var
+  child_      <- var
+  type_       <- var
+  value_      <- var
+  output_     <- var
+  lang_       <- var
+  typename_   <- var
+  property_   <- var
   properties_ <- var
 
-  triple_ id_ (rdf .:. "type") (mlc .:. "type")
-  triple_ id_ (rdf .:. "type") type_
-  filterExpr (type_ .!=. (mlc .:. "type"))
+  triple_ id_ PType OType
+  triple_ id_ PType type_
+  filterExpr (type_ .!=. PType)
 
-  optional_ $ triple_ id_ (rdf .:. "value") value_
+  optional_ $ triple_ id_ PType value_
   
   optional_ $ do
     triple_ id_ element_ child_
     MCU.isElement_ element_
 
-  optional_ $ triple_ id_ (mlc .:. "output") output_
+  optional_ $ triple_ id_ POutput output_
   optional_ $ do
     typedec_ <- var 
-    triple_ typedec_ (rdf .:. "type") (mlc .:. "typeDeclaration")
-    triple_ typedec_ (mlc .:. "lang") lang_
-    triple_ typedec_ (mlc .:. "lhs")  typename_
-    triple_ typedec_ (mlc .:. "rhs")  id_
+    triple_ typedec_ PType OTypeDeclaration
+    triple_ typedec_ PLang lang_
+    triple_ typedec_ PLeft  typename_
+    triple_ typedec_ PRight  id_
 
   groupBy id_
   groupBy element_

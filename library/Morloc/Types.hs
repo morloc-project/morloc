@@ -10,17 +10,12 @@ Stability   : experimental
 -}
 
 module Morloc.Types ( 
-    Script(..)
-  , Manifold(..)
-  , Argument(..)
-  , MData(..)
-  , MType(..)
-  , mData2mType -- TODO: this should no be here
-  , MTypeMeta(..)
-  , MShow(..)
-  , SerialMap(..)
+  -- ** Typeclasses
+    MShow(..)
+  , MorlocNodeLike(..)
+  , MorlocTypeable(..)
+  -- ** Synonyms
   , SparqlEndPoint  
-  , Text
   , AbstractType -- ^ A universal Morloc type
   , ConcreteType -- ^ A language-specific type
   , Name
@@ -32,17 +27,33 @@ module Morloc.Types (
   , Element
   , ScriptGenerator
   , CodeGenerator
+  -- ** Data
+  , Script(..)
+  , Manifold(..)
+  , Argument(..)
+  , MData(..)
+  , MType(..)
+  , MTypeMeta(..)
+  , GraphPredicate(..)
+  , GraphObject(..)
+  , SerialMap(..)
 ) where
 
-import qualified Data.Text as DT
-import qualified Data.Map.Strict as Map
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Data.Text (Text)
+import Data.RDF (Node)
+import Data.Map.Strict (Map)
+import Text.PrettyPrint.Leijen.Text (Doc)
 
 -- | Write into Morloc code
 class MShow a where
   mshow :: a -> Doc
 
-type Text = DT.Text
+class MorlocNodeLike a where
+  asRdfNode :: a -> Node
+  fromRdfNode :: Node -> a
+
+class MorlocTypeable a where
+  asType :: a -> MType
 
 type Name    = Text
 type Lang    = Text
@@ -107,35 +118,10 @@ data MTypeMeta = MTypeMeta {
   }
   deriving(Show, Eq, Ord)
 
-emptyMeta = MTypeMeta {
-      metaName = Nothing
-    , metaProp = []
-    , metaLang = Nothing
-  }
-
-mData2mType :: MData -> MType
-mData2mType (Num' _) = MDataType emptyMeta "Number" []
-mData2mType (Str' _) = MDataType emptyMeta "String" []
-mData2mType (Log' _) = MDataType emptyMeta "Bool" []
-mData2mType (Tup' xs) = MDataType emptyMeta "Tuple" (map mData2mType xs)
-mData2mType (Rec' xs) = MDataType emptyMeta "Tuple" (map record xs) where
-  record (key, value) = MDataType emptyMeta "Tuple" [ MDataType emptyMeta "String" []
-                                                    , mData2mType value]
-mData2mType (Lst' xs) = MDataType emptyMeta "List" [listType xs] where
-  listType [] = MDataType emptyMeta "*" [] -- cannot determine type
-  listType [x] = mData2mType x
-  listType (x:xs) =
-    if
-      all (\a -> mData2mType a == mData2mType x) xs
-    then
-      mData2mType x
-    else
-    error "Lists must be homogenous"
-
 data SerialMap = SerialMap {
       serialLang :: Lang
-    , serialPacker   :: Map.Map MType Name
-    , serialUnpacker :: Map.Map MType Name
+    , serialPacker   :: Map MType Name
+    , serialUnpacker :: Map MType Name
     , serialGenericPacker   :: Name
     , serialGenericUnpacker :: Name
     , serialSources :: [Path] -- Later, I might want to link the source files to
@@ -157,3 +143,57 @@ data Script = Script {
     , scriptCode :: Text -- ^ full script source code
   }
   deriving(Ord, Eq)
+
+data GraphPredicate
+  = PElem Int
+  | PAlias
+  | PConstraint
+  | PLabel
+  | PLang
+  | PLeft
+  | PNamespace
+  | POutput
+  | PPath
+  | PProperty
+  | PRight
+  | PType
+  | PValue
+  | PKey
+  | PNot
+  | PName
+  | PImport
+  deriving(Show, Eq, Ord)
+
+data GraphObject
+  = OLiteral Text
+  | OAccess
+  | OAtomicGenericType
+  | OAtomicType
+  | OBinaryOp
+  | OBoolean
+  | OCall
+  | OData
+  | ODataDeclaration
+  | OEmptyType
+  | OExport
+  | OFunctionType
+  | OImport
+  | OList
+  | OName
+  | ONamedType
+  | ONumber
+  | OParameterizedGenericType
+  | OParameterizedType
+  | ORecord
+  | ORecordEntry
+  | ORestrictedImport
+  | OScript
+  | OSource
+  | OString
+  | OTuple
+  | OType
+  | OTypeDeclaration
+  | OUnaryOp
+  | OEmpty
+  | OBinOp
+  deriving(Show, Eq, Ord)
