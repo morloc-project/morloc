@@ -32,6 +32,7 @@ dependencies:
   - mtl
   - network-uri
   - parsec
+  - pretty-simple
   - rdf4h
   - safe
   - scientific

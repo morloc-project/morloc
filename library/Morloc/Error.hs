@@ -14,8 +14,10 @@ module Morloc.Error
 (
     MorlocError(..)
   , ThrowsError
+  , error'
 ) where
 
+import qualified Morloc.Text as MT
 import qualified Text.Megaparsec.Error as PE
 import Data.Void
 
@@ -44,3 +46,6 @@ morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
 morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
+
+error' :: MT.Text -> a
+error' x = error $ MT.unpack x

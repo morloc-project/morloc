@@ -14,6 +14,7 @@ module Morloc.Component.Manifold (fromSparqlDb) where
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Quasi
+import qualified Morloc.Error as ME
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Morloc.RDF as MR
@@ -21,12 +22,10 @@ import qualified Morloc.Component.MType as MCT
 import qualified Morloc.Component.MData as MCD 
 import qualified Morloc.Text as MT
 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Morloc.Builder hiding ((<$>), (<>))
 import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
-import qualified Data.Maybe as DM
-import qualified Safe as Safe
 
 -- | Collect most of the info needed to build all manifolds
 fromSparqlDb :: SparqlEndPoint -> IO [Manifold]
@@ -88,7 +87,7 @@ asTuple typemap datamap [ Just callId'
     , element'
     )
   )
-asTuple _ _ x = error ("Unexpected SPARQL row:\n" ++ show x)
+asTuple _ _ x = ME.error' ("Unexpected SPARQL row:\n" <> MT.pretty x)
 
 setCalls :: [(Manifold, [Either Key Argument])] -> [Manifold]
 setCalls xs = map (\(m, args) -> m { mArgs = map (set hash) args }) xs
@@ -126,7 +125,7 @@ makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just e) =
   case (MT.stripPrefix (MR.rdfPre <> "_") e) >>= MT.readMay' of
     Just i -> Right $ ArgPosi i
-    _ -> error ("Unexpected value for element: " ++ show e)
+    _ -> ME.error' ("Unexpected value for element: " <> MT.pretty e)
 
 propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
 propagateBoundVariables ms = map setBoundVars ms 
@@ -158,11 +157,11 @@ unroll ms = concat $ map unroll' ms
             filter (declaringManifold m) ms
           of
             [r] -> unrollPair m r
-            xs  -> error $ unlines
+            xs  -> ME.error' $ MT.unlines
               [ "In this manifold:"
-              , show m
+              , MT.pretty m
               , "Expected to find one associated DataDeclaration, but found:"
-              , show ms
+              , MT.pretty xs
               ]
       | otherwise = [m]
 
@@ -178,7 +177,7 @@ unroll ms = concat $ map unroll' ms
         (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
       of
         (Just mKey, Just rKey) -> MR.midPre <> mKey <> "_" <> rKey
-        _ -> error ("callId of invalid form: " ++ show (m, r))
+        _ -> ME.error' ("callId of invalid form: " <> MT.pretty (m, r))
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
