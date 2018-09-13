@@ -106,7 +106,8 @@ data MData
   deriving(Show, Eq, Ord)
 
 data MType
-  = MDataType MTypeMeta Name [MType]
+  = MConcType MTypeMeta Name [MType]
+  | MAbstType MTypeMeta Name [MType]
   | MFuncType MTypeMeta [MType] MType
   deriving(Show, Eq, Ord)
 

@@ -17,6 +17,7 @@ import Morloc.Operators
 import Morloc.Data.Doc hiding ((<$>),(<>))
 import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.RDF as MR
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
@@ -32,8 +33,10 @@ type ParentData =
   )
 
 instance MShow MType where
-  mshow (MDataType _ n []) = text' n
-  mshow (MDataType _ n ts) = parens $ hsep (text' n:(map mshow ts))
+  mshow (MConcType _ n []) = text' n
+  mshow (MConcType _ n ts) = parens $ hsep (text' n:(map mshow ts))
+  mshow (MAbstType _ n []) = text' n
+  mshow (MAbstType _ n ts) = parens $ hsep (text' n:(map mshow ts))
   mshow (MFuncType _ ts o) = parens $
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
@@ -48,10 +51,12 @@ getParentData x = error ("Unexpected SPARQL result: " ++ show x)
 toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType
 toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((t, v, o, l, n, ps), xs)) = case makeMeta l n ps of
-    meta -> toMType'' meta v o xs
+    meta -> toMType'' meta t v o xs
 
-  toMType'' meta (Just v) _ xs = MDataType meta v (map (toMType h) xs)
-  toMType'' meta _ (Just o) xs = MFuncType meta (map (toMType h) xs) (toMType h o)
+  toMType'' meta t (Just v) _ xs
+    | isGeneric t = MAbstType meta v (map (toMType h) xs)
+    | otherwise = MConcType meta v (map (toMType h) xs)
+  toMType'' meta _ _ (Just o) xs = MFuncType meta (map (toMType h) xs) (toMType h o)
 
   makeMeta :: Maybe Lang -> Maybe Name -> [Name] -> MTypeMeta
   makeMeta l n ps = MTypeMeta {
@@ -59,6 +64,10 @@ toMType h k = toMType' (Map.lookup k h) where
       , metaProp = ps
       , metaLang = l
     }
+
+isGeneric :: MT.Text -> Bool
+isGeneric x = MR.UNode x == asRdfNode OAtomicGenericType ||
+              MR.UNode x == asRdfNode OParameterizedGenericType
 
 hsparql :: Query SelectQuery
 hsparql = do

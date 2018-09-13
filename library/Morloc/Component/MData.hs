@@ -63,15 +63,15 @@ emptyMeta = MTypeMeta {
   }
 
 mData2mType :: MData -> MType
-mData2mType (Num' _) = MDataType emptyMeta "Number" []
-mData2mType (Str' _) = MDataType emptyMeta "String" []
-mData2mType (Log' _) = MDataType emptyMeta "Bool" []
-mData2mType (Tup' xs) = MDataType emptyMeta "Tuple" (map mData2mType xs)
-mData2mType (Rec' xs) = MDataType emptyMeta "Tuple" (map record xs) where
-  record (key, value) = MDataType emptyMeta "Tuple" [ MDataType emptyMeta "String" []
+mData2mType (Num' _) = MConcType emptyMeta "Number" []
+mData2mType (Str' _) = MConcType emptyMeta "String" []
+mData2mType (Log' _) = MConcType emptyMeta "Bool" []
+mData2mType (Tup' xs) = MConcType emptyMeta "Tuple" (map mData2mType xs)
+mData2mType (Rec' xs) = MConcType emptyMeta "Tuple" (map record xs) where
+  record (key, value) = MConcType emptyMeta "Tuple" [ MConcType emptyMeta "String" []
                                                     , mData2mType value]
-mData2mType (Lst' xs) = MDataType emptyMeta "List" [listType xs] where
-  listType [] = MDataType emptyMeta "*" [] -- cannot determine type
+mData2mType (Lst' xs) = MConcType emptyMeta "List" [listType xs] where
+  listType [] = MConcType emptyMeta "*" [] -- cannot determine type
   listType [x] = mData2mType x
   listType (x:xs) =
     if
