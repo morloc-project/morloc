@@ -13,4 +13,4 @@ import Morloc.Types
 
 construct :: SparqlDatabaseLike db => db -> IO ()
 construct ep = do
-  putStrLn "  post-processing RDF graph ... "
+  putStrLn "  pretending to post-process RDF graph ... "

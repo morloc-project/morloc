@@ -24,7 +24,7 @@ import Morloc.Database.Construct
 -- | Build a Morloc program as a graph stored in a SPARQL database
 buildProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO db
 buildProgram ep code = do
-  configure ep 
+  configure
   MP.parse Nothing code >>= doOrDie >>= sparqlUpload ep
   construct ep
   typecheck ep

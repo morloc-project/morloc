@@ -1,7 +1,7 @@
 morloc version 0.15.1
 
 Usage:
-  morloc make [--expression] <script> <sparql-endpoint>
+  morloc make [--expression] <script> [--endpoint=<sparql-endpoint>]
   morloc rdf [--triple] [--expression] <script>
 
 Options:

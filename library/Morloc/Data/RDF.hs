@@ -13,6 +13,7 @@ module Morloc.Data.RDF (
     TopRDF(..)
   , RDF
   , mtriple
+  , makeRDF
   -- ** Re-exports from Data.RDF
   , DR.Triple
   , DR.Node(..)
