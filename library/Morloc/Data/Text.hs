@@ -21,6 +21,7 @@ module Morloc.Data.Text
   ) where
 
 import Data.Text
+import Data.Text.IO
 import qualified Data.Text.Lazy as DL
 import qualified Data.Text.IO as DTI
 import qualified Safe
