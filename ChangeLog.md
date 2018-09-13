@@ -3,6 +3,7 @@ next
 
  * Write RDF bools in lowercase ("true", rather than "True"), as per specs
  * Stricter node typing (replace ad hoc names with elements from an ADT)
+ * Add rudimentary typechecking
 
 0.15.1 [2018.09.10]
 -------------------
