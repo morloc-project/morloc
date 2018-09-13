@@ -12,8 +12,7 @@ This is a general wrapper around all textual representations in Morloc.
 module Morloc.Data.Text
   ( 
       module Data.Text 
-    , DTI.readFile
-    , DTI.writeFile
+    , module Data.Text.IO
     , show'
     , pretty
     , read'
@@ -23,7 +22,6 @@ module Morloc.Data.Text
 import Data.Text
 import Data.Text.IO
 import qualified Data.Text.Lazy as DL
-import qualified Data.Text.IO as DTI
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty 
 
