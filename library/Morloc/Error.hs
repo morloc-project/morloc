@@ -35,6 +35,8 @@ data MorlocError
   | SyntaxError (PE.ParseError Char Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
+  -- | Raised when parent and child types conflict
+  | TypeConflict String String
   deriving(Eq)
 
 instance Show MorlocError where
@@ -46,6 +48,7 @@ morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
 morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
 morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
 morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
+morlocShow (TypeConflict t1 t2)  = "TypeConflict: expected type\n" ++ t1 ++ "\n but got\n" ++ t2 
 
 error' :: MT.Text -> a
 error' x = error $ MT.unpack x
