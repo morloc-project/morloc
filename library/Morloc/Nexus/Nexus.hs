@@ -17,6 +17,6 @@ import qualified Morloc.Nexus.Template.Perl as Perl
 
 -- | Generate the nexus, which is a program that coordinates the execution of
 -- the language-specific function pools.
-generate :: Lang -> SparqlEndPoint -> IO Script
+generate :: SparqlDatabaseLike db => Lang -> db -> IO Script
 generate "perl" = Perl.generate
 generate l = error ("Cannot generate nexus in language: " ++ show l)

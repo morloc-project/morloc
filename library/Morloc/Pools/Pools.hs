@@ -20,15 +20,15 @@ import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 
-generate :: SparqlEndPoint -> IO [Script]
-generate ep = MCU.sendQuery hsparql ep >>= foo' where 
+generate :: SparqlDatabaseLike db => db -> IO [Script]
+generate db = sparqlSelect hsparql db >>= foo' where 
   foo' :: [[Maybe MT.Text]] -> IO [Script]
-  foo' xss = sequence (map (generateLang ep) xss)
+  foo' xss = sequence (map (generateLang db) xss)
 
-generateLang :: SparqlEndPoint -> [Maybe MT.Text] -> IO Script
-generateLang e lang = case lang of
-  [Just "R"] -> RLang.generate e
-  [Just "py"] -> Py3.generate e
+generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> IO Script
+generateLang db lang = case lang of
+  [Just "R"] -> RLang.generate db
+  [Just "py"] -> Py3.generate db
   [Just x] -> error ("The language " ++ show x ++ " is not supported")
   x -> error ("Bad SPARQL query:" ++ show x)
 

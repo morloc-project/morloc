@@ -40,8 +40,8 @@ instance MShow MType where
   mshow (MFuncType _ ts o) = parens $
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
-fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MType)
-fromSparqlDb = MCU.simpleGraph toMType getParentData id (MCU.sendQuery hsparql)
+fromSparqlDb :: (SparqlDatabaseLike db) => db -> IO (Map.Map Key MType)
+fromSparqlDb = MCU.simpleGraph toMType getParentData id (sparqlSelect hsparql)
 
 getParentData :: [Maybe MT.Text] -> ParentData 
 getParentData [Just t, v, o, l, n, ps] = (t, v, o, l, n, properties) where

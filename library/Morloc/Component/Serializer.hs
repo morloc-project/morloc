@@ -37,11 +37,13 @@ type SerialData =
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
-fromSparqlDb :: Lang -> SparqlEndPoint -> IO SerialMap
-fromSparqlDb lang ep
+fromSparqlDb
+  :: SparqlDatabaseLike db
+  => Lang -> db -> IO SerialMap
+fromSparqlDb lang db
   =   toSerialMap
-  <$> MCM.fromSparqlDb ep
-  <*> (map tuplify <$> MCU.sendQuery (hsparql lang) ep)
+  <$> MCM.fromSparqlDb db
+  <*> (map tuplify <$> sparqlSelect (hsparql lang) db)
 
   where
 

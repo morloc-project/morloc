@@ -28,11 +28,13 @@ import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
 
 -- | Collect most of the info needed to build all manifolds
-fromSparqlDb :: SparqlEndPoint -> IO [Manifold]
+fromSparqlDb
+  :: SparqlDatabaseLike db
+  => db -> IO [Manifold]
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
-  mandata <- MCU.sendQuery hsparql ep
+  mandata <- sparqlSelect hsparql ep
   return $ ( unroll
            . setCalls
            . setLangs

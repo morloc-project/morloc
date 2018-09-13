@@ -38,9 +38,9 @@ module Morloc.Data.RDF (
 
 import Morloc.Types
 import Morloc.Operators
-import Morloc.Error () -- just Show instance
-
+import qualified Morloc.Error as ME
 import qualified Morloc.Data.Text as MT
+
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS
 import qualified Data.Maybe as DM
@@ -235,10 +235,9 @@ instance RdfLike RDF where
   asTriples = DR.triplesOf
 
 instance SparqlDatabaseLike RDF where
-  -- sparqlUpload :: (RdfLike r) => r -> a -> IO a
-  sparqlUpload r x = return $ makeRDF (asTriples r ++ asTriples x)
+  -- sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
-  -- sparqlSelect :: (SparqlLike q) => q -> a -> IO (ThrowsError [[Maybe Text]])
   sparqlSelect q x = do
     writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
     writeSparql "z.rq" q  -- /  at Morloc home (set in config)
@@ -248,8 +247,8 @@ instance SparqlDatabaseLike RDF where
     out <- MT.hGetContents hout
     err <- MT.hGetContents herr
     return $ case exitCode of
-      (Just SE.ExitSuccess) -> Right (MT.parseTSV out)
-      _ -> Left ((MT.pack . show) (SparqlFail err))
+      (Just SE.ExitSuccess) -> MT.parseTSV out
+      _ -> ME.error' ((MT.pack . show) (SparqlFail err))
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)

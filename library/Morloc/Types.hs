@@ -14,11 +14,11 @@ module Morloc.Types (
     MShow(..)
   , MorlocNodeLike(..)
   , MorlocTypeable(..)
-  , SparqlLike(..)
+  , SparqlSelectLike(..)
   , SparqlDatabaseLike(..)
   , RdfLike(..)
   -- ** Synonyms
-  , SparqlEndPoint  
+  , SparqlEndPoint(..)  
   , AbstractType -- ^ A universal Morloc type
   , ConcreteType -- ^ A language-specific type
   , Name
@@ -28,8 +28,6 @@ module Morloc.Types (
   , Key
   , Value
   , Element
-  , ScriptGenerator
-  , CodeGenerator
   -- ** Data
   , Script(..)
   , Manifold(..)
@@ -63,19 +61,21 @@ class MorlocNodeLike a where
 class MorlocTypeable a where
   asType :: a -> MType
 
-class SparqlLike a where
+class SparqlSelectLike a where
   writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
+  showSparql :: a -> String
 
 class RdfLike a where
   writeTurtle :: Path -> a -> IO () -- ^ create Turtle formatted file
   asTriples :: a -> [Triple]
 
 class SparqlDatabaseLike a where
-  sparqlUpload :: (RdfLike r) => r -> a -> IO a
+  sparqlUpload :: (RdfLike r) => a -> r -> IO a
 
+  -- FIXME: wrap this pig in Either
   sparqlSelect
-    :: (SparqlLike q)
-    => q -> a -> IO (Either Text [[Maybe Text]])
+    :: (SparqlSelectLike q)
+    => q -> a -> IO [[Maybe Text]]
 
 type Name    = Text
 type Lang    = Text
@@ -153,11 +153,7 @@ data SerialMap = SerialMap {
   deriving(Show, Eq, Ord)
 
 -- | Stores a URL for a SPARQL endpoint (e.g. "http://localhost:3030/morloc")
-type SparqlEndPoint = String
-
--- | A code generator
-type ScriptGenerator = SparqlEndPoint -> IO Script
-type CodeGenerator = SparqlEndPoint -> IO Code
+newtype SparqlEndPoint = SparqlEndPoint { endpoint :: String }
 
 -- | Stores everything needed to build one file
 data Script = Script {

@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Component.Util (
     simpleGraph
   , graphify
-  , sendQuery
   , isElement_
 ) where
 
@@ -28,18 +27,18 @@ import qualified Data.List.Extra as DLE
 
 -- | This works for building a map based off a simple tree structure
 simpleGraph
-  :: (Ord key, Ord a)
+  :: (Ord key, Ord a, SparqlDatabaseLike db)
   => (    Map.Map key (a, [key])
        -> key
        -> b
      )
   -> ([Maybe MT.Text] -> a) -- prepare the specific data
   -> (MT.Text -> key) -- map a text field to an id
-  -> (SparqlEndPoint -> IO [[Maybe MT.Text]])
-  -> SparqlEndPoint
+  -> (db -> IO [[Maybe MT.Text]])
+  -> db 
   -> IO (Map.Map key b)
-simpleGraph f g h query ep
-  = fmap (graphify f . map tuplify) (query ep)
+simpleGraph f g h query d
+  = fmap (graphify f . map tuplify) (query d)
   where
     tuplify xs = case (take 3 xs, drop 3 xs) of
       ([Just mid, el, child], rs) -> ((h mid, g rs), (,) <$> el <*> (fmap h child))
@@ -68,20 +67,6 @@ graphify f xs = Map.fromList $ zip roots (map (f hash) roots)
   
 withSnd :: (a -> b) -> (c, a) -> (c , b)
 withSnd f (x, y) = (x, f y)
-
-sendQuery :: Query SelectQuery -> SparqlEndPoint -> IO [[Maybe MT.Text]]
-sendQuery query ep = fmap values (selectQuery ep query)
-  where
-    values :: Maybe [[BindingValue]] -> [[Maybe MT.Text]]
-    values Nothing = error "SPARQL command failed"
-    values (Just xss) = (fmap . fmap) maybeValue xss
-
-    maybeValue :: BindingValue -> Maybe MT.Text
-    maybeValue (Bound (MR.LNode (MR.PlainL  x  ))) = Just x
-    maybeValue (Bound (MR.LNode (MR.PlainLL x _))) = Just x
-    maybeValue (Bound (MR.LNode (MR.TypedL  x _))) = Just x
-    maybeValue (Bound (MR.UNode x))             = Just x
-    maybeValue _ = Nothing
 
 isElement_ :: PredicateTermLike a => a -> Query ()
 isElement_ x = filterExpr_ (regex (str x) ("_[0-9]+$" :: MT.Text))

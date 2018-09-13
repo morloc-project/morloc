@@ -21,21 +21,17 @@ import Morloc.Database.Configure
 import Morloc.Database.Typecheck
 import Morloc.Database.Construct
 
--- | Build a Morloc program as a graph stored at a SparqlEndPoint
-buildProgram :: SparqlEndPoint -> MT.Text -> IO SparqlEndPoint
+-- | Build a Morloc program as a graph stored in a SPARQL database
+buildProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO db
 buildProgram ep code = do
   configure ep 
-  MP.parse Nothing code >>= doOrDie >>= Up.uploadRDF ep >>= stateResult
+  MP.parse Nothing code >>= doOrDie >>= sparqlUpload ep
   construct ep
   typecheck ep
   return ep
-  where
-    stateResult :: Bool -> IO ()
-    stateResult False = fail ("Failed to upload RDF to" ++ ep)
-    stateResult True = return ()
 
 -- | Build a program as a local executable
-writeProgram :: SparqlEndPoint -> MT.Text -> IO ()
+writeProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO ()
 writeProgram ep code = do
   buildProgram ep code >>= MG.generate >>= writeProgram'
   where

@@ -29,7 +29,7 @@ generate e
   <*> pure "perl"
   <*> makeNexus e
 
-makeNexus :: SparqlEndPoint -> IO MT.Text
+makeNexus :: SparqlDatabaseLike db => db -> IO MT.Text
 makeNexus ep = fmap render $ main <$> names <*> fdata where
 
   manifolds :: IO [Manifold]

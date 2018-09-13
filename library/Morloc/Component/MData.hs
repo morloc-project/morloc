@@ -21,8 +21,10 @@ import qualified Morloc.Component.Util as MCU
 import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
 
-fromSparqlDb :: SparqlEndPoint -> IO (Map.Map Key MData)
-fromSparqlDb = MCU.simpleGraph toMData getParentData id (MCU.sendQuery hsparql)
+fromSparqlDb
+  :: SparqlDatabaseLike db
+  => db -> IO (Map.Map Key MData)
+fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect hsparql)
 
 getParentData :: [Maybe MT.Text] -> (MT.Text, Maybe MT.Text) 
 getParentData [Just t, v] = (t, v)

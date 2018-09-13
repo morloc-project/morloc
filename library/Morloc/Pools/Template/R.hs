@@ -16,6 +16,7 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
 
+generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {

@@ -20,6 +20,7 @@ import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
+generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g asImport main)
 
 asImport :: MT.Text -> Doc

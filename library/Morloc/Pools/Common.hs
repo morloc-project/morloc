@@ -83,9 +83,10 @@ data ForeignCallDoc = ForeignCallDoc {
   }
 
 makeGenerator
-  :: Grammar
-  -> CodeGenerator
-  -> ScriptGenerator
+  :: (SparqlDatabaseLike db)
+  => Grammar
+  -> (db -> IO Code)
+  -> (db -> IO Script)
 makeGenerator g gen
   = \ep ->
           Script
@@ -94,10 +95,11 @@ makeGenerator g gen
       <*> gen ep
 
 defaultCodeGenerator
-  :: Grammar
+  :: (SparqlDatabaseLike db)
+  => Grammar
   -> (MT.Text -> Doc) -- source name parser
   -> ([Doc] -> [Manifold] -> SerialMap -> Doc) -- main
-  -> CodeGenerator 
+  -> (db -> IO Code)
 defaultCodeGenerator g f main ep = do
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep

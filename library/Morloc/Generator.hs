@@ -16,13 +16,13 @@ module Morloc.Generator
   , generate  
 ) where
 
+import Morloc.Types
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
-import Morloc.Types (SparqlEndPoint, Script)
 
 type Nexus = Script
 type Pool  = Script
 
 -- | Given a SPARQL endpoint, generate an executable program
-generate :: SparqlEndPoint -> IO (Nexus, [Pool])
+generate :: SparqlDatabaseLike db => db -> IO (Nexus, [Pool])
 generate e = (,) <$> MN.generate "perl" e <*> MP.generate e

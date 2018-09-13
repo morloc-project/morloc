@@ -11,6 +11,6 @@ module Morloc.Database.Configure (configure) where
 
 import Morloc.Types
 
-configure :: SparqlEndPoint -> IO ()
+configure :: SparqlDatabaseLike db => db -> IO ()
 configure ep = do
   putStrLn "  loading config ... "

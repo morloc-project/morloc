@@ -23,7 +23,7 @@ import qualified Morloc.Component.Manifold as Manifold
 
 -- TODO: this should be wrapped in the Either monad or something else better
 -- for handling Error.
-typecheck :: SparqlEndPoint -> IO ()
+typecheck :: SparqlDatabaseLike db => db -> IO ()
 typecheck ep = do
   putStrLn "  typechecking RDF graph ... "
   manifolds <- Manifold.fromSparqlDb ep

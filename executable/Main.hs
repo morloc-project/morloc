@@ -2,6 +2,7 @@
 
 module Main where
 
+import Morloc.Types
 import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
 import System.Console.Docopt
@@ -28,7 +29,7 @@ main = do
     -- build a Morloc program, generating the nexus and pool files
     when (isPresent args (command "make")) $ do
       ep <- getArgOrExit args (argument "sparql-endpoint")
-      M.writeProgram ep script
+      M.writeProgram (SparqlEndPoint ep) script
 
     -- compile a Morloc script to RDF (turtle format by default)
     when (isPresent args (command "rdf")) $ do

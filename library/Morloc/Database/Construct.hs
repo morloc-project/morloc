@@ -11,6 +11,6 @@ module Morloc.Database.Construct (construct) where
 
 import Morloc.Types
 
-construct :: SparqlEndPoint -> IO ()
+construct :: SparqlDatabaseLike db => db -> IO ()
 construct ep = do
   putStrLn "  post-processing RDF graph ... "

@@ -23,13 +23,14 @@ import qualified Data.Text.Lazy as LT
 import qualified Text.PrettyPrint.Leijen.Text as G
 
 import qualified Morloc.Database.HSparql.Connection as Conn
-import Morloc.Types (SparqlEndPoint)
 import Morloc.Operators
 
-uploadRDF :: Rdf a => SparqlEndPoint -> RDF a -> IO Bool
+type EndPoint = String
+
+uploadRDF :: Rdf a => EndPoint -> RDF a -> IO Bool
 uploadRDF ep rdf = uploadTriples ep (triplesOf rdf)
 
-uploadTriples :: SparqlEndPoint -> Triples -> IO Bool
+uploadTriples :: EndPoint -> Triples -> IO Bool
 uploadTriples ep xs = Conn.updateQuery' ep (_render . makeSparql $ xs) where
   -- TODO: convert the whole Connection module to Text
   _render :: G.Doc -> String 
