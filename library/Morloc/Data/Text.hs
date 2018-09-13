@@ -17,9 +17,11 @@ module Morloc.Data.Text
     , pretty
     , read'
     , readMay'
+    , parseTSV
   ) where
 
-import Data.Text
+import Prelude hiding (lines, length)
+import Data.Text hiding (map)
 import Data.Text.IO
 import qualified Data.Text.Lazy as DL
 import qualified Safe
@@ -36,3 +38,20 @@ readMay' = Safe.readMay . unpack
 
 pretty :: Show a => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
+
+-- | parse a TSV, ignore first line (header)
+parseTSV :: Text -> [[Maybe Text]]
+parseTSV
+  = map (map nonZero)
+  . map (split ((==) '\t'))
+  . Prelude.tail
+  . lines
+
+nonZero :: Text -> Maybe Text
+nonZero s =
+  if
+    length s == 0
+  then
+    Nothing
+  else 
+    Just s

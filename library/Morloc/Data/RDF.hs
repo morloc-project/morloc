@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, TypeSynonymInstances, FlexibleInstances #-}
 
 {-|
 Module      : Morloc.Data.RDF
@@ -36,16 +36,18 @@ module Morloc.Data.RDF (
   , rdfAppend
 ) where
 
-import qualified Morloc.Data.Text as MT
+import Morloc.Types
+import Morloc.Operators
+import Morloc.Error () -- just Show instance
 
+import qualified Morloc.Data.Text as MT
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS
 import qualified Data.Maybe as DM
 import qualified Data.Scientific as DS
-
-import Morloc.Types
--- TODO: remove this import
-import Morloc.Operators
+import qualified System.IO as SIO
+import qualified System.Process as SP
+import qualified System.Exit as SE
 
 type RDF = DR.RDF DR.TList
 
@@ -222,6 +224,32 @@ mtriple
   :: ( MorlocNodeLike s, MorlocNodeLike p, MorlocNodeLike o)
   => s -> p -> o -> DR.Triple
 mtriple s p o = DR.triple (asRdfNode s) (asRdfNode p) (asRdfNode o)
+
+instance RdfLike RDF where
+  writeTurtle p x = do
+    handle <- SIO.openFile (MT.unpack p) SIO.WriteMode
+    let serializer = DR.TurtleSerializer Nothing prefixMap
+    DR.hWriteRdf serializer handle x
+      <* SIO.hClose handle
+
+  asTriples = DR.triplesOf
+
+instance SparqlDatabaseLike RDF where
+  -- sparqlUpload :: (RdfLike r) => r -> a -> IO a
+  sparqlUpload r x = return $ makeRDF (asTriples r ++ asTriples x)
+
+  -- sparqlSelect :: (SparqlLike q) => q -> a -> IO (ThrowsError [[Maybe Text]])
+  sparqlSelect q x = do
+    writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
+    writeSparql "z.rq" q  -- /  at Morloc home (set in config)
+    (_, Just hout, Just herr, ph) <-
+        SP.createProcess (SP.shell "arq --data=z.ttl --query=z.rq --results=TSV")
+    exitCode <- SP.getProcessExitCode ph
+    out <- MT.hGetContents hout
+    err <- MT.hGetContents herr
+    return $ case exitCode of
+      (Just SE.ExitSuccess) -> Right (MT.parseTSV out)
+      _ -> Left ((MT.pack . show) (SparqlFail err))
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)

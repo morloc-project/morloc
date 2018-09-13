@@ -33,6 +33,7 @@ dependencies:
   - network-uri
   - parsec
   - pretty-simple
+  - process
   - rdf4h
   - safe
   - scientific

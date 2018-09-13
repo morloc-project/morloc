@@ -14,6 +14,9 @@ module Morloc.Types (
     MShow(..)
   , MorlocNodeLike(..)
   , MorlocTypeable(..)
+  , SparqlLike(..)
+  , SparqlDatabaseLike(..)
+  , RdfLike(..)
   -- ** Synonyms
   , SparqlEndPoint  
   , AbstractType -- ^ A universal Morloc type
@@ -42,12 +45,12 @@ module Morloc.Types (
   , MorlocError(..)
 ) where
 
-import Data.Text                    ( Text       )
-import Data.RDF                     ( Node       )
-import Data.Map.Strict              ( Map        )
-import Text.PrettyPrint.Leijen.Text ( Doc        )
-import Text.Megaparsec.Error        ( ParseError )
-import Data.Void                    ( Void       )
+import Data.Text                    ( Text         )
+import Data.RDF                     ( Node, Triple )
+import Data.Map.Strict              ( Map          )
+import Text.PrettyPrint.Leijen.Text ( Doc          )
+import Text.Megaparsec.Error        ( ParseError   )
+import Data.Void                    ( Void         )
 
 -- | Write into Morloc code
 class MShow a where
@@ -59,6 +62,20 @@ class MorlocNodeLike a where
 
 class MorlocTypeable a where
   asType :: a -> MType
+
+class SparqlLike a where
+  writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
+
+class RdfLike a where
+  writeTurtle :: Path -> a -> IO () -- ^ create Turtle formatted file
+  asTriples :: a -> [Triple]
+
+class SparqlDatabaseLike a where
+  sparqlUpload :: (RdfLike r) => r -> a -> IO a
+
+  sparqlSelect
+    :: (SparqlLike q)
+    => q -> a -> IO (Either Text [[Maybe Text]])
 
 type Name    = Text
 type Lang    = Text
@@ -219,5 +236,6 @@ data MorlocError
   | UnknownError
   -- | Raised when parent and child types conflict
   | TypeConflict Text Text
+  -- | Raised when a SPARQL command fails
+  | SparqlFail Text
   deriving(Eq)
-

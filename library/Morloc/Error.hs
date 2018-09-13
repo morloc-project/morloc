@@ -32,6 +32,7 @@ errmsg (NotSupported msg)    = "NotSupported: " <> MT.show' msg
 errmsg (SyntaxError err)     = "SyntaxError: " <> MT.show' err
 errmsg (TypeConflict t1 t2)  = 
   "TypeConflict: cannot cast " <> t1 <> " as " <> t2 <> "\n"
+errmsg (SparqlFail t) = "SparqlFail: " <> t
 
 error' :: MT.Text -> a
 error' x = error $ MT.unpack x
