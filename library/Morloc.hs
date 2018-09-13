@@ -14,7 +14,6 @@ import qualified System.Directory as SD
 import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Types
-import qualified Morloc.Error as ME
 import qualified Morloc.Parser as MP
 import qualified Morloc.Database.HSparql.Upload as Up
 import qualified Morloc.Generator as MG
@@ -70,6 +69,6 @@ writeTripleTo = writeRdfTo DR.NTriplesSerializer
 writeTurtleTo :: MT.Text -> FilePath -> IO ()
 writeTurtleTo = writeRdfTo (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
 
-doOrDie :: ME.ThrowsError a -> IO a
+doOrDie :: ThrowsError a -> IO a
 doOrDie (Right x) = return x
 doOrDie (Left err) = fail $ show err ++ "\n"

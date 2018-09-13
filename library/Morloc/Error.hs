@@ -14,34 +14,12 @@ program. New entries can be added to describe new types of error.
 
 module Morloc.Error
 (
-    MorlocError(..)
-  , ThrowsError
-  , error'
+    error'
 ) where
 
+import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
-
-import qualified Text.Megaparsec.Error as PE
-import Data.Void
-
-type ThrowsError = Either MorlocError
-
-data MorlocError
-  -- | Raised when assumptions about the input RDF are broken. This should not
-  -- occur for RDF that has been validated.
-  = InvalidRDF MT.Text
-  -- | Raised for calls to unimplemented features
-  | NotImplemented MT.Text
-  -- | Raised for unsupported features (such as specific languages)
-  | NotSupported MT.Text
-  -- | Raised by parsec on parse errors
-  | SyntaxError (PE.ParseError Char Void)
-  -- | Raised when someone didn't customize their error messages
-  | UnknownError
-  -- | Raised when parent and child types conflict
-  | TypeConflict MT.Text MT.Text
-  deriving(Eq)
 
 instance Show MorlocError where
   show = MT.unpack . errmsg

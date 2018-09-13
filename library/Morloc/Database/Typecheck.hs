@@ -18,7 +18,6 @@ module Morloc.Database.Typecheck (typecheck) where
 
 import Morloc.Types
 import Morloc.Operators
-import qualified Morloc.Error as ME
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Component.Manifold as Manifold
 
@@ -47,8 +46,8 @@ compareTypes (parentType, (ArgCall c)) = case mAbstractType c of
       return ()
     else
       do
-        MT.putStr (MT.show' $ ME.TypeConflict (showType parentType)
-                                              (showType childOutput))
+        MT.putStr (MT.show' $ TypeConflict (showType parentType)
+                                           (showType childOutput))
         return ()
   _ -> return ()
 compareTypes _ = return ()

@@ -21,35 +21,34 @@ import qualified Data.List as DL
 
 import Morloc.Types
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Error as ME
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
 import qualified Morloc.Util as MU
 import Morloc.Operators
 
-parse :: Maybe MT.Text -> MT.Text -> IO (ME.ThrowsError MR.RDF)
+parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
 parse srcfile code = case (parseShallow srcfile code) of
   (Right rdf) -> joinRDF rdf (parseImports rdf)
   err         -> return err
 
-joinRDF :: MR.RDF -> [IO (ME.ThrowsError MR.RDF)] -> IO (ME.ThrowsError MR.RDF)
+joinRDF :: MR.RDF -> [IO (ThrowsError MR.RDF)] -> IO (ThrowsError MR.RDF)
 joinRDF rdf xs
-  = (fmap . fmap)                         -- raise to IO (ME.ThrowsError a)
+  = (fmap . fmap)                         -- raise to IO (ThrowsError a)
       (foldl MR.rdfAppend rdf)            -- ([MR.RDF] -> MR.RDF)
-      ((CM.liftM sequence . sequence) xs) -- IO (ME.ThrowsError [MR.RDF])
+      ((CM.liftM sequence . sequence) xs) -- IO (ThrowsError [MR.RDF])
 
-parseImports :: MR.RDF -> [IO (ME.ThrowsError MR.RDF)]
+parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
 parseImports rdf = map morlocScriptFromFile (MR.getImportedFiles rdf)
 
-morlocScriptFromFile :: MT.Text -> IO (ME.ThrowsError MR.RDF)
+morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
 morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ MT.unpack s
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-parseShallow :: Maybe MT.Text -> MT.Text -> ME.ThrowsError MR.RDF
+parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF
 parseShallow srcfile code =
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
-    Left err  -> CME.throwError $ ME.SyntaxError err
+    Left err  -> CME.throwError $ SyntaxError err
     Right ((MR.TopRDF _ val), s) -> return val
   where
     pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}

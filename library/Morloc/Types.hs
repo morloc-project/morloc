@@ -37,12 +37,17 @@ module Morloc.Types (
   , GraphPredicate(..)
   , GraphObject(..)
   , SerialMap(..)
+  -- ** Error handling
+  , ThrowsError
+  , MorlocError(..)
 ) where
 
-import Data.Text (Text)
-import Data.RDF (Node)
-import Data.Map.Strict (Map)
-import Text.PrettyPrint.Leijen.Text (Doc)
+import Data.Text                    ( Text       )
+import Data.RDF                     ( Node       )
+import Data.Map.Strict              ( Map        )
+import Text.PrettyPrint.Leijen.Text ( Doc        )
+import Text.Megaparsec.Error        ( ParseError )
+import Data.Void                    ( Void       )
 
 -- | Write into Morloc code
 class MShow a where
@@ -198,3 +203,21 @@ data GraphObject
   | OEmpty
   | OBinOp
   deriving(Show, Eq, Ord)
+
+type ThrowsError = Either MorlocError
+data MorlocError
+  -- | Raised when assumptions about the input RDF are broken. This should not
+  -- occur for RDF that has been validated.
+  = InvalidRDF Text
+  -- | Raised for calls to unimplemented features
+  | NotImplemented Text
+  -- | Raised for unsupported features (such as specific languages)
+  | NotSupported Text
+  -- | Raised by parsec on parse errors
+  | SyntaxError (ParseError Char Void)
+  -- | Raised when someone didn't customize their error messages
+  | UnknownError
+  -- | Raised when parent and child types conflict
+  | TypeConflict Text Text
+  deriving(Eq)
+
