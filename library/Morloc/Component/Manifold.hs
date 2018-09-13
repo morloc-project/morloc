@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Component.Manifold
@@ -13,17 +13,17 @@ module Morloc.Component.Manifold (fromSparqlDb) where
 
 import Morloc.Types
 import Morloc.Operators
-import Morloc.Quasi
+import Morloc.Sparql
 import qualified Morloc.Error as ME
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
+import qualified Morloc.Component.Util as MCU 
 import qualified Morloc.Data.Text as MT
 
 import Morloc.Data.Doc hiding ((<$>), (<>))
-import Morloc.Database.HSparql.Connection
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
 
@@ -32,7 +32,7 @@ fromSparqlDb :: SparqlEndPoint -> IO [Manifold]
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
-  mandata <- sparqlQuery ep
+  mandata <- MCU.sendQuery hsparql ep
   return $ ( unroll
            . setCalls
            . setLangs
@@ -182,113 +182,196 @@ unroll ms = concat $ map unroll' ms
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
 
+hsparql :: Query SelectQuery
+hsparql = do
+  abstractTypeId_ <- var
+  argcallId_      <- var
+  argdataId_      <- var
+  argname_        <- var
+  bnd_            <- var
+  bvars_          <- var
+  callId_         <- var
+  called_         <- var
+  composition_    <- var
+  concreteTypeId_ <- var
+  element_        <- var
+  exported_       <- var
+  morlocName_     <- var
+  sourceLang_     <- var
+  sourceName_     <- var
+  sourcePath_     <- var
+  sourced_        <- var
 
+  subQuery_ $ do
+    arg_           <- var
+    bndElement_    <- var
+    bndId_         <- var
+    callIdType_    <- var
+    datadec_       <- var
+    dectypeId_     <- var
+    e_             <- var
+    fid_           <- var
+    importId_      <- var
+    langTypedec_   <- var
+    scriptElement_ <- var
+    scriptId_      <- var
+    sourceId_      <- var
+    typedec_       <- var
+    typeid_        <- var
 
-sparqlQuery :: SparqlEndPoint -> IO [[Maybe MT.Text]]
-sparqlQuery = [sparql|
-PREFIX mlc: <http://www.morloc.io/ontology/000/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT ?call_id ?abstract_type_id ?element ?morloc_name ?source_name ?composition
-       (group_concat(?bnd; separator=",") as ?bvars)
-       ?source_lang ?source_path ?called ?sourced ?exported ?concrete_type_id
-       ?argname ?argcall_id ?argdata_id
-WHERE {
-    SELECT *
-    WHERE {
-        {
-            ?call_id rdf:type mlc:call ;
-                    rdf:value ?fid ;
-                    ?element ?arg .
-            FILTER(regex(str(?element), "_[0-9]+$", "i"))
-            ?fid rdf:type mlc:name ;
-                 rdf:value ?morloc_name .
-        } UNION {
-            # Find exported values
-            ?call_id rdf:type mlc:export ;
-                     rdf:value ?morloc_name .
-            # This is exported from the global environment
-            ?script_id rdf:type mlc:script ;
-                       rdf:value "<stdin>" ;
-                       ?script_element ?call_id .
-            FILTER(regex(str(?script_element), "_[0-9]+$", "i"))
-            ?typedec rdf:type mlc:typeDeclaration ;
-                     mlc:lang "Morloc" ;
-                     mlc:lhs ?morloc_name ;
-                     mlc:rhs ?typeid .
-            ?typeid ?element ?arg;
-            FILTER(regex(str(?element), "_[0-9]+$", "i"))
-            # Keep only the values that are NOT calls (to avoid duplication)
-            MINUS {
-                ?call_id rdf:type mlc:call .
-            }
-        }
-        BIND(bound(?fid) AS ?called)
-        # Determine whether this is exported
-        OPTIONAL {
-            ?e rdf:type mlc:export ;
-               rdf:value ?morloc_name .
-        }
-        BIND(bound(?e) AS ?exported)
-        # Find the bound variables
-        OPTIONAL {
-            ?datadec rdf:type mlc:dataDeclaration ;
-                     mlc:lhs ?composition ;
-                     mlc:rhs ?call_id ;
-                     ?bnd_element ?bnd_id .
-            FILTER(regex(str(?bnd_element), "_[0-9]+$", "i"))
-            ?bnd_id rdf:type mlc:name ;
-                   rdf:value ?bnd . # bound variables
-        }
-        # Find the source language
-        OPTIONAL {
-            ?source_id rdf:type mlc:source ;
-                       mlc:lang ?source_lang ;
-                       mlc:import ?import_id .
-            ?import_id mlc:name ?source_name ;
-                       mlc:alias ?morloc_name .
-            OPTIONAL {
-                ?source_id mlc:path ?source_path .
-            }
-        }
-        BIND(bound(?source_id) AS ?sourced)
-        # Find language-specific type signature, packer, and unpacker
-        OPTIONAL {
-           ?lang_typedec rdf:type mlc:typeDeclaration ;
-                         mlc:lang ?source_lang ;
-                         mlc:lhs ?morloc_name ;
-                         mlc:rhs ?concrete_type_id.
-           FILTER(!regex(str(?source_lang), "Morloc", "i"))
-        }
-        # Find the type delcaration ID
-        OPTIONAL {
-            ?dectype_id rdf:type mlc:typeDeclaration ;
-                     mlc:lang "Morloc" ;
-                     mlc:lhs ?morloc_name ;
-                     mlc:rhs ?abstract_type_id .
-        }
-        # A argument must be one of the following:
-        #  1. raw data
-        OPTIONAL {
-            ?arg rdf:type mlc:data.
-            BIND(?arg AS ?argdata_id)
-        }
-        #  2. a function call
-        OPTIONAL {
-            ?arg rdf:type mlc:call .
-            BIND(?arg AS ?argcall_id)
-        }
-        #  3. a name - the name can only come from one of the bound variables
-        OPTIONAL {
-            FILTER(bound(?arg))
-            ?arg rdf:type mlc:name ;
-                 rdf:value ?argname .
-        }
-    }
-    ORDER BY ?bnd_element 
-}
-GROUP BY ?call_id ?element ?abstract_type_id ?concrete_type_id ?morloc_name ?source_name ?composition
-         ?source_lang ?source_path ?called ?sourced ?exported 
-         ?argname ?argcall_id ?argdata_id
-ORDER BY ?call_id ?element 
-|]
+    union_
+      ( do
+          triple_ callId_ PType OCall
+          triple_ callId_ PValue fid_
+          triple_ callId_ element_ arg_
+          MCU.isElement_ element_
+
+          triple_ fid_ PType OName
+          triple_ fid_ PValue morlocName_
+      )
+      ( do
+          -- Find exported values
+          triple_ callId_ PType OExport
+          triple_ callId_ PValue morlocName_
+
+          -- This is exported from the global environment
+          triple_ scriptId_ PType OScript
+          triple_ scriptId_ PValue ("<stdin>" :: MT.Text)
+          triple_ scriptId_ scriptElement_ callId_
+          MCU.isElement_ scriptElement_
+
+          triple_ typedec_ PType OTypeDeclaration
+          triple_ typedec_ PLang ("Morloc" :: MT.Text)
+          triple_ typedec_ PLeft morlocName_
+          triple_ typedec_ PRight typeid_
+
+          triple_ typeid_ element_ arg_
+          MCU.isElement_ element_
+          
+          -- Keep only the values that are NOT calls (to avoid duplication)
+          triple_ callId_ PType callIdType_
+          filterExpr (str callIdType_ .!=. OCall)
+      )
+
+    -- # Determine whether this is exported
+    optional_ $ do    
+      triple_ e_ PType OExport
+      triple_ e_ PValue morlocName_
+
+    -- # Find the bound variables
+    optional_ $ do
+      triple_ datadec_ PType ODataDeclaration
+      triple_ datadec_ PLeft composition_
+      triple_ datadec_ PRight callId_
+      triple_ datadec_ bndElement_ bndId_
+      MCU.isElement_ bndElement_
+
+      triple_ bndId_ PType OName
+      triple_ bndId_ PValue bnd_ -- bound variables
+
+    -- # Find the source language
+    optional_ $ do
+      triple_ sourceId_ PType OSource
+      triple_ sourceId_ PLang sourceLang_
+      triple_ sourceId_ PImport importId_
+
+      triple_ importId_ PName sourceName_
+      triple_ importId_ PAlias morlocName_
+
+      optional_ $ do
+        triple_ sourceId_ PPath sourcePath_
+
+    -- Find language-specific type signature, packer, and unpacker
+    optional_ $ do
+      triple_ langTypedec_ PType OTypeDeclaration
+      triple_ langTypedec_ PLang sourceLang_
+      triple_ langTypedec_ PLeft morlocName_
+      triple_ langTypedec_ PRight concreteTypeId_
+
+      filterExpr ((str sourceLang_) .!=. ("Morloc" :: MT.Text))
+
+    -- Find the type delcaration ID
+    optional_ $ do
+      triple_ dectypeId_ PType OTypeDeclaration
+      triple_ dectypeId_ PLang ("Morloc" :: MT.Text)
+      triple_ dectypeId_ PLeft morlocName_
+      triple_ dectypeId_ PRight abstractTypeId_
+
+    --  A argument must be one of the following:
+    --  1. raw data
+    optional_ $ do
+      triple_ arg_ PType OData
+      bind (expr arg_) argdataId_
+
+    -- 2. a function call
+    optional_ $ do
+      triple_ arg_ PType OCall
+      bind (expr arg_) argcallId_
+
+    -- 3. a name - the name can only come from one of the bound variables
+    optional_ $ do
+      filterExpr (bound arg_)
+      triple_ arg_ PType OName
+      triple_ arg_ PValue argname_
+
+    bind (bound fid_) called_
+    bind (bound e_) exported_
+    bind (bound sourceId_) sourced_
+
+    orderNextAsc bndElement_
+    selectVars
+      [ abstractTypeId_
+      , argdataId_
+      , argcallId_
+      , argname_
+      , bnd_
+      , callId_
+      , called_
+      , composition_
+      , concreteTypeId_
+      , element_
+      , exported_
+      , morlocName_
+      , sourceLang_
+      , sourceName_
+      , sourcePath_
+      , sourced_
+      ]
+
+  groupBy abstractTypeId_
+  groupBy argcallId_
+  groupBy argdataId_
+  groupBy argname_
+  groupBy callId_
+  groupBy called_
+  groupBy composition_
+  groupBy concreteTypeId_
+  groupBy element_
+  groupBy exported_
+  groupBy morlocName_
+  groupBy sourceLang_
+  groupBy sourceName_
+  groupBy sourcePath_
+  groupBy sourced_
+
+  orderNextAsc callId_
+  orderNextAsc element_ 
+
+  select
+    [ SelectVar  callId_
+    , SelectVar  abstractTypeId_
+    , SelectVar  element_
+    , SelectVar  morlocName_
+    , SelectVar  sourceName_
+    , SelectVar  composition_
+    , SelectExpr (groupConcat bnd_ ",") bvars_
+    , SelectVar  sourceLang_
+    , SelectVar  sourcePath_
+    , SelectVar  called_
+    , SelectVar  sourced_
+    , SelectVar  exported_
+    , SelectVar  concreteTypeId_
+    , SelectVar  argname_
+    , SelectVar  argcallId_
+    , SelectVar  argdataId_
+    ]
