@@ -3,7 +3,7 @@
  [x] Replace all quasiquoted sparql with `hsparql` DSL
  [x] Add rudimentary typechecking
  [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
- [ ] Add local option database (e.g. with `--arq` as an option)
+ [x] Add local option database
 
 # RDF representation
 
