@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Data.Text
 Description : All things text
@@ -18,9 +20,13 @@ module Morloc.Data.Text
     , read'
     , readMay'
     , parseTSV
+    , unenclose
+    , unangle
+    , unquote
+    , undquote
   ) where
 
-import Prelude hiding (lines, length)
+import Prelude hiding (lines, length, uncons, unsnoc)
 import Data.Text hiding (map)
 import Data.Text.IO
 import qualified Data.Text.Lazy as DL
@@ -39,10 +45,11 @@ readMay' = Safe.readMay . unpack
 pretty :: Show a => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
 
--- | parse a TSV, ignore first line (header)
+-- | parse a TSV, ignore first line (header). Cells are also unquoted and
+-- wrapping angles are removed.
 parseTSV :: Text -> [[Maybe Text]]
 parseTSV
-  = map (map nonZero)
+  = map (map (nonZero . undquote . unangle))
   . map (split ((==) '\t'))
   . Prelude.tail
   . lines
@@ -55,3 +62,15 @@ nonZero s =
     Nothing
   else 
     Just s
+
+unenclose :: Text -> Text -> Text -> Text
+unenclose a b x = maybe x id (stripPrefix a x >>= stripSuffix b)
+
+unangle :: Text -> Text
+unangle = unenclose "<" ">"
+
+unquote :: Text -> Text
+unquote = unenclose "'" "'"
+
+undquote :: Text -> Text
+undquote = unenclose "\"" "\""

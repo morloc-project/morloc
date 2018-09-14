@@ -25,10 +25,10 @@ import Morloc.Database.Construct
 buildProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO db
 buildProgram ep code = do
   configure
-  MP.parse Nothing code >>= doOrDie >>= sparqlUpload ep
-  construct ep
-  typecheck ep
-  return ep
+  tbl <- MP.parse Nothing code >>= doOrDie >>= sparqlUpload ep
+  construct tbl
+  typecheck tbl
+  return tbl
 
 -- | Build a program as a local executable
 writeProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO ()

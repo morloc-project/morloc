@@ -242,13 +242,13 @@ instance SparqlDatabaseLike RDF where
   sparqlSelect q x = do
     writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
     writeSparql "z.rq" q  -- /  at Morloc home (set in config)
-    (_, Just hout, Just herr, ph) <-
-        SP.createProcess (SP.shell "arq --data=z.ttl --query=z.rq --results=TSV")
-    exitCode <- SP.getProcessExitCode ph
+    let cmd = "arq --data=z.ttl --query=z.rq --results=TSV"
+    (_, hout, herr, handle) <- SP.runInteractiveCommand cmd
+    exitCode <- SP.waitForProcess handle
     out <- MT.hGetContents hout
     err <- MT.hGetContents herr
     return $ case exitCode of
-      (Just SE.ExitSuccess) -> MT.parseTSV out
+      SE.ExitSuccess -> MT.parseTSV out
       _ -> ME.error' ((MT.pack . show) (SparqlFail err))
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
