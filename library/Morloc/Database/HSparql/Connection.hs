@@ -8,19 +8,21 @@ the addition of the `*Query'` functions that take a raw String.
 -}
 
 module Morloc.Database.HSparql.Connection
-    ( BindingValue(..)
-    -- * submit queries using raw SPARQL strings
-    , selectQuery'
-    , constructQuery'
-    , askQuery'
-    , updateQuery'
-    , describeQuery'
-    )
+  (
+  -- * submit queries using raw SPARQL strings
+    selectQuery'
+  , constructQuery'
+  , askQuery'
+  , updateQuery'
+  , describeQuery'
+  )
 where
+
+import Database.HSparql.Connection (BindingValue(..), EndPoint) 
 
 import Control.Monad
 import Data.Maybe
-import Network.HTTP
+import Network.HTTP hiding (EndPoint)
 import Text.XML.Light
 import qualified Text.RDF.RDF4H.TurtleParser as Turtle
 import qualified Data.RDF as RDF
@@ -29,13 +31,6 @@ import qualified Data.Text.Encoding as E
 import qualified Data.ByteString.Char8 as B
 
 import Network.URI hiding (URI)
-
-import Morloc.Types (SparqlEndPoint)
-
--- |Local representations of incoming XML results.
-data BindingValue = Bound RDF.Node    -- ^RDF Node (UNode, BNode, LNode)
-                  | Unbound       -- ^Unbound result value
-                  deriving (Show, Eq)
 
 -- |Base 'QName' for results with a SPARQL-result URI specified.
 sparqlResult :: String -> QName
@@ -88,7 +83,7 @@ parseUpdate s
   | s == "" = True
   | otherwise = error $ "Unexpected Update response: " ++ s
 
-selectQuery' :: SparqlEndPoint -> String -> IO (Maybe [[BindingValue]])
+selectQuery' :: EndPoint -> String -> IO (Maybe [[BindingValue]])
 selectQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
       h1 = mkHeader HdrAccept "application/sparql-results+xml"
@@ -101,7 +96,7 @@ selectQuery' ep q = do
   response <- simpleHTTP request >>= getResponseBody
   return $ structureContent response
 
-askQuery' :: SparqlEndPoint -> String -> IO Bool
+askQuery' :: EndPoint -> String -> IO Bool
 askQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
       hdr1 = Header HdrUserAgent "hsparql-client"
@@ -112,7 +107,7 @@ askQuery' ep q = do
   response <- simpleHTTP request >>= getResponseBody
   return $ parseAsk response
 
-updateQuery' :: SparqlEndPoint -> String -> IO Bool
+updateQuery' :: EndPoint -> String -> IO Bool
 updateQuery' ep q = do
   let uri = ep
       body = q
@@ -128,7 +123,7 @@ updateQuery' ep q = do
 --    return $ structureContent response
   return $ parseUpdate response
 
-constructQuery' :: (RDF.Rdf a) => SparqlEndPoint -> String -> IO (RDF.RDF a)
+constructQuery' :: (RDF.Rdf a) => EndPoint -> String -> IO (RDF.RDF a)
 constructQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
   rdfGraph <- httpCallForRdf uri
@@ -136,7 +131,7 @@ constructQuery' ep q = do
     Left e -> error $ show e
     Right graph -> return graph
 
-describeQuery' :: (RDF.Rdf a) => SparqlEndPoint -> String -> IO (RDF.RDF a)
+describeQuery' :: (RDF.Rdf a) => EndPoint -> String -> IO (RDF.RDF a)
 describeQuery' ep q = do
   let uri = ep ++ "?" ++ urlEncodeVars [("query", q)]
   rdfGraph <- httpCallForRdf uri

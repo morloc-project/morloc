@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Component.Util
 Description : Utility functions for components
@@ -7,30 +9,36 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.Util (simpleGraph, graphify) where
+module Morloc.Component.Util (
+    simpleGraph
+  , graphify
+  , isElement_
+) where
 
 import Morloc.Types
+import Morloc.Sparql
+import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
 import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
-import qualified Data.Text as DT
 
 -- | This works for building a map based off a simple tree structure
 simpleGraph
-  :: (Ord key, Ord a)
+  :: (Ord key, Ord a, SparqlDatabaseLike db)
   => (    Map.Map key (a, [key])
        -> key
        -> b
      )
-  -> ([Maybe DT.Text] -> a) -- prepare the specific data
-  -> (DT.Text -> key) -- map a text field to an id
-  -> (SparqlEndPoint -> IO [[Maybe DT.Text]])
-  -> SparqlEndPoint
+  -> ([Maybe MT.Text] -> a) -- prepare the specific data
+  -> (MT.Text -> key) -- map a text field to an id
+  -> (db -> IO [[Maybe MT.Text]])
+  -> db 
   -> IO (Map.Map key b)
-simpleGraph f g h query ep
-  = fmap (graphify f . map tuplify) (query ep)
+simpleGraph f g h query d
+  = fmap (graphify f . map tuplify) (query d)
   where
     tuplify xs = case (take 3 xs, drop 3 xs) of
       ([Just mid, el, child], rs) -> ((h mid, g rs), (,) <$> el <*> (fmap h child))
@@ -59,3 +67,6 @@ graphify f xs = Map.fromList $ zip roots (map (f hash) roots)
   
 withSnd :: (a -> b) -> (c, a) -> (c , b)
 withSnd f (x, y) = (x, f y)
+
+isElement_ :: PredicateTermLike a => a -> Query ()
+isElement_ x = filterExpr_ (regex (str x) ("_[0-9]+$" :: MT.Text))

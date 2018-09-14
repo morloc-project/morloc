@@ -1,3 +1,7 @@
+# Short-term
+
+ [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
+
 # RDF representation
 
  [ ] Unify call representations of [ ] `binop` and [ ] `composition`
@@ -10,7 +14,6 @@
  * In the compiler ...
    [ ] Add meaningful error messages to parser
    [ ] Replace the naked `error` calls everywhere
-   [ ] Detect syntax errors in SPARQL (use `hsparql` DSL?)
    [ ] Print last valid data structure on failure
 
  * In the generated code ...

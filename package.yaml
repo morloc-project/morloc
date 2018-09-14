@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.15.1
+version:          0.16.0
 homepage:         https://github.com/arendsee/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/githubuser/morloc#readme>
@@ -24,6 +24,7 @@ dependencies:
   - directory
   - docopt
   - extra
+  - hsparql
   - filepath
   - hashable
   - haskell-src-meta
@@ -31,6 +32,8 @@ dependencies:
   - mtl
   - network-uri
   - parsec
+  - pretty-simple
+  - process
   - rdf4h
   - safe
   - scientific

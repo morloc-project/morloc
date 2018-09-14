@@ -3,11 +3,15 @@
 all:
 	stack install
 	rm -f nexus.perl pool.R
-	morloc make sample.loc http://localhost:3030/morloc
+	# build using arq
+	morloc make sample.loc
+	# # build using fuseki endpoint
+	# morloc make sample.loc --endpoint=http://localhost:3030/morloc
 
 .PHONY: clean
 clean:
 	rm -rf nexus.* pool.* __pycache__ 
+	rm -rf z.ttl z.rq
 
 .PHONY: runall
 runall:

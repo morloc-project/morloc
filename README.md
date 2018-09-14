@@ -19,9 +19,8 @@ packages of functions or import them into their own programs.
 
 So far I have written two prototypes, described below.
 
-
-Minimal Example
-===============
+Installation
+============
 
 Compile and install the package as so (requires the Haskell utility `stack`):
 
@@ -32,15 +31,18 @@ stack build
 stack install
 ```
 
-`morloc` has a temporary dependency on a local SPARQL database. You may try
-`fuseki`, though any will do. Eventually I will remove this dependency and
-provide a local embedded graph database and remote SPARQL endpoint at
-Morloc.IO.
+`morloc` has a temporary dependency on the Java library Jena and its `arq`
+command line tool. You will need to have `arq` in PATH to use Morloc
+(currently). The `arq` dependency will be removed eventually, since the calls
+require firing up the Java runtime, and thus massivly slow down the compilation
+process.
 
-Then you can run a Morloc script, you might start with the example in
-`examples/sample1.loc`. This is just a toy script and I will have a better demo
-soon. Also the type signatures in this demo are currently ignored by the
-compiler.
+Minimal Example
+===============
+
+You might start with the example in `examples/sample1.loc`. This is just a toy
+script and I will have a better demo soon. Also the type signatures in this
+demo are currently ignored by the compiler.
 
 ```
 export ceiling
@@ -70,18 +72,15 @@ rand n = rand_uniform n 0.0 1.0;
 This script can be complied as follows:
 
 ```sh
-morloc examples/sample1.loc http://localhost:3030/morloc
+morloc make examples/sample1.loc
 ```
-
-Replacing the SPARQL endpoint above with your local endpoint (again, sorry for
-the temporary inconvenience).
 
 This will generate two files, `nexus.perl` and `pool.R`. Data from specific
 nodes can now be accessed.
 
 ```sh
-perl nexus.perl ceiling 4.3
-perl nexus.perl rand_uniform 10 0 3
+./nexus.perl ceiling 4.3
+./nexus.perl rand_uniform 10 0 3
 ```
 
 The Morloc Type System

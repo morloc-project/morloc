@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Pools.Pools
@@ -13,32 +13,30 @@ module Morloc.Pools.Pools (generate) where
 
 import Morloc.Types
 import Morloc.Operators
-import Morloc.Quasi
-import qualified Data.Text as DT
+import Morloc.Sparql
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Component.Util as MCU
 
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 
-generate :: SparqlEndPoint -> IO [Script]
-generate ep = languagesQ ep >>= foo' where 
-  foo' :: [[Maybe DT.Text]] -> IO [Script]
-  foo' xss = sequence (map (generateLang ep) xss)
+generate :: SparqlDatabaseLike db => db -> IO [Script]
+generate db = sparqlSelect hsparql db >>= foo' where 
+  foo' :: [[Maybe MT.Text]] -> IO [Script]
+  foo' xss = sequence (map (generateLang db) xss)
 
-generateLang :: SparqlEndPoint -> [Maybe DT.Text] -> IO Script
-generateLang e lang = case lang of
-  [Just "R"] -> RLang.generate e
-  [Just "py"] -> Py3.generate e
+generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> IO Script
+generateLang db lang = case lang of
+  [Just "R"] -> RLang.generate db
+  [Just "py"] -> Py3.generate db
   [Just x] -> error ("The language " ++ show x ++ " is not supported")
   x -> error ("Bad SPARQL query:" ++ show x)
 
-languagesQ :: SparqlEndPoint -> IO [[Maybe DT.Text]]
-languagesQ = [sparql|
-  PREFIX mlc: <http://www.morloc.io/ontology/000/>
-  PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-
-  SELECT DISTINCT ?lang
-  WHERE {
-    ?i rdf:type mlc:source ;
-       mlc:lang ?lang .
-  }
-|]
+hsparql :: Query SelectQuery
+hsparql = do
+  i_    <- var
+  lang_ <- var
+  triple_ i_ PType OSource
+  triple_ i_ PLang lang_
+  distinct_
+  selectVars [lang_]

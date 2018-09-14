@@ -14,10 +14,9 @@ module Morloc.Pools.Template.R (generate) where
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
+import Morloc.Data.Doc hiding ((<$>))
 
-import qualified Data.Text as DT 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
-
+generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g text' main)
 
 g = Grammar {

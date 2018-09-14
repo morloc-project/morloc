@@ -18,17 +18,17 @@ module Morloc.System
 
 import Morloc.Operators
 
-import qualified Data.Text as DT
+import qualified Morloc.Data.Text as MT
 
-findExecutor :: DT.Text -> DT.Text
+findExecutor :: MT.Text -> MT.Text
 findExecutor "R" = "Rscript" -- this is a safe bet
 findExecutor "py" = "python"  -- this isn't, due to python 2 versus 3 issues
 findExecutor l = error ("Language not supported: " ++ show l)
 
-makePoolName :: DT.Text -> DT.Text
+makePoolName :: MT.Text -> MT.Text
 makePoolName lang = "pool." <> lang
 
-makeManifoldName :: DT.Text -> DT.Text
-makeManifoldName x = case reverse (DT.splitOn "/" x) of
+makeManifoldName :: MT.Text -> MT.Text
+makeManifoldName x = case reverse (MT.splitOn "/" x) of
   (y:ys) -> "m" <> y
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"

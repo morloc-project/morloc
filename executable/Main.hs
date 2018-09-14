@@ -2,11 +2,12 @@
 
 module Main where
 
+import Morloc.Types
 import qualified Morloc as M
+import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Data.Text as MT
 import System.Console.Docopt
 import Control.Monad (when)
-import qualified Data.Text as DT
-import qualified Data.Text.IO as DTI
 import qualified System.Environment as SE
 
 patterns :: Docopt
@@ -23,13 +24,16 @@ main = do
   when (isPresent args (argument "script")) $ do
     -- handle the code, either from a file or a raw string
     script <- if isPresent args (longOption "expression")
-              then (fmap DT.pack $ getArgOrExit args (argument "script"))
-              else getArgOrExit args (argument "script") >>= DTI.readFile
+              then (fmap MT.pack $ getArgOrExit args (argument "script"))
+              else getArgOrExit args (argument "script") >>= MT.readFile
 
     -- build a Morloc program, generating the nexus and pool files
     when (isPresent args (command "make")) $ do
-      ep <- getArgOrExit args (argument "sparql-endpoint")
-      M.writeProgram ep script
+      when (isPresent args (longOption "endpoint")) $ do
+        ep <- (fmap SparqlEndPoint $ getArgOrExit args (longOption "endpoint"))
+        M.writeProgram ep script
+      when (notPresent args (longOption "endpoint")) $ do
+        M.writeProgram (MR.makeRDF []) script
 
     -- compile a Morloc script to RDF (turtle format by default)
     when (isPresent args (command "rdf")) $ do

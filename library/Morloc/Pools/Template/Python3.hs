@@ -14,20 +14,21 @@ module Morloc.Pools.Template.Python3 (generate) where
 import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
+import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Data.Text as MT
 
-import qualified Data.Text as DT 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
+generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g asImport main)
 
-asImport :: DT.Text -> Doc
-asImport s = text' $ case DT.uncons s of
-  (Just (x, xs)) -> DT.cons
+asImport :: MT.Text -> Doc
+asImport s = text' $ case MT.uncons s of
+  (Just (x, xs)) -> MT.cons
     (DC.toLower x)
     -- FIXME: generalize this to work with any path separator
-    ((DT.replace "/" ".") ((DT.pack . SF.dropExtensions . DT.unpack) xs)) 
+    ((MT.replace "/" ".") ((MT.pack . SF.dropExtensions . MT.unpack) xs)) 
   _ -> error "Expected import to have at least length 1"
 
 g = Grammar {

@@ -10,17 +10,15 @@ Stability   : experimental
 -}
 
 module Morloc.Types ( 
-    Script(..)
-  , Manifold(..)
-  , Argument(..)
-  , MData(..)
-  , MType(..)
-  , mData2mType -- TODO: this should no be here
-  , MTypeMeta(..)
-  , MShow(..)
-  , SerialMap(..)
-  , SparqlEndPoint  
-  , Text
+  -- ** Typeclasses
+    MShow(..)
+  , MorlocNodeLike(..)
+  , MorlocTypeable(..)
+  , SparqlSelectLike(..)
+  , SparqlDatabaseLike(..)
+  , RdfLike(..)
+  -- ** Synonyms
+  , SparqlEndPoint(..)  
   , AbstractType -- ^ A universal Morloc type
   , ConcreteType -- ^ A language-specific type
   , Name
@@ -30,19 +28,54 @@ module Morloc.Types (
   , Key
   , Value
   , Element
-  , ScriptGenerator
-  , CodeGenerator
+  -- ** Data
+  , Script(..)
+  , Manifold(..)
+  , Argument(..)
+  , MData(..)
+  , MType(..)
+  , MTypeMeta(..)
+  , GraphPredicate(..)
+  , GraphObject(..)
+  , SerialMap(..)
+  -- ** Error handling
+  , ThrowsError
+  , MorlocError(..)
 ) where
 
-import qualified Data.Text as DT
-import qualified Data.Map.Strict as Map
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
+import Data.Text                    ( Text         )
+import Data.RDF                     ( Node, Triple )
+import Data.Map.Strict              ( Map          )
+import Text.PrettyPrint.Leijen.Text ( Doc          )
+import Text.Megaparsec.Error        ( ParseError   )
+import Data.Void                    ( Void         )
 
 -- | Write into Morloc code
 class MShow a where
   mshow :: a -> Doc
 
-type Text = DT.Text
+class MorlocNodeLike a where
+  asRdfNode :: a -> Node
+  fromRdfNode :: Node -> a
+
+class MorlocTypeable a where
+  asType :: a -> MType
+
+class SparqlSelectLike a where
+  writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
+  showSparql :: a -> String
+
+class RdfLike a where
+  writeTurtle :: Path -> a -> IO () -- ^ create Turtle formatted file
+  asTriples :: a -> [Triple]
+
+class SparqlDatabaseLike a where
+  sparqlUpload :: (RdfLike r) => a -> r -> IO a
+
+  -- FIXME: wrap this pig in Either
+  sparqlSelect
+    :: (SparqlSelectLike q)
+    => q -> a -> IO [[Maybe Text]]
 
 type Name    = Text
 type Lang    = Text
@@ -95,7 +128,8 @@ data MData
   deriving(Show, Eq, Ord)
 
 data MType
-  = MDataType MTypeMeta Name [MType]
+  = MConcType MTypeMeta Name [MType]
+  | MAbstType MTypeMeta Name [MType]
   | MFuncType MTypeMeta [MType] MType
   deriving(Show, Eq, Ord)
 
@@ -107,35 +141,10 @@ data MTypeMeta = MTypeMeta {
   }
   deriving(Show, Eq, Ord)
 
-emptyMeta = MTypeMeta {
-      metaName = Nothing
-    , metaProp = []
-    , metaLang = Nothing
-  }
-
-mData2mType :: MData -> MType
-mData2mType (Num' _) = MDataType emptyMeta "Number" []
-mData2mType (Str' _) = MDataType emptyMeta "String" []
-mData2mType (Log' _) = MDataType emptyMeta "Bool" []
-mData2mType (Tup' xs) = MDataType emptyMeta "Tuple" (map mData2mType xs)
-mData2mType (Rec' xs) = MDataType emptyMeta "Tuple" (map record xs) where
-  record (key, value) = MDataType emptyMeta "Tuple" [ MDataType emptyMeta "String" []
-                                                    , mData2mType value]
-mData2mType (Lst' xs) = MDataType emptyMeta "List" [listType xs] where
-  listType [] = MDataType emptyMeta "*" [] -- cannot determine type
-  listType [x] = mData2mType x
-  listType (x:xs) =
-    if
-      all (\a -> mData2mType a == mData2mType x) xs
-    then
-      mData2mType x
-    else
-    error "Lists must be homogenous"
-
 data SerialMap = SerialMap {
       serialLang :: Lang
-    , serialPacker   :: Map.Map MType Name
-    , serialUnpacker :: Map.Map MType Name
+    , serialPacker   :: Map MType Name
+    , serialUnpacker :: Map MType Name
     , serialGenericPacker   :: Name
     , serialGenericUnpacker :: Name
     , serialSources :: [Path] -- Later, I might want to link the source files to
@@ -144,11 +153,7 @@ data SerialMap = SerialMap {
   deriving(Show, Eq, Ord)
 
 -- | Stores a URL for a SPARQL endpoint (e.g. "http://localhost:3030/morloc")
-type SparqlEndPoint = String
-
--- | A code generator
-type ScriptGenerator = SparqlEndPoint -> IO Script
-type CodeGenerator = SparqlEndPoint -> IO Code
+newtype SparqlEndPoint = SparqlEndPoint { endpoint :: String }
 
 -- | Stores everything needed to build one file
 data Script = Script {
@@ -157,3 +162,76 @@ data Script = Script {
     , scriptCode :: Text -- ^ full script source code
   }
   deriving(Ord, Eq)
+
+data GraphPredicate
+  = PElem Int
+  | PAlias
+  | PConstraint
+  | PLabel
+  | PLang
+  | PLeft
+  | PNamespace
+  | POutput
+  | PPath
+  | PProperty
+  | PRight
+  | PType
+  | PValue
+  | PKey
+  | PNot
+  | PName
+  | PImport
+  deriving(Show, Eq, Ord)
+
+data GraphObject
+  = OLiteral Text
+  | OAccess
+  | OAtomicGenericType
+  | OAtomicType
+  | OBinaryOp
+  | OBoolean
+  | OCall
+  | OData
+  | ODataDeclaration
+  | OEmptyType
+  | OExport
+  | OFunctionType
+  | OImport
+  | OList
+  | OName
+  | ONamedType
+  | ONumber
+  | OParameterizedGenericType
+  | OParameterizedType
+  | ORecord
+  | ORecordEntry
+  | ORestrictedImport
+  | OScript
+  | OSource
+  | OString
+  | OTuple
+  | OType
+  | OTypeDeclaration
+  | OUnaryOp
+  | OEmpty
+  | OBinOp
+  deriving(Show, Eq, Ord)
+
+type ThrowsError = Either MorlocError
+data MorlocError
+  -- | Raised when assumptions about the input RDF are broken. This should not
+  -- occur for RDF that has been validated.
+  = InvalidRDF Text
+  -- | Raised for calls to unimplemented features
+  | NotImplemented Text
+  -- | Raised for unsupported features (such as specific languages)
+  | NotSupported Text
+  -- | Raised by parsec on parse errors
+  | SyntaxError (ParseError Char Void)
+  -- | Raised when someone didn't customize their error messages
+  | UnknownError
+  -- | Raised when parent and child types conflict
+  | TypeConflict Text Text
+  -- | Raised when a SPARQL command fails
+  | SparqlFail Text
+  deriving(Eq)

@@ -18,23 +18,22 @@ module Morloc.State
   , getSourceUri
 ) where
 
+import qualified Morloc.Data.RDF as R
+import qualified Morloc.Data.Text as MT
+
 import Text.Megaparsec
-import qualified Data.RDF as DR
 import qualified Control.Monad.State as CMS
 import Data.Void
-import qualified Data.Text as DT
-
-import qualified Morloc.Triple as M3
 
 
 
 -- | A stateful Parser stores an integer that is used to generate URIs
-type Parser a = CMS.StateT ParserState (Parsec Void DT.Text) a
+type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
 data ParserState = ParserState {
     -- | Stores the current node number. This will be unique within a program.
     stateCount :: Int 
-  , stateSourceUri :: Maybe DT.Text
+  , stateSourceUri :: Maybe MT.Text
 }
 
 -- | The empty parser state, with the ID initialized to 0
@@ -45,13 +44,13 @@ parserStateEmpty = ParserState {
 }
 
 -- | Get an RDF URI and increment the internal counter
-getId :: Parser DR.Node
+getId :: Parser R.Node
 getId = do
   s <- CMS.get
   CMS.put (s {stateCount = (stateCount s) + 1})
-  return $ M3.idUri (stateSourceUri s) (stateCount s)
+  return $ R.idUri (stateSourceUri s) (stateCount s)
 
-getSourceUri :: Parser DT.Text
+getSourceUri :: Parser MT.Text
 getSourceUri = do
   s <- CMS.get
   return $ maybe "<stdin>" id (stateSourceUri s) 

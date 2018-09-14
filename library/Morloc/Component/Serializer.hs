@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Morloc.Component.Serializer
@@ -16,15 +16,16 @@ module Morloc.Component.Serializer (
 
 import Morloc.Types
 import Morloc.Operators
-import Morloc.Quasi
+import Morloc.Sparql
+import Morloc.Data.Doc hiding ((<$>), (<>))
+import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
+import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Component.MType as MCM 
-import qualified Data.Maybe as DM
+import qualified Morloc.Data.Text as MT
 
-import Text.PrettyPrint.Leijen.Text hiding ((<$>), (<>))
-import Morloc.Database.HSparql.Connection
+import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map
-import qualified Data.Text as DT
 
 type SerialData =
   ( Key  -- type_id - 
@@ -36,17 +37,20 @@ type SerialData =
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
-fromSparqlDb :: Lang -> SparqlEndPoint -> IO SerialMap
-fromSparqlDb lang ep
+fromSparqlDb
+  :: SparqlDatabaseLike db
+  => Lang -> db -> IO SerialMap
+fromSparqlDb lang db
   =   toSerialMap
-  <$> MCM.fromSparqlDb ep
-  <*> (map tuplify <$> sparqlQuery lang' ep)
+  <$> MCM.fromSparqlDb db
+  <*> (map tuplify <$> sparqlSelect (hsparql lang) db)
+
   where
 
-    tuplify :: [Maybe Text] -> SerialData
+    tuplify :: [Maybe MT.Text] -> SerialData
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
-    tuplify e = error ("Unexpected SPARQL result: " ++ show e)
+    tuplify e = ME.error' ("Unexpected SPARQL result: " <> MT.pretty e)
 
     lang' = dquotes (text' lang)
 
@@ -69,62 +73,83 @@ fromSparqlDb lang ep
           , serialGenericUnpacker = u
           , serialSources = srcs
           }
-        e -> error ("Expected exactly one generic packer/unpacker: " ++ show xs)
+        e -> ME.error' ("Expected exactly one generic packer/unpacker: " <> MT.pretty xs)
 
     getOut :: MType -> MType
     getOut (MFuncType _ _ x) = x
-    getOut _ = error "Expected packer to have signature: a -> JSON"
+    getOut t = ME.error' ("Expected packer to have signature: a -> JSON: " <> MT.pretty t)
 
     getIn :: MType -> MType
     getIn (MFuncType _ [x] _) = x
-    getIn _ = error "Expected unpacker to have signature: JSON -> a"
+    getIn t = ME.error' ("Expected unpacker to have signature: JSON -> a: " <> MT.pretty t)
 
     lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> b
     lookupOrDie k h = case Map.lookup k h of
       (Just x) -> x
-      Nothing -> error ("Could not find SerialMap for key: "
-                        ++ show k ++ " for " ++ DT.unpack lang)
+      Nothing -> ME.error' ("Could not find SerialMap for key: " <> MT.pretty k <> " for " <> lang)
 
-sparqlQuery :: Doc -> SparqlEndPoint -> IO [[Maybe Text]]
-sparqlQuery lang = [sparql|
-PREFIX mlc: <http://www.morloc.io/ontology/000/>
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-PREFIX mid: <http://www.morloc.io/XXX/mid/>
-SELECT DISTINCT ?type_id ?property ?is_generic ?name ?path
-WHERE {
-    # Get serialization functions of type `a -> JSON`
-    ?id rdf:type mlc:typeDeclaration ;
-          mlc:lang ${lang} ;
-          mlc:lhs ?name ;
-          mlc:rhs ?rhs .
-    ?rhs rdf:type mlc:functionType ;
-                 mlc:property ?property_id ;
-                 mlc:output ?output .
-    ?property_id rdf:type mlc:name .
-    BIND(?rhs as ?type_id)
-    {
-        ?property_id rdf:value ?property .
-        ?output rdf:type mlc:atomicType ;
-                rdf:value "JSON" .
-        ?rhs rdf:_0 ?packer_input .
-        BIND(exists{?packer_input rdf:type mlc:atomicGeneric} AS ?is_generic)
-        FILTER(?property = "packs")
-    } UNION {
-        ?property_id rdf:value ?property .
-        ?rhs rdf:_0 ?unpacker_input ;
-             mlc:output ?unpacker_output .
-        ?unpacker_input rdf:type mlc:atomicType ;
-                        rdf:value "JSON" .
-        BIND(exists{?unpacker_output rdf:type mlc:atomicGeneric} AS ?is_generic)
-        FILTER(?property = "unpacks")
-    }
-    OPTIONAL{
-       ?source_id rdf:type mlc:source ;
-                  mlc:lang ${lang} ;
-                  mlc:path ?path ;
-                  mlc:import ?import_id .
-       ?import_id mlc:alias ?name .
-    }
-}
-ORDER BY ?type_id ?property
-|]
+hsparql :: Lang -> Query SelectQuery
+hsparql lang = do
+  basetype_      <- var
+  filterExpr_    <- var
+  id_            <- var
+  importId_      <- var
+  isGeneric_     <- var
+  name_          <- var
+  output_        <- var
+  packerInput_   <- var
+  path_          <- var
+  propertyId_    <- var
+  property_      <- var
+  rhs_           <- var
+  sourceId_      <- var
+  typeId_        <- var
+  unpackerInput_ <- var
+
+  -- Get serialization functions of type `a -> JSON`
+  triple_ id_ PType  OTypeDeclaration
+  triple_ id_ PLang  lang
+  triple_ id_ PLeft  name_
+  triple_ id_ PRight rhs_
+
+  triple_ rhs_ PType OFunctionType
+  triple_ rhs_ PProperty propertyId_
+  triple_ rhs_ POutput output_
+
+  triple_ propertyId_ PType OName
+
+  union_
+    ( do
+        filterExpr (property_ .==. ("packs" :: MT.Text))
+        triple_ propertyId_ PValue property_
+        triple_ output_ PType OAtomicType
+        triple_ output_ PValue ("JSON" :: MT.Text)
+        triple_ rhs_ (PElem 0) packerInput_
+        triple_ packerInput_ PType basetype_
+        filterExpr (basetype_ .!=. OType)
+    )
+    ( do
+        filterExpr (property_ .==. ("unpacks" :: MT.Text))
+        triple_ propertyId_ PValue property_
+        triple_ rhs_ (PElem 0) unpackerInput_
+        triple_ unpackerInput_ PType OAtomicType
+        triple_ unpackerInput_ PValue ("JSON" :: MT.Text)
+        triple_ output_ PType basetype_
+        filterExpr (basetype_ .!=. OType)
+    )
+
+  bind (basetype_ .==. OAtomicGenericType) isGeneric_
+
+  optional_
+    ( do
+        triple_ sourceId_ PType OSource
+        triple_ sourceId_ PLang lang
+        triple_ sourceId_ PPath path_
+        triple_ sourceId_ PImport importId_
+        triple_ importId_ PAlias name_
+    )
+
+  orderNextAsc typeId_
+  orderNextAsc property_
+
+  selectVars [rhs_, property_, isGeneric_, name_, path_]

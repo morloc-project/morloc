@@ -22,18 +22,18 @@ module Morloc.Pools.Common
   , getUsedManifolds
 ) where
 
-import qualified Morloc.Component.Serializer as Serializer
-import qualified Morloc.Component.Manifold as Manifold
-
 import Morloc.Types
 import Morloc.Quasi
+import qualified Morloc.Error as ME
+import qualified Morloc.Component.Serializer as Serializer
+import qualified Morloc.Component.Manifold as Manifold
+import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.System as MS
-import qualified Data.Text as DT
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
+import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {
-      gLang     :: DT.Text
+      gLang     :: MT.Text
     , gAssign   :: Doc -> Doc -> Doc
     , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
@@ -83,21 +83,23 @@ data ForeignCallDoc = ForeignCallDoc {
   }
 
 makeGenerator
-  :: Grammar
-  -> CodeGenerator
-  -> ScriptGenerator
+  :: (SparqlDatabaseLike db)
+  => Grammar
+  -> (db -> IO Code)
+  -> (db -> IO Script)
 makeGenerator g gen
   = \ep ->
           Script
       <$> pure "pool"
-      <*> pure (DT.unpack (gLang g))
+      <*> pure (MT.unpack (gLang g))
       <*> gen ep
 
 defaultCodeGenerator
-  :: Grammar
-  -> (DT.Text -> Doc) -- source name parser
+  :: (SparqlDatabaseLike db)
+  => Grammar
+  -> (MT.Text -> Doc) -- source name parser
   -> ([Doc] -> [Manifold] -> SerialMap -> Doc) -- main
-  -> CodeGenerator 
+  -> (db -> IO Code)
 defaultCodeGenerator g f main ep = do
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
@@ -204,7 +206,7 @@ makeCisManifold g h m
 getUnpackers :: Grammar -> SerialMap -> Manifold -> [Doc]
 getUnpackers g h m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> map (unpackerName g h . return) ts 
-  (Just _) -> error "Expected a function type"
+  (Just _) -> ME.error' ("Expected a function type for:" <> MT.pretty m)
   Nothing -> take (length (mArgs m)) (repeat (unpackerName g h Nothing))
 
 useUnpacker :: Grammar -> Argument -> Manifold -> Bool
@@ -228,7 +230,7 @@ callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
-writeArgument :: Grammar -> [DT.Text] -> Argument -> Doc
+writeArgument :: Grammar -> [MT.Text] -> Argument -> Doc
 writeArgument g _  (ArgName n) = text' n
 writeArgument g _  (ArgData d) = writeData g d
 writeArgument _ _  (ArgPosi i) = "x" <> int i

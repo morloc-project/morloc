@@ -29,11 +29,12 @@ module Morloc.Lexer (
   , arithmeticBinOp
 ) where
 
+import qualified Morloc.Data.Text as MT
+
 import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Data.Scientific as DS
-import qualified Data.Text as DT
 import qualified Data.Set as DS
 
 import Morloc.State
@@ -50,10 +51,10 @@ lexeme :: Parser a -> Parser a
 lexeme = L.lexeme sc
 
 -- Parse and return a fixed string (and following space
-symbol :: DT.Text -> Parser DT.Text
+symbol :: MT.Text -> Parser MT.Text
 symbol = L.symbol sc
 
-reservedWords :: [DT.Text]
+reservedWords :: [MT.Text]
 reservedWords = ["where", "import", "from", "as", "source", "export",
                  "True", "False",
                  "and", "or", "xor", "nand", "not"]
@@ -61,19 +62,19 @@ reservedWords = ["where", "import", "from", "as", "source", "export",
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~"
 
-reserved :: DT.Text -> Parser DT.Text
+reserved :: MT.Text -> Parser MT.Text
 reserved w = (lexeme . try) (string w <* notFollowedBy alphaNumChar)
 
 -- TODO: should name this "identifier", that is more conventional
-name :: Parser DT.Text
+name :: Parser MT.Text
 name = (lexeme . try) (p >>= check)
   where
-    p       = fmap DT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
+    p       = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
     check x = if elem x reservedWords
                 then failure Nothing DS.empty -- TODO: error message
                 else return x
 
-op :: DT.Text -> Parser DT.Text
+op :: MT.Text -> Parser MT.Text
 op o = (lexeme . try) (string o <* notFollowedBy (oneOf operatorChars))
 
 parens :: Parser a -> Parser a
@@ -92,12 +93,12 @@ comma :: Parser ()
 comma = symbol "," >> return ()
 
 -- | match a double-quoted literal string
-stringLiteral :: Parser DT.Text
-stringLiteral = lexeme $ fmap DT.pack $ char '"' >> manyTill L.charLiteral (char '"')
+stringLiteral :: Parser MT.Text
+stringLiteral = lexeme $ fmap MT.pack $ char '"' >> manyTill L.charLiteral (char '"')
 
 
 -- | match an optional tag that precedes some construction
-tag :: Parser a -> Parser (Maybe DT.Text)
+tag :: Parser a -> Parser (Maybe MT.Text)
 tag p =
   optional (try tag')
   where
@@ -109,17 +110,17 @@ tag p =
 
 -- | match a boolean written as "True" or "False"
 boolean :: Parser Bool
-boolean = fmap (read . DT.unpack) (reserved "True" <|> reserved "False") where
+boolean = fmap MT.read' (reserved "True" <|> reserved "False") where
 
 -- | match a non-generic type (alphanumeric with initial uppercase character)
-specificType :: Parser DT.Text
-specificType = lexeme (fmap DT.pack $ (:) <$> upperChar <*> many alphaNumChar)
+specificType :: Parser MT.Text
+specificType = lexeme (fmap MT.pack $ (:) <$> upperChar <*> many alphaNumChar)
 
 -- | match a generic type (alphanumeric with initial lowercase character)
-genericType :: Parser DT.Text
-genericType = lexeme (fmap DT.pack $ (:) <$> lowerChar <*> many alphaNumChar)
+genericType :: Parser MT.Text
+genericType = lexeme (fmap MT.pack $ (:) <$> lowerChar <*> many alphaNumChar)
 
-relativeBinOp :: Parser DT.Text
+relativeBinOp :: Parser MT.Text
 relativeBinOp =
       op "=="
   <|> try (op "<=")
@@ -129,7 +130,7 @@ relativeBinOp =
   <|> op "!="
   <?> "a numeric comparison operator"
 
-logicalBinOp :: Parser DT.Text
+logicalBinOp :: Parser MT.Text
 logicalBinOp =
           (reserved "and")
   <|>     (reserved "or")
@@ -138,7 +139,7 @@ logicalBinOp =
   <|> try (reserved "not")
   <?> "a logical operator"
 
-arithmeticBinOp :: Parser DT.Text
+arithmeticBinOp :: Parser MT.Text
 arithmeticBinOp =
           (op "+")
   <|>     (op "-")

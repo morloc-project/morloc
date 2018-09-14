@@ -1,3 +1,11 @@
+0.16.0 [2018.09.14]
+-------------------
+
+ * Write RDF bools in lowercase ("true", rather than "True"), as per specs
+ * Stricter node typing (replace ad hoc names with elements from an ADT)
+ * Add very rudimentary typechecking
+ * Remove SPARQL server dependency (now there's a sluggish Jena dependency)
+
 0.15.1 [2018.09.10]
 -------------------
 

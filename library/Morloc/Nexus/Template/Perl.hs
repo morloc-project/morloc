@@ -16,12 +16,12 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Util as MU
 import Morloc.Component.Manifold as MCM
+import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import qualified Data.Text as DT
 import qualified Data.Map.Strict as Map
 import qualified Data.List as DL
 import qualified Data.Maybe as DM
-import Text.PrettyPrint.Leijen.Text hiding ((<$>))
 
 generate e
   =   Script
@@ -29,7 +29,7 @@ generate e
   <*> pure "perl"
   <*> makeNexus e
 
-makeNexus :: SparqlEndPoint -> IO DT.Text
+makeNexus :: SparqlDatabaseLike db => db -> IO MT.Text
 makeNexus ep = fmap render $ main <$> names <*> fdata where
 
   manifolds :: IO [Manifold]
@@ -38,7 +38,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
   names :: IO [Doc]
   names = fmap (map (text' . getName)) manifolds
 
-  getName :: Manifold -> DT.Text
+  getName :: Manifold -> MT.Text
   getName m = maybe (mMorlocName m) id (mComposition m)
 
   getNArgs :: Manifold -> Int

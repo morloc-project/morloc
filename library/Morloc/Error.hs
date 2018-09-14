@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Error
 Description : Error handling
@@ -12,35 +14,25 @@ program. New entries can be added to describe new types of error.
 
 module Morloc.Error
 (
-    MorlocError(..)
-  , ThrowsError
+    error'
 ) where
 
-import qualified Text.Megaparsec.Error as PE
-import Data.Void
-
-type ThrowsError = Either MorlocError
-
-data MorlocError
-  -- | Raised when assumptions about the input RDF are broken. This should not
-  -- occur for RDF that has been validated.
-  = InvalidRDF String
-  -- | Raised for calls to unimplemented features
-  | NotImplemented String
-  -- | Raised for unsupported features (such as specific languages)
-  | NotSupported String
-  -- | Raised by parsec on parse errors
-  | SyntaxError (PE.ParseError Char Void)
-  -- | Raised when someone didn't customize their error messages
-  | UnknownError
-  deriving(Eq)
+import Morloc.Types
+import Morloc.Operators
+import qualified Morloc.Data.Text as MT
 
 instance Show MorlocError where
-  show = morlocShow
+  show = MT.unpack . errmsg
 
-morlocShow :: MorlocError -> String
-morlocShow  UnknownError         = "UnknownError"
-morlocShow (InvalidRDF msg)      = "Invalid RDF: " ++ show msg
-morlocShow (NotImplemented msg)  = "Not yet implemented: " ++ show msg
-morlocShow (NotSupported msg)    = "NotSupported: "        ++ show msg
-morlocShow (SyntaxError    err)  = "SyntaxError: "         ++ show err
+errmsg :: MorlocError -> MT.Text
+errmsg  UnknownError         = "UnknownError"
+errmsg (InvalidRDF msg)      = "Invalid RDF: " <> MT.show' msg
+errmsg (NotImplemented msg)  = "Not yet implemented: " <> MT.show' msg
+errmsg (NotSupported msg)    = "NotSupported: " <> MT.show' msg
+errmsg (SyntaxError err)     = "SyntaxError: " <> MT.show' err
+errmsg (TypeConflict t1 t2)  = 
+  "TypeConflict: cannot cast " <> t1 <> " as " <> t2 <> "\n"
+errmsg (SparqlFail t) = "SparqlFail: " <> t
+
+error' :: MT.Text -> a
+error' x = error $ MT.unpack x
