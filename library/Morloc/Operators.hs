@@ -13,7 +13,7 @@ module Morloc.Operators
     (|>>)
   , (<>)
   -- * Filesystem utility operators from System.FilePath
-  , (</>) -- ^ join paths 
+  , (</>)
 ) where
 
 import Data.Monoid

@@ -19,8 +19,8 @@ module Morloc.Types (
   , RdfLike(..)
   -- ** Synonyms
   , SparqlEndPoint(..)  
-  , AbstractType -- ^ A universal Morloc type
-  , ConcreteType -- ^ A language-specific type
+  , AbstractType
+  , ConcreteType
   , Name
   , Lang
   , Path
@@ -85,7 +85,10 @@ type Key     = Text
 type Value   = Text
 type Element = Text
 
+-- | Universal Morloc type
 type AbstractType = MType
+
+-- | Language-specific type
 type ConcreteType = MType
 
 data Manifold = Manifold {
@@ -117,7 +120,7 @@ data Argument
   -- ^ A manifold positional argument (passed into a function assignment)
   deriving(Show, Eq, Ord)
 
--- The values are left unparsed, since they will be used as text
+-- | The values are left unparsed, since they will be used as text
 data MData
   = Num' Text
   | Str' Text
@@ -163,26 +166,28 @@ data Script = Script {
   }
   deriving(Ord, Eq)
 
+-- | Set of all legal predicates in a compiled Morloc script
 data GraphPredicate
-  = PElem Int
-  | PAlias
-  | PConstraint
-  | PLabel
-  | PLang
-  | PLeft
-  | PNamespace
-  | POutput
-  | PPath
-  | PProperty
-  | PRight
-  | PType
-  | PValue
-  | PKey
-  | PNot
-  | PName
-  | PImport
+  = PElem Int   -- ^ Link a parent to an ordered child
+  | PAlias      -- ^ Link an imported function to a Morloc name
+  | PConstraint -- ^ Link a type to a constraint
+  | PLabel      -- ^ Link a Morloc variable to a tag for the variable (TODO: replace this name)
+  | PLang       -- ^ Link something to a specific programming language
+  | PLeft       -- ^ Link something to its left-hand-side element
+  | PNamespace  -- ^ Link a source or import to a namespace
+  | POutput     -- ^ Link a function to its output
+  | PPath       -- ^ Link a source to the file-system path
+  | PProperty   -- ^ Link a type to a type property
+  | PRight      -- ^ Link something to its right-hand-side element
+  | PType       -- ^ Link something to its type (rdf:type)
+  | PValue      -- ^ Link something to
+  | PKey        -- ^ Link something to a key
+  | PNot        -- ^ Negate an exepressoin
+  | PName       -- ^ Link something to a Morloc name
+  | PImport     -- ^ The left-hand imports the right-hand side
   deriving(Show, Eq, Ord)
 
+-- | Set of all legal objects in a compiled Morloc script
 data GraphObject
   = OLiteral Text
   | OAccess
