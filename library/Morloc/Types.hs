@@ -189,37 +189,41 @@ data GraphPredicate
 
 -- | Set of all legal objects in a compiled Morloc script
 data GraphObject
-  = OLiteral Text
-  | OAccess
-  | OAtomicGenericType
-  | OAtomicType
-  | OBinaryOp
-  | OBoolean
-  | OCall
-  | OData
-  | ODataDeclaration
-  | OEmptyType
-  | OExport
-  | OFunctionType
-  | OImport
-  | OList
-  | OName
-  | ONamedType
-  | ONumber
-  | OParameterizedGenericType
-  | OParameterizedType
-  | ORecord
-  | ORecordEntry
-  | ORestrictedImport
-  | OScript
-  | OSource
-  | OString
-  | OTuple
-  | OType
-  | OTypeDeclaration
-  | OUnaryOp
-  | OEmpty
-  | OBinOp
+  -- literals
+  =  OLiteral Text             -- ^ Stores a literal textual field, should always be with the predicate PValue
+  -- top-level
+  |  ORestrictedImport         -- ^ LHS is an import with some imports hidden
+  |  OScript                   -- ^ LHS is a top-level script
+  |  OSource                   -- ^ LHS represents a source file
+  |  OExport                   -- ^ LHS represents an exported function (there should be an associated (?s PValue (OLiteral name)) triple.
+  |  OImport                   -- ^ LHS is an import (there exists a triple: `?i PName ?j` where `i` is the LHS and `j` is a string literal for the module name)
+  -- types and type declarations
+  |  OType                     -- ^ LHS is a type
+  |  OTypeDeclaration          -- ^ LHS is a type declaration (e.g. `Foo :: Matrix Int`)
+  |  OAtomicGenericType        -- ^ LHS is an abstract type with no type parameters
+  |  OAtomicType               -- ^ LHS is a concrete type with no type parameters
+  |  OParameterizedGenericType -- ^ LHS is a parameterized, abstract type
+  |  OParameterizedType        -- ^ LHS is a parameterized, concrete type
+  |  OEmptyType                -- ^ LHS is an empty type
+  |  OFunctionType             -- ^ LHS is a function type
+  |  ONamedType                -- ^ LHS is a named type (e.g. a record entry)
+  -- parts of a constraint
+  |  OAccess                   -- ^ Index access to a container (inside a constraint)
+  |  OUnaryOp                  -- ^ LHS is a unary operator in a constraint
+  |  OBinOp                    -- ^ LHS is a binary operator in a constraint (soon to be deprecated and merged with OCall)
+  -- data and data declarations and components
+  |  OData                     -- ^ LHS is literal data
+  |  ODataDeclaration          -- ^ LHS is a Morloc data (or function) declaration
+  |  OBoolean                  -- ^ LHS is a boolean literal
+  |  OCall                     -- ^ LHS is a function call
+  |  OName                     -- ^ LHS is a Morloc name (manifold parameter or something defined outside the dataDeclaration scope)
+  |  ONumber                   -- ^ LHS is a literal number
+  |  OString                   -- ^ LHS is a literal string
+  |  OList                     -- ^ LHS is an ordered list of homogenous data (with elements stored as PElem entries)
+  |  OTuple                    -- ^ LHS is a tuple (elements stored as PElem entries)
+  |  ORecord                   -- ^ LHS is a record (elements stored as PElem entries)
+  |  ORecordEntry              -- ^ LHS is a record entry (cmp. ONamedType)
+
   deriving(Show, Eq, Ord)
 
 type ThrowsError = Either MorlocError

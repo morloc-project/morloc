@@ -159,7 +159,6 @@ instance MorlocNodeLike GraphObject where
   asRdfNode OAccess                   = mlcPre .:. "access"
   asRdfNode OAtomicGenericType        = mlcPre .:. "atomicGeneric"
   asRdfNode OAtomicType               = mlcPre .:. "atomicType"
-  asRdfNode OBinaryOp                 = mlcPre .:. "binaryOp"
   asRdfNode OBoolean                  = mlcPre .:. "boolean"
   asRdfNode OCall                     = mlcPre .:. "call"
   asRdfNode OData                     = mlcPre .:. "data"
@@ -184,15 +183,13 @@ instance MorlocNodeLike GraphObject where
   asRdfNode OType                     = mlcPre .:. "type"
   asRdfNode OTypeDeclaration          = mlcPre .:. "typeDeclaration"
   asRdfNode OUnaryOp                  = mlcPre .:. "unaryOp"
-  asRdfNode OEmpty                    = mlcPre .:. "empty"
-  asRdfNode OBinOp                    = mlcPre .:. "binop"
+  asRdfNode OBinOp                    = mlcPre .:. "binOp"
 
   fromRdfNode (DR.LNode (DR.PlainL s)) = OLiteral s
   fromRdfNode n
     | n == ( mlcPre .:. "access"               ) = OAccess
     | n == ( mlcPre .:. "atomicGeneric"        ) = OAtomicGenericType
     | n == ( mlcPre .:. "atomicType"           ) = OAtomicType
-    | n == ( mlcPre .:. "binaryOp"             ) = OBinaryOp
     | n == ( mlcPre .:. "boolean"              ) = OBoolean
     | n == ( mlcPre .:. "call"                 ) = OCall
     | n == ( mlcPre .:. "data"                 ) = OData
@@ -217,7 +214,6 @@ instance MorlocNodeLike GraphObject where
     | n == ( mlcPre .:. "type"                 ) = OType
     | n == ( mlcPre .:. "typeDeclaration"      ) = OTypeDeclaration
     | n == ( mlcPre .:. "unaryOp"              ) = OUnaryOp
-    | n == ( mlcPre .:. "empty"                ) = OEmpty
     | n == ( mlcPre .:. "binOp"                ) = OBinOp
 
 -- | Build a triple from Morloc node-like objects

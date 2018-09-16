@@ -307,7 +307,7 @@ mtype =
       Tok.op ")"
       i <- MS.getId
       return $ MR.makeTopRDF i
-        [ MR.mtriple i PType OEmpty
+        [ MR.mtriple i PType OEmptyType
         , MR.mtriple i PType OType
         ]
 

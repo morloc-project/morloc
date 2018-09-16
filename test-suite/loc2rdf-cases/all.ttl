@@ -52,7 +52,7 @@ mid:7 mlc:output mid:9 .
 mid:9 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Num" .
 mid:7 mlc:constraint mid:10 .
-mid:10 rdf:type mlc:binop;
+mid:10 rdf:type mlc:binOp;
 	rdf:value "GT";
 	mlc:lhs mid:11;
 	mlc:rhs mid:12 .
@@ -78,11 +78,11 @@ mid:16 mlc:output mid:18 .
 mid:18 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y" .
 mid:16 mlc:constraint mid:19 .
-mid:19 rdf:type mlc:binop;
+mid:19 rdf:type mlc:binOp;
 	rdf:value "GT";
 	mlc:lhs mid:21;
 	mlc:rhs mid:23 .
-mid:21 rdf:type mlc:binop;
+mid:21 rdf:type mlc:binOp;
 	rdf:value "Add";
 	mlc:lhs mid:20;
 	mlc:rhs mid:22 .
@@ -135,11 +135,11 @@ mid:37 rdf:type mlc:typeDeclaration;
 mid:38 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "A";
 	mlc:constraint mid:39 .
-mid:39 rdf:type mlc:binop;
+mid:39 rdf:type mlc:binOp;
 	rdf:value "and";
 	mlc:lhs mid:40;
 	mlc:rhs mid:43 .
-mid:40 rdf:type mlc:binop;
+mid:40 rdf:type mlc:binOp;
 	rdf:value "EQ";
 	mlc:lhs mid:41;
 	mlc:rhs mid:42 .
@@ -147,7 +147,7 @@ mid:41 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:42 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
-mid:43 rdf:type mlc:binop;
+mid:43 rdf:type mlc:binOp;
 	rdf:value "EQ";
 	mlc:lhs mid:44;
 	mlc:rhs mid:45 .
@@ -162,11 +162,11 @@ mid:46 rdf:type mlc:typeDeclaration;
 mid:47 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
 	mlc:constraint mid:48 .
-mid:48 rdf:type mlc:binop;
+mid:48 rdf:type mlc:binOp;
 	rdf:value "EQ";
 	mlc:lhs mid:50;
 	mlc:rhs mid:53 .
-mid:50 rdf:type mlc:binop;
+mid:50 rdf:type mlc:binOp;
 	rdf:value "Pow";
 	mlc:lhs mid:49;
 	mlc:rhs mid:51 .
@@ -211,7 +211,7 @@ mid:63 rdf:type mlc:typeDeclaration;
 mid:64 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
 	mlc:constraint mid:65 .
-mid:65 rdf:type mlc:binop;
+mid:65 rdf:type mlc:binOp;
 	rdf:value "EQ";
 	mlc:lhs mid:66;
 	mlc:rhs mid:70 .
