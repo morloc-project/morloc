@@ -2,7 +2,8 @@
 [![github release](https://img.shields.io/github/release/arendsee/morloc.svg?label=current+release)](https://github.com/arendsee/morloc/releases)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-# Morloc: a typed meta-programming language 
+Morloc: a typed meta-programming language 
+==========================================
 
 The goal of Morloc is provide a universal interface to functions across
 computer languages that will allow programmers to share snippets of code that
@@ -13,14 +14,13 @@ types, the compiler generates the code needed to link functions between
 languages and also to direct automation of mundane tasks such as data
 validation, type/format conversions, data caching, distributed computing, and
 file reading/writing. I am also designing a cross-language database that makes
-functions searchable by type (a little like Hoogle). Ultimately, I hope to
-build a GitHub-like community portal around Morloc where users can upload
-packages of functions or import them into their own programs.
+functions searchable by type (a little like
+[Hoogle](https://www.haskell.org/hoogle/)). Ultimately, I hope to build
+a GitHub-like community portal around Morloc where users can upload packages of
+functions or import them into their own programs.
 
-So far I have written two prototypes, described below.
 
-Installation
-============
+## Installation
 
 Compile and install the package as so (requires the Haskell utility `stack`):
 
@@ -34,11 +34,9 @@ stack install
 `morloc` has a temporary dependency on the Java library Jena and its `arq`
 command line tool. You will need to have `arq` in PATH to use Morloc
 (currently). The `arq` dependency will be removed eventually, since the calls
-require firing up the Java runtime, and thus massivly slow down the compilation
-process.
+require firing up JVM, and thus massivly slow down the compilation process.
 
-Minimal Example
-===============
+## Minimal Example
 
 You might start with the example in `examples/sample1.loc`. This is just a toy
 script and I will have a better demo soon. Also the type signatures in this
@@ -83,8 +81,7 @@ nodes can now be accessed.
 ./nexus.perl rand_uniform 10 0 3
 ```
 
-The Morloc Type System
-======================
+## The Morloc Type System
 
 The type system and the syntax for specifying the type ontologies is still
 under construction. But here is a little information on how it will work.
@@ -133,4 +130,56 @@ The addition of the constraints allows
  * Formal documentation of the behavior of the function
 
 The type system is essential for specifying how data is passed between
-languages. I'll elaborate more on this soon.
+languages.
+
+
+## Language-specific type specialization
+
+A `morloc` program can import functions from multiple languages.
+
+Currently data is passed between languages through a language-agnostic
+intermediate format (JSON). For simple data types, generic JSON serlization
+libraries may be able to handle these conversions. For example, the Python
+`json` module will convert the JSON string `[1,2,3]` to the appropriate Python
+list. For more advanced cases, type-specific handling can be added.
+
+A function can be given a language-specific type, for example:
+
+```
+transpose :: Matrix a -> Matrix a
+transpose py :: NumpyMatrix -> NumpyMatrix
+```
+
+The first definition is the Morloc type, where `Matrix a` represents a matrix
+containing elements of generic type `a`. The second definition is
+a python-specific type from the Python `numpy` module. This second definition
+tells Morloc how to cast data into the python `transpose` function. 
+
+Handling for specfic types is determined by functions with the properties `packs` and `unpacks`. These serialization functions are defined in a Morloc module, for example:
+
+```
+source "py" from "scipy.py" (
+   "unpackMatrix"
+ , "packMatrix"
+)
+
+packMatrix   py :: packs   => Matrix -> JSON;
+unpackMatrix py :: unpacks => JSON -> Matrix;
+```
+
+The Python code for handling the conversions is:
+
+``` python
+import json
+import numpy as np
+
+def unpackMatrix(jsonTxt):
+    return(np.matrix(json.loads(jsonTxt)))
+
+def packMatrix(x):
+    return(json.dumps(np.matrix.tolist(x)))
+```
+
+`morloc` will then use these functions whenever it needs to cast data into
+Python as Matrix types.
+
