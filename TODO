@@ -1,3 +1,7 @@
+# Usability
+
+ [ ] Make a Docker image
+
 # Short-term
 
  [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
@@ -7,7 +11,7 @@
  [ ] Unify call representations of [ ] `binop` and [ ] `composition`
  [ ] Add graph names
  [ ] Handle scoping import scoping (maybe follow R environment model)
- [ ] Remove dependency on local SPARQL server
+ [ ] Remove dependency on `arq` (too slow)
 
 # Error reporting
 
