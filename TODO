@@ -4,7 +4,8 @@
 
 # Short-term
 
- [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
+ [x] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
+ [x] Remove the Morloc.Database.HSparql.Upload (use `hsparql`)
 
 # RDF representation
 
