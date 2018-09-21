@@ -15,7 +15,6 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Types
 import qualified Morloc.Parser as MP
-import qualified Morloc.Database.HSparql.Upload as Up
 import qualified Morloc.Generator as MG
 import Morloc.Database.Configure
 import Morloc.Database.Typecheck

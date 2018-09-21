@@ -9,19 +9,19 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Sparql
-  ( 
-      module Database.HSparql.QueryGenerator
-    , module Database.HSparql.Connection
-  ) where
+module Morloc.Sparql ( 
+    module Database.HSparql.QueryGenerator
+  , module Database.HSparql.Connection
+) where
 
 import Morloc.Types
+import Morloc.Operators
 import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Doc as G
 
 import Database.HSparql.QueryGenerator
 import Database.HSparql.Connection
-import Morloc.Database.HSparql.Upload
-import qualified Morloc.Data.Text as MT
 
 instance TermLike GraphPredicate where
   varOrTerm x = varOrTerm (asRdfNode x)
@@ -57,3 +57,10 @@ maybeValue (Bound (MR.LNode (MR.PlainLL x _))) = Just x
 maybeValue (Bound (MR.LNode (MR.TypedL  x _))) = Just x
 maybeValue (Bound (MR.UNode x))             = Just x
 maybeValue _ = Nothing
+
+uploadTriples :: String -> [MR.Triple] -> IO Bool
+uploadTriples ep xs = updateQueryRaw ep (G.render' . makeSparql $ xs) where
+
+makeSparql :: [MR.Triple] -> G.Doc
+makeSparql xs =  "INSERT DATA" <> G.line
+              <> G.braces (G.indent 4 $ toDoc xs)
