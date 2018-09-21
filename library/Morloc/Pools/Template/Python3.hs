@@ -80,7 +80,7 @@ g = Grammar {
 
     -- FIXME: qualify the calls (I don't have handling for this yet ...)
     import' :: Doc -> Doc
-    import' s = [idoc|from ${s} import *|]
+    import' s = [idoc|from #{s} import *|]
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' "_morloc_unpack"
@@ -102,7 +102,7 @@ g = Grammar {
 pytry :: TryDoc -> Doc
 pytry t = [idoc|
 try:
-    ${tryRet t} = ${tryCmd t}${tupled (tryArgs t)}
+    #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
 except Exception as e:
     sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
@@ -115,7 +115,7 @@ import sys
 import subprocess
 import json
 
-${vsep (map (gImport g) srcs)}
+#{vsep (map (gImport g) srcs)}
 
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
@@ -149,11 +149,11 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
     return(jsonString)
 
 
-${makeSourceManifolds g hash manifolds}
+#{makeSourceManifolds g hash manifolds}
 
-${makeCisManifolds g hash manifolds}
+#{makeCisManifolds g hash manifolds}
 
-dispatch = dict${tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
+dispatch = dict#{tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
 
 if __name__ == '__main__':
     script_name = sys.argv[0] 
