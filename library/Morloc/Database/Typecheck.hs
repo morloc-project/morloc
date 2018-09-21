@@ -66,3 +66,7 @@ eqTypes _ (MAbstType _ _ _) = True
 eqTypes (MConcType _ x xs) (MConcType _ y ys)
   =  x == y
      && foldl (&&) True (zipWith eqTypes xs ys)  
+eqTypes (MFuncType _ xs x) (MFuncType _ ys y)
+  =  x == y
+     && foldl (&&) True (zipWith eqTypes xs ys)  
+eqTypes _ _ = False

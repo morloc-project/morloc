@@ -40,9 +40,9 @@ writeProgram ep code = do
       mapM_ (writeScript' False) ps
       
     writeScript' :: Bool -> Script -> IO ()
-    writeScript' isExe (Script base lang code) = do
+    writeScript' isExe (Script base lang code') = do
       let f = base <> "." <> lang
-      MT.writeFile f code
+      MT.writeFile f code'
       p <- SD.getPermissions f
       SD.setPermissions f (p {SD.executable = isExe})
 

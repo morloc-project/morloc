@@ -39,17 +39,16 @@ module Morloc.Data.RDF (
 
 import Morloc.Types
 import Morloc.Operators
-import qualified Morloc.Error as ME
+import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as G
+import qualified Morloc.Data.Doc  as G
 
-import qualified Data.RDF as DR
+import qualified Data.RDF        as DR
 import qualified Data.Map.Strict as DMS
-import qualified Data.Maybe as DM
 import qualified Data.Scientific as DS
-import qualified System.IO as SIO
-import qualified System.Process as SP
-import qualified System.Exit as SE
+import qualified System.IO       as SIO
+import qualified System.Process  as SP
+import qualified System.Exit     as SE
 
 type RDF = DR.RDF DR.TList
 

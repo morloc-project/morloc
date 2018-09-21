@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Nexus.Nexus (generate) where
 
 import Morloc.Types
-import Morloc.Operators
 import qualified Morloc.Nexus.Template.Perl as Perl
 
 -- | Generate the nexus, which is a program that coordinates the execution of

@@ -49,7 +49,7 @@ parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF
 parseShallow srcfile code =
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
     Left err  -> CME.throwError $ SyntaxError err
-    Right ((MR.TopRDF _ val), s) -> return val
+    Right ((MR.TopRDF _ val), _) -> return val
   where
     pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}
     input' = case srcfile of

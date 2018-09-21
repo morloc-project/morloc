@@ -231,7 +231,7 @@ callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [MT.Text] -> Argument -> Doc
-writeArgument g _  (ArgName n) = text' n
+writeArgument _ _  (ArgName n) = text' n
 writeArgument g _  (ArgData d) = writeData g d
 writeArgument _ _  (ArgPosi i) = "x" <> int i
 writeArgument g xs (ArgCall m) = case mLang m of

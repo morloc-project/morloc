@@ -11,16 +11,12 @@ Stability   : experimental
 
 module Morloc.Nexus.Template.Perl (generate) where
 
-import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
-import Morloc.Util as MU
 import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import qualified Data.Map.Strict as Map
-import qualified Data.List as DL
 import qualified Data.Maybe as DM
 
 generate e
