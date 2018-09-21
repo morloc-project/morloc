@@ -1,3 +1,9 @@
+next [xxxx.xx.xx]
+----
+
+ * Prune unnecessary code
+ * Prune unnecessary imports
+
 0.16.0 [2018.09.14]
 -------------------
 
