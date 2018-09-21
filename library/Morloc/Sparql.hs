@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Sparql
   ( 
       module Database.HSparql.QueryGenerator
-    , module Morloc.Database.HSparql.Connection
     , module Database.HSparql.Connection
   ) where
 
@@ -21,7 +20,6 @@ import qualified Morloc.Data.RDF as MR
 
 import Database.HSparql.QueryGenerator
 import Database.HSparql.Connection
-import Morloc.Database.HSparql.Connection
 import Morloc.Database.HSparql.Upload
 import qualified Morloc.Data.Text as MT
 
@@ -47,7 +45,7 @@ instance SparqlDatabaseLike SparqlEndPoint where
   --   :: (SparqlSelectLike q)
   --   => q -> a -> IO (Either Text [[Maybe Text]])
   sparqlSelect q ep
-    = fmap values (selectQuery' (endpoint ep) (showSparql q))
+    = fmap values (selectQueryRaw (endpoint ep) (showSparql q))
 
 values :: Maybe [[BindingValue]] -> [[Maybe MT.Text]]
 values Nothing = error "SPARQL command failed"
