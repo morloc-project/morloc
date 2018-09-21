@@ -15,9 +15,7 @@ module Morloc.Component.Util (
   , isElement_
 ) where
 
-import Morloc.Types
 import Morloc.Sparql
-import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
@@ -27,7 +25,7 @@ import qualified Data.List.Extra as DLE
 
 -- | This works for building a map based off a simple tree structure
 simpleGraph
-  :: (Ord key, Ord a, SparqlDatabaseLike db)
+  :: (Ord key, Ord a)
   => (    Map.Map key (a, [key])
        -> key
        -> b

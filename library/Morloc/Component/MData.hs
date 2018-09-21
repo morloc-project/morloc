@@ -57,31 +57,31 @@ instance MShow MData where
   mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")
                               (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
 
+instance MorlocTypeable MData where
+  asType (Num' _) = MConcType emptyMeta "Number" []
+  asType (Str' _) = MConcType emptyMeta "String" []
+  asType (Log' _) = MConcType emptyMeta "Bool" []
+  asType (Tup' xs) = MConcType emptyMeta "Tuple" (map asType xs)
+  -- TODO: make `Record` type
+  asType (Rec' xs) = MConcType emptyMeta "Tuple" (map record xs) where
+    record (_, value) = MConcType emptyMeta "Tuple" [ MConcType emptyMeta "String" []
+                                                      , asType value]
+  asType (Lst' xs) = MConcType emptyMeta "List" [listType xs] where
+    listType [] = MConcType emptyMeta "*" [] -- cannot determine type
+    listType [x] = asType x
+    listType (x:xs') =
+      if
+        all (\a -> asType a == asType x) xs'
+      then
+        asType x
+      else
+      error "Lists must be homogenous"
 
 emptyMeta = MTypeMeta {
       metaName = Nothing
     , metaProp = []
     , metaLang = Nothing
   }
-
-mData2mType :: MData -> MType
-mData2mType (Num' _) = MConcType emptyMeta "Number" []
-mData2mType (Str' _) = MConcType emptyMeta "String" []
-mData2mType (Log' _) = MConcType emptyMeta "Bool" []
-mData2mType (Tup' xs) = MConcType emptyMeta "Tuple" (map mData2mType xs)
-mData2mType (Rec' xs) = MConcType emptyMeta "Tuple" (map record xs) where
-  record (key, value) = MConcType emptyMeta "Tuple" [ MConcType emptyMeta "String" []
-                                                    , mData2mType value]
-mData2mType (Lst' xs) = MConcType emptyMeta "List" [listType xs] where
-  listType [] = MConcType emptyMeta "*" [] -- cannot determine type
-  listType [x] = mData2mType x
-  listType (x:xs) =
-    if
-      all (\a -> mData2mType a == mData2mType x) xs
-    then
-      mData2mType x
-    else
-    error "Lists must be homogenous"
 
 hsparql :: Query SelectQuery
 hsparql= do

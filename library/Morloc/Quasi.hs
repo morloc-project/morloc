@@ -5,7 +5,6 @@ module Morloc.Quasi (idoc) where
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import qualified Morloc.Data.Doc as Gen
-import qualified Morloc.Data.Text as MT
 
 import qualified Language.Haskell.Meta.Parse as MP
 

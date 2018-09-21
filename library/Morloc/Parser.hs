@@ -17,14 +17,12 @@ import qualified Text.Megaparsec.Char as TMC
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
-import qualified Data.List as DL
 
 import Morloc.Types
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
-import qualified Morloc.Util as MU
 import Morloc.Operators
 
 parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
@@ -206,7 +204,7 @@ typeDeclaration = do
     )
 
 listTag :: MR.Node -> Maybe MT.Text -> [MR.Triple]
-listTag i Nothing    = []
+listTag _ Nothing    = []
 listTag i (Just tag) = [MR.mtriple i PLabel tag]
 
 mtype :: MS.Parser MR.TopRDF

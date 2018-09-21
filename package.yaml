@@ -39,10 +39,7 @@ dependencies:
 
 ghc-options:
   - -Wall
-  - -threaded
-  - -rtsopts
   - -Wcompat
-  - -with-rtsopts=-N
   - -fwarn-unused-binds
   - -fwarn-unused-imports 
   - -fwarn-tabs

@@ -30,5 +30,5 @@ makePoolName lang = "pool." <> lang
 
 makeManifoldName :: MT.Text -> MT.Text
 makeManifoldName x = case reverse (MT.splitOn "/" x) of
-  (y:ys) -> "m" <> y
+  (y:_) -> "m" <> y
   _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"

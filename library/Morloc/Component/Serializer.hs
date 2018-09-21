@@ -17,14 +17,11 @@ module Morloc.Component.Serializer (
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Sparql
-import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
-import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT
 
-import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map
 
 type SerialData =
@@ -40,10 +37,10 @@ type SerialData =
 fromSparqlDb
   :: SparqlDatabaseLike db
   => Lang -> db -> IO SerialMap
-fromSparqlDb lang db
+fromSparqlDb l db
   =   toSerialMap
   <$> MCM.fromSparqlDb db
-  <*> (map tuplify <$> sparqlSelect (hsparql lang) db)
+  <*> (map tuplify <$> sparqlSelect (hsparql l) db)
 
   where
 
@@ -51,8 +48,6 @@ fromSparqlDb lang db
     -- typename | property | is_generic | name | path
     tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
     tuplify e = ME.error' ("Unexpected SPARQL result: " <> MT.pretty e)
-
-    lang' = dquotes (text' lang)
 
     toSerialMap
       :: Map.Map Key ConcreteType 
@@ -66,14 +61,14 @@ fromSparqlDb lang db
       , MU.unique [s | (_, _, _, _, s) <- xs]
       ) of
         (phash, uhash, [p], [u], srcs) -> SerialMap
-          { serialLang = lang
+          { serialLang = l
           , serialPacker = phash
           , serialUnpacker = uhash
           , serialGenericPacker = p
           , serialGenericUnpacker = u
           , serialSources = srcs
           }
-        e -> ME.error' ("Expected exactly one generic packer/unpacker: " <> MT.pretty xs)
+        _ -> ME.error' ("Expected exactly one generic packer/unpacker: " <> MT.pretty xs)
 
     getOut :: MType -> MType
     getOut (MFuncType _ _ x) = x
@@ -86,12 +81,13 @@ fromSparqlDb lang db
     lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> b
     lookupOrDie k h = case Map.lookup k h of
       (Just x) -> x
-      Nothing -> ME.error' ("Could not find SerialMap for key: " <> MT.pretty k <> " for " <> lang)
+      Nothing -> ME.error' (
+          "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
+        )
 
 hsparql :: Lang -> Query SelectQuery
-hsparql lang = do
+hsparql lang' = do
   basetype_      <- var
-  filterExpr_    <- var
   id_            <- var
   importId_      <- var
   isGeneric_     <- var
@@ -108,7 +104,7 @@ hsparql lang = do
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
-  triple_ id_ PLang  lang
+  triple_ id_ PLang  lang'
   triple_ id_ PLeft  name_
   triple_ id_ PRight rhs_
 
@@ -143,7 +139,7 @@ hsparql lang = do
   optional_
     ( do
         triple_ sourceId_ PType OSource
-        triple_ sourceId_ PLang lang
+        triple_ sourceId_ PLang lang'
         triple_ sourceId_ PPath path_
         triple_ sourceId_ PImport importId_
         triple_ importId_ PAlias name_

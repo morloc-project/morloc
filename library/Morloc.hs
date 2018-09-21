@@ -16,17 +16,15 @@ import Morloc.Operators
 import Morloc.Types
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
-import Morloc.Database.Configure
-import Morloc.Database.Typecheck
-import Morloc.Database.Construct
+import Morloc.Typecheck (typecheck)
 
 -- | Build a Morloc program as a graph stored in a SPARQL database
 buildProgram :: SparqlDatabaseLike db => db -> MT.Text -> IO db
 buildProgram ep code = do
-  configure
+  -- TODO: configure
   tbl <- MP.parse Nothing code >>= doOrDie >>= sparqlUpload ep
-  construct tbl
   typecheck tbl
+  -- TODO: construct tbl
   return tbl
 
 -- | Build a program as a local executable

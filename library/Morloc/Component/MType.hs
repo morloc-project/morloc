@@ -20,7 +20,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR
 
 import qualified Data.Map.Strict as Map
-import qualified Data.List.Extra as DLE
 import qualified Data.Foldable as DF
 
 type ParentData =
@@ -52,11 +51,13 @@ toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType
 toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((t, v, o, l, n, ps), xs)) = case makeMeta l n ps of
     meta -> toMType'' meta t v o xs
+  toMType' Nothing = error ("Internal error")
 
   toMType'' meta t (Just v) _ xs
     | isGeneric t = MAbstType meta v (map (toMType h) xs)
     | otherwise = MConcType meta v (map (toMType h) xs)
   toMType'' meta _ _ (Just o) xs = MFuncType meta (map (toMType h) xs) (toMType h o)
+  toMType'' _ _ _ _ _ = error ("Internal error")
 
   makeMeta :: Maybe Lang -> Maybe Name -> [Name] -> MTypeMeta
   makeMeta l n ps = MTypeMeta {

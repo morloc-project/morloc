@@ -22,10 +22,7 @@ module Morloc.Util
   , spreadAttr
 ) where
 
-import Morloc.Operators
-
 import qualified Data.List as DL
-import qualified Control.Monad as CM
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -69,9 +66,11 @@ spreadAttr
 spreadAttr xs = asHash [(Set.toList sx, Set.toList sy) | (sx, sy) <- shareAttr xs]
   where
     asHash
-      :: (Ord a, Ord b)
+      :: Ord a
       => [([a], [b])] -> Map.Map a b
-    asHash xys = (Map.fromList . concat) [[(x, y) | x <- xs, y <- ys] | (xs, ys) <- xys]
+    asHash xys =
+      (Map.fromList . concat)
+      [[(x, y) | x <- xs', y <- ys'] | (xs', ys') <- xys]
 
 -- | For the list of tuples (l,r,c), find missing data that is present in a
 -- related member. All l and r that are linked are considered to be in the same
@@ -100,6 +99,6 @@ shareAttr xs = foldl f [] xs where
   maybeInsert (Just x) s = Set.insert x s 
   maybeInsert _ s = s
 
-  maybeSingleton :: Ord c => Maybe c -> Set.Set c
+  maybeSingleton :: Maybe c -> Set.Set c
   maybeSingleton (Just x) = Set.singleton x
   maybeSingleton _ = Set.empty
