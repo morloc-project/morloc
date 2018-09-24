@@ -1,3 +1,12 @@
+0.16.1 [2018.09.24]
+----
+
+Minor release consisting of internal refactoring
+
+ * Pruned unnecessary code
+ * Pruned unnecessary imports
+ * Compliance with stricter compile flags
+
 0.16.0 [2018.09.14]
 -------------------
 

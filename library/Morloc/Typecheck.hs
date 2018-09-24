@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
-Module      : Morloc.Database.Typecheck
+Module      : Morloc.Typecheck
 Description : Check the logical consistency of a program
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -14,7 +14,7 @@ case, the typechecker raises a warning (but does not die) if the types are not
 identical.
 -}
 
-module Morloc.Database.Typecheck (typecheck) where
+module Morloc.Typecheck (typecheck) where
 
 import Morloc.Types
 import Morloc.Operators
@@ -66,3 +66,7 @@ eqTypes _ (MAbstType _ _ _) = True
 eqTypes (MConcType _ x xs) (MConcType _ y ys)
   =  x == y
      && foldl (&&) True (zipWith eqTypes xs ys)  
+eqTypes (MFuncType _ xs x) (MFuncType _ ys y)
+  =  x == y
+     && foldl (&&) True (zipWith eqTypes xs ys)  
+eqTypes _ _ = False

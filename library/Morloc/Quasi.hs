@@ -5,7 +5,6 @@ module Morloc.Quasi (idoc) where
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 import qualified Morloc.Data.Doc as Gen
-import qualified Morloc.Data.Text as MT
 
 import qualified Language.Haskell.Meta.Parse as MP
 
@@ -19,14 +18,14 @@ pIs :: Parser [I]
 pIs = many1 (try pV <|> pS <|> pE) <* eof
 
 pV :: Parser I
-pV = fmap V $ between (string "${") (char '}') (many1 (noneOf "}")) 
+pV = fmap V $ between (string "#{") (char '}') (many1 (noneOf "}")) 
 
 pS :: Parser I
-pS = fmap S $ many1 (noneOf "$")
+pS = fmap S $ many1 (noneOf "#")
 
 -- | match a literal '$' sign
 pE :: Parser I
-pE = fmap (S . return) $ char '$' <* notFollowedBy (char '}')
+pE = fmap (S . return) $ char '#' <* notFollowedBy (char '}')
 
 
 -- | __i__nterpolated __doc__ument

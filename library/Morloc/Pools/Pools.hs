@@ -12,10 +12,8 @@ Stability   : experimental
 module Morloc.Pools.Pools (generate) where
 
 import Morloc.Types
-import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Component.Util as MCU
 
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
@@ -26,7 +24,7 @@ generate db = sparqlSelect hsparql db >>= foo' where
   foo' xss = sequence (map (generateLang db) xss)
 
 generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> IO Script
-generateLang db lang = case lang of
+generateLang db lang' = case lang' of
   [Just "R"] -> RLang.generate db
   [Just "py"] -> Py3.generate db
   [Just x] -> error ("The language " ++ show x ++ " is not supported")

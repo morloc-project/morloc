@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Data.Doc
 Description : A wrapper around Leijen's text builder
@@ -15,6 +17,7 @@ module Morloc.Data.Doc
     , render
     , render'
     , text'
+    , textEsc'
   ) where
 
 import Text.PrettyPrint.Leijen.Text
@@ -29,3 +32,12 @@ render' = DT.unpack . render
 
 text' :: DT.Text -> Doc
 text' = text . DL.fromStrict
+
+textEsc' :: DT.Text -> Doc
+textEsc' lit = (dquotes . string . DL.fromStrict) $ DT.concatMap escapeChar lit where
+  escapeChar '\n' = "\\n"
+  escapeChar '\t' = "\\t"
+  escapeChar '\r' = "\\r"
+  escapeChar '"'  = "\\\""
+  escapeChar '\\' = "\\\\"
+  escapeChar c    = DT.singleton c

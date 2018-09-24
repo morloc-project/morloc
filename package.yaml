@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.16.0
+version:          0.16.1
 homepage:         https://github.com/arendsee/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/githubuser/morloc#readme>
@@ -19,18 +19,14 @@ extra-source-files:
 
 dependencies:
   - base >= 4.7 && < 5
-  - bytestring
   - containers
   - directory
-  - docopt
   - extra
-  - hsparql
   - filepath
-  - hashable
   - haskell-src-meta
+  - hsparql
   - megaparsec
   - mtl
-  - network-uri
   - parsec
   - pretty-simple
   - process
@@ -39,11 +35,19 @@ dependencies:
   - scientific
   - template-haskell
   - text
-  - unordered-containers
-  - vector
   - wl-pprint-text
-  - xml
-  - HTTP
+
+ghc-options:
+  - -Wall
+  - -Wcompat
+  - -fwarn-unused-binds
+  - -fwarn-unused-imports 
+  - -fwarn-tabs
+  - -fwarn-incomplete-uni-patterns
+  - -fwarn-incomplete-record-updates
+  - -fwarn-redundant-constraints
+  - -fno-warn-missing-signatures
+  - -fno-warn-unused-do-bind
 
 library:
   source-dirs: library
@@ -60,6 +64,7 @@ executables:
     dependencies:
       - base >= 4.7 && < 5
       - morloc 
+      - docopt
       - rdf4h
       - text
 
@@ -78,6 +83,4 @@ tests:
       - rdf4h
       - tasty
       - tasty-golden
-      - tasty-hspec >= 0.1
-      - temporary
       - text

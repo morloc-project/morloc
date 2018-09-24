@@ -17,6 +17,7 @@ module Morloc.Types (
   , SparqlSelectLike(..)
   , SparqlDatabaseLike(..)
   , RdfLike(..)
+  , DocLike(..)
   -- ** Synonyms
   , SparqlEndPoint(..)  
   , AbstractType
@@ -53,6 +54,9 @@ import Data.Void                    ( Void         )
 -- | Write into Morloc code
 class MShow a where
   mshow :: a -> Doc
+
+class DocLike a where
+  toDoc :: a -> Doc
 
 class MorlocNodeLike a where
   asRdfNode :: a -> Node

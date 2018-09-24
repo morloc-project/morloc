@@ -11,16 +11,12 @@ Stability   : experimental
 
 module Morloc.Nexus.Template.Perl (generate) where
 
-import Morloc.Operators
 import Morloc.Types
 import Morloc.Quasi
-import Morloc.Util as MU
 import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import qualified Data.Map.Strict as Map
-import qualified Data.List as DL
 import qualified Data.Maybe as DM
 
 generate e
@@ -89,7 +85,7 @@ sub dispatch {
     my $cmd = shift;
     my $result = undef;
 
-    ${mapT names}
+    #{mapT names}
 
     if($cmd eq '-h' || $cmd eq '-?' || $cmd eq '--help' || $cmd eq '?'){
         &usage();
@@ -105,34 +101,34 @@ sub dispatch {
     return $result;
 }
 
-${usageT fdata}
+#{usageT fdata}
 
-${vsep (map functionT fdata)}
+#{vsep (map functionT fdata)}
 |]
 
-mapT names = [idoc|my %cmds = ${tupled (map mapEntryT names)};|]
+mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
-mapEntryT n = [idoc|${n} => \&call_${n}|]
+mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
 usageT fdata = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
-    ${align $ vsep (map usageLineT fdata)}
+    #{align $ vsep (map usageLineT fdata)}
     exit 0;
 }
 |]
 
-usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  ${name} [${int nargs}]\n";|]
+usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  #{name} [#{int nargs}]\n";|]
 
 functionT (name, nargs, prog, pool, mid) = [idoc|
-sub call_${name}{
-    if(scalar(@_) != ${int nargs}){
-        print STDERR "Expected ${int nargs} arguments to '${name}', given " . 
+sub call_#{name}{
+    if(scalar(@_) != #{int nargs}){
+        print STDERR "Expected #{int nargs} arguments to '#{name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
-    return `${prog} ${pool} ${mid} ${hsep $ map argT [0..(nargs-1)]}`
+    return `#{prog} #{pool} #{mid} #{hsep $ map argT [0..(nargs-1)]}`
 }
 |]
 
-argT i = [idoc|'$_[${int i}]'|]
+argT i = [idoc|'$_[#{int i}]'|]

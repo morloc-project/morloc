@@ -23,7 +23,6 @@ import qualified Morloc.Component.MData as MCD
 import qualified Morloc.Component.Util as MCU 
 import qualified Morloc.Data.Text as MT
 
-import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
 
@@ -128,6 +127,7 @@ makeArgument (Nothing , Nothing , Nothing , Just e) =
   case (MT.stripPrefix (MR.rdfPre <> "_") e) >>= MT.readMay' of
     Just i -> Right $ ArgPosi i
     _ -> ME.error' ("Unexpected value for element: " <> MT.pretty e)
+makeArgument _ = error "Bad argument"
 
 propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
 propagateBoundVariables ms = map setBoundVars ms 

@@ -1,4 +1,4 @@
-morloc version 0.16.0
+morloc version 0.16.1
 
 Usage:
   morloc make [--expression] <script> [--endpoint=<sparql-endpoint>]

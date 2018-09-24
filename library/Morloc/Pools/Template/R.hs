@@ -97,7 +97,7 @@ main
   :: [Doc] -> [Manifold] -> SerialMap -> Doc
 main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-${line <> vsep (map (gImport g) srcs)}
+#{line <> vsep (map (gImport g) srcs)}
 
 .morloc_run <- function(f, args){
   fails <- ""
@@ -163,9 +163,9 @@ ${line <> vsep (map (gImport g) srcs)}
 }
 
 
-${makeSourceManifolds g hash manifolds}
+#{makeSourceManifolds g hash manifolds}
 
-${makeCisManifolds g hash manifolds}
+#{makeCisManifolds g hash manifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

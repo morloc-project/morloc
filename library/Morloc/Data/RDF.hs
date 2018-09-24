@@ -39,16 +39,16 @@ module Morloc.Data.RDF (
 
 import Morloc.Types
 import Morloc.Operators
-import qualified Morloc.Error as ME
+import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Doc  as G
 
-import qualified Data.RDF as DR
+import qualified Data.RDF        as DR
 import qualified Data.Map.Strict as DMS
-import qualified Data.Maybe as DM
 import qualified Data.Scientific as DS
-import qualified System.IO as SIO
-import qualified System.Process as SP
-import qualified System.Exit as SE
+import qualified System.IO       as SIO
+import qualified System.Process  as SP
+import qualified System.Exit     as SE
 
 type RDF = DR.RDF DR.TList
 
@@ -154,6 +154,7 @@ instance MorlocNodeLike GraphPredicate where
           (Just i) -> PElem i
           Nothing -> error ("Unsupported predicate: " ++ show n)
 
+
 instance MorlocNodeLike GraphObject where
   asRdfNode (OLiteral s)              = (DR.LNode (DR.PlainL s))
   asRdfNode OAccess                   = mlcPre .:. "access"
@@ -185,7 +186,11 @@ instance MorlocNodeLike GraphObject where
   asRdfNode OUnaryOp                  = mlcPre .:. "unaryOp"
   asRdfNode OBinOp                    = mlcPre .:. "binOp"
 
-  fromRdfNode (DR.LNode (DR.PlainL s)) = OLiteral s
+  fromRdfNode (DR.LNode (DR.PlainL  s  )) = OLiteral s
+  fromRdfNode (DR.LNode (DR.TypedL  s _)) = OLiteral s
+  fromRdfNode (DR.LNode (DR.PlainLL s _)) = OLiteral s
+  fromRdfNode (DR.BNode x) = error ("illegal RDF node: " ++ show (DR.BNode x))
+  fromRdfNode (DR.BNodeGen x) = error ("illegal RDF node: " ++ show (DR.BNodeGen x))
   fromRdfNode n
     | n == ( mlcPre .:. "access"               ) = OAccess
     | n == ( mlcPre .:. "atomicGeneric"        ) = OAtomicGenericType
@@ -215,6 +220,21 @@ instance MorlocNodeLike GraphObject where
     | n == ( mlcPre .:. "typeDeclaration"      ) = OTypeDeclaration
     | n == ( mlcPre .:. "unaryOp"              ) = OUnaryOp
     | n == ( mlcPre .:. "binOp"                ) = OBinOp
+    | otherwise = error ("illegal RDF object: " ++ show n)
+
+instance DocLike DR.Triple where 
+  toDoc (DR.Triple s o p) = G.hsep [toDoc s, toDoc o, toDoc p, "."]
+
+instance DocLike [DR.Triple] where
+  toDoc xs = G.vsep (map toDoc xs)
+
+instance DocLike DR.Node where
+  toDoc (DR.UNode s) = G.angles (G.text' s) 
+  toDoc (DR.BNode gId) = "_:" <> G.text' gId
+  toDoc (DR.BNodeGen i) = "_:genid" <> G.int i
+  toDoc (DR.LNode (DR.PlainL lit)) = G.textEsc' lit
+  toDoc (DR.LNode (DR.PlainLL lit lang)) = G.textEsc' lit <> "@" <> G.text' lang
+  toDoc (DR.LNode (DR.TypedL lit dtype)) = G.textEsc' lit <> "^^" <> G.angles (G.text' dtype)
 
 -- | Build a triple from Morloc node-like objects
 mtriple
@@ -287,13 +307,13 @@ idUri (Just s) i = midPre .:. (s <> "_" <> MT.show' i)
 rdfId :: TopRDF -> DR.Node
 rdfId (TopRDF i _) = i
 
-
 -- The last survivors of the Walker module
 -- =======================================
 
 valueOf :: DR.Node -> [MT.Text]
 valueOf (DR.LNode (DR.TypedL s _)) = [s]
 valueOf (DR.LNode (DR.PlainL s)) = [s]
+valueOf (DR.LNode (DR.PlainLL s _)) = [s]
 valueOf _ = []
 
 -- Down :: Subject -> [Object]

@@ -2,10 +2,6 @@
 
  [ ] Make a Docker image
 
-# Short-term
-
- [ ] Remove the Morloc.Database.HSparql.Connection (use `hsparql`)
-
 # RDF representation
 
  [ ] Unify call representations of [ ] `binop` and [ ] `composition`

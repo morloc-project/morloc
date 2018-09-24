@@ -23,11 +23,10 @@ module Morloc.Pools.Common
 ) where
 
 import Morloc.Types
-import Morloc.Quasi
+import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Error as ME
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
-import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.System as MS
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
@@ -83,8 +82,7 @@ data ForeignCallDoc = ForeignCallDoc {
   }
 
 makeGenerator
-  :: (SparqlDatabaseLike db)
-  => Grammar
+  :: Grammar
   -> (db -> IO Code)
   -> (db -> IO Script)
 makeGenerator g gen
@@ -108,9 +106,9 @@ defaultCodeGenerator g f main ep = do
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
 makeSourceManifolds g h ms
-  = vsep . concat $ map (decide' g h) ms
+  = vsep . concat $ map decide' ms
   where
-    decide' g h m = case determineManifoldClass g m of
+    decide' m = case determineManifoldClass g m of
       Source -> return $ makeSourceManifold g h m
       _ -> []
 
@@ -130,10 +128,9 @@ determineManifoldClass g m
   | otherwise = error "Unexpected manifold class"
 
 makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
-makeCisManifolds g h ms
-  = vsep . concat $ map (decide' g h) ms
+makeCisManifolds g h ms = vsep . concat $ map decide' ms
   where
-    decide' g h m = case determineManifoldClass g m of
+    decide' m = case determineManifoldClass g m of
       Cis -> return $ makeCisManifold g h m
       _ -> []
 
@@ -152,7 +149,7 @@ makeSourceManifold g h m
     n = length (mArgs m)
 
     argTypes :: [(Doc, Argument)] -- unpacker and argument
-    argTypes = zip (getUnpackers g h m) (mArgs m)
+    argTypes = zip (getUnpackers h m) (mArgs m)
 
     unpack' :: Doc -> (Doc, Argument) -> Doc -> Doc
     unpack' lhs (u, _) x
@@ -178,7 +175,7 @@ makeCisManifold g h m
     n = length (mArgs m)
 
     argTypes :: [(Doc, Argument)] -- unpacker and argument
-    argTypes = zip (getUnpackers g h m) (mArgs m)
+    argTypes = zip (getUnpackers h m) (mArgs m)
 
     makeArg :: Doc -> (Doc, Argument) -> Doc
     makeArg lhs b = (gAssign g) lhs (makeArg' b)
@@ -192,6 +189,12 @@ makeCisManifold g h m
       else
         (writeArgument g (mBoundVars m) arg)
 
+    useUnpacker :: Grammar -> Argument -> Manifold -> Bool
+    useUnpacker _  (ArgName n') m' = elem n' (mBoundVars m')
+    useUnpacker g' (ArgCall m') _  = (mLang m') /= (Just (gLang g'))
+    useUnpacker _  (ArgData _)  _  = False
+    useUnpacker _  (ArgPosi _)  _  = True
+
     unpack' :: Doc -> Doc -> Doc
     unpack' p x
       = ((gUnpacker g) (UnpackerDoc {
@@ -203,35 +206,23 @@ makeCisManifold g h m
 
 
 -- find a packer for each argument
-getUnpackers :: Grammar -> SerialMap -> Manifold -> [Doc]
-getUnpackers g h m = case mConcreteType m of
-  (Just (MFuncType _ ts _)) -> map (unpackerName g h . return) ts 
+getUnpackers :: SerialMap -> Manifold -> [Doc]
+getUnpackers h m = case mConcreteType m of
+  (Just (MFuncType _ ts _)) -> map (unpackerName h . return) ts 
   (Just _) -> ME.error' ("Expected a function type for:" <> MT.pretty m)
-  Nothing -> take (length (mArgs m)) (repeat (unpackerName g h Nothing))
-
-useUnpacker :: Grammar -> Argument -> Manifold -> Bool
-useUnpacker g (ArgName n) m = elem n (mBoundVars m)
-useUnpacker g (ArgCall m) _ = (mLang m) /= (Just (gLang g))
-useUnpacker _ (ArgData _) _ = False
-useUnpacker _ (ArgPosi _) _ = True
-
-commaSep :: [Doc] -> Doc
-commaSep = hcat . punctuate ", "
-
-unpackerName :: Grammar -> SerialMap -> Maybe MType -> Doc 
-unpackerName g h n = case (n >>= (flip Map.lookup) (serialUnpacker h)) of 
-  (Just f) -> text' f
-  Nothing  -> text' (serialGenericUnpacker h)
-
-unpack :: Grammar -> SerialMap -> Maybe MType -> Doc -> Doc
-unpack g h n d = (gCall g) (unpackerName g h n) [d]
+  Nothing -> take (length (mArgs m)) (repeat (unpackerName h Nothing))
+  where
+    unpackerName :: SerialMap -> Maybe MType -> Doc 
+    unpackerName h' n' = case (n' >>= (flip Map.lookup) (serialUnpacker h')) of 
+      (Just f) -> text' f
+      Nothing  -> text' (serialGenericUnpacker h')
 
 callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [MT.Text] -> Argument -> Doc
-writeArgument g _  (ArgName n) = text' n
+writeArgument _ _  (ArgName n) = text' n
 writeArgument g _  (ArgData d) = writeData g d
 writeArgument _ _  (ArgPosi i) = "x" <> int i
 writeArgument g xs (ArgCall m) = case mLang m of

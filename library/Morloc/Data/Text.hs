@@ -26,7 +26,7 @@ module Morloc.Data.Text
     , undquote
   ) where
 
-import Prelude hiding (lines, length, uncons, unsnoc)
+import Prelude hiding (lines, length)
 import Data.Text hiding (map)
 import Data.Text.IO
 import qualified Data.Text.Lazy as DL
