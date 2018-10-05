@@ -63,6 +63,7 @@
 
  [ ] Write python TensorFlow example
  [ ] Add haddock for every function
+ [ ] Write basic manual
 
  * Extend README with
    [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
