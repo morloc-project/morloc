@@ -45,6 +45,7 @@
 
 # Features
 
+ [ ] Add sum types
  [ ] add full type checking
  [ ] constraint system
  [ ] allow function docstrings
