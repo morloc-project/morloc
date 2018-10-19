@@ -1,15 +1,15 @@
 name:             morloc
-version:          0.16.1
-homepage:         https://github.com/arendsee/morloc
+version:          0.16.2
+homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
-description:      See GitHub README <https://github.com/githubuser/morloc#readme>
+description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
 category:         Compiler
 license:          GPL-3
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 
 maintainer:       "zbwrbz@gmail.com"
-github:           "arendsee/morloc"
-bug-reports:      https://github.com/arendsee/morloc/issues
+github:           "morloc-project/morloc"
+bug-reports:      https://github.com/morloc-project/morloc/issues
 copyright:        "2018 Zebulun Arendsee"
 
 extra-source-files:

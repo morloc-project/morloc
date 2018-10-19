@@ -1,3 +1,9 @@
+next
+----
+
+ * Add Zenodo badge making the project citable
+ * Move to `morloc-project/morloc` github repo
+
 0.16.1 [2018.09.24]
 ----
 
