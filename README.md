@@ -1,5 +1,5 @@
-[![travis build status](https://travis-ci.org/arendsee/morloc.svg?branch=master)](https://travis-ci.org/arendsee/morloc)
-[![github release](https://img.shields.io/github/release/arendsee/morloc.svg?label=current+release)](https://github.com/arendsee/morloc/releases)
+[![travis build status](https://travis-ci.org/morloc-project/morloc.svg?branch=master)](https://travis-ci.org/morloc-project/morloc)
+[![github release](https://img.shields.io/github/release/morloc-project/morloc.svg?label=current+release)](https://github.com/morloc-project/morloc/releases)
 [![license: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
@@ -26,7 +26,7 @@ functions or import them into their own programs.
 Compile and install the package as so (requires the Haskell utility `stack`):
 
 ```sh
-git clone https://github.com/arendsee/morloc
+git clone https://github.com/morloc-project/morloc
 cd morloc
 stack build
 stack install
