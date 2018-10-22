@@ -81,3 +81,8 @@
  [ ] Add `learning` library for machine learning
  [ ] Add `stat` library
  [ ] Add `physics` library
+
+# Implementation
+
+ [ ] Consider replacing Megaparsec parser with traditional LR parser, i.e. the
+     Haskell equivalents of Flex and Bison, Alex and Happy. 
