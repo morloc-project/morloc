@@ -1,7 +1,0 @@
-source "py" from "pybase.py" (
-   "unpackGeneric"
- , "packGeneric"
-)
-
-packGeneric   py :: packs   => a    -> JSON;
-unpackGeneric py :: unpacks => JSON -> a;
