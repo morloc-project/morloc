@@ -20,7 +20,6 @@ functions searchable by type (a little like
 a GitHub-like community portal around Morloc where users can upload packages of
 functions or import them into their own programs.
 
-
 ## Installation
 
 Compile and install the package as so (requires the Haskell utility `stack`):
@@ -83,6 +82,8 @@ nodes can now be accessed.
 ```
 
 ## The Morloc Type System
+
+![The user enters the Morloc script (A), which casts a string (AT1G30270.1) as a TairID and feeds it to the composition function. This function has the type signature (B) and expects input of type BioSeq. The required conversions are automatically performed following the type ontology (C). The conversions are performed by functions with the signatures shown in (D), where ?TairID indicates possible failure. These functions are given the convert role in (E). Since ProteinSeq is a BioSeq, any function of a BioSeq works automatically with ProteinSeq. The Morloc compiler](./figures/case-study.png)
 
 The type system and the syntax for specifying the type ontologies is still
 under construction. But here is a little information on how it will work.
