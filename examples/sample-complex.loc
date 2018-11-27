@@ -1,0 +1,57 @@
+# Currently this script does not work, since I moved the required rbase.* and
+# pybase.* functions off to the morloc-lib. Currently modules are only imported
+# as local files with names relative to the working directory. This is
+# obviously not satisfactory. Once the function database is online, functions
+# will be accessible by username/path-to-function. These would then be stored
+# in a local SPARQL database along with the rest of the configs. I also need a
+# raw text (probably YAML) config file in some default location.
+
+export ceiling
+export rand_uniform
+export sum
+export transpose
+export nrow
+export roll
+export len
+
+source "R" (
+    "runif" as rand_uniform
+  , "sum"
+  , "ceiling"
+  , "t" as transpose
+  , "nrow"
+);
+
+import "rbase";
+import "pybase";
+source "py" ("len")
+
+# impose a type signature on the imported function rand_uniform
+rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
+    n > 0
+  , len xs == n
+  , c >= a
+  , c <= b
+);
+rand_uniform R :: Numeric, Numeric, Numeric -> Numeric;
+
+sum :: [Num] -> Num;
+# no R type defined, the generics packers are fine
+
+ceiling :: [Num] -> [Int];
+# no R type defined, the generics packers are fine
+
+transpose :: Matrix a -> Matrix a;
+transpose R :: Matrix -> Matrix;
+
+nrow :: Table -> Int;
+nrow R :: DataFrame -> Numeric;
+
+roll :: Int, Int -> [Int];
+roll n d = ceiling (rand_uniform n 0.0 d);
+
+# I should add a typeclass for things with length
+len :: a -> Int;
+
+test :: Int, Int -> Int;
+test n = len (roll n (sum [1,2,3])); 
