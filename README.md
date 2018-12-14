@@ -35,7 +35,7 @@ stack install
 `morloc` has a temporary dependency on the Java library Jena and its `arq`
 command line tool. You will need to have `arq` in PATH to use Morloc
 (currently). The `arq` dependency will be removed eventually, since the calls
-require firing up JVM, and thus massivly slow down the compilation process.
+require firing up JVM, and thus massively slow down the compilation process.
 
 ## Minimal Example
 
@@ -96,11 +96,11 @@ described using ontologies.
 One relation that can be defined between types is `a maps_to b`, which states
 that any variable of type `a` can be uniquely converted to a variable of type
 `b`, for example, `Int maps_to Double`. Some languages, such as Perl and
-Javascript, do extensive automatic conversions. Perl will happily evaluate the
+JavaScript, do extensive automatic conversions. Perl will happily evaluate the
 term `"42" + 1` to 43, for example. In Morloc, these sorts of automatic
 conversions are defined in ontologies that can be customized by the programmer.
 
-Types can also be specialized with constrains, for example:
+Types can also be specialized with constraints, for example:
 
 ```
 Count :: x:Int where ( x > 0 )
@@ -141,7 +141,7 @@ languages.
 A `morloc` program can import functions from multiple languages.
 
 Currently data is passed between languages through a language-agnostic
-intermediate format (JSON). For simple data types, generic JSON serlization
+intermediate format (JSON). For simple data types, generic JSON serialization
 libraries may be able to handle these conversions. For example, the Python
 `json` module will convert the JSON string `[1,2,3]` to the appropriate Python
 list. For more advanced cases, type-specific handling can be added.
@@ -158,7 +158,9 @@ containing elements of generic type `a`. The second definition is
 a python-specific type from the Python `numpy` module. This second definition
 tells Morloc how to cast data into the python `transpose` function. 
 
-Handling for specfic types is determined by functions with the properties `packs` and `unpacks`. These serialization functions are defined in a Morloc module, for example:
+Handling for specific types is determined by functions with the properties
+`packs` and `unpacks`. These serialization functions are defined in a Morloc
+module, for example:
 
 ```
 source "py" from "scipy.py" (
@@ -185,4 +187,3 @@ def packMatrix(x):
 
 `morloc` will then use these functions whenever it needs to cast data into
 Python as Matrix types.
-
