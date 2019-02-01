@@ -5,6 +5,7 @@
 # RDF representation
 
  [ ] Unify call representations of [ ] `binop` and [ ] `composition`
+ [ ] Write specification
  [ ] Add graph names
  [ ] Handle scoping import scoping (maybe follow R environment model)
  [ ] Remove dependency on `arq` (too slow)
@@ -43,25 +44,31 @@
    [ ] parse to RDF and upload to local SPARQL database
    [ ] thread the configuration through the compiler
 
+# typechecking
+
+ [ ] test different logic solvers in a clean repo with morloc RDF as input
+ [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
+ [ ] port this typechecker to Morloc
+
 # Features
 
- [ ] Add sum types
- [ ] add full type checking
  [ ] constraint system
+ [ ] add higher-order functions
+ [ ] demonstrate parameter handling
+ [ ] add sum types
  [ ] allow function docstrings
  [ ] allow caching
  [ ] allow effect handling hooks
- [ ] demonstrate parameter handling
- [ ] add higher-order functions
 
  * add support for more languages
    [ ] bash
-   [ ] C++
+   [ ] C
    [ ] Haskell
+   [ ] C++
 
 # Documentation
 
- [ ] Write python TensorFlow example
+ [ ] Write TensorFlow example
  [ ] Add haddock for every function
  [ ] Write basic manual
 
