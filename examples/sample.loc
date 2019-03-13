@@ -1,9 +1,12 @@
+import "rbase"
+
 export ceiling
 export rand_uniform
 
 source "R" (
     "runif" as rand_uniform
   , "ceiling"
+  , "len"
 );
 
 # impose a type signature on the imported function rand_uniform

@@ -15,6 +15,7 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Config as Config
 
 generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g text' main)
@@ -66,7 +67,7 @@ g = Grammar {
     record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
     import' :: Doc -> Doc
-    import' s = call' "source" [dquotes s]
+    import' s = call' "source" [dquotes (text' Config.getMorlocHome <> "/" <> s)]
 
     try' :: TryDoc -> Doc
     try' t = call' ".morloc_try"

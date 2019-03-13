@@ -23,6 +23,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
+import qualified Morloc.Config as Config
 import Morloc.Operators
 
 parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
@@ -37,10 +38,12 @@ joinRDF rdf xs
       ((CM.liftM sequence . sequence) xs) -- IO (ThrowsError [MR.RDF])
 
 parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
-parseImports rdf = map morlocScriptFromFile (MR.getImportedFiles rdf)
+parseImports rdf = map morlocScriptFromFile (MR.getImports rdf)
 
 morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
-morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ MT.unpack s
+morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ filename where
+  -- FIXME: make filename portable
+  filename = MT.unpack Config.getMorlocHome ++ "/" ++ (MT.unpack s)
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF

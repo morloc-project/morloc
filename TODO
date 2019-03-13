@@ -44,6 +44,11 @@
    [ ] parse to RDF and upload to local SPARQL database
    [ ] thread the configuration through the compiler
 
+ * conventions - decide on
+   [ ] the syntax and schema of morloc config file
+   [ ] a default name for the config file (e.g., `~/.morloc-config.yml`)
+   [ ] a default name for morloc home (e.g., `~/.morloc`)
+
 # typechecking
 
  [ ] test different logic solvers in a clean repo with morloc RDF as input
@@ -80,14 +85,19 @@
 
 # Libraries
 
- [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
-     This will require handling for choosing a concrete function from among
-     many language-specific alternatives. In C-morloc, the user specified the
-     language of each function. I want to automate the choice.
- [ ] Add taxonomy library
- [ ] Add `learning` library for machine learning
- [ ] Add `stat` library
- [ ] Add `physics` library
+ * Extend the libraries
+   [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
+       This will require handling for choosing a concrete function from among
+       many language-specific alternatives. In C-morloc, the user specified the
+       language of each function. I want to automate the choice.
+   [ ] Add taxonomy library
+   [ ] Add `learning` library for machine learning
+   [ ] Add `stat` library
+   [ ] Add `physics` library
+
+ * Determine library hierarchy
+   [ ] Where do core files go? (e.g., `$MORLOC_HOME/lib/core/*`)
+   [ ] Do we separate the *.loc files from the other language files?
 
 # Implementation
 

@@ -1,6 +1,12 @@
 next
 ----
 
+ * add morloc home
+ * load modules from `$MORLOCHOME/lib`
+
+0.16.2 [2018.03.05]
+----
+
  * Add Zenodo badge making the project citable
  * Move to `morloc-project/morloc` github repo
 

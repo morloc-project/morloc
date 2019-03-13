@@ -26,7 +26,7 @@ module Morloc.Data.RDF (
   , rdfPre
   , xsdPre
   -- ** RDF access
-  , getImportedFiles
+  , getImports
   -- ** TopRDF Utilities
   , makeTopRDF
   , idUri
@@ -331,8 +331,8 @@ up :: DR.Rdf a
   -> [DR.Subject]   -- chain function, allows searching in parallel
 up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
 
-getImportedFiles :: DR.Rdf a => DR.RDF a -> [MT.Text]
-getImportedFiles rdf
+getImports :: DR.Rdf a => DR.RDF a -> [MT.Text]
+getImports rdf
   =   up rdf (rdfPre .:. "type") (mlcPre .:. "import")
   >>= down rdf (mlcPre .:. "name")
   >>= valueOf

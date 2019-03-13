@@ -78,7 +78,9 @@ g = Grammar {
     record' :: [(Doc,Doc)] -> Doc
     record' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
-    -- FIXME: qualify the calls (I don't have handling for this yet ...)
+    -- FIXME: 
+    --  [ ] qualify the calls (I don't have handling for this yet ...)
+    --  [ ] make the imports relative to morloc home 
     import' :: Doc -> Doc
     import' s = [idoc|from #{s} import *|]
 
