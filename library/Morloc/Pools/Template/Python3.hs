@@ -78,11 +78,9 @@ g = Grammar {
     record' :: [(Doc,Doc)] -> Doc
     record' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
-    -- FIXME: 
-    --  [ ] qualify the calls (I don't have handling for this yet ...)
-    --  [ ] make the imports relative to morloc home 
-    import' :: Doc -> Doc
-    import' s = [idoc|from #{s} import *|]
+    -- 1st argument (home directory) is ignored (it is added to path in main)
+    import' :: Doc -> Doc -> Doc
+    import' _ s = [idoc|from #{s} import *|]
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' "_morloc_unpack"
@@ -110,14 +108,15 @@ except Exception as e:
 |]
 
 main
-  :: [Doc] -> [Manifold] -> SerialMap -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env python
+  :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
+main home srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
 import json
 
-#{vsep (map (gImport g) srcs)}
+sys.path.append('#{home}')
+#{vsep (map ((gImport g) home) srcs)}
 
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):

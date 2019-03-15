@@ -14,9 +14,11 @@ module Morloc.Config (
 ) where
 
 import qualified Morloc.Data.Text as MT
+import qualified System.Directory as Sys 
+import System.FilePath.Posix (combine)
 
--- FIXME: HARDCODED NAME FOR LOCAL TESTING
---  [ ] make relative to users home
---  [ ] make path construction portable
-getMorlocHome :: MT.Text
-getMorlocHome = "/home/z/.morloc/lib"
+-- TODO:
+--  [ ] use "$HOME/.morloc/lib" as the default, but also read user config
+--  [ ] make path construction portable (should work on Windows too)
+getMorlocHome :: IO MT.Text
+getMorlocHome = fmap (MT.pack . (flip combine) ".morloc/lib") Sys.getHomeDirectory

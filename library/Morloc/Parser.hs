@@ -17,6 +17,7 @@ import qualified Text.Megaparsec.Char as TMC
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
+import System.FilePath ((</>))
 
 import Morloc.Types
 import qualified Morloc.Data.Text as MT
@@ -41,9 +42,10 @@ parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
 parseImports rdf = map morlocScriptFromFile (MR.getImports rdf)
 
 morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
-morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ filename where
-  -- FIXME: make filename portable
-  filename = MT.unpack Config.getMorlocHome ++ "/" ++ (MT.unpack s)
+morlocScriptFromFile s =
+      (fmap combine Config.getMorlocHome) -- IO "$MORLOC_HOME/$MODULE"
+  >>= (CM.join . fmap (parse (Just s)) . MT.readFile) where -- read and parse the file
+  combine = \x -> (MT.unpack x) </> (MT.unpack s)
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF

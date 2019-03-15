@@ -15,7 +15,6 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
-import qualified Morloc.Config as Config
 
 generate :: SparqlDatabaseLike db => db -> IO Script
 generate = makeGenerator g (defaultCodeGenerator g text' main)
@@ -66,8 +65,9 @@ g = Grammar {
     record' :: [(Doc,Doc)] -> Doc
     record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    import' :: Doc -> Doc
-    import' s = call' "source" [dquotes (text' Config.getMorlocHome <> "/" <> s)]
+    -- FIXME: make portable (replace "/" with the appropriate separator)
+    import' :: Doc -> Doc -> Doc
+    import' dir libname = call' "source" [dquotes (dir <> "/" <> libname)]
 
     try' :: TryDoc -> Doc
     try' t = call' ".morloc_try"
@@ -95,10 +95,10 @@ g = Grammar {
       ]
 
 main
-  :: [Doc] -> [Manifold] -> SerialMap -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+  :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
+main home srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-#{line <> vsep (map (gImport g) srcs)}
+#{line <> vsep (map ((gImport g) home) srcs)}
 
 .morloc_run <- function(f, args){
   fails <- ""

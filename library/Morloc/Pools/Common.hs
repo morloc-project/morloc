@@ -22,6 +22,7 @@ module Morloc.Pools.Common
   , getUsedManifolds
 ) where
 
+import qualified Morloc.Config as Config
 import Morloc.Types
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Error as ME
@@ -39,7 +40,7 @@ data Grammar = Grammar {
     , gComment  :: Doc -> Doc
     , gReturn   :: Doc -> Doc
     , gQuote    :: Doc -> Doc
-    , gImport   :: Doc -> Doc
+    , gImport   :: Doc -> Doc -> Doc
     , gList     :: [Doc] -> Doc
     , gTuple    :: [Doc] -> Doc
     , gRecord   :: [(Doc,Doc)] -> Doc
@@ -96,13 +97,14 @@ defaultCodeGenerator
   :: (SparqlDatabaseLike db)
   => Grammar
   -> (MT.Text -> Doc) -- source name parser
-  -> ([Doc] -> [Manifold] -> SerialMap -> Doc) -- main
+  -> (Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> (db -> IO Code)
 defaultCodeGenerator g f main ep = do
+  home <- Config.getMorlocHome
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   let srcs = map f (serialSources packMap)
-  (return . render) $ main srcs manifolds packMap
+  (return . render) $ main (text' home) srcs manifolds packMap
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
 makeSourceManifolds g h ms
