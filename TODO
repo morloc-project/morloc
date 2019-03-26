@@ -1,3 +1,14 @@
+# Environment (in progress)
+
+ [x] remove hardcoding
+ [ ] make paths portable
+ [ ] get morloc home from environmental variable (use `~/.morloc` if it exists)
+ [x] add `install` command for installing a module from github
+ [.] design specification for morloc packages
+ [.] add `init` to generate boilerplate for a new morloc package
+ [.] add `check` to check the validity of a morloc package
+ [.] add `update` to check the validity of a morloc package
+
 # Usability
 
  [ ] Make a Docker image

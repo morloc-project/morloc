@@ -9,6 +9,7 @@ import qualified Morloc.Data.Text as MT
 import System.Console.Docopt
 import Control.Monad (when)
 import qualified System.Environment as SE
+import qualified Morloc.Environment as ME
 
 patterns :: Docopt
 patterns = [docoptFile|USAGE|]
@@ -19,6 +20,22 @@ getArgOrExit = getArgOrExitWith patterns
 main :: IO ()
 main = do
   args <- parseArgsOrExit patterns =<< SE.getArgs
+
+  when (isPresent args (command "install")) $ do
+    name <- getArgOrExit args (argument "name")
+    if isPresent args (longOption "github")
+    then ME.installModule (ME.GithubRepo name)
+    else ME.installModule (ME.CoreGithubRepo name)
+
+  when (isPresent args (command "init")) $ do
+    pkg <- getArgOrExit args (argument "package-name")
+    ME.initModule pkg
+
+  when (isPresent args (command "check")) $ do
+    putStrLn "not checking anything"
+
+  when (isPresent args (command "update")) $ do
+    putStrLn "not updating anything"
 
   -- do the following if we are processing Morloc code
   when (isPresent args (argument "script")) $ do

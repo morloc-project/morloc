@@ -3,6 +3,9 @@ morloc version 0.16.2-9000
 Usage:
   morloc make [--expression] <script> [--endpoint=<sparql-endpoint>]
   morloc rdf [--triple] [--expression] <script>
+  morloc install [--github] <name>
+  morloc init <package-name>
+  morloc check [<package-name>]
 
 Options:
   -t, --triple       print RDF graph in triple format, rather than the turtle

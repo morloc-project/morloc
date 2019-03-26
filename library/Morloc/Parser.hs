@@ -41,11 +41,12 @@ joinRDF rdf xs
 parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
 parseImports rdf = map morlocScriptFromFile (MR.getImports rdf)
 
+-- FIXME: allow reading of files in working directory
 morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
 morlocScriptFromFile s =
-      (fmap combine Config.getMorlocHome) -- IO "$MORLOC_HOME/$MODULE"
+      (fmap makeFile Config.getMorlocHome) -- IO "$MORLOC_HOME/$MODULE"
   >>= (CM.join . fmap (parse (Just s)) . MT.readFile) where -- read and parse the file
-  combine = \x -> (MT.unpack x) </> (MT.unpack s)
+  makeFile = \x -> (MT.unpack x) </> (MT.unpack s) </> "main.loc" -- FIXME: hardcode
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF
@@ -152,7 +153,7 @@ simpleImport = do
   return $ MR.makeTopRDF i (
       [
         MR.mtriple i PType OImport
-      , MR.mtriple i PName (path <> ".loc")
+      , MR.mtriple i PName path
       ] ++ maybe [] (\q -> [MR.mtriple i PNamespace q]) qual
     )
 
@@ -166,7 +167,7 @@ restrictedImport = do
   return $ MR.makeTopRDF i (
       [
         MR.mtriple i PType ORestrictedImport
-      , MR.mtriple i PName (path <> ".loc")
+      , MR.mtriple i PName path
       ] ++ MR.adoptAs PImport i functions
     )
 
