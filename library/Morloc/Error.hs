@@ -25,14 +25,14 @@ instance Show MorlocError where
   show = MT.unpack . errmsg
 
 errmsg :: MorlocError -> MT.Text
-errmsg  UnknownError         = "UnknownError"
-errmsg (InvalidRDF msg)      = "Invalid RDF: " <> MT.show' msg
-errmsg (NotImplemented msg)  = "Not yet implemented: " <> MT.show' msg
-errmsg (NotSupported msg)    = "NotSupported: " <> MT.show' msg
-errmsg (SyntaxError err)     = "SyntaxError: " <> MT.show' err
-errmsg (TypeConflict t1 t2)  = 
-  "TypeConflict: cannot cast " <> t1 <> " as " <> t2 <> "\n"
-errmsg (SparqlFail t) = "SparqlFail: " <> t
+errmsg UnknownError         = "UnknownError"
+errmsg (InvalidRDF msg)     = "Invalid RDF: " <> MT.show' msg
+errmsg (NotImplemented msg) = "Not yet implemented: " <> MT.show' msg
+errmsg (NotSupported msg)   = "NotSupported: " <> MT.show' msg
+errmsg (SyntaxError err)    = "SyntaxError: " <> MT.show' err
+errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
+errmsg (SparqlFail t)       = "SparqlFail: " <> t
+errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 
 error' :: MT.Text -> a
 error' x = error $ MT.unpack x

@@ -100,11 +100,11 @@ defaultCodeGenerator
   -> (Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> (db -> IO Code)
 defaultCodeGenerator g f main ep = do
-  home <- Config.getMorlocHome
+  lib <- Config.getMorlocLibrary
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   let srcs = map f (serialSources packMap)
-  (return . render) $ main (text' home) srcs manifolds packMap
+  (return . render) $ main (text' lib) srcs manifolds packMap
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
 makeSourceManifolds g h ms

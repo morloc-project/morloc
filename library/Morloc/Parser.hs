@@ -17,14 +17,13 @@ import qualified Text.Megaparsec.Char as TMC
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
-import System.FilePath ((</>))
 
 import Morloc.Types
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
-import qualified Morloc.Config as Config
+import qualified Morloc.Module as MM
 import Morloc.Operators
 
 parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
@@ -41,12 +40,15 @@ joinRDF rdf xs
 parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
 parseImports rdf = map morlocScriptFromFile (MR.getImports rdf)
 
--- FIXME: allow reading of files in working directory
 morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
-morlocScriptFromFile s =
-      (fmap makeFile Config.getMorlocHome) -- IO "$MORLOC_HOME/$MODULE"
-  >>= (CM.join . fmap (parse (Just s)) . MT.readFile) where -- read and parse the file
-  makeFile = \x -> (MT.unpack x) </> (MT.unpack s) </> "main.loc" -- FIXME: hardcode
+morlocScriptFromFile s
+  =   (fmap . fmap) parseFile (MM.findModule s) -- IO (ThrowsError (IO (ThrowsError a)))
+  |>> sequence
+  & CM.join
+  |>> CM.join
+  where
+    parseFile :: MT.Text -> IO (ThrowsError MR.RDF)
+    parseFile = CM.join . fmap (parse (Just s)) . MT.readFile . MT.unpack
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF

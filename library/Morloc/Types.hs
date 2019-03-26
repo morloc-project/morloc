@@ -247,4 +247,6 @@ data MorlocError
   | TypeConflict Text Text
   -- | Raised when a SPARQL command fails
   | SparqlFail Text
+  -- | Raised when a module cannot be loaded 
+  | CannotLoadModule Text
   deriving(Eq)

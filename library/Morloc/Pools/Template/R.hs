@@ -96,9 +96,9 @@ g = Grammar {
 
 main
   :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
-main home srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+main lib srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
-#{line <> vsep (map ((gImport g) home) srcs)}
+#{line <> vsep (map ((gImport g) lib) srcs)}
 
 .morloc_run <- function(f, args){
   fails <- ""

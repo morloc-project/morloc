@@ -28,7 +28,7 @@ data ModuleSource
 
 installGithubRepo :: String -> String -> IO ()
 installGithubRepo repo url = do
-  lib <- MC.getMorlocHome
+  lib <- MC.getMorlocLibrary
   let cmd = unwords ["git clone", url, (MT.unpack lib) ++ "/" ++ repo] 
   (_, _, herr, handle) <- SP.runInteractiveCommand cmd
   exitCode <- SP.waitForProcess handle

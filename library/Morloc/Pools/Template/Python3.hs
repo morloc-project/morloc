@@ -109,14 +109,14 @@ except Exception as e:
 
 main
   :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
-main home srcs manifolds hash = [idoc|#!/usr/bin/env python
+main lib srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
 import json
 
-sys.path.append('#{home}')
-#{vsep (map ((gImport g) home) srcs)}
+sys.path.append('#{lib}')
+#{vsep (map ((gImport g) lib) srcs)}
 
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
