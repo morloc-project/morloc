@@ -13,9 +13,7 @@ Stability   : experimental
 module Morloc.Config (
     Config(..)
   , loadConfig
-  , getDefaultMorlocHome
-  , getDefaultMorlocLibrary
-  , getDefaultMorlocConfig
+  , defaultConfig 
 ) where
 
 import Morloc.Types
@@ -57,11 +55,11 @@ loadConfig Nothing = do
   defaultExists <- Sys.doesFileExist (MT.unpack defaultConfigFile)
   if defaultExists
   then readConfigFile defaultConfigFile
-  else makeDefaultConfig
+  else defaultConfig
 
 -- | Build a default config for this system when no file is found
-makeDefaultConfig :: IO Config
-makeDefaultConfig = do
+defaultConfig :: IO Config
+defaultConfig = do
   home <- getDefaultMorlocHome
   lib  <- getDefaultMorlocLibrary
   return $ Config {
