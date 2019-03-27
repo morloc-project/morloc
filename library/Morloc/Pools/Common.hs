@@ -100,7 +100,7 @@ defaultCodeGenerator
   -> (Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> (db -> IO Code)
 defaultCodeGenerator g f main ep = do
-  lib <- Config.getMorlocLibrary
+  lib <- Config.getDefaultMorlocLibrary
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   let srcs = map f (serialSources packMap)

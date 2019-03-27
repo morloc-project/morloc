@@ -19,6 +19,8 @@ extra-source-files:
 
 dependencies:
   - base >= 4.7 && < 5
+  - aeson
+  - bytestring
   - containers
   - directory
   - extra
@@ -36,6 +38,7 @@ dependencies:
   - template-haskell
   - text
   - wl-pprint-text
+  - yaml
 
 ghc-options:
   - -Wall

@@ -15,6 +15,7 @@ module Morloc.Data.Text
   ( 
       module Data.Text 
     , module Data.Text.IO
+    , module Data.Text.Encoding
     , show'
     , pretty
     , read'
@@ -29,6 +30,7 @@ module Morloc.Data.Text
 import Prelude hiding (lines, length)
 import Data.Text hiding (map)
 import Data.Text.IO
+import Data.Text.Encoding
 import qualified Data.Text.Lazy as DL
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty 

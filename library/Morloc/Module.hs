@@ -26,7 +26,7 @@ import qualified Data.List as DL
 
 findModule :: MT.Text -> IO (Types.ThrowsError MT.Text)
 findModule x = do
-  lib <- Config.getMorlocLibrary
+  lib <- Config.getDefaultMorlocLibrary
   let allPaths = getModulePaths lib x
   existingPaths <- fmap DM.catMaybes $ CM.mapM getFile allPaths
   case existingPaths of
@@ -38,7 +38,7 @@ findModule x = do
       ))
 
 findModule x
-  =   Config.getMorlocLibrary -- IO Text
+  =   Config.getDefaultMorlocLibrary -- IO Text
   >>= (\lib -> CM.mapM getFile (getModulePaths lib x)) -- IO [Maybe Text]
   |>> DM.catMaybes -- IO [Text]
   >>= (\xs ->
