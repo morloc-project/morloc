@@ -19,6 +19,7 @@ import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 
 import Morloc.Types
+import Morloc.Config (Config)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
@@ -26,9 +27,9 @@ import qualified Morloc.Lexer as Tok
 import qualified Morloc.Module as MM
 import Morloc.Operators
 
-parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
-parse srcfile code = case (parseShallow srcfile code) of
-  (Right rdf) -> joinRDF rdf (parseImports rdf)
+parse :: Config -> Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
+parse config srcfile code = case (parseShallow srcfile code) of
+  (Right rdf) -> joinRDF rdf (parseImports config rdf)
   err         -> return err
 
 joinRDF :: MR.RDF -> [IO (ThrowsError MR.RDF)] -> IO (ThrowsError MR.RDF)
@@ -37,18 +38,18 @@ joinRDF rdf xs
       (foldl MR.rdfAppend rdf)            -- ([MR.RDF] -> MR.RDF)
       ((CM.liftM sequence . sequence) xs) -- IO (ThrowsError [MR.RDF])
 
-parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
-parseImports rdf = map morlocScriptFromFile (MR.getImports rdf)
+parseImports :: Config -> MR.RDF -> [IO (ThrowsError MR.RDF)]
+parseImports config rdf = map (morlocScriptFromFile config) (MR.getImports rdf)
 
-morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
-morlocScriptFromFile s
-  =   (fmap . fmap) parseFile (MM.findModule s) -- IO (ThrowsError (IO (ThrowsError a)))
+morlocScriptFromFile :: Config -> MT.Text -> IO (ThrowsError MR.RDF)
+morlocScriptFromFile config s
+  =   (fmap . fmap) parseFile (MM.findModule config s) -- IO (ThrowsError (IO (ThrowsError a)))
   |>> sequence
   & CM.join
   |>> CM.join
   where
     parseFile :: MT.Text -> IO (ThrowsError MR.RDF)
-    parseFile = CM.join . fmap (parse (Just s)) . MT.readFile . MT.unpack
+    parseFile = CM.join . fmap (parse config (Just s)) . MT.readFile . MT.unpack
 
 -- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
 parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF

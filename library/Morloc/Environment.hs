@@ -26,9 +26,9 @@ data ModuleSource
   | GithubRepo String
   | CoreGithubRepo String
 
-installGithubRepo :: String -> String -> IO ()
-installGithubRepo repo url = do
-  lib <- MC.getDefaultMorlocLibrary
+installGithubRepo :: MC.Config -> String -> String -> IO ()
+installGithubRepo config repo url = do
+  let lib = MC.configLibrary config
   let cmd = unwords ["git clone", url, (MT.unpack lib) ++ "/" ++ repo] 
   (_, _, herr, handle) <- SP.runInteractiveCommand cmd
   exitCode <- SP.waitForProcess handle
@@ -37,11 +37,13 @@ installGithubRepo repo url = do
     SE.ExitSuccess     -> putStr (MT.unpack err)
     (SE.ExitFailure _) -> SE.die (MT.unpack err)
 
-installModule :: ModuleSource -> IO ()
-installModule (GithubRepo repo) = installGithubRepo repo ("https://github.com/" ++ repo)
-installModule (CoreGithubRepo name) = installGithubRepo name ("https://github.com/morloc-project/" ++ name)
-installModule (LocalModule Nothing) = undefined    -- install from working directory
-installModule (LocalModule (Just dir)) = undefined -- install from dir
+installModule :: MC.Config -> ModuleSource -> IO ()
+installModule config (GithubRepo repo)
+  = installGithubRepo config repo ("https://github.com/" ++ repo)
+installModule config (CoreGithubRepo name)
+  = installGithubRepo config name ("https://github.com/morloc-project/" ++ name)
+installModule _ (LocalModule Nothing) = undefined    -- install from working directory
+installModule _ (LocalModule (Just dir)) = undefined -- install from dir
 
 initModule :: String -> IO ()
 initModule = undefined

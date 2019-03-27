@@ -15,9 +15,10 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Config (Config)
 
-generate :: SparqlDatabaseLike db => db -> IO Script
-generate = makeGenerator g (defaultCodeGenerator g text' main)
+generate :: SparqlDatabaseLike db => Config -> db -> IO Script
+generate config = makeGenerator config g (defaultCodeGenerator config g text' main)
 
 g = Grammar {
       gLang        = "R"

@@ -22,7 +22,7 @@ module Morloc.Pools.Common
   , getUsedManifolds
 ) where
 
-import qualified Morloc.Config as Config
+import qualified Morloc.Config as MC
 import Morloc.Types
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Error as ME
@@ -82,11 +82,13 @@ data ForeignCallDoc = ForeignCallDoc {
     , fcdFile :: Doc
   }
 
+-- NOTE: currently nothing from config is used
 makeGenerator
-  :: Grammar
+  :: MC.Config
+  -> Grammar
   -> (db -> IO Code)
   -> (db -> IO Script)
-makeGenerator g gen
+makeGenerator _ g gen
   = \ep ->
           Script
       <$> pure "pool"
@@ -95,12 +97,13 @@ makeGenerator g gen
 
 defaultCodeGenerator
   :: (SparqlDatabaseLike db)
-  => Grammar
+  => MC.Config
+  -> Grammar
   -> (MT.Text -> Doc) -- source name parser
   -> (Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> (db -> IO Code)
-defaultCodeGenerator g f main ep = do
-  lib <- Config.getDefaultMorlocLibrary
+defaultCodeGenerator config g f main ep = do
+  let lib = MC.configLibrary config
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   let srcs = map f (serialSources packMap)

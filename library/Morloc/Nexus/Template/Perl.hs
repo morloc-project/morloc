@@ -15,18 +15,21 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Config (Config)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Data.Maybe as DM
 
-generate e
+generate :: SparqlDatabaseLike db => Config -> db -> IO Script
+generate config e
   =   Script
   <$> pure "nexus"
   <*> pure "perl"
-  <*> makeNexus e
+  <*> makeNexus config e
 
-makeNexus :: SparqlDatabaseLike db => db -> IO MT.Text
-makeNexus ep = fmap render $ main <$> names <*> fdata where
+-- NOTE: currently nothing from config is used 
+makeNexus :: SparqlDatabaseLike db => Config -> db -> IO MT.Text
+makeNexus _ ep = fmap render $ main <$> names <*> fdata where
 
   manifolds :: IO [Manifold]
   manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)

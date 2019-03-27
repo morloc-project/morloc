@@ -11,12 +11,14 @@ Stability   : experimental
 -}
 
 module Morloc.Config (
-    loadConfig
+    Config(..)
+  , loadConfig
   , getDefaultMorlocHome
   , getDefaultMorlocLibrary
   , getDefaultMorlocConfig
 ) where
 
+import Morloc.Types
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
 import System.FilePath.Posix (combine)
@@ -25,6 +27,14 @@ import qualified Data.ByteString.Char8 as BS
 import qualified Data.Yaml as Y
 import GHC.Generics
 import Data.Aeson
+
+data Config = Config {
+    configHome :: MT.Text
+  , configLibrary :: MT.Text
+  }
+  deriving(Show, Generic)
+
+instance FromJSON Config
 
 -- append the path
 append :: String -> String -> MT.Text
@@ -38,14 +48,6 @@ getDefaultMorlocLibrary = fmap (append ".morloc/lib") Sys.getHomeDirectory
 
 getDefaultMorlocConfig :: IO MT.Text
 getDefaultMorlocConfig = fmap (append ".morloc/config") Sys.getHomeDirectory
-
-data Config = Config {
-    configHome :: MT.Text
-  , configLibrary :: MT.Text
-  }
-  deriving (Show, Generic)
-
-instance FromJSON Config
 
 -- | Load the config file (if it exists) or build a default one for this system
 loadConfig :: Maybe MT.Text -> IO Config

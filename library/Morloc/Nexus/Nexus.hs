@@ -12,10 +12,11 @@ Stability   : experimental
 module Morloc.Nexus.Nexus (generate) where
 
 import Morloc.Types
+import Morloc.Config (Config)
 import qualified Morloc.Nexus.Template.Perl as Perl
 
 -- | Generate the nexus, which is a program that coordinates the execution of
 -- the language-specific function pools.
-generate :: SparqlDatabaseLike db => Lang -> db -> IO Script
-generate "perl" = Perl.generate
-generate l = error ("Cannot generate nexus in language: " ++ show l)
+generate :: SparqlDatabaseLike db => Config -> Lang -> db -> IO Script
+generate config "perl" = Perl.generate config
+generate _ l = error ("Cannot generate nexus in language: " ++ show l)

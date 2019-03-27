@@ -15,13 +15,14 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Config (Config)
 import qualified Morloc.Data.Text as MT
 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
-generate :: SparqlDatabaseLike db => db -> IO Script
-generate = makeGenerator g (defaultCodeGenerator g asImport main)
+generate :: SparqlDatabaseLike db => Config -> db -> IO Script
+generate config = makeGenerator config g (defaultCodeGenerator config g asImport main)
 
 asImport :: MT.Text -> Doc
 asImport s = text' $ case MT.uncons s of
