@@ -67,4 +67,7 @@ loadConfig (Just f) = do
 loadConfig Nothing = do
   defaults <- defaultFields
   defaultPath <- getDefaultMorlocConfig 
-  YC.loadYamlSettings [MT.unpack defaultPath] [] (YC.useCustomEnv defaults)
+  fileExists <- Sys.doesFileExist (MT.unpack defaultPath)
+  if fileExists
+  then YC.loadYamlSettings [MT.unpack defaultPath] [] (YC.useCustomEnv defaults)
+  else defaultConfig
