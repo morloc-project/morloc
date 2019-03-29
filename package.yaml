@@ -37,6 +37,7 @@ dependencies:
   - scientific
   - template-haskell
   - text
+  - unordered-containers
   - wl-pprint-text
   - yaml
 

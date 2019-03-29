@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
 
 {-|
 Module      : Morloc.Config
@@ -16,23 +15,26 @@ module Morloc.Config (
   , defaultConfig 
 ) where
 
-import Morloc.Types
+
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
+import Control.Applicative ((<|>))
 import System.FilePath.Posix (combine)
 
-import qualified Data.ByteString.Char8 as BS
-import qualified Data.Yaml as Y
-import GHC.Generics
-import Data.Aeson
+import qualified Data.Yaml.Config as YC
+import qualified Data.HashMap.Strict as H
+import Data.Aeson (withObject, FromJSON(..), (.:?), (.!=))
 
 data Config = Config {
     configHome :: MT.Text
   , configLibrary :: MT.Text
   }
-  deriving(Show, Generic)
+  deriving(Show, Ord, Eq)
 
-instance FromJSON Config
+instance FromJSON Config where
+  parseJSON = withObject "object" $ \o ->
+    Config <$> o .:? "home"    .!= ""
+           <*> o .:? "library" .!= ""
 
 -- append the path
 append :: String -> String -> MT.Text
@@ -47,32 +49,22 @@ getDefaultMorlocLibrary = fmap (append ".morloc/lib") Sys.getHomeDirectory
 getDefaultMorlocConfig :: IO MT.Text
 getDefaultMorlocConfig = fmap (append ".morloc/config") Sys.getHomeDirectory
 
--- | Load the config file (if it exists) or build a default one for this system
-loadConfig :: Maybe MT.Text -> IO Config
-loadConfig (Just f) = readConfigFile f
-loadConfig Nothing = do
-  defaultConfigFile <- getDefaultMorlocConfig 
-  defaultExists <- Sys.doesFileExist (MT.unpack defaultConfigFile)
-  if defaultExists
-  then readConfigFile defaultConfigFile
-  else defaultConfig
+defaultFields :: IO (H.HashMap MT.Text MT.Text)
+defaultFields = do
+  home <- getDefaultMorlocHome
+  lib <- getDefaultMorlocLibrary
+  return $ H.fromList [ ("home", home), ("library", lib)]
 
--- | Build a default config for this system when no file is found
 defaultConfig :: IO Config
 defaultConfig = do
-  home <- getDefaultMorlocHome
-  lib  <- getDefaultMorlocLibrary
-  return $ Config {
-        configHome    = home
-      , configLibrary = lib
-    }
+  defaults <- defaultFields
+  return $ Config (defaults H.! "home") (defaults H.! "library")
 
--- FIXME: make this type (IO (ThrowErrors Config)), and add YAML parse error type
--- | Read a config file
-readConfigFile :: MT.Text -> IO Config
-readConfigFile f = do
-    content <- BS.readFile (MT.unpack f)
-    let configContent = Y.decodeEither' content
-    case configContent of
-        (Left err) -> error (show err)
-        (Right c) -> return c
+loadConfig :: Maybe MT.Text -> IO Config
+loadConfig (Just f) = do
+  defaults <- defaultFields
+  YC.loadYamlSettings [MT.unpack f] [] (YC.useCustomEnv defaults)
+loadConfig Nothing = do
+  defaults <- defaultFields
+  defaultPath <- getDefaultMorlocConfig 
+  YC.loadYamlSettings [MT.unpack defaultPath] [] (YC.useCustomEnv defaults)
