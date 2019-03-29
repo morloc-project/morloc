@@ -109,8 +109,8 @@ except Exception as e:
 |]
 
 main
-  :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
-main lib srcs manifolds hash = [idoc|#!/usr/bin/env python
+  :: Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
+main c lib srcs manifolds hash = [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
@@ -153,7 +153,7 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
 
 #{makeSourceManifolds g hash manifolds}
 
-#{makeCisManifolds g hash manifolds}
+#{makeCisManifolds c g hash manifolds}
 
 dispatch = dict#{tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
 

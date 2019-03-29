@@ -15,21 +15,20 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>))
-import Morloc.Config (Config)
+import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Data.Maybe as DM
 
-generate :: SparqlDatabaseLike db => Config -> db -> IO Script
+generate :: SparqlDatabaseLike db => MC.Config -> db -> IO Script
 generate config e
   =   Script
   <$> pure "nexus"
   <*> pure "perl"
   <*> makeNexus config e
 
--- NOTE: currently nothing from config is used 
-makeNexus :: SparqlDatabaseLike db => Config -> db -> IO MT.Text
-makeNexus _ ep = fmap render $ main <$> names <*> fdata where
+makeNexus :: SparqlDatabaseLike db => MC.Config -> db -> IO MT.Text
+makeNexus config ep = fmap render $ main <$> names <*> fdata where
 
   manifolds :: IO [Manifold]
   manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)
@@ -50,13 +49,15 @@ makeNexus _ ep = fmap render $ main <$> names <*> fdata where
 
   getFData :: Manifold -> (Doc, Int, Doc, Doc, Doc)
   getFData m = case mLang m of
-    (Just lang) ->
-      ( text' (getName m)
-      , getNArgs m
-      , text' (MS.findExecutor lang)
-      , text' (MS.makePoolName lang)
-      , text' (MS.makeManifoldName (mCallId m))
-      )
+    (Just lang) -> case MC.getExecutor config lang of
+      (Just exe) ->
+        ( text' (getName m)
+        , getNArgs m
+        , text' exe
+        , text' (MS.makePoolName lang)
+        , text' (MS.makeManifoldName (mCallId m))
+        )
+      Nothing -> error ("Language not supported: " ++ MT.unpack lang)
     Nothing -> error "A language must be defined"
 
   isExported :: Manifold -> Bool

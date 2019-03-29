@@ -96,8 +96,8 @@ g = Grammar {
       ]
 
 main
-  :: Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
-main lib srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+  :: Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
+main c lib srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
 #{line <> vsep (map ((gImport g) lib) srcs)}
 
@@ -167,7 +167,7 @@ main lib srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
 
 #{makeSourceManifolds g hash manifolds}
 
-#{makeCisManifolds g hash manifolds}
+#{makeCisManifolds c g hash manifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

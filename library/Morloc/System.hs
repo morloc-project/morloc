@@ -13,7 +13,6 @@ module Morloc.System
   ( 
       makeManifoldName
     , makePoolName
-    , findExecutor
     , loadYamlConfig
     , getHomeDirectory
     , appendPath
@@ -30,11 +29,6 @@ import Data.Aeson (FromJSON(..))
 -- | Append POSIX paths encoded as Text
 appendPath :: MT.Text -> MT.Text -> MT.Text
 appendPath base path = MT.pack $ combine (MT.unpack path) (MT.unpack base)
-
-findExecutor :: MT.Text -> MT.Text
-findExecutor "R" = "Rscript" -- this is a safe bet
-findExecutor "py" = "python"  -- this isn't, due to python 2 versus 3 issues
-findExecutor l = error ("Language not supported: " ++ show l)
 
 makePoolName :: MT.Text -> MT.Text
 makePoolName lang = "pool." <> lang

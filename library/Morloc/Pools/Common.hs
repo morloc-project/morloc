@@ -100,14 +100,14 @@ defaultCodeGenerator
   => MC.Config
   -> Grammar
   -> (MT.Text -> Doc) -- source name parser
-  -> (Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
+  -> (MC.Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
   -> (db -> IO Code)
 defaultCodeGenerator config g f main ep = do
   let lib = MC.configLibrary config
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   let srcs = map f (serialSources packMap)
-  (return . render) $ main (text' lib) srcs manifolds packMap
+  (return . render) $ main config (text' lib) srcs manifolds packMap
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
 makeSourceManifolds g h ms
@@ -132,11 +132,11 @@ determineManifoldClass g m
   | (mLang m /= Just (gLang g)) && mCalled m = Trans
   | otherwise = error "Unexpected manifold class"
 
-makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
-makeCisManifolds g h ms = vsep . concat $ map decide' ms
+makeCisManifolds :: MC.Config -> Grammar -> SerialMap -> [Manifold] -> Doc
+makeCisManifolds c g h ms = vsep . concat $ map decide' ms
   where
     decide' m = case determineManifoldClass g m of
-      Cis -> return $ makeCisManifold g h m
+      Cis -> return $ makeCisManifold c g h m
       _ -> []
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> Doc
@@ -165,8 +165,8 @@ makeSourceManifold g h m
             , udFile = text' (MS.makePoolName (gLang g))
           }))
 
-makeCisManifold :: Grammar -> SerialMap -> Manifold -> Doc
-makeCisManifold g h m
+makeCisManifold :: MC.Config -> Grammar -> SerialMap -> Manifold -> Doc
+makeCisManifold c g h m
   =  ((gComment g) "cis manifold") <> line
   <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
   <> ((gFunction g)
@@ -190,9 +190,9 @@ makeCisManifold g h m
       if
         useUnpacker g arg m
       then
-        unpack' u (writeArgument g (mBoundVars m) arg)
+        unpack' u (writeArgument c g (mBoundVars m) arg)
       else
-        (writeArgument g (mBoundVars m) arg)
+        (writeArgument c g (mBoundVars m) arg)
 
     useUnpacker :: Grammar -> Argument -> Manifold -> Bool
     useUnpacker _  (ArgName n') m' = elem n' (mBoundVars m')
@@ -226,24 +226,26 @@ callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
-writeArgument :: Grammar -> [MT.Text] -> Argument -> Doc
-writeArgument _ _  (ArgName n) = text' n
-writeArgument g _  (ArgData d) = writeData g d
-writeArgument _ _  (ArgPosi i) = "x" <> int i
-writeArgument g xs (ArgCall m) = case mLang m of
+writeArgument :: MC.Config -> Grammar -> [MT.Text] -> Argument -> Doc
+writeArgument _ _ _  (ArgName n) = text' n
+writeArgument _ g _  (ArgData d) = writeData g d
+writeArgument _ _ _  (ArgPosi i) = "x" <> int i
+writeArgument c g xs (ArgCall m) = case mLang m of
   (Just l) ->
     if
       l == gLang g
     then
       (gCall g) (callIdToName m) (map text' xs)
     else
-      (gForeignCall g) (ForeignCallDoc {
-            fcdForeignProg = text' (MS.findExecutor l)
-          , fcdForeignPool = text' (MS.makePoolName l)
-          , fcdMid = text' $ MS.makeManifoldName (mCallId m)
-          , fcdArgs = map text' xs
-          , fcdFile = text' (MS.makePoolName (gLang g))
-        })
+      case (MC.getExecutor c l) of
+        (Just exe) -> (gForeignCall g) (ForeignCallDoc {
+              fcdForeignProg = text' exe
+            , fcdForeignPool = text' (MS.makePoolName l)
+            , fcdMid = text' $ MS.makeManifoldName (mCallId m)
+            , fcdArgs = map text' xs
+            , fcdFile = text' (MS.makePoolName (gLang g))
+          })
+        Nothing -> error ("No command could be found to run language " ++ MT.unpack l)
   Nothing -> error ("No language set on: " ++ show m)
 
 writeData :: Grammar -> MData -> Doc
