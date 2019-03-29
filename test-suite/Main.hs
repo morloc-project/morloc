@@ -21,7 +21,7 @@ writeTurtleTo' config loc ttl = do
 
 goldenTests :: IO TestTree
 goldenTests = do
-  config <- MC.defaultConfig
+  config <- MC.loadDefaultMorlocConfig
   locFiles <- Golden.findByExtension [".loc"] ("test-suite" </> "loc2rdf-cases")
   return $ testGroup "morloc to RDF golden tests"
     [ Golden.goldenVsFile

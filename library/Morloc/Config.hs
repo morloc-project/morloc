@@ -11,18 +11,18 @@ Stability   : experimental
 
 module Morloc.Config (
     Config(..)
-  , loadConfig
-  , defaultConfig 
+  , loadMorlocConfig
+  , loadDefaultMorlocConfig 
 ) where
 
-
+import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
+import qualified Morloc.System as MS
 import Control.Applicative ((<|>))
-import System.FilePath.Posix (combine)
 
-import qualified Data.Yaml.Config as YC
 import qualified Data.HashMap.Strict as H
+import qualified Data.Yaml.Config as YC
 import Data.Aeson (withObject, FromJSON(..), (.:?), (.!=))
 
 data Config = Config {
@@ -36,18 +36,18 @@ instance FromJSON Config where
     Config <$> o .:? "home"    .!= ""
            <*> o .:? "library" .!= ""
 
--- append the path
-append :: String -> String -> MT.Text
-append base path = MT.pack $ combine path base
-
+-- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text
-getDefaultMorlocHome = fmap (append ".morloc") Sys.getHomeDirectory
+getDefaultMorlocHome = MS.getHomeDirectory |>> MS.appendPath ".morloc"
 
+-- | Get the Morloc library directory (absolute path). Usually this will be a
+-- folder inside the home directory.
 getDefaultMorlocLibrary :: IO MT.Text
-getDefaultMorlocLibrary = fmap (append ".morloc/lib") Sys.getHomeDirectory
+getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath ".morloc/lib"
 
+-- | Get the default Morloc YAML config filename
 getDefaultMorlocConfig :: IO MT.Text
-getDefaultMorlocConfig = fmap (append ".morloc/config") Sys.getHomeDirectory
+getDefaultMorlocConfig = MS.getHomeDirectory |>> MS.appendPath ".morloc/config"
 
 defaultFields :: IO (H.HashMap MT.Text MT.Text)
 defaultFields = do
@@ -55,19 +55,17 @@ defaultFields = do
   lib <- getDefaultMorlocLibrary
   return $ H.fromList [ ("home", home), ("library", lib)]
 
-defaultConfig :: IO Config
-defaultConfig = do
+-- | Load the default Morloc configuration, ignoring any local configurations.
+loadDefaultMorlocConfig :: IO Config
+loadDefaultMorlocConfig = do
   defaults <- defaultFields
   return $ Config (defaults H.! "home") (defaults H.! "library")
 
-loadConfig :: Maybe MT.Text -> IO Config
-loadConfig (Just f) = do
+-- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
+-- default configuration will be used.
+loadMorlocConfig :: Maybe MT.Text -> IO Config
+loadMorlocConfig f = do
   defaults <- defaultFields
-  YC.loadYamlSettings [MT.unpack f] [] (YC.useCustomEnv defaults)
-loadConfig Nothing = do
-  defaults <- defaultFields
-  defaultPath <- getDefaultMorlocConfig 
-  fileExists <- Sys.doesFileExist (MT.unpack defaultPath)
-  if fileExists
-  then YC.loadYamlSettings [MT.unpack defaultPath] [] (YC.useCustomEnv defaults)
-  else defaultConfig
+  MS.loadYamlConfig (fmap (\x -> [x]) f)
+                    (YC.useCustomEnv defaults)
+                    loadDefaultMorlocConfig

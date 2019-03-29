@@ -23,7 +23,9 @@ main = do
   args <- parseArgsOrExit patterns =<< SE.getArgs
 
   -- load the config file
-  config <- Config.loadConfig . fmap MT.pack . getArg args $ longOption "config"
+  config <- Config.loadMorlocConfig
+          . fmap MT.pack
+          . getArg args $ longOption "config"
 
   when (isPresent args (command "install")) $ do
     name <- getArgOrExit args (argument "name")
