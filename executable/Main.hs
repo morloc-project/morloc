@@ -2,6 +2,7 @@
 
 module Main where
 
+import Morloc.Operators
 import Morloc.Types
 import qualified Morloc as M
 import qualified Morloc.Data.RDF as MR
@@ -22,10 +23,17 @@ main :: IO ()
 main = do
   args <- parseArgsOrExit patterns =<< SE.getArgs
 
+  defaultPath <- Config.getDefaultConfigFilepath
+  let givenPath = getArg args (longOption "config")
+
+  let configPath = if (isPresent args (longOption "vanilla"))
+                   then Nothing
+                   else case givenPath of
+                     (Just f) -> Just (MT.pack f)
+                     Nothing -> Just defaultPath
+
   -- load the config file
-  config <- Config.loadMorlocConfig
-          . fmap MT.pack
-          . getArg args $ longOption "config"
+  config <- Config.loadMorlocConfig configPath 
 
   when (isPresent args (command "install")) $ do
     name <- getArgOrExit args (argument "name")

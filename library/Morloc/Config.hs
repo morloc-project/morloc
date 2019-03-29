@@ -14,17 +14,20 @@ module Morloc.Config (
   , loadMorlocConfig
   , loadDefaultMorlocConfig 
   , getExecutor
+  , getDefaultConfigFilepath
 ) where
 
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
 import qualified Morloc.System as MS
-import Control.Applicative ((<|>))
 
 import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import Data.Aeson (withObject, FromJSON(..), (.:?), (.!=))
+
+getDefaultConfigFilepath :: IO MT.Text
+getDefaultConfigFilepath = MS.getHomeDirectory |>> MS.appendPath ".morloc/config"
 
 data Config = Config {
     configHome :: MT.Text
@@ -51,9 +54,6 @@ defaultFields = do
   return $ H.fromList
     [ ("home", home)
     , ("library", lib)
-    , ("lang_python3", "python")
-    , ("lang_R", "Rscript")
-    , ("lang_perl", "perl")
     ]
 
 -- | Load the default Morloc configuration, ignoring any local configurations.
@@ -63,9 +63,9 @@ loadDefaultMorlocConfig = do
   return $ Config
     (defaults H.! "home")
     (defaults H.! "library")
-    (defaults H.! "lang_python3")
-    (defaults H.! "lang_R")
-    (defaults H.! "lang_perl")
+    "python"  -- lang_python3
+    "Rscript" -- lang_R
+    "perl"    -- lang_perl
 
 getExecutor :: Config -> MT.Text -> Maybe MT.Text
 getExecutor c "R"    = Just $ configLangR c

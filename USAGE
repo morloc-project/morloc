@@ -1,12 +1,13 @@
 morloc version 0.16.2-9000
 
 Usage:
-  morloc make [--expression] [--endpoint=<sparql-endpoint>] [--config=<config>] <script>
-  morloc rdf [--triple] [--expression] [--config=<config>] <script>
-  morloc install [--github] [--config=<config>] <name>
-  morloc init [--config=<config>] <package-name>
-  morloc check [--config=<config>] [<package-name>]
+  morloc make [--expression] [--endpoint=<sparql-endpoint>] [--config=<config>] [--vanilla] <script>
+  morloc rdf [--triple] [--expression] [--config=<config>] [--vanilla] <script>
+  morloc install [--github] [--config=<config>] [--vanilla] <name>
+  morloc init [--config=<config>] [--vanilla] <package-name>
+  morloc check [--config=<config>] [--vanilla] [<package-name>]
 
 Options:
   -t, --triple       print RDF graph in triple format, rather than the turtle
   -e, --expression   read script as string rather than file
+  --vanilla          ignore local configuration files
