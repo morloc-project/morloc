@@ -4,6 +4,7 @@ Usage:
   morloc make [--expression] [--endpoint=<sparql-endpoint>] [--config=<config>] [--vanilla] <script>
   morloc rdf [--triple] [--expression] [--config=<config>] [--vanilla] <script>
   morloc install [--github] [--config=<config>] [--vanilla] <name>
+  morloc remove [--config=<config>] [--vanilla] <name> 
   morloc init [--config=<config>] [--vanilla] <package-name>
   morloc check [--config=<config>] [--vanilla] [<package-name>]
 
