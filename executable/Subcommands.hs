@@ -1,4 +1,4 @@
-{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 {-|
 Module      : Subcommands
@@ -35,11 +35,10 @@ import qualified Morloc.Environment as ME
 
 type Subcommand = Arguments -> Config.Config -> IO ()
 
-patterns :: Docopt
-patterns = [docoptFile|USAGE|]
-
-getArgOrExit :: Arguments -> Option -> IO String
-getArgOrExit = getArgOrExitWith patterns
+getArgOrDie :: Arguments -> Option -> MT.Text
+getArgOrDie args opt = case getArg args opt of
+  Nothing -> error ("Invalid command: Expected option '" <> show opt)
+  (Just x) -> MT.pack x
 
 getConfig :: Arguments -> IO Config.Config
 getConfig args = do
@@ -58,12 +57,12 @@ getConfig args = do
 readScript :: Arguments -> IO MT.Text
 readScript args = do
   if isPresent args (longOption "expression")
-  then (fmap MT.pack $ getArgOrExit args (argument "script"))
-  else getArgOrExit args (argument "script") >>= MT.readFile
+  then (return $ getArgOrDie args (argument "script"))
+  else MT.readFile (MT.unpack $ getArgOrDie args (argument "script"))
 
 cmdInstall :: Subcommand
 cmdInstall args config = do
-  name <- getArgOrExit args (argument "name")
+  let name = getArgOrDie args (argument "name")
   if isPresent args (longOption "github")
   then ME.installModule config (ME.GithubRepo name)
   else ME.installModule config (ME.CoreGithubRepo name)
@@ -74,7 +73,7 @@ cmdRemove args config = do
 
 cmdInit :: Subcommand
 cmdInit args config = do
-  pkg <- getArgOrExit args (argument "package-name")
+  let pkg = getArgOrDie args (argument "package-name")
   ME.initModule pkg
 
 cmdCheck :: Subcommand
@@ -90,7 +89,7 @@ cmdMake :: Subcommand
 cmdMake args config = do
   script <- readScript args
   when (isPresent args (longOption "endpoint")) $ do
-    ep <- (fmap SparqlEndPoint $ getArgOrExit args (longOption "endpoint"))
+    let ep = SparqlEndPoint . MT.unpack $ getArgOrDie args (longOption "endpoint")
     M.writeProgram config ep script
   when (notPresent args (longOption "endpoint")) $ do
     M.writeProgram config (MR.makeRDF []) script

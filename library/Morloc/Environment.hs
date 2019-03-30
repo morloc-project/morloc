@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Environment
 Description : Environment code
@@ -16,21 +18,22 @@ module Morloc.Environment
   , updateModule
 ) where
 
+import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as MC
 import qualified System.Process  as SP
 import qualified System.Exit  as SE
 
 data ModuleSource
-  = LocalModule (Maybe String) 
-  | GithubRepo String
-  | CoreGithubRepo String
+  = LocalModule (Maybe MT.Text) 
+  | GithubRepo MT.Text
+  | CoreGithubRepo MT.Text
 
-installGithubRepo :: MC.Config -> String -> String -> IO ()
+installGithubRepo :: MC.Config -> MT.Text -> MT.Text -> IO ()
 installGithubRepo config repo url = do
   let lib = MC.configLibrary config
-  let cmd = unwords ["git clone", url, (MT.unpack lib) ++ "/" ++ repo] 
-  (_, _, herr, handle) <- SP.runInteractiveCommand cmd
+  let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo] 
+  (_, _, herr, handle) <- SP.runInteractiveCommand (MT.unpack cmd)
   exitCode <- SP.waitForProcess handle
   err <- MT.hGetContents herr
   case exitCode of
@@ -39,13 +42,13 @@ installGithubRepo config repo url = do
 
 installModule :: MC.Config -> ModuleSource -> IO ()
 installModule config (GithubRepo repo)
-  = installGithubRepo config repo ("https://github.com/" ++ repo)
+  = installGithubRepo config repo ("https://github.com/" <> repo)
 installModule config (CoreGithubRepo name)
-  = installGithubRepo config name ("https://github.com/morloc-project/" ++ name)
+  = installGithubRepo config name ("https://github.com/morloc-project/" <> name)
 installModule _ (LocalModule Nothing) = undefined    -- install from working directory
 installModule _ (LocalModule (Just dir)) = undefined -- install from dir
 
-initModule :: String -> IO ()
+initModule :: MT.Text -> IO ()
 initModule = undefined
 
 checkModule :: IO Bool
