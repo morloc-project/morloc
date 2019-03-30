@@ -13,10 +13,6 @@ module Subcommands
 ( 
     getConfig
   , cmdInstall
-  , cmdRemove
-  , cmdInit
-  , cmdCheck
-  , cmdUpdate
   , cmdMake
   , cmdRdf
 ) where
@@ -70,19 +66,6 @@ cmdInstall args config = do
 cmdRemove :: Subcommand
 cmdRemove args config = do
   putStrLn "not removing anything"
-
-cmdInit :: Subcommand
-cmdInit args config = do
-  let pkg = getArgOrDie args (argument "package-name")
-  ME.initModule pkg
-
-cmdCheck :: Subcommand
-cmdCheck args config = do
-  putStrLn "not checking anything"
-
-cmdUpdate :: Subcommand
-cmdUpdate args config = do
-  putStrLn "not updating anything"
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: Subcommand

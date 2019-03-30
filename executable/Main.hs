@@ -19,10 +19,6 @@ main = do
   config <- getConfig args
 
   when (isPresent args (command "install")) (cmdInstall args config)
-  when (isPresent args (command "remove")) (cmdRemove args config)
-  when (isPresent args (command "init")) (cmdInit args config)
-  when (isPresent args (command "check")) (cmdCheck args config)
-  when (isPresent args (command "update")) (cmdUpdate args config)
 
   -- do the following if we are processing Morloc code
   when (isPresent args (argument "script")) $ do

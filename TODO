@@ -1,14 +1,3 @@
-# Environment (in progress)
-
- [x] remove hardcoding
- [ ] make paths portable
- [ ] get morloc home from environmental variable (use `~/.morloc` if it exists)
- [x] add `install` command for installing a module from github
- [.] design specification for morloc packages
- [.] add `init` to generate boilerplate for a new morloc package
- [.] add `check` to check the validity of a morloc package
- [.] add `update` to check the validity of a morloc package
-
 # Usability
 
  [ ] Make a Docker image
@@ -51,14 +40,17 @@
    [ ] print the long doc string
 
  * configuration
-   [ ] specify yaml config file
+   [x] specify yaml config file
+   [x] thread the configuration through the compiler
    [ ] parse to RDF and upload to local SPARQL database
-   [ ] thread the configuration through the compiler
 
  * conventions - decide on
-   [ ] the syntax and schema of morloc config file
-   [ ] a default name for the config file (e.g., `~/.morloc-config.yml`)
-   [ ] a default name for morloc home (e.g., `~/.morloc`)
+   [x] a default name for the config file (e.g., `~/.morloc-config.yml`)
+   [x] a default name for morloc home (e.g., `~/.morloc`)
+   [ ] replace passed Config and MorlocError with a monad stack
+
+ * ecosystem
+   [x] add `install` to install a module from github
 
 # typechecking
 

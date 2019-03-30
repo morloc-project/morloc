@@ -13,9 +13,6 @@ module Morloc.Environment
 (
     ModuleSource(..)
   , installModule
-  , initModule
-  , checkModule
-  , updateModule
 ) where
 
 import Morloc.Operators
@@ -47,12 +44,3 @@ installModule config (CoreGithubRepo name)
   = installGithubRepo config name ("https://github.com/morloc-project/" <> name)
 installModule _ (LocalModule Nothing) = undefined    -- install from working directory
 installModule _ (LocalModule (Just dir)) = undefined -- install from dir
-
-initModule :: MT.Text -> IO ()
-initModule = undefined
-
-checkModule :: IO Bool
-checkModule = undefined
-
-updateModule :: IO ()
-updateModule = undefined
