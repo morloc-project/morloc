@@ -42,6 +42,8 @@ module Morloc.Types (
   -- ** Error handling
   , ThrowsError
   , MorlocError(..)
+  -- ** Configuration
+  , Config(..)
 ) where
 
 import Data.Text                    ( Text         )
@@ -250,3 +252,12 @@ data MorlocError
   -- | Raised when a module cannot be loaded 
   | CannotLoadModule Text
   deriving(Eq)
+
+data Config = Config {
+    configHome :: Text
+  , configLibrary :: Text
+  , configLangPython3 :: Text
+  , configLangR :: Text
+  , configLangPerl :: Text
+  }
+  deriving(Show, Ord, Eq)

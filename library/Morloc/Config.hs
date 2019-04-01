@@ -17,6 +17,7 @@ module Morloc.Config (
   , getDefaultConfigFilepath
 ) where
 
+import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
@@ -28,15 +29,6 @@ import Data.Aeson (withObject, FromJSON(..), (.:?), (.!=))
 
 getDefaultConfigFilepath :: IO MT.Text
 getDefaultConfigFilepath = MS.getHomeDirectory |>> MS.appendPath ".morloc/config"
-
-data Config = Config {
-    configHome :: MT.Text
-  , configLibrary :: MT.Text
-  , configLangPython3 :: MT.Text
-  , configLangR :: MT.Text
-  , configLangPerl :: MT.Text
-  }
-  deriving(Show, Ord, Eq)
 
 -- FIXME: remove this chronic multiplication
 instance FromJSON Config where
