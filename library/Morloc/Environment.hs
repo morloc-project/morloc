@@ -16,31 +16,27 @@ module Morloc.Environment
 ) where
 
 import Morloc.Operators
+import Morloc.Types
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as MC
-import qualified System.Process  as SP
-import qualified System.Exit  as SE
 
 data ModuleSource
   = LocalModule (Maybe MT.Text) 
   | GithubRepo MT.Text
   | CoreGithubRepo MT.Text
 
-installGithubRepo :: MC.Config -> MT.Text -> MT.Text -> IO ()
-installGithubRepo config repo url = do
+installGithubRepo :: MT.Text -> MT.Text -> MM.MorlocMonad ()
+installGithubRepo repo url = do
+  config <- MM.ask
   let lib = MC.configLibrary config
   let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo] 
-  (_, _, herr, handle) <- SP.runInteractiveCommand (MT.unpack cmd)
-  exitCode <- SP.waitForProcess handle
-  err <- MT.hGetContents herr
-  case exitCode of
-    SE.ExitSuccess     -> putStr (MT.unpack err)
-    (SE.ExitFailure _) -> SE.die (MT.unpack err)
-
-installModule :: MC.Config -> ModuleSource -> IO ()
-installModule config (GithubRepo repo)
-  = installGithubRepo config repo ("https://github.com/" <> repo)
-installModule config (CoreGithubRepo name)
-  = installGithubRepo config name ("https://github.com/morloc-project/" <> name)
-installModule _ (LocalModule Nothing) = undefined    -- install from working directory
-installModule _ (LocalModule (Just dir)) = undefined -- install from dir
+  MM.runCommand cmd
+  
+installModule :: ModuleSource -> MM.MorlocMonad ()
+installModule (GithubRepo repo)
+  = installGithubRepo repo ("https://github.com/" <> repo)
+installModule (CoreGithubRepo name)
+  = installGithubRepo name ("https://github.com/morloc-project/" <> name)
+installModule (LocalModule Nothing) = MM.throwError (NotImplemented "module installation from working directory")
+installModule (LocalModule (Just dir)) = MM.throwError (NotImplemented "module installation from local directory")

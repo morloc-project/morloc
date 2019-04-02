@@ -251,6 +251,8 @@ data MorlocError
   | SparqlFail Text
   -- | Raised when a module cannot be loaded 
   | CannotLoadModule Text
+  -- | System call failed
+  | SystemCallError Text
   deriving(Eq)
 
 data Config = Config {

@@ -15,6 +15,7 @@ program. New entries can be added to describe new types of error.
 module Morloc.Error
 (
     error'
+  , errmsg
 ) where
 
 import Morloc.Types
@@ -33,6 +34,7 @@ errmsg (SyntaxError err)    = "SyntaxError: " <> MT.show' err
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
 errmsg (SparqlFail t)       = "SparqlFail: " <> t
 errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
+errmsg (SystemCallError t)  = "System call failed:\n" <> t
 
 error' :: MT.Text -> a
 error' x = error $ MT.unpack x

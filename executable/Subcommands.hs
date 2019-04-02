@@ -17,16 +17,15 @@ module Subcommands
   , cmdRdf
 ) where
 
-import System.Console.Docopt
 import Morloc.Operators
 import Morloc.Types
 import qualified Morloc as M
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
 import System.Console.Docopt
 import Control.Monad (when)
-import qualified System.Environment as SE
 import qualified Morloc.Environment as ME
 
 type Subcommand = Arguments -> Config.Config -> IO ()
@@ -57,11 +56,12 @@ readScript args = do
   else MT.readFile (MT.unpack $ getArgOrDie args (argument "script"))
 
 cmdInstall :: Subcommand
-cmdInstall args config = do
-  let name = getArgOrDie args (argument "name")
-  if isPresent args (longOption "github")
-  then ME.installModule config (ME.GithubRepo name)
-  else ME.installModule config (ME.CoreGithubRepo name)
+cmdInstall args conf = MM.runMorlocMonad conf cmdInstall' >>= MM.writeMorlocReturn where
+  cmdInstall' = do
+    let name = getArgOrDie args (argument "name")
+    if isPresent args (longOption "github")
+    then ME.installModule (ME.GithubRepo name)
+    else ME.installModule (ME.CoreGithubRepo name)
 
 cmdRemove :: Subcommand
 cmdRemove args config = do
