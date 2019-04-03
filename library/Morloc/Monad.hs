@@ -37,20 +37,19 @@ import qualified System.Process as SP
 import System.IO (stderr)
 
 type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
-type MorlocState = Map.Map MT.Text MT.Text
-type MorlocMonad a = MorlocMonadGen Config MorlocError [MT.Text] MorlocState a
-type MorlocReturn a = ((Either MorlocError a, [MT.Text]), MorlocState)
+type MorlocMonad d a = MorlocMonadGen Config MorlocError [MT.Text] (MorlocState d) a
+type MorlocReturn d a = ((Either MorlocError a, [MT.Text]), (MorlocState d))
 
-runMorlocMonad :: Config -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) Map.empty
+runMorlocMonad :: SparqlDatabaseLike d => Config -> Maybe d -> MorlocMonad d a -> IO (MorlocReturn d a)
+runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db)
 
-writeMorlocReturn :: MorlocReturn a -> IO ()
+writeMorlocReturn :: MorlocReturn d a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
   =  MT.hPutStr stderr (MT.unlines msgs) -- write messages
   >> MT.hPutStr stderr (ME.errmsg err) -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStr stderr (MT.unlines msgs)
 
-runCommand :: MT.Text -> MorlocMonad ()
+runCommand :: MT.Text -> MorlocMonad d ()
 runCommand cmd = do
   (_, _, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
   exitCode <- liftIO $ SP.waitForProcess handle

@@ -35,6 +35,7 @@ getArgOrDie args opt = case getArg args opt of
   Nothing -> error ("Invalid command: Expected option '" <> show opt)
   (Just x) -> MT.pack x
 
+-- | read the global morloc config file or return a default one
 getConfig :: Arguments -> IO Config.Config
 getConfig args = do
   let givenPath = getArg args (longOption "config")
@@ -55,14 +56,18 @@ readScript args = do
   then (return $ getArgOrDie args (argument "script"))
   else MT.readFile (MT.unpack $ getArgOrDie args (argument "script"))
 
+-- | install a module
 cmdInstall :: Subcommand
-cmdInstall args conf = MM.runMorlocMonad conf cmdInstall' >>= MM.writeMorlocReturn where
+cmdInstall args conf
+  =   (MM.runMorlocMonad conf (Nothing :: Maybe MR.RDF) cmdInstall')
+  >>= MM.writeMorlocReturn where
   cmdInstall' = do
     let name = getArgOrDie args (argument "name")
     if isPresent args (longOption "github")
     then ME.installModule (ME.GithubRepo name)
     else ME.installModule (ME.CoreGithubRepo name)
 
+-- | remove a previously installed module (NOT YET IMPLEMENTED)
 cmdRemove :: Subcommand
 cmdRemove args config = do
   putStrLn "not removing anything"
@@ -73,9 +78,10 @@ cmdMake args config = do
   script <- readScript args
   when (isPresent args (longOption "endpoint")) $ do
     let ep = SparqlEndPoint . MT.unpack $ getArgOrDie args (longOption "endpoint")
-    M.writeProgram config ep script
+    MM.runMorlocMonad config (Just ep) (M.writeProgram script) >>= MM.writeMorlocReturn
   when (notPresent args (longOption "endpoint")) $ do
-    M.writeProgram config (MR.makeRDF []) script
+    let ep = MR.makeRDF []
+    MM.runMorlocMonad config (Just ep) (M.writeProgram script) >>= MM.writeMorlocReturn
 
 -- | compile a Morloc script to RDF (turtle format by default)
 cmdRdf :: Subcommand

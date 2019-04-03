@@ -44,6 +44,8 @@ module Morloc.Types (
   , MorlocError(..)
   -- ** Configuration
   , Config(..)
+  -- ** Global state
+  , MorlocState(..)
 ) where
 
 import Data.Text                    ( Text         )
@@ -253,7 +255,13 @@ data MorlocError
   | CannotLoadModule Text
   -- | System call failed
   | SystemCallError Text
+  -- | A truly weird and befuddling error that shouldn't ever occur
+  | TrulyWeird
   deriving(Eq)
+
+data MorlocState conn = MorlocState {
+    sparqlConn :: Maybe conn
+  }
 
 data Config = Config {
     configHome :: Text

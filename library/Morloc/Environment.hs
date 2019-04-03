@@ -26,17 +26,15 @@ data ModuleSource
   | GithubRepo MT.Text
   | CoreGithubRepo MT.Text
 
-installGithubRepo :: MT.Text -> MT.Text -> MM.MorlocMonad ()
+installGithubRepo :: MT.Text -> MT.Text -> MM.MorlocMonad d ()
 installGithubRepo repo url = do
   config <- MM.ask
   let lib = MC.configLibrary config
   let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo] 
   MM.runCommand cmd
   
-installModule :: ModuleSource -> MM.MorlocMonad ()
-installModule (GithubRepo repo)
-  = installGithubRepo repo ("https://github.com/" <> repo)
-installModule (CoreGithubRepo name)
-  = installGithubRepo name ("https://github.com/morloc-project/" <> name)
+installModule :: ModuleSource -> MM.MorlocMonad d ()
+installModule (GithubRepo repo) = installGithubRepo repo ("https://github.com/" <> repo)
+installModule (CoreGithubRepo name) = installGithubRepo name ("https://github.com/morloc-project/" <> name)
 installModule (LocalModule Nothing) = MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just dir)) = MM.throwError (NotImplemented "module installation from local directory")

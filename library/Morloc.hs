@@ -11,6 +11,7 @@ import qualified Data.Map.Strict as DMS
 import qualified System.IO as SIO
 import qualified System.Directory as SD
 
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Types
@@ -23,14 +24,18 @@ import Morloc.Typecheck (typecheck)
 buildProgram :: SparqlDatabaseLike db => Config -> db -> MT.Text -> IO db
 buildProgram config ep code = do
   tbl <- MP.parse config Nothing code >>= doOrDie >>= sparqlUpload ep
-  typecheck tbl
-  -- TODO: construct tbl
+  -- typecheck tbl
   return tbl
 
 -- | Build a program as a local executable
-writeProgram :: SparqlDatabaseLike db => Config -> db -> MT.Text -> IO ()
-writeProgram config ep code = do
-  buildProgram config ep code >>= MG.generate config >>= writeProgram'
+writeProgram :: SparqlDatabaseLike db => MT.Text -> MM.MorlocMonad db ()
+writeProgram code = do
+  config <- MM.ask
+  ep' <- MM.gets sparqlConn
+  case ep' of
+    (Just ep) -> MM.liftIO $ (buildProgram config ep code >>= MG.generate config >>= writeProgram')
+    Nothing -> MM.throwError TrulyWeird -- this case should never occur, since
+                                        -- higher code never sends in Nothing
   where
     writeProgram' :: (Script, [Script]) -> IO ()
     writeProgram' (n, ps) = do
