@@ -266,6 +266,8 @@ data MorlocError
   | CannotLoadModule Text
   -- | System call failed
   | SystemCallError Text
+  -- | Raised when there is an error in the code generators
+  | GeneratorError Text
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)
