@@ -20,24 +20,25 @@ import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Component.Manifold as Manifold
+import qualified Morloc.Monad as MM
 
 -- TODO: this should be wrapped in the Either monad or something else better
 -- for handling Error.
-typecheck :: SparqlDatabaseLike db => db -> IO ()
+typecheck :: SparqlDatabaseLike db => db -> MorlocMonad ()
 typecheck ep = do
-  putStrLn "  typechecking RDF graph ... "
+  MM.liftIO $ putStrLn "  typechecking RDF graph ... "
   manifolds <- Manifold.fromSparqlDb ep
   isGood manifolds
 
-isGood :: [Manifold] -> IO ()
+isGood :: [Manifold] -> MorlocMonad ()
 isGood ms = mapM_ isGoodOne ms
 
-isGoodOne :: Manifold -> IO ()
+isGoodOne :: Manifold -> MorlocMonad ()
 isGoodOne m = case (mAbstractType m, mArgs m) of
   (Just (MFuncType _ exps _), args) -> mapM_ compareTypes (zip exps args)
   _ -> return ()
 
-compareTypes :: (MType, Argument) -> IO ()
+compareTypes :: (MType, Argument) -> MorlocMonad ()
 compareTypes (parentType, (ArgCall c)) = case mAbstractType c of
   (Just (MFuncType _ _ childOutput)) ->
     if
@@ -46,8 +47,8 @@ compareTypes (parentType, (ArgCall c)) = case mAbstractType c of
       return ()
     else
       do
-        MT.putStr (MT.show' $ TypeConflict (showType parentType)
-                                           (showType childOutput))
+        MM.liftIO . MT.putStr . MT.show' $
+           TypeConflict (showType parentType) (showType childOutput)
         return ()
   _ -> return ()
 compareTypes _ = return ()

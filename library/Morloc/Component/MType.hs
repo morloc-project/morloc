@@ -18,6 +18,7 @@ import Morloc.Data.Doc hiding ((<$>),(<>))
 import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR
+import qualified Morloc.Monad as MM
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Foldable as DF
@@ -39,7 +40,7 @@ instance MShow MType where
   mshow (MFuncType _ ts o) = parens $
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
-fromSparqlDb :: (SparqlDatabaseLike db) => db -> IO (Map.Map Key MType)
+fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map Key MType)
 fromSparqlDb = MCU.simpleGraph toMType getParentData id (sparqlSelect hsparql)
 
 getParentData :: [Maybe MT.Text] -> ParentData 

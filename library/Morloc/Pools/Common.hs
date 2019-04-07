@@ -29,6 +29,7 @@ import qualified Morloc.Error as ME
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
 import qualified Morloc.System as MS
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
 
@@ -82,13 +83,12 @@ data ForeignCallDoc = ForeignCallDoc {
     , fcdFile :: Doc
   }
 
--- NOTE: currently nothing from config is used
 makeGenerator
-  :: MC.Config
-  -> Grammar
-  -> (db -> IO Code)
-  -> (db -> IO Script)
-makeGenerator _ g gen
+  :: Grammar
+  -> (db -> MorlocMonad Code)
+  -> db
+  -> MorlocMonad Script
+makeGenerator g gen
   = \ep ->
           Script
       <$> pure "pool"
@@ -97,16 +97,17 @@ makeGenerator _ g gen
 
 defaultCodeGenerator
   :: (SparqlDatabaseLike db)
-  => MC.Config
-  -> Grammar
-  -> (MT.Text -> Doc) -- source name parser
+  => Grammar
+  -> (MT.Text -> MorlocMonad Doc) -- source name parser
   -> (MC.Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
-  -> (db -> IO Code)
-defaultCodeGenerator config g f main ep = do
+  -> db
+  -> MorlocMonad Code
+defaultCodeGenerator g f main ep = do
+  config <- MM.ask 
   let lib = MC.configLibrary config
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
-  let srcs = map f (serialSources packMap)
+  srcs <- mapM f (serialSources packMap)
   (return . render) $ main config (text' lib) srcs manifolds packMap
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc

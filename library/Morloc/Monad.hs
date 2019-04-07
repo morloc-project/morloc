@@ -13,6 +13,7 @@ module Morloc.Monad
   , runMorlocMonad
   , writeMorlocReturn
   , runCommand
+  , runCommandWith
   , module Control.Monad.Trans 
   , module Control.Monad.Except 
   , module Control.Monad.Reader
@@ -23,7 +24,6 @@ module Morloc.Monad
 import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.RDF as RDF
 import qualified Morloc.Error as ME
 
 import Control.Monad.Trans
@@ -53,3 +53,13 @@ runCommand cmd = do
   case exitCode of
     SE.ExitSuccess     -> tell [err] -- log a message
     (SE.ExitFailure _) -> throwError (SystemCallError err) |>> (\_ -> ()) -- raise an error
+
+runCommandWith :: (MT.Text -> a) -> MT.Text -> MorlocMonad a
+runCommandWith f cmd = do
+    (_, hout, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
+    exitCode <- liftIO $ SP.waitForProcess handle
+    out <- liftIO $ MT.hGetContents hout
+    err <- liftIO $ MT.hGetContents herr
+    case exitCode of
+      SE.ExitSuccess -> return $ f out
+      _ -> throwError (SystemCallError err)

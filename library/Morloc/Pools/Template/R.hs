@@ -16,9 +16,14 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Config (Config)
+import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 
-generate :: SparqlDatabaseLike db => Config -> db -> IO Script
-generate config = makeGenerator config g (defaultCodeGenerator config g text' main)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
+generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+
+asImport :: MT.Text -> MorlocMonad Doc
+asImport s = return . text' $ s
 
 g = Grammar {
       gLang        = "R"

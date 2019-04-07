@@ -15,8 +15,10 @@ module Morloc.Component.Util (
   , isElement_
 ) where
 
+import Morloc.Types
 import Morloc.Sparql
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
@@ -32,9 +34,9 @@ simpleGraph
      )
   -> ([Maybe MT.Text] -> a) -- prepare the specific data
   -> (MT.Text -> key) -- map a text field to an id
-  -> (db -> IO [[Maybe MT.Text]])
+  -> (db -> MorlocMonad [[Maybe MT.Text]])
   -> db 
-  -> IO (Map.Map key b)
+  -> MorlocMonad (Map.Map key b)
 simpleGraph f g h query d
   = fmap (graphify f . map tuplify) (query d)
   where

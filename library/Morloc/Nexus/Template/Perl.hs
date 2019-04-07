@@ -33,7 +33,7 @@ generate e
 makeNexus :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
 makeNexus ep = fmap render $ main <$> names <*> fdata where
   manifolds :: MorlocMonad [Manifold]
-  manifolds = MM.liftIO $ fmap (filter isExported) (MCM.fromSparqlDb ep)
+  manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)
 
   names :: MorlocMonad [Doc]
   names = fmap (map (text' . getName)) manifolds

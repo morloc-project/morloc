@@ -86,10 +86,9 @@ class RdfLike a where
 class SparqlDatabaseLike a where
   sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
 
-  -- FIXME: wrap this pig in Either
   sparqlSelect
     :: (SparqlSelectLike q)
-    => q -> a -> IO [[Maybe Text]]
+    => q -> a -> MorlocMonad [[Maybe Text]]
 
 type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)

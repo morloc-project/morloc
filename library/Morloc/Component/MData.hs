@@ -17,13 +17,14 @@ import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.Util as MCU
+import qualified Morloc.Monad as MM
 
 import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Data.Map.Strict as Map
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => db -> IO (Map.Map Key MData)
+  => db -> MorlocMonad (Map.Map Key MData)
 fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect hsparql)
 
 getParentData :: [Maybe MT.Text] -> (MT.Text, Maybe MT.Text) 

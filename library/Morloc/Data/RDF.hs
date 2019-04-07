@@ -42,6 +42,7 @@ import Morloc.Operators
 import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
+import qualified Morloc.Monad     as MM
 
 import qualified Data.RDF        as DR
 import qualified Data.Map.Strict as DMS
@@ -251,20 +252,14 @@ instance RdfLike RDF where
   asTriples = DR.triplesOf
 
 instance SparqlDatabaseLike RDF where
-  -- sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  -- sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
   sparqlSelect q x = do
-    writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
-    writeSparql "z.rq" q  -- /  at Morloc home (set in config)
+    MM.liftIO $ writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
+    MM.liftIO $ writeSparql "z.rq" q  -- /  at Morloc home (set in config)
     let cmd = "arq --data=z.ttl --query=z.rq --results=TSV"
-    (_, hout, herr, handle) <- SP.runInteractiveCommand cmd
-    exitCode <- SP.waitForProcess handle
-    out <- MT.hGetContents hout
-    err <- MT.hGetContents herr
-    return $ case exitCode of
-      SE.ExitSuccess -> MT.parseTSV out
-      _ -> ME.error' ((MT.pack . show) (SparqlFail err))
+    MM.runCommandWith MT.parseTSV cmd
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)

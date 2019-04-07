@@ -21,6 +21,7 @@ import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
 
 import qualified Data.Map.Strict as Map
 
@@ -36,12 +37,11 @@ type SerialData =
 -- OR return a hash of hashes by language
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Lang -> db -> IO SerialMap
+  => Lang -> db -> MorlocMonad SerialMap
 fromSparqlDb l db
   =   toSerialMap
   <$> MCM.fromSparqlDb db
   <*> (map tuplify <$> sparqlSelect (hsparql l) db)
-
   where
 
     tuplify :: [Maybe MT.Text] -> SerialData

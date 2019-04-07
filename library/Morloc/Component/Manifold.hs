@@ -21,6 +21,7 @@ import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
 import qualified Morloc.Component.Util as MCU 
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
@@ -29,7 +30,7 @@ import qualified Data.List.Extra as DLE
 -- | Collect most of the info needed to build all manifolds
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => db -> IO [Manifold]
+  => db -> MorlocMonad [Manifold]
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep

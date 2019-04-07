@@ -47,7 +47,7 @@ readMay' = Safe.readMay . unpack
 pretty :: Show a => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
 
--- | parse a TSV, ignore first line (header). Cells are also unquoted and
+-- | Parse a TSV, ignore first line (header). Cells are also unquoted and
 -- wrapping angles are removed.
 parseTSV :: Text -> [[Maybe Text]]
 parseTSV

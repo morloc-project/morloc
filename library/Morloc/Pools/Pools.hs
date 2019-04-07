@@ -23,16 +23,14 @@ import qualified Morloc.Pools.Template.Python3 as Py3
 import qualified Control.Monad as CM
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad [Script]
-generate db = (MM.liftIO $ sparqlSelect hsparql db) >>= CM.mapM (generateLang db)
+generate db = (sparqlSelect hsparql db) >>= CM.mapM (generateLang db)
 
 generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> MorlocMonad Script
-generateLang db lang' = do
-  config <- MM.ask
-  case lang' of
-    [Just "R"] -> MM.liftIO $ RLang.generate config db
-    [Just "py"] -> MM.liftIO $ Py3.generate config db
-    [Just x] -> MM.throwError . GeneratorError $ "The language " <> x <> " is not supported"
-    x -> MM.throwError . SparqlFail $ "Bad SPARQL query:" <> MT.show' x
+generateLang db lang' = case lang' of
+  [Just "R"] -> RLang.generate db
+  [Just "py"] -> Py3.generate db
+  [Just x] -> MM.throwError . GeneratorError $ "The language " <> x <> " is not supported"
+  x -> MM.throwError . SparqlFail $ "Bad SPARQL query:" <> MT.show' x
 
 hsparql :: Query SelectQuery
 hsparql = do

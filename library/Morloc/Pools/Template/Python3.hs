@@ -16,21 +16,21 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Config (Config)
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
-generate :: SparqlDatabaseLike db => Config -> db -> IO Script
-generate config = makeGenerator config g (defaultCodeGenerator config g asImport main)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
+generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
 
-asImport :: MT.Text -> Doc
-asImport s = text' $ case MT.uncons s of
-  (Just (x, xs)) -> MT.cons
-    (DC.toLower x)
-    -- FIXME: generalize this to work with any path separator
-    ((MT.replace "/" ".") ((MT.pack . SF.dropExtensions . MT.unpack) xs)) 
-  _ -> error "Expected import to have at least length 1"
+asImport :: MT.Text -> MorlocMonad Doc
+asImport s = case MT.uncons s of
+  (Just (x, xs)) -> return . text' $ MT.cons
+            (DC.toLower x)
+            ((MT.replace "/" ".") ((MT.pack . SF.dropExtensions . MT.unpack) xs))
+  _ -> MM.throwError $ GeneratorError "Expected import to have at least length 1"
 
 g = Grammar {
       gLang        = "py"
