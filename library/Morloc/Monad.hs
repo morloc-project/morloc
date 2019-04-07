@@ -9,8 +9,7 @@ Stability   : experimental
 
 module Morloc.Monad
 ( 
-    MorlocMonad
-  , MorlocReturn
+    MorlocReturn
   , runMorlocMonad
   , writeMorlocReturn
   , runCommand
@@ -24,6 +23,7 @@ module Morloc.Monad
 import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.RDF as RDF
 import qualified Morloc.Error as ME
 
 import Control.Monad.Trans
@@ -36,20 +36,16 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 import System.IO (stderr)
 
-type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
-type MorlocMonad d a = MorlocMonadGen Config MorlocError [MT.Text] (MorlocState d) a
-type MorlocReturn d a = ((Either MorlocError a, [MT.Text]), (MorlocState d))
-
-runMorlocMonad :: SparqlDatabaseLike d => Config -> Maybe d -> MorlocMonad d a -> IO (MorlocReturn d a)
+runMorlocMonad :: Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db)
 
-writeMorlocReturn :: MorlocReturn d a -> IO ()
+writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
   =  MT.hPutStr stderr (MT.unlines msgs) -- write messages
   >> MT.hPutStr stderr (ME.errmsg err) -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStr stderr (MT.unlines msgs)
 
-runCommand :: MT.Text -> MorlocMonad d ()
+runCommand :: MT.Text -> MorlocMonad ()
 runCommand cmd = do
   (_, _, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
   exitCode <- liftIO $ SP.waitForProcess handle

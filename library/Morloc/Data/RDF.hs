@@ -100,7 +100,6 @@ instance MorlocNodeLike DS.Scientific where
     | otherwise = error ("Cannot read number from node of type: " ++ show t) 
   fromRdfNode n = error ("Cannot read number from node: " ++ show n)
 
-
 instance MorlocNodeLike Bool where
   asRdfNode True  = DR.LNode (DR.TypedL "true"  (xsdPre <> "boolean"))
   asRdfNode False = DR.LNode (DR.TypedL "false" (xsdPre <> "boolean"))

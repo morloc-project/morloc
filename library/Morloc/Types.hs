@@ -44,16 +44,22 @@ module Morloc.Types (
   , MorlocError(..)
   -- ** Configuration
   , Config(..)
-  -- ** Global state
+  -- ** Morloc monad
+  , MorlocMonad
   , MorlocState(..)
+  , MorlocReturn
 ) where
 
-import Data.Text                    ( Text         )
-import Data.RDF                     ( Node, Triple )
-import Data.Map.Strict              ( Map          )
-import Text.PrettyPrint.Leijen.Text ( Doc          )
-import Text.Megaparsec.Error        ( ParseError   )
-import Data.Void                    ( Void         )
+import Data.Text                    (Text)
+import Data.RDF                     (Node, Triple)
+import Data.Map.Strict              (Map)
+import Text.PrettyPrint.Leijen.Text (Doc)
+import Text.Megaparsec.Error        (ParseError)
+import Data.Void                    (Void)
+import Control.Monad.Except (ExceptT)
+import Control.Monad.Reader (ReaderT)
+import Control.Monad.State  (StateT)
+import Control.Monad.Writer (WriterT)
 
 -- | Write into Morloc code
 class MShow a where
@@ -78,12 +84,17 @@ class RdfLike a where
   asTriples :: a -> [Triple]
 
 class SparqlDatabaseLike a where
-  sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
 
   -- FIXME: wrap this pig in Either
   sparqlSelect
     :: (SparqlSelectLike q)
     => q -> a -> IO [[Maybe Text]]
+
+type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
+type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
+data MorlocState = MorlocState {sparqlConn :: Maybe SparqlEndPoint}
+type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 type Name    = Text
 type Lang    = Text
@@ -258,10 +269,6 @@ data MorlocError
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)
-
-data MorlocState conn = MorlocState {
-    sparqlConn :: Maybe conn
-  }
 
 data Config = Config {
     configHome :: Text

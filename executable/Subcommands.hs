@@ -50,16 +50,19 @@ getConfig args = do
   Config.loadMorlocConfig configPath 
 
 -- | handle the code, either from a file or a raw string
-readScript :: Arguments -> IO MT.Text
-readScript args = do
-  if isPresent args (longOption "expression")
-  then (return $ getArgOrDie args (argument "script"))
-  else MT.readFile (MT.unpack $ getArgOrDie args (argument "script"))
+readScript :: Arguments -> IO (Maybe Path, MT.Text)
+readScript args
+  | isPresent args (longOption "expression") = return (Nothing, script)
+  | otherwise = do
+      code <- MT.readFile (MT.unpack script)
+      return (Just script, code)
+  where
+    script = getArgOrDie args (argument "script")
 
 -- | install a module
 cmdInstall :: Subcommand
 cmdInstall args conf
-  =   (MM.runMorlocMonad conf (Nothing :: Maybe MR.RDF) cmdInstall')
+  =   (MM.runMorlocMonad conf Nothing cmdInstall')
   >>= MM.writeMorlocReturn where
   cmdInstall' = do
     let name = getArgOrDie args (argument "name")
@@ -75,19 +78,19 @@ cmdRemove args config = do
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: Subcommand
 cmdMake args config = do
-  script <- readScript args
+  (path, code) <- readScript args
   when (isPresent args (longOption "endpoint")) $ do
     let ep = SparqlEndPoint . MT.unpack $ getArgOrDie args (longOption "endpoint")
-    MM.runMorlocMonad config (Just ep) (M.writeProgram script) >>= MM.writeMorlocReturn
+    MM.runMorlocMonad config Nothing (M.writeProgram path code ep) >>= MM.writeMorlocReturn
   when (notPresent args (longOption "endpoint")) $ do
     let ep = MR.makeRDF []
-    MM.runMorlocMonad config (Just ep) (M.writeProgram script) >>= MM.writeMorlocReturn
+    MM.runMorlocMonad config Nothing (M.writeProgram path code ep) >>= MM.writeMorlocReturn
 
 -- | compile a Morloc script to RDF (turtle format by default)
 cmdRdf :: Subcommand
 cmdRdf args config = do
-  script <- readScript args
+  (path, code) <- readScript args
   let writer = if isPresent args (longOption "triple") 
                then M.writeTripleTo
                else M.writeTurtleTo
-  writer config script "/dev/stdout" -- not the prettiest solution ...
+  MM.runMorlocMonad config Nothing (writer path code "/dev/stdout") >>= MM.writeMorlocReturn

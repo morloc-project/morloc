@@ -6,6 +6,7 @@ import qualified Data.Text.IO as DTIO
 import Morloc.Operators
 import Morloc (writeTurtleTo)
 import qualified Morloc.Config as MC
+import qualified Morloc.Monad as MM
 
 main :: IO ()
 main = defaultMain =<< goldenTests
@@ -17,7 +18,8 @@ hideFile f = SF.replaceBaseName f ("." ++ SF.takeBaseName f)
 writeTurtleTo' :: MC.Config -> FilePath -> FilePath -> IO ()
 writeTurtleTo' config loc ttl = do
   locFile <- DTIO.readFile loc
-  writeTurtleTo config locFile ttl
+  MM.runMorlocMonad config Nothing (writeTurtleTo Nothing locFile ttl) >>=
+    MM.writeMorlocReturn
 
 goldenTests :: IO TestTree
 goldenTests = do

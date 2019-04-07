@@ -15,6 +15,7 @@ module Morloc.Module
 ) where
 
 import Morloc.Types
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
 import qualified System.Directory as SD
@@ -24,14 +25,15 @@ import System.FilePath ((</>))
 import Morloc.Operators
 import qualified Data.List as DL
 
-findModule :: Config.Config -> MT.Text -> IO (ThrowsError MT.Text)
-findModule config x = do
+findModule :: MT.Text -> MorlocMonad MT.Text
+findModule moduleName = do
+  config <- MM.ask
   let lib = Config.configLibrary config
-  let allPaths = getModulePaths lib x
-  existingPaths <- fmap DM.catMaybes $ CM.mapM getFile allPaths
+  let allPaths = getModulePaths lib moduleName
+  existingPaths <- MM.liftIO . fmap DM.catMaybes . CM.mapM getFile $ allPaths
   case existingPaths of
-    (x:_) -> return $ Right x
-    [] -> return $ Left (CannotLoadModule (
+    (x:_) -> return x
+    [] -> MM.throwError (CannotLoadModule (
           "module not found among the paths: ["
           <> (MT.concat $ DL.intersperse ", " allPaths)
           <> "]"
