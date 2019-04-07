@@ -46,11 +46,11 @@ instance SparqlDatabaseLike SparqlEndPoint where
   --   :: (SparqlSelectLike q)
   --   => q -> a -> MorlocMonad (Either Text [[Maybe Text]])
   sparqlSelect q ep
-    = MM.liftIO $ fmap values (selectQueryRaw (endpoint ep) (showSparql q))
+    = (MM.liftIO $ selectQueryRaw (endpoint ep) (showSparql q)) >>= values
 
-values :: Maybe [[BindingValue]] -> [[Maybe MT.Text]]
-values Nothing = error "SPARQL command failed"
-values (Just xss) = (fmap . fmap) maybeValue xss
+values :: Maybe [[BindingValue]] -> MorlocMonad [[Maybe MT.Text]]
+values Nothing = MM.throwError . SparqlFail $ "SPARQL command failed: "
+values (Just xss) = return $ (fmap . fmap) maybeValue xss
 
 maybeValue :: BindingValue -> Maybe MT.Text
 maybeValue (Bound (MR.LNode (MR.PlainL  x  ))) = Just x
