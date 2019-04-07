@@ -12,24 +12,27 @@ Stability   : experimental
 module Morloc.Pools.Pools (generate) where
 
 import Morloc.Types
+import Morloc.Operators
 import Morloc.Sparql
 import Morloc.Config (Config)
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
-
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 
-generate :: SparqlDatabaseLike db => Config -> db -> IO [Script]
-generate config db = sparqlSelect hsparql db >>= foo' where 
-  foo' :: [[Maybe MT.Text]] -> IO [Script]
-  foo' xss = sequence (map (generateLang config db) xss)
+import qualified Control.Monad as CM
 
-generateLang :: SparqlDatabaseLike db => Config -> db -> [Maybe MT.Text] -> IO Script
-generateLang config db lang' = case lang' of
-  [Just "R"] -> RLang.generate config db
-  [Just "py"] -> Py3.generate config db
-  [Just x] -> error ("The language " ++ show x ++ " is not supported")
-  x -> error ("Bad SPARQL query:" ++ show x)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad [Script]
+generate db = (MM.liftIO $ sparqlSelect hsparql db) >>= CM.mapM (generateLang db)
+
+generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> MorlocMonad Script
+generateLang db lang' = do
+  config <- MM.ask
+  case lang' of
+    [Just "R"] -> MM.liftIO $ RLang.generate config db
+    [Just "py"] -> MM.liftIO $ Py3.generate config db
+    [Just x] -> MM.throwError . GeneratorError $ "The language " <> x <> " is not supported"
+    x -> MM.throwError . SparqlFail $ "Bad SPARQL query:" <> MT.show' x
 
 hsparql :: Query SelectQuery
 hsparql = do

@@ -27,6 +27,4 @@ type Pool  = Script
 
 -- | Given a SPARQL endpoint, generate an executable program
 generate :: SparqlDatabaseLike db => db -> MorlocMonad (Nexus, [Pool])
-generate e = do
-  con <- MM.ask
-  (,) <$> (MN.generate "perl" e) <*> (MM.liftIO $ MP.generate con e)
+generate e = (,) <$> (MN.generate "perl" e) <*> (MP.generate e)
