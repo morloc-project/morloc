@@ -52,6 +52,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
   getFData :: Manifold -> MorlocMonad (Doc, Int, Doc, Doc, Doc)
   getFData m = do
     config <- MM.ask
+    name <- text' <$> MS.makeManifoldName (mCallId m)
     case mLang m of
       (Just lang) -> case MC.getExecutor config lang of
         (Just exe) -> return $
@@ -59,7 +60,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
           , getNArgs m
           , text' exe
           , text' (MS.makePoolName lang)
-          , text' (MS.makeManifoldName (mCallId m))
+          , name
           )
         Nothing -> MM.throwError (GeneratorError $ "Language not supported: " <> lang)
       Nothing -> MM.throwError (GeneratorError "A language must be selected for the nexus")

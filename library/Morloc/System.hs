@@ -35,10 +35,10 @@ appendPath base path = MT.pack $ combine (MT.unpack path) (MT.unpack base)
 makePoolName :: MT.Text -> MT.Text
 makePoolName lang = "pool." <> lang
 
-makeManifoldName :: MT.Text -> MT.Text
+makeManifoldName :: MT.Text -> MorlocMonad MT.Text
 makeManifoldName x = case reverse (MT.splitOn "/" x) of
-  (y:_) -> "m" <> y
-  _ -> error "Manifold uri does not match the pattern `.*/\\d+$`"
+  (y:_) -> return $ "m" <> y
+  _ -> MM.throwError . InvalidRDF $ "Manifold uri does not match the pattern `.*/\\d+$`"
 
 getHomeDirectory :: IO MT.Text
 getHomeDirectory = fmap MT.pack Sys.getHomeDirectory

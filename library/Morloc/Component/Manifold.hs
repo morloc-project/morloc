@@ -174,7 +174,7 @@ unroll ms = fmap concat (mapM unroll' ms)
     unrollPair :: Manifold -> Manifold -> MorlocMonad [Manifold]
     unrollPair m r = do
       signedKey <- signKey (mCallId m) (mCallId r)
-      let mName = MS.makeManifoldName signedKey
+      mName <- MS.makeManifoldName signedKey
       let r' = r { mCallId = signedKey, mExported = False }
       let m' = m { mCallName = mName }
       fmap (\ms' -> [m'] ++ ms') (unroll' r')
