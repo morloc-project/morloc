@@ -143,34 +143,31 @@ makeCisManifolds g h ms
 
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeCisManifold g h m = do
-  c <- MM.ask 
+  argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
+  args <- sequence $ zipWith makeArg (iArgs "a") argTypes
   return
     $  ((gComment g) "cis manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
     <> ((gFunction g)
          (callIdToName m)
          (map text' (mBoundVars m))
-         (
-              vsep (zipWith (makeArg c) (iArgs "a") argTypes) <> line
+         (    vsep args <> line
            <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
          ))
   where
     n = length (mArgs m)
 
-    argTypes :: [(Doc, Argument)] -- unpacker and argument
-    argTypes = zip (getUnpackers h m) (mArgs m)
+    makeArg :: Doc -> (Doc, Argument) -> MorlocMonad Doc
+    makeArg lhs b = (gAssign g) <$> pure lhs <*> (makeArg' b)
 
-    makeArg :: Config -> Doc -> (Doc, Argument) -> Doc
-    makeArg c lhs b = (gAssign g) lhs (makeArg' c b)
-
-    makeArg' :: Config -> (Doc, Argument) -> Doc
-    makeArg' c (u, arg) =
+    makeArg' :: (Doc, Argument) -> MorlocMonad Doc
+    makeArg' (u, arg) =
       if
         useUnpacker g arg m
       then
-        unpack' u (writeArgument c g (mBoundVars m) arg)
+        unpack' <$> pure u <*> (writeArgument g (mBoundVars m) arg)
       else
-        (writeArgument c g (mBoundVars m) arg)
+        (writeArgument g (mBoundVars m) arg)
 
     useUnpacker :: Grammar -> Argument -> Manifold -> Bool
     useUnpacker _  (ArgName n') m' = elem n' (mBoundVars m')
@@ -188,22 +185,20 @@ makeCisManifold g h m = do
           }))
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
-makeSourceManifold g h m
-  = return
-  $  ((gComment g) "source manifold") <> line
-  <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
-  <> ((gFunction g)
-       (callIdToName m)
-       (take n (iArgs "x"))
-       (
-            vsep (zipWith3 unpack' (iArgs "a") argTypes (iArgs "x")) <> line
-         <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
-       ))
+makeSourceManifold g h m = do
+  argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m)
+  return
+    $  ((gComment g) "source manifold") <> line
+    <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
+    <> ((gFunction g)
+         (callIdToName m)
+         (take n (iArgs "x"))
+         (
+              vsep (zipWith3 unpack' (iArgs "a") argTypes (iArgs "x")) <> line
+           <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+         ))
   where
     n = length (mArgs m)
-
-    argTypes :: [(Doc, Argument)] -- unpacker and argument
-    argTypes = zip (getUnpackers h m) (mArgs m)
 
     unpack' :: Doc -> (Doc, Argument) -> Doc -> Doc
     unpack' lhs (u, _) x
@@ -215,11 +210,11 @@ makeSourceManifold g h m
           }))
 
 -- find a packer for each argument
-getUnpackers :: SerialMap -> Manifold -> [Doc]
+getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
 getUnpackers h m = case mConcreteType m of
-  (Just (MFuncType _ ts _)) -> map (unpackerName h . return) ts 
-  (Just _) -> error . MT.unpack $ "Expected a function type for:" <> MT.pretty m
-  Nothing -> take (length (mArgs m)) (repeat (unpackerName h Nothing))
+  (Just (MFuncType _ ts _)) -> return $ map (unpackerName h . return) ts 
+  (Just _) -> MM.throwError . GeneratorError $ "Expected a function type for:" <> MT.pretty m
+  Nothing -> return $ take (length (mArgs m)) (repeat (unpackerName h Nothing))
   where
     unpackerName :: SerialMap -> Maybe MType -> Doc 
     unpackerName h' n' = case (n' >>= (flip Map.lookup) (serialUnpacker h')) of 
@@ -230,27 +225,30 @@ callIdToName :: Manifold -> Doc
 callIdToName m = text' $ MS.makeManifoldName (mCallId m)
 
 -- | writes an argument sans serialization 
-writeArgument :: MC.Config -> Grammar -> [MT.Text] -> Argument -> Doc
-writeArgument _ _ _  (ArgName n) = text' n
-writeArgument _ g _  (ArgData d) = writeData g d
-writeArgument _ _ _  (ArgPosi i) = "x" <> int i
-writeArgument c g xs (ArgCall m) = case mLang m of
-  (Just l) ->
-    if
-      l == gLang g
-    then
-      (gCall g) (callIdToName m) (map text' xs)
-    else
-      case (MC.getExecutor c l) of
-        (Just exe) -> (gForeignCall g) (ForeignCallDoc {
-              fcdForeignProg = text' exe
-            , fcdForeignPool = text' (MS.makePoolName l)
-            , fcdMid = text' $ MS.makeManifoldName (mCallId m)
-            , fcdArgs = map text' xs
-            , fcdFile = text' (MS.makePoolName (gLang g))
-          })
-        Nothing -> error ("No command could be found to run language " ++ MT.unpack l)
-  Nothing -> error ("No language set on: " ++ show m)
+writeArgument :: Grammar -> [MT.Text] -> Argument -> MorlocMonad Doc
+writeArgument _ _  (ArgName n) = return $ text' n
+writeArgument g _  (ArgData d) = return $ writeData g d
+writeArgument _ _  (ArgPosi i) = return $ "x" <> int i
+writeArgument g xs (ArgCall m) = do
+  c <- MM.ask
+  case mLang m of
+    (Just l) ->
+      if
+        l == gLang g
+      then
+        return $ (gCall g) (callIdToName m) (map text' xs)
+      else
+        case (MC.getExecutor c l) of
+          (Just exe) -> return $
+            (gForeignCall g) (ForeignCallDoc {
+                fcdForeignProg = text' exe
+              , fcdForeignPool = text' (MS.makePoolName l)
+              , fcdMid = text' $ MS.makeManifoldName (mCallId m)
+              , fcdArgs = map text' xs
+              , fcdFile = text' (MS.makePoolName (gLang g))
+            })
+          Nothing -> MM.throwError . GeneratorError $ "No command could be found to run language " <> l
+    Nothing -> MM.throwError . GeneratorError $ "No language set on: " <> MT.show' m
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x
