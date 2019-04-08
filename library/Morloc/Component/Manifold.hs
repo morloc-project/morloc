@@ -14,7 +14,6 @@ module Morloc.Component.Manifold (fromSparqlDb) where
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Sparql
-import qualified Morloc.Error as ME
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Morloc.Data.RDF as MR
@@ -34,18 +33,19 @@ fromSparqlDb
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
-  mandata <- sparqlSelect hsparql ep
-  (unroll . setCalls
-          . setLangs
-          . DLE.groupSort
-          . propagateBoundVariables
-          . map (asTuple typemap datamap)) mandata
+  sparqlSelect hsparql ep
+    >>= mapM (asTuple typemap datamap)
+    |>> propagateBoundVariables
+    |>> DLE.groupSort
+    |>> setLangs
+    >>= setCalls
+    >>= unroll
 
 asTuple
   :: Map.Map Key MType
   -> Map.Map Key MData
   -> [Maybe MT.Text]
-  -> (Manifold, Either Key Argument)
+  -> MorlocMonad (Manifold, Either Key Argument)
 asTuple typemap datamap [ Just callId'
                         , abstractTypeId'
                         , element'
@@ -62,10 +62,15 @@ asTuple typemap datamap [ Just callId'
                         , argname'
                         , argcall_id'
                         , argdata_id'
-                        ] =
-  (
-    Manifold
-      { mCallId       = callId'
+                        ] = do
+  arg <- makeArgument (
+      argname'
+    , argcall_id'
+    , argdata_id' >>= (flip Map.lookup) datamap
+    , element'
+    )
+  let man = Manifold {
+        mCallId       = callId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
       , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
       , mMorlocName   = morlocName'
@@ -80,26 +85,26 @@ asTuple typemap datamap [ Just callId'
       , mLang         = sourceLang'
       , mArgs         = [] -- this will be set in the next step
       }
-  , makeArgument (
-      argname'
-    , argcall_id'
-    , argdata_id' >>= (flip Map.lookup) datamap
-    , element'
-    )
-  )
-asTuple _ _ x = ME.error' ("Unexpected SPARQL row:\n" <> MT.pretty x)
+  return (man, arg)
 
-setCalls :: [(Manifold, [Either Key Argument])] -> [Manifold]
-setCalls xs = map (\(m, args) -> m { mArgs = map (set hash) args }) xs
+asTuple _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
+
+setCalls :: [(Manifold, [Either Key Argument])] -> MorlocMonad [Manifold]
+setCalls xs = mapM setArgs xs
   where
-    set :: Map.Map Key Manifold -> Either Key Argument -> Argument
-    set h (Left key) = case Map.lookup key h of
-      (Just m) -> ArgCall m
-      Nothing -> error "Call to non-existing manifold"
-    set _ (Right a) = a
-
     hash :: Map.Map Key Manifold
     hash = Map.fromList $ zip (map (mCallId . fst) xs) (map fst xs)
+
+    setArgs :: (Manifold, [Either Key Argument]) -> MorlocMonad Manifold 
+    setArgs (m, args) = do
+      args' <- mapM setArg args
+      return $ m { mArgs = args' }
+
+    setArg :: Either Key Argument -> MorlocMonad Argument
+    setArg (Left key) = case Map.lookup key hash of
+      (Just m) -> return $ ArgCall m
+      Nothing -> MM.throwError . InvalidRDF $ "Call to non-existing manifold"
+    setArg (Right a) = return a
 
 setLangs :: [(Manifold, a)] -> [(Manifold, a)]
 setLangs ms = map (setLang hash) ms
@@ -113,20 +118,20 @@ setLangs ms = map (setLang hash) ms
                                          , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Name    -- argument name (if it is a bound argument)
-     , Maybe Key     -- argument callId (if it is a function call)
-     , Maybe MData   -- argument data (if this is data)
-     , Maybe MT.Text -- the element (rdf:_<num>)
+  :: ( Maybe Name    -- ^ argument name (if it is a bound argument)
+     , Maybe Key     -- ^ argument callId (if it is a function call)
+     , Maybe MData   -- ^ argument data (if this is data)
+     , Maybe MT.Text -- ^ the element (rdf:_<num>)
      )
-  -> Either Key Argument
-makeArgument (Just x  , _       , _       , _ ) = Right $ ArgName x
-makeArgument (_       , Just x  , _       , _ ) = Left x
-makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
+  -> MorlocMonad (Either Key Argument)
+makeArgument (Just x  , _       , _       , _ ) = return . Right $ ArgName x
+makeArgument (_       , Just x  , _       , _ ) = return . Left $ x
+makeArgument (_       , _       , Just x  , _ ) = return . Right $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just e) =
   case (MT.stripPrefix (MR.rdfPre <> "_") e) >>= MT.readMay' of
-    Just i -> Right $ ArgPosi i
-    _ -> ME.error' ("Unexpected value for element: " <> MT.pretty e)
-makeArgument _ = error "Bad argument"
+    Just i -> return . Right $ ArgPosi i
+    _ -> MM.throwError . InvalidRDF $ "Unexpected value for element: " <> MT.pretty e
+makeArgument _ = MM.throwError . InvalidRDF $ "Bad argument"
 
 propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
 propagateBoundVariables ms = map setBoundVars ms 
