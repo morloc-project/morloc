@@ -28,26 +28,26 @@ fromSparqlDb
 fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect hsparql)
 
 getParentData :: [Maybe MT.Text] -> MorlocMonad (MT.Text, Maybe MT.Text) 
-getParentData [Just t, v] = return $ (t, v)
-getParentData _ = MM.throwError $ SparqlFail "Unexpected SPARQL result"
+getParentData [Just t, v] = return (t, v)
+getParentData _ = MM.throwError . SparqlFail $ "Unexpected SPARQL result"
 
-toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MData
+toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MorlocMonad MData
 toMData h k = toMData' (Map.lookup k h) where
-  toMData' :: (Maybe ((MT.Text, Maybe MT.Text), [Key])) -> MData
+  toMData' :: (Maybe ((MT.Text, Maybe MT.Text), [Key])) -> MorlocMonad MData
   -- primitive "leaf" data
   toMData' (Just ((mtype, Just x), _))
-    | mtype == MR.mlcPre <> "number"  = Num' x
-    | mtype == MR.mlcPre <> "string"  = Str' x
-    | mtype == MR.mlcPre <> "boolean" = Log' (x == "true")
-    | otherwise = error "Unexpected type ..."
+    | mtype == MR.mlcPre <> "number"  = return $ Num' x
+    | mtype == MR.mlcPre <> "string"  = return $ Str' x
+    | mtype == MR.mlcPre <> "boolean" = return $ Log' (x == "true")
+    | otherwise = MM.throwError . InvalidRDF $ "Unexpected type ..."
   -- containers "node" data
   toMData' (Just ((mtype, _), xs))
-    | mtype == MR.mlcPre <> "list"   = Lst' (map (toMData h) xs)
-    | mtype == MR.mlcPre <> "tuple"  = Tup' (map (toMData h) xs)
-    | mtype == MR.mlcPre <> "record" = error "Records not yet supported"
-    | otherwise = error "Unexpected type ..."
+    | mtype == MR.mlcPre <> "list"   = Lst' <$> mapM (toMData h) xs
+    | mtype == MR.mlcPre <> "tuple"  = Tup' <$> mapM (toMData h) xs
+    | mtype == MR.mlcPre <> "record" = MM.throwError $ NotImplemented "Records not yet supported"
+    | otherwise = MM.throwError . InvalidRDF $ "Unexpected type ..."
   -- shit happens
-  toMData' _ = error "Unexpected type"
+  toMData' _ = MM.throwError . InvalidRDF $ "Unexpected type"
 
 instance MShow MData where
   mshow (Num' x  ) = text' x
@@ -59,24 +59,27 @@ instance MShow MData where
                               (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
 
 instance MorlocTypeable MData where
-  asType (Num' _) = MConcType emptyMeta "Number" []
-  asType (Str' _) = MConcType emptyMeta "String" []
-  asType (Log' _) = MConcType emptyMeta "Bool" []
-  asType (Tup' xs) = MConcType emptyMeta "Tuple" (map asType xs)
+  asType (Num' _) = return $ MConcType emptyMeta "Number" []
+  asType (Str' _) = return $ MConcType emptyMeta "String" []
+  asType (Log' _) = return $ MConcType emptyMeta "Bool" []
+  asType (Tup' xs) = MConcType emptyMeta "Tuple" <$> mapM asType xs
   -- TODO: make `Record` type
-  asType (Rec' xs) = MConcType emptyMeta "Tuple" (map record xs) where
-    record (_, value) = MConcType emptyMeta "Tuple" [ MConcType emptyMeta "String" []
-                                                      , asType value]
-  asType (Lst' xs) = MConcType emptyMeta "List" [listType xs] where
-    listType [] = MConcType emptyMeta "*" [] -- cannot determine type
-    listType [x] = asType x
-    listType (x:xs') =
-      if
-        all (\a -> asType a == asType x) xs'
-      then
-        asType x
-      else
-      error "Lists must be homogenous"
+  asType (Rec' xs) = MConcType emptyMeta "Tuple" <$> mapM record xs where
+    record (_, value) = do
+      value' <- asType value
+      return $ MConcType emptyMeta "Tuple" [ MConcType emptyMeta "String" [], value' ]
+  -- FIXME: How should empty lists be typed? Should this raise an error?
+  asType (Lst' []) = return $ MConcType emptyMeta "*" [] -- cannot determine type
+  asType (Lst' [x]) = MConcType emptyMeta "List" . return <$> asType x 
+  asType (Lst' (x:xs)) = do
+    x' <- asType x 
+    xs' <- mapM asType xs
+    if
+      all ((==) x') xs'
+    then
+      return $ MConcType emptyMeta "List" [x']
+    else
+      MM.throwError . TypeError $ "Lists must be homogenous"
 
 emptyMeta = MTypeMeta {
       metaName = Nothing

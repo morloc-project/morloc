@@ -32,6 +32,7 @@ errmsg (NotImplemented msg) = "Not yet implemented: " <> MT.show' msg
 errmsg (NotSupported msg)   = "NotSupported: " <> MT.show' msg
 errmsg (SyntaxError err)    = "SyntaxError: " <> MT.show' err
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
+errmsg (TypeError t)        = "TypeError: " <> t
 errmsg (SparqlFail t)       = "SparqlFail: " <> t
 errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError t)  = "System call failed:\n" <> t

@@ -31,14 +31,14 @@ simpleGraph
   :: (Ord key, Ord a)
   => (    Map.Map key (a, [key])
        -> key
-       -> b
+       -> MorlocMonad b
      )
   -> ([Maybe MT.Text] -> MorlocMonad a) -- ^ using input text (e.g., from a SPARQL query) get data
   -> (MT.Text -> key) -- ^ transform a text field into a key
   -> (db -> MorlocMonad [[Maybe MT.Text]]) -- ^ query a database
   -> db -- ^ the database
   -> MorlocMonad (Map.Map key b) -- ^ return a flat map
-simpleGraph f g h query d = query d >>= mapM tuplify |>> graphify f
+simpleGraph f g h query d = query d >>= mapM tuplify >>= graphify f
   where
     tuplify xs = case (take 3 xs, drop 3 xs) of
       ([Just mid, el, child], rs) -> do
@@ -54,11 +54,13 @@ graphify
   :: (Ord index, Ord key, Ord a)
   => (    Map.Map key (a, [key])
        -> key
-       -> b
+       -> MorlocMonad b
      )
   -> [((key, a), Maybe (index, key))]
-  -> Map.Map key b -- one element for each root element
-graphify f xs = Map.fromList $ zip roots (map (f hash) roots)
+  -> MorlocMonad (Map.Map key b) -- one element for each root element
+graphify f xs = do
+  values <- mapM (f hash) roots
+  return . Map.fromList . zip roots $ values 
   where
     hash
       = Map.fromList

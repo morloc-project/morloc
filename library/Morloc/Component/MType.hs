@@ -48,17 +48,21 @@ getParentData [Just t, v, o, l, n, ps] = return $ (t, v, o, l, n, properties) wh
   properties = DF.concat . fmap (MT.splitOn ",") $ ps
 getParentData x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.show' x
 
-toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType
+toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MorlocMonad MType
 toMType h k = toMType' (Map.lookup k h) where
-  toMType' (Just ((t, v, o, l, n, ps), xs)) = case makeMeta l n ps of
-    meta -> toMType'' meta t v o xs
-  toMType' Nothing = error ("Internal error")
+  toMType' (Just ((t, v, o, l, n, ps), xs)) =
+    case makeMeta l n ps of
+      meta -> toMType'' meta t v o xs
+  toMType' Nothing = MM.throwError TrulyWeird
 
   toMType'' meta t (Just v) _ xs
-    | isGeneric t = MAbstType meta v (map (toMType h) xs)
-    | otherwise = MConcType meta v (map (toMType h) xs)
-  toMType'' meta _ _ (Just o) xs = MFuncType meta (map (toMType h) xs) (toMType h o)
-  toMType'' _ _ _ _ _ = error ("Internal error")
+    | isGeneric t = MAbstType meta v <$> mapM (toMType h) xs
+    | otherwise   = MConcType meta v <$> mapM (toMType h) xs
+  toMType'' meta _ _ (Just o) xs = do
+    inputTypes <- mapM (toMType h) xs
+    outputType <- toMType h o
+    return $ MFuncType meta inputTypes outputType
+  toMType'' _ _ _ _ _ = MM.throwError TrulyWeird
 
   makeMeta :: Maybe Lang -> Maybe Name -> [Name] -> MTypeMeta
   makeMeta l n ps = MTypeMeta {

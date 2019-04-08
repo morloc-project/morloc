@@ -73,7 +73,7 @@ class MorlocNodeLike a where
   fromRdfNode :: Node -> a
 
 class MorlocTypeable a where
-  asType :: a -> MType
+  asType :: a -> MorlocMonad MType
 
 class SparqlSelectLike a where
   writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
@@ -259,6 +259,8 @@ data MorlocError
   | UnknownError
   -- | Raised when parent and child types conflict
   | TypeConflict Text Text
+  -- | Raised for general type errors
+  | TypeError Text
   -- | Raised when a SPARQL command fails
   | SparqlFail Text
   -- | Raised when a module cannot be loaded 
