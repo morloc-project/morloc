@@ -14,7 +14,6 @@ module Morloc.Pools.Pools (generate) where
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Sparql
-import Morloc.Config (Config)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Pools.Template.R as RLang

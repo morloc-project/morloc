@@ -105,9 +105,12 @@ main
 main srcs manifolds hash = do
   c <- MM.ask
   let lib = text' $ MC.configLibrary c
+  let sourceManifolds = makeSourceManifolds g hash manifolds
+  let cisManifolds = makeCisManifolds c g hash manifolds
+  let sources = line <> vsep (map ((gImport g) lib) srcs)
   return $ [idoc|#!/usr/bin/env Rscript
 
-#{line <> vsep (map ((gImport g) lib) srcs)}
+#{sources}
 
 .morloc_run <- function(f, args){
   fails <- ""
@@ -172,10 +175,9 @@ main srcs manifolds hash = do
   .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .pool=.pool)
 }
 
+#{sourceManifolds}
 
-#{makeSourceManifolds g hash manifolds}
-
-#{makeCisManifolds c g hash manifolds}
+#{cisManifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

@@ -113,6 +113,10 @@ main
 main srcs manifolds hash = do
   c <- MM.ask
   let lib = text' $ MC.configLibrary c
+  let sourceManifolds = makeSourceManifolds g hash manifolds
+  let cisManifolds = makeCisManifolds c g hash manifolds
+  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))
+  let sources = vsep (map ((gImport g) lib) srcs)
   return $ [idoc|#!/usr/bin/env python
 
 import sys
@@ -120,8 +124,7 @@ import subprocess
 import json
 
 sys.path.append('#{lib}')
-#{vsep (map ((gImport g) lib) srcs)}
-
+#{sources}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:
@@ -153,12 +156,11 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
 
     return(jsonString)
 
+#{sourceManifolds}
 
-#{makeSourceManifolds g hash manifolds}
+#{cisManifolds}
 
-#{makeCisManifolds c g hash manifolds}
-
-dispatch = dict#{tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
+dispatch = #{dispatchDict}
 
 if __name__ == '__main__':
     script_name = sys.argv[0] 
