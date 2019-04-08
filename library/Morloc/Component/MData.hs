@@ -27,9 +27,9 @@ fromSparqlDb
   => db -> MorlocMonad (Map.Map Key MData)
 fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect hsparql)
 
-getParentData :: [Maybe MT.Text] -> (MT.Text, Maybe MT.Text) 
-getParentData [Just t, v] = (t, v)
-getParentData _ = error "Unexpected SPARQL result"
+getParentData :: [Maybe MT.Text] -> MorlocMonad (MT.Text, Maybe MT.Text) 
+getParentData [Just t, v] = return $ (t, v)
+getParentData _ = MM.throwError $ SparqlFail "Unexpected SPARQL result"
 
 toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MData
 toMData h k = toMData' (Map.lookup k h) where

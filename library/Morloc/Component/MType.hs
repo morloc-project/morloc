@@ -43,10 +43,10 @@ instance MShow MType where
 fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map Key MType)
 fromSparqlDb = MCU.simpleGraph toMType getParentData id (sparqlSelect hsparql)
 
-getParentData :: [Maybe MT.Text] -> ParentData 
-getParentData [Just t, v, o, l, n, ps] = (t, v, o, l, n, properties) where
+getParentData :: [Maybe MT.Text] -> MorlocMonad ParentData 
+getParentData [Just t, v, o, l, n, ps] = return $ (t, v, o, l, n, properties) where
   properties = DF.concat . fmap (MT.splitOn ",") $ ps
-getParentData x = error ("Unexpected SPARQL result: " ++ show x)
+getParentData x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.show' x
 
 toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MType
 toMType h k = toMType' (Map.lookup k h) where
