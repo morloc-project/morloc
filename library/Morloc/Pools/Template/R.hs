@@ -15,7 +15,7 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
-import Morloc.Config (Config)
+import qualified Morloc.Config as MC
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
@@ -101,8 +101,11 @@ g = Grammar {
       ]
 
 main
-  :: Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc
-main c lib srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
+main srcs manifolds hash = do
+  c <- MM.ask
+  let lib = text' $ MC.configLibrary c
+  return $ [idoc|#!/usr/bin/env Rscript
 
 #{line <> vsep (map ((gImport g) lib) srcs)}
 

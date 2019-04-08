@@ -99,16 +99,15 @@ defaultCodeGenerator
   :: (SparqlDatabaseLike db)
   => Grammar
   -> (MT.Text -> MorlocMonad Doc) -- source name parser
-  -> (MC.Config -> Doc -> [Doc] -> [Manifold] -> SerialMap -> Doc) -- main
+  -> ([Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc) -- main
   -> db
   -> MorlocMonad Code
 defaultCodeGenerator g f main ep = do
-  config <- MM.ask 
-  let lib = MC.configLibrary config
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
   srcs <- mapM f (serialSources packMap)
-  (return . render) $ main config (text' lib) srcs manifolds packMap
+  doc <- main srcs manifolds packMap
+  return $ render doc
 
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> Doc
 makeSourceManifolds g h ms

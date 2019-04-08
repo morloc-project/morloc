@@ -35,13 +35,11 @@ fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
   mandata <- sparqlSelect hsparql ep
-  return $ ( unroll
-           . setCalls
-           . setLangs
-           . DLE.groupSort
-           . propagateBoundVariables
-           . map (asTuple typemap datamap) 
-           ) mandata
+  (unroll . setCalls
+          . setLangs
+          . DLE.groupSort
+          . propagateBoundVariables
+          . map (asTuple typemap datamap)) mandata
 
 asTuple
   :: Map.Map Key MType
@@ -150,37 +148,39 @@ propagateBoundVariables ms = map setBoundVars ms
 
 -- | This function creates a tree of new manifolds to represent the call tree
 -- of a called Morloc composition.
-unroll :: [Manifold] -> [Manifold]
-unroll ms = concat $ map unroll' ms
+unroll :: [Manifold] -> MorlocMonad [Manifold]
+unroll ms = fmap concat (mapM unroll' ms)
   where
-    unroll' :: Manifold -> [Manifold]
+    unroll' :: Manifold -> MorlocMonad [Manifold]
     unroll' m
       | (mCalled m) && (not $ mSourced m) =
           case
             filter (declaringManifold m) ms
           of
             [r] -> unrollPair m r
-            xs  -> ME.error' $ MT.unlines
+            xs  -> MM.throwError . InvalidRDF $ MT.unlines
               [ "In this manifold:"
               , MT.pretty m
               , "Expected to find one associated DataDeclaration, but found:"
               , MT.pretty xs
               ]
-      | otherwise = [m]
+      | otherwise = return [m]
 
-    unrollPair :: Manifold -> Manifold -> [Manifold]
-    unrollPair m r = [m'] ++ unroll' r' where
-      signedKey = signKey (mCallId m) (mCallId r)
-      r' = r { mCallId = signedKey, mExported = False }
-      m' = m { mCallName = MS.makeManifoldName signedKey }
+    unrollPair :: Manifold -> Manifold -> MorlocMonad [Manifold]
+    unrollPair m r = do
+      signedKey <- signKey (mCallId m) (mCallId r)
+      let mName = MS.makeManifoldName signedKey
+      let r' = r { mCallId = signedKey, mExported = False }
+      let m' = m { mCallName = mName }
+      fmap (\ms' -> [m'] ++ ms') (unroll' r')
 
-    signKey :: Key -> Key -> Key
+    signKey :: Key -> Key -> MorlocMonad Key
     signKey m r =
       case
         (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
       of
-        (Just mKey, Just rKey) -> MR.midPre <> mKey <> "_" <> rKey
-        _ -> ME.error' ("callId of invalid form: " <> MT.pretty (m, r))
+        (Just mKey, Just rKey) -> return $ MR.midPre <> mKey <> "_" <> rKey
+        _ -> MM.throwError . InvalidRDF $ "callId of invalid form: " <> MT.pretty (m, r)
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
