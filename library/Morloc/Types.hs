@@ -269,6 +269,8 @@ data MorlocError
   | SystemCallError Text
   -- | Raised when there is an error in the code generators
   | GeneratorError Text
+  -- | Missing a serialization or deserialization function
+  | SerializationError Text
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)

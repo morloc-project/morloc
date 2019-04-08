@@ -38,29 +38,34 @@ type SerialData =
 fromSparqlDb
   :: SparqlDatabaseLike db
   => Lang -> db -> MorlocMonad SerialMap
-fromSparqlDb l db
-  =   toSerialMap
-  <$> MCM.fromSparqlDb db
-  <*> (map tuplify <$> sparqlSelect (hsparql l) db)
+fromSparqlDb l db = do
+  typemap <- MCM.fromSparqlDb db
+  serialData <- sparqlSelect (hsparql l) db >>= mapM tuplify
+  toSerialMap typemap serialData
   where
-
-    tuplify :: [Maybe MT.Text] -> SerialData
-    -- typename | property | is_generic | name | path
-    tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
-    tuplify e = ME.error' ("Unexpected SPARQL result: " <> MT.pretty e)
+    tuplify :: [Maybe MT.Text] -> MorlocMonad SerialData
+    tuplify [ Just t -- typename
+            , Just p -- property
+            , Just g -- is_generic
+            , Just n -- name
+            , Just s -- path
+            ] = return (t,p,g == "true",n,s)
+    tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
     toSerialMap
       :: Map.Map Key ConcreteType 
       -> [SerialData]
-      -> SerialMap
-    toSerialMap h xs = case
-      ( Map.fromList [(getIn  (lookupOrDie t h), p) | (t, "packs"  , False, p, _) <- xs]
-      , Map.fromList [(getOut (lookupOrDie t h), p) | (t, "unpacks", False, p, _) <- xs]
-      , [p | (_, "packs"  , True, p, _) <- xs]
-      , [p | (_, "unpacks", True, p, _) <- xs]
-      , MU.unique [s | (_, _, _, _, s) <- xs]
-      ) of
-        (phash, uhash, [p], [u], srcs) -> SerialMap
+      -> MorlocMonad SerialMap
+    toSerialMap h xs = do
+      packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _) <- xs]
+      unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _) <- xs]
+      case ( Map.fromList packers
+           , Map.fromList unpackers
+           , [p | (_, "packs"  , True, p, _) <- xs]
+           , [p | (_, "unpacks", True, p, _) <- xs]
+           , MU.unique [s | (_, _, _, _, s) <- xs]
+           ) of
+        (phash, uhash, [p], [u], srcs) -> return $ SerialMap
           { serialLang = l
           , serialPacker = phash
           , serialUnpacker = uhash
@@ -68,22 +73,23 @@ fromSparqlDb l db
           , serialGenericUnpacker = u
           , serialSources = srcs
           }
-        _ -> ME.error' ("Expected exactly one generic packer/unpacker: " <> MT.pretty xs)
+        _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
 
-    getOut :: MType -> MType
-    getOut (MFuncType _ _ x) = x
-    getOut t = ME.error' ("Expected packer to have signature: a -> JSON: " <> MT.pretty t)
+    getOut :: a -> MType -> MorlocMonad (MType, a)
+    getOut p (MFuncType _ _ x) = return (x, p)
+    getOut _ t = MM.throwError . SerializationError $
+      "Expected packer to have signature: a -> JSON: " <> MT.pretty t
 
-    getIn :: MType -> MType
-    getIn (MFuncType _ [x] _) = x
-    getIn t = ME.error' ("Expected unpacker to have signature: JSON -> a: " <> MT.pretty t)
+    getIn :: a -> MType -> MorlocMonad (MType, a)
+    getIn p (MFuncType _ [x] _) = return (x, p)
+    getIn _ t = MM.throwError . SerializationError $
+      "Expected unpacker to have signature: JSON -> a: " <> MT.pretty t
 
-    lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> b
+    lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> MorlocMonad b
     lookupOrDie k h = case Map.lookup k h of
-      (Just x) -> x
-      Nothing -> ME.error' (
-          "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
-        )
+      (Just x) -> return x
+      Nothing -> MM.throwError . SerializationError $
+        "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
 
 hsparql :: Lang -> Query SelectQuery
 hsparql lang' = do

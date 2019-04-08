@@ -24,13 +24,13 @@ module Morloc.Monad
 import Morloc.Types
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Error as ME
 
 import Control.Monad.Trans
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
+import Morloc.Error -- for MorlocError Show instance
 import qualified Data.Map as Map
 import qualified System.Exit as SE
 import qualified System.Process as SP
@@ -42,7 +42,7 @@ runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev con
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
   =  MT.hPutStr stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStr stderr (ME.errmsg err) -- write terminal failing message
+  >> MT.hPutStr stderr (MT.show' err) -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStr stderr (MT.unlines msgs)
 
 runCommand :: MT.Text -> MorlocMonad ()

@@ -214,7 +214,7 @@ makeCisManifold c g h m
 getUnpackers :: SerialMap -> Manifold -> [Doc]
 getUnpackers h m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> map (unpackerName h . return) ts 
-  (Just _) -> ME.error' ("Expected a function type for:" <> MT.pretty m)
+  (Just _) -> error . MT.unpack $ "Expected a function type for:" <> MT.pretty m
   Nothing -> take (length (mArgs m)) (repeat (unpackerName h Nothing))
   where
     unpackerName :: SerialMap -> Maybe MType -> Doc 
