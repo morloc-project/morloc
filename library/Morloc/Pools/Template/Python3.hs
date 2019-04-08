@@ -111,12 +111,12 @@ except Exception as e:
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
-  c <- MM.ask
-  let lib = text' $ MC.configLibrary c
-  let sourceManifolds = makeSourceManifolds g hash manifolds
-  let cisManifolds = makeCisManifolds c g hash manifolds
-  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))
+  lib <- fmap text' $ MM.asks MC.configLibrary
+  usedManifolds <- getUsedManifolds g manifolds
+  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) usedManifolds)
   let sources = vsep (map ((gImport g) lib) srcs)
+  sourceManifolds <- makeSourceManifolds g hash manifolds
+  cisManifolds <- makeCisManifolds g hash manifolds
   return $ [idoc|#!/usr/bin/env python
 
 import sys

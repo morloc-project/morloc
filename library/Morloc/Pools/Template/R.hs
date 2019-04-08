@@ -103,11 +103,10 @@ g = Grammar {
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
-  c <- MM.ask
-  let lib = text' $ MC.configLibrary c
-  let sourceManifolds = makeSourceManifolds g hash manifolds
-  let cisManifolds = makeCisManifolds c g hash manifolds
+  lib <- fmap text' $ MM.asks MC.configLibrary
   let sources = line <> vsep (map ((gImport g) lib) srcs)
+  sourceManifolds <- makeSourceManifolds g hash manifolds
+  cisManifolds <- makeCisManifolds g hash manifolds
   return $ [idoc|#!/usr/bin/env Rscript
 
 #{sources}
