@@ -292,7 +292,7 @@ adopt sbj objs =
 showTopRDF :: TopRDF -> MT.Text
 showTopRDF (TopRDF _ rdf) = MT.pack $ DR.showGraph rdf
 
--- | Make a UNode from a number, optionall with a prefix. This is used by
+-- | Make a UNode from a number, optionally with a prefix. This is used by
 -- Morloc.State to create unique ids.
 idUri :: Maybe MT.Text -> Int -> DR.Node
 idUri Nothing  i = midPre .:. MT.show' i

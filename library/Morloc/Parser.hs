@@ -19,7 +19,7 @@ import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 
 import Morloc.Types
-import Morloc.Config (Config)
+import qualified Morloc.Config as MC
 import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
@@ -43,12 +43,13 @@ parseShallow
   :: Maybe MT.Text -- ^ Source code file name
   -> MT.Text       -- ^ Source code
   -> MorlocMonad MR.RDF
-parseShallow srcfile code =
+parseShallow srcfile code = do
+  source_str <- MC.makeLibSourceString srcfile
+  let pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = source_str}
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
     Left err  -> M.throwError $ SyntaxError err
     Right ((MR.TopRDF _ val), _) -> return val
   where
-    pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}
     input' = case srcfile of
       Just s  -> s
       Nothing -> "<stdin>"

@@ -15,10 +15,12 @@ module Morloc.Config (
   , loadDefaultMorlocConfig 
   , getExecutor
   , getDefaultConfigFilepath
+  , makeLibSourceString
 ) where
 
 import Morloc.Types
 import Morloc.Operators
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
 import qualified Morloc.System as MS
@@ -82,3 +84,14 @@ loadMorlocConfig f = do
   MS.loadYamlConfig (fmap (\x -> [x]) f)
                     (YC.useCustomEnv defaults)
                     loadDefaultMorlocConfig
+
+-- | Get a source string for a library module. This will 1) remove the
+-- user-specific home directory and 2) replace '/' separators with '.'. An
+-- input of Nothing indicates the input is a local file or STDIN.
+makeLibSourceString :: Maybe MT.Text -> MorlocMonad (Maybe MT.Text)
+makeLibSourceString (Just x) = do
+  homedir <- MM.liftIO getDefaultMorlocLibrary
+  let x' = case (MT.stripPrefix homedir x) of {Nothing -> x; (Just y) -> y}
+  let x'' = case (MT.stripPrefix "/" x') of {Nothing -> x'; (Just y) -> y}
+  return . Just $ MT.replace "/" "__" x''
+makeLibSourceString Nothing = return Nothing
