@@ -45,7 +45,11 @@ parseShallow
   -> MorlocMonad MR.RDF
 parseShallow srcfile code = do
   source_str <- MC.makeLibSourceString srcfile
-  let pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = source_str}
+  let pstate = MS.ParserState {
+                   MS.stateCount      = 0
+                 , MS.stateSourceUri  = source_str
+                 , MS.stateModulePath = srcfile
+               }
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
     Left err  -> M.throwError $ SyntaxError err
     Right ((MR.TopRDF _ val), _) -> return val
@@ -69,11 +73,11 @@ parseImports rdf = do
 contents :: MS.Parser MR.TopRDF
 contents = do
   i <- MS.getId
-  srcUri <- MS.getSourceUri
+  modulePath <- MS.getModulePath
   xs <- Tok.sc >> many top <* eof
   return $ MR.makeTopRDF i (
          [ MR.mtriple i PType OScript
-         , MR.mtriple i PValue srcUri
+         , MR.mtriple i PValue modulePath
          ]
       ++ MR.adopt i xs
     )
