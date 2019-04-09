@@ -37,4 +37,12 @@ errmsg (SystemCallError cmd loc msg) =  "System call failed at (" <> loc <> "):\
                                      <> " cmd> " <> cmd <> "\n"
                                      <> " msg>\n" <> msg
 errmsg (GeneratorError t) = "GeneratorError: " <> t
+errmsg (DependencyError (ModuleDependency name path lang)) =
+  "DependencyError: could not find module " <> name <> "(" <> lang <> ") at " <> path
+errmsg (DependencyError (ExecutableDependency name path))
+  = "DependencyError: could not find executable " <> name <> " at " <> path
+errmsg (DependencyError (SourceCodeDependency moduleName path lang))
+  = "DependencyError: could not find source code '" <> path
+  <> "' (" <> lang <> ")"
+  <> " imported by Morloc module " <> moduleName
 errmsg TrulyWeird = "Find the code monkeys 'cause you broke it good"

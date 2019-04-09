@@ -42,6 +42,7 @@ module Morloc.Types (
   -- ** Error handling
   , MorlocError(..)
   -- ** Configuration
+  , Dependency(..)
   , Config(..)
   -- ** Morloc monad
   , MorlocMonad
@@ -89,9 +90,18 @@ class SparqlDatabaseLike a where
     :: (SparqlSelectLike q)
     => q -> a -> MorlocMonad [[Maybe Text]]
 
+data Dependency
+  = ModuleDependency Name Path Lang
+  | ExecutableDependency Name Path
+  | SourceCodeDependency Name Path Lang
+  deriving(Show, Ord, Eq)
+
 type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
-data MorlocState = MorlocState {sparqlConn :: Maybe SparqlEndPoint}
+data MorlocState = MorlocState {
+      sparqlConn :: Maybe SparqlEndPoint
+    , dependencies :: [Dependency]
+  }
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 type Name    = Text
@@ -269,6 +279,8 @@ data MorlocError
   | GeneratorError Text
   -- | Missing a serialization or deserialization function
   | SerializationError Text
+  -- | Raised when a dependency is missing
+  | DependencyError Dependency
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)
