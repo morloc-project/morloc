@@ -45,21 +45,31 @@ writeMorlocReturn ((Left err, msgs), _)
   >> MT.hPutStr stderr (MT.show' err) -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStr stderr (MT.unlines msgs)
 
-runCommand :: MT.Text -> MorlocMonad ()
-runCommand cmd = do
+-- | Execute a system call
+runCommand
+  :: MT.Text -- function making the call (used only in debugging messages on error)
+  -> MT.Text -- system command
+  -> MorlocMonad ()
+runCommand loc cmd = do
   (_, _, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
   exitCode <- liftIO $ SP.waitForProcess handle
   err <- liftIO $ MT.hGetContents herr
   case exitCode of
     SE.ExitSuccess     -> tell [err] -- log a message
-    (SE.ExitFailure _) -> throwError (SystemCallError err) |>> (\_ -> ()) -- raise an error
+    (SE.ExitFailure _) -> throwError (SystemCallError cmd loc err)
+                          |>> (\_ -> ()) -- raise an error
 
-runCommandWith :: (MT.Text -> a) -> MT.Text -> MorlocMonad a
-runCommandWith f cmd = do
+-- | Execute a system call and return a function of the STDOUT
+runCommandWith
+  :: MT.Text -- function making the call (used only in debugging messages on error)
+  -> (MT.Text -> a) -- ^ A function of the output (run on success)
+  -> MT.Text -- ^ System command
+  -> MorlocMonad a
+runCommandWith loc f cmd = do
     (_, hout, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
     exitCode <- liftIO $ SP.waitForProcess handle
     out <- liftIO $ MT.hGetContents hout
     err <- liftIO $ MT.hGetContents herr
     case exitCode of
       SE.ExitSuccess -> return $ f out
-      _ -> throwError (SystemCallError err)
+      _ -> throwError (SystemCallError cmd loc err)

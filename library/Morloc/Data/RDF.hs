@@ -259,7 +259,7 @@ instance SparqlDatabaseLike RDF where
     MM.liftIO $ writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
     MM.liftIO $ writeSparql "z.rq" q  -- /  at Morloc home (set in config)
     let cmd = "arq --data=z.ttl --query=z.rq --results=TSV"
-    MM.runCommandWith MT.parseTSV cmd
+    MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)

@@ -40,7 +40,6 @@ module Morloc.Types (
   , GraphObject(..)
   , SerialMap(..)
   -- ** Error handling
-  , ThrowsError
   , MorlocError(..)
   -- ** Configuration
   , Config(..)
@@ -244,7 +243,6 @@ data GraphObject
 
   deriving(Show, Eq, Ord)
 
-type ThrowsError = Either MorlocError
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
   -- occur for RDF that has been validated.
@@ -266,7 +264,7 @@ data MorlocError
   -- | Raised when a module cannot be loaded 
   | CannotLoadModule Text
   -- | System call failed
-  | SystemCallError Text
+  | SystemCallError Text Text Text
   -- | Raised when there is an error in the code generators
   | GeneratorError Text
   -- | Missing a serialization or deserialization function

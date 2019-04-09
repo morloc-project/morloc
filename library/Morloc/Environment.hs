@@ -31,7 +31,7 @@ installGithubRepo repo url = do
   config <- MM.ask
   let lib = MC.configLibrary config
   let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo] 
-  MM.runCommand cmd
+  MM.runCommand "installGithubRepo" cmd
   
 installModule :: ModuleSource -> MorlocMonad ()
 installModule (GithubRepo repo) = installGithubRepo repo ("https://github.com/" <> repo)
