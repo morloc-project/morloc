@@ -25,7 +25,7 @@ import qualified Data.Map.Strict as Map
 fromSparqlDb
   :: SparqlDatabaseLike db
   => db -> MorlocMonad (Map.Map Key MData)
-fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect hsparql)
+fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect "mdata" hsparql)
 
 getParentData :: [Maybe MT.Text] -> MorlocMonad (MT.Text, Maybe MT.Text) 
 getParentData [Just t, v] = return (t, v)

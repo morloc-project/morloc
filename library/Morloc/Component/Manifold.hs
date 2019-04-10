@@ -33,7 +33,7 @@ fromSparqlDb
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
-  sparqlSelect hsparql ep
+  sparqlSelect "manifold" hsparql ep
     >>= mapM (asTuple typemap datamap)
     |>> propagateBoundVariables
     |>> DLE.groupSort
@@ -62,6 +62,7 @@ asTuple typemap datamap [ Just callId'
                         , argname'
                         , argcall_id'
                         , argdata_id'
+                        , modulePath'
                         ] = do
   arg <- makeArgument (
       argname'
@@ -81,10 +82,12 @@ asTuple typemap datamap [ Just callId'
       , mExported     = exported' == "true"
       , mSourced      = sourced'  == "true"
       , mSourcePath   = sourcePath'
+      , mModulePath   = modulePath'
       , mBoundVars    = maybe [] (MT.splitOn ",") bvars'
       , mLang         = sourceLang'
       , mArgs         = [] -- this will be set in the next step
       }
+  -- MM.liftIO $ print man
   return (man, arg)
 
 asTuple _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
@@ -209,6 +212,7 @@ hsparql = do
   sourceName_     <- var
   sourcePath_     <- var
   sourced_        <- var
+  modulePath_     <- var
 
   subQuery_ $ do
     arg_           <- var
@@ -228,15 +232,6 @@ hsparql = do
     typeid_        <- var
 
     union_
-      ( do
-          triple_ callId_ PType OCall
-          triple_ callId_ PValue fid_
-          triple_ callId_ element_ arg_
-          MCU.isElement_ element_
-
-          triple_ fid_ PType OName
-          triple_ fid_ PValue morlocName_
-      )
       ( do
           -- Find exported values
           triple_ callId_ PType OExport
@@ -259,6 +254,15 @@ hsparql = do
           -- Keep only the values that are NOT calls (to avoid duplication)
           triple_ callId_ PType callIdType_
           filterExpr (str callIdType_ .!=. OCall)
+      )
+      ( do
+          triple_ callId_ PType OCall
+          triple_ callId_ PValue fid_
+          triple_ callId_ element_ arg_
+          MCU.isElement_ element_
+
+          triple_ fid_ PType OName
+          triple_ fid_ PValue morlocName_
       )
 
     -- # Determine whether this is exported
@@ -344,6 +348,7 @@ hsparql = do
       , sourceName_
       , sourcePath_
       , sourced_
+      , modulePath_
       ]
 
   groupBy abstractTypeId_
@@ -361,6 +366,7 @@ hsparql = do
   groupBy sourceName_
   groupBy sourcePath_
   groupBy sourced_
+  groupBy modulePath_
 
   orderNextAsc callId_
   orderNextAsc element_ 
@@ -382,4 +388,5 @@ hsparql = do
     , SelectVar  argname_
     , SelectVar  argcallId_
     , SelectVar  argdataId_
+    , SelectVar  modulePath_
     ]

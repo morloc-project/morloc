@@ -255,10 +255,12 @@ instance SparqlDatabaseLike RDF where
   -- sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
-  sparqlSelect q x = do
-    MM.liftIO $ writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
-    MM.liftIO $ writeSparql "z.rq" q  -- /  at Morloc home (set in config)
-    let cmd = "arq --data=z.ttl --query=z.rq --results=TSV"
+  sparqlSelect t q x = do
+    let turtlePath = t <> ".ttl"
+        sparqlPath = t <> ".rq"
+    MM.liftIO $ writeTurtle turtlePath x
+    MM.liftIO $ writeSparql sparqlPath q
+    let cmd = "arq --data=" <> turtlePath <> " --query=" <> sparqlPath <> " --results=TSV"
     MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF

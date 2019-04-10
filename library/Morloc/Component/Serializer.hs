@@ -40,7 +40,7 @@ fromSparqlDb
   => Lang -> db -> MorlocMonad SerialMap
 fromSparqlDb l db = do
   typemap <- MCM.fromSparqlDb db
-  serialData <- sparqlSelect (hsparql l) db >>= mapM tuplify
+  serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
   toSerialMap typemap serialData
   where
     tuplify :: [Maybe MT.Text] -> MorlocMonad SerialData

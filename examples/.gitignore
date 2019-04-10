@@ -1,3 +1,3 @@
 __pycache__
-z.ttl
-z.rq
+*.ttl
+*.rq

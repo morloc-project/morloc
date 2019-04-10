@@ -44,8 +44,8 @@ instance SparqlDatabaseLike SparqlEndPoint where
 
   -- sparqlSelect
   --   :: (SparqlSelectLike q)
-  --   => q -> a -> MorlocMonad (Either Text [[Maybe Text]])
-  sparqlSelect q ep
+  --   => Text -> q -> a -> MorlocMonad (Either Text [[Maybe Text]])
+  sparqlSelect _ q ep
     = (MM.liftIO $ selectQueryRaw (endpoint ep) (showSparql q)) >>= values
 
 values :: Maybe [[BindingValue]] -> MorlocMonad [[Maybe MT.Text]]

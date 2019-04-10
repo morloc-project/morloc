@@ -88,7 +88,10 @@ class SparqlDatabaseLike a where
 
   sparqlSelect
     :: (SparqlSelectLike q)
-    => q -> a -> MorlocMonad [[Maybe Text]]
+    => Text -- ^ A path prefix for stored sparql data and query
+    -> q    -- ^ The query
+    -> a    -- ^ The thing to be queried
+    -> MorlocMonad [[Maybe Text]]
 
 data Dependency
   = ModuleDependency Name Path Lang
@@ -127,7 +130,8 @@ data Manifold = Manifold {
     , mSourced      :: Bool
     , mMorlocName   :: Name
     , mCallName     :: Name
-    , mSourcePath   :: Maybe Path
+    , mSourcePath   :: Maybe Path -- e.g., "foo.py3", this is relative to the module directory path
+    , mModulePath   :: Maybe Path -- e.g., "$HOME/.morloc/lib/foo/main.loc
     , mSourceName   :: Maybe Name
     , mComposition  :: Maybe Name
     , mBoundVars    :: [Name]

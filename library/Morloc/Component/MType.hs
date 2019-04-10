@@ -41,7 +41,7 @@ instance MShow MType where
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
 fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map Key MType)
-fromSparqlDb = MCU.simpleGraph toMType getParentData id (sparqlSelect hsparql)
+fromSparqlDb = MCU.simpleGraph toMType getParentData id (sparqlSelect "mtype" hsparql)
 
 getParentData :: [Maybe MT.Text] -> MorlocMonad ParentData 
 getParentData [Just t, v, o, l, n, ps] = return $ (t, v, o, l, n, properties) where

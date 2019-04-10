@@ -22,7 +22,7 @@ import qualified Morloc.Pools.Template.Python3 as Py3
 import qualified Control.Monad as CM
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad [Script]
-generate db = (sparqlSelect hsparql db) >>= CM.mapM (generateLang db)
+generate db = (sparqlSelect "pools" hsparql db) >>= CM.mapM (generateLang db)
 
 generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> MorlocMonad Script
 generateLang db lang' = case lang' of
