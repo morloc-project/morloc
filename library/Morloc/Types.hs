@@ -181,8 +181,7 @@ data SerialMap = SerialMap {
     , serialUnpacker :: Map MType Name
     , serialGenericPacker   :: Name
     , serialGenericUnpacker :: Name
-    , serialSources :: [Path] -- Later, I might want to link the source files to
-                              -- each function, but for now that isn't needed.
+    , serialSources :: [Path] -- ^ The absolute paths to the source files
   }
   deriving(Show, Eq, Ord)
 

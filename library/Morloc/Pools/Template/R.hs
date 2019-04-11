@@ -73,7 +73,7 @@ g = Grammar {
 
     -- FIXME: make portable (replace "/" with the appropriate separator)
     import' :: Doc -> Doc -> Doc
-    import' dir libname = call' "source" [dquotes (dir <> "/" <> libname)]
+    import' _ srcpath = call' "source" [dquotes srcpath]
 
     try' :: TryDoc -> Doc
     try' t = call' ".morloc_try"

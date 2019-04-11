@@ -31,6 +31,7 @@ type SerialData =
   , Bool -- is_generic - is this a generic packer/unpacker
   , Name -- name
   , Path -- path
+  , Path -- module path
   )
 
 -- TODO: update this to limit results to one language
@@ -48,8 +49,9 @@ fromSparqlDb l db = do
             , Just p -- property
             , Just g -- is_generic
             , Just n -- name
-            , Just s -- path
-            ] = return (t,p,g == "true",n,s)
+            , Just s -- path (e.g., "rbase.R")
+            , Just m -- module path (e.g., "$HOME/.morloc/lib/rbase/main.loc")
+            ] = return (t,p,g == "true",n,s,m)
     tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
     toSerialMap
@@ -57,13 +59,13 @@ fromSparqlDb l db = do
       -> [SerialData]
       -> MorlocMonad SerialMap
     toSerialMap h xs = do
-      packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _) <- xs]
-      unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _) <- xs]
+      packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _, _) <- xs]
+      unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _, _) <- xs]
       case ( Map.fromList packers
            , Map.fromList unpackers
-           , [p | (_, "packs"  , True, p, _) <- xs]
-           , [p | (_, "unpacks", True, p, _) <- xs]
-           , MU.unique [s | (_, _, _, _, s) <- xs]
+           , [p | (_, "packs"  , True, p, _, _) <- xs]
+           , [p | (_, "unpacks", True, p, _, _) <- xs]
+           , MU.unique [makePath m s | (_, _, _, _, s, m) <- xs]
            ) of
         (phash, uhash, [p], [u], srcs) -> return $ SerialMap
           { serialLang = l
@@ -74,6 +76,12 @@ fromSparqlDb l db = do
           , serialSources = srcs
           }
         _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
+
+    makePath
+      :: MT.Text -- module path
+      -> MT.Text -- basename of packer/unpacker source file
+      -> MT.Text
+    makePath m' p' = MT.intercalate "/" $ (init (MT.splitOn "/" m')) ++ [p']
 
     getOut :: a -> MType -> MorlocMonad (MType, a)
     getOut p (MFuncType _ _ x) = return (x, p)
@@ -107,6 +115,9 @@ hsparql lang' = do
   sourceId_      <- var
   typeId_        <- var
   unpackerInput_ <- var
+  scriptId_      <- var
+  element_       <- var
+  modulePath_    <- var
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
@@ -149,9 +160,13 @@ hsparql lang' = do
         triple_ sourceId_ PPath path_
         triple_ sourceId_ PImport importId_
         triple_ importId_ PAlias name_
+
+        triple_ scriptId_ PType OScript
+        triple_ scriptId_ element_ sourceId_ 
+        triple_ scriptId_ PValue modulePath_
     )
 
   orderNextAsc typeId_
   orderNextAsc property_
 
-  selectVars [rhs_, property_, isGeneric_, name_, path_]
+  selectVars [rhs_, property_, isGeneric_, name_, path_, modulePath_]
