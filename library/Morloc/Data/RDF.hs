@@ -262,7 +262,7 @@ instance SparqlDatabaseLike RDF where
     -- * DEBUGGING: create it if needed
     MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
     -- * DEBUGGING: write the RDF and query to it, using the given prefix
-    let turtlePath = tmpdir <> "/" <> t <> ".ttl"
+    let turtlePath = tmpdir <> "/" <> "db.ttl"
         sparqlPath = tmpdir <> "/" <> t <> ".rq"
         outputPath = tmpdir <> "/" <> t <> ".tab"
     MM.liftIO $ writeTurtle turtlePath x

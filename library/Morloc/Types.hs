@@ -125,15 +125,18 @@ data Manifold = Manifold {
       mCallId       :: Key
     , mAbstractType :: Maybe AbstractType
     , mConcreteType :: Maybe ConcreteType
-    , mExported     :: Bool
+    , mExported     :: Bool -- If True, then this manifold will be
+                            -- 1) callable from the nexus (if this script is the base script)
+                            -- 2) imported if the module is imported
+                            -- If False, then it is purely a local function
     , mCalled       :: Bool
-    , mSourced      :: Bool
-    , mMorlocName   :: Name
+    , mSourced      :: Bool -- True if this function read from sourced (e.g., `source "R" ("runif")`)
+    , mMorlocName   :: Name -- e.g., in `source "R" ("runif" as rand_uniform)`, "rand_uniform" is morloc name and "runif" is the R name
     , mCallName     :: Name
-    , mSourcePath   :: Maybe Path -- e.g., "foo.py3", this is relative to the module directory path
-    , mModulePath   :: Maybe Path -- e.g., "$HOME/.morloc/lib/foo/main.loc
+    , mSourcePath   :: Maybe Path -- ^ e.g., "foo.py3", this is relative to the module directory path
+    , mModulePath   :: Maybe Path -- ^ e.g., "$HOME/.morloc/lib/foo/main.loc
     , mSourceName   :: Maybe Name
-    , mComposition  :: Maybe Name
+    , mComposition  :: Maybe Name -- ^ The name of the declaration function. For example, in `foo x = sqrt x`, "foo" is mComposition
     , mBoundVars    :: [Name]
     , mLang         :: Maybe Lang
     , mArgs         :: [Argument]
