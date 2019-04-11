@@ -239,7 +239,7 @@ hsparql = do
 
           -- This is exported from the global environment
           triple_ scriptId_ PType OScript
-          triple_ scriptId_ PValue modulePath_
+          triple_ scriptId_ PValue modulePath_   -- TODO: for nexus exports, I need to know whether this is exported from the top script
           triple_ scriptId_ scriptElement_ callId_
           MCU.isElement_ scriptElement_
 

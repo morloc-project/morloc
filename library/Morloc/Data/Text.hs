@@ -66,7 +66,7 @@ unparseTSV = unlines . map renderRow
     renderRow = intercalate "\t" . map renderCell
 
     renderCell :: Maybe Text -> Text
-    renderCell (Nothing) = ""
+    renderCell (Nothing) = "-"
     renderCell (Just x)  = x
 
 nonZero :: Text -> Maybe Text
