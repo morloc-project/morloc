@@ -257,18 +257,22 @@ instance SparqlDatabaseLike RDF where
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
   sparqlSelect t q x = do
-    -- * find the temporary directory
+    -- * DEBUGGING: find the temporary directory
     tmpdir <- MM.asks configTmpDir
-    -- * create it if needed
+    -- * DEBUGGING: create it if needed
     MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-    -- * write the RDF and query to it, using the given prefix
+    -- * DEBUGGING: write the RDF and query to it, using the given prefix
     let turtlePath = tmpdir <> "/" <> t <> ".ttl"
         sparqlPath = tmpdir <> "/" <> t <> ".rq"
+        outputPath = tmpdir <> "/" <> t <> ".tab"
     MM.liftIO $ writeTurtle turtlePath x
     MM.liftIO $ writeSparql sparqlPath q
     -- the system command that queries against a SPARQL database
     let cmd = "arq --data=" <> turtlePath <> " --query=" <> sparqlPath <> " --results=TSV"
-    MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
+    out <- MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
+    -- DEBUGGING: print a TAB-delimited result file
+    MM.liftIO $ MT.writeFile (MT.unpack outputPath) (MT.unparseTSV out)
+    return out
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)

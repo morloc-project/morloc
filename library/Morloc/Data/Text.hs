@@ -21,19 +21,21 @@ module Morloc.Data.Text
     , read'
     , readMay'
     , parseTSV
+    , unparseTSV
     , unenclose
     , unangle
     , unquote
     , undquote
   ) where
 
-import Prelude hiding (lines, length)
+import Prelude hiding (lines, unlines, length, concat)
 import Data.Text hiding (map)
 import Data.Text.IO
 import Data.Text.Encoding
 import qualified Data.Text.Lazy as DL
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty 
+import qualified Data.List as DL
 
 show' :: Show a => a -> Text
 show' = pack . show
@@ -55,6 +57,17 @@ parseTSV
   . map (split ((==) '\t'))
   . Prelude.tail
   . lines
+
+-- | Make a TSV text
+unparseTSV :: [[Maybe Text]] -> Text
+unparseTSV = unlines . map renderRow
+  where
+    renderRow :: [Maybe Text] -> Text
+    renderRow = intercalate "\t" . map renderCell
+
+    renderCell :: Maybe Text -> Text
+    renderCell (Nothing) = ""
+    renderCell (Just x)  = x
 
 nonZero :: Text -> Maybe Text
 nonZero s =
