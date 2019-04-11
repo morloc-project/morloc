@@ -15,6 +15,7 @@ module Morloc.Config (
   , loadDefaultMorlocConfig 
   , getExecutor
   , getDefaultConfigFilepath
+  , getDefaultMorlocTmpDir
   , makeLibSourceString
 ) where
 
@@ -37,6 +38,7 @@ instance FromJSON Config where
   parseJSON = withObject "object" $ \o ->
     Config <$> o .:? "home"    .!= ""
            <*> o .:? "library" .!= ""
+           <*> o .:? "tmpdir" .!= ""
            <*> o .:? "lang_python3" .!= "python"
            <*> o .:? "lang_R" .!= "Rscript"
            <*> o .:? "lang_perl" .!= "perl"
@@ -45,9 +47,11 @@ defaultFields :: IO (H.HashMap MT.Text MT.Text)
 defaultFields = do
   home <- getDefaultMorlocHome
   lib <- getDefaultMorlocLibrary
+  tmp <- getDefaultMorlocTmpDir
   return $ H.fromList
     [ ("home", home)
     , ("library", lib)
+    , ("tmpdir", tmp)
     ]
 
 -- | Load the default Morloc configuration, ignoring any local configurations.
@@ -57,6 +61,7 @@ loadDefaultMorlocConfig = do
   return $ Config
     (defaults H.! "home")
     (defaults H.! "library")
+    (defaults H.! "tmpdir")
     "python"  -- lang_python3
     "Rscript" -- lang_R
     "perl"    -- lang_perl
@@ -75,6 +80,11 @@ getDefaultMorlocHome = MS.getHomeDirectory |>> MS.appendPath ".morloc"
 -- folder inside the home directory.
 getDefaultMorlocLibrary :: IO MT.Text
 getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath ".morloc/lib"
+
+-- | Get the Morloc default temporary directory. This will store generated
+-- SPARQL queries and rdf dumps that can be used in debugging.
+getDefaultMorlocTmpDir :: IO MT.Text
+getDefaultMorlocTmpDir = MS.getHomeDirectory |>> MS.appendPath ".morloc/tmp"
 
 -- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 -- default configuration will be used.

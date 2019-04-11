@@ -44,12 +44,13 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
 import qualified Morloc.Monad     as MM
 
-import qualified Data.RDF        as DR
-import qualified Data.Map.Strict as DMS
-import qualified Data.Scientific as DS
-import qualified System.IO       as SIO
-import qualified System.Process  as SP
-import qualified System.Exit     as SE
+import qualified Data.RDF         as DR
+import qualified Data.Map.Strict  as DMS
+import qualified Data.Scientific  as DS
+import qualified System.IO        as SIO
+import qualified System.Process   as SP
+import qualified System.Exit      as SE
+import qualified System.Directory as SD
 
 type RDF = DR.RDF DR.TList
 
@@ -256,10 +257,16 @@ instance SparqlDatabaseLike RDF where
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
   sparqlSelect t q x = do
-    let turtlePath = t <> ".ttl"
-        sparqlPath = t <> ".rq"
+    -- * find the temporary directory
+    tmpdir <- MM.asks configTmpDir
+    -- * create it if needed
+    MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
+    -- * write the RDF and query to it, using the given prefix
+    let turtlePath = tmpdir <> "/" <> t <> ".ttl"
+        sparqlPath = tmpdir <> "/" <> t <> ".rq"
     MM.liftIO $ writeTurtle turtlePath x
     MM.liftIO $ writeSparql sparqlPath q
+    -- the system command that queries against a SPARQL database
     let cmd = "arq --data=" <> turtlePath <> " --query=" <> sparqlPath <> " --results=TSV"
     MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
 

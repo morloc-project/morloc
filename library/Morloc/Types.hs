@@ -292,6 +292,7 @@ data MorlocError
 data Config = Config {
     configHome :: Text
   , configLibrary :: Text
+  , configTmpDir :: Text
   , configLangPython3 :: Text
   , configLangR :: Text
   , configLangPerl :: Text
