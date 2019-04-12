@@ -9,7 +9,11 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Pools.Pools (generate) where
+module Morloc.Pools.Pools
+(
+    generate
+  , hsparql
+) where
 
 import Morloc.Types
 import Morloc.Operators

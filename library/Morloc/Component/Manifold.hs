@@ -9,7 +9,11 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.Manifold (fromSparqlDb) where
+module Morloc.Component.Manifold
+(
+    fromSparqlDb
+  , hsparql
+) where
 
 import Morloc.Types
 import Morloc.Operators

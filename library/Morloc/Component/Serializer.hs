@@ -9,8 +9,10 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.Serializer (
+module Morloc.Component.Serializer
+(
     fromSparqlDb
+  , hsparql
   , SerialMap(..)
 ) where
 

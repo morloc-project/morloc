@@ -7,6 +7,8 @@ Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+The SPARQL queries are the weakest spot in the codebase.
 -}
 
 module Morloc.Sparql ( 

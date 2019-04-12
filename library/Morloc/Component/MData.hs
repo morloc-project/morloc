@@ -9,7 +9,11 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.MData (fromSparqlDb) where
+module Morloc.Component.MData
+(
+    fromSparqlDb
+  , hsparql
+) where
 
 import Morloc.Sparql
 import Morloc.Types
