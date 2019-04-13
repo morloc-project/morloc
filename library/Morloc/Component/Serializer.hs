@@ -101,6 +101,7 @@ fromSparqlDb l db = do
       Nothing -> MM.throwError . SerializationError $
         "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
 
+-- | Get information about the serialization functions
 hsparql :: Lang -> Query SelectQuery
 hsparql lang' = do
   basetype_      <- var
@@ -172,3 +173,25 @@ hsparql lang' = do
   orderNextAsc property_
 
   selectVars [rhs_, property_, isGeneric_, name_, path_, modulePath_]
+
+---- expected output for `sample.loc`
+-- -----------------------------------------------------------------------------------------------------------------------
+-- | rhs                    | property  | isGeneric | name              | path      | modulePath                         |
+-- =======================================================================================================================
+-- | mlc:rbase__main.loc_55 | "packs"   | true      | "packGeneric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_20 | "packs"   | false     | "packCharacter"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_25 | "packs"   | false     | "packDataFrame"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_30 | "packs"   | false     | "packDataTable"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_35 | "packs"   | false     | "packList"        | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_40 | "packs"   | false     | "packLogical"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_45 | "packs"   | false     | "packMatrix"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_50 | "packs"   | false     | "packNumeric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_60 | "unpacks" | true      | "unpackGeneric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_65 | "unpacks" | false     | "unpackCharacter" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_70 | "unpacks" | false     | "unpackDataFrame" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_75 | "unpacks" | false     | "unpackDataTable" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_80 | "unpacks" | false     | "unpackList"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_85 | "unpacks" | false     | "unpackLogical"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_90 | "unpacks" | false     | "unpackMatrix"    | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_95 | "unpacks" | false     | "unpackNumeric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- -----------------------------------------------------------------------------------------------------------------------

@@ -35,6 +35,7 @@ generateLang db lang' = case lang' of
   [Just x] -> MM.throwError . GeneratorError $ "The language " <> x <> " is not supported"
   x -> MM.throwError . SparqlFail $ "Bad SPARQL query:" <> MT.show' x
 
+-- | Find all languages that are used in the Morloc script
 hsparql :: Query SelectQuery
 hsparql = do
   i_    <- var

@@ -104,9 +104,24 @@ hsparql= do
   filterExpr (type_ .!=. OData)
 
   optional_ $ triple_ id_ PValue value_
-  
+
   optional_ $ do
       triple_ id_ element_ child_
       MCU.isElement_ element_
 
   selectVars [id_, element_, child_, type_, value_]
+
+----- For example, with sample.loc ++ 'foo = [4,3,6]'
+-- ------------------------------------------------------------------
+-- | id              | element | child           | type     | value |
+-- ==================================================================
+-- | <sample.loc_50> |         |                 | <number> | 0.0   |
+-- | <sample.loc_17> |         |                 | <number> | 0.0   |
+-- | <sample.loc_32> |         |                 | <number> | 3.0   |
+-- | <sample.loc_30> | <rdf_1> | <sample.loc_32> | <list>   |       |
+-- | <sample.loc_30> | <rdf_0> | <sample.loc_31> | <list>   |       |
+-- | <sample.loc_30> | <rdf_2> | <sample.loc_33> | <list>   |       |
+-- | <sample.loc_31> |         |                 | <number> | 4.0   |
+-- | <sample.loc_33> |         |                 | <number> | 6.0   |
+-- | <sample.loc_51> |         |                 | <number> | 1.0   |
+-- ------------------------------------------------------------------
