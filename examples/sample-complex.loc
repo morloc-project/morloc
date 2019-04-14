@@ -5,6 +5,7 @@ export transpose
 export nrow
 export roll
 export len
+export test
 
 source "R" (
     "runif" as rand_uniform
