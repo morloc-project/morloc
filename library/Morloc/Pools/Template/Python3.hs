@@ -26,11 +26,15 @@ generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
 generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
 
 asImport :: MT.Text -> MorlocMonad Doc
-asImport s = case MT.uncons s of
-  (Just (x, xs)) -> return . text' $ MT.cons
-            (DC.toLower x)
-            ((MT.replace "/" ".") ((MT.pack . SF.dropExtensions . MT.unpack) xs))
-  _ -> MM.throwError $ GeneratorError "Expected import to have at least length 1"
+asImport s = do
+  lib <- MM.asks configLibrary
+  return . text'
+         . MT.liftToText (map DC.toLower)
+         . MT.replace "/" "."
+         . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+         . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+         . MT.liftToText SF.dropExtensions
+         $ s
 
 g = Grammar {
       gLang        = "py"

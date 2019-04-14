@@ -26,6 +26,8 @@ module Morloc.Data.Text
     , unangle
     , unquote
     , undquote
+    , stripPrefixIfPresent
+    , liftToText
   ) where
 
 import Prelude hiding (lines, unlines, length, concat)
@@ -46,6 +48,11 @@ read' =  read . unpack
 readMay' :: Read a => Text -> Maybe a
 readMay' = Safe.readMay . unpack
 
+stripPrefixIfPresent :: Text -> Text -> Text
+stripPrefixIfPresent prefix text = case stripPrefix prefix text of
+  (Just x) -> x
+  Nothing -> text
+
 pretty :: Show a => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
 
@@ -57,6 +64,9 @@ parseTSV
   . map (split ((==) '\t'))
   . Prelude.tail
   . lines
+
+liftToText :: (String -> String) -> Text -> Text
+liftToText f = pack . f . unpack
 
 -- | Make a TSV text
 unparseTSV :: [[Maybe Text]] -> Text
