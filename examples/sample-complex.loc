@@ -1,11 +1,3 @@
-# Currently this script does not work, since I moved the required rbase.* and
-# pybase.* functions off to the morloc-lib. Currently modules are only imported
-# as local files with names relative to the working directory. This is
-# obviously not satisfactory. Once the function database is online, functions
-# will be accessible by username/path-to-function. These would then be stored
-# in a local SPARQL database along with the rest of the configs. I also need a
-# raw text (probably YAML) config file in some default location.
-
 export ceiling
 export rand_uniform
 export sum
