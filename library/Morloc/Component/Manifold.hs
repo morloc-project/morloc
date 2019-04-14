@@ -60,7 +60,7 @@ asTuple
   -> Map.Map Key MData
   -> [Maybe MT.Text]
   -> MorlocMonad (Manifold, Either Key Argument)
-asTuple typemap datamap [ Just callId'
+asTuple typemap datamap [ Just manId'
                         , abstractTypeId'
                         , element'
                         , Just morlocName'
@@ -85,7 +85,7 @@ asTuple typemap datamap [ Just callId'
     , element'
     )
   let man = Manifold {
-        mCallId       = callId'
+        mCallId       = manId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
       , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
       , mMorlocName   = morlocName'
@@ -155,7 +155,7 @@ propagateBoundVariables ms = map setBoundVars ms
     setBoundVars :: (Manifold, Either Key Argument) -> (Manifold, Either Key Argument)
     setBoundVars (m, a) = (m { mBoundVars = maybe [] id (Map.lookup (mCallId m) hash) }, a)
 
-    -- map from mcallId to mBoundVars
+    -- map from mCallId to mBoundVars
     hash :: Map.Map Key [Name]
     hash = MU.spreadAttr (map toTriple ms)
 
@@ -215,7 +215,7 @@ hsparql = do
   argname_        <- var
   bnd_            <- var
   bvars_          <- var
-  callId_         <- var
+  mid_            <- var
   called_         <- var
   composition_    <- var
   concreteTypeId_ <- var
@@ -239,61 +239,74 @@ hsparql = do
     fid_           <- var
     importId_      <- var
     langTypedec_   <- var
-    scriptElement_ <- var
-    scriptId_      <- var
     sourceId_      <- var
     typedec_       <- var
     typeid_        <- var
 
+    -- Something can be exported if it is in the export list AND
+    --  * Case 1: sourced and typed
+    --  * Case 2: it is the name of a function declaration
+    --  All other cases currently should raise errors. Old C-loc could actually
+    --  export any manifold in a workflow. This was cool, since it allowed user
+    --  querying of intermediate elements. In the future, I should add this
+    --  handling back in, however I currently lack the syntax for it.
+
     union_
+      -- find manifolds that are 1) exported, 2) typed, and 3) sourced
       ( do
           -- Find exported values
-          triple_ callId_ PType OExport
-          triple_ callId_ PValue morlocName_
-
-          -- This is exported from the global environment
-          triple_ scriptId_ PType OScript
-          triple_ scriptId_ PValue modulePath_   -- TODO: for nexus exports, I need to know whether this is exported from the top script
-          triple_ scriptId_ scriptElement_ callId_
-          MCU.isElement_ scriptElement_
+          triple_ mid_ PType OExport
+          triple_ mid_ PValue morlocName_
 
           triple_ typedec_ PType OTypeDeclaration
           triple_ typedec_ PLang ("Morloc" :: MT.Text)
           triple_ typedec_ PLeft morlocName_
           triple_ typedec_ PRight typeid_
 
+          triple_ sourceId_ PType OSource
+          triple_ sourceId_ PImport importId_
+          triple_ importId_ PAlias morlocName_
+
+          -- one return for each argument (input type)
           triple_ typeid_ element_ arg_
           MCU.isElement_ element_
 
           -- Keep only the values that are NOT calls (to avoid duplication)
-          triple_ callId_ PType callIdType_
+          triple_ mid_ PType callIdType_
           filterExpr (str callIdType_ .!=. OCall)
+
+          -- export case #1 (see note above)
+          optional_ $ do
+            triple_ e_ PType OExport
+            triple_ e_ PValue morlocName_
+
       )
+      -- find manifolds that are calls (this includes compositions)
       ( do
-          triple_ callId_ PType OCall
-          triple_ callId_ PValue fid_
-          triple_ callId_ element_ arg_
+          triple_ mid_ PType OCall
+          triple_ mid_ PValue fid_
+          triple_ mid_ element_ arg_
           MCU.isElement_ element_
 
           triple_ fid_ PType OName
           triple_ fid_ PValue morlocName_
       )
 
-    -- # Determine whether this is exported
-    optional_ $ do    
-      triple_ e_ PType OExport
-      triple_ e_ PValue morlocName_
-
     -- # Find the bound variables
     optional_ $ do
       triple_ datadec_ PType ODataDeclaration
       triple_ datadec_ PLeft composition_
-      triple_ datadec_ PRight callId_
+      triple_ datadec_ PRight mid_
       triple_ datadec_ bndElement_ bndId_
       MCU.isElement_ bndElement_
 
       triple_ bndId_ PType OName
       triple_ bndId_ PValue bnd_ -- bound variables
+
+      -- export case #2 (see note above)
+      optional_ $ do    
+        triple_ e_ PType OExport
+        triple_ e_ PValue composition_
 
     -- # Find the source language
     optional_ $ do
@@ -351,7 +364,7 @@ hsparql = do
       , argcallId_
       , argname_
       , bnd_
-      , callId_
+      , mid_
       , called_
       , composition_
       , concreteTypeId_
@@ -369,7 +382,7 @@ hsparql = do
   groupBy argcallId_
   groupBy argdataId_
   groupBy argname_
-  groupBy callId_
+  groupBy mid_
   groupBy called_
   groupBy composition_
   groupBy concreteTypeId_
@@ -382,11 +395,11 @@ hsparql = do
   groupBy sourced_
   groupBy modulePath_
 
-  orderNextAsc callId_
+  orderNextAsc mid_
   orderNextAsc element_ 
 
   select
-    [ SelectVar  callId_
+    [ SelectVar  mid_
     , SelectVar  abstractTypeId_
     , SelectVar  element_
     , SelectVar  morlocName_

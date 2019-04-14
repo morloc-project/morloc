@@ -1,7 +1,7 @@
 import "rbase"
 
 export ceiling
-export rand_uniform
+export rand
 
 source "R" (
     "runif" as rand_uniform
