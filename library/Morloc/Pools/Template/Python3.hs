@@ -124,6 +124,7 @@ import subprocess
 import json
 
 sys.path.append('#{lib}')
+
 #{sources}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
