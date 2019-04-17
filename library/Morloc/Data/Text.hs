@@ -15,23 +15,29 @@ module Morloc.Data.Text
   ( 
       module Data.Text 
     , module Data.Text.IO
+    , module Data.Text.Encoding
     , show'
     , pretty
     , read'
     , readMay'
     , parseTSV
+    , unparseTSV
     , unenclose
     , unangle
     , unquote
     , undquote
+    , stripPrefixIfPresent
+    , liftToText
   ) where
 
-import Prelude hiding (lines, length)
+import Prelude hiding (lines, unlines, length, concat)
 import Data.Text hiding (map)
 import Data.Text.IO
+import Data.Text.Encoding
 import qualified Data.Text.Lazy as DL
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty 
+import qualified Data.List as DL
 
 show' :: Show a => a -> Text
 show' = pack . show
@@ -42,10 +48,15 @@ read' =  read . unpack
 readMay' :: Read a => Text -> Maybe a
 readMay' = Safe.readMay . unpack
 
+stripPrefixIfPresent :: Text -> Text -> Text
+stripPrefixIfPresent prefix text = case stripPrefix prefix text of
+  (Just x) -> x
+  Nothing -> text
+
 pretty :: Show a => a -> Text
 pretty = DL.toStrict . Pretty.pShowNoColor
 
--- | parse a TSV, ignore first line (header). Cells are also unquoted and
+-- | Parse a TSV, ignore first line (header). Cells are also unquoted and
 -- wrapping angles are removed.
 parseTSV :: Text -> [[Maybe Text]]
 parseTSV
@@ -53,6 +64,20 @@ parseTSV
   . map (split ((==) '\t'))
   . Prelude.tail
   . lines
+
+liftToText :: (String -> String) -> Text -> Text
+liftToText f = pack . f . unpack
+
+-- | Make a TSV text
+unparseTSV :: [[Maybe Text]] -> Text
+unparseTSV = unlines . map renderRow
+  where
+    renderRow :: [Maybe Text] -> Text
+    renderRow = intercalate "\t" . map renderCell
+
+    renderCell :: Maybe Text -> Text
+    renderCell (Nothing) = "-"
+    renderCell (Just x)  = x
 
 nonZero :: Text -> Maybe Text
 nonZero s =

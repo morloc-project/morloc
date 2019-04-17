@@ -7,6 +7,8 @@ Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+The SPARQL queries are the weakest spot in the codebase.
 -}
 
 module Morloc.Sparql ( 
@@ -19,6 +21,7 @@ import Morloc.Operators
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc as G
+import qualified Morloc.Monad as MM
 
 import Database.HSparql.QueryGenerator
 import Database.HSparql.Connection
@@ -37,19 +40,19 @@ instance SparqlSelectLike (Query SelectQuery) where
   showSparql = createSelectQuery
 
 instance SparqlDatabaseLike SparqlEndPoint where
-  -- sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  -- sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
   sparqlUpload ep r
-    = fmap (const ep) (uploadTriples (endpoint ep) (asTriples r))
+    = MM.liftIO $ fmap (const ep) (uploadTriples (endpoint ep) (asTriples r))
 
   -- sparqlSelect
   --   :: (SparqlSelectLike q)
-  --   => q -> a -> IO (Either Text [[Maybe Text]])
-  sparqlSelect q ep
-    = fmap values (selectQueryRaw (endpoint ep) (showSparql q))
+  --   => Text -> q -> a -> MorlocMonad (Either Text [[Maybe Text]])
+  sparqlSelect _ q ep
+    = (MM.liftIO $ selectQueryRaw (endpoint ep) (showSparql q)) >>= values
 
-values :: Maybe [[BindingValue]] -> [[Maybe MT.Text]]
-values Nothing = error "SPARQL command failed"
-values (Just xss) = (fmap . fmap) maybeValue xss
+values :: Maybe [[BindingValue]] -> MorlocMonad [[Maybe MT.Text]]
+values Nothing = MM.throwError . SparqlFail $ "SPARQL command failed: "
+values (Just xss) = return $ (fmap . fmap) maybeValue xss
 
 maybeValue :: BindingValue -> Maybe MT.Text
 maybeValue (Bound (MR.LNode (MR.PlainL  x  ))) = Just x

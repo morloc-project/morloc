@@ -16,6 +16,7 @@ module Morloc.State
   , parserStateEmpty
   , getId
   , getSourceUri
+  , getModulePath
 ) where
 
 import qualified Morloc.Data.RDF as R
@@ -34,6 +35,7 @@ data ParserState = ParserState {
     -- | Stores the current node number. This will be unique within a program.
     stateCount :: Int 
   , stateSourceUri :: Maybe MT.Text
+  , stateModulePath :: Maybe MT.Text
 }
 
 -- | The empty parser state, with the ID initialized to 0
@@ -41,6 +43,7 @@ parserStateEmpty :: ParserState
 parserStateEmpty = ParserState {
     stateCount  = 0
   , stateSourceUri = Nothing
+  , stateModulePath = Nothing
 }
 
 -- | Get an RDF URI and increment the internal counter
@@ -53,4 +56,9 @@ getId = do
 getSourceUri :: Parser MT.Text
 getSourceUri = do
   s <- CMS.get
-  return $ maybe "<stdin>" id (stateSourceUri s) 
+  return $ maybe "<stdin>" id (stateSourceUri s)
+
+getModulePath :: Parser MT.Text
+getModulePath = do
+  s <- CMS.get
+  return $ maybe "<stdin>" id (stateModulePath s)

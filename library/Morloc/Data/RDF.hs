@@ -26,7 +26,7 @@ module Morloc.Data.RDF (
   , rdfPre
   , xsdPre
   -- ** RDF access
-  , getImportedFiles
+  , getImports
   -- ** TopRDF Utilities
   , makeTopRDF
   , idUri
@@ -42,13 +42,15 @@ import Morloc.Operators
 import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
+import qualified Morloc.Monad     as MM
 
-import qualified Data.RDF        as DR
-import qualified Data.Map.Strict as DMS
-import qualified Data.Scientific as DS
-import qualified System.IO       as SIO
-import qualified System.Process  as SP
-import qualified System.Exit     as SE
+import qualified Data.RDF         as DR
+import qualified Data.Map.Strict  as DMS
+import qualified Data.Scientific  as DS
+import qualified System.IO        as SIO
+import qualified System.Process   as SP
+import qualified System.Exit      as SE
+import qualified System.Directory as SD
 
 type RDF = DR.RDF DR.TList
 
@@ -99,7 +101,6 @@ instance MorlocNodeLike DS.Scientific where
     | t == (xsdPre <> "decimal") = MT.read' x
     | otherwise = error ("Cannot read number from node of type: " ++ show t) 
   fromRdfNode n = error ("Cannot read number from node: " ++ show n)
-
 
 instance MorlocNodeLike Bool where
   asRdfNode True  = DR.LNode (DR.TypedL "true"  (xsdPre <> "boolean"))
@@ -252,20 +253,26 @@ instance RdfLike RDF where
   asTriples = DR.triplesOf
 
 instance SparqlDatabaseLike RDF where
-  -- sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  -- sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
-  sparqlSelect q x = do
-    writeTurtle "z.ttl" x -- \ FIXME: write this files to a tmp directory
-    writeSparql "z.rq" q  -- /  at Morloc home (set in config)
-    let cmd = "arq --data=z.ttl --query=z.rq --results=TSV"
-    (_, hout, herr, handle) <- SP.runInteractiveCommand cmd
-    exitCode <- SP.waitForProcess handle
-    out <- MT.hGetContents hout
-    err <- MT.hGetContents herr
-    return $ case exitCode of
-      SE.ExitSuccess -> MT.parseTSV out
-      _ -> ME.error' ((MT.pack . show) (SparqlFail err))
+  sparqlSelect t q x = do
+    -- * DEBUGGING: find the temporary directory
+    tmpdir <- MM.asks configTmpDir
+    -- * DEBUGGING: create it if needed
+    MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
+    -- * DEBUGGING: write the RDF and query to it, using the given prefix
+    let turtlePath = tmpdir <> "/" <> "db.ttl"
+        sparqlPath = tmpdir <> "/" <> t <> ".rq"
+        outputPath = tmpdir <> "/" <> t <> ".tab"
+    MM.liftIO $ writeTurtle turtlePath x
+    MM.liftIO $ writeSparql sparqlPath q
+    -- the system command that queries against a SPARQL database
+    let cmd = "arq --data=" <> turtlePath <> " --query=" <> sparqlPath <> " --results=TSV"
+    out <- MM.runCommandWith "sparqlSelect" MT.parseTSV cmd
+    -- DEBUGGING: print a TAB-delimited result file
+    MM.liftIO $ MT.writeFile (MT.unpack outputPath) (MT.unparseTSV out)
+    return out
 
 makeTopRDF :: DR.Node -> [DR.Triple] -> TopRDF
 makeTopRDF i ts = TopRDF i (makeRDF ts)
@@ -298,7 +305,7 @@ adopt sbj objs =
 showTopRDF :: TopRDF -> MT.Text
 showTopRDF (TopRDF _ rdf) = MT.pack $ DR.showGraph rdf
 
--- | Make a UNode from a number, optionall with a prefix. This is used by
+-- | Make a UNode from a number, optionally with a prefix. This is used by
 -- Morloc.State to create unique ids.
 idUri :: Maybe MT.Text -> Int -> DR.Node
 idUri Nothing  i = midPre .:. MT.show' i
@@ -331,8 +338,8 @@ up :: DR.Rdf a
   -> [DR.Subject]   -- chain function, allows searching in parallel
 up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
 
-getImportedFiles :: DR.Rdf a => DR.RDF a -> [MT.Text]
-getImportedFiles rdf
+getImports :: DR.Rdf a => DR.RDF a -> [MT.Text]
+getImports rdf
   =   up rdf (rdfPre .:. "type") (mlcPre .:. "import")
   >>= down rdf (mlcPre .:. "name")
   >>= valueOf

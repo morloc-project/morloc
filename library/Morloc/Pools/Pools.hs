@@ -9,27 +9,33 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Pools.Pools (generate) where
+module Morloc.Pools.Pools
+(
+    generate
+  , hsparql
+) where
 
 import Morloc.Types
+import Morloc.Operators
 import Morloc.Sparql
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
-
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 
-generate :: SparqlDatabaseLike db => db -> IO [Script]
-generate db = sparqlSelect hsparql db >>= foo' where 
-  foo' :: [[Maybe MT.Text]] -> IO [Script]
-  foo' xss = sequence (map (generateLang db) xss)
+import qualified Control.Monad as CM
 
-generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> IO Script
+generate :: SparqlDatabaseLike db => db -> MorlocMonad [Script]
+generate db = (sparqlSelect "pools" hsparql db) >>= CM.mapM (generateLang db)
+
+generateLang :: SparqlDatabaseLike db => db -> [Maybe MT.Text] -> MorlocMonad Script
 generateLang db lang' = case lang' of
   [Just "R"] -> RLang.generate db
   [Just "py"] -> Py3.generate db
-  [Just x] -> error ("The language " ++ show x ++ " is not supported")
-  x -> error ("Bad SPARQL query:" ++ show x)
+  [Just x] -> MM.throwError . GeneratorError $ "The language " <> x <> " is not supported"
+  x -> MM.throwError . SparqlFail $ "Bad SPARQL query:" <> MT.show' x
 
+-- | Find all languages that are used in the Morloc script
 hsparql :: Query SelectQuery
 hsparql = do
   i_    <- var

@@ -14,10 +14,12 @@ module Morloc.Operators
   , (<>)
   -- * Filesystem utility operators from System.FilePath
   , (</>)
+  , (&)
 ) where
 
 import Data.Monoid
 import System.FilePath
+import Data.Function ((&))
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Parser (parse, parseShallow) where
+module Morloc.Parser (parse) where
 
 import Text.Megaparsec hiding (parse, State)
 import qualified Text.Megaparsec.Expr as TPE
@@ -19,51 +19,65 @@ import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 
 import Morloc.Types
+import qualified Morloc.Config as MC
+import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
+import qualified Morloc.Module as MM
 import Morloc.Operators
 
-parse :: Maybe MT.Text -> MT.Text -> IO (ThrowsError MR.RDF)
-parse srcfile code = case (parseShallow srcfile code) of
-  (Right rdf) -> joinRDF rdf (parseImports rdf)
-  err         -> return err
+-- | Parse a Morloc source file into an AST stored as an RDF, recursively parse
+-- all imported Morloc files. Catch lexical syntax errors.
+parse
+  :: Maybe Path -- ^ A filename associated with the source code (for debugging messages)
+  -> MT.Text    -- ^ The Morloc source code
+  -> MorlocMonad MR.RDF
+parse srcfile code = do
+  top <- parseShallow srcfile code
+  imports <- parseImports top
+  return $ (foldl MR.rdfAppend top) imports
 
-joinRDF :: MR.RDF -> [IO (ThrowsError MR.RDF)] -> IO (ThrowsError MR.RDF)
-joinRDF rdf xs
-  = (fmap . fmap)                         -- raise to IO (ThrowsError a)
-      (foldl MR.rdfAppend rdf)            -- ([MR.RDF] -> MR.RDF)
-      ((CM.liftM sequence . sequence) xs) -- IO (ThrowsError [MR.RDF])
-
-parseImports :: MR.RDF -> [IO (ThrowsError MR.RDF)]
-parseImports rdf = map morlocScriptFromFile (MR.getImportedFiles rdf)
-
-morlocScriptFromFile :: MT.Text -> IO (ThrowsError MR.RDF)
-morlocScriptFromFile s = CM.join . fmap (parse (Just s)) . MT.readFile $ MT.unpack s
-
--- | Parse a string of Morloc text into an AST. Catch lexical syntax errors.
-parseShallow :: Maybe MT.Text -> MT.Text -> ThrowsError MR.RDF
-parseShallow srcfile code =
+parseShallow
+  :: Maybe MT.Text -- ^ Source code file name
+  -> MT.Text       -- ^ Source code
+  -> MorlocMonad MR.RDF
+parseShallow srcfile code = do
+  source_str <- MC.makeLibSourceString srcfile
+  let pstate = MS.ParserState {
+                   MS.stateCount      = 0
+                 , MS.stateSourceUri  = source_str
+                 , MS.stateModulePath = srcfile
+               }
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
-    Left err  -> CME.throwError $ SyntaxError err
+    Left err  -> M.throwError $ SyntaxError err
     Right ((MR.TopRDF _ val), _) -> return val
   where
-    pstate = MS.ParserState { MS.stateCount = 0, MS.stateSourceUri = srcfile}
     input' = case srcfile of
       Just s  -> s
       Nothing -> "<stdin>"
+
+parseImports :: MR.RDF -> MorlocMonad [MR.RDF]
+parseImports rdf = do
+  let importNames = MR.getImports rdf
+  CM.mapM MM.findModule importNames >>= CM.mapM parseFile
+  where
+    parseFile :: Path -> MorlocMonad MR.RDF
+    parseFile p = do
+      code <- M.liftIO . MT.readFile . MT.unpack $ p
+      parse (Just p) code
 
 -- (>>) :: f a -> f b -> f a
 -- (<*) :: f a -> (a -> f b) -> f a
 contents :: MS.Parser MR.TopRDF
 contents = do
   i <- MS.getId
-  srcUri <- MS.getSourceUri
+  modulePath <- MS.getModulePath
   xs <- Tok.sc >> many top <* eof
   return $ MR.makeTopRDF i (
          [ MR.mtriple i PType OScript
-         , MR.mtriple i PValue srcUri
+         , MR.mtriple i PValue modulePath
          ]
       ++ MR.adopt i xs
     )
@@ -147,7 +161,7 @@ simpleImport = do
   return $ MR.makeTopRDF i (
       [
         MR.mtriple i PType OImport
-      , MR.mtriple i PName (path <> ".loc")
+      , MR.mtriple i PName path
       ] ++ maybe [] (\q -> [MR.mtriple i PNamespace q]) qual
     )
 
@@ -161,7 +175,7 @@ restrictedImport = do
   return $ MR.makeTopRDF i (
       [
         MR.mtriple i PType ORestrictedImport
-      , MR.mtriple i PName (path <> ".loc")
+      , MR.mtriple i PName path
       ] ++ MR.adoptAs PImport i functions
     )
 

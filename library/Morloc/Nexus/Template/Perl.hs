@@ -12,26 +12,30 @@ Stability   : experimental
 module Morloc.Nexus.Template.Perl (generate) where
 
 import Morloc.Types
+import Morloc.Operators
 import Morloc.Quasi
 import Morloc.Component.Manifold as MCM
-import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Data.Doc hiding ((<$>), (<>))
+import qualified Morloc.Monad as MM
+import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Data.Maybe as DM
+import qualified Control.Monad as CM
 
+generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
 generate e
   =   Script
   <$> pure "nexus"
   <*> pure "perl"
   <*> makeNexus e
 
-makeNexus :: SparqlDatabaseLike db => db -> IO MT.Text
+makeNexus :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
 makeNexus ep = fmap render $ main <$> names <*> fdata where
-
-  manifolds :: IO [Manifold]
+  manifolds :: MorlocMonad [Manifold]
   manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)
 
-  names :: IO [Doc]
+  names :: MorlocMonad [Doc]
   names = fmap (map (text' . getName)) manifolds
 
   getName :: Manifold -> MT.Text
@@ -42,19 +46,24 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
     | DM.isJust (mComposition m) = length (mBoundVars m)
     | otherwise = length (mArgs m)
 
-  fdata :: IO [(Doc, Int, Doc, Doc, Doc)]
-  fdata = fmap (map getFData) manifolds
+  fdata :: MorlocMonad [(Doc, Int, Doc, Doc, Doc)]
+  fdata = manifolds >>= CM.mapM getFData 
 
-  getFData :: Manifold -> (Doc, Int, Doc, Doc, Doc)
-  getFData m = case mLang m of
-    (Just lang) ->
-      ( text' (getName m)
-      , getNArgs m
-      , text' (MS.findExecutor lang)
-      , text' (MS.makePoolName lang)
-      , text' (MS.makeManifoldName (mCallId m))
-      )
-    Nothing -> error "A language must be defined"
+  getFData :: Manifold -> MorlocMonad (Doc, Int, Doc, Doc, Doc)
+  getFData m = do
+    config <- MM.ask
+    name <- text' <$> MS.makeManifoldName (mCallId m)
+    case mLang m of
+      (Just lang) -> case MC.getExecutor config lang of
+        (Just exe) -> return $
+          ( text' (getName m)
+          , getNArgs m
+          , text' exe
+          , text' (MS.makePoolName lang)
+          , name
+          )
+        Nothing -> MM.throwError (GeneratorError $ "Language not supported: " <> lang)
+      Nothing -> MM.throwError (GeneratorError "A language must be selected for the nexus")
 
   isExported :: Manifold -> Bool
   isExported m =

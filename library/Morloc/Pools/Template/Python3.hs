@@ -15,21 +15,26 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Config as MC
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
-generate :: SparqlDatabaseLike db => db -> IO Script
-generate = makeGenerator g (defaultCodeGenerator g asImport main)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
+generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
 
-asImport :: MT.Text -> Doc
-asImport s = text' $ case MT.uncons s of
-  (Just (x, xs)) -> MT.cons
-    (DC.toLower x)
-    -- FIXME: generalize this to work with any path separator
-    ((MT.replace "/" ".") ((MT.pack . SF.dropExtensions . MT.unpack) xs)) 
-  _ -> error "Expected import to have at least length 1"
+asImport :: MT.Text -> MorlocMonad Doc
+asImport s = do
+  lib <- MM.asks configLibrary
+  return . text'
+         . MT.liftToText (map DC.toLower)
+         . MT.replace "/" "."
+         . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+         . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+         . MT.liftToText SF.dropExtensions
+         $ s
 
 g = Grammar {
       gLang        = "py"
@@ -78,9 +83,9 @@ g = Grammar {
     record' :: [(Doc,Doc)] -> Doc
     record' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
-    -- FIXME: qualify the calls (I don't have handling for this yet ...)
-    import' :: Doc -> Doc
-    import' s = [idoc|from #{s} import *|]
+    -- 1st argument (home directory) is ignored (it is added to path in main)
+    import' :: Doc -> Doc -> Doc
+    import' _ s = [idoc|from #{s} import *|]
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' "_morloc_unpack"
@@ -108,15 +113,23 @@ except Exception as e:
 |]
 
 main
-  :: [Doc] -> [Manifold] -> SerialMap -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env python
+  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
+main srcs manifolds hash = do
+  lib <- fmap text' $ MM.asks MC.configLibrary
+  usedManifolds <- getUsedManifolds g manifolds
+  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) usedManifolds)
+  let sources = vsep (map ((gImport g) lib) srcs)
+  sourceManifolds <- makeSourceManifolds g hash manifolds
+  cisManifolds <- makeCisManifolds g hash manifolds
+  return $ [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
 import json
 
-#{vsep (map (gImport g) srcs)}
+sys.path.append('#{lib}')
 
+#{sources}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:
@@ -149,11 +162,11 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
     return(jsonString)
 
 
-#{makeSourceManifolds g hash manifolds}
+#{sourceManifolds}
 
-#{makeCisManifolds g hash manifolds}
+#{cisManifolds}
 
-dispatch = dict#{tupled (map (\x -> x <> "=" <> x) (getUsedManifolds g manifolds))}
+dispatch = #{dispatchDict}
 
 if __name__ == '__main__':
     script_name = sys.argv[0] 

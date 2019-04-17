@@ -40,16 +40,26 @@ module Morloc.Types (
   , GraphObject(..)
   , SerialMap(..)
   -- ** Error handling
-  , ThrowsError
   , MorlocError(..)
+  -- ** Configuration
+  , Dependency(..)
+  , Config(..)
+  -- ** Morloc monad
+  , MorlocMonad
+  , MorlocState(..)
+  , MorlocReturn
 ) where
 
-import Data.Text                    ( Text         )
-import Data.RDF                     ( Node, Triple )
-import Data.Map.Strict              ( Map          )
-import Text.PrettyPrint.Leijen.Text ( Doc          )
-import Text.Megaparsec.Error        ( ParseError   )
-import Data.Void                    ( Void         )
+import Data.Text                    (Text)
+import Data.RDF                     (Node, Triple)
+import Data.Map.Strict              (Map)
+import Text.PrettyPrint.Leijen.Text (Doc)
+import Text.Megaparsec.Error        (ParseError)
+import Data.Void                    (Void)
+import Control.Monad.Except (ExceptT)
+import Control.Monad.Reader (ReaderT)
+import Control.Monad.State  (StateT)
+import Control.Monad.Writer (WriterT)
 
 -- | Write into Morloc code
 class MShow a where
@@ -63,7 +73,7 @@ class MorlocNodeLike a where
   fromRdfNode :: Node -> a
 
 class MorlocTypeable a where
-  asType :: a -> MType
+  asType :: a -> MorlocMonad MType
 
 class SparqlSelectLike a where
   writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
@@ -74,12 +84,28 @@ class RdfLike a where
   asTriples :: a -> [Triple]
 
 class SparqlDatabaseLike a where
-  sparqlUpload :: (RdfLike r) => a -> r -> IO a
+  sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
 
-  -- FIXME: wrap this pig in Either
   sparqlSelect
     :: (SparqlSelectLike q)
-    => q -> a -> IO [[Maybe Text]]
+    => Text -- ^ A path prefix for stored sparql data and query
+    -> q    -- ^ The query
+    -> a    -- ^ The thing to be queried
+    -> MorlocMonad [[Maybe Text]]
+
+data Dependency
+  = ModuleDependency Name Path Lang
+  | ExecutableDependency Name Path
+  | SourceCodeDependency Name Path Lang
+  deriving(Show, Ord, Eq)
+
+type MorlocMonadGen c e l s a = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
+type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
+data MorlocState = MorlocState {
+      sparqlConn :: Maybe SparqlEndPoint
+    , dependencies :: [Dependency]
+  }
+type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 type Name    = Text
 type Lang    = Text
@@ -99,14 +125,18 @@ data Manifold = Manifold {
       mCallId       :: Key
     , mAbstractType :: Maybe AbstractType
     , mConcreteType :: Maybe ConcreteType
-    , mExported     :: Bool
+    , mExported     :: Bool -- If True, then this manifold will be
+                            -- 1) callable from the nexus (if this script is the base script)
+                            -- 2) imported if the module is imported
+                            -- If False, then it is purely a local function
     , mCalled       :: Bool
-    , mSourced      :: Bool
-    , mMorlocName   :: Name
+    , mSourced      :: Bool -- True if this function read from sourced (e.g., `source "R" ("runif")`)
+    , mMorlocName   :: Name -- e.g., in `source "R" ("runif" as rand_uniform)`, "rand_uniform" is morloc name and "runif" is the R name
     , mCallName     :: Name
-    , mSourcePath   :: Maybe Path
+    , mSourcePath   :: Maybe Path -- ^ e.g., "foo.py3", this is relative to the module directory path
+    , mModulePath   :: Maybe Path -- ^ e.g., "$HOME/.morloc/lib/foo/main.loc
     , mSourceName   :: Maybe Name
-    , mComposition  :: Maybe Name
+    , mComposition  :: Maybe Name -- ^ The name of the declaration function. For example, in `foo x = sqrt x`, "foo" is mComposition
     , mBoundVars    :: [Name]
     , mLang         :: Maybe Lang
     , mArgs         :: [Argument]
@@ -154,8 +184,7 @@ data SerialMap = SerialMap {
     , serialUnpacker :: Map MType Name
     , serialGenericPacker   :: Name
     , serialGenericUnpacker :: Name
-    , serialSources :: [Path] -- Later, I might want to link the source files to
-                              -- each function, but for now that isn't needed.
+    , serialSources :: [Path] -- ^ The absolute paths to the source files
   }
   deriving(Show, Eq, Ord)
 
@@ -230,7 +259,6 @@ data GraphObject
 
   deriving(Show, Eq, Ord)
 
-type ThrowsError = Either MorlocError
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
   -- occur for RDF that has been validated.
@@ -245,6 +273,30 @@ data MorlocError
   | UnknownError
   -- | Raised when parent and child types conflict
   | TypeConflict Text Text
+  -- | Raised for general type errors
+  | TypeError Text
   -- | Raised when a SPARQL command fails
   | SparqlFail Text
+  -- | Raised when a module cannot be loaded 
+  | CannotLoadModule Text
+  -- | System call failed
+  | SystemCallError Text Text Text
+  -- | Raised when there is an error in the code generators
+  | GeneratorError Text
+  -- | Missing a serialization or deserialization function
+  | SerializationError Text
+  -- | Raised when a dependency is missing
+  | DependencyError Dependency
+  -- | A truly weird and befuddling error that shouldn't ever occur
+  | TrulyWeird
   deriving(Eq)
+
+data Config = Config {
+    configHome :: Text
+  , configLibrary :: Text
+  , configTmpDir :: Text
+  , configLangPython3 :: Text
+  , configLangR :: Text
+  , configLangPerl :: Text
+  }
+  deriving(Show, Ord, Eq)

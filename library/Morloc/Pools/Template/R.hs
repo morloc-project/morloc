@@ -15,9 +15,15 @@ import Morloc.Types
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Config as MC
+import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 
-generate :: SparqlDatabaseLike db => db -> IO Script
-generate = makeGenerator g (defaultCodeGenerator g text' main)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
+generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+
+asImport :: MT.Text -> MorlocMonad Doc
+asImport s = return . text' $ s
 
 g = Grammar {
       gLang        = "R"
@@ -65,8 +71,9 @@ g = Grammar {
     record' :: [(Doc,Doc)] -> Doc
     record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    import' :: Doc -> Doc
-    import' s = call' "source" [dquotes s]
+    -- FIXME: make portable (replace "/" with the appropriate separator)
+    import' :: Doc -> Doc -> Doc
+    import' _ srcpath = call' "source" [dquotes srcpath]
 
     try' :: TryDoc -> Doc
     try' t = call' ".morloc_try"
@@ -94,10 +101,15 @@ g = Grammar {
       ]
 
 main
-  :: [Doc] -> [Manifold] -> SerialMap -> Doc
-main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
+  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
+main srcs manifolds hash = do
+  lib <- fmap text' $ MM.asks MC.configLibrary
+  let sources = line <> vsep (map ((gImport g) lib) srcs)
+  sourceManifolds <- makeSourceManifolds g hash manifolds
+  cisManifolds <- makeCisManifolds g hash manifolds
+  return $ [idoc|#!/usr/bin/env Rscript
 
-#{line <> vsep (map (gImport g) srcs)}
+#{sources}
 
 .morloc_run <- function(f, args){
   fails <- ""
@@ -162,10 +174,9 @@ main srcs manifolds hash = [idoc|#!/usr/bin/env Rscript
   .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .pool=.pool)
 }
 
+#{sourceManifolds}
 
-#{makeSourceManifolds g hash manifolds}
-
-#{makeCisManifolds g hash manifolds}
+#{cisManifolds}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

@@ -15,8 +15,11 @@ module Morloc.Component.Util (
   , isElement_
 ) where
 
+import Morloc.Types
+import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
@@ -28,19 +31,22 @@ simpleGraph
   :: (Ord key, Ord a)
   => (    Map.Map key (a, [key])
        -> key
-       -> b
+       -> MorlocMonad b
      )
-  -> ([Maybe MT.Text] -> a) -- prepare the specific data
-  -> (MT.Text -> key) -- map a text field to an id
-  -> (db -> IO [[Maybe MT.Text]])
-  -> db 
-  -> IO (Map.Map key b)
-simpleGraph f g h query d
-  = fmap (graphify f . map tuplify) (query d)
+  -> ([Maybe MT.Text] -> MorlocMonad a) -- ^ using input text (e.g., from a SPARQL query) get data
+  -> (MT.Text -> key) -- ^ transform a text field into a key
+  -> (db -> MorlocMonad [[Maybe MT.Text]]) -- ^ query a database
+  -> db -- ^ the database
+  -> MorlocMonad (Map.Map key b) -- ^ return a flat map
+simpleGraph f g h query d = query d >>= mapM tuplify >>= graphify f
   where
     tuplify xs = case (take 3 xs, drop 3 xs) of
-      ([Just mid, el, child], rs) -> ((h mid, g rs), (,) <$> el <*> (fmap h child))
-      _ -> error "Unexpected SPARQL output"
+      ([Just mid, el, child], rs) -> do
+        a1 <- g rs                            -- a
+        let k1 = h mid                        -- key
+        let y = (,) <$> el <*> (fmap h child) -- Maybe (Text, [key])
+        return ((k1, a1), y)                  -- ((key, a), Maybe (Text, [key]))
+      _ -> MM.throwError $ SparqlFail "Unexpected SPARQL output"
 
 -- | Build a map of objects from a tree-like structure with parent keys
 -- mapping to one or more ordered child ids.
@@ -48,11 +54,13 @@ graphify
   :: (Ord index, Ord key, Ord a)
   => (    Map.Map key (a, [key])
        -> key
-       -> b
+       -> MorlocMonad b
      )
   -> [((key, a), Maybe (index, key))]
-  -> Map.Map key b -- one element for each root element
-graphify f xs = Map.fromList $ zip roots (map (f hash) roots)
+  -> MorlocMonad (Map.Map key b) -- one element for each root element
+graphify f xs = do
+  values <- mapM (f hash) roots
+  return . Map.fromList . zip roots $ values 
   where
     hash
       = Map.fromList

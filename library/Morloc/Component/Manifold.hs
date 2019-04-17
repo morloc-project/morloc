@@ -9,45 +9,58 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.Manifold (fromSparqlDb) where
+module Morloc.Component.Manifold
+(
+    fromSparqlDb
+  , hsparql
+) where
 
 import Morloc.Types
 import Morloc.Operators
 import Morloc.Sparql
-import qualified Morloc.Error as ME
 import qualified Morloc.System as MS
 import qualified Morloc.Util as MU
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.MType as MCT 
 import qualified Morloc.Component.MData as MCD 
 import qualified Morloc.Component.Util as MCU 
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
+import qualified System.Directory as SD
 
 -- | Collect most of the info needed to build all manifolds
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => db -> IO [Manifold]
+  => db -> MorlocMonad [Manifold]
 fromSparqlDb ep = do
   typemap <- MCT.fromSparqlDb ep
   datamap <- MCD.fromSparqlDb ep
-  mandata <- sparqlSelect hsparql ep
-  return $ ( unroll
-           . setCalls
-           . setLangs
-           . DLE.groupSort
-           . propagateBoundVariables
-           . map (asTuple typemap datamap) 
-           ) mandata
+  sparqlSelect "manifold" hsparql ep
+    >>= mapM (asTuple typemap datamap)
+    |>> propagateBoundVariables
+    |>> DLE.groupSort
+    |>> setLangs
+    >>= setCalls
+    >>= unroll
+    >>= printManifoldsForDebugging -- write manifolds to tmp directory
+
+printManifoldsForDebugging :: [Manifold] -> MorlocMonad [Manifold]
+printManifoldsForDebugging manifolds = do
+  tmpdir <- MM.asks configTmpDir
+  MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
+  let path = (MT.unpack tmpdir) <> "/" <> "manifolds.txt"
+  MM.liftIO $ writeFile path (show manifolds)
+  return manifolds
 
 asTuple
   :: Map.Map Key MType
   -> Map.Map Key MData
   -> [Maybe MT.Text]
-  -> (Manifold, Either Key Argument)
-asTuple typemap datamap [ Just callId'
+  -> MorlocMonad (Manifold, Either Key Argument)
+asTuple typemap datamap [ Just manId'
                         , abstractTypeId'
                         , element'
                         , Just morlocName'
@@ -63,10 +76,16 @@ asTuple typemap datamap [ Just callId'
                         , argname'
                         , argcall_id'
                         , argdata_id'
-                        ] =
-  (
-    Manifold
-      { mCallId       = callId'
+                        , modulePath'
+                        ] = do
+  arg <- makeArgument (
+      argname'
+    , argcall_id'
+    , argdata_id' >>= (flip Map.lookup) datamap
+    , element'
+    )
+  let man = Manifold {
+        mCallId       = manId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
       , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
       , mMorlocName   = morlocName'
@@ -77,30 +96,31 @@ asTuple typemap datamap [ Just callId'
       , mExported     = exported' == "true"
       , mSourced      = sourced'  == "true"
       , mSourcePath   = sourcePath'
+      , mModulePath   = modulePath'
       , mBoundVars    = maybe [] (MT.splitOn ",") bvars'
       , mLang         = sourceLang'
       , mArgs         = [] -- this will be set in the next step
       }
-  , makeArgument (
-      argname'
-    , argcall_id'
-    , argdata_id' >>= (flip Map.lookup) datamap
-    , element'
-    )
-  )
-asTuple _ _ x = ME.error' ("Unexpected SPARQL row:\n" <> MT.pretty x)
+  return (man, arg)
 
-setCalls :: [(Manifold, [Either Key Argument])] -> [Manifold]
-setCalls xs = map (\(m, args) -> m { mArgs = map (set hash) args }) xs
+asTuple _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
+
+setCalls :: [(Manifold, [Either Key Argument])] -> MorlocMonad [Manifold]
+setCalls xs = mapM setArgs xs
   where
-    set :: Map.Map Key Manifold -> Either Key Argument -> Argument
-    set h (Left key) = case Map.lookup key h of
-      (Just m) -> ArgCall m
-      Nothing -> error "Call to non-existing manifold"
-    set _ (Right a) = a
-
     hash :: Map.Map Key Manifold
     hash = Map.fromList $ zip (map (mCallId . fst) xs) (map fst xs)
+
+    setArgs :: (Manifold, [Either Key Argument]) -> MorlocMonad Manifold 
+    setArgs (m, args) = do
+      args' <- mapM setArg args
+      return $ m { mArgs = args' }
+
+    setArg :: Either Key Argument -> MorlocMonad Argument
+    setArg (Left key) = case Map.lookup key hash of
+      (Just m) -> return $ ArgCall m
+      Nothing -> MM.throwError . InvalidRDF $ "Call to non-existing manifold"
+    setArg (Right a) = return a
 
 setLangs :: [(Manifold, a)] -> [(Manifold, a)]
 setLangs ms = map (setLang hash) ms
@@ -114,20 +134,20 @@ setLangs ms = map (setLang hash) ms
                                          , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Name    -- argument name (if it is a bound argument)
-     , Maybe Key     -- argument callId (if it is a function call)
-     , Maybe MData   -- argument data (if this is data)
-     , Maybe MT.Text -- the element (rdf:_<num>)
+  :: ( Maybe Name    -- ^ argument name (if it is a bound argument)
+     , Maybe Key     -- ^ argument callId (if it is a function call)
+     , Maybe MData   -- ^ argument data (if this is data)
+     , Maybe MT.Text -- ^ the element (rdf:_<num>)
      )
-  -> Either Key Argument
-makeArgument (Just x  , _       , _       , _ ) = Right $ ArgName x
-makeArgument (_       , Just x  , _       , _ ) = Left x
-makeArgument (_       , _       , Just x  , _ ) = Right $ ArgData x
+  -> MorlocMonad (Either Key Argument)
+makeArgument (Just x  , _       , _       , _ ) = return . Right $ ArgName x
+makeArgument (_       , Just x  , _       , _ ) = return . Left $ x
+makeArgument (_       , _       , Just x  , _ ) = return . Right $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just e) =
   case (MT.stripPrefix (MR.rdfPre <> "_") e) >>= MT.readMay' of
-    Just i -> Right $ ArgPosi i
-    _ -> ME.error' ("Unexpected value for element: " <> MT.pretty e)
-makeArgument _ = error "Bad argument"
+    Just i -> return . Right $ ArgPosi i
+    _ -> MM.throwError . InvalidRDF $ "Unexpected value for element: " <> MT.pretty e
+makeArgument _ = MM.throwError . InvalidRDF $ "Bad argument"
 
 propagateBoundVariables :: [(Manifold, Either Key Argument)] -> [(Manifold, Either Key Argument)]
 propagateBoundVariables ms = map setBoundVars ms 
@@ -135,7 +155,7 @@ propagateBoundVariables ms = map setBoundVars ms
     setBoundVars :: (Manifold, Either Key Argument) -> (Manifold, Either Key Argument)
     setBoundVars (m, a) = (m { mBoundVars = maybe [] id (Map.lookup (mCallId m) hash) }, a)
 
-    -- map from mcallId to mBoundVars
+    -- map from mCallId to mBoundVars
     hash :: Map.Map Key [Name]
     hash = MU.spreadAttr (map toTriple ms)
 
@@ -149,41 +169,44 @@ propagateBoundVariables ms = map setBoundVars ms
 
 -- | This function creates a tree of new manifolds to represent the call tree
 -- of a called Morloc composition.
-unroll :: [Manifold] -> [Manifold]
-unroll ms = concat $ map unroll' ms
+unroll :: [Manifold] -> MorlocMonad [Manifold]
+unroll ms = fmap concat (mapM unroll' ms)
   where
-    unroll' :: Manifold -> [Manifold]
+    unroll' :: Manifold -> MorlocMonad [Manifold]
     unroll' m
       | (mCalled m) && (not $ mSourced m) =
           case
             filter (declaringManifold m) ms
           of
             [r] -> unrollPair m r
-            xs  -> ME.error' $ MT.unlines
+            xs  -> MM.throwError . InvalidRDF $ MT.unlines
               [ "In this manifold:"
               , MT.pretty m
               , "Expected to find one associated DataDeclaration, but found:"
               , MT.pretty xs
               ]
-      | otherwise = [m]
+      | otherwise = return [m]
 
-    unrollPair :: Manifold -> Manifold -> [Manifold]
-    unrollPair m r = [m'] ++ unroll' r' where
-      signedKey = signKey (mCallId m) (mCallId r)
-      r' = r { mCallId = signedKey, mExported = False }
-      m' = m { mCallName = MS.makeManifoldName signedKey }
+    unrollPair :: Manifold -> Manifold -> MorlocMonad [Manifold]
+    unrollPair m r = do
+      signedKey <- signKey (mCallId m) (mCallId r)
+      mName <- MS.makeManifoldName signedKey
+      let r' = r { mCallId = signedKey, mExported = False }
+      let m' = m { mCallName = mName }
+      fmap (\ms' -> [m'] ++ ms') (unroll' r')
 
-    signKey :: Key -> Key -> Key
+    signKey :: Key -> Key -> MorlocMonad Key
     signKey m r =
       case
         (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
       of
-        (Just mKey, Just rKey) -> MR.midPre <> mKey <> "_" <> rKey
-        _ -> ME.error' ("callId of invalid form: " <> MT.pretty (m, r))
+        (Just mKey, Just rKey) -> return $ MR.midPre <> mKey <> "_" <> rKey
+        _ -> MM.throwError . InvalidRDF $ "callId of invalid form: " <> MT.pretty (m, r)
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
 
+-- | 
 hsparql :: Query SelectQuery
 hsparql = do
   abstractTypeId_ <- var
@@ -192,7 +215,7 @@ hsparql = do
   argname_        <- var
   bnd_            <- var
   bvars_          <- var
-  callId_         <- var
+  mid_            <- var
   called_         <- var
   composition_    <- var
   concreteTypeId_ <- var
@@ -203,6 +226,7 @@ hsparql = do
   sourceName_     <- var
   sourcePath_     <- var
   sourced_        <- var
+  modulePath_     <- var
 
   subQuery_ $ do
     arg_           <- var
@@ -215,61 +239,74 @@ hsparql = do
     fid_           <- var
     importId_      <- var
     langTypedec_   <- var
-    scriptElement_ <- var
-    scriptId_      <- var
     sourceId_      <- var
     typedec_       <- var
     typeid_        <- var
 
-    union_
-      ( do
-          triple_ callId_ PType OCall
-          triple_ callId_ PValue fid_
-          triple_ callId_ element_ arg_
-          MCU.isElement_ element_
+    -- Something can be exported if it is in the export list AND
+    --  * Case 1: sourced and typed
+    --  * Case 2: it is the name of a function declaration
+    --  All other cases currently should raise errors. Old C-loc could actually
+    --  export any manifold in a workflow. This was cool, since it allowed user
+    --  querying of intermediate elements. In the future, I should add this
+    --  handling back in, however I currently lack the syntax for it.
 
-          triple_ fid_ PType OName
-          triple_ fid_ PValue morlocName_
-      )
+    union_
+      -- find manifolds that are 1) exported, 2) typed, and 3) sourced
       ( do
           -- Find exported values
-          triple_ callId_ PType OExport
-          triple_ callId_ PValue morlocName_
-
-          -- This is exported from the global environment
-          triple_ scriptId_ PType OScript
-          triple_ scriptId_ PValue ("<stdin>" :: MT.Text)
-          triple_ scriptId_ scriptElement_ callId_
-          MCU.isElement_ scriptElement_
+          triple_ mid_ PType OExport
+          triple_ mid_ PValue morlocName_
 
           triple_ typedec_ PType OTypeDeclaration
           triple_ typedec_ PLang ("Morloc" :: MT.Text)
           triple_ typedec_ PLeft morlocName_
           triple_ typedec_ PRight typeid_
 
+          triple_ sourceId_ PType OSource
+          triple_ sourceId_ PImport importId_
+          triple_ importId_ PAlias morlocName_
+
+          -- one return for each argument (input type)
           triple_ typeid_ element_ arg_
           MCU.isElement_ element_
-          
-          -- Keep only the values that are NOT calls (to avoid duplication)
-          triple_ callId_ PType callIdType_
-          filterExpr (str callIdType_ .!=. OCall)
-      )
 
-    -- # Determine whether this is exported
-    optional_ $ do    
-      triple_ e_ PType OExport
-      triple_ e_ PValue morlocName_
+          -- Keep only the values that are NOT calls (to avoid duplication)
+          triple_ mid_ PType callIdType_
+          filterExpr (str callIdType_ .!=. OCall)
+
+          -- export case #1 (see note above)
+          optional_ $ do
+            triple_ e_ PType OExport
+            triple_ e_ PValue morlocName_
+
+      )
+      -- find manifolds that are calls (this includes compositions)
+      ( do
+          triple_ mid_ PType OCall
+          triple_ mid_ PValue fid_
+          triple_ mid_ element_ arg_
+          MCU.isElement_ element_
+
+          triple_ fid_ PType OName
+          triple_ fid_ PValue morlocName_
+      )
 
     -- # Find the bound variables
     optional_ $ do
       triple_ datadec_ PType ODataDeclaration
       triple_ datadec_ PLeft composition_
-      triple_ datadec_ PRight callId_
+      triple_ datadec_ PRight mid_
       triple_ datadec_ bndElement_ bndId_
       MCU.isElement_ bndElement_
 
       triple_ bndId_ PType OName
       triple_ bndId_ PValue bnd_ -- bound variables
+
+      -- export case #2 (see note above)
+      optional_ $ do    
+        triple_ e_ PType OExport
+        triple_ e_ PValue composition_
 
     -- # Find the source language
     optional_ $ do
@@ -292,7 +329,7 @@ hsparql = do
 
       filterExpr ((str sourceLang_) .!=. ("Morloc" :: MT.Text))
 
-    -- Find the type delcaration ID
+    -- Find the type declaration ID
     optional_ $ do
       triple_ dectypeId_ PType OTypeDeclaration
       triple_ dectypeId_ PLang ("Morloc" :: MT.Text)
@@ -327,7 +364,7 @@ hsparql = do
       , argcallId_
       , argname_
       , bnd_
-      , callId_
+      , mid_
       , called_
       , composition_
       , concreteTypeId_
@@ -338,13 +375,14 @@ hsparql = do
       , sourceName_
       , sourcePath_
       , sourced_
+      , modulePath_
       ]
 
   groupBy abstractTypeId_
   groupBy argcallId_
   groupBy argdataId_
   groupBy argname_
-  groupBy callId_
+  groupBy mid_
   groupBy called_
   groupBy composition_
   groupBy concreteTypeId_
@@ -355,12 +393,13 @@ hsparql = do
   groupBy sourceName_
   groupBy sourcePath_
   groupBy sourced_
+  groupBy modulePath_
 
-  orderNextAsc callId_
+  orderNextAsc mid_
   orderNextAsc element_ 
 
   select
-    [ SelectVar  callId_
+    [ SelectVar  mid_
     , SelectVar  abstractTypeId_
     , SelectVar  element_
     , SelectVar  morlocName_
@@ -376,4 +415,19 @@ hsparql = do
     , SelectVar  argname_
     , SelectVar  argcallId_
     , SelectVar  argdataId_
+    , SelectVar  modulePath_
     ]
+
+------ example output for `sample.loc`
+-- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- | callId          | abstractTypeId  | el#      | morlocName     | srcName   | comp   | bvars | lang | srcPath | called | src  | exp   | concreteTypeId | argname | argcallId | argdataId       | modulePath   |
+-- ===============================================================================================================================================================================================================
+-- | <sample.loc_19> |                 | <rdf#_0> | "len"          | "len"     |        |       | "R"  |         | true   | true | false |                | "xs"    |           |                 |              |
+-- | <sample.loc_2>  | <sample.loc_35> | <rdf#_0> | "ceiling"      | "ceiling" |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
+-- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
+-- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
+-- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
+-- | <sample.loc_47> | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                | "n"     |           |                 |              |
+-- | <sample.loc_47> | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_50> |              |
+-- | <sample.loc_47> | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_51> |              |
+-- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

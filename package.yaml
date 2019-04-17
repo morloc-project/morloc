@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.16.2
+version:          0.17.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -19,6 +19,8 @@ extra-source-files:
 
 dependencies:
   - base >= 4.7 && < 5
+  - aeson
+  - bytestring
   - containers
   - directory
   - extra
@@ -35,7 +37,9 @@ dependencies:
   - scientific
   - template-haskell
   - text
+  - unordered-containers
   - wl-pprint-text
+  - yaml
 
 ghc-options:
   - -Wall

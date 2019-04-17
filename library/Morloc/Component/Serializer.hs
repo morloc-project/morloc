@@ -9,8 +9,10 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Component.Serializer (
+module Morloc.Component.Serializer
+(
     fromSparqlDb
+  , hsparql
   , SerialMap(..)
 ) where
 
@@ -21,6 +23,7 @@ import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
 
 import qualified Data.Map.Strict as Map
 
@@ -30,37 +33,43 @@ type SerialData =
   , Bool -- is_generic - is this a generic packer/unpacker
   , Name -- name
   , Path -- path
+  , Path -- module path
   )
 
 -- TODO: update this to limit results to one language
 -- OR return a hash of hashes by language
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Lang -> db -> IO SerialMap
-fromSparqlDb l db
-  =   toSerialMap
-  <$> MCM.fromSparqlDb db
-  <*> (map tuplify <$> sparqlSelect (hsparql l) db)
-
+  => Lang -> db -> MorlocMonad SerialMap
+fromSparqlDb l db = do
+  typemap <- MCM.fromSparqlDb db
+  serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
+  toSerialMap typemap serialData
   where
-
-    tuplify :: [Maybe MT.Text] -> SerialData
-    -- typename | property | is_generic | name | path
-    tuplify [Just t, Just p, Just g, Just n, Just s] = (t,p,g == "true",n,s)
-    tuplify e = ME.error' ("Unexpected SPARQL result: " <> MT.pretty e)
+    tuplify :: [Maybe MT.Text] -> MorlocMonad SerialData
+    tuplify [ Just t -- typename
+            , Just p -- property
+            , Just g -- is_generic
+            , Just n -- name
+            , Just s -- path (e.g., "rbase.R")
+            , Just m -- module path (e.g., "$HOME/.morloc/lib/rbase/main.loc")
+            ] = return (t,p,g == "true",n,s,m)
+    tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
     toSerialMap
       :: Map.Map Key ConcreteType 
       -> [SerialData]
-      -> SerialMap
-    toSerialMap h xs = case
-      ( Map.fromList [(getIn  (lookupOrDie t h), p) | (t, "packs"  , False, p, _) <- xs]
-      , Map.fromList [(getOut (lookupOrDie t h), p) | (t, "unpacks", False, p, _) <- xs]
-      , [p | (_, "packs"  , True, p, _) <- xs]
-      , [p | (_, "unpacks", True, p, _) <- xs]
-      , MU.unique [s | (_, _, _, _, s) <- xs]
-      ) of
-        (phash, uhash, [p], [u], srcs) -> SerialMap
+      -> MorlocMonad SerialMap
+    toSerialMap h xs = do
+      packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _, _) <- xs]
+      unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _, _) <- xs]
+      case ( Map.fromList packers
+           , Map.fromList unpackers
+           , [p | (_, "packs"  , True, p, _, _) <- xs]
+           , [p | (_, "unpacks", True, p, _, _) <- xs]
+           , MU.unique [makePath m s | (_, _, _, _, s, m) <- xs]
+           ) of
+        (phash, uhash, [p], [u], srcs) -> return $ SerialMap
           { serialLang = l
           , serialPacker = phash
           , serialUnpacker = uhash
@@ -68,23 +77,31 @@ fromSparqlDb l db
           , serialGenericUnpacker = u
           , serialSources = srcs
           }
-        _ -> ME.error' ("Expected exactly one generic packer/unpacker: " <> MT.pretty xs)
+        _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
 
-    getOut :: MType -> MType
-    getOut (MFuncType _ _ x) = x
-    getOut t = ME.error' ("Expected packer to have signature: a -> JSON: " <> MT.pretty t)
+    makePath
+      :: MT.Text -- module path
+      -> MT.Text -- basename of packer/unpacker source file
+      -> MT.Text
+    makePath m' p' = MT.intercalate "/" $ (init (MT.splitOn "/" m')) ++ [p']
 
-    getIn :: MType -> MType
-    getIn (MFuncType _ [x] _) = x
-    getIn t = ME.error' ("Expected unpacker to have signature: JSON -> a: " <> MT.pretty t)
+    getOut :: a -> MType -> MorlocMonad (MType, a)
+    getOut p (MFuncType _ _ x) = return (x, p)
+    getOut _ t = MM.throwError . SerializationError $
+      "Expected packer to have signature: a -> JSON: " <> MT.pretty t
 
-    lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> b
+    getIn :: a -> MType -> MorlocMonad (MType, a)
+    getIn p (MFuncType _ [x] _) = return (x, p)
+    getIn _ t = MM.throwError . SerializationError $
+      "Expected unpacker to have signature: JSON -> a: " <> MT.pretty t
+
+    lookupOrDie :: (Ord a, Show a) => a -> Map.Map a b -> MorlocMonad b
     lookupOrDie k h = case Map.lookup k h of
-      (Just x) -> x
-      Nothing -> ME.error' (
-          "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
-        )
+      (Just x) -> return x
+      Nothing -> MM.throwError . SerializationError $
+        "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
 
+-- | Get information about the serialization functions
 hsparql :: Lang -> Query SelectQuery
 hsparql lang' = do
   basetype_      <- var
@@ -101,6 +118,9 @@ hsparql lang' = do
   sourceId_      <- var
   typeId_        <- var
   unpackerInput_ <- var
+  scriptId_      <- var
+  element_       <- var
+  modulePath_    <- var
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
@@ -143,9 +163,35 @@ hsparql lang' = do
         triple_ sourceId_ PPath path_
         triple_ sourceId_ PImport importId_
         triple_ importId_ PAlias name_
+
+        triple_ scriptId_ PType OScript
+        triple_ scriptId_ element_ sourceId_ 
+        triple_ scriptId_ PValue modulePath_
     )
 
   orderNextAsc typeId_
   orderNextAsc property_
 
-  selectVars [rhs_, property_, isGeneric_, name_, path_]
+  selectVars [rhs_, property_, isGeneric_, name_, path_, modulePath_]
+
+---- expected output for `sample.loc`
+-- -----------------------------------------------------------------------------------------------------------------------
+-- | rhs                    | property  | isGeneric | name              | path      | modulePath                         |
+-- =======================================================================================================================
+-- | mlc:rbase__main.loc_55 | "packs"   | true      | "packGeneric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_20 | "packs"   | false     | "packCharacter"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_25 | "packs"   | false     | "packDataFrame"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_30 | "packs"   | false     | "packDataTable"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_35 | "packs"   | false     | "packList"        | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_40 | "packs"   | false     | "packLogical"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_45 | "packs"   | false     | "packMatrix"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_50 | "packs"   | false     | "packNumeric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_60 | "unpacks" | true      | "unpackGeneric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_65 | "unpacks" | false     | "unpackCharacter" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_70 | "unpacks" | false     | "unpackDataFrame" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_75 | "unpacks" | false     | "unpackDataTable" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_80 | "unpacks" | false     | "unpackList"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_85 | "unpacks" | false     | "unpackLogical"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_90 | "unpacks" | false     | "unpackMatrix"    | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- | mlc:rbase__main.loc_95 | "unpacks" | false     | "unpackNumeric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
+-- -----------------------------------------------------------------------------------------------------------------------
