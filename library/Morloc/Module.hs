@@ -42,10 +42,11 @@ findModule moduleName = do
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: MT.Text -> MT.Text -> [MT.Text]
 getModulePaths lib base = [
-    base <> ".loc"                    -- "./${base}.loc"
-  , base <> "/main.loc"               -- "${base}/main.loc"
-  , lib <> "/" <> base <> ".loc"      -- "${LIB}/${base}.loc"
-  , lib <> "/" <> base <> "/main.loc" -- "${LIB}/${base}/main.loc"
+    base <> ".loc"                               -- "./${base}.loc"
+  , base <> "/main.loc"                          -- "${base}/main.loc"
+  , lib <> "/" <> base <> ".loc"                 -- "${LIB}/${base}.loc"
+  , lib <> "/" <> base <> "/main.loc"            -- "${LIB}/${base}/main.loc"
+  , lib <> "/" <> base <> "/" <> base <> ".loc"  -- "${LIB}/${base}/${base}.loc"
   ]
 
 getFile :: MT.Text -> IO (Maybe MT.Text)
