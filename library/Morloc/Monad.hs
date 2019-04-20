@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
@@ -41,9 +43,9 @@ runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev con
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
-  =  MT.hPutStr stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStr stderr (MT.show' err) -- write terminal failing message
-writeMorlocReturn ((_, msgs), _) = MT.hPutStr stderr (MT.unlines msgs)
+  =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
+  >> MT.hPutStrLn stderr (MT.show' err) -- write terminal failing message
+writeMorlocReturn ((_, msgs), _) = MT.hPutStrLn stderr (MT.unlines msgs)
 
 -- | Execute a system call
 runCommand
