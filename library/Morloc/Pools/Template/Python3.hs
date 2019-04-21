@@ -85,7 +85,10 @@ g = Grammar {
 
     -- 1st argument (home directory) is ignored (it is added to path in main)
     import' :: Doc -> Doc -> Doc
-    import' _ s = [idoc|from #{s} import *|]
+    import' _ s = [idoc|from lib.#{s} import *|]
+    -- TODO: FIX THE 'lib.' HACK - the hack avoids namespace collisions (e.g.
+    -- of Morloc 'bio' against Biopython 'bio'). But it also hard-codes the
+    -- 'lib' foler name. 
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' "_morloc_unpack"
@@ -115,10 +118,10 @@ except Exception as e:
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
+  home <- fmap text' $ MM.asks MC.configHome
   usedManifolds <- getUsedManifolds g manifolds
   let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) usedManifolds)
-  let sources = vsep (map ((gImport g) lib) srcs)
+  let sources = vsep (map ((gImport g) "lib") srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
   return $ [idoc|#!/usr/bin/env python
@@ -127,7 +130,7 @@ import sys
 import subprocess
 import json
 
-sys.path.append('#{lib}')
+sys.path = ["#{home}"] + sys.path
 
 #{sources}
 
