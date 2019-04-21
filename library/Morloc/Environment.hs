@@ -35,6 +35,6 @@ installGithubRepo repo url = do
   
 installModule :: ModuleSource -> MorlocMonad ()
 installModule (GithubRepo repo) = installGithubRepo repo ("https://github.com/" <> repo)
-installModule (CoreGithubRepo name) = installGithubRepo name ("https://github.com/morloc-project/" <> name)
+installModule (CoreGithubRepo name) = installGithubRepo name ("https://github.com/morloclib/" <> name)
 installModule (LocalModule Nothing) = MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just dir)) = MM.throwError (NotImplemented "module installation from local directory")
