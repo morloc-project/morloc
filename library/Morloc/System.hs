@@ -16,6 +16,7 @@ module Morloc.System
     , loadYamlConfig
     , getHomeDirectory
     , appendPath
+    , takeDirectory
   ) where
 
 import Morloc.Types
@@ -24,7 +25,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
 import qualified System.Directory as Sys 
-import System.FilePath.Posix (combine)
+import System.FilePath.Posix (combine, takeDirectory)
 import qualified Data.Yaml.Config as YC
 import Data.Aeson (FromJSON(..))
 import qualified Data.Char as DC

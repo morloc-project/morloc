@@ -31,7 +31,10 @@ import qualified Morloc.Component.Manifold as Manifold
 import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Module as Mod
 import qualified Data.Map.Strict as Map
+import qualified Data.Maybe as DM
+import qualified Data.List as DL
 
 data Grammar = Grammar {
       gLang     :: MT.Text
@@ -105,9 +108,24 @@ defaultCodeGenerator
 defaultCodeGenerator g f main ep = do
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
-  srcs <- mapM f (serialSources packMap)
-  doc <- main srcs manifolds packMap
+  paksrcs <- mapM f (serialSources packMap)
+  mansrcs <- getManSrcs f manifolds
+  let srcs = paksrcs ++ mansrcs
+  doc <- main (srcs) manifolds packMap
+  -----------------
+  MM.liftIO . print $ manifolds
+  MM.liftIO . print $ packMap
+  MM.liftIO . print $ srcs
+  -----------------
   return $ render doc
+
+getManSrcs :: (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
+getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
+  getManSrc :: Manifold -> Maybe MT.Text
+  getManSrc m = case (mSourcePath m, mModulePath m) of
+    (Just srcpath, Just modpath) ->
+      Just $ (MT.pack . MS.takeDirectory . MT.unpack) modpath <> "/" <> srcpath
+    _ -> Nothing
 
 -- | inifinite list of named variables
 iArgs :: Doc -> [Doc]

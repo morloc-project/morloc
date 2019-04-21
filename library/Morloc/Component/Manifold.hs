@@ -242,6 +242,8 @@ hsparql = do
     sourceId_      <- var
     typedec_       <- var
     typeid_        <- var
+    scriptElement_ <- var
+    scriptId_      <- var
 
     -- Something can be exported if it is in the export list AND
     --  * Case 1: sourced and typed
@@ -267,6 +269,10 @@ hsparql = do
           triple_ sourceId_ PImport importId_
           triple_ importId_ PAlias morlocName_
 
+          triple_ scriptId_ PType OScript
+          triple_ scriptId_ PValue modulePath_
+          triple_ scriptId_ scriptElement_ sourceId_
+
           -- one return for each argument (input type)
           triple_ typeid_ element_ arg_
           MCU.isElement_ element_
@@ -287,6 +293,10 @@ hsparql = do
           triple_ mid_ PValue fid_
           triple_ mid_ element_ arg_
           MCU.isElement_ element_
+
+          triple_ scriptId_ PType OScript
+          triple_ scriptId_ PValue modulePath_
+          triple_ scriptId_ scriptElement_ mid_
 
           triple_ fid_ PType OName
           triple_ fid_ PValue morlocName_
