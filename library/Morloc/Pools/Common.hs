@@ -20,6 +20,8 @@ module Morloc.Pools.Common
   , makeCisManifolds
   , makeSourceManifolds
   , getUsedManifolds
+  , getUnpacker
+  , callIdToName
 ) where
 
 import Morloc.Types
@@ -291,3 +293,11 @@ getUsedManifolds g ms = MM.filterM isBuilt ms >>= mapM callIdToName
 
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
+
+getUnpacker :: SerialMap -> Manifold -> Doc
+getUnpacker hash m =
+  case mConcreteType m of
+    (Just (MFuncType _ _ o)) -> case Map.lookup o (serialUnpacker hash) of
+      (Just t) -> text' t
+      Nothing  -> text' . serialGenericUnpacker $ hash
+    Nothing ->  text' . serialGenericUnpacker $ hash

@@ -115,12 +115,17 @@ except Exception as e:
     sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
 
+toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+toDict l r xs = "dict" <> tupled (map (\x -> l x <> "=" <> r x) xs)
+
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
   home <- fmap text' $ MM.asks MC.configHome
   usedManifolds <- getUsedManifolds g manifolds
-  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) usedManifolds)
+  let dispatchFunDict = toDict id id usedManifolds
+  mids <- MM.mapM callIdToName manifolds
+  let dispatchSerializerDict = toDict fst (getUnpacker hash . snd) (zip mids manifolds)
   let sources = vsep (map ((gImport g) "lib") srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
@@ -169,7 +174,8 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
 
 #{cisManifolds}
 
-dispatch = #{dispatchDict}
+dispatchFun = #{dispatchFunDict}
+dispatchSerializer = #{dispatchSerializerDict}
 
 if __name__ == '__main__':
     script_name = sys.argv[0] 
@@ -180,12 +186,13 @@ if __name__ == '__main__':
         sys.exit("Internal error in {}: no manifold id found".format(script))
 
     try:
-        function = dispatch[cmd]
+        function = dispatchFun[cmd]
     except KeyError:
         sys.exit("Internal error in {}: expected manifold id (e.g. m34), got {}".format(script, cmd))
 
     args = sys.argv[2:]
+    serialize = dispatchSerializer[cmd]
 
-    print(packGeneric(function(*args)))
+    print(serialize(function(*args)))
 
 |]
