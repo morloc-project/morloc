@@ -100,6 +100,9 @@ g = Grammar {
       , ".name=" <> dquotes (fcdMid f)
       ]
 
+toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+toDict l r xs = "list" <> tupled (map (\x -> l x <> "=" <> r x) xs)
+
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
@@ -107,6 +110,8 @@ main srcs manifolds hash = do
   let sources = line <> vsep (map ((gImport g) lib) srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
+  mids <- MM.mapM callIdToName manifolds
+  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
   return $ [idoc|#!/usr/bin/env Rscript
 
 #{sources}
@@ -178,18 +183,23 @@ main srcs manifolds hash = do
 
 #{cisManifolds}
 
+dispatchSerializer <- #{dispatchSerializerDict}
+
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
   stop("Expected 1 or more arguments")
 } else if(exists(args[[1]])){
-  x <- get(args[[1]])
-  result <- if(class(x) == "function"){
-    do.call(get(args[[1]]), as.list(args[-1, drop=FALSE]))
+  cmdstr <- args[[1]]
+  cmd <- get(cmdstr)
+  args <- as.list(args[-1, drop=FALSE])
+  result <- if(class(cmd) == "function"){
+    do.call(cmd, args)
   } else {
-    x
+    cmd
   }
-  cat(packGeneric(result), "\n")
+  serializer <- dispatchSerializer[[cmdstr]]
+  cat(serializer(result), "\n")
 } else {
-  stop("Could not find function '", args[[1]], "'")
+  stop("Could not find function '", cmdstr, "'")
 }
 |]

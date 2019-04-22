@@ -125,7 +125,7 @@ main srcs manifolds hash = do
   usedManifolds <- getUsedManifolds g manifolds
   let dispatchFunDict = toDict id id usedManifolds
   mids <- MM.mapM callIdToName manifolds
-  let dispatchSerializerDict = toDict fst (getUnpacker hash . snd) (zip mids manifolds)
+  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
   let sources = vsep (map ((gImport g) "lib") srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
