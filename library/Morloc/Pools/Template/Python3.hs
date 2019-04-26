@@ -85,7 +85,10 @@ g = Grammar {
 
     -- 1st argument (home directory) is ignored (it is added to path in main)
     import' :: Doc -> Doc -> Doc
-    import' _ s = [idoc|from #{s} import *|]
+    import' _ s = [idoc|from lib.#{s} import *|]
+    -- TODO: FIX THE 'lib.' HACK - the hack avoids namespace collisions (e.g.
+    -- of Morloc 'bio' against Biopython 'bio'). But it also hard-codes the
+    -- 'lib' foler name. 
 
     unpacker' :: UnpackerDoc -> Doc
     unpacker' u = call' "_morloc_unpack"
@@ -112,13 +115,18 @@ except Exception as e:
     sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
 
+toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+toDict l r xs = "dict" <> tupled (map (\x -> l x <> "=" <> r x) xs)
+
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
+  home <- fmap text' $ MM.asks MC.configHome
   usedManifolds <- getUsedManifolds g manifolds
-  let dispatchDict = "dict" <> tupled (map (\x -> x <> "=" <> x) usedManifolds)
-  let sources = vsep (map ((gImport g) lib) srcs)
+  let dispatchFunDict = toDict id id usedManifolds
+  mids <- MM.mapM callIdToName manifolds
+  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
+  let sources = vsep (map ((gImport g) "lib") srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
   return $ [idoc|#!/usr/bin/env python
@@ -127,7 +135,7 @@ import sys
 import subprocess
 import json
 
-sys.path.append('#{lib}')
+sys.path = ["#{home}"] + sys.path
 
 #{sources}
 
@@ -166,7 +174,8 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
 
 #{cisManifolds}
 
-dispatch = #{dispatchDict}
+dispatchFun = #{dispatchFunDict}
+dispatchSerializer = #{dispatchSerializerDict}
 
 if __name__ == '__main__':
     script_name = sys.argv[0] 
@@ -177,12 +186,13 @@ if __name__ == '__main__':
         sys.exit("Internal error in {}: no manifold id found".format(script))
 
     try:
-        function = dispatch[cmd]
+        function = dispatchFun[cmd]
     except KeyError:
         sys.exit("Internal error in {}: expected manifold id (e.g. m34), got {}".format(script, cmd))
 
     args = sys.argv[2:]
+    serialize = dispatchSerializer[cmd]
 
-    print(packGeneric(function(*args)))
+    print(serialize(function(*args)))
 
 |]

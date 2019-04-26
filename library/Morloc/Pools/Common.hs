@@ -20,6 +20,8 @@ module Morloc.Pools.Common
   , makeCisManifolds
   , makeSourceManifolds
   , getUsedManifolds
+  , getPacker
+  , callIdToName
 ) where
 
 import Morloc.Types
@@ -31,7 +33,10 @@ import qualified Morloc.Component.Manifold as Manifold
 import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Module as Mod
 import qualified Data.Map.Strict as Map
+import qualified Data.Maybe as DM
+import qualified Data.List as DL
 
 data Grammar = Grammar {
       gLang     :: MT.Text
@@ -105,9 +110,24 @@ defaultCodeGenerator
 defaultCodeGenerator g f main ep = do
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (gLang g) ep
-  srcs <- mapM f (serialSources packMap)
-  doc <- main srcs manifolds packMap
+  paksrcs <- mapM f (serialSources packMap)
+  mansrcs <- getManSrcs f manifolds
+  let srcs = paksrcs ++ mansrcs
+  doc <- main (srcs) manifolds packMap
+  -----------------
+  MM.liftIO . print $ manifolds
+  MM.liftIO . print $ packMap
+  MM.liftIO . print $ srcs
+  -----------------
   return $ render doc
+
+getManSrcs :: (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
+getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
+  getManSrc :: Manifold -> Maybe MT.Text
+  getManSrc m = case (mSourcePath m, mModulePath m) of
+    (Just srcpath, Just modpath) ->
+      Just $ (MT.pack . MS.takeDirectory . MT.unpack) modpath <> "/" <> srcpath
+    _ -> Nothing
 
 -- | inifinite list of named variables
 iArgs :: Doc -> [Doc]
@@ -273,3 +293,11 @@ getUsedManifolds g ms = MM.filterM isBuilt ms >>= mapM callIdToName
 
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
+
+getPacker :: SerialMap -> Manifold -> Doc
+getPacker hash m =
+  case mConcreteType m of
+    (Just (MFuncType _ _ o)) -> case Map.lookup o (serialPacker hash) of
+      (Just t) -> text' t
+      Nothing  -> text' . serialGenericPacker $ hash
+    Nothing ->  text' . serialGenericPacker $ hash

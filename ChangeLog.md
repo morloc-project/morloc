@@ -1,17 +1,24 @@
-next
-----
+0.17.1 [2019.04.26]
+-------------------
 
- * add morloc home
- * load modules from `$MORLOCHOME/lib`
+ * Fix output serialization in generate code
+ * Fix module linking in generated code
+
+0.17.0 [2019.04.16]
+-------------------
+
+ * Add morloc home
+ * Load modules from `$MORLOCHOME/lib`
+ * Create monad stack
 
 0.16.2 [2018.03.05]
-----
+-------------------
 
  * Add Zenodo badge making the project citable
  * Move to `morloc-project/morloc` github repo
 
 0.16.1 [2018.09.24]
-----
+-------------------
 
 Minor release consisting of internal refactoring
 
