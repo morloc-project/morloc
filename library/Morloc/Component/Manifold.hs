@@ -15,7 +15,7 @@ module Morloc.Component.Manifold
   , hsparql
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.System as MS

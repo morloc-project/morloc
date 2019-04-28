@@ -16,7 +16,7 @@ module Morloc.Component.Serializer
   , SerialMap(..)
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Error as ME

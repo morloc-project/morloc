@@ -24,7 +24,7 @@ module Morloc.Pools.Common
   , callIdToName
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Config as MC
@@ -126,7 +126,9 @@ getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
   getManSrc :: Manifold -> Maybe MT.Text
   getManSrc m = case (mSourcePath m, mModulePath m) of
     (Just srcpath, Just modpath) ->
-      Just $ (MT.pack . MS.takeDirectory . MT.unpack) modpath <> "/" <> srcpath
+      case (MT.pack . MS.takeDirectory . MT.unpack $ modpath) of
+        "."  -> Just srcpath
+        path -> Just $ path <> "/" <> srcpath
     _ -> Nothing
 
 -- | inifinite list of named variables

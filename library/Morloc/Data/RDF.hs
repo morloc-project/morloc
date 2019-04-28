@@ -37,7 +37,7 @@ module Morloc.Data.RDF (
   , rdfAppend
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT

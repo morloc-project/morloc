@@ -15,7 +15,7 @@ module Morloc.Pools.Pools
   , hsparql
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Monad as MM

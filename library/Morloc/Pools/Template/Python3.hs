@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Pools.Template.Python3 (generate) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))

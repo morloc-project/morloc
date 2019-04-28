@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
-Module      : Morloc.Types
+Module      : Morloc.Global
 Description : All types and datastructures
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types ( 
+module Morloc.Global ( 
   -- ** Typeclasses
     MShow(..)
   , MorlocNodeLike(..)

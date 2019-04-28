@@ -16,7 +16,7 @@ module Morloc.Component.MData
 ) where
 
 import Morloc.Sparql
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR

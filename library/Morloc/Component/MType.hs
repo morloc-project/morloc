@@ -16,7 +16,7 @@ module Morloc.Component.MType
 ) where
 
 import Morloc.Sparql
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Data.Doc hiding ((<$>),(<>))
 import qualified Morloc.Component.Util as MCU

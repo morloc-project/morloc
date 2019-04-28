@@ -19,7 +19,7 @@ module Morloc.System
     , takeDirectory
   ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM

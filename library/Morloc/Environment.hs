@@ -16,7 +16,7 @@ module Morloc.Environment
 ) where
 
 import Morloc.Operators
-import Morloc.Types
+import Morloc.Global
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as MC

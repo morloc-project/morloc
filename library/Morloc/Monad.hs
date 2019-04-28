@@ -23,7 +23,7 @@ module Morloc.Monad
   , module Control.Monad.Writer
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 

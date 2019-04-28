@@ -14,7 +14,7 @@ program. New entries can be added to describe new types of error.
 
 module Morloc.Error () where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 
