@@ -36,15 +36,13 @@ type SerialData =
   , Path -- module path
   )
 
--- TODO: update this to limit results to one language
--- OR return a hash of hashes by language
 fromSparqlDb
   :: SparqlDatabaseLike db
   => Lang -> db -> MorlocMonad SerialMap
 fromSparqlDb l db = do
   typemap <- MCM.fromSparqlDb db
   serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
-  toSerialMap typemap serialData
+  toSerialMap typemap serialData >>= MM.logFile ("serialMap-" <> MT.unpack l <> ".txt")
   where
     tuplify :: [Maybe MT.Text] -> MorlocMonad SerialData
     tuplify [ Just t -- typename

@@ -29,7 +29,6 @@ import qualified Morloc.Data.Text as MT
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
-import qualified System.Directory as SD
 
 -- | Collect most of the info needed to build all manifolds
 fromSparqlDb
@@ -45,15 +44,7 @@ fromSparqlDb ep = do
     |>> setLangs
     >>= setCalls
     >>= unroll
-    >>= printManifoldsForDebugging -- write manifolds to tmp directory
-
-printManifoldsForDebugging :: [Manifold] -> MorlocMonad [Manifold]
-printManifoldsForDebugging manifolds = do
-  tmpdir <- MM.asks configTmpDir
-  MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-  let path = (MT.unpack tmpdir) <> "/" <> "manifolds.txt"
-  MM.liftIO $ writeFile path (show manifolds)
-  return manifolds
+    >>= MM.logFile "manifolds.txt"
 
 asTuple
   :: Map.Map Key MType
