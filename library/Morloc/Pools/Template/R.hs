@@ -107,7 +107,8 @@ main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
   lib <- fmap text' $ MM.asks MC.configLibrary
-  let sources = line <> vsep (map ((gImport g) lib) srcs)
+  -- TODO: fix this hack - the sources should be filtered by language before being passed to main
+  let sources = line <> vsep (map ((gImport g) lib) (filter (\s -> MT.isSuffixOf ".R" (render s)) srcs))
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
   mids <- MM.mapM callIdToName manifolds
