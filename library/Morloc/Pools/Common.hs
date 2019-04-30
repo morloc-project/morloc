@@ -27,6 +27,7 @@ module Morloc.Pools.Common
 import Morloc.Global
 import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.TypeHandler as MTH
 import qualified Morloc.Config as MC
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
@@ -114,11 +115,6 @@ defaultCodeGenerator g f main ep = do
   mansrcs <- getManSrcs f manifolds
   let srcs = paksrcs ++ mansrcs
   doc <- main (srcs) manifolds packMap
-  -----------------
-  MM.liftIO . print $ manifolds
-  MM.liftIO . print $ packMap
-  MM.liftIO . print $ srcs
-  -----------------
   return $ render doc
 
 getManSrcs :: (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
@@ -296,10 +292,35 @@ getUsedManifolds g ms = MM.filterM isBuilt ms >>= mapM callIdToName
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
 
+-- | If a language-specific signature is given for the manifold, choose a
+-- packer that matches the language-specific output type. Otherwise, search for
+-- a packer that matches the morloc type.
+-- TODO: make the MorlocMonad
+-- TODO: special handling of generic packers and unpackers is no longer necessary
 getPacker :: SerialMap -> Manifold -> Doc
-getPacker hash m =
-  case mConcreteType m of
-    (Just (MFuncType _ _ o)) -> case Map.lookup o (serialPacker hash) of
-      (Just t) -> text' t
-      Nothing  -> text' . serialGenericPacker $ hash
-    Nothing ->  text' . serialGenericPacker $ hash
+getPacker hash m = case packerType of
+  (Just t) -> case Map.lookup t (serialPacker hash) of
+    (Just n) -> text' n
+    Nothing -> error "You should not be reading this"
+  Nothing -> text' $ serialGenericPacker hash
+  where
+    packerType :: Maybe MType
+    packerType = case cPacker of
+      (Just x) -> Just x
+      Nothing -> aPacker
+
+    cPacker :: Maybe MType
+    cPacker = case mConcreteType m of
+      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      Nothing -> Nothing
+
+    aPacker :: Maybe MType
+    aPacker = case mAbstractType m of
+      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      Nothing -> Nothing
+
+    packers :: MType -> [MType]
+    packers o
+      = Map.keys
+      . Map.filterWithKey (\p _ -> MTH.childOf o p)
+      $ (serialPacker hash)
