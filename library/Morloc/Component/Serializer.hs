@@ -30,7 +30,6 @@ import qualified Data.Map.Strict as Map
 type SerialData =
   ( Key  -- type_id - 
   , Name -- property - "packs" or "unpackes"
-  , Bool -- is_generic - is this a generic packer/unpacker
   , Name -- name
   , Path -- path
   , Path -- module path
@@ -47,35 +46,49 @@ fromSparqlDb l db = do
     tuplify :: [Maybe MT.Text] -> MorlocMonad SerialData
     tuplify [ Just t -- typename
             , Just p -- property
-            , Just g -- is_generic
             , Just n -- name
             , Just s -- path (e.g., "rbase.R")
             , Just m -- module path (e.g., "$HOME/.morloc/lib/rbase/main.loc")
-            ] = return (t,p,g == "true",n,s,m)
+            ] = return (t,p,n,s,m)
     tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
+
     toSerialMap
-      :: Map.Map Key ConcreteType 
+      :: Map.Map Key ConcreteType
       -> [SerialData]
       -> MorlocMonad SerialMap
-    toSerialMap h xs = do
-      packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _, _) <- xs]
-      unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _, _) <- xs]
-      case ( Map.fromList packers
-           , Map.fromList unpackers
-           , [p | (_, "packs"  , True, p, _, _) <- xs]
-           , [p | (_, "unpacks", True, p, _, _) <- xs]
-           , MU.unique [makePath m s | (_, _, _, _, s, m) <- xs]
-           ) of
-        (phash, uhash, [p], [u], srcs) -> return $ SerialMap
-          { serialLang = l
-          , serialPacker = phash
-          , serialUnpacker = uhash
-          , serialGenericPacker = p
-          , serialGenericUnpacker = u
-          , serialSources = srcs
-          }
-        _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
+    toSerialMap h xs
+      =   SerialMap
+      <$> pure l -- language
+      <*> (fmap Map.fromList . sequence $
+            [lookupOrDie t h >>= getIn  p | (t, "packs"  , p, _, _) <- xs]) -- packers
+      <*> (fmap Map.fromList . sequence $
+            [lookupOrDie t h >>= getOut p | (t, "unpacks", p, _, _) <- xs]) -- unpackers
+      <*> pure (MU.unique [makePath m s | (_, _, _, s, m) <- xs]) -- sources
+
+
+    -- toSerialMap
+    --   :: Map.Map Key ConcreteType
+    --   -> [SerialData]
+    --   -> MorlocMonad SerialMap
+    -- toSerialMap h xs = do
+    --   packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _, _) <- xs]
+    --   unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _, _) <- xs]
+    --   case ( Map.fromList packers
+    --        , Map.fromList unpackers
+    --        , [p | (_, "packs"  , True, p, _, _) <- xs]
+    --        , [p | (_, "unpacks", True, p, _, _) <- xs]
+    --        , MU.unique [makePath m s | (_, _, _, _, s, m) <- xs]
+    --        ) of
+    --     (phash, uhash, [p], [u], srcs) -> return $ SerialMap
+    --       { serialLang = l
+    --       , serialPacker = phash
+    --       , serialUnpacker = uhash
+    --       , serialGenericPacker = p
+    --       , serialGenericUnpacker = u
+    --       , serialSources = srcs
+    --       }
+    --     _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
 
     makePath
       :: MT.Text -- module path
@@ -105,7 +118,6 @@ hsparql lang' = do
   basetype_      <- var
   id_            <- var
   importId_      <- var
-  isGeneric_     <- var
   name_          <- var
   output_        <- var
   packerInput_   <- var
@@ -152,8 +164,6 @@ hsparql lang' = do
         filterExpr (basetype_ .!=. OType)
     )
 
-  bind (basetype_ .==. OAtomicGenericType) isGeneric_
-
   optional_
     ( do
         triple_ sourceId_ PType OSource
@@ -170,26 +180,4 @@ hsparql lang' = do
   orderNextAsc typeId_
   orderNextAsc property_
 
-  selectVars [rhs_, property_, isGeneric_, name_, path_, modulePath_]
-
----- expected output for `sample.loc`
--- -----------------------------------------------------------------------------------------------------------------------
--- | rhs                    | property  | isGeneric | name              | path      | modulePath                         |
--- =======================================================================================================================
--- | mlc:rbase__main.loc_55 | "packs"   | true      | "packGeneric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_20 | "packs"   | false     | "packCharacter"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_25 | "packs"   | false     | "packDataFrame"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_30 | "packs"   | false     | "packDataTable"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_35 | "packs"   | false     | "packList"        | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_40 | "packs"   | false     | "packLogical"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_45 | "packs"   | false     | "packMatrix"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_50 | "packs"   | false     | "packNumeric"     | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_60 | "unpacks" | true      | "unpackGeneric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_65 | "unpacks" | false     | "unpackCharacter" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_70 | "unpacks" | false     | "unpackDataFrame" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_75 | "unpacks" | false     | "unpackDataTable" | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_80 | "unpacks" | false     | "unpackList"      | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_85 | "unpacks" | false     | "unpackLogical"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_90 | "unpacks" | false     | "unpackMatrix"    | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- | mlc:rbase__main.loc_95 | "unpacks" | false     | "unpackNumeric"   | "rbase.R" | "$HOME/.morloc/lib/rbase/main.loc" |
--- -----------------------------------------------------------------------------------------------------------------------
+  selectVars [rhs_, property_, name_, path_, modulePath_]

@@ -199,8 +199,6 @@ data SerialMap = SerialMap {
       serialLang :: Lang
     , serialPacker   :: Map MType Name
     , serialUnpacker :: Map MType Name
-    , serialGenericPacker   :: Name
-    , serialGenericUnpacker :: Name
     , serialSources :: [Path] -- ^ The absolute paths to the source files
   }
   deriving(Show, Eq, Ord)

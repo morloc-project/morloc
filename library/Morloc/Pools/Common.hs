@@ -230,18 +230,6 @@ makeSourceManifold g h m = do
             , udFile = text' (MS.makePoolName (gLang g))
           }))
 
--- find a packer for each argument
-getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
-getUnpackers h m = case mConcreteType m of
-  (Just (MFuncType _ ts _)) -> return $ map (unpackerName h . return) ts 
-  (Just _) -> MM.throwError . GeneratorError $ "Expected a function type for:" <> MT.pretty m
-  Nothing -> return $ take (length (mArgs m)) (repeat (unpackerName h Nothing))
-  where
-    unpackerName :: SerialMap -> Maybe MType -> Doc 
-    unpackerName h' n' = case (n' >>= (flip Map.lookup) (serialUnpacker h')) of 
-      (Just f) -> text' f
-      Nothing  -> text' (serialGenericUnpacker h')
-
 callIdToName :: Manifold -> MorlocMonad Doc
 callIdToName m = text' <$> MS.makeManifoldName (mCallId m)
 
@@ -292,17 +280,36 @@ getUsedManifolds g ms = MM.filterM isBuilt ms >>= mapM callIdToName
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
 
+-- find a packer for each argument
+getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
+getUnpackers hash m = case mConcreteType m of
+  (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
+  Nothing -> case mAbstractType m of
+    (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
+    Nothing -> MM.throwError . TypeError $
+      "Expected a function for the following manifold: " <> MT.pretty m
+
+getUnpacker :: SerialMap -> MType -> MorlocMonad Doc
+getUnpacker smap t =
+  case (MTH.findMostSpecificType
+         . Map.keys
+         . Map.filterWithKey (\p _ -> MTH.childOf t p)
+         $ (serialUnpacker smap)
+       ) >>= (flip Map.lookup) (serialUnpacker smap)
+  of
+    (Just x) -> return (text' x)
+    Nothing -> MM.throwError TrulyWeird
+
 -- | If a language-specific signature is given for the manifold, choose a
 -- packer that matches the language-specific output type. Otherwise, search for
 -- a packer that matches the morloc type.
 -- TODO: make the MorlocMonad
--- TODO: special handling of generic packers and unpackers is no longer necessary
 getPacker :: SerialMap -> Manifold -> Doc
 getPacker hash m = case packerType of
   (Just t) -> case Map.lookup t (serialPacker hash) of
     (Just n) -> text' n
     Nothing -> error "You should not be reading this"
-  Nothing -> text' $ serialGenericPacker hash
+  Nothing -> error "No packer found for this type"
   where
     packerType :: Maybe MType
     packerType = case cPacker of
