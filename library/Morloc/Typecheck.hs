@@ -16,7 +16,7 @@ identical.
 
 module Morloc.Typecheck (typecheck) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Component.Manifold as Manifold

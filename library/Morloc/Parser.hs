@@ -18,7 +18,7 @@ import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 import qualified Control.Monad.Except as CME
 
-import Morloc.Types
+import Morloc.Global
 import qualified Morloc.Config as MC
 import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
-Module      : Morloc.Types
+Module      : Morloc.Global
 Description : All types and datastructures
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types ( 
+module Morloc.Global ( 
   -- ** Typeclasses
     MShow(..)
   , MorlocNodeLike(..)
@@ -164,17 +164,34 @@ data MData
   | Tup' [MData]
   deriving(Show, Eq, Ord)
 
+-- | A Morloc type, may be a language specific type.
 data MType
-  = MConcType MTypeMeta Name [MType]
-  | MAbstType MTypeMeta Name [MType]
-  | MFuncType MTypeMeta [MType] MType
-  deriving(Show, Eq, Ord)
+  = MConcType MTypeMeta Name [MType]  -- ^ A non-generic, concrete type
+  | MAbstType MTypeMeta Name [MType]  -- ^ A generic, wildcard, type
+  | MFuncType MTypeMeta [MType] MType -- ^ A function type with a list of input types and a single output type
+  deriving(Show, Eq)
+
+instance Ord MType where
+  -- Concrete is more specific 
+  compare (MConcType _ _ _) (MAbstType _ _ _) = GT
+  compare (MAbstType _ _ _) (MConcType _ _ _) = LT
+  -- Function types are somewhat arbitrarily more specific than concrete types
+  compare (MFuncType _ _ _) (MConcType _ _ _) = GT
+  compare (MConcType _ _ _) (MFuncType _ _ _) = LT
+  -- Function types are more specific than abstract types
+  compare (MFuncType _ _ _) (MAbstType _ _ _) = GT
+  compare (MAbstType _ _ _) (MFuncType _ _ _) = LT
+  -- For similar types, compare first the children, then the properties, then the name
+  -- TODO: This needs more thought.
+  compare (MConcType d1 n1 xs1)  (MConcType d2 n2 xs2)  = compare (xs1, d1, n1)  (xs2, d2, n2)
+  compare (MAbstType d1 n1 xs1)  (MAbstType d2 n2 xs2)  = compare (xs1, d1, n1)  (xs2, d2, n2)
+  compare (MFuncType d1 ins1 o1) (MFuncType d2 ins2 o2) = compare (ins1, o1, d1) (ins2, o2, d2)
 
 -- TODO: add constraints
 data MTypeMeta = MTypeMeta {
       metaName :: Maybe Name
-    , metaProp :: [Name]
-    , metaLang :: Maybe Lang
+    , metaProp :: [Name]     -- ^ A list of properties. Currently these are non-parameterized properties, such as "pack" or "unpack".
+    , metaLang :: Maybe Lang -- ^ The language. TODO: make Nothing mean it is a Morloc function, and "Just lang" mean it is a concrete type from the language "lang".
   }
   deriving(Show, Eq, Ord)
 
@@ -182,8 +199,6 @@ data SerialMap = SerialMap {
       serialLang :: Lang
     , serialPacker   :: Map MType Name
     , serialUnpacker :: Map MType Name
-    , serialGenericPacker   :: Name
-    , serialGenericUnpacker :: Name
     , serialSources :: [Path] -- ^ The absolute paths to the source files
   }
   deriving(Show, Eq, Ord)
@@ -195,7 +210,7 @@ newtype SparqlEndPoint = SparqlEndPoint { endpoint :: String }
 data Script = Script {
       scriptBase :: String  -- ^ script basename (no extension)
     , scriptLang :: String  -- ^ script language
-    , scriptCode :: Text -- ^ full script source code
+    , scriptCode :: Text    -- ^ full script source code
   }
   deriving(Ord, Eq)
 

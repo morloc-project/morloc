@@ -2,7 +2,7 @@
 
 {-|
 Module      : Morloc.Component.MData
-Description : Build manifolds for code generation from a SPARQL endpoint.
+Description : Build MData objects for code generation from a SPARQL endpoint.
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -16,7 +16,7 @@ module Morloc.Component.MData
 ) where
 
 import Morloc.Sparql
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR

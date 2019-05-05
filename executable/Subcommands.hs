@@ -18,7 +18,7 @@ module Subcommands
 ) where
 
 import Morloc.Operators
-import Morloc.Types
+import Morloc.Global
 import qualified Morloc as M
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.RDF as MR

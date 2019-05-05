@@ -19,7 +19,7 @@ module Morloc.Config (
   , makeLibSourceString
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT

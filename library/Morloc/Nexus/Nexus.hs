@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Nexus.Nexus (generate) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Config (Config)
 import qualified Morloc.Monad as MM

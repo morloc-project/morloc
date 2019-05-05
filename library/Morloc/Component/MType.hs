@@ -2,7 +2,7 @@
 
 {-|
 Module      : Morloc.Component.MType
-Description : Build manifolds for code generation from a SPARQL endpoint.
+Description : Build MType objects for code generation from a SPARQL endpoint.
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -16,7 +16,7 @@ module Morloc.Component.MType
 ) where
 
 import Morloc.Sparql
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Data.Doc hiding ((<$>),(<>))
 import qualified Morloc.Component.Util as MCU

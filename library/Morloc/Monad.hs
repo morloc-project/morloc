@@ -16,6 +16,7 @@ module Morloc.Monad
   , writeMorlocReturn
   , runCommand
   , runCommandWith
+  , logFile
   , module Control.Monad.Trans 
   , module Control.Monad.Except 
   , module Control.Monad.Reader
@@ -23,7 +24,7 @@ module Morloc.Monad
   , module Control.Monad.Writer
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 
@@ -37,6 +38,7 @@ import qualified Data.Map as Map
 import qualified System.Exit as SE
 import qualified System.Process as SP
 import System.IO (stderr)
+import qualified System.Directory as SD
 
 runMorlocMonad :: Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db [])
@@ -75,3 +77,15 @@ runCommandWith loc f cmd = do
     case exitCode of
       SE.ExitSuccess -> return $ f out
       _ -> throwError (SystemCallError cmd loc err)
+
+-- | Write a object to a file in the Morloc temporary directory
+logFile :: Show a
+        => String -- ^ A filename
+        -> a
+        -> MorlocMonad a 
+logFile s m = do
+  tmpdir <- asks configTmpDir
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
+  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ writeFile path (show m)
+  return m 

@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Nexus.Template.Perl (generate) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Operators
 import Morloc.Quasi
 import Morloc.Component.Manifold as MCM

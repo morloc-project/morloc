@@ -16,7 +16,7 @@ module Morloc.Generator
   , generate  
 ) where
 
-import Morloc.Types
+import Morloc.Global
 import Morloc.Config (Config)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Nexus.Nexus as MN

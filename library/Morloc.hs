@@ -12,7 +12,7 @@ import qualified System.Directory as SD
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import Morloc.Operators
-import Morloc.Types
+import Morloc.Global
 import Morloc.Config (Config)
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
