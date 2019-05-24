@@ -34,7 +34,6 @@ import qualified Morloc.Component.Manifold as Manifold
 import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Module as Mod
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
 import qualified Data.List as DL
@@ -284,8 +283,10 @@ fname m = text' (mCallName m)
 getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
 getUnpackers hash m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
+  (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
   Nothing -> case mAbstractType m of
     (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
+    (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
     Nothing -> MM.throwError . TypeError $
       "Expected a function for the following manifold: " <> MT.pretty m
 
@@ -319,11 +320,13 @@ getPacker hash m = case packerType of
     cPacker :: Maybe MType
     cPacker = case mConcreteType m of
       (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      (Just _) -> error "Ah shit"
       Nothing -> Nothing
 
     aPacker :: Maybe MType
     aPacker = case mAbstractType m of
       (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      (Just _) -> error "Ah shit"
       Nothing -> Nothing
 
     packers :: MType -> [MType]

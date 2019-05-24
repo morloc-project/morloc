@@ -13,10 +13,8 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Global
-import Morloc.Config (Config)
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG
-import Morloc.Typecheck (typecheck)
 
 -- | Build a program as a local executable
 writeProgram :: SparqlDatabaseLike db

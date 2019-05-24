@@ -19,7 +19,6 @@ module Morloc.Component.Serializer
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
-import qualified Morloc.Error as ME
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT

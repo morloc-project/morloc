@@ -21,7 +21,6 @@ import qualified Morloc.Config as Config
 import qualified System.Directory as SD
 import qualified Control.Monad as CM
 import qualified Data.Maybe as DM
-import System.FilePath ((</>))
 import Morloc.Operators
 import qualified Data.List as DL
 

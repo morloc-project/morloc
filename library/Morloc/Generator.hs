@@ -17,8 +17,6 @@ module Morloc.Generator
 ) where
 
 import Morloc.Global
-import Morloc.Config (Config)
-import qualified Morloc.Monad as MM
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
 

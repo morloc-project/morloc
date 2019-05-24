@@ -306,6 +306,7 @@ data MorlocError
   | TrulyWeird
   deriving(Eq)
 
+-- | Configuration object that is passed with MorlocMonad
 data Config = Config {
     configHome :: Text
   , configLibrary :: Text

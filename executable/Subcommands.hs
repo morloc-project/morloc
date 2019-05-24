@@ -15,6 +15,7 @@ module Subcommands
   , cmdInstall
   , cmdMake
   , cmdRdf
+  , cmdRemove
 ) where
 
 import Morloc.Operators
@@ -72,7 +73,7 @@ cmdInstall args conf
 
 -- | remove a previously installed module (NOT YET IMPLEMENTED)
 cmdRemove :: Subcommand
-cmdRemove args config = do
+cmdRemove _ _ = do
   putStrLn "not removing anything"
 
 -- | build a Morloc program, generating the nexus and pool files

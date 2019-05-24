@@ -16,7 +16,6 @@ import qualified Text.Megaparsec.Expr as TPE
 import qualified Text.Megaparsec.Char as TMC
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
-import qualified Control.Monad.Except as CME
 
 import Morloc.Global
 import qualified Morloc.Config as MC
@@ -35,9 +34,9 @@ parse
   -> MT.Text    -- ^ The Morloc source code
   -> MorlocMonad MR.RDF
 parse srcfile code = do
-  top <- parseShallow srcfile code
-  imports <- parseImports top
-  return $ (foldl MR.rdfAppend top) imports
+  top' <- parseShallow srcfile code
+  imports <- parseImports top'
+  return $ (foldl MR.rdfAppend top') imports
 
 parseShallow
   :: Maybe MT.Text -- ^ Source code file name

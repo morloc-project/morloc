@@ -13,7 +13,6 @@ module Morloc.Nexus.Nexus (generate) where
 
 import Morloc.Global
 import Morloc.Operators
-import Morloc.Config (Config)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Nexus.Template.Perl as Perl
 

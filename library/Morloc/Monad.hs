@@ -33,8 +33,7 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
-import Morloc.Error -- for MorlocError Show instance
-import qualified Data.Map as Map
+import Morloc.Error () -- for MorlocError Show instance
 import qualified System.Exit as SE
 import qualified System.Process as SP
 import System.IO (stderr)

@@ -39,7 +39,6 @@ module Morloc.Data.RDF (
 
 import Morloc.Global
 import Morloc.Operators
-import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
 import qualified Morloc.Monad     as MM
@@ -48,8 +47,6 @@ import qualified Data.RDF         as DR
 import qualified Data.Map.Strict  as DMS
 import qualified Data.Scientific  as DS
 import qualified System.IO        as SIO
-import qualified System.Process   as SP
-import qualified System.Exit      as SE
 import qualified System.Directory as SD
 
 type RDF = DR.RDF DR.TList
