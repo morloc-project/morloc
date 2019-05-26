@@ -254,11 +254,11 @@ instance SparqlDatabaseLike RDF where
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
   sparqlSelect t q x = do
-    -- * DEBUGGING: find the temporary directory
+    -- DEBUGGING: find the temporary directory
     tmpdir <- MM.asks configTmpDir
-    -- * DEBUGGING: create it if needed
+    -- DEBUGGING: create it if needed
     MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-    -- * DEBUGGING: write the RDF and query to it, using the given prefix
+    -- DEBUGGING: write the RDF and query to it, using the given prefix
     let turtlePath = tmpdir <> "/" <> "db.ttl"
         sparqlPath = tmpdir <> "/" <> t <> ".rq"
         outputPath = tmpdir <> "/" <> t <> ".tab"

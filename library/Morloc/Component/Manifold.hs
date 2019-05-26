@@ -125,10 +125,10 @@ setLangs ms = map (setLang hash) ms
                                          , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Name    -- ^ argument name (if it is a bound argument)
-     , Maybe Key     -- ^ argument callId (if it is a function call)
-     , Maybe MData   -- ^ argument data (if this is data)
-     , Maybe MT.Text -- ^ the element (rdf:_<num>)
+  :: ( Maybe Name    -- argument name (if it is a bound argument)
+     , Maybe Key     -- argument callId (if it is a function call)
+     , Maybe MData   -- argument data (if this is data)
+     , Maybe MT.Text -- the element (rdf:_<num>)
      )
   -> MorlocMonad (Either Key Argument)
 makeArgument (Just x  , _       , _       , _ ) = return . Right $ ArgName x
