@@ -18,6 +18,7 @@ import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 
 import qualified System.Directory as SD
 
@@ -27,16 +28,21 @@ build s = case scriptLang s of
   "R" -> MM.liftIO $ writeInterpreted s
   "perl" -> MM.liftIO $ writeInterpreted s
   "C" -> buildC s
+  "c" -> buildC s
   _ -> MM.throwError (PoolBuildError s "Language not supported")
 
 -- | Compile a C program
 buildC :: Script -> MorlocMonad ()
-buildC = undefined
+buildC (Script base lang code') = do
+  let src = MS.makePoolSourceName (MT.pack base) (MT.pack lang)  
+  let exe = MS.makePoolExecutableName (MT.pack base) (MT.pack lang)  
+  MM.liftIO $ MT.writeFile (MT.unpack src) code'
+  MM.runCommand "buildC" ("gcc -o " <> exe <> " " <> src <> " -lm")
 
 -- | Build an interpreted script.
 writeInterpreted :: Script -> IO ()
 writeInterpreted (Script base lang code') = do
-  let f = base <> "." <> lang
+  let f = MT.unpack $ MS.makePoolExecutableName (MT.pack base) (MT.pack lang)
   MT.writeFile f code'
   p <- SD.getPermissions f
   SD.setPermissions f (p {SD.executable = True})

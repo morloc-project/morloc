@@ -67,6 +67,8 @@ loadDefaultMorlocConfig = do
     "perl"    -- lang_perl
 
 getExecutor :: Config -> MT.Text -> Maybe MT.Text
+getExecutor _ "c"    = Just $ "." -- for compiled programs, we just call the executable
+getExecutor _ "C"    = Just $ "." -- for compiled programs, we just call the executable
 getExecutor c "R"    = Just $ configLangR c
 getExecutor c "py"   = Just $ configLangPython3 c
 getExecutor c "perl" = Just $ configLangPerl c

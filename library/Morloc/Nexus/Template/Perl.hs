@@ -59,7 +59,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
           ( text' (getName m)
           , getNArgs m
           , text' exe
-          , text' (MS.makePoolName lang)
+          , text' (MS.makePoolExecutableName "pool" lang)
           , name
           )
         Nothing -> MM.throwError (GeneratorError $ "Language not supported: " <> lang)

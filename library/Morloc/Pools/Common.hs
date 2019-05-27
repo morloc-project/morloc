@@ -96,7 +96,7 @@ makeGenerator
 makeGenerator g gen
   = \ep ->
           Script
-      <$> pure "pool"
+      <$> pure "pool" -- TODO remove hard-coded name
       <*> pure (MT.unpack (gLang g))
       <*> gen ep
 
@@ -200,7 +200,8 @@ makeCisManifold g h m = do
             udValue = x
           , udUnpacker = p
           , udMid = name
-          , udFile = text' (MS.makePoolName (gLang g))
+          -- TODO: remove hard-coded name
+          , udFile = text' (MS.makePoolSourceName "pool" (gLang g))
         }))
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
@@ -226,7 +227,8 @@ makeSourceManifold g h m = do
               udValue = x   
             , udUnpacker = u
             , udMid = name
-            , udFile = text' (MS.makePoolName (gLang g))
+            -- TODO: remove hard-coded name
+            , udFile = text' (MS.makePoolSourceName "pool" (gLang g))
           }))
 
 callIdToName :: Manifold -> MorlocMonad Doc
@@ -251,10 +253,12 @@ writeArgument g xs (ArgCall m) = do
           (Just exe) -> return $
             (gForeignCall g) (ForeignCallDoc {
                 fcdForeignProg = text' exe
-              , fcdForeignPool = text' (MS.makePoolName l)
+                -- TODO remove hard-coded name
+              , fcdForeignPool = text' (MS.makePoolSourceName "pool" l)
               , fcdMid = name
               , fcdArgs = map text' xs
-              , fcdFile = text' (MS.makePoolName (gLang g))
+                -- TODO remove hard-coded name
+              , fcdFile = text' (MS.makePoolSourceName "pool" (gLang g))
             })
           Nothing -> MM.throwError . GeneratorError $ "No command could be found to run language " <> l
     Nothing -> MM.throwError . GeneratorError $ "No language set on: " <> MT.show' m
