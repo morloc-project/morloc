@@ -7,9 +7,9 @@ module Morloc (
 import qualified Data.RDF as DR
 import qualified Data.Map.Strict as DMS
 import qualified System.IO as SIO
-import qualified System.Directory as SD
 
 import qualified Morloc.Monad as MM
+import qualified Morloc.Build as MB
 import qualified Morloc.Data.Text as MT
 import Morloc.Operators
 import Morloc.Global
@@ -26,19 +26,10 @@ writeProgram path code ep = do
       MP.parse path code   -- Text -> MorlocMonad RDF
   >>= sparqlUpload ep -- SparqlDatabaseLike db => db -> MorlocMonad db
   >>= MG.generate     -- MorlocMonad (Nexus, [Pool])
-  >>= writeScripts    -- MorlocMoand ()
+  >>= buildScripts    -- MorlocMonad ()
   where
-    writeScripts :: (Script, [Script]) -> MorlocMonad ()
-    writeScripts (n, ps) = do
-      MM.liftIO $ writeScript True n
-      MM.liftIO $ mapM_ (writeScript False) ps
-
-    writeScript :: Bool -> Script -> IO ()
-    writeScript isExe (Script base lang code') = do
-      let f = base <> "." <> lang
-      MT.writeFile f code'
-      p <- SD.getPermissions f
-      SD.setPermissions f (p {SD.executable = isExe})
+    buildScripts :: (Script, [Script]) -> MorlocMonad ()
+    buildScripts (nexus, pools) = mapM_ MB.build (nexus:pools)
 
 -- | Triple serialization wrapper around `writeRdfTo`
 writeTripleTo

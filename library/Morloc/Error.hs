@@ -45,4 +45,6 @@ errmsg (DependencyError (SourceCodeDependency moduleName path lang))
   = "DependencyError: could not find source code '" <> path
   <> "' (" <> lang <> ")"
   <> " imported by Morloc module " <> moduleName
+-- TODO: specialize message with info from the failed Script (arg #1)
+errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg TrulyWeird = "Find the code monkeys 'cause you broke it good"

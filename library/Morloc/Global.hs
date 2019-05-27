@@ -211,6 +211,10 @@ data Script = Script {
       scriptBase :: String  -- ^ script basename (no extension)
     , scriptLang :: String  -- ^ script language
     , scriptCode :: Text    -- ^ full script source code
+    -- , scriptHasShebang :: Bool -- TODO: this field should determine whether
+                                  -- or not an interpreted script needs to be
+                                  -- made executable. For now I am making all
+                                  -- interpreted scripts executable in build.hs.
   }
   deriving(Ord, Eq)
 
@@ -302,6 +306,8 @@ data MorlocError
   | SerializationError Text
   -- | Raised when a dependency is missing
   | DependencyError Dependency
+  -- | Error in building a pool (i.e., in a compiled language)
+  | PoolBuildError Script Text
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)
