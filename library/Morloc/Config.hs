@@ -66,13 +66,13 @@ loadDefaultMorlocConfig = do
     "Rscript" -- lang_R
     "perl"    -- lang_perl
 
-getExecutor :: Config -> MT.Text -> Maybe MT.Text
-getExecutor _ "c"    = Just $ "." -- for compiled programs, we just call the executable
-getExecutor _ "C"    = Just $ "." -- for compiled programs, we just call the executable
-getExecutor c "R"    = Just $ configLangR c
-getExecutor c "py"   = Just $ configLangPython3 c
-getExecutor c "perl" = Just $ configLangPerl c
-getExecutor _ _      = Nothing
+-- FIXME: add explicit handling for executables, "." does not cut it
+getExecutor :: Config -> Lang -> Maybe MT.Text
+getExecutor _ CLang       = Just $ "."
+getExecutor c RLang       = Just $ configLangR c
+getExecutor c Python3Lang = Just $ configLangPython3 c
+getExecutor c PerlLang    = Just $ configLangPerl c
+getExecutor _ MorlocLang  = Nothing -- FIXME: add error handling
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text

@@ -12,8 +12,6 @@ Stability   : experimental
 module Morloc.System
   ( 
       makeManifoldName
-    , makePoolSourceName
-    , makePoolExecutableName
     , loadYamlConfig
     , getHomeDirectory
     , appendPath
@@ -34,24 +32,6 @@ import qualified Data.Char as DC
 -- | Append POSIX paths encoded as Text
 appendPath :: MT.Text -> MT.Text -> MT.Text
 appendPath base path = MT.pack $ combine (MT.unpack path) (MT.unpack base)
-
--- | Generate a name for a pool top-level source file given a language.
-makePoolSourceName
-  :: MT.Text -- ^ basename
-  -> MT.Text -- ^ language name
-  -> MT.Text -- ^ source file basename
-makePoolSourceName base lang = base <> "." <> lang -- TODO: remove hardcoding
-
--- | Generate a name for a pool executable file given a language. For
--- interpreted languages this will be the same as the output of the
--- @makePoolSourceName@ function.
-makePoolExecutableName
-  :: MT.Text -- ^ basename
-  -> MT.Text -- ^ Language name
-  -> MT.Text -- ^ executable file basename
-makePoolExecutableName base "c" = base <> "-c.out"  -- TODO: remove hardcoding
-makePoolExecutableName base "C" = base <> "-c.out"  -- TODO: remove hardcoding
-makePoolExecutableName base lang = makePoolSourceName base lang -- for interpreted languages
 
 -- | Generate a manifold ID from a UID
 makeManifoldName :: MT.Text -> MorlocMonad MT.Text

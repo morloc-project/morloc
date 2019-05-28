@@ -19,6 +19,7 @@ module Morloc.Component.Serializer
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
+import qualified Morloc.Language as ML
 import qualified Morloc.Util as MU
 import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT
@@ -36,7 +37,7 @@ type SerialData =
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Lang -> db -> MorlocMonad SerialMap
+  => MT.Text -> db -> MorlocMonad SerialMap
 fromSparqlDb l db = do
   typemap <- MCM.fromSparqlDb db
   serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
@@ -51,43 +52,18 @@ fromSparqlDb l db = do
             ] = return (t,p,n,s,m)
     tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
-
     toSerialMap
       :: Map.Map Key ConcreteType
       -> [SerialData]
       -> MorlocMonad SerialMap
     toSerialMap h xs
       =   SerialMap
-      <$> pure l -- language
+      <$> MM.readLang l -- language
       <*> (fmap Map.fromList . sequence $
             [lookupOrDie t h >>= getIn  p | (t, "packs"  , p, _, _) <- xs]) -- packers
       <*> (fmap Map.fromList . sequence $
             [lookupOrDie t h >>= getOut p | (t, "unpacks", p, _, _) <- xs]) -- unpackers
       <*> pure (MU.unique [makePath m s | (_, _, _, s, m) <- xs]) -- sources
-
-
-    -- toSerialMap
-    --   :: Map.Map Key ConcreteType
-    --   -> [SerialData]
-    --   -> MorlocMonad SerialMap
-    -- toSerialMap h xs = do
-    --   packers   <- sequence [lookupOrDie t h >>= getIn  p | (t, "packs"  , False, p, _, _) <- xs]
-    --   unpackers <- sequence [lookupOrDie t h >>= getOut p | (t, "unpacks", False, p, _, _) <- xs]
-    --   case ( Map.fromList packers
-    --        , Map.fromList unpackers
-    --        , [p | (_, "packs"  , True, p, _, _) <- xs]
-    --        , [p | (_, "unpacks", True, p, _, _) <- xs]
-    --        , MU.unique [makePath m s | (_, _, _, _, s, m) <- xs]
-    --        ) of
-    --     (phash, uhash, [p], [u], srcs) -> return $ SerialMap
-    --       { serialLang = l
-    --       , serialPacker = phash
-    --       , serialUnpacker = uhash
-    --       , serialGenericPacker = p
-    --       , serialGenericUnpacker = u
-    --       , serialSources = srcs
-    --       }
-    --     _ -> MM.throwError . TypeError $ "Expected exactly one generic packer/unpacker: " <> MT.pretty xs
 
     makePath
       :: MT.Text -- module path
@@ -112,8 +88,8 @@ fromSparqlDb l db = do
         "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
 
 -- | Get information about the serialization functions
-hsparql :: Lang -> Query SelectQuery
-hsparql lang' = do
+hsparql :: MT.Text -> Query SelectQuery
+hsparql langStr = do
   basetype_      <- var
   id_            <- var
   importId_      <- var
@@ -133,7 +109,7 @@ hsparql lang' = do
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
-  triple_ id_ PLang  lang'
+  triple_ id_ PLang  langStr
   triple_ id_ PLeft  name_
   triple_ id_ PRight rhs_
 
@@ -166,7 +142,7 @@ hsparql lang' = do
   optional_
     ( do
         triple_ sourceId_ PType OSource
-        triple_ sourceId_ PLang lang'
+        triple_ sourceId_ PLang langStr
         triple_ sourceId_ PPath path_
         triple_ sourceId_ PImport importId_
         triple_ importId_ PAlias name_

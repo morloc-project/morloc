@@ -18,6 +18,7 @@ import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
 
 import Morloc.Global
+import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC
 import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT
@@ -106,7 +107,7 @@ source' = do
   -- id for this source
   Tok.reserved "source"
   -- get the language of the imported source
-  lang <- Tok.stringLiteral
+  langStr <- Tok.stringLiteral
   -- get the path to the source file, if Nothing, then assume "vanilla"
   i <- MS.getId
   path <- optional (Tok.reserved "from" >> Tok.stringLiteral)
@@ -115,13 +116,16 @@ source' = do
   -- the statement is unambiguous even without a semicolon
   optional (Tok.op ";")
 
-  return $ MR.makeTopRDF i ([
-          MR.mtriple i PType OSource
-        , MR.mtriple i PLang lang
-      ] ++
-        MR.adoptAs OImport i fs ++
-        maybe [] (\p -> [MR.mtriple i PPath p]) path
-    )
+  case ML.standardizeLangName langStr of
+    (Just lang) ->
+      return $ MR.makeTopRDF i ([
+            MR.mtriple i PType OSource
+          , MR.mtriple i PLang lang
+        ] ++
+          MR.adoptAs OImport i fs ++
+          maybe [] (\p -> [MR.mtriple i PPath p]) path
+      )
+    Nothing -> fail ("Encountered unknown language: '" ++ MT.unpack langStr ++ "'")
 
   where
     importAs' :: MS.Parser MR.TopRDF

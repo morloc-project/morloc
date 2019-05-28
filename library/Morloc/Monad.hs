@@ -19,6 +19,7 @@ module Morloc.Monad
   , runCommand
   , runCommandWith
   , logFile
+  , readLang
   , module Control.Monad.Trans 
   , module Control.Monad.Except 
   , module Control.Monad.Reader
@@ -29,6 +30,7 @@ module Morloc.Monad
 import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 import Control.Monad.Trans
 import Control.Monad.Except
@@ -90,3 +92,11 @@ logFile s m = do
   let path = (MT.unpack tmpdir) <> "/" <> s
   liftIO $ writeFile path (show m)
   return m 
+
+-- | Attempt to read a language name. This is a wrapper around the
+-- @Morloc.Language::readLangName@ that appropriately handles error.
+readLang :: MT.Text -> MorlocMonad Lang
+readLang langStr = case ML.readLangName langStr of
+  (Just x) -> return x
+  Nothing -> throwError $ UnknownLanguage langStr
+

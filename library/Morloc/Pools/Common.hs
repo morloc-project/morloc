@@ -27,6 +27,7 @@ module Morloc.Pools.Common
 import Morloc.Global
 import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
+import qualified Morloc.Language as ML
 import qualified Morloc.TypeHandler as MTH
 import qualified Morloc.Config as MC
 import qualified Morloc.Component.Serializer as Serializer
@@ -39,7 +40,7 @@ import qualified Data.Maybe as DM
 import qualified Data.List as DL
 
 data Grammar = Grammar {
-      gLang     :: MT.Text
+      gLang     :: Lang
     , gAssign   :: Doc -> Doc -> Doc
     , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
@@ -97,7 +98,7 @@ makeGenerator g gen
   = \ep ->
           Script
       <$> pure "pool" -- TODO remove hard-coded name
-      <*> pure (MT.unpack (gLang g))
+      <*> pure (gLang g)
       <*> gen ep
 
 defaultCodeGenerator
@@ -109,7 +110,7 @@ defaultCodeGenerator
   -> MorlocMonad Code
 defaultCodeGenerator g f main ep = do
   manifolds <- Manifold.fromSparqlDb ep
-  packMap <- Serializer.fromSparqlDb (gLang g) ep
+  packMap <- Serializer.fromSparqlDb (ML.showLangName $ gLang g) ep
   paksrcs <- mapM f (serialSources packMap)
   mansrcs <- getManSrcs f manifolds
   let srcs = paksrcs ++ mansrcs
@@ -201,7 +202,7 @@ makeCisManifold g h m = do
           , udUnpacker = p
           , udMid = name
           -- TODO: remove hard-coded name
-          , udFile = text' (MS.makePoolSourceName "pool" (gLang g))
+          , udFile = text' (ML.makeSourceName (gLang g) "pool")
         }))
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
@@ -228,7 +229,7 @@ makeSourceManifold g h m = do
             , udUnpacker = u
             , udMid = name
             -- TODO: remove hard-coded name
-            , udFile = text' (MS.makePoolSourceName "pool" (gLang g))
+            , udFile = text' (ML.makeSourceName (gLang g) "pool")
           }))
 
 callIdToName :: Manifold -> MorlocMonad Doc
@@ -254,14 +255,16 @@ writeArgument g xs (ArgCall m) = do
             (gForeignCall g) (ForeignCallDoc {
                 fcdForeignProg = text' exe
                 -- TODO remove hard-coded name
-              , fcdForeignPool = text' (MS.makePoolSourceName "pool" l)
+              , fcdForeignPool = text' (ML.makeSourceName l "pool")
               , fcdMid = name
               , fcdArgs = map text' xs
                 -- TODO remove hard-coded name
-              , fcdFile = text' (MS.makePoolSourceName "pool" (gLang g))
+              , fcdFile = text' (ML.makeSourceName (gLang g) "pool")
             })
-          Nothing -> MM.throwError . GeneratorError $ "No command could be found to run language " <> l
-    Nothing -> MM.throwError . GeneratorError $ "No language set on: " <> MT.show' m
+          Nothing -> MM.throwError . GeneratorError $
+            "No command could be found to run language " <> (ML.showLangName l)
+    Nothing -> MM.throwError . GeneratorError $
+      "No language set on: " <> MT.show' m
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x

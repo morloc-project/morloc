@@ -11,7 +11,6 @@ import qualified System.IO as SIO
 import qualified Morloc.Monad as MM
 import qualified Morloc.Build as MB
 import qualified Morloc.Data.Text as MT
-import Morloc.Operators
 import Morloc.Global
 import qualified Morloc.Parser as MP
 import qualified Morloc.Generator as MG

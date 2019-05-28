@@ -75,6 +75,7 @@ asTuple typemap datamap [ Just manId'
     , argdata_id' >>= (flip Map.lookup) datamap
     , element'
     )
+  langM <- sequence . fmap MM.readLang $ sourceLang'
   let man = Manifold {
         mCallId       = manId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
@@ -89,7 +90,7 @@ asTuple typemap datamap [ Just manId'
       , mSourcePath   = sourcePath'
       , mModulePath   = modulePath'
       , mBoundVars    = maybe [] (MT.splitOn ",") bvars'
-      , mLang         = sourceLang'
+      , mLang         = langM
       , mArgs         = [] -- this will be set in the next step
       }
   return (man, arg)

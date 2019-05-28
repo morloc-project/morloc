@@ -16,6 +16,7 @@ import Morloc.Operators
 import Morloc.Quasi
 import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>), (<>))
+import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
@@ -27,7 +28,7 @@ generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
 generate e
   =   Script
   <$> pure "nexus"
-  <*> pure "perl"
+  <*> pure ML.PerlLang
   <*> makeNexus e
 
 makeNexus :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
@@ -59,11 +60,13 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
           ( text' (getName m)
           , getNArgs m
           , text' exe
-          , text' (MS.makePoolExecutableName "pool" lang)
+          , text' (ML.makeExecutableName lang "pool")
           , name
           )
-        Nothing -> MM.throwError (GeneratorError $ "Language not supported: " <> lang)
-      Nothing -> MM.throwError (GeneratorError "A language must be selected for the nexus")
+        Nothing -> MM.throwError . GeneratorError $
+          "No execution method found for language: " <> ML.showLangName lang
+      Nothing -> MM.throwError . GeneratorError $
+        "A language must be selected for the nexus"
 
   isExported :: Manifold -> Bool
   isExported m =

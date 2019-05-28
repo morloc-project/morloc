@@ -37,7 +37,7 @@ asImport s = do
          $ s
 
 g = Grammar {
-      gLang        = "py"
+      gLang        = Python3Lang
     , gAssign      = assign' 
     , gCall        = call'
     , gFunction    = function'
@@ -54,7 +54,6 @@ g = Grammar {
     , gTry         = pytry
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
-
   } where
 
     indent' = indent 4

@@ -10,7 +10,6 @@ Stability   : totally experimental
 
 The build process for C differs from that used in R and python since a
 compilation step is needed. This code currently is wildly experimental.
-
 -}
 
 module Morloc.Pools.Template.C
@@ -24,7 +23,7 @@ import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Quasi
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate _ = Script <$> pure "pool" <*> pure "c" <*> pure stubCode
+generate _ = Script <$> pure "pool" <*> pure CLang <*> pure stubCode
 
 stubCode :: MT.Text
 stubCode = render [idoc|

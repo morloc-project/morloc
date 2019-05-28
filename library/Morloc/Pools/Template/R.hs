@@ -26,7 +26,7 @@ asImport :: MT.Text -> MorlocMonad Doc
 asImport s = return . text' $ s
 
 g = Grammar {
-      gLang        = "R"
+      gLang        = RLang
     , gAssign      = assign'
     , gCall        = call'
     , gFunction    = function'
