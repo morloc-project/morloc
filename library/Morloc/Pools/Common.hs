@@ -306,7 +306,12 @@ getUnpacker smap t =
        ) >>= (flip Map.lookup) (serialUnpacker smap)
   of
     (Just x) -> return (text' x)
-    Nothing -> MM.throwError TrulyWeird
+    Nothing -> MM.throwError . GeneratorError $
+      (MT.unlines [ "No unpacker found - this is either a bug in the " <>
+                    "morloc codebase or incomplete serialization handling " <>
+                    "for the given language."
+                  , " - SerialMap: " <> MT.show' smap
+                  , " - MType: " <> MT.show' t])
 
 -- | If a language-specific signature is given for the manifold, choose a
 -- packer that matches the language-specific output type. Otherwise, search for
