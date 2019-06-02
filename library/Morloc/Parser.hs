@@ -202,7 +202,7 @@ typeDeclaration :: MS.Parser MR.TopRDF
 typeDeclaration = do
   i <- MS.getId
   lhs <- Tok.name
-  lang <- option "Morloc" Tok.name
+  langStr <- option "Morloc" Tok.name
   Tok.op "::"
   properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
   rhs <- mtype
@@ -210,15 +210,19 @@ typeDeclaration = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
-  return $ MR.makeTopRDF i (
-         [ MR.mtriple i PType OTypeDeclaration
-         , MR.mtriple i PLeft lhs
-         , MR.mtriple i PLang lang
-         ]
-      ++ MR.adoptAs PRight i [rhs]
-      ++ MR.adoptAs PProperty (MR.rdfId rhs) properties
-      ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
-    )
+  case ML.standardizeLangName langStr of
+    (Just lang) ->
+      return $ MR.makeTopRDF i (
+             [ MR.mtriple i PType OTypeDeclaration
+             , MR.mtriple i PLeft lhs
+             , MR.mtriple i PLang lang
+             ]
+          ++ MR.adoptAs PRight i [rhs]
+          ++ MR.adoptAs PProperty (MR.rdfId rhs) properties
+          ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
+        )
+    Nothing -> fail ("Encountered unknown language: '" ++ MT.unpack langStr ++ "'")
+
 
 listTag :: MR.Node -> Maybe MT.Text -> [MR.Triple]
 listTag _ Nothing    = []
