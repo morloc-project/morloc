@@ -54,7 +54,8 @@ makeExtension RLang       = "R"
 makeExtension CLang       = "c"
 makeExtension PerlLang    = "pl"
 
--- | Creat the name of a given language
+-- | Create the name of a given language. This is the internal standard name
+-- for the language and the string language name used in the RDF.
 showLangName :: Lang -> Text
 showLangName MorlocLang  = "morloc"
 showLangName Python3Lang = "python3"
@@ -62,7 +63,7 @@ showLangName RLang       = "R"
 showLangName CLang       = "C"
 showLangName PerlLang    = "Perl"
 
--- | Read the name of a given language and translate it
+-- | Read the name of a given language and try to translate it
 readLangName :: Text -> Maybe Lang
 readLangName "morloc"  = Just MorlocLang
 readLangName "Morloc"  = Just MorlocLang

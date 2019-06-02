@@ -202,7 +202,7 @@ typeDeclaration :: MS.Parser MR.TopRDF
 typeDeclaration = do
   i <- MS.getId
   lhs <- Tok.name
-  langStr <- option "Morloc" Tok.name
+  langStr <- option (ML.showLangName MorlocLang) Tok.name
   Tok.op "::"
   properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
   rhs <- mtype

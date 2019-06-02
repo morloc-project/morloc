@@ -26,6 +26,7 @@ import qualified Morloc.Component.MData as MCD
 import qualified Morloc.Component.Util as MCU 
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
@@ -253,7 +254,7 @@ hsparql = do
           triple_ mid_ PValue morlocName_
 
           triple_ typedec_ PType OTypeDeclaration
-          triple_ typedec_ PLang ("Morloc" :: MT.Text)
+          triple_ typedec_ PLang (ML.showLangName MorlocLang)
           triple_ typedec_ PLeft morlocName_
           triple_ typedec_ PRight typeid_
 
@@ -329,12 +330,12 @@ hsparql = do
       triple_ langTypedec_ PLeft morlocName_
       triple_ langTypedec_ PRight concreteTypeId_
 
-      filterExpr ((str sourceLang_) .!=. ("Morloc" :: MT.Text))
+      filterExpr ((str sourceLang_) .!=. (ML.showLangName MorlocLang))
 
     -- Find the type declaration ID
     optional_ $ do
       triple_ dectypeId_ PType OTypeDeclaration
-      triple_ dectypeId_ PLang ("Morloc" :: MT.Text)
+      triple_ dectypeId_ PLang (ML.showLangName MorlocLang)
       triple_ dectypeId_ PLeft morlocName_
       triple_ dectypeId_ PRight abstractTypeId_
 

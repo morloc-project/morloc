@@ -25,7 +25,7 @@ mid:0 rdf:type mlc:script;
 	rdf:_9 mid:63 .
 mid:1 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f1";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:2 .
 mid:2 rdf:type mlc:functionType, mlc:type;
 	rdf:_0 mid:3 .
@@ -41,7 +41,7 @@ mid:5 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "A" .
 mid:6 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f2";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:7 .
 mid:7 rdf:type mlc:functionType, mlc:type;
 	rdf:_0 mid:8 .
@@ -62,13 +62,13 @@ mid:12 rdf:type mlc:number, mlc:data;
 	rdf:value "0.0"^^xsd:decimal .
 mid:13 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f3";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:14 .
 mid:14 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int" .
 mid:15 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f4";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:16 .
 mid:16 rdf:type mlc:functionType, mlc:type;
 	rdf:_0 mid:17 .
@@ -94,7 +94,7 @@ mid:23 rdf:type mlc:number, mlc:data;
 	rdf:value "2.0"^^xsd:decimal .
 mid:24 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f5";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:25 .
 mid:25 rdf:type mlc:functionType, mlc:type;
 	rdf:_0 mid:26;
@@ -113,7 +113,7 @@ mid:30 rdf:type mlc:atomicGeneric, mlc:type;
 	rdf:value "d" .
 mid:31 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f6";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:32 .
 mid:32 rdf:type mlc:functionType, mlc:type;
 	rdf:_0 mid:33 .
@@ -130,7 +130,7 @@ mid:36 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "D" .
 mid:37 rdf:type mlc:typeDeclaration;
 	mlc:lhs "f7";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:38 .
 mid:38 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "A";
@@ -157,7 +157,7 @@ mid:45 rdf:type mlc:number, mlc:data;
 	rdf:value "2.0"^^xsd:decimal .
 mid:46 rdf:type mlc:typeDeclaration;
 	mlc:lhs "X1";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:47 .
 mid:47 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
@@ -181,7 +181,7 @@ mid:53 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:54 rdf:type mlc:typeDeclaration;
 	mlc:lhs "X2";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:55 .
 mid:55 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
@@ -206,7 +206,7 @@ mid:62 rdf:type mlc:name;
 	rdf:value "z" .
 mid:63 rdf:type mlc:typeDeclaration;
 	mlc:lhs "X3";
-	mlc:lang "Morloc";
+	mlc:lang "morloc";
 	mlc:rhs mid:64 .
 mid:64 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Y";
