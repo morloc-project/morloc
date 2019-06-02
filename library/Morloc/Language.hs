@@ -7,6 +7,10 @@ Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+The purpose of this module currently is to unify language naming conventions.
+We need to streamline the process of adding new languages to Morloc. This
+module should serve as the starting place for adding a new language.
 -}
 
 module Morloc.Language
@@ -27,7 +31,10 @@ import Data.Text (Text)
 -- in the hierarchy, to avoid circular dependencies, since the lexer needs to
 -- access it.
 
--- | Programming language
+-- | Programming languages in the Morloc ecosystem. This is the type that
+-- should be used to refer to a language (don't use raw strings). Some of these
+-- are languages that can be sourced (Python, R and C). Perl is currently used
+-- only in generating the nexus file.
 data Lang
   = MorlocLang
   | Python3Lang

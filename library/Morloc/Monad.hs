@@ -8,7 +8,10 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
-This 
+MorlocMonad is a monad stack that is passed throughout the morloc codebase.
+Most functions that raise errors, perform IO, or access global configuration
+will return `MorlocMonad a` types. The stack consists of a State, Writer,
+Except, and Reader monad.
 -}
 
 module Morloc.Monad
@@ -99,4 +102,3 @@ readLang :: MT.Text -> MorlocMonad Lang
 readLang langStr = case ML.readLangName langStr of
   (Just x) -> return x
   Nothing -> throwError $ UnknownLanguage langStr
-

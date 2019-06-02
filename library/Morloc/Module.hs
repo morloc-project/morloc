@@ -11,7 +11,9 @@ Stability   : experimental
 
 module Morloc.Module
 ( 
-  findModule
+    ModuleSource(..)
+  , installModule
+  , findModule
 ) where
 
 import Morloc.Global
@@ -24,6 +26,14 @@ import qualified Data.Maybe as DM
 import Morloc.Operators
 import qualified Data.List as DL
 
+
+-- | Specify where a module is located 
+data ModuleSource
+  = LocalModule (Maybe MT.Text) -- ^ A module in the working directory
+  | GithubRepo MT.Text -- ^ A module stored in an arbitrary Github repo: "<username>/<reponame>"
+  | CoreGithubRepo MT.Text -- ^ The repo name of a core package, e.g., "math"
+
+-- | Look for a local morloc module.
 findModule :: MT.Text -> MorlocMonad MT.Text
 findModule moduleName = do
   config <- MM.ask
@@ -54,3 +64,21 @@ getFile x = do
   return $ if fileExists
            then Just x
            else Nothing
+
+-- | Attempt to clone a package from github
+installGithubRepo
+  :: MT.Text -- ^ the repo path ("<username>/<reponame>")
+  -> MT.Text -- ^ the url for github (e.g., "https://github.com/")
+  -> MorlocMonad ()
+installGithubRepo repo url = do
+  config <- MM.ask
+  let lib = Config.configLibrary config
+  let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo] 
+  MM.runCommand "installGithubRepo" cmd
+
+-- | Install a morloc module
+installModule :: ModuleSource -> MorlocMonad ()
+installModule (GithubRepo repo) = installGithubRepo repo ("https://github.com/" <> repo)
+installModule (CoreGithubRepo name) = installGithubRepo name ("https://github.com/morloclib/" <> name)
+installModule (LocalModule Nothing) = MM.throwError (NotImplemented "module installation from working directory")
+installModule (LocalModule (Just _)) = MM.throwError (NotImplemented "module installation from local directory")
