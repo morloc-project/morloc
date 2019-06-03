@@ -99,13 +99,7 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' "_morloc_foreign_call"
-      [ dquotes (fcdForeignProg f)
-      , dquotes (fcdForeignPool f)
-      , dquotes (fcdMid f)
-      , list' (fcdArgs f)
-      ]
-
+    foreignCall' f = call' "_morloc_foreign_call" (map dquotes (fcdCliArgs f))
 
 pytry :: TryDoc -> Doc
 pytry t = [idoc|

@@ -228,10 +228,6 @@ data Script = Script {
       scriptBase :: String  -- ^ script basename (no extension)
     , scriptLang :: Lang    -- ^ script language
     , scriptCode :: Text    -- ^ full script source code
-    -- , scriptHasShebang :: Bool -- TODO: this field should determine whether
-                                  -- or not an interpreted script needs to be
-                                  -- made executable. For now I am making all
-                                  -- interpreted scripts executable in build.hs.
   }
   deriving(Ord, Eq)
 

@@ -83,11 +83,15 @@ data UnpackerDoc = UnpackerDoc {
   }
 
 data ForeignCallDoc = ForeignCallDoc {
-      fcdForeignProg :: Doc
-    , fcdForeignPool :: Doc
+      fcdForeignPool :: Doc
+    -- ^ the name of the foreign pool (e.g., "R.pool")
     , fcdMid :: Doc
+    -- ^ the function integer identifier
     , fcdArgs :: [Doc]
-    , fcdFile :: Doc
+    -- ^ command line arguments that will be passed to the foreign function
+    , fcdCliArgs :: [Doc]
+    -- ^ make a list of command line arguments from the first three inputs
+    , fcdFile :: Doc -- ^ for debugging
   }
 
 makeGenerator
@@ -251,18 +255,20 @@ writeArgument g xs (ArgCall m) = do
       then
         return $ (gCall g) name (map text' xs)
       else
-        case (MC.getExecutor c l) of
-          (Just exe) -> return $
+        case (
+            MC.getPoolCallBuilder c l
+          , text' (ML.makeSourceName l "pool")
+          , map text' xs
+        ) of
+          (Just poolBuilder, pool, args) -> return $
             (gForeignCall g) (ForeignCallDoc {
-                fcdForeignProg = text' exe
-                -- TODO remove hard-coded name
-              , fcdForeignPool = text' (ML.makeSourceName l "pool")
+                fcdForeignPool = pool
               , fcdMid = name
-              , fcdArgs = map text' xs
-                -- TODO remove hard-coded name
+              , fcdArgs = args
+              , fcdCliArgs = poolBuilder pool name args
               , fcdFile = text' (ML.makeSourceName (gLang g) "pool")
             })
-          Nothing -> MM.throwError . GeneratorError $
+          (Nothing, _, _) -> MM.throwError . GeneratorError $
             "No command could be found to run language " <> (ML.showLangName l)
     Nothing -> MM.throwError . GeneratorError $
       "No language set on: " <> MT.show' m

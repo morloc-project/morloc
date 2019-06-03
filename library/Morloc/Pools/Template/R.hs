@@ -95,12 +95,9 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' ".morloc_foreign_call"
-      [ dquotes (fcdForeignProg f)
-      , dquotes (fcdForeignPool f)
-      , dquotes (fcdMid f)
-      , list' (fcdArgs f)
-      , ".pool=" <> dquotes (fcdFile f)
+    foreignCall' f = call' ".morloc_foreign_call" $
+      map dquotes (fcdCliArgs f) ++
+      [ ".pool=" <> dquotes (fcdFile f)
       , ".name=" <> dquotes (fcdMid f)
       ]
 

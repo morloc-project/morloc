@@ -24,6 +24,15 @@ import qualified Morloc.System as MS
 import qualified Data.Maybe as DM
 import qualified Control.Monad as CM
 
+-- | A function for building a pool call
+type PoolBuilder
+  =  Doc    -- pool name
+  -> Doc    -- pool id
+  -> [Doc]  -- pool arguments
+  -> [Doc]  -- output list of CLI arguments
+
+type FData = (PoolBuilder, Doc, Int, Doc, Doc)
+
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
 generate e
   =   Script
@@ -47,21 +56,21 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
     | DM.isJust (mComposition m) = length (mBoundVars m)
     | otherwise = length (mArgs m)
 
-  fdata :: MorlocMonad [(Doc, Int, Doc, Doc, Doc)]
+  fdata :: MorlocMonad [FData]
   fdata = manifolds >>= CM.mapM getFData 
 
-  getFData :: Manifold -> MorlocMonad (Doc, Int, Doc, Doc, Doc)
+  getFData :: Manifold -> MorlocMonad FData
   getFData m = do
     config <- MM.ask
-    let name = text' . MT.show' $ mid m
+    let mid' = text' . MT.show' $ mid m
     case mLang m of
-      (Just lang) -> case MC.getExecutor config lang of
-        (Just exe) -> return $
-          ( text' (getName m)
+      (Just lang) -> case MC.getPoolCallBuilder config lang of
+        (Just call') -> return $
+          ( call'
+          , text' (getName m)
           , getNArgs m
-          , text' exe
           , text' (ML.makeExecutableName lang "pool")
-          , name
+          , mid' 
           )
         Nothing -> MM.throwError . GeneratorError $
           "No execution method found for language: " <> ML.showLangName lang
@@ -76,7 +85,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
     (mExported m && DM.isJust (mComposition m))
 
 
-main :: [Doc] -> [(Doc, Int, Doc, Doc, Doc)] -> Doc
+main :: [Doc] -> [FData] -> Doc
 main names fdata = [idoc|#!/usr/bin/env perl
 
 use strict;
@@ -130,17 +139,18 @@ sub usage{
 }
 |]
 
-usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  #{name} [#{int nargs}]\n";|]
+usageLineT (_, name, nargs, _, _) = [idoc|print STDERR "  #{name} [#{int nargs}]\n";|]
 
-functionT (name, nargs, prog, pool, mid') = [idoc|
+functionT (call', name, nargs, pool, mid') = [idoc|
 sub call_#{name}{
     if(scalar(@_) != #{int nargs}){
         print STDERR "Expected #{int nargs} arguments to '#{name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
-    return `#{prog} #{pool} #{mid'} #{hsep $ map argT [0..(nargs-1)]}`
+    return `#{poolcall}`
 }
-|]
+|] where
+  poolcall = hsep $ call' pool mid' (map argT [0..(nargs-1)])
 
 argT i = [idoc|'$_[#{int i}]'|]

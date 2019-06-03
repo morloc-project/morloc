@@ -13,14 +13,15 @@ module Morloc.Config (
     Config(..)
   , loadMorlocConfig
   , loadDefaultMorlocConfig 
-  , getExecutor
+  , getPoolCallBuilder
   , getDefaultConfigFilepath
   , getDefaultMorlocTmpDir
   , makeLibSourceString
 ) where
 
 import Morloc.Global
-import Morloc.Operators
+import Morloc.Operators hiding ((<>))
+import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
@@ -66,13 +67,18 @@ loadDefaultMorlocConfig = do
     "Rscript" -- lang_R
     "perl"    -- lang_perl
 
--- FIXME: add explicit handling for executables, "." does not cut it
-getExecutor :: Config -> Lang -> Maybe MT.Text
-getExecutor _ CLang       = Just $ "."
-getExecutor c RLang       = Just $ configLangR c
-getExecutor c Python3Lang = Just $ configLangPython3 c
-getExecutor c PerlLang    = Just $ configLangPerl c
-getExecutor _ MorlocLang  = Nothing -- FIXME: add error handling
+-- | Attempt to create a function for building a call to a pool. The call is
+-- represented as a list of arguments for a command line.
+getPoolCallBuilder :: Config -> Lang -> Maybe (Doc -> Doc -> [Doc] -> [Doc])
+getPoolCallBuilder _ CLang       = Just $ (\n i xs -> [ "./" <> n, i] ++ xs)
+getPoolCallBuilder c RLang       = Just $ makeCmdPoolCall (configLangR c)
+getPoolCallBuilder c Python3Lang = Just $ makeCmdPoolCall (configLangPython3 c)
+getPoolCallBuilder c PerlLang    = Just $ makeCmdPoolCall (configLangPerl c)
+getPoolCallBuilder _ MorlocLang  = Nothing -- FIXME: add error handling
+
+-- Build a simple pool call for an interpreted language
+makeCmdPoolCall :: MT.Text -> (Doc -> Doc -> [Doc] -> [Doc])
+makeCmdPoolCall prog name i args = [text' prog, name, i] ++ args
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text
