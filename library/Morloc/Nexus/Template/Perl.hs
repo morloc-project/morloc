@@ -53,7 +53,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
   getFData :: Manifold -> MorlocMonad (Doc, Int, Doc, Doc, Doc)
   getFData m = do
     config <- MM.ask
-    name <- text' <$> MS.makeManifoldName (mCallId m)
+    let name = text' . MT.show' $ mid m
     case mLang m of
       (Just lang) -> case MC.getExecutor config lang of
         (Just exe) -> return $
@@ -132,14 +132,14 @@ sub usage{
 
 usageLineT (name, nargs, _, _, _) = [idoc|print STDERR "  #{name} [#{int nargs}]\n";|]
 
-functionT (name, nargs, prog, pool, mid) = [idoc|
+functionT (name, nargs, prog, pool, mid') = [idoc|
 sub call_#{name}{
     if(scalar(@_) != #{int nargs}){
         print STDERR "Expected #{int nargs} arguments to '#{name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
-    return `#{prog} #{pool} #{mid} #{hsep $ map argT [0..(nargs-1)]}`
+    return `#{prog} #{pool} #{mid'} #{hsep $ map argT [0..(nargs-1)]}`
 }
 |]
 

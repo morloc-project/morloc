@@ -30,6 +30,7 @@ g = Grammar {
     , gAssign      = assign'
     , gCall        = call'
     , gFunction    = function'
+    , gId2Function = id2function'
     , gComment     = comment'
     , gReturn      = return'
     , gQuote       = dquotes
@@ -55,6 +56,9 @@ g = Grammar {
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
       = name <> " <- function" <> tupled args <> braces (line <> indent' body <> line) <> line
+
+    id2function' :: Integer -> Doc
+    id2function' i = "m" <> (text' (MT.show' i))
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -101,7 +105,7 @@ g = Grammar {
       ]
 
 toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = "list" <> tupled (map (\x -> l x <> "=" <> r x) xs)
+toDict l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
 
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
@@ -111,8 +115,9 @@ main srcs manifolds hash = do
   let sources = line <> vsep (map ((gImport g) lib) (filter (\s -> MT.isSuffixOf ".R" (render s)) srcs))
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
-  mids <- MM.mapM callIdToName manifolds
-  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
+  usedManifolds <- getUsedManifolds g manifolds
+  let dispatchSerializerDict = toDict (text' . MT.show' . mid) (getPacker hash) manifolds
+  let dispatchFunDict = toDict (text' . MT.show' . mid) (callIdToName g) usedManifolds
   return $ [idoc|#!/usr/bin/env Rscript
 
 #{sources}
@@ -184,14 +189,15 @@ main srcs manifolds hash = do
 
 #{cisManifolds}
 
+dispatchFun = #{dispatchFunDict}
 dispatchSerializer <- #{dispatchSerializerDict}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
   stop("Expected 1 or more arguments")
-} else if(exists(args[[1]])){
+} else {
   cmdstr <- args[[1]]
-  cmd <- get(cmdstr)
+  cmd <- dispatchFun[[cmdstr]]
   args <- as.list(args[-1, drop=FALSE])
   result <- if(class(cmd) == "function"){
     do.call(cmd, args)
@@ -200,7 +206,5 @@ if(length(args) == 0){
   }
   serializer <- dispatchSerializer[[cmdstr]]
   cat(serializer(result), "\n")
-} else {
-  stop("Could not find function '", cmdstr, "'")
 }
 |]

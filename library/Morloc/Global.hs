@@ -124,7 +124,8 @@ type AbstractType = MType
 type ConcreteType = MType
 
 data Manifold = Manifold {
-      mCallId       :: Key
+      mid           :: Integer
+    , mCallId       :: Text
     , mAbstractType :: Maybe AbstractType
     , mConcreteType :: Maybe ConcreteType
     , mExported     :: Bool

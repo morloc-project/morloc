@@ -45,14 +45,18 @@ fromSparqlDb ep = do
     |>> setLangs
     >>= setCalls
     >>= unroll
+    |>> setIds -- generate the final manifold ids
     >>= MM.logFile "manifolds.txt"
+
+setIds :: [Manifold] -> [Manifold]
+setIds ms = zipWith (\i m -> m {mid = i}) [1..] ms
 
 asTuple
   :: Map.Map Key MType
   -> Map.Map Key MData
   -> [Maybe MT.Text]
   -> MorlocMonad (Manifold, Either Key Argument)
-asTuple typemap datamap [ Just manId'
+asTuple typemap datamap [ Just callId'
                         , abstractTypeId'
                         , element'
                         , Just morlocName'
@@ -78,7 +82,8 @@ asTuple typemap datamap [ Just manId'
     )
   langM <- sequence . fmap MM.readLang $ sourceLang'
   let man = Manifold {
-        mCallId       = manId'
+        mid           = 0 -- will set later
+      , mCallId       = callId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
       , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
       , mMorlocName   = morlocName'
@@ -182,19 +187,8 @@ unroll ms = fmap concat (mapM unroll' ms)
 
     unrollPair :: Manifold -> Manifold -> MorlocMonad [Manifold]
     unrollPair m r = do
-      signedKey <- signKey (mCallId m) (mCallId r)
-      mName <- MS.makeManifoldName signedKey
-      let r' = r { mCallId = signedKey, mExported = False }
-      let m' = m { mCallName = mName }
-      fmap (\ms' -> [m'] ++ ms') (unroll' r')
-
-    signKey :: Key -> Key -> MorlocMonad Key
-    signKey m r =
-      case
-        (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
-      of
-        (Just mKey, Just rKey) -> return $ MR.midPre <> mKey <> "_" <> rKey
-        _ -> MM.throwError . InvalidRDF $ "callId of invalid form: " <> MT.pretty (m, r)
+      let r' = r { mExported = False }
+      fmap ((:) m) (unroll' r')
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
@@ -420,17 +414,3 @@ hsparql = do
     , SelectVar  argdataId_
     , SelectVar  modulePath_
     ]
-
------- example output for `sample.loc`
--- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- | callId          | abstractTypeId  | el#      | morlocName     | srcName   | comp   | bvars | lang | srcPath | called | src  | exp   | concreteTypeId | argname | argcallId | argdataId       | modulePath   |
--- ===============================================================================================================================================================================================================
--- | <sample.loc_19> |                 | <rdf#_0> | "len"          | "len"     |        |       | "R"  |         | true   | true | false |                | "xs"    |           |                 |              |
--- | <sample.loc_2>  | <sample.loc_35> | <rdf#_0> | "ceiling"      | "ceiling" |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                | "n"     |           |                 |              |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_50> |              |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_51> |              |
--- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

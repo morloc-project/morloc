@@ -41,6 +41,7 @@ g = Grammar {
     , gAssign      = assign' 
     , gCall        = call'
     , gFunction    = function'
+    , gId2Function = id2function'
     , gComment     = comment'
     , gReturn      = return'
     , gQuote       = dquotes
@@ -66,6 +67,9 @@ g = Grammar {
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
       = "def " <> name <> tupled args <> ":" <> line <> indent 4 body <> line
+
+    id2function' :: Integer -> Doc
+    id2function' i = "m" <> (text' (MT.show' i))
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -112,16 +116,15 @@ except Exception as e:
 |]
 
 toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = "dict" <> tupled (map (\x -> l x <> "=" <> r x) xs)
+toDict l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
 
 main
   :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
 main srcs manifolds hash = do
   lib <- fmap text' $ MM.asks MC.configLibrary
   usedManifolds <- getUsedManifolds g manifolds
-  let dispatchFunDict = toDict id id usedManifolds
-  mids <- MM.mapM callIdToName manifolds
-  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
+  let dispatchFunDict = toDict (text' . MT.show' . mid) (callIdToName g) usedManifolds
+  let dispatchSerializerDict = toDict (text' . MT.show' . mid) (getPacker hash) manifolds
   let sources = vsep (map ((gImport g) lib) srcs)
   sourceManifolds <- makeSourceManifolds g hash manifolds
   cisManifolds <- makeCisManifolds g hash manifolds
@@ -177,17 +180,19 @@ if __name__ == '__main__':
     script_name = sys.argv[0] 
 
     try:
-        cmd = sys.argv[1]
+        cmdID = int(sys.argv[1])
     except IndexError:
         sys.exit("Internal error in {}: no manifold id found".format(script))
+    except ValueError:
+        sys.exit("Internal error in {}: expected integer manifold id".format(script))
 
     try:
-        function = dispatchFun[cmd]
-    except KeyError:
-        sys.exit("Internal error in {}: expected manifold id (e.g. m34), got {}".format(script, cmd))
+        function = dispatchFun[cmdID]
+    except IndexError:
+        sys.exit("Internal error in {}: expected manifold id, got {}".format(script, cmdID))
 
     args = sys.argv[2:]
-    serialize = dispatchSerializer[cmd]
+    serialize = dispatchSerializer[cmdID]
 
     print(serialize(function(*args)))
 

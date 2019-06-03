@@ -44,6 +44,7 @@ data Grammar = Grammar {
     , gAssign   :: Doc -> Doc -> Doc
     , gCall     :: Doc -> [Doc] -> Doc
     , gFunction :: Doc -> [Doc] -> Doc -> Doc
+    , gId2Function :: Integer -> Doc
     , gComment  :: Doc -> Doc
     , gReturn   :: Doc -> Doc
     , gQuote    :: Doc -> Doc
@@ -127,6 +128,9 @@ getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
         path -> Just $ path <> "/" <> srcpath
     _ -> Nothing
 
+callIdToName :: Grammar -> Manifold -> Doc
+callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)
+
 -- | inifinite list of named variables
 iArgs :: Doc -> [Doc]
 iArgs prefix = zipWith (<>) (repeat prefix) (map int [0..])
@@ -163,7 +167,7 @@ makeCisManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeCisManifold g h m = do
   argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
   args <- sequence $ zipWith makeArg (iArgs "a") argTypes
-  name <- callIdToName m
+  let name = callIdToName g m
   return
     $  ((gComment g) "cis manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
@@ -196,7 +200,7 @@ makeCisManifold g h m = do
 
     unpack' :: Doc -> Doc -> MorlocMonad Doc
     unpack' p x = do
-      name <- callIdToName m 
+      let name = callIdToName g m 
       return ((gUnpacker g) (UnpackerDoc {
             udValue = x
           , udUnpacker = p
@@ -208,7 +212,7 @@ makeCisManifold g h m = do
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeSourceManifold g h m = do
   argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m)
-  name <- callIdToName m
+  let name = callIdToName g m
   return
     $  ((gComment g) "source manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
@@ -232,9 +236,6 @@ makeSourceManifold g h m = do
             , udFile = text' (ML.makeSourceName (gLang g) "pool")
           }))
 
-callIdToName :: Manifold -> MorlocMonad Doc
-callIdToName m = text' <$> MS.makeManifoldName (mCallId m)
-
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [MT.Text] -> Argument -> MorlocMonad Doc
 writeArgument _ _  (ArgName n) = return $ text' n
@@ -242,7 +243,7 @@ writeArgument g _  (ArgData d) = return $ writeData g d
 writeArgument _ _  (ArgPosi i) = return $ "x" <> int i
 writeArgument g xs (ArgCall m) = do
   c <- MM.ask
-  name <- callIdToName m
+  let name = callIdToName g m
   case mLang m of
     (Just l) ->
       if
@@ -275,8 +276,8 @@ writeData g (Lst' xs)    = (gList g) (map (writeData g) xs)
 writeData g (Tup' xs)    = (gTuple g) (map (writeData g) xs)
 writeData g (Rec' xs)    = (gRecord g) (map (\(k, v) -> (text' k, writeData g v)) xs)
 
-getUsedManifolds :: Grammar -> [Manifold] -> MorlocMonad [Doc]
-getUsedManifolds g ms = MM.filterM isBuilt ms >>= mapM callIdToName
+getUsedManifolds :: Grammar -> [Manifold] -> MorlocMonad [Manifold]
+getUsedManifolds g ms = MM.filterM isBuilt ms
   where
     isBuilt :: Manifold -> MorlocMonad Bool
     isBuilt m = do
