@@ -37,14 +37,21 @@ stubCode = render [idoc|
 
 int main(int argc, char * argv[]){
     char* json = (char*)malloc(50 * sizeof(char));
-    if(strcmp(argv[1], "sin") == 0){
-        strcpy(json, packDouble(sin(unpackDouble(argv[2]))));
-    } else if(strcmp(argv[1], "cos") == 0){
-        strcpy(json, packDouble(cos(unpackDouble(argv[2]))));
-    } else if(strcmp(argv[1], "tan") == 0){
-        strcpy(json, packDouble(tan(unpackDouble(argv[2]))));
-    } else {
-        strcpy(json, "other");
+
+    int mid = atoi(argv[1]);
+
+    switch(mid){
+        case 1:
+            strcpy(json, packDouble(sin(unpackDouble(argv[2]))));
+            break;
+        case 2:
+            strcpy(json, packDouble(cos(unpackDouble(argv[2]))));
+            break;
+        case 3:
+            strcpy(json, packDouble(tan(unpackDouble(argv[2]))));
+            break;
+        default:
+            break;
     }
     printf("%s\n", json);
     return 0;
