@@ -23,7 +23,7 @@ import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+generate db = makeGenerator g (defaultCodeGenerator g asImport) db
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = do
@@ -35,6 +35,14 @@ asImport s = do
          . MT.stripPrefixIfPresent lib  -- make the path relative to the library
          . MT.liftToText SF.dropExtensions
          $ s
+
+pytry :: TryDoc -> Doc
+pytry t = [idoc|
+try:
+    #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
+except Exception as e:
+    sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
+|]
 
 g = Grammar {
       gLang        = Python3Lang
@@ -55,9 +63,14 @@ g = Grammar {
     , gTry         = pytry
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
+    , gHash        = hash'
+    , gMain        = main'
   } where
 
     indent' = indent 4
+
+    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+    hash' l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
 
     assign' l r = l <> " = " <> r 
 
@@ -101,28 +114,10 @@ g = Grammar {
     foreignCall' :: ForeignCallDoc -> Doc
     foreignCall' f = call' "_morloc_foreign_call" (map dquotes (fcdCliArgs f))
 
-pytry :: TryDoc -> Doc
-pytry t = [idoc|
-try:
-    #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
-except Exception as e:
-    sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
-|]
-
-toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
-
-main
-  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
-main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
-  usedManifolds <- getUsedManifolds g manifolds
-  let dispatchFunDict = toDict (text' . MT.show' . mid) (callIdToName g) usedManifolds
-  let dispatchSerializerDict = toDict (text' . MT.show' . mid) (getPacker hash) manifolds
-  let sources = vsep (map ((gImport g) lib) srcs)
-  sourceManifolds <- makeSourceManifolds g hash manifolds
-  cisManifolds <- makeCisManifolds g hash manifolds
-  return $ [idoc|#!/usr/bin/env python
+    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
+    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict = do
+      lib <- fmap text' $ MM.asks MC.configLibrary
+      return $ [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
@@ -130,7 +125,7 @@ import json
 
 sys.path = ["#{lib}"] + sys.path
 
-#{sources}
+#{vsep sources}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:

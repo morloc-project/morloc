@@ -40,58 +40,56 @@ import qualified Data.Maybe as DM
 import qualified Data.List as DL
 
 data Grammar = Grammar {
-      gLang     :: Lang
-    , gAssign   :: Doc -> Doc -> Doc
-    , gCall     :: Doc -> [Doc] -> Doc
-    , gFunction :: Doc -> [Doc] -> Doc -> Doc
+      gLang        :: Lang
+    , gAssign      :: Doc -> Doc -> Doc
+    , gCall        :: Doc -> [Doc] -> Doc
+    , gFunction    :: Doc -> [Doc] -> Doc -> Doc
     , gId2Function :: Integer -> Doc
-    , gComment  :: Doc -> Doc
-    , gReturn   :: Doc -> Doc
-    , gQuote    :: Doc -> Doc
-    , gImport   :: Doc -> Doc -> Doc
-    , gList     :: [Doc] -> Doc
-    , gTuple    :: [Doc] -> Doc
-    , gRecord   :: [(Doc,Doc)] -> Doc
-    , gTrue     :: Doc
-    , gFalse    :: Doc
-    , gIndent   :: Doc -> Doc
-    , gUnpacker :: UnpackerDoc -> Doc
-    , gTry      :: TryDoc -> Doc
+    , gComment     :: Doc -> Doc
+    , gReturn      :: Doc -> Doc
+    , gQuote       :: Doc -> Doc
+    , gImport      :: Doc -> Doc -> Doc
+    , gList        :: [Doc] -> Doc
+    , gTuple       :: [Doc] -> Doc
+    , gRecord      :: [(Doc,Doc)] -> Doc
+    , gTrue        :: Doc
+    , gFalse       :: Doc
+    , gIndent      :: Doc -> Doc
+    , gUnpacker    :: UnpackerDoc -> Doc
+    , gTry         :: TryDoc -> Doc
     , gForeignCall :: ForeignCallDoc -> Doc
+    , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
+    , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
   }
 
 data ManifoldClass
-  = Cis -- ^ Wrapper around a Morloc composition
-  | Trans
-  | Source -- ^ Wrapper around a source function
+  = Cis      -- ^ Wrapper around a Morloc composition
+  | Trans    -- ^ Wrapper around a foreign call
+  | Source   -- ^ Wrapper around a source function
   | Uncalled -- ^ Does not need to be built in current language
   deriving(Show, Ord, Eq)
 
 data TryDoc = TryDoc {
-      tryCmd :: Doc
-    , tryRet :: Doc
-    , tryArgs :: [Doc]
-    , tryMid :: Doc
-    , tryFile :: Doc
+      tryCmd :: Doc    -- ^ The function we attempt to run
+    , tryRet :: Doc    -- ^ A name for the returned variable?
+    , tryArgs :: [Doc] -- ^ Arguments passed to function
+    , tryMid :: Doc    -- ^ The name of the calling manifold (for debugging)
+    , tryFile :: Doc   -- ^ The file where the issue occurs (for debugging)
   }
 
 data UnpackerDoc = UnpackerDoc {
-      udValue :: Doc
-    , udUnpacker :: Doc
-    , udMid :: Doc
-    , udFile :: Doc
+      udValue :: Doc    -- ^ The expression that will be unpacked
+    , udUnpacker :: Doc -- ^ The function for unpacking the value
+    , udMid :: Doc      -- ^ Manifold name for debugging messages
+    , udFile :: Doc     -- ^ File name for debugging messages
   }
 
 data ForeignCallDoc = ForeignCallDoc {
-      fcdForeignPool :: Doc
-    -- ^ the name of the foreign pool (e.g., "R.pool")
-    , fcdMid :: Doc
-    -- ^ the function integer identifier
-    , fcdArgs :: [Doc]
-    -- ^ command line arguments that will be passed to the foreign function
-    , fcdCliArgs :: [Doc]
-    -- ^ make a list of command line arguments from the first three inputs
-    , fcdFile :: Doc -- ^ for debugging
+      fcdForeignPool :: Doc   -- ^ the name of the foreign pool (e.g., "R.pool")
+    , fcdMid         :: Doc   -- ^ the function integer identifier
+    , fcdArgs        :: [Doc] -- ^ CLI arguments passed to foreign function
+    , fcdCliArgs     :: [Doc] -- ^ make a list of CLI arguments from first three inputs
+    , fcdFile        :: Doc   -- ^ for debugging
   }
 
 makeGenerator
@@ -110,20 +108,31 @@ defaultCodeGenerator
   :: (SparqlDatabaseLike db)
   => Grammar
   -> (MT.Text -> MorlocMonad Doc) -- source name parser
-  -> ([Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc) -- main
   -> db
   -> MorlocMonad Code
-defaultCodeGenerator g f main ep = do
+defaultCodeGenerator g f ep = do
   manifolds <- Manifold.fromSparqlDb ep
   packMap <- Serializer.fromSparqlDb (ML.showLangName $ gLang g) ep
   paksrcs <- mapM f (serialSources packMap)
-  mansrcs <- getManSrcs f manifolds
-  let srcs = paksrcs ++ mansrcs
-  doc <- main (srcs) manifolds packMap
+  mansrcs <- getManSrcs g f manifolds
+  lib <- MM.asks MC.configLibrary
+  let srcs = map ((gImport g) (text' lib)) (paksrcs ++ mansrcs)
+  srcManifolds <- makeSourceManifolds g packMap manifolds
+  cisManifolds <- makeCisManifolds g packMap manifolds
+  usedManifolds <- getUsedManifolds g manifolds
+  let dispatchSerializerDict = (gHash g) (text' . MT.show' . mid) (getPacker packMap) manifolds
+  let dispatchFunDict = (gHash g) (text' . MT.show' . mid) (callIdToName g) usedManifolds
+  doc <- (gMain g)
+    srcs                   -- [Doc]
+    srcManifolds           -- Doc
+    cisManifolds           -- Doc
+    dispatchFunDict        -- Doc
+    dispatchSerializerDict -- Doc
   return $ render doc
 
-getManSrcs :: (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
-getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
+-- | Get the paths to the sources 
+getManSrcs :: Grammar -> (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
+getManSrcs g f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms' where
   getManSrc :: Manifold -> Maybe MT.Text
   getManSrc m = case (mSourcePath m, mModulePath m) of
     (Just srcpath, Just modpath) ->
@@ -131,6 +140,9 @@ getManSrcs f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms where
         "."  -> Just srcpath
         path -> Just $ path <> "/" <> srcpath
     _ -> Nothing
+
+  -- select the manifolds that are in the same language as the grammar 
+  ms' = filter (\m -> maybe False ((==) (gLang g)) (mLang m)) ms
 
 callIdToName :: Grammar -> Manifold -> Doc
 callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)

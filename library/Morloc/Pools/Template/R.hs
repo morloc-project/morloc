@@ -20,7 +20,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+generate db = makeGenerator g (defaultCodeGenerator g asImport) db
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = return . text' $ s
@@ -44,9 +44,14 @@ g = Grammar {
     , gTry         = try'
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
+    , gHash        = hash'
+    , gMain        = main'
   } where
 
     assign' l r = l <> " <- " <> r 
+
+    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+    hash' l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
 
     indent' = indent 4
 
@@ -101,23 +106,11 @@ g = Grammar {
       , ".name=" <> dquotes (fcdMid f)
       ]
 
-toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
-
-main
-  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
-main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
-  -- TODO: fix this hack - the sources should be filtered by language before being passed to main
-  let sources = line <> vsep (map ((gImport g) lib) (filter (\s -> MT.isSuffixOf ".R" (render s)) srcs))
-  sourceManifolds <- makeSourceManifolds g hash manifolds
-  cisManifolds <- makeCisManifolds g hash manifolds
-  usedManifolds <- getUsedManifolds g manifolds
-  let dispatchSerializerDict = toDict (text' . MT.show' . mid) (getPacker hash) manifolds
-  let dispatchFunDict = toDict (text' . MT.show' . mid) (callIdToName g) usedManifolds
-  return $ [idoc|#!/usr/bin/env Rscript
-
-#{sources}
+    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
+    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict
+      = return [idoc|#!/usr/bin/env Rscript
+  
+#{line <> vsep sources}
 
 .morloc_run <- function(f, args){
   fails <- ""
