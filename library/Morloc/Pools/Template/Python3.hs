@@ -72,6 +72,7 @@ g = Grammar {
     hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
     hash' l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
 
+    assign' :: Doc -> Doc -> Doc
     assign' l r = l <> " = " <> r 
 
     call' :: Doc -> [Doc] -> Doc
@@ -79,7 +80,7 @@ g = Grammar {
 
     function' :: Doc -> [Doc] -> Doc -> Doc
     function' name args body
-      = "def " <> name <> tupled args <> ":" <> line <> indent 4 body <> line
+      = "def " <> name <> tupled args <> ":" <> line <> indent' body <> line
 
     id2function' :: Integer -> Doc
     id2function' i = "m" <> (text' (MT.show' i))
