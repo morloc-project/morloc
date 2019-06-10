@@ -40,6 +40,7 @@ module Morloc.Global (
   , GraphPredicate(..)
   , GraphObject(..)
   , SerialMap(..)
+  , ManifoldClass(..)
   -- ** Error handling
   , MorlocError(..)
   -- ** Configuration
@@ -154,6 +155,14 @@ data Manifold = Manifold {
     , mArgs         :: [Argument]
   }
   deriving(Show, Eq, Ord)
+
+-- | The role a manifold plays relative to a given language
+data ManifoldClass
+  = Cis      -- ^ Wrapper around a Morloc composition
+  | Trans    -- ^ Wrapper around a foreign call
+  | Source   -- ^ Wrapper around a source function
+  | Uncalled -- ^ Does not need to be built in current language
+  deriving(Show, Ord, Eq)
 
 data Argument
   = ArgName Name

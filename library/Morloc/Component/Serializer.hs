@@ -37,8 +37,9 @@ type SerialData =
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => MT.Text -> db -> MorlocMonad SerialMap
-fromSparqlDb l db = do
+  => Lang -> db -> MorlocMonad SerialMap
+fromSparqlDb lang db = do
+  let l = ML.showLangName lang
   typemap <- MCM.fromSparqlDb db
   serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
   toSerialMap typemap serialData >>= MM.logFile ("serialMap-" <> MT.unpack l <> ".txt")
@@ -58,7 +59,7 @@ fromSparqlDb l db = do
       -> MorlocMonad SerialMap
     toSerialMap h xs
       =   SerialMap
-      <$> MM.readLang l -- language
+      <$> pure lang -- language
       <*> (fmap Map.fromList . sequence $
             [lookupOrDie t h >>= getIn  p | (t, "packs"  , p, _, _) <- xs]) -- packers
       <*> (fmap Map.fromList . sequence $
@@ -85,7 +86,7 @@ fromSparqlDb l db = do
     lookupOrDie k h = case Map.lookup k h of
       (Just x) -> return x
       Nothing -> MM.throwError . SerializationError $
-        "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> l
+        "Could not find SerialMap for key: " <> MT.pretty k <> " for " <> ML.showLangName lang
 
 -- | Get information about the serialization functions
 hsparql :: MT.Text -> Query SelectQuery

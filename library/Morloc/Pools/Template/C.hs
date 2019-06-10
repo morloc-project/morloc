@@ -18,128 +18,170 @@ module Morloc.Pools.Template.C
 ) where
 
 import Morloc.Global
+import Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Component.Serializer as Serializer
+import qualified Morloc.Component.Manifold as Manifold
+import qualified Morloc.Monad as MM
 import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Quasi
 import Morloc.Pools.Common
 
+type CType = Doc
+type CVar = Doc
+type CVal = Doc
+type CExpr = Doc
+type CStatement = Doc
+
+-- | this must contain all the information needed to build a C program
+data CGlobal = CProg {
+    includesC :: [Doc] -- ^ list of include statements
+  , globalC :: [Doc] -- ^ any global variables
+  , functionsC :: [CFunction] -- ^ list of functions and their type info
+  , allocatedC :: [CVar] -- ^ things to free when leaving main
+  , mainC :: Doc
+}
+
+data CFunction = CFunction {
+    cFReturnType :: Doc -- ^ return type
+  , cFName :: Doc -- ^ function name
+  , cFArgs :: [(CType, CVar)] -- /
+  , cFBody :: Doc 
+}
+
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport) db
+generate db = pure Script <*> pure "pool" <*> pure CLang <*> generateC db
 
-asImport :: MT.Text -> MorlocMonad Doc
-asImport s = return . text' $ s
+generateC :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
+generateC db = do
+  manifolds <- Manifold.fromSparqlDb db
+  packMap <- Serializer.fromSparqlDb CLang db
+  paksrcs <- mapM nameSource (serialSources packMap)
+  mansrcs <- Man.getManSrcs CLang nameSource manifolds
+  fmap render $ main sources' cismanifolds' switch'
+  where
+    nameSource :: MT.Text -> MorlocMonad Doc
+    nameSource = return . dquotes . text'
 
--- generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
--- generate _ = Script <$> pure "pool" <*> pure CLang <*> pure stubCode
+initializeC :: CType -> CVar -> CExpr
+initializeC t v = t <+> v <> ";"
 
-g = Grammar {
-      gLang        = CLang
-    , gAssign      = assign' 
-    , gCall        = call'
-    , gFunction    = function'
-    , gId2Function = id2function'
-    , gComment     = comment'
-    , gReturn      = return'
-    , gQuote       = dquotes
-    , gImport      = include'
-    , gTrue        = "1" 
-    , gFalse       = "0"
-    , gList        = array'
-    , gTuple       = array'
-    , gRecord      = struct'
-    , gIndent      = indent'
-    , gTry         = tryCmd -- do or do not, there is no try
-    , gUnpacker    = unpacker'
-    , gForeignCall = foreignCall'
-    , gHash        = hash'
-    , gMain        = main'
-  } where
+assign :: Maybe CType -> CVar -> CVal -> Doc
+assign Nothing v x = v <+> "=" <+> x <> ";"
+assign (Just t) v x = t <+> v <+> "=" <+> x <> ";"
 
-    indent' = indent 4
+callC :: CVar -> CExpr -> CExpr
+callC f x = f <> "(" <> x <> ")"
 
-    -- FIXME: need to specify type
-    -- FIXME: l is dependent on r, e.g.:
-    --   int xs[5] = {1,2,3,4,5};
-    -- FIXME: memory management
-    assign' :: Doc -> Doc -> Doc
-    assign' l r = l <> " = " <> r
+blockC :: CStatement -> Doc
+blockC = braces . nest 2
 
-    call' :: Doc -> [Doc] -> Doc
-    call' f args = f <> tupled args
+-- FIXME: this is all a dirty hack. The type strings for a given language MUST
+-- NOT be specified in the Haskell code. You should be able to implement
+-- handling for a language without having to touch the Haskell core. In the
+-- dynamic languages (R and Python), the problem is easier because I don't have
+-- to explicitly state the data types.
+toCType :: MType -> MorlocMonad Doc
+toCType (MConcType MTypeMeta{metaLang = Just CLang} "Double" []) = return "double"
+toCType (MConcType MTypeMeta{metaLang = Just CLang} "String" []) = return "char*"
+toCType (MConcType MTypeMeta{metaLang = Just CLang} "Int"    []) = return "int"
+toCType _ = MM.throwError (TypeError "Cannot cast as a C type")
 
-    -- FIXME: need to specity return type
-    -- FIXME: need to specify each argument type
-    function' :: Doc -> [Doc] -> Doc -> Doc
-    function' name args body
-      = "<type> " <> name <> tupled args <> braces (line <> indent' body <> line)
+-- | Generate a switch statement
+switchC
+  :: CVar
+  -- ^ The variable the switch statement dispatches upon
+  -> [(CVal, [CStatement])]
+  -- ^ Pairs of values and statements to put in the block (@break@ will automatically be added)
+  -> [CStatement]
+  -- ^ Statements that go in the @default@ block
+  -> Doc
+switchC x cases defs = callC "switch" x <> blockC caseBlock where
+  caseBlock = vsep (map asCase cases) <> line <> def'
+  asCase (v, xs) = ("case" <+> v <> ":") <> line <> (nest 2 . vsep $ xs ++ ["break;"])
+  def' = "default:" <> line <> nest 2 (vsep defs <> line <> "break;")
 
-    id2function' :: Integer -> Doc
-    id2function' i = "m" <> (text' (MT.show' i))
+-- | Single line comment
+commentC :: Doc -> Doc
+commentC x = enclose "/*" "*/" x
 
-    comment' :: Doc -> Doc
-    comment' d = "// " <> d
+-- | Multi-line comment
+multicommentC :: Doc -> Doc
+multicommentC x = enclose "/*" "*/" (nest 2 x)
 
-    return' :: Doc -> Doc
-    return' x = call' "return" [x]
+-- | Create if else
+conditionalC :: [(Doc, Doc)] -> Maybe Doc -> Doc
+conditionalC [] (Just _) = error "else without if"
+conditionalC ((c, b):xs) els = callC "if" c <> blockC b <> conditionalC' xs els where
+  conditionalC' [] Nothing = ""
+  conditionalC' [] (Just x) = "else" <> blockC x
+  conditionalC' ((c', b'):xs) els
+    =   callC "else if" c' <> blockC b' 
+    <> line <> conditionalC' xs els
 
-    -- FIXME: needs to allocate memory
-    -- FIXME: needs type
-    array' :: [Doc] -> Doc
-    array' xs = encloseSep "{" "}" ", " xs 
+-- | Create the prototype of a function
+prototypeC :: CFunction -> Doc
+prototypeC r =  (cFReturnType r) <+> (cFName r)
+             <> encloseSep "(" ")" "," (map (\(t, v) -> t <+> v) (cFArgs r))
 
-    -- FIXME: needs declaration
-    -- FIXME: needs memory management
-    -- FIXME: needs type for assignment
-    struct' :: [(Doc,Doc)] -> Doc
-    struct' xs = encloseSep "{" "}" ", " (map (\(k,v) -> "." <> k <> "=" <> v) xs)
+-- | Create a function
+functionC :: CFunction -> Doc
+functionC r = prototypeC r <> enclose "{" "}" (indent 2 (cFBody r))
 
-    -- FIXME: distinguish between `<lib.h>` and `"lib.h"` imports
-    include' :: Doc -> Doc -> Doc
-    include' _ s = "#include " <> dquotes s
-
-    -- FIXME: add error handling
-    unpacker' :: UnpackerDoc -> Doc
-    unpacker' u = call' (udUnpacker u) [udValue u]
-
-    -- FIXME: implement `_morloc_foreign_call`
-    foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' "_morloc_foreign_call" (map dquotes (fcdCliArgs f))
-
-    -- FIXME: I am not sure we even need this in C, the purpose for which it is
-    -- used in R/Python is served in C with a switch statement.
-    hash' :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
-    hash' _ _ _ = ""
-
-    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
-    main' _ _ _ _ _ = return $ [idoc|
-
-#include <string.h>
-
-#include <stdio.h>
-
-#include "/home/z/.morloc/lib/math/c_math.h"
-
-#include "/home/z/.morloc/lib/cbase/cbase.h"
-
-int main(int argc, char * argv[]){
-    char* json = (char*)malloc(50 * sizeof(char));
-
-    int mid = atoi(argv[1]);
-
+switch' = [idoc| 
     switch(mid){
         case 1:
-            strcpy(json, packDouble(sin(unpackDouble(argv[2]))));
+            char* json = packDouble(m0(unpackDouble(argv[2])));
             break;
         case 2:
-            strcpy(json, packDouble(cos(unpackDouble(argv[2]))));
+            char* json = packDouble(m1(unpackDouble(argv[2])));
             break;
         case 3:
-            strcpy(json, packDouble(tan(unpackDouble(argv[2]))));
+            char* json = packDouble(m2(unpackDouble(argv[2])));
             break;
         default:
             break;
     }
+|]
+
+cismanifolds' = [idoc|
+double m0(double x){
+  return sin(x)
+}
+
+double m1(double x){
+  return cos(x)
+}
+
+double m2(double x){
+  return tan(x)
+}
+|]
+
+sources' = [idoc|
+#include "/home/z/.morloc/lib/math/c_math.h"
+
+#include "/home/z/.morloc/lib/cbase/cbase.h"
+|]
+
+main :: Doc -> Doc -> Doc -> MorlocMonad Doc
+main sources cismanifolds switch = do
+  return [idoc|
+#include <string.h>
+
+#include <stdio.h>
+
+#{sources}
+
+#{cismanifolds}
+
+int main(int argc, char * argv[]){
+    int mid = atoi(argv[1]);
+
+    #{switch}
+
     printf("%s\n", json);
+
     return 0;
 }
 |]

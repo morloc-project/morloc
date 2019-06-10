@@ -19,8 +19,6 @@ module Morloc.Pools.Common
   , defaultCodeGenerator
   , makeCisManifolds
   , makeSourceManifolds
-  , getUsedManifolds
-  , getPacker
   , callIdToName
 ) where
 
@@ -28,16 +26,12 @@ import Morloc.Global
 import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Language as ML
-import qualified Morloc.TypeHandler as MTH
 import qualified Morloc.Config as MC
 import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.Manifold as Manifold
-import qualified Morloc.System as MS
 import qualified Morloc.Monad as MM
+import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
-import qualified Data.Map.Strict as Map
-import qualified Data.Maybe as DM
-import qualified Data.List as DL
 
 data Grammar = Grammar {
       gLang        :: Lang
@@ -61,13 +55,6 @@ data Grammar = Grammar {
     , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
     , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
   }
-
-data ManifoldClass
-  = Cis      -- ^ Wrapper around a Morloc composition
-  | Trans    -- ^ Wrapper around a foreign call
-  | Source   -- ^ Wrapper around a source function
-  | Uncalled -- ^ Does not need to be built in current language
-  deriving(Show, Ord, Eq)
 
 data TryDoc = TryDoc {
       tryCmd :: Doc    -- ^ The function we attempt to run
@@ -112,15 +99,15 @@ defaultCodeGenerator
   -> MorlocMonad Code
 defaultCodeGenerator g f ep = do
   manifolds <- Manifold.fromSparqlDb ep
-  packMap <- Serializer.fromSparqlDb (ML.showLangName $ gLang g) ep
+  packMap <- Serializer.fromSparqlDb (gLang g) ep
   paksrcs <- mapM f (serialSources packMap)
-  mansrcs <- getManSrcs g f manifolds
+  mansrcs <- Man.getManSrcs (gLang g) f manifolds
   lib <- MM.asks MC.configLibrary
   let srcs = map ((gImport g) (text' lib)) (paksrcs ++ mansrcs)
   srcManifolds <- makeSourceManifolds g packMap manifolds
   cisManifolds <- makeCisManifolds g packMap manifolds
-  usedManifolds <- getUsedManifolds g manifolds
-  let dispatchSerializerDict = (gHash g) (text' . MT.show' . mid) (getPacker packMap) manifolds
+  usedManifolds <- Man.getUsedManifolds (gLang g) manifolds
+  let dispatchSerializerDict = (gHash g) (text' . MT.show' . mid) (Man.getPacker packMap) manifolds
   let dispatchFunDict = (gHash g) (text' . MT.show' . mid) (callIdToName g) usedManifolds
   doc <- (gMain g)
     srcs                   -- [Doc]
@@ -130,20 +117,6 @@ defaultCodeGenerator g f ep = do
     dispatchSerializerDict -- Doc
   return $ render doc
 
--- | Get the paths to the sources 
-getManSrcs :: Grammar -> (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
-getManSrcs g f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms' where
-  getManSrc :: Manifold -> Maybe MT.Text
-  getManSrc m = case (mSourcePath m, mModulePath m) of
-    (Just srcpath, Just modpath) ->
-      case (MT.pack . MS.takeDirectory . MT.unpack $ modpath) of
-        "."  -> Just srcpath
-        path -> Just $ path <> "/" <> srcpath
-    _ -> Nothing
-
-  -- select the manifolds that are in the same language as the grammar 
-  ms' = filter (\m -> maybe False ((==) (gLang g)) (mLang m)) ms
-
 callIdToName :: Grammar -> Manifold -> Doc
 callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)
 
@@ -151,37 +124,21 @@ callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)
 iArgs :: Doc -> [Doc]
 iArgs prefix = zipWith (<>) (repeat prefix) (map int [0..])
 
-determineManifoldClass :: Grammar -> Manifold -> MorlocMonad ManifoldClass
-determineManifoldClass g m
-  | mLang m == Just (gLang g)
-      && not (mCalled m)
-      && mSourced m
-      && mExported m = return Source
-  | not (mCalled m) && mExported m = return Uncalled
-  | mLang m == Just (gLang g) = return Cis 
-  | (mLang m /= Just (gLang g)) && mCalled m = return Trans
-  | otherwise = MM.throwError . GeneratorError $ "Unexpected manifold class"
-
-filterByManifoldClass :: Grammar -> ManifoldClass -> [Manifold] -> MorlocMonad [Manifold]
-filterByManifoldClass g mc ms = do
-  mcs <- mapM (determineManifoldClass g) ms 
-  return . map snd . filter ((==) mc . fst) $ zip mcs ms
-
 makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> MorlocMonad Doc
 makeSourceManifolds g h ms
-  =   filterByManifoldClass g Source ms
+  =   Man.filterByManifoldClass (gLang g) Source ms
   >>= mapM (makeSourceManifold g h)
   |>> vsep
 
 makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> MorlocMonad Doc
 makeCisManifolds g h ms
-  =   filterByManifoldClass g Cis ms
+  =   Man.filterByManifoldClass (gLang g) Cis ms
   >>= mapM (makeCisManifold g h)
   |>> vsep
 
 makeCisManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeCisManifold g h m = do
-  argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
+  argTypes <- zip <$> (Man.getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
   args <- sequence $ zipWith makeArg (iArgs "a") argTypes
   let name = callIdToName g m
   return
@@ -227,7 +184,7 @@ makeCisManifold g h m = do
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeSourceManifold g h m = do
-  argTypes <- zip <$> (getUnpackers h m) <*> pure (mArgs m)
+  argTypes <- zip <$> (Man.getUnpackers h m) <*> pure (mArgs m)
   let name = callIdToName g m
   return
     $  ((gComment g) "source manifold") <> line
@@ -294,74 +251,5 @@ writeData g (Lst' xs)    = (gList g) (map (writeData g) xs)
 writeData g (Tup' xs)    = (gTuple g) (map (writeData g) xs)
 writeData g (Rec' xs)    = (gRecord g) (map (\(k, v) -> (text' k, writeData g v)) xs)
 
-getUsedManifolds :: Grammar -> [Manifold] -> MorlocMonad [Manifold]
-getUsedManifolds g ms = MM.filterM isBuilt ms
-  where
-    isBuilt :: Manifold -> MorlocMonad Bool
-    isBuilt m = do
-      mc <- determineManifoldClass g m  
-      return $ mc == Cis || mc == Source
-
 fname :: Manifold -> Doc
 fname m = text' (mCallName m)
-
--- find a packer for each argument
-getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
-getUnpackers hash m = case mConcreteType m of
-  (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
-  (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
-  Nothing -> case mAbstractType m of
-    (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
-    (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
-    Nothing -> MM.throwError . TypeError $
-      "Expected a function for the following manifold: " <> MT.pretty m
-
-getUnpacker :: SerialMap -> MType -> MorlocMonad Doc
-getUnpacker smap t =
-  case (MTH.findMostSpecificType
-         . Map.keys
-         . Map.filterWithKey (\p _ -> MTH.childOf t p)
-         $ (serialUnpacker smap)
-       ) >>= (flip Map.lookup) (serialUnpacker smap)
-  of
-    (Just x) -> return (text' x)
-    Nothing -> MM.throwError . GeneratorError $
-      (MT.unlines [ "No unpacker found - this is either a bug in the " <>
-                    "morloc codebase or incomplete serialization handling " <>
-                    "for the given language."
-                  , " - SerialMap: " <> MT.show' smap
-                  , " - MType: " <> MT.show' t])
-
--- | If a language-specific signature is given for the manifold, choose a
--- packer that matches the language-specific output type. Otherwise, search for
--- a packer that matches the morloc type.
--- TODO: make the MorlocMonad
-getPacker :: SerialMap -> Manifold -> Doc
-getPacker hash m = case packerType of
-  (Just t) -> case Map.lookup t (serialPacker hash) of
-    (Just n) -> text' n
-    Nothing -> error "You should not be reading this"
-  Nothing -> error "No packer found for this type"
-  where
-    packerType :: Maybe MType
-    packerType = case cPacker of
-      (Just x) -> Just x
-      Nothing -> aPacker
-
-    cPacker :: Maybe MType
-    cPacker = case mConcreteType m of
-      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
-      (Just _) -> error "Ah shit"
-      Nothing -> Nothing
-
-    aPacker :: Maybe MType
-    aPacker = case mAbstractType m of
-      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
-      (Just _) -> error "Ah shit"
-      Nothing -> Nothing
-
-    packers :: MType -> [MType]
-    packers o
-      = Map.keys
-      . Map.filterWithKey (\p _ -> MTH.childOf o p)
-      $ (serialPacker hash)
