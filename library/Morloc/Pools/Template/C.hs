@@ -100,12 +100,14 @@ makeBody m = return
 getReturnType :: Manifold -> MorlocMonad Doc
 getReturnType m = case mConcreteType m of
   (Just (MFuncType _ _ rtype)) -> toCType rtype
-  _ -> MM.throwError $ TypeError "Missing concrete return type"
+  (Just t) -> MM.throwError . TypeError $ "Expected function type, got: " <> MT.show' t
+  Nothing -> MM.throwError . TypeError $ "Missing return type: " <> MT.show' m
 
 getArgTypes :: Manifold -> MorlocMonad [Doc]
 getArgTypes m = case mConcreteType m of 
   (Just (MFuncType _ argTypes _)) -> mapM toCType argTypes
-  _ -> MM.throwError $ TypeError "Missing concrete argument type"
+  (Just t) -> MM.throwError . TypeError $ "Expected function type, got: " <> MT.show' t
+  Nothing -> MM.throwError . TypeError $ "Missing concrete type: " <> MT.show' m
 
 makeSources :: [Doc] -> Doc
 makeSources = vsep . map ((<+>) "#include")
