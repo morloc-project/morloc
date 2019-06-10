@@ -26,6 +26,7 @@ import qualified Morloc.Monad as MM
 import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Quasi
 import Morloc.Pools.Common
+import qualified Data.Map.Strict as Map
 
 type CType = Doc
 type CVar = Doc
@@ -45,7 +46,7 @@ data CGlobal = CProg {
 data CFunction = CFunction {
     cFReturnType :: Doc -- ^ return type
   , cFName :: Doc -- ^ function name
-  , cFArgs :: [(CType, CVar)] -- /
+  , cFArgs :: [(CType, CVar)]
   , cFBody :: Doc 
 }
 
@@ -54,14 +55,60 @@ generate db = pure Script <*> pure "pool" <*> pure CLang <*> generateC db
 
 generateC :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
 generateC db = do
-  manifolds <- Manifold.fromSparqlDb db
-  packMap <- Serializer.fromSparqlDb CLang db
-  paksrcs <- mapM nameSource (serialSources packMap)
-  mansrcs <- Man.getManSrcs CLang nameSource manifolds
-  fmap render $ main sources' cismanifolds' switch'
+  manifolds <- Manifold.fromSparqlDb db                 -- [Manifold]
+  packMap <- Serializer.fromSparqlDb CLang db           -- SerialMap
+  paksrcs <- mapM nameSource (serialSources packMap)    -- [Doc]
+  mansrcs <- Man.getManSrcs CLang nameSource manifolds  -- [Doc]
+  usedManifolds <- Man.getUsedManifolds CLang manifolds -- [Manifold]
+  simpleManifolds <- mapM (\m -> makeCFunction m >>= makeFunctionDoc) $ usedManifolds
+  dispatch' <- makeDispatch packMap usedManifolds
+  let sources' = makeSources (mansrcs ++ paksrcs) <> line
+  fmap render $ main sources' (vsep simpleManifolds) dispatch'
   where
     nameSource :: MT.Text -> MorlocMonad Doc
     nameSource = return . dquotes . text'
+
+makeFunctionDoc :: CFunction -> MorlocMonad Doc
+makeFunctionDoc f = do
+  let targs = tupled (map (\(t, x) -> t <+> x) (cFArgs f))
+  let rargs = tupled (map snd (cFArgs f))
+  let head = [idoc|#{cFReturnType f} #{cFName f}#{targs}|]
+  return $ head <> blockC (cFBody f)
+
+makeCFunction :: Manifold -> MorlocMonad CFunction
+makeCFunction m = do
+  returnType <- getReturnType m
+  argTypes <- getArgTypes m
+  body <- makeBody m
+  return $ CFunction {
+      cFReturnType = returnType
+    , cFName = makeFunctionName m
+    , cFArgs = zip (argTypes) (map (\i -> "x" <> integer i) [0..])
+    , cFBody = body
+  }
+
+makeFunctionName :: Manifold -> Doc
+makeFunctionName m = "m" <> integer (mid m)
+
+makeBody :: Manifold -> MorlocMonad Doc
+makeBody m = return
+  $   "return"
+  <+> callC (text' $ mCallName m)
+            (zipWith (\i _ -> "x" <> integer i) [0..] (mArgs m))
+  <> ";"
+
+getReturnType :: Manifold -> MorlocMonad Doc
+getReturnType m = case mConcreteType m of
+  (Just (MFuncType _ _ rtype)) -> toCType rtype
+  _ -> MM.throwError $ TypeError "Missing concrete return type"
+
+getArgTypes :: Manifold -> MorlocMonad [Doc]
+getArgTypes m = case mConcreteType m of 
+  (Just (MFuncType _ argTypes _)) -> mapM toCType argTypes
+  _ -> MM.throwError $ TypeError "Missing concrete argument type"
+
+makeSources :: [Doc] -> Doc
+makeSources = vsep . map ((<+>) "#include")
 
 initializeC :: CType -> CVar -> CExpr
 initializeC t v = t <+> v <> ";"
@@ -70,36 +117,73 @@ assign :: Maybe CType -> CVar -> CVal -> Doc
 assign Nothing v x = v <+> "=" <+> x <> ";"
 assign (Just t) v x = t <+> v <+> "=" <+> x <> ";"
 
-callC :: CVar -> CExpr -> CExpr
-callC f x = f <> "(" <> x <> ")"
+callC :: CVar -> [CExpr] -> CExpr
+callC f args = f <> tupled args
+
+callC' :: CVar -> CExpr -> CExpr
+callC' f arg = callC f [arg]
 
 blockC :: CStatement -> Doc
-blockC = braces . nest 2
+blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
 
 -- FIXME: this is all a dirty hack. The type strings for a given language MUST
 -- NOT be specified in the Haskell code. You should be able to implement
 -- handling for a language without having to touch the Haskell core. In the
 -- dynamic languages (R and Python), the problem is easier because I don't have
 -- to explicitly state the data types.
+-- FIXME: I should require 'MTypeMeta{metaLang = Just CLang}'
 toCType :: MType -> MorlocMonad Doc
-toCType (MConcType MTypeMeta{metaLang = Just CLang} "Double" []) = return "double"
-toCType (MConcType MTypeMeta{metaLang = Just CLang} "String" []) = return "char*"
-toCType (MConcType MTypeMeta{metaLang = Just CLang} "Int"    []) = return "int"
-toCType _ = MM.throwError (TypeError "Cannot cast as a C type")
+toCType (MConcType _ "Double" []) = return "double"
+toCType (MConcType _ "String" []) = return "char*"
+toCType (MConcType _ "Int"    []) = return "int"
+toCType t = MM.throwError . TypeError $ "Unknown C type: " <> MT.show' t
 
 -- | Generate a switch statement
 switchC
   :: CVar
   -- ^ The variable the switch statement dispatches upon
-  -> [(CVal, [CStatement])]
+  -> [(CVal, CStatement)]
   -- ^ Pairs of values and statements to put in the block (@break@ will automatically be added)
-  -> [CStatement]
+  -> CStatement
   -- ^ Statements that go in the @default@ block
   -> Doc
-switchC x cases defs = callC "switch" x <> blockC caseBlock where
+switchC x cases def = callC' "switch" x <> blockC caseBlock where
   caseBlock = vsep (map asCase cases) <> line <> def'
-  asCase (v, xs) = ("case" <+> v <> ":") <> line <> (nest 2 . vsep $ xs ++ ["break;"])
-  def' = "default:" <> line <> nest 2 (vsep defs <> line <> "break;")
+  asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
+  def' = "default:" <> line <> indent 2 def
+
+caseC :: Doc -> Doc
+caseC body = body <> line <> "break;"
+
+-- // e.g., create something like this:
+-- switch(mid){
+--     case 1:
+--         json = packDouble(m0(unpackDouble(argv[2])));
+--         break;
+--     case 2:
+--         json = packDouble(m1(unpackDouble(argv[2])));
+--         break;
+--     default:
+--         break;
+-- }
+makeDispatch :: SerialMap -> [Manifold] -> MorlocMonad Doc
+makeDispatch h ms =
+  switchC
+    <$> pure "mid"  -- the integer manifold id (initialized in the main template)
+    <*> mapM (makeManifoldCase h) ms  -- case for dispatching to each manifold
+    <*> pure "return 1;"  -- default case, TODO: make a proper error message
+
+makeManifoldCase :: SerialMap -> Manifold -> MorlocMonad (Doc, Doc)
+makeManifoldCase h m = do
+  unpackers <- getUnpackers h m
+  let packer = getPacker h m
+  let f = makeFunctionName m
+  let caseVar = integer (mid m)
+  let call = callC f (zipWith callC'
+                              unpackers
+                              (map (\i -> "argv[" <> integer i <> "]") [2..]))
+  let caseBody = assign Nothing "json" (callC' packer call)
+  return (caseVar, caseBody)
 
 -- | Single line comment
 commentC :: Doc -> Doc
@@ -112,11 +196,11 @@ multicommentC x = enclose "/*" "*/" (nest 2 x)
 -- | Create if else
 conditionalC :: [(Doc, Doc)] -> Maybe Doc -> Doc
 conditionalC [] (Just _) = error "else without if"
-conditionalC ((c, b):xs) els = callC "if" c <> blockC b <> conditionalC' xs els where
+conditionalC ((c, b):xs) els = callC' "if" c <> blockC b <> conditionalC' xs els where
   conditionalC' [] Nothing = ""
   conditionalC' [] (Just x) = "else" <> blockC x
   conditionalC' ((c', b'):xs) els
-    =   callC "else if" c' <> blockC b' 
+    =   callC' "else if" c' <> blockC b' 
     <> line <> conditionalC' xs els
 
 -- | Create the prototype of a function
@@ -127,42 +211,6 @@ prototypeC r =  (cFReturnType r) <+> (cFName r)
 -- | Create a function
 functionC :: CFunction -> Doc
 functionC r = prototypeC r <> enclose "{" "}" (indent 2 (cFBody r))
-
-switch' = [idoc| 
-    switch(mid){
-        case 1:
-            char* json = packDouble(m0(unpackDouble(argv[2])));
-            break;
-        case 2:
-            char* json = packDouble(m1(unpackDouble(argv[2])));
-            break;
-        case 3:
-            char* json = packDouble(m2(unpackDouble(argv[2])));
-            break;
-        default:
-            break;
-    }
-|]
-
-cismanifolds' = [idoc|
-double m0(double x){
-  return sin(x)
-}
-
-double m1(double x){
-  return cos(x)
-}
-
-double m2(double x){
-  return tan(x)
-}
-|]
-
-sources' = [idoc|
-#include "/home/z/.morloc/lib/math/c_math.h"
-
-#include "/home/z/.morloc/lib/cbase/cbase.h"
-|]
 
 main :: Doc -> Doc -> Doc -> MorlocMonad Doc
 main sources cismanifolds switch = do
@@ -176,12 +224,11 @@ main sources cismanifolds switch = do
 #{cismanifolds}
 
 int main(int argc, char * argv[]){
-    int mid = atoi(argv[1]);
-
-    #{switch}
-
-    printf("%s\n", json);
-
-    return 0;
+  int mid;
+  char* json;
+  mid = atoi(argv[1]);
+  #{switch}
+  printf("%s\n", json);
+  return 0;
 }
 |]
