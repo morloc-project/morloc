@@ -17,9 +17,6 @@ module Morloc.Pools.Common
   , ForeignCallDoc(..)
   , makeGenerator
   , defaultCodeGenerator
-  , makeCisManifolds
-  , makeSourceManifolds
-  , callIdToName
 ) where
 
 import Morloc.Global

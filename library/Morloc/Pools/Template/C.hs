@@ -28,25 +28,19 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import qualified Data.Map.Strict as Map
 
-type CType = Doc
-type CVar = Doc
-type CVal = Doc
-type CExpr = Doc
-type CStatement = Doc
-
 -- | this must contain all the information needed to build a C program
 data CGlobal = CProg {
     includesC :: [Doc] -- ^ list of include statements
   , globalC :: [Doc] -- ^ any global variables
   , functionsC :: [CFunction] -- ^ list of functions and their type info
-  , allocatedC :: [CVar] -- ^ things to free when leaving main
+  , allocatedC :: [Doc] -- ^ things to free when leaving main
   , mainC :: Doc
 }
 
 data CFunction = CFunction {
     cFReturnType :: Doc -- ^ return type
   , cFName :: Doc -- ^ function name
-  , cFArgs :: [(CType, CVar)]
+  , cFArgs :: [(Doc, Doc)] -- ^ (variable type, variable name)
   , cFBody :: Doc 
 }
 
@@ -112,20 +106,20 @@ getArgTypes m = case mConcreteType m of
 makeSources :: [Doc] -> Doc
 makeSources = vsep . map ((<+>) "#include")
 
-initializeC :: CType -> CVar -> CExpr
+initializeC :: Doc -> Doc -> Doc
 initializeC t v = t <+> v <> ";"
 
-assign :: Maybe CType -> CVar -> CVal -> Doc
+assign :: Maybe Doc -> Doc -> Doc -> Doc
 assign Nothing v x = v <+> "=" <+> x <> ";"
 assign (Just t) v x = t <+> v <+> "=" <+> x <> ";"
 
-callC :: CVar -> [CExpr] -> CExpr
+callC :: Doc -> [Doc] -> Doc
 callC f args = f <> tupled args
 
-callC' :: CVar -> CExpr -> CExpr
+callC' :: Doc -> Doc -> Doc
 callC' f arg = callC f [arg]
 
-blockC :: CStatement -> Doc
+blockC :: Doc -> Doc
 blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
 
 -- FIXME: this is all a dirty hack. The type strings for a given language MUST
@@ -142,11 +136,11 @@ toCType t = MM.throwError . TypeError $ "Unknown C type: " <> MT.show' t
 
 -- | Generate a switch statement
 switchC
-  :: CVar
+  :: Doc
   -- ^ The variable the switch statement dispatches upon
-  -> [(CVal, CStatement)]
+  -> [(Doc, Doc)]
   -- ^ Pairs of values and statements to put in the block (@break@ will automatically be added)
-  -> CStatement
+  -> Doc
   -- ^ Statements that go in the @default@ block
   -> Doc
 switchC x cases def = callC' "switch" x <> blockC caseBlock where
