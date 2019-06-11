@@ -29,6 +29,7 @@ import qualified Morloc.Component.Manifold as Manifold
 import qualified Morloc.Monad as MM
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
+import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {
       gLang        :: Lang
@@ -104,8 +105,8 @@ defaultCodeGenerator g f ep = do
   mansrcs <- Man.getManSrcs (gLang g) f manifolds
   lib <- MM.asks MC.configLibrary
   let srcs = map ((gImport g) (text' lib)) (paksrcs ++ mansrcs)
-  srcManifolds <- makeSourceManifolds g packMap manifolds
-  cisManifolds <- makeCisManifolds g packMap manifolds
+  srcManifolds <- makeSourceManifolds g packMap manifolds 
+  cisManifolds <- makeCisManifolds g packMap (getMorlocFun2sourceFun manifolds) manifolds
   usedManifolds <- Man.getUsedManifolds (gLang g) manifolds
   let dispatchSerializerDict = (gHash g) (text' . MT.show' . mid) (Man.getPacker packMap) manifolds
   let dispatchFunDict = (gHash g) (text' . MT.show' . mid) (callIdToName g) usedManifolds
@@ -116,6 +117,15 @@ defaultCodeGenerator g f ep = do
     dispatchFunDict        -- Doc
     dispatchSerializerDict -- Doc
   return $ render doc
+
+-- | When a morloc function is declared, for example @foo x = sqrt(pow x 2)@,
+-- then calling @foo@ from the nexus should call the source function @sqrt@ not
+-- the morloc function @foo@ (since the morloc function does not really exist).
+-- The @getMorlocFun2sourceFun@ function maps from morloc names (@foo@) to the
+-- top-level source name (@sqrt@).
+getMorlocFun2sourceFun :: [Manifold] -> Map.Map Name Manifold
+getMorlocFun2sourceFun ms = Map.fromList
+  [(n,m) | (Just n, m) <- (map (\m -> (mComposition m, m)) ms)]
 
 callIdToName :: Grammar -> Manifold -> Doc
 callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)
@@ -130,14 +140,24 @@ makeSourceManifolds g h ms
   >>= mapM (makeSourceManifold g h)
   |>> vsep
 
-makeCisManifolds :: Grammar -> SerialMap -> [Manifold] -> MorlocMonad Doc
-makeCisManifolds g h ms
+makeCisManifolds
+  :: Grammar
+  -> SerialMap
+  -> Map.Map MT.Text Manifold
+  -> [Manifold]
+  -> MorlocMonad Doc
+makeCisManifolds g h cs ms
   =   Man.filterByManifoldClass (gLang g) Cis ms
-  >>= mapM (makeCisManifold g h)
+  >>= mapM (makeCisManifold g h cs)
   |>> vsep
 
-makeCisManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
-makeCisManifold g h m = do
+makeCisManifold
+  :: Grammar
+  -> SerialMap
+  -> Map.Map MT.Text Manifold
+  -> Manifold
+  -> MorlocMonad Doc
+makeCisManifold g h cs m = do
   argTypes <- zip <$> (Man.getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
   args <- sequence $ zipWith makeArg (iArgs "a") argTypes
   let name = callIdToName g m
@@ -148,10 +168,18 @@ makeCisManifold g h m = do
          name
          (map text' (mBoundVars m))
          (    vsep args <> line
-           <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+           <> (gReturn g) ((gCall g) calledFunction (take n (iArgs "a")))
          ))
   where
     n = length (mArgs m)
+
+    -- Get either the callName of the current manifold or, if the current
+    -- manifold is a morloc function, get the name of the top-level manifold in
+    -- the composition. 
+    calledFunction :: Doc
+    calledFunction = maybe (text' (mCallName m))
+                           (callIdToName g)
+                           (Map.lookup (mCallName m) cs)
 
     makeArg :: Doc -> (Doc, Argument) -> MorlocMonad Doc
     makeArg lhs b = (gAssign g) <$> pure lhs <*> (makeArg' b)
