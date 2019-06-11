@@ -47,7 +47,10 @@ g = Grammar {
     , gMain        = main'
   } where
 
-    assign' l r = l <> " <- " <> r 
+    assign' :: GeneralAssignment -> Doc
+    assign' g = case gaType g of
+      (Just t) -> gaName g <> " <- " <> gaValue g <+> comment' ("::" <+> t) 
+      Nothing  -> gaName g <> " <- " <> gaValue g 
 
     hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
     hash' l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)

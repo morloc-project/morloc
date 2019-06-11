@@ -73,8 +73,10 @@ g = Grammar {
     hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
     hash' l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
 
-    assign' :: Doc -> Doc -> Doc
-    assign' l r = l <> " = " <> r 
+    assign' :: GeneralAssignment -> Doc
+    assign' g = case gaType g of
+      (Just t) -> gaName g <> " = " <> gaValue g <+> comment' ("::" <+> t) 
+      Nothing  -> gaName g <> " = " <> gaValue g 
 
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args

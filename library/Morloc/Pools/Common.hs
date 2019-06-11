@@ -14,6 +14,7 @@ module Morloc.Pools.Common
     Grammar(..)
   , TryDoc(..)
   , GeneralFunction(..)
+  , GeneralAssignment(..)
   , UnpackerDoc(..)
   , ForeignCallDoc(..)
   , makeGenerator
@@ -34,7 +35,7 @@ import qualified Data.Map.Strict as Map
 
 data Grammar = Grammar {
       gLang        :: Lang
-    , gAssign      :: Doc -> Doc -> Doc
+    , gAssign      :: GeneralAssignment -> Doc
     , gCall        :: Doc -> [Doc] -> Doc
     , gFunction    :: GeneralFunction -> Doc
     , gSignature   :: GeneralFunction -> Doc
@@ -55,6 +56,12 @@ data Grammar = Grammar {
     , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
     , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
   }
+
+data GeneralAssignment = GeneralAssignment {
+    gaType :: Maybe Doc
+  , gaName :: Doc
+  , gaValue :: Doc
+}
 
 data GeneralFunction = GeneralFunction {
     gfReturnType :: Doc -- ^ return type
@@ -193,7 +200,13 @@ makeCisManifold g h cs m = do
                            (Map.lookup (mCallName m) cs)
 
     makeArg :: Doc -> (Doc, Argument) -> MorlocMonad Doc
-    makeArg lhs b = (gAssign g) <$> pure lhs <*> (makeArg' b)
+    makeArg lhs b = do
+      arg <- makeArg' b
+      return . gAssign g $ GeneralAssignment {
+            gaType = Nothing
+          , gaName = lhs
+          , gaValue = arg
+        }
 
     makeArg' :: (Doc, Argument) -> MorlocMonad Doc
     makeArg' (u, arg) =
@@ -245,13 +258,17 @@ makeSourceManifold g h m = do
 
     unpack' :: Doc -> Doc -> (Doc, Argument) -> Doc -> Doc
     unpack' name lhs (u, _) x
-      = (gAssign g) lhs ((gUnpacker g) (UnpackerDoc {
-              udValue = x   
-            , udUnpacker = u
-            , udMid = name
-            -- TODO: remove hard-coded name
-            , udFile = text' (ML.makeSourceName (gLang g) "pool")
-          }))
+      = (gAssign g) $ GeneralAssignment {
+            gaType = Nothing
+          , gaName = lhs
+          , gaValue = ((gUnpacker g) (UnpackerDoc {
+                udValue = x   
+              , udUnpacker = u
+              , udMid = name
+              -- TODO: remove hard-coded name
+              , udFile = text' (ML.makeSourceName (gLang g) "pool")
+            }))
+          }
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [MT.Text] -> Argument -> MorlocMonad Doc
