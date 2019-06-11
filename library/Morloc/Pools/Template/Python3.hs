@@ -113,7 +113,9 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' "_morloc_foreign_call" (map dquotes (fcdCliArgs f))
+    foreignCall' f
+      = call' "_morloc_foreign_call"
+      $ fcdCall f ++ [list (fcdArgs f)]
 
     main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
     main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict = do

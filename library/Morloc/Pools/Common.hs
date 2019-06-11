@@ -72,7 +72,10 @@ data ForeignCallDoc = ForeignCallDoc {
       fcdForeignPool :: Doc   -- ^ the name of the foreign pool (e.g., "R.pool")
     , fcdMid         :: Doc   -- ^ the function integer identifier
     , fcdArgs        :: [Doc] -- ^ CLI arguments passed to foreign function
-    , fcdCliArgs     :: [Doc] -- ^ make a list of CLI arguments from first three inputs
+
+    , fcdCall        :: [Doc] -- ^ make a list of CLI arguments from first two
+                              -- inputs -- since fcdArgs will likely be
+                              -- variables, they are not included in this call.
     , fcdFile        :: Doc   -- ^ for debugging
   }
 
@@ -222,7 +225,7 @@ writeArgument g xs (ArgCall m) = do
         return $ (gCall g) name (map text' xs)
       else
         case (
-            MC.getPoolCallBuilder c l
+            MC.getPoolCallBuilder c l (gQuote g)
           , text' (ML.makeSourceName l "pool")
           , map text' xs
         ) of
@@ -231,7 +234,7 @@ writeArgument g xs (ArgCall m) = do
                 fcdForeignPool = pool
               , fcdMid = name
               , fcdArgs = args
-              , fcdCliArgs = poolBuilder pool name args
+              , fcdCall = poolBuilder pool (integer $ mid m)
               , fcdFile = text' (ML.makeSourceName (gLang g) "pool")
             })
           (Nothing, _, _) -> MM.throwError . GeneratorError $

@@ -45,11 +45,7 @@ fromSparqlDb ep = do
     |>> setLangs
     >>= setCalls
     >>= unroll
-    |>> setIds -- generate the final manifold ids
     >>= MM.logFile "manifolds.txt"
-
-setIds :: [Manifold] -> [Manifold]
-setIds ms = zipWith (\i m -> m {mid = i}) [1..] ms
 
 asTuple
   :: Map.Map Key MType
@@ -104,10 +100,13 @@ asTuple typemap datamap [ Just callId'
 asTuple _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
 
 setCalls :: [(Manifold, [Either Key Argument])] -> MorlocMonad [Manifold]
-setCalls xs = mapM setArgs xs
+setCalls xs = mapM setArgs xs'
   where
+    -- set the IDs for each manifold
+    xs' = zipWith (\i (m, x) -> (m {mid = i}, x)) [1..] xs
+
     hash :: Map.Map Key Manifold
-    hash = Map.fromList $ zip (map (mCallId . fst) xs) (map fst xs)
+    hash = Map.fromList $ zip (map (mCallId . fst) xs') (map fst xs')
 
     setArgs :: (Manifold, [Either Key Argument]) -> MorlocMonad Manifold 
     setArgs (m, args) = do
@@ -231,6 +230,8 @@ hsparql = do
     typeid_        <- var
     scriptElement_ <- var
     scriptId_      <- var
+    mid'_ <- var
+    mid''_ <- var
 
     -- Something can be exported if it is in the export list AND
     --  * Case 1: sourced and typed
@@ -281,9 +282,12 @@ hsparql = do
           triple_ mid_ element_ arg_
           MCU.isElement_ element_
 
-          triple_ scriptId_ PType OScript
-          triple_ scriptId_ PValue modulePath_
-          triple_ scriptId_ scriptElement_ mid_
+          -- -- This does not work, since there is generally not a set path
+          -- -- to the call (can be nested arbitrarily deep)
+          -- triple_ scriptId_ PType OScript
+          -- triple_ scriptId_ PValue modulePath_
+          -- triple_ scriptId_ scriptElement_ mid_
+          -- MCU.isElement_ scriptElement_
 
           triple_ fid_ PType OName
           triple_ fid_ PValue morlocName_
@@ -304,6 +308,19 @@ hsparql = do
       optional_ $ do    
         triple_ e_ PType OExport
         triple_ e_ PValue composition_
+
+    ------------- BAD DAMN IT ALL SUCK BALLS -----------
+    -- -- # Find source name
+    -- --   This case SHOULD be mutually exclusive with the next case
+    -- optional_ $ do
+    --   triple_ datadec_ PType ODataDeclaration
+    --   triple_ datadec_ PLeft morlocName_
+    --   triple_ datadec_ PRight mid'_
+    --   triple_ mid'_ PType OCall
+    --   triple_ mid'_ PValue mid''_
+    --   triple_ mid''_ PType OName
+    --   triple_ mid''_ PValue sourceName_
+    ------------- BAD DAMN IT ALL SUCK BALLS -----------
 
     -- # Find the source language
     optional_ $ do

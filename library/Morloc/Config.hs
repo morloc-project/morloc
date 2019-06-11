@@ -69,16 +69,20 @@ loadDefaultMorlocConfig = do
 
 -- | Attempt to create a function for building a call to a pool. The call is
 -- represented as a list of arguments for a command line.
-getPoolCallBuilder :: Config -> Lang -> Maybe (Doc -> Doc -> [Doc] -> [Doc])
-getPoolCallBuilder _ CLang       = Just $ (\n i xs -> [ "./" <> n, i] ++ xs)
-getPoolCallBuilder c RLang       = Just $ makeCmdPoolCall (configLangR c)
-getPoolCallBuilder c Python3Lang = Just $ makeCmdPoolCall (configLangPython3 c)
-getPoolCallBuilder c PerlLang    = Just $ makeCmdPoolCall (configLangPerl c)
-getPoolCallBuilder _ MorlocLang  = Nothing -- FIXME: add error handling
+getPoolCallBuilder
+  :: Config
+  -> Lang
+  -> (Doc -> Doc) -- ^ a function for quoting a string
+  -> Maybe (Doc -> Doc -> [Doc])
+getPoolCallBuilder _ CLang       q = Just $ (\n i -> [ q ("./" <> n), q i])
+getPoolCallBuilder c RLang       q = Just $ makeCmdPoolCall q (configLangR c)
+getPoolCallBuilder c Python3Lang q = Just $ makeCmdPoolCall q (configLangPython3 c)
+getPoolCallBuilder c PerlLang    q = Just $ makeCmdPoolCall q (configLangPerl c)
+getPoolCallBuilder _ MorlocLang  _ = Nothing -- FIXME: add error handling
 
 -- Build a simple pool call for an interpreted language
-makeCmdPoolCall :: MT.Text -> (Doc -> Doc -> [Doc] -> [Doc])
-makeCmdPoolCall prog name i args = [text' prog, name, i] ++ args
+makeCmdPoolCall :: (Doc -> Doc) -> MT.Text -> (Doc -> Doc -> [Doc])
+makeCmdPoolCall q prog name i = [q (text' prog), q name, q i]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text

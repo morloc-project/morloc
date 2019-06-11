@@ -28,7 +28,6 @@ import qualified Control.Monad as CM
 type PoolBuilder
   =  Doc    -- pool name
   -> Doc    -- pool id
-  -> [Doc]  -- pool arguments
   -> [Doc]  -- output list of CLI arguments
 
 type FData = (PoolBuilder, Doc, Int, Doc, Doc)
@@ -64,7 +63,7 @@ makeNexus ep = fmap render $ main <$> names <*> fdata where
     config <- MM.ask
     let mid' = text' . MT.show' $ mid m
     case mLang m of
-      (Just lang) -> case MC.getPoolCallBuilder config lang of
+      (Just lang) -> case MC.getPoolCallBuilder config lang id of
         (Just call') -> return $
           ( call'
           , text' (getName m)
@@ -151,6 +150,6 @@ sub call_#{name}{
     return `#{poolcall}`
 }
 |] where
-  poolcall = hsep $ call' pool mid' (map argT [0..(nargs-1)])
+  poolcall = hsep $ (call' pool mid') ++ map argT [0..(nargs-1)]
 
 argT i = [idoc|'$_[#{int i}]'|]
