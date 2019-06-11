@@ -13,6 +13,7 @@ module Morloc.Pools.Common
 (
     Grammar(..)
   , TryDoc(..)
+  , GeneralFunction(..)
   , UnpackerDoc(..)
   , ForeignCallDoc(..)
   , makeGenerator
@@ -35,7 +36,8 @@ data Grammar = Grammar {
       gLang        :: Lang
     , gAssign      :: Doc -> Doc -> Doc
     , gCall        :: Doc -> [Doc] -> Doc
-    , gFunction    :: Doc -> [Doc] -> Doc -> Doc
+    , gFunction    :: GeneralFunction -> Doc
+    , gSignature   :: GeneralFunction -> Doc
     , gId2Function :: Integer -> Doc
     , gComment     :: Doc -> Doc
     , gReturn      :: Doc -> Doc
@@ -53,6 +55,13 @@ data Grammar = Grammar {
     , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
     , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
   }
+
+data GeneralFunction = GeneralFunction {
+    gfReturnType :: Doc -- ^ return type
+  , gfName :: Doc -- ^ function name
+  , gfArgs :: [(Doc, Doc)] -- ^ (variable type, variable name)
+  , gfBody :: Doc 
+}
 
 data TryDoc = TryDoc {
       tryCmd :: Doc    -- ^ The function we attempt to run
@@ -164,12 +173,14 @@ makeCisManifold g h cs m = do
   return
     $  ((gComment g) "cis manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
-    <> ((gFunction g)
-         name
-         (map text' (mBoundVars m))
-         (    vsep args <> line
-           <> (gReturn g) ((gCall g) calledFunction (take n (iArgs "a")))
-         ))
+    <> (gFunction g) (GeneralFunction {
+           gfReturnType = "<RET_TYPE>"
+         , gfName = name
+         , gfArgs = zip (repeat "<ARG_TYPE>") (map text' (mBoundVars m))
+         , gfBody = (vsep args <>
+                     line <>
+                     (gReturn g) ((gCall g) calledFunction (take n (iArgs "a"))))
+       })
   where
     n = length (mArgs m)
 
@@ -217,13 +228,18 @@ makeSourceManifold g h m = do
   return
     $  ((gComment g) "source manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
-    <> ((gFunction g)
-         name
-         (take n (iArgs "x"))
-         (
-              vsep (zipWith3 (unpack' name) (iArgs "a") argTypes (iArgs "x")) <> line
-           <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
-         ))
+    <> ((gFunction g) (GeneralFunction {
+           gfReturnType = "<RET_TYPE>"
+         , gfName = name
+         , gfArgs = zip (repeat "<ARG_TYPE>") (take n (iArgs "x"))
+         , gfBody = (vsep $ zipWith3
+                              (unpack' name)
+                              (iArgs "a")
+                              argTypes
+                              (iArgs "x"))
+                  <> line
+                  <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+      }))
   where
     n = length (mArgs m)
 

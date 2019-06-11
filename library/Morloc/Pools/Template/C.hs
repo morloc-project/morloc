@@ -28,22 +28,6 @@ import Morloc.Quasi
 import Morloc.Pools.Common
 import qualified Data.Map.Strict as Map
 
--- | this must contain all the information needed to build a C program
-data CGlobal = CProg {
-    includesC :: [Doc] -- ^ list of include statements
-  , globalC :: [Doc] -- ^ any global variables
-  , functionsC :: [CFunction] -- ^ list of functions and their type info
-  , allocatedC :: [Doc] -- ^ things to free when leaving main
-  , mainC :: Doc
-}
-
-data CFunction = CFunction {
-    cFReturnType :: Doc -- ^ return type
-  , cFName :: Doc -- ^ function name
-  , cFArgs :: [(Doc, Doc)] -- ^ (variable type, variable name)
-  , cFBody :: Doc 
-}
-
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
 generate db = pure Script <*> pure "pool" <*> pure CLang <*> generateC db
 
@@ -54,7 +38,7 @@ generateC db = do
   paksrcs <- mapM nameSource (serialSources packMap)    -- [Doc]
   mansrcs <- Man.getManSrcs CLang nameSource manifolds  -- [Doc]
   usedManifolds <- Man.getUsedManifolds CLang manifolds -- [Manifold]
-  simpleManifolds <- mapM (\m -> makeCFunction m >>= makeFunctionDoc) $ usedManifolds
+  simpleManifolds <- mapM (\m -> makeGeneralFunction m >>= makeFunctionDoc) $ usedManifolds
   dispatch' <- makeDispatch packMap usedManifolds
   let sources' = makeSources (mansrcs ++ paksrcs) <> line
   fmap render $ main sources' (vsep simpleManifolds) dispatch'
@@ -62,23 +46,23 @@ generateC db = do
     nameSource :: MT.Text -> MorlocMonad Doc
     nameSource = return . dquotes . text'
 
-makeFunctionDoc :: CFunction -> MorlocMonad Doc
+makeFunctionDoc :: GeneralFunction -> MorlocMonad Doc
 makeFunctionDoc f = do
-  let targs = tupled (map (\(t, x) -> t <+> x) (cFArgs f))
-  let rargs = tupled (map snd (cFArgs f))
-  let head = [idoc|#{cFReturnType f} #{cFName f}#{targs}|]
-  return $ head <> blockC (cFBody f)
+  let targs = tupled (map (\(t, x) -> t <+> x) (gfArgs f))
+  let rargs = tupled (map snd (gfArgs f))
+  let head = [idoc|#{gfReturnType f} #{gfName f}#{targs}|]
+  return $ head <> blockC (gfBody f)
 
-makeCFunction :: Manifold -> MorlocMonad CFunction
-makeCFunction m = do
+makeGeneralFunction :: Manifold -> MorlocMonad GeneralFunction
+makeGeneralFunction m = do
   returnType <- getReturnType m
   argTypes <- getArgTypes m
   body <- makeBody m
-  return $ CFunction {
-      cFReturnType = returnType
-    , cFName = makeFunctionName m
-    , cFArgs = zip (argTypes) (map (\i -> "x" <> integer i) [0..])
-    , cFBody = body
+  return $ GeneralFunction {
+      gfReturnType = returnType
+    , gfName = makeFunctionName m
+    , gfArgs = zip (argTypes) (map (\i -> "x" <> integer i) [0..])
+    , gfBody = body
   }
 
 makeFunctionName :: Manifold -> Doc
@@ -200,13 +184,13 @@ conditionalC ((c, b):xs) els = callC' "if" c <> blockC b <> conditionalC' xs els
     <> line <> conditionalC' xs els
 
 -- | Create the prototype of a function
-prototypeC :: CFunction -> Doc
-prototypeC r =  (cFReturnType r) <+> (cFName r)
-             <> encloseSep "(" ")" "," (map (\(t, v) -> t <+> v) (cFArgs r))
+prototypeC :: GeneralFunction -> Doc
+prototypeC r =  (gfReturnType r) <+> (gfName r)
+             <> encloseSep "(" ")" "," (map (\(t, v) -> t <+> v) (gfArgs r))
 
 -- | Create a function
-functionC :: CFunction -> Doc
-functionC r = prototypeC r <> enclose "{" "}" (indent 2 (cFBody r))
+functionC :: GeneralFunction -> Doc
+functionC r = prototypeC r <> enclose "{" "}" (indent 2 (gfBody r))
 
 main :: Doc -> Doc -> Doc -> MorlocMonad Doc
 main sources cismanifolds switch = do

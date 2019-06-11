@@ -15,8 +15,6 @@ import Morloc.Global
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
-import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
@@ -44,6 +42,7 @@ g = Grammar {
     , gTry         = try'
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
+    , gSignature   = signature'
     , gHash        = hash'
     , gMain        = main'
   } where
@@ -58,9 +57,17 @@ g = Grammar {
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
-    function' :: Doc -> [Doc] -> Doc -> Doc
-    function' name args body
-      = name <> " <- function" <> tupled args <> braces (line <> indent' body <> line) <> line
+    signature' :: GeneralFunction -> Doc
+    signature' gf
+      =   gfReturnType gf
+      <+> gfName gf
+      <>  tupledNoFold (map (\(t,x) -> t <+> x) (gfArgs gf))
+
+    function' :: GeneralFunction -> Doc
+    function' gf = comment' (signature' gf) <> line
+      <> gfName gf <> " <- function"
+      <> tupled (map snd (gfArgs gf))
+      <> braces (line <> indent' (gfBody gf <> line) <> line)
 
     id2function' :: Integer -> Doc
     id2function' i = "m" <> (text' (MT.show' i))

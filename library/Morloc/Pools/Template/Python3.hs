@@ -63,6 +63,7 @@ g = Grammar {
     , gTry         = pytry
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
+    , gSignature   = signature'
     , gHash        = hash'
     , gMain        = main'
   } where
@@ -78,9 +79,17 @@ g = Grammar {
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
-    function' :: Doc -> [Doc] -> Doc -> Doc
-    function' name args body
-      = "def " <> name <> tupled args <> ":" <> line <> indent' body <> line
+    signature' :: GeneralFunction -> Doc
+    signature' gf
+      =   gfReturnType gf
+      <+> gfName gf
+      <>  tupledNoFold (map (\(t,x) -> t <+> x) (gfArgs gf))
+
+    function' :: GeneralFunction -> Doc
+    function' gf = comment' (signature' gf) <> line
+      <> "def "
+      <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
+      <> line <> indent' (gfBody gf) <> line
 
     id2function' :: Integer -> Doc
     id2function' i = "m" <> (text' (MT.show' i))
