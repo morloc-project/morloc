@@ -256,7 +256,7 @@ data GraphPredicate
   | PType       -- ^ Link something to its type (rdf:type)
   | PValue      -- ^ Link something to
   | PKey        -- ^ Link something to a key
-  | PNot        -- ^ Negate an exepressoin
+  | PNot        -- ^ Negate an expressoin
   | PName       -- ^ Link something to a Morloc name
   | PImport     -- ^ The left-hand imports the right-hand side
   deriving(Show, Eq, Ord)
