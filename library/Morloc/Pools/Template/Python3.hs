@@ -65,6 +65,7 @@ g = Grammar {
     , gForeignCall = foreignCall'
     , gSignature   = signature'
     , gHash        = hash'
+    , gShowType    = mshow
     , gMain        = main'
   } where
 
@@ -83,9 +84,9 @@ g = Grammar {
 
     signature' :: GeneralFunction -> Doc
     signature' gf
-      =   gfReturnType gf
+      =   maybe "?" id (gfReturnType gf)
       <+> gfName gf
-      <>  tupledNoFold (map (\(t,x) -> t <+> x) (gfArgs gf))
+      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
     function' :: GeneralFunction -> Doc
     function' gf = comment' (signature' gf) <> line

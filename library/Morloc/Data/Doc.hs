@@ -37,7 +37,8 @@ text' = text . DL.fromStrict
 
 -- | a tupled function that does not fold long lines (folding breaks commenting)
 tupledNoFold :: [Doc] -> Doc
-tupledNoFold xs = parens (foldl (\x y -> x <> "," <+> y) "" xs)
+tupledNoFold [] = ""
+tupledNoFold (x:xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
 
 
 textEsc' :: DT.Text -> Doc

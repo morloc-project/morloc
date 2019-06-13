@@ -46,12 +46,26 @@ generateC db = do
     nameSource :: MT.Text -> MorlocMonad Doc
     nameSource = return . dquotes . text'
 
+
+-- | Force existance of the return type
+gfReturnType' :: GeneralFunction -> Doc
+gfReturnType' gf = case gfReturnType gf of
+  (Just t) -> t
+  Nothing -> error ("Missing concrete type in C: " ++ show gf)
+
+-- | Force existance of each argument type
+gfArgs' :: GeneralFunction -> [(Doc, Doc)]
+gfArgs' gf = map getType (gfArgs gf) where
+  getType :: (Maybe Doc, Doc) -> (Doc, Doc)
+  getType (Just t, x) = (t, x)
+  getType _ = error ("Missing concrete type in C: " ++ show gf)
+
 makeFunctionDoc :: GeneralFunction -> MorlocMonad Doc
-makeFunctionDoc f = do
-  let targs = tupled (map (\(t, x) -> t <+> x) (gfArgs f))
-  let rargs = tupled (map snd (gfArgs f))
-  let head = [idoc|#{gfReturnType f} #{gfName f}#{targs}|]
-  return $ head <> blockC (gfBody f)
+makeFunctionDoc gf = do
+  let targs = tupled (map (\(t, x) -> t <+> x) (gfArgs' gf))
+  let rargs = tupled (map snd (gfArgs' gf))
+  let head = [idoc|#{gfReturnType' gf} #{gfName gf}#{targs}|]
+  return $ head <> blockC (gfBody gf)
 
 makeGeneralFunction :: Manifold -> MorlocMonad GeneralFunction
 makeGeneralFunction m = do
@@ -59,9 +73,9 @@ makeGeneralFunction m = do
   argTypes <- getArgTypes m
   body <- makeBody m
   return $ GeneralFunction {
-      gfReturnType = returnType
+      gfReturnType = Just returnType
     , gfName = makeFunctionName m
-    , gfArgs = zip (argTypes) (map (\i -> "x" <> integer i) [0..])
+    , gfArgs = zip (map Just argTypes) (map (\i -> "x" <> integer i) [0..])
     , gfBody = body
   }
 
@@ -185,12 +199,13 @@ conditionalC ((c, b):xs) els = callC' "if" c <> blockC b <> conditionalC' xs els
 
 -- | Create the prototype of a function
 prototypeC :: GeneralFunction -> Doc
-prototypeC r =  (gfReturnType r) <+> (gfName r)
-             <> encloseSep "(" ")" "," (map (\(t, v) -> t <+> v) (gfArgs r))
+prototypeC gf =  gfReturnType' gf <+> (gfName gf)
+             <> encloseSep "(" ")" "," (map (\(t, v) -> t <+> v) (gfArgs' gf))
 
 -- | Create a function
 functionC :: GeneralFunction -> Doc
 functionC r = prototypeC r <> enclose "{" "}" (indent 2 (gfBody r))
+
 
 main :: Doc -> Doc -> Doc -> MorlocMonad Doc
 main sources cismanifolds switch = do

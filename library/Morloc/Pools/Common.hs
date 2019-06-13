@@ -54,6 +54,7 @@ data Grammar = Grammar {
     , gTry         :: TryDoc -> Doc
     , gForeignCall :: ForeignCallDoc -> Doc
     , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
+    , gShowType    :: MType -> Doc
     , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
   }
 
@@ -61,40 +62,39 @@ data GeneralAssignment = GeneralAssignment {
     gaType :: Maybe Doc
   , gaName :: Doc
   , gaValue :: Doc
-}
+} deriving (Show)
 
 data GeneralFunction = GeneralFunction {
-    gfReturnType :: Doc -- ^ return type
+    gfReturnType :: Maybe Doc -- ^ concrete return type
   , gfName :: Doc -- ^ function name
-  , gfArgs :: [(Doc, Doc)] -- ^ (variable type, variable name)
+  , gfArgs :: [(Maybe Doc, Doc)] -- ^ (variable concrete type, variable name)
   , gfBody :: Doc 
-}
+} deriving (Show)
 
 data TryDoc = TryDoc {
-      tryCmd :: Doc    -- ^ The function we attempt to run
-    , tryRet :: Doc    -- ^ A name for the returned variable?
-    , tryArgs :: [Doc] -- ^ Arguments passed to function
-    , tryMid :: Doc    -- ^ The name of the calling manifold (for debugging)
-    , tryFile :: Doc   -- ^ The file where the issue occurs (for debugging)
-  }
+    tryCmd :: Doc    -- ^ The function we attempt to run
+  , tryRet :: Doc    -- ^ A name for the returned variable?
+  , tryArgs :: [Doc] -- ^ Arguments passed to function
+  , tryMid :: Doc    -- ^ The name of the calling manifold (for debugging)
+  , tryFile :: Doc   -- ^ The file where the issue occurs (for debugging)
+} deriving (Show)
 
 data UnpackerDoc = UnpackerDoc {
-      udValue :: Doc    -- ^ The expression that will be unpacked
-    , udUnpacker :: Doc -- ^ The function for unpacking the value
-    , udMid :: Doc      -- ^ Manifold name for debugging messages
-    , udFile :: Doc     -- ^ File name for debugging messages
-  }
+    udValue :: Doc    -- ^ The expression that will be unpacked
+  , udUnpacker :: Doc -- ^ The function for unpacking the value
+  , udMid :: Doc      -- ^ Manifold name for debugging messages
+  , udFile :: Doc     -- ^ File name for debugging messages
+} deriving (Show)
 
 data ForeignCallDoc = ForeignCallDoc {
-      fcdForeignPool :: Doc   -- ^ the name of the foreign pool (e.g., "R.pool")
-    , fcdMid         :: Doc   -- ^ the function integer identifier
-    , fcdArgs        :: [Doc] -- ^ CLI arguments passed to foreign function
-
-    , fcdCall        :: [Doc] -- ^ make a list of CLI arguments from first two
-                              -- inputs -- since fcdArgs will likely be
-                              -- variables, they are not included in this call.
-    , fcdFile        :: Doc   -- ^ for debugging
-  }
+    fcdForeignPool :: Doc   -- ^ the name of the foreign pool (e.g., "R.pool")
+  , fcdMid         :: Doc   -- ^ the function integer identifier
+  , fcdArgs        :: [Doc] -- ^ CLI arguments passed to foreign function
+  , fcdCall        :: [Doc] -- ^ make a list of CLI arguments from first two
+                            -- inputs -- since fcdArgs will likely be
+                            -- variables, they are not included in this call.
+  , fcdFile        :: Doc   -- ^ for debugging
+} deriving (Show)
 
 makeGenerator
   :: Grammar
@@ -174,16 +174,19 @@ makeCisManifold
   -> Manifold
   -> MorlocMonad Doc
 makeCisManifold g h cs m = do
-  argTypes <- zip <$> (Man.getUnpackers h m) <*> pure (mArgs m) -- [(Doc, Argument)]
+  argTypes <-  zip3
+           <$> pure (getConcreteArgTypes g m) -- [Maybe Doc]
+           <*> Man.getUnpackers h m           -- [Doc]
+           <*> pure (mArgs m)                 -- [Argument]
   args <- sequence $ zipWith makeArg (iArgs "a") argTypes
   let name = callIdToName g m
   return
     $  ((gComment g) "cis manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
     <> (gFunction g) (GeneralFunction {
-           gfReturnType = "<RET_TYPE>"
+           gfReturnType = Nothing
          , gfName = name
-         , gfArgs = zip (repeat "<ARG_TYPE>") (map text' (mBoundVars m))
+         , gfArgs = zip (repeat $ Just "<BOUND_TYPE>") (map text' (mBoundVars m))
          , gfBody = (vsep args <>
                      line <>
                      (gReturn g) ((gCall g) calledFunction (take n (iArgs "a"))))
@@ -199,11 +202,11 @@ makeCisManifold g h cs m = do
                            (callIdToName g)
                            (Map.lookup (mCallName m) cs)
 
-    makeArg :: Doc -> (Doc, Argument) -> MorlocMonad Doc
-    makeArg lhs b = do
-      arg <- makeArg' b
+    makeArg :: Doc -> (Maybe Doc, Doc, Argument) -> MorlocMonad Doc
+    makeArg lhs (ctype, unpacker, arg) = do
+      arg <- makeArg' (unpacker, arg)
       return . gAssign g $ GeneralAssignment {
-            gaType = Nothing
+            gaType = ctype
           , gaName = lhs
           , gaValue = arg
         }
@@ -217,6 +220,7 @@ makeCisManifold g h cs m = do
       else
         (writeArgument g (mBoundVars m) arg)
 
+    -- Does this argument need to be deserialized?
     useUnpacker :: Grammar -> Argument -> Manifold -> Bool
     useUnpacker _  (ArgName n') m' = elem n' (mBoundVars m')
     useUnpacker g' (ArgCall m') _  = (mLang m') /= (Just (gLang g'))
@@ -236,15 +240,15 @@ makeCisManifold g h cs m = do
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
 makeSourceManifold g h m = do
-  argTypes <- zip <$> (Man.getUnpackers h m) <*> pure (mArgs m)
+  argTypes <- zip3 <$> pure (getConcreteArgTypes g m) <*> (Man.getUnpackers h m) <*> pure (mArgs m)
   let name = callIdToName g m
   return
     $  ((gComment g) "source manifold") <> line
     <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
     <> ((gFunction g) (GeneralFunction {
-           gfReturnType = "<RET_TYPE>"
+           gfReturnType = getConcreteReturnType g m
          , gfName = name
-         , gfArgs = zip (repeat "<ARG_TYPE>") (take n (iArgs "x"))
+         , gfArgs = zip (getConcreteArgTypes g m) (take n (iArgs "x"))
          , gfBody = (vsep $ zipWith3
                               (unpack' name)
                               (iArgs "a")
@@ -256,10 +260,10 @@ makeSourceManifold g h m = do
   where
     n = length (mArgs m)
 
-    unpack' :: Doc -> Doc -> (Doc, Argument) -> Doc -> Doc
-    unpack' name lhs (u, _) x
+    unpack' :: Doc -> Doc -> (Maybe Doc, Doc, Argument) -> Doc -> Doc
+    unpack' name lhs (ctype, u, _) x
       = (gAssign g) $ GeneralAssignment {
-            gaType = Nothing
+            gaType = ctype
           , gaName = lhs
           , gaValue = ((gUnpacker g) (UnpackerDoc {
                 udValue = x   
@@ -269,6 +273,17 @@ makeSourceManifold g h m = do
               , udFile = text' (ML.makeSourceName (gLang g) "pool")
             }))
           }
+
+getConcreteArgTypes :: Grammar -> Manifold -> [Maybe Doc]
+getConcreteArgTypes g m = case (mConcreteType m) of
+  (Just (MFuncType _ ts _)) -> map (Just . gShowType g) ts
+  _ -> repeat Nothing -- infinite nothing, fine for zipping, but don't map
+
+getConcreteReturnType :: Grammar -> Manifold -> Maybe Doc
+getConcreteReturnType g m = case (mConcreteType m) of
+  (Just (MFuncType _ _ t)) -> Just . gShowType g $ t
+  _ -> Nothing
+
 
 -- | writes an argument sans serialization 
 writeArgument :: Grammar -> [MT.Text] -> Argument -> MorlocMonad Doc
@@ -300,8 +315,7 @@ writeArgument g xs (ArgCall m) = do
             })
           (Nothing, _, _) -> MM.throwError . GeneratorError $
             "No command could be found to run language " <> (ML.showLangName l)
-    Nothing -> MM.throwError . GeneratorError $
-      "No language set on: " <> MT.show' m
+    Nothing -> MM.throwError . GeneratorError $ "No language set on: " <> MT.show' m
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x

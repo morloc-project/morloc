@@ -44,13 +44,14 @@ g = Grammar {
     , gForeignCall = foreignCall'
     , gSignature   = signature'
     , gHash        = hash'
+    , gShowType    = mshow
     , gMain        = main'
   } where
 
     assign' :: GeneralAssignment -> Doc
-    assign' g = case gaType g of
-      (Just t) -> gaName g <> " <- " <> gaValue g <+> comment' ("::" <+> t) 
-      Nothing  -> gaName g <> " <- " <> gaValue g 
+    assign' ga = case gaType ga of
+      (Just t) -> gaName ga <> " <- " <> gaValue ga <+> comment' ("::" <+> t) 
+      Nothing  -> gaName ga <> " <- " <> gaValue ga 
 
     hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
     hash' l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
@@ -62,9 +63,9 @@ g = Grammar {
 
     signature' :: GeneralFunction -> Doc
     signature' gf
-      =   gfReturnType gf
+      =   maybe "?" id (gfReturnType gf)
       <+> gfName gf
-      <>  tupledNoFold (map (\(t,x) -> t <+> x) (gfArgs gf))
+      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
     function' :: GeneralFunction -> Doc
     function' gf = comment' (signature' gf) <> line
