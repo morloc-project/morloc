@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.17.2
+version:          0.17.3
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -40,6 +40,10 @@ dependencies:
   - unordered-containers
   - wl-pprint-text
   - yaml
+
+extra-deps:
+  - github: github/semantic
+    commit: 38198bcf1ee25b09e2ce3fbcfc452f07892f6799
 
 ghc-options:
   - -Wall

@@ -7,6 +7,11 @@ Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+MorlocMonad is a monad stack that is passed throughout the morloc codebase.
+Most functions that raise errors, perform IO, or access global configuration
+will return `MorlocMonad a` types. The stack consists of a State, Writer,
+Except, and Reader monad.
 -}
 
 module Morloc.Monad
@@ -17,6 +22,7 @@ module Morloc.Monad
   , runCommand
   , runCommandWith
   , logFile
+  , readLang
   , module Control.Monad.Trans 
   , module Control.Monad.Except 
   , module Control.Monad.Reader
@@ -27,14 +33,14 @@ module Morloc.Monad
 import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 import Control.Monad.Trans
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Writer
-import Morloc.Error -- for MorlocError Show instance
-import qualified Data.Map as Map
+import Morloc.Error () -- for MorlocError Show instance
 import qualified System.Exit as SE
 import qualified System.Process as SP
 import System.IO (stderr)
@@ -89,3 +95,10 @@ logFile s m = do
   let path = (MT.unpack tmpdir) <> "/" <> s
   liftIO $ writeFile path (show m)
   return m 
+
+-- | Attempt to read a language name. This is a wrapper around the
+-- @Morloc.Language::readLangName@ that appropriately handles error.
+readLang :: MT.Text -> MorlocMonad Lang
+readLang langStr = case ML.readLangName langStr of
+  (Just x) -> return x
+  Nothing -> throwError $ UnknownLanguage langStr

@@ -10,7 +10,7 @@ all:
 
 .PHONY: clean
 clean:
-	rm -rf nexus.* pool.* __pycache__ 
+	rm -rf nexus.* pool* __pycache__ 
 	rm -rf z.ttl z.rq
 
 .PHONY: runall

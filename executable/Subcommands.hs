@@ -15,6 +15,7 @@ module Subcommands
   , cmdInstall
   , cmdMake
   , cmdRdf
+  , cmdRemove
 ) where
 
 import Morloc.Operators
@@ -26,7 +27,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
 import System.Console.Docopt
 import Control.Monad (when)
-import qualified Morloc.Environment as ME
+import qualified Morloc.Module as Mod
 
 type Subcommand = Arguments -> Config.Config -> IO ()
 
@@ -67,12 +68,12 @@ cmdInstall args conf
   cmdInstall' = do
     let name = getArgOrDie args (argument "name")
     if isPresent args (longOption "github")
-    then ME.installModule (ME.GithubRepo name)
-    else ME.installModule (ME.CoreGithubRepo name)
+    then Mod.installModule (Mod.GithubRepo name)
+    else Mod.installModule (Mod.CoreGithubRepo name)
 
 -- | remove a previously installed module (NOT YET IMPLEMENTED)
 cmdRemove :: Subcommand
-cmdRemove args config = do
+cmdRemove _ _ = do
   putStrLn "not removing anything"
 
 -- | build a Morloc program, generating the nexus and pool files

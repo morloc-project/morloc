@@ -50,12 +50,16 @@ hi def link reserved Keyword
 "                           P R I M A T I V E S                                
 " -----------------------------------------------------------------------------
 syn region s_string start=/"/ end=/"/
-syn match s_num  '\h\@<!-\?\(\d*\.\d\+\|\d\+\)\h\@!'
+syn match s_num '\([a-zA-Z_]\)\@<!\<[0-9]\+\>\([a-zA-Z_]\)\@!'
+syn match s_dbl '\([a-zA-Z_]\)\@<!\<[0-9]\+\.[0-9]\+\>\([a-zA-Z_]\)\@!'
+
+" syn match s_num '\v(\h)@<!-?(\d*\.\d+|\d+)(\h)\@!'
+"                  -------                ------- 
+"                  negative look behind   negative look ahead
 " -----------------------------------------------------------------------------
 hi def link s_num      Number
+hi def link s_dbl      Number
 hi def link s_string   String
-
-
 
 " =============================================================================
 "                            O P E R A T O R S                                 

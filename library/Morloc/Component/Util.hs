@@ -16,7 +16,6 @@ module Morloc.Component.Util (
 ) where
 
 import Morloc.Global
-import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM

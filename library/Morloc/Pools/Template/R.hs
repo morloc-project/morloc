@@ -15,21 +15,20 @@ import Morloc.Global
 import Morloc.Quasi
 import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
-import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+generate db = makeGenerator g (defaultCodeGenerator g asImport) db
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = return . text' $ s
 
 g = Grammar {
-      gLang        = "R"
+      gLang        = RLang
     , gAssign      = assign'
     , gCall        = call'
     , gFunction    = function'
+    , gId2Function = id2function'
     , gComment     = comment'
     , gReturn      = return'
     , gQuote       = dquotes
@@ -43,18 +42,39 @@ g = Grammar {
     , gTry         = try'
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
+    , gSignature   = signature'
+    , gHash        = hash'
+    , gShowType    = mshow
+    , gMain        = main'
   } where
 
-    assign' l r = l <> " <- " <> r 
+    assign' :: GeneralAssignment -> Doc
+    assign' ga = case gaType ga of
+      (Just t) -> gaName ga <> " <- " <> gaValue ga <+> comment' ("::" <+> t) 
+      Nothing  -> gaName ga <> " <- " <> gaValue ga 
+
+    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+    hash' l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
 
     indent' = indent 4
 
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
-    function' :: Doc -> [Doc] -> Doc -> Doc
-    function' name args body
-      = name <> " <- function" <> tupled args <> braces (line <> indent' body <> line) <> line
+    signature' :: GeneralFunction -> Doc
+    signature' gf
+      =   maybe "?" id (gfReturnType gf)
+      <+> gfName gf
+      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
+
+    function' :: GeneralFunction -> Doc
+    function' gf = comment' (signature' gf) <> line
+      <> gfName gf <> " <- function"
+      <> tupled (map snd (gfArgs gf))
+      <> braces (line <> indent' (gfBody gf <> line) <> line)
+
+    id2function' :: Integer -> Doc
+    id2function' i = "m" <> (text' (MT.show' i))
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -91,31 +111,18 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' ".morloc_foreign_call"
-      [ dquotes (fcdForeignProg f)
-      , dquotes (fcdForeignPool f)
-      , dquotes (fcdMid f)
-      , list' (fcdArgs f)
+    foreignCall' f = call' ".morloc_foreign_call" $
+      [ "cmd=" <> hsep (map dquotes (take 1 (fcdCall f)))
+      , "args=" <> list' ((map dquotes (drop 1 (fcdCall f))) ++ fcdArgs f)
       , ".pool=" <> dquotes (fcdFile f)
       , ".name=" <> dquotes (fcdMid f)
       ]
 
-toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = "list" <> tupled (map (\x -> l x <> "=" <> r x) xs)
-
-main
-  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
-main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
-  -- TODO: fix this hack - the sources should be filtered by language before being passed to main
-  let sources = line <> vsep (map ((gImport g) lib) (filter (\s -> MT.isSuffixOf ".R" (render s)) srcs))
-  sourceManifolds <- makeSourceManifolds g hash manifolds
-  cisManifolds <- makeCisManifolds g hash manifolds
-  mids <- MM.mapM callIdToName manifolds
-  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
-  return $ [idoc|#!/usr/bin/env Rscript
-
-#{sources}
+    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
+    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict
+      = return [idoc|#!/usr/bin/env Rscript
+  
+#{line <> vsep sources}
 
 .morloc_run <- function(f, args){
   fails <- ""
@@ -184,14 +191,15 @@ main srcs manifolds hash = do
 
 #{cisManifolds}
 
+dispatchFun = #{dispatchFunDict}
 dispatchSerializer <- #{dispatchSerializerDict}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
   stop("Expected 1 or more arguments")
-} else if(exists(args[[1]])){
+} else {
   cmdstr <- args[[1]]
-  cmd <- get(cmdstr)
+  cmd <- dispatchFun[[cmdstr]]
   args <- as.list(args[-1, drop=FALSE])
   result <- if(class(cmd) == "function"){
     do.call(cmd, args)
@@ -200,7 +208,5 @@ if(length(args) == 0){
   }
   serializer <- dispatchSerializer[[cmdstr]]
   cat(serializer(result), "\n")
-} else {
-  stop("Could not find function '", cmdstr, "'")
 }
 |]

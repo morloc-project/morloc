@@ -23,12 +23,13 @@ module Morloc.Global (
   , AbstractType
   , ConcreteType
   , Name
-  , Lang
   , Path
   , Code
   , Key
   , Value
   , Element
+  -- ** Language
+  , Lang(..)
   -- ** Data
   , Script(..)
   , Manifold(..)
@@ -39,6 +40,7 @@ module Morloc.Global (
   , GraphPredicate(..)
   , GraphObject(..)
   , SerialMap(..)
+  , ManifoldClass(..)
   -- ** Error handling
   , MorlocError(..)
   -- ** Configuration
@@ -60,6 +62,8 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State  (StateT)
 import Control.Monad.Writer (WriterT)
+
+import Morloc.Language (Lang(..))
 
 -- | Write into Morloc code
 class MShow a where
@@ -108,7 +112,6 @@ data MorlocState = MorlocState {
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 type Name    = Text
-type Lang    = Text
 type Path    = Text
 type Code    = Text
 type Key     = Text
@@ -122,26 +125,44 @@ type AbstractType = MType
 type ConcreteType = MType
 
 data Manifold = Manifold {
-      mCallId       :: Key
+      mid           :: Integer
+    , mCallId       :: Text
     , mAbstractType :: Maybe AbstractType
     , mConcreteType :: Maybe ConcreteType
-    , mExported     :: Bool -- If True, then this manifold will be
-                            -- 1) callable from the nexus (if this script is the base script)
-                            -- 2) imported if the module is imported
-                            -- If False, then it is purely a local function
+    , mExported     :: Bool
+    -- ^ If False, then it is purely a local function
+    -- If True, then this manifold will be
+    -- 1) callable from the nexus (if this script is the base script)
+    -- 2) imported if the module is imported
     , mCalled       :: Bool
-    , mSourced      :: Bool -- True if this function read from sourced (e.g., `source "R" ("runif")`)
-    , mMorlocName   :: Name -- e.g., in `source "R" ("runif" as rand_uniform)`, "rand_uniform" is morloc name and "runif" is the R name
+    , mSourced      :: Bool
+    -- ^ True if this function read from sourced (e.g., @source "R" ("runif")@)
+    , mMorlocName   :: Name
+    -- ^ e.g., in @source "R" ("runif" as rand_uniform)@, "rand_uniform" is
+    -- morloc name and "runif" is the R name
     , mCallName     :: Name
-    , mSourcePath   :: Maybe Path -- ^ e.g., "foo.py3", this is relative to the module directory path
-    , mModulePath   :: Maybe Path -- ^ e.g., "$HOME/.morloc/lib/foo/main.loc
+    , mSourcePath   :: Maybe Path
+    -- ^ e.g., "foo.py3", this is relative to the module directory path
+    , mModulePath   :: Maybe Path
+    -- ^ e.g., "$HOME/.morloc/lib/foo/main.loc
     , mSourceName   :: Maybe Name
-    , mComposition  :: Maybe Name -- ^ The name of the declaration function. For example, in `foo x = sqrt x`, "foo" is mComposition
+    , mComposition  :: Maybe Name
+    -- ^ The name of the declaration function. For example, in
+    -- @foo x = sqrt x@, "foo" is mComposition
     , mBoundVars    :: [Name]
     , mLang         :: Maybe Lang
+    -- ^ The language if specified (otherwise morloc should try to select one)
     , mArgs         :: [Argument]
   }
   deriving(Show, Eq, Ord)
+
+-- | The role a manifold plays relative to a given language
+data ManifoldClass
+  = Cis      -- ^ Wrapper around a Morloc composition
+  | Trans    -- ^ Wrapper around a foreign call
+  | Source   -- ^ Wrapper around a source function
+  | Uncalled -- ^ Does not need to be built in current language
+  deriving(Show, Ord, Eq)
 
 data Argument
   = ArgName Name
@@ -190,16 +211,21 @@ instance Ord MType where
 -- TODO: add constraints
 data MTypeMeta = MTypeMeta {
       metaName :: Maybe Name
-    , metaProp :: [Name]     -- ^ A list of properties. Currently these are non-parameterized properties, such as "pack" or "unpack".
-    , metaLang :: Maybe Lang -- ^ The language. TODO: make Nothing mean it is a Morloc function, and "Just lang" mean it is a concrete type from the language "lang".
+    , metaProp :: [Name]
+    -- ^ A list of properties. Currently these are non-parameterized
+    -- properties, such as "pack" or "unpack".
+    , metaLang :: Maybe Lang
+    -- ^ The language. TODO: make Nothing mean it is a Morloc function, and
+    -- "Just lang" mean it is a concrete type from the language "lang".
   }
   deriving(Show, Eq, Ord)
 
 data SerialMap = SerialMap {
-      serialLang :: Lang
+      serialLang     :: Lang
     , serialPacker   :: Map MType Name
     , serialUnpacker :: Map MType Name
-    , serialSources :: [Path] -- ^ The absolute paths to the source files
+    , serialSources  :: [Path]
+    -- ^ The absolute paths to the source files
   }
   deriving(Show, Eq, Ord)
 
@@ -209,7 +235,7 @@ newtype SparqlEndPoint = SparqlEndPoint { endpoint :: String }
 -- | Stores everything needed to build one file
 data Script = Script {
       scriptBase :: String  -- ^ script basename (no extension)
-    , scriptLang :: String  -- ^ script language
+    , scriptLang :: Lang    -- ^ script language
     , scriptCode :: Text    -- ^ full script source code
   }
   deriving(Ord, Eq)
@@ -230,7 +256,7 @@ data GraphPredicate
   | PType       -- ^ Link something to its type (rdf:type)
   | PValue      -- ^ Link something to
   | PKey        -- ^ Link something to a key
-  | PNot        -- ^ Negate an exepressoin
+  | PNot        -- ^ Negate an expressoin
   | PName       -- ^ Link something to a Morloc name
   | PImport     -- ^ The left-hand imports the right-hand side
   deriving(Show, Eq, Ord)
@@ -286,6 +312,8 @@ data MorlocError
   | SyntaxError (ParseError Char Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
+  -- | Raised when an unsupported language is encountered
+  | UnknownLanguage Text
   -- | Raised when parent and child types conflict
   | TypeConflict Text Text
   -- | Raised for general type errors
@@ -302,10 +330,13 @@ data MorlocError
   | SerializationError Text
   -- | Raised when a dependency is missing
   | DependencyError Dependency
+  -- | Error in building a pool (i.e., in a compiled language)
+  | PoolBuildError Script Text
   -- | A truly weird and befuddling error that shouldn't ever occur
   | TrulyWeird
   deriving(Eq)
 
+-- | Configuration object that is passed with MorlocMonad
 data Config = Config {
     configHome :: Text
   , configLibrary :: Text

@@ -6,3 +6,4 @@ tags
 nexus.*
 pool.*
 morloc.cabal
+*.out

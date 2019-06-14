@@ -19,6 +19,7 @@ import Morloc.Sparql
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Data.Doc hiding ((<$>),(<>))
+import qualified Morloc.Language as ML
 import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.RDF as MR
@@ -31,7 +32,7 @@ type ParentData =
   ( MT.Text       -- type (e.g. mlc:functionType or mlc:atomicGeneric)
   , Maybe MT.Text -- top-level name of the type (e.g. "List" or "Int")
   , Maybe Key     -- type id of the output if this is a function
-  , Maybe Lang    -- type language ("Morloc" for a general type)
+  , Maybe MT.Text -- type language ("Morloc" for a general type)
   , Maybe Name    -- typename from a typeDeclaration statement
   , [Name]        -- list of properties (e.g. "packs")
   )
@@ -55,25 +56,32 @@ getParentData x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> M
 toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MorlocMonad MType
 toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((t, v, o, l, n, ps), xs)) =
-    case makeMeta l n ps of
-      meta -> toMType'' meta t v o xs
+    makeMeta l n ps >>= toMType'' t v o xs
   toMType' Nothing = MM.throwError TrulyWeird
 
-  toMType'' meta t (Just v) _ xs
+  toMType'' t (Just v) _ xs meta 
     | isGeneric t = MAbstType meta v <$> mapM (toMType h) xs
     | otherwise   = MConcType meta v <$> mapM (toMType h) xs
-  toMType'' meta _ _ (Just o) xs = do
+  toMType'' _ _ (Just o) xs meta = do
     inputTypes <- mapM (toMType h) xs
     outputType <- toMType h o
     return $ MFuncType meta inputTypes outputType
   toMType'' _ _ _ _ _ = MM.throwError TrulyWeird
 
-  makeMeta :: Maybe Lang -> Maybe Name -> [Name] -> MTypeMeta
-  makeMeta l n ps = MTypeMeta {
-        metaName = n
-      , metaProp = ps
-      , metaLang = l
-    }
+  makeMeta :: Maybe MT.Text -> Maybe Name -> [Name] -> MorlocMonad MTypeMeta
+  makeMeta (Just langStr) n ps = case ML.readLangName langStr of
+    (Just lang) ->
+      return $ MTypeMeta {
+          metaName = n
+        , metaProp = ps
+        , metaLang = (Just lang)
+      }
+    Nothing -> MM.throwError $ UnknownLanguage langStr
+  makeMeta Nothing n ps = return $ MTypeMeta {
+          metaName = n
+        , metaProp = ps
+        , metaLang = Nothing
+      }
 
 isGeneric :: MT.Text -> Bool
 isGeneric x = MR.UNode x == asRdfNode OAtomicGenericType ||

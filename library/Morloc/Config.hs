@@ -13,14 +13,15 @@ module Morloc.Config (
     Config(..)
   , loadMorlocConfig
   , loadDefaultMorlocConfig 
-  , getExecutor
+  , getPoolCallBuilder
   , getDefaultConfigFilepath
   , getDefaultMorlocTmpDir
   , makeLibSourceString
 ) where
 
 import Morloc.Global
-import Morloc.Operators
+import Morloc.Operators hiding ((<>))
+import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.Directory as Sys 
@@ -66,11 +67,22 @@ loadDefaultMorlocConfig = do
     "Rscript" -- lang_R
     "perl"    -- lang_perl
 
-getExecutor :: Config -> MT.Text -> Maybe MT.Text
-getExecutor c "R"    = Just $ configLangR c
-getExecutor c "py"   = Just $ configLangPython3 c
-getExecutor c "perl" = Just $ configLangPerl c
-getExecutor _ _      = Nothing
+-- | Attempt to create a function for building a call to a pool. The call is
+-- represented as a list of arguments for a command line.
+getPoolCallBuilder
+  :: Config
+  -> Lang
+  -> (Doc -> Doc) -- ^ a function for quoting a string
+  -> Maybe (Doc -> Doc -> [Doc])
+getPoolCallBuilder _ CLang       q = Just $ (\n i -> [ q ("./" <> n), q i])
+getPoolCallBuilder c RLang       q = Just $ makeCmdPoolCall q (configLangR c)
+getPoolCallBuilder c Python3Lang q = Just $ makeCmdPoolCall q (configLangPython3 c)
+getPoolCallBuilder c PerlLang    q = Just $ makeCmdPoolCall q (configLangPerl c)
+getPoolCallBuilder _ MorlocLang  _ = Nothing -- FIXME: add error handling
+
+-- Build a simple pool call for an interpreted language
+makeCmdPoolCall :: (Doc -> Doc) -> MT.Text -> (Doc -> Doc -> [Doc])
+makeCmdPoolCall q prog name i = [q (text' prog), q name, q i]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text

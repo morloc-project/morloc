@@ -15,7 +15,7 @@ type Parser = Parsec String ()
 data I = S String | V String
 
 pIs :: Parser [I]
-pIs = many1 (try pV <|> pS <|> pE) <* eof
+pIs = many1 (try pV <|> try pS <|> try pE) <* eof
 
 pV :: Parser I
 pV = fmap V $ between (string "#{") (char '}') (many1 (noneOf "}")) 
@@ -23,7 +23,7 @@ pV = fmap V $ between (string "#{") (char '}') (many1 (noneOf "}"))
 pS :: Parser I
 pS = fmap S $ many1 (noneOf "#")
 
--- | match a literal '$' sign
+-- | match a literal '#' sign
 pE :: Parser I
 pE = fmap (S . return) $ char '#' <* notFollowedBy (char '}')
 

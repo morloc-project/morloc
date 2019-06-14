@@ -23,7 +23,7 @@ import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
 generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport main) db
+generate db = makeGenerator g (defaultCodeGenerator g asImport) db
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = do
@@ -36,11 +36,20 @@ asImport s = do
          . MT.liftToText SF.dropExtensions
          $ s
 
+pytry :: TryDoc -> Doc
+pytry t = [idoc|
+try:
+    #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
+except Exception as e:
+    sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
+|]
+
 g = Grammar {
-      gLang        = "py"
+      gLang        = Python3Lang
     , gAssign      = assign' 
     , gCall        = call'
     , gFunction    = function'
+    , gId2Function = id2function'
     , gComment     = comment'
     , gReturn      = return'
     , gQuote       = dquotes
@@ -54,19 +63,39 @@ g = Grammar {
     , gTry         = pytry
     , gUnpacker    = unpacker'
     , gForeignCall = foreignCall'
-
+    , gSignature   = signature'
+    , gHash        = hash'
+    , gShowType    = mshow
+    , gMain        = main'
   } where
 
     indent' = indent 4
 
-    assign' l r = l <> " = " <> r 
+    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
+    hash' l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
+
+    assign' :: GeneralAssignment -> Doc
+    assign' g = case gaType g of
+      (Just t) -> gaName g <> " = " <> gaValue g <+> comment' ("::" <+> t) 
+      Nothing  -> gaName g <> " = " <> gaValue g 
 
     call' :: Doc -> [Doc] -> Doc
     call' n args = n <> tupled args
 
-    function' :: Doc -> [Doc] -> Doc -> Doc
-    function' name args body
-      = "def " <> name <> tupled args <> ":" <> line <> indent 4 body <> line
+    signature' :: GeneralFunction -> Doc
+    signature' gf
+      =   maybe "?" id (gfReturnType gf)
+      <+> gfName gf
+      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
+
+    function' :: GeneralFunction -> Doc
+    function' gf = comment' (signature' gf) <> line
+      <> "def "
+      <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
+      <> line <> indent' (gfBody gf) <> line
+
+    id2function' :: Integer -> Doc
+    id2function' i = "m" <> (text' (MT.show' i))
 
     comment' :: Doc -> Doc
     comment' d = "# " <> d
@@ -96,37 +125,14 @@ g = Grammar {
       ]
 
     foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' "_morloc_foreign_call"
-      [ dquotes (fcdForeignProg f)
-      , dquotes (fcdForeignPool f)
-      , dquotes (fcdMid f)
-      , list' (fcdArgs f)
-      ]
+    foreignCall' f
+      = call' "_morloc_foreign_call"
+      $ fcdCall f ++ [list (fcdArgs f)]
 
-
-pytry :: TryDoc -> Doc
-pytry t = [idoc|
-try:
-    #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
-except Exception as e:
-    sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
-|]
-
-toDict :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-toDict l r xs = "dict" <> tupled (map (\x -> l x <> "=" <> r x) xs)
-
-main
-  :: [Doc] -> [Manifold] -> SerialMap -> MorlocMonad Doc
-main srcs manifolds hash = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
-  usedManifolds <- getUsedManifolds g manifolds
-  let dispatchFunDict = toDict id id usedManifolds
-  mids <- MM.mapM callIdToName manifolds
-  let dispatchSerializerDict = toDict fst (getPacker hash . snd) (zip mids manifolds)
-  let sources = vsep (map ((gImport g) lib) srcs)
-  sourceManifolds <- makeSourceManifolds g hash manifolds
-  cisManifolds <- makeCisManifolds g hash manifolds
-  return $ [idoc|#!/usr/bin/env python
+    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
+    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict = do
+      lib <- fmap text' $ MM.asks MC.configLibrary
+      return $ [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
@@ -134,7 +140,7 @@ import json
 
 sys.path = ["#{lib}"] + sys.path
 
-#{sources}
+#{vsep sources}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:
@@ -178,17 +184,19 @@ if __name__ == '__main__':
     script_name = sys.argv[0] 
 
     try:
-        cmd = sys.argv[1]
+        cmdID = int(sys.argv[1])
     except IndexError:
         sys.exit("Internal error in {}: no manifold id found".format(script))
+    except ValueError:
+        sys.exit("Internal error in {}: expected integer manifold id".format(script))
 
     try:
-        function = dispatchFun[cmd]
-    except KeyError:
-        sys.exit("Internal error in {}: expected manifold id (e.g. m34), got {}".format(script, cmd))
+        function = dispatchFun[cmdID]
+    except IndexError:
+        sys.exit("Internal error in {}: expected manifold id, got {}".format(script, cmdID))
 
     args = sys.argv[2:]
-    serialize = dispatchSerializer[cmd]
+    serialize = dispatchSerializer[cmdID]
 
     print(serialize(function(*args)))
 

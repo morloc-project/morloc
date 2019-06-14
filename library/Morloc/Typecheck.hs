@@ -12,6 +12,9 @@ This typechecker currently only checks the case where an argument with a
 concrete type receives input from a function with a concrete output. In this
 case, the typechecker raises a warning (but does not die) if the types are not
 identical.
+
+Actually, nothing in this module is worth reading. Typechecking should be
+handled by logic reasoner.
 -}
 
 module Morloc.Typecheck (typecheck) where

@@ -26,6 +26,7 @@ import qualified Morloc.Component.MData as MCD
 import qualified Morloc.Component.Util as MCU 
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 import qualified Data.Map.Strict as Map
 import qualified Data.List.Extra as DLE
@@ -51,7 +52,7 @@ asTuple
   -> Map.Map Key MData
   -> [Maybe MT.Text]
   -> MorlocMonad (Manifold, Either Key Argument)
-asTuple typemap datamap [ Just manId'
+asTuple typemap datamap [ Just callId'
                         , abstractTypeId'
                         , element'
                         , Just morlocName'
@@ -75,8 +76,10 @@ asTuple typemap datamap [ Just manId'
     , argdata_id' >>= (flip Map.lookup) datamap
     , element'
     )
+  langM <- sequence . fmap MM.readLang $ sourceLang'
   let man = Manifold {
-        mCallId       = manId'
+        mid           = 0 -- will set later
+      , mCallId       = callId'
       , mAbstractType = abstractTypeId' >>= (flip Map.lookup) typemap
       , mConcreteType = concreteTypeId' >>= (flip Map.lookup) typemap
       , mMorlocName   = morlocName'
@@ -89,7 +92,7 @@ asTuple typemap datamap [ Just manId'
       , mSourcePath   = sourcePath'
       , mModulePath   = modulePath'
       , mBoundVars    = maybe [] (MT.splitOn ",") bvars'
-      , mLang         = sourceLang'
+      , mLang         = langM
       , mArgs         = [] -- this will be set in the next step
       }
   return (man, arg)
@@ -97,10 +100,13 @@ asTuple typemap datamap [ Just manId'
 asTuple _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
 
 setCalls :: [(Manifold, [Either Key Argument])] -> MorlocMonad [Manifold]
-setCalls xs = mapM setArgs xs
+setCalls xs = mapM setArgs xs'
   where
+    -- set the IDs for each manifold
+    xs' = zipWith (\i (m, x) -> (m {mid = i}, x)) [1..] xs
+
     hash :: Map.Map Key Manifold
-    hash = Map.fromList $ zip (map (mCallId . fst) xs) (map fst xs)
+    hash = Map.fromList $ zip (map (mCallId . fst) xs') (map fst xs')
 
     setArgs :: (Manifold, [Either Key Argument]) -> MorlocMonad Manifold 
     setArgs (m, args) = do
@@ -125,10 +131,10 @@ setLangs ms = map (setLang hash) ms
                                          , mLang m)) ms)
 
 makeArgument
-  :: ( Maybe Name    -- ^ argument name (if it is a bound argument)
-     , Maybe Key     -- ^ argument callId (if it is a function call)
-     , Maybe MData   -- ^ argument data (if this is data)
-     , Maybe MT.Text -- ^ the element (rdf:_<num>)
+  :: ( Maybe Name    -- argument name (if it is a bound argument)
+     , Maybe Key     -- argument callId (if it is a function call)
+     , Maybe MData   -- argument data (if this is data)
+     , Maybe MT.Text -- the element (rdf:_<num>)
      )
   -> MorlocMonad (Either Key Argument)
 makeArgument (Just x  , _       , _       , _ ) = return . Right $ ArgName x
@@ -180,19 +186,8 @@ unroll ms = fmap concat (mapM unroll' ms)
 
     unrollPair :: Manifold -> Manifold -> MorlocMonad [Manifold]
     unrollPair m r = do
-      signedKey <- signKey (mCallId m) (mCallId r)
-      mName <- MS.makeManifoldName signedKey
-      let r' = r { mCallId = signedKey, mExported = False }
-      let m' = m { mCallName = mName }
-      fmap (\ms' -> [m'] ++ ms') (unroll' r')
-
-    signKey :: Key -> Key -> MorlocMonad Key
-    signKey m r =
-      case
-        (MT.stripPrefix MR.midPre m, MT.stripPrefix MR.midPre r)
-      of
-        (Just mKey, Just rKey) -> return $ MR.midPre <> mKey <> "_" <> rKey
-        _ -> MM.throwError . InvalidRDF $ "callId of invalid form: " <> MT.pretty (m, r)
+      let r' = r { mExported = False }
+      fmap ((:) m) (unroll' r')
 
     declaringManifold :: Manifold -> Manifold -> Bool
     declaringManifold m n = (Just (mMorlocName m) == mComposition n)
@@ -235,6 +230,8 @@ hsparql = do
     typeid_        <- var
     scriptElement_ <- var
     scriptId_      <- var
+    mid'_ <- var
+    mid''_ <- var
 
     -- Something can be exported if it is in the export list AND
     --  * Case 1: sourced and typed
@@ -252,7 +249,7 @@ hsparql = do
           triple_ mid_ PValue morlocName_
 
           triple_ typedec_ PType OTypeDeclaration
-          triple_ typedec_ PLang ("Morloc" :: MT.Text)
+          triple_ typedec_ PLang (ML.showLangName MorlocLang)
           triple_ typedec_ PLeft morlocName_
           triple_ typedec_ PRight typeid_
 
@@ -285,9 +282,12 @@ hsparql = do
           triple_ mid_ element_ arg_
           MCU.isElement_ element_
 
-          triple_ scriptId_ PType OScript
-          triple_ scriptId_ PValue modulePath_
-          triple_ scriptId_ scriptElement_ mid_
+          -- -- This does not work, since there is generally not a set path
+          -- -- to the call (can be nested arbitrarily deep)
+          -- triple_ scriptId_ PType OScript
+          -- triple_ scriptId_ PValue modulePath_
+          -- triple_ scriptId_ scriptElement_ mid_
+          -- MCU.isElement_ scriptElement_
 
           triple_ fid_ PType OName
           triple_ fid_ PValue morlocName_
@@ -309,6 +309,19 @@ hsparql = do
         triple_ e_ PType OExport
         triple_ e_ PValue composition_
 
+    ------------- BAD DAMN IT ALL SUCK BALLS -----------
+    -- -- # Find source name
+    -- --   This case SHOULD be mutually exclusive with the next case
+    -- optional_ $ do
+    --   triple_ datadec_ PType ODataDeclaration
+    --   triple_ datadec_ PLeft morlocName_
+    --   triple_ datadec_ PRight mid'_
+    --   triple_ mid'_ PType OCall
+    --   triple_ mid'_ PValue mid''_
+    --   triple_ mid''_ PType OName
+    --   triple_ mid''_ PValue sourceName_
+    ------------- BAD DAMN IT ALL SUCK BALLS -----------
+
     -- # Find the source language
     optional_ $ do
       triple_ sourceId_ PType OSource
@@ -328,12 +341,12 @@ hsparql = do
       triple_ langTypedec_ PLeft morlocName_
       triple_ langTypedec_ PRight concreteTypeId_
 
-      filterExpr ((str sourceLang_) .!=. ("Morloc" :: MT.Text))
+      filterExpr ((str sourceLang_) .!=. (ML.showLangName MorlocLang))
 
     -- Find the type declaration ID
     optional_ $ do
       triple_ dectypeId_ PType OTypeDeclaration
-      triple_ dectypeId_ PLang ("Morloc" :: MT.Text)
+      triple_ dectypeId_ PLang (ML.showLangName MorlocLang)
       triple_ dectypeId_ PLeft morlocName_
       triple_ dectypeId_ PRight abstractTypeId_
 
@@ -418,17 +431,3 @@ hsparql = do
     , SelectVar  argdataId_
     , SelectVar  modulePath_
     ]
-
------- example output for `sample.loc`
--- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
--- | callId          | abstractTypeId  | el#      | morlocName     | srcName   | comp   | bvars | lang | srcPath | called | src  | exp   | concreteTypeId | argname | argcallId | argdataId       | modulePath   |
--- ===============================================================================================================================================================================================================
--- | <sample.loc_19> |                 | <rdf#_0> | "len"          | "len"     |        |       | "R"  |         | true   | true | false |                | "xs"    |           |                 |              |
--- | <sample.loc_2>  | <sample.loc_35> | <rdf#_0> | "ceiling"      | "ceiling" |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_3>  | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   |        |       | "R"  |         | false  | true | true  |                |         |           |                 | "sample.loc" |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_0> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                | "n"     |           |                 |              |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_1> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_50> |              |
--- | <sample.loc_47> | <sample.loc_9>  | <rdf#_2> | "rand_uniform" | "runif"   | "rand" | "n"   | "R"  |         | true   | true | true  |                |         |           | <sample.loc_51> |              |
--- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

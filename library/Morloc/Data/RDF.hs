@@ -39,7 +39,6 @@ module Morloc.Data.RDF (
 
 import Morloc.Global
 import Morloc.Operators
-import qualified Morloc.Error     as ME
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
 import qualified Morloc.Monad     as MM
@@ -48,8 +47,6 @@ import qualified Data.RDF         as DR
 import qualified Data.Map.Strict  as DMS
 import qualified Data.Scientific  as DS
 import qualified System.IO        as SIO
-import qualified System.Process   as SP
-import qualified System.Exit      as SE
 import qualified System.Directory as SD
 
 type RDF = DR.RDF DR.TList
@@ -257,11 +254,11 @@ instance SparqlDatabaseLike RDF where
   sparqlUpload x r = return $ makeRDF (asTriples r ++ asTriples x)
 
   sparqlSelect t q x = do
-    -- * DEBUGGING: find the temporary directory
+    -- DEBUGGING: find the temporary directory
     tmpdir <- MM.asks configTmpDir
-    -- * DEBUGGING: create it if needed
+    -- DEBUGGING: create it if needed
     MM.liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-    -- * DEBUGGING: write the RDF and query to it, using the given prefix
+    -- DEBUGGING: write the RDF and query to it, using the given prefix
     let turtlePath = tmpdir <> "/" <> "db.ttl"
         sparqlPath = tmpdir <> "/" <> t <> ".rq"
         outputPath = tmpdir <> "/" <> t <> ".tab"

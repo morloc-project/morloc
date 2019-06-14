@@ -4,10 +4,8 @@
 
 # RDF representation
 
- [ ] Unify call representations of [ ] `binop` and [ ] `composition`
  [ ] Write specification
- [ ] Add graph names
- [ ] Handle scoping import scoping (maybe follow R environment model)
+ [ ] Handle import scoping (maybe follow R environment model)
  [ ] Remove dependency on `arq` (too slow)
 
 # Error reporting
@@ -15,12 +13,12 @@
  * In the compiler ...
    [ ] Add meaningful error messages to parser
    [ ] Replace the naked `error` calls everywhere
-   [ ] Print last valid data structure on failure
 
  * In the generated code ...
+
    [ ] If an error is caught, report the offending Morloc file and line of
-       code. This will require this information be passed added to the
-       generated RDF graph (which needs to be done anyway). 
+       code. This will require this information be added to the generated RDF
+       graph (which needs to be done anyway). 
 
 # Testing
 
@@ -40,21 +38,10 @@
    [ ] print the long doc string
 
  * configuration
-   [x] specify yaml config file
-   [x] thread the configuration through the compiler
    [ ] parse to RDF and upload to local SPARQL database
-
- * conventions - decide on
-   [x] a default name for the config file (e.g., `~/.morloc-config.yml`)
-   [x] a default name for morloc home (e.g., `~/.morloc`)
-   [ ] replace passed Config and MorlocError with a monad stack
-
- * ecosystem
-   [x] add `install` to install a module from github
 
 # typechecking
 
- [ ] test different logic solvers in a clean repo with morloc RDF as input
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
  [ ] port this typechecker to Morloc
 
@@ -70,7 +57,7 @@
 
  * add support for more languages
    [ ] bash
-   [ ] C
+   [.] C
    [ ] Haskell
    [ ] C++
 

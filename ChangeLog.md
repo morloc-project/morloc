@@ -1,3 +1,24 @@
+0.17.3 [2019.06.14]
+-------------------
+
+ * Partial C support
+   - execution of sourced functions
+   - no composition
+   - no foreign calls
+
+ * Partial transition to typed generators
+   - bound arguments are still not typed correctly
+
+ * Use integer IDs to identify manifolds in pools and the nexus (can to make
+   calls between them) instead of long, mangled names.
+
+ * Replace string names of languages (e.g., "python") with a sum type.
+
+
+0.17.2 [2019.05.5]
+
+ * PyCon2019 release
+
 0.17.1 [2019.04.26]
 -------------------
 

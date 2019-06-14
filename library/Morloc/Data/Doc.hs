@@ -18,6 +18,7 @@ module Morloc.Data.Doc
     , render'
     , text'
     , textEsc'
+    , tupledNoFold
   ) where
 
 import Text.PrettyPrint.Leijen.Text
@@ -32,6 +33,13 @@ render' = DT.unpack . render
 
 text' :: DT.Text -> Doc
 text' = text . DL.fromStrict
+
+
+-- | a tupled function that does not fold long lines (folding breaks commenting)
+tupledNoFold :: [Doc] -> Doc
+tupledNoFold [] = ""
+tupledNoFold (x:xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
+
 
 textEsc' :: DT.Text -> Doc
 textEsc' lit = (dquotes . string . DL.fromStrict) $ DT.concatMap escapeChar lit where

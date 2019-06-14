@@ -16,9 +16,9 @@ import qualified Text.Megaparsec.Expr as TPE
 import qualified Text.Megaparsec.Char as TMC
 import qualified Control.Monad as CM
 import qualified Control.Monad.State as CMS
-import qualified Control.Monad.Except as CME
 
 import Morloc.Global
+import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC
 import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT
@@ -35,9 +35,9 @@ parse
   -> MT.Text    -- ^ The Morloc source code
   -> MorlocMonad MR.RDF
 parse srcfile code = do
-  top <- parseShallow srcfile code
-  imports <- parseImports top
-  return $ (foldl MR.rdfAppend top) imports
+  top' <- parseShallow srcfile code
+  imports <- parseImports top'
+  return $ (foldl MR.rdfAppend top') imports
 
 parseShallow
   :: Maybe MT.Text -- ^ Source code file name
@@ -107,7 +107,7 @@ source' = do
   -- id for this source
   Tok.reserved "source"
   -- get the language of the imported source
-  lang <- Tok.stringLiteral
+  langStr <- Tok.stringLiteral
   -- get the path to the source file, if Nothing, then assume "vanilla"
   i <- MS.getId
   path <- optional (Tok.reserved "from" >> Tok.stringLiteral)
@@ -116,13 +116,16 @@ source' = do
   -- the statement is unambiguous even without a semicolon
   optional (Tok.op ";")
 
-  return $ MR.makeTopRDF i ([
-          MR.mtriple i PType OSource
-        , MR.mtriple i PLang lang
-      ] ++
-        MR.adoptAs OImport i fs ++
-        maybe [] (\p -> [MR.mtriple i PPath p]) path
-    )
+  case ML.standardizeLangName langStr of
+    (Just lang) ->
+      return $ MR.makeTopRDF i ([
+            MR.mtriple i PType OSource
+          , MR.mtriple i PLang lang
+        ] ++
+          MR.adoptAs OImport i fs ++
+          maybe [] (\p -> [MR.mtriple i PPath p]) path
+      )
+    Nothing -> fail ("Encountered unknown language: '" ++ MT.unpack langStr ++ "'")
 
   where
     importAs' :: MS.Parser MR.TopRDF
@@ -199,7 +202,7 @@ typeDeclaration :: MS.Parser MR.TopRDF
 typeDeclaration = do
   i <- MS.getId
   lhs <- Tok.name
-  lang <- option "Morloc" Tok.name
+  langStr <- option (ML.showLangName MorlocLang) Tok.name
   Tok.op "::"
   properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
   rhs <- mtype
@@ -207,15 +210,19 @@ typeDeclaration = do
       Tok.reserved "where" >>
       Tok.parens (sepBy1 booleanExpr Tok.comma)
     )
-  return $ MR.makeTopRDF i (
-         [ MR.mtriple i PType OTypeDeclaration
-         , MR.mtriple i PLeft lhs
-         , MR.mtriple i PLang lang
-         ]
-      ++ MR.adoptAs PRight i [rhs]
-      ++ MR.adoptAs PProperty (MR.rdfId rhs) properties
-      ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
-    )
+  case ML.standardizeLangName langStr of
+    (Just lang) ->
+      return $ MR.makeTopRDF i (
+             [ MR.mtriple i PType OTypeDeclaration
+             , MR.mtriple i PLeft lhs
+             , MR.mtriple i PLang lang
+             ]
+          ++ MR.adoptAs PRight i [rhs]
+          ++ MR.adoptAs PProperty (MR.rdfId rhs) properties
+          ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
+        )
+    Nothing -> fail ("Encountered unknown language: '" ++ MT.unpack langStr ++ "'")
+
 
 listTag :: MR.Node -> Maybe MT.Text -> [MR.Triple]
 listTag _ Nothing    = []

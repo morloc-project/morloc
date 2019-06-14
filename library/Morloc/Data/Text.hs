@@ -37,7 +37,6 @@ import Data.Text.Encoding
 import qualified Data.Text.Lazy as DL
 import qualified Safe
 import qualified Text.Pretty.Simple as Pretty 
-import qualified Data.List as DL
 
 show' :: Show a => a -> Text
 show' = pack . show

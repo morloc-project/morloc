@@ -2,14 +2,17 @@
 
 {-|
 Module      : Morloc.Error
-Description : Error handling
+Description : Prepare error messages from MorlocError types
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 
-The MorlocError type is used to handle all forms of errors across the entire
-program. New entries can be added to describe new types of error.
+MorlocError is the type used within morloc to store data related to any errors
+that are encountered. Data constructors in the MorlocError type may associates
+data with the error. This data may be an arbitrary message or any other type.
+The @errmsg@ function in this module defines how these errors will be printed
+to the user.
 -}
 
 module Morloc.Error () where
@@ -17,6 +20,7 @@ module Morloc.Error () where
 import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 -- TODO: fix this orphan instance
 instance Show MorlocError where
@@ -27,6 +31,7 @@ errmsg UnknownError = "UnknownError"
 errmsg (InvalidRDF msg) = "Invalid RDF: " <> MT.show' msg
 errmsg (NotImplemented msg) = "Not yet implemented: " <> MT.show' msg
 errmsg (NotSupported msg) = "NotSupported: " <> MT.show' msg
+errmsg (UnknownLanguage lang) = "'" <> lang <> "' is not recognized as a supported language"
 errmsg (SyntaxError err) = "SyntaxError: " <> MT.show' err
 errmsg (SerializationError t) = "SerializationError: " <> t
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
@@ -38,11 +43,13 @@ errmsg (SystemCallError cmd loc msg) =  "System call failed at (" <> loc <> "):\
                                      <> " msg>\n" <> msg
 errmsg (GeneratorError t) = "GeneratorError: " <> t
 errmsg (DependencyError (ModuleDependency name path lang)) =
-  "DependencyError: could not find module " <> name <> "(" <> lang <> ") at " <> path
+  "DependencyError: could not find module " <> name <> "(" <> ML.showLangName lang <> ") at " <> path
 errmsg (DependencyError (ExecutableDependency name path))
   = "DependencyError: could not find executable " <> name <> " at " <> path
 errmsg (DependencyError (SourceCodeDependency moduleName path lang))
   = "DependencyError: could not find source code '" <> path
-  <> "' (" <> lang <> ")"
+  <> "' (" <> ML.showLangName lang <> ")"
   <> " imported by Morloc module " <> moduleName
+-- TODO: specialize message with info from the failed Script (arg #1)
+errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg TrulyWeird = "Find the code monkeys 'cause you broke it good"
