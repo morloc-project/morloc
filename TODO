@@ -44,6 +44,8 @@
 
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
  [ ] port this typechecker to Morloc
+ [ ] in `TypeHandler:chooseRealization`, choose realization that minimizes
+     foreign function calls.
 
 # Features
 
@@ -57,9 +59,9 @@
 
  * add support for more languages
    [ ] bash
-   [.] C
+   [+] C
    [ ] Haskell
-   [ ] C++
+   [+] C++
 
 # Documentation
 
@@ -81,6 +83,9 @@
        many language-specific alternatives. In C-morloc, the user specified the
        language of each function. I want to automate the choice.
    [ ] Add taxonomy library
+   [ ] Add `math` library
+       [x] basic functions from `math.h`
+       [ ] advanced functions from GNU Scientific Library
    [ ] Add `learning` library for machine learning
    [ ] Add `stat` library
    [ ] Add `physics` library

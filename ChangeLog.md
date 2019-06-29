@@ -1,3 +1,9 @@
+0.17.5 [xxx]
+
+ [ ] Add a full test suite
+ [ ] Choose function implementations to minimize foreign calls
+ [ ] Allow parameterized type properties
+
 0.17.4 [2019.06.29]
 
  * Add C and C++ handling
