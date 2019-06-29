@@ -17,112 +17,136 @@ import Morloc.Pools.Common
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Data.Text as MT
 
-generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport) db
+generate :: [Manifold] -> SerialMap -> MorlocMonad Script
+generate = defaultCodeGenerator g asImport
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = return . text' $ s
 
 g = Grammar {
-      gLang        = RLang
-    , gAssign      = assign'
-    , gCall        = call'
-    , gFunction    = function'
-    , gId2Function = id2function'
-    , gComment     = comment'
-    , gReturn      = return'
-    , gQuote       = dquotes
-    , gImport      = import'
-    , gTrue        = "TRUE"
-    , gFalse       = "FALSE"
-    , gList        = list'
-    , gTuple       = tuple'
-    , gRecord      = record'
-    , gIndent      = indent'
-    , gTry         = try'
-    , gUnpacker    = unpacker'
-    , gForeignCall = foreignCall'
-    , gSignature   = signature'
-    , gHash        = hash'
-    , gShowType    = mshow
-    , gMain        = main'
-  } where
+      gLang        = gLang'
+    , gSerialType  = gSerialType'
+    , gAssign      = gAssign'
+    , gCall        = gCall'
+    , gFunction    = gFunction'
+    , gId2Function = gId2Function'
+    , gComment     = gComment'
+    , gReturn      = gReturn'
+    , gQuote       = gQuote'
+    , gImport      = gImport'
+    , gTrue        = gTrue'
+    , gFalse       = gFalse'
+    , gList        = gList'
+    , gTuple       = gTuple'
+    , gRecord      = gRecord'
+    , gIndent      = gIndent'
+    , gTry         = gTry'
+    , gUnpacker    = gUnpacker'
+    , gForeignCall = gForeignCall'
+    , gSignature   = gSignature'
+    , gSwitch      = gSwitch'
+    , gCmdArgs     = gCmdArgs'
+    , gShowType    = gShowType'
+    , gMain        = gMain'
+  }
 
-    assign' :: GeneralAssignment -> Doc
-    assign' ga = case gaType ga of
-      (Just t) -> gaName ga <> " <- " <> gaValue ga <+> comment' ("::" <+> t) 
-      Nothing  -> gaName ga <> " <- " <> gaValue ga 
+gLang' :: Lang
+gLang' = RLang
 
-    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-    hash' l r xs = "list" <> tupled (map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
+gSerialType' :: MType
+gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "character" []
 
-    indent' = indent 4
+gAssign' :: GeneralAssignment -> Doc
+gAssign' ga = case gaType ga of
+  (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ("::" <+> t) 
+  Nothing  -> gaName ga <> " <- " <> gaValue ga 
 
-    call' :: Doc -> [Doc] -> Doc
-    call' n args = n <> tupled args
+gCall' :: Doc -> [Doc] -> Doc
+gCall' n args = n <> tupled args
 
-    signature' :: GeneralFunction -> Doc
-    signature' gf
-      =   maybe "?" id (gfReturnType gf)
-      <+> gfName gf
-      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
+gFunction' :: GeneralFunction -> Doc
+gFunction' gf
+  =  gComment' (gfComments gf)
+  <> gfName gf <> " <- function"
+  <> tupled (map snd (gfArgs gf))
+  <> braces (line <> gIndent' (gfBody gf) <> line)
 
-    function' :: GeneralFunction -> Doc
-    function' gf = comment' (signature' gf) <> line
-      <> gfName gf <> " <- function"
-      <> tupled (map snd (gfArgs gf))
-      <> braces (line <> indent' (gfBody gf <> line) <> line)
+gId2Function' :: Integer -> Doc
+gId2Function' i = "m" <> (text' (MT.show' i))
 
-    id2function' :: Integer -> Doc
-    id2function' i = "m" <> (text' (MT.show' i))
+gComment' :: Doc -> Doc
+gComment' d = "# " <> d
 
-    comment' :: Doc -> Doc
-    comment' d = "# " <> d
+gReturn' :: Doc -> Doc
+gReturn' = id
 
-    return' :: Doc -> Doc
-    return' = id
+gQuote' :: Doc -> Doc
+gQuote' = dquotes
 
-    list' :: [Doc] -> Doc
-    list' xs = "c" <> tupled xs
+gTrue' = "TRUE"
+gFalse' = "FALSE"
 
-    tuple' :: [Doc] -> Doc
-    tuple' xs = "list" <> tupled xs
+-- FIXME: make portable (replace "/" with the appropriate separator)
+gImport' :: Doc -> Doc -> Doc
+gImport' _ srcpath = gCall' "source" [gQuote' srcpath]
 
-    record' :: [(Doc,Doc)] -> Doc
-    record' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
+gList' :: [Doc] -> Doc
+gList' xs = "c" <> tupled xs
 
-    -- FIXME: make portable (replace "/" with the appropriate separator)
-    import' :: Doc -> Doc -> Doc
-    import' _ srcpath = call' "source" [dquotes srcpath]
+gTuple' :: [Doc] -> Doc
+gTuple' xs = "list" <> tupled xs
 
-    try' :: TryDoc -> Doc
-    try' t = call' ".morloc_try"
-      $  ["f=" <> tryCmd t]
-      ++ [("args=" <> tuple' (tryArgs t))]
-      ++ [ ".name=" <> dquotes (tryMid t)
-         , ".file=" <> dquotes (tryFile t)]
+gRecord' :: [(Doc,Doc)] -> Doc
+gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-    unpacker' :: UnpackerDoc -> Doc
-    unpacker' u = call' ".morloc_unpack"
-      [ udUnpacker u
-      , udValue u
-      , ".name=" <> dquotes (udMid u)
-      , ".pool=" <> dquotes (udFile u)
-      ]
+gIndent' :: Doc -> Doc
+gIndent' = indent 4
 
-    foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f = call' ".morloc_foreign_call" $
-      [ "cmd=" <> hsep (map dquotes (take 1 (fcdCall f)))
-      , "args=" <> list' ((map dquotes (drop 1 (fcdCall f))) ++ fcdArgs f)
-      , ".pool=" <> dquotes (fcdFile f)
-      , ".name=" <> dquotes (fcdMid f)
-      ]
+gTry' :: TryDoc -> Doc
+gTry' t = gCall' ".morloc_try"
+  $  ["f=" <> tryCmd t]
+  ++ [("args=" <> gTuple' (tryArgs t))]
+  ++ [ ".name=" <> dquotes (tryMid t)
+     , ".file=" <> dquotes (tryFile t)]
 
-    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
-    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict
-      = return [idoc|#!/usr/bin/env Rscript
+gUnpacker' :: UnpackerDoc -> Doc
+gUnpacker' u = gCall' ".morloc_unpack"
+  [ udUnpacker u
+  , udValue u
+  , ".name=" <> dquotes (udMid u)
+  , ".pool=" <> dquotes (udFile u)
+  ]
+
+gSignature' :: GeneralFunction -> Doc
+gSignature' gf
+  =   maybe "?" id (gfReturnType gf)
+  <+> gfName gf
+  <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
+
+gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+gSwitch' l r xs x var
+  =   var <+> "<-"
+  <+> "switch"
+  <> tupled ([x] ++ map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
+
+gCmdArgs' :: [Doc]
+gCmdArgs' = map (\i -> "args[[" <> integer i <> "]]") [2..]
+
+gShowType' :: MType -> Doc
+gShowType' = mshow
+
+gForeignCall' :: ForeignCallDoc -> Doc
+gForeignCall' f = gCall' ".morloc_foreign_call" $
+  [ "cmd=" <> hsep (take 1 (fcdCall f))
+  , "args=" <> gList' ((drop 1 (fcdCall f)) ++ fcdArgs f)
+  , ".pool=" <> dquotes (fcdFile f)
+  , ".name=" <> dquotes (fcdMid f)
+  ]
+
+gMain' :: PoolMain -> MorlocMonad Doc
+gMain' pm = return [idoc|#!/usr/bin/env Rscript
   
-#{line <> vsep sources}
+#{line <> vsep (pmSources pm)}
 
 .morloc_run <- function(f, args){
   fails <- ""
@@ -156,57 +180,45 @@ g = Grammar {
 }
 
 # dies on error, ignores warnings and messages
-.morloc_try <- function(..., .log=stderr(), .pool="_", .name="_"){
-  x <- .morloc_run(...)
+.morloc_try <- function(f, args, .log=stderr(), .pool="_", .name="_"){
+  x <- .morloc_run(f=f, args=args)
   location <- sprintf("%s::%s", .pool, .name)
   if(! x$isOK){
-    cat(sprintf("** R errors in %s\n", location), file=stderr())
+    cat("** R errors in ", location, "\n", file=stderr())
     cat(x$fails, "\n", file=stderr())
     stop(1)
   }
   if(! is.null(.log)){
     lines = c()
     if(length(x$warns) > 0){
-      cat(sprintf("** R warnings in %s\n", location), file=stderr())
+      cat("** R warnings in ", location, "\n", file=stderr())
       cat(paste(unlist(x$warns), sep="\n"), file=stderr())
     }
     if(length(x$notes) > 0){
-      cat(sprintf("** R messages in %s\n", location), file=stderr())
+      cat("** R messages in ", location, "\n", file=stderr())
       cat(paste(unlist(x$notes), sep="\n"), file=stderr())
     }
   }
   x$value
 }
 
-.morloc_unpack <- function(unpacker, x, ...){
-  x <- .morloc_try(f=unpacker, args=list(as.character(x)), ...)  
+.morloc_unpack <- function(unpacker, x, .pool, .name){
+  x <- .morloc_try(f=unpacker, args=list(as.character(x)), .pool=.pool, .name=.name)  
   return(x)
 }
 
 .morloc_foreign_call <- function(cmd, args, .pool, .name){
-  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .pool=.pool)
+  .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .name=.name)
 }
 
-#{sourceManifolds}
-
-#{cisManifolds}
-
-dispatchFun = #{dispatchFunDict}
-dispatchSerializer <- #{dispatchSerializerDict}
+#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
   stop("Expected 1 or more arguments")
 } else {
-  cmdstr <- args[[1]]
-  cmd <- dispatchFun[[cmdstr]]
-  args <- as.list(args[-1, drop=FALSE])
-  result <- if(class(cmd) == "function"){
-    do.call(cmd, args)
-  } else {
-    cmd
-  }
-  serializer <- dispatchSerializer[[cmdstr]]
-  cat(serializer(result), "\n")
+  cmdID <- args[[1]]
+  #{(pmDispatchManifold pm) "cmdID" "result"}
+  cat(result, "\n")
 }
 |]

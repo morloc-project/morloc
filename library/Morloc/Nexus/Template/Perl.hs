@@ -14,7 +14,6 @@ module Morloc.Nexus.Template.Perl (generate) where
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Quasi
-import Morloc.Component.Manifold as MCM
 import Morloc.Data.Doc hiding ((<$>), (<>))
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
@@ -32,56 +31,47 @@ type PoolBuilder
 
 type FData = (PoolBuilder, Doc, Int, Doc, Doc)
 
-generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate e
-  =   Script
-  <$> pure "nexus"
-  <*> pure ML.PerlLang
-  <*> makeNexus e
+generate :: [Manifold] -> MorlocMonad Script
+generate all_manifolds = do
+  let manifolds = filter isExported all_manifolds
+      names = map (text' . getName) manifolds     -- [Doc]
+  fdata <- CM.mapM getFData manifolds -- [FData]
+  return $ Script { scriptBase = "nexus"
+                  , scriptLang = ML.PerlLang
+                  , scriptCode = render $ main names fdata
+                  , scriptCompilerFlags = []
+                  }
 
-makeNexus :: SparqlDatabaseLike db => db -> MorlocMonad MT.Text
-makeNexus ep = fmap render $ main <$> names <*> fdata where
-  manifolds :: MorlocMonad [Manifold]
-  manifolds = fmap (filter isExported) (MCM.fromSparqlDb ep)
+getName :: Manifold -> MT.Text
+getName m = maybe (mMorlocName m) id (mComposition m)
 
-  names :: MorlocMonad [Doc]
-  names = fmap (map (text' . getName)) manifolds
+getNArgs :: Manifold -> Int
+getNArgs m
+  | DM.isJust (mComposition m) = length (mBoundVars m)
+  | otherwise = length (mArgs m)
 
-  getName :: Manifold -> MT.Text
-  getName m = maybe (mMorlocName m) id (mComposition m)
+getFData :: Manifold -> MorlocMonad FData
+getFData m = do
+  config <- MM.ask
+  let mid' = text' . MT.show' $ mid m
+      lang = mLang m
+  case MC.getPoolCallBuilder config lang id of
+    (Just call') -> return $
+      ( call'
+      , text' (getName m)
+      , getNArgs m
+      , text' (ML.makeExecutableName lang "pool")
+      , mid' 
+      )
+    Nothing -> MM.throwError . GeneratorError $
+      "No execution method found for language: " <> ML.showLangName lang
 
-  getNArgs :: Manifold -> Int
-  getNArgs m
-    | DM.isJust (mComposition m) = length (mBoundVars m)
-    | otherwise = length (mArgs m)
-
-  fdata :: MorlocMonad [FData]
-  fdata = manifolds >>= CM.mapM getFData 
-
-  getFData :: Manifold -> MorlocMonad FData
-  getFData m = do
-    config <- MM.ask
-    let mid' = text' . MT.show' $ mid m
-    case mLang m of
-      (Just lang) -> case MC.getPoolCallBuilder config lang id of
-        (Just call') -> return $
-          ( call'
-          , text' (getName m)
-          , getNArgs m
-          , text' (ML.makeExecutableName lang "pool")
-          , mid' 
-          )
-        Nothing -> MM.throwError . GeneratorError $
-          "No execution method found for language: " <> ML.showLangName lang
-      Nothing -> MM.throwError . GeneratorError $
-        "A language must be selected for the nexus"
-
-  isExported :: Manifold -> Bool
-  isExported m =
-    -- shallow wrappers around a source function
-    (mExported m && not (mCalled m) && mSourced m)
-    || -- compositions
-    (mExported m && DM.isJust (mComposition m))
+isExported :: Manifold -> Bool
+isExported m =
+  -- shallow wrappers around a source function
+  (mExported m && not (mCalled m) && mSourced m)
+  || -- compositions
+  (mExported m && DM.isJust (mComposition m))
 
 
 main :: [Doc] -> [FData] -> Doc

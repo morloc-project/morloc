@@ -28,9 +28,9 @@ instance Show MorlocError where
 
 errmsg :: MorlocError -> MT.Text
 errmsg UnknownError = "UnknownError"
-errmsg (InvalidRDF msg) = "Invalid RDF: " <> MT.show' msg
-errmsg (NotImplemented msg) = "Not yet implemented: " <> MT.show' msg
-errmsg (NotSupported msg) = "NotSupported: " <> MT.show' msg
+errmsg (InvalidRDF msg) = "Invalid RDF: " <> msg
+errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
+errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) = "'" <> lang <> "' is not recognized as a supported language"
 errmsg (SyntaxError err) = "SyntaxError: " <> MT.show' err
 errmsg (SerializationError t) = "SerializationError: " <> t
@@ -52,4 +52,6 @@ errmsg (DependencyError (SourceCodeDependency moduleName path lang))
   <> " imported by Morloc module " <> moduleName
 -- TODO: specialize message with info from the failed Script (arg #1)
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
-errmsg TrulyWeird = "Find the code monkeys 'cause you broke it good"
+errmsg NoBenefits = "Manifolds in this context need to be fully resolved. " <>
+                    "This is probably due to a bug in the code."
+errmsg (CallTheMonkeys msg) = "There is a bug in the code, send this message to the maintainer: " <> msg

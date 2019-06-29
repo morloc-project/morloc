@@ -84,4 +84,30 @@ Id: mlc4
     -------------------------------
      o  <mlc:manifold_morloc_output> out
 
+Id: mlc5
+     o  <rdf:type> <mlc:manifold>
+     o  <rdf:manifold_morloc_name> n
+     d  <rdf:type> <mlc:typeDeclaration>
+     d  <mlc:lhs> n
+     d  <rdf:lang> "morloc"
+     d  <mlc:rhs> t
+     t  <mlc:has_member> e
+     e  <mlc:position> index
+    -------------------------------
+     o  <mlc:manifold_function_arguments> args
+     args <mlc:has_member> arg
+     arg <mlc:position> index
+
+/*
+Is this really what I want to do? Maybe instead the parser should generate the
+complex objects (e.g., Manifold, SerialMap, TypeMap, DataMap, etc), maybe
+collected under a 'Program' type. Then there can be a two-way function from
+this type to RDF and back (through SPARQL). Building the complex data structure
+in the parser is not impossible, by any means, and just requires storing a bit
+of context.
+
+The rules than are used for consistency checking and type-inference, but not
+for mundane gathering of pieces into data structures.
+*/
+
 }

@@ -1,0 +1,25 @@
+export rollsum
+
+source "R" (
+    "runif"
+  , "ceiling"
+  , "sum"
+);
+
+source "R"
+    from
+    "minimal.R"
+    ("packGeneric", "unpackGeneric")
+packGeneric R :: packs => a -> "character";
+unpackGeneric R :: unpacks => "character" -> a;
+
+
+runif :: Int, Num, Num -> [Num];
+ceiling :: [Num] -> [Int];
+sum :: [Int] -> Int;
+
+roll :: Int, Int -> [Int];
+roll n d = ceiling (runif n 0 d);
+
+rollsum :: Int, Int -> Int;
+rollsum n = sum (roll n 10); 

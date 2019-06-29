@@ -15,6 +15,7 @@ module Morloc.System
     , getHomeDirectory
     , appendPath
     , takeDirectory
+    , combine
   ) where
 
 import Morloc.Global
@@ -23,14 +24,20 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
 import qualified System.Directory as Sys 
-import System.FilePath.Posix (combine, takeDirectory)
+import qualified System.FilePath.Posix as Path
 import qualified Data.Yaml.Config as YC
 import Data.Aeson (FromJSON(..))
 import qualified Data.Char as DC
 
+combine :: MT.Text -> MT.Text -> MT.Text
+combine x y = MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)
+
+takeDirectory :: MT.Text -> MT.Text
+takeDirectory x = MT.pack $ Path.takeDirectory (MT.unpack x)
+
 -- | Append POSIX paths encoded as Text
 appendPath :: MT.Text -> MT.Text -> MT.Text
-appendPath base path = MT.pack $ combine (MT.unpack path) (MT.unpack base)
+appendPath base path = combine path base
 
 getHomeDirectory :: IO MT.Text
 getHomeDirectory = fmap MT.pack Sys.getHomeDirectory
@@ -41,4 +48,4 @@ loadYamlConfig :: FromJSON a
   -> IO a -- ^ default configuration
   -> IO a 
 loadYamlConfig (Just fs) e _ = YC.loadYamlSettings (map MT.unpack fs) [] e
-loadYamlConfig Nothing   _ d = d
+loadYamlConfig Nothing _ d = d

@@ -40,6 +40,7 @@ data Lang
   | Python3Lang
   | RLang
   | CLang
+  | CppLang
   | PerlLang
   deriving(Ord, Eq, Show)
 
@@ -50,6 +51,8 @@ parseExtension "py"  = Just Python3Lang
 parseExtension "R"   = Just RLang
 parseExtension "c"   = Just CLang
 parseExtension "h"   = Just CLang
+parseExtension "cpp" = Just CppLang
+parseExtension "hpp" = Just CppLang
 parseExtension "pl"  = Just PerlLang
 parseExtension _ = Nothing 
 
@@ -59,6 +62,7 @@ makeExtension MorlocLang  = "loc"
 makeExtension Python3Lang = "py"
 makeExtension RLang       = "R"
 makeExtension CLang       = "c"
+makeExtension CppLang     = "cpp"
 makeExtension PerlLang    = "pl"
 
 -- | Create the name of a given language. This is the internal standard name
@@ -68,6 +72,7 @@ showLangName MorlocLang  = "morloc"
 showLangName Python3Lang = "python3"
 showLangName RLang       = "R"
 showLangName CLang       = "C"
+showLangName CppLang     = "Cpp"
 showLangName PerlLang    = "Perl"
 
 -- | Read the name of a given language and try to translate it
@@ -81,6 +86,10 @@ readLangName "R"       = Just RLang
 readLangName "r"       = Just RLang
 readLangName "C"       = Just CLang
 readLangName "c"       = Just CLang
+readLangName "cpp"     = Just CppLang
+readLangName "Cpp"     = Just CppLang
+readLangName "C++"     = Just CppLang
+readLangName "c++"     = Just CppLang
 readLangName "Perl"    = Just PerlLang
 readLangName "perl"    = Just PerlLang
 readLangName _ = Nothing
@@ -100,6 +109,7 @@ makeExecutableName
   -> Text -- ^ basename
   -> Text -- ^ executable file basename
 makeExecutableName CLang base = base <> "-c.out"
+makeExecutableName CppLang base = base <> "-cpp.out"
 makeExecutableName lang  base = makeSourceName lang base -- For interpreted languages
 
 -- TODO: Use this function at the parsing stage to standardize names

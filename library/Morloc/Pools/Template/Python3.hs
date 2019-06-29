@@ -22,8 +22,8 @@ import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
-generate :: SparqlDatabaseLike db => db -> MorlocMonad Script
-generate db = makeGenerator g (defaultCodeGenerator g asImport) db
+generate :: [Manifold] -> SerialMap -> MorlocMonad Script
+generate = defaultCodeGenerator g asImport
 
 asImport :: MT.Text -> MorlocMonad Doc
 asImport s = do
@@ -36,103 +36,147 @@ asImport s = do
          . MT.liftToText SF.dropExtensions
          $ s
 
-pytry :: TryDoc -> Doc
-pytry t = [idoc|
+pyIfElse :: [(Doc,Doc)] -> Maybe Doc -> Doc
+pyIfElse [] _ = ""
+pyIfElse [(cond,block)] Nothing = nest 4 ("if" <+> cond <> ":" <> line <> block)
+pyIfElse (r:rs) els
+  =  pyIfElse [r] Nothing
+  <> line <> vsep (map pyElif rs) <> pyElse els
+  where
+    pyElif (cond,block) = nest 4 ("elif" <+> cond <> ":" <> line <> block)
+
+    pyElse Nothing = ""
+    pyElse (Just elseblock) = nest 4 ("else:" <> line <> elseblock)
+
+g = Grammar {
+      gLang        = gLang'
+    , gSerialType  = gSerialType'
+    , gAssign      = gAssign'
+    , gCall        = gCall'
+    , gFunction    = gFunction'
+    , gId2Function = gId2Function'
+    , gComment     = gComment'
+    , gReturn      = gReturn'
+    , gQuote       = gQuote'
+    , gImport      = gImport'
+    , gTrue        = gTrue'
+    , gFalse       = gFalse'
+    , gList        = gList'
+    , gTuple       = gTuple'
+    , gRecord      = gRecord'
+    , gIndent      = gIndent'
+    , gTry         = gTry'
+    , gUnpacker    = gUnpacker'
+    , gForeignCall = gForeignCall'
+    , gSignature   = gSignature'
+    , gSwitch      = gSwitch'
+    , gCmdArgs     = gCmdArgs'
+    , gShowType    = gShowType'
+    , gMain        = gMain'
+  }
+
+gLang' :: Lang
+gLang' = Python3Lang
+
+gSerialType' :: MType
+gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "str" []
+
+gAssign' :: GeneralAssignment -> Doc
+gAssign' g = case gaType g of
+  (Just t) -> gaName g <> " = " <> gaValue g <+> gComment' ("::" <+> t) 
+  Nothing  -> gaName g <> " = " <> gaValue g 
+
+gCall' :: Doc -> [Doc] -> Doc
+gCall' n args = n <> tupled args
+
+gFunction' :: GeneralFunction -> Doc
+gFunction' gf
+  =  gComment' (gfComments gf)
+  <> "def "
+  <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
+  <> line <> gIndent' (gfBody gf) <> line
+
+gId2Function' :: Integer -> Doc
+gId2Function' i = "m" <> (text' (MT.show' i))
+
+gComment' :: Doc -> Doc
+gComment' d = "# " <> d
+
+gReturn' :: Doc -> Doc
+gReturn' x = gCall' "return" [x]
+
+gQuote' :: Doc -> Doc
+gQuote' = dquotes
+
+-- 1st argument (home directory) is ignored (it is added to path in main)
+gImport' :: Doc -> Doc -> Doc
+gImport' _ s = [idoc|from #{s} import *|]
+
+gTrue' :: Doc
+gTrue' = "True"
+
+gFalse' :: Doc
+gFalse' = "False"
+
+gList' :: [Doc] -> Doc
+gList' = list
+
+gTuple' :: [Doc] -> Doc
+gTuple' = tupled
+
+gRecord' :: [(Doc,Doc)] -> Doc
+gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
+
+gIndent' :: Doc -> Doc
+gIndent' = indent 4
+
+gTry' :: TryDoc -> Doc
+gTry' t = [idoc|
 try:
     #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
 except Exception as e:
     sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
 
-g = Grammar {
-      gLang        = Python3Lang
-    , gAssign      = assign' 
-    , gCall        = call'
-    , gFunction    = function'
-    , gId2Function = id2function'
-    , gComment     = comment'
-    , gReturn      = return'
-    , gQuote       = dquotes
-    , gImport      = import'
-    , gTrue        = "True"
-    , gFalse       = "False"
-    , gList        = list'
-    , gTuple       = tuple'
-    , gRecord      = record'
-    , gIndent      = indent'
-    , gTry         = pytry
-    , gUnpacker    = unpacker'
-    , gForeignCall = foreignCall'
-    , gSignature   = signature'
-    , gHash        = hash'
-    , gShowType    = mshow
-    , gMain        = main'
-  } where
+gUnpacker' :: UnpackerDoc -> Doc
+gUnpacker' u = gCall' "_morloc_unpack"
+  [ udUnpacker u
+  , udValue u
+  , "mid=" <> dquotes (udMid u)
+  , "filename=" <> dquotes (udFile u)
+  ]
 
-    indent' = indent 4
+gForeignCall' :: ForeignCallDoc -> Doc
+gForeignCall' f = gCall' "_morloc_foreign_call" (fcdCall f ++ [list (fcdArgs f)])
 
-    hash' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc
-    hash' l r xs = encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs)
+gSignature' :: GeneralFunction -> Doc
+gSignature' gf
+  =   maybe "?" id (gfReturnType gf)
+  <+> gfName gf
+  <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
-    assign' :: GeneralAssignment -> Doc
-    assign' g = case gaType g of
-      (Just t) -> gaName g <> " = " <> gaValue g <+> comment' ("::" <+> t) 
-      Nothing  -> gaName g <> " = " <> gaValue g 
+gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+gSwitch' l r ms x var = pyIfElse cases Nothing
+  where
+    cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
+-- -- This is a cleaner approach, but python is too eager, leading every
+-- -- case to be evaluated, thus this does not behave like a switch statement.
+-- -- Doing all if statements (as above) does work, but is slow.
+-- gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+-- gSwitch' l r xs x var
+--   =   var <+> "=" <+> "if"
+--   <+> encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs) <> brackets x
 
-    call' :: Doc -> [Doc] -> Doc
-    call' n args = n <> tupled args
+gCmdArgs' :: [Doc]
+gCmdArgs' = map (\i -> "sys.argv[" <> integer i <> "]") [2..]
 
-    signature' :: GeneralFunction -> Doc
-    signature' gf
-      =   maybe "?" id (gfReturnType gf)
-      <+> gfName gf
-      <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
+gShowType' :: MType -> Doc
+gShowType' = mshow 
 
-    function' :: GeneralFunction -> Doc
-    function' gf = comment' (signature' gf) <> line
-      <> "def "
-      <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
-      <> line <> indent' (gfBody gf) <> line
-
-    id2function' :: Integer -> Doc
-    id2function' i = "m" <> (text' (MT.show' i))
-
-    comment' :: Doc -> Doc
-    comment' d = "# " <> d
-
-    return' :: Doc -> Doc
-    return' x = call' "return" [x]
-
-    list' :: [Doc] -> Doc
-    list' = list
-
-    tuple' :: [Doc] -> Doc
-    tuple' = tupled
-
-    record' :: [(Doc,Doc)] -> Doc
-    record' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
-
-    -- 1st argument (home directory) is ignored (it is added to path in main)
-    import' :: Doc -> Doc -> Doc
-    import' _ s = [idoc|from #{s} import *|]
-
-    unpacker' :: UnpackerDoc -> Doc
-    unpacker' u = call' "_morloc_unpack"
-      [ udUnpacker u
-      , udValue u
-      , "mid=" <> dquotes (udMid u)
-      , "filename=" <> dquotes (udFile u)
-      ]
-
-    foreignCall' :: ForeignCallDoc -> Doc
-    foreignCall' f
-      = call' "_morloc_foreign_call"
-      $ fcdCall f ++ [list (fcdArgs f)]
-
-    main' :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
-    main' sources sourceManifolds cisManifolds dispatchFunDict dispatchSerializerDict = do
-      lib <- fmap text' $ MM.asks MC.configLibrary
-      return $ [idoc|#!/usr/bin/env python
+gMain' :: PoolMain -> MorlocMonad Doc
+gMain' pm = do
+  lib <- fmap text' $ MM.asks MC.configLibrary
+  return $ [idoc|#!/usr/bin/env python
 
 import sys
 import subprocess
@@ -140,7 +184,7 @@ import json
 
 sys.path = ["#{lib}"] + sys.path
 
-#{vsep sources}
+#{vsep (pmSources pm)}
 
 def _morloc_unpack(unpacker, jsonString, mid, filename):
     try:
@@ -159,7 +203,8 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
         sysObj = subprocess.run(
             [interpreter, pool, mid, *args],
             capture_output=True,
-            check=True
+            check=True,
+            encoding="ascii"
         )
     except subprocess.CalledProcessError as e:
         sys.exit(str(e))
@@ -173,31 +218,21 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
     return(jsonString)
 
 
-#{sourceManifolds}
-
-#{cisManifolds}
-
-dispatchFun = #{dispatchFunDict}
-dispatchSerializer = #{dispatchSerializerDict}
+#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
 
 if __name__ == '__main__':
-    script_name = sys.argv[0] 
-
     try:
         cmdID = int(sys.argv[1])
     except IndexError:
-        sys.exit("Internal error in {}: no manifold id found".format(script))
+        sys.exit("Internal error in {}: no manifold id found".format(sys.argv[0]))
     except ValueError:
-        sys.exit("Internal error in {}: expected integer manifold id".format(script))
+        sys.exit("Internal error in {}: expected integer manifold id".format(sys.argv[0]))
 
     try:
-        function = dispatchFun[cmdID]
-    except IndexError:
-        sys.exit("Internal error in {}: expected manifold id, got {}".format(script, cmdID))
 
-    args = sys.argv[2:]
-    serialize = dispatchSerializer[cmdID]
+#{indent 8 ((pmDispatchManifold pm) "cmdID" "result")}
+    except KeyError:
+        sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
 
-    print(serialize(function(*args)))
-
+    print(result)
 |]

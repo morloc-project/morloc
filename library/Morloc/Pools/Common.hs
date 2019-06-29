@@ -17,7 +17,7 @@ module Morloc.Pools.Common
   , GeneralAssignment(..)
   , UnpackerDoc(..)
   , ForeignCallDoc(..)
-  , makeGenerator
+  , PoolMain(..)
   , defaultCodeGenerator
 ) where
 
@@ -26,15 +26,16 @@ import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC
-import qualified Morloc.Component.Serializer as Serializer
-import qualified Morloc.Component.Manifold as Manifold
+import Morloc.Component.MType () -- just for mshow instances
 import qualified Morloc.Monad as MM
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
+import qualified Data.Maybe as DM
 
 data Grammar = Grammar {
       gLang        :: Lang
+    , gSerialType  :: MType
     , gAssign      :: GeneralAssignment -> Doc
     , gCall        :: Doc -> [Doc] -> Doc
     , gFunction    :: GeneralFunction -> Doc
@@ -53,9 +54,10 @@ data Grammar = Grammar {
     , gUnpacker    :: UnpackerDoc -> Doc
     , gTry         :: TryDoc -> Doc
     , gForeignCall :: ForeignCallDoc -> Doc
-    , gHash        :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc
+    , gSwitch      :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc -> Doc -> Doc
+    , gCmdArgs     :: [Doc] -- ^ infinite list of main arguments (e.g. "argv[2]")
     , gShowType    :: MType -> Doc
-    , gMain        :: [Doc] -> Doc -> Doc -> Doc -> Doc -> MorlocMonad Doc
+    , gMain        :: PoolMain -> MorlocMonad Doc
   }
 
 data GeneralAssignment = GeneralAssignment {
@@ -65,7 +67,8 @@ data GeneralAssignment = GeneralAssignment {
 } deriving (Show)
 
 data GeneralFunction = GeneralFunction {
-    gfReturnType :: Maybe Doc -- ^ concrete return type
+    gfComments :: Doc
+  , gfReturnType :: Maybe Doc -- ^ concrete return type
   , gfName :: Doc -- ^ function name
   , gfArgs :: [(Maybe Doc, Doc)] -- ^ (variable concrete type, variable name)
   , gfBody :: Doc 
@@ -88,6 +91,7 @@ data UnpackerDoc = UnpackerDoc {
 
 data ForeignCallDoc = ForeignCallDoc {
     fcdForeignPool :: Doc   -- ^ the name of the foreign pool (e.g., "R.pool")
+  , fcdForeignExe  :: Doc   -- ^ path to the foreign executable
   , fcdMid         :: Doc   -- ^ the function integer identifier
   , fcdArgs        :: [Doc] -- ^ CLI arguments passed to foreign function
   , fcdCall        :: [Doc] -- ^ make a list of CLI arguments from first two
@@ -96,43 +100,54 @@ data ForeignCallDoc = ForeignCallDoc {
   , fcdFile        :: Doc   -- ^ for debugging
 } deriving (Show)
 
-makeGenerator
-  :: Grammar
-  -> (db -> MorlocMonad Code)
-  -> db
-  -> MorlocMonad Script
-makeGenerator g gen
-  = \ep ->
-          Script
-      <$> pure "pool" -- TODO remove hard-coded name
-      <*> pure (gLang g)
-      <*> gen ep
+data PoolMain = PoolMain {
+    pmSources :: [Doc]
+  , pmPoolManifolds :: [GeneralFunction]
+  , pmDispatchManifold :: Doc -> Doc -> Doc
+  , pmPrototypes :: [Doc] -- ^ a list of function prototypes, required for C/C++
+}
 
 defaultCodeGenerator
-  :: (SparqlDatabaseLike db)
-  => Grammar
+  :: Grammar
   -> (MT.Text -> MorlocMonad Doc) -- source name parser
-  -> db
-  -> MorlocMonad Code
-defaultCodeGenerator g f ep = do
-  manifolds <- Manifold.fromSparqlDb ep
-  packMap <- Serializer.fromSparqlDb (gLang g) ep
+  -> [Manifold]
+  -> SerialMap
+  -> MorlocMonad Script
+defaultCodeGenerator g f manifolds packMap = do
+  state <- MM.get 
   paksrcs <- mapM f (serialSources packMap)
   mansrcs <- Man.getManSrcs (gLang g) f manifolds
   lib <- MM.asks MC.configLibrary
+  poolManifolds <- makePoolManifolds g packMap (getMorlocFun2sourceFun manifolds) manifolds
   let srcs = map ((gImport g) (text' lib)) (paksrcs ++ mansrcs)
-  srcManifolds <- makeSourceManifolds g packMap manifolds 
-  cisManifolds <- makeCisManifolds g packMap (getMorlocFun2sourceFun manifolds) manifolds
-  usedManifolds <- Man.getUsedManifolds (gLang g) manifolds
-  let dispatchSerializerDict = (gHash g) (text' . MT.show' . mid) (Man.getPacker packMap) manifolds
-  let dispatchFunDict = (gHash g) (text' . MT.show' . mid) (callIdToName g) usedManifolds
-  doc <- (gMain g)
-    srcs                   -- [Doc]
-    srcManifolds           -- Doc
-    cisManifolds           -- Doc
-    dispatchFunDict        -- Doc
-    dispatchSerializerDict -- Doc
-  return $ render doc
+      dispatchManifold =
+        (gSwitch g)
+           (text' . MT.show' . mid)
+           (mainCall g packMap)
+           (Man.getUsedManifolds (gLang g) manifolds)
+  doc <- (gMain g) (PoolMain
+      { pmSources = srcs
+      , pmPoolManifolds = poolManifolds
+      , pmDispatchManifold = dispatchManifold
+      }
+    )
+  return $ Script {
+        scriptBase = "pool"
+      , scriptLang = gLang g
+      , scriptCode = render doc
+      , scriptCompilerFlags = filter (/= "") . map packageGccFlags $ statePackageMeta state
+    }
+
+-- call a manifold and deserialize the return value
+mainCall :: Grammar -> SerialMap -> Manifold -> Doc
+mainCall g h m
+  = (gCall g) (Man.getPacker h m)
+  $ [(gCall g) (callIdToName g m) (take n (gCmdArgs g))]
+  where
+    n = if mSourced m && not (mCalled m)
+        then length (mArgs m)
+        else length (mBoundVars m)
+      
 
 -- | When a morloc function is declared, for example @foo x = sqrt(pow x 2)@,
 -- then calling @foo@ from the nexus should call the source function @sqrt@ not
@@ -150,59 +165,68 @@ callIdToName g m = text' . MT.show' $ (gId2Function g) (mid m)
 iArgs :: Doc -> [Doc]
 iArgs prefix = zipWith (<>) (repeat prefix) (map int [0..])
 
-makeSourceManifolds :: Grammar -> SerialMap -> [Manifold] -> MorlocMonad Doc
-makeSourceManifolds g h ms
-  =   Man.filterByManifoldClass (gLang g) Source ms
-  >>= mapM (makeSourceManifold g h)
-  |>> vsep
-
-makeCisManifolds
+makePoolManifolds
   :: Grammar
   -> SerialMap
-  -> Map.Map MT.Text Manifold
+  -> Map.Map Key Manifold
   -> [Manifold]
-  -> MorlocMonad Doc
-makeCisManifolds g h cs ms
-  =   Man.filterByManifoldClass (gLang g) Cis ms
-  >>= mapM (makeCisManifold g h cs)
-  |>> vsep
+  -> MorlocMonad [GeneralFunction]
+makePoolManifolds g h cs ms = fmap DM.catMaybes . mapM makePoolManifold $ ms
+  where
+    makePoolManifold m = case Man.determineManifoldClass (gLang g) m of 
+      Cis -> Just <$> makeCisManifold g h cs ms m
+      Source -> Just <$> makeSourceManifold g h m
+      _ -> return Nothing
 
 makeCisManifold
   :: Grammar
   -> SerialMap
   -> Map.Map MT.Text Manifold
+  -> [Manifold]
   -> Manifold
-  -> MorlocMonad Doc
-makeCisManifold g h cs m = do
+  -> MorlocMonad GeneralFunction
+makeCisManifold g h cs ms m = do
   argTypes <-  zip3
            <$> pure (getConcreteArgTypes g m) -- [Maybe Doc]
-           <*> Man.getUnpackers h m           -- [Doc]
+           <*> packersIfNeeded                -- Maybe [Doc]
            <*> pure (mArgs m)                 -- [Argument]
   args <- sequence $ zipWith makeArg (iArgs "a") argTypes
+
   let name = callIdToName g m
-  return
-    $  ((gComment g) "cis manifold") <> line
-    <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
-    <> (gFunction g) (GeneralFunction {
-           gfReturnType = Nothing
+      comments
+        =  (gComment g) "cis manifold" <> line
+        <> (gComment g) (maybe (fname m) text' (mComposition m)) <> line
+        <> (gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))
+        <> line
+  return $ GeneralFunction {
+           gfComments = comments
+         , gfReturnType = getConcreteReturnType g m
          , gfName = name
-         , gfArgs = zip (repeat $ Just "<BOUND_TYPE>") (map text' (mBoundVars m))
+         , gfArgs = zip (repeat $ Just . gShowType g $ gSerialType g)
+                        (map text' (mBoundVars m))
          , gfBody = (vsep args <>
                      line <>
                      (gReturn g) ((gCall g) calledFunction (take n (iArgs "a"))))
-       })
+         }
   where
     n = length (mArgs m)
 
-    -- Get either the callName of the current manifold or, if the current
-    -- manifold is a morloc function, get the name of the top-level manifold in
-    -- the composition. 
     calledFunction :: Doc
-    calledFunction = maybe (text' (mCallName m))
+    calledFunction
+      | Man.isMorlocCall m = (callIdToName g) (findComposition (mMorlocName m))
+      | otherwise =  maybe (text' (mName m))
                            (callIdToName g)
-                           (Map.lookup (mCallName m) cs)
+                           (Map.lookup (mName m) cs)
 
-    makeArg :: Doc -> (Maybe Doc, Doc, Argument) -> MorlocMonad Doc
+    packersIfNeeded :: MorlocMonad ([Maybe Doc])
+    packersIfNeeded
+      | Man.isMorlocCall m = return $ repeat Nothing
+      | otherwise = fmap (map Just) $ Man.getUnpackers h m
+
+    findComposition :: Name -> Manifold
+    findComposition n = (filter (\m -> mComposition m == (Just n)) ms) !! 0
+
+    makeArg :: Doc -> (Maybe Doc, Maybe Doc, Argument) -> MorlocMonad Doc
     makeArg lhs (ctype, unpacker, arg) = do
       arg <- makeArg' (unpacker, arg)
       return . gAssign g $ GeneralAssignment {
@@ -211,19 +235,20 @@ makeCisManifold g h cs m = do
           , gaValue = arg
         }
 
-    makeArg' :: (Doc, Argument) -> MorlocMonad Doc
-    makeArg' (u, arg) =
+    makeArg' :: (Maybe Doc, Argument) -> MorlocMonad Doc
+    makeArg' (Nothing, arg) = writeArgument g ms (mBoundVars m) arg
+    makeArg' (Just u, arg) =
       if
         useUnpacker g arg m
       then
-        (writeArgument g (mBoundVars m) arg) >>= unpack' u 
-      else
-        (writeArgument g (mBoundVars m) arg)
+        (writeArgument g ms (mBoundVars m) arg) >>= unpack' u 
+      else                  
+        writeArgument g ms (mBoundVars m) arg
 
     -- Does this argument need to be deserialized?
     useUnpacker :: Grammar -> Argument -> Manifold -> Bool
     useUnpacker _  (ArgName n') m' = elem n' (mBoundVars m')
-    useUnpacker g' (ArgCall m') _  = (mLang m') /= (Just (gLang g'))
+    useUnpacker g' (ArgCall k)  _  = fmap mLang (lookupKey ms k) /= Just (gLang g')
     useUnpacker _  (ArgData _)  _  = False
     useUnpacker _  (ArgPosi _)  _  = True
 
@@ -238,17 +263,27 @@ makeCisManifold g h cs m = do
           , udFile = text' (ML.makeSourceName (gLang g) "pool")
         }))
 
-makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad Doc
+-- O(n) lookup of a manifold given a key (e.g., from Argument).
+lookupKey :: [Manifold] -> Key -> Maybe Manifold
+lookupKey ms k = case filter (\m -> mCallId m == k) ms of 
+  [m] -> Just m
+  _ -> Nothing
+
+makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad GeneralFunction
 makeSourceManifold g h m = do
   argTypes <- zip3 <$> pure (getConcreteArgTypes g m) <*> (Man.getUnpackers h m) <*> pure (mArgs m)
   let name = callIdToName g m
-  return
-    $  ((gComment g) "source manifold") <> line
-    <> ((gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))) <> line
-    <> ((gFunction g) (GeneralFunction {
-           gfReturnType = getConcreteReturnType g m
+      comments
+        =  (gComment g) "source manifold" <> line
+        <> (gComment g) (maybe (fname m) text' (mComposition m)) <> line
+        <> (gComment g) (fname m <> " :: " <> maybe "undefined" mshow (mAbstractType m))
+        <> line
+  return $ GeneralFunction {
+           gfComments = comments
+         , gfReturnType = getConcreteReturnType g m
          , gfName = name
-         , gfArgs = zip (getConcreteArgTypes g m) (take n (iArgs "x"))
+         , gfArgs = zip (repeat $ Just . gShowType g $ gSerialType g)
+                        (take n (iArgs "x"))
          , gfBody = (vsep $ zipWith3
                               (unpack' name)
                               (iArgs "a")
@@ -256,7 +291,7 @@ makeSourceManifold g h m = do
                               (iArgs "x"))
                   <> line
                   <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
-      }))
+         }
   where
     n = length (mArgs m)
 
@@ -275,47 +310,52 @@ makeSourceManifold g h m = do
           }
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe Doc]
-getConcreteArgTypes g m = case (mConcreteType m) of
-  (Just (MFuncType _ ts _)) -> map (Just . gShowType g) ts
-  _ -> repeat Nothing -- infinite nothing, fine for zipping, but don't map
+getConcreteArgTypes g m
+  | Man.isMorlocCall m = repeat Nothing
+  | otherwise = case (mConcreteType m) of
+      (Just (MFuncType _ ts _)) -> map (Just . gShowType g) ts
+      _ -> repeat Nothing -- infinite nothing, fine for zipping, but don't map
 
 getConcreteReturnType :: Grammar -> Manifold -> Maybe Doc
-getConcreteReturnType g m = case (mConcreteType m) of
-  (Just (MFuncType _ _ t)) -> Just . gShowType g $ t
+getConcreteReturnType g m = case (mConcreteType m, mAbstractType m) of
+  (Just (MFuncType _ _ t), _) -> Just . gShowType g $ t
+  (_, Just (MFuncType _ _ t)) -> Just . gShowType g $ t
   _ -> Nothing
 
-
 -- | writes an argument sans serialization 
-writeArgument :: Grammar -> [MT.Text] -> Argument -> MorlocMonad Doc
-writeArgument _ _  (ArgName n) = return $ text' n
-writeArgument g _  (ArgData d) = return $ writeData g d
-writeArgument _ _  (ArgPosi i) = return $ "x" <> int i
-writeArgument g xs (ArgCall m) = do
+writeArgument :: Grammar -> [Manifold] -> [MT.Text] -> Argument -> MorlocMonad Doc
+writeArgument _ _  _  (ArgName n) = return $ text' n
+writeArgument g _  _  (ArgData d) = return $ writeData g d
+writeArgument _ _  _  (ArgPosi i) = return $ "x" <> int i
+writeArgument g ms xs (ArgCall k) = do
+  m <- case lookupKey ms k of
+    (Just m') -> return m'
+    Nothing -> MM.throwError $ CallTheMonkeys ("Could not find ArgCall key in manifold list: key=" <> k)
   c <- MM.ask
   let name = callIdToName g m
-  case mLang m of
-    (Just l) ->
-      if
-        l == gLang g
-      then
-        return $ (gCall g) name (map text' xs)
-      else
-        case (
-            MC.getPoolCallBuilder c l (gQuote g)
-          , text' (ML.makeSourceName l "pool")
-          , map text' xs
-        ) of
-          (Just poolBuilder, pool, args) -> return $
-            (gForeignCall g) (ForeignCallDoc {
-                fcdForeignPool = pool
-              , fcdMid = name
-              , fcdArgs = args
-              , fcdCall = poolBuilder pool (integer $ mid m)
-              , fcdFile = text' (ML.makeSourceName (gLang g) "pool")
-            })
-          (Nothing, _, _) -> MM.throwError . GeneratorError $
-            "No command could be found to run language " <> (ML.showLangName l)
-    Nothing -> MM.throwError . GeneratorError $ "No language set on: " <> MT.show' m
+      lang = mLang m
+  if
+    lang == gLang g
+  then
+    return $ (gCall g) name (map text' xs)
+  else
+    case (
+        MC.getPoolCallBuilder c lang (gQuote g)
+      , text' (ML.makeSourceName lang "pool")
+      , text' (ML.makeExecutableName lang "pool")
+      , map text' xs
+    ) of
+      (Just poolBuilder, pool, exe, args) -> return $
+        (gForeignCall g) (ForeignCallDoc {
+            fcdForeignPool = pool
+          , fcdForeignExe = exe
+          , fcdMid = name
+          , fcdArgs = args
+          , fcdCall = poolBuilder exe (integer $ mid m)
+          , fcdFile = text' (ML.makeSourceName (gLang g) "pool")
+        })
+      (Nothing, _, _, _) -> MM.throwError . GeneratorError $
+        "No command could be found to run language " <> (ML.showLangName lang)
 
 writeData :: Grammar -> MData -> Doc
 writeData _ (Num' x)     = text' x
@@ -327,4 +367,4 @@ writeData g (Tup' xs)    = (gTuple g) (map (writeData g) xs)
 writeData g (Rec' xs)    = (gRecord g) (map (\(k, v) -> (text' k, writeData g v)) xs)
 
 fname :: Manifold -> Doc
-fname m = text' (mCallName m)
+fname m = text' (mName m)

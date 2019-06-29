@@ -13,17 +13,27 @@
 
 mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>";
-	rdf:_0 mid:1;
-	rdf:_1 mid:5;
-	rdf:_2 mid:8 .
+	mlc:has_member mid:0_1 .
+mid:0_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:1 .
+mid:0 mlc:has_member mid:0_2 .
+mid:0_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:5 .
+mid:0 mlc:has_member mid:0_3 .
+mid:0_3 mlc:position "3"^^xsd:integer;
+	rdf:value mid:8 .
 mid:1 rdf:type mlc:typeDeclaration;
 	mlc:lhs "A";
 	mlc:lang "morloc";
 	mlc:rhs mid:2 .
 mid:2 rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "Tuple";
-	rdf:_0 mid:3;
-	rdf:_1 mid:4 .
+	mlc:has_member mid:2_1 .
+mid:2_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:3 .
+mid:2 mlc:has_member mid:2_2 .
+mid:2_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:4 .
 mid:3 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int" .
 mid:4 rdf:type mlc:atomicType, mlc:type;
@@ -34,7 +44,9 @@ mid:5 rdf:type mlc:typeDeclaration;
 	mlc:rhs mid:6 .
 mid:6 rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "List";
-	rdf:_0 mid:7 .
+	mlc:has_member mid:6_1 .
+mid:6_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:7 .
 mid:7 rdf:type mlc:atomicType, mlc:type;
 	rdf:value "Int" .
 mid:8 rdf:type mlc:typeDeclaration;
@@ -43,8 +55,12 @@ mid:8 rdf:type mlc:typeDeclaration;
 	mlc:rhs mid:9 .
 mid:9 rdf:type mlc:parameterizedType, mlc:type;
 	rdf:value "Record";
-	rdf:_0 mid:10;
-	rdf:_1 mid:12 .
+	mlc:has_member mid:9_1 .
+mid:9_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:10 .
+mid:9 mlc:has_member mid:9_2 .
+mid:9_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:12 .
 mid:10 rdf:type mlc:namedType;
 	mlc:key "person";
 	rdf:value mid:11 .

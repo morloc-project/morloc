@@ -15,6 +15,10 @@ module Morloc.TypeHandler
   , standardizeGenerics
   , extractGenerics
   , findMostSpecificType
+  , findMostGeneralType
+  , chooseRealization
+  , chooseAbstraction
+  , chooseDeclaration
 ) where
 
 import Morloc.Global
@@ -54,7 +58,7 @@ standardizeGenerics t = f (extractGenerics t) t where
   nameGeneric :: [Name] -> Name -> MorlocMonad Name
   nameGeneric ts n = case (DL.elemIndex n ts) of
     (Just i) -> return $ "x" <> MT.show' i
-    Nothing  ->  M.throwError TrulyWeird
+    Nothing  ->  M.throwError $ CallTheMonkeys "TypeHandler::standardizeGenerics"
 
 -- | Extract the names of all generic variables (in order)
 extractGenerics :: MType -> [Name]
@@ -71,3 +75,34 @@ extractGenerics = DL.nub . extractGenerics' where
 findMostSpecificType :: [MType] -> Maybe MType
 findMostSpecificType [] = Nothing
 findMostSpecificType xs = Just (maximum xs)
+
+-- | Find the most general type. Also see @findMostSpecificType@.
+findMostGeneralType :: [MType] -> Maybe MType
+findMostGeneralType [] = Nothing
+findMostGeneralType xs = Just (minimum xs)
+
+-- | Chooses which manifold instance to use when there are multiple
+-- alternatives. It should choose the instance that that is supported on the
+-- current system and that maximizes performance (e.g., by avoiding foreign
+-- calls). Currently, however, it just chooses whichever realization is first
+-- in the list.
+chooseRealization :: [Manifold] -> Manifold -> Manifold 
+chooseRealization _ m = case mRealizations m of
+  -- -------------^ ignored, since I am not using context yet
+  [] -> m
+  [_] -> m
+  (x:_) -> m { mRealizations = [x] }
+
+-- | What should we do when there are multiple definitions of a given morloc
+-- function name? We could raise an error. We could implement overloading of
+-- some sort. We use the latest definition. For now I will use the most general
+-- type, and look into alternatives later.
+chooseAbstraction :: [MType] -> Maybe MType
+chooseAbstraction = findMostGeneralType
+
+-- | What should we do when there are multiple definitions of a morloc
+-- function? For now, I'll just choose the last one defined.
+chooseDeclaration :: [FunctionDeclaration] -> Maybe FunctionDeclaration
+chooseDeclaration [] = Nothing
+chooseDeclaration [f] = Just f
+chooseDeclaration fs = Just (head . reverse $ fs) -- choose the latest and greatest?

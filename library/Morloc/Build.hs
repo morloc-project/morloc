@@ -28,21 +28,22 @@ build s = case scriptLang s of
   Python3Lang -> MM.liftIO $ writeInterpreted s
   RLang       -> MM.liftIO $ writeInterpreted s
   PerlLang    -> MM.liftIO $ writeInterpreted s
-  CLang       -> buildC s
+  CLang       -> gccBuild s "gcc"
+  CppLang     -> gccBuild s "g++" -- TODO: I need more rigorous build handling
   MorlocLang  -> MM.throwError . GeneratorError $ "You don't want to do that"
 
 -- | Compile a C program
-buildC :: Script -> MorlocMonad ()
-buildC (Script base lang code') = do
-  let src = ML.makeSourceName lang (MT.pack base)
-  let exe = ML.makeExecutableName lang (MT.pack base)  
-  MM.liftIO $ MT.writeFile (MT.unpack src) code'
-  MM.runCommand "buildC" ("gcc -o " <> exe <> " " <> src <> " -lm")
+gccBuild :: Script -> MT.Text -> MorlocMonad ()
+gccBuild s cmd = do
+  let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
+  let exe = ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))  
+  MM.liftIO $ MT.writeFile (MT.unpack src) (scriptCode s) 
+  MM.runCommand "GccBuild" $ MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s)
 
 -- | Build an interpreted script.
 writeInterpreted :: Script -> IO ()
-writeInterpreted (Script base lang code') = do
-  let f = MT.unpack $ ML.makeExecutableName lang (MT.pack base)
-  MT.writeFile f code'
+writeInterpreted s = do
+  let f = MT.unpack $ ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))
+  MT.writeFile f (scriptCode s)
   p <- SD.getPermissions f
   SD.setPermissions f (p {SD.executable = True})

@@ -13,13 +13,27 @@
 
 mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>";
-	rdf:_0 mid:1;
-	rdf:_1 mid:2;
-	rdf:_2 mid:3;
-	rdf:_3 mid:4;
-	rdf:_4 mid:5;
-	rdf:_5 mid:6;
-	rdf:_6 mid:7 .
+	mlc:has_member mid:0_1 .
+mid:0_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:1 .
+mid:0 mlc:has_member mid:0_2 .
+mid:0_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:2 .
+mid:0 mlc:has_member mid:0_3 .
+mid:0_3 mlc:position "3"^^xsd:integer;
+	rdf:value mid:3 .
+mid:0 mlc:has_member mid:0_4 .
+mid:0_4 mlc:position "4"^^xsd:integer;
+	rdf:value mid:4 .
+mid:0 mlc:has_member mid:0_5 .
+mid:0_5 mlc:position "5"^^xsd:integer;
+	rdf:value mid:5 .
+mid:0 mlc:has_member mid:0_6 .
+mid:0_6 mlc:position "6"^^xsd:integer;
+	rdf:value mid:6 .
+mid:0 mlc:has_member mid:0_7 .
+mid:0_7 mlc:position "7"^^xsd:integer;
+	rdf:value mid:7 .
 mid:1 rdf:type mlc:number, mlc:data;
 	rdf:value "42.0"^^xsd:decimal .
 mid:2 rdf:type mlc:number, mlc:data;

@@ -2,17 +2,14 @@
 
 {-|
 Module      : C
-Description : Build a C program given a file
+Description : Build a Cpp program given a file
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
-Stability   : totally experimental
-
-The build process for C differs from that used in R and python since a
-compilation step is needed. This code currently is wildly experimental.
+Stability   : experimental
 -}
 
-module Morloc.Pools.Template.C
+module Morloc.Pools.Template.Cpp
 ( 
   generate
 ) where
@@ -76,7 +73,7 @@ fromMaybeType :: Maybe Doc -> Doc
 fromMaybeType = maybe "void*" id
 
 gLang' :: Lang
-gLang' = CLang
+gLang' = CppLang
 
 gSerialType' :: MType
 gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
@@ -166,9 +163,9 @@ gShowType' :: MType -> Doc
 gShowType' = mshow
 
 gMain' :: PoolMain -> MorlocMonad Doc
-gMain' pm = return [idoc|#include <string.h>
+gMain' pm = return [idoc|#include <string>
 
-#include <stdio.h>
+#include <iostream>
 
 #{vsep (pmSources pm)}
 
@@ -178,10 +175,10 @@ gMain' pm = return [idoc|#include <string.h>
 
 int main(int argc, char * argv[]){
   int cmdID;
-  char* result;
-  cmdID = atoi(argv[1]);
+  std::string result;
+  cmdID = std::stoi(argv[1]);
   #{(pmDispatchManifold pm) "cmdID" "result"}
-  printf("%s\n", result);
+  std::cout << result << std::endl;
   return 0;
 }
 |]

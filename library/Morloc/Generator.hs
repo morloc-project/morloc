@@ -9,21 +9,19 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Generator
-(
-    Nexus
-  , Pool
-  , generate  
-) where
+module Morloc.Generator (generate) where
 
 import Morloc.Global
 import qualified Morloc.Language as ML
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
-
-type Nexus = Script
-type Pool  = Script
+import qualified Morloc.Manifold as Man
+import Morloc.Component.Manifold (fromSparqlDb)
 
 -- | Given a SPARQL endpoint, generate an executable program
-generate :: SparqlDatabaseLike db => db -> MorlocMonad (Nexus, [Pool])
-generate e = (,) <$> (MN.generate ML.PerlLang e) <*> (MP.generate e)
+generate :: SparqlDatabaseLike db => db -> MorlocMonad (Script, [Script])
+generate db = do
+  manifolds <- fromSparqlDb db
+  nexus <- MN.generate ML.PerlLang manifolds
+  pools <- MP.generate db manifolds
+  return (nexus, pools)

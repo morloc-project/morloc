@@ -1,26 +1,20 @@
 # This is just a convenience Makefile for casual testing
 
 all:
+	stack build --test --fast --haddock-deps
 	stack install
-	rm -f nexus.perl pool.R
-	# build using arq
-	morloc make sample.loc
-	# # build using fuseki endpoint
-	# morloc make sample.loc --endpoint=http://localhost:3030/morloc
+	rm -f nexus.pl pool.R
+	morloc make mathy-math.loc
+	perl nexus.pl -h
+	perl nexus.pl meanfib 10
+	morloc make deep.loc
+	perl nexus.pl -h
+	perl nexus.pl rollsum 500
+	morloc make sample-complex.loc
+	perl nexus.pl -h
+	perl nexus.pl test 5
 
 .PHONY: clean
 clean:
 	rm -rf nexus.* pool* __pycache__ 
 	rm -rf z.ttl z.rq
-
-.PHONY: runall
-runall:
-	./nexus.perl
-	./nexus.perl ceiling 1.1
-	./nexus.perl test 10
-	./nexus.perl rand_uniform 10 4 5
-	./nexus.perl sum [1,2,3]
-	./nexus.perl transpose [[1,2,3],[3,4,5]]
-	./nexus.perl nrow '{"x":[1,2,3],"y":[2,3,4]}'
-	./nexus.perl len [1,2,3,4] 
-	./nexus.perl roll 10 4

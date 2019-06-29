@@ -10,13 +10,16 @@ Stability   : experimental
 -}
 
 module Morloc.Manifold
-  ( 
-      getManSrcs
-    , filterByManifoldClass
-    , getUnpackers
-    , getPacker
-    , getUsedManifolds
-  ) where
+( 
+    getManSrcs
+  , filterByManifoldClass
+  , getUnpackers
+  , getPacker
+  , getUsedManifolds
+  , determineManifoldClass
+  , isMorlocCall
+  , uniqueRealization
+) where
 
 import Morloc.Global
 import Morloc.Data.Doc hiding ((<$>))
@@ -30,33 +33,36 @@ import qualified Morloc.TypeHandler as MTH
 
 -- | Get the paths to the sources 
 getManSrcs :: Lang -> (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
-getManSrcs lang f ms = MM.mapM f . DL.nub . DM.catMaybes . map getManSrc $ ms' where
+getManSrcs lang f ms = MM.mapM f . DL.nub . DM.mapMaybe getManSrc $ ms' where
   getManSrc :: Manifold -> Maybe MT.Text
   getManSrc m = case (mSourcePath m, mModulePath m) of
     (Just srcpath, Just modpath) ->
-      case (MT.pack . MS.takeDirectory . MT.unpack $ modpath) of
+      case MS.takeDirectory modpath of
         "."  -> Just srcpath
         path -> Just $ path <> "/" <> srcpath
     _ -> Nothing
 
   -- select the manifolds that are in the same language as the grammar 
-  ms' = filter (\m -> maybe False ((==) lang) (mLang m)) ms
+  ms' = filter (\m -> lang == mLang m) ms
 
-determineManifoldClass :: Lang -> Manifold -> MorlocMonad ManifoldClass
+determineManifoldClass :: Lang -> Manifold -> ManifoldClass
 determineManifoldClass lang m
-  | mLang m == Just lang
+  | mDefined m && not (mCalled m) && not (mExported m) = Uncalled
+  | mLang m == lang
       && not (mCalled m)
       && mSourced m
-      && mExported m = return Source
-  | not (mCalled m) && mExported m = return Uncalled
-  | mLang m == Just lang = return Cis 
-  | (mLang m /= Just lang) && mCalled m = return Trans
-  | otherwise = MM.throwError . GeneratorError $ "Unexpected manifold class"
+      && mExported m = Source
+  | not (mCalled m) && mExported m = Uncalled
+  | mLang m == lang = Cis 
+  | (mLang m /= lang) && mCalled m = Trans
+  | otherwise = Uncalled
 
-filterByManifoldClass :: Lang -> ManifoldClass -> [Manifold] -> MorlocMonad [Manifold]
-filterByManifoldClass lang mc ms = do
-  mcs <- mapM (determineManifoldClass lang) ms 
-  return . map snd . filter ((==) mc . fst) $ zip mcs ms
+filterByManifoldClass :: Lang -> ManifoldClass -> [Manifold] -> [Manifold]
+filterByManifoldClass lang mc ms = filter (\m -> mc == determineManifoldClass lang m) ms
+
+-- | Is this manifold a called morloc function?
+isMorlocCall :: Manifold -> Bool
+isMorlocCall m = mDefined m && DM.isNothing (mComposition m)
 
 -- find a packer for each argument passed to a manifold
 getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
@@ -78,12 +84,12 @@ getUnpackers hash m = case mConcreteType m of
            ) >>= (flip Map.lookup) (serialUnpacker smap)
       of
         (Just x) -> return (text' x)
-        Nothing -> MM.throwError . GeneratorError $
-          (MT.unlines [ "No unpacker found - this is either a bug in the " <>
-                        "morloc codebase or incomplete serialization handling " <>
-                        "for the given language."
-                      , " - SerialMap: " <> MT.show' smap
-                      , " - MType: " <> MT.show' t])
+        Nothing -> MM.throwError . GeneratorError
+          $  "No unpacker found - this is either a bug in the "
+          <> "morloc codebase or incomplete serialization handling "
+          <> "for the given language." <> "\n"
+          <> " - SerialMap: " <> MT.show' smap <> "\n"
+          <> " - MType: " <> MT.show' t
 
 -- | If a language-specific signature is given for the manifold, choose a
 -- packer that matches the language-specific output type. Otherwise, search for
@@ -119,11 +125,36 @@ getPacker hash m = case packerType of
       . Map.filterWithKey (\p _ -> MTH.childOf o p)
       $ (serialPacker hash)
 
--- | Who knows what this is for ... it is the hack I used to resolve a worse hack
-getUsedManifolds :: Lang -> [Manifold] -> MorlocMonad [Manifold]
-getUsedManifolds lang ms = MM.filterM isBuilt ms
+-- | Find the manifolds that must be defined in a pool for a given language.
+getUsedManifolds :: Lang -> [Manifold] -> [Manifold]
+getUsedManifolds lang ms = filter buildIt ms
   where
-    isBuilt :: Manifold -> MorlocMonad Bool
-    isBuilt m = do
-      mc <- determineManifoldClass lang m
-      return $ mc == Cis || mc == Source
+    buildIt :: Manifold -> Bool
+    buildIt m =
+      let mc = determineManifoldClass lang m in
+        mc == Cis || mc == Source
+
+-- | @realize@ determines which instances to use for each manifold.
+uniqueRealization
+  :: [Manifold] 
+  -- ^ Abstract manifolds with possibly multiple realizations or none.
+  -> MorlocMonad [Manifold]
+  -- ^ Uniquely realized manifolds (e.g., mRealizations has exactly one element)
+uniqueRealization ms = do
+  let ms' = map (MTH.chooseRealization ms) ms
+  return $ map (compInit ms') ms'
+  where
+
+    -- initialize composition realizations
+    compInit :: [Manifold] -> Manifold -> Manifold 
+    compInit ms'' m
+      | mDefined m = makeRealization m (mRealizations (findChild ms'' m))
+      | otherwise = m
+
+    findChild :: [Manifold] -> Manifold -> Manifold
+    findChild ms'' m = case filter (\n -> mComposition n == (Just (mMorlocName m))) ms'' of
+      (child:_) -> child
+      xs -> error ("error in findChild: m=" <> show m <> " --- " <> "xs=" <> show xs)
+
+    makeRealization :: Manifold -> [Realization] -> Manifold
+    makeRealization p rs = p { mRealizations = map (\r -> r { rSourced = False }) rs }

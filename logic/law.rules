@@ -1,0 +1,62 @@
+# This is the ruleset syntax for Jena
+# Though I can't get it to run in Fuseki yet
+
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+@prefix owl: <http://www.w3.org/2002/07/owl#>
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#>
+@prefix mlc: <http://www.morloc.io/ontology/000/>
+
+# Id: mlc1
+#      e  <rdf:type>  <mlc:export>
+#      e  <rdf:value> n
+#      m  <rdf:type>  <mlc:dataDeclaration>
+#      m  <mlc:lhs> n
+#     -------------------------------
+#      o  <mlc:manifold_of> m
+#      o  <rdf:type> <mlc:manifold>
+#      o  <mlc:manifold_class> <mlc:exported>
+#      o  <mlc:manifold_morloc_name> n
+[mlc1:
+    (?e rdf:type mlc:export)
+    (?e rdf:value ?n)
+    (?m rdf:type mlc:dataDeclaration)
+    (?m mlc:lhs ?n)
+ ->
+    (?o mlc:manifold_of ?m)
+]
+
+
+# Id: mlc2
+#      m  <rdf:type>  <mlc:call>
+#      m  <rdf:value> c
+#      c  <rdf:type> <mlc:name>
+#      c  <rdf:name> n
+#     -------------------------------
+#      o  <mlc:manifold_of> m
+#      o  <rdf:type> <mlc:manifold>
+#      o  <mlc:manifold_class> <mlc:called>
+#      o  <mlc:manifold_morloc_name> n
+
+# Id: mlc3
+#      s  <rdf:type>  <mlc:source>
+#      s  <mlc:import> i
+#      i  <mlc:name> n
+#      m  <rdf:type> <mlc:export>
+#      m  <rdf:value> n
+#     -------------------------------
+#      o  <mlc:manifold_of> m
+#      o  <rdf:type> <mlc:manifold>
+#      o  <mlc:manifold_class> <mlc:sourced>
+#      o  <mlc:manifold_morloc_name> n
+#
+# Id: mlc4
+#      o  <rdf:type> <mlc:manifold>
+#      o  <rdf:manifold_morloc_name> n
+#      d  <rdf:type> <mlc:typeDeclaration>
+#      d  <mlc:lhs> n
+#      d  <rdf:lang> "morloc"
+#      d  <mlc:rhs> t
+#      t  <mlc:output> out
+#     -------------------------------
+#      o  <mlc:manifold_morloc_output> out

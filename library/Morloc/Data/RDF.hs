@@ -99,6 +99,20 @@ instance MorlocNodeLike DS.Scientific where
     | otherwise = error ("Cannot read number from node of type: " ++ show t) 
   fromRdfNode n = error ("Cannot read number from node: " ++ show n)
 
+instance MorlocNodeLike Integer where
+  asRdfNode x = DR.LNode (DR.TypedL (MT.show' x) (xsdPre <> "integer"))
+  fromRdfNode (DR.LNode (DR.TypedL x t))
+    | t == (xsdPre <> "integer") = MT.read' x
+    | otherwise = error ("Cannot read number from node of type: " ++ show t) 
+  fromRdfNode n = error ("Cannot read number from node: " ++ show n)
+
+instance MorlocNodeLike Int where
+  asRdfNode x = DR.LNode (DR.TypedL (MT.show' x) (xsdPre <> "integer"))
+  fromRdfNode (DR.LNode (DR.TypedL x t))
+    | t == (xsdPre <> "integer") = MT.read' x
+    | otherwise = error ("Cannot read number from node of type: " ++ show t) 
+  fromRdfNode n = error ("Cannot read number from node: " ++ show n)
+
 instance MorlocNodeLike Bool where
   asRdfNode True  = DR.LNode (DR.TypedL "true"  (xsdPre <> "boolean"))
   asRdfNode False = DR.LNode (DR.TypedL "false" (xsdPre <> "boolean"))
@@ -110,9 +124,9 @@ instance MorlocNodeLike Bool where
   fromRdfNode x = error ("Could not derive Bool from node: " ++ show x) 
 
 instance MorlocNodeLike GraphPredicate where
-  asRdfNode (PElem i)   = rdfPre .:. ("_" <> MT.show' i)
   asRdfNode PType       = rdfPre .:. "type"
   asRdfNode PValue      = rdfPre .:. "value"
+  asRdfNode PElem       = mlcPre .:. "has_member"
   asRdfNode PAlias      = mlcPre .:. "alias"
   asRdfNode PConstraint = mlcPre .:. "constraint"
   asRdfNode PLabel      = mlcPre .:. "label" -- NOT the same as the rdf:label
@@ -121,6 +135,7 @@ instance MorlocNodeLike GraphPredicate where
   asRdfNode PNamespace  = mlcPre .:. "namespace"
   asRdfNode POutput     = mlcPre .:. "output"
   asRdfNode PPath       = mlcPre .:. "path"
+  asRdfNode PPosition   = mlcPre .:. "position"
   asRdfNode PProperty   = mlcPre .:. "property"
   asRdfNode PRight      = mlcPre .:. "rhs"
   asRdfNode PKey        = mlcPre .:. "key"
@@ -131,6 +146,7 @@ instance MorlocNodeLike GraphPredicate where
   fromRdfNode n
     | n == ( rdfPre .:. "type"       ) = PType
     | n == ( rdfPre .:. "value"      ) = PValue
+    | n == ( mlcPre .:. "has_member" ) = PElem
     | n == ( mlcPre .:. "alias"      ) = PAlias
     | n == ( mlcPre .:. "constraint" ) = PConstraint
     | n == ( mlcPre .:. "label"      ) = PLabel
@@ -140,18 +156,13 @@ instance MorlocNodeLike GraphPredicate where
     | n == ( mlcPre .:. "output"     ) = POutput
     | n == ( mlcPre .:. "path"       ) = PPath
     | n == ( mlcPre .:. "property"   ) = PProperty
+    | n == ( mlcPre .:. "position"   ) = PPosition
     | n == ( mlcPre .:. "rhs"        ) = PRight
     | n == ( mlcPre .:. "key"        ) = PKey
     | n == ( mlcPre .:. "not"        ) = PNot
     | n == ( mlcPre .:. "name"       ) = PName
     | n == ( mlcPre .:. "import"     ) = PImport
-    | otherwise =
-        case
-          (MT.stripPrefix (rdfPre <> "_") (fromRdfNode n)) >>= MT.readMay'
-        of
-          (Just i) -> PElem i
-          Nothing -> error ("Unsupported predicate: " ++ show n)
-
+    -- WARNING: partial function, can I fix it?
 
 instance MorlocNodeLike GraphObject where
   asRdfNode (OLiteral s)              = (DR.LNode (DR.PlainL s))
@@ -289,15 +300,25 @@ adoptAs rel sbj objs =
   where
     link rel' sbj' (TopRDF obj' _) = mtriple sbj' rel' obj'
 
+{- Model for ordered elements
+  ?s rdf:member ?e .                 -- id of ?o with ?i appended (hacky, but should be uniq)
+  ?e mlc:position ?i^^xsd:integer .  -- 1-based order
+  ?e rdf:value ?o .                  -- store the actual member
+-}
+-- | Link an ordered list of elements to a node
 adopt :: DR.Node -> [TopRDF] -> [DR.Triple]
 adopt sbj objs =
-       zipWith (link sbj) [0..] objs
+       concat (zipWith (link sbj) [1..] objs)
     ++ concat (map (\(TopRDF _ obj) -> DR.triplesOf obj) objs)
   where
-    link :: DR.Node -> Int -> TopRDF -> DR.Triple
-    link sbj' index (TopRDF obj' _)
-      -- TODO: straighten this out, it is an artefact of my element reversal
-      = mtriple sbj' (PElem index) obj'
+    link :: DR.Node -> Int -> TopRDF -> [DR.Triple]
+    link (DR.UNode t) index (TopRDF obj' _) =
+      let e' = DR.UNode (t <> "_" <> MT.show' index)
+          i' = DR.LNode (DR.TypedL (MT.show' index) (xsdPre <> "integer"))
+      in [ mtriple sbj PElem e'
+         , mtriple e' PPosition i'
+         , mtriple e' PValue obj'
+         ]
 
 showTopRDF :: TopRDF -> MT.Text
 showTopRDF (TopRDF _ rdf) = MT.pack $ DR.showGraph rdf

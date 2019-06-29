@@ -12,7 +12,6 @@ Stability   : experimental
 module Morloc.Component.Util (
     simpleGraph
   , graphify
-  , isElement_
 ) where
 
 import Morloc.Global
@@ -72,6 +71,3 @@ graphify f xs = do
   
 withSnd :: (a -> b) -> (c, a) -> (c , b)
 withSnd f (x, y) = (x, f y)
-
-isElement_ :: PredicateTermLike a => a -> Query ()
-isElement_ x = filterExpr_ (regex (str x) ("_[0-9]+$" :: MT.Text))

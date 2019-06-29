@@ -93,3 +93,10 @@
 
  [ ] Consider replacing Megaparsec parser with traditional LR parser, i.e. the
      Haskell equivalents of Flex and Bison, Alex and Happy. 
+
+ [ ] Disentangle MAST generation from the parser. First pass the script through
+ a lexer (Alex) to create a token stream. The parser (Happy) generates a
+ Haskell data structure from the token stream. The Haskell data structure is
+ then converted to RDF (MAST). The semantic engine reads MAST to generate VAST.
+ The linker reads VAST to generate LAST (local abstract syntax tree) which is
+ finally converted by the generator to local source code.

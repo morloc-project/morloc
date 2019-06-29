@@ -1,3 +1,18 @@
+0.17.4 [2019.06.29]
+
+ * Add C and C++ handling
+ * Define Ord intance for MTypeMeta
+ * Allow pools to be called as executables
+ * Add type handling to generators
+ * Remove redundant SPARQL queries (better performance)
+ * New RDF list semantics
+ * Use strings to represent concrete types (e.g. "char\*")
+ * Write pretty-printed diagnostic files to `$MORLOC_HOME/tmp` 
+ * Handling for multiple concrete type signatures (e.g., definition of
+   a function in multiple languages).
+ * Handling for multiple abstract type signatures
+ * Handling for multiple function declarations
+
 0.17.3 [2019.06.14]
 -------------------
 
@@ -14,10 +29,9 @@
 
  * Replace string names of languages (e.g., "python") with a sum type.
 
+0.17.2 [2019.05.05]
 
-0.17.2 [2019.05.5]
-
- * PyCon2019 release
+  Pycon release
 
 0.17.1 [2019.04.26]
 -------------------

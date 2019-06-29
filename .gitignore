@@ -7,3 +7,4 @@ nexus.*
 pool.*
 morloc.cabal
 *.out
+run/

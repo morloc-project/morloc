@@ -22,6 +22,7 @@ module Morloc.Monad
   , runCommand
   , runCommandWith
   , logFile
+  , logFileWith
   , readLang
   , module Control.Monad.Trans 
   , module Control.Monad.Except 
@@ -47,7 +48,7 @@ import System.IO (stderr)
 import qualified System.Directory as SD
 
 runMorlocMonad :: Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db [])
+runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db [] [])
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
@@ -64,6 +65,7 @@ runCommand loc cmd = do
   (_, _, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
   exitCode <- liftIO $ SP.waitForProcess handle
   err <- liftIO $ MT.hGetContents herr
+  liftIO . print $ "$ " <> cmd
   case exitCode of
     SE.ExitSuccess     -> tell [err] -- log a message
     (SE.ExitFailure _) -> throwError (SystemCallError cmd loc err)
@@ -80,6 +82,7 @@ runCommandWith loc f cmd = do
     exitCode <- liftIO $ SP.waitForProcess handle
     out <- liftIO $ MT.hGetContents hout
     err <- liftIO $ MT.hGetContents herr
+    liftIO . print $ "$ " <> cmd
     case exitCode of
       SE.ExitSuccess -> return $ f out
       _ -> throwError (SystemCallError cmd loc err)
@@ -93,8 +96,23 @@ logFile s m = do
   tmpdir <- asks configTmpDir
   liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
   let path = (MT.unpack tmpdir) <> "/" <> s
-  liftIO $ writeFile path (show m)
+  liftIO $ MT.writeFile path (MT.pretty m)
   return m 
+
+-- | Write a object to a file in the Morloc temporary directory
+logFileWith
+  :: (Show b)
+  => String -- ^ A filename
+  -> (a -> b) -- ^ A function to convert a to something presentable
+  -> a
+  -> MorlocMonad a 
+logFileWith s f m = do
+  tmpdir <- asks configTmpDir
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
+  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ MT.writeFile path (MT.pretty (f m))
+  return m 
+
 
 -- | Attempt to read a language name. This is a wrapper around the
 -- @Morloc.Language::readLangName@ that appropriately handles error.

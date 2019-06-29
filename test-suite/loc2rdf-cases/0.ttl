@@ -13,7 +13,9 @@
 
 mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>";
-	rdf:_0 mid:1 .
+	mlc:has_member mid:0_1 .
+mid:0_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:1 .
 mid:1 rdf:type mlc:number, mlc:data;
 	rdf:value "0.0"^^xsd:decimal .
 

@@ -19,7 +19,7 @@ import qualified Morloc.Nexus.Template.Perl as Perl
 
 -- | Generate the nexus, which is a program that coordinates the execution of
 -- the language-specific function pools.
-generate :: SparqlDatabaseLike db => Lang -> db -> MorlocMonad Script
-generate PerlLang d = Perl.generate d
+generate :: Lang -> [Manifold] -> MorlocMonad Script
+generate PerlLang manifolds = Perl.generate manifolds
 generate l _ = MM.throwError . GeneratorError $
   ("Cannot generate nexus in language: " <> ML.showLangName l)

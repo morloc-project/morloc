@@ -25,7 +25,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.State as MS
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Lexer as Tok
-import qualified Morloc.Module as MM
+import qualified Morloc.Module as Mod
 import Morloc.Operators
 
 -- | Parse a Morloc source file into an AST stored as an RDF, recursively parse
@@ -50,6 +50,10 @@ parseShallow srcfile code = do
                  , MS.stateSourceUri  = source_str
                  , MS.stateModulePath = srcfile
                }
+  -- Find and parse module metadata (found relative to module main file).
+  case srcfile of
+    (Just f) -> Mod.loadModuleMetadata f
+    Nothing -> return () -- i.e. this is a raw string of code, not a file
   case runParser (CMS.runStateT contents pstate) (MT.unpack input') code of
     Left err  -> M.throwError $ SyntaxError err
     Right ((MR.TopRDF _ val), _) -> return val
@@ -61,7 +65,7 @@ parseShallow srcfile code = do
 parseImports :: MR.RDF -> MorlocMonad [MR.RDF]
 parseImports rdf = do
   let importNames = MR.getImports rdf
-  CM.mapM MM.findModule importNames >>= CM.mapM parseFile
+  CM.mapM Mod.findModule importNames >>= CM.mapM parseFile
   where
     parseFile :: Path -> MorlocMonad MR.RDF
     parseFile p = do
@@ -241,7 +245,7 @@ mtype =
     -- any type other than a naked function
     notFunction' :: MS.Parser MR.TopRDF
     notFunction' =
-          try specific' -- A ...
+          try specific' -- A or "int" (types may be quoted)
       <|> try generic'  -- a ...
       <|> try record'   -- A { ... }
       <|> try unambiguous'
@@ -260,7 +264,7 @@ mtype =
     specific' :: MS.Parser MR.TopRDF
     specific' = do
       l <- Tok.tag Tok.genericType
-      n <- Tok.specificType
+      n <- Tok.specificType <|> Tok.stringLiteral
       i <- MS.getId
       ns <- some unambiguous'
       return $ MR.makeTopRDF i (
@@ -296,7 +300,7 @@ mtype =
     specific1 :: MS.Parser MR.TopRDF
     specific1 = do
       l <- Tok.tag Tok.specificType
-      n <- Tok.specificType
+      n <- Tok.specificType <|> Tok.stringLiteral
       i <- MS.getId
       return $ MR.makeTopRDF i (
              [ MR.mtriple i PType OAtomicType
@@ -639,7 +643,7 @@ unaryOp :: MT.Text -> MR.Node -> MR.TopRDF -> MR.TopRDF
 unaryOp s i (MR.TopRDF j xs) = MR.makeTopRDF i (
      [ MR.mtriple i PType OUnaryOp
      , MR.mtriple i PValue s
-     , MR.mtriple i (PElem 0) j
+     , MR.mtriple i PElem j -- TODO: every element SHOULD have an order
      ] ++ (MR.triplesOf xs)
   )
 

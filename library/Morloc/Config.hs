@@ -75,6 +75,7 @@ getPoolCallBuilder
   -> (Doc -> Doc) -- ^ a function for quoting a string
   -> Maybe (Doc -> Doc -> [Doc])
 getPoolCallBuilder _ CLang       q = Just $ (\n i -> [ q ("./" <> n), q i])
+getPoolCallBuilder _ CppLang     q = Just $ (\n i -> [ q ("./" <> n), q i])
 getPoolCallBuilder c RLang       q = Just $ makeCmdPoolCall q (configLangR c)
 getPoolCallBuilder c Python3Lang q = Just $ makeCmdPoolCall q (configLangPython3 c)
 getPoolCallBuilder c PerlLang    q = Just $ makeCmdPoolCall q (configLangPerl c)

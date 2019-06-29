@@ -21,7 +21,6 @@ import Morloc.Operators
 import Morloc.Sparql
 import qualified Morloc.Language as ML
 import qualified Morloc.Util as MU
-import qualified Morloc.Component.MType as MCM 
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
@@ -37,10 +36,9 @@ type SerialData =
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Lang -> db -> MorlocMonad SerialMap
-fromSparqlDb lang db = do
+  => Lang -> (Map.Map Key MType) -> db -> MorlocMonad SerialMap
+fromSparqlDb lang typemap db = do
   let l = ML.showLangName lang
-  typemap <- MCM.fromSparqlDb db
   serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
   toSerialMap typemap serialData >>= MM.logFile ("serialMap-" <> MT.unpack l <> ".txt")
   where
@@ -106,7 +104,9 @@ hsparql langStr = do
   unpackerInput_ <- var
   scriptId_      <- var
   element_       <- var
+  e1_            <- var
   modulePath_    <- var
+  m_ <- var
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
@@ -125,17 +125,21 @@ hsparql langStr = do
         filterExpr (property_ .==. ("packs" :: MT.Text))
         triple_ propertyId_ PValue property_
         triple_ output_ PType OAtomicType
-        triple_ output_ PValue ("JSON" :: MT.Text)
-        triple_ rhs_ (PElem 0) packerInput_
+        -- triple_ output_ PValue ("JSON" :: MT.Text)
+        triple_ rhs_ PElem e1_
+        triple_ e1_ PPosition (asRdfNode (1 :: Integer))
+        triple_ e1_ PValue packerInput_
         triple_ packerInput_ PType basetype_
         filterExpr (basetype_ .!=. OType)
     )
     ( do
         filterExpr (property_ .==. ("unpacks" :: MT.Text))
         triple_ propertyId_ PValue property_
-        triple_ rhs_ (PElem 0) unpackerInput_
+        triple_ rhs_ PElem e1_
+        triple_ e1_ PPosition (asRdfNode (1 :: Integer))
+        triple_ e1_ PValue unpackerInput_
         triple_ unpackerInput_ PType OAtomicType
-        triple_ unpackerInput_ PValue ("JSON" :: MT.Text)
+        -- triple_ unpackerInput_ PValue ("JSON" :: MT.Text)
         triple_ output_ PType basetype_
         filterExpr (basetype_ .!=. OType)
     )
@@ -149,8 +153,10 @@ hsparql langStr = do
         triple_ importId_ PAlias name_
 
         triple_ scriptId_ PType OScript
-        triple_ scriptId_ element_ sourceId_ 
         triple_ scriptId_ PValue modulePath_
+        triple_ scriptId_ PElem m_ 
+        triple_ m_ PValue sourceId_
+
     )
 
   orderNextAsc typeId_

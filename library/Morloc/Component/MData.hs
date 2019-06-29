@@ -29,7 +29,9 @@ import qualified Data.Map.Strict as Map
 fromSparqlDb
   :: SparqlDatabaseLike db
   => db -> MorlocMonad (Map.Map Key MData)
-fromSparqlDb = MCU.simpleGraph toMData getParentData id (sparqlSelect "mdata" hsparql)
+fromSparqlDb db
+  = MCU.simpleGraph toMData getParentData id (sparqlSelect "mdata" hsparql) db
+  >>= MM.logFileWith "mdata.txt" Map.assocs
 
 getParentData :: [Maybe MT.Text] -> MorlocMonad (MT.Text, Maybe MT.Text) 
 getParentData [Just t, v] = return (t, v)
@@ -94,7 +96,8 @@ emptyMeta = MTypeMeta {
 hsparql :: Query SelectQuery
 hsparql= do
   id_      <- var
-  element_ <- var
+  m_ <- var
+  child_order_ <- var
   child_   <- var
   type_    <- var
   value_   <- var
@@ -106,22 +109,26 @@ hsparql= do
   optional_ $ triple_ id_ PValue value_
 
   optional_ $ do
-      triple_ id_ element_ child_
-      MCU.isElement_ element_
+      triple_ id_ PElem m_
+      triple_ m_ PValue child_
+      triple_ m_ PPosition child_order_
 
-  selectVars [id_, element_, child_, type_, value_]
+  orderNextAsc id_ 
+  orderNextAsc child_order_ 
+
+  selectVars [id_, child_order_, child_, type_, value_]
 
 ----- For example, with sample.loc ++ 'foo = [4,3,6]'
--- ------------------------------------------------------------------
--- | id              | element | child           | type     | value |
--- ==================================================================
--- | <sample.loc_50> |         |                 | <number> | 0.0   |
--- | <sample.loc_17> |         |                 | <number> | 0.0   |
--- | <sample.loc_32> |         |                 | <number> | 3.0   |
--- | <sample.loc_30> | <rdf_1> | <sample.loc_32> | <list>   |       |
--- | <sample.loc_30> | <rdf_0> | <sample.loc_31> | <list>   |       |
--- | <sample.loc_30> | <rdf_2> | <sample.loc_33> | <list>   |       |
--- | <sample.loc_31> |         |                 | <number> | 4.0   |
--- | <sample.loc_33> |         |                 | <number> | 6.0   |
--- | <sample.loc_51> |         |                 | <number> | 1.0   |
--- ------------------------------------------------------------------
+-- ----------------------------------------------------------------
+-- | id              | order | child           | type     | value |
+-- ================================================================
+-- | <sample.loc_30> | 0     | <sample.loc_31> | <list>   |       |
+-- | <sample.loc_30> | 1     | <sample.loc_32> | <list>   |       |
+-- | <sample.loc_30> | 2     | <sample.loc_33> | <list>   |       |
+-- | <sample.loc_17> |       |                 | <number> | 0.0   |
+-- | <sample.loc_31> |       |                 | <number> | 4.0   |
+-- | <sample.loc_32> |       |                 | <number> | 3.0   |
+-- | <sample.loc_33> |       |                 | <number> | 6.0   |
+-- | <sample.loc_50> |       |                 | <number> | 0.0   |
+-- | <sample.loc_51> |       |                 | <number> | 1.0   |
+-- ----------------------------------------------------------------

@@ -14,18 +14,37 @@ module Morloc.Module
     ModuleSource(..)
   , installModule
   , findModule
+  , loadModuleMetadata
 ) where
 
 import Morloc.Global
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
+import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import qualified Control.Monad as CM
 import qualified Data.Maybe as DM
 import Morloc.Operators
 import qualified Data.List as DL
 
+import qualified Data.Yaml.Config as YC
+import Data.Aeson (withObject, FromJSON(..), (.:?), (.!=))
+
+instance FromJSON PackageMeta where
+  parseJSON = withObject "object" $ \o ->
+    PackageMeta <$> o .:? "name"        .!= ""
+                <*> o .:? "version"     .!= ""
+                <*> o .:? "homepage"    .!= ""
+                <*> o .:? "synopsis"    .!= ""
+                <*> o .:? "description" .!= ""
+                <*> o .:? "category"    .!= ""
+                <*> o .:? "license"     .!= ""
+                <*> o .:? "author"      .!= ""
+                <*> o .:? "maintainer"  .!= ""
+                <*> o .:? "github"      .!= ""
+                <*> o .:? "bug-reports" .!= ""
+                <*> o .:? "gcc-flags"   .!= ""
 
 -- | Specify where a module is located 
 data ModuleSource
@@ -47,6 +66,29 @@ findModule moduleName = do
           <> (MT.concat $ DL.intersperse ", " allPaths)
           <> "]"
       ))
+
+-- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
+-- It currently only looks for a file named "package.yaml" in the same folder
+-- as the main "*.loc" file. 
+findModuleMetadata :: MT.Text -> IO (Maybe MT.Text)
+findModuleMetadata main_file = do
+  let meta_str = MS.combine (MS.takeDirectory main_file) "package.yaml"
+  meta_file <- getFile meta_str
+  case meta_file of
+    (Just x) -> return (Just x)
+    Nothing -> return Nothing
+
+loadModuleMetadata :: MT.Text -> MorlocMonad ()
+loadModuleMetadata main = do
+  maybef <- MM.liftIO $ findModuleMetadata main 
+  meta <- case maybef of
+    (Just f) -> MM.liftIO $ YC.loadYamlSettings [MT.unpack f] [] YC.ignoreEnv
+    Nothing -> return defaultPackageMeta
+  state <- MM.get
+  MM.put (appendMeta meta state)
+  where
+    appendMeta :: PackageMeta -> MorlocState -> MorlocState
+    appendMeta m s = s { statePackageMeta = m:(statePackageMeta s) }
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: MT.Text -> MT.Text -> [MT.Text]

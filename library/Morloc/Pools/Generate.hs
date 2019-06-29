@@ -16,6 +16,8 @@ module Morloc.Pools.Generate
 
 import Morloc.Global
 
+data Program = Program [Manifold] [SerialMap] 
+
 data Function = Function {
   functionLang :: Lang 
   -- etc
@@ -23,10 +25,9 @@ data Function = Function {
   -- etc
 }
 
-generatePools :: (SparqlDatabaseLike db) => db -> MorlocMonad [Script]
-generatePools db = do
+generatePools :: (SparqlDatabaseLike db) => db -> [Manifold] -> MorlocMonad [Script]
+generatePools db manifolds = do
   serialMaps <- getSerialMaps db
-  manifolds <- getManifolds db
   mapM (generateFunction serialMaps) manifolds >>= makeScripts 
 
 -- | get one serial map for each language

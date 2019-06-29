@@ -13,26 +13,44 @@
 
 mid:0 rdf:type mlc:script;
 	rdf:value "<stdin>";
-	rdf:_0 mid:1;
-	rdf:_1 mid:4;
-	rdf:_2 mid:7 .
+	mlc:has_member mid:0_1 .
+mid:0_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:1 .
+mid:0 mlc:has_member mid:0_2 .
+mid:0_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:4 .
+mid:0 mlc:has_member mid:0_3 .
+mid:0_3 mlc:position "3"^^xsd:integer;
+	rdf:value mid:7 .
 mid:1 rdf:type mlc:tuple, mlc:data;
-	rdf:_0 mid:2;
-	rdf:_1 mid:3 .
+	mlc:has_member mid:1_1 .
+mid:1_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:2 .
+mid:1 mlc:has_member mid:1_2 .
+mid:1_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:3 .
 mid:2 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:3 rdf:type mlc:string, mlc:data;
 	rdf:value "hi"^^xsd:string .
 mid:4 rdf:type mlc:list, mlc:data;
-	rdf:_0 mid:5;
-	rdf:_1 mid:6 .
+	mlc:has_member mid:4_1 .
+mid:4_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:5 .
+mid:4 mlc:has_member mid:4_2 .
+mid:4_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:6 .
 mid:5 rdf:type mlc:number, mlc:data;
 	rdf:value "1.0"^^xsd:decimal .
 mid:6 rdf:type mlc:number, mlc:data;
 	rdf:value "2.0"^^xsd:decimal .
 mid:7 rdf:type mlc:record, mlc:data;
-	rdf:_0 mid:8;
-	rdf:_1 mid:10 .
+	mlc:has_member mid:7_1 .
+mid:7_1 mlc:position "1"^^xsd:integer;
+	rdf:value mid:8 .
+mid:7 mlc:has_member mid:7_2 .
+mid:7_2 mlc:position "2"^^xsd:integer;
+	rdf:value mid:10 .
 mid:8 rdf:type mlc:recordEntry;
 	mlc:lhs "person";
 	mlc:rhs mid:9 .
