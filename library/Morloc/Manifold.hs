@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Manifold
 Description : Functions for dealing with Manifolds

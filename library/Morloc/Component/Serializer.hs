@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.Serializer
 Description : Build JSON packers and unpackers from a SPARQL endpoint.
@@ -96,17 +94,17 @@ hsparql langStr = do
   output_        <- var
   packerInput_   <- var
   path_          <- var
-  propertyId_    <- var
-  property_      <- var
   rhs_           <- var
   sourceId_      <- var
-  typeId_        <- var
   unpackerInput_ <- var
   scriptId_      <- var
-  element_       <- var
   e1_            <- var
   modulePath_    <- var
-  m_ <- var
+  m_             <- var
+  e_             <- var
+  property_      <- var
+  propertyId_    <- var
+  propertySetId_ <- var
 
   -- Get serialization functions of type `a -> JSON`
   triple_ id_ PType  OTypeDeclaration
@@ -115,9 +113,13 @@ hsparql langStr = do
   triple_ id_ PRight rhs_
 
   triple_ rhs_ PType OFunctionType
-  triple_ rhs_ PProperty propertyId_
+  triple_ rhs_ PProperty propertySetId_
   triple_ rhs_ POutput output_
 
+  triple_ propertySetId_ PType OProperty
+  triple_ propertySetId_ PElem e_
+  triple_ e_ PPosition (asRdfNode (1 :: Integer))
+  triple_ e_ PValue propertyId_
   triple_ propertyId_ PType OName
 
   union_
@@ -159,7 +161,6 @@ hsparql langStr = do
 
     )
 
-  orderNextAsc typeId_
   orderNextAsc property_
 
   selectVars [rhs_, property_, name_, path_, modulePath_]

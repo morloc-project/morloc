@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Data.Doc
 Description : A wrapper around Leijen's text builder

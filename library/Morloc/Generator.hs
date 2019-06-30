@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Generator
 Description : Generate code from the RDF representation of a Morloc script 

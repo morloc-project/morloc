@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Pools.Common
 Description : A common set of utility functions for language templates

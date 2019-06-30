@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.MData
 Description : Build MData objects for code generation from a SPARQL endpoint.
@@ -33,8 +31,8 @@ fromSparqlDb db
   = MCU.simpleGraph toMData getParentData id (sparqlSelect "mdata" hsparql) db
   >>= MM.logFileWith "mdata.txt" Map.assocs
 
-getParentData :: [Maybe MT.Text] -> MorlocMonad (MT.Text, Maybe MT.Text) 
-getParentData [Just t, v] = return (t, v)
+getParentData :: [[Maybe MT.Text]] -> MorlocMonad (MT.Text, Maybe MT.Text) 
+getParentData [[Just t, v]] = return (t, v)
 getParentData _ = MM.throwError . SparqlFail $ "Unexpected SPARQL result"
 
 toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MorlocMonad MData

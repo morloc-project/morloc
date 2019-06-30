@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Global
 Description : All types and datastructures
@@ -316,9 +314,11 @@ data MType
 -- TODO: add constraints
 data MTypeMeta = MTypeMeta {
       metaName :: Maybe Name
-    , metaProp :: [Name]
-    -- ^ A list of properties. Currently these are non-parameterized
-    -- properties, such as "pack" or "unpack".
+    , metaProp :: [[Name]]
+    -- ^ A list of properties. Each property is a list of names. These may be
+    -- single properties of the function (e.g., "packs") or relations
+    -- describing generic variables (e.g., "Num a", like a Haskell typeclass),
+    -- or more general logical relations. Nesting is currently not allowed.
     , metaLang :: Maybe Lang
     -- ^ The language. TODO: make Nothing mean it is a Morloc function, and
     -- "Just lang" mean it is a concrete type from the language "lang".
@@ -401,6 +401,7 @@ data GraphObject
   |  OImport                   -- ^ LHS is an import (there exists a triple: `?i PName ?j` where `i` is the LHS and `j` is a string literal for the module name)
   -- types and type declarations
   |  OType                     -- ^ LHS is a type
+  |  OProperty                 -- ^ A property of the type (contains a 0 or more ordered elements)
   |  OTypeDeclaration          -- ^ LHS is a type declaration (e.g. `Foo :: Matrix Int`)
   |  OAtomicGenericType        -- ^ LHS is an abstract type with no type parameters
   |  OAtomicType               -- ^ LHS is a concrete type with no type parameters

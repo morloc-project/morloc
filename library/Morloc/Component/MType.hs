@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.MType
 Description : Build MType objects for code generation from a SPARQL endpoint.
@@ -20,6 +18,7 @@ import Morloc.Sparql
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Data.Doc hiding ((<$>),(<>))
+import Morloc.Util as U
 import qualified Morloc.Language as ML
 import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Data.Text as MT
@@ -37,7 +36,7 @@ type ParentData =
   , Maybe Key     -- type id of the output if this is a function
   , Maybe MT.Text -- type language ("Morloc" for a general type)
   , Maybe Name    -- typename from a typeDeclaration statement
-  , [Name]        -- list of properties (e.g. "packs")
+  , [[Name]] -- But this is transformed into a property list
   )
 
 instance MShow MType where
@@ -58,10 +57,24 @@ fromSparqlDb db
       db
   >>= MM.logFileWith "mtype.txt" Map.assocs
 
-getParentData :: [Maybe MT.Text] -> MorlocMonad ParentData 
-getParentData [Just t, v, o, l, n, ps] = return $ (t, v, o, l, n, properties) where
-  properties = DF.concat . fmap (MT.splitOn ",") $ ps
-getParentData x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.show' x
+getParentData :: [[Maybe MT.Text]] -> MorlocMonad ParentData
+getParentData xss
+  = mapM tuplify xss -- [((t,a,o,l,n), Just (g,i,v))]
+  >>= U.groupSortWith groupProperties -- [((t,a,o,l,n), [[Name]])]
+  |>> map (\((t,a,o,l,n),ps) -> (t,a,o,l,n,ps)) 
+  |>> head
+  where
+    tuplify [Just t, a, o, l, n, (Just g), (Just i), (Just v)] = return ((t,a,o,l,n), Just (g,i,v))
+    tuplify [Just t, a, o, l, n, _, _, _] = return ((t,a,o,l,n), Nothing)
+    tuplify x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.show' x
+
+    groupProperties xs = case sequence xs of
+      Nothing -> return []
+      (Just xs)
+        -> fmap (map snd)
+        . U.groupSortWith (return . map snd . DLE.sort)
+        . map (\(g,i,v)->(g,(i,v)))
+        $ xs
 
 toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MorlocMonad MType
 toMType h k = toMType' (Map.lookup k h) where
@@ -78,7 +91,7 @@ toMType h k = toMType' (Map.lookup k h) where
     return $ MFuncType meta inputTypes outputType
   toMType'' _ _ _ _ _ = MM.throwError $ CallTheMonkeys "MType.hs::toMType'"
 
-  makeMeta :: Maybe MT.Text -> Maybe Name -> [Name] -> MorlocMonad MTypeMeta
+  makeMeta :: Maybe MT.Text -> Maybe Name -> [[Name]] -> MorlocMonad MTypeMeta
   makeMeta (Just langStr) n ps = case ML.readLangName langStr of
     (Just lang) ->
       return $ MTypeMeta {
@@ -115,20 +128,25 @@ makeAbstractFunctionMap
 -- | Extracts data needed to build types
 hsparql :: Query SelectQuery
 hsparql = do
-  id_         <- var
-  m_    <- var
+  id_             <- var
+  m_              <- var
   child_position_ <- var
-  child_      <- var
-  type_       <- var
-  value_      <- var
-  output_     <- var
-  lang_       <- var
-  typename_   <- var
-  property_   <- var
-  properties_ <- var
-  -- NOTE: these CANNOT be defined in the `optional_` do block
-  typedec_    <- var 
-  propertyId_ <- var
+  child_          <- var
+  type_           <- var
+  value_          <- var
+  output_         <- var
+  lang_           <- var
+  typename_       <- var
+  typedec_        <- var
+  -- variables for getting properties
+  property_           <- var
+  properties_         <- var
+  propertyId_         <- var
+  propertyIdx_        <- var
+  propertyElementIdx_ <- var
+  elementId_          <- var
+  elementName_        <- var
+  e_                  <- var
 
   -- For all types, the expression `?i rdf:type ?t` will return two objects.
   -- The first is `mlc:type`, which is common to all types. The second can be
@@ -158,10 +176,16 @@ hsparql = do
     triple_ typedec_ PLeft  typename_
     triple_ typedec_ PRight  id_
 
-  -- Extract any properties associated with a function type
-  optional_ $ do
-    triple_ id_ PProperty propertyId_
-    triple_ propertyId_ PValue property_
+    -- Extract any properties associated with a function type
+    optional_ $ do
+      triple_ id_ PType OFunctionType
+      triple_ id_ PProperty propertyId_
+      triple_ propertyId_ PType OProperty
+      triple_ propertyId_ PElem e_
+      triple_ e_ PPosition propertyElementIdx_
+      triple_ e_ PValue elementId_
+      triple_ elementId_ PType OName
+      triple_ elementId_ PValue elementName_
 
   groupBy id_
   groupBy child_position_
@@ -171,7 +195,9 @@ hsparql = do
   groupBy output_
   groupBy lang_
   groupBy typename_
-  groupBy property_
+  groupBy propertyId_
+  groupBy propertyElementIdx_
+  groupBy elementName_
 
   orderNextAsc id_ 
   orderNextAsc child_position_ 
@@ -185,77 +211,7 @@ hsparql = do
     , SelectVar output_    -- The UID of the output of a function (only defined if type_ == OFunctionTyp)
     , SelectVar lang_      -- Language, "Morloc" or something else
     , SelectVar typename_  -- The name associated with a type declaration, e.g., the "Foo" in `Foo :: i:Int {i > 5}`
-    , SelectExpr (groupConcat property_ ", ") properties_  -- a comma delimited list of properties (TODO: make this NOT a comma delimited list)
+    , SelectVar propertyId_          -- member index for a property
+    , SelectVar propertyElementIdx_  -- element index of a name within a property
+    , SelectVar elementName_       -- value of an element name
     ]
-
-{- -- for sample.loc
------------------------------------------------------------------------------------------------------------------------------------------------------------
-| id_                  | el_ | child_               | type_               | value_      | output_              | lang_    | typename_         | property_ |
-===========================================================================================================================================================
-| <rbase__main.loc_20> | 0   | <rbase__main.loc_21> | <functionType>      |             | <rbase__main.loc_22> | "R"      | "packCharacter"   | "packs"   |
-| <rbase__main.loc_21> |     |                      | <atomicType>        | "Character" |                      |          |                   |           |
-| <rbase__main.loc_22> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_25> | 0   | <rbase__main.loc_26> | <functionType>      |             | <rbase__main.loc_27> | "R"      | "packDataFrame"   | "packs"   |
-| <rbase__main.loc_26> |     |                      | <atomicType>        | "DataFrame" |                      |          |                   |           |
-| <rbase__main.loc_27> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_30> | 0   | <rbase__main.loc_31> | <functionType>      |             | <rbase__main.loc_32> | "R"      | "packDataTable"   | "packs"   |
-| <rbase__main.loc_31> |     |                      | <atomicType>        | "DataTable" |                      |          |                   |           |
-| <rbase__main.loc_32> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_35> | 0   | <rbase__main.loc_36> | <functionType>      |             | <rbase__main.loc_37> | "R"      | "packList"        | "packs"   |
-| <rbase__main.loc_36> |     |                      | <atomicType>        | "List"      |                      |          |                   |           |
-| <rbase__main.loc_37> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_40> | 0   | <rbase__main.loc_41> | <functionType>      |             | <rbase__main.loc_42> | "R"      | "packLogical"     | "packs"   |
-| <rbase__main.loc_41> |     |                      | <atomicType>        | "Logical"   |                      |          |                   |           |
-| <rbase__main.loc_42> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_45> | 0   | <rbase__main.loc_46> | <functionType>      |             | <rbase__main.loc_47> | "R"      | "packMatrix"      | "packs"   |
-| <rbase__main.loc_46> |     |                      | <atomicType>        | "Matrix"    |                      |          |                   |           |
-| <rbase__main.loc_47> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_50> | 0   | <rbase__main.loc_51> | <functionType>      |             | <rbase__main.loc_52> | "R"      | "packNumeric"     | "packs"   |
-| <rbase__main.loc_51> |     |                      | <atomicType>        | "Numeric"   |                      |          |                   |           |
-| <rbase__main.loc_52> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_55> | 0   | <rbase__main.loc_56> | <functionType>      |             | <rbase__main.loc_57> | "R"      | "packGeneric"     | "packs"   |
-| <rbase__main.loc_56> |     |                      | <atomicGeneric>     | "a"         |                      |          |                   |           |
-| <rbase__main.loc_57> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_60> | 0   | <rbase__main.loc_61> | <functionType>      |             | <rbase__main.loc_62> | "R"      | "unpackGeneric"   | "unpacks" |
-| <rbase__main.loc_61> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_62> |     |                      | <atomicGeneric>     | "a"         |                      |          |                   |           |
-| <rbase__main.loc_65> | 0   | <rbase__main.loc_66> | <functionType>      |             | <rbase__main.loc_67> | "R"      | "unpackCharacter" | "unpacks" |
-| <rbase__main.loc_66> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_67> |     |                      | <atomicType>        | "Character" |                      |          |                   |           |
-| <rbase__main.loc_70> | 0   | <rbase__main.loc_71> | <functionType>      |             | <rbase__main.loc_72> | "R"      | "unpackDataFrame" | "unpacks" |
-| <rbase__main.loc_71> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_72> |     |                      | <atomicType>        | "DataFrame" |                      |          |                   |           |
-| <rbase__main.loc_75> | 0   | <rbase__main.loc_76> | <functionType>      |             | <rbase__main.loc_77> | "R"      | "unpackDataTable" | "unpacks" |
-| <rbase__main.loc_76> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_77> |     |                      | <atomicType>        | "DataTable" |                      |          |                   |           |
-| <rbase__main.loc_80> | 0   | <rbase__main.loc_81> | <functionType>      |             | <rbase__main.loc_82> | "R"      | "unpackList"      | "unpacks" |
-| <rbase__main.loc_81> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_82> |     |                      | <atomicType>        | "List"      |                      |          |                   |           |
-| <rbase__main.loc_85> | 0   | <rbase__main.loc_86> | <functionType>      |             | <rbase__main.loc_87> | "R"      | "unpackLogical"   | "unpacks" |
-| <rbase__main.loc_86> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_87> |     |                      | <atomicType>        | "Logical"   |                      |          |                   |           |
-| <rbase__main.loc_90> | 0   | <rbase__main.loc_91> | <functionType>      |             | <rbase__main.loc_92> | "R"      | "unpackMatrix"    | "unpacks" |
-| <rbase__main.loc_91> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_92> |     |                      | <atomicType>        | "Matrix"    |                      |          |                   |           |
-| <rbase__main.loc_95> | 0   | <rbase__main.loc_96> | <functionType>      |             | <rbase__main.loc_97> | "R"      | "unpackNumeric"   | "unpacks" |
-| <rbase__main.loc_96> |     |                      | <atomicType>        | "JSON"      |                      |          |                   |           |
-| <rbase__main.loc_97> |     |                      | <atomicType>        | "Numeric"   |                      |          |                   |           |
-| <sample.loc_10>      |     |                      | <atomicType>        | "Int"       |                      |          |                   |           |
-| <sample.loc_11>      |     |                      | <atomicType>        | "Num"       |                      |          |                   |           |
-| <sample.loc_12>      |     |                      | <atomicType>        | "Num"       |                      |          |                   |           |
-| <sample.loc_13>      | 0   | <sample.loc_14>      | <parameterizedType> | "List"      |                      |          |                   |           |
-| <sample.loc_14>      |     |                      | <atomicType>        | "Num"       |                      |          |                   |           |
-| <sample.loc_30>      | 0   | <sample.loc_31>      | <functionType>      |             | <sample.loc_33>      | "Morloc" | "ceiling"         |           |
-| <sample.loc_31>      | 0   | <sample.loc_32>      | <parameterizedType> | "List"      |                      |          |                   |           |
-| <sample.loc_32>      |     |                      | <atomicType>        | "Num"       |                      |          |                   |           |
-| <sample.loc_33>      | 0   | <sample.loc_34>      | <parameterizedType> | "List"      |                      |          |                   |           |
-| <sample.loc_34>      |     |                      | <atomicType>        | "Int"       |                      |          |                   |           |
-| <sample.loc_36>      | 0   | <sample.loc_37>      | <functionType>      |             | <sample.loc_38>      | "Morloc" | "rand"            |           |
-| <sample.loc_37>      |     |                      | <atomicType>        | "Int"       |                      |          |                   |           |
-| <sample.loc_38>      | 0   | <sample.loc_39>      | <parameterizedType> | "List"      |                      |          |                   |           |
-| <sample.loc_39>      |     |                      | <atomicType>        | "Num"       |                      |          |                   |           |
-| <sample.loc_9>       | 0   | <sample.loc_10>      | <functionType>      |             | <sample.loc_13>      | "Morloc" | "rand_uniform"    |           |
-| <sample.loc_9>       | 1   | <sample.loc_11>      | <functionType>      |             | <sample.loc_13>      | "Morloc" | "rand_uniform"    |           |
-| <sample.loc_9>       | 2   | <sample.loc_12>      | <functionType>      |             | <sample.loc_13>      | "Morloc" | "rand_uniform"    |           |
----------------------------------------------------------------------------------------------------------------------------------------------------------------
--}

@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.Declaration
 Description : Map morloc names to morloc composition declarations

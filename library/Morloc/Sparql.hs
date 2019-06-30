@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 
 {-|
 Module      : Morloc.Sparql

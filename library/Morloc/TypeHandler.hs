@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : TypeHandler
 Description : Functions for handling general Morloc type operations

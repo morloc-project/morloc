@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.Util
 Description : Utility functions for components
@@ -14,11 +12,12 @@ module Morloc.Component.Util (
   , graphify
 ) where
 
+import Morloc.Operators
 import Morloc.Global
 import Morloc.Sparql
+import Morloc.Util as U
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
 import qualified Data.List as DL
@@ -26,25 +25,26 @@ import qualified Data.List.Extra as DLE
 
 -- | This works for building a map based off a simple tree structure
 simpleGraph
-  :: (Ord key, Ord a)
+  :: (Ord key, Ord a, Ord b, Show key, Show a) -- needed only for debug messages
   => (    Map.Map key (a, [key])
        -> key
        -> MorlocMonad b
      )
-  -> ([Maybe MT.Text] -> MorlocMonad a) -- ^ using input text (e.g., from a SPARQL query) get data
+  -> ([[Maybe MT.Text]] -> MorlocMonad a)
+  -- ^ Given a list of data associated with a parent entry, create a data object.
+  -- This function is used for aggregation
   -> (MT.Text -> key) -- ^ transform a text field into a key
   -> (db -> MorlocMonad [[Maybe MT.Text]]) -- ^ query a database
   -> db -- ^ the database
   -> MorlocMonad (Map.Map key b) -- ^ return a flat map
-simpleGraph f g h query d = query d >>= mapM tuplify >>= graphify f
+simpleGraph f g h q d = q d >>= mapM divide >>= U.groupSortWith g |>> map grp >>= graphify f
   where
-    tuplify xs = case (take 3 xs, drop 3 xs) of
-      ([Just mid, el, child], rs) -> do
-        a1 <- g rs                            -- a
-        let k1 = h mid                        -- key
-        let y = (,) <$> el <*> (fmap h child) -- Maybe (Text, [key])
-        return ((k1, a1), y)                  -- ((key, a), Maybe (Text, [key]))
+    divide xs = case (take 3 xs, drop 3 xs) of
+      ([Just mid, el, child], rs) -> return ((h mid, el, fmap h child), rs)
       _ -> MM.throwError $ SparqlFail "Unexpected SPARQL output"
+
+    grp ((pkey, Just el, Just ckey), a) = ((pkey, a), Just (el, ckey)) 
+    grp ((pkey, _, _), a) = ((pkey, a), Nothing) 
 
 -- | Build a map of objects from a tree-like structure with parent keys
 -- mapping to one or more ordered child ids.
@@ -68,6 +68,6 @@ graphify f xs = do
       $ xs
 
     roots = [p | ((p,_),_) <- xs, not (elem p [c | (_, Just (_,c)) <- xs])]
-  
-withSnd :: (a -> b) -> (c, a) -> (c , b)
+
+withSnd :: (a -> b) -> (c, a) -> (c, b)
 withSnd f (x, y) = (x, f y)

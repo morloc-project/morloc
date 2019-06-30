@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Module
 Description : Parses a Morloc script into RDF
@@ -208,7 +206,7 @@ typeDeclaration = do
   lhs <- Tok.name
   langStr <- option (ML.showLangName MorlocLang) Tok.name
   Tok.op "::"
-  properties <- option [] (try $ sepBy1 tripleName Tok.comma <* Tok.op "=>")
+  properties <- option [] (try $ typeProperties <* Tok.op "=>")
   rhs <- mtype
   constraints <- option [] (
       Tok.reserved "where" >>
@@ -226,6 +224,23 @@ typeDeclaration = do
           ++ MR.adoptAs PConstraint (MR.rdfId rhs) constraints
         )
     Nothing -> fail ("Encountered unknown language: '" ++ MT.unpack langStr ++ "'")
+
+typeProperties :: MS.Parser [MR.TopRDF]
+typeProperties =
+      try (Tok.parens typeProperties)
+  <|> try (sepBy1 typeProperty Tok.comma)
+
+typeProperty :: MS.Parser MR.TopRDF
+typeProperty = do
+  i <- MS.getId
+  ps <- property
+  return $ MR.makeTopRDF i (
+      [ MR.mtriple i PType OProperty ]
+      ++ MR.adopt i ps 
+    )
+
+property :: MS.Parser [MR.TopRDF]
+property = many tripleName
 
 
 listTag :: MR.Node -> Maybe MT.Text -> [MR.Triple]

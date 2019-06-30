@@ -20,9 +20,11 @@ module Morloc.Util
   , zipWithOrDie
   , shareAttr
   , spreadAttr
+  , groupSortWith
 ) where
 
 import qualified Data.List as DL
+import qualified Data.List.Extra as DLE
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 
@@ -53,6 +55,9 @@ either2bool (Right _) = True
 maybeOne :: [a] -> Maybe a
 maybeOne [x] = Just x
 maybeOne _  = Nothing
+
+groupSortWith :: (Monad m, Ord c) => ([a] -> m b) -> [(c, a)] -> m [(c, b)]
+groupSortWith f = mapM (\(x,xs) -> (,) <$> pure x <*> f xs) . DLE.groupSort
 
 zipWithOrDie :: (a -> b -> c) -> [a] -> [b] -> [c]
 zipWithOrDie f xs ys

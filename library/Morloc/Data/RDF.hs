@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TypeSynonymInstances, FlexibleInstances #-}
+{-# LANGUAGE TypeSynonymInstances, FlexibleInstances #-}
 
 {-|
 Module      : Morloc.Data.RDF
@@ -191,6 +191,7 @@ instance MorlocNodeLike GraphObject where
   asRdfNode OString                   = mlcPre .:. "string"
   asRdfNode OTuple                    = mlcPre .:. "tuple"
   asRdfNode OType                     = mlcPre .:. "type"
+  asRdfNode OProperty                 = mlcPre .:. "property"
   asRdfNode OTypeDeclaration          = mlcPre .:. "typeDeclaration"
   asRdfNode OUnaryOp                  = mlcPre .:. "unaryOp"
   asRdfNode OBinOp                    = mlcPre .:. "binOp"
@@ -226,6 +227,7 @@ instance MorlocNodeLike GraphObject where
     | n == ( mlcPre .:. "string"               ) = OString
     | n == ( mlcPre .:. "tuple"                ) = OTuple
     | n == ( mlcPre .:. "type"                 ) = OType
+    | n == ( mlcPre .:. "property"             ) = OProperty
     | n == ( mlcPre .:. "typeDeclaration"      ) = OTypeDeclaration
     | n == ( mlcPre .:. "unaryOp"              ) = OUnaryOp
     | n == ( mlcPre .:. "binOp"                ) = OBinOp

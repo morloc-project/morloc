@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : C

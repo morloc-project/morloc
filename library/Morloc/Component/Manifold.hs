@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Component.Manifold
 Description : Build manifolds for code generation from a SPARQL endpoint.

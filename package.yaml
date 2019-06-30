@@ -47,6 +47,8 @@ extra-deps:
 
 ghc-options:
   - -Wall
+  - -XFlexibleContexts
+  - -XOverloadedStrings
   - -Wcompat
   - -fwarn-unused-binds
   - -fwarn-unused-imports 
