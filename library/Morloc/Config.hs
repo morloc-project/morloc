@@ -113,5 +113,5 @@ makeLibSourceString (Just x) = do
   homedir <- MM.liftIO getDefaultMorlocLibrary
   let x' = case (MT.stripPrefix homedir x) of {Nothing -> x; (Just y) -> y}
   let x'' = case (MT.stripPrefix "/" x') of {Nothing -> x'; (Just y) -> y}
-  return . Just $ MT.replace "/" "__" x''
+  return . Just . MT.replace "/" "__" . MT.replace "." "_" $ x''
 makeLibSourceString Nothing = return Nothing
