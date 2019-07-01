@@ -16,22 +16,16 @@ module Morloc.Component.Manifold
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Sparql
-import qualified Morloc.System as MS
-import qualified Morloc.Util as MU
-import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.MType as CompMType
 import qualified Morloc.Component.MData as CompMData
 import qualified Morloc.Component.Call as CompCall
 import qualified Morloc.Component.Realization as CompReal
 import qualified Morloc.Component.Declaration as CompDecl
-import qualified Morloc.Component.Util as MCU 
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
 
 import qualified Data.Map.Strict as Map
-import qualified Data.List.Extra as DLE
 import qualified Data.Maybe as DM
 import qualified Safe as S
 
@@ -70,10 +64,10 @@ asManifold
   -> [Maybe MT.Text]
   -> MorlocMonad Manifold
 asManifold absfmap realmap callmap declmap revmap
-           [Just mid, Just name, Just exported]
+           [Just uri, Just name, Just exported]
   = case ( Map.lookup name absfmap
          , maybe [] id (Map.lookup name realmap)
-         , Map.lookup mid callmap
+         , Map.lookup uri callmap
          , Map.lookup name declmap
          ) of
   (abstractType, realizations, call, decl) -> do
@@ -81,11 +75,11 @@ asManifold absfmap realmap callmap declmap revmap
           = S.headMay
           . Map.elems
           . Map.map fdName
-          $ Map.filter (\m -> fdCallId m == mid) declmap
+          $ Map.filter (\m -> fdCallId m == uri) declmap
     args <- chooseArguments call decl abstractType realizations
     return $ Manifold {
         mid = 0 -- set this later
-      , mCallId = mid
+      , mCallId = uri
       , mAbstractType = abstractType
       , mRealizations = realizations
       , mMorlocName = name
@@ -93,7 +87,7 @@ asManifold absfmap realmap callmap declmap revmap
       , mCalled = DM.isJust call 
       , mDefined = DM.isJust decl
       , mComposition = composition
-      , mBoundVars = chooseBoundArguments mid declmap revmap
+      , mBoundVars = chooseBoundArguments uri declmap revmap
       , mArgs = args
       }
 asManifold _ _ _ _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
@@ -178,7 +172,7 @@ rewireExports declmap ms = map rewireExport ms
           )
         of
           -- set composition head to export status of composition
-          (Just d, True, _, _) -> m { mExported = fdExported d }
+          (Just d', True, _, _) -> m { mExported = fdExported d' }
           -- set composition export status to false (head is exported)
           (_, _, True, True) -> m { mExported = False }
           -- if something is neither, then leave it unchanged
@@ -200,8 +194,6 @@ hsparql :: Query SelectQuery
 hsparql = do
   mid_ <- var
   call_id_ <- var
-  mid2_ <- var
-  call_id2_ <- var
   morloc_name_ <- var
   is_exported_ <- var
   script_id_ <- var

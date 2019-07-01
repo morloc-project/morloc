@@ -13,10 +13,8 @@ module Morloc.Build
 ) where
 
 import Morloc.Global
-import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.System as MS
 import qualified Morloc.Language as ML
 
 import qualified System.Directory as SD

@@ -285,9 +285,7 @@ data Argument
   = ArgName Name
   -- ^ Morloc variables that are defined in scope
   | ArgCall Key
-  -- ^ A call to some manifold (within scope)
-  | ArgFunc Key [Argument]
-  -- ^ A call to a morloc function (out of scope)
+  -- ^ A call to some manifold
   | ArgData MData
   -- ^ Raw data defined in one of the Morloc internal types
   | ArgPosi Int

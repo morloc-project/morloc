@@ -13,7 +13,6 @@ import Morloc.Global
 import qualified Morloc.Language as ML
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
-import qualified Morloc.Manifold as Man
 import Morloc.Component.Manifold (fromSparqlDb)
 
 -- | Given a SPARQL endpoint, generate an executable program

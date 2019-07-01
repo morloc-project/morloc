@@ -18,13 +18,10 @@ module Morloc.Pools.Template.C
 ) where
 
 import Morloc.Global
-import Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
 import Morloc.Data.Doc hiding ((<$>))
 import Morloc.Quasi
 import Morloc.Pools.Common
-import qualified Data.Map.Strict as Map
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g wrapIncludeString

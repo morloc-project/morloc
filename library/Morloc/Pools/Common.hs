@@ -20,7 +20,6 @@ module Morloc.Pools.Common
 ) where
 
 import Morloc.Global
-import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC
@@ -102,7 +101,6 @@ data PoolMain = PoolMain {
     pmSources :: [Doc]
   , pmPoolManifolds :: [GeneralFunction]
   , pmDispatchManifold :: Doc -> Doc -> Doc
-  , pmPrototypes :: [Doc] -- ^ a list of function prototypes, required for C/C++
 }
 
 defaultCodeGenerator

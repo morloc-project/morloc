@@ -19,7 +19,6 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.System as MS
 import qualified Data.Maybe as DM
 import qualified Control.Monad as CM
 

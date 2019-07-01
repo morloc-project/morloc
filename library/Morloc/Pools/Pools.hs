@@ -14,10 +14,8 @@ module Morloc.Pools.Pools
 
 import Morloc.Global
 import Morloc.Operators
-import Morloc.Sparql
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 import qualified Morloc.Pools.Template.C as C
@@ -26,7 +24,6 @@ import qualified Morloc.Component.Serializer as Serializer
 import qualified Morloc.Component.MType as MCM 
 
 import qualified Control.Monad as CM
-import qualified Data.Maybe as DM 
 import qualified Data.List as DL
 import qualified Data.Map.Strict as Map
 

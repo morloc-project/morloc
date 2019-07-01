@@ -22,7 +22,6 @@ import Morloc.Operators hiding ((<>))
 import Morloc.Data.Doc hiding ((<$>))
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
-import qualified System.Directory as Sys 
 import qualified Morloc.System as MS
 
 import qualified Data.HashMap.Strict as H

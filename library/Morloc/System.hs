@@ -16,16 +16,12 @@ module Morloc.System
     , combine
   ) where
 
-import Morloc.Global
-import Morloc.Operators
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
 
 import qualified System.Directory as Sys 
 import qualified System.FilePath.Posix as Path
 import qualified Data.Yaml.Config as YC
 import Data.Aeson (FromJSON(..))
-import qualified Data.Char as DC
 
 combine :: MT.Text -> MT.Text -> MT.Text
 combine x y = MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)

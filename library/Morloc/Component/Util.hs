@@ -14,7 +14,6 @@ module Morloc.Component.Util (
 
 import Morloc.Operators
 import Morloc.Global
-import Morloc.Sparql
 import Morloc.Util as U
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -37,10 +36,15 @@ simpleGraph
   -> (db -> MorlocMonad [[Maybe MT.Text]]) -- ^ query a database
   -> db -- ^ the database
   -> MorlocMonad (Map.Map key b) -- ^ return a flat map
-simpleGraph f g h q d = q d >>= mapM divide >>= U.groupSortWith g |>> map grp >>= graphify f
+simpleGraph f g h q d
+  = q d
+  >>= mapM divide
+  >>= U.groupSortWith g
+  |>> map grp
+  >>= graphify f
   where
     divide xs = case (take 3 xs, drop 3 xs) of
-      ([Just mid, el, child], rs) -> return ((h mid, el, fmap h child), rs)
+      ([Just i, el, child], rs) -> return ((h i, el, fmap h child), rs)
       _ -> MM.throwError $ SparqlFail "Unexpected SPARQL output"
 
     grp ((pkey, Just el, Just ckey), a) = ((pkey, a), Just (el, ckey)) 

@@ -27,7 +27,6 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeHandler as MTH
 
 import qualified Data.Map.Strict as Map
-import qualified Data.Foldable as DF
 import qualified Data.List.Extra as DLE
 
 type ParentData =
@@ -139,10 +138,7 @@ hsparql = do
   typename_       <- var
   typedec_        <- var
   -- variables for getting properties
-  property_           <- var
-  properties_         <- var
   propertyId_         <- var
-  propertyIdx_        <- var
   propertyElementIdx_ <- var
   elementId_          <- var
   elementName_        <- var
@@ -156,7 +152,8 @@ hsparql = do
   filterExpr (type_ .!=. OType) -- /
 
   -- Get the type name, defined when type_ is OAtomicType or OParameterizedType
-  optional_ $ triple_ id_ PValue value_
+  optional_ $ do
+    triple_ id_ PValue value_
 
   -- This will run for P and F, since they have their parameters and inputs (respectively) as children
   optional_ $ do
@@ -165,7 +162,8 @@ hsparql = do
     triple_ m_ PPosition child_position_
 
   -- For F
-  optional_ $ triple_ id_ POutput output_
+  optional_ $ do
+    triple_ id_ POutput output_
 
   -- For types that are declared, for instance:
   -- CountingNumber :: i:Integer where { i >= 0 }
@@ -176,16 +174,16 @@ hsparql = do
     triple_ typedec_ PLeft  typename_
     triple_ typedec_ PRight  id_
 
-    -- Extract any properties associated with a function type
-    optional_ $ do
-      triple_ id_ PType OFunctionType
-      triple_ id_ PProperty propertyId_
-      triple_ propertyId_ PType OProperty
-      triple_ propertyId_ PElem e_
-      triple_ e_ PPosition propertyElementIdx_
-      triple_ e_ PValue elementId_
-      triple_ elementId_ PType OName
-      triple_ elementId_ PValue elementName_
+  -- Extract any properties associated with a function type
+  optional_ $ do
+    filterExpr (type_ .==. OFunctionType)
+    triple_ id_ PProperty propertyId_
+    triple_ propertyId_ PType OProperty
+    triple_ propertyId_ PElem e_
+    triple_ e_ PPosition propertyElementIdx_
+    triple_ e_ PValue elementId_
+    triple_ elementId_ PType OName
+    triple_ elementId_ PValue elementName_
 
   groupBy id_
   groupBy child_position_
