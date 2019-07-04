@@ -142,9 +142,9 @@ type ConcreteType = MType
 
 -- | Stores everything needed to build one file
 data Script = Script {
-      scriptBase :: String  -- ^ script basename (no extension)
-    , scriptLang :: Lang    -- ^ script language
-    , scriptCode :: Text    -- ^ full script source code
+      scriptBase :: !String  -- ^ script basename (no extension)
+    , scriptLang :: !Lang    -- ^ script language
+    , scriptCode :: !Text    -- ^ full script source code
     , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
   }
   deriving(Ord, Eq)
@@ -161,26 +161,26 @@ data Script = Script {
 -- version of Morloc, though it was extensively explored in the old C version,
 -- and one day I will resurrect it.
 data Manifold = Manifold {
-      mid :: Integer
+      mid :: !Integer
     -- ^ An ID uniquely identifying this manifold. Each manifold appears only
     -- once in the generated code.
-    , mCallId :: Text
+    , mCallId :: !Text
     -- ^ The RDF identifier for this manifold
     , mAbstractType :: Maybe AbstractType
     -- ^ The Morloc type for the wrapped function 
     , mRealizations :: [Realization]
     -- ^ Language specific instances for this manifold
-    , mMorlocName :: Name
+    , mMorlocName :: !Name
     -- ^ e.g., in @source "R" ("runif" as rand_uniform)@, "rand_uniform" is
     -- morloc name and "runif" is the R name
-    , mExported :: Bool
+    , mExported :: !Bool
     -- ^ If False, then it is purely a local function
     -- If True, then this manifold will be
     -- 1) callable from the nexus (if this script is the base script)
     -- 2) imported if the module is imported
-    , mCalled :: Bool
+    , mCalled :: !Bool
     -- ^ Is this function called within a Morloc composition?
-    , mDefined :: Bool
+    , mDefined :: !Bool
     -- ^ Is this a Morloc function
     , mComposition :: Maybe Name
     -- ^ The name of the declaration function. For example, in
@@ -195,13 +195,13 @@ data Manifold = Manifold {
 
 -- | Store a function declaration, e.g., (foo x y = bar (baz x) y)
 data FunctionDeclaration = FunctionDeclaration {
-    fdId :: Key
+    fdId :: !Key
   -- ^ RDF URI for the object of type DataDeclaration
-  , fdName :: Name
+  , fdName :: !Name
   -- ^ name of the funtion ("foo")
-  , fdCallId :: Key
+  , fdCallId :: !Key
   -- ^ RDF URI for the called function (URI of bar)
-  , fdExported :: Bool
+  , fdExported :: !Bool
   -- ^ Is this function exported?
   , fdArgs :: [Name]
   -- ^ list of bound arguments (["x","y"])
@@ -210,8 +210,8 @@ data FunctionDeclaration = FunctionDeclaration {
 -- | Store a single call, e.g., in (foo x y = bar (baz x) y) there would be two
 -- calls, "bar" and "baz", with 2 and 1 arguments, respectively.
 data Call = Call {
-      callId :: Key
-    , callName :: Name
+      callId :: !Key
+    , callName :: !Name
     , callArgs :: [Argument]
   } deriving(Show, Eq, Ord)
 
@@ -243,9 +243,9 @@ mSourced = getReal rSourced
 -- object, for example, performance metrics, which will be used in the
 -- selection process.
 data Realization = Realization {
-      rLang :: Lang
+      rLang :: !Lang
     -- ^ The implementation language for the concrete function.
-    , rName :: Name
+    , rName :: !Name
     -- ^ Either the source name, if specified, or the morloc name. It is the
     -- function name that will be used in the generated source code.
     , rConcreteType :: Maybe ConcreteType
@@ -267,7 +267,7 @@ data Realization = Realization {
     , rSourcePath :: Maybe Path
     -- ^ The path to the source code that contains the function in scope. The
     -- path is relative to the module path defined in mModulePath.
-    , rSourced :: Bool
+    , rSourced :: !Bool
     -- ^ True if this function read from sourced (e.g., @source "R" ("runif")@)
 } deriving(Show, Ord, Eq)
 
@@ -304,9 +304,9 @@ data MData
 
 -- | A Morloc type, may be a language specific type.
 data MType
-  = MConcType MTypeMeta Name [MType]  -- ^ A non-generic, concrete type
-  | MAbstType MTypeMeta Name [MType]  -- ^ A generic, wildcard, type
-  | MFuncType MTypeMeta [MType] MType -- ^ A function type with a list of input types and a single output type
+  = MConcType !MTypeMeta !Name [MType]  -- ^ A non-generic, concrete type
+  | MAbstType !MTypeMeta !Name [MType]  -- ^ A generic, wildcard, type
+  | MFuncType !MTypeMeta [MType] MType -- ^ A function type with a list of input types and a single output type
   deriving(Show, Eq)
 
 -- TODO: add constraints
@@ -354,7 +354,7 @@ instance Ord MTypeMeta where
       _ -> compare (l1, n2, ps1) (l2, n2, ps2)
 
 data SerialMap = SerialMap {
-      serialLang     :: Lang
+      serialLang     :: !Lang
     , serialPacker   :: Map MType Name
     , serialUnpacker :: Map MType Name
     , serialSources  :: [Path]
@@ -466,18 +466,18 @@ data MorlocError
   deriving(Eq)
 
 data PackageMeta = PackageMeta {
-    packageName        :: Text
-  , packageVersion     :: Text
-  , packageHomepage    :: Text
-  , packageSynopsis    :: Text
-  , packageDescription :: Text
-  , packageCategory    :: Text
-  , packageLicense     :: Text
-  , packageAuthor      :: Text
-  , packageMaintainer  :: Text
-  , packageGithub      :: Text
-  , packageBugReports  :: Text
-  , packageGccFlags    :: Text
+    packageName        :: !Text
+  , packageVersion     :: !Text
+  , packageHomepage    :: !Text
+  , packageSynopsis    :: !Text
+  , packageDescription :: !Text
+  , packageCategory    :: !Text
+  , packageLicense     :: !Text
+  , packageAuthor      :: !Text
+  , packageMaintainer  :: !Text
+  , packageGithub      :: !Text
+  , packageBugReports  :: !Text
+  , packageGccFlags    :: !Text
 } deriving(Show, Ord, Eq)
 
 defaultPackageMeta = PackageMeta {
@@ -497,11 +497,11 @@ defaultPackageMeta = PackageMeta {
 
 -- | Configuration object that is passed with MorlocMonad
 data Config = Config {
-    configHome :: Text
-  , configLibrary :: Text
-  , configTmpDir :: Text
-  , configLangPython3 :: Text
-  , configLangR :: Text
-  , configLangPerl :: Text
+    configHome :: !Text
+  , configLibrary :: !Text
+  , configTmpDir :: !Text
+  , configLangPython3 :: !Text
+  , configLangR :: !Text
+  , configLangPerl :: !Text
   }
   deriving(Show, Ord, Eq)

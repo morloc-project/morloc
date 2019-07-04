@@ -49,6 +49,7 @@ ghc-options:
   - -Wall
   - -XFlexibleContexts
   - -XOverloadedStrings
+  - -XBangPatterns
   - -Wcompat
   - -fwarn-unused-binds
   - -fwarn-unused-imports 
