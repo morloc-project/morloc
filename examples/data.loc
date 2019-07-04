@@ -1,3 +1,5 @@
+export roll
+
 source "R" (
     "runif"
   , "sum"

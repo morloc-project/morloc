@@ -93,12 +93,12 @@ emptyMeta = MTypeMeta {
 
 hsparql :: Query SelectQuery
 hsparql= do
-  id_      <- var
-  m_ <- var
+  id_          <- var
+  m_           <- var
   child_order_ <- var
-  child_   <- var
-  type_    <- var
-  value_   <- var
+  child_       <- var
+  type_        <- var
+  value_       <- var
 
   triple_ id_ PType OData
   triple_ id_ PType type_

@@ -185,31 +185,19 @@ hsparql = do
     triple_ elementId_ PType OName
     triple_ elementId_ PValue elementName_
 
-  groupBy id_
-  groupBy child_position_
-  groupBy child_
-  groupBy type_
-  groupBy value_
-  groupBy output_
-  groupBy lang_
-  groupBy typename_
-  groupBy propertyId_
-  groupBy propertyElementIdx_
-  groupBy elementName_
-
   orderNextAsc id_ 
   orderNextAsc child_position_ 
 
-  select
-    [ SelectVar id_        -- The UID of a OType object
-    , SelectVar child_position_ -- The argument number for things that have children
-    , SelectVar child_     -- The child ID (for F and P)
-    , SelectVar type_      -- The specialized type (OAtomicType | OFunctionType | OParameterizedType)
-    , SelectVar value_     -- The type name (e.g. "Int")
-    , SelectVar output_    -- The UID of the output of a function (only defined if type_ == OFunctionTyp)
-    , SelectVar lang_      -- Language, "Morloc" or something else
-    , SelectVar typename_  -- The name associated with a type declaration, e.g., the "Foo" in `Foo :: i:Int {i > 5}`
-    , SelectVar propertyId_          -- member index for a property
-    , SelectVar propertyElementIdx_  -- element index of a name within a property
-    , SelectVar elementName_       -- value of an element name
+  selectVars
+    [ id_                 -- The UID of a OType object
+    , child_position_     -- The argument number for things that have children
+    , child_              -- The child ID (for F and P)
+    , type_               -- The specialized type (OAtomicType | OFunctionType | OParameterizedType)
+    , value_              -- The type name (e.g. "Int")
+    , output_             -- The UID of the output of a function (only defined if type_ == OFunctionTyp)
+    , lang_               -- Language, "Morloc" or something else
+    , typename_           -- The name of type declaration ("Foo" in `Foo :: i:Int {i > 5}`)
+    , propertyId_         -- member index for a property
+    , propertyElementIdx_ -- element index of a name within a property
+    , elementName_        -- value of an element name
     ]

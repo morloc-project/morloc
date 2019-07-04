@@ -60,14 +60,12 @@ runCommand
   -> MT.Text -- system command
   -> MorlocMonad ()
 runCommand loc cmd = do
-  (_, _, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
-  exitCode <- liftIO $ SP.waitForProcess handle
-  err <- liftIO $ MT.hGetContents herr
-  liftIO . print $ "$ " <> cmd
+  liftIO . MT.putStrLn $ "$ " <> cmd
+  (exitCode, _, err) <- liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
-    SE.ExitSuccess     -> tell [err] -- log a message
-    (SE.ExitFailure _) -> throwError (SystemCallError cmd loc err)
-                          |>> (\_ -> ()) -- raise an error
+    SE.ExitSuccess -> tell [MT.pack err]
+    _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
+
 
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith
@@ -76,14 +74,11 @@ runCommandWith
   -> MT.Text -- ^ System command
   -> MorlocMonad a
 runCommandWith loc f cmd = do
-    (_, hout, herr, handle) <- liftIO $ SP.runInteractiveCommand (MT.unpack cmd)
-    exitCode <- liftIO $ SP.waitForProcess handle
-    out <- liftIO $ MT.hGetContents hout
-    err <- liftIO $ MT.hGetContents herr
-    liftIO . print $ "$ " <> cmd
-    case exitCode of
-      SE.ExitSuccess -> return $ f out
-      _ -> throwError (SystemCallError cmd loc err)
+  liftIO . MT.putStrLn $ "$ " <> cmd
+  (exitCode, out, err) <- liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
+  case exitCode of
+    SE.ExitSuccess -> return $ f (MT.pack out)
+    _ -> throwError (SystemCallError cmd loc (MT.pack err))
 
 -- | Write a object to a file in the Morloc temporary directory
 logFile :: Show a
