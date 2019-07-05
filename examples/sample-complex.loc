@@ -48,5 +48,5 @@ roll n d = ceiling (rand_uniform n 0.0 d);
 # I should add a typeclass for things with length
 len :: a -> Int;
 
-test :: Int, Int -> Int;
+test :: Int -> Int;
 test n = len (roll (pow n 2) (sum [1,2,3])); 

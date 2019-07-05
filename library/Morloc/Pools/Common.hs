@@ -42,9 +42,11 @@ data Grammar = Grammar {
     , gReturn      :: Doc -> Doc
     , gQuote       :: Doc -> Doc
     , gImport      :: Doc -> Doc -> Doc
+    ---------------------------------------------
     , gList        :: [Doc] -> Doc
     , gTuple       :: [Doc] -> Doc
     , gRecord      :: [(Doc,Doc)] -> Doc
+    ---------------------------------------------
     , gTrue        :: Doc
     , gFalse       :: Doc
     , gIndent      :: Doc -> Doc
@@ -61,6 +63,7 @@ data GeneralAssignment = GeneralAssignment {
     gaType :: Maybe Doc
   , gaName :: Doc
   , gaValue :: Doc
+  , gaArg :: Maybe Argument
 } deriving (Show)
 
 data GeneralFunction = GeneralFunction {
@@ -224,11 +227,12 @@ makeCisManifold g h cs ms m = do
 
     makeArg :: Doc -> (Maybe Doc, Maybe Doc, Argument) -> MorlocMonad Doc
     makeArg lhs (ctype, unpacker, arg) = do
-      arg <- makeArg' (unpacker, arg)
+      argDoc <- makeArg' (unpacker, arg)
       return . gAssign g $ GeneralAssignment {
             gaType = ctype
           , gaName = lhs
-          , gaValue = arg
+          , gaValue = argDoc
+          , gaArg = Just arg
         }
 
     makeArg' :: (Maybe Doc, Argument) -> MorlocMonad Doc
@@ -303,6 +307,7 @@ makeSourceManifold g h m = do
               -- TODO: remove hard-coded name
               , udFile = text' (ML.makeSourceName (gLang g) "pool")
             }))
+          , gaArg = Nothing
           }
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe Doc]

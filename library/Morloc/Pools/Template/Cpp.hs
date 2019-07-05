@@ -76,9 +76,14 @@ gSerialType' :: MType
 gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
 
 gAssign' :: GeneralAssignment -> Doc
-gAssign' ga = case gaType ga of
-  Nothing -> gaName ga <+> "=" <+> gaValue ga <> ";" 
-  (Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
+gAssign' ga = case (gaArg ga, gaType ga) of
+  -- need to call constructors
+  (Just (ArgData (Lst' xs)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (ArgData (Tup' xs)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (ArgData (Rec' _)), Just _) -> undefined
+  -- simple '=' assignment
+  (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";" 
+  (_, Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
 
 gCall' :: Doc -> [Doc] -> Doc
 gCall' f args = f <> tupled args
@@ -112,10 +117,10 @@ gImport' :: Doc -> Doc -> Doc
 gImport' _ s = "#include" <+> s 
 
 gList' :: [Doc] -> Doc
-gList' _ = undefined
+gList' xs = encloseSep "{" "}" "," xs
 
 gTuple' :: [Doc] -> Doc
-gTuple' _ = undefined
+gTuple' xs = encloseSep "{" "}" "," xs
 
 gRecord' :: [(Doc,Doc)] -> Doc
 gRecord' _ = undefined 
