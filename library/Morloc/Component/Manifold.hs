@@ -64,13 +64,14 @@ asManifold
   -> [Maybe MT.Text]
   -> MorlocMonad Manifold
 asManifold absfmap realmap callmap declmap revmap
-           [Just uri, Just name, Just exported]
+           [Just uri, Just name, Just exported, bound]
   = case ( Map.lookup name absfmap
          , maybe [] id (Map.lookup name realmap)
          , Map.lookup uri callmap
          , Map.lookup name declmap
+         , maybe False ((==) "false") bound
          ) of
-  (abstractType, realizations, call, decl) -> do
+  (abstractType, realizations, call, decl, nested) -> do
     let composition
           = S.headMay
           . Map.elems
@@ -197,19 +198,29 @@ hsparql = do
   morloc_name_ <- var
   is_exported_ <- var
   script_id_ <- var
+  bound_ <- var
 
-  union_
-    ( do
-        triple_ mid_ PType OCall
-        triple_ mid_ PValue call_id_
-        triple_ call_id_ PType OName
-        triple_ call_id_ PValue morloc_name_
-    )
-    ( do
-        triple_ mid_ PType OExport
-        triple_ mid_ PValue morloc_name_
-        triple_ script_id_ PValue mid_
-    )
+  -- The purpose of this query is to find all nodes in the AST that represent
+  -- manifolds. There are 3 cases:
+
+  -- Case 1: A function call
+  optional_ $ do
+    triple_ mid_ PType OCall
+    triple_ mid_ PValue call_id_
+    triple_ call_id_ PType OName
+    triple_ call_id_ PValue morloc_name_
+
+  -- Case 2: A function export
+  optional_ $ do
+    triple_ mid_ PType OExport
+    triple_ mid_ PValue morloc_name_
+    triple_ script_id_ PValue mid_
+
+  -- Case 3: A function passed to another function
+  optional_ $ do
+    triple_ mid_ PType OName
+    triple_ mid_ PBound bound_
+    triple_ mid_ PName morloc_name_
 
   bind (bound script_id_) is_exported_
 
@@ -217,4 +228,5 @@ hsparql = do
     [ mid_
     , morloc_name_
     , is_exported_
+    , bound_
     ]

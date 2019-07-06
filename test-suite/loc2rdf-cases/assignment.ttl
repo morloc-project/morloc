@@ -31,7 +31,8 @@ mid:3 rdf:type mlc:dataDeclaration;
 	mlc:lhs "f";
 	mlc:rhs mid:5 .
 mid:5 rdf:type mlc:name;
-	rdf:value "x" .
+	rdf:value "x";
+	mlc:is_bound "true"^^xsd:boolean .
 mid:3 mlc:has_member mid:3_1 .
 mid:3_1 mlc:position "1"^^xsd:integer;
 	rdf:value mid:4 .
@@ -43,7 +44,8 @@ mid:6 rdf:type mlc:dataDeclaration;
 mid:7 rdf:type mlc:call;
 	rdf:value mid:8 .
 mid:8 rdf:type mlc:name;
-	rdf:value "f" .
+	rdf:value "f";
+	mlc:is_bound "false"^^xsd:boolean .
 mid:7 mlc:has_member mid:7_1 .
 mid:7_1 mlc:position "1"^^xsd:integer;
 	rdf:value mid:9 .

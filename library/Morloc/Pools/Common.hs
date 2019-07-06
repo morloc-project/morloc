@@ -251,6 +251,7 @@ makeCisManifold g h cs ms m = do
     useUnpacker g' (ArgCall k)  _  = fmap mLang (lookupKey ms k) /= Just (gLang g')
     useUnpacker _  (ArgData _)  _  = False
     useUnpacker _  (ArgPosi _)  _  = True
+    -- useUnpacker _  (ArgNest _)  _  = False
 
     unpack' :: Doc -> Doc -> MorlocMonad Doc
     unpack' p x = do
@@ -328,6 +329,7 @@ writeArgument :: Grammar -> [Manifold] -> [MT.Text] -> Argument -> MorlocMonad D
 writeArgument _ _  _  (ArgName n) = return $ text' n
 writeArgument g _  _  (ArgData d) = return $ writeData g d
 writeArgument _ _  _  (ArgPosi i) = return $ "x" <> int i
+-- writeArgument _ _  _  (ArgNest n) = return $ text' n
 writeArgument g ms xs (ArgCall k) = do
   m <- case lookupKey ms k of
     (Just m') -> return m'

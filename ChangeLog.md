@@ -1,5 +1,9 @@
 0.17.5 [xxx]
 
+ * Allow properties to contain multiple terms 
+ * C++ handling for list and tuple morloc types
+ * Greatly simplify internal SPARQL calls
+
  [ ] Add a full test suite
  [ ] Choose function implementations to minimize foreign calls
  [ ] Allow parameterized type properties

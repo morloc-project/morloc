@@ -15,6 +15,8 @@ module Morloc.State
   , getId
   , getSourceUri
   , getModulePath
+  , isBound
+  , setBoundVariables
 ) where
 
 import qualified Morloc.Data.RDF as R
@@ -24,8 +26,6 @@ import Text.Megaparsec
 import qualified Control.Monad.State as CMS
 import Data.Void
 
-
-
 -- | A stateful Parser stores an integer that is used to generate URIs
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
@@ -34,6 +34,7 @@ data ParserState = ParserState {
     stateCount :: Int 
   , stateSourceUri :: Maybe MT.Text
   , stateModulePath :: Maybe MT.Text
+  , stateBoundVariables :: [MT.Text]
 }
 
 -- | The empty parser state, with the ID initialized to 0
@@ -42,7 +43,16 @@ parserStateEmpty = ParserState {
     stateCount  = 0
   , stateSourceUri = Nothing
   , stateModulePath = Nothing
+  , stateBoundVariables = []
 }
+
+isBound :: MT.Text -> Parser Bool
+isBound x = fmap (elem x) (CMS.gets stateBoundVariables)
+
+setBoundVariables :: [MT.Text] -> Parser ()
+setBoundVariables xs = do
+  s <- CMS.get
+  CMS.put (s {stateBoundVariables = xs})
 
 -- | Get an RDF URI and increment the internal counter
 getId :: Parser R.Node

@@ -381,6 +381,7 @@ data GraphPredicate
   | PRight      -- ^ Link something to its right-hand-side element
   | PType       -- ^ Link something to its type (rdf:type)
   | PValue      -- ^ Link something to
+  | PBound      -- ^ The call is bound
   | PKey        -- ^ Link something to a key
   | PNot        -- ^ Negate an expressoin
   | PName       -- ^ Link something to a Morloc name

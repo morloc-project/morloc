@@ -26,6 +26,8 @@ import qualified Morloc.Lexer as Tok
 import qualified Morloc.Module as Mod
 import Morloc.Operators
 
+import Debug.Trace (trace)
+
 -- | Parse a Morloc source file into an AST stored as an RDF, recursively parse
 -- all imported Morloc files. Catch lexical syntax errors.
 parse
@@ -189,6 +191,7 @@ dataDeclaration = do
   i <- MS.getId
   lhs <- Tok.name
   bndvars <- many tripleName
+  MS.setBoundVariables (hackahack bndvars)
   Tok.op "="
   rhs <- expression
   return $ MR.makeTopRDF i (
@@ -198,6 +201,10 @@ dataDeclaration = do
       ++ MR.adoptAs PRight i [rhs]
       ++ MR.adopt i bndvars
     )
+
+hackahack :: [MR.TopRDF] -> [Name] 
+hackahack xs = concat (map hack' xs) where
+  hack' (MR.TopRDF i rdf) = MR.down rdf PValue i >>= MR.valueOf
 
 -- | function :: [input] -> output constraints
 typeDeclaration :: MS.Parser MR.TopRDF
@@ -486,12 +493,12 @@ expression =
           try application -- must go first to allow, e.g. `(g . f) x`
       <|> try (Tok.parens expression)
       <|> try mdata
-      <|> try tripleName
+      <|> try declarationIdentifier 
 
 application :: MS.Parser MR.TopRDF
 application = do
   i <- MS.getId
-  function <- Tok.parens expression <|> identifier'
+  function <- Tok.parens expression <|> declarationIdentifier
   arguments <- some term'
   return $ MR.makeTopRDF i (
          [MR.mtriple i PType OCall]
@@ -501,17 +508,30 @@ application = do
   where
     term' =
           try (Tok.parens expression)
-      <|> try identifier'
+      <|> try declarationIdentifier
       <|> try mdata
 
-    identifier' = do
-      i    <- MS.getId
-      x    <- Tok.name
-      tag' <- Tok.tag Tok.name
-      return $ MR.makeTopRDF i (
-          [ MR.mtriple i PType OName
-          , MR.mtriple i PValue x
-          ] ++ listTag i tag')
+declarationIdentifier = do
+  i    <- MS.getId
+  x    <- Tok.name
+  bnd  <- MS.isBound x
+  tag' <- Tok.tag Tok.name
+
+  return $ MR.makeTopRDF i (
+      [ MR.mtriple i PType OName
+      , MR.mtriple i PValue x
+      , MR.mtriple i PBound bnd
+      ] ++ listTag i tag'
+    )
+
+constraintIdentifier = do
+  i    <- MS.getId
+  x    <- Tok.name
+  return $ MR.makeTopRDF i (
+      [ MR.mtriple i PType OName
+      , MR.mtriple i PValue x
+      ]
+    )
 
 booleanExpr :: MS.Parser MR.TopRDF
 booleanExpr = do
@@ -532,21 +552,13 @@ booleanExpr = do
     call' :: MS.Parser MR.TopRDF
     call' = do
       i <- MS.getId
-      f <- Tok.parens expression <|> identifier'
+      f <- Tok.parens expression <|> constraintIdentifier
       ns <- some argument'
       return $ MR.makeTopRDF i (
              [ MR.mtriple i PType OCall ]
           ++ MR.adoptAs  PValue i [f]
           ++ MR.adopt i ns
         )
-
-    identifier' :: MS.Parser MR.TopRDF
-    identifier' = do
-      i <- MS.getId
-      n <- Tok.name
-      return $ MR.makeTopRDF i
-        [ MR.mtriple i PType OName
-        , MR.mtriple i PValue n]
 
     argument' :: MS.Parser MR.TopRDF
     argument' =

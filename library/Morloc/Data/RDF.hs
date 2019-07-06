@@ -26,6 +26,8 @@ module Morloc.Data.RDF (
   , rdfPre
   , xsdPre
   -- ** RDF access
+  , down
+  , valueOf
   , getImports
   -- ** TopRDF Utilities
   , makeTopRDF
@@ -126,6 +128,7 @@ instance MorlocNodeLike Bool where
 instance MorlocNodeLike GraphPredicate where
   asRdfNode PType       = rdfPre .:. "type"
   asRdfNode PValue      = rdfPre .:. "value"
+  asRdfNode PBound      = mlcPre .:. "is_bound"
   asRdfNode PElem       = mlcPre .:. "has_member"
   asRdfNode PAlias      = mlcPre .:. "alias"
   asRdfNode PConstraint = mlcPre .:. "constraint"
@@ -146,6 +149,7 @@ instance MorlocNodeLike GraphPredicate where
   fromRdfNode n
     | n == ( rdfPre .:. "type"       ) = PType
     | n == ( rdfPre .:. "value"      ) = PValue
+    | n == ( rdfPre .:. "isBound"    ) = PBound
     | n == ( mlcPre .:. "has_member" ) = PElem
     | n == ( mlcPre .:. "alias"      ) = PAlias
     | n == ( mlcPre .:. "constraint" ) = PConstraint
@@ -344,22 +348,28 @@ valueOf (DR.LNode (DR.PlainLL s _)) = [s]
 valueOf _ = []
 
 -- Down :: Subject -> [Object]
-down :: DR.Rdf a
-  => DR.RDF a
-  -> DR.Predicate
-  -> DR.Subject    -- (Dr.Subject -> [Dr.Object]) is the monadic
-  -> [DR.Object]   -- chain function, allows searching in parallel
-down rdf p' s' = DR.query rdf (Just s') (Just p') Nothing |>> DR.objectOf
+down
+  :: (MorlocNodeLike p, MorlocNodeLike s)
+  => RDF
+  -> p 
+  -> s   -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Node] -- chain function, allows searching in parallel
+down rdf p' s'
+  = DR.query rdf (Just (asRdfNode s')) (Just (asRdfNode p')) Nothing
+  |>> DR.objectOf
 
-up :: DR.Rdf a
-  => DR.RDF a
-  -> DR.Predicate
-  -> DR.Object      -- (Dr.Subject -> [Dr.Object]) is the monadic
-  -> [DR.Subject]   -- chain function, allows searching in parallel
-up rdf p' o' = DR.query rdf Nothing (Just p') (Just o') |>> DR.subjectOf
+up
+  :: (MorlocNodeLike p, MorlocNodeLike o)
+  => RDF
+  -> p
+  -> o  -- (Dr.Subject -> [Dr.Object]) is the monadic
+  -> [DR.Subject] -- chain function, allows searching in parallel
+up rdf p' o'
+  = DR.query rdf Nothing (Just (asRdfNode p')) (Just (asRdfNode o'))
+  |>> DR.subjectOf
 
-getImports :: DR.Rdf a => DR.RDF a -> [MT.Text]
+getImports :: RDF -> [MT.Text]
 getImports rdf
-  =   up rdf (rdfPre .:. "type") (mlcPre .:. "import")
-  >>= down rdf (mlcPre .:. "name")
+  =   up rdf PType OImport
+  >>= down rdf OName
   >>= valueOf
