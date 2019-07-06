@@ -284,6 +284,8 @@ data ManifoldClass
 data Argument
   = ArgName Name
   -- ^ Morloc variables that are defined in scope
+  | ArgNest Name
+  -- ^ Literal name of a manifold or morloc variable
   | ArgCall Key
   -- ^ A call to some manifold
   | ArgData MData

@@ -50,7 +50,7 @@
 # Features
 
  [ ] constraint system
- [ ] add higher-order functions
+ [x] add higher-order functions
  [ ] demonstrate parameter handling
  [ ] add sum types
  [ ] allow function docstrings
@@ -78,7 +78,7 @@
 # Libraries
 
  * Extend the libraries
-   [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
+   [x] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
        This will require handling for choosing a concrete function from among
        many language-specific alternatives. In C-morloc, the user specified the
        language of each function. I want to automate the choice.

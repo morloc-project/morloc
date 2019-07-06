@@ -1,8 +1,16 @@
-import "math";
+import "rbase";
+
+source "R" ("sqrt", "sum");
 
 export rms;
 
+square :: Num -> Num;
 square x = mul x x;
+
+sqrt :: Num -> Num;
+
+sum :: [Num] -> Num;
+sum R :: "numeric" -> "numeric";
 
 rms :: [Num] -> Num;
 rms xs = sqrt (sum (map square xs));

@@ -13,6 +13,9 @@ all:
 	morloc make sample-complex.loc
 	perl nexus.pl -h
 	perl nexus.pl test 5
+	morloc make arithmetic.loc
+	perl nexus.pl -h
+	perl nexus.pl rms [1,2,3]
 
 .PHONY: clean
 clean:

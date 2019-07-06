@@ -41,6 +41,7 @@ tuplify datamap [ Just cid
                 , argData
                 , argCall
                 , argName
+                , isBound
                 ]
   =   (,)
   <$> pure (cid, morlocName)
@@ -49,6 +50,7 @@ tuplify datamap [ Just cid
       , argCall
       , argData >>= (flip Map.lookup) datamap
       , argPos >>= MT.readMay'
+      , isBound == (Just "false") 
       )
 tuplify _ row = MM.throwError $ SparqlFail ("Bad query: " <> MT.show' row) 
 
@@ -57,12 +59,14 @@ makeArgument
      , Maybe Key     -- argument callId (if it is a function call)
      , Maybe MData   -- argument data (if this is data)
      , Maybe Int     -- the element order
+     , Bool
      )
   -> MorlocMonad Argument
-makeArgument (Just x  , _       , _       , _     ) = return $ ArgName x
-makeArgument (_       , Just x  , _       , _     ) = return $ ArgCall x
-makeArgument (_       , _       , Just x  , _     ) = return $ ArgData x
-makeArgument (Nothing , Nothing , Nothing , Just x) = return $ ArgPosi x
+makeArgument (Just x  , _       , _       , _      , True) = return $ ArgNest x
+makeArgument (Just x  , _       , _       , _      , _   ) = return $ ArgName x
+makeArgument (_       , Just x  , _       , _      , _   ) = return $ ArgCall x
+makeArgument (_       , _       , Just x  , _      , _   ) = return $ ArgData x
+makeArgument (Nothing , Nothing , Nothing , Just x , _   ) = return $ ArgPosi x
 makeArgument _ = MM.throwError . InvalidRDF $ "Bad argument"
 
 toObj :: ((Key, Name), [Argument]) -> (Key, Call)
@@ -79,6 +83,7 @@ hsparql = do
   arg_data_id_ <- var
   arg_call_id_ <- var
   arg_name_ <- var
+  bound_ <- var
 
   triple_ call_id_ PType OCall
   triple_ call_id_ PValue call_value_ 
@@ -105,6 +110,7 @@ hsparql = do
     filterExpr (bound arg_id_)
     triple_ arg_id_ PType OName
     triple_ arg_id_ PValue arg_name_
+    triple_ arg_id_ PBound bound_
 
   orderNextAsc call_id_
   orderNextAsc arg_pos_ 
@@ -116,4 +122,5 @@ hsparql = do
     , arg_data_id_
     , arg_call_id_
     , arg_name_
+    , bound_
     ]

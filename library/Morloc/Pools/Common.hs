@@ -220,7 +220,7 @@ makeCisManifold g h cs ms m = do
     packersIfNeeded :: MorlocMonad ([Maybe Doc])
     packersIfNeeded
       | Man.isMorlocCall m = return $ repeat Nothing
-      | otherwise = fmap (map Just) $ Man.getUnpackers h m
+      | otherwise = Man.getUnpackers h m
 
     findComposition :: Name -> Manifold
     findComposition n = (filter (\m -> mComposition m == (Just n)) ms) !! 0
@@ -296,8 +296,8 @@ makeSourceManifold g h m = do
   where
     n = length (mArgs m)
 
-    unpack' :: Doc -> Doc -> (Maybe Doc, Doc, Argument) -> Doc -> Doc
-    unpack' name lhs (ctype, u, _) x
+    unpack' :: Doc -> Doc -> (Maybe Doc, Maybe Doc, Argument) -> Doc -> Doc
+    unpack' name lhs (ctype, (Just u), _) x
       = (gAssign g) $ GeneralAssignment {
             gaType = ctype
           , gaName = lhs
@@ -310,6 +310,7 @@ makeSourceManifold g h m = do
             }))
           , gaArg = Nothing
           }
+    unpack' name lhs (ctype, _, _) x = error "Expected unpacker"
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe Doc]
 getConcreteArgTypes g m
@@ -329,7 +330,21 @@ writeArgument :: Grammar -> [Manifold] -> [MT.Text] -> Argument -> MorlocMonad D
 writeArgument _ _  _  (ArgName n) = return $ text' n
 writeArgument g _  _  (ArgData d) = return $ writeData g d
 writeArgument _ _  _  (ArgPosi i) = return $ "x" <> int i
--- writeArgument _ _  _  (ArgNest n) = return $ text' n
+-- TODO: This currently does not handle morloc data definitions, such as:
+-- x = [1,2,3]
+-- This should compile into a literal, compile-time initilized, value. It should
+-- be given a mangled name in the generated code, and made available as needed.
+writeArgument g ms xs (ArgNest n) =
+  case
+    filter (\m -> mComposition m == Just n) ms
+  of
+    (m:_) -> return $ callIdToName g m
+    [] ->
+      case
+        filter (\m -> mMorlocName m == n && mSourced m) ms
+      of
+        (m:_) -> return $ callIdToName g m
+        [] -> MM.throwError $ GeneratorError ("Could not find unbound value '" <> n <> "'")
 writeArgument g ms xs (ArgCall k) = do
   m <- case lookupKey ms k of
     (Just m') -> return m'

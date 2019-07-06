@@ -63,7 +63,7 @@ isMorlocCall :: Manifold -> Bool
 isMorlocCall m = mDefined m && DM.isNothing (mComposition m)
 
 -- find a packer for each argument passed to a manifold
-getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Doc]
+getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Maybe Doc]
 getUnpackers hash m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
   (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
@@ -71,9 +71,9 @@ getUnpackers hash m = case mConcreteType m of
     (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
     (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
     Nothing -> MM.throwError . TypeError $
-      "Expected a function for the following manifold: " <> MT.pretty m
+      "No type signature found for this manifold: " <> MT.pretty m
   where
-    getUnpacker :: SerialMap -> MType -> MorlocMonad Doc
+    getUnpacker :: SerialMap -> MType -> MorlocMonad (Maybe Doc)
     getUnpacker smap t =
       case (MTH.findMostSpecificType
              . Map.keys
@@ -81,13 +81,8 @@ getUnpackers hash m = case mConcreteType m of
              $ (serialUnpacker smap)
            ) >>= (flip Map.lookup) (serialUnpacker smap)
       of
-        (Just x) -> return (text' x)
-        Nothing -> MM.throwError . GeneratorError
-          $  "No unpacker found - this is either a bug in the "
-          <> "morloc codebase or incomplete serialization handling "
-          <> "for the given language." <> "\n"
-          <> " - SerialMap: " <> MT.show' smap <> "\n"
-          <> " - MType: " <> MT.show' t
+        (Just x) -> return (Just $ text' x)
+        Nothing -> return Nothing
 
 -- | If a language-specific signature is given for the manifold, choose a
 -- packer that matches the language-specific output type. Otherwise, search for
