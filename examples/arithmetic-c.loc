@@ -1,0 +1,9 @@
+import "math"
+
+export rms;
+
+square :: Num -> Num;
+square x = mul x x;
+
+rms :: [Num] -> Num;
+rms xs = sqrt (sum (map square xs));

@@ -93,7 +93,7 @@ getPacker hash m = case packerType of
   (Just t) -> case Map.lookup t (serialPacker hash) of
     (Just n) -> text' n
     Nothing -> error "You should not be reading this"
-  Nothing -> error "No packer found for this type"
+  Nothing -> error (MT.unpack $ "No packer found for this type: " <> MT.pretty m)
   where
     packerType :: Maybe MType
     packerType = case cPacker of
