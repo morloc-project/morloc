@@ -29,24 +29,24 @@ fromSparqlDb
   => db -> MorlocMonad (Map.Map Name FunctionDeclaration)
 fromSparqlDb ep
   =   sparqlSelect "declaration" hsparql ep
-  >>= mapM tuplify    -- ((Name, Key, Key), Name))
-  |>> DLE.groupSort   -- ((Name, Key, Key), [Name])
+  >>= mapM tuplify    -- ((Name, URI, URI), Name))
+  |>> DLE.groupSort   -- ((Name, URI, URI), [Name])
   |>> map toObj       -- (Name, FunctionDeclaration)
   |>> DLE.groupSort   -- (Name, [FunctionDeclaration])
   |>> Map.fromList    -- Map Name [FunctionDeclaration]
   |>> Map.mapMaybe MTH.chooseDeclaration 
   >>= MM.logFile "declaration.txt"
 
-tuplify :: [Maybe MT.Text] -> MorlocMonad ((Name, Key, Key, Bool), Name)
+tuplify :: [Maybe MT.Text] -> MorlocMonad ((Name, URI, URI, Bool), Name)
 tuplify [ Just did
         , Just morlocName
         , Just cid
         , Just isExported
         , _
-        , Just argName ] = return ((morlocName, did, cid, isExported == "true"), argName)
+        , Just argName ] = return ((morlocName, URI did, URI cid, isExported == "true"), argName)
 tuplify row = MM.throwError $ SparqlFail ("Bad query: " <> MT.show' row) 
 
-toObj :: ((Name, Key, Key, Bool), [Name]) -> (Name, FunctionDeclaration)
+toObj :: ((Name, URI, URI, Bool), [Name]) -> (Name, FunctionDeclaration)
 toObj ((name, did, cid, exported), args)
   = (,) name
   $ FunctionDeclaration { fdId = did

@@ -167,7 +167,7 @@ iArgs prefix = zipWith (<>) (repeat prefix) (map int [0..])
 makePoolManifolds
   :: Grammar
   -> SerialMap
-  -> Map.Map Key Manifold
+  -> Map.Map Name Manifold
   -> [Manifold]
   -> MorlocMonad [GeneralFunction]
 makePoolManifolds g h cs ms = fmap DM.catMaybes . mapM makePoolManifold $ ms
@@ -265,7 +265,7 @@ makeCisManifold g h cs ms m = do
         }))
 
 -- O(n) lookup of a manifold given a key (e.g., from Argument).
-lookupKey :: [Manifold] -> Key -> Maybe Manifold
+lookupKey :: [Manifold] -> URI -> Maybe Manifold
 lookupKey ms k = case filter (\m -> mCallId m == k) ms of 
   [m] -> Just m
   _ -> Nothing
@@ -348,7 +348,7 @@ writeArgument g ms xs (ArgNest n) =
 writeArgument g ms xs (ArgCall k) = do
   m <- case lookupKey ms k of
     (Just m') -> return m'
-    Nothing -> MM.throwError $ CallTheMonkeys ("Could not find ArgCall key in manifold list: key=" <> k)
+    Nothing -> MM.throwError $ CallTheMonkeys ("Could not find ArgCall key in manifold list: key=" <> MT.show' k)
   c <- MM.ask
   let name = callIdToName g m
       lang = mLang m

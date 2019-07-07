@@ -25,7 +25,7 @@ import qualified Data.List.Extra as DLE
 -- | Collect most of the info needed to build all manifolds
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Map.Map Key MData -> db -> MorlocMonad (Map.Map Key Call)
+  => Map.Map URI MData -> db -> MorlocMonad (Map.Map URI Call)
 fromSparqlDb datamap ep
   =   sparqlSelect "call" hsparql ep
   >>= mapM (tuplify datamap)
@@ -34,7 +34,7 @@ fromSparqlDb datamap ep
   |>> Map.fromList
   >>= MM.logFileWith "call.txt" Map.assocs
 
-tuplify :: Map.Map Key MData -> [Maybe MT.Text] -> MorlocMonad ((Key, Name), Argument)
+tuplify :: Map.Map URI MData -> [Maybe MT.Text] -> MorlocMonad ((URI, Name), Argument)
 tuplify datamap [ Just cid
                 , Just morlocName
                 , argPos
@@ -44,11 +44,11 @@ tuplify datamap [ Just cid
                 , isBound
                 ]
   =   (,)
-  <$> pure (cid, morlocName)
+  <$> pure (URI cid, morlocName)
   <*> makeArgument (
         argName
-      , argCall
-      , argData >>= (flip Map.lookup) datamap
+      , fmap URI argCall
+      , fmap URI argData >>= (flip Map.lookup) datamap
       , argPos >>= MT.readMay'
       , isBound == (Just "false") 
       )
@@ -56,7 +56,7 @@ tuplify _ row = MM.throwError $ SparqlFail ("Bad query: " <> MT.show' row)
 
 makeArgument
   :: ( Maybe Name    -- argument name (if it is a bound argument)
-     , Maybe Key     -- argument callId (if it is a function call)
+     , Maybe URI     -- argument callId (if it is a function call)
      , Maybe MData   -- argument data (if this is data)
      , Maybe Int     -- the element order
      , Bool
@@ -69,7 +69,7 @@ makeArgument (_       , _       , Just x  , _      , _   ) = return $ ArgData x
 makeArgument (Nothing , Nothing , Nothing , Just x , _   ) = return $ ArgPosi x
 makeArgument _ = MM.throwError . InvalidRDF $ "Bad argument"
 
-toObj :: ((Key, Name), [Argument]) -> (Key, Call)
+toObj :: ((URI, Name), [Argument]) -> (URI, Call)
 toObj ((cid, name), args) = (cid, Call cid name args)
 
 hsparql :: Query SelectQuery

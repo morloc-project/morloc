@@ -23,9 +23,10 @@ module Morloc.Global (
   , Name
   , Path
   , Code
-  , Key
   , Value
   , Element
+  -- ** Newtypes
+  , URI(..)
   -- ** Language
   , Lang(..)
   -- ** Data
@@ -130,9 +131,10 @@ type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 type Name    = Text
 type Path    = Text
 type Code    = Text
-type Key     = Text
 type Value   = Text
 type Element = Text
+
+newtype URI = URI Text deriving(Show, Eq, Ord)
 
 -- | Universal Morloc type
 type AbstractType = MType
@@ -164,7 +166,7 @@ data Manifold = Manifold {
       mid :: !Integer
     -- ^ An ID uniquely identifying this manifold. Each manifold appears only
     -- once in the generated code.
-    , mCallId :: !Text
+    , mCallId :: !URI
     -- ^ The RDF identifier for this manifold
     , mAbstractType :: Maybe AbstractType
     -- ^ The Morloc type for the wrapped function 
@@ -195,11 +197,11 @@ data Manifold = Manifold {
 
 -- | Store a function declaration, e.g., (foo x y = bar (baz x) y)
 data FunctionDeclaration = FunctionDeclaration {
-    fdId :: !Key
+    fdId :: !URI
   -- ^ RDF URI for the object of type DataDeclaration
   , fdName :: !Name
   -- ^ name of the funtion ("foo")
-  , fdCallId :: !Key
+  , fdCallId :: !URI
   -- ^ RDF URI for the called function (URI of bar)
   , fdExported :: !Bool
   -- ^ Is this function exported?
@@ -210,7 +212,7 @@ data FunctionDeclaration = FunctionDeclaration {
 -- | Store a single call, e.g., in (foo x y = bar (baz x) y) there would be two
 -- calls, "bar" and "baz", with 2 and 1 arguments, respectively.
 data Call = Call {
-      callId :: !Key
+      callId :: !URI
     , callName :: !Name
     , callArgs :: [Argument]
   } deriving(Show, Eq, Ord)
@@ -286,7 +288,7 @@ data Argument
   -- ^ Morloc variables that are defined in scope
   | ArgNest Name
   -- ^ Literal name of a manifold or morloc variable
-  | ArgCall Key
+  | ArgCall URI
   -- ^ A call to some manifold
   | ArgData MData
   -- ^ Raw data defined in one of the Morloc internal types

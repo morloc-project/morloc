@@ -25,7 +25,7 @@ import qualified Morloc.Monad as MM
 import qualified Data.Map.Strict as Map
 
 type SerialData =
-  ( Key  -- type_id - 
+  ( URI  -- type_id - 
   , Name -- property - "packs" or "unpackes"
   , Name -- name
   , Path -- path
@@ -34,7 +34,7 @@ type SerialData =
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Lang -> (Map.Map Key MType) -> db -> MorlocMonad SerialMap
+  => Lang -> (Map.Map URI MType) -> db -> MorlocMonad SerialMap
 fromSparqlDb lang typemap db = do
   let l = ML.showLangName lang
   serialData <- sparqlSelect "serializer" (hsparql l) db >>= mapM tuplify
@@ -46,11 +46,11 @@ fromSparqlDb lang typemap db = do
             , Just n -- name
             , Just s -- path (e.g., "rbase.R")
             , Just m -- module path (e.g., "$HOME/.morloc/lib/rbase/main.loc")
-            ] = return (t,p,n,s,m)
+            ] = return (URI t,p,n,s,m)
     tuplify e = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.pretty e
 
     toSerialMap
-      :: Map.Map Key ConcreteType
+      :: Map.Map URI ConcreteType
       -> [SerialData]
       -> MorlocMonad SerialMap
     toSerialMap h xs

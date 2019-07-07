@@ -58,16 +58,16 @@ fromSparqlDb ep = do
 asManifold
   :: (Map.Map Name MType)  -- to mAbstractType
   -> (Map.Map Name [Realization])  -- to mRealizations
-  -> (Map.Map Key Call)
+  -> (Map.Map URI Call)
   -> (Map.Map Name FunctionDeclaration)
-  -> (Map.Map Key Key)
+  -> (Map.Map URI URI)
   -> [Maybe MT.Text]
   -> MorlocMonad Manifold
 asManifold absfmap realmap callmap declmap revmap
            [Just uri, Just name, Just exported, bound]
   = case ( Map.lookup name absfmap
          , maybe [] id (Map.lookup name realmap)
-         , Map.lookup uri callmap
+         , Map.lookup (URI uri) callmap
          , Map.lookup name declmap
          , maybe False ((==) "false") bound
          ) of
@@ -76,11 +76,11 @@ asManifold absfmap realmap callmap declmap revmap
           = S.headMay
           . Map.elems
           . Map.map fdName
-          $ Map.filter (\m -> fdCallId m == uri) declmap
+          $ Map.filter (\m -> fdCallId m == (URI uri)) declmap
     args <- chooseArguments call decl abstractType realizations
     return $ Manifold {
         mid = 0 -- set this later
-      , mCallId = uri
+      , mCallId = URI uri
       , mAbstractType = abstractType
       , mRealizations = realizations
       , mMorlocName = name
@@ -88,15 +88,15 @@ asManifold absfmap realmap callmap declmap revmap
       , mCalled = DM.isJust call 
       , mDefined = DM.isJust decl
       , mComposition = composition
-      , mBoundVars = chooseBoundArguments uri declmap revmap
+      , mBoundVars = chooseBoundArguments (URI uri) declmap revmap
       , mArgs = args
       }
 asManifold _ _ _ _ _ x = MM.throwError . SparqlFail $ "Unexpected SPARQL row:\n" <> MT.pretty x
 
 chooseBoundArguments
-  :: Key
-  -> (Map.Map Key FunctionDeclaration)
-  -> (Map.Map Key Key)
+  :: URI
+  -> (Map.Map Name FunctionDeclaration)
+  -> (Map.Map URI URI)
   -> [Name]
 chooseBoundArguments k declmap revmap
   = case filter (\d -> fdCallId d == firstCall) (Map.elems declmap) of
@@ -105,7 +105,7 @@ chooseBoundArguments k declmap revmap
     where
       firstCall = findAncestor revmap k
 
-findAncestor :: (Map.Map Key Key) -> Key -> Key
+findAncestor :: (Map.Map URI URI) -> URI -> URI
 findAncestor m k = case Map.lookup k m of
   (Just parent) -> findAncestor m parent
   Nothing -> k
@@ -113,9 +113,9 @@ findAncestor m k = case Map.lookup k m of
 -- | Reverse the call graph, creating a map from argument ID to parent call ID.
 -- This map can be used to find the top-level declaration of a particular call.
 reverseCall
-  :: (Map.Map Key Call)
+  :: (Map.Map URI Call)
   -- ^ a map from callID to Call object
-  -> (Map.Map Key Key)
+  -> (Map.Map URI URI)
   -- ^ a map from the ArgCall IDs in Call arguments back to the callID
 reverseCall
   = Map.fromList
@@ -123,7 +123,7 @@ reverseCall
   . map (\(Call k _ args) -> calls' k args)
   . Map.elems
   where
-    calls' :: Key -> [Argument] -> [(Key, Key)]
+    calls' :: URI -> [Argument] -> [(URI, URI)]
     calls' parent args' = [(child, parent) | (ArgCall child) <- args']
 
 chooseArguments
@@ -159,7 +159,7 @@ makePosi i
   | otherwise = map ArgPosi [1..i]
 
 -- | fix exports from compositions
-rewireExports :: (Map.Map Key FunctionDeclaration) -> [Manifold] -> [Manifold]
+rewireExports :: (Map.Map Name FunctionDeclaration) -> [Manifold] -> [Manifold]
 rewireExports declmap ms = map rewireExport ms
   where
     rewireExport m =

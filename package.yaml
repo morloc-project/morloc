@@ -45,11 +45,14 @@ extra-deps:
   - github: github/semantic
     commit: 38198bcf1ee25b09e2ce3fbcfc452f07892f6799
 
+default-extensions:
+  - FlexibleContexts
+  - OverloadedStrings
+  - BangPatterns
+  - GeneralizedNewtypeDeriving
+
 ghc-options:
   - -Wall
-  - -XFlexibleContexts
-  - -XOverloadedStrings
-  - -XBangPatterns
   - -Wcompat
   - -fwarn-unused-binds
   - -fwarn-unused-imports 

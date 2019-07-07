@@ -26,7 +26,7 @@ import qualified Data.Map.Strict as Map
 -- | Find all potential representations for each sourced morloc function
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => Map.Map Key MType
+  => Map.Map URI MType
   -> db
   -> MorlocMonad (Map.Map Name [Realization])
 fromSparqlDb tmap ep
@@ -35,7 +35,7 @@ fromSparqlDb tmap ep
   |>> Map.fromList . DLE.groupSort
   >>= MM.logFileWith "realizations.txt" Map.assocs
 
-realize :: Map.Map Key MType -> [Maybe MT.Text] -> MorlocMonad (Name, Realization)
+realize :: Map.Map URI MType -> [Maybe MT.Text] -> MorlocMonad (Name, Realization)
 realize
   tmap
   [ Just morlocName
@@ -49,7 +49,7 @@ realize
       return . (,) morlocName $ Realization
         { rLang         = lang
         , rName         = sourceName
-        , rConcreteType = typeID >>= ((flip Map.lookup) tmap)
+        , rConcreteType = (fmap URI typeID) >>= ((flip Map.lookup) tmap)
         , rModulePath   = modulePath
         , rSourcePath   = sourceFile
         , rSourced      = True

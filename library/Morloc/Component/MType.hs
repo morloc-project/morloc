@@ -32,7 +32,7 @@ import qualified Data.List.Extra as DLE
 type ParentData =
   ( MT.Text       -- type (e.g. mlc:functionType or mlc:atomicGeneric)
   , Maybe MT.Text -- top-level name of the type (e.g. "List" or "Int")
-  , Maybe Key     -- type id of the output if this is a function
+  , Maybe URI     -- type id of the output if this is a function
   , Maybe MT.Text -- type language ("Morloc" for a general type)
   , Maybe Name    -- typename from a typeDeclaration statement
   , [[Name]] -- But this is transformed into a property list
@@ -46,12 +46,12 @@ instance MShow MType where
   mshow (MFuncType _ ts o) = parens $
     (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
 
-fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map Key MType)
+fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map URI MType)
 fromSparqlDb db
   = MCU.simpleGraph
       toMType
       getParentData
-      id
+      URI
       (sparqlSelect "mtype" hsparql)
       db
   >>= MM.logFileWith "mtype.txt" Map.assocs
@@ -63,8 +63,8 @@ getParentData xss
   |>> map (\((t,a,o,l,n),ps) -> (t,a,o,l,n,ps)) 
   |>> head
   where
-    tuplify [Just t, a, o, l, n, (Just g), (Just i), (Just v)] = return ((t,a,o,l,n), Just (g,i,v))
-    tuplify [Just t, a, o, l, n, _, _, _] = return ((t,a,o,l,n), Nothing)
+    tuplify [Just t, a, o, l, n, (Just g), (Just i), (Just v)] = return ((t,a, fmap URI o,l,n), Just (URI g,i,v))
+    tuplify [Just t, a, o, l, n, _, _, _] = return ((t,a,fmap URI o,l,n), Nothing)
     tuplify x = MM.throwError . SparqlFail $ "Unexpected SPARQL result: " <> MT.show' x
 
     groupProperties xs = case sequence xs of
@@ -75,7 +75,7 @@ getParentData xss
         . map (\(g,i,v)->(g,(i,v)))
         $ xs
 
-toMType :: Map.Map Key (ParentData, [Key]) -> Key -> MorlocMonad MType
+toMType :: Map.Map URI (ParentData, [URI]) -> URI -> MorlocMonad MType
 toMType h k = toMType' (Map.lookup k h) where
   toMType' (Just ((t, v, o, l, n, ps), xs)) =
     makeMeta l n ps >>= toMType'' t v o xs
@@ -110,7 +110,7 @@ isGeneric x = MR.UNode x == asRdfNode OAtomicGenericType ||
               MR.UNode x == asRdfNode OParameterizedGenericType
 
 makeAbstractFunctionMap
-  :: Map.Map Key MType
+  :: Map.Map URI MType
   -> Map.Map Name MType
 makeAbstractFunctionMap
   = Map.mapMaybe MTH.chooseAbstraction -- Map Name MType

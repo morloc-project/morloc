@@ -26,18 +26,18 @@ import qualified Data.Map.Strict as Map
 
 fromSparqlDb
   :: SparqlDatabaseLike db
-  => db -> MorlocMonad (Map.Map Key MData)
+  => db -> MorlocMonad (Map.Map URI MData)
 fromSparqlDb db
-  = MCU.simpleGraph toMData getParentData id (sparqlSelect "mdata" hsparql) db
+  = MCU.simpleGraph toMData getParentData URI (sparqlSelect "mdata" hsparql) db
   >>= MM.logFileWith "mdata.txt" Map.assocs
 
 getParentData :: [[Maybe MT.Text]] -> MorlocMonad (MT.Text, Maybe MT.Text) 
 getParentData [[Just t, v]] = return (t, v)
 getParentData _ = MM.throwError . SparqlFail $ "Unexpected SPARQL result"
 
-toMData :: Map.Map Key ((MT.Text, Maybe MT.Text), [Key]) -> Key -> MorlocMonad MData
+toMData :: Map.Map URI ((MT.Text, Maybe MT.Text), [URI]) -> URI -> MorlocMonad MData
 toMData h k = toMData' (Map.lookup k h) where
-  toMData' :: (Maybe ((MT.Text, Maybe MT.Text), [Key])) -> MorlocMonad MData
+  toMData' :: (Maybe ((MT.Text, Maybe MT.Text), [URI])) -> MorlocMonad MData
   -- primitive "leaf" data
   toMData' (Just ((mtype, Just x), _))
     | mtype == MR.mlcPre <> "number"  = return $ Num' x

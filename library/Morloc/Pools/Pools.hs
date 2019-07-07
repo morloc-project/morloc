@@ -40,7 +40,7 @@ generateLang
   :: SparqlDatabaseLike db
   => db
   -> [Manifold]
-  -> (Map.Map Key MType) -- type map
+  -> (Map.Map URI MType) -- type map
   -> Lang
   -> MorlocMonad Script
 generateLang db manifolds typemap lang = do
