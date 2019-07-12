@@ -64,6 +64,6 @@ maybeValue _ = Nothing
 uploadTriples :: String -> [MR.Triple] -> IO Bool
 uploadTriples ep xs = updateQueryRaw ep (G.render' . makeSparql $ xs) where
 
-makeSparql :: [MR.Triple] -> G.Doc
+makeSparql :: [MR.Triple] -> MDoc
 makeSparql xs =  "INSERT DATA" <> G.line
-              <> G.braces (G.indent 4 $ toDoc xs)
+              <> G.braces (G.indent 4 $ G.pretty xs)

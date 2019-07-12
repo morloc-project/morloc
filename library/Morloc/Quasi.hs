@@ -4,7 +4,7 @@ module Morloc.Quasi (idoc) where
 
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
-import qualified Morloc.Data.Doc as Gen
+import qualified Morloc.Data.Doc as G
 
 import qualified Language.Haskell.Meta.Parse as MP
 
@@ -40,9 +40,9 @@ idoc = QuasiQuoter {
     compile :: String -> Q Exp
     compile txt = case parse pIs "" txt of
       Left err -> error $ show err
-      Right xs -> return $ AppE (VarE 'Gen.hcat) (ListE (map qI xs)) where
+      Right xs -> return $ AppE (VarE 'G.hcat) (ListE (map qI xs)) where
         qI :: I -> Exp
-        qI (S x) = AppE (VarE 'Gen.string) (LitE (StringL x))
+        qI (S x) = (LitE (StringL x))
         qI (V x) = case MP.parseExp x of
           (Right hask) -> hask -- a Haskell expression
           (Left err) -> error err

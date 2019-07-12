@@ -20,7 +20,7 @@ module Morloc.Manifold
 ) where
 
 import Morloc.Global
-import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Data.List as DL
@@ -30,7 +30,7 @@ import qualified Morloc.System as MS
 import qualified Morloc.TypeHandler as MTH
 
 -- | Get the paths to the sources 
-getManSrcs :: Lang -> (MT.Text -> MorlocMonad Doc) -> [Manifold] -> MorlocMonad [Doc]
+getManSrcs :: Lang -> (MT.Text -> MorlocMonad MDoc) -> [Manifold] -> MorlocMonad [MDoc]
 getManSrcs lang f ms = MM.mapM f . DL.nub . DM.mapMaybe getManSrc $ ms' where
   getManSrc :: Manifold -> Maybe MT.Text
   getManSrc m = case (mSourcePath m, mModulePath m) of
@@ -63,7 +63,7 @@ isMorlocCall :: Manifold -> Bool
 isMorlocCall m = mDefined m && DM.isNothing (mComposition m)
 
 -- find a packer for each argument passed to a manifold
-getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Maybe Doc]
+getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Maybe MDoc]
 getUnpackers hash m = case mConcreteType m of
   (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
   (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
@@ -73,7 +73,7 @@ getUnpackers hash m = case mConcreteType m of
     Nothing -> MM.throwError . TypeError $
       "No type signature found for this manifold: " <> MT.pretty m
   where
-    getUnpacker :: SerialMap -> MType -> MorlocMonad (Maybe Doc)
+    getUnpacker :: SerialMap -> MType -> MorlocMonad (Maybe MDoc)
     getUnpacker smap t =
       case (MTH.findMostSpecificType
              . Map.keys
@@ -81,17 +81,17 @@ getUnpackers hash m = case mConcreteType m of
              $ (serialUnpacker smap)
            ) >>= (flip Map.lookup) (serialUnpacker smap)
       of
-        (Just x) -> return (Just $ text' x)
+        (Just x) -> return (Just $ pretty x)
         Nothing -> return Nothing
 
 -- | If a language-specific signature is given for the manifold, choose a
 -- packer that matches the language-specific output type. Otherwise, search for
 -- a packer that matches the morloc type.
 -- TODO: make the MorlocMonad
-getPacker :: SerialMap -> Manifold -> Doc
+getPacker :: SerialMap -> Manifold -> MDoc
 getPacker hash m = case packerType of
   (Just t) -> case Map.lookup t (serialPacker hash) of
-    (Just n) -> text' n
+    (Just n) -> pretty n
     Nothing -> error "You should not be reading this"
   Nothing -> error (MT.unpack $ "No packer found for this type: " <> MT.pretty m)
   where

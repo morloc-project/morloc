@@ -19,7 +19,7 @@ module Morloc.Config (
 
 import Morloc.Global
 import Morloc.Operators hiding ((<>))
-import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
@@ -69,8 +69,8 @@ loadDefaultMorlocConfig = do
 getPoolCallBuilder
   :: Config
   -> Lang
-  -> (Doc -> Doc) -- ^ a function for quoting a string
-  -> Maybe (Doc -> Doc -> [Doc])
+  -> (MDoc -> MDoc) -- ^ a function for quoting a string
+  -> Maybe (MDoc -> MDoc -> [MDoc])
 getPoolCallBuilder _ CLang       q = Just $ (\n i -> [ q ("./" <> n), q i])
 getPoolCallBuilder _ CppLang     q = Just $ (\n i -> [ q ("./" <> n), q i])
 getPoolCallBuilder c RLang       q = Just $ makeCmdPoolCall q (configLangR c)
@@ -79,8 +79,8 @@ getPoolCallBuilder c PerlLang    q = Just $ makeCmdPoolCall q (configLangPerl c)
 getPoolCallBuilder _ MorlocLang  _ = Nothing -- FIXME: add error handling
 
 -- Build a simple pool call for an interpreted language
-makeCmdPoolCall :: (Doc -> Doc) -> MT.Text -> (Doc -> Doc -> [Doc])
-makeCmdPoolCall q prog name i = [q (text' prog), q name, q i]
+makeCmdPoolCall :: (MDoc -> MDoc) -> MT.Text -> (MDoc -> MDoc -> [MDoc])
+makeCmdPoolCall q prog name i = [q (pretty prog), q name, q i]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO MT.Text

@@ -237,19 +237,16 @@ instance MorlocNodeLike GraphObject where
     | n == ( mlcPre .:. "binOp"                ) = OBinOp
     | otherwise = error ("illegal RDF object: " ++ show n)
 
-instance DocLike DR.Triple where 
-  toDoc (DR.Triple s o p) = G.hsep [toDoc s, toDoc o, toDoc p, "."]
+instance G.Pretty DR.Triple where 
+  pretty (DR.Triple s o p) = G.hsep [G.pretty s, G.pretty o, G.pretty p, "."]
 
-instance DocLike [DR.Triple] where
-  toDoc xs = G.vsep (map toDoc xs)
-
-instance DocLike DR.Node where
-  toDoc (DR.UNode s) = G.angles (G.text' s) 
-  toDoc (DR.BNode gId) = "_:" <> G.text' gId
-  toDoc (DR.BNodeGen i) = "_:genid" <> G.int i
-  toDoc (DR.LNode (DR.PlainL lit)) = G.textEsc' lit
-  toDoc (DR.LNode (DR.PlainLL lit lang)) = G.textEsc' lit <> "@" <> G.text' lang
-  toDoc (DR.LNode (DR.TypedL lit dtype)) = G.textEsc' lit <> "^^" <> G.angles (G.text' dtype)
+instance G.Pretty DR.Node where
+  pretty (DR.UNode s) = G.angles (G.pretty s) 
+  pretty (DR.BNode gId) = "_:" <> G.pretty gId
+  pretty (DR.BNodeGen i) = "_:genid" <> G.pretty i
+  pretty (DR.LNode (DR.PlainL lit)) = G.textEsc' lit
+  pretty (DR.LNode (DR.PlainLL lit lang)) = G.textEsc' lit <> "@" <> G.pretty lang
+  pretty (DR.LNode (DR.TypedL lit dtype)) = G.textEsc' lit <> "^^" <> G.angles (G.pretty dtype)
 
 -- | Build a triple from Morloc node-like objects
 mtriple

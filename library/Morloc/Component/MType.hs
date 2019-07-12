@@ -17,7 +17,7 @@ module Morloc.Component.MType
 import Morloc.Sparql
 import Morloc.Global
 import Morloc.Operators
-import Morloc.Data.Doc hiding ((<$>),(<>))
+import Morloc.Data.Doc hiding ((<>))
 import Morloc.Util as U
 import qualified Morloc.Language as ML
 import qualified Morloc.Component.Util as MCU
@@ -38,13 +38,13 @@ type ParentData =
   , [[Name]] -- But this is transformed into a property list
   )
 
-instance MShow MType where
-  mshow (MConcType _ n []) = text' n
-  mshow (MConcType _ n ts) = parens $ hsep (text' n:(map mshow ts))
-  mshow (MAbstType _ n []) = text' n
-  mshow (MAbstType _ n ts) = parens $ hsep (text' n:(map mshow ts))
-  mshow (MFuncType _ ts o) = parens $
-    (hcat . punctuate ", ") (map mshow ts) <> " -> " <> mshow o
+instance Pretty MType where
+  pretty (MConcType _ n []) = pretty n
+  pretty (MConcType _ n ts) = parens $ hsep (pretty n:(map pretty ts))
+  pretty (MAbstType _ n []) = pretty n
+  pretty (MAbstType _ n ts) = parens $ hsep (pretty n:(map pretty ts))
+  pretty (MFuncType _ ts o) = parens $
+    (hcat . punctuate ", ") (map pretty ts) <> " -> " <> pretty o
 
 fromSparqlDb :: (SparqlDatabaseLike db) => db -> MorlocMonad (Map.Map URI MType)
 fromSparqlDb db

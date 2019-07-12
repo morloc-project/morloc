@@ -14,7 +14,7 @@ module Morloc.Nexus.Template.Perl (generate) where
 import Morloc.Global
 import Morloc.Operators
 import Morloc.Quasi
-import Morloc.Data.Doc hiding ((<$>), (<>))
+import Morloc.Data.Doc hiding ((<>))
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Config as MC
@@ -24,16 +24,16 @@ import qualified Control.Monad as CM
 
 -- | A function for building a pool call
 type PoolBuilder
-  =  Doc    -- pool name
-  -> Doc    -- pool id
-  -> [Doc]  -- output list of CLI arguments
+  =  MDoc    -- pool name
+  -> MDoc    -- pool id
+  -> [MDoc]  -- output list of CLI arguments
 
-type FData = (PoolBuilder, Doc, Int, Doc, Doc)
+type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
 
 generate :: [Manifold] -> MorlocMonad Script
 generate all_manifolds = do
   let manifolds = filter isExported all_manifolds
-      names = map (text' . getName) manifolds     -- [Doc]
+      names = map (pretty . getName) manifolds     -- [MDoc]
   fdata <- CM.mapM getFData manifolds -- [FData]
   return $ Script { scriptBase = "nexus"
                   , scriptLang = ML.PerlLang
@@ -52,14 +52,14 @@ getNArgs m
 getFData :: Manifold -> MorlocMonad FData
 getFData m = do
   config <- MM.ask
-  let mid' = text' . MT.show' $ mid m
+  let mid' = pretty . MT.show' $ mid m
       lang = mLang m
   case MC.getPoolCallBuilder config lang id of
     (Just call') -> return $
       ( call'
-      , text' (getName m)
+      , pretty (getName m)
       , getNArgs m
-      , text' (ML.makeExecutableName lang "pool")
+      , pretty (ML.makeExecutableName lang "pool")
       , mid' 
       )
     Nothing -> MM.throwError . GeneratorError $
@@ -73,7 +73,7 @@ isExported m =
   (mExported m && DM.isJust (mComposition m))
 
 
-main :: [Doc] -> [FData] -> Doc
+main :: [MDoc] -> [FData] -> MDoc
 main names fdata = [idoc|#!/usr/bin/env perl
 
 use strict;
@@ -119,6 +119,7 @@ mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
 mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
+usageT :: [FData] -> MDoc 
 usageT fdata = [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
@@ -127,12 +128,14 @@ sub usage{
 }
 |]
 
-usageLineT (_, name, nargs, _, _) = [idoc|print STDERR "  #{name} [#{int nargs}]\n";|]
+usageLineT :: FData -> MDoc 
+usageLineT (_, name, nargs, _, _) = [idoc|print STDERR "  #{name} [#{pretty nargs}]\n";|]
 
+functionT :: FData -> MDoc 
 functionT (call', name, nargs, pool, mid') = [idoc|
 sub call_#{name}{
-    if(scalar(@_) != #{int nargs}){
-        print STDERR "Expected #{int nargs} arguments to '#{name}', given " . 
+    if(scalar(@_) != #{pretty nargs}){
+        print STDERR "Expected #{pretty nargs} arguments to '#{name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
@@ -141,4 +144,5 @@ sub call_#{name}{
 |] where
   poolcall = hsep $ (call' pool mid') ++ map argT [0..(nargs-1)]
 
-argT i = [idoc|'$_[#{int i}]'|]
+argT :: Int -> MDoc
+argT i = "$_[" <> pretty i <> "]"

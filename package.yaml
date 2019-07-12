@@ -31,6 +31,7 @@ dependencies:
   - mtl
   - parsec
   - pretty-simple
+  - prettyprinter
   - process
   - rdf4h
   - safe
@@ -38,12 +39,7 @@ dependencies:
   - template-haskell
   - text
   - unordered-containers
-  - wl-pprint-text
   - yaml
-
-extra-deps:
-  - github: github/semantic
-    commit: 38198bcf1ee25b09e2ce3fbcfc452f07892f6799
 
 default-extensions:
   - FlexibleContexts

@@ -9,14 +9,13 @@ Stability   : experimental
 
 module Morloc.Global ( 
   -- ** Typeclasses
-    MShow(..)
-  , MorlocNodeLike(..)
+    MorlocNodeLike(..)
   , MorlocTypeable(..)
   , SparqlSelectLike(..)
   , SparqlDatabaseLike(..)
   , RdfLike(..)
-  , DocLike(..)
   -- ** Synonyms
+  , MDoc
   , SparqlEndPoint(..)  
   , AbstractType
   , ConcreteType
@@ -68,7 +67,7 @@ module Morloc.Global (
 import Data.Text                    (Text)
 import Data.RDF                     (Node, Triple)
 import Data.Map.Strict              (Map)
-import Text.PrettyPrint.Leijen.Text (Doc)
+import Data.Text.Prettyprint.Doc    (Doc)
 import Text.Megaparsec.Error        (ParseError)
 import Data.Void                    (Void)
 import Control.Monad.Except (ExceptT)
@@ -78,12 +77,8 @@ import Control.Monad.Writer (WriterT)
 
 import Morloc.Language (Lang(..))
 
--- | Write into Morloc code
-class MShow a where
-  mshow :: a -> Doc
-
-class DocLike a where
-  toDoc :: a -> Doc
+-- | no annotations for now
+type MDoc = Doc ()
 
 class MorlocNodeLike a where
   asRdfNode :: a -> Node

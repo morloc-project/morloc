@@ -21,7 +21,7 @@ import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Component.Util as MCU
 import qualified Morloc.Monad as MM
 
-import Morloc.Data.Doc hiding ((<$>), (<>))
+import Morloc.Data.Doc hiding ((<>))
 import qualified Data.Map.Strict as Map
 
 fromSparqlDb
@@ -53,14 +53,14 @@ toMData h k = toMData' (Map.lookup k h) where
   -- shit happens
   toMData' _ = MM.throwError . InvalidRDF $ "Unexpected type"
 
-instance MShow MData where
-  mshow (Num' x  ) = text' x
-  mshow (Str' x  ) = text' x
-  mshow (Log' x  ) = text' $ MT.pack (show x)
-  mshow (Lst' xs ) = list (map mshow xs)
-  mshow (Tup' xs ) = tupled (map mshow xs)
-  mshow (Rec' xs ) = braces $ (vsep . punctuate ", ")
-                              (map (\(k, v) -> text' k <> "=" <> mshow v) xs)
+instance Pretty MData where
+  pretty (Num' x  ) = pretty x
+  pretty (Str' x  ) = pretty x
+  pretty (Log' x  ) = pretty $ MT.pack (show x)
+  pretty (Lst' xs ) = list (map pretty xs)
+  pretty (Tup' xs ) = tupled (map pretty xs)
+  pretty (Rec' xs ) = braces $ (vsep . punctuate ", ")
+                              (map (\(k, v) -> pretty k <> "=" <> pretty v) xs)
 
 instance MorlocTypeable MData where
   asType (Num' _) = return $ MConcType emptyMeta "Number" []
