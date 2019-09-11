@@ -33,7 +33,7 @@ import Text.Megaparsec hiding (State)
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Data.Scientific as DS
-import qualified Data.Set as DS
+import qualified Data.Set as Set
 
 import Morloc.State
 
@@ -69,7 +69,7 @@ name = (lexeme . try) (p >>= check)
   where
     p       = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
     check x = if elem x reservedWords
-                then failure Nothing DS.empty -- TODO: error message
+                then failure Nothing Set.empty -- TODO: error message
                 else return x
 
 op :: MT.Text -> Parser MT.Text
