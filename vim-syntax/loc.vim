@@ -114,9 +114,16 @@ syn match s_tag /\(Author\|Email\|Github\|Bugs\|Website\|Maintainer\|Description
 " define comments
 " syn match comment '\/\/.*$' contains=tag
 " syn region comment start='\/\*' end='\*\/' contains=tag
-syn match s_comment '#.*' contains=s_todo,s_tag
+syn match s_comment '--.*' contains=s_todo,s_tag
+syn region s_comment start="{-" end="-}" contains=s_todo,s_tag
+
+" =============================================================================
+"                               E R R O R S                                    
+" -----------------------------------------------------------------------------
+syn match s_error '^#'
 
 " -----------------------------------------------------------------------------
 hi def link s_comment  Comment
 hi def link s_todo     Todo
 hi def link s_tag      SpecialComment
+hi def link s_error    Error
