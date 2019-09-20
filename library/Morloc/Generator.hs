@@ -9,16 +9,19 @@ Stability   : experimental
 
 module Morloc.Generator (generate) where
 
+import Xi
 import Morloc.Global
 import qualified Morloc.Language as ML
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
-import Morloc.Component.Manifold (fromSparqlDb)
 
--- | Given a SPARQL endpoint, generate an executable program
-generate :: SparqlDatabaseLike db => db -> MorlocMonad (Script, [Script])
-generate db = do
-  manifolds <- fromSparqlDb db
-  nexus <- MN.generate ML.PerlLang manifolds
-  pools <- MP.generate db manifolds
-  return (nexus, pools)
+generate :: [Module] -> MorlocMonad (Script, [Script])
+generate = undefined
+
+-- -- | Given a SPARQL endpoint, generate an executable program
+-- generate :: SparqlDatabaseLike db => db -> MorlocMonad (Script, [Script])
+-- generate db = do
+--   manifolds <- fromSparqlDb db
+--   nexus <- MN.generate ML.PerlLang manifolds
+--   pools <- MP.generate db manifolds
+--   return (nexus, pools)
