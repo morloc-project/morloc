@@ -1,3 +1,0 @@
-A :: (Int, String);
-B :: [Int];
-C :: {person :: String, age :: Int};

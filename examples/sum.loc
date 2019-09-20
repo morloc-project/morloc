@@ -7,14 +7,12 @@ source "R"
 
 export sum;
 export rand;
-# export runif;
 export rsum;
 
 packGeneric R :: packs => a -> "character";
 unpackGeneric R :: unpacks => "character" -> a;
 
 sum :: [Num] -> Num;
-# sum :: [Num] -> Num;
 
 runif :: Int, Num, Num -> [Num];
 

@@ -13,7 +13,7 @@ before_install:
 
 # stack will handle the installation of GHC
 script:
-  - stack --no-terminal --install-ghc test
+  - stack --no-terminal --install-ghc
 
 # Caching so the next build will be fast too.
 cache:

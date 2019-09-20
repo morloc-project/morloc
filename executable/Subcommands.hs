@@ -14,7 +14,6 @@ module Subcommands
     getConfig
   , cmdInstall
   , cmdMake
-  , cmdRdf
   , cmdRemove
 ) where
 
@@ -22,7 +21,6 @@ import Morloc.Operators
 import Morloc.Global
 import qualified Morloc as M
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
 import System.Console.Docopt
@@ -80,18 +78,4 @@ cmdRemove _ _ = do
 cmdMake :: Subcommand
 cmdMake args config = do
   (path, code) <- readScript args
-  when (isPresent args (longOption "endpoint")) $ do
-    let ep = SparqlEndPoint . MT.unpack $ getArgOrDie args (longOption "endpoint")
-    MM.runMorlocMonad config Nothing (M.writeProgram path code ep) >>= MM.writeMorlocReturn
-  when (notPresent args (longOption "endpoint")) $ do
-    let ep = MR.makeRDF []
-    MM.runMorlocMonad config Nothing (M.writeProgram path code ep) >>= MM.writeMorlocReturn
-
--- | compile a Morloc script to RDF (turtle format by default)
-cmdRdf :: Subcommand
-cmdRdf args config = do
-  (path, code) <- readScript args
-  let writer = if isPresent args (longOption "triple") 
-               then M.writeTripleTo
-               else M.writeTurtleTo
-  MM.runMorlocMonad config Nothing (writer path code "/dev/stdout") >>= MM.writeMorlocReturn
+  MM.runMorlocMonad config Nothing (M.writeProgram path code) >>= MM.writeMorlocReturn
