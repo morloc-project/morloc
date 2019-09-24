@@ -62,6 +62,7 @@ makeArgument
      , Bool
      )
   -> MorlocMonad Argument
+--            name      URI       MData     Int      is_bound
 makeArgument (Just x  , _       , _       , _      , True) = return $ ArgNest x
 makeArgument (Just x  , _       , _       , _      , _   ) = return $ ArgName x
 makeArgument (_       , Just x  , _       , _      , _   ) = return $ ArgCall x

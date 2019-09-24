@@ -42,10 +42,9 @@
 
 # typechecking
 
- [ ] Add a full Hindley-Milner type inference system, this is just one layer of
+ [x] Add a full Hindley-Milner type inference system, this is just one layer of
      the type system, but is an essential one. Eventually this can be ported
      to the rule-engine.
- [ ] 
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
  [ ] port this typechecker to Morloc
  [ ] in `TypeHandler:chooseRealization`, choose realization that minimizes

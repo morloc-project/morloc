@@ -1,0 +1,10 @@
+source "R" ("sqrt");
+
+source "R" from "minimal.R" ("packGeneric", "unpackGeneric")
+
+export sqrt
+
+packGeneric R :: packs => a -> "character";
+unpackGeneric R :: unpacks => "character" -> a;
+
+sqrt :: Num -> Num;

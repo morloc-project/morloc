@@ -173,7 +173,7 @@ data Manifold = Manifold {
     , mExported :: !Bool
     -- ^ If False, then it is purely a local function
     -- If True, then this manifold will be
-    -- 1) callable from the nexus (if this script is the base script)
+    -- 1) callable from the nexus (if this script is the top-level module)
     -- 2) imported if the module is imported
     , mCalled :: !Bool
     -- ^ Is this function called within a Morloc composition?

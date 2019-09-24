@@ -20,35 +20,32 @@ import qualified Morloc.Pools.Template.R as RLang
 import qualified Morloc.Pools.Template.Python3 as Py3
 import qualified Morloc.Pools.Template.C as C
 import qualified Morloc.Pools.Template.Cpp as Cpp
-import qualified Morloc.Component.Serializer as Serializer
-import qualified Morloc.Component.MType as MCM 
 
 import qualified Control.Monad as CM
 import qualified Data.List as DL
 import qualified Data.Map.Strict as Map
 
-generate :: SparqlDatabaseLike db => db -> [Manifold] -> MorlocMonad [Script]
-generate db manifolds = do
+generate :: [Manifold] -> Map.Map Lang SerialMap -> MorlocMonad [Script]
+generate manifolds packMaps = do
   let langs = DL.nub . map mLang $ manifolds
-  typemap <- MCM.fromSparqlDb db
-  CM.mapM (generateLang db manifolds typemap) langs 
+  CM.mapM (generateLang manifolds packMaps) langs 
 
 -- | If you want to add a new language, this is the function you currently need
 -- to modify. Add a case for the new language name, and then the function that
 -- will generate the code for a script in that language.
 generateLang
-  :: SparqlDatabaseLike db
-  => db
-  -> [Manifold]
-  -> (Map.Map URI MType) -- type map
+  :: [Manifold]
+  -> Map.Map Lang SerialMap
   -> Lang
   -> MorlocMonad Script
-generateLang db manifolds typemap lang = do
-  packMap <- Serializer.fromSparqlDb lang typemap db
-  case lang of
-    RLang       -> RLang.generate manifolds packMap
-    Python3Lang -> Py3.generate manifolds packMap
-    CLang       -> C.generate manifolds packMap
-    CppLang     -> Cpp.generate manifolds packMap
-    MorlocLang  -> MM.throwError . GeneratorError $ "Too much meta, don't generate morloc code"
-    x           -> MM.throwError . GeneratorError $ ML.showLangName x <> " is not yet supported"
+generateLang manifolds packMaps lang = case Map.lookup lang packMaps of 
+  Nothing -> MM.throwError . CallTheMonkeys $ "serial map should have been initialized for all languages"
+  (Just p) -> generateLang' manifolds p lang
+
+generateLang' :: [Manifold] -> SerialMap -> Lang -> MorlocMonad Script
+generateLang' ms p RLang = RLang.generate ms p
+generateLang' ms p Python3Lang = Py3.generate ms p
+generateLang' ms p CLang = C.generate ms p
+generateLang' ms p CppLang = Cpp.generate ms p
+generateLang' _ _ MorlocLang = MM.throwError . GeneratorError $ "Too meta, don't generate morloc code"
+generateLang' _  _ x = MM.throwError . GeneratorError $ ML.showLangName x <> " is not yet supported"
