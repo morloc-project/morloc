@@ -17,6 +17,7 @@ import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Doc as MD
 
 import Control.Monad.State (State, evalState, gets, get, put)
 import qualified Control.Monad as CM
@@ -25,8 +26,6 @@ import qualified Data.Set as Set
 import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
 import qualified Data.Maybe as DM
-
-import Debug.Trace (traceM)
 
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate mods = do
@@ -37,16 +36,19 @@ generate mods = do
   -- state monad handles scope and module attributes as well as assignment of
   -- unique integer IDs to all manifolds.
   modelState <- initProgramState mods
-  let ms = evalState (makeRootManifolds root) modelState
+  (ms, stat) <- MM.liftIO
+             . (flip MM.runStateT) modelState
+             $ fmap concat (mapM (manlyfold root) (moduleBody root))
+
   -- nexus :: Script
   -- generate the nexus script
   nexus <- MN.generate ms
   -- hss :: Map.Map Lang SerialMap
   hss <- makeSerialMaps mods
-  -- pools :: [Script]
-  pools <- MP.generate ms hss
 
-  traceM (show ms)
+  -- pools :: [Script]
+  -- pools <- MP.generate ms hss
+  pools <- return [] -- TODO: remove stub
 
   -- (Script, [Script])
   return (nexus, pools)
@@ -56,9 +58,9 @@ data Source' = Source' {
   , sourceLang :: Lang
   , sourceName :: Name
   , sourceAlias :: Name
-}
+} deriving(Show, Ord, Eq)
 
-type Program a = State ProgramState a
+type Program a = MM.StateT ProgramState IO a
 
 data ProgramState = ProgramState {
     stateCount :: Integer
@@ -68,7 +70,7 @@ data ProgramState = ProgramState {
   , stateModuleDeclarations :: Map.Map MVar (Map.Map EVar Expr)
   , stateModuleTypeSetMap :: Map.Map MVar (Map.Map EVar TypeSet)
   , stateModuleMap :: Map.Map MVar Module
-}
+} deriving(Show, Ord, Eq)
 
 initProgramState :: [Module] -> MorlocMonad ProgramState
 initProgramState mods = do
@@ -78,6 +80,7 @@ initProgramState mods = do
   -- stores all realizations and the (Maybe EType) is the general type. This
   -- information may be stored across multiple signatures and declarations.
   let typmap = makeTypeSetMap mods
+
   return $ ProgramState {
         stateCount = 0 -- counter used to create manifold IDs
       , stateModuleSources      = lmap mksrcmap mods -- \
@@ -91,7 +94,7 @@ initProgramState mods = do
     lmap f ms = Map.fromList $ map (\m -> (moduleName m, f m)) ms
 
     mksrcmap :: Module -> Map.Map EVar Source'
-    mksrcmap m = Map.unions $ map (\(SrcE x y z) -> makeSource (ML.readLangName x) y z) (moduleBody m)
+    mksrcmap m = Map.unions [makeSource (ML.readLangName x) y z | SrcE x y z <- moduleBody m]
 
     mkexpmap :: Module -> Set.Set EVar
     mkexpmap m = Set.fromList (moduleExports m)
@@ -137,47 +140,85 @@ isDeclared m e = do
   decmap <- gets stateModuleDeclarations
   imp <- lookupImport m e
   case (fmap (Map.member e) (Map.lookup m decmap), imp) of
-    (Just _, _) -> return True
-    (Nothing, Nothing) -> return False
+    -- if e is declared
+    (Just True, _) -> return True
+    -- if e is imported, search the imported module
     (Nothing, Just (m', e')) -> isDeclared m' e'
+    -- otherwise it is not declared (i.e., it must be sourced somewhere)
+    _ -> return False
 
-makeRootManifolds :: Module -> Program [Manifold]
-makeRootManifolds m = do
-  exports <- modExports (moduleName m)
-  declarations <- modDeclarations (moduleName m)
-  fmap (concat . Map.elems)
-    . Map.traverseWithKey (nexusManifolds m)
-    $ Map.restrictKeys declarations exports
+isExported :: MVar -> EVar -> Program Bool
+isExported mv ev = do
+  exportMap <- modExports mv
+  return $ Set.member ev exportMap
 
-nexusManifolds
+-- compile a declaration, for example:
+--   foo x y = bar x (baz 42 y)
+-- "foo" is the name of a lambda, not an application. "foo" can be exported
+-- from the nexus as a subcommand the user can call with arguments x and y.
+-- "bar" is the function that is called in the application "bar x (baz 42 y)".
+manlyfold
   :: Module
-  -> EVar
   -> Expr
   -> Program [Manifold]
-nexusManifolds m ev@(EV v) (AnnE e@(LamE _ _) gentype) = do
-  t <- lookupTypeSet (moduleName m) ev
+manlyfold m (Declaration ev@(EV v) (AnnE lambda@(LamE _ _) gentype)) = do
   i <- getId
-  case (uncurryExpr e, t) of
-    ((_, _, []), _) -> error $ "nexus can only accept applications in declarations: "
-                             <> show v <> " :: " <> show e
-    (_, Nothing) -> error "no signature found for this type"
-    (_, Just (TypeSet Nothing _)) -> error "no general type"
-    ((vars, f, es), Just (TypeSet (Just e) rs)) -> do
-      args <- CM.zipWithM (exprAsArgument vars m) [0..] es
-      return . (flip (:)) (concat . map snd $ args) $ Manifold
-        { mid = i
-        , mCallId = makeURI (moduleName m) i
-        , mAbstractType = Just (etype2mtype v (e {etype = gentype}))
-        , mRealizations = map (toRealization v m) rs
-        , mMorlocName = v
-        , mExported = True
-        , mCalled = False
-        , mDefined = True
-        , mComposition = Just v
-        , mBoundVars = [v' | (EV v') <- vars]
-        , mArgs = map fst args
-        }
-nexusManifolds _ _ _ = error "I can only export functions from nexus, sorry :("
+  exported <- isExported (moduleName m) ev
+  case (exported, uncurryExpr lambda) of
+    (False, _) -> return []
+    (_, (_, _, [])) -> error $ "nexus can only accept applications in declarations: "
+                             <> show v <> " :: " <> show lambda
+    -- FIXME: this only allows named function, not expressions like:
+    --   foo x y = (bar x) 42 y  -- where bar returns a function
+    --   foo x y = (x,y)         -- where there is no function on the right
+    (_, (vars, (exprAsFunction -> fv@(EV mname)), es)) -> do
+      typeset <- lookupVar fv m
+      case typeset of
+        (TypeSet Nothing _) -> error "no general type"
+        (TypeSet (Just e) rs) -> do
+          args <- CM.zipWithM (exprAsArgument vars m) [0..] es
+          return . (flip (:)) (concat . map snd $ args) $ Manifold
+            { mid = i
+            , mCallId = makeURI (moduleName m) i
+            , mAbstractType = Just (etype2mtype mname (e {etype = gentype}))
+            , mRealizations = map (toRealization mname m) rs
+            , mMorlocName = mname
+            , mExported = exported
+            , mCalled = False
+            , mDefined = True
+            , mComposition = Just v
+            , mBoundVars = [v' | (EV v') <- vars]
+            , mArgs = map fst args
+            }
+manlyfold m (Signature ev@(EV v) t) = do
+  i <- getId
+  exported <- isExported (moduleName m) ev
+  declared <- isDeclared (moduleName m) ev
+  -- If v is exported but not declared, then it must refer directly to a source
+  -- function (not a morloc lambda). Also, skip this signature if it is a
+  -- realization signature.
+  if exported && not declared && elang t == Nothing
+  then do
+    (TypeSet _ rs) <- lookupVar ev m
+    return [Manifold
+      { mid = i
+      , mCallId = makeURI (moduleName m) i
+      , mAbstractType = Just (etype2mtype v t)
+      , mRealizations = map (toRealization v m) rs
+      , mMorlocName = v
+      , mExported = exported
+      , mCalled = False
+      , mDefined = True
+      , mComposition = Nothing
+      , mBoundVars = []
+      , mArgs = map ArgPosi (take (nargs (etype t)) [0..])
+      }]
+  else return []
+manlyfold _ _ = return []
+
+nargs :: Type -> Int
+nargs (FunT t1 t2) = 1 + nargs t2
+nargs _ = 0
 
 exprAsArgument
   :: [EVar]
@@ -185,24 +226,23 @@ exprAsArgument
   -> Int -- ^ 0-indexed position of the argument
   -> Expr
   -> Program (Argument, [Manifold])
-exprAsArgument bnd _ p (AnnE (VarE v@(EV v')) t)
+exprAsArgument bnd _ p (AnnE (VarE v@(EV v')) gentype)
   | elem v bnd = return (ArgName v', [])
   | otherwise = return (ArgNest v', [])
-exprAsArgument bnd m _ (AnnE (AppE e1 e2) t) = case uncurryApplication e1 e2 of
+exprAsArgument bnd m _ (AnnE (AppE e1 e2) gentype) = case uncurryApplication e1 e2 of
   (f, es) -> do
     let v@(EV mname) = exprAsFunction f
-    ms <- gets stateModuleMap
-    ts <- gets stateModuleTypeSetMap
     defined <- isDeclared (moduleName m) v
     i <- getId
-    case lookupVar v ts ms m of
+    t <- lookupVar v m
+    case t of
       (TypeSet Nothing _) -> error "ah fuck shit"
       (TypeSet (Just etyp) rs) -> do
         args <- CM.zipWithM (exprAsArgument bnd m) [0..] es
         let newManifold = Manifold {
               mid = i
             , mCallId = makeURI (moduleName m) i
-            , mAbstractType = Just (etype2mtype mname (etyp {etype = t}))
+            , mAbstractType = Just (etype2mtype mname (etyp {etype = gentype}))
             , mRealizations = map (toRealization mname m) rs
             , mMorlocName = mname -- TODO: really?
             , mExported = elem v (moduleExports m)
@@ -247,14 +287,14 @@ primitive2mdata (RecE xs) = Rec' $ map entry xs where
 primitive2mdata _ = error "complex stuff is not yet allowed in MData (coming soon)"
 
 toRealization :: Name -> Module -> EType -> Realization
-toRealization n m e@(EType t (Just langText) props _ (Just (Just f, EV srcname))) =
+toRealization n m e@(EType t (Just langText) _ _ (Just (f, EV srcname))) =
   case ML.readLangName langText of 
     (Just lang) -> Realization
       { rLang = lang
       , rName = srcname
       , rConcreteType = Just $ etype2mtype n e
       , rModulePath = modulePath m
-      , rSourcePath = Just f
+      , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
       , rSourced = True
       }
     Nothing -> error "unrecognized language"
@@ -381,17 +421,22 @@ etype2mtype n e = type2mtype Set.empty (etype e) where
 -- TypeSet object. Die if there is disagreement about the basic general type.
 lookupVar
   :: EVar
-  -> Map.Map MVar (Map.Map EVar TypeSet)
-  -> Map.Map MVar Module
   -> Module
-  -> TypeSet
-lookupVar v typesetmap modulemap m = case Map.lookup (moduleName m) typesetmap >>= Map.lookup v of
-  Nothing -> foldr (joinTypeSet const) (TypeSet Nothing []) ts
-  (Just t) -> foldr (joinTypeSet const) t ts
+  -> Program TypeSet
+lookupVar v0 m0 = do
+  mm <- gets stateModuleMap
+  tm <- gets stateModuleTypeSetMap
+  return $ lookupVar' mm tm v0 m0
   where
-    ts = [maybe (TypeSet Nothing []) id (fmap (lookupVar v' typesetmap modulemap) $ Map.lookup mv' modulemap)
-         | (mv', v', alias') <- moduleImports m
-         , v == alias']
+    lookupVar' mm tm v m =
+      case Map.lookup (moduleName m) tm >>= Map.lookup v of
+        Nothing -> foldr (joinTypeSet const) (TypeSet Nothing []) (r mm tm v m)
+        (Just t) -> foldr (joinTypeSet const) t (r mm tm v m)
+
+    r mm tm v m
+      = [maybe (TypeSet Nothing []) id (fmap (lookupVar' mm tm v') $ Map.lookup mv' mm)
+        | (mv', v', alias') <- moduleImports m
+        , v == alias']
 
 -- | collect all type information within a module
 -- first all signatures are collected, storing each realization
