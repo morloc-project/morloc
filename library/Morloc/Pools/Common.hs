@@ -310,7 +310,9 @@ makeSourceManifold g h m = do
             }))
           , gaArg = Nothing
           }
-    unpack' name lhs (ctype, _, _) x = error "Expected unpacker"
+    unpack' name lhs (ctype, _, a) x = error
+      $ "No unpacker found for argument: " <> show m
+      <> " in " <> show name
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe MDoc]
 getConcreteArgTypes g m

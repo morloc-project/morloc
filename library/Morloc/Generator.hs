@@ -27,6 +27,8 @@ import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
 import qualified Data.Maybe as DM
 
+import Debug.Trace (traceShowM)
+
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate mods = do
   -- root :: Module -- fail if there is not a single "root" module, e.g., main
@@ -47,8 +49,7 @@ generate mods = do
   hss <- makeSerialMaps mods
 
   -- pools :: [Script]
-  -- pools <- MP.generate ms hss
-  pools <- return [] -- TODO: remove stub
+  pools <- MP.generate ms hss
 
   -- (Script, [Script])
   return (nexus, pools)
@@ -128,6 +129,11 @@ lookupImport m e = do
   impmap <- gets stateModuleImports
   return $ Map.lookup m impmap >>= Map.lookup e
 
+lookupSources :: MVar -> EVar -> Program (Maybe Source')
+lookupSources m e = do
+  srcmap <- gets stateModuleSources
+  return $ Map.lookup m srcmap >>= Map.lookup e
+
 lookupTypeSet :: MVar -> EVar -> Program (Maybe TypeSet)
 lookupTypeSet mv ev = do
   ts <- gets stateModuleTypeSetMap
@@ -177,11 +183,12 @@ manlyfold m (Declaration ev@(EV v) (AnnE lambda@(LamE _ _) gentype)) = do
         (TypeSet Nothing _) -> error "no general type"
         (TypeSet (Just e) rs) -> do
           args <- CM.zipWithM (exprAsArgument vars m) [0..] es
+          realizations <- toRealizations mname m (length args) rs
           return . (flip (:)) (concat . map snd $ args) $ Manifold
             { mid = i
             , mCallId = makeURI (moduleName m) i
-            , mAbstractType = Just (etype2mtype mname (e {etype = gentype}))
-            , mRealizations = map (toRealization mname m) rs
+            , mAbstractType = Just (etype2mtype (Just mname) (e {etype = gentype}))
+            , mRealizations = realizations
             , mMorlocName = mname
             , mExported = exported
             , mCalled = False
@@ -200,18 +207,20 @@ manlyfold m (Signature ev@(EV v) t) = do
   if exported && not declared && elang t == Nothing
   then do
     (TypeSet _ rs) <- lookupVar ev m
+    let args = map ArgPosi (take (nargs (etype t)) [0..])
+    realizations <- toRealizations v m (length args) rs
     return [Manifold
       { mid = i
       , mCallId = makeURI (moduleName m) i
-      , mAbstractType = Just (etype2mtype v t)
-      , mRealizations = map (toRealization v m) rs
+      , mAbstractType = Just (etype2mtype (Just v) t)
+      , mRealizations = realizations
       , mMorlocName = v
       , mExported = exported
       , mCalled = False
       , mDefined = True
       , mComposition = Nothing
       , mBoundVars = []
-      , mArgs = map ArgPosi (take (nargs (etype t)) [0..])
+      , mArgs = args
       }]
   else return []
 manlyfold _ _ = return []
@@ -239,11 +248,12 @@ exprAsArgument bnd m _ (AnnE (AppE e1 e2) gentype) = case uncurryApplication e1 
       (TypeSet Nothing _) -> error "ah fuck shit"
       (TypeSet (Just etyp) rs) -> do
         args <- CM.zipWithM (exprAsArgument bnd m) [0..] es
+        realizations <- toRealizations mname m (length args) rs
         let newManifold = Manifold {
               mid = i
             , mCallId = makeURI (moduleName m) i
-            , mAbstractType = Just (etype2mtype mname (etyp {etype = gentype}))
-            , mRealizations = map (toRealization mname m) rs
+            , mAbstractType = Just (etype2mtype (Just mname) (etyp {etype = gentype}))
+            , mRealizations = realizations
             , mMorlocName = mname -- TODO: really?
             , mExported = elem v (moduleExports m)
             , mCalled = True
@@ -286,19 +296,33 @@ primitive2mdata (RecE xs) = Rec' $ map entry xs where
   entry (EV v, e) = (v, primitive2mdata e)
 primitive2mdata _ = error "complex stuff is not yet allowed in MData (coming soon)"
 
-toRealization :: Name -> Module -> EType -> Realization
-toRealization n m e@(EType t (Just langText) _ _ (Just (f, EV srcname))) =
-  case ML.readLangName langText of 
-    (Just lang) -> Realization
-      { rLang = lang
-      , rName = srcname
-      , rConcreteType = Just $ etype2mtype n e
+toRealizations :: Name -> Module -> Int -> [EType] -> Program [Realization]
+toRealizations n m l [] = do
+  src <- lookupSources (moduleName m) (EV n) 
+  case src of
+    Nothing -> error "Bad realization"
+    (Just s) -> return [Realization
+      { rLang = sourceLang s
+      , rName = sourceName s
+      , rConcreteType = Nothing
       , rModulePath = modulePath m
-      , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
+      , rSourcePath = sourcePath s
       , rSourced = True
-      }
-    Nothing -> error "unrecognized language"
-toRealization _ _ _ = error "This is not a realization"
+      }]
+toRealizations n m _ es = return $ map toRealization es where
+  toRealization :: EType -> Realization
+  toRealization e@(EType t (Just langText) _ _ (Just (f, EV srcname))) =
+    case ML.readLangName langText of 
+      (Just lang) -> Realization
+        { rLang = lang
+        , rName = srcname
+        , rConcreteType = Just $ etype2mtype (Just n) e
+        , rModulePath = modulePath m
+        , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
+        , rSourced = True
+        }
+      Nothing -> error "unrecognized language"
+  toRealization _ = error "This is not a realization"
 
 -- | uncurry one level of an expression, pulling out a tuple with
 -- (<lambda-args>, <application-base>, <application-args>)
@@ -368,21 +392,27 @@ makeSerialMaps (concat . map moduleBody -> es)
     toSerialMap :: Lang -> [Expr] -> SerialMap
     toSerialMap lang es = SerialMap {
         serialLang = lang
-      , serialPacker = Map.fromList [(etype2mtype n e, n)
+      , serialPacker = Map.fromList [(etype2mtype (Just n) e, n)
                                     | (Signature (EV n) e) <- es
                                     , Set.member Pack (eprop e)]
-      , serialUnpacker = Map.fromList [(etype2mtype n e, n)
+      , serialUnpacker = Map.fromList [(etype2mtype (Just n) e, n)
                                       | (Signature (EV n) e) <- es
                                       , Set.member Unpack (eprop e)]
       , serialSources = DL.nub [p | (SrcE _ (Just p) _) <- es]
       }
 
-etype2mtype :: Name -> EType -> MType
+etype2mtype :: Maybe Name -> EType -> MType
 etype2mtype n e = type2mtype Set.empty (etype e) where
 
   meta = MTypeMeta {
-      metaName = Just n
+      metaName = n
     , metaProp = map prop2text (Set.toList (eprop e))
+    , metaLang = elang e >>= ML.readLangName
+  }
+
+  metaEmpty = MTypeMeta {
+      metaName = Nothing
+    , metaProp = []
     , metaLang = elang e >>= ML.readLangName
   }
 
@@ -408,7 +438,7 @@ etype2mtype n e = type2mtype Set.empty (etype e) where
 
   recordEntry :: Set.Set Name -> (TVar, Type) -> MType
   recordEntry bnds (TV v, t)
-    = MConcType meta "RecordEntry" [MConcType meta "Str" [], type2mtype bnds t]
+    = MConcType metaEmpty "RecordEntry" [MConcType metaEmpty "Str" [], type2mtype bnds t]
 
   functionTypes :: Set.Set Name -> Type -> [MType]
   functionTypes bnds (FunT t1 t2) = type2mtype bnds t1 : functionTypes bnds t2
