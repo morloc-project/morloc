@@ -316,7 +316,7 @@ toRealizations n m _ es = return $ map toRealization es where
       (Just lang) -> Realization
         { rLang = lang
         , rName = srcname
-        , rConcreteType = Just $ etype2mtype (Just n) e
+        , rConcreteType = Just $ etype2mtype Nothing e
         , rModulePath = modulePath m
         , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
         , rSourced = True
@@ -392,14 +392,21 @@ makeSerialMaps (concat . map moduleBody -> es)
     toSerialMap :: Lang -> [Expr] -> SerialMap
     toSerialMap lang es = SerialMap {
         serialLang = lang
-      , serialPacker = Map.fromList [(etype2mtype (Just n) e, n)
-                                    | (Signature (EV n) e) <- es
-                                    , Set.member Pack (eprop e)]
-      , serialUnpacker = Map.fromList [(etype2mtype (Just n) e, n)
-                                      | (Signature (EV n) e) <- es
-                                      , Set.member Unpack (eprop e)]
+      , serialPacker = getSerial Pack es
+      , serialUnpacker = getSerial Unpack es
       , serialSources = DL.nub [p | (SrcE _ (Just p) _) <- es]
       }
+
+getSerial :: Property -> [Expr] -> Map.Map MType Name
+getSerial p es = Map.fromList [(f (etype2mtype Nothing e), n)
+                              | (Signature (EV n) e) <- es
+                              , Set.member p (eprop e)]
+  where
+    f (MFuncType _ inputs output) = case (p, inputs) of 
+      (Pack, [x]) -> x
+      (Unpack, [_]) -> output
+      _ -> error "too many args in serial function"
+    f _ = error "wrong type for serial function"
 
 etype2mtype :: Maybe Name -> EType -> MType
 etype2mtype n e = type2mtype Set.empty (etype e) where

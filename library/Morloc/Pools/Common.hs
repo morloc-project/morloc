@@ -29,6 +29,7 @@ import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
+import qualified Data.List as DL
 
 data Grammar = Grammar {
       gLang        :: Lang
@@ -272,33 +273,34 @@ lookupKey ms k = case filter (\m -> mCallId m == k) ms of
 
 makeSourceManifold :: Grammar -> SerialMap -> Manifold -> MorlocMonad GeneralFunction
 makeSourceManifold g h m = do
-  argTypes <- zip3 <$> pure (getConcreteArgTypes g m) <*> (Man.getUnpackers h m) <*> pure (mArgs m)
   let name = callIdToName g m
       comments
         =  (gComment g) "source manifold" <> line
         <> (gComment g) (maybe (fname m) pretty (mComposition m)) <> line
         <> (gComment g) (fname m <> " :: " <> maybe "undefined" pretty (mAbstractType m))
         <> line
-  return $ GeneralFunction {
-           gfComments = comments
-         , gfReturnType = getConcreteReturnType g m
-         , gfName = name
-         , gfArgs = zip (repeat $ Just . gShowType g $ gSerialType g)
-                        (take n (iArgs "x"))
-         , gfBody = (vsep $ zipWith3
-                              (unpack' name)
-                              (iArgs "a")
-                              argTypes
-                              (iArgs "x"))
-                  <> line
-                  <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
-         }
+  argTypes <- DL.zip5
+          <$> pure (iArgs "a")
+          <*> pure (getConcreteArgTypes g m)
+          <*> (Man.getUnpackers h m)
+          <*> pure (mArgs m)
+          <*> pure (iArgs "x")
+
+  argAssign <- mapM (unpack' name) argTypes
+  return $ GeneralFunction
+     { gfComments = comments
+     , gfReturnType = getConcreteReturnType g m
+     , gfName = name
+     , gfArgs = zip (repeat $ Just . gShowType g $ gSerialType g)
+                    (take n (iArgs "x"))
+     , gfBody = (vsep argAssign) <> line <> (gReturn g) ((gCall g) (fname m) (take n (iArgs "a")))
+     }
   where
     n = length (mArgs m)
 
-    unpack' :: MDoc -> MDoc -> (Maybe MDoc, Maybe MDoc, Argument) -> MDoc -> MDoc
-    unpack' name lhs (ctype, (Just u), _) x
-      = (gAssign g) $ GeneralAssignment {
+    unpack' :: MDoc -> (MDoc, Maybe MDoc, Maybe MDoc, Argument, MDoc) -> MorlocMonad MDoc
+    unpack' name (lhs, ctype, (Just u), _, x)
+      = return . gAssign g $ GeneralAssignment {
             gaType = ctype
           , gaName = lhs
           , gaValue = ((gUnpacker g) (UnpackerDoc {
@@ -310,9 +312,10 @@ makeSourceManifold g h m = do
             }))
           , gaArg = Nothing
           }
-    unpack' name lhs (ctype, _, a) x = error
-      $ "No unpacker found for argument: " <> show m
-      <> " in " <> show name
+    unpack' name t@(lhs, ctype, _, a, x) = MM.throwError . GeneratorError
+      $ "No unpacker found for argument: "
+      <> MT.pretty (name, lhs, t, a) <> "\n" <> MT.pretty m
+      <> "\n" <> MT.pretty h
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe MDoc]
 getConcreteArgTypes g m
