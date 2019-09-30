@@ -11,7 +11,7 @@ unpackGeneric R :: unpack => forall a . JSON -> a;
 sqrt :: Num -> Num;
 sqrt R :: numeric -> numeric;
 
-cor :: [Num] -> [Num] -> Num;
+cor :: [Num] -> [Num] -> Num where { len xs == len ys };
 cor R :: numeric -> numeric -> numeric;
 
 foo :: Num -> Num;

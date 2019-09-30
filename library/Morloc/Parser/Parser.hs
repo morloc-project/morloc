@@ -65,7 +65,7 @@ angles p = lexeme $ between (symbol "<") (symbol ">") p
 
 reservedWords :: [MT.Text]
 reservedWords = ["module", "source", "from", "where", "import",
-                 "export", "as", "True", "False"]
+                 "export", "as", "True", "False", "forall"]
 
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
@@ -180,7 +180,7 @@ pFunctionDeclaration :: Parser Expr
 pFunctionDeclaration = do
   v <- name
   args <- many1 name
-  _ <- symbol "="
+  _ <- op "="
   e <- pExpr
   return $ Declaration (EV v) (curryLamE (map EV args) e)
   where
@@ -191,10 +191,10 @@ pSignature :: Parser Expr
 pSignature = do
   v <- name
   lang <- optional (name)
-  _ <- symbol "::"
+  _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
-  constraints <- option [] $ reserved "where" >> parens (sepBy1 pConstraint (symbol ","))
+  constraints <- option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
   return $ Signature (EV v) (EType
     { etype = t
     , elang = lang
@@ -217,7 +217,7 @@ tag p =
 pPropertyList :: Parser [Property]
 pPropertyList
   =  (parens (sepBy1 pProperty (symbol ",")) <|> sepBy1 pProperty (symbol ","))
-  <* symbol "=>"
+  <* op "=>"
 
 pProperty :: Parser Property
 pProperty = do 
@@ -229,7 +229,7 @@ pProperty = do
     _ -> return (GeneralProperty ps)
 
 pConstraint :: Parser Constraint
-pConstraint = fmap (Con . MT.pack) (many1 (noneOf [',']))
+pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 readType :: MT.Text -> Type
 readType s = case parse (pType <* eof) "" s of 
@@ -283,11 +283,11 @@ pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
 
 pTuple :: Parser Expr
 pTuple = do
-  _ <- symbol "("
+  _ <- op "("
   e <- pExpr
-  _ <- symbol ","
-  es <- sepBy1 pExpr (symbol ",")
-  _ <- symbol ")"
+  _ <- op ","
+  es <- sepBy1 pExpr (op ",")
+  _ <- op ")"
   return (TupleE (e:es))
 
 pUni :: Parser Expr
@@ -296,7 +296,7 @@ pUni = symbol "UNIT" >> return UniE
 pAnn :: Parser Expr
 pAnn = do
   e <- parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
-  _ <- symbol "::"
+  _ <- op "::"
   t <- pType
   return $ AnnE e t
 
@@ -379,7 +379,7 @@ pRecordT = do
 pRecordEntryT :: Parser (TVar, Type)
 pRecordEntryT = do
   n <- name
-  _ <- symbol "::"
+  _ <- op "::"
   t <- pType
   return (TV n, t)
 
@@ -399,8 +399,8 @@ pArrT = do
 pFunT :: Parser Type
 pFunT = do
   t <- pType'
-  _ <- symbol "->"
-  ts <- sepBy1 pType' (symbol "->")
+  _ <- op "->"
+  ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t:ts)
   where
     pType' = parens pType <|> try pArrT <|> pVarT <|> pListT
@@ -419,9 +419,9 @@ pVarT = do
 
 pForAllT :: Parser Type
 pForAllT = do
-  _ <- symbol "forall"
+  _ <- reserved "forall"
   vs <- many1 name
-  _ <- symbol "."
+  _ <- op "."
   t <- pType
   return (curryForall vs t)
   where

@@ -229,6 +229,10 @@ unitTests = testGroup "Unit tests"
     , exprTestGood "property syntax (4)" "f :: (Foo a) => Num; f" num
     , exprTestGood "property syntax (5)" "f :: (Foo a, Bar b) => Num; f" num
 
+    -- constraints
+    , exprTestGood "constraint syntax (1)" "f :: Num where {ladida}; f" num
+    , exprTestGood "constraint syntax (1)" "f :: Num where { ladida ; foo }; f" num
+
     -- tests modules
     , exprTestGood "basic Main module" "module Main {[1,2,3]}" (lst num)
     , (flip $ exprTestGood "import/export") (lst num) $ T.unlines
