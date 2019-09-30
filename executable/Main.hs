@@ -23,3 +23,5 @@ main = do
   -- do the following if we are processing Morloc code
   when (isPresent args (argument "script")) $ do
     when (isPresent args (command "make")) (cmdMake args config)
+
+  when (isPresent args (command "typecheck")) $ cmdTypecheck args config

@@ -15,6 +15,7 @@ module Subcommands
   , cmdInstall
   , cmdMake
   , cmdRemove
+  , cmdTypecheck
 ) where
 
 import Morloc.Operators
@@ -23,6 +24,9 @@ import qualified Morloc as M
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
+import qualified Morloc.Parser.API as Papi
+import qualified Morloc.Parser.Parser as P
+import qualified Morloc.TypeChecker.API as T
 import System.Console.Docopt
 import qualified Morloc.Module as Mod
 
@@ -78,3 +82,23 @@ cmdMake :: Subcommand
 cmdMake args config = do
   (path, code) <- readScript args
   MM.runMorlocMonad config Nothing (M.writeProgram path code) >>= MM.writeMorlocReturn
+
+cmdTypecheck :: Subcommand
+cmdTypecheck args config = do
+  let expr = getArgOrDie args (argument "script")
+  expr' <- if isPresent args (longOption "expression")
+           then return expr
+           else MT.readFile (MT.unpack expr)
+  let base = if isPresent args (longOption "expression")
+             then Nothing
+             else Just expr
+  let writer = if isPresent args (longOption "raw") then Papi.ugly else Papi.cute
+
+  if isPresent args (longOption "type")
+  then
+    print $ P.readType expr'
+  else
+    fmap T.typecheck (Papi.parse Papi.ignoreSource
+                                 (Papi.localModules (fmap MT.unpack base))
+                                 base
+                                 expr') >>= writer

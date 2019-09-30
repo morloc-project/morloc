@@ -26,7 +26,6 @@ import qualified Morloc.Data.Text as MT
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 import qualified Control.Monad as CM
 import qualified Data.Map as Map
-import qualified Data.Text.IO as DIO
 import qualified System.FilePath.Posix as SFP
 
 parse
@@ -61,11 +60,11 @@ ignoreSource _ = return ()
 
 localModules :: Maybe String -> MVar -> IO (Maybe Path, MT.Text)
 localModules (Just filename) (MV f) = do
-  code <- DIO.readFile . SFP.replaceFileName filename $ (MT.unpack f <> ".loc")
+  code <- MT.readFile . SFP.replaceFileName filename $ (MT.unpack f <> ".loc")
   return (Just (MT.pack filename), code)
 localModules Nothing (MV f) = do
   let filename = MT.unpack f <> ".loc"
-  code <- DIO.readFile filename
+  code <- MT.readFile filename
   return (Just . MT.pack $ filename, code)
 
 -- assert that all sourced resources exist
