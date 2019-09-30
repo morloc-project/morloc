@@ -218,6 +218,7 @@ data Call = Call {
 getReal :: (Realization -> a) -> Manifold -> a
 getReal f m = case mRealizations m of
   [r] -> f r
+  (r:_) -> f r
   _ -> error ("Realization failure in m = " ++ show m)
 mLang :: Manifold -> Lang
 mLang = getReal rLang

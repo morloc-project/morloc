@@ -1,7 +1,7 @@
-import "math";
-import "cppbase";
+import math (mean, fibonacci);
+import cppbase;
 
 export meanfib;
 
 meanfib :: Int -> Num;
-meanfib x = mean ( fibonocci x );
+meanfib x = mean ( fibonacci x );

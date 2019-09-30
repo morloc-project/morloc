@@ -31,10 +31,11 @@ childOf
   :: MType -- ^ Instance type (e.g. Matrix Num 5 6)
   -> MType -- ^ Parent type (e.g. Matrix a m n)
   -> Bool  -- ^ True if arg #1 is equal to or an instance of arg #2
-childOf (MConcType d1 n1 xs1) (MConcType d2 n2 xs2)
-  =  d1 == d2 -- the metadata are equal ... TODO: consider nuances
-  && n1 == n2 -- the type names are the same
-  && all id (zipWith childOf xs1 xs2)
+childOf (MConcType _ n1 xs1) (MConcType _ n2 xs2)
+  -- I currently don't check out the properties, should I?
+  = n1 == n2 -- type names must be the same 
+  && all id (zipWith childOf xs1 xs2) -- child types must be the same
+
 childOf (MConcType _ _ xs1) (MAbstType _ _ xs2)
   =  length xs2 == 0   -- TODO: check for required properties
   || all id (zipWith childOf xs1 xs2)

@@ -92,9 +92,9 @@ loadModuleMetadata main = do
 getModulePaths :: MT.Text -> MT.Text -> [MT.Text]
 getModulePaths lib base = [
     base <> ".loc"                               -- "./${base}.loc"
-  , base <> "/main.loc"                          -- "${base}/main.loc"
+  , base <> "/" <> "main.loc"                    -- "${base}/main.loc"
   , lib <> "/" <> base <> ".loc"                 -- "${LIB}/${base}.loc"
-  , lib <> "/" <> base <> "/main.loc"            -- "${LIB}/${base}/main.loc"
+  , lib <> "/" <> base <> "/" <> "main.loc"      -- "${LIB}/${base}/main.loc"
   , lib <> "/" <> base <> "/" <> base <> ".loc"  -- "${LIB}/${base}/${base}.loc"
   ]
 

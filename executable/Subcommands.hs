@@ -98,7 +98,5 @@ cmdTypecheck args config = do
   then
     print $ P.readType expr'
   else
-    fmap T.typecheck (Papi.parse Papi.ignoreSource
-                                 (Papi.localModules (fmap MT.unpack base))
-                                 base
-                                 expr') >>= writer
+    MM.runMorlocMonad config Nothing (M.typecheck base expr' >>= MM.liftIO . writer)
+      >>= MM.writeMorlocReturn

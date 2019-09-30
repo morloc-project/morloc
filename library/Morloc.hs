@@ -1,9 +1,8 @@
 module Morloc (
     writeProgram
+  , typecheck
   , P.cute
   , P.ugly
-  , P.ignoreSource
-  , P.localModules
 ) where
 
 import Morloc.Global
@@ -16,9 +15,8 @@ import qualified Morloc.Build as MB
 
 typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]
 typecheck path code = do
-  mods' <- MM.liftIO .  fmap T.typecheck
-        $  P.parse P.ignoreSource (P.localModules (fmap MT.unpack path)) path code
-  case mods' of
+  mods <- P.parse path code
+  case T.typecheck mods of
     (Right mods) -> return mods
     (Left err) -> MM.throwError . TypeError . MT.pack $ show err
 

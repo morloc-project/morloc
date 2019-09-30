@@ -286,6 +286,8 @@ makeSourceManifold g h m = do
           <*> pure (mArgs m)
           <*> pure (iArgs "x")
 
+  MM.liftIO . MT.putStrLn . MT.show' $ [(t,x) | (_,t,x,_,_) <- argTypes]
+
   argAssign <- mapM (unpack' name) argTypes
   return $ GeneralFunction
      { gfComments = comments
@@ -313,9 +315,7 @@ makeSourceManifold g h m = do
           , gaArg = Nothing
           }
     unpack' name t@(lhs, ctype, _, a, x) = MM.throwError . GeneratorError
-      $ "No unpacker found for argument: "
-      <> MT.pretty (name, lhs, t, a) <> "\n" <> MT.pretty m
-      <> "\n" <> MT.pretty h
+      $ "No unpacker found for argument: " <> render name
 
 getConcreteArgTypes :: Grammar -> Manifold -> [Maybe MDoc]
 getConcreteArgTypes g m

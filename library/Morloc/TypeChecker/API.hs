@@ -416,9 +416,9 @@ etype2mtype n e = type2mtype Set.empty (etype e) where
     , metaLang = elang e >>= ML.readLangName
   }
 
-  prop2text Pack = ["pack"]
-  prop2text Unpack = ["unpack"]
-  prop2text Cast = ["cast"]
+  prop2text Pack = ["packs"]
+  prop2text Unpack = ["unpacks"]
+  prop2text Cast = ["casts"]
   prop2text (GeneralProperty ts) = ts
 
   type2mtype :: Set.Set Name -> Type -> MType
