@@ -9,7 +9,7 @@ Stability   : experimental
 
 module Morloc.Generator (generate) where
 
-import Morloc.Types.API
+import Morloc.TypeChecker.API
 import Morloc.Global
 import Morloc.Operators
 import qualified Morloc.Nexus.Nexus as MN

@@ -23,7 +23,7 @@ import Morloc.Global
 import Morloc.Data.Doc
 import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC
-import Morloc.Component.MType () -- just for mshow instances
+import Morloc.Pretty () -- just for mshow instances
 import qualified Morloc.Monad as MM
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT

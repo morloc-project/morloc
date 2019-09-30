@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Types.Infer
+Module      : Morloc.TypeChecker.Infer
 Description : Core inference module
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types.Infer (
+module Morloc.TypeChecker.Infer (
   -- * The main type checker
     typecheck
   -- * Internal functions used in testing
@@ -24,7 +24,7 @@ module Morloc.Types.Infer (
 ) where
 
 import Morloc.Operators
-import Morloc.Types.Namespace
+import Morloc.TypeChecker.Namespace
 import Control.Monad (foldM)
 import qualified Data.Text as T
 import qualified Data.Set as Set

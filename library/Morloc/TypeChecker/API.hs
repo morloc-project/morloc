@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Types.API
+Module      : Morloc.TypeChecker.API
 Description : The primary API for the morloc type system
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -7,80 +7,31 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types.API (
-    parse
-  , typecheck
-  , cute
-  , ugly
-  , ignoreSource
-  , localModules
-  , prettyExpr
-  , prettyType
-  , prettyModule
+module Morloc.TypeChecker.API (
+    typecheck
   , rootModule
   , module2manifolds
   , initProgramState
   , makeSerialMaps
-  , XP.readType
   , Module(..)
-  , MVar(..)
-  , EVar(..)
-  , TVar(..)
-  , Expr(..)
-  , EType(..)
-  , Type(..)
-  , Property(..)
-  , Constraint(..)
-  , TypeError(..)
-  , TypeSet(..)
-  , Language
 ) where
 
 import Morloc.Global
 import Morloc.Operators
-import Morloc.Types.Namespace
+import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Morloc.Types.Infer as XI 
-import qualified Morloc.Types.Parser as XP
+import qualified Morloc.TypeChecker.Infer as XI 
 
 import Control.Monad.State (State, evalState, gets, get, put)
-import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 import qualified Control.Monad as CM
 import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
 import qualified Data.Map as Map
 import qualified Data.Maybe as DM
 import qualified Data.Set as Set
-import qualified Data.Text.IO as DIO
-import qualified System.FilePath.Posix as SFP
-
-parse
-  :: (Path -> IO ()) -- ^ check existence of a source (file, URL, or whatever)
-  -> (MVar -> IO (Maybe Path, MT.Text)) -- ^ open a module (file, URL, or whatever)
-  -> Maybe Path
-  -> MT.Text -- ^ code of the current module
-  -> IO [Module]
-parse checkSource loadModule f code = fmap Map.elems $ parse' Map.empty (f, code) where
-  parse' :: (Map.Map MVar Module) -> (Maybe Path, MT.Text) -> IO (Map.Map MVar Module)
-  parse' visited (f', code') = CM.foldM parse'' visited (XP.readProgram f' code')
-
-  parse'' :: (Map.Map MVar Module) -> Module -> IO (Map.Map MVar Module)
-  parse'' visited m
-    | Map.member (moduleName m) visited = return visited
-    | otherwise = do
-        checkSources checkSource m
-        imports <- mapM (loadModule . importModuleName) (moduleImports m)
-        CM.foldM parse' (Map.insert (moduleName m) m visited) imports
-
--- assert that all sourced resources exist
-checkSources :: (Path -> IO ()) -> Module -> IO ()
-checkSources f m = chk' (moduleBody m) where
-  chk' ((SrcE _ (Just filename) _):es) = f filename >> chk' es
-  chk' (_:es) = chk' es
-  chk' [] = return ()
 
 typecheck
   :: [Module]
@@ -89,29 +40,6 @@ typecheck ms =
   case runStack (XI.typecheck ms) of
     (Right result, _) -> Right result
     (Left err, _) -> Left err
-
-cute :: Either TypeError [Module] -> IO ()
-cute (Right es) = mapM_ (\e -> putDoc (prettyModule e) >> putStrLn "") es
-cute (Left err) = print err
-
-ugly :: Either TypeError [Module] -> IO ()
-ugly (Right es) = print es
-ugly (Left err) = print err
-
--- do not check existence of source files
-ignoreSource :: MT.Text -> IO () 
-ignoreSource _ = return ()
-
-localModules :: Maybe String -> MVar -> IO (Maybe Path, MT.Text)
-localModules (Just filename) (MV f) = do
-  code <- DIO.readFile . SFP.replaceFileName filename $ (MT.unpack f <> ".loc")
-  return (Just (MT.pack filename), code)
-localModules Nothing (MV f) = do
-  let filename = MT.unpack f <> ".loc"
-  code <- DIO.readFile filename
-  return (Just . MT.pack $ filename, code)
-
-
 
 -- | local
 data Source' = Source' {

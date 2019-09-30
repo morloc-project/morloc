@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Types.Parser
+Module      : Morloc.Parser.Parser
 Description : Full parser for Morloc/Xi
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -7,24 +7,25 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types.Parser (readProgram, readType) where
+module Morloc.Parser.Parser (readProgram, readType) where
 
 import Morloc.Global (Path)
 import Morloc.Operators
-import Morloc.Types.Namespace
-import Text.Megaparsec
-import Text.Megaparsec.Char as C
-import qualified Text.Megaparsec.Char.Lexer as L
-import qualified Data.Text as T
+import Morloc.TypeChecker.Namespace
+import qualified Morloc.Data.Text as MT
+
 import Data.Void (Void)
-import qualified Data.Set as Set
+import Text.Megaparsec
+import Text.Megaparsec.Char
+import qualified Data.Map as Map
 import qualified Data.Scientific as DS
+import qualified Data.Set as Set
+import qualified Text.Megaparsec.Char.Lexer as L
 
+type Parser = Parsec Void MT.Text
 
-type Parser = Parsec Void T.Text
-
-readProgram :: Maybe Path -> T.Text -> [Module]
-readProgram f s = case parse (sc >> pProgram f <* eof) (maybe "<expr>" T.unpack f) s of 
+readProgram :: Maybe Path -> MT.Text -> [Module]
+readProgram f s = case parse (sc >> pProgram f <* eof) (maybe "<expr>" MT.unpack f) s of 
       Left err -> error (show err)
       Right es -> es
 
@@ -62,29 +63,29 @@ braces p = lexeme $ between (symbol "{") (symbol "}") p
 angles :: Parser a -> Parser a
 angles p = lexeme $ between (symbol "<") (symbol ">") p
 
-reservedWords :: [T.Text]
+reservedWords :: [MT.Text]
 reservedWords = ["module", "source", "from", "where", "import",
                  "export", "as", "True", "False"]
 
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
-op :: T.Text -> Parser T.Text
+op :: MT.Text -> Parser MT.Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
-reserved :: T.Text -> Parser T.Text
+reserved :: MT.Text -> Parser MT.Text
 reserved w = try (symbol w)
 
-stringLiteral :: Parser T.Text
+stringLiteral :: Parser MT.Text
 stringLiteral = do
   _ <- symbol "\""
   s <- many (noneOf ['"'])
   _ <- symbol "\""
-  return $ T.pack s
+  return $ MT.pack s
 
-name :: Parser T.Text
+name :: Parser MT.Text
 name = (lexeme . try) (p >>= check) where
-  p       = fmap T.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
+  p       = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
   check x = if elem x reservedWords
               then failure Nothing Set.empty -- TODO: error message
               else return x
@@ -203,7 +204,7 @@ pSignature = do
     })
 
 -- | match an optional tag that precedes some construction
-tag :: Parser a -> Parser (Maybe T.Text)
+tag :: Parser a -> Parser (Maybe MT.Text)
 tag p =
   optional (try tag')
   where
@@ -223,9 +224,9 @@ pProperty = do
     _ -> return (GeneralProperty ps)
 
 pConstraint :: Parser Constraint
-pConstraint = fmap (Con . T.pack) (many1 (noneOf [',']))
+pConstraint = fmap (Con . MT.pack) (many1 (noneOf [',']))
 
-readType :: T.Text -> Type
+readType :: MT.Text -> Type
 readType s = case parse (pType <* eof) "" s of 
   Left err -> error (show err)
   Right t -> t 
@@ -361,7 +362,7 @@ pTupleT :: Parser Type
 pTupleT = do
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  let v = TV . T.pack $ "Tuple" ++ (show (length ts))
+  let v = TV . MT.pack $ "Tuple" ++ (show (length ts))
   return $ ArrT v ts
 
 pRecordT :: Parser Type

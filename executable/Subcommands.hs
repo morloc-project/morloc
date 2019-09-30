@@ -24,7 +24,6 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
 import System.Console.Docopt
-import Control.Monad (when)
 import qualified Morloc.Module as Mod
 
 type Subcommand = Arguments -> Config.Config -> IO ()

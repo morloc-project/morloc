@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Types.Namespace
+Module      : Morloc.TypeChecker.Namespace
 Description : Data structures and related functions
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Types.Namespace
+module Morloc.TypeChecker.Namespace
 (
     Stack
   , Expr(..)
