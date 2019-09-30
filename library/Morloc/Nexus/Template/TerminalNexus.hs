@@ -11,7 +11,7 @@ Stability   : experimental
 
 module Morloc.Nexus.Template.TerminalNexus (generate) where
 
-import Xi
+import Morloc.Types.API
 import Morloc.Global
 import Morloc.Quasi
 import Morloc.Data.Doc

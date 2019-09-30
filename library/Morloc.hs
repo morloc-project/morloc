@@ -2,9 +2,9 @@ module Morloc (
     writeProgram
 ) where
 
-import Xi
 import Morloc.Global
 import Morloc.Operators
+import Morloc.Types.API
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Generator as MG

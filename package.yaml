@@ -40,7 +40,6 @@ dependencies:
   - template-haskell
   - text
   - unordered-containers
-  - xi
   - yaml
 
 default-extensions:
