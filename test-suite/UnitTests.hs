@@ -222,6 +222,13 @@ unitTests = testGroup "Unit tests"
                 "F :: {x::Int, y::Str}"
                 "F :: foo:{x::(i:Int), y::Str}"
 
+    -- properties
+    , exprTestGood "property syntax (1)" "f :: Foo => Num; f" num
+    , exprTestGood "property syntax (2)" "f :: Foo bar => Num; f" num
+    , exprTestGood "property syntax (3)" "f :: Foo a, Bar b => Num; f" num
+    , exprTestGood "property syntax (4)" "f :: (Foo a) => Num; f" num
+    , exprTestGood "property syntax (5)" "f :: (Foo a, Bar b) => Num; f" num
+
     -- tests modules
     , exprTestGood "basic Main module" "module Main {[1,2,3]}" (lst num)
     , (flip $ exprTestGood "import/export") (lst num) $ T.unlines

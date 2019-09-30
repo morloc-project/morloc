@@ -192,7 +192,7 @@ pSignature = do
   v <- name
   lang <- optional (name)
   _ <- symbol "::"
-  props <- option [] (try $ sepBy1 pProperty (symbol ",") <* symbol "=>")
+  props <- option [] (try pPropertyList)
   t <- pType
   constraints <- option [] $ reserved "where" >> parens (sepBy1 pConstraint (symbol ","))
   return $ Signature (EV v) (EType
@@ -213,6 +213,11 @@ tag p =
       _ <- op ":"
       _ <- lookAhead p
       return l
+
+pPropertyList :: Parser [Property]
+pPropertyList
+  =  (parens (sepBy1 pProperty (symbol ",")) <|> sepBy1 pProperty (symbol ","))
+  <* symbol "=>"
 
 pProperty :: Parser Property
 pProperty = do 
