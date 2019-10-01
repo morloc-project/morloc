@@ -3,7 +3,7 @@ module PropertyTests
   propertyTests
 ) where
 
-import Morloc.Operators
+import Morloc.Namespace ((<>))
 import Morloc.TypeChecker.Infer
 import Morloc.TypeChecker.Namespace
 import Morloc.Parser.Parser

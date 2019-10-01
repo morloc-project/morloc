@@ -15,8 +15,7 @@ module Morloc.Parser.API
 ) where
 
 import Morloc.Parser.Parser
-import Morloc.Global (Path, Name, MorlocMonad)
-import Morloc.Operators
+import Morloc.Namespace (Path, Name, MorlocMonad)
 import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod

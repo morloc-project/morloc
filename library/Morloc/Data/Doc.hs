@@ -23,11 +23,12 @@ module Morloc.Data.Doc
     , integer
   ) where
 
-import Data.Text.Prettyprint.Doc
+import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 import Data.Text.Prettyprint.Doc.Render.Text (renderStrict)
 import qualified Data.Text as DT
 import qualified Data.Text.Lazy as DL
+import Data.Monoid ((<>))
 
 render :: Doc a -> DT.Text
 render = renderStrict . layoutPretty defaultLayoutOptions

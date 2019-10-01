@@ -15,7 +15,7 @@ module Morloc.Module
   , loadModuleMetadata
 ) where
 
-import Morloc.Global
+import Morloc.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Config as Config
@@ -23,7 +23,6 @@ import qualified Morloc.System as MS
 import qualified System.Directory as SD
 import qualified Control.Monad as CM
 import qualified Data.Maybe as DM
-import Morloc.Operators
 import qualified Data.List as DL
 
 import qualified Data.Yaml.Config as YC

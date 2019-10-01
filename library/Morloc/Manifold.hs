@@ -19,7 +19,7 @@ module Morloc.Manifold
   , uniqueRealization
 ) where
 
-import Morloc.Global
+import Morloc.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM

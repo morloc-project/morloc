@@ -57,8 +57,7 @@ module Morloc.TypeChecker.Namespace
   , Constraint(..)
 ) where
 
-import Morloc.Global (Path)
-import Morloc.Operators
+import Morloc.Namespace (Path, (<>))
 import qualified Data.List as DL
 import Control.Monad.Except (throwError)
 import qualified Control.Monad.Except as ME

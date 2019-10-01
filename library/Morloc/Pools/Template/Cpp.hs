@@ -14,7 +14,7 @@ module Morloc.Pools.Template.Cpp
   generate
 ) where
 
-import Morloc.Global
+import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import Morloc.Data.Doc

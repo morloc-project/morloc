@@ -11,8 +11,7 @@ Stability   : experimental
 
 module Morloc.Nexus.Template.Perl (generate) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import Morloc.Quasi
 import Morloc.Data.Doc hiding ((<>))
 import qualified Morloc.Language as ML

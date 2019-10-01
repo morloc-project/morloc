@@ -9,10 +9,7 @@ Stability   : experimental
 
 module Morloc.Nexus.Nexus (generate) where
 
-import Morloc.Global
-import Morloc.Operators
-import qualified Morloc.Language as ML
-import qualified Morloc.Monad as MM
+import Morloc.Namespace
 import qualified Morloc.Nexus.Template.Perl as Perl
 
 -- | For now there is just one nexus. Eventually I will add many more, such as

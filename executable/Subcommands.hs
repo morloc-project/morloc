@@ -18,8 +18,7 @@ module Subcommands
   , cmdTypecheck
 ) where
 
-import Morloc.Operators
-import Morloc.Global
+import Morloc.Namespace
 import qualified Morloc as M
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT

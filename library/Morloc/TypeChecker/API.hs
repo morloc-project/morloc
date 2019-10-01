@@ -16,8 +16,7 @@ module Morloc.TypeChecker.API (
   , Module(..)
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Data.Text as MT
@@ -25,6 +24,7 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as XI 
 import qualified Morloc.System as MS
+import qualified Morloc.Error as ME
 
 import Control.Monad.State (State, evalState, gets, get, put)
 import qualified Control.Monad as CM
@@ -34,13 +34,11 @@ import qualified Data.Map as Map
 import qualified Data.Maybe as DM
 import qualified Data.Set as Set
 
-typecheck
-  :: [Module]
-  -> Either TypeError [Module]
+typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms =
   case runStack (XI.typecheck ms) of
-    (Right result, _) -> Right result
-    (Left err, _) -> Left err
+    (Right result, _) -> return result
+    (Left err, _) -> MM.throwError . TypeError $ MT.show' err
 
 -- | local
 data Source' = Source' {
@@ -177,6 +175,7 @@ module2manifolds m (Declaration ev@(EV v) (AnnE lambda@(LamE _ _) gentype)) = do
         (TypeSet Nothing _) -> error "no general type"
         (TypeSet (Just e) rs) -> do
           args <- CM.zipWithM (exprAsArgument vars m) [0..] es
+
           realizations <- toRealizations mname m (length args) rs
           return . (flip (:)) (concat . map snd $ args) $ Manifold
             { mid = i
@@ -294,7 +293,7 @@ toRealizations :: Name -> Module -> Int -> [EType] -> Program [Realization]
 toRealizations n m l [] = do
   src <- lookupSources (moduleName m) (EV n) 
   case src of
-    Nothing -> error "Bad realization"
+    Nothing -> error $ "Bad realization: could not find '" <> MT.unpack n <> "'"
     (Just s) -> return [Realization
       { rLang = sourceLang s
       , rName = sourceName s

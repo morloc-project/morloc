@@ -19,7 +19,7 @@ module Morloc.Pools.Common
   , defaultCodeGenerator
 ) where
 
-import Morloc.Global
+import Morloc.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Language as ML
 import qualified Morloc.Config as MC

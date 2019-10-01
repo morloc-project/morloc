@@ -12,7 +12,7 @@ Stability   : experimental
 module Morloc.Nexus.Template.TerminalNexus (generate) where
 
 import Morloc.TypeChecker.API
-import Morloc.Global
+import Morloc.Namespace
 import Morloc.Quasi
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT

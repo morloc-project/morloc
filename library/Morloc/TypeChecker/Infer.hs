@@ -23,7 +23,7 @@ module Morloc.TypeChecker.Infer (
   , unrenameType
 ) where
 
-import Morloc.Operators
+import Morloc.Namespace ((<>))
 import Morloc.TypeChecker.Namespace
 import Control.Monad (foldM)
 import qualified Data.Text as T

@@ -9,8 +9,7 @@ Stability   : experimental
 
 module Morloc.Parser.Parser (readProgram, readType) where
 
-import Morloc.Global (Path)
-import Morloc.Operators
+import Morloc.Namespace (Path)
 import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS

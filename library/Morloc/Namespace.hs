@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Global
+Module      : Morloc.Namespace
 Description : All types and datastructures
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -7,9 +7,11 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Global ( 
+module Morloc.Namespace ( 
+  -- ** semigroup operator
+    (<>)
   -- ** Typeclasses
-    MorlocNodeLike(..)
+  , MorlocNodeLike(..)
   , MorlocTypeable(..)
   , SparqlSelectLike(..)
   , SparqlDatabaseLike(..)
@@ -64,6 +66,7 @@ module Morloc.Global (
   , defaultPackageMeta
 ) where
 
+import Data.Monoid
 import Data.Text                    (Text)
 import Data.RDF                     (Node, Triple)
 import Data.Map.Strict              (Map)

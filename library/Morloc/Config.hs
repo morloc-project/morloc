@@ -17,8 +17,8 @@ module Morloc.Config (
   , makeLibSourceString
 ) where
 
-import Morloc.Global
-import Morloc.Operators hiding ((<>))
+import Morloc.Namespace
+import Morloc.Util ((|>>))
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT

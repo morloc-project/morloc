@@ -9,16 +9,18 @@ Stability   : experimental
 
 module Morloc.Build
 ( 
-  build
+  buildProgram
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Language as ML
 
 import qualified System.Directory as SD
+
+buildProgram :: (Script, [Script]) -> MorlocMonad ()
+buildProgram (nexus, pools) = mapM_ build (nexus:pools)
 
 build :: Script -> MorlocMonad ()
 build s = case scriptLang s of

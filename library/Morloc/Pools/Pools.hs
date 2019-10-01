@@ -12,8 +12,7 @@ module Morloc.Pools.Pools
     generate
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.Pools.Template.R as RLang

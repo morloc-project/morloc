@@ -10,11 +10,11 @@ Stability   : experimental
 module Morloc.Generator (generate) where
 
 import Morloc.TypeChecker.API
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate mods = do
@@ -28,6 +28,8 @@ generate mods = do
   (ms, stat) <- MM.liftIO
              . (flip MM.runStateT) modelState
              $ fmap concat (mapM (module2manifolds root) (moduleBody root))
+
+  MM.liftIO . MT.putStrLn . MT.show' $ ms
 
   -- nexus :: Script
   -- generate the nexus script

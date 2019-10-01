@@ -29,8 +29,8 @@ module Morloc.Monad
   , module Control.Monad.Writer
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
+import Morloc.Util ((|>>))
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 

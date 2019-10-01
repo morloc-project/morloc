@@ -39,8 +39,8 @@ module Morloc.Data.RDF (
   , rdfAppend
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
+import Morloc.Util ((|>>))
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc  as G
 import qualified Morloc.Monad     as MM

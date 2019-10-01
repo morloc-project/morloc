@@ -16,8 +16,7 @@ module Morloc.Sparql (
   , module Database.HSparql.Connection
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import qualified Morloc.Data.RDF as MR
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc as G

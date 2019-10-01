@@ -21,12 +21,22 @@ module Morloc.Util
   , shareAttr
   , spreadAttr
   , groupSortWith
+  -- ** operators
+  , (|>>) -- piped fmap
+  , (</>) -- Filesystem utility operators from System.FilePath
 ) where
 
 import qualified Data.List as DL
 import qualified Data.List.Extra as DLE
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
+import System.FilePath
+import Data.Function ((&))
+
+-- | pipe the lhs functor into the rhs function
+infixl 1 |>>
+(|>>) :: Functor f => f a -> (a -> b) -> f b
+(|>>) = flip fmap
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f

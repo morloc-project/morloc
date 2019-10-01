@@ -19,8 +19,7 @@ module Morloc.TypeHandler
   , chooseDeclaration
 ) where
 
-import Morloc.Global
-import Morloc.Operators
+import Morloc.Namespace
 import qualified Morloc.Monad as M
 import qualified Morloc.Data.Text as MT
 import qualified Data.List as DL

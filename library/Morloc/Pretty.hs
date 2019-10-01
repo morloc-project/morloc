@@ -9,9 +9,8 @@ Stability   : experimental
 
 module Morloc.Pretty ( ) where
 
-import Morloc.Global
-import Morloc.Operators
-import Morloc.Data.Doc hiding ((<>))
+import Morloc.Namespace
+import Morloc.Data.Doc
 
 instance Pretty MType where
   pretty (MConcType _ n []) = pretty n
