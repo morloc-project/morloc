@@ -13,6 +13,7 @@ module Morloc.Build
 ) where
 
 import Morloc.Global
+import Morloc.Operators
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Language as ML
@@ -32,9 +33,10 @@ build s = case scriptLang s of
 gccBuild :: Script -> MT.Text -> MorlocMonad ()
 gccBuild s cmd = do
   let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
-  let exe = ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))  
+  let exe = ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))
+  let inc = ["-I" <> i | i <- scriptInclude s]
   MM.liftIO $ MT.writeFile (MT.unpack src) (scriptCode s) 
-  MM.runCommand "GccBuild" $ MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s)
+  MM.runCommand "GccBuild" $ MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
 
 -- | Build an interpreted script.
 writeInterpreted :: Script -> IO ()

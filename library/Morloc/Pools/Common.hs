@@ -27,6 +27,7 @@ import Morloc.Pretty () -- just for mshow instances
 import qualified Morloc.Monad as MM
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.System as MS
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as DM
 import qualified Data.List as DL
@@ -136,6 +137,7 @@ defaultCodeGenerator g f manifolds packMap = do
       , scriptLang = gLang g
       , scriptCode = render doc
       , scriptCompilerFlags = filter (/= "") . map packageGccFlags $ statePackageMeta state
+      , scriptInclude = DL.nub . map MS.takeDirectory $ (serialSources packMap)
     }
 
 -- call a manifold and deserialize the return value

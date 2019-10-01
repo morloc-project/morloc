@@ -19,6 +19,7 @@ module Morloc.Pools.Template.C
 
 import Morloc.Global
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.System as MS
 import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.Pools.Common
@@ -26,21 +27,12 @@ import Morloc.Pools.Common
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g wrapIncludeString
 
--- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
--- Include statements in C can be either wrapped in angle brackets (e.g.,
--- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
--- is implementation specific. I currently use the GCC compiler. For quoted
--- strings, it first searches relative to the working directory and then, if
--- nothing is found, searches system files. For angle brackets, it searches
--- only system files: <https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html>. So
--- quoting seems more reasonable, for now. This might change only if I start
--- loading the morloc libraries into the system directories (which might be
--- reasonable), though still, quotes would work.
+-- See comments above the homologous Cpp.hs function
 wrapIncludeString
   :: Monad m
   => MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
   -> m MDoc
-wrapIncludeString = return . dquotes . pretty
+wrapIncludeString = return . dquotes . pretty . MS.takeFileName
 
 g = Grammar {
       gLang        = gLang'

@@ -13,6 +13,7 @@ module Morloc.System
     , getHomeDirectory
     , appendPath
     , takeDirectory
+    , takeFileName
     , combine
   ) where
 
@@ -28,6 +29,9 @@ combine x y = MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)
 
 takeDirectory :: MT.Text -> MT.Text
 takeDirectory x = MT.pack $ Path.takeDirectory (MT.unpack x)
+
+takeFileName :: MT.Text -> MT.Text
+takeFileName x = MT.pack $ Path.takeFileName (MT.unpack x)
 
 -- | Append POSIX paths encoded as Text
 appendPath :: MT.Text -> MT.Text -> MT.Text

@@ -16,6 +16,7 @@ module Morloc.Pools.Template.Cpp
 
 import Morloc.Global
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.System as MS
 import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.Pools.Common
@@ -33,11 +34,19 @@ generate = defaultCodeGenerator g wrapIncludeString
 -- quoting seems more reasonable, for now. This might change only if I start
 -- loading the morloc libraries into the system directories (which might be
 -- reasonable), though still, quotes would work.
+--
+-- UPDATE: The build system will now read the source paths from the Script
+-- object and write an `-I${MORLOC_HOME}/lib/${MORLOC_PACKAGE}` argument for
+-- g++. This will tell g++ where to look for headers. So now in the generated
+-- source code I can just write the basename. This makes the generated code
+-- neater (no hard-coded local paths), but now the g++ compiler will search
+-- through all the module paths for each file, which introduces the possibility
+-- of name conflicts.
 wrapIncludeString
   :: Monad m
   => MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
   -> m MDoc
-wrapIncludeString = return . dquotes . pretty
+wrapIncludeString = return . dquotes . pretty . MS.takeFileName
 
 g = Grammar {
       gLang        = gLang'

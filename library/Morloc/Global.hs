@@ -143,6 +143,7 @@ data Script = Script {
     , scriptLang :: !Lang    -- ^ script language
     , scriptCode :: !Text    -- ^ full script source code
     , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
+    , scriptInclude :: [Path] -- ^ paths to morloc module directories
   }
   deriving(Ord, Eq)
 
