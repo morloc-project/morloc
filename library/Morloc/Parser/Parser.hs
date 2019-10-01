@@ -13,6 +13,7 @@ import Morloc.Global (Path)
 import Morloc.Operators
 import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.System as MS
 
 import Data.Void (Void)
 import Text.Megaparsec
@@ -110,13 +111,13 @@ pProgram f = do
 
 pToplevel :: Maybe Path -> Parser Toplevel
 pToplevel f =   try (fmap TModule (pModule f) <* optional (symbol ";"))
-            <|> fmap TModuleBody (pModuleBody <* optional (symbol ";"))
+            <|> fmap TModuleBody (pModuleBody f <* optional (symbol ";"))
 
 pModule :: Maybe Path -> Parser Module
 pModule f = do
   _ <- reserved "module"
   moduleName' <- name
-  mes <- braces ( many1 pModuleBody)
+  mes <- braces ( many1 (pModuleBody f))
   return $ makeModule f (MV moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
@@ -131,15 +132,15 @@ makeModule f n mes = Module {
   exports' = [x | (MBExport x) <- mes]
   body' = [x | (MBBody x) <- mes]
 
-pModuleBody :: Parser ModuleBody
-pModuleBody
+pModuleBody :: Maybe Path -> Parser ModuleBody
+pModuleBody f
   =   try pImport <* optional (symbol ";")
   <|> try pExport <* optional (symbol ";")
   <|> try pStatement' <* optional (symbol ";")
   <|> pExpr' <* optional (symbol ";")
   where
     pStatement' = fmap MBBody pStatement
-    pExpr' = fmap MBBody pExpr
+    pExpr' = fmap MBBody (pExpr f)
 
 pImport :: Parser ModuleBody
 pImport = do
@@ -173,7 +174,7 @@ pDataDeclaration :: Parser Expr
 pDataDeclaration = do
   v <- name
   _ <- symbol "="
-  e <- pExpr
+  e <- pExpr Nothing
   return (Declaration (EV v) e)
 
 pFunctionDeclaration :: Parser Expr
@@ -181,7 +182,7 @@ pFunctionDeclaration = do
   v <- name
   args <- many1 name
   _ <- op "="
-  e <- pExpr
+  e <- pExpr Nothing
   return $ Declaration (EV v) (curryLamE (map EV args) e)
   where
     curryLamE [] e' = e'
@@ -236,8 +237,8 @@ readType s = case parse (pType <* eof) "" s of
   Left err -> error (show err)
   Right t -> t 
 
-pExpr :: Parser Expr
-pExpr
+pExpr :: Maybe Path -> Parser Expr
+pExpr f
   =   try pRecordE
   <|> try pTuple
   <|> try pUni
@@ -246,21 +247,21 @@ pExpr
   <|> try pStrE
   <|> try pLogE
   <|> try pNumE
-  <|> try pSrcE
+  <|> try (pSrcE f)
   <|> pListE
-  <|> parens pExpr
+  <|> parens (pExpr Nothing)
   <|> pLam
   <|> pVar
 
 -- source "c" from "foo.c" ("Foo" as foo, "bar")
 -- source "R" ("sqrt", "t.test" as t_test)
-pSrcE :: Parser Expr
-pSrcE = do
+pSrcE :: Maybe Path -> Parser Expr
+pSrcE f = do
   reserved "source"
   language <- stringLiteral 
   srcfile <- optional (reserved "from" >> stringLiteral)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  return $ SrcE language srcfile rs
+  return $ SrcE language (MS.combine <$> fmap MS.takeDirectory f <*> srcfile) rs
 
 pImportSourceTerm :: Parser (EVar, EVar)
 pImportSourceTerm = do
@@ -275,18 +276,18 @@ pRecordEntryE :: Parser (EVar, Expr)
 pRecordEntryE = do
   n <- name
   _ <- symbol "="
-  e <- pExpr
+  e <- pExpr Nothing
   return (EV n, e)
 
 pListE :: Parser Expr
-pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
+pListE = fmap ListE $ brackets (sepBy (pExpr Nothing) (symbol ","))
 
 pTuple :: Parser Expr
 pTuple = do
   _ <- op "("
-  e <- pExpr
+  e <- pExpr Nothing
   _ <- op ","
-  es <- sepBy1 pExpr (op ",")
+  es <- sepBy1 (pExpr Nothing) (op ",")
   _ <- op ")"
   return (TupleE (e:es))
 
@@ -295,19 +296,19 @@ pUni = symbol "UNIT" >> return UniE
 
 pAnn :: Parser Expr
 pAnn = do
-  e <- parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
+  e <- parens (pExpr Nothing) <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pType
   return $ AnnE e t
 
 pApp :: Parser Expr
 pApp = do
-  f <- parens pExpr <|> pVar
+  f <- parens (pExpr Nothing) <|> pVar
   (e:es) <- many1 s
   return $ foldl AppE (AppE f e) es
   where
     s =   try pAnn
-      <|> try (parens pExpr)
+      <|> try (parens (pExpr Nothing))
       <|> try pUni
       <|> try pStrE
       <|> try pLogE
@@ -332,7 +333,7 @@ pLam = do
   _ <- symbol "\\"
   vs <- many1 pEVar
   _ <- symbol "->"
-  e <- pExpr
+  e <- pExpr Nothing
   return (curryLamE vs e)
   where
     curryLamE [] e' = e'

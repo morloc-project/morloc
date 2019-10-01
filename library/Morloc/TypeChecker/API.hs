@@ -24,6 +24,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as XI 
+import qualified Morloc.System as MS
 
 import Control.Monad.State (State, evalState, gets, get, put)
 import qualified Control.Monad as CM
@@ -87,7 +88,7 @@ initProgramState mods = do
     modmap = Map.fromList [(moduleName m, m) | m <- mods]
 
     mksrcmap :: Module -> Map.Map EVar Source'
-    mksrcmap m = Map.unions [makeSource (ML.readLangName x) y z | SrcE x y z <- moduleBody m]
+    mksrcmap m = Map.unions [makeSource (modulePath m) (ML.readLangName x) y z | SrcE x y z <- moduleBody m]
 
     mkexpmap :: Module -> Set.Set EVar
     mkexpmap m = Set.fromList (moduleExports m)
@@ -348,9 +349,11 @@ onSnd f (x, y) = (x, f y)
 onFst :: (a -> c) -> (a, b) -> (c, b)
 onFst f (x, y) = (f x, y)
 
-makeSource :: Maybe Lang -> Maybe Path -> [(EVar, EVar)] -> Map.Map EVar Source'
-makeSource (Just l) f xs = Map.fromList $ map (\(EV n, EV a) -> (EV a, Source' f l n a)) xs
-makeSource Nothing _ _ = error "unsupported language"
+makeSource :: Maybe Path -> Maybe Lang -> Maybe Path -> [(EVar, EVar)] -> Map.Map EVar Source'
+makeSource mpath (Just l) f xs = Map.fromList $ map (\(EV n, EV a) -> (EV a, Source' path l n a)) xs
+  where
+    path = MS.combine <$> fmap MS.takeDirectory mpath <*> f
+makeSource _ Nothing _ _ = error "unsupported language"
 
 rootModule :: [Module] -> MorlocMonad Module
 rootModule ms = case roots of
