@@ -5,8 +5,8 @@
 # RDF representation
 
  [ ] Write specification
- [ ] Handle import scoping (maybe follow R environment model)
- [ ] Remove dependency on `arq` (too slow)
+ [x] Handle import scoping (maybe follow R environment model)
+ [x] Remove dependency on `arq` (too slow)
 
 # Error reporting
 
@@ -46,9 +46,7 @@
      the type system, but is an essential one. Eventually this can be ported
      to the rule-engine.
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
- [ ] port this typechecker to Morloc
- [ ] in `TypeHandler:chooseRealization`, choose realization that minimizes
-     foreign function calls.
+ [x] port this typechecker to Morloc
 
 # Features
 

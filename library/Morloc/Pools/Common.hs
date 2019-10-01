@@ -288,8 +288,6 @@ makeSourceManifold g h m = do
           <*> pure (mArgs m)
           <*> pure (iArgs "x")
 
-  MM.liftIO . MT.putStrLn . MT.show' $ [(t,x) | (_,t,x,_,_) <- argTypes]
-
   argAssign <- mapM (unpack' name) argTypes
   return $ GeneralFunction
      { gfComments = comments

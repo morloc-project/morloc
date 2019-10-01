@@ -10,8 +10,11 @@ import qualified Morloc.TypeChecker.API as T
 import qualified Morloc.Parser.API as P
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.Generator as MG
-import qualified Morloc.Build as MB
+import Morloc.Realize (realize)
+import Morloc.Connect (connect)
+import Morloc.Serialize (serialize)
+import Morloc.Generate (generate)
+import Morloc.Build (buildProgram)
 
 typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]
 typecheck path code = P.parse path code >>= T.typecheck
@@ -40,12 +43,7 @@ writeProgram path code
   >>= realize
   -- [Manifold] -> (Script, [Script])
   -- translate modules into manifolds and manifolds into scripts of source code
-  >>= MG.generate
+  >>= generate
   -- (Script, [Script]) -> IO ()
   -- write the code and compile as needed
-  >>= MB.buildProgram
-
--- STUB
-connect = return
-realize = return
-serialize = return
+  >>= buildProgram

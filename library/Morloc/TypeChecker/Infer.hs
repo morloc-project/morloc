@@ -410,11 +410,11 @@ checkRealization :: EType -> EType -> Stack ()
 checkRealization e1 e2 = f' (etype e1) (etype e2) where
   f' :: Type -> Type -> Stack ()
   f' (FunT x1 y1) (FunT x2 y2) = f' x1 x2 >> f' y1 y2 
-  f' (FunT _ _) _ = throwError BadRealization
-  f' _ (FunT _ _) = throwError BadRealization
   f' (Forall _ x) (Forall _ y) = f' x y
   f' (Forall _ x) y            = f' x y
   f' x            (Forall _ y) = f' x y
+  f' (FunT _ _) _ = throwError BadRealization
+  f' _ (FunT _ _) = throwError BadRealization
   f' _ _ = return ()
 
 chainInfer :: Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])

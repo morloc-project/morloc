@@ -44,9 +44,13 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 import System.IO (stderr)
 import qualified System.Directory as SD
+import qualified Data.Map as Map
 
 runMorlocMonad :: Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (MorlocState db [] [])
+runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (emptyState db)
+
+emptyState :: Maybe SparqlEndPoint -> MorlocState
+emptyState db = MorlocState db [] [] Map.empty
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)

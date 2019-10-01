@@ -122,6 +122,7 @@ data MorlocState = MorlocState {
     sparqlConn :: Maybe SparqlEndPoint
   , dependencies :: [Dependency]
   , statePackageMeta :: [PackageMeta]
+  , stateSerialMaps :: Map Lang SerialMap
 }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a

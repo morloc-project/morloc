@@ -1,5 +1,5 @@
 {-|
-Module      : Manifold
+Module      : Morloc.Manifold
 Description : Functions for dealing with Manifolds
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -16,7 +16,6 @@ module Morloc.Manifold
   , getUsedManifolds
   , determineManifoldClass
   , isMorlocCall
-  , uniqueRealization
 ) where
 
 import Morloc.Namespace
@@ -27,7 +26,6 @@ import qualified Data.List as DL
 import qualified Data.Maybe as DM
 import qualified Data.Map.Strict as Map
 import qualified Morloc.System as MS
-import qualified Morloc.TypeHandler as MTH
 
 -- | Get the paths to the sources 
 getManSrcs :: Lang -> (MT.Text -> MorlocMonad MDoc) -> [Manifold] -> MorlocMonad [MDoc]
@@ -75,9 +73,9 @@ getUnpackers hash m = case mConcreteType m of
   where
     getUnpacker :: SerialMap -> MType -> MorlocMonad (Maybe MDoc)
     getUnpacker smap t =
-      case (MTH.findMostSpecificType
+      case (findMostSpecificType
              . Map.keys
-             . Map.filterWithKey (\p _ -> MTH.childOf t p)
+             . Map.filterWithKey (\p _ -> childOf t p)
              $ (serialUnpacker smap)
            ) >>= (flip Map.lookup) (serialUnpacker smap)
       of
@@ -102,20 +100,20 @@ getPacker hash m = case packerType of
 
     cPacker :: Maybe MType
     cPacker = case mConcreteType m of
-      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      (Just (MFuncType _ _ t)) -> findMostSpecificType (packers t)
       (Just _) -> error "Ah shit"
       Nothing -> Nothing
 
     aPacker :: Maybe MType
     aPacker = case mAbstractType m of
-      (Just (MFuncType _ _ t)) -> MTH.findMostSpecificType (packers t)
+      (Just (MFuncType _ _ t)) -> findMostSpecificType (packers t)
       (Just _) -> error "Ah shit"
       Nothing -> Nothing
 
     packers :: MType -> [MType]
     packers o
       = Map.keys
-      . Map.filterWithKey (\p _ -> MTH.childOf o p)
+      . Map.filterWithKey (\p _ -> childOf o p)
       $ (serialPacker hash)
 
 -- | Find the manifolds that must be defined in a pool for a given language.
@@ -127,27 +125,34 @@ getUsedManifolds lang ms = filter buildIt ms
       let mc = determineManifoldClass lang m in
         mc == Cis || mc == Source
 
--- | @realize@ determines which instances to use for each manifold.
-uniqueRealization
-  :: [Manifold] 
-  -- ^ Abstract manifolds with possibly multiple realizations or none.
-  -> MorlocMonad [Manifold]
-  -- ^ Uniquely realized manifolds (e.g., mRealizations has exactly one element)
-uniqueRealization ms = do
-  let ms' = map (MTH.chooseRealization ms) ms
-  return $ map (compInit ms') ms'
-  where
+-- | Determine if the first MType object is equal to, or a specialization of,
+-- the second MType object.
+childOf
+  :: MType -- ^ Instance type (e.g. Matrix Num 5 6)
+  -> MType -- ^ Parent type (e.g. Matrix a m n)
+  -> Bool  -- ^ True if arg #1 is equal to or an instance of arg #2
+childOf (MConcType _ n1 xs1) (MConcType _ n2 xs2)
+  -- I currently don't check out the properties, should I?
+  = n1 == n2 -- type names must be the same 
+  && all id (zipWith childOf xs1 xs2) -- child types must be the same
 
-    -- initialize composition realizations
-    compInit :: [Manifold] -> Manifold -> Manifold 
-    compInit ms'' m
-      | mDefined m = makeRealization m (mRealizations (findChild ms'' m))
-      | otherwise = m
+childOf (MConcType _ _ xs1) (MAbstType _ _ xs2)
+  =  length xs2 == 0   -- TODO: check for required properties
+  || all id (zipWith childOf xs1 xs2)
+childOf (MAbstType _ _ xs1) (MAbstType _ _ xs2)
+  = all id (zipWith childOf xs1 xs2)
+childOf (MFuncType _ is1 o1) (MFuncType _ is2 o2)
+  = all id (zipWith childOf is1 is2) && childOf o1 o2
+childOf _ _ = False
 
-    findChild :: [Manifold] -> Manifold -> Manifold
-    findChild ms'' m = case filter (\n -> mComposition n == (Just (mMorlocName m))) ms'' of
-      (child:_) -> child
-      xs -> error ("error in findChild: m=" <> show m <> " --- " <> "xs=" <> show xs)
+-- | Get the most specifc type from a list of compatible types. By compatible I
+-- mean types where either (childOf a b) or (childOf b a) is true. That is, one
+-- of them must generalize the other.
+findMostSpecificType :: [MType] -> Maybe MType
+findMostSpecificType [] = Nothing
+findMostSpecificType xs = Just (maximum xs)
 
-    makeRealization :: Manifold -> [Realization] -> Manifold
-    makeRealization p rs = p { mRealizations = map (\r -> r { rSourced = False }) rs }
+-- | Find the most general type. Also see @findMostSpecificType@.
+findMostGeneralType :: [MType] -> Maybe MType
+findMostGeneralType [] = Nothing
+findMostGeneralType xs = Just (minimum xs)
