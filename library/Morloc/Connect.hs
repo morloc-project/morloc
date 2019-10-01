@@ -167,14 +167,13 @@ module2manifolds
 module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) gentype)) = do
   i <- getId
   exported <- isExported (moduleName m) (EV lambdaName)
-  case (exported, uncurryExpr lambda) of
-    (False, _) -> return []
-    (_, (_, _, [])) -> error $ "nexus can only accept applications in declarations: "
-                             <> show lambdaName <> " :: " <> show lambda
+  case (uncurryExpr lambda) of
+    (_, _, []) -> error $ "nexus can only accept applications in declarations: "
+                        <> show lambdaName <> " :: " <> show lambda
     -- FIXME: this only allows named function, not expressions like:
     --   foo x y = (bar x) 42 y  -- where bar returns a function
     --   foo x y = (x,y)         -- where there is no function on the right
-    (_, (vars, (exprAsFunction -> EV functionName), es)) -> do
+    (vars, (exprAsFunction -> EV functionName), es) -> do
       typeset <- lookupVar (EV functionName) m
       case typeset of
         (TypeSet Nothing _) -> error "no general type"
@@ -197,7 +196,6 @@ module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) gentype)
             , mArgs = map fst args
             }
 module2manifolds m (Signature ev@(EV v) t) = do
-  i <- getId
   exported <- isExported (moduleName m) ev
   declared <- isDeclared (moduleName m) ev
   -- If v is exported but not declared, then it must refer directly to a source
@@ -205,6 +203,7 @@ module2manifolds m (Signature ev@(EV v) t) = do
   -- realization signature.
   if exported && not declared && elang t == Nothing
   then do
+    i <- getId
     (TypeSet _ rs) <- lookupVar ev m
     let args = map ArgPosi (take (nargs (etype t)) [0..])
     realizations <- toRealizations v m (length args) rs

@@ -1,0 +1,12 @@
+-- this will not compile, it is only intended to be typechecked
+
+source "Cpp" ("pair", "sqrt");
+
+export foo;
+
+snd :: forall a . a -> a -> a;
+
+sqrt :: Num -> Num;
+sqrt Cpp :: "double" -> "double"; 
+
+foo x = snd x (sqrt x);
