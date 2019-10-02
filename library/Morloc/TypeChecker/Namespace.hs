@@ -173,9 +173,11 @@ data Expr
   | AnnE Expr Type
   -- ^ (e : A)
   | NumE DS.Scientific
+  -- ^ number of arbitrary size and precision
   | LogE Bool
+  -- ^ boolean primitive
   | StrE T.Text
-  -- ^ primitives
+  -- ^ literal string
   | RecE [(EVar, Expr)]
   deriving (Show, Ord, Eq)
 
