@@ -23,12 +23,12 @@ module Morloc.TypeChecker.Infer
   ) where
 
 import Control.Monad (foldM)
+import Morloc.Namespace ((<>))
+import Morloc.TypeChecker.Namespace
 import qualified Data.List as DL
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Data.Text as T
-import Morloc.Namespace ((<>))
-import Morloc.TypeChecker.Namespace
+import qualified Morloc.Data.Text as MT
 
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
@@ -119,7 +119,7 @@ unrenameExpr :: Expr -> Expr
 unrenameExpr = mapT unrenameType
 
 unrename :: TVar -> TVar
-unrename (TV t) = TV . head $ T.splitOn "." t
+unrename (TV t) = TV . head $ MT.splitOn "." t
 
 unrenameType :: Type -> Type
 unrenameType UniT = UniT
@@ -345,7 +345,7 @@ instantiate ta tb@(ExistT v) g1 =
         Nothing ->
           throwError . OtherError $
           "Error in InstRSolve: ta=(" <>
-          show' ta <> ") tb=(" <> show' tb <> ") g1=(" <> show' g1 <> ")"
+          MT.show' ta <> ") tb=(" <> MT.show' tb <> ") g1=(" <> MT.show' g1 <> ")"
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
@@ -356,17 +356,8 @@ instantiate ta@(ExistT v) tb g1 = do
       case access1 (SolvedG v tb) g1 of
         (Just _) -> return g1
         Nothing -> error "error in InstLSolve"
--- accessWith
---   :: (Show a, Indexable a)
---   => (GammaIndex -> GammaIndex) -> a -> Gamma -> Stack Gamma
--- accessWith f gi gs = case access1 gi gs of
---   (Just (ls, x, rs)) -> return $ ls <> (f x:rs)
---   Nothing -> throwError $ AccessError ("Cannot find " <> show' (index gi) <> " in " <> show' gs)
 -- bad
 instantiate _ _ g = return g
-
-show' :: Show a => a -> T.Text
-show' = T.pack . show
 
 applyConcrete :: Expr -> Expr -> Type -> Stack Expr
 applyConcrete (AnnE e1 _) e2@(AnnE _ a) c =
@@ -374,7 +365,7 @@ applyConcrete (AnnE e1 _) e2@(AnnE _ a) c =
 applyConcrete e1 e2 t =
   throwError . OtherError $
   "Expected annotatated types in applyConcrete, got:\n  > " <>
-  show' e1 <> "\n  > " <> show' e2 <> "\n  > " <> show' t
+  MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
 
 isAnnG :: EVar -> GammaIndex -> Bool
 isAnnG e1 (AnnG (VarE e2) _)
@@ -556,7 +547,7 @@ infer' _ (TupleE []) = throwError EmptyTuple
 infer' _ (TupleE [_]) = throwError TupleSingleton
 infer' g (TupleE xs) = do
   (g', ts, es) <- chainInfer g (reverse xs) [] []
-  let v = TV . T.pack $ "Tuple" ++ (show (length xs))
+  let v = TV . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
   return (g', t, AnnE e t)

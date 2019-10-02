@@ -66,20 +66,20 @@ import qualified Data.List as DL
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
-import qualified Data.Text as T
 import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Terminal
 import Data.Text.Prettyprint.Doc.Render.Terminal.Internal
 import Morloc.Namespace (Path, (<>))
+import qualified Morloc.Data.Text as MT
 
 type GeneralStack c e l s a
    = MR.ReaderT c (ME.ExceptT e (MW.WriterT l (MS.StateT s MI.Identity))) a
 
-type Stack a = GeneralStack StackConfig TypeError [T.Text] StackState a
+type Stack a = GeneralStack StackConfig TypeError [MT.Text] StackState a
 
 -- | currently I do nothing with the Reader and Writer monads, but I'm leaving
 -- them in for now since I will need them when I plug this all into Morloc.
-runStack :: Stack a -> (Either TypeError a, [T.Text])
+runStack :: Stack a -> (Either TypeError a, [MT.Text])
 runStack e =
   fst .
   MI.runIdentity .
@@ -89,15 +89,15 @@ runStack e =
 type Gamma = [GammaIndex]
 
 newtype EVar =
-  EV T.Text
+  EV MT.Text
   deriving (Show, Eq, Ord)
 
 newtype MVar =
-  MV T.Text
+  MV MT.Text
   deriving (Show, Eq, Ord)
 
 newtype TVar =
-  TV T.Text
+  TV MT.Text
   deriving (Show, Eq, Ord)
 
 data StackState =
@@ -129,6 +129,7 @@ data GammaIndex
   | MarkEG EVar
   -- ^ ...
   | SrcG (EVar, Language, Maybe Path, EVar)
+  -- ^ source
   deriving (Ord, Eq, Show)
 
 data Import =
@@ -176,7 +177,7 @@ data Expr
   -- ^ number of arbitrary size and precision
   | LogE Bool
   -- ^ boolean primitive
-  | StrE T.Text
+  | StrE MT.Text
   -- ^ literal string
   | RecE [(EVar, Expr)]
   deriving (Show, Ord, Eq)
@@ -203,19 +204,19 @@ data Property
   = Pack -- data structure to JSON
   | Unpack -- JSON to data structure
   | Cast -- casts from type A to B
-  | GeneralProperty [T.Text]
+  | GeneralProperty [MT.Text]
   deriving (Show, Eq, Ord)
 
 -- | Eventually, Constraint should be a richer type, but for they are left as
 -- unparsed lines of text
 newtype Constraint =
-  Con T.Text
+  Con MT.Text
   deriving (Show, Eq, Ord)
 
 -- | Eventually Lang should be an enumeration with a term for each supported
 -- language (as it is in Morloc). But until Xi is connected with Morloc, I will
 -- leave it as general text.
-type Language = T.Text
+type Language = MT.Text
 
 -- | Extended Type that may represent a language specific type as well as sets
 -- of properties and constrains.
@@ -238,7 +239,7 @@ data TypeError
   | SubtypeError Type Type
   | ExistentialError
   | BadExistentialCast
-  | AccessError T.Text
+  | AccessError MT.Text
   | NonFunctionDerive
   | UnboundVariable EVar
   | OccursCheckFail
@@ -248,7 +249,7 @@ data TypeError
   | ToplevelRedefinition
   | NoAnnotationFound -- I don't know what this is for
   | NotImplemented -- this should only be used as a placeholder
-  | OtherError T.Text
+  | OtherError MT.Text
   -- container errors
   | EmptyTuple
   | TupleSingleton
@@ -429,7 +430,7 @@ generalize t = generalize' existentialMap t
     generalize' [] t' = t'
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
     existentialMap =
-      zip (Set.toList (findExistentials t)) (map (TV . T.pack) variables)
+      zip (Set.toList (findExistentials t)) (map (TV . MT.pack) variables)
     variables = [1 ..] >>= flip CM.replicateM ['a' .. 'z']
     findExistentials :: Type -> Set.Set TVar
     findExistentials UniT = Set.empty
@@ -466,12 +467,12 @@ newvar = do
   return (ExistT $ TV v)
   where
     newvars =
-      zipWith (\x y -> T.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])
+      zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])
 
 newqul :: TVar -> Stack TVar
 newqul (TV v) = do
   s <- MS.get
-  let v' = TV (v <> "." <> (T.pack . show $ stateQul s)) -- create a new variable such as "a.0"
+  let v' = TV (v <> "." <> (MT.pack . show $ stateQul s)) -- create a new variable such as "a.0"
   MS.put $ s {stateQul = stateQul s + 1}
   return v'
 
@@ -631,25 +632,25 @@ class Describable a where
 
 instance Describable Expr where
   desc (UniE) = "UniE"
-  desc (VarE (EV v)) = "VarE:" ++ T.unpack v
+  desc (VarE (EV v)) = "VarE:" ++ MT.unpack v
   desc (ListE _) = "ListE"
   desc (TupleE _) = "Tuple"
   desc (SrcE _ _ _) = "SrcE:"
-  desc (LamE (EV v) _) = "LamE:" ++ T.unpack v
+  desc (LamE (EV v) _) = "LamE:" ++ MT.unpack v
   desc (AppE e1 e2) = "AppE (" ++ desc e1 ++ ") (" ++ desc e2 ++ ")"
   desc (AnnE e _) = "AnnE (" ++ desc e ++ ")"
   desc (NumE x) = "NumE:" ++ show x
   desc (LogE x) = "LogE:" ++ show x
   desc (StrE x) = "StrE:" ++ show x
   desc (RecE _) = "RecE:"
-  desc (Declaration (EV e) _) = "Declaration:" ++ T.unpack e
-  desc (Signature (EV e) _) = "Signature:" ++ T.unpack e
+  desc (Declaration (EV e) _) = "Declaration:" ++ MT.unpack e
+  desc (Signature (EV e) _) = "Signature:" ++ MT.unpack e
 
 instance Describable Type where
   desc (UniT) = "UniT"
-  desc (VarT (TV v)) = "VarT:" ++ T.unpack v
-  desc (ExistT (TV v)) = "ExistT:" ++ T.unpack v
-  desc (Forall (TV v) _) = "Forall:" ++ T.unpack v
+  desc (VarT (TV v)) = "VarT:" ++ MT.unpack v
+  desc (ExistT (TV v)) = "ExistT:" ++ MT.unpack v
+  desc (Forall (TV v) _) = "Forall:" ++ MT.unpack v
   desc (FunT t1 t2) = "FunT (" ++ desc t1 ++ ") (" ++ desc t2 ++ ")"
-  desc (ArrT (TV v) xs) = "ArrT:" ++ T.unpack v ++ " " ++ (concat . map desc) xs
+  desc (ArrT (TV v) xs) = "ArrT:" ++ MT.unpack v ++ " " ++ (concat . map desc) xs
   desc (RecT _) = "RecT:"

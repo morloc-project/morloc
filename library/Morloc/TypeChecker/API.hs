@@ -14,11 +14,11 @@ module Morloc.TypeChecker.API
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.Namespace
-import qualified Morloc.TypeChecker.Infer as XI
+import qualified Morloc.TypeChecker.Infer as Infer
 import Morloc.TypeChecker.Namespace
 
 typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms =
-  case runStack (XI.typecheck ms) of
+  case runStack (Infer.typecheck ms) of
     (Right result, _) -> return result
     (Left err, _) -> MM.throwError . TypeError $ MT.show' err
