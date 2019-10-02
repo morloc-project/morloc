@@ -1,5 +1,5 @@
-module UnitTests
-  ( unitTests
+module UnitTypeTests
+  ( unitTypeTests
   ) where
 
 import Morloc.Namespace ((<>))
@@ -101,9 +101,9 @@ tuple ts = ArrT v ts
 
 record rs = RecT (map (\(x, t) -> (TV x, t)) rs)
 
-unitTests =
+unitTypeTests =
   testGroup
-    "Unit tests"
+    "Typechecker unit tests"
     -- comments
     [ exprTestGood "block comments (1)" "{- -} 42" num
     , exprTestGood "block comments (2)" " {--} 42{-   foo -} " num

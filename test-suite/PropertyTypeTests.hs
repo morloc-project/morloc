@@ -1,5 +1,5 @@
-module PropertyTests
-  ( propertyTests
+module PropertyTypeTests
+  ( propertyTypeTests
   ) where
 
 import Morloc.Namespace ((<>))
@@ -14,9 +14,9 @@ import qualified Test.QuickCheck as QC
 import Test.Tasty
 import Test.Tasty.QuickCheck as TQC
 
-propertyTests =
+propertyTypeTests =
   testGroup
-    "Property tests"
+    "Typechecking property tests"
    -- generalization
     [ TQC.testProperty "size(Gen(t)) >= size(t)" $ \t ->
         typeSize (generalize t) >= typeSize t

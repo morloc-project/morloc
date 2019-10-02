@@ -14,6 +14,7 @@ Except, and Reader monad.
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
+  , evalMorlocMonad
   , writeMorlocReturn
   , runCommand
   , runCommandWith
@@ -27,27 +28,37 @@ module Morloc.Monad
   , module Control.Monad.Writer
   ) where
 
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
-import Morloc.Namespace
-import Morloc.Util ((|>>))
-
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Writer
-import qualified Data.Map as Map
 import Morloc.Error () -- for MorlocError Show instance
+import Morloc.Namespace
+import Morloc.Util ((|>>))
+import System.IO (stderr)
+import qualified Data.Map as Map
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 import qualified System.Directory as SD
 import qualified System.Exit as SE
-import System.IO (stderr)
 import qualified System.Process as SP
 
 runMorlocMonad ::
      Config -> MorlocMonad a -> IO (MorlocReturn a)
 runMorlocMonad config ev =
   runStateT (runWriterT (runExceptT (runReaderT ev config))) emptyState
+
+-- | Evaluate a morloc monad
+evalMorlocMonad ::
+     Config -- ^ use default config object if Nothing
+  -> MorlocMonad a
+  -> IO a
+evalMorlocMonad config m = do
+  ((x, _), _) <- runMorlocMonad config m
+  case x of
+    (Left err) -> error (show err)
+    (Right value) -> return value 
 
 emptyState :: MorlocState
 emptyState = MorlocState [] [] Map.empty

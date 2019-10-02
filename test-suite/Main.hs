@@ -1,9 +1,10 @@
 import Test.Tasty
 
-import PropertyTests (propertyTests)
-import UnitTests (unitTests)
+import PropertyTypeTests (propertyTypeTests)
+import UnitTypeTests (unitTypeTests)
+import UnitManifoldTests (unitManifoldTests)
 
-main = defaultMain tests
-
-tests :: TestTree
-tests = testGroup "Tests" [unitTests, propertyTests]
+main = do
+  manifoldTests <- unitManifoldTests
+  defaultMain $
+    testGroup "Morloc tests" [unitTypeTests, propertyTypeTests, manifoldTests]
