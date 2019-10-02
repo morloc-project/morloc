@@ -8,27 +8,25 @@ Stability   : experimental
 
 This module re-exports Leijen's text builder along with a few other utilities.
 -}
-
 module Morloc.Data.Doc
-  ( 
-      module Data.Text.Prettyprint.Doc
-    , putDoc
-    , render
-    , render'
-    , textEsc'
-    , tupledNoFold
+  ( module Data.Text.Prettyprint.Doc
+  , putDoc
+  , render
+  , render'
+  , textEsc'
+  , tupledNoFold
     -- ** These are not strictly necessary, since @pretty@ could be used, but
     -- they avoid the requirements of an explicity type signature.
-    , int
-    , integer
+  , int
+  , integer
   ) where
 
+import Data.Monoid ((<>))
+import qualified Data.Text as DT
+import qualified Data.Text.Lazy as DL
 import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 import Data.Text.Prettyprint.Doc.Render.Text (renderStrict)
-import qualified Data.Text as DT
-import qualified Data.Text.Lazy as DL
-import Data.Monoid ((<>))
 
 render :: Doc a -> DT.Text
 render = renderStrict . layoutPretty defaultLayoutOptions
@@ -47,12 +45,12 @@ tupledNoFold :: [Doc a] -> Doc a
 tupledNoFold [] = ""
 tupledNoFold (x:xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
 
-
 textEsc' :: DT.Text -> Doc a
-textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit where
-  escapeChar '\n' = "\\n"
-  escapeChar '\t' = "\\t"
-  escapeChar '\r' = "\\r"
-  escapeChar '"'  = "\\\""
-  escapeChar '\\' = "\\\\"
-  escapeChar c    = DT.singleton c
+textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit
+  where
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar '"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar c = DT.singleton c

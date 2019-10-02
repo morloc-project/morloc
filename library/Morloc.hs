@@ -1,27 +1,26 @@
-module Morloc (
-    writeProgram
+module Morloc
+  ( writeProgram
   , typecheck
   , P.cute
   , P.ugly
-) where
+  ) where
 
-import Morloc.Namespace
-import qualified Morloc.TypeChecker.API as T
-import qualified Morloc.Parser.API as P
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import Morloc.Realize (realize)
-import Morloc.Connect (connect)
-import Morloc.Serialize (serialize)
-import Morloc.Generate (generate)
 import Morloc.Build (buildProgram)
+import Morloc.Connect (connect)
+import qualified Morloc.Data.Text as MT
+import Morloc.Generate (generate)
+import Morloc.Namespace
+import qualified Morloc.Parser.API as P
+import Morloc.Realize (realize)
+import Morloc.Serialize (serialize)
+import qualified Morloc.TypeChecker.API as T
 
 typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]
 typecheck path code = P.parse path code >>= T.typecheck
 
 -- | Build a program as a local executable
-writeProgram
-  :: Maybe Path -- ^ source code filename (for debugging messages)
+writeProgram ::
+     Maybe Path -- ^ source code filename (for debugging messages)
   -> MT.Text    -- ^ source code text
   -> MorlocMonad ()
 writeProgram path code

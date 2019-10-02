@@ -6,40 +6,42 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+module Morloc.Parser.Parser
+  ( readProgram
+  , readType
+  ) where
 
-module Morloc.Parser.Parser (readProgram, readType) where
-
-import Morloc.Namespace (Path)
-import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Text as MT
+import Morloc.Namespace (Path)
 import qualified Morloc.System as MS
+import Morloc.TypeChecker.Namespace
 
+import qualified Data.Scientific as DS
+import qualified Data.Set as Set
 import Data.Void (Void)
 import Text.Megaparsec
 import Text.Megaparsec.Char
-import qualified Data.Map as Map
-import qualified Data.Scientific as DS
-import qualified Data.Set as Set
 import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser = Parsec Void MT.Text
 
 readProgram :: Maybe Path -> MT.Text -> [Module]
-readProgram f s = case parse (sc >> pProgram f <* eof) (maybe "<expr>" MT.unpack f) s of 
-      Left err -> error (show err)
-      Right es -> es
+readProgram f s =
+  case parse (sc >> pProgram f <* eof) (maybe "<expr>" MT.unpack f) s of
+    Left err -> error (show err)
+    Right es -> es
 
 many1 :: Parser a -> Parser [a]
 many1 p = do
   x <- p
   xs <- many p
-  return (x:xs)
+  return (x : xs)
 
 -- sc stands for space consumer
 sc :: Parser ()
 sc = L.space space1 lineComment blockComment
   where
-    lineComment  = L.skipLineComment "--"
+    lineComment = L.skipLineComment "--"
     blockComment = L.skipBlockComment "{-" "-}"
 
 symbol = L.symbol sc
@@ -64,8 +66,18 @@ angles :: Parser a -> Parser a
 angles p = lexeme $ between (symbol "<") (symbol ">") p
 
 reservedWords :: [MT.Text]
-reservedWords = ["module", "source", "from", "where", "import",
-                 "export", "as", "True", "False", "forall"]
+reservedWords =
+  [ "module"
+  , "source"
+  , "from"
+  , "where"
+  , "import"
+  , "export"
+  , "as"
+  , "True"
+  , "False"
+  , "forall"
+  ]
 
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
@@ -84,15 +96,17 @@ stringLiteral = do
   return $ MT.pack s
 
 name :: Parser MT.Text
-name = (lexeme . try) (p >>= check) where
-  p       = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
-  check x = if elem x reservedWords
-              then failure Nothing Set.empty -- TODO: error message
-              else return x
+name = (lexeme . try) (p >>= check)
+  where
+    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
+    check x =
+      if elem x reservedWords
+        then failure Nothing Set.empty -- TODO: error message
+        else return x
 
 data Toplevel
   = TModule Module
-  | TModuleBody ModuleBody 
+  | TModuleBody ModuleBody
 
 data ModuleBody
   = MBImport Import
@@ -109,34 +123,36 @@ pProgram f = do
     es' -> return $ makeModule f (MV "Main") es' : mods
 
 pToplevel :: Maybe Path -> Parser Toplevel
-pToplevel f =   try (fmap TModule (pModule f) <* optional (symbol ";"))
-            <|> fmap TModuleBody (pModuleBody f <* optional (symbol ";"))
+pToplevel f =
+  try (fmap TModule (pModule f) <* optional (symbol ";")) <|>
+  fmap TModuleBody (pModuleBody f <* optional (symbol ";"))
 
 pModule :: Maybe Path -> Parser Module
 pModule f = do
   _ <- reserved "module"
   moduleName' <- name
-  mes <- braces ( many1 (pModuleBody f))
+  mes <- braces (many1 (pModuleBody f))
   return $ makeModule f (MV moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
-makeModule f n mes = Module {
-      moduleName = n
+makeModule f n mes =
+  Module
+    { moduleName = n
     , modulePath = f
     , moduleImports = imports'
     , moduleExports = exports'
     , moduleBody = body'
-  } where
-  imports' = [x | (MBImport x) <- mes]
-  exports' = [x | (MBExport x) <- mes]
-  body' = [x | (MBBody x) <- mes]
+    }
+  where
+    imports' = [x | (MBImport x) <- mes]
+    exports' = [x | (MBExport x) <- mes]
+    body' = [x | (MBBody x) <- mes]
 
 pModuleBody :: Maybe Path -> Parser ModuleBody
-pModuleBody f
-  =   try pImport <* optional (symbol ";")
-  <|> try pExport <* optional (symbol ";")
-  <|> try pStatement' <* optional (symbol ";")
-  <|> pExpr' <* optional (symbol ";")
+pModuleBody f =
+  try pImport <* optional (symbol ";") <|> try pExport <* optional (symbol ";") <|>
+  try pStatement' <* optional (symbol ";") <|>
+  pExpr' <* optional (symbol ";")
   where
     pStatement' = fmap MBBody pStatement
     pExpr' = fmap MBBody (pExpr f)
@@ -145,14 +161,16 @@ pImport :: Parser ModuleBody
 pImport = do
   _ <- reserved "import"
   n <- name
-  imports <- optional $ parens (sepBy pImportTerm (symbol ","))
-          <|> fmap (\x -> [(EV x, EV x)]) name
-  return . MBImport $ Import
-    { importModuleName = MV n
-    , importInclude = imports
-    , importExclude = []
-    , importNamespace = Nothing
-    }
+  imports <-
+    optional $
+    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EV x, EV x)]) name
+  return . MBImport $
+    Import
+      { importModuleName = MV n
+      , importInclude = imports
+      , importExclude = []
+      , importNamespace = Nothing
+      }
 
 pImportTerm :: Parser (EVar, EVar)
 pImportTerm = do
@@ -168,7 +186,7 @@ pStatement = try pDeclaration <|> pSignature
 
 pDeclaration :: Parser Expr
 pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
- 
+
 pDataDeclaration :: Parser Expr
 pDataDeclaration = do
   v <- name
@@ -185,7 +203,7 @@ pFunctionDeclaration = do
   return $ Declaration (EV v) (curryLamE (map EV args) e)
   where
     curryLamE [] e' = e'
-    curryLamE (v:vs') e' = LamE v (curryLamE vs' e') 
+    curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
 
 pSignature :: Parser Expr
 pSignature = do
@@ -194,19 +212,22 @@ pSignature = do
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
-  constraints <- option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
-  return $ Signature (EV v) (EType
-    { etype = t
-    , elang = lang
-    , eprop = Set.fromList props
-    , econs = Set.fromList constraints
-    , esource = Nothing
-    })
+  constraints <-
+    option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
+  return $
+    Signature
+      (EV v)
+      (EType
+         { etype = t
+         , elang = lang
+         , eprop = Set.fromList props
+         , econs = Set.fromList constraints
+         , esource = Nothing
+         })
 
 -- | match an optional tag that precedes some construction
 tag :: Parser a -> Parser (Maybe MT.Text)
-tag p =
-  optional (try tag')
+tag p = optional (try tag')
   where
     tag' = do
       l <- name
@@ -215,12 +236,12 @@ tag p =
       return l
 
 pPropertyList :: Parser [Property]
-pPropertyList
-  =  (parens (sepBy1 pProperty (symbol ",")) <|> sepBy1 pProperty (symbol ","))
-  <* op "=>"
+pPropertyList =
+  (parens (sepBy1 pProperty (symbol ",")) <|> sepBy1 pProperty (symbol ",")) <*
+  op "=>"
 
 pProperty :: Parser Property
-pProperty = do 
+pProperty = do
   ps <- many1 name
   case ps of
     ["packs"] -> return Pack
@@ -232,32 +253,29 @@ pConstraint :: Parser Constraint
 pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 readType :: MT.Text -> Type
-readType s = case parse (pType <* eof) "" s of 
-  Left err -> error (show err)
-  Right t -> t 
+readType s =
+  case parse (pType <* eof) "" s of
+    Left err -> error (show err)
+    Right t -> t
 
 pExpr :: Maybe Path -> Parser Expr
-pExpr f
-  =   try pRecordE
-  <|> try pTuple
-  <|> try pUni
-  <|> try pAnn
-  <|> try pApp
-  <|> try pStrE
-  <|> try pLogE
-  <|> try pNumE
-  <|> try (pSrcE f)
-  <|> pListE
-  <|> parens (pExpr Nothing)
-  <|> pLam
-  <|> pVar
+pExpr f =
+  try pRecordE <|> try pTuple <|> try pUni <|> try pAnn <|> try pApp <|>
+  try pStrE <|>
+  try pLogE <|>
+  try pNumE <|>
+  try (pSrcE f) <|>
+  pListE <|>
+  parens (pExpr Nothing) <|>
+  pLam <|>
+  pVar
 
 -- source "c" from "foo.c" ("Foo" as foo, "bar")
 -- source "R" ("sqrt", "t.test" as t_test)
 pSrcE :: Maybe Path -> Parser Expr
 pSrcE f = do
   reserved "source"
-  language <- stringLiteral 
+  language <- stringLiteral
   srcfile <- optional (reserved "from" >> stringLiteral)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
   return $ SrcE language (MS.combine <$> fmap MS.takeDirectory f <*> srcfile) rs
@@ -288,14 +306,15 @@ pTuple = do
   _ <- op ","
   es <- sepBy1 (pExpr Nothing) (op ",")
   _ <- op ")"
-  return (TupleE (e:es))
+  return (TupleE (e : es))
 
 pUni :: Parser Expr
 pUni = symbol "UNIT" >> return UniE
 
 pAnn :: Parser Expr
 pAnn = do
-  e <- parens (pExpr Nothing) <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
+  e <-
+    parens (pExpr Nothing) <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pType
   return $ AnnE e t
@@ -306,14 +325,12 @@ pApp = do
   (e:es) <- many1 s
   return $ foldl AppE (AppE f e) es
   where
-    s =   try pAnn
-      <|> try (parens (pExpr Nothing))
-      <|> try pUni
-      <|> try pStrE
-      <|> try pLogE
-      <|> try pNumE
-      <|> pListE
-      <|> pVar
+    s =
+      try pAnn <|> try (parens (pExpr Nothing)) <|> try pUni <|> try pStrE <|>
+      try pLogE <|>
+      try pNumE <|>
+      pListE <|>
+      pVar
 
 pLogE :: Parser Expr
 pLogE = pTrue <|> pFalse
@@ -336,7 +353,7 @@ pLam = do
   return (curryLamE vs e)
   where
     curryLamE [] e' = e'
-    curryLamE (v:vs') e' = LamE v (curryLamE vs' e') 
+    curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
 
 pVar :: Parser Expr
 pVar = fmap VarE pEVar
@@ -345,17 +362,13 @@ pEVar :: Parser EVar
 pEVar = fmap EV name
 
 pType :: Parser Type
-pType
-  =   pExistential
-  <|> try pUniT
-  <|> try pRecordT
-  <|> try pForAllT
-  <|> try pArrT
-  <|> try pFunT
-  <|> try (parens pType)
-  <|> pListT
-  <|> pTupleT
-  <|> pVarT
+pType =
+  pExistential <|> try pUniT <|> try pRecordT <|> try pForAllT <|> try pArrT <|>
+  try pFunT <|>
+  try (parens pType) <|>
+  pListT <|>
+  pTupleT <|>
+  pVarT
 
 pUniT :: Parser Type
 pUniT = do
@@ -401,7 +414,7 @@ pFunT = do
   t <- pType'
   _ <- op "->"
   ts <- sepBy1 pType' (op "->")
-  return $ foldr1 FunT (t:ts)
+  return $ foldr1 FunT (t : ts)
   where
     pType' = parens pType <|> try pArrT <|> pVarT <|> pListT
 
@@ -426,4 +439,4 @@ pForAllT = do
   return (curryForall vs t)
   where
     curryForall [] e' = e'
-    curryForall (v:vs') e' =  Forall (TV v) (curryForall vs' e') 
+    curryForall (v:vs') e' = Forall (TV v) (curryForall vs' e')

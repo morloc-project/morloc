@@ -15,7 +15,6 @@ import Morloc.TypeChecker.API
 import Morloc.Namespace
 import Morloc.Quasi
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 
 generate :: [Module] -> MorlocMonad Script 
 generate mods = return $ Script {
@@ -23,6 +22,7 @@ generate mods = return $ Script {
   , scriptLang = CLang
   , scriptCode = render $ makeBody mods
   , scriptCompilerFlags = []
+  , scriptInclude = []
   }
 
 

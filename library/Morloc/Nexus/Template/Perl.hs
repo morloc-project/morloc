@@ -8,37 +8,41 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+module Morloc.Nexus.Template.Perl
+  ( generate
+  ) where
 
-module Morloc.Nexus.Template.Perl (generate) where
-
-import Morloc.Namespace
-import Morloc.Quasi
-import Morloc.Data.Doc hiding ((<>))
+import qualified Control.Monad as CM
+import qualified Data.Maybe as DM
+import qualified Morloc.Config as MC
+import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Morloc.Config as MC
-import qualified Morloc.Data.Text as MT
-import qualified Data.Maybe as DM
-import qualified Control.Monad as CM
+import Morloc.Namespace
+import Morloc.Quasi
 
 -- | A function for building a pool call
 type PoolBuilder
-  =  MDoc    -- pool name
-  -> MDoc    -- pool id
-  -> [MDoc]  -- output list of CLI arguments
+   = MDoc -- pool name
+      -> MDoc -- pool id
+          -> [MDoc] -- output list of CLI arguments
 
 type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
 
 generate :: [Manifold] -> MorlocMonad Script
 generate all_manifolds = do
   let manifolds = filter isExported all_manifolds
-      names = map (pretty . getName) manifolds     -- [MDoc]
+      names = map (pretty . getName) manifolds -- [MDoc]
   fdata <- CM.mapM getFData manifolds -- [FData]
-  return $ Script { scriptBase = "nexus"
-                  , scriptLang = ML.PerlLang
-                  , scriptCode = render $ main names fdata
-                  , scriptCompilerFlags = []
-                  }
+  return $
+    Script
+      { scriptBase = "nexus"
+      , scriptLang = ML.PerlLang
+      , scriptCode = render $ main names fdata
+      , scriptCompilerFlags = []
+      , scriptInclude = []
+      }
 
 getName :: Manifold -> MT.Text
 getName m = maybe (mMorlocName m) id (mComposition m)
@@ -54,26 +58,27 @@ getFData m = do
   let mid' = pretty . MT.show' $ mid m
       lang = mLang m
   case MC.getPoolCallBuilder config lang id of
-    (Just call') -> return $
+    (Just call') ->
+      return $
       ( call'
       , pretty (getName m)
       , getNArgs m
       , pretty (ML.makeExecutableName lang "pool")
-      , mid' 
-      )
-    Nothing -> MM.throwError . GeneratorError $
+      , mid')
+    Nothing ->
+      MM.throwError . GeneratorError $
       "No execution method found for language: " <> ML.showLangName lang
 
 isExported :: Manifold -> Bool
-isExported m =
+isExported m
   -- shallow wrappers around a source function
-  (mExported m && not (mCalled m) && mSourced m)
-  || -- compositions
+ =
+  (mExported m && not (mCalled m) && mSourced m) || -- compositions
   (mExported m && DM.isJust (mComposition m))
 
-
 main :: [MDoc] -> [FData] -> MDoc
-main names fdata = [idoc|#!/usr/bin/env perl
+main names fdata =
+  [idoc|#!/usr/bin/env perl
 
 use strict;
 use warnings;
@@ -118,8 +123,9 @@ mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
 mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
-usageT :: [FData] -> MDoc 
-usageT fdata = [idoc|
+usageT :: [FData] -> MDoc
+usageT fdata =
+  [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
     #{align $ vsep (map usageLineT fdata)}
@@ -127,11 +133,13 @@ sub usage{
 }
 |]
 
-usageLineT :: FData -> MDoc 
-usageLineT (_, name, nargs, _, _) = [idoc|print STDERR "  #{name} [#{pretty nargs}]\n";|]
+usageLineT :: FData -> MDoc
+usageLineT (_, name, nargs, _, _) =
+  [idoc|print STDERR "  #{name} [#{pretty nargs}]\n";|]
 
-functionT :: FData -> MDoc 
-functionT (call', name, nargs, pool, mid') = [idoc|
+functionT :: FData -> MDoc
+functionT (call', name, nargs, pool, mid') =
+  [idoc|
 sub call_#{name}{
     if(scalar(@_) != #{pretty nargs}){
         print STDERR "Expected #{pretty nargs} arguments to '#{name}', given " . 
@@ -140,8 +148,9 @@ sub call_#{name}{
     }
     return `#{poolcall}`
 }
-|] where
-  poolcall = hsep $ (call' pool mid') ++ map argT [0..(nargs-1)]
+|]
+  where
+    poolcall = hsep $ (call' pool mid') ++ map argT [0 .. (nargs - 1)]
 
 argT :: Int -> MDoc
 argT i = "$_[" <> pretty i <> "]"

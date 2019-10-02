@@ -6,8 +6,9 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-
-module Morloc.Nexus.Nexus (generate) where
+module Morloc.Nexus.Nexus
+  ( generate
+  ) where
 
 import Morloc.Namespace
 import qualified Morloc.Nexus.Template.Perl as Perl

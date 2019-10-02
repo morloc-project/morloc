@@ -1,57 +1,48 @@
 module PropertyTests
-( 
-  propertyTests
-) where
+  ( propertyTests
+  ) where
 
 import Morloc.Namespace ((<>))
+import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
 import Morloc.TypeChecker.Namespace
-import Morloc.Parser.Parser
 
+import qualified Control.Monad as CM
+import qualified Data.Set as Set
+import qualified Data.Text as T
+import qualified Test.QuickCheck as QC
 import Test.Tasty
 import Test.Tasty.QuickCheck as TQC
-import qualified Data.Set as Set
-import qualified Test.QuickCheck as QC
-import qualified Data.Text as T
-import qualified Control.Monad as CM
 
-propertyTests = testGroup "Property tests"
-  [
+propertyTests =
+  testGroup
+    "Property tests"
    -- generalization
-     TQC.testProperty "size(Gen(t)) >= size(t)" $
-       \t -> typeSize (generalize t) >= typeSize t
-
+    [ TQC.testProperty "size(Gen(t)) >= size(t)" $ \t ->
+        typeSize (generalize t) >= typeSize t
    -- -- quantifier term renaming
    -- , TQC.testProperty "e == unrename(rename e)" renameTest
-
    -- substitution
-   , TQC.testProperty "size([v/<v>]t) == size(t)" $
-       \(v,t) -> typeSize (substitute v t) == typeSize t
+    , TQC.testProperty "size([v/<v>]t) == size(t)" $ \(v, t) ->
+        typeSize (substitute v t) == typeSize t
    -- subtype tests
-   , TQC.testProperty "t <: t" $
-       \t -> subtypeOf t t []
-
+    , TQC.testProperty "t <: t" $ \t -> subtypeOf t t []
    -- -- generalizeE tests
    -- , TQC.testProperty "unannotate(e) == unannotate(generalizeE(e))" $
    --     \e -> unannotate e == unannotate (map generalizeE e)
-
    -- apply
-   , TQC.testProperty "apply [] t == t" $
-      \t -> apply [] t == t
-
+    , TQC.testProperty "apply [] t == t" $ \t -> apply [] t == t
    -- -- applyE
    -- , TQC.testProperty "applyE [] e == e" $
    --    \e -> applyE [] e == e
-
    -- free
-   , TQC.testProperty "length(free t) <= size t" $
-      \t -> Set.size (free t) <= typeSize t
-
+    , TQC.testProperty "length(free t) <= size t" $ \t ->
+        Set.size (free t) <= typeSize t
    -- -- infer1
    -- , TQC.testProperty "i4.2 == annotationOf(i4.3)" infer1
    -- -- infer2
    -- , TQC.testProperty "unannotate e == unannotate (infer e)" infer2
-  ]
+    ]
 
 -- -- remove all type annotations and type signatures
 -- unannotate :: [Expr] -> [Expr]
@@ -68,15 +59,14 @@ propertyTests = testGroup "Property tests"
 -- annotationOf :: Expr -> Maybe Type
 -- annotationOf (AnnE e t) = Just t
 -- annotationOf _ = Nothing
-
 typeSize :: Type -> Int
 typeSize (UniT) = 1
 typeSize (VarT _) = 1
 typeSize (ExistT _) = 1
 typeSize (Forall _ t) = 1 + typeSize t
 typeSize (FunT t1 t2) = 1 + typeSize t1 + typeSize t2
-typeSize (ArrT _ xs) = 1 + sum (map typeSize xs) 
-typeSize (RecT xs) = 1 + sum (map (typeSize . snd) xs) 
+typeSize (ArrT _ xs) = 1 + sum (map typeSize xs)
+typeSize (RecT xs) = 1 + sum (map (typeSize . snd) xs)
 
 subtypeOf :: Type -> Type -> Gamma -> Bool
 subtypeOf t1 t2 g =
@@ -104,80 +94,79 @@ subtypeOf t1 t2 g =
 -- renameTest es = case runStack (mapM renameExpr es) of
 --   (Right es', _) -> map unrenameExpr es' == es
 --   (Left _, _) -> False
-
 instance QC.Arbitrary Type where
   arbitrary = arbitraryType 3 []
-
   shrink (UniT) = [VarT (TV "X")]
   shrink (VarT (TV "X")) = []
   shrink (VarT _) = [VarT (TV "X")]
   shrink (ExistT _) = [VarT (TV "X")]
   shrink (Forall v t) = QC.shrink t ++ [t] ++ [Forall v t' | t' <- QC.shrink t]
-  shrink (FunT t1 t2)
-    =  QC.shrink t1
-    ++ QC.shrink t2
-    ++ [t1,t2]
-    ++ [FunT t1' t2' | (t1', t2') <- QC.shrink (t1, t2) ]
-    ++ [FunT t1' t2  | t1' <- QC.shrink t1 ]
-    ++ [FunT t1  t2' | t2' <- QC.shrink t2 ]
+  shrink (FunT t1 t2) =
+    QC.shrink t1 ++
+    QC.shrink t2 ++
+    [t1, t2] ++
+    [FunT t1' t2' | (t1', t2') <- QC.shrink (t1, t2)] ++
+    [FunT t1' t2 | t1' <- QC.shrink t1] ++ [FunT t1 t2' | t2' <- QC.shrink t2]
   shrink (ArrT _ []) = [] -- this expression should not be generated
-  shrink (ArrT v@(TV "L") [p1,p2,p3])
-    = [VarT (TV "X")]
-    ++ QC.shrink p1
-    ++ QC.shrink p2
-    ++ QC.shrink p3
-    ++ QC.shrink (ArrT (TV "K") [p1,p2])
-    ++ QC.shrink (ArrT (TV "K") [p1,p3])
-    ++ QC.shrink (ArrT (TV "K") [p2,p3])
-    ++ [ArrT v [p1',p2',p3'] | (p1',p2',p3') <- QC.shrink (p1,p2,p3)]
-  shrink (ArrT v@(TV "K") [p1,p2])
-    = [VarT (TV "X")]
-    ++ QC.shrink p1
-    ++ QC.shrink p2
-    ++ QC.shrink (ArrT (TV "J") [p1])
-    ++ QC.shrink (ArrT (TV "J") [p2])
-    ++ [ArrT v [p1',p2'] | (p1',p2') <- QC.shrink (p1,p2)]
-  shrink (ArrT (TV "J") [p])
-    = [VarT (TV "X")]
-    ++ QC.shrink p
-  shrink (ArrT v (p:ps))
-    = [VarT (TV "X")]
-    ++ [ArrT v (p':ps') | p' <- QC.shrink p, (ArrT _ ps') <- QC.shrink (ArrT v ps)]
-    ++ [ArrT v (p:ps') | (ArrT _ ps') <- QC.shrink (ArrT v ps)]
+  shrink (ArrT v@(TV "L") [p1, p2, p3]) =
+    [VarT (TV "X")] ++
+    QC.shrink p1 ++
+    QC.shrink p2 ++
+    QC.shrink p3 ++
+    QC.shrink (ArrT (TV "K") [p1, p2]) ++
+    QC.shrink (ArrT (TV "K") [p1, p3]) ++
+    QC.shrink (ArrT (TV "K") [p2, p3]) ++
+    [ArrT v [p1', p2', p3'] | (p1', p2', p3') <- QC.shrink (p1, p2, p3)]
+  shrink (ArrT v@(TV "K") [p1, p2]) =
+    [VarT (TV "X")] ++
+    QC.shrink p1 ++
+    QC.shrink p2 ++
+    QC.shrink (ArrT (TV "J") [p1]) ++
+    QC.shrink (ArrT (TV "J") [p2]) ++
+    [ArrT v [p1', p2'] | (p1', p2') <- QC.shrink (p1, p2)]
+  shrink (ArrT (TV "J") [p]) = [VarT (TV "X")] ++ QC.shrink p
+  shrink (ArrT v (p:ps)) =
+    [VarT (TV "X")] ++
+    [ ArrT v (p' : ps')
+    | p' <- QC.shrink p
+    , (ArrT _ ps') <- QC.shrink (ArrT v ps)
+    ] ++
+    [ArrT v (p : ps') | (ArrT _ ps') <- QC.shrink (ArrT v ps)]
   shrink (RecT []) = [VarT (TV "X")]
   shrink (RecT xs) = [VarT (TV "X")] ++ [RecT (tail xs)]
   -- | RecT [(TVar, Type)]
 
 arbitraryType :: Int -> [TVar] -> QC.Gen Type
-arbitraryType depth vs = QC.oneof [
-      arbitraryType' depth vs
+arbitraryType depth vs =
+  QC.oneof
+    [ arbitraryType' depth vs
     , Forall <$> pure (newvar' vs) <*> arbitraryType depth (newvar' vs : vs)
-  ]
+    ]
   where
-    variables = [1..] >>= flip CM.replicateM ['a'..'z']
+    variables = [1 ..] >>= flip CM.replicateM ['a' .. 'z']
     newvar' vs' = TV (T.pack $ variables !! length vs')
 
 arbitraryType' :: Int -> [TVar] -> QC.Gen Type
 arbitraryType' 0 vs = atomicType vs
-arbitraryType' depth vs = QC.oneof [
-      atomicType vs 
-    , FunT <$> arbitraryType' (depth-1) vs <*> arbitraryType' (depth-1) vs
+arbitraryType' depth vs =
+  QC.oneof
+    [ atomicType vs
+    , FunT <$> arbitraryType' (depth - 1) vs <*> arbitraryType' (depth - 1) vs
     , QC.elements [ExistT (TV "e1"), ExistT (TV "e2"), ExistT (TV "e3")]
-    , QC.frequency [
-          (3, arbitraryArrT (depth-1) vs (TV "J") 1)
-        , (2, arbitraryArrT (depth-1) vs (TV "K") 2)
-        , (1, arbitraryArrT (depth-1) vs (TV "L") 3)
-      ]
-  ]
+    , QC.frequency
+        [ (3, arbitraryArrT (depth - 1) vs (TV "J") 1)
+        , (2, arbitraryArrT (depth - 1) vs (TV "K") 2)
+        , (1, arbitraryArrT (depth - 1) vs (TV "L") 3)
+        ]
+    ]
 
 atomicType :: [TVar] -> QC.Gen Type
 atomicType [] = QC.elements [VarT (TV "A"), VarT (TV "B"), VarT (TV "C")]
-atomicType vs = QC.oneof [
-      atomicType []
-    , QC.elements (map (\v -> VarT v) vs)
-  ]
+atomicType vs = QC.oneof [atomicType [], QC.elements (map (\v -> VarT v) vs)]
+
 arbitraryArrT :: Int -> [TVar] -> TVar -> Int -> QC.Gen Type
-arbitraryArrT depth vs v arity = ArrT <$> pure v <*> CM.replicateM arity (arbitraryType' depth vs)
+arbitraryArrT depth vs v arity =
+  ArrT <$> pure v <*> CM.replicateM arity (arbitraryType' depth vs)
 
 -- instance QC.Arbitrary Expr where
 --   arbitrary = arbitraryExpr 3 3 [] []
@@ -243,7 +232,6 @@ arbitraryArrT depth vs v arity = ArrT <$> pure v <*> CM.replicateM arity (arbitr
 --     , fmap LogE (QC.arbitrary :: QC.Gen Bool)
 --     , QC.elements [StrE "foo", StrE "bar"]
 --   ]
-
 instance QC.Arbitrary GammaIndex where
   arbitrary = undefined
   shrink = undefined

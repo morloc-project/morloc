@@ -6,11 +6,11 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-
-module Morloc.Serialize (serialize) where
+module Morloc.Serialize
+  ( serialize
+  ) where
 
 import Morloc.Namespace
-import Morloc.TypeChecker.Namespace
 
 serialize :: [Manifold] -> MorlocMonad [Manifold]
 serialize ms = return ms

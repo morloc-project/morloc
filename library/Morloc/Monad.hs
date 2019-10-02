@@ -11,10 +11,8 @@ Most functions that raise errors, perform IO, or access global configuration
 will return `MorlocMonad a` types. The stack consists of a State, Writer,
 Except, and Reader monad.
 -}
-
 module Morloc.Monad
-( 
-    MorlocReturn
+  ( MorlocReturn
   , runMorlocMonad
   , writeMorlocReturn
   , runCommand
@@ -22,32 +20,34 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
-  , module Control.Monad.Trans 
-  , module Control.Monad.Except 
+  , module Control.Monad.Trans
+  , module Control.Monad.Except
   , module Control.Monad.Reader
   , module Control.Monad.State
   , module Control.Monad.Writer
-) where
+  ) where
 
-import Morloc.Namespace
-import Morloc.Util ((|>>))
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
+import Morloc.Namespace
+import Morloc.Util ((|>>))
 
-import Control.Monad.Trans
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
+import Control.Monad.Trans
 import Control.Monad.Writer
-import Morloc.Error () -- for MorlocError Show instance
-import qualified System.Exit as SE
-import qualified System.Process as SP
-import System.IO (stderr)
-import qualified System.Directory as SD
 import qualified Data.Map as Map
+import Morloc.Error () -- for MorlocError Show instance
+import qualified System.Directory as SD
+import qualified System.Exit as SE
+import System.IO (stderr)
+import qualified System.Process as SP
 
-runMorlocMonad :: Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config db ev = runStateT (runWriterT(runExceptT(runReaderT ev config))) (emptyState db)
+runMorlocMonad ::
+     Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad config db ev =
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState db)
 
 emptyState :: Maybe SparqlEndPoint -> MorlocState
 emptyState db = MorlocState db [] [] Map.empty
@@ -59,61 +59,63 @@ writeMorlocReturn ((Left err, msgs), _)
 writeMorlocReturn ((_, msgs), _) = MT.hPutStrLn stderr (MT.unlines msgs)
 
 -- | Execute a system call
-runCommand
-  :: MT.Text -- function making the call (used only in debugging messages on error)
+runCommand ::
+     MT.Text -- function making the call (used only in debugging messages on error)
   -> MT.Text -- system command
   -> MorlocMonad ()
 runCommand loc cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, _, err) <- liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
+  (exitCode, _, err) <-
+    liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> tell [MT.pack err]
     _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
 
-
 -- | Execute a system call and return a function of the STDOUT
-runCommandWith
-  :: MT.Text -- function making the call (used only in debugging messages on error)
+runCommandWith ::
+     MT.Text -- function making the call (used only in debugging messages on error)
   -> (MT.Text -> a) -- ^ A function of the output (run on success)
   -> MT.Text -- ^ System command
   -> MorlocMonad a
 runCommandWith loc f cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, out, err) <- liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
+  (exitCode, out, err) <-
+    liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> return $ f (MT.pack out)
     _ -> throwError (SystemCallError cmd loc (MT.pack err))
 
 -- | Write a object to a file in the Morloc temporary directory
-logFile :: Show a
-        => String -- ^ A filename
-        -> a
-        -> MorlocMonad a 
+logFile ::
+     Show a
+  => String -- ^ A filename
+  -> a
+  -> MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
   liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
   let path = (MT.unpack tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty m)
-  return m 
+  return m
 
 -- | Write a object to a file in the Morloc temporary directory
-logFileWith
-  :: (Show b)
+logFileWith ::
+     (Show b)
   => String -- ^ A filename
   -> (a -> b) -- ^ A function to convert a to something presentable
   -> a
-  -> MorlocMonad a 
+  -> MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
   liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
   let path = (MT.unpack tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty (f m))
-  return m 
-
+  return m
 
 -- | Attempt to read a language name. This is a wrapper around the
 -- @Morloc.Language::readLangName@ that appropriately handles error.
 readLang :: MT.Text -> MorlocMonad Lang
-readLang langStr = case ML.readLangName langStr of
-  (Just x) -> return x
-  Nothing -> throwError $ UnknownLanguage langStr
+readLang langStr =
+  case ML.readLangName langStr of
+    (Just x) -> return x
+    Nothing -> throwError $ UnknownLanguage langStr

@@ -6,17 +6,16 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-
-module Morloc.TypeChecker.API (
-    typecheck
+module Morloc.TypeChecker.API
+  ( typecheck
   , Module(..)
-) where
+  ) where
 
-import Morloc.Namespace
-import Morloc.TypeChecker.Namespace
-import qualified Morloc.TypeChecker.Infer as XI 
-import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
+import Morloc.Namespace
+import qualified Morloc.TypeChecker.Infer as XI
+import Morloc.TypeChecker.Namespace
 
 typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms =

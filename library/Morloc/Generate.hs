@@ -6,13 +6,14 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
+module Morloc.Generate
+  ( generate
+  ) where
 
-module Morloc.Generate (generate) where
-
+import Control.Monad.State (gets)
 import Morloc.Namespace
 import qualified Morloc.Nexus.Nexus as MN
 import qualified Morloc.Pools.Pools as MP
-import Control.Monad.State (gets)
 
 generate :: [Manifold] -> MorlocMonad (Script, [Script])
 generate ms = do
