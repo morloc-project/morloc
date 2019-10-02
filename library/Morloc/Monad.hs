@@ -45,12 +45,12 @@ import System.IO (stderr)
 import qualified System.Process as SP
 
 runMorlocMonad ::
-     Config -> Maybe SparqlEndPoint -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config db ev =
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState db)
+     Config -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad config ev =
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) emptyState
 
-emptyState :: Maybe SparqlEndPoint -> MorlocState
-emptyState db = MorlocState db [] [] Map.empty
+emptyState :: MorlocState
+emptyState = MorlocState [] [] Map.empty
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)

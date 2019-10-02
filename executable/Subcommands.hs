@@ -63,7 +63,7 @@ readScript args
 -- | install a module
 cmdInstall :: Subcommand
 cmdInstall args conf =
-  (MM.runMorlocMonad conf Nothing cmdInstall') >>= MM.writeMorlocReturn
+  (MM.runMorlocMonad conf cmdInstall') >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
       let name = getArgOrDie args (argument "name")
@@ -80,7 +80,7 @@ cmdRemove _ _ = do
 cmdMake :: Subcommand
 cmdMake args config = do
   (path, code) <- readScript args
-  MM.runMorlocMonad config Nothing (M.writeProgram path code) >>=
+  MM.runMorlocMonad config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
 cmdTypecheck :: Subcommand
@@ -102,6 +102,5 @@ cmdTypecheck args config = do
     then print $ P.readType expr'
     else MM.runMorlocMonad
            config
-           Nothing
            (M.typecheck base expr' >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn

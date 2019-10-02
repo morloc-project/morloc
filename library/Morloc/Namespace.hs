@@ -11,21 +11,14 @@ module Morloc.Namespace
   -- ** semigroup operator
   ( (<>)
   -- ** Typeclasses
-  , MorlocNodeLike(..)
   , MorlocTypeable(..)
-  , SparqlSelectLike(..)
-  , SparqlDatabaseLike(..)
-  , RdfLike(..)
   -- ** Synonyms
   , MDoc
-  , SparqlEndPoint(..)
   , AbstractType
   , ConcreteType
   , Name
   , Path
   , Code
-  , Value
-  , Element
   -- ** Newtypes
   , URI(..)
   -- ** Language
@@ -48,8 +41,6 @@ module Morloc.Namespace
   , MData(..)
   , MType(..)
   , MTypeMeta(..)
-  , GraphPredicate(..)
-  , GraphObject(..)
   , SerialMap(..)
   , ManifoldClass(..)
   -- ** Error handling
@@ -72,7 +63,6 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Map.Strict (Map)
 import Data.Monoid
-import Data.RDF (Node, Triple)
 import Data.Text (Text)
 import Data.Text.Prettyprint.Doc (Doc)
 import Data.Void (Void)
@@ -83,29 +73,8 @@ import Morloc.Language (Lang(..))
 -- | no annotations for now
 type MDoc = Doc ()
 
-class MorlocNodeLike a where
-  asRdfNode :: a -> Node
-  fromRdfNode :: Node -> a
-
 class MorlocTypeable a where
   asType :: a -> MorlocMonad MType
-
-class SparqlSelectLike a where
-  writeSparql :: Path -> a -> IO () -- ^ create SPARQL text
-  showSparql :: a -> String
-
-class RdfLike a where
-  writeTurtle :: Path -> a -> IO () -- ^ create Turtle formatted file
-  asTriples :: a -> [Triple]
-
-class SparqlDatabaseLike a where
-  sparqlUpload :: (RdfLike r) => a -> r -> MorlocMonad a
-  sparqlSelect ::
-       (SparqlSelectLike q)
-    => Text -- ^ A path prefix for stored sparql data and query
-    -> q -- ^ The query
-    -> a -- ^ The thing to be queried
-    -> MorlocMonad [[Maybe Text]]
 
 data Dependency
   = ModuleDependency Name Path Lang
@@ -120,8 +89,7 @@ type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
 data MorlocState =
   MorlocState
-    { sparqlConn :: Maybe SparqlEndPoint
-    , dependencies :: [Dependency]
+    { dependencies :: [Dependency]
     , statePackageMeta :: [PackageMeta]
     , stateSerialMaps :: Map Lang SerialMap
     }
@@ -133,10 +101,6 @@ type Name = Text
 type Path = Text
 
 type Code = Text
-
-type Value = Text
-
-type Element = Text
 
 newtype URI =
   URI Text
@@ -396,101 +360,6 @@ data SerialMap =
     }
   deriving (Show, Eq, Ord)
 
--- | Stores a URL for a SPARQL endpoint (e.g. "http://localhost:3030/morloc")
-newtype SparqlEndPoint =
-  SparqlEndPoint
-    { endpoint :: String
-    }
-
--- | Set of all legal predicates in a compiled Morloc script
-data GraphPredicate
-  = PElem -- ^ Link a parent to an ordered child
-  | PAlias -- ^ Link an imported function to a Morloc name
-  | PConstraint -- ^ Link a type to a constraint
-  | PLabel -- ^ Link a Morloc variable to a tag for the variable (TODO: replace this name)
-  | PLang -- ^ Link something to a specific programming language
-  | PLeft -- ^ Link something to its left-hand-side element
-  | PNamespace -- ^ Link a source or import to a namespace
-  | POutput -- ^ Link a function to its output
-  | PPath -- ^ Link a source to the file-system path
-  | PPosition -- ^ Link to the list index of an element
-  | PProperty -- ^ Link a type to a type property
-  | PRight -- ^ Link something to its right-hand-side element
-  | PType -- ^ Link something to its type (rdf:type)
-  | PValue -- ^ Link something to
-  | PBound -- ^ The call is bound
-  | PKey -- ^ Link something to a key
-  | PNot -- ^ Negate an expressoin
-  | PName -- ^ Link something to a Morloc name
-  | PImport -- ^ The left-hand imports the right-hand side
-  deriving (Show, Eq, Ord)
-
--- | Set of all legal objects in a compiled Morloc script
-data GraphObject
-  = OLiteral Text
-  -- ^ Stores a literal textual field, should always be with the predicate PValue
-  | ORestrictedImport
-  -- ^ LHS is an import with some imports hidden
-  | OScript
-  -- ^ LHS is a top-level script
-  | OSource
-  -- ^ LHS represents a source file
-  | OExport
-  -- ^ LHS represents an exported function (there should be an associated (?s PValue (OLiteral name)) triple.
-  | OImport
-  -- ^ LHS is an import (there exists a triple: `?i PName ?j` where `i` is the
-  -- LHS and `j` is a string literal for the module name) types and type
-  -- declarations
-  | OType
-  -- ^ LHS is a type
-  | OProperty
-  -- ^ A property of the type (contains a 0 or more ordered elements)
-  | OTypeDeclaration
-  -- ^ LHS is a type declaration (e.g. `Foo :: Matrix Int`)
-  | OAtomicGenericType
-  -- ^ LHS is an abstract type with no type parameters
-  | OAtomicType
-  -- ^ LHS is a concrete type with no type parameters
-  | OParameterizedGenericType
-  -- ^ LHS is a parameterized, abstract type
-  | OParameterizedType
-  -- ^ LHS is a parameterized, concrete type
-  | OEmptyType
-  -- ^ LHS is an empty type
-  | OFunctionType
-  -- ^ LHS is a function type
-  | ONamedType
-  -- ^ LHS is a named type (e.g. a record entry)
-  | OAccess
-  -- ^ Index access to a container (inside a constraint)
-  | OUnaryOp
-  -- ^ LHS is a unary operator in a constraint
-  | OBinOp
-  -- ^ LHS is a binary operator in a constraint (soon to be deprecated and merged with OCall)
-  | OData
-  -- ^ LHS is literal data
-  | ODataDeclaration
-  -- ^ LHS is a Morloc data (or function) declaration
-  | OBoolean
-  -- ^ LHS is a boolean literal
-  | OCall
-  -- ^ LHS is a function call
-  | OName
-  -- ^ LHS is a Morloc name (manifold parameter or something defined outside the dataDeclaration scope)
-  | ONumber
-  -- ^ LHS is a literal number
-  | OString
-  -- ^ LHS is a literal string
-  | OList
-  -- ^ LHS is an ordered list of homogenous data (with elements stored as PElem entries)
-  | OTuple
-  -- ^ LHS is a tuple (elements stored as PElem entries)
-  | ORecord
-  -- ^ LHS is a record (elements stored as PElem entries)
-  | ORecordEntry
-  -- ^ LHS is a record entry (cmp. ONamedType)
-  deriving (Show, Eq, Ord)
-
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
   -- occur for RDF that has been validated.
@@ -509,8 +378,6 @@ data MorlocError
   | TypeConflict Text Text
   -- | Raised for general type errors
   | TypeError Text
-  -- | Raised when a SPARQL command fails
-  | SparqlFail Text
   -- | Raised when a module cannot be loaded 
   | CannotLoadModule Text
   -- | System call failed

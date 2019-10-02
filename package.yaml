@@ -26,7 +26,6 @@ dependencies:
   - extra
   - filepath
   - haskell-src-meta
-  - hsparql
   - megaparsec
   - mtl
   - parsec
@@ -34,7 +33,6 @@ dependencies:
   - prettyprinter
   - prettyprinter-ansi-terminal
   - process
-  - rdf4h
   - safe
   - scientific
   - template-haskell
@@ -77,7 +75,6 @@ executables:
       - base >= 4.7 && < 5
       - morloc 
       - docopt
-      - rdf4h
       - text
 
 tests:
