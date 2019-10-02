@@ -1,0 +1,104 @@
+[ Manifold 
+    { mid = 0
+    , mCallId = URI "Main_0"
+    , mAbstractType = Just 
+        ( MFuncType 
+            ( MTypeMeta 
+                { metaName = Just "foo"
+                , metaProp = []
+                , metaLang = Nothing
+                } 
+            ) 
+            [ MConcType 
+                ( MTypeMeta 
+                    { metaName = Just "foo"
+                    , metaProp = []
+                    , metaLang = Nothing
+                    } 
+                ) "Num"[]
+            ] 
+            ( MConcType 
+                ( MTypeMeta 
+                    { metaName = Just "foo"
+                    , metaProp = []
+                    , metaLang = Nothing
+                    } 
+                ) "Num"[]
+            )
+        )
+    , mRealizations = 
+        [ Realization 
+            { rLang = CppLang
+            , rName = "snd"
+            , rConcreteType = Nothing
+            , rModulePath = Just "test-suite/tests-data/partial-01.loc"
+            , rSourcePath = Just "test-suite/tests-data/test-suite/tests-data/partial-01.hpp"
+            , rSourced = True
+            } 
+        ]
+    , mMorlocName = "snd"
+    , mExported = True
+    , mCalled = True
+    , mDefined = False
+    , mComposition = Just "foo"
+    , mBoundVars = [ "x" ]
+    , mArgs = 
+        [ ArgName "x"
+        , ArgCall ( URI "Main_1" )
+        ] 
+    } 
+, Manifold 
+    { mid = 1
+    , mCallId = URI "Main_1"
+    , mAbstractType = Just 
+        ( MConcType 
+            ( MTypeMeta 
+                { metaName = Just "sqrt"
+                , metaProp = []
+                , metaLang = Nothing
+                } 
+            ) "Num"[]
+        )
+    , mRealizations = 
+        [ Realization 
+            { rLang = CppLang
+            , rName = "sqrt"
+            , rConcreteType = Just 
+                ( MFuncType 
+                    ( MTypeMeta 
+                        { metaName = Nothing
+                        , metaProp = []
+                        , metaLang = Just CppLang
+                        } 
+                    ) 
+                    [ MConcType 
+                        ( MTypeMeta 
+                            { metaName = Nothing
+                            , metaProp = []
+                            , metaLang = Just CppLang
+                            } 
+                        ) "double"[]
+                    ] 
+                    ( MConcType 
+                        ( MTypeMeta 
+                            { metaName = Nothing
+                            , metaProp = []
+                            , metaLang = Just CppLang
+                            } 
+                        ) "double"[]
+                    )
+                )
+            , rModulePath = Just "test-suite/tests-data/partial-01.loc"
+            , rSourcePath = Just "test-suite/tests-data/partial-01.hpp"
+            , rSourced = True
+            } 
+        ]
+    , mMorlocName = "sqrt"
+    , mExported = False
+    , mCalled = True
+    , mDefined = False
+    , mComposition = Nothing
+    , mBoundVars = [ "x" ]
+    , mArgs = [ ArgName "x" ]
+    } 
+] 

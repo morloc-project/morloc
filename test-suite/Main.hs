@@ -2,9 +2,13 @@ import Test.Tasty
 
 import PropertyTypeTests (propertyTypeTests)
 import UnitTypeTests (unitTypeTests)
-import UnitManifoldTests (unitManifoldTests)
+import GoldenManifoldTests (goldenManifoldTest01)
 
 main = do
-  manifoldTests <- unitManifoldTests
   defaultMain $
-    testGroup "Morloc tests" [unitTypeTests, propertyTypeTests, manifoldTests]
+    testGroup
+      "Morloc tests"
+      [ unitTypeTests
+      , propertyTypeTests
+      , goldenManifoldTest01
+      ]
