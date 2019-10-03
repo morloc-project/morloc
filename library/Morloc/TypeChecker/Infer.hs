@@ -22,11 +22,8 @@ module Morloc.TypeChecker.Infer
   , unrenameType
   ) where
 
-import Control.Monad (foldM)
-import Morloc.Namespace ((<>))
-import Morloc.TypeChecker.Namespace
+import Morloc.Namespace
 import Morloc.TypeChecker.Util
-import qualified Data.List as DL
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -83,7 +80,7 @@ isRoot m k _ = not $ Map.foldr (isChild k) False m
 
 typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr g e = do
-  es <- fmap DL.sort (mapM renameExpr e)
+  es <- fmap sort (mapM renameExpr e)
   (g', es') <- typecheckExpr' g [] es
   let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
   return $ (g', map (generalizeE . unrenameExpr . applyE g') es'')
@@ -243,7 +240,7 @@ subtype' (ArrT v1 vs1) (ArrT v2 vs2) g = do
       compareArr ts1' ts2' g''
     compareArr _ _ _ = throwError TypeMismatch
 -- subtype unordered records
-subtype' (RecT rs1) (RecT rs2) g = compareEntry (DL.sort rs1) (DL.sort rs2) g
+subtype' (RecT rs1) (RecT rs2) g = compareEntry (sort rs1) (sort rs2) g
   where
     compareEntry :: [(TVar, Type)] -> [(TVar, Type)] -> Gamma -> Stack Gamma
     compareEntry [] [] g2 = return g2
@@ -470,7 +467,7 @@ infer' g (Declaration v e) = do
 infer' g (Signature v e) = do
   e' <- addSource g v e
   (left, r3, right) <-
-    case DL.findIndex (isAnnG v) g of
+    case findIndex (isAnnG v) g of
       (Just i) ->
         case (i, g !! i) of
           (0, AnnG _ r2) ->

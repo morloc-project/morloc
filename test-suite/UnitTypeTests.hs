@@ -2,10 +2,10 @@ module UnitTypeTests
   ( unitTypeTests
   ) where
 
-import Morloc.Namespace ((<>))
+import Morloc.Namespace
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
-import Morloc.TypeChecker.Namespace
+import qualified Morloc.TypeChecker.API as API
 
 import qualified Data.Text as T
 import Test.Tasty
@@ -32,7 +32,7 @@ typeof es = typeof' . head . reverse $ es
 exprTestGood :: String -> T.Text -> Type -> TestTree
 exprTestGood msg code t =
   testCase msg $
-  case runStack (typecheck (readProgram Nothing code)) of
+  case API.runStack (typecheck (readProgram Nothing code)) of
     (Right es', _) -> assertEqual "" t (typeof (main es'))
     (Left err, _) ->
       error $
@@ -41,36 +41,36 @@ exprTestGood msg code t =
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
   testCase msg $
-  case ( runStack (typecheck (readProgram Nothing code1))
-       , runStack (typecheck (readProgram Nothing code2))) of
+  case ( API.runStack (typecheck (readProgram Nothing code1))
+       , API.runStack (typecheck (readProgram Nothing code2))) of
     ((Right e1, _), (Right e2, _)) -> assertEqual "" e1 e2
     _ -> error $ "Expected equal"
 
 exprTestFull :: String -> T.Text -> T.Text -> TestTree
 exprTestFull msg code expCode =
   testCase msg $
-  case runStack (typecheck (readProgram Nothing code)) of
+  case API.runStack (typecheck (readProgram Nothing code)) of
     (Right e, _) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
     (Left err, _) -> error (show err)
 
 exprTestBad :: String -> T.Text -> TestTree
 exprTestBad msg e =
   testCase msg $
-  case runStack (typecheck (readProgram Nothing e)) of
+  case API.runStack (typecheck (readProgram Nothing e)) of
     (Right _, _) -> assertFailure . T.unpack $ "Expected '" <> e <> "' to fail"
     (Left _, _) -> return ()
 
-expectError :: String -> T.Text -> TypeError -> TestTree
+expectError :: String -> T.Text -> MorlocError -> TestTree
 expectError msg expr err =
   testCase msg $
-  case runStack (typecheck (readProgram Nothing expr)) of
+  case API.runStack (typecheck (readProgram Nothing expr)) of
     (Right _, _) -> assertFailure . T.unpack $ "Expected failure"
     (Left err, _) -> return ()
 
 testPasses :: String -> T.Text -> TestTree
 testPasses msg e =
   testCase msg $
-  case runStack (typecheck (readProgram Nothing e)) of
+  case API.runStack (typecheck (readProgram Nothing e)) of
     (Right _, _) -> return ()
     (Left e, _) ->
       assertFailure $

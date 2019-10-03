@@ -29,11 +29,8 @@ module Morloc.TypeChecker.Util
   ) where
 
 import Control.Monad.Except (throwError)
-import Morloc.Namespace (Path, Lang, (<>))
-import Morloc.TypeChecker.Namespace
-import qualified Control.Monad as CM
+import Morloc.Namespace
 import qualified Control.Monad.State as MS
-import qualified Data.List as DL
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -135,7 +132,7 @@ lookupSrc x (_:rs) = lookupSrc x rs
 
 access1 :: Indexable a => a -> Gamma -> Maybe (Gamma, GammaIndex, Gamma)
 access1 gi gs =
-  case DL.elemIndex (index gi) gs of
+  case elemIndex (index gi) gs of
     (Just 0) -> Just ([], head gs, tail gs)
     (Just i) -> Just (take i gs, gs !! i, drop (i + 1) gs)
     _ -> Nothing
@@ -168,7 +165,7 @@ generalize t = generalize' existentialMap t
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
     existentialMap =
       zip (Set.toList (findExistentials t)) (map (TV . MT.pack) variables)
-    variables = [1 ..] >>= flip CM.replicateM ['a' .. 'z']
+    variables = [1 ..] >>= flip replicateM ['a' .. 'z']
     findExistentials :: Type -> Set.Set TVar
     findExistentials UniT = Set.empty
     findExistentials (VarT _) = Set.empty

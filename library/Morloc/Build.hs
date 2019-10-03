@@ -10,10 +10,10 @@ module Morloc.Build
   ( buildProgram
   ) where
 
+import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 
 import qualified System.Directory as SD
 

@@ -17,12 +17,12 @@ module Morloc.Pools.Template.C
   generate
 ) where
 
+import Morloc.Data.Doc
 import Morloc.Namespace
+import Morloc.Pools.Common
+import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import Morloc.Data.Doc
-import Morloc.Quasi
-import Morloc.Pools.Common
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g wrapIncludeString

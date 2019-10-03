@@ -35,7 +35,6 @@ import Control.Monad.Trans
 import Control.Monad.Writer
 import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
-import Morloc.Util ((|>>))
 import System.IO (stderr)
 import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT

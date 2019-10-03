@@ -12,13 +12,13 @@ module Morloc.Parser.API
   , ugly
   ) where
 
+import Morloc.Internal
+import Morloc.Namespace
+import Morloc.Parser.Parser
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Pretty as Pretty
-import Morloc.Namespace (MorlocMonad, Path)
-import Morloc.Parser.Parser
-import Morloc.TypeChecker.Namespace
 
 import qualified Control.Monad as CM
 import qualified Data.Map as Map

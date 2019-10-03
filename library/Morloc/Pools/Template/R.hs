@@ -11,10 +11,10 @@ Stability   : experimental
 
 module Morloc.Pools.Template.R (generate) where
 
-import Morloc.Namespace
-import Morloc.Quasi
-import Morloc.Pools.Common
 import Morloc.Data.Doc
+import Morloc.Namespace
+import Morloc.Pools.Common
+import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script

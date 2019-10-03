@@ -11,16 +11,15 @@ Stability   : experimental
 
 module Morloc.Pools.Template.Python3 (generate) where
 
-import Morloc.Namespace
-import Morloc.Quasi
-import Morloc.Pools.Common
 import Morloc.Data.Doc
-import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
-
-import qualified System.FilePath as SF
+import Morloc.Namespace
+import Morloc.Pools.Common
+import Morloc.Quasi
 import qualified Data.Char as DC
+import qualified Morloc.Config as MC
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
+import qualified System.FilePath as SF
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g asImport

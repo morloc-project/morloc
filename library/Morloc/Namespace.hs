@@ -8,8 +8,9 @@ Stability   : experimental
 -}
 
 module Morloc.Namespace
-  -- ** semigroup operator
-  ( (<>)
+  (
+  -- ** re-export supplements to Prelude
+    module Morloc.Internal
   -- ** Typeclasses
   , MorlocTypeable(..)
   -- ** Synonyms
@@ -55,19 +56,46 @@ module Morloc.Namespace
   -- ** Package metadata
   , PackageMeta(..)
   , defaultPackageMeta
+  -- * Typechecking
+  , EVar(..)
+  , Expr(..)
+  , Gamma
+  , GammaIndex(..)
+  , Import(..)
+  , Indexable(..)
+  , MVar(..)
+  , Module(..)
+  , Stack
+  , StackState(..)
+  , TVar(..)
+  , Type(..)
+  -- ** State manipulation
+  , fromType
+  , toType
+  , StackConfig(..)
+  -- ** ModuleGamma paraphernalia
+  , ModularGamma
+  -- ** Type extensions
+  , Constraint(..)
+  , EType(..)
+  , Property(..)
+  , TypeSet(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
+import Control.Monad.Identity (Identity)
 import Data.Map.Strict (Map)
 import Data.Monoid
+import Data.Scientific (Scientific)
+import Data.Set (Set, empty)
 import Data.Text (Text)
 import Data.Text.Prettyprint.Doc (Doc)
 import Data.Void (Void)
+import Morloc.Internal
 import Text.Megaparsec.Error (ParseError)
-
 import Morloc.Language (Lang(..))
 
 -- | no annotations for now
@@ -394,6 +422,41 @@ data MorlocError
   | NoBenefits
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
+  --------------- T Y P E   E R R O R S --------------------------------------
+  | SubtypeError Type Type
+  | ExistentialError
+  | BadExistentialCast
+  | AccessError Text
+  | NonFunctionDerive
+  | UnboundVariable EVar
+  | OccursCheckFail
+  | EmptyCut
+  | TypeMismatch
+  | UnexpectedPattern Expr Type
+  | ToplevelRedefinition
+  | NoAnnotationFound -- I don't know what this is for
+  | OtherError Text
+  -- container errors
+  | EmptyTuple
+  | TupleSingleton
+  | EmptyRecord
+  -- module errors
+  | MultipleModuleDeclarations MVar
+  | BadImport MVar EVar
+  | CannotFindModule MVar
+  | CyclicDependency
+  | CannotImportMain
+  | SelfImport MVar
+  | BadRealization
+  | TooManyRealizations
+  | MissingSource
+  -- type extension errors
+  | AmbiguousPacker TVar
+  | AmbiguousUnpacker TVar
+  | AmbiguousCast TVar TVar
+  | IncompatibleRealization MVar
+  | MissingAbstractType
+  | ExpectedAbstractType
   deriving (Eq)
 
 data PackageMeta =
@@ -440,3 +503,189 @@ data Config =
     , configLangPerl :: !Text
     }
   deriving (Show, Ord, Eq)
+
+
+-- ================ T Y P E C H E C K I N G  =================================
+
+type Gamma = [GammaIndex]
+
+newtype EVar = EV Text deriving (Show, Eq, Ord)
+newtype MVar = MV Text deriving (Show, Eq, Ord)
+newtype TVar = TV Text deriving (Show, Eq, Ord)
+
+type GeneralStack c e l s a
+   = ReaderT c (ExceptT e (WriterT l (StateT s Identity))) a
+
+type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
+
+data StackConfig =
+  StackConfig
+    { configVerbosity :: Int -- Not currently used
+    }
+
+data StackState =
+  StackState
+    { stateVar :: Int
+    , stateQul :: Int
+    }
+  deriving (Ord, Eq, Show)
+
+-- | A context, see Dunfield Figure 6
+data GammaIndex
+  = VarG TVar
+  -- ^ (G,a)
+  | AnnG Expr TypeSet
+  -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
+  | ExistG TVar
+  -- ^ (G,a^) unsolved existential variable
+  | SolvedG TVar Type
+  -- ^ (G,a^=t) Store a solved existential variable
+  | MarkG TVar
+  -- ^ (G,>a^) Store a type variable marker bound under a forall
+  | MarkEG EVar
+  -- ^ ...
+  | SrcG (EVar, Lang, Maybe Path, EVar)
+  -- ^ source
+  | ConcreteG EVar Lang Type
+  -- ^ store a local concrete type
+  deriving (Ord, Eq, Show)
+
+data Import =
+  Import
+    { importModuleName :: MVar
+    , importInclude :: Maybe [(EVar, EVar)]
+    , importExclude :: [EVar]
+    , importNamespace :: Maybe EVar -- currently not used
+    }
+  deriving (Ord, Eq, Show)
+
+data Module =
+  Module
+    { moduleName :: MVar
+    , modulePath :: Maybe Path
+    , moduleImports :: [Import]
+    , moduleExports :: [EVar]
+    , moduleBody :: [Expr]
+    }
+  deriving (Ord, Eq, Show)
+
+-- | Terms, see Dunfield Figure 1
+data Expr
+  = SrcE Lang (Maybe Path) [(EVar, EVar)]
+  -- ^ import "c" from "foo.c" ("f" as yolo)
+  | Signature EVar EType
+  -- ^ x :: A; e
+  | Declaration EVar Expr
+  -- ^ x=e1; e2
+  | UniE
+  -- ^ (())
+  | VarE EVar
+  -- ^ (x)
+  | ListE [Expr]
+  -- ^ [e]
+  | TupleE [Expr]
+  -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
+  | LamE EVar Expr
+  -- ^ (\x -> e)
+  | AppE Expr Expr
+  -- ^ (e e)
+  | AnnE Expr Type
+  -- ^ (e : A)
+  | NumE Scientific
+  -- ^ number of arbitrary size and precision
+  | LogE Bool
+  -- ^ boolean primitive
+  | StrE Text
+  -- ^ literal string
+  | RecE [(EVar, Expr)]
+  deriving (Show, Ord, Eq)
+
+-- | Types, see Dunfield Figure 6
+data Type
+  = UniT
+  -- ^ (1)
+  | VarT TVar
+  -- ^ (a)
+  | ExistT TVar
+  -- ^ (a^) will be solved into one of the other types
+  | Forall TVar Type
+  -- ^ (Forall a . A)
+  | FunT Type Type
+  -- ^ (A->B)
+  | ArrT TVar [Type]
+  -- ^ f [Type]
+  | RecT [(TVar, Type)]
+  -- ^ Foo { bar :: A, baz :: B }
+  deriving (Show, Ord, Eq)
+
+data Property
+  = Pack -- data structure to JSON
+  | Unpack -- JSON to data structure
+  | Cast -- casts from type A to B
+  | GeneralProperty [Text]
+  deriving (Show, Eq, Ord)
+
+-- | Eventually, Constraint should be a richer type, but for they are left as
+-- unparsed lines of text
+newtype Constraint =
+  Con Text
+  deriving (Show, Eq, Ord)
+
+-- | Extended Type that may represent a language specific type as well as sets
+-- of properties and constrains.
+data EType =
+  EType
+    { etype :: Type
+    , elang :: Maybe Lang
+    , eprop :: Set Property
+    , econs :: Set Constraint
+    , esource :: Maybe (Maybe Path, EVar)
+    }
+  deriving (Show, Eq, Ord)
+
+data TypeSet =
+  TypeSet (Maybe EType) [EType]
+  deriving (Show, Eq, Ord)
+
+type ModularGamma = Map MVar (Map EVar TypeSet)
+
+class Typed a where
+  toType :: a -> Maybe Type
+  fromType :: Type -> a
+
+instance Typed EType where
+  toType e =
+    case elang e of
+      (Just _) -> Nothing
+      Nothing -> Just (etype e)
+  fromType t =
+    EType
+      { etype = t
+      , elang = Nothing
+      , eprop = empty
+      , econs = empty
+      , esource = Nothing
+      }
+
+instance Typed TypeSet where
+  toType (TypeSet (Just e) _) = toType e
+  toType (TypeSet Nothing _) = Nothing
+  fromType t = TypeSet (Just (fromType t)) []
+
+instance Typed Type where
+  toType = Just
+  fromType = id
+
+class Indexable a where
+  index :: a -> GammaIndex
+
+instance Indexable GammaIndex where
+  index = id
+
+instance Indexable Type where
+  index (ExistT t) = ExistG t
+  index _ = error "Can only index ExistT"
+
+instance Indexable Expr where
+  index (AnnE x t) = AnnG x (fromType t)
+  index _ = error "Can only index AnnE"

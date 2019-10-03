@@ -17,17 +17,15 @@ module Morloc.Pools.Common
   , defaultCodeGenerator
   ) where
 
-import qualified Data.List as DL
-import qualified Data.Map.Strict as Map
-import qualified Data.Maybe as DM
-import qualified Morloc.Config as MC
 import Morloc.Data.Doc
+import Morloc.Namespace
+import Morloc.Pretty () -- just for mshow instances
+import qualified Data.Map.Strict as Map
+import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Manifold as Man
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
-import Morloc.Pretty () -- just for mshow instances
 import qualified Morloc.System as MS
 
 data Grammar =
@@ -151,7 +149,7 @@ defaultCodeGenerator g f manifolds packMap = do
       , scriptCode = render doc
       , scriptCompilerFlags =
           filter (/= "") . map packageGccFlags $ statePackageMeta state
-      , scriptInclude = DL.nub . map MS.takeDirectory $ (serialSources packMap)
+      , scriptInclude = nub . map MS.takeDirectory $ (serialSources packMap)
       }
 
 -- call a manifold and deserialize the return value
@@ -187,7 +185,7 @@ makePoolManifolds ::
   -> Map.Map Name Manifold
   -> [Manifold]
   -> MorlocMonad [GeneralFunction]
-makePoolManifolds g h cs ms = fmap DM.catMaybes . mapM makePoolManifold $ ms
+makePoolManifolds g h cs ms = fmap catMaybes . mapM makePoolManifold $ ms
   where
     makePoolManifold m =
       case Man.determineManifoldClass (gLang g) m of
@@ -300,7 +298,7 @@ makeSourceManifold g h m = do
           (fname m <> " :: " <> maybe "undefined" pretty (mAbstractType m)) <>
         line
   argTypes <-
-    DL.zip5 <$> pure (iArgs "a") <*> pure (getConcreteArgTypes g m) <*>
+    zip5 <$> pure (iArgs "a") <*> pure (getConcreteArgTypes g m) <*>
     (Man.getUnpackers h m) <*>
     pure (mArgs m) <*>
     pure (iArgs "x")

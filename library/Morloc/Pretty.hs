@@ -13,13 +13,12 @@ module Morloc.Pretty
   , desc
   ) where
 
-import Morloc.Data.Doc
 import Data.Text.Prettyprint.Doc.Render.Terminal
-import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
+import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.TypeChecker.Namespace
-import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
+import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
+import qualified Morloc.Data.Text as MT
 
 instance Pretty MType where
   pretty (MConcType _ n []) = pretty n

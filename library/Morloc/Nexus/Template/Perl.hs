@@ -12,15 +12,14 @@ module Morloc.Nexus.Template.Perl
   ( generate
   ) where
 
-import qualified Control.Monad as CM
-import qualified Data.Maybe as DM
-import qualified Morloc.Config as MC
 import Morloc.Data.Doc
+import Morloc.Namespace
+import Morloc.Quasi
+import qualified Control.Monad as CM
+import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
-import Morloc.Quasi
 
 -- | A function for building a pool call
 type PoolBuilder
@@ -49,7 +48,7 @@ getName m = maybe (mMorlocName m) id (mComposition m)
 
 getNArgs :: Manifold -> Int
 getNArgs m
-  | DM.isJust (mComposition m) = length (mBoundVars m)
+  | isJust (mComposition m) = length (mBoundVars m)
   | otherwise = length (mArgs m)
 
 getFData :: Manifold -> MorlocMonad FData
@@ -74,7 +73,7 @@ isExported m
   -- shallow wrappers around a source function
  =
   (mExported m && not (mCalled m) && mSourced m) || -- compositions
-  (mExported m && DM.isJust (mComposition m))
+  (mExported m && isJust (mComposition m))
 
 main :: [MDoc] -> [FData] -> MDoc
 main names fdata =

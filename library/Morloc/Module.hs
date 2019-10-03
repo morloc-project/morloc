@@ -13,13 +13,10 @@ module Morloc.Module
   , loadModuleMetadata
   ) where
 
-import qualified Control.Monad as CM
-import qualified Data.List as DL
-import qualified Data.Maybe as DM
+import Morloc.Namespace
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 import qualified Morloc.System as MS
 import qualified System.Directory as SD
 
@@ -56,14 +53,14 @@ findModule moduleName = do
   config <- MM.ask
   let lib = Config.configLibrary config
   let allPaths = getModulePaths lib moduleName
-  existingPaths <- MM.liftIO . fmap DM.catMaybes . CM.mapM getFile $ allPaths
+  existingPaths <- MM.liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     (x:_) -> return x
     [] ->
       MM.throwError
         (CannotLoadModule
            ("module not found among the paths: [" <>
-            (MT.concat $ DL.intersperse ", " allPaths) <> "]"))
+            (MT.concat $ intersperse ", " allPaths) <> "]"))
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder

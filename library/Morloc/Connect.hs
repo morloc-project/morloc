@@ -12,12 +12,7 @@ module Morloc.Connect
 
 import Control.Monad.State (get, gets, modify, put)
 import Morloc.Namespace
-import Morloc.TypeChecker.Namespace
-import qualified Control.Monad as CM
-import qualified Data.List as DL
-import qualified Data.List.Extra as DLE
 import qualified Data.Map as Map
-import qualified Data.Maybe as DM
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
@@ -187,7 +182,7 @@ module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) gentype)
       case typeset of
         (TypeSet Nothing _) -> error "no general type"
         (TypeSet (Just e) rs) -> do
-          args <- CM.zipWithM (exprAsArgument vars m) [0 ..] es
+          args <- zipWithM (exprAsArgument vars m) [0 ..] es
           declared <- isDeclared (moduleName m) (EV functionName)
           realizations <- toRealizations functionName m (length args) rs
           return . (flip (:)) (concat . map snd $ args) $
@@ -258,7 +253,7 @@ exprAsArgument bnd m i (AnnE (AppE e1 e2) gentype) =
       case t of
         (TypeSet Nothing _) -> error "ah fuck shit"
         (TypeSet (Just etyp) rs) -> do
-          args <- CM.zipWithM (exprAsArgument bnd m) [0 ..] es
+          args <- zipWithM (exprAsArgument bnd m) [0 ..] es
           realizations <- toRealizations mname m (length args) rs
           let newManifold =
                 Manifold
@@ -414,9 +409,9 @@ makeSerialMaps (concat . map moduleBody -> es) =
       .
      Map.fromList -- Map Lang [Expr]
       .
-     DLE.groupSort -- [(Lang, [Expr])]
+     groupSort -- [(Lang, [Expr])]
       .
-     DM.catMaybes) $
+     catMaybes) $
   mapM f es -- MorloMonad [Maybe (Lang, Expr)]
     -- collect all sources and signatures paired with language
     -- needed for @toSerialMap@
@@ -433,7 +428,7 @@ makeSerialMaps (concat . map moduleBody -> es) =
         { serialLang = lang
         , serialPacker = getSerial Pack es
         , serialUnpacker = getSerial Unpack es
-        , serialSources = DL.nub [p | (SrcE _ (Just p) _) <- es]
+        , serialSources = nub [p | (SrcE _ (Just p) _) <- es]
         }
 
 getSerial :: Property -> [Expr] -> Map.Map MType Name
@@ -535,7 +530,7 @@ findSignatures (moduleBody -> es) =
   foldr
     insertAppendEtype
     (Map.map (foldr appendTypeSet (TypeSet Nothing [])) .
-     Map.fromList . DLE.groupSort $
+     Map.fromList . groupSort $
      [(v, t) | (Signature v t) <- es])
     [(v, type2etype t) | (AnnE (Declaration v _) t) <- es]
 

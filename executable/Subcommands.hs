@@ -16,16 +16,16 @@ module Subcommands
   , cmdTypecheck
   ) where
 
+import Morloc.Namespace
+import System.Console.Docopt
 import qualified Morloc as M
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 import qualified Morloc.Parser.API as Papi
 import qualified Morloc.Parser.Parser as P
 import qualified Morloc.TypeChecker.API as T
-import System.Console.Docopt
 
 type Subcommand = Arguments -> Config.Config -> IO ()
 

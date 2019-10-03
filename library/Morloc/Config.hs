@@ -16,16 +16,14 @@ module Morloc.Config
   , makeLibSourceString
   ) where
 
-import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import Morloc.Namespace
-import qualified Morloc.System as MS
-import Morloc.Util ((|>>))
-
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
+import Morloc.Data.Doc
+import Morloc.Namespace
 import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 
 getDefaultConfigFilepath :: IO MT.Text
 getDefaultConfigFilepath =

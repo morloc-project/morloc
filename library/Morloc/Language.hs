@@ -21,10 +21,7 @@ module Morloc.Language
   , standardizeLangName
   ) where
 
--- Don't import anything from Morloc here. This module should be VERY lowest
--- in the hierarchy, to avoid circular dependencies, since the lexer needs to
--- access it.
-import Data.Monoid ((<>))
+import Morloc.Internal
 import Data.Text (Text)
 
 -- | Programming languages in the Morloc ecosystem. This is the type that

@@ -11,8 +11,8 @@ module Morloc.Realize
   ) where
 
 import Morloc.Data.Doc
-import qualified Morloc.Monad as MM
 import Morloc.Namespace
+import qualified Morloc.Monad as MM
 
 -- | @realize@ determines which instances to use for each manifold.
 realize ::

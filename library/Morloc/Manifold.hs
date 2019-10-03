@@ -16,19 +16,17 @@ module Morloc.Manifold
   , isMorlocCall
   ) where
 
-import qualified Data.List as DL
-import qualified Data.Map.Strict as Map
-import qualified Data.Maybe as DM
 import Morloc.Data.Doc
+import Morloc.Namespace
+import qualified Data.Map.Strict as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 import qualified Morloc.System as MS
 
 -- | Get the paths to the sources 
 getManSrcs ::
      Lang -> (MT.Text -> MorlocMonad MDoc) -> [Manifold] -> MorlocMonad [MDoc]
-getManSrcs lang f ms = MM.mapM f . DL.nub . DM.mapMaybe getManSrc $ ms'
+getManSrcs lang f ms = MM.mapM f . nub . mapMaybe getManSrc $ ms'
   where
     getManSrc :: Manifold -> Maybe MT.Text
     getManSrc m =
@@ -56,7 +54,7 @@ filterByManifoldClass lang mc ms =
 
 -- | Is this manifold a called morloc function?
 isMorlocCall :: Manifold -> Bool
-isMorlocCall m = mDefined m && DM.isNothing (mComposition m)
+isMorlocCall m = mDefined m && isNothing (mComposition m)
 
 -- find a packer for each argument passed to a manifold
 getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Maybe MDoc]

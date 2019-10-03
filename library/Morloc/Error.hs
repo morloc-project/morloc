@@ -14,9 +14,9 @@ to the user.
 -}
 module Morloc.Error () where
 
+import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
-import Morloc.Namespace
 
 -- TODO: fix this orphan instance
 instance Show MorlocError where
@@ -48,10 +48,10 @@ errmsg (DependencyError (SourceCodeDependency moduleName path lang)) =
   path <>
   "' (" <>
   ML.showLangName lang <> ")" <> " imported by Morloc module " <> moduleName
--- TODO: specialize message with info from the failed Script (arg #1)
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>
   "This is probably due to a bug in the code."
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
+errmsg otherError = MT.show' otherError

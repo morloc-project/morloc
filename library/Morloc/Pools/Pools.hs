@@ -10,22 +10,19 @@ module Morloc.Pools.Pools
   ( generate
   ) where
 
+import Morloc.Namespace
+import qualified Data.Map.Strict as Map
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 import qualified Morloc.Pools.Template.C as C
 import qualified Morloc.Pools.Template.Cpp as Cpp
 import qualified Morloc.Pools.Template.Python3 as Py3
 import qualified Morloc.Pools.Template.R as RLang
 
-import qualified Control.Monad as CM
-import qualified Data.List as DL
-import qualified Data.Map.Strict as Map
-
 generate :: [Manifold] -> Map.Map Lang SerialMap -> MorlocMonad [Script]
 generate manifolds packMaps = do
-  let langs = DL.nub . map mLang $ manifolds
-  CM.mapM (generateLang manifolds packMaps) langs
+  let langs = nub . map mLang $ manifolds
+  mapM (generateLang manifolds packMaps) langs
 
 -- | If you want to add a new language, this is the function you currently need
 -- to modify. Add a case for the new language name, and then the function that

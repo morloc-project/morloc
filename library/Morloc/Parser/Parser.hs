@@ -12,8 +12,7 @@ module Morloc.Parser.Parser
   ) where
 
 import Data.Void (Void)
-import Morloc.Namespace (Path, Lang, (<>))
-import Morloc.TypeChecker.Namespace
+import Morloc.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Data.Scientific as DS
