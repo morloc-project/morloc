@@ -1,5 +1,5 @@
-source "R" ("sqrt", "cor");
-source "R" from "minimal.R" ("packGeneric", "unpackGeneric")
+source R ("sqrt", "cor");
+source R from "minimal.R" ("packGeneric", "unpackGeneric")
 
 export foo
 export cor

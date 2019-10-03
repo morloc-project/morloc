@@ -490,7 +490,7 @@ unitTypeTests =
     -- source
     , (flip $ exprTestGood "can source") num $
       T.unlines -- FIXME: this does not prove much beyond syntax
-        [ "source \"c\" from \"foo.c\" (\"yolo\" as f, \"olga\");"
+        [ "source c from \"foo.c\" (\"yolo\" as f, \"olga\");"
         , "f c :: qwer -> sadf;"
         , "f :: cc -> vv;"
         , "44"

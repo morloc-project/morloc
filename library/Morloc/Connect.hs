@@ -96,7 +96,7 @@ initProgramState mods
     mksrcmap :: Module -> Map.Map EVar Source'
     mksrcmap m =
       Map.unions
-        [ makeSource (modulePath m) (ML.readLangName x) y z
+        [ makeSource (modulePath m) x y z
         | SrcE x y z <- moduleBody m
         ]
 
@@ -339,18 +339,15 @@ toRealizations n m l [] = do
 toRealizations n m _ es = return $ map toRealization es
   where
     toRealization :: EType -> Realization
-    toRealization e@(EType t (Just langText) _ _ (Just (f, EV srcname))) =
-      case ML.readLangName langText of
-        (Just lang) ->
-          Realization
-            { rLang = lang
-            , rName = srcname
-            , rConcreteType = Just $ etype2mtype Nothing e
-            , rModulePath = modulePath m
-            , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
-            , rSourced = True
-            }
-        Nothing -> error "unrecognized language"
+    toRealization e@(EType t (Just lang) _ _ (Just (f, EV srcname))) =
+      Realization
+        { rLang = lang
+        , rName = srcname
+        , rConcreteType = Just $ etype2mtype Nothing e
+        , rModulePath = modulePath m
+        , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
+        , rSourced = True
+        }
     toRealization _ = error "This is not a realization"
 
 -- | uncurry one level of an expression, pulling out a tuple with
@@ -389,15 +386,14 @@ onFst f (x, y) = (f x, y)
 
 makeSource ::
      Maybe Path
-  -> Maybe Lang
+  -> Lang
   -> Maybe Path
   -> [(EVar, EVar)]
   -> Map.Map EVar Source'
-makeSource mpath (Just l) f xs =
-  Map.fromList $ map (\(EV n, EV a) -> (EV a, Source' path l n a)) xs
+makeSource mpath lang f xs =
+  Map.fromList $ map (\(EV n, EV a) -> (EV a, Source' path lang n a)) xs
   where
     path = MS.combine <$> fmap MS.takeDirectory mpath <*> f
-makeSource _ Nothing _ _ = error "unsupported language"
 
 rootModule :: [Module] -> MorlocMonad Module
 rootModule ms =
@@ -427,15 +423,10 @@ makeSerialMaps (concat . map moduleBody -> es) =
     -- convert textual language names to Lang's
   where
     f :: Expr -> MorlocMonad (Maybe (Lang, Expr))
-    f e@(SrcE l _ _) =
-      case ML.readLangName l of
-        (Just lang) -> return $ Just (lang, e)
-        _ -> MM.throwError . GeneratorError $ "unrecognized language: " <> l
-    f e@(Signature _ (elang -> Just l)) =
-      case ML.readLangName l of
-        (Just lang) -> return $ Just (lang, e)
-        _ -> MM.throwError . GeneratorError $ "unrecognized language: " <> l
+    f e@(SrcE lang _ _) = return $ Just (lang, e)
+    f e@(Signature _ (elang -> Just lang)) = return $ Just (lang, e)
     f _ = return $ Nothing
+
     toSerialMap :: Lang -> [Expr] -> SerialMap
     toSerialMap lang es =
       SerialMap
@@ -467,13 +458,13 @@ etype2mtype n e = type2mtype Set.empty (etype e)
       MTypeMeta
         { metaName = n
         , metaProp = map prop2text (Set.toList (eprop e))
-        , metaLang = elang e >>= ML.readLangName
+        , metaLang = elang e
         }
     metaEmpty =
       MTypeMeta
         { metaName = Nothing
         , metaProp = []
-        , metaLang = elang e >>= ML.readLangName
+        , metaLang = elang e
         }
     prop2text Pack = ["packs"]
     prop2text Unpack = ["unpacks"]

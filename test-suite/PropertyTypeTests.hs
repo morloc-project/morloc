@@ -6,6 +6,7 @@ import Morloc.Namespace ((<>))
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
 import Morloc.TypeChecker.Namespace
+import Morloc.TypeChecker.Util
 
 import qualified Control.Monad as CM
 import qualified Data.Set as Set

@@ -25,6 +25,7 @@ module Morloc.TypeChecker.Infer
 import Control.Monad (foldM)
 import Morloc.Namespace ((<>))
 import Morloc.TypeChecker.Namespace
+import Morloc.TypeChecker.Util
 import qualified Data.List as DL
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -226,6 +227,10 @@ subtype' (FunT a1 a2) (FunT b1 b2) g1
  = do
   g2 <- subtype b1 a1 g1
   subtype (apply g2 a2) (apply g2 b2) g2
+--  g1 |- A1 <: B1
+-- ----------------------------------------- <:App
+--  g1 |- A1 A2 <: B1 B2 -| g2
+--  unparameterized types are the same as VarT, so subtype on that instead
 subtype' (ArrT v1 []) (ArrT v2 []) g = subtype (VarT v1) (VarT v2) g
 subtype' (ArrT v1 vs1) (ArrT v2 vs2) g = do
   subtype (VarT v1) (VarT v2) g
@@ -237,6 +242,7 @@ subtype' (ArrT v1 vs1) (ArrT v2 vs2) g = do
       g'' <- subtype t1' t2' g'
       compareArr ts1' ts2' g''
     compareArr _ _ _ = throwError TypeMismatch
+-- subtype unordered records
 subtype' (RecT rs1) (RecT rs2) g = compareEntry (DL.sort rs1) (DL.sort rs2) g
   where
     compareEntry :: [(TVar, Type)] -> [(TVar, Type)] -> Gamma -> Stack Gamma
@@ -246,10 +252,6 @@ subtype' (RecT rs1) (RecT rs2) g = compareEntry (DL.sort rs1) (DL.sort rs2) g
       g4 <- subtype t1 t2 g3
       compareEntry rs1' rs2' g4
     compareEntry _ _ _ = throwError TypeMismatch
---  g1 |- A1 <: B1
--- ----------------------------------------- <:App
---  g1 |- A1 A2 <: B1 B2 -| g2
---  unparameterized types are the same as VarT, so subtype on that instead
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR

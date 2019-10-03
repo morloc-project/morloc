@@ -11,16 +11,16 @@ module Morloc.Parser.Parser
   , readType
   ) where
 
-import qualified Morloc.Data.Text as MT
-import Morloc.Namespace (Path)
-import qualified Morloc.System as MS
-import Morloc.TypeChecker.Namespace
-
-import qualified Data.Scientific as DS
-import qualified Data.Set as Set
 import Data.Void (Void)
+import Morloc.Namespace (Path, Lang, (<>))
+import Morloc.TypeChecker.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
+import qualified Data.Scientific as DS
+import qualified Data.Set as Set
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
+import qualified Morloc.System as MS
 import qualified Text.Megaparsec.Char.Lexer as L
 
 type Parser = Parsec Void MT.Text
@@ -208,7 +208,7 @@ pFunctionDeclaration = do
 pSignature :: Parser Expr
 pSignature = do
   v <- name
-  lang <- optional (name)
+  lang <- optional pLang
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
@@ -225,6 +225,14 @@ pSignature = do
          , esource = Nothing
          })
 
+pLang :: Parser Lang
+pLang = do
+  langStr <- name
+  case ML.readLangName langStr of
+    (Just lang) -> return lang
+    Nothing -> fancyFailure . Set.singleton . ErrorFail
+      $ "Langage '" <> MT.unpack langStr <> "' is not supported"
+ 
 -- | match an optional tag that precedes some construction
 tag :: Parser a -> Parser (Maybe MT.Text)
 tag p = optional (try tag')
@@ -275,7 +283,7 @@ pExpr f =
 pSrcE :: Maybe Path -> Parser Expr
 pSrcE f = do
   reserved "source"
-  language <- stringLiteral
+  language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
   return $ SrcE language (MS.combine <$> fmap MS.takeDirectory f <*> srcfile) rs

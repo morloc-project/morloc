@@ -1,6 +1,6 @@
 import rbase (map, mul);
 
-source "R" ("sqrt", "sum", "abs");
+source R ("sqrt", "sum", "abs");
 
 export rms;
 export abssum;

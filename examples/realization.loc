@@ -1,6 +1,6 @@
 -- this will not compile, it is only intended to be typechecked
 
-source "Cpp" ("snd", "sqrt");
+source Cpp ("snd", "sqrt");
 
 export foo;
 

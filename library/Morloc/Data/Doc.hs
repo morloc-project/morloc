@@ -10,6 +10,7 @@ This module re-exports Leijen's text builder along with a few other utilities.
 -}
 module Morloc.Data.Doc
   ( module Data.Text.Prettyprint.Doc
+  , module Data.Text.Prettyprint.Doc.Render.Text
   , putDoc
   , render
   , render'
@@ -25,27 +26,26 @@ import Data.Monoid ((<>))
 import qualified Data.Text as DT
 import qualified Data.Text.Lazy as DL
 import Data.Text.Prettyprint.Doc hiding ((<>))
-import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
-import Data.Text.Prettyprint.Doc.Render.Text (renderStrict)
+import Data.Text.Prettyprint.Doc.Render.Text
 
-render :: Doc a -> DT.Text
+render :: Doc ann -> DT.Text
 render = renderStrict . layoutPretty defaultLayoutOptions
 
-render' :: Doc a -> String
+render' :: Doc ann -> String
 render' = show -- NOTE: This ignores layouts
 
-int :: Int -> Doc a
+int :: Int -> Doc ann
 int = pretty
 
-integer :: Integer -> Doc a
+integer :: Integer -> Doc ann
 integer = pretty
 
 -- | a tupled function that does not fold long lines (folding breaks commenting)
-tupledNoFold :: [Doc a] -> Doc a
+tupledNoFold :: [Doc ann] -> Doc ann
 tupledNoFold [] = ""
 tupledNoFold (x:xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
 
-textEsc' :: DT.Text -> Doc a
+textEsc' :: DT.Text -> Doc ann
 textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit
   where
     escapeChar '\n' = "\\n"

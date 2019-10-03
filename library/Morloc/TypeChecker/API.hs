@@ -11,11 +11,11 @@ module Morloc.TypeChecker.API
   , Module(..)
   ) where
 
+import Morloc.Namespace
+import Morloc.TypeChecker.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import Morloc.Namespace
 import qualified Morloc.TypeChecker.Infer as Infer
-import Morloc.TypeChecker.Namespace
 
 typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms =

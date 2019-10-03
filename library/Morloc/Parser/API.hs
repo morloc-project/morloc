@@ -15,6 +15,7 @@ module Morloc.Parser.API
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.Pretty as Pretty
 import Morloc.Namespace (MorlocMonad, Path)
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Namespace
@@ -52,7 +53,7 @@ parse f code = do
         return mods
 
 cute :: [Module] -> IO ()
-cute ms = mapM_ (\m -> putDoc (prettyModule m) >> putStrLn "") ms
+cute ms = mapM_ (\m -> putDoc (Pretty.prettyModule m) >> putStrLn "") ms
 
 ugly :: [Module] -> IO ()
 ugly ms = print ms
