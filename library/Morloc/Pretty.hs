@@ -10,7 +10,6 @@ module Morloc.Pretty
   ( prettyExpr
   , prettyModule
   , prettyType
-  , desc
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -18,7 +17,6 @@ import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Data.Set as Set
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
-import qualified Morloc.Data.Text as MT
 
 instance Pretty MType where
   pretty (MConcType _ n []) = pretty n
@@ -35,7 +33,8 @@ instance Pretty EVar where
   pretty (EV t) = pretty t
 
 instance Pretty TVar where
-  pretty (TV t) = pretty t
+  pretty (TV Nothing t) = pretty t
+  pretty (TV (Just lang) t) = pretty t <> "@" <> pretty (show lang)
 
 typeStyle =
   Style.SetAnsiStyle
@@ -141,7 +140,7 @@ prettyProperty Cast = "cast"
 prettyProperty (GeneralProperty ts) = hsep (map pretty ts)
 
 forallVars :: Type -> [Doc a]
-forallVars (Forall (TV s) t) = pretty s : forallVars t
+forallVars (Forall v t) = pretty v : forallVars t
 forallVars _ = []
 
 forallBlock :: Type -> Doc a
@@ -153,42 +152,14 @@ prettyGreenType t = annotate typeStyle (prettyType t)
 
 prettyType :: Type -> Doc ann
 prettyType UniT = "1"
-prettyType (VarT (TV s)) = pretty s
+prettyType (VarT v) = pretty v
 prettyType (FunT t1@(FunT _ _) t2) =
   parens (prettyType t1) <+> "->" <+> prettyType t2
 prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
 prettyType t@(Forall _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyType (ExistT (TV e)) = "<" <> pretty e <> ">"
-prettyType (ArrT (TV v) ts) = pretty v <+> hsep (map prettyType ts)
+prettyType (ExistT v) = angles (pretty v)
+prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
 prettyType (RecT entries) =
   encloseSep "{" "}" ", "
-    (map (\(TV v, e) -> pretty v <+> "=" <+> prettyType e) entries)
-
-class Describable a where
-  desc :: a -> String
-
-instance Describable Expr where
-  desc (UniE) = "UniE"
-  desc (VarE (EV v)) = "VarE:" ++ MT.unpack v
-  desc (ListE _) = "ListE"
-  desc (TupleE _) = "Tuple"
-  desc (SrcE _ _ _) = "SrcE:"
-  desc (LamE (EV v) _) = "LamE:" ++ MT.unpack v
-  desc (AppE e1 e2) = "AppE (" ++ desc e1 ++ ") (" ++ desc e2 ++ ")"
-  desc (AnnE e _) = "AnnE (" ++ desc e ++ ")"
-  desc (NumE x) = "NumE:" ++ show x
-  desc (LogE x) = "LogE:" ++ show x
-  desc (StrE x) = "StrE:" ++ show x
-  desc (RecE _) = "RecE:"
-  desc (Declaration (EV e) _) = "Declaration:" ++ MT.unpack e
-  desc (Signature (EV e) _) = "Signature:" ++ MT.unpack e
-
-instance Describable Type where
-  desc (UniT) = "UniT"
-  desc (VarT (TV v)) = "VarT:" ++ MT.unpack v
-  desc (ExistT (TV v)) = "ExistT:" ++ MT.unpack v
-  desc (Forall (TV v) _) = "Forall:" ++ MT.unpack v
-  desc (FunT t1 t2) = "FunT (" ++ desc t1 ++ ") (" ++ desc t2 ++ ")"
-  desc (ArrT (TV v) xs) = "ArrT:" ++ MT.unpack v ++ " " ++ (concat . map desc) xs
-  desc (RecT _) = "RecT:"
+    (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)

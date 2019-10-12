@@ -3,7 +3,6 @@ module GoldenManifoldTests
   ) where
 
 import Morloc.Connect (connect)
-import Morloc.Namespace
 import Test.Tasty
 import Test.Tasty.Golden
 import qualified Morloc.Config as Config

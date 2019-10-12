@@ -164,7 +164,7 @@ generalize t = generalize' existentialMap t
     generalize' [] t' = t'
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
     existentialMap =
-      zip (Set.toList (findExistentials t)) (map (TV . MT.pack) variables)
+      zip (Set.toList (findExistentials t)) (map (TV Nothing . MT.pack) variables)
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
     findExistentials :: Type -> Set.Set TVar
     findExistentials UniT = Set.empty
@@ -193,19 +193,19 @@ generalize t = generalize' existentialMap t
 generalizeE :: Expr -> Expr
 generalizeE = mapT generalize
 
-newvar :: Stack Type
-newvar = do
+newvar :: Maybe Lang -> Stack Type
+newvar lang = do
   s <- MS.get
   let v = newvars !! stateVar s
   MS.put $ s {stateVar = stateVar s + 1}
-  return (ExistT $ TV v)
+  return (ExistT $ TV lang v)
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])
 
 newqul :: TVar -> Stack TVar
-newqul (TV v) = do
+newqul (TV l v) = do
   s <- MS.get
-  let v' = TV (v <> "." <> (MT.pack . show $ stateQul s)) -- create a new variable such as "a.0"
+  let v' = TV l (v <> "." <> (MT.pack . show $ stateQul s)) -- create a new variable such as "a.0"
   MS.put $ s {stateQul = stateQul s + 1}
   return v'

@@ -97,10 +97,10 @@ subtypeOf t1 t2 g =
 --   (Left _, _) -> False
 instance QC.Arbitrary Type where
   arbitrary = arbitraryType 3 []
-  shrink (UniT) = [VarT (TV "X")]
-  shrink (VarT (TV "X")) = []
-  shrink (VarT _) = [VarT (TV "X")]
-  shrink (ExistT _) = [VarT (TV "X")]
+  shrink (UniT) = [VarT (TV Nothing "X")]
+  shrink (VarT (TV Nothing "X")) = []
+  shrink (VarT _) = [VarT (TV Nothing "X")]
+  shrink (ExistT _) = [VarT (TV Nothing "X")]
   shrink (Forall v t) = QC.shrink t ++ [t] ++ [Forall v t' | t' <- QC.shrink t]
   shrink (FunT t1 t2) =
     QC.shrink t1 ++
@@ -109,32 +109,32 @@ instance QC.Arbitrary Type where
     [FunT t1' t2' | (t1', t2') <- QC.shrink (t1, t2)] ++
     [FunT t1' t2 | t1' <- QC.shrink t1] ++ [FunT t1 t2' | t2' <- QC.shrink t2]
   shrink (ArrT _ []) = [] -- this expression should not be generated
-  shrink (ArrT v@(TV "L") [p1, p2, p3]) =
-    [VarT (TV "X")] ++
+  shrink (ArrT v@(TV Nothing "L") [p1, p2, p3]) =
+    [VarT (TV Nothing "X")] ++
     QC.shrink p1 ++
     QC.shrink p2 ++
     QC.shrink p3 ++
-    QC.shrink (ArrT (TV "K") [p1, p2]) ++
-    QC.shrink (ArrT (TV "K") [p1, p3]) ++
-    QC.shrink (ArrT (TV "K") [p2, p3]) ++
+    QC.shrink (ArrT (TV Nothing "K") [p1, p2]) ++
+    QC.shrink (ArrT (TV Nothing "K") [p1, p3]) ++
+    QC.shrink (ArrT (TV Nothing "K") [p2, p3]) ++
     [ArrT v [p1', p2', p3'] | (p1', p2', p3') <- QC.shrink (p1, p2, p3)]
-  shrink (ArrT v@(TV "K") [p1, p2]) =
-    [VarT (TV "X")] ++
+  shrink (ArrT v@(TV Nothing "K") [p1, p2]) =
+    [VarT (TV Nothing "X")] ++
     QC.shrink p1 ++
     QC.shrink p2 ++
-    QC.shrink (ArrT (TV "J") [p1]) ++
-    QC.shrink (ArrT (TV "J") [p2]) ++
+    QC.shrink (ArrT (TV Nothing "J") [p1]) ++
+    QC.shrink (ArrT (TV Nothing "J") [p2]) ++
     [ArrT v [p1', p2'] | (p1', p2') <- QC.shrink (p1, p2)]
-  shrink (ArrT (TV "J") [p]) = [VarT (TV "X")] ++ QC.shrink p
+  shrink (ArrT (TV Nothing "J") [p]) = [VarT (TV Nothing "X")] ++ QC.shrink p
   shrink (ArrT v (p:ps)) =
-    [VarT (TV "X")] ++
+    [VarT (TV Nothing "X")] ++
     [ ArrT v (p' : ps')
     | p' <- QC.shrink p
     , (ArrT _ ps') <- QC.shrink (ArrT v ps)
     ] ++
     [ArrT v (p : ps') | (ArrT _ ps') <- QC.shrink (ArrT v ps)]
-  shrink (RecT []) = [VarT (TV "X")]
-  shrink (RecT xs) = [VarT (TV "X")] ++ [RecT (tail xs)]
+  shrink (RecT []) = [VarT (TV Nothing "X")]
+  shrink (RecT xs) = [VarT (TV Nothing "X")] ++ [RecT (tail xs)]
   -- | RecT [(TVar, Type)]
 
 arbitraryType :: Int -> [TVar] -> QC.Gen Type
@@ -145,7 +145,7 @@ arbitraryType depth vs =
     ]
   where
     variables = [1 ..] >>= flip CM.replicateM ['a' .. 'z']
-    newvar' vs' = TV (T.pack $ variables !! length vs')
+    newvar' vs' = TV Nothing (T.pack $ variables !! length vs')
 
 arbitraryType' :: Int -> [TVar] -> QC.Gen Type
 arbitraryType' 0 vs = atomicType vs
@@ -153,16 +153,16 @@ arbitraryType' depth vs =
   QC.oneof
     [ atomicType vs
     , FunT <$> arbitraryType' (depth - 1) vs <*> arbitraryType' (depth - 1) vs
-    , QC.elements [ExistT (TV "e1"), ExistT (TV "e2"), ExistT (TV "e3")]
+    , QC.elements [ExistT (TV Nothing "e1"), ExistT (TV Nothing "e2"), ExistT (TV Nothing "e3")]
     , QC.frequency
-        [ (3, arbitraryArrT (depth - 1) vs (TV "J") 1)
-        , (2, arbitraryArrT (depth - 1) vs (TV "K") 2)
-        , (1, arbitraryArrT (depth - 1) vs (TV "L") 3)
+        [ (3, arbitraryArrT (depth - 1) vs (TV Nothing "J") 1)
+        , (2, arbitraryArrT (depth - 1) vs (TV Nothing "K") 2)
+        , (1, arbitraryArrT (depth - 1) vs (TV Nothing "L") 3)
         ]
     ]
 
 atomicType :: [TVar] -> QC.Gen Type
-atomicType [] = QC.elements [VarT (TV "A"), VarT (TV "B"), VarT (TV "C")]
+atomicType [] = QC.elements [VarT (TV Nothing "A"), VarT (TV Nothing "B"), VarT (TV Nothing "C")]
 atomicType vs = QC.oneof [atomicType [], QC.elements (map (\v -> VarT v) vs)]
 
 arbitraryArrT :: Int -> [TVar] -> TVar -> Int -> QC.Gen Type
@@ -238,7 +238,7 @@ instance QC.Arbitrary GammaIndex where
   shrink = undefined
 
 instance QC.Arbitrary TVar where
-  arbitrary = QC.elements [TV "a", TV "b", TV "c"]
+  arbitrary = QC.elements [TV Nothing "a", TV Nothing "b", TV Nothing "c"]
   shrink _ = []
 
 instance QC.Arbitrary EVar where

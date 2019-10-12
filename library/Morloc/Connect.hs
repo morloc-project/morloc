@@ -15,7 +15,6 @@ import Morloc.Namespace
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 
@@ -231,7 +230,7 @@ module2manifolds m (Signature ev@(EV v) t) = do
 module2manifolds _ _ = return []
 
 nargs :: Type -> Int
-nargs (FunT t1 t2) = 1 + nargs t2
+nargs (FunT _ t2) = 1 + nargs t2
 nargs _ = 0
 
 exprAsArgument ::
@@ -240,10 +239,10 @@ exprAsArgument ::
   -> Int -- ^ 0-indexed position of the argument
   -> Expr
   -> Program (Argument, [Manifold])
-exprAsArgument bnd _ p (AnnE (VarE v@(EV v')) gentype)
+exprAsArgument bnd _ _ (AnnE (VarE v@(EV v')) _)
   | elem v bnd = return (ArgName v', [])
   | otherwise = return (ArgNest v', [])
-exprAsArgument bnd m i (AnnE (AppE e1 e2) gentype) =
+exprAsArgument bnd m _ (AnnE (AppE e1 e2) gentype) =
   case uncurryApplication e1 e2 of
     (f, es) -> do
       let v@(EV mname) = exprAsFunction f
@@ -316,7 +315,7 @@ primitive2mdata _ =
   error "complex stuff is not yet allowed in MData (coming soon)"
 
 toRealizations :: Name -> Module -> Int -> [EType] -> Program [Realization]
-toRealizations n m l [] = do
+toRealizations n m _ [] = do
   src <- lookupSources (moduleName m) (EV n)
   case src of
     Nothing -> error $ "Bad realization: could not find '" <> MT.unpack n <> "'"
@@ -331,10 +330,10 @@ toRealizations n m l [] = do
             , rSourced = True
             }
         ]
-toRealizations n m _ es = return $ map toRealization es
+toRealizations _ m _ es = return $ map toRealization es
   where
     toRealization :: EType -> Realization
-    toRealization e@(EType t (Just lang) _ _ (Just (f, EV srcname))) =
+    toRealization e@(EType _ (Just lang) _ _ (Just (f, EV srcname))) =
       Realization
         { rLang = lang
         , rName = srcname
@@ -375,9 +374,6 @@ uncurryApplication f en = (f, [en])
 
 onSnd :: (b -> c) -> (a, b) -> (a, c)
 onSnd f (x, y) = (x, f y)
-
-onFst :: (a -> c) -> (a, b) -> (c, b)
-onFst f (x, y) = (f x, y)
 
 makeSource ::
      Maybe Path
@@ -423,12 +419,12 @@ makeSerialMaps (concat . map moduleBody -> es) =
     f _ = return $ Nothing
 
     toSerialMap :: Lang -> [Expr] -> SerialMap
-    toSerialMap lang es =
+    toSerialMap lang es' =
       SerialMap
         { serialLang = lang
-        , serialPacker = getSerial Pack es
-        , serialUnpacker = getSerial Unpack es
-        , serialSources = nub [p | (SrcE _ (Just p) _) <- es]
+        , serialPacker = getSerial Pack es'
+        , serialUnpacker = getSerial Unpack es'
+        , serialSources = nub [p | (SrcE _ (Just p) _) <- es']
         }
 
 getSerial :: Property -> [Expr] -> Map.Map MType Name
@@ -466,15 +462,15 @@ etype2mtype n e = type2mtype Set.empty (etype e)
     prop2text Cast = ["casts"]
     prop2text (GeneralProperty ts) = ts
     type2mtype :: Set.Set Name -> Type -> MType
-    type2mtype bnds (VarT (TV v))
+    type2mtype bnds (VarT (TV _ v))
       | Set.member v bnds = MAbstType meta v []
       | otherwise = MConcType meta v []
     type2mtype _ (ExistT _) = error "found existential type"
-    type2mtype bnds (Forall (TV v) t) = (type2mtype (Set.insert v bnds) t)
+    type2mtype bnds (Forall (TV _ v) t) = (type2mtype (Set.insert v bnds) t)
     type2mtype bnds (FunT t1 t2) =
       let ts = type2mtype bnds t1 : functionTypes bnds t2
        in MFuncType meta (init ts) (last ts)
-    type2mtype bnds (ArrT (TV v) ts)
+    type2mtype bnds (ArrT (TV _ v) ts)
       | Set.member v bnds =
         error $ "currently I can't use bound variables in ArrT"
       | otherwise = MAbstType meta v (map (type2mtype bnds) ts)
@@ -482,7 +478,7 @@ etype2mtype n e = type2mtype Set.empty (etype e)
       MConcType meta "Record" (map (recordEntry bnds) fs)
     type2mtype _ t = error $ "cannot cast type: " <> show t
     recordEntry :: Set.Set Name -> (TVar, Type) -> MType
-    recordEntry bnds (TV v, t) =
+    recordEntry bnds (TV _ _, t) =
       MConcType
         metaEmpty
         "RecordEntry"

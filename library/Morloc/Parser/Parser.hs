@@ -387,7 +387,7 @@ pTupleT :: Parser Type
 pTupleT = do
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  let v = TV . MT.pack $ "Tuple" ++ (show (length ts))
+  let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length ts))
   return $ ArrT v ts
 
 pRecordT :: Parser Type
@@ -401,18 +401,18 @@ pRecordEntryT = do
   n <- name
   _ <- op "::"
   t <- pType
-  return (TV n, t)
+  return (TV Nothing n, t)
 
 pExistential :: Parser Type
 pExistential = do
   v <- angles name
-  return (ExistT (TV v))
+  return (ExistT (TV Nothing v))
 
 pArrT :: Parser Type
 pArrT = do
   v <- name
   args <- many1 pType'
-  return $ ArrT (TV v) args
+  return $ ArrT (TV Nothing v) args
   where
     pType' = parens pType <|> pVarT <|> pListT
 
@@ -429,13 +429,13 @@ pListT :: Parser Type
 pListT = do
   _ <- tag (symbol "[")
   t <- brackets pType
-  return $ ArrT (TV "List") [t]
+  return $ ArrT (TV Nothing "List") [t]
 
 pVarT :: Parser Type
 pVarT = do
   _ <- tag (name <|> stringLiteral)
   n <- name <|> stringLiteral
-  return $ VarT (TV n)
+  return $ VarT (TV Nothing n)
 
 pForAllT :: Parser Type
 pForAllT = do
@@ -446,4 +446,4 @@ pForAllT = do
   return (curryForall vs t)
   where
     curryForall [] e' = e'
-    curryForall (v:vs') e' = Forall (TV v) (curryForall vs' e')
+    curryForall (v:vs') e' = Forall (TV Nothing v) (curryForall vs' e')

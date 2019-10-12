@@ -240,7 +240,7 @@ makeCisManifold g h cs ms m = do
       | otherwise = Man.getUnpackers h m
 
     findComposition :: Name -> Manifold
-    findComposition n = (filter (\m -> mComposition m == (Just n)) ms) !! 0
+    findComposition n' = (filter (\x -> mComposition x == (Just n')) ms) !! 0
 
     makeArg :: MDoc -> (Maybe MDoc, Maybe MDoc, Argument) -> MorlocMonad MDoc
     makeArg lhs (ctype, unpacker, arg) = do
@@ -337,7 +337,7 @@ makeSourceManifold g h m = do
                   }))
         , gaArg = Nothing
         }
-    unpack' name t@(lhs, ctype, _, a, x) =
+    unpack' name _ =
       MM.throwError . GeneratorError $
       "No unpacker found for argument: " <> render name
 
@@ -366,7 +366,7 @@ writeArgument _ _ _ (ArgPosi i) = return $ "x" <> pretty i
 -- x = [1,2,3]
 -- This should compile into a literal, compile-time initilized, value. It should
 -- be given a mangled name in the generated code, and made available as needed.
-writeArgument g ms xs (ArgNest n) =
+writeArgument g ms _ (ArgNest n) =
   case filter (\m -> mComposition m == Just n) ms of
     (m:_) -> return $ callIdToName g m
     [] ->

@@ -79,10 +79,11 @@ gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
-gFunction' gf = comments <> head <> braces (line <> gIndent' (gfBody gf) <> line) where
+gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> line) where
   targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
-  rargs = tupled (map snd (gfArgs gf))
-  head = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
+  -- FIXME: do I really not need this?
+  -- rargs = tupled (map snd (gfArgs gf))
+  head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
   comments = gfComments gf
 
 gSignature' :: GeneralFunction -> MDoc
@@ -138,12 +139,12 @@ gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
 gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
   where
-    switchC x cases = gCall' "switch" [x] <> blockC caseBlock where
+    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
       caseBlock = vsep (map asCase cases) <> line
       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
 
     blockC :: MDoc -> MDoc
-    blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
+    blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
 
     caseC :: MDoc -> MDoc
     caseC body = var <> " = " <> body <> ";" <> line <> "break;"

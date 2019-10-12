@@ -511,7 +511,8 @@ type Gamma = [GammaIndex]
 
 newtype EVar = EV Text deriving (Show, Eq, Ord)
 newtype MVar = MV Text deriving (Show, Eq, Ord)
-newtype TVar = TV Text deriving (Show, Eq, Ord)
+
+data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
 type GeneralStack c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s Identity))) a

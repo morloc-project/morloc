@@ -81,9 +81,9 @@ gSerialType' :: MType
 gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "str" []
 
 gAssign' :: GeneralAssignment -> MDoc
-gAssign' g = case gaType g of
-  (Just t) -> gaName g <> " = " <> gaValue g <+> gComment' ("::" <+> t) 
-  Nothing  -> gaName g <> " = " <> gaValue g 
+gAssign' ga = case gaType ga of
+  (Just t) -> gaName ga <> " = " <> gaValue ga <+> gComment' ("::" <+> t) 
+  Nothing  -> gaName ga <> " = " <> gaValue ga 
 
 gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' n args = n <> tupled args

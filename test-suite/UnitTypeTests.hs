@@ -76,30 +76,30 @@ testPasses msg e =
       assertFailure $
       "Expected this test to pass, but it failed with the message: " <> show e
 
-bool = VarT (TV "Bool")
+bool = VarT (TV Nothing "Bool")
 
-num = VarT (TV "Num")
+num = VarT (TV Nothing "Num")
 
-str = VarT (TV "Str")
+str = VarT (TV Nothing "Str")
 
 fun [] = error "Cannot infer type of empty list"
 fun [t] = t
 fun (t:ts) = FunT t (fun ts)
 
 forall [] t = t
-forall (s:ss) t = Forall (TV s) (forall ss t)
+forall (s:ss) t = Forall (TV Nothing s) (forall ss t)
 
-var s = VarT (TV s)
+var s = VarT (TV Nothing s)
 
-arr s ts = ArrT (TV s) ts
+arr s ts = ArrT (TV Nothing s) ts
 
 lst t = arr "List" [t]
 
 tuple ts = ArrT v ts
   where
-    v = (TV . T.pack) ("Tuple" ++ show (length ts))
+    v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
-record rs = RecT (map (\(x, t) -> (TV x, t)) rs)
+record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
 
 unitTypeTests =
   testGroup

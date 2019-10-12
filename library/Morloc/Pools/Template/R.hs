@@ -127,7 +127,7 @@ gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r xs x var
   =   var <+> "<-"
   <+> "switch"
-  <> tupled ([x] ++ map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
+  <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]

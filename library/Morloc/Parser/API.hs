@@ -12,7 +12,6 @@ module Morloc.Parser.API
   , ugly
   ) where
 
-import Morloc.Internal
 import Morloc.Namespace
 import Morloc.Parser.Parser
 import qualified Morloc.Data.Text as MT

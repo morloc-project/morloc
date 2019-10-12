@@ -117,7 +117,7 @@ unrenameExpr :: Expr -> Expr
 unrenameExpr = mapT unrenameType
 
 unrename :: TVar -> TVar
-unrename (TV t) = TV . head $ MT.splitOn "." t
+unrename (TV l t) = TV l . head $ MT.splitOn "." t
 
 unrenameType :: Type -> Type
 unrenameType UniT = UniT
@@ -277,8 +277,8 @@ instantiate :: Type -> Type -> Gamma -> Stack Gamma
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
 instantiate ta@(ExistT v) (FunT t1 t2) g1 = do
-  ea1 <- newvar
-  ea2 <- newvar
+  ea1 <- newvar Nothing
+  ea2 <- newvar Nothing
   g2 <-
     case access1 ta g1 of
       Just (rs, _, ls) ->
@@ -292,8 +292,8 @@ instantiate ta@(ExistT v) (FunT t1 t2) g1 = do
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
 instantiate (FunT t1 t2) tb@(ExistT v) g1 = do
-  ea1 <- newvar
-  ea2 <- newvar
+  ea1 <- newvar Nothing
+  ea2 <- newvar Nothing
   g2 <-
     case access1 tb g1 of
       Just (rs, _, ls) ->
@@ -443,15 +443,15 @@ infer' g UniE = return (g, UniT, ann UniE UniT)
 -- Num=>
 infer' g e@(NumE _) = return (g, t, ann e t)
   where
-    t = VarT (TV "Num")
+    t = VarT (TV Nothing "Num")
 -- Str=> 
 infer' g e@(StrE _) = return (g, t, ann e t)
   where
-    t = VarT (TV "Str")
+    t = VarT (TV Nothing "Str")
 -- Log=> 
 infer' g e@(LogE _) = return (g, t, ann e t)
   where
-    t = VarT (TV "Bool")
+    t = VarT (TV Nothing "Bool")
 -- Declaration=>
 infer' g (Declaration v e) = do
   (g2, t1, e2) <- infer (g +> MarkEG v) e
@@ -498,8 +498,8 @@ infer' g e@(VarE v) = do
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
 infer' g1 (LamE v e2) = do
-  a <- newvar
-  b <- newvar
+  a <- newvar Nothing
+  b <- newvar Nothing
   let anng = AnnG (VarE v) (fromType a)
       g2 = g1 +> a +> b +> anng
   (g3, t1, e2') <- check g2 e2 b
@@ -534,19 +534,19 @@ infer' g e1@(AnnE e@(VarE _) t)
     Nothing -> return (g, t, e1)
 infer' g (AnnE e t) = check g e t
 infer' g e1@(ListE []) = do
-  t <- newvar
-  let t' = ArrT (TV "List") [t]
+  t <- newvar Nothing
+  let t' = ArrT (TV Nothing "List") [t]
   return (g +> t, t', ann e1 t')
 infer' g1 e1@(ListE (x:xs)) = do
   (g2, t', _) <- infer g1 x
   g3 <- foldM (quietCheck t') g2 xs
-  let t'' = ArrT (TV "List") [t']
+  let t'' = ArrT (TV Nothing "List") [t']
   return (g3, t'', ann e1 t'')
 infer' _ (TupleE []) = throwError EmptyTuple
 infer' _ (TupleE [_]) = throwError TupleSingleton
 infer' g (TupleE xs) = do
   (g', ts, es) <- chainInfer g (reverse xs) [] []
-  let v = TV . MT.pack $ "Tuple" ++ (show (length xs))
+  let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
   return (g', t, AnnE e t)
@@ -554,7 +554,7 @@ infer' g (TupleE xs) = do
 infer' _ (RecE []) = throwError EmptyRecord
 infer' g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (reverse $ map snd rs) [] []
-  let t = RecT (zip [TV x | (EV x, _) <- rs] ts)
+  let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
   return (g2, t, AnnE e t)
 
 quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
@@ -634,8 +634,8 @@ derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
 derive' g e t@(ExistT v) = do
-  ea1 <- newvar
-  ea2 <- newvar
+  ea1 <- newvar Nothing
+  ea2 <- newvar Nothing
   let t' = FunT ea1 ea2
   g2 <-
     case access1 t g
