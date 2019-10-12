@@ -21,14 +21,39 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.System as MS
 import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Control.Monad.State as CMS
 
-type Parser = Parsec Void MT.Text
+type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
+
+data ParserState = ParserState {
+    stateLang :: Maybe Lang
+  , stateModulePath :: Maybe MT.Text
+}
+
+emptyState :: ParserState
+emptyState = ParserState {stateLang = Nothing , stateModulePath = Nothing}
+
+setLang :: Maybe Lang -> Parser ()
+setLang lang = do
+  s <- CMS.get
+  CMS.put (s { stateLang = lang })
 
 readProgram :: Maybe Path -> MT.Text -> [Module]
-readProgram f s =
-  case parse (sc >> pProgram f <* eof) (maybe "<expr>" MT.unpack f) s of
+readProgram f sourceCode =
+  case runParser
+         (CMS.runStateT (sc >> pProgram <* eof) pstate)
+         (maybe "<expr>" MT.unpack f)
+         sourceCode of
     Left err -> error (show err)
-    Right es -> es
+    Right (es, _) -> es
+  where
+    pstate = ParserState {stateLang = Nothing , stateModulePath = f}
+
+readType :: MT.Text -> Type
+readType typeStr =
+  case runParser (CMS.runStateT (pType <* eof) emptyState) "" typeStr of
+    Left err -> error (show err)
+    Right (es, _) -> es
 
 many1 :: Parser a -> Parser [a]
 many1 p = do
@@ -113,24 +138,26 @@ data ModuleBody
   | MBExport EVar
   | MBBody Expr
 
-pProgram :: Maybe Path -> Parser [Module]
-pProgram f = do
-  es <- many (pToplevel f)
+pProgram :: Parser [Module]
+pProgram = do
+  f <- CMS.gets stateModulePath
+  es <- many pToplevel
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
     [] -> return mods
     es' -> return $ makeModule f (MV "Main") es' : mods
 
-pToplevel :: Maybe Path -> Parser Toplevel
-pToplevel f =
-  try (fmap TModule (pModule f) <* optional (symbol ";")) <|>
-  fmap TModuleBody (pModuleBody f <* optional (symbol ";"))
+pToplevel :: Parser Toplevel
+pToplevel =
+  try (fmap TModule pModule <* optional (symbol ";")) <|>
+  fmap TModuleBody (pModuleBody <* optional (symbol ";"))
 
-pModule :: Maybe Path -> Parser Module
-pModule f = do
+pModule :: Parser Module
+pModule = do
+  f <- CMS.gets stateModulePath
   _ <- reserved "module"
   moduleName' <- name
-  mes <- braces (many1 (pModuleBody f))
+  mes <- braces (many1 pModuleBody)
   return $ makeModule f (MV moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
@@ -147,14 +174,14 @@ makeModule f n mes =
     exports' = [x | (MBExport x) <- mes]
     body' = [x | (MBBody x) <- mes]
 
-pModuleBody :: Maybe Path -> Parser ModuleBody
-pModuleBody f =
+pModuleBody :: Parser ModuleBody
+pModuleBody =
   try pImport <* optional (symbol ";") <|> try pExport <* optional (symbol ";") <|>
   try pStatement' <* optional (symbol ";") <|>
   pExpr' <* optional (symbol ";")
   where
     pStatement' = fmap MBBody pStatement
-    pExpr' = fmap MBBody (pExpr f)
+    pExpr' = fmap MBBody pExpr
 
 pImport :: Parser ModuleBody
 pImport = do
@@ -190,7 +217,7 @@ pDataDeclaration :: Parser Expr
 pDataDeclaration = do
   v <- name
   _ <- symbol "="
-  e <- pExpr Nothing
+  e <- pExpr
   return (Declaration (EV v) e)
 
 pFunctionDeclaration :: Parser Expr
@@ -198,7 +225,7 @@ pFunctionDeclaration = do
   v <- name
   args <- many1 name
   _ <- op "="
-  e <- pExpr Nothing
+  e <- pExpr
   return $ Declaration (EV v) (curryLamE (map EV args) e)
   where
     curryLamE [] e' = e'
@@ -208,11 +235,13 @@ pSignature :: Parser Expr
 pSignature = do
   v <- name
   lang <- optional pLang
+  setLang lang
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
   constraints <-
     option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
+  setLang Nothing
   return $
     Signature
       (EV v)
@@ -259,28 +288,23 @@ pProperty = do
 pConstraint :: Parser Constraint
 pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
-readType :: MT.Text -> Type
-readType s =
-  case parse (pType <* eof) "" s of
-    Left err -> error (show err)
-    Right t -> t
-
-pExpr :: Maybe Path -> Parser Expr
-pExpr f =
+pExpr :: Parser Expr
+pExpr =
   try pRecordE <|> try pTuple <|> try pUni <|> try pAnn <|> try pApp <|>
   try pStrE <|>
   try pLogE <|>
   try pNumE <|>
-  try (pSrcE f) <|>
+  try pSrcE <|>
   pListE <|>
-  parens (pExpr Nothing) <|>
+  parens pExpr <|>
   pLam <|>
   pVar
 
 -- source "c" from "foo.c" ("Foo" as foo, "bar")
 -- source "R" ("sqrt", "t.test" as t_test)
-pSrcE :: Maybe Path -> Parser Expr
-pSrcE f = do
+pSrcE :: Parser Expr
+pSrcE = do
+  f <- CMS.gets stateModulePath
   reserved "source"
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral)
@@ -300,18 +324,18 @@ pRecordEntryE :: Parser (EVar, Expr)
 pRecordEntryE = do
   n <- name
   _ <- symbol "="
-  e <- pExpr Nothing
+  e <- pExpr
   return (EV n, e)
 
 pListE :: Parser Expr
-pListE = fmap ListE $ brackets (sepBy (pExpr Nothing) (symbol ","))
+pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
 
 pTuple :: Parser Expr
 pTuple = do
   _ <- op "("
-  e <- pExpr Nothing
+  e <- pExpr
   _ <- op ","
-  es <- sepBy1 (pExpr Nothing) (op ",")
+  es <- sepBy1 pExpr (op ",")
   _ <- op ")"
   return (TupleE (e : es))
 
@@ -321,19 +345,19 @@ pUni = symbol "UNIT" >> return UniE
 pAnn :: Parser Expr
 pAnn = do
   e <-
-    parens (pExpr Nothing) <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
+    parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pType
   return $ AnnE e t
 
 pApp :: Parser Expr
 pApp = do
-  f <- parens (pExpr Nothing) <|> pVar
+  f <- parens pExpr <|> pVar
   (e:es) <- many1 s
   return $ foldl AppE (AppE f e) es
   where
     s =
-      try pAnn <|> try (parens (pExpr Nothing)) <|> try pUni <|> try pStrE <|>
+      try pAnn <|> try (parens pExpr) <|> try pUni <|> try pStrE <|>
       try pLogE <|>
       try pNumE <|>
       pListE <|>
@@ -356,7 +380,7 @@ pLam = do
   _ <- symbol "\\"
   vs <- many1 pEVar
   _ <- symbol "->"
-  e <- pExpr Nothing
+  e <- pExpr
   return (curryLamE vs e)
   where
     curryLamE [] e' = e'
@@ -433,9 +457,10 @@ pListT = do
 
 pVarT :: Parser Type
 pVarT = do
+  lang <- CMS.gets stateLang
   _ <- tag (name <|> stringLiteral)
   n <- name <|> stringLiteral
-  return $ VarT (TV Nothing n)
+  return $ VarT (TV lang n)
 
 pForAllT :: Parser Type
 pForAllT = do
