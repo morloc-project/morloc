@@ -89,7 +89,7 @@ toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
 typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr' g es [] = return (g, es)
 typecheckExpr' g es (x:xs) = do
-  (g', _, e') <- infer g x
+  (g', _, e') <- infer Nothing g x
   case e' of
     (Signature _ _) -> typecheckExpr' g' es xs
     _ -> typecheckExpr' g' (e' : es) xs
@@ -257,13 +257,13 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
 
 
 -- | TODO: document
-chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
-chainInfer g es = chainInfer' g es [] [] where
+chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
+chainInfer lang g0 es0 = chainInfer' g0 es0 [] [] where
   chainInfer' ::
        Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
   chainInfer' g [] ts es = return (g, ts, es)
   chainInfer' g (x:xs) ts es = do
-    (g', t', e') <- infer g x
+    (g', t', e') <- infer lang g x
     chainInfer' g' xs (t' : ts) (e' : es)
 
 
@@ -290,14 +290,6 @@ subtype t1 t2 g = do subtype' t1 t2 g
 subtype' UniT UniT g = return g
 subtype' t1@UniT t2@(VarT (TV (Just _) _)) g = serialConstraint t1 t2 >> return g
 subtype' (VarT (TV (Just _) _)) UniT g = return g
-
---
--- ----------------------------------------- <:Var
---  G[a] |- a <: a -| G[a]
-subtype' t1@(VarT a1) t2@(VarT a2) g = do
-  if (a1 == a2)
-    then return g
-    else throwError $ SubtypeError t1 t2
 
 -- VarT vs VarT
 subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
@@ -488,34 +480,35 @@ instantiate _ _ g = return g
 
 
 infer ::
-     Gamma
+     Maybe Lang
+  -> Gamma
   -> Expr -- ^ A subexpression from the original expression
   -> Stack ( Gamma
            , Type -- The return type
            , Expr -- The annotated expression
             )
-infer g e = do infer' g e
+infer l g e = do infer' l g e
 
 -- --
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
 -- --
-infer' g UniE = return (g, UniT, ann UniE UniT)
+infer' Nothing g UniE = return (g, UniT, ann UniE UniT)
 -- Num=>
-infer' g e@(NumE _) = return (g, t, ann e t)
+infer' Nothing g e@(NumE _) = return (g, t, ann e t)
   where
     t = VarT (TV Nothing "Num")
 -- Str=> 
-infer' g e@(StrE _) = return (g, t, ann e t)
+infer' Nothing g e@(StrE _) = return (g, t, ann e t)
   where
     t = VarT (TV Nothing "Str")
 -- Log=> 
-infer' g e@(LogE _) = return (g, t, ann e t)
+infer' Nothing g e@(LogE _) = return (g, t, ann e t)
   where
     t = VarT (TV Nothing "Bool")
 -- Declaration=>
-infer' g (Declaration v e) = do
-  (g2, t1, e2) <- infer (g +> MarkEG v) e
+infer' Nothing g (Declaration v e) = do
+  (g2, t1, e2) <- infer Nothing (g +> MarkEG v) e
   g3 <- cut (MarkEG v) g2
   (g4, t2, e3) <-
     case lookupE (VarE v) g >>= toType of
@@ -525,7 +518,7 @@ infer' g (Declaration v e) = do
       g5 = g4 +> AnnG (VarE v) (fromType t3)
   return (g5, t3, Declaration v (generalizeE e3))
 -- Signature=>
-infer' g (Signature v e) = do
+infer' Nothing g (Signature v e) = do
   e' <- addSource g v e
   (left, r3, right) <-
     case findIndex (isAnnG v) g of
@@ -541,7 +534,7 @@ infer' g (Signature v e) = do
           (Just _) -> return (g, TypeSet Nothing [e'], [])
           Nothing -> return (g, TypeSet (Just e') [], [])
   return (left ++ (AnnG (VarE v) r3) : right, UniT, Signature v e')
-infer' g1 s1@(SrcE l f xs) = do
+infer' Nothing g1 s1@(SrcE l f xs) = do
   let g3 = srcList g1 xs
   return (g3, UniT, s1)
   where
@@ -551,16 +544,16 @@ infer' g1 s1@(SrcE l f xs) = do
 --  (x:A) in g
 -- ------------------------------------------- Var
 --  g |- x => A -| g
-infer' g e@(VarE v) = do
+infer' Nothing g e@(VarE v) = do
   case lookupE e g >>= toType of
     (Just t) -> return (g, t, ann e t)
     Nothing -> throwError (UnboundVariable v)
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
-infer' g1 (LamE v e2) = do
+infer' Nothing g1 (LamE v e2) = do
   a <- newvar Nothing
-  b <- newvar Nothing
+  b <- newvar Nothing 
   let anng = AnnG (VarE v) (fromType a)
       g2 = g1 +> a +> b +> anng
   (g3, t1, e2') <- check g2 e2 b
@@ -574,8 +567,8 @@ infer' g1 (LamE v e2) = do
 --  g2 |- [g2]A o e2 =>> C -| g3
 -- ----------------------------------------- -->E
 --  g1 |- e1 e2 => C -| g3
-infer' g1 (AppE e1 e2) = do
-  (g2, a, e1') <- infer g1 e1
+infer' Nothing g1 (AppE e1 e2) = do
+  (g2, a, e1') <- infer Nothing g1 e1
   (g3, c, e2') <- derive g2 e2 (apply g2 a)
   e3 <- applyConcrete e1' e2' c
   return (g3, c, e3)
@@ -583,7 +576,7 @@ infer' g1 (AppE e1 e2) = do
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer' g e1@(AnnE e@(VarE _) t)
+infer' Nothing g e1@(AnnE e@(VarE _) t)
   -- This is a bit questionable. If a single variable is annotated, e.g.
   -- `x::Int`, and is not declared, this would normally raise an
   -- UnboundVariable error. However, it is convenient for testing purposes, and
@@ -593,30 +586,49 @@ infer' g e1@(AnnE e@(VarE _) t)
  = case lookupE e g of
     (Just _) -> check g e t
     Nothing -> return (g, t, e1)
-infer' g (AnnE e t) = check g e t
-infer' g e1@(ListE []) = do
+infer' Nothing g (AnnE e t) = check g e t
+infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
   return (g +> t, t', ann e1 t')
-infer' g1 e1@(ListE (x:xs)) = do
-  (g2, t', _) <- infer g1 x
+infer' Nothing g1 e1@(ListE (x:xs)) = do
+  (g2, t', _) <- infer Nothing g1 x
   g3 <- foldM (quietCheck t') g2 xs
   let t'' = ArrT (TV Nothing "List") [t']
   return (g3, t'', ann e1 t'')
-infer' _ (TupleE []) = throwError EmptyTuple
-infer' _ (TupleE [_]) = throwError TupleSingleton
-infer' g (TupleE xs) = do
-  (g', ts, es) <- chainInfer g (reverse xs)
+infer' _ _ (TupleE []) = throwError EmptyTuple
+infer' _ _ (TupleE [_]) = throwError TupleSingleton
+infer' Nothing g (TupleE xs) = do
+  (g', ts, es) <- chainInfer Nothing g (reverse xs)
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
   return (g', t, AnnE e t)
 -- ----------------------------------------- -->Rec
-infer' _ (RecE []) = throwError EmptyRecord
-infer' g1 e@(RecE rs) = do
-  (g2, ts, _) <- chainInfer g1 (reverse $ map snd rs)
+infer' _ _ (RecE []) = throwError EmptyRecord
+infer' Nothing g1 e@(RecE rs) = do
+  (g2, ts, _) <- chainInfer Nothing g1 (reverse $ map snd rs)
   let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
   return (g2, t, AnnE e t)
+
+-- Unsupported inference patterns:
+-- These shouldn't be supported
+infer' (Just _) _ (SrcE _ _ _) = undefined
+infer' (Just _) _ (Signature _ _) = undefined
+infer' (Just _) _ (Declaration _ _) = undefined
+infer' (Just _) _ UniE = undefined
+infer' (Just _) _ (NumE _) = undefined
+infer' (Just _) _ (LogE _) = undefined
+infer' (Just _) _ (StrE _) = undefined
+-- These should be supported
+infer' (Just _) _ (VarE _) = undefined
+infer' (Just _) _ (ListE _) = undefined
+infer' (Just _) _ (TupleE _) = undefined
+infer' (Just _) _ (LamE _ _) = undefined
+infer' (Just _) _ (AppE _ _) = undefined
+infer' (Just _) _ (AnnE _ _) = undefined
+infer' (Just _) _ (RecE _) = undefined
+
 
 quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
 quietCheck t g e = do
@@ -666,7 +678,7 @@ check' g1 e r2@(Forall x a) = do
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
 check' g1 e b = do
-  (g2, a, e') <- infer g1 e
+  (g2, a, e') <- infer Nothing g1 e
   g3 <- subtype (apply g2 a) (apply g2 b) g2
   let a' = apply g3 a
   return (g3, a', ann (apply g3 e') a')
