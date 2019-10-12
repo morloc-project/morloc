@@ -26,14 +26,20 @@ module Morloc.TypeChecker.Util
   , newqul
   , newvar
   , throwError
+  , serialConstraint
   ) where
 
 import Control.Monad.Except (throwError)
 import Morloc.Namespace
-import qualified Control.Monad.State as MS
+import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+
+serialConstraint :: Type -> Type -> Stack ()
+serialConstraint t1 t2 = do
+  s <- CMS.get
+  CMS.put (s {stateSer = (t1, t2):stateSer s})
 
 importFromModularGamma :: ModularGamma -> Module -> Stack Gamma
 importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
@@ -195,9 +201,9 @@ generalizeE = mapT generalize
 
 newvar :: Maybe Lang -> Stack Type
 newvar lang = do
-  s <- MS.get
+  s <- CMS.get
   let v = newvars !! stateVar s
-  MS.put $ s {stateVar = stateVar s + 1}
+  CMS.put $ s {stateVar = stateVar s + 1}
   return (ExistT $ TV lang v)
   where
     newvars =
@@ -205,7 +211,7 @@ newvar lang = do
 
 newqul :: TVar -> Stack TVar
 newqul (TV l v) = do
-  s <- MS.get
+  s <- CMS.get
   let v' = TV l (v <> "." <> (MT.pack . show $ stateQul s)) -- create a new variable such as "a.0"
-  MS.put $ s {stateQul = stateQul s + 1}
+  CMS.put $ s {stateQul = stateQul s + 1}
   return v'

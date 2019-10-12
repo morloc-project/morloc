@@ -528,6 +528,7 @@ data StackState =
   StackState
     { stateVar :: Int
     , stateQul :: Int
+    , stateSer :: [(Type, Type)]
     }
   deriving (Ord, Eq, Show)
 
@@ -549,6 +550,10 @@ data GammaIndex
   -- ^ source
   | ConcreteG EVar Lang Type
   -- ^ store a local concrete type
+  | UnsolvedConstraint Type Type
+  -- ^ Store an unsolved serialization constraint containing one or more
+  -- existential variables. When the existential variables are solved, the
+  -- constraint will be written into the Stack state.
   deriving (Ord, Eq, Show)
 
 data Import =

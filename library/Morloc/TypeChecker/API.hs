@@ -37,4 +37,4 @@ runStack e =
   flip MS.runStateT emptyState . MW.runWriterT . ME.runExceptT . MR.runReaderT e $
   StackConfig 0
 
-emptyState = StackState 0 0
+emptyState = StackState 0 0 []

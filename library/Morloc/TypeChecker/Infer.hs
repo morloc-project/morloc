@@ -194,6 +194,9 @@ subtype t1 t2 g = do subtype' t1 t2 g
 -- ----------------------------------------- Unit
 --  G |- 1 <: 1 -| G
 subtype' UniT UniT g = return g
+subtype' t1@UniT t2@(VarT (TV (Just _) _)) g = serialConstraint t1 t2 >> return g
+subtype' (VarT (TV (Just _) _)) UniT g = return g
+
 --
 -- ----------------------------------------- <:Var
 --  G[a] |- a <: a -| G[a]
@@ -201,11 +204,31 @@ subtype' t1@(VarT a1) t2@(VarT a2) g = do
   if (a1 == a2)
     then return g
     else throwError $ SubtypeError t1 t2
-subtype' a@(ExistT a1) b@(ExistT a2) g
+
+-- VarT vs VarT
+subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
+  -- If everything is the same, do nothing
+  --
+  -- ----------------------------------------- <:Var
+  --  G[a] |- a_l <: a_l -| G[a]
+  | lang1 == lang2 && a1 == a2 = return g
+  -- If languages are different, do nothing
+  --  l1 != l2    b_l2 ~~> a_l1
+  -- ----------------------------------------- <:Var
+  --  G[a] |- a_l1 <: b_l2 -| G[a]
+  | lang1 /= lang2 = serialConstraint t1 t2 >> return g
+  -- If languages are same, but types are different, raise error
+  | lang1 == lang2 && a1 /= a2 = throwError $ SubtypeError t1 t2
+
+subtype' a@(ExistT (TV l1 _)) b@(ExistT (TV l2 _)) g
   --
   -- ----------------------------------------- <:Exvar
-  --  G[E.a] |- Ea <: Ea -| G[E.a]
-  | a1 == a2 = return g
+  --  G[E.a] |- E.a <: E.a -| G[E.a]
+  | a == b = return g
+  --  l1 == l2
+  -- ----------------------------------------- <:AlienExvar
+  --  G[E.a,E.b] |- E.a <: E.b -| G[E.a,E.b], E.a ~~> E.b
+  | l1 /= l2 = return $ g +> UnsolvedConstraint a b
   --
   -- ----------------------------------------- <:InstantiateL/<:InstantiateR
   --  G[E.a] |- Ea <: Ea -| G[E.a]
@@ -214,6 +237,7 @@ subtype' a@(ExistT a1) b@(ExistT a2) g
       -- types involved are all existentials, it will always pass, so I omit
       -- it.
    = instantiate a b g
+
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
@@ -224,14 +248,17 @@ subtype' (FunT a1 a2) (FunT b1 b2) g1
  = do
   g2 <- subtype b1 a1 g1
   subtype (apply g2 a2) (apply g2 b2) g2
+
 --  g1 |- A1 <: B1
 -- ----------------------------------------- <:App
 --  g1 |- A1 A2 <: B1 B2 -| g2
 --  unparameterized types are the same as VarT, so subtype on that instead
 subtype' (ArrT v1 []) (ArrT v2 []) g = subtype (VarT v1) (VarT v2) g
-subtype' (ArrT v1 vs1) (ArrT v2 vs2) g = do
-  subtype (VarT v1) (VarT v2) g
-  compareArr vs1 vs2 g
+subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
+  | l1 /= l2 = serialConstraint t1 t2 >> return g
+  | l1 == l2 = do
+    subtype (VarT v1) (VarT v2) g
+    compareArr vs1 vs2 g
   where
     compareArr :: [Type] -> [Type] -> Gamma -> Stack Gamma
     compareArr [] [] g' = return g'
@@ -239,16 +266,20 @@ subtype' (ArrT v1 vs1) (ArrT v2 vs2) g = do
       g'' <- subtype t1' t2' g'
       compareArr ts1' ts2' g''
     compareArr _ _ _ = throwError TypeMismatch
+
 -- subtype unordered records
 subtype' (RecT rs1) (RecT rs2) g = compareEntry (sort rs1) (sort rs2) g
   where
     compareEntry :: [(TVar, Type)] -> [(TVar, Type)] -> Gamma -> Stack Gamma
     compareEntry [] [] g2 = return g2
-    compareEntry ((v1, t1):rs1') ((v2, t2):rs2') g2 = do
-      g3 <- subtype (VarT v1) (VarT v2) g2
-      g4 <- subtype t1 t2 g3
-      compareEntry rs1' rs2' g4
+    compareEntry ((v1@(TV l1 _), t1):rs1') ((v2@(TV l2 _), t2):rs2') g2
+      | l1 == l2 = do
+          g3 <- subtype (VarT v1) (VarT v2) g2
+          g4 <- subtype t1 t2 g3
+          compareEntry rs1' rs2' g4
+      | l1 /= l2 = serialConstraint t1 t2 >> return g
     compareEntry _ _ _ = throwError TypeMismatch
+
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
@@ -259,9 +290,11 @@ subtype' a b@(ExistT _) g = occursCheck a b >> instantiate a b g
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
 subtype' a@(ExistT _) b g = occursCheck b a >> instantiate a b g
+
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
 -- ----------------------------------------- <:ForallL
 --  g1 |- Forall x . A <: B -| g2
+--
 subtype' (Forall x a) b g =
   subtype (substitute x a) b (g +> MarkG x +> ExistG x) >>= cut (MarkG x)
 --  g1,a |- A :> B -| g2,a,g3
@@ -270,15 +303,16 @@ subtype' (Forall x a) b g =
 subtype' a (Forall v b) g = subtype a b (g +> VarG v) >>= cut (VarG v)
 subtype' a b _ = throwError $ SubtypeError a b
 
+
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
 --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate ta@(ExistT v) (FunT t1 t2) g1 = do
-  ea1 <- newvar Nothing
-  ea2 <- newvar Nothing
+instantiate ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
+  ea1 <- newvar lang
+  ea2 <- newvar lang
   g2 <-
     case access1 ta g1 of
       Just (rs, _, ls) ->
@@ -291,9 +325,9 @@ instantiate ta@(ExistT v) (FunT t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate (FunT t1 t2) tb@(ExistT v) g1 = do
-  ea1 <- newvar Nothing
-  ea2 <- newvar Nothing
+instantiate (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
+  ea1 <- newvar lang
+  ea2 <- newvar lang
   g2 <-
     case access1 tb g1 of
       Just (rs, _, ls) ->
