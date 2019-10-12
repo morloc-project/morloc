@@ -13,13 +13,10 @@ module Morloc.TypeChecker.Infer
   , subtype
   , substitute
   , apply
-  , applyE
   , free
   , infer
-  , renameExpr
-  , unrenameExpr
-  , renameType
-  , unrenameType
+  , rename
+  , unrename
   ) where
 
 import Morloc.Namespace
@@ -80,10 +77,10 @@ isRoot m k _ = not $ Map.foldr (isChild k) False m
 
 typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr g e = do
-  es <- fmap sort (mapM renameExpr e)
+  es <- fmap sort (mapM rename e)
   (g', es') <- typecheckExpr' g [] es
   let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
-  return $ (g', map (generalizeE . unrenameExpr . applyE g') es'')
+  return $ (g', map (generalizeE . unrename . apply g') es'')
 
 toExpr :: EVar -> TypeSet -> [Expr]
 toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
@@ -97,36 +94,65 @@ typecheckExpr' g es (x:xs) = do
     (Signature _ _) -> typecheckExpr' g' es xs
     _ -> typecheckExpr' g' (e' : es) xs
 
-renameExpr :: Expr -> Stack Expr
-renameExpr = mapT' renameType
 
-renameType :: Type -> Stack Type
-renameType UniT = return UniT
-renameType t@(VarT _) = return t
-renameType t@(ExistT _) = return t
-renameType (Forall v t) = do
-  v' <- newqul v
-  t' <- renameType (substitute' v (VarT v') t)
-  return $ Forall v' t'
-renameType (FunT t1 t2) = FunT <$> renameType t1 <*> renameType t2
-renameType (ArrT v ts) = ArrT <$> pure v <*> mapM renameType ts
-renameType (RecT rs) =
-  RecT <$> mapM (\(x, t) -> (,) <$> pure x <*> renameType t) rs
+class Renameable a where
+  rename :: a -> Stack a
+  unrename :: a -> a
 
-unrenameExpr :: Expr -> Expr
-unrenameExpr = mapT unrenameType
+instance Renameable Expr where
+  rename = mapT' rename
+  unrename = mapT unrename
 
-unrename :: TVar -> TVar
-unrename (TV l t) = TV l . head $ MT.splitOn "." t
+instance Renameable Type where
+  rename UniT = return UniT
+  rename t@(VarT _) = return t
+  rename t@(ExistT _) = return t
+  rename (Forall v t) = do
+    v' <- rename v
+    t' <- rename (substitute' v (VarT v') t)
+    return $ Forall v' t'
+  rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
+  rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
+  rename (RecT rs) =
+    RecT <$> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
-unrenameType :: Type -> Type
-unrenameType UniT = UniT
-unrenameType (VarT v) = VarT (unrename v)
-unrenameType t@(ExistT _) = t
-unrenameType (Forall v t) = Forall (unrename v) (unrenameType t)
-unrenameType (FunT t1 t2) = FunT (unrenameType t1) (unrenameType t2)
-unrenameType (ArrT v ts) = ArrT v (map unrenameType ts)
-unrenameType (RecT rs) = RecT [(x, unrenameType t) | (x, t) <- rs]
+  unrename UniT = UniT
+  unrename (VarT v) = VarT (unrename v)
+  unrename t@(ExistT _) = t
+  unrename (Forall v t) = Forall (unrename v) (unrename t)
+  unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
+  unrename (ArrT v ts) = ArrT v (map unrename ts)
+  unrename (RecT rs) = RecT [(x, unrename t) | (x, t) <- rs]
+
+instance Renameable TVar where
+  unrename (TV l t) = TV l . head $ MT.splitOn "." t
+  rename = newqul
+
+
+class Applicable a where
+  apply :: Gamma -> a -> a
+
+-- | Apply a context to a type (See Dunfield Figure 8).
+instance Applicable Type where
+  -- [G]l = l
+  apply _ UniT = UniT
+  -- [G]a = a
+  apply _ a@(VarT _) = a
+  -- [G](A->B) = ([G]A -> [G]B)
+  apply g (FunT a b) = FunT (apply g a) (apply g b)
+  -- [G]Forall a.a = forall a. [G]a
+  apply g (Forall x a) = Forall x (apply g a)
+  -- [G[a=t]]a = [G[a=t]]t
+  apply g a@(ExistT v) =
+    case lookupT v g of
+      (Just t') -> apply g t' -- reduce an existential; strictly smaller term
+      Nothing -> a
+  apply g (ArrT v ts) = ArrT v (map (apply g) ts)
+  apply g (RecT rs) = RecT (map (\(n, t) -> (n, apply g t)) rs)
+
+instance Applicable Expr where
+  apply g e = mapT (apply g) e
+
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
@@ -145,38 +171,22 @@ substitute' v r t = sub t
     sub (RecT rs) = RecT [(x, sub t') | (x, t') <- rs]
     sub t' = t'
 
+
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> Type -> Type
 substitute v t = substitute' v (ExistT v) t
 
--- | Apply a context to a type (See Dunfield Figure 8).
-apply :: Gamma -> Type -> Type
--- [G]l = l
-apply _ UniT = UniT
--- [G]a = a
-apply _ a@(VarT _) = a
--- [G](A->B) = ([G]A -> [G]B)
-apply g (FunT a b) = FunT (apply g a) (apply g b)
--- [G]Forall a.a = forall a. [G]a
-apply g (Forall x a) = Forall x (apply g a)
--- [G[a=t]]a = [G[a=t]]t
-apply g a@(ExistT v) =
-  case lookupT v g of
-    (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-    Nothing -> a
-apply g (ArrT v ts) = ArrT v (map (apply g) ts)
-apply g (RecT rs) = RecT (map (\(n, t) -> (n, apply g t)) rs)
 
-applyE :: Gamma -> Expr -> Expr
-applyE g e = mapT (apply g) e
-
+-- | TODO: document
 occursCheck :: Type -> Type -> Stack ()
 occursCheck t1 t2 =
   case Set.member t1 (free t2) of
     True -> throwError OccursCheckFail
     False -> return ()
 
+
+-- | TODO: document
 free :: Type -> Set.Set Type
 free UniT = Set.empty
 free v@(VarT _) = Set.singleton v
@@ -185,6 +195,90 @@ free (FunT t1 t2) = Set.union (free t1) (free t2)
 free (Forall v t) = Set.delete (VarT v) (free t)
 free (ArrT _ xs) = Set.unions (map free xs)
 free (RecT rs) = Set.unions [free t | (_, t) <- rs]
+
+
+-- | TODO: document
+applyConcrete :: Expr -> Expr -> Type -> Stack Expr
+applyConcrete (AnnE e1 _) e2@(AnnE _ a) c =
+  return $ AnnE (AppE (AnnE e1 (FunT a c)) e2) c
+applyConcrete e1 e2 t =
+  throwError . OtherError $
+  "Expected annotatated types in applyConcrete, got:\n  > " <>
+  MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
+
+
+-- | TODO: document
+isAnnG :: EVar -> GammaIndex -> Bool
+isAnnG e1 (AnnG (VarE e2) _)
+  | e1 == e2 = True
+  | otherwise = False
+isAnnG _ _ = False
+
+
+-- | TODO: document
+appendTypeSet :: EType -> TypeSet -> Stack TypeSet
+appendTypeSet e1 s =
+  case (elang e1, s) of
+  -- if e is a general type, and there is no conflicting type, then set e
+    (Nothing, TypeSet Nothing rs) -> do
+      mapM_ (checkRealization e1) rs
+      return $ TypeSet (Just e1) rs
+  -- if e is a realization, and no general type is set, just add e to the list
+    (Just _, TypeSet Nothing rs) -> return $ TypeSet Nothing (e1 : rs)
+  -- if e is a realization, and a general type exists, append it and check
+    (Just _, TypeSet (Just e2) rs) -> do
+      checkRealization e2 e1
+      return $ TypeSet (Just e2) (e1 : rs)
+  -- if e is general, and a general type exists, merge the general types
+    (Nothing, TypeSet (Just e2) rs) -> do
+      let e3 =
+            EType
+              { elang = Nothing
+              , etype = etype e2
+              , eprop = Set.union (eprop e1) (eprop e2)
+              , econs = Set.union (econs e1) (econs e2)
+              , esource = Nothing
+              }
+      return $ TypeSet (Just e3) rs
+
+
+-- | TODO: document
+checkRealization :: EType -> EType -> Stack ()
+checkRealization e1 e2 = f' (etype e1) (etype e2)
+  where
+    f' :: Type -> Type -> Stack ()
+    f' (FunT x1 y1) (FunT x2 y2) = f' x1 x2 >> f' y1 y2
+    f' (Forall _ x) (Forall _ y) = f' x y
+    f' (Forall _ x) y = f' x y
+    f' x (Forall _ y) = f' x y
+    f' (FunT _ _) _ = throwError BadRealization
+    f' _ (FunT _ _) = throwError BadRealization
+    f' _ _ = return ()
+
+
+-- | TODO: document
+chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
+chainInfer g es = chainInfer' g es [] [] where
+  chainInfer' ::
+       Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
+  chainInfer' g [] ts es = return (g, ts, es)
+  chainInfer' g (x:xs) ts es = do
+    (g', t', e') <- infer g x
+    chainInfer' g' xs (t' : ts) (e' : es)
+
+
+-- | TODO: document
+addSource :: Gamma -> EVar -> EType -> Stack EType
+addSource g v e =
+  case elang e of
+    (Just l) ->
+      case lookupSrc (v, l) g of
+        (Just (_, _, srcfile, srcname)) ->
+          return $ e {esource = Just (srcfile, srcname)}
+        Nothing -> return e -- FIXME: technically, this should raise MissingSource
+    Nothing -> return e
+
+
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
@@ -392,73 +486,6 @@ instantiate ta@(ExistT v) tb g1 = do
 -- bad
 instantiate _ _ g = return g
 
-applyConcrete :: Expr -> Expr -> Type -> Stack Expr
-applyConcrete (AnnE e1 _) e2@(AnnE _ a) c =
-  return $ AnnE (AppE (AnnE e1 (FunT a c)) e2) c
-applyConcrete e1 e2 t =
-  throwError . OtherError $
-  "Expected annotatated types in applyConcrete, got:\n  > " <>
-  MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
-
-isAnnG :: EVar -> GammaIndex -> Bool
-isAnnG e1 (AnnG (VarE e2) _)
-  | e1 == e2 = True
-  | otherwise = False
-isAnnG _ _ = False
-
-appendTypeSet :: EType -> TypeSet -> Stack TypeSet
-appendTypeSet e1 s =
-  case (elang e1, s) of
-  -- if e is a general type, and there is no conflicting type, then set e
-    (Nothing, TypeSet Nothing rs) -> do
-      mapM_ (checkRealization e1) rs
-      return $ TypeSet (Just e1) rs
-  -- if e is a realization, and no general type is set, just add e to the list
-    (Just _, TypeSet Nothing rs) -> return $ TypeSet Nothing (e1 : rs)
-  -- if e is a realization, and a general type exists, append it and check
-    (Just _, TypeSet (Just e2) rs) -> do
-      checkRealization e2 e1
-      return $ TypeSet (Just e2) (e1 : rs)
-  -- if e is general, and a general type exists, merge the general types
-    (Nothing, TypeSet (Just e2) rs) -> do
-      let e3 =
-            EType
-              { elang = Nothing
-              , etype = etype e2
-              , eprop = Set.union (eprop e1) (eprop e2)
-              , econs = Set.union (econs e1) (econs e2)
-              , esource = Nothing
-              }
-      return $ TypeSet (Just e3) rs
-
-checkRealization :: EType -> EType -> Stack ()
-checkRealization e1 e2 = f' (etype e1) (etype e2)
-  where
-    f' :: Type -> Type -> Stack ()
-    f' (FunT x1 y1) (FunT x2 y2) = f' x1 x2 >> f' y1 y2
-    f' (Forall _ x) (Forall _ y) = f' x y
-    f' (Forall _ x) y = f' x y
-    f' x (Forall _ y) = f' x y
-    f' (FunT _ _) _ = throwError BadRealization
-    f' _ (FunT _ _) = throwError BadRealization
-    f' _ _ = return ()
-
-chainInfer ::
-     Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
-chainInfer g [] ts es = return (g, ts, es)
-chainInfer g (x:xs) ts es = do
-  (g', t', e') <- infer g x
-  chainInfer g' xs (t' : ts) (e' : es)
-
-addSource :: Gamma -> EVar -> EType -> Stack EType
-addSource g v e =
-  case elang e of
-    (Just l) ->
-      case lookupSrc (v, l) g of
-        (Just (_, _, srcfile, srcname)) ->
-          return $ e {esource = Just (srcfile, srcname)}
-        Nothing -> return e -- FIXME: technically, this should raise MissingSource
-    Nothing -> return e
 
 infer ::
      Gamma
@@ -579,7 +606,7 @@ infer' g1 e1@(ListE (x:xs)) = do
 infer' _ (TupleE []) = throwError EmptyTuple
 infer' _ (TupleE [_]) = throwError TupleSingleton
 infer' g (TupleE xs) = do
-  (g', ts, es) <- chainInfer g (reverse xs) [] []
+  (g', ts, es) <- chainInfer g (reverse xs)
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
@@ -587,7 +614,7 @@ infer' g (TupleE xs) = do
 -- ----------------------------------------- -->Rec
 infer' _ (RecE []) = throwError EmptyRecord
 infer' g1 e@(RecE rs) = do
-  (g2, ts, _) <- chainInfer g1 (reverse $ map snd rs) [] []
+  (g2, ts, _) <- chainInfer g1 (reverse $ map snd rs)
   let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
   return (g2, t, AnnE e t)
 
@@ -642,7 +669,7 @@ check' g1 e b = do
   (g2, a, e') <- infer g1 e
   g3 <- subtype (apply g2 a) (apply g2 b) g2
   let a' = apply g3 a
-  return (g3, a', ann (applyE g3 e') a')
+  return (g3, a', ann (apply g3 e') a')
 
 derive ::
      Gamma

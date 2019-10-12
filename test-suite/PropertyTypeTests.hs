@@ -32,7 +32,7 @@ propertyTypeTests =
    -- , TQC.testProperty "unannotate(e) == unannotate(generalizeE(e))" $
    --     \e -> unannotate e == unannotate (map generalizeE e)
    -- apply
-    , TQC.testProperty "apply [] t == t" $ \t -> apply [] t == t
+    , TQC.testProperty "apply [] t == t" $ \t -> apply [] t == (t :: Type)
    -- -- applyE
    -- , TQC.testProperty "applyE [] e == e" $
    --    \e -> applyE [] e == e
