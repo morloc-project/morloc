@@ -689,40 +689,57 @@ infer lang g1 e0@(LamE v e2) = do
  -  g |- e1 e2 =>> C -| d_k
  -}
 infer _ g1 (AppE e1 e2) = do
-  -- Anonymous lambda functions are currently not supported. So e1 currently will
-  -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
-  -- would roughly correspond to DeclareInfer statements while adding annotated
-  -- lambdas would correspond to DeclareAnnot.
-  --
-  -- ts1 will include one entry consisting of the general type `(Nothing,t)`
-  -- and one or more realizatoins `(Just lang, t)`
-  (d1, ts1, e1') <- infer Nothing g1 e1
-  (dk, xs) <- foldM chainDerive (d1, []) ts1
-  e2' <- collate xs
-  -- * e1' - e1 with type annotations
-  -- * e2' - e2 with type annotations (after being applied to e2)
-  (ts', ek') <- applyConcrete e1' e2'
-  return (dk, ts', ek')
+  -- FIXME: the code below totally ignore concrete types
+  (g2, a', e1') <- infer Nothing g1 e1
+  let a = head [t | (Nothing, t) <- a'] 
+  (g3, c, e2') <- derive g2 e2 (apply g2 a)
+  e3 <- applyConcrete e1' e2' c
+  return (g3, [(Nothing, c)], e3)
   where
-    -- Chain a context through a series of `derive` calls, one for each type
-    -- inferred for e1.
-    chainDerive ::
-         (Gamma, [Expr])
-      -> (Maybe Lang, Type)
-      -> Stack (Gamma, [Expr])
-    chainDerive (g, es) (l, t) = do
-      (g', _, e') <- derive g e2 (apply g t)
-      return (g', (e':es))
-    -- pair input and output types by language and construct the function type
-    applyConcrete :: Expr -> Expr -> Stack ([(Maybe Lang, Type)], Expr)
-    applyConcrete (AnnE e1 ts1) (AnnE e2 ts2) = do
-      let (ts1', ts2') = unzip [ ((l1, FunT t1 t2), (l2, t2))
-                               | (l1, t1) <- ts1
-                               , (l2, t2) <- ts2
-                               , l1 == l2
-                               ]
-      return $ (ts2', AnnE (AppE (AnnE e1 ts1') e2) ts2')
-    applyConcrete _ _ = throwError $ OtherError "bad concrete"
+    applyConcrete :: Expr -> Expr -> Type -> Stack Expr
+    applyConcrete (AnnE e1 _) e2@(AnnE _ a') c = do
+      let a = head [t | (Nothing, t) <- a']
+      return $ AnnE (AppE (AnnE e1 [(Nothing, FunT a c)]) e2) [(Nothing, c)]
+    applyConcrete e1 e2 t =
+      throwError . OtherError $
+      "Expected annotatated types in applyConcrete, got:\n  > " <>
+      MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
+  -- The rightish, but totally broken, way
+  -- -- Anonymous lambda functions are currently not supported. So e1 currently will
+  -- -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
+  -- -- would roughly correspond to DeclareInfer statements while adding annotated
+  -- -- lambdas would correspond to DeclareAnnot.
+  -- --
+  -- -- ts1 will include one entry consisting of the general type `(Nothing,t)`
+  -- -- and one or more realizatoins `(Just lang, t)`
+  -- (d1, ts1, e1') <- infer Nothing g1 e1
+  -- (dk, xs) <- foldM chainDerive (d1, []) ts1
+  -- e2' <- collate xs
+  -- -- * e1' - e1 with type annotations
+  -- -- * e2' - e2 with type annotations (after being applied to e2)
+  -- (ts', ek') <- applyConcrete e1' e2'
+  -- return (dk, ts', ek')
+  -- where
+  --   -- Chain a context through a series of `derive` calls, one for each type
+  --   -- inferred for e1.
+  --   chainDerive ::
+  --        (Gamma, [Expr])
+  --     -> (Maybe Lang, Type)
+  --     -> Stack (Gamma, [Expr])
+  --   chainDerive (g, es) (l, t) = do
+  --     (g', _, e') <- derive g e2 (apply g t)
+  --     return (g', (e':es))
+  --   -- pair input and output types by language and construct the function type
+  --   applyConcrete :: Expr -> Expr -> Stack ([(Maybe Lang, Type)], Expr)
+  --   applyConcrete (AnnE e1 ts1) (AnnE e2 ts2) = do
+  --     let (ts1', ts2') = unzip [ ((l1, t1), (l2, t2))
+  --                              | (l1, t1) <- ts1
+  --                              , (l2, t2) <- ts2
+  --                              , l1 == l2
+  --                              ]
+  --     return $ (ts2', AnnE (AppE (AnnE e1 ts1') e2) ts2')
+  --   applyConcrete _ _ = throwError $ OtherError "bad concrete"
+
 
 --  g1 |- A
 --  g1 |- e <= A -| g2
