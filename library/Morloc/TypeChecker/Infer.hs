@@ -235,6 +235,7 @@ collateOne (RecE es1) (RecE es2)
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
 collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
+collateOne _ _ = error "bad kitty bad!!!"
 
 
 -- | TODO: document
@@ -740,6 +741,8 @@ infer _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
     (Just _) -> checkup g e t
     Nothing -> return (g, annot, e1)
 infer _ g (AnnE e [(Nothing, t)]) = checkup g e t
+infer _ g (AnnE _ _) = throwError
+  $ OtherError "concrete annotations are not yet supported"
 
 -- List=>
 infer (Just _) _ (ListE _) = undefined

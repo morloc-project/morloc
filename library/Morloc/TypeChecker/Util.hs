@@ -177,7 +177,7 @@ access2 lgi rgi gs =
     _ -> Nothing
 
 ann :: Maybe Lang -> Expr -> Type -> Expr
-ann _ (AnnE _ _) _ = error "'ann' cannot replace existing annotation"
+ann l (AnnE e _) t = AnnE e [(l, t)] 
 ann _ e@(Declaration _ _) _ = e
 ann _ e@(Signature _ _) _ = e
 ann l e t = AnnE e [(l,t)]

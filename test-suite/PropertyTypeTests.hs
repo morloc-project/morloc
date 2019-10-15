@@ -18,32 +18,33 @@ import Test.Tasty.QuickCheck as TQC
 propertyTypeTests =
   testGroup
     "Typechecking property tests"
-   -- generalization
-    [ TQC.testProperty "size(Gen(t)) >= size(t)" $ \t ->
-        typeSize (generalize t) >= typeSize t
-   -- -- quantifier term renaming
-   -- , TQC.testProperty "e == unrename(rename e)" renameTest
-   -- substitution
-    , TQC.testProperty "size([v/<v>]t) == size(t)" $ \(v, t) ->
-        typeSize (substitute v t) == typeSize t
-   -- subtype tests
-    , TQC.testProperty "t <: t" $ \t -> subtypeOf t t []
-   -- -- generalizeE tests
-   -- , TQC.testProperty "unannotate(e) == unannotate(generalizeE(e))" $
-   --     \e -> unannotate e == unannotate (map generalizeE e)
-   -- apply
-    , TQC.testProperty "apply [] t == t" $ \t -> apply [] t == (t :: Type)
-   -- -- applyE
-   -- , TQC.testProperty "applyE [] e == e" $
-   --    \e -> applyE [] e == e
-   -- free
-    , TQC.testProperty "length(free t) <= size t" $ \t ->
-        Set.size (free t) <= typeSize t
-   -- -- infer1
-   -- , TQC.testProperty "i4.2 == annotationOf(i4.3)" infer1
-   -- -- infer2
-   -- , TQC.testProperty "unannotate e == unannotate (infer e)" infer2
-    ]
+    []
+   -- -- generalization
+   --  [ TQC.testProperty "size(Gen(t)) >= size(t)" $ \t ->
+   --      typeSize (generalize t) >= typeSize t
+   -- -- -- quantifier term renaming
+   -- -- , TQC.testProperty "e == unrename(rename e)" renameTest
+   -- -- substitution
+   --  , TQC.testProperty "size([v/<v>]t) == size(t)" $ \(v, t) ->
+   --      typeSize (substitute v t) == typeSize t
+   -- -- subtype tests
+   --  , TQC.testProperty "t <: t" $ \t -> subtypeOf t t []
+   -- -- -- generalizeE tests
+   -- -- , TQC.testProperty "unannotate(e) == unannotate(generalizeE(e))" $
+   -- --     \e -> unannotate e == unannotate (map generalizeE e)
+   -- -- apply
+   --  , TQC.testProperty "apply [] t == t" $ \t -> apply [] t == (t :: Type)
+   -- -- -- applyE
+   -- -- , TQC.testProperty "applyE [] e == e" $
+   -- --    \e -> applyE [] e == e
+   -- -- free
+   --  , TQC.testProperty "length(free t) <= size t" $ \t ->
+   --      Set.size (free t) <= typeSize t
+   -- -- -- infer1
+   -- -- , TQC.testProperty "i4.2 == annotationOf(i4.3)" infer1
+   -- -- -- infer2
+   -- -- , TQC.testProperty "unannotate e == unannotate (infer e)" infer2
+   --  ]
 
 -- -- remove all type annotations and type signatures
 -- unannotate :: [Expr] -> [Expr]

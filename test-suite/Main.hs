@@ -10,5 +10,5 @@ main = do
       "Morloc tests"
       [ unitTypeTests
       , propertyTypeTests
-      , goldenManifoldTest01
+      -- , goldenManifoldTest01
       ]
