@@ -192,7 +192,6 @@ generalize t = generalize' existentialMap t
       zip (Set.toList (findExistentials t)) (map (TV Nothing . MT.pack) variables)
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
     findExistentials :: Type -> Set.Set TVar
-    findExistentials UniT = Set.empty
     findExistentials (VarT _) = Set.empty
     findExistentials (ExistT v) = Set.singleton v
     findExistentials (Forall v t') = Set.delete v (findExistentials t')

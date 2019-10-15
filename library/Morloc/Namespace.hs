@@ -615,9 +615,7 @@ data Expr
 
 -- | Types, see Dunfield Figure 6
 data Type
-  = UniT
-  -- ^ (1)
-  | VarT TVar
+  = VarT TVar
   -- ^ (a)
   | ExistT TVar
   -- ^ (a^) will be solved into one of the other types

@@ -158,7 +158,7 @@ prettyGreenType :: Type -> Doc AnsiStyle
 prettyGreenType t = annotate typeStyle (prettyType t)
 
 prettyType :: Type -> Doc ann
-prettyType UniT = "1"
+prettyType (VarT (TV _ "Unit")) = "()"
 prettyType (VarT v) = pretty v
 prettyType (FunT t1@(FunT _ _) t2) =
   parens (prettyType t1) <+> "->" <+> prettyType t2

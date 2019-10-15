@@ -342,7 +342,7 @@ pTuple = do
   return (TupleE (e : es))
 
 pUni :: Parser Expr
-pUni = symbol "UNIT" >> return UniE
+pUni = symbol "Null" >> return UniE
 
 pAnn :: Parser Expr
 pAnn = do
@@ -407,7 +407,7 @@ pUniT :: Parser Type
 pUniT = do
   _ <- symbol "("
   _ <- symbol ")"
-  return UniT
+  return (VarT (TV Nothing "Unit"))
 
 pTupleT :: Parser Type
 pTupleT = do

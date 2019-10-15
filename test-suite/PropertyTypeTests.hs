@@ -62,7 +62,6 @@ propertyTypeTests =
 -- annotationOf (AnnE e t) = Just t
 -- annotationOf _ = Nothing
 typeSize :: Type -> Int
-typeSize (UniT) = 1
 typeSize (VarT _) = 1
 typeSize (ExistT _) = 1
 typeSize (Forall _ t) = 1 + typeSize t
@@ -98,7 +97,6 @@ subtypeOf t1 t2 g =
 --   (Left _, _) -> False
 instance QC.Arbitrary Type where
   arbitrary = arbitraryType 3 []
-  shrink (UniT) = [VarT (TV Nothing "X")]
   shrink (VarT (TV Nothing "X")) = []
   shrink (VarT _) = [VarT (TV Nothing "X")]
   shrink (ExistT _) = [VarT (TV Nothing "X")]

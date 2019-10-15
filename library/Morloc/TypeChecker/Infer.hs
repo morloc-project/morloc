@@ -104,7 +104,6 @@ instance Renameable Expr where
   unrename = mapT unrename
 
 instance Renameable Type where
-  rename UniT = return UniT
   rename t@(VarT _) = return t
   rename t@(ExistT _) = return t
   rename (Forall v t) = do
@@ -116,7 +115,6 @@ instance Renameable Type where
   rename (RecT rs) =
     RecT <$> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
-  unrename UniT = UniT
   unrename (VarT v) = VarT (unrename v)
   unrename t@(ExistT _) = t
   unrename (Forall v t) = Forall (unrename v) (unrename t)
@@ -134,8 +132,6 @@ class Applicable a where
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable Type where
-  -- [G]l = l
-  apply _ UniT = UniT
   -- [G]a = a
   apply _ a@(VarT _) = a
   -- [G](A->B) = ([G]A -> [G]B)
@@ -188,7 +184,6 @@ occursCheck t1 t2 =
 
 -- | TODO: document
 free :: Type -> Set.Set Type
-free UniT = Set.empty
 free v@(VarT _) = Set.singleton v
 free v@(ExistT _) = Set.singleton v
 free (FunT t1 t2) = Set.union (free t1) (free t2)
@@ -287,7 +282,6 @@ typesetFromList ts = do
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
 findTypeLanguage :: Type -> Stack (Maybe Lang)
-findTypeLanguage UniT = return Nothing
 findTypeLanguage (VarT (TV lang _)) = return lang
 findTypeLanguage (ExistT (TV lang _)) = return lang
 findTypeLanguage (Forall (TV lang1 _) t) = do
@@ -328,13 +322,6 @@ chainInfer g0 es0 = chainInfer' g0 (reverse es0) [] [] where
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
 subtype t1 t2 g = do subtype' t1 t2 g
-
---
--- ----------------------------------------- Unit
---  G |- 1 <: 1 -| G
-subtype' UniT UniT g = return g
-subtype' t1@UniT t2@(VarT (TV (Just _) _)) g = serialConstraint t1 t2 >> return g
-subtype' (VarT (TV (Just _) _)) UniT g = return g
 
 -- VarT vs VarT
 subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
@@ -536,9 +523,6 @@ infer ::
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
 -- 
--- Unit=>
-infer (Just _) _ UniE = throwError CannotInferConcretePrimitiveType
-infer Nothing g UniE = return (g, [(Nothing, UniT)], AnnE UniE [(Nothing, UniT)])
 -- Num=>
 infer (Just _) _ (NumE _) = throwError CannotInferConcretePrimitiveType
 infer Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
@@ -813,12 +797,6 @@ check ::
             )
 check g e t = check' g e t
 
---
--- ----------------------------------------- 1l
---  g |- () <= 1 -| g
-check' g UniE UniT = return (g, UniT, AnnE UniE [(Nothing, UniT)])
--- 1l-error
-check' _ _ UniT = throwError TypeMismatch
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
