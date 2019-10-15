@@ -44,9 +44,9 @@ typecheckModules _ [] = return []
 typecheckModules mg (m:ms) = do
   g <- importFromModularGamma mg m
   (g', exprs) <- typecheckExpr g (moduleBody m)
-  mg' <- extendModularGamma g' m mg
+  (privateMap, mg') <- extendModularGamma g' m mg
   mods <- typecheckModules mg' ms
-  return (m {moduleBody = exprs} : mods)
+  return (m {moduleBody = exprs, moduleTypeMap = privateMap} : mods)
 
 insertWithCheck ::
      Map.Map MVar Module -> (MVar, Module) -> Stack (Map.Map MVar Module)
@@ -68,12 +68,12 @@ path m
   where
     rootMap = Map.filterWithKey (isRoot m) m
 
-isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
-isRoot m k _ = not $ Map.foldr (isChild k) False m
-  where
-    isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
-    isChild _ _ True = True
-    isChild k' s False = Set.member k' s
+    isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
+    isRoot m k _ = not $ Map.foldr (isChild k) False m
+      where
+        isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
+        isChild _ _ True = True
+        isChild k' s False = Set.member k' s
 
 typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr g e = do
@@ -81,10 +81,10 @@ typecheckExpr g e = do
   (g', es') <- typecheckExpr' g [] es
   let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
   return $ (g', map (generalizeE . unrename . apply g') es'')
-
-toExpr :: EVar -> TypeSet -> [Expr]
-toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
-toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
+  where
+    toExpr :: EVar -> TypeSet -> [Expr]
+    toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
+    toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
 
 typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr' g es [] = return (g, es)
@@ -196,50 +196,45 @@ free (Forall v t) = Set.delete (VarT v) (free t)
 free (ArrT _ xs) = Set.unions (map free xs)
 free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 
+-- | fold a list of annotated expressions into one, preserving annotations
+collate :: [Expr] -> Stack Expr
+collate (e:es) = foldM collateOne e es where
 
--- | TODO: document
-applyConcrete :: Expr -> Expr -> Type -> Stack Expr
-applyConcrete (AnnE e1 _) e2@(AnnE _ a) c =
-  return $ AnnE (AppE (AnnE e1 (FunT a c)) e2) c
-applyConcrete e1 e2 t =
-  throwError . OtherError $
-  "Expected annotatated types in applyConcrete, got:\n  > " <>
-  MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
-
-
--- | TODO: document
-isAnnG :: EVar -> GammaIndex -> Bool
-isAnnG e1 (AnnG (VarE e2) _)
-  | e1 == e2 = True
-  | otherwise = False
-isAnnG _ _ = False
-
-
--- | TODO: document
-appendTypeSet :: EType -> TypeSet -> Stack TypeSet
-appendTypeSet e1 s =
-  case (elang e1, s) of
-  -- if e is a general type, and there is no conflicting type, then set e
-    (Nothing, TypeSet Nothing rs) -> do
-      mapM_ (checkRealization e1) rs
-      return $ TypeSet (Just e1) rs
-  -- if e is a realization, and no general type is set, just add e to the list
-    (Just _, TypeSet Nothing rs) -> return $ TypeSet Nothing (e1 : rs)
-  -- if e is a realization, and a general type exists, append it and check
-    (Just _, TypeSet (Just e2) rs) -> do
-      checkRealization e2 e1
-      return $ TypeSet (Just e2) (e1 : rs)
-  -- if e is general, and a general type exists, merge the general types
-    (Nothing, TypeSet (Just e2) rs) -> do
-      let e3 =
-            EType
-              { elang = Nothing
-              , etype = etype e2
-              , eprop = Set.union (eprop e1) (eprop e2)
-              , econs = Set.union (econs e1) (econs e2)
-              , esource = Nothing
-              }
-      return $ TypeSet (Just e3) rs
+-- | Merge two annotated expressions into one, fail if the expressions are not
+-- equivalent.
+collateOne :: Expr -> Expr -> Stack Expr
+collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> pure (nub $ ts1 ++ ts2)
+-- 
+collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e21 e22
+collateOne (LamE v1 e1) (LamE v2 e2)
+  | v1 == v2 = LamE <$> pure v1 <*> collateOne e1 e2
+  | otherwise = throwError $ OtherError "collate error #1"
+collateOne e@(VarE v1) (VarE v2)
+  | v1 == v2 = return e
+  | otherwise = throwError $ OtherError "collate error #2"
+-- primitives
+collateOne e@UniE UniE = return e
+collateOne e@(LogE _) (LogE _) = return e
+collateOne e@(NumE _) (NumE _) = return e
+collateOne e@(StrE _) (StrE _) = return e
+-- containers
+collateOne (ListE es1) (ListE es2) = ListE <$> zipWithM collateOne es1 es2
+collateOne (TupleE es1) (TupleE es2) = TupleE <$> zipWithM collateOne es1 es2
+collateOne (RecE es1) (RecE es2)
+  = RecE <$> (
+          zip
+      <$> zipWithM returnIfEqual (map fst es1) (map fst es2)
+      <*> zipWithM collateOne (map snd es1) (map snd es2)
+    )
+  where
+    returnIfEqual :: Eq a => a -> a -> Stack a
+    returnIfEqual x y
+      | x == y = return x
+      | otherwise = throwError $ OtherError "expected them to be equal"
+-- illegal
+collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
+collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
+collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
 
 
 -- | TODO: document
@@ -255,30 +250,79 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
     f' _ (FunT _ _) = throwError BadRealization
     f' _ _ = return ()
 
+checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [(Maybe Lang, Type)], Expr)
+checkup g e t = do
+  (g', t', e') <- check g e t
+  lang <- findTypeLanguage t'
+  return (g', [(lang, t')], e')
 
--- | TODO: document
-chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
-chainInfer lang g0 es0 = chainInfer' g0 es0 [] [] where
+inferOne :: Maybe Lang -> Gamma -> Expr -> Stack (Gamma, Type, Expr)
+inferOne l g e = do
+  (g', as', e') <- infer l g e
+  case [t | (l',t) <- as', l' == l] of
+    [t'] -> return (g', t', e')
+    _ -> throwError $ OtherError "Cannot infer unique type for this language"
+  
+
+typesetFromList :: [(Maybe Lang, Type)] -> Stack TypeSet
+typesetFromList ts = do 
+  let gentype = [makeEType t Nothing | (Nothing, t) <- ts]
+      contype = [makeEType t lang | (lang@(Just _), t) <- ts] 
+  case (gentype, contype) of
+    ([x], cs) -> return $ TypeSet (Just x) cs
+    ([], cs) -> return $ TypeSet Nothing cs
+    _ -> throwError $ OtherError "ambiguous general type"
+  where
+    makeEType :: Type -> Maybe Lang -> EType
+    makeEType t l = EType
+      { etype = t
+      , elang = l
+      , eprop = Set.empty
+      , econs = Set.empty
+      , esource = Nothing
+      }
+
+-- | Determine the language from a type, fail if the language is inconsistent.
+-- Inconsistency in language should be impossible at the syntactic level, thus
+-- an error in this function indicates a logical bug in the typechecker.
+findTypeLanguage :: Type -> Stack (Maybe Lang)
+findTypeLanguage UniT = return Nothing
+findTypeLanguage (VarT (TV lang _)) = return lang
+findTypeLanguage (ExistT (TV lang _)) = return lang
+findTypeLanguage (Forall (TV lang1 _) t) = do
+  lang2 <- findTypeLanguage t
+  if lang1 == lang2
+    then return lang1
+    else throwError InconsistentWithinTypeLanguage
+findTypeLanguage (FunT t1 t2) = do 
+  lang1 <- findTypeLanguage t1
+  lang2 <- findTypeLanguage t2
+  if lang1 == lang2
+    then return lang1
+    else throwError InconsistentWithinTypeLanguage
+findTypeLanguage (ArrT (TV lang1 _) ts) = do 
+  langs <- mapM findTypeLanguage ts
+  if all ((==) lang1) langs
+    then return lang1
+    else throwError InconsistentWithinTypeLanguage
+findTypeLanguage (RecT []) = throwError CannotInferLanguageOfEmptyRecord
+findTypeLanguage (RecT ts@((TV lang0 _, _):_)) = do
+  let vLangs = map (\(TV l _, _) -> l) ts 
+  tlangs <- mapM (findTypeLanguage . snd) ts
+  if all ((==) lang0) vLangs && all ((==) lang0) tlangs
+    then return lang0
+    else throwError InconsistentWithinTypeLanguage
+
+
+-- | TODO: document - allow things other than general
+chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
+chainInfer g0 es0 = chainInfer' g0 (reverse es0) [] [] where
   chainInfer' ::
        Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
   chainInfer' g [] ts es = return (g, ts, es)
   chainInfer' g (x:xs) ts es = do
-    (g', t', e') <- infer lang g x
+    (g', [(Nothing, t')], e') <- infer Nothing g x
     chainInfer' g' xs (t' : ts) (e' : es)
-
-
--- | TODO: document
-addSource :: Gamma -> EVar -> EType -> Stack EType
-addSource g v e =
-  case elang e of
-    (Just l) ->
-      case lookupSrc (v, l) g of
-        (Just (_, _, srcfile, srcname)) ->
-          return $ e {esource = Just (srcfile, srcname)}
-        Nothing -> return e -- FIXME: technically, this should raise MissingSource
-    Nothing -> return e
-
-
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
@@ -478,105 +522,214 @@ instantiate ta@(ExistT v) tb g1 = do
 -- bad
 instantiate _ _ g = return g
 
-
 infer ::
      Maybe Lang
   -> Gamma
   -> Expr -- ^ A subexpression from the original expression
   -> Stack ( Gamma
-           , Type -- The return type
+           , [(Maybe Lang, Type)] -- The return type
            , Expr -- The annotated expression
-            )
-infer l g e = do infer' l g e
+           )
 
--- --
+--
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
--- --
-infer' Nothing g UniE = return (g, UniT, ann UniE UniT)
+-- 
+-- Unit=>
+infer (Just _) _ UniE = throwError CannotInferConcretePrimitiveType
+infer Nothing g UniE = return (g, [(Nothing, UniT)], AnnE UniE [(Nothing, UniT)])
 -- Num=>
-infer' Nothing g e@(NumE _) = return (g, t, ann e t)
+infer (Just _) _ (NumE _) = throwError CannotInferConcretePrimitiveType
+infer Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Num")
 -- Str=> 
-infer' Nothing g e@(StrE _) = return (g, t, ann e t)
+infer (Just _) _ (StrE _) = throwError CannotInferConcretePrimitiveType
+infer Nothing g e@(StrE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Str")
 -- Log=> 
-infer' Nothing g e@(LogE _) = return (g, t, ann e t)
+infer (Just _) _ (LogE _) = throwError CannotInferConcretePrimitiveType
+infer Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Bool")
--- Declaration=>
-infer' Nothing g (Declaration v e) = do
-  (g2, t1, e2) <- infer Nothing (g +> MarkEG v) e
-  g3 <- cut (MarkEG v) g2
-  (g4, t2, e3) <-
-    case lookupE (VarE v) g >>= toType of
-      (Just t) -> check g2 e2 t
-      Nothing -> return (g3, t1, e2)
-  let t3 = generalize t2
-      g5 = g4 +> AnnG (VarE v) (fromType t3)
-  return (g5, t3, Declaration v (generalizeE e3))
--- Signature=>
-infer' Nothing g (Signature v e) = do
-  e' <- addSource g v e
-  (left, r3, right) <-
-    case findIndex (isAnnG v) g of
-      (Just i) ->
-        case (i, g !! i) of
-          (0, AnnG _ r2) ->
-            appendTypeSet e' r2 >>= (\x -> return ([], x, tail g))
-          (_, AnnG _ r2) ->
-            appendTypeSet e' r2 >>= (\x -> return (take i g, x, drop (i + 1) g))
-          (_, _) -> throwError $ OtherError "bad Gamma"
-      Nothing ->
-        case elang e' of
-          (Just _) -> return (g, TypeSet Nothing [e'], [])
-          Nothing -> return (g, TypeSet (Just e') [], [])
-  return (left ++ (AnnG (VarE v) r3) : right, UniT, Signature v e')
-infer' Nothing g1 s1@(SrcE l f xs) = do
-  let g3 = srcList g1 xs
-  return (g3, UniT, s1)
+
+-- Src=>
+infer (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer Nothing g1 s1@(SrcE lang path xs) = do
+  g3 <- foldM srcList g1 xs
+  return
+    ( g3 -- existential signatures are created for each sourced term
+    , [] -- nothing is returned from source
+    , s1 -- SrcE should not be annotated, so the input expression is returned as is
+    )
   where
-    srcList :: Gamma -> [(EVar, EVar)] -> Gamma
-    srcList g2 [] = g2
-    srcList g2 ((e1, e2):rs) = srcList (g2 +> SrcG (e2, l, f, e1)) rs
+    -- Store an existential type for each sourced term. Since the expressions
+    -- in a Morloc script are sorted before being evaluated, the SrcE
+    -- expressions will be considered before the Signature and Declaration
+    -- expressions. Thus every term that originates in source code will be
+    -- initialized here and elaborated upon with deeper type information as the
+    -- signatures and declarations are parsed. 
+    srcList :: Gamma -> (EVar, EVar) -> Stack Gamma
+    srcList g2 (srcname, alias) = do
+      v <- newvar (Just lang)
+      return $ g2 +> AnnG (VarE alias) (TypeSet Nothing
+        [ EType { etype = v
+        , elang = (Just lang)
+        , eprop = Set.empty
+        , econs = Set.empty
+        , esource = Just (path, srcname)
+        }])
+
+-- Signature=>
+infer (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer Nothing g e0@(Signature v e) = do
+  g2 <- accessWith1 isAnnG append' ifNotFound g
+  return (g2, [], e0)
+  where
+    -- find a typeset
+    isAnnG :: GammaIndex -> Bool
+    isAnnG (AnnG (VarE e2) _)
+      | v == e2 = True
+      | otherwise = False
+    isAnnG _ = False
+    -- update the found typeset
+    append' :: GammaIndex -> Stack GammaIndex
+    append' (AnnG v r2) = AnnG <$> pure v <*> appendTypeSet e r2
+    append' _ = throwError $ OtherError "Bad Gamma"
+    -- create a new typeset if none was found
+    ifNotFound :: Gamma -> Stack Gamma
+    ifNotFound g' = case elang e of
+        lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
+        Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
+    -- merge the new data from a signature with any prior type data
+    appendTypeSet :: EType -> TypeSet -> Stack TypeSet
+    appendTypeSet e1 s =
+      case (elang e1, s) of
+      -- if e is a general type, and there is no conflicting type, then set e
+        (Nothing, TypeSet Nothing rs) -> do
+          mapM_ (checkRealization e1) rs
+          return $ TypeSet (Just e1) rs
+      -- if e is a realization, and no general type is set, just add e to the list
+        (Just _, TypeSet Nothing rs) -> return $ TypeSet Nothing (e1 : rs)
+      -- if e is a realization, and a general type exists, append it and check
+        (Just _, TypeSet (Just e2) rs) -> do
+          checkRealization e2 e1
+          return $ TypeSet (Just e2) (e1 : rs)
+      -- if e is general, and a general type exists, merge the general types
+        (Nothing, TypeSet (Just e2) rs) -> do
+          let e3 =
+                EType
+                  { elang = Nothing
+                  , etype = etype e2
+                  , eprop = Set.union (eprop e1) (eprop e2)
+                  , econs = Set.union (econs e1) (econs e2)
+                  , esource = Nothing
+                  }
+          return $ TypeSet (Just e3) rs
+
+-- Declaration=>
+infer (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer Nothing g (Declaration v e) =
+  case lookupE (VarE v) g of 
+    Nothing -> declareInfer
+    (Just typeset) -> declareCheck typeset
+  where
+    -- declare a morloc composition where no signature is provided
+    declareInfer = do
+      (g2, ts1, e2) <- infer Nothing (g +> MarkEG v) e
+      g3 <- cut (MarkEG v) g2
+      ts2 <- typesetFromList [(l, generalize t) | (l,t) <- ts1]
+      let g4 = g3 +> AnnG (VarE v) ts2
+      return (g4, [], Declaration v (generalizeE e2))
+    -- declare a morloc composition based on a provided signature
+    declareCheck (TypeSet (Just t) []) = do
+      (g2, _, e2) <- check (g +> MarkEG v) e (etype t)
+      g3 <- cut (MarkEG v) g2
+      return (g3, [], Declaration v e2)
+    declareCheck (TypeSet Nothing _) = throwError $
+      OtherError "composition signatures must be general"
+    declareCheck (TypeSet (Just _) (_:_)) = throwError $
+      OtherError "composition signatures cannot have concrete realizations"
+
 --  (x:A) in g
 -- ------------------------------------------- Var
 --  g |- x => A -| g
-infer' Nothing g e@(VarE v) = do
-  case lookupE e g >>= toType of
-    (Just t) -> return (g, t, ann e t)
+infer _ g e@(VarE v) = do
+  case lookupE e g of
+    (Just typeset) ->
+      let ts = mapTS (\e -> (elang e, etype e)) typeset
+      in return (g, ts, AnnE e ts)
     Nothing -> throwError (UnboundVariable v)
+  where
+    mapTS :: (EType -> a) -> TypeSet -> [a]
+    mapTS f (TypeSet (Just a) es) = map f (a:es)
+    mapTS f (TypeSet Nothing es) = map f es
+
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
-infer' Nothing g1 (LamE v e2) = do
-  a <- newvar Nothing
-  b <- newvar Nothing 
-  let anng = AnnG (VarE v) (fromType a)
+infer lang g1 e0@(LamE v e2) = do
+  a <- newvar lang
+  b <- newvar lang
+  let anng = AnnG (VarE v) (fromType lang a)
       g2 = g1 +> a +> b +> anng
   (g3, t1, e2') <- check g2 e2 b
-  case lookupE (VarE v) g3 >>= toType of
+  case lookupE (VarE v) g3 >>= toType lang of
     (Just t2) -> do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
-      return (g4, t3, ann (LamE v e2') t3)
+      return (g4, [(lang, t3)], ann lang e0 t3)
     Nothing -> throwError UnknownError
---  g1 |- e1 => A -| g2
---  g2 |- [g2]A o e2 =>> C -| g3
--- ----------------------------------------- -->E
---  g1 |- e1 e2 => C -| g3
-infer' Nothing g1 (AppE e1 e2) = do
-  (g2, a, e1') <- infer Nothing g1 e1
-  (g3, c, e2') <- derive g2 e2 (apply g2 a)
-  e3 <- applyConcrete e1' e2' c
-  return (g3, c, e3)
+
+{-  g |- e1 => A* -| d_1
+ -  { d_i |- [d_i]A_i o e2 =>> C_i -| d_{i+1} } forall i in (1,2 ... k)
+ - ----------------------------------------- -->E
+ -  g |- e1 e2 =>> C -| d_k
+ -}
+infer _ g1 (AppE e1 e2) = do
+  -- Anonymous lambda functions are currently not supported. So e1 currently will
+  -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
+  -- would roughly correspond to DeclareInfer statements while adding annotated
+  -- lambdas would correspond to DeclareAnnot.
+  --
+  -- ts1 will include one entry consisting of the general type `(Nothing,t)`
+  -- and one or more realizatoins `(Just lang, t)`
+  (d1, ts1, e1') <- infer Nothing g1 e1
+  (dk, xs) <- foldM chainDerive (d1, []) ts1
+  e2' <- collate xs
+  -- * e1' - e1 with type annotations
+  -- * e2' - e2 with type annotations (after being applied to e2)
+  (ts', ek') <- applyConcrete e1' e2'
+  return (dk, ts', ek')
+  where
+    -- Chain a context through a series of `derive` calls, one for each type
+    -- inferred for e1.
+    chainDerive ::
+         (Gamma, [Expr])
+      -> (Maybe Lang, Type)
+      -> Stack (Gamma, [Expr])
+    chainDerive (g, es) (l, t) = do
+      (g', _, e') <- derive g e2 (apply g t)
+      return (g', (e':es))
+    -- pair input and output types by language and construct the function type
+    applyConcrete :: Expr -> Expr -> Stack ([(Maybe Lang, Type)], Expr)
+    applyConcrete (AnnE e1 ts1) (AnnE e2 ts2) = do
+      let (ts1', ts2') = unzip [ ((l1, FunT t1 t2), (l2, t2))
+                               | (l1, t1) <- ts1
+                               , (l2, t2) <- ts2
+                               , l1 == l2
+                               ]
+      return $ (ts2', AnnE (AppE (AnnE e1 ts1') e2) ts2')
+    applyConcrete _ _ = throwError $ OtherError "bad concrete"
+
 --  g1 |- A
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer' Nothing g e1@(AnnE e@(VarE _) t)
+infer _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
+  -- Non-top-level annotations will always consist of a single general type.
+  --
   -- This is a bit questionable. If a single variable is annotated, e.g.
   -- `x::Int`, and is not declared, this would normally raise an
   -- UnboundVariable error. However, it is convenient for testing purposes, and
@@ -584,50 +737,44 @@ infer' Nothing g e1@(AnnE e@(VarE _) t)
   -- languages, to be able to simply declare a type as an axiom. Perhaps I
   -- should add dedicated syntax for axiomatic type declarations?
  = case lookupE e g of
-    (Just _) -> check g e t
-    Nothing -> return (g, t, e1)
-infer' Nothing g (AnnE e t) = check g e t
-infer' Nothing g e1@(ListE []) = do
+    (Just _) -> checkup g e t
+    Nothing -> return (g, annot, e1)
+infer _ g (AnnE e [(Nothing, t)]) = checkup g e t
+
+-- List=>
+infer (Just _) _ (ListE _) = undefined
+infer Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
-  return (g +> t, t', ann e1 t')
-infer' Nothing g1 e1@(ListE (x:xs)) = do
-  (g2, t', _) <- infer Nothing g1 x
+  return (g +> t, [(Nothing, t')], ann Nothing e1 t')
+infer Nothing g1 e1@(ListE (x:xs)) = do
+  (g2, t', _) <- inferOne Nothing g1 x
   g3 <- foldM (quietCheck t') g2 xs
   let t'' = ArrT (TV Nothing "List") [t']
-  return (g3, t'', ann e1 t'')
-infer' _ _ (TupleE []) = throwError EmptyTuple
-infer' _ _ (TupleE [_]) = throwError TupleSingleton
-infer' Nothing g (TupleE xs) = do
-  (g', ts, es) <- chainInfer Nothing g (reverse xs)
+  return (g3, [(Nothing, t'')], ann Nothing e1 t'')
+
+-- Tuple=>
+infer (Just _) _ (TupleE _) = undefined
+infer _ _ (TupleE []) = throwError EmptyTuple
+infer _ _ (TupleE [_]) = throwError TupleSingleton
+infer Nothing g1 (TupleE xs) = do
+  (g2, ts, es) <- chainInfer g1 xs
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
-  return (g', t, AnnE e t)
--- ----------------------------------------- -->Rec
-infer' _ _ (RecE []) = throwError EmptyRecord
-infer' Nothing g1 e@(RecE rs) = do
-  (g2, ts, _) <- chainInfer Nothing g1 (reverse $ map snd rs)
-  let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
-  return (g2, t, AnnE e t)
+  return (g2, [(Nothing, t)], ann Nothing e t)
 
--- Unsupported inference patterns:
--- These shouldn't be supported
-infer' (Just _) _ (SrcE _ _ _) = undefined
-infer' (Just _) _ (Signature _ _) = undefined
-infer' (Just _) _ (Declaration _ _) = undefined
-infer' (Just _) _ UniE = undefined
-infer' (Just _) _ (NumE _) = undefined
-infer' (Just _) _ (LogE _) = undefined
-infer' (Just _) _ (StrE _) = undefined
--- These should be supported
-infer' (Just _) _ (VarE _) = undefined
-infer' (Just _) _ (ListE _) = undefined
-infer' (Just _) _ (TupleE _) = undefined
-infer' (Just _) _ (LamE _ _) = undefined
-infer' (Just _) _ (AppE _ _) = undefined
-infer' (Just _) _ (AnnE _ _) = undefined
-infer' (Just _) _ (RecE _) = undefined
+-- chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
+-- infer :: Maybe Lang -> Gamma -> Expr -> Stack ( Gamma, [(Maybe Lang, Type)], Expr)
+
+-- ----------------------------------------- Record=>
+infer (Just _) _ (RecE _) = undefined
+infer _ _ (RecE []) = throwError EmptyRecord
+infer Nothing g1 e@(RecE rs) = do
+  (g2, ts, _) <- chainInfer g1 (map snd rs)
+  let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
+  return (g2, [(Nothing, t)], ann Nothing e t)
+
 
 
 quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
@@ -649,39 +796,42 @@ check g e t = check' g e t
 --
 -- ----------------------------------------- 1l
 --  g |- () <= 1 -| g
-check' g UniE UniT = return (g, UniT, ann UniE UniT)
+check' g UniE UniT = return (g, UniT, AnnE UniE [(Nothing, UniT)])
 -- 1l-error
 check' _ _ UniT = throwError TypeMismatch
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-check' g (LamE v e) (FunT a b)
+check' g1 (LamE v e1) t1@(FunT a b)
   -- define x:A
  = do
-  let anng = AnnG (VarE v) (fromType a)
+  lang <- findTypeLanguage t1
+  let anng = AnnG (VarE v) (fromType lang a)
   -- check that e has the expected output type
-  (g', t', e') <- check (g +> anng) e b
+  (g2, t2, e2) <- check (g1 +> anng) e1 b
   -- ignore the trailing context and (x:A), since it is out of scope
-  g2 <- cut anng g'
-  let t'' = FunT a t'
-  return (g2, t'', ann (LamE v e') t'')
+  g3 <- cut anng g2
+  let t3 = FunT a t2
+  return (g3, t3, ann lang (LamE v e2) t3)
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
-check' g1 e r2@(Forall x a) = do
-  (g', _, e') <- check (g1 +> VarG x) e a
-  g2 <- cut (VarG x) g'
-  let t'' = apply g2 r2
-  return (g2, t'', ann e' t'')
+check' g1 e1 t2@(Forall x a) = do
+  lang <- findTypeLanguage t2
+  (g2, _, e2) <- check (g1 +> VarG x) e1 a
+  g3 <- cut (VarG x) g2
+  let t3 = apply g3 t2
+  return (g3, t3, ann lang e2 t3)
 --  g1 |- e => A -| g2
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
-check' g1 e b = do
-  (g2, a, e') <- infer Nothing g1 e
-  g3 <- subtype (apply g2 a) (apply g2 b) g2
-  let a' = apply g3 a
-  return (g3, a', ann (apply g3 e') a')
+check' g1 e1 b = do
+  lang <- findTypeLanguage b
+  (g2, a1, e2) <- inferOne lang g1 e1
+  g3 <- subtype (apply g2 a1) (apply g2 b) g2
+  let a2 = apply g3 a1
+  return (g3, a2, ann lang (apply g3 e2) a2)
 
 derive ::
      Gamma

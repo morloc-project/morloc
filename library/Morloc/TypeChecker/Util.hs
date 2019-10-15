@@ -11,6 +11,7 @@ module Morloc.TypeChecker.Util
   ( (+>)
   , access1
   , access2
+  , accessWith1
   , ann
   , cut
   , extendModularGamma
@@ -66,25 +67,29 @@ importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
       where
         v = importModuleName imp
 
+-- | Update a ModularGamma object with all exported terms from a module. Return
+-- the resulting map was well as a private map containing all terms (whether
+-- exported or not) in the module.
 extendModularGamma ::
      Gamma -- ^ context generated from typechecking this module
   -> Module -- ^ the module that is being loaded into the modular context
   -> ModularGamma -- ^ the previous object
-  -> Stack ModularGamma
+  -> Stack (Map.Map EVar TypeSet, ModularGamma)
 extendModularGamma g m mg
   | Map.member v mg = throwError $ MultipleModuleDeclarations v
-  | otherwise = return $ Map.insert v g' mg
+  | otherwise = return $ (Map.fromList privateMap, Map.insert v publicMap mg)
   where
     v = moduleName m
     es = moduleExports m
-    g' = Map.fromList [(e, t) | (AnnG (VarE e) t) <- g, elem e es]
+    privateMap = [(e,t) | AnnG (VarE e) t <- g]
+    publicMap = Map.fromList [(e,t) | (e,t) <- privateMap, elem e es]
 
 mapT :: (Type -> Type) -> Expr -> Expr
 mapT f (LamE v e) = LamE v (mapT f e)
 mapT f (ListE es) = ListE (map (mapT f) es)
 mapT f (TupleE es) = TupleE (map (mapT f) es)
 mapT f (AppE e1 e2) = AppE (mapT f e1) (mapT f e2)
-mapT f (AnnE e t) = AnnE (mapT f e) (f t)
+mapT f (AnnE e ts) = AnnE (mapT f e) [(l, f t) | (l, t) <- ts]
 mapT f (Declaration v e) = Declaration v (mapT f e)
 mapT f (Signature v e) = Signature v $ e {etype = f (etype e)}
 mapT _ e = e
@@ -94,7 +99,7 @@ mapT' f (LamE v e) = LamE <$> pure v <*> mapT' f e
 mapT' f (ListE es) = ListE <$> mapM (mapT' f) es
 mapT' f (TupleE es) = TupleE <$> mapM (mapT' f) es
 mapT' f (AppE e1 e2) = AppE <$> mapT' f e1 <*> mapT' f e2
-mapT' f (AnnE e t) = AnnE <$> mapT' f e <*> f t
+mapT' f (AnnE e ts) = AnnE <$> mapT' f e <*> mapM (\(l,t) -> (,) <$> pure l <*> f t) ts
 mapT' f (Declaration v e) = Declaration <$> pure v <*> mapT' f e
 mapT' f (Signature v e) = do
   t' <- f (etype e)
@@ -143,6 +148,20 @@ access1 gi gs =
     (Just i) -> Just (take i gs, gs !! i, drop (i + 1) gs)
     _ -> Nothing
 
+accessWith1 :: Monad m =>
+     (GammaIndex -> Bool) -- ^ method for finding the index
+  -> (GammaIndex -> m GammaIndex) -- ^ alter GammaIndex
+  -> (Gamma -> m Gamma) -- ^ default action if the index is not found
+  -> Gamma -- ^ context that is searched
+  -> m Gamma
+accessWith1 select make def g =
+  case findIndex select g of
+    (Just i) ->
+      case (i, g !! i) of
+        (0, x) -> make x >>= (\y -> return ([] <> (y : tail g)))
+        (_, x) -> make x >>= (\y -> return (take i g <> (y : drop (i + 1) g)))
+    Nothing -> def g
+
 access2 ::
      (Indexable a)
   => a
@@ -157,11 +176,11 @@ access2 lgi rgi gs =
         _ -> Nothing
     _ -> Nothing
 
-ann :: Expr -> Type -> Expr
-ann (AnnE e _) t = AnnE e t
-ann e@(Declaration _ _) _ = e
-ann e@(Signature _ _) _ = e
-ann e t = AnnE e t
+ann :: Maybe Lang -> Expr -> Type -> Expr
+ann _ (AnnE _ _) _ = error "'ann' cannot replace existing annotation"
+ann _ e@(Declaration _ _) _ = e
+ann _ e@(Signature _ _) _ = e
+ann l e t = AnnE e [(l,t)]
 
 generalize :: Type -> Type
 generalize t = generalize' existentialMap t

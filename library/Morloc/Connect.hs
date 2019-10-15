@@ -116,7 +116,7 @@ getId = do
 
 makeTypeSetMap :: [Module] -> Map.Map MVar (Map.Map EVar TypeSet)
 makeTypeSetMap mods =
-  Map.fromList [(moduleName m, findSignatures m) | m <- mods]
+  Map.fromList [(moduleName m, moduleTypeMap m) | m <- mods]
 
 modExports :: MVar -> Program (Set.Set EVar)
 modExports v = fmap (Map.findWithDefault Set.empty v) (gets stateModuleExports)
@@ -159,13 +159,24 @@ isExported mv ev = do
   exportMap <- modExports mv
   return $ Set.member ev exportMap
 
+-- | Type annotations store type infor as `[(Maybe Lang, Type)]`, where
+-- `Nothing` indicates the general type. There should be exactly one general
+-- type for every expression in a program. This could change in the future if
+-- we decide to add overloading.
+getGeneralType :: [(Maybe Lang, Type)] -> Program Type
+getGeneralType xs = case [t | (Nothing, t) <- xs] of
+  [] -> error "MissingGeneralType"
+  [x] -> return x
+  _ -> error "AmbiguousGeneralType"
+
 -- | compile a declaration, for example:
 --   foo x y = bar x (baz 42 y)
 -- "foo" is the name of a lambda, not an application. "foo" can be exported
 -- from the nexus as a subcommand the user can call with arguments x and y.
 -- "bar" is the function that is called in the application "bar x (baz 42 y)".
 module2manifolds :: Module -> Expr -> Program [Manifold]
-module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) gentype)) = do
+module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) ts)) = do
+  gentype <- getGeneralType ts
   i <- getId
   exported <- isExported (moduleName m) (EV lambdaName)
   case (uncurryExpr lambda) of
@@ -242,9 +253,10 @@ exprAsArgument ::
 exprAsArgument bnd _ _ (AnnE (VarE v@(EV v')) _)
   | elem v bnd = return (ArgName v', [])
   | otherwise = return (ArgNest v', [])
-exprAsArgument bnd m _ (AnnE (AppE e1 e2) gentype) =
+exprAsArgument bnd m _ (AnnE (AppE e1 e2) ts) =
   case uncurryApplication e1 e2 of
     (f, es) -> do
+      gentype <- getGeneralType ts
       let v@(EV mname) = exprAsFunction f
       defined <- isDeclared (moduleName m) v
       i <- getId
@@ -286,8 +298,10 @@ exprAsArgument _ _ _ (AnnE x@(TupleE _) _) =
 exprAsArgument _ _ _ (AnnE x@(RecE _) _) =
   return (ArgData $ primitive2mdata x, [])
 -- errors       
-exprAsArgument _ _ _ (AnnE (LamE _ _) (FunT _ _)) =
-  error "lambdas not yet supported"
+exprAsArgument _ _ _ (AnnE (LamE _ _) ts) = do
+  gentype <- getGeneralType ts
+  case gentype of
+    (FunT _ _) -> error "lambdas not yet supported"
 exprAsArgument _ _ _ _ = error "expected annotated expression"
 
 makeURI :: MVar -> Integer -> URI
@@ -517,18 +531,6 @@ getImports mm (Import mv Nothing _ _) = do
   case Map.lookup mv mm of
     Nothing -> error "Cannot find module"
     (Just m') -> [(mv, v, v) | v <- moduleExports m']
-
--- | collect all type information within a module
--- first all signatures are collected, storing each realization
--- then the
-findSignatures :: Module -> Map.Map EVar TypeSet
-findSignatures (moduleBody -> es) =
-  foldr
-    insertAppendEtype
-    (Map.map (foldr appendTypeSet (TypeSet Nothing [])) .
-     Map.fromList . groupSort $
-     [(v, t) | (Signature v t) <- es])
-    [(v, type2etype t) | (AnnE (Declaration v _) t) <- es]
 
 type2etype :: Type -> EType
 type2etype t =

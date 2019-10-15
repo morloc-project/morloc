@@ -15,13 +15,14 @@ import Data.Void (Void)
 import Morloc.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
+import qualified Control.Monad.State as CMS
+import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.System as MS
 import qualified Text.Megaparsec.Char.Lexer as L
-import qualified Control.Monad.State as CMS
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
@@ -168,6 +169,7 @@ makeModule f n mes =
     , moduleImports = imports'
     , moduleExports = exports'
     , moduleBody = body'
+    , moduleTypeMap = Map.empty
     }
   where
     imports' = [x | (MBImport x) <- mes]
@@ -348,7 +350,7 @@ pAnn = do
     parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pType
-  return $ AnnE e t
+  return $ AnnE e [(Nothing, t)]
 
 pApp :: Parser Expr
 pApp = do

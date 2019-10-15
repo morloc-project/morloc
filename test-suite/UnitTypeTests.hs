@@ -22,10 +22,12 @@ typeof :: [Expr] -> Type
 typeof es = typeof' . head . reverse $ es
   where
     typeof' (Signature _ e) =
-      case toType e of
+      case toType Nothing e of
         (Just t) -> t
         Nothing -> error $ "No general type found for: " <> show e
-    typeof' (AnnE _ t) = t
+    typeof' e@(AnnE _ ts) = case [t | (Nothing, t) <- ts] of
+      [t] -> t
+      otherwise -> error $ "No general type found for: " <> show e
     typeof' (AppE _ t) = typeof' t
     typeof' t = error ("No annotation found for: " <> show t)
 

@@ -423,6 +423,8 @@ data MorlocError
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
   --------------- T Y P E   E R R O R S --------------------------------------
+  | MissingGeneralType
+  | AmbiguousGeneralType
   | SubtypeError Type Type
   | ExistentialError
   | BadExistentialCast
@@ -457,6 +459,10 @@ data MorlocError
   | IncompatibleRealization MVar
   | MissingAbstractType
   | ExpectedAbstractType
+  | CannotInferConcretePrimitiveType
+  | ToplevelStatementsHaveNoLanguage
+  | InconsistentWithinTypeLanguage
+  | CannotInferLanguageOfEmptyRecord
   deriving (Eq)
 
 data PackageMeta =
@@ -572,6 +578,7 @@ data Module =
     , moduleImports :: [Import]
     , moduleExports :: [EVar]
     , moduleBody :: [Expr]
+    , moduleTypeMap :: Map EVar TypeSet
     }
   deriving (Ord, Eq, Show)
 
@@ -595,7 +602,7 @@ data Expr
   -- ^ (\x -> e)
   | AppE Expr Expr
   -- ^ (e e)
-  | AnnE Expr Type
+  | AnnE Expr [(Maybe Lang, Type)]
   -- ^ (e : A)
   | NumE Scientific
   -- ^ number of arbitrary size and precision
@@ -656,31 +663,31 @@ data TypeSet =
 type ModularGamma = Map MVar (Map EVar TypeSet)
 
 class Typed a where
-  toType :: a -> Maybe Type
-  fromType :: Type -> a
+  toType :: Maybe Lang -> a -> Maybe Type
+  fromType :: Maybe Lang -> Type -> a
 
 instance Typed EType where
-  toType e =
-    case elang e of
-      (Just _) -> Nothing
-      Nothing -> Just (etype e)
-  fromType t =
+  toType lang e
+    | elang e == lang = Just (etype e)
+    | otherwise = Nothing
+  fromType lang t =
     EType
       { etype = t
-      , elang = Nothing
+      , elang = lang
       , eprop = empty
       , econs = empty
       , esource = Nothing
       }
 
 instance Typed TypeSet where
-  toType (TypeSet (Just e) _) = toType e
-  toType (TypeSet Nothing _) = Nothing
-  fromType t = TypeSet (Just (fromType t)) []
+  toType Nothing (TypeSet e _) = e >>= toType Nothing
+  toType lang (TypeSet _ ts) = case filter (\e -> elang e == lang) ts of 
+    [ ] -> Nothing
+    [e] -> Just (etype e)
+    _ -> error "a typeset can contain only one instance of each language"
 
-instance Typed Type where
-  toType = Just
-  fromType = id
+  fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
+  fromType lang t = TypeSet Nothing [fromType lang t]
 
 class Indexable a where
   index :: a -> GammaIndex
@@ -691,7 +698,3 @@ instance Indexable GammaIndex where
 instance Indexable Type where
   index (ExistT t) = ExistG t
   index _ = error "Can only index ExistT"
-
-instance Indexable Expr where
-  index (AnnE x t) = AnnG x (fromType t)
-  index _ = error "Can only index AnnE"

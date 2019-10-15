@@ -72,11 +72,18 @@ prettyImport imp =
       | e /= alias = pretty e
       | otherwise = pretty e <+> "as" <+> pretty alias
 
+prettyConcrete :: (Maybe Lang) -> Doc a
+prettyConcrete Nothing = ""
+prettyConcrete (Just l) = angles (viaShow l)
+
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
 prettyExpr (VarE (EV s)) = pretty s
 prettyExpr (LamE (EV n) e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
-prettyExpr (AnnE e t) = parens (prettyExpr e <+> "::" <+> prettyGreenType t)
+prettyExpr (AnnE e ts) = parens
+  $   prettyExpr e
+  <+> "::"
+  <+> encloseSep "(" ")" "; " [prettyGreenType t <> prettyConcrete l | (l, t) <- ts]
 prettyExpr (AppE e1@(LamE _ _) e2) = parens (prettyExpr e1) <+> prettyExpr e2
 prettyExpr (AppE e1 e2) = prettyExpr e1 <+> prettyExpr e2
 prettyExpr (NumE x) = pretty (show x)

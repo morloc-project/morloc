@@ -58,6 +58,7 @@ ghc-options:
   - -fwarn-redundant-constraints
   - -fno-warn-missing-signatures
   - -fno-warn-unused-do-bind
+  - -fno-warn-orphans
 
 library:
   source-dirs: library
