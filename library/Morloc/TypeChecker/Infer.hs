@@ -25,6 +25,8 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 
+import Debug.Trace
+
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
   mods <- foldM insertWithCheck Map.empty [(moduleName m, m) | m <- ms]
@@ -673,57 +675,38 @@ infer lang g1 e0@(LamE v e2) = do
  -  g |- e1 e2 =>> C -| d_k
  -}
 infer _ g1 (AppE e1 e2) = do
-  -- FIXME: the code below totally ignore concrete types
-  (g2, a', e1') <- infer Nothing g1 e1
-  let a = head [t | (Nothing, t) <- a'] 
-  (g3, c, e2') <- derive g2 e2 (apply g2 a)
-  e3 <- applyConcrete e1' e2' c
-  return (g3, [(Nothing, c)], e3)
-  where
-    applyConcrete :: Expr -> Expr -> Type -> Stack Expr
-    applyConcrete (AnnE e1 _) e2@(AnnE _ a') c = do
-      let a = head [t | (Nothing, t) <- a']
-      return $ AnnE (AppE (AnnE e1 [(Nothing, FunT a c)]) e2) [(Nothing, c)]
-    applyConcrete e1 e2 t =
-      throwError . OtherError $
-      "Expected annotatated types in applyConcrete, got:\n  > " <>
-      MT.show' e1 <> "\n  > " <> MT.show' e2 <> "\n  > " <> MT.show' t
-  -- The rightish, but totally broken, way
-  -- -- Anonymous lambda functions are currently not supported. So e1 currently will
-  -- -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
-  -- -- would roughly correspond to DeclareInfer statements while adding annotated
-  -- -- lambdas would correspond to DeclareAnnot.
-  -- --
-  -- -- ts1 will include one entry consisting of the general type `(Nothing,t)`
-  -- -- and one or more realizatoins `(Just lang, t)`
-  -- (d1, ts1, e1') <- infer Nothing g1 e1
-  -- (dk, xs) <- foldM chainDerive (d1, []) ts1
-  -- e2' <- collate xs
-  -- -- * e1' - e1 with type annotations
-  -- -- * e2' - e2 with type annotations (after being applied to e2)
-  -- (ts', ek') <- applyConcrete e1' e2'
-  -- return (dk, ts', ek')
-  -- where
-  --   -- Chain a context through a series of `derive` calls, one for each type
-  --   -- inferred for e1.
-  --   chainDerive ::
-  --        (Gamma, [Expr])
-  --     -> (Maybe Lang, Type)
-  --     -> Stack (Gamma, [Expr])
-  --   chainDerive (g, es) (l, t) = do
-  --     (g', _, e') <- derive g e2 (apply g t)
-  --     return (g', (e':es))
-  --   -- pair input and output types by language and construct the function type
-  --   applyConcrete :: Expr -> Expr -> Stack ([(Maybe Lang, Type)], Expr)
-  --   applyConcrete (AnnE e1 ts1) (AnnE e2 ts2) = do
-  --     let (ts1', ts2') = unzip [ ((l1, t1), (l2, t2))
-  --                              | (l1, t1) <- ts1
-  --                              , (l2, t2) <- ts2
-  --                              , l1 == l2
-  --                              ]
-  --     return $ (ts2', AnnE (AppE (AnnE e1 ts1') e2) ts2')
-  --   applyConcrete _ _ = throwError $ OtherError "bad concrete"
+  -- Anonymous lambda functions are currently not supported. So e1 currently will
+  -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
+  -- would roughly correspond to DeclareInfer statements while adding annotated
+  -- lambdas would correspond to DeclareAnnot.
 
+  -- @as1@ will include one entry consisting of the general type `(Nothing,t)`
+  -- and one or more realizatoins `(Just lang, t)`
+  (d1, as1, e1') <- infer Nothing g1 e1
+
+  -- Map derive over every type observed for e1, the functional element. The
+  -- result is a list of the types and expressions derived from e2
+  (_, cs1, es2') <- fmap unzip3 $ mapM (\(_, t) -> derive d1 e2 (apply d1 t)) as1
+
+  e2' <- collate es2' 
+  cs1' <- mapM (\c -> (,) <$> findTypeLanguage c <*> pure c) cs1
+
+  -- * e1' - e1 with type annotations
+  -- * e2' - e2 with type annotations (after being applied to e2)
+  (as2, ek') <- applyConcrete e1' e2' cs1'
+
+  return (d1, as2, ek')
+  where
+    -- pair input and output types by language and construct the function type
+    applyConcrete :: Expr -> Expr -> [(Maybe Lang, Type)] ->  Stack ([(Maybe Lang, Type)], Expr)
+    applyConcrete (AnnE e1 _) e2@(AnnE _ ts2) cs = do
+      let (tas, tcs) = unzip [ ((l1, FunT a c), (l1, c))
+                               | (l1, a) <- ts2
+                               , (l2, c) <- cs
+                               , l1 == l2
+                             ]
+      return $ (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
+    applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
 
 --  g1 |- A
 --  g1 |- e <= A -| g2
@@ -794,13 +777,11 @@ check ::
   -> Stack ( Gamma
            , Type -- The inferred type of the expression
            , Expr -- The annotated expression
-            )
-check g e t = check' g e t
-
+           )
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-check' g1 (LamE v e1) t1@(FunT a b)
+check g1 (LamE v e1) t1@(FunT a b)
   -- define x:A
  = do
   lang <- findTypeLanguage t1
@@ -814,7 +795,7 @@ check' g1 (LamE v e1) t1@(FunT a b)
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
-check' g1 e1 t2@(Forall x a) = do
+check g1 e1 t2@(Forall x a) = do
   lang <- findTypeLanguage t2
   (g2, _, e2) <- check (g1 +> VarG x) e1 a
   g3 <- cut (VarG x) g2
@@ -824,7 +805,7 @@ check' g1 e1 t2@(Forall x a) = do
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
-check' g1 e1 b = do
+check g1 e1 b = do
   lang <- findTypeLanguage b
   (g2, a1, e2) <- inferOne lang g1 e1
   g3 <- subtype (apply g2 a1) (apply g2 b) g2
@@ -839,22 +820,20 @@ derive ::
            , Type -- @b@, the function output type after context application
            , Expr -- @e@, with type annotation
             )
-derive g e t = do derive' g e t
-
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-derive' g e (FunT a b) = do
+derive g e (FunT a b) = do
   (g', _, e') <- check g e a
   return (g', apply g' b, e')
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
+derive g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistT v) = do
+derive g e t@(ExistT v) = do
   ea1 <- newvar Nothing
   ea2 <- newvar Nothing
   let t' = FunT ea1 ea2
