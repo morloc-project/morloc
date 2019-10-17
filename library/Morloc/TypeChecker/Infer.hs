@@ -846,4 +846,4 @@ derive g e t@(ExistT v) = do
       Nothing -> throwError UnknownError
   (g3, _, e2) <- check g2 e ea1
   return (g3, apply g3 ea2, e2)
-derive' _ _ _ = throwError NonFunctionDerive
+derive _ _ _ = throwError NonFunctionDerive
