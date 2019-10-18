@@ -107,7 +107,7 @@ loadMorlocConfig f = do
 -- input of Nothing indicates the input is a local file or STDIN.
 makeLibSourceString :: Maybe MT.Text -> MorlocMonad (Maybe MT.Text)
 makeLibSourceString (Just x) = do
-  homedir <- MM.liftIO getDefaultMorlocLibrary
+  homedir <- liftIO getDefaultMorlocLibrary
   let x' =
         case (MT.stripPrefix homedir x) of
           Nothing -> x

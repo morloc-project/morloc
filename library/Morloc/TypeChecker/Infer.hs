@@ -25,7 +25,8 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 
-import Debug.Trace
+import Morloc.Pretty
+import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
@@ -35,7 +36,7 @@ typecheck ms = do
   mods' <- path graph
   case mapM (flip Map.lookup $ mods) mods' of
     (Just mods'') -> fmap reverse $ typecheckModules (Map.empty) mods''
-    Nothing -> throwError UnknownError -- this shouldn't happen
+    Nothing -> throwError $ OtherError "bad thing #1"
   where
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m =
@@ -323,7 +324,9 @@ chainInfer g0 es0 = chainInfer' g0 (reverse es0) [] [] where
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
-subtype t1 t2 g = do subtype' t1 t2 g
+subtype t1 t2 g = do
+  liftIO . putDoc $ ":>" <> (prettyGreenType t1) <> " | " <> prettyGreenType t2 <> "\n"
+  subtype' t1 t2 g
 
 -- VarT vs VarT
 subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
@@ -437,7 +440,7 @@ instantiate ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
     case access1 ta g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
-      Nothing -> throwError UnknownError
+      Nothing -> throwError $ OtherError "Bad thing #2"
   g3 <- instantiate t1 ea1 g2
   g4 <- instantiate ea2 (apply g3 t2) g3
   return g4
@@ -452,7 +455,7 @@ instantiate (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
     case access1 tb g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
-      Nothing -> throwError UnknownError
+      Nothing -> throwError $ OtherError "Bad thing #3"
   g3 <- instantiate t1 ea1 g2
   g4 <- instantiate ea2 (apply g3 t2) g3
   return g4
@@ -511,6 +514,7 @@ instantiate ta@(ExistT v) tb g1 = do
         Nothing -> error "error in InstLSolve"
 -- bad
 instantiate _ _ g = return g
+
 
 infer ::
      Maybe Lang
@@ -667,7 +671,7 @@ infer lang g1 e0@(LamE v e2) = do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
       return (g4, [(lang, t3)], ann lang e0 t3)
-    Nothing -> throwError UnknownError
+    Nothing -> throwError $ OtherError "Bad thing #4"
 
 {-  g |- e1 => A* -| d_1
  -  { d_i |- [d_i]A_i o e2 =>> C_i -| d_{i+1} } forall i in (1,2 ... k)
@@ -843,7 +847,7 @@ derive g e t@(ExistT v) = do
           of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
-      Nothing -> throwError UnknownError
+      Nothing -> throwError $ OtherError "Bad thing #5"
   (g3, _, e2) <- check g2 e ea1
   return (g3, apply g3 ea2, e2)
 derive _ _ _ = throwError NonFunctionDerive

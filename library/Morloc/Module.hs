@@ -53,7 +53,7 @@ findModule moduleName = do
   config <- MM.ask
   let lib = Config.configLibrary config
   let allPaths = getModulePaths lib moduleName
-  existingPaths <- MM.liftIO . fmap catMaybes . mapM getFile $ allPaths
+  existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     (x:_) -> return x
     [] ->
@@ -75,10 +75,10 @@ findModuleMetadata main_file = do
 
 loadModuleMetadata :: MT.Text -> MorlocMonad ()
 loadModuleMetadata main = do
-  maybef <- MM.liftIO $ findModuleMetadata main
+  maybef <- liftIO $ findModuleMetadata main
   meta <-
     case maybef of
-      (Just f) -> MM.liftIO $ YC.loadYamlSettings [MT.unpack f] [] YC.ignoreEnv
+      (Just f) -> liftIO $ YC.loadYamlSettings [MT.unpack f] [] YC.ignoreEnv
       Nothing -> return defaultPackageMeta
   state <- MM.get
   MM.put (appendMeta meta state)

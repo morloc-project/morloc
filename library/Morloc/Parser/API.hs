@@ -60,5 +60,5 @@ ugly ms = print ms
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
 openLocalModule filename = do
-  code <- MM.liftIO $ MT.readFile (MT.unpack filename)
+  code <- liftIO $ MT.readFile (MT.unpack filename)
   return (Just filename, code)

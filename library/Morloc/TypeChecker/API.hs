@@ -14,7 +14,6 @@ module Morloc.TypeChecker.API
 
 import Morloc.Namespace
 import qualified Control.Monad.Except as ME
-import qualified Control.Monad.Identity as MI
 import qualified Control.Monad.Reader as MR
 import qualified Control.Monad.State as MS
 import qualified Control.Monad.Writer as MW
@@ -23,18 +22,20 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer
 
 typecheck :: [Module] -> MorlocMonad [Module]
-typecheck ms =
-  case runStack (Infer.typecheck ms) of
-    (Right result, _) -> return result
-    (Left err, _) -> MM.throwError err
+typecheck ms = do
+  x <- liftIO $ runStack (Infer.typecheck ms)
+  case x of
+    ((Right result, _), _) -> return result
+    ((Left err, _), _) -> MM.throwError err
 
 -- | currently I do nothing with the Reader and Writer monads, but I'm leaving
 -- them in for now since I will need them when I plug this all into Morloc.
-runStack :: Stack a -> (Either MorlocError a, [MT.Text])
-runStack e =
-  fst .
-  MI.runIdentity .
-  flip MS.runStateT emptyState . MW.runWriterT . ME.runExceptT . MR.runReaderT e $
-  StackConfig 0
+runStack :: Stack a -> IO ((Either MorlocError a, [MT.Text]), StackState)
+runStack e
+  = flip MS.runStateT emptyState
+  . MW.runWriterT
+  . ME.runExceptT
+  . MR.runReaderT e
+  $ StackConfig 0
 
 emptyState = StackState 0 0 []

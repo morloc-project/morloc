@@ -15,6 +15,7 @@ module Morloc.Internal
   , module Data.Either
   , module Data.List.Extra
   , module Control.Monad
+  , module Control.Monad.IO.Class
   , module Data.Monoid
   -- ** operators
   , (|>>) -- piped fmap
@@ -24,6 +25,7 @@ module Morloc.Internal
 -- Don't import anything from Morloc here. This module should be VERY lowest
 -- in the hierarchy, to avoid circular dependencies, since the lexer needs to
 -- access it.
+import Control.Monad.IO.Class
 import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Maybe
 import Data.Either

@@ -521,7 +521,7 @@ newtype MVar = MV Text deriving (Show, Eq, Ord)
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
 type GeneralStack c e l s a
-   = ReaderT c (ExceptT e (WriterT l (StateT s Identity))) a
+   = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 
 type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
 

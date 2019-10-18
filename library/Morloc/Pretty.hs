@@ -10,6 +10,7 @@ module Morloc.Pretty
   ( prettyExpr
   , prettyModule
   , prettyType
+  , prettyGreenType
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal

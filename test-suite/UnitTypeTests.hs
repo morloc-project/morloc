@@ -26,50 +26,57 @@ typeof es = f' . head . reverse $ es
     f' (AppE _ t) = f' t
     f' t = error ("No annotation found for: " <> show t)
 
+unres :: ((a, b), c) -> a 
+unres ((x, _), _) = x
+
 exprTestGood :: String -> T.Text -> [Type] -> TestTree
-exprTestGood msg code t =
-  testCase msg $
-  case API.runStack (typecheck (readProgram Nothing code)) of
-    (Right es', _) -> assertEqual "" t (typeof (main es'))
-    (Left err, _) ->
-      error $
+exprTestGood msg code t = testCase msg $ do
+  result <- API.runStack (typecheck (readProgram Nothing code))
+  case unres result of
+    (Right es') -> assertEqual "" t (typeof (main es'))
+    (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
-  testCase msg $
-  case ( API.runStack (typecheck (readProgram Nothing code1))
-       , API.runStack (typecheck (readProgram Nothing code2))) of
-    ((Right e1, _), (Right e2, _)) -> assertEqual "" e1 e2
+  testCase msg $ do
+  result1 <- API.runStack (typecheck (readProgram Nothing code1))
+  result2 <- API.runStack (typecheck (readProgram Nothing code2))
+  case (unres result1, unres result2) of
+    (Right e1, Right e2) -> assertEqual "" e1 e2
     _ -> error $ "Expected equal"
 
 exprTestFull :: String -> T.Text -> T.Text -> TestTree
 exprTestFull msg code expCode =
-  testCase msg $
-  case API.runStack (typecheck (readProgram Nothing code)) of
-    (Right e, _) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
-    (Left err, _) -> error (show err)
+  testCase msg $ do
+  result <- API.runStack (typecheck (readProgram Nothing code))
+  case unres result of
+    (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
+    (Left err) -> error (show err)
 
 exprTestBad :: String -> T.Text -> TestTree
 exprTestBad msg e =
-  testCase msg $
-  case API.runStack (typecheck (readProgram Nothing e)) of
-    (Right _, _) -> assertFailure . T.unpack $ "Expected '" <> e <> "' to fail"
-    (Left _, _) -> return ()
+  testCase msg $ do
+  result <- API.runStack (typecheck (readProgram Nothing e))
+  case unres result of
+    (Right _) -> assertFailure . T.unpack $ "Expected '" <> e <> "' to fail"
+    (Left _) -> return ()
 
 expectError :: String -> MorlocError -> T.Text -> TestTree
 expectError msg err expr =
-  testCase msg $
-  case API.runStack (typecheck (readProgram Nothing expr)) of
-    (Right _, _) -> assertFailure . T.unpack $ "Expected failure"
-    (Left err, _) -> return ()
+  testCase msg $ do
+  result <- API.runStack (typecheck (readProgram Nothing expr))
+  case unres result of
+    (Right _) -> assertFailure . T.unpack $ "Expected failure"
+    (Left err) -> return ()
 
 testPasses :: String -> T.Text -> TestTree
 testPasses msg e =
-  testCase msg $
-  case API.runStack (typecheck (readProgram Nothing e)) of
-    (Right _, _) -> return ()
-    (Left e, _) ->
+  testCase msg $ do
+  result <- API.runStack (typecheck (readProgram Nothing e))
+  case unres result of
+    (Right _) -> return ()
+    (Left e) ->
       assertFailure $
       "Expected this test to pass, but it failed with the message: " <> show e
 

@@ -69,12 +69,12 @@ typeSize (FunT t1 t2) = 1 + typeSize t1 + typeSize t2
 typeSize (ArrT _ xs) = 1 + sum (map typeSize xs)
 typeSize (RecT xs) = 1 + sum (map (typeSize . snd) xs)
 
-subtypeOf :: Type -> Type -> Gamma -> Bool
-subtypeOf t1 t2 g =
-  case runStack (subtype t1 t2 g) of
-    (Right _, _) -> True
-    (Left _, _) -> False
-
+-- subtypeOf :: Type -> Type -> Gamma -> Bool
+-- subtypeOf t1 t2 g =
+--   case runStack (subtype t1 t2 g) of
+--     (Right _, _) -> True
+--     (Left _, _) -> False
+--
 -- infer1 :: [Expr] -> Bool
 -- infer1 es = case runStack (typecheck es) of
 --   (Right (g, t, es'), _) -> all (infer1' t) es'

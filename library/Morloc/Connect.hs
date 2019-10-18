@@ -29,7 +29,7 @@ connect mods
   -- unique integer IDs to all manifolds.
   modelState <- initProgramState mods
   (ms, _) <-
-    MM.liftIO . (flip MM.runStateT) modelState $
+    liftIO . (flip MM.runStateT) modelState $
     fmap concat (mapM (module2manifolds root) (moduleBody root))
   -- extract and store the serialization functions
   hss <- makeSerialMaps mods

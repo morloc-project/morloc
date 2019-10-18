@@ -23,9 +23,9 @@ buildProgram (nexus, pools) = mapM_ build (nexus : pools)
 build :: Script -> MorlocMonad ()
 build s =
   case scriptLang s of
-    Python3Lang -> MM.liftIO $ writeInterpreted s
-    RLang -> MM.liftIO $ writeInterpreted s
-    PerlLang -> MM.liftIO $ writeInterpreted s
+    Python3Lang -> liftIO $ writeInterpreted s
+    RLang -> liftIO $ writeInterpreted s
+    PerlLang -> liftIO $ writeInterpreted s
     CLang -> gccBuild s "gcc"
     CppLang -> gccBuild s "g++" -- TODO: I need more rigorous build handling
     MorlocLang -> MM.throwError . GeneratorError $ "You don't want to do that"
@@ -36,7 +36,7 @@ gccBuild s cmd = do
   let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
   let exe = ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))
   let inc = ["-I" <> i | i <- scriptInclude s]
-  MM.liftIO $ MT.writeFile (MT.unpack src) (scriptCode s)
+  liftIO $ MT.writeFile (MT.unpack src) (scriptCode s)
   MM.runCommand "GccBuild" $
     MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
 
