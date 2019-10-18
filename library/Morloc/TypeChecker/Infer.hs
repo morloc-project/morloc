@@ -45,13 +45,19 @@ typecheck ms = do
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
 
 enter :: Doc AnsiStyle -> Stack ()
-enter d = debugLog $ "->  " <> d <> "\n"
+enter d = do
+  depth <- incDepth
+  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> align d <> "\n"
 
 say :: Doc AnsiStyle -> Stack ()
-say d = debugLog $ ":   " <> d <> "\n"
+say d = do
+  depth <- getDepth
+  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> align d <> "\n"
 
 leave :: Doc AnsiStyle -> Stack ()
-leave d = debugLog $ "<-  " <> d <> "\n"
+leave d = do
+  depth <- decDepth
+  debugLog $ "<" <> pretty (take depth (repeat '-')) <+> align d <> "\n"
 
 debugLog :: Doc AnsiStyle -> Stack ()
 debugLog d = do
@@ -217,7 +223,7 @@ free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
 collate (e:es) = do
-  say $ "collating" <+> viaShow (length es) <+> "expressions into:\n  " <+> prettyExpr e
+  say $ "collating" <+> viaShow (length es) <+> "expressions into:\n" <> prettyExpr e
   foldM collateOne e es
 
 -- | Merge two annotated expressions into one, fail if the expressions are not

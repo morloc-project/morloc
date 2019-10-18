@@ -43,4 +43,5 @@ emptyState = StackState
   { stateVar = 0
   , stateQul = 0
   , stateSer = []
+  , stateDepth = 0
   }

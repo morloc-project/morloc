@@ -536,6 +536,7 @@ data StackState =
     { stateVar :: Int
     , stateQul :: Int
     , stateSer :: [(Type, Type)]
+    , stateDepth :: Int
     }
   deriving (Ord, Eq, Show)
 

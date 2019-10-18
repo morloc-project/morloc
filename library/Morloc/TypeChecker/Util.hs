@@ -28,6 +28,9 @@ module Morloc.TypeChecker.Util
   , newvar
   , throwError
   , serialConstraint
+  , incDepth
+  , decDepth
+  , getDepth
   ) where
 
 import Control.Monad.Except (throwError)
@@ -41,6 +44,23 @@ serialConstraint :: Type -> Type -> Stack ()
 serialConstraint t1 t2 = do
   s <- CMS.get
   CMS.put (s {stateSer = (t1, t2):stateSer s})
+
+incDepth :: Stack Int
+incDepth = do
+  s <- CMS.get 
+  let depth = stateDepth s + 1
+  CMS.put (s {stateDepth = depth})
+  return depth
+
+decDepth :: Stack Int
+decDepth = do
+  s <- CMS.get 
+  let depth = stateDepth s - 1
+  CMS.put (s {stateDepth = depth})
+  return depth
+
+getDepth :: Stack Int
+getDepth = CMS.gets stateDepth
 
 importFromModularGamma :: ModularGamma -> Module -> Stack Gamma
 importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
