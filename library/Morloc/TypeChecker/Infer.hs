@@ -25,8 +25,9 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 
+import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
-import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
+import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
@@ -42,13 +43,24 @@ typecheck ms = do
     mod2pair m =
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
 
+enter :: Doc AnsiStyle -> Stack ()
+enter d = liftIO . putDoc $ "->  " <> d <> "\n"
+
+say :: Doc AnsiStyle -> Stack ()
+say d = liftIO . putDoc $ ":  " <> d <> "\n"
+
+leave :: Doc AnsiStyle -> Stack ()
+leave d = liftIO . putDoc $ "<-  " <> d <> "\n"
+
 typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
 typecheckModules _ [] = return []
 typecheckModules mg (m:ms) = do
+  enter $ "entering module '" <> viaShow (moduleName m) <> "'"
   g <- importFromModularGamma mg m
   (g', exprs) <- typecheckExpr g (moduleBody m)
   (privateMap, mg') <- extendModularGamma g' m mg
   mods <- typecheckModules mg' ms
+  leave $ "module"
   return (m {moduleBody = exprs, moduleTypeMap = privateMap} : mods)
 
 insertWithCheck ::
@@ -196,7 +208,9 @@ free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
-collate (e:es) = foldM collateOne e es where
+collate (e:es) = do
+  say $ "collating" <+> viaShow (length es) <+> "expressions into:\n  " <+> prettyExpr e
+  foldM collateOne e es
 
 -- | Merge two annotated expressions into one, fail if the expressions are not
 -- equivalent.
@@ -314,19 +328,24 @@ findTypeLanguage (RecT ts@((TV lang0 _, _):_)) = do
 
 -- | TODO: document - allow things other than general
 chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
-chainInfer g0 es0 = chainInfer' g0 (reverse es0) [] [] where
-  chainInfer' ::
-       Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
-  chainInfer' g [] ts es = return (g, ts, es)
-  chainInfer' g (x:xs) ts es = do
-    (g', [(Nothing, t')], e') <- infer Nothing g x
-    chainInfer' g' xs (t' : ts) (e' : es)
+chainInfer g0 es0 = do
+  say "chainInfer"
+  chainInfer' g0 (reverse es0) [] []
+  where
+    chainInfer' ::
+         Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
+    chainInfer' g [] ts es = return (g, ts, es)
+    chainInfer' g (x:xs) ts es = do
+      (g', [(Nothing, t')], e') <- infer Nothing g x
+      chainInfer' g' xs (t' : ts) (e' : es)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
 subtype t1 t2 g = do
-  liftIO . putDoc $ ":>" <> (prettyGreenType t1) <> " | " <> prettyGreenType t2 <> "\n"
-  subtype' t1 t2 g
+  enter $ prettyGreenType t1 <+> ":>" <+> prettyGreenType t2
+  g' <- subtype' t1 t2 g
+  leave "subtype"
+  return g'
 
 -- VarT vs VarT
 subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
@@ -429,11 +448,15 @@ subtype' a b _ = throwError $ SubtypeError a b
 
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
+instantiate t1 t2 g = do
+  say $ prettyGreenType t1 <+> "<=:" <+> prettyGreenType t2
+  instantiate' t1 t2 g 
+
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
 --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
+instantiate' ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -448,7 +471,7 @@ instantiate ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
+instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -462,14 +485,14 @@ instantiate (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
 --
 -- ----------------------------------------- InstLAllR
 --
-instantiate ta@(ExistT _) (Forall v2 t2) g1 =
+instantiate' ta@(ExistT _) (Forall v2 t2) g1 =
   instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
 -- InstLReach or instRReach -- each rule eliminates an existential
 -- Replace the rightmost with leftmost (G[a][b] --> L,a,M,b=a,R)
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate ta@(ExistT v1) tb@(ExistT v2) g1 = do
+instantiate' ta@(ExistT v1) tb@(ExistT v2) g1 = do
   _ <- return ()
   case access2 ta tb g1 of
     -- InstLReach
@@ -483,7 +506,7 @@ instantiate ta@(ExistT v1) tb@(ExistT v2) g1 = do
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate (Forall x b) tb@(ExistT _) g1 =
+instantiate' (Forall x b) tb@(ExistT _) g1 =
   do instantiate
        (substitute x b) -- [Eb/x]B
        tb -- Ea
@@ -492,7 +515,7 @@ instantiate (Forall x b) tb@(ExistT _) g1 =
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate ta tb@(ExistT v) g1 =
+instantiate' ta tb@(ExistT v) g1 =
   case access1 tb g1 of
     (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v ta) : rs
     Nothing ->
@@ -505,7 +528,7 @@ instantiate ta tb@(ExistT v) g1 =
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate ta@(ExistT v) tb g1 = do
+instantiate' ta@(ExistT v) tb g1 = do
   case access1 ta g1 of
     (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v tb) : rs
     Nothing ->
@@ -513,7 +536,7 @@ instantiate ta@(ExistT v) tb g1 = do
         (Just _) -> return g1
         Nothing -> error "error in InstLSolve"
 -- bad
-instantiate _ _ g = return g
+instantiate' _ _ g = return g
 
 
 infer ::
@@ -524,30 +547,35 @@ infer ::
            , [(Maybe Lang, Type)] -- The return type
            , Expr -- The annotated expression
            )
+infer l g e = do
+  enter $ "infer" <+> maybe "MLang" (viaShow . id) l <+> prettyExpr e
+  o@(_, ts, _) <- infer' l g e
+  leave $ "infer |-" <+> encloseSep "(" ")" ", " (map (\(_, t) -> prettyGreenType t) ts)
+  return o
 
 --
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
 -- 
 -- Num=>
-infer (Just _) _ (NumE _) = throwError CannotInferConcretePrimitiveType
-infer Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
+infer' (Just _) _ (NumE _) = throwError CannotInferConcretePrimitiveType
+infer' Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Num")
 -- Str=> 
-infer (Just _) _ (StrE _) = throwError CannotInferConcretePrimitiveType
-infer Nothing g e@(StrE _) = return (g, [(Nothing, t)], ann Nothing e t)
+infer' (Just _) _ (StrE _) = throwError CannotInferConcretePrimitiveType
+infer' Nothing g e@(StrE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Str")
 -- Log=> 
-infer (Just _) _ (LogE _) = throwError CannotInferConcretePrimitiveType
-infer Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
+infer' (Just _) _ (LogE _) = throwError CannotInferConcretePrimitiveType
+infer' Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Bool")
 
 -- Src=>
-infer (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer Nothing g1 s1@(SrcE lang path xs) = do
+infer' (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer' Nothing g1 s1@(SrcE lang path xs) = do
   g3 <- foldM srcList g1 xs
   return
     ( g3 -- existential signatures are created for each sourced term
@@ -573,8 +601,8 @@ infer Nothing g1 s1@(SrcE lang path xs) = do
         }])
 
 -- Signature=>
-infer (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer Nothing g e0@(Signature v e) = do
+infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer' Nothing g e0@(Signature v e) = do
   g2 <- accessWith1 isAnnG append' ifNotFound g
   return (g2, [], e0)
   where
@@ -620,8 +648,8 @@ infer Nothing g e0@(Signature v e) = do
           return $ TypeSet (Just e3) rs
 
 -- Declaration=>
-infer (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer Nothing g (Declaration v e) =
+infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
+infer' Nothing g (Declaration v e) =
   case lookupE (VarE v) g of 
     Nothing -> declareInfer
     (Just typeset) -> declareCheck typeset
@@ -646,7 +674,7 @@ infer Nothing g (Declaration v e) =
 --  (x:A) in g
 -- ------------------------------------------- Var
 --  g |- x => A -| g
-infer _ g e@(VarE v) = do
+infer' _ g e@(VarE v) = do
   case lookupE e g of
     (Just typeset) ->
       let ts = mapTS (\e -> (elang e, etype e)) typeset
@@ -660,7 +688,7 @@ infer _ g e@(VarE v) = do
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
-infer lang g1 e0@(LamE v e2) = do
+infer' lang g1 e0@(LamE v e2) = do
   a <- newvar lang
   b <- newvar lang
   let anng = AnnG (VarE v) (fromType lang a)
@@ -678,7 +706,7 @@ infer lang g1 e0@(LamE v e2) = do
  - ----------------------------------------- -->E
  -  g |- e1 e2 =>> C -| d_k
  -}
-infer _ g1 (AppE e1 e2) = do
+infer' _ g1 (AppE e1 e2) = do
   -- Anonymous lambda functions are currently not supported. So e1 currently will
   -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
   -- would roughly correspond to DeclareInfer statements while adding annotated
@@ -716,7 +744,7 @@ infer _ g1 (AppE e1 e2) = do
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
+infer' _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
   -- Non-top-level annotations will always consist of a single general type.
   --
   -- This is a bit questionable. If a single variable is annotated, e.g.
@@ -728,27 +756,27 @@ infer _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
  = case lookupE e g of
     (Just _) -> checkup g e t
     Nothing -> return (g, annot, e1)
-infer _ g (AnnE e [(Nothing, t)]) = checkup g e t
-infer _ g (AnnE _ _) = throwError
+infer' _ g (AnnE e [(Nothing, t)]) = checkup g e t
+infer' _ g (AnnE _ _) = throwError
   $ OtherError "concrete annotations are not yet supported"
 
 -- List=>
-infer (Just _) _ (ListE _) = undefined
-infer Nothing g e1@(ListE []) = do
+infer' (Just _) _ (ListE _) = undefined
+infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
   return (g +> t, [(Nothing, t')], ann Nothing e1 t')
-infer Nothing g1 e1@(ListE (x:xs)) = do
+infer' Nothing g1 e1@(ListE (x:xs)) = do
   (g2, t', _) <- inferOne Nothing g1 x
   g3 <- foldM (quietCheck t') g2 xs
   let t'' = ArrT (TV Nothing "List") [t']
   return (g3, [(Nothing, t'')], ann Nothing e1 t'')
 
 -- Tuple=>
-infer (Just _) _ (TupleE _) = undefined
-infer _ _ (TupleE []) = throwError EmptyTuple
-infer _ _ (TupleE [_]) = throwError TupleSingleton
-infer Nothing g1 (TupleE xs) = do
+infer' (Just _) _ (TupleE _) = undefined
+infer' _ _ (TupleE []) = throwError EmptyTuple
+infer' _ _ (TupleE [_]) = throwError TupleSingleton
+infer' Nothing g1 (TupleE xs) = do
   (g2, ts, es) <- chainInfer g1 xs
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
@@ -759,9 +787,9 @@ infer Nothing g1 (TupleE xs) = do
 -- infer :: Maybe Lang -> Gamma -> Expr -> Stack ( Gamma, [(Maybe Lang, Type)], Expr)
 
 -- ----------------------------------------- Record=>
-infer (Just _) _ (RecE _) = undefined
-infer _ _ (RecE []) = throwError EmptyRecord
-infer Nothing g1 e@(RecE rs) = do
+infer' (Just _) _ (RecE _) = undefined
+infer' _ _ (RecE []) = throwError EmptyRecord
+infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
   let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
   return (g2, [(Nothing, t)], ann Nothing e t)
@@ -782,10 +810,16 @@ check ::
            , Type -- The inferred type of the expression
            , Expr -- The annotated expression
            )
+check g e t = do
+  enter $  "check" <+> prettyExpr e <> "  " <> prettyGreenType t
+  (g', t', e') <- check' g e t
+  leave $ "check |-" <+> prettyType t'
+  return (g', t', e')
+
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-check g1 (LamE v e1) t1@(FunT a b)
+check' g1 (LamE v e1) t1@(FunT a b)
   -- define x:A
  = do
   lang <- findTypeLanguage t1
@@ -799,7 +833,7 @@ check g1 (LamE v e1) t1@(FunT a b)
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
-check g1 e1 t2@(Forall x a) = do
+check' g1 e1 t2@(Forall x a) = do
   lang <- findTypeLanguage t2
   (g2, _, e2) <- check (g1 +> VarG x) e1 a
   g3 <- cut (VarG x) g2
@@ -809,7 +843,7 @@ check g1 e1 t2@(Forall x a) = do
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
-check g1 e1 b = do
+check' g1 e1 b = do
   lang <- findTypeLanguage b
   (g2, a1, e2) <- inferOne lang g1 e1
   g3 <- subtype (apply g2 a1) (apply g2 b) g2
@@ -824,20 +858,27 @@ derive ::
            , Type -- @b@, the function output type after context application
            , Expr -- @e@, with type annotation
             )
+derive g e f = do
+  enter $ "derive" <+> prettyExpr e <> "  " <> prettyGreenType f
+  (g', t', e') <- derive' g e f
+  leave $ "derive |-" <+> prettyType t'
+  return (g', t', e')
+
+
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-derive g e (FunT a b) = do
+derive' g e (FunT a b) = do
   (g', _, e') <- check g e a
   return (g', apply g' b, e')
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-derive g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
+derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive g e t@(ExistT v) = do
+derive' g e t@(ExistT v) = do
   ea1 <- newvar Nothing
   ea2 <- newvar Nothing
   let t' = FunT ea1 ea2
@@ -850,4 +891,4 @@ derive g e t@(ExistT v) = do
       Nothing -> throwError $ OtherError "Bad thing #5"
   (g3, _, e2) <- check g2 e ea1
   return (g3, apply g3 ea2, e2)
-derive _ _ _ = throwError NonFunctionDerive
+derive' _ _ _ = throwError NonFunctionDerive
