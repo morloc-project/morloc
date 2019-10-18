@@ -120,6 +120,7 @@ data MorlocState =
     { dependencies :: [Dependency]
     , statePackageMeta :: [PackageMeta]
     , stateSerialMaps :: Map Lang SerialMap
+    , stateVerbosity :: Int
     }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
@@ -527,7 +528,7 @@ type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
 
 data StackConfig =
   StackConfig
-    { configVerbosity :: Int -- Not currently used
+    { stackConfigVerbosity :: Int
     }
 
 data StackState =

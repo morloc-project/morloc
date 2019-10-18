@@ -50,6 +50,12 @@ getConfig args = do
   -- load the config file
   Config.loadMorlocConfig configPath
 
+getVerbosity :: Arguments -> Int
+getVerbosity args =
+  if isPresent args (longOption "verbose")
+    then 1
+    else 0
+
 -- | handle the code, either from a file or a raw string
 readScript :: Arguments -> IO (Maybe Path, MT.Text)
 readScript args
@@ -63,7 +69,7 @@ readScript args
 -- | install a module
 cmdInstall :: Subcommand
 cmdInstall args conf =
-  (MM.runMorlocMonad conf cmdInstall') >>= MM.writeMorlocReturn
+  (MM.runMorlocMonad (getVerbosity args) conf cmdInstall') >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
       let name = getArgOrDie args (argument "name")
@@ -80,7 +86,7 @@ cmdRemove _ _ = do
 cmdMake :: Subcommand
 cmdMake args config = do
   (path, code) <- readScript args
-  MM.runMorlocMonad config (M.writeProgram path code) >>=
+  MM.runMorlocMonad (getVerbosity args) config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
 cmdTypecheck :: Subcommand
@@ -101,6 +107,7 @@ cmdTypecheck args config = do
   if isPresent args (longOption "type")
     then print $ P.readType expr'
     else MM.runMorlocMonad
+           (getVerbosity args)
            config
            (M.typecheck base expr' >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn

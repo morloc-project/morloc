@@ -3,10 +3,11 @@ morloc version 0.17.4-dev
 Usage:
   morloc make [--expression] [--config=<config>] [--vanilla] <script>
   morloc install [--github] [--config=<config>] [--vanilla] <name>
-  morloc typecheck [--type] [--raw] [--expression] <script>
+  morloc typecheck [--type] [--raw] [--expression] [--verbose] <script>
 
 Options:
   -e, --expression   read script as string rather than file
   --vanilla          ignore local configuration files
   -t, --type         parse a typestring instead of an expression
   -r, --raw          print raw objects
+  -v, --verbose      print debugging information

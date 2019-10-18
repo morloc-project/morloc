@@ -27,6 +27,6 @@ makeManifoldFile :: String -> String -> IO ()
 makeManifoldFile locFile obsFile = do
   code <- MT.readFile locFile
   config <- Config.loadMorlocConfig Nothing -- default config
-  ms <- MM.evalMorlocMonad config
+  ms <- MM.evalMorlocMonad 0 config
     (P.parse (Just (MT.pack locFile)) code >>= T.typecheck >>= connect)
   writeBinaryFile obsFile (MT.unpack $ MT.pretty ms)

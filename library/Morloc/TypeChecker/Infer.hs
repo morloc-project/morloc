@@ -24,6 +24,7 @@ import Morloc.TypeChecker.Util
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import qualified Control.Monad.Reader as R
 
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
@@ -44,13 +45,20 @@ typecheck ms = do
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
 
 enter :: Doc AnsiStyle -> Stack ()
-enter d = liftIO . putDoc $ "->  " <> d <> "\n"
+enter d = debugLog $ "->  " <> d <> "\n"
 
 say :: Doc AnsiStyle -> Stack ()
-say d = liftIO . putDoc $ ":  " <> d <> "\n"
+say d = debugLog $ ":   " <> d <> "\n"
 
 leave :: Doc AnsiStyle -> Stack ()
-leave d = liftIO . putDoc $ "<-  " <> d <> "\n"
+leave d = debugLog $ "<-  " <> d <> "\n"
+
+debugLog :: Doc AnsiStyle -> Stack ()
+debugLog d = do
+  verbosity <- R.asks stackConfigVerbosity 
+  if verbosity > 0
+    then (liftIO . putDoc) d
+    else return ()
 
 typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
 typecheckModules _ [] = return []

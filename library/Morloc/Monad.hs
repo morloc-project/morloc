@@ -44,23 +44,30 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 
 runMorlocMonad ::
-     Config -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad config ev =
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) emptyState
+     Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad v config ev =
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState v)
 
 -- | Evaluate a morloc monad
 evalMorlocMonad ::
-     Config -- ^ use default config object if Nothing
+     Int
+  -> Config -- ^ use default config object if Nothing
   -> MorlocMonad a
   -> IO a
-evalMorlocMonad config m = do
-  ((x, _), _) <- runMorlocMonad config m
+evalMorlocMonad v config m = do
+  ((x, _), _) <- runMorlocMonad v config m
   case x of
     (Left err) -> error (show err)
     (Right value) -> return value 
 
-emptyState :: MorlocState
-emptyState = MorlocState [] [] Map.empty
+emptyState :: Int -> MorlocState
+emptyState v =
+  MorlocState
+    { dependencies = []
+    , statePackageMeta = []
+    , stateSerialMaps = Map.empty
+    , stateVerbosity = v
+    }
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
