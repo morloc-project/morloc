@@ -441,15 +441,15 @@ unitTypeTests =
     , exprTestGood
         "a realization can be defined following general type signature"
         (T.unlines ["f :: Num -> Num;", "f r :: integer -> integer;", "f 44"])
-        [num]
+        [num, varc RLang "integer"]
     , exprTestGood
         "realizations can map one general type to multiple specific ones"
         (T.unlines ["f :: Num -> Num;", "f r :: integer -> numeric;", "f 44"])
-        [num]
+        [num, varc RLang "numeric"]
     , exprTestGood
         "realizations can map multiple general type to one specific one"
         (T.unlines ["f :: Num -> Nat;", "f r :: integer -> integer;", "f 44"])
-        [var "Nat"]
+        [var "Nat", varc RLang "integer"]
     , exprTestGood
         "multiple realizations for different languages can be defined"
         (T.unlines

@@ -68,7 +68,7 @@ errmsg TypeMismatch = "TypeMismatch"
 errmsg (UnexpectedPattern e t) = "UnexpectedPattern"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg NoAnnotationFound = "NoAnnotationFound"
-errmsg (OtherError msg) = "OtherError"
+errmsg (OtherError msg) = "OtherError: " <> msg
 -- container errors
 errmsg EmptyTuple = "EmptyTuple"
 errmsg TupleSingleton = "TupleSingleton"

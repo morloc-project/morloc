@@ -564,7 +564,6 @@ instantiate' ta@(ExistT v) tb g1 = do
 -- bad
 instantiate' _ _ g = return g
 
-
 infer ::
      Maybe Lang
   -> Gamma
@@ -584,17 +583,23 @@ infer l g e = do
 --  g |- <primitive expr> => <primitive type> -| g
 -- 
 -- Num=>
-infer' (Just _) _ (NumE _) = throwError CannotInferConcretePrimitiveType
+infer' lang@(Just _) g e@(NumE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Num")
 -- Str=> 
-infer' (Just _) _ (StrE _) = throwError CannotInferConcretePrimitiveType
+infer' lang@(Just _) g e@(StrE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' Nothing g e@(StrE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Str")
 -- Log=> 
-infer' (Just _) _ (LogE _) = throwError CannotInferConcretePrimitiveType
+infer' lang@(Just _) g e@(LogE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
   where
     t = VarT (TV Nothing "Bool")
