@@ -458,7 +458,7 @@ unitTypeTests =
           , "f c :: int -> int;"
           , "f 44"
           ])
-        [num]
+        [num, varc CLang "int", varc RLang "integer"]
     , exprTestGood
         "realizations with parameterized variables"
         (T.unlines
@@ -485,7 +485,7 @@ unitTypeTests =
           , "f c :: int -> int;"
           , "f 44"
           ])
-        [num]
+        [num, varc CLang "int", varc RLang "integer"]
     , exprTestGood
         "the order of general signatures and realizations does not matter (2)"
         (T.unlines
@@ -494,7 +494,7 @@ unitTypeTests =
           , "f :: Num -> Num;"
           , "f 44"
           ])
-        [num]
+        [num, varc CLang "int", varc RLang "integer"]
     , exprTestGood
         "multiple realizations for a single language can be defined"
         (T.unlines
@@ -503,7 +503,7 @@ unitTypeTests =
           , "f r :: int -> int;"
           , "f 44"
           ])
-        [num]
+        [num, varc RLang "integer", varc RLang "int"]
     , expectError
         "a general signature must be given"
         (UnboundVariable (EV "f")) $
