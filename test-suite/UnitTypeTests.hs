@@ -464,10 +464,10 @@ unitTypeTests =
         (T.unlines
           [ "f :: [Num] -> Num;"
           , "f r :: integer -> integer;"
-          , "f c :: int -> int;"
+          , "f cpp :: \"std::vector<int>\" -> int;"
           , "f [44]"
           ])
-        [num]
+        [num, varc CppLang "int", varc RLang "integer"]
     , exprTestGood
         "realizations can use quoted variables"
         (T.unlines

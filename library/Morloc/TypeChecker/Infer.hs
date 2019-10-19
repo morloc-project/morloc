@@ -792,7 +792,9 @@ infer' _ g (AnnE _ _) = throwError
   $ OtherError "concrete annotations are not yet supported"
 
 -- List=>
-infer' (Just _) _ (ListE _) = undefined
+infer' lang@(Just _) g e@(ListE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
@@ -804,7 +806,9 @@ infer' Nothing g1 e1@(ListE (x:xs)) = do
   return (g3, [(Nothing, t'')], ann Nothing e1 t'')
 
 -- Tuple=>
-infer' (Just _) _ (TupleE _) = undefined
+infer' lang@(Just _) g e@(TupleE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' Nothing g1 (TupleE xs) = do
@@ -814,11 +818,10 @@ infer' Nothing g1 (TupleE xs) = do
       e = TupleE es
   return (g2, [(Nothing, t)], ann Nothing e t)
 
--- chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
--- infer :: Maybe Lang -> Gamma -> Expr -> Stack ( Gamma, [(Maybe Lang, Type)], Expr)
-
 -- ----------------------------------------- Record=>
-infer' (Just _) _ (RecE _) = undefined
+infer' lang@(Just _) g e@(RecE _) = do
+  v <- newvar lang
+  return (g +> v, [(lang, v)], ann lang e v) 
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
