@@ -11,6 +11,7 @@ module Morloc.Pretty
   , prettyModule
   , prettyType
   , prettyGreenType
+  , prettyGammaIndex
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -167,3 +168,14 @@ prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
 prettyType (RecT entries) =
   encloseSep "{" "}" ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+
+prettyGammaIndex :: GammaIndex -> Doc AnsiStyle
+prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
+prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e
+prettyGammaIndex (ExistG tv) = "ExistG:" <+> pretty tv
+prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
+prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
+prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
+prettyGammaIndex (SrcG (ev1, lang, _, _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+prettyGammaIndex (ConcreteG ev lang t) = "ConcreteG:" <+> pretty ev <+> viaShow lang <+> prettyGreenType t
+prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2

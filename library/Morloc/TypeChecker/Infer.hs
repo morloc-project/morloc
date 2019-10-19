@@ -205,7 +205,8 @@ substitute v t = substitute' v (ExistT v) t
 
 -- | TODO: document
 occursCheck :: Type -> Type -> Stack ()
-occursCheck t1 t2 =
+occursCheck t1 t2 = do
+  say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
   case Set.member t1 (free t2) of
     True -> throwError OccursCheckFail
     False -> return ()
@@ -279,12 +280,14 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
 
 checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [(Maybe Lang, Type)], Expr)
 checkup g e t = do
+  say "checkup"
   (g', t', e') <- check g e t
   lang <- findTypeLanguage t'
   return (g', [(lang, t')], e')
 
 inferOne :: Maybe Lang -> Gamma -> Expr -> Stack (Gamma, Type, Expr)
 inferOne l g e = do
+  say "inferOne"
   (g', as', e') <- infer l g e
   case [t | (l',t) <- as', l' == l] of
     [t'] -> return (g', t', e')
@@ -293,6 +296,7 @@ inferOne l g e = do
 
 typesetFromList :: [(Maybe Lang, Type)] -> Stack TypeSet
 typesetFromList ts = do 
+  say "typesetFromList"
   let gentype = [makeEType t Nothing | (Nothing, t) <- ts]
       contype = [makeEType t lang | (lang@(Just _), t) <- ts] 
   case (gentype, contype) of
@@ -313,32 +317,37 @@ typesetFromList ts = do
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
 findTypeLanguage :: Type -> Stack (Maybe Lang)
-findTypeLanguage (VarT (TV lang _)) = return lang
-findTypeLanguage (ExistT (TV lang _)) = return lang
-findTypeLanguage (Forall (TV lang1 _) t) = do
-  lang2 <- findTypeLanguage t
+findTypeLanguage t = do
+  say $ "findTypeLanguage:" <+> prettyGreenType t
+  lang <- findTypeLanguage' t
+  say $ "  lang is" <+> viaShow lang
+  return lang
+
+findTypeLanguage' (VarT (TV lang _)) = return lang
+findTypeLanguage' (ExistT (TV lang _)) = return lang
+findTypeLanguage' (Forall (TV lang1 _) t) = do
+  lang2 <- findTypeLanguage' t
   if lang1 == lang2
     then return lang1
     else throwError InconsistentWithinTypeLanguage
-findTypeLanguage (FunT t1 t2) = do 
-  lang1 <- findTypeLanguage t1
-  lang2 <- findTypeLanguage t2
+findTypeLanguage' (FunT t1 t2) = do 
+  lang1 <- findTypeLanguage' t1
+  lang2 <- findTypeLanguage' t2
   if lang1 == lang2
     then return lang1
     else throwError InconsistentWithinTypeLanguage
-findTypeLanguage (ArrT (TV lang1 _) ts) = do 
-  langs <- mapM findTypeLanguage ts
+findTypeLanguage' (ArrT (TV lang1 _) ts) = do 
+  langs <- mapM findTypeLanguage' ts
   if all ((==) lang1) langs
     then return lang1
     else throwError InconsistentWithinTypeLanguage
-findTypeLanguage (RecT []) = throwError CannotInferLanguageOfEmptyRecord
-findTypeLanguage (RecT ts@((TV lang0 _, _):_)) = do
+findTypeLanguage' (RecT []) = throwError CannotInferLanguageOfEmptyRecord
+findTypeLanguage' (RecT ts@((TV lang0 _, _):_)) = do
   let vLangs = map (\(TV l _, _) -> l) ts 
-  tlangs <- mapM (findTypeLanguage . snd) ts
+  tlangs <- mapM (findTypeLanguage' . snd) ts
   if all ((==) lang0) vLangs && all ((==) lang0) tlangs
     then return lang0
     else throwError InconsistentWithinTypeLanguage
-
 
 -- | TODO: document - allow things other than general
 chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
@@ -464,7 +473,10 @@ subtype' a b _ = throwError $ SubtypeError a b
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
 instantiate t1 t2 g = do
   say $ prettyGreenType t1 <+> "<=:" <+> prettyGreenType t2
-  instantiate' t1 t2 g 
+  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+  g <- instantiate' t1 t2 g 
+  say $ "instantiate done"
+  return g
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
 --  g2 |- Ea2 <=: [g2]A2 -| g3
@@ -812,7 +824,9 @@ infer' Nothing g1 e@(RecE rs) = do
 
 quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
 quietCheck t g e = do
+  enter $  "quietcheck" <+> prettyExpr e <> "  " <> prettyGreenType t
   (g', _, _) <- check g e t
+  return $ "quietcheck" 
   return g'
 
 -- | Pattern matches against each type
@@ -826,6 +840,7 @@ check ::
            )
 check g e t = do
   enter $  "check" <+> prettyExpr e <> "  " <> prettyGreenType t
+  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
   (g', t', e') <- check' g e t
   leave $ "check |-" <+> prettyType t'
   return (g', t', e')

@@ -13,6 +13,7 @@ import Morloc.Namespace
 import qualified Morloc.Parser.API as P
 import Morloc.Realize (realize)
 import Morloc.Serialize (serialize)
+import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.API as T
 
 typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]

@@ -23,7 +23,7 @@ import qualified Morloc.TypeChecker.Infer as Infer
 
 typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms = do
-  verbosity <- MS.gets stateVerbosity 
+  verbosity <- MS.gets stateVerbosity
   x <- liftIO $ runStack verbosity (Infer.typecheck ms)
   case x of
     ((Right result, _), _) -> return result

@@ -112,16 +112,16 @@ unitTypeTests =
     -- comments
     [ exprTestGood "block comments (1)" "{- -} 42" [num]
     , exprTestGood "block comments (2)" " {--} 42{-   foo -} " [num]
-    , exprTestGood "line comments (3)" "-- foo\n 42"[num]
+    , exprTestGood "line comments (3)" "-- foo\n 42" [num]
     -- semicolons
-    , exprTestGood "semicolons are allowed at the end" "42;"[num]
+    , exprTestGood "semicolons are allowed at the end" "42;" [num]
     -- primitives
-    , exprTestGood "primitive integer" "42"[num]
-    , exprTestGood "primitive big integer" "123456789123456789123456789"[num]
-    , exprTestGood "primitive decimal" "4.2"[num]
-    , exprTestGood "primitive negative number" "-4.2"[num]
-    , exprTestGood "primitive positive number (with sign)" "+4.2"[num]
-    , exprTestGood "primitive scientific large exponent" "4.2e3000"[num]
+    , exprTestGood "primitive integer" "42" [num]
+    , exprTestGood "primitive big integer" "123456789123456789123456789" [num]
+    , exprTestGood "primitive decimal" "4.2" [num]
+    , exprTestGood "primitive negative number" "-4.2" [num]
+    , exprTestGood "primitive positive number (with sign)" "+4.2" [num]
+    , exprTestGood "primitive scientific large exponent" "4.2e3000" [num]
     , exprTestGood
         "primitive scientific irregular"
         "123456789123456789123456789e-3000"
@@ -132,25 +132,23 @@ unitTypeTests =
        [num]
     , exprTestGood "primitive boolean" "True" [bool]
     , exprTestGood "primitive string" "\"this is a string literal\"" [str]
-    , exprTestGood "primitive integer annotation" "42 :: Num"[num]
+    , exprTestGood "primitive integer annotation" "42 :: Num" [num]
     , exprTestGood "primitive boolean annotation" "True :: Bool" [bool]
-    , exprTestGood "primitive double annotation" "4.2 :: Num"[num]
+    , exprTestGood "primitive double annotation" "4.2 :: Num" [num]
     , exprTestGood
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         [str]
-    , exprTestGood "primitive declaration" "x = True; 4.2"[num]
+    , exprTestGood "primitive declaration" "x = True; 4.2" [num]
     -- declarations
     , exprTestGood
         "identity function declaration and application"
         "f x = x; f 42"
        [num]
-
-    -- -- FIXME this should work ...
-    -- , exprTestGood
-    --     "snd function declaration and application"
-    --     "snd x y = y; snd True 42"
-    --     [num]
+    , exprTestGood
+        "snd function declaration and application"
+        "snd x y = y; snd True 42"
+        [num]
 
     , exprTestGood
         "explicit annotation within an application"
@@ -178,12 +176,10 @@ unitTypeTests =
         "annotated, partially applied lambda"
         "((\\x y -> x) :: forall a b . a -> b -> a) True"
         [forall ["a"] (fun [var "a", bool])]
-
-    -- -- FIXME
-    -- , exprTestGood
-    --     "recursive functions are A-OK"
-    --     "\\f -> f 5"
-    --     [forall ["a"] (fun [fun [num, var "a"], var "a"])]
+    , exprTestGood
+        "recursive functions are A-OK"
+        "\\f -> f 5"
+        [forall ["a"] (fun [fun [num, var "a"], var "a"])]
 
     -- applications
     , exprTestGood
@@ -207,31 +203,28 @@ unitTypeTests =
     , exprTestBad
         "applications with mismatched types fail (2)"
         "f = 14; g = \\x h -> h x; (g True) f"
-
-    -- -- FIXME: [ ] evaluation within containers
-    -- , expectError
-    --     "arguments to a function are monotypes"
-    --     (SubtypeError num bool)
-    --     "f :: forall a . a -> a; g = \\h -> (h 42, h True); g f"
-    -- , exprTestGood
-    --     "polymorphism under lambdas (203f8c) (1)"
-    --     "f :: forall a . a -> a; g = \\h -> (h 42, h 1234); g f"
-    --     [tuple [num, num]]
-    -- , exprTestGood
-    --     "polymorphism under lambdas (203f8c) (2)"
-    --     "f :: forall a . a -> a; g = \\h -> [h 42, h 1234]; g f"
-    --     [lst num]
-
     , expectError
         "applications of non-functions should fail (1)"
         NonFunctionDerive
         "f = 5; g = \\x -> f x; g 12"
+    , expectError
+        "applications of non-functions should fail (2)"
+        NonFunctionDerive
+        "f = 5; g = \\h -> h 5; g f"
 
-    -- -- FIXME
-    -- , expectError
-    --     "applications of non-functions should fail (2)"
-    --     NonFunctionDerive
-    --     "f = 5; g = \\h -> h 5; g f"
+    -- evaluation within containers
+    , expectError
+        "arguments to a function are monotypes"
+        (SubtypeError num bool)
+        "f :: forall a . a -> a; g = \\h -> (h 42, h True); g f"
+    , exprTestGood
+        "polymorphism under lambdas (203f8c) (1)"
+        "f :: forall a . a -> a; g = \\h -> (h 42, h 1234); g f"
+        [tuple [num, num]]
+    , exprTestGood
+        "polymorphism under lambdas (203f8c) (2)"
+        "f :: forall a . a -> a; g = \\h -> [h 42, h 1234]; g f"
+        [lst num]
 
     -- binding
     , exprTestGood
@@ -283,12 +276,11 @@ unitTypeTests =
         [ fun [num, num]
         , fun [varc RLang "numeric", varc RLang "numeric"]]
 
-    -- -- shadowing
-    -- -- FIXME this should work ...
-    -- , exprTestGood
-    --     "name shadowing in lambda expressions"
-    --     "f = \\x -> (14,x); g = \\x f -> f x; g True f"
-    --     [tuple [num, bool]]
+    -- shadowing
+    , exprTestGood
+        "name shadowing in lambda expressions"
+        "f = \\x -> (14,x); g = \\x f -> f x; g True f"
+        [tuple [num, bool]]
     , exprTestGood
         "shadowed qualified type variables (7ffd52a)"
         "f :: forall a . a -> a; g :: forall a . a -> Num; g f"
@@ -446,103 +438,99 @@ unitTypeTests =
         T.unlines ["module Foo {x = 42};", "module Main {import Foo (x); x}"]
 
     -- test realization integration
-    -- , (flip $
-    --    exprTestGood
-    --      "a realization can be defined following general type signature")
-    --     num $
-    --   T.unlines ["f :: Num -> Num;", "f r :: integer -> integer;", "f 44"]
-    -- , (flip $
-    --    exprTestGood
-    --      "realizations can map one general type to multiple specific ones ")
-    --     num $
-    --   T.unlines ["f :: Num -> Num;", "f r :: integer -> numeric;", "f 44"]
-    -- , (flip $
-    --    exprTestGood
-    --      "realizations can map multiple general type to one specific one")
-    --     (var "Nat") $
-    --   T.unlines ["f :: Num -> Nat;", "f r :: integer -> integer;", "f 44"]
-    -- , (flip $
-    --    exprTestGood
-    --      "multiple realizations for different languages can be defined")
-    --     num $
-    --   T.unlines
-    --     [ "f :: Num -> Num;"
-    --     , "f r :: integer -> integer;"
-    --     , "f c :: int -> int;"
-    --     , "f 44"
-    --     ]
-    -- , (flip $ exprTestGood "realizations with parameterized variables") num $
-    --   T.unlines
-    --     [ "f :: [Num] -> Num;"
-    --     , "f r :: integer -> integer;"
-    --     , "f c :: int -> int;"
-    --     , "f [44]"
-    --     ]
-    -- , (flip $ exprTestGood "realizations can use quoted variables") num $
-    --   T.unlines
-    --     [ "sum :: [Num] -> Num;"
-    --     , "sum c :: \"double*\" -> double;"
-    --     , "sum cpp :: \"std::vector<double>\" -> double;"
-    --     , "sum 12"
-    --     ]
-    -- , (flip $
-    --    exprTestGood
-    --      "the order of general signatures and realizations does not matter (1)")
-    --     num $
-    --   T.unlines
-    --     [ "f r :: integer -> integer;"
-    --     , "f :: Num -> Num;"
-    --     , "f c :: int -> int;"
-    --     , "f 44"
-    --     ]
-    -- , (flip $
-    --    exprTestGood
-    --      "the order of general signatures and realizations does not matter (2)")
-    --     num $
-    --   T.unlines
-    --     [ "f r :: integer -> integer;"
-    --     , "f c :: int -> int;"
-    --     , "f :: Num -> Num;"
-    --     , "f 44"
-    --     ]
-    -- , (flip $
-    --    exprTestGood "multiple realizations for a single language can be defined")
-    --     num $
-    --   T.unlines
-    --     [ "f :: Num -> Num;"
-    --     , "f r :: integer -> integer;"
-    --     , "f r :: int -> int;"
-    --     , "f 44"
-    --     ]
-    -- , (flip $ expectError "a general signature must be given")
-    --     (UnboundVariable (EV "f")) $
-    --   T.unlines ["f r :: integer -> integer;", "f 44"]
-    -- , (flip $
-    --    exprTestGood
-    --      "no general type signature is required if it can be inferred")
-    --     num $
-    --   T.unlines ["f r :: integer -> integer;", "f = \\x -> 42;", "f 44"]
-    -- , (flip $
-    --    expectError
-    --      "arguments number in realizations must equal the general case (1)")
-    --     BadRealization $
-    --   T.unlines
-    --     ["f :: Num -> String -> Num;", "f r :: integer -> integer;", "f 44"]
-    -- , (flip $
-    --    expectError
-    --      "arguments number in realizations must equal the general case (2)")
-    --     (BadRealization) $
-    --   T.unlines
-    --     ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
+    , exprTestGood
+        "a realization can be defined following general type signature"
+        (T.unlines ["f :: Num -> Num;", "f r :: integer -> integer;", "f 44"])
+        [num]
+    , exprTestGood
+        "realizations can map one general type to multiple specific ones"
+        (T.unlines ["f :: Num -> Num;", "f r :: integer -> numeric;", "f 44"])
+        [num]
+    , exprTestGood
+        "realizations can map multiple general type to one specific one"
+        (T.unlines ["f :: Num -> Nat;", "f r :: integer -> integer;", "f 44"])
+        [var "Nat"]
+    , exprTestGood
+        "multiple realizations for different languages can be defined"
+        (T.unlines
+          [ "f :: Num -> Num;"
+          , "f r :: integer -> integer;"
+          , "f c :: int -> int;"
+          , "f 44"
+          ])
+        [num]
+    , exprTestGood
+        "realizations with parameterized variables"
+        (T.unlines
+          [ "f :: [Num] -> Num;"
+          , "f r :: integer -> integer;"
+          , "f c :: int -> int;"
+          , "f [44]"
+          ])
+        [num]
+    , exprTestGood
+        "realizations can use quoted variables"
+        (T.unlines
+          [ "sum :: [Num] -> Num;"
+          , "sum c :: \"double*\" -> double;"
+          , "sum cpp :: \"std::vector<double>\" -> double;"
+          , "sum 12"
+          ])
+        [num]
+    , exprTestGood
+        "the order of general signatures and realizations does not matter (1)"
+        (T.unlines
+          [ "f r :: integer -> integer;"
+          , "f :: Num -> Num;"
+          , "f c :: int -> int;"
+          , "f 44"
+          ])
+        [num]
+    , exprTestGood
+        "the order of general signatures and realizations does not matter (2)"
+        (T.unlines
+          [ "f r :: integer -> integer;"
+          , "f c :: int -> int;"
+          , "f :: Num -> Num;"
+          , "f 44"
+          ])
+        [num]
+    , exprTestGood
+        "multiple realizations for a single language can be defined"
+        (T.unlines
+          [ "f :: Num -> Num;"
+          , "f r :: integer -> integer;"
+          , "f r :: int -> int;"
+          , "f 44"
+          ])
+        [num]
+    , expectError
+        "a general signature must be given"
+        (UnboundVariable (EV "f")) $
+        T.unlines ["f r :: integer -> integer;", "f 44"]
+    , exprTestGood
+        "no general type signature is required if it can be inferred"
+        (T.unlines ["f r :: integer -> integer;", "f = \\x -> 42;", "f 44"])
+        [num]
+    , expectError
+       "arguments number in realizations must equal the general case (1)"
+        BadRealization $
+        T.unlines
+          ["f :: Num -> String -> Num;", "f r :: integer -> integer;", "f 44"]
+    , expectError
+         "arguments number in realizations must equal the general case (2)"
+         BadRealization $
+         T.unlines
+           ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
 
-    -- -- source
-    -- , (flip $ exprTestGood "can source") [num] $
-    --   T.unlines -- FIXME: this does not prove much beyond syntax
-    --     [ "source c from \"foo.c\" (\"yolo\" as f, \"olga\");"
-    --     , "f c :: qwer -> sadf;"
-    --     , "f :: cc -> vv;"
-    --     , "44"
-    --     ]
+    -- source
+    , (flip $ exprTestGood "can source") [num] $
+      T.unlines -- FIXME: this does not prove much beyond syntax
+        [ "source c from \"foo.c\" (\"yolo\" as f, \"olga\");"
+        , "f c :: qwer -> sadf;"
+        , "f :: cc -> vv;"
+        , "44"
+        ]
 
     -- internal
     , exprTestFull
