@@ -156,6 +156,10 @@ unitTypeTests =
         [num]
 
     -- lambdas
+    , exprTestGood
+        "functions can be passed"
+        "g f = f 42; g"
+        [forall ["a"] (fun [(fun [num, var "a"]), var "a"])]
     , exprTestGood "fully applied lambda (1)" "(\\x y -> x) 1 True" [num]
     , exprTestGood "fully applied lambda (2)" "(\\x -> True) 42" [bool]
     , exprTestGood "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" [bool]
