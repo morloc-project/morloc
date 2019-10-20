@@ -178,6 +178,16 @@ instance Applicable Type where
 instance Applicable Expr where
   apply g e = mapT (apply g) e
 
+instance Applicable GammaIndex where
+  apply _ x@(VarG _) = x 
+  apply _ x@(AnnG _ _) = x
+  apply g   (ExistG v) = SolvedG v (apply g (ExistT v))
+  apply g   (SolvedG v t) = SolvedG v (apply g t)
+  apply _ x@(MarkG _) = x 
+  apply _ x@(MarkEG _) = x 
+  apply _ x@(SrcG _) = x 
+  apply g   (ConcreteG e l t) = ConcreteG e l (apply g t)
+  apply g   (UnsolvedConstraint t1 t2) = UnsolvedConstraint (apply g t1) (apply g t2)
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
@@ -473,7 +483,6 @@ subtype' a b _ = throwError $ SubtypeError a b
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
 instantiate t1 t2 g = do
   say $ prettyGreenType t1 <+> "<=:" <+> prettyGreenType t2
-  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
   g <- instantiate' t1 t2 g 
   say $ "instantiate done"
   return g
@@ -573,7 +582,8 @@ infer ::
            , Expr -- The annotated expression
            )
 infer l g e = do
-  enter $ "infer" <+> maybe "MLang" (viaShow . id) l <+> prettyExpr e
+  enter $ "infer" <+> maybe "MLang" (viaShow . id) l <+> parens (prettyExpr e)
+  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
   o@(_, ts, _) <- infer' l g e
   leave $ "infer |-" <+> encloseSep "(" ")" ", " (map (\(_, t) -> prettyGreenType t) ts)
   return o
@@ -749,7 +759,7 @@ infer' _ g1 (AppE e1 e2) = do
 
   -- Map derive over every type observed for e1, the functional element. The
   -- result is a list of the types and expressions derived from e2
-  (_, cs1, es2') <- fmap unzip3 $ mapM (\(_, t) -> derive d1 e2 (apply d1 t)) as1
+  (g2, cs1, es2') <- foldM deriveF (d1, [], []) (map snd as1)
 
   e2' <- collate es2' 
   cs1' <- mapM (\c -> (,) <$> findTypeLanguage c <*> pure c) cs1
@@ -758,7 +768,7 @@ infer' _ g1 (AppE e1 e2) = do
   -- * e2' - e2 with type annotations (after being applied to e2)
   (as2, ek') <- applyConcrete e1' e2' cs1'
 
-  return (d1, as2, ek')
+  return (g2, as2, ek')
   where
     -- pair input and output types by language and construct the function type
     applyConcrete :: Expr -> Expr -> [(Maybe Lang, Type)] ->  Stack ([(Maybe Lang, Type)], Expr)
@@ -770,6 +780,14 @@ infer' _ g1 (AppE e1 e2) = do
                              ]
       return $ (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
     applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
+
+    deriveF ::
+         (Gamma, [Type], [Expr])
+      -> Type
+      -> Stack (Gamma, [Type], [Expr])
+    deriveF (g', ts, es) t' = do
+      (g'', t'', e'') <- derive g' e2 t'
+      return (g'', t'':ts, e'':es)
 
 --  g1 |- A
 --  g1 |- e <= A -| g2
@@ -847,7 +865,7 @@ check ::
            , Expr -- The annotated expression
            )
 check g e t = do
-  enter $  "check" <+> prettyExpr e <> "  " <> prettyGreenType t
+  enter $  "check" <+> parens (prettyExpr e) <> "  " <> prettyGreenType t
   say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
   (g', t', e') <- check' g e t
   leave $ "check |-" <+> prettyType t'
@@ -897,6 +915,7 @@ derive ::
             )
 derive g e f = do
   enter $ "derive" <+> prettyExpr e <> "  " <> prettyGreenType f
+  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
   (g', t', e') <- derive' g e f
   leave $ "derive |-" <+> prettyType t'
   return (g', t', e')
@@ -907,7 +926,7 @@ derive g e f = do
 --  g1 |- A->C o e =>> C -| g2
 derive' g e (FunT a b) = do
   (g', _, e') <- check g e a
-  return (g', apply g' b, e')
+  return (g', apply g' b, apply g' e')
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2

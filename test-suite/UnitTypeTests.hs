@@ -33,7 +33,8 @@ exprTestGood :: String -> T.Text -> [Type] -> TestTree
 exprTestGood msg code t = testCase msg $ do
   result <- API.runStack 0 (typecheck (readProgram Nothing code))
   case unres result of
-    (Right es') -> assertEqual "" t (typeof (main es'))
+    -- the order of the list is not important, so sort before comparing
+    (Right es') -> assertEqual "" (sort t) (sort (typeof (main es')))
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 

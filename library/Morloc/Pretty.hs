@@ -169,9 +169,15 @@ prettyType (RecT entries) =
   encloseSep "{" "}" ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
 
+prettyTypeSet :: TypeSet -> Doc AnsiStyle
+prettyTypeSet (TypeSet Nothing ts)
+  = encloseSep "(" ")" ";" (map (prettyGreenType . etype) ts)
+prettyTypeSet (TypeSet (Just t) ts)
+  = encloseSep "(" ")" ";" (map (prettyGreenType . etype) (t:ts))
+
 prettyGammaIndex :: GammaIndex -> Doc AnsiStyle
 prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
-prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e
+prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e <+> prettyTypeSet ts
 prettyGammaIndex (ExistG tv) = "ExistG:" <+> pretty tv
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
