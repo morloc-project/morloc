@@ -23,7 +23,6 @@ typeof es = f' . head . reverse $ es
   where
     f' (Signature _ e) = [etype e]
     f' e@(AnnE _ ts) = map snd ts
-    f' (AppE _ t) = f' t
     f' t = error ("No annotation found for: " <> show t)
 
 unres :: ((a, b), c) -> a 
@@ -500,15 +499,15 @@ unitTypeTests =
           , "f 44"
           ])
         [num, varc CLang "int", varc RLang "integer"]
-    , exprTestGood
-        "multiple realizations for a single language can be defined"
+    , expectError
+        "multiple realizations for a single language cannot be defined"
+        ConflictingSignatures
         (T.unlines
           [ "f :: Num -> Num;"
           , "f r :: integer -> integer;"
           , "f r :: int -> int;"
           , "f 44"
           ])
-        [num, varc RLang "integer", varc RLang "int"]
     , expectError
         "a general signature must be given"
         (UnboundVariable (EV "f")) $

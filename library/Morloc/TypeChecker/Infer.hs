@@ -762,6 +762,7 @@ infer' _ g1 (AppE e1 e2) = do
   (g2, cs1, es2') <- foldM deriveF (d1, [], []) (map snd as1)
 
   e2' <- collate es2' 
+
   cs1' <- mapM (\c -> (,) <$> findTypeLanguage c <*> pure c) cs1
 
   -- * e1' - e1 with type annotations
@@ -772,13 +773,15 @@ infer' _ g1 (AppE e1 e2) = do
   where
     -- pair input and output types by language and construct the function type
     applyConcrete :: Expr -> Expr -> [(Maybe Lang, Type)] ->  Stack ([(Maybe Lang, Type)], Expr)
-    applyConcrete (AnnE e1 _) e2@(AnnE _ ts2) cs = do
+    applyConcrete (AnnE e1 f) e2@(AnnE _ ts2) cs = do
       let (tas, tcs) = unzip [ ((l1, FunT a c), (l1, c))
                                | (l1, a) <- ts2
                                , (l2, c) <- cs
                                , l1 == l2
                              ]
-      return $ (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
+      if (length tas) /= (length . nub . map fst $ tas)
+        then throwError ConflictingSignatures
+        else return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
     applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
 
     deriveF ::

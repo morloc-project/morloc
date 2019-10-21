@@ -464,6 +464,7 @@ data MorlocError
   | ToplevelStatementsHaveNoLanguage
   | InconsistentWithinTypeLanguage
   | CannotInferLanguageOfEmptyRecord
+  | ConflictingSignatures
   deriving (Eq)
 
 data PackageMeta =
