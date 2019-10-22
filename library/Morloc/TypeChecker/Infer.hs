@@ -707,10 +707,12 @@ infer' Nothing g (Declaration v e) =
       (g2, _, e2) <- check (g +> MarkEG v) e (etype t)
       g3 <- cut (MarkEG v) g2
       return (g3, [], Declaration v e2)
-    declareCheck (TypeSet Nothing _) = throwError $
-      OtherError "composition signatures must be general"
-    declareCheck (TypeSet (Just _) (_:_)) = throwError $
-      OtherError "composition signatures cannot have concrete realizations"
+    -- The elements in a composition may have realizations, but the composition
+    -- itself is purely a Morloc construct. Since the variable is assigned in a
+    -- Morloc script, it could not have been imported from a particular source
+    -- language. 
+    declareCheck (TypeSet Nothing _) = throwError CompositionsMustBeGeneral
+    declareCheck (TypeSet (Just _) (_:_)) = throwError CompositionsMustBeGeneral
 
 --  (x:A) in g
 -- ------------------------------------------- Var

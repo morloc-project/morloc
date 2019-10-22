@@ -478,9 +478,9 @@ unitTypeTests =
           [ "sum :: [Num] -> Num;"
           , "sum c :: \"double*\" -> double;"
           , "sum cpp :: \"std::vector<double>\" -> double;"
-          , "sum 12"
+          , "sum [1,2]"
           ])
-        [num]
+        [num, varc CLang "double", varc CppLang "double"]
     , exprTestGood
         "the order of general signatures and realizations does not matter (1)"
         (T.unlines
@@ -508,14 +508,14 @@ unitTypeTests =
           , "f r :: int -> int;"
           , "f 44"
           ])
-    , expectError
-        "a general signature must be given"
-        (UnboundVariable (EV "f")) $
-        T.unlines ["f r :: integer -> integer;", "f 44"]
     , exprTestGood
-        "no general type signature is required if it can be inferred"
+        "general signatures are optional"
+        (T.unlines ["f r :: integer -> integer;", "f 44"])
+        [varc RLang "integer"]
+    , expectError
+        "compositions cannot have concrete realizations"
+        CompositionsMustBeGeneral       
         (T.unlines ["f r :: integer -> integer;", "f = \\x -> 42;", "f 44"])
-        [num]
     , expectError
        "arguments number in realizations must equal the general case (1)"
         BadRealization $
@@ -526,15 +526,6 @@ unitTypeTests =
          BadRealization $
          T.unlines
            ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
-
-    -- source
-    , (flip $ exprTestGood "can source") [num] $
-      T.unlines -- FIXME: this does not prove much beyond syntax
-        [ "source c from \"foo.c\" (\"yolo\" as f, \"olga\");"
-        , "f c :: qwer -> sadf;"
-        , "f :: cc -> vv;"
-        , "44"
-        ]
 
     -- internal
     , exprTestFull

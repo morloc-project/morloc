@@ -465,6 +465,7 @@ data MorlocError
   | InconsistentWithinTypeLanguage
   | CannotInferLanguageOfEmptyRecord
   | ConflictingSignatures
+  | CompositionsMustBeGeneral
   deriving (Eq)
 
 data PackageMeta =
