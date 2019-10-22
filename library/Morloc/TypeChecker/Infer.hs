@@ -937,17 +937,21 @@ derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistT v) = do
-  ea1 <- newvar Nothing
-  ea2 <- newvar Nothing
-  let t' = FunT ea1 ea2
-  g2 <-
-    case access1 t g
-    -- replace <t0> with <t0>:<ea1> -> <ea2>
-          of
-      Just (rs, _, ls) ->
-        return $ rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
-      Nothing -> throwError $ OtherError "Bad thing #5"
-  (g3, _, e2) <- check g2 e ea1
-  return (g3, apply g3 ea2, e2)
+derive' g e t@(ExistT v) =
+  case access1 t g
+  -- replace <t0> with <t0>:<ea1> -> <ea2>
+        of
+    Just (rs, _, ls) -> do
+      ea1 <- newvar Nothing
+      ea2 <- newvar Nothing
+      let t' = FunT ea1 ea2
+          g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
+      (g3, _, e2) <- check g2 e ea1
+      return (g3, apply g3 ea2, e2)
+    -- if the variable has already been solved, use solved value
+    Nothing -> case lookupT v g of
+      (Just (FunT t1 t2)) -> do
+        (g2, _, e2) <- check g e t1
+        return (g2, t2, e2)
+      _ -> throwError . OtherError $ "Expected a function"
 derive' _ _ _ = throwError NonFunctionDerive
