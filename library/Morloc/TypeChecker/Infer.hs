@@ -301,8 +301,8 @@ inferOne l g e = do
   (g', as', e') <- infer l g e
   case [t | (l',t) <- as', l' == l] of
     [t'] -> return (g', t', e')
-    _ -> throwError $ OtherError "Cannot infer unique type for this language"
-  
+    _ -> throwError . OtherError $ "Cannot infer unique type for language " <> MT.show' l
+
 
 typesetFromList :: [(Maybe Lang, Type)] -> Stack TypeSet
 typesetFromList ts = do 

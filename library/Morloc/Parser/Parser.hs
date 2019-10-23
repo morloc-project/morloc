@@ -436,9 +436,11 @@ pExistential = do
 
 pArrT :: Parser Type
 pArrT = do
-  v <- name
+  lang <- CMS.gets stateLang
+  _ <- tag (name <|> stringLiteral)
+  n <- name <|> stringLiteral
   args <- many1 pType'
-  return $ ArrT (TV Nothing v) args
+  return $ ArrT (TV lang n) args
   where
     pType' = parens pType <|> pVarT <|> pListT
 
@@ -466,11 +468,12 @@ pVarT = do
 
 pForAllT :: Parser Type
 pForAllT = do
+  lang <- CMS.gets stateLang
   _ <- reserved "forall"
   vs <- many1 name
   _ <- op "."
   t <- pType
-  return (curryForall vs t)
+  return (curryForall lang vs t)
   where
-    curryForall [] e' = e'
-    curryForall (v:vs') e' = Forall (TV Nothing v) (curryForall vs' e')
+    curryForall _ [] e' = e'
+    curryForall lang' (v:vs') e' = Forall (TV lang' v) (curryForall lang' vs' e')

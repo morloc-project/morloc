@@ -96,6 +96,8 @@ forall (s:ss) t = Forall (TV Nothing s) (forall ss t)
 var s = VarT (TV Nothing s)
 varc l s = VarT (TV (Just l) s)
 
+arrc l s ts = ArrT (TV (Just l) s) ts
+
 arr s ts = ArrT (TV Nothing s) ts
 
 lst t = arr "List" [t]
@@ -526,6 +528,16 @@ unitTypeTests =
          BadRealization $
          T.unlines
            ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
+    , exprTestGood
+      "concrete map function"
+      (T.unlines
+        [ "map :: forall a b . (a -> b) -> [a] -> [b];" 
+        , "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
+        , "f :: Num -> Num;"
+        , "f cpp :: double -> double;"
+        , "map f [1,2]"
+        ])
+      [lst num, arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
 
     -- internal
     , exprTestFull

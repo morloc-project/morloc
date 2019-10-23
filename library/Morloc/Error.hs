@@ -56,7 +56,7 @@ errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
 errmsg MissingGeneralType = "MissingGeneralType"
 errmsg AmbiguousGeneralType = "AmbiguousGeneralType"
-errmsg (SubtypeError t1 t2) = "SubtypeError"
+errmsg (SubtypeError t1 t2) = "SubtypeError: (" <> MT.show' t1 <> ") <: (" <> MT.show' t2 <> ")"
 errmsg ExistentialError = "ExistentialError"
 errmsg BadExistentialCast = "BadExistentialCast"
 errmsg (AccessError msg) = "AccessError"
