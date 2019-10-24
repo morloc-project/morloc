@@ -396,8 +396,8 @@ pEVar = fmap EV name
 
 pType :: Parser Type
 pType =
-  pExistential <|> try pUniT <|> try pRecordT <|> try pForAllT <|> try pArrT <|>
-  try pFunT <|>
+  pExistential <|> try pUniT <|> try pRecordT <|> try pForAllT <|> try pFunT <|>
+  try pArrT <|>
   try (parens pType) <|>
   pListT <|>
   pTupleT <|>
