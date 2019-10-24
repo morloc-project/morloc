@@ -538,6 +538,15 @@ unitTypeTests =
         , "map f [1,2]"
         ])
       [lst num, arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
+    , exprTestGood
+      "infer type signature from concrete functions"
+      (T.unlines
+        [ "sqrt :: Num -> Num;" 
+        , "sqrt R :: numeric -> numeric;"
+        , "foo x = sqrt x;"
+        , "sqrt 42"
+        ])
+      [num, varc RLang "integer"]
 
     -- internal
     , exprTestFull
