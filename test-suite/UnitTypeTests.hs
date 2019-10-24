@@ -13,6 +13,7 @@ import Test.Tasty.HUnit
 
 main :: [Module] -> [Expr]
 main [] = error "Missing main"
+main [m] = moduleBody m
 main (m:ms)
   | moduleName m == (MV "Main") = moduleBody m
   | otherwise = main ms
@@ -418,6 +419,10 @@ unitTypeTests =
         , "module Bar {export f; f :: forall a . a -> [a]};"
         , "module Main {import Foo (x); import Bar (f); f x}"
         ]
+    , exprTestGood
+        "Allow gross overuse of semicolons"
+        ";;;;;module foo{;42;  ;};"
+        [num]
     , expectError
         "fail on import of Main"
         CannotImportMain $

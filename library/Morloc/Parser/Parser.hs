@@ -107,6 +107,9 @@ reservedWords =
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
+delimiter :: Parser ()
+delimiter = many1 (symbol ";") >> return ()
+
 op :: MT.Text -> Parser MT.Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
@@ -142,6 +145,8 @@ data ModuleBody
 pProgram :: Parser [Module]
 pProgram = do
   f <- CMS.gets stateModulePath
+  -- allow ';' at the beginning (if you're into that sort of thing)
+  optional delimiter
   es <- many pToplevel
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
@@ -150,15 +155,15 @@ pProgram = do
 
 pToplevel :: Parser Toplevel
 pToplevel =
-  try (fmap TModule pModule <* optional (symbol ";")) <|>
-  fmap TModuleBody (pModuleBody <* optional (symbol ";"))
+  try (fmap TModule pModule <* optional delimiter) <|>
+  fmap TModuleBody (pModuleBody <* optional delimiter)
 
 pModule :: Parser Module
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
   moduleName' <- name
-  mes <- braces (many1 pModuleBody)
+  mes <- braces (optional delimiter >> many1 pModuleBody)
   return $ makeModule f (MV moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
@@ -178,9 +183,10 @@ makeModule f n mes =
 
 pModuleBody :: Parser ModuleBody
 pModuleBody =
-  try pImport <* optional (symbol ";") <|> try pExport <* optional (symbol ";") <|>
-  try pStatement' <* optional (symbol ";") <|>
-  pExpr' <* optional (symbol ";")
+        try pImport <* optional delimiter 
+    <|> try pExport <* optional delimiter 
+    <|> try pStatement' <* optional delimiter
+    <|> pExpr' <* optional delimiter
   where
     pStatement' = fmap MBBody pStatement
     pExpr' = fmap MBBody pExpr
