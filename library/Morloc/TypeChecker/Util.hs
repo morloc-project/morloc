@@ -154,10 +154,10 @@ lookupT v (_:gs) = lookupT v gs
 
 -- | Look up the source of a function
 lookupSrc ::
-     (EVar, Lang) -> Gamma -> Maybe (EVar, Lang, Maybe Path, EVar)
+     (EVar, Lang) -> Gamma -> Maybe (Maybe Path, EVar)
 lookupSrc _ [] = Nothing
-lookupSrc (e, l) (SrcG x@(e', l', _, _):rs)
-  | e == e' && l == l' = Just x
+lookupSrc (e, l) ((SrcG e' l' path alias):rs)
+  | e == e' && l == l' = Just (path, alias)
   | otherwise = lookupSrc (e, l) rs
 lookupSrc x (_:rs) = lookupSrc x rs
 

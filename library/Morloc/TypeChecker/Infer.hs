@@ -180,14 +180,17 @@ instance Applicable Expr where
 
 instance Applicable GammaIndex where
   apply _ x@(VarG _) = x 
-  apply _ x@(AnnG _ _) = x
+  apply g   (AnnG e (TypeSet t ts)) = AnnG e (TypeSet (fmap (apply g) t) (map (apply g) ts))
   apply g   (ExistG v) = SolvedG v (apply g (ExistT v))
   apply g   (SolvedG v t) = SolvedG v (apply g t)
   apply _ x@(MarkG _) = x 
   apply _ x@(MarkEG _) = x 
-  apply _ x@(SrcG _) = x 
+  apply _ x@(SrcG _ _ _ _) = x 
   apply g   (ConcreteG e l t) = ConcreteG e l (apply g t)
   apply g   (UnsolvedConstraint t1 t2) = UnsolvedConstraint (apply g t1) (apply g t2)
+
+instance Applicable EType where
+  apply g e = e { etype = apply g (etype e) }
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
@@ -615,31 +618,15 @@ infer' Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
     t = VarT (TV Nothing "Bool")
 
 -- Src=>
+-- Since the expressions in a Morloc script are sorted before being
+-- evaluated, the SrcE expressions will be considered before the Signature
+-- and Declaration expressions. Thus every term that originates in source
+-- code will be initialized here and elaborated upon with deeper type
+-- information as the signatures and declarations are parsed. 
 infer' (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g1 s1@(SrcE lang path xs) = do
-  g3 <- foldM srcList g1 xs
-  return
-    ( g3 -- existential signatures are created for each sourced term
-    , [] -- nothing is returned from source
-    , s1 -- SrcE should not be annotated, so the input expression is returned as is
-    )
-  where
-    -- Store an existential type for each sourced term. Since the expressions
-    -- in a Morloc script are sorted before being evaluated, the SrcE
-    -- expressions will be considered before the Signature and Declaration
-    -- expressions. Thus every term that originates in source code will be
-    -- initialized here and elaborated upon with deeper type information as the
-    -- signatures and declarations are parsed. 
-    srcList :: Gamma -> (EVar, EVar) -> Stack Gamma
-    srcList g2 (srcname, alias) = do
-      v <- newvar (Just lang)
-      return $ g2 +> AnnG (VarE alias) (TypeSet Nothing
-        [ EType { etype = v
-        , elang = (Just lang)
-        , eprop = Set.empty
-        , econs = Set.empty
-        , esource = Just (path, srcname)
-        }])
+  let g3 = [SrcG alias lang path srcname | (srcname, alias) <- xs] ++ g1
+  return ( g3 , [] , s1)
 
 -- Signature=>
 infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
@@ -647,21 +634,25 @@ infer' Nothing g e0@(Signature v e) = do
   g2 <- accessWith1 isAnnG append' ifNotFound g
   return (g2, [], e0)
   where
+
     -- find a typeset
     isAnnG :: GammaIndex -> Bool
     isAnnG (AnnG (VarE e2) _)
       | v == e2 = True
       | otherwise = False
     isAnnG _ = False
+
     -- update the found typeset
     append' :: GammaIndex -> Stack GammaIndex
     append' (AnnG v r2) = AnnG <$> pure v <*> appendTypeSet e r2
     append' _ = throwError $ OtherError "Bad Gamma"
+
     -- create a new typeset if none was found
     ifNotFound :: Gamma -> Stack Gamma
     ifNotFound g' = case elang e of
         lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
         Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
+
     -- merge the new data from a signature with any prior type data
     appendTypeSet :: EType -> TypeSet -> Stack TypeSet
     appendTypeSet e1 s =
@@ -671,11 +662,12 @@ infer' Nothing g e0@(Signature v e) = do
           mapM_ (checkRealization e1) rs
           return $ TypeSet (Just e1) rs
       -- if e is a realization, and no general type is set, just add e to the list
-        (Just _, TypeSet Nothing rs) -> return $ TypeSet Nothing (e1 : rs)
+        (Just lang, TypeSet Nothing rs) ->
+          return $ TypeSet Nothing (e1 {esource = lookupSrc (v, lang) g} : rs)
       -- if e is a realization, and a general type exists, append it and check
-        (Just _, TypeSet (Just e2) rs) -> do
+        (Just lang, TypeSet (Just e2) rs) -> do
           checkRealization e2 e1
-          return $ TypeSet (Just e2) (e1 : rs)
+          return $ TypeSet (Just e2) (e1 {esource = lookupSrc (v, lang) g} : rs)
       -- if e is general, and a general type exists, merge the general types
         (Nothing, TypeSet (Just e2) rs) -> do
           let e3 =

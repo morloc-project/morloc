@@ -31,11 +31,11 @@ writeProgram path code
   -- [Module] -> [Module]
   -- add type annotations to sub-expressions and raise type errors
   >>= T.typecheck
-  -- [Module] -> [Manifold]
+  -- [Module] -> [Module]
   -- dissassemble modules into a graph of linked manifolds
   -- associate each realization with serialization functions
   >>= connect
-  -- [Manifold] -> [Manifold]
+  -- [Module] -> [Manifold]
   -- Connect serialization functions as needed
   >>= serialize
   -- [Manifold] -> [Manifold]

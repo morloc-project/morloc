@@ -12,11 +12,13 @@ module Morloc.Pretty
   , prettyType
   , prettyGreenType
   , prettyGammaIndex
+  , prettyScream
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
 import Morloc.Data.Doc
 import Morloc.Namespace
+import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
@@ -41,6 +43,15 @@ instance Pretty TVar where
 typeStyle =
   Style.SetAnsiStyle
     { Style.ansiForeground = Just (Vivid, Green)
+    , Style.ansiBackground = Nothing
+    , Style.ansiBold = Nothing
+    , Style.ansiItalics = Nothing
+    , Style.ansiUnderlining = Just Underlined
+    }
+
+screamStyle =
+  Style.SetAnsiStyle
+    { Style.ansiForeground = Just (Vivid, Red)
     , Style.ansiBackground = Nothing
     , Style.ansiBold = Nothing
     , Style.ansiItalics = Nothing
@@ -155,6 +166,9 @@ forallBlock t = prettyType t
 prettyGreenType :: Type -> Doc AnsiStyle
 prettyGreenType t = annotate typeStyle (prettyType t)
 
+prettyScream :: MT.Text -> Doc AnsiStyle
+prettyScream x = annotate screamStyle (pretty x)
+
 prettyType :: Type -> Doc ann
 prettyType (VarT (TV _ "Unit")) = "()"
 prettyType (VarT v) = pretty v
@@ -182,6 +196,6 @@ prettyGammaIndex (ExistG tv) = "ExistG:" <+> pretty tv
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
-prettyGammaIndex (SrcG (ev1, lang, _, _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+prettyGammaIndex (SrcG ev1 lang _ _) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (ConcreteG ev lang t) = "ConcreteG:" <+> pretty ev <+> viaShow lang <+> prettyGreenType t
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2

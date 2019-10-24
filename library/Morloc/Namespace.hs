@@ -556,7 +556,7 @@ data GammaIndex
   -- ^ (G,>a^) Store a type variable marker bound under a forall
   | MarkEG EVar
   -- ^ ...
-  | SrcG (EVar, Lang, Maybe Path, EVar)
+  | SrcG EVar Lang (Maybe Path) EVar
   -- ^ source
   | ConcreteG EVar Lang Type
   -- ^ store a local concrete type

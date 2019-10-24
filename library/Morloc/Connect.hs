@@ -194,7 +194,7 @@ module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) ts)) = d
         (TypeSet (Just e) rs) -> do
           args <- zipWithM (exprAsArgument vars m) [0 ..] es
           declared <- isDeclared (moduleName m) (EV functionName)
-          realizations <- toRealizations functionName m (length args) rs
+          realizations <- toRealizations functionName m (length args) rs ts
           return . (flip (:)) (concat . map snd $ args) $
             Manifold
               { mid = i
@@ -221,7 +221,7 @@ module2manifolds m (Signature ev@(EV v) t) = do
       i <- getId
       (TypeSet _ rs) <- lookupVar ev m
       let args = map ArgPosi (take (nargs (etype t)) [0 ..])
-      realizations <- toRealizations v m (length args) rs
+      realizations <- toRealizations v m (length args) rs []
       return
         [ Manifold
             { mid = i
@@ -265,7 +265,7 @@ exprAsArgument bnd m _ (AnnE (AppE e1 e2) ts) =
         (TypeSet Nothing _) -> error "ah fuck shit"
         (TypeSet (Just etyp) rs) -> do
           args <- zipWithM (exprAsArgument bnd m) [0 ..] es
-          realizations <- toRealizations mname m (length args) rs
+          realizations <- toRealizations mname m (length args) rs ts
           let newManifold =
                 Manifold
                   { mid = i
@@ -328,8 +328,8 @@ primitive2mdata (RecE xs) = Rec' $ map entry xs
 primitive2mdata _ =
   error "complex stuff is not yet allowed in MData (coming soon)"
 
-toRealizations :: Name -> Module -> Int -> [EType] -> Program [Realization]
-toRealizations n m _ [] = do
+toRealizations :: Name -> Module -> Int -> [EType] -> [(Maybe Lang, Type)] -> Program [Realization]
+toRealizations n m _ [] [] = do
   src <- lookupSources (moduleName m) (EV n)
   case src of
     Nothing -> error $ "Bad realization: could not find '" <> MT.unpack n <> "'"
@@ -344,14 +344,17 @@ toRealizations n m _ [] = do
             , rSourced = True
             }
         ]
-toRealizations _ m _ es = return $ map toRealization es
+toRealizations _ m _ es ts = return . map toRealization $ linkTypes es ts
   where
-    toRealization :: EType -> Realization
-    toRealization e@(EType _ (Just lang) _ _ (Just (f, EV srcname))) =
+    linkTypes :: [EType] -> [(Maybe Lang, Type)] -> [(EType, Type)]
+    linkTypes es' ts' = [(e, t) | e <- es', (l, t) <- ts', l == elang e] 
+
+    toRealization :: (EType, Type) -> Realization
+    toRealization (e@(EType _ (Just lang) _ _ (Just (f, EV srcname))), t) =
       Realization
         { rLang = lang
         , rName = srcname
-        , rConcreteType = Just $ etype2mtype Nothing e
+        , rConcreteType = Just $ etype2mtype Nothing (e {etype = t})
         , rModulePath = modulePath m
         , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
         , rSourced = True
@@ -475,6 +478,7 @@ etype2mtype n e = type2mtype Set.empty (etype e)
     prop2text Unpack = ["unpacks"]
     prop2text Cast = ["casts"]
     prop2text (GeneralProperty ts) = ts
+
     type2mtype :: Set.Set Name -> Type -> MType
     type2mtype bnds (VarT (TV _ v))
       | Set.member v bnds = MAbstType meta v []
