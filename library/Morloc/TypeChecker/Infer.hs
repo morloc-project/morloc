@@ -54,6 +54,9 @@ say d = do
   depth <- getDepth
   debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> align d <> "\n"
 
+seeGamma :: Gamma -> Stack ()
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+
 leave :: Doc AnsiStyle -> Stack ()
 leave d = do
   depth <- decDepth
@@ -302,6 +305,11 @@ inferOne :: Maybe Lang -> Gamma -> Expr -> Stack (Gamma, Type, Expr)
 inferOne l g e = do
   say "inferOne"
   (g', as', e') <- infer l g e
+  seeGamma g'
+  say $ prettyExpr e
+  say $ prettyExpr e'
+  say $ viaShow l
+  say $ nest 4 $ "as':" <> line <> vsep (map (\(l,t) -> parens (viaShow l) <+> prettyGreenType t) as')
   case [t | (l',t) <- as', l' == l] of
     [t'] -> return (g', t', e')
     _ -> throwError . OtherError $ "Cannot infer unique type for language " <> MT.show' l
@@ -586,7 +594,7 @@ infer ::
            )
 infer l g e = do
   enter $ "infer" <+> maybe "MLang" (viaShow . id) l <+> parens (prettyExpr e)
-  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+  seeGamma g
   o@(_, ts, _) <- infer' l g e
   leave $ "infer |-" <+> encloseSep "(" ")" ", " (map (\(_, t) -> prettyGreenType t) ts)
   return o
@@ -863,7 +871,7 @@ check ::
            )
 check g e t = do
   enter $  "check" <+> parens (prettyExpr e) <> "  " <> prettyGreenType t
-  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+  seeGamma g
   (g', t', e') <- check' g e t
   leave $ "check |-" <+> prettyType t'
   return (g', t', e')
@@ -912,7 +920,7 @@ derive ::
             )
 derive g e f = do
   enter $ "derive" <+> prettyExpr e <> "  " <> prettyGreenType f
-  say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+  seeGamma g
   (g', t', e') <- derive' g e f
   leave $ "derive |-" <+> prettyType t'
   return (g', t', e')

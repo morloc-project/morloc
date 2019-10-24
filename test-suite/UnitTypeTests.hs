@@ -547,6 +547,23 @@ unitTypeTests =
         , "sqrt 42"
         ])
       [num, varc RLang "integer"]
+    , exprTestGood
+      "calls cross-language"
+      (T.unlines
+        [ "foo R :: integer -> integer;"
+        , "bar C :: int -> int;"
+        , "foo(bar 4);"
+        ])
+      [varc CLang "int", varc RLang "integer"]
+    , exprTestGood
+      "language branching"
+      (T.unlines
+        [ "id R :: forall a . a -> a;"
+        , "sqrt C :: double -> double;"
+        , "sqrt R :: numeric -> numeric;"
+        , "id (sqrt 4);"
+        ])
+      [varc RLang "numeric"]
 
     -- internal
     , exprTestFull
