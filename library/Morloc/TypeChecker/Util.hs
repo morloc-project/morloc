@@ -13,6 +13,7 @@ module Morloc.TypeChecker.Util
   , access2
   , accessWith1
   , ann
+  , anns
   , cut
   , extendModularGamma
   , generalize
@@ -201,6 +202,12 @@ ann (AnnE e _) t = AnnE e [t]
 ann e@(Declaration _ _) _ = e
 ann e@(Signature _ _) _ = e
 ann e t = AnnE e [t]
+
+anns :: Expr -> [Type] -> Expr
+anns (AnnE e _) ts = AnnE e ts 
+anns e@(Declaration _ _) _ = e
+anns e@(Signature _ _) _ = e
+anns e ts = AnnE e ts
 
 generalize :: Type -> Type
 generalize t = generalize' existentialMap t

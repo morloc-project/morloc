@@ -680,23 +680,23 @@ instance Indexable Type where
 langOf :: Type -> Maybe Lang
 langOf (VarT (TV lang _)) = lang
 langOf (ExistT (TV lang _)) = lang
-langOf (Forall (TV lang _) t)
+langOf x@(Forall (TV lang _) t)
   | lang == langOf t = lang
-  | otherwise = error "type system bug: inconsistent languages"
-langOf (FunT t1 t2)
+  | otherwise = error $ "inconsistent languages in " <> show x
+langOf x@(FunT t1 t2)
   | l1 == l2 = l1
-  | otherwise = error "type system bug: inconsistent languages"
+  | otherwise = error $ "inconsistent languages in" <> show x
   where
     l1 = langOf t1
     l2 = langOf t1
-langOf (ArrT (TV lang _) ts)
+langOf x@(ArrT (TV lang _) ts)
   | all ((==) lang) (map langOf ts) = lang
-  | otherwise = error "type system bug: inconsistent languages"
+  | otherwise = error $ "inconsistent languages in " <> show x 
 langOf (RecT []) = error "empty records are not allowed"
-langOf (RecT ts@((TV lang _, _):_))
+langOf x@(RecT ts@((TV lang _, _):_))
   | all ((==) lang) (map (langOf . snd) ts) &&
     all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
-  | otherwise = error "type system bug: inconsistent languages"
+  | otherwise = error $ "inconsistent languages in " <> show x
 
 -- | Like langOf but uses MLang instead of Nothing to indicate the general
 -- language

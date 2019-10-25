@@ -305,7 +305,7 @@ collateOne (RecE es1) (RecE es2)
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
 collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
-collateOne _ _ = error "bad kitty bad!!!"
+collateOne e1 e2 = error $ show e1 <> "  " <> show e2
 
 
 -- | TODO: document
@@ -326,20 +326,6 @@ checkup g e t = do
   say "checkup"
   (g', t', e') <- check g e t
   return (g', [t'], e')
-
-inferOne :: Maybe Lang -> Gamma -> Expr -> Stack (Gamma, Type, Expr)
-inferOne l g e = do
-  say "inferOne"
-  (g', as', e') <- infer l g e
-  seeGamma g'
-  say $ prettyExpr e
-  say $ prettyExpr e'
-  say $ viaShow l
-  say $ nest 4 $ "as':" <> line <> vsep (map prettyGreenType as')
-  case [t | t <- as', langOf t == l] of
-    [t'] -> return (g', t', e')
-    _ -> throwError . OtherError $ "Cannot infer unique type for language " <> MT.show' l
-
 
 typesetFromList :: [Type] -> Stack TypeSet
 typesetFromList ts = do 
@@ -749,27 +735,23 @@ infer' _ g1 (AppE e1 e2) = do
 
   -- Map derive over every type observed for e1, the functional element. The
   -- result is a list of the types and expressions derived from e2
-  (g2, cs1, es2') <- foldM deriveF (d1, [], []) as1
+  (g2, fs, es2') <- foldM deriveF (d1, [], []) as1
+
+  let cs1 = [c | FunT _ c <- fs]
 
   e2' <- collate es2' 
 
   -- * e1' - e1 with type annotations
   -- * e2' - e2 with type annotations (after being applied to e2)
-  (as2, ek') <- applyConcrete e1' e2' cs1
+  (as2, ek') <- applyConcrete e1' e2' fs
 
   return (g2, as2, ek')
   where
     -- pair input and output types by language and construct the function type
     applyConcrete :: Expr -> Expr -> [Type] ->  Stack ([Type], Expr)
-    applyConcrete (AnnE e1 f) e2@(AnnE _ ts2) cs = do
-      let (tas, tcs) = unzip [ (FunT a c, c)
-                               | a <- ts2
-                               , c <- cs
-                               , langOf a == langOf c 
-                             ]
-      if (length tas) /= (length . nub $ tas)
-        then throwError ConflictingSignatures
-        else return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
+    applyConcrete (AnnE e1 f) e2 fs' = do
+      let (tas, tcs) = unzip [ (FunT a c, c) | (FunT a c) <- fs' ]
+      return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
     applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
 
     deriveF ::
@@ -814,8 +796,9 @@ infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
   return (g +> t, [t'], ann e1 t')
+-- TODO: fix this - this should do something more reasonable
 infer' Nothing g1 e1@(ListE (x:xs)) = do
-  (g2, t', _) <- inferOne Nothing g1 x
+  (g2, (t':_), _) <- infer Nothing g1 x
   g3 <- foldM (quietCheck t') g2 xs
   let t'' = ArrT (TV Nothing "List") [t']
   return (g3, [t''], ann e1 t'')
@@ -894,17 +877,17 @@ check' g1 e1 t2@(Forall x a) = do
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
 check' g1 e1 b = do
-  (g2, a1, e2) <- inferOne (langOf b) g1 e1
-  g3 <- subtype (apply g2 a1) (apply g2 b) g2
-  let a2 = apply g3 a1
-  return (g3, a2, ann (apply g3 e2) a2)
+  (g2, ts, e2) <- infer (langOf b) g1 e1
+  g3 <- foldM (\g t -> subtype (apply g t) (apply g b) g) g2 ts
+  return (g3, apply g3 b, anns (apply g3 e2) (map (apply g3) ts))
+
 
 derive ::
      Gamma
   -> Expr -- the expression that is passed to the function
   -> Type -- the function type
   -> Stack ( Gamma
-           , Type -- @b@, the function output type after context application
+           , Type -- output function type
            , Expr -- @e@, with type annotation
             )
 derive g e f = do
@@ -919,8 +902,9 @@ derive g e f = do
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
 derive' g e (FunT a b) = do
-  (g', _, e') <- check g e a
-  return (g', apply g' b, apply g' e')
+  (g', a', e') <- check g e a
+  let b' = apply g' b
+  return (g', FunT a' b', apply g' e')
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
@@ -936,12 +920,13 @@ derive' g e t@(ExistT v) =
       ea2 <- newvar Nothing
       let t' = FunT ea1 ea2
           g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
-      (g3, _, e2) <- check g2 e ea1
-      return (g3, apply g3 ea2, e2)
+      (g3, a', e2) <- check g2 e ea1
+      let f' = FunT a' (apply g3 ea2)
+      return (g3, f', e2)
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupT v g of
       (Just (FunT t1 t2)) -> do
         (g2, _, e2) <- check g e t1
-        return (g2, t2, e2)
+        return (g2, FunT t1 t2, e2)
       _ -> throwError . OtherError $ "Expected a function"
 derive' _ _ _ = throwError NonFunctionDerive

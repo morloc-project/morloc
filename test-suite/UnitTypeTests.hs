@@ -510,15 +510,14 @@ unitTypeTests =
           , "f 44"
           ])
         [num, varc CLang "int", varc RLang "integer"]
-    , expectError
+    , exprTestGood
         "multiple realizations for a single language cannot be defined"
-        ConflictingSignatures
         (T.unlines
-          [ "f :: Num -> Num;"
-          , "f r :: integer -> integer;"
-          , "f r :: int -> int;"
-          , "f 44"
+          [ "f r :: a -> b;"
+          , "f r :: c -> d;"
+          , "f 1"
           ])
+        [varc RLang "b", varc RLang "d"]
     , exprTestGood
         "general signatures are optional"
         (T.unlines ["f r :: integer -> integer;", "f 44"])
@@ -555,15 +554,15 @@ unitTypeTests =
         , "foo x = sqrt x;"
         , "sqrt 42"
         ])
-      [num, varc RLang "integer"]
+      [num, varc RLang "numeric"]
     , exprTestGood
       "calls cross-language"
       (T.unlines
-        [ "foo R :: integer -> integer;"
-        , "bar C :: int -> int;"
-        , "foo(bar 4);"
+        [ "f R :: a -> b;"
+        , "g C :: b -> c;"
+        , "g (f 4);"
         ])
-      [varc CLang "int", varc RLang "integer"]
+      [varc CLang "c"]
     , exprTestGood
       "language branching"
       (T.unlines
@@ -580,3 +579,10 @@ unitTypeTests =
         "f :: forall a . a -> Bool; f 42"
         "f :: forall a . a -> Bool; (((f :: Num -> Bool) (42 :: Num)) :: Bool)"
     ]
+
+{-
+      [
+        AnnE (AppE (AnnE (VarE (EV "f")) [FunT (VarT (TV Nothing "Num")) (VarT (TV Nothing "Bool"))])       (NumE 42.0)                             ) [VarT (TV Nothing "Bool")]
+        AnnE (AppE (AnnE (VarE (EV "f")) [FunT (VarT (TV Nothing "Num")) (VarT (TV Nothing "Bool"))]) (AnnE (NumE 42.0) [VarT (TV Nothing "Num")])  ) [VarT (TV Nothing "Bool")]
+      ]
+-}
