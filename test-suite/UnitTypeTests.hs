@@ -537,15 +537,23 @@ unitTypeTests =
          T.unlines
            ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
     , exprTestGood
-      "concrete map function"
+      "concrete map: single map, single f"
       (T.unlines
-        [ "map :: forall a b . (a -> b) -> [a] -> [b];" 
-        , "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
-        , "f :: Num -> Num;"
+        [ "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
         , "f cpp :: double -> double;"
         , "map f [1,2]"
         ])
-      [lst num, arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
+      [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
+    , exprTestGood
+      "concrete map: multiple maps, single f"
+      (T.unlines
+        [ "map :: forall a b . (a -> b) -> List a -> List b;"
+        , "map c :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
+        , "map r :: forall a b . (a -> b) -> vector a -> vector b;"
+        , "f cpp :: double -> double;"
+        , "map f [1,2]"
+        ])
+      [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
     , exprTestGood
       "infer type signature from concrete functions"
       (T.unlines
