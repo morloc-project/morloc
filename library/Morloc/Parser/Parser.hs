@@ -255,7 +255,6 @@ pSignature = do
       (EV v)
       (EType
          { etype = t
-         , elang = lang
          , eprop = Set.fromList props
          , econs = Set.fromList constraints
          , esource = Nothing
@@ -356,7 +355,7 @@ pAnn = do
     parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pType
-  return $ AnnE e [(Nothing, t)]
+  return $ AnnE e [t]
 
 pApp :: Parser Expr
 pApp = do

@@ -23,7 +23,7 @@ typeof :: [Expr] -> [Type]
 typeof es = f' . head . reverse $ es
   where
     f' (Signature _ e) = [etype e]
-    f' e@(AnnE _ ts) = map snd ts
+    f' e@(AnnE _ ts) = ts
     f' t = error ("No annotation found for: " <> show t)
 
 unres :: ((a, b), c) -> a 

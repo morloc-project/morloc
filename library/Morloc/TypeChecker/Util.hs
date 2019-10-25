@@ -109,7 +109,7 @@ mapT f (LamE v e) = LamE v (mapT f e)
 mapT f (ListE es) = ListE (map (mapT f) es)
 mapT f (TupleE es) = TupleE (map (mapT f) es)
 mapT f (AppE e1 e2) = AppE (mapT f e1) (mapT f e2)
-mapT f (AnnE e ts) = AnnE (mapT f e) [(l, f t) | (l, t) <- ts]
+mapT f (AnnE e ts) = AnnE (mapT f e) (map f ts)
 mapT f (Declaration v e) = Declaration v (mapT f e)
 mapT f (Signature v e) = Signature v $ e {etype = f (etype e)}
 mapT _ e = e
@@ -119,7 +119,7 @@ mapT' f (LamE v e) = LamE <$> pure v <*> mapT' f e
 mapT' f (ListE es) = ListE <$> mapM (mapT' f) es
 mapT' f (TupleE es) = TupleE <$> mapM (mapT' f) es
 mapT' f (AppE e1 e2) = AppE <$> mapT' f e1 <*> mapT' f e2
-mapT' f (AnnE e ts) = AnnE <$> mapT' f e <*> mapM (\(l,t) -> (,) <$> pure l <*> f t) ts
+mapT' f (AnnE e ts) = AnnE <$> mapT' f e <*> mapM f ts
 mapT' f (Declaration v e) = Declaration <$> pure v <*> mapT' f e
 mapT' f (Signature v e) = do
   t' <- f (etype e)
@@ -196,11 +196,11 @@ access2 lgi rgi gs =
         _ -> Nothing
     _ -> Nothing
 
-ann :: Maybe Lang -> Expr -> Type -> Expr
-ann l (AnnE e _) t = AnnE e [(l, t)] 
-ann _ e@(Declaration _ _) _ = e
-ann _ e@(Signature _ _) _ = e
-ann l e t = AnnE e [(l,t)]
+ann :: Expr -> Type -> Expr
+ann (AnnE e _) t = AnnE e [t] 
+ann e@(Declaration _ _) _ = e
+ann e@(Signature _ _) _ = e
+ann e t = AnnE e [t]
 
 generalize :: Type -> Type
 generalize t = generalize' existentialMap t

@@ -92,7 +92,7 @@ prettyExpr (LamE (EV n) e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
 prettyExpr (AnnE e ts) = parens
   $   prettyExpr e
   <+> "::"
-  <+> encloseSep "(" ")" "; " [prettyGreenType t | (l, t) <- ts]
+  <+> encloseSep "(" ")" "; " (map prettyGreenType ts)
 prettyExpr (AppE e1@(LamE _ _) e2) = parens (prettyExpr e1) <+> prettyExpr e2
 prettyExpr (AppE e1 e2) = prettyExpr e1 <+> prettyExpr e2
 prettyExpr (NumE x) = pretty (show x)
@@ -135,7 +135,7 @@ prettyExpr (Signature (EV v) e) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle
-    elang' = maybe "" (\lang -> viaShow lang <> " ") (elang e)
+    elang' = maybe "" (\lang -> viaShow lang <> " ") (langOf . etype $ e)
     eprop' :: Doc AnsiStyle
     eprop' =
       case Set.toList (eprop e) of

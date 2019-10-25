@@ -195,6 +195,32 @@ instance Applicable GammaIndex where
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
+class Typed a where
+  toType :: Maybe Lang -> a -> Maybe Type
+  fromType :: Maybe Lang -> Type -> a
+
+instance Typed EType where
+  toType lang e
+    | (langOf . etype) e == lang = Just (etype e)
+    | otherwise = Nothing
+  fromType lang t =
+    EType
+      { etype = t
+      , eprop = Set.empty
+      , econs = Set.empty
+      , esource = Nothing
+      }
+
+instance Typed TypeSet where
+  toType Nothing (TypeSet e _) = e >>= toType Nothing
+  toType lang (TypeSet _ ts) = case filter (\e -> (langOf . etype) e == lang) ts of 
+    [ ] -> Nothing
+    [e] -> Just (etype e)
+    _ -> error "a typeset can contain only one instance of each language"
+
+  fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
+  fromType lang t = TypeSet Nothing [fromType lang t]
+
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute' :: TVar -> Type -> Type -> Type
@@ -239,6 +265,7 @@ free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
+collate [] = throwError . OtherError $ "Nothing to collate"
 collate (e:es) = do
   say $ "collating" <+> viaShow (length es) <+> "expressions into:\n" <> prettyExpr e
   foldM collateOne e es
@@ -294,12 +321,11 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
     f' _ (FunT _ _) = throwError BadRealization
     f' _ _ = return ()
 
-checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [(Maybe Lang, Type)], Expr)
+checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [Type], Expr)
 checkup g e t = do
   say "checkup"
   (g', t', e') <- check g e t
-  lang <- findTypeLanguage t'
-  return (g', [(lang, t')], e')
+  return (g', [t'], e')
 
 inferOne :: Maybe Lang -> Gamma -> Expr -> Stack (Gamma, Type, Expr)
 inferOne l g e = do
@@ -309,66 +335,29 @@ inferOne l g e = do
   say $ prettyExpr e
   say $ prettyExpr e'
   say $ viaShow l
-  say $ nest 4 $ "as':" <> line <> vsep (map (\(l,t) -> parens (viaShow l) <+> prettyGreenType t) as')
-  case [t | (l',t) <- as', l' == l] of
+  say $ nest 4 $ "as':" <> line <> vsep (map prettyGreenType as')
+  case [t | t <- as', langOf t == l] of
     [t'] -> return (g', t', e')
     _ -> throwError . OtherError $ "Cannot infer unique type for language " <> MT.show' l
 
 
-typesetFromList :: [(Maybe Lang, Type)] -> Stack TypeSet
+typesetFromList :: [Type] -> Stack TypeSet
 typesetFromList ts = do 
   say "typesetFromList"
-  let gentype = [makeEType t Nothing | (Nothing, t) <- ts]
-      contype = [makeEType t lang | (lang@(Just _), t) <- ts] 
+  let gentype = [makeEType t | t <- ts, (isNothing . langOf) t]
+      contype = [makeEType t | t <- ts, (isJust . langOf) t]
   case (gentype, contype) of
     ([x], cs) -> return $ TypeSet (Just x) cs
     ([], cs) -> return $ TypeSet Nothing cs
     _ -> throwError $ OtherError "ambiguous general type"
   where
-    makeEType :: Type -> Maybe Lang -> EType
-    makeEType t l = EType
+    makeEType :: Type -> EType
+    makeEType t = EType
       { etype = t
-      , elang = l
       , eprop = Set.empty
       , econs = Set.empty
       , esource = Nothing
       }
-
--- | Determine the language from a type, fail if the language is inconsistent.
--- Inconsistency in language should be impossible at the syntactic level, thus
--- an error in this function indicates a logical bug in the typechecker.
-findTypeLanguage :: Type -> Stack (Maybe Lang)
-findTypeLanguage t = do
-  say $ "findTypeLanguage:" <+> prettyGreenType t
-  lang <- findTypeLanguage' t
-  say $ "  lang is" <+> viaShow lang
-  return lang
-
-findTypeLanguage' (VarT (TV lang _)) = return lang
-findTypeLanguage' (ExistT (TV lang _)) = return lang
-findTypeLanguage' (Forall (TV lang1 _) t) = do
-  lang2 <- findTypeLanguage' t
-  if lang1 == lang2
-    then return lang1
-    else throwError InconsistentWithinTypeLanguage
-findTypeLanguage' (FunT t1 t2) = do 
-  lang1 <- findTypeLanguage' t1
-  lang2 <- findTypeLanguage' t2
-  if lang1 == lang2
-    then return lang1
-    else throwError InconsistentWithinTypeLanguage
-findTypeLanguage' (ArrT (TV lang1 _) ts) = do 
-  langs <- mapM findTypeLanguage' ts
-  if all ((==) lang1) langs
-    then return lang1
-    else throwError InconsistentWithinTypeLanguage
-findTypeLanguage' (RecT []) = throwError CannotInferLanguageOfEmptyRecord
-findTypeLanguage' (RecT ts@((TV lang0 _, _):_)) = do
-  let vLangs = map (\(TV l _, _) -> l) ts 
-  tlangs <- mapM (findTypeLanguage' . snd) ts
-  if all ((==) lang0) vLangs && all ((==) lang0) tlangs
-    then return lang0
-    else throwError InconsistentWithinTypeLanguage
 
 -- | TODO: document - allow things other than general
 chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
@@ -380,7 +369,7 @@ chainInfer g0 es0 = do
          Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
     chainInfer' g [] ts es = return (g, ts, es)
     chainInfer' g (x:xs) ts es = do
-      (g', [(Nothing, t')], e') <- infer Nothing g x
+      (g', [t'], e') <- infer Nothing g x
       chainInfer' g' xs (t' : ts) (e' : es)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
@@ -589,14 +578,14 @@ infer ::
   -> Gamma
   -> Expr -- ^ A subexpression from the original expression
   -> Stack ( Gamma
-           , [(Maybe Lang, Type)] -- The return type
+           , [Type] -- The return types
            , Expr -- The annotated expression
            )
 infer l g e = do
   enter $ "infer" <+> maybe "MLang" (viaShow . id) l <+> parens (prettyExpr e)
   seeGamma g
   o@(_, ts, _) <- infer' l g e
-  leave $ "infer |-" <+> encloseSep "(" ")" ", " (map (\(_, t) -> prettyGreenType t) ts)
+  leave $ "infer |-" <+> encloseSep "(" ")" ", " (map prettyGreenType ts)
   return o
 
 --
@@ -606,22 +595,22 @@ infer l g e = do
 -- Num=>
 infer' lang@(Just _) g e@(NumE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
-infer' Nothing g e@(NumE _) = return (g, [(Nothing, t)], ann Nothing e t)
+  return (g +> v, [v], ann e v) 
+infer' Nothing g e@(NumE _) = return (g, [t], ann e t)
   where
     t = VarT (TV Nothing "Num")
 -- Str=> 
 infer' lang@(Just _) g e@(StrE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
-infer' Nothing g e@(StrE _) = return (g, [(Nothing, t)], ann Nothing e t)
+  return (g +> v, [v], ann e v) 
+infer' Nothing g e@(StrE _) = return (g, [t], ann e t)
   where
     t = VarT (TV Nothing "Str")
 -- Log=> 
 infer' lang@(Just _) g e@(LogE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
-infer' Nothing g e@(LogE _) = return (g, [(Nothing, t)], ann Nothing e t)
+  return (g +> v, [v], ann e v) 
+infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
   where
     t = VarT (TV Nothing "Bool")
 
@@ -657,14 +646,14 @@ infer' Nothing g e0@(Signature v e) = do
 
     -- create a new typeset if none was found
     ifNotFound :: Gamma -> Stack Gamma
-    ifNotFound g' = case elang e of
+    ifNotFound g' = case (langOf . etype) e of
         lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
         Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
 
     -- merge the new data from a signature with any prior type data
     appendTypeSet :: EType -> TypeSet -> Stack TypeSet
     appendTypeSet e1 s =
-      case (elang e1, s) of
+      case ((langOf . etype) e1, s) of
       -- if e is a general type, and there is no conflicting type, then set e
         (Nothing, TypeSet Nothing rs) -> do
           mapM_ (checkRealization e1) rs
@@ -680,8 +669,7 @@ infer' Nothing g e0@(Signature v e) = do
         (Nothing, TypeSet (Just e2) rs) -> do
           let e3 =
                 EType
-                  { elang = Nothing
-                  , etype = etype e2
+                  { etype = etype e2
                   , eprop = Set.union (eprop e1) (eprop e2)
                   , econs = Set.union (econs e1) (econs e2)
                   , esource = Nothing
@@ -699,7 +687,7 @@ infer' Nothing g (Declaration v e) =
     declareInfer = do
       (g2, ts1, e2) <- infer Nothing (g +> MarkEG v) e
       g3 <- cut (MarkEG v) g2
-      ts2 <- typesetFromList [(l, generalize t) | (l,t) <- ts1]
+      ts2 <- typesetFromList (map generalize ts1)
       let g4 = g3 +> AnnG (VarE v) ts2
       return (g4, [], Declaration v (generalizeE e2))
     -- declare a morloc composition based on a provided signature
@@ -720,7 +708,7 @@ infer' Nothing g (Declaration v e) =
 infer' _ g e@(VarE v) = do
   case lookupE e g of
     (Just typeset) ->
-      let ts = mapTS (\e -> (elang e, etype e)) typeset
+      let ts = mapTS etype typeset
       in return (g, ts, AnnE e ts)
     Nothing -> throwError (UnboundVariable v)
   where
@@ -741,7 +729,7 @@ infer' lang g1 e0@(LamE v e2) = do
     (Just t2) -> do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
-      return (g4, [(lang, t3)], ann lang e0 t3)
+      return (g4, [t3], ann e0 t3)
     Nothing -> throwError $ OtherError "Bad thing #4"
 
 {-  g |- e1 => A* -| d_1
@@ -761,27 +749,25 @@ infer' _ g1 (AppE e1 e2) = do
 
   -- Map derive over every type observed for e1, the functional element. The
   -- result is a list of the types and expressions derived from e2
-  (g2, cs1, es2') <- foldM deriveF (d1, [], []) (map snd as1)
+  (g2, cs1, es2') <- foldM deriveF (d1, [], []) as1
 
   e2' <- collate es2' 
 
-  cs1' <- mapM (\c -> (,) <$> findTypeLanguage c <*> pure c) cs1
-
   -- * e1' - e1 with type annotations
   -- * e2' - e2 with type annotations (after being applied to e2)
-  (as2, ek') <- applyConcrete e1' e2' cs1'
+  (as2, ek') <- applyConcrete e1' e2' cs1
 
   return (g2, as2, ek')
   where
     -- pair input and output types by language and construct the function type
-    applyConcrete :: Expr -> Expr -> [(Maybe Lang, Type)] ->  Stack ([(Maybe Lang, Type)], Expr)
+    applyConcrete :: Expr -> Expr -> [Type] ->  Stack ([Type], Expr)
     applyConcrete (AnnE e1 f) e2@(AnnE _ ts2) cs = do
-      let (tas, tcs) = unzip [ ((l1, FunT a c), (l1, c))
-                               | (l1, a) <- ts2
-                               , (l2, c) <- cs
-                               , l1 == l2
+      let (tas, tcs) = unzip [ (FunT a c, c)
+                               | a <- ts2
+                               , c <- cs
+                               , langOf a == langOf c 
                              ]
-      if (length tas) /= (length . nub . map fst $ tas)
+      if (length tas) /= (length . nub $ tas)
         then throwError ConflictingSignatures
         else return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
     applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
@@ -798,7 +784,7 @@ infer' _ g1 (AppE e1 e2) = do
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer' _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
+infer' _ g e1@(AnnE e@(VarE _) annot@[t]) = do
   -- Non-top-level annotations will always consist of a single general type.
   --
   -- This is a bit questionable. If a single variable is annotated, e.g.
@@ -807,31 +793,37 @@ infer' _ g e1@(AnnE e@(VarE _) annot@[(Nothing, t)])
   -- also for Morloc where functions are imported as black boxes from other
   -- languages, to be able to simply declare a type as an axiom. Perhaps I
   -- should add dedicated syntax for axiomatic type declarations?
- = case lookupE e g of
-    (Just _) -> checkup g e t
-    Nothing -> return (g, annot, e1)
-infer' _ g (AnnE e [(Nothing, t)]) = checkup g e t
-infer' _ g (AnnE _ _) = throwError
-  $ OtherError "concrete annotations are not yet supported"
+  if langOf t == Nothing 
+    then
+      case lookupE e g of
+        (Just _) -> checkup g e t
+        Nothing -> return (g, annot, e1)
+    else
+      throwError IllegalConcreteAnnotation
+infer' _ g (AnnE e [t]) =
+  if langOf t == Nothing
+    then checkup g e t
+    else throwError IllegalConcreteAnnotation
+infer' _ g (AnnE _ _) = throwError IllegalConcreteAnnotation
 
 -- List=>
 infer' lang@(Just _) g e@(ListE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
+  return (g +> v, [v], ann e v) 
 infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
-  return (g +> t, [(Nothing, t')], ann Nothing e1 t')
+  return (g +> t, [t'], ann e1 t')
 infer' Nothing g1 e1@(ListE (x:xs)) = do
   (g2, t', _) <- inferOne Nothing g1 x
   g3 <- foldM (quietCheck t') g2 xs
   let t'' = ArrT (TV Nothing "List") [t']
-  return (g3, [(Nothing, t'')], ann Nothing e1 t'')
+  return (g3, [t''], ann e1 t'')
 
 -- Tuple=>
 infer' lang@(Just _) g e@(TupleE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
+  return (g +> v, [v], ann e v) 
 infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' Nothing g1 (TupleE xs) = do
@@ -839,17 +831,17 @@ infer' Nothing g1 (TupleE xs) = do
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
       t = ArrT v ts
       e = TupleE es
-  return (g2, [(Nothing, t)], ann Nothing e t)
+  return (g2, [t], ann e t)
 
 -- ----------------------------------------- Record=>
 infer' lang@(Just _) g e@(RecE _) = do
   v <- newvar lang
-  return (g +> v, [(lang, v)], ann lang e v) 
+  return (g +> v, [v], ann e v) 
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
   let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
-  return (g2, [(Nothing, t)], ann Nothing e t)
+  return (g2, [t], ann e t)
 
 
 
@@ -882,33 +874,30 @@ check g e t = do
 check' g1 (LamE v e1) t1@(FunT a b)
   -- define x:A
  = do
-  lang <- findTypeLanguage t1
-  let anng = AnnG (VarE v) (fromType lang a)
+  let anng = AnnG (VarE v) (fromType (langOf t1) a)
   -- check that e has the expected output type
   (g2, t2, e2) <- check (g1 +> anng) e1 b
   -- ignore the trailing context and (x:A), since it is out of scope
   g3 <- cut anng g2
   let t3 = FunT a t2
-  return (g3, t3, ann lang (LamE v e2) t3)
+  return (g3, t3, ann (LamE v e2) t3)
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
 check' g1 e1 t2@(Forall x a) = do
-  lang <- findTypeLanguage t2
   (g2, _, e2) <- check (g1 +> VarG x) e1 a
   g3 <- cut (VarG x) g2
   let t3 = apply g3 t2
-  return (g3, t3, ann lang e2 t3)
+  return (g3, t3, ann e2 t3)
 --  g1 |- e => A -| g2
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
 check' g1 e1 b = do
-  lang <- findTypeLanguage b
-  (g2, a1, e2) <- inferOne lang g1 e1
+  (g2, a1, e2) <- inferOne (langOf b) g1 e1
   g3 <- subtype (apply g2 a1) (apply g2 b) g2
   let a2 = apply g3 a1
-  return (g3, a2, ann lang (apply g3 e2) a2)
+  return (g3, a2, ann (apply g3 e2) a2)
 
 derive ::
      Gamma
@@ -940,9 +929,8 @@ derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
 derive' g e t@(ExistT v) =
-  case access1 t g
+  case access1 t g of
   -- replace <t0> with <t0>:<ea1> -> <ea2>
-        of
     Just (rs, _, ls) -> do
       ea1 <- newvar Nothing
       ea2 <- newvar Nothing

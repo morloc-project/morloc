@@ -69,9 +69,9 @@ module Morloc.Namespace
   , StackState(..)
   , TVar(..)
   , Type(..)
+  , langOf
+  , langOf'
   -- ** State manipulation
-  , fromType
-  , toType
   , StackConfig(..)
   -- ** ModuleGamma paraphernalia
   , ModularGamma
@@ -466,6 +466,7 @@ data MorlocError
   | CannotInferLanguageOfEmptyRecord
   | ConflictingSignatures
   | CompositionsMustBeGeneral
+  | IllegalConcreteAnnotation
   deriving (Eq)
 
 data PackageMeta =
@@ -606,7 +607,7 @@ data Expr
   -- ^ (\x -> e)
   | AppE Expr Expr
   -- ^ (e e)
-  | AnnE Expr [(Maybe Lang, Type)]
+  | AnnE Expr [Type]
   -- ^ (e : A)
   | NumE Scientific
   -- ^ number of arbitrary size and precision
@@ -651,7 +652,6 @@ newtype Constraint =
 data EType =
   EType
     { etype :: Type
-    , elang :: Maybe Lang
     , eprop :: Set Property
     , econs :: Set Constraint
     , esource :: Maybe (Maybe Path, EVar)
@@ -664,33 +664,6 @@ data TypeSet =
 
 type ModularGamma = Map MVar (Map EVar TypeSet)
 
-class Typed a where
-  toType :: Maybe Lang -> a -> Maybe Type
-  fromType :: Maybe Lang -> Type -> a
-
-instance Typed EType where
-  toType lang e
-    | elang e == lang = Just (etype e)
-    | otherwise = Nothing
-  fromType lang t =
-    EType
-      { etype = t
-      , elang = lang
-      , eprop = empty
-      , econs = empty
-      , esource = Nothing
-      }
-
-instance Typed TypeSet where
-  toType Nothing (TypeSet e _) = e >>= toType Nothing
-  toType lang (TypeSet _ ts) = case filter (\e -> elang e == lang) ts of 
-    [ ] -> Nothing
-    [e] -> Just (etype e)
-    _ -> error "a typeset can contain only one instance of each language"
-
-  fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
-  fromType lang t = TypeSet Nothing [fromType lang t]
-
 class Indexable a where
   index :: a -> GammaIndex
 
@@ -700,3 +673,33 @@ instance Indexable GammaIndex where
 instance Indexable Type where
   index (ExistT t) = ExistG t
   index _ = error "Can only index ExistT"
+
+-- | Determine the language from a type, fail if the language is inconsistent.
+-- Inconsistency in language should be impossible at the syntactic level, thus
+-- an error in this function indicates a logical bug in the typechecker.
+langOf :: Type -> Maybe Lang
+langOf (VarT (TV lang _)) = lang
+langOf (ExistT (TV lang _)) = lang
+langOf (Forall (TV lang _) t)
+  | lang == langOf t = lang
+  | otherwise = error "type system bug: inconsistent languages"
+langOf (FunT t1 t2)
+  | l1 == l2 = l1
+  | otherwise = error "type system bug: inconsistent languages"
+  where
+    l1 = langOf t1
+    l2 = langOf t1
+langOf (ArrT (TV lang _) ts)
+  | all ((==) lang) (map langOf ts) = lang
+  | otherwise = error "type system bug: inconsistent languages"
+langOf (RecT []) = error "empty records are not allowed"
+langOf (RecT ts@((TV lang _, _):_))
+  | all ((==) lang) (map (langOf . snd) ts) &&
+    all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
+  | otherwise = error "type system bug: inconsistent languages"
+
+-- | Like langOf but uses MLang instead of Nothing to indicate the general
+-- language
+langOf' :: Type -> Lang
+langOf' (langOf -> Nothing) = MorlocLang 
+langOf' (langOf -> (Just lang)) = lang

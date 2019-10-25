@@ -3,5 +3,4 @@ import cppbase;
 
 export meanfib;
 
-meanfib :: Int -> Num;
 meanfib x = mean ( fibonacci x );

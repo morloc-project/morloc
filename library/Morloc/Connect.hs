@@ -159,12 +159,12 @@ isExported mv ev = do
   exportMap <- modExports mv
   return $ Set.member ev exportMap
 
--- | Type annotations store type infor as `[(Maybe Lang, Type)]`, where
--- `Nothing` indicates the general type. There should be exactly one general
--- type for every expression in a program. This could change in the future if
--- we decide to add overloading.
-getGeneralType :: [(Maybe Lang, Type)] -> Program Type
-getGeneralType xs = case [t | (Nothing, t) <- xs] of
+-- | Type annotations store type infor as `[Type]`, where `Nothing` indicates
+-- the general type. There should be exactly one general type for every
+-- expression in a program. This could change in the future if we decide to add
+-- overloading.
+getGeneralType :: [Type] -> Program Type
+getGeneralType xs = case [t | t <- xs, langOf t == Nothing] of
   [] -> error "MissingGeneralType"
   [x] -> return x
   _ -> error "AmbiguousGeneralType"
@@ -216,7 +216,7 @@ module2manifolds m (Signature ev@(EV v) t) = do
   -- If v is exported but not declared, then it must refer directly to a source
   -- function (not a morloc lambda). Also, skip this signature if it is a
   -- realization signature.
-  if exported && not declared && elang t == Nothing
+  if exported && not declared && (langOf . etype) t == Nothing
     then do
       i <- getId
       (TypeSet _ rs) <- lookupVar ev m
@@ -328,7 +328,7 @@ primitive2mdata (RecE xs) = Rec' $ map entry xs
 primitive2mdata _ =
   error "complex stuff is not yet allowed in MData (coming soon)"
 
-toRealizations :: Name -> Module -> Int -> [EType] -> [(Maybe Lang, Type)] -> Program [Realization]
+toRealizations :: Name -> Module -> Int -> [EType] -> [Type] -> Program [Realization]
 toRealizations n m _ [] [] = do
   src <- lookupSources (moduleName m) (EV n)
   case src of
@@ -346,13 +346,13 @@ toRealizations n m _ [] [] = do
         ]
 toRealizations _ m _ es ts = return . map toRealization $ linkTypes es ts
   where
-    linkTypes :: [EType] -> [(Maybe Lang, Type)] -> [(EType, Type)]
-    linkTypes es' ts' = [(e, t) | e <- es', (l, t) <- ts', l == elang e] 
+    linkTypes :: [EType] -> [Type] -> [(EType, Type)]
+    linkTypes es' ts' = [(e, t) | e <- es', t <- ts', langOf t == (langOf . etype) e] 
 
     toRealization :: (EType, Type) -> Realization
-    toRealization (e@(EType _ (Just lang) _ _ (Just (f, EV srcname))), t) =
+    toRealization (e@(EType _ _ _ (Just (f, EV srcname))), t) =
       Realization
-        { rLang = lang
+        { rLang = langOf' t
         , rName = srcname
         , rConcreteType = Just $ etype2mtype Nothing (e {etype = t})
         , rModulePath = modulePath m
@@ -432,7 +432,7 @@ makeSerialMaps (concat . map moduleBody -> es) =
   where
     f :: Expr -> MorlocMonad (Maybe (Lang, Expr))
     f e@(SrcE lang _ _) = return $ Just (lang, e)
-    f e@(Signature _ (elang -> Just lang)) = return $ Just (lang, e)
+    f e@(Signature _ t) = return $ Just ((langOf' . etype) t, e)
     f _ = return $ Nothing
 
     toSerialMap :: Lang -> [Expr] -> SerialMap
@@ -466,13 +466,13 @@ etype2mtype n e = type2mtype Set.empty (etype e)
       MTypeMeta
         { metaName = n
         , metaProp = map prop2text (Set.toList (eprop e))
-        , metaLang = elang e
+        , metaLang = (langOf . etype) e
         }
     metaEmpty =
       MTypeMeta
         { metaName = Nothing
         , metaProp = []
-        , metaLang = elang e
+        , metaLang = (langOf . etype) e
         }
     prop2text Pack = ["packs"]
     prop2text Unpack = ["unpacks"]
@@ -540,7 +540,6 @@ type2etype :: Type -> EType
 type2etype t =
   EType
     { etype = t
-    , elang = Nothing
     , eprop = Set.empty
     , econs = Set.empty
     , esource = Nothing
@@ -554,7 +553,7 @@ insertAppendEtype (v, t) =
     f edec eold = eold {etype = etype edec}
 
 appendTypeSet :: EType -> TypeSet -> TypeSet
-appendTypeSet e@(elang -> Nothing) (TypeSet _ es) = TypeSet (Just e) es
+appendTypeSet e@(langOf . etype -> Nothing) (TypeSet _ es) = TypeSet (Just e) es
 appendTypeSet e (TypeSet x es) = TypeSet x (e : es)
 
 joinTypeSet :: (EType -> EType -> EType) -> TypeSet -> TypeSet -> TypeSet
