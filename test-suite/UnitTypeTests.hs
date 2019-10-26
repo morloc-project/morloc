@@ -537,6 +537,16 @@ unitTypeTests =
          T.unlines
            ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
     , exprTestGood
+        "multiple realizations for one type"
+        (T.unlines
+          [ "foo :: Num -> Num;"
+          , "foo r :: a -> b;"
+          , "foo c :: c -> d;"
+          , "bar c :: c -> c;"
+          , "foo (bar 1);"
+          ])
+        [num, varc CLang "d", varc RLang "b"]
+    , exprTestGood
       "concrete map: single map, single f"
       (T.unlines
         [ "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"

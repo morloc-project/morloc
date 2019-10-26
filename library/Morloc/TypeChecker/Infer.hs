@@ -267,7 +267,7 @@ free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 collate :: [Expr] -> Stack Expr
 collate [] = throwError . OtherError $ "Nothing to collate"
 collate (e:es) = do
-  say $ "collating" <+> viaShow (length es) <+> "expressions into:\n" <> prettyExpr e
+  say $ "collating" <+> (align . vsep . map prettyExpr) (e:es)
   foldM collateOne e es
 
 -- | Merge two annotated expressions into one, fail if the expressions are not
@@ -275,7 +275,7 @@ collate (e:es) = do
 collateOne :: Expr -> Expr -> Stack Expr
 collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> pure (nub $ ts1 ++ ts2)
 -- 
-collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e21 e22
+collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e12 e22
 collateOne (LamE v1 e1) (LamE v2 e2)
   | v1 == v2 = LamE <$> pure v1 <*> collateOne e1 e2
   | otherwise = throwError $ OtherError "collate error #1"
@@ -305,7 +305,7 @@ collateOne (RecE es1) (RecE es2)
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
 collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
-collateOne e1 e2 = error $ show e1 <> "  " <> show e2
+collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
 
 
 -- | TODO: document
@@ -736,6 +736,8 @@ infer' _ g1 (AppE e1 e2) = do
   -- Map derive over every type observed for e1, the functional element. The
   -- result is a list of the types and expressions derived from e2
   (g2, fs, es2') <- foldM deriveF (d1, [], []) as1
+
+  say $ "es2'" <+> (align . vsep . map prettyExpr) es2'
 
   let cs1 = [c | FunT _ c <- fs]
 
