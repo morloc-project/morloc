@@ -94,6 +94,9 @@ fun (t:ts) = FunT t (fun ts)
 forall [] t = t
 forall (s:ss) t = Forall (TV Nothing s) (forall ss t)
 
+forallc _ [] t = t
+forallc lang (s:ss) t = Forall (TV (Just lang) s) (forall ss t)
+
 var s = VarT (TV Nothing s)
 varc l s = VarT (TV (Just l) s)
 
@@ -549,10 +552,11 @@ unitTypeTests =
     , exprTestGood
       "concrete snd: simple test with containers"
       (T.unlines
-        [ "snd r :: forall a b . (a, b) -> b;"
+        [ "snd :: forall a b . (a, b) -> b;"
+        , "snd r :: forall a b . list a b -> b;"
         , "snd (1, True);"
         ])
-        [varc RLang "logical"]
+        [bool, forallc RLang ["a"] (varc RLang "a")]
     , exprTestGood
       "concrete map: single map, single f"
       (T.unlines
@@ -604,10 +608,3 @@ unitTypeTests =
         "f :: forall a . a -> Bool; f 42"
         "f :: forall a . a -> Bool; (((f :: Num -> Bool) (42 :: Num)) :: Bool)"
     ]
-
-{-
-      [
-        AnnE (AppE (AnnE (VarE (EV "f")) [FunT (VarT (TV Nothing "Num")) (VarT (TV Nothing "Bool"))])       (NumE 42.0)                             ) [VarT (TV Nothing "Bool")]
-        AnnE (AppE (AnnE (VarE (EV "f")) [FunT (VarT (TV Nothing "Num")) (VarT (TV Nothing "Bool"))]) (AnnE (NumE 42.0) [VarT (TV Nothing "Num")])  ) [VarT (TV Nothing "Bool")]
-      ]
--}

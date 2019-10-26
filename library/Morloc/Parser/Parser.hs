@@ -297,15 +297,19 @@ pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 pExpr :: Parser Expr
 pExpr =
-  try pRecordE <|> try pTuple <|> try pUni <|> try pAnn <|> try pApp <|>
-  try pStrE <|>
-  try pLogE <|>
-  try pNumE <|>
-  try pSrcE <|>
-  pListE <|>
-  parens pExpr <|>
-  pLam <|>
-  pVar
+      try pRecordE
+  <|> try pTuple
+  <|> try pUni
+  <|> try pAnn
+  <|> try pApp
+  <|> try pStrE
+  <|> try pLogE
+  <|> try pNumE
+  <|> try pSrcE
+  <|> pListE
+  <|> parens pExpr
+  <|> pLam
+  <|> pVar
 
 -- source "c" from "foo.c" ("Foo" as foo, "bar")
 -- source "R" ("sqrt", "t.test" as t_test)
@@ -363,12 +367,16 @@ pApp = do
   (e:es) <- many1 s
   return $ foldl AppE (AppE f e) es
   where
-    s =
-      try pAnn <|> try (parens pExpr) <|> try pUni <|> try pStrE <|>
-      try pLogE <|>
-      try pNumE <|>
-      pListE <|>
-      pVar
+    s =   try pAnn
+      <|> try (parens pExpr)
+      <|> try pUni
+      <|> try pStrE
+      <|> try pLogE
+      <|> try pNumE
+      <|> pListE
+      <|> pTuple
+      <|> pRecordE
+      <|> pVar
 
 pLogE :: Parser Expr
 pLogE = pTrue <|> pFalse
