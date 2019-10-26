@@ -547,6 +547,13 @@ unitTypeTests =
           ])
         [num, varc CLang "d", varc RLang "b"]
     , exprTestGood
+      "concrete snd: simple test with containers"
+      (T.unlines
+        [ "snd r :: forall a b . (a, b) -> b;"
+        , "snd (1, True);"
+        ])
+        [varc RLang "logical"]
+    , exprTestGood
       "concrete map: single map, single f"
       (T.unlines
         [ "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
