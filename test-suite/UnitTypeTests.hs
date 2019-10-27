@@ -574,7 +574,10 @@ unitTypeTests =
         , "f c :: double -> double;"
         , "map f [1,2]"
         ])
-      [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
+      [ forall ["a"] (arr "List" [var "a"])
+      , forallc RLang ["a"] (arrc RLang "vector" [varc RLang "a"])
+      , arrc CLang "std::vector<$1>" [varc CLang "double"]
+      ]
     , exprTestGood
       "infer type signature from concrete functions"
       (T.unlines
@@ -608,7 +611,7 @@ unitTypeTests =
         , "f c :: b -> b;"
         , "foo f 1"
         ])
-      [varc RLang "a"]
+      [forallc RLang ["a"] (varc RLang "a")]
 
     -- internal
     , exprTestFull

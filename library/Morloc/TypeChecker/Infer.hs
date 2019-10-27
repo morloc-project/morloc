@@ -451,24 +451,31 @@ subtype' (RecT rs1) (RecT rs2) g = compareEntry (sort rs1) (sort rs2) g
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
 --  g1[Ea] |- A <: Ea -| g2
-subtype' a b@(ExistT _ _) g = occursCheck a b >> instantiate a b g
+subtype' a b@(ExistT _ _) g
+  | langOf a /= langOf b = return g
+  | otherwise = occursCheck a b >> instantiate a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
-subtype' a@(ExistT _ _) b g = occursCheck b a >> instantiate a b g
+subtype' a@(ExistT _ _) b g
+  | langOf a /= langOf b = return g
+  | otherwise = occursCheck b a >> instantiate a b g
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
 -- ----------------------------------------- <:ForallL
 --  g1 |- Forall x . A <: B -| g2
 --
-subtype' (Forall v@(TV lang _) a) b g =
-  subtype (substitute v a) b (g +> MarkG v +> ExistG v []) >>= cut (MarkG v)
+subtype' (Forall v@(TV lang _) a) b g
+  | lang /= langOf b = return g
+  | otherwise = subtype (substitute v a) b (g +> MarkG v +> ExistG v [])
+              >>= cut (MarkG v)
 --  g1,a |- A :> B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
-subtype' a (Forall v@(TV lang _) b) g =
-  subtype a b (g +> VarG v) >>= cut (VarG v)
+subtype' a (Forall v@(TV lang _) b) g
+  | lang /= langOf a = return g
+  | otherwise = subtype a b (g +> VarG v) >>= cut (VarG v)
 subtype' a b _ = throwError $ SubtypeError a b
 
 
@@ -513,8 +520,9 @@ instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
 --
 -- ----------------------------------------- InstLAllR
 --
-instantiate' ta@(ExistT _ []) (Forall v2 t2) g1 =
-  instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
+instantiate' ta@(ExistT _ []) tb@(Forall v2 t2) g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise = instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
 -- InstLReach or instRReach -- each rule eliminates an existential
 -- Replace the rightmost with leftmost (G[a][b] --> L,a,M,b=a,R)
 -- WARNING: be careful here, since the implementation adds to the front and the
@@ -534,12 +542,14 @@ instantiate' ta@(ExistT v1 []) tb@(ExistT v2 []) g1 = do
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate' (Forall x b) tb@(ExistT _ []) g1 =
-  do instantiate
-       (substitute x b) -- [Eb/x]B
-       tb -- Ea
-       (g1 +> MarkG x +> ExistG x []) -- g1[Ea],>Eb,Eb
-     >>= cut (MarkG x)
+instantiate' ta@(Forall x b) tb@(ExistT _ []) g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise =
+      instantiate
+        (substitute x b) -- [Eb/x]B
+        tb -- Ea
+        (g1 +> MarkG x +> ExistG x []) -- g1[Ea],>Eb,Eb
+      >>= cut (MarkG x)
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
@@ -744,12 +754,7 @@ infer' _ g1 (AppE e1 e2) = do
   -- result is a list of the types and expressions derived from e2
   (g2, fs, es2') <- foldM deriveF (d1, [], []) as1
 
-  say $ "es2'" <+> (align . vsep . map prettyExpr) es2'
-
   let cs1 = [c | FunT _ c <- fs]
-
-  say $ prettyScream "THIS IS SPARTA!!!"
-  seeGamma g2
 
   e2' <- collate es2' 
 
@@ -957,12 +962,12 @@ derive' g e (Forall x s) = derive (g +> ExistG x []) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistT v []) =
+derive' g e t@(ExistT v@(TV lang _) []) =
   case access1 v g of
   -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
-      ea1 <- newvar Nothing
-      ea2 <- newvar Nothing
+      ea1 <- newvar lang
+      ea2 <- newvar lang
       let t' = FunT ea1 ea2
           g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
       (g3, a', e2) <- check g2 e ea1
