@@ -482,7 +482,7 @@ unitTypeTests =
         (T.unlines
           [ "f :: [Num] -> Num;"
           , "f r :: integer -> integer;"
-          , "f cpp :: \"std::vector<int>\" -> int;"
+          , "f cpp :: \"std::vector<$1>\" int -> int;"
           , "f [44]"
           ])
         [num, varc CppLang "int", varc RLang "integer"]
@@ -491,7 +491,7 @@ unitTypeTests =
         (T.unlines
           [ "sum :: [Num] -> Num;"
           , "sum c :: \"double*\" -> double;"
-          , "sum cpp :: \"std::vector<double>\" -> double;"
+          , "sum cpp :: \"std::vector<$1>\" double -> double;"
           , "sum [1,2]"
           ])
         [num, varc CLang "double", varc CppLang "double"]
@@ -568,10 +568,10 @@ unitTypeTests =
     , exprTestGood
       "concrete map: multiple maps, single f"
       (T.unlines
-        [ "map :: forall a b . (a -> b) -> List a -> List b;"
+        [ "map :: forall a b . (a -> b) -> [a] -> [b];"
         , "map c :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
         , "map r :: forall a b . (a -> b) -> vector a -> vector b;"
-        , "f cpp :: double -> double;"
+        , "f c :: double -> double;"
         , "map f [1,2]"
         ])
       [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
@@ -601,6 +601,14 @@ unitTypeTests =
         , "id (sqrt 4);"
         ])
       [varc RLang "numeric"]
+    , exprTestGood
+      "obligate foreign call"
+      (T.unlines
+        [ "foo r :: forall a . (a -> a) -> a -> a;"
+        , "f c :: b -> b;"
+        , "foo f 1"
+        ])
+      [varc RLang "a"]
 
     -- internal
     , exprTestFull
