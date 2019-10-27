@@ -16,6 +16,7 @@ import Morloc.Namespace
 import Morloc.Pools.Common
 import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g asImport
@@ -133,7 +134,9 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]
 
 gShowType' :: MType -> MDoc
-gShowType' = pretty
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f = \_ _ -> error "Currently passing functions is not supported in R"
 
 gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' f = gCall' ".morloc_foreign_call" $

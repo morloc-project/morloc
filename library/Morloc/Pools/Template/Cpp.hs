@@ -20,6 +20,7 @@ import Morloc.Pools.Common
 import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g wrapIncludeString
@@ -172,7 +173,9 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
 gShowType' :: MType -> MDoc
-gShowType' = pretty
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f = \_ _ -> error "Currently passing functions is not supported in C++"
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>

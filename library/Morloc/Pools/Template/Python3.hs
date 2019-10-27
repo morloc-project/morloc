@@ -20,6 +20,7 @@ import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified System.FilePath as SF
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g asImport
@@ -170,7 +171,9 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]
 
 gShowType' :: MType -> MDoc
-gShowType' = pretty
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f = \_ _ -> error "Currently passing functions is not supported in python"
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = do
