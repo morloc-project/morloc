@@ -449,7 +449,7 @@ pRecordEntryT = do
 pExistential :: Parser Type
 pExistential = do
   v <- angles name
-  return (ExistT (TV Nothing v))
+  return (ExistT (TV Nothing v) [])
 
 pArrT :: Parser Type
 pArrT = do

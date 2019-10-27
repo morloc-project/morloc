@@ -9,6 +9,7 @@ Stability   : experimental
 
 module Morloc.TypeChecker.Util
   ( (+>)
+  , (++>)
   , access1
   , access2
   , accessWith1
@@ -130,6 +131,9 @@ mapT' _ e = return e
 (+>) :: Indexable a => Gamma -> a -> Gamma
 (+>) xs x = (index x) : xs
 
+(++>) :: Indexable a => Gamma -> [a] -> Gamma
+(++>) g xs = map index (reverse xs) ++ g 
+
 -- | remove context up to a marker
 cut :: GammaIndex -> Gamma -> Stack Gamma
 cut _ [] = throwError EmptyCut
@@ -162,12 +166,16 @@ lookupSrc (e, l) ((SrcG e' l' path alias):rs)
   | otherwise = lookupSrc (e, l) rs
 lookupSrc x (_:rs) = lookupSrc x rs
 
-access1 :: Indexable a => a -> Gamma -> Maybe (Gamma, GammaIndex, Gamma)
-access1 gi gs =
-  case elemIndex (index gi) gs of
+access1 :: TVar -> Gamma -> Maybe (Gamma, GammaIndex, Gamma)
+access1 v gs =
+  case findIndex (exists v) gs of
     (Just 0) -> Just ([], head gs, tail gs)
     (Just i) -> Just (take i gs, gs !! i, drop (i + 1) gs)
     _ -> Nothing
+  where
+    exists :: TVar -> GammaIndex -> Bool
+    exists v1 (ExistG v2 _) = v1 == v2
+    exists _ _ = False
 
 accessWith1 :: Monad m =>
      (GammaIndex -> Bool) -- ^ method for finding the index
@@ -184,15 +192,12 @@ accessWith1 select make def g =
     Nothing -> def g
 
 access2 ::
-     (Indexable a)
-  => a
-  -> a
-  -> Gamma
-  -> Maybe (Gamma, GammaIndex, Gamma, GammaIndex, Gamma)
-access2 lgi rgi gs =
-  case access1 lgi gs of
+     TVar -> TVar
+  -> Gamma -> Maybe (Gamma, GammaIndex, Gamma, GammaIndex, Gamma)
+access2 lv rv gs =
+  case access1 lv gs of
     Just (ls, x, rs) ->
-      case access1 rgi rs of
+      case access1 rv rs of
         Just (ls', y, rs') -> Just (ls, x, ls', y, rs')
         _ -> Nothing
     _ -> Nothing
@@ -212,27 +217,35 @@ anns e ts = AnnE e ts
 generalize :: Type -> Type
 generalize t = generalize' existentialMap t
   where
-    generalize' :: [(TVar, TVar)] -> Type -> Type
+    generalize' :: [(TVar, Name)] -> Type -> Type
     generalize' [] t' = t'
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
+
     existentialMap =
-      zip (Set.toList (findExistentials t)) (map (TV Nothing . MT.pack) variables)
+      zip (Set.toList (findExistentials t)) (map MT.pack variables)
+
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
+
     findExistentials :: Type -> Set.Set TVar
     findExistentials (VarT _) = Set.empty
-    findExistentials (ExistT v) = Set.singleton v
+    findExistentials (ExistT v ts) =
+      Set.unions $ Set.singleton v : map findExistentials ts 
     findExistentials (Forall v t') = Set.delete v (findExistentials t')
     findExistentials (FunT t1 t2) =
       Set.union (findExistentials t1) (findExistentials t2)
     findExistentials (ArrT _ ts) = Set.unions (map findExistentials ts)
     findExistentials (RecT rs) = Set.unions (map (findExistentials . snd) rs)
-    generalizeOne :: TVar -> TVar -> Type -> Type
-    generalizeOne v0 r t0 = Forall r (f v0 t0)
+
+    generalizeOne :: TVar -> Name -> Type -> Type
+    generalizeOne v0@(TV lang _) r t0 = Forall (TV lang r) (f v0 t0)
       where
         f :: TVar -> Type -> Type
-        f v t1@(ExistT v')
-          | v == v' = VarT r
+        f v t1@(ExistT v' [])
+          | v == v' = VarT (TV lang r)
           | otherwise = t1
+        f v t1@(ExistT v' ts)
+          | v == v' = ArrT (TV lang r) (map (f v) ts)
+          | otherwise = ArrT v (map (f v) ts)
         f v (FunT t1 t2) = FunT (f v t1) (f v t2)
         f v t1@(Forall x t2)
           | v /= x = Forall x (f v t2)
@@ -249,7 +262,7 @@ newvar lang = do
   s <- CMS.get
   let v = newvars !! stateVar s
   CMS.put $ s {stateVar = stateVar s + 1}
-  return (ExistT $ TV lang v)
+  return (ExistT (TV lang v) [])
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])

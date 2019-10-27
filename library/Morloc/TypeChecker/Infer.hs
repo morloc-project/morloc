@@ -137,7 +137,7 @@ instance Renameable Expr where
 
 instance Renameable Type where
   rename t@(VarT _) = return t
-  rename t@(ExistT _) = return t
+  rename (ExistT v ts) = ExistT <$> pure v <*> (mapM rename ts) 
   rename (Forall v t) = do
     v' <- rename v
     t' <- rename (substitute' v (VarT v') t)
@@ -148,7 +148,7 @@ instance Renameable Type where
     RecT <$> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
   unrename (VarT v) = VarT (unrename v)
-  unrename t@(ExistT _) = t
+  unrename (ExistT v ts) = ExistT v (map unrename ts)
   unrename (Forall v t) = Forall (unrename v) (unrename t)
   unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
   unrename (ArrT v ts) = ArrT v (map unrename ts)
@@ -171,26 +171,20 @@ instance Applicable Type where
   -- [G]Forall a.a = forall a. [G]a
   apply g (Forall x a) = Forall x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
-  apply g a@(ExistT v) =
+  apply g a@(ExistT v []) =
     case lookupT v g of
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> a
+  apply g (ExistT v ts) =
+    case lookupT v g of
+      -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
+      (Just t') -> apply g t'
+      Nothing -> ExistT v (map (apply g) ts)
   apply g (ArrT v ts) = ArrT v (map (apply g) ts)
   apply g (RecT rs) = RecT (map (\(n, t) -> (n, apply g t)) rs)
 
 instance Applicable Expr where
   apply g e = mapT (apply g) e
-
-instance Applicable GammaIndex where
-  apply _ x@(VarG _) = x 
-  apply g   (AnnG e (TypeSet t ts)) = AnnG e (TypeSet (fmap (apply g) t) (map (apply g) ts))
-  apply g   (ExistG v) = SolvedG v (apply g (ExistT v))
-  apply g   (SolvedG v t) = SolvedG v (apply g t)
-  apply _ x@(MarkG _) = x 
-  apply _ x@(MarkEG _) = x 
-  apply _ x@(SrcG _ _ _ _) = x 
-  apply g   (ConcreteG e l t) = ConcreteG e l (apply g t)
-  apply g   (UnsolvedConstraint t1 t2) = UnsolvedConstraint (apply g t1) (apply g t2)
 
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
@@ -242,7 +236,7 @@ substitute' v r t = sub t
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> Type -> Type
-substitute v t = substitute' v (ExistT v) t
+substitute v t = substitute' v (ExistT v []) t
 
 
 -- | TODO: document
@@ -257,7 +251,8 @@ occursCheck t1 t2 = do
 -- | TODO: document
 free :: Type -> Set.Set Type
 free v@(VarT _) = Set.singleton v
-free v@(ExistT _) = Set.singleton v
+free v@(ExistT _ []) = Set.singleton v
+free (ExistT v ts) = Set.unions $ Set.singleton (ArrT v ts) : map free ts
 free (FunT t1 t2) = Set.union (free t1) (free t2)
 free (Forall v t) = Set.delete (VarT v) (free t)
 free (ArrT _ xs) = Set.unions (map free xs)
@@ -381,7 +376,7 @@ subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
   -- If languages are same, but types are different, raise error
   | lang1 == lang2 && a1 /= a2 = throwError $ SubtypeError t1 t2
 
-subtype' a@(ExistT (TV l1 _)) b@(ExistT (TV l2 _)) g
+subtype' a@(ExistT (TV l1 _) []) b@(ExistT (TV l2 _) []) g
   --
   -- ----------------------------------------- <:Exvar
   --  G[E.a] |- E.a <: E.a -| G[E.a]
@@ -416,10 +411,21 @@ subtype' (FunT a1 a2) (FunT b1 b2) g1
 --  unparameterized types are the same as VarT, so subtype on that instead
 subtype' (ArrT v1 []) (ArrT v2 []) g = subtype (VarT v1) (VarT v2) g
 subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
+  | length vs1 /= length vs2 = throwError . OtherError
+    $ "Cannot subtype types with unequal parameter count" 
   | l1 /= l2 = serialConstraint t1 t2 >> return g
-  | l1 == l2 = do
-    subtype (VarT v1) (VarT v2) g
-    compareArr vs1 vs2 g
+  | v1 == v2 = compareArr vs1 vs2 g
+  | otherwise = do
+    case access1 v1 g of
+      (Just (lhs, (ExistG v1' vs1'), rhs)) -> do
+        let t1' = ArrT v2 vs1'
+        let g2 = lhs ++ (SolvedG v1 t1' : rhs)
+        subtype t1' t2 g2
+      Nothing -> case access1 v2 g of
+        (Just (lhs, (ExistG v2' vs2'), rhs)) -> do
+          let t2' = ArrT v1 vs2'
+          let g2 = lhs ++ (SolvedG v2 t2' : rhs)
+          subtype t1 t2' g2
   where
     compareArr :: [Type] -> [Type] -> Gamma -> Stack Gamma
     compareArr [] [] g' = return g'
@@ -445,23 +451,24 @@ subtype' (RecT rs1) (RecT rs2) g = compareEntry (sort rs1) (sort rs2) g
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
 --  g1[Ea] |- A <: Ea -| g2
-subtype' a b@(ExistT _) g = occursCheck a b >> instantiate a b g
+subtype' a b@(ExistT _ _) g = occursCheck a b >> instantiate a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
-subtype' a@(ExistT _) b g = occursCheck b a >> instantiate a b g
+subtype' a@(ExistT _ _) b g = occursCheck b a >> instantiate a b g
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
 -- ----------------------------------------- <:ForallL
 --  g1 |- Forall x . A <: B -| g2
 --
-subtype' (Forall x a) b g =
-  subtype (substitute x a) b (g +> MarkG x +> ExistG x) >>= cut (MarkG x)
+subtype' (Forall v@(TV lang _) a) b g =
+  subtype (substitute v a) b (g +> MarkG v +> ExistG v []) >>= cut (MarkG v)
 --  g1,a |- A :> B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
-subtype' a (Forall v b) g = subtype a b (g +> VarG v) >>= cut (VarG v)
+subtype' a (Forall v@(TV lang _) b) g =
+  subtype a b (g +> VarG v) >>= cut (VarG v)
 subtype' a b _ = throwError $ SubtypeError a b
 
 
@@ -477,11 +484,11 @@ instantiate t1 t2 g = do
 --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate' ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
+instantiate' ta@(ExistT v@(TV lang _) []) (FunT t1 t2) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
-    case access1 ta g1 of
+    case access1 v g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
       Nothing -> throwError $ OtherError "Bad thing #2"
@@ -492,11 +499,11 @@ instantiate' ta@(ExistT v@(TV lang _)) (FunT t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
+instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
-    case access1 tb g1 of
+    case access1 v g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
       Nothing -> throwError $ OtherError "Bad thing #3"
@@ -506,20 +513,20 @@ instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _)) g1 = do
 --
 -- ----------------------------------------- InstLAllR
 --
-instantiate' ta@(ExistT _) (Forall v2 t2) g1 =
+instantiate' ta@(ExistT _ []) (Forall v2 t2) g1 =
   instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
 -- InstLReach or instRReach -- each rule eliminates an existential
 -- Replace the rightmost with leftmost (G[a][b] --> L,a,M,b=a,R)
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate' ta@(ExistT v1) tb@(ExistT v2) g1 = do
+instantiate' ta@(ExistT v1 []) tb@(ExistT v2 []) g1 = do
   _ <- return ()
-  case access2 ta tb g1 of
+  case access2 v1 v2 g1 of
     -- InstLReach
     (Just (ls, _, ms, x, rs)) -> return $ ls <> (SolvedG v1 tb : ms) <> (x : rs)
     Nothing ->
-      case access2 tb ta g1 of
+      case access2 v2 v1 g1 of
       -- InstRReach
         (Just (ls, _, ms, x, rs)) ->
           return $ ls <> (SolvedG v2 ta : ms) <> (x : rs)
@@ -527,20 +534,20 @@ instantiate' ta@(ExistT v1) tb@(ExistT v2) g1 = do
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate' (Forall x b) tb@(ExistT _) g1 =
+instantiate' (Forall x b) tb@(ExistT _ []) g1 =
   do instantiate
        (substitute x b) -- [Eb/x]B
        tb -- Ea
-       (g1 +> MarkG x +> ExistG x) -- g1[Ea],>Eb,Eb
+       (g1 +> MarkG x +> ExistG x []) -- g1[Ea],>Eb,Eb
      >>= cut (MarkG x)
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate' ta tb@(ExistT v) g1 =
-  case access1 tb g1 of
+instantiate' ta tb@(ExistT v []) g1 =
+  case access1 v g1 of
     (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v ta) : rs
     Nothing ->
-      case access1 (SolvedG v ta) g1 of
+      case lookupT v g1 of
         (Just _) -> return g1
         Nothing ->
           throwError . OtherError $
@@ -549,11 +556,11 @@ instantiate' ta tb@(ExistT v) g1 =
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate' ta@(ExistT v) tb g1 = do
-  case access1 ta g1 of
+instantiate' ta@(ExistT v []) tb g1 = do
+  case access1 v g1 of
     (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v tb) : rs
     Nothing ->
-      case access1 (SolvedG v tb) g1 of
+      case lookupT v g1 of
         (Just _) -> return g1
         Nothing -> error "error in InstLSolve"
 -- bad
@@ -806,11 +813,17 @@ infer' Nothing g1 e1@(ListE (x:xs)) = do
   return (g3, [t''], ann e1 t'')
 
 -- Tuple=>
-infer' lang@(Just _) g e@(TupleE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
 infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
+infer' lang@(Just _) g1 e@(TupleE xs) = do
+  (ExistT v []) <- newvar lang
+  vs <- replicateM (length xs) (newvar lang)
+  let t = ArrT v vs
+      g2 = g1 +> ExistG v vs ++> vs
+  (g3, ts, es) <- chainCheck (zip vs xs) g2
+  let t2 = apply g3 t
+      e2 = apply g3 (TupleE es)
+  return (g3, [t2], ann e2 t2) 
 infer' Nothing g1 (TupleE xs) = do
   (g2, ts, es) <- chainInfer g1 xs
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
@@ -829,13 +842,24 @@ infer' Nothing g1 e@(RecE rs) = do
   return (g2, [t], ann e t)
 
 
-
 quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
 quietCheck t g e = do
   enter $  "quietcheck" <+> prettyExpr e <> "  " <> prettyGreenType t
   (g', _, _) <- check g e t
   return $ "quietcheck" 
   return g'
+
+
+chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
+chainCheck xs g = do
+  (g, ts, es) <- foldM f (g, [], []) xs
+  return (g, reverse ts, reverse es)
+  where
+    f :: (Gamma, [Type], [Expr]) -> (Type, Expr) -> Stack (Gamma, [Type], [Expr])
+    f (g', ts, es) (t', e') = do 
+      (g'', t'', e'') <- check g' e' t'
+      return (g'', t'':ts, e'':es)
+
 
 -- | Pattern matches against each type
 check ::
@@ -910,12 +934,12 @@ derive' g e (FunT a b) = do
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-derive' g e (Forall x s) = derive (g +> ExistG x) e (substitute x s)
+derive' g e (Forall x s) = derive (g +> ExistG x []) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistT v) =
-  case access1 t g of
+derive' g e t@(ExistT v []) =
+  case access1 v g of
   -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       ea1 <- newvar Nothing

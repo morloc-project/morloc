@@ -177,7 +177,7 @@ prettyType (FunT t1@(FunT _ _) t2) =
 prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
 prettyType t@(Forall _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyType (ExistT v) = angles (pretty v)
+prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
 prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
 prettyType (RecT entries) =
   encloseSep "{" "}" ", "
@@ -192,7 +192,8 @@ prettyTypeSet (TypeSet (Just t) ts)
 prettyGammaIndex :: GammaIndex -> Doc AnsiStyle
 prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
 prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e <+> prettyTypeSet ts
-prettyGammaIndex (ExistG tv) = "ExistG:" <+> pretty tv
+prettyGammaIndex (ExistG tv []) = "ExistG:" <+> pretty tv
+prettyGammaIndex (ExistG tv ts) = "ExistG:" <+> pretty tv <+> hsep (map (parens . prettyGreenType) ts)
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev

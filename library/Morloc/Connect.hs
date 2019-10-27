@@ -483,7 +483,7 @@ etype2mtype n e = type2mtype Set.empty (etype e)
     type2mtype bnds (VarT (TV _ v))
       | Set.member v bnds = MAbstType meta v []
       | otherwise = MConcType meta v []
-    type2mtype _ (ExistT _) = error "found existential type"
+    type2mtype _ (ExistT _ []) = error "found existential type"
     type2mtype bnds (Forall (TV _ v) t) = (type2mtype (Set.insert v bnds) t)
     type2mtype bnds (FunT t1 t2) =
       let ts = type2mtype bnds t1 : functionTypes bnds t2
