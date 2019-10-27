@@ -748,6 +748,9 @@ infer' _ g1 (AppE e1 e2) = do
 
   let cs1 = [c | FunT _ c <- fs]
 
+  say $ prettyScream "THIS IS SPARTA!!!"
+  seeGamma g2
+
   e2' <- collate es2' 
 
   -- * e1' - e1 with type annotations
@@ -798,19 +801,43 @@ infer' _ g (AnnE e [t]) =
 infer' _ g (AnnE _ _) = throwError IllegalConcreteAnnotation
 
 -- List=>
-infer' lang@(Just _) g e@(ListE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
 infer' Nothing g e1@(ListE []) = do
   t <- newvar Nothing
   let t' = ArrT (TV Nothing "List") [t]
   return (g +> t, [t'], ann e1 t')
+infer' lang@(Just _) g1 e@(ListE []) = do
+  (ExistT v []) <- newvar lang
+  -- generate an existential variable for the unknown container parameter
+  p <- newvar lang
+  -- define the container type
+  let t = ExistT v [p]
+      -- store the container and paramter types as an existentials, since
+      -- neither is yet unknown
+      g2 = g1 +> t +> p
+  return (g2, [t], ann e t)
+infer' lang@(Just _) g1 (ListE (x:xs)) = do
+  -- infer the type of the first element
+  (g2, (p:_), _) <- infer lang g1 x
+  -- check that every following element is a subtype of this element
+  -- FIXME: this is wrong ... I should instead infer the types of all and
+  -- report the most general type (or something like that). I need a
+  -- `mostPolymorphic` function that given a pair of types will fail if neither
+  -- is the subtype of the other or otherwise return the more polymorphic one.
+  -- Then I could infer every type in the list and then foldM them with
+  -- `mostPolymorphic`.
+  (g3, _, es) <- chainCheck (zip (repeat p) xs) g2
+  -- generate an existential variable for the unknown container parameter
+  (ExistT v []) <- newvar lang
+  let p' = apply g3 p
+      t = ExistT v [p']
+      g4 = g3 +> t
+  return (g4, [t], ann (ListE es) t)
 -- TODO: fix this - this should do something more reasonable
 infer' Nothing g1 e1@(ListE (x:xs)) = do
-  (g2, (t':_), _) <- infer Nothing g1 x
-  g3 <- foldM (quietCheck t') g2 xs
-  let t'' = ArrT (TV Nothing "List") [t']
-  return (g3, [t''], ann e1 t'')
+  (g2, (p:_), _) <- infer Nothing g1 x
+  (g3, _, es) <- chainCheck (zip (repeat p) xs) g2
+  let t'' = ArrT (TV Nothing "List") [apply g3 p]
+  return (g3, [t''], ann (ListE es) t'')
 
 -- Tuple=>
 infer' _ _ (TupleE []) = throwError EmptyTuple
@@ -840,14 +867,6 @@ infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
   let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
   return (g2, [t], ann e t)
-
-
-quietCheck :: Type -> Gamma -> Expr -> Stack Gamma
-quietCheck t g e = do
-  enter $  "quietcheck" <+> prettyExpr e <> "  " <> prettyGreenType t
-  (g', _, _) <- check g e t
-  return $ "quietcheck" 
-  return g'
 
 
 chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
