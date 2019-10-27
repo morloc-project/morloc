@@ -94,7 +94,7 @@ prettyExpr (AnnE e ts) = parens
   <+> "::"
   <+> encloseSep "(" ")" "; " (map prettyGreenType ts)
 prettyExpr (AppE e1@(LamE _ _) e2) = parens (prettyExpr e1) <+> prettyExpr e2
-prettyExpr (AppE e1 e2) = prettyExpr e1 <+> prettyExpr e2
+prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x

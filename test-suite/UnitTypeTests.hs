@@ -612,6 +612,15 @@ unitTypeTests =
         , "foo f 1"
         ])
       [forallc RLang ["a"] (varc RLang "a")]
+    , exprTestGood
+      "declarations represent all realizations"
+      (T.unlines
+        [ "sqrt :: Num -> Num;"
+        , "sqrt r :: integer -> numeric;"
+        , "foo x = sqrt x;"
+        , "foo"
+        ])
+      [fun [num, num], fun [varc RLang "integer", varc RLang "numeric"]]
 
     -- internal
     , exprTestFull

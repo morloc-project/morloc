@@ -1,8 +1,8 @@
 source Cpp from "partial-01.hpp" ("snd", "sqrt")
 source Cpp from "doubleSerial.hpp" ("packDouble", "unpackDouble")
 
-packDouble Cpp :: packs => "double" -> "char*"
-unpackDouble Cpp :: unpacks => "char*" -> "double"
+packDouble Cpp :: packs => "double" -> "char*";
+unpackDouble Cpp :: unpacks => "char*" -> "double";
 
 export foo
 

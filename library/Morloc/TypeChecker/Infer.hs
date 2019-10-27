@@ -732,7 +732,7 @@ infer' lang g1 e0@(LamE v e2) = do
     (Just t2) -> do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
-      return (g4, [t3], ann e0 t3)
+      return (g4, [t3], ann e2' t3)
     Nothing -> throwError $ OtherError "Bad thing #4"
 
 {-  g |- e1 => A* -| d_1
