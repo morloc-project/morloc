@@ -293,7 +293,11 @@ unitTypeTests =
     -- shadowing
     , exprTestGood
         "name shadowing in lambda expressions"
-        "f = \\x -> (14,x); g = \\x f -> f x; g True f"
+        "f x = (14,x); g x f = f x; g True f"
+        [tuple [num, bool]]
+    , exprTestGood
+        "function passing without shadowing"
+        "f x = (14,x); g foo = foo True; g f"
         [tuple [num, bool]]
     , exprTestGood
         "shadowed qualified type variables (7ffd52a)"

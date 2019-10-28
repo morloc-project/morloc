@@ -69,8 +69,6 @@ module Morloc.Namespace
   , StackState(..)
   , TVar(..)
   , Type(..)
-  , langOf
-  , langOf'
   -- ** State manipulation
   , StackConfig(..)
   -- ** ModuleGamma paraphernalia
@@ -80,6 +78,8 @@ module Morloc.Namespace
   , EType(..)
   , Property(..)
   , TypeSet(..)
+  , langOf
+  , langOf'
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -674,34 +674,35 @@ instance Indexable Type where
   index (ExistT t ts) = ExistG t ts
   index t = error $ "Can only index ExistT, found: " <> show t
 
+class HasOneLanguage a where
+  langOf :: a -> Maybe Lang
+  langOf' :: a -> Lang
+
+  langOf' (langOf -> Nothing) = MorlocLang
+  langOf' (langOf -> (Just lang)) = lang
+
 -- | Determine the language from a type, fail if the language is inconsistent.
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
-langOf :: Type -> Maybe Lang
-langOf (VarT (TV lang _)) = lang
-langOf x@(ExistT (TV lang _) ts)
-  | all ((==) lang) (map langOf ts) = lang
-  | otherwise = error $ "inconsistent languages in " <> show x
-langOf x@(Forall (TV lang _) t)
-  | lang == langOf t = lang
-  | otherwise = error $ "inconsistent languages in " <> show x
-langOf x@(FunT t1 t2)
-  | l1 == l2 = l1
-  | otherwise = error $ "inconsistent languages in" <> show x
-  where
-    l1 = langOf t1
-    l2 = langOf t1
-langOf x@(ArrT (TV lang _) ts)
-  | all ((==) lang) (map langOf ts) = lang
-  | otherwise = error $ "inconsistent languages in " <> show x 
-langOf (RecT []) = error "empty records are not allowed"
-langOf x@(RecT ts@((TV lang _, _):_))
-  | all ((==) lang) (map (langOf . snd) ts) &&
-    all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
-  | otherwise = error $ "inconsistent languages in " <> show x
+instance HasOneLanguage Type where
+  langOf (VarT (TV lang _)) = lang
+  langOf x@(ExistT (TV lang _) ts)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(Forall (TV lang _) t)
+    | lang == langOf t = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(FunT t1 t2)
+    | langOf t1 == langOf t2 = langOf t1
+    | otherwise = error $ "inconsistent languages in" <> show x
+  langOf x@(ArrT (TV lang _) ts)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x 
+  langOf (RecT []) = error "empty records are not allowed"
+  langOf x@(RecT ts@((TV lang _, _):_))
+    | all ((==) lang) (map (langOf . snd) ts) &&
+      all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
 
--- | Like langOf but uses MLang instead of Nothing to indicate the general
--- language
-langOf' :: Type -> Lang
-langOf' (langOf -> Nothing) = MorlocLang 
-langOf' (langOf -> (Just lang)) = lang
+instance HasOneLanguage EType where
+  langOf e = langOf (etype e) 

@@ -1,18 +1,3 @@
-source R ("sqrt", "cor");
-source R from "minimal.R" ("packGeneric", "unpackGeneric")
-
-export foo
-export cor
-
-packGeneric R :: packs => forall a . a -> JSON;
-unpackGeneric R :: unpacks => forall a . JSON -> a;
-
 sqrt :: Num -> Num;
-sqrt R :: numeric -> numeric;
-
-cor :: [Num] -> [Num] -> Num where { len xs == len ys };
-cor R :: numeric -> numeric -> numeric;
-
--- I should be able to export foo regardless of whether I have a declaration
-foo :: Num -> Num;
+sqrt r :: numeric -> numeric;
 foo x = sqrt x;

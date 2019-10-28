@@ -33,6 +33,7 @@ module Morloc.TypeChecker.Util
   , incDepth
   , decDepth
   , getDepth
+  , langsOf
   ) where
 
 import Control.Monad.Except (throwError)
@@ -41,6 +42,33 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+
+class HasManyLanguages a where
+  langsOf :: Gamma -> a -> [Maybe Lang]
+
+instance HasManyLanguages TypeSet where
+  langsOf _ (TypeSet Nothing es) = map langOf es
+  langsOf _ (TypeSet (Just e) es) = langOf e : map langOf es
+
+instance HasManyLanguages Expr where
+  langsOf g e = nub $ Nothing : langsOf' g e where
+    langsOf' _ (SrcE lang _ _) = [Just lang]
+    langsOf' _ (Signature _ t) = [langOf t] 
+    langsOf' g (Declaration _ e) = langsOf' g e
+    langsOf' g UniE = [] 
+    langsOf' g v@(VarE _) = case lookupE v g of  
+      (Just ts) -> langsOf g ts
+      Nothing -> []
+    langsOf' g (ListE es) = concat . map (langsOf' g) $ es
+    langsOf' g (TupleE es) = concat . map (langsOf' g) $ es
+    langsOf' g (LamE _ e) = langsOf' g e 
+    langsOf' g (AppE e1 e2) = langsOf' g e1 ++ langsOf' g e2 
+    langsOf' g (AnnE e ts) = map langOf ts
+    langsOf' g (NumE _) = []
+    langsOf' g (LogE _) = [] 
+    langsOf' g (StrE _) = []
+    langsOf' g (RecE entries) = concat . map (langsOf' g . snd) $ entries
+
 
 serialConstraint :: Type -> Type -> Stack ()
 serialConstraint t1 t2 = do

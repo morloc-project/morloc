@@ -303,6 +303,33 @@ collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing dow
 collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
 
 
+-- | merge the new data from a signature with any prior type data
+appendTypeSet :: Gamma -> EVar -> TypeSet -> EType -> Stack TypeSet
+appendTypeSet g v s e1 =
+  case ((langOf . etype) e1, s) of
+  -- if e is a general type, and there is no conflicting type, then set e
+    (Nothing, TypeSet Nothing rs) -> do
+      mapM_ (checkRealization e1) rs
+      return $ TypeSet (Just e1) rs
+  -- if e is a realization, and no general type is set, just add e to the list
+    (Just lang, TypeSet Nothing rs) ->
+      return $ TypeSet Nothing (e1 {esource = lookupSrc (v, lang) g} : rs)
+  -- if e is a realization, and a general type exists, append it and check
+    (Just lang, TypeSet (Just e2) rs) -> do
+      checkRealization e2 e1
+      return $ TypeSet (Just e2) (e1 {esource = lookupSrc (v, lang) g} : rs)
+  -- if e is general, and a general type exists, merge the general types
+    (Nothing, TypeSet (Just e2) rs) -> do
+      let e3 =
+            EType
+              { etype = etype e2
+              , eprop = Set.union (eprop e1) (eprop e2)
+              , econs = Set.union (econs e1) (econs e2)
+              , esource = Nothing
+              }
+      return $ TypeSet (Just e3) rs
+
+
 -- | TODO: document
 checkRealization :: EType -> EType -> Stack ()
 checkRealization e1 e2 = f' (etype e1) (etype e2)
@@ -506,14 +533,19 @@ instantiate' ta@(ExistT v@(TV lang _) []) (FunT t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate' (FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
+instantiate' t@(FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
     case access1 v g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
-      Nothing -> throwError $ OtherError "Bad thing #3"
+      Nothing -> do
+        say $ prettyScream "YYYAAARRRGGGG"
+        say $ prettyGreenType t
+        say $ prettyGreenType tb
+        seeGamma g1
+        throwError $ OtherError "Bad thing #3"
   g3 <- instantiate t1 ea1 g2
   g4 <- instantiate ea2 (apply g3 t2) g3
   return g4
@@ -591,6 +623,7 @@ infer l g e = do
   leave $ "infer |-" <+> encloseSep "(" ")" ", " (map prettyGreenType ts)
   return o
 
+
 --
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
@@ -644,7 +677,7 @@ infer' Nothing g e0@(Signature v e) = do
 
     -- update the found typeset
     append' :: GammaIndex -> Stack GammaIndex
-    append' (AnnG v r2) = AnnG <$> pure v <*> appendTypeSet e r2
+    append' (AnnG x@(VarE v) r2) = AnnG <$> pure x <*> appendTypeSet g v r2 e
     append' _ = throwError $ OtherError "Bad Gamma"
 
     -- create a new typeset if none was found
@@ -653,57 +686,60 @@ infer' Nothing g e0@(Signature v e) = do
         lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
         Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
 
-    -- merge the new data from a signature with any prior type data
-    appendTypeSet :: EType -> TypeSet -> Stack TypeSet
-    appendTypeSet e1 s =
-      case ((langOf . etype) e1, s) of
-      -- if e is a general type, and there is no conflicting type, then set e
-        (Nothing, TypeSet Nothing rs) -> do
-          mapM_ (checkRealization e1) rs
-          return $ TypeSet (Just e1) rs
-      -- if e is a realization, and no general type is set, just add e to the list
-        (Just lang, TypeSet Nothing rs) ->
-          return $ TypeSet Nothing (e1 {esource = lookupSrc (v, lang) g} : rs)
-      -- if e is a realization, and a general type exists, append it and check
-        (Just lang, TypeSet (Just e2) rs) -> do
-          checkRealization e2 e1
-          return $ TypeSet (Just e2) (e1 {esource = lookupSrc (v, lang) g} : rs)
-      -- if e is general, and a general type exists, merge the general types
-        (Nothing, TypeSet (Just e2) rs) -> do
-          let e3 =
-                EType
-                  { etype = etype e2
-                  , eprop = Set.union (eprop e1) (eprop e2)
-                  , econs = Set.union (econs e1) (econs e2)
-                  , esource = Nothing
-                  }
-          return $ TypeSet (Just e3) rs
-
 -- Declaration=>
 infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g (Declaration v e) =
-  case lookupE (VarE v) g of 
-    Nothing -> declareInfer
-    (Just typeset) -> declareCheck typeset
+infer' Nothing g1 (Declaration v e1) = do
+  (typeset3, g4, es4) <- case lookupE (VarE v) g1 of
+    (Just typeset) -> do
+      (g2, ts2, e2) <- declareCheck g1 e1 typeset
+      let langs = filter isJust (langsOf g2 e1)
+      (g3, ts3, es3) <- mapM newvar langs >>= foldM (f v e1) (g2, ts2, [e2])
+      typeset2 <- foldM (appendTypeSet g2 v) typeset (map (toEType . generalize) ts3)
+      return (typeset2, g3, es3)
+    Nothing -> do
+      let langs = langsOf g1 e1
+      (g3, ts3, es3) <- mapM newvar langs >>= foldM (f v e1) (g1, [], [])
+      typeset2 <- typesetFromList (map generalize ts3)
+      return (typeset2, g3, es3)
+
+  e2 <- collate es4
+
+  let e5 = Declaration v (generalizeE e2)
+
+  return (g4 +> AnnG (VarE v) typeset3, [], e5)
   where
-    -- declare a morloc composition where no signature is provided
-    declareInfer = do
-      (g2, ts1, e2) <- infer Nothing (g +> MarkEG v) e
-      g3 <- cut (MarkEG v) g2
-      ts2 <- typesetFromList (map generalize ts1)
-      let g4 = g3 +> AnnG (VarE v) ts2
-      return (g4, [], Declaration v (generalizeE e2))
+    f ::
+         EVar
+      -> Expr
+      -> (Gamma, [Type], [Expr])
+      -> Type
+      -> Stack (Gamma, [Type], [Expr])
+    f v e' (g1', ts, es) t' = do
+      (g2', t2', e2') <- check (g1' +> MarkEG v +> t') e' t'
+      g3' <- cut (MarkEG v) g2'
+      return (g3', t2':ts, e2':es)
+
+    toEType t = EType
+      { etype = t
+      , eprop = Set.empty
+      , econs = Set.empty
+      , esource = Nothing
+      }
+
+    getBoundVariables :: Expr -> [EVar]
+    getBoundVariables (LamE v e) = v : getBoundVariables e
+    getBoundVariables _ = []
+
     -- declare a morloc composition based on a provided signature
-    declareCheck (TypeSet (Just t) []) = do
-      (g2, _, e2) <- check (g +> MarkEG v) e (etype t)
-      g3 <- cut (MarkEG v) g2
-      return (g3, [], Declaration v e2)
+    declareCheck g1' e1' (TypeSet (Just t) []) = do
+      (g2', t2', e2') <- check (g1' +> MarkEG v) e1' (etype t)
+      return (g2', [t2'], e2')
     -- The elements in a composition may have realizations, but the composition
     -- itself is purely a Morloc construct. Since the variable is assigned in a
     -- Morloc script, it could not have been imported from a particular source
-    -- language. 
-    declareCheck (TypeSet Nothing _) = throwError CompositionsMustBeGeneral
-    declareCheck (TypeSet (Just _) (_:_)) = throwError CompositionsMustBeGeneral
+    -- language.
+    declareCheck _ _ (TypeSet Nothing _) = throwError CompositionsMustBeGeneral
+    declareCheck _ _ (TypeSet (Just _) (_:_)) = throwError CompositionsMustBeGeneral
 
 --  (x:A) in g
 -- ------------------------------------------- Var
@@ -722,6 +758,7 @@ infer' _ g e@(VarE v) = do
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
+-- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 infer' lang g1 e0@(LamE v e2) = do
   a <- newvar lang
   b <- newvar lang
@@ -769,7 +806,10 @@ infer' _ g1 (AppE e1 e2) = do
     applyConcrete (AnnE e1 f) e2 fs' = do
       let (tas, tcs) = unzip [ (FunT a c, c) | (FunT a c) <- fs' ]
       return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
-    applyConcrete _ _ _ = throwError $ OtherError "bad concrete"
+    applyConcrete e _ _ = do
+      say $ prettyScream "ERROR!!!"
+      say $ "e =" <+> prettyExpr e
+      throwError . OtherError $ "bad concrete"
 
     deriveF ::
          (Gamma, [Type], [Expr])
@@ -783,27 +823,26 @@ infer' _ g1 (AppE e1 e2) = do
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer' _ g e1@(AnnE e@(VarE _) annot@[t]) = do
-  -- Non-top-level annotations will always consist of a single general type.
+infer' _ g e1@(AnnE e@(VarE _) [t]) = do
+  -- FIXME - I need to distinguish between the two types of annotations. There
+  -- are annotations that the user writes; these need to be checked. There are
+  -- annotations that are generated by the typechecker; these are basically
+  -- cached results that do not need to be checked.
   --
-  -- This is a bit questionable. If a single variable is annotated, e.g.
-  -- `x::Int`, and is not declared, this would normally raise an
-  -- UnboundVariable error. However, it is convenient for testing purposes, and
-  -- also for Morloc where functions are imported as black boxes from other
-  -- languages, to be able to simply declare a type as an axiom. Perhaps I
-  -- should add dedicated syntax for axiomatic type declarations?
-  if langOf t == Nothing 
+  -- Currently I am checking the general cases, since that is the only kind of
+  -- annotation the user can make, but this still runs some unnecessary checks.
+  if langOf t == Nothing
     then
       case lookupE e g of
         (Just _) -> checkup g e t
-        Nothing -> return (g, annot, e1)
+        Nothing -> return (g, [t], e1)
     else
-      throwError IllegalConcreteAnnotation
+        return (g, [t], e1)
 infer' _ g (AnnE e [t]) =
   if langOf t == Nothing
     then checkup g e t
-    else throwError IllegalConcreteAnnotation
-infer' _ g (AnnE _ _) = throwError IllegalConcreteAnnotation
+    else return (g, [t], e)
+infer' _ g (AnnE e ts) = return (g, ts, e)
 
 -- List=>
 infer' Nothing g e1@(ListE []) = do
@@ -895,7 +934,7 @@ check ::
            , Expr -- The annotated expression
            )
 check g e t = do
-  enter $  "check" <+> parens (prettyExpr e) <> "  " <> prettyGreenType t
+  enter $ "check" <+> parens (prettyExpr e) <> "  " <> prettyGreenType t
   seeGamma g
   (g', t', e') <- check' g e t
   leave $ "check |-" <+> prettyType t'
@@ -904,9 +943,8 @@ check g e t = do
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-check' g1 (LamE v e1) t1@(FunT a b)
+check' g1 (LamE v e1) t1@(FunT a b) = do
   -- define x:A
- = do
   let anng = AnnG (VarE v) (fromType (langOf t1) a)
   -- check that e has the expected output type
   (g2, t2, e2) <- check (g1 +> anng) e1 b
