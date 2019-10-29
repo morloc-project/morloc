@@ -350,8 +350,8 @@ checkup g e t = do
   (g', t', e') <- check g e t
   return (g', [t'], e')
 
-typesetFromList :: [Type] -> Stack TypeSet
-typesetFromList ts = do 
+typesetFromList :: Gamma -> EVar -> [Type] -> Stack TypeSet
+typesetFromList g v ts = do 
   say "typesetFromList"
   let gentype = [makeEType t | t <- ts, (isNothing . langOf) t]
       contype = [makeEType t | t <- ts, (isJust . langOf) t]
@@ -365,7 +365,7 @@ typesetFromList ts = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = Nothing
+      , esource = langOf t >>= (\l -> lookupSrc (v, l) g)
       }
 
 -- | TODO: document - allow things other than general
@@ -662,9 +662,13 @@ infer' Nothing g1 s1@(SrcE lang path xs) = do
 
 -- Signature=>
 infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g e0@(Signature v e) = do
-  g2 <- accessWith1 isAnnG append' ifNotFound g
-  return (g2, [], e0)
+infer' Nothing g (Signature v e1) = do
+
+  let src = langOf e1 >>= (\l -> lookupSrc (v, l) g)
+      e2 = e1 {esource = src}
+
+  g2 <- accessWith1 isAnnG (append' e2) (ifNotFound e2) g
+  return (g2, [], Signature v e2)
   where
 
     -- find a typeset
@@ -675,13 +679,13 @@ infer' Nothing g e0@(Signature v e) = do
     isAnnG _ = False
 
     -- update the found typeset
-    append' :: GammaIndex -> Stack GammaIndex
-    append' (AnnG x@(VarE v) r2) = AnnG <$> pure x <*> appendTypeSet g v r2 e
-    append' _ = throwError $ OtherError "Bad Gamma"
+    append' :: EType -> GammaIndex -> Stack GammaIndex
+    append' e (AnnG x@(VarE v) r2) = AnnG <$> pure x <*> appendTypeSet g v r2 e
+    append' _ _ = throwError $ OtherError "Bad Gamma"
 
     -- create a new typeset if none was found
-    ifNotFound :: Gamma -> Stack Gamma
-    ifNotFound g' = case (langOf . etype) e of
+    ifNotFound :: EType -> Gamma -> Stack Gamma
+    ifNotFound e g' = case (langOf . etype) e of
         lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
         Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
 
@@ -696,13 +700,13 @@ infer' Nothing g1 (Declaration v e1) = do
       (g2, _,   es2) <- foldM (foldCheck e1) (g1, [], []) xs1
       (g3, ts3, es3) <- mapM newvar langs
                      >>= foldM (foldCheckExist v e1) (g2, [], [])
-      typeset2 <- foldM (appendTypeSet g3 v) typeset (map (toEType . generalize) ts3)
+      typeset2 <- foldM (appendTypeSet g3 v) typeset (map ((toEType g3) . generalize) ts3)
       return (typeset2, g3, es3)
     Nothing -> do
       let langs = langsOf g1 e1
       (g3, ts3, es3) <- mapM newvar langs
                      >>= foldM (foldCheckExist v e1) (g1, [], [])
-      typeset2 <- typesetFromList (map generalize ts3)
+      typeset2 <- typesetFromList g3 v (map generalize ts3)
       return (typeset2, g3, es3)
 
   e2 <- collate es4
@@ -731,11 +735,11 @@ infer' Nothing g1 (Declaration v e1) = do
       (g2', t2', e2') <- check g1' e' t'
       return (g2', t2':ts, e2':es)
 
-    toEType t = EType
+    toEType g t = EType
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = Nothing
+      , esource = langOf t >>= (\l -> lookupSrc (v,l) g)
       }
 
     getBoundVariables :: Expr -> [EVar]

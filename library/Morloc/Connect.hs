@@ -18,6 +18,10 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 
+import Morloc.Data.Doc hiding (putDoc)
+import Morloc.Pretty
+import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
+
 connect :: [Module] -> MorlocMonad [Manifold]
 connect mods
   -- root :: Module -- fail if there is not a single "root" module, e.g., main
@@ -62,6 +66,9 @@ data ProgramState =
     , stateModuleMap :: Map.Map MVar Module
     }
   deriving (Show, Ord, Eq)
+
+say :: Doc AnsiStyle -> Program ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 initProgramState :: [Module] -> MorlocMonad ProgramState
 initProgramState mods
@@ -216,6 +223,14 @@ module2manifolds m (Signature ev@(EV v) t) = do
   -- If v is exported but not declared, then it must refer directly to a source
   -- function (not a morloc lambda). Also, skip this signature if it is a
   -- realization signature.
+
+  -- * do not generate if not exported, because the function does not need to
+  --   exist independently, but will later be instantiated as needed when
+  --   called in compositions
+  -- * do not generated declared modules since they will be generated when
+  --   Declaration is parsed
+  -- * do not generate for concrete languages then all languages are merged
+  --   together within this one manifold
   if exported && not declared && (langOf . etype) t == Nothing
     then do
       i <- getId
@@ -237,7 +252,8 @@ module2manifolds m (Signature ev@(EV v) t) = do
             , mArgs = args
             }
         ]
-    else return []
+    else do
+      return []
 module2manifolds _ _ = return []
 
 nargs :: Type -> Int
@@ -344,10 +360,15 @@ toRealizations n m _ [] [] = do
             , rSourced = True
             }
         ]
-toRealizations _ m _ es ts = return . map toRealization $ linkTypes es ts
+toRealizations n m _ es ts = do
+  let linked = linkTypes es ts
+  return . map toRealization $ linked 
   where
     linkTypes :: [EType] -> [Type] -> [(EType, Type)]
-    linkTypes es' ts' = [(e, t) | e <- es', t <- ts', langOf t == (langOf . etype) e] 
+    linkTypes es' [] = [(e, etype e) | e <- es']
+    linkTypes es' ts'
+      | length es' == length ts' = [(e, t) | e <- es', t <- ts', langOf t == (langOf . etype) e]
+      | otherwise = error "expected equal numbers of signature types and expression types"
 
     toRealization :: (EType, Type) -> Realization
     toRealization (e@(EType _ _ _ (Just (f, EV srcname))), t) =
@@ -359,7 +380,15 @@ toRealizations _ m _ es ts = return . map toRealization $ linkTypes es ts
         , rSourcePath = f -- if Nothing, then $srcname is a builtin of $lang
         , rSourced = True
         }
-    toRealization _ = error "This is not a realization"
+    toRealization (e@(EType _ _ _ Nothing), t) =
+      Realization
+        { rLang = langOf' t
+        , rName = n
+        , rConcreteType = Just $ etype2mtype Nothing (e {etype = t})
+        , rModulePath = modulePath m
+        , rSourcePath = Nothing
+        , rSourced = False
+        }
 
 -- | uncurry one level of an expression, pulling out a tuple with
 -- (<lambda-args>, <application-base>, <application-args>)
