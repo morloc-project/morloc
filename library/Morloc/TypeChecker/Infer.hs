@@ -495,8 +495,11 @@ subtype' a@(ExistT _ _) b g
 --
 subtype' (Forall v@(TV lang _) a) b g
   | lang /= langOf b = return g
-  | otherwise = subtype (substitute v a) b (g +> MarkG v +> ExistG v [])
-              >>= cut (MarkG v)
+  | otherwise = do
+      a' <- newvar lang
+      g' <- subtype (substitute' v a' a) b (g +> MarkG v +> a')
+      cut (MarkG v) g'
+
 --  g1,a |- A :> B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
@@ -540,12 +543,7 @@ instantiate' t@(FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
     case access1 v g1 of
       Just (rs, _, ls) ->
         return $ rs ++ [SolvedG v (FunT ea1 ea2), index ea1, index ea2] ++ ls
-      Nothing -> do
-        say $ prettyScream "YYYAAARRRGGGG"
-        say $ prettyGreenType t
-        say $ prettyGreenType tb
-        seeGamma g1
-        throwError $ OtherError "Bad thing #3"
+      Nothing -> throwError $ OtherError "Bad thing #3"
   g3 <- instantiate t1 ea1 g2
   g4 <- instantiate ea2 (apply g3 t2) g3
   return g4
