@@ -625,6 +625,15 @@ unitTypeTests =
         , "foo"
         ])
       [fun [num, num], fun [varc RLang "integer", varc RLang "numeric"]]
+    , exprTestGood
+      "declarations may have signatures"
+      (T.unlines
+        [ "a R :: numeric;"
+        , "foo :: Num -> Num;"
+        , "foo x = a;"
+        , "foo 5"
+        ])
+        [num, varc RLang "numeric"]
 
     -- internal
     , exprTestFull
