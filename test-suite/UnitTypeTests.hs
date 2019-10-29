@@ -529,10 +529,10 @@ unitTypeTests =
         "general signatures are optional"
         (T.unlines ["f r :: integer -> integer;", "f 44"])
         [varc RLang "integer"]
-    , expectError
-        "compositions cannot have concrete realizations"
-        CompositionsMustBeGeneral       
-        (T.unlines ["f r :: integer -> integer;", "f = \\x -> 42;", "f 44"])
+    , exprTestGood 
+        "compositions can have concrete realizations"
+        "f r :: integer -> integer; f x = 42; f 44"
+        [varc RLang "integer", num]
     , expectError
        "arguments number in realizations must equal the general case (1)"
         BadRealization $
@@ -625,15 +625,6 @@ unitTypeTests =
         , "foo"
         ])
       [fun [num, num], fun [varc RLang "integer", varc RLang "numeric"]]
-    , exprTestGood
-      "declarations may have signatures"
-      (T.unlines
-        [ "a R :: numeric;"
-        , "foo :: Num -> Num;"
-        , "foo x = a;"
-        , "foo 5"
-        ])
-        [num, varc RLang "numeric"]
 
     -- internal
     , exprTestFull

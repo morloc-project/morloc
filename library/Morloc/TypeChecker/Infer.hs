@@ -261,6 +261,7 @@ free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
 collate [] = throwError . OtherError $ "Nothing to collate"
+collate [e] = return e
 collate (e:es) = do
   say $ "collating" <+> (align . vsep . map prettyExpr) (e:es)
   foldM collateOne e es
@@ -688,15 +689,19 @@ infer' Nothing g e0@(Signature v e) = do
 infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g1 (Declaration v e1) = do
   (typeset3, g4, es4) <- case lookupE (VarE v) g1 of
-    (Just typeset) -> do
-      (g2, ts2, e2) <- declareCheck g1 e1 typeset
-      let langs = filter isJust (langsOf g2 e1)
-      (g3, ts3, es3) <- mapM newvar langs >>= foldM (f v e1) (g2, ts2, [e2])
-      typeset2 <- foldM (appendTypeSet g2 v) typeset (map (toEType . generalize) ts3)
+    (Just typeset@(TypeSet t ts)) -> do
+      let xs1 = map etype (maybeToList t ++ ts)
+          langs = langsOf g1 e1
+      -- Check each of the signatures against the expression.
+      (g2, _,   es2) <- foldM (foldCheck e1) (g1, [], []) xs1
+      (g3, ts3, es3) <- mapM newvar langs
+                     >>= foldM (foldCheckExist v e1) (g2, [], [])
+      typeset2 <- foldM (appendTypeSet g3 v) typeset (map (toEType . generalize) ts3)
       return (typeset2, g3, es3)
     Nothing -> do
       let langs = langsOf g1 e1
-      (g3, ts3, es3) <- mapM newvar langs >>= foldM (f v e1) (g1, [], [])
+      (g3, ts3, es3) <- mapM newvar langs
+                     >>= foldM (foldCheckExist v e1) (g1, [], [])
       typeset2 <- typesetFromList (map generalize ts3)
       return (typeset2, g3, es3)
 
@@ -706,16 +711,25 @@ infer' Nothing g1 (Declaration v e1) = do
 
   return (g4 +> AnnG (VarE v) typeset3, [], e5)
   where
-    f ::
+    foldCheckExist ::
          EVar
       -> Expr
       -> (Gamma, [Type], [Expr])
       -> Type
       -> Stack (Gamma, [Type], [Expr])
-    f v e' (g1', ts, es) t' = do
+    foldCheckExist v e' (g1', ts, es) t' = do
       (g2', t2', e2') <- check (g1' +> MarkEG v +> t') e' t'
       g3' <- cut (MarkEG v) g2'
       return (g3', t2':ts, e2':es)
+
+    foldCheck ::
+         Expr
+      -> (Gamma, [Type], [Expr])
+      -> Type
+      -> Stack (Gamma, [Type], [Expr])
+    foldCheck e' (g1', ts, es) t' = do
+      (g2', t2', e2') <- check g1' e' t'
+      return (g2', t2':ts, e2':es)
 
     toEType t = EType
       { etype = t
@@ -727,17 +741,6 @@ infer' Nothing g1 (Declaration v e1) = do
     getBoundVariables :: Expr -> [EVar]
     getBoundVariables (LamE v e) = v : getBoundVariables e
     getBoundVariables _ = []
-
-    -- declare a morloc composition based on a provided signature
-    declareCheck g1' e1' (TypeSet (Just t) []) = do
-      (g2', t2', e2') <- check (g1' +> MarkEG v) e1' (etype t)
-      return (g2', [t2'], e2')
-    -- The elements in a composition may have realizations, but the composition
-    -- itself is purely a Morloc construct. Since the variable is assigned in a
-    -- Morloc script, it could not have been imported from a particular source
-    -- language.
-    declareCheck _ _ (TypeSet Nothing _) = throwError CompositionsMustBeGeneral
-    declareCheck _ _ (TypeSet (Just _) (_:_)) = throwError CompositionsMustBeGeneral
 
 --  (x:A) in g
 -- ------------------------------------------- Var
