@@ -29,14 +29,37 @@ typeof es = f' . head . reverse $ es
 unres :: ((a, b), c) -> a 
 unres ((x, _), _) = x
 
-exprTestGood :: String -> T.Text -> [Type] -> TestTree
-exprTestGood msg code t = testCase msg $ do
+assertTerminalType :: String -> T.Text -> [Type] -> TestTree
+assertTerminalType msg code t = testCase msg $ do
   result <- API.runStack 0 (typecheck (readProgram Nothing code))
   case unres result of
     -- the order of the list is not important, so sort before comparing
     (Right es') -> assertEqual "" (sort t) (sort (typeof (main es')))
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
+
+-- remove all type annotations and type signatures
+unannotate :: [Expr] -> [Expr]
+unannotate = mapMaybe unannotate' where
+  unannotate' :: Expr -> Maybe Expr
+  unannotate' (AnnE e t) = unannotate' e
+  unannotate' (ListE xs) = Just $ ListE (unannotate xs)
+  unannotate' (TupleE xs) = Just $ TupleE (unannotate xs)
+  unannotate' (LamE v e) = LamE <$> pure v <*> unannotate' e
+  unannotate' (AppE e1 e2) = AppE <$> unannotate' e1 <*> unannotate' e2
+  unannotate' (Declaration v e) = Declaration <$> pure v <*> unannotate' e
+  unannotate' (Signature v t) = Nothing
+  unannotate' e = Just e
+
+assertTerminalExpr :: String -> T.Text -> Expr -> TestTree
+assertTerminalExpr msg code expr = testCase msg $ do
+  result <- API.runStack 0 (typecheck (readProgram Nothing code))
+  case unres result of
+    -- the order of the list is not important, so sort before comparing
+    (Right es') -> assertEqual "" expr (head . reverse . sort . unannotate . main $ es')
+    (Left err) -> error $
+      "The following error was raised: " <> show err <> "\nin:\n" <> show code
+
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
@@ -116,95 +139,99 @@ unitTypeTests =
   testGroup
     "Typechecker unit tests"
     -- comments
-    [ exprTestGood "block comments (1)" "{- -} 42" [num]
-    , exprTestGood "block comments (2)" " {--} 42{-   foo -} " [num]
-    , exprTestGood "line comments (3)" "-- foo\n 42" [num]
+    [ assertTerminalType "block comments (1)" "{- -} 42" [num]
+    , assertTerminalType "block comments (2)" " {--} 42{-   foo -} " [num]
+    , assertTerminalType "line comments (3)" "-- foo\n 42" [num]
     -- semicolons
-    , exprTestGood "semicolons are allowed at the end" "42;" [num]
+    , assertTerminalType "semicolons are allowed at the end" "42;" [num]
     -- primitives
-    , exprTestGood "primitive integer" "42" [num]
-    , exprTestGood "primitive big integer" "123456789123456789123456789" [num]
-    , exprTestGood "primitive decimal" "4.2" [num]
-    , exprTestGood "primitive negative number" "-4.2" [num]
-    , exprTestGood "primitive positive number (with sign)" "+4.2" [num]
-    , exprTestGood "primitive scientific large exponent" "4.2e3000" [num]
-    , exprTestGood
+    , assertTerminalType "primitive integer" "42" [num]
+    , assertTerminalType "primitive big integer" "123456789123456789123456789" [num]
+    , assertTerminalType "primitive decimal" "4.2" [num]
+    , assertTerminalType "primitive negative number" "-4.2" [num]
+    , assertTerminalType "primitive positive number (with sign)" "+4.2" [num]
+    , assertTerminalType "primitive scientific large exponent" "4.2e3000" [num]
+    , assertTerminalType
         "primitive scientific irregular"
         "123456789123456789123456789e-3000"
        [num]
-    , exprTestGood
+    , assertTerminalType
         "primitive big real"
         "123456789123456789123456789.123456789123456789123456789"
        [num]
-    , exprTestGood "primitive boolean" "True" [bool]
-    , exprTestGood "primitive string" "\"this is a string literal\"" [str]
-    , exprTestGood "primitive integer annotation" "42 :: Num" [num]
-    , exprTestGood "primitive boolean annotation" "True :: Bool" [bool]
-    , exprTestGood "primitive double annotation" "4.2 :: Num" [num]
-    , exprTestGood
+    , assertTerminalType "primitive boolean" "True" [bool]
+    , assertTerminalType "primitive string" "\"this is a string literal\"" [str]
+    , assertTerminalType "primitive integer annotation" "42 :: Num" [num]
+    , assertTerminalType "primitive boolean annotation" "True :: Bool" [bool]
+    , assertTerminalType "primitive double annotation" "4.2 :: Num" [num]
+    , assertTerminalType
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         [str]
-    , exprTestGood "primitive declaration" "x = True; 4.2" [num]
+    , assertTerminalType "primitive declaration" "x = True; 4.2" [num]
     -- declarations
-    , exprTestGood
+    , assertTerminalType
         "identity function declaration and application"
         "f x = x; f 42"
        [num]
-    , exprTestGood
+    , assertTerminalType
         "snd function declaration and application"
         "snd x y = y; snd True 42"
         [num]
 
-    , exprTestGood
+    , assertTerminalType
         "explicit annotation within an application"
         "f :: Num -> Num; f (42 :: Num)"
         [num]
 
     -- lambdas
-    , exprTestGood
+    , assertTerminalExpr
+        "functions return lambda expressions"
+        "\\x -> 42"
+        (LamE (EV "x") (NumE 42.0))
+    , assertTerminalType
         "functions can be passed"
         "g f = f 42; g"
         [forall ["a"] (fun [(fun [num, var "a"]), var "a"])]
-    , exprTestGood
+    , assertTerminalType
         "function with parameterized types"
         "f :: a b -> c; f"
         [fun [arr "a" [var "b"], var "c"]]
-    , exprTestGood "fully applied lambda (1)" "(\\x y -> x) 1 True" [num]
-    , exprTestGood "fully applied lambda (2)" "(\\x -> True) 42" [bool]
-    , exprTestGood "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" [bool]
-    , exprTestGood "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" [num]
-    , exprTestGood
+    , assertTerminalType "fully applied lambda (1)" "(\\x y -> x) 1 True" [num]
+    , assertTerminalType "fully applied lambda (2)" "(\\x -> True) 42" [bool]
+    , assertTerminalType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" [bool]
+    , assertTerminalType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" [num]
+    , assertTerminalType
         "unapplied lambda, polymorphic (1)"
         "(\\x -> True)"
         [forall ["a"] (fun [var "a", bool])]
-    , exprTestGood
+    , assertTerminalType
         "unapplied lambda, polymorphic (2)"
         "(\\x y -> x) :: forall a b . a -> b -> a"
         [forall ["a", "b"] (fun [var "a", var "b", var "a"])]
-    , exprTestGood
+    , assertTerminalType
         "annotated, fully applied lambda"
         "((\\x -> x) :: forall a . a -> a) True"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "annotated, partially applied lambda"
         "((\\x y -> x) :: forall a b . a -> b -> a) True"
         [forall ["a"] (fun [var "a", bool])]
-    , exprTestGood
+    , assertTerminalType
         "recursive functions are A-OK"
         "\\f -> f 5"
         [forall ["a"] (fun [fun [num, var "a"], var "a"])]
 
     -- applications
-    , exprTestGood
+    , assertTerminalType
         "primitive variable in application"
         "x = True; (\\y -> y) x"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "function variable in application"
         "f = (\\x y -> x); f 42"
         [forall ["a"] (fun [var "a", num])]
-    , exprTestGood
+    , assertTerminalType
         "partially applied function variable in application"
         "f = (\\x y -> x); x = f 42; x"
         [forall ["a"] (fun [var "a", num])]
@@ -231,21 +258,21 @@ unitTypeTests =
         "arguments to a function are monotypes"
         (SubtypeError num bool)
         "f :: forall a . a -> a; g = \\h -> (h 42, h True); g f"
-    , exprTestGood
+    , assertTerminalType
         "polymorphism under lambdas (203f8c) (1)"
         "f :: forall a . a -> a; g = \\h -> (h 42, h 1234); g f"
         [tuple [num, num]]
-    , exprTestGood
+    , assertTerminalType
         "polymorphism under lambdas (203f8c) (2)"
         "f :: forall a . a -> a; g = \\h -> [h 42, h 1234]; g f"
         [lst num]
 
     -- binding
-    , exprTestGood
+    , assertTerminalType
         "annotated variables without definition are legal"
         "x :: Num"
         [num]
-    , exprTestGood
+    , assertTerminalType
         "unannotated variables with definition are legal"
         "x = 42; x"
         [num]
@@ -254,132 +281,132 @@ unitTypeTests =
         "\\x -> y"
 
     -- parameterized types
-    , exprTestGood
+    , assertTerminalType
         "parameterized type (n=1)"
         "xs :: Foo a"
         [arr "Foo" [var "a"]]
-    , exprTestGood
+    , assertTerminalType
         "parameterized type (n=2)"
         "xs :: Foo a b"
         [arr "Foo" [var "a", var "b"]]
-    , exprTestGood
+    , assertTerminalType
         "nested parameterized type"
         "xs :: Foo (Bar a) [b]"
         [arr "Foo" [arr "Bar" [var "a"], arr "List" [var "b"]]]
 
     -- type signatures and higher-order functions
-    , exprTestGood
+    , assertTerminalType
         "type signature: identity function"
         "f :: forall a . a -> a; f 42"
         [num]
-    , exprTestGood
+    , assertTerminalType
         "type signature: apply function with primitives"
         "apply :: (Num -> Bool) -> Num -> Bool; f :: Num -> Bool; apply f 42"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "type signature: generic apply function"
         "apply :: forall a b . (a->b) -> a -> b; f :: Num -> Bool; apply f 42"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "type signature: map"
         "map :: forall a b . (a->b) -> [a] -> [b]; f :: Num -> Bool; map f [5,2]"
         [lst bool]
-    , exprTestGood
+    , assertTerminalType
         "type signature: sqrt with realizations"
         "sqrt :: Num -> Num; sqrt R :: numeric -> numeric; sqrt"
         [ fun [num, num]
         , fun [varc RLang "numeric", varc RLang "numeric"]]
 
     -- shadowing
-    , exprTestGood
+    , assertTerminalType
         "name shadowing in lambda expressions"
         "f x = (14,x); g x f = f x; g True f"
         [tuple [num, bool]]
-    , exprTestGood
+    , assertTerminalType
         "function passing without shadowing"
         "f x = (14,x); g foo = foo True; g f"
         [tuple [num, bool]]
-    , exprTestGood
+    , assertTerminalType
         "shadowed qualified type variables (7ffd52a)"
         "f :: forall a . a -> a; g :: forall a . a -> Num; g f"
         [num]
-    , exprTestGood
+    , assertTerminalType
         "non-shadowed qualified type variables (7ffd52a)"
         "f :: forall a . a -> a; g :: forall b . b -> Num; g f"
         [num]
 
     -- lists
-    , exprTestGood "list of primitives" "[1,2,3]" [lst num]
-    , exprTestGood
+    , assertTerminalType "list of primitives" "[1,2,3]" [lst num]
+    , assertTerminalType
         "list containing an applied variable"
         "f :: forall a . a -> a; [53, f 34]"
         [lst num]
-    , exprTestGood "empty list" "[]" [forall ["a"] (lst (var "a"))]
-    , exprTestGood
+    , assertTerminalType "empty list" "[]" [forall ["a"] (lst (var "a"))]
+    , assertTerminalType
         "list in function signature and application"
         "f :: [Num] -> Bool; f [1]"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "list in generic function signature and application"
         "f :: forall a . [a] -> Bool; f [1]"
         [bool]
     , exprTestBad "failure on heterogenous list" "[1,2,True]"
 
     -- tuples
-    , exprTestGood
+    , assertTerminalType
         "tuple of primitives"
         "(4.2, True)"
         [arr "Tuple2" [num, bool]]
-    , exprTestGood
+    , assertTerminalType
         "tuple containing an applied variable"
         "f :: forall a . a -> a; (f 53, True)"
         [tuple [num, bool]]
-    , exprTestGood
+    , assertTerminalType
         "check 2-tuples type signature"
         "f :: (Num, Str)"
         [tuple [num, str]]
-    , exprTestGood "1-tuples are just for grouping" "f :: (Num)" [num]
+    , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
 
     -- -- TODO: reconsider what an empty tuple is
     -- -- I am inclined to cast it as the unit type
-    -- , exprTestGood "empty tuples are of unit type" "f :: ()" UniT
+    -- , assertTerminalType "empty tuples are of unit type" "f :: ()" UniT
 
     -- records
-    , exprTestGood
+    , assertTerminalType
         "primitive record statement"
         "{x=42, y=\"yolo\"}"
         [record [("x", num), ("y", str)]]
-    , exprTestGood
+    , assertTerminalType
         "primitive record signature"
         "Foo :: {x :: Num, y :: Str}"
         [record [("x", num), ("y", str)]]
-    , exprTestGood
+    , assertTerminalType
         "primitive record declaration"
         "foo = {x = 42, y = \"yolo\"}; foo"
         [record [("x", num), ("y", str)]]
-    , exprTestGood
+    , assertTerminalType
         "nested records"
         "Foo :: {x :: Num, y :: {bob :: Num, tod :: Str}}"
         [record [("x", num), ("y", record [("bob", num), ("tod", str)])]]
-    , exprTestGood
+    , assertTerminalType
         "records with variables"
         "a=42; b={x=a, y=\"yolo\"}; f=\\b->b; f b"
         [record [("x", num), ("y", str)]]
 
     -- extra space
-    , exprTestGood "leading space" " 42" [num]
-    , exprTestGood "trailing space" "42 " [num]
+    , assertTerminalType "leading space" " 42" [num]
+    , assertTerminalType "trailing space" "42 " [num]
 
     -- adding signatures to declarations
-    , exprTestGood
+    , assertTerminalType
         "declaration with a signature (1)"
         "f :: forall a . a -> a; f x = x; f 42"
         [num]
-    , exprTestGood
+    , assertTerminalType
         "declaration with a signature (2)"
         "f :: Num -> Bool; f x = True; f 42"
         [bool]
-    , exprTestGood
+    , assertTerminalType
         "declaration with a signature (3)"
         "f :: Num -> Bool; f x = True; f"
         [fun [num, bool]]
@@ -406,27 +433,27 @@ unitTypeTests =
         "F :: foo:{x::(i:Int), y::Str}"
 
     -- properties
-    , exprTestGood "property syntax (1)" "f :: Foo => Num; f" [num]
-    , exprTestGood "property syntax (2)" "f :: Foo bar => Num; f" [num]
-    , exprTestGood "property syntax (3)" "f :: Foo a, Bar b => Num; f" [num]
-    , exprTestGood "property syntax (4)" "f :: (Foo a) => Num; f" [num]
-    , exprTestGood "property syntax (5)" "f :: (Foo a, Bar b) => Num; f" [num]
+    , assertTerminalType "property syntax (1)" "f :: Foo => Num; f" [num]
+    , assertTerminalType "property syntax (2)" "f :: Foo bar => Num; f" [num]
+    , assertTerminalType "property syntax (3)" "f :: Foo a, Bar b => Num; f" [num]
+    , assertTerminalType "property syntax (4)" "f :: (Foo a) => Num; f" [num]
+    , assertTerminalType "property syntax (5)" "f :: (Foo a, Bar b) => Num; f" [num]
     -- constraints
-    , exprTestGood "constraint syntax (1)" "f :: Num where {ladida}; f" [num]
-    , exprTestGood
+    , assertTerminalType "constraint syntax (1)" "f :: Num where {ladida}; f" [num]
+    , assertTerminalType
         "constraint syntax (1)"
         "f :: Num where { ladida ; foo }; f"
         [num]
 
     -- tests modules
-    , exprTestGood "basic Main module" "module Main {[1,2,3]}" [lst num]
-    , (flip $ exprTestGood "import/export") [lst num] $
+    , assertTerminalType "basic Main module" "module Main {[1,2,3]}" [lst num]
+    , (flip $ assertTerminalType "import/export") [lst num] $
       T.unlines
         [ "module Foo {export x; x = 42};"
         , "module Bar {export f; f :: forall a . a -> [a]};"
         , "module Main {import Foo (x); import Bar (f); f x}"
         ]
-    , exprTestGood
+    , assertTerminalType
         "Allow gross overuse of semicolons"
         ";;;;;module foo{;42;  ;};"
         [num]
@@ -460,19 +487,19 @@ unitTypeTests =
         T.unlines ["module Foo {x = 42};", "module Main {import Foo (x); x}"]
 
     -- test realization integration
-    , exprTestGood
+    , assertTerminalType
         "a realization can be defined following general type signature"
         (T.unlines ["f :: Num -> Num;", "f r :: integer -> integer;", "f 44"])
         [num, varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "realizations can map one general type to multiple specific ones"
         (T.unlines ["f :: Num -> Num;", "f r :: integer -> numeric;", "f 44"])
         [num, varc RLang "numeric"]
-    , exprTestGood
+    , assertTerminalType
         "realizations can map multiple general type to one specific one"
         (T.unlines ["f :: Num -> Nat;", "f r :: integer -> integer;", "f 44"])
         [var "Nat", varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "multiple realizations for different languages can be defined"
         (T.unlines
           [ "f :: Num -> Num;"
@@ -481,7 +508,7 @@ unitTypeTests =
           , "f 44"
           ])
         [num, varc CLang "int", varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "realizations with parameterized variables"
         (T.unlines
           [ "f :: [Num] -> Num;"
@@ -490,7 +517,7 @@ unitTypeTests =
           , "f [44]"
           ])
         [num, varc CppLang "int", varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "realizations can use quoted variables"
         (T.unlines
           [ "sum :: [Num] -> Num;"
@@ -499,7 +526,7 @@ unitTypeTests =
           , "sum [1,2]"
           ])
         [num, varc CLang "double", varc CppLang "double"]
-    , exprTestGood
+    , assertTerminalType
         "the order of general signatures and realizations does not matter (1)"
         (T.unlines
           [ "f r :: integer -> integer;"
@@ -508,7 +535,7 @@ unitTypeTests =
           , "f 44"
           ])
         [num, varc CLang "int", varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "the order of general signatures and realizations does not matter (2)"
         (T.unlines
           [ "f r :: integer -> integer;"
@@ -517,7 +544,7 @@ unitTypeTests =
           , "f 44"
           ])
         [num, varc CLang "int", varc RLang "integer"]
-    , exprTestGood
+    , assertTerminalType
         "multiple realizations for a single language cannot be defined"
         (T.unlines
           [ "f r :: a -> b;"
@@ -525,11 +552,11 @@ unitTypeTests =
           , "f 1"
           ])
         [varc RLang "b", varc RLang "d"]
-    , exprTestGood
+    , assertTerminalType
         "general signatures are optional"
         (T.unlines ["f r :: integer -> integer;", "f 44"])
         [varc RLang "integer"]
-    , exprTestGood 
+    , assertTerminalType 
         "compositions can have concrete realizations"
         "f r :: integer -> integer; f x = 42; f 44"
         [varc RLang "integer", num]
@@ -543,7 +570,7 @@ unitTypeTests =
          BadRealization $
          T.unlines
            ["f   :: Num -> Num;", "f r :: integer -> integer -> string;", "f 44"]
-    , exprTestGood
+    , assertTerminalType
         "multiple realizations for one type"
         (T.unlines
           [ "foo :: Num -> Num;"
@@ -553,7 +580,7 @@ unitTypeTests =
           , "foo (bar 1);"
           ])
         [num, varc CLang "d", varc RLang "b"]
-    , exprTestGood
+    , assertTerminalType
       "concrete snd: simple test with containers"
       (T.unlines
         [ "snd :: forall a b . (a, b) -> b;"
@@ -561,7 +588,7 @@ unitTypeTests =
         , "snd (1, True);"
         ])
         [bool, forallc RLang ["a"] (varc RLang "a")]
-    , exprTestGood
+    , assertTerminalType
       "concrete map: single map, single f"
       (T.unlines
         [ "map cpp :: forall a b . (a -> b) -> \"std::vector<$1>\" a -> \"std::vector<$1>\" b;"
@@ -569,7 +596,7 @@ unitTypeTests =
         , "map f [1,2]"
         ])
       [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
-    , exprTestGood
+    , assertTerminalType
       "concrete map: multiple maps, single f"
       (T.unlines
         [ "map :: forall a b . (a -> b) -> [a] -> [b];"
@@ -582,7 +609,7 @@ unitTypeTests =
       , forallc RLang ["a"] (arrc RLang "vector" [varc RLang "a"])
       , arrc CLang "std::vector<$1>" [varc CLang "double"]
       ]
-    , exprTestGood
+    , assertTerminalType
       "infer type signature from concrete functions"
       (T.unlines
         [ "sqrt :: Num -> Num;" 
@@ -591,7 +618,7 @@ unitTypeTests =
         , "sqrt 42"
         ])
       [num, varc RLang "numeric"]
-    , exprTestGood
+    , assertTerminalType
       "calls cross-language"
       (T.unlines
         [ "f R :: a -> b;"
@@ -599,7 +626,7 @@ unitTypeTests =
         , "g (f 4);"
         ])
       [varc CLang "c"]
-    , exprTestGood
+    , assertTerminalType
       "language branching"
       (T.unlines
         [ "id R :: forall a . a -> a;"
@@ -608,7 +635,7 @@ unitTypeTests =
         , "id (sqrt 4);"
         ])
       [varc RLang "numeric"]
-    , exprTestGood
+    , assertTerminalType
       "obligate foreign call"
       (T.unlines
         [ "foo r :: forall a . (a -> a) -> a -> a;"
@@ -616,7 +643,7 @@ unitTypeTests =
         , "foo f 1"
         ])
       [forallc RLang ["a"] (varc RLang "a")]
-    , exprTestGood
+    , assertTerminalType
       "declarations represent all realizations"
       (T.unlines
         [ "sqrt :: Num -> Num;"

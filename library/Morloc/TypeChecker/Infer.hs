@@ -17,6 +17,7 @@ module Morloc.TypeChecker.Infer
   , infer
   , rename
   , unrename
+  , fromType
   ) where
 
 import Morloc.Namespace
@@ -742,10 +743,6 @@ infer' Nothing g1 (Declaration v e1) = do
       , esource = langOf t >>= (\l -> lookupSrc (v,l) g)
       }
 
-    getBoundVariables :: Expr -> [EVar]
-    getBoundVariables (LamE v e) = v : getBoundVariables e
-    getBoundVariables _ = []
-
 --  (x:A) in g
 -- ------------------------------------------- Var
 --  g |- x => A -| g
@@ -774,7 +771,7 @@ infer' lang g1 e0@(LamE v e2) = do
     (Just t2) -> do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
-      return (g4, [t3], ann e2' t3)
+      return (g4, [t3], ann (LamE v e2') t3)
     Nothing -> throwError $ OtherError "Bad thing #4"
 
 {-  g |- e1 => A* -| d_1
