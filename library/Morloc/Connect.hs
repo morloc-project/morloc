@@ -17,6 +17,7 @@ import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+import qualified Morloc.TypeChecker.Infer as MTI
 
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
@@ -366,9 +367,12 @@ toRealizations n m _ es ts = do
   where
     linkTypes :: [EType] -> [Type] -> [(EType, Type)]
     linkTypes es' [] = [(e, etype e) | e <- es']
-    linkTypes es' ts'
-      | length es' == length ts' = [(e, t) | e <- es', t <- ts', langOf t == (langOf . etype) e]
-      | otherwise = error "expected equal numbers of signature types and expression types"
+    linkTypes es' ts' = map (linkType [(langOf e, e) | e <- es']) ts'
+
+    linkType :: [(Maybe Lang, EType)] -> Type -> (EType, Type)
+    linkType es' t = case lookup (langOf t) es' of
+      (Just e) -> (e, t)
+      Nothing -> (MTI.fromType (langOf t) t, t)
 
     toRealization :: (EType, Type) -> Realization
     toRealization (e@(EType _ _ _ (Just (f, EV srcname))), t) =

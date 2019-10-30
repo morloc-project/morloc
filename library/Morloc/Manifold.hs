@@ -61,11 +61,11 @@ getUnpackers :: SerialMap -> Manifold -> MorlocMonad [Maybe MDoc]
 getUnpackers hash m =
   case mConcreteType m of
     (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
-    (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
+    (Just t) -> MM.throwError . TypeError $ "Unpackers must be functions, found: " <> MT.show' t
     Nothing ->
       case mAbstractType m of
         (Just (MFuncType _ ts _)) -> mapM (getUnpacker hash) ts
-        (Just _) -> MM.throwError . TypeError $ "Unpackers must be functions"
+        (Just t) -> MM.throwError . TypeError $ "Unpackers must be functions, found: " <> MT.show' t
         Nothing ->
           MM.throwError . TypeError $
           "No type signature found for this manifold: " <> MT.pretty m
