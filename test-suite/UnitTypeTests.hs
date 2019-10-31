@@ -51,15 +51,23 @@ unannotate = mapMaybe unannotate' where
   unannotate' (Signature v t) = Nothing
   unannotate' e = Just e
 
+-- assert the full expression with all annotations removed
 assertTerminalExpr :: String -> T.Text -> Expr -> TestTree
-assertTerminalExpr msg code expr = testCase msg $ do
+assertTerminalExpr = assertTerminalExpr' unannotate
+
+-- assert the full expression with complete sub-expression annotations
+assertTerminalExprWithAnnot :: String -> T.Text -> Expr -> TestTree
+assertTerminalExprWithAnnot = assertTerminalExpr' id 
+
+-- assert the last expression in the main module, process the expression with f
+assertTerminalExpr' :: ([Expr] -> [Expr]) -> String -> T.Text -> Expr -> TestTree
+assertTerminalExpr' f msg code expr = testCase msg $ do
   result <- API.runStack 0 (typecheck (readProgram Nothing code))
   case unres result of
     -- the order of the list is not important, so sort before comparing
-    (Right es') -> assertEqual "" expr (head . reverse . sort . unannotate . main $ es')
+    (Right es') -> assertEqual "" expr (head . reverse . sort . f . main $ es')
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
-
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
@@ -652,6 +660,48 @@ unitTypeTests =
         , "foo"
         ])
       [fun [num, num], fun [varc RLang "integer", varc RLang "numeric"]]
+
+    , assertTerminalType
+      "all internal concrete and general types are right"
+      (T.unlines
+        [ "snd :: forall a b . a -> b -> b;"
+        , "sqrt :: Num -> Num;"
+        , "sqrt Cpp :: \"double\" -> \"double\";"
+        , "foo x = snd x (sqrt x);"
+        , "foo"
+        ])
+      [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
+
+    , assertTerminalExprWithAnnot
+      "all internal concrete and general types are right"
+      (T.unlines
+        [ "snd :: forall a b . a -> b -> b;"
+        , "sqrt :: Num -> Num;"
+        , "sqrt Cpp :: \"double\" -> \"double\";"
+        , "foo x = snd x (sqrt x);"
+        ])
+      (Declaration (EV "foo")
+        (AnnE (LamE (EV "x")
+          (AnnE (AppE
+            (AnnE (AppE
+              (AnnE (VarE (EV "snd"))
+                [FunT (num) (FunT (num) (num))])
+              (AnnE (VarE (EV "x"))
+                [ num
+                , varc CppLang "double"])
+            ) [FunT num num])
+            (AnnE (AppE
+              (AnnE (VarE (EV "sqrt"))
+                [ FunT num num
+                , FunT (varc CppLang "double") (varc CppLang "double")])
+              (AnnE (VarE (EV "x"))
+                [ num
+                , varc CppLang "double"])
+            ) [ num
+              , varc CppLang "double"])
+          ) [num])
+        ) [FunT num num,FunT (varc CppLang "double") (varc CppLang "double")]
+      ))
 
     -- internal
     , exprTestFull
