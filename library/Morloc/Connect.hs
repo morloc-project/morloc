@@ -366,8 +366,9 @@ toRealizations n m _ es ts = do
   return . map toRealization $ linked 
   where
     linkTypes :: [EType] -> [Type] -> [(EType, Type)]
-    linkTypes es' [] = [(e, etype e) | e <- es']
-    linkTypes es' ts' = map (linkType [(langOf e, e) | e <- es']) ts'
+    linkTypes es' [] = [(e, etype e) | e <- es', (isJust . langOf) e]
+    linkTypes es' ts' = map (linkType [(langOf e, e) | e <- es'])
+                            (filter (isJust . langOf) ts')
 
     linkType :: [(Maybe Lang, EType)] -> Type -> (EType, Type)
     linkType es' t = case lookup (langOf t) es' of

@@ -66,7 +66,7 @@ getFData m = do
       , mid')
     Nothing ->
       MM.throwError . GeneratorError $
-      "No execution method found for language: " <> ML.showLangName lang
+      "No execution method found for language: " <> ML.showLangName lang <> MT.pretty m
 
 isExported :: Manifold -> Bool
 isExported m
