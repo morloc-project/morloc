@@ -183,7 +183,8 @@ getGeneralType xs = case [t | t <- xs, langOf t == Nothing] of
 -- from the nexus as a subcommand the user can call with arguments x and y.
 -- "bar" is the function that is called in the application "bar x (baz 42 y)".
 module2manifolds :: Module -> Expr -> Program [Manifold]
-module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) ts)) = do
+module2manifolds m (Declaration (EV lambdaName) e0@(AnnE lambda@(LamE _ _) _)) = do
+  let ts = functionTypes e0
   gentype <- getGeneralType ts
   i <- getId
   exported <- isExported (moduleName m) (EV lambdaName)
@@ -202,6 +203,9 @@ module2manifolds m (Declaration (EV lambdaName) (AnnE lambda@(LamE _ _) ts)) = d
         (TypeSet (Just e) rs) -> do
           args <- zipWithM (exprAsArgument vars m) [0 ..] es
           declared <- isDeclared (moduleName m) (EV functionName)
+          
+          -- say $ prettyScream "module2manifolds Declaration"
+
           realizations <- toRealizations functionName m (length args) rs ts
           return . (flip (:)) (concat . map snd $ args) $
             Manifold
@@ -237,6 +241,9 @@ module2manifolds m (Signature ev@(EV v) t) = do
       i <- getId
       (TypeSet _ rs) <- lookupVar ev m
       let args = map ArgPosi (take (nargs (etype t)) [0 ..])
+          
+      -- say $ prettyScream "module2manifolds Signature"
+
       realizations <- toRealizations v m (length args) rs []
       return
         [ Manifold
@@ -270,9 +277,10 @@ exprAsArgument ::
 exprAsArgument bnd _ _ (AnnE (VarE v@(EV v')) _)
   | elem v bnd = return (ArgName v', [])
   | otherwise = return (ArgNest v', [])
-exprAsArgument bnd m _ (AnnE (AppE (AnnE e1 ts) e2) _) =
+exprAsArgument bnd m _ (AnnE e0@(AppE (AnnE e1 _) e2) _) =
   case uncurryApplication e1 e2 of
     (f, es) -> do
+      let ts = functionTypes e0
       gentype <- getGeneralType ts
       let v@(EV mname) = exprAsFunction f
       defined <- isDeclared (moduleName m) v
@@ -282,6 +290,9 @@ exprAsArgument bnd m _ (AnnE (AppE (AnnE e1 ts) e2) _) =
         (TypeSet Nothing _) -> error "ah fuck shit"
         (TypeSet (Just etyp) rs) -> do
           args <- zipWithM (exprAsArgument bnd m) [0 ..] es
+          
+          -- say $ prettyScream "exprAsArgument"
+
           realizations <- toRealizations mname m (length args) rs ts
           let newManifold =
                 Manifold
@@ -320,6 +331,13 @@ exprAsArgument _ _ _ (AnnE (LamE _ _) ts) = do
   case gentype of
     (FunT _ _) -> error "lambdas not yet supported"
 exprAsArgument _ _ _ _ = error "expected annotated expression"
+
+functionTypes :: Expr -> [Type]
+functionTypes (AnnE (VarE _) ts) = ts
+functionTypes (AnnE (LamE _ e) _) = functionTypes e
+functionTypes (AnnE e _) = functionTypes e
+functionTypes (AppE e _) = functionTypes e
+functionTypes e = error $ "Expected a function, found: " <> show e
 
 makeURI :: MVar -> Integer -> URI
 makeURI (MV v) i = URI $ v <> "_" <> MT.show' i
@@ -363,6 +381,11 @@ toRealizations n m _ [] [] = do
         ]
 toRealizations n m _ es ts = do
   let linked = linkTypes es ts
+
+  -- say $ prettyScream "-------------------------------"
+  -- say $ "n: " <> pretty n
+  -- say $ "linked: " <> (align . vsep . map (\(e,t)->(prettyGreenType . etype) e <> " | " <> prettyGreenType t)) linked
+
   return . map toRealization $ linked 
   where
     linkTypes :: [EType] -> [Type] -> [(EType, Type)]
@@ -520,7 +543,7 @@ etype2mtype n e = type2mtype Set.empty (etype e)
     type2mtype _ (ExistT _ []) = error "found existential type"
     type2mtype bnds (Forall (TV _ v) t) = (type2mtype (Set.insert v bnds) t)
     type2mtype bnds (FunT t1 t2) =
-      let ts = type2mtype bnds t1 : functionTypes bnds t2
+      let ts = type2mtype bnds t1 : functionTypes' bnds t2
        in MFuncType meta (init ts) (last ts)
     type2mtype bnds (ArrT (TV _ v) ts)
       | Set.member v bnds =
@@ -535,9 +558,9 @@ etype2mtype n e = type2mtype Set.empty (etype e)
         metaEmpty
         "RecordEntry"
         [MConcType metaEmpty "Str" [], type2mtype bnds t]
-    functionTypes :: Set.Set Name -> Type -> [MType]
-    functionTypes bnds (FunT t1 t2) = type2mtype bnds t1 : functionTypes bnds t2
-    functionTypes bnds t = [type2mtype bnds t]
+    functionTypes' :: Set.Set Name -> Type -> [MType]
+    functionTypes' bnds (FunT t1 t2) = type2mtype bnds t1 : functionTypes' bnds t2
+    functionTypes' bnds t = [type2mtype bnds t]
 
 -- | Lookup a variable in a given module. If collect any type information
 -- (including realizations). Whether the variable is found or not, recurse into
