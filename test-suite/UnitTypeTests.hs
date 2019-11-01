@@ -665,6 +665,7 @@ unitTypeTests =
       "all internal concrete and general types are right"
       (T.unlines
         [ "snd :: forall a b . a -> b -> b;"
+        , "snd Cpp :: forall a b . a -> b -> b;"
         , "sqrt :: Num -> Num;"
         , "sqrt Cpp :: \"double\" -> \"double\";"
         , "foo x = snd x (sqrt x);"
@@ -676,6 +677,7 @@ unitTypeTests =
       "all internal concrete and general types are right"
       (T.unlines
         [ "snd :: forall a b . a -> b -> b;"
+        , "snd Cpp :: forall a b . a -> b -> b;"
         , "sqrt :: Num -> Num;"
         , "sqrt Cpp :: \"double\" -> \"double\";"
         , "foo x = snd x (sqrt x);"
@@ -685,23 +687,23 @@ unitTypeTests =
           (AnnE (AppE
             (AnnE (AppE
               (AnnE (VarE (EV "snd"))
-                [FunT (num) (FunT (num) (num))])
+                [ fun [num, num, num]
+                , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
               (AnnE (VarE (EV "x"))
-                [ num
-                , varc CppLang "double"])
-            ) [FunT num num])
+                [num,varc CppLang "double"]))
+              [ FunT num num
+              , FunT (varc CppLang "double") (varc CppLang "double")])
             (AnnE (AppE
               (AnnE (VarE (EV "sqrt"))
                 [ FunT num num
                 , FunT (varc CppLang "double") (varc CppLang "double")])
               (AnnE (VarE (EV "x"))
                 [ num
-                , varc CppLang "double"])
-            ) [ num
-              , varc CppLang "double"])
-          ) [num])
-        ) [FunT num num,FunT (varc CppLang "double") (varc CppLang "double")]
-      ))
+                , varc CppLang "double"]))
+              [num,varc CppLang "double"]))
+            [num,varc CppLang "double"]))
+          [ FunT num num
+          , FunT (varc CppLang "double") (varc CppLang "double")]))
 
     -- internal
     , exprTestFull

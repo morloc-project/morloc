@@ -270,7 +270,7 @@ collate (e:es) = do
 -- | Merge two annotated expressions into one, fail if the expressions are not
 -- equivalent.
 collateOne :: Expr -> Expr -> Stack Expr
-collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> pure (nub $ ts1 ++ ts2)
+collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> collateTypes ts1 ts2
 -- 
 collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e12 e22
 collateOne (LamE v1 e1) (LamE v2 e2)
@@ -303,6 +303,30 @@ collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing 
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
 collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
 collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
+
+collateTypes :: [Type] -> [Type] -> Stack [Type]
+collateTypes ts1 ts2
+  = mapM (collateByLang . snd)
+  . groupSort
+  $ [(langOf t, t) | t <- nub (ts1 ++ ts2)]
+  where
+    collateByLang :: [Type] -> Stack Type
+    collateByLang [] = throwError . OtherError $ "This should be impossible"
+    collateByLang [t] = return t
+    collateByLang (t1:ts) = foldM moreSpecific t1 ts
+
+    moreSpecific :: Type -> Type -> Stack Type
+    moreSpecific (FunT t11 t12) (FunT t21 t22) = FunT <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
+    moreSpecific (ArrT v1 ts1) (ArrT v2 ts2) = ArrT v1 <$> zipWithM moreSpecific ts1 ts2
+    moreSpecific (RecT ts1) (RecT ts2) = RecT <$> zipWithM mergeEntry (sort ts1) (sort ts2) where
+      mergeEntry (v1, t1) (v2, t2)
+        | v1 == v2 = (,) <$> pure v1 <*> moreSpecific t1 t2
+        | otherwise = throwError . OtherError $ "Cannot collate records with unequal keys"
+    moreSpecific (ExistT _ _) t = return t
+    moreSpecific t (ExistT _ _) = return t
+    moreSpecific (Forall _ _) t = return t
+    moreSpecific t (Forall _ _) = return t
+    moreSpecific t _ = return t
 
 
 -- | merge the new data from a signature with any prior type data

@@ -91,7 +91,9 @@ getPacker hash m =
         (Just n) -> pretty n
         Nothing -> error "You should not be reading this"
     Nothing ->
-      error (MT.unpack $ "No packer found for this type: " <> MT.pretty m)
+      error . MT.unpack
+        $  "No packer found for this serialmap and type: "
+        <> MT.pretty hash <> "\n" <> MT.pretty m
   where
     packerType :: Maybe MType
     packerType =

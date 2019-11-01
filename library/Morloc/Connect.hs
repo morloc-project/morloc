@@ -270,7 +270,7 @@ exprAsArgument ::
 exprAsArgument bnd _ _ (AnnE (VarE v@(EV v')) _)
   | elem v bnd = return (ArgName v', [])
   | otherwise = return (ArgNest v', [])
-exprAsArgument bnd m _ (AnnE (AppE e1 e2) ts) =
+exprAsArgument bnd m _ (AnnE (AppE (AnnE e1 ts) e2) _) =
   case uncurryApplication e1 e2 of
     (f, es) -> do
       gentype <- getGeneralType ts
