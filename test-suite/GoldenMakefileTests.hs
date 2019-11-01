@@ -28,5 +28,5 @@ goldenMakefileTest msg testdir =
 makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- SD.makeAbsolute path
-  SD.withCurrentDirectory abspath
-    (SP.callProcess "make" [] >> SP.callProcess "make" ["clean"])
+  SP.callProcess "make" ["-C", abspath, "--quiet"]
+  SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]

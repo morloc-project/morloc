@@ -546,9 +546,8 @@ etype2mtype n e = type2mtype Set.empty (etype e)
       let ts = type2mtype bnds t1 : functionTypes' bnds t2
        in MFuncType meta (init ts) (last ts)
     type2mtype bnds (ArrT (TV _ v) ts)
-      | Set.member v bnds =
-        error $ "currently I can't use bound variables in ArrT"
-      | otherwise = MAbstType meta v (map (type2mtype bnds) ts)
+      | Set.member v bnds = MAbstType meta v (map (type2mtype bnds) ts)
+      | otherwise = MConcType meta v (map (type2mtype bnds) ts)
     type2mtype bnds (RecT fs) =
       MConcType meta "Record" (map (recordEntry bnds) fs)
     type2mtype _ t = error $ "cannot cast type: " <> show t
