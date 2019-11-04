@@ -11,10 +11,11 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ golden "Golden test for C++" "1_cpp"
-      , golden "Golden test for R" "2_r"
-      , golden "Golden test for math" "3_math"
-      , golden "Golden test for C++ map function" "4_map"
+      [ golden "simple C++" "1_cpp"
+      , golden "simple R" "2_r"
+      , golden "basic math" "3_math"
+      , golden "C++ map function" "4_map"
+      , golden "nested C++ map functions" "5_nested"
       , unitTypeTests
       , propertyTypeTests
       ]

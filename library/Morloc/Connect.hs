@@ -295,7 +295,7 @@ exprAsArgument bnd m i (AnnE (VarE v@(EV v')) argtypes)
         (Just (Declaration _ e@(AnnE (RecE   _) _))) -> exprAsArgument bnd m i e
         (Just e) -> do
           ms' <- module2manifolds m e
-          let m' = (head . reverse $ ms') { mPassed = True }
+          let m' = (head . reverse $ ms') { mPassed = True, mExported = False }
           return (ArgNest ("m" <> (MT.show' . mid) m'), init ms' ++ [m'])
         Nothing -> do
           i <- getId
