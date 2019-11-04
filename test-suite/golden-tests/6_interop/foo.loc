@@ -1,0 +1,18 @@
+source R ("rbinom", "mean");
+import rbase;
+import math (fibonacci, sqrt);
+
+export mean;
+export rbinom;
+export fibonacci;
+export sqrtfibmean;
+
+rbinom :: Num -> Num -> Num -> Num;
+rbinom R :: integer -> integer -> numeric -> vector integer;
+
+mean :: [Num] -> Num;
+mean R :: vector numeric -> numeric;
+
+sqrtfibmean n = sqrt (mean (fibonacci n));
+--               C     R       C
+-----------------^-----^-------^

@@ -4,14 +4,14 @@
 #include <stdio.h>
 
 std::string packDouble(double x);
-double unpackDouble(const char* json);
+double unpackDouble(std::string json);
 
 std::string packDouble(double x){
     return(std::to_string(x));
 }
 
-double unpackDouble(const char* json){
-    return(std::stod(json));
+double unpackDouble(std::string json){
+    return(std::stod(json.c_str()));
 }
 
 #endif

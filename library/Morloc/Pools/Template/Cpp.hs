@@ -83,7 +83,7 @@ gLang' :: Lang
 gLang' = CppLang
 
 gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
+gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "std::string" []
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case (gaArg ga, gaType ga) of
@@ -154,7 +154,10 @@ gTry' td = gCall' (tryCmd td) (tryArgs td)
 
 -- "foreign_call" is defined in "cbase.h"
 gForeignCall' :: ForeignCallDoc -> MDoc
-gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
+gForeignCall' fc = gCall' "foreign_call" [hsep $ punctuate " + " (joinStr (fcdCall fc) : fcdArgs fc)]
+  where
+    joinStr xs
+      = "\"" <> (hsep $ map (pretty . MT.undquote . render) xs) <+> "\""
 
 gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
