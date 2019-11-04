@@ -12,10 +12,10 @@ before_install:
 
 # stack will handle the installation of GHC
 script:
+  - stack --no-terminal --install-ghc
   - morloc install rbase
   - morloc install math
   - morloc install cppbase
-  - stack --no-terminal --install-ghc
 
 # Caching so the next build will be fast too.
 cache:
