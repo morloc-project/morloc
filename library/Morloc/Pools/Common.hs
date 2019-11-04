@@ -205,7 +205,7 @@ makeCisManifold g h cs ms m = do
            <$> pure (getConcreteArgTypes g m) -- [Maybe MDoc]
            <*> packersIfNeeded                -- Maybe [MDoc]
            <*> pure (mArgs m)                 -- [Argument]
-  args <- sequence $ zipWith makeArg (iArgs "a") argTypes
+  args <- fmap catMaybes . zipWithM makeArg (iArgs "a") $ argTypes
   let name = callIdToName g m
       comments
         =  (gComment g) "cis manifold" <> line
@@ -217,16 +217,22 @@ makeCisManifold g h cs ms m = do
       { gfComments = comments
       , gfReturnType = getConcreteReturnType g m
       , gfName = name
-      , gfArgs =
-          zip
-            (repeat $ Just . gShowType g $ gSerialType g)
-            (map pretty (mBoundVars m))
+      , gfArgs = zip manifoldArgTypes (map pretty (mBoundVars m))
       , gfBody =
           (vsep args <>
-           line <> (gReturn g) ((gCall g) calledFunction (take n (iArgs "a"))))
+           line <> (gReturn g) ((gCall g) calledFunction (zipWith returnArgType (iArgs "a") argTypes)))
       }
   where
     n = length (mArgs m)
+
+    manifoldArgTypes =
+      if mPassed m
+        then getConcreteArgTypes g m
+        else repeat . Just . gShowType g $ gSerialType g
+
+    returnArgType :: MDoc -> (Maybe MDoc, Maybe MDoc, Argument) -> MDoc
+    returnArgType _ (_, _, ArgNest x) = pretty x
+    returnArgType x _ = x
 
     calledFunction :: MDoc
     calledFunction
@@ -236,16 +242,17 @@ makeCisManifold g h cs ms m = do
 
     packersIfNeeded :: MorlocMonad ([Maybe MDoc])
     packersIfNeeded
-      | Man.isMorlocCall m = return $ repeat Nothing
+      | Man.isMorlocCall m || mPassed m = return $ repeat Nothing
       | otherwise = Man.getUnpackers h m
 
     findComposition :: Name -> Manifold
     findComposition n' = (filter (\x -> mComposition x == (Just n')) ms) !! 0
 
-    makeArg :: MDoc -> (Maybe MDoc, Maybe MDoc, Argument) -> MorlocMonad MDoc
+    makeArg :: MDoc -> (Maybe MDoc, Maybe MDoc, Argument) -> MorlocMonad (Maybe MDoc)
+    makeArg lhs (ctype, unpacker, ArgNest _) = return Nothing
     makeArg lhs (ctype, unpacker, arg) = do
       argDoc <- makeArg' (unpacker, arg)
-      return . gAssign g $
+      return . Just . gAssign g $
         GeneralAssignment
           {gaType = ctype, gaName = lhs, gaValue = argDoc, gaArg = Just arg}
 
@@ -372,9 +379,10 @@ writeArgument g ms _ (ArgNest n) =
     [] ->
       case filter (\m -> mMorlocName m == n && mSourced m) ms of
         (m:_) -> return $ callIdToName g m
-        [] ->
-          MM.throwError $
-          GeneratorError ("Could not find unbound value '" <> n <> "'")
+        [] -> case filter (\m -> render (callIdToName g m) == n) ms of
+          (m:_) -> return (callIdToName g m)
+          [] -> MM.throwError $
+            GeneratorError ("Could not find unbound value '" <> n <> "'")
 writeArgument g ms xs (ArgCall k) = do
   m <-
     case lookupKey ms k of

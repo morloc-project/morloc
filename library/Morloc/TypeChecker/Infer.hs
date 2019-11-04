@@ -38,7 +38,7 @@ typecheck ms = do
   let graph = Map.fromList $ map mod2pair ms
   mods' <- path graph
   case mapM (flip Map.lookup $ mods) mods' of
-    (Just mods'') -> fmap reverse $ typecheckModules (Map.empty) mods''
+    (Just mods'') -> typecheckModules (Map.empty) mods''
     Nothing -> throwError $ OtherError "bad thing #1"
   where
     mod2pair :: Module -> (MVar, Set.Set MVar)
@@ -110,7 +110,7 @@ path m
 
 typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
 typecheckExpr g e = do
-  es <- fmap sort (mapM rename e)
+  es <- mapM rename e
   (g', es') <- typecheckExpr' g [] es
   let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
   return $ (g', map (generalizeE . unrename . apply g') es'')
@@ -675,6 +675,7 @@ infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
     t = VarT (TV Nothing "Bool")
 
 -- Src=>
+-- --- FIXME: the expressions are now NOT sorted ... need to fix
 -- Since the expressions in a Morloc script are sorted before being
 -- evaluated, the SrcE expressions will be considered before the Signature
 -- and Declaration expressions. Thus every term that originates in source
@@ -1043,4 +1044,8 @@ derive' g e t@(ExistT v@(TV lang _) []) =
         (g2, _, e2) <- check g e t1
         return (g2, FunT t1 t2, e2)
       _ -> throwError . OtherError $ "Expected a function"
-derive' _ _ _ = throwError NonFunctionDerive
+derive' _ e t = do
+  say $ prettyScream "ERROR!!!"
+  say $ "e: " <> prettyExpr e
+  say $ "t: " <> prettyGreenType t
+  throwError NonFunctionDerive

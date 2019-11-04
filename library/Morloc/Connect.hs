@@ -199,7 +199,8 @@ module2manifolds m (Declaration (EV lambdaName) e0@(AnnE lambda@(LamE _ _) _)) =
     (vars, (exprAsFunction -> EV functionName), es) -> do
       typeset <- lookupVar (EV functionName) m
       case typeset of
-        (TypeSet Nothing _) -> error "no general type"
+        (TypeSet Nothing _) -> error $
+          "No general type for " ++ MT.unpack functionName
         (TypeSet (Just e) rs) -> do
           args <- zipWithM (exprAsArgument vars m) [0 ..] es
           declared <- isDeclared (moduleName m) (EV functionName)
@@ -218,6 +219,7 @@ module2manifolds m (Declaration (EV lambdaName) e0@(AnnE lambda@(LamE _ _) _)) =
               , mExported = exported
               , mCalled = True
               , mDefined = declared
+              , mPassed = False
               , mComposition = Just lambdaName
               , mBoundVars = [v' | (EV v') <- vars]
               , mArgs = map fst args
@@ -255,6 +257,7 @@ module2manifolds m (Signature ev@(EV v) t) = do
             , mExported = exported
             , mCalled = False
             , mDefined = declared
+            , mPassed = False
             , mComposition = Nothing
             , mBoundVars = []
             , mArgs = args
@@ -268,15 +271,53 @@ nargs :: Type -> Int
 nargs (FunT _ t2) = 1 + nargs t2
 nargs _ = 0
 
+lookupExpr :: Module -> EVar -> Maybe Expr
+lookupExpr m v = case [e | e@(Declaration v' _) <- moduleBody m, v' == v] of
+  [e] -> Just e
+  [ ] -> Nothing
+
 exprAsArgument ::
      [EVar]
   -> Module
   -> Int -- ^ 0-indexed position of the argument
   -> Expr
   -> Program (Argument, [Manifold])
-exprAsArgument bnd _ _ (AnnE (VarE v@(EV v')) _)
+exprAsArgument bnd m i (AnnE (VarE v@(EV v')) argtypes)
   | elem v bnd = return (ArgName v', [])
-  | otherwise = return (ArgNest v', [])
+  | otherwise =
+      case lookupExpr m v of
+        (Just (Declaration _ e@(AnnE (ListE  _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (TupleE _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (AppE _ _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (NumE   _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (LogE   _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (StrE   _) _))) -> exprAsArgument bnd m i e
+        (Just (Declaration _ e@(AnnE (RecE   _) _))) -> exprAsArgument bnd m i e
+        (Just e) -> do
+          ms' <- module2manifolds m e
+          let m' = (head . reverse $ ms') { mPassed = True }
+          return (ArgNest ("m" <> (MT.show' . mid) m'), init ms' ++ [m'])
+        Nothing -> do
+          i <- getId
+          Just (TypeSet gentype ts) <- lookupTypeSet (moduleName m) v
+          realizations <- toRealizations v' m (length argtypes) ts argtypes
+          let uri = makeURI (moduleName m) i
+          let man = Manifold {
+              mid = i
+            , mCallId = uri
+            , mAbstractType = fmap (etype2mtype (Just v')) gentype
+            , mRealizations = realizations
+            , mMorlocName = v'
+            , mExported = False
+            , mCalled = False
+            , mDefined = False
+            , mPassed = True
+            , mComposition = Nothing
+            , mBoundVars = ["x" <> MT.show' i' | i' <- take (nargs (argtypes !! 0)) [0..]]
+            , mArgs = [ArgPosi i' | i' <- take (nargs (argtypes !! 0)) [0..]]
+            }
+          return (ArgNest ("m" <> MT.show' i), [man])
+
 exprAsArgument bnd m _ (AnnE e0@(AppE (AnnE e1 _) e2) _) =
   case uncurryApplication e1 e2 of
     (f, es) -> do
@@ -305,6 +346,7 @@ exprAsArgument bnd m _ (AnnE e0@(AppE (AnnE e1 _) e2) _) =
                   , mExported = elem v (moduleExports m)
                   , mCalled = True
                   , mDefined = defined
+                  , mPassed = False
                   , mComposition = Nothing
                   , mBoundVars = [b | (EV b) <- bnd]
                   , mArgs = map fst args

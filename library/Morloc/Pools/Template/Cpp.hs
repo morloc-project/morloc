@@ -175,7 +175,8 @@ gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 gShowType' :: MType -> MDoc
 gShowType' t = pretty $ MTM.showMType f t
   where
-    f = \_ _ -> error "Currently passing functions is not supported in C++"
+    f :: [Name] -> Name -> Name
+    f inputs output = render $ pretty output <> "(*f)" <> tupled (map pretty inputs)  
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>

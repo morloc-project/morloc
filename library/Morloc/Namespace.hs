@@ -186,6 +186,10 @@ data Manifold =
     -- ^ Is this function called within a Morloc composition?
     , mDefined :: !Bool
     -- ^ Is this a Morloc function
+    , mPassed :: !Bool
+    -- ^ Is this function passed as an argument to a concrete function? If so,
+    -- then its inputs must match the arguments passed to it by the concrete
+    -- function (i.e., they must not be serialized).
     , mComposition :: Maybe Name
     -- ^ The name of the declaration function. For example, in
     -- @foo x = sqrt x@, "foo" is mComposition

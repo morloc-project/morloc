@@ -14,6 +14,7 @@ main = do
       [ golden "Golden test for C++" "1_cpp"
       , golden "Golden test for R" "2_r"
       , golden "Golden test for math" "3_math"
+      , golden "Golden test for C++ map function" "4_map"
       , unitTypeTests
       , propertyTypeTests
       ]

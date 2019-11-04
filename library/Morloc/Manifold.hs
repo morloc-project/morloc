@@ -126,7 +126,7 @@ getUsedManifolds lang ms = filter buildIt ms
     buildIt :: Manifold -> Bool
     buildIt m =
       let mc = determineManifoldClass lang m
-       in mc == Cis || mc == Source
+       in (mc == Cis || mc == Source) && not (mPassed m)
 
 -- | Determine if the first MType object is equal to, or a specialization of,
 -- the second MType object.
