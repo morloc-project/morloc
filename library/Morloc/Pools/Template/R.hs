@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Pools.Template.R
@@ -11,17 +11,18 @@ Stability   : experimental
 
 module Morloc.Pools.Template.R (generate) where
 
-import Morloc.Global
-import Morloc.Quasi
+import Morloc.Data.Doc
+import Morloc.Namespace
 import Morloc.Pools.Common
-import Morloc.Data.Doc hiding ((<$>))
+import Morloc.Quasi
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g asImport
 
-asImport :: MT.Text -> MorlocMonad Doc
-asImport s = return . text' $ s
+asImport :: MT.Text -> MorlocMonad MDoc
+asImport s = return . pretty $ s
 
 g = Grammar {
       gLang        = gLang'
@@ -56,60 +57,60 @@ gLang' = RLang
 gSerialType' :: MType
 gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "character" []
 
-gAssign' :: GeneralAssignment -> Doc
+gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
   (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ("::" <+> t) 
   Nothing  -> gaName ga <> " <- " <> gaValue ga 
 
-gCall' :: Doc -> [Doc] -> Doc
+gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' n args = n <> tupled args
 
-gFunction' :: GeneralFunction -> Doc
+gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
   =  gComment' (gfComments gf)
   <> gfName gf <> " <- function"
   <> tupled (map snd (gfArgs gf))
   <> braces (line <> gIndent' (gfBody gf) <> line)
 
-gId2Function' :: Integer -> Doc
-gId2Function' i = "m" <> (text' (MT.show' i))
+gId2Function' :: Integer -> MDoc
+gId2Function' i = "m" <> (pretty (MT.show' i))
 
-gComment' :: Doc -> Doc
+gComment' :: MDoc -> MDoc
 gComment' d = "# " <> d
 
-gReturn' :: Doc -> Doc
+gReturn' :: MDoc -> MDoc
 gReturn' = id
 
-gQuote' :: Doc -> Doc
+gQuote' :: MDoc -> MDoc
 gQuote' = dquotes
 
 gTrue' = "TRUE"
 gFalse' = "FALSE"
 
 -- FIXME: make portable (replace "/" with the appropriate separator)
-gImport' :: Doc -> Doc -> Doc
+gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ srcpath = gCall' "source" [gQuote' srcpath]
 
-gList' :: [Doc] -> Doc
+gList' :: [MDoc] -> MDoc
 gList' xs = "c" <> tupled xs
 
-gTuple' :: [Doc] -> Doc
+gTuple' :: [MDoc] -> MDoc
 gTuple' xs = "list" <> tupled xs
 
-gRecord' :: [(Doc,Doc)] -> Doc
+gRecord' :: [(MDoc, MDoc)] -> MDoc
 gRecord' xs = "list" <> tupled (map (\(k,v) -> k <> "=" <> v) xs)
 
-gIndent' :: Doc -> Doc
+gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
 
-gTry' :: TryDoc -> Doc
+gTry' :: TryDoc -> MDoc
 gTry' t = gCall' ".morloc_try"
   $  ["f=" <> tryCmd t]
   ++ [("args=" <> gTuple' (tryArgs t))]
   ++ [ ".name=" <> dquotes (tryMid t)
      , ".file=" <> dquotes (tryFile t)]
 
-gUnpacker' :: UnpackerDoc -> Doc
+gUnpacker' :: UnpackerDoc -> MDoc
 gUnpacker' u = gCall' ".morloc_unpack"
   [ udUnpacker u
   , udValue u
@@ -117,25 +118,27 @@ gUnpacker' u = gCall' ".morloc_unpack"
   , ".pool=" <> dquotes (udFile u)
   ]
 
-gSignature' :: GeneralFunction -> Doc
+gSignature' :: GeneralFunction -> MDoc
 gSignature' gf
   =   maybe "?" id (gfReturnType gf)
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
-gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r xs x var
   =   var <+> "<-"
   <+> "switch"
-  <> tupled ([x] ++ map (\x -> "`" <> l x <> "`" <> "=" <> r x) xs)
+  <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
 
-gCmdArgs' :: [Doc]
-gCmdArgs' = map (\i -> "args[[" <> integer i <> "]]") [2..]
+gCmdArgs' :: [MDoc]
+gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]
 
-gShowType' :: MType -> Doc
-gShowType' = mshow
+gShowType' :: MType -> MDoc
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f = \_ _ -> error "Currently passing functions is not supported in R"
 
-gForeignCall' :: ForeignCallDoc -> Doc
+gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' f = gCall' ".morloc_foreign_call" $
   [ "cmd=" <> hsep (take 1 (fcdCall f))
   , "args=" <> gList' ((drop 1 (fcdCall f)) ++ fcdArgs f)
@@ -143,7 +146,7 @@ gForeignCall' f = gCall' ".morloc_foreign_call" $
   , ".name=" <> dquotes (fcdMid f)
   ]
 
-gMain' :: PoolMain -> MorlocMonad Doc
+gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#!/usr/bin/env Rscript
   
 #{line <> vsep (pmSources pm)}

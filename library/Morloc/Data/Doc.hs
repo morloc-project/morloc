@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {-|
 Module      : Morloc.Data.Doc
 Description : A wrapper around Leijen's text builder
@@ -10,42 +8,49 @@ Stability   : experimental
 
 This module re-exports Leijen's text builder along with a few other utilities.
 -}
-
 module Morloc.Data.Doc
-  ( 
-      module Text.PrettyPrint.Leijen.Text
-    , render
-    , render'
-    , text'
-    , textEsc'
-    , tupledNoFold
+  ( module Data.Text.Prettyprint.Doc
+  , module Data.Text.Prettyprint.Doc.Render.Text
+  , putDoc
+  , render
+  , render'
+  , textEsc'
+  , tupledNoFold
+    -- ** These are not strictly necessary, since @pretty@ could be used, but
+    -- they avoid the requirements of an explicity type signature.
+  , int
+  , integer
   ) where
 
-import Text.PrettyPrint.Leijen.Text
+import Data.Monoid ((<>))
 import qualified Data.Text as DT
 import qualified Data.Text.Lazy as DL
+import Data.Text.Prettyprint.Doc hiding ((<>))
+import Data.Text.Prettyprint.Doc.Render.Text
 
-render :: Doc -> DT.Text
-render = displayTStrict . renderPretty 0.5 70
+render :: Doc ann -> DT.Text
+render = renderStrict . layoutPretty defaultLayoutOptions
 
-render' :: Doc -> String
-render' = DT.unpack . render
+render' :: Doc ann -> String
+render' = show -- NOTE: This ignores layouts
 
-text' :: DT.Text -> Doc
-text' = text . DL.fromStrict
+int :: Int -> Doc ann
+int = pretty
 
+integer :: Integer -> Doc ann
+integer = pretty
 
 -- | a tupled function that does not fold long lines (folding breaks commenting)
-tupledNoFold :: [Doc] -> Doc
+tupledNoFold :: [Doc ann] -> Doc ann
 tupledNoFold [] = ""
 tupledNoFold (x:xs) = parens (foldl (\l r -> l <> "," <+> r) x xs)
 
-
-textEsc' :: DT.Text -> Doc
-textEsc' lit = (dquotes . string . DL.fromStrict) $ DT.concatMap escapeChar lit where
-  escapeChar '\n' = "\\n"
-  escapeChar '\t' = "\\t"
-  escapeChar '\r' = "\\r"
-  escapeChar '"'  = "\\\""
-  escapeChar '\\' = "\\\\"
-  escapeChar c    = DT.singleton c
+textEsc' :: DT.Text -> Doc ann
+textEsc' lit = (dquotes . pretty) $ DT.concatMap escapeChar lit
+  where
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar '"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar c = DT.singleton c

@@ -1,3 +1,11 @@
+0.18.0 [2019.11.04]
+
+ * Add bidirectional type system
+ * Allow parameterized concrete types
+ * Allow higher-order functions
+ * Allow properties to contain multiple terms 
+ * Add many tests
+
 0.17.4 [2019.06.29]
 
  * Add C and C++ handling

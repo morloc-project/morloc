@@ -40,10 +40,7 @@ packages:
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
-  - rdf4h-3.1.0
   - hgal-2.0.0.2
-  - github: robstewart57/hsparql
-    commit: 1f54b485bf9c5d892c50af1b0740cf6bc5ff4071
 
 # Override default flag values for local packages and extra-deps
 # flags: {}

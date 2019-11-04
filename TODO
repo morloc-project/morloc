@@ -5,8 +5,8 @@
 # RDF representation
 
  [ ] Write specification
- [ ] Handle import scoping (maybe follow R environment model)
- [ ] Remove dependency on `arq` (too slow)
+ [x] Handle import scoping (maybe follow R environment model)
+ [x] Remove dependency on `arq` (too slow)
 
 # Error reporting
 
@@ -42,13 +42,16 @@
 
 # typechecking
 
+ [x] Add a full Hindley-Milner type inference system, this is just one layer of
+     the type system, but is an essential one. Eventually this can be ported
+     to the rule-engine.
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
- [ ] port this typechecker to Morloc
+ [x] port this typechecker to Morloc
 
 # Features
 
  [ ] constraint system
- [ ] add higher-order functions
+ [x] add higher-order functions
  [ ] demonstrate parameter handling
  [ ] add sum types
  [ ] allow function docstrings
@@ -57,9 +60,9 @@
 
  * add support for more languages
    [ ] bash
-   [.] C
+   [+] C
    [ ] Haskell
-   [ ] C++
+   [+] C++
 
 # Documentation
 
@@ -76,11 +79,14 @@
 # Libraries
 
  * Extend the libraries
-   [ ] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
+   [x] Add higher-order function libraries (map, foldl, foldr, reduce, filter).
        This will require handling for choosing a concrete function from among
        many language-specific alternatives. In C-morloc, the user specified the
        language of each function. I want to automate the choice.
    [ ] Add taxonomy library
+   [ ] Add `math` library
+       [x] basic functions from `math.h`
+       [ ] advanced functions from GNU Scientific Library
    [ ] Add `learning` library for machine learning
    [ ] Add `stat` library
    [ ] Add `physics` library

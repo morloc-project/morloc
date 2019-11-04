@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : C
@@ -14,14 +14,13 @@ module Morloc.Pools.Template.Cpp
   generate
 ) where
 
-import Morloc.Global
-import Morloc.Manifold as Man
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import Morloc.Data.Doc hiding ((<$>))
-import Morloc.Quasi
+import Morloc.Data.Doc
+import Morloc.Namespace
 import Morloc.Pools.Common
-import qualified Data.Map.Strict as Map
+import Morloc.Quasi
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.System as MS
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g wrapIncludeString
@@ -36,11 +35,19 @@ generate = defaultCodeGenerator g wrapIncludeString
 -- quoting seems more reasonable, for now. This might change only if I start
 -- loading the morloc libraries into the system directories (which might be
 -- reasonable), though still, quotes would work.
+--
+-- UPDATE: The build system will now read the source paths from the Script
+-- object and write an `-I${MORLOC_HOME}/lib/${MORLOC_PACKAGE}` argument for
+-- g++. This will tell g++ where to look for headers. So now in the generated
+-- source code I can just write the basename. This makes the generated code
+-- neater (no hard-coded local paths), but now the g++ compiler will search
+-- through all the module paths for each file, which introduces the possibility
+-- of name conflicts.
 wrapIncludeString
   :: Monad m
   => MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
-  -> m Doc
-wrapIncludeString = return . dquotes . text'
+  -> m MDoc
+wrapIncludeString = return . dquotes . pretty . MS.takeFileName
 
 g = Grammar {
       gLang        = gLang'
@@ -69,100 +76,112 @@ g = Grammar {
     , gMain        = gMain'
   }
 
-fromMaybeType :: Maybe Doc -> Doc
+fromMaybeType :: Maybe MDoc -> MDoc
 fromMaybeType = maybe "void*" id
 
 gLang' :: Lang
 gLang' = CppLang
 
 gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
+gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "std::string" []
 
-gAssign' :: GeneralAssignment -> Doc
-gAssign' ga = case gaType ga of
-  Nothing -> gaName ga <+> "=" <+> gaValue ga <> ";" 
-  (Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
+gAssign' :: GeneralAssignment -> MDoc
+gAssign' ga = case (gaArg ga, gaType ga) of
+  -- need to call constructors
+  (Just (ArgData (Lst' _)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (ArgData (Tup' _)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (ArgData (Rec' _)), Just _) -> undefined
+  -- simple '=' assignment
+  (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";" 
+  (_, Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
 
-gCall' :: Doc -> [Doc] -> Doc
+gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
-gFunction' :: GeneralFunction -> Doc
-gFunction' gf = comments <> head <> braces (line <> gIndent' (gfBody gf) <> line) where
+gFunction' :: GeneralFunction -> MDoc
+gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> line) where
   targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
-  rargs = tupled (map snd (gfArgs gf))
-  head = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
+  -- -- do I not need this?
+  -- rargs = tupled (map snd (gfArgs gf))
+  head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
   comments = gfComments gf
 
-gSignature' :: GeneralFunction -> Doc
+gSignature' :: GeneralFunction -> MDoc
 gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
                <> encloseSep "(" ")" "," (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
                <> ";"
 
-gId2Function' :: Integer -> Doc
+gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> integer i
 
-gComment' :: Doc -> Doc
+gComment' :: MDoc -> MDoc
 gComment' d = "/* " <> d <> " */"
 
-gReturn' :: Doc -> Doc
+gReturn' :: MDoc -> MDoc
 gReturn' x = "return" <+> x <> ";"
 
-gQuote' :: Doc -> Doc
+gQuote' :: MDoc -> MDoc
 gQuote' = dquotes
 
 -- | The first argment is the directory, this is added later?
-gImport' :: Doc -> Doc -> Doc
+gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = "#include" <+> s 
 
-gList' :: [Doc] -> Doc
-gList' _ = undefined
+gList' :: [MDoc] -> MDoc
+gList' xs = encloseSep "{" "}" "," xs
 
-gTuple' :: [Doc] -> Doc
-gTuple' _ = undefined
+gTuple' :: [MDoc] -> MDoc
+gTuple' xs = encloseSep "{" "}" "," xs
 
-gRecord' :: [(Doc,Doc)] -> Doc
+gRecord' :: [(MDoc, MDoc)] -> MDoc
 gRecord' _ = undefined 
 
-gTrue' :: Doc
+gTrue' :: MDoc
 gTrue' = integer 1
 
-gFalse' :: Doc
+gFalse' :: MDoc
 gFalse' = integer 0
 
-gIndent' :: Doc -> Doc
+gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
 
-gUnpacker' :: UnpackerDoc -> Doc
+gUnpacker' :: UnpackerDoc -> MDoc
 gUnpacker' ud = gCall' (udUnpacker ud) [udValue ud] 
 
 -- There is no try, only do
-gTry' :: TryDoc -> Doc
+gTry' :: TryDoc -> MDoc
 gTry' td = gCall' (tryCmd td) (tryArgs td) 
 
 -- "foreign_call" is defined in "cbase.h"
-gForeignCall' :: ForeignCallDoc -> Doc
-gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
+gForeignCall' :: ForeignCallDoc -> MDoc
+gForeignCall' fc = gCall' "foreign_call" [hsep $ punctuate " + " (joinStr (fcdCall fc) : fcdArgs fc)]
+  where
+    joinStr xs
+      = "\"" <> (hsep $ map (pretty . MT.undquote . render) xs) <+> "\""
 
-gSwitch' :: (Manifold -> Doc) -> (Manifold -> Doc) -> [Manifold] -> Doc -> Doc -> Doc
+gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
   where
-    switchC x cases = gCall' "switch" [x] <> blockC caseBlock where
+    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
       caseBlock = vsep (map asCase cases) <> line
       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
 
-    blockC :: Doc -> Doc
+    blockC :: MDoc -> MDoc
     blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
 
-    caseC :: Doc -> Doc
+    caseC :: MDoc -> MDoc
     caseC body = var <> " = " <> body <> ";" <> line <> "break;"
 
-gCmdArgs' :: [Doc]
+gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
-gShowType' :: MType -> Doc
-gShowType' = mshow
+gShowType' :: MType -> MDoc
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f :: [Name] -> Name -> Name
+    f inputs output = render $ pretty output <> "(*f)" <> tupled (map pretty inputs)  
 
-gMain' :: PoolMain -> MorlocMonad Doc
+gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>
 
 #include <iostream>

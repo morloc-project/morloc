@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.17.4
+version:          0.18.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -26,24 +26,26 @@ dependencies:
   - extra
   - filepath
   - haskell-src-meta
-  - hsparql
   - megaparsec
   - mtl
   - parsec
   - pretty-simple
+  - prettyprinter
+  - prettyprinter-ansi-terminal
   - process
-  - rdf4h
   - safe
   - scientific
   - template-haskell
   - text
   - unordered-containers
-  - wl-pprint-text
   - yaml
 
-extra-deps:
-  - github: github/semantic
-    commit: 38198bcf1ee25b09e2ce3fbcfc452f07892f6799
+default-extensions:
+  - FlexibleContexts
+  - OverloadedStrings
+  - BangPatterns
+  - GeneralizedNewtypeDeriving
+  - ViewPatterns
 
 ghc-options:
   - -Wall
@@ -56,6 +58,7 @@ ghc-options:
   - -fwarn-redundant-constraints
   - -fno-warn-missing-signatures
   - -fno-warn-unused-do-bind
+  - -fno-warn-orphans
 
 library:
   source-dirs: library
@@ -73,7 +76,6 @@ executables:
       - base >= 4.7 && < 5
       - morloc 
       - docopt
-      - rdf4h
       - text
 
 tests:
@@ -86,9 +88,9 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - base
-      - directory
       - morloc
-      - rdf4h
+      - QuickCheck
       - tasty
+      - tasty-quickcheck
+      - tasty-hunit
       - tasty-golden
-      - text

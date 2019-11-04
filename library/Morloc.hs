@@ -1,61 +1,49 @@
-module Morloc (
-    writeProgram
-  , writeTurtleTo
-  , writeTripleTo
-) where
+module Morloc
+  ( writeProgram
+  , typecheck
+  , P.cute
+  , P.ugly
+  ) where
 
-import qualified Data.RDF as DR
-import qualified Data.Map.Strict as DMS
-import qualified System.IO as SIO
-
-import qualified Morloc.Monad as MM
-import qualified Morloc.Build as MB
+import Morloc.Build (buildProgram)
+import Morloc.Connect (connect)
 import qualified Morloc.Data.Text as MT
-import Morloc.Global
-import qualified Morloc.Parser as MP
-import qualified Morloc.Generator as MG
+import Morloc.Generate (generate)
+import Morloc.Namespace
+import qualified Morloc.Parser.API as P
+import Morloc.Realize (realize)
+import Morloc.Serialize (serialize)
+import qualified Morloc.Monad as MM
+import qualified Morloc.TypeChecker.API as T
+
+typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]
+typecheck path code = P.parse path code >>= T.typecheck
 
 -- | Build a program as a local executable
-writeProgram :: SparqlDatabaseLike db
-  => Maybe Path -- ^ source code filename (for debugging messages)
+writeProgram ::
+     Maybe Path -- ^ source code filename (for debugging messages)
   -> MT.Text    -- ^ source code text
-  -> db         -- ^ a SPARQL endpoint
   -> MorlocMonad ()
-writeProgram path code ep = do
-      MP.parse path code   -- Text -> MorlocMonad RDF
-  >>= sparqlUpload ep -- SparqlDatabaseLike db => db -> MorlocMonad db
-  >>= MG.generate     -- MorlocMonad (Nexus, [Pool])
-  >>= buildScripts    -- MorlocMonad ()
-  where
-    buildScripts :: (Script, [Script]) -> MorlocMonad ()
-    buildScripts (nexus, pools) = mapM_ MB.build (nexus:pools)
-
--- | Triple serialization wrapper around `writeRdfTo`
-writeTripleTo
-  :: Maybe Path -- source code filename
-  -> MT.Text    -- source code text
-  -> FilePath   -- output filename
-  -> MorlocMonad ()
-writeTripleTo = writeRdfTo DR.NTriplesSerializer
-
--- | Turtle serialization wrapper around `writeRdfTo`
-writeTurtleTo
-  :: Maybe Path -- source code filename
-  -> MT.Text    -- source code text
-  -> FilePath   -- output filename
-  -> MorlocMonad ()
-writeTurtleTo = writeRdfTo (DR.TurtleSerializer Nothing (DR.PrefixMappings DMS.empty))
-
--- | Compile a program to RDF. Does not depend on a local SPARQL database. It
--- also does not consider the local configuration or postprocessing and
--- typechecking.
-writeRdfTo :: DR.RdfSerializer s
-  => s           -- ^ the RDF serializer
-  -> Maybe Path  -- ^ source code file name (Nothing if it is a raw string)
-  -> MT.Text     -- ^ source code
-  -> FilePath    -- ^ output filename
-  -> MorlocMonad ()
-writeRdfTo s path code ttl = do
-  rdf <- MP.parse path code
-  handle <- MM.liftIO $ SIO.openFile ttl SIO.WriteMode
-  MM.liftIO $ DR.hWriteRdf s handle rdf <* SIO.hClose handle
+writeProgram path code
+  -- Maybe Path -> MT.Text -> [Module]
+  -- parse code into unannotated modules
+  =   P.parse path code
+  -- [Module] -> [Module]
+  -- add type annotations to sub-expressions and raise type errors
+  >>= T.typecheck
+  -- [Module] -> [Module]
+  -- dissassemble modules into a graph of linked manifolds
+  -- associate each realization with serialization functions
+  >>= connect
+  -- [Module] -> [Manifold]
+  -- Connect serialization functions as needed
+  >>= serialize
+  -- [Manifold] -> [Manifold]
+  -- select a single realization for each manifold
+  >>= realize
+  -- [Manifold] -> (Script, [Script])
+  -- translate modules into manifolds and manifolds into scripts of source code
+  >>= generate
+  -- (Script, [Script]) -> IO ()
+  -- write the code and compile as needed
+  >>= buildProgram

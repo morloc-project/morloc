@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
 Module      : Morloc.Pools.Template.Python3
@@ -11,24 +11,24 @@ Stability   : experimental
 
 module Morloc.Pools.Template.Python3 (generate) where
 
-import Morloc.Global
-import Morloc.Quasi
+import Morloc.Data.Doc
+import Morloc.Namespace
 import Morloc.Pools.Common
-import Morloc.Data.Doc hiding ((<$>))
-import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
-
-import qualified System.FilePath as SF
+import Morloc.Quasi
 import qualified Data.Char as DC
+import qualified Morloc.Config as MC
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
+import qualified System.FilePath as SF
+import qualified Morloc.TypeChecker.Macro as MTM
 
 generate :: [Manifold] -> SerialMap -> MorlocMonad Script
 generate = defaultCodeGenerator g asImport
 
-asImport :: MT.Text -> MorlocMonad Doc
+asImport :: MT.Text -> MorlocMonad MDoc
 asImport s = do
   lib <- MM.asks configLibrary
-  return . text'
+  return . pretty
          . MT.liftToText (map DC.toLower)
          . MT.replace "/" "."
          . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
@@ -36,7 +36,7 @@ asImport s = do
          . MT.liftToText SF.dropExtensions
          $ s
 
-pyIfElse :: [(Doc,Doc)] -> Maybe Doc -> Doc
+pyIfElse :: [(MDoc, MDoc)] -> Maybe MDoc -> MDoc
 pyIfElse [] _ = ""
 pyIfElse [(cond,block)] Nothing = nest 4 ("if" <+> cond <> ":" <> line <> block)
 pyIfElse (r:rs) els
@@ -81,56 +81,56 @@ gLang' = Python3Lang
 gSerialType' :: MType
 gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "str" []
 
-gAssign' :: GeneralAssignment -> Doc
-gAssign' g = case gaType g of
-  (Just t) -> gaName g <> " = " <> gaValue g <+> gComment' ("::" <+> t) 
-  Nothing  -> gaName g <> " = " <> gaValue g 
+gAssign' :: GeneralAssignment -> MDoc
+gAssign' ga = case gaType ga of
+  (Just t) -> gaName ga <> " = " <> gaValue ga <+> gComment' ("::" <+> t) 
+  Nothing  -> gaName ga <> " = " <> gaValue ga 
 
-gCall' :: Doc -> [Doc] -> Doc
+gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' n args = n <> tupled args
 
-gFunction' :: GeneralFunction -> Doc
+gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
   =  gComment' (gfComments gf)
   <> "def "
   <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
   <> line <> gIndent' (gfBody gf) <> line
 
-gId2Function' :: Integer -> Doc
-gId2Function' i = "m" <> (text' (MT.show' i))
+gId2Function' :: Integer -> MDoc
+gId2Function' i = "m" <> (pretty (MT.show' i))
 
-gComment' :: Doc -> Doc
+gComment' :: MDoc -> MDoc
 gComment' d = "# " <> d
 
-gReturn' :: Doc -> Doc
+gReturn' :: MDoc -> MDoc
 gReturn' x = gCall' "return" [x]
 
-gQuote' :: Doc -> Doc
+gQuote' :: MDoc -> MDoc
 gQuote' = dquotes
 
 -- 1st argument (home directory) is ignored (it is added to path in main)
-gImport' :: Doc -> Doc -> Doc
+gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = [idoc|from #{s} import *|]
 
-gTrue' :: Doc
+gTrue' :: MDoc
 gTrue' = "True"
 
-gFalse' :: Doc
+gFalse' :: MDoc
 gFalse' = "False"
 
-gList' :: [Doc] -> Doc
+gList' :: [MDoc] -> MDoc
 gList' = list
 
-gTuple' :: [Doc] -> Doc
+gTuple' :: [MDoc] -> MDoc
 gTuple' = tupled
 
-gRecord' :: [(Doc,Doc)] -> Doc
+gRecord' :: [(MDoc,MDoc)] -> MDoc
 gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
-gIndent' :: Doc -> Doc
+gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
 
-gTry' :: TryDoc -> Doc
+gTry' :: TryDoc -> MDoc
 gTry' t = [idoc|
 try:
     #{tryRet t} = #{tryCmd t}#{tupled (tryArgs t)}
@@ -138,7 +138,7 @@ except Exception as e:
     sys.exit("Error in %s:%s\n%s" % (__FILE__, __name__, str(e)))
 |]
 
-gUnpacker' :: UnpackerDoc -> Doc
+gUnpacker' :: UnpackerDoc -> MDoc
 gUnpacker' u = gCall' "_morloc_unpack"
   [ udUnpacker u
   , udValue u
@@ -146,36 +146,38 @@ gUnpacker' u = gCall' "_morloc_unpack"
   , "filename=" <> dquotes (udFile u)
   ]
 
-gForeignCall' :: ForeignCallDoc -> Doc
+gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' f = gCall' "_morloc_foreign_call" (fcdCall f ++ [list (fcdArgs f)])
 
-gSignature' :: GeneralFunction -> Doc
+gSignature' :: GeneralFunction -> MDoc
 gSignature' gf
   =   maybe "?" id (gfReturnType gf)
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
-gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = pyIfElse cases Nothing
   where
     cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
 -- -- This is a cleaner approach, but python is too eager, leading every
 -- -- case to be evaluated, thus this does not behave like a switch statement.
 -- -- Doing all if statements (as above) does work, but is slow.
--- gSwitch' :: (a -> Doc) -> (a -> Doc) -> [a] -> Doc -> Doc -> Doc
+-- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 -- gSwitch' l r xs x var
 --   =   var <+> "=" <+> "if"
 --   <+> encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs) <> brackets x
 
-gCmdArgs' :: [Doc]
-gCmdArgs' = map (\i -> "sys.argv[" <> integer i <> "]") [2..]
+gCmdArgs' :: [MDoc]
+gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]
 
-gShowType' :: MType -> Doc
-gShowType' = mshow 
+gShowType' :: MType -> MDoc
+gShowType' t = pretty $ MTM.showMType f t
+  where
+    f = \_ _ -> error "Currently passing functions is not supported in python"
 
-gMain' :: PoolMain -> MorlocMonad Doc
+gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = do
-  lib <- fmap text' $ MM.asks MC.configLibrary
+  lib <- fmap pretty $ MM.asks MC.configLibrary
   return $ [idoc|#!/usr/bin/env python
 
 import sys

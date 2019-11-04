@@ -1,0 +1,6 @@
+import math (sqrt)
+import cppbase (map);
+
+export baz
+
+baz xs = map sqrt xs;

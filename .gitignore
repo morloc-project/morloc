@@ -8,3 +8,7 @@ pool.*
 morloc.cabal
 *.out
 run/
+.idea/
+*.iml
+z
+z.*
