@@ -1,12 +1,10 @@
-0.17.5 [xxx]
+0.18.0 [2019.11.04]
 
- * Add higher-order functions
+ * Add bidirectional type system
+ * Allow parameterized concrete types
+ * Allow higher-order functions
  * Allow properties to contain multiple terms 
- * C++ handling for list and tuple morloc types
- * Greatly simplify internal SPARQL calls
-
- [ ] Add a full test suite
- [ ] Choose function implementations to minimize foreign calls
+ * Add many tests
 
 0.17.4 [2019.06.29]
 
