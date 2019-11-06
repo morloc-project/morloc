@@ -422,9 +422,10 @@ pType =
 
 pUniT :: Parser Type
 pUniT = do
+  lang <- CMS.gets stateLang
   _ <- symbol "("
   _ <- symbol ")"
-  return (VarT (TV Nothing "Unit"))
+  return (VarT (TV lang "Unit"))
 
 pTupleT :: Parser Type
 pTupleT = do
@@ -459,7 +460,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try (parens pType) <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try (parens pType) <|> try pUniT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pFunT :: Parser Type
 pFunT = do
@@ -468,7 +469,7 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try (parens pType) <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try (parens pType) <|> try pUniT <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pListT :: Parser Type
 pListT = do
