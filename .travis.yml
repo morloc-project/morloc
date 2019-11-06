@@ -1,23 +1,30 @@
-# This travis file is adapted from fpco/wai-middleware-crowd
+sudo: false
 
-# Use c since it is light, then install everything needed for Haskell
 language: c
 
-before_install:
-  # Download and unpack the stack executable
-  - mkdir -p ~/.local/bin
-  - export PATH=$HOME/.local/bin:$PATH
-  - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
-  - sudo apt-get install r-base
+addons:
+    apt:
+        packages:
+        - r-base
+        - python3
+        - ghc
+        - git
 
-# stack will handle the installation of GHC
+# adapted from Stack documentation at https://docs.haskellstack.org/en/v1.0.2/travis_ci/
+before_install:
+    # Download and unpack the stack executable
+    - mkdir -p ~/.local/bin
+    - export PATH=$HOME/.local/bin:$PATH
+    - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+
 script:
-  - stack --no-terminal --install-ghc
+  - stack --no-terminal --fast build
+  - stack --no-terminal install
   - morloc install rbase
   - morloc install math
   - morloc install cppbase
+  - stack --no-terminal test
 
-# Caching so the next build will be fast too.
 cache:
   directories:
     - $HOME/.stack

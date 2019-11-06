@@ -22,11 +22,15 @@
 
 # Testing
 
- [ ] Add golden tests for generated output. This will be a collection of
+ [x] Add golden tests for generated output. This will be a collection of
      workflows, scripts to call them, and the recorded output.
  [ ] Add benchmarking
  [ ] Add code linting
  [ ] Add test coverage reports
+
+# Syntax
+
+ [ ] Remove semicolon requirement
 
 # UI and configuration 
 
@@ -42,9 +46,9 @@
 
 # typechecking
 
- [x] Add a full Hindley-Milner type inference system, this is just one layer of
-     the type system, but is an essential one. Eventually this can be ported
-     to the rule-engine.
+ [x] Add a full type inference system, this is just one layer of the type
+     system, but is an essential one. Eventually this can be ported to the
+     rule-engine.
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
  [x] port this typechecker to Morloc
 
@@ -58,9 +62,14 @@
  [ ] allow caching
  [ ] allow effect handling hooks
 
+ * resurrect the old features
+   [ ] attach effects to labeled nodes in a composition 
+   [ ] set function parameters in external config 
+
  * add support for more languages
    [ ] bash
    [+] C
+   [+] Python3
    [ ] Haskell
    [+] C++
 

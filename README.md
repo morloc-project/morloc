@@ -9,17 +9,16 @@ Morloc: a typed meta-programming language
 
 The goal of Morloc is provide a universal interface to functions across
 computer languages that will allow programmers to share snippets of code that
-anyone can snap together to make their own custom applications. The common
-interface is a semantic type system that describes the relationships between
+anyone can snap together to make their own applications. The common interface
+is a semantic type system that describes the relationships between
 language-specific types, data formats, and abstract concepts. Based on the
 types, the compiler generates the code needed to link functions between
 languages and also to direct automation of mundane tasks such as data
 validation, type/format conversions, data caching, distributed computing, and
 file reading/writing. I am also designing a cross-language database that makes
-functions searchable by type (a little like
-[Hoogle](https://www.haskell.org/hoogle/)). Ultimately, I hope to build
-a GitHub-like community portal around Morloc where users can upload packages of
-functions or import them into their own programs.
+functions searchable by type (like [Hoogle](https://www.haskell.org/hoogle/)).
+Ultimately, I hope to build a GitHub-like community portal around Morloc where
+users can upload packages of functions or import them into their own programs.
 
 ## Installation
 
@@ -32,109 +31,75 @@ stack build
 stack install
 ```
 
-`morloc` has a temporary dependency on the Java library Jena and its `arq`
-command line tool. You will need to have `arq` in PATH to use Morloc
-(currently). The `arq` dependency will be removed eventually, since the calls
-require firing up JVM, and thus massively slow down the compilation process.
-
 ## Minimal Example
 
-You might start with the example in `examples/sample1.loc`. This is just a toy
-script and I will have a better demo soon. Also the type signatures in this
-demo are currently ignored by the compiler.
+The following code uses only C++ functions (`sqrt`, `sum`, `mul` and `map`). 
 
 ```
-export ceiling
-export rand_uniform
+import math (sqrt, sum, mul)
+import cppbase (map)
 
-source "R" (
-    "runif" as rand_uniform
-  , "ceiling"
-);
+export square;
+export rms;
 
-# impose a type signature on the imported function rand_uniform
-rand_uniform :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
-    n > 0
-  , len xs == n
-  , c >= a
-  , c <= b
-);
-
-# type signatures for ceiling (NOTE: adding constraints is optional)
-ceiling :: [Num] -> [Int];
-
-# A simple wrapper specializing the imported rand_uniform function
-rand :: Int -> [Num];
-rand n = rand_uniform n 0.0 1.0;
+square x = mul x x;
+rms xs = sqrt (sum (map square xs));
 ```
 
 This script can be complied as follows:
 
 ```sh
-morloc make examples/sample1.loc
+morloc import math
+morloc import cppbase
+morloc make examples/rootMeanSquare.loc
 ```
 
-This will generate two files, `nexus.perl` and `pool.R`. Data from specific
-nodes can now be accessed.
+The `import` command clones the `math` and `cppbase` repos from github into the
+local directory `~/.morloc/lib`. The `make` command will generate a file named
+`nexus.pl`, which is an executable interface to the exported functions.
+
+You can see the exported functions and the number of arguments they take:
 
 ```sh
-./nexus.perl ceiling 4.3
-./nexus.perl rand_uniform 10 0 3
+$ ./nexus.pl
+The following commands are exported
+  square [1]
+  rms [1]
 ```
 
-## The Morloc Type System
+Then you can call the exported functions:
 
-![The user enters the Morloc script (A), which casts a string (AT1G30270.1) as a TairID and feeds it to the composition function. This function has the type signature (B) and expects input of type BioSeq. The required conversions are automatically performed following the type ontology (C). The conversions are performed by functions with the signatures shown in (D), where ?TairID indicates possible failure. These functions are given the convert role in (E). Since ProteinSeq is a BioSeq, any function of a BioSeq works automatically with ProteinSeq. The Morloc compiler](./figures/case-study.png)
-
-The type system and the syntax for specifying the type ontologies is still
-under construction. But here is a little information on how it will work.
-
-Morloc unifies all programming languages under a common type system. This is
-a *semantic* type system, where the types, and the relations between them, are
-described using ontologies.
-
-One relation that can be defined between types is `a maps_to b`, which states
-that any variable of type `a` can be uniquely converted to a variable of type
-`b`, for example, `Int maps_to Double`. Some languages, such as Perl and
-JavaScript, do extensive automatic conversions. Perl will happily evaluate the
-term `"42" + 1` to 43, for example. In Morloc, these sorts of automatic
-conversions are defined in ontologies that can be customized by the programmer.
-
-Types can also be specialized with constraints, for example:
-
-```
-Count :: x:Int where ( x > 0 )
+```sh
+$ ./nexus.pl rms [1,2,3]
+3.741657
 ```
 
-This is can also be used to place constraints on functions. A function is
-a compound type that is composed of the types of its inputs, outputs, and
-a list of constraints. Here is a signature for a function that generates *n*
-random numbers between *a* and *b*.
+The `nexus.pl` executable dispatches the command to the compiled C++ program, `pool-cpp.out`.
+
+## Language interop
+
+`morloc` can compose functions across languages. For example
 
 ```
-rand :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
-    n > 0
-  , len xs == n
-  , c >= a
-  , c <= b
-);
+import math (fibonacci)
+import rbase (plotPDF)
+
+export fibplot
+
+fibplot n = plotPDF (fibonacci n) "fibonacci-plot.pdf";
 ```
 
-The constraints are optional, and `rand` could instead just be written as:
+The `fibplot` function calculates fibonacci numbers using a C++ function and
+plots it using an R function. The R function `plotPDF` is a perfectly normal R
+function with no extra boilerplate:
 
+``` R
+plotPDF <- function(x, filename){
+  pdf(filename)
+  plot(x)
+  dev.off()
+}
 ```
-rand :: Int, Num, Num -> [Num]
-```
-
-The addition of the constraints allows
-
- * Static analysis of the correctness of the program. 
- * Runtime checks of input (if desired, this will be a compiler flag)
- * Formal documentation of the behavior of the function
-
-The type system is essential for specifying how data is passed between
-languages.
-
 
 ## Language-specific type specialization
 
@@ -187,3 +152,109 @@ def packMatrix(x):
 
 `morloc` will then use these functions whenever it needs to cast data into
 Python as Matrix types.
+
+
+## The Morloc Type System
+
+The first level of the `morloc` typesystem is basically System F extended
+across languages. A given function will have a general type as well as a
+specialized type for each language it is implemented in.
+
+The map function has the types
+
+```
+map :: forall a b . (a -> b) -> [a] -> [b]
+map Cpp :: forall a b . (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
+map Python3 :: forall a b . (a -> b) -> list a -> list b
+```
+
+The general signature looks almost the same as the Haskell equivalent (except
+that `morloc` univeral quantification is currently explicit). The list type
+constructors for C++ are very literally "type constructors" in that they are
+used to create syntactically correct C++ type strings. If the type variable `a`
+is inferred to be `int`, for example, then the Cpp type `std::vector<int>` will
+be used in the generated code. The same occurs in the python type constructors
+`list`, except here the same Python type is generated regardless of the type of
+`a`.
+
+The following example is available in `examples/rmsWithTypes.loc`:
+
+```
+map Cpp :: forall a b . (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b;
+sum Cpp :: Num a => forall a . "std::vector<$1>" a -> a;
+sqrt Cpp :: double -> double;
+mul Cpp :: Num a => forall a . a -> a -> a;
+square x = mul x x;
+rms xs = sqrt (sum (map square xs)) ;
+```
+
+This example cannot be compiled since none of the functions are imported or
+sourced, but it can be typechecked:
+
+```
+morloc typecheck examples/rmsWithTypes.loc
+```
+
+The typechecker associates each sub-expression of the program with a set of
+types. The specific type information in `sqrt` is sufficient to infer concrete
+types for every other C++ function in the program. The inferred C++ type of
+`rms` is
+
+```
+"std::vector<$1>" double -> "std::vector<$1>" double
+```
+
+General types are also inferred for every subexpression, but since no general
+signatures were given, the general types remain polymorphic. Thus the general
+type inferred for `rms` is `forall a b . a -> b`.
+
+## The next level
+
+System F is a solid foundation, but the ultimate goal is to be able to express
+deep knowledge about the world. To this end, I am exploring the use of
+description logic and ontologies for specifying the relationships between
+types. This is the *semantic* layer of the type system.
+
+![The user enters the Morloc script (A), which casts a string (AT1G30270.1) as a TairID and feeds it to the composition function. This function has the type signature (B) and expects input of type BioSeq. The required conversions are automatically performed following the type ontology (C). The conversions are performed by functions with the signatures shown in (D), where ?TairID indicates possible failure. These functions are given the convert role in (E). Since ProteinSeq is a BioSeq, any function of a BioSeq works automatically with ProteinSeq. The Morloc compiler](./figures/case-study.png)
+
+One relation that can be defined between types is `a maps_to b`, which states
+that any variable of type `a` can be uniquely converted to a variable of type
+`b`, for example, `Int maps_to Double`. Some languages, such as Perl and
+JavaScript, do extensive automatic conversions. Perl will happily evaluate the
+term `"42" + 1` to 43, for example. In Morloc, these sorts of automatic
+conversions are defined in ontologies that can be customized by the programmer.
+
+Types can also be specialized with constraints, for example:
+
+```
+Count :: x:Int where ( x > 0 )
+```
+
+This is can also be used to place constraints on functions. A function is
+a compound type that is composed of the types of its inputs, outputs, and
+a list of constraints. Here is a signature for a function that generates *n*
+random numbers between *a* and *b*.
+
+```
+rand :: n:Int, a:Num, b:Num -> xs:[c:Num] where (
+    n > 0
+  , len xs == n
+  , c >= a
+  , c <= b
+);
+```
+
+The constraints are optional, and `rand` could instead just be written as:
+
+```
+rand :: Int, Num, Num -> [Num]
+```
+
+The addition of the constraints allows
+
+ * Static analysis of the correctness of the program. 
+ * Runtime checks of input (if desired, this will be a compiler flag)
+ * Formal documentation of the behavior of the function
+
+The type system is essential for specifying how data is passed between
+languages.
