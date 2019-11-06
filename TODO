@@ -22,11 +22,12 @@
 
 # Testing
 
- [x] Add golden tests for generated output. This will be a collection of
-     workflows, scripts to call them, and the recorded output.
- [ ] Add benchmarking
- [ ] Add code linting
- [ ] Add test coverage reports
+ [x] unit tests covering the typechecker
+ [x] golden tests over generated output
+ [ ] performance profiling
+ [ ] code linting
+ [ ] test coverage reports
+ [ ] property testing (resurrect it)
 
 # Syntax
 
@@ -69,9 +70,12 @@
  * add support for more languages
    [ ] bash
    [+] C
+   [+] R
    [+] Python3
    [ ] Haskell
    [+] C++
+   [ ] Perl
+   [ ] Julia
 
 # Documentation
 

@@ -19,6 +19,7 @@ module Morloc.Config
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import Morloc.Data.Doc
 import Morloc.Namespace
+import qualified System.Directory as SD
 import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
@@ -95,12 +96,24 @@ getDefaultMorlocTmpDir = MS.getHomeDirectory |>> MS.appendPath ".morloc/tmp"
 -- | Load a Morloc config file. If no file is given (i.e., Nothing), then the
 -- default configuration will be used.
 loadMorlocConfig :: Maybe MT.Text -> IO Config
-loadMorlocConfig f = do
+loadMorlocConfig Nothing = do
   defaults <- defaultFields
   MS.loadYamlConfig
-    (fmap (\x -> [x]) f)
+    Nothing 
     (YC.useCustomEnv defaults)
     loadDefaultMorlocConfig
+loadMorlocConfig (Just configFile) = do
+  configExists <- SD.doesFileExist (MT.unpack configFile)
+  defaults <- defaultFields
+  if configExists
+    then
+      MS.loadYamlConfig
+        (Just [configFile])
+        (YC.useCustomEnv defaults)
+        loadDefaultMorlocConfig
+    else
+      loadMorlocConfig Nothing 
+
 
 -- | Get a source string for a library module. This will 1) remove the
 -- user-specific home directory and 2) replace '/' separators with '.'. An
