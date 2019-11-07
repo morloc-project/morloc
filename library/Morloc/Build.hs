@@ -27,7 +27,7 @@ build s =
     RLang -> liftIO $ writeInterpreted s
     PerlLang -> liftIO $ writeInterpreted s
     CLang -> gccBuild s "gcc"
-    CppLang -> gccBuild s "g++" -- TODO: I need more rigorous build handling
+    CppLang -> gccBuild s "g++ --std=c++11" -- TODO: I need more rigorous build handling
     MorlocLang -> MM.throwError . GeneratorError $ "You don't want to do that"
 
 -- | Compile a C program
