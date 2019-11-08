@@ -15,7 +15,7 @@ addons:
 before_install:
     # Set up R
     - mkdir -p ~/R/library
-    - echo "export R_LIB=~/R/library" > .Renviron
+    - echo "R_LIBS=~/R/library" >> .Renviron
     - R -e 'install.packages("jsonlite", lib="~/R/library", repos="https://cloud.r-project.org")'
     # Download and unpack the stack executable
     - mkdir -p ~/.local/bin
