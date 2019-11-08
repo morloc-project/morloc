@@ -1,3 +1,10 @@
+0.18.1 [2019.11.08]
+
+ * fix travis
+ * use C++11 for C++ builds
+ * make .morloc/config optional
+ * fix bug in parsing unit type: `()`
+
 0.18.0 [2019.11.04]
 
  * Add bidirectional type system
@@ -5,6 +12,9 @@
  * Allow higher-order functions
  * Allow properties to contain multiple terms 
  * Add many tests
+ * Add module system
+ * Allow non-primitive types in lists, tuples, and records
+ * Removed arq and SPARQL dependency (very fast compilation)
 
 0.17.4 [2019.06.29]
 

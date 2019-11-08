@@ -1,4 +1,4 @@
-morloc version 0.18.0
+morloc version 0.18.1
 
 Usage:
   morloc make [--expression] [--config=<config>] [--vanilla] <script>
