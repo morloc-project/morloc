@@ -16,7 +16,7 @@ before_install:
     # Set up R
     - mkdir -p ~/R/library
     - echo "R_LIBS=~/R/library" >> ~/.Renviron
-    - R -e 'install.packages("jsonlite", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages(c("jsonlite", "data.table"), lib="~/R/library", repos="https://cloud.r-project.org")'
     # Download and unpack the stack executable
     - mkdir -p ~/.local/bin
     - export PATH=$HOME/.local/bin:$PATH
