@@ -14,7 +14,7 @@ addons:
 # adapted from Stack documentation at https://docs.haskellstack.org/en/v1.0.2/travis_ci/
 before_install:
     # Set up R
-    - mkdir -p ~R/library
+    - mkdir -p ~/R/library
     - echo "R_LIB=~R/library" > .Renviron
     - R -e 'install.packages("jsonlite", lib="~/R/library", repos="https://cloud.r-project.org")'
     # Download and unpack the stack executable
