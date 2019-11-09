@@ -1,3 +1,13 @@
+0.18.1 [xxxx.xx.xx]
+
+ [ ] replace perl manifold nexus with C
+ [ ] add type annotations to printed help
+ [ ] resurrect property tests
+ [ ] add python tests
+ [ ] meaningful error messages
+ [ ] generate error handling in pools
+ [ ] remove/replace Manifold object, build from Expr
+
 0.18.1 [2019.11.08]
 
  * fix travis
