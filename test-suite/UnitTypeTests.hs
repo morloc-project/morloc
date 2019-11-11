@@ -674,6 +674,17 @@ unitTypeTests =
         ])
       [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
 
+    , assertTerminalType
+      "declaration general type signatures are respected"
+      (T.unlines
+        [ "sqrt cpp :: double -> double;"
+        , "sqrt :: forall a . a -> a;"
+        , "foo :: Num -> Num;"
+        , "foo x = sqrt x;"
+        , "foo"
+        ])
+      [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
+
     , assertTerminalExprWithAnnot
       "all internal concrete and general types are right"
       (T.unlines

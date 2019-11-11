@@ -19,6 +19,7 @@ module Morloc.TypeChecker.Util
   , extendModularGamma
   , generalize
   , generalizeE
+  , generalizeTypeSet
   , importFromModularGamma
   , index
   , lookupE
@@ -284,6 +285,13 @@ generalize t = generalize' existentialMap t
 
 generalizeE :: Expr -> Expr
 generalizeE = mapT generalize
+
+generalizeEType :: EType -> EType
+generalizeEType e = e {etype = generalize (etype e)}
+
+generalizeTypeSet :: TypeSet -> TypeSet
+generalizeTypeSet (TypeSet (Just t) ts) = TypeSet (Just (generalizeEType t)) (map generalizeEType ts)
+generalizeTypeSet (TypeSet Nothing ts) = TypeSet Nothing (map generalizeEType ts)
 
 newvar :: Maybe Lang -> Stack Type
 newvar lang = do
