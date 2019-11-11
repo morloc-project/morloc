@@ -1,12 +1,21 @@
-0.18.1 [xxxx.xx.xx]
+0.xx.x [xxxx.xx.xx]
 
- [ ] replace perl manifold nexus with C
- [ ] add type annotations to printed help
+ [ ] remove/replace Manifold object, build from Expr
  [ ] resurrect property tests
- [ ] add python tests
  [ ] meaningful error messages
  [ ] generate error handling in pools
- [ ] remove/replace Manifold object, build from Expr
+ [ ] add type annotations to printed help
+ [ ] add python tests
+ [ ] replace perl manifold nexus with C
+
+0.18.2 [xxxx.xx.xx]
+
+ [ ] test record handling
+ [ ] add general type-directed structure to JSON serialization 
+
+ [x] allow tags on parenthesized types
+ [x] improve error messages 
+ [x] fix bug in functions with multiple parameters 
 
 0.18.1 [2019.11.08]
 

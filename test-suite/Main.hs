@@ -17,6 +17,7 @@ main = do
       , golden "C++ map function" "4_map"
       , golden "nested C++ map functions" "5_nested"
       , golden "C++ / R interop" "6_interop"
+      , golden "C++ quadratic eqation" "7_quadraticEq"
       , unitTypeTests
       , propertyTypeTests
       ]

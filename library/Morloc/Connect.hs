@@ -189,10 +189,10 @@ module2manifolds m (Declaration (EV lambdaName) e0@(AnnE lambda@(LamE _ _) _)) =
   i <- getId
   exported <- isExported (moduleName m) (EV lambdaName)
   case (uncurryExpr lambda) of
-    (_, _, []) ->
-      error $
-      "nexus can only accept applications in declarations: " <>
-      show lambdaName <> " :: " <> show lambda
+    (_, _, []) -> do
+      say $ prettyScream ("======= " <> lambdaName <> " ======")
+      say $ prettyExpr lambda
+      error $ "nexus can only accept applications in declarations"
     -- FIXME: this only allows named function, not expressions like:
     --   foo x y = (bar x) 42 y  -- where bar returns a function
     --   foo x y = (x,y)         -- where there is no function on the right
@@ -468,10 +468,11 @@ toRealizations n m _ es ts = do
 -- @f a b = g 4 a b ==> ([a,b], g, [4,a,b])
 -- @f x = g (h x) 5 ==> ([x], g, [(h x), 5]  -- no recursion into expressions
 uncurryExpr :: Expr -> ([EVar], Expr, [Expr])
-uncurryExpr (LamE v e) = (\(vs, e', es) -> (v : vs, e', es)) (uncurryExpr e)
-uncurryExpr (AnnE (AppE e1 e2) _) =
-  (\(e, es) -> ([], e, es)) (uncurryApplication e1 e2)
-uncurryExpr (AppE e1 e2) = (\(e, es) -> ([], e, es)) (uncurryApplication e1 e2)
+uncurryExpr (AnnE e _) = uncurryExpr e
+uncurryExpr (LamE v e) = case uncurryExpr e of
+  (vs, e', es) -> (v:vs, e', es)
+uncurryExpr (AppE e1 e2) = case uncurryApplication e1 e2 of
+  (e, es) -> ([], e, es)
 uncurryExpr e = ([], e, [])
 
 -- | uncurry an application
