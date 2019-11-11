@@ -76,7 +76,7 @@ errmsg EmptyRecord = "EmptyRecord"
 -- module errors
 errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations"
 errmsg (BadImport mv ev) = "BadImport"
-errmsg (CannotFindModule mv) = "CannotFindModule"
+errmsg (CannotFindModule (MV name)) = "Cannot find morloc module '" <> name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
 errmsg CannotImportMain = "CannotImportMain"
 errmsg (SelfImport mv) = "SelfImport"
