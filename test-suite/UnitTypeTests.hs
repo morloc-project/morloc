@@ -426,6 +426,7 @@ unitTypeTests =
     -- tags
     , exprEqual "variable tags" "F :: Int" "F :: foo:Int"
     , exprEqual "list tags" "F :: [Int]" "F :: foo:[Int]"
+    , exprEqual "tags on parenthesized types" "F :: Int" "F :: f:(Int)"
     , exprEqual
         "record tags"
         "F :: {x::Int, y::Str}"

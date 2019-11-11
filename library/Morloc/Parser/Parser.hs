@@ -415,7 +415,7 @@ pType =
   <|> try pForAllT
   <|> try pFunT
   <|> try pArrT
-  <|> try (parens pType)
+  <|> try parensType
   <|> pListT
   <|> pTupleT
   <|> pVarT
@@ -426,6 +426,12 @@ pUniT = do
   _ <- symbol "("
   _ <- symbol ")"
   return (VarT (TV lang "Unit"))
+
+parensType :: Parser Type
+parensType = do
+  _ <- tag (symbol "(")
+  t <- parens pType
+  return t
 
 pTupleT :: Parser Type
 pTupleT = do
@@ -460,7 +466,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try (parens pType) <|> try pUniT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try parensType <|> try pUniT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pFunT :: Parser Type
 pFunT = do
@@ -469,7 +475,7 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try (parens pType) <|> try pUniT <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try parensType <|> try pUniT <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pListT :: Parser Type
 pListT = do
