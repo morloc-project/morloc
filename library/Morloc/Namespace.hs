@@ -150,7 +150,7 @@ data Script =
     , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
     , scriptInclude :: [Path] -- ^ paths to morloc module directories
     }
-  deriving (Ord, Eq)
+  deriving (Show, Ord, Eq)
 
 -- | Represents a Platonic function with zero or more concrete realizations
 -- (Realization objects). The Manifold represents one node in the
@@ -235,7 +235,7 @@ getReal f m =
   case mRealizations m of
     [r] -> f r
     (r:_) -> f r
-    _ -> error ("Realization failure in m = " ++ show m)
+    [] -> error ("Missing realization in m = " ++ show m)
 
 mLang :: Manifold -> Lang
 mLang = getReal rLang

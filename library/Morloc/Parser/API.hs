@@ -40,14 +40,16 @@ parse f code = do
          (Map.Map MVar Module) -> Module -> MorlocMonad (Map.Map MVar Module)
     parse'' visited m
       | Map.member (moduleName m) visited = return visited
-      | otherwise
-          -- for now I only support local modules
-       = do
+      | otherwise = do
+        -- load metadata for all imported modules
+        mapM
+          (\(MV v) -> Mod.findModule v >>= Mod.loadModuleMetadata)
+          (map importModuleName (moduleImports m))
+        -- for now I only support local modules
         imports <-
           mapM
             (\(MV v) -> Mod.findModule v >>= openLocalModule)
             (map importModuleName (moduleImports m))
-        mapM Mod.loadModuleMetadata (map snd imports)
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods
 

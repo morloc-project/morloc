@@ -16,6 +16,7 @@
  [x] allow tags on parenthesized types
  [x] improve error messages 
  [x] fix bug in functions with multiple parameters 
+ [x] fix bug preventing loading of package metadata 
 
 0.18.1 [2019.11.08]
 

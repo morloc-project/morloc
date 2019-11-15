@@ -108,7 +108,7 @@ gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> lin
 
 gSignature' :: GeneralFunction -> MDoc
 gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
-               <> encloseSep "(" ")" "," (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
+               <> tupled (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
                <> ";"
 
 gId2Function' :: Integer -> MDoc
