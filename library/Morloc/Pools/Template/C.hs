@@ -13,7 +13,7 @@ compilation step is needed. This code currently is wildly experimental.
 -}
 
 module Morloc.Pools.Template.C
-( 
+(
   generate
 ) where
 
@@ -42,6 +42,7 @@ g = Grammar {
     , gCall        = gCall'
     , gFunction    = gFunction'
     , gId2Function = gId2Function'
+    , gCurry       = gCurry'
     , gComment     = gComment'
     , gReturn      = gReturn'
     , gQuote       = gQuote'
@@ -73,7 +74,7 @@ gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
-  Nothing -> gaName ga <+> "=" <+> gaValue ga <> ";" 
+  Nothing -> gaName ga <+> "=" <+> gaValue ga <> ";"
   (Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
 
 gCall' :: MDoc -> [MDoc] -> MDoc
@@ -95,6 +96,9 @@ gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> pretty i
 
+gCurry' :: MDoc -> [MDoc] -> Int -> MDoc
+gCurry' _ _ _ = error "Currying is not supported in C"
+
 gComment' :: MDoc -> MDoc
 gComment' d = "/* " <> d <> " */"
 
@@ -106,7 +110,7 @@ gQuote' = dquotes
 
 -- | The first argment is the directory, this is added later?
 gImport' :: MDoc -> MDoc -> MDoc
-gImport' _ s = "#include" <+> s 
+gImport' _ s = "#include" <+> s
 
 gList' :: [MDoc] -> MDoc
 gList' _ = undefined
@@ -115,7 +119,7 @@ gTuple' :: [MDoc] -> MDoc
 gTuple' _ = undefined
 
 gRecord' :: [(MDoc,MDoc)] -> MDoc
-gRecord' _ = undefined 
+gRecord' _ = undefined
 
 gTrue' :: MDoc
 gTrue' = integer 1
@@ -127,11 +131,11 @@ gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
 
 gUnpacker' :: UnpackerDoc -> MDoc
-gUnpacker' ud = gCall' (udUnpacker ud) [udValue ud] 
+gUnpacker' ud = gCall' (udUnpacker ud) [udValue ud]
 
 -- There is no try, only do
 gTry' :: TryDoc -> MDoc
-gTry' td = gCall' (tryCmd td) (tryArgs td) 
+gTry' td = gCall' (tryCmd td) (tryArgs td)
 
 -- "foreign_call" is defined in "cbase.h"
 gForeignCall' :: ForeignCallDoc -> MDoc

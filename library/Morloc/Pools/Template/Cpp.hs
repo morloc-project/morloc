@@ -10,7 +10,7 @@ Stability   : experimental
 -}
 
 module Morloc.Pools.Template.Cpp
-( 
+(
   generate
 ) where
 
@@ -56,6 +56,7 @@ g = Grammar {
     , gCall        = gCall'
     , gFunction    = gFunction'
     , gId2Function = gId2Function'
+    , gCurry       = gCurry'
     , gComment     = gComment'
     , gReturn      = gReturn'
     , gQuote       = gQuote'
@@ -92,7 +93,7 @@ gAssign' ga = case (gaArg ga, gaType ga) of
   (Just (ArgData (Tup' _)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
   (Just (ArgData (Rec' _)), Just _) -> undefined
   -- simple '=' assignment
-  (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";" 
+  (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";"
   (_, Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
 
 gCall' :: MDoc -> [MDoc] -> MDoc
@@ -114,6 +115,11 @@ gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> integer i
 
+gCurry' :: MDoc -> [MDoc] -> Int -> MDoc
+gCurry' f args i
+  = gCall' "std::bind"
+  $ (f:args) ++ map (\i -> "std::placeholders::_" <> pretty i) (take i ([1..] :: [Int]))
+
 gComment' :: MDoc -> MDoc
 gComment' d = "/* " <> d <> " */"
 
@@ -125,7 +131,7 @@ gQuote' = dquotes
 
 -- | The first argment is the directory, this is added later?
 gImport' :: MDoc -> MDoc -> MDoc
-gImport' _ s = "#include" <+> s 
+gImport' _ s = "#include" <+> s
 
 gList' :: [MDoc] -> MDoc
 gList' xs = encloseSep "{" "}" "," xs
@@ -134,7 +140,7 @@ gTuple' :: [MDoc] -> MDoc
 gTuple' xs = encloseSep "{" "}" "," xs
 
 gRecord' :: [(MDoc, MDoc)] -> MDoc
-gRecord' _ = undefined 
+gRecord' _ = undefined
 
 gTrue' :: MDoc
 gTrue' = integer 1
@@ -146,11 +152,11 @@ gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
 
 gUnpacker' :: UnpackerDoc -> MDoc
-gUnpacker' ud = gCall' (udUnpacker ud) [udValue ud] 
+gUnpacker' ud = gCall' (udUnpacker ud) [udValue ud]
 
 -- There is no try, only do
 gTry' :: TryDoc -> MDoc
-gTry' td = gCall' (tryCmd td) (tryArgs td) 
+gTry' td = gCall' (tryCmd td) (tryArgs td)
 
 -- "foreign_call" is defined in "cbase.h"
 gForeignCall' :: ForeignCallDoc -> MDoc
@@ -179,12 +185,13 @@ gShowType' :: MType -> MDoc
 gShowType' t = pretty $ MTM.showMType f t
   where
     f :: [Name] -> Name -> Name
-    f inputs output = render $ pretty output <> "(*f)" <> tupled (map pretty inputs)  
+    f _ _ = "auto"
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>
 
 #include <iostream>
+#include <functional>
 
 #{vsep (pmSources pm)}
 

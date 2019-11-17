@@ -37,6 +37,10 @@ data Grammar =
     , gFunction :: GeneralFunction -> MDoc
     , gSignature :: GeneralFunction -> MDoc
     , gId2Function :: Integer -> MDoc
+    , gCurry :: MDoc -- function name
+             -> [MDoc] -- arguments that are partially applied
+             -> Int -- number of remaining arguments
+             -> MDoc
     , gComment :: MDoc -> MDoc
     , gReturn :: MDoc -> MDoc
     , gQuote :: MDoc -> MDoc

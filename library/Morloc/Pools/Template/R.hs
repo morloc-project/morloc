@@ -31,6 +31,7 @@ g = Grammar {
     , gCall        = gCall'
     , gFunction    = gFunction'
     , gId2Function = gId2Function'
+    , gCurry       = gCurry'
     , gComment     = gComment'
     , gReturn      = gReturn'
     , gQuote       = gQuote'
@@ -59,8 +60,8 @@ gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "character" []
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
-  (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ("::" <+> t) 
-  Nothing  -> gaName ga <> " <- " <> gaValue ga 
+  (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ("::" <+> t)
+  Nothing  -> gaName ga <> " <- " <> gaValue ga
 
 gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' n args = n <> tupled args
@@ -74,6 +75,13 @@ gFunction' gf
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))
+
+gCurry' :: MDoc -> [MDoc] -> Int -> MDoc
+gCurry' f args i
+  = "function" <> tupled rems <> braces (gCall' f (args ++ rems)) where
+    rems = if i == 1
+      then ["x"]
+      else map (\i' -> pretty i') (take i ([1..] :: [Int]))
 
 gComment' :: MDoc -> MDoc
 gComment' d = "# " <> d
@@ -148,7 +156,7 @@ gForeignCall' f = gCall' ".morloc_foreign_call" $
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#!/usr/bin/env Rscript
-  
+
 #{line <> vsep (pmSources pm)}
 
 .morloc_run <- function(f, args){
@@ -206,7 +214,7 @@ gMain' pm = return [idoc|#!/usr/bin/env Rscript
 }
 
 .morloc_unpack <- function(unpacker, x, .pool, .name){
-  x <- .morloc_try(f=unpacker, args=list(as.character(x)), .pool=.pool, .name=.name)  
+  x <- .morloc_try(f=unpacker, args=list(as.character(x)), .pool=.pool, .name=.name)
   return(x)
 }
 
