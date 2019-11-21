@@ -22,14 +22,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
-instance Pretty MType where
-  pretty (MConcType _ n []) = pretty n
-  pretty (MConcType _ n ts) = parens $ hsep (pretty n : (map pretty ts))
-  pretty (MAbstType _ n []) = pretty n
-  pretty (MAbstType _ n ts) = parens $ hsep (pretty n : (map pretty ts))
-  pretty (MFuncType _ ts o) =
-    parens $ (hcat . punctuate ", ") (map pretty ts) <> " -> " <> pretty o
-
 instance Pretty MVar where
   pretty (MV t) = pretty t
 

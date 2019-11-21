@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : C
+Module      : Morloc.CodeGenerator.Grammars.Template.C
 Description : Build a C program given a file
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -12,21 +12,19 @@ The build process for C differs from that used in R and python since a
 compilation step is needed. This code currently is wildly experimental.
 -}
 
-module Morloc.Pools.Template.C
+module Morloc.CodeGenerator.Grammars.Template.C
 (
-  generate
+  grammar
 ) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.Pools.Common
+import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
-
-generate :: [Manifold] -> SerialMap -> MorlocMonad Script
-generate = defaultCodeGenerator g wrapIncludeString
 
 -- See comments above the homologous Cpp.hs function
 wrapIncludeString
@@ -35,7 +33,7 @@ wrapIncludeString
   -> m MDoc
 wrapIncludeString = return . dquotes . pretty . MS.takeFileName
 
-g = Grammar {
+grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
@@ -57,7 +55,7 @@ g = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    , gSwitch      = gSwitch'
+    -- , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -69,8 +67,8 @@ fromMaybeType = maybe "void*" id
 gLang' :: Lang
 gLang' = CLang
 
-gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "char*" []
+gSerialType' :: Type
+gSerialType' = VarT (TV (Just CLang) "char*")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -141,26 +139,24 @@ gTry' td = gCall' (tryCmd td) (tryArgs td)
 gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
 
-gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
-gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
-  where
-    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
-      caseBlock = vsep (map asCase cases) <> line
-      asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
-
-    blockC :: MDoc -> MDoc
-    blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
-
-    caseC :: MDoc -> MDoc
-    caseC body = var <> " = " <> body <> ";" <> line <> "break;"
+-- gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
+-- gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
+--   where
+--     switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
+--       caseBlock = vsep (map asCase cases) <> line
+--       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
+--
+--     blockC :: MDoc -> MDoc
+--     blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
+--
+--     caseC :: MDoc -> MDoc
+--     caseC body = var <> " = " <> body <> ";" <> line <> "break;"
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
-gShowType' :: MType -> MDoc
-gShowType' t = pretty $ MTM.showMType f t
-  where
-    f = \_ _ -> error "Currently passing functions is not supported in C"
+gShowType' :: Type -> MDoc
+gShowType' = prettyType
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string.h>
@@ -169,9 +165,9 @@ gMain' pm = return [idoc|#include <string.h>
 
 #{vsep (pmSources pm)}
 
-#{vsep $ map (gSignature g) (pmPoolManifolds pm)}
+#{vsep $ map (gSignature grammar) (pmPoolManifolds pm)}
 
-#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
+#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
 
 int main(int argc, char * argv[]){
   int cmdID;

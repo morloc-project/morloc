@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : Morloc.Pools.Template.Python3
+Module      : Morloc.CodeGenerator.Grammars.Template.Python3
 Description : R language generation
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,21 +9,22 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Pools.Template.Python3 (generate) where
+module Morloc.CodeGenerator.Grammars.Template.Python3
+(
+  grammar
+) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.Pools.Common
+import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Data.Char as DC
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified System.FilePath as SF
 import qualified Morloc.TypeChecker.Macro as MTM
-
-generate :: [Manifold] -> SerialMap -> MorlocMonad Script
-generate = defaultCodeGenerator g asImport
 
 asImport :: MT.Text -> MorlocMonad MDoc
 asImport s = do
@@ -48,7 +49,7 @@ pyIfElse (r:rs) els
     pyElse Nothing = ""
     pyElse (Just elseblock) = nest 4 ("else:" <> line <> elseblock)
 
-g = Grammar {
+grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
@@ -70,7 +71,7 @@ g = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    , gSwitch      = gSwitch'
+    -- , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -79,8 +80,8 @@ g = Grammar {
 gLang' :: Lang
 gLang' = Python3Lang
 
-gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "str" []
+gSerialType' :: Type
+gSerialType' = VarT (TV (Just Python3Lang) "str")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -163,25 +164,23 @@ gSignature' gf
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
-gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
-gSwitch' l r ms x var = pyIfElse cases Nothing
-  where
-    cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
--- -- This is a cleaner approach, but python is too eager, leading every
--- -- case to be evaluated, thus this does not behave like a switch statement.
--- -- Doing all if statements (as above) does work, but is slow.
 -- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
--- gSwitch' l r xs x var
---   =   var <+> "=" <+> "if"
---   <+> encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs) <> brackets x
+-- gSwitch' l r ms x var = pyIfElse cases Nothing
+--   where
+--     cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
+-- -- -- This is a cleaner approach, but python is too eager, leading every
+-- -- -- case to be evaluated, thus this does not behave like a switch statement.
+-- -- -- Doing all if statements (as above) does work, but is slow.
+-- -- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
+-- -- gSwitch' l r xs x var
+-- --   =   var <+> "=" <+> "if"
+-- --   <+> encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs) <> brackets x
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]
 
-gShowType' :: MType -> MDoc
-gShowType' t = pretty $ MTM.showMType f t
-  where
-    f = \_ _ -> error "Currently passing functions is not supported in python"
+gShowType' :: Type -> MDoc
+gShowType' = prettyType
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = do
@@ -228,7 +227,7 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
     return(jsonString)
 
 
-#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
+#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
 
 if __name__ == '__main__':
     try:

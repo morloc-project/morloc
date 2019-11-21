@@ -61,13 +61,10 @@ evalMorlocMonad v config m = do
     (Right value) -> return value 
 
 emptyState :: Int -> MorlocState
-emptyState v =
-  MorlocState
-    { dependencies = []
-    , statePackageMeta = []
-    , stateSerialMaps = Map.empty
-    , stateVerbosity = v
-    }
+emptyState v = MorlocState {
+    statePackageMeta = []
+  , stateVerbosity = v
+}
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)

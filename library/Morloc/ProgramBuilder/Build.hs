@@ -1,12 +1,12 @@
 {-|
-Module      : Build
+Module      : Morloc.ProgramBuilder.Build
 Description : Manage system requirements and project building for pools
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Build
+module Morloc.ProgramBuilder.Build
   ( buildProgram
   ) where
 

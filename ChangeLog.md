@@ -1,18 +1,18 @@
 0.xx.x [xxxx.xx.xx]
 
- [ ] remove/replace Manifold object, build from Expr
  [ ] resurrect property tests
  [ ] meaningful error messages
  [ ] generate error handling in pools
  [ ] add type annotations to printed help
  [ ] add python tests
  [ ] replace perl manifold nexus with C
-
-0.18.2 [xxxx.xx.xx]
-
  [ ] test record handling
  [ ] add general type-directed structure to JSON serialization 
 
+0.18.2 [xxxx.xx.xx]
+
+ [ ] remove/replace Manifold object, build from Expr
+ [ ] allow and test currying
  [x] allow tags on parenthesized types
  [x] improve error messages 
  [x] fix bug in functions with multiple parameters 

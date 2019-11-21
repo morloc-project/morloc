@@ -38,16 +38,6 @@ errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
 errmsg (GeneratorError t) = "GeneratorError: " <> t
-errmsg (DependencyError (ModuleDependency name path lang)) =
-  "DependencyError: could not find module " <>
-  name <> "(" <> ML.showLangName lang <> ") at " <> path
-errmsg (DependencyError (ExecutableDependency name path)) =
-  "DependencyError: could not find executable " <> name <> " at " <> path
-errmsg (DependencyError (SourceCodeDependency moduleName path lang)) =
-  "DependencyError: could not find source code '" <>
-  path <>
-  "' (" <>
-  ML.showLangName lang <> ")" <> " imported by Morloc module " <> moduleName
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>

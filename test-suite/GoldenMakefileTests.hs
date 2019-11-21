@@ -2,7 +2,6 @@ module GoldenMakefileTests
   ( goldenMakefileTest
   ) where
 
-import Morloc.Connect (connect)
 import Test.Tasty
 import Test.Tasty.Golden
 import qualified Morloc.Config as Config

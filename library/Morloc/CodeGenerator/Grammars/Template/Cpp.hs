@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : C
+Module      : Morloc.CodeGenerator.Grammars.Template.Cpp
 Description : Build a Cpp program given a file
 Copyright   : (c) Zebulun Arendsee, 2019
 License     : GPL-3
@@ -9,21 +9,19 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Pools.Template.Cpp
+module Morloc.CodeGenerator.Grammars.Template.Cpp
 (
-  generate
+  grammar
 ) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.Pools.Common
+import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
-
-generate :: [Manifold] -> SerialMap -> MorlocMonad Script
-generate = defaultCodeGenerator g wrapIncludeString
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -49,7 +47,7 @@ wrapIncludeString
   -> m MDoc
 wrapIncludeString = return . dquotes . pretty . MS.takeFileName
 
-g = Grammar {
+grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
@@ -71,7 +69,7 @@ g = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    , gSwitch      = gSwitch'
+    -- , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -83,15 +81,15 @@ fromMaybeType = maybe "void*" id
 gLang' :: Lang
 gLang' = CppLang
 
-gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "std::string" []
+gSerialType' :: Type
+gSerialType' = VarT (TV (Just CppLang) "std::string")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case (gaArg ga, gaType ga) of
   -- need to call constructors
-  (Just (ArgData (Lst' _)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
-  (Just (ArgData (Tup' _)), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
-  (Just (ArgData (Rec' _)), Just _) -> undefined
+  (Just (Lst' _), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (Tup' _), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
+  (Just (Rec' _), Just _) -> undefined
   -- simple '=' assignment
   (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";"
   (_, Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
@@ -165,27 +163,24 @@ gForeignCall' fc = gCall' "foreign_call" [hsep $ punctuate " + " (joinStr (fcdCa
     joinStr xs
       = "\"" <> (hsep $ map (pretty . MT.undquote . render) xs) <+> "\""
 
-gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
-gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
-  where
-    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
-      caseBlock = vsep (map asCase cases) <> line
-      asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
-
-    blockC :: MDoc -> MDoc
-    blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
-
-    caseC :: MDoc -> MDoc
-    caseC body = var <> " = " <> body <> ";" <> line <> "break;"
+-- gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
+-- gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
+--   where
+--     switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
+--       caseBlock = vsep (map asCase cases) <> line
+--       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
+--
+--     blockC :: MDoc -> MDoc
+--     blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
+--
+--     caseC :: MDoc -> MDoc
+--     caseC body = var <> " = " <> body <> ";" <> line <> "break;"
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
-gShowType' :: MType -> MDoc
-gShowType' t = pretty $ MTM.showMType f t
-  where
-    f :: [Name] -> Name -> Name
-    f _ _ = "auto"
+gShowType' :: Type -> MDoc
+gShowType' = prettyType
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>
@@ -195,9 +190,9 @@ gMain' pm = return [idoc|#include <string>
 
 #{vsep (pmSources pm)}
 
-#{vsep $ map (gSignature g) (pmPoolManifolds pm)}
+#{vsep $ map (gSignature grammar) (pmPoolManifolds pm)}
 
-#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
+#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
 
 int main(int argc, char * argv[]){
   int cmdID;

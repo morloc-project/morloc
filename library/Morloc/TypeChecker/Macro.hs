@@ -9,9 +9,9 @@ Stability   : experimental
 -}
 
 module Morloc.TypeChecker.Macro
-  ( expandMacro
-  , showMType
-  ) where
+(
+    expandMacro
+) where
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
@@ -26,11 +26,6 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
-
-showMType :: ([MT.Text] -> MT.Text -> MT.Text) -> MType -> MT.Text
-showMType f (MConcType _ n xs) = expandMacro n (map (showMType f) xs)
-showMType f (MAbstType _ n xs) = expandMacro n (map (showMType f) xs)
-showMType f (MFuncType _ inputs output) = f (map (showMType f) inputs) (showMType f output)
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t

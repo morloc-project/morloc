@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 {-|
-Module      : Morloc.Pools.Template.R
+Module      : Morloc.CodeGenerator.Grammars.Template.R
 Description : R language generation
 Copyright   : (c) Zebulun Arendsee, 2018
 License     : GPL-3
@@ -9,22 +9,20 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Pools.Template.R (generate) where
+module Morloc.CodeGenerator.Grammars.Template.R (grammar) where
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.Pools.Common
+import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.TypeChecker.Macro as MTM
-
-generate :: [Manifold] -> SerialMap -> MorlocMonad Script
-generate = defaultCodeGenerator g asImport
 
 asImport :: MT.Text -> MorlocMonad MDoc
 asImport s = return . pretty $ s
 
-g = Grammar {
+grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
@@ -46,7 +44,7 @@ g = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    , gSwitch      = gSwitch'
+    -- , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -55,8 +53,8 @@ g = Grammar {
 gLang' :: Lang
 gLang' = RLang
 
-gSerialType' :: MType
-gSerialType' = MConcType (MTypeMeta Nothing [] Nothing) "character" []
+gSerialType' :: Type
+gSerialType' = VarT (TV (Just RLang) "character")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -132,19 +130,17 @@ gSignature' gf
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
-gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
-gSwitch' l r xs x var
-  =   var <+> "<-"
-  <+> "switch"
-  <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
+-- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
+-- gSwitch' l r xs x var
+--   =   var <+> "<-"
+--   <+> "switch"
+--   <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]
 
-gShowType' :: MType -> MDoc
-gShowType' t = pretty $ MTM.showMType f t
-  where
-    f = \_ _ -> error "Currently passing functions is not supported in R"
+gShowType' :: Type -> MDoc
+gShowType' = prettyType
 
 gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' f = gCall' ".morloc_foreign_call" $
@@ -222,7 +218,7 @@ gMain' pm = return [idoc|#!/usr/bin/env Rscript
   .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .name=.name)
 }
 
-#{vsep $ map (gFunction g) (pmPoolManifolds pm)}
+#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){
