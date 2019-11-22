@@ -257,7 +257,6 @@ pSignature = do
          { etype = t
          , eprop = Set.fromList props
          , econs = Set.fromList constraints
-         , esource = Nothing
          })
 
 pLang :: Parser Lang
@@ -320,7 +319,12 @@ pSrcE = do
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  return $ SrcE language (MS.combine <$> fmap MS.takeDirectory f <*> srcfile) rs
+  let path = MS.combine <$> fmap MS.takeDirectory f <*> srcfile
+  return $ SrcE [Source { srcName = name
+                        , srcLang = language
+                        , srcPath = path
+                        , srcAlias = alias
+                        } | (name, alias) <- rs]
 
 pImportSourceTerm :: Parser (EVar, EVar)
 pImportSourceTerm = do

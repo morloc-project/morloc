@@ -23,7 +23,6 @@ module Morloc.TypeChecker.Util
   , importFromModularGamma
   , index
   , lookupE
-  , lookupSrc
   , lookupT
   , mapT
   , mapT'
@@ -53,7 +52,7 @@ instance HasManyLanguages TypeSet where
 
 instance HasManyLanguages Expr where
   langsOf g e = nub $ Nothing : langsOf' g e where
-    langsOf' _ (SrcE lang _ _) = [Just lang]
+    langsOf' _ (SrcE srcs) = map (Just . srcLang) srcs
     langsOf' _ (Signature _ t) = [langOf t] 
     langsOf' g (Declaration _ e) = langsOf' g e
     langsOf' g UniE = [] 
@@ -185,15 +184,6 @@ lookupT v ((SolvedG v' t):gs)
   | v == v' = Just t
   | otherwise = lookupT v gs
 lookupT v (_:gs) = lookupT v gs
-
--- | Look up the source of a function
-lookupSrc ::
-     (EVar, Lang) -> Gamma -> Maybe (Maybe Path, EVar)
-lookupSrc _ [] = Nothing
-lookupSrc (e, l) ((SrcG e' l' path alias):rs)
-  | e == e' && l == l' = Just (path, alias)
-  | otherwise = lookupSrc (e, l) rs
-lookupSrc x (_:rs) = lookupSrc x rs
 
 access1 :: TVar -> Gamma -> Maybe (Gamma, GammaIndex, Gamma)
 access1 v gs =

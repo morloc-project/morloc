@@ -41,6 +41,7 @@ module Morloc.Namespace
   , Gamma
   , GammaIndex(..)
   , Import(..)
+  , Source(..)
   , Indexable(..)
   , MVar(..)
   , Module(..)
@@ -289,7 +290,7 @@ data GammaIndex
   -- ^ (G,>a^) Store a type variable marker bound under a forall
   | MarkEG EVar
   -- ^ ...
-  | SrcG EVar Lang (Maybe Path) EVar
+  | SrcG Source
   -- ^ source
   | ConcreteG EVar Lang Type
   -- ^ store a local concrete type
@@ -297,6 +298,15 @@ data GammaIndex
   -- ^ Store an unsolved serialization constraint containing one or more
   -- existential variables. When the existential variables are solved, the
   -- constraint will be written into the Stack state.
+  deriving (Ord, Eq, Show)
+
+data Source =
+  Source
+    { srcName :: EVar
+    , srcLang :: Lang
+    , srcPath :: Maybe Path
+    , srcAlias :: EVar
+    }
   deriving (Ord, Eq, Show)
 
 data Import =
@@ -314,6 +324,7 @@ data Module =
     , modulePath :: Maybe Path
     , moduleImports :: [Import]
     , moduleExports :: [EVar]
+    , moduleSources :: [Source]
     , moduleBody :: [Expr]
     , moduleTypeMap :: Map EVar TypeSet
     }
@@ -321,7 +332,7 @@ data Module =
 
 -- | Terms, see Dunfield Figure 1
 data Expr
-  = SrcE Lang (Maybe Path) [(EVar, EVar)]
+  = SrcE [Source]
   -- ^ import "c" from "foo.c" ("f" as yolo)
   | Signature EVar EType
   -- ^ x :: A; e
@@ -386,7 +397,6 @@ data EType =
     { etype :: Type
     , eprop :: Set Property
     , econs :: Set Constraint
-    , esource :: Maybe (Maybe Path, EVar)
     }
   deriving (Show, Eq, Ord)
 

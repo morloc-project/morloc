@@ -79,7 +79,10 @@ typecheckModules mg (m:ms) = do
   (privateMap, mg') <- extendModularGamma g' m mg
   mods <- typecheckModules mg' ms
   leave $ "module"
-  return (m {moduleBody = exprs, moduleTypeMap = privateMap} : mods)
+  return (m { moduleBody = exprs
+            , moduleTypeMap = privateMap
+            , moduleSources = [s | (SrcG s) <- g']
+            } : mods)
 
 insertWithCheck ::
      Map.Map MVar Module -> (MVar, Module) -> Stack (Map.Map MVar Module)
@@ -203,7 +206,6 @@ instance Typed EType where
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = Nothing
       }
 
 instance Typed TypeSet where
@@ -301,7 +303,7 @@ collateOne (RecE es1) (RecE es2)
 -- illegal
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
-collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
+collateOne (SrcE _) (SrcE _) = error "the hell's is a toplevel doing down here?"
 collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
 
 collateTypes :: [Type] -> [Type] -> Stack [Type]
@@ -339,13 +341,11 @@ appendTypeSet g v s e1 =
       return $ TypeSet (Just e1) rs
   -- if e is a realization, and no general type is set, just add e to the list
     (Just lang, TypeSet Nothing rs) -> do
-      let e1' = e1 {esource = lookupSrc (v, lang) g}
-      return $ TypeSet Nothing (e1' : [r | r <- rs, r /= e1'])
+      return $ TypeSet Nothing (e1 : [r | r <- rs, r /= e1])
   -- if e is a realization, and a general type exists, append it and check
     (Just lang, TypeSet (Just e2) rs) -> do
       checkRealization e2 e1
-      let e1' = e1 {esource = lookupSrc (v, lang) g}
-      return $ TypeSet (Just e2) (e1' : [r | r <- rs, r /= e1'])
+      return $ TypeSet (Just e2) (e1 : [r | r <- rs, r /= e1])
   -- if e is general, and a general type exists, merge the general types
     (Nothing, TypeSet (Just e2) rs) -> do
       let e3 =
@@ -353,7 +353,6 @@ appendTypeSet g v s e1 =
               { etype = etype e2
               , eprop = Set.union (eprop e1) (eprop e2)
               , econs = Set.union (econs e1) (econs e2)
-              , esource = Nothing
               }
       return $ TypeSet (Just e3) rs
 
@@ -399,7 +398,6 @@ typesetFromList g v ts = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = langOf t >>= (\l -> lookupSrc (v, l) g)
       }
 
 -- | TODO: document - allow things other than general
@@ -694,26 +692,22 @@ infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
 -- and Declaration expressions. Thus every term that originates in source
 -- code will be initialized here and elaborated upon with deeper type
 -- information as the signatures and declarations are parsed. 
-infer' (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g1 s1@(SrcE lang path xs) = do
-  let g3 = [SrcG alias lang path srcname | (srcname, alias) <- xs] ++ g1
-  return ( g3 , [] , s1)
+infer' (Just _) _ (SrcE _) = throwError ToplevelStatementsHaveNoLanguage
+infer' Nothing g1 s1@(SrcE srcs) = do
+  let g3 = map SrcG srcs ++ g1
+  return (g3, [], s1)
 
 -- Signature=>
 infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g (Signature v e1) = do
-
-  let src = langOf e1 >>= (\l -> lookupSrc (v, l) g)
-      e2 = e1 {esource = src}
-
-  g2 <- accessWith1 isAnnG (append' e2) (ifNotFound e2) g
-  return (g2, [], Signature v e2)
+  g2 <- accessWith1 isAnnG (append' e1) (ifNotFound e1) g
+  return (g2, [], Signature v e1)
   where
 
     -- find a typeset
     isAnnG :: GammaIndex -> Bool
-    isAnnG (AnnG (VarE e2) _)
-      | v == e2 = True
+    isAnnG (AnnG (VarE e1) _)
+      | v == e1 = True
       | otherwise = False
     isAnnG _ = False
 
@@ -783,7 +777,6 @@ infer' Nothing g1 (Declaration v e1) = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = langOf t >>= (\l -> lookupSrc (v,l) g)
       }
 
 --  (x:A) in g

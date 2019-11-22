@@ -74,7 +74,7 @@ connect :: [Module] -> MorlocMonad [SAnno (EType, Maybe EType, Int)]
 connect ms = mapM (collect ms >=> realize >=> enumerate) (findRoots ms)
 
 collect :: [Module] -> (Expr, Module) -> MorlocMonad (SAnno [EType])
-collect ms (AnnE UniE ts, m) = sanno UniS m ts
+collect ms (AnnE UniE ts, m) = sanno UniS m ms ts
 collect ms (AnnE (VarE v) ts, m) = sanno (VarS v) m ms ts 
 collect ms (AnnE (ListE es) ts, m) = do
   es' <- mapM (collect ms) [(e,m) | e <- es]
@@ -102,7 +102,7 @@ collect ms (AnnE (StrE e) ts, m) = sanno (StrS e) m ms ts
 collect _ _ = MM.throwError . OtherError $ "Unexpected type in collect"
 
 sanno :: SExpr [EType] -> Module -> [Module] -> [Type] -> MorlocMonad (SAnno [EType])
-sanno e m ts = return $ Annotation e (toEType m ms ts)
+sanno e m ms ts = return $ Annotation e (toEType m ms ts)
 
 toEType :: Module -> [Module] -> [Type] -> [EType]
 toEType = undefined
