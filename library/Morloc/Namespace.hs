@@ -89,6 +89,7 @@ type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 data MorlocState = MorlocState {
     statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
+  , stateCounter :: Int
 }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
@@ -322,11 +323,13 @@ data Module =
   Module
     { moduleName :: MVar
     , modulePath :: Maybe Path
+    , moduleBody :: [Expr] -- ^ will be parsed by the typechecker and used in pretty printing 
+    , moduleExports :: Set EVar
     , moduleImports :: [Import]
-    , moduleExports :: [EVar]
-    , moduleSources :: [Source]
-    , moduleBody :: [Expr]
+    , moduleImportMap :: Map EVar MVar
+    , moduleSourceMap :: Map (EVar, Lang) Source
     , moduleTypeMap :: Map EVar TypeSet
+    , moduleDeclarationMap :: Map EVar Expr
     }
   deriving (Ord, Eq, Show)
 

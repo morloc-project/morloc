@@ -25,7 +25,6 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Parser.API as Papi
 import qualified Morloc.Parser.Parser as P
-import qualified Morloc.TypeChecker.API as T
 
 type Subcommand = Arguments -> Config.Config -> IO ()
 

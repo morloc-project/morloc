@@ -171,14 +171,19 @@ makeModule f n mes =
   Module
     { moduleName = n
     , modulePath = f
-    , moduleImports = imports'
-    , moduleExports = exports'
     , moduleBody = body'
-    , moduleTypeMap = Map.empty
+    , moduleExports = exports'
+    , moduleImports = imports'
+    , moduleImportMap = Map.empty -- will be created in Infer.hs
+    , moduleSourceMap = (Map.fromList . concat)
+                        [[((srcAlias s, srcLang s), s) | s <- ss ]
+                        | (SrcE ss) <- body']
+    , moduleDeclarationMap = Map.empty -- will be created in Infer.hs
+    , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where
     imports' = [x | (MBImport x) <- mes]
-    exports' = [x | (MBExport x) <- mes]
+    exports' = Set.fromList [x | (MBExport x) <- mes]
     body' = [x | (MBBody x) <- mes]
 
 pModuleBody :: Parser ModuleBody

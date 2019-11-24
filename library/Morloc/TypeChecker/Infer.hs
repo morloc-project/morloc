@@ -37,13 +37,41 @@ typecheck ms = do
   -- graph :: Map MVar (Set MVar)
   let graph = Map.fromList $ map mod2pair ms
   mods' <- path graph
-  case mapM (flip Map.lookup $ mods) mods' of
+  mods'' <- case mapM (flip Map.lookup $ mods) mods' of
     (Just mods'') -> typecheckModules (Map.empty) mods''
     Nothing -> throwError $ OtherError "bad thing #1"
+  let modmap = Map.fromList [(moduleName m, m) | m <- mods'']
+  return (Map.elems . Map.map (addImportMap modmap) $ modmap)
   where
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m =
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
+
+    addImportMap :: Map.Map MVar Module -> Module -> Module
+    addImportMap ms m = m {
+      moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m) 
+    }
+
+    mkImportMap
+      :: Module -- the module for which
+      -> Map.Map MVar Module
+      -> Import
+      -> Map.Map EVar MVar
+    mkImportMap m ms imp = case ( importInclude imp
+                                , Map.lookup (importModuleName imp) ms
+                                ) of 
+      (_, Nothing) -> error "Bad import"
+      -- include everything
+      (Nothing, Just m') -> exportMap m' (importExclude imp)
+      -- include specific selection of terms
+      (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
+                                              (exportMap m' (importExclude imp))
+
+    exportMap :: Module -> [EVar] -> Map.Map EVar MVar
+    exportMap m excl
+      = Map.fromSet (\_ -> moduleName m)
+      $ Set.difference (moduleExports m) (Set.fromList excl)
+
 
 enter :: Doc AnsiStyle -> Stack ()
 enter d = do
@@ -81,7 +109,7 @@ typecheckModules mg (m:ms) = do
   leave $ "module"
   return (m { moduleBody = exprs
             , moduleTypeMap = privateMap
-            , moduleSources = [s | (SrcG s) <- g']
+            , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
             } : mods)
 
 insertWithCheck ::
@@ -686,12 +714,17 @@ infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
     t = VarT (TV Nothing "Bool")
 
 -- Src=>
--- --- FIXME: the expressions are now NOT sorted ... need to fix
+-- -- FIXME: the expressions are now NOT sorted ... need to fix
 -- Since the expressions in a Morloc script are sorted before being
 -- evaluated, the SrcE expressions will be considered before the Signature
 -- and Declaration expressions. Thus every term that originates in source
 -- code will be initialized here and elaborated upon with deeper type
 -- information as the signatures and declarations are parsed. 
+-- -- NOTE: Keeping SrcE as an expression, rather than pulling it out of the
+-- body, as is done with imports and exports, is justified since the type
+-- system should know that a given term is from a given language since it may
+-- be possible, in cases, to infer a type signature for the given language from
+-- the general type signature.
 infer' (Just _) _ (SrcE _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g1 s1@(SrcE srcs) = do
   let g3 = map SrcG srcs ++ g1

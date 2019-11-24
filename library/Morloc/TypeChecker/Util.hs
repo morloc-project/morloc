@@ -132,7 +132,7 @@ extendModularGamma g m mg
     v = moduleName m
     es = moduleExports m
     privateMap = [(e,t) | AnnG (VarE e) t <- g]
-    publicMap = Map.fromList [(e,t) | (e,t) <- privateMap, elem e es]
+    publicMap = Map.fromList [(e,t) | (e,t) <- privateMap, Set.member e es]
 
 mapT :: (Type -> Type) -> Expr -> Expr
 mapT f (LamE v e) = LamE v (mapT f e)

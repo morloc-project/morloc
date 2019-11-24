@@ -61,7 +61,7 @@ prettyModule m =
 prettyBlock :: Module -> Doc AnsiStyle
 prettyBlock m =
   vsep (map prettyImport (moduleImports m)) <>
-  vsep ["export" <+> pretty e <> line | (EV e) <- moduleExports m] <>
+  vsep ["export" <+> pretty e <> line | (EV e) <- Set.toList (moduleExports m)] <>
   vsep (map prettyExpr (moduleBody m))
 
 prettyImport :: Import -> Doc AnsiStyle
