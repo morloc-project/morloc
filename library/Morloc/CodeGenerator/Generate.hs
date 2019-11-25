@@ -81,7 +81,29 @@ makePool :: (Grammar, [SAnno (Type, Meta, MDoc)]) -> MorlocMonad Script
 makePool = undefined
 
 findSerializers :: [Module] -> MorlocMonad SerialMap
-findSerializers ms = undefined
+findSerializers ms = return $ SerialMap
+  { packers = Map.unions (map (findSerialFun Pack) ms)
+  , unpackers = Map.unions (map (findSerialFun Unpack) ms)
+  } where
+
+  findSerialFun :: Property -> Module -> Map.Map Type (Name, Path)
+  findSerialFun p m
+    = Map.fromList
+    . mapSum
+    . Map.mapWithKey (\v t -> map (g m) (f p v t))
+    $ moduleTypeMap m
+
+  f :: Property -> EVar -> TypeSet -> [(Type, EVar)]
+  f p v (TypeSet (Just gentype) ts) =
+    if Set.member p (eprop gentype)  
+      then [(etype t, v) | t <- ts]
+      else [(etype t, v) | t <- ts, Set.member p (eprop t)]
+  f p v (TypeSet Nothing ts) = [(etype t, v) | t <- ts, Set.member p (eprop t)]
+
+  g :: Module -> (Type, EVar) -> (Type, (Name, Path))
+  g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
+    (Just (Source (EV name) _ (Just path) _)) -> (t, (name, path))
+    _ -> error "something evil this way comes"
 
 -- | Create one tree for each nexus command.
 connect :: [Module] -> MorlocMonad [SAnno (Type, Meta)]
