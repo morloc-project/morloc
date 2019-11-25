@@ -20,6 +20,10 @@ import Data.Scientific (Scientific)
 import Control.Monad ((>=>))
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Morloc.CodeGenerator.Grammars.Template.C as GrammarC
+import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
+import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
+import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
 data SAnno a = Annotation (SExpr a) a deriving (Show, Ord, Eq)
 
@@ -221,7 +225,10 @@ codify
 codify = undefined
 
 selectGrammar :: (Lang, a) -> MorlocMonad (Grammar, a)
-selectGrammar = undefined
+selectGrammar (CLang,       x) = return (GrammarC.grammar,       x)
+selectGrammar (CppLang,     x) = return (GrammarCpp.grammar,     x)
+selectGrammar (RLang,       x) = return (GrammarR.grammar,       x)
+selectGrammar (Python3Lang, x) = return (GrammarPython3.grammar, x)
 
 segregate :: [SAnno (Type, Meta, MDoc)] -> MorlocMonad [(Lang, [SAnno (Type, Meta, MDoc)])]
 segregate = undefined
