@@ -116,9 +116,10 @@ connect ms = do
   mapM (collect modmap >=> realize) (findRoots modmap)
 
 collect :: Map.Map MVar Module -> (Expr, EVar, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
-collect ms (e, ev, mv) = root where
-  root :: MorlocMonad (SAnno [(Type, Meta)])
-  root = undefined
+collect ms (e@(AnnE _ ts), ev, mv) = root where
+  root = do
+    (Annotation sexpr _) <- collect' (e, mv)
+    Annotation sexpr <$> makeVarMeta ev mv ts
 
   -- TODO: I need to couple metadata to the manifolds function calls. Each call
   -- must have a path to source code and may optionally have properties and
@@ -174,22 +175,28 @@ collect ms (e, ev, mv) = root where
                     }
     return $ Annotation x [(t, meta) | t <- ts] 
 
-  makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad Meta
+  makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
   makeVarMeta evar mvar ts = do
     i <- MM.getCounter
     generalType <- getGeneralType ts
     let typeset = lookupTypeSet evar mvar ms 
-    return $ Meta { metaGeneralType = generalType
-                  , metaProperties = Set.empty
-                  , metaConstraints = Set.empty
-                  , metaSource = Nothing
-                  , metaModule = mvar
-                  , metaId = i
-                  }
+    let meta = Meta { metaGeneralType = generalType
+                    , metaProperties = Set.empty
+                    , metaConstraints = Set.empty
+                    , metaSource = Nothing
+                    , metaModule = mvar
+                    , metaId = i
+                    }
+    return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
 
   -- | Evaluate a variable. If it was imported, lookup of the module it came from.
   evaluateVariable :: MVar -> EVar -> [Type] -> MorlocMonad (SAnno ([(Type, Meta)]))
-  evaluateVariable e m = undefined
+  evaluateVariable mvar evar ts =
+    case Map.lookup mvar ms >>= (\m -> findExpr ms m evar) of
+      (Just (expr', evar', mvar')) -> do
+        (Annotation sexpr _) <- collect' (expr', mvar')
+        Annotation sexpr <$> makeVarMeta evar' mvar' ts
+      Nothing -> MM.throwError . OtherError $ "Cannot find module"
 
 -- | Find the first source for a term sourced from a given language relative to a given module 
 lookupSource :: EVar -> MVar -> Lang -> Map.Map MVar Module -> Maybe Source
@@ -238,7 +245,7 @@ findRoots ms
   = catMaybes
   . Set.toList
   . mapSum
-  . Map.map (\m -> Set.map (findExpr m) (moduleExports m))
+  . Map.map (\m -> Set.map (findExpr ms m) (moduleExports m))
   . Map.filter isRoot
   $ ms where
     -- is this module a "root" module?
@@ -249,12 +256,12 @@ findRoots ms
     -- set of all modules that are imported
     allImports = mapSumWith (valset . moduleImportMap) ms
 
-    findExpr :: Module -> EVar -> Maybe (Expr, EVar, MVar)
-    findExpr m v
-      | Set.member v (moduleExports m) = case Map.lookup v (moduleDeclarationMap m) of
-          (Just e) -> Just (e, v, moduleName m)
-          Nothing -> case Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m) of
-            mvs -> case [findExpr m' v | m' <- mapMaybe (flip Map.lookup $ ms) mvs] of
-              (x:_) -> x
-              _ -> Nothing
-      | otherwise = Nothing
+findExpr :: Map.Map MVar Module -> Module -> EVar -> Maybe (Expr, EVar, MVar)
+findExpr ms m v
+  | Set.member v (moduleExports m) = case Map.lookup v (moduleDeclarationMap m) of
+      (Just e) -> Just (e, v, moduleName m)
+      Nothing -> case Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m) of
+        mvs -> case [findExpr ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) mvs] of
+          (x:_) -> x
+          _ -> Nothing
+  | otherwise = Nothing
