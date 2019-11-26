@@ -223,13 +223,44 @@ lookupTypeSet evar mvar ms =
 -- | Select a single concrete language for each sub-expression. Store the
 -- concrete type and the general type (if available).
 realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
-realize = undefined
+realize (Annotation _ []) = MM.throwError . OtherError $ "No type found"
+realize x = stepAM head x where
+
+stepAM :: Monad m => (a -> b) -> SAnno a -> m (SAnno b) 
+stepAM f (Annotation x a) = Annotation <$> stepBM f x <*> pure (f a)
+
+stepBM :: Monad m => (a -> b) -> SExpr a -> m (SExpr b)
+stepBM _ UniS = return $ UniS
+stepBM f (VarS x) = return $ VarS x
+stepBM f (ListS xs) = ListS <$> mapM (stepAM f) xs
+stepBM f (TupleS xs) = TupleS <$> mapM (stepAM f) xs
+stepBM f (LamS vs x) = LamS vs <$> stepAM f x
+stepBM f (AppS x xs) = AppS <$> stepAM f x <*> mapM (stepAM f) xs
+stepBM _ (NumS x) = return $ NumS x
+stepBM _ (LogS x) = return $ LogS x
+stepBM _ (StrS x) = return $ StrS x
+stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entries
+
+data Argument = Argument {
+    argName :: Name
+  , argType :: Type
+  , argPacker :: Name
+  , argUnpacker :: Name
+  , argIsPacked :: Bool
+}
 
 codify
   :: SerialMap
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify = undefined
+codify hashmap expr = codify' hashmap Set.empty expr 
+
+codify'
+  :: SerialMap
+  -> Set.Set Argument
+  -> SAnno (Type, Meta)
+  -> MorlocMonad (SAnno (Type, Meta, MDoc))
+codify' = undefined
 
 selectGrammar :: (Lang, a) -> MorlocMonad (Grammar, a)
 selectGrammar (CLang,       x) = return (GrammarC.grammar,       x)
