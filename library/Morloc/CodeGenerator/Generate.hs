@@ -86,10 +86,22 @@ generateScripts smap es
 -- determine the pool), and the ID of each function (since calls are by
 -- manifold ID).
 makeNexus :: [(Type, Meta)] -> MorlocMonad Script
-makeNexus = undefined
+makeNexus xs = return $ Script
+  { scriptBase = "nexus"
+  , scriptLang = PerlLang
+  , scriptCode = "this is the body"
+  , scriptCompilerFlags = []
+  , scriptInclude = []
+  }
 
 makePool :: (C.Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
-makePool = undefined
+makePool (g, xs) = return $ Script 
+  { scriptBase = "pool"
+  , scriptLang = C.gLang g
+  , scriptCode = "this is a pool"
+  , scriptCompilerFlags = []
+  , scriptInclude = []
+  }
 
 -- | This is a beast of a return type. Here is what it means:
 -- [ (Lang,  -- the one pool language
@@ -114,7 +126,7 @@ foldPools xs
     foldPool' _ (SAnno (VarS _) _) = Map.empty
     foldPool' k (SAnno (ListS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
     foldPool' k (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
-    foldPool' _ (SAnno (LamS _ _) _) = Map.empty
+    foldPool' k (SAnno (LamS _ x) _) = foldPool' k x
     foldPool' k (SAnno (AppS x xs) m) =
       Map.unionsWith
         (++)
