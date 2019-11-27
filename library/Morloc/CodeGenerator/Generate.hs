@@ -27,7 +27,7 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
-data SAnno a = Annotation (SExpr a) a deriving (Show, Ord, Eq)
+data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
 
 data SExpr a
   = UniS
@@ -73,8 +73,8 @@ generateScripts
   -> MorlocMonad (Script, [Script])
 generateScripts smap es
   = (,)
-  <$> makeNexus [t | (Annotation _ t) <- es]
-  <*> (mapM (codify smap) es >>= segregate >>= mapM addGrammar >>= mapM makePool)
+  <$> makeNexus [t | (SAnno _ t) <- es]
+  <*> (mapM (codify smap) es |>> foldPools >>= mapM addGrammar >>= mapM makePool)
   where
     addGrammar :: (Lang, a) -> MorlocMonad (C.Grammar, a)
     addGrammar (lang, x) = do 
@@ -88,8 +88,51 @@ generateScripts smap es
 makeNexus :: [(Type, Meta)] -> MorlocMonad Script
 makeNexus = undefined
 
-makePool :: (C.Grammar, [SAnno (Type, Meta, MDoc)]) -> MorlocMonad Script
+makePool :: (C.Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
 makePool = undefined
+
+-- | This is a beast of a return type. Here is what it means:
+-- [ (Lang,  -- the one pool language
+--   [ (Int  -- the id for toplevel manifold, this manifold may or may
+--           -- not be exported to the manifold, the important bit is
+--           -- that the manifold be a foreign call
+--   , [(Type, Meta, MDoc)]
+--   )])]
+foldPools :: [SAnno (Type, Meta, MDoc)] -> [(Lang, [(Int, [(Type, Meta, MDoc)])])]
+foldPools xs
+  = groupSort -- [(Lang, [(Int, [(Type, Meta, MDoc)])])]
+  . map (\((l,i),xs) -> (l, (i, xs))) -- [(Lang, (Int, [(Type, Meta, MDoc)])]
+  . Map.toList -- [((Lang, Int), [(Type, Meta, MDoc)])]
+  . Map.unionsWith (++)
+  $ (map (\x -> foldPool' (getKey x) x) xs)
+  where
+    foldPool'
+      :: (Lang, Int)
+      -> SAnno (Type, Meta, MDoc)
+      -> Map.Map (Lang, Int) [(Type, Meta, MDoc)]
+    foldPool' _ (SAnno UniS _) = Map.empty
+    foldPool' _ (SAnno (VarS _) _) = Map.empty
+    foldPool' k (SAnno (ListS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
+    foldPool' k (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
+    foldPool' _ (SAnno (LamS _ _) _) = Map.empty
+    foldPool' k (SAnno (AppS x xs) m) =
+      Map.unionsWith
+        (++)
+        (Map.singleton (rekey k x) [m] : map (\x -> foldPool' (rekey k x) x) xs)
+    foldPool' _ (SAnno (NumS _) _) = Map.empty
+    foldPool' _ (SAnno (LogS _) _) = Map.empty
+    foldPool' _ (SAnno (StrS _) _) = Map.empty
+    foldPool' k (SAnno (RecS xs) _) = Map.unionsWith (++) (map (foldPool' k . snd) xs)
+
+    rekey :: (Lang, Int) -> SAnno (Type, Meta, MDoc) -> (Lang, Int)
+    rekey k@(lang, _) (SAnno _ (t, m, _))
+      | lang /= lang' = (lang', metaId m)
+      | otherwise = k
+      where
+        lang' = langOf' t
+
+    getKey ::  SAnno (Type, Meta, MDoc) -> (Lang, Int)
+    getKey (SAnno _ (t, m, _)) = (langOf' t, metaId m)
 
 findSerializers :: [Module] -> MorlocMonad SerialMap
 findSerializers ms = return $ SerialMap
@@ -130,8 +173,8 @@ connect ms = do
 collect :: Map.Map MVar Module -> (Expr, EVar, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
 collect ms (e@(AnnE _ ts), ev, mv) = root where
   root = do
-    (Annotation sexpr _) <- collect' Set.empty (e, mv)
-    Annotation sexpr <$> makeVarMeta ev mv ts
+    (SAnno sexpr _) <- collect' Set.empty (e, mv)
+    SAnno sexpr <$> makeVarMeta ev mv ts
 
   collect' :: Set.Set EVar -> (Expr, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
   collect' _ (AnnE UniE ts, m) = simpleCollect UniS ts m
@@ -149,14 +192,14 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     let args = Set.union args (Set.fromList $ exprArgs e1) 
     e' <- collect' args (e2, m)
     case e' of
-      (Annotation (LamS vs e'') t) -> return $ Annotation (LamS (v:vs) e'') t
-      e''@(Annotation _ t) -> return $ Annotation (LamS [v] e'') t
+      (SAnno (LamS vs e'') t) -> return $ SAnno (LamS (v:vs) e'') t
+      e''@(SAnno _ t) -> return $ SAnno (LamS [v] e'') t
   collect' args (AnnE (AppE e1 e2) ts, m) = do
     e1' <- collect' args (e1, m)
     e2' <- collect' args (e2, m)
     case e1' of
-      (Annotation (AppS f es) t) -> return $ Annotation (AppS f (e2':es)) t
-      f@(Annotation _ t) -> return $ Annotation (AppS f [e2']) t
+      (SAnno (AppS f es) t) -> return $ SAnno (AppS f (e2':es)) t
+      f@(SAnno _ t) -> return $ SAnno (AppS f [e2']) t
   collect' _ (AnnE (LogE e) ts, m) = simpleCollect (LogS e) ts m
   collect' _ (AnnE (NumE e) ts, m) = simpleCollect (NumS e) ts m
   collect' _ (AnnE (StrE e) ts, m) = simpleCollect (StrS e) ts m
@@ -188,8 +231,8 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
         case Map.lookup mvar ms >>= (\m -> findExpr ms m evar) of
           -- if the expression is defined somewhere, unroll it
           (Just (expr', evar', mvar')) -> do
-            (Annotation sexpr _) <- collect' args (expr', mvar')
-            Annotation sexpr <$> makeVarMeta evar' mvar' ts
+            (SAnno sexpr _) <- collect' args (expr', mvar')
+            SAnno sexpr <$> makeVarMeta evar' mvar' ts
           Nothing -> MM.throwError . OtherError $ "Cannot find module"
 
   simpleCollect :: SExpr [(Type, Meta)] -> [Type] -> MVar -> MorlocMonad (SAnno [(Type, Meta)])
@@ -203,7 +246,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
                     , metaModule = v
                     , metaId = i
                     }
-    return $ Annotation x [(t, meta) | t <- ts] 
+    return $ SAnno x [(t, meta) | t <- ts] 
 
   makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
   makeVarMeta evar mvar ts = do
@@ -244,11 +287,11 @@ lookupTypeSet evar mvar ms =
 -- | Select a single concrete language for each sub-expression. Store the
 -- concrete type and the general type (if available).
 realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
-realize (Annotation _ []) = MM.throwError . OtherError $ "No type found"
+realize (SAnno _ []) = MM.throwError . OtherError $ "No type found"
 realize x = stepAM head x where
 
 stepAM :: Monad m => (a -> b) -> SAnno a -> m (SAnno b) 
-stepAM f (Annotation x a) = Annotation <$> stepBM f x <*> pure (f a)
+stepAM f (SAnno x a) = SAnno <$> stepBM f x <*> pure (f a)
 
 stepBM :: Monad m => (a -> b) -> SExpr a -> m (SExpr b)
 stepBM _ UniS = return $ UniS
@@ -274,7 +317,7 @@ codify
   :: SerialMap
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify hashmap (Annotation (LamS vs e2) (t@(FunT _ _), meta)) = do
+codify hashmap (SAnno (LamS vs e2) (t@(FunT _ _), meta)) = do
   args <- zipWithM makeNexusArg vs (typeArgs t)
   codify' hashmap args e2
   where
@@ -299,42 +342,42 @@ codify'
   -> [Argument] -- r - lambda-bound arguments
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify' h r (Annotation (AppS e funargs) (type1, meta1)) = do
+codify' h r (SAnno (AppS e funargs) (type1, meta1)) = do
   grammar <- selectGrammar (langOf' type1)
   e2 <- codify' h r e 
   args <- mapM (codify' h r) funargs
   let mdoc = "apps stub"
-  return $ Annotation (AppS e2 args) (type1, meta1, mdoc)
-codify' _ _ (Annotation UniS (t,m)) = return $ Annotation UniS (t, m, "NULL")
-codify' _ _ (Annotation (VarS (EV v)) (t,m)) = return $ Annotation (VarS (EV v)) (t, m, "NULL")
-codify' h r (Annotation (ListS xs) (t,m)) = do
+  return $ SAnno (AppS e2 args) (type1, meta1, mdoc)
+codify' _ _ (SAnno UniS (t,m)) = return $ SAnno UniS (t, m, "NULL")
+codify' _ _ (SAnno (VarS (EV v)) (t,m)) = return $ SAnno (VarS (EV v)) (t, m, "NULL")
+codify' h r (SAnno (ListS xs) (t,m)) = do
   elements <- mapM (codify' h r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (C.gList grammar) (map getDoc elements)
-  return $ Annotation (ListS elements) (t,m,mdoc)
-codify' h r (Annotation (TupleS xs) (t,m)) = do
+  return $ SAnno (ListS elements) (t,m,mdoc)
+codify' h r (SAnno (TupleS xs) (t,m)) = do
   elements <- mapM (codify' h r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (C.gTuple grammar) (map getDoc elements)
-  return $ Annotation (TupleS elements) (t,m,mdoc)
-codify' h r (Annotation (LamS vs e) (t,m)) = do
+  return $ SAnno (TupleS elements) (t,m,mdoc)
+codify' h r (SAnno (LamS vs e) (t,m)) = do
   newargs <- updateArguments h r (zipWith (\e t -> (e,t,False)) vs (typeArgs t))
   body <- codify' h newargs e
   let mdoc = "lambda"
-  return $ Annotation (LamS vs body) (t, m, mdoc)
-codify' h r (Annotation (RecS entries) (t, m)) = do
+  return $ SAnno (LamS vs body) (t, m, mdoc)
+codify' h r (SAnno (RecS entries) (t, m)) = do
   newvals <- mapM (codify' h r) (map snd entries)
   grammar <- selectGrammar (langOf' t)
   let newEntries = zip (map fst entries) newvals
       mdoc = C.gRecord grammar
            $ map (\(EV k, v) -> (pretty k, getDoc v)) newEntries
-  return $ Annotation (RecS newEntries) (t, m, mdoc)
-codify' _ _ (Annotation (NumS x) (t,m)) = return $ Annotation (NumS x) (t, m, "NUM") -- Scientific
-codify' _ _ (Annotation (LogS x) (t,m)) = return $ Annotation (LogS x) (t, m, "LOG") -- Bool
-codify' _ _ (Annotation (StrS x) (t,m)) = return $ Annotation (StrS x) (t, m, "STR") -- Text
+  return $ SAnno (RecS newEntries) (t, m, mdoc)
+codify' _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, "NUM") -- Scientific
+codify' _ _ (SAnno (LogS x) (t,m)) = return $ SAnno (LogS x) (t, m, "LOG") -- Bool
+codify' _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, "STR") -- Text
 
 getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 
-getDoc (Annotation _ (_, _, x)) = x
+getDoc (SAnno _ (_, _, x)) = x
 
 updateArguments :: SerialMap -> [Argument] -> [(EVar, Type, Bool)] -> MorlocMonad [Argument]
 updateArguments _ args [] = return args
@@ -377,9 +420,6 @@ selectGrammar CLang       = return GrammarC.grammar
 selectGrammar CppLang     = return GrammarCpp.grammar
 selectGrammar RLang       = return GrammarR.grammar
 selectGrammar Python3Lang = return GrammarPython3.grammar
-
-segregate :: [SAnno (Type, Meta, MDoc)] -> MorlocMonad [(Lang, [SAnno (Type, Meta, MDoc)])]
-segregate = undefined
 
 findRoots :: Map.Map MVar Module -> [(Expr, EVar, MVar)]
 findRoots ms
