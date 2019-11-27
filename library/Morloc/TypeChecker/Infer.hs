@@ -22,6 +22,7 @@ module Morloc.TypeChecker.Infer
 
 import Morloc.Namespace
 import Morloc.TypeChecker.Util
+import qualified Morloc.TypeChecker.PartialOrder as P
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -172,7 +173,7 @@ instance Renameable Type where
   rename (ExistT v ts) = ExistT <$> pure v <*> (mapM rename ts) 
   rename (Forall v t) = do
     v' <- rename v
-    t' <- rename (substitute' v (VarT v') t)
+    t' <- rename (P.substitute v (VarT v') t)
     return $ Forall v' t'
   rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
   rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
@@ -248,27 +249,8 @@ instance Typed TypeSet where
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
-substitute' :: TVar -> Type -> Type -> Type
-substitute' v r t = sub t
-  where
-    sub :: Type -> Type
-    sub t'@(VarT v')
-      | v == v' = r
-      | otherwise = t'
-    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
-    sub t'@(Forall x t'')
-      | v /= x = Forall x (sub t'')
-      | otherwise = t' -- allows shadowing of the variable
-    sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (RecT rs) = RecT [(x, sub t') | (x, t') <- rs]
-    sub t' = t'
-
-
--- | substitute all appearances of a given variable with an existential
--- [t/v]A
 substitute :: TVar -> Type -> Type
-substitute v t = substitute' v (ExistT v []) t
-
+substitute v t = P.substitute v (ExistT v []) t
 
 -- | TODO: document
 occursCheck :: Type -> Type -> Stack ()
@@ -558,7 +540,7 @@ subtype' (Forall v@(TV lang _) a) b g
   | lang /= langOf b = return g
   | otherwise = do
       a' <- newvar lang
-      g' <- subtype (substitute' v a' a) b (g +> MarkG v +> a')
+      g' <- subtype (P.substitute v a' a) b (g +> MarkG v +> a')
       cut (MarkG v) g'
 
 --  g1,a |- A :> B -| g2,a,g3

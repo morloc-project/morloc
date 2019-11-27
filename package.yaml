@@ -29,6 +29,7 @@ dependencies:
   - megaparsec
   - mtl
   - parsec
+  - partial-order
   - pretty-simple
   - prettyprinter
   - prettyprinter-ansi-terminal

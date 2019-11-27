@@ -8,6 +8,7 @@ import Morloc.TypeChecker.Infer
 import qualified Morloc.TypeChecker.API as API
 
 import qualified Data.Text as T
+import qualified Data.PartialOrd as P
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -112,6 +113,14 @@ testPasses msg e =
       assertFailure $
       "Expected this test to pass, but it failed with the message: " <> show e
 
+assertPartialOrderLT :: P.PartialOrder a => String -> a -> a -> TestTree
+assertPartialOrderLT msg x1 x2 =
+  testCase msg $ do
+    case compare x1 x2 of
+      (Just LT) -> return ()
+      (Just x) -> assertFailure $ "Expected LT, found " <> show x
+      Nothing -> assertFailure $ "Incomparable types"
+
 bool = VarT (TV Nothing "Bool")
 
 num = VarT (TV Nothing "Num")
@@ -142,6 +151,12 @@ tuple ts = ArrT v ts
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
 record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
+
+typeOrderTests =
+  testGroup
+    "Tests of type partial ordering"
+    [ assertPartialOrderLT (forall [var "a"] (var "a")) int
+    ]
 
 unitTypeTests =
   testGroup
