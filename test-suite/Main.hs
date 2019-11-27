@@ -2,7 +2,7 @@ import Test.Tasty
 import qualified System.Directory as SD
 
 import PropertyTypeTests (propertyTypeTests)
-import UnitTypeTests (unitTypeTests)
+import UnitTypeTests (typeOrderTests, unitTypeTests)
 import GoldenMakefileTests (goldenMakefileTest)
 
 main = do
@@ -18,7 +18,7 @@ main = do
       , golden "nested C++ map functions" "5_nested"
       , golden "C++ / R interop" "6_interop"
       , golden "C++ quadratic eqation" "7_quadraticEq"
-      , typeOrderTests
       , unitTypeTests
+      , typeOrderTests
       , propertyTypeTests
       ]

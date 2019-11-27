@@ -1,14 +1,16 @@
 module UnitTypeTests
   ( unitTypeTests
+  , typeOrderTests
   ) where
 
 import Morloc.Namespace
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
 import qualified Morloc.TypeChecker.API as API
+import qualified Morloc.TypeChecker.PartialOrder as MP
 
 import qualified Data.Text as T
-import qualified Data.PartialOrd as P
+import qualified Data.PartialOrd as DP
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -113,13 +115,21 @@ testPasses msg e =
       assertFailure $
       "Expected this test to pass, but it failed with the message: " <> show e
 
-assertPartialOrderLT :: P.PartialOrder a => String -> a -> a -> TestTree
-assertPartialOrderLT msg x1 x2 =
-  testCase msg $ do
-    case compare x1 x2 of
-      (Just LT) -> return ()
-      (Just x) -> assertFailure $ "Expected LT, found " <> show x
-      Nothing -> assertFailure $ "Incomparable types"
+testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
+testEqual msg x y =
+  testCase msg $ assertEqual "" x y
+
+testNotEqual :: Eq a => String -> a -> a -> TestTree
+testNotEqual msg x y =
+  testCase msg $ assertEqual "" (x == y) False
+
+testTrue :: String -> Bool -> TestTree
+testTrue msg x =
+  testCase msg $ assertEqual "" x True
+
+testFalse :: String -> Bool -> TestTree
+testFalse msg x =
+  testCase msg $ assertEqual "" x False
 
 bool = VarT (TV Nothing "Bool")
 
@@ -155,7 +165,20 @@ record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
 typeOrderTests =
   testGroup
     "Tests of type partial ordering"
-    [ assertPartialOrderLT (forall [var "a"] (var "a")) int
+    [ testTrue
+        "forall a . a <= Num"
+        (MP.isSubtypeOf (forall ["a"] (var "a")) num)
+    , testFalse
+        "Num !< forall a . a"
+        (MP.isSubtypeOf num (forall ["a"] (var "a")))
+    , testTrue
+        "forall a . (Num, a) <= (Num, Str)"
+        (MP.isSubtypeOf (forall ["a"] (tuple [num, var "a"])) (tuple [num, str]))
+    , testTrue
+        "forall a . (Num, a) <= forall b . (Num, b)"
+        (MP.isSubtypeOf
+          (forall ["a"] (tuple [num, var "a"]))
+          (forall ["b"] (tuple [num, var "b"])))
     ]
 
 unitTypeTests =
