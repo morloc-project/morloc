@@ -16,6 +16,7 @@ import Morloc.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import qualified Morloc.TypeChecker.PartialOrder as MP
 import qualified Morloc.CodeGenerator.Grammars.Common as C
 import Data.Scientific (Scientific)
 import Control.Monad ((>=>))
@@ -99,6 +100,7 @@ findSerializers ms = return $ SerialMap
   findSerialFun :: Property -> Module -> Map.Map Type (Name, Path)
   findSerialFun p m
     = Map.fromList
+    . map (getType p)
     . mapSum
     . Map.mapWithKey (\v t -> map (g m) (f p v t))
     $ moduleTypeMap m
@@ -114,6 +116,10 @@ findSerializers ms = return $ SerialMap
   g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
     (Just (Source (EV name) _ (Just path) _)) -> (t, (name, path))
     _ -> error "something evil this way comes"
+
+  getType :: Property -> (Type, a) -> (Type, a)
+  getType Pack (FunT t _, x) = (t, x) 
+  getType Unpack (FunT _ t, x) = (t, x) 
 
 -- | Create one tree for each nexus command.
 connect :: [Module] -> MorlocMonad [SAnno (Type, Meta)]
@@ -276,8 +282,8 @@ codify hashmap (Annotation (LamS vs e2) (t@(FunT _ _), meta)) = do
     -- they are the original inputs to the entire morloc program
     makeNexusArg :: EVar -> Type -> MorlocMonad Argument
     makeNexusArg n t = do
-      packer <- lookupPacker t hashmap
-      unpacker <- lookupUnpacker t hashmap
+      packer <- selectFunction t Pack hashmap
+      unpacker <- selectFunction t Unpack hashmap
       return $ Argument
         { argName = n
         , argType = t
@@ -339,8 +345,8 @@ updateArguments hashmap args xs = do
   where
     makeArg :: (EVar, Type, Bool) -> MorlocMonad Argument
     makeArg (n, t, packed) = do
-      packer <- lookupPacker t hashmap
-      unpacker <- lookupUnpacker t hashmap
+      packer <- selectFunction t Pack hashmap
+      unpacker <- selectFunction t Unpack hashmap
       return $ Argument
         { argName = n
         , argType = t
@@ -348,7 +354,6 @@ updateArguments hashmap args xs = do
         , argUnpacker = unpacker
         , argIsPacked = packed
         }
-
 
 typeArgs :: Type -> [Type]
 typeArgs (FunT t1 t2) = t1 : typeArgs t2
@@ -358,11 +363,14 @@ exprArgs :: SExpr a -> [Name]
 exprArgs (LamS vs _) = [name | (EV name) <- vs]
 exprArgs _ = []
 
-lookupPacker :: Type -> SerialMap -> MorlocMonad Name
-lookupPacker = undefined
-
-lookupUnpacker :: Type -> SerialMap -> MorlocMonad Name
-lookupUnpacker = undefined
+selectFunction :: Type -> Property -> SerialMap -> MorlocMonad Name
+selectFunction t p h = case MP.mostSpecificSubtypes t (Map.keys hmap) of
+  [] -> MM.throwError . OtherError $ "No packer found"
+  (x:_) -> case Map.lookup x hmap of
+    (Just (name, _)) -> return name
+    Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
+  where
+    hmap = if p == Pack then packers h else unpackers h
 
 selectGrammar :: Lang -> MorlocMonad C.Grammar
 selectGrammar CLang       = return GrammarC.grammar
