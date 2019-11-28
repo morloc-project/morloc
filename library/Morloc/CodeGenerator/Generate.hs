@@ -62,11 +62,15 @@ data Meta = Meta {
   -- metaMorlocSourceColumn :: Int
 }
 
+say :: MDoc -> MorlocMonad ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
+
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate ms = do
   MM.startCounter -- initialize state counter to 0, used to index manifolds
   smap <- findSerializers ms
   ast <- connect ms
+  say $ "length of ast: " <> pretty (length ast)
   generateScripts smap ast
 
 generateScripts
@@ -80,6 +84,7 @@ generateScripts smap es
   where
     addGrammar :: (Lang, a) -> MorlocMonad (C.Grammar, a)
     addGrammar (lang, x) = do 
+      say "adding grammar" 
       grammar <- selectGrammar lang
       return (grammar, x)
 
@@ -151,7 +156,7 @@ findSerializers ms = return $ SerialMap
 
   f :: Property -> EVar -> TypeSet -> [(Type, EVar)]
   f p v (TypeSet (Just gentype) ts) =
-    if Set.member p (eprop gentype)  
+    if Set.member p (eprop gentype)
       then [(etype t, v) | t <- ts]
       else [(etype t, v) | t <- ts, Set.member p (eprop t)]
   f p v (TypeSet Nothing ts) = [(etype t, v) | t <- ts, Set.member p (eprop t)]
@@ -162,18 +167,23 @@ findSerializers ms = return $ SerialMap
     _ -> error "something evil this way comes"
 
   getType :: Property -> (Type, a) -> (Type, a)
-  getType Pack (FunT t _, x) = (t, x) 
-  getType Unpack (FunT _ t, x) = (t, x) 
+  getType Pack   (FunT t _, x) = (t, x)
+  getType Unpack (FunT _ t, x) = (t, x)
+  getType _ t = t
 
 -- | Create one tree for each nexus command.
 connect :: [Module] -> MorlocMonad [SAnno (Type, Meta)]
 connect ms = do
+  say $ "loading" <+> pretty (length ms) <+> "modules"
   let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
-  mapM (collect modmap >=> realize) (findRoots modmap)
+      roots = findRoots modmap
+  say $ "found" <+> pretty (length roots) <+> "root modules"
+  mapM (collect modmap >=> realize) roots 
 
 collect :: Map.Map MVar Module -> (Expr, EVar, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
 collect ms (e@(AnnE _ ts), ev, mv) = root where
   root = do
+    say $ "collect"
     (SAnno sexpr _) <- collect' Set.empty (e, mv)
     SAnno sexpr <$> makeVarMeta ev mv ts
 
@@ -189,12 +199,10 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
   collect' args (AnnE (RecE es) ts, m) = do
     es' <- mapM (\x -> (collect' args) (x, m)) (map snd es)
     simpleCollect (RecS (zip (map fst es) es')) ts m
-  collect' args (AnnE e1@(LamE v e2) ts, m) = do
-    let args = Set.union args (Set.fromList $ exprArgs e1) 
-    e' <- collect' args (e2, m)
-    case e' of
-      (SAnno (LamS vs e'') t) -> return $ SAnno (LamS (v:vs) e'') t
-      e''@(SAnno _ t) -> return $ SAnno (LamS [v] e'') t
+  collect' args (AnnE e1@(LamE _ _) ts, m) = do
+    let (vs, e) = unrollLambda e1
+    e' <- collect' (Set.union args (Set.fromList vs)) (e, m)
+    simpleCollect (LamS vs e') ts m
   collect' args (AnnE (AppE e1 e2) ts, m) = do
     e1' <- collect' args (e1, m)
     e2' <- collect' args (e2, m)
@@ -206,9 +214,14 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
   collect' _ (AnnE (StrE e) ts, m) = simpleCollect (StrS e) ts m
   collect _ _ _ = MM.throwError . OtherError $ "Unexpected type in collect"
 
-  exprArgs :: Expr -> [EVar]
-  exprArgs (LamE v e2) = v : exprArgs e2
-  exprArgs _ = []
+  lambdaArgs :: Expr -> [EVar]
+  lambdaArgs (LamE v e2) = v : lambdaArgs e2
+  lambdaArgs _ = []
+
+  unrollLambda :: Expr -> ([EVar], Expr)
+  unrollLambda (LamE v e2) = case unrollLambda e2 of
+    (vs, e) -> (v:vs, e)
+  unrollLambda e = ([], e)
 
   getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
   getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of 
@@ -218,7 +231,10 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
 
   -- | Evaluate a variable. If it was imported, lookup of the module it came from.
   evaluateVariable :: Set.Set EVar -> MVar -> EVar -> [Type] -> MorlocMonad (SAnno ([(Type, Meta)]))
-  evaluateVariable args mvar evar ts =
+  evaluateVariable args mvar evar ts = do
+    say $ viaShow args
+    say $ viaShow evar
+    say $ viaShow mvar
     if Set.member evar args
       then
         -- variable is bound under a lambda, so we leave it as a variable
@@ -234,7 +250,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
           (Just (expr', evar', mvar')) -> do
             (SAnno sexpr _) <- collect' args (expr', mvar')
             SAnno sexpr <$> makeVarMeta evar' mvar' ts
-          Nothing -> MM.throwError . OtherError $ "Cannot find module"
+          Nothing -> simpleCollect (VarS evar) ts mvar
 
   simpleCollect :: SExpr [(Type, Meta)] -> [Type] -> MVar -> MorlocMonad (SAnno [(Type, Meta)])
   simpleCollect x ts v = do
@@ -291,7 +307,9 @@ lookupTypeSet evar mvar ms =
 -- concrete type and the general type (if available).
 realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
 realize (SAnno _ []) = MM.throwError . OtherError $ "No type found"
-realize x = stepAM head x where
+realize x = do
+  say $ "realize"
+  stepAM head x
 
 stepAM :: Monad m => (a -> b) -> SAnno a -> m (SAnno b) 
 stepAM f (SAnno x a) = SAnno <$> stepBM f x <*> pure (f a)
@@ -435,7 +453,7 @@ findRoots ms
     -- is this module a "root" module?
     -- a root module is a module that is not imported from any other module
     isRoot :: Module -> Bool
-    isRoot m = Set.member (moduleName m) allImports
+    isRoot m = not $ Set.member (moduleName m) allImports
 
     -- set of all modules that are imported
     allImports = mapSumWith (valset . moduleImportMap) ms
