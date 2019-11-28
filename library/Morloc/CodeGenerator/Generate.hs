@@ -18,6 +18,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.PartialOrder as MP
 import qualified Morloc.CodeGenerator.Grammars.Common as C
+import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Data.Scientific (Scientific)
 import Control.Monad ((>=>))
 import qualified Data.Map as Map
@@ -49,6 +50,7 @@ data SerialMap = SerialMap {
 
 data Meta = Meta {
     metaGeneralType :: Maybe Type
+  , metaName :: Maybe Name
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
   , metaSource :: Maybe Source
@@ -73,26 +75,13 @@ generateScripts
   -> MorlocMonad (Script, [Script])
 generateScripts smap es
   = (,)
-  <$> makeNexus [t | (SAnno _ t) <- es]
+  <$>  Nexus.generate [(t, metaId m, metaName m) | (SAnno _ (t, m)) <- es]
   <*> (mapM (codify smap) es |>> foldPools >>= mapM addGrammar >>= mapM makePool)
   where
     addGrammar :: (Lang, a) -> MorlocMonad (C.Grammar, a)
     addGrammar (lang, x) = do 
       grammar <- selectGrammar lang
       return (grammar, x)
-
--- | Type alone is sufficient to create the nexus. The nexus needs to know 1)
--- the type of each command it calls, 2) the language of each type (to
--- determine the pool), and the ID of each function (since calls are by
--- manifold ID).
-makeNexus :: [(Type, Meta)] -> MorlocMonad Script
-makeNexus xs = return $ Script
-  { scriptBase = "nexus"
-  , scriptLang = PerlLang
-  , scriptCode = "this is the body"
-  , scriptCompilerFlags = []
-  , scriptInclude = []
-  }
 
 makePool :: (C.Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
 makePool (g, xs) = return $ Script 
@@ -116,7 +105,7 @@ foldPools xs
   . map (\((l,i),xs) -> (l, (i, xs))) -- [(Lang, (Int, [(Type, Meta, MDoc)])]
   . Map.toList -- [((Lang, Int), [(Type, Meta, MDoc)])]
   . Map.unionsWith (++)
-  $ (map (\x -> foldPool' (getKey x) x) xs)
+  $ map (\x -> foldPool' (getKey x) x) xs
   where
     foldPool'
       :: (Lang, Int)
@@ -124,9 +113,9 @@ foldPools xs
       -> Map.Map (Lang, Int) [(Type, Meta, MDoc)]
     foldPool' _ (SAnno UniS _) = Map.empty
     foldPool' _ (SAnno (VarS _) _) = Map.empty
-    foldPool' k (SAnno (ListS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
+    foldPool' k (SAnno (ListS  xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
     foldPool' k (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
-    foldPool' k (SAnno (LamS _ x) _) = foldPool' k x
+    foldPool' k (SAnno (LamS _ x)  _) = foldPool' k x
     foldPool' k (SAnno (AppS x xs) m) =
       Map.unionsWith
         (++)
@@ -252,6 +241,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     i <- MM.getCounter
     generalType <- getGeneralType ts
     let meta = Meta { metaGeneralType = generalType
+                    , metaName = Nothing
                     , metaProperties = Set.empty
                     , metaConstraints = Set.empty
                     , metaSource = Nothing
@@ -261,11 +251,12 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     return $ SAnno x [(t, meta) | t <- ts] 
 
   makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
-  makeVarMeta evar mvar ts = do
+  makeVarMeta evar@(EV name) mvar ts = do
     i <- MM.getCounter
     generalType <- getGeneralType ts
     let typeset = lookupTypeSet evar mvar ms 
     let meta = Meta { metaGeneralType = generalType
+                    , metaName = Just name 
                     , metaProperties = Set.empty
                     , metaConstraints = Set.empty
                     , metaSource = Nothing
