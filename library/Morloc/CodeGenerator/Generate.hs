@@ -309,7 +309,7 @@ realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
 realize (SAnno _ []) = MM.throwError . OtherError $ "No type found"
 realize x = do
   say $ "realize"
-  stepAM head x
+  stepAM (head . filter (\(t, _) -> isJust (langOf t))) x
 
 stepAM :: Monad m => (a -> b) -> SAnno a -> m (SAnno b) 
 stepAM f (SAnno x a) = SAnno <$> stepBM f x <*> pure (f a)
@@ -441,6 +441,10 @@ selectGrammar CLang       = return GrammarC.grammar
 selectGrammar CppLang     = return GrammarCpp.grammar
 selectGrammar RLang       = return GrammarR.grammar
 selectGrammar Python3Lang = return GrammarPython3.grammar
+selectGrammar MorlocLang = MM.throwError . OtherError $
+  "No grammar exists for MorlocLang, this may be a compiler bug"
+selectGrammar lang = MM.throwError . OtherError $
+  "No grammar found for " <> MT.show' lang
 
 findRoots :: Map.Map MVar Module -> [(Expr, EVar, MVar)]
 findRoots ms
