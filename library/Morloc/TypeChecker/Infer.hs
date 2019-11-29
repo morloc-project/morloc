@@ -13,7 +13,6 @@ module Morloc.TypeChecker.Infer
   , subtype
   , substitute
   , apply
-  , free
   , infer
   , rename
   , unrename
@@ -256,20 +255,10 @@ substitute v t = P.substitute v (ExistT v []) t
 occursCheck :: Type -> Type -> Stack ()
 occursCheck t1 t2 = do
   say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
-  case Set.member t1 (free t2) of
+  case Set.member t1 (P.free t2) of
     True -> throwError OccursCheckFail
     False -> return ()
 
-
--- | TODO: document
-free :: Type -> Set.Set Type
-free v@(VarT _) = Set.singleton v
-free v@(ExistT _ []) = Set.singleton v
-free (ExistT v ts) = Set.unions $ Set.singleton (ArrT v ts) : map free ts
-free (FunT t1 t2) = Set.union (free t1) (free t2)
-free (Forall v t) = Set.delete (VarT v) (free t)
-free (ArrT _ xs) = Set.unions (map free xs)
-free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
@@ -496,6 +485,8 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
           let t2' = ArrT v1 vs2'
           let g2 = lhs ++ (SolvedG v2 t2' : rhs)
           subtype t1 t2' g2
+      _ -> throwError . OtherError $
+        "Could not find a suitable existential in context"
   where
     compareArr :: [Type] -> [Type] -> Gamma -> Stack Gamma
     compareArr [] [] g' = return g'

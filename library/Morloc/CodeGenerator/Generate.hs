@@ -14,9 +14,9 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.Namespace
 import Morloc.Data.Doc
+import Morloc.TypeChecker.PartialOrder
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.TypeChecker.PartialOrder as MP
 import qualified Morloc.CodeGenerator.Grammars.Common as C
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import Data.Scientific (Scientific)
@@ -428,7 +428,7 @@ exprArgs (LamS vs _) = [name | (EV name) <- vs]
 exprArgs _ = []
 
 selectFunction :: Type -> Property -> SerialMap -> MorlocMonad Name
-selectFunction t p h = case MP.mostSpecificSubtypes t (Map.keys hmap) of
+selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
   [] -> MM.throwError . OtherError $ "No packer found"
   (x:_) -> case Map.lookup x hmap of
     (Just (name, _)) -> return name
