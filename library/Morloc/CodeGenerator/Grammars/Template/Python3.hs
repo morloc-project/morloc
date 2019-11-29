@@ -227,7 +227,7 @@ def _morloc_foreign_call(interpreter, pool, mid, args):
     return(jsonString)
 
 
-#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
+#{vsep (pmPoolManifolds pm)}
 
 if __name__ == '__main__':
     try:

@@ -218,7 +218,7 @@ gMain' pm = return [idoc|#!/usr/bin/env Rscript
   .morloc_try(f=system2, args=list(cmd, args=args, stdout=TRUE), .pool=.pool, .name=.name)
 }
 
-#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
+#{vsep (pmPoolManifolds pm)}
 
 args <- commandArgs(trailingOnly=TRUE)
 if(length(args) == 0){

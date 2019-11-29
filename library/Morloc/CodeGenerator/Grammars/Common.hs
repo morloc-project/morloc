@@ -114,6 +114,7 @@ data ForeignCallDoc =
 data PoolMain =
   PoolMain
     { pmSources :: [MDoc]
-    , pmPoolManifolds :: [GeneralFunction]
+    , pmSignatures :: [MDoc]
+    , pmPoolManifolds :: [MDoc]
     , pmDispatchManifold :: MDoc -> MDoc -> MDoc
     }

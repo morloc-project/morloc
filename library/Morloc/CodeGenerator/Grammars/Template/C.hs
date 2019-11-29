@@ -165,9 +165,9 @@ gMain' pm = return [idoc|#include <string.h>
 
 #{vsep (pmSources pm)}
 
-#{vsep $ map (gSignature grammar) (pmPoolManifolds pm)}
+#{vsep (pmSignatures pm)}
 
-#{vsep $ map (gFunction grammar) (pmPoolManifolds pm)}
+#{vsep (pmPoolManifolds pm)}
 
 int main(int argc, char * argv[]){
   int cmdID;
