@@ -24,6 +24,7 @@ import Data.Scientific (Scientific)
 import Control.Monad ((>=>))
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+
 import qualified Morloc.CodeGenerator.Grammars.Template.C as GrammarC
 import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
@@ -57,11 +58,21 @@ data Meta = Meta {
   , metaSource :: Maybe Source
   , metaModule :: MVar
   , metaId :: Int
+  , metaArgs :: [Argument]
   -- -- there should be morloc source info here, for great debugging
   -- metaMorlocSource :: Path
   -- metaMorlocSourceLine :: Int
   -- metaMorlocSourceColumn :: Int
 }
+
+data Argument = Argument {
+    argName :: EVar
+  , argType :: Type
+  , argPacker :: Name
+  , argUnpacker :: Name
+  , argIsPacked :: Bool
+} deriving (Show, Ord, Eq)
+
 
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
@@ -113,12 +124,37 @@ poolIncludes xs
 poolCode :: Grammar -> [(Int, [(Type, Meta, MDoc)])] -> MorlocMonad MDoc
 poolCode g xs = do
   let mans = concat [[d | (_,_,d) <- ys] | (i, ys) <- xs]
+      sigs = concat [[(m,t) | (t,m,_) <- ys] | (i, ys) <- xs]
   gMain g $ PoolMain
     { pmSources = map pretty (poolIncludes xs)
-    , pmSignatures = []
+    , pmSignatures = map (makeSignature g) sigs
     , pmPoolManifolds = mans
     , pmDispatchManifold = \x y -> x <+> y
     }
+
+makeSignature :: Grammar -> (Meta, Type) -> MDoc
+makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
+  { gfComments = ""
+  , gfReturnType = Just . gShowType g $ t
+  , gfName = fromJust . fmap pretty $ metaName m
+  , gfArgs = map (prepArg g) (metaArgs m)
+  , gfBody = ""
+  }
+
+prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
+prepArg g r = case (gShowType g . argType $ r, argName r) of  
+  (t, EV n) -> (Just t, pretty n)
+
+selectGrammar :: Lang -> MorlocMonad Grammar
+selectGrammar CLang       = return GrammarC.grammar
+selectGrammar CppLang     = return GrammarCpp.grammar
+selectGrammar RLang       = return GrammarR.grammar
+selectGrammar Python3Lang = return GrammarPython3.grammar
+selectGrammar MorlocLang = MM.throwError . OtherError $
+  "No grammar exists for MorlocLang, this may be a compiler bug"
+selectGrammar lang = MM.throwError . OtherError $
+  "No grammar found for " <> MT.show' lang
+
 
 -- | This is a beast of a return type. Here is what it means:
 -- [ (Lang,  -- the one pool language
@@ -286,6 +322,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
                     , metaSource = Nothing
                     , metaModule = v
                     , metaId = i
+                    , metaArgs = []
                     }
     return $ SAnno x [(t, meta) | t <- ts] 
 
@@ -294,13 +331,14 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     i <- MM.getCounter
     generalType <- getGeneralType ts
     let typeset = lookupTypeSet evar mvar ms 
-    let meta = Meta { metaGeneralType = generalType
+        meta = Meta { metaGeneralType = generalType
                     , metaName = Just name 
                     , metaProperties = Set.empty
                     , metaConstraints = Set.empty
                     , metaSource = Nothing
                     , metaModule = mvar
                     , metaId = i
+                    , metaArgs = []
                     }
     return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
 
@@ -348,14 +386,6 @@ stepBM _ (NumS x) = return $ NumS x
 stepBM _ (LogS x) = return $ LogS x
 stepBM _ (StrS x) = return $ StrS x
 stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entries
-
-data Argument = Argument {
-    argName :: EVar
-  , argType :: Type
-  , argPacker :: Name
-  , argUnpacker :: Name
-  , argIsPacked :: Bool
-} deriving (Show, Ord, Eq)
 
 codify
   :: SerialMap
@@ -408,7 +438,8 @@ codify' h r (SAnno (LamS vs e) (t,m)) = do
   newargs <- updateArguments h r (zipWith (\e t -> (e,t,False)) vs (typeArgs t))
   body <- codify' h newargs e
   let mdoc = "lambda"
-  return $ SAnno (LamS vs body) (t, m, mdoc)
+      m' = m { metaArgs = newargs }
+  return $ SAnno (LamS vs body) (t, m', mdoc)
 codify' h r (SAnno (RecS entries) (t, m)) = do
   newvals <- mapM (codify' h r) (map snd entries)
   grammar <- selectGrammar (langOf' t)
@@ -502,16 +533,6 @@ selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
     Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
   where
     hmap = if p == Pack then packers h else unpackers h
-
-selectGrammar :: Lang -> MorlocMonad Grammar
-selectGrammar CLang       = return GrammarC.grammar
-selectGrammar CppLang     = return GrammarCpp.grammar
-selectGrammar RLang       = return GrammarR.grammar
-selectGrammar Python3Lang = return GrammarPython3.grammar
-selectGrammar MorlocLang = MM.throwError . OtherError $
-  "No grammar exists for MorlocLang, this may be a compiler bug"
-selectGrammar lang = MM.throwError . OtherError $
-  "No grammar found for " <> MT.show' lang
 
 findRoots :: Map.Map MVar Module -> [(Expr, EVar, MVar)]
 findRoots ms

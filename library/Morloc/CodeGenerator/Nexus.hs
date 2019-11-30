@@ -17,7 +17,6 @@ import Morloc.Namespace
 import Morloc.Quasi
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 
