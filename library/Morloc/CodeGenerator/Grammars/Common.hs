@@ -7,7 +7,12 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.CodeGenerator.Grammars.Common
-  ( Grammar(..)
+  ( SAnno(..)
+  , SExpr(..)
+  , SerialMap(..)
+  , Meta(..)
+  , Argument(..)
+  , Grammar(..)
   , TryDoc(..)
   , GeneralFunction(..)
   , GeneralAssignment(..)
@@ -25,6 +30,52 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+
+import Data.Scientific (Scientific)
+import qualified Data.Set as Set
+
+data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
+
+data SExpr a
+  = UniS
+  | VarS EVar
+  | ListS [SAnno a]
+  | TupleS [SAnno a]
+  | LamS [EVar] (SAnno a)
+  | AppS (SAnno a) [SAnno a]
+  | NumS Scientific
+  | LogS Bool
+  | StrS MT.Text
+  | RecS [(EVar, SAnno a)]
+  deriving (Show, Ord, Eq)
+
+data SerialMap = SerialMap {
+    packers :: Map.Map Type (Name, Path)
+  , unpackers :: Map.Map Type (Name, Path)
+}
+
+data Meta = Meta {
+    metaGeneralType :: Maybe Type
+  , metaName :: Maybe Name
+  , metaProperties :: Set.Set Property
+  , metaConstraints :: Set.Set Constraint
+  , metaSource :: Maybe Source
+  , metaModule :: MVar
+  , metaId :: Int
+  , metaArgs :: [Argument]
+  -- -- there should be morloc source info here, for great debugging
+  -- metaMorlocSource :: Path
+  -- metaMorlocSourceLine :: Int
+  -- metaMorlocSourceColumn :: Int
+}
+
+data Argument = Argument {
+    argName :: Name
+  , argType :: Type
+  , argPacker :: Name
+  , argUnpacker :: Name
+  , argIsPacked :: Bool
+} deriving (Show, Ord, Eq)
 
 data Grammar =
   Grammar
@@ -44,17 +95,22 @@ data Grammar =
     , gQuote :: MDoc -> MDoc
     , gImport :: MDoc -> MDoc -> MDoc
     ---------------------------------------------
+    , gNull :: MDoc
+    , gBool :: Bool -> MDoc
     , gList :: [MDoc] -> MDoc
     , gTuple :: [MDoc] -> MDoc
     , gRecord :: [(MDoc, MDoc)] -> MDoc
     ---------------------------------------------
-    , gTrue :: MDoc
-    , gFalse :: MDoc
     , gIndent :: MDoc -> MDoc
     , gUnpacker :: UnpackerDoc -> MDoc
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
-    -- , gSwitch :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
+    , gSwitch
+        :: ((Type, Meta, Name) -> MDoc)
+        -> ((Type, Meta, Name) -> MDoc)
+        -> [(Type, Meta, Name)] -> MDoc
+        -> MDoc
+        -> MDoc
     , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
     , gShowType :: Type -> MDoc
     , gMain :: PoolMain -> MorlocMonad MDoc

@@ -34,8 +34,8 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
-    , gTrue        = gTrue'
-    , gFalse       = gFalse'
+    , gNull        = gNull'
+    , gBool        = gBool'
     , gList        = gList'
     , gTuple       = gTuple'
     , gRecord      = gRecord'
@@ -44,7 +44,7 @@ grammar = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    -- , gSwitch      = gSwitch'
+    , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -90,8 +90,11 @@ gReturn' = id
 gQuote' :: MDoc -> MDoc
 gQuote' = dquotes
 
-gTrue' = "TRUE"
-gFalse' = "FALSE"
+gNull' :: MDoc
+gNull' = "NULL"
+
+gBool' :: Bool -> MDoc
+gBool' x = if x then "TRUE" else "FALSE" 
 
 -- FIXME: make portable (replace "/" with the appropriate separator)
 gImport' :: MDoc -> MDoc -> MDoc
@@ -130,11 +133,11 @@ gSignature' gf
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
--- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
--- gSwitch' l r xs x var
---   =   var <+> "<-"
---   <+> "switch"
---   <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
+gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
+gSwitch' l r xs x var
+  =   var <+> "<-"
+  <+> "switch"
+  <> tupled ([x] ++ map (\v -> "`" <> l v <> "`" <> "=" <> r v) xs)
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]

@@ -45,8 +45,8 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
-    , gTrue        = gTrue'
-    , gFalse       = gFalse'
+    , gNull        = gNull'
+    , gBool        = gBool'
     , gList        = gList'
     , gTuple       = gTuple'
     , gRecord      = gRecord'
@@ -55,7 +55,7 @@ grammar = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    -- , gSwitch      = gSwitch'
+    , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -119,11 +119,11 @@ gTuple' _ = undefined
 gRecord' :: [(MDoc,MDoc)] -> MDoc
 gRecord' _ = undefined
 
-gTrue' :: MDoc
-gTrue' = integer 1
+gNull' :: MDoc
+gNull' = "NULL"
 
-gFalse' :: MDoc
-gFalse' = integer 0
+gBool' :: Bool -> MDoc
+gBool' x = if x then integer 1 else integer 0
 
 gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
@@ -139,18 +139,18 @@ gTry' td = gCall' (tryCmd td) (tryArgs td)
 gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
 
--- gSwitch' :: (Manifold -> MDoc) -> (Manifold -> MDoc) -> [Manifold] -> MDoc -> MDoc -> MDoc
--- gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
---   where
---     switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
---       caseBlock = vsep (map asCase cases) <> line
---       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
---
---     blockC :: MDoc -> MDoc
---     blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
---
---     caseC :: MDoc -> MDoc
---     caseC body = var <> " = " <> body <> ";" <> line <> "break;"
+gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
+gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
+  where
+    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
+      caseBlock = vsep (map asCase cases) <> line
+      asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
+
+    blockC :: MDoc -> MDoc
+    blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
+
+    caseC :: MDoc -> MDoc
+    caseC body = var <> " = " <> body <> ";" <> line <> "break;"
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]

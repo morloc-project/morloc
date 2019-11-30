@@ -61,8 +61,8 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
-    , gTrue        = gTrue'
-    , gFalse       = gFalse'
+    , gNull        = gNull'
+    , gBool        = gBool'
     , gList        = gList'
     , gTuple       = gTuple'
     , gRecord      = gRecord'
@@ -71,7 +71,7 @@ grammar = Grammar {
     , gUnpacker    = gUnpacker'
     , gForeignCall = gForeignCall'
     , gSignature   = gSignature'
-    -- , gSwitch      = gSwitch'
+    , gSwitch      = gSwitch'
     , gCmdArgs     = gCmdArgs'
     , gShowType    = gShowType'
     , gMain        = gMain'
@@ -121,11 +121,11 @@ gQuote' = dquotes
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = [idoc|from #{s} import *|]
 
-gTrue' :: MDoc
-gTrue' = "True"
+gNull' :: MDoc
+gNull' = "None"
 
-gFalse' :: MDoc
-gFalse' = "False"
+gBool' :: Bool -> MDoc
+gBool' x = if x then "True" else "False" 
 
 gList' :: [MDoc] -> MDoc
 gList' = list
@@ -164,17 +164,10 @@ gSignature' gf
   <+> gfName gf
   <>  tupledNoFold (map (\(t,x) -> maybe "?" id t <+> x) (gfArgs gf))
 
--- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
--- gSwitch' l r ms x var = pyIfElse cases Nothing
---   where
---     cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
--- -- -- This is a cleaner approach, but python is too eager, leading every
--- -- -- case to be evaluated, thus this does not behave like a switch statement.
--- -- -- Doing all if statements (as above) does work, but is slow.
--- -- gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
--- -- gSwitch' l r xs x var
--- --   =   var <+> "=" <+> "if"
--- --   <+> encloseSep "{" "}" "," (map (\x -> l x <> ":" <> r x) xs) <> brackets x
+gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
+gSwitch' l r ms x var = pyIfElse cases Nothing
+  where
+    cases = map (\m -> (x <+> "==" <+> l m, var <+> "=" <+> r m)) ms
 
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]

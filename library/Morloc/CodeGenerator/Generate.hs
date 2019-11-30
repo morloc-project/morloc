@@ -30,50 +30,6 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
-data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
-
-data SExpr a
-  = UniS
-  | VarS EVar
-  | ListS [SAnno a]
-  | TupleS [SAnno a]
-  | LamS [EVar] (SAnno a)
-  | AppS (SAnno a) [SAnno a]
-  | NumS Scientific
-  | LogS Bool
-  | StrS MT.Text
-  | RecS [(EVar, SAnno a)]
-  deriving (Show, Ord, Eq)
-
-data SerialMap = SerialMap {
-    packers :: Map.Map Type (Name, Path)
-  , unpackers :: Map.Map Type (Name, Path)
-}
-
-data Meta = Meta {
-    metaGeneralType :: Maybe Type
-  , metaName :: Maybe Name
-  , metaProperties :: Set.Set Property
-  , metaConstraints :: Set.Set Constraint
-  , metaSource :: Maybe Source
-  , metaModule :: MVar
-  , metaId :: Int
-  , metaArgs :: [Argument]
-  -- -- there should be morloc source info here, for great debugging
-  -- metaMorlocSource :: Path
-  -- metaMorlocSourceLine :: Int
-  -- metaMorlocSourceColumn :: Int
-}
-
-data Argument = Argument {
-    argName :: EVar
-  , argType :: Type
-  , argPacker :: Name
-  , argUnpacker :: Name
-  , argIsPacked :: Bool
-} deriving (Show, Ord, Eq)
-
-
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
@@ -91,8 +47,8 @@ generateScripts
   -> MorlocMonad (Script, [Script])
 generateScripts smap es
   = (,)
-  <$>  Nexus.generate [(t, metaId m, metaName m) | (SAnno _ (t, m)) <- es]
-  <*> (mapM (codify smap) es |>> foldPools >>= mapM addGrammar >>= mapM makePool)
+  <$>  Nexus.generate [(t, metaId m, metaName m) | (t, m) <- map poolCall es]
+  <*> (mapM (codify smap) es |>> foldPools >>= mapM addGrammar >>= mapM (makePool smap))
   where
     addGrammar :: (Lang, a) -> MorlocMonad (Grammar, a)
     addGrammar (lang, x) = do 
@@ -100,10 +56,15 @@ generateScripts smap es
       grammar <- selectGrammar lang
       return (grammar, x)
 
-makePool :: (Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
-makePool (g, xs) = do
+    -- reach into the top exported lambda and find the pool application
+    poolCall :: SAnno (Type, Meta) -> (Type, Meta)
+    poolCall (SAnno (LamS _ (SAnno _ m)) _) = m
+    poolCall _ = error "Currently only functional exports are supported"
+
+makePool :: SerialMap -> (Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
+makePool h (g, xs) = do
   state <- MM.get
-  code <- poolCode g xs
+  code <- poolCode g h xs
   return $ Script 
     { scriptBase = "pool"
     , scriptLang = gLang g
@@ -121,16 +82,41 @@ poolIncludes xs
   $ (map snd xs >>= map (\(_,x,_) -> x))
     |>> (\m -> metaSource m >>= srcPath)
 
-poolCode :: Grammar -> [(Int, [(Type, Meta, MDoc)])] -> MorlocMonad MDoc
-poolCode g xs = do
+poolCode :: Grammar -> SerialMap -> [(Int, [(Type, Meta, MDoc)])] -> MorlocMonad MDoc
+poolCode g h xs = do
+  xs' <- getTopPoolCalls h xs
   let mans = concat [[d | (_,_,d) <- ys] | (i, ys) <- xs]
       sigs = concat [[(m,t) | (t,m,_) <- ys] | (i, ys) <- xs]
+      dispatchManifold =
+        (gSwitch g)
+          (\(_,m,_) -> pretty (metaId m))
+          (\(t,m,p) -> mainCall g t m p)
+          xs'
   gMain g $ PoolMain
     { pmSources = map pretty (poolIncludes xs)
     , pmSignatures = map (makeSignature g) sigs
     , pmPoolManifolds = mans
-    , pmDispatchManifold = \x y -> x <+> y
+    , pmDispatchManifold = dispatchManifold
     }
+
+getTopPoolCalls
+  :: SerialMap
+  -> [(Int, [(Type, Meta, MDoc)])]
+  -> MorlocMonad [(Type, Meta, Name)]
+getTopPoolCalls h xs = mapM f xs where
+  f :: (Int, [(Type, Meta, MDoc)]) -> MorlocMonad (Type, Meta, Name)
+  f (i, ys) =
+    case listToMaybe [(i, t, m) | (t, m, _) <- ys, metaId m == i] of
+      (Just (i,t,m)) -> do
+        packer <- selectFunction t Pack h
+        return (t,m,packer)
+      Nothing -> MM.throwError . OtherError $ "Manifold ID not in pool"
+
+-- call a manifold and deserialize the return value
+mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
+mainCall g t m packer =
+  (gCall g) (pretty packer) $
+  [(gCall g) ("m" <> pretty (metaId m)) (map (pretty . argName) (metaArgs m))]
 
 makeSignature :: Grammar -> (Meta, Type) -> MDoc
 makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
@@ -143,7 +129,7 @@ makeSignature g (m, t) = (gSignature g) $ GeneralFunction
 
 prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
 prepArg g r = case (gShowType g . argType $ r, argName r) of  
-  (t, EV n) -> (Just t, pretty n)
+  (t, n) -> (Just t, pretty n)
 
 selectGrammar :: Lang -> MorlocMonad Grammar
 selectGrammar CLang       = return GrammarC.grammar
@@ -322,7 +308,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
                     , metaSource = Nothing
                     , metaModule = v
                     , metaId = i
-                    , metaArgs = []
+                    , metaArgs = [] -- cannot be set until after realization
                     }
     return $ SAnno x [(t, meta) | t <- ts] 
 
@@ -338,7 +324,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
                     , metaSource = Nothing
                     , metaModule = mvar
                     , metaId = i
-                    , metaArgs = []
+                    , metaArgs = [] -- cannot be set until after realization
                     }
     return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
 
@@ -398,7 +384,7 @@ codify hashmap (SAnno (LamS vs e2) (t@(FunT _ _), meta)) = do
     -- these are arguments provided by the user from the nexus
     -- they are the original inputs to the entire morloc program
     makeNexusArg :: EVar -> Type -> MorlocMonad Argument
-    makeNexusArg n t = do
+    makeNexusArg (EV n) t = do
       packer <- selectFunction t Pack hashmap
       unpacker <- selectFunction t Unpack hashmap
       return $ Argument
@@ -422,8 +408,10 @@ codify' h r (SAnno (AppS e funargs) (type1, meta1)) = do
   args <- mapM (codify' h r) funargs
   mandoc <- makeManifold grammar r meta1 args e2
   return $ SAnno (AppS e2 args) (type1, meta1, mandoc)
-codify' _ _ (SAnno UniS (t,m)) = return $ SAnno UniS (t, m, "NULL")
-codify' _ _ (SAnno (VarS (EV v)) (t,m)) = return $ SAnno (VarS (EV v)) (t, m, "NULL")
+codify' _ _ (SAnno UniS (t,m)) = do
+  grammar <- selectGrammar (langOf' t)
+  return $ SAnno UniS (t, m, gNull grammar)
+codify' _ _ (SAnno (VarS (EV v)) (t,m)) = return $ SAnno (VarS (EV v)) (t, m, pretty v)
 codify' h r (SAnno (ListS xs) (t,m)) = do
   elements <- mapM (codify' h r) xs
   grammar <- selectGrammar (langOf' t)
@@ -437,7 +425,7 @@ codify' h r (SAnno (TupleS xs) (t,m)) = do
 codify' h r (SAnno (LamS vs e) (t,m)) = do
   newargs <- updateArguments h r (zipWith (\e t -> (e,t,False)) vs (typeArgs t))
   body <- codify' h newargs e
-  let mdoc = "lambda"
+  let mdoc = "lambda" ---------------- FIXME incomplete ---------------
       m' = m { metaArgs = newargs }
   return $ SAnno (LamS vs body) (t, m', mdoc)
 codify' h r (SAnno (RecS entries) (t, m)) = do
@@ -447,9 +435,11 @@ codify' h r (SAnno (RecS entries) (t, m)) = do
       mdoc = gRecord grammar
            $ map (\(EV k, v) -> (pretty k, getDoc v)) newEntries
   return $ SAnno (RecS newEntries) (t, m, mdoc)
-codify' _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, "NUM") -- Scientific
-codify' _ _ (SAnno (LogS x) (t,m)) = return $ SAnno (LogS x) (t, m, "LOG") -- Bool
-codify' _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, "STR") -- Text
+codify' _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x) -- Scientific
+codify' _ _ (SAnno (LogS x) (t,m)) = do
+  grammar <- selectGrammar (langOf' t)
+  return $ SAnno (LogS x) (t, m, (gBool grammar) x)
+codify' _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x) -- Text
 
 makeManifold
   :: Grammar
@@ -476,8 +466,8 @@ makeManifold g args meta inputs (SAnno _ (otype, _, _)) = do
 prepInput :: Grammar -> [Argument] -> SAnno (Type, Meta, MDoc) -> MorlocMonad (MDoc, Maybe MDoc) 
 prepInput g rs (SAnno _ (t, m, d)) = do
   let name = metaName m
-      arg = listToMaybe [r | r <- rs, cmpArgMet m r]
-      nth = findIndex (cmpArgMet m) rs
+      arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
+      nth = findIndex (\r -> Just (argName r) == metaName m) rs
   case (name, arg, nth, fmap argIsPacked arg) of
     (Just n, Just r, Just i, Just True) ->
        return ( "x" <> pretty i, Just . gAssign g $ GeneralAssignment
@@ -490,11 +480,6 @@ prepInput g rs (SAnno _ (t, m, d)) = do
     (Just n, _, _, Just False) -> return (pretty name, Nothing)
     _ -> MM.throwError . OtherError $ "Need to add handling for this"
 
-cmpArgMet :: Meta -> Argument -> Bool
-cmpArgMet m r = case (argName r, metaName m) of
-  (EV n1, Just n2) -> n1 == n2
-  _ -> False
-
 getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 
 getDoc (SAnno _ (_, _, x)) = x
 
@@ -506,7 +491,7 @@ updateArguments hashmap args xs = do
   return $ newargs ++ oldargs
   where
     makeArg :: (EVar, Type, Bool) -> MorlocMonad Argument
-    makeArg (n, t, packed) = do
+    makeArg (EV n, t, packed) = do
       packer <- selectFunction t Pack hashmap
       unpacker <- selectFunction t Unpack hashmap
       return $ Argument
