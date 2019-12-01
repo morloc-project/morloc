@@ -144,7 +144,12 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]
 
 gShowType' :: Type -> MDoc
-gShowType' = prettyType
+gShowType' = MTM.buildConcreteType mkfun mkrec where
+  mkfun :: MDoc -> [MDoc] -> MDoc 
+  mkfun _ _ = "FUNCTION!!!" -- FIXME: stub
+
+  mkrec :: [(MDoc, MDoc)] -> MDoc
+  mkrec _ = "RECORD!!!" -- FIXME: stub
 
 gForeignCall' :: ForeignCallDoc -> MDoc
 gForeignCall' f = gCall' ".morloc_foreign_call" $

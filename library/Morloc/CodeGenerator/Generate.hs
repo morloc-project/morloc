@@ -15,6 +15,7 @@ module Morloc.CodeGenerator.Generate
 import Morloc.Namespace
 import Morloc.Data.Doc
 import Morloc.TypeChecker.PartialOrder
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
@@ -141,22 +142,25 @@ makeDispatcher g xs =
     mainCall g t m packer = (gCall g)
       (pretty packer)
       [(gCall g)
-          ("m" <> pretty (metaId m))
+          (makeManifoldName m)
           (take (length (metaArgs m))
           (gCmdArgs g))]
 
 makeSignature :: Grammar -> (Meta, Type) -> MDoc
 makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
   { gfComments = ""
-  , gfReturnType = Just . gShowType g $ t
-  , gfName = fromJust . fmap pretty $ metaName m
+  , gfReturnType = Just . gShowType g . last . typeArgs $ t
+  , gfName = makeManifoldName m
   , gfArgs = map (prepArg g) (metaArgs m)
   , gfBody = ""
   }
 
 prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-prepArg g r = case (gShowType g . argType $ r, argName r) of  
-  (t, n) -> (Just t, pretty n)
+prepArg g r = (Just . gShowType g $ t, pretty n) where
+  t = if argIsPacked r
+        then gSerialType g
+        else argType r
+  n = argName r
 
 selectGrammar :: Lang -> MorlocMonad Grammar
 selectGrammar CLang       = return GrammarC.grammar
@@ -496,47 +500,64 @@ makeManifold
   -> [SAnno (Type, Meta, MDoc)]
   -> SAnno (Type, Meta, MDoc)
   -> MorlocMonad MDoc
-makeManifold g args meta inputs (SAnno _ (otype, _, _)) = do
+makeManifold g args meta inputs (SAnno _ (t, _, _)) = do
+  let otype = last (typeArgs t)
   name <- case metaName meta of
     (Just n) -> return n
     Nothing -> MM.throwError . OtherError $ "No name found for manifold"
-  inputs' <- mapM (prepInput g args) inputs
+  inputs' <- zipWithM (prepInput g args) [0..] inputs
   return . gFunction g $ GeneralFunction
-    { gfComments = "comment" <> line
+    { gfComments = prettyType t <> line
     , gfReturnType = Just ((gShowType g) otype)
-    , gfName = "m" <> pretty (metaId meta)
-    , gfArgs = [(Just ((gShowType g) (argType a)), pretty (argName a)) | a <- args]
+    , gfName = makeManifoldName meta
+    , gfArgs = map (prepArg g) args
     , gfBody =
         vsep (catMaybes (map snd inputs')) <> line <>
         (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
     }
 
--- Handle serialization of arguments passed to a manifold. Return the name of
--- the variable that will be used in the wrapped function and the optional name
--- of the unpacker (if the input is serialized)
+makeManifoldName :: Meta -> MDoc
+makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
+
+makeArgumentName :: Int -> MDoc
+makeArgumentName i = "x" <> pretty i
+
+-- Handle preparation of arguments passed to a manifold. Return the name of the
+-- variable that will be used and an block of code that defines the variable
+-- (if necessary).
 prepInput
   :: Grammar
   -> [Argument] -- all arguments of the manifold
+  -> Int
   -> SAnno (Type, Meta, MDoc) -- an input to the wrapped function
   -> MorlocMonad (MDoc, Maybe MDoc)
-prepInput g rs (SAnno _ (t, m, d)) = do
+prepInput g rs i (SAnno (AppS x xs) (t, m, d)) = do
+  let varname = makeArgumentName i
+      mid = makeManifoldName m
+      ass = (gAssign g) $ GeneralAssignment
+        { gaType = Just . gShowType g . last . typeArgs $ t
+        , gaName = varname
+        , gaValue = (gCall g) mid (map (pretty . argName) rs)
+        , gaArg = Nothing
+        }
+  return (varname, Just ass)
+prepInput g rs i (SAnno _ (t, m, d)) = do
   let name = metaName m
+      varname = makeArgumentName i
       arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
-      nth = findIndex (\r -> Just (argName r) == metaName m) rs
-  case (name, arg, nth, fmap argIsPacked arg) of
-    (Just n, Just r, Just i, Just True) ->
-       return ( "x" <> pretty i, Just . gAssign g $ GeneralAssignment
+  case (name, arg, fmap argIsPacked arg) of
+    (Just n, Just r, Just True) ->
+       return (varname, Just . gAssign g $ GeneralAssignment
           { gaType = Just . gShowType g . argType $ r
-          , gaName = "x" <> pretty i
+          , gaName = varname
           , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty name]
           , gaArg = Nothing
           }
        )
-
     -- the argument is used in the wrapped function, but is not serialized
-    (Just n, _, _, Just False) -> return (pretty name, Nothing)
+    (Just n, _, Just False) -> return (pretty name, Nothing)
     -- the argument is not used in the wrapped function
-    (Just n, _, _, Nothing) -> return (pretty name, Nothing)
+    (Just n, _, Nothing) -> return (pretty name, Nothing)
     x -> MM.throwError . OtherError $ MT.show' x
 
 getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 

@@ -180,7 +180,13 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
 gShowType' :: Type -> MDoc
-gShowType' = prettyType
+gShowType' = MTM.buildConcreteType mkfun mkrec where
+  mkfun :: MDoc -> [MDoc] -> MDoc 
+  mkfun _ _ = "auto" -- and hope for the best
+
+  mkrec :: [(MDoc, MDoc)] -> MDoc
+  mkrec _ = "RECORD!!!"
+
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>
@@ -190,7 +196,7 @@ gMain' pm = return [idoc|#include <string>
 
 #{vsep (pmSources pm)}
 
-#{vsep (pmPoolManifolds pm)}
+#{vsep (pmSignatures pm)}
 
 #{vsep (pmPoolManifolds pm)}
 

@@ -174,7 +174,12 @@ gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]
 
 gShowType' :: Type -> MDoc
-gShowType' = prettyType
+gShowType' = MTM.buildConcreteType mkfun mkrec where
+  mkfun :: MDoc -> [MDoc] -> MDoc 
+  mkfun _ _ = "FUNCTION!!!" -- FIXME: stub
+
+  mkrec :: [(MDoc, MDoc)] -> MDoc
+  mkrec _ = "RECORD!!!" -- FIXME: stub
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = do

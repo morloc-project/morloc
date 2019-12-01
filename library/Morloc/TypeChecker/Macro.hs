@@ -11,9 +11,11 @@ Stability   : experimental
 module Morloc.TypeChecker.Macro
 (
     expandMacro
+  , buildConcreteType
 ) where
 
 import Morloc.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.State as CMS
 import Text.Megaparsec
@@ -26,6 +28,24 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
+
+buildConcreteType
+  :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
+  -> ([(MDoc, MDoc)] -> MDoc) -- ^ make record type
+  -> Type
+  -> MDoc
+buildConcreteType mkfun mkrec t = f t where
+  f :: Type -> MDoc
+  f (VarT (TV _ x)) = pretty x
+  f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
+  f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
+  f (RecT entries) = mkrec [(pretty k, f t) | (TV _ k, t) <- entries]
+  f (Forall _ _) = error "Concrete polymorphism is not supported"
+  f (ExistT _ _) = error "Concrete existentials are not supported"
+
+  typeArgs :: Type -> [Type]
+  typeArgs (FunT t1 t2) = t1 : typeArgs t2
+  typeArgs t = [t]
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t
