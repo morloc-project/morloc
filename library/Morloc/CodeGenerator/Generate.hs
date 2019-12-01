@@ -33,13 +33,18 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
+-- | Translate modules from the typechecker into executable code
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate ms = do
-  MM.startCounter -- initialize state counter to 0, used to index manifolds
+  -- initialize state counter to 0, used to index manifolds
+  MM.startCounter
+  -- recursively find all serializers imported from any module
   smap <- findSerializers ms
-  ast <- connect ms
+  -- translate modules into bitrees
+  -- connect :: [Module] -> [SAnno (Type, Meta)]
+  ast <- connect ms 
+  -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
-  say $ "length of ast: " <> pretty (length ast)
   generateScripts smap modmap ast
 
 generateScripts
@@ -47,29 +52,30 @@ generateScripts
   -> Map.Map MVar Module
   -> [SAnno (Type, Meta)]
   -> MorlocMonad (Script, [Script])
-generateScripts smap ms es
-  = (,)
-  <$>  Nexus.generate [(t, metaId m, metaName m) | (t, m) <- map poolCall es]
-  <*> (mapM (codify smap ms) es |>> foldPools >>= mapM addGrammar >>= mapM (makePool smap))
+generateScripts smap ms es = do
+  nexus <- Nexus.generate [(t, poolId m x, metaName m) | (SAnno x (t, m)) <- es]
+  pools <-
+    -- translate expressions to code
+        mapM (codify smap ms) es  
+    -- pool code by language
+    |>> foldPools 
+    -- collate manifold code into single pool code
+    >>= mapM (makePool smap)
+  return (nexus, pools)
   where
-    addGrammar :: (Lang, a) -> MorlocMonad (Grammar, a)
-    addGrammar (lang, x) = do 
-      say "adding grammar" 
-      grammar <- selectGrammar lang
-      return (grammar, x)
+    -- map from nexus id to pool id
+    poolId :: Meta -> SExpr (Type, Meta) -> Int
+    poolId _ (LamS _ (SAnno _ (_, meta))) = metaId meta
+    poolId meta _ = metaId meta
 
-    -- reach into the top exported lambda and find the pool application
-    poolCall :: SAnno (Type, Meta) -> (Type, Meta)
-    poolCall (SAnno (LamS _ (SAnno _ m)) _) = m
-    poolCall _ = error "Currently only functional exports are supported"
-
-makePool :: SerialMap -> (Grammar, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
-makePool h (g, xs) = do
+makePool :: SerialMap -> (Lang, [(Int, [(Type, Meta, MDoc)])]) -> MorlocMonad Script
+makePool h (lang, xs) = do
+  g <- selectGrammar lang
   state <- MM.get
   code <- poolCode g h xs
   return $ Script 
     { scriptBase = "pool"
-    , scriptLang = gLang g
+    , scriptLang = lang
     , scriptCode = render code
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
@@ -81,19 +87,14 @@ poolCode g h xs = do
   xs' <- getTopPoolCalls h xs
   let mans = concat [[d | (_,_,d) <- ys] | (i, ys) <- xs]
       sigs = concat [[(m,t) | (t,m,_) <- ys] | (i, ys) <- xs]
-      dispatchManifold =
-        (gSwitch g)
-          (\(_,m,_) -> pretty (metaId m))
-          (\(t,m,p) -> mainCall g t m p)
-          xs'
   gMain g $ PoolMain
-    { pmSources = map pretty (poolIncludes h xs)
+    { pmSources = map (\p -> (gImport g) "" (pretty p)) (poolIncludes h xs)
     , pmSignatures = map (makeSignature g) sigs
     , pmPoolManifolds = mans
-    , pmDispatchManifold = dispatchManifold
+    , pmDispatchManifold = makeDispatcher g xs'
     }
 
--- | Find all unique included directory paths
+-- | Find all unique included directory paths (include serialization functions)
 poolIncludes :: SerialMap -> [(Int, [(Type, Meta, MDoc)])] -> [Path]
 poolIncludes h xs
   = let mets = map snd xs >>= map (\(_,x,_) -> x) in
@@ -116,11 +117,32 @@ getTopPoolCalls h xs = mapM f xs where
         return (t,m,packer)
       Nothing -> MM.throwError . OtherError $ "Manifold ID not in pool"
 
--- call a manifold and deserialize the return value
-mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
-mainCall g t m packer =
-  (gCall g) (pretty packer) $
-  [(gCall g) ("m" <> pretty (metaId m)) (take (length (metaArgs m)) (gCmdArgs g))]
+-- Make a function for generating the code to dispatch from the pool main
+-- function to manifold functions. The two arguments of the returned function
+-- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
+-- results are stored.
+makeDispatcher
+  :: Grammar
+  -> [( Type
+      , Meta
+      , Name -- the name of the function that packs the return data
+      )]
+  -> (  MDoc -- manifold integer id
+     -> MDoc -- variable name that stores the result
+     -> MDoc
+     )
+makeDispatcher g xs =
+  (gSwitch g) (\(_,m,_) -> pretty (metaId m))
+              (\(t,m,p) -> mainCall g t m p)
+              xs
+  where
+    mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
+    mainCall g t m packer = (gCall g)
+      (pretty packer)
+      [(gCall g)
+          ("m" <> pretty (metaId m))
+          (take (length (metaArgs m))
+          (gCmdArgs g))]
 
 makeSignature :: Grammar -> (Meta, Type) -> MDoc
 makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
