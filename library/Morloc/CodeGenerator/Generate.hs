@@ -116,7 +116,7 @@ getTopPoolCalls h xs = mapM f xs where
 mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
 mainCall g t m packer =
   (gCall g) (pretty packer) $
-  [(gCall g) ("m" <> pretty (metaId m)) (map (pretty . argName) (metaArgs m))]
+  [(gCall g) ("m" <> pretty (metaId m)) (take (length (metaArgs m)) (gCmdArgs g))]
 
 makeSignature :: Grammar -> (Meta, Type) -> MDoc
 makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
@@ -402,12 +402,13 @@ codify'
   -> [Argument] -- r - lambda-bound arguments
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify' h r (SAnno (AppS e funargs) (type1, meta1)) = do
-  grammar <- selectGrammar (langOf' type1)
+codify' h r (SAnno (AppS e funargs) (t, m)) = do
+  grammar <- selectGrammar (langOf' t)
+  let m' = m {metaArgs = r}
   e2 <- codify' h r e 
   args <- mapM (codify' h r) funargs
-  mandoc <- makeManifold grammar r meta1 args e2
-  return $ SAnno (AppS e2 args) (type1, meta1, mandoc)
+  mandoc <- makeManifold grammar r m' args e2
+  return $ SAnno (AppS e2 args) (t, m', mandoc)
 codify' _ _ (SAnno UniS (t,m)) = do
   grammar <- selectGrammar (langOf' t)
   return $ SAnno UniS (t, m, gNull grammar)
