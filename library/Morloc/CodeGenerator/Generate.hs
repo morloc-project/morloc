@@ -38,17 +38,19 @@ generate ms = do
   MM.startCounter -- initialize state counter to 0, used to index manifolds
   smap <- findSerializers ms
   ast <- connect ms
+  let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
   say $ "length of ast: " <> pretty (length ast)
-  generateScripts smap ast
+  generateScripts smap modmap ast
 
 generateScripts
   :: SerialMap
+  -> Map.Map MVar Module
   -> [SAnno (Type, Meta)]
   -> MorlocMonad (Script, [Script])
-generateScripts smap es
+generateScripts smap ms es
   = (,)
   <$>  Nexus.generate [(t, metaId m, metaName m) | (t, m) <- map poolCall es]
-  <*> (mapM (codify smap) es |>> foldPools >>= mapM addGrammar >>= mapM (makePool smap))
+  <*> (mapM (codify smap ms) es |>> foldPools >>= mapM addGrammar >>= mapM (makePool smap))
   where
     addGrammar :: (Lang, a) -> MorlocMonad (Grammar, a)
     addGrammar (lang, x) = do 
@@ -71,16 +73,8 @@ makePool h (g, xs) = do
     , scriptCode = render code
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
-    , scriptInclude = map MS.takeDirectory (poolIncludes xs)
+    , scriptInclude = map MS.takeDirectory (poolIncludes h xs)
     }
-
--- | Find all unique included directory paths
-poolIncludes :: [(Int, [(Type, Meta, MDoc)])] -> [Path]
-poolIncludes xs
-  = nub
-  . catMaybes
-  $ (map snd xs >>= map (\(_,x,_) -> x))
-    |>> (\m -> metaSource m >>= srcPath)
 
 poolCode :: Grammar -> SerialMap -> [(Int, [(Type, Meta, MDoc)])] -> MorlocMonad MDoc
 poolCode g h xs = do
@@ -93,11 +87,21 @@ poolCode g h xs = do
           (\(t,m,p) -> mainCall g t m p)
           xs'
   gMain g $ PoolMain
-    { pmSources = map pretty (poolIncludes xs)
+    { pmSources = map pretty (poolIncludes h xs)
     , pmSignatures = map (makeSignature g) sigs
     , pmPoolManifolds = mans
     , pmDispatchManifold = dispatchManifold
     }
+
+-- | Find all unique included directory paths
+poolIncludes :: SerialMap -> [(Int, [(Type, Meta, MDoc)])] -> [Path]
+poolIncludes h xs
+  = let mets = map snd xs >>= map (\(_,x,_) -> x) in
+      (nub . concat)
+        [ catMaybes . Set.toList . Set.map srcPath . Set.unions . map metaSources $ mets
+        , map argPackerPath   . concat . map metaArgs $ mets
+        , map argUnpackerPath . concat . map metaArgs $ mets
+        ]
 
 getTopPoolCalls
   :: SerialMap
@@ -108,7 +112,7 @@ getTopPoolCalls h xs = mapM f xs where
   f (i, ys) =
     case listToMaybe [(i, t, m) | (t, m, _) <- ys, metaId m == i] of
       (Just (i,t,m)) -> do
-        packer <- selectFunction t Pack h
+        (packer, path) <- selectFunction t Pack h
         return (t,m,packer)
       Nothing -> MM.throwError . OtherError $ "Manifold ID not in pool"
 
@@ -165,11 +169,14 @@ foldPools xs
     foldPool' _ (SAnno (VarS _) _) = Map.empty
     foldPool' k (SAnno (ListS  xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
     foldPool' k (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
+
     foldPool' k (SAnno (LamS _ x)  _) = foldPool' k x
-    foldPool' k (SAnno (AppS x xs) m) =
-      Map.unionsWith
-        (++)
-        (Map.singleton (rekey k x) [m] : map (\x -> foldPool' (rekey k x) x) xs)
+    foldPool' k (SAnno (AppS x xs) (t,m,d)) =
+      let srcs = Set.unions (map collectSources (x:xs)) in
+        Map.unionsWith
+          (++)
+          ( Map.singleton (rekey k x) [(t, m {metaSources = srcs}, d)]
+          : map (\x -> foldPool' (rekey k x) x) xs)
     foldPool' _ (SAnno (NumS _) _) = Map.empty
     foldPool' _ (SAnno (LogS _) _) = Map.empty
     foldPool' _ (SAnno (StrS _) _) = Map.empty
@@ -184,6 +191,15 @@ foldPools xs
 
     getKey ::  SAnno (Type, Meta, MDoc) -> (Lang, Int)
     getKey (SAnno _ (t, m, _)) = (langOf' t, metaId m)
+
+collectSources :: SAnno (Type, Meta, MDoc) -> Set.Set Source
+collectSources (SAnno (VarS _) (_, m, _)) = metaSources m
+collectSources (SAnno (ListS xs) _) = Set.unions (map collectSources xs)
+collectSources (SAnno (TupleS xs) _) = Set.unions (map collectSources xs)
+collectSources (SAnno (RecS xs) _) = Set.unions (map collectSources (map snd xs))
+collectSources (SAnno (AppS _ _) _) = Set.empty
+collectSources (SAnno (LamS _ x) _) = collectSources x
+collectSources _ = Set.empty
 
 findSerializers :: [Module] -> MorlocMonad SerialMap
 findSerializers ms = return $ SerialMap
@@ -305,7 +321,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
                     , metaName = name
                     , metaProperties = Set.empty
                     , metaConstraints = Set.empty
-                    , metaSource = Nothing
+                    , metaSources = Set.empty
                     , metaModule = v
                     , metaId = i
                     , metaArgs = [] -- cannot be set until after realization
@@ -316,12 +332,11 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
   makeVarMeta evar@(EV name) mvar ts = do
     i <- MM.getCounter
     generalType <- getGeneralType ts
-    let typeset = lookupTypeSet evar mvar ms 
-        meta = Meta { metaGeneralType = generalType
+    let meta = Meta { metaGeneralType = generalType
                     , metaName = Just name 
                     , metaProperties = Set.empty
                     , metaConstraints = Set.empty
-                    , metaSource = Nothing
+                    , metaSources = Set.empty
                     , metaModule = mvar
                     , metaId = i
                     , metaArgs = [] -- cannot be set until after realization
@@ -329,15 +344,17 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
 
 -- | Find the first source for a term sourced from a given language relative to a given module 
-lookupSource :: EVar -> MVar -> Lang -> Map.Map MVar Module -> Maybe Source
+lookupSource :: EVar -> MVar -> Lang -> Map.Map MVar Module -> Set.Set Source
 lookupSource evar mvar lang ms =
   case Map.lookup mvar ms |>> moduleSourceMap >>= Map.lookup (evar, lang) of
-    (Just src) -> Just src
-    Nothing -> Map.lookup mvar ms
-            |>> moduleImportMap
-            |>> Map.elems
-            |>> mapMaybe (\mvar' -> lookupSource evar mvar' lang ms)
-            >>= listToMaybe
+    (Just src) -> Set.singleton src
+    Nothing -> case Map.lookup mvar ms of
+      (Just mod) -> Set.unions
+                 . map (\mvar' -> lookupSource evar mvar' lang ms)
+                 . Map.elems
+                 . moduleImportMap
+                 $ mod
+      Nothing -> Set.empty
 
 -- | Find the first typeset defined for a term relative to a given module
 lookupTypeSet :: EVar -> MVar -> Map.Map MVar Module -> Maybe TypeSet
@@ -375,72 +392,79 @@ stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entrie
 
 codify
   :: SerialMap
+  -> Map.Map MVar Module 
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify hashmap (SAnno (LamS vs e2) (t@(FunT _ _), meta)) = do
+codify hashmap hs (SAnno (LamS vs e2) (t@(FunT _ _), meta)) = do
   args <- zipWithM makeNexusArg vs (typeArgs t)
-  codify' hashmap args e2
+  codify' hashmap hs args e2
   where
     -- these are arguments provided by the user from the nexus
     -- they are the original inputs to the entire morloc program
     makeNexusArg :: EVar -> Type -> MorlocMonad Argument
     makeNexusArg (EV n) t = do
-      packer <- selectFunction t Pack hashmap
-      unpacker <- selectFunction t Unpack hashmap
+      (packer, packerpath) <- selectFunction t Pack hashmap
+      (unpacker, unpackerpath) <- selectFunction t Unpack hashmap
       return $ Argument
         { argName = n
         , argType = t
         , argPacker = packer
+        , argPackerPath = packerpath
         , argUnpacker = unpacker
+        , argUnpackerPath = unpackerpath
         , argIsPacked = True
         }
-codify _ _ = MM.throwError . OtherError $
+codify _ _ _ = MM.throwError . OtherError $
   "Top-level nexus entries must be non-polymorphic functions"
 
 codify'
   :: SerialMap -- h - stores pack and unpack maps
+  -> Map.Map MVar Module
   -> [Argument] -- r - lambda-bound arguments
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify' h r (SAnno (AppS e funargs) (t, m)) = do
+codify' h ms r (SAnno (AppS e funargs) (t, m)) = do
   grammar <- selectGrammar (langOf' t)
+  e2 <- codify' h ms r e 
   let m' = m {metaArgs = r}
-  e2 <- codify' h r e 
-  args <- mapM (codify' h r) funargs
+  args <- mapM (codify' h ms r) funargs
   mandoc <- makeManifold grammar r m' args e2
   return $ SAnno (AppS e2 args) (t, m', mandoc)
-codify' _ _ (SAnno UniS (t,m)) = do
+codify' _ _ _ (SAnno UniS (t,m)) = do
   grammar <- selectGrammar (langOf' t)
   return $ SAnno UniS (t, m, gNull grammar)
-codify' _ _ (SAnno (VarS (EV v)) (t,m)) = return $ SAnno (VarS (EV v)) (t, m, pretty v)
-codify' h r (SAnno (ListS xs) (t,m)) = do
-  elements <- mapM (codify' h r) xs
+codify' _ hs _ (SAnno (VarS evar@(EV v)) (t,m)) = do
+  let src = lookupSource evar (metaModule m) (langOf' t) hs 
+      m' = m {metaSources = src}
+  return $ SAnno (VarS evar) (t, m', pretty v)
+codify' h ms r (SAnno (ListS xs) (t,m)) = do
+  elements <- mapM (codify' h ms r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (gList grammar) (map getDoc elements)
   return $ SAnno (ListS elements) (t,m,mdoc)
-codify' h r (SAnno (TupleS xs) (t,m)) = do
-  elements <- mapM (codify' h r) xs
+codify' h ms r (SAnno (TupleS xs) (t,m)) = do
+  elements <- mapM (codify' h ms r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (gTuple grammar) (map getDoc elements)
   return $ SAnno (TupleS elements) (t,m,mdoc)
-codify' h r (SAnno (LamS vs e) (t,m)) = do
+codify' h ms r (SAnno (LamS vs e) (t,m)) = do
   newargs <- updateArguments h r (zipWith (\e t -> (e,t,False)) vs (typeArgs t))
-  body <- codify' h newargs e
+  body <- codify' h ms newargs e
   let mdoc = "lambda" ---------------- FIXME incomplete ---------------
       m' = m { metaArgs = newargs }
   return $ SAnno (LamS vs body) (t, m', mdoc)
-codify' h r (SAnno (RecS entries) (t, m)) = do
-  newvals <- mapM (codify' h r) (map snd entries)
+codify' h ms r (SAnno (RecS entries) (t, m)) = do
+  newvals <- mapM (codify' h ms r) (map snd entries)
   grammar <- selectGrammar (langOf' t)
   let newEntries = zip (map fst entries) newvals
       mdoc = gRecord grammar
            $ map (\(EV k, v) -> (pretty k, getDoc v)) newEntries
   return $ SAnno (RecS newEntries) (t, m, mdoc)
-codify' _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x) -- Scientific
-codify' _ _ (SAnno (LogS x) (t,m)) = do
+codify' _ _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x) -- Scientific
+codify' _ _ _ (SAnno (LogS x) (t,m)) = do
   grammar <- selectGrammar (langOf' t)
   return $ SAnno (LogS x) (t, m, (gBool grammar) x)
-codify' _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x) -- Text
+codify' _ _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x) -- Text
 
 makeManifold
   :: Grammar
@@ -493,13 +517,15 @@ updateArguments hashmap args xs = do
   where
     makeArg :: (EVar, Type, Bool) -> MorlocMonad Argument
     makeArg (EV n, t, packed) = do
-      packer <- selectFunction t Pack hashmap
-      unpacker <- selectFunction t Unpack hashmap
+      (packer, packerpath) <- selectFunction t Pack hashmap
+      (unpacker, unpackerpath) <- selectFunction t Unpack hashmap
       return $ Argument
         { argName = n
         , argType = t
         , argPacker = packer
+        , argPackerPath = packerpath
         , argUnpacker = unpacker
+        , argUnpackerPath = unpackerpath
         , argIsPacked = packed
         }
 
@@ -511,11 +537,11 @@ exprArgs :: SExpr a -> [Name]
 exprArgs (LamS vs _) = [name | (EV name) <- vs]
 exprArgs _ = []
 
-selectFunction :: Type -> Property -> SerialMap -> MorlocMonad Name
+selectFunction :: Type -> Property -> SerialMap -> MorlocMonad (Name, Path)
 selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
   [] -> MM.throwError . OtherError $ "No packer found"
   (x:_) -> case Map.lookup x hmap of
-    (Just (name, _)) -> return name
+    (Just x) -> return x
     Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
   where
     hmap = if p == Pack then packers h else unpackers h

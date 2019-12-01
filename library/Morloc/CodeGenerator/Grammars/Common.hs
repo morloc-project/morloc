@@ -59,7 +59,7 @@ data Meta = Meta {
   , metaName :: Maybe Name
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
-  , metaSource :: Maybe Source
+  , metaSources :: Set.Set Source
   , metaModule :: MVar
   , metaId :: Int
   , metaArgs :: [Argument]
@@ -73,7 +73,9 @@ data Argument = Argument {
     argName :: Name
   , argType :: Type
   , argPacker :: Name
+  , argPackerPath :: Path
   , argUnpacker :: Name
+  , argUnpackerPath :: Path
   , argIsPacked :: Bool
 } deriving (Show, Ord, Eq)
 
