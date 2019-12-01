@@ -19,9 +19,6 @@ import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.TypeChecker.Macro as MTM
 
-asImport :: MT.Text -> MorlocMonad MDoc
-asImport s = return . pretty $ s
-
 grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
@@ -34,6 +31,7 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
+    , gPrepImport  = gPrepImport'
     , gNull        = gNull'
     , gBool        = gBool'
     , gList        = gList'
@@ -99,6 +97,9 @@ gBool' x = if x then "TRUE" else "FALSE"
 -- FIXME: make portable (replace "/" with the appropriate separator)
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ srcpath = gCall' "source" [gQuote' srcpath]
+
+gPrepImport' :: MT.Text -> MorlocMonad MDoc
+gPrepImport' = return . pretty
 
 gList' :: [MDoc] -> MDoc
 gList' xs = "c" <> tupled xs

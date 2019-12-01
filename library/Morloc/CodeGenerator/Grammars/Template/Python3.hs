@@ -26,17 +26,6 @@ import qualified Morloc.Monad as MM
 import qualified System.FilePath as SF
 import qualified Morloc.TypeChecker.Macro as MTM
 
-asImport :: MT.Text -> MorlocMonad MDoc
-asImport s = do
-  lib <- MM.asks configLibrary
-  return . pretty
-         . MT.liftToText (map DC.toLower)
-         . MT.replace "/" "."
-         . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
-         . MT.stripPrefixIfPresent lib  -- make the path relative to the library
-         . MT.liftToText SF.dropExtensions
-         $ s
-
 pyIfElse :: [(MDoc, MDoc)] -> Maybe MDoc -> MDoc
 pyIfElse [] _ = ""
 pyIfElse [(cond,block)] Nothing = nest 4 ("if" <+> cond <> ":" <> line <> block)
@@ -61,6 +50,7 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
+    , gPrepImport  = gPrepImport'
     , gNull        = gNull'
     , gBool        = gBool'
     , gList        = gList'
@@ -120,6 +110,17 @@ gQuote' = dquotes
 -- 1st argument (home directory) is ignored (it is added to path in main)
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = [idoc|from #{s} import *|]
+
+gPrepImport' :: MT.Text -> MorlocMonad MDoc
+gPrepImport' s = do
+  lib <- MM.asks configLibrary
+  return . pretty
+         . MT.liftToText (map DC.toLower)
+         . MT.replace "/" "."
+         . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+         . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+         . MT.liftToText SF.dropExtensions
+         $ s
 
 gNull' :: MDoc
 gNull' = "None"

@@ -87,8 +87,9 @@ poolCode g h xs = do
   xs' <- getTopPoolCalls h xs
   let mans = concat [[d | (_,_,d) <- ys] | (i, ys) <- xs]
       sigs = concat [[(m,t) | (t,m,_) <- ys] | (i, ys) <- xs]
+  importPaths <- mapM (gPrepImport g) (poolIncludes h xs)
   gMain g $ PoolMain
-    { pmSources = map (\p -> (gImport g) "" (pretty p)) (poolIncludes h xs)
+    { pmSources = map ((gImport g) "") importPaths
     , pmSignatures = map (makeSignature g) sigs
     , pmPoolManifolds = mans
     , pmDispatchManifold = makeDispatcher g xs'
@@ -510,7 +511,14 @@ makeManifold g args meta inputs (SAnno _ (otype, _, _)) = do
         (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
     }
 
-prepInput :: Grammar -> [Argument] -> SAnno (Type, Meta, MDoc) -> MorlocMonad (MDoc, Maybe MDoc) 
+-- Handle serialization of arguments passed to a manifold. Return the name of
+-- the variable that will be used in the wrapped function and the optional name
+-- of the unpacker (if the input is serialized)
+prepInput
+  :: Grammar
+  -> [Argument] -- all arguments of the manifold
+  -> SAnno (Type, Meta, MDoc) -- an input to the wrapped function
+  -> MorlocMonad (MDoc, Maybe MDoc)
 prepInput g rs (SAnno _ (t, m, d)) = do
   let name = metaName m
       arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
@@ -524,8 +532,12 @@ prepInput g rs (SAnno _ (t, m, d)) = do
           , gaArg = Nothing
           }
        )
+
+    -- the argument is used in the wrapped function, but is not serialized
     (Just n, _, _, Just False) -> return (pretty name, Nothing)
-    _ -> MM.throwError . OtherError $ "Need to add handling for this"
+    -- the argument is not used in the wrapped function
+    (Just n, _, _, Nothing) -> return (pretty name, Nothing)
+    x -> MM.throwError . OtherError $ MT.show' x
 
 getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 
 getDoc (SAnno _ (_, _, x)) = x

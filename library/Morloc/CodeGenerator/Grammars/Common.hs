@@ -96,6 +96,7 @@ data Grammar =
     , gReturn :: MDoc -> MDoc
     , gQuote :: MDoc -> MDoc
     , gImport :: MDoc -> MDoc -> MDoc
+    , gPrepImport :: MT.Text -> MorlocMonad MDoc
     ---------------------------------------------
     , gNull :: MDoc
     , gBool :: Bool -> MDoc

@@ -26,13 +26,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
 
--- See comments above the homologous Cpp.hs function
-wrapIncludeString
-  :: Monad m
-  => MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
-  -> m MDoc
-wrapIncludeString = return . dquotes . pretty . MS.takeFileName
-
 grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
@@ -45,6 +38,7 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
+    , gPrepImport  = gPrepImport'
     , gNull        = gNull'
     , gBool        = gBool'
     , gList        = gList'
@@ -109,6 +103,12 @@ gQuote' = dquotes
 -- | The first argment is the directory, this is added later?
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = "#include" <+> s
+
+-- See comments above the homologous Cpp.hs function
+gPrepImport'
+  :: MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  -> MorlocMonad MDoc
+gPrepImport' = return . dquotes . pretty . MS.takeFileName
 
 gList' :: [MDoc] -> MDoc
 gList' _ = undefined

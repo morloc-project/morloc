@@ -23,30 +23,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
 
--- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
--- Include statements in C can be either wrapped in angle brackets (e.g.,
--- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
--- is implementation specific. I currently use the GCC compiler. For quoted
--- strings, it first searches relative to the working directory and then, if
--- nothing is found, searches system files. For angle brackets, it searches
--- only system files: <https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html>. So
--- quoting seems more reasonable, for now. This might change only if I start
--- loading the morloc libraries into the system directories (which might be
--- reasonable), though still, quotes would work.
---
--- UPDATE: The build system will now read the source paths from the Script
--- object and write an `-I${MORLOC_HOME}/lib/${MORLOC_PACKAGE}` argument for
--- g++. This will tell g++ where to look for headers. So now in the generated
--- source code I can just write the basename. This makes the generated code
--- neater (no hard-coded local paths), but now the g++ compiler will search
--- through all the module paths for each file, which introduces the possibility
--- of name conflicts.
-wrapIncludeString
-  :: Monad m
-  => MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
-  -> m MDoc
-wrapIncludeString = return . dquotes . pretty . MS.takeFileName
-
 grammar = Grammar {
       gLang        = gLang'
     , gSerialType  = gSerialType'
@@ -59,6 +35,7 @@ grammar = Grammar {
     , gReturn      = gReturn'
     , gQuote       = gQuote'
     , gImport      = gImport'
+    , gPrepImport  = gPrepImport'
     , gNull        = gNull'
     , gBool        = gBool'
     , gList        = gList'
@@ -103,7 +80,7 @@ gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> lin
   -- -- do I not need this?
   -- rargs = tupled (map snd (gfArgs gf))
   head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
-  comments = gfComments gf
+  comments = gComment' (gfComments gf)
 
 gSignature' :: GeneralFunction -> MDoc
 gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
@@ -119,7 +96,7 @@ gCurry' f args i
   $ (f:args) ++ map (\i -> "std::placeholders::_" <> pretty i) (take i ([1..] :: [Int]))
 
 gComment' :: MDoc -> MDoc
-gComment' d = "/* " <> d <> " */"
+gComment' d = "/* " <> d <> " */" <> line
 
 gReturn' :: MDoc -> MDoc
 gReturn' x = "return" <+> x <> ";"
@@ -130,6 +107,29 @@ gQuote' = dquotes
 -- | The first argment is the directory, this is added later?
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = "#include" <+> s
+
+-- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
+-- Include statements in C can be either wrapped in angle brackets (e.g.,
+-- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
+-- is implementation specific. I currently use the GCC compiler. For quoted
+-- strings, it first searches relative to the working directory and then, if
+-- nothing is found, searches system files. For angle brackets, it searches
+-- only system files: <https://gcc.gnu.org/onlinedocs/cpp/Search-Path.html>. So
+-- quoting seems more reasonable, for now. This might change only if I start
+-- loading the morloc libraries into the system directories (which might be
+-- reasonable), though still, quotes would work.
+--
+-- UPDATE: The build system will now read the source paths from the Script
+-- object and write an `-I${MORLOC_HOME}/lib/${MORLOC_PACKAGE}` argument for
+-- g++. This will tell g++ where to look for headers. So now in the generated
+-- source code I can just write the basename. This makes the generated code
+-- neater (no hard-coded local paths), but now the g++ compiler will search
+-- through all the module paths for each file, which introduces the possibility
+-- of name conflicts.
+gPrepImport'
+  :: MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  -> MorlocMonad MDoc
+gPrepImport' = return . dquotes . pretty . MS.takeFileName
 
 gList' :: [MDoc] -> MDoc
 gList' xs = encloseSep "{" "}" "," xs
