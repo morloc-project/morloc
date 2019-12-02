@@ -32,7 +32,7 @@ import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
 say :: MDoc -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
+say d = return () -- liftIO . putDoc $ " : " <> d <> "\n"
 
 -- | Translate modules from the typechecker into executable code
 generate :: [Module] -> MorlocMonad (Script, [Script])
@@ -186,27 +186,31 @@ foldPools xs
   . map (\((l,i),xs) -> (l, (i, xs))) -- [(Lang, (Int, [(Type, Meta, MDoc)])]
   . Map.toList -- [((Lang, Int), [(Type, Meta, MDoc)])]
   . Map.unionsWith (++)
-  $ map (\x -> foldPool' (getKey x) x) xs
+  $ map (\x -> foldPool' (getKey x) True x) xs
   where
     foldPool'
       :: (Lang, Int)
+      -> Bool -- is this the top expression?
       -> SAnno (Type, Meta, MDoc)
       -> Map.Map (Lang, Int) [(Type, Meta, MDoc)]
-    foldPool' _ (SAnno UniS _) = Map.empty
-    foldPool' _ (SAnno (VarS _) _) = Map.empty
-    foldPool' k (SAnno (ListS  xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
-    foldPool' k (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k) xs)
-    foldPool' k (SAnno (LamS _ x)  _) = foldPool' k x
-    foldPool' k (SAnno (AppS x xs) (t,m,d)) =
+    foldPool' _ _ (SAnno UniS _) = Map.empty
+    foldPool' _ False (SAnno (VarS _) _) = Map.empty
+    foldPool' k True x@(SAnno (VarS _) (t, m, d)) =
+      let srcs = collectSources x in
+        Map.singleton (rekey k x) [(t, m {metaSources = srcs}, d)]
+    foldPool' k _ (SAnno (ListS  xs) _) = Map.unionsWith (++) (map (foldPool' k False) xs)
+    foldPool' k _ (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k False) xs)
+    foldPool' k _ (SAnno (LamS _ x)  _) = foldPool' k False x
+    foldPool' k _ (SAnno (AppS x xs) (t,m,d)) =
       let srcs = Set.unions (map collectSources (x:xs)) in
         Map.unionsWith
           (++)
           ( Map.singleton (rekey k x) [(t, m {metaSources = srcs}, d)]
-          : map (\x -> foldPool' (rekey k x) x) xs)
-    foldPool' _ (SAnno (NumS _) _) = Map.empty
-    foldPool' _ (SAnno (LogS _) _) = Map.empty
-    foldPool' _ (SAnno (StrS _) _) = Map.empty
-    foldPool' k (SAnno (RecS xs) _) = Map.unionsWith (++) (map (foldPool' k . snd) xs)
+          : map (\x -> foldPool' (rekey k x) False x) xs)
+    foldPool' _ _ (SAnno (NumS _) _) = Map.empty
+    foldPool' _ _ (SAnno (LogS _) _) = Map.empty
+    foldPool' _ _ (SAnno (StrS _) _) = Map.empty
+    foldPool' k _ (SAnno (RecS xs) _) = Map.unionsWith (++) (map (foldPool' k False . snd) xs)
 
     rekey :: (Lang, Int) -> SAnno (Type, Meta, MDoc) -> (Lang, Int)
     rekey k@(lang, _) (SAnno _ (t, m, _))
@@ -364,13 +368,6 @@ collect ms (e@(AnnE _ ts), ev, mv) = root where
     return $ SAnno x [(t, meta) | t <- ts] 
 collect _ _ = MM.throwError . OtherError $ "This is probably a bug" 
 
-getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
-getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of 
-    [] -> return Nothing
-    [x] -> return $ Just x
-    xs -> MM.throwError . OtherError $
-      "Expected 0 or 1 general types, found " <> MT.show' (length xs)
-
 makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
 makeVarMeta evar@(EV name) mvar ts = do
   i <- MM.getCounter
@@ -434,128 +431,81 @@ stepBM _ (LogS x) = return $ LogS x
 stepBM _ (StrS x) = return $ StrS x
 stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entries
 
--- codify
---   :: SerialMap
---   -> Map.Map MVar Module
---   -> SAnno (Type, Meta)
---   -> MorlocMonad (SAnno (Type, Meta, MDoc))
--- codify hashmap hs (SAnno (LamS vs e2) (t@(FunT _ _), meta)) = do
---   args <- zipWithM makeNexusArg vs (typeArgs t)
---   codify' hashmap hs args e2
---   where
---     -- these are arguments provided by the user from the nexus
---     -- they are the original inputs to the entire morloc program
---     makeNexusArg :: EVar -> Type -> MorlocMonad Argument
---     makeNexusArg (EV n) t = do
---       (packer, packerpath) <- selectFunction t Pack hashmap
---       (unpacker, unpackerpath) <- selectFunction t Unpack hashmap
---       return $ Argument
---         { argName = n
---         , argType = t
---         , argPacker = packer
---         , argPackerPath = packerpath
---         , argUnpacker = unpacker
---         , argUnpackerPath = unpackerpath
---         , argIsPacked = True
---         }
--- codify hashmap hs (SAnno (VarS v) (t@(FunT _ _), meta)) = do
---   let types = typeArgs t
---       generalTypes = typeArgs (fromJust (metaGeneralType meta))
---       fvars = map (EV . MT.pack) . take (length types) $ variables
---   args <- zipWithM makeSourceArg fvars types
---   grammar <- selectGrammar (langOf' t)
---   argmetas <- zipWithM (makeVarMeta' (metaModule meta)) args generalTypes
---   let meta' = meta {metaArgs = args}
---       fargs = zipWith toSAnno args argmetas
---   mandoc <- makeManifold grammar args meta' fargs (VarS v)
---   return $ SAnno (VarS v) (t, meta', mandoc)
---   where
---     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
---     makeSourceArg :: EVar -> Type -> MorlocMonad Argument
---     makeSourceArg (EV v) t = do
---       (packer, packerpath) <- selectFunction t Pack hashmap
---       (unpacker, unpackerpath) <- selectFunction t Unpack hashmap
---       return $ Argument
---         { argName = v
---         , argType = t
---         , argPacker = packer
---         , argPackerPath = packerpath
---         , argUnpacker = unpacker
---         , argUnpackerPath = unpackerpath
---         , argIsPacked = True
---         }
---
---     makeVarMeta' :: Module -> Argument -> Type -> MorlocMonad Meta
---     makeVarMeta' m r generalType = do
---       i <- MM.getCounter
---       return $ Meta { metaGeneralType = generalType
---                     , metaName = Just name
---                     , metaProperties = Set.empty
---                     , metaConstraints = Set.empty
---                     , metaSources = Set.empty
---                     , metaModule = moduleName m
---                     , metaId = i
---                     , metaArgs = [] -- cannot be set until after realization
---                     }
---
---     toSAnno :: Argument -> Meta -> SAnno (Type, Meta, MDoc)
---     toSAnno r m = SAnno (VarS (EV (argName r))) (argType r, m, pretty (argName r))
---
--- codify _ _ _ = MM.throwError . OtherError $
---   "Top-level nexus entries must be non-polymorphic functions"
-
 codify
   :: SerialMap
   -> Map.Map MVar Module
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify h ms e = codify' h ms [] e
+codify h ms e = codify' True h ms [] e
 
 codify'
-  :: SerialMap -- h - stores pack and unpack maps
+  :: Bool -- is this a top-level expression
+  -> SerialMap -- h - stores pack and unpack maps
   -> Map.Map MVar Module
   -> [Argument] -- r - lambda-bound arguments
   -> SAnno (Type, Meta)
   -> MorlocMonad (SAnno (Type, Meta, MDoc))
-codify' h ms r (SAnno (AppS e funargs) (t, m)) = do
+codify' _ h ms r (SAnno (AppS e funargs) (t, m)) = do
   grammar <- selectGrammar (langOf' t)
-  e2 <- codify' h ms r e 
+  e2 <- codify' False  h ms r e 
   let m' = m {metaArgs = r}
-  args <- mapM (codify' h ms r) funargs
+  args <- mapM (codify' False h ms r) funargs
   mandoc <- makeManifold grammar r m' args e2
   return $ SAnno (AppS e2 args) (t, m', mandoc)
-codify' _ _ _ (SAnno UniS (t,m)) = do
+codify' _ _ _ _ (SAnno UniS (t,m)) = do
   grammar <- selectGrammar (langOf' t)
   return $ SAnno UniS (t, m, gNull grammar)
-codify' _ hs _ (SAnno (VarS evar@(EV v)) (t,m)) = do
+codify' False _ hs _ (SAnno (VarS evar@(EV v)) (t,m)) = do
   let src = lookupSource evar (metaModule m) (langOf' t) hs 
       m' = m {metaSources = src}
   return $ SAnno (VarS evar) (t, m', pretty v)
-codify' h ms r (SAnno (ListS xs) (t,m)) = do
-  elements <- mapM (codify' h ms r) xs
+codify' True ms _ r (SAnno (VarS evar@(EV v)) (t,m)) = do
+  let otype = last (typeArgs t)
+      itypes = init (typeArgs t)
+      vars = variables (length itypes)
+  args <- updateArguments ms r (zipWith (\n t -> (n, t, True)) vars itypes) 
+  g <- selectGrammar (langOf' t)
+  inputs' <- mapM (simplePrepInput g) (zip3 [0..] vars args)
+  let mdoc = gFunction g $ GeneralFunction {
+      gfComments = prettyType t <> line
+    , gfReturnType = Just ((gShowType g) otype)
+    , gfName = makeManifoldName m
+    , gfArgs = map (prepArg g) args
+    , gfBody =
+        vsep (map snd inputs') <> line <>
+        (gReturn g $ (gCall g) (pretty v) (map fst inputs'))
+    }
+  return $ SAnno (VarS evar) (t, m {metaArgs = args}, mdoc)
+codify' _ h ms r (SAnno (ListS xs) (t,m)) = do
+  elements <- mapM (codify' False h ms r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (gList grammar) (map getDoc elements)
   return $ SAnno (ListS elements) (t,m,mdoc)
-codify' h ms r (SAnno (TupleS xs) (t,m)) = do
-  elements <- mapM (codify' h ms r) xs
+codify' _ h ms r (SAnno (TupleS xs) (t,m)) = do
+  elements <- mapM (codify' False h ms r) xs
   grammar <- selectGrammar (langOf' t)
   let mdoc = (gTuple grammar) (map getDoc elements)
   return $ SAnno (TupleS elements) (t,m,mdoc)
-codify' h ms r (SAnno (LamS vs e) (t,m)) = do
+codify' _ h ms r (SAnno (LamS vs e) (t,m)) = do
   newargs <- updateArguments h r (zipWith (\e t -> (e,t,True)) vs (typeArgs t))
-  codify' h ms newargs e
-codify' h ms r (SAnno (RecS entries) (t, m)) = do
-  newvals <- mapM (codify' h ms r) (map snd entries)
+  codify' False h ms newargs e
+codify' _ h ms r (SAnno (RecS entries) (t, m)) = do
+  newvals <- mapM (codify' False h ms r) (map snd entries)
   grammar <- selectGrammar (langOf' t)
   let newEntries = zip (map fst entries) newvals
       mdoc = gRecord grammar
            $ map (\(EV k, v) -> (pretty k, getDoc v)) newEntries
   return $ SAnno (RecS newEntries) (t, m, mdoc)
-codify' _ _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x)
-codify' _ _ _ (SAnno (LogS x) (t,m)) = do
+codify' _ _ _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x)
+codify' _ _ _ _ (SAnno (LogS x) (t,m)) = do
   grammar <- selectGrammar (langOf' t)
   return $ SAnno (LogS x) (t, m, (gBool grammar) x)
-codify' _ _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x)
+codify' _ _ _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x)
+
+variables :: Int -> [EVar]
+variables i = map (EV . MT.pack) $ take i variables
+  where
+    variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
 makeManifold
   :: Grammar
@@ -579,12 +529,6 @@ makeManifold g args meta inputs (SAnno _ (t, _, _)) = do
         vsep (catMaybes (map snd inputs')) <> line <>
         (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
     }
-
-makeManifoldName :: Meta -> MDoc
-makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
-
-makeArgumentName :: Int -> MDoc
-makeArgumentName i = "x" <> pretty i
 
 -- Handle preparation of arguments passed to a manifold. Return the name of the
 -- variable that will be used and an block of code that defines the variable
@@ -624,8 +568,15 @@ prepInput g rs i (SAnno _ (t, m, d)) = do
     (Just n, _, Nothing) -> return (pretty name, Nothing)
     x -> MM.throwError . OtherError $ MT.show' x
 
-getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 
-getDoc (SAnno _ (_, _, x)) = x
+simplePrepInput :: Grammar -> (Int, EVar, Argument) -> MorlocMonad (MDoc, MDoc)
+simplePrepInput g (i, (EV v), r) = do
+  let varname = makeArgumentName i
+  return (varname, gAssign g $ GeneralAssignment
+     { gaType = Just . gShowType g . argType $ r
+     , gaName = varname
+     , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty v]
+     , gaArg = Nothing
+     })
 
 updateArguments :: SerialMap -> [Argument] -> [(EVar, Type, Bool)] -> MorlocMonad [Argument]
 updateArguments _ args [] = return args
@@ -647,14 +598,6 @@ updateArguments hashmap args xs = do
         , argUnpackerPath = unpackerpath
         , argIsPacked = packed
         }
-
-typeArgs :: Type -> [Type]
-typeArgs (FunT t1 t2) = t1 : typeArgs t2
-typeArgs t = [t]
-
-exprArgs :: SExpr a -> [Name]
-exprArgs (LamS vs _) = [name | (EV name) <- vs]
-exprArgs _ = []
 
 selectFunction :: Type -> Property -> SerialMap -> MorlocMonad (Name, Path)
 selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
@@ -681,6 +624,10 @@ findRoots ms
     -- set of all modules that are imported
     allImports = mapSumWith (valset . moduleImportMap) ms
 
+-- | Find exported expressions. These may be declared or sourced in the current
+-- module or they may be imported from a different module. If they are
+-- imported, ascend through modules to the original declaration, returning the
+-- module where they are defined.
 findExpr :: Map.Map MVar Module -> Module -> EVar -> Maybe (Expr, EVar, MVar)
 findExpr ms m v
   | Set.member v (moduleExports m)
@@ -714,3 +661,28 @@ findExpr ms m v
 
     listMVars :: Module -> [MVar]
     listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m) 
+
+
+getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
+getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of 
+    [] -> return Nothing
+    [x] -> return $ Just x
+    xs -> MM.throwError . OtherError $
+      "Expected 0 or 1 general types, found " <> MT.show' (length xs)
+
+makeManifoldName :: Meta -> MDoc
+makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
+
+makeArgumentName :: Int -> MDoc
+makeArgumentName i = "x" <> pretty i
+
+getDoc :: SAnno (Type, Meta, MDoc) -> MDoc 
+getDoc (SAnno _ (_, _, x)) = x
+
+typeArgs :: Type -> [Type]
+typeArgs (FunT t1 t2) = t1 : typeArgs t2
+typeArgs t = [t]
+
+exprArgs :: SExpr a -> [Name]
+exprArgs (LamS vs _) = [name | (EV name) <- vs]
+exprArgs _ = []
