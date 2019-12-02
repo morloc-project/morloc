@@ -20,6 +20,7 @@ module Morloc.Internal
   -- ** operators
   , (|>>) -- piped fmap
   , (</>) -- Filesystem utility operators from System.FilePath
+  , (<|>) -- alternative operator
   -- ** map and set helper functions
   , keyset
   , valset
@@ -33,6 +34,7 @@ module Morloc.Internal
 -- access it.
 import Control.Monad
 import Control.Monad.IO.Class
+import Control.Applicative ((<|>))
 import Data.Either
 import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Maybe
