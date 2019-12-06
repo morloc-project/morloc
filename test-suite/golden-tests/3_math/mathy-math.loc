@@ -1,6 +1,11 @@
 import math (mean, fibonacci);
 import cppbase;
 
+-- mean :: (Num a) => forall a . [a] -> a;
+-- mean Cpp :: forall a . "std::vector<$1>" a -> a;
+-- fibonacci :: Num -> [Num];
+-- fibonacci Cpp :: "size_t" -> "std::vector<$1>" double;
+
 export meanfib;
 export fibonacci;
 

@@ -115,8 +115,12 @@ getTopPoolCalls h xs = mapM f xs where
   f (i, ys) =
     case listToMaybe [(i, t, m) | (t, m, _) <- ys, metaId m == i] of
       (Just (i,t,m)) -> do
-        (packer, path) <- selectFunction t Pack h
-        return (t,m,packer)
+        let t' = last (typeArgs t)
+        (packer, path) <- selectFunction t' Pack h
+        say $ "in getTopPoolCalls"
+        say $ " : " <> prettyType t'
+        say . pretty $ " : " <> MT.show' (metaName m) <> " " <> packer <> " " <> path
+        return (t', m, packer)
       Nothing -> MM.throwError . OtherError $ "Manifold ID not in pool"
 
 -- Make a function for generating the code to dispatch from the pool main
@@ -240,7 +244,7 @@ findSerializers ms = return $ SerialMap
   findSerialFun :: Property -> Module -> Map.Map Type (Name, Path)
   findSerialFun p m
     = Map.fromList
-    . map (getType p)
+    . map (\(t, x) -> (getType p t, x))
     . mapSum
     . Map.mapWithKey (\v t -> map (g m) (f p v t))
     $ moduleTypeMap m
@@ -257,9 +261,11 @@ findSerializers ms = return $ SerialMap
     (Just (Source (EV name) _ (Just path) _)) -> (t, (name, path))
     _ -> error "something evil this way comes"
 
-  getType :: Property -> (Type, a) -> (Type, a)
-  getType Pack   (FunT t _, x) = (t, x)
-  getType Unpack (FunT _ t, x) = (t, x)
+  -- Get the type that is being serialized or deserialized
+  getType :: Property -> Type -> Type
+  getType Pack   (FunT t _) = t
+  getType Unpack (FunT _ t) = t
+  getType p (Forall v t) = Forall v (getType p t)
   getType _ t = t
 
 -- | Create one tree for each nexus command.

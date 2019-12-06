@@ -11,6 +11,7 @@ import qualified Morloc.TypeChecker.PartialOrder as MP
 
 import qualified Data.Text as T
 import qualified Data.PartialOrd as DP
+import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -179,6 +180,28 @@ typeOrderTests =
         (MP.isSubtypeOf
           (forall ["a"] (tuple [num, var "a"]))
           (forall ["b"] (tuple [num, var "b"])))
+    -- cannot compare
+    , testFalse
+        "[Num] !< Num"
+        (MP.isSubtypeOf (lst num) num)
+    , testFalse
+        "Num !< [Num]"
+        (MP.isSubtypeOf num (lst num))
+    -- test "mostSpecific"
+    , testEqual
+        "mostSpecific [Num, Str, forall a . a] = [Num, Str]"
+        (MP.mostSpecific [num, str, forall ["a"] (var "a")])
+        [num, str]
+    -- test "mostGeneral"
+    , testEqual
+        "mostGeneral [Num, Str, forall a . a] = forall a . a"
+        (MP.mostGeneral [num, str, forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
+    -- test mostSpecificSubtypes
+    , testEqual
+        "mostSpecificSubtypes"
+        (MP.mostSpecificSubtypes num [forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
     ]
 
 unitTypeTests =

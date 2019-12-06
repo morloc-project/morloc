@@ -52,7 +52,7 @@ data SExpr a
 data SerialMap = SerialMap {
     packers :: Map.Map Type (Name, Path)
   , unpackers :: Map.Map Type (Name, Path)
-}
+} deriving (Show, Ord, Eq)
 
 data Meta = Meta {
     metaGeneralType :: Maybe Type

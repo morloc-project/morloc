@@ -131,4 +131,4 @@ mostSpecific ts = P.maxima ts
 
 -- | find the most specific subtypes
 mostSpecificSubtypes :: Type -> [Type] -> [Type]
-mostSpecificSubtypes t ts = mostSpecific $ filter (\t2 -> P.compare t2 t <= Just EQ) ts
+mostSpecificSubtypes t ts = mostSpecific $ filter (\t2 -> isSubtypeOf t2 t) ts
