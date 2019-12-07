@@ -22,7 +22,6 @@ import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.System as MS
 import Data.Scientific (Scientific)
-import Control.Monad ((>=>))
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
@@ -31,39 +30,46 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
--- | Information sufficient to build a manifold function in a pool
-type Manifold =
-  ( Type -- The chosen concrete type (language-specific) type of the manifold
-  , Meta -- General (NOT language-specific) metadata for the manifold
-  , MDoc -- The code for the manifold, generated in `codify`
-  )
+-- -- | Information sufficient to build a manifold function in a pool
+-- type Manifold =
+--   ( Type -- The chosen concrete type (language-specific) type of the manifold
+--   , Meta -- General (NOT language-specific) metadata for the manifold
+--   , MDoc -- The code for the manifold, generated in `codify`
+--   )
+--
+-- -- | The interface to a pool is a set of functions (manifolds) that can be
+-- -- called by index from the nexus. These manifolds in turn may call other
+-- -- manifolds, creating a call tree. These are strictly tree data structures, so
+-- -- no manifolds are shared between trees rooted on different manifolds. CallSet
+-- -- specifies a single "tree". The manifolds are stored as a list here, since
+-- -- they have already been encoded (in codify) and thus do not need to access
+-- -- their neighbors. The list is ordered, though, such that manifolds appear in
+-- -- the reverse order they are called. This ensures manifolds are defined before
+-- -- being called, which is matters in many languages.
+-- type CallSet =
+--   ( Int -- The integer index of the first manifold in the set
+--   , [Manifold] -- All manifolds that will be called
+--   )
 
--- | The interface to a pool is a set of functions (manifolds) that can be
--- called by index from the nexus. These manifolds in turn may call other
--- manifolds, creating a call tree. These are strictly tree data structures, so
--- no manifolds are shared between trees rooted on different manifolds. CallSet
--- specifies a single "tree". The manifolds are stored as a list here, since
--- they have already been encoded (in codify) and thus do not need to access
--- their neighbors. The list is ordered, though, such that manifolds appear in
--- the reverse order they are called. This ensures manifolds are defined before
--- being called, which is matters in many languages.
-type CallSet =
-  ( Int -- The integer index of the first manifold in the set
-  , [Manifold] -- All manifolds that will be called
-  )
+data Role
+  = Foreign
+  | Domestic
+  deriving(Show, Ord, Eq)
 
 -- | Translate typechecker-created modules into compilable code
 generate :: [Module] -> MorlocMonad (Script, [Script])
 generate ms = do
   -- initialize state counter to 0, used to index manifolds
   MM.startCounter
-  -- recursively find all serializers imported from any module
-  smap <- findSerializers ms
-  -- translate modules into bitrees
-  -- connect :: [Module] -> [SAnno (Type, Meta)]
-  ast <- connect ms 
+
   -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
+
+  -- recursively find all serializers imported from any module
+  smap <- findSerializers ms
+
+  -- translate modules into bitrees
+  ast <- roots modmap >>= mapM (collect modmap) >>= mapM realize
 
   -- build nexus
   -- -----------
@@ -73,13 +79,7 @@ generate ms = do
   nexus <- Nexus.generate [(t, poolId m x, metaName m) | (SAnno x (t, m)) <- ast]
 
   -- for each language, collect all functions into one "pool"
-  pools <-
-    -- translate expressions to code
-        mapM (codify smap modmap) ast  
-    -- pool code by language
-    |>> foldPools 
-    -- collate manifold code into single pool code
-    >>= mapM (makePool smap)
+  pools <- mapM segment ast |>> concat >>= pool >>= mapM (encode smap modmap)
 
   -- return the nexus script and each pool script
   return (nexus, pools)
@@ -89,6 +89,42 @@ generate ms = do
     poolId :: Meta -> SExpr (Type, Meta) -> Int
     poolId _ (LamS _ (SAnno _ (_, meta))) = metaId meta
     poolId meta _ = metaId meta
+
+-- | Find the expressions that are exposed to the user
+roots :: Map.Map MVar Module -> MorlocMonad [(Expr, EVar, MVar)]
+roots ms
+  = return
+  . catMaybes
+  . Set.toList
+  . mapSum
+  . Map.map (\m -> Set.map (findExpr ms m) (moduleExports m))
+  . Map.filter isRoot
+  $ ms where
+    -- is this module a "root" module?
+    -- a root module is a module that is not imported from any other module
+    isRoot :: Module -> Bool
+    isRoot m = not $ Set.member (moduleName m) allImports
+
+    -- set of all modules that are imported
+    allImports = mapSumWith (valset . moduleImportMap) ms
+
+segment
+  :: SAnno (Type, Meta)
+  -> MorlocMonad [SAnno (Type, Meta, Role)]
+segment = undefined
+
+-- Sort manifolds into pools. Within pools, group manifolds into call sets.
+pool
+  :: [SAnno (Type, Meta, Role)]
+  -> MorlocMonad [(Lang, [SAnno (Type, Meta, Role)])]
+pool = undefined
+
+encode
+  :: SerialMap
+  -> Map.Map MVar Module
+  -> (Lang, [SAnno (Type, Meta, Role)])
+  -> MorlocMonad Script
+encode = undefined
 
 -- find all serialization functions in a list of modules
 findSerializers :: [Module] -> MorlocMonad SerialMap
@@ -124,58 +160,6 @@ findSerializers ms = return $ SerialMap
   getType p (Forall v t) = Forall v (getType p t)
   getType _ t = t
 
-
--- | Create one tree for each nexus command.
-connect :: [Module] -> MorlocMonad [SAnno (Type, Meta)]
-connect ms = do
-  let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
-      roots = findRoots modmap
-  mapM (collect modmap >=> realize) roots 
-  where
-    -- | Select a single concrete language for each sub-expression. Store the
-    -- concrete type and the general type (if available).
-    realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
-    realize (SAnno _ []) = MM.throwError . OtherError $ "No type found"
-    realize x = stepAM selectRealization x
-
-    -- | Keep the first concrete realization in the list
-    -- FIXME: this is an EXTREMELY bad approach
-    selectRealization :: [(Type, Meta)] -> MorlocMonad (Type, Meta)
-    selectRealization xs =
-      case filter (\(t, _) -> isJust (langOf t)) xs of
-        [] -> MM.throwError . OtherError $ "No concrete realization found"
-        (x:_) -> return x
-
-    stepAM :: Monad m => (a -> m b) -> SAnno a -> m (SAnno b) 
-    stepAM f (SAnno x a) = SAnno <$> stepBM f x <*> f a
-
-    stepBM :: Monad m => (a -> m b) -> SExpr a -> m (SExpr b)
-    stepBM _ UniS = return $ UniS
-    stepBM f (VarS x) = return $ VarS x
-    stepBM f (ListS xs) = ListS <$> mapM (stepAM f) xs
-    stepBM f (TupleS xs) = TupleS <$> mapM (stepAM f) xs
-    stepBM f (LamS vs x) = LamS vs <$> stepAM f x
-    stepBM f (AppS x xs) = AppS <$> stepAM f x <*> mapM (stepAM f) xs
-    stepBM _ (NumS x) = return $ NumS x
-    stepBM _ (LogS x) = return $ LogS x
-    stepBM _ (StrS x) = return $ StrS x
-    stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entries
-
-    findRoots :: Map.Map MVar Module -> [(Expr, EVar, MVar)]
-    findRoots ms
-      = catMaybes
-      . Set.toList
-      . mapSum
-      . Map.map (\m -> Set.map (findExpr ms m) (moduleExports m))
-      . Map.filter isRoot
-      $ ms where
-        -- is this module a "root" module?
-        -- a root module is a module that is not imported from any other module
-        isRoot :: Module -> Bool
-        isRoot m = not $ Set.member (moduleName m) allImports
-
-        -- set of all modules that are imported
-        allImports = mapSumWith (valset . moduleImportMap) ms
 
 collect :: Map.Map MVar Module -> (Expr, EVar, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
 collect ms (e@(AnnE _ ts), ev, mv) = do
@@ -283,405 +267,36 @@ makeVarMeta evar@(EV name) mvar ts = do
                   }
   return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
 
--- | Generate code for each manifold
-codify
-  :: SerialMap
-  -> Map.Map MVar Module
-  -> SAnno (Type, Meta)
-  -> MorlocMonad (SAnno Manifold)
-codify h ms e = codify' True h ms [] e
+-- | Select a single concrete language for each sub-expression. Store the
+-- concrete type and the general type (if available).
+realize :: SAnno [(Type, Meta)] -> MorlocMonad (SAnno (Type, Meta))
+realize (SAnno _ []) = MM.throwError . OtherError $ "No type found"
+realize x = stepAM selectRealization x where
+  -- | Keep the first concrete realization in the list
+  -- FIXME: this is an EXTREMELY bad approach
+  selectRealization :: [(Type, Meta)] -> MorlocMonad (Type, Meta)
+  selectRealization xs =
+    case filter (\(t, _) -> isJust (langOf t)) xs of
+      [] -> MM.throwError . OtherError $ "No concrete realization found"
+      (x:_) -> return x
 
-codify'
-  :: Bool -- is this a top-level expression
-  -> SerialMap -- h - stores pack and unpack maps
-  -> Map.Map MVar Module
-  -> [Argument] -- r - lambda-bound arguments
-  -> SAnno (Type, Meta)
-  -> MorlocMonad (SAnno Manifold)
-codify' _ h ms r (SAnno (AppS e funargs) (t, m)) = do
-  grammar <- selectGrammar (langOf' t)
-  e2 <- codify' False  h ms r e 
-  let m' = m {metaArgs = r}
-  args <- mapM (codify' False h ms r) funargs
-  mandoc <- makeManifoldDoc grammar r m' args e2
-  return $ SAnno (AppS e2 args) (t, m', mandoc)
-  where
-    makeManifoldDoc
-      :: Grammar
-      -> [Argument]
-      -> Meta
-      -> [SAnno Manifold]
-      -> SAnno Manifold
-      -> MorlocMonad MDoc
-    makeManifoldDoc g args meta inputs (SAnno _ (t, _, _)) = do
-      let otype = last (typeArgs t)
-      name <- case metaName meta of
-        (Just n) -> return n
-        Nothing -> MM.throwError . OtherError $ "No name found for manifold"
-      inputs' <- zipWithM (prepInput g args) [0..] inputs
-      return . gFunction g $ GeneralFunction
-        { gfComments = prettyType t <> line
-        , gfReturnType = Just ((gShowType g) otype)
-        , gfName = makeManifoldName meta
-        , gfArgs = map (prepArg g) args
-        , gfBody =
-            vsep (catMaybes (map snd inputs')) <> line <>
-            (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
-        }
+  stepAM :: Monad m => (a -> m b) -> SAnno a -> m (SAnno b) 
+  stepAM f (SAnno x a) = SAnno <$> stepBM f x <*> f a
 
-    -- Handle preparation of arguments passed to a manifold. Return the name of the
-    -- variable that will be used and an block of code that defines the variable
-    -- (if necessary).
-    prepInput
-      :: Grammar
-      -> [Argument] -- all arguments of the manifold
-      -> Int
-      -> SAnno Manifold -- an input to the wrapped function
-      -> MorlocMonad (MDoc, Maybe MDoc)
-    prepInput g rs i (SAnno (AppS x xs) (t, m, d)) = do
-      let varname = makeArgumentName i
-          mid = makeManifoldName m
-          ass = (gAssign g) $ GeneralAssignment
-            { gaType = Just . gShowType g . last . typeArgs $ t
-            , gaName = varname
-            , gaValue = (gCall g) mid (map (pretty . argName) rs)
-            , gaArg = Nothing
-            }
-      return (varname, Just ass)
-    prepInput g rs i (SAnno _ (t, m, d)) = do
-      let name = metaName m
-          varname = makeArgumentName i
-          arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
-      case (name, arg, fmap argIsPacked arg) of
-        (Just n, Just r, Just True) ->
-           return (varname, Just . gAssign g $ GeneralAssignment
-              { gaType = Just . gShowType g . argType $ r
-              , gaName = varname
-              , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty name]
-              , gaArg = Nothing
-              }
-           )
-        -- the argument is used in the wrapped function, but is not serialized
-        (Just n, _, Just False) -> return (pretty name, Nothing)
-        -- the argument is not used in the wrapped function
-        (Just n, _, Nothing) -> return (pretty name, Nothing)
-        x -> MM.throwError . OtherError $ MT.show' x
-
-codify' _ _ _ _ (SAnno UniS (t,m)) = do
-  grammar <- selectGrammar (langOf' t)
-  return $ SAnno UniS (t, m, gNull grammar)
-
-codify' False _ hs _ (SAnno (VarS evar@(EV v)) (t,m)) = do
-  let src = lookupSource evar (metaModule m) (langOf' t) hs 
-      m' = m {metaSources = src}
-  return $ SAnno (VarS evar) (t, m', pretty v)
-  where
-    -- | Find the first source for a term sourced from a given language relative to
-    -- a given module 
-    lookupSource :: EVar -> MVar -> Lang -> Map.Map MVar Module -> Set.Set Source
-    lookupSource evar mvar lang ms =
-      case Map.lookup mvar ms |>> moduleSourceMap >>= Map.lookup (evar, lang) of
-        (Just src) -> Set.singleton src
-        Nothing -> case Map.lookup mvar ms of
-          (Just mod) -> Set.unions
-                     . map (\mvar' -> lookupSource evar mvar' lang ms)
-                     . Map.elems
-                     . moduleImportMap
-                     $ mod
-          Nothing -> Set.empty
-
-codify' True ms _ r (SAnno (VarS evar@(EV v)) (t,m)) = do
-  let otype = last (typeArgs t)
-      itypes = init (typeArgs t)
-      vars = variableStream (length itypes)
-  args <- updateArguments ms r (zipWith (\n t -> (n, t, True)) vars itypes) 
-  g <- selectGrammar (langOf' t)
-  inputs' <- mapM (simplePrepInput g) (zip3 [0..] vars args)
-  let mdoc = gFunction g $ GeneralFunction {
-      gfComments = prettyType t <> line
-    , gfReturnType = Just ((gShowType g) otype)
-    , gfName = makeManifoldName m
-    , gfArgs = map (prepArg g) args
-    , gfBody =
-        vsep (map snd inputs') <> line <>
-        (gReturn g $ (gCall g) (pretty v) (map fst inputs'))
-    }
-  return $ SAnno (VarS evar) (t, m {metaArgs = args}, mdoc)
-  where
-    -- infinite stream: ['a', 'b', ..., 'z', 'aa', 'ab', ..., 'aaa', ...]
-    variables = [1 ..] >>= flip replicateM ['a' .. 'z']
-    -- get the nth variable
-    variableStream :: Int -> [EVar]
-    variableStream i = map (EV . MT.pack) $ take i variables
-    -- Create the declaration for an argument and store the lhs variable name.
-    -- Here is an example of a return value:
-    --   ("a", "double a = unpackDouble(x0);")
-    simplePrepInput
-      :: Grammar
-      -> (Int, EVar, Argument)
-      -> MorlocMonad ( MDoc -- variable name
-                     , MDoc -- assignment code
-                     )
-    simplePrepInput g (i, (EV v), r) = do
-      let varname = makeArgumentName i
-      return (varname, gAssign g $ GeneralAssignment
-         { gaType = Just . gShowType g . argType $ r
-         , gaName = varname
-         , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty v]
-         , gaArg = Nothing
-         })
-
-codify' _ h ms r (SAnno (ListS xs) (t,m)) = do
-  elements <- mapM (codify' False h ms r) xs
-  grammar <- selectGrammar (langOf' t)
-  let mdoc = (gList grammar) (map getDoc elements)
-  return $ SAnno (ListS elements) (t,m,mdoc)
-
-codify' _ h ms r (SAnno (TupleS xs) (t,m)) = do
-  elements <- mapM (codify' False h ms r) xs
-  grammar <- selectGrammar (langOf' t)
-  let mdoc = (gTuple grammar) (map getDoc elements)
-  return $ SAnno (TupleS elements) (t,m,mdoc)
-
-codify' _ h ms r (SAnno (LamS vs e) (t,m)) = do
-  newargs <- updateArguments h r (zipWith (\e t -> (e,t,True)) vs (typeArgs t))
-  codify' False h ms newargs e
-
-codify' _ h ms r (SAnno (RecS entries) (t, m)) = do
-  newvals <- mapM (codify' False h ms r) (map snd entries)
-  grammar <- selectGrammar (langOf' t)
-  let newEntries = zip (map fst entries) newvals
-      mdoc = gRecord grammar
-           $ map (\(EV k, v) -> (pretty k, getDoc v)) newEntries
-  return $ SAnno (RecS newEntries) (t, m, mdoc)
-
-codify' _ _ _ _ (SAnno (NumS x) (t,m)) = return $ SAnno (NumS x) (t, m, viaShow x)
-
-codify' _ _ _ _ (SAnno (LogS x) (t,m)) = do
-  grammar <- selectGrammar (langOf' t)
-  return $ SAnno (LogS x) (t, m, (gBool grammar) x)
-
-codify' _ _ _ _ (SAnno (StrS x) (t,m)) = return $ SAnno (StrS x) (t, m, pretty x)
-
-updateArguments :: SerialMap -> [Argument] -> [(EVar, Type, Bool)] -> MorlocMonad [Argument]
-updateArguments _ args [] = return args
-updateArguments hashmap args xs = do
-  newargs <- mapM makeArg xs
-  let oldargs = [x | x <- args, not (elem (argName x) (map argName newargs))]
-  return $ newargs ++ oldargs
-  where
-    makeArg :: (EVar, Type, Bool) -> MorlocMonad Argument
-    makeArg (EV n, t, packed) = do
-      (packer, packerpath) <- selectFunction t Pack hashmap
-      (unpacker, unpackerpath) <- selectFunction t Unpack hashmap
-      return $ Argument
-        { argName = n
-        , argType = t
-        , argPacker = packer
-        , argPackerPath = packerpath
-        , argUnpacker = unpacker
-        , argUnpackerPath = unpackerpath
-        , argIsPacked = packed
-        }
-
-
--- | For language `lang`, collate the code for the script, handle dependencies,
--- and choose a pool name. Calls `poolCode`, which generates the pool code from
--- the (Lang, [CallSet]) input.
-makePool :: SerialMap -> (Lang, [CallSet]) -> MorlocMonad Script
-makePool h (lang, xs) = do
-  g <- selectGrammar lang
-  state <- MM.get
-  code <- poolCode g h xs
-  return $ Script 
-    { scriptBase = "pool"
-    , scriptLang = lang
-    , scriptCode = render code
-    , scriptCompilerFlags =
-        filter (/= "") . map packageGccFlags $ statePackageMeta state
-    , scriptInclude = map MS.takeDirectory (poolIncludes h xs)
-    }
-
--- | For language `lang`, collect the code generated for all the manifolds in
--- `lang` and wrap them in a script that can be called from the command line by
--- the nexus (i.e., make a "pool"). Each manifold called within a pool will
--- return data of language-specific type, this will need to be serialized
--- before printing to STDOUT. Serialization functions are stored in the input
--- SerialMap record.
-poolCode :: Grammar -> SerialMap -> [CallSet] -> MorlocMonad MDoc
-poolCode g h xs = do
-  -- collect top-level pool calls for use in dispatcher generation
-  -- the dispatch code generator also needs to serialize the returned code
-  dispatched <- mapM (topCall h) xs
-  -- collect manifold code (mans)
-  let mans = concat [[d | (_,_,d) <- ys] | (i, ys) <- xs]
-  -- collect data needed to build signatures/prototypes (sigs)
-  let sigs = concat [[(m,t) | (t,m,_) <- ys] | (i, ys) <- xs]
-  -- find relative file paths for sourced code (including serialization paths)
-  importPaths <- mapM (gPrepImport g) (poolIncludes h xs)
-  gMain g $ PoolMain
-    { pmSources = map ((gImport g) "") importPaths
-    , pmSignatures = map (makeSignature g) sigs
-    , pmPoolManifolds = mans
-    , pmDispatchManifold = makeDispatcher g dispatched
-    }
-
--- | Find all unique included directory paths (include serialization functions)
-poolIncludes :: SerialMap -> [CallSet] -> [Path]
-poolIncludes h xs
-  = let mets = map snd xs >>= map (\(_,x,_) -> x) in
-      (nub . concat)
-        [ catMaybes . Set.toList . Set.map srcPath . Set.unions . map metaSources $ mets
-        , map argPackerPath   . concat . map metaArgs $ mets
-        , map argUnpackerPath . concat . map metaArgs $ mets
-        ]
-
--- | Get type, metadata, and packer function for the top manifold in a CallSet
-topCall
-  :: SerialMap
-  -> CallSet
-  -> MorlocMonad
-       ( Type -- top-level manifold type
-       , Meta -- top-level manifold meta
-       , Name -- name of serialization (packer) function
-       )
-topCall h (i, ys) =
-  case listToMaybe [(i, t, m) | (t, m, _) <- ys, metaId m == i] of
-    (Just (i, t, m)) -> do
-      let t' = last (typeArgs t)
-      (packer, path) <- selectFunction t' Pack h
-      return (t', m, packer)
-    Nothing -> MM.throwError . OtherError $ "Manifold ID not in pool"
-
--- | choose a packer or unpacker for a given type
-selectFunction :: Type -> Property -> SerialMap -> MorlocMonad (Name, Path)
-selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
-  [] -> MM.throwError . OtherError $ "No packer found"
-  (x:_) -> case Map.lookup x hmap of
-    (Just x) -> return x
-    Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
-  where
-    hmap = if p == Pack then packers h else unpackers h
-
--- | Make a function for generating the code to dispatch from the pool main
--- function to manifold functions. The two arguments of the returned function
--- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
--- results are stored.
-makeDispatcher
-  :: Grammar
-  -> [( Type
-      , Meta
-      , Name -- the name of the function that packs the return data
-      )]
-  -> (  MDoc -- manifold integer id
-     -> MDoc -- variable name that stores the result
-     -> MDoc
-     )
-makeDispatcher g xs =
-  (gSwitch g) (\(_,m,_) -> pretty (metaId m))
-              (\(t,m,p) -> mainCall g t m p)
-              xs
-  where
-    mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
-    mainCall g t m packer = (gCall g)
-      (pretty packer)
-      [(gCall g)
-          (makeManifoldName m)
-          (take (length (metaArgs m))
-          (gCmdArgs g))]
-
--- | Create a signature/prototype. Not all languages need this. C and C++ need
--- prototype definitions, but R and Python do not. Languages that do not
--- require signatures may simply write the type information as comments at the
--- beginning of the source file.
-makeSignature :: Grammar -> (Meta, Type) -> MDoc
-makeSignature g (m, t) = (gSignature g) $ GeneralFunction 
-  { gfComments = ""
-  , gfReturnType = Just . gShowType g . last . typeArgs $ t
-  , gfName = makeManifoldName m
-  , gfArgs = map (prepArg g) (metaArgs m)
-  , gfBody = ""
-  }
-
--- | Serialize the result of a call if a serialization function is defined.
--- Presumably, if no serialization function is given, then the argument is
--- either a native construct or will be passed on in serialized form.
-prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-prepArg g r = (Just . gShowType g $ t, pretty n) where
-  t = if argIsPacked r
-        then gSerialType g
-        else argType r
-  n = argName r
-
--- Sort manifolds into pools. Within pools, group manifolds into call sets.
-foldPools :: [SAnno Manifold] -> [(Lang, [CallSet])]
-foldPools xs
-  = groupSort -- [(Lang, [CallSet])]
-  . map (\((l,i),xs) -> (l, (i, xs))) -- [(Lang, CallSet]
-  . Map.toList -- [((Lang, Int), [Manifold])]
-  . Map.unionsWith (++)
-  $ map (\x -> foldPool' (getKey x) True x) xs
-  where
-    foldPool'
-      :: (Lang, Int)
-      -> Bool -- is this the top expression?
-      -> SAnno Manifold
-      -> Map.Map (Lang, Int) [Manifold]
-    foldPool' _ _ (SAnno UniS _) = Map.empty
-    foldPool' _ False (SAnno (VarS _) _) = Map.empty
-    foldPool' k True x@(SAnno (VarS _) (t, m, d)) =
-      let srcs = collectSources x in
-        Map.singleton (rekey k x) [(t, m {metaSources = srcs}, d)]
-    foldPool' k _ (SAnno (ListS  xs) _) = Map.unionsWith (++) (map (foldPool' k False) xs)
-    foldPool' k _ (SAnno (TupleS xs) _) = Map.unionsWith (++) (map (foldPool' k False) xs)
-    foldPool' k _ (SAnno (LamS _ x)  _) = foldPool' k False x
-    foldPool' k _ (SAnno (AppS x xs) (t,m,d)) =
-      let srcs = Set.unions (map collectSources (x:xs)) in
-        Map.unionsWith
-          (++)
-          ( Map.singleton (rekey k x) [(t, m {metaSources = srcs}, d)]
-          : map (\x -> foldPool' (rekey k x) False x) xs)
-    foldPool' _ _ (SAnno (NumS _) _) = Map.empty
-    foldPool' _ _ (SAnno (LogS _) _) = Map.empty
-    foldPool' _ _ (SAnno (StrS _) _) = Map.empty
-    foldPool' k _ (SAnno (RecS xs) _) = Map.unionsWith (++) (map (foldPool' k False . snd) xs)
-
-    rekey :: (Lang, Int) -> SAnno Manifold -> (Lang, Int)
-    rekey k@(lang, _) (SAnno _ (t, m, _))
-      | lang /= lang' = (lang', metaId m)
-      | otherwise = k
-      where
-        lang' = langOf' t
-
-    getKey :: SAnno Manifold -> (Lang, Int)
-    getKey (SAnno _ (t, m, _)) = (langOf' t, metaId m)
-
-    -- Find all source files in a call tree
-    collectSources :: SAnno Manifold -> Set.Set Source
-    collectSources (SAnno (VarS _) (_, m, _)) = metaSources m
-    collectSources (SAnno (ListS xs) _) = Set.unions (map collectSources xs)
-    collectSources (SAnno (TupleS xs) _) = Set.unions (map collectSources xs)
-    collectSources (SAnno (RecS xs) _) = Set.unions (map collectSources (map snd xs))
-    collectSources (SAnno (AppS _ _) _) = Set.empty
-    collectSources (SAnno (LamS _ x) _) = collectSources x
-    collectSources _ = Set.empty
+  stepBM :: Monad m => (a -> m b) -> SExpr a -> m (SExpr b)
+  stepBM _ UniS = return $ UniS
+  stepBM f (VarS x) = return $ VarS x
+  stepBM f (ListS xs) = ListS <$> mapM (stepAM f) xs
+  stepBM f (TupleS xs) = TupleS <$> mapM (stepAM f) xs
+  stepBM f (LamS vs x) = LamS vs <$> stepAM f x
+  stepBM f (AppS x xs) = AppS <$> stepAM f x <*> mapM (stepAM f) xs
+  stepBM _ (NumS x) = return $ NumS x
+  stepBM _ (LogS x) = return $ LogS x
+  stepBM _ (StrS x) = return $ StrS x
+  stepBM f (RecS entries) = RecS <$> mapM (\(v, x) -> (,) v <$> stepAM f x) entries
 
 
 -------- Utility and lookup functions ----------------------------------------
-
-say :: MDoc -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
-
--- | Map a language to a grammar
-selectGrammar :: Lang -> MorlocMonad Grammar
-selectGrammar CLang       = return GrammarC.grammar
-selectGrammar CppLang     = return GrammarCpp.grammar
-selectGrammar RLang       = return GrammarR.grammar
-selectGrammar Python3Lang = return GrammarPython3.grammar
-selectGrammar MorlocLang = MM.throwError . OtherError $
-  "No grammar exists for MorlocLang, this may be a compiler bug"
-selectGrammar lang = MM.throwError . OtherError $
-  "No grammar found for " <> MT.show' lang
 
 getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
 getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of 
@@ -689,23 +304,6 @@ getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of
     [x] -> return $ Just x
     xs -> MM.throwError . OtherError $
       "Expected 0 or 1 general types, found " <> MT.show' (length xs)
-
-makeManifoldName :: Meta -> MDoc
-makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
-
-makeArgumentName :: Int -> MDoc
-makeArgumentName i = "x" <> pretty i
-
-getDoc :: SAnno Manifold -> MDoc 
-getDoc (SAnno _ (_, _, x)) = x
-
-typeArgs :: Type -> [Type]
-typeArgs (FunT t1 t2) = t1 : typeArgs t2
-typeArgs t = [t]
-
-exprArgs :: SExpr a -> [Name]
-exprArgs (LamS vs _) = [name | (EV name) <- vs]
-exprArgs _ = []
 
 -- | Find exported expressions. These may be declared or sourced in the current
 -- module or they may be imported from a different module. If they are
