@@ -47,6 +47,7 @@ data SExpr a
   | LogS Bool
   | StrS MT.Text
   | RecS [(EVar, SAnno a)]
+  | ForeignS Int Lang
   deriving (Show, Ord, Eq)
 
 data SerialMap = SerialMap {
@@ -63,6 +64,8 @@ data Meta = Meta {
   , metaModule :: MVar
   , metaId :: Int
   , metaArgs :: [Argument]
+  , metaPacker :: Name
+  , metaPackerPath :: Path
   -- -- there should be morloc source info here, for great debugging
   -- metaMorlocSource :: Path
   -- metaMorlocSourceLine :: Int
@@ -164,8 +167,8 @@ data ForeignCallDoc =
     , fcdMid :: MDoc -- ^ the function integer identifier
     , fcdArgs :: [MDoc] -- ^ CLI arguments passed to foreign function
     , fcdCall :: [MDoc] -- ^ make a list of CLI arguments from first two
-                            -- inputs -- since fcdArgs will likely be
-                            -- variables, they are not included in this call.
+                        -- inputs -- since fcdArgs will likely be
+                        -- variables, they are not included in this call.
     , fcdFile :: MDoc -- ^ for debugging
     }
   deriving (Show)
