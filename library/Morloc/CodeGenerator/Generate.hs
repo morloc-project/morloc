@@ -388,7 +388,7 @@ encode :: (Lang, [SAnno (Type, Meta)]) -> MorlocMonad Script
 encode (lang, xs) = do
   g <- selectGrammar lang
   state <- MM.get
-  code <- mapM (codify g) xs >>= makePoolCode
+  code <- mapM (codify g) xs >>= makePoolCode g
   return $ Script
     { scriptBase = "pool"
     , scriptLang = lang
@@ -396,45 +396,47 @@ encode (lang, xs) = do
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude =
-        map (MS.takeDirectory) (catMaybes [srcPath s | s <- findSources xs])
+        map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources xs]
     }
 
-makePoolCode :: [SAnno (Type, Meta, MDoc)] -> MorlocMonad MDoc
-makePoolCode = undefined
--- makePoolCode xs = do
---   srcs <- encodeSources xs
---   let manifolds = mapM gatherManifolds xs
---       signatures = mapM gatherSignatures xs
---   return . gMain g $ PoolMain
---     { pmSources = srcs
---     , pmSignatures = signatures
---     , pmPoolManifolds = manifolds
---     , pmDispatchManifold = makeDispatchBuilder g xs
---     }
+makePoolCode :: Grammar -> [SAnno (Type, Meta, MDoc)] -> MorlocMonad MDoc
+makePoolCode g xs = do
+  srcs <- encodeSources g xs
+  let manifolds = conmap gatherManifolds xs
+      signatures = conmap (encodeSignatures g) xs
+  gMain g $ PoolMain
+    { pmSources = srcs
+    , pmSignatures = signatures
+    , pmPoolManifolds = manifolds
+    , pmDispatchManifold = makeDispatchBuilder g xs
+    }
 
 gatherManifolds :: SAnno (Type, Meta, MDoc) -> [MDoc]
-gatherManifolds = undefined
--- gatherManifolds = catMaybes . unpackSAnno f where
---   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> MDoc
---   f (AppS _ _) (_, _, x) = Just x
---   f (ForeignS _ _) (_, _, x) = Just x
---   f _ _ = Nothing
+gatherManifolds = catMaybes . unpackSAnno f where
+  f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe MDoc
+  f (AppS _ _) (_, _, x) = Just x
+  f (ForeignS _ _) (_, _, x) = Just x
+  f _ _ = Nothing
 
-encodeSources :: Grammar -> [SAnno (Type, Meta)] -> MorlocMonad [MDoc]
-encodeSources = undefined
--- encodeSources g xs = fmap catMaybes $ mapM encodeSource (findSources xs) where
---   encodeSource :: Source -> MorlocMonad (Maybe MDoc)
---   encodeSource src = do
---     sourcePath <- case srcPath src of
---       (Just path) -> Just <$> (gPrepImport g) path
---       Nothing -> Nothing
---     return $ (gImport g) "" sourcePath
+encodeSources :: Grammar -> [SAnno (Type, Meta, MDoc)] -> MorlocMonad [MDoc]
+encodeSources g xs = fmap catMaybes $ mapM encodeSource (findSources' xs) where
+  encodeSource :: Source -> MorlocMonad (Maybe MDoc)
+  encodeSource src = case srcPath src of
+    (Just path) -> (Just . (gImport g) "") <$> (gPrepImport g) path
+    Nothing -> return $ Nothing
 
 findSources :: [SAnno (Type, Meta)] -> [Source]
 findSources = Set.toList . Set.unions . conmap (unpackSAnno f)
   where
     f :: SExpr (Type, Meta) -> (Type, Meta) -> Set.Set Source
     f _ (_, m) = metaSources m
+    f _ _ = Set.empty
+
+findSources' :: [SAnno (Type, Meta, MDoc)] -> [Source]
+findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
+  where
+    f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Set.Set Source
+    f _ (_, m, _) = metaSources m
     f _ _ = Set.empty
 
 encodeSignatures :: Grammar -> SAnno (Type, Meta, MDoc) -> [MDoc]
@@ -458,7 +460,7 @@ encodeSignatures = undefined
 --     , gfBody = ""
 --     }
 
-makeDispatchBuilder :: Grammar -> [SAnno (Type, Meta, MDoc)] -> [(MDoc, MDoc, MDoc)]
+makeDispatchBuilder :: Grammar -> [SAnno (Type, Meta, MDoc)] -> (MDoc -> MDoc -> MDoc)
 makeDispatchBuilder = undefined
 -- makeDispatchBuilder g xs = makeDispatcher g (mapM (unpackSAnno f) xs) where
 --   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> (Meta, MDoc, Name)
