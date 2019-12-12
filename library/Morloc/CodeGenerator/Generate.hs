@@ -205,6 +205,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = do
       return $ SAnno x [(t, meta) | t <- ts] 
 collect _ _ = MM.throwError . OtherError $ "This is probably a bug" 
 
+
 makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
 makeVarMeta evar@(EV name) mvar ts = do
   i <- MM.getCounter
@@ -219,6 +220,7 @@ makeVarMeta evar@(EV name) mvar ts = do
                   , metaArgs = [] -- cannot be set until after realization
                   }
   return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
+
 
 -- | Select a single concrete language for each sub-expression.
 -- Store the concrete type and the general type (if available).
@@ -331,6 +333,7 @@ realize h x = realize' Nothing [] x where
      ((t, m):_) -> return (t, m, langOf t)
      [] -> selectRealization Nothing xs
 
+
 segment
   :: SAnno (Type, Meta)
   -> MorlocMonad [SAnno (Type, Meta)]
@@ -378,11 +381,13 @@ segment s = (\(r,rs)-> r:rs) <$> segment' Nothing Nothing s where
   makeFun [t] = t
   makeFun (t:ts) = FunT t (makeFun ts)
 
+
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool
   :: [SAnno (Type, Meta)]
   -> MorlocMonad [(Lang, [SAnno (Type, Meta)])]
 pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
+
 
 encode :: (Lang, [SAnno (Type, Meta)]) -> MorlocMonad Script
 encode (lang, xs) = do
@@ -399,6 +404,7 @@ encode (lang, xs) = do
         map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources xs]
     }
 
+
 makePoolCode :: Grammar -> [SAnno (Type, Meta, MDoc)] -> MorlocMonad MDoc
 makePoolCode g xs = do
   srcs <- encodeSources g xs
@@ -411,12 +417,14 @@ makePoolCode g xs = do
     , pmDispatchManifold = makeDispatchBuilder g xs
     }
 
+
 gatherManifolds :: SAnno (Type, Meta, MDoc) -> [MDoc]
 gatherManifolds = catMaybes . unpackSAnno f where
   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe MDoc
   f (AppS _ _) (_, _, x) = Just x
   f (ForeignS _ _) (_, _, x) = Just x
   f _ _ = Nothing
+
 
 encodeSources :: Grammar -> [SAnno (Type, Meta, MDoc)] -> MorlocMonad [MDoc]
 encodeSources g xs = fmap catMaybes $ mapM encodeSource (findSources' xs) where
@@ -425,12 +433,14 @@ encodeSources g xs = fmap catMaybes $ mapM encodeSource (findSources' xs) where
     (Just path) -> (Just . (gImport g) "") <$> (gPrepImport g) path
     Nothing -> return $ Nothing
 
+
 findSources :: [SAnno (Type, Meta)] -> [Source]
 findSources = Set.toList . Set.unions . conmap (unpackSAnno f)
   where
     f :: SExpr (Type, Meta) -> (Type, Meta) -> Set.Set Source
     f _ (_, m) = metaSources m
     f _ _ = Set.empty
+
 
 findSources' :: [SAnno (Type, Meta, MDoc)] -> [Source]
 findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
@@ -439,61 +449,54 @@ findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
     f _ (_, m, _) = metaSources m
     f _ _ = Set.empty
 
-encodeSignatures :: Grammar -> SAnno (Type, Meta, MDoc) -> [MDoc]
-encodeSignatures = undefined
--- encodeSignatures g = map (makeSignature g) . unpackSAnno f where
---   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> (Meta, MDoc)
---   f (AppS _ _) (_, m, x) = Just (m, x)
---   f (ForeignS _ _) (_, m, x) = Just (m, x)
---   f _ _ = Nothing
---
---   -- | Create a signature/prototype. Not all languages need this. C and C++ need
---   -- prototype definitions, but R and Python do not. Languages that do not
---   -- require signatures may simply write the type information as comments at the
---   -- beginning of the source file.
---   makeSignature :: Grammar -> (Meta, Type) -> MDoc
---   makeSignature g (m, t) = (gSignature g) $ GeneralFunction
---     { gfComments = ""
---     , gfReturnType = Just . gShowType g . last . typeArgs $ t
---     , gfName = makeManifoldName m
---     , gfArgs = map (prepArg g) (metaArgs m)
---     , gfBody = ""
---     }
 
-makeDispatchBuilder :: Grammar -> [SAnno (Type, Meta, MDoc)] -> (MDoc -> MDoc -> MDoc)
-makeDispatchBuilder = undefined
--- makeDispatchBuilder g xs = makeDispatcher g (mapM (unpackSAnno f) xs) where
---   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> (Meta, MDoc, Name)
---   f (AppS _ _) (_, m, x) = Just (m, x, metaPacker m)
---   f _ _ = Nothing
+-- | Create a signature/prototype. Not all languages need this. C and C++ need
+-- prototype definitions, but R and Python do not. Languages that do not
+-- require signatures may simply write the type information as comments at the
+-- beginning of the source file.
+encodeSignatures :: Grammar -> SAnno (Type, Meta, MDoc) -> [MDoc]
+encodeSignatures g = map (makeSignature g) . catMaybes . unpackSAnno f where
+  f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe (Meta, Type)
+  f (AppS _ _) (t, m, _) = Just (m, t)
+  f (ForeignS _ _) (t, m, _) = Just (m, t)
+  f _ _ = Nothing
+
+  makeSignature :: Grammar -> (Meta, Type) -> MDoc
+  makeSignature g (m, t) = (gSignature g) $ GeneralFunction
+    { gfComments = ""
+    , gfReturnType = Just . gShowType g . last . typeArgs $ t
+    , gfName = makeManifoldName m
+    , gfArgs = map (makeArg g) (metaArgs m)
+    , gfBody = ""
+    }
+
+  makeArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
+  makeArg g arg =
+    if argIsPacked arg
+      then (Just ((gShowType g) (gSerialType g)), pretty (argName arg))
+      else (Nothing, pretty (argName arg))
+
 
 -- | Make a function for generating the code to dispatch from the pool main
 -- function to manifold functions. The two arguments of the returned function
 -- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
 -- results are stored.
-makeDispatcher
-  :: Grammar
-  -> [( Type
-      , Meta
-      , Name -- the name of the function that packs the return data
-      )]
-  -> (  MDoc -- manifold integer id
-     -> MDoc -- variable name that stores the result
-     -> MDoc
-     )
-makeDispatcher = undefined
--- makeDispatcher g xs =
---   (gSwitch g) (\(_,m,_) -> pretty (metaId m))
---               (\(t,m,p) -> mainCall g t m p)
---               xs
---   where
---     mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
---     mainCall g t m packer = (gCall g)
---       (pretty packer)
---       [(gCall g)
---           (makeManifoldName m)
---           (take (length (metaArgs m))
---           (gCmdArgs g))]
+makeDispatchBuilder :: Grammar -> [SAnno (Type, Meta, MDoc)] -> (MDoc -> MDoc -> MDoc)
+makeDispatchBuilder g xs =
+  (gSwitch g)
+    (\(_,m,_) -> pretty (metaId m))
+    (\(t,m,p) -> mainCall g t m p)
+    switchList
+  where
+    switchList = [(t, m, metaPacker m) | (SAnno (AppS _ _) (t, m, _)) <- xs]
+
+    mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
+    mainCall g t m packer = (gCall g)
+      (pretty packer)
+      [(gCall g)
+          (makeManifoldName m)
+          (take (length (metaArgs m))
+          (gCmdArgs g))]
 
 codify
   :: Grammar
@@ -553,12 +556,6 @@ codify = undefined
 --         , fcdFile = Lang.makeSourceName (langOf' t) "pool"
 --         }
 --   return (t, m, mdoc)
---   where
---     prepArg :: Argument -> MDoc
---     prepArg arg =
---       if isPacked arg
---         then argName
---         else (gCall g) (argUnpacker arg) [argName]
 --
 -- -- | AppS (SAnno a) [SAnno a]
 -- codify g (SAnno (AppS e args) (t, m)) = do
@@ -659,6 +656,12 @@ typeArgs t = [t]
 exprArgs :: SExpr a -> [Name]
 exprArgs (LamS vs _) = [name | (EV name) <- vs]
 exprArgs _ = []
+
+makeManifoldName :: Meta -> MDoc
+makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
+
+makeArgumentName :: Int -> MDoc
+makeArgumentName i = "x" <> pretty i
 
 sannoType :: SAnno (Type, Meta) -> Type
 sannoType (SAnno _ (t, _)) = t
