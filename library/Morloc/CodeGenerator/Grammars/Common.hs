@@ -64,8 +64,8 @@ data Meta = Meta {
   , metaModule :: MVar
   , metaId :: Int
   , metaArgs :: [Argument]
-  , metaPacker :: Name
-  , metaPackerPath :: Path
+  , metaPacker :: Maybe Name
+  , metaPackerPath :: Maybe Path
   -- -- there should be morloc source info here, for great debugging
   -- metaMorlocSource :: Path
   -- metaMorlocSourceLine :: Int
