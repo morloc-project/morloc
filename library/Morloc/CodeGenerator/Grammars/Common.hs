@@ -34,6 +34,18 @@ import qualified Morloc.System as MS
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 
+-- -- f: a collection - before realization this will probably be Set
+-- --                 - after realization it will be (Either String), storing
+-- --                   an error message on failure?
+-- -- a: an annotation for the specific child tree
+-- -- b: an annotation for the group of child trees (what they have in common)
+-- data SAnno f a b = SAnno (f (SExpr f a b, a)) b
+--
+-- data Mono a = Mono a deriving (Show, Ord, Eq)
+-- instance Functor (Mono a) where
+--   fmap f (Mono x) = Mono (f x)
+
+
 data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
 
 data SExpr a

@@ -70,10 +70,15 @@ generate ms = do
 roots :: Map.Map MVar Module -> MorlocMonad [(Expr, EVar, MVar)]
 roots ms
   = return
+  . map (\(e, v, m) -> (e, v, moduleName m))
   . catMaybes
   . Set.toList
   . mapSum
-  . Map.map (\m -> Set.map (findExpr ms m) (moduleExports m))
+  . Map.map (\m -> Set.map (listToMaybe . findExprs ms m) (moduleExports m))
+                    --      ^---- wrong, I should do one of the following
+                    --            1) select the most optimal option
+                    --            2) die screaming that may be only one
+                    -- For roots, #2 may be acceptable
   . Map.filter isRoot
   $ ms where
     -- is this module a "root" module?
@@ -82,6 +87,7 @@ roots ms
     isRoot m = not $ Set.member (moduleName m) allImports
 
     -- set of all modules that are imported
+    allImports :: Set.Set MVar
     allImports = mapSumWith (valset . moduleImportMap) ms
 
 -- find all serialization functions in a list of modules
@@ -163,6 +169,7 @@ collect ms (e@(AnnE _ ts), ev, mv) = do
       -> [Type]
       -> MorlocMonad (SAnno ([(Type, Meta)]))
     evaluateVariable args mvar evar@(EV name) ts = do
+      let expr = VarS evar
       case Map.lookup mvar ms of
         Nothing -> MM.throwError . OtherError $ "Could not find module"
         (Just m) ->
@@ -170,20 +177,21 @@ collect ms (e@(AnnE _ ts), ev, mv) = do
             then
               -- variable is bound under a lambda, so we leave it as a variable
               simpleCollect (VarS evar) (Just name) ts mvar
-            else
+            else do
               -- Term is defined outside, so we replace it with the exterior
-              -- definition This leads to massive code duplication, but the code is
+              -- definition. This leads to massive code duplication, but the code is
               -- not identical. Each instance of the term may be in a different
               -- language or have different settings (e.g. different memoization
               -- handling).
-              case findExpr ms m evar of
+              case listToMaybe (findExprs ms m evar) of -- FIXME: DO NOT COLLAPSE
                 -- if the expression is defined somewhere, unroll it
-                (Just (expr', evar', mvar')) ->
-                  if elem evar' (map fst (Map.keys (moduleSourceMap m)))
-                    then simpleCollect (VarS evar') (Just name) ts mvar'
-                    else do
-                      (SAnno sexpr _) <- collect' args (expr', mvar')
-                      SAnno sexpr <$> makeVarMeta evar' mvar' ts
+                (Just (expr', evar', mod')) ->
+                  let mvar' = moduleName mod' in
+                    if elem evar' (map fst (Map.keys (moduleSourceMap m)))
+                      then simpleCollect (VarS evar') (Just name) ts mvar'
+                      else do
+                        (SAnno sexpr _) <- collect' args (expr', mvar')
+                        SAnno sexpr <$> makeVarMeta evar' mvar' ts
                 Nothing -> simpleCollect (VarS evar) (Just name) ts mvar
 
     simpleCollect
@@ -208,7 +216,6 @@ collect ms (e@(AnnE _ ts), ev, mv) = do
                       }
       return $ SAnno x [(t, meta) | t <- ts] 
 collect _ _ = MM.throwError . OtherError $ "This is probably a bug" 
-
 
 makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
 makeVarMeta evar@(EV name) mvar ts = do
@@ -433,17 +440,22 @@ makePoolCode g xs = do
 gatherManifolds :: SAnno (Type, Meta, MDoc) -> [MDoc]
 gatherManifolds = catMaybes . unpackSAnno f where
   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe MDoc
-  f (AppS _ _) (_, _, x) = Just x
+  f (AppS _ _) (_, _, d) = Just d
   f (ForeignS _ _) (_, _, x) = Just x
   f _ _ = Nothing
 
 
 encodeSources :: Grammar -> [SAnno (Type, Meta, MDoc)] -> MorlocMonad [MDoc]
-encodeSources g xs = fmap catMaybes $ mapM encodeSource (findSources' xs) where
-  encodeSource :: Source -> MorlocMonad (Maybe MDoc)
-  encodeSource src = case srcPath src of
-    (Just path) -> (Just . (gImport g) "") <$> (gPrepImport g) path
-    Nothing -> return $ Nothing
+encodeSources g xs = do
+  let srcs = findSources' xs
+  say $ "sources:"
+  say $ viaShow srcs
+  fmap catMaybes $ mapM encodeSource srcs
+  where
+    encodeSource :: Source -> MorlocMonad (Maybe MDoc)
+    encodeSource src = case srcPath src of
+      (Just path) -> (Just . (gImport g) "") <$> (gPrepImport g) path
+      Nothing -> return $ Nothing
 
 
 findSources :: [SAnno (Type, Meta)] -> [Source]
@@ -459,7 +471,6 @@ findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
   where
     f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Set.Set Source
     f _ (_, m, _) = metaSources m
-    f _ _ = Set.empty
 
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
@@ -707,41 +718,40 @@ unpackSAnno f (SAnno e m) = [f e m]
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
+  
+say :: MDoc -> MorlocMonad ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 -- | Find exported expressions. These may be declared or sourced in the current
 -- module or they may be imported from a different module. If they are
 -- imported, ascend through modules to the original declaration, returning the
 -- module where they are defined.
-findExpr :: Map.Map MVar Module -> Module -> EVar -> Maybe (Expr, EVar, MVar)
-findExpr ms m v
+findExprs :: Map.Map MVar Module -> Module -> EVar -> [(Expr, EVar, Module)]
+findExprs ms m v
   | Set.member v (moduleExports m)
       =   evarDeclared
-      <|> evarSourced
-      <|> evarImported
-  | otherwise = Nothing
+      ++ evarSourced
+      ++ evarImported
+  | otherwise = []
   where
-    evarDeclared :: Maybe (Expr, EVar, MVar) 
-    evarDeclared =   Map.lookup v (moduleDeclarationMap m)
-                 |>> (\e -> (e, v, moduleName m))
+    evarDeclared :: [(Expr, EVar, Module)]
+    evarDeclared = case Map.lookup v (moduleDeclarationMap m) of
+      (Just e) -> [(e, v, m)]
+      Nothing -> []
 
-    evarSourced :: Maybe (Expr, EVar, MVar)
-    evarSourced = listToMaybe
-                     . map (\((v', _), _) -> (typeEVar v', v', moduleName m))
-                     . Map.toList
-                     . Map.filterWithKey (\(v',_) _ -> v' == v)
-                     $ moduleSourceMap m
+    evarSourced :: [(Expr, EVar, Module)]
+    evarSourced = map (\((v', _), _) -> (typeEVar v', v', m))
+                . Map.toList
+                . Map.filterWithKey (\(v',_) _ -> v' == v)
+                $ moduleSourceMap m
+
+    evarImported :: [(Expr, EVar, Module)]
+    evarImported =
+      concat [findExprs ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
 
     typeEVar :: EVar -> Expr  
     typeEVar v' = case Map.lookup v' (moduleTypeMap m) of
       (Just (TypeSet t ts)) -> AnnE (VarE v') (map etype (maybe ts (\t' -> t':ts) t))
-
-    evarImported :: Maybe (Expr, EVar, MVar)
-    evarImported =
-      case
-        catMaybes [findExpr ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
-      of
-        [] -> Nothing   
-        (x:_) -> Just x
 
     listMVars :: Module -> [MVar]
     listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m) 
