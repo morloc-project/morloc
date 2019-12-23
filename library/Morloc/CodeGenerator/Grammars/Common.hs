@@ -10,7 +10,9 @@ module Morloc.CodeGenerator.Grammars.Common
   ( SAnno(..)
   , SExpr(..)
   , SerialMap(..)
-  , Meta(..)
+  , GMeta(..)
+  , CMeta(..)
+  , Mono(..)
   , Argument(..)
   , Grammar(..)
   , TryDoc(..)
@@ -34,55 +36,90 @@ import qualified Morloc.System as MS
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
 
--- -- f: a collection - before realization this will probably be Set
--- --                 - after realization it will be (Either String), storing
--- --                   an error message on failure?
--- -- a: an annotation for the specific child tree
--- -- b: an annotation for the group of child trees (what they have in common)
--- data SAnno f a b = SAnno (f (SExpr f a b, a)) b
---
--- data Mono a = Mono a deriving (Show, Ord, Eq)
--- instance Functor (Mono a) where
---   fmap f (Mono x) = Mono (f x)
+-- g: an annotation for the group of child trees (what they have in common)
+-- f: a collection - before realization this will probably be Set
+--                 - after realization it will be Mono
+-- c: an annotation for the specific child tree
+data SAnno g f c
+  = SAnno (f (SExpr g f c, c)) g
 
+data Mono a
+  = Mono a
 
-data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
+instance Functor Mono where
+  fmap f (Mono x) = Mono (f x)
 
-data SExpr a
+data SExpr g f c
   = UniS
   | VarS EVar
-  | ListS [SAnno a]
-  | TupleS [SAnno a]
-  | LamS [EVar] (SAnno a)
-  | AppS (SAnno a) [SAnno a]
+  | ListS [SAnno g f c]
+  | TupleS [SAnno g f c]
+  | LamS [EVar] (SAnno g f c)
+  | AppS (SAnno g f c) [SAnno g f c]
   | NumS Scientific
   | LogS Bool
   | StrS MT.Text
-  | RecS [(EVar, SAnno a)]
+  | RecS [(EVar, SAnno g f c)]
   | ForeignS Int Lang
-  deriving (Show, Ord, Eq)
+
+-- | Description of the general manifold
+data GMeta = GMeta {
+    metaGeneralType :: Maybe Type
+  , metaName :: Maybe Name
+  , metaProperties :: Set.Set Property
+  , metaConstraints :: Set.Set Constraint
+  , metaModule :: MVar
+  , metaId :: Int
+}
+
+-- | Description of the language-specific manifold 
+data CMeta = CMeta {
+    metaLang :: Lang
+  , metaType :: Type
+  , metaSource :: Maybe Source
+  , metaArgs :: [Argument]
+  , metaPacker :: Maybe Name -- ^ name of function for packing output of this function
+  , metaPackerPath :: Maybe Path  -- ^ path to the packer function
+}
+
+-- data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
+--
+-- data SExpr a
+--   = UniS
+--   | VarS EVar
+--   | ListS [SAnno a]
+--   | TupleS [SAnno a]
+--   | LamS [EVar] (SAnno a)
+--   | AppS (SAnno a) [SAnno a]
+--   | NumS Scientific
+--   | LogS Bool
+--   | StrS MT.Text
+--   | RecS [(EVar, SAnno a)]
+--   | ForeignS Int Lang
+--   deriving (Show, Ord, Eq)
+--
+-- -- data Meta = Meta {
+--     metaGeneralType :: Maybe Type
+--   , metaName :: Maybe Name
+--   , metaProperties :: Set.Set Property
+--   , metaConstraints :: Set.Set Constraint
+--   , metaSources :: Set.Set Source
+--   , metaModule :: MVar
+--   , metaId :: Int
+--   , metaArgs :: [Argument]
+--   , metaPacker :: Maybe Name
+--   , metaPackerPath :: Maybe Path
+--   -- -- there should be morloc source info here, for great debugging
+--   -- metaMorlocSource :: Path
+--   -- metaMorlocSourceLine :: Int
+--   -- metaMorlocSourceColumn :: Int
+-- }
+
 
 data SerialMap = SerialMap {
     packers :: Map.Map Type (Name, Path)
   , unpackers :: Map.Map Type (Name, Path)
 } deriving (Show, Ord, Eq)
-
-data Meta = Meta {
-    metaGeneralType :: Maybe Type
-  , metaName :: Maybe Name
-  , metaProperties :: Set.Set Property
-  , metaConstraints :: Set.Set Constraint
-  , metaSources :: Set.Set Source
-  , metaModule :: MVar
-  , metaId :: Int
-  , metaArgs :: [Argument]
-  , metaPacker :: Maybe Name
-  , metaPackerPath :: Maybe Path
-  -- -- there should be morloc source info here, for great debugging
-  -- metaMorlocSource :: Path
-  -- metaMorlocSourceLine :: Int
-  -- metaMorlocSourceColumn :: Int
-}
 
 data Argument = Argument {
     argName :: Name
@@ -124,9 +161,9 @@ data Grammar =
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
     , gSwitch
-        :: ((Type, Meta, Name) -> MDoc)
-        -> ((Type, Meta, Name) -> MDoc)
-        -> [(Type, Meta, Name)] -> MDoc
+        :: ((GMeta, CMeta) -> MDoc)
+        -> ((GMeta, CMeta) -> MDoc)
+        -> [(GMeta, CMeta)] -> MDoc
         -> MDoc
         -> MDoc
     , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
