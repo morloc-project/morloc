@@ -12,7 +12,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , SerialMap(..)
   , GMeta(..)
   , CMeta(..)
-  , Mono(..)
+  , One(..)
+  , Many(..)
   , Argument(..)
   , Grammar(..)
   , TryDoc(..)
@@ -38,16 +39,16 @@ import qualified Data.Set as Set
 
 -- g: an annotation for the group of child trees (what they have in common)
 -- f: a collection - before realization this will probably be Set
---                 - after realization it will be Mono
+--                 - after realization it will be One
 -- c: an annotation for the specific child tree
 data SAnno g f c
   = SAnno (f (SExpr g f c, c)) g
 
-data Mono a
-  = Mono a
+data One a = One a
+data Many a = Many [a]
 
-instance Functor Mono where
-  fmap f (Mono x) = Mono (f x)
+instance Functor One where
+  fmap f (One x) = One (f x)
 
 data SExpr g f c
   = UniS
@@ -64,62 +65,27 @@ data SExpr g f c
 
 -- | Description of the general manifold
 data GMeta = GMeta {
-    metaGeneralType :: Maybe Type
+    metaId :: Int
+  , metaGeneralType :: Maybe Type
   , metaName :: Maybe Name
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
-  , metaModule :: MVar
-  , metaId :: Int
 }
 
--- | Description of the language-specific manifold 
+-- | Intrinsic description of a language-specific manifold 
 data CMeta = CMeta {
     metaLang :: Lang
   , metaType :: Type
   , metaSource :: Maybe Source
-  , metaArgs :: [Argument]
+  , metaModule :: MVar
+}
+
+-- | Relational description of a language-specific manifold
+data IMeta = IMeta {
+    metaArgs :: [Argument]
   , metaPacker :: Maybe Name -- ^ name of function for packing output of this function
   , metaPackerPath :: Maybe Path  -- ^ path to the packer function
 }
-
--- data SAnno a = SAnno (SExpr a) a deriving (Show, Ord, Eq)
---
--- data SExpr a
---   = UniS
---   | VarS EVar
---   | ListS [SAnno a]
---   | TupleS [SAnno a]
---   | LamS [EVar] (SAnno a)
---   | AppS (SAnno a) [SAnno a]
---   | NumS Scientific
---   | LogS Bool
---   | StrS MT.Text
---   | RecS [(EVar, SAnno a)]
---   | ForeignS Int Lang
---   deriving (Show, Ord, Eq)
---
--- -- data Meta = Meta {
---     metaGeneralType :: Maybe Type
---   , metaName :: Maybe Name
---   , metaProperties :: Set.Set Property
---   , metaConstraints :: Set.Set Constraint
---   , metaSources :: Set.Set Source
---   , metaModule :: MVar
---   , metaId :: Int
---   , metaArgs :: [Argument]
---   , metaPacker :: Maybe Name
---   , metaPackerPath :: Maybe Path
---   -- -- there should be morloc source info here, for great debugging
---   -- metaMorlocSource :: Path
---   -- metaMorlocSourceLine :: Int
---   -- metaMorlocSourceColumn :: Int
--- }
-
-
-data SerialMap = SerialMap {
-    packers :: Map.Map Type (Name, Path)
-  , unpackers :: Map.Map Type (Name, Path)
-} deriving (Show, Ord, Eq)
 
 data Argument = Argument {
     argName :: Name
@@ -129,6 +95,11 @@ data Argument = Argument {
   , argUnpacker :: Name
   , argUnpackerPath :: Path
   , argIsPacked :: Bool
+} deriving (Show, Ord, Eq)
+
+data SerialMap = SerialMap {
+    packers :: Map.Map Type (Name, Path)
+  , unpackers :: Map.Map Type (Name, Path)
 } deriving (Show, Ord, Eq)
 
 data Grammar =

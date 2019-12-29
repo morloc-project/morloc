@@ -17,10 +17,16 @@ module Morloc.Internal
   , module Control.Monad
   , module Control.Monad.IO.Class
   , module Data.Monoid
+  -- ** selected functions from Data.Tuple.Extra
+  , uncurry3
+  , curry3
+  , third
   -- ** operators
   , (|>>) -- piped fmap
   , (</>) -- Filesystem utility operators from System.FilePath
   , (<|>) -- alternative operator
+  , (&&&) -- (a -> a') -> (b -> b') -> (a, b) -> (a', b')
+  , (***) -- (a -> b) -> (a -> c) -> a -> (b, c) 
   -- ** map and set helper functions
   , keyset
   , valset
@@ -37,11 +43,21 @@ import Control.Monad.IO.Class
 import Control.Applicative ((<|>))
 import Data.Either
 import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
+import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
 import System.FilePath
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+
+uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d 
+uncurry3 f (x, y, z) = f x y z
+
+curry3 :: ((a, b, c) -> d) -> a -> b -> c -> d
+curry3 f = \x y z -> f (x, y, z)
+
+third :: (a, b, c) -> c
+third (_, _, x) = x
 
 keyset :: Ord k => Map.Map k b -> Set.Set k
 keyset = Set.fromList . Map.keys

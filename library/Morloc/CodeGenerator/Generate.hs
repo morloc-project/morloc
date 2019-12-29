@@ -32,6 +32,19 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
+-- | XXXXXXXXXXXXXX-DOUBLE CHECK Store all necessary information about a particular implementation of a
+-- term.  A term may either be declared or sourced. If declared, the left and
+-- right hand sides of the declaration are stored. If sourced, the Source
+-- object is stored. In either case, the module where the term is defined is
+-- also stored.
+--
+-- XXXXXXXXXXXXXX-DOUBLE CHECK Each element of the list consists of an EVar that is the term exported from
+-- the main module. This term may be a named composition in the main module, a
+-- sourced function/value from language-specific code, or an imported term from
+-- another module. A term may be defined in multiple modules or sourced from
+-- multiple implementations. Thus each term exported from main is associated
+-- with a list of possible implementations/realizations.
+data TermOrigin = Declared Module EVar Expr | Sourced Module Source
 
 -- | Translate typechecker-created modules into compilable code
 generate :: [Module] -> MorlocMonad (Script, [Script])
@@ -54,7 +67,7 @@ generate ms = do
   -- Each nexus subcommand calls one function from one of the language-specific pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate [ (metaType c, poolId m x, metaName m)
-                          | SAnno (Mono (x, c)) m <- ast
+                          | SAnno (One (x, c)) m <- ast
                           ]
 
   -- for each language, collect all functions into one "pool"
@@ -65,38 +78,23 @@ generate ms = do
   where
     -- map from nexus id to pool id
     -- these differ when a declared variable is exported
-    poolId :: GMeta -> SExpr GMeta Mono CMeta -> Int
+    poolId :: GMeta -> SExpr GMeta One CMeta -> Int
     poolId _ (LamS _ (SAnno _ meta)) = metaId meta
     poolId meta _ = metaId meta
 
--- | Find the set of expressions that are exposed to the user.
--- NOTE: in the return type the two EVar may be different. The first is the
--- variable name that was exported from the main module. The second is the name
--- of the variable in the module where the variable was first defined or
--- sourced. These may differ if any aliases were used along the import path.
-roots :: Map.Map MVar Module -> MorlocMonad [(EVar, [(Expr, EVar, MVar)])]
-roots = undefined
--- roots ms
---   = return
---   . map (\(e, v, m) -> (e, v, moduleName m))
---   . catMaybes
---   . Set.toList
---   . mapSum
---   . Map.map (\m -> Set.map (listToMaybe . findExprs ms m) (moduleExports m))
---                     --      ^---- wrong, I should do one of the following
---                     --            1) select the most optimal option
---                     --            2) die screaming that may be only one
---                     -- For roots, #2 may be acceptable
---   . Map.filter isRoot
---   $ ms where
---     -- is this module a "root" module?
---     -- a root module is a module that is not imported from any other module
---     isRoot :: Module -> Bool
---     isRoot m = not $ Set.member (moduleName m) allImports
---
---     -- set of all modules that are imported
---     allImports :: Set.Set MVar
---     allImports = mapSumWith (valset . moduleImportMap) ms
+-- | Find the expressions that are exposed to the user.
+roots :: Map.Map MVar Module -> MorlocMonad [(EVar, [TermOrigin])]
+roots ms = do
+  case roots of
+    [m] ->
+      let vs = Set.toList (moduleExports m) in
+        return $ zip vs (map (findTerm ms m) vs) 
+    [] -> MM.throwError . OtherError $ "Circular dependencies between modules"
+    _ -> MM.throwError . OtherError $ "Multiple root modules"
+  where
+    isRoot m = not $ Set.member (moduleName m) allImports
+    allImports = mapSumWith (valset . moduleImportMap) ms
+    roots = filter isRoot (Map.elems ms)
 
 -- find all serialization functions in a list of modules
 findSerializers :: [Module] -> MorlocMonad SerialMap
@@ -133,126 +131,103 @@ findSerializers ms = return $ SerialMap
   getType _ t = t
 
 
--- | Translate a module into a tree
+-- | Translate a term to a tree
 collect
   :: Map.Map MVar Module
-  -> (EVar, [(Expr, EVar, MVar)])
-  -> MorlocMonad (SAnno GMeta Set.Set [CMeta])
-collect = undefined
--- collect ms (e@(AnnE _ ts), ev, mv) = do
---   (SAnno sexpr _) <- collect' Set.empty (e, mv)
---   SAnno sexpr <$> makeVarMeta ev mv ts
---   where
---     collect' :: Set.Set EVar -> (Expr, MVar) -> MorlocMonad (SAnno [(Type, Meta)])
---     collect' _ (AnnE UniE ts, m) = simpleCollect UniS Nothing ts m
---     collect' args (AnnE (VarE v) ts, m) = evaluateVariable args m v ts
---     collect' args (AnnE (ListE es) ts, m) = do
---       es' <- mapM (collect' args) [(e,m) | e <- es]
---       simpleCollect (ListS es') Nothing ts m
---     collect' args (AnnE (TupleE es) ts, m) = do
---       es' <- mapM (collect' args) [(e,m) | e <- es]
---       simpleCollect (TupleS es') Nothing ts m
---     collect' args (AnnE (RecE es) ts, m) = do
---       es' <- mapM (\x -> (collect' args) (x, m)) (map snd es)
---       simpleCollect (RecS (zip (map fst es) es')) Nothing ts m
---     collect' args (AnnE e1@(LamE _ _) ts, m) = do
---       let (vs, e) = unrollLambda e1
---       e' <- collect' (Set.union args (Set.fromList vs)) (e, m)
---       simpleCollect (LamS vs e') Nothing ts m
---     collect' args (AnnE (AppE e1 e2) ts, m) = do
---       e1' <- collect' args (e1, m)
---       e2' <- collect' args (e2, m)
---       case e1' of
---         (SAnno (AppS f es) t) -> return $ SAnno (AppS f (es ++ [e2'])) t
---         f@(SAnno _ t) -> return $ SAnno (AppS f [e2']) t
---     collect' _ (AnnE (LogE e) ts, m) = simpleCollect (LogS e) Nothing ts m
---     collect' _ (AnnE (NumE e) ts, m) = simpleCollect (NumS e) Nothing ts m
---     collect' _ (AnnE (StrE e) ts, m) = simpleCollect (StrS e) Nothing ts m
---     collect _ _ _ = MM.throwError . OtherError $ "Unexpected type in collect"
---
---     lambdaArgs :: Expr -> [EVar]
---     lambdaArgs (LamE v e2) = v : lambdaArgs e2
---     lambdaArgs _ = []
---
---     -- | Evaluate a variable. If it was imported, lookup of the module it came from.
---     evaluateVariable
---       :: Set.Set EVar
---       -> MVar
---       -> EVar
---       -> [Type]
---       -> MorlocMonad (SAnno ([(Type, Meta)]))
---     evaluateVariable args mvar evar@(EV name) ts = do
---       let expr = VarS evar
---       case Map.lookup mvar ms of
---         Nothing -> MM.throwError . OtherError $ "Could not find module"
---         (Just m) ->
---           if Set.member evar args
---             then
---               -- variable is bound under a lambda, so we leave it as a variable
---               simpleCollect (VarS evar) (Just name) ts mvar
---             else do
---               -- Term is defined outside, so we replace it with the exterior
---               -- definition. This leads to massive code duplication, but the code is
---               -- not identical. Each instance of the term may be in a different
---               -- language or have different settings (e.g. different memoization
---               -- handling).
---               case listToMaybe (findExprs ms m evar) of -- FIXME: DO NOT COLLAPSE
---                 -- if the expression is defined somewhere, unroll it
---                 (Just (expr', evar', mod')) ->
---                   let mvar' = moduleName mod' in
---                     if elem evar' (map fst (Map.keys (moduleSourceMap m)))
---                       then simpleCollect (VarS evar') (Just name) ts mvar'
---                       else do
---                         (SAnno sexpr _) <- collect' args (expr', mvar')
---                         SAnno sexpr <$> makeVarMeta evar' mvar' ts
---                 Nothing -> simpleCollect (VarS evar) (Just name) ts mvar
---
---     simpleCollect
---       :: SExpr [(Type, Meta)]
---       -> Maybe Name
---       -> [Type]
---       -> MVar
---       -> MorlocMonad (SAnno [(Type, Meta)])
---     simpleCollect x name ts v = do
---       i <- MM.getCounter
---       generalType <- getGeneralType ts
---       let meta = Meta { metaGeneralType = generalType
---                       , metaName = name
---                       , metaProperties = Set.empty
---                       , metaConstraints = Set.empty
---                       , metaSources = Set.empty
---                       , metaModule = v
---                       , metaId = i
---                       , metaArgs = [] -- cannot be set until after realization
---                       , metaPacker = Nothing
---                       , metaPackerPath = Nothing
---                       }
---       return $ SAnno x [(t, meta) | t <- ts]
--- collect _ _ = MM.throwError . OtherError $ "This is probably a bug"
+  -> (EVar, [TermOrigin])
+  -> MorlocMonad (SAnno GMeta Many [CMeta])
+collect ms (evar', xs@(x:_)) = do
+  gmeta <- makeGMeta (Just evar') (getTermModule x)
+  trees <- mapM collectTerm xs
+  return $ SAnno (Many trees) gmeta
+  where
 
--- makeVarMeta :: EVar -> MVar -> [Type] -> MorlocMonad [(Type, Meta)]
--- makeVarMeta evar@(EV name) mvar ts = do
---   i <- MM.getCounter
---   generalType <- getGeneralType ts
---   let meta = Meta { metaGeneralType = generalType
---                   , metaName = Just name
---                   , metaProperties = Set.empty
---                   , metaConstraints = Set.empty
---                   , metaSources = Set.empty
---                   , metaModule = mvar
---                   , metaId = i
---                   , metaArgs = [] -- cannot be set until after realization
---                   }
---   return $ zip [t | t <- ts, langOf' t /= MorlocLang] (repeat meta)
+    -- Notice that `args` is NOT an intput to collectTerm. Morloc uses lexical
+    -- scoping, and the input to collectTerm is the origin of a term, so the
+    -- definition of the term is outside the scope of the parent expression.
+    collectTerm
+      :: TermOrigin
+      -> MorlocMonad (SExpr GMeta Many [CMeta], [CMeta])
+    collectTerm (Declared m _ (AnnE x ts)) = do
+      xs <- collectExpr Set.empty m ts x
+      case xs of
+        [x] -> return x
+        _ -> MM.throwError . OtherError $ "Expected exactly one topology for a declared term"
+    collectTerm term@(Sourced m src) = do
+      ts <- getTermTypes term 
+      let cmetas = map (makeCMeta (Just src) m) ts
+      return (VarS (srcAlias src), cmetas)
 
+    collectAnno
+      :: Set.Set EVar
+      -> Expr
+      -> Module
+      -> MorlocMonad (SAnno GMeta Many [CMeta])
+    collectAnno args (AnnE e ts) m = do
+      gmeta <- makeGMeta Nothing m
+      trees <- collectExpr args m ts e
+      return $ SAnno (Many trees) gmeta
+    collectAnno _ _ _ = error "impossible bug - unannotated expression" 
+
+    collectExpr
+      :: Set.Set EVar
+      -> Module
+      -> [Type]
+      -> Expr
+      -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
+    collectExpr args m ts (UniE) = simpleCollect UniS m ts
+    collectExpr args m ts (NumE x) = simpleCollect (NumS x) m ts
+    collectExpr args m ts (LogE x) = simpleCollect (LogS x) m ts
+    collectExpr args m ts (StrE x) = simpleCollect (StrS x) m ts
+    collectExpr args m ts (VarE v)
+      | Set.member v args = return [(VarS v, cmetas)]
+      | otherwise = mapM collectTerm (findTerm ms m v) -- FIXME: WHENCE ts?
+      where
+        cmetas = map (makeCMeta Nothing m) ts
+    collectExpr args m ts (ListE es) = undefined
+    collectExpr args m ts (TupleE es) = undefined
+    collectExpr args m ts (LamE v e) = undefined
+    collectExpr args m ts (AppE e1 e2) = undefined
+    collectExpr args m ts (RecE entries) = undefined
+    collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
+
+    simpleCollect
+      :: (SExpr GMeta Many [CMeta])
+      -> Module
+      -> [Type]
+      -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
+    simpleCollect sexpr m ts = return [(sexpr, map (makeCMeta Nothing m) ts)]
+
+    -- | Find info common across realizations of a given term in a given module
+    makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
+    makeGMeta evar m = do
+      i <- MM.getCounter
+      case evar >>= (flip Map.lookup) (moduleTypeMap m) of
+        (Just (TypeSet (Just e) _)) -> return $ GMeta
+          { metaId = i
+          , metaName = fmap (\(EV x) -> x) evar
+          , metaGeneralType = Just (etype e)
+          , metaProperties = eprop e
+          , metaConstraints = econs e
+          }
+        Nothing -> MM.throwError . OtherError $ "Could not build GMeta"
+    makeGMeta _ _ = MM.throwError . OtherError $ "Cannot make GMeta from nothing"
+
+    makeCMeta :: Maybe Source -> Module -> Type -> CMeta
+    makeCMeta src m t = CMeta {
+          metaLang = langOf' t
+        , metaType = t
+        , metaSource = src
+        , metaModule = moduleName m
+      }
 
 -- | Select a single concrete language for each sub-expression.
 -- Store the concrete type and the general type (if available).
 -- Select serialization functions.
 realize
   :: SerialMap
-  -> SAnno GMeta Set.Set [CMeta]
-  -> MorlocMonad (SAnno GMeta Mono CMeta)
+  -> SAnno GMeta Many [CMeta]
+  -> MorlocMonad (SAnno GMeta One CMeta)
 realize = undefined
 -- realize h x = realize' Nothing [] x where
 --
@@ -370,8 +345,8 @@ selectFunction = undefined
 
 
 segment
-  :: SAnno GMeta Mono CMeta
-  -> MorlocMonad [SAnno GMeta Mono CMeta]
+  :: SAnno GMeta One CMeta
+  -> MorlocMonad [SAnno GMeta One CMeta]
 segment = undefined
 -- segment s = (\(r,rs)-> r:rs) <$> segment' Nothing Nothing s where
 --   segment'
@@ -422,13 +397,13 @@ segment = undefined
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool
-  :: [SAnno GMeta Mono CMeta]
-  -> MorlocMonad [(Lang, [SAnno GMeta Mono CMeta])]
+  :: [SAnno GMeta One CMeta]
+  -> MorlocMonad [(Lang, [SAnno GMeta One CMeta])]
 pool = undefined
 -- pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
 
 
-encode :: (Lang, [SAnno GMeta Mono CMeta]) -> MorlocMonad Script
+encode :: (Lang, [SAnno GMeta One CMeta]) -> MorlocMonad Script
 encode = undefined
 -- encode (lang, xs) = do
 --   g <- selectGrammar lang
@@ -445,7 +420,7 @@ encode = undefined
 --     }
 
 
-makePoolCode :: Grammar -> [SAnno (GMeta, MDoc) Mono CMeta] -> MorlocMonad MDoc
+makePoolCode :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> MorlocMonad MDoc
 makePoolCode = undefined
 -- makePoolCode g xs = do
 --   srcs <- encodeSources g xs
@@ -459,7 +434,7 @@ makePoolCode = undefined
 --     }
 
 
-gatherManifolds :: SAnno (GMeta, MDoc) Mono CMeta -> [MDoc]
+gatherManifolds :: SAnno (GMeta, MDoc) One CMeta -> [MDoc]
 gatherManifolds = undefined
 -- gatherManifolds = catMaybes . unpackSAnno f where
 --   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe MDoc
@@ -468,7 +443,7 @@ gatherManifolds = undefined
 --   f _ _ = Nothing
 
 
-encodeSources :: Grammar -> [SAnno (GMeta, MDoc) Mono CMeta] -> MorlocMonad [MDoc]
+encodeSources :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> MorlocMonad [MDoc]
 encodeSources = undefined
 -- encodeSources g xs = do
 --   let srcs = findSources' xs
@@ -482,7 +457,7 @@ encodeSources = undefined
 --       Nothing -> return $ Nothing
 
 
-findSources :: [SAnno GMeta Mono CMeta] -> [Source]
+findSources :: [SAnno GMeta One CMeta] -> [Source]
 findSources = undefined
 -- findSources = Set.toList . Set.unions . conmap (unpackSAnno f)
 --   where
@@ -491,7 +466,7 @@ findSources = undefined
 --     f _ _ = Set.empty
 
 
-findSources' :: [SAnno (GMeta, MDoc) Mono CMeta] -> [Source]
+findSources' :: [SAnno (GMeta, MDoc) One CMeta] -> [Source]
 findSources' = undefined
 -- findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
 --   where
@@ -503,7 +478,7 @@ findSources' = undefined
 -- prototype definitions, but R and Python do not. Languages that do not
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
-encodeSignatures :: Grammar -> SAnno (GMeta, MDoc) Mono CMeta -> [MDoc]
+encodeSignatures :: Grammar -> SAnno (GMeta, MDoc) One CMeta -> [MDoc]
 encodeSignatures = undefined
 -- encodeSignatures g = map (makeSignature g) . catMaybes . unpackSAnno f where
 --   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe (Meta, Type)
@@ -531,7 +506,7 @@ encodeSignatures = undefined
 -- function to manifold functions. The two arguments of the returned function
 -- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
 -- results are stored.
-makeDispatchBuilder :: Grammar -> [SAnno (GMeta, MDoc) Mono CMeta] -> (MDoc -> MDoc -> MDoc)
+makeDispatchBuilder :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> (MDoc -> MDoc -> MDoc)
 makeDispatchBuilder = undefined
 -- makeDispatchBuilder g xs =
 --   (gSwitch g)
@@ -551,8 +526,8 @@ makeDispatchBuilder = undefined
 
 codify
   :: Grammar
-  -> SAnno GMeta Mono CMeta
-  -> MorlocMonad (SAnno (GMeta, MDoc) Mono CMeta) 
+  -> SAnno GMeta One CMeta
+  -> MorlocMonad (SAnno (GMeta, MDoc) One CMeta) 
 codify = undefined
 --
 -- -- | UniS
@@ -694,7 +669,7 @@ codify = undefined
 
 -------- Utility and lookup functions ----------------------------------------
 
-getdoc :: SAnno (GMeta, MDoc) Mono CMeta -> MDoc 
+getdoc :: SAnno (GMeta, MDoc) One CMeta -> MDoc 
 getdoc (SAnno _ (_, d)) = d
 
 unrollLambda :: Expr -> ([EVar], Expr)
@@ -724,8 +699,27 @@ makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
 makeArgumentName :: Int -> MDoc
 makeArgumentName i = "x" <> pretty i
 
-sannoType :: SAnno g Mono CMeta -> Type
-sannoType (SAnno (Mono (_, c)) _) = metaType c
+sannoType :: SAnno g One CMeta -> Type
+sannoType (SAnno (One (_, c)) _) = metaType c
+
+getTermModule :: TermOrigin -> Module
+getTermModule (Sourced m _) = m
+getTermModule (Declared m _ _) = m
+
+getTermEVar :: TermOrigin -> EVar
+getTermEVar (Sourced _ src) = srcAlias src
+getTermEVar (Declared _ v _) = v
+
+getTermTypeSet :: TermOrigin -> MorlocMonad TypeSet
+getTermTypeSet t =
+  case Map.lookup (getTermEVar t) (moduleTypeMap (getTermModule t)) of
+    (Just ts) -> return ts
+    Nothing -> MM.throwError . OtherError $ "Expected the term to have a typeset"
+
+getTermTypes :: TermOrigin -> MorlocMonad [Type]
+getTermTypes t = do
+  (TypeSet _ es) <- getTermTypeSet t
+  return $ map etype es
 
 -- | Map a language to a grammar
 selectGrammar :: Lang -> MorlocMonad Grammar
@@ -738,7 +732,7 @@ selectGrammar MorlocLang = MM.throwError . OtherError $
 selectGrammar lang = MM.throwError . OtherError $
   "No grammar found for " <> MT.show' lang
 
-unpackSAnnoG :: (SExpr g Mono c -> g -> g') -> SExpr g Mono c -> [g'] 
+unpackSAnnoG :: (SExpr g One c -> g -> g') -> SExpr g One c -> [g'] 
 unpackSAnnoG = undefined
 -- unpackSAnnoG f (SAnno e@(ListS xs) m) = f e m : conmap (unpackSAnnoG f) xs
 -- unpackSAnnoG f (SAnno e@(TupleS xs) m) = f e m : conmap (unpackSAnnoG f) xs
@@ -747,7 +741,7 @@ unpackSAnnoG = undefined
 -- unpackSAnnoG f (SAnno e@(AppS x xs) m) = f e m : conmap (unpackSAnnoG f) (x:xs)
 -- unpackSAnnoG f (SAnno e m) = [f e m]
 
-unpackSAnnoC :: (SExpr g Mono c -> c -> c') -> SExpr g Mono c -> [c'] 
+unpackSAnnoC :: (SExpr g One c -> c -> c') -> SExpr g One c -> [c'] 
 unpackSAnnoC = undefined
 -- unpackSAnnoC f (SAnno e@(ListS xs) m) = f e m : conmap (unpackSAnnoC f) xs
 -- unpackSAnnoC f (SAnno e@(TupleS xs) m) = f e m : conmap (unpackSAnnoC f) xs
@@ -762,40 +756,55 @@ conmap f = concat . map f
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
--- | Find exported expressions. These may be declared or sourced in the current
--- module or they may be imported from a different module. If they are
--- imported, ascend through modules to the original declaration, returning the
--- module where they are defined.
-findExprs
+{- | Find exported expressions.
+
+Terms may be declared or sourced in the current module or they may be imported
+from a different module. If they are imported, ascend through modules to the
+original declaration, returning the module where they are defined.
+
+For each input term (EVar) a list is returned. Each element in the list
+describes a specific implementation of the term. These implementations may have
+different topologies and languages. A given language may have more than one
+implementation. However, all implementations share the same general type.
+
+Each element in the return list is a tuple of two values. The module where the
+term is exported and the source/declaration information needed to uniquely
+specify it (within an Either monad). If the term is sourced, then a (Left
+Source) data constructor holds the required source information. If the term is
+declared, a (EVar, Expr) tuple stores the left and right sides of a declaration
+(the same information that is stored in the Declaration data constructor of
+Expr).
+-}
+findTerm
   :: Map.Map MVar Module
-  -> Module -- ^ a module where EVar is  used
+  -> Module -- ^ a module where EVar is used
   -> EVar -- ^ the variable name in the top level module
-  -> [
-        ( Expr
-        , EVar -- ^ the variable name in the returned module
-        , Module -- ^ the module where EVar is defined or sourced
-     )]
-findExprs ms m v
+  -> [TermOrigin]
+findTerm ms m v
   | Set.member v (moduleExports m)
       = evarDeclared
       ++ evarSourced
       ++ evarImported
   | otherwise = []
   where
-    evarDeclared :: [(Expr, EVar, Module)]
+    evarDeclared :: [TermOrigin]
     evarDeclared = case Map.lookup v (moduleDeclarationMap m) of
-      (Just e) -> [(e, v, m)]
+      -- If a term is defined as being equal to another term, find this other term.
+      (Just (Declaration v' (VarE v''))) -> if v' /= v''
+        then findTerm ms m v''
+        else error "found term of type `x = x`, the typechecker should have died on this ..."
+      (Just (Declaration v' e)) -> [Declared m v' e]
       Nothing -> []
 
-    evarSourced :: [(Expr, EVar, Module)]
-    evarSourced = map (\((v', _), _) -> (typeEVar v', v', m))
+    evarSourced :: [TermOrigin]
+    evarSourced = map (\(_, src) -> Sourced m src)
                 . Map.toList
                 . Map.filterWithKey (\(v',_) _ -> v' == v)
                 $ moduleSourceMap m
 
-    evarImported :: [(Expr, EVar, Module)]
+    evarImported :: [TermOrigin]
     evarImported =
-      concat [findExprs ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
+      concat [findTerm ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
 
     typeEVar :: EVar -> Expr
     typeEVar v' = case Map.lookup v' (moduleTypeMap m) of
