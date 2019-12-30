@@ -32,18 +32,11 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Cpp as GrammarCpp
 import qualified Morloc.CodeGenerator.Grammars.Template.R as GrammarR
 import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython3
 
--- | XXXXXXXXXXXXXX-DOUBLE CHECK Store all necessary information about a particular implementation of a
+-- | Store all necessary information about a particular implementation of a
 -- term.  A term may either be declared or sourced. If declared, the left and
 -- right hand sides of the declaration are stored. If sourced, the Source
 -- object is stored. In either case, the module where the term is defined is
 -- also stored.
---
--- XXXXXXXXXXXXXX-DOUBLE CHECK Each element of the list consists of an EVar that is the term exported from
--- the main module. This term may be a named composition in the main module, a
--- sourced function/value from language-specific code, or an imported term from
--- another module. A term may be defined in multiple modules or sourced from
--- multiple implementations. Thus each term exported from main is associated
--- with a list of possible implementations/realizations.
 data TermOrigin = Declared Module EVar Expr | Sourced Module Source
 
 -- | Translate typechecker-created modules into compilable code
@@ -83,6 +76,12 @@ generate ms = do
     poolId meta _ = metaId meta
 
 -- | Find the expressions that are exposed to the user.
+-- Each element of the returned list consists of an EVar that is the term
+-- exported from the main module. This term may be a named composition in the
+-- main module, a sourced function/value from language-specific code, or an
+-- imported term from another module. A term may be defined in multiple modules
+-- or sourced from multiple implementations. Thus each term exported from main
+-- is associated with a list of possible implementations/realizations.
 roots :: Map.Map MVar Module -> MorlocMonad [(EVar, [TermOrigin])]
 roots ms = do
   case roots of
@@ -160,10 +159,10 @@ collect ms (evar', xs@(x:_)) = do
 
     collectAnno
       :: Set.Set EVar
-      -> Expr
       -> Module
+      -> Expr
       -> MorlocMonad (SAnno GMeta Many [CMeta])
-    collectAnno args (AnnE e ts) m = do
+    collectAnno args m (AnnE e ts) = do
       gmeta <- makeGMeta Nothing m
       trees <- collectExpr args m ts e
       return $ SAnno (Many trees) gmeta
@@ -181,15 +180,57 @@ collect ms (evar', xs@(x:_)) = do
     collectExpr args m ts (StrE x) = simpleCollect (StrS x) m ts
     collectExpr args m ts (VarE v)
       | Set.member v args = return [(VarS v, cmetas)]
-      | otherwise = mapM collectTerm (findTerm ms m v) -- FIXME: WHENCE ts?
+      | otherwise = mapM (fmap chooseTypes . collectTerm) (findTerm ms m v)
       where
         cmetas = map (makeCMeta Nothing m) ts
-    collectExpr args m ts (ListE es) = undefined
-    collectExpr args m ts (TupleE es) = undefined
-    collectExpr args m ts (LamE v e) = undefined
-    collectExpr args m ts (AppE e1 e2) = undefined
-    collectExpr args m ts (RecE entries) = undefined
+        -- FIXME: The typesystem should handle this. It should unroll every
+        -- type as far as it can be unrolled, and infer specialized types all
+        -- the way down. Multiple declarations of every term within a given
+        -- language should be allowed. The function below will only work in
+        -- special cases where there is 1) a single instance of the term in
+        -- each language and 2) types beneath the term (if this is a
+        -- composition) do not depend on the type on top.
+        chooseTypes
+          :: (SExpr GMeta Many [CMeta], [CMeta])
+          -> (SExpr GMeta Many [CMeta], [CMeta])
+        chooseTypes (x, cmetas') =
+          (x, [cmeta
+              | cmeta <- cmetas
+              , cmeta' <- cmetas'
+              , metaLang cmeta == metaLang cmeta'])
+    collectExpr args m ts (ListE es) = do
+      es' <- mapM (collectAnno args m) es
+      simpleCollect (ListS es') m ts
+    collectExpr args m ts (TupleE es) = do
+      es' <- mapM (collectAnno args m) es
+      simpleCollect (TupleS es') m ts
+    collectExpr args m ts (RecE entries) = do
+      es' <- mapM (collectAnno args m) (map snd entries)
+      let entries' = zip (map fst entries) es'
+      simpleCollect (RecS entries') m ts
+    collectExpr args m ts e@(LamE _ _) =
+      case unrollLambda e of
+        (args', e') -> do
+          e'' <- collectAnno (Set.union args (Set.fromList args')) m e'
+          simpleCollect (LamS args' e'') m ts
+    -- AppS (SAnno g f c) [SAnno g f c]
+    collectExpr args m ts (AppE e1 e2) = do
+      -- The topology of e1' may vary. It could be a direct binary function. Or
+      -- it could be a partially applied function. So it is necessary to map
+      -- over the Many.
+      e1'@(SAnno (Many fs) g) <- collectAnno args m e1
+      e2' <- collectAnno args m e2
+      return $ map (\(f, c) -> (app f c g e2', c)) fs
     collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
+
+    app
+      :: SExpr GMeta Many [CMeta]
+      -> [CMeta]
+      -> GMeta
+      -> SAnno GMeta Many [CMeta]
+      -> SExpr GMeta Many [CMeta]
+    app (AppS f es) _ _ e2 = AppS f (es ++ [e2])
+    app f cmetas g e2 = AppS (SAnno (Many [(f, cmetas)]) g) [e2] 
 
     simpleCollect
       :: (SExpr GMeta Many [CMeta])
@@ -228,120 +269,50 @@ realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One CMeta)
-realize = undefined
--- realize h x = realize' Nothing [] x where
---
---   realize'
---     :: Maybe Lang
---     -> [Argument]
---     -> SAnno [(Type, Meta)]
---     -> MorlocMonad (SAnno (Type, Meta))
---
---   -- new arguments may be bound under lambdas
---   realize' lang rs (SAnno (LamS vs x) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     let isPacked = isNothing lang
---     args <- zipWithM (makeArg isPacked) vs (init $ typeArgs t)
---          >>= updateArguments m rs
---     x' <- realize' lang' args x
---     (packer, packerpath) <- selectFunction (last $ typeArgs t) Pack h
---     let m' = m { metaArgs = args
---                , metaPacker = Just packer
---                , metaPackerPath = Just packerpath
---                }
---     return $ SAnno (LamS vs x') (t, m')
---     where
---       makeArg :: Bool -> EVar -> Type -> MorlocMonad Argument
---       makeArg packed (EV n) t = do
---         (packer, packerpath) <- selectFunction t Pack h
---         (unpacker, unpackerpath) <- selectFunction t Unpack h
---         return $ Argument
---           { argName = n
---           , argType = t
---           , argPacker = packer
---           , argPackerPath = packerpath
---           , argUnpacker = unpacker
---           , argUnpackerPath = unpackerpath
---           , argIsPacked = packed
---           }
---
---       updateArguments :: Meta -> [Argument] -> [Argument] -> MorlocMonad [Argument]
---       updateArguments m oldargs newargs = case metaName m of
---         -- the lambda is named, which means we are jumping into a new scope
---         -- where the old arguments are not defined
---         (Just _) -> return newargs
---         -- we are in an anonymous lambda, where arguments from the outside
---         -- scope are still defined
---         Nothing -> do
---           let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
---           return $ newargs ++ oldargs'
---
---   realize' lang rs (SAnno (AppS e funargs) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     e' <- realize' lang' rs e
---     funargs' <- mapM (realize' lang' rs) funargs
---     (packer, packerpath) <- selectFunction (last $ typeArgs t) Pack h
---     let m' = m { metaArgs = rs
---                , metaPacker = Just packer
---                , metaPackerPath = Just packerpath
---                }
---     return (SAnno (AppS e' funargs') (t, m'))
---
---   realize' lang rs (SAnno (ListS xs) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     xs' <- mapM (realize' lang' rs) xs
---     return $ SAnno (ListS xs') (t, m)
---
---   realize' lang rs (SAnno (TupleS xs) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     xs' <- mapM (realize' lang' rs) xs
---     return $ SAnno (TupleS xs') (t, m)
---
---   realize' lang rs (SAnno (RecS entries) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     xs' <- mapM (realize' lang' rs) (map snd entries)
---     let entries' = zip (map fst entries) xs'
---     return $ SAnno (RecS entries') (t, m)
---
---   realize' lang _ (SAnno (NumS x) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     return (SAnno (NumS x) (t, m))
---
---   realize' lang _ (SAnno (LogS x) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     return (SAnno (LogS x) (t, m))
---
---   realize' lang _ (SAnno (StrS x) ms) = do
---     (t, m, lang') <- selectRealization lang ms
---     return (SAnno (StrS x) (t, m))
---
---   realize' lang _ (SAnno (VarS x) ms) = do
---     (t, m, _) <- selectRealization lang ms
---     return (SAnno (VarS x) (t, m))
---
---   -- | If the parent has a defined language, then try to find a realization
---   -- that matches, otherwise choose the first realization in the list.
---   selectRealization :: Maybe Lang -> [(Type, Meta)] -> MorlocMonad (Type, Meta, Maybe Lang)
---   selectRealization Nothing xs =
---     case filter (\(t, _) -> isJust (langOf t)) xs of
---       [] -> MM.throwError . OtherError $ "No concrete realization found"
---       ((t, m):_) -> return (t, m, langOf t)
---   selectRealization (Just lang) xs =
---     case filter (\(t, _) -> lang == langOf' t) xs of
---      ((t, m):_) -> return (t, m, langOf t)
---      [] -> selectRealization Nothing xs
+realize h x = realizeAnno Nothing [] x where
+
+  realizeAnno
+    :: Maybe Lang
+    -> [Argument]
+    -> SAnno GMeta Many [CMeta]
+    -> MorlocMonad (SAnno GMeta One CMeta)
+  realizeAnno lang args (SAnno (Many ((x, cmeta:_):_)) gmeta) = do
+    x' <- realizeExpr lang args x
+    return $ SAnno (One (x', cmeta)) gmeta
+
+  realizeExpr
+    :: Maybe Lang
+    -> [Argument]
+    -> SExpr GMeta Many [CMeta]
+    -> MorlocMonad (SExpr GMeta One CMeta)
+  realizeExpr lang args (UniS) = return UniS
+  realizeExpr lang args (NumS x) = return $ NumS x
+  realizeExpr lang args (LogS x) = return $ LogS x
+  realizeExpr lang args (StrS x) = return $ StrS x
+  realizeExpr lang args (VarS x) = return $ VarS x
+  realizeExpr lang args (ListS xs) = do
+    xs' <- mapM (realizeAnno lang args) xs
+    return $ ListS xs'
+  realizeExpr lang args (TupleS xs) = do
+    xs' <- mapM (realizeAnno lang args) xs
+    return $ TupleS xs'
+  realizeExpr lang args (RecS entries) = do
+    vals <- mapM (realizeAnno lang args) (map snd entries) 
+    return $ RecS (zip (map fst entries) vals)
+  realizeExpr lang args (LamS vs e) = undefined
+  realizeExpr lang args (AppS f xs) = undefined
+  realizeExpr lang args (ForeignS i lang') = undefined
 
 
 -- | choose a packer or unpacker for a given type
 selectFunction :: Type -> Property -> SerialMap -> MorlocMonad (Name, Path)
-selectFunction = undefined
--- selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
---   [] -> MM.throwError . OtherError $ "No packer found"
---   (x:_) -> case Map.lookup x hmap of
---     (Just x) -> return x
---     Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
---   where
---     hmap = if p == Pack then packers h else unpackers h
+selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
+  [] -> MM.throwError . OtherError $ "No packer found"
+  (x:_) -> case Map.lookup x hmap of
+    (Just x) -> return x
+    Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
+  where
+    hmap = if p == Pack then packers h else unpackers h
 
 
 segment
@@ -399,25 +370,23 @@ segment = undefined
 pool
   :: [SAnno GMeta One CMeta]
   -> MorlocMonad [(Lang, [SAnno GMeta One CMeta])]
-pool = undefined
--- pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
+pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
 
 
 encode :: (Lang, [SAnno GMeta One CMeta]) -> MorlocMonad Script
-encode = undefined
--- encode (lang, xs) = do
---   g <- selectGrammar lang
---   state <- MM.get
---   code <- mapM (codify g) xs >>= makePoolCode g
---   return $ Script
---     { scriptBase = "pool"
---     , scriptLang = lang
---     , scriptCode = render code
---     , scriptCompilerFlags =
---         filter (/= "") . map packageGccFlags $ statePackageMeta state
---     , scriptInclude =
---         map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources xs]
---     }
+encode (lang, xs) = do
+  g <- selectGrammar lang
+  state <- MM.get
+  code <- mapM (codify g) xs >>= makePoolCode g
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = lang
+    , scriptCode = render code
+    , scriptCompilerFlags =
+        filter (/= "") . map packageGccFlags $ statePackageMeta state
+    , scriptInclude =
+        map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources xs]
+    }
 
 
 makePoolCode :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> MorlocMonad MDoc
@@ -514,9 +483,9 @@ makeDispatchBuilder = undefined
 --     (\(t,m,p) -> mainCall g t m p)
 --     switchList
 --   where
---     switchList = [(t, m, fromJust (metaPacker m)) | (SAnno (AppS _ _) (t, m, _)) <- xs]
+--     switchList = [(metaType c, m, fromJust (metaPacker m)) | (SAnno (One (AppS _ _, c)) m) <- xs]
 --
---     mainCall :: Grammar -> Type -> Meta -> Name -> MDoc
+--     mainCall :: Grammar -> Type -> GMeta -> Name -> MDoc
 --     mainCall g t m packer = (gCall g)
 --       (pretty packer)
 --       [(gCall g)
