@@ -11,6 +11,7 @@ abandon the default prelude and create my own. But not just yet.
 -}
 module Morloc.Internal
   ( ifelse
+  , conmap
   , module Data.Maybe
   , module Data.Either
   , module Data.List.Extra
@@ -77,6 +78,9 @@ mapSumWith f = Map.foldr (\x y -> mappend y (f x)) mempty
 ifelse :: Bool -> a -> a -> a
 ifelse True x _ = x
 ifelse False _ y = y
+
+conmap :: (a -> [b]) -> [a] -> [b]
+conmap f = concat . map f
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

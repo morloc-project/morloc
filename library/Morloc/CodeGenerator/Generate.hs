@@ -443,7 +443,7 @@ encode (lang, xs) = do
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude =
-        map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources xs]
+        map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources2 xs]
     }
 
 
@@ -461,19 +461,19 @@ makePoolCode = undefined
 --     }
 
 
-gatherManifolds :: SAnno (GMeta, MDoc) One CMeta -> [MDoc]
-gatherManifolds = undefined
--- gatherManifolds = catMaybes . unpackSAnno f where
---   f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Maybe MDoc
---   f (AppS _ _) (_, _, d) = Just d
---   f (ForeignS _ _) (_, _, x) = Just x
---   f _ _ = Nothing
+gatherManifolds :: SAnno (g, MDoc) One c -> [MDoc]
+gatherManifolds = catMaybes . unpackSAnno f
+  where
+    f :: SExpr (g, MDoc) One c -> (g, MDoc) -> c -> Maybe MDoc
+    f (AppS _ _) (_, d) _ = Just d
+    f (ForeignS _ _) (_, d) _ = Just d
+    f _ _ _ = Nothing
 
 
 encodeSources :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad [MDoc]
 encodeSources = undefined
 -- encodeSources g xs = do
---   let srcs = findSources' xs
+--   let srcs = findSources3 xs
 --   say $ "sources:"
 --   say $ viaShow srcs
 --   fmap catMaybes $ mapM encodeSource srcs
@@ -484,21 +484,18 @@ encodeSources = undefined
 --       Nothing -> return $ Nothing
 
 
-findSources :: [(SAnno GMeta One (CMeta, IMeta))] -> [Source]
-findSources = undefined
--- findSources = Set.toList . Set.unions . conmap (unpackSAnno f)
---   where
---     f :: SExpr (Type, Meta) -> (Type, Meta) -> Set.Set Source
---     f _ (_, m) = metaSources m
---     f _ _ = Set.empty
+findSources2 :: [SAnno g One (CMeta, a)] -> [Source]
+findSources2 = nub . catMaybes . concat . map (unpackSAnno f)
+  where
+    f :: SExpr g One (CMeta, a) -> g -> (CMeta, a) -> Maybe Source
+    f _ _ (c, _) = metaSource c
 
 
-findSources' :: [SAnno (GMeta, MDoc) One CMeta] -> [Source]
-findSources' = undefined
--- findSources' = Set.toList . Set.unions . conmap (unpackSAnno f)
---   where
---     f :: SExpr (Type, Meta, MDoc) -> (Type, Meta, MDoc) -> Set.Set Source
---     f _ (_, m, _) = metaSources m
+findSources3 :: [SAnno g One (CMeta, a, b)] -> [Source]
+findSources3 = nub . catMaybes . concat . map (unpackSAnno f)
+  where
+    f :: SExpr g One (CMeta, a, b) -> g -> (CMeta, a, b) -> Maybe Source
+    f _ _ (c, _, _) = metaSource c
 
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
@@ -696,8 +693,8 @@ codify = undefined
 
 -------- Utility and lookup functions ----------------------------------------
 
-getdoc :: SAnno (GMeta, MDoc) One CMeta -> MDoc 
-getdoc (SAnno _ (_, d)) = d
+say :: MDoc -> MorlocMonad ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 unrollLambda :: Expr -> ([EVar], Expr)
 unrollLambda (LamE v e2) = case unrollLambda e2 of
@@ -705,12 +702,11 @@ unrollLambda (LamE v e2) = case unrollLambda e2 of
 unrollLambda e = ([], e)
 
 getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
-getGeneralType = undefined
--- getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of
---     [] -> return Nothing
---     [x] -> return $ Just x
---     xs -> MM.throwError . OtherError $
---       "Expected 0 or 1 general types, found " <> MT.show' (length xs)
+getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of
+  [] -> return Nothing
+  [x] -> return $ Just x
+  xs -> MM.throwError . OtherError $
+    "Expected 0 or 1 general types, found " <> MT.show' (length xs)
 
 typeArgs :: Type -> [Type]
 typeArgs (FunT t1 t2) = t1 : typeArgs t2
@@ -725,9 +721,6 @@ makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
 
 makeArgumentName :: Int -> MDoc
 makeArgumentName i = "x" <> pretty i
-
-sannoType :: SAnno g One (CMeta, IMeta) -> Type
-sannoType (SAnno (One (_, (c, _))) _) = metaType c
 
 getTermModule :: TermOrigin -> Module
 getTermModule (Sourced m _) = m
@@ -759,29 +752,19 @@ selectGrammar MorlocLang = MM.throwError . OtherError $
 selectGrammar lang = MM.throwError . OtherError $
   "No grammar found for " <> MT.show' lang
 
-unpackSAnnoG :: (SExpr g One c -> g -> g') -> SExpr g One c -> [g'] 
-unpackSAnnoG = undefined
--- unpackSAnnoG f (SAnno e@(ListS xs) m) = f e m : conmap (unpackSAnnoG f) xs
--- unpackSAnnoG f (SAnno e@(TupleS xs) m) = f e m : conmap (unpackSAnnoG f) xs
--- unpackSAnnoG f (SAnno e@(RecS entries) m) = f e m : conmap (unpackSAnnoG f) (map snd entries)
--- unpackSAnnoG f (SAnno e@(LamS _ x) m) = f e m : unpackSAnnoG f x
--- unpackSAnnoG f (SAnno e@(AppS x xs) m) = f e m : conmap (unpackSAnnoG f) (x:xs)
--- unpackSAnnoG f (SAnno e m) = [f e m]
+unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a] 
+unpackSAnno f (SAnno (One (e@(ListS xs), c)) g) = f e g c : conmap (unpackSAnno f) xs
+unpackSAnno f (SAnno (One (e@(TupleS xs), c)) g) = f e g c : conmap (unpackSAnno f) xs
+unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = f e g c : conmap (unpackSAnno f) (map snd entries)
+unpackSAnno f (SAnno (One (e@(LamS _ x), c)) g) = f e g c : unpackSAnno f x
+unpackSAnno f (SAnno (One (e@(AppS x xs), c)) g) = f e g c : conmap (unpackSAnno f) (x:xs)
+unpackSAnno f (SAnno (One (e, c)) g) = [f e g c]
 
-unpackSAnnoC :: (SExpr g One c -> c -> c') -> SExpr g One c -> [c'] 
-unpackSAnnoC = undefined
--- unpackSAnnoC f (SAnno e@(ListS xs) m) = f e m : conmap (unpackSAnnoC f) xs
--- unpackSAnnoC f (SAnno e@(TupleS xs) m) = f e m : conmap (unpackSAnnoC f) xs
--- unpackSAnnoC f (SAnno e@(RecS entries) m) = f e m : conmap (unpackSAnnoC f) (map snd entries)
--- unpackSAnnoC f (SAnno e@(LamS _ x) m) = f e m : unpackSAnnoC f x
--- unpackSAnnoC f (SAnno e@(AppS x xs) m) = f e m : conmap (unpackSAnnoC f) (x:xs)
--- unpackSAnnoC f (SAnno e m) = [f e m]
+getdoc :: SAnno (GMeta, MDoc) One CMeta -> MDoc 
+getdoc (SAnno _ (_, d)) = d
 
-conmap :: (a -> [b]) -> [a] -> [b]
-conmap f = concat . map f
-  
-say :: MDoc -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
+sannoType :: SAnno g One (CMeta, IMeta) -> Type
+sannoType (SAnno (One (_, (c, _))) _) = metaType c
 
 {- | Find exported expressions.
 
