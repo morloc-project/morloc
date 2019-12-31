@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , SerialMap(..)
   , GMeta(..)
   , CMeta(..)
+  , IMeta(..)
   , One(..)
   , Many(..)
   , Argument(..)

@@ -60,7 +60,7 @@ generate ms = do
   -- Each nexus subcommand calls one function from one of the language-specific pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate [ (metaType c, poolId m x, metaName m)
-                          | SAnno (One (x, c)) m <- ast
+                          | SAnno (One (x, (c, _))) m <- ast
                           ]
 
   -- for each language, collect all functions into one "pool"
@@ -71,7 +71,7 @@ generate ms = do
   where
     -- map from nexus id to pool id
     -- these differ when a declared variable is exported
-    poolId :: GMeta -> SExpr GMeta One CMeta -> Int
+    poolId :: GMeta -> SExpr GMeta One (CMeta, IMeta) -> Int
     poolId _ (LamS _ (SAnno _ meta)) = metaId meta
     poolId meta _ = metaId meta
 
@@ -268,40 +268,95 @@ collect ms (evar', xs@(x:_)) = do
 realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
-  -> MorlocMonad (SAnno GMeta One CMeta)
+  -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
 realize h x = realizeAnno Nothing [] x where
 
   realizeAnno
     :: Maybe Lang
     -> [Argument]
     -> SAnno GMeta Many [CMeta]
-    -> MorlocMonad (SAnno GMeta One CMeta)
+    -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
   realizeAnno lang args (SAnno (Many ((x, cmeta:_):_)) gmeta) = do
-    x' <- realizeExpr lang args x
-    return $ SAnno (One (x', cmeta)) gmeta
+    x' <- realizeExpr lang args gmeta cmeta x
+    imeta <- makeIMeta x' cmeta args
+    return $ SAnno (One (x', (cmeta, imeta))) gmeta
 
   realizeExpr
-    :: Maybe Lang
+    :: Maybe Lang -- ^ the parent language (not the language in CMeta)
     -> [Argument]
+    -> GMeta -> CMeta
     -> SExpr GMeta Many [CMeta]
-    -> MorlocMonad (SExpr GMeta One CMeta)
-  realizeExpr lang args (UniS) = return UniS
-  realizeExpr lang args (NumS x) = return $ NumS x
-  realizeExpr lang args (LogS x) = return $ LogS x
-  realizeExpr lang args (StrS x) = return $ StrS x
-  realizeExpr lang args (VarS x) = return $ VarS x
-  realizeExpr lang args (ListS xs) = do
+    -> MorlocMonad (SExpr GMeta One (CMeta, IMeta))
+  realizeExpr _ _ _ _ (UniS) = return UniS
+  realizeExpr _ _ _ _ (NumS x) = return $ NumS x
+  realizeExpr _ _ _ _ (LogS x) = return $ LogS x
+  realizeExpr _ _ _ _ (StrS x) = return $ StrS x
+  realizeExpr _ _ _ _ (VarS x) = return $ VarS x
+  realizeExpr lang args _ _ (ListS xs) = do
     xs' <- mapM (realizeAnno lang args) xs
     return $ ListS xs'
-  realizeExpr lang args (TupleS xs) = do
+  realizeExpr lang args _ _ (TupleS xs) = do
     xs' <- mapM (realizeAnno lang args) xs
     return $ TupleS xs'
-  realizeExpr lang args (RecS entries) = do
-    vals <- mapM (realizeAnno lang args) (map snd entries) 
+  realizeExpr lang args _ _ (RecS entries) = do
+    vals <- mapM (realizeAnno lang args) (map snd entries)
     return $ RecS (zip (map fst entries) vals)
-  realizeExpr lang args (LamS vs e) = undefined
-  realizeExpr lang args (AppS f xs) = undefined
-  realizeExpr lang args (ForeignS i lang') = undefined
+
+  -- if the lambda is anonymous, the arguments from context are preserved
+  realizeExpr lang args gmeta cmeta (LamS vs e) = do
+    let isPacked = isNothing lang
+        inputTypes = (init . typeArgs . metaType $ cmeta)
+    args' <- zipWithM (makeArg isPacked) vs inputTypes
+      >>= updateArguments gmeta args
+    e' <- realizeAnno lang args e
+    return $ LamS vs e'
+
+  realizeExpr lang args _ cmeta (AppS f xs) = do
+    let lang' = Just $ metaLang cmeta
+    f' <- realizeAnno lang' args f
+    xs' <- mapM (realizeAnno lang' args) xs 
+    return (AppS f' xs')
+  realizeExpr _ _ _ _ (ForeignS _ _) = error "This is unexpected"
+
+  makeIMeta
+    :: (SExpr GMeta One (CMeta, IMeta))
+    -> CMeta -> [Argument] -> MorlocMonad IMeta
+  makeIMeta sexpr cmeta args = do
+    (packerName, packerPath) <- selectFunction t Pack h
+    return $ IMeta
+      { metaArgs = args
+      , metaPacker = Just packerName
+      , metaPackerPath = Just packerPath
+      }
+    where
+      t = case sexpr of
+        (AppS _ _) -> last $ typeArgs (metaType cmeta)
+        _ -> metaType cmeta
+
+  makeArg :: Bool -> EVar -> Type -> MorlocMonad Argument
+  makeArg packed (EV n) t = do
+    (packer, packerpath) <- selectFunction t Pack h
+    (unpacker, unpackerpath) <- selectFunction t Unpack h
+    return $ Argument
+      { argName = n
+      , argType = t
+      , argPacker = packer
+      , argPackerPath = packerpath
+      , argUnpacker = unpacker
+      , argUnpackerPath = unpackerpath
+      , argIsPacked = packed
+      }
+
+  updateArguments :: GMeta -> [Argument] -> [Argument] -> MorlocMonad [Argument]
+  updateArguments m oldargs newargs = case metaName m of
+    -- the lambda is named, which means we are jumping into a new scope
+    -- where the old arguments are not defined
+    (Just _) -> return newargs
+    -- we are in an anonymous lambda, where arguments from the outside
+    -- scope are still defined
+    Nothing -> do
+      let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
+      return $ newargs ++ oldargs'
 
 
 -- | choose a packer or unpacker for a given type
@@ -316,64 +371,67 @@ selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
 
 
 segment
-  :: SAnno GMeta One CMeta
-  -> MorlocMonad [SAnno GMeta One CMeta]
-segment = undefined
--- segment s = (\(r,rs)-> r:rs) <$> segment' Nothing Nothing s where
---   segment'
---     :: Maybe Meta -- data from the parent
---     -> Maybe Type -- child type in parent language
---     -> SAnno (Type, Meta)
---     -> MorlocMonad (SAnno (Type, Meta), [SAnno (Type, Meta)])
---   segment' (Just m0) (Just t0) s@(SAnno (AppS x@(SAnno _ (t2, _)) xs) (t1, m1))
---     | langOf' t0 == langOf' t1 = do
---         (x', rs') <- segment' (Just m1) Nothing x
---         xs' <- zipWithM (\t x -> segment' (Just m1) (Just t) x) (typeArgs t2) xs
---         let (args', rss') = unzip xs'
---         return (SAnno (AppS x' args') (t1, m1), rs' ++ concat rss')
---     | otherwise = do
---         -- generate the tree for the other language
---         (x', rs') <- segment' (Just m1) (Just t1) s
---         let t1' = makeFun (map argType (metaArgs m0) ++ [t0])
---         v <- case metaName m1 of
---           (Just v') -> return v'
---           Nothing -> MM.throwError . OtherError $ "Expected a named function"
---         return (SAnno (ForeignS (metaId m1) (langOf' t1)) (t1', m1), x':rs')
---   segment' (Just m0) _ (SAnno (LamS vs x) (t1, m1)) = do
---     (x', xs') <- segment' (Just m1) (Just . last $ typeArgs t1) x
---     return (SAnno (LamS vs x') (t1, m1), xs')
---   segment' (Just m0) (Just (ArrT _ [tExp])) (SAnno (ListS xs) (t1, m1)) = do
---     xs' <- mapM (segment' (Just m1) (Just tExp)) xs
---     let (elements, rss') = unzip xs'
---     return (SAnno (ListS elements) (t1, m1), concat rss')
---   segment' (Just m0) (Just (ArrT _ ts0)) (SAnno (TupleS xs) (t1, m1)) = do
---     xs' <- zipWithM (\t x -> segment' (Just m1) (Just t) x) ts0 xs
---     let (elements, rss') = unzip xs'
---     return (SAnno (TupleS elements) (t1, m1), concat rss')
---   segment' (Just m0) (Just (RecT ts0)) (SAnno (RecS entries) (t1, m1)) = do
---     xs' <- zipWithM
---              (\t x -> segment' (Just m1) (Just t) x)
---              (map snd ts0)
---              (map snd entries)
---     let (es', rss') = unzip xs'
---         entries' = zip (map fst entries) es'
---     return (SAnno (RecS entries') (t1, m1), concat rss')
---   segment' _ _ s = return (s, [])
---
---   makeFun :: [Type] -> Type
---   makeFun [] = error "No types given"
---   makeFun [t] = t
---   makeFun (t:ts) = FunT t (makeFun ts)
+  :: SAnno GMeta One (CMeta, IMeta)
+  -> MorlocMonad [SAnno GMeta One (CMeta, IMeta)]
+segment s = (\(r,rs) -> r:rs) <$> segment' Nothing Nothing s where
+  segment'
+    :: Maybe (GMeta, CMeta, IMeta) -- data from the parent
+    -> Maybe Type -- child type in parent language
+    -> SAnno GMeta One (CMeta, IMeta)
+    -> MorlocMonad
+         ( SAnno GMeta One (CMeta, IMeta)
+         , [SAnno GMeta One (CMeta, IMeta)])
+  segment' (Just (g0, c0, i0)) (Just t0) s@(SAnno (One (AppS f xs, (c1, i1))) g1)
+    | langOf' t0 == metaLang c1 = do
+        (x', rs') <- segment' (Just (g1, c1, i1)) Nothing f
+        xs' <- zipWithM (\t x -> segment' (Just (g1, c1, i1)) (Just t) x) (typeArgs (sannoType f)) xs
+        let (args', rss') = unzip xs'
+        return (SAnno (One (AppS x' args', (c1, i1))) g1, rs' ++ concat rss')
+    | otherwise = do
+        -- generate the tree for the other language
+        (x', rs') <- segment' (Just (g1, c1, i1)) (Just $ sannoType f) s
+        let t1' = makeFun (map argType (metaArgs i0) ++ [t0])
+            c1' = CMeta { metaType = t1', metaLang = langOf' t1' }
+        v <- case metaName g1 of
+          (Just v') -> return v'
+          Nothing -> MM.throwError . OtherError $ "Expected a named function"
+        return (SAnno (One (ForeignS (metaId g1) (metaLang c1), (c1', i1))) g1, x':rs')
+  segment' (Just (g0, c0, i0)) _ (SAnno (One (LamS vs x, (c1, i1))) g1) = do
+    let t1 = Just . last $ typeArgs (metaType c1)
+    (x', xs') <- segment' (Just (g1, c1, i1)) t1 x
+    return (SAnno (One (LamS vs x', (c1, i1))) g1, xs')
+  segment' (Just (g0, c0, i0)) (Just (ArrT _ [tExp])) (SAnno (One (ListS xs, (c1, i1))) g1) = do
+    xs' <- mapM (segment' (Just (g1, c1, i1)) (Just tExp)) xs
+    let (elements, rss') = unzip xs'
+    return (SAnno (One (ListS elements, (c1, i1))) g1, concat rss')
+  segment' (Just (g0, c0, i0)) (Just (ArrT _ ts0)) (SAnno (One (TupleS xs, (c1, i1))) g1) = do
+    xs' <- zipWithM (\t x -> segment' (Just (g1, c1, i1)) (Just t) x) ts0 xs
+    let (elements, rss') = unzip xs'
+    return (SAnno (One (TupleS elements, (c1, i1))) g1, concat rss')
+  segment' (Just (g0, c0, i0)) (Just (RecT ts0)) (SAnno (One (RecS entries, (c1, i1))) g1) = do
+    xs' <- zipWithM
+             (\t x -> segment' (Just (g1, c1, i1)) (Just t) x)
+             (map snd ts0)
+             (map snd entries)
+    let (es', rss') = unzip xs'
+        entries' = zip (map fst entries) es'
+    return (SAnno (One (RecS entries', (c1, i1))) g1, concat rss')
+  segment' _ _ s = return (s, [])
+
+makeFun :: [Type] -> Type
+makeFun [] = error "No types given"
+makeFun [t] = t
+makeFun (t:ts) = FunT t (makeFun ts)
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
-pool
-  :: [SAnno GMeta One CMeta]
-  -> MorlocMonad [(Lang, [SAnno GMeta One CMeta])]
+pool 
+  :: [SAnno GMeta One (CMeta, IMeta)]
+  -> MorlocMonad [(Lang, [SAnno GMeta One (CMeta, IMeta)])]
 pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
 
 
-encode :: (Lang, [SAnno GMeta One CMeta]) -> MorlocMonad Script
+encode :: (Lang, [SAnno GMeta One (CMeta, IMeta)]) -> MorlocMonad Script
 encode (lang, xs) = do
   g <- selectGrammar lang
   state <- MM.get
@@ -389,7 +447,7 @@ encode (lang, xs) = do
     }
 
 
-makePoolCode :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> MorlocMonad MDoc
+makePoolCode :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad MDoc
 makePoolCode = undefined
 -- makePoolCode g xs = do
 --   srcs <- encodeSources g xs
@@ -412,7 +470,7 @@ gatherManifolds = undefined
 --   f _ _ = Nothing
 
 
-encodeSources :: Grammar -> [SAnno (GMeta, MDoc) One CMeta] -> MorlocMonad [MDoc]
+encodeSources :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad [MDoc]
 encodeSources = undefined
 -- encodeSources g xs = do
 --   let srcs = findSources' xs
@@ -426,7 +484,7 @@ encodeSources = undefined
 --       Nothing -> return $ Nothing
 
 
-findSources :: [SAnno GMeta One CMeta] -> [Source]
+findSources :: [(SAnno GMeta One (CMeta, IMeta))] -> [Source]
 findSources = undefined
 -- findSources = Set.toList . Set.unions . conmap (unpackSAnno f)
 --   where
@@ -495,8 +553,8 @@ makeDispatchBuilder = undefined
 
 codify
   :: Grammar
-  -> SAnno GMeta One CMeta
-  -> MorlocMonad (SAnno (GMeta, MDoc) One CMeta) 
+  -> SAnno GMeta One (CMeta, IMeta)
+  -> MorlocMonad (SAnno GMeta One (CMeta, IMeta, MDoc))
 codify = undefined
 --
 -- -- | UniS
@@ -668,8 +726,8 @@ makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
 makeArgumentName :: Int -> MDoc
 makeArgumentName i = "x" <> pretty i
 
-sannoType :: SAnno g One CMeta -> Type
-sannoType (SAnno (One (_, c)) _) = metaType c
+sannoType :: SAnno g One (CMeta, IMeta) -> Type
+sannoType (SAnno (One (_, (c, _))) _) = metaType c
 
 getTermModule :: TermOrigin -> Module
 getTermModule (Sourced m _) = m
