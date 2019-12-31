@@ -133,9 +133,10 @@ data Grammar =
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
     , gSwitch
-        :: ((GMeta, CMeta) -> MDoc)
-        -> ((GMeta, CMeta) -> MDoc)
-        -> [(GMeta, CMeta)] -> MDoc
+        :: ((GMeta, CMeta, IMeta) -> MDoc)
+        -> ((GMeta, CMeta, IMeta) -> MDoc)
+        -> [(GMeta, CMeta, IMeta)]
+        -> MDoc
         -> MDoc
         -> MDoc
     , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
