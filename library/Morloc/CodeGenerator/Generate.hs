@@ -135,6 +135,8 @@ collect
   :: Map.Map MVar Module
   -> (EVar, [TermOrigin])
   -> MorlocMonad (SAnno GMeta Many [CMeta])
+collect ms (EV v, []) = MM.throwError . OtherError $
+  "No origin found for variable '" <> v <> "'"
 collect ms (evar', xs@(x:_)) = do
   gmeta <- makeGMeta (Just evar') (getTermModule x)
   trees <- mapM collectTerm xs
@@ -152,6 +154,8 @@ collect ms (evar', xs@(x:_)) = do
       case xs of
         [x] -> return x
         _ -> MM.throwError . OtherError $ "Expected exactly one topology for a declared term"
+    collectTerm (Declared _ _ _) = MM.throwError . OtherError $
+      "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
       ts <- getTermTypes term 
       let cmetas = map (makeCMeta (Just src) m) ts
@@ -243,16 +247,22 @@ collect ms (evar', xs@(x:_)) = do
     makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
     makeGMeta evar m = do
       i <- MM.getCounter
+      let name = fmap (\(EV x) -> x) evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
         (Just (TypeSet (Just e) _)) -> return $ GMeta
           { metaId = i
-          , metaName = fmap (\(EV x) -> x) evar
+          , metaName = name
           , metaGeneralType = Just (etype e)
           , metaProperties = eprop e
           , metaConstraints = econs e
           }
-        Nothing -> MM.throwError . OtherError $ "Could not build GMeta"
-    makeGMeta _ _ = MM.throwError . OtherError $ "Cannot make GMeta from nothing"
+        _ -> return $ GMeta
+          { metaId = i
+          , metaName = name
+          , metaGeneralType = Nothing
+          , metaProperties = Set.empty
+          , metaConstraints = Set.empty
+          }
 
     makeCMeta :: Maybe Source -> Module -> Type -> CMeta
     makeCMeta src m t = CMeta {
@@ -280,6 +290,8 @@ realize h x = realizeAnno Nothing [] x where
     x' <- realizeExpr lang args gmeta cmeta x
     imeta <- makeIMeta x' cmeta args
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
+  realizeAnno _ _ _ = MM.throwError . OtherError $
+    "No valid cases found"
 
   realizeExpr
     :: Maybe Lang -- ^ the parent language (not the language in CMeta)
@@ -817,7 +829,7 @@ findTerm ms m v
         then findTerm ms m v''
         else error "found term of type `x = x`, the typechecker should have died on this ..."
       (Just (Declaration v' e)) -> [Declared m v' e]
-      Nothing -> []
+      _ -> []
 
     evarSourced :: [TermOrigin]
     evarSourced = map (\(_, src) -> Sourced m src)
@@ -830,8 +842,9 @@ findTerm ms m v
       concat [findTerm ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
 
     typeEVar :: EVar -> Expr
-    typeEVar v' = case Map.lookup v' (moduleTypeMap m) of
+    typeEVar v'@(EV name) = case Map.lookup v' (moduleTypeMap m) of
       (Just (TypeSet t ts)) -> AnnE (VarE v') (map etype (maybe ts (\t' -> t':ts) t))
+      Nothing -> error $ "Variable '" <> MT.unpack name <> "' is not defined"
 
     listMVars :: Module -> [MVar]
     listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m)
