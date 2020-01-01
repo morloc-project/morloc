@@ -8,8 +8,8 @@ Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Generate
-( 
-  generate 
+(
+  generate
 ) where
 
 import Morloc.Namespace
@@ -38,6 +38,7 @@ import qualified Morloc.CodeGenerator.Grammars.Template.Python3 as GrammarPython
 -- object is stored. In either case, the module where the term is defined is
 -- also stored.
 data TermOrigin = Declared Module EVar Expr | Sourced Module Source
+  deriving(Show, Ord, Eq)
 
 -- | Translate typechecker-created modules into compilable code
 generate :: [Module] -> MorlocMonad (Script, [Script])
@@ -46,7 +47,7 @@ generate ms = do
   MM.startCounter
 
   -- modmap :: Map.Map MVar Module
-  let modmap = Map.fromList [(moduleName m, m) | m <- ms] 
+  let modmap = Map.fromList [(moduleName m, m) | m <- ms]
 
   -- recursively find all serializers imported from any module
   smap <- findSerializers ms
@@ -87,7 +88,7 @@ roots ms = do
   case roots of
     [m] ->
       let vs = Set.toList (moduleExports m) in
-        return $ zip vs (map (findTerm ms m) vs) 
+        return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError . OtherError $ "Circular dependencies between modules"
     _ -> MM.throwError . OtherError $ "Multiple root modules"
   where
@@ -150,15 +151,19 @@ collect ms (evar', xs@(x:_)) = do
       :: TermOrigin
       -> MorlocMonad (SExpr GMeta Many [CMeta], [CMeta])
     collectTerm (Declared m _ (AnnE x ts)) = do
-      xs <- collectExpr Set.empty m ts x
+      -- remove general types
+      let ts' = filter (isJust . langOf) ts
+      xs <- collectExpr Set.empty m ts' x
       case xs of
         [x] -> return x
         _ -> MM.throwError . OtherError $ "Expected exactly one topology for a declared term"
     collectTerm (Declared _ _ _) = MM.throwError . OtherError $
       "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
-      ts <- getTermTypes term 
-      let cmetas = map (makeCMeta (Just src) m) ts
+      ts <- getTermTypes term
+      -- remove general types
+      let ts' = filter (isJust . langOf) ts
+      cmetas <- mapM (makeCMeta (Just src) m) ts'
       return (VarS (srcAlias src), cmetas)
 
     collectAnno
@@ -167,10 +172,16 @@ collect ms (evar', xs@(x:_)) = do
       -> Expr
       -> MorlocMonad (SAnno GMeta Many [CMeta])
     collectAnno args m (AnnE e ts) = do
-      gmeta <- makeGMeta Nothing m
-      trees <- collectExpr args m ts e
+      gmeta <- makeGMeta (getExprName e) m
+      -- remove general types
+      let ts' = filter (isJust . langOf) ts
+      trees <- collectExpr args m ts' e
       return $ SAnno (Many trees) gmeta
-    collectAnno _ _ _ = error "impossible bug - unannotated expression" 
+    collectAnno _ _ _ = error "impossible bug - unannotated expression"
+
+    getExprName :: Expr -> Maybe EVar
+    getExprName (VarE v) = Just v
+    getExprName _ = Nothing
 
     collectExpr
       :: Set.Set EVar
@@ -183,10 +194,16 @@ collect ms (evar', xs@(x:_)) = do
     collectExpr args m ts (LogE x) = simpleCollect (LogS x) m ts
     collectExpr args m ts (StrE x) = simpleCollect (StrS x) m ts
     collectExpr args m ts (VarE v)
-      | Set.member v args = return [(VarS v, cmetas)]
-      | otherwise = mapM (fmap chooseTypes . collectTerm) (findTerm ms m v)
+      | Set.member v args = do
+          cmetas <- mapM (makeCMeta Nothing m) ts
+          return [(VarS v, cmetas)]
+      | otherwise = do
+          cmetas <- mapM (makeCMeta Nothing m) ts
+          let terms = findTerm True ms m v
+          xs <- mapM collectTerm terms
+          let chosen = map (chooseTypes cmetas) xs
+          return chosen
       where
-        cmetas = map (makeCMeta Nothing m) ts
         -- FIXME: The typesystem should handle this. It should unroll every
         -- type as far as it can be unrolled, and infer specialized types all
         -- the way down. Multiple declarations of every term within a given
@@ -195,10 +212,11 @@ collect ms (evar', xs@(x:_)) = do
         -- each language and 2) types beneath the term (if this is a
         -- composition) do not depend on the type on top.
         chooseTypes
-          :: (SExpr GMeta Many [CMeta], [CMeta])
+          :: [CMeta]
           -> (SExpr GMeta Many [CMeta], [CMeta])
-        chooseTypes (x, cmetas') =
-          (x, [cmeta
+          -> (SExpr GMeta Many [CMeta], [CMeta])
+        chooseTypes cmetas (x, cmetas') =
+          (x, [ cmeta
               | cmeta <- cmetas
               , cmeta' <- cmetas'
               , metaLang cmeta == metaLang cmeta'])
@@ -224,7 +242,8 @@ collect ms (evar', xs@(x:_)) = do
       -- over the Many.
       e1'@(SAnno (Many fs) g) <- collectAnno args m e1
       e2' <- collectAnno args m e2
-      return $ map (\(f, c) -> (app f c g e2', c)) fs
+      let trees = map (\(f, c) -> (app f c g e2', c)) fs
+      return trees
     collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
 
     app
@@ -234,14 +253,16 @@ collect ms (evar', xs@(x:_)) = do
       -> SAnno GMeta Many [CMeta]
       -> SExpr GMeta Many [CMeta]
     app (AppS f es) _ _ e2 = AppS f (es ++ [e2])
-    app f cmetas g e2 = AppS (SAnno (Many [(f, cmetas)]) g) [e2] 
+    app f cmetas g e2 = AppS (SAnno (Many [(f, cmetas)]) g) [e2]
 
     simpleCollect
       :: (SExpr GMeta Many [CMeta])
       -> Module
       -> [Type]
       -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
-    simpleCollect sexpr m ts = return [(sexpr, map (makeCMeta Nothing m) ts)]
+    simpleCollect sexpr m ts = do
+      cmeta <- mapM (makeCMeta Nothing m) ts
+      return [(sexpr, cmeta)]
 
     -- | Find info common across realizations of a given term in a given module
     makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
@@ -249,28 +270,33 @@ collect ms (evar', xs@(x:_)) = do
       i <- MM.getCounter
       let name = fmap (\(EV x) -> x) evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
-        (Just (TypeSet (Just e) _)) -> return $ GMeta
-          { metaId = i
-          , metaName = name
-          , metaGeneralType = Just (etype e)
-          , metaProperties = eprop e
-          , metaConstraints = econs e
-          }
-        _ -> return $ GMeta
-          { metaId = i
-          , metaName = name
-          , metaGeneralType = Nothing
-          , metaProperties = Set.empty
-          , metaConstraints = Set.empty
-          }
+        (Just (TypeSet (Just e) _)) -> do
+          return $ GMeta
+            { metaId = i
+            , metaName = name
+            , metaGeneralType = Just (etype e)
+            , metaProperties = eprop e
+            , metaConstraints = econs e
+            }
+        _ -> do
+          return $ GMeta
+            { metaId = i
+            , metaName = name
+            , metaGeneralType = Nothing
+            , metaProperties = Set.empty
+            , metaConstraints = Set.empty
+            }
 
-    makeCMeta :: Maybe Source -> Module -> Type -> CMeta
-    makeCMeta src m t = CMeta {
-          metaLang = langOf' t
-        , metaType = t
-        , metaSource = src
-        , metaModule = moduleName m
-      }
+    makeCMeta :: Maybe Source -> Module -> Type -> MorlocMonad CMeta
+    makeCMeta src m t
+      | langOf t == Nothing = MM.throwError . OtherError $
+        "In collect, cannot make CMeta from general type: " <> render (prettyType t) 
+      | otherwise = return $ CMeta
+          { metaLang = langOf' t
+          , metaType = t
+          , metaSource = src
+          , metaModule = moduleName m
+          }
 
 -- | Select a single concrete language for each sub-expression.
 -- Store the concrete type and the general type (if available).
@@ -290,8 +316,10 @@ realize h x = realizeAnno Nothing [] x where
     x' <- realizeExpr lang args gmeta cmeta x
     imeta <- makeIMeta x' cmeta args
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
-  realizeAnno _ _ _ = MM.throwError . OtherError $
-    "No valid cases found"
+  realizeAnno lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
+    "No valid cases found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
+  realizeAnno lang _ (SAnno (Many ((x, []):_)) gmeta) = MM.throwError . OtherError $
+    "No valid cmeta found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
 
   realizeExpr
     :: Maybe Lang -- ^ the parent language (not the language in CMeta)
@@ -326,7 +354,7 @@ realize h x = realizeAnno Nothing [] x where
   realizeExpr lang args _ cmeta (AppS f xs) = do
     let lang' = Just $ metaLang cmeta
     f' <- realizeAnno lang' args f
-    xs' <- mapM (realizeAnno lang' args) xs 
+    xs' <- mapM (realizeAnno lang' args) xs
     return (AppS f' xs')
   realizeExpr _ _ _ _ (ForeignS _ _) = error "This is unexpected"
 
@@ -334,30 +362,41 @@ realize h x = realizeAnno Nothing [] x where
     :: (SExpr GMeta One (CMeta, IMeta))
     -> CMeta -> [Argument] -> MorlocMonad IMeta
   makeIMeta sexpr cmeta args = do
-    (packerName, packerPath) <- selectFunction t Pack h
-    return $ IMeta
-      { metaArgs = args
-      , metaPacker = Just packerName
-      , metaPackerPath = Just packerPath
-      }
+    case (selectFunction t Pack h) of
+      (Just (packer, packerpath)) ->
+        return $ IMeta
+          { metaArgs = args
+          , metaPacker = Just packer
+          , metaPackerPath = Just packerpath
+          }
+      _ ->
+        return $ IMeta
+          { metaArgs = args
+          , metaPacker = Nothing
+          , metaPackerPath = Nothing
+          }
     where
       t = case sexpr of
         (AppS _ _) -> last $ typeArgs (metaType cmeta)
         _ -> metaType cmeta
 
   makeArg :: Bool -> EVar -> Type -> MorlocMonad Argument
-  makeArg packed (EV n) t = do
-    (packer, packerpath) <- selectFunction t Pack h
-    (unpacker, unpackerpath) <- selectFunction t Unpack h
-    return $ Argument
-      { argName = n
-      , argType = t
-      , argPacker = packer
-      , argPackerPath = packerpath
-      , argUnpacker = unpacker
-      , argUnpackerPath = unpackerpath
-      , argIsPacked = packed
-      }
+  makeArg packed (EV n) t
+    | langOf t == Nothing = MM.throwError . OtherError $
+      "Cannot make an argument from the general type: " <> render (prettyType t)
+    | otherwise = do
+      case (selectFunction t Pack h, selectFunction t Unpack h) of
+        (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
+          return $ Argument
+            { argName = n
+            , argType = t
+            , argPacker = packer
+            , argPackerPath = packerpath
+            , argUnpacker = unpacker
+            , argUnpackerPath = unpackerpath
+            , argIsPacked = packed
+            }
+        _ -> MM.throwError . OtherError $ "Expected a packer and unpacker for argument"
 
   updateArguments :: GMeta -> [Argument] -> [Argument] -> MorlocMonad [Argument]
   updateArguments m oldargs newargs = case metaName m of
@@ -372,12 +411,10 @@ realize h x = realizeAnno Nothing [] x where
 
 
 -- | choose a packer or unpacker for a given type
-selectFunction :: Type -> Property -> SerialMap -> MorlocMonad (Name, Path)
+selectFunction :: Type -> Property -> SerialMap -> Maybe (Name, Path)
 selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
-  [] -> MM.throwError . OtherError $ "No packer found"
-  (x:_) -> case Map.lookup x hmap of
-    (Just x) -> return x
-    Nothing -> MM.throwError . OtherError $ "I swear it used to be there"
+  [] -> Nothing
+  (x:_) -> Map.lookup x hmap
   where
     hmap = if p == Pack then packers h else unpackers h
 
@@ -403,7 +440,13 @@ segment s = (\(r,rs) -> r:rs) <$> segment' Nothing Nothing s where
         -- generate the tree for the other language
         (x', rs') <- segment' (Just (g1, c1, i1)) (Just $ sannoType f) s
         let t1' = makeFun (map argType (metaArgs i0) ++ [t0])
-            c1' = CMeta { metaType = t1', metaLang = langOf' t1' }
+        c1' <- case langOf t1' of
+          Nothing -> MM.throwError . OtherError $
+            "Cannot make CMeta from general type"
+          (Just t) -> return $ CMeta
+            { metaType = t1'
+            , metaLang = langOf' t1'
+            }
         v <- case metaName g1 of
           (Just v') -> return v'
           Nothing -> MM.throwError . OtherError $ "Expected a named function"
@@ -437,7 +480,7 @@ makeFun (t:ts) = FunT t (makeFun ts)
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
-pool 
+pool
   :: [SAnno GMeta One (CMeta, IMeta)]
   -> MorlocMonad [(Lang, [SAnno GMeta One (CMeta, IMeta)])]
 pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
@@ -484,8 +527,6 @@ gatherManifolds = catMaybes . unpackSAnno f
 encodeSources :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad [MDoc]
 encodeSources g xs = do
   let srcs = findSources3 xs
-  say $ "sources:"
-  say $ viaShow srcs
   fmap catMaybes $ mapM encodeSource srcs
   where
     encodeSource :: Source -> MorlocMonad (Maybe MDoc)
@@ -768,7 +809,7 @@ selectGrammar MorlocLang = MM.throwError . OtherError $
 selectGrammar lang = MM.throwError . OtherError $
   "No grammar found for " <> MT.show' lang
 
-unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a] 
+unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
 unpackSAnno f (SAnno (One (e@(ListS xs), c)) g) = f e g c : conmap (unpackSAnno f) xs
 unpackSAnno f (SAnno (One (e@(TupleS xs), c)) g) = f e g c : conmap (unpackSAnno f) xs
 unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = f e g c : conmap (unpackSAnno f) (map snd entries)
@@ -811,12 +852,13 @@ declared, a (EVar, Expr) tuple stores the left and right sides of a declaration
 Expr).
 -}
 findTerm
-  :: Map.Map MVar Module
+  :: Bool -- ^ should non-exported terms be included?
+  -> Map.Map MVar Module
   -> Module -- ^ a module where EVar is used
   -> EVar -- ^ the variable name in the top level module
   -> [TermOrigin]
-findTerm ms m v
-  | Set.member v (moduleExports m)
+findTerm includeInternal ms m v
+  | includeInternal || Set.member v (moduleExports m)
       = evarDeclared
       ++ evarSourced
       ++ evarImported
@@ -825,10 +867,10 @@ findTerm ms m v
     evarDeclared :: [TermOrigin]
     evarDeclared = case Map.lookup v (moduleDeclarationMap m) of
       -- If a term is defined as being equal to another term, find this other term.
-      (Just (Declaration v' (VarE v''))) -> if v' /= v''
-        then findTerm ms m v''
+      (Just (VarE v')) -> if v /= v'
+        then findTerm False ms m v'
         else error "found term of type `x = x`, the typechecker should have died on this ..."
-      (Just (Declaration v' e)) -> [Declared m v' e]
+      (Just e) -> [Declared m v e]
       _ -> []
 
     evarSourced :: [TermOrigin]
@@ -839,7 +881,7 @@ findTerm ms m v
 
     evarImported :: [TermOrigin]
     evarImported =
-      concat [findTerm ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
+      concat [findTerm False ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
 
     typeEVar :: EVar -> Expr
     typeEVar v'@(EV name) = case Map.lookup v' (moduleTypeMap m) of

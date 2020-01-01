@@ -71,7 +71,7 @@ data GMeta = GMeta {
   , metaName :: Maybe Name
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
-}
+} deriving (Show, Ord, Eq)
 
 -- | Intrinsic description of a language-specific manifold 
 data CMeta = CMeta {
@@ -79,14 +79,14 @@ data CMeta = CMeta {
   , metaType :: Type
   , metaSource :: Maybe Source
   , metaModule :: MVar
-}
+} deriving (Show, Ord, Eq)
 
 -- | Relational description of a language-specific manifold
 data IMeta = IMeta {
     metaArgs :: [Argument]
   , metaPacker :: Maybe Name -- ^ name of function for packing output of this function
   , metaPackerPath :: Maybe Path  -- ^ path to the packer function
-}
+} deriving (Show, Ord, Eq)
 
 data Argument = Argument {
     argName :: Name
