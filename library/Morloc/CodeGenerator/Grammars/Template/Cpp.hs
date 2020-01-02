@@ -83,7 +83,8 @@ gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> lin
   comments = gComment' (gfComments gf)
 
 gSignature' :: GeneralFunction -> MDoc
-gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
+gSignature' gf =  gComment' (gfComments gf)
+               <> (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
                <> tupled (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
                <> ";"
 

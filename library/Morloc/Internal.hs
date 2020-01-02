@@ -12,6 +12,7 @@ abandon the default prelude and create my own. But not just yet.
 module Morloc.Internal
   ( ifelse
   , conmap
+  , unique
   , module Data.Maybe
   , module Data.Either
   , module Data.List.Extra
@@ -81,6 +82,10 @@ ifelse False _ y = y
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
+
+-- of course nub could be used, but this should be faster for large lists
+unique :: Ord a => [a] -> [a]
+unique = Set.toList . Set.fromList
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

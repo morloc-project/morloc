@@ -15,7 +15,7 @@ module Morloc.CodeGenerator.Generate
 import Morloc.Namespace
 import Morloc.Data.Doc
 import Morloc.TypeChecker.PartialOrder
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty (prettyType, prettyExpr)
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
@@ -173,6 +173,10 @@ collect ms (evar', xs@(x:_)) = do
       -> MorlocMonad (SAnno GMeta Many [CMeta])
     collectAnno args m (AnnE e ts) = do
       gmeta <- makeGMeta (getExprName e) m
+      say $ "---------------------------"
+      say $ "gmeta:" <+> viaShow gmeta
+      say $ "e:" <+> prettyExpr e      
+      say $ "---------------------------"
       -- remove general types
       let ts' = filter (isJust . langOf) ts
       trees <- collectExpr args m ts' e
@@ -216,7 +220,7 @@ collect ms (evar', xs@(x:_)) = do
           -> (SExpr GMeta Many [CMeta], [CMeta])
           -> (SExpr GMeta Many [CMeta], [CMeta])
         chooseTypes cmetas (x, cmetas') =
-          (x, [ cmeta
+          (x, [ cmeta { metaSource = metaSource cmeta' }
               | cmeta <- cmetas
               , cmeta' <- cmetas'
               , metaLang cmeta == metaLang cmeta'])
@@ -268,6 +272,7 @@ collect ms (evar', xs@(x:_)) = do
     makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
     makeGMeta evar m = do
       i <- MM.getCounter
+      say $ viaShow (evar, i)
       let name = fmap (\(EV x) -> x) evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
         (Just (TypeSet (Just e) _)) -> do
@@ -348,7 +353,7 @@ realize h x = realizeAnno Nothing [] x where
         inputTypes = (init . typeArgs . metaType $ cmeta)
     args' <- zipWithM (makeArg isPacked) vs inputTypes
       >>= updateArguments gmeta args
-    e' <- realizeAnno lang args e
+    e' <- realizeAnno lang args' e
     return $ LamS vs e'
 
   realizeExpr lang args _ cmeta (AppS f xs) = do
@@ -488,9 +493,10 @@ pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
 
 encode :: (Lang, [SAnno GMeta One (CMeta, IMeta)]) -> MorlocMonad Script
 encode (lang, xs) = do
+  let srcs = findSources xs
   g <- selectGrammar lang
   state <- MM.get
-  code <- mapM (codify g) xs >>= makePoolCode g
+  code <- mapM (codify g) xs >>= makePoolCode g srcs
   return $ Script
     { scriptBase = "pool"
     , scriptLang = lang
@@ -498,17 +504,17 @@ encode (lang, xs) = do
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude =
-        map MS.takeDirectory [s | Source _ _ (Just s) _ <- findSources2 xs]
+        map MS.takeDirectory [s | Source _ _ (Just s) _ <- srcs]
     }
 
 
-makePoolCode :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad MDoc
-makePoolCode g xs = do
-  srcs <- encodeSources g xs
+makePoolCode :: Grammar -> [Source] -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad MDoc
+makePoolCode g srcs xs = do
+  srcstrs <- encodeSources g srcs 
   let manifolds = conmap gatherManifolds xs
       signatures = conmap (encodeSignatures g) xs
   gMain g $ PoolMain
-    { pmSources = srcs
+    { pmSources = srcstrs
     , pmSignatures = signatures
     , pmPoolManifolds = manifolds
     , pmDispatchManifold = makeDispatchBuilder g xs
@@ -524,30 +530,38 @@ gatherManifolds = catMaybes . unpackSAnno f
     f _ _ _ = Nothing
 
 
-encodeSources :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> MorlocMonad [MDoc]
-encodeSources g xs = do
-  let srcs = findSources3 xs
-  fmap catMaybes $ mapM encodeSource srcs
+encodeSources :: Grammar -> [Source] -> MorlocMonad [MDoc]
+encodeSources g srcs =
+  mapM encodeSource (unique . mapMaybe srcPath $ srcs)
   where
-    encodeSource :: Source -> MorlocMonad (Maybe MDoc)
-    encodeSource src = case srcPath src of
-      (Just path) -> (Just . (gImport g) "") <$> (gPrepImport g) path
-      Nothing -> return $ Nothing
+    encodeSource :: Path -> MorlocMonad MDoc
+    encodeSource path = gImport g <$> pure "" <*> (gPrepImport g) path
 
 
-findSources2 :: [SAnno g One (CMeta, a)] -> [Source]
-findSources2 = nub . catMaybes . concat . map (unpackSAnno f)
+findSources :: [SAnno g One (CMeta, IMeta)] -> [Source]
+findSources = unique . concat . concat . map (unpackSAnno f)
   where
-    f :: SExpr g One (CMeta, a) -> g -> (CMeta, a) -> Maybe Source
-    f _ _ (c, _) = metaSource c
+    f :: SExpr g One (CMeta, IMeta) -> g -> (CMeta, IMeta) -> [Source]
+    f _ _ (c, i)
+      =  maybeToList (metaSource c)
+      ++ maybeToList (makeSrc <$> metaPacker i
+                              <*> pure (langOf' . metaType $ c)
+                              <*> metaPackerPath i)
+      ++ conmap toSource (metaArgs i)
 
+    toSource :: Argument -> [Source]
+    toSource r =
+      [ makeSrc (argPacker   r) (langOf' (argType r)) (argPackerPath   r)
+      , makeSrc (argUnpacker r) (langOf' (argType r)) (argUnpackerPath r)
+      ]
 
-findSources3 :: [SAnno g One (CMeta, a, b)] -> [Source]
-findSources3 = nub . catMaybes . concat . map (unpackSAnno f)
-  where
-    f :: SExpr g One (CMeta, a, b) -> g -> (CMeta, a, b) -> Maybe Source
-    f _ _ (c, _, _) = metaSource c
-
+    makeSrc :: Name -> Lang -> Path -> Source
+    makeSrc n l p = Source
+      { srcName = EV n
+      , srcLang = l
+      , srcPath = Just p
+      , srcAlias = EV n
+      }
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
 -- prototype definitions, but R and Python do not. Languages that do not
@@ -565,7 +579,7 @@ encodeSignatures g = map (makeSignature g) . catMaybes . unpackSAnno f where
 
   makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
   makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
-    { gfComments = ""
+    { gfComments = maybe "" (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
     , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
     , gfName = makeManifoldName m
     , gfArgs = map (makeArg g) (metaArgs i)
@@ -671,19 +685,20 @@ codify g (SAnno (One (AppS e args, (c, i))) m) = do
   let t = metaType c
   e2 <- codify g e
   args' <- mapM (codify g) args
-  mandoc <- makeManifoldDoc args' e2
+  mandoc <- makeManifoldDoc args' e2 (c, i, m)
   return $ SAnno (One (AppS e2 args', (c, i, mandoc))) m
   where
 
     makeManifoldDoc
       :: [SAnno GMeta One (CMeta, IMeta, MDoc)] -- inputs
       -> SAnno GMeta One (CMeta, IMeta, MDoc)
+      -> (CMeta, IMeta, GMeta)
       -> MorlocMonad MDoc
-    makeManifoldDoc inputs (SAnno (One (_, (c, i, _))) m) = do
-      let t = metaType c
+    makeManifoldDoc inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
+      let t = metaType c'
           otype = last (typeArgs t)
-          margs = metaArgs i
-      name <- case metaName m of
+          margs = metaArgs i'
+      name <- case metaName m' of
         (Just n) -> return n
         Nothing -> MM.throwError . OtherError $ "No name found for manifold"
       inputs' <- zipWithM (prepInput margs) [0..] inputs
@@ -750,7 +765,7 @@ codify g (SAnno (One (AppS e args, (c, i))) m) = do
 
 -------- Utility and lookup functions ----------------------------------------
 
-say :: MDoc -> MorlocMonad ()
+say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 unrollLambda :: Expr -> ([EVar], Expr)
