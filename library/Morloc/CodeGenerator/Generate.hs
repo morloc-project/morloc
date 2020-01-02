@@ -729,6 +729,7 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
       itypes = init (typeArgs ftype) -- input types
   g <- selectGrammar (langOf' ftype)
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
+  let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
   let mdoc = gFunction g $ GeneralFunction {
       gfComments = Just $ prettyType ftype <> line
     , gfReturnType = Just ((gShowType g) otype)
@@ -736,7 +737,7 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
     , gfArgs = map (prepArg g) args
     , gfBody =
         vsep (map snd inputs') <> line <>
-        (gReturn g $ (gCall g) (pretty v) (map fst inputs'))
+        (gReturn g $ (gCall g) (pretty srcName) (map fst inputs'))
     }
   return $ SAnno (One (VarS v, (c, i, mdoc))) m
   where
@@ -774,9 +775,12 @@ makeManifoldDoc g inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
   let t = metaType c'
       otype = last (typeArgs t)
       margs = metaArgs i'
-  name <- case metaName m' of
-    (Just n) -> return n
-    Nothing -> MM.throwError . OtherError $ "No name found for manifold"
+  -- let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
+  name <- case (metaName m', metaSource c') of
+    (_, Just (Source (EV x) _ _ _)) -> return x
+    (Just n, _) -> return n
+    _ -> MM.throwError . OtherError $ "No name found for manifold"
+
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   return . gFunction g $ GeneralFunction
     { gfComments = Just (prettyType t <> line)
