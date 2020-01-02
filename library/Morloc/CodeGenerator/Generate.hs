@@ -298,28 +298,52 @@ collect ms (evar', xs@(x:_)) = do
           , metaModule = moduleName m
           }
 
--- | Select a single concrete language for each sub-expression.
--- Store the concrete type and the general type (if available).
--- Select serialization functions.
+-- | Select a single concrete language for each sub-expression.  Store the
+-- concrete type and the general type (if available).  Select serialization
+-- functions (the serial map should not be needed after this step in the
+-- workflow).
 realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-realize h x = realizeAnno Nothing [] x where
+realize h x = realizeAnno True Nothing [] x where
 
   realizeAnno
-    :: Maybe Lang
+    :: Bool -- is this a top-level expression
+    -> Maybe Lang
     -> [Argument]
     -> SAnno GMeta Many [CMeta]
     -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-  realizeAnno lang args (SAnno (Many ((x, cmeta:_):_)) gmeta) = do
+  realizeAnno isTop lang args (SAnno (Many ((x, cmeta:_):_)) gmeta) = do
     x' <- realizeExpr lang args gmeta cmeta x
-    imeta <- makeIMeta x' cmeta args
+    args' <- handleArgsForSourced isTop cmeta x' args
+    imeta <- makeIMeta isTop x' cmeta args'
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
-  realizeAnno lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
+  realizeAnno _ lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
     "No valid cases found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
-  realizeAnno lang _ (SAnno (Many ((x, []):_)) gmeta) = MM.throwError . OtherError $
+  realizeAnno _ lang _ (SAnno (Many ((x, []):_)) gmeta) = MM.throwError . OtherError $
     "No valid cmeta found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
+
+  -- prepare arguments for top-level sourced expressions
+  handleArgsForSourced
+    :: Bool
+    -> CMeta
+    -> SExpr GMeta One (CMeta, IMeta)
+    -> [Argument]
+    -> MorlocMonad [Argument]
+  handleArgsForSourced True c (VarS x) _ = do
+    let ftype = metaType c -- full function type
+        otype = last (typeArgs ftype) -- output type
+        itypes = init (typeArgs ftype) -- input types
+        vars = variableStream (length itypes)
+    zipWithM (makeArg True h) vars itypes
+    where
+      -- infinite stream: ['a', 'b', ..., 'z', 'aa', 'ab', ..., 'aaa', ...]
+      variables = [1 ..] >>= flip replicateM ['a' .. 'z']
+      -- get the nth variable
+      variableStream :: Int -> [EVar]
+      variableStream i = map (EV . MT.pack) $ take i variables
+  handleArgsForSourced _ _ _ args = return args
 
   realizeExpr
     :: Maybe Lang -- ^ the parent language (not the language in CMeta)
@@ -333,35 +357,36 @@ realize h x = realizeAnno Nothing [] x where
   realizeExpr _ _ _ _ (StrS x) = return $ StrS x
   realizeExpr _ _ _ _ (VarS x) = return $ VarS x
   realizeExpr lang args _ _ (ListS xs) = do
-    xs' <- mapM (realizeAnno lang args) xs
+    xs' <- mapM (realizeAnno False lang args) xs
     return $ ListS xs'
   realizeExpr lang args _ _ (TupleS xs) = do
-    xs' <- mapM (realizeAnno lang args) xs
+    xs' <- mapM (realizeAnno False lang args) xs
     return $ TupleS xs'
   realizeExpr lang args _ _ (RecS entries) = do
-    vals <- mapM (realizeAnno lang args) (map snd entries)
+    vals <- mapM (realizeAnno False lang args) (map snd entries)
     return $ RecS (zip (map fst entries) vals)
 
   -- if the lambda is anonymous, the arguments from context are preserved
   realizeExpr lang args gmeta cmeta (LamS vs e) = do
     let isPacked = isNothing lang
         inputTypes = (init . typeArgs . metaType $ cmeta)
-    args' <- zipWithM (makeArg isPacked) vs inputTypes
+    args' <- zipWithM (makeArg isPacked h) vs inputTypes
       >>= updateArguments gmeta args
-    e' <- realizeAnno lang args' e
+    e' <- realizeAnno False lang args' e
     return $ LamS vs e'
 
   realizeExpr lang args _ cmeta (AppS f xs) = do
     let lang' = Just $ metaLang cmeta
-    f' <- realizeAnno lang' args f
-    xs' <- mapM (realizeAnno lang' args) xs
+    f' <- realizeAnno False lang' args f
+    xs' <- mapM (realizeAnno False lang' args) xs
     return (AppS f' xs')
   realizeExpr _ _ _ _ (ForeignS _ _) = error "This is unexpected"
 
   makeIMeta
-    :: (SExpr GMeta One (CMeta, IMeta))
+    :: Bool
+    -> (SExpr GMeta One (CMeta, IMeta))
     -> CMeta -> [Argument] -> MorlocMonad IMeta
-  makeIMeta sexpr cmeta args = do
+  makeIMeta isTop sexpr cmeta args = do
     case (selectFunction t Pack h) of
       (Just (packer, packerpath)) ->
         return $ IMeta
@@ -376,27 +401,12 @@ realize h x = realizeAnno Nothing [] x where
           , metaPackerPath = Nothing
           }
     where
-      t = case sexpr of
-        (AppS _ _) -> last $ typeArgs (metaType cmeta)
+      t = case (isTop, sexpr) of
+        (_, AppS _ _) -> last $ typeArgs (metaType cmeta)
+        (True, VarS _) -> case metaType cmeta of
+          t'@(FunT _ _) -> last $ typeArgs t'
+          t' -> t'
         _ -> metaType cmeta
-
-  makeArg :: Bool -> EVar -> Type -> MorlocMonad Argument
-  makeArg packed (EV n) t
-    | langOf t == Nothing = MM.throwError . OtherError $
-      "Cannot make an argument from the general type: " <> render (prettyType t)
-    | otherwise = do
-      case (selectFunction t Pack h, selectFunction t Unpack h) of
-        (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
-          return $ Argument
-            { argName = n
-            , argType = t
-            , argPacker = packer
-            , argPackerPath = packerpath
-            , argUnpacker = unpacker
-            , argUnpackerPath = unpackerpath
-            , argIsPacked = packed
-            }
-        _ -> MM.throwError . OtherError $ "Expected a packer and unpacker for argument"
 
   updateArguments :: GMeta -> [Argument] -> [Argument] -> MorlocMonad [Argument]
   updateArguments m oldargs newargs = case metaName m of
@@ -408,6 +418,24 @@ realize h x = realizeAnno Nothing [] x where
     Nothing -> do
       let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
       return $ newargs ++ oldargs'
+
+makeArg :: Bool -> SerialMap -> EVar -> Type -> MorlocMonad Argument
+makeArg packed h (EV n) t
+  | langOf t == Nothing = MM.throwError . OtherError $
+    "Cannot make an argument from the general type: " <> render (prettyType t)
+  | otherwise = do
+    case (selectFunction t Pack h, selectFunction t Unpack h) of
+      (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
+        return $ Argument
+          { argName = n
+          , argType = t
+          , argPacker = packer
+          , argPackerPath = packerpath
+          , argUnpacker = unpacker
+          , argUnpackerPath = unpackerpath
+          , argIsPacked = packed
+          }
+      _ -> MM.throwError . OtherError $ "Expected a packer and unpacker for argument"
 
 
 -- | choose a packer or unpacker for a given type
@@ -517,7 +545,8 @@ makePoolCode g srcs xs = do
 
 
 gatherManifolds :: SAnno g One (a, b, MDoc) -> [MDoc]
-gatherManifolds = catMaybes . unpackSAnno f
+gatherManifolds (SAnno (One (VarS _, (_, i, d))) _) = [d]
+gatherManifolds x = catMaybes . unpackSAnno f $ x
   where
     f :: SExpr g One (a, b, MDoc) -> g -> (a, b, MDoc) -> Maybe MDoc
     f (AppS _ _) _ (_, _, d) = Just d
@@ -563,29 +592,38 @@ findSources = unique . concat . concat . map (unpackSAnno f)
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One (CMeta, IMeta, MDoc) -> [MDoc]
-encodeSignatures g = map (makeSignature g) . catMaybes . unpackSAnno f where
-  f :: SExpr g One (c, i, d)
-    -> g
-    -> (c, i, d)
-    -> Maybe (g, c, i)
-  f (AppS _ _) g (c, i, _) = Just (g, c, i)
-  f (ForeignS _ _) g (c, i, _) = Just (g, c, i)
-  f _ _ _ = Nothing
+encodeSignatures g x =
+  (map (makeSignature g) . catMaybes . unpackSAnno f $ x) ++
+  maybeToList (getSourced g x)
+  where
+    f :: SExpr g One (c, i, d)
+      -> g
+      -> (c, i, d)
+      -> Maybe (g, c, i)
+    f (AppS _ _) g (c, i, _) = Just (g, c, i)
+    f (ForeignS _ _) g (c, i, _) = Just (g, c, i)
+    f _ _ _ = Nothing
 
-  makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
-  makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
-    { gfComments = fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
-    , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
-    , gfName = makeManifoldName m
-    , gfArgs = map (makeArg g) (metaArgs i)
-    , gfBody = ""
-    }
+    -- make the signature for an exported function that is directly sourced
+    -- such cases will always be at the top level, hence no recursion is needed
+    getSourced :: Grammar -> SAnno GMeta One (CMeta, IMeta, MDoc) -> Maybe MDoc
+    getSourced g (SAnno (One ((VarS v), (c, i, _))) m) = Just (makeSignature g (m, c, i))
+    getSourced _ _ = Nothing
 
-  makeArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-  makeArg g arg =
-    if argIsPacked arg
-      then (Just ((gShowType g) (gSerialType g)), pretty (argName arg))
-      else (Nothing, pretty (argName arg))
+    makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
+    makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
+      { gfComments = fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
+      , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
+      , gfName = makeManifoldName m
+      , gfArgs = map (makeArg' g) (metaArgs i)
+      , gfBody = ""
+      }
+
+    makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
+    makeArg' g arg =
+      if argIsPacked arg
+        then (Just ((gShowType g) (gSerialType g)), pretty (argName arg))
+        else (Nothing, pretty (argName arg))
 
 
 -- | Make a function for generating the code to dispatch from the pool main
@@ -597,62 +635,69 @@ makeDispatchBuilder g xs =
   (gSwitch g)
     (\(m, _, _) -> pretty (metaId m))
     (mainCall g)
-    switchList
+    (mapMaybe getPoolCall xs)
   where
-    switchList = [(m, c, i) | (SAnno (One (AppS _ _, (c, i, _))) m) <- xs]
-
+    getPoolCall :: SAnno GMeta One (CMeta, IMeta, MDoc) -> Maybe (GMeta, CMeta, IMeta)
+    getPoolCall (SAnno (One (AppS _ _, (c, i, _))) m) = Just (m, c, i)
+    getPoolCall (SAnno (One (VarS _,   (c, i, _))) m)
+      | (length (metaArgs i)) > 0 = Just (m, c, i)
+      | otherwise = Nothing
+    getPoolCall _ = Nothing
+ 
     mainCall :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
-    mainCall g (m, c, i) = (gCall g)
-      (pretty (fromJust $ metaPacker i))
-      [(gCall g)
-          (makeManifoldName m)
-          (take (length (metaArgs i))
-          (gCmdArgs g))]
+    mainCall g (m, c, i) = case metaPacker i of
+      Nothing -> error $
+        "Could not find packer for " <> show m
+      (Just packer) ->
+        (gCall g)
+          (pretty packer)
+          [(gCall g)
+              (makeManifoldName m)
+              (take (length (metaArgs i))
+              (gCmdArgs g))]
 
 codify
   :: Grammar
   -> SAnno GMeta One (CMeta, IMeta)
   -> MorlocMonad (SAnno GMeta One (CMeta, IMeta, MDoc))
+codify = codify' True
 
 -- | UniS
-codify g (SAnno (One (UniS, (c, i))) m) = return $ SAnno (One (UniS, (c, i, gNull g))) m
-
--- | VarS EVar
-codify _ (SAnno (One (VarS v, (c, i))) m) = return $ SAnno (One (VarS v, (c, i, pretty v))) m
+codify' _ g (SAnno (One (UniS, (c, i))) m) = return $ SAnno (One (UniS, (c, i, gNull g))) m
 
 -- | ListS [SAnno a]
-codify g (SAnno (One (ListS xs, (c, i))) m) = do
-  xs' <- mapM (codify g) xs
+codify' _ g (SAnno (One (ListS xs, (c, i))) m) = do
+  xs' <- mapM (codify' False g) xs
   let mdoc = (gList g) (map getdoc xs')
   return $ SAnno (One (ListS xs', (c, i, mdoc))) m
 
 -- | TupleS [SAnno a]
-codify g (SAnno (One (TupleS xs, (c, i))) m) = do
-  xs' <- mapM (codify g) xs
+codify' _ g (SAnno (One (TupleS xs, (c, i))) m) = do
+  xs' <- mapM (codify' False g) xs
   let mdoc = (gTuple g) (map getdoc xs')
   return $ SAnno (One (TupleS xs', (c, i, mdoc))) m
 
 -- | RecS [(EVar, SAnno a)]
-codify g (SAnno (One (RecS entries, (c, i))) m) = do
-  xs <- mapM (codify g) (map snd entries)
+codify' _ g (SAnno (One (RecS entries, (c, i))) m) = do
+  xs <- mapM (codify' False g) (map snd entries)
   let mdoc = (gRecord g) (zip (map (pretty . fst) entries) (map getdoc xs))
       sexpr = RecS (zip (map fst entries) xs)
   return $ SAnno (One (sexpr, (c, i, mdoc))) m
 
 -- | LamS [EVar] (SAnno a)
-codify g (SAnno (One (LamS vs x, (c, i))) m) = codify g x
+codify' _ g (SAnno (One (LamS vs x, (c, i))) m) = codify' False g x
 
 -- | NumS Scientific
-codify _ (SAnno (One (NumS x, (c, i))) m) = return $ SAnno (One (NumS x, (c, i, viaShow x))) m
+codify' _ _ (SAnno (One (NumS x, (c, i))) m) = return $ SAnno (One (NumS x, (c, i, viaShow x))) m
 
 -- | LogS Bool
-codify g (SAnno (One (LogS x, (c, i))) m) = return $ SAnno (One (LogS x, (c, i, (gBool g) x))) m
+codify' _ g (SAnno (One (LogS x, (c, i))) m) = return $ SAnno (One (LogS x, (c, i, (gBool g) x))) m
 
 -- | StrS MT.Text
-codify g (SAnno (One (StrS x, (c, i))) m) = return $ SAnno (One (StrS x, (c, i, (gQuote g) (pretty x)))) m
+codify' _ g (SAnno (One (StrS x, (c, i))) m) = return $ SAnno (One (StrS x, (c, i, (gQuote g) (pretty x)))) m
 
 -- | ForeignS Int Lang
-codify g (SAnno (One (ForeignS mid lang, (c, i))) m) = do
+codify' _ g (SAnno (One (ForeignS mid lang, (c, i))) m) = do
   let t = metaType c
   config <- MM.ask
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
@@ -675,86 +720,123 @@ codify g (SAnno (One (ForeignS mid lang, (c, i))) m) = do
         then pretty (argName r)
         else (gCall g) (pretty $ argUnpacker r) [pretty $ argName r]
 
--- | AppS (SAnno a) [SAnno a]
-codify g (SAnno (One (AppS e args, (c, i))) m) = do
-  let t = metaType c
-  e2 <- codify g e
-  args' <- mapM (codify g) args
-  mandoc <- makeManifoldDoc args' e2 (c, i, m)
-  return $ SAnno (One (AppS e2 args', (c, i, mandoc))) m
+-- | VarS EVar
+codify' False _ (SAnno (One (VarS v, (c, i))) m) = return $ SAnno (One (VarS v, (c, i, pretty v))) m
+codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
+  let args = metaArgs i
+      ftype = metaType c -- full function type
+      otype = last (typeArgs ftype) -- output type
+      itypes = init (typeArgs ftype) -- input types
+  g <- selectGrammar (langOf' ftype)
+  inputs' <- mapM (simplePrepInput g) (zip [0..] args)
+  let mdoc = gFunction g $ GeneralFunction {
+      gfComments = Just $ prettyType ftype <> line
+    , gfReturnType = Just ((gShowType g) otype)
+    , gfName = makeManifoldName m
+    , gfArgs = map (prepArg g) args
+    , gfBody =
+        vsep (map snd inputs') <> line <>
+        (gReturn g $ (gCall g) (pretty v) (map fst inputs'))
+    }
+  return $ SAnno (One (VarS v, (c, i, mdoc))) m
   where
+    simplePrepInput
+      :: Grammar
+      -> (Int, Argument)
+      -> MorlocMonad ( MDoc -- variable name
+                     , MDoc -- assignment code
+                     )
+    simplePrepInput g (i, r) = do
+      let varname = makeArgumentName i
+      return (varname, gAssign g $ GeneralAssignment
+         { gaType = Just . gShowType g . argType $ r
+         , gaName = varname
+         , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty (argName r)]
+         , gaArg = Nothing
+         })
 
-    makeManifoldDoc
-      :: [SAnno GMeta One (CMeta, IMeta, MDoc)] -- inputs
-      -> SAnno GMeta One (CMeta, IMeta, MDoc)
-      -> (CMeta, IMeta, GMeta)
-      -> MorlocMonad MDoc
-    makeManifoldDoc inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
-      let t = metaType c'
-          otype = last (typeArgs t)
-          margs = metaArgs i'
-      name <- case metaName m' of
-        (Just n) -> return n
-        Nothing -> MM.throwError . OtherError $ "No name found for manifold"
-      inputs' <- zipWithM (prepInput margs) [0..] inputs
-      return . gFunction g $ GeneralFunction
-        { gfComments = Just (prettyType t <> line)
-        , gfReturnType = Just ((gShowType g) otype)
-        , gfName = makeManifoldName m
-        , gfArgs = map (prepArg g) margs
-        , gfBody =
-            vsep (catMaybes (map snd inputs')) <> line <>
-            (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
+-- | AppS (SAnno a) [SAnno a]
+codify' _ g (SAnno (One (AppS e args, (c, i))) m) = do
+  let t = metaType c
+  e2 <- codify' False g e
+  args' <- mapM (codify' False g) args
+  mandoc <- makeManifoldDoc g args' e2 (c, i, m)
+  return $ SAnno (One (AppS e2 args', (c, i, mandoc))) m
+
+
+makeManifoldDoc
+  :: Grammar
+  -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -- inputs
+  -> SAnno GMeta One (CMeta, IMeta, MDoc)
+  -> (CMeta, IMeta, GMeta)
+  -> MorlocMonad MDoc
+makeManifoldDoc g inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
+  let t = metaType c'
+      otype = last (typeArgs t)
+      margs = metaArgs i'
+  name <- case metaName m' of
+    (Just n) -> return n
+    Nothing -> MM.throwError . OtherError $ "No name found for manifold"
+  inputs' <- zipWithM (prepInput g margs) [0..] inputs
+  return . gFunction g $ GeneralFunction
+    { gfComments = Just (prettyType t <> line)
+    , gfReturnType = Just ((gShowType g) otype)
+    , gfName = makeManifoldName m
+    , gfArgs = map (prepArg g) margs
+    , gfBody =
+        vsep (catMaybes (map snd inputs')) <> line <>
+        (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
+    }
+
+-- Handle preparation of arguments passed to a manifold. Return the name of the
+-- variable that will be used and an block of code that defines the variable
+-- (if necessary).
+prepInput
+  :: Grammar
+  -> [Argument] -- all arguments of the manifold
+  -> Int
+  -> SAnno GMeta One (CMeta, IMeta, MDoc) -- an input to the wrapped function
+  -> MorlocMonad (MDoc, Maybe MDoc)
+prepInput g rs mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
+  let varname = makeArgumentName mid
+      t = metaType c
+      mname = makeManifoldName m
+      ass = (gAssign g) $ GeneralAssignment
+        { gaType = Just . gShowType g . last . typeArgs $ t
+        , gaName = varname
+        , gaValue = (gCall g) mname (map (pretty . argName) rs)
+        , gaArg = Nothing
         }
+  return (varname, Just ass)
+prepInput g rs mid (SAnno (One (_, (c, i, d))) m) = do
+  let name = metaName m
+      varname = makeArgumentName mid
+      t = metaType c
+      arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
+  case (name, arg, fmap argIsPacked arg) of
+    (Just n, Just r, Just True) ->
+       return (varname, Just . gAssign g $ GeneralAssignment
+          { gaType = Just . gShowType g . argType $ r
+          , gaName = varname
+          , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty name]
+          , gaArg = Nothing
+          }
+       )
+    -- the argument is used in the wrapped function, but is not serialized
+    (Just n, _, Just False) -> return (pretty name, Nothing)
+    -- the argument is not used in the wrapped function
+    (Just n, _, Nothing) -> return (pretty name, Nothing)
+    x -> MM.throwError . OtherError $ MT.show' x
 
-    -- Handle preparation of arguments passed to a manifold. Return the name of the
-    -- variable that will be used and an block of code that defines the variable
-    -- (if necessary).
-    prepInput
-      :: [Argument] -- all arguments of the manifold
-      -> Int
-      -> SAnno GMeta One (CMeta, IMeta, MDoc) -- an input to the wrapped function
-      -> MorlocMonad (MDoc, Maybe MDoc)
-    prepInput rs mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
-      let varname = makeArgumentName mid
-          t = metaType c
-          mname = makeManifoldName m
-          ass = (gAssign g) $ GeneralAssignment
-            { gaType = Just . gShowType g . last . typeArgs $ t
-            , gaName = varname
-            , gaValue = (gCall g) mname (map (pretty . argName) rs)
-            , gaArg = Nothing
-            }
-      return (varname, Just ass)
-    prepInput rs mid (SAnno (One (_, (c, i, d))) m) = do
-      let name = metaName m
-          varname = makeArgumentName mid
-          t = metaType c
-          arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
-      case (name, arg, fmap argIsPacked arg) of
-        (Just n, Just r, Just True) ->
-           return (varname, Just . gAssign g $ GeneralAssignment
-              { gaType = Just . gShowType g . argType $ r
-              , gaName = varname
-              , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty name]
-              , gaArg = Nothing
-              }
-           )
-        -- the argument is used in the wrapped function, but is not serialized
-        (Just n, _, Just False) -> return (pretty name, Nothing)
-        -- the argument is not used in the wrapped function
-        (Just n, _, Nothing) -> return (pretty name, Nothing)
-        x -> MM.throwError . OtherError $ MT.show' x
-
-    -- | Serialize the result of a call if a serialization function is defined.
-    -- Presumably, if no serialization function is given, then the argument is
-    -- either a native construct or will be passed on in serialized form.
-    prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-    prepArg g r = (Just . gShowType g $ t, pretty n) where
-      t = if argIsPacked r
-            then gSerialType g
-            else argType r
-      n = argName r
+-- | Serialize the result of a call if a serialization function is defined.
+-- Presumably, if no serialization function is given, then the argument is
+-- either a native construct or will be passed on in serialized form.
+prepArg :: Grammar -> Argument -> (Maybe MDoc, MDoc)
+prepArg g r = (Just . gShowType g $ t, pretty n) where
+  t = if argIsPacked r
+        then gSerialType g
+        else argType r
+  n = argName r
 
 
 
