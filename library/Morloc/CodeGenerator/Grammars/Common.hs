@@ -155,7 +155,7 @@ data GeneralAssignment =
 
 data GeneralFunction =
   GeneralFunction
-    { gfComments :: MDoc
+    { gfComments :: Maybe MDoc
     , gfReturnType :: Maybe MDoc -- ^ concrete return type
     , gfName :: MDoc -- ^ function name
     , gfArgs :: [(Maybe MDoc, MDoc)] -- ^ (variable concrete type, variable name)

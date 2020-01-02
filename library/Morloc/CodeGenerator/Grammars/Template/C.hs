@@ -78,7 +78,7 @@ gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> lin
   -- FIXME: do I really not need this?
   -- rargs = tupled (map snd (gfArgs gf))
   head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
-  comments = gfComments gf
+  comments = maybe "" gComment' (gfComments gf)
 
 gSignature' :: GeneralFunction -> MDoc
 gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)

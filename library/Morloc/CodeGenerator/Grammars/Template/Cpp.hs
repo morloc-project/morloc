@@ -75,18 +75,20 @@ gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
-gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> line) where
+gFunction' gf = comments <> block head' (gfBody gf) <> line where
   targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
   -- -- do I not need this?
   -- rargs = tupled (map snd (gfArgs gf))
   head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
-  comments = gComment' (gfComments gf)
+  comments = maybe "" gComment' (gfComments gf)
 
 gSignature' :: GeneralFunction -> MDoc
-gSignature' gf =  gComment' (gfComments gf)
+gSignature' gf =  comment 
                <> (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
                <> tupled (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
                <> ";"
+  where
+    comment = maybe "" gComment' (gfComments gf)
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> integer i
@@ -167,12 +169,9 @@ gForeignCall' fc = gCall' "foreign_call" [hsep $ punctuate " + " (joinStr (fcdCa
 gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
   where
-    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
-      caseBlock = vsep (map asCase cases) <> line
-      asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
-
-    blockC :: MDoc -> MDoc
-    blockC x = "{" <> line <> "  " <> indent 2 x <> line <> "}"
+    switchC i cases = block (gCall' "switch" [i]) caseBlock where
+      caseBlock = vsep (map asCase cases)
+      asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 4 $ caseC body)
 
     caseC :: MDoc -> MDoc
     caseC body = var <> " = " <> body <> ";" <> line <> "break;"
@@ -188,25 +187,25 @@ gShowType' = MTM.buildConcreteType mkfun mkrec where
   mkrec :: [(MDoc, MDoc)] -> MDoc
   mkrec _ = "RECORD!!!"
 
+block :: MDoc -> MDoc -> MDoc
+block header body = align . vsep $ [header, "{", gIndent' body, "}"]
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>
-
 #include <iostream>
 #include <functional>
-
 #{vsep (pmSources pm)}
 
 #{vsep (pmSignatures pm)}
 
 #{vsep (pmPoolManifolds pm)}
-
-int main(int argc, char * argv[]){
-  int cmdID;
-  std::string result;
-  cmdID = std::stoi(argv[1]);
-  #{(pmDispatchManifold pm) "cmdID" "result"}
-  std::cout << result << std::endl;
-  return 0;
+int main(int argc, char * argv[])
+{
+    int cmdID;
+    std::string result;
+    cmdID = std::stoi(argv[1]);
+    #{(pmDispatchManifold pm) "cmdID" "result"}
+    std::cout << result << std::endl;
+    return 0;
 }
 |]

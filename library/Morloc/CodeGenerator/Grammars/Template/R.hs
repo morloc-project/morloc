@@ -64,10 +64,12 @@ gCall' n args = n <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
-  =  gComment' (gfComments gf)
+  =  comments
   <> gfName gf <> " <- function"
   <> tupled (map snd (gfArgs gf))
   <> braces (line <> gIndent' (gfBody gf) <> line)
+  where
+    comments = maybe "" gComment' (gfComments gf)
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))

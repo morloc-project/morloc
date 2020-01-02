@@ -173,10 +173,6 @@ collect ms (evar', xs@(x:_)) = do
       -> MorlocMonad (SAnno GMeta Many [CMeta])
     collectAnno args m (AnnE e ts) = do
       gmeta <- makeGMeta (getExprName e) m
-      say $ "---------------------------"
-      say $ "gmeta:" <+> viaShow gmeta
-      say $ "e:" <+> prettyExpr e      
-      say $ "---------------------------"
       -- remove general types
       let ts' = filter (isJust . langOf) ts
       trees <- collectExpr args m ts' e
@@ -272,7 +268,6 @@ collect ms (evar', xs@(x:_)) = do
     makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
     makeGMeta evar m = do
       i <- MM.getCounter
-      say $ viaShow (evar, i)
       let name = fmap (\(EV x) -> x) evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
         (Just (TypeSet (Just e) _)) -> do
@@ -504,7 +499,7 @@ encode (lang, xs) = do
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude =
-        map MS.takeDirectory [s | Source _ _ (Just s) _ <- srcs]
+        unique . map MS.takeDirectory $ [s | Source _ _ (Just s) _ <- srcs]
     }
 
 
@@ -579,7 +574,7 @@ encodeSignatures g = map (makeSignature g) . catMaybes . unpackSAnno f where
 
   makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
   makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
-    { gfComments = maybe "" (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
+    { gfComments = fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
     , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
     , gfName = makeManifoldName m
     , gfArgs = map (makeArg g) (metaArgs i)
@@ -703,7 +698,7 @@ codify g (SAnno (One (AppS e args, (c, i))) m) = do
         Nothing -> MM.throwError . OtherError $ "No name found for manifold"
       inputs' <- zipWithM (prepInput margs) [0..] inputs
       return . gFunction g $ GeneralFunction
-        { gfComments = prettyType t <> line
+        { gfComments = Just (prettyType t <> line)
         , gfReturnType = Just ((gShowType g) otype)
         , gfName = makeManifoldName m
         , gfArgs = map (prepArg g) margs
