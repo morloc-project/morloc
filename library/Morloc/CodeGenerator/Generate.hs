@@ -721,7 +721,9 @@ codify' _ g (SAnno (One (ForeignS mid lang, (c, i))) m) = do
         else (gCall g) (pretty $ argUnpacker r) [pretty $ argName r]
 
 -- | VarS EVar
-codify' False _ (SAnno (One (VarS v, (c, i))) m) = return $ SAnno (One (VarS v, (c, i, pretty v))) m
+codify' False _ (SAnno (One (VarS v, (c, i))) m) = do
+  let name = maybe v srcName (metaSource c)
+  return $ SAnno (One (VarS v, (c, i, pretty name))) m
 codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
   let args = metaArgs i
       ftype = metaType c -- full function type
@@ -812,6 +814,8 @@ prepInput g rs mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
         , gaArg = Nothing
         }
   return (varname, Just ass)
+-- handle sourced files, which should be used as unaliased variables
+prepInput _ _ _ (SAnno (One (VarS _, (CMeta _ _ (Just v) _, _, _))) _) = return (pretty (srcName v), Nothing)
 prepInput g rs mid (SAnno (One (_, (c, i, d))) m) = do
   let name = metaName m
       varname = makeArgumentName mid
