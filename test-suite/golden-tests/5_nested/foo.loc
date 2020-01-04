@@ -1,13 +1,18 @@
-import math (mul, mean, sqrt, sum);
-import math (sqrt)
-import cppbase (map);
+import math (mul);
 
-export square;
-export rms;
-export sqrtsum;
-export nested_map;
+export fourth;
 
 square x = mul x x;
-rms xs = sqrt (sum (map square xs));
-sqrtsum xs = sum (map sqrt xs);
-nested_map xs = sum (map square (map sqrt xs));
+fourth y = square y;
+
+{-
+
+fourth = \y -> square y
+square = \x -> mul x x
+
+fourth = \y -> (\x -> mul x x) y
+
+AppS (\x -> mul x x) y
+     name :: fourth
+
+-}

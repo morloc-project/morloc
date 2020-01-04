@@ -75,20 +75,17 @@ gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
-gFunction' gf = comments <> block head' (gfBody gf) <> line where
+gFunction' gf = gComment' (gfComments gf) <> block head' (gfBody gf) <> line where
   targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
   -- -- do I not need this?
   -- rargs = tupled (map snd (gfArgs gf))
   head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
-  comments = maybe "" gComment' (gfComments gf)
 
 gSignature' :: GeneralFunction -> MDoc
-gSignature' gf =  comment 
+gSignature' gf =  gComment' (gfComments gf) 
                <> (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
                <> tupled (map (\(t, v) -> (fromMaybeType t) <+> v) (gfArgs gf))
                <> ";"
-  where
-    comment = maybe "" gComment' (gfComments gf)
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> integer i
@@ -98,8 +95,8 @@ gCurry' f args i
   = gCall' "std::bind"
   $ (f:args) ++ map (\i -> "std::placeholders::_" <> pretty i) (take i ([1..] :: [Int]))
 
-gComment' :: MDoc -> MDoc
-gComment' d = "/* " <> d <> " */" <> line
+gComment' :: [MDoc] -> MDoc
+gComment' ds = "/* " <> vsep ds <> " */" <> line
 
 gReturn' :: MDoc -> MDoc
 gReturn' x = "return" <+> x <> ";"

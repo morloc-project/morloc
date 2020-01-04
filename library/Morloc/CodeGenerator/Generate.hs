@@ -53,19 +53,34 @@ generate ms = do
   smap <- findSerializers ms
 
   -- translate modules into bitrees
-  ast <- roots modmap >>= mapM (collect modmap) >>= mapM (realize smap)
+  ast
+    -- find each term that is exported to the nexus
+    <- roots modmap  -- [(EVar, [TermOrigin])]
+    -- turn each term into an ambiguous call tree
+    >>= mapM (collect modmap)   -- [SAnno GMeta Many [CMeta]]
+    -- select a single instance at each node in the tree
+    -- also resolve the manifold arguments that are in scope for each expression
+    >>= mapM (realize smap)  -- [SAnno GMeta One (CMeta, IMeta)]
 
   -- build nexus
   -- -----------
-  -- Each (Type, Int, Name) tuple passed to Nexus.generate maps to nexus subcommand.
-  -- Each nexus subcommand calls one function from one of the language-specific pool.
+  -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate [ (metaType c, poolId m x, metaName m)
                           | SAnno (One (x, (c, _))) m <- ast
                           ]
 
   -- for each language, collect all functions into one "pool"
-  pools <- mapM segment ast |>> concat >>= pool >>= mapM encode
+  pools
+    -- Separate the call trees into mono-lingual segments terminated in
+    -- primitives or foreign calls.
+    <- mapM segment ast |>> concat
+    -- Gather segments into pools, currently tihs entails gathering all
+    -- segments from a given language into one pool. Later it may be more
+    -- nuanced.
+    >>= pool
+    -- Generate the code for each pool
+    >>= mapM encode
 
   -- return the nexus script and each pool script
   return (nexus, pools)
@@ -139,7 +154,7 @@ collect
 collect ms (EV v, []) = MM.throwError . OtherError $
   "No origin found for variable '" <> v <> "'"
 collect ms (evar', xs@(x:_)) = do
-  gmeta <- makeGMeta (Just evar') (getTermModule x)
+  gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
   return $ SAnno (Many trees) gmeta
   where
@@ -172,7 +187,8 @@ collect ms (evar', xs@(x:_)) = do
       -> Expr
       -> MorlocMonad (SAnno GMeta Many [CMeta])
     collectAnno args m (AnnE e ts) = do
-      gmeta <- makeGMeta (getExprName e) m
+      gtype <- getGeneralType ts
+      gmeta <- makeGMeta (getExprName e) m gtype
       -- remove general types
       let ts' = filter (isJust . langOf) ts
       trees <- collectExpr args m ts' e
@@ -265,8 +281,8 @@ collect ms (evar', xs@(x:_)) = do
       return [(sexpr, cmeta)]
 
     -- | Find info common across realizations of a given term in a given module
-    makeGMeta :: Maybe EVar -> Module -> MorlocMonad GMeta
-    makeGMeta evar m = do
+    makeGMeta :: Maybe EVar -> Module -> Maybe Type -> MorlocMonad GMeta
+    makeGMeta evar m gtype = do
       i <- MM.getCounter
       let name = fmap (\(EV x) -> x) evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
@@ -274,7 +290,7 @@ collect ms (evar', xs@(x:_)) = do
           return $ GMeta
             { metaId = i
             , metaName = name
-            , metaGeneralType = Just (etype e)
+            , metaGeneralType = maybe (Just (etype e)) Just gtype
             , metaProperties = eprop e
             , metaConstraints = econs e
             }
@@ -282,7 +298,7 @@ collect ms (evar', xs@(x:_)) = do
           return $ GMeta
             { metaId = i
             , metaName = name
-            , metaGeneralType = Nothing
+            , metaGeneralType = gtype
             , metaProperties = Set.empty
             , metaConstraints = Set.empty
             }
@@ -306,7 +322,7 @@ realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-realize h x = realizeAnno True Nothing [] x where
+realize h x = say "-- realize" >> realizeAnno True Nothing [] x where
 
   realizeAnno
     :: Bool -- is this a top-level expression
@@ -318,6 +334,11 @@ realize h x = realizeAnno True Nothing [] x where
     x' <- realizeExpr lang args gmeta cmeta x
     args' <- handleArgsForSourced isTop cmeta x' args
     imeta <- makeIMeta isTop x' cmeta args'
+
+    say $ pretty (metaId gmeta) <+> descSExpr x <> ":"
+        <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
+        <+> maybe "<untyped>" prettyType (metaGeneralType gmeta) 
+
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
   realizeAnno _ lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
     "No valid cases found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
@@ -612,7 +633,8 @@ encodeSignatures g x =
 
     makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
     makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
-      { gfComments = fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
+      { gfComments = maybeToList $
+          fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
       , gfName = makeManifoldName m
       , gfArgs = map (makeArg' g) (metaArgs i)
@@ -733,7 +755,7 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
   let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
   let mdoc = gFunction g $ GeneralFunction {
-      gfComments = Just $ prettyType ftype <> line
+      gfComments = comments
     , gfReturnType = Just ((gShowType g) otype)
     , gfName = makeManifoldName m
     , gfArgs = map (prepArg g) args
@@ -743,6 +765,13 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
     }
   return $ SAnno (One (VarS v, (c, i, mdoc))) m
   where
+    comments = catMaybes
+      [ Just "From A"
+      , Just (pretty v)
+      , fmap (signature (metaName m) Nothing) (metaGeneralType m)
+      , Just $ signature (metaName m) (Just (metaLang c)) (metaType c)
+      ]
+
     simplePrepInput
       :: Grammar
       -> (Int, Argument)
@@ -770,12 +799,12 @@ codify' _ g (SAnno (One (AppS e args, (c, i))) m) = do
 makeManifoldDoc
   :: Grammar
   -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -- inputs
-  -> SAnno GMeta One (CMeta, IMeta, MDoc)
-  -> (CMeta, IMeta, GMeta)
+  -> SAnno GMeta One (CMeta, IMeta, MDoc) -- the function
+  -> (CMeta, IMeta, GMeta) -- the AppS meta data
   -> MorlocMonad MDoc
-makeManifoldDoc g inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
-  let t = metaType c'
-      otype = last (typeArgs t)
+makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
+  let ftype = metaType c'
+      otype = last (typeArgs ftype)
       margs = metaArgs i'
   -- let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
   name <- case (metaName m', metaSource c') of
@@ -785,7 +814,12 @@ makeManifoldDoc g inputs (SAnno (One (_, (c', i', _))) m') (c, i, m) = do
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   return . gFunction g $ GeneralFunction
-    { gfComments = Just (prettyType t <> line)
+    { gfComments = catMaybes $
+        [ Just "From B"
+        , Just (descSExpr x)
+        , fmap (signature (metaName m') Nothing) (metaGeneralType m')
+        , Just $ signature (metaName m') (Just (metaLang c)) (metaType c)
+        ]
     , gfReturnType = Just ((gShowType g) otype)
     , gfName = makeManifoldName m
     , gfArgs = map (prepArg g) margs
@@ -803,14 +837,14 @@ prepInput
   -> Int
   -> SAnno GMeta One (CMeta, IMeta, MDoc) -- an input to the wrapped function
   -> MorlocMonad (MDoc, Maybe MDoc)
-prepInput g rs mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
+prepInput g _ mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
   let varname = makeArgumentName mid
       t = metaType c
       mname = makeManifoldName m
       ass = (gAssign g) $ GeneralAssignment
         { gaType = Just . gShowType g . last . typeArgs $ t
         , gaName = varname
-        , gaValue = (gCall g) mname (map (pretty . argName) rs)
+        , gaValue = (gCall g) mname (map (pretty . argName) (metaArgs i))
         , gaArg = Nothing
         }
   return (varname, Just ass)
@@ -931,6 +965,23 @@ sannoType = sannoWithC (metaType . fst)
 
 getdoc :: SAnno g One (a, b, MDoc) -> MDoc
 getdoc = sannoWithC third
+
+descSExpr :: SExpr g f c -> MDoc
+descSExpr (UniS) = "UniS"
+descSExpr (VarS v) = "VarS" <+> pretty v
+descSExpr (ListS _) = "ListS"
+descSExpr (TupleS _) = "TupleS"
+descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
+descSExpr (AppS _ _) = "AppS"
+descSExpr (NumS _) = "NumS"
+descSExpr (LogS _) = "LogS"
+descSExpr (StrS _) = "StrS"
+descSExpr (RecS _) = "RecS"
+descSExpr (ForeignS i lang) = "ForeignS" <+> pretty i <+> viaShow lang
+
+signature :: Maybe Name -> Maybe Lang -> Type -> MDoc
+signature n l t
+  = maybe "_" pretty n <+> maybe "" (\l' -> " " <> viaShow l') l <+> "::" <+> prettyType t
 
 {- | Find exported expressions.
 

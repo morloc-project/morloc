@@ -75,7 +75,7 @@ gSerialType' = VarT (TV (Just Python3Lang) "str")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
-  (Just t) -> gaName ga <> " = " <> gaValue ga <+> gComment' ("::" <+> t)
+  (Just t) -> gaName ga <> " = " <> gaValue ga <+> gComment' ["::" <+> t]
   Nothing  -> gaName ga <> " = " <> gaValue ga
 
 gCall' :: MDoc -> [MDoc] -> MDoc
@@ -83,12 +83,10 @@ gCall' n args = n <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
-  =  comments
+  =  gComment' (gfComments gf)
   <> "def "
   <> gfName gf <> tupled (map snd (gfArgs gf)) <> ":"
   <> line <> gIndent' (gfBody gf) <> line
-  where
-    comments = maybe "" gComment' (gfComments gf)
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))
@@ -100,8 +98,8 @@ gCurry' f args i
       then ["x"]
       else map (\i' -> "x" <> pretty i') (take i ([1..] :: [Int]))
 
-gComment' :: MDoc -> MDoc
-gComment' d = "# " <> d
+gComment' :: [MDoc] -> MDoc
+gComment' ds = vsep ["\"\"\"", vsep ds, "\"\"\""]
 
 gReturn' :: MDoc -> MDoc
 gReturn' x = gCall' "return" [x]

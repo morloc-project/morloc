@@ -56,7 +56,7 @@ gSerialType' = VarT (TV (Just RLang) "character")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
-  (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ("::" <+> t)
+  (Just t) -> gaName ga <> " <- " <> gaValue ga <+> gComment' ["::" <+> t]
   Nothing  -> gaName ga <> " <- " <> gaValue ga
 
 gCall' :: MDoc -> [MDoc] -> MDoc
@@ -64,12 +64,10 @@ gCall' n args = n <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
-  =  comments
+  =  gComment' (gfComments gf)
   <> gfName gf <> " <- function"
   <> tupled (map snd (gfArgs gf))
   <> braces (line <> gIndent' (gfBody gf) <> line)
-  where
-    comments = maybe "" gComment' (gfComments gf)
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))
@@ -81,8 +79,8 @@ gCurry' f args i
       then ["x"]
       else map (\i' -> pretty i') (take i ([1..] :: [Int]))
 
-gComment' :: MDoc -> MDoc
-gComment' d = "# " <> d
+gComment' :: [MDoc] -> MDoc
+gComment' ds = vsep (map (\d -> "#" <+> d) ds) <> line
 
 gReturn' :: MDoc -> MDoc
 gReturn' = id

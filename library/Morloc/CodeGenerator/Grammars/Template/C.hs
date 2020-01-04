@@ -73,12 +73,15 @@ gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
-gFunction' gf = comments <> head' <> braces (line <> gIndent' (gfBody gf) <> line) where
-  targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
-  -- FIXME: do I really not need this?
-  -- rargs = tupled (map snd (gfArgs gf))
-  head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
-  comments = maybe "" gComment' (gfComments gf)
+gFunction' gf
+  = gComment' (gfComments gf)
+  <> head' <> braces (line <> gIndent' (gfBody gf) <> line)
+  where
+    targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
+    -- FIXME: do I really not need this?
+    -- rargs = tupled (map snd (gfArgs gf))
+    head' = (fromMaybeType (gfReturnType gf)) <+> gfName gf <> targs
+    comments = maybe "" 
 
 gSignature' :: GeneralFunction -> MDoc
 gSignature' gf =  (fromMaybeType (gfReturnType gf)) <+> (gfName gf)
@@ -91,8 +94,8 @@ gId2Function' i = "m" <> pretty i
 gCurry' :: MDoc -> [MDoc] -> Int -> MDoc
 gCurry' _ _ _ = error "Currying is not supported in C"
 
-gComment' :: MDoc -> MDoc
-gComment' d = "/* " <> d <> " */"
+gComment' :: [MDoc] -> MDoc
+gComment' ds = "/* " <> vsep ds <> " */" <> line
 
 gReturn' :: MDoc -> MDoc
 gReturn' x = "return" <+> x <> ";"

@@ -88,6 +88,7 @@ data IMeta = IMeta {
   , metaPackerPath :: Maybe Path  -- ^ path to the packer function
 } deriving (Show, Ord, Eq)
 
+-- | An argument that is passed to a manifold
 data Argument = Argument {
     argName :: Name
   , argType :: Type
@@ -116,7 +117,7 @@ data Grammar =
              -> [MDoc] -- arguments that are partially applied
              -> Int -- number of remaining arguments
              -> MDoc
-    , gComment :: MDoc -> MDoc
+    , gComment :: [MDoc] -> MDoc
     , gReturn :: MDoc -> MDoc
     , gQuote :: MDoc -> MDoc
     , gImport :: MDoc -> MDoc -> MDoc
@@ -155,7 +156,7 @@ data GeneralAssignment =
 
 data GeneralFunction =
   GeneralFunction
-    { gfComments :: Maybe MDoc
+    { gfComments :: [MDoc]
     , gfReturnType :: Maybe MDoc -- ^ concrete return type
     , gfName :: MDoc -- ^ function name
     , gfArgs :: [(Maybe MDoc, MDoc)] -- ^ (variable concrete type, variable name)
