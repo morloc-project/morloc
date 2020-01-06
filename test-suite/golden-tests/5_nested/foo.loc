@@ -1,18 +1,9 @@
 import math (mul);
+import math (sqrt)
+import cppbase (map);
 
+export square;
 export fourth;
 
 square x = mul x x;
-fourth y = square y;
-
-{-
-
-fourth = \y -> square y
-square = \x -> mul x x
-
-fourth = \y -> (\x -> mul x x) y
-
-AppS (\x -> mul x x) y
-     name :: fourth
-
--}
+fourth x = mul (square x) (square x); 

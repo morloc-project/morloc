@@ -645,7 +645,7 @@ encodeSignatures g x =
     makeArg' g arg =
       if argIsPacked arg
         then (Just ((gShowType g) (gSerialType g)), pretty (argName arg))
-        else (Nothing, pretty (argName arg))
+        else (Just ((gShowType g) (argType arg)), pretty (argName arg))
 
 
 -- | Make a function for generating the code to dispatch from the pool main
@@ -805,12 +805,18 @@ makeManifoldDoc
 makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
   let ftype = metaType c'
       otype = last (typeArgs ftype)
-      margs = metaArgs i'
-  -- let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
-  name <- case (metaName m', metaSource c') of
-    (_, Just (Source (EV x) _ _ _)) -> return x
-    (Just n, _) -> return n
-    _ -> MM.throwError . OtherError $ "No name found for manifold"
+      margs = metaArgs i
+
+  say $ pretty (metaId m) <+> pretty (metaId m') <+> descSExpr x
+      -- <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
+      -- <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
+
+  innerCall <- case x of
+    (AppS _ _) -> return $ makeManifoldName m'
+    _ -> case (metaName m', metaSource c') of
+      (_, Just (Source (EV x) _ _ _)) -> return (pretty x)
+      (Just n, _) -> return (pretty n)
+      _ -> MM.throwError . OtherError $ "No name found for manifold"
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   return . gFunction g $ GeneralFunction
@@ -825,7 +831,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
     , gfArgs = map (prepArg g) margs
     , gfBody =
         vsep (catMaybes (map snd inputs')) <> line <>
-        (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
+        (gReturn g $ (gCall g) innerCall (map fst inputs'))
     }
 
 -- Handle preparation of arguments passed to a manifold. Return the name of the
