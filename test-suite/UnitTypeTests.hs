@@ -202,6 +202,12 @@ typeOrderTests =
         "mostSpecificSubtypes"
         (MP.mostSpecificSubtypes num [forall ["a"] (var "a")])
         [forall ["a"] (var "a")]
+
+    -- test mostSpecificSubtypes different languages
+    , testEqual
+        "mostSpecificSubtypes"
+        (MP.mostSpecificSubtypes (varc RLang "num") [forallc CLang ["a"] (var "a")])
+        []
     ]
 
 unitTypeTests =

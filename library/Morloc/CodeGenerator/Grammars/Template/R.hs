@@ -68,6 +68,7 @@ gFunction' gf
   <> gfName gf <> " <- function"
   <> tupled (map snd (gfArgs gf))
   <> braces (line <> gIndent' (gfBody gf) <> line)
+  <> line
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))

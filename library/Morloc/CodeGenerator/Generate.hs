@@ -55,7 +55,7 @@ generate ms = do
   -- translate modules into bitrees
   ast
     -- find each term that is exported to the nexus
-    <- roots modmap  -- [(EVar, [TermOrigin])]
+    <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CMeta]]
     -- select a single instance at each node in the tree
@@ -123,7 +123,7 @@ findSerializers ms = return $ SerialMap
     = Map.fromList
     . map (\(t, x) -> (getType p t, x))
     . mapSum
-    . Map.mapWithKey (\v t -> map (g m) (f p v t))
+    . Map.mapWithKey (\v t -> conmap (g m) (f p v t))
     $ moduleTypeMap m
 
   f :: Property -> EVar -> TypeSet -> [(Type, EVar)]
@@ -133,10 +133,10 @@ findSerializers ms = return $ SerialMap
       else [(etype t, v) | t <- ts, Set.member p (eprop t)]
   f p v (TypeSet Nothing ts) = [(etype t, v) | t <- ts, Set.member p (eprop t)]
 
-  g :: Module -> (Type, EVar) -> (Type, (Name, Path))
+  g :: Module -> (Type, EVar) -> [(Type, (Name, Path))]
   g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
-    (Just (Source (EV name) _ (Just path) _)) -> (t, (name, path))
-    _ -> error "something evil this way comes"
+    (Just (Source (EV name) _ (Just path) _)) -> [(t, (name, path))]
+    _ -> []
 
   -- Get the type that is being serialized or deserialized
   getType :: Property -> Type -> Type
@@ -246,7 +246,7 @@ collect ms (evar', xs@(x:_)) = do
       es' <- mapM (collectAnno args m) (map snd entries)
       let entries' = zip (map fst entries) es'
       simpleCollect (RecS entries') m ts
-    collectExpr args m ts e@(LamE _ _) =
+    collectExpr args m ts e@(LamE v _) =
       case unrollLambda e of
         (args', e') -> do
           e'' <- collectAnno (Set.union args (Set.fromList args')) m e'
@@ -537,7 +537,7 @@ pool = return . groupSort . map (\s -> (langOf' (sannoType s), s))
 
 encode :: (Lang, [SAnno GMeta One (CMeta, IMeta)]) -> MorlocMonad Script
 encode (lang, xs) = do
-  let srcs = findSources xs
+  let srcs = filter (\src -> srcLang src == lang) (findSources xs)
   g <- selectGrammar lang
   state <- MM.get
   code <- mapM (codify g) xs >>= makePoolCode g srcs
@@ -874,7 +874,7 @@ prepInput g rs mid (SAnno (One (_, (c, i, d))) m) = do
     (Just n, _, Just False) -> return (pretty name, Nothing)
     -- the argument is not used in the wrapped function
     (Just n, _, Nothing) -> return (pretty name, Nothing)
-    x -> MM.throwError . OtherError $ MT.show' x
+    x -> MM.throwError . OtherError $ "import prep error: " <> MT.show' x
 
 -- | Serialize the result of a call if a serialization function is defined.
 -- Presumably, if no serialization function is given, then the argument is
@@ -895,6 +895,8 @@ say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 unrollLambda :: Expr -> ([EVar], Expr)
 unrollLambda (LamE v e2) = case unrollLambda e2 of
+  (vs, e) -> (v:vs, e)
+unrollLambda (AnnE (LamE v e2) _) = case unrollLambda e2 of
   (vs, e) -> (v:vs, e)
 unrollLambda e = ([], e)
 
