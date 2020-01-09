@@ -54,15 +54,14 @@ prettyMVar :: MVar -> Doc AnsiStyle
 prettyMVar (MV x) = pretty x
 
 prettyModule :: Module -> Doc AnsiStyle
-prettyModule m =
-  prettyMVar (moduleName m) <+>
-  braces (line <> (indent 4 (prettyBlock m)) <> line)
+prettyModule m = block 2 (prettyMVar (moduleName m)) (prettyBlock m)
 
 prettyBlock :: Module -> Doc AnsiStyle
-prettyBlock m =
-  vsep (map prettyImport (moduleImports m)) <>
-  vsep ["export" <+> pretty e <> line | (EV e) <- Set.toList (moduleExports m)] <>
-  vsep (map prettyExpr (moduleBody m))
+prettyBlock m = vsep
+  [ vsep (map prettyImport (moduleImports m))
+  , vsep ["export" <+> pretty e | (EV e) <- Set.toList (moduleExports m)]
+  , vsep (map prettyExpr (moduleBody m))
+  ]
 
 prettyImport :: Import -> Doc AnsiStyle
 prettyImport imp =

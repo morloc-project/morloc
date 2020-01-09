@@ -66,10 +66,9 @@ gCall' n args = n <> tupled args
 gFunction' :: GeneralFunction -> MDoc
 gFunction' gf
   =  gComment' (gfComments gf)
-  <> gfName gf <> " <- function"
-  <> tupled (map snd (gfArgs gf))
-  <> braces (line <> gIndent' (gfBody gf) <> line)
-  <> line
+  <> block 2
+     (gfName gf <> " <- function" <> tupled (map snd (gfArgs gf)))
+     (gIndent' (gfBody gf))
 
 gId2Function' :: Integer -> MDoc
 gId2Function' i = "m" <> (pretty (MT.show' i))

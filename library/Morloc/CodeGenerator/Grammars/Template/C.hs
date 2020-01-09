@@ -146,12 +146,9 @@ gForeignCall' fc = gCall' "foreign_call" (fcdCall fc ++ fcdArgs fc)
 gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
   where
-    switchC i cases = gCall' "switch" [i] <> blockC caseBlock where
+    switchC i cases = block 2 (gCall' "switch" [i]) caseBlock where
       caseBlock = vsep (map asCase cases) <> line
       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 2 $ caseC body)
-
-    blockC :: MDoc -> MDoc
-    blockC block = "{" <> line <> "  " <> indent 2 block <> line <> "}"
 
     caseC :: MDoc -> MDoc
     caseC body = var <> " = " <> body <> ";" <> line <> "break;"

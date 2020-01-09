@@ -76,7 +76,7 @@ gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args
 
 gFunction' :: GeneralFunction -> MDoc
-gFunction' gf = gComment' (gfComments gf) <> block head' (gfBody gf) <> line where
+gFunction' gf = gComment' (gfComments gf) <> block 4 head' (gfBody gf) <> line where
   targs = tupled (map (\(t, x) -> (fromMaybeType t) <+> x) (gfArgs gf))
   -- -- do I not need this?
   -- rargs = tupled (map snd (gfArgs gf))
@@ -167,7 +167,7 @@ gForeignCall' fc = gCall' "foreign_call" [hsep $ punctuate " + " (joinStr (fcdCa
 gSwitch' :: (a -> MDoc) -> (a -> MDoc) -> [a] -> MDoc -> MDoc -> MDoc
 gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
   where
-    switchC i cases = block (gCall' "switch" [i]) caseBlock where
+    switchC i cases = block 4 (gCall' "switch" [i]) caseBlock where
       caseBlock = vsep (map asCase cases)
       asCase (v, body) = ("case" <+> v <> ":") <> line <> (indent 4 $ caseC body)
 
@@ -184,9 +184,6 @@ gShowType' = MTM.buildConcreteType mkfun mkrec where
 
   mkrec :: [(MDoc, MDoc)] -> MDoc
   mkrec _ = "RECORD!!!"
-
-block :: MDoc -> MDoc -> MDoc
-block header body = align . vsep $ [header, "{", gIndent' body, "}"]
 
 gMain' :: PoolMain -> MorlocMonad MDoc
 gMain' pm = return [idoc|#include <string>

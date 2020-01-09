@@ -47,14 +47,6 @@ generate xs = do
 
 getFData :: (Type, Int, Name) -> MorlocMonad FData
 getFData (t, i, n) = do
-  (say . hsep)
-    [ "Nexus entry:"
-    , viaShow i
-    , pretty n
-    , pretty (getNArgs t)
-    , "::"
-    , prettyType t
-    ]
   config <- MM.ask
   let mid' = pretty i
       lang = langOf' t

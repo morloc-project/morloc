@@ -154,6 +154,7 @@ collect
 collect ms (EV v, []) = MM.throwError . OtherError $
   "No origin found for variable '" <> v <> "'"
 collect ms (evar', xs@(x:_)) = do
+  -- say $ hsep ["for", pretty evar', "found", pretty (length xs), "definitions"]
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
   return $ SAnno (Many trees) gmeta
@@ -180,6 +181,11 @@ collect ms (evar', xs@(x:_)) = do
       let ts' = filter (isJust . langOf) ts
       cmetas <- mapM (makeCMeta (Just src) m) ts'
       return (VarS (srcAlias src), cmetas)
+      where
+        getTermTypes :: TermOrigin -> MorlocMonad [Type]
+        getTermTypes t = do
+          (TypeSet _ es) <- getTermTypeSet t
+          return $ map etype es
 
     collectAnno
       :: Set.Set EVar
@@ -322,7 +328,7 @@ realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-realize h x = say "-- realize" >> realizeAnno True Nothing [] x where
+realize h x = realizeAnno True Nothing [] x where
 
   realizeAnno
     :: Bool -- is this a top-level expression
@@ -330,15 +336,23 @@ realize h x = say "-- realize" >> realizeAnno True Nothing [] x where
     -> [Argument]
     -> SAnno GMeta Many [CMeta]
     -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-  realizeAnno isTop lang args (SAnno (Many ((x, cmeta:_):_)) gmeta) = do
+  realizeAnno isTop lang args (SAnno (Many xs@((x, ys@(cmeta:_)):_)) gmeta) = do
+    -- say $ hsep
+    --   [ "realizeAnno: for"
+    --   , viaShow (metaName gmeta)
+    --   , "found"
+    --   , pretty (length xs)
+    --   , "topologies and"
+    --   , pretty (length ys)
+    --   , "cmetas with types:"
+    --   ] <> line
+    --   <> indent 4 (tupled (map (prettyType . metaType) ys)) <> line
     x' <- realizeExpr lang args gmeta cmeta x
     args' <- handleArgsForSourced isTop cmeta x' args
     imeta <- makeIMeta isTop x' cmeta args'
-
-    say $ pretty (metaId gmeta) <+> descSExpr x <> ":"
-        <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
-        <+> maybe "<untyped>" prettyType (metaGeneralType gmeta) 
-
+    -- say $ pretty (metaId gmeta) <+> descSExpr x <> ":"
+    --     <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
+    --     <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
   realizeAnno _ lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
     "No valid cases found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
@@ -807,9 +821,9 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
       otype = last (typeArgs ftype)
       margs = metaArgs i
 
-  say $ pretty (metaId m) <+> pretty (metaId m') <+> descSExpr x
-      -- <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
-      -- <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
+  -- say $ pretty (metaId m) <+> pretty (metaId m') <+> descSExpr x
+  --     -- <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
+  --     -- <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
 
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
@@ -946,11 +960,6 @@ getTermTypeSet t =
   case Map.lookup (getTermEVar t) (moduleTypeMap (getTermModule t)) of
     (Just ts) -> return ts
     Nothing -> MM.throwError . OtherError $ "Expected the term to have a typeset"
-
-getTermTypes :: TermOrigin -> MorlocMonad [Type]
-getTermTypes t = do
-  (TypeSet _ es) <- getTermTypeSet t
-  return $ map etype es
 
 -- | Map a language to a grammar
 selectGrammar :: Lang -> MorlocMonad Grammar
