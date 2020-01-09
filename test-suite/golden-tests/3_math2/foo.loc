@@ -1,0 +1,10 @@
+import math (add, mul, div);
+
+export foo;
+foo x = mul (add x x) 2;
+
+export bar;
+bar x = mul x 2;
+
+export baz;
+baz x = mul x x;

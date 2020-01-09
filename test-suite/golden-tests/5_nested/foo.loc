@@ -5,5 +5,5 @@ import cppbase (map);
 export square;
 export fourth;
 
-square x = mul x x;
+square y = mul y y;
 fourth x = mul (square x) (square x); 

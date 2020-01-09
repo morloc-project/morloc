@@ -15,6 +15,7 @@ module Morloc.CodeGenerator.Nexus
 import Morloc.Data.Doc
 import Morloc.Namespace
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
@@ -27,6 +28,9 @@ type PoolBuilder
    -> [MDoc] -- output list of CLI arguments
 
 type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
+
+say :: Doc ann -> MorlocMonad ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 generate :: [(Type, Int, Maybe Name)] -> MorlocMonad Script
 generate xs = do
@@ -43,6 +47,14 @@ generate xs = do
 
 getFData :: (Type, Int, Name) -> MorlocMonad FData
 getFData (t, i, n) = do
+  (say . hsep)
+    [ "Nexus entry:"
+    , viaShow i
+    , pretty n
+    , pretty (getNArgs t)
+    , "::"
+    , prettyType t
+    ]
   config <- MM.ask
   let mid' = pretty i
       lang = langOf' t
@@ -60,6 +72,7 @@ getFData (t, i, n) = do
 
 getNArgs :: Type -> Int
 getNArgs (FunT _ t) = 1 + getNArgs t
+getNArgs (Forall _ t) = getNArgs t
 getNArgs _ = 0
 
 main :: [MDoc] -> [FData] -> MDoc

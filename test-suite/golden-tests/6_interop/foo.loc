@@ -8,7 +8,8 @@ export fibonacci;
 export sqrtfibmean;
 
 rbinom :: Num -> Num -> Num -> Num;
-rbinom R :: integer -> integer -> numeric -> vector integer;
+rbinom R :: n:integer -> size:integer -> p:numeric -> vector integer
+    where {0 <= p <= 1};
 
 mean :: [Num] -> Num;
 mean R :: vector numeric -> numeric;

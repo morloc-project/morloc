@@ -41,6 +41,7 @@ grammar = Grammar {
     , gPrepImport  = gPrepImport'
     , gNull        = gNull'
     , gBool        = gBool'
+    , gReal        = viaShow
     , gList        = gList'
     , gTuple       = gTuple'
     , gRecord      = gRecord'

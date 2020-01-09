@@ -843,6 +843,16 @@ prepInput
   -> Int
   -> SAnno GMeta One (CMeta, IMeta, MDoc) -- an input to the wrapped function
   -> MorlocMonad (MDoc, Maybe MDoc)
+prepInput g _ _ (SAnno (One (UniS, _)) _) = return (gNull g, Nothing) 
+prepInput g _ _ (SAnno (One (NumS x, _)) _) = return ((gReal g) x, Nothing)
+prepInput g _ _ (SAnno (One (LogS x, _)) _) = return ((gBool g) x, Nothing)
+prepInput g _ _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, Nothing)
+prepInput g _ _ (SAnno (One (ListS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
+  "Function passing not implemented yet ..."
+prepInput g _ _ (SAnno (One (ForeignS _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
   let varname = makeArgumentName mid
       t = metaType c
@@ -909,6 +919,8 @@ getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of
 
 typeArgs :: Type -> [Type]
 typeArgs (FunT t1 t2) = t1 : typeArgs t2
+typeArgs t@(Forall _ _) = error . MT.unpack . render $
+  "qualified types should have been eliminated long ago in (" <> prettyType t <> ")"
 typeArgs t = [t]
 
 exprArgs :: SExpr g f c -> [Name]

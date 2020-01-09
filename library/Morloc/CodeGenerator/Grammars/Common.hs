@@ -125,6 +125,7 @@ data Grammar =
     ---------------------------------------------
     , gNull :: MDoc
     , gBool :: Bool -> MDoc
+    , gReal :: Scientific -> MDoc
     , gList :: [MDoc] -> MDoc
     , gTuple :: [MDoc] -> MDoc
     , gRecord :: [(MDoc, MDoc)] -> MDoc
