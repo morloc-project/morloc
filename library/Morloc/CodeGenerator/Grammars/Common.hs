@@ -88,6 +88,17 @@ data IMeta = IMeta {
   , metaPackerPath :: Maybe Path  -- ^ path to the packer function
 } deriving (Show, Ord, Eq)
 
+-- FIXME: This is wrong. The manifold arguments will not always be concretely
+-- typed. They can be used at multiple places within in a composition and thus
+-- can take on multiple language-specific types. They should only be
+-- deserialized when they are needed. Thus, serialization should be handled in
+-- the codify function.
+-- data Argument' = PackedArgument | UnpackedArgument
+
+-- data Argument
+--   = PackedArgument Name Type
+--   | UnpackedArgument Name
+
 -- | An argument that is passed to a manifold
 data Argument = Argument {
     argName :: Name

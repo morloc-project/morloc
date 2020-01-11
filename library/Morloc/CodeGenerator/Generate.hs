@@ -146,7 +146,9 @@ findSerializers ms = return $ SerialMap
   getType _ t = t
 
 
--- | Translate a term to a tree
+-- | Build the call tree for a single nexus command. The result is ambiguous,
+-- with 1 or more possible tree topologies, each with one or more possible for
+-- each function.
 collect
   :: Map.Map MVar Module
   -> (EVar, [TermOrigin])
@@ -172,7 +174,8 @@ collect ms (evar', xs@(x:_)) = do
       xs <- collectExpr Set.empty m ts' x
       case xs of
         [x] -> return x
-        _ -> MM.throwError . OtherError $ "Expected exactly one topology for a declared term"
+        _ -> MM.throwError . OtherError $
+          "Expected exactly one topology for a declared term"
     collectTerm (Declared _ _ _) = MM.throwError . OtherError $
       "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
