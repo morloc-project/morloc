@@ -151,7 +151,7 @@ pProgram = do
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
     [] -> return mods
-    es' -> return $ makeModule f (MV "Main") es' : mods
+    es' -> return $ makeModule f (MVar "Main") es' : mods
 
 pToplevel :: Parser Toplevel
 pToplevel =
@@ -164,7 +164,7 @@ pModule = do
   _ <- reserved "module"
   moduleName' <- name
   mes <- braces (optional delimiter >> many1 pModuleBody)
-  return $ makeModule f (MV moduleName') mes
+  return $ makeModule f (MVar moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
 makeModule f n mes =
@@ -202,10 +202,10 @@ pImport = do
   n <- name
   imports <-
     optional $
-    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EV x, EV x)]) name
+    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EVar x, EVar x)]) name
   return . MBImport $
     Import
-      { importModuleName = MV n
+      { importModuleName = MVar n
       , importInclude = imports
       , importExclude = []
       , importNamespace = Nothing
@@ -215,10 +215,10 @@ pImportTerm :: Parser (EVar, EVar)
 pImportTerm = do
   n <- name
   a <- option n (reserved "as" >> name)
-  return (EV n, EV a)
+  return (EVar n, EVar a)
 
 pExport :: Parser ModuleBody
-pExport = fmap (MBExport . EV) $ reserved "export" >> name
+pExport = fmap (MBExport . EVar) $ reserved "export" >> name
 
 pStatement :: Parser Expr
 pStatement = try pDeclaration <|> pSignature
@@ -231,7 +231,7 @@ pDataDeclaration = do
   v <- name
   _ <- symbol "="
   e <- pExpr
-  return (Declaration (EV v) e)
+  return (Declaration (EVar v) e)
 
 pFunctionDeclaration :: Parser Expr
 pFunctionDeclaration = do
@@ -239,7 +239,7 @@ pFunctionDeclaration = do
   args <- many1 name
   _ <- op "="
   e <- pExpr
-  return $ Declaration (EV v) (curryLamE (map EV args) e)
+  return $ Declaration (EVar v) (curryLamE (map EVar args) e)
   where
     curryLamE [] e' = e'
     curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
@@ -257,7 +257,7 @@ pSignature = do
   setLang Nothing
   return $
     Signature
-      (EV v)
+      (EVar v)
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -335,7 +335,7 @@ pImportSourceTerm :: Parser (EVar, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
   a <- option n (reserved "as" >> name)
-  return (EV n, EV a)
+  return (EVar n, EVar a)
 
 pRecordE :: Parser Expr
 pRecordE = fmap RecE $ braces (sepBy1 pRecordEntryE (symbol ","))
@@ -345,7 +345,7 @@ pRecordEntryE = do
   n <- name
   _ <- symbol "="
   e <- pExpr
-  return (EV n, e)
+  return (EVar n, e)
 
 pListE :: Parser Expr
 pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
@@ -414,7 +414,7 @@ pVar :: Parser Expr
 pVar = fmap VarE pEVar
 
 pEVar :: Parser EVar
-pEVar = fmap EV name
+pEVar = fmap EVar name
 
 pType :: Parser Type
 pType =

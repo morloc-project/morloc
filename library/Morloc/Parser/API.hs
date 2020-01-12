@@ -43,12 +43,12 @@ parse f code = do
       | otherwise = do
         -- load metadata for all imported modules
         mapM
-          (\(MV v) -> Mod.findModule v >>= Mod.loadModuleMetadata)
+          (\v -> Mod.findModule (unMVar v) >>= Mod.loadModuleMetadata)
           (map importModuleName (moduleImports m))
         -- for now I only support local modules
         imports <-
           mapM
-            (\(MV v) -> Mod.findModule v >>= openLocalModule)
+            (\v -> Mod.findModule (unMVar v) >>= openLocalModule)
             (map importModuleName (moduleImports m))
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods

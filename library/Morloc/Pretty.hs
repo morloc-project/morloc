@@ -23,10 +23,10 @@ import qualified Data.Set as Set
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
 instance Pretty MVar where
-  pretty (MV t) = pretty t
+  pretty = pretty . unMVar
 
 instance Pretty EVar where
-  pretty (EV t) = pretty t
+  pretty = pretty . unEVar
 
 instance Pretty TVar where
   pretty (TV Nothing t) = pretty t
@@ -50,17 +50,14 @@ screamStyle =
     , Style.ansiUnderlining = Just Underlined
     }
 
-prettyMVar :: MVar -> Doc AnsiStyle
-prettyMVar (MV x) = pretty x
-
 prettyModule :: Module -> Doc AnsiStyle
-prettyModule m = block 2 (prettyMVar (moduleName m)) (prettyBlock m)
+prettyModule m = block 2 (pretty (moduleName m)) (prettyBlock m)
 
 prettyBlock :: Module -> Doc AnsiStyle
 prettyBlock m = vsep
-  [ vsep (map prettyImport (moduleImports m))
-  , vsep ["export" <+> pretty e | (EV e) <- Set.toList (moduleExports m)]
-  , vsep (map prettyExpr (moduleBody m))
+  [ vsep $ map prettyImport (moduleImports m)
+  , vsep $ map (\v -> "export" <+> pretty v) (Set.toList (moduleExports m))
+  , vsep $ map prettyExpr (moduleBody m)
   ]
 
 prettyImport :: Import -> Doc AnsiStyle
@@ -72,14 +69,14 @@ prettyImport imp =
     (\xs -> encloseSep "(" ")" ", " (map prettyImportOne xs))
     (importInclude imp)
   where
-    prettyImportOne (EV e, EV alias)
+    prettyImportOne (e, alias)
       | e /= alias = pretty e
       | otherwise = pretty e <+> "as" <+> pretty alias
 
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
-prettyExpr (VarE (EV s)) = pretty s
-prettyExpr (LamE (EV n) e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
+prettyExpr (VarE s) = pretty s
+prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
 prettyExpr (AnnE e ts) = parens
   $   prettyExpr e
   <+> "::"
@@ -89,7 +86,7 @@ prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x
-prettyExpr (Declaration (EV v) e) = pretty v <+> "=" <+> prettyExpr e
+prettyExpr (Declaration v e) = pretty v <+> "=" <+> prettyExpr e
 prettyExpr (ListE xs) = list (map prettyExpr xs)
 prettyExpr (TupleE xs) = tupled (map prettyExpr xs)
 prettyExpr (SrcE []) = ""
@@ -100,20 +97,20 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
   pretty f <+>
   tupled
     (map
-       (\(EV n, EV a) ->
+       (\(n, a) ->
           pretty n <>
           if n == a
             then ""
             else (" as" <> pretty a))
        rs)
   where
-    rs = [(n,a) | (Source n _ _ a) <- srcs]
+    rs = [(n, a) | (Source n _ _ a) <- srcs]
 prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
   "source" <+>
   viaShow lang <+>
   tupled
     (map
-       (\(EV n, EV a) ->
+       (\(n, a) ->
           pretty n <>
           if n == a
             then ""
@@ -126,8 +123,8 @@ prettyExpr (RecE entries) =
     "{"
     "}"
     ", "
-    (map (\(EV v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
-prettyExpr (Signature (EV v) e) =
+    (map (\(v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
+prettyExpr (Signature v e) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle

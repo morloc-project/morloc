@@ -135,7 +135,7 @@ findSerializers ms = return $ SerialMap
 
   g :: Module -> (Type, EVar) -> [(Type, (Name, Path))]
   g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
-    (Just (Source (EV name) _ (Just path) _)) -> [(t, (name, path))]
+    (Just (Source name _ (Just path) _)) -> [(t, (unEVar name, path))]
     _ -> []
 
   -- Get the type that is being serialized or deserialized
@@ -153,8 +153,8 @@ collect
   :: Map.Map MVar Module
   -> (EVar, [TermOrigin])
   -> MorlocMonad (SAnno GMeta Many [CMeta])
-collect ms (EV v, []) = MM.throwError . OtherError $
-  "No origin found for variable '" <> v <> "'"
+collect ms (v, []) = MM.throwError . OtherError $
+  "No origin found for variable '" <> unEVar v <> "'"
 collect ms (evar', xs@(x:_)) = do
   -- say $ hsep ["for", pretty evar', "found", pretty (length xs), "definitions"]
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
@@ -293,7 +293,7 @@ collect ms (evar', xs@(x:_)) = do
     makeGMeta :: Maybe EVar -> Module -> Maybe Type -> MorlocMonad GMeta
     makeGMeta evar m gtype = do
       i <- MM.getCounter
-      let name = fmap (\(EV x) -> x) evar
+      let name = fmap unEVar evar
       case evar >>= (flip Map.lookup) (moduleTypeMap m) of
         (Just (TypeSet (Just e) _)) -> do
           return $ GMeta
@@ -380,7 +380,7 @@ realize h x = realizeAnno True Nothing [] x where
       variables = [1 ..] >>= flip replicateM ['a' .. 'z']
       -- get the nth variable
       variableStream :: Int -> [EVar]
-      variableStream i = map (EV . MT.pack) $ take i variables
+      variableStream i = map (EVar . MT.pack) $ take i variables
   handleArgsForSourced _ _ _ args = return args
 
   realizeExpr
@@ -458,14 +458,14 @@ realize h x = realizeAnno True Nothing [] x where
       return $ newargs ++ oldargs'
 
 makeArg :: Bool -> SerialMap -> EVar -> Type -> MorlocMonad Argument
-makeArg packed h (EV n) t
+makeArg packed h n t
   | langOf t == Nothing = MM.throwError . OtherError $
     "Cannot make an argument from the general type: " <> render (prettyType t)
   | otherwise = do
     case (selectFunction t Pack h, selectFunction t Unpack h) of
       (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
         return $ Argument
-          { argName = n
+          { argName = unEVar n
           , argType = t
           , argPacker = packer
           , argPackerPath = packerpath
@@ -619,10 +619,10 @@ findSources = unique . concat . concat . map (unpackSAnno f)
 
     makeSrc :: Name -> Lang -> Path -> Source
     makeSrc n l p = Source
-      { srcName = EV n
+      { srcName = EVar n
       , srcLang = l
       , srcPath = Just p
-      , srcAlias = EV n
+      , srcAlias = EVar n
       }
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
@@ -831,7 +831,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
     _ -> case (metaName m', metaSource c') of
-      (_, Just (Source (EV x) _ _ _)) -> return (pretty x)
+      (_, Just (Source x _ _ _)) -> return (pretty x)
       (Just n, _) -> return (pretty n)
       _ -> MM.throwError . OtherError $ "No name found for manifold"
 
@@ -941,7 +941,7 @@ typeArgs t@(Forall _ _) = error . MT.unpack . render $
 typeArgs t = [t]
 
 exprArgs :: SExpr g f c -> [Name]
-exprArgs (LamS vs _) = [name | (EV name) <- vs]
+exprArgs (LamS vs _) = map unEVar vs
 exprArgs _ = []
 
 makeManifoldName :: GMeta -> MDoc
@@ -1067,9 +1067,9 @@ findTerm includeInternal ms m v
       concat [findTerm False ms m' v | m' <- mapMaybe (flip Map.lookup $ ms) (listMVars m)]
 
     typeEVar :: EVar -> Expr
-    typeEVar v'@(EV name) = case Map.lookup v' (moduleTypeMap m) of
-      (Just (TypeSet t ts)) -> AnnE (VarE v') (map etype (maybe ts (\t' -> t':ts) t))
-      Nothing -> error $ "Variable '" <> MT.unpack name <> "' is not defined"
+    typeEVar name = case Map.lookup name (moduleTypeMap m) of
+      (Just (TypeSet t ts)) -> AnnE (VarE name) (map etype (maybe ts (\t' -> t':ts) t))
+      Nothing -> error $ "Variable '" <> MT.unpack (unEVar name) <> "' is not defined"
 
     listMVars :: Module -> [MVar]
     listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m)

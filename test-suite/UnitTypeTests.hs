@@ -19,7 +19,7 @@ main :: [Module] -> [Expr]
 main [] = error "Missing main"
 main [m] = moduleBody m
 main (m:ms)
-  | moduleName m == (MV "Main") = moduleBody m
+  | moduleName m == (MVar "Main") = moduleBody m
   | otherwise = main ms
 
 -- get the toplevel type of a fully annotated expression
@@ -263,7 +263,7 @@ unitTypeTests =
     , assertTerminalExpr
         "functions return lambda expressions"
         "\\x -> 42"
-        (LamE (EV "x") (NumE 42.0))
+        (LamE (EVar "x") (NumE 42.0))
     , assertTerminalType
         "functions can be passed"
         "g f = f 42; g"
@@ -540,7 +540,7 @@ unitTypeTests =
           ["module Main {export x; x = 42};", "module Foo {import Main (x)}"]
     , expectError
         "fail on import of non-existing variable"
-        (BadImport (MV "Foo") (EV "x")) $
+        (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines
           ["module Foo {export y; y = 42};", "module Main {import Foo (x); x}"]
     , expectError
@@ -552,14 +552,14 @@ unitTypeTests =
           ]
     , expectError
         "fail on redundant module declaration"
-        (MultipleModuleDeclarations (MV "Foo")) $
+        (MultipleModuleDeclarations (MVar "Foo")) $
         T.unlines ["module Foo {x = 42};", "module Foo {x = 88}"]
     , expectError "fail on self import"
-        (SelfImport (MV "Foo")) $
+        (SelfImport (MVar "Foo")) $
         T.unlines ["module Foo {import Foo (x); x = 42}"]
     , expectError
         "fail on import of non-exported variable"
-        (BadImport (MV "Foo") (EV "x")) $
+        (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines ["module Foo {x = 42};", "module Main {import Foo (x); x}"]
 
     -- test realization integration
@@ -783,22 +783,22 @@ unitTypeTests =
         , "sqrt Cpp :: \"double\" -> \"double\";"
         , "foo x = snd x (sqrt x);"
         ])
-      (Declaration (EV "foo")
-        (AnnE (LamE (EV "x")
+      (Declaration (EVar "foo")
+        (AnnE (LamE (EVar "x")
           (AnnE (AppE
             (AnnE (AppE
-              (AnnE (VarE (EV "snd"))
+              (AnnE (VarE (EVar "snd"))
                 [ fun [num, num, num]
                 , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
-              (AnnE (VarE (EV "x"))
+              (AnnE (VarE (EVar "x"))
                 [num,varc CppLang "double"]))
               [ FunT num num
               , FunT (varc CppLang "double") (varc CppLang "double")])
             (AnnE (AppE
-              (AnnE (VarE (EV "sqrt"))
+              (AnnE (VarE (EVar "sqrt"))
                 [ FunT num num
                 , FunT (varc CppLang "double") (varc CppLang "double")])
-              (AnnE (VarE (EV "x"))
+              (AnnE (VarE (EVar "x"))
                 [ num
                 , varc CppLang "double"]))
               [num,varc CppLang "double"]))

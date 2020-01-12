@@ -104,7 +104,7 @@ importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
     lookupImport :: Import -> Stack Gamma
     lookupImport imp
       | v == moduleName m = throwError $ SelfImport v
-      | v == MV "Main" = throwError CannotImportMain
+      | v == MVar "Main" = throwError CannotImportMain
       | otherwise =
         case (importInclude imp, Map.lookup v g) of
         -- raise error if the imported module is not in the module map

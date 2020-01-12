@@ -953,7 +953,7 @@ infer' lang@(Just _) g e@(RecE _) = do
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
-  let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
+  let t = RecT (zip [TV Nothing (unEVar x) | (x, _) <- rs] ts)
   return (g2, [t], ann e t)
 
 

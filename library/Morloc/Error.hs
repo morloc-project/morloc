@@ -51,7 +51,7 @@ errmsg ExistentialError = "ExistentialError"
 errmsg BadExistentialCast = "BadExistentialCast"
 errmsg (AccessError msg) = "AccessError"
 errmsg NonFunctionDerive = "NonFunctionDerive"
-errmsg (UnboundVariable (EV v)) = "UnboundVariable: " <> v
+errmsg (UnboundVariable v) = "UnboundVariable: " <> unEVar v
 errmsg OccursCheckFail = "OccursCheckFail"
 errmsg EmptyCut = "EmptyCut"
 errmsg TypeMismatch = "TypeMismatch"
@@ -66,7 +66,7 @@ errmsg EmptyRecord = "EmptyRecord"
 -- module errors
 errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations"
 errmsg (BadImport mv ev) = "BadImport"
-errmsg (CannotFindModule (MV name)) = "Cannot find morloc module '" <> name <> "'"
+errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
 errmsg CannotImportMain = "CannotImportMain"
 errmsg (SelfImport mv) = "SelfImport"

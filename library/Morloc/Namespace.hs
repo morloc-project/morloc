@@ -253,8 +253,8 @@ data Config =
 
 type Gamma = [GammaIndex]
 
-newtype EVar = EV Text deriving (Show, Eq, Ord)
-newtype MVar = MV Text deriving (Show, Eq, Ord)
+newtype EVar = EVar { unEVar :: Name } deriving (Show, Eq, Ord)
+newtype MVar = MVar { unMVar :: Name } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
