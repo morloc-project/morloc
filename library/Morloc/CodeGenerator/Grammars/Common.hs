@@ -67,7 +67,7 @@ data SExpr g f c
 -- | Description of the general manifold
 data GMeta = GMeta {
     metaId :: Int
-  , metaGeneralType :: Maybe Type
+  , metaGeneralType :: Maybe GeneralType
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
@@ -76,7 +76,7 @@ data GMeta = GMeta {
 -- | Intrinsic description of a language-specific manifold 
 data CMeta = CMeta {
     metaLang :: Lang
-  , metaType :: Type
+  , metaType :: ConcreteType
   , metaSource :: Maybe Source
   , metaModule :: MVar
 } deriving (Show, Ord, Eq)
@@ -96,13 +96,19 @@ data IMeta = IMeta {
 -- data Argument' = PackedArgument | UnpackedArgument
 
 -- data Argument
---   = PackedArgument Name Type
+--   = PackedArgument Name GeneralType
 --   | UnpackedArgument Name
+--
+-- -- | An argument that is passed to a manifold
+-- data Argument = Argument {
+--     argName :: EVar
+--   , argType :: Type
+-- } deriving (Show, Ord, Eq)
 
 -- | An argument that is passed to a manifold
 data Argument = Argument {
     argName :: EVar
-  , argType :: Type
+  , argType :: ConcreteType
   , argPacker :: Name
   , argPackerPath :: Path
   , argUnpacker :: Name
@@ -111,14 +117,14 @@ data Argument = Argument {
 } deriving (Show, Ord, Eq)
 
 data SerialMap = SerialMap {
-    packers :: Map.Map Type (Name, Path)
-  , unpackers :: Map.Map Type (Name, Path)
+    packers :: Map.Map ConcreteType (Name, Path)
+  , unpackers :: Map.Map ConcreteType (Name, Path)
 } deriving (Show, Ord, Eq)
 
 data Grammar =
   Grammar
     { gLang :: Lang
-    , gSerialType :: Type
+    , gSerialType :: ConcreteType
     , gAssign :: GeneralAssignment -> MDoc
     , gCall :: MDoc -> [MDoc] -> MDoc
     , gFunction :: GeneralFunction -> MDoc
@@ -153,7 +159,7 @@ data Grammar =
         -> MDoc
         -> MDoc
     , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
-    , gShowType :: Type -> MDoc
+    , gShowType :: ConcreteType -> MDoc
     , gMain :: PoolMain -> MorlocMonad MDoc
     }
 

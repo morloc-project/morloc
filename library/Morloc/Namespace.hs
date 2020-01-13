@@ -15,7 +15,9 @@ module Morloc.Namespace
   , MDoc
   -- ** Newtypes
   , ConcreteType(..)
+  , concreteType
   , GeneralType(..)
+  , generalType
   , EVar(..)
   , MVar(..)
   , Name(..)
@@ -59,8 +61,10 @@ module Morloc.Namespace
   , EType(..)
   , Property(..)
   , TypeSet(..)
+  , Typelike(..)
   , langOf
   , langOf'
+  , typeOf
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -366,7 +370,22 @@ data Expr
   deriving (Show, Ord, Eq)
 
 newtype ConcreteType = ConcreteType { unConcreteType :: Type }
+  deriving (Show, Ord, Eq)
+
 newtype GeneralType = GeneralType { unGeneralType :: Type }
+  deriving (Show, Ord, Eq)
+
+-- a safe alternative to the ConcreteType constructor
+concreteType :: Type -> ConcreteType
+concreteType t
+  | langOf' t /= MorlocLang = ConcreteType t
+  | otherwise = error "COMPILER BUG - incorrect assignment to concrete type"
+
+-- a safe alternative to the GeneralType constructor
+generalType :: Type -> GeneralType
+generalType t
+  | langOf' t == MorlocLang = GeneralType t
+  | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
 -- | Types, see Dunfield Figure 6
 data Type
@@ -423,12 +442,35 @@ instance Indexable Type where
   index (ExistT t ts) = ExistG t ts
   index t = error $ "Can only index ExistT, found: " <> show t
 
+class Typelike a where
+  typeOf :: a -> Type
+
+instance Typelike Type where
+  typeOf = id
+
+instance Typelike EType where
+  typeOf = etype
+
+instance Typelike ConcreteType where
+  typeOf (ConcreteType t) = t 
+
+instance Typelike GeneralType where
+  typeOf (GeneralType t) = t 
+
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
 
   langOf' (langOf -> Nothing) = MorlocLang
   langOf' (langOf -> (Just lang)) = lang
+
+instance HasOneLanguage ConcreteType where
+  langOf (ConcreteType t) = langOf t
+  langOf' (ConcreteType t) = langOf' t
+-- NOTE: There is NO instace of HasOneLanguage for GeneralType. You should not
+-- ask for the language of a GeneralType, since you should already know the
+-- language (MorlocLang), so asking for the language implies you are writing a
+-- bug.
 
 -- | Determine the language from a type, fail if the language is inconsistent.
 -- Inconsistency in language should be impossible at the syntactic level, thus

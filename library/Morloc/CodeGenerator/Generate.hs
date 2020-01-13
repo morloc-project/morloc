@@ -118,7 +118,7 @@ findSerializers ms = return $ SerialMap
   , unpackers = Map.unions (map (findSerialFun Unpack) ms)
   } where
 
-  findSerialFun :: Property -> Module -> Map.Map Type (Name, Path)
+  findSerialFun :: Property -> Module -> Map.Map ConcreteType (Name, Path)
   findSerialFun p m
     = Map.fromList
     . map (\(t, x) -> (getType p t, x))
@@ -126,24 +126,31 @@ findSerializers ms = return $ SerialMap
     . Map.mapWithKey (\v t -> conmap (g m) (f p v t))
     $ moduleTypeMap m
 
-  f :: Property -> EVar -> TypeSet -> [(Type, EVar)]
+  -- extract serialization functions from a typeset if appropriate
+  f :: Property -> EVar -> TypeSet -> [(ConcreteType, EVar)]
   f p v (TypeSet (Just gentype) ts) =
     if Set.member p (eprop gentype)
-      then [(etype t, v) | t <- ts]
-      else [(etype t, v) | t <- ts, Set.member p (eprop t)]
-  f p v (TypeSet Nothing ts) = [(etype t, v) | t <- ts, Set.member p (eprop t)]
+      then [(ConcreteType (etype t), v) | t <- ts]
+      else [(ConcreteType (etype t), v) | t <- ts, Set.member p (eprop t)]
+  f p v (TypeSet Nothing ts) =
+    [ (ConcreteType (etype t), v)
+    | t <- ts
+    , Set.member p (eprop t)]
 
-  g :: Module -> (Type, EVar) -> [(Type, (Name, Path))]
+  -- find the source for the serialization functions
+  g :: Module -> (ConcreteType, EVar) -> [(ConcreteType, (Name, Path))]
   g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
     (Just (Source name _ (Just path) _)) -> [(t, (name, path))]
     _ -> []
 
-  -- Get the type that is being serialized or deserialized
-  getType :: Property -> Type -> Type
-  getType Pack   (FunT t _) = t
-  getType Unpack (FunT _ t) = t
-  getType p (Forall v t) = Forall v (getType p t)
-  getType _ t = t
+  -- get the type that is being serialized or deserialized
+  getType :: Property -> ConcreteType -> ConcreteType
+  getType p (ConcreteType t) = ConcreteType $ getType' p t where
+    getType' :: Property -> Type -> Type
+    getType' Pack   (FunT t' _) = t'
+    getType' Unpack (FunT _ t') = t'
+    getType' p (Forall v t') = Forall v (getType' p t')
+    getType' _ t' = t'
 
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -169,9 +176,7 @@ collect ms (evar', xs@(x:_)) = do
       :: TermOrigin
       -> MorlocMonad (SExpr GMeta Many [CMeta], [CMeta])
     collectTerm (Declared m _ (AnnE x ts)) = do
-      -- remove general types
-      let ts' = filter (isJust . langOf) ts
-      xs <- collectExpr Set.empty m ts' x
+      xs <- collectExpr Set.empty m (getConcreteTypes ts) x
       case xs of
         [x] -> return x
         _ -> MM.throwError . OtherError $
@@ -180,9 +185,7 @@ collect ms (evar', xs@(x:_)) = do
       "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
       ts <- getTermTypes term
-      -- remove general types
-      let ts' = filter (isJust . langOf) ts
-      cmetas <- mapM (makeCMeta (Just src) m) ts'
+      cmetas <- mapM (makeCMeta (Just src) m) (getConcreteTypes ts)
       return (VarS (srcAlias src), cmetas)
       where
         getTermTypes :: TermOrigin -> MorlocMonad [Type]
@@ -198,9 +201,7 @@ collect ms (evar', xs@(x:_)) = do
     collectAnno args m (AnnE e ts) = do
       gtype <- getGeneralType ts
       gmeta <- makeGMeta (getExprName e) m gtype
-      -- remove general types
-      let ts' = filter (isJust . langOf) ts
-      trees <- collectExpr args m ts' e
+      trees <- collectExpr args m (getConcreteTypes ts) e
       return $ SAnno (Many trees) gmeta
     collectAnno _ _ _ = error "impossible bug - unannotated expression"
 
@@ -211,7 +212,7 @@ collect ms (evar', xs@(x:_)) = do
     collectExpr
       :: Set.Set EVar
       -> Module
-      -> [Type]
+      -> [ConcreteType]
       -> Expr
       -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
     collectExpr args m ts (UniE) = simpleCollect UniS m ts
@@ -283,14 +284,14 @@ collect ms (evar', xs@(x:_)) = do
     simpleCollect
       :: (SExpr GMeta Many [CMeta])
       -> Module
-      -> [Type]
+      -> [ConcreteType]
       -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
     simpleCollect sexpr m ts = do
       cmeta <- mapM (makeCMeta Nothing m) ts
       return [(sexpr, cmeta)]
 
     -- | Find info common across realizations of a given term in a given module
-    makeGMeta :: Maybe EVar -> Module -> Maybe Type -> MorlocMonad GMeta
+    makeGMeta :: Maybe EVar -> Module -> Maybe GeneralType -> MorlocMonad GMeta
     makeGMeta name m gtype = do
       i <- MM.getCounter
       case name >>= (flip Map.lookup) (moduleTypeMap m) of
@@ -298,7 +299,7 @@ collect ms (evar', xs@(x:_)) = do
           return $ GMeta
             { metaId = i
             , metaName = name
-            , metaGeneralType = maybe (Just (etype e)) Just gtype
+            , metaGeneralType = maybe (Just . GeneralType $ etype e) Just gtype
             , metaProperties = eprop e
             , metaConstraints = econs e
             }
@@ -311,16 +312,14 @@ collect ms (evar', xs@(x:_)) = do
             , metaConstraints = Set.empty
             }
 
-    makeCMeta :: Maybe Source -> Module -> Type -> MorlocMonad CMeta
-    makeCMeta src m t
-      | langOf t == Nothing = MM.throwError . OtherError $
-        "In collect, cannot make CMeta from general type: " <> render (prettyType t) 
-      | otherwise = return $ CMeta
-          { metaLang = langOf' t
-          , metaType = t
-          , metaSource = src
-          , metaModule = moduleName m
-          }
+    makeCMeta :: Maybe Source -> Module -> ConcreteType -> MorlocMonad CMeta
+    makeCMeta src m t =
+      return $ CMeta
+        { metaLang = langOf' t
+        , metaType = t
+        , metaSource = src
+        , metaModule = moduleName m
+        }
 
 -- | Select a single concrete language for each sub-expression.  Store the
 -- concrete type and the general type (if available).  Select serialization
@@ -441,7 +440,7 @@ realize h x = realizeAnno True Nothing [] x where
       t = case (isTop, sexpr) of
         (_, AppS _ _) -> last $ typeArgs (metaType cmeta)
         (True, VarS _) -> case metaType cmeta of
-          t'@(FunT _ _) -> last $ typeArgs t'
+          t'@(ConcreteType (FunT _ _)) -> last $ typeArgs t'
           t' -> t'
         _ -> metaType cmeta
 
@@ -456,32 +455,30 @@ realize h x = realizeAnno True Nothing [] x where
       let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
       return $ newargs ++ oldargs'
 
-makeArg :: Bool -> SerialMap -> EVar -> Type -> MorlocMonad Argument
-makeArg packed h n t
-  | langOf t == Nothing = MM.throwError . OtherError $
-    "Cannot make an argument from the general type: " <> render (prettyType t)
-  | otherwise = do
-    case (selectFunction t Pack h, selectFunction t Unpack h) of
-      (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
-        return $ Argument
-          { argName = n
-          , argType = t
-          , argPacker = packer
-          , argPackerPath = packerpath
-          , argUnpacker = unpacker
-          , argUnpackerPath = unpackerpath
-          , argIsPacked = packed
-          }
-      _ -> MM.throwError . OtherError $ "Expected a packer and unpacker for argument"
+makeArg :: Bool -> SerialMap -> EVar -> ConcreteType -> MorlocMonad Argument
+makeArg packed h n t =
+  case (selectFunction t Pack h, selectFunction t Unpack h) of
+    (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
+      return $ Argument
+        { argName = n
+        , argType = t
+        , argPacker = packer
+        , argPackerPath = packerpath
+        , argUnpacker = unpacker
+        , argUnpackerPath = unpackerpath
+        , argIsPacked = packed
+        }
+    _ -> MM.throwError . OtherError $ "Expected a packer and unpacker for argument"
 
 
 -- | choose a packer or unpacker for a given type
-selectFunction :: Type -> Property -> SerialMap -> Maybe (Name, Path)
-selectFunction t p h = case mostSpecificSubtypes t (Map.keys hmap) of
-  [] -> Nothing
-  (x:_) -> Map.lookup x hmap
-  where
-    hmap = if p == Pack then packers h else unpackers h
+selectFunction :: ConcreteType -> Property -> SerialMap -> Maybe (Name, Path)
+selectFunction t p h =
+  case mostSpecificSubtypes (typeOf t) (map typeOf (Map.keys hmap)) of
+    [] -> Nothing
+    (x:_) -> Map.lookup (ConcreteType x) hmap
+    where
+      hmap = if p == Pack then packers h else unpackers h
 
 
 segment
@@ -490,7 +487,7 @@ segment
 segment s = (\(r,rs) -> r:rs) <$> segment' Nothing Nothing s where
   segment'
     :: Maybe (GMeta, CMeta, IMeta) -- data from the parent
-    -> Maybe Type -- child type in parent language
+    -> Maybe ConcreteType -- child type in parent language
     -> SAnno GMeta One (CMeta, IMeta)
     -> MorlocMonad
          ( SAnno GMeta One (CMeta, IMeta)
@@ -520,29 +517,37 @@ segment s = (\(r,rs) -> r:rs) <$> segment' Nothing Nothing s where
     let t1 = Just . last $ typeArgs (metaType c1)
     (x', xs') <- segment' (Just (g1, c1, i1)) t1 x
     return (SAnno (One (LamS vs x', (c1, i1))) g1, xs')
-  segment' (Just (g0, c0, i0)) (Just (ArrT _ [tExp])) (SAnno (One (ListS xs, (c1, i1))) g1) = do
-    xs' <- mapM (segment' (Just (g1, c1, i1)) (Just tExp)) xs
+  segment' (Just (g0, c0, i0))
+           (Just (typeOf -> ArrT _ [tExp]))
+           (SAnno (One (ListS xs, (c1, i1))) g1) = do
+    xs' <- mapM (segment' (Just (g1, c1, i1)) (Just (ConcreteType tExp))) xs
     let (elements, rss') = unzip xs'
     return (SAnno (One (ListS elements, (c1, i1))) g1, concat rss')
-  segment' (Just (g0, c0, i0)) (Just (ArrT _ ts0)) (SAnno (One (TupleS xs, (c1, i1))) g1) = do
-    xs' <- zipWithM (\t x -> segment' (Just (g1, c1, i1)) (Just t) x) ts0 xs
+  segment' (Just (g0, c0, i0))
+           (Just (typeOf -> ArrT _ ts0))
+           (SAnno (One (TupleS xs, (c1, i1))) g1) = do
+    xs' <- zipWithM (\t x -> segment' (Just (g1, c1, i1)) (Just t) x)
+                    (map concreteType ts0) xs
     let (elements, rss') = unzip xs'
     return (SAnno (One (TupleS elements, (c1, i1))) g1, concat rss')
-  segment' (Just (g0, c0, i0)) (Just (RecT ts0)) (SAnno (One (RecS entries, (c1, i1))) g1) = do
+  segment' (Just (g0, c0, i0))
+           (Just (typeOf -> RecT ts0))
+           (SAnno (One (RecS entries, (c1, i1))) g1) = do
     xs' <- zipWithM
              (\t x -> segment' (Just (g1, c1, i1)) (Just t) x)
-             (map snd ts0)
+             (map (concreteType . snd) ts0)
              (map snd entries)
     let (es', rss') = unzip xs'
         entries' = zip (map fst entries) es'
     return (SAnno (One (RecS entries', (c1, i1))) g1, concat rss')
   segment' _ _ s = return (s, [])
 
-makeFun :: [Type] -> Type
-makeFun [] = error "No types given"
-makeFun [t] = t
-makeFun (t:ts) = FunT t (makeFun ts)
-
+makeFun :: [ConcreteType] -> ConcreteType
+makeFun ts = ConcreteType (makeFun' $ map typeOf ts)
+  where
+    makeFun' [] = error "No types given"
+    makeFun' [t] = t
+    makeFun' (t:ts) = FunT t (makeFun' ts)
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool
@@ -652,7 +657,7 @@ encodeSignatures g x =
     makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
     makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
       { gfComments = maybeToList $
-          fmap (\t -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
+          fmap (\(GeneralType t) -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
       , gfName = makeManifoldName m
       , gfArgs = map (makeArg' g) (metaArgs i)
@@ -786,8 +791,8 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
     comments = catMaybes
       [ Just "From A"
       , Just (pretty v)
-      , fmap (signature (metaName m) Nothing) (metaGeneralType m)
-      , Just $ signature (metaName m) (Just (metaLang c)) (metaType c)
+      , fmap (generalSignature (metaName m)) (metaGeneralType m)
+      , Just $ concreteSignature (metaName m) (metaType c)
       ]
 
     simplePrepInput
@@ -841,8 +846,8 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
     { gfComments = catMaybes $
         [ Just "From B"
         , Just (descSExpr x)
-        , fmap (signature (metaName m') Nothing) (metaGeneralType m')
-        , Just $ signature (metaName m') (Just (metaLang c)) (metaType c)
+        , fmap (generalSignature (metaName m')) (metaGeneralType m')
+        , Just $ concreteSignature (metaName m') (metaType c)
         ]
     , gfReturnType = Just ((gShowType g) otype)
     , gfName = makeManifoldName m
@@ -928,18 +933,23 @@ unrollLambda (AnnE (LamE v e2) _) = case unrollLambda e2 of
   (vs, e) -> (v:vs, e)
 unrollLambda e = ([], e)
 
-getGeneralType :: [Type] -> MorlocMonad (Maybe Type)
-getGeneralType ts = case [t | t <- ts, langOf' t == MorlocLang] of
+getGeneralType :: [Type] -> MorlocMonad (Maybe GeneralType)
+getGeneralType ts = case [GeneralType t | t <- ts, langOf' t == MorlocLang] of
   [] -> return Nothing
   [x] -> return $ Just x
   xs -> MM.throwError . OtherError $
     "Expected 0 or 1 general types, found " <> MT.show' (length xs)
 
-typeArgs :: Type -> [Type]
-typeArgs (FunT t1 t2) = t1 : typeArgs t2
-typeArgs t@(Forall _ _) = error . MT.unpack . render $
-  "qualified types should have been eliminated long ago in (" <> prettyType t <> ")"
-typeArgs t = [t]
+getConcreteTypes :: [Type] -> [ConcreteType]
+getConcreteTypes ts = [ConcreteType t | t <- ts, isJust (langOf t)]
+
+typeArgs :: ConcreteType -> [ConcreteType]
+typeArgs (ConcreteType t) = map concreteType (typeArgs' t)
+  where
+    typeArgs' (FunT t1 t2) = t1 : typeArgs' t2
+    typeArgs' t@(Forall _ _) = error . MT.unpack . render $
+      "qualified types should have been eliminated long ago in (" <> prettyType t <> ")"
+    typeArgs' t = [t]
 
 makeManifoldName :: GMeta -> MDoc
 makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
@@ -989,7 +999,7 @@ sannoWithG f (SAnno (One _) g) = f g
 sannoWithC :: (c -> a) -> SAnno g One c -> a
 sannoWithC f (SAnno (One (_, c)) _) = f c
 
-sannoType :: SAnno g One (CMeta, a) -> Type
+sannoType :: SAnno g One (CMeta, a) -> ConcreteType
 sannoType = sannoWithC (metaType . fst)
 
 getdoc :: SAnno g One (a, b, MDoc) -> MDoc
@@ -1008,9 +1018,13 @@ descSExpr (StrS _) = "StrS"
 descSExpr (RecS _) = "RecS"
 descSExpr (ForeignS i lang) = "ForeignS" <+> pretty i <+> viaShow lang
 
-signature :: Maybe EVar -> Maybe Lang -> Type -> MDoc
-signature n l t
-  = maybe "_" pretty n <+> maybe "" (\l' -> " " <> viaShow l') l <+> "::" <+> prettyType t
+concreteSignature :: Maybe EVar -> ConcreteType -> MDoc
+concreteSignature n (ConcreteType t)
+  = maybe "_" pretty n <+> viaShow (langOf' t) <+> "::" <+> prettyType t
+
+generalSignature :: Maybe EVar -> GeneralType -> MDoc
+generalSignature n (GeneralType t)
+  = maybe "_" pretty n <+> "::" <+> prettyType t
 
 {- | Find exported expressions.
 

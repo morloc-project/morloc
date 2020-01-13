@@ -62,8 +62,8 @@ fromMaybeType = maybe "void*" id
 gLang' :: Lang
 gLang' = CLang
 
-gSerialType' :: Type
-gSerialType' = VarT (TV (Just CLang) "char*")
+gSerialType' :: ConcreteType
+gSerialType' = ConcreteType $ VarT (TV (Just CLang) "char*")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -156,7 +156,7 @@ gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
-gShowType' :: Type -> MDoc
+gShowType' :: ConcreteType -> MDoc
 gShowType' = MTM.buildConcreteType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc 
   mkfun _ _ = "FUNCTION!!!" -- FIXME: stub

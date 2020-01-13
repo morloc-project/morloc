@@ -32,9 +32,9 @@ data ParserState = ParserState {
 buildConcreteType
   :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
   -> ([(MDoc, MDoc)] -> MDoc) -- ^ make record type
-  -> Type
+  -> ConcreteType
   -> MDoc
-buildConcreteType mkfun mkrec t = f t where
+buildConcreteType mkfun mkrec (ConcreteType t) = f t where
   f :: Type -> MDoc
   f (VarT (TV _ x)) = pretty x
   f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
