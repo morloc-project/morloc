@@ -99,7 +99,7 @@ gBool' x = if x then "TRUE" else "FALSE"
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ srcpath = gCall' "source" [gQuote' srcpath]
 
-gPrepImport' :: MT.Text -> MorlocMonad MDoc
+gPrepImport' :: Path -> MorlocMonad MDoc
 gPrepImport' = return . pretty
 
 gList' :: [MDoc] -> MDoc

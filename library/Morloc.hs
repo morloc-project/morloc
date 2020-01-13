@@ -14,13 +14,13 @@ import qualified Morloc.TypeChecker.API as T
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 
-typecheck :: Maybe Path -> MT.Text -> MorlocMonad [T.Module]
+typecheck :: Maybe Path -> Code -> MorlocMonad [T.Module]
 typecheck path code = P.parse path code >>= T.typecheck
 
 -- | Build a program as a local executable
 writeProgram ::
      Maybe Path -- ^ source code filename (for debugging messages)
-  -> MT.Text    -- ^ source code text
+  -> Code       -- ^ source code text
   -> MorlocMonad ()
 writeProgram path code
   -- Maybe Path -> MT.Text -> [Module]

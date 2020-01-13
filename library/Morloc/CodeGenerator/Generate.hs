@@ -135,7 +135,7 @@ findSerializers ms = return $ SerialMap
 
   g :: Module -> (Type, EVar) -> [(Type, (Name, Path))]
   g m (t, v) = case Map.lookup (v, langOf' t) (moduleSourceMap m) of
-    (Just (Source name _ (Just path) _)) -> [(t, (unEVar name, path))]
+    (Just (Source name _ (Just path) _)) -> [(t, (name, path))]
     _ -> []
 
   -- Get the type that is being serialized or deserialized
@@ -291,10 +291,9 @@ collect ms (evar', xs@(x:_)) = do
 
     -- | Find info common across realizations of a given term in a given module
     makeGMeta :: Maybe EVar -> Module -> Maybe Type -> MorlocMonad GMeta
-    makeGMeta evar m gtype = do
+    makeGMeta name m gtype = do
       i <- MM.getCounter
-      let name = fmap unEVar evar
-      case evar >>= (flip Map.lookup) (moduleTypeMap m) of
+      case name >>= (flip Map.lookup) (moduleTypeMap m) of
         (Just (TypeSet (Just e) _)) -> do
           return $ GMeta
             { metaId = i
@@ -465,7 +464,7 @@ makeArg packed h n t
     case (selectFunction t Pack h, selectFunction t Unpack h) of
       (Just (packer, packerpath), Just (unpacker, unpackerpath)) ->
         return $ Argument
-          { argName = unEVar n
+          { argName = n
           , argType = t
           , argPacker = packer
           , argPackerPath = packerpath
@@ -561,7 +560,7 @@ encode (lang, xs) = do
   return $ Script
     { scriptBase = "pool"
     , scriptLang = lang
-    , scriptCode = render code
+    , scriptCode = Code . render $ code
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude =
@@ -619,10 +618,12 @@ findSources = unique . concat . concat . map (unpackSAnno f)
 
     makeSrc :: Name -> Lang -> Path -> Source
     makeSrc n l p = Source
-      { srcName = EVar n
+      { srcName = n -- source name
       , srcLang = l
       , srcPath = Just p
-      , srcAlias = EVar n
+      -- srcAlias will not be used, since serialization is not written in morloc script
+      -- if XXX appears in the generated code, then something is wrong
+      , srcAlias = EVar "XXX"
       }
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
@@ -761,7 +762,7 @@ codify' _ g (SAnno (One (ForeignS mid lang, (c, i))) m) = do
 
 -- | VarS EVar
 codify' False _ (SAnno (One (VarS v, (c, i))) m) = do
-  let name = maybe v srcName (metaSource c)
+  let name = maybe (unEVar v) (unName . srcName) (metaSource c)
   return $ SAnno (One (VarS v, (c, i, pretty name))) m
 codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
   let args = metaArgs i
@@ -770,7 +771,7 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
       itypes = init (typeArgs ftype) -- input types
   g <- selectGrammar (langOf' ftype)
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
-  let srcName = maybe v (\(Source x _ _ _) -> x) (metaSource c)
+  let name = maybe (unEVar v) (\(Source x _ _ _) -> unName x) (metaSource c)
   let mdoc = gFunction g $ GeneralFunction {
       gfComments = comments
     , gfReturnType = Just ((gShowType g) otype)
@@ -778,7 +779,7 @@ codify' True _ (SAnno (One (VarS v, (c, i))) m) = do
     , gfArgs = map (prepArg g) args
     , gfBody =
         vsep (map snd inputs') <> line <>
-        (gReturn g $ (gCall g) (pretty srcName) (map fst inputs'))
+        (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
     }
   return $ SAnno (One (VarS v, (c, i, mdoc))) m
   where
@@ -940,10 +941,6 @@ typeArgs t@(Forall _ _) = error . MT.unpack . render $
   "qualified types should have been eliminated long ago in (" <> prettyType t <> ")"
 typeArgs t = [t]
 
-exprArgs :: SExpr g f c -> [Name]
-exprArgs (LamS vs _) = map unEVar vs
-exprArgs _ = []
-
 makeManifoldName :: GMeta -> MDoc
 makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
 
@@ -1011,7 +1008,7 @@ descSExpr (StrS _) = "StrS"
 descSExpr (RecS _) = "RecS"
 descSExpr (ForeignS i lang) = "ForeignS" <+> pretty i <+> viaShow lang
 
-signature :: Maybe Name -> Maybe Lang -> Type -> MDoc
+signature :: Maybe EVar -> Maybe Lang -> Type -> MDoc
 signature n l t
   = maybe "_" pretty n <+> maybe "" (\l' -> " " <> viaShow l') l <+> "::" <+> prettyType t
 

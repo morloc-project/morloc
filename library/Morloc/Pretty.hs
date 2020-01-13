@@ -28,6 +28,15 @@ instance Pretty MVar where
 instance Pretty EVar where
   pretty = pretty . unEVar
 
+instance Pretty Path where
+  pretty = pretty . unPath
+
+instance Pretty Code where
+  pretty = pretty . unCode
+
+instance Pretty Name where
+  pretty = pretty . unName
+
 instance Pretty TVar where
   pretty (TV Nothing t) = pretty t
   pretty (TV (Just lang) t) = pretty t <> "@" <> pretty (show lang)
@@ -99,7 +108,7 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
     (map
        (\(n, a) ->
           pretty n <>
-          if n == a
+          if unName n == unEVar a
             then ""
             else (" as" <> pretty a))
        rs)
@@ -112,7 +121,7 @@ prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
     (map
        (\(n, a) ->
           pretty n <>
-          if n == a
+          if unName n == unEVar a
             then ""
             else (" as" <> pretty a))
        rs)

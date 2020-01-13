@@ -110,7 +110,7 @@ gImport' _ s = "#include" <+> s
 
 -- See comments above the homologous Cpp.hs function
 gPrepImport'
-  :: MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
   -> MorlocMonad MDoc
 gPrepImport' = return . dquotes . pretty . MS.takeFileName
 

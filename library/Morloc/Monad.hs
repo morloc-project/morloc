@@ -124,8 +124,8 @@ logFile ::
   -> MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
+  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty m)
   return m
 
@@ -138,8 +138,8 @@ logFileWith ::
   -> MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
+  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 

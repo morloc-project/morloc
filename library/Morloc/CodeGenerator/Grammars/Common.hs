@@ -68,7 +68,7 @@ data SExpr g f c
 data GMeta = GMeta {
     metaId :: Int
   , metaGeneralType :: Maybe Type
-  , metaName :: Maybe Name
+  , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
 } deriving (Show, Ord, Eq)
@@ -101,7 +101,7 @@ data IMeta = IMeta {
 
 -- | An argument that is passed to a manifold
 data Argument = Argument {
-    argName :: Name
+    argName :: EVar
   , argType :: Type
   , argPacker :: Name
   , argPackerPath :: Path
@@ -132,7 +132,7 @@ data Grammar =
     , gReturn :: MDoc -> MDoc
     , gQuote :: MDoc -> MDoc
     , gImport :: MDoc -> MDoc -> MDoc
-    , gPrepImport :: MT.Text -> MorlocMonad MDoc
+    , gPrepImport :: Path -> MorlocMonad MDoc
     ---------------------------------------------
     , gNull :: MDoc
     , gBool :: Bool -> MDoc

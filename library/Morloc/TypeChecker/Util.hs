@@ -241,7 +241,7 @@ generalize t = generalize' existentialMap t
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
 
     existentialMap =
-      zip (Set.toList (findExistentials t)) (map MT.pack variables)
+      zip (Set.toList (findExistentials t)) (map (Name . MT.pack) variables)
 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
@@ -256,14 +256,14 @@ generalize t = generalize' existentialMap t
     findExistentials (RecT rs) = Set.unions (map (findExistentials . snd) rs)
 
     generalizeOne :: TVar -> Name -> Type -> Type
-    generalizeOne v0@(TV lang _) r t0 = Forall (TV lang r) (f v0 t0)
+    generalizeOne v0@(TV lang _) r t0 = Forall (TV lang (unName r)) (f v0 t0)
       where
         f :: TVar -> Type -> Type
         f v t1@(ExistT v' [])
-          | v == v' = VarT (TV lang r)
+          | v == v' = VarT (TV lang (unName r))
           | otherwise = t1
         f v t1@(ExistT v' ts)
-          | v == v' = ArrT (TV lang r) (map (f v) ts)
+          | v == v' = ArrT (TV lang (unName r)) (map (f v) ts)
           | otherwise = ArrT v (map (f v) ts)
         f v (FunT t1 t2) = FunT (f v t1) (f v t2)
         f v t1@(Forall x t2)

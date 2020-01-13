@@ -112,9 +112,9 @@ gQuote' = dquotes
 gImport' :: MDoc -> MDoc -> MDoc
 gImport' _ s = [idoc|from #{s} import *|]
 
-gPrepImport' :: MT.Text -> MorlocMonad MDoc
-gPrepImport' s = do
-  lib <- MM.asks configLibrary
+gPrepImport' :: Path -> MorlocMonad MDoc
+gPrepImport' (Path s) = do
+  (Path lib) <- MM.asks configLibrary
   return . pretty
          . MT.liftToText (map DC.toLower)
          . MT.replace "/" "."

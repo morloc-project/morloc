@@ -13,11 +13,14 @@ module Morloc.Namespace
     module Morloc.Internal
   -- ** Synonyms
   , MDoc
-  , Name
-  , Path
-  , Code
   -- ** Newtypes
-  , URI(..)
+  , ConcreteType(..)
+  , GeneralType(..)
+  , EVar(..)
+  , MVar(..)
+  , Name(..)
+  , Path(..)
+  , Code(..)
   -- ** Language
   , Lang(..)
   -- ** Data
@@ -36,14 +39,12 @@ module Morloc.Namespace
   , PackageMeta(..)
   , defaultPackageMeta
   -- * Typechecking
-  , EVar(..)
   , Expr(..)
   , Gamma
   , GammaIndex(..)
   , Import(..)
   , Source(..)
   , Indexable(..)
-  , MVar(..)
   , Module(..)
   , Stack
   , StackState(..)
@@ -94,22 +95,16 @@ data MorlocState = MorlocState {
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
-type Name = Text
-
-type Path = Text
-
-type Code = Text
-
-newtype URI =
-  URI Text
-  deriving (Show, Eq, Ord)
+newtype Name = Name {unName :: Text} deriving (Show, Eq, Ord)
+newtype Path = Path {unPath :: Text} deriving (Show, Eq, Ord)
+newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
 -- | Stores everything needed to build one file
 data Script =
   Script
     { scriptBase :: !String -- ^ script basename (no extension)
     , scriptLang :: !Lang -- ^ script language
-    , scriptCode :: !Text -- ^ full script source code
+    , scriptCode :: !Code -- ^ full script source code
     , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
     , scriptInclude :: [Path] -- ^ paths to morloc module directories
     }
@@ -121,7 +116,7 @@ data MData
   | Str' Text
   | Log' Bool -- booleans are parsed, since representation depend on language
   | Lst' [MData]
-  | Rec' [(Name, MData)]
+  | Rec' [(Text, MData)]
   | Tup' [MData]
   deriving (Show, Eq, Ord)
 
@@ -239,12 +234,15 @@ defaultPackageMeta =
 -- | Configuration object that is passed with MorlocMonad
 data Config =
   Config
-    { configHome :: !Text
-    , configLibrary :: !Text
-    , configTmpDir :: !Text
-    , configLangPython3 :: !Text
-    , configLangR :: !Text
-    , configLangPerl :: !Text
+    { configHome :: !Path
+    , configLibrary :: !Path
+    , configTmpDir :: !Path
+    , configLangPython3 :: !Path
+    -- ^ path to python interpreter
+    , configLangR :: !Path
+    -- ^ path to R interpreter
+    , configLangPerl :: !Path
+    -- ^ path to perl interpreter
     }
   deriving (Show, Ord, Eq)
 
@@ -253,8 +251,8 @@ data Config =
 
 type Gamma = [GammaIndex]
 
-newtype EVar = EVar { unEVar :: Name } deriving (Show, Eq, Ord)
-newtype MVar = MVar { unMVar :: Name } deriving (Show, Eq, Ord)
+newtype EVar = EVar { unEVar :: Text } deriving (Show, Eq, Ord)
+newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
@@ -303,10 +301,13 @@ data GammaIndex
 
 data Source =
   Source
-    { srcName :: EVar
+    { srcName :: Name
+      -- ^ the name of the function in the source language
     , srcLang :: Lang
     , srcPath :: Maybe Path
     , srcAlias :: EVar
+      -- ^ the morloc alias for the function (if no alias is explicitly given,
+      -- this will be equal to the name
     }
   deriving (Ord, Eq, Show)
 
@@ -363,6 +364,9 @@ data Expr
   -- ^ literal string
   | RecE [(EVar, Expr)]
   deriving (Show, Ord, Eq)
+
+newtype ConcreteType = ConcreteType { unConcreteType :: Type }
+newtype GeneralType = GeneralType { unGeneralType :: Type }
 
 -- | Types, see Dunfield Figure 6
 data Type

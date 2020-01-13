@@ -44,7 +44,7 @@ getConfig args = do
         if isVanilla
           then Nothing
           else case givenPath of
-                 (Just f) -> Just (MT.pack f)
+                 (Just f) -> Just . Path . MT.pack $ f
                  Nothing -> Just defaultPath
   -- load the config file
   Config.loadMorlocConfig configPath
@@ -56,14 +56,17 @@ getVerbosity args =
     else 0
 
 -- | handle the code, either from a file or a raw string
-readScript :: Arguments -> IO (Maybe Path, MT.Text)
-readScript args
-  | isPresent args (longOption "expression") = return (Nothing, script)
-  | otherwise = do
-    code <- MT.readFile (MT.unpack script)
-    return (Just script, code)
-  where
-    script = getArgOrDie args (argument "script")
+readScript :: Arguments -> IO (Maybe Path, Code)
+readScript args = do
+  let input = getArgOrDie args (argument "script")
+  if isPresent args (longOption "expression") 
+  then do
+    let code = Code input 
+    return (Nothing, code)
+  else do
+    let filename = Path input
+    code <- fmap Code $ MT.readFile (MT.unpack input)
+    return (Just filename, code)
 
 -- | install a module
 cmdInstall :: Subcommand
@@ -98,7 +101,7 @@ cmdTypecheck args config = do
   let base =
         if isPresent args (longOption "expression")
           then Nothing
-          else Just expr
+          else Just (Path expr)
   let writer =
         if isPresent args (longOption "raw")
           then Papi.ugly
@@ -108,5 +111,5 @@ cmdTypecheck args config = do
     else MM.runMorlocMonad
            (getVerbosity args)
            config
-           (M.typecheck base expr' >>= MM.liftIO . writer) >>=
+           (M.typecheck base (Code expr') >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn

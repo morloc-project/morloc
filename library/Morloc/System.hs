@@ -13,36 +13,42 @@ module Morloc.System
   , takeDirectory
   , takeFileName
   , combine
+  , fileExists
   ) where
 
+import Morloc.Namespace 
 import qualified Morloc.Data.Text as MT
 
 import Data.Aeson (FromJSON(..))
 import qualified Data.Yaml.Config as YC
 import qualified System.Directory as Sys
 import qualified System.FilePath.Posix as Path
+import qualified System.Directory as SD
 
-combine :: MT.Text -> MT.Text -> MT.Text
-combine x y = MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)
+combine :: Path -> Path -> Path
+combine (Path x) (Path y) = Path . MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)
 
-takeDirectory :: MT.Text -> MT.Text
-takeDirectory x = MT.pack $ Path.takeDirectory (MT.unpack x)
+fileExists :: Path -> IO Bool
+fileExists = SD.doesFileExist . MT.unpack . unPath
 
-takeFileName :: MT.Text -> MT.Text
-takeFileName x = MT.pack $ Path.takeFileName (MT.unpack x)
+takeDirectory :: Path -> Path
+takeDirectory (Path x) = Path . MT.pack . Path.takeDirectory $ MT.unpack x
+
+takeFileName :: Path -> Path
+takeFileName (Path x) = Path . MT.pack . Path.takeFileName $ MT.unpack x
 
 -- | Append POSIX paths encoded as Text
-appendPath :: MT.Text -> MT.Text -> MT.Text
+appendPath :: Path -> Path -> Path
 appendPath base path = combine path base
 
-getHomeDirectory :: IO MT.Text
-getHomeDirectory = fmap MT.pack Sys.getHomeDirectory
+getHomeDirectory :: IO Path
+getHomeDirectory = fmap (Path . MT.pack) Sys.getHomeDirectory
 
 loadYamlConfig ::
      FromJSON a
-  => Maybe [MT.Text] -- ^ possible locations of the config file 
+  => Maybe [Path] -- ^ possible locations of the config file 
   -> YC.EnvUsage -- ^ default values taken from the environment (or a hashmap)
   -> IO a -- ^ default configuration
   -> IO a
-loadYamlConfig (Just fs) e _ = YC.loadYamlSettings (map MT.unpack fs) [] e
+loadYamlConfig (Just fs) e _ = YC.loadYamlSettings (map (MT.unpack . unPath) fs) [] e
 loadYamlConfig Nothing _ d = d

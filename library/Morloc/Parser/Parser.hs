@@ -28,7 +28,7 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
 data ParserState = ParserState {
     stateLang :: Maybe Lang
-  , stateModulePath :: Maybe MT.Text
+  , stateModulePath :: Maybe Path
 }
 
 emptyState :: ParserState
@@ -43,7 +43,7 @@ readProgram :: Maybe Path -> MT.Text -> [Module]
 readProgram f sourceCode =
   case runParser
          (CMS.runStateT (sc >> pProgram <* eof) pstate)
-         (maybe "<expr>" MT.unpack f)
+         (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
     Left err -> error (show err)
     Right (es, _) -> es
@@ -322,7 +322,7 @@ pSrcE = do
   f <- CMS.gets stateModulePath
   reserved "source"
   language <- pLang
-  srcfile <- optional (reserved "from" >> stringLiteral)
+  srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
   let path = MS.combine <$> fmap MS.takeDirectory f <*> srcfile
   return $ SrcE [Source { srcName = name
@@ -331,11 +331,11 @@ pSrcE = do
                         , srcAlias = alias
                         } | (name, alias) <- rs]
 
-pImportSourceTerm :: Parser (EVar, EVar)
+pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
   a <- option n (reserved "as" >> name)
-  return (EVar n, EVar a)
+  return (Name n, EVar a)
 
 pRecordE :: Parser Expr
 pRecordE = fmap RecE $ braces (sepBy1 pRecordEntryE (symbol ","))

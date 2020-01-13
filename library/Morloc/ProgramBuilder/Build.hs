@@ -35,8 +35,8 @@ gccBuild :: Script -> MT.Text -> MorlocMonad ()
 gccBuild s cmd = do
   let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
   let exe = ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))
-  let inc = ["-I" <> i | i <- scriptInclude s]
-  liftIO $ MT.writeFile (MT.unpack src) (scriptCode s)
+  let inc = ["-I" <> unPath i | i <- scriptInclude s]
+  liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
   MM.runCommand "GccBuild" $
     MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
 
@@ -46,6 +46,6 @@ writeInterpreted s = do
   let f =
         MT.unpack $
         ML.makeExecutableName (scriptLang s) (MT.pack (scriptBase s))
-  MT.writeFile f (scriptCode s)
+  MT.writeFile f (unCode (scriptCode s))
   p <- SD.getPermissions f
   SD.setPermissions f (p {SD.executable = True})

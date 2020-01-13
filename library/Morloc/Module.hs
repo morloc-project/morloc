@@ -14,6 +14,7 @@ module Morloc.Module
   ) where
 
 import Morloc.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -48,7 +49,7 @@ data ModuleSource
   -- ^ The repo name of a core package, e.g., "math"
 
 -- | Look for a local morloc module.
-findModule :: MT.Text -> MorlocMonad MT.Text
+findModule :: MVar -> MorlocMonad Path
 findModule moduleName = do
   config <- MM.ask
   let lib = Config.configLibrary config
@@ -57,28 +58,22 @@ findModule moduleName = do
   case existingPaths of
     (x:_) -> return x
     [] ->
-      MM.throwError
-        (CannotLoadModule
-           ("module not found among the paths: [" <>
-            (MT.concat $ intersperse ", " allPaths) <> "]"))
+      MM.throwError . CannotLoadModule . render $
+        "module not found among the paths:" <+> list (map pretty allPaths)
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder
 -- as the main "*.loc" file. 
-findModuleMetadata :: MT.Text -> IO (Maybe MT.Text)
-findModuleMetadata main_file = do
-  let meta_str = MS.combine (MS.takeDirectory main_file) "package.yaml"
-  meta_file <- getFile meta_str
-  case meta_file of
-    (Just x) -> return (Just x)
-    Nothing -> return Nothing
+findModuleMetadata :: Path -> IO (Maybe Path)
+findModuleMetadata mainFile =
+  getFile $ MS.combine (MS.takeDirectory mainFile) (Path "package.yaml")
 
-loadModuleMetadata :: MT.Text -> MorlocMonad ()
+loadModuleMetadata :: Path -> MorlocMonad ()
 loadModuleMetadata main = do
   maybef <- liftIO $ findModuleMetadata main
   meta <-
     case maybef of
-      (Just f) -> liftIO $ YC.loadYamlSettings [MT.unpack f] [] YC.ignoreEnv
+      (Just f) -> liftIO $ YC.loadYamlSettings [MT.unpack . unPath $ f] [] YC.ignoreEnv
       Nothing -> return defaultPackageMeta
   state <- MM.get
   MM.put (appendMeta meta state)
@@ -87,8 +82,8 @@ loadModuleMetadata main = do
     appendMeta m s = s {statePackageMeta = m : (statePackageMeta s)}
 
 -- | Find an ordered list of possible locations to search for a module
-getModulePaths :: MT.Text -> MT.Text -> [MT.Text]
-getModulePaths lib base =
+getModulePaths :: Path -> MVar -> [Path]
+getModulePaths (Path lib) (MVar base) = map Path
   [ base <> ".loc"                              -- "./${base}.loc"
   , base <> "/" <> "main.loc"                   -- "${base}/main.loc"
   , lib <> "/" <> base <> ".loc"                -- "${LIB}/${base}.loc"
@@ -96,11 +91,11 @@ getModulePaths lib base =
   , lib <> "/" <> base <> "/" <> base <> ".loc" -- "${LIB}/${base}/${base}.loc"
   ]
 
-getFile :: MT.Text -> IO (Maybe MT.Text)
+getFile :: Path -> IO (Maybe Path)
 getFile x = do
-  fileExists <- SD.doesFileExist (MT.unpack x)
+  exists <- MS.fileExists x
   return $
-    if fileExists
+    if exists
       then Just x
       else Nothing
 
@@ -111,7 +106,7 @@ installGithubRepo ::
   -> MorlocMonad ()
 installGithubRepo repo url = do
   config <- MM.ask
-  let lib = Config.configLibrary config
+  let (Path lib) = Config.configLibrary config
   let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo]
   MM.runCommand "installGithubRepo" cmd
 

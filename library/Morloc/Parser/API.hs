@@ -25,9 +25,9 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc)
 
 parse ::
      Maybe Path
-  -> MT.Text -- ^ code of the current module
+  -> Code -- ^ code of the current module
   -> MorlocMonad [Module]
-parse f code = do
+parse f (Code code) = do
   mods <- fmap Map.elems $ parse' Map.empty (f, code)
   return mods
   where
@@ -43,12 +43,12 @@ parse f code = do
       | otherwise = do
         -- load metadata for all imported modules
         mapM
-          (\v -> Mod.findModule (unMVar v) >>= Mod.loadModuleMetadata)
+          (\v -> Mod.findModule v >>= Mod.loadModuleMetadata)
           (map importModuleName (moduleImports m))
         -- for now I only support local modules
         imports <-
           mapM
-            (\v -> Mod.findModule (unMVar v) >>= openLocalModule)
+            (\v -> Mod.findModule v >>= openLocalModule)
             (map importModuleName (moduleImports m))
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods
@@ -62,5 +62,5 @@ ugly ms = print ms
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
 openLocalModule filename = do
-  code <- liftIO $ MT.readFile (MT.unpack filename)
+  code <- liftIO $ MT.readFile (MT.unpack . unPath $ filename)
   return (Just filename, code)

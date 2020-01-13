@@ -128,7 +128,7 @@ gImport' _ s = "#include" <+> s
 -- through all the module paths for each file, which introduces the possibility
 -- of name conflicts.
 gPrepImport'
-  :: MT.Text -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
   -> MorlocMonad MDoc
 gPrepImport' = return . dquotes . pretty . MS.takeFileName
 
