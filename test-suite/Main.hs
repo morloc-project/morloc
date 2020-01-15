@@ -22,4 +22,5 @@ main = do
       , golden "nested C++ map functions" "5_nested"
       , golden "C++ / R interop" "6_interop"
       , golden "C++ quadratic eqation" "7_quadraticEq"
+      , golden "C++ currying" "8_partial-application"
       ]
