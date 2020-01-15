@@ -1,0 +1,4 @@
+import math
+import cppbase
+export double
+double xs = map (mul 2) xs;

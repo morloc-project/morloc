@@ -42,8 +42,7 @@ import qualified Data.Set as Set
 -- f: a collection - before realization this will probably be Set
 --                 - after realization it will be One
 -- c: an annotation for the specific child tree
-data SAnno g f c
-  = SAnno (f (SExpr g f c, c)) g
+data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 
 data One a = One a
 data Many a = Many [a]
@@ -87,23 +86,6 @@ data IMeta = IMeta {
   , metaPacker :: Maybe Name -- ^ name of function for packing output of this function
   , metaPackerPath :: Maybe Path  -- ^ path to the packer function
 } deriving (Show, Ord, Eq)
-
--- FIXME: This is wrong. The manifold arguments will not always be concretely
--- typed. They can be used at multiple places within in a composition and thus
--- can take on multiple language-specific types. They should only be
--- deserialized when they are needed. Thus, serialization should be handled in
--- the codify function.
--- data Argument' = PackedArgument | UnpackedArgument
-
--- data Argument
---   = PackedArgument Name GeneralType
---   | UnpackedArgument Name
---
--- -- | An argument that is passed to a manifold
--- data Argument = Argument {
---     argName :: EVar
---   , argType :: Type
--- } deriving (Show, Ord, Eq)
 
 -- | An argument that is passed to a manifold
 data Argument = Argument {

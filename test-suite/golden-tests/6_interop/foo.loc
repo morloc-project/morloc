@@ -17,3 +17,9 @@ mean R :: vector numeric -> numeric;
 sqrtfibmean n = sqrt (mean (fibonacci n));
 --               C     R       C
 -----------------^-----^-------^
+
+
+------ here is a pure Cpp implementation for sqrtfibmean
+-- import math (fibonacci, mean, sqrt);
+-- export sqrtfibmean;
+-- sqrtfibmean n = sqrt (mean (fibonacci n));
