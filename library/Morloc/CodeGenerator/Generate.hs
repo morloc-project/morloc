@@ -100,16 +100,28 @@ generate ms = do
 -- is associated with a list of possible implementations/realizations.
 roots :: Map.Map MVar Module -> MorlocMonad [(EVar, [TermOrigin])]
 roots ms = do
-  case roots of
+  xs <- case roots of
     [m] ->
       let vs = Set.toList (moduleExports m) in
         return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError . OtherError $ "Circular dependencies between modules"
     _ -> MM.throwError . OtherError $ "Multiple root modules"
+  say $ "roots"
+  say . vsep . map prettyRoot $ xs
+  return xs
   where
     isRoot m = not $ Set.member (moduleName m) allImports
     allImports = mapSumWith (valset . moduleImportMap) ms
     roots = filter isRoot (Map.elems ms)
+
+    prettyRoot :: (EVar, [TermOrigin]) -> MDoc 
+    prettyRoot (v, ts) =
+      hsep ["for", dquotes (pretty v), "found", parens . hsep . map prettyTermOrigin $ ts]
+
+    prettyTermOrigin :: TermOrigin -> MDoc
+    prettyTermOrigin (Declared _ _ _) = "D"
+    prettyTermOrigin (Sourced _ _) = "S"
+
 
 -- find all serialization functions in a list of modules
 findSerializers :: [Module] -> MorlocMonad SerialMap
@@ -163,7 +175,7 @@ collect
 collect ms (v, []) = MM.throwError . OtherError $
   "No origin found for variable '" <> unEVar v <> "'"
 collect ms (evar', xs@(x:_)) = do
-  -- say $ hsep ["for", pretty evar', "found", pretty (length xs), "definitions"]
+  say $ hsep ["for", pretty evar', "found", pretty (length xs), "definitions"]
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
   return $ SAnno (Many trees) gmeta
@@ -234,8 +246,8 @@ collect ms (evar', xs@(x:_)) = do
         -- type as far as it can be unrolled, and infer specialized types all
         -- the way down. Multiple declarations of every term within a given
         -- language should be allowed. The function below will only work in
-        -- special cases where there is 1) a single instance of the term in
-        -- each language and 2) types beneath the term (if this is a
+        -- special cases where there is A) a single instance of the term in
+        -- each language and B) types beneath the term (if this is a
         -- composition) do not depend on the type on top.
         chooseTypes
           :: [CMeta]
@@ -266,20 +278,27 @@ collect ms (evar', xs@(x:_)) = do
       -- The topology of e1' may vary. It could be a direct binary function. Or
       -- it could be a partially applied function. So it is necessary to map
       -- over the Many.
-      e1'@(SAnno (Many fs) g) <- collectAnno args m e1
+      e1'@(SAnno (Many fs) g1) <- collectAnno args m e1
       e2' <- collectAnno args m e2
-      let trees = map (\(f, c) -> (app f c g e2', c)) fs
-      return trees
-    collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
+      mapM (app g1 e2') fs
 
+    collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
     app
-      :: SExpr GMeta Many [CMeta]
-      -> [CMeta]
-      -> GMeta
+      :: GMeta
       -> SAnno GMeta Many [CMeta]
-      -> SExpr GMeta Many [CMeta]
-    app (AppS f es) _ _ e2 = AppS f (es ++ [e2])
-    app f cmetas g e2 = AppS (SAnno (Many [(f, cmetas)]) g) [e2]
+      -> (SExpr GMeta Many [CMeta], [CMeta])
+      -> MorlocMonad (SExpr GMeta Many [CMeta], [CMeta])
+    app _ e2 ((AppS f es), cmetas) = do
+      cmetas' <- mapM partialApplyCMeta cmetas
+      return (AppS f (es ++ [e2]), cmetas')
+    app g e2 (f, cmetas) = do
+      cmetas' <- mapM partialApplyCMeta cmetas
+      return (AppS (SAnno (Many [(f, cmetas)]) g) [e2], cmetas')
+
+    partialApplyCMeta :: CMeta -> MorlocMonad CMeta
+    partialApplyCMeta c = do
+      t <- partialApply (unConcreteType $ metaType c)
+      return $ c {metaType = ConcreteType t}
 
     simpleCollect
       :: (SExpr GMeta Many [CMeta])
@@ -321,6 +340,7 @@ collect ms (evar', xs@(x:_)) = do
         , metaModule = moduleName m
         }
 
+
 -- | Select a single concrete language for each sub-expression.  Store the
 -- concrete type and the general type (if available).  Select serialization
 -- functions (the serial map should not be needed after this step in the
@@ -329,7 +349,11 @@ realize
   :: SerialMap
   -> SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-realize h x = realizeAnno True Nothing [] x where
+realize h x = do
+  realized <- realizeAnno True Nothing [] x
+  liftIO . putDoc $ prettySAnno realized
+  return realized
+  where
 
   realizeAnno
     :: Bool -- is this a top-level expression
@@ -338,16 +362,16 @@ realize h x = realizeAnno True Nothing [] x where
     -> SAnno GMeta Many [CMeta]
     -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
   realizeAnno isTop lang args (SAnno (Many xs@((x, ys@(cmeta:_)):_)) gmeta) = do
-    -- say $ hsep
-    --   [ "realizeAnno: for"
-    --   , viaShow (metaName gmeta)
-    --   , "found"
-    --   , pretty (length xs)
-    --   , "topologies and"
-    --   , pretty (length ys)
-    --   , "cmetas with types:"
-    --   ] <> line
-    --   <> indent 4 (tupled (map (prettyType . metaType) ys)) <> line
+    say $ hsep
+      [ "realizeAnno: for"
+      , viaShow (metaName gmeta)
+      , "found"
+      , pretty (length xs)
+      , "topologies and"
+      , pretty (length ys)
+      , "cmetas with types:"
+      ] <> line
+      <> indent 4 (tupled (map (prettyType . metaType) ys)) <> line
     x' <- realizeExpr lang args gmeta cmeta x
     args' <- handleArgsForSourced isTop cmeta x' args
     imeta <- makeIMeta isTop x' cmeta args'
@@ -455,6 +479,7 @@ realize h x = realizeAnno True Nothing [] x where
       let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
       return $ newargs ++ oldargs'
 
+
 makeArg :: Bool -> SerialMap -> EVar -> ConcreteType -> MorlocMonad Argument
 makeArg packed h n t =
   case (selectFunction t Pack h, selectFunction t Unpack h) of
@@ -542,12 +567,14 @@ segment s = (\(r,rs) -> r:rs) <$> segment' Nothing Nothing s where
     return (SAnno (One (RecS entries', (c1, i1))) g1, concat rss')
   segment' _ _ s = return (s, [])
 
+
 makeFun :: [ConcreteType] -> ConcreteType
 makeFun ts = ConcreteType (makeFun' $ map typeOf ts)
   where
     makeFun' [] = error "No types given"
     makeFun' [t] = t
     makeFun' (t:ts) = FunT t (makeFun' ts)
+
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool
@@ -630,6 +657,7 @@ findSources = unique . concat . concat . map (unpackSAnno f)
       -- if XXX appears in the generated code, then something is wrong
       , srcAlias = EVar "XXX"
       }
+
 
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
 -- prototype definitions, but R and Python do not. Languages that do not
@@ -827,12 +855,8 @@ makeManifoldDoc
   -> MorlocMonad MDoc
 makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
   let ftype = metaType c'
-      otype = last (typeArgs ftype)
+      otype = metaType c
       margs = metaArgs i
-
-  -- say $ pretty (metaId m) <+> pretty (metaId m') <+> descSExpr x
-  --     -- <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
-  --     -- <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
 
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
@@ -847,7 +871,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
         [ Just "From B"
         , Just (descSExpr x)
         , fmap (generalSignature (metaName m')) (metaGeneralType m')
-        , Just $ concreteSignature (metaName m') (metaType c)
+        , Just $ concreteSignature (metaName m') (metaType c')
         ]
     , gfReturnType = Just ((gShowType g) otype)
     , gfName = makeManifoldName m
@@ -856,6 +880,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
         vsep (catMaybes (map snd inputs')) <> line <>
         (gReturn g $ (gCall g) innerCall (map fst inputs'))
     }
+
 
 -- Handle preparation of arguments passed to a manifold. Return the name of the
 -- variable that will be used and an block of code that defines the variable
@@ -1025,6 +1050,46 @@ concreteSignature n (ConcreteType t)
 generalSignature :: Maybe EVar -> GeneralType -> MDoc
 generalSignature n (GeneralType t)
   = maybe "_" pretty n <+> "::" <+> prettyType t
+
+prettySAnno :: SAnno GMeta One (CMeta, IMeta) -> MDoc
+prettySAnno (SAnno (One (x, (c, i))) m)
+  = "SAnno" <+> pretty (metaId m)
+  <+> maybe "-" pretty (metaName m)
+  <+> (align . vsep)
+        [ parens (maybe "-" prettyType (metaGeneralType m))
+        , parens (prettyType (metaType c))]
+  <> line <> indent 2 (prettySExpr x)
+
+prettySExpr :: SExpr GMeta One (CMeta, IMeta) -> MDoc
+prettySExpr UniS = "UniS"
+prettySExpr (VarS v) = pretty v
+prettySExpr (ListS xs) = "ListS" <+> align (encloseSep "[" "]" "," (map prettySAnno xs))
+prettySExpr (TupleS xs) = "TupleS" <+> align (encloseSep "[" "]" "," (map prettySAnno xs))
+prettySExpr (LamS vs x) = hsep ("LamS" : map pretty vs) <+> "->" <> line <> indent 2 (prettySAnno x)
+prettySExpr (AppS f xs) = nest 2 . vsep $
+  ["AppS", parens (prettySAnno f)] ++ map (parens . prettySAnno) xs
+prettySExpr (NumS x) = viaShow x
+prettySExpr (LogS x) = viaShow x
+prettySExpr (StrS x) = viaShow x
+prettySExpr (RecS _) = error "Too lazy to support this"
+prettySExpr (ForeignS _ _) = error "ForeignS shouldn't have been added yet"
+
+partialApply :: Type -> MorlocMonad Type
+partialApply (FunT _ t) = return t
+partialApply (Forall v t) = do
+  t' <- partialApply t
+  return $ Forall v t'
+partialApply _ = MM.throwError . OtherError $
+  "Cannot partially apply a non-function type"
+
+partialApplyN :: Int -> Type -> MorlocMonad Type
+partialApplyN i t
+  | i < 0 = MM.throwError . OtherError $
+    "Do you really want to apply a negative number of arguments?"
+  | i == 0 = return t
+  | i > 0 = do
+    appliedType <- partialApply t
+    partialApplyN (i-1) appliedType
 
 {- | Find exported expressions.
 

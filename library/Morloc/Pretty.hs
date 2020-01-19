@@ -171,19 +171,28 @@ prettyGreenType t = annotate typeStyle (prettyType t)
 prettyScream :: MT.Text -> Doc AnsiStyle
 prettyScream x = annotate screamStyle (pretty x)
 
-prettyType :: Type -> Doc ann
-prettyType (VarT (TV _ "Unit")) = "()"
-prettyType (VarT v) = pretty v
-prettyType (FunT t1@(FunT _ _) t2) =
-  parens (prettyType t1) <+> "->" <+> prettyType t2
-prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
-prettyType t@(Forall _ _) =
-  "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
-prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-prettyType (RecT entries) =
-  encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+class PrettyType a where
+  prettyType :: a -> Doc ann
+
+instance PrettyType Type where
+  prettyType (VarT (TV _ "Unit")) = "()"
+  prettyType (VarT v) = pretty v
+  prettyType (FunT t1@(FunT _ _) t2) =
+    parens (prettyType t1) <+> "->" <+> prettyType t2
+  prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
+  prettyType t@(Forall _ _) =
+    "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
+  prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
+  prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
+  prettyType (RecT entries) =
+    encloseSep "{" "}" ", "
+      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+
+instance PrettyType GeneralType where
+  prettyType = prettyType . unGeneralType
+
+instance PrettyType ConcreteType where
+  prettyType = prettyType . unConcreteType
 
 prettyTypeSet :: TypeSet -> Doc AnsiStyle
 prettyTypeSet (TypeSet Nothing ts)

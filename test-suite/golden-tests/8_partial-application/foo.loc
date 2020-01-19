@@ -1,4 +1,4 @@
 import math
 import cppbase
-export double
-double xs = map (mul 2) xs;
+export triple
+triple xs = map (mul 3) xs;
