@@ -35,6 +35,12 @@ module Morloc.Internal
   , mapFold
   , mapSum
   , mapSumWith
+  -- ** safe versions of errant functions
+  , module Safe
+  , maximumOnMay
+  , minimumOnMay
+  , maximumOnDef
+  , minimumOnDef
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -48,9 +54,26 @@ import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
+import Safe hiding (at)
 import System.FilePath
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+
+maximumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
+maximumOnMay _ [] = Nothing
+maximumOnMay f xs = Just $ maximumOn f xs
+
+minimumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
+minimumOnMay _ [] = Nothing
+minimumOnMay f xs = Just $ minimumOn f xs
+
+maximumOnDef :: Ord b => a -> (a -> b) -> [a] -> a
+maximumOnDef x _ [] = x
+maximumOnDef _ f xs = maximumOn f xs
+
+minimumOnDef :: Ord b => a -> (a -> b) -> [a] -> a
+minimumOnDef x _ [] = x
+minimumOnDef _ f xs = minimumOn f xs
 
 uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d 
 uncurry3 f (x, y, z) = f x y z

@@ -19,6 +19,7 @@ module Morloc.Language
   , makeExecutableName
   , makeSourceName
   , standardizeLangName
+  , pairwiseCost
   ) where
 
 import Morloc.Internal
@@ -29,13 +30,34 @@ import Data.Text (Text)
 -- are languages that can be sourced (Python, R and C). Perl is currently used
 -- only in generating the nexus file.
 data Lang
-  = MorlocLang
+  = MorlocLang -- FIXME: MorlocLang should not be in this list,
   | Python3Lang
   | RLang
   | CLang
   | CppLang
   | PerlLang
   deriving (Ord, Eq, Show)
+
+-- | very rough function overhead costs that can be used when no benchmark info is available
+-- `Nothing` indicates that the language pair are not interoperable
+pairwiseCost :: Lang -> Lang -> Maybe Int
+-- morloc lang cannot be used in the generator
+pairwiseCost MorlocLang _ = Nothing
+pairwiseCost _ MorlocLang = Nothing
+-- functional overhead in each language
+pairwiseCost CLang       CLang       = Just 1
+pairwiseCost CppLang     CppLang     = Just 1
+pairwiseCost PerlLang    PerlLang    = Just 10
+pairwiseCost Python3Lang Python3Lang = Just 10
+pairwiseCost RLang       RLang       = Just 100
+-- pairs of languages for which foreign calls are optimized
+pairwiseCost CppLang CLang = Just 1
+-- cost of naive foreign function calls
+pairwiseCost _ CLang       = Just 100
+pairwiseCost _ CppLang     = Just 100
+pairwiseCost _ Python3Lang = Just 10000
+pairwiseCost _ PerlLang    = Just 10000
+pairwiseCost _ RLang       = Just 1000000
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang

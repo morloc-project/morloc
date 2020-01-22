@@ -49,9 +49,6 @@ generate ms = do
   -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
 
-  -- recursively find all serializers imported from any module
-  smap <- findSerializers ms
-
   -- translate modules into bitrees
   ast
     -- find each term that is exported to the nexus
@@ -59,22 +56,27 @@ generate ms = do
     -- turn each term into an ambiguous call tree
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CMeta]]
     -- select a single instance at each node in the tree
-    -- also resolve the manifold arguments that are in scope for each expression
-    >>= mapM (realize smap)  -- [SAnno GMeta One (CMeta, IMeta)]
+    >>= mapM realize  -- [SAnno GMeta One CMeta]
 
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate [ (metaType c, poolId m x, metaName m)
-                          | SAnno (One (x, (c, _))) m <- ast
+                          | SAnno (One (x, c)) m <- ast
                           ]
+
+  -- recursively find all serializers imported from any module
+  smap <- findSerializers ms
 
   -- for each language, collect all functions into one "pool"
   pools
+    -- resolve the manifold arguments that are in scope for each expression and
+    -- choose serialization functions.
+    <- mapM (serialize smap) ast
     -- Separate the call trees into mono-lingual segments terminated in
     -- primitives or foreign calls.
-    <- mapM segment ast |>> concat
+    >>= mapM segment |>> concat
     -- Gather segments into pools, currently tihs entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
@@ -87,7 +89,7 @@ generate ms = do
   where
     -- map from nexus id to pool id
     -- these differ when a declared variable is exported
-    poolId :: GMeta -> SExpr GMeta One (CMeta, IMeta) -> Int
+    poolId :: GMeta -> SExpr GMeta One CMeta -> Int
     poolId _ (LamS _ (SAnno _ meta)) = metaId meta
     poolId meta _ = metaId meta
 
@@ -346,43 +348,103 @@ collect ms (evar', xs@(x:_)) = do
 -- functions (the serial map should not be needed after this step in the
 -- workflow).
 realize
-  :: SerialMap
-  -> SAnno GMeta Many [CMeta]
-  -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-realize h x = do
-  realized <- realizeAnno True Nothing [] x
-  liftIO . putDoc $ prettySAnno realized
-  return realized
+  :: SAnno GMeta Many [CMeta]
+  -> MorlocMonad (SAnno GMeta One CMeta)
+realize x = do
+  realizationMay <- realizeAnno Nothing x
+  case realizationMay of
+    (Just (_, realization)) -> return realization 
+    Nothing -> MM.throwError . OtherError $ "No valid realization found"
   where
+    realizeAnno
+      :: Maybe Lang
+      -> SAnno GMeta Many [CMeta]
+      -> MorlocMonad (Maybe (Int, SAnno GMeta One CMeta))
+    realizeAnno langMay (SAnno (Many xs) m) = do
+      asts <- mapM (\(x, cs) -> mapM (realizeExpr langMay x) cs) xs |>> concat
+      case maximumOnMay (\(s,_,_) -> s) (catMaybes asts) of
+        Just (i, x, c) -> return $ Just (i, SAnno (One (x, c)) m)
+        Nothing -> return Nothing
 
-  realizeAnno
-    :: Bool -- is this a top-level expression
+    realizeExpr
+      :: Maybe Lang
+      -> SExpr GMeta Many [CMeta]
+      -> CMeta
+      -> MorlocMonad (Maybe (Int, SExpr GMeta One CMeta, CMeta))
+    realizeExpr lang x c = realizeExpr' (maybe (metaLang c) id lang) x c
+
+    realizeExpr'
+      :: Lang
+      -> SExpr GMeta Many [CMeta]
+      -> CMeta
+      -> MorlocMonad (Maybe (Int, SExpr GMeta One CMeta, CMeta))
+    realizeExpr' lang (UniS) c
+      | lang == metaLang c = return $ Just (0, UniS, c)
+      | otherwise = return Nothing
+    realizeExpr' lang (NumS x) c
+      | lang == metaLang c = return $ Just (0, NumS x, c)
+      | otherwise = return Nothing
+    realizeExpr' lang (LogS x) c
+      | lang == metaLang c = return $ Just (0, LogS x, c)
+      | otherwise = return Nothing
+    realizeExpr' lang (StrS x) c
+      | lang == metaLang c = return $ Just (0, StrS x, c)
+      | otherwise = return Nothing
+    realizeExpr' lang (VarS x) c
+      | lang == metaLang c = return $ Just (0, VarS x, c)
+      | otherwise = return Nothing
+    realizeExpr' lang (ListS xs) c
+      | lang == metaLang c = do
+        xsMay <- mapM (realizeAnno (Just lang)) xs
+        case (fmap unzip . sequence) xsMay of
+          (Just (scores, xs')) -> return $ Just (sum scores, ListS xs', c)
+          Nothing -> return Nothing
+      | otherwise = return Nothing
+    realizeExpr' lang (TupleS xs) c
+      | lang == metaLang c = do
+        xsMay <- mapM (realizeAnno (Just lang)) xs
+        case (fmap unzip . sequence) xsMay of
+          (Just (scores, xs')) -> return $ Just (sum scores, TupleS xs', c)
+          Nothing -> return Nothing
+      | otherwise = return Nothing
+    realizeExpr' lang (RecS entries) c
+      | lang == metaLang c = do
+          xsMay <- mapM (realizeAnno (Just lang)) (map snd entries)
+          case (fmap unzip . sequence) xsMay of
+            (Just (scores, vals)) -> return $ Just (sum scores, RecS (zip (map fst entries) vals), c)
+            Nothing -> return Nothing
+      | otherwise = return Nothing
+    realizeExpr' _ (LamS vs x) c = do
+      xMay <- realizeAnno (Just $ metaLang c) x
+      case xMay of
+        (Just (score, x')) -> return $ Just (score, LamS vs x', c)
+        Nothing -> return Nothing
+    realizeExpr' lang (AppS f xs) c = do
+      fMay <- realizeAnno (Just $ metaLang c) f
+      xsMay <- mapM (realizeAnno (Just $ metaLang c)) xs
+      case (fMay, (fmap unzip . sequence) xsMay, Lang.pairwiseCost lang (metaLang c)) of
+        (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
+          return $ Just (fscore + sum scores + interopCost, AppS f' xs', c) 
+        _ -> return Nothing
+    realizeExpr' _ (ForeignS _ _) _ = MM.throwError . OtherError $
+      "ForeignS should not yet appear in an SExpr"
+
+serialize
+  :: SerialMap
+  -> SAnno GMeta One CMeta
+  -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
+serialize h x = serializeAnno True Nothing [] x where
+  serializeAnno
+    :: Bool
     -> Maybe Lang
     -> [Argument]
-    -> SAnno GMeta Many [CMeta]
+    -> SAnno GMeta One CMeta
     -> MorlocMonad (SAnno GMeta One (CMeta, IMeta))
-  realizeAnno isTop lang args (SAnno (Many xs@((x, ys@(cmeta:_)):_)) gmeta) = do
-    say $ hsep
-      [ "realizeAnno: for"
-      , viaShow (metaName gmeta)
-      , "found"
-      , pretty (length xs)
-      , "topologies and"
-      , pretty (length ys)
-      , "cmetas with types:"
-      ] <> line
-      <> indent 4 (tupled (map (prettyType . metaType) ys)) <> line
-    x' <- realizeExpr lang args gmeta cmeta x
+  serializeAnno isTop lang args (SAnno (One (x, cmeta)) gmeta) = do
+    x' <- serializeExpr lang args gmeta cmeta x
     args' <- handleArgsForSourced isTop cmeta x' args
     imeta <- makeIMeta isTop x' cmeta args'
-    -- say $ pretty (metaId gmeta) <+> descSExpr x <> ":"
-    --     <+> maybe "_ ::" (\n -> pretty n <+> "::") (metaName gmeta)
-    --     <+> maybe "<untyped>" prettyType (metaGeneralType gmeta)
     return $ SAnno (One (x', (cmeta, imeta))) gmeta
-  realizeAnno _ lang _ (SAnno (Many []) gmeta) = MM.throwError . OtherError $
-    "No valid cases found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
-  realizeAnno _ lang _ (SAnno (Many ((x, []):_)) gmeta) = MM.throwError . OtherError $
-    "No valid cmeta found for: " <> render (viaShow gmeta) <> " in " <> render (viaShow lang)
 
   -- prepare arguments for top-level sourced expressions
   handleArgsForSourced
@@ -405,42 +467,42 @@ realize h x = do
       variableStream i = map (EVar . MT.pack) $ take i variables
   handleArgsForSourced _ _ _ args = return args
 
-  realizeExpr
+  serializeExpr
     :: Maybe Lang -- ^ the parent language (not the language in CMeta)
     -> [Argument]
     -> GMeta -> CMeta
-    -> SExpr GMeta Many [CMeta]
+    -> SExpr GMeta One CMeta
     -> MorlocMonad (SExpr GMeta One (CMeta, IMeta))
-  realizeExpr _ _ _ _ (UniS) = return UniS
-  realizeExpr _ _ _ _ (NumS x) = return $ NumS x
-  realizeExpr _ _ _ _ (LogS x) = return $ LogS x
-  realizeExpr _ _ _ _ (StrS x) = return $ StrS x
-  realizeExpr _ _ _ _ (VarS x) = return $ VarS x
-  realizeExpr lang args _ _ (ListS xs) = do
-    xs' <- mapM (realizeAnno False lang args) xs
+  serializeExpr _ _ _ _ (UniS) = return UniS
+  serializeExpr _ _ _ _ (NumS x) = return $ NumS x
+  serializeExpr _ _ _ _ (LogS x) = return $ LogS x
+  serializeExpr _ _ _ _ (StrS x) = return $ StrS x
+  serializeExpr _ _ _ _ (VarS x) = return $ VarS x
+  serializeExpr lang args _ _ (ListS xs) = do
+    xs' <- mapM (serializeAnno False lang args) xs
     return $ ListS xs'
-  realizeExpr lang args _ _ (TupleS xs) = do
-    xs' <- mapM (realizeAnno False lang args) xs
+  serializeExpr lang args _ _ (TupleS xs) = do
+    xs' <- mapM (serializeAnno False lang args) xs
     return $ TupleS xs'
-  realizeExpr lang args _ _ (RecS entries) = do
-    vals <- mapM (realizeAnno False lang args) (map snd entries)
+  serializeExpr lang args _ _ (RecS entries) = do
+    vals <- mapM (serializeAnno False lang args) (map snd entries)
     return $ RecS (zip (map fst entries) vals)
 
   -- if the lambda is anonymous, the arguments from context are preserved
-  realizeExpr lang args gmeta cmeta (LamS vs e) = do
+  serializeExpr lang args gmeta cmeta (LamS vs e) = do
     let isPacked = isNothing lang
         inputTypes = (init . typeArgs . metaType $ cmeta)
     args' <- zipWithM (makeArg isPacked h) vs inputTypes
       >>= updateArguments gmeta args
-    e' <- realizeAnno False lang args' e
+    e' <- serializeAnno False lang args' e
     return $ LamS vs e'
 
-  realizeExpr lang args _ cmeta (AppS f xs) = do
+  serializeExpr lang args _ cmeta (AppS f xs) = do
     let lang' = Just $ metaLang cmeta
-    f' <- realizeAnno False lang' args f
-    xs' <- mapM (realizeAnno False lang' args) xs
+    f' <- serializeAnno False lang' args f
+    xs' <- mapM (serializeAnno False lang' args) xs
     return (AppS f' xs')
-  realizeExpr _ _ _ _ (ForeignS _ _) = error "This is unexpected"
+  serializeExpr _ _ _ _ (ForeignS _ _) = error "This is unexpected"
 
   makeIMeta
     :: Bool
@@ -478,7 +540,6 @@ realize h x = do
     Nothing -> do
       let oldargs' = [x | x <- oldargs, not (elem (argName x) (map argName newargs))]
       return $ newargs ++ oldargs'
-
 
 makeArg :: Bool -> SerialMap -> EVar -> ConcreteType -> MorlocMonad Argument
 makeArg packed h n t =
@@ -671,21 +732,21 @@ encodeSignatures g x =
     f :: SExpr g One (c, i, d)
       -> g
       -> (c, i, d)
-      -> Maybe (g, c, i)
-    f (AppS _ _) g (c, i, _) = Just (g, c, i)
-    f (ForeignS _ _) g (c, i, _) = Just (g, c, i)
+      -> Maybe (Maybe g, g, c, i)
+    f (AppS (SAnno _ gFun) _) g (c, i, _) = Just (Just gFun, g, c, i)
+    f (ForeignS _ _) g (c, i, _) = Just (Nothing, g, c, i)
     f _ _ _ = Nothing
 
     -- make the signature for an exported function that is directly sourced
     -- such cases will always be at the top level, hence no recursion is needed
     getSourced :: Grammar -> SAnno GMeta One (CMeta, IMeta, MDoc) -> Maybe MDoc
-    getSourced g (SAnno (One ((VarS v), (c, i, _))) m) = Just (makeSignature g (m, c, i))
+    getSourced g (SAnno (One ((VarS v), (c, i, _))) m) = Just (makeSignature g (Just m, m, c, i))
     getSourced _ _ = Nothing
 
-    makeSignature :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
-    makeSignature g (m, c, i) = (gSignature g) $ GeneralFunction
+    makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, IMeta) -> MDoc
+    makeSignature g (gFun, m, c, i) = (gSignature g) $ GeneralFunction
       { gfComments = maybeToList $
-          fmap (\(GeneralType t) -> pretty (metaName m) <+> "::" <+> prettyType t) (metaGeneralType m)
+          fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t) (gFun >>= metaGeneralType)
       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
       , gfName = makeManifoldName m
       , gfArgs = map (makeArg' g) (metaArgs i)
@@ -973,7 +1034,7 @@ typeArgs (ConcreteType t) = map concreteType (typeArgs' t)
   where
     typeArgs' (FunT t1 t2) = t1 : typeArgs' t2
     typeArgs' t@(Forall _ _) = error . MT.unpack . render $
-      "qualified types should have been eliminated long ago in (" <> prettyType t <> ")"
+      "unexpected qualified type, this is probably a the generator, not the typechecker or Morloc code (" <> prettyType t <> ")"
     typeArgs' t = [t]
 
 makeManifoldName :: GMeta -> MDoc
