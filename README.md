@@ -49,12 +49,14 @@ rms xs = sqrt (sum (map square xs));
 This script can be complied as follows:
 
 ```sh
-morloc import math
-morloc import cppbase
+morloc install math
+morloc install cppbase 
 morloc make examples/rootMeanSquare.loc
 ```
 
-The `import` command clones the `math` and `cppbase` repos from github into the
+You will need to have GSL (GNU Scientific Library) installed already.
+
+The `install` command clones the `math` and `cppbase` repos from github into the
 local directory `~/.morloc/lib`. The `make` command will generate a file named
 `nexus.pl`, which is an executable interface to the exported functions.
 

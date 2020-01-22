@@ -1,0 +1,16 @@
+source Cpp from "math.hpp" ("sqrt");
+source Cpp from "doubleSerial.hpp" ("packDouble", "unpackDouble");
+source R ("log");
+
+packDouble Cpp :: packs => "double" -> "char*";
+unpackDouble Cpp :: unpacks => "char*" -> "double";
+
+export r2cpp
+
+sqrt :: Num -> Num;
+sqrt Cpp :: "double" -> "double";
+
+log :: Num -> Num;
+log R :: "numeric" -> "numeric";
+
+r2cpp x = log (sqrt x);
