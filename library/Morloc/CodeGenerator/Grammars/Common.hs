@@ -12,10 +12,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , SerialMap(..)
   , GMeta(..)
   , CMeta(..)
-  , IMeta(..)
   , One(..)
   , Many(..)
-  , Argument(..)
   , Grammar(..)
   , TryDoc(..)
   , GeneralFunction(..)
@@ -80,24 +78,6 @@ data CMeta = CMeta {
   , metaModule :: MVar
 } deriving (Show, Ord, Eq)
 
--- | Relational description of a language-specific manifold
-data IMeta = IMeta {
-    metaArgs :: [Argument]
-  , metaPacker :: Maybe Name -- ^ name of function for packing output of this function
-  , metaPackerPath :: Maybe Path  -- ^ path to the packer function
-} deriving (Show, Ord, Eq)
-
--- | An argument that is passed to a manifold
-data Argument = Argument {
-    argName :: EVar
-  , argType :: ConcreteType
-  , argPacker :: Name
-  , argPackerPath :: Path
-  , argUnpacker :: Name
-  , argUnpackerPath :: Path
-  , argIsPacked :: Bool
-} deriving (Show, Ord, Eq)
-
 data SerialMap = SerialMap {
     packers :: Map.Map ConcreteType (Name, Path)
   , unpackers :: Map.Map ConcreteType (Name, Path)
@@ -134,9 +114,9 @@ data Grammar =
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
     , gSwitch
-        :: ((GMeta, CMeta, IMeta) -> MDoc)
-        -> ((GMeta, CMeta, IMeta) -> MDoc)
-        -> [(GMeta, CMeta, IMeta)]
+        :: ((GMeta, CMeta) -> MDoc)
+        -> ((GMeta, CMeta) -> MDoc)
+        -> [(GMeta, CMeta)]
         -> MDoc
         -> MDoc
         -> MDoc

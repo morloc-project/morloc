@@ -23,4 +23,5 @@ main = do
       , golden "C++ / R interop" "6_interop"
       , golden "C++ quadratic eqation" "7_quadraticEq"
       , golden "C++ currying" "8_partial-application"
+      , golden "interop" "9_minimal-interop"
       ]
