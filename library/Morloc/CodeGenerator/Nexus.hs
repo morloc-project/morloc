@@ -55,17 +55,12 @@ getFData (t, i, n) = do
       return $
       ( call'
       , pretty n
-      , getNArgs (typeOf t)
+      , nargs (typeOf t)
       , pretty (ML.makeExecutableName lang "pool")
       , mid')
     Nothing ->
       MM.throwError . GeneratorError $
       "No execution method found for language: " <> ML.showLangName lang
-
-getNArgs :: Type -> Int
-getNArgs (FunT _ t) = 1 + getNArgs t
-getNArgs (Forall _ t) = getNArgs t
-getNArgs _ = 0
 
 main :: [MDoc] -> [FData] -> MDoc
 main names fdata =

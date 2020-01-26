@@ -64,7 +64,6 @@ module Morloc.Namespace
   , Typelike(..)
   , langOf
   , langOf'
-  , typeOf
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -444,6 +443,12 @@ instance Indexable Type where
 
 class Typelike a where
   typeOf :: a -> Type
+
+  nargs :: a -> Int
+  nargs t = case typeOf t of
+    (FunT _ t) -> 1 + nargs t
+    (Forall _ t) -> nargs t
+    _ -> 0
 
 instance Typelike Type where
   typeOf = id

@@ -114,9 +114,9 @@ data Grammar =
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
     , gSwitch
-        :: ((GMeta, CMeta) -> MDoc)
-        -> ((GMeta, CMeta) -> MDoc)
-        -> [(GMeta, CMeta)]
+        :: (([EVar], GMeta, CMeta) -> MDoc)
+        -> (([EVar], GMeta, CMeta) -> MDoc)
+        -> [([EVar], GMeta, CMeta)]
         -> MDoc
         -> MDoc
         -> MDoc

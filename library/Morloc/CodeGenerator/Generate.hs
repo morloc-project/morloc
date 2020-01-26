@@ -501,7 +501,7 @@ encode h (lang, xs) = do
     { pmSources = srcdocs
     , pmSignatures = signatures
     , pmPoolManifolds = manifolds
-    , pmDispatchManifold = makeDispatchBuilder g xs
+    , pmDispatchManifold = makeDispatchBuilder h g xs
     }
 
   return $ Script
@@ -539,83 +539,91 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
       , fmap snd $ Map.lookup (metaType c) (unpackers h)
       ]
 
+
 -- | Create a signature/prototype. Not all languages need this. C and C++ need
 -- prototype definitions, but R and Python do not. Languages that do not
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One CMeta -> [MDoc]
-encodeSignatures = undefined
--- encodeSignatures :: Grammar -> SAnno GMeta One (CMeta, IMeta, MDoc) -> [MDoc]
--- encodeSignatures g x =
---   (map (makeSignature g) . catMaybes . unpackSAnno f $ x) ++
---   maybeToList (getSourced g x)
---   where
---     f :: SExpr g One (c, i, d)
---       -> g
---       -> (c, i, d)
---       -> Maybe (Maybe g, g, c, i)
---     f (AppS (SAnno _ gFun) _) g (c, i, _) = Just (Just gFun, g, c, i)
---     f (ForeignS _ _) g (c, i, _) = Just (Nothing, g, c, i)
---     f _ _ _ = Nothing
---
---     -- make the signature for an exported function that is directly sourced
---     -- such cases will always be at the top level, hence no recursion is needed
---     getSourced :: Grammar -> SAnno GMeta One (CMeta, IMeta, MDoc) -> Maybe MDoc
---     getSourced g (SAnno (One ((VarS v), (c, i, _))) m) = Just (makeSignature g (Just m, m, c, i))
---     getSourced _ _ = Nothing
---
---     makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, IMeta) -> MDoc
---     makeSignature g (gFun, m, c, i) = (gSignature g) $ GeneralFunction
---       { gfComments = maybeToList $
---           fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t) (gFun >>= metaGeneralType)
---       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
---       , gfName = makeManifoldName m
---       , gfArgs = map (makeArg' g) (metaArgs i)
---       , gfBody = ""
---       }
---
---     makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
---     makeArg' g arg =
---       if argIsPacked arg
---         then (Just ((gShowType g) (gSerialType g)), pretty (argName arg))
---         else (Just ((gShowType g) (argType arg)), pretty (argName arg))
+encodeSignatures g (SAnno (One (LamS vs x, cmeta)) m) =
+  map (makeSignature g) (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced g x)
+  where
+    f :: SExpr GMeta One CMeta -> GMeta -> CMeta -> Maybe (Maybe GMeta, GMeta, CMeta)
+    f (AppS (SAnno _ gFun) _) g c = Just (Just gFun, g, c)
+    f (ForeignS _ _) g c = Just (Nothing, g, c)
+    f _ _ _ = Nothing
 
+    -- find variables that are used in this segment, that that are not do not
+    -- need to be deserialized 
+    usedVars = filter (varExists x) vs
+
+    -- make the signature for an exported function that is directly sourced
+    -- such cases will always be at the top level, hence no recursion is needed
+    getSourced :: Grammar -> SAnno GMeta One CMeta -> Maybe MDoc
+    getSourced g (SAnno (One ((VarS v), c)) m) = Just (makeSignature g (Just m, m, c))
+    getSourced _ _ = Nothing
+
+    makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta) -> MDoc
+    makeSignature g (gFun, m, c) = (gSignature g) $ GeneralFunction
+      { gfComments = maybeToList $
+          fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t) (gFun >>= metaGeneralType)
+      , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
+      , gfName = makeManifoldName m
+      , gfArgs = zipWith (makeArg' g) vs (map unConcreteType (typeArgs (metaType c)))
+      , gfBody = ""
+      }
+
+    makeArg' :: Grammar -> EVar -> Type -> (Maybe MDoc, MDoc)
+    makeArg' g arg t =
+      if elem arg usedVars
+        then (Just ((gShowType g) (ConcreteType t)), pretty arg)
+        else (Just ((gShowType g) (gSerialType g)), pretty arg)
+encodeSignatures _ _ = error "Expected LamS at all top-level segments"
+
+
+varExists :: SAnno GMeta One CMeta -> EVar -> Bool
+varExists x v = varExists' x where
+  varExists' (SAnno (One (VarS v', _)) _) = v == v'
+  varExists' (SAnno (One (ListS xs, _)) _) = any varExists' xs
+  varExists' (SAnno (One (TupleS xs, _)) _) = any varExists' xs
+  varExists' (SAnno (One (RecS xs, _)) _) = any (varExists' . snd) xs
+  varExists' (SAnno (One (AppS x xs, _)) _) = varExists' x || any varExists' xs
+  varExists' (SAnno (One (LamS vs x, _)) _)
+    | elem v vs = False
+    | otherwise = varExists' x
+  varExists' _ = False
 
 -- | Make a function for generating the code to dispatch from the pool main
 -- function to manifold functions. The two arguments of the returned function
 -- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
 -- results are stored.
-makeDispatchBuilder :: Grammar -> [SAnno GMeta One CMeta] -> (MDoc -> MDoc -> MDoc)
-makeDispatchBuilder = undefined
--- -- | Make a function for generating the code to dispatch from the pool main
--- -- function to manifold functions. The two arguments of the returned function
--- -- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
--- -- results are stored.
--- makeDispatchBuilder :: Grammar -> [SAnno GMeta One (CMeta, IMeta, MDoc)] -> (MDoc -> MDoc -> MDoc)
--- makeDispatchBuilder g xs =
---   (gSwitch g)
---     (\(m, _, _) -> pretty (metaId m))
---     (mainCall g)
---     (mapMaybe getPoolCall xs)
---   where
---     getPoolCall :: SAnno GMeta One (CMeta, IMeta, MDoc) -> Maybe (GMeta, CMeta, IMeta)
---     getPoolCall (SAnno (One (AppS _ _, (c, i, _))) m) = Just (m, c, i)
---     getPoolCall (SAnno (One (VarS _,   (c, i, _))) m)
---       | (length (metaArgs i)) > 0 = Just (m, c, i)
---       | otherwise = Nothing
---     getPoolCall _ = Nothing
---
---     mainCall :: Grammar -> (GMeta, CMeta, IMeta) -> MDoc
---     mainCall g (m, c, i) = case metaPacker i of
---       Nothing -> error $
---         "Could not find packer for " <> show m
---       (Just packer) ->
---         (gCall g)
---           (pretty packer)
---           [(gCall g)
---               (makeManifoldName m)
---               (take (length (metaArgs i))
---               (gCmdArgs g))]
+makeDispatchBuilder :: SerialMap -> Grammar -> [SAnno GMeta One CMeta] -> (MDoc -> MDoc -> MDoc)
+makeDispatchBuilder h g xs =
+  (gSwitch g)
+    (\(_, m, _) -> pretty (metaId m))
+    (mainCall g)
+    (mapMaybe getPoolCall xs)
+  where
+    getPoolCall :: SAnno GMeta One CMeta -> Maybe ([EVar], GMeta, CMeta)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (AppS _ _, c)) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (VarS _  , c)) m), _)) _)
+      | (length vs) > 0 = Just (vs, m, c)
+      | otherwise = Nothing
+    getPoolCall _ = Nothing
+
+    -- Note, the CMeta is for the type of the full application, that is, the return type.
+    -- It is NOT for the function that is called.
+    mainCall :: Grammar -> ([EVar], GMeta, CMeta) -> MDoc
+    mainCall g (vs, m, c) = case Map.lookup (metaType c) (packers h) of
+      Nothing -> error $
+        "Could not find packer for " <> show m
+      (Just (packer, _)) ->
+        (gCall g)
+          (pretty packer)
+          [(gCall g)
+              (makeManifoldName m)
+              (take (length vs)
+              (gCmdArgs g))]
 
 codify
   :: SerialMap
@@ -993,6 +1001,7 @@ partialApplyN i t
   | i > 0 = do
     appliedType <- partialApply t
     partialApplyN (i-1) appliedType
+
 
 {- | Find exported expressions.
 
