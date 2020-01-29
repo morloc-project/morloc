@@ -778,88 +778,86 @@ makeManifoldDoc
   -> SAnno GMeta One (CMeta, [Argument], MDoc) -- the function
   -> (CMeta, [Argument], GMeta) -- the AppS meta data
   -> MorlocMonad MDoc
-makeManifoldDoc = undefined
+makeManifoldDoc g inputs (SAnno (One (x, (c', _, _))) m') (c, margs, m) = do
+  let ftype = metaType c'
+      otype = metaType c
 
--- makeManifoldDoc g inputs (SAnno (One (x, (c', i', _))) m') (c, i, m) = do
---   let ftype = metaType c'
---       otype = metaType c
---       margs = metaArgs i
---
---   innerCall <- case x of
---     (AppS _ _) -> return $ makeManifoldName m'
---     _ -> case (metaName m', metaSource c') of
---       (_, Just (Source x _ _ _)) -> return (pretty x)
---       (Just n, _) -> return (pretty n)
---       _ -> MM.throwError . OtherError $ "No name found for manifold"
---
---   inputs' <- zipWithM (prepInput g margs) [0..] inputs
---   return . gFunction g $ GeneralFunction
---     { gfComments = catMaybes $
---         [ Just "From B"
---         , Just (descSExpr x)
---         , fmap (generalSignature (metaName m')) (metaGeneralType m')
---         , Just $ concreteSignature (metaName m') (metaType c')
---         ]
---     , gfReturnType = Just ((gShowType g) otype)
---     , gfName = makeManifoldName m
---     , gfArgs = map (prepArg g) margs
---     , gfBody =
---         vsep (catMaybes (map snd inputs')) <> line <>
---         (gReturn g $ (gCall g) innerCall (map fst inputs'))
---     }
+  innerCall <- case x of
+    (AppS _ _) -> return $ makeManifoldName m'
+    _ -> case (metaName m', metaSource c') of
+      (_, Just (Source x _ _ _)) -> return (pretty x)
+      (Just n, _) -> return (pretty n)
+      _ -> MM.throwError . OtherError $ "No name found for manifold"
+
+  inputs' <- zipWithM (prepInput g margs) [0..] inputs
+  args' <- mapM (prepArg g) margs
+  return . gFunction g $ GeneralFunction
+    { gfComments = catMaybes $
+        [ Just "From B"
+        , Just (descSExpr x)
+        , fmap (generalSignature (metaName m')) (metaGeneralType m')
+        , Just $ concreteSignature (metaName m') (metaType c')
+        ]
+    , gfReturnType = Just ((gShowType g) otype)
+    , gfName = makeManifoldName m
+    , gfArgs = args'
+    , gfBody =
+        vsep (catMaybes (map snd inputs')) <> line <>
+        (gReturn g $ (gCall g) innerCall (map fst inputs'))
+    }
 
 
--- -- Handle preparation of arguments passed to a manifold. Return the name of the
--- -- variable that will be used and an block of code that defines the variable
--- -- (if necessary).
--- prepInput
---   :: Grammar
---   -> [Argument] -- all arguments of the manifold
---   -> Int
---   -> SAnno GMeta One (CMeta, IMeta, MDoc) -- an input to the wrapped function
---   -> MorlocMonad (MDoc, Maybe MDoc)
--- prepInput g _ _ (SAnno (One (UniS, _)) _) = return (gNull g, Nothing)
--- prepInput g _ _ (SAnno (One (NumS x, _)) _) = return ((gReal g) x, Nothing)
--- prepInput g _ _ (SAnno (One (LogS x, _)) _) = return ((gBool g) x, Nothing)
--- prepInput g _ _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, Nothing)
--- prepInput g _ _ (SAnno (One (ListS _, (_, _, d))) _) = return (d, Nothing)
--- prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
--- prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
--- prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
---   "Function passing not implemented yet ..."
--- prepInput g _ _ (SAnno (One (ForeignS _ _, (_, _, d))) _) = return (d, Nothing)
--- prepInput g _ mid (SAnno (One (AppS x xs, (c, i, d))) m) = do
---   let varname = makeArgumentName mid
---       t = metaType c
---       mname = makeManifoldName m
---       ass = (gAssign g) $ GeneralAssignment
---         { gaType = Just . gShowType g . last . typeArgs $ t
---         , gaName = varname
---         , gaValue = (gCall g) mname (map (pretty . argName) (metaArgs i))
---         , gaArg = Nothing
---         }
---   return (varname, Just ass)
--- -- handle sourced files, which should be used as unaliased variables
--- prepInput _ _ _ (SAnno (One (VarS _, (CMeta _ _ (Just v) _, _, _))) _) = return (pretty (srcName v), Nothing)
--- prepInput g rs mid (SAnno (One (_, (c, i, d))) m) = do
---   let name = metaName m
---       varname = makeArgumentName mid
---       t = metaType c
---       arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
---   case (name, arg, fmap argIsPacked arg) of
---     (Just n, Just r, Just True) ->
---        return (varname, Just . gAssign g $ GeneralAssignment
---           { gaType = Just . gShowType g . argType $ r
---           , gaName = varname
---           , gaValue = (gCall g) (pretty (argUnpacker r)) [pretty name]
---           , gaArg = Nothing
---           }
---        )
---     -- the argument is used in the wrapped function, but is not serialized
---     (Just n, _, Just False) -> return (pretty name, Nothing)
---     -- the argument is not used in the wrapped function
---     (Just n, _, Nothing) -> return (pretty name, Nothing)
---     x -> MM.throwError . OtherError $ "import prep error: " <> MT.show' x
+-- Handle preparation of arguments passed to a manifold. Return the name of the
+-- variable that will be used and an block of code that defines the variable
+-- (if necessary).
+prepInput
+  :: Grammar
+  -> [Argument] -- arguments in the parent (the input arguments may differ)
+  -> Int
+  -> SAnno GMeta One (CMeta, [Argument], MDoc) -- an input to the wrapped function
+  -> MorlocMonad (MDoc, Maybe MDoc)
+prepInput g _ _ (SAnno (One (UniS, _)) _) = return (gNull g, Nothing)
+prepInput g _ _ (SAnno (One (NumS x, _)) _) = return ((gReal g) x, Nothing)
+prepInput g _ _ (SAnno (One (LogS x, _)) _) = return ((gBool g) x, Nothing)
+prepInput g _ _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, Nothing)
+prepInput g _ _ (SAnno (One (ListS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
+  "Function passing not implemented yet ..."
+prepInput g _ _ (SAnno (One (ForeignS _ _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ mid (SAnno (One (AppS x xs, (c, args, d))) m) = do
+  let varname = makeArgumentName mid
+      t = metaType c
+      mname = makeManifoldName m
+      ass = (gAssign g) $ GeneralAssignment
+        { gaType = Just . gShowType g . last . typeArgs $ t
+        , gaName = varname
+        , gaValue = (gCall g) mname (map (pretty . argName) args)
+        , gaArg = Nothing
+        }
+  return (varname, Just ass)
+-- handle sourced files, which should be used as unaliased variables
+prepInput _ _ _ (SAnno (One (VarS _, (CMeta _ _ (Just v) _, _, _))) _) = return (pretty (srcName v), Nothing)
+prepInput g rs mid (SAnno (One (_, (c, _, d))) m) = do
+  let name = metaName m
+      varname = makeArgumentName mid
+      t = metaType c
+      arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
+  case (name, arg) of
+    (Just n, Just (PackedArgument _ t (Just unpacker))) ->
+       return (varname, Just . gAssign g $ GeneralAssignment
+          { gaType = Just . gShowType g $ t
+          , gaName = varname
+          , gaValue = (gCall g) (pretty unpacker) [pretty name]
+          , gaArg = Nothing
+          }
+       )
+    (_, Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
+      "No unpacker found"
+    -- the argument is used in the wrapped function, but is not serialized
+    (Just n, _) -> return (pretty name, Nothing)
+    (Nothing, _) -> MM.throwError . OtherError $ "import prep error"
 
 -- | Serialize the result of a call if a serialization function is defined.
 -- Presumably, if no serialization function is given, then the argument is
@@ -867,7 +865,7 @@ makeManifoldDoc = undefined
 prepArg :: Grammar -> Argument -> MorlocMonad (Maybe MDoc, MDoc)
 prepArg g (PackedArgument _ t (Just name)) = return (Just . gShowType g $ gSerialType g, pretty name)
 prepArg g (UnpackedArgument _ t (Just name)) = return (Just . gShowType g $ t, pretty name)
-prepArg _ _ = MM.throwError . OtherError $ "Fuck"
+prepArg _ _ = MM.throwError . OtherError $ "Something is stinky in the packers"
 
 
 

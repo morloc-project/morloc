@@ -13,6 +13,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , GMeta(..)
   , CMeta(..)
   , Argument(..)
+  , argName
+  , argType
   , One(..)
   , Many(..)
   , Grammar(..)
@@ -95,6 +97,14 @@ data Argument
   | UnpackedArgument EVar ConcreteType (Maybe Name)
   -- ^ A native argument with the same parameters as above (except #3 is the
   -- unpacker name, e.g., unpackDouble)
+
+argName :: Argument -> EVar
+argName (PackedArgument v _ _) = v
+argName (UnpackedArgument v _ _) = v
+
+argType :: Argument -> ConcreteType
+argType (PackedArgument _ t _) = t
+argType (UnpackedArgument _ t _) = t
 
 data Grammar =
   Grammar
