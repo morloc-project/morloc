@@ -20,7 +20,7 @@ module Morloc.TypeChecker.Infer
   ) where
 
 import Morloc.Namespace
-import Morloc.TypeChecker.Util
+import Morloc.TypeChecker.Internal
 import qualified Morloc.TypeChecker.PartialOrder as P
 import qualified Data.Map as Map
 import qualified Data.Set as Set

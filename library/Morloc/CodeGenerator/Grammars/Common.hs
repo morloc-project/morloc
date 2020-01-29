@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , SerialMap(..)
   , GMeta(..)
   , CMeta(..)
+  , Argument(..)
   , One(..)
   , Many(..)
   , Grammar(..)
@@ -82,6 +83,18 @@ data SerialMap = SerialMap {
     packers :: Map.Map ConcreteType (Name, Path)
   , unpackers :: Map.Map ConcreteType (Name, Path)
 } deriving (Show, Ord, Eq)
+
+-- | An argument that is passed to a manifold
+data Argument
+  = PackedArgument EVar ConcreteType (Maybe Name)
+  -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
+  -- argument name (e.g., x), 2) argument type (e.g., double), and 3) packer
+  -- name (e.g., packDouble).  The packer name is optional. Some types may not
+  -- be serializable. This is OK, so long as they are only used in functions of
+  -- the same language.
+  | UnpackedArgument EVar ConcreteType (Maybe Name)
+  -- ^ A native argument with the same parameters as above (except #3 is the
+  -- unpacker name, e.g., unpackDouble)
 
 data Grammar =
   Grammar
