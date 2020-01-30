@@ -516,7 +516,8 @@ encode h (lang, xs) = do
     , scriptInclude = unique $ map MS.takeDirectory srcs
     }
 
-
+-- | Add arguments that are required for each term. Unneeded arguments are
+-- removed at each step.
 serialize
   :: SerialMap
   -> SAnno GMeta One CMeta
@@ -526,16 +527,48 @@ serialize h (SAnno (One (LamS vs x, c)) m) = do
   x' <- serialize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
   where
+    serialize'
+      :: [Argument] -- arguments in parental scope (child needn't retain them)
+      -> SAnno GMeta One CMeta
+      -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
+    -- primitives, no arguments are required for a primitive, so empty lists
+    serialize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
+    serialize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
+    serialize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
+    serialize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
+    -- VarS EVar
+    serialize' args (SAnno (One (VarS v, c)) m) = do
+      let args' = filter (\r -> argName r == v) args
+      return $ SAnno (One (VarS v, (c, args'))) m
+    -- containers
+    serialize' args (SAnno (One (ListS xs, c)) m) = do
+      xs' <- mapM (serialize' args) xs
+      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- xs']
+      return $ SAnno (One (ListS xs', (c, args'))) m
+    serialize' args (SAnno (One (TupleS xs, c)) m) = do
+      xs' <- mapM (serialize' args) xs
+      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- xs']
+      return $ SAnno (One (TupleS xs', (c, args'))) m
+    serialize' args (SAnno (One (RecS entries, c)) m) = do
+      vs' <- mapM (serialize' args) (map snd entries)
+      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- vs']
+      return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
+    -- How are HOFs handled?
+    serialize' _ (SAnno (One (LamS vs x, c)) m) = do
+      args' <- zipWithM makeArgument vs (typeArgs (metaType c)) 
+      x' <- serialize' args' x
+      return $ SAnno (One (LamS vs x', (c, []))) m 
+
+    serialize' args (SAnno (One (AppS x xs, c)) m) = undefined
+    serialize' args (SAnno (One (ForeignS i lang, c)) m) = undefined
+
     makeArgument :: EVar -> ConcreteType -> MorlocMonad Argument
     makeArgument v t = case Map.lookup t (unpackers h) of
       Nothing -> MM.throwError . OtherError $ "No packer found"
       (Just (name, _)) -> return $ PackedArgument v t (Just name)
 
-    serialize'
-      :: [Argument]
-      -> SAnno GMeta One CMeta
-      -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
-    serialize' = undefined
+    sannoSnd :: SAnno g One (a, b) -> b
+    sannoSnd (SAnno (One (_, (_, x))) _) = x
 
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
