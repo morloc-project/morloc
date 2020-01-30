@@ -527,6 +527,29 @@ serialize h (SAnno (One (LamS vs x, c)) m) = do
   x' <- serialize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
   where
+
+    makeArgument :: EVar -> ConcreteType -> MorlocMonad Argument
+    makeArgument v t = case Map.lookup t (unpackers h) of
+      Nothing -> MM.throwError . OtherError $ "No packer found"
+      (Just (name, _)) -> return $ PackedArgument v t (Just name)
+
+    pack :: Argument -> Argument
+    pack (UnpackedArgument v t n) = PackedArgument v t n
+    pack x = x
+
+    unpack :: Argument -> Argument
+    unpack (PackedArgument v t n) = UnpackedArgument v t n
+    unpack x = x
+
+    sannoSnd :: SAnno g One (a, b) -> b
+    sannoSnd (SAnno (One (_, (_, x))) _) = x
+
+    -- TODO: the arguments coupled to every term should be the arguments USED
+    -- (not inherited) by the term. I need to ensure the argument threading
+    -- leads to correct passing of packed/unpacked arguments. AppS should
+    -- "know" that it needs to pack functions that are passed to a foreign
+    -- call, for instance.
+
     serialize'
       :: [Argument] -- arguments in parental scope (child needn't retain them)
       -> SAnno GMeta One CMeta
@@ -543,32 +566,28 @@ serialize h (SAnno (One (LamS vs x, c)) m) = do
     -- containers
     serialize' args (SAnno (One (ListS xs, c)) m) = do
       xs' <- mapM (serialize' args) xs
-      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- xs']
+      let args' = unique . concat . map sannoSnd $ xs'
       return $ SAnno (One (ListS xs', (c, args'))) m
     serialize' args (SAnno (One (TupleS xs, c)) m) = do
       xs' <- mapM (serialize' args) xs
-      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- xs']
+      let args' = unique . concat . map sannoSnd $ xs'
       return $ SAnno (One (TupleS xs', (c, args'))) m
     serialize' args (SAnno (One (RecS entries, c)) m) = do
       vs' <- mapM (serialize' args) (map snd entries)
-      let args' = (unique . concat) [rs | (SAnno (One (_, (_, rs))) _) <- vs']
+      let args' = unique . concat . map sannoSnd $ vs'
       return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
-    -- How are HOFs handled?
     serialize' _ (SAnno (One (LamS vs x, c)) m) = do
       args' <- zipWithM makeArgument vs (typeArgs (metaType c)) 
       x' <- serialize' args' x
       return $ SAnno (One (LamS vs x', (c, []))) m 
-
-    serialize' args (SAnno (One (AppS x xs, c)) m) = undefined
-    serialize' args (SAnno (One (ForeignS i lang, c)) m) = undefined
-
-    makeArgument :: EVar -> ConcreteType -> MorlocMonad Argument
-    makeArgument v t = case Map.lookup t (unpackers h) of
-      Nothing -> MM.throwError . OtherError $ "No packer found"
-      (Just (name, _)) -> return $ PackedArgument v t (Just name)
-
-    sannoSnd :: SAnno g One (a, b) -> b
-    sannoSnd (SAnno (One (_, (_, x))) _) = x
+    serialize' args (SAnno (One (AppS x xs, c)) m) = do
+      x' <- serialize' args x
+      xs' <- mapM (serialize' args) xs
+      let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
+      return $ SAnno (One (AppS x' xs', (c, args'))) m
+    serialize' args (SAnno (One (ForeignS i lang, c)) m) = do
+      let args' = map pack args
+      return $ SAnno (One (ForeignS i lang, (c, args'))) m
 
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
