@@ -164,6 +164,8 @@ collect
 collect ms (v, []) = MM.throwError . OtherError $
   "No origin found for variable '" <> unEVar v <> "'"
 collect ms (evar', xs@(x:_)) = do
+  -- Just look at one x, since any should emit the same GMeta (if not, then
+  -- something is broken upstream of GMeta is not general enough)
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
   return $ SAnno (Many trees) gmeta
@@ -504,7 +506,7 @@ encode h (lang, xs) = do
     { pmSources = srcdocs
     , pmSignatures = signatures
     , pmPoolManifolds = manifolds
-    , pmDispatchManifold = makeDispatchBuilder h g xs
+    , pmDispatchManifold = makeDispatchBuilder h g serializedTree
     }
 
   return $ Script
@@ -523,72 +525,66 @@ serialize
   -> SAnno GMeta One CMeta
   -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
 serialize h (SAnno (One (LamS vs x, c)) m) = do
-  args0 <- zipWithM makeArgument vs (typeArgs (metaType c))
-  x' <- serialize' args0 x
+  args0 <- zipWithM (makeArgument h) vs (typeArgs (metaType c))
+  x' <- serialize' h args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
-  where
+serialize h (SAnno (One (VarS v, c)) m) = do
+  let ts = init $ typeArgs (metaType c)
+      vs = map (EVar . render . makeArgumentName) [0..]
+  args0 <- zipWithM (makeArgument h) vs ts
+  return $ SAnno (One (VarS v, (c, args0))) m
+serialize h x = serialize' h [] x
 
-    makeArgument :: EVar -> ConcreteType -> MorlocMonad Argument
-    makeArgument v t = case Map.lookup t (unpackers h) of
-      Nothing -> MM.throwError . OtherError $ "No packer found"
-      (Just (name, _)) -> return $ PackedArgument v t (Just name)
+-- TODO: the arguments coupled to every term should be the arguments USED
+-- (not inherited) by the term. I need to ensure the argument threading
+-- leads to correct passing of packed/unpacked arguments. AppS should
+-- "know" that it needs to pack functions that are passed to a foreign
+-- call, for instance.
+serialize'
+  :: SerialMap
+  -> [Argument] -- arguments in parental scope (child needn't retain them)
+  -> SAnno GMeta One CMeta
+  -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
+-- primitives, no arguments are required for a primitive, so empty lists
+serialize' _ _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
+serialize' _ _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
+serialize' _ _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
+serialize' _ _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
+-- VarS EVar
+serialize' _ args (SAnno (One (VarS v, c)) m) = do
+  let args' = filter (\r -> argName r == v) args
+  return $ SAnno (One (VarS v, (c, args'))) m
+-- containers
+serialize' h args (SAnno (One (ListS xs, c)) m) = do
+  xs' <- mapM (serialize' h args) xs
+  let args' = unique . concat . map sannoSnd $ xs'
+  return $ SAnno (One (ListS xs', (c, args'))) m
+serialize' h args (SAnno (One (TupleS xs, c)) m) = do
+  xs' <- mapM (serialize' h args) xs
+  let args' = unique . concat . map sannoSnd $ xs'
+  return $ SAnno (One (TupleS xs', (c, args'))) m
+serialize' h args (SAnno (One (RecS entries, c)) m) = do
+  vs' <- mapM (serialize' h args) (map snd entries)
+  let args' = unique . concat . map sannoSnd $ vs'
+  return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
+serialize' h _ (SAnno (One (LamS vs x, c)) m) = do
+  args' <- zipWithM (makeArgument h) vs (typeArgs (metaType c)) 
+  x' <- serialize' h args' x
+  return $ SAnno (One (LamS vs x', (c, []))) m 
+serialize' h args (SAnno (One (AppS x xs, c)) m) = do
+  x' <- serialize' h args x
+  xs' <- mapM (serialize' h args) xs
+  let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
+  return $ SAnno (One (AppS x' xs', (c, args'))) m
+serialize' _ args (SAnno (One (ForeignS i lang, c)) m) = do
+  let args' = map pack args
+  return $ SAnno (One (ForeignS i lang, (c, args'))) m
 
-    pack :: Argument -> Argument
-    pack (UnpackedArgument v t n) = PackedArgument v t n
-    pack x = x
 
-    unpack :: Argument -> Argument
-    unpack (PackedArgument v t n) = UnpackedArgument v t n
-    unpack x = x
-
-    sannoSnd :: SAnno g One (a, b) -> b
-    sannoSnd (SAnno (One (_, (_, x))) _) = x
-
-    -- TODO: the arguments coupled to every term should be the arguments USED
-    -- (not inherited) by the term. I need to ensure the argument threading
-    -- leads to correct passing of packed/unpacked arguments. AppS should
-    -- "know" that it needs to pack functions that are passed to a foreign
-    -- call, for instance.
-
-    serialize'
-      :: [Argument] -- arguments in parental scope (child needn't retain them)
-      -> SAnno GMeta One CMeta
-      -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
-    -- primitives, no arguments are required for a primitive, so empty lists
-    serialize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
-    serialize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
-    serialize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
-    serialize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
-    -- VarS EVar
-    serialize' args (SAnno (One (VarS v, c)) m) = do
-      let args' = filter (\r -> argName r == v) args
-      return $ SAnno (One (VarS v, (c, args'))) m
-    -- containers
-    serialize' args (SAnno (One (ListS xs, c)) m) = do
-      xs' <- mapM (serialize' args) xs
-      let args' = unique . concat . map sannoSnd $ xs'
-      return $ SAnno (One (ListS xs', (c, args'))) m
-    serialize' args (SAnno (One (TupleS xs, c)) m) = do
-      xs' <- mapM (serialize' args) xs
-      let args' = unique . concat . map sannoSnd $ xs'
-      return $ SAnno (One (TupleS xs', (c, args'))) m
-    serialize' args (SAnno (One (RecS entries, c)) m) = do
-      vs' <- mapM (serialize' args) (map snd entries)
-      let args' = unique . concat . map sannoSnd $ vs'
-      return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
-    serialize' _ (SAnno (One (LamS vs x, c)) m) = do
-      args' <- zipWithM makeArgument vs (typeArgs (metaType c)) 
-      x' <- serialize' args' x
-      return $ SAnno (One (LamS vs x', (c, []))) m 
-    serialize' args (SAnno (One (AppS x xs, c)) m) = do
-      x' <- serialize' args x
-      xs' <- mapM (serialize' args) xs
-      let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
-      return $ SAnno (One (AppS x' xs', (c, args'))) m
-    serialize' args (SAnno (One (ForeignS i lang, c)) m) = do
-      let args' = map pack args
-      return $ SAnno (One (ForeignS i lang, (c, args'))) m
-
+makeArgument h v t = case selectFunction t Unpack h of
+  Nothing -> MM.throwError . OtherError . render $
+    "No packer found for type" <+> parens (prettyType t)
+  (Just (name, _)) -> return $ PackedArgument v t (Just name)
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
 gatherManifolds (SAnno (One (VarS _, d)) _) = [d]
@@ -610,8 +606,8 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
     f :: SExpr g One CMeta -> g -> CMeta -> [Path]
     f _ _ c = catMaybes
       [ metaSource c >>= srcPath
-      , fmap snd $ Map.lookup (metaType c) (packers h)
-      , fmap snd $ Map.lookup (metaType c) (unpackers h)
+      , fmap snd $ selectFunction (metaType c) Pack h
+      , fmap snd $ selectFunction (metaType c) Unpack h
       ]
 
 
@@ -640,7 +636,8 @@ encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
     makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, [Argument]) -> MDoc
     makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
       { gfComments = maybeToList $
-          fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t) (gFun >>= metaGeneralType)
+          fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
+               (gFun >>= metaGeneralType)
       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
       , gfName = makeManifoldName m
       , gfArgs = map (makeArg' g) args
@@ -669,24 +666,34 @@ varExists x v = varExists' x where
 -- function to manifold functions. The two arguments of the returned function
 -- (MDoc->MDoc->MDoc) are 1) the manifold id and 2) the variable name where the
 -- results are stored.
-makeDispatchBuilder :: SerialMap -> Grammar -> [SAnno GMeta One CMeta] -> (MDoc -> MDoc -> MDoc)
+makeDispatchBuilder
+  :: SerialMap
+  -> Grammar
+  -> [SAnno GMeta One (CMeta, [Argument])]
+  -> (MDoc -> MDoc -> MDoc)
 makeDispatchBuilder h g xs =
   (gSwitch g)
     (\(_, m, _) -> pretty (metaId m))
     (mainCall g)
     (mapMaybe getPoolCall xs)
   where
-    getPoolCall :: SAnno GMeta One CMeta -> Maybe ([EVar], GMeta, CMeta)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (AppS _ _, c)) m), _)) _) = Just (vs, m, c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (VarS _  , c)) m), _)) _)
-      | (length vs) > 0 = Just (vs, m, c)
+    getPoolCall
+      :: SAnno GMeta One (CMeta, [Argument])
+      -> Maybe ([EVar], GMeta, ConcreteType)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (AppS _ _, (c, _))) m), _)) _)
+      = Just (vs, m, metaType c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (VarS _  , (c, _))) m), _)) _)
+      | (length vs) > 0 = Just (vs, m, metaType c)
+      | otherwise = Nothing
+    getPoolCall (SAnno (One (VarS _, (c, args))) m)
+      | (length args) > 0 = Just (map argName args, m, last . typeArgs $ metaType c)
       | otherwise = Nothing
     getPoolCall _ = Nothing
 
     -- Note, the CMeta is for the type of the full application, that is, the return type.
     -- It is NOT for the function that is called.
-    mainCall :: Grammar -> ([EVar], GMeta, CMeta) -> MDoc
-    mainCall g (vs, m, c) = case Map.lookup (metaType c) (packers h) of
+    mainCall :: Grammar -> ([EVar], GMeta, ConcreteType) -> MDoc
+    mainCall g (vs, m, t) = case selectFunction t Pack h of
       Nothing -> error $
         "Could not find packer for " <> show m
       (Just (packer, _)) ->
@@ -1084,6 +1091,16 @@ partialApplyN i t
     appliedType <- partialApply t
     partialApplyN (i-1) appliedType
 
+pack :: Argument -> Argument
+pack (UnpackedArgument v t n) = PackedArgument v t n
+pack x = x
+
+unpack :: Argument -> Argument
+unpack (PackedArgument v t n) = UnpackedArgument v t n
+unpack x = x
+
+sannoSnd :: SAnno g One (a, b) -> b
+sannoSnd (SAnno (One (_, (_, x))) _) = x
 
 {- | Find exported expressions.
 
