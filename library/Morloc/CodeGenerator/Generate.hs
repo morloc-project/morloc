@@ -620,25 +620,25 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One (CMeta, [Argument]) -> [MDoc]
-encodeSignatures g (SAnno (One (LamS _ x, _)) m) =
+encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
   map (makeSignature g) (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced g x)
   where
     f :: SExpr GMeta One (CMeta, [Argument])
       -> GMeta
       -> (CMeta, [Argument])
-      -> Maybe (Maybe GMeta, CMeta, [Argument])
-    f (AppS (SAnno _ gFun) _) _ (c, args) = Just (Just gFun, c, args)
-    f (ForeignS _ _) _ (c, args) = Just (Nothing, c, args)
+      -> Maybe (Maybe GMeta, GMeta, CMeta, [Argument])
+    f (AppS (SAnno _ gFun) _) m (c, args) = Just (Just gFun, m, c, args)
+    f (ForeignS _ _) m (c, args) = Just (Nothing, m, c, args)
     f _ _ _ = Nothing
 
     -- make the signature for an exported function that is directly sourced
     -- such cases will always be at the top level, hence no recursion is needed
     getSourced :: Grammar -> SAnno GMeta One (CMeta, [Argument]) -> Maybe MDoc
-    getSourced g (SAnno (One ((VarS v), (c, args))) m) = Just (makeSignature g (Just m, c, args))
+    getSourced g (SAnno (One ((VarS v), (c, args))) m) = Just (makeSignature g (Just m, m, c, args))
     getSourced _ _ = Nothing
 
-    makeSignature :: Grammar -> (Maybe GMeta, CMeta, [Argument]) -> MDoc
-    makeSignature g (gFun, c, args) = (gSignature g) $ GeneralFunction
+    makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, [Argument]) -> MDoc
+    makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
       { gfComments = maybeToList $
           fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t) (gFun >>= metaGeneralType)
       , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
@@ -648,8 +648,8 @@ encodeSignatures g (SAnno (One (LamS _ x, _)) m) =
       }
 
     makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-    makeArg' g (PackedArgument v t _) = (Just ((gShowType g) t), pretty v)
-    makeArg' g (UnpackedArgument v t _) = (Just ((gShowType g) (gSerialType g)), pretty v)
+    makeArg' g (PackedArgument v t _) = (Just ((gShowType g) (gSerialType g)), pretty v)
+    makeArg' g (UnpackedArgument v t _) = (Just ((gShowType g) t), pretty v)
 encodeSignatures _ _ = error "Expected LamS at all top-level segments"
 
 
@@ -915,8 +915,8 @@ prepInput g rs mid (SAnno (One (_, (c, _, d))) m) = do
 -- Presumably, if no serialization function is given, then the argument is
 -- either a native construct or will be passed on in serialized form.
 prepArg :: Grammar -> Argument -> MorlocMonad (Maybe MDoc, MDoc)
-prepArg g (PackedArgument _ t (Just name)) = return (Just . gShowType g $ gSerialType g, pretty name)
-prepArg g (UnpackedArgument _ t (Just name)) = return (Just . gShowType g $ t, pretty name)
+prepArg g (PackedArgument v t _) = return (Just . gShowType g $ gSerialType g, pretty v)
+prepArg g (UnpackedArgument v t _) = return (Just . gShowType g $ t, pretty v)
 prepArg _ _ = MM.throwError . OtherError $ "Something is stinky in the packers"
 
 
@@ -1013,6 +1013,7 @@ mapC f (SAnno (One (LamS vs x, c)) g) =
   SAnno (One (LamS vs (mapC f x), f c)) g
 mapC f (SAnno (One (AppS x xs, c)) g) =
   SAnno (One (AppS (mapC f x) (map (mapC f) xs), f c)) g
+mapC f (SAnno (One (VarS x, c)) g) = SAnno (One (VarS x, f c)) g
 mapC f (SAnno (One (UniS, c)) g) = SAnno (One (UniS, f c)) g
 mapC f (SAnno (One (NumS x, c)) g) = SAnno (One (NumS x, f c)) g
 mapC f (SAnno (One (LogS x, c)) g) = SAnno (One (LogS x, f c)) g
