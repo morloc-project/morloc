@@ -530,7 +530,7 @@ serialize h (SAnno (One (LamS vs x, c)) m) = do
   return $ SAnno (One (LamS vs x', (c, args0))) m
 serialize h (SAnno (One (VarS v, c)) m) = do
   let ts = init $ typeArgs (metaType c)
-      vs = map (EVar . render . makeArgumentName) [0..]
+      vs = map EVar ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
   args0 <- zipWithM (makeArgument h) vs ts
   return $ SAnno (One (VarS v, (c, args0))) m
 serialize h x = serialize' h [] x
@@ -616,6 +616,7 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One (CMeta, [Argument]) -> [MDoc]
+encodeSignatures g (SAnno (One (VarS x, (c, args))) m) = [makeSignature g (Just m, m, c, args)]
 encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
   map (makeSignature g) (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced g x)
   where
@@ -632,22 +633,22 @@ encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
     getSourced :: Grammar -> SAnno GMeta One (CMeta, [Argument]) -> Maybe MDoc
     getSourced g (SAnno (One ((VarS v), (c, args))) m) = Just (makeSignature g (Just m, m, c, args))
     getSourced _ _ = Nothing
+encodeSignatures _ _ = error "Expected LamS or VarS at all top-level segments"
 
-    makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, [Argument]) -> MDoc
-    makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
-      { gfComments = maybeToList $
-          fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
-               (gFun >>= metaGeneralType)
-      , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
-      , gfName = makeManifoldName m
-      , gfArgs = map (makeArg' g) args
-      , gfBody = ""
-      }
+makeSignature :: Grammar -> (Maybe GMeta, GMeta, CMeta, [Argument]) -> MDoc
+makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
+  { gfComments = maybeToList $
+      fmap (\(GeneralType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
+           (gFun >>= metaGeneralType)
+  , gfReturnType = Just . gShowType g . last . typeArgs $ metaType c
+  , gfName = makeManifoldName m
+  , gfArgs = map (makeArg' g) args
+  , gfBody = ""
+  }
 
-    makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-    makeArg' g (PackedArgument v t _) = (Just ((gShowType g) (gSerialType g)), pretty v)
-    makeArg' g (UnpackedArgument v t _) = (Just ((gShowType g) t), pretty v)
-encodeSignatures _ _ = error "Expected LamS at all top-level segments"
+makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
+makeArg' g (PackedArgument v t _) = (Just ((gShowType g) (gSerialType g)), pretty v)
+makeArg' g (UnpackedArgument v t _) = (Just ((gShowType g) t), pretty v)
 
 
 varExists :: SAnno GMeta One CMeta -> EVar -> Bool
