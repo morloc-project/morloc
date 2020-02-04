@@ -55,16 +55,22 @@ generate ms = do
     <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CMeta]]
+    -- remove Morloc composition abstractions, simplifying the AST
+    >>= mapM rewrite
     -- select a single instance at each node in the tree
     >>= mapM realize  -- [SAnno GMeta One CMeta]
+
+  -- print abstract syntax trees to the console as debugging message
+  say $ line <> indent 2 (vsep (map writeAST ast))
 
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
-  nexus <- Nexus.generate [ (metaType c, poolId m x, metaName m)
-                          | SAnno (One (x, c)) m <- ast
-                          ]
+  nexus <- Nexus.generate
+    [ (metaType c, poolId m x, metaName m)
+    | SAnno (One (x, c)) m <- ast
+    ]
 
   -- recursively find all serializers imported from any module
   smap <- findSerializers ms
@@ -171,7 +177,7 @@ collect ms (evar', xs@(x:_)) = do
   return $ SAnno (Many trees) gmeta
   where
 
-    -- Notice that `args` is NOT an intput to collectTerm. Morloc uses lexical
+    -- Notice that `args` is NOT an input to collectTerm. Morloc uses lexical
     -- scoping, and the input to collectTerm is the origin of a term, so the
     -- definition of the term is outside the scope of the parent expression.
     collectTerm
@@ -330,21 +336,83 @@ collect ms (evar', xs@(x:_)) = do
         , metaModule = moduleName m
         }
 
+rewrite
+  :: SAnno GMeta Many [CMeta]
+  -> MorlocMonad (SAnno GMeta Many [CMeta])
+rewrite s = return s
+
+-- rewrite
+--   :: SAnno GMeta Many [CMeta]
+--   -> MorlocMonad (SAnno GMeta Many [CMeta])
+-- rewrite (SAnno (Many xs) g) = do
+--   xs' <- mapM rewriteExpr xs
+--   return $ SAnno (Many xs') g
+--   where
+--     rewriteExpr
+--       :: SExpr GMeta Many [CMeta]
+--       -> MorlocMonad (SExpr GMeta Many [CMeta])
+--     -- AppS (SAnno g f c) [(SAnno g f c)]
+--     rewriteExpr (AppS (SAnno (Many xs) g) args) = do
+--       xs' <- mapM (substituteExprs args) (map fst xs)
+--       return $ SAnno (Many (zip xs' (map snd xs))) g
+--     -- LamS [EVar] (SAnno g f c)
+--     rewriteExpr (LamS vs (SAnno (Many xs) g)) = undefined
+--     -- ListS [SAnno g f c]
+--     rewriteExpr (ListS xs) = do
+--       xs' <- mapM rewrite xs
+--       return $ ListS xs'
+--     -- TupleS [SAnno g f c]
+--     rewriteExpr (TupleS xs) = do
+--       xs' <- mapM rewrite xs
+--       return $ TupleS xs'
+--     -- RecS [(EVar, SAnno g f c)]
+--     rewriteExpr (RecS xs) = do
+--       vs' <- mapM rewrite (map snd xs)
+--       return $ RecS (zip (map fst xs) vs')
+--     rewriteExpr x@(VarS _) = return x
+--     rewriteExpr x@UniS = return x
+--     rewriteExpr x@(NumS _) = return x
+--     rewriteExpr x@(LogS _) = return x
+--     rewriteExpr x@(StrS _) = return x
+--     rewriteExpr x@(ForeignS _ _) = return x
+--
+--     -- geh, the ambiguous tree is a bitch
+--     substituteExprs
+--       :: [SAnno GMeta Many [CMeta]]
+--       -> SExpr GMeta Many [CMeta]
+--       -> MorlocMonad (SExpr GMeta Many [CMeta])
+--     -- fully applied lambda, replace now with body
+--     substituteExprs [] (LamS [] x) = return x
+--     -- partially applied lambda, leave as is
+--     substituteExprs [] f@(LamS vs x) = return f
+--     -- lambda that is passed arguments, apply all
+--     substituteExprs (r:rs) (LamS (v:vs) x) = do
+--       x' <- substituteExpr v r x
+--       substituteExprs rs (LamS vs x')
+--     -- this shouldn't happen in well-typed code
+--     substituteExprs (_:_) (LamS [] _) = MM.throwError . OtherError $ "WTF?"
+--     substituteExprs _ _ = MM.throwError . OtherError $ "Expected LamS in substitution"
+--
+--     substituteExpr
+--       :: EVar
+--       -> SAnno GMeta Many [CMeta] -- replacement
+--       -> SExpr GMeta Many [CMeta] -- original value
+--       -> MorlocMonad (SAnno GMeta Many [CMeta]) -- new value
+--     substituteExpr = undefined
+
+
 
 -- | Select a single concrete language for each sub-expression.  Store the
 -- concrete type and the general type (if available).  Select serialization
 -- functions (the serial map should not be needed after this step in the
 -- workflow).
--- TODO: add branch substitution paths
 realize
   :: SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta One CMeta)
 realize x = do
-  say "----- entering realize ------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     (Just (_, realization)) -> do
-      say $ line <> prettySAnno realization
       return realization 
     Nothing -> MM.throwError . OtherError $ "No valid realization found"
   where
@@ -354,14 +422,11 @@ realize x = do
       -> SAnno GMeta Many [CMeta]
       -> MorlocMonad (Maybe (Int, SAnno GMeta One CMeta))
     realizeAnno depth langMay (SAnno (Many xs) m) = do
-      say $ indent' depth <> "realizeAnno:" <+> list (map (descSExpr . fst) xs)
       asts <- mapM (\(x, cs) -> mapM (realizeExpr (depth+1) langMay x) cs) xs |>> concat
       case maximumOnMay (\(s,_,_) -> s) (catMaybes asts) of
         Just (i, x, c) -> do
-          say $ indent' depth <> "choosing:" <+> prettyType (metaType c)
           return $ Just (i, SAnno (One (x, c)) m)
         Nothing -> do
-          say $ indent' depth <> "  choosing: <FAILURE>"
           return Nothing
 
     indent' :: Int -> MDoc
@@ -431,6 +496,34 @@ realize x = do
         _ -> return Nothing
     realizeExpr' _ _ (ForeignS _ _) _ = MM.throwError . OtherError $
       "ForeignS should not yet appear in an SExpr"
+
+writeAST
+  :: SAnno GMeta One CMeta -> MDoc
+writeAST s = hang 2 . vsep $ ["AST:", describe s] where
+  describe
+    :: SAnno GMeta One CMeta
+    -> MDoc
+  describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
+  describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
+  describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
+  describe (SAnno (One (x@(AppS f xs), c)) g) =
+    hang 2 . vsep $
+      [ descSExpr x
+      , describe f
+      ] ++ map describe xs
+  describe (SAnno (One (f@(LamS _ x), c)) g) = do 
+    hang 2 . vsep $
+      [ name c g <+> descSExpr f
+      , describe x
+      ] 
+  describe (SAnno (One (x, _)) _) = descSExpr x
+
+  name :: CMeta -> GMeta -> MDoc
+  name (viaShow . metaLang -> lang) g =
+    maybe
+      ("_" <+> lang <+> "::")
+      (\x -> pretty x <+> lang <+> "::")
+      (metaName g)
 
 
 -- | In the returned list, every top-level element is a LamS that is called
@@ -842,6 +935,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', _, _))) m') (c, margs, m) = do
   let ftype = metaType c'
       otype = metaType c
 
+  -- TODO: this is the problem part
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
     _ -> case (metaName m', metaSource c') of
