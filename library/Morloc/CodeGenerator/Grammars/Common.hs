@@ -62,6 +62,7 @@ data SExpr g f c
   | LogS Bool
   | StrS MT.Text
   | RecS [(EVar, SAnno g f c)]
+  | CallS Source
   | ForeignS Int Lang
 
 -- | Description of the general manifold

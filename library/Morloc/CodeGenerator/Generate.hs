@@ -55,8 +55,6 @@ generate ms = do
     <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CMeta]]
-    -- remove Morloc composition abstractions, simplifying the AST
-    >>= mapM rewrite
     -- select a single instance at each node in the tree
     >>= mapM realize  -- [SAnno GMeta One CMeta]
 
@@ -174,7 +172,7 @@ collect ms (evar', xs@(x:_)) = do
   -- something is broken upstream of GMeta is not general enough)
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
-  return $ SAnno (Many trees) gmeta
+  rewrite $ SAnno (Many trees) gmeta
   where
 
     -- Notice that `args` is NOT an input to collectTerm. Morloc uses lexical
@@ -193,8 +191,8 @@ collect ms (evar', xs@(x:_)) = do
       "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
       ts <- getTermTypes term
-      cmetas <- mapM (makeCMeta (Just src) m) (getConcreteTypes ts)
-      return (VarS (srcAlias src), cmetas)
+      cmetas <- mapM (makeCMeta m) (getConcreteTypes ts)
+      return (CallS src, cmetas)
       where
         getTermTypes :: TermOrigin -> MorlocMonad [Type]
         getTermTypes t = do
@@ -229,10 +227,10 @@ collect ms (evar', xs@(x:_)) = do
     collectExpr args m ts (StrE x) = simpleCollect (StrS x) m ts
     collectExpr args m ts (VarE v)
       | Set.member v args = do
-          cmetas <- mapM (makeCMeta Nothing m) ts
+          cmetas <- mapM (makeCMeta m) ts
           return [(VarS v, cmetas)]
       | otherwise = do
-          cmetas <- mapM (makeCMeta Nothing m) ts
+          cmetas <- mapM (makeCMeta m) ts
           let terms = findTerm True ms m v
           xs <- mapM collectTerm terms
           let chosen = map (chooseTypes cmetas) xs
@@ -302,7 +300,7 @@ collect ms (evar', xs@(x:_)) = do
       -> [ConcreteType]
       -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
     simpleCollect sexpr m ts = do
-      cmeta <- mapM (makeCMeta Nothing m) ts
+      cmeta <- mapM (makeCMeta m) ts
       return [(sexpr, cmeta)]
 
     -- | Find info common across realizations of a given term in a given module
@@ -327,23 +325,18 @@ collect ms (evar', xs@(x:_)) = do
             , metaConstraints = Set.empty
             }
 
-    makeCMeta :: Maybe Source -> Module -> ConcreteType -> MorlocMonad CMeta
-    makeCMeta src m t =
+    makeCMeta :: Module -> ConcreteType -> MorlocMonad CMeta
+    makeCMeta m t =
       return $ CMeta
         { metaLang = langOf' t
         , metaType = t
-        , metaSource = src
         , metaModule = moduleName m
         }
 
 rewrite
   :: SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta Many [CMeta])
-rewrite s = return s
-
--- rewrite
---   :: SAnno GMeta Many [CMeta]
---   -> MorlocMonad (SAnno GMeta Many [CMeta])
+rewrite = return
 -- rewrite (SAnno (Many xs) g) = do
 --   xs' <- mapM rewriteExpr xs
 --   return $ SAnno (Many xs') g
@@ -458,6 +451,9 @@ realize x = do
     realizeExpr' _ lang (StrS x) c
       | lang == metaLang c = return $ Just (0, StrS x, c)
       | otherwise = return Nothing
+    realizeExpr' _ lang (CallS src) c
+      | lang == metaLang c = return $ Just (0, CallS src, c)
+      | otherwise = return Nothing
     realizeExpr' _ lang (VarS x) c
       | lang == metaLang c = return $ Just (0, VarS x, c)
       | otherwise = return Nothing
@@ -544,6 +540,7 @@ segment x@(SAnno (One (_, c)) _) = do
     segment' _ x@(SAnno (One (LogS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (StrS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (VarS _, _)) _) = return (x, [])
+    segment' _ x@(SAnno (One (CallS _, _)) _) = return (x, [])
     segment' c0 (SAnno (One (ListS xs, c1)) m) = do
       (xs', rs) <- mapM (segment' c0) xs |>> unzip
       return (SAnno (One (ListS xs', c1)) m, concat rs)
@@ -621,11 +618,11 @@ serialize h (SAnno (One (LamS vs x, c)) m) = do
   args0 <- zipWithM (makeArgument h) vs (typeArgs (metaType c))
   x' <- serialize' h args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
-serialize h (SAnno (One (VarS v, c)) m) = do
+serialize h (SAnno (One (CallS src, c)) m) = do
   let ts = init $ typeArgs (metaType c)
       vs = map EVar ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
   args0 <- zipWithM (makeArgument h) vs ts
-  return $ SAnno (One (VarS v, (c, args0))) m
+  return $ SAnno (One (CallS src, (c, args0))) m
 serialize h x = serialize' h [] x
 
 -- TODO: the arguments coupled to every term should be the arguments USED
@@ -647,6 +644,9 @@ serialize' _ _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []
 serialize' _ args (SAnno (One (VarS v, c)) m) = do
   let args' = filter (\r -> argName r == v) args
   return $ SAnno (One (VarS v, (c, args'))) m
+-- CallS Source
+serialize' _ args (SAnno (One (CallS src, c)) m) = do
+  return $ SAnno (One (CallS src, (c, []))) m
 -- containers
 serialize' h args (SAnno (One (ListS xs, c)) m) = do
   xs' <- mapM (serialize' h args) xs
@@ -680,7 +680,7 @@ makeArgument h v t = case selectFunction t Unpack h of
   (Just (name, _)) -> return $ PackedArgument v t (Just name)
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
-gatherManifolds (SAnno (One (VarS _, d)) _) = [d]
+gatherManifolds (SAnno (One (CallS _, d)) _) = [d]
 gatherManifolds x = catMaybes . unpackSAnno f $ x
   where
     f :: SExpr g One MDoc -> g -> MDoc -> Maybe MDoc
@@ -697,9 +697,13 @@ findSources :: SerialMap -> [SAnno g One CMeta] -> [Path]
 findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
   where
     f :: SExpr g One CMeta -> g -> CMeta -> [Path]
-    f _ _ c = catMaybes
-      [ metaSource c >>= srcPath
+    f (CallS src) _ c = catMaybes
+      [ srcPath src
       , fmap snd $ selectFunction (metaType c) Pack h
+      , fmap snd $ selectFunction (metaType c) Unpack h
+      ]
+    f _ _ c = catMaybes
+      [ fmap snd $ selectFunction (metaType c) Pack h
       , fmap snd $ selectFunction (metaType c) Unpack h
       ]
 
@@ -709,7 +713,7 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One (CMeta, [Argument]) -> [MDoc]
-encodeSignatures g (SAnno (One (VarS x, (c, args))) m) = [makeSignature g (Just m, m, c, args)]
+encodeSignatures g (SAnno (One (CallS _, (c, args))) m) = [makeSignature g (Just m, m, c, args)]
 encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
   map (makeSignature g) (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced g x)
   where
@@ -776,10 +780,10 @@ makeDispatchBuilder h g xs =
       -> Maybe ([EVar], GMeta, ConcreteType)
     getPoolCall (SAnno (One (LamS vs (SAnno (One (AppS _ _, (c, _))) m), _)) _)
       = Just (vs, m, metaType c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (VarS _  , (c, _))) m), _)) _)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (CallS _  , (c, _))) m), _)) _)
       | (length vs) > 0 = Just (vs, m, metaType c)
       | otherwise = Nothing
-    getPoolCall (SAnno (One (VarS _, (c, args))) m)
+    getPoolCall (SAnno (One (CallS _, (c, args))) m)
       | (length args) > 0 = Just (map argName args, m, last . typeArgs $ metaType c)
       | otherwise = Nothing
     getPoolCall _ = Nothing
@@ -868,17 +872,21 @@ codify' _ h g (SAnno (One (ForeignS mid lang, (c, args))) m) = do
       "In cliArg, no unpacker found"
 
 -- | VarS EVar
-codify' False _ _ (SAnno (One (VarS v, (c, args))) m) = do
-  let name = maybe (unEVar v) (unName . srcName) (metaSource c)
+codify' _ _ _ (SAnno (One (VarS v, (c, args))) m) = do
+  let name = unEVar v
   return $ SAnno (One (VarS v, (c, args, pretty name))) m
 
-codify' True _ g (SAnno (One (VarS v, (c, args))) m) = do
+codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
+  let name = srcName src
+  return $ SAnno (One (CallS src, (c, args, pretty name))) m
+
+codify' True _ g (SAnno (One (CallS src, (c, args))) m) = do
   let ftype = metaType c -- full function type
       otype = last (typeArgs ftype) -- output type
       itypes = init (typeArgs ftype) -- input types
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
   args' <- mapM (prepArg g) args
-  let name = maybe (unEVar v) (\(Source x _ _ _) -> unName x) (metaSource c)
+  let name = unName (srcName src)
   let mdoc = gFunction g $ GeneralFunction {
       gfComments = comments
     , gfReturnType = Just ((gShowType g) otype)
@@ -888,11 +896,11 @@ codify' True _ g (SAnno (One (VarS v, (c, args))) m) = do
         vsep (map snd inputs') <> line <>
         (gReturn g $ (gCall g) (pretty name) (map fst inputs'))
     }
-  return $ SAnno (One (VarS v, (c, args, mdoc))) m
+  return $ SAnno (One (CallS src, (c, args, mdoc))) m
   where
     comments = catMaybes
       [ Just "From A"
-      , Just (pretty v)
+      , Just (pretty (srcName src))
       , fmap (generalSignature (metaName m)) (metaGeneralType m)
       , Just $ concreteSignature (metaName m) (metaType c)
       ]
@@ -938,10 +946,9 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', _, _))) m') (c, margs, m) = do
   -- TODO: this is the problem part
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
-    _ -> case (metaName m', metaSource c') of
-      (_, Just (Source x _ _ _)) -> return (pretty x)
-      (Just n, _) -> return (pretty n)
-      _ -> MM.throwError . OtherError $ "No name found for manifold"
+    (CallS src) -> return (pretty $ srcName src)
+    (LamS vs x) -> return (pretty $ metaName m')
+    _ -> MM.throwError . OtherError $ "Unexpected innerCall: " <> render (descSExpr x)
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   args' <- mapM (prepArg g) margs
@@ -992,7 +999,7 @@ prepInput g _ mid (SAnno (One (AppS x xs, (c, args, d))) m) = do
         }
   return (varname, Just ass)
 -- handle sourced files, which should be used as unaliased variables
-prepInput _ _ _ (SAnno (One (VarS _, (CMeta _ _ (Just v) _, _, _))) _) = return (pretty (srcName v), Nothing)
+prepInput _ _ _ (SAnno (One (CallS src, _)) _) = return (pretty (srcName src), Nothing)
 prepInput g rs mid (SAnno (One (_, (c, _, d))) m) = do
   let name = metaName m
       varname = makeArgumentName mid
@@ -1116,6 +1123,7 @@ mapC f (SAnno (One (LamS vs x, c)) g) =
 mapC f (SAnno (One (AppS x xs, c)) g) =
   SAnno (One (AppS (mapC f x) (map (mapC f) xs), f c)) g
 mapC f (SAnno (One (VarS x, c)) g) = SAnno (One (VarS x, f c)) g
+mapC f (SAnno (One (CallS src, c)) g) = SAnno (One (CallS src, f c)) g
 mapC f (SAnno (One (UniS, c)) g) = SAnno (One (UniS, f c)) g
 mapC f (SAnno (One (NumS x, c)) g) = SAnno (One (NumS x, f c)) g
 mapC f (SAnno (One (LogS x, c)) g) = SAnno (One (LogS x, f c)) g
@@ -1128,6 +1136,10 @@ sannoType = sannoWithC (metaType . id)
 descSExpr :: SExpr g f c -> MDoc
 descSExpr (UniS) = "UniS"
 descSExpr (VarS v) = "VarS" <+> pretty v
+descSExpr (CallS src)
+  =   "CallS"
+  <+> pretty (srcAlias src)
+  <+> parens (pretty (srcAlias src) <> "@" <> viaShow (srcLang src))
 descSExpr (ListS _) = "ListS"
 descSExpr (TupleS _) = "TupleS"
 descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
@@ -1145,29 +1157,6 @@ concreteSignature n (ConcreteType t)
 generalSignature :: Maybe EVar -> GeneralType -> MDoc
 generalSignature n (GeneralType t)
   = maybe "_" pretty n <+> "::" <+> prettyType t
-
-prettySAnno :: SAnno GMeta One CMeta -> MDoc
-prettySAnno (SAnno (One (x, c)) m)
-  = "SAnno" <+> pretty (metaId m)
-  <+> maybe "-" pretty (metaName m)
-  <+> (align . vsep)
-        [ parens (maybe "-" prettyType (metaGeneralType m))
-        , parens (prettyType (metaType c))]
-  <> line <> indent 2 (prettySExpr x)
-
-prettySExpr :: SExpr GMeta One CMeta -> MDoc
-prettySExpr UniS = "UniS"
-prettySExpr (VarS v) = pretty v
-prettySExpr (ListS xs) = "ListS" <+> align (encloseSep "[" "]" "," (map prettySAnno xs))
-prettySExpr (TupleS xs) = "TupleS" <+> align (encloseSep "[" "]" "," (map prettySAnno xs))
-prettySExpr (LamS vs x) = hsep ("LamS" : map pretty vs) <+> "->" <> line <> indent 2 (prettySAnno x)
-prettySExpr (AppS f xs) = nest 2 . vsep $
-  ["AppS", parens (prettySAnno f)] ++ map (parens . prettySAnno) xs
-prettySExpr (NumS x) = viaShow x
-prettySExpr (LogS x) = viaShow x
-prettySExpr (StrS x) = viaShow x
-prettySExpr (RecS _) = error "Too lazy to support this"
-prettySExpr (ForeignS _ _) = error "ForeignS shouldn't have been added yet"
 
 partialApply :: Type -> MorlocMonad Type
 partialApply (FunT _ t) = return t
