@@ -420,7 +420,7 @@ rewrite (SAnno (Many es0) g0) = do
       f' <- substituteAnno v r f
       xs' <- mapM (substituteAnno v r) xs
       return [(AppS f' xs', c)]
-    -- VarS UniS NumS LogS StrS CallS ForeignS
+    -- UniS NumS LogS StrS CallS ForeignS
     substituteExpr _ _ x = return [x]
 
     substituteAnno
@@ -622,6 +622,8 @@ encode h (lang, xs) = do
   let srcs = findSources h xs
   srcdocs <- mapM (encodeSource g) srcs
 
+  -- say $ "length(xs) = " <> viaShow (length xs)
+
   -- determine where serialization occurs, add argument list to tree
   serializedTree <- mapM (serialize h) xs
 
@@ -655,6 +657,9 @@ serialize
   -> MorlocMonad (SAnno GMeta One (CMeta, [Argument]))
 serialize h (SAnno (One (LamS vs x, c)) m) = do
   args0 <- zipWithM (makeArgument h) vs (typeArgs (metaType c))
+  -- say $ " ---- entering serialize"
+  -- say $ viaShow vs
+  -- say $ viaShow args0
   x' <- serialize' h args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
 serialize h (SAnno (One (CallS src, c)) m) = do
@@ -882,6 +887,9 @@ codify' _ h g (SAnno (One (RecS entries, (c, args))) m) = do
 -- | LamS [EVar] (SAnno a)
 codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m) = do
   x' <- codify' isTop h g x
+  -- say $ "---- codify' LamS"
+  -- say $ viaShow vs
+  -- say $ viaShow args
   let mdoc = undefined -- FIXME: what does a function look like, anyway?
   return (SAnno (One (LamS vs x', (c, args, mdoc))) m)
 
@@ -913,6 +921,9 @@ codify' _ h g (SAnno (One (ForeignS mid lang, (c, args))) m) = do
 -- | VarS EVar
 codify' _ _ _ (SAnno (One (VarS v, (c, args))) m) = do
   let name = unEVar v
+  -- say $ " ---- codify' VarS"
+  -- say $ pretty name
+  -- say $ viaShow args
   return $ SAnno (One (VarS v, (c, args, pretty name))) m
 
 codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
@@ -982,15 +993,17 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', _, _))) m') (c, margs, m) = do
   let ftype = metaType c'
       otype = metaType c
 
-  -- TODO: this is the problem part
+  say $ " ---- entering makeManifoldDoc"
+  say $ viaShow margs
+
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
     (CallS src) -> return (pretty $ srcName src)
-    (LamS vs x) -> return (pretty $ metaName m')
     _ -> MM.throwError . OtherError $ "Unexpected innerCall: " <> render (descSExpr x)
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   args' <- mapM (prepArg g) margs
+
   return . gFunction g $ GeneralFunction
     { gfComments = catMaybes $
         [ Just "From B"
@@ -1008,7 +1021,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (c', _, _))) m') (c, margs, m) = do
 
 
 -- Handle preparation of arguments passed to a manifold. Return the name of the
--- variable that will be used and an block of code that defines the variable
+-- variable that will be used and a block of code that defines the variable
 -- (if necessary).
 prepInput
   :: Grammar
@@ -1039,25 +1052,24 @@ prepInput g _ mid (SAnno (One (AppS x xs, (c, args, d))) m) = do
   return (varname, Just ass)
 -- handle sourced files, which should be used as unaliased variables
 prepInput _ _ _ (SAnno (One (CallS src, _)) _) = return (pretty (srcName src), Nothing)
-prepInput g rs mid (SAnno (One (_, (c, _, d))) m) = do
-  let name = metaName m
+prepInput g rs mid (SAnno (One (VarS v, (c, _, d))) m) = do
+  let name = pretty (unEVar v)
       varname = makeArgumentName mid
       t = metaType c
-      arg = listToMaybe [r | r <- rs, Just (argName r) == metaName m]
-  case (name, arg) of
-    (Just n, Just (PackedArgument _ t (Just unpacker))) ->
+      arg = listToMaybe [r | r <- rs, argName r == v]
+  case arg of
+    (Just (PackedArgument _ t (Just unpacker))) ->
        return (varname, Just . gAssign g $ GeneralAssignment
           { gaType = Just . gShowType g $ t
           , gaName = varname
-          , gaValue = (gCall g) (pretty unpacker) [pretty name]
+          , gaValue = (gCall g) (pretty unpacker) [name]
           , gaArg = Nothing
           }
        )
-    (_, Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
+    (Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
       "No unpacker found"
     -- the argument is used in the wrapped function, but is not serialized
-    (Just n, _) -> return (pretty name, Nothing)
-    (Nothing, _) -> MM.throwError . OtherError $ "import prep error"
+    Nothing -> return (name, Nothing)
 
 -- | Serialize the result of a call if a serialization function is defined.
 -- Presumably, if no serialization function is given, then the argument is
