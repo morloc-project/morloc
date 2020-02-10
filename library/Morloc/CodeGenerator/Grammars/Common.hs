@@ -78,8 +78,7 @@ data GMeta = GMeta {
 data CMeta = CMeta {
     metaLang :: Lang
   , metaType :: ConcreteType
-  , metaSource :: Maybe Source
-  , metaModule :: MVar
+  , metaModule :: MVar -- useful for debugging, though not currently used
 } deriving (Show, Ord, Eq)
 
 data SerialMap = SerialMap {

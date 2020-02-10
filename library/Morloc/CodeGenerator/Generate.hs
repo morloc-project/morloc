@@ -248,7 +248,7 @@ collect ms (evar', xs@(x:_)) = do
           -> (SExpr GMeta Many [CMeta], [CMeta])
           -> (SExpr GMeta Many [CMeta], [CMeta])
         chooseTypes cmetas (x, cmetas') =
-          (x, [ cmeta { metaSource = metaSource cmeta' }
+          (x, [ cmeta
               | cmeta <- cmetas
               , cmeta' <- cmetas'
               , metaLang cmeta == metaLang cmeta'])
@@ -336,62 +336,101 @@ collect ms (evar', xs@(x:_)) = do
 rewrite
   :: SAnno GMeta Many [CMeta]
   -> MorlocMonad (SAnno GMeta Many [CMeta])
-rewrite = return
--- rewrite (SAnno (Many xs) g) = do
---   xs' <- mapM rewriteExpr xs
---   return $ SAnno (Many xs') g
---   where
---     rewriteExpr
---       :: SExpr GMeta Many [CMeta]
---       -> MorlocMonad (SExpr GMeta Many [CMeta])
---     -- AppS (SAnno g f c) [(SAnno g f c)]
---     rewriteExpr (AppS (SAnno (Many xs) g) args) = do
---       xs' <- mapM (substituteExprs args) (map fst xs)
---       return $ SAnno (Many (zip xs' (map snd xs))) g
---     -- LamS [EVar] (SAnno g f c)
---     rewriteExpr (LamS vs (SAnno (Many xs) g)) = undefined
---     -- ListS [SAnno g f c]
---     rewriteExpr (ListS xs) = do
---       xs' <- mapM rewrite xs
---       return $ ListS xs'
---     -- TupleS [SAnno g f c]
---     rewriteExpr (TupleS xs) = do
---       xs' <- mapM rewrite xs
---       return $ TupleS xs'
---     -- RecS [(EVar, SAnno g f c)]
---     rewriteExpr (RecS xs) = do
---       vs' <- mapM rewrite (map snd xs)
---       return $ RecS (zip (map fst xs) vs')
---     rewriteExpr x@(VarS _) = return x
---     rewriteExpr x@UniS = return x
---     rewriteExpr x@(NumS _) = return x
---     rewriteExpr x@(LogS _) = return x
---     rewriteExpr x@(StrS _) = return x
---     rewriteExpr x@(ForeignS _ _) = return x
---
---     -- geh, the ambiguous tree is a bitch
---     substituteExprs
---       :: [SAnno GMeta Many [CMeta]]
---       -> SExpr GMeta Many [CMeta]
---       -> MorlocMonad (SExpr GMeta Many [CMeta])
---     -- fully applied lambda, replace now with body
---     substituteExprs [] (LamS [] x) = return x
---     -- partially applied lambda, leave as is
---     substituteExprs [] f@(LamS vs x) = return f
---     -- lambda that is passed arguments, apply all
---     substituteExprs (r:rs) (LamS (v:vs) x) = do
---       x' <- substituteExpr v r x
---       substituteExprs rs (LamS vs x')
---     -- this shouldn't happen in well-typed code
---     substituteExprs (_:_) (LamS [] _) = MM.throwError . OtherError $ "WTF?"
---     substituteExprs _ _ = MM.throwError . OtherError $ "Expected LamS in substitution"
---
---     substituteExpr
---       :: EVar
---       -> SAnno GMeta Many [CMeta] -- replacement
---       -> SExpr GMeta Many [CMeta] -- original value
---       -> MorlocMonad (SAnno GMeta Many [CMeta]) -- new value
---     substituteExpr = undefined
+rewrite (SAnno (Many es0) g0) = do
+  es0' <- fmap concat $ mapM rewriteL0 es0 
+  return $ SAnno (Many es0') g0
+  where
+    rewriteL0
+      :: (SExpr GMeta Many [CMeta], [CMeta])
+      -> MorlocMonad [(SExpr GMeta Many [CMeta], [CMeta])]
+    rewriteL0 (AppS (SAnno (Many es1) g1) args, c1) = do
+      args' <- mapM rewrite args
+      -- originally es1 consists of a list of CallS and LamS constructos
+      --  - CallS are irreducible source functions
+      --  - LamS are Morloc abstractions that can be reduced
+      -- separate LamS expressions from all others
+      let (es1LamS, es1CallS) = partitionEithers (map sepLamS es1)
+      -- rewrite the LamS expressions, each expression will yields 1 or more
+      es1LamS' <- fmap concat $ mapM (rewriteL1 args') es1LamS
+      return $ (AppS (SAnno (Many es1CallS) g1) args', c1) : es1LamS'
+      where
+        sepLamS
+          :: (SExpr g Many c, c)
+          -> Either ([EVar], SAnno g Many c)
+                    (SExpr g Many c, c)
+        sepLamS (x@(LamS vs body), _) = Left (vs, body)
+        sepLamS x = Right x
+    rewriteL0 (ListS xs, c) = do
+      xs' <- mapM rewrite xs
+      return [(ListS xs', c)]
+    rewriteL0 (TupleS xs, c) = do
+      xs' <- mapM rewrite xs
+      return [(TupleS xs', c)]
+    rewriteL0 (RecS entries, c) = do
+      xs' <- mapM rewrite (map snd entries)
+      return [(RecS $ zip (map fst entries) xs', c)]
+    rewriteL0 (LamS vs x, c) = do
+      x' <- rewrite x
+      return [(LamS vs x', c)]
+    -- VarS UniS NumS LogS StrS CallS ForeignS
+    rewriteL0 x = return [x]
+
+    rewriteL1
+      :: [SAnno g Many c]
+      -> ([EVar], SAnno g Many c) -- lambda variables and body
+      -> MorlocMonad [(SExpr g Many c, c)]
+    rewriteL1 args (vs, SAnno (Many es2) g2)
+      | length vs == length args =
+          fmap concat $ mapM (substituteExprs (zip vs args)) es2
+      | length vs > length args = error
+          "Partial function application not yet implemented (coming soon)"
+      | length vs < length args = MM.throwError . OtherError $
+          "Type error: too many arguments applied to lambda"
+
+    substituteExprs
+      :: [(EVar, SAnno g Many c)]
+      -> (SExpr g Many c, c) -- body
+      -> MorlocMonad [(SExpr g Many c, c)] -- substituted bodies
+    substituteExprs [] x = return [x]
+    substituteExprs ((v, r):rs) x = do
+      xs' <- substituteExpr v r x
+      fmap concat $ mapM (substituteExprs rs) xs'
+
+    substituteExpr
+      :: EVar
+      -> SAnno g Many c -- replacement
+      -> (SExpr g Many c, c) -- expression
+      -> MorlocMonad [(SExpr g Many c, c)]
+    substituteExpr v (SAnno (Many xs) _) x@(VarS v', _)
+      | v == v' = return xs
+      | otherwise = return [x]
+    substituteExpr v r (ListS xs, c) = do
+      xs' <- mapM (substituteAnno v r) xs
+      return [(ListS xs, c)]
+    substituteExpr v r (TupleS xs, c) = do
+      xs' <- mapM (substituteAnno v r) xs
+      return [(TupleS xs, c)]
+    substituteExpr v r (RecS entries, c) = do
+      xs' <- mapM (substituteAnno v r) (map snd entries)
+      return [(RecS (zip (map fst entries) xs'), c)]
+    substituteExpr v r (LamS vs x, c) = do
+      x' <- substituteAnno v r x
+      return [(LamS vs x', c)]
+    substituteExpr v r (AppS f xs, c) = do
+      f' <- substituteAnno v r f
+      xs' <- mapM (substituteAnno v r) xs
+      return [(AppS f' xs', c)]
+    -- VarS UniS NumS LogS StrS CallS ForeignS
+    substituteExpr _ _ x = return [x]
+
+    substituteAnno
+      :: EVar -- variable to replace
+      -> SAnno g Many c -- replacement branch set
+      -> SAnno g Many c -- search branch
+      -> MorlocMonad (SAnno g Many c)
+    substituteAnno v r (SAnno (Many xs) g) = do
+      xs' <- fmap concat $ mapM (substituteExpr v r) xs
+      return $ SAnno (Many xs') g
 
 
 
