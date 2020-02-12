@@ -52,8 +52,8 @@ grammar = Grammar {
 gLang' :: Lang
 gLang' = RLang
 
-gSerialType' :: ConcreteType
-gSerialType' = ConcreteType $ VarT (TV (Just RLang) "character")
+gSerialType' :: CType
+gSerialType' = CType $ VarT (TV (Just RLang) "character")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -144,8 +144,8 @@ gSwitch' l r xs x var
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "args[[" <> int i <> "]]") [2..]
 
-gShowType' :: ConcreteType -> MDoc
-gShowType' = MTM.buildConcreteType mkfun mkrec where
+gShowType' :: CType -> MDoc
+gShowType' = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc 
   mkfun _ _ = "FUNCTION!!!" -- FIXME: stub
 

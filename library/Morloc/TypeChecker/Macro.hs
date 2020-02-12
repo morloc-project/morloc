@@ -11,7 +11,7 @@ Stability   : experimental
 module Morloc.TypeChecker.Macro
 (
     expandMacro
-  , buildConcreteType
+  , buildCType
 ) where
 
 import Morloc.Namespace
@@ -29,12 +29,12 @@ data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
 
-buildConcreteType
+buildCType
   :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
   -> ([(MDoc, MDoc)] -> MDoc) -- ^ make record type
-  -> ConcreteType
+  -> CType
   -> MDoc
-buildConcreteType mkfun mkrec (ConcreteType t) = f t where
+buildCType mkfun mkrec (CType t) = f t where
   f :: Type -> MDoc
   f (VarT (TV _ x)) = pretty x
   f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))

@@ -59,8 +59,8 @@ fromMaybeType = maybe "void*" id
 gLang' :: Lang
 gLang' = CppLang
 
-gSerialType' :: ConcreteType
-gSerialType' = ConcreteType $ VarT (TV (Just CppLang) "std::string")
+gSerialType' :: CType
+gSerialType' = CType $ VarT (TV (Just CppLang) "std::string")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case (gaArg ga, gaType ga) of
@@ -177,8 +177,8 @@ gSwitch' l r ms x var = switchC x (map (\m -> (l m, r m)) ms)
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "argv[" <> integer i <> "]") [2..]
 
-gShowType' :: ConcreteType -> MDoc
-gShowType' = MTM.buildConcreteType mkfun mkrec where
+gShowType' :: CType -> MDoc
+gShowType' = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc 
   mkfun _ _ = "auto" -- and hope for the best
 

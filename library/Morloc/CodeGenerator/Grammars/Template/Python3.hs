@@ -71,8 +71,8 @@ grammar = Grammar {
 gLang' :: Lang
 gLang' = Python3Lang
 
-gSerialType' :: ConcreteType
-gSerialType' = ConcreteType $ VarT (TV (Just Python3Lang) "str")
+gSerialType' :: CType
+gSerialType' = CType $ VarT (TV (Just Python3Lang) "str")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
@@ -174,8 +174,8 @@ gSwitch' l r ms x var = pyIfElse cases Nothing
 gCmdArgs' :: [MDoc]
 gCmdArgs' = map (\i -> "sys.argv[" <> int i <> "]") [2..]
 
-gShowType' :: ConcreteType -> MDoc
-gShowType' = MTM.buildConcreteType mkfun mkrec where
+gShowType' :: CType -> MDoc
+gShowType' = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc 
   mkfun _ _ = "FUNCTION!!!" -- FIXME: stub
 

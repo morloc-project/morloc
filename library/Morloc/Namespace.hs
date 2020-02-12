@@ -14,9 +14,9 @@ module Morloc.Namespace
   -- ** Synonyms
   , MDoc
   -- ** Newtypes
-  , ConcreteType(..)
-  , concreteType
-  , GeneralType(..)
+  , CType(..)
+  , ctype
+  , GType(..)
   , generalType
   , EVar(..)
   , MVar(..)
@@ -368,22 +368,22 @@ data Expr
   | RecE [(EVar, Expr)]
   deriving (Show, Ord, Eq)
 
-newtype ConcreteType = ConcreteType { unConcreteType :: Type }
+newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
 
-newtype GeneralType = GeneralType { unGeneralType :: Type }
+newtype GType = GType { unGType :: Type }
   deriving (Show, Ord, Eq)
 
--- a safe alternative to the ConcreteType constructor
-concreteType :: Type -> ConcreteType
-concreteType t
-  | langOf' t /= MorlocLang = ConcreteType t
+-- a safe alternative to the CType constructor
+ctype :: Type -> CType
+ctype t
+  | langOf' t /= MorlocLang = CType t
   | otherwise = error "COMPILER BUG - incorrect assignment to concrete type"
 
--- a safe alternative to the GeneralType constructor
-generalType :: Type -> GeneralType
+-- a safe alternative to the GType constructor
+generalType :: Type -> GType
 generalType t
-  | langOf' t == MorlocLang = GeneralType t
+  | langOf' t == MorlocLang = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
 -- | Types, see Dunfield Figure 6
@@ -456,11 +456,11 @@ instance Typelike Type where
 instance Typelike EType where
   typeOf = etype
 
-instance Typelike ConcreteType where
-  typeOf (ConcreteType t) = t 
+instance Typelike CType where
+  typeOf (CType t) = t 
 
-instance Typelike GeneralType where
-  typeOf (GeneralType t) = t 
+instance Typelike GType where
+  typeOf (GType t) = t 
 
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
@@ -469,11 +469,11 @@ class HasOneLanguage a where
   langOf' (langOf -> Nothing) = MorlocLang
   langOf' (langOf -> (Just lang)) = lang
 
-instance HasOneLanguage ConcreteType where
-  langOf (ConcreteType t) = langOf t
-  langOf' (ConcreteType t) = langOf' t
--- NOTE: There is NO instace of HasOneLanguage for GeneralType. You should not
--- ask for the language of a GeneralType, since you should already know the
+instance HasOneLanguage CType where
+  langOf (CType t) = langOf t
+  langOf' (CType t) = langOf' t
+-- NOTE: There is NO instace of HasOneLanguage for GType. You should not
+-- ask for the language of a GType, since you should already know the
 -- language (MorlocLang), so asking for the language implies you are writing a
 -- bug.
 

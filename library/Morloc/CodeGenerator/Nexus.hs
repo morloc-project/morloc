@@ -32,7 +32,7 @@ type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
 say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
-generate :: [(ConcreteType, Int, Maybe EVar)] -> MorlocMonad Script
+generate :: [(CType, Int, Maybe EVar)] -> MorlocMonad Script
 generate xs = do
   let names = [pretty name | (_, _, Just name) <- xs]
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
@@ -45,7 +45,7 @@ generate xs = do
       , scriptInclude = []
       }
 
-getFData :: (ConcreteType, Int, EVar) -> MorlocMonad FData
+getFData :: (CType, Int, EVar) -> MorlocMonad FData
 getFData (t, i, n) = do
   config <- MM.ask
   let mid' = pretty i

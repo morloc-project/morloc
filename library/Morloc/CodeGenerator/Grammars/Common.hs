@@ -11,7 +11,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , SExpr(..)
   , SerialMap(..)
   , GMeta(..)
-  , CMeta(..)
   , Argument(..)
   , argName
   , argType
@@ -68,33 +67,26 @@ data SExpr g f c
 -- | Description of the general manifold
 data GMeta = GMeta {
     metaId :: Int
-  , metaGeneralType :: Maybe GeneralType
+  , metaGType :: Maybe GType
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set.Set Property
   , metaConstraints :: Set.Set Constraint
 } deriving (Show, Ord, Eq)
 
--- | Intrinsic description of a language-specific manifold 
-data CMeta = CMeta {
-    metaLang :: Lang
-  , metaType :: ConcreteType
-  , metaModule :: MVar -- useful for debugging, though not currently used
-} deriving (Show, Ord, Eq)
-
 data SerialMap = SerialMap {
-    packers :: Map.Map ConcreteType (Name, Path)
-  , unpackers :: Map.Map ConcreteType (Name, Path)
+    packers :: Map.Map CType (Name, Path)
+  , unpackers :: Map.Map CType (Name, Path)
 } deriving (Show, Ord, Eq)
 
 -- | An argument that is passed to a manifold
 data Argument
-  = PackedArgument EVar ConcreteType (Maybe Name)
+  = PackedArgument EVar CType (Maybe Name)
   -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
   -- argument name (e.g., x), 2) argument type (e.g., double), and 3) packer
   -- name (e.g., packDouble).  The packer name is optional. Some types may not
   -- be serializable. This is OK, so long as they are only used in functions of
   -- the same language.
-  | UnpackedArgument EVar ConcreteType (Maybe Name)
+  | UnpackedArgument EVar CType (Maybe Name)
   -- ^ A native argument with the same parameters as above (except #3 is the
   -- unpacker name, e.g., unpackDouble)
   deriving (Show, Ord, Eq)
@@ -103,14 +95,14 @@ argName :: Argument -> EVar
 argName (PackedArgument v _ _) = v
 argName (UnpackedArgument v _ _) = v
 
-argType :: Argument -> ConcreteType
+argType :: Argument -> CType
 argType (PackedArgument _ t _) = t
 argType (UnpackedArgument _ t _) = t
 
 data Grammar =
   Grammar
     { gLang :: Lang
-    , gSerialType :: ConcreteType
+    , gSerialType :: CType
     , gAssign :: GeneralAssignment -> MDoc
     , gCall :: MDoc -> [MDoc] -> MDoc
     , gFunction :: GeneralFunction -> MDoc
@@ -138,14 +130,14 @@ data Grammar =
     , gTry :: TryDoc -> MDoc
     , gForeignCall :: ForeignCallDoc -> MDoc
     , gSwitch
-        :: (([EVar], GMeta, ConcreteType) -> MDoc)
-        -> (([EVar], GMeta, ConcreteType) -> MDoc)
-        -> [([EVar], GMeta, ConcreteType)]
+        :: (([EVar], GMeta, CType) -> MDoc)
+        -> (([EVar], GMeta, CType) -> MDoc)
+        -> [([EVar], GMeta, CType)]
         -> MDoc
         -> MDoc
         -> MDoc
     , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
-    , gShowType :: ConcreteType -> MDoc
+    , gShowType :: CType -> MDoc
     , gMain :: PoolMain -> MorlocMonad MDoc
     }
 

@@ -188,11 +188,11 @@ instance PrettyType Type where
     encloseSep "{" "}" ", "
       (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
 
-instance PrettyType GeneralType where
-  prettyType = prettyType . unGeneralType
+instance PrettyType GType where
+  prettyType = prettyType . unGType
 
-instance PrettyType ConcreteType where
-  prettyType = prettyType . unConcreteType
+instance PrettyType CType where
+  prettyType = prettyType . unCType
 
 prettyTypeSet :: TypeSet -> Doc AnsiStyle
 prettyTypeSet (TypeSet Nothing ts)
