@@ -433,7 +433,7 @@ realize x = do
       -> MorlocMonad (Maybe (Int, SAnno GMeta One CType))
     realizeAnno depth langMay (SAnno (Many xs) m) = do
       asts <- mapM (\(x, cs) -> mapM (realizeExpr (depth+1) langMay x) cs) xs |>> concat
-      case maximumOnMay (\(s,_,_) -> s) (catMaybes asts) of
+      case minimumOnMay (\(s,_,_) -> s) (catMaybes asts) of
         Just (i, x, c) -> do
           return $ Just (i, SAnno (One (x, c)) m)
         Nothing -> do
@@ -521,7 +521,7 @@ writeAST s = hang 2 . vsep $ ["AST:", describe s] where
   describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
   describe (SAnno (One (x@(AppS f xs), c)) g) =
     hang 2 . vsep $
-      [ descSExpr x
+      [ descSExpr x <+> "<" <> viaShow (langOf' c) <> ">"
       , describe f
       ] ++ map describe xs
   describe (SAnno (One (f@(LamS _ x), c)) g) = do 
@@ -1153,8 +1153,7 @@ descSExpr (UniS) = "UniS"
 descSExpr (VarS v) = "VarS" <+> pretty v
 descSExpr (CallS src)
   =   "CallS"
-  <+> pretty (srcAlias src)
-  <+> parens (pretty (srcAlias src) <> "@" <> viaShow (srcLang src))
+  <+> pretty (srcAlias src) <+> "<" <> viaShow (srcLang src) <> ">"
 descSExpr (ListS _) = "ListS"
 descSExpr (TupleS _) = "TupleS"
 descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
