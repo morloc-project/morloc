@@ -62,7 +62,7 @@ data SExpr g f c
   | StrS MT.Text
   | RecS [(EVar, SAnno g f c)]
   | CallS Source
-  | ForeignS Int Lang
+  | ForeignS Int Lang [EVar]
 
 -- | Description of the general manifold
 data GMeta = GMeta {

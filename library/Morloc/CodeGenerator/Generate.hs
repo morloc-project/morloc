@@ -59,7 +59,7 @@ generate ms = do
     >>= mapM realize  -- [SAnno GMeta One CType]
 
   -- print abstract syntax trees to the console as debugging message
-  say $ line <> indent 2 (vsep (map writeAST ast))
+  say $ line <> indent 2 (vsep (map (writeAST id) ast))
 
   -- build nexus
   -- -----------
@@ -75,9 +75,10 @@ generate ms = do
 
   -- for each language, collect all functions into one "pool"
   pools
+    <- mapM (parameterize smap) ast
     -- Separate the call trees into mono-lingual segments terminated in
     -- primitives or foreign calls.
-    <- mapM segment ast |>> concat
+    >>= mapM segment |>> concat
     -- Gather segments into pools, currently tihs entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
@@ -507,29 +508,26 @@ realize x = do
         (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
           return $ Just (fscore + sum scores + interopCost, AppS f' xs', c) 
         _ -> return Nothing
-    realizeExpr' _ _ (ForeignS _ _) _ = MM.throwError . OtherError $
+    realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . OtherError $
       "ForeignS should not yet appear in an SExpr"
 
 writeAST
-  :: SAnno GMeta One CType -> MDoc
-writeAST s = hang 2 . vsep $ ["AST:", describe s] where
-  describe
-    :: SAnno GMeta One CType
-    -> MDoc
+  :: (a -> CType) -> SAnno GMeta One a -> MDoc
+writeAST getType s = hang 2 . vsep $ ["AST:", describe s] where
   describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
   describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
   describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
   describe (SAnno (One (x@(AppS f xs), c)) g) =
     hang 2 . vsep $
-      [ descSExpr x <+> "<" <> viaShow (langOf' c) <> ">"
+      [ descSExpr x <+> parens (prettyType (getType c))
       , describe f
       ] ++ map describe xs
   describe (SAnno (One (f@(LamS _ x), c)) g) = do 
     hang 2 . vsep $
-      [ name c g <+> descSExpr f
+      [ name (getType c) g <+> descSExpr f
       , describe x
       ] 
-  describe (SAnno (One (x, _)) _) = descSExpr x
+  describe (SAnno (One (x, c)) _) = descSExpr x <+> parens (prettyType (getType c))
 
   name :: CType -> GMeta -> MDoc
   name (viaShow . langOf' -> lang) g =
@@ -542,65 +540,92 @@ writeAST s = hang 2 . vsep $ ["AST:", describe s] where
 -- | This function handles the mechanics of segmentation, not the choice of
 -- languages or the let-optimizations that ultimately determine which
 segment
-  :: SAnno GMeta One CType
-  -> MorlocMonad [SAnno GMeta One CType]
+  :: SAnno GMeta One (CType, [Argument])
+  -> MorlocMonad [SAnno GMeta One (CType, [Argument])]
 segment x@(SAnno (One (_, c)) _) = do
   say $ " ---- entering segment"
-  (x', xs) <- segment' c x
-  say $ line <> indent 2 (vsep (map writeAST (x' : xs)))
+  (x', xs) <- segment' (fst c) x
+  say $ line <> indent 2 (vsep (map (writeAST fst) (x' : xs)))
   return (x' : xs)
   where
     segment' 
       :: CType
-      -> SAnno GMeta One CType
-      -> MorlocMonad (SAnno GMeta One CType, [SAnno GMeta One CType])
+      -> SAnno GMeta One (CType, [Argument])
+      -> MorlocMonad (SAnno GMeta One (CType, [Argument]), [SAnno GMeta One (CType, [Argument])])
     segment' _ x@(SAnno (One (UniS  , _)) _) = return (x, [])
     segment' _ x@(SAnno (One (NumS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (LogS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (StrS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (VarS _, _)) _) = return (x, [])
-    segment' c0 (SAnno (One (ListS xs, c1)) m) = do
-      (xs', rs) <- mapM (segment' c0) xs |>> unzip
-      return (SAnno (One (ListS xs', c1)) m, concat rs)
-    segment' c0 (SAnno (One (TupleS xs, c1)) m) = do
-      (xs', rs) <- mapM (segment' c0) xs |>> unzip
-      return (SAnno (One (TupleS xs', c1)) m, concat rs)
-    segment' c0 (SAnno (One (RecS xs, c1)) m) = do
-      (vals, rs) <- mapM (segment' c0) (map snd xs) |>> unzip
-      return (SAnno (One (RecS (zip (map fst xs) vals), c1)) m, concat rs)
-    segment' c0 (SAnno (One (LamS vs x, c1)) m)
-      | langOf' c0 == langOf' c1 = do
-          (x', rs) <- segment' c1 x
+    segment' _ (SAnno (One (ListS xs, c)) m) = do
+      t <- listType (fst c)
+      (xs', rs) <- mapM (segment' t) xs |>> unzip
+      return (SAnno (One (ListS xs', c)) m, concat rs)
+      where
+        listType :: CType -> MorlocMonad CType
+        listType (CType (ArrT (TV _ "List") [t])) = return (CType t)
+        listType _ = MM.throwError . OtherError $ "Expected List type"
+    segment' _ (SAnno (One (TupleS xs, c)) m) = do
+      ts <- tupleTypes (fst c)
+      (xs', rs) <- zipWithM segment' ts xs |>> unzip
+      return (SAnno (One (TupleS xs', c)) m, concat rs)
+      where
+        tupleTypes :: CType -> MorlocMonad [CType]
+        tupleTypes (CType (ArrT (TV _ "Tuple") ts)) = return (map CType ts)
+        tupleTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
+    segment' _ (SAnno (One (RecS xs, c)) m) = do
+      ts <- recTypes (fst c)
+      (vals, rs) <- zipWithM segment' ts (map snd xs) |>> unzip
+      return (SAnno (One (RecS (zip (map fst xs) vals), c)) m, concat rs)
+      where
+        recTypes :: CType -> MorlocMonad [CType]
+        recTypes (CType (RecT entries)) = return (map (CType . snd) entries)
+        recTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
+    segment' t0 (SAnno (One (LamS vs x, c1)) m)
+      | langOf' t0 == langOf' (fst c1) = do
+          t <- lamType (fst c1)
+          (x', rs) <- segment' t x
           return (SAnno (One (LamS vs x', c1)) m, rs)
       | otherwise = MM.throwError . OtherError $
         "Foreign lambda's are not currently supported (coming soon)"
-    segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS v, c2)) _) xs, c1)) m) = do
-      (x', xrs) <- segment' c0 x
-      (xs', xsrss) <- mapM (segment' c0) xs |>> unzip
-      case langOf' c0 == langOf' c2 of
-        True -> return (SAnno (One (AppS x' xs', c1)) m, xrs ++ concat xsrss)
+      where
+        lamType :: CType -> MorlocMonad CType
+        lamType (CType (FunT _ t)) = return (CType t)
+    segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
+      (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
+      case langOf' c0 == langOf' (fst c2) of
+        True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
-          -- generate a new unique ID for the foreign call
-          i <- MM.getCounter
-          let foreignGMeta = m { metaId = i }
-          -- the top-level expression in called foreign segment
-          return
-            ( -- the terminal manifold in L1 in this segment, same type as the AppS
-              SAnno (One (ForeignS (metaId m) (langOf' c2), c1)) m
-              -- the called segment in L2
-            , SAnno (One (CallS v, c2)) foreignGMeta : (xrs ++ concat xsrss)
-            )
-    segment' c0 x@(SAnno (One (CallS src, c1)) _) = return (x, [])
+          -- argument names shared between segments
+          let vs' = map argName (snd c2)
+          -- foreign function argument type
+          let lamType = untypeArgs (map argType (snd c2) ++ [fst c1])
+          let foreignCMeta = (c0, snd c1)
+          -- let meta for each produced expression
+          -- all three should have the same metaId
+          let foreignMeta = m
+          let lamMeta = m2 -- FIXME - need to adjust the general type
+          let appMeta = m2 -- FIXME - need to adjust the general type
+          -- final three
+          -- the terminal manifold in L1 in this segment, same type as the AppS
+          let foreignCall = SAnno (One (ForeignS (metaId m) (langOf' (fst c2)) vs', foreignCMeta)) foreignMeta
+          let foreignApp = SAnno (One (AppS x xs', c1)) appMeta
+          let foreignLam = SAnno (One (LamS vs' foreignApp, (lamType, []))) lamMeta
+          return (foreignCall , foreignLam : concat xsrss)
+    segment' _ x@(SAnno (One (CallS _, _)) _) = return (x, [])
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool
-  :: [SAnno GMeta One CType]
-  -> MorlocMonad [(Lang, [SAnno GMeta One CType])]
-pool = return . groupSort . map (\s@(SAnno (One (_, t)) _) -> (langOf' t, s))
+  :: [SAnno GMeta One (CType, [Argument])]
+  -> MorlocMonad [(Lang, [SAnno GMeta One (CType, [Argument])])]
+pool = return . groupSort . map (\s@(SAnno (One (_, (t, _))) _) -> (langOf' t, s))
 
 
-encode :: SerialMap -> (Lang, [SAnno GMeta One CType]) -> MorlocMonad Script
+encode
+  :: SerialMap
+  -> (Lang, [SAnno GMeta One (CType, [Argument])])
+  -> MorlocMonad Script
 encode h (lang, xs) = do
   state <- MM.get
 
@@ -611,20 +636,17 @@ encode h (lang, xs) = do
   let srcs = findSources h xs
   srcdocs <- mapM (encodeSource g) srcs
 
-  -- determine where serialization occurs, add argument list to tree
-  serializedTree <- mapM (parameterize h) xs
-
   -- translate each node in the AST to code
-  codeTree <- mapM (codify h g) serializedTree
+  codeTree <- mapM (codify h g) xs
   let manifolds = conmap gatherManifolds codeTree
-      signatures = conmap (encodeSignatures g) serializedTree
+      signatures = conmap (encodeSignatures g) xs
 
   -- generate final pool code
   code <- gMain g $ PoolMain
     { pmSources = srcdocs
     , pmSignatures = signatures
     , pmPoolManifolds = manifolds
-    , pmDispatchManifold = makeDispatchBuilder h g serializedTree
+    , pmDispatchManifold = makeDispatchBuilder h g xs
     }
 
   return $ Script
@@ -697,9 +719,10 @@ parameterize' h args (SAnno (One (AppS x xs, c)) m) = do
   xs' <- mapM (parameterize' h args) xs
   let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
   return $ SAnno (One (AppS x' xs', (c, args'))) m
-parameterize' _ args (SAnno (One (ForeignS i lang, c)) m) = do
-  let args' = map pack args
-  return $ SAnno (One (ForeignS i lang, (c, args'))) m
+parameterize' _ args (SAnno (One (ForeignS i lang vs, c)) m) =
+  case sequence $ map listToMaybe [[r | r <- args, argName r == v] | v <- vs] of
+    Nothing -> MM.throwError . OtherError $ "Bad argument sent to ForeignS"
+    Just args' -> return $ SAnno (One (ForeignS i lang vs, (c, args'))) m
 
 
 makeArgument h v t = case selectFunction t Unpack h of
@@ -713,7 +736,6 @@ gatherManifolds x = catMaybes . unpackSAnno f $ x
   where
     f :: SExpr g One MDoc -> g -> MDoc -> Maybe MDoc
     f (AppS _ _) _ d = Just d
-    f (ForeignS _ _) _ d = Just d
     f _ _ _ = Nothing
 
 
@@ -721,16 +743,16 @@ encodeSource :: Grammar -> Path -> MorlocMonad MDoc
 encodeSource g path = gImport g <$> pure "" <*> (gPrepImport g) path
 
 
-findSources :: SerialMap -> [SAnno g One CType] -> [Path]
+findSources :: SerialMap -> [SAnno g One (CType, [Argument])] -> [Path]
 findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
   where
-    f :: SExpr g One CType -> g -> CType -> [Path]
-    f (CallS src) _ c = catMaybes
+    f :: SExpr g One (CType, [Argument]) -> g -> (CType, [Argument]) -> [Path]
+    f (CallS src) _ (c, _) = catMaybes
       [ srcPath src
       , fmap snd $ selectFunction c Pack h
       , fmap snd $ selectFunction c Unpack h
       ]
-    f _ _ c = catMaybes
+    f _ _ (c, _) = catMaybes
       [ fmap snd $ selectFunction c Pack h
       , fmap snd $ selectFunction c Unpack h
       ]
@@ -750,7 +772,7 @@ encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
       -> (CType, [Argument])
       -> Maybe (Maybe GMeta, GMeta, CType, [Argument])
     f (AppS (SAnno _ gFun) _) m (c, args) = Just (Just gFun, m, c, args)
-    f (ForeignS _ _) m (c, args) = Just (Nothing, m, c, args)
+    f (ForeignS _ _ _) m (c, args) = Just (Nothing, m, c, args)
     f _ _ _ = Nothing
 
     -- make the signature for an exported function that is directly sourced
@@ -875,7 +897,7 @@ codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m) = do
   return (SAnno (One (LamS vs x', (c, args, mdoc))) m)
 
 -- | ForeignS Int Lang
-codify' _ h g (SAnno (One (ForeignS mid lang, (t, args))) m) = do
+codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   config <- MM.ask
   args' <- mapM cliArg args
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
@@ -890,7 +912,7 @@ codify' _ h g (SAnno (One (ForeignS mid lang, (t, args))) m) = do
         , fcdCall = poolBuilder exe (pretty mid)
         , fcdFile = pretty $ Lang.makeSourceName (langOf' t) "pool"
         }
-  return $ SAnno (One (ForeignS mid lang, (t, args, mdoc))) m
+  return $ SAnno (One (ForeignS mid lang vs, (t, args, mdoc))) m
   where
     cliArg :: Argument -> MorlocMonad MDoc
     cliArg (PackedArgument v _ _) = return $ pretty v
@@ -1007,7 +1029,7 @@ prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
   "Function passing not implemented yet ..."
-prepInput g _ _ (SAnno (One (ForeignS _ _, (_, _, d))) _) = return (d, Nothing)
+prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
   let varname = makeArgumentName mid
       mname = makeManifoldName m
@@ -1087,6 +1109,13 @@ typeArgs t = map ctype (typeArgs' (unCType t))
       "unexpected qualified type, this is probably a the generator, not the typechecker or Morloc code (" <> prettyType t <> ")"
     typeArgs' t = [t]
 
+untypeArgs :: [CType] -> CType
+untypeArgs = ctype . untypeArgs' . map unCType
+  where
+    untypeArgs' [] = error "empty type" -- FIXME: I should resurrect the unit type
+    untypeArgs' [t] = t
+    untypeArgs' (t:ts) = FunT t (untypeArgs' ts)
+
 makeManifoldName :: GMeta -> MDoc
 makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
 
@@ -1146,7 +1175,7 @@ mapC f (SAnno (One (UniS, c)) g) = SAnno (One (UniS, f c)) g
 mapC f (SAnno (One (NumS x, c)) g) = SAnno (One (NumS x, f c)) g
 mapC f (SAnno (One (LogS x, c)) g) = SAnno (One (LogS x, f c)) g
 mapC f (SAnno (One (StrS x, c)) g) = SAnno (One (StrS x, f c)) g
-mapC f (SAnno (One (ForeignS i lang, c)) g) = SAnno (One (ForeignS i lang, f c)) g
+mapC f (SAnno (One (ForeignS i lang vs, c)) g) = SAnno (One (ForeignS i lang vs, f c)) g
 
 descSExpr :: SExpr g f c -> MDoc
 descSExpr (UniS) = "UniS"
@@ -1162,7 +1191,8 @@ descSExpr (NumS _) = "NumS"
 descSExpr (LogS _) = "LogS"
 descSExpr (StrS _) = "StrS"
 descSExpr (RecS _) = "RecS"
-descSExpr (ForeignS i lang) = "ForeignS" <+> pretty i <+> viaShow lang
+descSExpr (ForeignS i lang vs) =
+  parens (hsep ("ForeignS" : map pretty vs)) <+> pretty i <+> viaShow lang
 
 concreteSignature :: Maybe EVar -> CType -> MDoc
 concreteSignature n (CType t)
