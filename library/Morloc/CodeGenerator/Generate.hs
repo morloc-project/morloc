@@ -597,20 +597,21 @@ segment x@(SAnno (One (_, c)) _) = do
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
           -- argument names shared between segments
-          let vs' = map argName (snd c2)
+          let vs' = map argName (snd c1)
           -- foreign function argument type
-          let lamType = untypeArgs (map argType (snd c2) ++ [fst c1])
-          let foreignCMeta = (c0, snd c1)
+              lamType = untypeArgs (map argType (snd c2) ++ [fst c1])
+              foreignCMeta = (c0, snd c1)
+              appCMeta = (fst c1, map packArgument (snd c1))
           -- let meta for each produced expression
           -- all three should have the same metaId
-          let foreignMeta = m
-          let lamMeta = m2 -- FIXME - need to adjust the general type
-          let appMeta = m2 -- FIXME - need to adjust the general type
+              foreignMeta = m
+              lamMeta = m2 {metaId = metaId m} -- FIXME - need to adjust the general type
+              appMeta = m2 {metaId = metaId m} -- FIXME - need to adjust the general type
           -- final three
           -- the terminal manifold in L1 in this segment, same type as the AppS
-          let foreignCall = SAnno (One (ForeignS (metaId m) (langOf' (fst c2)) vs', foreignCMeta)) foreignMeta
-          let foreignApp = SAnno (One (AppS x xs', c1)) appMeta
-          let foreignLam = SAnno (One (LamS vs' foreignApp, (lamType, []))) lamMeta
+              foreignCall = SAnno (One (ForeignS (metaId m) (langOf' (fst c2)) vs', foreignCMeta)) foreignMeta
+              foreignApp = SAnno (One (AppS x xs', c1)) appMeta
+              foreignLam = SAnno (One (LamS vs' foreignApp, (lamType, []))) lamMeta
           return (foreignCall , foreignLam : concat xsrss)
     segment' _ x@(SAnno (One (CallS _, _)) _) = return (x, [])
 
@@ -900,18 +901,23 @@ codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m) = do
 codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   config <- MM.ask
   args' <- mapM cliArg args
+  packer <- case selectFunction t Unpack h of
+    (Just (name, _)) -> return name
+    _ -> MM.throwError . OtherError $ "Could not find packer for foreign call"
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
     Nothing -> MM.throwError . OtherError $ "ah for fuck sake!!!"
     (Just poolBuilder) -> do
       let exe = pretty $ Lang.makeExecutableName lang "pool"
-      return . gForeignCall g $ ForeignCallDoc
-        { fcdForeignPool = pretty $ Lang.makeSourceName lang "pool"
-        , fcdForeignExe = exe
-        , fcdMid = pretty mid
-        , fcdArgs = args'
-        , fcdCall = poolBuilder exe (pretty mid)
-        , fcdFile = pretty $ Lang.makeSourceName (langOf' t) "pool"
-        }
+      return $ (gCall g) (pretty packer)
+        [ gForeignCall g $ ForeignCallDoc
+            { fcdForeignPool = pretty $ Lang.makeSourceName lang "pool"
+            , fcdForeignExe = exe
+            , fcdMid = pretty mid
+            , fcdArgs = args'
+            , fcdCall = poolBuilder exe (pretty mid)
+            , fcdFile = pretty $ Lang.makeSourceName (langOf' t) "pool"
+            }
+        ]
   return $ SAnno (One (ForeignS mid lang vs, (t, args, mdoc))) m
   where
     cliArg :: Argument -> MorlocMonad MDoc
@@ -1080,7 +1086,12 @@ selectFunction :: CType -> Property -> SerialMap -> Maybe (Name, Path)
 selectFunction t p h =
   case mostSpecificSubtypes (typeOf t) (map typeOf (Map.keys hmap)) of
     [] -> Nothing
-    (x:_) -> Map.lookup (CType x) hmap
+    -- FIXME: I should not have to filter here, the mostSpecificSubtypes
+    -- function should NEVER return a type from a different language. However,
+    -- it currently does. This needs to be fixed.
+    xs -> case filter (\x -> langOf' x == langOf' t) xs of
+      [] -> Nothing
+      (x:_) -> Map.lookup (CType x) hmap
     where
       hmap = if p == Pack then packers h else unpackers h
 

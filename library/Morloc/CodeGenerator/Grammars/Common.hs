@@ -14,6 +14,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , Argument(..)
   , argName
   , argType
+  , unpackArgument
+  , packArgument
   , One(..)
   , Many(..)
   , Grammar(..)
@@ -98,6 +100,14 @@ argName (UnpackedArgument v _ _) = v
 argType :: Argument -> CType
 argType (PackedArgument _ t _) = t
 argType (UnpackedArgument _ t _) = t
+
+packArgument :: Argument -> Argument
+packArgument (UnpackedArgument v t n) = PackedArgument v t n
+packArgument x = x
+
+unpackArgument :: Argument -> Argument
+unpackArgument (PackedArgument v t n) = UnpackedArgument v t n
+unpackArgument x = x
 
 data Grammar =
   Grammar
