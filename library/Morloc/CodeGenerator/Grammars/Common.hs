@@ -15,7 +15,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , argName
   , argType
   , unpackArgument
-  , packArgument
   , One(..)
   , Many(..)
   , Grammar(..)
@@ -102,14 +101,10 @@ argName (PackedArgument v _ _) = v
 argName (UnpackedArgument v _ _) = v
 argName (PassThroughArgument v) = v
 
-argType :: Argument -> CType
-argType (PackedArgument _ t _) = t
-argType (UnpackedArgument _ t _) = t
-argType (PassThroughArgument _) = error "Cannot get type for PassThroughArgument"
-
-packArgument :: Argument -> Argument
-packArgument (UnpackedArgument v t n) = PackedArgument v t n
-packArgument x = x
+argType :: Argument -> Maybe CType
+argType (PackedArgument _ t _) = Just t
+argType (UnpackedArgument _ t _) = Just t
+argType (PassThroughArgument _) = Nothing
 
 unpackArgument :: Argument -> Argument
 unpackArgument (PackedArgument v t n) = UnpackedArgument v t n

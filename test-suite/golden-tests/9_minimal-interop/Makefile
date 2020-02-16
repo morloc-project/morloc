@@ -6,8 +6,8 @@
 
 all:
 	rm -f obs.txt
-	morloc make partial-01.loc
-	./nexus.pl foo 16 > obs.txt
+	morloc make foo.loc
+	./nexus.pl r2cpp 5 > obs.txt
 
 clean:
 	rm -f nexus* pool*

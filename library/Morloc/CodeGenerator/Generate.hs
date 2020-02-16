@@ -59,7 +59,7 @@ generate ms = do
     >>= mapM realize  -- [SAnno GMeta One CType]
 
   -- print abstract syntax trees to the console as debugging message
-  say $ line <> indent 2 (vsep (map (writeAST id) ast))
+  say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
 
   -- build nexus
   -- -----------
@@ -78,7 +78,7 @@ generate ms = do
     <- mapM (parameterize smap) ast
     -- Separate the call trees into mono-lingual segments terminated in
     -- primitives or foreign calls.
-    >>= mapM segment |>> concat
+    >>= mapM (segment smap) |>> concat
     -- Gather segments into pools, currently tihs entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
@@ -512,40 +512,46 @@ realize x = do
       "ForeignS should not yet appear in an SExpr"
 
 writeAST
-  :: (a -> CType) -> SAnno GMeta One a -> MDoc
-writeAST getType s = hang 2 . vsep $ ["AST:", describe s] where
-  describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
-  describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
-  describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
-  describe (SAnno (One (x@(AppS f xs), c)) g) =
-    hang 2 . vsep $
-      [ descSExpr x <+> parens (prettyType (getType c))
-      , describe f
-      ] ++ map describe xs
-  describe (SAnno (One (f@(LamS _ x), c)) g) = do 
-    hang 2 . vsep $
-      [ name (getType c) g <+> descSExpr f
-      , describe x
-      ] 
-  describe (SAnno (One (x, c)) _) = descSExpr x <+> parens (prettyType (getType c))
+  :: (a -> CType) -> Maybe (a -> MDoc) -> SAnno GMeta One a -> MDoc
+writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
+  where
+    addExtra x = case extra of
+      (Just f) -> " " <> f x
+      Nothing -> ""
+  
+    describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
+    describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
+    describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
+    describe (SAnno (One (x@(AppS f xs), c)) g) =
+      hang 2 . vsep $
+        [ descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
+        , describe f
+        ] ++ map describe xs
+    describe (SAnno (One (f@(LamS _ x), c)) g) = do 
+      hang 2 . vsep $
+        [ name (getType c) g <+> descSExpr f <+> parens (prettyType (getType c)) <> addExtra c
+        , describe x
+        ] 
+    describe (SAnno (One (x, c)) _) = descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
 
-  name :: CType -> GMeta -> MDoc
-  name (viaShow . langOf' -> lang) g =
-    maybe
-      ("_" <+> lang <+> "::")
-      (\x -> pretty x <+> lang <+> "::")
-      (metaName g)
+    name :: CType -> GMeta -> MDoc
+    name (viaShow . langOf' -> lang) g =
+      maybe
+        ("_" <+> lang <+> "::")
+        (\x -> pretty x <+> lang <+> "::")
+        (metaName g)
 
 
 -- | This function handles the mechanics of segmentation, not the choice of
 -- languages or the let-optimizations that ultimately determine which
 segment
-  :: SAnno GMeta One (CType, [Argument])
+  :: SerialMap
+  -> SAnno GMeta One (CType, [Argument])
   -> MorlocMonad [SAnno GMeta One (CType, [Argument])]
-segment x@(SAnno (One (_, c)) _) = do
+segment h x@(SAnno (One (_, c)) _) = do
   say $ " ---- entering segment"
   (x', xs) <- segment' (fst c) x
-  say $ line <> indent 2 (vsep (map (writeAST fst) (x' : xs)))
+  say $ line <> indent 2 (vsep (map (writeAST fst (Just (viaShow . snd))) (x' : xs)))
   return (x' : xs)
   where
     segment' 
@@ -587,22 +593,25 @@ segment x@(SAnno (One (_, c)) _) = do
           return (SAnno (One (LamS vs x', c1)) m, rs)
       | otherwise = MM.throwError . OtherError $
         "Foreign lambda's are not currently supported (coming soon)"
-
     segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
       (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
       case langOf' c0 == langOf' (fst c2) of
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
-          
-          lamType <- case untypeArgs (map argType (snd c2) ++ [fst c1]) of
-            (Just t) -> return t
-            Nothing -> MM.throwError . OtherError $ "In segment' AppS/CallS - bad type"
 
+          let lamArgs = typeArgs (fst c2)
+              lamType = fst c2
           -- argument names shared between segments
-          let vs' = map argName (snd c1)
+              vs' = map argName (snd c1)
+
+          foreignArgs <- zipWithM (makeArgument h) vs' lamArgs
+
+          -- FIXME: soooooo ugly ...
+          let (SAnno (One (AppS x' xs'', c1'@(_, lamRs'))) _) = mapC (reparameterize foreignArgs) (SAnno (One (AppS x xs', c1)) m)
+
           -- foreign function argument type
-              foreignCMeta = (c0, snd c1)
-              appCMeta = (fst c1, map packArgument (snd c1))
+          let foreignCMeta = (c0, snd c1)
+              appCMeta = (fst c1, foreignArgs)
           -- let meta for each produced expression
           -- all three should have the same metaId
               foreignMeta = m
@@ -611,10 +620,26 @@ segment x@(SAnno (One (_, c)) _) = do
           -- final three
           -- the terminal manifold in L1 in this segment, same type as the AppS
               foreignCall = SAnno (One (ForeignS (metaId m) (langOf' (fst c2)) vs', foreignCMeta)) foreignMeta
-              foreignApp = SAnno (One (AppS x xs', c1)) appMeta
-              foreignLam = SAnno (One (LamS vs' foreignApp, (lamType, []))) lamMeta
+              foreignApp = SAnno (One (AppS x' xs'', c1')) appMeta
+              foreignLam = SAnno (One (LamS vs' foreignApp, (lamType, lamRs'))) lamMeta
           return (foreignCall , foreignLam : concat xsrss)
     segment' _ x@(SAnno (One (CallS _, _)) _) = return (x, [])
+
+-- Now that the AST is segmented by language, we can resolve passed-through
+-- arguments where possible.
+reparameterize
+  :: [Argument]
+  -> (CType, [Argument])
+  -> (CType, [Argument])
+reparameterize args0 (t, args1) = (t, map f args1)
+  where
+    f :: Argument -> Argument
+    f r@(PackedArgument _ _ _) = r
+    f r@(UnpackedArgument _ _ _) = r
+    f r@(PassThroughArgument v) =
+      case [r' | r' <- args0, argName r' == v] of
+        (r':_) -> r'
+        _ -> r
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
@@ -1148,12 +1173,29 @@ typeArgs t = map (fmap ctype) (typeArgs' [] (unCType t))
       | otherwise = [Just t]
     typeArgs' unsolved t = [Just t]
 
-untypeArgs :: [CType] -> Maybe CType
-untypeArgs = fmap ctype . untypeArgs' . map unCType
+untypeArgs :: [Maybe CType] -> CType
+untypeArgs xs = ctype . untypeArgs' . map (fmap unCType) $ xs
   where
-    untypeArgs' [] = Nothing
-    untypeArgs' [t] = Just t
-    untypeArgs' (t1:ts) = FunT <$> pure t1 <*> untypeArgs' ts
+    used = [v | (Just (CType (VarT (TV _ v)))) <- xs]
+    vs = filter (\x -> not (elem x used))
+       $ [1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack
+
+    lang = langOf . head . catMaybes $ xs
+
+    untypeArgs' :: [Maybe Type] -> Type 
+    untypeArgs' xs = case untypeArgs'' vs xs of
+      (vs', _, t) -> generalize vs' t 
+
+    generalize :: [MT.Text] -> Type -> Type
+    generalize [] t = t
+    generalize (v':vs') t = Forall (TV lang v') (generalize vs' t)
+
+    untypeArgs'' _ [] = error "empty type"
+    untypeArgs'' vs [Just t] = ([], vs, t)
+    untypeArgs'' (v':vs') [Nothing] = ([v'], vs', VarT (TV lang v'))
+    untypeArgs'' vs1 (t1:ts) = case untypeArgs'' vs1 [t1] of
+      (v1', vs2, t1') -> case untypeArgs'' vs2 ts of
+        (v2', vs3, t2') -> (v1' ++ v2', vs3, FunT t1' t2')
 
 makeManifoldName :: GMeta -> MDoc
 makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
