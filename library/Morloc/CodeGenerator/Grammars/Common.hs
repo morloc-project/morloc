@@ -91,15 +91,21 @@ data Argument
   | UnpackedArgument EVar CType (Maybe Name)
   -- ^ A native argument with the same parameters as above (except #3 is the
   -- unpacker name, e.g., unpackDouble)
+  | PassThroughArgument EVar
+  -- ^ A serialized argument that is untyped in the current language. It cannot
+  -- be unpacked, but will be passed eventually to a foreign argument where it
+  -- does have a concrete type.
   deriving (Show, Ord, Eq)
 
 argName :: Argument -> EVar
 argName (PackedArgument v _ _) = v
 argName (UnpackedArgument v _ _) = v
+argName (PassThroughArgument v) = v
 
 argType :: Argument -> CType
 argType (PackedArgument _ t _) = t
 argType (UnpackedArgument _ t _) = t
+argType (PassThroughArgument _) = error "Cannot get type for PassThroughArgument"
 
 packArgument :: Argument -> Argument
 packArgument (UnpackedArgument v t n) = PackedArgument v t n

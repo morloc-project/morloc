@@ -583,23 +583,24 @@ segment x@(SAnno (One (_, c)) _) = do
         recTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
     segment' t0 (SAnno (One (LamS vs x, c1)) m)
       | langOf' t0 == langOf' (fst c1) = do
-          t <- lamType (fst c1)
-          (x', rs) <- segment' t x
+          (x', rs) <- segment' (fromJust . last . typeArgs . fst $ c1) x
           return (SAnno (One (LamS vs x', c1)) m, rs)
       | otherwise = MM.throwError . OtherError $
         "Foreign lambda's are not currently supported (coming soon)"
-      where
-        lamType :: CType -> MorlocMonad CType
-        lamType (CType (FunT _ t)) = return (CType t)
+
     segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
       (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
       case langOf' c0 == langOf' (fst c2) of
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
+          
+          lamType <- case untypeArgs (map argType (snd c2) ++ [fst c1]) of
+            (Just t) -> return t
+            Nothing -> MM.throwError . OtherError $ "In segment' AppS/CallS - bad type"
+
           -- argument names shared between segments
           let vs' = map argName (snd c1)
           -- foreign function argument type
-              lamType = untypeArgs (map argType (snd c2) ++ [fst c1])
               foreignCMeta = (c0, snd c1)
               appCMeta = (fst c1, map packArgument (snd c1))
           -- let meta for each produced expression
@@ -670,9 +671,12 @@ parameterize h (SAnno (One (LamS vs x, t)) m) = do
   x' <- parameterize' h args0 x
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize h (SAnno (One (CallS src, t)) m) = do
-  let ts = init $ typeArgs t
-      vs = map EVar ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
-  args0 <- zipWithM (makeArgument h) vs ts
+  ts <- case sequence (typeArgs t) of
+    (Just ts') -> return (init ts')
+    Nothing -> MM.throwError . OtherError . render $
+      "Unexpected type in parameterize CallS:" <+> prettyType t
+  let vs = map EVar ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
+  args0 <- zipWithM (makeArgument h) vs (map Just ts)
   return $ SAnno (One (CallS src, (t, args0))) m
 parameterize h x = parameterize' h [] x
 
@@ -712,8 +716,8 @@ parameterize' h args (SAnno (One (RecS entries, c)) m) = do
   let args' = unique . concat . map sannoSnd $ vs'
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' h _ (SAnno (One (LamS vs x, c)) m) = do
-  args' <- zipWithM (makeArgument h) vs (typeArgs c)
-  x' <- parameterize' h args' x
+  args0 <- zipWithM (makeArgument h) vs (typeArgs c)
+  x' <- parameterize' h args0 x
   return $ SAnno (One (LamS vs x', (c, []))) m 
 parameterize' h args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' h args x
@@ -725,11 +729,12 @@ parameterize' _ args (SAnno (One (ForeignS i lang vs, c)) m) =
     Nothing -> MM.throwError . OtherError $ "Bad argument sent to ForeignS"
     Just args' -> return $ SAnno (One (ForeignS i lang vs, (c, args'))) m
 
-
-makeArgument h v t = case selectFunction t Unpack h of
+makeArgument :: SerialMap -> EVar -> Maybe CType -> MorlocMonad Argument 
+makeArgument h v (Just t) = case selectFunction t Unpack h of
   Nothing -> MM.throwError . OtherError . render $
     "No packer found for type" <+> parens (prettyType t)
   (Just (name, _)) -> return $ PackedArgument v t (Just name)
+makeArgument _ v Nothing = return $ PassThroughArgument v
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
 gatherManifolds (SAnno (One (CallS _, d)) _) = [d]
@@ -788,14 +793,15 @@ makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
   { gfComments = maybeToList $
       fmap (\(GType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
            (gFun >>= metaGType)
-  , gfReturnType = Just . gShowType g . last . typeArgs $ c
+  , gfReturnType = Just . gShowType g . last . fromJust . sequence . typeArgs $ c
   , gfName = makeManifoldName m
   , gfArgs = map (makeArg' g) args
   , gfBody = ""
   }
 
 makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
-makeArg' g (PackedArgument v t _) = (Just ((gShowType g) (gSerialType g)), pretty v)
+makeArg' g (PackedArgument v _ _)  = (Just ((gShowType g) (gSerialType g)), pretty v)
+makeArg' g (PassThroughArgument v) = (Just ((gShowType g) (gSerialType g)), pretty v)
 makeArg' g (UnpackedArgument v t _) = (Just ((gShowType g) t), pretty v)
 
 
@@ -835,7 +841,7 @@ makeDispatchBuilder h g xs =
       | (length vs) > 0 = Just (vs, m, c)
       | otherwise = Nothing
     getPoolCall (SAnno (One (CallS _, (c, args))) m)
-      | (length args) > 0 = Just (map argName args, m, last . typeArgs $ c)
+      | (length args) > 0 = Just (map argName args, m, last . fromJust . sequence . typeArgs $ c)
       | otherwise = Nothing
     getPoolCall _ = Nothing
 
@@ -903,7 +909,8 @@ codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   args' <- mapM cliArg args
   packer <- case selectFunction t Unpack h of
     (Just (name, _)) -> return name
-    _ -> MM.throwError . OtherError $ "Could not find packer for foreign call"
+    _ -> MM.throwError . OtherError . render $
+      "Could not find unpacker for foreign call of type:" <+> prettyType t
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
     Nothing -> MM.throwError . OtherError $ "ah for fuck sake!!!"
     (Just poolBuilder) -> do
@@ -922,6 +929,7 @@ codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   where
     cliArg :: Argument -> MorlocMonad MDoc
     cliArg (PackedArgument v _ _) = return $ pretty v
+    cliArg (PassThroughArgument v) = return $ pretty v
     cliArg (UnpackedArgument v _ (Just unpacker)) = return $ (gCall g) (pretty unpacker) [pretty v]
     cliArg (UnpackedArgument v _ Nothing) = MM.throwError . OtherError $
       "In cliArg, no unpacker found"
@@ -936,8 +944,10 @@ codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
   return $ SAnno (One (CallS src, (c, args, pretty name))) m
 
 codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
-  let otype = last (typeArgs ftype) -- output type
-      itypes = init (typeArgs ftype) -- input types
+  (otype, itypes) <- case sequence (typeArgs ftype) of
+    (Just ts) -> return (last ts, init ts)
+    Nothing -> MM.throwError . OtherError . render $
+      "Unexpected type type codify':" <+> prettyType ftype
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
   args' <- mapM (prepArg g) args
   let name = unName (srcName src)
@@ -977,6 +987,8 @@ codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
       "Don't panic"
     simplePrepInput _ (_, PackedArgument _ _ Nothing) = MM.throwError . OtherError $
       "Oh shit, panic panic PANIC!!!"
+    simplePrepInput _ (_, PassThroughArgument _) = MM.throwError . OtherError $
+      "This might be a problem, or not, or whatever"
 
 -- | AppS (SAnno a) [SAnno a]
 codify' _ h g (SAnno (One (AppS f xs, (c, args))) m) = do
@@ -1037,10 +1049,14 @@ prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
   "Function passing not implemented yet ..."
 prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
+  gaType' <- case sequence (typeArgs t) of
+    (Just ts) -> return . Just . gShowType g . last $ ts
+    Nothing -> MM.throwError . OtherError . render $
+      "Unexpected type in prepInput:" <+> prettyType t
   let varname = makeArgumentName mid
       mname = makeManifoldName m
       ass = (gAssign g) $ GeneralAssignment
-        { gaType = Just . gShowType g . last . typeArgs $ t
+        { gaType = gaType'
         , gaName = varname
         , gaValue = (gCall g) mname (map (pretty . argName) args)
         , gaArg = Nothing
@@ -1061,6 +1077,8 @@ prepInput g rs mid (SAnno (One (VarS v, (t, _, d))) m) = do
           , gaArg = Nothing
           }
        )
+    (Just (PassThroughArgument v)) -> MM.throwError . OtherError . render $
+      "Compiler bug: a PassThroughArgument cannot be an input"
     (Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
       "No unpacker found"
     -- the argument is used in the wrapped function, but is not serialized
@@ -1071,10 +1089,8 @@ prepInput g rs mid (SAnno (One (VarS v, (t, _, d))) m) = do
 -- either a native construct or will be passed on in serialized form.
 prepArg :: Grammar -> Argument -> MorlocMonad (Maybe MDoc, MDoc)
 prepArg g (PackedArgument v t _) = return (Just . gShowType g $ gSerialType g, pretty v)
+prepArg g (PassThroughArgument v) = return (Just . gShowType g $ gSerialType g, pretty v)
 prepArg g (UnpackedArgument v t _) = return (Just . gShowType g $ t, pretty v)
-prepArg _ _ = MM.throwError . OtherError $ "Something is stinky in the packers"
-
-
 
 -------- Utility and lookup functions ----------------------------------------
 
@@ -1112,20 +1128,32 @@ getGType ts = case [GType t | t <- ts, langOf' t == MorlocLang] of
 getCTypes :: [Type] -> [CType]
 getCTypes ts = [CType t | t <- ts, isJust (langOf t)]
 
-typeArgs :: CType -> [CType]
-typeArgs t = map ctype (typeArgs' (unCType t))
+-- resolves a function into a list of types, for example:
+-- ((Num->String)->[Num]->[String]) would resolve to the list
+-- [(Num->String),[Num],[String]]. Any unsolved variables (i.e., that are still
+-- universally qualified) will be stored as Nothing. Such variables will always
+-- be passthrough arguments that have unknown type in the current language, but
+-- will be passed on to one where they are defined.
+typeArgs :: CType -> [Maybe CType]
+typeArgs t = map (fmap ctype) (typeArgs' [] (unCType t))
   where
-    typeArgs' (FunT t1 t2) = t1 : typeArgs' t2
-    typeArgs' t@(Forall _ _) = error . MT.unpack . render $
-      "unexpected qualified type, this is probably a the generator, not the typechecker or Morloc code (" <> prettyType t <> ")"
-    typeArgs' t = [t]
+    -- typeArgs' :: [TVar] -> Type -> [Maybe Type]
+    typeArgs' unsolved (FunT t1@(VarT v) t2)
+      | elem v unsolved = Nothing : typeArgs' unsolved t2
+      | otherwise = Just t1 : typeArgs' unsolved t2
+    typeArgs' unsolved (FunT t1 t2) = Just t1 : typeArgs' unsolved t2
+    typeArgs' unsolved (Forall v t) = typeArgs' (v:unsolved) t
+    typeArgs' unsolved t@(VarT v)
+      | elem v unsolved = [Nothing]
+      | otherwise = [Just t]
+    typeArgs' unsolved t = [Just t]
 
-untypeArgs :: [CType] -> CType
-untypeArgs = ctype . untypeArgs' . map unCType
+untypeArgs :: [CType] -> Maybe CType
+untypeArgs = fmap ctype . untypeArgs' . map unCType
   where
-    untypeArgs' [] = error "empty type" -- FIXME: I should resurrect the unit type
-    untypeArgs' [t] = t
-    untypeArgs' (t:ts) = FunT t (untypeArgs' ts)
+    untypeArgs' [] = Nothing
+    untypeArgs' [t] = Just t
+    untypeArgs' (t1:ts) = FunT <$> pure t1 <*> untypeArgs' ts
 
 makeManifoldName :: GMeta -> MDoc
 makeManifoldName m = pretty $ "m" <> MT.show' (metaId m)
