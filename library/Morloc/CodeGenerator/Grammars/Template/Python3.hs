@@ -76,7 +76,7 @@ gSerialType' = CType $ VarT (TV (Just Python3Lang) "str")
 
 gAssign' :: GeneralAssignment -> MDoc
 gAssign' ga = case gaType ga of
-  (Just t) -> gaName ga <> " = " <> gaValue ga <+> gComment' ["::" <+> t]
+  (Just t) -> gaName ga <> " = " <> gaValue ga <+> "# ::" <+> t
   Nothing  -> gaName ga <> " = " <> gaValue ga
 
 gCall' :: MDoc -> [MDoc] -> MDoc
@@ -100,7 +100,7 @@ gCurry' f args i
       else map (\i' -> "x" <> pretty i') (take i ([1..] :: [Int]))
 
 gComment' :: [MDoc] -> MDoc
-gComment' ds = vsep ["\"\"\"", vsep ds, "\"\"\""]
+gComment' ds = vsep ["\"\"\"", vsep ds, "\"\"\""] <> line
 
 gReturn' :: MDoc -> MDoc
 gReturn' x = gCall' "return" [x]

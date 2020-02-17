@@ -532,7 +532,7 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
   where
     makeGType :: [Maybe GType] -> MorlocMonad GType
     makeGType ts = fmap GType . makeType . map unGType $ (map fromJust ts)
-
+    -- make an sanno variable from variable name and type info
     makeVar :: EVar -> Maybe CType -> Maybe GType -> SAnno GMeta One CType
     makeVar _ Nothing _ = error "Yeah, so this can happen"
     makeVar v (Just c) g = SAnno (One (VarS v, c))
@@ -542,12 +542,11 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
           , metaConstraints = Set.empty
           }
       )
-
+    -- turn type list into a function
     makeType :: [Type] -> MorlocMonad Type
     makeType [] = MM.throwError . OtherError $ "empty type"
     makeType [t] = return t
     makeType (t:ts) = FunT <$> pure t <*> makeType ts
-
 -- apply the pattern above down the AST
 rewritePartials (SAnno (One (AppS f xs, t)) m) = do
   xs' <- mapM rewritePartials xs
@@ -808,7 +807,8 @@ parameterize' h args (SAnno (One (RecS entries, c)) m) = do
   let args' = unique . concat . map sannoSnd $ vs'
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' h _ (SAnno (One (LamS vs x, c)) m) = do
-  args0 <- zipWithM (makeArgument h) vs (typeArgsC c)
+  args0 <- fmap (map unpackArgument) $
+    zipWithM (makeArgument h) vs (typeArgsC c)
   x' <- parameterize' h args0 x
   return $ SAnno (One (LamS vs x', (c, []))) m 
 parameterize' h args (SAnno (One (AppS x xs, c)) m) = do
@@ -990,10 +990,10 @@ codify' _ h g (SAnno (One (RecS entries, (c, args))) m) = do
   return $ SAnno (One (sexpr, (c, args, mdoc))) m
 
 -- | LamS [EVar] (SAnno a)
-codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m) = do
-  x' <- codify' isTop h g x
-  let mdoc = undefined -- FIXME: what does a function look like, anyway?
-  return (SAnno (One (LamS vs x', (c, args, mdoc))) m)
+codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m1) = do
+  x'@(SAnno _ m2) <- codify' isTop h g x
+  let mdoc = makeManifoldName m1
+  return (SAnno (One (LamS vs x', (c, args, mdoc))) m1)
 
 -- | ForeignS Int Lang
 codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
@@ -1137,8 +1137,7 @@ prepInput g _ _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, Not
 prepInput g _ _ (SAnno (One (ListS _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
-  "Function passing not implemented yet ..."
+prepInput g _ _ (SAnno (One (LamS _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
   gaType' <- case sequence (typeArgsC t) of
@@ -1174,7 +1173,7 @@ prepInput g rs mid (SAnno (One (VarS v, (t, _, d))) m) = do
     (Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
       "No unpacker found"
     -- the argument is used in the wrapped function, but is not serialized
-    Nothing -> return (name, Nothing)
+    _ -> return (name, Nothing)
 
 -- | Serialize the result of a call if a serialization function is defined.
 -- Presumably, if no serialization function is given, then the argument is
