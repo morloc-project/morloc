@@ -15,6 +15,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , argName
   , argType
   , unpackArgument
+  , prettyArgument
   , One(..)
   , Many(..)
   , Grammar(..)
@@ -28,7 +29,7 @@ module Morloc.CodeGenerator.Grammars.Common
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import Morloc.Pretty () -- just for mshow instances
+import Morloc.Pretty (prettyType)
 import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
@@ -95,6 +96,14 @@ data Argument
   -- be unpacked, but will be passed eventually to a foreign argument where it
   -- does have a concrete type.
   deriving (Show, Ord, Eq)
+
+prettyArgument :: Argument -> MDoc
+prettyArgument (PackedArgument v c n) =
+  "Packed" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
+prettyArgument (UnpackedArgument v c n) =
+  "Unpacked" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
+prettyArgument (PassThroughArgument v) =
+  "PassThrough" <+> pretty v
 
 argName :: Argument -> EVar
 argName (PackedArgument v _ _) = v

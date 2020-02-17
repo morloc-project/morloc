@@ -57,6 +57,8 @@ generate ms = do
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CType]]
     -- select a single instance at each node in the tree
     >>= mapM realize  -- [SAnno GMeta One CType]
+    -- rewrite partials
+    >>= mapM rewritePartials
 
   -- print abstract syntax trees to the console as debugging message
   say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
@@ -511,6 +513,61 @@ realize x = do
     realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . OtherError $
       "ForeignS should not yet appear in an SExpr"
 
+rewritePartials
+  :: SAnno GMeta One CType
+  -> MorlocMonad (SAnno GMeta One CType)
+rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
+  let gTypeArgs = maybe (repeat Nothing) typeArgsG (metaGType m)
+  f' <- rewritePartials f
+  xs' <- mapM rewritePartials xs
+  lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
+  let vs = map EVar . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
+      ys = zipWith3 makeVar vs (typeArgsC ftype) gTypeArgs
+  -- unsafe, but should not fail for well-typed input
+      appType = fromJust . last . typeArgsC $ ftype
+      appMeta = m {metaGType = metaGType m >>= (last . typeArgsG)}
+      lamCType = untypeArgs $ map (Just . sannoWithC id) xs' ++ typeArgsC ftype
+      lamMeta = m {metaGType = Just lamGType}
+  return $ SAnno (One (LamS vs (SAnno (One (AppS f' (xs' ++ ys), appType)) appMeta), lamCType)) lamMeta
+  where
+    makeGType :: [Maybe GType] -> MorlocMonad GType
+    makeGType ts = fmap GType . makeType . map unGType $ (map fromJust ts)
+
+    makeVar :: EVar -> Maybe CType -> Maybe GType -> SAnno GMeta One CType
+    makeVar _ Nothing _ = error "Yeah, so this can happen"
+    makeVar v (Just c) g = SAnno (One (VarS v, c))
+      ( m { metaGType = g
+          , metaName = Nothing
+          , metaProperties = Set.empty
+          , metaConstraints = Set.empty
+          }
+      )
+
+    makeType :: [Type] -> MorlocMonad Type
+    makeType [] = MM.throwError . OtherError $ "empty type"
+    makeType [t] = return t
+    makeType (t:ts) = FunT <$> pure t <*> makeType ts
+
+-- apply the pattern above down the AST
+rewritePartials (SAnno (One (AppS f xs, t)) m) = do
+  xs' <- mapM rewritePartials xs
+  f' <- rewritePartials f
+  return $ SAnno (One (AppS f' xs', t)) m
+rewritePartials (SAnno (One (LamS vs x, t)) m) = do
+  x' <- rewritePartials x
+  return $ SAnno (One (LamS vs x', t)) m
+rewritePartials (SAnno (One (ListS xs, t)) m) = do
+  xs' <- mapM rewritePartials xs
+  return $ SAnno (One (ListS xs', t)) m
+rewritePartials (SAnno (One (TupleS xs, t)) m) = do
+  xs' <- mapM rewritePartials xs
+  return $ SAnno (One (TupleS xs', t)) m
+rewritePartials (SAnno (One (RecS entries, t)) m) = do
+  let keys = map fst entries
+  vals <- mapM rewritePartials (map snd entries)
+  return $ SAnno (One (RecS (zip keys vals), t)) m
+rewritePartials x = return x
+
 writeAST
   :: (a -> CType) -> Maybe (a -> MDoc) -> SAnno GMeta One a -> MDoc
 writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
@@ -518,7 +575,7 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
     addExtra x = case extra of
       (Just f) -> " " <> f x
       Nothing -> ""
-  
+
     describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
     describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
     describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
@@ -529,10 +586,16 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
         ] ++ map describe xs
     describe (SAnno (One (f@(LamS _ x), c)) g) = do 
       hang 2 . vsep $
-        [ name (getType c) g <+> descSExpr f <+> parens (prettyType (getType c)) <> addExtra c
+        [ name (getType c) g
+            <+> descSExpr f
+            <+> parens (prettyType (getType c))
+            <> addExtra c
         , describe x
         ] 
-    describe (SAnno (One (x, c)) _) = descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
+    describe (SAnno (One (x, c)) _) =
+          descSExpr x
+      <+> parens (prettyType (getType c))
+      <>  addExtra c
 
     name :: CType -> GMeta -> MDoc
     name (viaShow . langOf' -> lang) g =
@@ -551,13 +614,17 @@ segment
 segment h x@(SAnno (One (_, c)) _) = do
   say $ " ---- entering segment"
   (x', xs) <- segment' (fst c) x
-  say $ line <> indent 2 (vsep (map (writeAST fst (Just (viaShow . snd))) (x' : xs)))
+  say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
   return (x' : xs)
   where
+    writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
+
     segment' 
       :: CType
       -> SAnno GMeta One (CType, [Argument])
-      -> MorlocMonad (SAnno GMeta One (CType, [Argument]), [SAnno GMeta One (CType, [Argument])])
+      -> MorlocMonad
+         ( SAnno GMeta One (CType, [Argument])
+         , [SAnno GMeta One (CType, [Argument])])
     segment' _ x@(SAnno (One (UniS  , _)) _) = return (x, [])
     segment' _ x@(SAnno (One (NumS _, _)) _) = return (x, [])
     segment' _ x@(SAnno (One (LogS _, _)) _) = return (x, [])
@@ -589,7 +656,7 @@ segment h x@(SAnno (One (_, c)) _) = do
         recTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
     segment' t0 (SAnno (One (LamS vs x, c1)) m)
       | langOf' t0 == langOf' (fst c1) = do
-          (x', rs) <- segment' (fromJust . last . typeArgs . fst $ c1) x
+          (x', rs) <- segment' (fromJust . last . typeArgsC . fst $ c1) x
           return (SAnno (One (LamS vs x', c1)) m, rs)
       | otherwise = MM.throwError . OtherError $
         "Foreign lambda's are not currently supported (coming soon)"
@@ -599,7 +666,7 @@ segment h x@(SAnno (One (_, c)) _) = do
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
 
-          let lamArgs = typeArgs (fst c2)
+          let lamArgs = typeArgsC (fst c2)
               lamType = fst c2
           -- argument names shared between segments
               vs' = map argName (snd c1)
@@ -692,15 +759,15 @@ parameterize
   -> SAnno GMeta One CType
   -> MorlocMonad (SAnno GMeta One (CType, [Argument]))
 parameterize h (SAnno (One (LamS vs x, t)) m) = do
-  args0 <- zipWithM (makeArgument h) vs (typeArgs t)
+  args0 <- zipWithM (makeArgument h) vs (typeArgsC t)
   x' <- parameterize' h args0 x
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize h (SAnno (One (CallS src, t)) m) = do
-  ts <- case sequence (typeArgs t) of
+  ts <- case sequence (typeArgsC t) of
     (Just ts') -> return (init ts')
     Nothing -> MM.throwError . OtherError . render $
       "Unexpected type in parameterize CallS:" <+> prettyType t
-  let vs = map EVar ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
+  let vs = map EVar (freshVarsAZ [])
   args0 <- zipWithM (makeArgument h) vs (map Just ts)
   return $ SAnno (One (CallS src, (t, args0))) m
 parameterize h x = parameterize' h [] x
@@ -741,7 +808,7 @@ parameterize' h args (SAnno (One (RecS entries, c)) m) = do
   let args' = unique . concat . map sannoSnd $ vs'
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' h _ (SAnno (One (LamS vs x, c)) m) = do
-  args0 <- zipWithM (makeArgument h) vs (typeArgs c)
+  args0 <- zipWithM (makeArgument h) vs (typeArgsC c)
   x' <- parameterize' h args0 x
   return $ SAnno (One (LamS vs x', (c, []))) m 
 parameterize' h args (SAnno (One (AppS x xs, c)) m) = do
@@ -818,7 +885,7 @@ makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
   { gfComments = maybeToList $
       fmap (\(GType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
            (gFun >>= metaGType)
-  , gfReturnType = Just . gShowType g . last . fromJust . sequence . typeArgs $ c
+  , gfReturnType = Just . gShowType g . last . fromJust . sequence . typeArgsC $ c
   , gfName = makeManifoldName m
   , gfArgs = map (makeArg' g) args
   , gfBody = ""
@@ -866,7 +933,7 @@ makeDispatchBuilder h g xs =
       | (length vs) > 0 = Just (vs, m, c)
       | otherwise = Nothing
     getPoolCall (SAnno (One (CallS _, (c, args))) m)
-      | (length args) > 0 = Just (map argName args, m, last . fromJust . sequence . typeArgs $ c)
+      | (length args) > 0 = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
       | otherwise = Nothing
     getPoolCall _ = Nothing
 
@@ -969,7 +1036,7 @@ codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
   return $ SAnno (One (CallS src, (c, args, pretty name))) m
 
 codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
-  (otype, itypes) <- case sequence (typeArgs ftype) of
+  (otype, itypes) <- case sequence (typeArgsC ftype) of
     (Just ts) -> return (last ts, init ts)
     Nothing -> MM.throwError . OtherError . render $
       "Unexpected type type codify':" <+> prettyType ftype
@@ -1074,7 +1141,7 @@ prepInput g _ _ (SAnno (One (LamS _ _, _)) _) = MM.throwError . OtherError $
   "Function passing not implemented yet ..."
 prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing)
 prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
-  gaType' <- case sequence (typeArgs t) of
+  gaType' <- case sequence (typeArgsC t) of
     (Just ts) -> return . Just . gShowType g . last $ ts
     Nothing -> MM.throwError . OtherError . render $
       "Unexpected type in prepInput:" <+> prettyType t
@@ -1159,26 +1226,28 @@ getCTypes ts = [CType t | t <- ts, isJust (langOf t)]
 -- universally qualified) will be stored as Nothing. Such variables will always
 -- be passthrough arguments that have unknown type in the current language, but
 -- will be passed on to one where they are defined.
-typeArgs :: CType -> [Maybe CType]
-typeArgs t = map (fmap ctype) (typeArgs' [] (unCType t))
-  where
-    -- typeArgs' :: [TVar] -> Type -> [Maybe Type]
-    typeArgs' unsolved (FunT t1@(VarT v) t2)
-      | elem v unsolved = Nothing : typeArgs' unsolved t2
-      | otherwise = Just t1 : typeArgs' unsolved t2
-    typeArgs' unsolved (FunT t1 t2) = Just t1 : typeArgs' unsolved t2
-    typeArgs' unsolved (Forall v t) = typeArgs' (v:unsolved) t
-    typeArgs' unsolved t@(VarT v)
-      | elem v unsolved = [Nothing]
-      | otherwise = [Just t]
-    typeArgs' unsolved t = [Just t]
+typeArgsC :: CType -> [Maybe CType]
+typeArgsC t = map (fmap ctype) (typeArgs [] (unCType t))
+
+typeArgsG :: GType -> [Maybe GType]
+typeArgsG t = map (fmap GType) (typeArgs [] (unGType t))
+
+typeArgs :: [TVar] -> Type -> [Maybe Type]
+typeArgs unsolved (FunT t1@(VarT v) t2)
+  | elem v unsolved = Nothing : typeArgs unsolved t2
+  | otherwise = Just t1 : typeArgs unsolved t2
+typeArgs unsolved (FunT t1 t2) = Just t1 : typeArgs unsolved t2
+typeArgs unsolved (Forall v t) = typeArgs (v:unsolved) t
+typeArgs unsolved t@(VarT v)
+  | elem v unsolved = [Nothing]
+  | otherwise = [Just t]
+typeArgs unsolved t = [Just t]
 
 untypeArgs :: [Maybe CType] -> CType
 untypeArgs xs = ctype . untypeArgs' . map (fmap unCType) $ xs
   where
-    used = [v | (Just (CType (VarT (TV _ v)))) <- xs]
-    vs = filter (\x -> not (elem x used))
-       $ [1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack
+    exclude = [v | (Just (CType (VarT (TV _ v)))) <- xs]
+    vs = freshVarsAZ exclude
 
     lang = langOf . head . catMaybes $ xs
 
@@ -1310,6 +1379,15 @@ unpack x = x
 
 sannoSnd :: SAnno g One (a, b) -> b
 sannoSnd (SAnno (One (_, (_, x))) _) = x
+
+-- generate infinite list of fresh variables of form ['a','b',...,'z','aa','ab',...,'zz',...]
+freshVarsAZ
+  :: [MT.Text] -- variables to exclude
+  -> [MT.Text]
+freshVarsAZ exclude =
+  filter
+    (\x -> not (elem x exclude))
+    ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
 
 {- | Find exported expressions.
 
