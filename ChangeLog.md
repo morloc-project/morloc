@@ -1,4 +1,5 @@
 0.xx.x [xxxx.xx.xx]
+-------------------
 
  [ ] resurrect property tests
  [ ] meaningful error messages
@@ -9,23 +10,32 @@
  [ ] test record handling
  [ ] add general type-directed structure to JSON serialization 
 
-0.18.2 [xxxx.xx.xx]
+0.19.0 [2020.02.17]
+-------------------
 
- [ ] remove/replace Manifold object, build from Expr
- [ ] allow and test currying
- [x] allow tags on parenthesized types
- [x] improve error messages 
- [x] fix bug in functions with multiple parameters 
- [x] fix bug preventing loading of package metadata 
+Major changes
+ * Allow currying
+ * Add realization optimizations
+ * Refactor generator into series of clear transformations
+ * Added handling for dealing with ambiguous ASTs
+
+Minor bug fixes and updates
+ * Prettier code generation for C++, Python and R
+ * More detailed comments in generated code
+ * Allow tags on parenthesized types
+ * Fix bug in functions with multiple parameters 
+ * Fix bug preventing loading of package metadata 
 
 0.18.1 [2019.11.08]
+-------------------
 
- * fix travis
- * use C++11 for C++ builds
- * make .morloc/config optional
- * fix bug in parsing unit type: `()`
+ * Fix travis
+ * Use C++11 for C++ builds
+ * Make .morloc/config optional
+ * Fix bug in parsing unit type: `()`
 
 0.18.0 [2019.11.04]
+-------------------
 
  * Add bidirectional type system
  * Allow parameterized concrete types
@@ -37,6 +47,7 @@
  * Removed arq and SPARQL dependency (very fast compilation)
 
 0.17.4 [2019.06.29]
+-------------------
 
  * Add C and C++ handling
  * Define Ord intance for MTypeMeta
