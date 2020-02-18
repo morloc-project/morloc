@@ -19,6 +19,7 @@ main = do
       , golden "basic math" "3_math"
       , golden "more basic math" "3_math2"
       , golden "C++ map function" "4_map"
+      , golden "C++ more complex map function" "4_map-more"
       , golden "nested C++ map functions" "5_nested"
       , golden "C++ / R interop" "6_interop"
       , golden "C++ quadratic eqation" "7_quadraticEq"
