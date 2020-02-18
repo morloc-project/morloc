@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

@@ -10,7 +10,7 @@ author:           "Zebulun Arendsee"
 maintainer:       "zbwrbz@gmail.com"
 github:           "morloc-project/morloc"
 bug-reports:      https://github.com/morloc-project/morloc/issues
-copyright:        "2018 Zebulun Arendsee"
+copyright:        "2020 Zebulun Arendsee"
 
 extra-source-files:
   - README.md

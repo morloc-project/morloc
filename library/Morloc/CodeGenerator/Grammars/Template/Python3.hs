@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Template.Python3
 Description : R language generation
-Copyright   : (c) Zebulun Arendsee, 2018
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

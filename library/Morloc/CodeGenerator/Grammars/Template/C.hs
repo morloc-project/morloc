@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Template.C
 Description : Build a C program given a file
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : totally experimental

@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.ProgramBuilder.Build
 Description : Manage system requirements and project building for pools
-Copyright   : (c) Zebulun Arendsee, 2018
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

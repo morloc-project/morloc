@@ -3,7 +3,7 @@
 {-|
 Module      : Subcommands
 Description : Morloc executable subcommands
-Copyright   : (c) Zebulun Arendsee, 2018
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
