@@ -1,0 +1,6 @@
+import math (fibonacci)
+import rbase (plotPDF)
+
+export fibplot
+
+fibplot n = plotPDF (fibonacci n) "fibonacci-plot.pdf";

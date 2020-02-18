@@ -27,4 +27,5 @@ main = do
       , golden "R currying" "8_partials-r"
       , golden "Python currying" "8_partials-py"
       , golden "interop" "9_minimal-interop"
+      , golden "IO test with Unit type" "10_io"
       ]
