@@ -581,19 +581,21 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
     describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
     describe (SAnno (One (x@(AppS f xs), c)) g) =
       hang 2 . vsep $
-        [ descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
+        [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
         , describe f
         ] ++ map describe xs
     describe (SAnno (One (f@(LamS _ x), c)) g) = do 
       hang 2 . vsep $
-        [ name (getType c) g
+        [ pretty (metaId g)
+            <+> name (getType c) g
             <+> descSExpr f
             <+> parens (prettyType (getType c))
             <> addExtra c
         , describe x
         ] 
-    describe (SAnno (One (x, c)) _) =
-          descSExpr x
+    describe (SAnno (One (x, c)) g) =
+          pretty (metaId g)
+      <+> descSExpr x
       <+> parens (prettyType (getType c))
       <>  addExtra c
 
@@ -992,7 +994,7 @@ codify' _ h g (SAnno (One (RecS entries, (c, args))) m) = do
 -- | LamS [EVar] (SAnno a)
 codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m1) = do
   x'@(SAnno _ m2) <- codify' isTop h g x
-  let mdoc = makeManifoldName m1
+  let mdoc = makeManifoldName m2
   return (SAnno (One (LamS vs x', (c, args, mdoc))) m1)
 
 -- | ForeignS Int Lang
