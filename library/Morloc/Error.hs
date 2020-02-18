@@ -15,6 +15,8 @@ to the user.
 module Morloc.Error () where
 
 import Morloc.Namespace
+import Morloc.Pretty (prettyType)
+import Morloc.Data.Doc (render)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 
@@ -32,18 +34,18 @@ errmsg (UnknownLanguage lang) =
 errmsg (SyntaxError err) = "SyntaxError: " <> MT.show' err
 errmsg (SerializationError t) = "SerializationError: " <> t
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
-errmsg (TypeError t) = "TypeError: " <> t
+errmsg (TypeError msg) = "TypeError: " <> msg
 errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
-errmsg (GeneratorError t) = "GeneratorError: " <> t
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>
   "This is probably due to a bug in the code."
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
+errmsg (GeneratorError msg) = "GeneratorError: " <> msg
 errmsg MissingGeneralType = "MissingGeneralType"
 errmsg AmbiguousGeneralType = "AmbiguousGeneralType"
 errmsg (SubtypeError t1 t2) = "SubtypeError: (" <> MT.show' t1 <> ") <: (" <> MT.show' t2 <> ")"
@@ -71,8 +73,14 @@ errmsg CyclicDependency = "CyclicDependency"
 errmsg CannotImportMain = "CannotImportMain"
 errmsg (SelfImport mv) = "SelfImport"
 errmsg BadRealization = "BadRealization"
-errmsg TooManyRealizations = "TooManyRealizations"
 errmsg MissingSource = "MissingSource"
+-- serialization errors
+errmsg (MissingPacker place t)
+  = "SerializationError: no packer found for type ("
+  <> render (prettyType (unCType t)) <> ") at " <> place 
+errmsg (MissingUnpacker place t)
+  = "SerializationError: no unpacker found for type ("
+  <> render (prettyType (unCType t)) <> ") at " <> place
 -- type extension errors
 errmsg (AmbiguousPacker tv) = "AmbiguousPacker"
 errmsg (AmbiguousUnpacker tv) = "AmbiguousUnpacker"

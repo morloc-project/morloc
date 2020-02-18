@@ -60,8 +60,8 @@ generate ms = do
     -- rewrite partials
     >>= mapM rewritePartials
 
-  -- print abstract syntax trees to the console as debugging message
-  say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
+  -- -- print abstract syntax trees to the console as debugging message
+  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
 
   -- build nexus
   -- -----------
@@ -110,8 +110,8 @@ roots ms = do
     [m] ->
       let vs = Set.toList (moduleExports m) in
         return $ zip vs (map (findTerm False ms m) vs)
-    [] -> MM.throwError . OtherError $ "Circular dependencies between modules"
-    _ -> MM.throwError . OtherError $ "Multiple root modules"
+    [] -> MM.throwError CyclicDependency
+    _ -> MM.throwError . GeneratorError $ "Multiple root modules"
   return xs
   where
     isRoot m = not $ Set.member (moduleName m) allImports
@@ -168,7 +168,7 @@ collect
   :: Map.Map MVar Module
   -> (EVar, [TermOrigin])
   -> MorlocMonad (SAnno GMeta Many [CType])
-collect ms (v, []) = MM.throwError . OtherError $
+collect ms (v, []) = MM.throwError . GeneratorError $
   "No origin found for variable '" <> unEVar v <> "'"
 collect ms (evar', xs@(x:_)) = do
   -- Just look at one x, since any should emit the same GMeta (if not, then
@@ -188,9 +188,9 @@ collect ms (evar', xs@(x:_)) = do
       xs <- collectExpr Set.empty m (getCTypes ts) x
       case xs of
         [x] -> return x
-        _ -> MM.throwError . OtherError $
+        _ -> MM.throwError . GeneratorError $
           "Expected exactly one topology for a declared term"
-    collectTerm (Declared _ _ _) = MM.throwError . OtherError $
+    collectTerm (Declared _ _ _) = MM.throwError . GeneratorError $
       "Invalid expression in CollectTerm Declared, expected AnnE"
     collectTerm term@(Sourced m src) = do
       ts <- getTermTypes term |>> getCTypes
@@ -275,7 +275,8 @@ collect ms (evar', xs@(x:_)) = do
       e2' <- collectAnno args m e2
       mapM (app g1 e2') fs
 
-    collectExpr _ _ _ _ = MM.throwError . OtherError $ "Unexpected expression in collectExpr"
+    collectExpr _ _ _ _ = MM.throwError . GeneratorError $
+      "Unexpected expression in collectExpr"
     app
       :: GMeta
       -> SAnno GMeta Many [CType]
@@ -363,9 +364,9 @@ rewrite (SAnno (Many es0) g0) = do
     rewriteL1 args (vs, SAnno (Many es2) g2)
       | length vs == length args =
           fmap concat $ mapM (substituteExprs (zip vs args)) es2
-      | length vs > length args = error
+      | length vs > length args = MM.throwError . NotImplemented $
           "Partial function application not yet implemented (coming soon)"
-      | length vs < length args = MM.throwError . OtherError $
+      | length vs < length args = MM.throwError . TypeError $
           "Type error: too many arguments applied to lambda"
 
     substituteExprs
@@ -427,7 +428,7 @@ realize x = do
   case realizationMay of
     (Just (_, realization)) -> do
       return realization 
-    Nothing -> MM.throwError . OtherError $ "No valid realization found"
+    Nothing -> MM.throwError . TypeError $ "No valid realization found"
   where
     realizeAnno
       :: Int
@@ -510,7 +511,7 @@ realize x = do
         (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
           return $ Just (fscore + sum scores + interopCost, AppS f' xs', c) 
         _ -> return Nothing
-    realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . OtherError $
+    realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . GeneratorError $
       "ForeignS should not yet appear in an SExpr"
 
 rewritePartials
@@ -544,7 +545,7 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
       )
     -- turn type list into a function
     makeType :: [Type] -> MorlocMonad Type
-    makeType [] = MM.throwError . OtherError $ "empty type"
+    makeType [] = MM.throwError . TypeError $ "empty type"
     makeType [t] = return t
     makeType (t:ts) = FunT <$> pure t <*> makeType ts
 -- apply the pattern above down the AST
@@ -611,12 +612,12 @@ segment
   -> SAnno GMeta One (CType, [Argument])
   -> MorlocMonad [SAnno GMeta One (CType, [Argument])]
 segment h x@(SAnno (One (_, c)) _) = do
-  say $ " ---- entering segment"
+  -- say $ " ---- entering segment"
   (x', xs) <- segment' (fst c) x
-  say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
+  -- say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
   return (x' : xs)
   where
-    writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
+    -- writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
 
     segment' 
       :: CType
@@ -636,7 +637,7 @@ segment h x@(SAnno (One (_, c)) _) = do
       where
         listType :: CType -> MorlocMonad CType
         listType (CType (ArrT (TV _ "List") [t])) = return (CType t)
-        listType _ = MM.throwError . OtherError $ "Expected List type"
+        listType _ = MM.throwError . TypeError $ "Expected List type"
     segment' _ (SAnno (One (TupleS xs, c)) m) = do
       ts <- tupleTypes (fst c)
       (xs', rs) <- zipWithM segment' ts xs |>> unzip
@@ -644,7 +645,7 @@ segment h x@(SAnno (One (_, c)) _) = do
       where
         tupleTypes :: CType -> MorlocMonad [CType]
         tupleTypes (CType (ArrT (TV _ "Tuple") ts)) = return (map CType ts)
-        tupleTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
+        tupleTypes _ = MM.throwError . TypeError $ "Expected Tuple type"
     segment' _ (SAnno (One (RecS xs, c)) m) = do
       ts <- recTypes (fst c)
       (vals, rs) <- zipWithM segment' ts (map snd xs) |>> unzip
@@ -652,13 +653,13 @@ segment h x@(SAnno (One (_, c)) _) = do
       where
         recTypes :: CType -> MorlocMonad [CType]
         recTypes (CType (RecT entries)) = return (map (CType . snd) entries)
-        recTypes _ = MM.throwError . OtherError $ "Expected Tuple type"
+        recTypes _ = MM.throwError . TypeError $ "Expected Tuple type"
     segment' t0 (SAnno (One (LamS vs x, c1)) m)
       | langOf' t0 == langOf' (fst c1) = do
           (x', rs) <- segment' (fromJust . last . typeArgsC . fst $ c1) x
           return (SAnno (One (LamS vs x', c1)) m, rs)
-      | otherwise = MM.throwError . OtherError $
-        "Foreign lambda's are not currently supported (coming soon)"
+      | otherwise = MM.throwError . NotImplemented $
+        "Foreign lambda's are not currently supported"
     segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
       (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
       case langOf' c0 == langOf' (fst c2) of
@@ -764,7 +765,7 @@ parameterize h (SAnno (One (LamS vs x, t)) m) = do
 parameterize h (SAnno (One (CallS src, t)) m) = do
   ts <- case sequence (typeArgsC t) of
     (Just ts') -> return (init ts')
-    Nothing -> MM.throwError . OtherError . render $
+    Nothing -> MM.throwError . TypeError . render $
       "Unexpected type in parameterize CallS:" <+> prettyType t
   let vs = map EVar (freshVarsAZ [])
   args0 <- zipWithM (makeArgument h) vs (map Just ts)
@@ -818,13 +819,12 @@ parameterize' h args (SAnno (One (AppS x xs, c)) m) = do
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 parameterize' _ args (SAnno (One (ForeignS i lang vs, c)) m) =
   case sequence $ map listToMaybe [[r | r <- args, argName r == v] | v <- vs] of
-    Nothing -> MM.throwError . OtherError $ "Bad argument sent to ForeignS"
+    Nothing -> MM.throwError . GeneratorError $ "Bad argument sent to ForeignS"
     Just args' -> return $ SAnno (One (ForeignS i lang vs, (c, args'))) m
 
 makeArgument :: SerialMap -> EVar -> Maybe CType -> MorlocMonad Argument 
 makeArgument h v (Just t) = case selectFunction t Unpack h of
-  Nothing -> MM.throwError . OtherError . render $
-    "No packer found for type" <+> parens (prettyType t)
+  Nothing -> MM.throwError (MissingPacker "makeArgument" t)
   (Just (name, _)) -> return $ PackedArgument v t (Just name)
 makeArgument _ v Nothing = return $ PassThroughArgument v
 
@@ -1001,10 +1001,10 @@ codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   args' <- mapM cliArg args
   packer <- case selectFunction t Unpack h of
     (Just (name, _)) -> return name
-    _ -> MM.throwError . OtherError . render $
-      "Could not find unpacker for foreign call of type:" <+> prettyType t
+    _ -> MM.throwError (MissingUnpacker "codify'" t)
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
-    Nothing -> MM.throwError . OtherError $ "ah for fuck sake!!!"
+    Nothing -> MM.throwError . CallTheMonkeys . render $
+      "Expected a concrete language in getPoolCallBuilder, found MorlocLang"
     (Just poolBuilder) -> do
       let exe = pretty $ Lang.makeExecutableName lang "pool"
       return $ (gCall g) (pretty packer)
@@ -1023,8 +1023,7 @@ codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
     cliArg (PackedArgument v _ _) = return $ pretty v
     cliArg (PassThroughArgument v) = return $ pretty v
     cliArg (UnpackedArgument v _ (Just unpacker)) = return $ (gCall g) (pretty unpacker) [pretty v]
-    cliArg (UnpackedArgument v _ Nothing) = MM.throwError . OtherError $
-      "In cliArg, no unpacker found"
+    cliArg (UnpackedArgument v t Nothing) = MM.throwError (MissingUnpacker "cliArg" t)
 
 -- | VarS EVar
 codify' _ _ _ (SAnno (One (VarS v, (c, args))) m) = do
@@ -1038,8 +1037,8 @@ codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
 codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
   (otype, itypes) <- case sequence (typeArgsC ftype) of
     (Just ts) -> return (last ts, init ts)
-    Nothing -> MM.throwError . OtherError . render $
-      "Unexpected type type codify':" <+> prettyType ftype
+    Nothing -> MM.throwError . CallTheMonkeys . render $
+      "Unexpected type codify CallS:" <+> prettyType ftype
   inputs' <- mapM (simplePrepInput g) (zip [0..] args)
   args' <- mapM (prepArg g) args
   let name = unName (srcName src)
@@ -1061,6 +1060,7 @@ codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
       , Just $ concreteSignature (metaName m) ftype
       ]
 
+    -- since this is a top-level input, it MUST be serialized 
     simplePrepInput
       :: Grammar
       -> (Int, Argument)
@@ -1075,12 +1075,8 @@ codify' True _ g (SAnno (One (CallS src, (ftype, args))) m) = do
          , gaValue = (gCall g) (pretty unpackerName) [pretty v]
          , gaArg = Nothing
          })
-    simplePrepInput _ (_, UnpackedArgument _ _ _) = MM.throwError . OtherError $
-      "Don't panic"
-    simplePrepInput _ (_, PackedArgument _ _ Nothing) = MM.throwError . OtherError $
-      "Oh shit, panic panic PANIC!!!"
-    simplePrepInput _ (_, PassThroughArgument _) = MM.throwError . OtherError $
-      "This might be a problem, or not, or whatever"
+    simplePrepInput _ (_, arg) = MM.throwError . CallTheMonkeys . render $
+      "in simplePrepInput, expected a packed argument to a top-level function, found:" <+> prettyArgument arg
 
 -- | AppS (SAnno a) [SAnno a]
 codify' _ h g (SAnno (One (AppS f xs, (c, args))) m) = do
@@ -1100,7 +1096,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) =
   innerCall <- case x of
     (AppS _ _) -> return $ makeManifoldName m'
     (CallS src) -> return (pretty $ srcName src)
-    _ -> MM.throwError . OtherError $ "Unexpected innerCall: " <> render (descSExpr x)
+    _ -> MM.throwError . CallTheMonkeys $ "Unexpected innerCall: " <> render (descSExpr x)
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
   args' <- mapM (prepArg g) margs
@@ -1142,7 +1138,7 @@ prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing
 prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
   gaType' <- case sequence (typeArgsC t) of
     (Just ts) -> return . Just . gShowType g . last $ ts
-    Nothing -> MM.throwError . OtherError . render $
+    Nothing -> MM.throwError . CallTheMonkeys . render $
       "Unexpected type in prepInput:" <+> prettyType t
   let varname = makeArgumentName mid
       mname = makeManifoldName m
@@ -1168,10 +1164,9 @@ prepInput g rs mid (SAnno (One (VarS v, (t, _, d))) m) = do
           , gaArg = Nothing
           }
        )
-    (Just (PassThroughArgument v)) -> MM.throwError . OtherError . render $
+    (Just (PassThroughArgument v)) -> MM.throwError . GeneratorError $
       "Compiler bug: a PassThroughArgument cannot be an input"
-    (Just (PackedArgument _ _ Nothing)) -> MM.throwError . OtherError $
-      "No unpacker found"
+    (Just (PackedArgument _ _ Nothing)) -> MM.throwError (MissingUnpacker "generator.hs:prepInput" t)
     -- the argument is used in the wrapped function, but is not serialized
     _ -> return (name, Nothing)
 
@@ -1213,7 +1208,7 @@ getGType :: [Type] -> MorlocMonad (Maybe GType)
 getGType ts = case [GType t | t <- ts, langOf' t == MorlocLang] of
   [] -> return Nothing
   [x] -> return $ Just x
-  xs -> MM.throwError . OtherError $
+  xs -> MM.throwError . GeneratorError $
     "Expected 0 or 1 general types, found " <> MT.show' (length xs)
 
 getCTypes :: [Type] -> [CType]
@@ -1283,7 +1278,7 @@ getTermTypeSet :: TermOrigin -> MorlocMonad TypeSet
 getTermTypeSet t =
   case Map.lookup (getTermEVar t) (moduleTypeMap (getTermModule t)) of
     (Just ts) -> return ts
-    Nothing -> MM.throwError . OtherError $ "Expected the term to have a typeset"
+    Nothing -> MM.throwError . GeneratorError $ "Expected the term to have a typeset"
 
 -- | Map a language to a grammar
 selectGrammar :: Lang -> MorlocMonad Grammar
@@ -1291,9 +1286,9 @@ selectGrammar CLang       = return GrammarC.grammar
 selectGrammar CppLang     = return GrammarCpp.grammar
 selectGrammar RLang       = return GrammarR.grammar
 selectGrammar Python3Lang = return GrammarPython3.grammar
-selectGrammar MorlocLang = MM.throwError . OtherError $
-  "No grammar exists for MorlocLang, this may be a compiler bug"
-selectGrammar lang = MM.throwError . OtherError $
+selectGrammar MorlocLang = MM.throwError . GeneratorError $
+  "No grammar exists for MorlocLang"
+selectGrammar lang = MM.throwError . GeneratorError $
   "No grammar found for " <> MT.show' lang
 
 unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
@@ -1356,12 +1351,12 @@ partialApply (FunT _ t) = return t
 partialApply (Forall v t) = do
   t' <- partialApply t
   return $ Forall v t'
-partialApply _ = MM.throwError . OtherError $
+partialApply _ = MM.throwError . GeneratorError $
   "Cannot partially apply a non-function type"
 
 partialApplyN :: Int -> Type -> MorlocMonad Type
 partialApplyN i t
-  | i < 0 = MM.throwError . OtherError $
+  | i < 0 = MM.throwError . GeneratorError $
     "Do you really want to apply a negative number of arguments?"
   | i == 0 = return t
   | i > 0 = do

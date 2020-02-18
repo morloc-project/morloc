@@ -185,6 +185,9 @@ data MorlocError
   | BadRealization
   | TooManyRealizations
   | MissingSource
+  -- serialization errors
+  | MissingPacker Text CType
+  | MissingUnpacker Text CType
   -- type extension errors
   | AmbiguousPacker TVar
   | AmbiguousUnpacker TVar
