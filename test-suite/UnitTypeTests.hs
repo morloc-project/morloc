@@ -442,6 +442,17 @@ unitTypeTests =
         [tuple [num, str]]
     , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
 
+    -- unit type
+    , assertTerminalType
+        "unit as input"
+        "f :: () -> Bool"
+        [fun [VarT (TV Nothing "Unit"), bool]]
+
+    , assertTerminalType
+        "unit as output"
+        "f :: Bool -> ()"
+        [fun [bool, VarT (TV Nothing "Unit")]]
+
     -- -- TODO: reconsider what an empty tuple is
     -- -- I am inclined to cast it as the unit type
     -- , assertTerminalType "empty tuples are of unit type" "f :: ()" UniT

@@ -1,7 +1,8 @@
 all:
+	rm -f obs.txt
 	morloc make foo.loc
-	./nexus.pl fibplot 5
-	ls *pdf > obs.txt
+	./nexus.pl foo [1,2,3]
+	ls -s foo.pdf > obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -f nexus* pool* *pdf

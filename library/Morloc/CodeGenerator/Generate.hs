@@ -60,8 +60,8 @@ generate ms = do
     -- rewrite partials
     >>= mapM rewritePartials
 
-  -- -- print abstract syntax trees to the console as debugging message
-  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
+  -- print abstract syntax trees to the console as debugging message
+  say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
 
   -- build nexus
   -- -----------
@@ -261,18 +261,22 @@ collect ms (evar', xs@(x:_)) = do
       es' <- mapM (collectAnno args m) (map snd entries)
       let entries' = zip (map fst entries) es'
       return [(RecS entries', ts)]
-    collectExpr args m ts e@(LamE v _) =
+    collectExpr args m ts e@(LamE v x) =
       case unrollLambda e of
         (args', e') -> do
+          say $ "in LamE:" <+> prettyExpr x
           e'' <- collectAnno (Set.union args (Set.fromList args')) m e'
           return [(LamS args' e'', ts)]
     -- AppS (SAnno g f c) [SAnno g f c]
     collectExpr args m ts (AppE e1 e2) = do
+      say $ "in AppE:" <+> parens (prettyExpr e1) <+> parens (prettyExpr e2)
       -- The topology of e1' may vary. It could be a direct binary function. Or
       -- it could be a partially applied function. So it is necessary to map
       -- over the Many.
       e1'@(SAnno (Many fs) g1) <- collectAnno args m e1
       e2' <- collectAnno args m e2
+      say $ "in AppE e1':" <+> writeManyAST e1'
+      say $ "in AppE e2':" <+> writeManyAST e2'
       mapM (app g1 e2') fs
 
     collectExpr _ _ _ _ = MM.throwError . GeneratorError $
@@ -424,6 +428,9 @@ realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (SAnno GMeta One CType)
 realize x = do
+  say $ " --- realize ---"
+  say $ writeManyAST x
+  say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     (Just (_, realization)) -> do
@@ -452,7 +459,8 @@ realize x = do
       -> SExpr GMeta Many [CType]
       -> CType
       -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
-    realizeExpr depth lang x c = realizeExpr' depth (maybe (langOf' c) id lang) x c
+    realizeExpr depth lang x c = do
+      realizeExpr' depth (maybe (langOf' c) id lang) x c
 
     realizeExpr'
       :: Int
@@ -460,6 +468,7 @@ realize x = do
       -> SExpr GMeta Many [CType]
       -> CType
       -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
+    -- always choose the primitive that is in the same language as the parent
     realizeExpr' _ lang (UniS) c
       | lang == langOf' c = return $ Just (0, UniS, c)
       | otherwise = return Nothing
@@ -472,12 +481,15 @@ realize x = do
     realizeExpr' _ lang (StrS x) c
       | lang == langOf' c = return $ Just (0, StrS x, c)
       | otherwise = return Nothing
+    -- a call should also be of the same language as the parent, shouldn't it?
     realizeExpr' _ lang (CallS src) c
       | lang == langOf' c = return $ Just (0, CallS src, c)
       | otherwise = return Nothing
+    -- and a var?
     realizeExpr' _ lang (VarS x) c
       | lang == langOf' c = return $ Just (0, VarS x, c)
       | otherwise = return Nothing
+    -- simple recursion into ListS, TupleS, and RecS
     realizeExpr' depth lang (ListS xs) c
       | lang == langOf' c = do
         xsMay <- mapM (realizeAnno depth (Just lang)) xs
@@ -499,6 +511,7 @@ realize x = do
             (Just (scores, vals)) -> return $ Just (sum scores, RecS (zip (map fst entries) vals), c)
             Nothing -> return Nothing
       | otherwise = return Nothing
+    --
     realizeExpr' depth _ (LamS vs x) c = do
       xMay <- realizeAnno depth (Just $ langOf' c) x
       case xMay of
@@ -567,6 +580,31 @@ rewritePartials (SAnno (One (RecS entries, t)) m) = do
   vals <- mapM rewritePartials (map snd entries)
   return $ SAnno (One (RecS (zip keys vals), t)) m
 rewritePartials x = return x
+
+writeManyAST :: SAnno GMeta Many [CType] -> MDoc
+writeManyAST (SAnno (Many xs) g) =
+     pretty (metaId g)
+  <> maybe "" (\n -> " " <> pretty n) (metaName g)
+  <+> "::" <+> maybe "_" prettyType (metaGType g)
+  <> line <> indent 5 (vsep (map writeSome xs))
+  where
+    writeSome :: (SExpr GMeta Many [CType], [CType]) -> MDoc
+    writeSome (s, ts)
+      =  "_ ::"
+      <+> encloseSep "{" "}" ";" (map prettyType ts)
+      <> line <> writeExpr s
+
+    writeExpr :: SExpr GMeta Many [CType] -> MDoc
+    writeExpr (ListS xs) = list (map writeManyAST xs)
+    writeExpr (TupleS xs) = list (map writeManyAST xs)
+    writeExpr (RecS entries) = encloseSep "{" "}" "," $
+      map (\(k,v) -> pretty k <+> "=" <+> writeManyAST v) entries
+    writeExpr (LamS vs x)
+      = "LamS"
+      <+> list (map pretty vs)
+      <> line <> indent 2 (writeManyAST x)
+    writeExpr (AppS f xs) = "AppS" <+> indent 2 (vsep (writeManyAST f : map writeManyAST xs))
+    writeExpr x = descSExpr x
 
 writeAST
   :: (a -> CType) -> Maybe (a -> MDoc) -> SAnno GMeta One a -> MDoc

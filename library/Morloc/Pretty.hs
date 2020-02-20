@@ -175,7 +175,7 @@ class PrettyType a where
   prettyType :: a -> Doc ann
 
 instance PrettyType Type where
-  prettyType (VarT (TV _ "Unit")) = "()"
+  prettyType (VarT (TV lang "Unit")) = "()"
   prettyType (VarT v) = pretty v
   prettyType (FunT t1@(FunT _ _) t2) =
     parens (prettyType t1) <+> "->" <+> prettyType t2

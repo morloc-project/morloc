@@ -419,10 +419,10 @@ pEVar = fmap EVar name
 pType :: Parser Type
 pType =
       pExistential
+  <|> try pFunT
   <|> try pUniT
   <|> try pRecordT
   <|> try pForAllT
-  <|> try pFunT
   <|> try pArrT
   <|> try parensType
   <|> pListT
@@ -475,7 +475,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try parensType <|> try pUniT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pFunT :: Parser Type
 pFunT = do
@@ -484,7 +484,7 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try parensType <|> try pUniT <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pListT :: Parser Type
 pListT = do
