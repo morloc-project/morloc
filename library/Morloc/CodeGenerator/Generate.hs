@@ -1293,8 +1293,10 @@ untypeArgs xs = ctype . untypeArgs' . map (fmap unCType) $ xs
     generalize [] t = t
     generalize (v':vs') t = Forall (TV lang v') (generalize vs' t)
 
-    untypeArgs'' _ [] = error "empty type"
+    untypeArgs'' :: [MT.Text] -> [Maybe Type] -> ([MT.Text], [MT.Text], Type)
+    untypeArgs'' _ [] = error "TypeError: empty type"
     untypeArgs'' vs [Just t] = ([], vs, t)
+    -- create associate this unknown type with a generic variable
     untypeArgs'' (v':vs') [Nothing] = ([v'], vs', VarT (TV lang v'))
     untypeArgs'' vs1 (t1:ts) = case untypeArgs'' vs1 [t1] of
       (v1', vs2, t1') -> case untypeArgs'' vs2 ts of
@@ -1390,7 +1392,17 @@ partialApply :: Type -> MorlocMonad Type
 partialApply (FunT _ t) = return t
 partialApply (Forall v t) = do
   t' <- partialApply t
-  return $ Forall v t'
+  return $ if varIsUsed v t' then Forall v t' else t'
+  where
+    varIsUsed :: TVar -> Type -> Bool 
+    varIsUsed v (VarT v') = v == v'
+    varIsUsed v (ExistT v' ts) = v == v' || any (varIsUsed v) ts
+    varIsUsed v (Forall v' t)
+      | v == v' = False
+      | otherwise = varIsUsed v t
+    varIsUsed v (FunT t1 t2) = varIsUsed v t1 || varIsUsed v t2
+    varIsUsed v (ArrT v' ts) = any (varIsUsed v) ts
+    varIsUsed v (RecT entries) = any (varIsUsed v) (map snd entries)
 partialApply _ = MM.throwError . GeneratorError $
   "Cannot partially apply a non-function type"
 
