@@ -652,12 +652,12 @@ segment
   -> SAnno GMeta One (CType, [Argument])
   -> MorlocMonad [SAnno GMeta One (CType, [Argument])]
 segment h x@(SAnno (One (_, c)) _) = do
-  -- say $ " ---- entering segment"
+  say $ " ---- entering segment"
   (x', xs) <- segment' (fst c) x
-  -- say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
+  say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
   return (x' : xs)
   where
-    -- writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
+    writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
 
     segment' 
       :: CType
@@ -701,6 +701,9 @@ segment h x@(SAnno (One (_, c)) _) = do
       | otherwise = MM.throwError . NotImplemented $
         "Foreign lambda's are not currently supported"
     segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
+      -- ----------------------------.  
+      --                              \
+      --                               v    WRONG!!! -- need (argTypes *)
       (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
       case langOf' c0 == langOf' (fst c2) of
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
