@@ -91,7 +91,7 @@ export fibplot
 fibplot n = plotPDF (fibonacci n) "fibonacci-plot.pdf";
 ```
 
-The `fibplot` function calculates fibonacci numbers using a C++ function and
+The `fibplot` function calculates Fibonacci numbers using a C++ function and
 plots it using an R function. The R function `plotPDF` is a perfectly normal R
 function with no extra boilerplate:
 
@@ -171,10 +171,10 @@ map Python3 :: forall a b . (a -> b) -> list a -> list b
 ```
 
 The general signature looks almost the same as the Haskell equivalent (except
-that `morloc` univeral quantification is currently explicit). The list type
+that `morloc` universal quantification is currently explicit). The list type
 constructors for C++ are very literally "type constructors" in that they are
 used to create syntactically correct C++ type strings. If the type variable `a`
-is inferred to be `int`, for example, then the Cpp type `std::vector<int>` will
+is inferred to be `int`, for example, then the C++ type `std::vector<int>` will
 be used in the generated code. The same occurs in the python type constructors
 `list`, except here the same Python type is generated regardless of the type of
 `a`.
@@ -206,7 +206,7 @@ types for every other C++ function in the program. The inferred C++ type of
 "std::vector<$1>" double -> "std::vector<$1>" double
 ```
 
-General types are also inferred for every subexpression, but since no general
+General types are also inferred for every sub-expression, but since no general
 signatures were given, the general types remain polymorphic. Thus the general
 type inferred for `rms` is `forall a b . a -> b`.
 
