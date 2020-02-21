@@ -60,8 +60,8 @@ generate ms = do
     -- rewrite partials
     >>= mapM rewritePartials
 
-  -- print abstract syntax trees to the console as debugging message
-  say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
+  -- -- print abstract syntax trees to the console as debugging message
+  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
 
   -- build nexus
   -- -----------
@@ -264,19 +264,19 @@ collect ms (evar', xs@(x:_)) = do
     collectExpr args m ts e@(LamE v x) =
       case unrollLambda e of
         (args', e') -> do
-          say $ "in LamE:" <+> prettyExpr x
+          -- say $ "in LamE:" <+> prettyExpr x
           e'' <- collectAnno (Set.union args (Set.fromList args')) m e'
           return [(LamS args' e'', ts)]
     -- AppS (SAnno g f c) [SAnno g f c]
     collectExpr args m ts (AppE e1 e2) = do
-      say $ "in AppE:" <+> parens (prettyExpr e1) <+> parens (prettyExpr e2)
+      -- say $ "in AppE:" <+> parens (prettyExpr e1) <+> parens (prettyExpr e2)
       -- The topology of e1' may vary. It could be a direct binary function. Or
       -- it could be a partially applied function. So it is necessary to map
       -- over the Many.
       e1'@(SAnno (Many fs) g1) <- collectAnno args m e1
       e2' <- collectAnno args m e2
-      say $ "in AppE e1':" <+> writeManyAST e1'
-      say $ "in AppE e2':" <+> writeManyAST e2'
+      -- say $ "in AppE e1':" <+> writeManyAST e1'
+      -- say $ "in AppE e2':" <+> writeManyAST e2'
       mapM (app g1 e2') fs
 
     collectExpr _ _ _ _ = MM.throwError . GeneratorError $
@@ -428,9 +428,9 @@ realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (SAnno GMeta One CType)
 realize x = do
-  say $ " --- realize ---"
-  say $ writeManyAST x
-  say $ " ---------------"
+  -- say $ " --- realize ---"
+  -- say $ writeManyAST x
+  -- say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     (Just (_, realization)) -> do
@@ -652,9 +652,9 @@ segment
   -> SAnno GMeta One (CType, [Argument])
   -> MorlocMonad [SAnno GMeta One (CType, [Argument])]
 segment h x@(SAnno (One (_, c)) _) = do
-  say $ " ---- entering segment"
+  -- say $ " ---- entering segment"
   (x', xs) <- segment' (fst c) x
-  say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
+  -- say $ line <> indent 2 (vsep (map writeAST' (x' : xs)))
   return (x' : xs)
   where
     writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
@@ -700,12 +700,10 @@ segment h x@(SAnno (One (_, c)) _) = do
           return (SAnno (One (LamS vs x', c1)) m, rs)
       | otherwise = MM.throwError . NotImplemented $
         "Foreign lambda's are not currently supported"
-    segment' c0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
-      -- ----------------------------.  
-      --                              \
-      --                               v    WRONG!!! -- need (argTypes *)
-      (xs', xsrss) <- mapM (segment' (fst c1)) xs |>> unzip
-      case langOf' c0 == langOf' (fst c2) of
+    segment' t0 (SAnno (One (AppS x@(SAnno (One (CallS src, c2)) m2) xs, c1)) m) = do
+
+      (xs', xsrss) <- zipWithM segment' (typeArgsC' (fst c2)) xs |>> unzip
+      case langOf' t0 == langOf' (fst c2) of
         True -> return (SAnno (One (AppS x xs', c1)) m, concat xsrss)
         False -> do
 
@@ -720,7 +718,7 @@ segment h x@(SAnno (One (_, c)) _) = do
           let (SAnno (One (AppS x' xs'', c1'@(_, lamRs'))) _) = mapC (reparameterize foreignArgs) (SAnno (One (AppS x xs', c1)) m)
 
           -- foreign function argument type
-          let foreignCMeta = (c0, snd c1)
+          let foreignCMeta = (t0, snd c1)
               appCMeta = (fst c1, foreignArgs)
           -- let meta for each produced expression
           -- all three should have the same metaId
@@ -1279,6 +1277,25 @@ typeArgs unsolved t@(VarT v)
   | elem v unsolved = [Nothing]
   | otherwise = [Just t]
 typeArgs unsolved t = [Just t]
+
+-- The typeArgs*' functions are like the typeArgs* functions except they
+-- replace Nothing with `forall a . a`. Basically, Anything instead of Nothing.
+typeArgsC' :: CType -> [CType]
+typeArgsC' t = map ctype (typeArgs' [] (unCType t))
+
+typeArgsG' :: GType -> [GType]
+typeArgsG' t = map GType (typeArgs' [] (unGType t))
+
+typeArgs' :: [TVar] -> Type -> [Type]
+typeArgs' unsolved (FunT t1@(VarT v) t2)
+  | elem v unsolved = Forall v t1 : typeArgs' unsolved t2
+  | otherwise = t1 : typeArgs' unsolved t2
+typeArgs' unsolved (FunT t1 t2) = t1 : typeArgs' unsolved t2
+typeArgs' unsolved (Forall v t) = typeArgs' (v:unsolved) t
+typeArgs' unsolved t@(VarT v)
+  | elem v unsolved = [Forall v t]
+  | otherwise = [t]
+typeArgs' _ t = [t]
 
 untypeArgs :: [Maybe CType] -> CType
 untypeArgs xs = ctype . untypeArgs' . map (fmap unCType) $ xs

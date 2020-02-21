@@ -1,6 +1,11 @@
 0.xx.x [xxxx.xx.xx]
 -------------------
 
+major
+ [ ] implement composable default types
+ [ ] implement composable serialization functions
+
+minor
  [ ] resurrect property tests
  [ ] meaningful error messages
  [ ] generate error handling in pools
@@ -8,7 +13,7 @@
  [ ] add python tests
  [ ] replace perl manifold nexus with C
  [ ] test record handling
- [ ] add general type-directed structure to JSON serialization 
+ [ ] make the test output look pretty (no weird whitespace)
 
 0.19.0 [2020.02.17]
 -------------------
