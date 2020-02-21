@@ -5,7 +5,7 @@ module PropertyTypeTests
 import Morloc.Namespace
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
-import Morloc.TypeChecker.Util
+import Morloc.TypeChecker.Internal
 import Morloc.TypeChecker.API
 
 import qualified Control.Monad as CM

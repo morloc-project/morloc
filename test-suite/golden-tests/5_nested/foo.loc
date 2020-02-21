@@ -1,13 +1,9 @@
-import math (mul, mean, sqrt, sum);
+import math (mul);
 import math (sqrt)
 import cppbase (map);
 
 export square;
-export rms;
-export sqrtsum;
-export nested_map;
+export fourth;
 
-square x = mul x x;
-rms xs = sqrt (sum (map square xs));
-sqrtsum xs = sum (map sqrt xs);
-nested_map xs = sum (map square (map sqrt xs));
+square y = mul y y;
+fourth x = mul (square x) (square x); 

@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.TypeChecker.API
 Description : The primary API for the morloc type system
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -17,6 +17,7 @@ import qualified Control.Monad.Except as ME
 import qualified Control.Monad.Reader as MR
 import qualified Control.Monad.State as MS
 import qualified Control.Monad.Writer as MW
+import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer

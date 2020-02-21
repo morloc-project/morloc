@@ -1,11 +1,46 @@
-0.18.1 [2019.11.08]
+0.xx.x [xxxx.xx.xx]
+-------------------
 
- * fix travis
- * use C++11 for C++ builds
- * make .morloc/config optional
- * fix bug in parsing unit type: `()`
+major
+ [ ] implement composable default types
+ [ ] implement composable serialization functions
+
+minor
+ [ ] resurrect property tests
+ [ ] meaningful error messages
+ [ ] generate error handling in pools
+ [ ] add type annotations to printed help
+ [ ] add python tests
+ [ ] replace perl manifold nexus with C
+ [ ] test record handling
+ [ ] make the test output look pretty (no weird whitespace)
+
+0.19.0 [2020.02.20]
+-------------------
+
+Major changes
+ * Allow currying
+ * Add realization optimizations
+ * Refactor generator into series of clear transformations
+ * Added handling for dealing with ambiguous ASTs
+
+Minor bug fixes and updates
+ * Prettier code generation for C++, Python and R
+ * More detailed comments in generated code
+ * Allow tags on parenthesized types
+ * Fix bug in functions with multiple parameters 
+ * Fix bug preventing loading of package metadata 
+
+0.18.1 [2019.11.08]
+-------------------
+
+ * Fix travis
+ * Use C++11 for C++ builds
+ * Make .morloc/config optional
+ * Fix bug in parsing unit type: `()`
 
 0.18.0 [2019.11.04]
+-------------------
 
  * Add bidirectional type system
  * Allow parameterized concrete types
@@ -17,6 +52,7 @@
  * Removed arq and SPARQL dependency (very fast compilation)
 
 0.17.4 [2019.06.29]
+-------------------
 
  * Add C and C++ handling
  * Define Ord intance for MTypeMeta

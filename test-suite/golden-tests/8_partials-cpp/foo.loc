@@ -1,0 +1,4 @@
+import math
+import cppbase
+export triple
+triple xs = map (mul 3) xs;

@@ -1,14 +1,28 @@
-source R ("rbinom", "mean");
+-- source R ("rbinom", "mean");
+-- import rbase;
+-- import math (fibonacci, sqrt);
+--
+-- export mean;
+-- export rbinom;
+-- export fibonacci;
+-- export sqrtfibmean;
+--
+-- rbinom :: Num -> Num -> Num -> Num;
+-- rbinom R :: n:integer -> size:integer -> p:numeric -> vector integer
+--     where {0 <= p <= 1};
+--
+-- mean :: [Num] -> Num;
+-- mean R :: vector numeric -> numeric;
+--
+-- sqrtfibmean n = sqrt (mean (fibonacci n));
+-- --               C     R       C
+-- -----------------^-----^-------^
+
+source R ("mean");
 import rbase;
 import math (fibonacci, sqrt);
 
-export mean;
-export rbinom;
-export fibonacci;
 export sqrtfibmean;
-
-rbinom :: Num -> Num -> Num -> Num;
-rbinom R :: integer -> integer -> numeric -> vector integer;
 
 mean :: [Num] -> Num;
 mean R :: vector numeric -> numeric;
@@ -16,3 +30,9 @@ mean R :: vector numeric -> numeric;
 sqrtfibmean n = sqrt (mean (fibonacci n));
 --               C     R       C
 -----------------^-----^-------^
+
+
+-- ---- here is a pure Cpp implementation for sqrtfibmean
+-- import math (fibonacci, mean, sqrt);
+-- export sqrtfibmean;
+-- sqrtfibmean n = sqrt (mean (fibonacci n));

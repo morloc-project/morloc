@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Parser.Parser
 Description : Full parser for Morloc/Xi
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -28,7 +28,7 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
 data ParserState = ParserState {
     stateLang :: Maybe Lang
-  , stateModulePath :: Maybe MT.Text
+  , stateModulePath :: Maybe Path
 }
 
 emptyState :: ParserState
@@ -43,7 +43,7 @@ readProgram :: Maybe Path -> MT.Text -> [Module]
 readProgram f sourceCode =
   case runParser
          (CMS.runStateT (sc >> pProgram <* eof) pstate)
-         (maybe "<expr>" MT.unpack f)
+         (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
     Left err -> error (show err)
     Right (es, _) -> es
@@ -151,7 +151,7 @@ pProgram = do
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
     [] -> return mods
-    es' -> return $ makeModule f (MV "Main") es' : mods
+    es' -> return $ makeModule f (MVar "Main") es' : mods
 
 pToplevel :: Parser Toplevel
 pToplevel =
@@ -164,21 +164,26 @@ pModule = do
   _ <- reserved "module"
   moduleName' <- name
   mes <- braces (optional delimiter >> many1 pModuleBody)
-  return $ makeModule f (MV moduleName') mes
+  return $ makeModule f (MVar moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
 makeModule f n mes =
   Module
     { moduleName = n
     , modulePath = f
-    , moduleImports = imports'
-    , moduleExports = exports'
     , moduleBody = body'
-    , moduleTypeMap = Map.empty
+    , moduleExports = exports'
+    , moduleImports = imports'
+    , moduleImportMap = Map.empty -- will be created in Infer.hs
+    , moduleSourceMap = (Map.fromList . concat)
+                        [[((srcAlias s, srcLang s), s) | s <- ss ]
+                        | (SrcE ss) <- body']
+    , moduleDeclarationMap = Map.empty -- will be created in Infer.hs
+    , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where
     imports' = [x | (MBImport x) <- mes]
-    exports' = [x | (MBExport x) <- mes]
+    exports' = Set.fromList [x | (MBExport x) <- mes]
     body' = [x | (MBBody x) <- mes]
 
 pModuleBody :: Parser ModuleBody
@@ -197,10 +202,10 @@ pImport = do
   n <- name
   imports <-
     optional $
-    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EV x, EV x)]) name
+    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EVar x, EVar x)]) name
   return . MBImport $
     Import
-      { importModuleName = MV n
+      { importModuleName = MVar n
       , importInclude = imports
       , importExclude = []
       , importNamespace = Nothing
@@ -210,10 +215,10 @@ pImportTerm :: Parser (EVar, EVar)
 pImportTerm = do
   n <- name
   a <- option n (reserved "as" >> name)
-  return (EV n, EV a)
+  return (EVar n, EVar a)
 
 pExport :: Parser ModuleBody
-pExport = fmap (MBExport . EV) $ reserved "export" >> name
+pExport = fmap (MBExport . EVar) $ reserved "export" >> name
 
 pStatement :: Parser Expr
 pStatement = try pDeclaration <|> pSignature
@@ -226,7 +231,7 @@ pDataDeclaration = do
   v <- name
   _ <- symbol "="
   e <- pExpr
-  return (Declaration (EV v) e)
+  return (Declaration (EVar v) e)
 
 pFunctionDeclaration :: Parser Expr
 pFunctionDeclaration = do
@@ -234,7 +239,7 @@ pFunctionDeclaration = do
   args <- many1 name
   _ <- op "="
   e <- pExpr
-  return $ Declaration (EV v) (curryLamE (map EV args) e)
+  return $ Declaration (EVar v) (curryLamE (map EVar args) e)
   where
     curryLamE [] e' = e'
     curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
@@ -252,12 +257,11 @@ pSignature = do
   setLang Nothing
   return $
     Signature
-      (EV v)
+      (EVar v)
       (EType
          { etype = t
          , eprop = Set.fromList props
          , econs = Set.fromList constraints
-         , esource = Nothing
          })
 
 pLang :: Parser Lang
@@ -318,15 +322,20 @@ pSrcE = do
   f <- CMS.gets stateModulePath
   reserved "source"
   language <- pLang
-  srcfile <- optional (reserved "from" >> stringLiteral)
+  srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  return $ SrcE language (MS.combine <$> fmap MS.takeDirectory f <*> srcfile) rs
+  let path = MS.combine <$> fmap MS.takeDirectory f <*> srcfile
+  return $ SrcE [Source { srcName = name
+                        , srcLang = language
+                        , srcPath = path
+                        , srcAlias = alias
+                        } | (name, alias) <- rs]
 
-pImportSourceTerm :: Parser (EVar, EVar)
+pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
   a <- option n (reserved "as" >> name)
-  return (EV n, EV a)
+  return (Name n, EVar a)
 
 pRecordE :: Parser Expr
 pRecordE = fmap RecE $ braces (sepBy1 pRecordEntryE (symbol ","))
@@ -336,7 +345,7 @@ pRecordEntryE = do
   n <- name
   _ <- symbol "="
   e <- pExpr
-  return (EV n, e)
+  return (EVar n, e)
 
 pListE :: Parser Expr
 pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
@@ -405,17 +414,17 @@ pVar :: Parser Expr
 pVar = fmap VarE pEVar
 
 pEVar :: Parser EVar
-pEVar = fmap EV name
+pEVar = fmap EVar name
 
 pType :: Parser Type
 pType =
       pExistential
+  <|> try pFunT
   <|> try pUniT
   <|> try pRecordT
   <|> try pForAllT
-  <|> try pFunT
   <|> try pArrT
-  <|> try (parens pType)
+  <|> try parensType
   <|> pListT
   <|> pTupleT
   <|> pVarT
@@ -426,6 +435,12 @@ pUniT = do
   _ <- symbol "("
   _ <- symbol ")"
   return (VarT (TV lang "Unit"))
+
+parensType :: Parser Type
+parensType = do
+  _ <- tag (symbol "(")
+  t <- parens pType
+  return t
 
 pTupleT :: Parser Type
 pTupleT = do
@@ -460,7 +475,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try (parens pType) <|> try pUniT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pFunT :: Parser Type
 pFunT = do
@@ -469,7 +484,7 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try (parens pType) <|> try pUniT <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
 
 pListT :: Parser Type
 pListT = do

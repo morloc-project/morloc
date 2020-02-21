@@ -1,13 +1,17 @@
 module UnitTypeTests
   ( unitTypeTests
+  , typeOrderTests
   ) where
 
 import Morloc.Namespace
 import Morloc.Parser.Parser
 import Morloc.TypeChecker.Infer
 import qualified Morloc.TypeChecker.API as API
+import qualified Morloc.TypeChecker.PartialOrder as MP
 
 import qualified Data.Text as T
+import qualified Data.PartialOrd as DP
+import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -15,7 +19,7 @@ main :: [Module] -> [Expr]
 main [] = error "Missing main"
 main [m] = moduleBody m
 main (m:ms)
-  | moduleName m == (MV "Main") = moduleBody m
+  | moduleName m == (MVar "Main") = moduleBody m
   | otherwise = main ms
 
 -- get the toplevel type of a fully annotated expression
@@ -112,6 +116,22 @@ testPasses msg e =
       assertFailure $
       "Expected this test to pass, but it failed with the message: " <> show e
 
+testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
+testEqual msg x y =
+  testCase msg $ assertEqual "" x y
+
+testNotEqual :: Eq a => String -> a -> a -> TestTree
+testNotEqual msg x y =
+  testCase msg $ assertEqual "" (x == y) False
+
+testTrue :: String -> Bool -> TestTree
+testTrue msg x =
+  testCase msg $ assertEqual "" x True
+
+testFalse :: String -> Bool -> TestTree
+testFalse msg x =
+  testCase msg $ assertEqual "" x False
+
 bool = VarT (TV Nothing "Bool")
 
 num = VarT (TV Nothing "Num")
@@ -142,6 +162,53 @@ tuple ts = ArrT v ts
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
 record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
+
+typeOrderTests =
+  testGroup
+    "Tests of type partial ordering"
+    [ testTrue
+        "forall a . a <= Num"
+        (MP.isSubtypeOf (forall ["a"] (var "a")) num)
+    , testFalse
+        "Num !< forall a . a"
+        (MP.isSubtypeOf num (forall ["a"] (var "a")))
+    , testTrue
+        "forall a . (Num, a) <= (Num, Str)"
+        (MP.isSubtypeOf (forall ["a"] (tuple [num, var "a"])) (tuple [num, str]))
+    , testTrue
+        "forall a . (Num, a) <= forall b . (Num, b)"
+        (MP.isSubtypeOf
+          (forall ["a"] (tuple [num, var "a"]))
+          (forall ["b"] (tuple [num, var "b"])))
+    -- cannot compare
+    , testFalse
+        "[Num] !< Num"
+        (MP.isSubtypeOf (lst num) num)
+    , testFalse
+        "Num !< [Num]"
+        (MP.isSubtypeOf num (lst num))
+    -- test "mostSpecific"
+    , testEqual
+        "mostSpecific [Num, Str, forall a . a] = [Num, Str]"
+        (MP.mostSpecific [num, str, forall ["a"] (var "a")])
+        [num, str]
+    -- test "mostGeneral"
+    , testEqual
+        "mostGeneral [Num, Str, forall a . a] = forall a . a"
+        (MP.mostGeneral [num, str, forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
+    -- test mostSpecificSubtypes
+    , testEqual
+        "mostSpecificSubtypes"
+        (MP.mostSpecificSubtypes num [forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
+
+    -- test mostSpecificSubtypes different languages
+    , testEqual
+        "mostSpecificSubtypes"
+        (MP.mostSpecificSubtypes (varc RLang "num") [forallc CLang ["a"] (var "a")])
+        []
+    ]
 
 unitTypeTests =
   testGroup
@@ -196,7 +263,7 @@ unitTypeTests =
     , assertTerminalExpr
         "functions return lambda expressions"
         "\\x -> 42"
-        (LamE (EV "x") (NumE 42.0))
+        (LamE (EVar "x") (NumE 42.0))
     , assertTerminalType
         "functions can be passed"
         "g f = f 42; g"
@@ -375,6 +442,17 @@ unitTypeTests =
         [tuple [num, str]]
     , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
 
+    -- unit type
+    , assertTerminalType
+        "unit as input"
+        "f :: () -> Bool"
+        [fun [VarT (TV Nothing "Unit"), bool]]
+
+    , assertTerminalType
+        "unit as output"
+        "f :: Bool -> ()"
+        [fun [bool, VarT (TV Nothing "Unit")]]
+
     -- -- TODO: reconsider what an empty tuple is
     -- -- I am inclined to cast it as the unit type
     -- , assertTerminalType "empty tuples are of unit type" "f :: ()" UniT
@@ -426,6 +504,7 @@ unitTypeTests =
     -- tags
     , exprEqual "variable tags" "F :: Int" "F :: foo:Int"
     , exprEqual "list tags" "F :: [Int]" "F :: foo:[Int]"
+    , exprEqual "tags on parenthesized types" "F :: Int" "F :: f:(Int)"
     , exprEqual
         "record tags"
         "F :: {x::Int, y::Str}"
@@ -472,7 +551,7 @@ unitTypeTests =
           ["module Main {export x; x = 42};", "module Foo {import Main (x)}"]
     , expectError
         "fail on import of non-existing variable"
-        (BadImport (MV "Foo") (EV "x")) $
+        (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines
           ["module Foo {export y; y = 42};", "module Main {import Foo (x); x}"]
     , expectError
@@ -484,14 +563,14 @@ unitTypeTests =
           ]
     , expectError
         "fail on redundant module declaration"
-        (MultipleModuleDeclarations (MV "Foo")) $
+        (MultipleModuleDeclarations (MVar "Foo")) $
         T.unlines ["module Foo {x = 42};", "module Foo {x = 88}"]
     , expectError "fail on self import"
-        (SelfImport (MV "Foo")) $
+        (SelfImport (MVar "Foo")) $
         T.unlines ["module Foo {import Foo (x); x = 42}"]
     , expectError
         "fail on import of non-exported variable"
-        (BadImport (MV "Foo") (EV "x")) $
+        (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines ["module Foo {x = 42};", "module Main {import Foo (x); x}"]
 
     -- test realization integration
@@ -673,6 +752,39 @@ unitTypeTests =
         ])
       [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
 
+    , assertTerminalType
+      "declaration general type signatures are respected"
+      (T.unlines
+        [ "sqrt cpp :: double -> double;"
+        , "sqrt :: forall a . a -> a;"
+        , "foo :: Num -> Num;"
+        , "foo x = sqrt x;"
+        , "foo"
+        ])
+      [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
+
+    -- -- What exactly does this mean? what should a function "be"? Will the types
+    -- -- even work out to those of a single language? For `foo x y = f (g x) y`,
+    -- -- x will be passed the G (the manifold wrapping g) where it will be
+    -- -- unpacked into Lg (the language of g); y will be passed to f and be
+    -- -- unwrapped as an argument in Lf. But what is the type of `foo`? Indeed, x
+    -- -- could also be passed to more functions, where it takes on values in more
+    -- -- languages. Surely, the type of foo must be general. Declarations do
+    -- -- not, in general, have concrete types.
+    -- , assertTerminalType
+    --   "declaration type does not have useful terms"
+    --   (T.unlines
+    --     [ "source Cpp (\"sum\");"
+    --     , "source Cpp (\"fibonacci\");"
+    --     , "sum :: [Num] -> Num;"
+    --     , "sum R :: vector numeric -> numeric;"
+    --     , "fibonacci :: Num -> [Num];"
+    --     , "fibonacci Cpp :: \"int\" -> \"vector<$1>\" \"double\";"
+    --     , "sqrtfibmean n = sum (fibonacci n);"
+    --     , "sqrtfibmean"
+    --     ])
+    --   [fun [num, num]]
+
     , assertTerminalExprWithAnnot
       "all internal concrete and general types are right"
       (T.unlines
@@ -682,22 +794,22 @@ unitTypeTests =
         , "sqrt Cpp :: \"double\" -> \"double\";"
         , "foo x = snd x (sqrt x);"
         ])
-      (Declaration (EV "foo")
-        (AnnE (LamE (EV "x")
+      (Declaration (EVar "foo")
+        (AnnE (LamE (EVar "x")
           (AnnE (AppE
             (AnnE (AppE
-              (AnnE (VarE (EV "snd"))
+              (AnnE (VarE (EVar "snd"))
                 [ fun [num, num, num]
                 , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
-              (AnnE (VarE (EV "x"))
+              (AnnE (VarE (EVar "x"))
                 [num,varc CppLang "double"]))
               [ FunT num num
               , FunT (varc CppLang "double") (varc CppLang "double")])
             (AnnE (AppE
-              (AnnE (VarE (EV "sqrt"))
+              (AnnE (VarE (EVar "sqrt"))
                 [ FunT num num
                 , FunT (varc CppLang "double") (varc CppLang "double")])
-              (AnnE (VarE (EV "x"))
+              (AnnE (VarE (EVar "x"))
                 [ num
                 , varc CppLang "double"]))
               [num,varc CppLang "double"]))

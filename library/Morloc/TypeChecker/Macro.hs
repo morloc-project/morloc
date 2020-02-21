@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.TypeChecker.Macro
 Description : Expand parameters in concrete types
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -9,11 +9,13 @@ Stability   : experimental
 -}
 
 module Morloc.TypeChecker.Macro
-  ( expandMacro
-  , showMType
-  ) where
+(
+    expandMacro
+  , buildCType
+) where
 
 import Morloc.Namespace
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.State as CMS
 import Text.Megaparsec
@@ -27,10 +29,23 @@ data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
 
-showMType :: ([MT.Text] -> MT.Text -> MT.Text) -> MType -> MT.Text
-showMType f (MConcType _ n xs) = expandMacro n (map (showMType f) xs)
-showMType f (MAbstType _ n xs) = expandMacro n (map (showMType f) xs)
-showMType f (MFuncType _ inputs output) = f (map (showMType f) inputs) (showMType f output)
+buildCType
+  :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
+  -> ([(MDoc, MDoc)] -> MDoc) -- ^ make record type
+  -> CType
+  -> MDoc
+buildCType mkfun mkrec (CType t) = f t where
+  f :: Type -> MDoc
+  f (VarT (TV _ x)) = pretty x
+  f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
+  f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
+  f (RecT entries) = mkrec [(pretty k, f t) | (TV _ k, t) <- entries]
+  f (Forall _ _) = error "Concrete polymorphism is not supported"
+  f (ExistT _ _) = error "Concrete existentials are not supported"
+
+  typeArgs :: Type -> [Type]
+  typeArgs (FunT t1 t2) = t1 : typeArgs t2
+  typeArgs t = [t]
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t

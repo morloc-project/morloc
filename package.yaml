@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.18.1
+version:          0.19.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -10,7 +10,7 @@ author:           "Zebulun Arendsee"
 maintainer:       "zbwrbz@gmail.com"
 github:           "morloc-project/morloc"
 bug-reports:      https://github.com/morloc-project/morloc/issues
-copyright:        "2018 Zebulun Arendsee"
+copyright:        "2020 Zebulun Arendsee"
 
 extra-source-files:
   - README.md
@@ -29,6 +29,7 @@ dependencies:
   - megaparsec
   - mtl
   - parsec
+  - partial-order
   - pretty-simple
   - prettyprinter
   - prettyprinter-ansi-terminal

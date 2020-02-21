@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.TypeChecker.Infer
 Description : Core inference module
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -13,7 +13,6 @@ module Morloc.TypeChecker.Infer
   , subtype
   , substitute
   , apply
-  , free
   , infer
   , rename
   , unrename
@@ -21,7 +20,8 @@ module Morloc.TypeChecker.Infer
   ) where
 
 import Morloc.Namespace
-import Morloc.TypeChecker.Util
+import Morloc.TypeChecker.Internal
+import qualified Morloc.TypeChecker.PartialOrder as P
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -37,13 +37,41 @@ typecheck ms = do
   -- graph :: Map MVar (Set MVar)
   let graph = Map.fromList $ map mod2pair ms
   mods' <- path graph
-  case mapM (flip Map.lookup $ mods) mods' of
+  mods'' <- case mapM (flip Map.lookup $ mods) mods' of
     (Just mods'') -> typecheckModules (Map.empty) mods''
     Nothing -> throwError $ OtherError "bad thing #1"
+  let modmap = Map.fromList [(moduleName m, m) | m <- mods'']
+  return (Map.elems . Map.map (addImportMap modmap) $ modmap)
   where
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m =
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
+
+    addImportMap :: Map.Map MVar Module -> Module -> Module
+    addImportMap ms m = m {
+      moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m) 
+    }
+
+    mkImportMap
+      :: Module -- the module for which
+      -> Map.Map MVar Module
+      -> Import
+      -> Map.Map EVar MVar
+    mkImportMap m ms imp = case ( importInclude imp
+                                , Map.lookup (importModuleName imp) ms
+                                ) of 
+      (_, Nothing) -> error "Bad import"
+      -- include everything
+      (Nothing, Just m') -> exportMap m' (importExclude imp)
+      -- include specific selection of terms
+      (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
+                                              (exportMap m' (importExclude imp))
+
+    exportMap :: Module -> [EVar] -> Map.Map EVar MVar
+    exportMap m excl
+      = Map.fromSet (\_ -> moduleName m)
+      $ Set.difference (moduleExports m) (Set.fromList excl)
+
 
 enter :: Doc AnsiStyle -> Stack ()
 enter d = do
@@ -79,7 +107,10 @@ typecheckModules mg (m:ms) = do
   (privateMap, mg') <- extendModularGamma g' m mg
   mods <- typecheckModules mg' ms
   leave $ "module"
-  return (m {moduleBody = exprs, moduleTypeMap = privateMap} : mods)
+  return (m { moduleBody = exprs
+            , moduleTypeMap = privateMap
+            , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
+            } : mods)
 
 insertWithCheck ::
      Map.Map MVar Module -> (MVar, Module) -> Stack (Map.Map MVar Module)
@@ -141,7 +172,7 @@ instance Renameable Type where
   rename (ExistT v ts) = ExistT <$> pure v <*> (mapM rename ts) 
   rename (Forall v t) = do
     v' <- rename v
-    t' <- rename (substitute' v (VarT v') t)
+    t' <- rename (P.substitute v (VarT v') t)
     return $ Forall v' t'
   rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
   rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
@@ -203,7 +234,6 @@ instance Typed EType where
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = Nothing
       }
 
 instance Typed TypeSet where
@@ -218,46 +248,17 @@ instance Typed TypeSet where
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
-substitute' :: TVar -> Type -> Type -> Type
-substitute' v r t = sub t
-  where
-    sub :: Type -> Type
-    sub t'@(VarT v')
-      | v == v' = r
-      | otherwise = t'
-    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
-    sub t'@(Forall x t'')
-      | v /= x = Forall x (sub t'')
-      | otherwise = t' -- allows shadowing of the variable
-    sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (RecT rs) = RecT [(x, sub t') | (x, t') <- rs]
-    sub t' = t'
-
-
--- | substitute all appearances of a given variable with an existential
--- [t/v]A
 substitute :: TVar -> Type -> Type
-substitute v t = substitute' v (ExistT v []) t
-
+substitute v t = P.substitute v (ExistT v []) t
 
 -- | TODO: document
 occursCheck :: Type -> Type -> Stack ()
 occursCheck t1 t2 = do
   say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
-  case Set.member t1 (free t2) of
+  case Set.member t1 (P.free t2) of
     True -> throwError OccursCheckFail
     False -> return ()
 
-
--- | TODO: document
-free :: Type -> Set.Set Type
-free v@(VarT _) = Set.singleton v
-free v@(ExistT _ []) = Set.singleton v
-free (ExistT v ts) = Set.unions $ Set.singleton (ArrT v ts) : map free ts
-free (FunT t1 t2) = Set.union (free t1) (free t2)
-free (Forall v t) = Set.delete (VarT v) (free t)
-free (ArrT _ xs) = Set.unions (map free xs)
-free (RecT rs) = Set.unions [free t | (_, t) <- rs]
 
 -- | fold a list of annotated expressions into one, preserving annotations
 collate :: [Expr] -> Stack Expr
@@ -301,7 +302,7 @@ collateOne (RecE es1) (RecE es2)
 -- illegal
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
-collateOne (SrcE _ _ _) (SrcE _ _ _) = error "the hell's is a toplevel doing down here?"
+collateOne (SrcE _) (SrcE _) = error "the hell's is a toplevel doing down here?"
 collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
 
 collateTypes :: [Type] -> [Type] -> Stack [Type]
@@ -338,12 +339,12 @@ appendTypeSet g v s e1 =
       mapM_ (checkRealization e1) rs
       return $ TypeSet (Just e1) rs
   -- if e is a realization, and no general type is set, just add e to the list
-    (Just lang, TypeSet Nothing rs) ->
-      return $ TypeSet Nothing (e1 {esource = lookupSrc (v, lang) g} : rs)
+    (Just lang, TypeSet Nothing rs) -> do
+      return $ TypeSet Nothing (e1 : [r | r <- rs, r /= e1])
   -- if e is a realization, and a general type exists, append it and check
     (Just lang, TypeSet (Just e2) rs) -> do
       checkRealization e2 e1
-      return $ TypeSet (Just e2) (e1 {esource = lookupSrc (v, lang) g} : rs)
+      return $ TypeSet (Just e2) (e1 : [r | r <- rs, r /= e1])
   -- if e is general, and a general type exists, merge the general types
     (Nothing, TypeSet (Just e2) rs) -> do
       let e3 =
@@ -351,10 +352,8 @@ appendTypeSet g v s e1 =
               { etype = etype e2
               , eprop = Set.union (eprop e1) (eprop e2)
               , econs = Set.union (econs e1) (econs e2)
-              , esource = Nothing
               }
       return $ TypeSet (Just e3) rs
-
 
 -- | TODO: document
 checkRealization :: EType -> EType -> Stack ()
@@ -365,8 +364,16 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
     f' (Forall _ x) (Forall _ y) = f' x y
     f' (Forall _ x) y = f' x y
     f' x (Forall _ y) = f' x y
-    f' (FunT _ _) _ = throwError BadRealization
-    f' _ (FunT _ _) = throwError BadRealization
+    f' (ExistT _ []) (ExistT _ []) = return ()
+    f' (ExistT v (x:xs)) (ExistT w (y:ys)) = f' (ExistT v xs) (ExistT w ys)
+    f' (ExistT _ _) (ExistT _ _) = throwError . OtherError $
+      "BadRealization: unequal number of parameters"
+    f' (ExistT _ _) _ = return ()
+    f' _ (ExistT _ _) = return ()
+    f' t1@(FunT _ _) t2 = throwError . OtherError $
+      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
+    f' t1 t2@(FunT _ _) = throwError . OtherError $
+      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
     f' _ _ = return ()
 
 checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [Type], Expr)
@@ -390,7 +397,6 @@ typesetFromList g v ts = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = langOf t >>= (\l -> lookupSrc (v, l) g)
       }
 
 -- | TODO: document - allow things other than general
@@ -479,6 +485,8 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
           let t2' = ArrT v1 vs2'
           let g2 = lhs ++ (SolvedG v2 t2' : rhs)
           subtype t1 t2' g2
+      _ -> throwError . OtherError $
+        "Could not find a suitable existential in context"
   where
     compareArr :: [Type] -> [Type] -> Gamma -> Stack Gamma
     compareArr [] [] g' = return g'
@@ -523,7 +531,7 @@ subtype' (Forall v@(TV lang _) a) b g
   | lang /= langOf b = return g
   | otherwise = do
       a' <- newvar lang
-      g' <- subtype (substitute' v a' a) b (g +> MarkG v +> a')
+      g' <- subtype (P.substitute v a' a) b (g +> MarkG v +> a')
       cut (MarkG v) g'
 
 --  g1,a |- A :> B -| g2,a,g3
@@ -609,26 +617,30 @@ instantiate' ta@(Forall x b) tb@(ExistT _ []) g1
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate' ta tb@(ExistT v []) g1 =
-  case access1 v g1 of
-    (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v ta) : rs
-    Nothing ->
-      case lookupT v g1 of
-        (Just _) -> return g1
+instantiate' ta tb@(ExistT v []) g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise =
+      case access1 v g1 of
+        (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v ta) : rs
         Nothing ->
-          throwError . OtherError $
-          "Error in InstRSolve: ta=(" <>
-          MT.show' ta <> ") tb=(" <> MT.show' tb <> ") g1=(" <> MT.show' g1 <> ")"
+          case lookupT v g1 of
+            (Just _) -> return g1
+            Nothing ->
+              throwError . OtherError $
+              "Error in InstRSolve: ta=(" <>
+              MT.show' ta <> ") tb=(" <> MT.show' tb <> ") g1=(" <> MT.show' g1 <> ")"
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate' ta@(ExistT v []) tb g1 = do
-  case access1 v g1 of
-    (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v tb) : rs
-    Nothing ->
-      case lookupT v g1 of
-        (Just _) -> return g1
-        Nothing -> error "error in InstLSolve"
+instantiate' ta@(ExistT v []) tb g1
+  | langOf ta /= langOf tb = return g1
+  | otherwise =
+      case access1 v g1 of
+        (Just (ls, _, rs)) -> return $ ls ++ (SolvedG v tb) : rs
+        Nothing ->
+          case lookupT v g1 of
+            (Just _) -> return g1
+            Nothing -> error "error in InstLSolve"
 -- bad
 instantiate' _ _ g = return g
 
@@ -675,32 +687,33 @@ infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
     t = VarT (TV Nothing "Bool")
 
 -- Src=>
--- --- FIXME: the expressions are now NOT sorted ... need to fix
+-- -- FIXME: the expressions are now NOT sorted ... need to fix
 -- Since the expressions in a Morloc script are sorted before being
 -- evaluated, the SrcE expressions will be considered before the Signature
 -- and Declaration expressions. Thus every term that originates in source
 -- code will be initialized here and elaborated upon with deeper type
 -- information as the signatures and declarations are parsed. 
-infer' (Just _) _ (SrcE _ _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g1 s1@(SrcE lang path xs) = do
-  let g3 = [SrcG alias lang path srcname | (srcname, alias) <- xs] ++ g1
-  return ( g3 , [] , s1)
+-- -- NOTE: Keeping SrcE as an expression, rather than pulling it out of the
+-- body, as is done with imports and exports, is justified since the type
+-- system should know that a given term is from a given language since it may
+-- be possible, in cases, to infer a type signature for the given language from
+-- the general type signature.
+infer' (Just _) _ (SrcE _) = throwError ToplevelStatementsHaveNoLanguage
+infer' Nothing g1 s1@(SrcE srcs) = do
+  let g3 = map SrcG srcs ++ g1
+  return (g3, [], s1)
 
 -- Signature=>
 infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g (Signature v e1) = do
-
-  let src = langOf e1 >>= (\l -> lookupSrc (v, l) g)
-      e2 = e1 {esource = src}
-
-  g2 <- accessWith1 isAnnG (append' e2) (ifNotFound e2) g
-  return (g2, [], Signature v e2)
+  g2 <- accessWith1 isAnnG (append' e1) (ifNotFound e1) g
+  return (g2, [], Signature v e1)
   where
 
     -- find a typeset
     isAnnG :: GammaIndex -> Bool
-    isAnnG (AnnG (VarE e2) _)
-      | v == e2 = True
+    isAnnG (AnnG (VarE e1) _)
+      | v == e1 = True
       | otherwise = False
     isAnnG _ = False
 
@@ -722,12 +735,13 @@ infer' Nothing g1 (Declaration v e1) = do
     (Just typeset@(TypeSet t ts)) -> do
       let xs1 = map etype (maybeToList t ++ ts)
           langs = langsOf g1 e1
+          tlangs = langsOf g1 typeset
       -- Check each of the signatures against the expression.
-      (g2, _,   es2) <- foldM (foldCheck e1) (g1, [], []) xs1
+      (g2, ts2, es2) <- foldM (foldCheck e1) (g1, [], []) xs1
       (g3, ts3, es3) <- mapM newvar langs
-                     >>= foldM (foldCheckExist v e1) (g2, [], [])
-      typeset2 <- foldM (appendTypeSet g3 v) typeset (map ((toEType g3) . generalize) ts3)
-      return (typeset2, g3, es3)
+                     >>= foldM (foldCheckExist v e1) (g2, ts2, es2)
+      typeset2 <- foldM (appendTypeSet g3 v) typeset (map (toEType g3) ts3)
+      return (generalizeTypeSet typeset2, g3, es3)
     Nothing -> do
       let langs = langsOf g1 e1
       (g3, ts3, es3) <- mapM newvar langs
@@ -759,13 +773,16 @@ infer' Nothing g1 (Declaration v e1) = do
       -> Stack (Gamma, [Type], [Expr])
     foldCheck e' (g1', ts, es) t' = do
       (g2', t2', e2') <- check g1' e' t'
+
+      say $ prettyScream "folded !!!!"
+      say $ prettyExpr e2'
+
       return (g2', t2':ts, e2':es)
 
     toEType g t = EType
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = langOf t >>= (\l -> lookupSrc (v,l) g)
       }
 
 --  (x:A) in g
@@ -936,7 +953,7 @@ infer' lang@(Just _) g e@(RecE _) = do
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
-  let t = RecT (zip [TV Nothing x | (EV x, _) <- rs] ts)
+  let t = RecT (zip [TV Nothing (unEVar x) | (x, _) <- rs] ts)
   return (g2, [t], ann e t)
 
 

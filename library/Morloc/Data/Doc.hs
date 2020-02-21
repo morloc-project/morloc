@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Data.Doc
 Description : A wrapper around Leijen's text builder
-Copyright   : (c) Zebulun Arendsee, 2018
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -20,6 +20,7 @@ module Morloc.Data.Doc
     -- they avoid the requirements of an explicity type signature.
   , int
   , integer
+  , block
   ) where
 
 import Data.Monoid ((<>))
@@ -39,6 +40,9 @@ int = pretty
 
 integer :: Integer -> Doc ann
 integer = pretty
+
+block :: Int -> Doc ann -> Doc ann -> Doc ann
+block level header body = align . vsep $ [header, "{", indent level body, "}"]
 
 -- | a tupled function that does not fold long lines (folding breaks commenting)
 tupledNoFold :: [Doc ann] -> Doc ann

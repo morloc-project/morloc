@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Monad
 Description : A great big stack of monads
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -21,6 +21,10 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
+  -- * reusable counter
+  , startCounter
+  , getCounter
+  -- * re-exports
   , module Control.Monad.Trans
   , module Control.Monad.Except
   , module Control.Monad.Reader
@@ -61,13 +65,23 @@ evalMorlocMonad v config m = do
     (Right value) -> return value 
 
 emptyState :: Int -> MorlocState
-emptyState v =
-  MorlocState
-    { dependencies = []
-    , statePackageMeta = []
-    , stateSerialMaps = Map.empty
-    , stateVerbosity = v
-    }
+emptyState v = MorlocState {
+    statePackageMeta = []
+  , stateVerbosity = v
+  , stateCounter = -1
+}
+
+startCounter :: MorlocMonad ()
+startCounter = do
+  s <- get
+  put $ s {stateCounter = 0}
+
+getCounter :: MorlocMonad Int
+getCounter = do
+  s <- get
+  let i = stateCounter s
+  put $ s {stateCounter = (stateCounter s) + 1}
+  return i
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)
@@ -110,8 +124,8 @@ logFile ::
   -> MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
+  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty m)
   return m
 
@@ -124,8 +138,8 @@ logFileWith ::
   -> MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack tmpdir)
-  let path = (MT.unpack tmpdir) <> "/" <> s
+  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
+  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 

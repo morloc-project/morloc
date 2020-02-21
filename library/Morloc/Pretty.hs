@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Pretty
 Description : Pretty print instances
-Copyright   : (c) Zebulun Arendsee, 2019
+Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -22,19 +22,20 @@ import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
-instance Pretty MType where
-  pretty (MConcType _ n []) = pretty n
-  pretty (MConcType _ n ts) = parens $ hsep (pretty n : (map pretty ts))
-  pretty (MAbstType _ n []) = pretty n
-  pretty (MAbstType _ n ts) = parens $ hsep (pretty n : (map pretty ts))
-  pretty (MFuncType _ ts o) =
-    parens $ (hcat . punctuate ", ") (map pretty ts) <> " -> " <> pretty o
-
 instance Pretty MVar where
-  pretty (MV t) = pretty t
+  pretty = pretty . unMVar
 
 instance Pretty EVar where
-  pretty (EV t) = pretty t
+  pretty = pretty . unEVar
+
+instance Pretty Path where
+  pretty = pretty . unPath
+
+instance Pretty Code where
+  pretty = pretty . unCode
+
+instance Pretty Name where
+  pretty = pretty . unName
 
 instance Pretty TVar where
   pretty (TV Nothing t) = pretty t
@@ -58,19 +59,15 @@ screamStyle =
     , Style.ansiUnderlining = Just Underlined
     }
 
-prettyMVar :: MVar -> Doc AnsiStyle
-prettyMVar (MV x) = pretty x
-
 prettyModule :: Module -> Doc AnsiStyle
-prettyModule m =
-  prettyMVar (moduleName m) <+>
-  braces (line <> (indent 4 (prettyBlock m)) <> line)
+prettyModule m = block 2 (pretty (moduleName m)) (prettyBlock m)
 
 prettyBlock :: Module -> Doc AnsiStyle
-prettyBlock m =
-  vsep (map prettyImport (moduleImports m)) <>
-  vsep ["export" <+> pretty e <> line | (EV e) <- moduleExports m] <>
-  vsep (map prettyExpr (moduleBody m))
+prettyBlock m = vsep
+  [ vsep $ map prettyImport (moduleImports m)
+  , vsep $ map (\v -> "export" <+> pretty v) (Set.toList (moduleExports m))
+  , vsep $ map prettyExpr (moduleBody m)
+  ]
 
 prettyImport :: Import -> Doc AnsiStyle
 prettyImport imp =
@@ -81,14 +78,14 @@ prettyImport imp =
     (\xs -> encloseSep "(" ")" ", " (map prettyImportOne xs))
     (importInclude imp)
   where
-    prettyImportOne (EV e, EV alias)
+    prettyImportOne (e, alias)
       | e /= alias = pretty e
       | otherwise = pretty e <+> "as" <+> pretty alias
 
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
-prettyExpr (VarE (EV s)) = pretty s
-prettyExpr (LamE (EV n) e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
+prettyExpr (VarE s) = pretty s
+prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
 prettyExpr (AnnE e ts) = parens
   $   prettyExpr e
   <+> "::"
@@ -98,40 +95,45 @@ prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x
-prettyExpr (Declaration (EV v) e) = pretty v <+> "=" <+> prettyExpr e
+prettyExpr (Declaration v e) = pretty v <+> "=" <+> prettyExpr e
 prettyExpr (ListE xs) = list (map prettyExpr xs)
 prettyExpr (TupleE xs) = tupled (map prettyExpr xs)
-prettyExpr (SrcE lang (Just f) rs) =
+prettyExpr (SrcE []) = ""
+prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
   "source" <+>
   viaShow lang <+>
   "from" <+>
   pretty f <+>
   tupled
     (map
-       (\(EV n, EV a) ->
+       (\(n, a) ->
           pretty n <>
-          if n == a
+          if unName n == unEVar a
             then ""
             else (" as" <> pretty a))
        rs)
-prettyExpr (SrcE lang Nothing rs) =
+  where
+    rs = [(n, a) | (Source n _ _ a) <- srcs]
+prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
   "source" <+>
   viaShow lang <+>
   tupled
     (map
-       (\(EV n, EV a) ->
+       (\(n, a) ->
           pretty n <>
-          if n == a
+          if unName n == unEVar a
             then ""
             else (" as" <> pretty a))
        rs)
+  where
+    rs = [(n,a) | (Source n _ _ a) <- srcs]
 prettyExpr (RecE entries) =
   encloseSep
     "{"
     "}"
     ", "
-    (map (\(EV v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
-prettyExpr (Signature (EV v) e) =
+    (map (\(v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
+prettyExpr (Signature v e) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle
@@ -169,19 +171,28 @@ prettyGreenType t = annotate typeStyle (prettyType t)
 prettyScream :: MT.Text -> Doc AnsiStyle
 prettyScream x = annotate screamStyle (pretty x)
 
-prettyType :: Type -> Doc ann
-prettyType (VarT (TV _ "Unit")) = "()"
-prettyType (VarT v) = pretty v
-prettyType (FunT t1@(FunT _ _) t2) =
-  parens (prettyType t1) <+> "->" <+> prettyType t2
-prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
-prettyType t@(Forall _ _) =
-  "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
-prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-prettyType (RecT entries) =
-  encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+class PrettyType a where
+  prettyType :: a -> Doc ann
+
+instance PrettyType Type where
+  prettyType (VarT (TV lang "Unit")) = "()"
+  prettyType (VarT v) = pretty v
+  prettyType (FunT t1@(FunT _ _) t2) =
+    parens (prettyType t1) <+> "->" <+> prettyType t2
+  prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
+  prettyType t@(Forall _ _) =
+    "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
+  prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
+  prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
+  prettyType (RecT entries) =
+    encloseSep "{" "}" ", "
+      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+
+instance PrettyType GType where
+  prettyType = prettyType . unGType
+
+instance PrettyType CType where
+  prettyType = prettyType . unCType
 
 prettyTypeSet :: TypeSet -> Doc AnsiStyle
 prettyTypeSet (TypeSet Nothing ts)
@@ -197,6 +208,6 @@ prettyGammaIndex (ExistG tv ts) = "ExistG:" <+> pretty tv <+> hsep (map (parens 
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
-prettyGammaIndex (SrcG ev1 lang _ _) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (ConcreteG ev lang t) = "ConcreteG:" <+> pretty ev <+> viaShow lang <+> prettyGreenType t
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2

@@ -1,0 +1,14 @@
+-- import math (fibonacci)
+-- import rbase (plotPDF)
+--
+-- export fibplot
+--
+-- fibplot n = plotPDF (fibonacci n) "fibonacci-plot.pdf";
+
+import rbase plotPDF
+
+export foo
+
+foo :: [Num] -> ()
+foo R :: vector numeric -> ()
+foo xs = plotPDF xs "foo.pdf"
