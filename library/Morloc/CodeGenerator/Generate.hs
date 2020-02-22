@@ -530,7 +530,9 @@ realize x = do
 rewritePartials
   :: SAnno GMeta One CType
   -> MorlocMonad (SAnno GMeta One CType)
-rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
+rewritePartials s@(SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
+  -- say $ writeAST id Nothing s
+
   let gTypeArgs = maybe (repeat Nothing) typeArgsG (metaGType m)
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
@@ -540,8 +542,9 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
   -- unsafe, but should not fail for well-typed input
       appType = fromJust . last . typeArgsC $ ftype
       appMeta = m {metaGType = metaGType m >>= (last . typeArgsG)}
-      lamCType = untypeArgs $ map (Just . sannoWithC id) xs' ++ typeArgsC ftype
       lamMeta = m {metaGType = Just lamGType}
+      lamCType = ftype
+
   return $ SAnno (One (LamS vs (SAnno (One (AppS f' (xs' ++ ys), appType)) appMeta), lamCType)) lamMeta
   where
     makeGType :: [Maybe GType] -> MorlocMonad GType
