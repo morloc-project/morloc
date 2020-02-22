@@ -26,6 +26,7 @@ main = do
       , golden "C++ currying" "8_partials-cpp"
       , golden "R currying" "8_partials-r"
       , golden "Python currying" "8_partials-py"
+      , golden "Export of a simple curried function" "11_curry"
       , golden "interop" "9_minimal-interop"
       , golden "IO test with Unit type" "10_io"
       , golden "IO test with interop over generics" "10_io-interop"
