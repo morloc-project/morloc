@@ -15,6 +15,10 @@ minor
  - [ ] test record handling
  - [ ] make the test output look pretty (no weird whitespace)
 
+0.19.1 [2020.02.22]
+
+ * bug fixes
+
 0.19.0 [2020.02.20]
 -------------------
 
