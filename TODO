@@ -1,3 +1,30 @@
+# Features
+
+ [ ] composable serialization/deserialization functions
+ [ ] composable default types
+ [ ] auto-casting
+ [ ] side-effect handling
+ [x] higher-order functions
+ [ ] constraint system
+ [ ] sum types
+
+ * manifold hooks
+   [ ] function docstrings
+   [ ] caching
+   [ ] effect handling hooks
+   [ ] attach effects to labeled nodes in a composition 
+   [x] set function parameters in external config (currying)
+
+ * add support for more languages
+   [ ] bash
+   [+] C
+   [+] R
+   [+] Python3
+   [ ] Haskell
+   [+] C++
+   [ ] Perl
+   [ ] Julia
+
 # Usability
 
  [ ] Make a Docker image
@@ -11,14 +38,14 @@
 # Error reporting
 
  * In the compiler ...
+
    [ ] Add meaningful error messages to parser
    [ ] Replace the naked `error` calls everywhere
 
  * In the generated code ...
 
-   [ ] If an error is caught, report the offending Morloc file and line of
-       code. This will require this information be added to the generated RDF
-       graph (which needs to be done anyway). 
+   [ ] On exceptions in generated code, return Morloc file and line number
+   [ ] Raise errors in pools when no manifold is found
 
 # Testing
 
@@ -51,31 +78,6 @@
      system, but is an essential one. Eventually this can be ported to the
      rule-engine.
  [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
- [x] port this typechecker to Morloc
-
-# Features
-
- [ ] constraint system
- [x] add higher-order functions
- [ ] demonstrate parameter handling
- [ ] add sum types
- [ ] allow function docstrings
- [ ] allow caching
- [ ] allow effect handling hooks
-
- * resurrect the old features
-   [ ] attach effects to labeled nodes in a composition 
-   [ ] set function parameters in external config 
-
- * add support for more languages
-   [ ] bash
-   [+] C
-   [+] R
-   [+] Python3
-   [ ] Haskell
-   [+] C++
-   [ ] Perl
-   [ ] Julia
 
 # Documentation
 
@@ -107,15 +109,3 @@
  * Determine library hierarchy
    [ ] Where do core files go? (e.g., `$MORLOC_HOME/lib/core/*`)
    [ ] Do we separate the *.loc files from the other language files?
-
-# Implementation
-
- [ ] Consider replacing Megaparsec parser with traditional LR parser, i.e. the
-     Haskell equivalents of Flex and Bison, Alex and Happy. 
-
- [ ] Disentangle MAST generation from the parser. First pass the script through
- a lexer (Alex) to create a token stream. The parser (Happy) generates a
- Haskell data structure from the token stream. The Haskell data structure is
- then converted to RDF (MAST). The semantic engine reads MAST to generate VAST.
- The linker reads VAST to generate LAST (local abstract syntax tree) which is
- finally converted by the generator to local source code.
