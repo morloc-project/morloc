@@ -368,6 +368,16 @@ unitTypeTests =
         "nested parameterized type"
         "xs :: Foo (Bar a) [b]"
         [arr "Foo" [arr "Bar" [var "a"], arr "List" [var "b"]]]
+    , assertTerminalType
+        "language inference in lists"
+        (T.unlines
+          [ "mul :: Num -> Num -> Num;"
+          , "mul C :: int -> int -> int;"
+          , "foo = mul 2;"
+          , "bar x = [foo x, 42];"
+          , "bar 5"
+          ])
+        [arr "List" [var "Num"], arr "List" [varc CLang "int"]]
 
     -- type signatures and higher-order functions
     , assertTerminalType
