@@ -270,7 +270,7 @@ generalize t = generalize' existentialMap t
           | v /= x = Forall x (f v t2)
           | otherwise = t1
         f v (ArrT v' xs) = ArrT v' (map (f v) xs)
-        f v (RecT xs) = RecT (map (\(v', _) -> (v', f v t)) xs)
+        f v (RecT xs) = RecT (map (\(v', t) -> (v', f v t)) xs)
         f _ t1 = t1
 
 generalizeE :: Expr -> Expr

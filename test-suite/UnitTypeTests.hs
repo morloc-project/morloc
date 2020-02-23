@@ -478,6 +478,10 @@ unitTypeTests =
         "records with variables"
         "a=42; b={x=a, y=\"yolo\"}; f=\\b->b; f b"
         [record [("x", num), ("y", str)]]
+    , assertTerminalType
+        "records with bound variables"
+        "foo a = {x=a, y=\"yolo\"}; foo 42;"
+        [record [("x", num), ("y", str)]]
 
     -- extra space
     , assertTerminalType "leading space" " 42" [num]
