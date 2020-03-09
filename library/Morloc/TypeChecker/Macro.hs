@@ -39,7 +39,7 @@ buildCType mkfun mkrec (CType t) = f t where
   f (VarT (TV _ x)) = pretty x
   f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
   f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
-  f (RecT entries) = mkrec [(pretty k, f t) | (TV _ k, t) <- entries]
+  f (NamT (TV _ v) entries) = mkrec [(pretty k, f t) | (k, t) <- entries]
   f (Forall _ _) = error "Concrete polymorphism is not supported"
   f (ExistT _ _) = error "Concrete existentials are not supported"
 
@@ -56,6 +56,8 @@ expandMacro t ps =
          t of
     Left err -> error (show err)
     Right (es, _) -> es
+
+-- expandNamedMacro :: MT.Text -> [
 
 many1 :: Parser a -> Parser [a]
 many1 p = do

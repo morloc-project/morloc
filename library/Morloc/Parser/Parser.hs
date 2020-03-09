@@ -301,7 +301,7 @@ pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 pExpr :: Parser Expr
 pExpr =
-      try pRecordE
+      try pNamE
   <|> try pTuple
   <|> try pUni
   <|> try pAnn
@@ -337,11 +337,11 @@ pImportSourceTerm = do
   a <- option n (reserved "as" >> name)
   return (Name n, EVar a)
 
-pRecordE :: Parser Expr
-pRecordE = fmap RecE $ braces (sepBy1 pRecordEntryE (symbol ","))
+pNamE :: Parser Expr
+pNamE = fmap RecE $ braces (sepBy1 pNamEntryE (symbol ","))
 
-pRecordEntryE :: Parser (EVar, Expr)
-pRecordEntryE = do
+pNamEntryE :: Parser (EVar, Expr)
+pNamEntryE = do
   n <- name
   _ <- symbol "="
   e <- pExpr
@@ -384,7 +384,7 @@ pApp = do
       <|> try pNumE
       <|> pListE
       <|> pTuple
-      <|> pRecordE
+      <|> pNamE
       <|> pVar
 
 pLogE :: Parser Expr
@@ -421,7 +421,7 @@ pType =
       pExistential
   <|> try pFunT
   <|> try pUniT
-  <|> try pRecordT
+  <|> try pNamT
   <|> try pForAllT
   <|> try pArrT
   <|> try parensType
@@ -449,18 +449,18 @@ pTupleT = do
   let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length ts))
   return $ ArrT v ts
 
-pRecordT :: Parser Type
-pRecordT = do
+pNamT :: Parser Type
+pNamT = do
   _ <- tag (symbol "{")
-  record <- braces (sepBy1 pRecordEntryT (symbol ","))
-  return $ RecT record
+  name <- braces (sepBy1 pNamEntryT (symbol ","))
+  return $ NamT (TV Nothing "Record") name
 
-pRecordEntryT :: Parser (TVar, Type)
-pRecordEntryT = do
+pNamEntryT :: Parser (MT.Text, Type)
+pNamEntryT = do
   n <- name
   _ <- op "::"
   t <- pType
-  return (TV Nothing n, t)
+  return (n, t)
 
 pExistential :: Parser Type
 pExistential = do
@@ -475,7 +475,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pNamT
 
 pFunT :: Parser Type
 pFunT = do
@@ -484,7 +484,7 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pNamT
 
 pListT :: Parser Type
 pListT = do

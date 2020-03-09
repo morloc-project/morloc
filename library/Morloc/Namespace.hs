@@ -399,9 +399,9 @@ data Type
   -- ^ (Forall a . A)
   | FunT Type Type
   -- ^ (A->B)
-  | ArrT TVar [Type]
+  | ArrT TVar [Type] -- positional parameterized types
   -- ^ f [Type]
-  | RecT [(TVar, Type)]
+  | NamT TVar [(Text, Type)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
@@ -497,11 +497,13 @@ instance HasOneLanguage Type where
   langOf x@(ArrT (TV lang _) ts)
     | all ((==) lang) (map langOf ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (RecT []) = error "empty records are not allowed"
-  langOf x@(RecT ts@((TV lang _, _):_))
-    | all ((==) lang) (map (langOf . snd) ts) &&
-      all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
+  langOf (NamT _ []) = error "empty records are not allowed"
+  langOf x@(NamT (TV lang _) ts)
+    | all ((==) lang) (map (langOf . snd) ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
 
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
+
+instance HasOneLanguage TVar where
+  langOf (TV lang _) = lang

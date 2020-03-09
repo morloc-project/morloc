@@ -22,6 +22,7 @@ module Morloc.TypeChecker.Infer
 import Morloc.Namespace
 import Morloc.TypeChecker.Internal
 import qualified Morloc.TypeChecker.PartialOrder as P
+import qualified Morloc.Lang.DefaultTypes as MLD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -176,15 +177,15 @@ instance Renameable Type where
     return $ Forall v' t'
   rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
   rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
-  rename (RecT rs) =
-    RecT <$> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
+  rename (NamT v rs) =
+    NamT <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
   unrename (VarT v) = VarT (unrename v)
   unrename (ExistT v ts) = ExistT v (map unrename ts)
   unrename (Forall v t) = Forall (unrename v) (unrename t)
   unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
   unrename (ArrT v ts) = ArrT v (map unrename ts)
-  unrename (RecT rs) = RecT [(x, unrename t) | (x, t) <- rs]
+  unrename (NamT v rs) = NamT v [(x, unrename t) | (x, t) <- rs]
 
 instance Renameable TVar where
   unrename (TV l t) = TV l . head $ MT.splitOn "." t
@@ -213,7 +214,7 @@ instance Applicable Type where
       (Just t') -> apply g t'
       Nothing -> ExistT v (map (apply g) ts)
   apply g (ArrT v ts) = ArrT v (map (apply g) ts)
-  apply g (RecT rs) = RecT (map (\(n, t) -> (n, apply g t)) rs)
+  apply g (NamT v rs) = NamT v (map (\(n, t) -> (n, apply g t)) rs)
 
 instance Applicable Expr where
   apply g e = mapT (apply g) e
@@ -319,9 +320,12 @@ collateTypes ts1 ts2
     moreSpecific :: Type -> Type -> Stack Type
     moreSpecific (FunT t11 t12) (FunT t21 t22) = FunT <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
     moreSpecific (ArrT v1 ts1) (ArrT v2 ts2) = ArrT v1 <$> zipWithM moreSpecific ts1 ts2
-    moreSpecific (RecT ts1) (RecT ts2) = RecT <$> zipWithM mergeEntry (sort ts1) (sort ts2) where
-      mergeEntry (v1, t1) (v2, t2)
-        | v1 == v2 = (,) <$> pure v1 <*> moreSpecific t1 t2
+    moreSpecific (NamT v1 ts1) (NamT v2 ts2)
+      | v1 == v2 = NamT <$> pure v1 <*> zipWithM mergeEntry (sort ts1) (sort ts2)
+      | otherwise = throwError . OtherError $ "Cannot collate records with unequal names/langs"
+      where
+      mergeEntry (k1, t1) (k2, t2)
+        | k1 == k2 = (,) <$> pure k1 <*> moreSpecific t1 t2
         | otherwise = throwError . OtherError $ "Cannot collate records with unequal keys"
     moreSpecific (ExistT _ _) t = return t
     moreSpecific t (ExistT _ _) = return t
@@ -495,17 +499,24 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
       compareArr ts1' ts2' g''
     compareArr _ _ _ = throwError TypeMismatch
 
+-- subtype :: Type -> Type -> Gamma -> Stack Gamma
+
 -- subtype unordered records
-subtype' (RecT rs1) (RecT rs2) g = compareEntry (sort rs1) (sort rs2) g
+subtype' (NamT v1 rs1) (NamT v2 rs2) g = do
+  g' <- subtype (VarT v1) (VarT v2) g
+  compareEntry (sort rs1) (sort rs2) g'
   where
-    compareEntry :: [(TVar, Type)] -> [(TVar, Type)] -> Gamma -> Stack Gamma
+    compareEntry :: [(MT.Text, Type)] -> [(MT.Text, Type)] -> Gamma -> Stack Gamma
     compareEntry [] [] g2 = return g2
-    compareEntry ((v1@(TV l1 _), t1):rs1') ((v2@(TV l2 _), t2):rs2') g2
+    compareEntry ((k1, t1):rs1') ((k2, t2):rs2') g2
       | l1 == l2 = do
-          g3 <- subtype (VarT v1) (VarT v2) g2
+          g3 <- subtype (VarT (TV l1 k1)) (VarT (TV l2 k2)) g2
           g4 <- subtype t1 t2 g3
           compareEntry rs1' rs2' g4
-      | l1 /= l2 = serialConstraint t1 t2 >> return g
+      | otherwise = serialConstraint t1 t2 >> return g
+      where
+        l1 = langOf t1
+        l2 = langOf t2
     compareEntry _ _ _ = throwError TypeMismatch
 
 --  Ea not in FV(a)
@@ -889,9 +900,9 @@ infer' _ g (AnnE e [t]) =
 infer' _ g (AnnE e ts) = return (g, ts, e)
 
 -- List=>
-infer' Nothing g e1@(ListE []) = do
-  t <- newvar Nothing
-  let t' = ArrT (TV Nothing "List") [t]
+infer' lang g e1@(ListE []) = do
+  t <- newvar lang
+  let t' = MLD.defaultList (maybe MorlocLang id lang) t
   return (g +> t, [t'], ann e1 t')
 infer' lang@(Just _) g1 e@(ListE []) = do
   (ExistT v []) <- newvar lang
@@ -924,8 +935,16 @@ infer' lang@(Just _) g1 (ListE (x:xs)) = do
 infer' Nothing g1 e1@(ListE (x:xs)) = do
   (g2, (p:_), _) <- infer Nothing g1 x
   (g3, _, es) <- chainCheck (zip (repeat p) xs) g2
+  -- In `TV Nothing "List"`, below, the language MUST be Nothing since "List"
+  -- is a general type. Concrete type will have language-specific types, e.g.
+  -- "std::vector<$1>". Sometimes this type will be dependent on the value it
+  -- contains, for example, in R "vector numeric" for a real vector but "list
+  -- (vector numeric)" for lists of vectors (or lists of other complex things).
+  -- I need a carefully-considered system for default types, type promotion,
+  -- and automatic type composition.
   let t'' = ArrT (TV Nothing "List") [apply g3 p]
   return (g3, [t''], ann (ListE es) t'')
+
 
 -- Tuple=>
 infer' _ _ (TupleE []) = throwError EmptyTuple
@@ -953,7 +972,7 @@ infer' lang@(Just _) g e@(RecE _) = do
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' Nothing g1 e@(RecE rs) = do
   (g2, ts, _) <- chainInfer g1 (map snd rs)
-  let t = RecT (zip [TV Nothing (unEVar x) | (x, _) <- rs] ts)
+  let t = MLD.defaultRecord MorlocLang (zip [unEVar x | (x, _) <- rs] ts)
   return (g2, [t], ann e t)
 
 

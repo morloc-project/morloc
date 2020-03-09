@@ -184,7 +184,11 @@ instance PrettyType Type where
     "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
   prettyType (ExistT v ts) = angles (pretty v) <+> (hsep . map prettyType) ts
   prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-  prettyType (RecT entries) =
+  prettyType (NamT (TV Nothing _) entries) =
+    encloseSep "{" "}" ", "
+      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+  prettyType (NamT (TV (Just lang) t) entries) =
+    pretty t <> "@" <> viaShow lang <+>
     encloseSep "{" "}" ", "
       (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
 

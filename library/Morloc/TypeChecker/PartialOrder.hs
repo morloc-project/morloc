@@ -34,7 +34,7 @@ substitute v r t = sub t
       | v /= x = Forall x (sub t'')
       | otherwise = t' -- allows shadowing of the variable
     sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (RecT rs) = RecT [(x, sub t') | (x, t') <- rs]
+    sub (NamT v' rs) = NamT v' [(x, sub t') | (x, t') <- rs]
     sub t' = t'
 
 -- | TODO: document
@@ -45,7 +45,7 @@ free (ExistT v ts) = Set.unions $ Set.singleton (ArrT v ts) : map free ts
 free (FunT t1 t2) = Set.union (free t1) (free t2)
 free (Forall v t) = Set.delete (VarT v) (free t)
 free (ArrT _ xs) = Set.unions (map free xs)
-free (RecT rs) = Set.unions [free t | (_, t) <- rs]
+free (NamT _ rs) = Set.unions [free t | (_, t) <- rs]
 
 -- Types are partially ordered, 'forall a . a' is lower (more generic) than
 -- Int. But 'forall a . a -> a' cannot be compared to 'forall a . a', since
@@ -68,8 +68,9 @@ instance P.PartialOrd Type where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (RecT es1) (RecT es2)
-    =  length ts1 == length ts2
+  (<=) (NamT v1 es1) (NamT v2 es2)
+    =  v1 == v2
+    && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
     where
       ts1 = map snd es1
@@ -108,7 +109,7 @@ findFirst v (FunT t11 t12) (FunT t21 t22)
     _ -> Nothing
 findFirst v (ArrT _ ts1) (ArrT _ ts2)
   = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
-findFirst v (RecT es1) (RecT es2)
+findFirst v (NamT _ es1) (NamT _ es2)
   = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
     where
       ts1 = map snd es1

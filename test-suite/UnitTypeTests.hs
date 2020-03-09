@@ -161,7 +161,7 @@ tuple ts = ArrT v ts
   where
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
-record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
+record rs = NamT (TV Nothing "Record") rs
 
 typeOrderTests =
   testGroup
@@ -369,15 +369,24 @@ unitTypeTests =
         "xs :: Foo (Bar a) [b]"
         [arr "Foo" [arr "Bar" [var "a"], arr "List" [var "b"]]]
     , assertTerminalType
-        "language inference in lists"
+        "language inference in lists #1"
+        (T.unlines
+          [ "bar Cpp :: float -> \"std::vector<$1>\" float;"
+          , "bar x = [x];"
+          , "bar 5;"
+          ])
+        [arrc CppLang "std::vector<$1>" [varc CppLang "float"], lst (var "Num")]
+    , assertTerminalType
+        "language inference in lists #2"
         (T.unlines
           [ "mul :: Num -> Num -> Num;"
-          , "mul C :: int -> int -> int;"
+          , "mul Cpp :: int -> int -> int;"
           , "foo = mul 2;"
+          , "bar Cpp :: int -> \"std::vector<$1>\" int;"
           , "bar x = [foo x, 42];"
           , "bar 5"
           ])
-        [arr "List" [var "Num"], arr "List" [varc CLang "int"]]
+        [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
 
     -- type signatures and higher-order functions
     , assertTerminalType

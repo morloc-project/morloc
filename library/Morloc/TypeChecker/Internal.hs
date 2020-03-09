@@ -253,7 +253,7 @@ generalize t = generalize' existentialMap t
     findExistentials (FunT t1 t2) =
       Set.union (findExistentials t1) (findExistentials t2)
     findExistentials (ArrT _ ts) = Set.unions (map findExistentials ts)
-    findExistentials (RecT rs) = Set.unions (map (findExistentials . snd) rs)
+    findExistentials (NamT _ rs) = Set.unions (map (findExistentials . snd) rs)
 
     generalizeOne :: TVar -> Name -> Type -> Type
     generalizeOne v0@(TV lang _) r t0 = Forall (TV lang (unName r)) (f v0 t0)
@@ -270,7 +270,7 @@ generalize t = generalize' existentialMap t
           | v /= x = Forall x (f v t2)
           | otherwise = t1
         f v (ArrT v' xs) = ArrT v' (map (f v) xs)
-        f v (RecT xs) = RecT (map (\(v', t) -> (v', f v t)) xs)
+        f v (NamT v' xs) = NamT v' (map (\(v', t) -> (v', f v t)) xs)
         f _ t1 = t1
 
 generalizeE :: Expr -> Expr
