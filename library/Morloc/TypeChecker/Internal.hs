@@ -28,6 +28,7 @@ module Morloc.TypeChecker.Internal
   , mapT'
   , newqul
   , newvar
+  , newvarRich
   , throwError
   , serialConstraint
   , incDepth
@@ -138,6 +139,7 @@ mapT :: (Type -> Type) -> Expr -> Expr
 mapT f (LamE v e) = LamE v (mapT f e)
 mapT f (ListE es) = ListE (map (mapT f) es)
 mapT f (TupleE es) = TupleE (map (mapT f) es)
+mapT f (RecE rs) = RecE (zip (map fst rs) (map (mapT f . snd) rs))
 mapT f (AppE e1 e2) = AppE (mapT f e1) (mapT f e2)
 mapT f (AnnE e ts) = AnnE (mapT f e) (map f ts)
 mapT f (Declaration v e) = Declaration v (mapT f e)
@@ -147,6 +149,9 @@ mapT _ e = e
 mapT' :: Monad m => (Type -> m Type) -> Expr -> m Expr
 mapT' f (LamE v e) = LamE <$> pure v <*> mapT' f e
 mapT' f (ListE es) = ListE <$> mapM (mapT' f) es
+mapT' f (RecE rs) = do
+  es' <- mapM (mapT' f . snd) rs
+  return $ RecE (zip (map fst rs) es')
 mapT' f (TupleE es) = TupleE <$> mapM (mapT' f) es
 mapT' f (AppE e1 e2) = AppE <$> mapT' f e1 <*> mapT' f e2
 mapT' f (AnnE e ts) = AnnE <$> mapT' f e <*> mapM f ts
@@ -193,7 +198,7 @@ access1 v gs =
     _ -> Nothing
   where
     exists :: TVar -> GammaIndex -> Bool
-    exists v1 (ExistG v2 _) = v1 == v2
+    exists v1 (ExistG v2 _ _) = v1 == v2
     exists _ _ = False
 
 accessWith1 :: Monad m =>
@@ -233,22 +238,42 @@ anns e@(Declaration _ _) _ = e
 anns e@(Signature _ _) _ = e
 anns e ts = AnnE e ts
 
+-- | Deal with existentials.
+-- This function is used to resolve remaining existentials when no further
+-- inferences about their type can be made. If the existentials have a default
+-- type, then that type can be used to replace the existential. Otherwise, the
+-- existential can be cast as generic (Forall).
 generalize :: Type -> Type
-generalize t = generalize' existentialMap t
+generalize t = generalize' existentialMap t'
   where
+
+    t' = setDefaults t
+
     generalize' :: [(TVar, Name)] -> Type -> Type
     generalize' [] t' = t'
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
 
+    setDefaults :: Type -> Type
+    setDefaults (ExistT v ps []) = ExistT v (map setDefaults ps) []
+    setDefaults (ExistT _ _ (d:_)) = setDefaults (unDefaultType d)
+    setDefaults t@(VarT _) = t
+    setDefaults (Forall v t) = Forall v (setDefaults t)
+    setDefaults (FunT t1 t2) = FunT (setDefaults t1) (setDefaults t2)
+    setDefaults (ArrT v ts) = ArrT v (map setDefaults ts)
+    setDefaults (NamT v es) = NamT v (zip (map fst es) (map (setDefaults . snd) es))
+
     existentialMap =
-      zip (Set.toList (findExistentials t)) (map (Name . MT.pack) variables)
+      zip (Set.toList (findExistentials t')) (map (Name . MT.pack) variables)
 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
     findExistentials :: Type -> Set.Set TVar
     findExistentials (VarT _) = Set.empty
-    findExistentials (ExistT v ts) =
-      Set.unions $ Set.singleton v : map findExistentials ts 
+    findExistentials (ExistT v ts ds) =
+      Set.unions
+        $ [Set.singleton v]
+        ++ map findExistentials ts
+        ++ map (findExistentials . unDefaultType) ds
     findExistentials (Forall v t') = Set.delete v (findExistentials t')
     findExistentials (FunT t1 t2) =
       Set.union (findExistentials t1) (findExistentials t2)
@@ -259,10 +284,10 @@ generalize t = generalize' existentialMap t
     generalizeOne v0@(TV lang _) r t0 = Forall (TV lang (unName r)) (f v0 t0)
       where
         f :: TVar -> Type -> Type
-        f v t1@(ExistT v' [])
+        f v t1@(ExistT v' [] _)
           | v == v' = VarT (TV lang (unName r))
           | otherwise = t1
-        f v t1@(ExistT v' ts)
+        f v t1@(ExistT v' ts _)
           | v == v' = ArrT (TV lang (unName r)) (map (f v) ts)
           | otherwise = ArrT v (map (f v) ts)
         f v (FunT t1 t2) = FunT (f v t1) (f v t2)
@@ -280,15 +305,18 @@ generalizeEType :: EType -> EType
 generalizeEType e = e {etype = generalize (etype e)}
 
 generalizeTypeSet :: TypeSet -> TypeSet
-generalizeTypeSet (TypeSet (Just t) ts) = TypeSet (Just (generalizeEType t)) (map generalizeEType ts)
-generalizeTypeSet (TypeSet Nothing ts) = TypeSet Nothing (map generalizeEType ts)
+generalizeTypeSet (TypeSet t ts) =
+  TypeSet (fmap generalizeEType t) (map generalizeEType ts)
 
 newvar :: Maybe Lang -> Stack Type
-newvar lang = do
+newvar = newvarRich [] []
+
+newvarRich :: [Type] -> [DefaultType] -> Maybe Lang -> Stack Type
+newvarRich ps ds lang = do
   s <- CMS.get
   let v = newvars !! stateVar s
   CMS.put $ s {stateVar = stateVar s + 1}
-  return (ExistT (TV lang v) [])
+  return (ExistT (TV lang v) ps ds)
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])

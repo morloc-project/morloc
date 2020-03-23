@@ -450,7 +450,7 @@ unitTypeTests =
     , assertTerminalType
         "tuple of primitives"
         "(4.2, True)"
-        [arr "Tuple2" [num, bool]]
+        [tuple [num, bool]]
     , assertTerminalType
         "tuple containing an applied variable"
         "f :: forall a . a -> a; (f 53, True)"
@@ -461,6 +461,7 @@ unitTypeTests =
         [tuple [num, str]]
     , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
 
+    --- FIXME - distinguish between Unit an Null
     -- unit type
     , assertTerminalType
         "unit as input"
@@ -622,7 +623,7 @@ unitTypeTests =
         "realizations with parameterized variables"
         (T.unlines
           [ "f :: [Num] -> Num;"
-          , "f r :: integer -> integer;"
+          , "f r :: \"$1\" integer -> integer;"
           , "f cpp :: \"std::vector<$1>\" int -> int;"
           , "f [44]"
           ])
@@ -631,7 +632,7 @@ unitTypeTests =
         "realizations can use quoted variables"
         (T.unlines
           [ "sum :: [Num] -> Num;"
-          , "sum c :: \"double*\" -> double;"
+          , "sum c :: \"$1*\" double -> double;"
           , "sum cpp :: \"std::vector<$1>\" double -> double;"
           , "sum [1,2]"
           ])
@@ -697,7 +698,7 @@ unitTypeTests =
         , "snd r :: forall a b . list a b -> b;"
         , "snd (1, True);"
         ])
-        [bool, forallc RLang ["a"] (varc RLang "a")]
+        [bool, varc RLang "logical"]
     , assertTerminalType
       "concrete map: single map, single f"
       (T.unlines
@@ -749,10 +750,18 @@ unitTypeTests =
       "obligate foreign call"
       (T.unlines
         [ "foo r :: forall a . (a -> a) -> a -> a;"
-        , "f c :: b -> b;"
-        , "foo f 1"
+        , "f c :: int -> int;"
+        , "foo f 42"
         ])
-      [forallc RLang ["a"] (varc RLang "a")]
+      [varc RLang "numeric"]
+    , assertTerminalType
+      "obligate foreign call - tupled"
+      (T.unlines
+        [ "foo r :: forall a . (a -> a) -> a -> (a,a);"
+        , "f c :: int -> int;"
+        , "foo f 42"
+        ])
+      [arrc RLang "list" [varc RLang "numeric", varc RLang "numeric"]]
     , assertTerminalType
       "declarations represent all realizations"
       (T.unlines

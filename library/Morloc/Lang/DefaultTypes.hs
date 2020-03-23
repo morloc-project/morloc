@@ -42,63 +42,66 @@ var lang t = VarT (tv lang t)
 rec :: Lang -> MT.Text -> [(MT.Text, Type)] -> Type
 rec lang name entries = NamT (tv lang name) entries
 
-defaultList :: Lang -> Type -> Type
-defaultList MorlocLang t = arr MorlocLang "List" [t]
-defaultList Python3Lang t = arr Python3Lang "list" [t]
-defaultList RLang t@(VarT (TV (Just RLang) "numeric")) = arr RLang "vector" [t]
-defaultList RLang t@(VarT (TV (Just RLang) "character")) = arr RLang "vector" [t]
-defaultList RLang t@(VarT (TV (Just RLang) "logical")) = arr RLang "vector" [t]
-defaultList RLang t = arr RLang "list" [t]
-defaultList CLang t = arr CLang "$1*" [t]
-defaultList CppLang t = arr CppLang "std::vector<$1>" [t]
-defaultList PerlLang t = arr CppLang "array" [t]
 
-defaultTuple :: Lang -> [Type] -> Type
-defaultTuple MorlocLang ts = arr MorlocLang "List" ts
-defaultTuple Python3Lang ts = arr Python3Lang "tuple" ts
-defaultTuple RLang ts = arr RLang "list" ts
-defaultTuple CLang ts = undefined -- TODO: structure
-defaultTuple CppLang ts = arr CppLang t ts where
+
+defaultList :: Maybe Lang -> Type -> DefaultType
+defaultList Nothing t = DefaultType $ arr MorlocLang "List" [t]
+defaultList (Just Python3Lang) t = DefaultType $ arr Python3Lang "list" [t]
+defaultList (Just RLang) t@(VarT (TV (Just RLang) "numeric")) = DefaultType $ arr RLang "vector" [t]
+defaultList (Just RLang) t@(VarT (TV (Just RLang) "character")) = DefaultType $ arr RLang "vector" [t]
+defaultList (Just RLang) t@(VarT (TV (Just RLang) "logical")) = DefaultType $ arr RLang "vector" [t]
+defaultList (Just RLang) t = DefaultType $ arr RLang "list" [t]
+defaultList (Just CLang) t = DefaultType $ arr CLang "$1*" [t]
+defaultList (Just CppLang) t = DefaultType $ arr CppLang "std::vector<$1>" [t]
+defaultList (Just PerlLang) t = DefaultType $ arr CppLang "array" [t]
+
+defaultTuple :: Maybe Lang -> [Type] -> DefaultType
+defaultTuple Nothing ts = DefaultType $ arr MorlocLang (MT.pack $ "Tuple" ++ show (length ts)) ts
+
+defaultTuple (Just Python3Lang) ts = DefaultType $ arr Python3Lang "tuple" ts
+defaultTuple (Just RLang) ts = DefaultType $ arr RLang "list" ts
+defaultTuple (Just CLang) ts = undefined -- TODO: structure
+defaultTuple (Just CppLang) ts = DefaultType $ arr CppLang t ts where
   vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
   t = "std::tuple<" <> MT.intercalate ", " vars <> ">"
-defaultTuple PerlLang ts = arr CppLang "array" ts
+defaultTuple (Just PerlLang) ts = DefaultType $ arr CppLang "array" ts
 
-defaultRecord :: Lang -> [(MT.Text, Type)] -> Type
-defaultRecord MorlocLang entries =  rec MorlocLang "Record" entries
-defaultRecord Python3Lang entries = rec Python3Lang "dict" entries
-defaultRecord RLang entries = rec RLang "list" entries
-defaultRecord CLang entries = undefined -- TODO: structure
-defaultRecord CppLang entries = undefined -- TODO: structure
-defaultRecord PerlLang entries = rec PerlLang "hash" entries
+defaultRecord :: Maybe Lang -> [(MT.Text, Type)] -> DefaultType
+defaultRecord Nothing entries = DefaultType $ rec MorlocLang "Record" entries
+defaultRecord (Just Python3Lang) entries = DefaultType $ rec Python3Lang "dict" entries
+defaultRecord (Just RLang) entries = DefaultType $ rec RLang "list" entries
+defaultRecord (Just CLang) entries = undefined -- TODO: structure
+defaultRecord (Just CppLang) entries = undefined -- TODO: structure
+defaultRecord (Just PerlLang) entries = DefaultType $ rec PerlLang "hash" entries
 
-defaultNull :: Lang -> Type
-defaultNull MorlocLang = var MorlocLang "Null"
-defaultNull Python3Lang = var Python3Lang "None"
-defaultNull RLang = var RLang "NULL"
-defaultNull CLang = var CLang "null"
-defaultNull CppLang = var CppLang "null"
-defaultNull PerlLang = var PerlLang "NULL"
+defaultNull :: Maybe Lang -> DefaultType
+defaultNull Nothing = DefaultType $ var MorlocLang "Unit"
+defaultNull (Just Python3Lang) = DefaultType $ var Python3Lang "None"
+defaultNull (Just RLang) = DefaultType $ var RLang "NULL"
+defaultNull (Just CLang) = DefaultType $ var CLang "null"
+defaultNull (Just CppLang) = DefaultType $ var CppLang "null"
+defaultNull (Just PerlLang) = DefaultType $ var PerlLang "NULL"
 
-defaultBool :: Lang -> Type
-defaultBool MorlocLang = var MorlocLang "Bool"
-defaultBool Python3Lang = var Python3Lang "bool"
-defaultBool RLang = var RLang "logical" 
-defaultBool CLang = var CLang "bool"
-defaultBool CppLang = var CppLang "bool"
-defaultBool PerlLang = var PerlLang "bool"
+defaultBool :: Maybe Lang -> DefaultType
+defaultBool Nothing = DefaultType $ var MorlocLang "Bool"
+defaultBool (Just Python3Lang) = DefaultType $ var Python3Lang "bool"
+defaultBool (Just RLang) = DefaultType $ var RLang "logical" 
+defaultBool (Just CLang) = DefaultType $ var CLang "bool"
+defaultBool (Just CppLang) = DefaultType $ var CppLang "bool"
+defaultBool (Just PerlLang) = DefaultType $ var PerlLang "bool"
 
-defaultString :: Lang -> Type
-defaultString MorlocLang = var MorlocLang "Str"
-defaultString Python3Lang = var Python3Lang "str"
-defaultString RLang = var RLang "character"
-defaultString CLang = var CLang "char*"
-defaultString CppLang = var CppLang "std::string"
-defaultString PerlLang = var PerlLang "str"
+defaultString :: Maybe Lang -> DefaultType
+defaultString Nothing = DefaultType $ var MorlocLang "Str"
+defaultString (Just Python3Lang) = DefaultType $ var Python3Lang "str"
+defaultString (Just RLang) = DefaultType $ var RLang "character"
+defaultString (Just CLang) = DefaultType $ var CLang "char*"
+defaultString (Just CppLang) = DefaultType $ var CppLang "std::string"
+defaultString (Just PerlLang) = DefaultType $ var PerlLang "str"
 
-defaultNumber :: Lang -> Type
-defaultNumber MorlocLang = var MorlocLang "Num"
-defaultNumber Python3Lang = var Python3Lang "float"
-defaultNumber RLang = var RLang "numeric"
-defaultNumber CLang = var CLang "double"
-defaultNumber CppLang = var CppLang "double"
-defaultNumber PerlLang = var PerlLang "double"
+defaultNumber :: Maybe Lang -> DefaultType
+defaultNumber Nothing = DefaultType $ var MorlocLang "Num"
+defaultNumber (Just Python3Lang) = DefaultType $ var Python3Lang "float"
+defaultNumber (Just RLang) = DefaultType $ var RLang "numeric"
+defaultNumber (Just CLang) = DefaultType $ var CLang "double"
+defaultNumber (Just CppLang) = DefaultType $ var CppLang "double"
+defaultNumber (Just PerlLang) = DefaultType $ var PerlLang "double"

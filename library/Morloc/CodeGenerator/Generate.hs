@@ -1419,7 +1419,10 @@ partialApply (Forall v t) = do
   where
     varIsUsed :: TVar -> Type -> Bool 
     varIsUsed v (VarT v') = v == v'
-    varIsUsed v (ExistT v' ts) = v == v' || any (varIsUsed v) ts
+    varIsUsed v (ExistT v' ts ds)
+      =  v == v'
+      || any (varIsUsed v) ts
+      || any (varIsUsed v) (map unDefaultType ds)
     varIsUsed v (Forall v' t)
       | v == v' = False
       | otherwise = varIsUsed v t

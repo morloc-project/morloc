@@ -170,7 +170,7 @@ instance Renameable Expr where
 
 instance Renameable Type where
   rename t@(VarT _) = return t
-  rename (ExistT v ts) = ExistT <$> pure v <*> (mapM rename ts) 
+  rename (ExistT v ts ds) = ExistT <$> pure v <*> (mapM rename ts) <*> (mapM rename ds)
   rename (Forall v t) = do
     v' <- rename v
     t' <- rename (P.substitute v (VarT v') t)
@@ -181,11 +181,15 @@ instance Renameable Type where
     NamT <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
   unrename (VarT v) = VarT (unrename v)
-  unrename (ExistT v ts) = ExistT v (map unrename ts)
+  unrename (ExistT v ts ds) = ExistT v (map unrename ts) (map unrename ds)
   unrename (Forall v t) = Forall (unrename v) (unrename t)
   unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
   unrename (ArrT v ts) = ArrT v (map unrename ts)
   unrename (NamT v rs) = NamT v [(x, unrename t) | (x, t) <- rs]
+
+instance Renameable DefaultType where
+  rename dt = fmap DefaultType $ rename (unDefaultType dt) 
+  unrename = DefaultType . unrename . unDefaultType
 
 instance Renameable TVar where
   unrename (TV l t) = TV l . head $ MT.splitOn "." t
@@ -204,15 +208,11 @@ instance Applicable Type where
   -- [G]Forall a.a = forall a. [G]a
   apply g (Forall x a) = Forall x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
-  apply g a@(ExistT v []) =
-    case lookupT v g of
-      (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-      Nothing -> a
-  apply g (ExistT v ts) =
+  apply g (ExistT v ts ds) =
     case lookupT v g of
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
-      (Just t') -> apply g t'
-      Nothing -> ExistT v (map (apply g) ts)
+      (Just t') -> apply g t' -- reduce an existential; strictly smaller term
+      Nothing -> ExistT v (map (apply g) ts) (map (DefaultType . apply g . unDefaultType) ds)
   apply g (ArrT v ts) = ArrT v (map (apply g) ts)
   apply g (NamT v rs) = NamT v (map (\(n, t) -> (n, apply g t)) rs)
 
@@ -250,12 +250,12 @@ instance Typed TypeSet where
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> Type -> Type
-substitute v t = P.substitute v (ExistT v []) t
+substitute v t = P.substitute v (ExistT v [] []) t
 
 -- | TODO: document
 occursCheck :: Type -> Type -> Stack ()
 occursCheck t1 t2 = do
-  say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
+  -- say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
   case Set.member t1 (P.free t2) of
     True -> throwError OccursCheckFail
     False -> return ()
@@ -267,7 +267,9 @@ collate [] = throwError . OtherError $ "Nothing to collate"
 collate [e] = return e
 collate (e:es) = do
   say $ "collating" <+> (align . vsep . map prettyExpr) (e:es)
-  foldM collateOne e es
+  e' <- foldM collateOne e es
+  say $ "collated to:" <+> prettyExpr e'
+  return e'
 
 -- | Merge two annotated expressions into one, fail if the expressions are not
 -- equivalent.
@@ -287,14 +289,20 @@ collateOne e@(LogE _) (LogE _) = return e
 collateOne e@(NumE _) (NumE _) = return e
 collateOne e@(StrE _) (StrE _) = return e
 -- containers
-collateOne (ListE es1) (ListE es2) = ListE <$> zipWithM collateOne es1 es2
-collateOne (TupleE es1) (TupleE es2) = TupleE <$> zipWithM collateOne es1 es2
+collateOne (ListE es1) (ListE es2)
+  | length es1 == length es2 = ListE <$> zipWithM collateOne es1 es2
+  | otherwise = throwError $ OtherError "collate error: unequal list length"
+collateOne (TupleE es1) (TupleE es2)
+  | length es1 == length es2 = TupleE <$> zipWithM collateOne es1 es2
+  | otherwise = throwError $ OtherError "collate error: unequal tuple length"
 collateOne (RecE es1) (RecE es2)
-  = RecE <$> (
+  | length es1 == length es2 =
+    RecE <$> (
           zip
       <$> zipWithM returnIfEqual (map fst es1) (map fst es2)
       <*> zipWithM collateOne (map snd es1) (map snd es2)
     )
+  | otherwise = throwError $ OtherError "collate error: unequal record length"
   where
     returnIfEqual :: Eq a => a -> a -> Stack a
     returnIfEqual x y
@@ -304,7 +312,8 @@ collateOne (RecE es1) (RecE es2)
 collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
 collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
 collateOne (SrcE _) (SrcE _) = error "the hell's is a toplevel doing down here?"
-collateOne e1 e2 = error $ "collation failure: (" <> show e1 <> ")  (" <> show e2 <> ")"
+collateOne e1 e2 = throwError . OtherError . render $
+  nest 2 . vsep $ ["collation failure - unequal expressions:", viaShow e1, viaShow e2]
 
 collateTypes :: [Type] -> [Type] -> Stack [Type]
 collateTypes ts1 ts2
@@ -327,8 +336,8 @@ collateTypes ts1 ts2
       mergeEntry (k1, t1) (k2, t2)
         | k1 == k2 = (,) <$> pure k1 <*> moreSpecific t1 t2
         | otherwise = throwError . OtherError $ "Cannot collate records with unequal keys"
-    moreSpecific (ExistT _ _) t = return t
-    moreSpecific t (ExistT _ _) = return t
+    moreSpecific (ExistT _ _ []) t = return t
+    moreSpecific t (ExistT _ _ []) = return t
     moreSpecific (Forall _ _) t = return t
     moreSpecific t (Forall _ _) = return t
     moreSpecific t _ = return t
@@ -368,12 +377,12 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
     f' (Forall _ x) (Forall _ y) = f' x y
     f' (Forall _ x) y = f' x y
     f' x (Forall _ y) = f' x y
-    f' (ExistT _ []) (ExistT _ []) = return ()
-    f' (ExistT v (x:xs)) (ExistT w (y:ys)) = f' (ExistT v xs) (ExistT w ys)
-    f' (ExistT _ _) (ExistT _ _) = throwError . OtherError $
+    f' (ExistT _ [] _) (ExistT _ [] _) = return ()
+    f' (ExistT v (x:xs) ds1) (ExistT w (y:ys) ds2) = f' (ExistT v xs ds1) (ExistT w ys ds2)
+    f' (ExistT _ _ _) (ExistT _ _ _) = throwError . OtherError $
       "BadRealization: unequal number of parameters"
-    f' (ExistT _ _) _ = return ()
-    f' _ (ExistT _ _) = return ()
+    f' (ExistT _ _ _) _ = return ()
+    f' _ (ExistT _ _ _) = return ()
     f' t1@(FunT _ _) t2 = throwError . OtherError $
       "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
     f' t1 t2@(FunT _ _) = throwError . OtherError $
@@ -403,23 +412,30 @@ typesetFromList g v ts = do
       , econs = Set.empty
       }
 
--- | TODO: document - allow things other than general
-chainInfer :: Gamma -> [Expr] -> Stack (Gamma, [Type], [Expr])
-chainInfer g0 es0 = do
+chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [(Type, Expr)])
+chainInfer lang g0 es0 = do
   say "chainInfer"
-  chainInfer' g0 (reverse es0) [] []
+  chainInfer' g0 (reverse es0) []
   where
     chainInfer' ::
-         Gamma -> [Expr] -> [Type] -> [Expr] -> Stack (Gamma, [Type], [Expr])
-    chainInfer' g [] ts es = return (g, ts, es)
-    chainInfer' g (x:xs) ts es = do
-      (g', [t'], e') <- infer Nothing g x
-      chainInfer' g' xs (t' : ts) (e' : es)
+         Gamma -> [Expr] -> [(Type,Expr)] -> Stack (Gamma, [(Type, Expr)])
+    chainInfer' g [] xs = return (g, xs)
+    chainInfer' g (e:es) xs = do
+      (g', ts, e') <- infer lang g e
+      case filter (\t -> langOf t == lang) ts of
+        -- FIXME - performance bug. In cases such as: `[foo x, 42]`, the
+        -- application `foo x` will be evaluated identically each time
+        -- chainInfer is called with a different language. Each time all
+        -- concrete instances will be resolved and only one will be used. 
+        [t'] -> chainInfer' g' es ((t', e'):xs)
+        ts -> throwError . OtherError . render $
+          "Expected unique type from infer, found:" <+> list (map prettyGreenType ts)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
 subtype t1 t2 g = do
-  enter $ prettyGreenType t1 <+> ":>" <+> prettyGreenType t2
+  enter $ prettyGreenType t1 <+> "<:" <+> prettyGreenType t2
+  seeGamma g
   g' <- subtype' t1 t2 g
   leave "subtype"
   return g'
@@ -439,7 +455,7 @@ subtype' t1@(VarT (TV lang1 a1)) t2@(VarT (TV lang2 a2)) g
   -- If languages are same, but types are different, raise error
   | lang1 == lang2 && a1 /= a2 = throwError $ SubtypeError t1 t2
 
-subtype' a@(ExistT (TV l1 _) []) b@(ExistT (TV l2 _) []) g
+subtype' a@(ExistT (TV l1 _) _ _) b@(ExistT (TV l2 _) _ _) g
   --
   -- ----------------------------------------- <:Exvar
   --  G[E.a] |- E.a <: E.a -| G[E.a]
@@ -480,12 +496,12 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
   | v1 == v2 = compareArr vs1 vs2 g
   | otherwise = do
     case access1 v1 g of
-      (Just (lhs, (ExistG v1' vs1'), rhs)) -> do
+      (Just (lhs, (ExistG v1' vs1' _), rhs)) -> do
         let t1' = ArrT v2 vs1'
         let g2 = lhs ++ (SolvedG v1 t1' : rhs)
         subtype t1' t2 g2
       Nothing -> case access1 v2 g of
-        (Just (lhs, (ExistG v2' vs2'), rhs)) -> do
+        (Just (lhs, (ExistG v2' vs2' _), rhs)) -> do
           let t2' = ArrT v1 vs2'
           let g2 = lhs ++ (SolvedG v2 t2' : rhs)
           subtype t1 t2' g2
@@ -498,8 +514,6 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
       g'' <- subtype t1' t2' g'
       compareArr ts1' ts2' g''
     compareArr _ _ _ = throwError TypeMismatch
-
--- subtype :: Type -> Type -> Gamma -> Stack Gamma
 
 -- subtype unordered records
 subtype' (NamT v1 rs1) (NamT v2 rs2) g = do
@@ -523,16 +537,30 @@ subtype' (NamT v1 rs1) (NamT v2 rs2) g = do
 --  g1[Ea] |- A <=: Ea -| g2
 -- ----------------------------------------- <:InstantiateR
 --  g1[Ea] |- A <: Ea -| g2
-subtype' a b@(ExistT _ _) g
-  | langOf a /= langOf b = return g
+subtype' a b@(ExistT _ [] _) g
+  | langOf a /= langOf b = return g -- incomparable
   | otherwise = occursCheck a b >> instantiate a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
-subtype' a@(ExistT _ _) b g
-  | langOf a /= langOf b = return g
+subtype' a@(ExistT _ [] _) b g
+  | langOf a /= langOf b = return g -- incomparable
   | otherwise = occursCheck b a >> instantiate a b g
+
+subtype' (ArrT v1 ps1) (ExistT v2 ps2 _) g = subtype' (ArrT v1 ps1) (ExistT v2 ps2 []) g
+subtype' (ExistT v1 ps1 _) t@(ArrT v2 ps2) g1
+  | langOf v1 /= langOf v2 = return g1 -- incomparable
+  | length ps1 /= length ps2 = throwError . OtherError . render $ 
+      "Expected equal number of type paramters, found:"
+        <+> list (map prettyGreenType ps1)
+        <+> list (map prettyGreenType ps2)
+  | otherwise = do
+    g2 <- foldM (\g (p1, p2) -> subtype p1 p2 g) g1 (zip ps1 ps2)
+    case access1 v1 g2 of
+      Just (rs, _, ls) ->
+        return $ rs ++ [SolvedG v1 t] ++ ls
+      Nothing -> return g2 -- it is already solved, so do nothing
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
 -- ----------------------------------------- <:ForallL
@@ -545,7 +573,7 @@ subtype' (Forall v@(TV lang _) a) b g
       g' <- subtype (P.substitute v a' a) b (g +> MarkG v +> a')
       cut (MarkG v) g'
 
---  g1,a |- A :> B -| g2,a,g3
+--  g1,a |- A <: B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
 --  g1 |- A <: Forall a. B -| g2
 subtype' a (Forall v@(TV lang _) b) g
@@ -556,17 +584,18 @@ subtype' a b _ = throwError $ SubtypeError a b
 
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
-instantiate t1 t2 g = do
+instantiate t1 t2 g1 = do
   say $ prettyGreenType t1 <+> "<=:" <+> prettyGreenType t2
-  g <- instantiate' t1 t2 g 
+  g2 <- instantiate' t1 t2 g1 
   say $ "instantiate done"
-  return g
+  seeGamma g2
+  return g2
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
 --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate' ta@(ExistT v@(TV lang _) []) (FunT t1 t2) g1 = do
+instantiate' ta@(ExistT v@(TV lang _) [] _) (FunT t1 t2) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -581,7 +610,7 @@ instantiate' ta@(ExistT v@(TV lang _) []) (FunT t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate' t@(FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
+instantiate' t@(FunT t1 t2) tb@(ExistT v@(TV lang _) [] _) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -595,7 +624,7 @@ instantiate' t@(FunT t1 t2) tb@(ExistT v@(TV lang _) []) g1 = do
 --
 -- ----------------------------------------- InstLAllR
 --
-instantiate' ta@(ExistT _ []) tb@(Forall v2 t2) g1
+instantiate' ta@(ExistT _ _ _) tb@(Forall v2 t2) g1
   | langOf ta /= langOf tb = return g1
   | otherwise = instantiate ta t2 (g1 +> VarG v2) >>= cut (VarG v2)
 -- InstLReach or instRReach -- each rule eliminates an existential
@@ -603,32 +632,33 @@ instantiate' ta@(ExistT _ []) tb@(Forall v2 t2) g1
 -- WARNING: be careful here, since the implementation adds to the front and the
 -- formal syntax adds to the back. Don't change anything in the function unless
 -- you really know what you are doing and have tests to confirm it.
-instantiate' ta@(ExistT v1 []) tb@(ExistT v2 []) g1 = do
-  _ <- return ()
-  case access2 v1 v2 g1 of
+instantiate' ta@(ExistT v1 ps1 []) tb@(ExistT v2 ps2 []) g1 = do
+  g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
+  g3 <- case access2 v1 v2 g2 of
     -- InstLReach
     (Just (ls, _, ms, x, rs)) -> return $ ls <> (SolvedG v1 tb : ms) <> (x : rs)
     Nothing ->
-      case access2 v2 v1 g1 of
+      case access2 v2 v1 g2 of
       -- InstRReach
         (Just (ls, _, ms, x, rs)) ->
           return $ ls <> (SolvedG v2 ta : ms) <> (x : rs)
-        Nothing -> return g1
+        Nothing -> return g2
+  return g3
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
 -- ----------------------------------------- InstRAllL
 --  g1[Ea] |- Forall x. B <=: Ea -| g2
-instantiate' ta@(Forall x b) tb@(ExistT _ []) g1
+instantiate' ta@(Forall x b) tb@(ExistT _ [] _) g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       instantiate
         (substitute x b) -- [Eb/x]B
         tb -- Ea
-        (g1 +> MarkG x +> ExistG x []) -- g1[Ea],>Eb,Eb
+        (g1 +> MarkG x +> ExistG x [] []) -- g1[Ea],>Eb,Eb
       >>= cut (MarkG x)
 --  g1 |- t
 -- ----------------------------------------- InstRSolve
 --  g1,Ea,g2 |- t <=: Ea -| g1,Ea=t,g2
-instantiate' ta tb@(ExistT v []) g1
+instantiate' ta tb@(ExistT v [] []) g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       case access1 v g1 of
@@ -643,7 +673,7 @@ instantiate' ta tb@(ExistT v []) g1
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
-instantiate' ta@(ExistT v []) tb g1
+instantiate' ta@(ExistT v [] []) tb g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       case access1 v g1 of
@@ -652,6 +682,14 @@ instantiate' ta@(ExistT v []) tb g1
           case lookupT v g1 of
             (Just _) -> return g1
             Nothing -> error "error in InstLSolve"
+
+-- if defaults are involved, no solving is done, but the subtypes of parameters
+-- and defaults needs to be checked. 
+instantiate' ta@(ExistT v1 ps1 ds1) tb@(ExistT v2 ps2 ds2) g1 = do
+  g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
+  g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype (unDefaultType d1) (unDefaultType d2) g') g ds2) g2 ds1
+  return g3
+
 -- bad
 instantiate' _ _ g = return g
 
@@ -670,32 +708,33 @@ infer l g e = do
   leave $ "infer |-" <+> encloseSep "(" ")" ", " (map prettyGreenType ts)
   return o
 
-
 --
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
--- 
+--
 -- Num=>
-infer' lang@(Just _) g e@(NumE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
-infer' Nothing g e@(NumE _) = return (g, [t], ann e t)
-  where
-    t = VarT (TV Nothing "Num")
--- Str=> 
-infer' lang@(Just _) g e@(StrE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
-infer' Nothing g e@(StrE _) = return (g, [t], ann e t)
-  where
-    t = VarT (TV Nothing "Str")
--- Log=> 
-infer' lang@(Just _) g e@(LogE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
-infer' Nothing g e@(LogE _) = return (g, [t], ann e t)
-  where
-    t = VarT (TV Nothing "Bool")
+infer' Nothing g e@(NumE _) = do
+  let t = unDefaultType $ MLD.defaultNumber Nothing
+  return (g, [t], ann e t)
+infer' lang g e@(NumE _) = do
+  t <- newvarRich [] [MLD.defaultNumber lang] lang
+  return (g +> t, [t], ann e t)
+
+-- Str=>
+infer' Nothing g e@(StrE _) = do
+  let t = unDefaultType $ MLD.defaultString Nothing
+  return (g, [t], ann e t)
+infer' lang g e@(StrE _) = do
+  t <- newvarRich [] [MLD.defaultString lang] lang
+  return (g +> t, [t], ann e t)
+
+-- Log=>
+infer' Nothing g e@(LogE _) = do
+  let t = unDefaultType $ MLD.defaultBool Nothing
+  return (g, [t], ann e t)
+infer' lang g e@(LogE _) = do
+  t <- newvarRich [] [MLD.defaultBool lang] lang
+  return (g +> t, [t], ann e t)
 
 -- Src=>
 -- -- FIXME: the expressions are now NOT sorted ... need to fix
@@ -743,21 +782,22 @@ infer' Nothing g (Signature v e1) = do
 infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
 infer' Nothing g1 (Declaration v e1) = do
   (typeset3, g4, es4) <- case lookupE (VarE v) g1 of
+    -- CheckDeclaration
     (Just typeset@(TypeSet t ts)) -> do
       let xs1 = map etype (maybeToList t ++ ts)
-          langs = langsOf g1 e1
           tlangs = langsOf g1 typeset
+          langs = [lang | lang <- langsOf g1 e1, not (elem lang tlangs)]
       -- Check each of the signatures against the expression.
       (g2, ts2, es2) <- foldM (foldCheck e1) (g1, [], []) xs1
       (g3, ts3, es3) <- mapM newvar langs
                      >>= foldM (foldCheckExist v e1) (g2, ts2, es2)
       typeset2 <- foldM (appendTypeSet g3 v) typeset (map (toEType g3) ts3)
       return (generalizeTypeSet typeset2, g3, es3)
+    -- InferDeclaration
     Nothing -> do
-      let langs = langsOf g1 e1
-      (g3, ts3, es3) <- mapM newvar langs
-                     >>= foldM (foldCheckExist v e1) (g1, [], [])
-      typeset2 <- typesetFromList g3 v (map generalize ts3)
+      (g3, ts3, es3) <- foldM (foldInfer v e1) (g1, [], []) (langsOf g1 e1)
+      let ts4 = unique ts3
+      typeset2 <- typesetFromList g3 v (map generalize ts4)
       return (typeset2, g3, es3)
 
   e2 <- collate es4
@@ -766,8 +806,20 @@ infer' Nothing g1 (Declaration v e1) = do
 
   return (g4 +> AnnG (VarE v) typeset3, [], e5)
   where
-    foldCheckExist ::
-         EVar
+
+    foldInfer
+      :: EVar
+      -> Expr
+      -> (Gamma, [Type], [Expr])
+      -> Maybe Lang
+      -> Stack (Gamma, [Type], [Expr])
+    foldInfer v e' (g1', ts1, es) lang = do
+      (g2', ts2, e2) <- infer lang (g1' +> MarkEG v) e'
+      g3' <- cut (MarkEG v) g2'
+      return (g2', ts1 ++ ts2, e2:es)
+
+    foldCheckExist
+      :: EVar
       -> Expr
       -> (Gamma, [Type], [Expr])
       -> Type
@@ -775,7 +827,7 @@ infer' Nothing g1 (Declaration v e1) = do
     foldCheckExist v e' (g1', ts, es) t' = do
       (g2', t2', e2') <- check (g1' +> MarkEG v +> t') e' t'
       g3' <- cut (MarkEG v) g2'
-      return (g3', t2':ts, e2':es)
+      return (g2', t2':ts, e2':es)
 
     foldCheck ::
          Expr
@@ -785,7 +837,6 @@ infer' Nothing g1 (Declaration v e1) = do
     foldCheck e' (g1', ts, es) t' = do
       (g2', t2', e2') <- check g1' e' t'
 
-      say $ prettyScream "folded !!!!"
       say $ prettyExpr e2'
 
       return (g2', t2':ts, e2':es)
@@ -832,7 +883,7 @@ infer' lang g1 e0@(LamE v e2) = do
  - ----------------------------------------- -->E
  -  g |- e1 e2 =>> C -| d_k
  -}
-infer' _ g1 (AppE e1 e2) = do
+infer' lang g1 (AppE e1 e2) = do
   -- Anonymous lambda functions are currently not supported. So e1 currently will
   -- be a VarE, an AppE, or an AnnE annotating a VarE or AppE. Anonymous lambdas
   -- would roughly correspond to DeclareInfer statements while adding annotated
@@ -840,7 +891,7 @@ infer' _ g1 (AppE e1 e2) = do
 
   -- @as1@ will include one entry consisting of the general type `(Nothing,t)`
   -- and one or more realizatoins `(Just lang, t)`
-  (d1, as1, e1') <- infer Nothing g1 e1
+  (d1, as1, e1') <- infer lang g1 e1
 
   -- Map derive over every type observed for e1, the functional element. The
   -- result is a list of the types and expressions derived from e2
@@ -900,81 +951,45 @@ infer' _ g (AnnE e [t]) =
 infer' _ g (AnnE e ts) = return (g, ts, e)
 
 -- List=>
-infer' lang g e1@(ListE []) = do
-  t <- newvar lang
-  let t' = MLD.defaultList (maybe MorlocLang id lang) t
-  return (g +> t, [t'], ann e1 t')
-infer' lang@(Just _) g1 e@(ListE []) = do
-  (ExistT v []) <- newvar lang
-  -- generate an existential variable for the unknown container parameter
-  p <- newvar lang
-  -- define the container type
-  let t = ExistT v [p]
-      -- store the container and paramter types as an existentials, since
-      -- neither is yet unknown
-      g2 = g1 +> t +> p
-  return (g2, [t], ann e t)
-infer' lang@(Just _) g1 (ListE (x:xs)) = do
-  -- infer the type of the first element
-  (g2, (p:_), _) <- infer lang g1 x
-  -- check that every following element is a subtype of this element
-  -- FIXME: this is wrong ... I should instead infer the types of all and
-  -- report the most general type (or something like that). I need a
-  -- `mostPolymorphic` function that given a pair of types will fail if neither
-  -- is the subtype of the other or otherwise return the more polymorphic one.
-  -- Then I could infer every type in the list and then foldM them with
-  -- `mostPolymorphic`.
-  (g3, _, es) <- chainCheck (zip (repeat p) xs) g2
-  -- generate an existential variable for the unknown container parameter
-  (ExistT v []) <- newvar lang
-  let p' = apply g3 p
-      t = ExistT v [p']
-      g4 = g3 +> t
-  return (g4, [t], ann (ListE es) t)
--- TODO: fix this - this should do something more reasonable
-infer' Nothing g1 e1@(ListE (x:xs)) = do
-  (g2, (p:_), _) <- infer Nothing g1 x
-  (g3, _, es) <- chainCheck (zip (repeat p) xs) g2
-  -- In `TV Nothing "List"`, below, the language MUST be Nothing since "List"
-  -- is a general type. Concrete type will have language-specific types, e.g.
-  -- "std::vector<$1>". Sometimes this type will be dependent on the value it
-  -- contains, for example, in R "vector numeric" for a real vector but "list
-  -- (vector numeric)" for lists of vectors (or lists of other complex things).
-  -- I need a carefully-considered system for default types, type promotion,
-  -- and automatic type composition.
-  let t'' = ArrT (TV Nothing "List") [apply g3 p]
-  return (g3, [t''], ann (ListE es) t'')
-
+infer' lang g1 e1@(ListE xs1) = do
+  (g2, pairs) <- chainInfer lang g1 xs1
+  elementType <- case P.mostSpecific (map fst pairs) of
+    [] -> newvar lang
+    (t:_) -> return t
+  (g3, _, xs3) <- chainCheck (zip (repeat elementType) xs1) g2
+  let dt = MLD.defaultList Nothing elementType
+  containerType <-
+    if lang == Nothing
+    then return (unDefaultType dt)
+    else newvarRich [elementType] [dt] lang
+  return (g3, [containerType], ann (ListE xs3) containerType)
 
 -- Tuple=>
 infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
-infer' lang@(Just _) g1 e@(TupleE xs) = do
-  (ExistT v []) <- newvar lang
-  vs <- replicateM (length xs) (newvar lang)
-  let t = ArrT v vs
-      g2 = g1 +> ExistG v vs ++> vs
-  (g3, ts, es) <- chainCheck (zip vs xs) g2
-  let t2 = apply g3 t
-      e2 = apply g3 (TupleE es)
-  return (g3, [t2], ann e2 t2) 
-infer' Nothing g1 (TupleE xs) = do
-  (g2, ts, es) <- chainInfer g1 xs
-  let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length xs))
-      t = ArrT v ts
-      e = TupleE es
-  return (g2, [t], ann e t)
+infer' lang g1 e@(TupleE xs1) = do
+  (g2, pairs) <- chainInfer lang g1 xs1
+  let (ts2, xs2) = unzip pairs
+      dt = MLD.defaultTuple Nothing ts2
+  containerType <-
+    if lang == Nothing
+    then return (unDefaultType dt)
+    else newvarRich ts2 [dt] lang
+  return (g2, [containerType], ann (TupleE xs2) containerType)
 
--- ----------------------------------------- Record=>
-infer' lang@(Just _) g e@(RecE _) = do
-  v <- newvar lang
-  return (g +> v, [v], ann e v) 
+-- Record=>
 infer' _ _ (RecE []) = throwError EmptyRecord
-infer' Nothing g1 e@(RecE rs) = do
-  (g2, ts, _) <- chainInfer g1 (map snd rs)
-  let t = MLD.defaultRecord MorlocLang (zip [unEVar x | (x, _) <- rs] ts)
-  return (g2, [t], ann e t)
-
+infer' lang g1 e@(RecE rs) = do
+  (g2, pairs) <- chainInfer lang g1 (map snd rs)
+  let (ts2, xs2) = unzip pairs
+      keys = map fst rs
+      entries = zip (map unEVar keys) ts2
+      dt = MLD.defaultRecord lang entries
+  containerType <-
+    if lang == Nothing
+    then return (unDefaultType dt)
+    else newvarRich [NamT (TV lang "__RECORD__") entries] [dt] lang -- see entry in Parser.hs
+  return (g2, [containerType], ann (RecE (zip keys xs2)) containerType)
 
 chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
 chainCheck xs g = do
@@ -985,7 +1000,6 @@ chainCheck xs g = do
     f (g', ts, es) (t', e') = do 
       (g'', t'', e'') <- check g' e' t'
       return (g'', t'':ts, e'':es)
-
 
 -- | Pattern matches against each type
 check ::
@@ -1000,7 +1014,7 @@ check g e t = do
   enter $ "check" <+> parens (prettyExpr e) <> "  " <> prettyGreenType t
   seeGamma g
   (g', t', e') <- check' g e t
-  leave $ "check |-" <+> prettyType t'
+  leave $ "check |-" <+> prettyGreenType t'
   return (g', t', e')
 
 --  g1,x:A |- e <= B -| g2,x:A,g3
@@ -1045,7 +1059,7 @@ derive g e f = do
   enter $ "derive" <+> prettyExpr e <> "  " <> prettyGreenType f
   seeGamma g
   (g', t', e') <- derive' g e f
-  leave $ "derive |-" <+> prettyType t'
+  leave $ "derive |-" <+> prettyGreenType t'
   return (g', t', e')
 
 
@@ -1059,13 +1073,13 @@ derive' g e (FunT a b) = do
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-derive' g e (Forall x s) = derive (g +> ExistG x []) e (substitute x s)
+derive' g e (Forall x s) = derive (g +> ExistG x [] []) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistT v@(TV lang _) []) =
+derive' g e t@(ExistT v@(TV lang _) [] _) =
   case access1 v g of
-  -- replace <t0> with <t0>:<ea1> -> <ea2>
+    -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       ea1 <- newvar lang
       ea2 <- newvar lang
