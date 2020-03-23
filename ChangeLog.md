@@ -2,7 +2,6 @@
 -------------------
 
 major
- - [ ] implement composable default types
  - [ ] implement composable serialization functions
 
 minor
@@ -14,6 +13,11 @@ minor
  - [ ] replace perl manifold nexus with C
  - [ ] test record handling
  - [ ] make the test output look pretty (no weird whitespace)
+
+0.20.0 [2020.03.23]
+-------------------
+
+ * Add composable default types
 
 0.19.1 [2020.02.22]
 

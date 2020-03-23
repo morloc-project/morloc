@@ -15,6 +15,7 @@ import Data.Void (Void)
 import Morloc.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
+import qualified Morloc.Lang.DefaultTypes as MLD
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
@@ -29,10 +30,18 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 data ParserState = ParserState {
     stateLang :: Maybe Lang
   , stateModulePath :: Maybe Path
+  , stateIndex :: Int
 }
 
 emptyState :: ParserState
-emptyState = ParserState {stateLang = Nothing , stateModulePath = Nothing}
+emptyState = ParserState {stateLang = Nothing , stateModulePath = Nothing, stateIndex = 1}
+
+newvar :: Maybe Lang -> Parser TVar
+newvar lang = do
+  s <- CMS.get
+  let i = stateIndex s 
+  CMS.put (s {stateIndex = i + 1}) 
+  return (TV lang ("p" <> MT.show' i))
 
 setLang :: Maybe Lang -> Parser ()
 setLang lang = do
@@ -48,7 +57,7 @@ readProgram f sourceCode =
     Left err -> error (show err)
     Right (es, _) -> es
   where
-    pstate = ParserState {stateLang = Nothing , stateModulePath = f}
+    pstate = ParserState {stateLang = Nothing , stateModulePath = f, stateIndex = 1}
 
 readType :: MT.Text -> Type
 readType typeStr =
@@ -301,7 +310,7 @@ pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 pExpr :: Parser Expr
 pExpr =
-      try pRecordE
+      try pNamE
   <|> try pTuple
   <|> try pUni
   <|> try pAnn
@@ -337,11 +346,11 @@ pImportSourceTerm = do
   a <- option n (reserved "as" >> name)
   return (Name n, EVar a)
 
-pRecordE :: Parser Expr
-pRecordE = fmap RecE $ braces (sepBy1 pRecordEntryE (symbol ","))
+pNamE :: Parser Expr
+pNamE = fmap RecE $ braces (sepBy1 pNamEntryE (symbol ","))
 
-pRecordEntryE :: Parser (EVar, Expr)
-pRecordEntryE = do
+pNamEntryE :: Parser (EVar, Expr)
+pNamEntryE = do
   n <- name
   _ <- symbol "="
   e <- pExpr
@@ -384,7 +393,7 @@ pApp = do
       <|> try pNumE
       <|> pListE
       <|> pTuple
-      <|> pRecordE
+      <|> pNamE
       <|> pVar
 
 pLogE :: Parser Expr
@@ -421,7 +430,7 @@ pType =
       pExistential
   <|> try pFunT
   <|> try pUniT
-  <|> try pRecordT
+  <|> try pNamT
   <|> try pForAllT
   <|> try pArrT
   <|> try parensType
@@ -431,10 +440,11 @@ pType =
 
 pUniT :: Parser Type
 pUniT = do
-  lang <- CMS.gets stateLang
   _ <- symbol "("
   _ <- symbol ")"
-  return (VarT (TV lang "Unit"))
+  lang <- CMS.gets stateLang
+  v <- newvar lang
+  return (ExistT v [] [MLD.defaultNull lang])
 
 parensType :: Parser Type
 parensType = do
@@ -444,28 +454,39 @@ parensType = do
 
 pTupleT :: Parser Type
 pTupleT = do
+  lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  let v = TV Nothing . MT.pack $ "Tuple" ++ (show (length ts))
-  return $ ArrT v ts
+  v <- newvar lang
+  let dt = MLD.defaultTuple lang ts
+  return $
+    if lang == Nothing
+    then unDefaultType dt
+    else ExistT v ts [dt]
 
-pRecordT :: Parser Type
-pRecordT = do
+pNamT :: Parser Type
+pNamT = do
   _ <- tag (symbol "{")
-  record <- braces (sepBy1 pRecordEntryT (symbol ","))
-  return $ RecT record
+  entries <- braces (sepBy1 pNamEntryT (symbol ","))
+  lang <- CMS.gets stateLang
+  v <- newvar lang
+  let dt = MLD.defaultRecord lang entries
+  return $
+    if lang == Nothing
+    then unDefaultType dt
+    else ExistT v [NamT (TV lang "__RECORD__") entries] [dt] -- see entry in Infer.hs
 
-pRecordEntryT :: Parser (TVar, Type)
-pRecordEntryT = do
+pNamEntryT :: Parser (MT.Text, Type)
+pNamEntryT = do
   n <- name
   _ <- op "::"
   t <- pType
-  return (TV Nothing n, t)
+  return (n, t)
 
 pExistential :: Parser Type
 pExistential = do
   v <- angles name
-  return (ExistT (TV Nothing v) [])
+  return (ExistT (TV Nothing v) [] [])
 
 pArrT :: Parser Type
 pArrT = do
@@ -475,7 +496,7 @@ pArrT = do
   args <- many1 pType'
   return $ ArrT (TV lang n) args
   where
-    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pNamT
 
 pFunT :: Parser Type
 pFunT = do
@@ -484,13 +505,19 @@ pFunT = do
   ts <- sepBy1 pType' (op "->")
   return $ foldr1 FunT (t : ts)
   where
-    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pRecordT
+    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pNamT
 
 pListT :: Parser Type
 pListT = do
   _ <- tag (symbol "[")
   t <- brackets pType
-  return $ ArrT (TV Nothing "List") [t]
+  lang <- CMS.gets stateLang
+  v <- newvar lang
+  let dt = MLD.defaultList lang t
+  return $
+    if lang == Nothing
+    then unDefaultType dt
+    else ExistT v [t] [dt]
 
 pVarT :: Parser Type
 pVarT = do

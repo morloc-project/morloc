@@ -18,6 +18,7 @@ module Morloc.Namespace
   , ctype
   , GType(..)
   , generalType
+  , DefaultType(..)
   , EVar(..)
   , MVar(..)
   , Name(..)
@@ -287,7 +288,7 @@ data GammaIndex
   -- ^ (G,a)
   | AnnG Expr TypeSet
   -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar [Type]
+  | ExistG TVar [Type] [DefaultType]
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar Type
   -- ^ (G,a^=t) Store a solved existential variable
@@ -377,6 +378,9 @@ newtype CType = CType { unCType :: Type }
 newtype GType = GType { unGType :: Type }
   deriving (Show, Ord, Eq)
 
+newtype DefaultType = DefaultType { unDefaultType :: Type }
+  deriving (Show, Ord, Eq)
+
 -- a safe alternative to the CType constructor
 ctype :: Type -> CType
 ctype t
@@ -393,15 +397,15 @@ generalType t
 data Type
   = VarT TVar
   -- ^ (a)
-  | ExistT TVar [Type]
+  | ExistT TVar [Type] [DefaultType]
   -- ^ (a^) will be solved into one of the other types
   | Forall TVar Type
   -- ^ (Forall a . A)
   | FunT Type Type
   -- ^ (A->B)
-  | ArrT TVar [Type]
+  | ArrT TVar [Type] -- positional parameterized types
   -- ^ f [Type]
-  | RecT [(TVar, Type)]
+  | NamT TVar [(Text, Type)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
@@ -441,7 +445,7 @@ instance Indexable GammaIndex where
   index = id
 
 instance Indexable Type where
-  index (ExistT t ts) = ExistG t ts
+  index (ExistT t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
 
 class Typelike a where
@@ -485,7 +489,7 @@ instance HasOneLanguage CType where
 -- an error in this function indicates a logical bug in the typechecker.
 instance HasOneLanguage Type where
   langOf (VarT (TV lang _)) = lang
-  langOf x@(ExistT (TV lang _) ts)
+  langOf x@(ExistT (TV lang _) ts _)
     | all ((==) lang) (map langOf ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
   langOf x@(Forall (TV lang _) t)
@@ -497,11 +501,13 @@ instance HasOneLanguage Type where
   langOf x@(ArrT (TV lang _) ts)
     | all ((==) lang) (map langOf ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (RecT []) = error "empty records are not allowed"
-  langOf x@(RecT ts@((TV lang _, _):_))
-    | all ((==) lang) (map (langOf . snd) ts) &&
-      all ((==) lang) (map (\(TV l _, _) -> l) ts) = lang
+  langOf (NamT _ []) = error "empty records are not allowed"
+  langOf x@(NamT (TV lang _) ts)
+    | all ((==) lang) (map (langOf . snd) ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
 
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
+
+instance HasOneLanguage TVar where
+  langOf (TV lang _) = lang

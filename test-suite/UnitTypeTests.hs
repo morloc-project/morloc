@@ -161,7 +161,7 @@ tuple ts = ArrT v ts
   where
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
-record rs = RecT (map (\(x, t) -> (TV Nothing x, t)) rs)
+record rs = NamT (TV Nothing "Record") rs
 
 typeOrderTests =
   testGroup
@@ -368,6 +368,25 @@ unitTypeTests =
         "nested parameterized type"
         "xs :: Foo (Bar a) [b]"
         [arr "Foo" [arr "Bar" [var "a"], arr "List" [var "b"]]]
+    , assertTerminalType
+        "language inference in lists #1"
+        (T.unlines
+          [ "bar Cpp :: float -> \"std::vector<$1>\" float;"
+          , "bar x = [x];"
+          , "bar 5;"
+          ])
+        [arrc CppLang "std::vector<$1>" [varc CppLang "float"], lst (var "Num")]
+    , assertTerminalType
+        "language inference in lists #2"
+        (T.unlines
+          [ "mul :: Num -> Num -> Num;"
+          , "mul Cpp :: int -> int -> int;"
+          , "foo = mul 2;"
+          , "bar Cpp :: int -> \"std::vector<$1>\" int;"
+          , "bar x = [foo x, 42];"
+          , "bar 5"
+          ])
+        [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
 
     -- type signatures and higher-order functions
     , assertTerminalType
@@ -431,7 +450,7 @@ unitTypeTests =
     , assertTerminalType
         "tuple of primitives"
         "(4.2, True)"
-        [arr "Tuple2" [num, bool]]
+        [tuple [num, bool]]
     , assertTerminalType
         "tuple containing an applied variable"
         "f :: forall a . a -> a; (f 53, True)"
@@ -442,6 +461,7 @@ unitTypeTests =
         [tuple [num, str]]
     , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
 
+    --- FIXME - distinguish between Unit an Null
     -- unit type
     , assertTerminalType
         "unit as input"
@@ -477,6 +497,10 @@ unitTypeTests =
     , assertTerminalType
         "records with variables"
         "a=42; b={x=a, y=\"yolo\"}; f=\\b->b; f b"
+        [record [("x", num), ("y", str)]]
+    , assertTerminalType
+        "records with bound variables"
+        "foo a = {x=a, y=\"yolo\"}; foo 42;"
         [record [("x", num), ("y", str)]]
 
     -- extra space
@@ -599,7 +623,7 @@ unitTypeTests =
         "realizations with parameterized variables"
         (T.unlines
           [ "f :: [Num] -> Num;"
-          , "f r :: integer -> integer;"
+          , "f r :: \"$1\" integer -> integer;"
           , "f cpp :: \"std::vector<$1>\" int -> int;"
           , "f [44]"
           ])
@@ -608,7 +632,7 @@ unitTypeTests =
         "realizations can use quoted variables"
         (T.unlines
           [ "sum :: [Num] -> Num;"
-          , "sum c :: \"double*\" -> double;"
+          , "sum c :: \"$1*\" double -> double;"
           , "sum cpp :: \"std::vector<$1>\" double -> double;"
           , "sum [1,2]"
           ])
@@ -674,7 +698,7 @@ unitTypeTests =
         , "snd r :: forall a b . list a b -> b;"
         , "snd (1, True);"
         ])
-        [bool, forallc RLang ["a"] (varc RLang "a")]
+        [bool, varc RLang "logical"]
     , assertTerminalType
       "concrete map: single map, single f"
       (T.unlines
@@ -726,10 +750,18 @@ unitTypeTests =
       "obligate foreign call"
       (T.unlines
         [ "foo r :: forall a . (a -> a) -> a -> a;"
-        , "f c :: b -> b;"
-        , "foo f 1"
+        , "f c :: int -> int;"
+        , "foo f 42"
         ])
-      [forallc RLang ["a"] (varc RLang "a")]
+      [varc RLang "numeric"]
+    , assertTerminalType
+      "obligate foreign call - tupled"
+      (T.unlines
+        [ "foo r :: forall a . (a -> a) -> a -> (a,a);"
+        , "f c :: int -> int;"
+        , "foo f 42"
+        ])
+      [arrc RLang "list" [varc RLang "numeric", varc RLang "numeric"]]
     , assertTerminalType
       "declarations represent all realizations"
       (T.unlines

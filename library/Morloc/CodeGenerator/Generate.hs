@@ -695,7 +695,7 @@ segment h x@(SAnno (One (_, c)) _) = do
       return (SAnno (One (RecS (zip (map fst xs) vals), c)) m, concat rs)
       where
         recTypes :: CType -> MorlocMonad [CType]
-        recTypes (CType (RecT entries)) = return (map (CType . snd) entries)
+        recTypes (CType (NamT _ entries)) = return (map (CType . snd) entries)
         recTypes _ = MM.throwError . TypeError $ "Expected Tuple type"
     segment' t0 (SAnno (One (LamS vs x, c1)) m)
       | langOf' t0 == langOf' (fst c1) = do
@@ -1419,13 +1419,16 @@ partialApply (Forall v t) = do
   where
     varIsUsed :: TVar -> Type -> Bool 
     varIsUsed v (VarT v') = v == v'
-    varIsUsed v (ExistT v' ts) = v == v' || any (varIsUsed v) ts
+    varIsUsed v (ExistT v' ts ds)
+      =  v == v'
+      || any (varIsUsed v) ts
+      || any (varIsUsed v) (map unDefaultType ds)
     varIsUsed v (Forall v' t)
       | v == v' = False
       | otherwise = varIsUsed v t
     varIsUsed v (FunT t1 t2) = varIsUsed v t1 || varIsUsed v t2
     varIsUsed v (ArrT v' ts) = any (varIsUsed v) ts
-    varIsUsed v (RecT entries) = any (varIsUsed v) (map snd entries)
+    varIsUsed v (NamT v' entries) = any (varIsUsed v) (map snd entries)
 partialApply _ = MM.throwError . GeneratorError $
   "Cannot partially apply a non-function type"
 
