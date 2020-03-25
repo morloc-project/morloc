@@ -1,0 +1,4 @@
+import rbase
+export foo
+foo R :: numeric -> numeric; -- this could be generic, but concrete is a simpler case
+foo x = x;

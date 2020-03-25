@@ -1,0 +1,4 @@
+import rbase
+export foo
+foo R :: numeric -> [numeric];
+foo x = [x,x];
