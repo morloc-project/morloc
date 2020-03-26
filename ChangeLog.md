@@ -1,18 +1,18 @@
-0.xx.x [xxxx.xx.xx]
--------------------
+0.21.0 [xxxx.xx.xx]
 
-major
+Major changes
  - [ ] implement composable serialization functions
+ - [.] Allow source-free functions 
+ - [ ] Rewrite perl manifold nexus in C
 
-minor
- - [ ] resurrect property tests
- - [ ] meaningful error messages
- - [ ] generate error handling in pools
- - [ ] add type annotations to printed help
- - [ ] add python tests
- - [ ] replace perl manifold nexus with C
+Minor changes
  - [ ] test record handling
+ - [ ] add python tests
  - [ ] make the test output look pretty (no weird whitespace)
+ - [ ] add type annotations to printed help
+ - [ ] generate error handling in pools
+ - [ ] meaningful error messages
+ - [ ] resurrect property tests
 
 0.20.0 [2020.03.23]
 -------------------
