@@ -957,7 +957,7 @@ infer' lang g1 e1@(ListE xs1) = do
     [] -> newvar lang
     (t:_) -> return t
   (g3, _, xs3) <- chainCheck (zip (repeat elementType) xs1) g2
-  let dt = MLD.defaultList Nothing elementType
+  let dt = MLD.defaultList lang elementType
   containerType <-
     if lang == Nothing
     then return (unDefaultType dt)
@@ -970,7 +970,7 @@ infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' lang g1 e@(TupleE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
   let (ts2, xs2) = unzip pairs
-      dt = MLD.defaultTuple Nothing ts2
+      dt = MLD.defaultTuple lang ts2
   containerType <-
     if lang == Nothing
     then return (unDefaultType dt)

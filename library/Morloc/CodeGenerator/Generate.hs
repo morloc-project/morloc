@@ -679,16 +679,15 @@ segment h x@(SAnno (One (_, c)) _) = do
       return (SAnno (One (ListS xs', c)) m, concat rs)
       where
         listType :: CType -> MorlocMonad CType
-        listType (CType (ArrT (TV _ "List") [t])) = return (CType t)
-        listType _ = MM.throwError . TypeError $ "Expected List type"
+        listType (CType (ArrT _ [t])) = return (CType t)
+        recTypes _ = MM.throwError . TypeError $ "Expected exactly one parameter for List type"
     segment' _ (SAnno (One (TupleS xs, c)) m) = do
       ts <- tupleTypes (fst c)
       (xs', rs) <- zipWithM segment' ts xs |>> unzip
       return (SAnno (One (TupleS xs', c)) m, concat rs)
       where
         tupleTypes :: CType -> MorlocMonad [CType]
-        tupleTypes (CType (ArrT (TV _ "Tuple") ts)) = return (map CType ts)
-        tupleTypes _ = MM.throwError . TypeError $ "Expected Tuple type"
+        tupleTypes (CType (ArrT _ ts)) = return (map CType ts)
     segment' _ (SAnno (One (RecS xs, c)) m) = do
       ts <- recTypes (fst c)
       (vals, rs) <- zipWithM segment' ts (map snd xs) |>> unzip
@@ -696,7 +695,7 @@ segment h x@(SAnno (One (_, c)) _) = do
       where
         recTypes :: CType -> MorlocMonad [CType]
         recTypes (CType (NamT _ entries)) = return (map (CType . snd) entries)
-        recTypes _ = MM.throwError . TypeError $ "Expected Tuple type"
+        recTypes _ = MM.throwError . TypeError $ "Expected Record type"
     segment' t0 (SAnno (One (LamS vs x, c1)) m)
       | langOf' t0 == langOf' (fst c1) = do
           (x', rs) <- segment' (fromJust . last . typeArgsC . fst $ c1) x
