@@ -33,4 +33,5 @@ main = do
       , golden "Top identity" "12_top-container-identity"
       , golden "Top list" "12_top-container-list"
       , golden "Top tuple" "12_top-container-tuple"
+      , golden "Top tuple with app" "12_top-container-app"
       ]
