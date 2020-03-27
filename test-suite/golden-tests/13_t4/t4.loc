@@ -1,0 +1,3 @@
+import math (sqrt)
+export foo
+foo = (True, sqrt 16);

@@ -34,4 +34,12 @@ main = do
       , golden "Top list" "12_top-container-list"
       , golden "Top tuple" "12_top-container-tuple"
       , golden "Top tuple with app" "12_top-container-app"
+      , golden "0th form" "13_t0"
+      , golden "1th form" "13_t1"
+      , golden "2th form" "13_t2"
+      , golden "3th form" "13_t3"
+      , golden "4th form" "13_t4"
+      , golden "5th form" "13_t5"
+      , golden "6th form" "13_t6"
+      , golden "7th form" "13_t7"
       ]
