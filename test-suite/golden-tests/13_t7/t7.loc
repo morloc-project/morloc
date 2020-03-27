@@ -1,3 +1,0 @@
-import math (sum, sqrt)
-export foo
-foo x = sum [1, 2, 3, sqrt x];

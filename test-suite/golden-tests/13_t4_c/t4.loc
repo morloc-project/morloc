@@ -1,0 +1,4 @@
+import cppbase (mul)
+
+export foo
+foo = (True, mul 1 4);

@@ -505,6 +505,8 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
           let t2' = ArrT v1 vs2'
           let g2 = lhs ++ (SolvedG v2 t2' : rhs)
           subtype t1 t2' g2
+        _ -> throwError . OtherError . render $
+          hang 4 (vsep ["subtype error:", parens (prettyType t1), parens (prettyType t2)])
       _ -> throwError . OtherError $
         "Could not find a suitable existential in context"
   where

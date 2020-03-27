@@ -1,3 +1,0 @@
-import math (sum, sqrt)
-export foo
-foo = sum [1, 2, 3, sqrt 16];

@@ -1,0 +1,4 @@
+import rbase (fold, div)
+
+export foo
+foo x = fold add 0 [1, 2, 3, div x 4];

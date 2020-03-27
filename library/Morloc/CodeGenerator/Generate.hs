@@ -1016,19 +1016,19 @@ codify' _ _ g (SAnno (One (StrS x, (c, rs))) m) = return $ SAnno (One (StrS x, (
 -- | ListS [SAnno a]
 codify' _ h g (SAnno (One (ListS xs, (c, args))) m) = do
   xs' <- mapM (codify' False h g) xs
-  let mdoc = (gList g) (map (sannoWithC third) xs')
+  let mdoc = (gList g) (map (prepContainerInput g) xs')
   return $ SAnno (One (ListS xs', (c, args, mdoc))) m
 
 -- | TupleS [SAnno a]
 codify' _ h g (SAnno (One (TupleS xs, (c, args))) m) = do
   xs' <- mapM (codify' False h g) xs
-  let mdoc = (gTuple g) (map (sannoWithC third) xs')
+  let mdoc = (gTuple g) (map (prepContainerInput g) xs')
   return $ SAnno (One (TupleS xs', (c, args, mdoc))) m
 
 -- | RecS [(EVar, SAnno a)]
 codify' _ h g (SAnno (One (RecS entries, (c, args))) m) = do
   xs <- mapM (codify' False h g) (map snd entries)
-  let mdoc = (gRecord g) (zip (map (pretty . fst) entries) (map (sannoWithC third) xs))
+  let mdoc = (gRecord g) (zip (map (pretty . fst) entries) (map (prepContainerInput g) xs))
       sexpr = RecS (zip (map fst entries) xs)
   return $ SAnno (One (sexpr, (c, args, mdoc))) m
 
@@ -1128,6 +1128,11 @@ codify' _ h g (SAnno (One (AppS f xs, (c, args))) m) = do
   mandoc <- makeManifoldDoc g xs' f' (c, args, m)
   return $ SAnno (One (AppS f' xs', (c, args, mandoc))) m
 
+
+prepContainerInput :: Grammar -> (SAnno GMeta One (CType, [Argument], MDoc)) -> MDoc
+prepContainerInput g (SAnno (One (AppS _ _, (_, args, _))) m) =
+  (gCall g) (makeManifoldName m) (map (pretty . argName) args)
+prepContainerInput _ (SAnno (One (_, (_, _, d))) _) = d
 
 makeManifoldDoc
   :: Grammar

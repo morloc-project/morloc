@@ -1,0 +1,4 @@
+import pybase (mul)
+
+export foo
+foo = (True, mul 1 4);
