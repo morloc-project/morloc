@@ -444,7 +444,7 @@ pUniT = do
   _ <- symbol ")"
   lang <- CMS.gets stateLang
   v <- newvar lang
-  return (ExistT v [] [MLD.defaultNull lang])
+  return (ExistT v [] (MLD.defaultNull lang))
 
 parensType :: Parser Type
 parensType = do
@@ -458,11 +458,11 @@ pTupleT = do
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
   v <- newvar lang
-  let dt = MLD.defaultTuple lang ts
+  let dts = MLD.defaultTuple lang ts
   return $
     if lang == Nothing
-    then unDefaultType dt
-    else ExistT v ts [dt]
+    then head (map unDefaultType dts)
+    else ExistT v ts dts
 
 pNamT :: Parser Type
 pNamT = do
@@ -470,11 +470,11 @@ pNamT = do
   entries <- braces (sepBy1 pNamEntryT (symbol ","))
   lang <- CMS.gets stateLang
   v <- newvar lang
-  let dt = MLD.defaultRecord lang entries
+  let dts = MLD.defaultRecord lang entries
   return $
     if lang == Nothing
-    then unDefaultType dt
-    else ExistT v [NamT (TV lang "__RECORD__") entries] [dt] -- see entry in Infer.hs
+    then head (map unDefaultType dts)
+    else ExistT v [NamT (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
 
 pNamEntryT :: Parser (MT.Text, Type)
 pNamEntryT = do
@@ -513,11 +513,11 @@ pListT = do
   t <- brackets pType
   lang <- CMS.gets stateLang
   v <- newvar lang
-  let dt = MLD.defaultList lang t
+  let dts = MLD.defaultList lang t
   return $
     if lang == Nothing
-    then unDefaultType dt
-    else ExistT v [t] [dt]
+    then head (map unDefaultType dts)
+    else ExistT v [t] dts
 
 pVarT :: Parser Type
 pVarT = do
