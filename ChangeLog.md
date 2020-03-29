@@ -7,8 +7,8 @@ Major changes
 
 Minor changes
  - [ ] test record handling
- - [ ] add python tests
- - [ ] make the test output look pretty (no weird whitespace)
+ - [x] add python tests
+ - [x] make the test output look pretty (no weird whitespace)
  - [ ] add type annotations to printed help
  - [ ] generate error handling in pools
  - [ ] meaningful error messages

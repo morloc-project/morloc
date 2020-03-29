@@ -55,8 +55,10 @@ generate ms = do
     <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
     >>= mapM (collect modmap)   -- [SAnno GMeta Many [CType]]
+    -- eliminate morloc composition abstractions
+    >>= mapM rewrite
     -- select a single instance at each node in the tree
-    >>= mapM realize  -- [SAnno GMeta One CType]
+    >>= mapM realize   -- [SAnno GMeta One CType]
     -- rewrite partials
     >>= mapM rewritePartials
 
@@ -112,6 +114,7 @@ roots ms = do
         return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError CyclicDependency
     _ -> MM.throwError . GeneratorError $ "Multiple root modules"
+
   return xs
   where
     isRoot m = not $ Set.member (moduleName m) allImports
@@ -175,7 +178,7 @@ collect ms (evar', xs@(x:_)) = do
   -- something is broken upstream of GMeta is not general enough)
   gmeta <- makeGMeta (Just evar') (getTermModule x) Nothing
   trees <- mapM collectTerm xs
-  rewrite $ SAnno (Many trees) gmeta
+  return $ SAnno (Many trees) gmeta
   where
 
     -- Notice that `args` is NOT an input to collectTerm. Morloc uses lexical
@@ -319,6 +322,14 @@ makeGMeta name m gtype = do
         , metaConstraints = Set.empty
         }
 
+-- | Eliminate morloc function calls
+-- For example:
+--    foo x y = bar x (baz y)
+--    bar x y = add x y
+--    baz x = div x 5
+-- Can be rewritten as:
+--    foo x y = add x (div y 5)
+-- Notice that no morloc abstractions appear on the right hand side.
 rewrite
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (SAnno GMeta Many [CType])
@@ -331,7 +342,7 @@ rewrite (SAnno (Many es0) g0) = do
       -> MorlocMonad [(SExpr GMeta Many [CType], [CType])]
     rewriteL0 (AppS (SAnno (Many es1) g1) args, c1) = do
       args' <- mapM rewrite args
-      -- originally es1 consists of a list of CallS and LamS constructos
+      -- originally es1 consists of a list of CallS and LamS constructors
       --  - CallS are irreducible source functions
       --  - LamS are Morloc abstractions that can be reduced
       -- separate LamS expressions from all others
@@ -532,7 +543,6 @@ rewritePartials
   -> MorlocMonad (SAnno GMeta One CType)
 rewritePartials s@(SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
   -- say $ writeAST id Nothing s
-
   let gTypeArgs = maybe (repeat Nothing) typeArgsG (metaGType m)
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
@@ -872,8 +882,25 @@ makeArgument h v (Just t) = case selectFunction t Unpack h of
 makeArgument _ v Nothing = return $ PassThroughArgument v
 
 gatherManifolds :: SAnno g One MDoc -> [MDoc]
-gatherManifolds (SAnno (One (CallS _, d)) _) = [d]
-gatherManifolds x = catMaybes . unpackSAnno f $ x
+gatherManifolds = gatherManifolds' True
+
+gatherManifolds' :: Bool -> SAnno g One MDoc -> [MDoc]
+gatherManifolds' _ (SAnno (One (CallS _, d)) _) = [d]
+gatherManifolds' True (SAnno (One (ListS xs, d)) _) =  d : (concat $ map (gatherManifolds' False) xs)
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (ListS xs, d)) _), _)) _) = d : (concat $ map (gatherManifolds' False) xs)
+gatherManifolds' True (SAnno (One (TupleS xs, d)) _) =  d : (concat $ map (gatherManifolds' False) xs)
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (TupleS xs, d)) _), _)) _) = d : (concat $ map (gatherManifolds' False) xs)
+gatherManifolds' True (SAnno (One (RecS es, d)) _) =  d : (concat $ map (gatherManifolds' False) (map snd es))
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (RecS es, d)) _), _)) _) = d : (concat $ map (gatherManifolds' False) (map snd es))
+gatherManifolds' True (SAnno (One (VarS _, d)) _) = [d]
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (VarS _, d)) _), _ )) _) = [d]
+gatherManifolds' True (SAnno (One (NumS _, d)) _) = [d]
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (NumS _, d)) _), _ )) _) = [d]
+gatherManifolds' True (SAnno (One (LogS _, d)) _) = [d]
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (LogS _, d)) _), _ )) _) = [d]
+gatherManifolds' True (SAnno (One (StrS _, d)) _) = [d]
+gatherManifolds' True (SAnno (One (LamS _ (SAnno (One (StrS _, d)) _), _ )) _) = [d]
+gatherManifolds' _ x = catMaybes . unpackSAnno f $ x
   where
     f :: SExpr g One MDoc -> g -> MDoc -> Maybe MDoc
     f (AppS _ _) _ d = Just d
@@ -970,14 +997,9 @@ makeDispatchBuilder h g xs =
     getPoolCall
       :: SAnno GMeta One (CType, [Argument])
       -> Maybe ([EVar], GMeta, CType)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (AppS _ _, (c, _))) m), _)) _)
-      = Just (vs, m, c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (CallS _  , (c, _))) m), _)) _)
-      | (length vs) > 0 = Just (vs, m, c)
-      | otherwise = Nothing
-    getPoolCall (SAnno (One (CallS _, (c, args))) m)
-      | (length args) > 0 = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
-      | otherwise = Nothing
+    -- get top-level cals
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (_, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (CallS _, (c, args))) m) = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
     getPoolCall _ = Nothing
 
     -- Note, the CType is for the type of the full application, that is, the return type.
@@ -1014,22 +1036,31 @@ codify' _ _ g (SAnno (One (LogS x, (c, rs))) m) = return $ SAnno (One (LogS x, (
 codify' _ _ g (SAnno (One (StrS x, (c, rs))) m) = return $ SAnno (One (StrS x, (c, rs, (gQuote g) (pretty x)))) m
 
 -- | ListS [SAnno a]
-codify' _ h g (SAnno (One (ListS xs, (c, args))) m) = do
+codify' isTop h g (SAnno (One (ListS xs, (c, args))) m) = do
   xs' <- mapM (codify' False h g) xs
-  let mdoc = (gList g) (map (prepContainerInput g) xs')
+  mdoc <-
+    if isTop
+    then makeManifoldDoc g xs' (SAnno (One (ListS xs', (c, args, ""))) m) (c, args, m)
+    else return $ (gList g) (map (prepContainerInput g) xs')
   return $ SAnno (One (ListS xs', (c, args, mdoc))) m
 
 -- | TupleS [SAnno a]
-codify' _ h g (SAnno (One (TupleS xs, (c, args))) m) = do
+codify' isTop h g (SAnno (One (TupleS xs, (c, args))) m) = do
   xs' <- mapM (codify' False h g) xs
-  let mdoc = (gTuple g) (map (prepContainerInput g) xs')
+  mdoc <-
+    if isTop
+    then makeManifoldDoc g xs' (SAnno (One (TupleS xs', (c, args, ""))) m) (c, args, m)
+    else return $ (gTuple g) (map (prepContainerInput g) xs')
   return $ SAnno (One (TupleS xs', (c, args, mdoc))) m
 
 -- | RecS [(EVar, SAnno a)]
-codify' _ h g (SAnno (One (RecS entries, (c, args))) m) = do
+codify' isTop h g (SAnno (One (RecS entries, (c, args))) m) = do
   xs <- mapM (codify' False h g) (map snd entries)
-  let mdoc = (gRecord g) (zip (map (pretty . fst) entries) (map (prepContainerInput g) xs))
-      sexpr = RecS (zip (map fst entries) xs)
+  let sexpr = RecS (zip (map fst entries) xs)
+  mdoc <-
+    if isTop
+    then makeManifoldDoc g xs (SAnno (One (sexpr, (c, args, ""))) m) (c, args, m)
+    else return $ (gRecord g) (zip (map (pretty . fst) entries) (map (prepContainerInput g) xs))
   return $ SAnno (One (sexpr, (c, args, mdoc))) m
 
 -- | LamS [EVar] (SAnno a)
@@ -1069,9 +1100,12 @@ codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
     cliArg (UnpackedArgument v t Nothing) = MM.throwError (MissingUnpacker "cliArg" t)
 
 -- | VarS EVar
-codify' _ _ _ (SAnno (One (VarS v, (c, args))) m) = do
-  let name = unEVar v
-  return $ SAnno (One (VarS v, (c, args, pretty name))) m
+codify' isTop _ g (SAnno (One (VarS v, (c, args))) m) = do
+  mdoc <-
+    if isTop
+    then makeManifoldDoc g [] (SAnno (One (VarS v, (c, args, ""))) m) (c, args, m)
+    else return $ pretty (unEVar v)
+  return $ SAnno (One (VarS v, (c, args, mdoc))) m
 
 codify' False _ _ (SAnno (One (CallS src, (c, args))) m) = do
   let name = srcName src
@@ -1142,8 +1176,12 @@ makeManifoldDoc
   -> MorlocMonad MDoc
 makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) = do
   innerCall <- case x of
-    (AppS _ _) -> return $ makeManifoldName m'
-    (CallS src) -> return (pretty $ srcName src)
+    (AppS _ _) -> return $ (gCall g) (makeManifoldName m')
+    (CallS src) -> return $ (gCall g) (pretty $ srcName src)
+    (ListS _) -> return (gList g)
+    (TupleS _) -> return (gTuple g)
+    (VarS v) -> return (\_ -> pretty v)
+    (RecS es) -> return (\xs -> (gRecord g) (zip (map (pretty . fst) es) xs))
     _ -> MM.throwError . CallTheMonkeys $ "Unexpected innerCall: " <> render (descSExpr x)
 
   inputs' <- zipWithM (prepInput g margs) [0..] inputs
@@ -1161,7 +1199,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) =
     , gfArgs = args'
     , gfBody =
         vsep (catMaybes (map snd inputs')) <> line <>
-        (gReturn g $ (gCall g) innerCall (map fst inputs'))
+        (gReturn g $ innerCall (map fst inputs'))
     }
 
 

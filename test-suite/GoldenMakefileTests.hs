@@ -11,6 +11,8 @@ import qualified Morloc.Parser.API as P
 import qualified Morloc.TypeChecker.API as T
 import qualified System.Process as SP
 import qualified System.Directory as SD
+import qualified GHC.IO.Handle as GIH
+import qualified System.IO as SI
 
 goldenMakefileTest :: String -> String -> TestTree
 goldenMakefileTest msg testdir =
@@ -27,5 +29,19 @@ goldenMakefileTest msg testdir =
 makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- SD.makeAbsolute path
-  SP.callProcess "make" ["-C", abspath, "--quiet"]
+  -- SP.callProcess "make" ["-C", abspath, "--quiet"]
+  -- SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]
+  
+  devnull <- SI.openFile "/dev/null" SI.WriteMode
+
+  SP.runProcess
+    "make" -- command
+    ["-C", abspath, "--quiet"] -- arguments
+    Nothing -- optional path to working diretory
+    Nothing -- optional environment
+    Nothing -- stdin handle
+    (Just devnull) -- stdout handle
+    (Just devnull) -- stderr handle
+    >>= SP.waitForProcess
+
   SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]
