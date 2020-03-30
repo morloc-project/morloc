@@ -29,11 +29,7 @@ goldenMakefileTest msg testdir =
 makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- SD.makeAbsolute path
-  -- SP.callProcess "make" ["-C", abspath, "--quiet"]
-  -- SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]
-  
   devnull <- SI.openFile "/dev/null" SI.WriteMode
-
   SP.runProcess
     "make" -- command
     ["-C", abspath, "--quiet"] -- arguments

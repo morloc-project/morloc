@@ -876,7 +876,7 @@ parameterize' _ args (SAnno (One (ForeignS i lang vs, c)) m) =
     Just args' -> return $ SAnno (One (ForeignS i lang vs, (c, args'))) m
 
 makeArgument :: SerialMap -> EVar -> Maybe CType -> MorlocMonad Argument 
-makeArgument h v (Just t) = case selectFunction t Unpack h of
+makeArgument h v (Just t) = case selectSerializationFunction t Unpack h of
   Nothing -> MM.throwError (MissingPacker "makeArgument" t)
   (Just (name, _)) -> return $ PackedArgument v t (Just name)
 makeArgument _ v Nothing = return $ PassThroughArgument v
@@ -917,12 +917,12 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
     f :: SExpr g One (CType, [Argument]) -> g -> (CType, [Argument]) -> [Path]
     f (CallS src) _ (c, _) = catMaybes
       [ srcPath src
-      , fmap snd $ selectFunction c Pack h
-      , fmap snd $ selectFunction c Unpack h
+      , fmap snd $ selectSerializationFunction c Pack h
+      , fmap snd $ selectSerializationFunction c Unpack h
       ]
     f _ _ (c, _) = catMaybes
-      [ fmap snd $ selectFunction c Pack h
-      , fmap snd $ selectFunction c Unpack h
+      [ fmap snd $ selectSerializationFunction c Pack h
+      , fmap snd $ selectSerializationFunction c Unpack h
       ]
 
 
@@ -997,7 +997,6 @@ makeDispatchBuilder h g xs =
     getPoolCall
       :: SAnno GMeta One (CType, [Argument])
       -> Maybe ([EVar], GMeta, CType)
-    -- get top-level cals
     getPoolCall (SAnno (One (LamS vs (SAnno (One (_, (c, _))) m), _)) _) = Just (vs, m, c)
     getPoolCall (SAnno (One (CallS _, (c, args))) m) = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
     getPoolCall _ = Nothing
@@ -1005,7 +1004,7 @@ makeDispatchBuilder h g xs =
     -- Note, the CType is for the type of the full application, that is, the return type.
     -- It is NOT for the function that is called.
     mainCall :: Grammar -> ([EVar], GMeta, CType) -> MDoc
-    mainCall g (vs, m, t) = case selectFunction t Pack h of
+    mainCall g (vs, m, t) = case selectSerializationFunction t Pack h of
       Nothing -> error $
         "Could not find packer for " <> show m
       (Just (packer, _)) ->
@@ -1073,7 +1072,7 @@ codify' isTop h g (SAnno (One (LamS vs x, (c, args))) m1) = do
 codify' _ h g (SAnno (One (ForeignS mid lang vs, (t, args))) m) = do
   config <- MM.ask
   args' <- mapM cliArg args
-  packer <- case selectFunction t Unpack h of
+  packer <- case selectSerializationFunction t Unpack h of
     (Just (name, _)) -> return name
     _ -> MM.throwError (MissingUnpacker "codify'" t)
   mdoc <- case MC.getPoolCallBuilder config lang (gQuote g) of
@@ -1270,8 +1269,8 @@ say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 -- | choose a packer or unpacker for a given type
-selectFunction :: CType -> Property -> SerialMap -> Maybe (Name, Path)
-selectFunction t p h =
+selectSerializationFunction :: CType -> Property -> SerialMap -> Maybe (Name, Path)
+selectSerializationFunction t p h =
   case mostSpecificSubtypes (typeOf t) (map typeOf (Map.keys hmap)) of
     [] -> Nothing
     -- FIXME: I should not have to filter here, the mostSpecificSubtypes
