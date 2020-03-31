@@ -50,7 +50,7 @@ generate ms = do
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
 
   -- translate modules into bitrees
-  ast
+  (gASTs, rASTs) 
     -- find each term that is exported to the nexus
     <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
@@ -58,20 +58,24 @@ generate ms = do
     -- eliminate morloc composition abstractions
     >>= mapM rewrite
     -- select a single instance at each node in the tree
-    >>= mapM realize   -- [SAnno GMeta One CType]
-    -- rewrite partials
-    >>= mapM rewritePartials
+    >>= mapM realize   -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
+    -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
+    |>> partitionEithers
 
   -- -- print abstract syntax trees to the console as debugging message
-  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) ast))
-
+  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) rASTs))
+  
+  -- Collect all call-free data
+  gSerial <- mapM generalSerial gASTs
+  
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
+    gSerial
     [ (t, poolId m x, metaName m)
-    | SAnno (One (x, t)) m <- ast
+    | SAnno (One (x, t)) m <- rASTs
     ]
 
   -- recursively find all serializers imported from any module
@@ -79,7 +83,7 @@ generate ms = do
 
   -- for each language, collect all functions into one "pool"
   pools
-    <- mapM (parameterize smap) ast
+    <- mapM (parameterize smap) rASTs
     -- Separate the call trees into mono-lingual segments terminated in
     -- primitives or foreign calls.
     >>= mapM (segment smap) |>> concat
@@ -429,24 +433,22 @@ rewrite (SAnno (Many es0) g0) = do
       xs' <- fmap concat $ mapM (substituteExpr v r) xs
       return $ SAnno (Many xs') g
 
-
-
 -- | Select a single concrete language for each sub-expression.  Store the
 -- concrete type and the general type (if available).  Select serialization
 -- functions (the serial map should not be needed after this step in the
 -- workflow).
 realize
   :: SAnno GMeta Many [CType]
-  -> MorlocMonad (SAnno GMeta One CType)
+  -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One CType))
 realize x = do
   -- say $ " --- realize ---"
   -- say $ writeManyAST x
   -- say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
+    Nothing -> makeGAST x |>> Left
     (Just (_, realization)) -> do
-      return realization 
-    Nothing -> MM.throwError . TypeError $ "No valid realization found"
+       rewritePartials realization |>> Right
   where
     realizeAnno
       :: Int
@@ -537,6 +539,60 @@ realize x = do
         _ -> return Nothing
     realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . GeneratorError $
       "ForeignS should not yet appear in an SExpr"
+
+makeGAST :: SAnno GMeta Many [CType] -> MorlocMonad (SAnno GMeta One ())
+makeGAST (SAnno (Many [(UniS, _)]) m) = return (SAnno (One (UniS, ())) m)
+makeGAST (SAnno (Many [(VarS x, _)]) m) = return (SAnno (One (VarS x, ())) m)
+makeGAST (SAnno (Many [(NumS x, _)]) m) = return (SAnno (One (NumS x, ())) m)
+makeGAST (SAnno (Many [(LogS x, _)]) m) = return (SAnno (One (LogS x, ())) m)
+makeGAST (SAnno (Many [(StrS x, _)]) m) = return (SAnno (One (StrS x, ())) m)
+makeGAST (SAnno (Many [(ListS ss, _)]) m) = do
+  ss' <- mapM makeGAST ss
+  return $ SAnno (One (ListS ss', ())) m
+makeGAST (SAnno (Many [(TupleS ss, _)]) m) = do
+  ss' <- mapM makeGAST ss
+  return $ SAnno (One (TupleS ss', ())) m
+makeGAST (SAnno (Many [(LamS vs s, _)]) m) = do
+  s' <- makeGAST s
+  return $ SAnno (One (LamS vs s', ())) m
+makeGAST (SAnno (Many [(AppS f xs, _)]) m) = do
+  f' <- makeGAST f
+  xs' <- mapM makeGAST xs
+  return $ SAnno (One (AppS f' xs', ())) m
+makeGAST (SAnno (Many [(RecS es, _)]) m) = do
+  vs <- mapM (makeGAST . snd) es
+  return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
+makeGAST (SAnno (Many [(CallS _, _)]) _) = MM.throwError . OtherError $ "Expected GAST"
+makeGAST (SAnno (Many [(ForeignS _ _ _, _)]) _) = MM.throwError . OtherError $ "Expected GAST"
+makeGAST (SAnno (Many (_:_)) _) = MM.throwError . OtherError $ "Expected GAST"
+
+
+-- | Serialize a simple, general data type. This type can consists only of JSON
+-- primitives and containers (lists, tuples, and records).
+generalSerial :: SAnno GMeta One () -> MorlocMonad (EVar, MDoc)
+generalSerial x@(SAnno _ g) = do 
+  mdoc <- generalSerial' x
+  case metaName g of
+    (Just evar) -> return (evar, mdoc)
+    Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
+  where
+    generalSerial' :: SAnno GMeta One () -> MorlocMonad MDoc
+    generalSerial' (SAnno (One (UniS, _)) _) = return "null"
+    generalSerial' (SAnno (One (NumS x, _)) _) = return $ viaShow x
+    generalSerial' (SAnno (One (LogS x, _)) _) = return $ if x then "true" else "false" 
+    generalSerial' (SAnno (One (StrS x, _)) _) = return $ dquotes (pretty x)
+    generalSerial' (SAnno (One (ListS xs, _)) _) = do
+      xs' <- mapM generalSerial' xs
+      return $ list xs'
+    generalSerial' (SAnno (One (TupleS xs, _)) _) = do
+      xs' <- mapM generalSerial' xs
+      return $ list xs'
+    generalSerial' (SAnno (One (RecS es, _)) _) = do
+      vs' <- mapM (generalSerial' . snd) es
+      let es' = zip (map fst es) vs'
+      return . encloseSep "{" "}" "," $ map (\(k, v) -> pretty k <+> "=" <+> v) es'
+    generalSerial' _ = MM.throwError . OtherError $ "Cannot serialize this shit"
+
 
 rewritePartials
   :: SAnno GMeta One CType

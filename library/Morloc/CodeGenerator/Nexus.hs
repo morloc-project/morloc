@@ -32,15 +32,15 @@ type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
 say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
-generate :: [(CType, Int, Maybe EVar)] -> MorlocMonad Script
-generate xs = do
-  let names = [pretty name | (_, _, Just name) <- xs]
+generate :: [(EVar, MDoc)] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
+generate cs xs = do
+  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst) cs
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
   return $
     Script
       { scriptBase = "nexus"
       , scriptLang = ML.PerlLang
-      , scriptCode = Code . render $ main names fdata
+      , scriptCode = Code . render $ main names fdata cs
       , scriptCompilerFlags = []
       , scriptInclude = []
       }
@@ -62,8 +62,8 @@ getFData (t, i, n) = do
       MM.throwError . GeneratorError $
       "No execution method found for language: " <> ML.showLangName lang
 
-main :: [MDoc] -> [FData] -> MDoc
-main names fdata =
+main :: [MDoc] -> [FData] -> [(EVar, MDoc)] -> MDoc
+main names fdata cdata =
   [idoc|#!/usr/bin/env perl
 
 use strict;
@@ -100,21 +100,24 @@ sub dispatch {
     return $result;
 }
 
-#{usageT fdata}
+#{usageT fdata cdata}
+
+#{vsep (map functionCT cdata)}
 
 #{vsep (map functionT fdata)}
+
 |]
 
 mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
 mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
-usageT :: [FData] -> MDoc
-usageT fdata =
+usageT :: [FData] -> [(EVar, MDoc)] -> MDoc
+usageT fdata cdata =
   [idoc|
 sub usage{
     print STDERR "The following commands are exported:\n";
-    #{align $ vsep (map usageLineT fdata)}
+    #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
     exit 0;
 }
 |]
@@ -122,6 +125,9 @@ sub usage{
 usageLineT :: FData -> MDoc
 usageLineT (_, name, nargs, _, _) =
   [idoc|print STDERR "  #{name} [#{pretty nargs}]\n";|]
+
+usageLineConst :: (EVar, MDoc) -> MDoc
+usageLineConst (v, d) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
 
 functionT :: FData -> MDoc
 functionT (call', name, nargs, pool, mid') =
@@ -137,6 +143,19 @@ sub call_#{name}{
 |]
   where
     poolcall = hsep $ (call' pool mid') ++ map argT [0 .. (nargs - 1)]
+
+functionCT :: (EVar, MDoc) -> MDoc
+functionCT (v, d) =
+  [idoc|
+sub call_#{pretty v}{
+    if(scalar(@_) != 0){
+        print STDERR "Expected 0 arguments to '#{pretty v}', given " . 
+        scalar(@_) . "\n";
+        exit 1;
+    }
+    return "#{d}\n"
+}
+|]
 
 argT :: Int -> MDoc
 argT i = "$_[" <> pretty i <> "]"
