@@ -1,2 +1,2 @@
 export foo
-foo = ([True], 42);
+foo = ([True], 42, "hello");

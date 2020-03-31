@@ -138,7 +138,7 @@ sub call_#{name}{
         scalar(@_) . "\n";
         exit 1;
     }
-    return `#{poolcall}`
+    return `#{poolcall}`;
 }
 |]
   where
@@ -153,7 +153,7 @@ sub call_#{pretty v}{
         scalar(@_) . "\n";
         exit 1;
     }
-    return "#{d}\n"
+    return ('#{d}' . "\n");
 }
 |]
 
