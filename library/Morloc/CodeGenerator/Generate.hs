@@ -1005,8 +1005,8 @@ makeDispatchBuilder h g xs =
     -- It is NOT for the function that is called.
     mainCall :: Grammar -> ([EVar], GMeta, CType) -> MDoc
     mainCall g (vs, m, t) = case selectSerializationFunction t Pack h of
-      Nothing -> error $
-        "Could not find packer for " <> show m
+      Nothing -> error . show . render $
+        "Could not find packer for type" <+> prettyType t
       (Just (packer, _)) ->
         (gCall g)
           (pretty packer)

@@ -57,7 +57,7 @@ defaultTuple (Just RLang) ts = [DefaultType $ arr RLang "list" ts]
 defaultTuple (Just CLang) ts = []
 defaultTuple (Just CppLang) ts = [DefaultType $ arr CppLang t ts] where
   vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
-  t = "std::tuple<" <> MT.intercalate ", " vars <> ">"
+  t = "std::tuple<" <> MT.intercalate "," vars <> ">"
 defaultTuple (Just PerlLang) ts = [DefaultType $ arr CppLang "array" ts]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, Type)] -> [DefaultType]
