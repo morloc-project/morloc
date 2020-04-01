@@ -1055,6 +1055,12 @@ makeDispatchBuilder h g xs =
       -> Maybe ([EVar], GMeta, CType)
     getPoolCall (SAnno (One (LamS vs (SAnno (One (_, (c, _))) m), _)) _) = Just (vs, m, c)
     getPoolCall (SAnno (One (CallS _, (c, args))) m) = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
+    getPoolCall (SAnno (One (TupleS xs, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (ListS  xs, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (RecS   xs, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (TupleS xs, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (ListS  xs, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (RecS   xs, (c, _))) m), _)) _) = Just (vs, m, c)
     getPoolCall _ = Nothing
 
     -- Note, the CType is for the type of the full application, that is, the return type.

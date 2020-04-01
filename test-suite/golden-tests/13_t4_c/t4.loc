@@ -1,4 +1,4 @@
 import cppbase (mul)
 
 export foo
-foo = (True, mul 1 4);
+foo = ((True, 42.0), mul 1 4);
