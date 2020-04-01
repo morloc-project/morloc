@@ -15,7 +15,7 @@ addons:
 before_install:
     # Set up R
     - mkdir -p ~/R/library
-    - echo "R_LIBS=~/R/library" >> ~/.Renviron
+    - echo 'R_LIBS=~/R/library' >> ~/.Renviron
     - R -e 'install.packages(c("jsonlite", "data.table"), lib="~/R/library", repos="https://cloud.r-project.org")'
     # Download and unpack the stack executable
     - mkdir -p ~/.local/bin
@@ -23,13 +23,19 @@ before_install:
     - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
 
 script:
-  - stack --no-terminal build
+  - stack --no-terminal build --fast
   - stack --no-terminal install
+  - mkdir -p $HOME/.morloc/lib
+  - mkdir -p $HOME/.morloc/tmp
+  - "echo home : $HOME/.morloc > ~/.morloc/config"
+  - "echo library : $HOME/.morloc/lib >> ~/.morloc/config"
+  - "echo tmpdir : $HOME/.morloc/tmp >> ~/.morloc/config"
+  - "echo lang_python3 : python3 >> ~/.morloc/config"
   - morloc install rbase
-  - morloc install math
+  - morloc install pybase
   - morloc install cppbase
-  - echo "lang_python3 : python3" >> .morloc/config
-  - stack --no-terminal test
+  - morloc install math
+  - stack --no-terminal test --fast
 
 cache:
   directories:
