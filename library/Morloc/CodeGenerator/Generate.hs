@@ -1244,6 +1244,12 @@ makeManifoldDoc
   -> (CType, [Argument], GMeta) -- the AppS meta data
   -> MorlocMonad MDoc
 makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) = do
+
+  -- This is a bit hacky. I am repurposing the counter that was used to assign
+  -- unique manifold ids. Now I am using it to generate ids for variables
+  -- within a specific manifold. 
+  MM.startCounter
+
   innerCall <- case x of
     (AppS _ _) -> return $ (gCall g) (makeManifoldName m')
     (CallS src) -> return $ (gCall g) (pretty $ srcName src)
@@ -1253,7 +1259,7 @@ makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) =
     (RecS es) -> return (\xs -> (gRecord g) (zip (map (pretty . fst) es) xs))
     _ -> MM.throwError . CallTheMonkeys $ "Unexpected innerCall: " <> render (descSExpr x)
 
-  inputs' <- zipWithM (prepInput g margs) [0..] inputs
+  inputs' <- mapM (prepInput g margs) inputs
   args' <- mapM (prepArg g) margs
 
   return . gFunction g $ GeneralFunction
@@ -1266,9 +1272,9 @@ makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) =
     , gfReturnType = Just ((gShowType g) otype)
     , gfName = makeManifoldName m
     , gfArgs = args'
-    , gfBody =
-        vsep (catMaybes (map snd inputs')) <> line <>
-        (gReturn g $ innerCall (map fst inputs'))
+    , gfBody = vsep
+             $  concat (map snd inputs')
+             ++ [ gReturn g $ innerCall (map fst inputs') ]
     }
 
 
@@ -1278,24 +1284,54 @@ makeManifoldDoc g inputs (SAnno (One (x, (ftype, _, _))) m') (otype, margs, m) =
 prepInput
   :: Grammar
   -> [Argument] -- arguments in the parent (the input arguments may differ)
-  -> Int
   -> SAnno GMeta One (CType, [Argument], MDoc) -- an input to the wrapped function
-  -> MorlocMonad (MDoc, Maybe MDoc)
-prepInput g _ _ (SAnno (One (UniS, _)) _) = return (gNull g, Nothing)
-prepInput g _ _ (SAnno (One (NumS x, _)) _) = return ((gReal g) x, Nothing)
-prepInput g _ _ (SAnno (One (LogS x, _)) _) = return ((gBool g) x, Nothing)
-prepInput g _ _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, Nothing)
-prepInput g _ _ (SAnno (One (ListS _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ _ (SAnno (One (TupleS _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ _ (SAnno (One (RecS _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ _ (SAnno (One (LamS _ _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, Nothing)
-prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
+  -> MorlocMonad (MDoc, [MDoc])
+prepInput g _ (SAnno (One (UniS, _)) _) = return (gNull g, [])
+prepInput g _ (SAnno (One (NumS x, _)) _) = return ((gReal g) x, [])
+prepInput g _ (SAnno (One (LogS x, _)) _) = return ((gBool g) x, [])
+prepInput g _ (SAnno (One (StrS x, _)) _) = return ((gQuote g . pretty) x, [])
+prepInput g args (SAnno (One (ListS xs, (c, _, d))) m) = do
+  i <- MM.getCounter
+  (xs', asses) <- mapM (prepInput g args) xs |>> unzip
+  let varname = makeArgumentName i
+  let ass = (gAssign g) (GeneralAssignment {
+      gaType = Just ((gShowType g) c)
+    , gaName = varname
+    , gaValue = (gList g) xs'
+    , gaArg = Nothing
+    })
+  return (varname, concat asses ++ [ass])
+prepInput g args (SAnno (One (TupleS xs, (c, _, d))) m) = do
+  i <- MM.getCounter
+  (xs', asses) <- mapM (prepInput g args) xs |>> unzip
+  let varname = makeArgumentName i
+  let ass = (gAssign g) (GeneralAssignment {
+      gaType = Just ((gShowType g) c)
+    , gaName = varname
+    , gaValue = (gTuple g) xs'
+    , gaArg = Nothing
+    })
+  return (varname, concat asses ++ [ass])
+prepInput g args (SAnno (One (RecS es, (c, _, d))) m) = do
+  i <- MM.getCounter
+  (xs', asses) <- mapM (prepInput g args) (map snd es) |>> unzip
+  let varname = makeArgumentName i
+  let ass = (gAssign g) (GeneralAssignment {
+      gaType = Just ((gShowType g) c)
+    , gaName = varname
+    , gaValue = (gRecord g) (zip (map (pretty . fst) es) xs')
+    , gaArg = Nothing
+    })
+  return (varname, concat asses ++ [ass])
+prepInput g _ (SAnno (One (LamS _ _, (_, _, d))) _) = return (d, [])
+prepInput g _ (SAnno (One (ForeignS _ _ _, (_, _, d))) _) = return (d, [])
+prepInput g _ (SAnno (One (AppS x xs, (t, args, d))) m) = do
   gaType' <- case sequence (typeArgsC t) of
     (Just ts) -> return . Just . gShowType g . last $ ts
     Nothing -> MM.throwError . CallTheMonkeys . render $
       "Unexpected type in prepInput:" <+> prettyType t
-  let varname = makeArgumentName mid
+  i <- MM.getCounter
+  let varname = makeArgumentName i
       mname = makeManifoldName m
       ass = (gAssign g) $ GeneralAssignment
         { gaType = gaType'
@@ -1303,27 +1339,28 @@ prepInput g _ mid (SAnno (One (AppS x xs, (t, args, d))) m) = do
         , gaValue = (gCall g) mname (map (pretty . argName) args)
         , gaArg = Nothing
         }
-  return (varname, Just ass)
+  return (varname, [ass])
 -- handle sourced files, which should be used as unaliased variables
-prepInput _ _ _ (SAnno (One (CallS src, _)) _) = return (pretty (srcName src), Nothing)
-prepInput g rs mid (SAnno (One (VarS v, (t, _, d))) m) = do
+prepInput _ _ (SAnno (One (CallS src, _)) _) = return (pretty (srcName src), [])
+prepInput g rs (SAnno (One (VarS v, (t, _, d))) m) = do
+  i <- MM.getCounter
   let name = pretty (unEVar v)
-      varname = makeArgumentName mid
+      varname = makeArgumentName i
       arg = listToMaybe [r | r <- rs, argName r == v]
   case arg of
     (Just (PackedArgument _ t (Just unpacker))) ->
-       return (varname, Just . gAssign g $ GeneralAssignment
+       return (varname, [gAssign g $ GeneralAssignment
           { gaType = Just . gShowType g $ t
           , gaName = varname
           , gaValue = (gCall g) (pretty unpacker) [name]
           , gaArg = Nothing
           }
-       )
+       ])
     (Just (PassThroughArgument v)) -> MM.throwError . GeneratorError $
       "Compiler bug: a PassThroughArgument cannot be an input"
     (Just (PackedArgument _ _ Nothing)) -> MM.throwError (MissingUnpacker "generator.hs:prepInput" t)
     -- the argument is used in the wrapped function, but is not serialized
-    _ -> return (name, Nothing)
+    _ -> return (name, [])
 
 -- | Serialize the result of a call if a serialization function is defined.
 -- Presumably, if no serialization function is given, then the argument is
