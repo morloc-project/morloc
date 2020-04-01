@@ -28,6 +28,7 @@ script:
   - morloc install rbase
   - morloc install math
   - morloc install cppbase
+  - echo "lang_python3 : python3" >> .morloc/config
   - stack --no-terminal test
 
 cache:
