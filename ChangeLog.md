@@ -5,6 +5,8 @@ Major changes
  - [ ] Rewrite perl manifold nexus in C
 
 Minor changes
+ - [x] change default python3 interpreter from "python" to "python3"
+ - [x] add default library and tmp paths to config handler
  - [ ] test composable serialization functions in all supported languages
  - [ ] test record handling
  - [ ] add type annotations to printed help

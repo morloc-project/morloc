@@ -38,10 +38,10 @@ instance FromJSON Config where
   parseJSON =
     withObject "object" $ \o ->
       Config
-        <$> fmap Path (o .:? "home" .!= "")
-        <*> fmap Path (o .:? "library" .!= "")
-        <*> fmap Path (o .:? "tmpdir" .!= "" )
-        <*> fmap Path (o .:? "lang_python3" .!= "python")
+        <$> fmap Path (o .:? "home" .!= "$HOME/.morloc")
+        <*> fmap Path (o .:? "library" .!= "$HOME/.morloc/lib")
+        <*> fmap Path (o .:? "tmpdir" .!= "$HOME/.morloc/tmp" )
+        <*> fmap Path (o .:? "lang_python3" .!= "python3")
         <*> fmap Path (o .:? "lang_R" .!= "Rscript")
         <*> fmap Path (o .:? "lang_perl" .!= "perl")
 
