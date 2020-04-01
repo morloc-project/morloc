@@ -505,6 +505,8 @@ subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
           let t2' = ArrT v1 vs2'
           let g2 = lhs ++ (SolvedG v2 t2' : rhs)
           subtype t1 t2' g2
+        _ -> throwError . OtherError . render $
+          hang 4 (vsep ["subtype error:", parens (prettyType t1), parens (prettyType t2)])
       _ -> throwError . OtherError $
         "Could not find a suitable existential in context"
   where
@@ -714,26 +716,26 @@ infer l g e = do
 --
 -- Num=>
 infer' Nothing g e@(NumE _) = do
-  let t = unDefaultType $ MLD.defaultNumber Nothing
+  let [t] = map unDefaultType (MLD.defaultNumber Nothing)
   return (g, [t], ann e t)
 infer' lang g e@(NumE _) = do
-  t <- newvarRich [] [MLD.defaultNumber lang] lang
+  t <- newvarRich [] (MLD.defaultNumber lang) lang
   return (g +> t, [t], ann e t)
 
 -- Str=>
 infer' Nothing g e@(StrE _) = do
-  let t = unDefaultType $ MLD.defaultString Nothing
+  let [t] = map unDefaultType (MLD.defaultString Nothing)
   return (g, [t], ann e t)
 infer' lang g e@(StrE _) = do
-  t <- newvarRich [] [MLD.defaultString lang] lang
+  t <- newvarRich [] (MLD.defaultString lang) lang
   return (g +> t, [t], ann e t)
 
 -- Log=>
 infer' Nothing g e@(LogE _) = do
-  let t = unDefaultType $ MLD.defaultBool Nothing
+  let [t] = map unDefaultType (MLD.defaultBool Nothing)
   return (g, [t], ann e t)
 infer' lang g e@(LogE _) = do
-  t <- newvarRich [] [MLD.defaultBool lang] lang
+  t <- newvarRich [] (MLD.defaultBool lang) lang
   return (g +> t, [t], ann e t)
 
 -- Src=>
@@ -957,11 +959,11 @@ infer' lang g1 e1@(ListE xs1) = do
     [] -> newvar lang
     (t:_) -> return t
   (g3, _, xs3) <- chainCheck (zip (repeat elementType) xs1) g2
-  let dt = MLD.defaultList Nothing elementType
+  let dts = MLD.defaultList lang elementType
   containerType <-
     if lang == Nothing
-    then return (unDefaultType dt)
-    else newvarRich [elementType] [dt] lang
+    then return (head $ map unDefaultType dts)
+    else newvarRich [elementType] dts lang
   return (g3, [containerType], ann (ListE xs3) containerType)
 
 -- Tuple=>
@@ -970,11 +972,11 @@ infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' lang g1 e@(TupleE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
   let (ts2, xs2) = unzip pairs
-      dt = MLD.defaultTuple Nothing ts2
+      dts = MLD.defaultTuple lang ts2
   containerType <-
     if lang == Nothing
-    then return (unDefaultType dt)
-    else newvarRich ts2 [dt] lang
+    then return (head $ map unDefaultType dts)
+    else newvarRich ts2 dts lang
   return (g2, [containerType], ann (TupleE xs2) containerType)
 
 -- Record=>
@@ -984,11 +986,11 @@ infer' lang g1 e@(RecE rs) = do
   let (ts2, xs2) = unzip pairs
       keys = map fst rs
       entries = zip (map unEVar keys) ts2
-      dt = MLD.defaultRecord lang entries
+      dts = MLD.defaultRecord lang entries
   containerType <-
     if lang == Nothing
-    then return (unDefaultType dt)
-    else newvarRich [NamT (TV lang "__RECORD__") entries] [dt] lang -- see entry in Parser.hs
+    then return (head $ map unDefaultType dts)
+    else newvarRich [NamT (TV lang "__RECORD__") entries] dts lang -- see entry in Parser.hs
   return (g2, [containerType], ann (RecE (zip keys xs2)) containerType)
 
 chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])

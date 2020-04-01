@@ -298,8 +298,6 @@ data GammaIndex
   -- ^ ...
   | SrcG Source
   -- ^ source
-  | ConcreteG EVar Lang Type
-  -- ^ store a local concrete type
   | UnsolvedConstraint Type Type
   -- ^ Store an unsolved serialization constraint containing one or more
   -- existential variables. When the existential variables are solved, the

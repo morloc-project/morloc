@@ -1,0 +1,4 @@
+import rbase (mul)
+
+export foo
+foo = ((True, 4.2), mul 1 4);

@@ -219,5 +219,4 @@ prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGre
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
 prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-prettyGammaIndex (ConcreteG ev lang t) = "ConcreteG:" <+> pretty ev <+> viaShow lang <+> prettyGreenType t
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2

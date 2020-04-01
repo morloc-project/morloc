@@ -20,6 +20,14 @@ functions searchable by type (like [Hoogle](https://www.haskell.org/hoogle/)).
 Ultimately, I hope to build a GitHub-like community portal around Morloc where
 users can upload packages of functions or import them into their own programs.
 
+## Status
+
+This project is under active development and may change radically without
+warning. All development is done in Manjaro Linux (an Arch-based distro) and
+also tested on Ubuntu through travis. 
+
+Pull requests and issue reports are welcome.
+
 ## Installation
 
 Compile and install the package as so (requires the Haskell utility `stack`):
@@ -31,7 +39,7 @@ stack build
 stack install
 ```
 
-## Minimal Example
+## Simple example using math functions from C++
 
 The following code uses only C++ functions (`sqrt`, `sum`, `mul` and `map`). 
 
@@ -116,8 +124,8 @@ list. For more advanced cases, type-specific handling can be added.
 A function can be given a language-specific type, for example:
 
 ```
-transpose :: Matrix a -> Matrix a
-transpose py :: NumpyMatrix -> NumpyMatrix
+transpose :: forall a . Matrix a -> Matrix a
+transpose py :: forall a . "numpy.matrix" a -> "numpy.matrix" a
 ```
 
 The first definition is the Morloc type, where `Matrix a` represents a matrix
@@ -135,8 +143,8 @@ source "py" from "scipy.py" (
  , "packMatrix"
 )
 
-packMatrix   py :: packs   => Matrix -> JSON;
-unpackMatrix py :: unpacks => JSON -> Matrix;
+packMatrix   py :: packs   => forall a . Matrix a -> JSON;
+unpackMatrix py :: unpacks => forall a . JSON -> Matrix a;
 ```
 
 The Python code for handling the conversions is:

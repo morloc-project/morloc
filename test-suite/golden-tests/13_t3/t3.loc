@@ -1,0 +1,2 @@
+export foo
+foo = ([True], 42, "hello");

@@ -136,7 +136,7 @@ gList' :: [MDoc] -> MDoc
 gList' xs = encloseSep "{" "}" "," xs
 
 gTuple' :: [MDoc] -> MDoc
-gTuple' xs = encloseSep "{" "}" "," xs
+gTuple' xs = "std::make_tuple" <> (tupled xs)
 
 gRecord' :: [(MDoc, MDoc)] -> MDoc
 gRecord' _ = undefined

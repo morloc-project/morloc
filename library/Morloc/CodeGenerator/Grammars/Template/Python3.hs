@@ -236,9 +236,7 @@ if __name__ == '__main__':
         sys.exit("Internal error in {}: no manifold id found".format(sys.argv[0]))
     except ValueError:
         sys.exit("Internal error in {}: expected integer manifold id".format(sys.argv[0]))
-
     try:
-
 #{indent 8 ((pmDispatchManifold pm) "cmdID" "result")}
     except KeyError:
         sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))

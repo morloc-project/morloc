@@ -14,6 +14,7 @@ module Morloc.TypeChecker.PartialOrder (
   , mostGeneral
   , mostSpecific
   , mostSpecificSubtypes
+  , (<=)
 ) where
 
 import Morloc.Namespace
@@ -23,6 +24,14 @@ import qualified Data.PartialOrd as P
 
 -- | substitute all appearances of a given variable with a given new type
 substitute :: TVar -> Type -> Type -> Type
+substitute v (Forall q r) t = 
+  if Set.member (VarT q) (free t)
+  then
+    let q' = getNewVariable r t -- get unused variable name from [a, ..., z, aa, ...]
+        r' = substitute q (VarT q') r -- substitute the new variable into the unqualified type
+    in Forall q' (substitute v r' t)
+  else
+    Forall q (substitute v r t)
 substitute v r t = sub t
   where
     sub :: Type -> Type
@@ -60,7 +69,6 @@ instance P.PartialOrd Type where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (Forall v1 t1) (Forall v2 t2) = (P.<=) t1 (substitute v2 (VarT v1) t2)
   (<=) (FunT t11 t12) (FunT t21 t22)
     =  (P.<=) t11 t21
     && (P.<=) t22 t12
@@ -76,16 +84,29 @@ instance P.PartialOrd Type where
     where
       ts1 = map snd es1
       ts2 = catMaybes $ map (\(k,_) -> lookup k es2) es1
-  (<=) (Forall v@(TV lang _) t1) t2 = case substituteFirst v t1 t2 of
-    (Just t1') -> (P.<=) t1' t2
-    Nothing -> (P.<=) (substitute v (getNewVariable lang t1 t2) t1) t2
+  (<=) (Forall v t1) t2
+    | (P.==) (Forall v t1) t2 = True
+    | otherwise = (P.<=) (substituteFirst v t1 t2) t2
   (<=) _ _ = False
 
-substituteFirst :: TVar -> Type -> Type -> Maybe Type
-substituteFirst v t1 t2 = substitute v <$> findFirst v t1 t2 <*> pure t1
+  (==) (Forall v1 t1) (Forall v2 t2) =
+    if Set.member (VarT v1) (free t2)
+    then
+      let v = getNewVariable t1 t2
+      in (P.==) (substitute v1 (VarT v) t1) (substitute v2 (VarT v) t2)
+    else (P.==) t1 (substitute v2 (VarT v1) t2)
+  (==) a b = a == b
 
-getNewVariable :: Maybe Lang -> Type -> Type -> Type 
-getNewVariable lang t1 t2 = VarT $ findNew variables (Set.union (free t1) (free t2))
+-- Substitute all v for the first term in t2 that corresponds to v in t1. If v
+-- does not occur in t1, then t1 is returned unchanged (e.g., `forall a . Int`).
+substituteFirst :: TVar -> Type -> Type -> Type
+substituteFirst v t1 t2 = case findFirst v t1 t2 of
+  (Just t) -> substitute v t t1
+  Nothing -> t1
+
+-- | get a fresh variable name that is not used in t1 or t2
+getNewVariable :: Type -> Type -> TVar
+getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
   where 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
@@ -94,7 +115,12 @@ getNewVariable lang t1 t2 = VarT $ findNew variables (Set.union (free t1) (free 
       | Set.member (VarT v) ts = findNew xs ts 
       | otherwise = v
       where
-        v = TV lang (MT.pack x)
+        v = TV (langOf t1) (MT.pack x)
+
+    allVars :: Type -> Set.Set Type
+    allVars (Forall v t) = Set.union (Set.singleton (VarT v)) (allVars t)
+    allVars t = free t
+
 
 findFirst :: TVar -> Type -> Type -> Maybe Type
 findFirst v (VarT v') t2
@@ -103,9 +129,12 @@ findFirst v (VarT v') t2
 findFirst v (Forall v1 t1) (Forall v2 t2)
   | v == v1 = Nothing
   | otherwise = findFirst v t1 (substitute v2 (VarT v1) t2)
+findFirst v (Forall v1 t1) t2
+  | v == v1 = Nothing
+  | otherwise = findFirst v (substitute v1 (VarT v1) t1) t2
 findFirst v (FunT t11 t12) (FunT t21 t22)
   = case (findFirst v t11 t21, findFirst v t12 t22) of
-    (Just t, _) -> Just t  
+    (Just t, _) -> Just t
     (_, Just t) -> Just t
     _ -> Nothing
 findFirst v (ArrT _ ts1) (ArrT _ ts2)
