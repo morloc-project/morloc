@@ -987,35 +987,42 @@ findSources h xs = unique . concat . concat . map (unpackSAnno f) $ xs
 -- require signatures may simply write the type information as comments at the
 -- beginning of the source file.
 encodeSignatures :: Grammar -> SAnno GMeta One (CType, [Argument]) -> [MDoc]
-encodeSignatures g (SAnno (One (CallS _, (c, args))) m) = [makeSignature g (Just m, m, c, args)]
-encodeSignatures g (SAnno (One (LamS _ x, _)) _) =
-  map (makeSignature g) (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced g x)
-  where
-    f :: SExpr GMeta One (CType, [Argument])
-      -> GMeta
-      -> (CType, [Argument])
-      -> Maybe (Maybe GMeta, GMeta, CType, [Argument])
-    f (AppS (SAnno _ gFun) _) m (c, args) = Just (Just gFun, m, c, args)
-    f (ForeignS _ _ _) m (c, args) = Just (Nothing, m, c, args)
-    f _ _ _ = Nothing
+encodeSignatures g s = encodeSignatures' True s where
+  encodeSignatures'
+    :: Bool -- is this a root expression
+    -> SAnno GMeta One (CType, [Argument]) -> [MDoc]
+  encodeSignatures' _ (SAnno (One (CallS _, (c, args))) m) = [makeSignature (Just m, m, c, args)]
+  encodeSignatures' _ (SAnno (One (LamS _ x, _)) _) = map makeSignature (catMaybes $ unpackSAnno f x) ++ maybeToList (getSourced x)
+  encodeSignatures' _ (SAnno (One (AppS g xs, (c, _))) m) = conmap (\x -> map makeSignature (catMaybes $ unpackSAnno f x)) xs ++ maybeToList (getSourced g)
+  encodeSignatures' True x@(SAnno (One (TupleS xs, (c, _))) m) = [makeSignature (Just m, m, c, [])] ++ conmap (\x -> map makeSignature (catMaybes $ unpackSAnno f x)) xs
+  encodeSignatures' True x@(SAnno (One (ListS xs, (c, _))) m) = [makeSignature (Just m, m, c, [])] ++ conmap (\x -> map makeSignature (catMaybes $ unpackSAnno f x)) xs
+  encodeSignatures' True x@(SAnno (One (RecS es, (c, _))) m) = [makeSignature (Just m, m, c, [])] ++ conmap (\x -> map makeSignature (catMaybes $ unpackSAnno f x)) (map snd es)
+  encodeSignatures' _ _ = []
 
-    -- make the signature for an exported function that is directly sourced
-    -- such cases will always be at the top level, hence no recursion is needed
-    getSourced :: Grammar -> SAnno GMeta One (CType, [Argument]) -> Maybe MDoc
-    getSourced g (SAnno (One ((VarS v), (c, args))) m) = Just (makeSignature g (Just m, m, c, args))
-    getSourced _ _ = Nothing
-encodeSignatures _ _ = error "Expected LamS or VarS at all top-level segments"
+  f :: SExpr GMeta One (CType, [Argument])
+    -> GMeta
+    -> (CType, [Argument])
+    -> Maybe (Maybe GMeta, GMeta, CType, [Argument])
+  f (AppS (SAnno _ gFun) _) m (c, args) = Just (Just gFun, m, c, args)
+  f (ForeignS _ _ _) m (c, args) = Just (Nothing, m, c, args)
+  f _ _ _ = Nothing
 
-makeSignature :: Grammar -> (Maybe GMeta, GMeta, CType, [Argument]) -> MDoc
-makeSignature g (gFun, m, c, args) = (gSignature g) $ GeneralFunction
-  { gfComments = maybeToList $
-      fmap (\(GType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
-           (gFun >>= metaGType)
-  , gfReturnType = Just . gShowType g . last . fromJust . sequence . typeArgsC $ c
-  , gfName = makeManifoldName m
-  , gfArgs = map (makeArg' g) args
-  , gfBody = ""
-  }
+  -- make the signature for an exported function that is directly sourced
+  -- such cases will always be at the top level, hence no recursion is needed
+  getSourced :: SAnno GMeta One (CType, [Argument]) -> Maybe MDoc
+  getSourced (SAnno (One ((VarS v), (c, args))) m) = Just (makeSignature (Just m, m, c, args))
+  getSourced _ = Nothing
+
+  makeSignature :: (Maybe GMeta, GMeta, CType, [Argument]) -> MDoc
+  makeSignature (gFun, m, c, args) = (gSignature g) $ GeneralFunction
+    { gfComments = maybeToList $
+        fmap (\(GType t) -> maybe "_" pretty (gFun >>= metaName) <+> "::" <+> prettyType t)
+             (gFun >>= metaGType)
+    , gfReturnType = Just . gShowType g . last . fromJust . sequence . typeArgsC $ c
+    , gfName = makeManifoldName m
+    , gfArgs = map (makeArg' g) args
+    , gfBody = ""
+    }
 
 makeArg' :: Grammar -> Argument -> (Maybe MDoc, MDoc)
 makeArg' g (PackedArgument v _ _)  = (Just ((gShowType g) (gSerialType g)), pretty v)
@@ -1055,12 +1062,13 @@ makeDispatchBuilder h g xs =
       -> Maybe ([EVar], GMeta, CType)
     getPoolCall (SAnno (One (LamS vs (SAnno (One (_, (c, _))) m), _)) _) = Just (vs, m, c)
     getPoolCall (SAnno (One (CallS _, (c, args))) m) = Just (map argName args, m, last . fromJust . sequence . typeArgsC $ c)
-    getPoolCall (SAnno (One (TupleS xs, (c, _))) m) = Just ([], m, c)
-    getPoolCall (SAnno (One (ListS  xs, (c, _))) m) = Just ([], m, c)
-    getPoolCall (SAnno (One (RecS   xs, (c, _))) m) = Just ([], m, c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (TupleS xs, (c, _))) m), _)) _) = Just (vs, m, c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (ListS  xs, (c, _))) m), _)) _) = Just (vs, m, c)
-    getPoolCall (SAnno (One (LamS vs (SAnno (One (RecS   xs, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (AppS _ _, (c, _))) m) = Just ([], m, c) 
+    getPoolCall (SAnno (One (TupleS _, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (ListS  _, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (RecS   _, (c, _))) m) = Just ([], m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (TupleS _, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (ListS  _, (c, _))) m), _)) _) = Just (vs, m, c)
+    getPoolCall (SAnno (One (LamS vs (SAnno (One (RecS   _, (c, _))) m), _)) _) = Just (vs, m, c)
     getPoolCall _ = Nothing
 
     -- Note, the CType is for the type of the full application, that is, the return type.
