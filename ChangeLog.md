@@ -1,18 +1,30 @@
-0.21.0 [xxxx.xx.xx]
+x.xx.x [xxxx.xx.xx]
+-------------------
 
 Major changes
- - [ ] implement composable serialization functions
- - [.] Allow source-free functions 
  - [ ] Rewrite perl manifold nexus in C
 
 Minor changes
+ - [ ] test composable serialization functions in all supported languages
  - [ ] test record handling
- - [x] add python tests
- - [x] make the test output look pretty (no weird whitespace)
  - [ ] add type annotations to printed help
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
  - [ ] resurrect property tests
+
+0.21.0 [2020.03.31]
+-------------------
+
+Major - add handling and test for many many corner cases
+ * Allow export of data statements
+ * Allow export of non-functions
+ * Allow functions with containers at the root
+ * Allow export of 0-argument functions 
+
+Minor
+ * proof-of-concept composable serialization functions in C++ (cppbase)
+ * add python tests
+ * make the test output look pretty (no weird whitespace)
 
 0.20.0 [2020.03.23]
 -------------------
@@ -20,6 +32,7 @@ Minor changes
  * Add composable default types
 
 0.19.1 [2020.02.22]
+-------------------
 
  * bug fixes
 
@@ -92,6 +105,7 @@ Minor bug fixes and updates
  * Replace string names of languages (e.g., "python") with a sum type.
 
 0.17.2 [2019.05.05]
+-------------------
 
   Pycon release
 
