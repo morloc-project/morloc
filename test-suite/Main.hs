@@ -50,4 +50,7 @@ main = do
       , golden "7th form C++" "13_t7_c"
       , golden "7th form Python3" "13_t7_py"
       , golden "7th form R" "13_t7_r"
+      , golden "Record in R" "14_records-r"
+      , golden "Record in Python3" "14_records-py"
+      , golden "Record in C++" "14_records-c"
       ]
