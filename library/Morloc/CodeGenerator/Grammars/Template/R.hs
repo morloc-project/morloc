@@ -15,7 +15,7 @@ import Morloc.Data.Doc
 import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty (prettyType, prettyLinePrefixes)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.TypeChecker.Macro as MTM
 
@@ -81,7 +81,7 @@ gCurry' f args i
       else map (\i' -> pretty i') (take i ([1..] :: [Int]))
 
 gComment' :: [MDoc] -> MDoc
-gComment' ds = vsep (map (\d -> "#" <+> d) ds) <> line
+gComment' ds = prettyLinePrefixes "# " (vsep ds)
 
 gReturn' :: MDoc -> MDoc
 gReturn' = id

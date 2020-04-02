@@ -24,6 +24,7 @@ Testing - grammar directed testing
  - [ ] test tuple interop
 
 Fixes
+ - [ ] allow wrapped comments in R
  - [ ] fix record handling
  - [ ] fix container interop
 

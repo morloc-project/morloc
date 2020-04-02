@@ -57,8 +57,6 @@ expandMacro t ps =
     Left err -> error (show err)
     Right (es, _) -> es
 
--- expandNamedMacro :: MT.Text -> [
-
 many1 :: Parser a -> Parser [a]
 many1 p = do
   x <- p
