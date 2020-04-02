@@ -2,17 +2,30 @@ x.xx.x [xxxx.xx.xx]
 -------------------
 
 Major changes
- - [ ] Rewrite perl manifold nexus in C
+ - [ ] Remove semicolon requirement
+ - [ ] Rewrite perl manifold nexus in C++
+ - [ ] Place pools and nexus in ~/.morloc/tmp and create a script in the
+       working directory that calls them
+ - [ ] Add a verbosity flag to `morloc make`
 
 Minor changes
  - [x] change default python3 interpreter from "python" to "python3"
  - [x] add default library and tmp paths to config handler
  - [ ] test composable serialization functions in all supported languages
- - [ ] test record handling
  - [ ] add type annotations to printed help
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
  - [ ] resurrect property tests
+
+Testing - grammar directed testing
+ - [x] test record handling
+ - [ ] test record interop
+ - [ ] test list interop
+ - [ ] test tuple interop
+
+Fixes
+ - [ ] fix record handling
+ - [ ] fix container interop
 
 0.21.0 [2020.03.31]
 -------------------
