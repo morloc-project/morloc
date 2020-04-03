@@ -15,7 +15,6 @@ main = do
       , typeOrderTests
       , propertyTypeTests
       , golden "simple C++" "1_cpp"
-      , golden "simple R" "2_r"
       , golden "basic math" "3_math"
       , golden "more basic math" "3_math2"
       , golden "C++ map function" "4_map"

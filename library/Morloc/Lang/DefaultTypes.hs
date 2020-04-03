@@ -62,7 +62,7 @@ defaultTuple (Just PerlLang) ts = [DefaultType $ arr CppLang "array" ts]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, Type)] -> [DefaultType]
 defaultRecord Nothing entries = [DefaultType $ rec MorlocLang "Record" entries]
-defaultRecord (Just Python3Lang) entries = [DefaultType $ rec Python3Lang "dict" entries]
+defaultRecord (Just Python3Lang) entries = [DefaultType $ rec Python3Lang "record" entries]
 defaultRecord (Just RLang) entries = [DefaultType $ rec RLang "record" entries]
 defaultRecord (Just CLang) entries = []
 defaultRecord (Just CppLang) entries = []

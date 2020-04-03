@@ -73,7 +73,30 @@ gLang' :: Lang
 gLang' = Python3Lang
 
 gTypeSchema' :: CType -> Int -> GeneralAssignment
-gTypeSchema' c i = undefined
+gTypeSchema' c i = 
+  GeneralAssignment
+    { gaType = Just (gShowType' c)
+    , gaName = "t" <> pretty i
+    , gaValue = f (unCType c) 
+    , gaArg = Nothing
+    }
+  where
+    f (VarT v) = lst [var v, "None"]
+    f (ArrT v ps) = lst [var v, lst (map f ps)]
+    f (NamT v es) = lst [var v, dict (map entry es)]
+    f _ = error "Cannot serialize this type"
+
+    entry :: (MT.Text, Type) -> MDoc
+    entry (v, t) = pretty v <> "=" <> f t
+
+    dict :: [MDoc] -> MDoc
+    dict xs = "dict" <> lst xs
+
+    lst :: [MDoc] -> MDoc
+    lst xs = encloseSep "(" ")" "," xs
+
+    var :: TVar -> MDoc
+    var (TV _ v) = dquotes (pretty v)
 
 gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just Python3Lang) "str")
@@ -140,7 +163,7 @@ gTuple' :: [MDoc] -> MDoc
 gTuple' = tupled
 
 gRecord' :: [(MDoc,MDoc)] -> MDoc
-gRecord' xs = encloseSep "{" "}" ", " (map (\(k,v) -> k <> "=" <> v) xs)
+gRecord' xs = "dict" <> encloseSep "(" ")" ", " (map (\(k,v) -> k <> "=" <> v) xs)
 
 gIndent' :: MDoc -> MDoc
 gIndent' = indent 4
