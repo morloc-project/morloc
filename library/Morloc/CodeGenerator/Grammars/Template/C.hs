@@ -28,6 +28,7 @@ import qualified Morloc.TypeChecker.Macro as MTM
 
 grammar = Grammar {
       gLang        = gLang'
+    , gTypeSchema  = gTypeSchema'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
     , gCall        = gCall'
@@ -61,6 +62,9 @@ fromMaybeType = maybe "void*" id
 
 gLang' :: Lang
 gLang' = CLang
+
+gTypeSchema' :: CType -> Int -> GeneralAssignment
+gTypeSchema' c i = undefined
 
 gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just CLang) "char*")

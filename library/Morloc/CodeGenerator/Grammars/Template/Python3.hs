@@ -40,6 +40,7 @@ pyIfElse (r:rs) els
 
 grammar = Grammar {
       gLang        = gLang'
+    , gTypeSchema  = gTypeSchema'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
     , gCall        = gCall'
@@ -70,6 +71,9 @@ grammar = Grammar {
 
 gLang' :: Lang
 gLang' = Python3Lang
+
+gTypeSchema' :: CType -> Int -> GeneralAssignment
+gTypeSchema' c i = undefined
 
 gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just Python3Lang) "str")

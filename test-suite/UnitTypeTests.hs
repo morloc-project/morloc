@@ -818,7 +818,7 @@ unitTypeTests =
         , "f c :: int -> int;"
         , "foo f 42"
         ])
-      [arrc RLang "list" [varc RLang "numeric", varc RLang "numeric"]]
+      [arrc RLang "tuple" [varc RLang "numeric", varc RLang "numeric"]]
     , assertTerminalType
       "declarations represent all realizations"
       (T.unlines

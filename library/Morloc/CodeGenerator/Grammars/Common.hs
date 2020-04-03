@@ -9,7 +9,6 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Common
   ( SAnno(..)
   , SExpr(..)
-  , SerialMap(..)
   , GMeta(..)
   , Argument(..)
   , argName
@@ -75,22 +74,15 @@ data GMeta = GMeta {
   , metaConstraints :: Set.Set Constraint
 } deriving (Show, Ord, Eq)
 
-data SerialMap = SerialMap {
-    packers :: Map.Map CType (Name, Path)
-  , unpackers :: Map.Map CType (Name, Path)
-} deriving (Show, Ord, Eq)
-
 -- | An argument that is passed to a manifold
 data Argument
-  = PackedArgument EVar CType (Maybe Name)
+  = PackedArgument EVar CType
   -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
-  -- argument name (e.g., x), 2) argument type (e.g., double), and 3) packer
-  -- name (e.g., packDouble).  The packer name is optional. Some types may not
-  -- be serializable. This is OK, so long as they are only used in functions of
-  -- the same language.
-  | UnpackedArgument EVar CType (Maybe Name)
-  -- ^ A native argument with the same parameters as above (except #3 is the
-  -- unpacker name, e.g., unpackDouble)
+  -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
+  -- may not be serializable. This is OK, so long as they are only used in
+  -- functions of the same language.
+  | UnpackedArgument EVar CType
+  -- ^ A native argument with the same parameters as above
   | PassThroughArgument EVar
   -- ^ A serialized argument that is untyped in the current language. It cannot
   -- be unpacked, but will be passed eventually to a foreign argument where it
@@ -98,31 +90,32 @@ data Argument
   deriving (Show, Ord, Eq)
 
 prettyArgument :: Argument -> MDoc
-prettyArgument (PackedArgument v c n) =
-  "Packed" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
-prettyArgument (UnpackedArgument v c n) =
-  "Unpacked" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
+prettyArgument (PackedArgument v c) =
+  "Packed" <+> pretty v <+> parens (prettyType c)
+prettyArgument (UnpackedArgument v c) =
+  "Unpacked" <+> pretty v <+> parens (prettyType c)
 prettyArgument (PassThroughArgument v) =
   "PassThrough" <+> pretty v
 
 argName :: Argument -> EVar
-argName (PackedArgument v _ _) = v
-argName (UnpackedArgument v _ _) = v
+argName (PackedArgument v _) = v
+argName (UnpackedArgument v _) = v
 argName (PassThroughArgument v) = v
 
 argType :: Argument -> Maybe CType
-argType (PackedArgument _ t _) = Just t
-argType (UnpackedArgument _ t _) = Just t
+argType (PackedArgument _ t) = Just t
+argType (UnpackedArgument _ t) = Just t
 argType (PassThroughArgument _) = Nothing
 
 unpackArgument :: Argument -> Argument
-unpackArgument (PackedArgument v t n) = UnpackedArgument v t n
+unpackArgument (PackedArgument v t) = UnpackedArgument v t
 unpackArgument x = x
 
 data Grammar =
   Grammar
     { gLang :: Lang
     , gSerialType :: CType
+    , gTypeSchema :: CType -> Int -> GeneralAssignment
     , gAssign :: GeneralAssignment -> MDoc
     , gCall :: MDoc -> [MDoc] -> MDoc
     , gFunction :: GeneralFunction -> MDoc

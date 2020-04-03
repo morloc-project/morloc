@@ -21,6 +21,7 @@ import qualified Morloc.TypeChecker.Macro as MTM
 
 grammar = Grammar {
       gLang        = gLang'
+    , gTypeSchema  = gTypeSchema'
     , gSerialType  = gSerialType'
     , gAssign      = gAssign'
     , gCall        = gCall'
@@ -51,6 +52,29 @@ grammar = Grammar {
 
 gLang' :: Lang
 gLang' = RLang
+
+gTypeSchema' :: CType -> Int -> GeneralAssignment
+gTypeSchema' c i = 
+  GeneralAssignment
+    { gaType = Just (gShowType' c)
+    , gaName = "t" <> pretty i
+    , gaValue = f (unCType c) 
+    , gaArg = Nothing
+    }
+  where
+    f (VarT v) = dquotes (var v)
+    f (ArrT v ps) = lst [var v <> "=" <> lst (map f ps)]
+    f (NamT v es) = lst [var v <> "=" <> lst (map entry es)]
+    f _ = error "Cannot serialize this type"
+
+    entry :: (MT.Text, Type) -> MDoc
+    entry (v, t) = pretty v <> "=" <> f t
+
+    lst :: [MDoc] -> MDoc
+    lst xs = "list" <> encloseSep "(" ")" "," xs
+
+    var :: TVar -> MDoc
+    var (TV _ v) = pretty v
 
 gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just RLang) "character")
