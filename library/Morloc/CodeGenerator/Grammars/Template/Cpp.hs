@@ -60,21 +60,31 @@ fromMaybeType = maybe "void*" id
 gLang' :: Lang
 gLang' = CppLang
 
+-- The type schema is simply an initialized variable for the proper type
+-- This is all that is needed to ensure proper resolution of the C++ templates
 gTypeSchema' :: CType -> Int -> GeneralAssignment
-gTypeSchema' c i = undefined
+gTypeSchema' c i = 
+  GeneralAssignment
+    { gaType = Just (gShowType' c)
+    , gaName = "t" <> pretty i
+    , gaValue = Nothing
+    , gaArg = Nothing
+    }
 
 gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just CppLang) "std::string")
 
 gAssign' :: GeneralAssignment -> MDoc
-gAssign' ga = case (gaArg ga, gaType ga) of
+gAssign' ga = case (gaArg ga, gaType ga, gaValue ga) of
   -- need to call constructors
-  (Just (Lst' _), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
-  (Just (Tup' _), Just t) -> t <+> gaName ga <> gaValue ga <> ";"
-  (Just (Rec' _), Just _) -> undefined
+  (Just (Lst' _), Just t, Just v) -> t <+> gaName ga <> v <> ";"
+  (Just (Tup' _), Just t, Just v) -> t <+> gaName ga <> v <> ";"
+  (Just (Rec' _), Just _, _) -> undefined
   -- simple '=' assignment
-  (_, Nothing) -> gaName ga <+> "=" <+> gaValue ga <> ";"
-  (_, Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
+  (_, Nothing, Just v) -> gaName ga <+> "=" <+> v <> ";"
+  (_, Just t, Just v) -> t <+> gaName ga <+> "=" <+> v <> ";"
+  (_, Just t, Nothing) -> t <+> gaName ga <> ";" -- initialization
+  _ -> error "Bad C++ assignment"
 
 gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args

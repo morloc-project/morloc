@@ -158,7 +158,7 @@ data GeneralAssignment =
   GeneralAssignment
     { gaType :: Maybe MDoc
     , gaName :: MDoc
-    , gaValue :: MDoc
+    , gaValue :: Maybe MDoc
     , gaArg :: Maybe MData
     }
   deriving (Show)

@@ -77,7 +77,7 @@ gTypeSchema' c i =
   GeneralAssignment
     { gaType = Just (gShowType' c)
     , gaName = "t" <> pretty i
-    , gaValue = f (unCType c) 
+    , gaValue = Just (f (unCType c))
     , gaArg = Nothing
     }
   where
@@ -102,9 +102,10 @@ gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just Python3Lang) "str")
 
 gAssign' :: GeneralAssignment -> MDoc
-gAssign' ga = case gaType ga of
-  (Just t) -> gaName ga <> " = " <> gaValue ga <+> "# ::" <+> t
-  Nothing  -> gaName ga <> " = " <> gaValue ga
+gAssign' ga = case (gaType ga, gaValue ga) of
+  (Just t, Just v) -> gaName ga <> " = " <> v <+> "# ::" <+> t
+  (Nothing, Just v) -> gaName ga <> " = " <> v
+  _ -> error "Bad Python3 assignment"
 
 gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' n args = n <> tupled args

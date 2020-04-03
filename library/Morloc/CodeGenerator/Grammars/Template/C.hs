@@ -70,9 +70,11 @@ gSerialType' :: CType
 gSerialType' = CType $ VarT (TV (Just CLang) "char*")
 
 gAssign' :: GeneralAssignment -> MDoc
-gAssign' ga = case gaType ga of
-  Nothing -> gaName ga <+> "=" <+> gaValue ga <> ";"
-  (Just t) -> t <+> gaName ga <+> "=" <+> gaValue ga <> ";"
+gAssign' ga = case (gaType ga, gaValue ga) of
+  (Nothing, Just v) -> gaName ga <+> "=" <+> v <> ";"
+  (Just t, Just v) -> t <+> gaName ga <+> "=" <+> v <> ";"
+  (Just t, Nothing) -> t <+> gaName ga <> ";" -- initialize a variable
+  _ -> error "Bad C assignment"
 
 gCall' :: MDoc -> [MDoc] -> MDoc
 gCall' f args = f <> tupled args

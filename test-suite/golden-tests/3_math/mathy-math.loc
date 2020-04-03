@@ -1,5 +1,4 @@
 import math (mean, fibonacci);
-import cppbase;
 
 export meanfib;
 export fibonacci;

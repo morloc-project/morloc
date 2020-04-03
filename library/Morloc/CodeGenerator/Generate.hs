@@ -1173,7 +1173,7 @@ codify' True g (SAnno (One (CallS src, (ftype, args))) m) = do
             , (gAssign g) GeneralAssignment
                 { gaType = Just . gShowType g $ t
                 , gaName = varname
-                , gaValue = (gCall g) "unpack" [pretty v, gaName typeSchema]
+                , gaValue = Just $ (gCall g) "unpack" [pretty v, gaName typeSchema]
                 , gaArg = Nothing
                 }
             ]
@@ -1254,7 +1254,7 @@ prepInput g args (SAnno (One (ListS xs, (c, _, d))) m) = do
   let ass = (gAssign g) (GeneralAssignment {
       gaType = Just ((gShowType g) c)
     , gaName = varname
-    , gaValue = (gList g) xs'
+    , gaValue = Just $ (gList g) xs'
     , gaArg = Nothing
     })
   return (varname, concat asses ++ [ass])
@@ -1265,7 +1265,7 @@ prepInput g args (SAnno (One (TupleS xs, (c, _, d))) m) = do
   let ass = (gAssign g) (GeneralAssignment {
       gaType = Just ((gShowType g) c)
     , gaName = varname
-    , gaValue = (gTuple g) xs'
+    , gaValue = Just $ (gTuple g) xs'
     , gaArg = Nothing
     })
   return (varname, concat asses ++ [ass])
@@ -1276,7 +1276,7 @@ prepInput g args (SAnno (One (RecS es, (c, _, d))) m) = do
   let ass = (gAssign g) (GeneralAssignment {
       gaType = Just ((gShowType g) c)
     , gaName = varname
-    , gaValue = (gRecord g) (zip (map (pretty . fst) es) xs')
+    , gaValue = Just $ (gRecord g) (zip (map (pretty . fst) es) xs')
     , gaArg = Nothing
     })
   return (varname, concat asses ++ [ass])
@@ -1293,7 +1293,7 @@ prepInput g _ (SAnno (One (AppS x xs, (t, args, d))) m) = do
       ass = (gAssign g) $ GeneralAssignment
         { gaType = gaType'
         , gaName = varname
-        , gaValue = (gCall g) mname (map (pretty . argName) args)
+        , gaValue = Just $ (gCall g) mname (map (pretty . argName) args)
         , gaArg = Nothing
         }
   return (varname, [ass])
@@ -1313,7 +1313,7 @@ prepInput g rs (SAnno (One (VarS v, (t, _, d))) m) = do
            , (gAssign g) GeneralAssignment
                { gaType = Just . gShowType g $ t
                , gaName = varname
-               , gaValue = (gCall g) "unpack" [name, gaName typeSchema]
+               , gaValue = Just $ (gCall g) "unpack" [name, gaName typeSchema]
                , gaArg = Nothing
                }
            ]
