@@ -1,32 +1,55 @@
-x.xx.x [xxxx.xx.xx]
+x.xx.x-pre [xxxx.xx.xx]
 -------------------
 
+New build system and and compiler options
+
 Major changes
- - [ ] Remove semicolon requirement
- - [ ] Rewrite perl manifold nexus in C++
- - [ ] Place pools and nexus in ~/.morloc/tmp and create a script in the
-       working directory that calls them
+ - [ ] Remove semicolon requirement (1 day)
+ - [ ] Rewrite perl manifold nexus in C++ (2 days)
+       - [ ] add type annotations to printed help
+ - [ ] New build system (3-7 days)
+       - [ ] Place pools and nexus in ~/.morloc/tmp
+       - [ ] Create scripts in the working directory that calls them
+       - [ ] Add compiler options for executable name, deletion, cache clearing, etc
+       - [ ] Allow stdin to replace '-' argument
  - [ ] Add a verbosity flag to `morloc make`
+ - [ ] New compiler commands for managing modules
+       - [ ] `morloc uninstall` command for deleting modules
+       - [ ] `morloc update` command for updating modules (i.e., git pull)
+       - [ ] `morloc list` command for listing all available modules
+
+Minor changes
+ - [ ] generate error handling in pools
+ - [ ] meaningful error messages
+ - [ ] resurrect property tests
+ - [ ] generate error handling in pools
+ - [ ] address all compiler warnings
+ - [ ] add linter
+
+
+0.22.0-pre [xxxx.xx.xx]
+-------------------
+
+Implement a schema-directed composable serialization system
+
+Major changes
+ - [x] Fully composable serialization over containers and primitives
+ - [ ] Full record support
 
 Minor changes
  - [x] change default python3 interpreter from "python" to "python3"
  - [x] add default library and tmp paths to config handler
- - [ ] test composable serialization functions in all supported languages
- - [ ] add type annotations to printed help
- - [ ] generate error handling in pools
- - [ ] meaningful error messages
+ - [x] test composable serialization functions in all supported languages
+ - [x] allow wrapped comments in R
  - [ ] resurrect property tests
 
 Testing - grammar directed testing
- - [x] test record handling
- - [ ] test record interop
- - [ ] test list interop
- - [ ] test tuple interop
-
-Fixes
- - [ ] allow wrapped comments in R
- - [ ] fix record handling
- - [ ] fix container interop
+ - [.] test record handling
+       - [x] R
+       - [x] Python3
+       - [ ] C++
+ - [.] remove and replace out-of-date golden tests
+ - [ ] systematic interop testing
 
 0.21.0 [2020.03.31]
 -------------------

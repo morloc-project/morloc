@@ -10,5 +10,5 @@ import rbase plotPDF
 export foo
 
 foo :: [Num] -> ()
-foo R :: vector numeric -> ()
+foo R :: [numeric] -> ()
 foo xs = plotPDF xs "foo.pdf"
