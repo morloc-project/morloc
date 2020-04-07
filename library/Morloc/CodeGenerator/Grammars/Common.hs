@@ -17,13 +17,10 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyArgument
   , One(..)
   , Many(..)
-  , Grammar(..)
-  , TryDoc(..)
-  , GeneralFunction(..)
-  , GeneralAssignment(..)
-  , UnpackerDoc(..)
-  , ForeignCallDoc(..)
-  , PoolMain(..)
+  , ReturnValue(..)
+  , Manifold(..)
+  , MAnno(..)
+  , MExpr(..)
   ) where
 
 import Morloc.Data.Doc
@@ -89,6 +86,15 @@ data Argument
   -- does have a concrete type.
   deriving (Show, Ord, Eq)
 
+-- | Similar to Argument, but for values returned from a manifold. The EVar
+-- parameter stores the names of the manifold. The CType stores the return type
+-- of the manifold, which may serialized.
+data ReturnValue
+  = PackedReturn EVar CType
+  | UnpackedReturn EVar CType
+  | PassThroughReturn EVar
+  deriving (Show, Ord, Eq)
+
 prettyArgument :: Argument -> MDoc
 prettyArgument (PackedArgument v c) =
   "Packed" <+> pretty v <+> parens (prettyType c)
@@ -111,104 +117,23 @@ unpackArgument :: Argument -> Argument
 unpackArgument (PackedArgument v t) = UnpackedArgument v t
 unpackArgument x = x
 
-data Grammar =
-  Grammar
-    { gLang :: Lang
-    , gSerialType :: CType
-    , gTypeSchema :: CType -> Int -> GeneralAssignment
-    , gAssign :: GeneralAssignment -> MDoc
-    , gCall :: MDoc -> [MDoc] -> MDoc
-    , gFunction :: GeneralFunction -> MDoc
-    , gSignature :: GeneralFunction -> MDoc
-    , gId2Function :: Integer -> MDoc
-    , gCurry :: MDoc -- function name
-             -> [MDoc] -- arguments that are partially applied
-             -> Int -- number of remaining arguments
-             -> MDoc
-    , gComment :: [MDoc] -> MDoc
-    , gReturn :: MDoc -> MDoc
-    , gQuote :: MDoc -> MDoc
-    , gImport :: MDoc -> MDoc -> MDoc
-    , gPrepImport :: Path -> MorlocMonad MDoc
-    ---------------------------------------------
-    , gNull :: MDoc
-    , gBool :: Bool -> MDoc
-    , gReal :: Scientific -> MDoc
-    , gList :: [MDoc] -> MDoc
-    , gTuple :: [MDoc] -> MDoc
-    , gRecord :: [(MDoc, MDoc)] -> MDoc
-    ---------------------------------------------
-    , gIndent :: MDoc -> MDoc
-    , gUnpacker :: UnpackerDoc -> MDoc
-    , gTry :: TryDoc -> MDoc
-    , gForeignCall :: ForeignCallDoc -> MDoc
-    , gSwitch
-        :: (([EVar], GMeta, CType) -> MDoc)
-        -> (([EVar], GMeta, CType) -> MDoc)
-        -> [([EVar], GMeta, CType)]
-        -> MDoc
-        -> MDoc
-        -> MDoc
-    , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
-    , gShowType :: CType -> MDoc
-    , gMain :: PoolMain -> MorlocMonad MDoc
-    }
+data Manifold = Manifold ReturnValue [Argument] [MAnno]
 
-data GeneralAssignment =
-  GeneralAssignment
-    { gaType :: Maybe MDoc
-    , gaName :: MDoc
-    , gaValue :: Maybe MDoc
-    , gaArg :: Maybe MData
-    }
-  deriving (Show)
+data MAnno = MAnno MExpr CType
 
-data GeneralFunction =
-  GeneralFunction
-    { gfComments :: [MDoc]
-    , gfReturnType :: Maybe MDoc -- ^ concrete return type
-    , gfName :: MDoc -- ^ function name
-    , gfArgs :: [(Maybe MDoc, MDoc)] -- ^ (variable concrete type, variable name)
-    , gfBody :: MDoc
-    }
-  deriving (Show)
-
-data TryDoc =
-  TryDoc
-    { tryCmd :: MDoc -- ^ The function we attempt to run
-    , tryRet :: MDoc -- ^ A name for the returned variable?
-    , tryArgs :: [MDoc] -- ^ Arguments passed to function
-    , tryMid :: MDoc -- ^ The name of the calling manifold (for debugging)
-    , tryFile :: MDoc -- ^ The file where the issue occurs (for debugging)
-    }
-  deriving (Show)
-
-data UnpackerDoc =
-  UnpackerDoc
-    { udValue :: MDoc -- ^ The expression that will be unpacked
-    , udUnpacker :: MDoc -- ^ The function for unpacking the value
-    , udMid :: MDoc -- ^ Manifold name for debugging messages
-    , udFile :: MDoc -- ^ File name for debugging messages
-    }
-  deriving (Show)
-
-data ForeignCallDoc =
-  ForeignCallDoc
-    { fcdForeignPool :: MDoc -- ^ the name of the foreign pool (e.g., "R.pool")
-    , fcdForeignExe :: MDoc -- ^ path to the foreign executable
-    , fcdMid :: MDoc -- ^ the function integer identifier
-    , fcdArgs :: [MDoc] -- ^ CLI arguments passed to foreign function
-    , fcdCall :: [MDoc] -- ^ make a list of CLI arguments from first two
-                        -- inputs -- since fcdArgs will likely be
-                        -- variables, they are not included in this call.
-    , fcdFile :: MDoc -- ^ for debugging
-    }
-  deriving (Show)
-
-data PoolMain =
-  PoolMain
-    { pmSources :: [MDoc]
-    , pmSignatures :: [MDoc]
-    , pmPoolManifolds :: [MDoc]
-    , pmDispatchManifold :: MDoc -> MDoc -> MDoc
-    }
+  -- | ForeignS Int Lang [EVar]
+data MExpr
+  = MTAssign EVar MAnno
+  | MTCall EVar [MAnno]
+  | MTForeignCall Int Lang [EVar] -- | cmd [parameters]
+  | MTReturn MAnno
+  | MTVar EVar
+  -- containers
+  | MTList [MAnno]
+  | MTTuple [MAnno]
+  | MTRecord [(EVar, MAnno)]
+  -- primitives
+  | MTLog Bool
+  | MTNum Scientific 
+  | MTStr MT.Text
+  | MTNull
