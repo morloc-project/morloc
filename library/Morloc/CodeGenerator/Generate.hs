@@ -854,8 +854,10 @@ encode
 encode srcs (lang, xs) = do
   state <- MM.get
 
+  let srcs' = unique [s | s <- srcs, srcLang s == lang]
+
   -- translate each node in the AST to code
-  code <- mapM codify xs |>> concat >>= translate lang srcs
+  code <- mapM codify xs |>> concat >>= translate lang srcs'
 
   return $ Script
     { scriptBase = "pool"
@@ -864,7 +866,7 @@ encode srcs (lang, xs) = do
     , scriptCompilerFlags =
         filter (/= "") . map packageGccFlags $ statePackageMeta state
     , scriptInclude = unique . map MS.takeDirectory $
-        catMaybes [srcPath s | s <- srcs, srcLang s == lang]
+        (unique . catMaybes) (map srcPath srcs')
     }
 
 codify
@@ -942,7 +944,9 @@ codify' _ (SAnno (One (AppS f xs, (c, args))) m) = do
 
 
 translate :: Lang -> [Source] -> [Manifold] -> MorlocMonad MDoc
-translate = undefined
+translate CppLang srcs ms = Cpp.translate srcs ms
+translate RLang srcs ms = R.translate srcs ms
+translate Python3Lang srcs ms = Python3.translate srcs ms
 
 
 -------- Utility and lookup functions ----------------------------------------
