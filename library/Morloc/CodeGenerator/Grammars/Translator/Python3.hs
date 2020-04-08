@@ -18,15 +18,17 @@ import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
+import qualified Morloc.Data.Text as MT
 
-translate :: [Source] -> [Manifold] -> MorlocMonad MDoc
-translate srcs ms = do 
+
+translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
+translate srcs mss = do 
   let includes = unique . catMaybes . map srcPath $ srcs
 
   lib <- return "lib"
   includeDocs <- mapM translateSource includes
-  mDocs <- mapM translateManifold ms
-  dispatch <- makeDispatch ms
+  mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss])
+  dispatch <- makeDispatch [m | (CallTree m _) <- mss]
   return $ makePool lib includeDocs mDocs dispatch
 
 translateSource :: Path -> MorlocMonad MDoc
@@ -37,6 +39,26 @@ translateManifold _ = return "manifold"
 
 makeDispatch :: [Manifold] -> MorlocMonad MDoc
 makeDispatch _ = return "DISPATCH"
+
+typeSchema :: CType -> Int -> MDoc
+typeSchema c i = f (unCType c)
+  where
+    f (VarT v) = lst [var v, "None"]
+    f (ArrT v ps) = lst [var v, lst (map f ps)]
+    f (NamT v es) = lst [var v, dict (map entry es)]
+    f _ = error "Cannot serialize this type"
+
+    entry :: (MT.Text, Type) -> MDoc
+    entry (v, t) = pretty v <> "=" <> f t
+
+    dict :: [MDoc] -> MDoc
+    dict xs = "dict" <> lst xs
+
+    lst :: [MDoc] -> MDoc
+    lst xs = encloseSep "(" ")" "," xs
+
+    var :: TVar -> MDoc
+    var (TV _ v) = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python

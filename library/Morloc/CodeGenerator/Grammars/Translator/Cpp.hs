@@ -22,13 +22,13 @@ import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
 
 
-translate :: [Source] -> [Manifold] -> MorlocMonad MDoc
-translate srcs ms = do 
+translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
+translate srcs mss = do 
   let includes = unique . catMaybes . map srcPath $ srcs
 
   includeDocs <- mapM translateSource includes
-  mDocs <- mapM translateManifold ms
-  main <- translateMain ms
+  mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss])
+  main <- translateMain [m | (CallTree m _) <- mss]
   return . vsep $ includeDocs ++ mDocs ++ [main]
 
 serialType :: MDoc
@@ -85,6 +85,17 @@ showType = MTM.buildCType mkfun mkrec where
 
   mkrec :: [(MDoc, MDoc)] -> MDoc
   mkrec _ = error "Record type annotations not supported in C++"
+
+-- -- The type schema is simply an initialized variable for the proper type
+-- -- This is all that is needed to ensure proper resolution of the C++ templates
+-- gTypeSchema' :: CType -> Int -> GeneralAssignment
+-- gTypeSchema' c i =
+--   GeneralAssignment
+--     { gaType = Just (gShowType' c)
+--     , gaName = "t" <> pretty i
+--     , gaValue = Nothing
+--     , gaArg = Nothing
+--     }
 
 translateMain :: [Manifold] -> MorlocMonad MDoc
 translateMain ms = return [idoc|

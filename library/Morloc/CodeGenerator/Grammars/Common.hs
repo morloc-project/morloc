@@ -18,9 +18,12 @@ module Morloc.CodeGenerator.Grammars.Common
   , One(..)
   , Many(..)
   , ReturnValue(..)
+  , CallTree(..)
+  , prettyCallTree
   , Manifold(..)
-  , MAnno(..)
-  , MExpr(..)
+  , ExprM(..)
+  , serializeCallTree
+  , typeOfExprM
   ) where
 
 import Morloc.Data.Doc
@@ -117,23 +120,127 @@ unpackArgument :: Argument -> Argument
 unpackArgument (PackedArgument v t) = UnpackedArgument v t
 unpackArgument x = x
 
-data Manifold = Manifold ReturnValue [Argument] [MAnno]
+data CallTree = CallTree Manifold [Manifold]
+  deriving(Show, Ord, Eq)
 
-data MAnno = MAnno MExpr CType
+data Manifold = Manifold ReturnValue [Argument] [ExprM]
+  deriving(Show, Ord, Eq)
 
-  -- | ForeignS Int Lang [EVar]
-data MExpr
-  = MTAssign EVar MAnno
-  | MTCall EVar [MAnno]
-  | MTForeignCall Int Lang [EVar] -- | cmd [parameters]
-  | MTReturn MAnno
-  | MTVar EVar
+data TypeM = C CType | S CType | P GType
+
+data ExprM
+  = AssignM EVar ExprM
+  | CallM CType EVar [ExprM] -- always return unpacked object
+  | ForeignCallM CType Int Lang [EVar] -- always returns packed object
+  | ReturnM ExprM
+  | VarM CType EVar
   -- containers
-  | MTList [MAnno]
-  | MTTuple [MAnno]
-  | MTRecord [(EVar, MAnno)]
+  | ListM CType [ExprM]
+  | TupleM CType [ExprM]
+  | RecordM CType [(EVar, ExprM)]
   -- primitives
-  | MTLog Bool
-  | MTNum Scientific 
-  | MTStr MT.Text
-  | MTNull
+  | LogM CType Bool
+  | NumM CType Scientific 
+  | StrM CType MT.Text
+  | NullM CType
+  -- serialization - these must remain abstract, since required arguments
+  -- will vary between languages.
+  | PackM ExprM
+  | UnpackM ExprM
+  deriving(Show, Ord, Eq)
+
+prettyCallTree :: CallTree -> MDoc
+prettyCallTree (CallTree m ms) = vsep (map prettyManifold (m:ms))
+
+prettyManifold :: Manifold -> MDoc
+prettyManifold (Manifold v args es) =
+  block 4 (rval v) (vsep $ map prettyExprM es)
+  where
+    rval :: ReturnValue -> MDoc
+    rval (PackedReturn v t)
+      = "packed(" <> prettyType t <> ")"
+      <+> pretty v
+      <> tupled (map prettyArgument args)
+    rval (UnpackedReturn v t)
+      = "unpacked(" <> prettyType t <> ")"
+      <+> pretty v
+      <> tupled (map prettyArgument args)
+    rval (PassThroughReturn v)
+      = "passthrough" 
+      <+> pretty v
+      <> tupled (map prettyArgument args)
+
+prettyExprM :: ExprM -> MDoc
+prettyExprM (AssignM v e) = pretty v <+> "=" <+> prettyExprM e
+prettyExprM (CallM c v es) = pretty v <> tupled (map prettyExprM es)
+prettyExprM (ForeignCallM c i lang vs) =
+  "foreign_call" <> tupled ([pretty i, viaShow lang] ++ map pretty vs)
+prettyExprM (ReturnM e) = "return(" <> prettyExprM e <> ")"
+prettyExprM (VarM c v) = pretty v
+prettyExprM (ListM c es) = encloseSep "[" "]" "," (map prettyExprM es)
+prettyExprM (TupleM c es) = tupled (map prettyExprM es)
+prettyExprM (RecordM c entries) =
+  encloseSep "{" "}" ";" (map (\(k,e) -> pretty k <+> "=" <+> prettyExprM e) entries) 
+prettyExprM (LogM c x) = if x then "true" else "false"
+prettyExprM (NumM c x) = viaShow x
+prettyExprM (StrM c x) = dquotes (pretty x)
+prettyExprM (NullM c) = "Null"
+prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
+prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
+
+-- data Manifold = Manifold ReturnValue [Argument] [ExprM]
+
+serializeCallTree :: CallTree -> MorlocMonad CallTree
+serializeCallTree x@(CallTree m ms) = do
+  let m' = packHead m
+  (m'':ms') <- mapM serialize (m':ms)
+  return (CallTree m'' ms')
+  where
+    -- rewrite the head manifold to unpack its return value
+    packHead :: Manifold -> Manifold
+    packHead m@(Manifold (PackedReturn _ _) _ _) = m
+    packHead (Manifold (UnpackedReturn v c) args ms) =
+      Manifold (PackedReturn v c) args (map packOutput ms)
+    packHead m@(Manifold (PassThroughReturn _) _ _) = m
+
+    packOutput :: ExprM -> ExprM
+    packOutput (ReturnM x) = ReturnM (PackM x)
+    packOutput m = m
+
+    -- add serialization handling downstream as needed
+    serialize :: Manifold -> MorlocMonad Manifold
+    serialize x = return x 
+
+    -- serialize (Manifold v args es) = do
+    --
+    -- -- Manifold v args (conmap f es)
+    --   where
+    --     f :: ExprM -> [ExprM]
+    --     f (CallM c v es) =
+    --     f x = [x]
+    --
+    -- unpackIfNeeded' :: ExprM -> ExprM
+    -- serializeOne
+    -- serializeOne x = x
+
+
+-- Get the type of an expression
+-- Serialization is ignored
+typeOfExprM :: ExprM -> CType
+typeOfExprM (AssignM _ e) = typeOfExprM e
+typeOfExprM (CallM c _ _) = c
+typeOfExprM (ForeignCallM c _ _ _) = c
+typeOfExprM (ReturnM e) = typeOfExprM e
+typeOfExprM (VarM c _) = c
+typeOfExprM (ListM c _) = c
+typeOfExprM (TupleM c _) = c
+typeOfExprM (RecordM c _) = c
+typeOfExprM (LogM c _ ) = c
+typeOfExprM (NumM c _) = c
+typeOfExprM (StrM c _) = c
+typeOfExprM (NullM c) = c
+typeOfExprM (PackM e) = typeOfExprM e
+typeOfExprM (UnpackM e) = typeOfExprM e
+
+  -- | CallM CType EVar [ExprM]
+-- data Manifold = Manifold ReturnValue [Argument] [ExprM]

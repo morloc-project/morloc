@@ -857,7 +857,7 @@ encode srcs (lang, xs) = do
   let srcs' = unique [s | s <- srcs, srcLang s == lang]
 
   -- translate each node in the AST to code
-  code <- mapM codify xs |>> concat >>= translate lang srcs'
+  code <- mapM codify xs >>= translate lang srcs'
 
   return $ Script
     { scriptBase = "pool"
@@ -874,19 +874,6 @@ codify
   -> MorlocMonad [Manifold]
 codify x = fmap fst $ codify' True x
 
-codifyContainer
-  :: Bool
-  -> [[Manifold]]
-  -> MAnno
-  -> SAnno GMeta One (CType, [Argument])
-  -> MorlocMonad ([Manifold], MAnno)
-codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
-  let v = makeManifoldName m
-  in
-    if isTop
-      then return (Manifold (UnpackedReturn v c) args [x] : concat mss, x)
-      else return (concat mss, x)
-
 -- | Make general manifolds. The goal is to do as much work as possible before
 -- invoking language-specific behaviour. Eventually manifold effects and
 -- control will be added here (caches, assertions, logging, visualization,
@@ -895,58 +882,81 @@ codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
 codify'
   :: Bool
   -> SAnno GMeta One (CType, [Argument])
-  -> MorlocMonad ([Manifold], MAnno)
+  -> MorlocMonad ([Manifold], ExprM)
 -- primitives
-codify' _ (SAnno (One (UniS,   (c, _))) _) = return ([], MAnno MTNull    c)
-codify' _ (SAnno (One (NumS x, (c, _))) _) = return ([], MAnno (MTNum x) c)
-codify' _ (SAnno (One (LogS x, (c, _))) _) = return ([], MAnno (MTLog x) c)
-codify' _ (SAnno (One (StrS x, (c, _))) _) = return ([], MAnno (MTStr x) c)
+codify' _ (SAnno (One (UniS,   (c, _))) _) = return ([], NullM c)
+codify' _ (SAnno (One (NumS x, (c, _))) _) = return ([], (NumM c x))
+codify' _ (SAnno (One (LogS x, (c, _))) _) = return ([], (LogM c x))
+codify' _ (SAnno (One (StrS x, (c, _))) _) = return ([], (StrM c x))
 -- list
 codify' isTop s@(SAnno (One (ListS xs, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) xs)
-  let x = MAnno (MTList xs') c
+  let x = ListM c xs'
   codifyContainer isTop mss x s 
 -- tuple
 codify' isTop s@(SAnno (One (TupleS xs, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) xs)
-  let x = MAnno (MTTuple xs') c
+  let x = TupleM c xs'
   codifyContainer isTop mss x s 
 -- record
 codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) (map snd es))
-  let x = MAnno (MTRecord (zip (map fst es) xs')) c
+  let x = RecordM c (zip (map fst es) xs')
   codifyContainer isTop mss x s 
 -- var
-codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], MAnno (MTVar v) c)
+codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], VarM c v)
 -- lambda
 codify' _ (SAnno (One (LamS _ x, (c, _))) _) = codify' False x
 -- foreign call
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = do
-  return ([], MAnno (MTForeignCall mid lang vs) c)
+  return ([], ForeignCallM c mid lang vs)
 -- domestic call
 codify' False (SAnno (One (CallS src, (c, args))) m) =
-  return ([], MAnno (MTVar (EVar (unName (srcName src)))) c)
+  return ([], VarM c (EVar (unName (srcName src))))
 codify' True (SAnno (One (CallS src, (c, args))) m) = do
-  let x = MAnno (MTVar (EVar (unName (srcName src)))) c
-      manifold = Manifold (UnpackedReturn (makeManifoldName m) c) args [x]
+  let x = VarM c (EVar (unName (srcName src)))
+      manifold = Manifold (UnpackedReturn (makeManifoldName m) c) args [ReturnM x]
   return ([manifold], x)
 -- applcation
 codify' _ (SAnno (One (AppS f xs, (c, args))) m) = do
   (ms', f') <- codify' False f
   (mss', xs') <- fmap unzip $ mapM (codify' False) xs
-  let v = makeManifoldName m
+  let mname = makeManifoldName m
       ms = ms' ++ concat mss'
-      x = MTCall v xs' 
-  returnValue <- case f' of
-    (MAnno (MTForeignCall _ _ _) _) -> return (PackedReturn v c)
-    (MAnno (MTVar _) _) -> return (UnpackedReturn v c)
-  return (Manifold returnValue args [MAnno x c] : ms, MAnno (MTVar v) c)
+  case f' of
+    x@(ForeignCallM _ _ _ _) ->
+      return
+        (Manifold (PackedReturn mname c) args [ReturnM x] : ms
+        , x
+        )
+    (VarM _ v) ->
+      return
+        ( Manifold (UnpackedReturn mname c) args [ReturnM (CallM c v xs')] : ms
+        , CallM c mname xs'
+        )
 
+codifyContainer
+  :: Bool
+  -> [[Manifold]]
+  -> ExprM
+  -> SAnno GMeta One (CType, [Argument])
+  -> MorlocMonad ([Manifold], ExprM)
+codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
+  let v = makeManifoldName m
+  in
+    if isTop
+      then return (Manifold (UnpackedReturn v c) args [x] : concat mss, x)
+      else return (concat mss, x)
 
-translate :: Lang -> [Source] -> [Manifold] -> MorlocMonad MDoc
-translate CppLang srcs ms = Cpp.translate srcs ms
-translate RLang srcs ms = R.translate srcs ms
-translate Python3Lang srcs ms = Python3.translate srcs ms
+translate :: Lang -> [Source] -> [[Manifold]] -> MorlocMonad MDoc
+translate lang srcs mss = do
+  let callTrees = [CallTree m ms | (m:ms) <- mss]
+  case lang of
+    CppLang -> Cpp.translate srcs callTrees
+    RLang -> R.translate srcs callTrees
+    Python3Lang -> Python3.translate srcs callTrees
+    x -> MM.throwError . OtherError . render
+      $ "Language '" <> viaShow x <> "' has no translator" 
 
 
 -------- Utility and lookup functions ----------------------------------------
