@@ -126,8 +126,6 @@ data CallTree = CallTree Manifold [Manifold]
 data Manifold = Manifold ReturnValue [Argument] [ExprM]
   deriving(Show, Ord, Eq)
 
-data TypeM = C CType | S CType | P GType
-
 data ExprM
   = AssignM EVar ExprM
   | CallM CType EVar [ExprM] -- always return unpacked object
@@ -188,8 +186,6 @@ prettyExprM (NullM c) = "Null"
 prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
 prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
 
--- data Manifold = Manifold ReturnValue [Argument] [ExprM]
-
 serializeCallTree :: CallTree -> MorlocMonad CallTree
 serializeCallTree x@(CallTree m ms) = do
   let m' = packHead m
@@ -241,6 +237,3 @@ typeOfExprM (StrM c _) = c
 typeOfExprM (NullM c) = c
 typeOfExprM (PackM e) = typeOfExprM e
 typeOfExprM (UnpackM e) = typeOfExprM e
-
-  -- | CallM CType EVar [ExprM]
--- data Manifold = Manifold ReturnValue [Argument] [ExprM]

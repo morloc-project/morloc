@@ -932,7 +932,7 @@ codify' _ (SAnno (One (AppS f xs, (c, args))) m) = do
     (VarM _ v) ->
       return
         ( Manifold (UnpackedReturn mname c) args [ReturnM (CallM c v xs')] : ms
-        , CallM c mname xs'
+        , CallM c mname (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
         )
 
 codifyContainer
