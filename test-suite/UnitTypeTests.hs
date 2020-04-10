@@ -911,4 +911,15 @@ unitTypeTests =
         "every sub-expression should be annotated in output"
         "f :: forall a . a -> Bool; f 42"
         "f :: forall a . a -> Bool; (((f :: Num -> Bool) (42 :: Num)) :: Bool)"
+
+    -- default list evaluation of arguments
+    , assertTerminalType
+        "can infer multiple argument types"
+        (T.unlines
+          [ "ith :: [Num] -> Num -> Num;"
+          , "ith R :: [numeric] -> numeric -> numeric;"
+          , "snd x = ith x 2;"
+          , "snd [1,2,3];"
+          ])
+        [num, varc RLang "numeric"]
     ]

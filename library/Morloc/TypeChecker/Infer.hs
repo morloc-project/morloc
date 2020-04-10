@@ -488,27 +488,15 @@ subtype' (FunT a1 a2) (FunT b1 b2) g1
 -- ----------------------------------------- <:App
 --  g1 |- A1 A2 <: B1 B2 -| g2
 --  unparameterized types are the same as VarT, so subtype on that instead
-subtype' (ArrT v1 []) (ArrT v2 []) g = subtype (VarT v1) (VarT v2) g
+subtype' (ArrT v1 []) (ArrT v2 []) g
+  | langOf v1 == langOf v2 = subtype (VarT v1) (VarT v2) g
+  | otherwise = throwError . OtherError $ "Cannot compare types between languages"
 subtype' t1@(ArrT v1@(TV l1 _) vs1) t2@(ArrT v2@(TV l2 _) vs2) g
   | length vs1 /= length vs2 = throwError . OtherError
     $ "Cannot subtype types with unequal parameter count" 
   | l1 /= l2 = serialConstraint t1 t2 >> return g
   | v1 == v2 = compareArr vs1 vs2 g
-  | otherwise = do
-    case access1 v1 g of
-      (Just (lhs, (ExistG v1' vs1' _), rhs)) -> do
-        let t1' = ArrT v2 vs1'
-        let g2 = lhs ++ (SolvedG v1 t1' : rhs)
-        subtype t1' t2 g2
-      Nothing -> case access1 v2 g of
-        (Just (lhs, (ExistG v2' vs2' _), rhs)) -> do
-          let t2' = ArrT v1 vs2'
-          let g2 = lhs ++ (SolvedG v2 t2' : rhs)
-          subtype t1 t2' g2
-        _ -> throwError . OtherError . render $
-          hang 4 (vsep ["subtype error:", parens (prettyType t1), parens (prettyType t2)])
-      _ -> throwError . OtherError $
-        "Could not find a suitable existential in context"
+  | otherwise = throwError . OtherError $ "Shit happens" 
   where
     compareArr :: [Type] -> [Type] -> Gamma -> Stack Gamma
     compareArr [] [] g' = return g'
@@ -550,7 +538,9 @@ subtype' a@(ExistT _ [] _) b g
   | langOf a /= langOf b = return g -- incomparable
   | otherwise = occursCheck b a >> instantiate a b g
 
-subtype' (ArrT v1 ps1) (ExistT v2 ps2 _) g = subtype' (ArrT v1 ps1) (ExistT v2 ps2 []) g
+subtype' a@(ArrT v1 ps1) b@(ExistT v2 ps2 _) g
+  | langOf a /= langOf b = return g -- incomparable
+  | otherwise = subtype' (ArrT v1 ps1) (ExistT v2 ps2 []) g
 subtype' (ExistT v1 ps1 _) t@(ArrT v2 ps2) g1
   | langOf v1 /= langOf v2 = return g1 -- incomparable
   | length ps1 /= length ps2 = throwError . OtherError . render $ 
