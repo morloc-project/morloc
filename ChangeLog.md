@@ -5,15 +5,15 @@ New build system and and compiler options
 
 Major changes
  - [ ] Remove semicolon requirement (1 day)
- - [ ] Rewrite perl manifold nexus in C++ (2 days)
+ - [ ] Rewrite perl manifold nexus in C++ (3 days)
        - [ ] add type annotations to printed help
- - [ ] New build system (3-7 days)
+ - [ ] New build system (7 days)
        - [ ] Place pools and nexus in ~/.morloc/tmp
        - [ ] Create scripts in the working directory that calls them
        - [ ] Add compiler options for executable name, deletion, cache clearing, etc
        - [ ] Allow stdin to replace '-' argument
- - [ ] Add a verbosity flag to `morloc make`
- - [ ] New compiler commands for managing modules
+ - [ ] Add a verbosity flag to `morloc make` (1 day)
+ - [ ] New compiler commands for managing modules (1 day)
        - [ ] `morloc uninstall` command for deleting modules
        - [ ] `morloc update` command for updating modules (i.e., git pull)
        - [ ] `morloc list` command for listing all available modules
@@ -27,7 +27,7 @@ Minor changes
  - [ ] add linter
 
 
-0.22.0-pre [xxxx.xx.xx]
+0.22.0-pre [2020.04.xx]
 -------------------
 
 Implement a schema-directed composable serialization system
@@ -35,6 +35,7 @@ Implement a schema-directed composable serialization system
 Major changes
  - [x] Fully composable serialization over containers and primitives
  - [ ] Full record support
+ - [ ] Refactor generator - replace old grammar system
 
 Minor changes
  - [x] change default python3 interpreter from "python" to "python3"

@@ -215,6 +215,10 @@ serializeCallTree x@(CallTree m ms) = do
     serializeExpr args (PackM e) = PackM (serializeExpr args e)
     serializeExpr args (SrcCallM c f es) =
       SrcCallM c (serializeExpr args f) (map (unpackMay args) es) 
+    serializeExpr args (TupleM c es) = TupleM c (map (unpackMay args) es)
+    serializeExpr args (ListM c es) = ListM c (map (unpackMay args) es)
+    serializeExpr args (RecordM c xs) =
+      RecordM c (map (\(k,v)->(k, unpackMay args v)) xs)
     serializeExpr _ e = e 
 
     unpackMay :: [Argument] -> ExprM -> ExprM

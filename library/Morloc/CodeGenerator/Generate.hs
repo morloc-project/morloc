@@ -906,7 +906,7 @@ codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
 -- var
 codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], VarM c v)
 -- lambda
-codify' _ (SAnno (One (LamS _ x, (c, _))) _) = codify' False x
+codify' isTop (SAnno (One (LamS _ x, (c, _))) _) = codify' isTop x
 -- foreign call
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = do
   return ([], ForeignCallM c mid lang vs)
@@ -943,7 +943,7 @@ codifyContainer
   -> MorlocMonad ([Manifold], ExprM)
 codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
   if isTop
-    then return (Manifold (UnpackedReturn (metaId m) c) args [x] : concat mss, x)
+    then return (Manifold (UnpackedReturn (metaId m) c) args [ReturnM x] : concat mss, x)
     else return (concat mss, x)
 
 translate :: Lang -> [Source] -> [[Manifold]] -> MorlocMonad MDoc

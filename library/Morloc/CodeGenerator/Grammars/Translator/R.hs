@@ -41,7 +41,7 @@ typeSchema c = f (unCType c)
     f (VarT v) = dquotes (var v)
     f (ArrT v ps) = lst [var v <> "=" <> lst (map f ps)]
     f (NamT v es) = lst [var v <> "=" <> lst (map entry es)]
-    f _ = error "Cannot serialize this type"
+    f t = error $ "Cannot serialize this type: " <> show t
 
     entry :: (MT.Text, Type) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
@@ -84,7 +84,7 @@ translateExpr args (RecordM _ entries) = do
   xs' <- mapM (translateExpr args . snd) entries
   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) xs'
   return $ "list" <> tupled entries'
-translateExpr args (LogM _ x) = return $ pretty x
+translateExpr args (LogM _ x) = return $ if x then "TRUE" else "FALSE"
 translateExpr args (NumM _ x) = return $ viaShow x
 translateExpr args (StrM _ x) = return $ dquotes (pretty x)
 translateExpr args (NullM _) = return "NULL"
