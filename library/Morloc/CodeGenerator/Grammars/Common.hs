@@ -228,7 +228,9 @@ serializeCallTree x@(CallTree m ms) = do
     serializeExpr _ e = e 
 
     unpackMay :: [Argument] -> ExprM -> ExprM
-    unpackMay args e@(VarM _ v) = UnpackM e
+    unpackMay args e@(VarM c v) = case unCType c of
+      (FunT _ _) -> e -- do not unpack functions
+      _ -> UnpackM e
     unpackMay _ e = e
 
     lookupArg :: EVar -> [Argument] -> Bool

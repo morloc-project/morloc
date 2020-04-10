@@ -1,11 +1,4 @@
-import rbase (mul, zipWith)
-
-zipWith :: forall a b c . (a -> b -> c) -> [a] -> [b] -> [c]
-zipWith R :: forall a b c . (a -> b -> c) -> [a] -> [b] -> [c]
-
-mul :: Num -> Num -> Num;
-mul R :: "numeric" -> "numeric" -> "numeric";
+import rbase (zipWith, mul)
 
 export foo
-
-foo xs = zipWith mul xs xs;
+foo xs ys = zipWith mul xs ys;
