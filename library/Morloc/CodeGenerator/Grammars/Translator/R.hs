@@ -65,9 +65,12 @@ translateExpr :: [Argument] -> ExprM -> MorlocMonad MDoc
 translateExpr args (AssignM v e) = do
   e' <- translateExpr args e
   return $ pretty v <+> "<-" <+> e'
-translateExpr args (CallM _ v es) = do
+translateExpr args (SrcCallM _ (VarM _ v) es) = do
   xs <- mapM (translateExpr args) es
   return $ pretty v <> tupled xs
+translateExpr args (ManCallM _ i es) = do
+  xs <- mapM (translateExpr args) es
+  return $ "m" <> pretty i <> tupled xs
 translateExpr args (ForeignCallM _ i lang vs) = return "FOREIGN"
 translateExpr args (ReturnM e) = translateExpr args e
 translateExpr args (VarM _ v) = return $ pretty v
@@ -102,9 +105,9 @@ makeArgument (UnpackedArgument v c) = pretty v
 makeArgument (PassThroughArgument v) = pretty v
 
 returnName :: ReturnValue -> MDoc
-returnName (PackedReturn v _) = pretty v
-returnName (UnpackedReturn v _) = pretty v
-returnName (PassThroughReturn v) = pretty v
+returnName (PackedReturn v _) = "m" <> pretty v
+returnName (UnpackedReturn v _) = "m" <> pretty v
+returnName (PassThroughReturn v) = "m" <> pretty v
 
 say :: Doc ann -> MorlocMonad ()
 say = liftIO . putDoc

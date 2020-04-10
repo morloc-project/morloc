@@ -93,9 +93,9 @@ data Argument
 -- parameter stores the names of the manifold. The CType stores the return type
 -- of the manifold, which may serialized.
 data ReturnValue
-  = PackedReturn EVar CType
-  | UnpackedReturn EVar CType
-  | PassThroughReturn EVar
+  = PackedReturn Int CType
+  | UnpackedReturn Int CType
+  | PassThroughReturn Int 
   deriving (Show, Ord, Eq)
 
 prettyArgument :: Argument -> MDoc
@@ -128,7 +128,8 @@ data Manifold = Manifold ReturnValue [Argument] [ExprM]
 
 data ExprM
   = AssignM EVar ExprM
-  | CallM CType EVar [ExprM] -- always return unpacked object
+  | SrcCallM CType ExprM [ExprM] -- always return unpacked object
+  | ManCallM CType Int [ExprM] -- always return unpacked object
   | ForeignCallM CType Int Lang [EVar] -- always returns packed object
   | ReturnM ExprM
   | VarM CType EVar
@@ -155,22 +156,23 @@ prettyManifold (Manifold v args es) =
   block 4 (rval v) (vsep $ map prettyExprM es)
   where
     rval :: ReturnValue -> MDoc
-    rval (PackedReturn v t)
+    rval (PackedReturn i t)
       = "packed(" <> prettyType t <> ")"
-      <+> pretty v
+      <+> "m" <> pretty i
       <> tupled (map prettyArgument args)
-    rval (UnpackedReturn v t)
+    rval (UnpackedReturn i t)
       = "unpacked(" <> prettyType t <> ")"
-      <+> pretty v
+      <+> "m" <> pretty i
       <> tupled (map prettyArgument args)
-    rval (PassThroughReturn v)
+    rval (PassThroughReturn i)
       = "passthrough" 
-      <+> pretty v
+      <+> "m" <> pretty i
       <> tupled (map prettyArgument args)
 
 prettyExprM :: ExprM -> MDoc
 prettyExprM (AssignM v e) = pretty v <+> "=" <+> prettyExprM e
-prettyExprM (CallM c v es) = pretty v <> tupled (map prettyExprM es)
+prettyExprM (SrcCallM c v es) = prettyExprM v <> tupled (map prettyExprM es)
+prettyExprM (ManCallM c i es) = "m" <> pretty i <> tupled (map prettyExprM es)
 prettyExprM (ForeignCallM c i lang vs) =
   "foreign_call" <> tupled ([pretty i, viaShow lang] ++ map pretty vs)
 prettyExprM (ReturnM e) = "return(" <> prettyExprM e <> ")"
@@ -195,8 +197,8 @@ serializeCallTree x@(CallTree m ms) = do
     -- rewrite the head manifold to unpack its return value
     packHead :: Manifold -> Manifold
     packHead m@(Manifold (PackedReturn _ _) _ _) = m
-    packHead (Manifold (UnpackedReturn v c) args ms) =
-      Manifold (PackedReturn v c) args (map packOutput ms)
+    packHead (Manifold (UnpackedReturn i c) args ms) =
+      Manifold (PackedReturn i c) args (map packOutput ms)
     packHead m@(Manifold (PassThroughReturn _) _ _) = m
 
     packOutput :: ExprM -> ExprM
@@ -205,26 +207,31 @@ serializeCallTree x@(CallTree m ms) = do
 
     -- add serialization handling downstream as needed
     serialize :: Manifold -> MorlocMonad Manifold
-    serialize x = return x 
+    serialize (Manifold v args es) =
+      return $ Manifold v args (map (serializeExpr args) es) 
 
-    -- serialize (Manifold v args es) = do
-    --
-    -- -- Manifold v args (conmap f es)
-    --   where
-    --     f :: ExprM -> [ExprM]
-    --     f (CallM c v es) =
-    --     f x = [x]
-    --
-    -- unpackIfNeeded' :: ExprM -> ExprM
-    -- serializeOne
-    -- serializeOne x = x
+    serializeExpr :: [Argument] -> ExprM -> ExprM
+    serializeExpr args (ReturnM e) = ReturnM (serializeExpr args e)
+    serializeExpr args (PackM e) = PackM (serializeExpr args e)
+    serializeExpr args (SrcCallM c f es) =
+      SrcCallM c (serializeExpr args f) (map (unpackMay args) es) 
+    serializeExpr _ e = e 
 
+    unpackMay :: [Argument] -> ExprM -> ExprM
+    unpackMay args e@(VarM _ v) = UnpackM e
+    unpackMay _ e = e
+
+    lookupArg :: EVar -> [Argument] -> Bool
+    lookupArg v args = any (\r -> argName r == v) args
+
+-- data Manifold = Manifold ReturnValue [Argument] [ExprM]
 
 -- Get the type of an expression
 -- Serialization is ignored
 typeOfExprM :: ExprM -> CType
 typeOfExprM (AssignM _ e) = typeOfExprM e
-typeOfExprM (CallM c _ _) = c
+typeOfExprM (ManCallM c _ _) = c
+typeOfExprM (SrcCallM c _ _) = c
 typeOfExprM (ForeignCallM c _ _ _) = c
 typeOfExprM (ReturnM e) = typeOfExprM e
 typeOfExprM (VarM c _) = c

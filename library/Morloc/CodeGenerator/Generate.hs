@@ -915,24 +915,24 @@ codify' False (SAnno (One (CallS src, (c, args))) m) =
   return ([], VarM c (EVar (unName (srcName src))))
 codify' True (SAnno (One (CallS src, (c, args))) m) = do
   let x = VarM c (EVar (unName (srcName src)))
-      manifold = Manifold (UnpackedReturn (makeManifoldName m) c) args [ReturnM x]
+      manifold = Manifold (UnpackedReturn (metaId m) c) args [ReturnM x]
   return ([manifold], x)
 -- applcation
 codify' _ (SAnno (One (AppS f xs, (c, args))) m) = do
   (ms', f') <- codify' False f
   (mss', xs') <- fmap unzip $ mapM (codify' False) xs
-  let mname = makeManifoldName m
+  let mid = metaId m
       ms = ms' ++ concat mss'
   case f' of
     x@(ForeignCallM _ _ _ _) ->
       return
-        (Manifold (PackedReturn mname c) args [ReturnM x] : ms
+        (Manifold (PackedReturn mid c) args [ReturnM x] : ms
         , x
         )
-    (VarM _ v) ->
+    x@(VarM _ _) ->
       return
-        ( Manifold (UnpackedReturn mname c) args [ReturnM (CallM c v xs')] : ms
-        , CallM c mname (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
+        ( Manifold (UnpackedReturn mid c) args [ReturnM (SrcCallM c x xs')] : ms
+        , ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
         )
 
 codifyContainer
@@ -942,11 +942,9 @@ codifyContainer
   -> SAnno GMeta One (CType, [Argument])
   -> MorlocMonad ([Manifold], ExprM)
 codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
-  let v = makeManifoldName m
-  in
-    if isTop
-      then return (Manifold (UnpackedReturn v c) args [x] : concat mss, x)
-      else return (concat mss, x)
+  if isTop
+    then return (Manifold (UnpackedReturn (metaId m) c) args [x] : concat mss, x)
+    else return (concat mss, x)
 
 translate :: Lang -> [Source] -> [[Manifold]] -> MorlocMonad MDoc
 translate lang srcs mss = do

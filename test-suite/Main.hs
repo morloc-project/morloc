@@ -14,6 +14,12 @@ main = do
       [ unitTypeTests
       , typeOrderTests
       , propertyTypeTests
+      , golden "(1) basic C functions" "1_basic_c"  
+      , golden "(1) basic Python3 functions" "1_basic_py" 
+      , golden "(1) basic R functions" "1_basic_r"  
+      , golden "(2) C composition" "2_comp_c"  
+      , golden "(2) Python3 composition" "2_comp_py" 
+      , golden "(2) R composition" "2_comp_r"  
       , golden "basic math" "3_math"
       , golden "more basic math" "3_math2"
       , golden "C++ map function" "4_map"
