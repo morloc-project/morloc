@@ -1,0 +1,5 @@
+import pybase (map, mul)
+
+export foo
+square x = mul x x
+foo xs = map square xs;

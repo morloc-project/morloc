@@ -1,5 +1,0 @@
-import math (mul)
-
-export foo
-
-foo = mul 2

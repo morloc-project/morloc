@@ -1,6 +1,0 @@
-import math (mean, fibonacci);
-
-export meanfib;
-export fibonacci;
-
-meanfib x = mean ( fibonacci x );

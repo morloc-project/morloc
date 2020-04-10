@@ -1,5 +1,0 @@
-import pybase (map, mul)
-
-export triple
-
-triple xs = map (mul 3) xs;

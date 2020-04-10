@@ -1,9 +1,0 @@
-import math (mul);
-import math (sqrt)
-import cppbase (map);
-
-export square;
-export fourth;
-
-square y = mul y y;
-fourth x = mul (square x) (square x); 
