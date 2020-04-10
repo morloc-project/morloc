@@ -23,14 +23,23 @@ import qualified Morloc.Data.Text as MT
 
 translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
 translate srcs mss = do 
-  let includes = unique . catMaybes . map srcPath $ srcs
-  includeDocs <- mapM translateSource includes
+  -- translate sources
+  includeDocs <- mapM
+    translateSource
+    (unique . catMaybes . map srcPath $ srcs)
+
+  -- handle serialzation
   mss' <- mapM serializeCallTree mss
 
-  say $ (vsep $ map prettyCallTree mss')
+  -- diagnostics
+  liftIO . putDoc $ (vsep $ map prettyCallTree mss')
 
+  -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss'])
+
+  -- create and return complete pool script
   return $ makeMain includeDocs mDocs
+
 
 serialType :: CType
 serialType = CType (VarT (TV (Just RLang) "character"))
@@ -108,9 +117,6 @@ returnName :: ReturnValue -> MDoc
 returnName (PackedReturn v _) = "m" <> pretty v
 returnName (UnpackedReturn v _) = "m" <> pretty v
 returnName (PassThroughReturn v) = "m" <> pretty v
-
-say :: Doc ann -> MorlocMonad ()
-say = liftIO . putDoc
 
 makeMain :: [MDoc] -> [MDoc] -> MDoc
 makeMain sources manifolds = [idoc|#!/usr/bin/env Rscript

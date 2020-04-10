@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , ExprM(..)
   , serializeCallTree
   , typeOfExprM
+  , returnId
   ) where
 
 import Morloc.Data.Doc
@@ -97,6 +98,11 @@ data ReturnValue
   | UnpackedReturn Int CType
   | PassThroughReturn Int 
   deriving (Show, Ord, Eq)
+
+returnId :: ReturnValue -> Int
+returnId (PackedReturn i _) = i
+returnId (UnpackedReturn i _) = i
+returnId (PassThroughReturn i) = i
 
 prettyArgument :: Argument -> MDoc
 prettyArgument (PackedArgument v c) =
