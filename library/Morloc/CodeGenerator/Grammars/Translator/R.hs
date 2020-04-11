@@ -29,7 +29,7 @@ translate srcs mss = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- handle serialzation
-  mss' <- mapM serializeCallTree mss
+  mss' <- mapM serializeCallTree mss >>= mapM (extractAssignment namer)
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyCallTree mss')
@@ -40,6 +40,8 @@ translate srcs mss = do
   -- create and return complete pool script
   return $ makeMain includeDocs mDocs
 
+namer :: Int -> EVar
+namer i = EVar ("a" <> MT.show' i)
 
 serialType :: CType
 serialType = CType (VarT (TV (Just RLang) "character"))

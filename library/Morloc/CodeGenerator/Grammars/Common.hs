@@ -296,7 +296,7 @@ extractAssignment' namer (RecordM c xs) = do
   (assess, es') <- mapM (extractAssignment' namer) (map snd xs) |>> unzip
   v <- MM.getCounter |>> namer
   let mv = VarM c v
-  return (RecordM c (zip (map fst xs) es') : concat assess, mv)
+  return (AssignM v (RecordM c (zip (map fst xs) es')) : concat assess, mv)
 -- VarM CType EVar
 -- LogM CType Bool
 -- NumM CType Scientific
