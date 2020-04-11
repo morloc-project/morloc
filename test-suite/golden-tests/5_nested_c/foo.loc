@@ -1,0 +1,13 @@
+import cppbase (map, mul, add)
+
+export foo
+
+-- foo [1,2,3] 5
+-- > [bar 5 1, bar 5 2, bar 5 3]
+-- > [add (baz 5 2) 1, add (baz 5 2) 2, add (baz 5 2) 3]
+-- > [add 11 1, add 11 2, add 11 3]
+-- > [12, 13, 14]
+
+baz x y = add (mul x y) 1;
+bar x y = add (baz x 2) y;
+foo xs y = map (bar y) xs;

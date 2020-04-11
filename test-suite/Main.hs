@@ -30,6 +30,13 @@ main = do
       , golden "(4) curry in Python3" "4_curry_py"
       , golden "(4) curry in R" "4_curry_r"
 
+      , golden "(5) nesting in C" "5_nested_c"
+      , golden "(5) nesting in Python3" "5_nested_py"
+      , golden "(5) nesting in R" "5_nested_r"
+
+      , golden "(6) interop in Python3/C++" "6_interop_py"
+      , golden "(6) interop in R/C++" "6_interop_r"
+
       , golden "Top identity" "12_top-container-identity"
       , golden "Top list" "12_top-container-list"
       , golden "Top tuple" "12_top-container-tuple"
