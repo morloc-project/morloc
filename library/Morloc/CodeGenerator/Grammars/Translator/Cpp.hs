@@ -20,19 +20,45 @@ import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.System as MS
 import qualified Morloc.TypeChecker.Macro as MTM
+import qualified Morloc.Data.Text as MT
+import qualified Morloc.Monad as MM
 
 
 translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
 translate srcs mss = do 
-  let includes = unique . catMaybes . map srcPath $ srcs
+  -- translate sources
+  includeDocs <- mapM
+    translateSource
+    (unique . catMaybes . map srcPath $ srcs)
 
-  includeDocs <- mapM translateSource includes
-  mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss])
-  main <- translateMain [m | (CallTree m _) <- mss]
-  return . vsep $ includeDocs ++ mDocs ++ [main]
+  -- handle serialzation
+  mss' <- mapM serializeCallTree mss >>= mapM (extractAssignment namer)
+
+  -- diagnostics
+  liftIO . putDoc $ (vsep $ map prettyCallTree mss')
+
+  -- translate each manifold tree, rooted on a call from nexus or another pool
+  mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss'])
+
+  let dispatch = makeDispatch [m | (CallTree m _) <- mss']
+      signatures = map makeSignature (concat [m:ms | (CallTree m ms) <- mss'])
+
+  -- create and return complete pool script
+  return $ makeMain includeDocs signatures mDocs dispatch
+
+namer :: Int -> EVar
+namer i = EVar ("a" <> MT.show' i)
 
 serialType :: MDoc
 serialType = "std::string"
+
+makeSignature :: Manifold -> MDoc
+makeSignature (Manifold v args _) =
+  (returnType v) <+> "m" <> pretty (returnId v) <> tupled (map makeArg args) <> ";"
+
+makeArg (PackedArgument v c) = serialType <+> pretty v
+makeArg (UnpackedArgument v c) = showType c <+> pretty v
+makeArg (PassThroughArgument v) = serialType <+> pretty v
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -59,19 +85,86 @@ translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
 translateManifold :: Manifold -> MorlocMonad MDoc
-translateManifold (Manifold v args es) = return $ line <> block 4 head body where
-  head = returnType v <+> returnName v <> tupled (map makeArgument args)
-  body = "BODY"
+translateManifold (Manifold v args es) = do
+  let head = returnType v <+> "m" <> returnName v <> tupled (map makeArgument args)
+  body <- mapM (translateExpr args) es |>> vsep
+  return $ line <> block 4 head body
+
+translateExpr :: [Argument] -> ExprM -> MorlocMonad MDoc
+translateExpr args (AssignM v (PackM e)) = do
+  e' <- translateExpr args e
+  let schemaName = pretty v <> "_schema"
+      t = showType (typeOfExprM e)
+      schema = t <+> schemaName <> ";"
+      packing = serialType <+> pretty v <+> "=" <+> "pack" <> tupled [e', schemaName] <> ";"
+  return (vsep [schema, packing]) 
+translateExpr args (AssignM v (UnpackM e)) = do
+  e' <- translateExpr args e
+  let schemaName = pretty v <> "_schema"
+      t = showType (typeOfExprM e)
+      schema = t <+> schemaName <> ";"
+      packing = t <+> pretty v <+> "=" <+> "unpack" <> tupled [e', schemaName] <> ";"
+  return (vsep [schema, packing]) 
+translateExpr args (AssignM v e) = do
+  e' <- translateExpr args e
+  let t = showType (typeOfExprM e)
+  return $ t <+> pretty v <+> "=" <+> e' <> ";"
+translateExpr args (SrcCallM _ (VarM _ v) es) = do
+  xs <- mapM (translateExpr args) es
+  return $ pretty v <> tupled xs
+translateExpr args (ManCallM _ i es) = do
+  xs <- mapM (translateExpr args) es
+  return $ "m" <> pretty i <> tupled xs
+translateExpr args (PartialM _ i (ManCallM c mid es)) = do
+  let es' = map (translateExpr args) es
+      vs = take i $ zipWith (<>) (repeat "p") (map viaShow [1..])
+  return $ "function" <> tupled vs <> "{" <> "m" <> pretty mid <> tupled vs <> "}"
+translateExpr args (ForeignCallM _ i lang vs) = return "FOREIGN"
+translateExpr args (ReturnM e) = do
+  e' <- translateExpr args e
+  return $ "return(" <> e' <> ");"
+translateExpr args (VarM _ v) = return $ pretty v
+translateExpr args (ListM _ es) = do
+  xs <- mapM (translateExpr args) es
+  return $ "{" <> tupled xs <> "}"
+translateExpr args (TupleM _ es) = do
+  xs <- mapM (translateExpr args) es
+  return $ "std::make_tuple" <> tupled xs
+translateExpr args (RecordM _ entries) = MM.throwError . NotImplemented
+  $ "Records in C++ are not yet supported"
+translateExpr args (LogM _ x) = return $ if x then "true" else "false"
+translateExpr args (NumM _ x) = return $ viaShow x
+translateExpr args (StrM _ x) = return $ dquotes (pretty x)
+translateExpr args (NullM _) = return "NULL"
+translateExpr args (PackM e) = MM.throwError . OtherError
+  $ "PackM should only appear in an assignment"
+translateExpr args (UnpackM e) = MM.throwError . OtherError
+  $ "UnpackM should only appear in an assignment"
+
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = serialType <+> pretty v
 makeArgument (UnpackedArgument v c) = showType c <+> pretty v
 makeArgument (PassThroughArgument v) = serialType <+> pretty v
 
-returnType :: ReturnValue -> MDoc
-returnType (PackedReturn _ _) = serialType
+makeDispatch :: [Manifold] -> MDoc
+makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
+  where
+    makeCase :: Manifold -> MDoc
+    makeCase (Manifold v args es) =
+      let mid = pretty (returnId v)
+          manifoldName = "m" <> mid
+          args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
+      in
+        (nest 4 . vsep)
+          [ "case" <+> mid <> ":"
+          , "result = " <> manifoldName <> tupled args' <> ";"
+          , "break;"
+          ]
+
+returnType :: ReturnValue -> MDoc 
 returnType (UnpackedReturn _ c) = showType c
-returnType (PassThroughReturn _) = serialType
+returnType _ = serialType
 
 returnName :: ReturnValue -> MDoc
 returnName (PackedReturn v _) = pretty v
@@ -86,30 +179,24 @@ showType = MTM.buildCType mkfun mkrec where
   mkrec :: [(MDoc, MDoc)] -> MDoc
   mkrec _ = error "Record type annotations not supported in C++"
 
--- -- The type schema is simply an initialized variable for the proper type
--- -- This is all that is needed to ensure proper resolution of the C++ templates
--- gTypeSchema' :: CType -> Int -> GeneralAssignment
--- gTypeSchema' c i =
---   GeneralAssignment
---     { gaType = Just (gShowType' c)
---     , gaName = "t" <> pretty i
---     , gaValue = Nothing
---     , gaArg = Nothing
---     }
+makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+makeMain includes signatures manifolds dispatch = [idoc|#include <string>
+#include <iostream>
+#include <functional>
 
-translateMain :: [Manifold] -> MorlocMonad MDoc
-translateMain ms = return [idoc|
+#{vsep includes}
+
+#{vsep signatures}
+
+#{vsep manifolds}
+
 int main(int argc, char * argv[])
 {
     int cmdID;
-    std::string result;
+    #{serialType} result;
     cmdID = std::stoi(argv[1]);
-    #{schema}
     #{dispatch}
     std::cout << result << std::endl;
     return 0;
 }
 |]
-  where
-    schema = "SCHEMA" 
-    dispatch = "DISPATCH" 
