@@ -906,7 +906,10 @@ codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
 -- var
 codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], VarM c v)
 -- lambda
-codify' isTop (SAnno (One (LamS _ x, (c, _))) _) = codify' isTop x
+codify' True (SAnno (One (LamS _ x, (c, _))) _) = codify' True x
+codify' False (SAnno (One (LamS vs x, (c, _))) _) = do
+  (ms, x') <- codify' False x
+  return (ms, PartialM c (length vs) x')
 -- foreign call
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = do
   return ([], ForeignCallM c mid lang vs)
@@ -918,22 +921,30 @@ codify' True (SAnno (One (CallS src, (c, args))) m) = do
       manifold = Manifold (UnpackedReturn (metaId m) c) args [ReturnM x]
   return ([manifold], x)
 -- applcation
-codify' _ (SAnno (One (AppS f xs, (c, args))) m) = do
+codify' _ (SAnno (One (AppS f@(SAnno (One (_, (fc, _))) _) xs, (c, args))) m) = do
   (ms', f') <- codify' False f
   (mss', xs') <- fmap unzip $ mapM (codify' False) xs
   let mid = metaId m
       ms = ms' ++ concat mss'
+      curriedArgs = nargs fc - length xs
   case f' of
     x@(ForeignCallM _ _ _ _) ->
       return
         (Manifold (PackedReturn mid c) args [ReturnM x] : ms
-        , x
+        , curryM fc curriedArgs x
         )
     x@(VarM _ _) ->
       return
         ( Manifold (UnpackedReturn mid c) args [ReturnM (SrcCallM c x xs')] : ms
-        , ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
+        , curryM fc curriedArgs
+        $ ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
         )
+
+curryM :: CType -> Int -> ExprM -> ExprM
+curryM c i e
+  | i == 0 = e
+  | i < 0 = error "This should not happen"
+  | i > 0 = PartialM c i e 
 
 codifyContainer
   :: Bool

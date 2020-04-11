@@ -137,6 +137,7 @@ data ExprM
   | SrcCallM CType ExprM [ExprM] -- always return unpacked object
   | ManCallM CType Int [ExprM] -- always return unpacked object
   | ForeignCallM CType Int Lang [EVar] -- always returns packed object
+  | PartialM CType Int ExprM
   | ReturnM ExprM
   | VarM CType EVar
   -- containers
@@ -193,6 +194,7 @@ prettyExprM (StrM c x) = dquotes (pretty x)
 prettyExprM (NullM c) = "Null"
 prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
 prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
+prettyExprM (PartialM _ i e) = "Partial(" <> viaShow i <> ", " <> prettyExprM e <> ")"
 
 serializeCallTree :: CallTree -> MorlocMonad CallTree
 serializeCallTree x@(CallTree m ms) = do
@@ -219,6 +221,7 @@ serializeCallTree x@(CallTree m ms) = do
     serializeExpr :: [Argument] -> ExprM -> ExprM
     serializeExpr args (ReturnM e) = ReturnM (serializeExpr args e)
     serializeExpr args (PackM e) = PackM (serializeExpr args e)
+    serializeExpr args (PartialM i c e) = PartialM i c (serializeExpr args e)
     serializeExpr args (SrcCallM c f es) =
       SrcCallM c (serializeExpr args f) (map (unpackMay args) es) 
     serializeExpr args (TupleM c es) = TupleM c (map (unpackMay args) es)
@@ -230,13 +233,15 @@ serializeCallTree x@(CallTree m ms) = do
     unpackMay :: [Argument] -> ExprM -> ExprM
     unpackMay args e@(VarM c v) = case unCType c of
       (FunT _ _) -> e -- do not unpack functions
-      _ -> UnpackM e
+      _ -> case lookupArg v args of
+        -- unpack only if the variable is a packed manifold argument
+        (Just (PackedArgument _ _)) -> UnpackM e
+        -- otherwise leave it alone
+        _ -> e
     unpackMay _ e = e
 
-    lookupArg :: EVar -> [Argument] -> Bool
-    lookupArg v args = any (\r -> argName r == v) args
-
--- data Manifold = Manifold ReturnValue [Argument] [ExprM]
+    lookupArg :: EVar -> [Argument] -> Maybe Argument
+    lookupArg v args = listToMaybe [r | r <- args, argName r == v]
 
 -- Get the type of an expression
 -- Serialization is ignored
@@ -256,3 +261,4 @@ typeOfExprM (StrM c _) = c
 typeOfExprM (NullM c) = c
 typeOfExprM (PackM e) = typeOfExprM e
 typeOfExprM (UnpackM e) = typeOfExprM e
+typeOfExprM (PartialM c _ _) = c

@@ -26,6 +26,10 @@ main = do
       , golden "(3) zipWith hof in Python3" "3_hof_py"
       , golden "(3) zipWith hof in R" "3_hof_r"
 
+      , golden "(4) curry in C" "4_curry_c"
+      , golden "(4) curry in Python3" "4_curry_py"
+      , golden "(4) curry in R" "4_curry_r"
+
       , golden "Top identity" "12_top-container-identity"
       , golden "Top list" "12_top-container-list"
       , golden "Top tuple" "12_top-container-tuple"

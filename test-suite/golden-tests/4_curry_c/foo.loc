@@ -1,5 +1,4 @@
 import cppbase (map, mul)
 
-export foo
-square x = mul x x
-foo xs = map square xs;
+export double
+double xs = map (mul 2) xs;
