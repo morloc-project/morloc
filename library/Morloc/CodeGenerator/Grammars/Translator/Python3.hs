@@ -36,7 +36,7 @@ translate srcs mss = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- handle serialzation
-  mss' <- mapM serializeCallTree mss
+  mss' <- mapM serializeCallTree mss >>= mapM (extractAssignment namer)
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyCallTree mss')
@@ -49,6 +49,8 @@ translate srcs mss = do
 
   return $ makePool lib includeDocs mDocs dispatch
 
+namer :: Int -> EVar
+namer i = EVar ("a" <> MT.show' i)
 
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc

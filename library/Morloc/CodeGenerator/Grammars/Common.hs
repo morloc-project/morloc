@@ -25,6 +25,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , serializeCallTree
   , typeOfExprM
   , returnId
+  , extractAssignment
   ) where
 
 import Morloc.Data.Doc
@@ -242,6 +243,67 @@ serializeCallTree x@(CallTree m ms) = do
 
     lookupArg :: EVar -> [Argument] -> Maybe Argument
     lookupArg v args = listToMaybe [r | r <- args, argName r == v]
+
+extractAssignment :: (Int -> EVar) -> CallTree -> MorlocMonad CallTree
+extractAssignment namer (CallTree m ms) = do
+  MM.startCounter
+  (m':ms') <- mapM f (m:ms)
+  return (CallTree m' ms')
+  where
+    f :: Manifold -> MorlocMonad Manifold
+    f (Manifold v args es) =
+      mapM (extractAssignment' namer) es |>> (Manifold v args . reverse . concat . map fst)
+
+extractAssignment' :: (Int -> EVar) -> ExprM -> MorlocMonad ([ExprM], ExprM)
+extractAssignment' namer (ReturnM e) = do
+  (asses, e') <- extractAssignment' namer e
+  return (ReturnM e' : asses, e')
+extractAssignment' namer (PackM e) = do
+  (asses, e') <- extractAssignment' namer e
+  v <- MM.getCounter |>> namer
+  let mv = VarM (typeOfExprM e) v
+  return (AssignM v (PackM e') : asses, mv)
+extractAssignment' namer (UnpackM e) = do
+  (asses, e') <- extractAssignment' namer e
+  v <- MM.getCounter |>> namer
+  let mv = VarM (typeOfExprM e) v
+  return (AssignM v (UnpackM e') : asses, mv)
+extractAssignment' _ e@(AssignM _ _) = return ([e], e) -- skip assignment
+extractAssignment' namer (SrcCallM c e es) = do
+  (asses, e') <- extractAssignment' namer e
+  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
+  v <- MM.getCounter |>> namer
+  let mv = VarM c v
+  return (AssignM v (SrcCallM c e' es') : (asses ++ concat assess), mv)
+extractAssignment' namer (ManCallM c i es) = do
+  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
+  v <- MM.getCounter |>> namer
+  let mv = VarM c v
+  return (AssignM v (ManCallM c i es') : concat assess, mv)
+-- don't mess with the partials
+extractAssignment' _ e@(PartialM _ _ _) = return ([], e)
+extractAssignment' namer (ListM c es) = do
+  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
+  v <- MM.getCounter |>> namer
+  let mv = VarM c v
+  return (AssignM v (ListM c es') : concat assess, mv)
+extractAssignment' namer (TupleM c es) = do
+  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
+  v <- MM.getCounter |>> namer
+  let mv = VarM c v
+  return (AssignM v (TupleM c es') : concat assess, mv)
+extractAssignment' namer (RecordM c xs) = do
+  (assess, es') <- mapM (extractAssignment' namer) (map snd xs) |>> unzip
+  v <- MM.getCounter |>> namer
+  let mv = VarM c v
+  return (RecordM c (zip (map fst xs) es') : concat assess, mv)
+-- VarM CType EVar
+-- LogM CType Bool
+-- NumM CType Scientific
+-- StrM CType MT.Text
+-- NullM CType
+-- ForeignCallM CType Int Lang [EVar]
+extractAssignment' _ e = return ([], e)
 
 -- Get the type of an expression
 -- Serialization is ignored
