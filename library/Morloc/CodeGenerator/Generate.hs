@@ -61,8 +61,8 @@ generate ms = do
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
-  -- -- print abstract syntax trees to the console as debugging message
-  -- say $ line <> indent 2 (vsep (map (writeAST id Nothing) rASTs))
+  -- print abstract syntax trees to the console as debugging message
+  say $ line <> indent 2 (vsep (map (writeAST id Nothing) rASTs))
   
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
@@ -906,39 +906,57 @@ codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
 -- var
 codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], VarM c v)
 -- lambda
-codify' True (SAnno (One (LamS _ x, (c, _))) _) = codify' True x
-codify' False (SAnno (One (LamS vs x, (c, _))) _) = do
-  (ms, x') <- codify' False x
-  return (ms, PartialM c (length vs) x')
+codify' _ (SAnno (One (LamS _ x@(SAnno _ m), (c, _))) _) = do
+  (ms, _) <- codify' True x
+  return $ (ms, LamM c (metaId m))
 -- foreign call
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = do
   return ([], ForeignCallM c mid lang vs)
--- domestic call
-codify' False (SAnno (One (CallS src, (c, args))) m) =
-  return ([], VarM c (EVar (unName (srcName src))))
-codify' True (SAnno (One (CallS src, (c, args))) m) = do
-  let x = VarM c (EVar (unName (srcName src)))
-      manifold = Manifold (UnpackedReturn (metaId m) c) args [ReturnM x]
-  return ([manifold], x)
--- applcation
-codify' _ (SAnno (One (AppS f@(SAnno (One (_, (fc, _))) _) xs, (c, args))) m) = do
-  (ms', f') <- codify' False f
+
+-- application - calling a foreign function
+codify' _ (SAnno (One (AppS  (SAnno (One (ForeignS fid lang vs, (fc, _)))_)  xs, (c, args))) m) = do
   (mss', xs') <- fmap unzip $ mapM (codify' False) xs
   let mid = metaId m
-      ms = ms' ++ concat mss'
       curriedArgs = nargs fc - length xs
-  case f' of
-    x@(ForeignCallM _ _ _ _) ->
-      return
-        (Manifold (PackedReturn mid c) args [ReturnM x] : ms
-        , curryM fc curriedArgs x
-        )
-    x@(VarM _ _) ->
-      return
-        ( Manifold (UnpackedReturn mid c) args [ReturnM (SrcCallM c x xs')] : ms
-        , curryM fc curriedArgs
-        $ ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
-        )
+      x = ForeignCallM c fid lang vs
+  return
+    ( Manifold (PackedReturn mid c) args [ReturnM x] : concat mss'
+    , curryM fc curriedArgs x
+    )
+-- application - calling a domestic function
+codify' _ (SAnno (One (AppS  f@(SAnno (One (CallS src, (fc, _)))_)  xs, (c, args))) m) = do
+  (mss', xs') <- fmap unzip $ mapM (codify' False) xs
+  let mid = metaId m
+      curriedArgs = nargs fc - length xs
+      f = VarM c (EVar (unName (srcName src)))
+  return
+    ( Manifold (UnpackedReturn mid c) args [ReturnM (SrcCallM c f xs')] : concat mss'
+    , curryM fc curriedArgs
+    $ ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
+    )
+codify' _ (SAnno (One (AppS _ _, _)) _) = MM.throwError . OtherError $
+  "After SAnno tree rewriting, all applications must be to either CallS or ForeignS"
+
+-- domestic call
+codify' _ (SAnno (One (CallS src, (c, _))) m) = do
+  let vs = map EVar $ freshVarsAZ []
+      (inputs, output) = typeParts c
+      args = zipWith UnpackedArgument vs inputs
+      f = VarM c (EVar (unName (srcName src)))
+      es = zipWith VarM inputs vs
+      call = SrcCallM output f es 
+      manifold = Manifold (UnpackedReturn (metaId m) output) args [ReturnM call]
+  return ([manifold], LamM c (metaId m))
+
+-- get input types to a function type
+typeParts :: CType -> ([CType], CType)
+typeParts c = case reverse . map CType $ typeArgs (unCType c) of
+  (t:ts) -> (reverse ts, t)
+  where
+    typeArgs (FunT t1 t2) = t1 : typeArgs t2
+    typeArgs t = [t]
+
+
 
 curryM :: CType -> Int -> ExprM -> ExprM
 curryM c i e

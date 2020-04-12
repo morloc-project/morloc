@@ -139,6 +139,7 @@ data ExprM
   | ManCallM CType Int [ExprM] -- always return unpacked object
   | ForeignCallM CType Int Lang [EVar] -- always returns packed object
   | PartialM CType Int ExprM
+  | LamM CType Int
   | ReturnM ExprM
   | VarM CType EVar
   -- containers
@@ -195,7 +196,8 @@ prettyExprM (StrM c x) = dquotes (pretty x)
 prettyExprM (NullM c) = "Null"
 prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
 prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
-prettyExprM (PartialM _ i e) = "Partial(" <> viaShow i <> ", " <> prettyExprM e <> ")"
+prettyExprM (PartialM _ i j) = "Partial<" <> viaShow i <> ">(m" <> viaShow j <> ")"
+prettyExprM (LamM _ i) = "\\m" <> viaShow i
 
 serializeCallTree :: CallTree -> MorlocMonad CallTree
 serializeCallTree x@(CallTree m ms) = do
@@ -280,8 +282,6 @@ extractAssignment' namer (ManCallM c i es) = do
   v <- MM.getCounter |>> namer
   let mv = VarM c v
   return (AssignM v (ManCallM c i es') : concat assess, mv)
--- don't mess with the partials
-extractAssignment' _ e@(PartialM _ _ _) = return ([], e)
 extractAssignment' namer (ListM c es) = do
   (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
   v <- MM.getCounter |>> namer
@@ -302,6 +302,8 @@ extractAssignment' namer (RecordM c xs) = do
 -- NumM CType Scientific
 -- StrM CType MT.Text
 -- NullM CType
+-- PartialM
+-- LamM
 -- ForeignCallM CType Int Lang [EVar]
 extractAssignment' _ e = return ([], e)
 
@@ -323,4 +325,5 @@ typeOfExprM (StrM c _) = c
 typeOfExprM (NullM c) = c
 typeOfExprM (PackM e) = typeOfExprM e
 typeOfExprM (UnpackM e) = typeOfExprM e
+typeOfExprM (LamM c _) = c
 typeOfExprM (PartialM c _ _) = c

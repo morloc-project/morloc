@@ -85,6 +85,7 @@ translateExpr args (PartialM _ i (ManCallM c mid es)) = do
   let es' = map (translateExpr args) es
       vs = take i $ zipWith (<>) (repeat "p") (map viaShow [1..])
   return $ "lambda " <+> hsep (punctuate "," vs) <> ":" <+> "m" <> pretty mid <> tupled vs
+translateExpr _ (LamM _ i) = return $ "m" <> viaShow i
 translateExpr args (ForeignCallM _ i lang vs) = return "FOREIGN"
 translateExpr args (ReturnM e) = do
   doc <- translateExpr args e
