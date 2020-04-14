@@ -275,12 +275,6 @@ invertTree namer (CallTree m ms) = do
       let e = LetM v (LamM c mv (terminalOf body')) (VarM c v)
           e' = dependsOn e body'
       return e'
-    invertExpr' e@(CisM c i args) = do
-      v <- MM.getCounter |>> namer
-      return (LetM v e (VarM c v))
-    invertExpr' e@(TrsM c i lang) = do
-      v <- MM.getCounter |>> namer
-      return (LetM v e (VarM c v))
     invertExpr' (ListM c es) = do
       es' <- mapM invertExpr' es
       v <- MM.getCounter |>> namer
@@ -310,8 +304,7 @@ invertTree namer (CallTree m ms) = do
       return $ dependsOn (LetM v (UnpackM (terminalOf e')) (VarM (typeOfExprM e) v)) e'
     invertExpr' (ReturnM e) = do
       e' <- invertExpr' e
-      v <- MM.getCounter |>> namer
-      return $ dependsOn (LetM v (terminalOf e') (ReturnM (VarM (typeOfExprM e) v))) e'
+      return $ dependsOn (ReturnM (terminalOf e')) e'
     -- VarM LogM NumM StrM NullM
     invertExpr' e = return e
 

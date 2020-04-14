@@ -932,7 +932,10 @@ codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, _))) _) xs, (c, args))) m) = do
     (ForeignS mid lang vs) -> return $ TrsM c mid lang
     (LamS vs x) -> error "Thinking of function factories fills you with determination"
   let manifold = Manifold (UnpackedReturn (metaId m) c) args (ReturnM $ AppM c f' xs')
-  return (manifold : concat mss', CisM c (metaId m) args)
+      x' = if nargs c == 0
+           then AppM c (CisM c (metaId m) args) [] -- evaluates to a primitive
+           else CisM c (metaId m) args -- doesn't
+  return (manifold : concat mss', x')
 
 -- lambda
 codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = do
@@ -943,7 +946,7 @@ codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = do
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) =
   return ([], TrsM c mid lang)
 
--- domestic call
+-- domestic call, this is a call passed as an argument
 codify' _ (SAnno (One (CallS src, (c, _))) m) = do
   let vs = map EVar $ freshVarsAZ []
       (inputs, output) = typeParts c
@@ -1156,7 +1159,8 @@ unpack x = x
 sannoSnd :: SAnno g One (a, b) -> b
 sannoSnd (SAnno (One (_, (_, x))) _) = x
 
--- generate infinite list of fresh variables of form ['a','b',...,'z','aa','ab',...,'zz',...]
+-- generate infinite list of fresh variables of form
+-- ['a','b',...,'z','aa','ab',...,'zz',...]
 freshVarsAZ
   :: [MT.Text] -- variables to exclude
   -> [MT.Text]

@@ -18,6 +18,7 @@ import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 
 
@@ -80,15 +81,20 @@ translateExpr args (LetM v e1 e2) = do
 translateExpr args (AppM c f es) = do
   f' <- translateExpr args f 
   es' <- mapM (translateExpr args) es
-  return $ f' <> tupled es'
+  return $ f' <> tupled es' <> " # AppM :: " <> prettyType c
+translateExpr args (AppM c f@(CisM c' i args') es) = error "FUCK"
 translateExpr args (LamM c mv e) = do
   e' <- translateExpr args e
   let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
                    (zipWith (<>) (repeat "p") (map viaShow [1..]))
-  return $ "function(" <+> hsep (punctuate "," vs) <> "){" <+> e' <> tupled vs <> "}"
+  return $ "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}"
 translateExpr args (VarM c v) = return (pretty v)
-translateExpr args (CisM c i args') = return $
-  "m" <> viaShow i <> tupled (map (pretty . argName) args')
+translateExpr args (CisM c i args') = return $ "m" <> viaShow i
+  -- return $ case nargs c of
+  --   0 -> "m" <> viaShow i
+  --            <> tupled (map (pretty . argName) args') <+> "# CisM :: " <> prettyType c
+  --   i -> translateExpr args (LamM [
+  -- where
 translateExpr args (TrsM c i lang) = return "FOREIGN"
 translateExpr args (ListM _ es) = do
   es' <- mapM (translateExpr args) es
@@ -100,10 +106,10 @@ translateExpr args (RecordM c entries) = do
   es' <- mapM (translateExpr args . snd) entries
   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
   return $ "dict" <> tupled entries'
-translateExpr args (LogM c x) = return $ if x then "True" else "False"
+translateExpr args (LogM c x) = return $ if x then "TRUE" else "FALSE"
 translateExpr args (NumM c x) = return $ viaShow x
 translateExpr args (StrM c x) = return . dquotes $ pretty x
-translateExpr args (NullM c) = return "None"
+translateExpr args (NullM c) = return "NULL"
 translateExpr args (PackM e) = do
   e' <- translateExpr args e
   let c = typeOfExprM e
@@ -117,48 +123,6 @@ translateExpr args (UnpackM e) = do
 translateExpr args (ReturnM e) = do
   e' <- translateExpr args e
   return $ "return(" <> e' <> ")"
-
--- translateExpr args (AssignM v e) = do
---   e' <- translateExpr args e
---   return $ pretty v <+> "<-" <+> e'
--- translateExpr args (SrcCallM _ (VarM _ v) es) = do
---   xs <- mapM (translateExpr args) es
---   return $ pretty v <> tupled xs
--- translateExpr args (ManCallM _ i es) = do
---   xs <- mapM (translateExpr args) es
---   return $ "m" <> pretty i <> tupled xs
--- translateExpr args (PartialM _ i (ManCallM c mid es)) = do
---   let es' = map (translateExpr args) es
---       vs = take i $ zipWith (<>) (repeat "p") (map viaShow [1..])
---   return $ "function" <> tupled vs <> "{" <> "m" <> pretty mid <> tupled vs <> "}"
--- translateExpr _ (LamM _ i) = return $ "m" <> viaShow i
--- translateExpr args (ForeignCallM _ i lang vs) = return "FOREIGN"
--- translateExpr args (ReturnM e) = translateExpr args e
--- translateExpr args (VarM _ v) = return $ pretty v
--- translateExpr args (ListM _ es) = do
---   xs <- mapM (translateExpr args) es
---   return $ "c" <> tupled xs
--- translateExpr args (TupleM _ es) = do
---   xs <- mapM (translateExpr args) es
---   return $ "list" <> tupled xs
--- translateExpr args (RecordM _ entries) = do
---   xs' <- mapM (translateExpr args . snd) entries
---   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) xs'
---   return $ "list" <> tupled entries'
--- translateExpr args (LogM _ x) = return $ if x then "TRUE" else "FALSE"
--- translateExpr args (NumM _ x) = return $ viaShow x
--- translateExpr args (StrM _ x) = return $ dquotes (pretty x)
--- translateExpr args (NullM _) = return "NULL"
--- translateExpr args (PackM e) = do
---   e' <- translateExpr args e
---   let c = typeOfExprM e
---       schema = typeSchema c
---   return $ "pack" <> tupled [e', schema]
--- translateExpr args (UnpackM e) = do
---   e' <- translateExpr args e
---   let c = typeOfExprM e
---       schema = typeSchema c
---   return $ "unpack" <> tupled [e', schema]
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v

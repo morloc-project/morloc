@@ -18,6 +18,7 @@ import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Config as MC
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
@@ -79,15 +80,20 @@ translateExpr args (LetM v e1 e2) = do
 translateExpr args (AppM c f es) = do
   f' <- translateExpr args f 
   es' <- mapM (translateExpr args) es
-  return $ f' <> tupled es'
+  return $ f' <> tupled es' <> " # AppM :: " <> prettyType c
+translateExpr args (AppM c f@(CisM c' i args') es) = error "FUCK"
 translateExpr args (LamM c mv e) = do
   e' <- translateExpr args e
   let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
                    (zipWith (<>) (repeat "p") (map viaShow [1..]))
   return $ "lambda " <+> hsep (punctuate "," vs) <> ":" <+> e' <> tupled vs
 translateExpr args (VarM c v) = return (pretty v)
-translateExpr args (CisM c i args') = return $
-  "m" <> viaShow i <> tupled (map (pretty . argName) args')
+translateExpr args (CisM c i args') = return $ "m" <> viaShow i
+  -- return $ case nargs c of
+  --   0 -> "m" <> viaShow i
+  --            <> tupled (map (pretty . argName) args') <+> "# CisM :: " <> prettyType c
+  --   i -> translateExpr args (LamM [
+  -- where
 translateExpr args (TrsM c i lang) = return "FOREIGN"
 translateExpr args (ListM _ es) = do
   es' <- mapM (translateExpr args) es

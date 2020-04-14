@@ -97,7 +97,7 @@ translateExpr args (LetM v (PackM e1) e2) = do
   let schemaName = pretty v <> "_schema"
       t = showType (typeOfExprM e1)
       schema = t <+> schemaName <> ";"
-      unpacking = t <+> pretty v <+> "=" <+> "pack" <> tupled [e1', schemaName] <> ";"
+      unpacking = serialType <+> pretty v <+> "=" <+> "pack" <> tupled [e1', schemaName] <> ";"
   return (vsep [schema, unpacking, e2'])
 translateExpr args (LetM v (UnpackM e1) e2) = do
   e1' <- translateExpr args e1
@@ -110,7 +110,7 @@ translateExpr args (LetM v (UnpackM e1) e2) = do
 translateExpr args (LetM v e1 e2) = do
   e1' <- translateExpr args e1
   e2' <- translateExpr args e2
-  return $ pretty v <+> "=" <+> e1' <> line <> e2' 
+  return $ showType (typeOfExprM e1) <+> pretty v <+> "=" <+> e1' <> ";" <> line <> e2' <> ";"
 translateExpr args (AppM c f es) = do
   f' <- translateExpr args f 
   es' <- mapM (translateExpr args) es
