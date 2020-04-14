@@ -25,7 +25,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , serializeCallTree
   , typeOfExprM
   , returnId
-  , extractAssignment
+  , invertTree
   ) where
 
 import Morloc.Data.Doc
@@ -97,7 +97,7 @@ data Argument
 data ReturnValue
   = PackedReturn Int CType
   | UnpackedReturn Int CType
-  | PassThroughReturn Int 
+  | PassThroughReturn Int
   deriving (Show, Ord, Eq)
 
 returnId :: ReturnValue -> Int
@@ -130,39 +130,48 @@ unpackArgument x = x
 data CallTree = CallTree Manifold [Manifold]
   deriving(Show, Ord, Eq)
 
-data Manifold = Manifold ReturnValue [Argument] [ExprM]
+data Manifold = Manifold ReturnValue [Argument] ExprM
   deriving(Show, Ord, Eq)
 
 data ExprM
-  = AssignM EVar ExprM
-  | SrcCallM CType ExprM [ExprM] -- always return unpacked object
-  | ManCallM CType Int [ExprM] -- always return unpacked object
-  | ForeignCallM CType Int Lang [EVar] -- always returns packed object
-  | PartialM CType Int ExprM
-  | LamM CType Int
-  | ReturnM ExprM
+  -- structural elements
+  = LetM EVar ExprM ExprM
+  | AppM CType ExprM [ExprM]
+  | LamM CType [Maybe EVar] ExprM -- ^ Nothing Evar will be auto generated
+
+  -- manifold types
   | VarM CType EVar
+  | CisM CType Int [Argument]
+  | TrsM CType Int Lang
+
   -- containers
   | ListM CType [ExprM]
   | TupleM CType [ExprM]
   | RecordM CType [(EVar, ExprM)]
+
   -- primitives
   | LogM CType Bool
-  | NumM CType Scientific 
+  | NumM CType Scientific
   | StrM CType MT.Text
   | NullM CType
+
   -- serialization - these must remain abstract, since required arguments
   -- will vary between languages.
   | PackM ExprM
   | UnpackM ExprM
+
+  -- return
+  | ReturnM ExprM -- I need this to distinguish between the values in assigned
+                  -- in let expressions and the final return value. In some
+                  -- languages, this may not be necessary.
   deriving(Show, Ord, Eq)
 
 prettyCallTree :: CallTree -> MDoc
 prettyCallTree (CallTree m ms) = vsep (map prettyManifold (m:ms))
 
 prettyManifold :: Manifold -> MDoc
-prettyManifold (Manifold v args es) =
-  block 4 (rval v) (vsep $ map prettyExprM es)
+prettyManifold (Manifold v args e) =
+  block 4 (rval v) (prettyExprM e)
   where
     rval :: ReturnValue -> MDoc
     rval (PackedReturn i t)
@@ -174,30 +183,30 @@ prettyManifold (Manifold v args es) =
       <+> "m" <> pretty i
       <> tupled (map prettyArgument args)
     rval (PassThroughReturn i)
-      = "passthrough" 
+      = "passthrough"
       <+> "m" <> pretty i
       <> tupled (map prettyArgument args)
 
 prettyExprM :: ExprM -> MDoc
-prettyExprM (AssignM v e) = pretty v <+> "=" <+> prettyExprM e
-prettyExprM (SrcCallM c v es) = prettyExprM v <> tupled (map prettyExprM es)
-prettyExprM (ManCallM c i es) = "m" <> pretty i <> tupled (map prettyExprM es)
-prettyExprM (ForeignCallM c i lang vs) =
-  "foreign_call" <> tupled ([pretty i, viaShow lang] ++ map pretty vs)
-prettyExprM (ReturnM e) = "return(" <> prettyExprM e <> ")"
-prettyExprM (VarM c v) = pretty v
+prettyExprM (LetM v e1 e2) = pretty v <+> "=" <+> prettyExprM e1 <> line <> prettyExprM e2
+prettyExprM (AppM _ f xs) = prettyExprM f <+> tupled (map prettyExprM xs)
+prettyExprM (LamM _ mvs e) = "\\" <> hsep prettyVs <+> "->" <+> prettyExprM e 
+  where
+    prettyVs = zipWith (\i v -> maybe ("_" <> viaShow i) pretty v) [0..] mvs
+prettyExprM (VarM _ v) = pretty v
+prettyExprM (CisM _ i _) = "CisM<" <> pretty i <> ">" 
+prettyExprM (TrsM _ i lang) = "TrsM<" <> pretty i <> ", " <> viaShow lang <> ">" 
 prettyExprM (ListM c es) = encloseSep "[" "]" "," (map prettyExprM es)
 prettyExprM (TupleM c es) = tupled (map prettyExprM es)
 prettyExprM (RecordM c entries) =
-  encloseSep "{" "}" ";" (map (\(k,e) -> pretty k <+> "=" <+> prettyExprM e) entries) 
+  encloseSep "{" "}" ";" (map (\(k,e) -> pretty k <+> "=" <+> prettyExprM e) entries)
 prettyExprM (LogM c x) = if x then "true" else "false"
 prettyExprM (NumM c x) = viaShow x
 prettyExprM (StrM c x) = dquotes (pretty x)
 prettyExprM (NullM c) = "Null"
 prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
 prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
-prettyExprM (PartialM _ i j) = "Partial<" <> viaShow i <> ">(m" <> viaShow j <> ")"
-prettyExprM (LamM _ i) = "\\m" <> viaShow i
+prettyExprM (ReturnM e) = "RETURN(" <> prettyExprM e <> ")"
 
 serializeCallTree :: CallTree -> MorlocMonad CallTree
 serializeCallTree x@(CallTree m ms) = do
@@ -207,31 +216,27 @@ serializeCallTree x@(CallTree m ms) = do
   where
     -- rewrite the head manifold to unpack its return value
     packHead :: Manifold -> Manifold
-    packHead m@(Manifold (PackedReturn _ _) _ _) = m
-    packHead (Manifold (UnpackedReturn i c) args ms) =
-      Manifold (PackedReturn i c) args (map packOutput ms)
-    packHead m@(Manifold (PassThroughReturn _) _ _) = m
-
-    packOutput :: ExprM -> ExprM
-    packOutput (ReturnM x) = ReturnM (PackM x)
-    packOutput m = m
+    packHead (Manifold (UnpackedReturn i c) args (ReturnM e)) =
+      Manifold (PackedReturn i c) args (ReturnM (PackM e))
+    packHead m = m
 
     -- add serialization handling downstream as needed
     serialize :: Manifold -> MorlocMonad Manifold
-    serialize (Manifold v args es) =
-      return $ Manifold v args (map (serializeExpr args) es) 
+    serialize (Manifold v args e) =
+      return $ Manifold v args (serializeExpr args e)
 
     serializeExpr :: [Argument] -> ExprM -> ExprM
-    serializeExpr args (ReturnM e) = ReturnM (serializeExpr args e)
-    serializeExpr args (PackM e) = PackM (serializeExpr args e)
-    serializeExpr args (PartialM i c e) = PartialM i c (serializeExpr args e)
-    serializeExpr args (SrcCallM c f es) =
-      SrcCallM c (serializeExpr args f) (map (unpackMay args) es) 
-    serializeExpr args (TupleM c es) = TupleM c (map (unpackMay args) es)
+    serializeExpr args (LetM v e1 e2) = LetM v (serializeExpr args e1) (serializeExpr args e2) 
+    serializeExpr args (AppM c f@(VarM _ _) es) = AppM c f (map (unpackMay args) es)
+    serializeExpr args (LamM c vs e) = LamM c vs (serializeExpr args e)
     serializeExpr args (ListM c es) = ListM c (map (unpackMay args) es)
+    serializeExpr args (TupleM c es) = TupleM c (map (unpackMay args) es)
     serializeExpr args (RecordM c xs) =
       RecordM c (map (\(k,v)->(k, unpackMay args v)) xs)
-    serializeExpr _ e = e 
+    serializeExpr args (PackM e) = PackM (serializeExpr args e)
+    serializeExpr args (ReturnM e) = ReturnM (serializeExpr args e)
+    -- LogM -- NumM -- StrM -- NullM -- VarM -- CisM -- TrsM
+    serializeExpr _ e = e
 
     unpackMay :: [Argument] -> ExprM -> ExprM
     unpackMay args e@(VarM c v) = case unCType c of
@@ -246,84 +251,101 @@ serializeCallTree x@(CallTree m ms) = do
     lookupArg :: EVar -> [Argument] -> Maybe Argument
     lookupArg v args = listToMaybe [r | r <- args, argName r == v]
 
-extractAssignment :: (Int -> EVar) -> CallTree -> MorlocMonad CallTree
-extractAssignment namer (CallTree m ms) = do
+invertTree :: (Int -> EVar) -> CallTree -> MorlocMonad CallTree
+invertTree namer (CallTree m ms) = do
   MM.startCounter
   (m':ms') <- mapM f (m:ms)
   return (CallTree m' ms')
   where
     f :: Manifold -> MorlocMonad Manifold
-    f (Manifold v args es) =
-      mapM (extractAssignment' namer) es |>> (Manifold v args . reverse . concat . map fst)
+    f (Manifold v args e) = Manifold v args <$> invertExpr' e
 
-extractAssignment' :: (Int -> EVar) -> ExprM -> MorlocMonad ([ExprM], ExprM)
-extractAssignment' namer (ReturnM e) = do
-  (asses, e') <- extractAssignment' namer e
-  return (ReturnM e' : asses, e')
-extractAssignment' namer (PackM e) = do
-  (asses, e') <- extractAssignment' namer e
-  v <- MM.getCounter |>> namer
-  let mv = VarM (typeOfExprM e) v
-  return (AssignM v (PackM e') : asses, mv)
-extractAssignment' namer (UnpackM e) = do
-  (asses, e') <- extractAssignment' namer e
-  v <- MM.getCounter |>> namer
-  let mv = VarM (typeOfExprM e) v
-  return (AssignM v (UnpackM e') : asses, mv)
-extractAssignment' _ e@(AssignM _ _) = return ([e], e) -- skip assignment
-extractAssignment' namer (SrcCallM c e es) = do
-  (asses, e') <- extractAssignment' namer e
-  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
-  v <- MM.getCounter |>> namer
-  let mv = VarM c v
-  return (AssignM v (SrcCallM c e' es') : (asses ++ concat assess), mv)
-extractAssignment' namer (ManCallM c i es) = do
-  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
-  v <- MM.getCounter |>> namer
-  let mv = VarM c v
-  return (AssignM v (ManCallM c i es') : concat assess, mv)
-extractAssignment' namer (ListM c es) = do
-  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
-  v <- MM.getCounter |>> namer
-  let mv = VarM c v
-  return (AssignM v (ListM c es') : concat assess, mv)
-extractAssignment' namer (TupleM c es) = do
-  (assess, es') <- mapM (extractAssignment' namer) es |>> unzip
-  v <- MM.getCounter |>> namer
-  let mv = VarM c v
-  return (AssignM v (TupleM c es') : concat assess, mv)
-extractAssignment' namer (RecordM c xs) = do
-  (assess, es') <- mapM (extractAssignment' namer) (map snd xs) |>> unzip
-  v <- MM.getCounter |>> namer
-  let mv = VarM c v
-  return (AssignM v (RecordM c (zip (map fst xs) es')) : concat assess, mv)
--- VarM CType EVar
--- LogM CType Bool
--- NumM CType Scientific
--- StrM CType MT.Text
--- NullM CType
--- PartialM
--- LamM
--- ForeignCallM CType Int Lang [EVar]
-extractAssignment' _ e = return ([], e)
+    invertExpr' :: ExprM -> MorlocMonad ExprM
+    invertExpr' e@(LetM v e1 e2) = return e
+    invertExpr' (AppM c f es) = do
+      f' <- invertExpr' f
+      es' <- mapM invertExpr' es
+      v <- MM.getCounter |>> namer
+      let e = LetM v (AppM c (terminalOf f') (map terminalOf es')) (VarM c v)
+          e' = foldl (\x y -> dependsOn x y) e (f' : es') 
+      return e'
+    invertExpr' (LamM c mv body) = do
+      body' <- invertExpr' body
+      v <- MM.getCounter |>> namer
+      let e = LetM v (LamM c mv (terminalOf body')) (VarM c v)
+          e' = dependsOn e body'
+      return e'
+    invertExpr' e@(CisM c i args) = do
+      v <- MM.getCounter |>> namer
+      return (LetM v e (VarM c v))
+    invertExpr' e@(TrsM c i lang) = do
+      v <- MM.getCounter |>> namer
+      return (LetM v e (VarM c v))
+    invertExpr' (ListM c es) = do
+      es' <- mapM invertExpr' es
+      v <- MM.getCounter |>> namer
+      let e = LetM v (ListM c (map terminalOf es')) (VarM c v)
+          e' = foldl (\x y -> dependsOn x y) e es'
+      return e'
+    invertExpr' (TupleM c es) = do
+      es' <- mapM invertExpr' es
+      v <- MM.getCounter |>> namer
+      let e = LetM v (TupleM c (map terminalOf es')) (VarM c v)
+          e' = foldl (\x y -> dependsOn x y) e es'
+      return e'
+    invertExpr' (RecordM c entries) = do
+      es' <- mapM invertExpr' (map snd entries)
+      v <- MM.getCounter |>> namer
+      let entries' = zip (map fst entries) (map terminalOf es')
+          e = LetM v (RecordM c entries') (VarM c v)
+          e' = foldl (\x y -> dependsOn x y) e es'
+      return e'
+    invertExpr' (PackM e) = do
+      e' <- invertExpr' e
+      v <- MM.getCounter |>> namer
+      return $ dependsOn (LetM v (PackM (terminalOf e')) (VarM (typeOfExprM e) v)) e'
+    invertExpr' (UnpackM e) = do
+      e' <- invertExpr' e
+      v <- MM.getCounter |>> namer
+      return $ dependsOn (LetM v (UnpackM (terminalOf e')) (VarM (typeOfExprM e) v)) e'
+    invertExpr' (ReturnM e) = do
+      e' <- invertExpr' e
+      v <- MM.getCounter |>> namer
+      return $ dependsOn (LetM v (terminalOf e') (ReturnM (VarM (typeOfExprM e) v))) e'
+    -- VarM LogM NumM StrM NullM
+    invertExpr' e = return e
+
+    -- transfer all let-dependencies from y to x
+    --
+    -- Technically, I should check for variable reuse in the let-chain and
+    -- resolve conflicts be substituting in fresh variable names. However, for
+    -- now, I will trust that my name generator created names that are unique
+    -- within the manifold.
+    dependsOn :: ExprM -> ExprM -> ExprM
+    dependsOn x (LetM v e y) = LetM v e (dependsOn x y)
+    dependsOn x _ = x
+
+    -- get the rightmost expression in a let-tree
+    terminalOf :: ExprM -> ExprM
+    terminalOf (LetM _ _ e) = terminalOf e
+    terminalOf e = e
 
 -- Get the type of an expression
 -- Serialization is ignored
 typeOfExprM :: ExprM -> CType
-typeOfExprM (AssignM _ e) = typeOfExprM e
-typeOfExprM (ManCallM c _ _) = c
-typeOfExprM (SrcCallM c _ _) = c
-typeOfExprM (ForeignCallM c _ _ _) = c
-typeOfExprM (ReturnM e) = typeOfExprM e
+typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+typeOfExprM (AppM c _ _) = c
+typeOfExprM (LamM c _ _) = c
 typeOfExprM (VarM c _) = c
+typeOfExprM (CisM c _ _) = c
+typeOfExprM (TrsM c _ _) = c
 typeOfExprM (ListM c _) = c
 typeOfExprM (TupleM c _) = c
 typeOfExprM (RecordM c _) = c
-typeOfExprM (LogM c _ ) = c
+typeOfExprM (LogM c _) = c
 typeOfExprM (NumM c _) = c
 typeOfExprM (StrM c _) = c
 typeOfExprM (NullM c) = c
 typeOfExprM (PackM e) = typeOfExprM e
 typeOfExprM (UnpackM e) = typeOfExprM e
-typeOfExprM (LamM c _) = c
-typeOfExprM (PartialM c _ _) = c
+typeOfExprM (ReturnM e) = typeOfExprM e

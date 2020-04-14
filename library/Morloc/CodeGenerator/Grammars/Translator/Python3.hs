@@ -10,7 +10,7 @@ Stability   : experimental
 -}
 
 module Morloc.CodeGenerator.Grammars.Translator.Python3
-  ( 
+  (
     translate
   ) where
 
@@ -19,14 +19,14 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM 
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
 
 translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
-translate srcs mss = do 
+translate srcs mss = do
   -- setup library paths
   lib <- fmap pretty $ MM.asks MC.configLibrary
 
@@ -36,7 +36,7 @@ translate srcs mss = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- handle serialzation
-  mss' <- mapM serializeCallTree mss >>= mapM (extractAssignment namer)
+  mss' <- mapM serializeCallTree mss >>= mapM (invertTree namer)
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyCallTree mss')
@@ -66,45 +66,43 @@ translateSource (Path s) = do
   return $ "from" <+> mod <+> "import *"
 
 translateManifold :: Manifold -> MorlocMonad MDoc
-translateManifold (Manifold v args es) = do
+translateManifold (Manifold v args e) = do
   let head = "def" <+> returnName v <> tupled (map makeArgument args) <> ":"
-  body <- mapM (translateExpr args) es |>> vsep
+  body <- translateExpr args e
   return $ vsep [head, indent 4 body]
 
 translateExpr :: [Argument] -> ExprM -> MorlocMonad MDoc
-translateExpr args (AssignM v e) = do
+translateExpr args (LetM v e1 e2) = do
+  e1' <- translateExpr args e1
+  e2' <- translateExpr args e2
+  return $ pretty v <+> "=" <+> e1' <> line <> e2' 
+translateExpr args (AppM c f es) = do
+  f' <- translateExpr args f 
+  es' <- mapM (translateExpr args) es
+  return $ f' <> tupled es'
+translateExpr args (LamM c mv e) = do
   e' <- translateExpr args e
-  return $ pretty v <+> "=" <+> e'
-translateExpr args (SrcCallM _ (VarM _ v) es) = do
-  xs <- mapM (translateExpr args) es
-  return $ pretty v <> tupled xs
-translateExpr args (ManCallM _ i es) = do
-  xs <- mapM (translateExpr args) es
-  return $ "m" <> pretty i <> tupled xs
-translateExpr args (PartialM _ i (ManCallM c mid es)) = do
-  let es' = map (translateExpr args) es
-      vs = take i $ zipWith (<>) (repeat "p") (map viaShow [1..])
-  return $ "lambda " <+> hsep (punctuate "," vs) <> ":" <+> "m" <> pretty mid <> tupled vs
-translateExpr _ (LamM _ i) = return $ "m" <> viaShow i
-translateExpr args (ForeignCallM _ i lang vs) = return "FOREIGN"
-translateExpr args (ReturnM e) = do
-  doc <- translateExpr args e
-  return $ "return(" <> doc <> ")"
-translateExpr args (VarM _ v) = return $ pretty v
+  let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
+                   (zipWith (<>) (repeat "p") (map viaShow [1..]))
+  return $ "lambda " <+> hsep (punctuate "," vs) <> ":" <+> e' <> tupled vs
+translateExpr args (VarM c v) = return (pretty v)
+translateExpr args (CisM c i args') = return $
+  "m" <> viaShow i <> tupled (map (pretty . argName) args')
+translateExpr args (TrsM c i lang) = return "FOREIGN"
 translateExpr args (ListM _ es) = do
-  xs <- mapM (translateExpr args) es
-  return $ list xs
+  es' <- mapM (translateExpr args) es
+  return $ list es'
 translateExpr args (TupleM _ es) = do
-  xs <- mapM (translateExpr args) es
-  return $ tupled xs
-translateExpr args (RecordM _ entries) = do
-  xs' <- mapM (translateExpr args . snd) entries
-  let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) xs'
+  es' <- mapM (translateExpr args) es
+  return $ tupled es'
+translateExpr args (RecordM c entries) = do
+  es' <- mapM (translateExpr args . snd) entries
+  let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
   return $ "dict" <> tupled entries'
-translateExpr args (LogM _ x) = return $ if x then "True" else "False"
-translateExpr args (NumM _ x) = return $ viaShow x
-translateExpr args (StrM _ x) = return $ dquotes (pretty x)
-translateExpr args (NullM _) = return "None"
+translateExpr args (LogM c x) = return $ if x then "True" else "False"
+translateExpr args (NumM c x) = return $ viaShow x
+translateExpr args (StrM c x) = return . dquotes $ pretty x
+translateExpr args (NullM c) = return "None"
 translateExpr args (PackM e) = do
   e' <- translateExpr args e
   let c = typeOfExprM e
@@ -115,6 +113,9 @@ translateExpr args (UnpackM e) = do
   let c = typeOfExprM e
       schema = typeSchema c
   return $ "unpack" <> tupled [e', schema]
+translateExpr args (ReturnM e) = do
+  e' <- translateExpr args e
+  return $ "return(" <> e' <> ")"
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v

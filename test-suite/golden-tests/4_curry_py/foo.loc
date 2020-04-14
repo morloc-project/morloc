@@ -2,26 +2,3 @@ import pybase (map, mul)
 
 export double
 double xs = map (mul 2) xs;
--- AST:
---   0 double Python3Lang :: LamS xs (list@Python3Lang float@Python3Lang -> float@Python3Lang)
---     1 AppS (float@Python3Lang)
---       3 CallS map <Python3Lang> ((float@Python3Lang -> float@Python3Lang) -> list@Python3Lang float@Python3Lang -> float@Python3Lang)
---       4 _ Python3Lang :: LamS a (float@Python3Lang -> float@Python3Lang)
---         4 AppS (float@Python3Lang)
---           5 CallS mul <Python3Lang> (float@Python3Lang -> float@Python3Lang -> float@Python3Lang)
---           6 NumS (float@Python3Lang)
---           4 VarS a (float@Python3Lang)
---       7 VarS xs (list@Python3Lang float@Python3Lang)
---
--- f x = mul 2 x;
--- double xs = map f xs;
---
--- 0 double Python3Lang :: LamS xs (list@Python3Lang float@Python3Lang -> float@Python3Lang)
---   1 AppS (float@Python3Lang)
---     3 CallS map <Python3Lang> ((float@Python3Lang -> float@Python3Lang) -> list@Python3Lang float@Python3Lang -> float@Python3Lang)
---     4 f Python3Lang :: LamS x (float@Python3Lang -> float@Python3Lang)
---       5 AppS (float@Python3Lang)
---         7 CallS mul <Python3Lang> (float@Python3Lang -> float@Python3Lang -> float@Python3Lang)
---         8 NumS (float@Python3Lang)
---         9 VarS x (float@Python3Lang)
---     10 VarS xs (list@Python3Lang float@Python3Lang)

@@ -49,7 +49,7 @@ generate ms = do
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
 
   -- translate modules into bitrees
-  (gASTs, rASTs) 
+  (gASTs, rASTs)
     -- find each term that is exported to the nexus
     <- roots modmap   -- [(EVar, [TermOrigin])]
     -- turn each term into an ambiguous call tree
@@ -63,10 +63,10 @@ generate ms = do
 
   -- print abstract syntax trees to the console as debugging message
   say $ line <> indent 2 (vsep (map (writeAST id Nothing) rASTs))
-  
+
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
-  
+
   -- build nexus
   -- -----------
   -- Each nexus subcommand calls one function from one one pool.
@@ -295,7 +295,7 @@ rewrite
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (SAnno GMeta Many [CType])
 rewrite (SAnno (Many es0) g0) = do
-  es0' <- fmap concat $ mapM rewriteL0 es0 
+  es0' <- fmap concat $ mapM rewriteL0 es0
   return $ SAnno (Many es0') g0
   where
     rewriteL0
@@ -492,7 +492,7 @@ realize x = do
       xsMay <- mapM (realizeAnno depth (Just $ langOf' c)) xs
       case (fMay, (fmap unzip . sequence) xsMay, Lang.pairwiseCost lang (langOf' c)) of
         (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
-          return $ Just (fscore + sum scores + interopCost, AppS f' xs', c) 
+          return $ Just (fscore + sum scores + interopCost, AppS f' xs', c)
         _ -> return Nothing
     realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . GeneratorError $
       "ForeignS should not yet appear in an SExpr"
@@ -527,7 +527,7 @@ makeGAST (SAnno (Many (_:_)) _) = MM.throwError . OtherError $ "Expected GAST"
 -- | Serialize a simple, general data type. This type can consists only of JSON
 -- primitives and containers (lists, tuples, and records).
 generalSerial :: SAnno GMeta One () -> MorlocMonad (EVar, MDoc)
-generalSerial x@(SAnno _ g) = do 
+generalSerial x@(SAnno _ g) = do
   mdoc <- generalSerial' x
   case metaName g of
     (Just evar) -> return (evar, mdoc)
@@ -536,7 +536,7 @@ generalSerial x@(SAnno _ g) = do
     generalSerial' :: SAnno GMeta One () -> MorlocMonad MDoc
     generalSerial' (SAnno (One (UniS, _)) _) = return "null"
     generalSerial' (SAnno (One (NumS x, _)) _) = return $ viaShow x
-    generalSerial' (SAnno (One (LogS x, _)) _) = return $ if x then "true" else "false" 
+    generalSerial' (SAnno (One (LogS x, _)) _) = return $ if x then "true" else "false"
     generalSerial' (SAnno (One (StrS x, _)) _) = return $ dquotes (pretty x)
     generalSerial' (SAnno (One (ListS xs, _)) _) = do
       xs' <- mapM generalSerial' xs
@@ -643,7 +643,7 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
         [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
         , describe f
         ] ++ map describe xs
-    describe (SAnno (One (f@(LamS _ x), c)) g) = do 
+    describe (SAnno (One (f@(LamS _ x), c)) g) = do
       hang 2 . vsep $
         [ pretty (metaId g)
             <+> name (getType c) g
@@ -651,7 +651,7 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
             <+> parens (prettyType (getType c))
             <> addExtra c
         , describe x
-        ] 
+        ]
     describe (SAnno (One (x, c)) g) =
           pretty (metaId g)
       <+> descSExpr x
@@ -719,10 +719,11 @@ parameterize' args (SAnno (One (RecS entries, c)) m) = do
   vs' <- mapM (parameterize' args) (map snd entries)
   let args' = unique . concat . map sannoSnd $ vs'
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
-parameterize' _ (SAnno (One (LamS vs x, c)) m) = do
-  let args0 = map unpackArgument $ zipWith makeArgument vs (typeArgsC c)
-  x' <- parameterize' args0 x
-  return $ SAnno (One (LamS vs x', (c, []))) m 
+parameterize' args (SAnno (One (LamS vs x, c)) m) = do
+  let args' = [r | r <- args, not (elem (argName r) vs)]
+      args0 = map unpackArgument $ zipWith makeArgument vs (typeArgsC c)
+  x' <- parameterize' (args' ++ args0) x
+  return $ SAnno (One (LamS vs x', (c, args'))) m
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
@@ -746,7 +747,7 @@ segment x@(SAnno (One (_, c)) _) = do
   where
     writeAST' = writeAST fst (Just (list . map prettyArgument . snd))
 
-    segment' 
+    segment'
       :: CType
       -> SAnno GMeta One (CType, [Argument])
       -> MorlocMonad
@@ -835,7 +836,7 @@ reparameterize args0 (t, args1) = (t, map f args1)
         (r':_) -> r'
         _ -> r
 
-makeArgument :: EVar -> Maybe CType -> Argument 
+makeArgument :: EVar -> Maybe CType -> Argument
 makeArgument v (Just t) = PackedArgument v t
 makeArgument v Nothing = PassThroughArgument v
 
@@ -879,6 +880,20 @@ codify x = fmap fst $ codify' True x
 -- control will be added here (caches, assertions, logging, visualization,
 -- etc). Following steps will extract assignments, handle serialization and
 -- schemas, and finally translate to executable code.
+--
+-- The return pair is 1) a list of complete manifolds emited by the given tree
+-- expression and 2) a identifier for the tree. For example:
+--
+--   \x -> f 42 (g (1, x)) [1, 2, (h 9)]
+--
+-- would yield something like:
+--
+--  ( [ Manifold m0 (\x -> AppM f [42, AppM m1 [x], [1, 2, AppM m2 []]])
+--    , Manifold m1 (\x -> AppM g (1, x))
+--    , Manifold m2 (AppM h 9)
+--    ]
+--  , \x -> AppM m0 [x]
+--  )
 codify'
   :: Bool
   -> SAnno GMeta One (CType, [Argument])
@@ -892,50 +907,41 @@ codify' _ (SAnno (One (StrS x, (c, _))) _) = return ([], (StrM c x))
 codify' isTop s@(SAnno (One (ListS xs, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) xs)
   let x = ListM c xs'
-  codifyContainer isTop mss x s 
+  codifyContainer isTop mss x s
 -- tuple
 codify' isTop s@(SAnno (One (TupleS xs, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) xs)
   let x = TupleM c xs'
-  codifyContainer isTop mss x s 
+  codifyContainer isTop mss x s
 -- record
 codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
   (mss, xs') <- fmap unzip (mapM (codify' False) (map snd es))
   let x = RecordM c (zip (map fst es) xs')
-  codifyContainer isTop mss x s 
+  codifyContainer isTop mss x s
 -- var
-codify' _ (SAnno (One (VarS v, (c, _))) _) = return ([], VarM c v)
--- lambda
-codify' _ (SAnno (One (LamS _ x@(SAnno _ m), (c, _))) _) = do
-  (ms, _) <- codify' True x
-  return $ (ms, LamM c (metaId m))
--- foreign call
-codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = do
-  return ([], ForeignCallM c mid lang vs)
+codify' True (SAnno (One (VarS v, (c, args))) m) = return
+  ([Manifold (PackedReturn (metaId m) c) args (ReturnM $ VarM c v)], CisM c (metaId m) args)
+codify' False (SAnno (One (VarS v, (c, _))) _) =
+  return ([], VarM c v)
 
--- application - calling a foreign function
-codify' _ (SAnno (One (AppS  (SAnno (One (ForeignS fid lang vs, (fc, _)))_)  xs, (c, args))) m) = do
-  (mss', xs') <- fmap unzip $ mapM (codify' False) xs
-  let mid = metaId m
-      curriedArgs = nargs fc - length xs
-      x = ForeignCallM c fid lang vs
-  return
-    ( Manifold (PackedReturn mid c) args [ReturnM x] : concat mss'
-    , curryM fc curriedArgs x
-    )
--- application - calling a domestic function
-codify' _ (SAnno (One (AppS  f@(SAnno (One (CallS src, (fc, _)))_)  xs, (c, args))) m) = do
-  (mss', xs') <- fmap unzip $ mapM (codify' False) xs
-  let mid = metaId m
-      curriedArgs = nargs fc - length xs
-      f = VarM c (EVar (unName (srcName src)))
-  return
-    ( Manifold (UnpackedReturn mid c) args [ReturnM (SrcCallM c f xs')] : concat mss'
-    , curryM fc curriedArgs
-    $ ManCallM c mid (map (\r -> VarM (fromJust $ argType r) (argName r)) args)
-    )
-codify' _ (SAnno (One (AppS _ _, _)) _) = MM.throwError . OtherError $
-  "After SAnno tree rewriting, all applications must be to either CallS or ForeignS"
+-- app
+codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, _))) _) xs, (c, args))) m) = do
+  (mss', xs') <- mapM (codify' False) xs |>> unzip
+  f' <- case f of
+    (CallS src) -> return $ VarM fc (EVar . unName . srcName $ src)
+    (ForeignS mid lang vs) -> return $ TrsM c mid lang
+    (LamS vs x) -> error "Thinking of function factories fills you with determination"
+  let manifold = Manifold (UnpackedReturn (metaId m) c) args (ReturnM $ AppM c f' xs')
+  return (manifold : concat mss', CisM c (metaId m) args)
+
+-- lambda
+codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = do
+  (ms, x') <- codify' False x
+  return (ms, LamM c (map Just vs) x')
+
+-- foreign call
+codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) =
+  return ([], TrsM c mid lang)
 
 -- domestic call
 codify' _ (SAnno (One (CallS src, (c, _))) m) = do
@@ -944,9 +950,9 @@ codify' _ (SAnno (One (CallS src, (c, _))) m) = do
       args = zipWith UnpackedArgument vs inputs
       f = VarM c (EVar (unName (srcName src)))
       es = zipWith VarM inputs vs
-      call = SrcCallM output f es 
-      manifold = Manifold (UnpackedReturn (metaId m) output) args [ReturnM call]
-  return ([manifold], LamM c (metaId m))
+      call = AppM output f es
+      manifold = Manifold (UnpackedReturn (metaId m) output) args (ReturnM call)
+  return ([manifold], CisM c (metaId m) args)
 
 -- get input types to a function type
 typeParts :: CType -> ([CType], CType)
@@ -956,14 +962,6 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
     typeArgs (FunT t1 t2) = t1 : typeArgs t2
     typeArgs t = [t]
 
-
-
-curryM :: CType -> Int -> ExprM -> ExprM
-curryM c i e
-  | i == 0 = e
-  | i < 0 = error "This should not happen"
-  | i > 0 = PartialM c i e 
-
 codifyContainer
   :: Bool
   -> [[Manifold]]
@@ -972,7 +970,7 @@ codifyContainer
   -> MorlocMonad ([Manifold], ExprM)
 codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
   if isTop
-    then return (Manifold (UnpackedReturn (metaId m) c) args [ReturnM x] : concat mss, x)
+    then return (Manifold (UnpackedReturn (metaId m) c) args (ReturnM x) : concat mss, x)
     else return (concat mss, x)
 
 translate :: Lang -> [Source] -> [[Manifold]] -> MorlocMonad MDoc
@@ -983,7 +981,7 @@ translate lang srcs mss = do
     RLang -> R.translate srcs callTrees
     Python3Lang -> Python3.translate srcs callTrees
     x -> MM.throwError . OtherError . render
-      $ "Language '" <> viaShow x <> "' has no translator" 
+      $ "Language '" <> viaShow x <> "' has no translator"
 
 
 -------- Utility and lookup functions ----------------------------------------
@@ -1123,7 +1121,7 @@ partialApply (Forall v t) = do
   t' <- partialApply t
   return $ if varIsUsed v t' then Forall v t' else t'
   where
-    varIsUsed :: TVar -> Type -> Bool 
+    varIsUsed :: TVar -> Type -> Bool
     varIsUsed v (VarT v') = v == v'
     varIsUsed v (ExistT v' ts ds)
       =  v == v'

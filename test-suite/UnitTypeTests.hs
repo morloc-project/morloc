@@ -852,28 +852,6 @@ unitTypeTests =
         ])
       [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
 
-    -- -- What exactly does this mean? what should a function "be"? Will the types
-    -- -- even work out to those of a single language? For `foo x y = f (g x) y`,
-    -- -- x will be passed the G (the manifold wrapping g) where it will be
-    -- -- unpacked into Lg (the language of g); y will be passed to f and be
-    -- -- unwrapped as an argument in Lf. But what is the type of `foo`? Indeed, x
-    -- -- could also be passed to more functions, where it takes on values in more
-    -- -- languages. Surely, the type of foo must be general. Declarations do
-    -- -- not, in general, have concrete types.
-    -- , assertTerminalType
-    --   "declaration type does not have useful terms"
-    --   (T.unlines
-    --     [ "source Cpp (\"sum\");"
-    --     , "source Cpp (\"fibonacci\");"
-    --     , "sum :: [Num] -> Num;"
-    --     , "sum R :: vector numeric -> numeric;"
-    --     , "fibonacci :: Num -> [Num];"
-    --     , "fibonacci Cpp :: \"int\" -> \"vector<$1>\" \"double\";"
-    --     , "sqrtfibmean n = sum (fibonacci n);"
-    --     , "sqrtfibmean"
-    --     ])
-    --   [fun [num, num]]
-
     , assertTerminalExprWithAnnot
       "all internal concrete and general types are right"
       (T.unlines
