@@ -22,24 +22,23 @@ import Morloc.Pretty (prettyType)
 import qualified Morloc.Data.Text as MT
 
 
-translate :: [Source] -> [CallTree] -> MorlocMonad MDoc
-translate srcs mss = do 
+translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- handle serialzation
-  mss' <- mapM serializeCallTree mss >>= mapM (invertTree namer)
+  -- tree rewrites
+  es' <- mapM (invertExprM namer) es
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyCallTree mss')
+  liftIO . putDoc $ (vsep $ map prettyExprM es')
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold (concat [m:ms | (CallTree m ms) <- mss'])
+  mDocs <- mapM translateExpr es'
 
-  -- create and return complete pool script
-  return $ makeMain includeDocs mDocs
+  return $ makePool includeDocs mDocs
 
 namer :: Int -> EVar
 namer i = EVar ("a" <> MT.show' i)
@@ -67,75 +66,70 @@ typeSchema c = f (unCType c)
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
-translateManifold :: Manifold -> MorlocMonad MDoc
-translateManifold (Manifold v args e) = do
-  let head = returnName v <+> "<- function" <> tupled (map makeArgument args)
-  body <- translateExpr args e
-  return $ line <> block 4 head body
-
-translateExpr :: [Argument] -> ExprM -> MorlocMonad MDoc
-translateExpr args (LetM v e1 e2) = do
-  e1' <- translateExpr args e1
-  e2' <- translateExpr args e2
-  return $ pretty v <+> "<-" <+> e1' <> line <> e2' 
-translateExpr args (AppM c f es) = do
-  f' <- translateExpr args f 
-  es' <- mapM (translateExpr args) es
-  return $ f' <> tupled es' <> " # AppM :: " <> prettyType c
-translateExpr args (AppM c f@(CisM c' i args') es) = error "FUCK"
-translateExpr args (LamM c mv e) = do
-  e' <- translateExpr args e
-  let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
-                   (zipWith (<>) (repeat "p") (map viaShow [1..]))
-  return $ "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}"
-translateExpr args (VarM c v) = return (pretty v)
-translateExpr args (CisM c i args') = return $ "m" <> viaShow i
-  -- return $ case nargs c of
-  --   0 -> "m" <> viaShow i
-  --            <> tupled (map (pretty . argName) args') <+> "# CisM :: " <> prettyType c
-  --   i -> translateExpr args (LamM [
-  -- where
-translateExpr args (TrsM c i lang) = return "FOREIGN"
-translateExpr args (ListM _ es) = do
-  es' <- mapM (translateExpr args) es
-  return $ list es'
-translateExpr args (TupleM _ es) = do
-  es' <- mapM (translateExpr args) es
-  return $ tupled es'
-translateExpr args (RecordM c entries) = do
-  es' <- mapM (translateExpr args . snd) entries
-  let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-  return $ "dict" <> tupled entries'
-translateExpr args (LogM c x) = return $ if x then "TRUE" else "FALSE"
-translateExpr args (NumM c x) = return $ viaShow x
-translateExpr args (StrM c x) = return . dquotes $ pretty x
-translateExpr args (NullM c) = return "NULL"
-translateExpr args (PackM e) = do
-  e' <- translateExpr args e
-  let c = typeOfExprM e
-      schema = typeSchema c
-  return $ "pack" <> tupled [e', schema]
-translateExpr args (UnpackM e) = do
-  e' <- translateExpr args e
-  let c = typeOfExprM e
-      schema = typeSchema c
-  return $ "unpack" <> tupled [e', schema]
-translateExpr args (ReturnM e) = do
-  e' <- translateExpr args e
-  return $ "return(" <> e' <> ")"
+translateExpr :: ExprM -> MorlocMonad MDoc
+translateExpr = undefined
+-- translateExpr args (LetM v e1 e2) = do
+--   e1' <- translateExpr args e1
+--   e2' <- translateExpr args e2
+--   return $ pretty v <+> "<-" <+> e1' <> line <> e2'
+-- translateExpr args (AppM c f es) = do
+--   f' <- translateExpr args f
+--   es' <- mapM (translateExpr args) es
+--   return $ f' <> tupled es' <> " # AppM :: " <> prettyType c
+-- translateExpr args (AppM c f@(CisM c' i args') es) = error "FUCK"
+-- translateExpr args (LamM c mv e) = do
+--   e' <- translateExpr args e
+--   let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
+--                    (zipWith (<>) (repeat "p") (map viaShow [1..]))
+--   return $ "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}"
+-- translateExpr args (VarM c v) = return (pretty v)
+-- translateExpr args (CisM c i args') = return $ "m" <> viaShow i
+--   -- return $ case nargs c of
+--   --   0 -> "m" <> viaShow i
+--   --            <> tupled (map (pretty . argName) args') <+> "# CisM :: " <> prettyType c
+--   --   i -> translateExpr args (LamM [
+--   -- where
+-- translateExpr args (TrsM c i lang) = return "FOREIGN"
+-- translateExpr args (ListM _ es) = do
+--   es' <- mapM (translateExpr args) es
+--   return $ list es'
+-- translateExpr args (TupleM _ es) = do
+--   es' <- mapM (translateExpr args) es
+--   return $ tupled es'
+-- translateExpr args (RecordM c entries) = do
+--   es' <- mapM (translateExpr args . snd) entries
+--   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+--   return $ "dict" <> tupled entries'
+-- translateExpr args (LogM c x) = return $ if x then "TRUE" else "FALSE"
+-- translateExpr args (NumM c x) = return $ viaShow x
+-- translateExpr args (StrM c x) = return . dquotes $ pretty x
+-- translateExpr args (NullM c) = return "NULL"
+-- translateExpr args (PackM e) = do
+--   e' <- translateExpr args e
+--   let c = typeOfExprM e
+--       schema = typeSchema c
+--   return $ "pack" <> tupled [e', schema]
+-- translateExpr args (UnpackM e) = do
+--   e' <- translateExpr args e
+--   let c = typeOfExprM e
+--       schema = typeSchema c
+--   return $ "unpack" <> tupled [e', schema]
+-- translateExpr args (ReturnM e) = do
+--   e' <- translateExpr args e
+--   return $ "return(" <> e' <> ")"
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v
 makeArgument (UnpackedArgument v c) = pretty v
 makeArgument (PassThroughArgument v) = pretty v
 
-returnName :: ReturnValue -> MDoc
-returnName (PackedReturn v _) = "m" <> pretty v
-returnName (UnpackedReturn v _) = "m" <> pretty v
-returnName (PassThroughReturn v) = "m" <> pretty v
+-- returnName :: ReturnValue -> MDoc
+-- returnName (PackedReturn v _) = "m" <> pretty v
+-- returnName (UnpackedReturn v _) = "m" <> pretty v
+-- returnName (PassThroughReturn v) = "m" <> pretty v
 
-makeMain :: [MDoc] -> [MDoc] -> MDoc
-makeMain sources manifolds = [idoc|#!/usr/bin/env Rscript
+makePool :: [MDoc] -> [MDoc] -> MDoc
+makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
 
 #{vsep sources}
 

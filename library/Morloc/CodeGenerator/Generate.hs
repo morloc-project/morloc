@@ -872,90 +872,69 @@ encode srcs (lang, xs) = do
 
 codify
   :: SAnno GMeta One (CType, [Argument])
-  -> MorlocMonad [Manifold]
-codify x = fmap fst $ codify' True x
+  -> MorlocMonad ExprM
+codify x = codify' True x
 
 -- | Make general manifolds. The goal is to do as much work as possible before
 -- invoking language-specific behaviour. Eventually manifold effects and
 -- control will be added here (caches, assertions, logging, visualization,
 -- etc). Following steps will extract assignments, handle serialization and
 -- schemas, and finally translate to executable code.
---
--- The return pair is 1) a list of complete manifolds emited by the given tree
--- expression and 2) a identifier for the tree. For example:
---
---   \x -> f 42 (g (1, x)) [1, 2, (h 9)]
---
--- would yield something like:
---
---  ( [ Manifold m0 (\x -> AppM f [42, AppM m1 [x], [1, 2, AppM m2 []]])
---    , Manifold m1 (\x -> AppM g (1, x))
---    , Manifold m2 (AppM h 9)
---    ]
---  , \x -> AppM m0 [x]
---  )
 codify'
   :: Bool
   -> SAnno GMeta One (CType, [Argument])
-  -> MorlocMonad ([Manifold], ExprM)
+  -> MorlocMonad ExprM
+
 -- primitives
-codify' _ (SAnno (One (UniS,   (c, _))) _) = return ([], NullM c)
-codify' _ (SAnno (One (NumS x, (c, _))) _) = return ([], (NumM c x))
-codify' _ (SAnno (One (LogS x, (c, _))) _) = return ([], (LogM c x))
-codify' _ (SAnno (One (StrS x, (c, _))) _) = return ([], (StrM c x))
--- list
+codify' _ (SAnno (One (UniS,   (c, _))) _) = return $ NullM (Unpacked c)
+codify' _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (Unpacked c) x
+codify' _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (Unpacked c) x
+codify' _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (Unpacked c) x
+
+-- containers
 codify' isTop s@(SAnno (One (ListS xs, (c, args))) m) = do
-  (mss, xs') <- fmap unzip (mapM (codify' False) xs)
-  let x = ListM c xs'
-  codifyContainer isTop mss x s
--- tuple
+  xs' <- mapM (codify' False) xs >>= mapM unpack
+  codifyContainer isTop (ListM (Unpacked c) xs') s
 codify' isTop s@(SAnno (One (TupleS xs, (c, args))) m) = do
-  (mss, xs') <- fmap unzip (mapM (codify' False) xs)
-  let x = TupleM c xs'
-  codifyContainer isTop mss x s
--- record
+  xs' <- mapM (codify' False) xs >>= mapM unpack
+  codifyContainer isTop (TupleM (Unpacked c) xs') s
 codify' isTop s@(SAnno (One (RecS es, (c, args))) m) = do
-  (mss, xs') <- fmap unzip (mapM (codify' False) (map snd es))
-  let x = RecordM c (zip (map fst es) xs')
-  codifyContainer isTop mss x s
+  xs' <- mapM (codify' False) (map snd es) >>= mapM unpack
+  let x' = RecordM (Unpacked c) (zip (map fst es) xs')
+  codifyContainer isTop x' s
+
 -- var
-codify' True (SAnno (One (VarS v, (c, args))) m) = return
-  ([Manifold (PackedReturn (metaId m) c) args (ReturnM $ VarM c v)], CisM c (metaId m) args)
-codify' False (SAnno (One (VarS v, (c, _))) _) =
-  return ([], VarM c v)
+codify' isTop (SAnno (One (VarS v, (c, args))) m) = do
+  t <- return $ case lookupArg v args of 
+    Nothing -> Unpacked c
+    (Just (PackedArgument v c)) -> Packed c
+    (Just (UnpackedArgument v c)) -> Unpacked c
+    (Just (PassThroughArgument v)) -> Passthrough
+  return $ if isTop
+           then Manifold t args (metaId m) (VarM t v)
+           else VarM t v
 
 -- app
-codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, _))) _) xs, (c, args))) m) = do
-  (mss', xs') <- mapM (codify' False) xs |>> unzip
-  f' <- case f of
-    (CallS src) -> return $ VarM fc (EVar . unName . srcName $ src)
-    (ForeignS mid lang vs) -> return $ TrsM c mid lang
-    (LamS vs x) -> error "Thinking of function factories fills you with determination"
-  let manifold = Manifold (UnpackedReturn (metaId m) c) args (ReturnM $ AppM c f' xs')
-      x' = if nargs c == 0
-           then AppM c (CisM c (metaId m) args) [] -- evaluates to a primitive
-           else CisM c (metaId m) args -- doesn't
-  return (manifold : concat mss', x')
+codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, fargs))) _) xs, (c, args))) m) = do
+  xs' <- mapM (codify' False) xs
+  x' <- case (f, typeParts fc) of 
+    (CallS src, (_, output)) -> CisAppM (Unpacked output) src <$> mapM unpack xs'
+    (ForeignS int lang _, (_, output)) -> TrsAppM (Packed output) int lang <$> mapM pack xs'
+    _ -> MM.throwError . OtherError $ "What the fuck?"
+  t <- typeOfExprM x'
+  return $ Manifold t args (metaId m) x'
 
 -- lambda
-codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = do
-  (ms, x') <- codify' False x
-  return (ms, LamM c (map Just vs) x')
+codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = undefined
 
 -- foreign call
-codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) =
-  return ([], TrsM c mid lang)
+codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = undefined
 
 -- domestic call, this is a call passed as an argument
-codify' _ (SAnno (One (CallS src, (c, _))) m) = do
-  let vs = map EVar $ freshVarsAZ []
-      (inputs, output) = typeParts c
-      args = zipWith UnpackedArgument vs inputs
-      f = VarM c (EVar (unName (srcName src)))
-      es = zipWith VarM inputs vs
-      call = AppM output f es
-      manifold = Manifold (UnpackedReturn (metaId m) output) args (ReturnM call)
-  return ([manifold], CisM c (metaId m) args)
+codify' _ (SAnno (One (CallS src, (c, _))) m) = undefined
+
+lookupArg :: EVar -> [Argument] -> Maybe Argument
+lookupArg v args = listToMaybe $ filter (\r -> argName r == v) args 
 
 -- get input types to a function type
 typeParts :: CType -> ([CType], CType)
@@ -967,22 +946,20 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
 
 codifyContainer
   :: Bool
-  -> [[Manifold]]
   -> ExprM
   -> SAnno GMeta One (CType, [Argument])
-  -> MorlocMonad ([Manifold], ExprM)
-codifyContainer isTop mss x (SAnno (One (_, (c, args))) m) =
+  -> MorlocMonad ExprM
+codifyContainer isTop x (SAnno (One (_, (c, args))) m) =
   if isTop
-    then return (Manifold (UnpackedReturn (metaId m) c) args (ReturnM x) : concat mss, x)
-    else return (concat mss, x)
+    then return $ Manifold (Unpacked c) args (metaId m) (ReturnM x)
+    else return x
 
-translate :: Lang -> [Source] -> [[Manifold]] -> MorlocMonad MDoc
-translate lang srcs mss = do
-  let callTrees = [CallTree m ms | (m:ms) <- mss]
+translate :: Lang -> [Source] -> [ExprM] -> MorlocMonad MDoc
+translate lang srcs es = do
   case lang of
-    CppLang -> Cpp.translate srcs callTrees
-    RLang -> R.translate srcs callTrees
-    Python3Lang -> Python3.translate srcs callTrees
+    CppLang -> Cpp.translate srcs es
+    RLang -> R.translate srcs es
+    Python3Lang -> Python3.translate srcs es
     x -> MM.throwError . OtherError . render
       $ "Language '" <> viaShow x <> "' has no translator"
 
@@ -1148,13 +1125,13 @@ partialApplyN i t
     appliedType <- partialApply t
     partialApplyN (i-1) appliedType
 
-pack :: Argument -> Argument
-pack (UnpackedArgument v t) = PackedArgument v t
-pack x = x
+packArg :: Argument -> Argument
+packArg (UnpackedArgument v t) = PackedArgument v t
+packArg x = x
 
-unpack :: Argument -> Argument
-unpack (PackedArgument v t) = UnpackedArgument v t
-unpack x = x
+unpackArg :: Argument -> Argument
+unpackArg (PackedArgument v t) = UnpackedArgument v t
+unpackArg x = x
 
 sannoSnd :: SAnno g One (a, b) -> b
 sannoSnd (SAnno (One (_, (_, x))) _) = x
