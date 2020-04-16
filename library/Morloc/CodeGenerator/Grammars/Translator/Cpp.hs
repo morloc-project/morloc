@@ -25,30 +25,33 @@ import qualified Morloc.Monad as MM
 
 
 translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
-translate srcs es = do 
-  -- translate sources
-  includeDocs <- mapM
-    translateSource
-    (unique . catMaybes . map srcPath $ srcs)
+translate = undefined
+-- translate srcs es = do
+--   -- translate sources
+--   includeDocs <- mapM
+--     translateSource
+--     (unique . catMaybes . map srcPath $ srcs)
+--
+--   -- tree rewrites
+--   es' <- mapM (invertExprM namer) es
+--
+--   -- diagnostics
+--   liftIO . putDoc $ (vsep $ map prettyExprM es')
+--
+--   -- translate each manifold tree, rooted on a call from nexus or another pool
+--   mDocs <- mapM translateManifold es'
+--
+--   let dispatch = makeDispatch es'
+--       signatures = map makeSignature es'
+--
+--   -- create and return complete pool script
+--   return $ makeMain includeDocs signatures mDocs dispatch
 
-  -- tree rewrites
-  es' <- mapM (invertExprM namer) es
+varNamer :: Int -> EVar
+varNamer i = EVar ("a" <> MT.show' i)
 
-  -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
-
-  -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM segmentExprM es' |>> concat >>= mapM translateManifold
-
-  let dispatch = makeDispatch es'
-      signatures = map makeSignature es'
-
-  -- create and return complete pool script
-  return $ makeMain includeDocs signatures mDocs dispatch
-
-
-namer :: Int -> EVar
-namer i = EVar ("a" <> MT.show' i)
+manNamer :: Int -> EVar
+manNamer i = EVar ("m" <> MT.show' i)
 
 serialType :: MDoc
 serialType = "std::string"

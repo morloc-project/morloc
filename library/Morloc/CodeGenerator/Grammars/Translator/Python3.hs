@@ -37,21 +37,26 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- tree rewrites
-  es' <- mapM (invertExprM namer) es
+  es' <- mapM (invertExprM varNamer) es
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es')
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM segmentExprM es' |>> concat >>= mapM translateManifold
+  mDocs <- mapM translateManifold es'
 
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es'
 
   return $ makePool lib includeDocs mDocs dispatch
 
-namer :: Int -> EVar
-namer i = EVar ("a" <> MT.show' i)
+-- create an internal variable based on a unique id
+varNamer :: Int -> EVar
+varNamer i = EVar ("a" <> MT.show' i)
+
+-- create a name for a manifold based on a unique id
+manNamer :: Int -> EVar
+manNamer i = EVar ("m" <> MT.show' i)
 
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
@@ -66,52 +71,56 @@ translateSource (Path s) = do
            $ s
   return $ "from" <+> mod <+> "import *"
 
+-- break a call tree into manifolds
 translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold (Manifold t args i e) = do
-  body <- translateExpr e
-  let head = "def" <+> "m" <> viaShow i <> tupled (map makeArgument args) <> ":"
-  return $ nest 4 (vsep [head, body])
-  where
-  translateExpr :: ExprM -> MorlocMonad MDoc
-  translateExpr (LetM v e1 e2) = do
-    e1' <- translateExpr e1
-    e2' <- translateExpr e2
-    return $ pretty v <+> "=" <+> e1' <> line <> e2'
-  translateExpr (LamM c mv e) = do
-    e' <- translateExpr e
+translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f args m where
+  f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
+  f _ (Manifold t args i e) = do
+    (ms', body) <- f args e
+    let head = "def" <+> pretty (manNamer i) <> tupled (map makeArgument args) <> ":"
+        mdoc = nest 4 (vsep [head, body])
+    return (mdoc : ms', pretty (manNamer i))
+  f args (LetM v e1 e2) = do
+    (ms1', e1') <- (f args) e1
+    (ms2', e2') <- (f args) e2
+    return (ms1' ++ ms2', pretty v <+> "=" <+> e1' <> line <> e2')
+  f args (CisAppM c src xs) = do
+    (mss', xs') <- mapM (f args) xs |>> unzip
+    return (concat mss', pretty (srcName src) <> tupled xs')
+  f args (TrsAppM c i lang xs) = return ([], "FOREIGN")
+  f args (LamM c mv e) = do
+    (ms', e') <- f args e
     let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
                      (zipWith (<>) (repeat "p") (map viaShow [1..]))
-    return $ "lambda " <+> hsep (punctuate "," vs) <> ":" <+> e' <> tupled vs
-  translateExpr (VarM c v) = return (pretty v)
-  translateExpr (CisAppM c src xs) = do
-    xs' <- mapM translateExpr xs
-    return $ pretty (srcName src) <> tupled xs'
-  translateExpr (TrsAppM c i lang xs) = return "FOREIGN"
-  translateExpr (ListM _ es) = do
-    es' <- mapM translateExpr es
-    return $ list es'
-  translateExpr (TupleM _ es) = do
-    es' <- mapM translateExpr es
-    return $ tupled es'
-  translateExpr (RecordM c entries) = do
-    es' <- mapM (translateExpr . snd) entries
+    return (ms', "lambda " <+> hsep (punctuate "," vs) <> ":" <+> e' <> tupled vs)
+  f args (ListM _ es) = do
+    (mss', es') <- mapM (f args) es |>> unzip
+    return (concat mss', list es')
+  f args (TupleM _ es) = do
+    (mss', es') <- mapM (f args) es |>> unzip
+    return (concat mss', tupled es')
+  f args (RecordM c entries) = do
+    (mss', es') <- mapM (f args . snd) entries |>> unzip
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return $ "dict" <> tupled entries'
-  translateExpr (LogM c x) = return $ if x then "True" else "False"
-  translateExpr (NumM c x) = return $ viaShow x
-  translateExpr (StrM c x) = return . dquotes $ pretty x
-  translateExpr (NullM c) = return "None"
-  translateExpr (PackM e) = do
-    e' <- translateExpr e
+    return (concat mss', "dict" <> tupled entries')
+  f _ (VarM c v) = return ([], pretty v)
+  f _ (LogM _ x) = return ([], if x then "True" else "False")
+  f _ (NumM _ x) = return ([], viaShow x)
+  f _ (StrM _ x) = return ([], dquotes $ pretty x)
+  f _ (NullM _) = return ([], "None")
+  f args (PackM e) = do
+    (ms, e') <- f args e
     (Unpacked t) <- typeOfExprM e
-    return $ "pack" <> tupled [e', typeSchema t]
-  translateExpr (UnpackM e) = do
-    e' <- translateExpr e
+    return (ms, "pack" <> tupled [e', typeSchema t])
+  f args (UnpackM e) = do
+    (ms, e') <- f args e
     (Packed t) <- typeOfExprM e
-    return $ "unpack" <> tupled [e', typeSchema t]
-  translateExpr (ReturnM e) = do
-    e' <- translateExpr e
-    return $ "return(" <> e' <> ")"
+    return (ms, "unpack" <> tupled [e', typeSchema t])
+  f args (ReturnM e) = do
+    (ms, e') <- f args e
+    return (ms, "return(" <> e' <> ")")
+
+
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v
