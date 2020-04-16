@@ -911,7 +911,7 @@ codify' isTop (SAnno (One (VarS v, (c, args))) m) = do
     (Just (UnpackedArgument v c)) -> Unpacked c
     (Just (PassThroughArgument v)) -> Passthrough
   return $ if isTop
-           then Manifold t args (metaId m) (VarM t v)
+           then Manifold t args (metaId m) (ReturnM $ VarM t v)
            else VarM t v
 
 -- app
@@ -922,16 +922,16 @@ codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, fargs))) _) xs, (c, args))) m) 
     (ForeignS int lang _, (_, output)) -> TrsAppM (Packed output) int lang <$> mapM pack xs'
     _ -> MM.throwError . OtherError $ "What the fuck?"
   t <- typeOfExprM x'
-  return $ Manifold t args (metaId m) x'
+  return $ Manifold t args (metaId m) (ReturnM x')
 
 -- lambda
-codify' _ (SAnno (One (LamS vs x@(SAnno _ m), (c, args))) _) = undefined
+codify' _ (SAnno (One (LamS _ x, _)) _) = codify' True x
 
 -- foreign call
-codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = undefined
+codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = error "FOREIGN CALL NOT SUPPORTED"
 
 -- domestic call, this is a call passed as an argument
-codify' _ (SAnno (One (CallS src, (c, _))) m) = undefined
+codify' _ (SAnno (One (CallS src, (c, _))) m) = return $ VarM (Packed c) (EVar "__CallS__")
 
 lookupArg :: EVar -> [Argument] -> Maybe Argument
 lookupArg v args = listToMaybe $ filter (\r -> argName r == v) args 

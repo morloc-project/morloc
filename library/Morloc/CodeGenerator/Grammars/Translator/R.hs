@@ -36,7 +36,7 @@ translate srcs es = do
   liftIO . putDoc $ (vsep $ map prettyExprM es')
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateExpr es'
+  mDocs <- mapM segmentExprM es' |>> concat >>= mapM translateManifold
 
   return $ makePool includeDocs mDocs
 
@@ -66,8 +66,8 @@ typeSchema c = f (unCType c)
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
-translateExpr :: ExprM -> MorlocMonad MDoc
-translateExpr = undefined
+translateManifold :: ExprM -> MorlocMonad MDoc
+translateManifold = undefined
 -- translateExpr args (LetM v e1 e2) = do
 --   e1' <- translateExpr args e1
 --   e2' <- translateExpr args e2

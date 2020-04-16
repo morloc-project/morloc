@@ -38,7 +38,7 @@ translate srcs es = do
   liftIO . putDoc $ (vsep $ map prettyExprM es')
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateExpr es'
+  mDocs <- mapM segmentExprM es' |>> concat >>= mapM translateManifold
 
   let dispatch = makeDispatch es'
       signatures = map makeSignature es'
@@ -86,8 +86,8 @@ translateSource
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
-translateExpr :: ExprM -> MorlocMonad MDoc
-translateExpr = undefined
+translateManifold :: ExprM -> MorlocMonad MDoc
+translateManifold = undefined
 -- translateExpr args (LetM v (PackM e1) e2) = do
 --   e1' <- translateExpr args e1
 --   e2' <- translateExpr args e2

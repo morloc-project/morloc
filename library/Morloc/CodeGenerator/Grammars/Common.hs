@@ -22,6 +22,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyExprM
   , typeOfExprM
   , invertExprM
+  , segmentExprM
   , pack
   , unpack
   ) where
@@ -154,29 +155,29 @@ data ExprM
   deriving(Show, Ord, Eq)
 
 prettyExprM :: ExprM -> MDoc
-prettyExprM = undefined
--- prettyExprM (Manifold _ args i e) = undefined
--- prettyExprM (LetM v e1 e2) = pretty v <+> "=" <+> prettyExprM e1 <> line <> prettyExprM e2
--- prettyExprM (CisAppM _ f xs) = prettyExprM f <+> tupled (map prettyExprM xs)
--- prettyExprM (TrsAppM _ _ f xs) = "foreign_call" <> tupled (prettyExprM f : map prettyExprM xs)
--- prettyExprM (LamM _ mvs e) = "\\" <> hsep prettyVs <+> "->" <+> prettyExprM e
---   where
---     prettyVs = zipWith (\i v -> maybe ("_" <> viaShow i) pretty v) [0..] mvs
--- prettyExprM (VarM _ v) = pretty v
--- prettyExprM (ListM c es) = encloseSep "[" "]" "," (map prettyExprM es)
--- prettyExprM (TupleM c es) = tupled (map prettyExprM es)
--- prettyExprM (RecordM c entries) =
---   encloseSep "{" "}" ";" (map (\(k,e) -> pretty k <+> "=" <+> prettyExprM e) entries)
--- prettyExprM (LogM c x) = if x then "true" else "false"
--- prettyExprM (NumM c x) = viaShow x
--- prettyExprM (StrM c x) = dquotes (pretty x)
--- prettyExprM (NullM c) = "Null"
--- prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
--- prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
--- prettyExprM (ReturnM e) = "RETURN(" <> prettyExprM e <> ")"
+prettyExprM (Manifold _ args i e) =
+  block 4 ("m" <> viaShow i <> tupled (map prettyArgument args)) (prettyExprM e)
+prettyExprM (LetM v e1 e2) = pretty v <+> "=" <+> prettyExprM e1 <> line <> prettyExprM e2
+prettyExprM (CisAppM _ src xs) = pretty (srcAlias src) <+> tupled (map prettyExprM xs)
+prettyExprM (TrsAppM _ i _ xs) = "foreign_call" <> tupled ("m" <> viaShow i : map prettyExprM xs)
+prettyExprM (LamM _ mvs e) = "\\" <> hsep prettyVs <+> "->" <+> prettyExprM e
+  where
+    prettyVs = zipWith (\i v -> maybe ("_" <> viaShow i) pretty v) [0..] mvs
+prettyExprM (VarM _ v) = pretty v
+prettyExprM (ListM c es) = encloseSep "[" "]" "," (map prettyExprM es)
+prettyExprM (TupleM c es) = tupled (map prettyExprM es)
+prettyExprM (RecordM c entries) =
+  encloseSep "{" "}" ";" (map (\(k,e) -> pretty k <+> "=" <+> prettyExprM e) entries)
+prettyExprM (LogM c x) = if x then "true" else "false"
+prettyExprM (NumM c x) = viaShow x
+prettyExprM (StrM c x) = dquotes (pretty x)
+prettyExprM (NullM c) = "Null"
+prettyExprM (PackM e) = "PACK(" <> prettyExprM e <> ")"
+prettyExprM (UnpackM e) = "UNPACK(" <> prettyExprM e <> ")"
+prettyExprM (ReturnM e) = "RETURN(" <> prettyExprM e <> ")"
 
 invertExprM :: (Int -> EVar) -> ExprM -> MorlocMonad ExprM
-invertExprM = undefined
+invertExprM namer e = return e 
 -- invertExprM namer e = invert e where
 --   invert (Manifold t args i e) = do
 --     MM.startCounter
@@ -239,6 +240,47 @@ dependsOn x _ = x
 terminalOf :: ExprM -> ExprM
 terminalOf (LetM _ _ e) = terminalOf e
 terminalOf e = e
+
+
+-- break a call tree into manifolds
+segmentExprM :: ExprM -> MorlocMonad [ExprM]
+segmentExprM e = fst <$> f e where
+  f :: ExprM -> MorlocMonad ([ExprM], ExprM)
+  f (Manifold t args i e) = do
+    (ms', e') <- f e
+    return (Manifold t args i e' : ms', VarM t (EVar "__MANIFOLD__")) 
+  f (LetM v e1 e2) = do
+    (ms1, e1') <- f e1
+    (ms2, e2') <- f e2
+    return (ms1 ++ ms2, LetM v e1' e2')
+  f (CisAppM t src xs) = do
+    (mss, xs') <- mapM f xs |>> unzip
+    return (concat mss, CisAppM t src xs')
+  f (TrsAppM t i lang xs) = do
+    (mss, xs') <- mapM f xs |>> unzip
+    return (concat mss, TrsAppM t i lang xs')
+  f (LamM t mvs e) = do
+    (ms, e') <- f e
+    return (ms, LamM t mvs e')
+  f (ListM t xs) = do
+    (mss, xs') <- mapM f xs |>> unzip
+    return (concat mss, ListM t xs')
+  f (TupleM t xs) = do
+    (mss, xs') <- mapM f xs |>> unzip
+    return (concat mss, TupleM t xs')
+  f (RecordM t entries) = do
+    (mss, xs') <- mapM f (map snd entries) |>> unzip
+    return (concat mss, RecordM t (zip (map fst entries) xs'))
+  f (PackM e) = do
+    (ms, e') <- f e
+    return (ms, PackM e')
+  f (UnpackM e) = do
+    (ms, e') <- f e
+    return (ms, UnpackM e')
+  f (ReturnM e) = do
+    (ms, e') <- f e
+    return (ms, ReturnM e')
+  f x = return ([], x)
 
 -- Get the type of an expression
 -- Serialization is ignored
