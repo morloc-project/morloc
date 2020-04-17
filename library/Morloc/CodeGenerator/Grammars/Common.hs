@@ -24,6 +24,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , invertExprM
   , pack
   , unpack
+  , nargsTypeM
   ) where
 
 import Morloc.Data.Doc
@@ -152,6 +153,11 @@ data ExprM
                   -- in let expressions and the final return value. In some
                   -- languages, this may not be necessary.
   deriving(Show, Ord, Eq)
+
+
+nargsTypeM :: TypeM -> Int
+nargsTypeM (Function ts _) = length ts
+nargsTypeM _ = 0
 
 prettyExprM :: ExprM -> MDoc
 prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where

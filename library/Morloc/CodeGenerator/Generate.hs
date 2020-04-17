@@ -61,9 +61,6 @@ generate ms = do
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
-  -- print abstract syntax trees to the console as debugging message
-  say $ line <> indent 2 (vsep (map (writeAST id Nothing) rASTs))
-
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
@@ -79,6 +76,10 @@ generate ms = do
 
   -- find all sources files
   let srcs = unique . concat $ map (map snd . Map.assocs . moduleSourceMap) ms
+
+  withArgs <- mapM parameterize rASTs
+  -- print abstract syntax trees to the console as debugging message
+  say $ line <> indent 2 (vsep (map (writeAST fst (Just (list . map prettyArgument . snd))) withArgs))
 
   -- for each language, collect all functions into one "pool"
   pools
@@ -873,7 +874,12 @@ encode srcs (lang, xs) = do
 codify
   :: SAnno GMeta One (CType, [Argument])
   -> MorlocMonad ExprM
-codify x = codify' True x
+codify x0 = do
+  x1 <- codify' True x0
+  case x1 of
+    (Manifold t args i (ReturnM x2)) -> return $
+      Manifold t args i (ReturnM (PackM x2))
+    _ -> MM.throwError . OtherError $ "Malformed ExprM: " <> MT.show' x1
 
 -- | Make general manifolds. The goal is to do as much work as possible before
 -- invoking language-specific behaviour. Eventually manifold effects and
@@ -915,11 +921,13 @@ codify' isTop (SAnno (One (VarS v, (c, args))) m) = do
            else VarM t v
 
 -- app
-codify' _ (SAnno (One (AppS (SAnno (One (f, (fc, fargs))) _) xs, (c, args))) m) = do
+codify' isTop (SAnno (One (AppS (SAnno (One (f, (fc, fargs))) _) xs, (c, args))) m) = do
   xs' <- mapM (codify' False) xs
   x' <- case (f, typeParts fc) of 
-    (CallS src, (_, output)) -> CisAppM (Unpacked output) src <$> mapM unpack xs'
-    (ForeignS int lang _, (_, output)) -> TrsAppM (Packed output) int lang <$> mapM pack xs'
+    (CallS src, (_, output)) ->
+      CisAppM (Unpacked output) src <$> mapM unpack xs'
+    (ForeignS int lang _, (_, output)) ->
+      TrsAppM (Packed output) int lang <$> mapM pack xs'
     _ -> MM.throwError . OtherError $ "What the fuck?"
   t <- typeOfExprM x'
   return $ Manifold t args (metaId m) (ReturnM x')
@@ -931,7 +939,8 @@ codify' _ (SAnno (One (LamS _ x, _)) _) = codify' True x
 codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = error "FOREIGN CALL NOT SUPPORTED"
 
 -- domestic call, this is a call passed as an argument
-codify' _ (SAnno (One (CallS src, (c, _))) m) = return $ VarM (Packed c) (EVar "__CallS__")
+codify' _ (SAnno (One (CallS src, (c, _))) m) =
+  return $ VarM (Unpacked c) (EVar . unName . srcName $ src)
 
 lookupArg :: EVar -> [Argument] -> Maybe Argument
 lookupArg v args = listToMaybe $ filter (\r -> argName r == v) args 

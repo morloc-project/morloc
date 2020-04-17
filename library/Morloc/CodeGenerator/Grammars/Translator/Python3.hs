@@ -62,24 +62,28 @@ manNamer i = EVar ("m" <> MT.show' i)
 translateSource :: Path -> MorlocMonad MDoc
 translateSource (Path s) = do
   (Path lib) <- MM.asks configLibrary
-  let mod =  pretty
-           . MT.liftToText (map DC.toLower)
-           . MT.replace "/" "."
-           . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
-           . MT.stripPrefixIfPresent lib  -- make the path relative to the library
-           . MT.liftToText SF.dropExtensions
-           $ s
+  let mod = pretty
+          . MT.liftToText (map DC.toLower)
+          . MT.replace "/" "."
+          . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+          . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+          . MT.liftToText SF.dropExtensions
+          $ s
   return $ "from" <+> mod <+> "import *"
 
 -- break a call tree into manifolds
 translateManifold :: ExprM -> MorlocMonad MDoc
 translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f args m where
   f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f _ (Manifold t args i e) = do
+  f pargs (Manifold t args i e) = do
     (ms', body) <- f args e
     let head = "def" <+> pretty (manNamer i) <> tupled (map makeArgument args) <> ":"
         mdoc = nest 4 (vsep [head, body])
-    return (mdoc : ms', pretty (manNamer i))
+        mname = pretty (manNamer i)
+    call <- return $ case (splitArgs args pargs, nargsTypeM t) of
+      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      ((rs, vs), _) -> makeLambda (rs ++ vs) (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    return (mdoc : ms', call)
   f args (LetM v e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
@@ -120,7 +124,17 @@ translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f 
     (ms, e') <- f args e
     return (ms, "return(" <> e' <> ")")
 
+-- divide a list of arguments based on wheither they are in a second list
+splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
+splitArgs args1 args2 = partitionEithers $ map split args1 where
+  split :: Argument -> Either Argument Argument
+  split r = if elem r args2
+            then Left r
+            else Right r
 
+
+makeLambda :: [Argument] -> MDoc -> MDoc
+makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v
@@ -144,7 +158,7 @@ typeSchema c = f (unCType c)
     f (VarT v) = lst [var v, "None"]
     f (ArrT v ps) = lst [var v, lst (map f ps)]
     f (NamT v es) = lst [var v, dict (map entry es)]
-    f _ = error "Cannot serialize this type"
+    f t = error $ "Cannot serialize this type: " ++ show t
 
     entry :: (MT.Text, Type) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
