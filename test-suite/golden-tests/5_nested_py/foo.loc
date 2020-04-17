@@ -1,3 +1,0 @@
-import pybase (map, mul)
-export foo
-foo x ys = map (mul x) ys;

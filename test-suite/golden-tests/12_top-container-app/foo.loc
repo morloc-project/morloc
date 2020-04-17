@@ -1,4 +1,0 @@
-import math (sqrt)
-export foo
-
-foo x = (x, sqrt x);

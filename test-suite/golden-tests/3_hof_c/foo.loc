@@ -1,4 +1,0 @@
-import cppbase (zipWith, mul)
-
-export foo
-foo xs ys = zipWith mul xs ys;

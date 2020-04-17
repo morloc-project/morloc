@@ -1,4 +1,0 @@
-import pybase (add)
-
-export foo
-foo x = add x 42;

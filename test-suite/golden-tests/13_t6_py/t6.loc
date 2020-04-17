@@ -1,3 +1,0 @@
-import pybase (div)
-export foo
-foo x = (True, div 4 x);

@@ -1,4 +1,0 @@
-import cppbase (map, mul)
-
-export double
-double xs = map (mul 2) xs;

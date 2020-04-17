@@ -1,4 +1,0 @@
-import cppbase (add)
-
-export foo
-foo x = add x 42;

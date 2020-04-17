@@ -1,4 +1,0 @@
-import cppbase (add, mul)
-
-export foo
-foo x = add x (mul 2 21);
