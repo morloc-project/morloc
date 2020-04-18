@@ -214,56 +214,60 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     in (ms, "RETURN(" <> e' <> ")")
 
 
-
 invertExprM :: (Int -> EVar) -> ExprM -> MorlocMonad ExprM
-invertExprM namer e = return e 
--- invertExprM namer e = invert e where
---   invert (Manifold t args i e) = do
---     MM.startCounter
---     e' <- invert e
---     return $ Manifold t args i e'
---   invert e@(LetM v e1 e2) = return e
---   invert (AppM c f es) = do
---     f' <- invert f
---     es' <- mapM invert es
---     v <- MM.getCounter |>> namer
---     let e = LetM v (AppM c (terminalOf f') (map terminalOf es')) (VarM c v)
---         e' = foldl (\x y -> dependsOn x y) e (f' : es')
---     return e'
---   -- you can't pull the body of the lambda out into a let statement
---   invert f@(LamM _ _ _) = return f
---   invert (ListM c es) = do
---     es' <- mapM invert es
---     v <- MM.getCounter |>> namer
---     let e = LetM v (ListM c (map terminalOf es')) (VarM c v)
---         e' = foldl (\x y -> dependsOn x y) e es'
---     return e'
---   invert (TupleM c es) = do
---     es' <- mapM invert es
---     v <- MM.getCounter |>> namer
---     let e = LetM v (TupleM c (map terminalOf es')) (VarM c v)
---         e' = foldl (\x y -> dependsOn x y) e es'
---     return e'
---   invert (RecordM c entries) = do
---     es' <- mapM invert (map snd entries)
---     v <- MM.getCounter |>> namer
---     let entries' = zip (map fst entries) (map terminalOf es')
---         e = LetM v (RecordM c entries') (VarM c v)
---         e' = foldl (\x y -> dependsOn x y) e es'
---     return e'
---   invert (PackM e) = do
---     e' <- invert e
---     v <- MM.getCounter |>> namer
---     return $ dependsOn (LetM v (PackM (terminalOf e')) (VarM (typeOfExprM e) v)) e'
---   invert (UnpackM e) = do
---     e' <- invert e
---     v <- MM.getCounter |>> namer
---     return $ dependsOn (LetM v (UnpackM (terminalOf e')) (VarM (typeOfExprM e) v)) e'
---   invert (ReturnM e) = do
---     e' <- invert e
---     return $ dependsOn (ReturnM (terminalOf e')) e'
---   -- VarM LogM NumM StrM NullM
---   invert e = return e
+invertExprM namer e = invert e where
+  invert (Manifold t args i e) = do
+    MM.startCounter
+    e' <- invert e
+    return $ Manifold t args i e'
+  invert (CisAppM c src es) = do
+    es' <- mapM invert es
+    v <- MM.getCounter |>> namer
+    let e = LetM v (CisAppM c src (map terminalOf es')) (VarM c v)
+        e' = foldl (\x y -> dependsOn x y) e es'
+    return e'
+  invert (TrsAppM c i lang es) = do
+    es' <- mapM invert es
+    v <- MM.getCounter |>> namer
+    let e = LetM v (TrsAppM c i lang (map terminalOf es')) (VarM c v)
+        e' = foldl (\x y -> dependsOn x y) e es'
+    return e'
+  -- you can't pull the body of the lambda out into a let statement
+  invert f@(LamM _ _ _) = return f
+  invert (ListM c es) = do
+    es' <- mapM invert es
+    v <- MM.getCounter |>> namer
+    let e = LetM v (ListM c (map terminalOf es')) (VarM c v)
+        e' = foldl (\x y -> dependsOn x y) e es'
+    return e'
+  invert (TupleM c es) = do
+    es' <- mapM invert es
+    v <- MM.getCounter |>> namer
+    let e = LetM v (TupleM c (map terminalOf es')) (VarM c v)
+        e' = foldl (\x y -> dependsOn x y) e es'
+    return e'
+  invert (RecordM c entries) = do
+    es' <- mapM invert (map snd entries)
+    v <- MM.getCounter |>> namer
+    let entries' = zip (map fst entries) (map terminalOf es')
+        e = LetM v (RecordM c entries') (VarM c v)
+        e' = foldl (\x y -> dependsOn x y) e es'
+    return e'
+  invert (PackM e) = do
+    e' <- invert e
+    v <- MM.getCounter |>> namer
+    t' <- typeOfExprM e
+    return $ dependsOn (LetM v (PackM (terminalOf e')) (VarM t' v)) e'
+  invert (UnpackM e) = do
+    e' <- invert e
+    v <- MM.getCounter |>> namer
+    t' <- typeOfExprM e
+    return $ dependsOn (LetM v (UnpackM (terminalOf e')) (VarM t' v)) e'
+  invert (ReturnM e) = do
+    e' <- invert e
+    return $ dependsOn (ReturnM (terminalOf e')) e'
+  -- VarM LogM NumM StrM NullM LetM
+  invert e = return e
 
 -- transfer all let-dependencies from y to x
 --
