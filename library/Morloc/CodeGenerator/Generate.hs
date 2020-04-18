@@ -877,8 +877,9 @@ codify
 codify x0 = do
   x1 <- codify' True x0
   case x1 of
-    (Manifold t args i (ReturnM x2)) -> return $
-      Manifold t args i (ReturnM (PackM x2))
+    (Manifold t args i (ReturnM x2)) -> do
+      t' <- packTypeM t
+      return $ Manifold t' args i (ReturnM (PackM x2))
     _ -> MM.throwError . OtherError $ "Malformed ExprM: " <> MT.show' x1
 
 -- | Make general manifolds. The goal is to do as much work as possible before

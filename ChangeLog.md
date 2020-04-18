@@ -25,6 +25,7 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] address all compiler warnings
  - [ ] add linter
+ - [ ] resurrect property tests
 
 
 0.22.0-pre [2020.04.xx]
@@ -42,7 +43,6 @@ Minor changes
  - [x] add default library and tmp paths to config handler
  - [x] test composable serialization functions in all supported languages
  - [x] allow wrapped comments in R
- - [ ] resurrect property tests
 
 Testing - grammar directed testing
  - [.] test record handling

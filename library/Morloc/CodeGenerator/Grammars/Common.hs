@@ -23,7 +23,9 @@ module Morloc.CodeGenerator.Grammars.Common
   , typeOfExprM
   , invertExprM
   , pack
+  , packTypeM
   , unpack
+  , unpackTypeM
   , nargsTypeM
   ) where
 
