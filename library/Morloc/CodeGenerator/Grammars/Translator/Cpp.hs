@@ -303,10 +303,10 @@ makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
 showType :: CType -> MDoc
 showType = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc
-  mkfun _ _ = error "Function type annotations not supported in C++"
+  mkfun _ _ = "FUNCTION_TYPE"
 
   mkrec :: [(MDoc, MDoc)] -> MDoc
-  mkrec _ = error "Record type annotations not supported in C++"
+  mkrec _ = "RECORD_TYPE"
 
 showTypeM :: TypeM -> MDoc
 showTypeM Null = error "For now, the Null TypeM is not in use, so WTF?"

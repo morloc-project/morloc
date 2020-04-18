@@ -941,7 +941,18 @@ codify' _ (SAnno (One (ForeignS mid lang vs, (c, args))) m) = error "FOREIGN CAL
 
 -- domestic call, this is a call passed as an argument
 codify' _ (SAnno (One (CallS src, (c, _))) m) =
-  return $ VarM (Unpacked c) (EVar . unName . srcName $ src)
+  case typeParts c of
+    (inputs, output) -> do
+      let vs = take (length inputs) (map EVar (freshVarsAZ []))
+          args = zipWith UnpackedArgument vs inputs
+          es = zipWith VarM (map toTypeM inputs) vs
+          x = ReturnM (CisAppM (Unpacked output) src es)
+      return $ Manifold (Unpacked output) args (metaId m) x
+  where
+    toTypeM :: CType -> TypeM
+    toTypeM c@(CType (FunT _ _)) = case typeParts c of
+      (inputs, output) -> Function (map toTypeM inputs) (toTypeM output)
+    toTypeM c = Unpacked c
 
 lookupArg :: EVar -> [Argument] -> Maybe Argument
 lookupArg v args = listToMaybe $ filter (\r -> argName r == v) args 
