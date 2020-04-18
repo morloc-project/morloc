@@ -114,9 +114,9 @@ translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f 
         mdoc = block 4 head body
         mname = pretty (manNamer i)
     call <- return $ case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      ((rs, []), _) -> mname <> tupled (map (pretty . argName) rs) -- covers #1, #2 and #4
       (([], vs), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map (pretty . argName) (rs ++ vs))) -- covers #5
     return (mdoc : ms', call)
 
   f args (LetM v (PackM e1) e2) = do
