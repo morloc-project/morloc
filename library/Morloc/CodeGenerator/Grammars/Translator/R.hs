@@ -23,22 +23,22 @@ import qualified Morloc.Data.Text as MT
 
 
 translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
-translate srcs es = undefined
-  -- -- translate sources
-  -- includeDocs <- mapM
-  --   translateSource
-  --   (unique . catMaybes . map srcPath $ srcs)
-  --
-  -- -- tree rewrites
-  -- es' <- mapM (invertExprM namer) es
-  --
-  -- -- diagnostics
-  -- liftIO . putDoc $ (vsep $ map prettyExprM es')
-  --
-  -- -- translate each manifold tree, rooted on a call from nexus or another pool
-  -- mDocs <- mapM translateManifold es'
-  --
-  -- return $ makePool includeDocs mDocs
+translate srcs es = do
+  -- translate sources
+  includeDocs <- mapM
+    translateSource
+    (unique . catMaybes . map srcPath $ srcs)
+
+  -- tree rewrites
+  es' <- mapM (invertExprM varNamer) es
+
+  -- diagnostics
+  liftIO . putDoc $ (vsep $ map prettyExprM es')
+
+  -- translate each manifold tree, rooted on a call from nexus or another pool
+  mDocs <- mapM translateManifold es'
+
+  return $ makePool includeDocs mDocs
 
 varNamer :: Int -> EVar
 varNamer i = EVar ("a" <> MT.show' i)
@@ -69,57 +69,77 @@ typeSchema c = f (unCType c)
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
+-- break a call tree into manifolds
 translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold = undefined
--- translateExpr args (LetM v e1 e2) = do
---   e1' <- translateExpr args e1
---   e2' <- translateExpr args e2
---   return $ pretty v <+> "<-" <+> e1' <> line <> e2'
--- translateExpr args (AppM c f es) = do
---   f' <- translateExpr args f
---   es' <- mapM (translateExpr args) es
---   return $ f' <> tupled es' <> " # AppM :: " <> prettyType c
--- translateExpr args (AppM c f@(CisM c' i args') es) = error "FUCK"
--- translateExpr args (LamM c mv e) = do
---   e' <- translateExpr args e
---   let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
---                    (zipWith (<>) (repeat "p") (map viaShow [1..]))
---   return $ "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}"
--- translateExpr args (VarM c v) = return (pretty v)
--- translateExpr args (CisM c i args') = return $ "m" <> viaShow i
---   -- return $ case nargs c of
---   --   0 -> "m" <> viaShow i
---   --            <> tupled (map (pretty . argName) args') <+> "# CisM :: " <> prettyType c
---   --   i -> translateExpr args (LamM [
---   -- where
--- translateExpr args (TrsM c i lang) = return "FOREIGN"
--- translateExpr args (ListM _ es) = do
---   es' <- mapM (translateExpr args) es
---   return $ list es'
--- translateExpr args (TupleM _ es) = do
---   es' <- mapM (translateExpr args) es
---   return $ tupled es'
--- translateExpr args (RecordM c entries) = do
---   es' <- mapM (translateExpr args . snd) entries
---   let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
---   return $ "dict" <> tupled entries'
--- translateExpr args (LogM c x) = return $ if x then "TRUE" else "FALSE"
--- translateExpr args (NumM c x) = return $ viaShow x
--- translateExpr args (StrM c x) = return . dquotes $ pretty x
--- translateExpr args (NullM c) = return "NULL"
--- translateExpr args (PackM e) = do
---   e' <- translateExpr args e
---   let c = typeOfExprM e
---       schema = typeSchema c
---   return $ "pack" <> tupled [e', schema]
--- translateExpr args (UnpackM e) = do
---   e' <- translateExpr args e
---   let c = typeOfExprM e
---       schema = typeSchema c
---   return $ "unpack" <> tupled [e', schema]
--- translateExpr args (ReturnM e) = do
---   e' <- translateExpr args e
---   return $ "return(" <> e' <> ")"
+translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f args m where
+  f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
+  f pargs (Manifold t args i e) = do
+    (ms', body) <- f args e
+    let head = pretty (manNamer i) <+> "<- function" <> tupled (map makeArgument args)
+        mdoc = block 4 head body
+        mname = pretty (manNamer i)
+    call <- return $ case (splitArgs args pargs, nargsTypeM t) of
+      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      (([], vs), _) -> mname
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    return (mdoc : ms', call)
+  f args (LetM v e1 e2) = do
+    (ms1', e1') <- (f args) e1
+    (ms2', e2') <- (f args) e2
+    return (ms1' ++ ms2', pretty v <+> "<-" <+> e1' <> line <> e2')
+  f args (CisAppM c src xs) = do
+    (mss', xs') <- mapM (f args) xs |>> unzip
+    return (concat mss', pretty (srcName src) <> tupled xs')
+  f args (TrsAppM c i lang xs) = return ([], "FOREIGN")
+  f args (LamM c mv e) = do
+    (ms', e') <- f args e
+    let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
+                     (zipWith (<>) (repeat "p") (map viaShow [1..]))
+    return (ms', "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}")
+  f args (ListM t es) = do
+    (mss', es') <- mapM (f args) es |>> unzip
+    x' <- return $ case t of
+      (Unpacked (CType (ArrT _ [VarT et]))) -> case et of       
+        (TV _ "numeric") -> "c" <> tupled es'
+        (TV _ "logical") -> "c" <> tupled es'
+        (TV _ "character") -> "c" <> tupled es'
+        _ -> "list" <> tupled es'
+      _ -> "list" <> tupled es'
+    return (concat mss', x')
+  f args (TupleM _ es) = do
+    (mss', es') <- mapM (f args) es |>> unzip
+    return (concat mss', "list" <> tupled es')
+  f args (RecordM c entries) = do
+    (mss', es') <- mapM (f args . snd) entries |>> unzip
+    let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+    return (concat mss', "list" <> tupled entries')
+  f _ (VarM c v) = return ([], pretty v)
+  f _ (LogM _ x) = return ([], if x then "TRUE" else "FALSE")
+  f _ (NumM _ x) = return ([], viaShow x)
+  f _ (StrM _ x) = return ([], dquotes $ pretty x)
+  f _ (NullM _) = return ([], "NULL")
+  f args (PackM e) = do
+    (ms, e') <- f args e
+    (Unpacked t) <- typeOfExprM e
+    return (ms, "pack" <> tupled [e', typeSchema t])
+  f args (UnpackM e) = do
+    (ms, e') <- f args e
+    (Packed t) <- typeOfExprM e
+    return (ms, "unpack" <> tupled [e', typeSchema t])
+  f args (ReturnM e) = do
+    (ms, e') <- f args e
+    return (ms, e')
+
+makeLambda :: [Argument] -> MDoc -> MDoc
+makeLambda args body = "function" <+> tupled (map makeArgument args) <> "{" <> body <> "}"
+
+-- divide a list of arguments based on wheither they are in a second list
+splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
+splitArgs args1 args2 = partitionEithers $ map split args1 where
+  split :: Argument -> Either Argument Argument
+  split r = if elem r args2
+            then Left r
+            else Right r
 
 makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v
