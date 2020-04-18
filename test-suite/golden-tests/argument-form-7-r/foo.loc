@@ -1,0 +1,6 @@
+import rbase (map, mul)
+
+export foo
+
+-- literal partially-applied function passed as argument
+foo xs = map (mul 2) xs;
