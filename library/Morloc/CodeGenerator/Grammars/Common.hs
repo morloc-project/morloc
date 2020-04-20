@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , unpack
   , unpackTypeM
   , nargsTypeM
+  , arg2typeM
   ) where
 
 import Morloc.Data.Doc
@@ -286,11 +287,16 @@ terminalOf :: ExprM -> ExprM
 terminalOf (LetM _ _ e) = terminalOf e
 terminalOf e = e
 
+arg2typeM :: Argument -> TypeM
+arg2typeM (PackedArgument v c) = Packed c
+arg2typeM (UnpackedArgument v c) = Unpacked c
+arg2typeM (PassThroughArgument v) = Passthrough
 
 -- Get the type of an expression
 -- Serialization is ignored
 typeOfExprM :: ExprM -> MorlocMonad TypeM
-typeOfExprM (Manifold t _ _ _) = return t
+typeOfExprM (Manifold t args _ _) = return $
+  Function (map arg2typeM args) t
 typeOfExprM (LetM _ _ e) = typeOfExprM e
 typeOfExprM (CisAppM t _ _) = return t
 typeOfExprM (TrsAppM t _ _ _) = return t
