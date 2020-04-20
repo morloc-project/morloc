@@ -22,6 +22,13 @@ main (m:ms)
   | moduleName m == (MVar "Main") = moduleBody m
   | otherwise = main ms
 
+mainDecMap :: [Module] -> [(EVar, Expr)]
+mainDecMap [] = error "Missing main"
+mainDecMap [m] = Map.toList $ moduleDeclarationMap m
+mainDecMap (m:ms)
+  | moduleName m == (MVar "Main") = Map.toList $ moduleDeclarationMap m
+  | otherwise = mainDecMap ms
+
 -- get the toplevel type of a fully annotated expression
 typeof :: [Expr] -> [Type]
 typeof es = f' . head . reverse $ es
@@ -88,6 +95,15 @@ exprTestFull msg code expCode =
   result <- API.runStack 0 (typecheck (readProgram Nothing code))
   case unres result of
     (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
+    (Left err) -> error (show err)
+
+-- assert the exact expressions
+exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
+exprTestFullDec msg code expCode =
+  testCase msg $ do
+  result <- API.runStack 0 (typecheck (readProgram Nothing code))
+  case unres result of
+    (Right e) -> assertEqual "" (mainDecMap e) expCode
     (Left err) -> error (show err)
 
 exprTestBad :: String -> T.Text -> TestTree
@@ -889,6 +905,34 @@ unitTypeTests =
         "every sub-expression should be annotated in output"
         "f :: forall a . a -> Bool; f 42"
         "f :: forall a . a -> Bool; (((f :: Num -> Bool) (42 :: Num)) :: Bool)"
+
+    , exprTestFullDec
+        "concrete types should be inferred for declared variables"
+        (T.unlines
+          [ "id :: Num -> Num;"
+          , "id C :: int -> int;"
+          , "id x = x;"
+          , "y = 40;"
+          , "foo = id y;"
+          ]
+        )
+        [ (EVar "foo", 
+          AnnE (AppE
+              (AnnE (VarE (EVar "id")) [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
+              (AnnE (VarE (EVar "y")) [num, varc CLang "int"])
+                                         -- ^ The purpose of this test is to assert that the above
+                                         -- type is defined. As of commit 'c31660a0', `y` was assigned
+                                         -- only the general type Num.
+            )
+          [num, varc CLang "int"]
+          )
+        , (EVar "id",
+          AnnE (LamE (EVar "x")
+              (AnnE (VarE (EVar "x"))
+                [num, varc CLang "int"]))
+            [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
+        , (EVar "y", AnnE (NumE 40.0) [num]) 
+        ]
 
     -- default list evaluation of arguments
     , assertTerminalType

@@ -399,9 +399,9 @@ realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One CType))
 realize x = do
-  -- say $ " --- realize ---"
-  -- say $ writeManyAST x
-  -- say $ " ---------------"
+  say $ " --- realize ---"
+  say $ writeManyAST x
+  say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     Nothing -> makeGAST x |>> Left
@@ -498,6 +498,26 @@ realize x = do
     realizeExpr' _ _ (ForeignS _ _ _) _ = MM.throwError . GeneratorError $
       "ForeignS should not yet appear in an SExpr"
 
+-- | This function is called on trees that contain no language-specific
+-- components.  "GAST" refers to General Abstract Syntax Tree. The most common
+-- GAST case, and the only one that is currently supported, is a expression
+-- that merely rearranges data structures without calling any functions. Here
+-- are a few examples:
+--
+--  Constant values and containters (currently supported):
+--  f1 = 5
+--  f2 = [1,2,3]
+--
+--  Variable values and containers (coming soon):
+--  f3 x = x
+--
+--  f4 x = [1,2,x]
+--
+--  Combinations of transformations on containers (possible, but not coming soon):
+--  f5 :: forall a b . (a, b) -> (b, a)
+--  f6 (x,y) = (y,x)
+--
+-- The idea could be elaborated into a full-fledged language.
 makeGAST :: SAnno GMeta Many [CType] -> MorlocMonad (SAnno GMeta One ())
 makeGAST (SAnno (Many [(UniS, _)]) m) = return (SAnno (One (UniS, ())) m)
 makeGAST (SAnno (Many [(VarS x, _)]) m) = return (SAnno (One (VarS x, ())) m)
