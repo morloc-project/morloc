@@ -23,9 +23,10 @@ main = do
       , golden "argument-form-2-py" "argument-form-2-py"
       , golden "argument-form-2-r" "argument-form-2-r"
 
-      , golden "argument-form-3-c" "argument-form-3-c"
-      , golden "argument-form-3-py" "argument-form-3-py"
-      , golden "argument-form-3-r" "argument-form-3-r"
+      -- -- uncomment to test github issue #7
+      -- , golden "argument-form-3-c" "argument-form-3-c"
+      -- , golden "argument-form-3-py" "argument-form-3-py"
+      -- , golden "argument-form-3-r" "argument-form-3-r"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"

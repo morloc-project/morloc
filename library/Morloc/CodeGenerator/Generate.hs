@@ -540,9 +540,7 @@ makeGAST (SAnno (Many [(AppS f xs, _)]) m) = do
 makeGAST (SAnno (Many [(RecS es, _)]) m) = do
   vs <- mapM (makeGAST . snd) es
   return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
-makeGAST (SAnno (Many [(CallS _, _)]) _) = MM.throwError . OtherError $ "Expected GAST"
-makeGAST (SAnno (Many [(ForeignS _ _ _, _)]) _) = MM.throwError . OtherError $ "Expected GAST"
-makeGAST (SAnno (Many (_:_)) _) = MM.throwError . OtherError $ "Expected GAST"
+makeGAST _ = MM.throwError . OtherError $ "See github issue #7"
 
 
 -- | Serialize a simple, general data type. This type can consists only of JSON
