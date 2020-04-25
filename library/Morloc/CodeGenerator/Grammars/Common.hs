@@ -10,21 +10,20 @@ module Morloc.CodeGenerator.Grammars.Common
   ( SAnno(..)
   , SExpr(..)
   , GMeta(..)
-  , Argument(..)
-  , argName
   , argType
   , unpackArgument
   , prettyArgument
+  , argId
   , One(..)
   , Many(..)
-  , ExprM(..)
-  , TypeM(..)
   , prettyExprM
   , typeOfExprM
   , invertExprM
-  , pack
+  , typeParts
+  , ctype2typeM
   , packTypeM
-  , unpack
+  , packExprM
+  , unpackExprM
   , unpackTypeM
   , nargsTypeM
   , arg2typeM
@@ -67,7 +66,6 @@ data SExpr g f c
   | StrS MT.Text
   | RecS [(EVar, SAnno g f c)]
   | CallS Source
-  | ForeignS Int Lang [EVar]
 
 -- | Description of the general manifold
 data GMeta = GMeta {
@@ -78,33 +76,19 @@ data GMeta = GMeta {
   , metaConstraints :: Set.Set Constraint
 } deriving (Show, Ord, Eq)
 
--- | An argument that is passed to a manifold
-data Argument
-  = PackedArgument EVar CType
-  -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
-  -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
-  -- may not be serializable. This is OK, so long as they are only used in
-  -- functions of the same language.
-  | UnpackedArgument EVar CType
-  -- ^ A native argument with the same parameters as above
-  | PassThroughArgument EVar
-  -- ^ A serialized argument that is untyped in the current language. It cannot
-  -- be unpacked, but will be passed eventually to a foreign argument where it
-  -- does have a concrete type.
-  deriving (Show, Ord, Eq)
 
 prettyArgument :: Argument -> MDoc
-prettyArgument (PackedArgument v c) =
-  "Packed" <+> pretty v <+> parens (prettyType c)
-prettyArgument (UnpackedArgument v c) =
-  "Unpacked" <+> pretty v <+> parens (prettyType c)
-prettyArgument (PassThroughArgument v) =
-  "PassThrough" <+> pretty v
+prettyArgument (PackedArgument i c) =
+  "Packed" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (UnpackedArgument i c) =
+  "Unpacked" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (PassThroughArgument i) =
+  "PassThrough" <+> "x" <> pretty i
 
-argName :: Argument -> EVar
-argName (PackedArgument v _) = v
-argName (UnpackedArgument v _) = v
-argName (PassThroughArgument v) = v
+argId :: Argument -> Int
+argId (PackedArgument i _) = i
+argId (UnpackedArgument i _) = i
+argId (PassThroughArgument i ) = i
 
 argType :: Argument -> Maybe CType
 argType (PackedArgument _ t) = Just t
@@ -112,51 +96,8 @@ argType (UnpackedArgument _ t) = Just t
 argType (PassThroughArgument _) = Nothing
 
 unpackArgument :: Argument -> Argument
-unpackArgument (PackedArgument v t) = UnpackedArgument v t
+unpackArgument (PackedArgument i t) = UnpackedArgument i t
 unpackArgument x = x
-
-data TypeM
-  = Null -- ^ null/void, e.g., the return type for a void function in C++
-  | Passthrough -- ^ serialized data that cannot be unpacked in this language
-  | Packed CType -- ^ serialized data that may be unpacked in this language
-  | Unpacked CType
-  | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
-  deriving(Show, Eq, Ord)
-
-data ExprM
-  = Manifold TypeM [Argument] Int ExprM
-
-  -- structural elements
-  | LetM EVar ExprM ExprM
-  | CisAppM TypeM Source [ExprM] -- ^ a within pool function call (cis)
-  | TrsAppM TypeM Int Lang [ExprM] -- ^ a foreign call (trans)
-  | LamM TypeM [Maybe EVar] ExprM -- ^ Nothing Evar will be auto generated
-
-  -- may be a function name or a passed variable
-  | VarM TypeM EVar
-
-  -- containers
-  | ListM TypeM [ExprM]
-  | TupleM TypeM [ExprM]
-  | RecordM TypeM [(EVar, ExprM)]
-
-  -- primitives
-  | LogM TypeM Bool
-  | NumM TypeM Scientific
-  | StrM TypeM MT.Text
-  | NullM TypeM
-
-  -- serialization - these must remain abstract, since required arguments
-  -- will vary between languages.
-  | PackM ExprM
-  | UnpackM ExprM
-
-  -- return
-  | ReturnM ExprM -- I need this to distinguish between the values in assigned
-                  -- in let expressions and the final return value. In some
-                  -- languages, this may not be necessary.
-  deriving(Show, Ord, Eq)
-
 
 nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
@@ -167,30 +108,29 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   manNamer :: Int -> MDoc
   manNamer i = "m" <> pretty i
 
-  makeArgument :: Argument -> MDoc
-  makeArgument (PackedArgument v c) = pretty v
-  makeArgument (UnpackedArgument v c) = pretty v
-  makeArgument (PassThroughArgument v) = pretty v
-
   f :: ExprM -> ([MDoc], MDoc)
-  f (Manifold t args i e) =
+  f (ManifoldM i args e) =
     let (ms', body) = f e
-        head = manNamer i <> tupled (map makeArgument args)
+        head = manNamer i <> tupled (map prettyArgument args)
         mdoc = block 4 head body
     in (mdoc : ms', manNamer i)
+  f (ForeignCallM t i lang args) = ([], "FOREIGN" <> tupled [viaShow lang, pretty i, list (map prettyArgument args)]) 
   f (LetM v e1 e2) =
     let (ms1', e1') = f e1
         (ms2', e2') = f e2
-    in (ms1' ++ ms2', pretty v <+> "=" <+> e1' <> line <> e2')
-  f (CisAppM c src xs) =
-    let (mss', xs') = unzip $ map f xs
-    in (concat mss', pretty (srcName src) <> tupled xs')
-  f (TrsAppM c i lang xs) = ([], "FOREIGN")
-  f (LamM c mv e) =
+    in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
+  f (AppM fun xs) =
+    let (ms', fun') = f fun
+        (mss', xs') = unzip $ map f xs
+    in (ms' ++ concat mss', fun' <> tupled xs')
+  f (SrcM c src) = ([], pretty (srcName src))
+  f (LamM args e) =
     let (ms', e') = f e
-        vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
-                     (zipWith (<>) (repeat "p") (map viaShow [1..]))
-    in (ms', "\\ " <+> hsep (punctuate "," vs) <> "->" <+> e' <> tupled vs)
+        vsFull = map prettyArgument args
+        vsNames = map (\r -> "x" <> pretty (argId r)) args
+    in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
+  f (BndVarM c i) = ([], "x" <> pretty i)
+  f (LetVarM c i) = ([], "a" <> pretty i)
   f (ListM _ es) =
     let (mss', es') = unzip $ map f es
     in (concat mss', list es')
@@ -201,11 +141,10 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     let (mss', es') = unzip $ map (f . snd) entries
         entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
     in (concat mss', "{" <> tupled entries' <> "}")
-  f (VarM c v) = ([], pretty v)
-  f (LogM _ x) = ([], if x then "TRUE" else "FALSE")
+  f (LogM _ x) = ([], if x then "true" else "false")
   f (NumM _ x) = ([], viaShow x)
   f (StrM _ x) = ([], dquotes $ pretty x)
-  f (NullM _) = ([], "None")
+  f (NullM _) = ([], "null")
   f (PackM e) =
     let (ms, e') = f e
     in (ms, "PACK" <> tupled [e'])
@@ -216,61 +155,56 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     let (ms, e') = f e
     in (ms, "RETURN(" <> e' <> ")")
 
-
-invertExprM :: (Int -> EVar) -> ExprM -> MorlocMonad ExprM
-invertExprM namer e = invert e where
-  invert (Manifold t args i e) = do
-    MM.startCounter
-    e' <- invert e
-    return $ Manifold t args i e'
-  invert (CisAppM c src es) = do
-    es' <- mapM invert es
-    v <- MM.getCounter |>> namer
-    let e = LetM v (CisAppM c src (map terminalOf es')) (VarM c v)
-        e' = foldl (\x y -> dependsOn x y) e es'
-    return e'
-  invert (TrsAppM c i lang es) = do
-    es' <- mapM invert es
-    v <- MM.getCounter |>> namer
-    let e = LetM v (TrsAppM c i lang (map terminalOf es')) (VarM c v)
-        e' = foldl (\x y -> dependsOn x y) e es'
-    return e'
-  -- you can't pull the body of the lambda out into a let statement
-  invert f@(LamM _ _ _) = return f
-  invert (ListM c es) = do
-    es' <- mapM invert es
-    v <- MM.getCounter |>> namer
-    let e = LetM v (ListM c (map terminalOf es')) (VarM c v)
-        e' = foldl (\x y -> dependsOn x y) e es'
-    return e'
-  invert (TupleM c es) = do
-    es' <- mapM invert es
-    v <- MM.getCounter |>> namer
-    let e = LetM v (TupleM c (map terminalOf es')) (VarM c v)
-        e' = foldl (\x y -> dependsOn x y) e es'
-    return e'
-  invert (RecordM c entries) = do
-    es' <- mapM invert (map snd entries)
-    v <- MM.getCounter |>> namer
-    let entries' = zip (map fst entries) (map terminalOf es')
-        e = LetM v (RecordM c entries') (VarM c v)
-        e' = foldl (\x y -> dependsOn x y) e es'
-    return e'
-  invert (PackM e) = do
-    e' <- invert e
-    v <- MM.getCounter |>> namer
-    t' <- typeOfExprM e
-    return $ dependsOn (LetM v (PackM (terminalOf e')) (VarM t' v)) e'
-  invert (UnpackM e) = do
-    e' <- invert e
-    v <- MM.getCounter |>> namer
-    t' <- typeOfExprM e
-    return $ dependsOn (LetM v (UnpackM (terminalOf e')) (VarM t' v)) e'
-  invert (ReturnM e) = do
-    e' <- invert e
-    return $ dependsOn (ReturnM (terminalOf e')) e'
-  -- VarM LogM NumM StrM NullM LetM
-  invert e = return e
+invertExprM :: ExprM -> MorlocMonad ExprM
+invertExprM (ManifoldM i args e) = do
+  MM.startCounter
+  e' <- invertExprM e
+  return $ ManifoldM i args e'
+invertExprM (LetM v e1 e2) = do
+  e2' <- invertExprM e2
+  return $ LetM v e1 e2'
+invertExprM e@(AppM f es) = do
+  f' <- invertExprM f
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let t = typeOfExprM e
+      appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
+  return $ foldl dependsOn appM' (f':es')
+-- you can't pull the body of the lambda out into a let statement
+invertExprM f@(LamM _ _) = return f
+invertExprM (ListM c es) = do
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (TupleM c es) = do
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (RecordM c entries) = do
+  es' <- mapM invertExprM (map snd entries)
+  v <- MM.getCounter
+  let entries' = zip (map fst entries) (map terminalOf es')
+      e = LetM v (RecordM c entries') (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (PackM e) = do
+  e' <- invertExprM e
+  v <- MM.getCounter
+  let t' = typeOfExprM e
+  return $ dependsOn (LetM v (PackM (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (UnpackM e) = do
+  e' <- invertExprM e
+  v <- MM.getCounter
+  let t' = typeOfExprM e
+  return $ dependsOn (LetM v (UnpackM (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (ReturnM e) = do
+  e' <- invertExprM e
+  return $ dependsOn (ReturnM (terminalOf e')) e'
+invertExprM e = return e
 
 -- transfer all let-dependencies from y to x
 --
@@ -287,60 +221,79 @@ terminalOf :: ExprM -> ExprM
 terminalOf (LetM _ _ e) = terminalOf e
 terminalOf e = e
 
+typeOfTypeM :: TypeM -> Maybe CType 
+typeOfTypeM t = fmap CType (typeOfTypeM' t) where
+  typeOfTypeM' Passthrough = Nothing
+  typeOfTypeM' (Packed c) = Just (typeOf c)
+  typeOfTypeM' (Unpacked c) = Just (typeOf c)
+  typeOfTypeM' (Function [] t) = typeOfTypeM' t
+  typeOfTypeM' (Function (ti:ts) to) = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
+
 arg2typeM :: Argument -> TypeM
-arg2typeM (PackedArgument v c) = Packed c
-arg2typeM (UnpackedArgument v c) = Unpacked c
-arg2typeM (PassThroughArgument v) = Passthrough
+arg2typeM (PackedArgument _ c) = Packed c
+arg2typeM (UnpackedArgument _ c) = Unpacked c
+arg2typeM (PassThroughArgument _) = Passthrough
 
--- Get the type of an expression
--- Serialization is ignored
-typeOfExprM :: ExprM -> MorlocMonad TypeM
-typeOfExprM (Manifold t args _ _) = return $
-  Function (map arg2typeM args) t
-typeOfExprM (LetM _ _ e) = typeOfExprM e
-typeOfExprM (CisAppM t _ _) = return t
-typeOfExprM (TrsAppM t _ _ _) = return t
-typeOfExprM (LamM t _ _) = return t
-typeOfExprM (VarM t _) = return t
-typeOfExprM (ListM t _) = return t
-typeOfExprM (TupleM t _) = return t
-typeOfExprM (RecordM t _) = return t
-typeOfExprM (LogM t _) = return t
-typeOfExprM (NumM t _) = return t
-typeOfExprM (StrM t _) = return t
-typeOfExprM (NullM t) = return t
-typeOfExprM (PackM e) = typeOfExprM e >>= packTypeM
-typeOfExprM (UnpackM e) = typeOfExprM e >>= unpackTypeM
-typeOfExprM (ReturnM e) = typeOfExprM e 
+-- | Get the manifold type of an expression
+--
+-- The ExprM must have exactly enough type information to infer the type of any
+-- element without reference to the element's parent.
+typeOfExprM :: ExprM -> TypeM
+typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
+typeOfExprM (ForeignCallM t _ _ args) = Function (map arg2typeM args) t
+typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+typeOfExprM (AppM f xs) = case typeOfExprM f of
+  (Function inputs output) -> case drop (length xs) inputs of
+    [] -> output
+    inputs' -> Function inputs' output
+  _ -> error "COMPILER BUG: application of non-function"
+typeOfExprM (SrcM t _) = t
+typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
+typeOfExprM (BndVarM t _) = t
+typeOfExprM (LetVarM t _) = t
+typeOfExprM (ListM t _) = t
+typeOfExprM (TupleM t _) = t
+typeOfExprM (RecordM t _) = t
+typeOfExprM (LogM t _) = t
+typeOfExprM (NumM t _) = t
+typeOfExprM (StrM t _) = t
+typeOfExprM (NullM t) = t
+typeOfExprM (PackM e) = packTypeM (typeOfExprM e)
+typeOfExprM (UnpackM e) = unpackTypeM (typeOfExprM e)
+typeOfExprM (ReturnM e) = typeOfExprM e
+
+packTypeM :: TypeM -> TypeM
+packTypeM (Unpacked t) = Packed t
+packTypeM (Function ts t) = error $ "BUG: Cannot pack a function"
+packTypeM t = t
+
+ctype2typeM :: CType -> TypeM
+ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
+  (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
+ctype2typeM c = Unpacked c
+
+-- get input types to a function type
+typeParts :: CType -> ([CType], CType)
+typeParts c = case reverse . map CType $ typeArgs (unCType c) of
+  (t:ts) -> (reverse ts, t)
+  where
+    typeArgs (FunT t1 t2) = t1 : typeArgs t2
+    typeArgs t = [t]
 
 
-packTypeM :: TypeM -> MorlocMonad TypeM
-packTypeM (Unpacked t) = return (Packed t)
-packTypeM (Function ts t) = MM.throwError . OtherError $
-  "Canno pack a function"
-packTypeM t = return t
+unpackTypeM :: TypeM -> TypeM
+unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
+unpackTypeM (Packed t) = Unpacked t
+unpackTypeM t = t 
 
+unpackExprM :: ExprM -> ExprM
+unpackExprM e = case typeOfExprM e of
+  (Packed _) -> UnpackM e
+  (Passthrough) -> error "Cannot unpack a passthrough type argument"
+  _ -> e
 
-unpackTypeM :: TypeM -> MorlocMonad TypeM
-unpackTypeM Passthrough = MM.throwError . OtherError $
-  "Cannot unpack a passthrough type"
-unpackTypeM (Packed t) = return $ Unpacked t
-unpackTypeM t = return t 
-
-
-unpack :: ExprM -> MorlocMonad ExprM
-unpack e = do
-  t <- typeOfExprM e
-  case t of
-    (Packed _) -> return (UnpackM e)
-    (Passthrough) -> MM.throwError . OtherError $
-      "Cannot unpack a passthrough type argument"
-    _ -> return e
-
-pack :: ExprM -> MorlocMonad ExprM
-pack e = do
-  t <- typeOfExprM e
-  case t of
-    (Unpacked _) -> return (PackM e)
-    (Function _ _) -> MM.throwError . OtherError $ "Cannot pack a function"
-    _ -> return e
+packExprM :: ExprM -> ExprM
+packExprM e = case typeOfExprM e of
+  (Unpacked _) -> PackM e
+  (Function _ _) -> error "Cannot pack a function"
+  _ -> e

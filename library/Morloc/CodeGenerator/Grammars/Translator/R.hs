@@ -30,7 +30,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- tree rewrites
-  es' <- mapM (invertExprM varNamer) es
+  es' <- mapM invertExprM es
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es')
@@ -40,8 +40,11 @@ translate srcs es = do
 
   return $ makePool includeDocs mDocs
 
-varNamer :: Int -> EVar
-varNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> EVar
+letNamer i = EVar ("a" <> MT.show' i)
+
+bndNamer :: Int -> EVar
+bndNamer i = EVar ("x" <> MT.show' i)
 
 manNamer :: Int -> EVar
 manNamer i = EVar ("m" <> MT.show' i)
@@ -71,35 +74,39 @@ translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
 -- break a call tree into manifolds
 translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f args m where
+translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
   f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f pargs (Manifold t args i e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', body) <- f args e
     let head = pretty (manNamer i) <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 head body
         mname = pretty (manNamer i)
-    call <- return $ case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], vs), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    return (mdoc : ms', call)
-  f args (LetM v e1 e2) = do
+    -- -- TODO: handle partials BEFORE translation
+    -- call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
+    --   ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+    --   (([], vs), _) -> mname
+    --   ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    -- return (mdoc : ms', call)
+    return $ error "handle partials BEFORE translation"
+  f args (ForeignCallM c i lang xs) = return ([], "FOREIGN")
+  f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
-    return (ms1' ++ ms2', pretty v <+> "<-" <+> e1' <> line <> e2')
-  f args (CisAppM c src xs) = do
+    return (ms1' ++ ms2', pretty (letNamer i) <+> "<-" <+> e1' <> line <> e2')
+  f args (AppM (SrcM _ src) xs) = do
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
-  f args (TrsAppM c i lang xs) = return ([], "FOREIGN")
-  f args (LamM c mv e) = do
+  f _ (SrcM t src) = return ([], pretty (srcName src))
+  f args (LamM labmdaArgs e) = do
     (ms', e') <- f args e
-    let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
-                     (zipWith (<>) (repeat "p") (map viaShow [1..]))
-    return (ms', "function" <> tupled vs <> "{" <+> e' <> tupled vs <> "}")
+    let vs = map (pretty . bndNamer . argId) labmdaArgs
+    return (ms', "function" <> tupled vs <> "{" <+> e' <> "}")
+  f _ (BndVarM _ i) = return ([], pretty $ bndNamer i)
+  f _ (LetVarM _ i) = return ([], pretty $ letNamer i)
   f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     x' <- return $ case t of
-      (Unpacked (CType (ArrT _ [VarT et]))) -> case et of       
+      (Unpacked (CType (ArrT _ [VarT et]))) -> case et of
         (TV _ "numeric") -> "c" <> tupled es'
         (TV _ "logical") -> "c" <> tupled es'
         (TV _ "character") -> "c" <> tupled es'
@@ -113,18 +120,17 @@ translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f 
     (mss', es') <- mapM (f args . snd) entries |>> unzip
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
     return (concat mss', "list" <> tupled entries')
-  f _ (VarM c v) = return ([], pretty v)
   f _ (LogM _ x) = return ([], if x then "TRUE" else "FALSE")
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "NULL")
   f args (PackM e) = do
     (ms, e') <- f args e
-    (Unpacked t) <- typeOfExprM e
+    let (Unpacked t) = typeOfExprM e
     return (ms, "pack" <> tupled [e', typeSchema t])
   f args (UnpackM e) = do
     (ms, e') <- f args e
-    (Packed t) <- typeOfExprM e
+    let (Packed t) = typeOfExprM e
     return (ms, "unpack" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
@@ -145,11 +151,6 @@ makeArgument :: Argument -> MDoc
 makeArgument (PackedArgument v c) = pretty v
 makeArgument (UnpackedArgument v c) = pretty v
 makeArgument (PassThroughArgument v) = pretty v
-
--- returnName :: ReturnValue -> MDoc
--- returnName (PackedReturn v _) = "m" <> pretty v
--- returnName (UnpackedReturn v _) = "m" <> pretty v
--- returnName (PassThroughReturn v) = "m" <> pretty v
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript

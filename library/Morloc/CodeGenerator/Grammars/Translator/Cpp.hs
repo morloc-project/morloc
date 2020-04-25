@@ -32,7 +32,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- tree rewrites
-  es' <- mapM (invertExprM varNamer) es
+  es' <- mapM invertExprM es
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es')
@@ -46,25 +46,28 @@ translate srcs es = do
   -- create and return complete pool script
   return $ makeMain includeDocs signatures mDocs dispatch
 
-varNamer :: Int -> EVar
-varNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> EVar
+letNamer i = EVar ("a" <> MT.show' i)
 
 manNamer :: Int -> EVar
 manNamer i = EVar ("m" <> MT.show' i)
+
+bndNamer :: Int -> EVar
+bndNamer i = EVar ("x" <> MT.show' i)
 
 serialType :: MDoc
 serialType = "std::string"
 
 makeSignature :: ExprM -> MDoc
-makeSignature e@(Manifold _ _ _ _) = vsep (f e) where
+makeSignature e@(ManifoldM _ _ _) = vsep (f e) where
   f :: ExprM -> [MDoc]
-  f (Manifold t args i e) =
-    let sig = returnType t <+> "m" <> pretty i <> tupled (map makeArg args) <> ";"
+  f m@(ManifoldM i args e) =
+    let t = typeOfExprM m
+        sig = returnType t <+> "m" <> pretty i <> tupled (map makeArg args) <> ";"
     in sig : f e
   f (LetM _ e1 e2) = f e1 ++ f e2
-  f (CisAppM _ _ es) = conmap f es
-  f (TrsAppM _ _ _ es) = conmap f es
-  f (LamM _ _ e) = f e
+  f (AppM e es) = f e ++ conmap f es
+  f (LamM _ e) = f e
   f (ListM _ es) = conmap f es
   f (TupleM _ es) = conmap f es
   f (RecordM _ entries) = conmap f (map snd entries)
@@ -77,9 +80,15 @@ returnType :: TypeM -> MDoc
 returnType (Unpacked c) = showType c
 returnType _ = serialType
 
-makeArg (PackedArgument v c) = serialType <+> pretty v
-makeArg (UnpackedArgument v c) = showType c <+> pretty v
-makeArg (PassThroughArgument v) = serialType <+> pretty v
+makeArg :: Argument -> MDoc
+makeArg r@(PackedArgument _ _) = serialType <+> argName r
+makeArg r@(UnpackedArgument _ c) = showType c <+> argName r
+makeArg r@(PassThroughArgument _) = serialType <+> argName r
+
+argName :: Argument -> MDoc
+argName (PackedArgument i _) = "x" <> pretty i
+argName (UnpackedArgument i _) = "x" <> pretty i
+argName (PassThroughArgument i) = "x" <> pretty i
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -106,7 +115,7 @@ translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
 translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold m@(Manifold _ args _ _) =
+translateManifold m@(ManifoldM _ args _) =
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
   f :: [Argument]
@@ -120,36 +129,37 @@ translateManifold m@(Manifold _ args _ _) =
   f args (LetM v (PackM e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- typeOfExprM e1 >>= showUnpackedTypeM
+    t <- showUnpackedTypeM (typeOfExprM e1)
     let schemaName = pretty v <> "_schema"
         schema = t <+> schemaName <> ";"
         packing = serialType <+> pretty v <+> "=" <+> "pack" <> tupled [e1', schemaName] <> ";"
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, packing, e2'], [])
+
   f _ (PackM _) = MM.throwError . OtherError
     $ "PackM should only appear in an assignment"
 
-  f args (LetM v (UnpackM e1) e2) = do
+  f args (LetM i (UnpackM e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- typeOfExprM e1 >>= showUnpackedTypeM
-    let schemaName = pretty v <> "_schema"
+    t <- showUnpackedTypeM (typeOfExprM e1)
+    let schemaName = pretty (letNamer i) <> "_schema"
         schema = t <+> schemaName <> ";"
-        unpacking = t <+> pretty v <+> "=" <+> "unpack" <> tupled [e1', schemaName] <> ";"
+        unpacking = t <+> pretty (letNamer i) <+> "=" <+> "unpack" <> tupled [e1', schemaName] <> ";"
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, unpacking, e2'], [])
   f _ (UnpackM _) = MM.throwError . OtherError
     $ "UnpackM should only appear in an assignment"
 
-  f args (LetM v e1 e2) = do
+  f args (LetM i e1 e2) = do
     (ms1', e1', ps1) <- (f args) e1
     (ms2', e2', ps2) <- (f args) e2
-    t <- showTypeM <$> typeOfExprM e1
-    let ps = ps1 ++ ps2 ++ [t <+> pretty v <+> "=" <+> e1' <> ";", e2']
+    let t = showTypeM (typeOfExprM e1)
+        ps = ps1 ++ ps2 ++ [t <+> pretty (letNamer i) <+> "=" <+> e1' <> ";", e2']
     return (ms1' ++ ms2', vsep ps, [])
 
-  f args (CisAppM c src xs) = do
+  f args (AppM (SrcM c src) xs) = do
     (mss', xs', pss) <- mapM (f args) xs |>> unzip3
-    inputs <- mapM typeOfExprM' xs >>= mapM unpackTypeM |>> map showTypeM
-    let otype = showTypeM c
+    let inputs = map (showTypeM . unpackTypeM . typeOfExprM') xs
+        otype = showTypeM c
         name = pretty $ srcName src
         mangledName = name <> "_fun"
         inputBlock = "(" <> cat (punctuate "," inputs) <> ")"
@@ -158,19 +168,24 @@ translateManifold m@(Manifold _ args _ _) =
         sig =  lhs <+> "=" <+> rhs <> ";";
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
     where
-      typeOfExprM' :: ExprM -> MorlocMonad TypeM
-      typeOfExprM' (Manifold t' args' _ _) = case splitArgs args' args of
-        (_, []) -> return $ t' 
-        (_, ts) -> return $ Function (map arg2typeM ts) t' 
+      typeOfExprM' :: ExprM -> TypeM
+      typeOfExprM' m@(ManifoldM _ args' _) = case splitArgs args' args of
+        (_, []) -> typeOfExprM m
+        (_, ts) -> Function (map arg2typeM ts) (typeOfExprM m)
       typeOfExprM' e = typeOfExprM e
 
-  f pargs (Manifold t args i e) = do
+  f args (AppM f xs) = error "Goddamn it! You just had to ask!"
+
+  f args (SrcM t src) = return ([], pretty $ srcName src, [])
+
+  f pargs m@(ManifoldM i args e) = do
     (ms', body, ps1) <- f args e
-    let head = showTypeM t <+> pretty (manNamer i) <> tupled (map makeArgument args)
+    let t = typeOfExprM m
+        head = showTypeM t <+> pretty (manNamer i) <> tupled (map makeArgument args)
         mdoc = block 4 head body
         mname = pretty (manNamer i)
     (call, ps2) <- case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> return (mname <> tupled (map (pretty . argName) rs), [])
+      ((rs, []), _) -> return (mname <> tupled (map (pretty . bndNamer . argId) rs), [])
       (([], vs), _) -> return (mname, [])
       ((rs, vs), _) -> do
         let v = mname <> "_fun"
@@ -179,15 +194,15 @@ translateManifold m@(Manifold _ args _ _) =
         let vs' = take
                   (length vs)
                   (map (\i -> "std::placeholders::_" <> viaShow i) [1..])
-            rs' = map (pretty . argName) rs
+            rs' = map (pretty . bndNamer . argId) rs
             rhs = stdBind $ castFunction : (rs' ++ vs')
-            sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";" 
+            sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f args (TrsAppM c i lang xs) = return ([], "FOREIGN", [])
+  f args (ForeignCallM c i lang foreignArgs) = return ([], "FOREIGN", [])
 
-  f args (LamM c mv e) = undefined
+  f args (LamM lambdaArgs e) = undefined
 
   f args (ListM t es) = do
     (mss', es', pss) <- mapM (f args) es |>> unzip3
@@ -200,7 +215,8 @@ translateManifold m@(Manifold _ args _ _) =
 
   f args (RecordM c entries) = error "C++ records not yet supported"
 
-  f _ (VarM c v) = return ([], pretty v, [])
+  f _ (BndVarM c i) = return ([], pretty (bndNamer i), [])
+  f _ (LetVarM c i) = return ([], pretty (letNamer i), [])
   f _ (LogM _ x) = return ([], if x then "true" else "false", [])
   f _ (NumM _ x) = return ([], viaShow x, [])
   f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
@@ -247,19 +263,20 @@ makeArgument (UnpackedArgument v c) = showType c <+> pretty v
 makeArgument (PassThroughArgument v) = serialType <+> pretty v
 
 makeDispatch :: [ExprM] -> MDoc
-makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
-  where
-    makeCase :: ExprM -> MDoc
-    makeCase (Manifold _ args i _) =
-      let mid = pretty i
-          manifoldName = "m" <> mid
-          args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
-      in
-        (nest 4 . vsep)
-          [ "case" <+> mid <> ":"
-          , "result = " <> manifoldName <> tupled args' <> ";"
-          , "break;"
-          ]
+makeDispatch = undefined
+-- makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
+--   where
+--     makeCase :: ExprM -> MDoc
+--     makeCase (ManifoldM _ args i _) =
+--       let mid = pretty i
+--           manifoldName = "m" <> mid
+--           args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
+--       in
+--         (nest 4 . vsep)
+--           [ "case" <+> mid <> ":"
+--           , "result = " <> manifoldName <> tupled args' <> ";"
+--           , "break;"
+--           ]
 
 showType :: CType -> MDoc
 showType = MTM.buildCType mkfun mkrec where
@@ -270,7 +287,6 @@ showType = MTM.buildCType mkfun mkrec where
   mkrec _ = "RECORD_TYPE"
 
 showTypeM :: TypeM -> MDoc
-showTypeM Null = error "For now, the Null TypeM is not in use, so WTF?"
 showTypeM Passthrough = serialType
 showTypeM (Packed t) = serialType
 showTypeM (Unpacked t) = showType t

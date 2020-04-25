@@ -65,6 +65,10 @@ module Morloc.Namespace
   , Typelike(..)
   , langOf
   , langOf'
+  -- ** Types used in final translations
+  , TypeM(..)
+  , ExprM(..)
+  , Argument(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -509,3 +513,134 @@ instance HasOneLanguage EType where
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
+
+
+-- | An argument that is passed to a manifold
+data Argument
+  = PackedArgument Int CType
+  -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
+  -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
+  -- may not be serializable. This is OK, so long as they are only used in
+  -- functions of the same language.
+  | UnpackedArgument Int CType
+  -- ^ A native argument with the same parameters as above
+  | PassThroughArgument Int 
+  -- ^ A serialized argument that is untyped in the current language. It cannot
+  -- be unpacked, but will be passed eventually to a foreign argument where it
+  -- does have a concrete type.
+  deriving (Show, Ord, Eq)
+
+instance HasOneLanguage Argument where
+  langOf (PackedArgument _ c) = langOf c
+  langOf (UnpackedArgument _ c) = langOf c
+  langOf (PassThroughArgument _) = Nothing
+
+
+data TypeM
+  = Passthrough -- ^ serialized data that cannot be unpacked in this language
+  | Packed CType -- ^ serialized data that may be unpacked in this language
+  | Unpacked CType
+  | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
+  deriving(Show, Eq, Ord)
+
+instance HasOneLanguage TypeM where
+  langOf Passthrough = Nothing
+  langOf (Packed c) = langOf c
+  langOf (Unpacked c) = langOf c
+  langOf (Function xs f) = listToMaybe $ catMaybes (map langOf (f:xs))
+
+
+-- | A grammar that describes the implementation of the pools. Expressions in
+-- this grammar will be directly translated into concrete code.
+data ExprM
+  = ManifoldM Int [Argument] ExprM
+  -- ^ A wrapper around a single source call or (in some cases) a container.
+
+  | ForeignCallM
+      TypeM -- the return type in calling language
+      Int -- manifold number
+      Lang -- the foreign language
+      [Argument] -- argument list, with types in calling language
+
+  | LetM Int ExprM ExprM
+  -- ^ let syntax allows fine control over order of operations in the generated
+  -- code. The Int is an index for a LetVarM. It is also important in languages
+  -- such as C++ where values need to be declared with explicit types and
+  -- special constructors.
+
+  | AppM
+      ExprM -- ManifoldM | SrcM | LamM
+      [ExprM] 
+
+  | SrcM TypeM Source
+  -- ^ a within pool function call (cis)
+
+  | LamM [Argument] ExprM
+  -- ^ Nothing Evar will be auto generated
+
+  | BndVarM TypeM Int
+  -- ^ A lambda-bound variable. BndVarM only describes variables bound as positional
+  -- arguments in a manifold. The are represented as integers since the name
+  -- will be language-specific.
+  --
+  -- In the rewrite step, morloc declarations are removed. So the expression:
+  --   x = 5
+  --   foo y = mul x y
+  -- Is rewritten as:
+  --   \y -> mul 5 y
+  -- So BndVarM does NOT include variables defined in the morloc script. It only
+  -- includes lambda-bound variables. The only BndVarM is `y` (`mul` is SrcM). The
+  -- literal name "y" is replaced, though, with the integer 1. This required in
+  -- order to avoid name conflicts in concrete languages, for example consider
+  -- the following (perfectly legal) morloc function:
+  --   foo for = mul for 2
+  -- If the string "for" were retained as the variable name, this would fail in
+  -- many language where "for" is a keyword.
+
+  | LetVarM TypeM Int
+  -- ^ An internally generated variable id used in let assignments. When
+  -- translated into a language, the integer will be used to generate a unique
+  -- variable name (e.g. [a0,a1,...] or [a,b,c,...]).
+
+  -- containers
+  | ListM TypeM [ExprM]
+  | TupleM TypeM [ExprM]
+  | RecordM TypeM [(EVar, ExprM)]
+
+  -- primitives
+  | LogM TypeM Bool
+  | NumM TypeM Scientific
+  | StrM TypeM Text
+  | NullM TypeM
+
+  -- serialization - these must remain abstract, since required arguments
+  -- will vary between languages.
+  | PackM ExprM
+  | UnpackM ExprM
+
+  | ReturnM ExprM
+  -- ^ The return value of a manifold. I need this to distinguish between the
+  -- values assigned in let expressions and the final return value. In some
+  -- languages, this may not be necessary (e.g., R).
+  deriving(Show, Ord, Eq)
+
+instance HasOneLanguage ExprM where
+  -- langOf :: a -> Maybe Lang
+  langOf (ManifoldM _ args e) = listToMaybe $ catMaybes (langOf e : map langOf args)
+  langOf (ForeignCallM t _ _ args) = listToMaybe $ catMaybes (langOf t : map langOf args)
+  langOf (LetM _ e1 e2) = listToMaybe $ catMaybes [langOf e1, langOf e2]
+  langOf (AppM e es ) = listToMaybe $ catMaybes (map langOf (e:es))
+  langOf (SrcM _ src) = Just (srcLang src) 
+  langOf (LamM args e) = listToMaybe $ catMaybes (langOf e : map langOf args)
+  langOf (BndVarM t _) = langOf t
+  langOf (LetVarM t _) = langOf t
+  langOf (ListM t es) = listToMaybe $ catMaybes (langOf t : map langOf es)
+  langOf (TupleM t es) = listToMaybe $ catMaybes (langOf t : map langOf es)
+  langOf (RecordM t es) = listToMaybe $ catMaybes (langOf t : map langOf (map snd es))
+  langOf (LogM t _) = langOf t
+  langOf (NumM t _) = langOf t
+  langOf (StrM t _) = langOf t
+  langOf (NullM t) = langOf t
+  langOf (PackM e) = langOf e
+  langOf (UnpackM e) = langOf e
+  langOf (ReturnM e) = langOf e

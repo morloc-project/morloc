@@ -37,7 +37,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- tree rewrites
-  es' <- mapM (invertExprM varNamer) es
+  es' <- mapM invertExprM es
 
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es')
@@ -51,8 +51,12 @@ translate srcs es = do
   return $ makePool lib includeDocs mDocs dispatch
 
 -- create an internal variable based on a unique id
-varNamer :: Int -> EVar
-varNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> EVar
+letNamer i = EVar ("a" <> MT.show' i)
+
+-- create namer for manifold positional arguments
+bndNamer :: Int -> EVar
+bndNamer i = EVar ("x" <> MT.show' i)
 
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> EVar
@@ -73,32 +77,35 @@ translateSource (Path s) = do
 
 -- break a call tree into manifolds
 translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f args m where
+translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
   f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f pargs (Manifold t args i e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', body) <- f args e
-    let head = "def" <+> pretty (manNamer i) <> tupled (map makeArgument args) <> ":"
-        mdoc = nest 4 (vsep [head, body])
+    let head = "def" <+> pretty (manNamer i) <+> tupled (map makeArgument args)
+        mdoc = block 4 head body
         mname = pretty (manNamer i)
-    call <- return $ case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], vs), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    return (mdoc : ms', call)
-  f args (LetM v e1 e2) = do
+    -- call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
+    --   ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+    --   (([], vs), _) -> mname
+    --   ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    -- return (mdoc : ms', call)
+    return $ error "HANDLE PARTIALS BEFORE TRANSLATION"
+  f args (ForeignCallM c i lang xs) = return ([], "FOREIGN")
+  f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
-    return (ms1' ++ ms2', pretty v <+> "=" <+> e1' <> line <> e2')
-  f args (CisAppM c src xs) = do
+    return (ms1' ++ ms2', pretty (letNamer i) <+> "=" <+> e1' <> line <> e2')
+  f args (AppM (SrcM _ src) xs) = do
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
-  f args (TrsAppM c i lang xs) = return ([], "FOREIGN")
-  f args (LamM c mv e) = do
+  f _ (SrcM t src) = return ([], pretty (srcName src))
+  f args (LamM labmdaArgs e) = do
     (ms', e') <- f args e
-    let vs = zipWith (\namedVar autoVar -> maybe autoVar (pretty . id) namedVar) mv $
-                     (zipWith (<>) (repeat "p") (map viaShow [1..]))
-    return (ms', "lambda " <+> hsep (punctuate "," vs) <> ":" <+> e' <> tupled vs)
-  f args (ListM _ es) = do
+    let vs = map (pretty . bndNamer . argId) labmdaArgs
+    return (ms', "lambda" <> hsep (punctuate "," vs) <> ":" <+> e')
+  f _ (BndVarM _ i) = return ([], pretty $ bndNamer i)
+  f _ (LetVarM _ i) = return ([], pretty $ letNamer i)
+  f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     return (concat mss', list es')
   f args (TupleM _ es) = do
@@ -108,22 +115,22 @@ translateManifold m@(Manifold _ args _ _) = (vsep . punctuate line . fst) <$> f 
     (mss', es') <- mapM (f args . snd) entries |>> unzip
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
     return (concat mss', "dict" <> tupled entries')
-  f _ (VarM c v) = return ([], pretty v)
   f _ (LogM _ x) = return ([], if x then "True" else "False")
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "None")
   f args (PackM e) = do
     (ms, e') <- f args e
-    (Unpacked t) <- typeOfExprM e
+    let (Unpacked t) = typeOfExprM e
     return (ms, "pack" <> tupled [e', typeSchema t])
   f args (UnpackM e) = do
     (ms, e') <- f args e
-    (Packed t) <- typeOfExprM e
+    let (Packed t) = typeOfExprM e
     return (ms, "unpack" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
-    return (ms, "return(" <> e' <> ")")
+    return (ms, e')
+
 
 -- divide a list of arguments based on wheither they are in a second list
 splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
@@ -149,9 +156,9 @@ makeDispatch ms = align . vsep $
   ]
   where
     entry :: ExprM -> MDoc
-    entry (Manifold _ _ i _)
+    entry (ManifoldM i _ _)
       = pretty i <> ":" <+> "m" <> pretty i <> ","
-    entry _ = error "Expected Manifold"
+    entry _ = error "Expected ManifoldM"
 
 typeSchema :: CType -> MDoc
 typeSchema c = f (unCType c)
