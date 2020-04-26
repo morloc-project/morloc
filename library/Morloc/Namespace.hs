@@ -174,8 +174,8 @@ data MorlocError
   | TypeMismatch
   | UnexpectedPattern Expr Type
   | ToplevelRedefinition
-  | NoAnnotationFound -- I don't know what this is for
-  | OtherError Text
+  | NoAnnotationFound -- I don't know what this is for (then fucking remove it)
+  | OtherError Text -- TODO: remove this option
   -- container errors
   | EmptyTuple
   | TupleSingleton
@@ -556,11 +556,19 @@ data ExprM
   = ManifoldM Int [Argument] ExprM
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
-  | ForeignCallM
-      TypeM -- the return type in calling language
-      Int -- manifold number
-      Lang -- the foreign language
-      [Argument] -- argument list, with types in calling language
+  | ForeignInterfaceM
+      TypeM -- required type in the calling language
+      ExprM -- expression in the foreign language
+  -- ^ A generic interface to an expression in another language. Currently it
+  -- will be resolved only to the specfic pool call interface type, where
+  -- system calls pass serialized information between pools in different
+  -- languages. Eventually, better methods will be added for certain pairs of
+  -- languages.
+
+  | PoolCallM
+      TypeM -- serialized return data
+      [MDoc] -- shell command components that preceed the passed data
+  -- ^ Make a system call to another language
 
   | LetM Int ExprM ExprM
   -- ^ let syntax allows fine control over order of operations in the generated
@@ -622,21 +630,22 @@ data ExprM
   -- ^ The return value of a manifold. I need this to distinguish between the
   -- values assigned in let expressions and the final return value. In some
   -- languages, this may not be necessary (e.g., R).
-  deriving(Show, Ord, Eq)
+  deriving(Show)
 
 instance HasOneLanguage ExprM where
   -- langOf :: a -> Maybe Lang
-  langOf (ManifoldM _ args e) = listToMaybe $ catMaybes (langOf e : map langOf args)
-  langOf (ForeignCallM t _ _ args) = listToMaybe $ catMaybes (langOf t : map langOf args)
-  langOf (LetM _ e1 e2) = listToMaybe $ catMaybes [langOf e1, langOf e2]
-  langOf (AppM e es ) = listToMaybe $ catMaybes (map langOf (e:es))
+  langOf (ManifoldM _ _ e) = langOf e
+  langOf (ForeignInterfaceM t _) = langOf t
+  langOf (PoolCallM t _) = langOf t
+  langOf (LetM _ _ e2) = langOf e2
+  langOf (AppM e _) = langOf e
   langOf (SrcM _ src) = Just (srcLang src) 
-  langOf (LamM args e) = listToMaybe $ catMaybes (langOf e : map langOf args)
+  langOf (LamM _ e) = langOf e
   langOf (BndVarM t _) = langOf t
   langOf (LetVarM t _) = langOf t
-  langOf (ListM t es) = listToMaybe $ catMaybes (langOf t : map langOf es)
-  langOf (TupleM t es) = listToMaybe $ catMaybes (langOf t : map langOf es)
-  langOf (RecordM t es) = listToMaybe $ catMaybes (langOf t : map langOf (map snd es))
+  langOf (ListM t _) = langOf t
+  langOf (TupleM t _) = langOf t
+  langOf (RecordM t _) = langOf t
   langOf (LogM t _) = langOf t
   langOf (NumM t _) = langOf t
   langOf (StrM t _) = langOf t

@@ -19,6 +19,7 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
 import Morloc.Pretty (prettyType)
+import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
 
@@ -88,7 +89,9 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
     --   ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     -- return (mdoc : ms', call)
     return $ error "handle partials BEFORE translation"
-  f args (ForeignCallM c i lang xs) = return ([], "FOREIGN")
+  f args (PoolCallM _ _) = return ([], "FOREIGN")
+  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+    "Foreign interfaces should have been resolved before passed to the translators"
   f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2

@@ -114,7 +114,10 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
         head = manNamer i <> tupled (map prettyArgument args)
         mdoc = block 4 head body
     in (mdoc : ms', manNamer i)
-  f (ForeignCallM t i lang args) = ([], "FOREIGN" <> tupled [viaShow lang, pretty i, list (map prettyArgument args)]) 
+  f (PoolCallM t cmds) = ([], "PoolCall" <> tupled cmds) 
+  f (ForeignInterfaceM t e) =
+    let (ms, e') = f e
+    in (ms, "ForeignInterface")
   f (LetM v e1 e2) =
     let (ms1', e1') = f e1
         (ms2', e2') = f e2
@@ -240,7 +243,8 @@ arg2typeM (PassThroughArgument _) = Passthrough
 -- element without reference to the element's parent.
 typeOfExprM :: ExprM -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
-typeOfExprM (ForeignCallM t _ _ args) = Function (map arg2typeM args) t
+typeOfExprM (ForeignInterfaceM t _) = t
+typeOfExprM (PoolCallM t _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of

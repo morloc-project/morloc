@@ -200,7 +200,10 @@ translateManifold m@(ManifoldM _ args _) =
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f args (ForeignCallM c i lang foreignArgs) = return ([], "FOREIGN", [])
+  f args (PoolCallM _ _) = return ([], "FOREIGN", [])
+
+  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+    "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LamM lambdaArgs e) = undefined
 

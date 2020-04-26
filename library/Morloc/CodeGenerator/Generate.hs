@@ -697,65 +697,80 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
+makeArgument :: Int -> Maybe CType -> Argument
+makeArgument i (Just t) = PackedArgument i t
+makeArgument i Nothing = PassThroughArgument i
+
 
 -- convert from unambiguous tree to non-segmented ExprM
 express :: SAnno GMeta One (CType, [(EVar, Argument)]) -> MorlocMonad ExprM
+express s@(SAnno (One (_, (c, _))) _) = express' c s where
 
--- primitives
-express (SAnno (One (NumS x, (c, _))) _) = return $ NumM (ctype2typeM c) x
-express (SAnno (One (LogS x, (c, _))) _) = return $ LogM (ctype2typeM c) x
-express (SAnno (One (StrS x, (c, _))) _) = return $ StrM (ctype2typeM c) x
-express (SAnno (One (UniS, (c, _))) _) = return $ NullM (Unpacked c)
+  express' :: CType -> SAnno GMeta One (CType, [(EVar, Argument)]) -> MorlocMonad ExprM
 
--- containers
-express (SAnno (One (ListS xs, (c, _))) _) = do
-  xs' <- mapM express xs |>> map unpackExprM
-  return (ListM (Packed c) xs')
-express (SAnno (One (TupleS xs, (c, _))) _) = do
-  xs' <- mapM express xs |>> map unpackExprM
-  return (TupleM (Packed c) xs')
-express (SAnno (One (RecS entries, (c, _))) _) = do
-  xs' <- mapM express (map snd entries) |>> map unpackExprM
-  return (RecordM (Packed c) (zip (map fst entries) xs'))
-express (SAnno (One (LamS vs x, (c, _))) _) = error "No LamS yet"
+  -- primitives
+  express' _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (ctype2typeM c) x
+  express' _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (ctype2typeM c) x
+  express' _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (ctype2typeM c) x
+  express' _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Unpacked c)
 
--- var
-express (SAnno (One (VarS v, (c, rs))) m) =
-  case [r | (v', r) <- rs, v == v'] of
-    [r] -> case r of
-      (PackedArgument i c) -> return $ BndVarM (Packed c) i
-      (UnpackedArgument i c) -> return $ BndVarM (Unpacked c) i
-      (PassThroughArgument i) -> return $ BndVarM Passthrough i
-    _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
+  -- containers
+  express' _ (SAnno (One (ListS xs, (c@(CType (ArrT _ [t])), _))) _) = do
+    xs' <- mapM (express' (CType t)) xs |>> map unpackExprM
+    return (ListM (Packed c) xs')
+  express' _ (SAnno (One (TupleS xs, (c@(CType (ArrT _ ts)), _))) _) = do
+    xs' <- zipWithM express' (map CType ts) xs |>> map unpackExprM
+    return (TupleM (Packed c) xs')
+  express' _ (SAnno (One (RecS entries, (c@(CType (NamT _ ts)), _))) _) = do
+    xs' <- zipWithM express' (map (CType . snd) ts) (map snd entries) |>> map unpackExprM
+    return (RecordM (Packed c) (zip (map fst entries) xs'))
 
--- Apply arguments to a sourced function
--- The CallS object may be in a foreign language. These inter-language
--- connections will be snapped apart in the segment step.
-express (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m) = do
-  -- were are applying a source function to data, so the data must be unserialized
-  xs' <- mapM express xs |>> map unpackExprM
-  let inputs = fst $ typeParts fc
-      f = SrcM (ctype2typeM fc) src
-      manifold = ManifoldM (metaId m) (map snd args)
-  return $
-    if length inputs == length xs
-    then
-      manifold $ AppM f xs'
-    else
-      let startId = maximum (map (argId . snd) args) + 1
-          lambdaTypes = drop (length xs) (map ctype2typeM inputs)
-          lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
-          lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
-      in manifold $ LamM lambdaArgs (AppM f (xs' ++ lambdaVals)) 
--- An un-applied source call
-express (SAnno (One (CallS src, (c, _))) m) =
-  let inputs = fst $ typeParts c
-      lambdaTypes = map ctype2typeM inputs
-      lambdaArgs = zipWith UnpackedArgument [0 ..] inputs
-      lambdaVals = zipWith BndVarM          lambdaTypes [0 ..]
-      f = SrcM (ctype2typeM c) src
-  in return $ ManifoldM (metaId m) lambdaArgs (AppM f lambdaVals)
+  -- lambda
+  express' _ (SAnno (One (LamS vs x@(SAnno (One (_, (c,_))) _), _)) _) = express' c x
 
+  -- var
+  express' _ (SAnno (One (VarS v, (_, rs))) m) =
+    case [r | (v', r) <- rs, v == v'] of
+      [r] -> case r of
+        (PackedArgument i c) -> return $ BndVarM (Packed c) i
+        (UnpackedArgument i c) -> return $ BndVarM (Unpacked c) i
+        (PassThroughArgument i) -> return $ BndVarM Passthrough i
+      _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
+
+  -- Apply arguments to a sourced function
+  -- The CallS object may be in a foreign language. These inter-language
+  -- connections will be snapped apart in the segment step.
+  express' pc (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m) = do
+    -- were are applying a source function to data, so the data must be unserialized
+    let inputs = fst $ typeParts fc
+        f = SrcM (ctype2typeM fc) src
+        manifold = ManifoldM (metaId m) (map snd args) . ReturnM
+        maybeForeignManifold = if langOf pc == langOf fc
+          then manifold
+          else (ForeignInterfaceM (ctype2typeM pc) . manifold)
+    xs' <- zipWithM express' inputs xs |>> map unpackExprM
+    return $
+      if length inputs == length xs
+      then
+        maybeForeignManifold $ AppM f xs'
+      else
+        let startId = maximum (map (argId . snd) args) + 1
+            lambdaTypes = drop (length xs) (map ctype2typeM inputs)
+            lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
+            lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
+        in maybeForeignManifold $ LamM lambdaArgs (AppM f (xs' ++ lambdaVals))
+  -- An un-applied source call
+  express' pc (SAnno (One (CallS src, (c, _))) m) = do
+    let inputs = fst $ typeParts c
+        lambdaTypes = map ctype2typeM inputs
+        lambdaArgs = zipWith UnpackedArgument [0 ..] inputs
+        lambdaVals = zipWith BndVarM          lambdaTypes [0 ..]
+        f = SrcM (ctype2typeM c) src
+        manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
+
+    if langOf pc == langOf c
+      then return manifold
+      else return $ ForeignInterfaceM (ctype2typeM pc) manifold
 
 -- | Move let assignments to minimize number of foreign calls.  This step
 -- should be integrated with the optimizations performed in the realize step.
@@ -763,14 +778,60 @@ letOptimize :: ExprM -> MorlocMonad ExprM
 letOptimize e = return e
 
 segment :: ExprM -> MorlocMonad [ExprM]
-segment = undefined
+segment e = segment' e |>> (\(ms,e) -> e:ms) where
 
-rehead :: ExprM -> MorlocMonad ExprM 
-rehead = undefined
+  -- This is where segmentation happens, every other match is just traversal
+  segment' (ForeignInterfaceM t e@(ManifoldM i args e')) = do
+    (ms, e') <- segment' e
+    let cmds = ["pool.xxx", viaShow i, "--"]
+    return (ms, PoolCallM (packTypeM t) cmds)
 
-makeArgument :: Int -> Maybe CType -> Argument
-makeArgument i (Just t) = PackedArgument i t
-makeArgument i Nothing = PassThroughArgument i
+  segment' (ManifoldM i args e) = do
+    (ms, e') <- segment' e
+    return (ms, ManifoldM i args e')
+
+  segment' (AppM e es) = do
+    (ms, e') <- segment' e
+    (mss, es') <- mapM segment' es |>> unzip
+    return (ms ++ concat mss, AppM e' es')
+
+  segment' (LamM args e) = do
+    (ms, e') <- segment' e
+    return (ms, LamM args e')
+
+  segment' (LetM i e1 e2) = do
+    (ms1, e1') <- segment' e1
+    (ms2, e2') <- segment' e2
+    return (ms1 ++ ms2, LetM i e1' e2')
+
+  segment' (ListM t es) = do
+    (mss, es') <- mapM segment' es |>> unzip
+    return (concat mss, ListM t es')
+
+  segment' (TupleM t es) = do
+    (mss, es') <- mapM segment' es |>> unzip
+    return (concat mss, TupleM t es')
+
+  segment' (RecordM t entries) = do
+    (mss, es') <- mapM segment' (map snd entries) |>> unzip
+    return (concat mss, RecordM t (zip (map fst entries) es'))
+
+  segment' (PackM e) = do
+    (ms, e') <- segment' e
+    return (ms, PackM e')
+
+  segment' (UnpackM e) = do
+    (ms, e') <- segment' e
+    return (ms, UnpackM e')
+
+  segment' (ReturnM e) = do
+    (ms, e') <- segment' e
+    return (ms, ReturnM e')
+
+  segment' e = return ([], e)
+
+rehead :: ExprM -> MorlocMonad ExprM
+rehead e = return e
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM] -> MorlocMonad [(Lang, [ExprM])]

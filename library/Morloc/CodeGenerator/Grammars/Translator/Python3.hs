@@ -51,16 +51,16 @@ translate srcs es = do
   return $ makePool lib includeDocs mDocs dispatch
 
 -- create an internal variable based on a unique id
-letNamer :: Int -> EVar
-letNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> MDoc
+letNamer i = "a" <> viaShow i
 
 -- create namer for manifold positional arguments
-bndNamer :: Int -> EVar
-bndNamer i = EVar ("x" <> MT.show' i)
+bndNamer :: Int -> MDoc
+bndNamer i = "x" <> viaShow i
 
 -- create a name for a manifold based on a unique id
-manNamer :: Int -> EVar
-manNamer i = EVar ("m" <> MT.show' i)
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
 
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
@@ -81,30 +81,32 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
   f pargs m@(ManifoldM i args e) = do
     (ms', body) <- f args e
-    let head = "def" <+> pretty (manNamer i) <+> tupled (map makeArgument args)
-        mdoc = block 4 head body
-        mname = pretty (manNamer i)
-    -- call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-    --   ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-    --   (([], vs), _) -> mname
-    --   ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    -- return (mdoc : ms', call)
-    return $ error "HANDLE PARTIALS BEFORE TRANSLATION"
-  f args (ForeignCallM c i lang xs) = return ([], "FOREIGN")
+    let mname = manNamer i
+        head = "def" <+> mname <> tupled (map makeArgument args) <> ":"
+        mdoc = nest 4 (vsep [head, body])
+    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
+      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      (([], vs), _) -> mname
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    return (mdoc : ms', call)
+
+  f args (PoolCallM _ _) = return ([], "FOREIGN")
+  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+    "Foreign interfaces should have been resolved before passed to the translators"
   f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
-    return (ms1' ++ ms2', pretty (letNamer i) <+> "=" <+> e1' <> line <> e2')
+    return (ms1' ++ ms2', letNamer i <+> "=" <+> e1' <> line <> e2')
   f args (AppM (SrcM _ src) xs) = do
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
   f _ (SrcM t src) = return ([], pretty (srcName src))
   f args (LamM labmdaArgs e) = do
     (ms', e') <- f args e
-    let vs = map (pretty . bndNamer . argId) labmdaArgs
+    let vs = map (bndNamer . argId) labmdaArgs
     return (ms', "lambda" <> hsep (punctuate "," vs) <> ":" <+> e')
-  f _ (BndVarM _ i) = return ([], pretty $ bndNamer i)
-  f _ (LetVarM _ i) = return ([], pretty $ letNamer i)
+  f _ (BndVarM _ i) = return ([], bndNamer i)
+  f _ (LetVarM _ i) = return ([], letNamer i)
   f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     return (concat mss', list es')
@@ -129,7 +131,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
     return (ms, "unpack" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
-    return (ms, e')
+    return (ms, "return(" <> e' <> ")")
 
 
 -- divide a list of arguments based on wheither they are in a second list
@@ -145,9 +147,9 @@ makeLambda :: [Argument] -> MDoc -> MDoc
 makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
 
 makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument v c) = pretty v
-makeArgument (UnpackedArgument v c) = pretty v
-makeArgument (PassThroughArgument v) = pretty v
+makeArgument (PackedArgument i c) = bndNamer i
+makeArgument (UnpackedArgument i c) = bndNamer i
+makeArgument (PassThroughArgument i) = bndNamer i
 
 makeDispatch :: [ExprM] -> MDoc
 makeDispatch ms = align . vsep $
@@ -157,7 +159,7 @@ makeDispatch ms = align . vsep $
   where
     entry :: ExprM -> MDoc
     entry (ManifoldM i _ _)
-      = pretty i <> ":" <+> "m" <> pretty i <> ","
+      = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 
 typeSchema :: CType -> MDoc
