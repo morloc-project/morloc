@@ -41,14 +41,14 @@ translate srcs es = do
 
   return $ makePool includeDocs mDocs
 
-letNamer :: Int -> EVar
-letNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> MDoc 
+letNamer i = "a" <> viaShow i
 
-bndNamer :: Int -> EVar
-bndNamer i = EVar ("x" <> MT.show' i)
+bndNamer :: Int -> MDoc
+bndNamer i = "x" <> viaShow i
 
-manNamer :: Int -> EVar
-manNamer i = EVar ("m" <> MT.show' i)
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
 
 serialType :: CType
 serialType = CType (VarT (TV (Just RLang) "character"))
@@ -79,33 +79,32 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
   f pargs m@(ManifoldM i args e) = do
     (ms', body) <- f args e
-    let head = pretty (manNamer i) <+> "<- function" <> tupled (map makeArgument args)
+    let head = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 head body
-        mname = pretty (manNamer i)
-    -- -- TODO: handle partials BEFORE translation
-    -- call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-    --   ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-    --   (([], vs), _) -> mname
-    --   ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    -- return (mdoc : ms', call)
-    return $ error "handle partials BEFORE translation"
+        mname = manNamer i
+    -- TODO: handle partials BEFORE translation
+    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
+      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      (([], vs), _) -> mname
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+    return (mdoc : ms', call)
   f args (PoolCallM _ _) = return ([], "FOREIGN")
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
   f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
-    return (ms1' ++ ms2', pretty (letNamer i) <+> "<-" <+> e1' <> line <> e2')
+    return (ms1' ++ ms2', letNamer i <+> "<-" <+> e1' <> line <> e2')
   f args (AppM (SrcM _ src) xs) = do
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
   f _ (SrcM t src) = return ([], pretty (srcName src))
   f args (LamM labmdaArgs e) = do
     (ms', e') <- f args e
-    let vs = map (pretty . bndNamer . argId) labmdaArgs
+    let vs = map (bndNamer . argId) labmdaArgs
     return (ms', "function" <> tupled vs <> "{" <+> e' <> "}")
-  f _ (BndVarM _ i) = return ([], pretty $ bndNamer i)
-  f _ (LetVarM _ i) = return ([], pretty $ letNamer i)
+  f _ (BndVarM _ i) = return ([], bndNamer i)
+  f _ (LetVarM _ i) = return ([], letNamer i)
   f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     x' <- return $ case t of
@@ -151,9 +150,9 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             else Right r
 
 makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument v c) = pretty v
-makeArgument (UnpackedArgument v c) = pretty v
-makeArgument (PassThroughArgument v) = pretty v
+makeArgument (PackedArgument v c) = bndNamer v
+makeArgument (UnpackedArgument v c) = bndNamer v
+makeArgument (PassThroughArgument v) = bndNamer v
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
