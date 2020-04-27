@@ -10,7 +10,7 @@ module Morloc.Config
   ( Config(..)
   , loadMorlocConfig
   , loadDefaultMorlocConfig
-  , getPoolCallBuilder
+  , buildPoolCallBase
   , getDefaultConfigFilepath
   , getDefaultMorlocTmpDir
   , makeLibSourceString
@@ -19,6 +19,7 @@ module Morloc.Config
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import Morloc.Data.Doc
 import Morloc.Namespace
+import qualified Morloc.Language as ML
 import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
@@ -79,20 +80,26 @@ loadMorlocConfig (Just configFile) = do
     else
       loadMorlocConfig Nothing 
 
--- | Attempt to create a function for building a call to a pool. The call is
--- represented as a list of arguments for a command line.
-getPoolCallBuilder ::
-     Config
+-- | Create the base call to a pool (without arguments)
+-- For example:
+--   ./pool.R 1 --
+--   ./pool.py 1 --
+--   ./pool-cpp.out 1 --
+--   ./pool.R 1 [1,2,3] true
+buildPoolCallBase
+  :: Config
   -> Lang
-  -> (MDoc -> MDoc) -- ^ a function for quoting a string
-  -> Maybe (MDoc -> MDoc -> [MDoc])
-getPoolCallBuilder _ CLang q = Just $ (\n i -> [q ("./" <> n), q i])
-getPoolCallBuilder _ CppLang q = Just $ (\n i -> [q ("./" <> n), q i])
-getPoolCallBuilder c RLang q = Just $ makeCmdPoolCall q (configLangR c)
-getPoolCallBuilder c Python3Lang q =
-  Just $ makeCmdPoolCall q (configLangPython3 c)
-getPoolCallBuilder c PerlLang q = Just $ makeCmdPoolCall q (configLangPerl c)
-getPoolCallBuilder _ MorlocLang _ = Nothing -- FIXME: add error handling
+  -> Int
+  -> Maybe [MDoc]
+buildPoolCallBase _ CLang i =
+  Just ["./" <> pretty (ML.makeExecutableName CLang "pool"), pretty i]
+buildPoolCallBase _ CppLang i =
+  Just ["./" <> pretty (ML.makeExecutableName CppLang "pool"), pretty i]
+buildPoolCallBase c RLang i =
+  Just [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool"), pretty i]
+buildPoolCallBase c Python3Lang i =
+  Just [pretty (configLangPython3 c), pretty (ML.makeExecutableName Python3Lang "pool"), pretty i]
+buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
 
 -- A key value map
 defaultFields :: IO (H.HashMap MT.Text MT.Text)
@@ -101,10 +108,6 @@ defaultFields = do
   lib <- fmap unPath getDefaultMorlocLibrary
   tmp <- fmap unPath getDefaultMorlocTmpDir
   return $ H.fromList [("home", home), ("library", lib), ("tmpdir", tmp)]
-
--- Build a simple pool call for an interpreted language
-makeCmdPoolCall :: (MDoc -> MDoc) -> Path -> (MDoc -> MDoc -> [MDoc])
-makeCmdPoolCall q prog name i = [q (pretty prog), q name, q i]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path

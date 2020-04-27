@@ -757,25 +757,44 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
   -- connections will be snapped apart in the segment step.
-  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m) = do
-    -- were are applying a source function to data, so the data must be unserialized
-    let inputs = fst $ typeParts fc
-        f = SrcM (ctype2typeM fc) src
-        manifold = ManifoldM (metaId m) (map snd args) . ReturnM
-        maybeForeignManifold = if langOf pc == langOf fc
-          then manifold
-          else (ForeignInterfaceM (ctype2typeM pc) . manifold)
-    xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
-    return $
-      if length inputs == length xs
-      then
-        maybeForeignManifold $ AppM f xs'
-      else
+  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m)
+    -- case #1
+    | sameLanguage && fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
+        return . ManifoldM (metaId m) (map snd args) $
+          ReturnM (AppM f xs')
+
+    -- case #2
+    | sameLanguage && not fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
         let startId = maximum (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map ctype2typeM inputs)
             lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
-        in maybeForeignManifold $ LamM lambdaArgs (AppM f (xs' ++ lambdaVals))
+        return . ManifoldM (metaId m) (map snd args) $
+          ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+
+    -- case #3
+    | not sameLanguage && fullyApplied = do
+          xs' <- zipWithM (express' False) inputs xs |>> map packExprM
+          return . ForeignInterfaceM (packTypeM (ctype2typeM pc)) . ManifoldM (metaId m) (map snd args) $
+            ReturnM (AppM f xs')
+
+    -- case #4
+    | not sameLanguage && not fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs |>> map packExprM
+        let startId = maximum (map (argId . snd) args) + 1
+            lambdaTypes = drop (length xs) (map ctype2typeM inputs)
+            lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
+            lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
+        return . ForeignInterfaceM (packTypeM (ctype2typeM pc)) . ManifoldM (metaId m) (map snd args) $
+          ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+    where
+      inputs = fst $ typeParts fc
+      sameLanguage = langOf pc == langOf fc
+      fullyApplied = length inputs == length xs
+      f = SrcM (ctype2typeM fc) src
+
   -- An un-applied source call
   express' _ pc (SAnno (One (CallS src, (c, _))) m) = do
     let inputs = fst $ typeParts c
@@ -800,8 +819,15 @@ segment e = segment' e |>> (\(ms,e) -> e:ms) |>> map reparameterize where
   -- This is where segmentation happens, every other match is just traversal
   segment' (ForeignInterfaceM t e@(ManifoldM i args e')) = do
     (ms, e') <- segment' e
-    let cmds = ["pool.xxx", viaShow i, "--"]
-    return (ms, PoolCallM (packTypeM t) cmds)
+    config <- MM.ask
+    case MC.buildPoolCallBase config (langOf' e') i of
+      (Just cmds) -> return (ms, PoolCallM (packTypeM t) cmds)
+      Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf' e')
+
+  segment' (PackM (AppM e@(ForeignInterfaceM _ _) es)) = do
+    (ms, e') <- segment' e
+    (mss, es') <- mapM segment' es |>> unzip
+    return (ms ++ concat mss, AppM e' (map packExprM es'))
 
   segment' (ManifoldM i args e) = do
     (ms, e') <- segment' e

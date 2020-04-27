@@ -214,6 +214,9 @@ invertExprM (UnpackM e) = do
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
+invertExprM (PoolCallM t cmds) = do
+  v <- MM.getCounter
+  return $ LetM v (PoolCallM t cmds) (LetVarM t v)
 invertExprM e = return e
 
 -- transfer all let-dependencies from y to x

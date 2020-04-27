@@ -90,17 +90,26 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call)
 
-  f args (PoolCallM _ _) = return ([], "FOREIGN")
-  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
-    "Foreign interfaces should have been resolved before passed to the translators"
   f args (LetM i e1 e2) = do
     (ms1', e1') <- (f args) e1
     (ms2', e2') <- (f args) e2
     return (ms1' ++ ms2', letNamer i <+> "=" <+> e1' <> line <> e2')
+
   f args (AppM (SrcM _ src) xs) = do
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
   f _ (SrcM t src) = return ([], pretty (srcName src))
+
+  f args (AppM (PoolCallM t cmds) xs) = do
+    (mss', xs') <- mapM (f args) xs |>> unzip
+    let call = "_morloc_foreign_call" <> tupled (cmds ++ xs')
+    return (concat mss', call)
+  f args (PoolCallM t cmds) = do
+    let call = "_morloc_foreign_call" <> tupled (map dquotes cmds)
+    return ([], call)
+
+  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+    "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LamM lambdaArgs e) = undefined
 
@@ -192,22 +201,10 @@ sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
 
-def _morloc_unpack(unpacker, jsonString, mid, filename):
-    try:
-        pyObj = unpacker(jsonString)
-    except Exception:
-        msg = "Error in %s::%s - JSON parse failure" % (filename, mid)
-        if(len(jsonString) == 0):
-            msg += ": empty document"
-        else:
-            msg += ", bad document:\n%s" % str(jsonString)
-        sys.exit(msg)
-    return(pyObj)
-
-def _morloc_foreign_call(interpreter, pool, mid, args):
+def _morloc_foreign_call(commands, args=[]):
     try:
         sysObj = subprocess.run(
-            [interpreter, pool, mid, *args],
+            commands + args,
             capture_output=True,
             check=True,
             encoding="ascii"

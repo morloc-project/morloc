@@ -88,7 +88,19 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
       (([], vs), _) -> mname
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call)
-  f args (PoolCallM _ _) = return ([], "FOREIGN")
+
+  f args (AppM (PoolCallM t cmds) xs) = do
+    (mss', xs') <- mapM (f args) xs |>> unzip
+    let cmd = dquotes (head cmds)
+        args = "c" <> tupled (map dquotes $ drop 1 cmds ++ xs')
+        call = ".morloc_foreign_call" <> tupled ([cmd, args, dquotes "_", dquotes "_"])
+    return (concat mss', call)
+  f args (PoolCallM t cmds) = do
+    let cmd = dquotes (head cmds)
+        args = "c" <> tupled (map dquotes $ drop 1 cmds)
+        call = ".morloc_foreign_call" <> tupled ([cmd, args])
+    return ([], call)
+
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
   f args (LetM i e1 e2) = do

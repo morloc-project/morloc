@@ -193,7 +193,14 @@ translateManifold m@(ManifoldM _ args _) =
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f args (PoolCallM _ _) = return ([], "FOREIGN", [])
+  f args (AppM (PoolCallM t cmds) xs) = do
+    (mss', xs', pss) <- mapM (f args) xs |>> unzip3
+    let call = "foreign_call(" <> hsep (map dquotes $ cmds ++ xs') <> ")"
+    return (concat mss', call, concat pss)
+
+  f args (PoolCallM t cmds) = do
+    let call = "foreign_call(" <> dquotes (hsep cmds) <> ")"
+    return ([], call, [])
 
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
