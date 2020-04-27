@@ -114,10 +114,10 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
         head = manNamer i <> tupled (map prettyArgument args)
         mdoc = block 4 head body
     in (mdoc : ms', manNamer i)
-  f (PoolCallM t cmds) = ([], "PoolCall" <> tupled cmds) 
+  f (PoolCallM t cmds) = ([], "PoolCallM" <> list cmds <+> "::" <+> prettyTypeM t) 
   f (ForeignInterfaceM t e) =
     let (ms, e') = f e
-    in (ms, "ForeignInterface")
+    in (ms, "ForeignInterface :: " <> prettyTypeM t)
   f (LetM v e1 e2) =
     let (ms1', e1') = f e1
         (ms2', e2') = f e2
@@ -157,6 +157,13 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   f (ReturnM e) =
     let (ms, e') = f e
     in (ms, "RETURN(" <> e' <> ")")
+
+prettyTypeM :: TypeM -> MDoc
+prettyTypeM Passthrough = "Passthrough"
+prettyTypeM (Packed c) = "Packed<" <> prettyType c <> ">"
+prettyTypeM (Unpacked c) = "Unpacked<" <> prettyType c <> ">"
+prettyTypeM (Function ts t) =
+  "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
 
 invertExprM :: ExprM -> MorlocMonad ExprM
 invertExprM (ManifoldM i args e) = do
@@ -292,7 +299,7 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
 unpackExprM :: ExprM -> ExprM
 unpackExprM e = case typeOfExprM e of
   (Packed _) -> UnpackM e
-  (Passthrough) -> error "Cannot unpack a passthrough type argument"
+  (Passthrough) -> error "Cannot unpack a passthrough typed expression"
   _ -> e
 
 packExprM :: ExprM -> ExprM

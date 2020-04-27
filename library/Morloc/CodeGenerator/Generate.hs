@@ -744,12 +744,14 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   express' isTop _ (SAnno (One (LamS vs x@(SAnno (One (_, (c,_))) _), _)) _) = express' isTop c x
 
   -- var
-  express' isTop _ (SAnno (One (VarS v, (_, rs))) m) =
+  express' isTop _ (SAnno (One (VarS v, (c, rs))) m) =
     case [r | (v', r) <- rs, v == v'] of
       [r] -> case r of
-        (PackedArgument i c) -> return $ BndVarM (Packed c) i
-        (UnpackedArgument i c) -> return $ BndVarM (Unpacked c) i
-        (PassThroughArgument i) -> return $ BndVarM Passthrough i
+        (PackedArgument i _) -> return $ BndVarM (Packed c) i
+        (UnpackedArgument i _) -> return $ BndVarM (Unpacked c) i
+        -- NOT passthrough, since it doesn't
+        -- After segmentation, this type will be used to resolve passthroughs everywhere
+        (PassThroughArgument i) -> return $ BndVarM (Packed c) i
       _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
 
   -- Apply arguments to a sourced function
@@ -793,7 +795,7 @@ letOptimize :: ExprM -> MorlocMonad ExprM
 letOptimize e = return e
 
 segment :: ExprM -> MorlocMonad [ExprM]
-segment e = segment' e |>> (\(ms,e) -> e:ms) where
+segment e = segment' e |>> (\(ms,e) -> e:ms) |>> map reparameterize where
 
   -- This is where segmentation happens, every other match is just traversal
   segment' (ForeignInterfaceM t e@(ManifoldM i args e')) = do
@@ -844,6 +846,58 @@ segment e = segment' e |>> (\(ms,e) -> e:ms) where
     return (ms, ReturnM e')
 
   segment' e = return ([], e)
+
+-- Now that the AST is segmented by language, we can resolve passed-through
+-- arguments where possible.
+reparameterize :: ExprM -> ExprM
+reparameterize e = snd (substituteBndArgs e) where 
+  substituteBndArgs :: ExprM -> ([(Int, TypeM)], ExprM) 
+  substituteBndArgs (ForeignInterfaceM i e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, ForeignInterfaceM i (snd $ substituteBndArgs e))
+  substituteBndArgs (ManifoldM i args e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, ManifoldM i (map (sub vs) args) e')
+  substituteBndArgs (AppM e es) =
+    let (vs, e') = substituteBndArgs e
+        (vss, es') = unzip $ map substituteBndArgs es
+    in (vs ++ concat vss, AppM e' es')
+  substituteBndArgs (LamM args e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, LamM (map (sub vs) args) e')
+  substituteBndArgs (LetM i e1 e2) =
+    let (vs1, e1') = substituteBndArgs e1
+        (vs2, e2') = substituteBndArgs e2
+    in (vs1 ++ vs2, LetM i e1' e2')
+  substituteBndArgs (ListM t es) =
+    let (vss, es') = unzip $ map substituteBndArgs es
+    in (concat vss, ListM t es')
+  substituteBndArgs (TupleM t es) =
+    let (vss, es') = unzip $ map substituteBndArgs es
+    in (concat vss, TupleM t es')
+  substituteBndArgs (RecordM t entries) =
+    let (vss, es') = unzip $ map substituteBndArgs (map snd entries)
+    in (concat vss, RecordM t (zip (map fst entries) es'))
+  substituteBndArgs (PackM e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, PackM e')
+  substituteBndArgs (UnpackM e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, UnpackM e')
+  substituteBndArgs (ReturnM e) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, ReturnM e')
+  substituteBndArgs e@(BndVarM t i) = ([(i, t)], e)
+  substituteBndArgs e = ([], e)
+
+  sub :: [(Int, TypeM)] -> Argument -> Argument
+  sub bnds r@(PassThroughArgument i) = case [t | (i', t) <- bnds, i == i'] of
+    ((Packed t):_) -> PackedArgument i t 
+    ((Unpacked t):_) -> UnpackedArgument i t 
+    ((Function _ _):_) -> error "You don't need to pass functions as manifold arguments"
+    (Passthrough : _) -> error "What about 'Passthrough' do you not understand?"
+    _ -> r 
+  sub _ r = r
 
 rehead :: ExprM -> MorlocMonad ExprM
 rehead (LamM _ e) = rehead e
