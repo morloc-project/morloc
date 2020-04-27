@@ -101,10 +101,9 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
     (mss', xs') <- mapM (f args) xs |>> unzip
     return (concat mss', pretty (srcName src) <> tupled xs')
   f _ (SrcM t src) = return ([], pretty (srcName src))
-  f args (LamM labmdaArgs e) = do
-    (ms', e') <- f args e
-    let vs = map (bndNamer . argId) labmdaArgs
-    return (ms', "lambda" <> hsep (punctuate "," vs) <> ":" <+> e')
+
+  f args (LamM lambdaArgs e) = undefined
+
   f _ (BndVarM _ i) = return ([], bndNamer i)
   f _ (LetVarM _ i) = return ([], letNamer i)
   f args (ListM t es) = do

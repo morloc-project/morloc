@@ -229,7 +229,7 @@ stdFunction t args =
   in return [idoc|std::function<#{showTypeM t}(#{argList})>|]
 
 stdBind :: [MDoc] -> MDoc
-stdBind xs = [idoc|std::bind(${args})"|] where
+stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 staticCast :: TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
@@ -243,9 +243,6 @@ argTypeM :: Argument -> MDoc
 argTypeM (PackedArgument _ _) = serialType
 argTypeM (UnpackedArgument _ c) = showType c
 argTypeM (PassThroughArgument _) = serialType
-
-makeLambda :: [Argument] -> MDoc -> MDoc
-makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArg args)) <> ":" <+> body
 
 -- divide a list of arguments based on wheither they are in a second list
 splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])

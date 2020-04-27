@@ -675,15 +675,18 @@ parameterize' args (SAnno (One (CallS src, c)) m) = do
 -- containers
 parameterize' args (SAnno (One (ListS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let args' = unique . concat . map sannoSnd $ xs'
+  let usedArgs = map fst . unique . concat . map sannoSnd $ xs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (ListS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupleS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let args' = unique . concat . map sannoSnd $ xs'
+  let usedArgs = map fst . unique . concat . map sannoSnd $ xs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (TupleS xs', (c, args'))) m
 parameterize' args (SAnno (One (RecS entries, c)) m) = do
   vs' <- mapM (parameterize' args) (map snd entries)
-  let args' = unique . concat . map sannoSnd $ vs'
+  let usedArgs = map fst . unique . concat . map sannoSnd $ vs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c)) m) = do
   let args' = [(v, r) | (v, r) <- args, not (elem v vs)]
@@ -694,7 +697,8 @@ parameterize' args (SAnno (One (LamS vs x, c)) m) = do
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
-  let args' = sannoSnd x' ++ (unique . concat . map sannoSnd) xs'
+  let usedArgs = map fst $ (sannoSnd x' ++ (unique . concat . map sannoSnd $ xs'))
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 makeArgument :: Int -> Maybe CType -> Argument
@@ -844,25 +848,6 @@ segment e = segment' e |>> (\(ms,e) -> e:ms) where
 rehead :: ExprM -> MorlocMonad ExprM
 rehead (LamM _ e) = rehead e
 rehead (ManifoldM i args (ReturnM e)) = return $ ManifoldM i args (ReturnM (packExprM e))
--- ManifoldM Int [Argument] ExprM
--- ForeignInterfaceM TypeM ExprM
--- PoolCallM TypeM [MDoc]
--- LetM Int ExprM ExprM
--- AppM ExprM [ExprM]
--- SrcM TypeM Source
--- LamM [Argument] ExprM
--- BndVarM TypeM Int
--- LetVarM TypeM Int
--- ListM TypeM [ExprM]
--- TupleM TypeM [ExprM]
--- RecordM TypeM [(EVar, ExprM)]
--- LogM TypeM Bool
--- NumM TypeM Scientific
--- StrM TypeM Text
--- NullM TypeM
--- PackM ExprM
--- UnpackM ExprM
--- ReturnM ExprM
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM] -> MorlocMonad [(Lang, [ExprM])]
