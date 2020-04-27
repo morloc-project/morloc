@@ -197,12 +197,12 @@ invertExprM (RecordM c entries) = do
 invertExprM (PackM e) = do
   e' <- invertExprM e
   v <- MM.getCounter
-  let t' = typeOfExprM e
+  let t' = packTypeM $ typeOfExprM e
   return $ dependsOn (LetM v (PackM (terminalOf e')) (LetVarM t' v)) e'
 invertExprM (UnpackM e) = do
   e' <- invertExprM e
   v <- MM.getCounter
-  let t' = typeOfExprM e
+  let t' = unpackTypeM $ typeOfExprM e
   return $ dependsOn (LetM v (UnpackM (terminalOf e')) (LetVarM t' v)) e'
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
@@ -271,6 +271,11 @@ packTypeM (Unpacked t) = Packed t
 packTypeM (Function ts t) = error $ "BUG: Cannot pack a function"
 packTypeM t = t
 
+unpackTypeM :: TypeM -> TypeM
+unpackTypeM (Packed t) = Unpacked t
+unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
+unpackTypeM t = t 
+
 ctype2typeM :: CType -> TypeM
 ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
   (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
@@ -283,12 +288,6 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
   where
     typeArgs (FunT t1 t2) = t1 : typeArgs t2
     typeArgs t = [t]
-
-
-unpackTypeM :: TypeM -> TypeM
-unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
-unpackTypeM (Packed t) = Unpacked t
-unpackTypeM t = t 
 
 unpackExprM :: ExprM -> ExprM
 unpackExprM e = case typeOfExprM e of

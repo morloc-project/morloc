@@ -831,7 +831,9 @@ segment e = segment' e |>> (\(ms,e) -> e:ms) where
   segment' e = return ([], e)
 
 rehead :: ExprM -> MorlocMonad ExprM
-rehead e = return e
+rehead (LamM _ e) = rehead e
+rehead (ManifoldM i args (ReturnM e)) = return $ ManifoldM i args (ReturnM (packExprM e))
+rehead _ = error "REHEAD IS BAF"
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM] -> MorlocMonad [(Lang, [ExprM])]

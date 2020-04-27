@@ -46,24 +46,24 @@ translate srcs es = do
   -- create and return complete pool script
   return $ makeMain includeDocs signatures mDocs dispatch
 
-letNamer :: Int -> EVar
-letNamer i = EVar ("a" <> MT.show' i)
+letNamer :: Int -> MDoc
+letNamer i = "a" <> viaShow i
 
-manNamer :: Int -> EVar
-manNamer i = EVar ("m" <> MT.show' i)
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
 
-bndNamer :: Int -> EVar
-bndNamer i = EVar ("x" <> MT.show' i)
+bndNamer :: Int -> MDoc
+bndNamer i = "x" <> viaShow i
 
 serialType :: MDoc
 serialType = "std::string"
 
 makeSignature :: ExprM -> MDoc
-makeSignature e@(ManifoldM _ _ _) = vsep (f e) where
+makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM -> [MDoc]
-  f m@(ManifoldM i args e) =
-    let t = typeOfExprM m
-        sig = returnType t <+> "m" <> pretty i <> tupled (map makeArg args) <> ";"
+  f (ManifoldM i args e) =
+    let t = typeOfExprM e
+        sig = showTypeM t <+> manNamer i <> tupled (map makeArg args) <> ";"
     in sig : f e
   f (LetM _ e1 e2) = f e1 ++ f e2
   f (AppM e es) = f e ++ conmap f es
@@ -76,19 +76,15 @@ makeSignature e@(ManifoldM _ _ _) = vsep (f e) where
   f (ReturnM e) = f e
   f _ = []
 
-returnType :: TypeM -> MDoc
-returnType (Unpacked c) = showType c
-returnType _ = serialType
-
 makeArg :: Argument -> MDoc
-makeArg r@(PackedArgument _ _) = serialType <+> argName r
-makeArg r@(UnpackedArgument _ c) = showType c <+> argName r
-makeArg r@(PassThroughArgument _) = serialType <+> argName r
+makeArg (PackedArgument i _) = serialType <+> bndNamer i
+makeArg (UnpackedArgument i c) = showType c <+> bndNamer i
+makeArg (PassThroughArgument i) = serialType <+> bndNamer i
 
 argName :: Argument -> MDoc
-argName (PackedArgument i _) = "x" <> pretty i
-argName (UnpackedArgument i _) = "x" <> pretty i
-argName (PassThroughArgument i) = "x" <> pretty i
+argName (PackedArgument i _) = bndNamer i
+argName (UnpackedArgument i _) = bndNamer i
+argName (PassThroughArgument i) = bndNamer i
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -126,13 +122,13 @@ translateManifold m@(ManifoldM _ args _) =
        , [MDoc] -- a list of statements that should precede this assignment
        )
 
-  f args (LetM v (PackM e1) e2) = do
+  f args (LetM i (PackM e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showUnpackedTypeM (typeOfExprM e1)
-    let schemaName = pretty v <> "_schema"
-        schema = t <+> schemaName <> ";"
-        packing = serialType <+> pretty v <+> "=" <+> "pack" <> tupled [e1', schemaName] <> ";"
+    let schemaName = letNamer i <> "_schema"
+        schema = [idoc|#{t} #{schemaName};|]
+        packing = [idoc|#{serialType} #{letNamer i} = pack(#{e1'}, #{schemaName});|]
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, packing, e2'], [])
 
   f _ (PackM _) = MM.throwError . OtherError
@@ -142,9 +138,9 @@ translateManifold m@(ManifoldM _ args _) =
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showUnpackedTypeM (typeOfExprM e1)
-    let schemaName = pretty (letNamer i) <> "_schema"
-        schema = t <+> schemaName <> ";"
-        unpacking = t <+> pretty (letNamer i) <+> "=" <+> "unpack" <> tupled [e1', schemaName] <> ";"
+    let schemaName = letNamer i <> "_schema"
+        schema = [idoc|#{t} #{schemaName};|]
+        unpacking = [idoc|#{t} #{letNamer i} = unpack(#{e1'}, #{schemaName});|]
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, unpacking, e2'], [])
   f _ (UnpackM _) = MM.throwError . OtherError
     $ "UnpackM should only appear in an assignment"
@@ -153,19 +149,16 @@ translateManifold m@(ManifoldM _ args _) =
     (ms1', e1', ps1) <- (f args) e1
     (ms2', e2', ps2) <- (f args) e2
     let t = showTypeM (typeOfExprM e1)
-        ps = ps1 ++ ps2 ++ [t <+> pretty (letNamer i) <+> "=" <+> e1' <> ";", e2']
+        ps = ps1 ++ ps2 ++ [[idoc|#{t} #{letNamer i} = #{e1'};|], e2']
     return (ms1' ++ ms2', vsep ps, [])
 
-  f args (AppM (SrcM c src) xs) = do
+  f args (AppM (SrcM (Function inputs output) src) xs) = do
     (mss', xs', pss) <- mapM (f args) xs |>> unzip3
-    let inputs = map (showTypeM . unpackTypeM . typeOfExprM') xs
-        otype = showTypeM c
+    let
         name = pretty $ srcName src
         mangledName = name <> "_fun"
-        inputBlock = "(" <> cat (punctuate "," inputs) <> ")"
-        lhs = otype <+> "(*" <> mangledName <> ")" <> inputBlock
-        rhs = "&" <> name
-        sig =  lhs <+> "=" <+> rhs <> ";";
+        inputBlock = cat (punctuate "," (map showTypeM inputs))
+        sig = [idoc|#{showTypeM output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
     where
       typeOfExprM' :: ExprM -> TypeM
@@ -180,12 +173,12 @@ translateManifold m@(ManifoldM _ args _) =
 
   f pargs m@(ManifoldM i args e) = do
     (ms', body, ps1) <- f args e
-    let t = typeOfExprM m
-        head = showTypeM t <+> pretty (manNamer i) <> tupled (map makeArgument args)
+    let t = typeOfExprM e
+        head = showTypeM t <+> manNamer i <> tupled (map makeArg args)
         mdoc = block 4 head body
-        mname = pretty (manNamer i)
+        mname = manNamer i
     (call, ps2) <- case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> return (mname <> tupled (map (pretty . bndNamer . argId) rs), [])
+      ((rs, []), _) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
       (([], vs), _) -> return (mname, [])
       ((rs, vs), _) -> do
         let v = mname <> "_fun"
@@ -194,7 +187,7 @@ translateManifold m@(ManifoldM _ args _) =
         let vs' = take
                   (length vs)
                   (map (\i -> "std::placeholders::_" <> viaShow i) [1..])
-            rs' = map (pretty . bndNamer . argId) rs
+            rs' = map (bndNamer . argId) rs
             rhs = stdBind $ castFunction : (rs' ++ vs')
             sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
         return (v, [sig])
@@ -218,8 +211,8 @@ translateManifold m@(ManifoldM _ args _) =
 
   f args (RecordM c entries) = error "C++ records not yet supported"
 
-  f _ (BndVarM c i) = return ([], pretty (bndNamer i), [])
-  f _ (LetVarM c i) = return ([], pretty (letNamer i), [])
+  f _ (BndVarM c i) = return ([], bndNamer i, [])
+  f _ (LetVarM c i) = return ([], letNamer i, [])
   f _ (LogM _ x) = return ([], if x then "true" else "false", [])
   f _ (NumM _ x) = return ([], viaShow x, [])
   f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
@@ -231,18 +224,20 @@ translateManifold m@(ManifoldM _ args _) =
 
 
 stdFunction :: TypeM -> [Argument] -> MorlocMonad MDoc
-stdFunction t args = return $
-  "std::function<" <> showTypeM t <> "(" <> cat (punctuate "," (map argTypeM args)) <> ")>"
+stdFunction t args = 
+  let argList = cat (punctuate "," (map argTypeM args))
+  in return [idoc|std::function<#{showTypeM t}(#{argList})>|]
 
 stdBind :: [MDoc] -> MDoc
-stdBind xs = "std::bind" <> "(" <> cat (punctuate "," xs) <> ")"
+stdBind xs = [idoc|std::bind(${args})"|] where
+  args = cat (punctuate "," xs)
 
 staticCast :: TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
 staticCast t args name = do
   let output = showTypeM t
       inputs = map argTypeM args
-      typedef = output <> "(*)(" <> cat (punctuate "," inputs) <> ")"
-  return $ "static_cast<" <> typedef <> ">" <> "(&" <> name <> ")"
+      argList = cat (punctuate "," inputs)
+  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name})|]
 
 argTypeM :: Argument -> MDoc
 argTypeM (PackedArgument _ _) = serialType
@@ -250,7 +245,7 @@ argTypeM (UnpackedArgument _ c) = showType c
 argTypeM (PassThroughArgument _) = serialType
 
 makeLambda :: [Argument] -> MDoc -> MDoc
-makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
+makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArg args)) <> ":" <+> body
 
 -- divide a list of arguments based on wheither they are in a second list
 splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
@@ -260,26 +255,18 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             then Left r
             else Right r
 
-makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument v c) = serialType <+> pretty v
-makeArgument (UnpackedArgument v c) = showType c <+> pretty v
-makeArgument (PassThroughArgument v) = serialType <+> pretty v
-
 makeDispatch :: [ExprM] -> MDoc
-makeDispatch = undefined
--- makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
---   where
---     makeCase :: ExprM -> MDoc
---     makeCase (ManifoldM _ args i _) =
---       let mid = pretty i
---           manifoldName = "m" <> mid
---           args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
---       in
---         (nest 4 . vsep)
---           [ "case" <+> mid <> ":"
---           , "result = " <> manifoldName <> tupled args' <> ";"
---           , "break;"
---           ]
+makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
+  where
+    makeCase :: ExprM -> MDoc
+    makeCase (ManifoldM i args _) =
+      let args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
+      in
+        (nest 4 . vsep)
+          [ "case" <+> viaShow i <> ":"
+          , "result = " <> manNamer i <> tupled args' <> ";"
+          , "break;"
+          ]
 
 showType :: CType -> MDoc
 showType = MTM.buildCType mkfun mkrec where
@@ -295,6 +282,7 @@ showTypeM (Packed t) = serialType
 showTypeM (Unpacked t) = showType t
 showTypeM (Function ts t) = "std::function<" <> showTypeM t <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
 
+-- for use in making schema, where the unpacked type is needed
 showUnpackedTypeM :: TypeM -> MorlocMonad MDoc
 showUnpackedTypeM (Packed t) = return $ showType t
 showUnpackedTypeM (Unpacked t) = return $ showType t
