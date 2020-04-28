@@ -174,7 +174,7 @@ data MorlocError
   | TypeMismatch
   | UnexpectedPattern Expr Type
   | ToplevelRedefinition
-  | NoAnnotationFound -- I don't know what this is for (then fucking remove it)
+  | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
   -- container errors
   | EmptyTuple

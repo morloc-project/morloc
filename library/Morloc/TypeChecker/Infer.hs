@@ -429,7 +429,7 @@ chainInfer lang g0 es0 = do
         -- concrete instances will be resolved and only one will be used. 
         [t'] -> chainInfer' g' es ((t', e'):xs)
         ts -> throwError . OtherError . render $
-          "Expected unique type from infer, found:" <+> list (map prettyGreenType ts)
+          "Expected unique type from infer, found (see issue #9):" <+> list (map prettyGreenType ts)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma

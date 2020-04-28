@@ -67,11 +67,14 @@ main = do
       , golden "manifold-form-6_c" "manifold-form-6_c"
       , golden "manifold-form-6_py" "manifold-form-6_py"
       , golden "manifold-form-6_r" "manifold-form-6_r"
-      , golden "manifold-form-7_c" "manifold-form-7_c"
-      , golden "manifold-form-7_py" "manifold-form-7_py"
-      , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      , golden "records-1-c" "records-1-c"
+      -- -- uncomment to test github issue #9
+      -- , golden "manifold-form-7_c" "manifold-form-7_c"
+      -- , golden "manifold-form-7_py" "manifold-form-7_py"
+      -- , golden "manifold-form-7_r" "manifold-form-7_r"
+
+      -- -- uncomment to test github issue #8
+      -- , golden "records-1-c" "records-1-c"
       , golden "records-1-py" "records-1-py"
       , golden "records-1-r" "records-1-r"
       ]

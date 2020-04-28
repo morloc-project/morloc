@@ -4,6 +4,13 @@ x.xx.x-pre [xxxx.xx.xx]
 New build system and and compiler options
 
 Major changes
+ - [ ] Add record handling for C++
+           Implementing them as tuples would be the easiest option, since I
+           would not have to add much no machinery (e.g., serialization already
+           works for tuples). It would be better in both performance (probably)
+           and readability to use structures. Before going too far, though, I
+           need to decide in general how records will work in morloc. Do I want
+           extensible records? Does order matter?
  - [ ] Remove semicolon requirement (1 day)
  - [ ] Rewrite perl manifold nexus in C++ (3 days)
        - [ ] add type annotations to printed help
@@ -17,6 +24,11 @@ Major changes
        - [ ] `morloc uninstall` command for deleting modules
        - [ ] `morloc update` command for updating modules (i.e., git pull)
        - [ ] `morloc list` command for listing all available modules
+
+Bug fixes
+ - [ ] github issue #7
+ - [ ] github issue #8
+ - [ ] github issue #9
 
 Minor changes
  - [ ] generate error handling in pools
@@ -33,41 +45,26 @@ Minor changes
 
 Implement a schema-directed composable serialization system
 
-  * * * temp * * *
-
- - [ ] substitute in idocs in translators for better readability
- - [ ] fix the argument-form-3 and manifold-form-7 problem
- - [ ] resurrect interop (and add testing)
- - [ ] add IO tests
- - [ ] add C++ record handling
-       Implementing them as tuples would be the easiest option, since I would
-       not have to add much no machinery (e.g., serialization already works for
-       tuples). It would be better in both performance (probably) and
-       readability to use structures. Before going too far, though, I need to
-       decide in general how records will work in morloc. Do I want extensible
-       records? Does order matter?
-
 Major changes
- - [x] Fully composable serialization over containers and primitives
- - [x] Improved C++ support of generic functions
- - [ ] Record support
-       - [x] R
-       - [x] Python3
-       - [ ] C++
- - [x] Refactor generator - replace old grammar system
+ * Fully composable serialization over containers and primitives
+ * Improved C++ support of generic functions
+ * Record support for R and Python3 (not C++ yet)
+ * Refactor generator - replace old grammar system
+ * Allow arguments to be passed to general functions
+   (e.g., `foo x = [x]`, where no specific language is needed) 
 
 Minor changes
- - [x] change default python3 interpreter from "python" to "python3"
- - [x] add default library and tmp paths to config handler
- - [x] test composable serialization functions in all supported languages
- - [x] allow wrapped comments in R
+ * change default python3 interpreter from "python" to "python3"
+ * add default library and tmp paths to config handler
+ * test composable serialization functions in all supported languages
+ * allow wrapped comments in R
 
 Testing - grammar directed testing
- - [x] test record handling
- - [x] remove and replace out-of-date golden tests
- - [x] systematic argument handling tests
- - [x] systematic manifold form tests
- - [.] systematic interop testing
+ * test record handling
+ * remove and replace out-of-date golden tests
+ * systematic argument handling tests
+ * systematic manifold form tests
+ * systematic interop testing
 
 0.21.0 [2020.03.31]
 -------------------
