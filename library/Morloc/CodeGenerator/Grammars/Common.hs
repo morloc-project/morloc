@@ -114,7 +114,9 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
         head = manNamer i <> tupled (map prettyArgument args)
         mdoc = block 4 head body
     in (mdoc : ms', manNamer i)
-  f (PoolCallM t cmds) = ([], "PoolCallM" <> list cmds <+> "::" <+> prettyTypeM t) 
+  f (PoolCallM t cmds args) =
+    let poolArgs = cmds ++ map prettyArgument args
+    in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
   f (ForeignInterfaceM t e) =
     let (ms, e') = f e
     in (ms, "ForeignInterface :: " <> prettyTypeM t)
@@ -214,9 +216,9 @@ invertExprM (UnpackM e) = do
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM (PoolCallM t cmds) = do
+invertExprM (PoolCallM t cmds args) = do
   v <- MM.getCounter
-  return $ LetM v (PoolCallM t cmds) (LetVarM t v)
+  return $ LetM v (PoolCallM t cmds args) (LetVarM t v)
 invertExprM e = return e
 
 -- transfer all let-dependencies from y to x
@@ -254,7 +256,7 @@ arg2typeM (PassThroughArgument _) = Passthrough
 typeOfExprM :: ExprM -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
 typeOfExprM (ForeignInterfaceM t _) = t
-typeOfExprM (PoolCallM t _) = t
+typeOfExprM (PoolCallM t _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of

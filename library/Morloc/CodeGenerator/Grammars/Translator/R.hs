@@ -89,16 +89,10 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call)
 
-  f args (AppM (PoolCallM t cmds) xs) = do
-    (mss', xs') <- mapM (f args) xs |>> unzip
-    let cmd = dquotes (head cmds)
-        args = "c" <> tupled (map dquotes $ drop 1 cmds ++ xs')
-        call = ".morloc_foreign_call" <> tupled ([cmd, args, dquotes "_", dquotes "_"])
-    return (concat mss', call)
-  f args (PoolCallM t cmds) = do
-    let cmd = dquotes (head cmds)
-        args = "c" <> tupled (map dquotes $ drop 1 cmds)
-        call = ".morloc_foreign_call" <> tupled ([cmd, args])
+  f _ (PoolCallM t cmds args) = do
+    let quotedCmds = map dquotes cmds
+        callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map makeArgument args)) <> ")"
+        call = ".morloc_foreign_call" <> tupled([head quotedCmds, callArgs, dquotes "_", dquotes "_"])
     return ([], call)
 
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $

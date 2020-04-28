@@ -193,14 +193,12 @@ translateManifold m@(ManifoldM _ args _) =
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f args (AppM (PoolCallM t cmds) xs) = do
-    (mss', xs', pss) <- mapM (f args) xs |>> unzip3
-    let call = "foreign_call(" <> hsep (map dquotes $ cmds ++ xs') <> ")"
-    return (concat mss', call, concat pss)
-
-  f args (PoolCallM t cmds) = do
-    let call = "foreign_call(" <> dquotes (hsep cmds) <> ")"
-    return ([], call, [])
+  f _ (PoolCallM t cmds args) = do
+    let bufDef = "std::ostringstream s;"
+        callArgs = map dquotes cmds ++ map argName args
+        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
+        call = [idoc|foreign_call(s.str())|] 
+    return ([], call, [bufDef, cmd])
 
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
@@ -295,6 +293,7 @@ showUnpackedTypeM _ = MM.throwError . OtherError $ "Expected packed or unpacked 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #include <iostream>
+#include <sstream>
 #include <functional>
 
 #{vsep includes}

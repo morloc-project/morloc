@@ -776,13 +776,13 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
 
     -- case #3
     | not sameLanguage && fullyApplied = do
-          xs' <- zipWithM (express' False) inputs xs |>> map packExprM
+          xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
           return . ForeignInterfaceM (packTypeM (ctype2typeM pc)) . ManifoldM (metaId m) (map snd args) $
             ReturnM (AppM f xs')
 
     -- case #4
     | not sameLanguage && not fullyApplied = do
-        xs' <- zipWithM (express' False) inputs xs |>> map packExprM
+        xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
         let startId = maximum (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map ctype2typeM inputs)
             lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
@@ -814,64 +814,69 @@ letOptimize :: ExprM -> MorlocMonad ExprM
 letOptimize e = return e
 
 segment :: ExprM -> MorlocMonad [ExprM]
-segment e = segment' e |>> (\(ms,e) -> e:ms) |>> map reparameterize where
+segment e = segment' (argsOf e) e |>> (\(ms,e) -> e:ms) |>> map reparameterize where
 
   -- This is where segmentation happens, every other match is just traversal
-  segment' (ForeignInterfaceM t e@(ManifoldM i args e')) = do
-    (ms, e') <- segment' e
+  segment' args (ForeignInterfaceM t e@(ManifoldM i args' _)) = do
+    (ms, e') <- segment' args' e
     config <- MM.ask
     case MC.buildPoolCallBase config (langOf' e') i of
-      (Just cmds) -> return (ms, PoolCallM (packTypeM t) cmds)
+      (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) cmds args)
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf' e')
 
-  segment' (PackM (AppM e@(ForeignInterfaceM _ _) es)) = do
-    (ms, e') <- segment' e
-    (mss, es') <- mapM segment' es |>> unzip
+  segment' args (PackM (AppM e@(ForeignInterfaceM _ _) es)) = do
+    (ms, e') <- segment' args e
+    (mss, es') <- mapM (segment' args) es |>> unzip
     return (ms ++ concat mss, AppM e' (map packExprM es'))
 
-  segment' (ManifoldM i args e) = do
-    (ms, e') <- segment' e
+  segment' _ (ManifoldM i args e) = do
+    (ms, e') <- segment' args e
     return (ms, ManifoldM i args e')
 
-  segment' (AppM e es) = do
-    (ms, e') <- segment' e
-    (mss, es') <- mapM segment' es |>> unzip
+  segment' args (AppM e es) = do
+    (ms, e') <- segment' args e
+    (mss, es') <- mapM (segment' args) es |>> unzip
     return (ms ++ concat mss, AppM e' es')
 
-  segment' (LamM args e) = do
-    (ms, e') <- segment' e
-    return (ms, LamM args e')
+  segment' args0 (LamM args1 e) = do
+    (ms, e') <- (segment' (args0 ++ args1)) e
+    return (ms, LamM args1 e')
 
-  segment' (LetM i e1 e2) = do
-    (ms1, e1') <- segment' e1
-    (ms2, e2') <- segment' e2
+  segment' args (LetM i e1 e2) = do
+    (ms1, e1') <- segment' args e1
+    (ms2, e2') <- segment' args e2
     return (ms1 ++ ms2, LetM i e1' e2')
 
-  segment' (ListM t es) = do
-    (mss, es') <- mapM segment' es |>> unzip
+  segment' args (ListM t es) = do
+    (mss, es') <- mapM (segment' args) es |>> unzip
     return (concat mss, ListM t es')
 
-  segment' (TupleM t es) = do
-    (mss, es') <- mapM segment' es |>> unzip
+  segment' args (TupleM t es) = do
+    (mss, es') <- mapM (segment' args) es |>> unzip
     return (concat mss, TupleM t es')
 
-  segment' (RecordM t entries) = do
-    (mss, es') <- mapM segment' (map snd entries) |>> unzip
+  segment' args (RecordM t entries) = do
+    (mss, es') <- mapM (segment' args) (map snd entries) |>> unzip
     return (concat mss, RecordM t (zip (map fst entries) es'))
 
-  segment' (PackM e) = do
-    (ms, e') <- segment' e
+  segment' args (PackM e) = do
+    (ms, e') <- segment' args e
     return (ms, PackM e')
 
-  segment' (UnpackM e) = do
-    (ms, e') <- segment' e
+  segment' args (UnpackM e) = do
+    (ms, e') <- segment' args e
     return (ms, UnpackM e')
 
-  segment' (ReturnM e) = do
-    (ms, e') <- segment' e
+  segment' args (ReturnM e) = do
+    (ms, e') <- segment' args e
     return (ms, ReturnM e')
 
-  segment' e = return ([], e)
+  segment' _ e = return ([], e)
+
+argsOf :: ExprM -> [Argument]
+argsOf (LamM args _) = args
+argsOf (ManifoldM _ args _) = args
+argsOf _ = []
 
 -- Now that the AST is segmented by language, we can resolve passed-through
 -- arguments where possible.

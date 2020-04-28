@@ -568,6 +568,7 @@ data ExprM
   | PoolCallM
       TypeM -- serialized return data
       [MDoc] -- shell command components that preceed the passed data
+      [Argument] -- argument passed to the foreign function (must be packed)
   -- ^ Make a system call to another language
 
   | LetM Int ExprM ExprM
@@ -636,7 +637,7 @@ instance HasOneLanguage ExprM where
   -- langOf :: a -> Maybe Lang
   langOf (ManifoldM _ _ e) = langOf e
   langOf (ForeignInterfaceM t _) = langOf t
-  langOf (PoolCallM t _) = langOf t
+  langOf (PoolCallM t _ _) = langOf t
   langOf (LetM _ _ e2) = langOf e2
   langOf (AppM e _) = langOf e
   langOf (SrcM _ src) = Just (srcLang src) 
