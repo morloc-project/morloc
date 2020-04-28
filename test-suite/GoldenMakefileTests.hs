@@ -36,8 +36,8 @@ makeManifoldFile path = do
     Nothing -- optional path to working diretory
     Nothing -- optional environment
     Nothing -- stdin handle
-    (Just devnull) -- stdout handle
-    (Just devnull) -- stderr handle
+    Nothing -- (Just devnull) -- stdout handle
+    Nothing -- (Just devnull) -- stderr handle
     >>= SP.waitForProcess
 
   SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]
