@@ -102,7 +102,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (SrcM t src) = return ([], pretty (srcName src))
 
   f _ (PoolCallM t cmds args) = do
-    let call = "_morloc_foreign_call" <> tupled(map dquotes cmds ++ map makeArgument args)
+    let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
     return ([], call)
 
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
@@ -198,10 +198,10 @@ sys.path = ["#{lib}"] + sys.path
 
 #{vsep includeDocs}
 
-def _morloc_foreign_call(*args):
+def _morloc_foreign_call(args):
     try:
         sysObj = subprocess.run(
-            [*args],
+            args,
             capture_output=True,
             check=True,
             encoding="ascii"
