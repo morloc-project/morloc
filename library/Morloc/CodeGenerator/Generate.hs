@@ -556,30 +556,35 @@ makeGAST _ = MM.throwError . OtherError $ "See github issue #7"
 
 -- | Serialize a simple, general data type. This type can consists only of JSON
 -- primitives and containers (lists, tuples, and records).
-generalSerial :: SAnno GMeta One () -> MorlocMonad (EVar, MDoc)
+generalSerial :: SAnno GMeta One () -> MorlocMonad (EVar, MDoc, [EVar])
 generalSerial x@(SAnno _ g) = do
-  mdoc <- generalSerial' x
+  (mdoc, vs) <- generalSerial' x
   case metaName g of
-    (Just evar) -> return (evar, mdoc)
+    (Just evar) -> return (evar, mdoc, vs)
     Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
   where
-    generalSerial' :: SAnno GMeta One () -> MorlocMonad MDoc
-    generalSerial' (SAnno (One (UniS, _)) _) = return "null"
-    generalSerial' (SAnno (One (NumS x, _)) _) = return $ viaShow x
-    generalSerial' (SAnno (One (LogS x, _)) _) = return $ if x then "true" else "false"
-    generalSerial' (SAnno (One (StrS x, _)) _) = return $ dquotes (pretty x)
+    generalSerial' :: SAnno GMeta One () -> MorlocMonad (MDoc, [EVar])
+    generalSerial' (SAnno (One (UniS, _)) _) = return ("null", [])
+    generalSerial' (SAnno (One (NumS x, _)) _) = return (viaShow x, [])
+    generalSerial' (SAnno (One (LogS x, _)) _) = return (if x then "true" else "false", [])
+    generalSerial' (SAnno (One (StrS x, _)) _) = return (dquotes (pretty x), [])
     generalSerial' (SAnno (One (ListS xs, _)) _) = do
-      xs' <- mapM generalSerial' xs
-      return $ list xs'
+      (xs', _) <- mapM generalSerial' xs |>> unzip
+      return (list xs', [])
     generalSerial' (SAnno (One (TupleS xs, _)) _) = do
-      xs' <- mapM generalSerial' xs
-      return $ list xs'
+      (xs', _)  <- mapM generalSerial' xs |>> unzip
+      return (list xs', [])
     generalSerial' (SAnno (One (RecS es, _)) _) = do
-      vs' <- mapM (generalSerial' . snd) es
+      (vs', _) <- mapM (generalSerial' . snd) es |>> unzip
       let es' = zip (map fst es) vs'
-      return . encloseSep "{" "}" "," $ map (\(k, v) -> pretty k <+> "=" <+> v) es'
-    generalSerial' _ = MM.throwError . OtherError $ "Cannot serialize this shit"
-
+      return (encloseSep "{" "}" "," (map (\(k, v) -> pretty k <+> "=" <+> v) es'), [])
+    generalSerial' (SAnno (One (LamS vs x, _)) m) = do
+      (x', _) <- generalSerial' x
+      return (x', vs)
+    generalSerial' (SAnno (One (VarS v, _)) _) = return ("<<" <> pretty v <> ">>", [])
+    generalSerial' (SAnno (One (s, _)) m) = do
+      MM.throwError . OtherError . render $
+        "Cannot serialize general type:" <+> prettyType (fromJust $ metaGType m)
 
 rewritePartials
   :: SAnno GMeta One CType

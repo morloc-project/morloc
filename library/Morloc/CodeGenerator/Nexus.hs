@@ -30,9 +30,12 @@ type FData =
 say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
-generate :: [(EVar, MDoc)] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
+fst3 :: (a,b,c) -> a
+fst3 (x,_,_) = x
+
+generate :: [(EVar, MDoc, [EVar])] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
 generate cs xs = do
-  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst) cs
+  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst3) cs
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
   return $
     Script
@@ -53,7 +56,7 @@ getFData (t, i, n) = do
       MM.throwError . GeneratorError $
       "No execution method found for language: " <> ML.showLangName lang
 
-main :: [MDoc] -> [FData] -> [(EVar, MDoc)] -> MDoc
+main :: [MDoc] -> [FData] -> [(EVar, MDoc, [EVar])] -> MDoc
 main names fdata cdata =
   [idoc|#!/usr/bin/env perl
 
@@ -103,7 +106,7 @@ mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
 mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
-usageT :: [FData] -> [(EVar, MDoc)] -> MDoc
+usageT :: [FData] -> [(EVar, MDoc, [EVar])] -> MDoc
 usageT fdata cdata =
   [idoc|
 sub usage{
@@ -117,8 +120,8 @@ usageLineT :: FData -> MDoc
 usageLineT (_, name, t) =
   [idoc|print STDERR "  #{name} [#{pretty (nargs t)}]\n";|]
 
-usageLineConst :: (EVar, MDoc) -> MDoc
-usageLineConst (v, d) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
+usageLineConst :: (EVar, MDoc, [EVar]) -> MDoc
+usageLineConst (v, d, _) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
 
 functionT :: FData -> MDoc
 functionT (cmd, name, t) =
@@ -136,18 +139,21 @@ sub call_#{name}{
     n = nargs t
     poolcall = hsep $ cmd : map argT [0 .. (n - 1)]
 
-functionCT :: (EVar, MDoc) -> MDoc
-functionCT (v, d) =
+functionCT :: (EVar, MDoc, [EVar]) -> MDoc
+functionCT (v, d, vs) =
   [idoc|
 sub call_#{pretty v}{
-    if(scalar(@_) != 0){
-        print STDERR "Expected 0 arguments to '#{pretty v}', given " . 
-        scalar(@_) . "\n";
+    if(scalar(@_) != #{pretty $ length vs}){
+        print STDERR "Expected #{pretty $ length vs} arguments to '#{pretty v}', given " . scalar(@_) . "\n";
         exit 1;
     }
-    return ('#{d}' . "\n");
+    my $x = '#{d}';
+    #{replacements}
+    return ($x . "\n");
 }
 |]
+  where
+    replacements = vsep (zipWith (\v i-> [idoc|$x =~ s/\Q<<#{pretty v}>>/$_[#{viaShow i}]/g;|]) vs [0..])
 
 argT :: Int -> MDoc
 argT i = "$_[" <> pretty i <> "]"
