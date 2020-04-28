@@ -202,20 +202,13 @@ def _morloc_foreign_call(args):
     try:
         sysObj = subprocess.run(
             args,
-            capture_output=True,
-            check=True,
-            encoding="ascii"
+            stdout=subprocess.PIPE,
+            check=True
         )
     except subprocess.CalledProcessError as e:
         sys.exit(str(e))
 
-    jsonString = sysObj.stdout
-    jsonLog = sysObj.stderr
-
-    if(len(jsonLog) > 0):
-      print(jsonLog, file=sys.stderr)
-
-    return(jsonString)
+    return(sysObj.stdout.decode("ascii"))
 
 #{vsep manifolds}
 
