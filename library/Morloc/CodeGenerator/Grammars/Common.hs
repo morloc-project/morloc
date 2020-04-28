@@ -9,22 +9,24 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Common
   ( SAnno(..)
   , SExpr(..)
-  , SerialMap(..)
   , GMeta(..)
-  , Argument(..)
-  , argName
   , argType
   , unpackArgument
   , prettyArgument
+  , argId
   , One(..)
   , Many(..)
-  , Grammar(..)
-  , TryDoc(..)
-  , GeneralFunction(..)
-  , GeneralAssignment(..)
-  , UnpackerDoc(..)
-  , ForeignCallDoc(..)
-  , PoolMain(..)
+  , prettyExprM
+  , typeOfExprM
+  , invertExprM
+  , typeParts
+  , ctype2typeM
+  , packTypeM
+  , packExprM
+  , unpackExprM
+  , unpackTypeM
+  , nargsTypeM
+  , arg2typeM
   ) where
 
 import Morloc.Data.Doc
@@ -64,7 +66,6 @@ data SExpr g f c
   | StrS MT.Text
   | RecS [(EVar, SAnno g f c)]
   | CallS Source
-  | ForeignS Int Lang [EVar]
 
 -- | Description of the general manifold
 data GMeta = GMeta {
@@ -75,147 +76,239 @@ data GMeta = GMeta {
   , metaConstraints :: Set.Set Constraint
 } deriving (Show, Ord, Eq)
 
-data SerialMap = SerialMap {
-    packers :: Map.Map CType (Name, Path)
-  , unpackers :: Map.Map CType (Name, Path)
-} deriving (Show, Ord, Eq)
-
--- | An argument that is passed to a manifold
-data Argument
-  = PackedArgument EVar CType (Maybe Name)
-  -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
-  -- argument name (e.g., x), 2) argument type (e.g., double), and 3) packer
-  -- name (e.g., packDouble).  The packer name is optional. Some types may not
-  -- be serializable. This is OK, so long as they are only used in functions of
-  -- the same language.
-  | UnpackedArgument EVar CType (Maybe Name)
-  -- ^ A native argument with the same parameters as above (except #3 is the
-  -- unpacker name, e.g., unpackDouble)
-  | PassThroughArgument EVar
-  -- ^ A serialized argument that is untyped in the current language. It cannot
-  -- be unpacked, but will be passed eventually to a foreign argument where it
-  -- does have a concrete type.
-  deriving (Show, Ord, Eq)
 
 prettyArgument :: Argument -> MDoc
-prettyArgument (PackedArgument v c n) =
-  "Packed" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
-prettyArgument (UnpackedArgument v c n) =
-  "Unpacked" <> "<" <> maybe "" pretty n <> ">" <+> pretty v <+> parens (prettyType c)
-prettyArgument (PassThroughArgument v) =
-  "PassThrough" <+> pretty v
+prettyArgument (PackedArgument i c) =
+  "Packed" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (UnpackedArgument i c) =
+  "Unpacked" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (PassThroughArgument i) =
+  "PassThrough" <+> "x" <> pretty i
 
-argName :: Argument -> EVar
-argName (PackedArgument v _ _) = v
-argName (UnpackedArgument v _ _) = v
-argName (PassThroughArgument v) = v
+argId :: Argument -> Int
+argId (PackedArgument i _) = i
+argId (UnpackedArgument i _) = i
+argId (PassThroughArgument i ) = i
 
 argType :: Argument -> Maybe CType
-argType (PackedArgument _ t _) = Just t
-argType (UnpackedArgument _ t _) = Just t
+argType (PackedArgument _ t) = Just t
+argType (UnpackedArgument _ t) = Just t
 argType (PassThroughArgument _) = Nothing
 
 unpackArgument :: Argument -> Argument
-unpackArgument (PackedArgument v t n) = UnpackedArgument v t n
+unpackArgument (PackedArgument i t) = UnpackedArgument i t
 unpackArgument x = x
 
-data Grammar =
-  Grammar
-    { gLang :: Lang
-    , gSerialType :: CType
-    , gAssign :: GeneralAssignment -> MDoc
-    , gCall :: MDoc -> [MDoc] -> MDoc
-    , gFunction :: GeneralFunction -> MDoc
-    , gSignature :: GeneralFunction -> MDoc
-    , gId2Function :: Integer -> MDoc
-    , gCurry :: MDoc -- function name
-             -> [MDoc] -- arguments that are partially applied
-             -> Int -- number of remaining arguments
-             -> MDoc
-    , gComment :: [MDoc] -> MDoc
-    , gReturn :: MDoc -> MDoc
-    , gQuote :: MDoc -> MDoc
-    , gImport :: MDoc -> MDoc -> MDoc
-    , gPrepImport :: Path -> MorlocMonad MDoc
-    ---------------------------------------------
-    , gNull :: MDoc
-    , gBool :: Bool -> MDoc
-    , gReal :: Scientific -> MDoc
-    , gList :: [MDoc] -> MDoc
-    , gTuple :: [MDoc] -> MDoc
-    , gRecord :: [(MDoc, MDoc)] -> MDoc
-    ---------------------------------------------
-    , gIndent :: MDoc -> MDoc
-    , gUnpacker :: UnpackerDoc -> MDoc
-    , gTry :: TryDoc -> MDoc
-    , gForeignCall :: ForeignCallDoc -> MDoc
-    , gSwitch
-        :: (([EVar], GMeta, CType) -> MDoc)
-        -> (([EVar], GMeta, CType) -> MDoc)
-        -> [([EVar], GMeta, CType)]
-        -> MDoc
-        -> MDoc
-        -> MDoc
-    , gCmdArgs :: [MDoc] -- ^ infinite list of main arguments (e.g. "argv[2]")
-    , gShowType :: CType -> MDoc
-    , gMain :: PoolMain -> MorlocMonad MDoc
-    }
+nargsTypeM :: TypeM -> Int
+nargsTypeM (Function ts _) = length ts
+nargsTypeM _ = 0
 
-data GeneralAssignment =
-  GeneralAssignment
-    { gaType :: Maybe MDoc
-    , gaName :: MDoc
-    , gaValue :: MDoc
-    , gaArg :: Maybe MData
-    }
-  deriving (Show)
+prettyExprM :: ExprM -> MDoc
+prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
+  manNamer :: Int -> MDoc
+  manNamer i = "m" <> pretty i
 
-data GeneralFunction =
-  GeneralFunction
-    { gfComments :: [MDoc]
-    , gfReturnType :: Maybe MDoc -- ^ concrete return type
-    , gfName :: MDoc -- ^ function name
-    , gfArgs :: [(Maybe MDoc, MDoc)] -- ^ (variable concrete type, variable name)
-    , gfBody :: MDoc
-    }
-  deriving (Show)
+  f :: ExprM -> ([MDoc], MDoc)
+  f (ManifoldM i args e) =
+    let (ms', body) = f e
+        head = manNamer i <> tupled (map prettyArgument args)
+        mdoc = block 4 head body
+    in (mdoc : ms', manNamer i)
+  f (PoolCallM t cmds args) =
+    let poolArgs = cmds ++ map prettyArgument args
+    in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
+  f (ForeignInterfaceM t e) =
+    let (ms, e') = f e
+    in (ms, "ForeignInterface :: " <> prettyTypeM t)
+  f (LetM v e1 e2) =
+    let (ms1', e1') = f e1
+        (ms2', e2') = f e2
+    in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
+  f (AppM fun xs) =
+    let (ms', fun') = f fun
+        (mss', xs') = unzip $ map f xs
+    in (ms' ++ concat mss', fun' <> tupled xs')
+  f (SrcM c src) = ([], pretty (srcName src))
+  f (LamM args e) =
+    let (ms', e') = f e
+        vsFull = map prettyArgument args
+        vsNames = map (\r -> "x" <> pretty (argId r)) args
+    in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
+  f (BndVarM c i) = ([], "x" <> pretty i)
+  f (LetVarM c i) = ([], "a" <> pretty i)
+  f (ListM _ es) =
+    let (mss', es') = unzip $ map f es
+    in (concat mss', list es')
+  f (TupleM _ es) =
+    let (mss', es') = unzip $ map f es
+    in (concat mss', tupled es')
+  f (RecordM c entries) =
+    let (mss', es') = unzip $ map (f . snd) entries
+        entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+    in (concat mss', "{" <> tupled entries' <> "}")
+  f (LogM _ x) = ([], if x then "true" else "false")
+  f (NumM _ x) = ([], viaShow x)
+  f (StrM _ x) = ([], dquotes $ pretty x)
+  f (NullM _) = ([], "null")
+  f (PackM e) =
+    let (ms, e') = f e
+    in (ms, "PACK" <> tupled [e'])
+  f (UnpackM e) =
+    let (ms, e') = f e
+    in (ms, "UNPACK" <> tupled [e'])
+  f (ReturnM e) =
+    let (ms, e') = f e
+    in (ms, "RETURN(" <> e' <> ")")
 
-data TryDoc =
-  TryDoc
-    { tryCmd :: MDoc -- ^ The function we attempt to run
-    , tryRet :: MDoc -- ^ A name for the returned variable?
-    , tryArgs :: [MDoc] -- ^ Arguments passed to function
-    , tryMid :: MDoc -- ^ The name of the calling manifold (for debugging)
-    , tryFile :: MDoc -- ^ The file where the issue occurs (for debugging)
-    }
-  deriving (Show)
+prettyTypeM :: TypeM -> MDoc
+prettyTypeM Passthrough = "Passthrough"
+prettyTypeM (Packed c) = "Packed<" <> prettyType c <> ">"
+prettyTypeM (Unpacked c) = "Unpacked<" <> prettyType c <> ">"
+prettyTypeM (Function ts t) =
+  "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
 
-data UnpackerDoc =
-  UnpackerDoc
-    { udValue :: MDoc -- ^ The expression that will be unpacked
-    , udUnpacker :: MDoc -- ^ The function for unpacking the value
-    , udMid :: MDoc -- ^ Manifold name for debugging messages
-    , udFile :: MDoc -- ^ File name for debugging messages
-    }
-  deriving (Show)
+invertExprM :: ExprM -> MorlocMonad ExprM
+invertExprM (ManifoldM i args e) = do
+  MM.startCounter
+  e' <- invertExprM e
+  return $ ManifoldM i args e'
+invertExprM (LetM v e1 e2) = do
+  e2' <- invertExprM e2
+  return $ LetM v e1 e2'
+invertExprM e@(AppM f es) = do
+  f' <- invertExprM f
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let t = typeOfExprM e
+      appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
+  return $ foldl dependsOn appM' (f':es')
+-- you can't pull the body of the lambda out into a let statement
+invertExprM f@(LamM _ _) = return f
+invertExprM (ListM c es) = do
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (TupleM c es) = do
+  es' <- mapM invertExprM es
+  v <- MM.getCounter
+  let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (RecordM c entries) = do
+  es' <- mapM invertExprM (map snd entries)
+  v <- MM.getCounter
+  let entries' = zip (map fst entries) (map terminalOf es')
+      e = LetM v (RecordM c entries') (LetVarM c v)
+      e' = foldl (\x y -> dependsOn x y) e es'
+  return e'
+invertExprM (PackM e) = do
+  e' <- invertExprM e
+  v <- MM.getCounter
+  let t' = packTypeM $ typeOfExprM e
+  return $ dependsOn (LetM v (PackM (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (UnpackM e) = do
+  e' <- invertExprM e
+  v <- MM.getCounter
+  let t' = unpackTypeM $ typeOfExprM e
+  return $ dependsOn (LetM v (UnpackM (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (ReturnM e) = do
+  e' <- invertExprM e
+  return $ dependsOn (ReturnM (terminalOf e')) e'
+invertExprM (PoolCallM t cmds args) = do
+  v <- MM.getCounter
+  return $ LetM v (PoolCallM t cmds args) (LetVarM t v)
+invertExprM e = return e
 
-data ForeignCallDoc =
-  ForeignCallDoc
-    { fcdForeignPool :: MDoc -- ^ the name of the foreign pool (e.g., "R.pool")
-    , fcdForeignExe :: MDoc -- ^ path to the foreign executable
-    , fcdMid :: MDoc -- ^ the function integer identifier
-    , fcdArgs :: [MDoc] -- ^ CLI arguments passed to foreign function
-    , fcdCall :: [MDoc] -- ^ make a list of CLI arguments from first two
-                        -- inputs -- since fcdArgs will likely be
-                        -- variables, they are not included in this call.
-    , fcdFile :: MDoc -- ^ for debugging
-    }
-  deriving (Show)
+-- transfer all let-dependencies from y to x
+--
+-- Technically, I should check for variable reuse in the let-chain and
+-- resolve conflicts be substituting in fresh variable names. However, for
+-- now, I will trust that my name generator created names that are unique
+-- within the manifold.
+dependsOn :: ExprM -> ExprM -> ExprM
+dependsOn x (LetM v e y) = LetM v e (dependsOn x y)
+dependsOn x _ = x
 
-data PoolMain =
-  PoolMain
-    { pmSources :: [MDoc]
-    , pmSignatures :: [MDoc]
-    , pmPoolManifolds :: [MDoc]
-    , pmDispatchManifold :: MDoc -> MDoc -> MDoc
-    }
+-- get the rightmost expression in a let-tree
+terminalOf :: ExprM -> ExprM
+terminalOf (LetM _ _ e) = terminalOf e
+terminalOf e = e
+
+typeOfTypeM :: TypeM -> Maybe CType 
+typeOfTypeM t = fmap CType (typeOfTypeM' t) where
+  typeOfTypeM' Passthrough = Nothing
+  typeOfTypeM' (Packed c) = Just (typeOf c)
+  typeOfTypeM' (Unpacked c) = Just (typeOf c)
+  typeOfTypeM' (Function [] t) = typeOfTypeM' t
+  typeOfTypeM' (Function (ti:ts) to) = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
+
+arg2typeM :: Argument -> TypeM
+arg2typeM (PackedArgument _ c) = Packed c
+arg2typeM (UnpackedArgument _ c) = Unpacked c
+arg2typeM (PassThroughArgument _) = Passthrough
+
+-- | Get the manifold type of an expression
+--
+-- The ExprM must have exactly enough type information to infer the type of any
+-- element without reference to the element's parent.
+typeOfExprM :: ExprM -> TypeM
+typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
+typeOfExprM (ForeignInterfaceM t _) = t
+typeOfExprM (PoolCallM t _ _) = t
+typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+typeOfExprM (AppM f xs) = case typeOfExprM f of
+  (Function inputs output) -> case drop (length xs) inputs of
+    [] -> output
+    inputs' -> Function inputs' output
+  _ -> error "COMPILER BUG: application of non-function"
+typeOfExprM (SrcM t _) = t
+typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
+typeOfExprM (BndVarM t _) = t
+typeOfExprM (LetVarM t _) = t
+typeOfExprM (ListM t _) = t
+typeOfExprM (TupleM t _) = t
+typeOfExprM (RecordM t _) = t
+typeOfExprM (LogM t _) = t
+typeOfExprM (NumM t _) = t
+typeOfExprM (StrM t _) = t
+typeOfExprM (NullM t) = t
+typeOfExprM (PackM e) = packTypeM (typeOfExprM e)
+typeOfExprM (UnpackM e) = unpackTypeM (typeOfExprM e)
+typeOfExprM (ReturnM e) = typeOfExprM e
+
+packTypeM :: TypeM -> TypeM
+packTypeM (Unpacked t) = Packed t
+packTypeM (Function ts t) = error $ "BUG: Cannot pack a function"
+packTypeM t = t
+
+unpackTypeM :: TypeM -> TypeM
+unpackTypeM (Packed t) = Unpacked t
+unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
+unpackTypeM t = t 
+
+ctype2typeM :: CType -> TypeM
+ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
+  (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
+ctype2typeM c = Unpacked c
+
+-- get input types to a function type
+typeParts :: CType -> ([CType], CType)
+typeParts c = case reverse . map CType $ typeArgs (unCType c) of
+  (t:ts) -> (reverse ts, t)
+  where
+    typeArgs (FunT t1 t2) = t1 : typeArgs t2
+    typeArgs t = [t]
+
+unpackExprM :: ExprM -> ExprM
+unpackExprM e = case typeOfExprM e of
+  (Packed _) -> UnpackM e
+  (Passthrough) -> error "Cannot unpack a passthrough typed expression"
+  _ -> e
+
+packExprM :: ExprM -> ExprM
+packExprM e = case typeOfExprM e of
+  (Unpacked _) -> PackM e
+  (Function _ _) -> error "Cannot pack a function"
+  _ -> e

@@ -1,0 +1,7 @@
+import pybase (add, mul)
+
+export foo
+
+-- full application with variable passing
+-- cannot optimize out this manifold
+foo x = add x (mul 20 x);

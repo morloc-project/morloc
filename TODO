@@ -1,7 +1,7 @@
 # Features
 
  [ ] composable serialization/deserialization functions
- [ ] composable default types
+ [x] composable default types
  [ ] auto-casting
  [ ] side-effect handling
  [x] higher-order functions
@@ -16,12 +16,12 @@
    [x] set function parameters in external config (currying)
 
  * add support for more languages
-   [ ] bash
-   [+] C
    [+] R
    [+] Python3
-   [ ] Haskell
    [+] C++
+   [.] C
+   [ ] bash
+   [ ] Haskell
    [ ] Perl
    [ ] Julia
 

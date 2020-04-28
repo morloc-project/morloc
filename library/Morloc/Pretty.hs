@@ -13,6 +13,7 @@ module Morloc.Pretty
   , prettyGreenType
   , prettyGammaIndex
   , prettyScream
+  , prettyLinePrefixes
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -170,6 +171,10 @@ prettyGreenType t = annotate typeStyle (prettyType t)
 
 prettyScream :: MT.Text -> Doc AnsiStyle
 prettyScream x = annotate screamStyle (pretty x)
+
+prettyLinePrefixes :: MT.Text -> Doc ann -> Doc ann 
+prettyLinePrefixes prefix d =
+  pretty . MT.unlines . map (\l -> prefix <> l) $ MT.lines (render d)
 
 class PrettyType a where
   prettyType :: a -> Doc ann

@@ -1,0 +1,8 @@
+import pybase (add)
+import cppbase (mul)
+
+export py2c
+export c2py
+
+py2c x y = add (mul x y) 100;
+c2py x y = mul (add x y) 100;

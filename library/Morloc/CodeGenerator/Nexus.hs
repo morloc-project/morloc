@@ -21,20 +21,21 @@ import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 
--- | A function for building a pool call
-type PoolBuilder
-   = MDoc -- pool name
-   -> MDoc -- pool id
-   -> [MDoc] -- output list of CLI arguments
-
-type FData = (PoolBuilder, MDoc, Int, MDoc, MDoc)
+type FData =
+  ( MDoc -- pool call command, (e.g., "RScript pool.R 4 --")
+  , MDoc -- subcommand name
+  , Type -- argument type
+  )
 
 say :: Doc ann -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
 
-generate :: [(EVar, MDoc)] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
+fst3 :: (a,b,c) -> a
+fst3 (x,_,_) = x
+
+generate :: [(EVar, MDoc, [EVar])] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
 generate cs xs = do
-  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst) cs
+  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst3) cs
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
   return $
     Script
@@ -48,21 +49,14 @@ generate cs xs = do
 getFData :: (CType, Int, EVar) -> MorlocMonad FData
 getFData (t, i, n) = do
   config <- MM.ask
-  let mid' = pretty i
-      lang = langOf' t
-  case MC.getPoolCallBuilder config lang id of
-    (Just call') ->
-      return $
-      ( call'
-      , pretty n
-      , nargs (typeOf t)
-      , pretty (ML.makeExecutableName lang "pool")
-      , mid')
+  let lang = langOf' t
+  case MC.buildPoolCallBase config lang i of
+    (Just cmds) -> return (hsep cmds, pretty n, typeOf t)
     Nothing ->
       MM.throwError . GeneratorError $
       "No execution method found for language: " <> ML.showLangName lang
 
-main :: [MDoc] -> [FData] -> [(EVar, MDoc)] -> MDoc
+main :: [MDoc] -> [FData] -> [(EVar, MDoc, [EVar])] -> MDoc
 main names fdata cdata =
   [idoc|#!/usr/bin/env perl
 
@@ -112,7 +106,7 @@ mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
 
 mapEntryT n = [idoc|#{n} => \&call_#{n}|]
 
-usageT :: [FData] -> [(EVar, MDoc)] -> MDoc
+usageT :: [FData] -> [(EVar, MDoc, [EVar])] -> MDoc
 usageT fdata cdata =
   [idoc|
 sub usage{
@@ -123,18 +117,18 @@ sub usage{
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name, nargs, _, _) =
-  [idoc|print STDERR "  #{name} [#{pretty nargs}]\n";|]
+usageLineT (_, name, t) =
+  [idoc|print STDERR "  #{name} [#{pretty (nargs t)}]\n";|]
 
-usageLineConst :: (EVar, MDoc) -> MDoc
-usageLineConst (v, d) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
+usageLineConst :: (EVar, MDoc, [EVar]) -> MDoc
+usageLineConst (v, d, _) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
 
 functionT :: FData -> MDoc
-functionT (call', name, nargs, pool, mid') =
+functionT (cmd, name, t) =
   [idoc|
 sub call_#{name}{
-    if(scalar(@_) != #{pretty nargs}){
-        print STDERR "Expected #{pretty nargs} arguments to '#{name}', given " . 
+    if(scalar(@_) != #{pretty n}){
+        print STDERR "Expected #{pretty n} arguments to '#{name}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
@@ -142,20 +136,24 @@ sub call_#{name}{
 }
 |]
   where
-    poolcall = hsep $ (call' pool mid') ++ map argT [0 .. (nargs - 1)]
+    n = nargs t
+    poolcall = hsep $ cmd : map argT [0 .. (n - 1)]
 
-functionCT :: (EVar, MDoc) -> MDoc
-functionCT (v, d) =
+functionCT :: (EVar, MDoc, [EVar]) -> MDoc
+functionCT (v, d, vs) =
   [idoc|
 sub call_#{pretty v}{
-    if(scalar(@_) != 0){
-        print STDERR "Expected 0 arguments to '#{pretty v}', given " . 
-        scalar(@_) . "\n";
+    if(scalar(@_) != #{pretty $ length vs}){
+        print STDERR "Expected #{pretty $ length vs} arguments to '#{pretty v}', given " . scalar(@_) . "\n";
         exit 1;
     }
-    return ('#{d}' . "\n");
+    my $x = '#{d}';
+    #{replacements}
+    return ($x . "\n");
 }
 |]
+  where
+    replacements = vsep (zipWith (\v i-> [idoc|$x =~ s/\Q<<#{pretty v}>>/$_[#{viaShow i}]/g;|]) vs [0..])
 
 argT :: Int -> MDoc
 argT i = "$_[" <> pretty i <> "]"

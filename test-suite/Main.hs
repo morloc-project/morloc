@@ -14,40 +14,67 @@ main = do
       [ unitTypeTests
       , typeOrderTests
       , propertyTypeTests
-      , golden "simple C++" "1_cpp"
-      , golden "simple R" "2_r"
-      , golden "basic math" "3_math"
-      , golden "more basic math" "3_math2"
-      , golden "C++ map function" "4_map"
-      , golden "C++ more complex map function" "4_map-more"
-      , golden "nested C++ map functions" "5_nested"
-      , golden "C++ / R interop" "6_interop"
-      , golden "C++ quadratic eqation" "7_quadraticEq"
-      , golden "C++ currying" "8_partials-cpp"
-      , golden "R currying" "8_partials-r"
-      , golden "Python currying" "8_partials-py"
-      , golden "Export of a simple curried function" "11_curry"
-      , golden "interop" "9_minimal-interop"
-      , golden "IO test with Unit type" "10_io"
-      , golden "IO test with interop over generics" "10_io-interop"
-      , golden "Top identity" "12_top-container-identity"
-      , golden "Top list" "12_top-container-list"
-      , golden "Top tuple" "12_top-container-tuple"
-      , golden "Top tuple with app" "12_top-container-app"
-      , golden "0th form" "13_t0"
-      , golden "1th form" "13_t1"
-      , golden "2th form" "13_t2"
-      , golden "3th form" "13_t3"
-      , golden "4th form C++" "13_t4_c"
-      , golden "4th form Python3" "13_t4_py"
-      , golden "4th form R" "13_t4_r"
-      , golden "5th form C++" "13_t5_c"
-      , golden "5th form Python3" "13_t5_py"
-      , golden "5th form R" "13_t5_r"
-      , golden "6th form C++" "13_t6_c"
-      , golden "6th form Python3" "13_t6_py"
-      , golden "6th form R" "13_t6_r"
-      , golden "7th form C++" "13_t7_c"
-      , golden "7th form Python3" "13_t7_py"
-      , golden "7th form R" "13_t7_r"
+
+      , golden "argument-form-1-c" "argument-form-1-c"
+      , golden "argument-form-1-py" "argument-form-1-py"
+      , golden "argument-form-1-r" "argument-form-1-r"
+
+      , golden "argument-form-2-c" "argument-form-2-c"
+      , golden "argument-form-2-py" "argument-form-2-py"
+      , golden "argument-form-2-r" "argument-form-2-r"
+
+      -- -- uncomment to test github issue #7
+      -- , golden "argument-form-3-c" "argument-form-3-c"
+      -- , golden "argument-form-3-py" "argument-form-3-py"
+      -- , golden "argument-form-3-r" "argument-form-3-r"
+
+      , golden "argument-form-4-c" "argument-form-4-c"
+      , golden "argument-form-4-py" "argument-form-4-py"
+      , golden "argument-form-4-r" "argument-form-4-r"
+
+      , golden "argument-form-5-c" "argument-form-5-c"
+      , golden "argument-form-5-py" "argument-form-5-py"
+      , golden "argument-form-5-r" "argument-form-5-r"
+
+      , golden "argument-form-6-c" "argument-form-6-c"
+      , golden "argument-form-6-py" "argument-form-6-py"
+      , golden "argument-form-6-r" "argument-form-6-r"
+
+      , golden "argument-form-7-c" "argument-form-7-c"
+      , golden "argument-form-7-py" "argument-form-7-py"
+      , golden "argument-form-7-r" "argument-form-7-r"
+
+      , golden "argument-form-8-c" "argument-form-8-c"
+      , golden "argument-form-8-py" "argument-form-8-py"
+      , golden "argument-form-8-r" "argument-form-8-r"
+
+      , golden "interop-1-py" "interop-1-py"
+      , golden "interop-1-r" "interop-1-r"
+
+      , golden "manifold-form-0" "manifold-form-0"
+      , golden "manifold-form-0x" "manifold-form-0x"
+      , golden "manifold-form-1" "manifold-form-1"
+      , golden "manifold-form-2" "manifold-form-2"
+      , golden "manifold-form-2x" "manifold-form-2x"
+      , golden "manifold-form-3" "manifold-form-3"
+      , golden "manifold-form-3x" "manifold-form-3x"
+      , golden "manifold-form-4_c" "manifold-form-4_c"
+      , golden "manifold-form-4_py" "manifold-form-4_py"
+      , golden "manifold-form-4_r" "manifold-form-4_r"
+      , golden "manifold-form-5_c" "manifold-form-5_c"
+      , golden "manifold-form-5_py" "manifold-form-5_py"
+      , golden "manifold-form-5_r" "manifold-form-5_r"
+      , golden "manifold-form-6_c" "manifold-form-6_c"
+      , golden "manifold-form-6_py" "manifold-form-6_py"
+      , golden "manifold-form-6_r" "manifold-form-6_r"
+
+      -- -- uncomment to test github issue #9
+      -- , golden "manifold-form-7_c" "manifold-form-7_c"
+      -- , golden "manifold-form-7_py" "manifold-form-7_py"
+      -- , golden "manifold-form-7_r" "manifold-form-7_r"
+
+      -- -- uncomment to test github issue #8
+      -- , golden "records-1-c" "records-1-c"
+      , golden "records-1-py" "records-1-py"
+      , golden "records-1-r" "records-1-r"
       ]

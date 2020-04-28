@@ -1,0 +1,8 @@
+import rbase (add)
+import cppbase (mul)
+
+export r2c
+export c2r
+
+r2c x y = add (mul x y) 100;
+c2r x y = mul (add x y) 100;

@@ -1,6 +1,0 @@
-import math (add, mul)
-
-export quadraticEq
-
-quadraticEq :: Num -> Num -> Num -> Num -> Num;
-quadraticEq a b c x = add (mul a (mul x x)) (add (mul b x) c);

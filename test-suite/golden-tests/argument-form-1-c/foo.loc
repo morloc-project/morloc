@@ -1,0 +1,7 @@
+import cppbase (add, mul)
+
+export foo
+
+-- full application with constants
+-- can potentially optimize out this manifold
+foo x = add x (mul 2 20);

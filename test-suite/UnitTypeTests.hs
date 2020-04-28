@@ -22,6 +22,13 @@ main (m:ms)
   | moduleName m == (MVar "Main") = moduleBody m
   | otherwise = main ms
 
+mainDecMap :: [Module] -> [(EVar, Expr)]
+mainDecMap [] = error "Missing main"
+mainDecMap [m] = Map.toList $ moduleDeclarationMap m
+mainDecMap (m:ms)
+  | moduleName m == (MVar "Main") = Map.toList $ moduleDeclarationMap m
+  | otherwise = mainDecMap ms
+
 -- get the toplevel type of a fully annotated expression
 typeof :: [Expr] -> [Type]
 typeof es = f' . head . reverse $ es
@@ -88,6 +95,15 @@ exprTestFull msg code expCode =
   result <- API.runStack 0 (typecheck (readProgram Nothing code))
   case unres result of
     (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
+    (Left err) -> error (show err)
+
+-- assert the exact expressions
+exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
+exprTestFullDec msg code expCode =
+  testCase msg $ do
+  result <- API.runStack 0 (typecheck (readProgram Nothing code))
+  case unres result of
+    (Right e) -> assertEqual "" (mainDecMap e) expCode
     (Left err) -> error (show err)
 
 exprTestBad :: String -> T.Text -> TestTree
@@ -818,7 +834,7 @@ unitTypeTests =
         , "f c :: int -> int;"
         , "foo f 42"
         ])
-      [arrc RLang "list" [varc RLang "numeric", varc RLang "numeric"]]
+      [arrc RLang "tuple" [varc RLang "numeric", varc RLang "numeric"]]
     , assertTerminalType
       "declarations represent all realizations"
       (T.unlines
@@ -851,28 +867,6 @@ unitTypeTests =
         , "foo"
         ])
       [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
-
-    -- -- What exactly does this mean? what should a function "be"? Will the types
-    -- -- even work out to those of a single language? For `foo x y = f (g x) y`,
-    -- -- x will be passed the G (the manifold wrapping g) where it will be
-    -- -- unpacked into Lg (the language of g); y will be passed to f and be
-    -- -- unwrapped as an argument in Lf. But what is the type of `foo`? Indeed, x
-    -- -- could also be passed to more functions, where it takes on values in more
-    -- -- languages. Surely, the type of foo must be general. Declarations do
-    -- -- not, in general, have concrete types.
-    -- , assertTerminalType
-    --   "declaration type does not have useful terms"
-    --   (T.unlines
-    --     [ "source Cpp (\"sum\");"
-    --     , "source Cpp (\"fibonacci\");"
-    --     , "sum :: [Num] -> Num;"
-    --     , "sum R :: vector numeric -> numeric;"
-    --     , "fibonacci :: Num -> [Num];"
-    --     , "fibonacci Cpp :: \"int\" -> \"vector<$1>\" \"double\";"
-    --     , "sqrtfibmean n = sum (fibonacci n);"
-    --     , "sqrtfibmean"
-    --     ])
-    --   [fun [num, num]]
 
     , assertTerminalExprWithAnnot
       "all internal concrete and general types are right"
@@ -911,4 +905,44 @@ unitTypeTests =
         "every sub-expression should be annotated in output"
         "f :: forall a . a -> Bool; f 42"
         "f :: forall a . a -> Bool; (((f :: Num -> Bool) (42 :: Num)) :: Bool)"
+
+    -- -- TODO: resurrect to test github issue #7
+    -- , exprTestFullDec
+    --     "concrete types should be inferred for declared variables"
+    --     (T.unlines
+    --       [ "id :: Num -> Num;"
+    --       , "id C :: int -> int;"
+    --       , "id x = x;"
+    --       , "y = 40;"
+    --       , "foo = id y;"
+    --       ]
+    --     )
+    --     [ (EVar "foo",
+    --       AnnE (AppE
+    --           (AnnE (VarE (EVar "id")) [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
+    --           (AnnE (VarE (EVar "y")) [num, varc CLang "int"])
+    --                                      -- ^ The purpose of this test is to assert that the above
+    --                                      -- type is defined. As of commit 'c31660a0', `y` was assigned
+    --                                      -- only the general type Num.
+    --         )
+    --       [num, varc CLang "int"]
+    --       )
+    --     , (EVar "id",
+    --       AnnE (LamE (EVar "x")
+    --           (AnnE (VarE (EVar "x"))
+    --             [num, varc CLang "int"]))
+    --         [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
+    --     , (EVar "y", AnnE (NumE 40.0) [num])
+    --     ]
+
+    -- default list evaluation of arguments
+    , assertTerminalType
+        "can infer multiple argument types"
+        (T.unlines
+          [ "ith :: [Num] -> Num -> Num;"
+          , "ith R :: [numeric] -> numeric -> numeric;"
+          , "snd x = ith x 2;"
+          , "snd [1,2,3];"
+          ])
+        [num, varc RLang "numeric"]
     ]
