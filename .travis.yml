@@ -1,12 +1,17 @@
 sudo: false
 
-language: c
+language: python
+python:
+ - "3.4"
+ - "3.5"
+ - "3.6"
+ - "3.7"
+ - "3.8"
 
 addons:
     apt:
         packages:
         - r-base
-        - python3
         - ghc
         - git
         - libgsl0-dev
