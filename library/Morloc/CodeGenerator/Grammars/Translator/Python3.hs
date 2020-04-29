@@ -121,7 +121,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f args (RecordM c entries) = do
     (mss', es') <- mapM (f args . snd) entries |>> unzip
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return (concat mss', "dict" <> tupled entries')
+    return (concat mss', "OrderedDict" <> tupled entries')
   f _ (LogM _ x) = return ([], if x then "True" else "False")
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
@@ -179,7 +179,7 @@ typeSchema c = f (unCType c)
     entry (v, t) = pretty v <> "=" <> f t
 
     dict :: [MDoc] -> MDoc
-    dict xs = "dict" <> lst xs
+    dict xs = "OrderedDict" <> lst xs
 
     lst :: [MDoc] -> MDoc
     lst xs = encloseSep "(" ")" "," xs
@@ -193,6 +193,7 @@ makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 import sys
 import subprocess
 import json
+from collections import OrderedDict
 
 sys.path = ["#{lib}"] + sys.path
 
