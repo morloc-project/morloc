@@ -1,6 +1,0 @@
-map Cpp :: forall a b . (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b;
-sum Cpp :: Num a => forall a . "std::vector<$1>" a -> a;
-sqrt Cpp :: double -> double;
-mul Cpp :: Num a => forall a . a -> a -> a;
-square x = mul x x;
-rms xs = sqrt (sum (map square xs)) ;

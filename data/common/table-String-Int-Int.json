@@ -1,8 +1,0 @@
-{
-    "type"  : "Table +cols={A::String, B::Int, C::Int}"
-  , "value" : {
-          "A" : ["foo","bar","baz"]
-        , "B" : [1,2,3]
-        , "C" : [4,5,6]
-      }
-}

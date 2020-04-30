@@ -1,8 +1,0 @@
-{
-    "type" : "Graph"
-  , "value" : {
-          "edgelist" : [[1,2],[2,3],[3,1]]
-        , "edgeattr" : [ [[1,2], {"relation" : "knows", "weight" : 2.34}] ]
-        , "nodeattr" : [ [1, {"name" : "Bob", "foo" : null}] ]
-      }
-}

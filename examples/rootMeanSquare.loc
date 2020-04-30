@@ -1,8 +1,0 @@
-import math (sqrt, sum, mul)
-import cppbase (map)
-
-export square;
-export rms;
-
-square x = mul x x;
-rms xs = sqrt (sum (map square xs));
