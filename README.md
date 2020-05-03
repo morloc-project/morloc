@@ -13,6 +13,8 @@ the far future, I hope to develop `morloc` into a query language that returns
 optimized programs from an infinite "library" of functions and compositions of
 functions.
 
+See [the manual](https://morloc-project.github.io/docs) for more information.
+
 ## Status
 
 This project is under active development and may change radically without
