@@ -1,0 +1,4 @@
+import rbase (plotPDF)
+import cppbase (map, add)
+export foo
+foo xs = plotPDF (map (add 2) xs) "foo.pdf";

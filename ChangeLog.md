@@ -34,11 +34,11 @@ Minor changes
 
 Bug fixes and code cleanup
 
-Bug fixes
- - [ ] github issue #7
- - [ ] github issue #9
- - [ ] github issue #10
- - [ ] github issue #11
+Bug fixes / tests
+ - [ ] [x] github issue #7
+ - [ ] [x] github issue #9
+ - [x] [x] github issue #10
+ - [ ] [x] github issue #11
 
 Minor changes
  - [ ] generate error handling in pools

@@ -52,6 +52,8 @@ main = do
 
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
+      -- see github issue #11
+      , golden "interop-2" "import-2"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
