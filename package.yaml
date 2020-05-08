@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.22.0
+version:          0.23.0-dev
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>

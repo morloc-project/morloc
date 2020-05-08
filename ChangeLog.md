@@ -1,10 +1,10 @@
-x.xx.x-pre [xxxx.xx.xx]
+x.xx.x [2020.xx.xx]
 -------------------
 
 New build system and and compiler options
 
 Major changes
- - [ ] Add record handling for C++
+ - [ ] Add record handling for C++ (github issue #8)
            Implementing them as tuples would be the easiest option, since I
            would not have to add much no machinery (e.g., serialization already
            works for tuples). It would be better in both performance (probably)
@@ -25,19 +25,28 @@ Major changes
        - [ ] `morloc update` command for updating modules (i.e., git pull)
        - [ ] `morloc list` command for listing all available modules
 
+Minor changes
+ - [ ] meaningful error messages
+ - [ ] resurrect property tests
+
+
+0.23.0 [2020.05.xx]
+
+Bug fixes and code cleanup
+
 Bug fixes
  - [ ] github issue #7
- - [ ] github issue #8
  - [ ] github issue #9
+ - [ ] github issue #10
+ - [ ] github issue #11
 
 Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
- - [ ] resurrect property tests
  - [ ] generate error handling in pools
  - [ ] address all compiler warnings
  - [ ] add linter
- - [ ] resurrect property tests
+ - [ ] clean up haddock documentation
 
 
 0.22.0 [2020.04.28]
