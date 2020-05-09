@@ -15,7 +15,6 @@ copyright:        "2020 Zebulun Arendsee"
 extra-source-files:
   - README.md
   - ChangeLog.md
-  - data/common/*.json
 
 dependencies:
   - base >= 4.7 && < 5
