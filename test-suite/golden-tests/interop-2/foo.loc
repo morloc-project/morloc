@@ -1,4 +1,6 @@
-import rbase (plotPDF)
+import rbase (plotVectorPDF)
 import cppbase (map, add)
+
 export foo
-foo xs = plotPDF (map (add 2) xs) "foo.pdf";
+
+foo xs = plotVectorPDF (map (add 2) xs) "foo.pdf";

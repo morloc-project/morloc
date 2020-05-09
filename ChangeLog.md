@@ -38,7 +38,7 @@ Bug fixes / tests
  - [ ] [x] github issue #7
  - [ ] [x] github issue #9
  - [x] [x] github issue #10
- - [ ] [x] github issue #11
+ - [x] [x] github issue #11
 
 Minor changes
  - [ ] generate error handling in pools

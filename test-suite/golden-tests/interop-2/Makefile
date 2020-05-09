@@ -5,4 +5,4 @@ all:
 	ls *pdf > obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -f nexus* pool* *pdf

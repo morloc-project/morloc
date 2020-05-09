@@ -52,8 +52,7 @@ main = do
 
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
-      -- see github issue #11
-      , golden "interop-2" "import-2"
+      , golden "interop-2" "interop-2"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
@@ -77,12 +76,8 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
+      , golden "records-1-c" "records-1-c"
+      , golden "records-1-py" "records-1-py"
       -- -- see github issue #8
-      -- , golden "records-1-c" "records-1-c"
-      -- , golden "records-1-py" "records-1-py"
       -- , golden "records-1-r" "records-1-r"
-
-      -- -- TODO: add in these tests
-      -- see github issue #10
-      -- see github issue #11
       ]
