@@ -541,6 +541,7 @@ data TypeM
   | Packed CType -- ^ serialized data that may be unpacked in this language
   | Unpacked CType
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
+  | ForallM [TVar] TypeM
   deriving(Show, Eq, Ord)
 
 instance HasOneLanguage TypeM where
