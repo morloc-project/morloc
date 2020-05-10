@@ -551,7 +551,9 @@ makeGAST (SAnno (Many [(AppS f xs, _)]) m) = do
 makeGAST (SAnno (Many [(RecS es, _)]) m) = do
   vs <- mapM (makeGAST . snd) es
   return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
-makeGAST _ = MM.throwError . OtherError $ "See github issue #7"
+makeGAST (SAnno (Many [(CallS src, cs)]) m)
+  = MM.throwError . OtherError . render
+  $ "Function calls by cannot be used in general code:" <+> pretty (srcName src)
 
 
 -- | Serialize a simple, general data type. This type can consists only of JSON

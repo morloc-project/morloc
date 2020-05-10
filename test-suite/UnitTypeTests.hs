@@ -660,7 +660,7 @@ unitTypeTests =
           ]
     , expectError
         "fail on redundant module declaration"
-        (MultipleModuleDeclarations (MVar "Foo")) $
+        (MultipleModuleDeclarations [MVar "Foo"]) $
         T.unlines ["module Foo {x = 42};", "module Foo {x = 88}"]
     , expectError "fail on self import"
         (SelfImport (MVar "Foo")) $

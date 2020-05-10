@@ -181,7 +181,7 @@ data MorlocError
   | TupleSingleton
   | EmptyRecord
   -- module errors
-  | MultipleModuleDeclarations MVar
+  | MultipleModuleDeclarations [MVar]
   | BadImport MVar EVar
   | CannotFindModule MVar
   | CyclicDependency

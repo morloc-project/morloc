@@ -34,16 +34,31 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
-  mods <- foldM insertWithCheck Map.empty [(moduleName m, m) | m <- ms]
+
+  checkForMultipleDeclarations
+
   -- graph :: Map MVar (Set MVar)
   let graph = Map.fromList $ map mod2pair ms
-  mods' <- path graph
-  mods'' <- case mapM (flip Map.lookup $ mods) mods' of
-    (Just mods'') -> typecheckModules (Map.empty) mods''
-    Nothing -> throwError $ OtherError "bad thing #1"
-  let modmap = Map.fromList [(moduleName m, m) | m <- mods'']
+
+  -- list modules ordered such that all dependencies of each module are defined
+  -- in modules that appear earlier in the list
+  -- ms' :: [Module]
+  ms' <- sequence . map (\v -> find (\m -> moduleName m == v) ms) <$> path graph
+
+  -- mods :: [Module]
+  mods <- case ms' of
+    (Just mods') -> typecheckModules (Map.empty) mods'
+    Nothing -> throwError $ OtherError "No modules found"
+
+  let modmap = Map.fromList [(moduleName m, m) | m <- mods]
   return (Map.elems . Map.map (addImportMap modmap) $ modmap)
   where
+
+    checkForMultipleDeclarations :: Stack ()
+    checkForMultipleDeclarations = case duplicates (map moduleName ms) of
+      [] -> return ()
+      mvars -> throwError $ MultipleModuleDeclarations mvars
+
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m =
       (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
@@ -112,13 +127,6 @@ typecheckModules mg (m:ms) = do
             , moduleTypeMap = privateMap
             , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
             } : mods)
-
-insertWithCheck ::
-     Map.Map MVar Module -> (MVar, Module) -> Stack (Map.Map MVar Module)
-insertWithCheck ms (v, m) =
-  case Map.insertLookupWithKey (\_ _ y -> y) v m ms of
-    (Just m', _) -> throwError $ MultipleModuleDeclarations (moduleName m')
-    (Nothing, ms') -> return ms'
 
 -- produce a path from sources to pools, die on cycles
 path :: (Ord a) => Map.Map a (Set.Set a) -> Stack [a]

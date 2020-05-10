@@ -1,7 +1,7 @@
 import Test.Tasty
 import qualified System.Directory as SD
 
-import PropertyTypeTests (propertyTypeTests)
+import PropertyTests (propertyTests)
 import UnitTypeTests (typeOrderTests, unitTypeTests)
 import GoldenMakefileTests (goldenMakefileTest)
 
@@ -13,7 +13,7 @@ main = do
       "Morloc tests"
       [ unitTypeTests
       , typeOrderTests
-      , propertyTypeTests
+      , propertyTests
 
       , golden "import-1" "import-1"
 
@@ -76,8 +76,8 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      , golden "records-1-c" "records-1-c"
       , golden "records-1-py" "records-1-py"
+      , golden "records-1-r" "records-1-r"
       -- -- see github issue #8
-      -- , golden "records-1-r" "records-1-r"
+      -- , golden "records-1-c" "records-1-c"
       ]

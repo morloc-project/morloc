@@ -127,7 +127,7 @@ extendModularGamma ::
   -> ModularGamma -- ^ the previous object
   -> Stack (Map.Map EVar TypeSet, ModularGamma)
 extendModularGamma g m mg
-  | Map.member v mg = throwError $ MultipleModuleDeclarations v
+  | Map.member v mg = throwError $ MultipleModuleDeclarations [v]
   | otherwise = return $ (Map.fromList privateMap, Map.insert v publicMap mg)
   where
     v = moduleName m
