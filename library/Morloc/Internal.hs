@@ -14,7 +14,6 @@ module Morloc.Internal
   , conmap
   , unique
   , duplicates
-  , isSorted
   , module Data.Maybe
   , module Data.Either
   , module Data.List.Extra
@@ -118,17 +117,12 @@ unique xs = unique' Set.empty xs where
 
 -- | Build an ordered list of duplicated elements
 duplicates :: Ord a => [a] -> [a] 
-duplicates xs = filter isDuplicated xs where
+duplicates xs = unique $ filter isDuplicated xs where
   -- countMap :: Ord a => Map.Map a Int
   countMap = Map.fromList . map (\(k:ks) -> (k, length ks + 1)) . group . sort $ xs
 
   -- isDuplicated :: Ord a => a -> Bool
   isDuplicated k = fromJust (Map.lookup k countMap) > 1
-
-isSorted :: Ord a => [a] -> Bool
-isSorted [] = True
-isSorted [x] = True
-isSorted (x:(y:xs)) = x < y && isSorted (y:xs) 
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>
