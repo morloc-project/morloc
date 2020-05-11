@@ -10,6 +10,9 @@ Stability   : experimental
 module Morloc.TypeChecker.Internal
   ( (+>)
   , (++>)
+  , Renameable(..)
+  , Applicable(..)
+  , Typed(..) 
   , access1
   , access2
   , accessWith1
@@ -43,6 +46,7 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.TypeChecker.PartialOrder as P
 
 class HasManyLanguages a where
   langsOf :: Gamma -> a -> [Maybe Lang]
@@ -70,6 +74,96 @@ instance HasManyLanguages Expr where
     langsOf' g (StrE _) = []
     langsOf' g (RecE entries) = concat . map (langsOf' g . snd) $ entries
 
+class Renameable a where
+  rename :: a -> Stack a
+  unrename :: a -> a
+
+instance Renameable Expr where
+  rename = mapT' rename
+  unrename = mapT unrename
+
+instance Renameable Type where
+  rename t@(VarT _) = return t
+  rename (ExistT v ts ds) = ExistT <$> pure v <*> (mapM rename ts) <*> (mapM rename ds)
+  rename (Forall v t) = do
+    v' <- rename v
+    t' <- rename (P.substitute v (VarT v') t)
+    return $ Forall v' t'
+  rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
+  rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
+  rename (NamT v rs) =
+    NamT <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
+
+  unrename (VarT v) = VarT (unrename v)
+  unrename (ExistT v ts ds) = ExistT v (map unrename ts) (map unrename ds)
+  unrename (Forall v t) = Forall (unrename v) (unrename t)
+  unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
+  unrename (ArrT v ts) = ArrT v (map unrename ts)
+  unrename (NamT v rs) = NamT v [(x, unrename t) | (x, t) <- rs]
+
+instance Renameable DefaultType where
+  rename dt = fmap DefaultType $ rename (unDefaultType dt) 
+  unrename = DefaultType . unrename . unDefaultType
+
+instance Renameable TVar where
+  unrename (TV l t) = TV l . head $ MT.splitOn "." t
+  rename = newqul
+
+
+class Applicable a where
+  apply :: Gamma -> a -> a
+
+-- | Apply a context to a type (See Dunfield Figure 8).
+instance Applicable Type where
+  -- [G]a = a
+  apply _ a@(VarT _) = a
+  -- [G](A->B) = ([G]A -> [G]B)
+  apply g (FunT a b) = FunT (apply g a) (apply g b)
+  -- [G]Forall a.a = forall a. [G]a
+  apply g (Forall x a) = Forall x (apply g a)
+  -- [G[a=t]]a = [G[a=t]]t
+  apply g (ExistT v ts ds) =
+    case lookupT v g of
+      -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
+      (Just t') -> apply g t' -- reduce an existential; strictly smaller term
+      Nothing -> ExistT v (map (apply g) ts) (map (DefaultType . apply g . unDefaultType) ds)
+  apply g (ArrT v ts) = ArrT v (map (apply g) ts)
+  apply g (NamT v rs) = NamT v (map (\(n, t) -> (n, apply g t)) rs)
+
+instance Applicable Expr where
+  apply g e = mapT (apply g) e
+
+instance Applicable EType where
+  apply g e = e { etype = apply g (etype e) }
+
+
+class Typed a where
+  toType :: Maybe Lang -> a -> Maybe Type
+  fromType :: Maybe Lang -> Type -> a
+
+instance Typed EType where
+  toType lang e
+    | (langOf . etype) e == lang = Just (etype e)
+    | otherwise = Nothing
+  fromType lang t =
+    EType
+      { etype = t
+      , eprop = Set.empty
+      , econs = Set.empty
+      }
+
+
+instance Typed TypeSet where
+  toType Nothing (TypeSet e _) = e >>= toType Nothing
+  toType lang (TypeSet _ ts) = case filter (\e -> (langOf . etype) e == lang) ts of 
+    [ ] -> Nothing
+    [e] -> Just (etype e)
+    _ -> error "a typeset can contain only one instance of each language"
+
+  fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
+  fromType lang t = TypeSet Nothing [fromType lang t]
+
+
 
 serialConstraint :: Type -> Type -> Stack ()
 serialConstraint t1 t2 = do
@@ -93,15 +187,10 @@ decDepth = do
 getDepth :: Stack Int
 getDepth = CMS.gets stateDepth
 
+-- | Pass type and source information from imported modules to the current module.
 importFromModularGamma :: ModularGamma -> Module -> Stack Gamma
 importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
   where
-    lookupOneImport ::
-         MVar -> Map.Map EVar TypeSet -> (EVar, EVar) -> Stack GammaIndex
-    lookupOneImport v typemap (n, alias) =
-      case Map.lookup n typemap of
-        (Just t) -> return $ AnnG (VarE alias) t
-        Nothing -> throwError $ BadImport v alias
     lookupImport :: Import -> Stack Gamma
     lookupImport imp
       | v == moduleName m = throwError $ SelfImport v
@@ -117,6 +206,17 @@ importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
           (Just xs, Just g') -> mapM (lookupOneImport v g') xs
       where
         v = importModuleName imp
+
+    lookupOneImport
+      :: MVar
+      -> Map.Map EVar TypeSet
+      -> (EVar, EVar)
+      -> Stack GammaIndex
+    lookupOneImport v typemap (n, alias) =
+      case Map.lookup n typemap of
+        (Just t) -> return $ AnnG (VarE alias) t
+        Nothing -> throwError $ BadImport v alias
+
 
 -- | Update a ModularGamma object with all exported terms from a module. Return
 -- the resulting map was well as a private map containing all terms (whether
