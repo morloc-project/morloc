@@ -30,8 +30,7 @@ import Data.Text (Text)
 -- are languages that can be sourced (Python, R and C). Perl is currently used
 -- only in generating the nexus file.
 data Lang
-  = MorlocLang -- FIXME: MorlocLang should not be in this list,
-  | Python3Lang
+  = Python3Lang
   | RLang
   | CLang
   | CppLang
@@ -41,9 +40,6 @@ data Lang
 -- | very rough function overhead costs that can be used when no benchmark info is available
 -- `Nothing` indicates that the language pair are not interoperable
 pairwiseCost :: Lang -> Lang -> Maybe Int
--- morloc lang cannot be used in the generator
-pairwiseCost MorlocLang _ = Nothing
-pairwiseCost _ MorlocLang = Nothing
 -- functional overhead in each language
 pairwiseCost CLang       CLang       = Just 1
 pairwiseCost CppLang     CppLang     = Just 1
@@ -61,7 +57,7 @@ pairwiseCost _ RLang       = Just 1000000
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang
-parseExtension "loc" = Just MorlocLang
+parseExtension "loc" = Nothing
 parseExtension "py" = Just Python3Lang
 parseExtension "R" = Just RLang
 parseExtension "c" = Just CLang
@@ -73,7 +69,6 @@ parseExtension _ = Nothing
 
 -- | Create an extension for a given language
 makeExtension :: Lang -> Text
-makeExtension MorlocLang = "loc"
 makeExtension Python3Lang = "py"
 makeExtension RLang = "R"
 makeExtension CLang = "c"
@@ -83,7 +78,6 @@ makeExtension PerlLang = "pl"
 -- | Create the name of a given language. This is the internal standard name
 -- for the language and the string language name used in the RDF.
 showLangName :: Lang -> Text
-showLangName MorlocLang = "morloc"
 showLangName Python3Lang = "python3"
 showLangName RLang = "R"
 showLangName CLang = "C"
@@ -92,8 +86,6 @@ showLangName PerlLang = "Perl"
 
 -- | Read the name of a given language and try to translate it
 readLangName :: Text -> Maybe Lang
-readLangName "morloc" = Just MorlocLang
-readLangName "Morloc" = Just MorlocLang
 readLangName "python" = Just Python3Lang
 readLangName "python3" = Just Python3Lang
 readLangName "py" = Just Python3Lang

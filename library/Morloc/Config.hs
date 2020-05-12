@@ -88,16 +88,16 @@ loadMorlocConfig (Just configFile) = do
 --   ./pool.R 1 [1,2,3] true
 buildPoolCallBase
   :: Config
-  -> Lang
+  -> Maybe Lang
   -> Int
   -> Maybe [MDoc]
-buildPoolCallBase _ CLang i =
+buildPoolCallBase _ (Just CLang) i =
   Just ["./" <> pretty (ML.makeExecutableName CLang "pool"), pretty i]
-buildPoolCallBase _ CppLang i =
+buildPoolCallBase _ (Just CppLang) i =
   Just ["./" <> pretty (ML.makeExecutableName CppLang "pool"), pretty i]
-buildPoolCallBase c RLang i =
+buildPoolCallBase c (Just RLang) i =
   Just [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool"), pretty i]
-buildPoolCallBase c Python3Lang i =
+buildPoolCallBase c (Just Python3Lang) i =
   Just [pretty (configLangPython3 c), pretty (ML.makeExecutableName Python3Lang "pool"), pretty i]
 buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
 
