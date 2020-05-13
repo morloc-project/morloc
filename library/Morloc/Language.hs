@@ -12,6 +12,7 @@ module should serve as the starting place for adding a new language.
 -}
 module Morloc.Language
   ( Lang(..)
+  , mapLang
   , parseExtension
   , makeExtension
   , showLangName
@@ -36,6 +37,16 @@ data Lang
   | CppLang
   | PerlLang
   deriving (Ord, Eq, Show)
+
+-- | Map a function over each supported language
+mapLang :: (Lang -> a) -> [a]
+mapLang f =
+  [ f Python3Lang
+  , f RLang
+  , f CLang
+  , f CppLang
+  , f PerlLang
+  ]
 
 -- | very rough function overhead costs that can be used when no benchmark info is available
 -- `Nothing` indicates that the language pair are not interoperable

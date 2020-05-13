@@ -61,8 +61,8 @@ instance HasManyLanguages Expr where
     langsOf' _ (Signature _ t) = [langOf t] 
     langsOf' g (Declaration _ e) = langsOf' g e
     langsOf' g UniE = [] 
-    langsOf' g v@(VarE _) = case lookupE v g of  
-      (Just ts) -> langsOf g ts
+    langsOf' g (VarE v) = case lookupE v g of  
+      (Just (_, ts)) -> langsOf g ts
       Nothing -> []
     langsOf' g (ListE es) = concat . map (langsOf' g) $ es
     langsOf' g (TupleE es) = concat . map (langsOf' g) $ es
@@ -233,6 +233,7 @@ extendModularGamma g m mg
     v = moduleName m
     es = moduleExports m
     privateMap = [(e,t) | AnnG (VarE e) t <- g]
+               ++ [(v,t) | AnnG (Declaration v _) t <- g]
     publicMap = Map.fromList [(e,t) | (e,t) <- privateMap, Set.member e es]
 
 mapT :: (Type -> Type) -> Expr -> Expr
@@ -275,12 +276,15 @@ cut i (x:xs)
   | otherwise = cut i xs
 
 -- | Look up a type annotated expression
-lookupE :: Expr -> Gamma -> Maybe TypeSet
+lookupE :: EVar -> Gamma -> Maybe (Expr, TypeSet)
 lookupE _ [] = Nothing
-lookupE e ((AnnG e' t):gs)
-  | e == e' = Just t
-  | otherwise = lookupE e gs
-lookupE e (_:gs) = lookupE e gs
+lookupE v ((AnnG (Declaration v' e) t):gs)
+  | v == v' = Just (e, t)
+  | otherwise = lookupE v gs
+lookupE v ((AnnG e@(VarE v') t):gs)
+  | v == v' = Just (e, t)
+  | otherwise = lookupE v gs
+lookupE v (_:gs) = lookupE v gs
 
 -- | Look up a solved existential type variable
 lookupT :: TVar -> Gamma -> Maybe Type

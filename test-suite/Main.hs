@@ -50,6 +50,8 @@ main = do
       , golden "argument-form-8-py" "argument-form-8-py"
       , golden "argument-form-8-r" "argument-form-8-r"
 
+      , golden "defaults-1-py" "defaults-1-py"
+
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
       , golden "interop-2" "interop-2"
