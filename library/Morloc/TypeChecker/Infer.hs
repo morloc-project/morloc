@@ -671,7 +671,7 @@ infer' _ g (AnnE e ts) = return (g, ts, e)
 -- List=>
 infer' lang g1 e1@(ListE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
-  elementType <- case P.mostSpecific (map fst pairs) of
+  elementType <- case (P.mostSpecific . catMaybes)  (map fst pairs) of
     [] -> newvar lang
     (t:_) -> return t
   (g3, _, xs3) <- chainCheck (zip (repeat elementType) xs1) g2
@@ -687,8 +687,11 @@ infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' lang g1 e@(TupleE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
-  let (ts2, xs2) = unzip pairs
-      dts = MLD.defaultTuple lang ts2
+  let (ts2may, xs2) = unzip pairs
+  ts2 <- case sequence ts2may of
+    Nothing -> throwError . OtherError $ "Could not infer tuple type"
+    (Just ts2') -> return ts2' 
+  let dts = MLD.defaultTuple lang ts2
   containerType <-
     if lang == Nothing
     then return (head $ map unDefaultType dts)
@@ -699,10 +702,12 @@ infer' lang g1 e@(TupleE xs1) = do
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' lang g1 e@(RecE rs) = do
   (g2, pairs) <- chainInfer lang g1 (map snd rs)
-  let (ts2, xs2) = unzip pairs
+  let (ts2may, xs2) = unzip pairs
       keys = map fst rs
-      entries = zip (map unEVar keys) ts2
-      dts = MLD.defaultRecord lang entries
+  entries <- case sequence ts2may of
+    (Just ts2) -> return $ zip (map unEVar keys) ts2
+    Nothing -> throwError . OtherError $ "Could not infer record type"
+  let dts = MLD.defaultRecord lang entries
   containerType <-
     if lang == Nothing
     then return (head $ map unDefaultType dts)
@@ -987,24 +992,21 @@ typesetFromList g v ts = do
       , econs = Set.empty
       }
 
-chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [(Type, Expr)])
+-- Synthesize types for a list of expressions. Each expression is synthesized
+-- independently, though context is passed along. The returned "Maybe Type" is
+-- the type of the paired expression in the given language.
+chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [(Maybe Type, Expr)])
 chainInfer lang g0 es0 = do
   say "chainInfer"
   chainInfer' g0 (reverse es0) []
   where
     chainInfer' ::
-         Gamma -> [Expr] -> [(Type,Expr)] -> Stack (Gamma, [(Type, Expr)])
+         Gamma -> [Expr] -> [(Maybe Type,Expr)] -> Stack (Gamma, [(Maybe Type, Expr)])
     chainInfer' g [] xs = return (g, xs)
     chainInfer' g (e:es) xs = do
       (g', ts, e') <- infer lang g e
-      case filter (\t -> langOf t == lang) ts of
-        -- FIXME - performance bug. In cases such as: `[foo x, 42]`, the
-        -- application `foo x` will be evaluated identically each time
-        -- chainInfer is called with a different language. Each time all
-        -- concrete instances will be resolved and only one will be used. 
-        [t'] -> chainInfer' g' es ((t', e'):xs)
-        ts -> throwError . OtherError . render $
-          "Expected unique type from infer, found (see issue #9):" <+> list (map prettyGreenType ts)
+      let t' = listToMaybe $ filter (\t -> langOf t == lang) ts
+      chainInfer' g' es ((t', e'):xs)
 
 chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
 chainCheck xs g = do

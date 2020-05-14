@@ -35,8 +35,8 @@ Minor changes
 Bug fixes and code cleanup
 
 Bug fixes / tests
- - [ ] [x] github issue #7
- - [ ] [x] github issue #9
+ - [x] [x] github issue #7 - new Var=> typechecking rule
+ - [x] [x] github issue #9 - rewire container type inference
  - [x] [x] github issue #10
  - [x] [x] github issue #11
 
