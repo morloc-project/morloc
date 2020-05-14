@@ -228,7 +228,7 @@ collect ms (evar', xs@(x:_)) = do
           (x, [ t
               | t <- ts
               , t' <- ts'
-              , langOf' t == langOf' t'])
+              , langOf t == langOf t'])
     collectExpr args m ts (ListE es) = do
       es' <- mapM (collectAnno args m) es
       return [(ListS es', ts)]
@@ -444,70 +444,75 @@ realize x = do
       -> CType
       -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
     realizeExpr depth lang x c = do
-      realizeExpr' depth (maybe (langOf' c) id lang) x c
+      let lang' = if isJust lang then lang else langOf c
+      realizeExpr' depth lang' x c
 
     realizeExpr'
       :: Int
-      -> Lang
+      -> Maybe Lang
       -> SExpr GMeta Many [CType]
       -> CType
       -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
     -- always choose the primitive that is in the same language as the parent
     realizeExpr' _ lang (UniS) c
-      | lang == langOf' c = return $ Just (0, UniS, c)
+      | lang == langOf c = return $ Just (0, UniS, c)
       | otherwise = return Nothing
     realizeExpr' _ lang (NumS x) c
-      | lang == langOf' c = return $ Just (0, NumS x, c)
+      | lang == langOf c = return $ Just (0, NumS x, c)
       | otherwise = return Nothing
     realizeExpr' _ lang (LogS x) c
-      | lang == langOf' c = return $ Just (0, LogS x, c)
+      | lang == langOf c = return $ Just (0, LogS x, c)
       | otherwise = return Nothing
     realizeExpr' _ lang (StrS x) c
-      | lang == langOf' c = return $ Just (0, StrS x, c)
+      | lang == langOf c = return $ Just (0, StrS x, c)
       | otherwise = return Nothing
     -- a call should also be of the same language as the parent, shouldn't it?
     realizeExpr' _ lang (CallS src) c
-      | lang == langOf' c = return $ Just (0, CallS src, c)
+      | lang == langOf c = return $ Just (0, CallS src, c)
       | otherwise = return Nothing
     -- and a var?
     realizeExpr' _ lang (VarS x) c
-      | lang == langOf' c = return $ Just (0, VarS x, c)
+      | lang == langOf c = return $ Just (0, VarS x, c)
       | otherwise = return Nothing
     -- simple recursion into ListS, TupleS, and RecS
     realizeExpr' depth lang (ListS xs) c
-      | lang == langOf' c = do
-        xsMay <- mapM (realizeAnno depth (Just lang)) xs
+      | lang == langOf c = do
+        xsMay <- mapM (realizeAnno depth lang) xs
         case (fmap unzip . sequence) xsMay of
           (Just (scores, xs')) -> return $ Just (sum scores, ListS xs', c)
           Nothing -> return Nothing
       | otherwise = return Nothing
     realizeExpr' depth lang (TupleS xs) c
-      | lang == langOf' c = do
-        xsMay <- mapM (realizeAnno depth (Just lang)) xs
+      | lang == langOf c = do
+        xsMay <- mapM (realizeAnno depth lang) xs
         case (fmap unzip . sequence) xsMay of
           (Just (scores, xs')) -> return $ Just (sum scores, TupleS xs', c)
           Nothing -> return Nothing
       | otherwise = return Nothing
     realizeExpr' depth lang (RecS entries) c
-      | lang == langOf' c = do
-          xsMay <- mapM (realizeAnno depth (Just lang)) (map snd entries)
+      | lang == langOf c = do
+          xsMay <- mapM (realizeAnno depth lang) (map snd entries)
           case (fmap unzip . sequence) xsMay of
             (Just (scores, vals)) -> return $ Just (sum scores, RecS (zip (map fst entries) vals), c)
             Nothing -> return Nothing
       | otherwise = return Nothing
     --
     realizeExpr' depth _ (LamS vs x) c = do
-      xMay <- realizeAnno depth (Just $ langOf' c) x
+      xMay <- realizeAnno depth (langOf c) x
       case xMay of
         (Just (score, x')) -> return $ Just (score, LamS vs x', c)
         Nothing -> return Nothing
-    realizeExpr' depth lang (AppS f xs) c = do
-      fMay <- realizeAnno depth (Just $ langOf' c) f
-      xsMay <- mapM (realizeAnno depth (Just $ langOf' c)) xs
-      case (fMay, (fmap unzip . sequence) xsMay, Lang.pairwiseCost lang (langOf' c)) of
+    -- AppS
+    realizeExpr' _ Nothing _ _ = MM.throwError . OtherError $ "Expected concrete type"
+    realizeExpr' depth (Just lang) (AppS f xs) c = do
+      let lang' = (fromJust . langOf) c 
+      fMay <- realizeAnno depth (Just lang') f
+      xsMay <- mapM (realizeAnno depth (Just lang')) xs
+      case (fMay, (fmap unzip . sequence) xsMay, Lang.pairwiseCost lang lang') of
         (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
           return $ Just (fscore + sum scores + interopCost, AppS f' xs', c)
         _ -> return Nothing
+
 
 -- | This function is called on trees that contain no language-specific
 -- components.  "GAST" refers to General Abstract Syntax Tree. The most common
@@ -551,7 +556,9 @@ makeGAST (SAnno (Many [(AppS f xs, _)]) m) = do
 makeGAST (SAnno (Many [(RecS es, _)]) m) = do
   vs <- mapM (makeGAST . snd) es
   return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
-makeGAST _ = MM.throwError . OtherError $ "See github issue #7"
+makeGAST (SAnno (Many [(CallS src, cs)]) m)
+  = MM.throwError . OtherError . render
+  $ "Function calls cannot be used in general code:" <+> pretty (srcName src)
 
 
 -- | Serialize a simple, general data type. This type can consists only of JSON
@@ -825,9 +832,9 @@ segment e = segment' (argsOf e) e |>> (\(ms,e) -> e:ms) |>> map reparameterize w
   segment' args (ForeignInterfaceM t e@(ManifoldM i args' _)) = do
     (ms, e') <- segment' args' e
     config <- MM.ask
-    case MC.buildPoolCallBase config (langOf' e') i of
+    case MC.buildPoolCallBase config (langOf e') i of
       (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) cmds args)
-      Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf' e')
+      Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
   segment' args (PackM (AppM e@(ForeignInterfaceM _ _) es)) = do
     (ms, e') <- segment' args e
@@ -941,7 +948,7 @@ rehead (ManifoldM i args (ReturnM e)) = return $ ManifoldM i args (ReturnM (pack
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM] -> MorlocMonad [(Lang, [ExprM])]
-pool = return . groupSort . map (\e -> (langOf' e, e))
+pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
 
 encode
   :: [Source]
@@ -988,7 +995,7 @@ unrollLambda (AnnE (LamE v e2) _) = case unrollLambda e2 of
 unrollLambda e = ([], e)
 
 getGType :: [Type] -> MorlocMonad (Maybe GType)
-getGType ts = case [GType t | t <- ts, langOf' t == MorlocLang] of
+getGType ts = case [GType t | t <- ts, isNothing (langOf t)] of
   [] -> return Nothing
   [x] -> return $ Just x
   xs -> MM.throwError . GeneratorError $
@@ -1217,11 +1224,13 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
       <>  addExtra c
 
     name :: CType -> GMeta -> MDoc
-    name (viaShow . langOf' -> lang) g =
-      maybe
-        ("_" <+> lang <+> "::")
-        (\x -> pretty x <+> lang <+> "::")
-        (metaName g)
+    name t g = case langOf t of
+      (Just lang) ->       
+        maybe
+          ("_" <+> viaShow lang <+> "::")
+          (\x -> pretty x <+> viaShow lang <+> "::")
+          (metaName g)
+
 
 {- | Find exported expressions.
 

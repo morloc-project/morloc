@@ -1,6 +1,6 @@
 # Features
 
- [ ] composable serialization/deserialization functions
+ [x] composable serialization/deserialization functions
  [x] composable default types
  [ ] auto-casting
  [ ] side-effect handling

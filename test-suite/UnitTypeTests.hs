@@ -637,6 +637,12 @@ unitTypeTests =
         , "module Bar {export f; f :: forall a . a -> [a]};"
         , "module Main {import Foo (x); import Bar (f); f x}"
         ]
+    , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
+      T.unlines
+        [ "module Foo {export x; x = [1,2,3]};"
+        , "module Bar {export f; f R :: [numeric] -> numeric};"
+        , "module Main {import Foo (x); import Bar (f); f x}"
+        ]
     , assertTerminalType
         "Allow gross overuse of semicolons"
         ";;;;;module foo{;42;  ;};"
@@ -660,7 +666,7 @@ unitTypeTests =
           ]
     , expectError
         "fail on redundant module declaration"
-        (MultipleModuleDeclarations (MVar "Foo")) $
+        (MultipleModuleDeclarations [MVar "Foo"]) $
         T.unlines ["module Foo {x = 42};", "module Foo {x = 88}"]
     , expectError "fail on self import"
         (SelfImport (MVar "Foo")) $

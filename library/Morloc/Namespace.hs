@@ -64,7 +64,6 @@ module Morloc.Namespace
   , TypeSet(..)
   , Typelike(..)
   , langOf
-  , langOf'
   -- ** Types used in final translations
   , TypeM(..)
   , ExprM(..)
@@ -181,7 +180,7 @@ data MorlocError
   | TupleSingleton
   | EmptyRecord
   -- module errors
-  | MultipleModuleDeclarations MVar
+  | MultipleModuleDeclarations [MVar]
   | BadImport MVar EVar
   | CannotFindModule MVar
   | CyclicDependency
@@ -386,13 +385,13 @@ newtype DefaultType = DefaultType { unDefaultType :: Type }
 -- a safe alternative to the CType constructor
 ctype :: Type -> CType
 ctype t
-  | langOf' t /= MorlocLang = CType t
+  | isJust (langOf t) = CType t
   | otherwise = error "COMPILER BUG - incorrect assignment to concrete type"
 
 -- a safe alternative to the GType constructor
 generalType :: Type -> GType
 generalType t
-  | langOf' t == MorlocLang = GType t
+  | isJust (langOf t) = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
 -- | Types, see Dunfield Figure 6
@@ -475,16 +474,8 @@ class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
 
-  langOf' (langOf -> Nothing) = MorlocLang
-  langOf' (langOf -> (Just lang)) = lang
-
 instance HasOneLanguage CType where
   langOf (CType t) = langOf t
-  langOf' (CType t) = langOf' t
--- NOTE: There is NO instace of HasOneLanguage for GType. You should not
--- ask for the language of a GType, since you should already know the
--- language (MorlocLang), so asking for the language implies you are writing a
--- bug.
 
 -- | Determine the language from a type, fail if the language is inconsistent.
 -- Inconsistency in language should be impossible at the syntactic level, thus
@@ -541,6 +532,7 @@ data TypeM
   | Packed CType -- ^ serialized data that may be unpacked in this language
   | Unpacked CType
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
+  | ForallM [TVar] TypeM
   deriving(Show, Eq, Ord)
 
 instance HasOneLanguage TypeM where

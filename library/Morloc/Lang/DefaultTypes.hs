@@ -13,7 +13,6 @@ function, the concrete list type can be inferred. But if @f@ is directly
 exported, the concrete list type is unknown. Providing a concrete signature for
 @f@, however, limits the use of @f@ in other functions. Thus a default type is
 needed.
-
 -}
 
 module Morloc.Lang.DefaultTypes
@@ -29,73 +28,60 @@ module Morloc.Lang.DefaultTypes
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 
-tv :: Lang -> MT.Text -> TVar
-tv MorlocLang t = TV Nothing t
-tv lang t = TV (Just lang) t
-
-arr :: Lang -> MT.Text -> [Type] -> Type
-arr lang t ts = ArrT (tv lang t) ts
-
-var :: Lang -> MT.Text -> Type
-var lang t = VarT (tv lang t)
-
-rec :: Lang -> MT.Text -> [(MT.Text, Type)] -> Type
-rec lang name entries = NamT (tv lang name) entries
-
 defaultList :: Maybe Lang -> Type -> [DefaultType]
-defaultList Nothing t = [DefaultType $ arr MorlocLang "List" [t]]
-defaultList (Just Python3Lang) t = [DefaultType $ arr Python3Lang "list" [t]]
-defaultList (Just RLang) t = [DefaultType $ arr RLang "list" [t]]
-defaultList (Just CLang) t = [DefaultType $ arr CLang "$1*" [t]]
-defaultList (Just CppLang) t = [DefaultType $ arr CppLang "std::vector<$1>" [t]]
-defaultList (Just PerlLang) t = [DefaultType $ arr CppLang "array" [t]]
+defaultList lang@Nothing t = [DefaultType $ ArrT (TV lang "List") [t]]
+defaultList lang@(Just Python3Lang) t = [DefaultType $ ArrT (TV lang "list") [t]]
+defaultList lang@(Just RLang) t = [DefaultType $ ArrT (TV lang "list") [t]]
+defaultList lang@(Just CLang) t = [DefaultType $ ArrT (TV lang "$1*") [t]]
+defaultList lang@(Just CppLang) t = [DefaultType $ ArrT (TV lang "std::vector<$1>") [t]]
+defaultList lang@(Just PerlLang) t = [DefaultType $ ArrT (TV lang "array") [t]]
 
 defaultTuple :: Maybe Lang -> [Type] -> [DefaultType]
-defaultTuple Nothing ts = [DefaultType $ arr MorlocLang (MT.pack $ "Tuple" ++ show (length ts)) ts]
-defaultTuple (Just Python3Lang) ts = [DefaultType $ arr Python3Lang "tuple" ts]
-defaultTuple (Just RLang) ts = [DefaultType $ arr RLang "tuple" ts]
-defaultTuple (Just CLang) ts = []
-defaultTuple (Just CppLang) ts = [DefaultType $ arr CppLang t ts] where
+defaultTuple lang@Nothing ts = [DefaultType $ ArrT (TV lang (MT.pack $ "Tuple" ++ show (length ts))) ts]
+defaultTuple lang@(Just Python3Lang) ts = [DefaultType $ ArrT (TV lang "tuple") ts]
+defaultTuple lang@(Just RLang) ts = [DefaultType $ ArrT (TV lang "tuple") ts]
+defaultTuple lang@(Just CLang) ts = []
+defaultTuple lang@(Just CppLang) ts = [DefaultType $ ArrT (TV lang t) ts] where
   vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
   t = "std::tuple<" <> MT.intercalate "," vars <> ">"
-defaultTuple (Just PerlLang) ts = [DefaultType $ arr CppLang "array" ts]
+defaultTuple lang@(Just PerlLang) ts = [DefaultType $ ArrT (TV lang "array") ts]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, Type)] -> [DefaultType]
-defaultRecord Nothing entries = [DefaultType $ rec MorlocLang "Record" entries]
-defaultRecord (Just Python3Lang) entries = [DefaultType $ rec Python3Lang "record" entries]
-defaultRecord (Just RLang) entries = [DefaultType $ rec RLang "record" entries]
-defaultRecord (Just CLang) entries = []
-defaultRecord (Just CppLang) entries = []
-defaultRecord (Just PerlLang) entries = [DefaultType $ rec PerlLang "hash" entries]
+defaultRecord lang@Nothing entries = [DefaultType $ NamT (TV lang "Record") entries]
+defaultRecord lang@(Just Python3Lang) entries = [DefaultType $ NamT (TV lang "record") entries]
+defaultRecord lang@(Just RLang) entries = [DefaultType $ NamT (TV lang "record") entries]
+defaultRecord lang@(Just CLang) entries = []
+defaultRecord lang@(Just CppLang) entries = []
+defaultRecord lang@(Just PerlLang) entries = [DefaultType $ NamT (TV lang "hash") entries]
 
 defaultNull :: Maybe Lang -> [DefaultType]
-defaultNull Nothing = [DefaultType $ var MorlocLang "Unit"]
-defaultNull (Just Python3Lang) = [DefaultType $ var Python3Lang "None"]
-defaultNull (Just RLang) = [DefaultType $ var RLang "NULL"]
-defaultNull (Just CLang) = [DefaultType $ var CLang "null"]
-defaultNull (Just CppLang) = [DefaultType $ var CppLang "null"]
-defaultNull (Just PerlLang) = [DefaultType $ var PerlLang "NULL"]
+defaultNull lang@Nothing = [DefaultType $ VarT (TV lang "Unit")]
+defaultNull lang@(Just Python3Lang) = [DefaultType $ VarT (TV lang "None")]
+defaultNull lang@(Just RLang) = [DefaultType $ VarT (TV lang "NULL")]
+defaultNull lang@(Just CLang) = [DefaultType $ VarT (TV lang "null")]
+defaultNull lang@(Just CppLang) = [DefaultType $ VarT (TV lang "null")]
+defaultNull lang@(Just PerlLang) = [DefaultType $ VarT (TV lang "NULL")]
 
 defaultBool :: Maybe Lang -> [DefaultType]
-defaultBool Nothing = [DefaultType $ var MorlocLang "Bool"]
-defaultBool (Just Python3Lang) = [DefaultType $ var Python3Lang "bool"]
-defaultBool (Just RLang) = [DefaultType $ var RLang "logical" ]
-defaultBool (Just CLang) = [DefaultType $ var CLang "bool"]
-defaultBool (Just CppLang) = [DefaultType $ var CppLang "bool"]
-defaultBool (Just PerlLang) = [DefaultType $ var PerlLang "bool"]
+defaultBool lang@Nothing = [DefaultType $ VarT (TV lang "Bool")]
+defaultBool lang@(Just Python3Lang) = [DefaultType $ VarT (TV lang "bool")]
+defaultBool lang@(Just RLang) = [DefaultType $ VarT (TV lang "logical" )]
+defaultBool lang@(Just CLang) = [DefaultType $ VarT (TV lang "bool")]
+defaultBool lang@(Just CppLang) = [DefaultType $ VarT (TV lang "bool")]
+defaultBool lang@(Just PerlLang) = [DefaultType $ VarT (TV lang "bool")]
 
 defaultString :: Maybe Lang -> [DefaultType]
-defaultString Nothing = [DefaultType $ var MorlocLang "Str"]
-defaultString (Just Python3Lang) = [DefaultType $ var Python3Lang "str"]
-defaultString (Just RLang) = [DefaultType $ var RLang "character"]
-defaultString (Just CLang) = [DefaultType $ var CLang "char*"]
-defaultString (Just CppLang) = [DefaultType $ var CppLang "std::string"]
-defaultString (Just PerlLang) = [DefaultType $ var PerlLang "str"]
+defaultString lang@Nothing = [DefaultType $ VarT (TV lang "Str")]
+defaultString lang@(Just Python3Lang) = [DefaultType $ VarT (TV lang "str")]
+defaultString lang@(Just RLang) = [DefaultType $ VarT (TV lang "character")]
+defaultString lang@(Just CLang) = [DefaultType $ VarT (TV lang "char*")]
+defaultString lang@(Just CppLang) = [DefaultType $ VarT (TV lang "std::string")]
+defaultString lang@(Just PerlLang) = [DefaultType $ VarT (TV lang "str")]
 
 defaultNumber :: Maybe Lang -> [DefaultType]
-defaultNumber Nothing = [DefaultType $ var MorlocLang "Num"]
-defaultNumber (Just Python3Lang) = [DefaultType $ var Python3Lang "float"]
-defaultNumber (Just RLang) = [DefaultType $ var RLang "numeric"]
-defaultNumber (Just CLang) = [DefaultType $ var CLang "double"]
-defaultNumber (Just CppLang) = [DefaultType $ var CppLang "double"]
-defaultNumber (Just PerlLang) = [DefaultType $ var PerlLang "double"]
+defaultNumber lang@Nothing = [DefaultType $ VarT (TV lang "Num")]
+defaultNumber lang@(Just Python3Lang) = [DefaultType $ VarT (TV lang "float")]
+defaultNumber lang@(Just RLang) = [DefaultType $ VarT (TV lang "numeric")]
+defaultNumber lang@(Just CLang) = [DefaultType $ VarT (TV lang "double")]
+defaultNumber lang@(Just CppLang) = [DefaultType $ VarT (TV lang "double")]
+defaultNumber lang@(Just PerlLang) = [DefaultType $ VarT (TV lang "double")]

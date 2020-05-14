@@ -17,6 +17,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , One(..)
   , Many(..)
   , prettyExprM
+  , prettyTypeM
   , typeOfExprM
   , invertExprM
   , typeParts
@@ -166,6 +167,7 @@ prettyTypeM (Packed c) = "Packed<" <> prettyType c <> ">"
 prettyTypeM (Unpacked c) = "Unpacked<" <> prettyType c <> ">"
 prettyTypeM (Function ts t) =
   "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
+prettyTypeM (ForallM vs t) = "Forall" <+> hsep (map pretty vs) <+> "." <+> prettyTypeM t
 
 invertExprM :: ExprM -> MorlocMonad ExprM
 invertExprM (ManifoldM i args e) = do
@@ -262,7 +264,10 @@ typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output
     inputs' -> Function inputs' output
-  _ -> error "COMPILER BUG: application of non-function"
+  (ForallM vs (Function inputs output))  -> case drop (length xs) inputs of
+    [] -> output
+    inputs' -> ForallM vs (Function inputs' output)
+  _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (prettyTypeM $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
@@ -291,6 +296,9 @@ unpackTypeM t = t
 ctype2typeM :: CType -> TypeM
 ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
   (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
+ctype2typeM (CType (Forall v t)) = case ctype2typeM (CType t) of
+  (ForallM vs t') -> ForallM (v:vs) t'
+  t' -> ForallM [v] t'
 ctype2typeM c = Unpacked c
 
 -- get input types to a function type
@@ -299,6 +307,7 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
   (t:ts) -> (reverse ts, t)
   where
     typeArgs (FunT t1 t2) = t1 : typeArgs t2
+    typeArgs (Forall _ t) = typeArgs t
     typeArgs t = [t]
 
 unpackExprM :: ExprM -> ExprM
@@ -310,5 +319,5 @@ unpackExprM e = case typeOfExprM e of
 packExprM :: ExprM -> ExprM
 packExprM e = case typeOfExprM e of
   (Unpacked _) -> PackM e
-  (Function _ _) -> error "Cannot pack a function"
+  -- (Function _ _) -> error "Cannot pack a function"
   _ -> e

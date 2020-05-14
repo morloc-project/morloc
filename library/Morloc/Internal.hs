@@ -13,6 +13,7 @@ module Morloc.Internal
   ( ifelse
   , conmap
   , unique
+  , duplicates
   , module Data.Maybe
   , module Data.Either
   , module Data.List.Extra
@@ -106,9 +107,22 @@ ifelse False _ y = y
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
 
--- of course nub could be used, but this should be faster for large lists
+-- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]
-unique = Set.toList . Set.fromList
+unique xs = unique' Set.empty xs where 
+  unique' set [] = []
+  unique' set (x:xs)
+    | Set.member x set = unique' set xs
+    | otherwise = x : unique' (Set.insert x set) xs
+
+-- | Build an ordered list of duplicated elements
+duplicates :: Ord a => [a] -> [a] 
+duplicates xs = unique $ filter isDuplicated xs where
+  -- countMap :: Ord a => Map.Map a Int
+  countMap = Map.fromList . map (\(k:ks) -> (k, length ks + 1)) . group . sort $ xs
+
+  -- isDuplicated :: Ord a => a -> Bool
+  isDuplicated k = fromJust (Map.lookup k countMap) > 1
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

@@ -21,6 +21,7 @@ module Morloc.TypeChecker.Infer
 
 import Morloc.Namespace
 import Morloc.TypeChecker.Internal
+import qualified Morloc.Language as ML
 import qualified Morloc.TypeChecker.PartialOrder as P
 import qualified Morloc.Lang.DefaultTypes as MLD
 import qualified Data.Map as Map
@@ -34,19 +35,33 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
-  mods <- foldM insertWithCheck Map.empty [(moduleName m, m) | m <- ms]
+
+  checkForMultipleDeclarations
+
   -- graph :: Map MVar (Set MVar)
   let graph = Map.fromList $ map mod2pair ms
-  mods' <- path graph
-  mods'' <- case mapM (flip Map.lookup $ mods) mods' of
-    (Just mods'') -> typecheckModules (Map.empty) mods''
-    Nothing -> throwError $ OtherError "bad thing #1"
-  let modmap = Map.fromList [(moduleName m, m) | m <- mods'']
+
+  -- list modules ordered such that all dependencies of each module are defined
+  -- in modules that appear earlier in the list
+  -- ms' :: [Module]
+  ms' <- sequence . map (\v -> find (\m -> moduleName m == v) ms) <$> path graph
+
+  -- mods :: [Module]
+  mods <- case ms' of
+    (Just mods') -> typecheckModules (Map.empty) mods'
+    Nothing -> throwError $ OtherError "No modules found"
+
+  let modmap = Map.fromList [(moduleName m, m) | m <- mods]
   return (Map.elems . Map.map (addImportMap modmap) $ modmap)
   where
+
+    checkForMultipleDeclarations :: Stack ()
+    checkForMultipleDeclarations = case duplicates (map moduleName ms) of
+      [] -> return ()
+      mvars -> throwError $ MultipleModuleDeclarations mvars
+
     mod2pair :: Module -> (MVar, Set.Set MVar)
-    mod2pair m =
-      (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
+    mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
 
     addImportMap :: Map.Map MVar Module -> Module -> Module
     addImportMap ms m = m {
@@ -54,7 +69,7 @@ typecheck ms = do
     }
 
     mkImportMap
-      :: Module -- the module for which
+      :: Module
       -> Map.Map MVar Module
       -> Import
       -> Map.Map EVar MVar
@@ -73,363 +88,63 @@ typecheck ms = do
       = Map.fromSet (\_ -> moduleName m)
       $ Set.difference (moduleExports m) (Set.fromList excl)
 
+    -- typecheck a list of modules, pass context onwards.
+    typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
+    typecheckModules _ [] = return []
+    typecheckModules mg (m:ms) = do
+      enter $ "entering module '" <> viaShow (moduleName m) <> "'"
+      g <- importFromModularGamma mg m
+      (g', exprs) <- typecheckExpr g (moduleBody m)
+      (privateMap, mg') <- extendModularGamma g' m mg
+      mods <- typecheckModules mg' ms
+      leave $ "module"
+      return (m { moduleBody = exprs
+                , moduleTypeMap = privateMap
+                , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
+                } : mods)
 
-enter :: Doc AnsiStyle -> Stack ()
-enter d = do
-  depth <- incDepth
-  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> align d <> "\n"
-
-say :: Doc AnsiStyle -> Stack ()
-say d = do
-  depth <- getDepth
-  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> align d <> "\n"
-
-seeGamma :: Gamma -> Stack ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
-
-leave :: Doc AnsiStyle -> Stack ()
-leave d = do
-  depth <- decDepth
-  debugLog $ "<" <> pretty (take depth (repeat '-')) <+> align d <> "\n"
-
-debugLog :: Doc AnsiStyle -> Stack ()
-debugLog d = do
-  verbosity <- R.asks stackConfigVerbosity 
-  if verbosity > 0
-    then (liftIO . putDoc) d
-    else return ()
-
-typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
-typecheckModules _ [] = return []
-typecheckModules mg (m:ms) = do
-  enter $ "entering module '" <> viaShow (moduleName m) <> "'"
-  g <- importFromModularGamma mg m
-  (g', exprs) <- typecheckExpr g (moduleBody m)
-  (privateMap, mg') <- extendModularGamma g' m mg
-  mods <- typecheckModules mg' ms
-  leave $ "module"
-  return (m { moduleBody = exprs
-            , moduleTypeMap = privateMap
-            , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
-            } : mods)
-
-insertWithCheck ::
-     Map.Map MVar Module -> (MVar, Module) -> Stack (Map.Map MVar Module)
-insertWithCheck ms (v, m) =
-  case Map.insertLookupWithKey (\_ _ y -> y) v m ms of
-    (Just m', _) -> throwError $ MultipleModuleDeclarations (moduleName m')
-    (Nothing, ms') -> return ms'
-
--- produce a path from sources to pools, die on cycles
-path :: (Ord a) => Map.Map a (Set.Set a) -> Stack [a]
-path m
-  | Map.size m == 0 = return []
-  | otherwise =
-    if Map.size rootMap == 0
-      then throwError CyclicDependency
-      else do
-        rest <- path (Map.difference m rootMap)
-        return (rest ++ Map.keys rootMap)
-  where
-    rootMap = Map.filterWithKey (isRoot m) m
-
-    isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
-    isRoot m k _ = not $ Map.foldr (isChild k) False m
+    -- produce a path from sources to pools, die on cycles
+    path :: (Ord a) => Map.Map a (Set.Set a) -> Stack [a]
+    path m
+      | Map.size m == 0 = return []
+      | otherwise =
+        if Map.size rootMap == 0
+          then throwError CyclicDependency
+          else do
+            rest <- path (Map.difference m rootMap)
+            return (rest ++ Map.keys rootMap)
       where
-        isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
-        isChild _ _ True = True
-        isChild k' s False = Set.member k' s
+        rootMap = Map.filterWithKey (isRoot m) m
 
-typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
-typecheckExpr g e = do
-  es <- mapM rename e
-  (g', es') <- typecheckExpr' g [] es
-  let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
-  return $ (g', map (generalizeE . unrename . apply g') es'')
-  where
-    toExpr :: EVar -> TypeSet -> [Expr]
-    toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
-    toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
+        isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
+        isRoot m k _ = not $ Map.foldr (isChild k) False m
+          where
+            isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
+            isChild _ _ True = True
+            isChild k' s False = Set.member k' s
 
-typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
-typecheckExpr' g es [] = return (g, es)
-typecheckExpr' g es (x:xs) = do
-  (g', _, e') <- infer Nothing g x
-  case e' of
-    (Signature _ _) -> typecheckExpr' g' es xs
-    _ -> typecheckExpr' g' (e' : es) xs
-
-
-class Renameable a where
-  rename :: a -> Stack a
-  unrename :: a -> a
-
-instance Renameable Expr where
-  rename = mapT' rename
-  unrename = mapT unrename
-
-instance Renameable Type where
-  rename t@(VarT _) = return t
-  rename (ExistT v ts ds) = ExistT <$> pure v <*> (mapM rename ts) <*> (mapM rename ds)
-  rename (Forall v t) = do
-    v' <- rename v
-    t' <- rename (P.substitute v (VarT v') t)
-    return $ Forall v' t'
-  rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
-  rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
-  rename (NamT v rs) =
-    NamT <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
-
-  unrename (VarT v) = VarT (unrename v)
-  unrename (ExistT v ts ds) = ExistT v (map unrename ts) (map unrename ds)
-  unrename (Forall v t) = Forall (unrename v) (unrename t)
-  unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
-  unrename (ArrT v ts) = ArrT v (map unrename ts)
-  unrename (NamT v rs) = NamT v [(x, unrename t) | (x, t) <- rs]
-
-instance Renameable DefaultType where
-  rename dt = fmap DefaultType $ rename (unDefaultType dt) 
-  unrename = DefaultType . unrename . unDefaultType
-
-instance Renameable TVar where
-  unrename (TV l t) = TV l . head $ MT.splitOn "." t
-  rename = newqul
-
-
-class Applicable a where
-  apply :: Gamma -> a -> a
-
--- | Apply a context to a type (See Dunfield Figure 8).
-instance Applicable Type where
-  -- [G]a = a
-  apply _ a@(VarT _) = a
-  -- [G](A->B) = ([G]A -> [G]B)
-  apply g (FunT a b) = FunT (apply g a) (apply g b)
-  -- [G]Forall a.a = forall a. [G]a
-  apply g (Forall x a) = Forall x (apply g a)
-  -- [G[a=t]]a = [G[a=t]]t
-  apply g (ExistT v ts ds) =
-    case lookupT v g of
-      -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
-      (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-      Nothing -> ExistT v (map (apply g) ts) (map (DefaultType . apply g . unDefaultType) ds)
-  apply g (ArrT v ts) = ArrT v (map (apply g) ts)
-  apply g (NamT v rs) = NamT v (map (\(n, t) -> (n, apply g t)) rs)
-
-instance Applicable Expr where
-  apply g e = mapT (apply g) e
-
-instance Applicable EType where
-  apply g e = e { etype = apply g (etype e) }
-
-class Typed a where
-  toType :: Maybe Lang -> a -> Maybe Type
-  fromType :: Maybe Lang -> Type -> a
-
-instance Typed EType where
-  toType lang e
-    | (langOf . etype) e == lang = Just (etype e)
-    | otherwise = Nothing
-  fromType lang t =
-    EType
-      { etype = t
-      , eprop = Set.empty
-      , econs = Set.empty
-      }
-
-instance Typed TypeSet where
-  toType Nothing (TypeSet e _) = e >>= toType Nothing
-  toType lang (TypeSet _ ts) = case filter (\e -> (langOf . etype) e == lang) ts of 
-    [ ] -> Nothing
-    [e] -> Just (etype e)
-    _ -> error "a typeset can contain only one instance of each language"
-
-  fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
-  fromType lang t = TypeSet Nothing [fromType lang t]
-
--- | substitute all appearances of a given variable with an existential
--- [t/v]A
-substitute :: TVar -> Type -> Type
-substitute v t = P.substitute v (ExistT v [] []) t
-
--- | TODO: document
-occursCheck :: Type -> Type -> Stack ()
-occursCheck t1 t2 = do
-  -- say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
-  case Set.member t1 (P.free t2) of
-    True -> throwError OccursCheckFail
-    False -> return ()
-
-
--- | fold a list of annotated expressions into one, preserving annotations
-collate :: [Expr] -> Stack Expr
-collate [] = throwError . OtherError $ "Nothing to collate"
-collate [e] = return e
-collate (e:es) = do
-  say $ "collating" <+> (align . vsep . map prettyExpr) (e:es)
-  e' <- foldM collateOne e es
-  say $ "collated to:" <+> prettyExpr e'
-  return e'
-
--- | Merge two annotated expressions into one, fail if the expressions are not
--- equivalent.
-collateOne :: Expr -> Expr -> Stack Expr
-collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> collateTypes ts1 ts2
--- 
-collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e12 e22
-collateOne (LamE v1 e1) (LamE v2 e2)
-  | v1 == v2 = LamE <$> pure v1 <*> collateOne e1 e2
-  | otherwise = throwError $ OtherError "collate error #1"
-collateOne e@(VarE v1) (VarE v2)
-  | v1 == v2 = return e
-  | otherwise = throwError $ OtherError "collate error #2"
--- primitives
-collateOne e@UniE UniE = return e
-collateOne e@(LogE _) (LogE _) = return e
-collateOne e@(NumE _) (NumE _) = return e
-collateOne e@(StrE _) (StrE _) = return e
--- containers
-collateOne (ListE es1) (ListE es2)
-  | length es1 == length es2 = ListE <$> zipWithM collateOne es1 es2
-  | otherwise = throwError $ OtherError "collate error: unequal list length"
-collateOne (TupleE es1) (TupleE es2)
-  | length es1 == length es2 = TupleE <$> zipWithM collateOne es1 es2
-  | otherwise = throwError $ OtherError "collate error: unequal tuple length"
-collateOne (RecE es1) (RecE es2)
-  | length es1 == length es2 =
-    RecE <$> (
-          zip
-      <$> zipWithM returnIfEqual (map fst es1) (map fst es2)
-      <*> zipWithM collateOne (map snd es1) (map snd es2)
-    )
-  | otherwise = throwError $ OtherError "collate error: unequal record length"
-  where
-    returnIfEqual :: Eq a => a -> a -> Stack a
-    returnIfEqual x y
-      | x == y = return x
-      | otherwise = throwError $ OtherError "expected them to be equal"
--- illegal
-collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
-collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
-collateOne (SrcE _) (SrcE _) = error "the hell's is a toplevel doing down here?"
-collateOne e1 e2 = throwError . OtherError . render $
-  nest 2 . vsep $ ["collation failure - unequal expressions:", viaShow e1, viaShow e2]
-
-collateTypes :: [Type] -> [Type] -> Stack [Type]
-collateTypes ts1 ts2
-  = mapM (collateByLang . snd)
-  . groupSort
-  $ [(langOf t, t) | t <- nub (ts1 ++ ts2)]
-  where
-    collateByLang :: [Type] -> Stack Type
-    collateByLang [] = throwError . OtherError $ "This should be impossible"
-    collateByLang [t] = return t
-    collateByLang (t1:ts) = foldM moreSpecific t1 ts
-
-    moreSpecific :: Type -> Type -> Stack Type
-    moreSpecific (FunT t11 t12) (FunT t21 t22) = FunT <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
-    moreSpecific (ArrT v1 ts1) (ArrT v2 ts2) = ArrT v1 <$> zipWithM moreSpecific ts1 ts2
-    moreSpecific (NamT v1 ts1) (NamT v2 ts2)
-      | v1 == v2 = NamT <$> pure v1 <*> zipWithM mergeEntry (sort ts1) (sort ts2)
-      | otherwise = throwError . OtherError $ "Cannot collate records with unequal names/langs"
+    -- Typecheck a set of expressions within a given context (i.e., one module).
+    -- Return the modified context and a list of annotated expressions.
+    typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
+    typecheckExpr g e = do
+      es <- mapM rename e
+      (g', es') <- typecheckExpr' g [] es
+      let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
+      return $ (g', map (generalizeE . unrename . apply g') es'')
       where
-      mergeEntry (k1, t1) (k2, t2)
-        | k1 == k2 = (,) <$> pure k1 <*> moreSpecific t1 t2
-        | otherwise = throwError . OtherError $ "Cannot collate records with unequal keys"
-    moreSpecific (ExistT _ _ []) t = return t
-    moreSpecific t (ExistT _ _ []) = return t
-    moreSpecific (Forall _ _) t = return t
-    moreSpecific t (Forall _ _) = return t
-    moreSpecific t _ = return t
+        toExpr :: EVar -> TypeSet -> [Expr]
+        toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
+        toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
+
+        typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
+        typecheckExpr' g es [] = return (g, es)
+        typecheckExpr' g es (x:xs) = do
+          (g', _, e') <- infer Nothing g x
+          case e' of
+            (Signature _ _) -> typecheckExpr' g' es xs
+            _ -> typecheckExpr' g' (e' : es) xs
 
 
--- | merge the new data from a signature with any prior type data
-appendTypeSet :: Gamma -> EVar -> TypeSet -> EType -> Stack TypeSet
-appendTypeSet g v s e1 =
-  case ((langOf . etype) e1, s) of
-  -- if e is a general type, and there is no conflicting type, then set e
-    (Nothing, TypeSet Nothing rs) -> do
-      mapM_ (checkRealization e1) rs
-      return $ TypeSet (Just e1) rs
-  -- if e is a realization, and no general type is set, just add e to the list
-    (Just lang, TypeSet Nothing rs) -> do
-      return $ TypeSet Nothing (e1 : [r | r <- rs, r /= e1])
-  -- if e is a realization, and a general type exists, append it and check
-    (Just lang, TypeSet (Just e2) rs) -> do
-      checkRealization e2 e1
-      return $ TypeSet (Just e2) (e1 : [r | r <- rs, r /= e1])
-  -- if e is general, and a general type exists, merge the general types
-    (Nothing, TypeSet (Just e2) rs) -> do
-      let e3 =
-            EType
-              { etype = etype e2
-              , eprop = Set.union (eprop e1) (eprop e2)
-              , econs = Set.union (econs e1) (econs e2)
-              }
-      return $ TypeSet (Just e3) rs
-
--- | TODO: document
-checkRealization :: EType -> EType -> Stack ()
-checkRealization e1 e2 = f' (etype e1) (etype e2)
-  where
-    f' :: Type -> Type -> Stack ()
-    f' (FunT x1 y1) (FunT x2 y2) = f' x1 x2 >> f' y1 y2
-    f' (Forall _ x) (Forall _ y) = f' x y
-    f' (Forall _ x) y = f' x y
-    f' x (Forall _ y) = f' x y
-    f' (ExistT _ [] _) (ExistT _ [] _) = return ()
-    f' (ExistT v (x:xs) ds1) (ExistT w (y:ys) ds2) = f' (ExistT v xs ds1) (ExistT w ys ds2)
-    f' (ExistT _ _ _) (ExistT _ _ _) = throwError . OtherError $
-      "BadRealization: unequal number of parameters"
-    f' (ExistT _ _ _) _ = return ()
-    f' _ (ExistT _ _ _) = return ()
-    f' t1@(FunT _ _) t2 = throwError . OtherError $
-      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
-    f' t1 t2@(FunT _ _) = throwError . OtherError $
-      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
-    f' _ _ = return ()
-
-checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [Type], Expr)
-checkup g e t = do
-  say "checkup"
-  (g', t', e') <- check g e t
-  return (g', [t'], e')
-
-typesetFromList :: Gamma -> EVar -> [Type] -> Stack TypeSet
-typesetFromList g v ts = do 
-  say "typesetFromList"
-  let gentype = [makeEType t | t <- ts, (isNothing . langOf) t]
-      contype = [makeEType t | t <- ts, (isJust . langOf) t]
-  case (gentype, contype) of
-    ([x], cs) -> return $ TypeSet (Just x) cs
-    ([], cs) -> return $ TypeSet Nothing cs
-    _ -> throwError $ OtherError "ambiguous general type"
-  where
-    makeEType :: Type -> EType
-    makeEType t = EType
-      { etype = t
-      , eprop = Set.empty
-      , econs = Set.empty
-      }
-
-chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [(Type, Expr)])
-chainInfer lang g0 es0 = do
-  say "chainInfer"
-  chainInfer' g0 (reverse es0) []
-  where
-    chainInfer' ::
-         Gamma -> [Expr] -> [(Type,Expr)] -> Stack (Gamma, [(Type, Expr)])
-    chainInfer' g [] xs = return (g, xs)
-    chainInfer' g (e:es) xs = do
-      (g', ts, e') <- infer lang g e
-      case filter (\t -> langOf t == lang) ts of
-        -- FIXME - performance bug. In cases such as: `[foo x, 42]`, the
-        -- application `foo x` will be evaluated identically each time
-        -- chainInfer is called with a different language. Each time all
-        -- concrete instances will be resolved and only one will be used. 
-        [t'] -> chainInfer' g' es ((t', e'):xs)
-        ts -> throwError . OtherError . render $
-          "Expected unique type from infer, found (see issue #9):" <+> list (map prettyGreenType ts)
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
@@ -574,6 +289,7 @@ subtype' a (Forall v@(TV lang _) b) g
 subtype' a b _ = throwError $ SubtypeError a b
 
 
+
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: Type -> Type -> Gamma -> Stack Gamma
 instantiate t1 t2 g1 = do
@@ -685,6 +401,8 @@ instantiate' ta@(ExistT v1 ps1 ds1) tb@(ExistT v2 ps2 ds2) g1 = do
 -- bad
 instantiate' _ _ g = return g
 
+
+
 infer ::
      Maybe Lang
   -> Gamma
@@ -772,10 +490,10 @@ infer' Nothing g (Signature v e1) = do
 
 -- Declaration=>
 infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g1 (Declaration v e1) = do
-  (typeset3, g4, es4) <- case lookupE (VarE v) g1 of
+infer' Nothing g1 e0@(Declaration v e1) = do
+  (typeset3, g4, es4) <- case lookupE v g1 of
     -- CheckDeclaration
-    (Just typeset@(TypeSet t ts)) -> do
+    (Just (_, typeset@(TypeSet t ts))) -> do
       let xs1 = map etype (maybeToList t ++ ts)
           tlangs = langsOf g1 typeset
           langs = [lang | lang <- langsOf g1 e1, not (elem lang tlangs)]
@@ -796,7 +514,7 @@ infer' Nothing g1 (Declaration v e1) = do
 
   let e5 = Declaration v (generalizeE e2)
 
-  return (g4 +> AnnG (VarE v) typeset3, [], e5)
+  return (g4 +> AnnG e0 typeset3, [], e5)
   where
 
     foldInfer
@@ -828,9 +546,7 @@ infer' Nothing g1 (Declaration v e1) = do
       -> Stack (Gamma, [Type], [Expr])
     foldCheck e' (g1', ts, es) t' = do
       (g2', t2', e2') <- check g1' e' t'
-
-      say $ prettyExpr e2'
-
+      say (prettyExpr e2')
       return (g2', t2':ts, e2':es)
 
     toEType g t = EType
@@ -839,15 +555,25 @@ infer' Nothing g1 (Declaration v e1) = do
       , econs = Set.empty
       }
 
---  (x:A) in g
--- ------------------------------------------- Var
---  g |- x => A -| g
-infer' _ g e@(VarE v) = do
-  case lookupE e g of
-    (Just typeset) ->
+infer' lang g e@(VarE v) = do
+  say $ "----------------------------------"
+  say $ pretty v
+  case (lang, lookupE v g) of
+    (Just _, Just (VarE v', t@(TypeSet _ []))) -> 
+      if v' == v
+      then return (g, mapTS etype t, AnnE (VarE v') (mapTS etype t))
+      else infer' lang g (VarE v')
+    --  forall M . (x:A_m) not_in 
+    -- ------------------------------------------- Var=>
+    --  g |- x => A -| g
+    (Just _, Just (e', TypeSet _ [])) -> infer lang g e'
+    --  (x:A) in g
+    -- ------------------------------------------- Var
+    --  g |- x => A -| g
+    (_, Just (_, typeset)) ->
       let ts = mapTS etype typeset
       in return (g, ts, AnnE e ts)
-    Nothing -> throwError (UnboundVariable v)
+    (_, Nothing) -> throwError (UnboundVariable v)
   where
     mapTS :: (EType -> a) -> TypeSet -> [a]
     mapTS f (TypeSet (Just a) es) = map f (a:es)
@@ -863,7 +589,7 @@ infer' lang g1 e0@(LamE v e2) = do
   let anng = AnnG (VarE v) (fromType lang a)
       g2 = g1 +> a +> b +> anng
   (g3, t1, e2') <- check g2 e2 b
-  case lookupE (VarE v) g3 >>= toType lang of
+  case fmap snd (lookupE v g3) >>= toType lang of
     (Just t2) -> do
       let t3 = FunT (apply g3 t2) t1
       g4 <- cut anng g3
@@ -921,7 +647,7 @@ infer' lang g1 (AppE e1 e2) = do
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- Anno
 --  g1 |- (e:A) => A -| g2
-infer' _ g e1@(AnnE e@(VarE _) [t]) = do
+infer' _ g e1@(AnnE e@(VarE v) [t]) = do
   -- FIXME - I need to distinguish between the two types of annotations. There
   -- are annotations that the user writes; these need to be checked. There are
   -- annotations that are generated by the typechecker; these are basically
@@ -931,7 +657,7 @@ infer' _ g e1@(AnnE e@(VarE _) [t]) = do
   -- annotation the user can make, but this still runs some unnecessary checks.
   if langOf t == Nothing
     then
-      case lookupE e g of
+      case lookupE v g of
         (Just _) -> checkup g e t
         Nothing -> return (g, [t], e1)
     else
@@ -945,7 +671,7 @@ infer' _ g (AnnE e ts) = return (g, ts, e)
 -- List=>
 infer' lang g1 e1@(ListE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
-  elementType <- case P.mostSpecific (map fst pairs) of
+  elementType <- case (P.mostSpecific . catMaybes)  (map fst pairs) of
     [] -> newvar lang
     (t:_) -> return t
   (g3, _, xs3) <- chainCheck (zip (repeat elementType) xs1) g2
@@ -961,8 +687,11 @@ infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
 infer' lang g1 e@(TupleE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
-  let (ts2, xs2) = unzip pairs
-      dts = MLD.defaultTuple lang ts2
+  let (ts2may, xs2) = unzip pairs
+  ts2 <- case sequence ts2may of
+    Nothing -> throwError . OtherError $ "Could not infer tuple type"
+    (Just ts2') -> return ts2' 
+  let dts = MLD.defaultTuple lang ts2
   containerType <-
     if lang == Nothing
     then return (head $ map unDefaultType dts)
@@ -973,25 +702,19 @@ infer' lang g1 e@(TupleE xs1) = do
 infer' _ _ (RecE []) = throwError EmptyRecord
 infer' lang g1 e@(RecE rs) = do
   (g2, pairs) <- chainInfer lang g1 (map snd rs)
-  let (ts2, xs2) = unzip pairs
+  let (ts2may, xs2) = unzip pairs
       keys = map fst rs
-      entries = zip (map unEVar keys) ts2
-      dts = MLD.defaultRecord lang entries
+  entries <- case sequence ts2may of
+    (Just ts2) -> return $ zip (map unEVar keys) ts2
+    Nothing -> throwError . OtherError $ "Could not infer record type"
+  let dts = MLD.defaultRecord lang entries
   containerType <-
     if lang == Nothing
     then return (head $ map unDefaultType dts)
     else newvarRich [NamT (TV lang "__RECORD__") entries] dts lang -- see entry in Parser.hs
   return (g2, [containerType], ann (RecE (zip keys xs2)) containerType)
 
-chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
-chainCheck xs g = do
-  (g, ts, es) <- foldM f (g, [], []) xs
-  return (g, reverse ts, reverse es)
-  where
-    f :: (Gamma, [Type], [Expr]) -> (Type, Expr) -> Stack (Gamma, [Type], [Expr])
-    f (g', ts, es) (t', e') = do 
-      (g'', t'', e'') <- check g' e' t'
-      return (g'', t'':ts, e'':es)
+
 
 -- | Pattern matches against each type
 check ::
@@ -1021,6 +744,7 @@ check' g1 (LamE v e1) t1@(FunT a b) = do
   g3 <- cut anng g2
   let t3 = FunT a t2
   return (g3, t3, ann (LamE v e2) t3)
+
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
@@ -1029,6 +753,7 @@ check' g1 e1 t2@(Forall x a) = do
   g3 <- cut (VarG x) g2
   let t3 = apply g3 t2
   return (g3, t3, ann e2 t3)
+
 --  g1 |- e => A -| g2
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
@@ -1037,6 +762,7 @@ check' g1 e1 b = do
   (g2, ts, e2) <- infer (langOf b) g1 e1
   g3 <- foldM (\g t -> subtype (apply g t) (apply g b) g) g2 ts
   return (g3, apply g3 b, anns (apply g3 e2) (map (apply g3) ts))
+
 
 
 derive ::
@@ -1054,7 +780,6 @@ derive g e f = do
   leave $ "derive |-" <+> prettyGreenType t'
   return (g', t', e')
 
-
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
@@ -1062,10 +787,12 @@ derive' g e (FunT a b) = do
   (g', a', e') <- check g e a
   let b' = apply g' b
   return (g', FunT a' b', apply g' e')
+
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
 derive' g e (Forall x s) = derive (g +> ExistG x [] []) e (substitute x s)
+
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
@@ -1086,8 +813,236 @@ derive' g e t@(ExistT v@(TV lang _) [] _) =
         (g2, _, e2) <- check g e t1
         return (g2, FunT t1 t2, e2)
       _ -> throwError . OtherError $ "Expected a function"
+
 derive' _ e t = do
   say $ prettyScream "ERROR!!!"
   say $ "e: " <> prettyExpr e
   say $ "t: " <> prettyGreenType t
   throwError NonFunctionDerive
+
+
+
+-- ----- H E L P E R S --------------------------------------------------
+
+-- | substitute all appearances of a given variable with an existential
+-- [t/v]A
+substitute :: TVar -> Type -> Type
+substitute v t = P.substitute v (ExistT v [] []) t
+
+-- | TODO: document
+occursCheck :: Type -> Type -> Stack ()
+occursCheck t1 t2 = do
+  -- say $ "occursCheck:" <+> prettyGreenType t1 <+> prettyGreenType t2
+  case Set.member t1 (P.free t2) of
+    True -> throwError OccursCheckFail
+    False -> return ()
+
+
+-- | fold a list of annotated expressions into one, preserving annotations
+collate :: [Expr] -> Stack Expr
+collate [] = throwError . OtherError $ "Nothing to collate"
+collate [e] = return e
+collate (e:es) = do
+  say $ "collating" <+> (align . vsep . map prettyExpr) (e:es)
+  e' <- foldM collateOne e es
+  say $ "collated to:" <+> prettyExpr e'
+  return e'
+
+-- | Merge two annotated expressions into one, fail if the expressions are not
+-- equivalent.
+collateOne :: Expr -> Expr -> Stack Expr
+collateOne (AnnE e1 ts1) (AnnE e2 ts2) = AnnE <$> collateOne e1 e2 <*> collateTypes ts1 ts2
+-- 
+collateOne (AppE e11 e12) (AppE e21 e22) = AppE <$> collateOne e11 e21 <*> collateOne e12 e22
+collateOne (LamE v1 e1) (LamE v2 e2)
+  | v1 == v2 = LamE <$> pure v1 <*> collateOne e1 e2
+  | otherwise = throwError $ OtherError "collate error #1"
+collateOne e@(VarE v1) (VarE v2)
+  | v1 == v2 = return e
+  | otherwise = throwError $ OtherError "collate error #2"
+-- primitives
+collateOne e@UniE UniE = return e
+collateOne e@(LogE _) (LogE _) = return e
+collateOne e@(NumE _) (NumE _) = return e
+collateOne e@(StrE _) (StrE _) = return e
+-- containers
+collateOne (ListE es1) (ListE es2)
+  | length es1 == length es2 = ListE <$> zipWithM collateOne es1 es2
+  | otherwise = throwError $ OtherError "collate error: unequal list length"
+collateOne (TupleE es1) (TupleE es2)
+  | length es1 == length es2 = TupleE <$> zipWithM collateOne es1 es2
+  | otherwise = throwError $ OtherError "collate error: unequal tuple length"
+collateOne (RecE es1) (RecE es2)
+  | length es1 == length es2 =
+    RecE <$> (
+          zip
+      <$> zipWithM returnIfEqual (map fst es1) (map fst es2)
+      <*> zipWithM collateOne (map snd es1) (map snd es2)
+    )
+  | otherwise = throwError $ OtherError "collate error: unequal record length"
+  where
+    returnIfEqual :: Eq a => a -> a -> Stack a
+    returnIfEqual x y
+      | x == y = return x
+      | otherwise = throwError $ OtherError "expected them to be equal"
+-- variable expansion
+collateOne (VarE _) x = return x
+collateOne x (VarE _) = return x
+-- illegal
+collateOne (Signature _ _) (Signature _ _) = error "the hell's a toplevel doing down here?"
+collateOne (Declaration _ _) (Declaration _ _) = error "the hell's is a toplevel doing down here?"
+collateOne (SrcE _) (SrcE _) = error "the hell's is a toplevel doing down here?"
+collateOne e1 e2 = throwError . OtherError . render $
+  nest 2 . vsep $ ["collation failure - unequal expressions:", viaShow e1, viaShow e2]
+
+collateTypes :: [Type] -> [Type] -> Stack [Type]
+collateTypes ts1 ts2
+  = mapM (collateByLang . snd)
+  . groupSort
+  $ [(langOf t, t) | t <- nub (ts1 ++ ts2)]
+  where
+    collateByLang :: [Type] -> Stack Type
+    collateByLang [] = throwError . OtherError $ "This should be impossible"
+    collateByLang [t] = return t
+    collateByLang (t1:ts) = foldM moreSpecific t1 ts
+
+    moreSpecific :: Type -> Type -> Stack Type
+    moreSpecific (FunT t11 t12) (FunT t21 t22) = FunT <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
+    moreSpecific (ArrT v1 ts1) (ArrT v2 ts2) = ArrT v1 <$> zipWithM moreSpecific ts1 ts2
+    moreSpecific (NamT v1 ts1) (NamT v2 ts2)
+      | v1 == v2 = NamT <$> pure v1 <*> zipWithM mergeEntry (sort ts1) (sort ts2)
+      | otherwise = throwError . OtherError $ "Cannot collate records with unequal names/langs"
+      where
+      mergeEntry (k1, t1) (k2, t2)
+        | k1 == k2 = (,) <$> pure k1 <*> moreSpecific t1 t2
+        | otherwise = throwError . OtherError $ "Cannot collate records with unequal keys"
+    moreSpecific (ExistT _ _ []) t = return t
+    moreSpecific t (ExistT _ _ []) = return t
+    moreSpecific (Forall _ _) t = return t
+    moreSpecific t (Forall _ _) = return t
+    moreSpecific t _ = return t
+
+
+-- | merge the new data from a signature with any prior type data
+appendTypeSet :: Gamma -> EVar -> TypeSet -> EType -> Stack TypeSet
+appendTypeSet g v s e1 =
+  case ((langOf . etype) e1, s) of
+  -- if e is a general type, and there is no conflicting type, then set e
+    (Nothing, TypeSet Nothing rs) -> do
+      mapM_ (checkRealization e1) rs
+      return $ TypeSet (Just e1) rs
+  -- if e is a realization, and no general type is set, just add e to the list
+    (Just lang, TypeSet Nothing rs) -> do
+      return $ TypeSet Nothing (e1 : [r | r <- rs, r /= e1])
+  -- if e is a realization, and a general type exists, append it and check
+    (Just lang, TypeSet (Just e2) rs) -> do
+      checkRealization e2 e1
+      return $ TypeSet (Just e2) (e1 : [r | r <- rs, r /= e1])
+  -- if e is general, and a general type exists, merge the general types
+    (Nothing, TypeSet (Just e2) rs) -> do
+      let e3 =
+            EType
+              { etype = etype e2
+              , eprop = Set.union (eprop e1) (eprop e2)
+              , econs = Set.union (econs e1) (econs e2)
+              }
+      return $ TypeSet (Just e3) rs
+
+-- | TODO: document
+checkRealization :: EType -> EType -> Stack ()
+checkRealization e1 e2 = f' (etype e1) (etype e2)
+  where
+    f' :: Type -> Type -> Stack ()
+    f' (FunT x1 y1) (FunT x2 y2) = f' x1 x2 >> f' y1 y2
+    f' (Forall _ x) (Forall _ y) = f' x y
+    f' (Forall _ x) y = f' x y
+    f' x (Forall _ y) = f' x y
+    f' (ExistT _ [] _) (ExistT _ [] _) = return ()
+    f' (ExistT v (x:xs) ds1) (ExistT w (y:ys) ds2) = f' (ExistT v xs ds1) (ExistT w ys ds2)
+    f' (ExistT _ _ _) (ExistT _ _ _) = throwError . OtherError $
+      "BadRealization: unequal number of parameters"
+    f' (ExistT _ _ _) _ = return ()
+    f' _ (ExistT _ _ _) = return ()
+    f' t1@(FunT _ _) t2 = throwError . OtherError $
+      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
+    f' t1 t2@(FunT _ _) = throwError . OtherError $
+      "BadRealization: Cannot compare types '" <> MT.show' t1 <> "' to '" <> MT.show' t2 <> "'"
+    f' _ _ = return ()
+
+checkup :: Gamma -> Expr -> Type -> Stack (Gamma, [Type], Expr)
+checkup g e t = do
+  say "checkup"
+  (g', t', e') <- check g e t
+  return (g', [t'], e')
+
+typesetFromList :: Gamma -> EVar -> [Type] -> Stack TypeSet
+typesetFromList g v ts = do 
+  say "typesetFromList"
+  let gentype = [makeEType t | t <- ts, (isNothing . langOf) t]
+      contype = [makeEType t | t <- ts, (isJust . langOf) t]
+  case (gentype, contype) of
+    ([x], cs) -> return $ TypeSet (Just x) cs
+    ([], cs) -> return $ TypeSet Nothing cs
+    _ -> throwError $ OtherError "ambiguous general type"
+  where
+    makeEType :: Type -> EType
+    makeEType t = EType
+      { etype = t
+      , eprop = Set.empty
+      , econs = Set.empty
+      }
+
+-- Synthesize types for a list of expressions. Each expression is synthesized
+-- independently, though context is passed along. The returned "Maybe Type" is
+-- the type of the paired expression in the given language.
+chainInfer :: Maybe Lang -> Gamma -> [Expr] -> Stack (Gamma, [(Maybe Type, Expr)])
+chainInfer lang g0 es0 = do
+  say "chainInfer"
+  chainInfer' g0 (reverse es0) []
+  where
+    chainInfer' ::
+         Gamma -> [Expr] -> [(Maybe Type,Expr)] -> Stack (Gamma, [(Maybe Type, Expr)])
+    chainInfer' g [] xs = return (g, xs)
+    chainInfer' g (e:es) xs = do
+      (g', ts, e') <- infer lang g e
+      let t' = listToMaybe $ filter (\t -> langOf t == lang) ts
+      chainInfer' g' es ((t', e'):xs)
+
+chainCheck :: [(Type, Expr)] -> Gamma -> Stack (Gamma, [Type], [Expr])
+chainCheck xs g = do
+  (g, ts, es) <- foldM f (g, [], []) xs
+  return (g, reverse ts, reverse es)
+  where
+    f :: (Gamma, [Type], [Expr]) -> (Type, Expr) -> Stack (Gamma, [Type], [Expr])
+    f (g', ts, es) (t', e') = do 
+      (g'', t'', e'') <- check g' e' t'
+      return (g'', t'':ts, e'':es)
+
+
+
+-- ----- U T I L I T I E S ----------------------------------------------
+
+enter :: Doc AnsiStyle -> Stack ()
+enter d = do
+  depth <- incDepth
+  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> align d <> "\n"
+
+say :: Doc AnsiStyle -> Stack ()
+say d = do
+  depth <- getDepth
+  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> align d <> "\n"
+
+seeGamma :: Gamma -> Stack ()
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex g))
+
+leave :: Doc AnsiStyle -> Stack ()
+leave d = do
+  depth <- decDepth
+  debugLog $ "<" <> pretty (take depth (repeat '-')) <+> align d <> "\n"
+
+debugLog :: Doc AnsiStyle -> Stack ()
+debugLog d = do
+  verbosity <- R.asks stackConfigVerbosity 
+  if verbosity > 0
+    then (liftIO . putDoc) d
+    else return ()

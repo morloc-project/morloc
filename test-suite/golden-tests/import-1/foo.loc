@@ -1,0 +1,7 @@
+import cppbase (map)
+import math (sqrt, sum, mul, div)
+
+export foo;
+
+square x = mul x x;
+foo xs = sqrt (sum (map square xs));

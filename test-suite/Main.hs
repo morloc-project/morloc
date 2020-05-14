@@ -1,7 +1,7 @@
 import Test.Tasty
 import qualified System.Directory as SD
 
-import PropertyTypeTests (propertyTypeTests)
+import PropertyTests (propertyTests)
 import UnitTypeTests (typeOrderTests, unitTypeTests)
 import GoldenMakefileTests (goldenMakefileTest)
 
@@ -13,7 +13,9 @@ main = do
       "Morloc tests"
       [ unitTypeTests
       , typeOrderTests
-      , propertyTypeTests
+      , propertyTests
+
+      , golden "import-1" "import-1"
 
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
@@ -23,10 +25,10 @@ main = do
       , golden "argument-form-2-py" "argument-form-2-py"
       , golden "argument-form-2-r" "argument-form-2-r"
 
-      -- -- uncomment to test github issue #7
-      -- , golden "argument-form-3-c" "argument-form-3-c"
-      -- , golden "argument-form-3-py" "argument-form-3-py"
-      -- , golden "argument-form-3-r" "argument-form-3-r"
+      -- see github issue #7
+      , golden "argument-form-3-c" "argument-form-3-c"
+      , golden "argument-form-3-py" "argument-form-3-py"
+      , golden "argument-form-3-r" "argument-form-3-r"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
@@ -48,8 +50,11 @@ main = do
       , golden "argument-form-8-py" "argument-form-8-py"
       , golden "argument-form-8-r" "argument-form-8-r"
 
+      , golden "defaults-1-py" "defaults-1-py"
+
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
+      , golden "interop-2" "interop-2"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
@@ -68,13 +73,13 @@ main = do
       , golden "manifold-form-6_py" "manifold-form-6_py"
       , golden "manifold-form-6_r" "manifold-form-6_r"
 
-      -- -- uncomment to test github issue #9
-      -- , golden "manifold-form-7_c" "manifold-form-7_c"
-      -- , golden "manifold-form-7_py" "manifold-form-7_py"
-      -- , golden "manifold-form-7_r" "manifold-form-7_r"
+      -- see github issue #9
+      , golden "manifold-form-7_c" "manifold-form-7_c"
+      , golden "manifold-form-7_py" "manifold-form-7_py"
+      , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      -- -- uncomment to test github issue #8
-      -- , golden "records-1-c" "records-1-c"
       , golden "records-1-py" "records-1-py"
       , golden "records-1-r" "records-1-r"
+      -- -- see github issue #8
+      -- , golden "records-1-c" "records-1-c"
       ]

@@ -49,12 +49,12 @@ generate cs xs = do
 getFData :: (CType, Int, EVar) -> MorlocMonad FData
 getFData (t, i, n) = do
   config <- MM.ask
-  let lang = langOf' t
+  let lang = langOf t
   case MC.buildPoolCallBase config lang i of
     (Just cmds) -> return (hsep cmds, pretty n, typeOf t)
     Nothing ->
       MM.throwError . GeneratorError $
-      "No execution method found for language: " <> ML.showLangName lang
+      "No execution method found for language: " <> ML.showLangName (fromJust lang)
 
 main :: [MDoc] -> [FData] -> [(EVar, MDoc, [EVar])] -> MDoc
 main names fdata cdata =
