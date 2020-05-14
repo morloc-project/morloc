@@ -1,4 +1,33 @@
-x.xx.x [2020.xx.xx]
+1.0.0 [202x.xx.xx]
+
+This will be the first stable version. It will be a product that I expect other
+people to use for important projects, therefore backwards compatibility will be
+important. The whole system needs extensive testing in real applications. Much
+of this will be done in the development of the core libraries. We will also
+need to add handling for several very different languages (proofs-of-concept).
+
+ - [ ] full semantic types - test in bioinformatics applications
+ - [ ] constraints - refined types?
+ - [ ] manifold hooks - caching, documentation, logging, effects
+ - [ ] logic engine - from typechecking to architecture design and debugging
+ - [ ] full ecosystem - test suites, package tools, editors, vim plugins
+ - [ ] language support (at least the following)
+       - [x] Python3
+       - [x] R
+       - [x] C++
+       - [ ] Java - OOP
+       - [ ] Haskell - strongly-typed functional
+       - [ ] Scheme - weakly-typed functional
+       - [ ] Prolog - logic
+ - [ ] well tested core libraries for
+       - [ ] math
+       - [ ] algorithms
+       - [ ] image processing
+       - [ ] audio processing
+       - [ ] machine learning
+       - [ ] bioinformatics
+
+x.xx.x [2020.xx.xx]  -- next
 -------------------
 
 New build system and and compiler options
@@ -11,26 +40,30 @@ Major changes
            and readability to use structures. Before going too far, though, I
            need to decide in general how records will work in morloc. Do I want
            extensible records? Does order matter?
- - [ ] Remove semicolon requirement (1 day)
- - [ ] Rewrite perl manifold nexus in C++ (3 days)
+ - [ ] Remove semicolon requirement
+ - [ ] Rewrite perl manifold nexus in C++
        - [ ] add type annotations to printed help
- - [ ] New build system (7 days)
+ - [ ] New build system
        - [ ] Place pools and nexus in ~/.morloc/tmp
        - [ ] Create scripts in the working directory that calls them
        - [ ] Add compiler options for executable name, deletion, cache clearing, etc
        - [ ] Allow stdin to replace '-' argument
- - [ ] Add a verbosity flag to `morloc make` (1 day)
- - [ ] New compiler commands for managing modules (1 day)
+ - [ ] Add a verbosity flag to `morloc make`
+ - [ ] New compiler commands for managing modules
        - [ ] `morloc uninstall` command for deleting modules
        - [ ] `morloc update` command for updating modules (i.e., git pull)
        - [ ] `morloc list` command for listing all available modules
 
 Minor changes
+ - [ ] add linter
+ - [ ] address all compiler warnings
+ - [ ] clean up haddock documentation
+ - [ ] generate error handling in pools
  - [ ] meaningful error messages
  - [ ] resurrect property tests
 
 
-0.23.0 [2020.05.xx]
+0.23.0 [2020.05.14]
 
 Bug fixes and code cleanup
 
@@ -39,14 +72,6 @@ Bug fixes / tests
  - [x] [x] github issue #9 - rewire container type inference
  - [x] [x] github issue #10
  - [x] [x] github issue #11
-
-Minor changes
- - [ ] generate error handling in pools
- - [ ] meaningful error messages
- - [ ] generate error handling in pools
- - [ ] address all compiler warnings
- - [ ] add linter
- - [ ] clean up haddock documentation
 
 
 0.22.0 [2020.04.28]
