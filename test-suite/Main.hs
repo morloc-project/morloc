@@ -82,4 +82,6 @@ main = do
       , golden "records-1-r" "records-1-r"
       -- -- see github issue #8
       -- , golden "records-1-c" "records-1-c"
+
+      , golden "selection-1" "selection-1"
       ]

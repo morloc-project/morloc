@@ -27,7 +27,7 @@ need to add handling for several very different languages (proofs-of-concept).
        - [ ] machine learning
        - [ ] bioinformatics
 
-x.xx.x [2020.xx.xx]  -- next
+x.xx.x [2020.xx.xx]
 -------------------
 
 New build system and and compiler options
@@ -61,6 +61,12 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
  - [ ] resurrect property tests
+
+
+0.24.0 [2020.xx.xx]
+-------------------
+
+ - [ ] fix bug that prevented importing multiple instances of a function
 
 
 0.23.0 [2020.05.14]
