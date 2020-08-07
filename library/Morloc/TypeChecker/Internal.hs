@@ -150,6 +150,7 @@ instance Typed EType where
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
+      , esource = Nothing
       }
 
 
@@ -187,8 +188,57 @@ decDepth = do
 getDepth :: Stack Int
 getDepth = CMS.gets stateDepth
 
+
+-- -- | Pass type and source information from imported modules to the current module.
+-- importFromModularGamma
+-- importFromModularGamma g m
+--   = mapM mergeTypesets
+--   . fmap (groupSort . concat)
+--   $ mapM lookupImport (moduleImports m)
+--   where
+--     lookupImport :: Import -> Stack (EVar, TypeSet)
+--     lookupImport imp
+--       | v == moduleName m = throwError $ SelfImport v
+--       | v == MVar "Main" = throwError CannotImportMain
+--       | otherwise =
+--         case (importInclude imp, Map.lookup v g) of
+--         -- raise error if the imported module is not in the module map
+--           (_, Nothing) -> throwError $ CannotFindModule v
+--         -- handle imports of everything, i.e. @import Foo@
+--           (Nothing, Just g') -> return $ Map.toList g'
+--         -- handle limited imports, i.g. @import Foo ("f" as foo, bar)@
+--           (Just xs, Just g') -> mapM (lookupOneImport v g') xs
+--       where
+--         v = importModuleName imp
+--
+--     lookupOneImport
+--       :: MVar
+--       -> Map.Map EVar TypeSet
+--       -> (EVar, EVar)
+--       -> Stack (EVar, TypeSet)
+--     lookupOneImport v typemap (n, alias) =
+--       case Map.lookup n typemap of
+--         (Just t) -> return $ (alias, t)
+--         Nothing -> throwError $ BadImport v alias
+--
+--     mergeTypeSets :: (EVar, [TypeSet]) -> Stack GammaIndex
+--     mergeTypeSets (_, []) = throwError $ CallTheMonkeys "This can't happen"
+--     mergeTypeSets (v, [t]) = return $ AnnG (VarE v) t
+--     mergeTypeSets (_, (t:ts)) = throwError $ NotImplemented "Multiple imports"
+
 -- | Pass type and source information from imported modules to the current module.
-importFromModularGamma :: ModularGamma -> Module -> Stack Gamma
+importFromModularGamma
+  :: ModularGamma
+  -- ^ Map MVar (Map EVar TypeSet) -- a map of all previously processed
+  -- modules. The evaluation order should ensure all dependencies have already
+  -- been processed.
+  -> Module
+  -- ^ The current module in the typechecking list. Every term it imports will
+  -- be looked up in the ModularGamma object, raising an error if it is not
+  -- present.
+  -> Stack Gamma
+  -- ^ The initial context object that will be passed to the typechecker for
+  -- this module. The order of elements in Gamma does not matter.
 importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
   where
     lookupImport :: Import -> Stack Gamma

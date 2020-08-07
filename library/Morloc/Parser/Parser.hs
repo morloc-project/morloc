@@ -157,10 +157,72 @@ pProgram = do
   -- allow ';' at the beginning (if you're into that sort of thing)
   optional delimiter
   es <- many pToplevel
-  let mods = [m | (TModule m) <- es]
-  case [e | (TModuleBody e) <- es] of
+  let es' = mergeSourceAndSignature es 
+  let mods = [m | (TModule m) <- es']
+  case [e | (TModuleBody e) <- es'] of
     [] -> return mods
-    es' -> return $ makeModule f (MVar "Main") es' : mods
+    es'' -> return $ makeModule f (MVar "Main") es'' : mods
+  where
+    mergeSourceAndSignature :: [Toplevel] -> [Toplevel]
+    mergeSourceAndSignature ts = case partition isExpr ts of
+      (es, ts') -> ts' ++
+        map (\e -> TModuleBody (MBBody e))
+            (mergeSourceAndSignature' [e | (TModuleBody (MBBody e)) <- es])
+
+    isExpr :: Toplevel -> Bool
+    isExpr (TModuleBody (MBBody _)) = True
+    isExpr _ = False
+
+    -- Any source statement that does not include a type signature is deleted.
+    -- Is this reasonable? Is there a solution where you might want to import a
+    -- concrete function but not give it a type signature? Possibly if you
+    -- could 1) infer the type from the source, 2) wanted to import the type
+    -- from outside, 3) wanted to define the type higher up (why?), or 4)
+    -- wanted to just use the function without type info and hope for the best
+    -- (maybe this is reasonable). The 4th case is actually reasonable, at
+    -- least for fast-and-dirty analysis where you trust yourself to get the
+    -- types right and don't want any extra magic.
+    --
+    -- TODO: add support for the 4th case
+    mergeSourceAndSignature' :: [Expr] -> [Expr]
+    mergeSourceAndSignature' es
+      = let (srcs, nonSrcs) = partition isSrc es
+            (sigs, exprs) = partition isSig nonSrcs 
+            (genSigs, conSigs) = partition isGeneral sigs
+        in genSigs
+           ++ map (annotateSource [(v, e) | (Signature v e) <- conSigs])
+                  (concat [ss | (SrcE ss) <- srcs])
+           ++ exprs
+
+    isSrc :: Expr -> Bool
+    isSrc (SrcE _) = True
+    isSrc _ = False
+
+    isSig :: Expr -> Bool
+    isSig (Signature _ _) = True
+    isSig _ = False
+
+    isGeneral :: Expr -> Bool 
+    isGeneral (Signature _ e) = isNothing (esource e)
+    isGeneral _ = error "Expected a signature"
+
+    annotateSource :: [(EVar, EType)] -> Source -> Expr
+    annotateSource sigs src = case catMaybes (map (combine src) sigs) of
+      [] -> error "Not supported: source with no signature"
+      [e] -> e
+      _ -> error "Not supported: multiple concrete signatures for one source"
+
+    -- If Source and the (Evar, EType) info from a signature match, then update
+    -- the signature with the info in source. This appends the signature with
+    -- the path to the source file and the source name.
+    combine :: Source -> (EVar, EType) -> Maybe Expr
+    combine _ (_, EType _ _ _ Nothing) = Nothing
+    combine s (v, e@(EType _ _ _ (Just src))) =
+      if    srcLang s == srcLang src
+         && srcAlias s == v -- morloc names; signature doesn't know source name
+         && srcLabel s == srcLabel src
+      then Just (Signature v (e {esource = Just s}))
+      else Nothing
 
 pToplevel :: Parser Toplevel
 pToplevel =
@@ -255,23 +317,37 @@ pFunctionDeclaration = do
 
 pSignature :: Parser Expr
 pSignature = do
+  label <- tag name
   v <- name
-  lang <- optional pLang
-  setLang lang
+  mayLang <- optional pLang
+  setLang mayLang
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
   constraints <-
     option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
   setLang Nothing
+
+  src <- case mayLang of
+    Nothing -> return Nothing
+    (Just lang) -> return . Just $ Source
+       { srcName  = Name v
+       , srcLang  = lang
+       , srcPath  = Nothing -- I don't yet know the path
+       , srcAlias = EVar "" -- or the alias
+       , srcLabel = fmap Name label
+       }
+
   return $
     Signature
       (EVar v)
       (EType
-         { etype = t
-         , eprop = Set.fromList props
-         , econs = Set.fromList constraints
-         })
+        { etype = t
+        , eprop = Set.fromList props
+        , econs = Set.fromList constraints
+        , esource = src
+        }
+      )
 
 pLang :: Parser Lang
 pLang = do
@@ -338,13 +414,20 @@ pSrcE = do
                         , srcLang = language
                         , srcPath = path
                         , srcAlias = alias
-                        } | (name, alias) <- rs]
+                        , srcLabel = label
+                        } | (name, alias, label) <- rs]
 
-pImportSourceTerm :: Parser (Name, EVar)
+pImportSourceTerm :: Parser (Name, EVar, Maybe Name)
 pImportSourceTerm = do
   n <- stringLiteral
-  a <- option n (reserved "as" >> name)
-  return (Name n, EVar a)
+  (a, l) <- option (EVar n, Nothing) (reserved "as" >> pImportAlias)
+  return (Name n, a, l)
+
+pImportAlias :: Parser (EVar, Maybe Name)
+pImportAlias = do
+  l <- tag name
+  n <- name
+  return (EVar n, fmap Name l)
 
 pNamE :: Parser Expr
 pNamE = fmap RecE $ braces (sepBy1 pNamEntryE (symbol ","))

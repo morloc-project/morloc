@@ -100,7 +100,7 @@ prettyExpr (Declaration v e) = pretty v <+> "=" <+> prettyExpr e
 prettyExpr (ListE xs) = list (map prettyExpr xs)
 prettyExpr (TupleE xs) = tupled (map prettyExpr xs)
 prettyExpr (SrcE []) = ""
-prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
+prettyExpr (SrcE srcs@(Source _ lang (Just f) _ _ : _)) =
   "source" <+>
   viaShow lang <+>
   "from" <+>
@@ -114,8 +114,8 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
             else (" as" <> pretty a))
        rs)
   where
-    rs = [(n, a) | (Source n _ _ a) <- srcs]
-prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
+    rs = [(n, a) | (Source n _ _ a _) <- srcs]
+prettyExpr (SrcE srcs@(Source _ lang Nothing _ _ : _)) =
   "source" <+>
   viaShow lang <+>
   tupled
@@ -127,7 +127,7 @@ prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
             else (" as" <> pretty a))
        rs)
   where
-    rs = [(n,a) | (Source n _ _ a) <- srcs]
+    rs = [(n,a) | (Source n _ _ a _) <- srcs]
 prettyExpr (RecE entries) =
   encloseSep
     "{"
@@ -223,5 +223,5 @@ prettyGammaIndex (ExistG tv ts ds)
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
-prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2

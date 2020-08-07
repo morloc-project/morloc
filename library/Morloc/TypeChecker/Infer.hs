@@ -553,6 +553,7 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
+      , esource = Nothing
       }
 
 infer' lang g e@(VarE v) = do

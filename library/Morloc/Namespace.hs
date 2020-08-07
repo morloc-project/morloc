@@ -316,6 +316,7 @@ data Source =
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
+    , srcLabel :: Maybe Name
     }
   deriving (Ord, Eq, Show)
 
@@ -430,6 +431,7 @@ data EType =
     { etype :: Type
     , eprop :: Set Property
     , econs :: Set Constraint
+    , esource :: Maybe Source -- required for distinguising implementation
     }
   deriving (Show, Eq, Ord)
 
