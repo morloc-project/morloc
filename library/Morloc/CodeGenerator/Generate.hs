@@ -31,33 +31,16 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 
--- | Store all necessary information about a particular implementation of a
--- term.  A term may either be declared or sourced. If declared, the left and
--- right hand sides of the declaration are stored. If sourced, the Source
--- object is stored. In either case, the module where the term is defined is
--- also stored.
-data TermOrigin = Declared Module EVar Expr | Sourced Module Source
-  deriving(Show, Ord, Eq)
-
 -- | Translate typechecker-created modules into compilable code
-generate :: [Module] -> MorlocMonad (Script, [Script])
+generate :: [SAnno GMeta Many [CType]] -> MorlocMonad (Script, [Script])
 generate ms = do
   -- initialize state counter to 0, used to index manifolds
   MM.startCounter
 
-  -- modmap :: Map.Map MVar Module
-  let modmap = Map.fromList [(moduleName m, m) | m <- ms]
-
   -- translate modules into bitrees
   (gASTs, rASTs)
-    -- find each term that is exported to the nexus
-    <- roots modmap   -- [(EVar, [TermOrigin])]
-    -- turn each term into an ambiguous call tree
-    >>= mapM (collect modmap)   -- [SAnno GMeta Many [CType]]
-    -- eliminate morloc composition abstractions
-    >>= mapM rewrite
     -- select a single instance at each node in the tree
-    >>= mapM realize   -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
+    <- mapM realize ms   -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
@@ -73,9 +56,6 @@ generate ms = do
     [ (t, poolId m x, metaName m)
     | SAnno (One (x, t)) m <- rASTs
     ]
-
-  -- find all sources files
-  let srcs = unique . concat $ map (map snd . Map.assocs . moduleSourceMap) ms
 
   -- for each language, collect all functions into one "pool"
   pools
@@ -96,7 +76,8 @@ generate ms = do
     -- nuanced.
     >>= pool
     -- Generate the code for each pool
-    >>= mapM (encode srcs)
+    >>= mapM (encode []) -- TODO - [] was a list of sources, however,
+                         -- that should not now be necessary
 
   -- return the nexus script and each pool script
   return (nexus, pools)
