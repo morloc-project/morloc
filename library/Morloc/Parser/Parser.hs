@@ -160,7 +160,7 @@ pProgram = do
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
     [] -> return mods
-    es'' -> return $ makeModule f (MVar "Main") es'' : mods
+    es' -> return $ makeModule f (MVar "Main") es' : mods
 
 pToplevel :: Parser Toplevel
 pToplevel =
@@ -255,37 +255,23 @@ pFunctionDeclaration = do
 
 pSignature :: Parser Expr
 pSignature = do
-  label <- tag name
   v <- name
-  mayLang <- optional pLang
-  setLang mayLang
+  lang <- optional pLang
+  setLang lang
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pType
   constraints <-
     option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
   setLang Nothing
-
-  src <- case mayLang of
-    Nothing -> return Nothing
-    (Just lang) -> return . Just $ Source
-       { srcName  = Name v
-       , srcLang  = lang
-       , srcPath  = Nothing -- I don't yet know the path
-       , srcAlias = EVar "" -- or the alias
-       , srcLabel = fmap Name label
-       }
-
   return $
     Signature
       (EVar v)
       (EType
-        { etype = t
-        , eprop = Set.fromList props
-        , econs = Set.fromList constraints
-        , esource = src
-        }
-      )
+         { etype = t
+         , eprop = Set.fromList props
+         , econs = Set.fromList constraints
+         })
 
 pLang :: Parser Lang
 pLang = do
@@ -352,20 +338,13 @@ pSrcE = do
                         , srcLang = language
                         , srcPath = path
                         , srcAlias = alias
-                        , srcLabel = label
-                        } | (name, alias, label) <- rs]
+                        } | (name, alias) <- rs]
 
-pImportSourceTerm :: Parser (Name, EVar, Maybe Name)
+pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
-  (a, l) <- option (EVar n, Nothing) (reserved "as" >> pImportAlias)
-  return (Name n, a, l)
-
-pImportAlias :: Parser (EVar, Maybe Name)
-pImportAlias = do
-  l <- tag name
-  n <- name
-  return (EVar n, fmap Name l)
+  a <- option n (reserved "as" >> name)
+  return (Name n, EVar a)
 
 pNamE :: Parser Expr
 pNamE = fmap RecE $ braces (sepBy1 pNamEntryE (symbol ","))

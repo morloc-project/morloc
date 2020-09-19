@@ -22,7 +22,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer
 
-typecheck :: [SAnno GMeta Many (Maybe [CType])] -> MorlocMonad [SAnno GMeta Many [CType]]
+typecheck :: [Module] -> MorlocMonad [Module]
 typecheck ms = do
   verbosity <- MS.gets stateVerbosity
   x <- liftIO $ runStack verbosity (Infer.typecheck ms)

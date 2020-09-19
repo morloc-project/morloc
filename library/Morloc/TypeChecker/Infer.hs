@@ -33,117 +33,116 @@ import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
-typecheck :: [SAnno GMeta Many (Maybe [CType])] -> Stack [SAnno GMeta Many [CType]]
-typecheck = undefined
--- typecheck ms = do
---
---   checkForMultipleDeclarations
---
---   -- graph :: Map MVar (Set MVar)
---   let graph = Map.fromList $ map mod2pair ms
---
---   -- list modules ordered such that all dependencies of each module are defined
---   -- in modules that appear earlier in the list
---   -- ms' :: [Module]
---   ms' <- sequence . map (\v -> find (\m -> moduleName m == v) ms) <$> path graph
---
---   -- mods :: [Module]
---   mods <- case ms' of
---     (Just mods') -> typecheckModules (Map.empty) mods'
---     Nothing -> throwError $ OtherError "No modules found"
---
---   let modmap = Map.fromList [(moduleName m, m) | m <- mods]
---   return (Map.elems . Map.map (addImportMap modmap) $ modmap)
---   where
---
---     checkForMultipleDeclarations :: Stack ()
---     checkForMultipleDeclarations = case duplicates (map moduleName ms) of
---       [] -> return ()
---       mvars -> throwError $ MultipleModuleDeclarations mvars
---
---     mod2pair :: Module -> (MVar, Set.Set MVar)
---     mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
---
---     addImportMap :: Map.Map MVar Module -> Module -> Module
---     addImportMap ms m = m {
---       moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m)
---     }
---
---     mkImportMap
---       :: Module
---       -> Map.Map MVar Module
---       -> Import
---       -> Map.Map EVar MVar
---     mkImportMap m ms imp = case ( importInclude imp
---                                 , Map.lookup (importModuleName imp) ms
---                                 ) of
---       (_, Nothing) -> error "Bad import"
---       -- include everything
---       (Nothing, Just m') -> exportMap m' (importExclude imp)
---       -- include specific selection of terms
---       (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
---                                               (exportMap m' (importExclude imp))
---
---     exportMap :: Module -> [EVar] -> Map.Map EVar MVar
---     exportMap m excl
---       = Map.fromSet (\_ -> moduleName m)
---       $ Set.difference (moduleExports m) (Set.fromList excl)
---
---     -- typecheck a list of modules, pass context onwards.
---     typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
---     typecheckModules _ [] = return []
---     typecheckModules mg (m:ms) = do
---       enter $ "entering module '" <> viaShow (moduleName m) <> "'"
---       g <- importFromModularGamma mg m
---       (g', exprs) <- typecheckExpr g (moduleBody m)
---       (privateMap, mg') <- extendModularGamma g' m mg
---       mods <- typecheckModules mg' ms
---       leave $ "module"
---       return (m { moduleBody = exprs
---                 , moduleTypeMap = privateMap
---                 , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
---                 } : mods)
---
---     -- produce a path from sources to pools, die on cycles
---     path :: (Ord a) => Map.Map a (Set.Set a) -> Stack [a]
---     path m
---       | Map.size m == 0 = return []
---       | otherwise =
---         if Map.size rootMap == 0
---           then throwError CyclicDependency
---           else do
---             rest <- path (Map.difference m rootMap)
---             return (rest ++ Map.keys rootMap)
---       where
---         rootMap = Map.filterWithKey (isRoot m) m
---
---         isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
---         isRoot m k _ = not $ Map.foldr (isChild k) False m
---           where
---             isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
---             isChild _ _ True = True
---             isChild k' s False = Set.member k' s
---
---     -- Typecheck a set of expressions within a given context (i.e., one module).
---     -- Return the modified context and a list of annotated expressions.
---     typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
---     typecheckExpr g e = do
---       es <- mapM rename e
---       (g', es') <- typecheckExpr' g [] es
---       let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
---       return $ (g', map (generalizeE . unrename . apply g') es'')
---       where
---         toExpr :: EVar -> TypeSet -> [Expr]
---         toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
---         toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
---
---         typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
---         typecheckExpr' g es [] = return (g, es)
---         typecheckExpr' g es (x:xs) = do
---           (g', _, e') <- infer Nothing g x
---           case e' of
---             (Signature _ _) -> typecheckExpr' g' es xs
---             _ -> typecheckExpr' g' (e' : es) xs
+typecheck :: [Module] -> Stack [Module]
+typecheck ms = do
+
+  checkForMultipleDeclarations
+
+  -- graph :: Map MVar (Set MVar)
+  let graph = Map.fromList $ map mod2pair ms
+
+  -- list modules ordered such that all dependencies of each module are defined
+  -- in modules that appear earlier in the list
+  -- ms' :: [Module]
+  ms' <- sequence . map (\v -> find (\m -> moduleName m == v) ms) <$> path graph
+
+  -- mods :: [Module]
+  mods <- case ms' of
+    (Just mods') -> typecheckModules (Map.empty) mods'
+    Nothing -> throwError $ OtherError "No modules found"
+
+  let modmap = Map.fromList [(moduleName m, m) | m <- mods]
+  return (Map.elems . Map.map (addImportMap modmap) $ modmap)
+  where
+
+    checkForMultipleDeclarations :: Stack ()
+    checkForMultipleDeclarations = case duplicates (map moduleName ms) of
+      [] -> return ()
+      mvars -> throwError $ MultipleModuleDeclarations mvars
+
+    mod2pair :: Module -> (MVar, Set.Set MVar)
+    mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
+
+    addImportMap :: Map.Map MVar Module -> Module -> Module
+    addImportMap ms m = m {
+      moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m) 
+    }
+
+    mkImportMap
+      :: Module
+      -> Map.Map MVar Module
+      -> Import
+      -> Map.Map EVar MVar
+    mkImportMap m ms imp = case ( importInclude imp
+                                , Map.lookup (importModuleName imp) ms
+                                ) of 
+      (_, Nothing) -> error "Bad import"
+      -- include everything
+      (Nothing, Just m') -> exportMap m' (importExclude imp)
+      -- include specific selection of terms
+      (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
+                                              (exportMap m' (importExclude imp))
+
+    exportMap :: Module -> [EVar] -> Map.Map EVar MVar
+    exportMap m excl
+      = Map.fromSet (\_ -> moduleName m)
+      $ Set.difference (moduleExports m) (Set.fromList excl)
+
+    -- typecheck a list of modules, pass context onwards.
+    typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
+    typecheckModules _ [] = return []
+    typecheckModules mg (m:ms) = do
+      enter $ "entering module '" <> viaShow (moduleName m) <> "'"
+      g <- importFromModularGamma mg m
+      (g', exprs) <- typecheckExpr g (moduleBody m)
+      (privateMap, mg') <- extendModularGamma g' m mg
+      mods <- typecheckModules mg' ms
+      leave $ "module"
+      return (m { moduleBody = exprs
+                , moduleTypeMap = privateMap
+                , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
+                } : mods)
+
+    -- produce a path from sources to pools, die on cycles
+    path :: (Ord a) => Map.Map a (Set.Set a) -> Stack [a]
+    path m
+      | Map.size m == 0 = return []
+      | otherwise =
+        if Map.size rootMap == 0
+          then throwError CyclicDependency
+          else do
+            rest <- path (Map.difference m rootMap)
+            return (rest ++ Map.keys rootMap)
+      where
+        rootMap = Map.filterWithKey (isRoot m) m
+
+        isRoot :: (Ord a) => Map.Map a (Set.Set a) -> a -> Set.Set a -> Bool
+        isRoot m k _ = not $ Map.foldr (isChild k) False m
+          where
+            isChild :: (Ord a) => a -> Set.Set a -> Bool -> Bool
+            isChild _ _ True = True
+            isChild k' s False = Set.member k' s
+
+    -- Typecheck a set of expressions within a given context (i.e., one module).
+    -- Return the modified context and a list of annotated expressions.
+    typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
+    typecheckExpr g e = do
+      es <- mapM rename e
+      (g', es') <- typecheckExpr' g [] es
+      let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
+      return $ (g', map (generalizeE . unrename . apply g') es'')
+      where
+        toExpr :: EVar -> TypeSet -> [Expr]
+        toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
+        toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
+
+        typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
+        typecheckExpr' g es [] = return (g, es)
+        typecheckExpr' g es (x:xs) = do
+          (g', _, e') <- infer Nothing g x
+          case e' of
+            (Signature _ _) -> typecheckExpr' g' es xs
+            _ -> typecheckExpr' g' (e' : es) xs
 
 
 
@@ -554,7 +553,6 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
-      , esource = Nothing
       }
 
 infer' lang g e@(VarE v) = do

@@ -68,14 +68,6 @@ module Morloc.Namespace
   , TypeM(..)
   , ExprM(..)
   , Argument(..)
-  -- ** SAnno tree and associated types
-  , GMeta(..)
-  , Many(..)
-  , None(..)
-  , One(..)
-  , SAnno(..)
-  , SExpr(..)
-  , TermOrigin(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -324,7 +316,6 @@ data Source =
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
-    , srcLabel :: Maybe Name
     }
   deriving (Ord, Eq, Show)
 
@@ -439,7 +430,6 @@ data EType =
     { etype :: Type
     , eprop :: Set Property
     , econs :: Set Constraint
-    , esource :: Maybe Source -- required for distinguising implementation
     }
   deriving (Show, Eq, Ord)
 
@@ -656,47 +646,3 @@ instance HasOneLanguage ExprM where
   langOf (PackM e) = langOf e
   langOf (UnpackM e) = langOf e
   langOf (ReturnM e) = langOf e
-
-
--- g: an annotation for the group of child trees (what they have in common)
--- f: a collection - before realization this will probably be Set
---                 - after realization it will be One
--- c: an annotation for the specific child tree
-data SAnno g f c = SAnno (f (SExpr g f c, c)) g
-
-data None = None
-data One a = One a
-data Many a = Many [a]
-
-instance Functor One where
-  fmap f (One x) = One (f x)
-
-data SExpr g f c
-  = UniS
-  | VarS EVar
-  | ListS [SAnno g f c]
-  | TupleS [SAnno g f c]
-  | LamS [EVar] (SAnno g f c)
-  | AppS (SAnno g f c) [SAnno g f c]
-  | NumS Scientific
-  | LogS Bool
-  | StrS Text
-  | RecS [(EVar, SAnno g f c)]
-  | CallS Source
-
--- | Description of the general manifold
-data GMeta = GMeta {
-    metaId :: Int
-  , metaGType :: Maybe GType
-  , metaName :: Maybe EVar -- the name, if relevant
-  , metaProperties :: Set Property
-  , metaConstraints :: Set Constraint
-} deriving (Show, Ord, Eq)
-
--- | Store all necessary information about a particular implementation of a
--- term.  A term may either be declared or sourced. If declared, the left and
--- right hand sides of the declaration are stored. If sourced, the Source
--- object is stored. In either case, the module where the term is defined is
--- also stored.
-data TermOrigin = Declared Module EVar Expr | Sourced Module Source
-  deriving(Show, Ord, Eq)

@@ -53,11 +53,11 @@ parse f (Code code) = do
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods
 
-cute :: [SAnno GMeta Many [CType]] -> IO ()
-cute ms = undefined
+cute :: [Module] -> IO ()
+cute ms = mapM_ (\m -> putDoc (Pretty.prettyModule m) >> putStrLn "") ms
 
-ugly :: [SAnno GMeta Many [CType]] -> IO ()
-ugly ms = undefined
+ugly :: [Module] -> IO ()
+ugly ms = print ms
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)

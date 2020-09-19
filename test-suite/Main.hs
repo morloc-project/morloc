@@ -84,4 +84,6 @@ main = do
       -- , golden "records-1-c" "records-1-c"
 
       , golden "selection-1" "selection-1"
+      , golden "selection-2" "selection-2"
+      , golden "selection-3" "selection-3"
       ]
