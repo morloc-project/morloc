@@ -130,7 +130,7 @@ roots ms = do
       let vs = Set.toList (moduleExports m) in
         return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError CyclicDependency
-    _ -> MM.throwError . GeneratorError $ "Multiple root modules"
+    ms -> MM.throwError . GeneratorError $ ("Multiple root modules: " <> MT.show' (map moduleName ms))
 
   return xs
   where

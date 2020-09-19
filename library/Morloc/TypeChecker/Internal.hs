@@ -23,7 +23,6 @@ module Morloc.TypeChecker.Internal
   , generalize
   , generalizeE
   , generalizeTypeSet
-  , importFromModularGamma
   , index
   , lookupE
   , lookupT
@@ -186,37 +185,6 @@ decDepth = do
 
 getDepth :: Stack Int
 getDepth = CMS.gets stateDepth
-
--- | Pass type and source information from imported modules to the current module.
-importFromModularGamma :: ModularGamma -> Module -> Stack Gamma
-importFromModularGamma g m = fmap concat $ mapM lookupImport (moduleImports m)
-  where
-    lookupImport :: Import -> Stack Gamma
-    lookupImport imp
-      | v == moduleName m = throwError $ SelfImport v
-      | v == MVar "Main" = throwError CannotImportMain
-      | otherwise =
-        case (importInclude imp, Map.lookup v g) of
-        -- raise error if the imported module is not in the module map
-          (_, Nothing) -> throwError $ CannotFindModule v
-        -- handle imports of everything, i.e. @import Foo@
-          (Nothing, Just g') ->
-            return [AnnG (VarE e) t | (e, t) <- Map.toList g']
-        -- handle limited imports, i.g. @import Foo ("f" as foo, bar)@
-          (Just xs, Just g') -> mapM (lookupOneImport v g') xs
-      where
-        v = importModuleName imp
-
-    lookupOneImport
-      :: MVar
-      -> Map.Map EVar TypeSet
-      -> (EVar, EVar)
-      -> Stack GammaIndex
-    lookupOneImport v typemap (n, alias) =
-      case Map.lookup n typemap of
-        (Just t) -> return $ AnnG (VarE alias) t
-        Nothing -> throwError $ BadImport v alias
-
 
 -- | Update a ModularGamma object with all exported terms from a module. Return
 -- the resulting map was well as a private map containing all terms (whether

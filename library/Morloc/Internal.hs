@@ -20,6 +20,9 @@ module Morloc.Internal
   , module Control.Monad
   , module Control.Monad.IO.Class
   , module Data.Monoid
+  -- ** selected functions from Data.Foldable
+  , foldlM
+  , foldrM
   -- ** selected functions from Data.Tuple.Extra
   , uncurry3
   , curry3
@@ -51,6 +54,7 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Control.Applicative ((<|>))
 import Data.Either
+import Data.Foldable (foldlM, foldrM)
 import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe

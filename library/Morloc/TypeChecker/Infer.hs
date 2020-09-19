@@ -145,6 +145,89 @@ typecheck ms = do
             _ -> typecheckExpr' g' (e' : es) xs
 
 
+-- | Pass type and source information from imported modules to the current
+-- module.  The imported typesets for each term are unified with the current
+-- module's type signatures. For a given term, all general signatures must be
+-- subtypes of eachother. All properties and constraints are pooled.  TODO:
+-- properties should NOT always be pooled. While I have not yet made use of
+-- them, in the future I intend to add properties such as "Pure" or
+-- "Open-Source", essentially metadata which emphatically should not be pooled.
+importFromModularGamma
+  :: ModularGamma
+  -- ^ Map MVar (Map EVar TypeSet) -- a map of all previously processed
+  -- modules. The evaluation order should ensure all dependencies have already
+  -- been processed.
+  -> Module
+  -- ^ The current module in the typechecking list. Every term it imports will
+  -- be looked up in the ModularGamma object, raising an error if it is not
+  -- present.
+  -> Stack Gamma
+  -- ^ The initial context object that will be passed to the typechecker for
+  -- this module. The order of elements in Gamma does not matter.
+importFromModularGamma g m = mapM lookupImport (moduleImports m) >>= combineGammas
+  where
+    lookupImport :: Import -> Stack [(EVar, TypeSet)]
+    lookupImport imp
+      | v == moduleName m = throwError $ SelfImport v
+      | v == MVar "Main" = throwError CannotImportMain
+      | otherwise =
+        case (importInclude imp, Map.lookup v g) of
+        -- raise error if the imported module is not in the module map
+          (_, Nothing) -> throwError $ CannotFindModule v
+        -- handle imports of everything, i.e. @import Foo@
+          (Nothing, Just g') -> return (Map.toList g')
+        -- handle limited imports, i.g. @import Foo ("f" as foo, bar)@
+          (Just xs, Just g') -> mapM (lookupOneImport v g') xs
+      where
+        v = importModuleName imp
+
+    lookupOneImport
+      :: MVar
+      -> Map.Map EVar TypeSet
+      -> (EVar, EVar)
+      -> Stack (EVar, TypeSet)
+    lookupOneImport v typemap (n, alias) =
+      case Map.lookup n typemap of
+        (Just t) -> return (alias, t)
+        Nothing -> throwError $ BadImport v alias
+
+    combineGammas :: [[(EVar, TypeSet)]] -> Stack Gamma
+    combineGammas
+      = fmap (map (\(v, t) -> AnnG (VarE v) t))
+      . mapM mergeManyTypeSets
+      . groupSort
+      . concat
+
+    mergeManyTypeSets :: (EVar, [TypeSet]) -> Stack (EVar, TypeSet)
+    mergeManyTypeSets (v, ts) = do
+      (localGeneralType, localConcreteTypes) <- case Map.lookup v (moduleTypeMap m) of
+        (Just (TypeSet t cs)) -> return (t, cs)
+        Nothing -> return (Nothing, [])
+
+      generalType <- mergeGeneral $ catMaybes (localGeneralType : [gt | (TypeSet gt _) <- ts])
+
+      let concreteTypes = localConcreteTypes ++ concat [cs | (TypeSet _ cs) <- ts]
+
+      return $ (v, TypeSet generalType concreteTypes)
+
+    mergeGeneral :: [EType] -> Stack (Maybe EType)
+    mergeGeneral [] = return Nothing
+    mergeGeneral [e] = return (Just e)
+    mergeGeneral [e1, e2] = fmap Just $ mergeGeneralTwo e1 e2 
+    mergeGeneral (e1:es) = do
+      e2' <- mergeGeneral es
+      case e2' of
+        (Just e2) -> fmap Just $ mergeGeneralTwo e1 e2
+        Nothing -> return Nothing
+
+    mergeGeneralTwo :: EType -> EType -> Stack EType
+    mergeGeneralTwo (EType t1 ps1 cs1) (EType t2 ps2 cs2) = do
+      subtype t1 t2 []
+      subtype t2 t1 []
+      -- FIXME: implement better behavior here for joining properties
+      return $ EType t1 (Set.union ps1 ps2) (Set.union cs1 cs2)
+
+
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: Type -> Type -> Gamma -> Stack Gamma
