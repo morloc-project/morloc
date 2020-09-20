@@ -15,7 +15,7 @@ module Morloc.CodeGenerator.Generate
 import Morloc.Namespace
 import Morloc.Data.Doc
 import Morloc.TypeChecker.PartialOrder
-import Morloc.Pretty (prettyType, prettyExpr)
+import Morloc.Pretty (prettyType, prettyExpr, prettyModule)
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
@@ -47,6 +47,8 @@ generate ms = do
 
   -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
+
+  MM.logFileWith "mods.txt" (MT.unpack . render . vsep . map prettyModule) ms
 
   -- translate modules into bitrees
   (gASTs, rASTs)
@@ -130,12 +132,13 @@ roots ms = do
       let vs = Set.toList (moduleExports m) in
         return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError CyclicDependency
-    ms -> MM.throwError . GeneratorError $ ("Multiple root modules: " <> MT.show' (map moduleName ms))
+    ms -> MM.throwError . GeneratorError $
+          ("Multiple root modules: " <> render (vsep $ map prettyModule ms) <> MT.show' allImports)
 
   return xs
   where
     isRoot m = not $ Set.member (moduleName m) allImports
-    allImports = mapSumWith (valset . moduleImportMap) ms
+    allImports = Set.fromList . map importModuleName . concat . map moduleImports . Map.elems $ ms
     roots = filter isRoot (Map.elems ms)
 
 
@@ -1265,13 +1268,14 @@ findTerm includeInternal ms m v
   | otherwise = []
   where
     evarDeclared :: [TermOrigin]
-    evarDeclared = case Map.lookup v (moduleDeclarationMap m) of
-      -- If a term is defined as being equal to another term, find this other term.
-      (Just (VarE v')) -> if v /= v'
-        then findTerm False ms m v'
-        else error "found term of type `x = x`, the typechecker should have died on this ..."
-      (Just e) -> [Declared m v e]
-      _ -> []
+    evarDeclared = concat [findDecl e | (Declaration v' e) <- moduleBody m, v' == v]
+
+    findDecl :: Expr -> [TermOrigin]
+    -- If a term is defined as being equal to another term, find this other term.
+    findDecl (VarE v')
+      | v /= v' = findTerm False ms m v'
+      | v == v' = error "found term of type `x = x`, the typechecker should have died on this ..."
+    findDecl e = [Declared m v e]
 
     evarSourced :: [TermOrigin]
     evarSourced = map (\(_, src) -> Sourced m src)
@@ -1289,4 +1293,9 @@ findTerm includeInternal ms m v
       Nothing -> error $ "Variable '" <> MT.unpack (unEVar name) <> "' is not defined"
 
     listMVars :: Module -> [MVar]
-    listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m)
+    listMVars = map importModuleName . filter (inImport v) . moduleImports
+
+    inImport :: EVar -> Import -> Bool 
+    inImport v imp = case (importInclude imp, importExclude imp) of  
+        (Nothing, ex) -> not (elem v ex)
+        (Just included, _) -> elem v (map snd included) 

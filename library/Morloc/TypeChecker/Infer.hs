@@ -51,8 +51,8 @@ typecheck ms = do
     (Just mods') -> typecheckModules (Map.empty) mods'
     Nothing -> throwError $ OtherError "No modules found"
 
-  let modmap = Map.fromList [(moduleName m, m) | m <- mods]
-  return (Map.elems . Map.map (addImportMap modmap) $ modmap)
+  return mods
+
   where
 
     checkForMultipleDeclarations :: Stack ()
@@ -62,31 +62,6 @@ typecheck ms = do
 
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
-
-    addImportMap :: Map.Map MVar Module -> Module -> Module
-    addImportMap ms m = m {
-      moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m) 
-    }
-
-    mkImportMap
-      :: Module
-      -> Map.Map MVar Module
-      -> Import
-      -> Map.Map EVar MVar
-    mkImportMap m ms imp = case ( importInclude imp
-                                , Map.lookup (importModuleName imp) ms
-                                ) of 
-      (_, Nothing) -> error "Bad import"
-      -- include everything
-      (Nothing, Just m') -> exportMap m' (importExclude imp)
-      -- include specific selection of terms
-      (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
-                                              (exportMap m' (importExclude imp))
-
-    exportMap :: Module -> [EVar] -> Map.Map EVar MVar
-    exportMap m excl
-      = Map.fromSet (\_ -> moduleName m)
-      $ Set.difference (moduleExports m) (Set.fromList excl)
 
     -- typecheck a list of modules, pass context onwards.
     typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
@@ -100,7 +75,6 @@ typecheck ms = do
       leave $ "module"
       return (m { moduleBody = exprs
                 , moduleTypeMap = privateMap
-                , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
                 } : mods)
 
     -- produce a path from sources to pools, die on cycles

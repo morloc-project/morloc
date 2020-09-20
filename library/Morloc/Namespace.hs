@@ -335,10 +335,8 @@ data Module =
     , moduleBody :: [Expr] -- ^ will be parsed by the typechecker and used in pretty printing 
     , moduleExports :: Set EVar
     , moduleImports :: [Import]
-    , moduleImportMap :: Map EVar MVar
     , moduleSourceMap :: Map (EVar, Lang) Source
     , moduleTypeMap :: Map EVar TypeSet
-    , moduleDeclarationMap :: Map EVar Expr
     }
   deriving (Ord, Eq, Show)
 

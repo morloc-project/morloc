@@ -24,9 +24,9 @@ main (m:ms)
 
 mainDecMap :: [Module] -> [(EVar, Expr)]
 mainDecMap [] = error "Missing main"
-mainDecMap [m] = Map.toList $ moduleDeclarationMap m
+mainDecMap [m] = [(v, e) | (Declaration v e) <- moduleBody m]
 mainDecMap (m:ms)
-  | moduleName m == (MVar "Main") = Map.toList $ moduleDeclarationMap m
+  | moduleName m == (MVar "Main") = [(v, e) | (Declaration v e) <- moduleBody m]
   | otherwise = mainDecMap ms
 
 -- get the toplevel type of a fully annotated expression
