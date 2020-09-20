@@ -1,11 +1,11 @@
-import pybase
+import rbase
 
-source py from "foo.py" (
+source r from "rms.r" (
     "rms1" as rms
   , "rms2" as rms
 )
 
 export rms
 
-rms py :: [float] -> float;
+rms r :: [numeric] -> numeric;
 rms :: [Num] -> Num;

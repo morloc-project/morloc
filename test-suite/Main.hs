@@ -90,5 +90,7 @@ main = do
 
       -- import two instances in one languages for a function
       -- this is also a test of a function that is defind in a local file
-      , golden "multiple-instances-1" "multiple-instances-1"
+      , golden "multiple-instances-1-c" "multiple-instances-1-c"
+      , golden "multiple-instances-1-py" "multiple-instances-1-py"
+      , golden "multiple-instances-1-r" "multiple-instances-1-r"
       ]
