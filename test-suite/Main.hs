@@ -87,4 +87,8 @@ main = do
       , golden "selection-2" "selection-2"
       , golden "selection-3" "selection-3"
       , golden "selection-4" "selection-4"
+
+      -- import two instances in one languages for a function
+      -- this is also a test of a function that is defind in a local file
+      , golden "multiple-instances-1" "multiple-instances-1"
       ]
