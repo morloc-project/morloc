@@ -1,0 +1,15 @@
+import pybase
+import math
+
+export rms
+
+source py from "rms.py" (
+    "rms1" as rms
+  , "rms2" as rms
+)
+
+square x = mul x x;
+rms xs = sqrt (mean (map square xs));
+
+rms py :: [float] -> float;
+rms :: [Num] -> Num;
