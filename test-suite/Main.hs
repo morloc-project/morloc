@@ -95,6 +95,6 @@ main = do
       , golden "multiple-instances-1-r" "multiple-instances-1-r"
       -- multiple sources and a declaration
       , golden "multiple-instances-2-c" "multiple-instances-2-c"
-      , golden "multiple-instances-2-c" "multiple-instances-2-py"
-      , golden "multiple-instances-2-c" "multiple-instances-2-r"
+      , golden "multiple-instances-2-py" "multiple-instances-2-py"
+      , golden "multiple-instances-2-r" "multiple-instances-2-r"
       ]

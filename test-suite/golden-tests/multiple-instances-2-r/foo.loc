@@ -1,5 +1,6 @@
-import rbase
-import math
+import rbase;
+import math (sqrt, mean, mul);
+import cppbase (map);
 
 export rms
 

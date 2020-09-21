@@ -67,7 +67,7 @@ errmsg TupleSingleton = "TupleSingleton"
 errmsg EmptyRecord = "EmptyRecord"
 -- module errors
 errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.unwords (map unMVar mv) 
-errmsg (BadImport mv ev) = "BadImport"
+errmsg (BadImport mv ev) = "BadImport: " <> unMVar mv <> "::" <> unEVar ev
 errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
 errmsg CannotImportMain = "CannotImportMain"
