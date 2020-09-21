@@ -9,7 +9,7 @@ rms2 <- function(xs){
   for (x in xs){
     result = result + x ^ 2
   }
-  result = result / length(result)
+  result = result / length(xs)
   result = sqrt(result)
   return(result)
 }

@@ -70,6 +70,7 @@ translateSource (Path s) = do
           . MT.liftToText (map DC.toLower)
           . MT.replace "/" "."
           . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+          . MT.stripPrefixIfPresent "./" -- no path if relative to here
           . MT.stripPrefixIfPresent lib  -- make the path relative to the library
           . MT.liftToText SF.dropExtensions
           $ s

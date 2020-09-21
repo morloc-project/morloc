@@ -48,6 +48,7 @@ generate ms = do
   -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
 
+  -- pretty print modules to $MORLOC_HOME/tmp/mods.txt
   MM.logFileWith "mods.txt" (MT.unpack . render . vsep . map prettyModule) ms
 
   -- translate modules into bitrees
@@ -93,7 +94,7 @@ generate ms = do
     >>= mapM segment |>> concat
     -- Cast each call tree root as a manifold
     >>= mapM rehead
-    -- Gather segments into pools, currently tihs entails gathering all
+    -- Gather segments into pools, currently this entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
     >>= pool
@@ -810,12 +811,22 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
       fullyApplied = length inputs == length xs
       f = SrcM (ctype2typeM fc) src
 
+  -- CallS - direct export of a sourced function, e.g.:
+  express' True _ (SAnno (One (CallS src, (c, _))) m) = do
+    let inputs = fst $ typeParts c
+        lambdaArgs = zipWith PackedArgument [0 ..] inputs
+        lambdaTypes = map (packTypeM . ctype2typeM) inputs
+        lambdaVals = map UnpackM $ zipWith BndVarM lambdaTypes [0 ..]
+        f = SrcM (ctype2typeM c) src
+        manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
+    return manifold
+
   -- An un-applied source call
-  express' _ pc (SAnno (One (CallS src, (c, _))) m) = do
+  express' False pc (SAnno (One (CallS src, (c, _))) m) = do
     let inputs = fst $ typeParts c
         lambdaTypes = map ctype2typeM inputs
         lambdaArgs = zipWith UnpackedArgument [0 ..] inputs
-        lambdaVals = zipWith BndVarM          lambdaTypes [0 ..]
+        lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
         f = SrcM (ctype2typeM c) src
         manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
 
@@ -825,6 +836,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
 
 -- | Move let assignments to minimize number of foreign calls.  This step
 -- should be integrated with the optimizations performed in the realize step.
+-- FIXME: replace stub
 letOptimize :: ExprM -> MorlocMonad ExprM
 letOptimize e = return e
 
