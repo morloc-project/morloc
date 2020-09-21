@@ -7,6 +7,5 @@ source py from "rms.py" (
 
 export rms
 
--- TODO: should be able to write [float] and default to list
-rms py :: list float -> float;
+rms py :: [float] -> float;
 rms :: [Num] -> Num;
