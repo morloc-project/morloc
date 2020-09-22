@@ -1,10 +1,13 @@
 -- source 1, import 1, declare 1
 
-import pybase (add, fold);
-import math (sum);
+-- PROBLEM: no C++ file generated (all work if cppbase import is removed)
 
-source py from "foo.py" ("sum_loc" as sum)
+import pybase (add, mul);
+import rbase (add, mul);
+import cppbase (add, mul, sub); -- import sub
 
-export sum
+source py from "foo.py" ("sub_loc" as sub); -- source sub
 
-sum xs = fold add 0 xs;
+export sub;
+
+sub x y = add x (mul -1 y); -- declare sub

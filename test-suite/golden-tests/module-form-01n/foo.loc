@@ -1,9 +1,9 @@
 -- 01n - single import and multiple declarations
 
 import math (sum);
-import pybase;
-import cppbase (fold, add);
-import rbase;
+import pybase (fold, add, mul);
+import cppbase (fold, add, mul);
+import rbase (fold, add, mul);
 
 export sum;
 

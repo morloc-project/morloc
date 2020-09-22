@@ -470,8 +470,10 @@ realize x = do
     realizeExpr' _ lang (StrS x) c
       | lang == langOf c = return $ Just (0, StrS x, c)
       | otherwise = return Nothing
-    -- a call should also be of the same language as the parent, shouldn't it?
+    -- Q: a call should also be of the same language as the parent, shouldn't it?
+    -- A: not necessarily, specifically if the parent includes many child calls, say in a list
     realizeExpr' _ lang (CallS src) c
+      -- FIXME: assuming function calls have 0 cost is perhaps not realistic
       | lang == langOf c = return $ Just (0, CallS src, c)
       | otherwise = return Nothing
     -- and a var?

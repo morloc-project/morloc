@@ -1,2 +1,2 @@
-def sum_loc(xs):
-    return sum(xs)
+def sub_loc(x, y):
+    return (x - y)

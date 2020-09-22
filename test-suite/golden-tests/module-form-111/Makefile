@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make foo.loc
-	./nexus.pl sum 3 5 > obs.txt
+	./nexus.pl sub 3 5 > obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -rf nexus* pool* __pycache__

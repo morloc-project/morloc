@@ -4,4 +4,4 @@ all:
 	./nexus.pl sub 3 5 > obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -rf nexus* pool* __pycache__
