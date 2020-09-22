@@ -82,4 +82,38 @@ main = do
       , golden "records-1-r" "records-1-r"
       -- -- see github issue #8
       -- , golden "records-1-c" "records-1-c"
+
+      , golden "selection-1" "selection-1"
+      , golden "selection-2" "selection-2"
+      , golden "selection-3" "selection-3"
+      , golden "selection-4" "selection-4"
+
+      -- import two instances in one languages for a function
+      -- this is also a test of a function that is defind in a local file
+      , golden "multiple-instances-1-c" "multiple-instances-1-c"
+      , golden "multiple-instances-1-py" "multiple-instances-1-py"
+      , golden "multiple-instances-1-r" "multiple-instances-1-r"
+      -- multiple sources and a declaration
+      , golden "multiple-instances-2-c" "multiple-instances-2-c"
+      , golden "multiple-instances-2-py" "multiple-instances-2-py"
+      , golden "multiple-instances-2-r" "multiple-instances-2-r"
+      -- tests of module forms
+      -- where *-sid
+      --   s - number of sourced instances
+      --   i - number of imported instances
+      --   d - number of declared instances
+      , golden "module-form-00n" "module-form-00n"
+      , golden "module-form-011" "module-form-011"
+      , golden "module-form-01n" "module-form-01n"
+      , golden "module-form-0n0" "module-form-0n0"
+      , golden "module-form-0n1" "module-form-0n1"
+      , golden "module-form-101" "module-form-101"
+      , golden "module-form-10n" "module-form-10n"
+      , golden "module-form-110" "module-form-110"
+      , golden "module-form-111" "module-form-111"
+      , golden "module-form-1n0" "module-form-1n0"
+      , golden "module-form-n00" "module-form-n00"
+      , golden "module-form-n01" "module-form-n01"
+      , golden "module-form-n10" "module-form-n10"
       ]
+

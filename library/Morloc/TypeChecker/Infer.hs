@@ -51,8 +51,8 @@ typecheck ms = do
     (Just mods') -> typecheckModules (Map.empty) mods'
     Nothing -> throwError $ OtherError "No modules found"
 
-  let modmap = Map.fromList [(moduleName m, m) | m <- mods]
-  return (Map.elems . Map.map (addImportMap modmap) $ modmap)
+  return mods
+
   where
 
     checkForMultipleDeclarations :: Stack ()
@@ -62,31 +62,6 @@ typecheck ms = do
 
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
-
-    addImportMap :: Map.Map MVar Module -> Module -> Module
-    addImportMap ms m = m {
-      moduleImportMap = Map.unions $ map (mkImportMap m ms) (moduleImports m) 
-    }
-
-    mkImportMap
-      :: Module
-      -> Map.Map MVar Module
-      -> Import
-      -> Map.Map EVar MVar
-    mkImportMap m ms imp = case ( importInclude imp
-                                , Map.lookup (importModuleName imp) ms
-                                ) of 
-      (_, Nothing) -> error "Bad import"
-      -- include everything
-      (Nothing, Just m') -> exportMap m' (importExclude imp)
-      -- include specific selection of terms
-      (Just xs, Just m') -> Map.filterWithKey (\v _ -> elem v (map snd xs))
-                                              (exportMap m' (importExclude imp))
-
-    exportMap :: Module -> [EVar] -> Map.Map EVar MVar
-    exportMap m excl
-      = Map.fromSet (\_ -> moduleName m)
-      $ Set.difference (moduleExports m) (Set.fromList excl)
 
     -- typecheck a list of modules, pass context onwards.
     typecheckModules :: ModularGamma -> [Module] -> Stack [Module]
@@ -100,7 +75,6 @@ typecheck ms = do
       leave $ "module"
       return (m { moduleBody = exprs
                 , moduleTypeMap = privateMap
-                , moduleDeclarationMap = Map.fromList [(v, e) | (Declaration v e) <- exprs]
                 } : mods)
 
     -- produce a path from sources to pools, die on cycles
@@ -143,6 +117,89 @@ typecheck ms = do
           case e' of
             (Signature _ _) -> typecheckExpr' g' es xs
             _ -> typecheckExpr' g' (e' : es) xs
+
+
+-- | Pass type and source information from imported modules to the current
+-- module.  The imported typesets for each term are unified with the current
+-- module's type signatures. For a given term, all general signatures must be
+-- subtypes of eachother. All properties and constraints are pooled.  TODO:
+-- properties should NOT always be pooled. While I have not yet made use of
+-- them, in the future I intend to add properties such as "Pure" or
+-- "Open-Source", essentially metadata which emphatically should not be pooled.
+importFromModularGamma
+  :: ModularGamma
+  -- ^ Map MVar (Map EVar TypeSet) -- a map of all previously processed
+  -- modules. The evaluation order should ensure all dependencies have already
+  -- been processed.
+  -> Module
+  -- ^ The current module in the typechecking list. Every term it imports will
+  -- be looked up in the ModularGamma object, raising an error if it is not
+  -- present.
+  -> Stack Gamma
+  -- ^ The initial context object that will be passed to the typechecker for
+  -- this module. The order of elements in Gamma does not matter.
+importFromModularGamma g m = mapM lookupImport (moduleImports m) >>= combineGammas
+  where
+    lookupImport :: Import -> Stack [(EVar, TypeSet)]
+    lookupImport imp
+      | v == moduleName m = throwError $ SelfImport v
+      | v == MVar "Main" = throwError CannotImportMain
+      | otherwise =
+        case (importInclude imp, Map.lookup v g) of
+        -- raise error if the imported module is not in the module map
+          (_, Nothing) -> throwError $ CannotFindModule v
+        -- handle imports of everything, i.e. @import Foo@
+          (Nothing, Just g') -> return (Map.toList g')
+        -- handle limited imports, i.g. @import Foo ("f" as foo, bar)@
+          (Just xs, Just g') -> mapM (lookupOneImport v g') xs
+      where
+        v = importModuleName imp
+
+    lookupOneImport
+      :: MVar
+      -> Map.Map EVar TypeSet
+      -> (EVar, EVar)
+      -> Stack (EVar, TypeSet)
+    lookupOneImport v typemap (n, alias) =
+      case Map.lookup n typemap of
+        (Just t) -> return (alias, t)
+        Nothing -> throwError $ BadImport v alias
+
+    combineGammas :: [[(EVar, TypeSet)]] -> Stack Gamma
+    combineGammas
+      = fmap (map (\(v, t) -> AnnG (VarE v) t))
+      . mapM mergeManyTypeSets
+      . groupSort
+      . concat
+
+    mergeManyTypeSets :: (EVar, [TypeSet]) -> Stack (EVar, TypeSet)
+    mergeManyTypeSets (v, ts) = do
+      (localGeneralType, localConcreteTypes) <- case Map.lookup v (moduleTypeMap m) of
+        (Just (TypeSet t cs)) -> return (t, cs)
+        Nothing -> return (Nothing, [])
+
+      generalType <- mergeGeneral $ catMaybes (localGeneralType : [gt | (TypeSet gt _) <- ts])
+
+      let concreteTypes = localConcreteTypes ++ concat [cs | (TypeSet _ cs) <- ts]
+
+      return $ (v, TypeSet generalType concreteTypes)
+
+    mergeGeneral :: [EType] -> Stack (Maybe EType)
+    mergeGeneral [] = return Nothing
+    mergeGeneral [e] = return (Just e)
+    mergeGeneral [e1, e2] = fmap Just $ mergeGeneralTwo e1 e2 
+    mergeGeneral (e1:es) = do
+      e2' <- mergeGeneral es
+      case e2' of
+        (Just e2) -> fmap Just $ mergeGeneralTwo e1 e2
+        Nothing -> return Nothing
+
+    mergeGeneralTwo :: EType -> EType -> Stack EType
+    mergeGeneralTwo (EType t1 ps1 cs1) (EType t2 ps2 cs2) = do
+      subtype t1 t2 []
+      subtype t2 t1 []
+      -- FIXME: implement better behavior here for joining properties
+      return $ EType t1 (Set.union ps1 ps2) (Set.union cs1 cs2)
 
 
 

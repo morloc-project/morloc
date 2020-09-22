@@ -15,7 +15,7 @@ module Morloc.CodeGenerator.Generate
 import Morloc.Namespace
 import Morloc.Data.Doc
 import Morloc.TypeChecker.PartialOrder
-import Morloc.Pretty (prettyType, prettyExpr)
+import Morloc.Pretty (prettyType, prettyExpr, prettyModule)
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
@@ -47,6 +47,9 @@ generate ms = do
 
   -- modmap :: Map.Map MVar Module
   let modmap = Map.fromList [(moduleName m, m) | m <- ms]
+
+  -- pretty print modules to $MORLOC_HOME/tmp/mods.txt
+  MM.logFileWith "mods.txt" (MT.unpack . render . vsep . map prettyModule) ms
 
   -- translate modules into bitrees
   (gASTs, rASTs)
@@ -91,7 +94,7 @@ generate ms = do
     >>= mapM segment |>> concat
     -- Cast each call tree root as a manifold
     >>= mapM rehead
-    -- Gather segments into pools, currently tihs entails gathering all
+    -- Gather segments into pools, currently this entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
     >>= pool
@@ -130,12 +133,13 @@ roots ms = do
       let vs = Set.toList (moduleExports m) in
         return $ zip vs (map (findTerm False ms m) vs)
     [] -> MM.throwError CyclicDependency
-    _ -> MM.throwError . GeneratorError $ "Multiple root modules"
+    ms -> MM.throwError . GeneratorError $
+          ("Multiple root modules: " <> render (vsep $ map prettyModule ms) <> MT.show' allImports)
 
   return xs
   where
     isRoot m = not $ Set.member (moduleName m) allImports
-    allImports = mapSumWith (valset . moduleImportMap) ms
+    allImports = Set.fromList . map importModuleName . concat . map moduleImports . Map.elems $ ms
     roots = filter isRoot (Map.elems ms)
 
 
@@ -177,7 +181,7 @@ collect ms (evar', xs@(x:_)) = do
         getTermTypes :: TermOrigin -> MorlocMonad [Type]
         getTermTypes t = do
           (TypeSet _ es) <- getTermTypeSet t
-          return $ map etype es
+          return $ [etype e | e <- es, Just (srcLang src) == langOf e]
 
     collectAnno
       :: Set.Set EVar
@@ -466,8 +470,10 @@ realize x = do
     realizeExpr' _ lang (StrS x) c
       | lang == langOf c = return $ Just (0, StrS x, c)
       | otherwise = return Nothing
-    -- a call should also be of the same language as the parent, shouldn't it?
+    -- Q: a call should also be of the same language as the parent, shouldn't it?
+    -- A: not necessarily, specifically if the parent includes many child calls, say in a list
     realizeExpr' _ lang (CallS src) c
+      -- FIXME: assuming function calls have 0 cost is perhaps not realistic
       | lang == langOf c = return $ Just (0, CallS src, c)
       | otherwise = return Nothing
     -- and a var?
@@ -807,12 +813,22 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
       fullyApplied = length inputs == length xs
       f = SrcM (ctype2typeM fc) src
 
+  -- CallS - direct export of a sourced function, e.g.:
+  express' True _ (SAnno (One (CallS src, (c, _))) m) = do
+    let inputs = fst $ typeParts c
+        lambdaArgs = zipWith PackedArgument [0 ..] inputs
+        lambdaTypes = map (packTypeM . ctype2typeM) inputs
+        lambdaVals = map UnpackM $ zipWith BndVarM lambdaTypes [0 ..]
+        f = SrcM (ctype2typeM c) src
+        manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
+    return manifold
+
   -- An un-applied source call
-  express' _ pc (SAnno (One (CallS src, (c, _))) m) = do
+  express' False pc (SAnno (One (CallS src, (c, _))) m) = do
     let inputs = fst $ typeParts c
         lambdaTypes = map ctype2typeM inputs
         lambdaArgs = zipWith UnpackedArgument [0 ..] inputs
-        lambdaVals = zipWith BndVarM          lambdaTypes [0 ..]
+        lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
         f = SrcM (ctype2typeM c) src
         manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
 
@@ -822,6 +838,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
 
 -- | Move let assignments to minimize number of foreign calls.  This step
 -- should be integrated with the optimizations performed in the realize step.
+-- FIXME: replace stub
 letOptimize :: ExprM -> MorlocMonad ExprM
 letOptimize e = return e
 
@@ -1265,13 +1282,14 @@ findTerm includeInternal ms m v
   | otherwise = []
   where
     evarDeclared :: [TermOrigin]
-    evarDeclared = case Map.lookup v (moduleDeclarationMap m) of
-      -- If a term is defined as being equal to another term, find this other term.
-      (Just (VarE v')) -> if v /= v'
-        then findTerm False ms m v'
-        else error "found term of type `x = x`, the typechecker should have died on this ..."
-      (Just e) -> [Declared m v e]
-      _ -> []
+    evarDeclared = concat [findDecl e | (Declaration v' e) <- moduleBody m, v' == v]
+
+    findDecl :: Expr -> [TermOrigin]
+    -- If a term is defined as being equal to another term, find this other term.
+    findDecl (VarE v')
+      | v /= v' = findTerm False ms m v'
+      | v == v' = error "found term of type `x = x`, the typechecker should have died on this ..."
+    findDecl e = [Declared m v e]
 
     evarSourced :: [TermOrigin]
     evarSourced = map (\(_, src) -> Sourced m src)
@@ -1289,4 +1307,9 @@ findTerm includeInternal ms m v
       Nothing -> error $ "Variable '" <> MT.unpack (unEVar name) <> "' is not defined"
 
     listMVars :: Module -> [MVar]
-    listMVars m = Map.elems $ Map.filterWithKey (\v' _ -> v' == v) (moduleImportMap m)
+    listMVars = map importModuleName . filter (inImport v) . moduleImports
+
+    inImport :: EVar -> Import -> Bool 
+    inImport v imp = case (importInclude imp, importExclude imp) of  
+        (Nothing, ex) -> not (elem v ex)
+        (Just included, _) -> elem v (map snd included) 

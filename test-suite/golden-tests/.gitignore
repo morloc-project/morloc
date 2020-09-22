@@ -2,3 +2,4 @@ obs.txt
 0-*
 *out
 000*
+__pycache__/

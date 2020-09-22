@@ -24,9 +24,9 @@ main (m:ms)
 
 mainDecMap :: [Module] -> [(EVar, Expr)]
 mainDecMap [] = error "Missing main"
-mainDecMap [m] = Map.toList $ moduleDeclarationMap m
+mainDecMap [m] = [(v, e) | (Declaration v e) <- moduleBody m]
 mainDecMap (m:ms)
-  | moduleName m == (MVar "Main") = Map.toList $ moduleDeclarationMap m
+  | moduleName m == (MVar "Main") = [(v, e) | (Declaration v e) <- moduleBody m]
   | otherwise = mainDecMap ms
 
 -- get the toplevel type of a fully annotated expression
@@ -643,6 +643,14 @@ unitTypeTests =
         , "module Bar {export f; f R :: [numeric] -> numeric};"
         , "module Main {import Foo (x); import Bar (f); f x}"
         ]
+
+    , (flip $ assertTerminalType "multiple imports") [varc Python3Lang "float", varc RLang "numeric"] $
+      T.unlines
+        [ "module Foo {export f; f py :: [float] -> float};"
+        , "module Bar {export f; f R :: [numeric] -> numeric};"
+        , "module Main {import Foo (f); import Bar (f); f [1,2,3]}"
+        ]
+
     , assertTerminalType
         "Allow gross overuse of semicolons"
         ";;;;;module foo{;42;  ;};"

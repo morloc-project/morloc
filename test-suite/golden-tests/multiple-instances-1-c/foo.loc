@@ -1,0 +1,11 @@
+import cppbase
+
+source cpp from "rms.h" (
+    "rms1" as rms
+  , "rms2" as rms
+)
+
+export rms
+
+rms cpp :: [double] -> double;
+rms :: [Num] -> Num;

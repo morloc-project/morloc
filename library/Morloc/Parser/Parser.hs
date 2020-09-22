@@ -183,11 +183,9 @@ makeModule f n mes =
     , moduleBody = body'
     , moduleExports = exports'
     , moduleImports = imports'
-    , moduleImportMap = Map.empty -- will be created in Infer.hs
     , moduleSourceMap = (Map.fromList . concat)
                         [[((srcAlias s, srcLang s), s) | s <- ss ]
                         | (SrcE ss) <- body']
-    , moduleDeclarationMap = Map.empty -- will be created in Infer.hs
     , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where

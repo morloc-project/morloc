@@ -1,0 +1,10 @@
+-- 01n - single import and multiple declarations
+
+import pybase (sub);
+import cppbase (add, mul);
+import rbase (add, mul);
+
+export sub;
+
+sub x y = add x (mul -1 y);
+sub x y = mul 1 (add x (mul -1 y));

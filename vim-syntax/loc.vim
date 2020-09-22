@@ -28,6 +28,7 @@ let b:current_syntax = "loc"
 
 
 syn keyword reserved where
+syn keyword reserved module
 syn keyword reserved import
 syn keyword reserved from
 syn keyword reserved as

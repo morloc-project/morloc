@@ -1,0 +1,16 @@
+-- source n
+
+-- FIXME: A python file is generated instead of an R file, and the python file
+-- uses the R concrete types.
+
+import pybase (add)
+import rbase (add)
+
+source py from "foo.py" ("sub_loc" as sub);
+source r from "foo.R" ("sub_loc" as sub);
+
+export sub
+
+sub :: Num -> Num -> Num;
+sub py :: float -> float -> float;
+sub r :: numeric -> numeric -> numeric;

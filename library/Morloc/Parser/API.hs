@@ -41,15 +41,17 @@ parse f (Code code) = do
     parse'' visited m
       | Map.member (moduleName m) visited = return visited
       | otherwise = do
-        -- load metadata for all imported modules
-        mapM
-          (\v -> Mod.findModule v >>= Mod.loadModuleMetadata)
-          (map importModuleName (moduleImports m))
+        -- these are modules that are not defined in the input file
+        let nonlocalModules = filter (\v -> not (Map.member v visited))
+                            . map importModuleName . moduleImports $ m
+
+        -- FIXME: for local modules, where two or more modules are defined in
+        -- one file, how is module/package metadata entered?
+
+        -- load metadata for all non-local imported modules
+        mapM (\v -> Mod.findModule v >>= Mod.loadModuleMetadata) nonlocalModules
         -- for now I only support local modules
-        imports <-
-          mapM
-            (\v -> Mod.findModule v >>= openLocalModule)
-            (map importModuleName (moduleImports m))
+        imports <- mapM (\v -> Mod.findModule v >>= openLocalModule) nonlocalModules
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods
 

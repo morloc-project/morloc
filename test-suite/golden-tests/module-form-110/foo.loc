@@ -1,0 +1,9 @@
+-- source 1 import 1
+
+import pybase (add, fold);
+
+export sum
+
+source py from "foo.py" ("sum_loc" as sum)
+
+sum xs = fold add 0 xs;

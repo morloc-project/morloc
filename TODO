@@ -25,6 +25,21 @@
    [ ] Perl
    [ ] Julia
 
+# Refactoring
+
+ [ ] Replace Type with SolvedType after typechecking (see 6bdcf5a4): 
+
+```
+data SolvedType
+  = VarS TVar
+  | FunS Type SolvedType
+  | ArrS TVar [SolvedType]
+  | NamS TVar [(Text, SolvedType)]
+```
+
+ [ ] Build a tree object in the parser and typecheck it, rather than the
+     awkward Module list
+
 # Usability
 
  [ ] Make a Docker image

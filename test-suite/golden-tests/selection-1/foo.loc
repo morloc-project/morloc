@@ -1,0 +1,12 @@
+-- A function may be imported from multiple modules. The compiler is
+-- responsible for deciding which of the available implementations to use.
+--
+-- In the case below, C++ should be selected for both `add` instances, since
+-- C++ is the faster language.
+
+import pybase (add)
+import cppbase (add)
+
+export foo
+
+foo x y = add x (add y 42);

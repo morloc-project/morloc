@@ -1,0 +1,13 @@
+-- source 1, import 1, declare 1
+
+-- PROBLEM: no C++ file generated (all work if cppbase import is removed)
+
+import pybase (add, mul);
+import rbase (add, mul);
+import cppbase (add, mul, sub); -- import sub
+
+source py from "foo.py" ("sub_loc" as sub); -- source sub
+
+export sub;
+
+sub x y = add x (mul -1 y); -- declare sub

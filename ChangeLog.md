@@ -63,6 +63,11 @@ Minor changes
  - [ ] resurrect property tests
 
 
+0.24.0 [2020.09.22]
+-------------------
+
+Allow integration of many instances
+
 0.23.0 [2020.05.14]
 
 Bug fixes and code cleanup
