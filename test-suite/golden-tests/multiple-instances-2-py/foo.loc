@@ -1,4 +1,4 @@
-import pybase;
+import pybase();
 import math (sqrt, mean, mul);
 import cppbase (map);
 
@@ -12,6 +12,6 @@ source py from "rms.py" (
 square x = mul x x;
 rms xs = sqrt (mean (map square xs));
 
-rms py :: [float] -> float;
-rms cpp :: [double] -> float;
 rms :: [Num] -> Num;
+rms py :: [float] -> float;
+rms cpp :: [double] -> double;
