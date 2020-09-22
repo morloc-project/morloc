@@ -1,4 +1,4 @@
-import rbase;
+import rbase();
 import math (sqrt, mean, mul);
 import cppbase (map);
 
