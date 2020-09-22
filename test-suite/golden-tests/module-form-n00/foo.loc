@@ -3,8 +3,8 @@
 -- FIXME: A python file is generated instead of an R file, and the python file
 -- uses the R concrete types.
 
-import pybase ()
-import rbase ()
+import pybase (add)
+import rbase (add)
 
 source py from "foo.py" ("sub_loc" as sub);
 source r from "foo.R" ("sub_loc" as sub);

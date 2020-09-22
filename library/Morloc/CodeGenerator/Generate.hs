@@ -181,7 +181,7 @@ collect ms (evar', xs@(x:_)) = do
         getTermTypes :: TermOrigin -> MorlocMonad [Type]
         getTermTypes t = do
           (TypeSet _ es) <- getTermTypeSet t
-          return $ map etype es
+          return $ [etype e | e <- es, Just (srcLang src) == langOf e]
 
     collectAnno
       :: Set.Set EVar
