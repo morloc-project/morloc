@@ -1,0 +1,10 @@
+-- 011 - single import and single declaration
+
+import math (sum);
+import pybase;
+import cppbase (fold, add);
+import rbase;
+
+export sum;
+
+sum xs = fold add 0 xs;

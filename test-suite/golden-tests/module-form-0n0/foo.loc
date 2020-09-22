@@ -1,0 +1,7 @@
+-- 00n - multiple declarations with multiple possible realizations
+
+import pybase (add);
+import cppbase (add);
+import rbase (add);
+
+export add

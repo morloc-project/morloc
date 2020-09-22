@@ -1,0 +1,14 @@
+import pybase (add, mul)
+import rbase (add, mul)
+import cppbase (add, mul)
+
+source py from "foo.py" ("sub_loc" as sub)
+source r from "foo.R" ("sub_loc" as sub)
+
+export sub
+
+sub :: Num -> Num -> Num;
+sub py :: float -> float -> float;
+sub r :: numeric -> numeric -> numeric;
+
+sub x y = add x (mul -1 y);  

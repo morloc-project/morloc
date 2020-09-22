@@ -1,0 +1,11 @@
+-- source and declare a function
+
+import pybase  (sub, add, mul);
+import cppbase (sub, add, mul);
+import rbase   (sub, add, mul);
+
+source py from "foo.py" ("foo_loc" as foo)
+
+export foo
+
+foo x = add 1 x

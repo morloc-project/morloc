@@ -1,0 +1,14 @@
+-- source n, import n
+
+import cppbase (sub)
+import pybase (sub)
+import rbase (sub)
+
+source py from "foo.py" ("sub_loc" as sub)
+source r from "foo.R" ("sub_loc" as sub)
+
+export sub
+
+sub :: Num -> Num -> Num;
+sub py :: float -> float -> float;
+sub r :: numeric -> numeric -> numeric;

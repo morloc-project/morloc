@@ -1,0 +1,9 @@
+-- 00n - multiple declarations with multiple possible realizations
+
+import pybase  (sub, add, mul);
+import cppbase (sub, add, mul);
+import rbase   (sub, add, mul);
+
+export sub
+
+sub x y = add x (mul -1 y);
