@@ -1,6 +1,4 @@
--- source 1, import 1, declare 1
-
--- PROBLEM: no C++ file generated (all work if cppbase import is removed)
+-- 111 - source 1, import 1, declare 1
 
 import pybase (add, mul);
 import rbase (add, mul);
