@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.Parser.Parser
-Description : Full parser for Morloc/Xi
+Description : Full parser for Morloc
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com

@@ -11,6 +11,7 @@ import qualified Morloc.Monad as MM
 
 import qualified Morloc.Parser.API as P
 import qualified Morloc.TypeChecker.API as T
+import Morloc.Parser.Desugar (desugar) 
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 
@@ -26,6 +27,9 @@ writeProgram path code
   -- Maybe Path -> MT.Text -> [Module]
   -- parse code into unannotated modules
   =   P.parse path code
+  -- [Module] -> [Module]
+  -- resolve type aliases and such
+  >>= desugar
   -- [Module] -> [Module]
   -- add type annotations to sub-expressions and raise type errors
   >>= T.typecheck
