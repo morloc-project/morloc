@@ -6,11 +6,16 @@ important. The whole system needs extensive testing in real applications. Much
 of this will be done in the development of the core libraries. We will also
 need to add handling for several very different languages (proofs-of-concept).
 
- - [ ] full semantic types - test in bioinformatics applications
+ - [ ] typeclasses
+ - [ ] semantic types - test in bioinformatics applications
  - [ ] constraints - refined types?
  - [ ] manifold hooks - caching, documentation, logging, effects
- - [ ] logic engine - from typechecking to architecture design and debugging
- - [ ] full ecosystem - test suites, package tools, editors, vim plugins
+ - [ ] logic engine (z3?) - from typechecking to architecture design and debugging
+ - [ ] ecosystem
+       - test suite
+       - linter
+       - package tools
+       - vim plugin
  - [ ] language support (at least the following)
        - [x] Python3
        - [x] R
@@ -62,6 +67,23 @@ Minor changes
  - [ ] meaningful error messages
  - [ ] resurrect property tests
 
+
+
+0.25.0 [2020.09.xx]
+-------------------
+
+ [ ] move to Haskell initial character case conventions
+     - no more explicity "forall"
+     - generics are lowercase in type signatures
+     - types are uppercase
+     - normal functions are lowercase
+     - class constructors are uppercase
+ [ ] Add `type` definitions for type synonyms
+ [ ] Add `record` syntax and link to classes in C++, Python, and R 
+ [ ] add constructors
+ [ ] C++ records as classes or structs
+ [ ] OOP support - records as classes
+ [ ] Add labels for source and signature
 
 0.24.0 [2020.09.22]
 -------------------
