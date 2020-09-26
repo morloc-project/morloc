@@ -389,7 +389,7 @@ ctype t
 -- a safe alternative to the GType constructor
 generalType :: Type -> GType
 generalType t
-  | isJust (langOf t) = GType t
+  | isNothing (langOf t) = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
 -- | Types, see Dunfield Figure 6
