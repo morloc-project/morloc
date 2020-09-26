@@ -131,6 +131,7 @@ reservedWords =
   , "as"
   , "True"
   , "False"
+  , "type"
   ]
 
 operatorChars :: String
@@ -169,6 +170,7 @@ data ModuleBody
   = MBImport Import
   -- ^ module name, function name and optional alias
   | MBExport EVar
+  | MBTypeDef TVar (Maybe Lang) [TVar] Type
   | MBBody Expr
 
 pProgram :: Parser [Module]
@@ -206,6 +208,7 @@ makeModule f n mes =
     , moduleSourceMap = (Map.fromList . concat)
                         [[((srcAlias s, srcLang s), s) | s <- ss ]
                         | (SrcE ss) <- body']
+    , moduleTypedefs = Map.fromList [((v, lang), (t, vs)) | MBTypeDef v lang vs t <- mes]
     , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where
@@ -217,11 +220,36 @@ pModuleBody :: Parser ModuleBody
 pModuleBody =
         try pImport <* optional delimiter 
     <|> try pExport <* optional delimiter 
+    <|> try pTypedef <* optional delimiter
     <|> try pStatement' <* optional delimiter
     <|> pExpr' <* optional delimiter
   where
     pStatement' = fmap MBBody pStatement
     pExpr' = fmap MBBody pExpr
+
+pTypedef :: Parser ModuleBody
+pTypedef = do
+  _ <- reserved "type"
+  lang <- optional pLang
+  setLang lang
+  (v, vs) <- pTypedefTermPar <|> pTypedefTermUnpar
+  t <- pType
+  return (MBTypeDef v lang vs t)
+
+pTypedefTermUnpar :: Parser (TVar, [TVar])
+pTypedefTermUnpar = do
+  v <- name 
+  lang <- CMS.gets stateLang
+  return (TV lang v, [])
+
+pTypedefTermPar :: Parser (TVar, [TVar])
+pTypedefTermPar = do
+  _ <- op "("
+  v <- name 
+  vs <- many name
+  _ <- op "("
+  lang <- CMS.gets stateLang
+  return (TV lang v, map (TV lang) vs)
 
 pImport :: Parser ModuleBody
 pImport = do

@@ -336,6 +336,7 @@ data Module =
     , moduleExports :: Set EVar
     , moduleImports :: [Import]
     , moduleSourceMap :: Map (EVar, Lang) Source
+    , moduleTypedefs :: Map (TVar, Maybe Lang) (Type, [TVar])
     , moduleTypeMap :: Map EVar TypeSet
     }
   deriving (Ord, Eq, Show)
