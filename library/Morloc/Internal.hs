@@ -20,6 +20,9 @@ module Morloc.Internal
   , module Control.Monad
   , module Control.Monad.IO.Class
   , module Data.Monoid
+  -- Data.Char characters
+  , isUpper
+  , isLower
   -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
@@ -59,6 +62,7 @@ import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
+import Data.Char (isUpper, isLower)
 import Safe hiding (at)
 import System.FilePath
 import qualified Data.Map as Map

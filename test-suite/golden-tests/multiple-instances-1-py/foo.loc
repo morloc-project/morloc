@@ -7,5 +7,5 @@ source py from "rms.py" (
 
 export rms
 
-rms py :: [float] -> float;
+rms py :: ["float"] -> "float";
 rms :: [Num] -> Num;

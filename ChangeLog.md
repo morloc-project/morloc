@@ -32,19 +32,13 @@ need to add handling for several very different languages (proofs-of-concept).
        - [ ] machine learning
        - [ ] bioinformatics
 
-x.xx.x [2020.xx.xx]
+0.xx.x [2020.xx.xx]
 -------------------
 
-New build system and and compiler options
+A presentable, usable language that is ready for serious beta testing but not
+production. That is, no guarantee of backwards compatibility.
 
 Major changes
- - [ ] Add record handling for C++ (github issue #8)
-           Implementing them as tuples would be the easiest option, since I
-           would not have to add much no machinery (e.g., serialization already
-           works for tuples). It would be better in both performance (probably)
-           and readability to use structures. Before going too far, though, I
-           need to decide in general how records will work in morloc. Do I want
-           extensible records? Does order matter?
  - [ ] Remove semicolon requirement
  - [ ] Rewrite perl manifold nexus in C++
        - [ ] add type annotations to printed help
@@ -67,23 +61,28 @@ Minor changes
  - [ ] meaningful error messages
  - [ ] resurrect property tests
 
-
-
-0.25.0 [2020.09.xx]
+0.26.0 [2020.09.xx]
 -------------------
 
- [ ] move to Haskell initial character case conventions
-     - no more explicity "forall"
-     - generics are lowercase in type signatures
-     - types are uppercase
-     - normal functions are lowercase
-     - class constructors are uppercase
+ [ ] add constructors
  [ ] Add `type` definitions for type synonyms
  [ ] Add `record` syntax and link to classes in C++, Python, and R 
- [ ] add constructors
  [ ] C++ records as classes or structs
  [ ] OOP support - records as classes
  [ ] Add labels for source and signature
+
+
+0.25.0 [2020.09.26]
+-------------------
+
+No explicit forall. Instead use Haskell convention of generics being lowercase
+and non-generics being uppercase. 
+
+ * no more explicit "forall"
+ * generics are lowercase in type signatures
+ * non-generic types are uppercase
+ * normal functions are lowercase
+ * class constructors are uppercase (though handling for this is not yet implemented)
 
 0.24.0 [2020.09.22]
 -------------------
