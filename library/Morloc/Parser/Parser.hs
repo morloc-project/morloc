@@ -170,7 +170,7 @@ data ModuleBody
   = MBImport Import
   -- ^ module name, function name and optional alias
   | MBExport EVar
-  | MBTypeDef TVar (Maybe Lang) [TVar] Type
+  | MBTypeDef TVar [TVar] Type
   | MBBody Expr
 
 pProgram :: Parser [Module]
@@ -208,7 +208,7 @@ makeModule f n mes =
     , moduleSourceMap = (Map.fromList . concat)
                         [[((srcAlias s, srcLang s), s) | s <- ss ]
                         | (SrcE ss) <- body']
-    , moduleTypedefs = Map.fromList [((v, lang), (t, vs)) | MBTypeDef v lang vs t <- mes]
+    , moduleTypedefs = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
     , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where
@@ -234,7 +234,7 @@ pTypedef = do
   setLang lang
   (v, vs) <- pTypedefTermPar <|> pTypedefTermUnpar
   t <- pType
-  return (MBTypeDef v lang vs t)
+  return (MBTypeDef v vs t)
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do

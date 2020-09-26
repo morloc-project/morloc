@@ -157,6 +157,8 @@ data MorlocError
   | PoolBuildError Script Text
   -- | Raise error if inappropriate function is called on unrealized manifold
   | NoBenefits
+  -- | Raise when a type alias substitution fails
+  | BadTypeAlias Text
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
   --------------- T Y P E   E R R O R S --------------------------------------
@@ -336,7 +338,7 @@ data Module =
     , moduleExports :: Set EVar
     , moduleImports :: [Import]
     , moduleSourceMap :: Map (EVar, Lang) Source
-    , moduleTypedefs :: Map (TVar, Maybe Lang) (Type, [TVar])
+    , moduleTypedefs :: Map TVar (Type, [TVar])
     , moduleTypeMap :: Map EVar TypeSet
     }
   deriving (Ord, Eq, Show)

@@ -40,6 +40,7 @@ errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
+errmsg (BadTypeAlias msg) = "BadTypeAlias: " <> msg
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>
   "This is probably due to a bug in the code."
