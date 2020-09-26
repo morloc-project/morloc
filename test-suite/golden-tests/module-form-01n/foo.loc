@@ -1,4 +1,4 @@
--- 01n - single import and multiple declarations
+-- 01n - import 1, declare n
 
 import pybase (sub);
 import cppbase (add, mul);

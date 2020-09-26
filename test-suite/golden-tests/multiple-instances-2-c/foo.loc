@@ -11,5 +11,5 @@ source cpp from "rms.h" (
 square x = mul x x;
 rms xs = sqrt (mean (map square xs));
 
-rms cpp :: [double] -> double;
+rms cpp :: ["double"] -> "double";
 rms :: [Num] -> Num;

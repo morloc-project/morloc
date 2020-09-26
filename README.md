@@ -173,9 +173,9 @@ specialized type for each language it is implemented in.
 The map function has the types
 
 ```
-map :: forall a b . (a -> b) -> [a] -> [b]
-map Cpp :: forall a b . (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
-map Python3 :: forall a b . (a -> b) -> list a -> list b
+map :: (a -> b) -> [a] -> [b]
+map Cpp :: (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
+map Python3 :: (a -> b) -> list a -> list b
 ```
 
 The general signature looks almost the same as the Haskell equivalent (except
@@ -214,12 +214,12 @@ add Cpp :: double -> double -> double;
 mul :: Num -> Num -> Num;
 mul Cpp :: double -> double -> double;
 
-fold     :: forall a b . (b -> a -> b) -> b -> [a] -> b;
-fold Cpp :: forall a b . (b -> a -> b) -> b -> "std::vector<$1>" a -> b;
+fold     :: (b -> a -> b) -> b -> [a] -> b;
+fold Cpp :: (b -> a -> b) -> b -> "std::vector<$1>" a -> b;
 
-map :: forall a b . (a -> b) -> [a] -> [b];
-map Cpp :: forall a b . (a -> b) -> "std::vector<$1>" a
-                                 -> "std::vector<$1>" b;
+map :: (a -> b) -> [a] -> [b];
+map Cpp :: (a -> b) -> "std::vector<$1>" a
+                    -> "std::vector<$1>" b;
 
 square x = mul x x;
 sumOfSquares xs = fold add 0 (map square xs);

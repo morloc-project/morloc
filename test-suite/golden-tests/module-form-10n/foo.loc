@@ -1,4 +1,4 @@
--- source one and declare many
+-- 10n - source 1, declare n
 
 import pybase  (sub, add, mul);
 import cppbase (sub, add, mul);

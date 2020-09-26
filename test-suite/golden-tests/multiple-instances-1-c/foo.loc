@@ -7,5 +7,5 @@ source cpp from "rms.h" (
 
 export rms
 
-rms cpp :: [double] -> double;
+rms cpp :: ["double"] -> "double";
 rms :: [Num] -> Num;

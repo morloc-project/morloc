@@ -1,4 +1,4 @@
--- 00n - multiple declarations with multiple possible realizations
+-- 00n - declare n
 
 import pybase;
 import cppbase;

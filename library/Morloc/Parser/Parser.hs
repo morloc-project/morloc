@@ -20,6 +20,7 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
+import qualified Data.Char as DC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.System as MS
@@ -31,10 +32,17 @@ data ParserState = ParserState {
     stateLang :: Maybe Lang
   , stateModulePath :: Maybe Path
   , stateIndex :: Int
+  , stateGenerics :: [TVar] -- store the observed generic variables in the current type
+                            -- you should reset the field before parsing a new type 
 }
 
 emptyState :: ParserState
-emptyState = ParserState {stateLang = Nothing , stateModulePath = Nothing, stateIndex = 1}
+emptyState = ParserState {
+    stateLang = Nothing
+  , stateModulePath = Nothing
+  , stateIndex = 1
+  , stateGenerics = []
+}
 
 newvar :: Maybe Lang -> Parser TVar
 newvar lang = do
@@ -47,6 +55,19 @@ setLang :: Maybe Lang -> Parser ()
 setLang lang = do
   s <- CMS.get
   CMS.put (s { stateLang = lang })
+
+resetGenerics :: Parser ()
+resetGenerics = do
+  s <- CMS.get
+  CMS.put (s { stateGenerics = [] })
+
+appendGenerics :: TVar -> Parser ()
+appendGenerics v@(TV _ vstr) = do
+  s <- CMS.get
+  let isGeneric = maybe False (DC.isLower . fst) (MT.uncons vstr)
+      gs = stateGenerics s
+      gs' = if isGeneric then v : gs else gs
+  CMS.put (s {stateGenerics = gs'})
 
 readProgram :: Maybe Path -> MT.Text -> [Module]
 readProgram f sourceCode =
@@ -61,7 +82,7 @@ readProgram f sourceCode =
 
 readType :: MT.Text -> Type
 readType typeStr =
-  case runParser (CMS.runStateT (pType <* eof) emptyState) "" typeStr of
+  case runParser (CMS.runStateT (pTypeGen <* eof) emptyState) "" typeStr of
     Left err -> error (show err)
     Right (es, _) -> es
 
@@ -110,7 +131,6 @@ reservedWords =
   , "as"
   , "True"
   , "False"
-  , "forall"
   ]
 
 operatorChars :: String
@@ -258,7 +278,7 @@ pSignature = do
   setLang lang
   _ <- op "::"
   props <- option [] (try pPropertyList)
-  t <- pType
+  t <- pTypeGen
   constraints <-
     option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
   setLang Nothing
@@ -374,7 +394,7 @@ pAnn = do
   e <-
     parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
-  t <- pType
+  t <- pTypeGen
   return $ AnnE e [t]
 
 pApp :: Parser Expr
@@ -423,13 +443,23 @@ pVar = fmap VarE pEVar
 pEVar :: Parser EVar
 pEVar = fmap EVar name
 
+pTypeGen :: Parser Type
+pTypeGen = do
+  resetGenerics
+  t <- pType
+  s <- CMS.get
+  return $ forallWrap (unique (reverse (stateGenerics s))) t
+  where
+    forallWrap :: [TVar] -> Type -> Type
+    forallWrap [] t = t
+    forallWrap (v:vs) t = Forall v (forallWrap vs t)
+
 pType :: Parser Type
 pType =
       pExistential
   <|> try pFunT
   <|> try pUniT
   <|> try pNamT
-  <|> try pForAllT
   <|> try pArrT
   <|> try parensType
   <|> pListT
@@ -518,20 +548,20 @@ pListT = do
     else ExistT v [t] dts
 
 pVarT :: Parser Type
-pVarT = do
+pVarT = try pVarConT <|> pVarGenT
+
+pVarConT :: Parser Type
+pVarConT = do
   lang <- CMS.gets stateLang
-  _ <- tag (name <|> stringLiteral)
-  n <- name <|> stringLiteral
+  _ <- tag stringLiteral
+  n <- stringLiteral
   return $ VarT (TV lang n)
 
-pForAllT :: Parser Type
-pForAllT = do
+pVarGenT :: Parser Type
+pVarGenT = do
   lang <- CMS.gets stateLang
-  _ <- reserved "forall"
-  vs <- many1 name
-  _ <- op "."
-  t <- pType
-  return (curryForall lang vs t)
-  where
-    curryForall _ [] e' = e'
-    curryForall lang' (v:vs') e' = Forall (TV lang' v) (curryForall lang' vs' e')
+  _ <- tag name
+  n <- name
+  let v = TV lang n
+  appendGenerics v  -- add the term to the generic list IF generic
+  return $ VarT v

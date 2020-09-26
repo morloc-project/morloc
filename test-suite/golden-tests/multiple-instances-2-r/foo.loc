@@ -12,5 +12,5 @@ source r from "rms.R" (
 square x = mul x x;
 rms xs = sqrt (mean (map square xs));
 
-rms r :: [numeric] -> numeric;
+rms r :: ["numeric"] -> "numeric";
 rms :: [Num] -> Num;

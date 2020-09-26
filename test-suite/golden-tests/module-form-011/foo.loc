@@ -1,4 +1,4 @@
--- 011 - single import and single declaration
+-- 011 - import 1, declare 1
 
 import pybase (sub);
 import cppbase (mul, add);
