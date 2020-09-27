@@ -1,11 +1,15 @@
 module UnitTypeTests
   ( unitTypeTests
   , typeOrderTests
+  , typeAliasTests
   ) where
 
 import Morloc.Namespace
 import Morloc.Parser.Parser
-import Morloc.TypeChecker.Infer
+import Morloc.TypeChecker.Infer hiding(typecheck)
+import Morloc.Parser.Desugar (desugar)
+import Morloc (typecheck)
+import Morloc.Monad as MM
 import qualified Morloc.TypeChecker.API as API
 import qualified Morloc.TypeChecker.PartialOrder as MP
 
@@ -37,13 +41,24 @@ typeof es = f' . head . reverse $ es
     f' e@(AnnE _ ts) = ts
     f' t = error ("No annotation found for: " <> show t)
 
-unres :: ((a, b), c) -> a 
-unres ((x, _), _) = x
+run :: T.Text -> IO (Either MorlocError [Module])
+run code = do
+  ((x, _), _) <- MM.runMorlocMonad 0 emptyConfig (typecheck Nothing (Code code))
+  return x
+  where
+    emptyConfig =  Config
+        { configHome = Path ""
+        , configLibrary = Path ""
+        , configTmpDir = Path ""
+        , configLangPython3 = Path ""
+        , configLangR = Path ""
+        , configLangPerl = Path ""
+        }
 
 assertTerminalType :: String -> T.Text -> [Type] -> TestTree
 assertTerminalType msg code t = testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing code))
-  case unres result of
+  result <- run code
+  case result of
     -- the order of the list is not important, so sort before comparing
     (Right es') -> assertEqual "" (sort t) (sort (typeof (main es')))
     (Left err) -> error $
@@ -73,8 +88,8 @@ assertTerminalExprWithAnnot = assertTerminalExpr' id
 -- assert the last expression in the main module, process the expression with f
 assertTerminalExpr' :: ([Expr] -> [Expr]) -> String -> T.Text -> Expr -> TestTree
 assertTerminalExpr' f msg code expr = testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing code))
-  case unres result of
+  result <- run code
+  case result of
     -- the order of the list is not important, so sort before comparing
     (Right es') -> assertEqual "" expr (head . reverse . sort . f . main $ es')
     (Left err) -> error $
@@ -83,17 +98,17 @@ assertTerminalExpr' f msg code expr = testCase msg $ do
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
   testCase msg $ do
-  result1 <- API.runStack 0 (typecheck (readProgram Nothing code1))
-  result2 <- API.runStack 0 (typecheck (readProgram Nothing code2))
-  case (unres result1, unres result2) of
+  result1 <- run code1
+  result2 <- run code2
+  case (result1, result2) of
     (Right e1, Right e2) -> assertEqual "" e1 e2
     _ -> error $ "Expected equal"
 
 exprTestFull :: String -> T.Text -> T.Text -> TestTree
 exprTestFull msg code expCode =
   testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing code))
-  case unres result of
+  result <- run code
+  case result of
     (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
     (Left err) -> error (show err)
 
@@ -101,32 +116,32 @@ exprTestFull msg code expCode =
 exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
 exprTestFullDec msg code expCode =
   testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing code))
-  case unres result of
+  result <- run code
+  case result of
     (Right e) -> assertEqual "" (mainDecMap e) expCode
     (Left err) -> error (show err)
 
 exprTestBad :: String -> T.Text -> TestTree
-exprTestBad msg e =
+exprTestBad msg code =
   testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing e))
-  case unres result of
-    (Right _) -> assertFailure . T.unpack $ "Expected '" <> e <> "' to fail"
+  result <- run code
+  case result of
+    (Right _) -> assertFailure . T.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
 
 expectError :: String -> MorlocError -> T.Text -> TestTree
-expectError msg err expr =
+expectError msg err code =
   testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing expr))
-  case unres result of
+  result <- run code
+  case result of
     (Right _) -> assertFailure . T.unpack $ "Expected failure"
     (Left err) -> return ()
 
 testPasses :: String -> T.Text -> TestTree
-testPasses msg e =
+testPasses msg code =
   testCase msg $ do
-  result <- API.runStack 0 (typecheck (readProgram Nothing e))
-  case unres result of
+  result <- run code
+  case result of
     (Right _) -> return ()
     (Left e) ->
       assertFailure $
@@ -178,6 +193,48 @@ tuple ts = ArrT v ts
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
 record rs = NamT (TV Nothing "Record") rs
+
+typeAliasTests =
+  testGroup
+    "Test type alias substitutions"
+    [ assertTerminalType
+        "non-parametric, general type alias"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: Foo -> B;"
+          , "f"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "parametric alias, general type alias"
+        (T.unlines
+          [ "type (Foo a b) = (a,b);"
+          , "f :: Foo X Y -> Z;"
+          , "f"
+          ]
+        )
+        [fun [tuple [var "X", var "Y"], var "Z"]]
+    , assertTerminalType
+        "non-parametric alias, concrete type alias"
+        (T.unlines
+          [ "type C Num = double;"
+          , "f C :: Num -> \"int\";"
+          , "f"
+          ]
+        )
+        [fun [varc CLang "double", varc CLang "int"]]
+    , assertTerminalType
+        "parametric alias, concrete type alias"
+        (T.unlines
+          [ "type Cpp (Map a b) = \"std::map<$1,$2>\" a b;"
+          , "f Cpp :: Map \"int\" \"double\" -> \"int\";"
+          , "f"
+          ]
+        )
+        [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "int", varc CppLang "double"]
+              , varc CppLang "int"]]
+    ]
 
 typeOrderTests =
   testGroup

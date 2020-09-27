@@ -35,7 +35,12 @@ parse f (Code code) = do
          (Map.Map MVar Module)
       -> (Maybe Path, MT.Text)
       -> MorlocMonad (Map.Map MVar Module)
-    parse' visited (f', code') = CM.foldM parse'' visited (readProgram f' code')
+
+    parse' visited (f', code') = do
+      -- check for multiple declarations within a file, NOT global
+      ms <- checkForMultipleDeclarations (readProgram f' code') 
+      CM.foldM parse'' visited ms
+
     parse'' ::
          (Map.Map MVar Module) -> Module -> MorlocMonad (Map.Map MVar Module)
     parse'' visited m
@@ -54,6 +59,11 @@ parse f (Code code) = do
         imports <- mapM (\v -> Mod.findModule v >>= openLocalModule) nonlocalModules
         mods <- CM.foldM parse' (Map.insert (moduleName m) m visited) imports
         return mods
+
+checkForMultipleDeclarations :: [Module] -> MorlocMonad [Module] 
+checkForMultipleDeclarations ms = case duplicates (map moduleName ms) of
+  [] -> return ms
+  mvars -> MM.throwError $ MultipleModuleDeclarations mvars
 
 cute :: [Module] -> IO ()
 cute ms = mapM_ (\m -> putDoc (Pretty.prettyModule m) >> putStrLn "") ms

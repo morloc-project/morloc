@@ -78,7 +78,7 @@ readProgram f sourceCode =
     Left err -> error (show err)
     Right (es, _) -> es
   where
-    pstate = ParserState {stateLang = Nothing , stateModulePath = f, stateIndex = 1}
+    pstate = emptyState { stateModulePath = f }
 
 readType :: MT.Text -> Type
 readType typeStr =
@@ -247,12 +247,9 @@ pTypedefTermUnpar = do
 
 pTypedefTermPar :: Parser (TVar, [TVar])
 pTypedefTermPar = do
-  _ <- op "("
-  v <- name
-  vs <- many name
-  _ <- op ")"
+  vs <- parens (many1 name)
   lang <- CMS.gets stateLang
-  return (TV lang v, map (TV lang) vs)
+  return (TV lang (head vs), map (TV lang) (tail vs))
 
 pImport :: Parser ModuleBody
 pImport = do

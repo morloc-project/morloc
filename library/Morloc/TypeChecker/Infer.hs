@@ -7,8 +7,9 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.TypeChecker.Infer
+  (
   -- * The main type checker
-  ( typecheck
+  typecheck
   -- * Internal functions used in testing
   , subtype
   , substitute
@@ -36,8 +37,6 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 typecheck :: [Module] -> Stack [Module]
 typecheck ms = do
 
-  checkForMultipleDeclarations
-
   -- graph :: Map MVar (Set MVar)
   let graph = Map.fromList $ map mod2pair ms
 
@@ -54,11 +53,6 @@ typecheck ms = do
   return mods
 
   where
-
-    checkForMultipleDeclarations :: Stack ()
-    checkForMultipleDeclarations = case duplicates (map moduleName ms) of
-      [] -> return ()
-      mvars -> throwError $ MultipleModuleDeclarations mvars
 
     mod2pair :: Module -> (MVar, Set.Set MVar)
     mod2pair m = (moduleName m, Set.fromList $ map importModuleName (moduleImports m))
