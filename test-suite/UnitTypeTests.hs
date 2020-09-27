@@ -234,6 +234,53 @@ typeAliasTests =
         )
         [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "int", varc CppLang "double"]
               , varc CppLang "int"]]
+    , assertTerminalType
+        "nested types"
+        (T.unlines
+          [ "type A = B;"
+          , "type B = C;"
+          , "foo :: A -> B -> C;"
+          , "foo"
+          ]
+        )
+        [fun [var "C", fun [var "C", var "C"]]]
+    , expectError
+        "fail neatly for self-recursive type aliases"
+        (SelfRecursiveTypeAlias (TV Nothing "A"))
+        (T.unlines
+          [ "type A = (A,A);"
+          , "foo :: A -> B -> C;"
+          , "foo"
+          ]
+        )
+    , expectError
+        "fail neatly for mutually-recursive type aliases"
+        (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
+        (T.unlines
+          [ "type A = B;"
+          , "type B = A;"
+          , "foo :: A -> B -> C;"
+          , "foo"
+          ]
+        )
+    , expectError
+        "fail on too many type aliases parameters"
+        (BadTypeAliasParameters (TV Nothing "A") 0 1)
+        (T.unlines
+          [ "type A = B;"
+          , "foo :: A Int -> C;"
+          , "foo"
+          ]
+        )
+    , expectError
+        "fail on too few type aliases parameters"
+        (BadTypeAliasParameters (TV Nothing "A") 1 0)
+        (T.unlines
+          [ "type (A a) = (a,a);"
+          , "foo :: A -> C;"
+          , "foo"
+          ]
+        )
     ]
 
 typeOrderTests =

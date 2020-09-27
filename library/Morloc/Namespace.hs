@@ -158,7 +158,9 @@ data MorlocError
   -- | Raise error if inappropriate function is called on unrealized manifold
   | NoBenefits
   -- | Raise when a type alias substitution fails
-  | BadTypeAlias Text
+  | SelfRecursiveTypeAlias TVar
+  | MutuallyRecursiveTypeAlias [TVar]
+  | BadTypeAliasParameters TVar Int Int 
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
   --------------- T Y P E   E R R O R S --------------------------------------
