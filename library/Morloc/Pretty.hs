@@ -21,6 +21,7 @@ import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
 instance Pretty MVar where
@@ -67,6 +68,8 @@ prettyBlock :: Module -> Doc AnsiStyle
 prettyBlock m = vsep
   [ vsep $ map prettyImport (moduleImports m)
   , vsep $ map (\v -> "export" <+> pretty v) (Set.toList (moduleExports m))
+  , vsep $ map (\(v, (t, vs)) -> "type" <+> "(" <> hsep (map pretty (v:vs)) <> ") = " <> prettyType t)
+               (Map.toList (moduleTypedefs m))
   , vsep $ map prettyExpr (moduleBody m)
   ]
 
