@@ -2,7 +2,7 @@ import Test.Tasty
 import qualified System.Directory as SD
 
 import PropertyTests (propertyTests)
-import UnitTypeTests (typeOrderTests, unitTypeTests)
+import UnitTypeTests (typeOrderTests, unitTypeTests, typeAliasTests)
 import GoldenMakefileTests (goldenMakefileTest)
 
 main = do
@@ -13,6 +13,7 @@ main = do
       "Morloc tests"
       [ unitTypeTests
       , typeOrderTests
+      , typeAliasTests
       , propertyTests
 
       , golden "import-1" "import-1"

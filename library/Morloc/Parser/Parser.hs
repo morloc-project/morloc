@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.Parser.Parser
-Description : Full parser for Morloc/Xi
+Description : Full parser for Morloc
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -78,7 +78,7 @@ readProgram f sourceCode =
     Left err -> error (show err)
     Right (es, _) -> es
   where
-    pstate = ParserState {stateLang = Nothing , stateModulePath = f, stateIndex = 1}
+    pstate = emptyState { stateModulePath = f }
 
 readType :: MT.Text -> Type
 readType typeStr =
@@ -131,6 +131,7 @@ reservedWords =
   , "as"
   , "True"
   , "False"
+  , "type"
   ]
 
 operatorChars :: String
@@ -169,6 +170,7 @@ data ModuleBody
   = MBImport Import
   -- ^ module name, function name and optional alias
   | MBExport EVar
+  | MBTypeDef TVar [TVar] Type
   | MBBody Expr
 
 pProgram :: Parser [Module]
@@ -206,22 +208,48 @@ makeModule f n mes =
     , moduleSourceMap = (Map.fromList . concat)
                         [[((srcAlias s, srcLang s), s) | s <- ss ]
                         | (SrcE ss) <- body']
+    , moduleTypedefs = typedefmap
     , moduleTypeMap = Map.empty -- will be created in Infer.hs
     }
   where
     imports' = [x | (MBImport x) <- mes]
     exports' = Set.fromList [x | (MBExport x) <- mes]
     body' = [x | (MBBody x) <- mes]
+    typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
 
 pModuleBody :: Parser ModuleBody
 pModuleBody =
-        try pImport <* optional delimiter 
+        try pTypedef <* optional delimiter
+    <|> try pImport <* optional delimiter 
     <|> try pExport <* optional delimiter 
     <|> try pStatement' <* optional delimiter
     <|> pExpr' <* optional delimiter
   where
     pStatement' = fmap MBBody pStatement
     pExpr' = fmap MBBody pExpr
+
+pTypedef :: Parser ModuleBody
+pTypedef = do
+  _ <- reserved "type"
+  lang <- optional (try pLang)
+  setLang lang
+  (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
+  _ <- symbol "="
+  t <- pType
+  setLang Nothing
+  return (MBTypeDef v vs t)
+
+pTypedefTermUnpar :: Parser (TVar, [TVar])
+pTypedefTermUnpar = do
+  v <- name
+  lang <- CMS.gets stateLang
+  return (TV lang v, [])
+
+pTypedefTermPar :: Parser (TVar, [TVar])
+pTypedefTermPar = do
+  vs <- parens (many1 name)
+  lang <- CMS.gets stateLang
+  return (TV lang (head vs), map (TV lang) (tail vs))
 
 pImport :: Parser ModuleBody
 pImport = do
@@ -274,7 +302,7 @@ pFunctionDeclaration = do
 pSignature :: Parser Expr
 pSignature = do
   v <- name
-  lang <- optional pLang
+  lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
   props <- option [] (try pPropertyList)

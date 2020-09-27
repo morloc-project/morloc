@@ -40,6 +40,12 @@ errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
+errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
+errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
+errmsg (BadTypeAliasParameters v exp obs)
+  =  "BadTypeAliasParameters: for type alias '" <> MT.show' v
+  <> "' expected " <> MT.show' exp
+  <> " parameters but found " <> MT.show' obs
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>
   "This is probably due to a bug in the code."

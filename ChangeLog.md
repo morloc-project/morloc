@@ -61,16 +61,20 @@ Minor changes
  - [ ] meaningful error messages
  - [ ] resurrect property tests
 
-0.26.0 [2020.09.xx]
+0.28.0 [2020.xx.xx]
 -------------------
 
- [ ] add constructors
- [ ] Add `type` definitions for type synonyms
- [ ] Add `record` syntax and link to classes in C++, Python, and R 
- [ ] C++ records as classes or structs
- [ ] OOP support - records as classes
- [ ] Add labels for source and signature
+Add `data` keyword for defining data, this data is used to build objects
 
+0.27.0 [2020.xx.xx]
+-------------------
+
+Add type constructors for parameterized types
+
+0.26.0 [2020.09.27]
+-------------------
+
+Add `type` keyword for defining type aliases
 
 0.25.0 [2020.09.26]
 -------------------
