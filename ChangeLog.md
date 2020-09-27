@@ -61,6 +61,11 @@ Minor changes
  - [ ] meaningful error messages
  - [ ] resurrect property tests
 
+0.29.0 [2020.xx.xx]
+-------------------
+
+Play with tables, if necessary add dedicated table syntax
+
 0.28.0 [2020.xx.xx]
 -------------------
 
@@ -71,7 +76,7 @@ Add `data` keyword for defining data, this data is used to build objects
 
 Add type constructors for parameterized types
 
-0.26.0 [2020.09.xx]
+0.26.0 [2020.09.27]
 -------------------
 
 Add `type` keyword for defining type aliases
