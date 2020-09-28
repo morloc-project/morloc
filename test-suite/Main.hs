@@ -116,5 +116,7 @@ main = do
       , golden "module-form-n00" "module-form-n00"
       , golden "module-form-n01" "module-form-n01"
       , golden "module-form-n10" "module-form-n10"
+
+      , golden "constructor-1" "constructor-1"
       ]
 
