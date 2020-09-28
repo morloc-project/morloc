@@ -127,13 +127,13 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "None")
-  f args (PackM e) = do
+  f args (SerializeM e) = do
     (ms, e') <- f args e
-    let (Unpacked t) = typeOfExprM e
+    let (Native t) = typeOfExprM e
     return (ms, "pack" <> tupled [e', typeSchema t])
-  f args (UnpackM e) = do
+  f args (DeserializeM e) = do
     (ms, e') <- f args e
-    let (Packed t) = typeOfExprM e
+    let (Serial t) = typeOfExprM e
     return (ms, "unpack" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
@@ -153,8 +153,8 @@ makeLambda :: [Argument] -> MDoc -> MDoc
 makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
 
 makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument i c) = bndNamer i
-makeArgument (UnpackedArgument i c) = bndNamer i
+makeArgument (SerialArgument i c) = bndNamer i
+makeArgument (NativeArgument i c) = bndNamer i
 makeArgument (PassThroughArgument i) = bndNamer i
 
 makeDispatch :: [ExprM] -> MDoc

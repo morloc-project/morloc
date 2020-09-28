@@ -116,7 +116,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     x' <- return $ case t of
-      (Unpacked (CType (ArrT _ [VarT et]))) -> case et of
+      (Native (CType (ArrT _ [VarT et]))) -> case et of
         (TV _ "numeric") -> "c" <> tupled es'
         (TV _ "logical") -> "c" <> tupled es'
         (TV _ "character") -> "c" <> tupled es'
@@ -134,13 +134,13 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "NULL")
-  f args (PackM e) = do
+  f args (SerializeM e) = do
     (ms, e') <- f args e
-    let (Unpacked t) = typeOfExprM e
+    let (Native t) = typeOfExprM e
     return (ms, "pack" <> tupled [e', typeSchema t])
-  f args (UnpackM e) = do
+  f args (DeserializeM e) = do
     (ms, e') <- f args e
-    let (Packed t) = typeOfExprM e
+    let (Serial t) = typeOfExprM e
     return (ms, "unpack" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
@@ -158,8 +158,8 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             else Right r
 
 makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument v c) = bndNamer v
-makeArgument (UnpackedArgument v c) = bndNamer v
+makeArgument (SerialArgument v c) = bndNamer v
+makeArgument (NativeArgument v c) = bndNamer v
 makeArgument (PassThroughArgument v) = bndNamer v
 
 makePool :: [MDoc] -> [MDoc] -> MDoc

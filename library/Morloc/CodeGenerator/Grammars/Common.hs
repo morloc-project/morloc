@@ -79,25 +79,25 @@ data GMeta = GMeta {
 
 
 prettyArgument :: Argument -> MDoc
-prettyArgument (PackedArgument i c) =
-  "Packed" <+> "x" <> pretty i <+> parens (prettyType c)
-prettyArgument (UnpackedArgument i c) =
-  "Unpacked" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (SerialArgument i c) =
+  "Serial" <+> "x" <> pretty i <+> parens (prettyType c)
+prettyArgument (NativeArgument i c) =
+  "Native" <+> "x" <> pretty i <+> parens (prettyType c)
 prettyArgument (PassThroughArgument i) =
   "PassThrough" <+> "x" <> pretty i
 
 argId :: Argument -> Int
-argId (PackedArgument i _) = i
-argId (UnpackedArgument i _) = i
+argId (SerialArgument i _) = i
+argId (NativeArgument i _) = i
 argId (PassThroughArgument i ) = i
 
 argType :: Argument -> Maybe CType
-argType (PackedArgument _ t) = Just t
-argType (UnpackedArgument _ t) = Just t
+argType (SerialArgument _ t) = Just t
+argType (NativeArgument _ t) = Just t
 argType (PassThroughArgument _) = Nothing
 
 unpackArgument :: Argument -> Argument
-unpackArgument (PackedArgument i t) = UnpackedArgument i t
+unpackArgument (SerialArgument i t) = NativeArgument i t
 unpackArgument x = x
 
 nargsTypeM :: TypeM -> Int
@@ -151,10 +151,10 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   f (NumM _ x) = ([], viaShow x)
   f (StrM _ x) = ([], dquotes $ pretty x)
   f (NullM _) = ([], "null")
-  f (PackM e) =
+  f (SerializeM e) =
     let (ms, e') = f e
     in (ms, "PACK" <> tupled [e'])
-  f (UnpackM e) =
+  f (DeserializeM e) =
     let (ms, e') = f e
     in (ms, "UNPACK" <> tupled [e'])
   f (ReturnM e) =
@@ -163,8 +163,8 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
 
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
-prettyTypeM (Packed c) = "Packed<" <> prettyType c <> ">"
-prettyTypeM (Unpacked c) = "Unpacked<" <> prettyType c <> ">"
+prettyTypeM (Serial c) = "Serial<" <> prettyType c <> ">"
+prettyTypeM (Native c) = "Native<" <> prettyType c <> ">"
 prettyTypeM (Function ts t) =
   "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
 prettyTypeM (ForallM vs t) = "Forall" <+> hsep (map pretty vs) <+> "." <+> prettyTypeM t
@@ -205,16 +205,16 @@ invertExprM (RecordM c entries) = do
       e = LetM v (RecordM c entries') (LetVarM c v)
       e' = foldl (\x y -> dependsOn x y) e es'
   return e'
-invertExprM (PackM e) = do
+invertExprM (SerializeM e) = do
   e' <- invertExprM e
   v <- MM.getCounter
   let t' = packTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (PackM (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (UnpackM e) = do
+  return $ dependsOn (LetM v (SerializeM (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (DeserializeM e) = do
   e' <- invertExprM e
   v <- MM.getCounter
   let t' = unpackTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (UnpackM (terminalOf e')) (LetVarM t' v)) e'
+  return $ dependsOn (LetM v (DeserializeM (terminalOf e')) (LetVarM t' v)) e'
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
@@ -241,14 +241,14 @@ terminalOf e = e
 typeOfTypeM :: TypeM -> Maybe CType 
 typeOfTypeM t = fmap CType (typeOfTypeM' t) where
   typeOfTypeM' Passthrough = Nothing
-  typeOfTypeM' (Packed c) = Just (typeOf c)
-  typeOfTypeM' (Unpacked c) = Just (typeOf c)
+  typeOfTypeM' (Serial c) = Just (typeOf c)
+  typeOfTypeM' (Native c) = Just (typeOf c)
   typeOfTypeM' (Function [] t) = typeOfTypeM' t
   typeOfTypeM' (Function (ti:ts) to) = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
 
 arg2typeM :: Argument -> TypeM
-arg2typeM (PackedArgument _ c) = Packed c
-arg2typeM (UnpackedArgument _ c) = Unpacked c
+arg2typeM (SerialArgument _ c) = Serial c
+arg2typeM (NativeArgument _ c) = Native c
 arg2typeM (PassThroughArgument _) = Passthrough
 
 -- | Get the manifold type of an expression
@@ -279,17 +279,17 @@ typeOfExprM (LogM t _) = t
 typeOfExprM (NumM t _) = t
 typeOfExprM (StrM t _) = t
 typeOfExprM (NullM t) = t
-typeOfExprM (PackM e) = packTypeM (typeOfExprM e)
-typeOfExprM (UnpackM e) = unpackTypeM (typeOfExprM e)
+typeOfExprM (SerializeM e) = packTypeM (typeOfExprM e)
+typeOfExprM (DeserializeM e) = unpackTypeM (typeOfExprM e)
 typeOfExprM (ReturnM e) = typeOfExprM e
 
 packTypeM :: TypeM -> TypeM
-packTypeM (Unpacked t) = Packed t
+packTypeM (Native t) = Serial t
 packTypeM (Function ts t) = error $ "BUG: Cannot pack a function"
 packTypeM t = t
 
 unpackTypeM :: TypeM -> TypeM
-unpackTypeM (Packed t) = Unpacked t
+unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
@@ -299,7 +299,7 @@ ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
 ctype2typeM (CType (Forall v t)) = case ctype2typeM (CType t) of
   (ForallM vs t') -> ForallM (v:vs) t'
   t' -> ForallM [v] t'
-ctype2typeM c = Unpacked c
+ctype2typeM c = Native c
 
 -- get input types to a function type
 typeParts :: CType -> ([CType], CType)
@@ -312,12 +312,12 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
 
 unpackExprM :: ExprM -> ExprM
 unpackExprM e = case typeOfExprM e of
-  (Packed _) -> UnpackM e
+  (Serial _) -> DeserializeM e
   (Passthrough) -> error "Cannot unpack a passthrough typed expression"
   _ -> e
 
 packExprM :: ExprM -> ExprM
 packExprM e = case typeOfExprM e of
-  (Unpacked _) -> PackM e
+  (Native _) -> SerializeM e
   -- (Function _ _) -> error "Cannot pack a function"
   _ -> e
