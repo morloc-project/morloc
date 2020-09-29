@@ -76,6 +76,8 @@ Add `data` keyword for defining data, this data is used to build objects
 
 Add type constructors for parameterized types
 
+ - [ ] fix the leaky existential crisis
+
 0.26.0 [2020.09.27]
 -------------------
 

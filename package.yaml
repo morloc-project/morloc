@@ -33,6 +33,7 @@ dependencies:
   - prettyprinter
   - prettyprinter-ansi-terminal
   - process
+  - raw-strings-qq
   - safe
   - scientific
   - template-haskell

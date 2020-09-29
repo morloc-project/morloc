@@ -28,6 +28,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , unpackTypeM
   , nargsTypeM
   , arg2typeM
+  , jsontype2json
+  , type2jsontype
   ) where
 
 import Morloc.Data.Doc
@@ -321,3 +323,25 @@ packExprM e = case typeOfExprM e of
   (Native _) -> SerializeM e
   -- (Function _ _) -> error "Cannot pack a function"
   _ -> e
+
+type2jsontype :: Type -> MorlocMonad JsonType
+type2jsontype (VarT (TV _ v)) = return $ VarJ v
+type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (ExistT _ _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT"
+-- FIXME: leaking existential
+type2jsontype (ExistT _ _ [t]) = type2jsontype (unDefaultType t)
+type2jsontype (Forall _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: Forall"
+type2jsontype (FunT _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: FunT"
+type2jsontype (NamT (TV _ v) rs) = do
+  vs <- mapM type2jsontype (map snd rs)
+  return $ NamJ v (zip (map fst rs) vs)
+
+jsontype2json :: JsonType -> MDoc
+jsontype2json (VarJ v) = dquotes (pretty v)
+jsontype2json (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
+  key = dquotes (pretty v)
+  val = encloseSep "[" "]" "," (map jsontype2json ts)
+jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "}" "," rs' <> "}" where
+  keys = map (dquotes . pretty) (map fst rs) 
+  vals = map jsontype2json (map snd rs)
+  rs' = zipWith (\k v -> k <> ":" <> v) keys vals

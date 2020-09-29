@@ -53,24 +53,9 @@ manNamer i = "m" <> viaShow i
 serialType :: CType
 serialType = CType (VarT (TV (Just RLang) "character"))
 
-typeSchema :: CType -> MDoc
-typeSchema c = f (unCType c)
-  where
-    f (VarT v) = dquotes (var v)
-    f (ArrT v ps) = lst [var v <> "=" <> lst (map f ps)]
-    f (NamT v es) = lst [var v <> "=" <> lst (map entry es)]
-    -- FIXME: leaking existential
-    f (ExistT _ _ [t]) = typeSchema (CType $ unDefaultType t)
-    f t = error $ "Cannot serialize this type: " <> show t
-
-    entry :: (MT.Text, Type) -> MDoc
-    entry (v, t) = pretty v <> "=" <> f t
-
-    lst :: [MDoc] -> MDoc
-    lst xs = "list" <> encloseSep "(" ")" "," xs
-
-    var :: TVar -> MDoc
-    var (TV _ v) = pretty v
+-- For R, the type schema is the JSON representation of the type
+typeSchema :: CType -> MorlocMonad MDoc
+typeSchema c = jsontype2json <$> type2jsontype (unCType c)
 
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
@@ -137,11 +122,13 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f args (SerializeM e) = do
     (ms, e') <- f args e
     let (Native t) = typeOfExprM e
-    return (ms, "pack" <> tupled [e', typeSchema t])
+    schema <- typeSchema t
+    return (ms, "pack" <> tupled [e', schema])
   f args (DeserializeM e) = do
     (ms, e') <- f args e
     let (Serial t) = typeOfExprM e
-    return (ms, "unpack" <> tupled [e', typeSchema t])
+    schema <- typeSchema t
+    return (ms, "unpack" <> tupled [e', schema])
   f args (ReturnM e) = do
     (ms, e') <- f args e
     return (ms, e')

@@ -2,7 +2,7 @@ import Test.Tasty
 import qualified System.Directory as SD
 
 import PropertyTests (propertyTests)
-import UnitTypeTests (typeOrderTests, unitTypeTests, typeAliasTests)
+import UnitTypeTests (typeOrderTests, unitTypeTests, typeAliasTests, jsontype2jsonTests)
 import GoldenMakefileTests (goldenMakefileTest)
 
 main = do
@@ -15,6 +15,7 @@ main = do
       , typeOrderTests
       , typeAliasTests
       , propertyTests
+      , jsontype2jsonTests
 
       , golden "import-1" "import-1"
 

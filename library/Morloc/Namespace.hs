@@ -53,6 +53,7 @@ module Morloc.Namespace
   , StackState(..)
   , TVar(..)
   , Type(..)
+  , JsonType(..)
   -- ** State manipulation
   , StackConfig(..)
   -- ** ModuleGamma paraphernalia
@@ -411,6 +412,18 @@ data Type
   -- ^ f [Type]
   | NamT TVar [(Text, Type)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
+  deriving (Show, Ord, Eq)
+
+-- | A simplified subset of the Type record
+-- functions, existential, and universal types are removed
+-- language-specific info is removed
+data JsonType
+  = VarJ Text
+  -- ^ {"int"}
+  | ArrJ Text [JsonType]
+  -- ^ {"list":["int"]}
+  | NamJ Text [(Text, JsonType)]
+  -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
 data Property
