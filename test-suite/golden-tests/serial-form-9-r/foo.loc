@@ -1,0 +1,14 @@
+import rbase (id)
+
+source R ("list" as Person)
+
+data (Person a) = Person {name :: Str, info :: a}
+data R (Person a) = Person {name :: "character", info :: a}
+
+export foo
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo :: Person (Person Str) -> Person (Person Str)
+foo r :: Person (Person "character") -> Person (Person "character")
+foo xs = id xs

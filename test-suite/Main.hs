@@ -117,6 +117,35 @@ main = do
       , golden "module-form-n01" "module-form-n01"
       , golden "module-form-n10" "module-form-n10"
 
-      , golden "constructor-1" "constructor-1"
+      -- tests of serialization
+      -- outer simple type
+      , golden "c  S(S)" "serial-form-1-c"
+      , golden "py S(C)" "serial-form-1-py"
+      , golden "r  S(R)" "serial-form-1-r"
+      , golden "c  S(S)" "serial-form-2-c"
+      , golden "py S(C)" "serial-form-2-py"
+      , golden "r  S(R)" "serial-form-2-r"
+      , golden "c  S(S)" "serial-form-3-c"
+      , golden "py S(C)" "serial-form-3-py"
+      , golden "r  S(R)" "serial-form-3-r"
+      -- outer constructed type
+      , golden "c  C(S)" "serial-form-4-c"
+      , golden "py C(C)" "serial-form-4-py"
+      , golden "r  C(R)" "serial-form-4-r"
+      , golden "c  C(S)" "serial-form-5-c"
+      , golden "py C(C)" "serial-form-5-py"
+      , golden "r  C(R)" "serial-form-5-r"
+      , golden "c  C(S)" "serial-form-6-c"
+      , golden "py C(C)" "serial-form-6-py"
+      , golden "r  C(R)" "serial-form-6-r"
+      -- outer record type
+      , golden "c  R(S)" "serial-form-7-c"
+      , golden "py R(C)" "serial-form-7-py"
+      , golden "r  R(R)" "serial-form-7-r"
+      , golden "c  R(S)" "serial-form-8-c"
+      , golden "py R(C)" "serial-form-8-py"
+      , golden "r  R(R)" "serial-form-8-r"
+      , golden "c  R(S)" "serial-form-9-c"
+      , golden "py R(C)" "serial-form-9-py"
+      , golden "r  R(R)" "serial-form-9-r"
       ]
-
