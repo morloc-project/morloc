@@ -55,7 +55,10 @@ serialType = CType (VarT (TV (Just RLang) "character"))
 
 -- For R, the type schema is the JSON representation of the type
 typeSchema :: CType -> MorlocMonad MDoc
-typeSchema c = jsontype2json <$> type2jsontype (unCType c)
+typeSchema c = do
+  json <- jsontype2json <$> type2jsontype (unCType c)
+  -- FIXME: Need to support single quotes inside strings
+  return $ "'" <> json <> "'"
 
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
@@ -123,12 +126,12 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
     (ms, e') <- f args e
     let (Native t) = typeOfExprM e
     schema <- typeSchema t
-    return (ms, "pack" <> tupled [e', schema])
+    return (ms, "rmorlocinternals::mlc_serialize" <> tupled [e', schema])
   f args (DeserializeM e) = do
     (ms, e') <- f args e
     let (Serial t) = typeOfExprM e
     schema <- typeSchema t
-    return (ms, "unpack" <> tupled [e', schema])
+    return (ms, "rmorlocinternals::mlc_deserialize" <> tupled [e', schema])
   f args (ReturnM e) = do
     (ms, e') <- f args e
     return (ms, e')

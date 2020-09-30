@@ -327,9 +327,10 @@ packExprM e = case typeOfExprM e of
 type2jsontype :: Type -> MorlocMonad JsonType
 type2jsontype (VarT (TV _ v)) = return $ VarJ v
 type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (ExistT _ _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT"
 -- FIXME: leaking existential
-type2jsontype (ExistT _ _ [t]) = type2jsontype (unDefaultType t)
+type2jsontype (ExistT _ _ [d]) = type2jsontype (unDefaultType d)
+type2jsontype (ExistT _ _ []) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with no default type"
+type2jsontype (ExistT _ _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with ambiguous default types"
 type2jsontype (Forall _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: Forall"
 type2jsontype (FunT _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: FunT"
 type2jsontype (NamT (TV _ v) rs) = do
