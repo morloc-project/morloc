@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
 
 import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
+import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.System as MS
@@ -295,6 +296,10 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
+
+#{Src.foreignCallFunction}
+
+#{Src.serializationHandling}
 
 #{vsep includes}
 

@@ -2,8 +2,11 @@ import cppbase (id)
 
 export foo
 
+type Cpp Str = "std::string";
+type Cpp Int = "int";
+
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: [(Str, Int)] -> [(Str, Int)]
-foo cpp :: [("std::string", "int")] -> [("std::string", "int")]
+foo     :: [(Str, Int)] -> [(Str, Int)]
+foo cpp :: [(Str, Int)] -> [(Str, Int)]
 foo xs = id xs
