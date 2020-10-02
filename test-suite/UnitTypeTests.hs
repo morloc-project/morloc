@@ -289,6 +289,24 @@ typeAliasTests =
         )
         [fun [varc CLang "double", varc CLang "int"]]
     , assertTerminalType
+        "language-specific types are be nested"
+        (T.unlines
+          [ "type R Num = \"numeric\";"
+          , "f R :: [Num] -> \"integer\";"
+          , "f"
+          ]
+        )
+        [fun [arrc RLang "list" [varc RLang "numeric"], varc RLang "integer"]]
+    , assertTerminalType
+        "no substitution is across languages"
+        (T.unlines
+          [ "type Num = \"numeric\";"
+          , "f R :: [Num] -> \"integer\";"
+          , "f"
+          ]
+        )
+        [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
+    , assertTerminalType
         "parametric alias, concrete type alias"
         (T.unlines
           [ "type Cpp (Map a b) = \"std::map<$1,$2>\" a b;"
