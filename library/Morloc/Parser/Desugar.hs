@@ -79,7 +79,7 @@ desugarType s h t0@(ArrT v ts)
         if length ts == length vs
         then desugarType (v:s) h (foldr parsub t (zip vs ts)) -- substitute parameters into alias
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> return t0
+      Nothing -> ArrT v <$> mapM (desugarType s h) ts 
 desugarType s h (NamT v rs) = do
   let keys = map fst rs   
   vals <- mapM (desugarType s h) (map snd rs)

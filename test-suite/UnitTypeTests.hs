@@ -244,6 +244,33 @@ typeAliasTests =
         )
         [fun [var "A", var "B"]]
     , assertTerminalType
+        "deep type substitution: `[Foo] -> B`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> B;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), var "B"]]
+    , assertTerminalType
+        "deep type substitution: `[Foo] -> Foo`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> Foo;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), var "A"]]
+    , assertTerminalType
+        "deep type substitution: `[Foo] -> { a = Foo }`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> { a :: Foo } ;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), record [("a", var "A")]]]
+    , assertTerminalType
         "parametric alias, general type alias"
         (T.unlines
           [ "type (Foo a b) = (a,b);"
