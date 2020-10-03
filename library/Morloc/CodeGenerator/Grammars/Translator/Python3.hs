@@ -130,11 +130,11 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f args (SerializeM e) = do
     (ms, e') <- f args e
     let (Native t) = typeOfExprM e
-    return (ms, "pack" <> tupled [e', typeSchema t])
+    return (ms, "mlc_serialize" <> tupled [e', typeSchema t])
   f args (DeserializeM e) = do
     (ms, e') <- f args e
     let (Serial t) = typeOfExprM e
-    return (ms, "unpack" <> tupled [e', typeSchema t])
+    return (ms, "mlc_deserialize" <> tupled [e', typeSchema t])
   f args (ReturnM e) = do
     (ms, e') <- f args e
     return (ms, "return(" <> e' <> ")")
@@ -196,6 +196,7 @@ makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 import sys
 import subprocess
 import json
+from pymorlocinternals import (mlc_serialize, mlc_deserialize)
 from collections import OrderedDict
 
 sys.path = ["#{lib}"] + sys.path
