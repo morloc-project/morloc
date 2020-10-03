@@ -129,8 +129,8 @@ translateManifold m@(ManifoldM _ args _) =
     t <- showNativeTypeM (typeOfExprM e1)
     let schemaName = letNamer i <> "_schema"
         schema = [idoc|#{t} #{schemaName};|]
-        packing = [idoc|#{serialType} #{letNamer i} = pack(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, packing, e2'], [])
+        serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{e1'}, #{schemaName});|]
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, serializing, e2'], [])
 
   f _ (SerializeM _) = MM.throwError . OtherError
     $ "SerializeM should only appear in an assignment"
@@ -141,8 +141,8 @@ translateManifold m@(ManifoldM _ args _) =
     t <- showNativeTypeM (typeOfExprM e1)
     let schemaName = letNamer i <> "_schema"
         schema = [idoc|#{t} #{schemaName};|]
-        unpacking = [idoc|#{t} #{letNamer i} = unpack(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, unpacking, e2'], [])
+        deserializeing = [idoc|#{t} #{letNamer i} = deserialize(#{e1'}, #{schemaName});|]
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, deserializeing, e2'], [])
   f _ (DeserializeM _) = MM.throwError . OtherError
     $ "DeserializeM should only appear in an assignment"
 
@@ -285,11 +285,11 @@ showTypeM (Serial t) = serialType
 showTypeM (Native t) = showType t
 showTypeM (Function ts t) = "std::function<" <> showTypeM t <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
 
--- for use in making schema, where the unpacked type is needed
+-- for use in making schema, where the native type is needed
 showNativeTypeM :: TypeM -> MorlocMonad MDoc
 showNativeTypeM (Serial t) = return $ showType t
 showNativeTypeM (Native t) = return $ showType t
-showNativeTypeM _ = MM.throwError . OtherError $ "Expected packed or unpacked type"
+showNativeTypeM _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures manifolds dispatch = [idoc|#include <string>

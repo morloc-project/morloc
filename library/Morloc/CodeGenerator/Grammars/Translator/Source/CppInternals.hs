@@ -44,28 +44,28 @@ serializationHandling = [idoc|
 #include <utility> 
 
 
-std::string pack(bool x, bool schema);
-std::string pack(int x, int schema);
-std::string pack(int x, size_t schema);
-std::string pack(int x, long schema);
-std::string pack(double x, double schema);
-std::string pack(std::string x, std::string schema);
+std::string serialize(bool x, bool schema);
+std::string serialize(int x, int schema);
+std::string serialize(int x, size_t schema);
+std::string serialize(int x, long schema);
+std::string serialize(double x, double schema);
+std::string serialize(std::string x, std::string schema);
 
-template <class A> std::string pack(A x);
+template <class A> std::string serialize(A x);
 
 template<std::size_t I = 0, class... Rs>
 inline typename std::enable_if<I == sizeof...(Rs), std::string>::type
-  _pack_tuple(std::tuple<Rs...> x);
+  _serialize_tuple(std::tuple<Rs...> x);
 
 template<std::size_t I = 0, class... Rs>
 inline typename std::enable_if<I < sizeof...(Rs), std::string>::type
-  _pack_tuple(std::tuple<Rs...> x);
+  _serialize_tuple(std::tuple<Rs...> x);
 
 template <class... A>
-std::string pack(std::tuple<A...> x, std::tuple<A...> schema);
+std::string serialize(std::tuple<A...> x, std::tuple<A...> schema);
 
 template <class A>
-std::string pack(std::vector<A> x, std::vector<A> schema);
+std::string serialize(std::vector<A> x, std::vector<A> schema);
 
 bool match(const std::string json, const std::string pattern, size_t &i);
 void whitespace(const std::string json, size_t &i);
@@ -76,30 +76,30 @@ double read_double(std::string json);
 template <class A>
 bool try_parse(std::string json, size_t &i, A &x, bool (*f)(std::string, size_t &, A &));
 
-bool unpack(const std::string json, size_t &i, bool &x);
-bool unpack(const std::string json, size_t &i, double &x);
-bool unpack(const std::string json, size_t &i, std::string &x);
+bool deserialize(const std::string json, size_t &i, bool &x);
+bool deserialize(const std::string json, size_t &i, double &x);
+bool deserialize(const std::string json, size_t &i, std::string &x);
 
 template <class A>
-bool integer_unpack(const std::string json, size_t &i, A &x);
-bool unpack(const std::string json, size_t &i, int &x);
-bool unpack(const std::string json, size_t &i, size_t &x);
-bool unpack(const std::string json, size_t &i, long &x);
+bool integer_deserialize(const std::string json, size_t &i, A &x);
+bool deserialize(const std::string json, size_t &i, int &x);
+bool deserialize(const std::string json, size_t &i, size_t &x);
+bool deserialize(const std::string json, size_t &i, long &x);
 
 template <class A>
-bool unpack(const std::string json, size_t &i, std::vector<A> &x);
+bool deserialize(const std::string json, size_t &i, std::vector<A> &x);
 
 template <class A>
-bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A> &x);
+bool _deserialize_tuple(const std::string json, size_t &i, std::tuple<A> &x);
 
 template <class A, class... Rest>
-bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x);
+bool _deserialize_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x);
 
 template <class... Rest>
-bool unpack(const std::string json, size_t &i, std::tuple<Rest...> &x);
+bool deserialize(const std::string json, size_t &i, std::tuple<Rest...> &x);
 
 template <class A>
-A unpack(const std::string json, A output);
+A deserialize(const std::string json, A output);
 
 
 
@@ -108,45 +108,45 @@ A unpack(const std::string json, A output);
 /*                       S E R I A L I Z A T I O N                        */
 /* ---------------------------------------------------------------------- */
 
-std::string pack(bool x, bool schema){
+std::string serialize(bool x, bool schema){
     return(x? "true" : "false");
 }
 
-std::string pack(int x, int schema){
+std::string serialize(int x, int schema){
     std::ostringstream s;
     s << x;
     return(s.str());
 }
-std::string pack(int x, size_t schema){
+std::string serialize(int x, size_t schema){
     std::ostringstream s;
     s << x;
     return(s.str());
 }
-std::string pack(int x, long schema){
+std::string serialize(int x, long schema){
     std::ostringstream s;
     s << x;
     return(s.str());
 }
 
-std::string pack(double x, double schema){
+std::string serialize(double x, double schema){
     std::ostringstream s;
     s << std::setprecision(std::numeric_limits<double>::digits10 + 2) << x;
     return(s.str());
 }
 
-std::string pack(std::string x, std::string schema){
+std::string serialize(std::string x, std::string schema){
     std::ostringstream s;
     s << '"' << x << '"';
     return(s.str());
 }
 
 template <class A>
-std::string pack(std::vector<A> x, std::vector<A> schema){
+std::string serialize(std::vector<A> x, std::vector<A> schema){
     A element_schema;
     std::ostringstream s;
     s << "[";
     for(size_t i = 0; i < x.size(); i++){
-        s << pack(x[i], element_schema);
+        s << serialize(x[i], element_schema);
         if((i+1) < x.size()){
             s << ',';
         }
@@ -156,30 +156,30 @@ std::string pack(std::vector<A> x, std::vector<A> schema){
 }
 
 template <class A>
-std::string pack(A x){
-    return pack(x, x);
+std::string serialize(A x){
+    return serialize(x, x);
 }
 
 // adapted from stackoverflow #1198260 answer from emsr
 template<std::size_t I = 0, class... Rs>
 inline typename std::enable_if<I == sizeof...(Rs), std::string>::type
-  _pack_tuple(std::tuple<Rs...> x)
+  _serialize_tuple(std::tuple<Rs...> x)
   { return ""; }
 
 template<std::size_t I = 0, class... Rs>
 inline typename std::enable_if<I < sizeof...(Rs), std::string>::type
-  _pack_tuple(std::tuple<Rs...> x)
+  _serialize_tuple(std::tuple<Rs...> x)
   {
-    return pack(std::get<I>(x)) + "," + _pack_tuple<I + 1, Rs...>(x);
+    return serialize(std::get<I>(x)) + "," + _serialize_tuple<I + 1, Rs...>(x);
   }
 
 template <class... A>
-std::string pack(std::tuple<A...> x, std::tuple<A...> schema){
+std::string serialize(std::tuple<A...> x, std::tuple<A...> schema){
     std::ostringstream ss;
     ss << "[";
-    ss << _pack_tuple(x);
+    ss << _serialize_tuple(x);
     std::string json = ss.str();
-    // _pack_tuple adds a terminal comma, replaced here with the end bracket
+    // _serialize_tuple adds a terminal comma, replaced here with the end bracket
     json[json.size() - 1] = ']';
     return json;
 }
@@ -243,13 +243,13 @@ bool try_parse(std::string json, size_t &i, A &x, bool (*f)(std::string, size_t 
 // All combinator functions have the following general signature:
 //
 //   template <class A>
-//   bool unpack(const std::string json, size_t &i, A &x)
+//   bool deserialize(const std::string json, size_t &i, A &x)
 
 // The return value represents parse success.
 // The index may be incremented even on failure.
 
 // combinator parser for bool
-bool unpack(const std::string json, size_t &i, bool &x){
+bool deserialize(const std::string json, size_t &i, bool &x){
     if(match(json, "true", i)){
         x = true;
     }
@@ -263,7 +263,7 @@ bool unpack(const std::string json, size_t &i, bool &x){
 }
 
 // combinator parser for doubles
-bool unpack(const std::string json, size_t &i, double &x){
+bool deserialize(const std::string json, size_t &i, double &x){
     std::string lhs = "";
     std::string rhs = "";
     char sign = '+';
@@ -289,7 +289,7 @@ bool unpack(const std::string json, size_t &i, double &x){
 }
 
 // combinator parser for double-quoted strings
-bool unpack(const std::string json, size_t &i, std::string &x){
+bool deserialize(const std::string json, size_t &i, std::string &x){
     try {
         x = "";
         if(! match(json, "\"", i)){
@@ -310,28 +310,33 @@ bool unpack(const std::string json, size_t &i, std::string &x){
 }
 
 template <class A>
-bool integer_unpack(const std::string json, size_t &i, A &x){
+bool integer_deserialize(const std::string json, size_t &i, A &x){
+    char sign = '+';
+    if(json[i] == '-'){
+        sign = '-';
+        i++;
+    }
     std::string x_str = digit_str(json, i);
     if(x_str.size() > 0){
-        std::stringstream sstream(x_str);
+        std::stringstream sstream(sign + x_str);
         sstream >> x;
         return true;
     }
     return false; 
 }
-bool unpack(const std::string json, size_t &i, int &x){
-    return integer_unpack(json, i, x);
+bool deserialize(const std::string json, size_t &i, int &x){
+    return integer_deserialize(json, i, x);
 }
-bool unpack(const std::string json, size_t &i, size_t &x){
-    return integer_unpack(json, i, x);
+bool deserialize(const std::string json, size_t &i, size_t &x){
+    return integer_deserialize(json, i, x);
 }
-bool unpack(const std::string json, size_t &i, long &x){
-    return integer_unpack(json, i, x);
+bool deserialize(const std::string json, size_t &i, long &x){
+    return integer_deserialize(json, i, x);
 }
 
 // parser for vectors
 template <class A>
-bool unpack(const std::string json, size_t &i, std::vector<A> &x){
+bool deserialize(const std::string json, size_t &i, std::vector<A> &x){
     x = {};
     try {
         if(! match(json, "[", i)){
@@ -340,7 +345,7 @@ bool unpack(const std::string json, size_t &i, std::vector<A> &x){
         whitespace(json, i);
         while(true){
             A element;
-            if(unpack(json, i, element)){
+            if(deserialize(json, i, element)){
                 x.push_back(element);
                 whitespace(json, i);
                 match(json, ",", i);
@@ -360,19 +365,19 @@ bool unpack(const std::string json, size_t &i, std::vector<A> &x){
 }
 
 template <class A>
-bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A> &x){
+bool _deserialize_tuple(const std::string json, size_t &i, std::tuple<A> &x){
     A a;
-    if(! unpack(json, i, a)){
+    if(! deserialize(json, i, a)){
         return false;
     }
     x = std::make_tuple(a);
     return true;
 }
 template <class A, class... Rest>
-bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x){
+bool _deserialize_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x){
     A a;
     // parse the next element
-    if(! unpack(json, i, a)){
+    if(! deserialize(json, i, a)){
         return false;
     }
     // skip whitespace and the comma
@@ -383,7 +388,7 @@ bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x)
     whitespace(json, i);
     // parse the rest of the elements
     std::tuple<Rest...> rs;
-    if(! _unpack_tuple(json, i, rs)){
+    if(! _deserialize_tuple(json, i, rs)){
         return false;
     }
     // cons
@@ -391,17 +396,17 @@ bool _unpack_tuple(const std::string json, size_t &i, std::tuple<A, Rest...> &x)
     return true;
 }
 template <class... Rest>
-bool unpack(const std::string json, size_t &i, std::tuple<Rest...> &x){
+bool deserialize(const std::string json, size_t &i, std::tuple<Rest...> &x){
     try {
-        if(! match(json, "(", i)){
+        if(! match(json, "[", i)){
             throw 1;
         }
         whitespace(json, i);
-        if(! _unpack_tuple(json, i, x)){
+        if(! _deserialize_tuple(json, i, x)){
             throw 1;
         }
         whitespace(json, i);
-        if(! match(json, ")", i)){
+        if(! match(json, "]", i)){
             throw 1;
         }
     } catch (int e) {
@@ -411,16 +416,16 @@ bool unpack(const std::string json, size_t &i, std::tuple<Rest...> &x){
 }
 
 template <class A>
-A unpack(const std::string json, A output){
+A deserialize(const std::string json, A output){
     size_t i = 0;
-    unpack(json, i, output);
+    deserialize(json, i, output);
     return output;
 }
 
 template <class... Rest>
-std::tuple<Rest...> unpack(const std::string json, std::tuple<Rest...> output){
+std::tuple<Rest...> deserialize(const std::string json, std::tuple<Rest...> output){
     size_t i = 0;
-    unpack(json, i, output);
+    deserialize(json, i, output);
     return output;
 }
 |]
