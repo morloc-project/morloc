@@ -72,7 +72,7 @@ Minor changes
  - [ ] Fix the leaky existential crisis
  - [ ] Allow import/export of type aliases
 
-0.27.0 [2020.xx.xx]
+0.27.0 [2020.10.04]
 -------------------
 
  * Add systematic tests for data serialization
