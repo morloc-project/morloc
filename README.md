@@ -146,24 +146,6 @@ plotPDF <- function(x, filename){
 ```
 
 
-## Language-specific type specialization
-
-A `morloc` program can import functions from multiple languages.
-
-Currently data is passed between languages through a language-agnostic
-intermediate format (JSON). For simple data types, generic JSON serialization
-libraries may be able to handle these conversions. For example, the Python
-`json` module will convert the JSON string `[1,2,3]` to the appropriate Python
-list. For more advanced cases, type-specific handling can be added.
-
-How exactly this is accomplished depends on the language. Currently, for
-Python3, R, and C++, I pass the `pack` and `unpack` functions two arguments:
-the data and a type schema. For Python and R, these type schema are nested
-lists specifying which functions to call to unpack each component of the data.
-For C++, the schema is an undefined term with the desired type, its role is
-simply to ensure currect template resolution.
-
-
 ## The Morloc Type System
 
 The first level of the `morloc` type system is basically System F extended
