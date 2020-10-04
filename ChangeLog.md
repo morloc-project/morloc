@@ -63,20 +63,21 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
 
-
-0.27.0 [2020.xx.xx]
+0.28.0 [2020.xx.xx]
 -------------------
 
  - [ ] Add type constructors for parameterized types
  - [ ] Add table handling
  - [ ] Add `data` keyword for defining data constructors
- - [.] Move to dedicated serialize libraries that require no import
-       - [x] in R
-       - [ ] in python3
-       - [ ] in C++
  - [ ] Fix the leaky existential crisis
- - [x] Add systematic tests for data serialization
- - [x] Rewrite R serializer (`morloc-project/rmorlocinternals`)
+ - [ ] Allow import/export of type aliases
+
+0.27.0 [2020.xx.xx]
+-------------------
+
+ * Add systematic tests for data serialization
+ * Fix bug in C++ serialization
+ * Move to serialize to dedicated libraries that require no import
 
 0.26.0 [2020.09.27]
 -------------------
