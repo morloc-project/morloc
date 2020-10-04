@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
 
 import Morloc.Namespace
 import Morloc.CodeGenerator.Grammars.Common
+import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.System as MS
@@ -71,19 +72,19 @@ makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
   f (ListM _ es) = conmap f es
   f (TupleM _ es) = conmap f es
   f (RecordM _ entries) = conmap f (map snd entries)
-  f (PackM e) = f e
-  f (UnpackM e) = f e
+  f (SerializeM e) = f e
+  f (DeserializeM e) = f e
   f (ReturnM e) = f e
   f _ = []
 
 makeArg :: Argument -> MDoc
-makeArg (PackedArgument i _) = serialType <+> bndNamer i
-makeArg (UnpackedArgument i c) = showType c <+> bndNamer i
+makeArg (SerialArgument i _) = serialType <+> bndNamer i
+makeArg (NativeArgument i c) = showType c <+> bndNamer i
 makeArg (PassThroughArgument i) = serialType <+> bndNamer i
 
 argName :: Argument -> MDoc
-argName (PackedArgument i _) = bndNamer i
-argName (UnpackedArgument i _) = bndNamer i
+argName (SerialArgument i _) = bndNamer i
+argName (NativeArgument i _) = bndNamer i
 argName (PassThroughArgument i) = bndNamer i
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
@@ -122,28 +123,28 @@ translateManifold m@(ManifoldM _ args _) =
        , [MDoc] -- a list of statements that should precede this assignment
        )
 
-  f args (LetM i (PackM e1) e2) = do
+  f args (LetM i (SerializeM e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- showUnpackedTypeM (typeOfExprM e1)
+    t <- showNativeTypeM (typeOfExprM e1)
     let schemaName = letNamer i <> "_schema"
         schema = [idoc|#{t} #{schemaName};|]
-        packing = [idoc|#{serialType} #{letNamer i} = pack(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, packing, e2'], [])
+        serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{e1'}, #{schemaName});|]
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, serializing, e2'], [])
 
-  f _ (PackM _) = MM.throwError . OtherError
-    $ "PackM should only appear in an assignment"
+  f _ (SerializeM _) = MM.throwError . OtherError
+    $ "SerializeM should only appear in an assignment"
 
-  f args (LetM i (UnpackM e1) e2) = do
+  f args (LetM i (DeserializeM e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- showUnpackedTypeM (typeOfExprM e1)
+    t <- showNativeTypeM (typeOfExprM e1)
     let schemaName = letNamer i <> "_schema"
         schema = [idoc|#{t} #{schemaName};|]
-        unpacking = [idoc|#{t} #{letNamer i} = unpack(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, unpacking, e2'], [])
-  f _ (UnpackM _) = MM.throwError . OtherError
-    $ "UnpackM should only appear in an assignment"
+        deserializeing = [idoc|#{t} #{letNamer i} = deserialize(#{e1'}, #{schemaName});|]
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, deserializeing, e2'], [])
+  f _ (DeserializeM _) = MM.throwError . OtherError
+    $ "DeserializeM should only appear in an assignment"
 
   f args (LetM i e1 e2) = do
     (ms1', e1', ps1) <- (f args) e1
@@ -245,8 +246,8 @@ staticCast t args name = do
   return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name})|]
 
 argTypeM :: Argument -> MDoc
-argTypeM (PackedArgument _ _) = serialType
-argTypeM (UnpackedArgument _ c) = showType c
+argTypeM (SerialArgument _ _) = serialType
+argTypeM (NativeArgument _ c) = showType c
 argTypeM (PassThroughArgument _) = serialType
 
 -- divide a list of arguments based on wheither they are in a second list
@@ -280,21 +281,25 @@ showType = MTM.buildCType mkfun mkrec where
 
 showTypeM :: TypeM -> MDoc
 showTypeM Passthrough = serialType
-showTypeM (Packed t) = serialType
-showTypeM (Unpacked t) = showType t
+showTypeM (Serial t) = serialType
+showTypeM (Native t) = showType t
 showTypeM (Function ts t) = "std::function<" <> showTypeM t <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
 
--- for use in making schema, where the unpacked type is needed
-showUnpackedTypeM :: TypeM -> MorlocMonad MDoc
-showUnpackedTypeM (Packed t) = return $ showType t
-showUnpackedTypeM (Unpacked t) = return $ showType t
-showUnpackedTypeM _ = MM.throwError . OtherError $ "Expected packed or unpacked type"
+-- for use in making schema, where the native type is needed
+showNativeTypeM :: TypeM -> MorlocMonad MDoc
+showNativeTypeM (Serial t) = return $ showType t
+showNativeTypeM (Native t) = return $ showType t
+showNativeTypeM _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
+
+#{Src.foreignCallFunction}
+
+#{Src.serializationHandling}
 
 #{vsep includes}
 

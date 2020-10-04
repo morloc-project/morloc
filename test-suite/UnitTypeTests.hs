@@ -1,11 +1,17 @@
+{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
+
 module UnitTypeTests
   ( unitTypeTests
   , typeOrderTests
   , typeAliasTests
+  , jsontype2jsonTests
   ) where
 
 import Morloc.Namespace
 import Morloc.Parser.Parser
+import Text.RawString.QQ
+import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
+import Morloc.Data.Doc as Doc
 import Morloc.TypeChecker.Infer hiding(typecheck)
 import Morloc.Parser.Desugar (desugar)
 import Morloc (typecheck)
@@ -194,6 +200,37 @@ tuple ts = ArrT v ts
 
 record rs = NamT (TV Nothing "Record") rs
 
+jsontype2jsonTests =
+  testGroup
+    "Test conversion of JsonType's to JSON text"
+    [ jsontest "value"
+        (VarJ "int")
+        [r|"int"|]
+    , jsontest "array(value)"
+        (ArrJ "list" [VarJ "int"])
+        [r|{"list":["int"]}|]
+    , jsontest "object(value)"
+        (NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])
+        [r|{"Person":{"name":"Str","age":"Int"}}|]
+    , jsontest "array(array)"
+        (ArrJ "list" [ArrJ "matrix" [VarJ "int"]])
+        [r|{"list":[{"matrix":["int"]}]}|]
+    , jsontest "array(object)"
+        (ArrJ "list" [(NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])])
+        [r|{"list":[{"Person":{"name":"Str","age":"Int"}}]}|]
+    , jsontest "object(array)"
+        (NamJ "Person" [("name", VarJ "Str"), ("friends", ArrJ "list" [VarJ "Str"])])
+        [r|{"Person":{"name":"Str","friends":{"list":["Str"]}}}|]
+    , jsontest "object(object)"
+        (NamJ "Person"
+          [ ("name", VarJ "Str")
+          , ("pet", NamJ "Animal" [("name", VarJ "Str"), ("species", VarJ "Str")])
+          ])
+        [r|{"Person":{"name":"Str","pet":{"Animal":{"name":"Str","species":"Str"}}}}|]
+    ]
+  where
+    jsontest msg t j = testEqual msg (Doc.render $ jsontype2json t) j
+
 typeAliasTests =
   testGroup
     "Test type alias substitutions"
@@ -206,6 +243,33 @@ typeAliasTests =
           ]
         )
         [fun [var "A", var "B"]]
+    , assertTerminalType
+        "deep type substitution: `[Foo] -> B`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> B;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), var "B"]]
+    , assertTerminalType
+        "deep type substitution: `[Foo] -> Foo`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> Foo;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), var "A"]]
+    , assertTerminalType
+        "deep type substitution: `[Foo] -> { a = Foo }`"
+        (T.unlines
+          [ "type Foo = A;"
+          , "f :: [Foo] -> { a :: Foo } ;"
+          , "f"
+          ]
+        )
+        [fun [lst (var "A"), record [("a", var "A")]]]
     , assertTerminalType
         "parametric alias, general type alias"
         (T.unlines
@@ -224,6 +288,24 @@ typeAliasTests =
           ]
         )
         [fun [varc CLang "double", varc CLang "int"]]
+    , assertTerminalType
+        "language-specific types are be nested"
+        (T.unlines
+          [ "type R Num = \"numeric\";"
+          , "f R :: [Num] -> \"integer\";"
+          , "f"
+          ]
+        )
+        [fun [arrc RLang "list" [varc RLang "numeric"], varc RLang "integer"]]
+    , assertTerminalType
+        "no substitution is across languages"
+        (T.unlines
+          [ "type Num = \"numeric\";"
+          , "f R :: [Num] -> \"integer\";"
+          , "f"
+          ]
+        )
+        [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
     , assertTerminalType
         "parametric alias, concrete type alias"
         (T.unlines

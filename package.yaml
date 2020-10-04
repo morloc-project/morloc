@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.26.0
+version:          0.27.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -33,6 +33,7 @@ dependencies:
   - prettyprinter
   - prettyprinter-ansi-terminal
   - process
+  - raw-strings-qq
   - safe
   - scientific
   - template-haskell

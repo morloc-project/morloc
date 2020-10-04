@@ -32,26 +32,29 @@ need to add handling for several very different languages (proofs-of-concept).
        - [ ] machine learning
        - [ ] bioinformatics
 
+
 0.xx.x [2020.xx.xx]
 -------------------
 
-A presentable, usable language that is ready for serious beta testing but not
-production. That is, no guarantee of backwards compatibility.
+A usable language that is ready for serious beta testing but not production
+(nobackwards compatibility guarantee). Make new github release and release to
+hackage.
 
 Major changes
  - [ ] Remove semicolon requirement
  - [ ] Rewrite perl manifold nexus in C++
-       - [ ] add type annotations to printed help
+       - [ ] Add type annotations to printed help
+       - [ ] Allow stdin to replace '-' arguments
  - [ ] New build system
        - [ ] Place pools and nexus in ~/.morloc/tmp
        - [ ] Create scripts in the working directory that calls them
        - [ ] Add compiler options for executable name, deletion, cache clearing, etc
-       - [ ] Allow stdin to replace '-' argument
  - [ ] Add a verbosity flag to `morloc make`
  - [ ] New compiler commands for managing modules
-       - [ ] `morloc uninstall` command for deleting modules
-       - [ ] `morloc update` command for updating modules (i.e., git pull)
-       - [ ] `morloc list` command for listing all available modules
+       - [ ] `morloc install` - add option for installing working directory
+       - [ ] `morloc uninstall` - delete modules
+       - [ ] `morloc update` - update modules (i.e., git pull)
+       - [ ] `morloc list` - list all available modules
 
 Minor changes
  - [ ] add linter
@@ -59,17 +62,22 @@ Minor changes
  - [ ] clean up haddock documentation
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
- - [ ] resurrect property tests
 
 0.28.0 [2020.xx.xx]
 -------------------
 
-Add `data` keyword for defining data, this data is used to build objects
+ - [ ] Add type constructors for parameterized types
+ - [ ] Add table handling
+ - [ ] Add `data` keyword for defining data constructors
+ - [ ] Fix the leaky existential crisis
+ - [ ] Allow import/export of type aliases
 
 0.27.0 [2020.xx.xx]
 -------------------
 
-Add type constructors for parameterized types
+ * Add systematic tests for data serialization
+ * Fix bug in C++ serialization
+ * Move to serialize to dedicated libraries that require no import
 
 0.26.0 [2020.09.27]
 -------------------

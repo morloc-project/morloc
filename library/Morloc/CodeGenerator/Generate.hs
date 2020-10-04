@@ -409,9 +409,8 @@ rewrite (SAnno (Many es0) g0) = do
       return $ SAnno (Many xs') g
 
 -- | Select a single concrete language for each sub-expression.  Store the
--- concrete type and the general type (if available).  Select serialization
--- functions (the serial map should not be needed after this step in the
--- workflow).
+-- concrete type and the general type (if available).  Select pack/unpack
+-- functions.
 realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One CType))
@@ -671,8 +670,8 @@ parameterize x = parameterize' [] x
 
 -- TODO: the arguments coupled to every term should be the arguments USED
 -- (not inherited) by the term. I need to ensure the argument threading
--- leads to correct passing of packed/unpacked arguments. AppS should
--- "know" that it needs to pack functions that are passed to a foreign
+-- leads to correct passing of serialized/unserialized arguments. AppS should
+-- "know" that it needs to deserialize functions that are passed to a foreign
 -- call, for instance.
 parameterize'
   :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
@@ -720,7 +719,7 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 makeArgument :: Int -> Maybe CType -> Argument
-makeArgument i (Just t) = PackedArgument i t
+makeArgument i (Just t) = SerialArgument i t
 makeArgument i Nothing = PassThroughArgument i
 
 
@@ -734,26 +733,26 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   express' _ _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (ctype2typeM c) x
   express' _ _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (ctype2typeM c) x
   express' _ _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (ctype2typeM c) x
-  express' _ _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Unpacked c)
+  express' _ _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Native c)
 
   -- containers
   express' isTop _ (SAnno (One (ListS xs, (c@(CType (ArrT _ [t])), args))) m) = do
     xs' <- mapM ((express' False) (CType t)) xs |>> map unpackExprM
-    let x = (ListM (Unpacked c) xs')
+    let x = (ListM (Native c) xs')
     if isTop
       then return $ ManifoldM (metaId m) (map snd args) (ReturnM (packExprM x))
       else return x
 
   express' isTop _ (SAnno (One (TupleS xs, (c@(CType (ArrT _ ts)), args))) m) = do
     xs' <- zipWithM (express' False) (map CType ts) xs |>> map unpackExprM
-    let x = (TupleM (Unpacked c) xs')
+    let x = (TupleM (Native c) xs')
     if isTop
       then return $ ManifoldM (metaId m) (map snd args) (ReturnM (packExprM x))
       else return x
 
   express' isTop _ (SAnno (One (RecS entries, (c@(CType (NamT _ ts)), args))) m) = do
     xs' <- zipWithM (express' False) (map (CType . snd) ts) (map snd entries) |>> map unpackExprM
-    let x = RecordM (Unpacked c) (zip (map fst entries) xs')
+    let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
       then return $ ManifoldM (metaId m) (map snd args) (ReturnM (packExprM x))
       else return x
@@ -765,11 +764,11 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   express' isTop _ (SAnno (One (VarS v, (c, rs))) m) =
     case [r | (v', r) <- rs, v == v'] of
       [r] -> case r of
-        (PackedArgument i _) -> return $ BndVarM (Packed c) i
-        (UnpackedArgument i _) -> return $ BndVarM (Unpacked c) i
+        (SerialArgument i _) -> return $ BndVarM (Serial c) i
+        (NativeArgument i _) -> return $ BndVarM (Native c) i
         -- NOT passthrough, since it doesn't
         -- After segmentation, this type will be used to resolve passthroughs everywhere
-        (PassThroughArgument i) -> return $ BndVarM (Packed c) i
+        (PassThroughArgument i) -> return $ BndVarM (Serial c) i
       _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
 
   -- Apply arguments to a sourced function
@@ -787,7 +786,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
         xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
         let startId = maximum (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map ctype2typeM inputs)
-            lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
+            lambdaArgs = zipWith NativeArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
         return . ManifoldM (metaId m) (map snd args) $
           ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
@@ -803,7 +802,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
         xs' <- zipWithM (express' False) inputs xs |>> map unpackExprM
         let startId = maximum (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map ctype2typeM inputs)
-            lambdaArgs = zipWith UnpackedArgument [startId ..] inputs
+            lambdaArgs = zipWith NativeArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
         return . ForeignInterfaceM (packTypeM (ctype2typeM pc)) . ManifoldM (metaId m) (map snd args) $
           ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
@@ -816,9 +815,9 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   -- CallS - direct export of a sourced function, e.g.:
   express' True _ (SAnno (One (CallS src, (c, _))) m) = do
     let inputs = fst $ typeParts c
-        lambdaArgs = zipWith PackedArgument [0 ..] inputs
+        lambdaArgs = zipWith SerialArgument [0 ..] inputs
         lambdaTypes = map (packTypeM . ctype2typeM) inputs
-        lambdaVals = map UnpackM $ zipWith BndVarM lambdaTypes [0 ..]
+        lambdaVals = map DeserializeM $ zipWith BndVarM lambdaTypes [0 ..]
         f = SrcM (ctype2typeM c) src
         manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
     return manifold
@@ -827,7 +826,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   express' False pc (SAnno (One (CallS src, (c, _))) m) = do
     let inputs = fst $ typeParts c
         lambdaTypes = map ctype2typeM inputs
-        lambdaArgs = zipWith UnpackedArgument [0 ..] inputs
+        lambdaArgs = zipWith NativeArgument [0 ..] inputs
         lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
         f = SrcM (ctype2typeM c) src
         manifold = ManifoldM (metaId m) lambdaArgs (ReturnM $ AppM f lambdaVals)
@@ -853,7 +852,7 @@ segment e = segment' (argsOf e) e |>> (\(ms,e) -> e:ms) |>> map reparameterize w
       (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) cmds args)
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
-  segment' args (PackM (AppM e@(ForeignInterfaceM _ _) es)) = do
+  segment' args (SerializeM (AppM e@(ForeignInterfaceM _ _) es)) = do
     (ms, e') <- segment' args e
     (mss, es') <- mapM (segment' args) es |>> unzip
     return (ms ++ concat mss, AppM e' (map packExprM es'))
@@ -888,13 +887,13 @@ segment e = segment' (argsOf e) e |>> (\(ms,e) -> e:ms) |>> map reparameterize w
     (mss, es') <- mapM (segment' args) (map snd entries) |>> unzip
     return (concat mss, RecordM t (zip (map fst entries) es'))
 
-  segment' args (PackM e) = do
+  segment' args (SerializeM e) = do
     (ms, e') <- segment' args e
-    return (ms, PackM e')
+    return (ms, SerializeM e')
 
-  segment' args (UnpackM e) = do
+  segment' args (DeserializeM e) = do
     (ms, e') <- segment' args e
-    return (ms, UnpackM e')
+    return (ms, DeserializeM e')
 
   segment' args (ReturnM e) = do
     (ms, e') <- segment' args e
@@ -938,12 +937,12 @@ reparameterize e = snd (substituteBndArgs e) where
   substituteBndArgs (RecordM t entries) =
     let (vss, es') = unzip $ map substituteBndArgs (map snd entries)
     in (concat vss, RecordM t (zip (map fst entries) es'))
-  substituteBndArgs (PackM e) =
+  substituteBndArgs (SerializeM e) =
     let (vs, e') = substituteBndArgs e
-    in (vs, PackM e')
-  substituteBndArgs (UnpackM e) =
+    in (vs, SerializeM e')
+  substituteBndArgs (DeserializeM e) =
     let (vs, e') = substituteBndArgs e
-    in (vs, UnpackM e')
+    in (vs, DeserializeM e')
   substituteBndArgs (ReturnM e) =
     let (vs, e') = substituteBndArgs e
     in (vs, ReturnM e')
@@ -952,8 +951,8 @@ reparameterize e = snd (substituteBndArgs e) where
 
   sub :: [(Int, TypeM)] -> Argument -> Argument
   sub bnds r@(PassThroughArgument i) = case [t | (i', t) <- bnds, i == i'] of
-    ((Packed t):_) -> PackedArgument i t 
-    ((Unpacked t):_) -> UnpackedArgument i t 
+    ((Serial t):_) -> SerialArgument i t 
+    ((Native t):_) -> NativeArgument i t 
     ((Function _ _):_) -> error "You don't need to pass functions as manifold arguments"
     (Passthrough : _) -> error "What about 'Passthrough' do you not understand?"
     _ -> r 
@@ -1158,11 +1157,11 @@ partialApplyN i t
     partialApplyN (i-1) appliedType
 
 packArg :: Argument -> Argument
-packArg (UnpackedArgument v t) = PackedArgument v t
+packArg (NativeArgument v t) = SerialArgument v t
 packArg x = x
 
 unpackArg :: Argument -> Argument
-unpackArg (PackedArgument v t) = UnpackedArgument v t
+unpackArg (SerialArgument v t) = NativeArgument v t
 unpackArg x = x
 
 sannoSnd :: SAnno g One (a, b) -> b

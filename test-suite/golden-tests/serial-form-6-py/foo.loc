@@ -1,0 +1,14 @@
+import pybase (id, Map)
+
+source py ("list" as Person)
+
+data (Person a) = Person {name :: Str, info :: a}
+data py (Person a) = Person {name :: "str", info :: a}
+
+export foo
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo :: Map Str (Person Str) -> Map Str (Person Str)
+foo r :: Map "str" (Person "str") -> Map "str" (Person "str")
+foo xs = id xs

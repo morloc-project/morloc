@@ -53,6 +53,7 @@ module Morloc.Namespace
   , StackState(..)
   , TVar(..)
   , Type(..)
+  , JsonType(..)
   -- ** State manipulation
   , StackConfig(..)
   -- ** ModuleGamma paraphernalia
@@ -341,7 +342,7 @@ data Module =
     , moduleImports :: [Import]
     , moduleSourceMap :: Map (EVar, Lang) Source
     , moduleTypedefs :: Map TVar (Type, [TVar])
-    , moduleTypeMap :: Map EVar TypeSet
+    , moduleTypeMap :: Map EVar TypeSet -- set in Infer.hs
     }
   deriving (Ord, Eq, Show)
 
@@ -411,6 +412,18 @@ data Type
   -- ^ f [Type]
   | NamT TVar [(Text, Type)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
+  deriving (Show, Ord, Eq)
+
+-- | A simplified subset of the Type record
+-- functions, existential, and universal types are removed
+-- language-specific info is removed
+data JsonType
+  = VarJ Text
+  -- ^ {"int"}
+  | ArrJ Text [JsonType]
+  -- ^ {"list":["int"]}
+  | NamJ Text [(Text, JsonType)]
+  -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
 data Property
@@ -511,37 +524,37 @@ instance HasOneLanguage TVar where
 
 -- | An argument that is passed to a manifold
 data Argument
-  = PackedArgument Int CType
+  = SerialArgument Int CType
   -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
   -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
   -- may not be serializable. This is OK, so long as they are only used in
   -- functions of the same language.
-  | UnpackedArgument Int CType
+  | NativeArgument Int CType
   -- ^ A native argument with the same parameters as above
   | PassThroughArgument Int 
   -- ^ A serialized argument that is untyped in the current language. It cannot
-  -- be unpacked, but will be passed eventually to a foreign argument where it
+  -- be deserialized, but will be passed eventually to a foreign argument where it
   -- does have a concrete type.
   deriving (Show, Ord, Eq)
 
 instance HasOneLanguage Argument where
-  langOf (PackedArgument _ c) = langOf c
-  langOf (UnpackedArgument _ c) = langOf c
+  langOf (SerialArgument _ c) = langOf c
+  langOf (NativeArgument _ c) = langOf c
   langOf (PassThroughArgument _) = Nothing
 
 
 data TypeM
-  = Passthrough -- ^ serialized data that cannot be unpacked in this language
-  | Packed CType -- ^ serialized data that may be unpacked in this language
-  | Unpacked CType
+  = Passthrough -- ^ serialized data that cannot be deserialized in this language
+  | Serial CType -- ^ serialized data that may be deserialized in this language
+  | Native CType
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
   | ForallM [TVar] TypeM
   deriving(Show, Eq, Ord)
 
 instance HasOneLanguage TypeM where
   langOf Passthrough = Nothing
-  langOf (Packed c) = langOf c
-  langOf (Unpacked c) = langOf c
+  langOf (Serial c) = langOf c
+  langOf (Native c) = langOf c
   langOf (Function xs f) = listToMaybe $ catMaybes (map langOf (f:xs))
 
 
@@ -563,7 +576,7 @@ data ExprM
   | PoolCallM
       TypeM -- serialized return data
       [MDoc] -- shell command components that preceed the passed data
-      [Argument] -- argument passed to the foreign function (must be packed)
+      [Argument] -- argument passed to the foreign function (must be serialized)
   -- ^ Make a system call to another language
 
   | LetM Int ExprM ExprM
@@ -619,8 +632,8 @@ data ExprM
 
   -- serialization - these must remain abstract, since required arguments
   -- will vary between languages.
-  | PackM ExprM
-  | UnpackM ExprM
+  | SerializeM ExprM
+  | DeserializeM ExprM
 
   | ReturnM ExprM
   -- ^ The return value of a manifold. I need this to distinguish between the
@@ -646,6 +659,6 @@ instance HasOneLanguage ExprM where
   langOf (NumM t _) = langOf t
   langOf (StrM t _) = langOf t
   langOf (NullM t) = langOf t
-  langOf (PackM e) = langOf e
-  langOf (UnpackM e) = langOf e
+  langOf (SerializeM e) = langOf e
+  langOf (DeserializeM e) = langOf e
   langOf (ReturnM e) = langOf e

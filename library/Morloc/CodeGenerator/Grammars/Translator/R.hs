@@ -53,24 +53,12 @@ manNamer i = "m" <> viaShow i
 serialType :: CType
 serialType = CType (VarT (TV (Just RLang) "character"))
 
-typeSchema :: CType -> MDoc
-typeSchema c = f (unCType c)
-  where
-    f (VarT v) = dquotes (var v)
-    f (ArrT v ps) = lst [var v <> "=" <> lst (map f ps)]
-    f (NamT v es) = lst [var v <> "=" <> lst (map entry es)]
-    -- FIXME: leaking existential
-    f (ExistT _ _ [t]) = typeSchema (CType $ unDefaultType t)
-    f t = error $ "Cannot serialize this type: " <> show t
-
-    entry :: (MT.Text, Type) -> MDoc
-    entry (v, t) = pretty v <> "=" <> f t
-
-    lst :: [MDoc] -> MDoc
-    lst xs = "list" <> encloseSep "(" ")" "," xs
-
-    var :: TVar -> MDoc
-    var (TV _ v) = pretty v
+-- For R, the type schema is the JSON representation of the type
+typeSchema :: CType -> MorlocMonad MDoc
+typeSchema c = do
+  json <- jsontype2json <$> type2jsontype (unCType c)
+  -- FIXME: Need to support single quotes inside strings
+  return $ "'" <> json <> "'"
 
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
@@ -116,7 +104,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f args (ListM t es) = do
     (mss', es') <- mapM (f args) es |>> unzip
     x' <- return $ case t of
-      (Unpacked (CType (ArrT _ [VarT et]))) -> case et of
+      (Native (CType (ArrT _ [VarT et]))) -> case et of
         (TV _ "numeric") -> "c" <> tupled es'
         (TV _ "logical") -> "c" <> tupled es'
         (TV _ "character") -> "c" <> tupled es'
@@ -134,14 +122,16 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "NULL")
-  f args (PackM e) = do
+  f args (SerializeM e) = do
     (ms, e') <- f args e
-    let (Unpacked t) = typeOfExprM e
-    return (ms, "pack" <> tupled [e', typeSchema t])
-  f args (UnpackM e) = do
+    let (Native t) = typeOfExprM e
+    schema <- typeSchema t
+    return (ms, "rmorlocinternals::mlc_serialize" <> tupled [e', schema])
+  f args (DeserializeM e) = do
     (ms, e') <- f args e
-    let (Packed t) = typeOfExprM e
-    return (ms, "unpack" <> tupled [e', typeSchema t])
+    let (Serial t) = typeOfExprM e
+    schema <- typeSchema t
+    return (ms, "rmorlocinternals::mlc_deserialize" <> tupled [e', schema])
   f args (ReturnM e) = do
     (ms, e') <- f args e
     return (ms, e')
@@ -158,8 +148,8 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             else Right r
 
 makeArgument :: Argument -> MDoc
-makeArgument (PackedArgument v c) = bndNamer v
-makeArgument (UnpackedArgument v c) = bndNamer v
+makeArgument (SerialArgument v c) = bndNamer v
+makeArgument (NativeArgument v c) = bndNamer v
 makeArgument (PassThroughArgument v) = bndNamer v
 
 makePool :: [MDoc] -> [MDoc] -> MDoc

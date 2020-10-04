@@ -69,7 +69,10 @@ desugarType s h t0@(VarT v)
       (Just (t, [])) -> desugarType (v:s) h t
       (Just (t, vs)) -> MM.throwError $ BadTypeAliasParameters v 0 (length vs)
       Nothing -> return t0 
-desugarType s h (ExistT v ts ds) = ExistT v <$> mapM (desugarType s h) ts <*> pure ds
+desugarType s h (ExistT v ts ds) = do
+  ts' <- mapM (desugarType s h) ts
+  ds' <- mapM (desugarType s h) (map unDefaultType ds)
+  return $ ExistT v ts' (map DefaultType ds')
 desugarType s h (Forall v t) = Forall v <$> desugarType s h t
 desugarType s h (FunT t1 t2) = FunT <$> desugarType s h t1 <*> desugarType s h t2
 desugarType s h t0@(ArrT v ts)
@@ -79,7 +82,7 @@ desugarType s h t0@(ArrT v ts)
         if length ts == length vs
         then desugarType (v:s) h (foldr parsub t (zip vs ts)) -- substitute parameters into alias
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> return t0
+      Nothing -> ArrT v <$> mapM (desugarType s h) ts 
 desugarType s h (NamT v rs) = do
   let keys = map fst rs   
   vals <- mapM (desugarType s h) (map snd rs)
