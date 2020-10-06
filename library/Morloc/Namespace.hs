@@ -65,6 +65,12 @@ module Morloc.Namespace
   , TypeSet(..)
   , Typelike(..)
   , langOf
+  -- ** Types used in post-typechecking tree
+  , SAnno(..)
+  , SExpr(..)
+  , GMeta(..)
+  , One(..)
+  , Many(..)
   -- ** Types used in final translations
   , TypeM(..)
   , ExprM(..)
@@ -345,6 +351,52 @@ data Module =
     , moduleTypeMap :: Map EVar TypeSet -- set in Infer.hs
     }
   deriving (Ord, Eq, Show)
+
+-- g: an annotation for the group of child trees (what they have in common)
+-- f: a collection - before realization this will probably be Set
+--                 - after realization it will be One
+-- c: an annotation for the specific child tree
+data SAnno g f c = SAnno (f (SExpr g f c, c)) g
+
+data One a = One a
+data Many a = Many [a]
+
+instance Functor One where
+  fmap f (One x) = One (f x)
+
+data SExpr g f c
+  = UniS
+  | VarS EVar
+  | ListS [SAnno g f c]
+  | TupleS [SAnno g f c]
+  | LamS [EVar] (SAnno g f c)
+  | AppS (SAnno g f c) [SAnno g f c]
+  | NumS Scientific
+  | LogS Bool
+  | StrS Text
+  | RecS [(EVar, SAnno g f c)]
+  | CallS Source
+
+-- | Description of the general manifold
+data GMeta = GMeta {
+    metaId :: Int
+  , metaGType :: Maybe GType
+  , metaName :: Maybe EVar -- the name, if relevant
+  , metaProperties :: Set Property
+  , metaConstraints :: Set Constraint
+} deriving (Show, Ord, Eq)
+
+-- data SimpleType
+--   = VarSimple TVar
+--   -- ^ (a)
+--   | FunSimple Type SimpleType
+--   -- ^ (A->B)
+--   | ArrSimple TVar [SimpleType] -- positional parameterized types
+--   -- ^ f [Type]
+--   | NamSimple TVar [(Text, SimpleType)] -- keyword parameterized types
+--   -- ^ Foo { bar :: A, baz :: B }
+--   deriving (Show, Ord, Eq)
+
 
 -- | Terms, see Dunfield Figure 1
 data Expr
