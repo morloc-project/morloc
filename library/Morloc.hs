@@ -1,8 +1,6 @@
 module Morloc
   ( writeProgram
   , typecheck
-  , P.cute
-  , P.ugly
   ) where
 
 import Morloc.Namespace
@@ -16,7 +14,7 @@ import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.TypeChecker.Treeify (treeify)
 
-typecheck :: Maybe Path -> Code -> MorlocMonad [T.Module]
+typecheck :: Maybe Path -> Code -> MorlocMonad TypedDag
 typecheck path code
   -- Maybe Path -> MT.Text -> [Module]
   -- parse code into unannotated modules

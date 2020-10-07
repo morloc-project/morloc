@@ -9,7 +9,6 @@ Stability   : experimental
 module Morloc.TypeChecker.API
   ( typecheck
   , runStack
-  , Module(..)
   ) where
 
 import Morloc.Namespace
@@ -22,13 +21,16 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer
 
-typecheck :: [Module] -> MorlocMonad [Module]
-typecheck ms = do
-  verbosity <- MS.gets stateVerbosity
-  x <- liftIO $ runStack verbosity (Infer.typecheck ms)
-  case x of
-    ((Right result, _), _) -> return result
-    ((Left err, _), _) -> MM.throwError err
+typecheck
+  :: DAG MVar (Map.Map EVar EVar) PreparedNode
+  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) TypedNode)
+typecheck = undefined
+-- typecheck ms = do
+--   verbosity <- MS.gets stateVerbosity
+--   x <- liftIO $ runStack verbosity (Infer.typecheck ms)
+--   case x of
+--     ((Right result, _), _) -> return result
+--     ((Left err, _), _) -> MM.throwError err
 
 -- | currently I do nothing with the Reader and Writer monads, but I'm leaving
 -- them in for now since I will need them when I plug this all into Morloc.

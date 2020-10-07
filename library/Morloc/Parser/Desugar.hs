@@ -15,15 +15,54 @@ import Morloc.Pretty ()
 import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
-desugar :: [Module] -> MorlocMonad [Module]
-desugar = mapM desugarModule
+desugar
+  :: [DAG MVar Import ParserNode]
+  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) PreparedNode)
+desugar [] = return $ DAG Map.empty Map.empty
+desugar (s:ss)
+  -- DAG MVar Import ParserNode
+  = foldlM dagUnionM s ss
+  -- DAG MVar (Map EVar EVar) ParserNode
+  >>= resolveImports
+  -- DAG MVar (Map EVar EVar) ParserNode
+  >>= desugarDag
+  -- DAG MVar (Map EVar EVar) PreparedNode
+  >>= simplify
 
-desugarModule :: Module -> MorlocMonad Module
-desugarModule m = do
-  checkForSelfRecursion (moduleTypedefs m)
-  expr' <- mapM (desugarExpr (moduleTypedefs m)) (moduleBody m)
-  return $ m { moduleBody = expr' }
+dagUnionM
+  :: DAG idx edge node
+  -> DAG idx edge node
+  -> MorlocMonad (DAG idx edge node)
+dagUnionM = undefined
+
+unionM :: Map.Map MVar v -> Map.Map MVar v -> MorlocMonad (Map.Map MVar v)
+unionM m1 m2
+  | any ((flip Map.member) m2) (Map.keys m1)
+    = MM.throwError . MultipleModuleDeclarations
+    $ (Set.toList $ Set.intersection (Map.keysSet m1) (Map.keysSet m2))
+  | otherwise = return $ Map.union m1 m2
+
+resolveImports
+  :: DAG MVar Import ParserNode
+  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) ParserNode)
+resolveImports = undefined
+
+desugarDag
+  :: DAG MVar (Map.Map EVar EVar) ParserNode
+  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) ParserNode)
+desugarDag = undefined
+-- desugarModule :: Module -> MorlocMonad Module
+-- desugarModule m = do
+--   checkForSelfRecursion (moduleTypedefs m)
+--   expr' <- mapM (desugarExpr (moduleTypedefs m)) (moduleBody m)
+--   return $ m { moduleBody = expr' }
+
+simplify
+  :: (DAG MVar (Map.Map EVar EVar) ParserNode)
+  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) PreparedNode)
+simplify = undefined
 
 checkForSelfRecursion :: Map.Map TVar (Type, [TVar]) -> MorlocMonad ()
 checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] where
@@ -59,16 +98,16 @@ desugarExpr h (RecE rs) = do
   es <- mapM (desugarExpr h) (map snd rs)
   return (RecE (zip (map fst rs) es))
 
-desugarEType :: Map.Map TVar (Type, [TVar]) -> EType -> MorlocMonad EType 
+desugarEType :: Map.Map TVar (Type, [TVar]) -> EType -> MorlocMonad EType
 desugarEType h (EType t ps cs) = EType <$> desugarType [] h t <*> pure ps <*> pure cs
 
 desugarType :: [TVar] -> Map.Map TVar (Type, [TVar]) -> Type -> MorlocMonad Type
 desugarType s h t0@(VarT v)
-  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s 
+  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case Map.lookup v h of
       (Just (t, [])) -> desugarType (v:s) h t
       (Just (t, vs)) -> MM.throwError $ BadTypeAliasParameters v 0 (length vs)
-      Nothing -> return t0 
+      Nothing -> return t0
 desugarType s h (ExistT v ts ds) = do
   ts' <- mapM (desugarType s h) ts
   ds' <- mapM (desugarType s h) (map unDefaultType ds)
@@ -76,15 +115,15 @@ desugarType s h (ExistT v ts ds) = do
 desugarType s h (Forall v t) = Forall v <$> desugarType s h t
 desugarType s h (FunT t1 t2) = FunT <$> desugarType s h t1 <*> desugarType s h t2
 desugarType s h t0@(ArrT v ts)
-  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s 
+  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case Map.lookup v h of
       (Just (t, vs)) ->
         if length ts == length vs
         then desugarType (v:s) h (foldr parsub t (zip vs ts)) -- substitute parameters into alias
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> ArrT v <$> mapM (desugarType s h) ts 
+      Nothing -> ArrT v <$> mapM (desugarType s h) ts
 desugarType s h (NamT v rs) = do
-  let keys = map fst rs   
+  let keys = map fst rs
   vals <- mapM (desugarType s h) (map snd rs)
   return (NamT v (zip keys vals))
 

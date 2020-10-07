@@ -48,7 +48,6 @@ module Morloc.Namespace
   , Import(..)
   , Source(..)
   , Indexable(..)
-  , Module(..)
   , Stack
   , StackState(..)
   , TVar(..)
@@ -71,6 +70,14 @@ module Morloc.Namespace
   , GMeta(..)
   , One(..)
   , Many(..)
+  -- ** DAG and associated types
+  , DAG(..)
+  , ParserNode(..)
+  , ParserDag
+  , PreparedNode(..)
+  , PreparedDag
+  , TypedNode(..)
+  , TypedDag
   -- ** Types used in final translations
   , TypeM(..)
   , ExprM(..)
@@ -339,19 +346,6 @@ data Import =
     }
   deriving (Ord, Eq, Show)
 
-data Module =
-  Module
-    { moduleName :: MVar
-    , modulePath :: Maybe Path
-    , moduleBody :: [Expr] -- ^ will be parsed by the typechecker and used in pretty printing 
-    , moduleExports :: Set EVar
-    , moduleImports :: [Import]
-    , moduleSourceMap :: Map (EVar, Lang) Source
-    , moduleTypedefs :: Map TVar (Type, [TVar])
-    , moduleTypeMap :: Map EVar TypeSet -- set in Infer.hs
-    }
-  deriving (Ord, Eq, Show)
-
 -- g: an annotation for the group of child trees (what they have in common)
 -- f: a collection - before realization this will probably be Set
 --                 - after realization it will be One
@@ -386,6 +380,8 @@ data GMeta = GMeta {
   , metaConstraints :: Set Constraint
 } deriving (Show, Ord, Eq)
 
+-- -- | Replace Type with SimpleType after typechecking (where all types should
+-- -- be resolved and all universal and existential types removed)
 -- data SimpleType
 --   = VarSimple TVar
 --   -- ^ (a)
@@ -396,6 +392,48 @@ data GMeta = GMeta {
 --   | NamSimple TVar [(Text, SimpleType)] -- keyword parameterized types
 --   -- ^ Foo { bar :: A, baz :: B }
 --   deriving (Show, Ord, Eq)
+
+
+-- | A general purpose Directed Acyclic Graph (DAG)
+data DAG key edge node =
+  DAG
+    { dagGraph :: Map key [(key, edge)]
+    , dagData :: Map key node
+    }
+
+-- | The type returned from the Parser. It contains all the information in a
+-- single module but knows NOTHING about other modules.
+data ParserNode =
+  ParserNode 
+    { parserNodePath :: Maybe Path
+    , parserNodeBody :: [Expr]
+    , parserNodeSourceMap :: Map (EVar, Lang) Source
+    , parserNodeTypedefs :: Map TVar (Type, [TVar])
+    , parserNodeExports :: Set EVar
+    }
+type ParserDag = DAG MVar Import ParserNode
+
+-- | Node description after desugaring (substitute type aliases and resolve
+-- imports/exports)
+data PreparedNode =
+  PreparedNode 
+    { preparedNodePath :: Maybe Path
+    , preparedNodeBody :: [Expr]
+    , preparedNodeSourceMap :: Map (EVar, Lang) Source
+    }
+type PreparedDag = DAG MVar (Map EVar EVar) ParserNode
+
+-- | Node description after type checking. This will later be fed into
+-- `treeify` to make the SAnno objects that will be passed to Generator.
+data TypedNode =
+  TypedNode 
+    { typedNodePath :: Maybe Path
+    , typedNodeBody :: Map EVar Expr
+    , typedNodeTypeMap :: Map EVar TypeSet
+    , typedNodeSourceMap :: Map (EVar, Lang) Source
+    , typedNodeExport :: Set EVar
+    }
+type TypedDag = DAG MVar (Map EVar EVar) TypedNode
 
 
 -- | Terms, see Dunfield Figure 1
