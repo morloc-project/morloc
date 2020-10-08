@@ -92,13 +92,16 @@ import Control.Monad.Identity (Identity)
 import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
-import Data.Set (Set, empty)
+import Data.Set (Set)
 import Data.Text (Text)
 import Data.Text.Prettyprint.Doc (Doc)
 import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec.Error (ParseError)
 import Morloc.Language (Lang(..))
+
+import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 
 -- | no annotations for now
 type MDoc = Doc ()
@@ -395,44 +398,44 @@ data GMeta = GMeta {
 
 
 -- | A general purpose Directed Acyclic Graph (DAG)
-data DAG key edge node =
-  DAG
-    { dagGraph :: Map key [(key, edge)]
-    , dagData :: Map key node
-    }
+data DAG key edge node = DAG {
+    dagGraph :: Map key [(key, edge)]
+  , dagData :: Map key node
+} deriving (Show, Ord, Eq)
+
+instance Ord k => Monoid (DAG k e n) where
+  mappend (DAG g1 d1) (DAG g2 d2) = DAG (M.union g1 g2) (M.union d1 d2) 
+  mempty = DAG (M.empty) (M.empty)
 
 -- | The type returned from the Parser. It contains all the information in a
 -- single module but knows NOTHING about other modules.
-data ParserNode =
-  ParserNode 
-    { parserNodePath :: Maybe Path
-    , parserNodeBody :: [Expr]
-    , parserNodeSourceMap :: Map (EVar, Lang) Source
-    , parserNodeTypedefs :: Map TVar (Type, [TVar])
-    , parserNodeExports :: Set EVar
-    }
+data ParserNode = ParserNode  {
+    parserNodePath :: Maybe Path
+  , parserNodeBody :: [Expr]
+  , parserNodeSourceMap :: Map (EVar, Lang) Source
+  , parserNodeTypedefs :: Map TVar (Type, [TVar])
+  , parserNodeExports :: Set EVar
+} deriving (Show, Ord, Eq)
 type ParserDag = DAG MVar Import ParserNode
 
 -- | Node description after desugaring (substitute type aliases and resolve
 -- imports/exports)
-data PreparedNode =
-  PreparedNode 
-    { preparedNodePath :: Maybe Path
-    , preparedNodeBody :: [Expr]
-    , preparedNodeSourceMap :: Map (EVar, Lang) Source
-    }
+data PreparedNode = PreparedNode {
+    preparedNodePath :: Maybe Path
+  , preparedNodeBody :: [Expr]
+  , preparedNodeSourceMap :: Map (EVar, Lang) Source
+} deriving (Show, Ord, Eq)
 type PreparedDag = DAG MVar (Map EVar EVar) ParserNode
 
 -- | Node description after type checking. This will later be fed into
 -- `treeify` to make the SAnno objects that will be passed to Generator.
-data TypedNode =
-  TypedNode 
-    { typedNodePath :: Maybe Path
-    , typedNodeBody :: Map EVar Expr
-    , typedNodeTypeMap :: Map EVar TypeSet
-    , typedNodeSourceMap :: Map (EVar, Lang) Source
-    , typedNodeExport :: Set EVar
-    }
+data TypedNode = TypedNode {
+    typedNodePath :: Maybe Path
+  , typedNodeBody :: Map EVar Expr
+  , typedNodeTypeMap :: Map EVar TypeSet
+  , typedNodeSourceMap :: Map (EVar, Lang) Source
+  , typedNodeExport :: Set EVar
+} deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar (Map EVar EVar) TypedNode
 
 
