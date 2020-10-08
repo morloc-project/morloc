@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.Data.DAG
-Description : Functions for working with directed acyclic graphgs
+Description : Functions for working with directed acyclic graphs
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
@@ -8,7 +8,10 @@ Stability   : experimental
 -}
 
 module Morloc.Data.DAG
-  ( member
+  ( insertNode
+  , insertNodeMaybe
+  , insertEdge
+  , member
   , keysSet
   , keys
   , edges
@@ -18,7 +21,7 @@ module Morloc.Data.DAG
   , findCycle
   , mapNode
   , mapEdge
-  , mapEdgeWithNodeM
+  , mapEdgeWithNode
   , mapNodeWithEdge
   ) where
 
@@ -36,6 +39,21 @@ data DagError k
 -- only in the data map (i.e., it is a singleton).
 member :: Ord k => k -> DAG k e n -> Bool
 member k (DAG _ d) = Map.member k d 
+
+insertNode :: Ord k => k -> n -> DAG k e n -> DAG k e n
+insertNode k n (DAG g d) = DAG g (Map.insert k n d)
+
+insertNodeMaybe :: Ord k => k -> n -> DAG k e n -> Maybe (DAG k e n)
+insertNodeMaybe k n (DAG g d)
+  | Map.member k d = Nothing
+  | otherwise = Just $ DAG g (Map.insert k n d)
+
+insertEdge :: Ord k => k -> k -> e -> DAG k e n -> DAG k e n
+insertEdge k1 k2 e (DAG g d) = DAG (Map.alter f k1 g) d
+  where  
+    -- f :: Maybe [(k, e)] -> Maybe [(k, e)]
+    f Nothing = Just [(k2, e)]
+    f (Just xs) = Just $ (k2,e):xs
 
 -- | Get set of all keys
 keysSet :: Ord k => DAG k e n -> Set.Set k

@@ -18,31 +18,15 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 desugar
-  :: [DAG MVar Import ParserNode]
+  :: DAG MVar Import ParserNode
   -> MorlocMonad (DAG MVar (Map.Map EVar EVar) PreparedNode)
-desugar [] = return $ DAG Map.empty Map.empty
-desugar (s:ss)
+desugar s
   -- DAG MVar Import ParserNode
-  = foldlM dagUnionM s ss
-  -- DAG MVar (Map EVar EVar) ParserNode
-  >>= resolveImports
+  = resolveImports s
   -- DAG MVar (Map EVar EVar) ParserNode
   >>= desugarDag
   -- DAG MVar (Map EVar EVar) PreparedNode
   >>= simplify
-
-dagUnionM
-  :: DAG idx edge node
-  -> DAG idx edge node
-  -> MorlocMonad (DAG idx edge node)
-dagUnionM = undefined
-
-unionM :: Map.Map MVar v -> Map.Map MVar v -> MorlocMonad (Map.Map MVar v)
-unionM m1 m2
-  | any ((flip Map.member) m2) (Map.keys m1)
-    = MM.throwError . MultipleModuleDeclarations
-    $ (Set.toList $ Set.intersection (Map.keysSet m1) (Map.keysSet m2))
-  | otherwise = return $ Map.union m1 m2
 
 resolveImports
   :: DAG MVar Import ParserNode

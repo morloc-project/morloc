@@ -25,6 +25,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.System as MS
 import qualified Text.Megaparsec.Char.Lexer as L
+import qualified Morloc.Data.DAG as MDD
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
@@ -69,16 +70,35 @@ appendGenerics v@(TV _ vstr) = do
       gs' = if isGeneric then v : gs else gs
   CMS.put (s {stateGenerics = gs'})
 
-readProgram :: Maybe Path -> MT.Text -> [DAG MVar Import ParserNode]
-readProgram f sourceCode =
+readProgram
+  :: Maybe Path
+  -> MT.Text
+  -> DAG MVar Import ParserNode
+  -> DAG MVar Import ParserNode
+readProgram f sourceCode p =
   case runParser
          (CMS.runStateT (sc >> pProgram <* eof) pstate)
          (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
     Left err -> error (show err)
-    Right (es, _) -> es
+    Right (es, _) -> addin p es
   where
     pstate = emptyState { stateModulePath = f }
+
+    addin
+      :: DAG MVar Import ParserNode
+      -> [(MVar, [(MVar, Import)], ParserNode)]
+      -> DAG MVar Import ParserNode
+    addin d [] = d
+    addin d ((m, xs, n):rs) = addEdges m xs (MDD.insertNode m n d)
+
+    addEdges
+      :: MVar
+      -> [(MVar, Import)]
+      -> DAG MVar Import ParserNode
+      -> DAG MVar Import ParserNode 
+    addEdges _ [] d = d
+    addEdges m1 ((m2, e):xs) d = addEdges m1 xs (MDD.insertEdge m1 m2 e d)
 
 readType :: MT.Text -> Type
 readType typeStr =
@@ -163,7 +183,7 @@ name = (lexeme . try) (p >>= check)
         else return x
 
 data Toplevel
-  = TModule (DAG MVar Import ParserNode)
+  = TModule (MVar, [(MVar, Import)], ParserNode)
   | TModuleBody ModuleBody
 
 data ModuleBody
@@ -173,7 +193,7 @@ data ModuleBody
   | MBTypeDef TVar [TVar] Type
   | MBBody Expr
 
-pProgram :: Parser [DAG MVar Import ParserNode]
+pProgram :: Parser [(MVar, [(MVar, Import)], ParserNode)]
 pProgram = do
   f <- CMS.gets stateModulePath
   -- allow ';' at the beginning (if you're into that sort of thing)
@@ -189,7 +209,7 @@ pToplevel =
   try (fmap TModule pModule <* optional delimiter) <|>
   fmap TModuleBody (pModuleBody <* optional delimiter)
 
-pModule :: Parser (DAG MVar Import ParserNode)
+pModule :: Parser (MVar, [(MVar, Import)], ParserNode)
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
@@ -197,16 +217,15 @@ pModule = do
   mes <- braces (optional delimiter >> many1 pModuleBody)
   return $ makeModule f (MVar moduleName') mes
 
-makeModule :: Maybe Path -> MVar -> [ModuleBody] -> DAG MVar Import ParserNode
-makeModule f n mes = DAG g d where
+makeModule :: Maybe Path -> MVar -> [ModuleBody] -> (MVar, [(MVar, Import)], ParserNode)
+makeModule f n mes = (n, edges, node) where
   imports' = [x | (MBImport x) <- mes]
   exports' = Set.fromList [x | (MBExport x) <- mes]
   body' = [x | (MBBody x) <- mes]
   typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   srcMap = (Map.fromList . concat)
            [[((srcAlias s, srcLang s), s) | s <- ss ] | (SrcE ss) <- body']
-  g = Map.singleton n [(importModuleName i, i) | i <- imports']
-  d = Map.singleton n node
+  edges = [(importModuleName i, i) | i <- imports']
   node = ParserNode
     { parserNodePath = f
     , parserNodeBody = body'
