@@ -22,18 +22,14 @@ module Morloc.Data.DAG
   , mapNode
   , mapEdge
   , mapEdgeWithNode
+  , mapEdgeWithNodeM
   , mapNodeWithEdge
   ) where
 
 import Morloc.Namespace
+import Morloc.Monad as MM
 import qualified Data.Map as Map 
 import qualified Data.Set as Set 
-
--- | The ways a DAG may go wrong
-data DagError k
-  = DagHasCycle
-  | DagHasUndefinedKey [k]
-  | DagHasConflictingKey [k]
 
 -- | Determine if a key is in the DAG. The key needn't be in the graph, it may be
 -- only in the data map (i.e., it is a singleton).
@@ -64,11 +60,11 @@ keys :: Ord k => DAG k e n -> [k]
 keys = Set.toList . keysSet
 
 -- | Get all edges
-edges :: Ord k => DAG k e n -> [e]
+edges :: DAG k e n -> [e]
 edges (DAG g _) = map snd (concat $ Map.elems g)
 
 -- | Get all nodes
-nodes :: Ord k => DAG k e n -> [n]
+nodes :: DAG k e n -> [n]
 nodes (DAG _ d) = Map.elems d
 
 -- | Get all roots
@@ -131,3 +127,24 @@ mapNodeWithEdge f (DAG g d) = DAG g (Map.mapWithKey fkey d) where
   fkey k1 n1 = case Map.lookup k1 g of
     Nothing -> f n1 []
     (Just xs) -> f n1 [(k2, e, fromJust (Map.lookup k2 d)) | (k2, e) <- xs]
+
+-- | map over edges given the nodes the edge connects
+mapEdgeWithNodeM
+  :: Ord k
+  => (n -> e1 -> n -> MorlocMonad e2)
+  -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
+mapEdgeWithNodeM f (DAG g d) = do
+  g' <- mapM runit (Map.toList g) |>> Map.fromList
+  return $ DAG g' d
+  where
+    runit (k1, xs) = case Map.lookup k1 d of 
+      (Just n1) -> do
+        n2s <- mapM (lookupM d) (map fst xs)
+        es <- mapM (\(n2,(k2,e)) -> (,) <$> pure k2 <*> f n1 e n2) (zip n2s xs)
+        return (k1, es)
+      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, edge is missing subject"
+
+    lookupM :: Ord key => Map.Map key val -> key -> MorlocMonad val
+    lookupM m k = case Map.lookup k m of
+      (Just v) -> return v
+      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, edge is missing object"
