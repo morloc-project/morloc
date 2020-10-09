@@ -425,7 +425,7 @@ data PreparedNode = PreparedNode {
   , preparedNodeBody :: [Expr]
   , preparedNodeSourceMap :: Map (EVar, Lang) Source
 } deriving (Show, Ord, Eq)
-type PreparedDag = DAG MVar (Map EVar EVar) ParserNode
+type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
 
 -- | Node description after type checking. This will later be fed into
 -- `treeify` to make the SAnno objects that will be passed to Generator.
@@ -436,7 +436,7 @@ data TypedNode = TypedNode {
   , typedNodeSourceMap :: Map (EVar, Lang) Source
   , typedNodeExport :: Set EVar
 } deriving (Show, Ord, Eq)
-type TypedDag = DAG MVar (Map EVar EVar) TypedNode
+type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
 
 
 -- | Terms, see Dunfield Figure 1

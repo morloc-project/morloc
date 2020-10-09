@@ -19,30 +19,33 @@ import qualified Data.Set as Set
 
 desugar
   :: DAG MVar Import ParserNode
-  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) PreparedNode)
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
 desugar s
   -- DAG MVar Import ParserNode
   = resolveImports s
+  -- DAG MVar (Map EVar EVar) ParserNode
+  |>> propagateTypedefs
   -- DAG MVar (Map EVar EVar) ParserNode
   >>= desugarDag
   -- DAG MVar (Map EVar EVar) PreparedNode
   >>= simplify
 
 -- | Consider export/import information to determine which terms are imported
--- into each module. This step reduces the Import edge type to `Map EVar
--- EVar`, which is a map from source name to alias.
+-- into each module. This step reduces the Import edge type to an m-to-n source
+-- name to alias map.
 resolveImports
   :: DAG MVar Import ParserNode
-  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) ParserNode)
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)
 resolveImports = MDD.mapEdgeWithNodeM resolveImport where
   resolveImport
     :: ParserNode
     -> Import
     -> ParserNode
-    -> MorlocMonad (Map.Map EVar EVar)
+    -> MorlocMonad [(EVar, EVar)]
   resolveImport _ (Import v Nothing exc _) n2
     = return
-    . Map.fromSet id -- alias is identical
+    . map (\x -> (x,x)) -- alias is identical
+    . Set.toList
     $ Set.difference (parserNodeExports n2) (Set.fromList exc)
   resolveImport _ (Import v (Just inc) exc _) n2
     | length contradict > 0
@@ -53,14 +56,21 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
         = MM.throwError . CallTheMonkeys
         $ "Error: The following terms are not exported: " <>
           MD.render (MD.tupledNoFold $ map MD.pretty missing)
-    | otherwise = return (Map.fromList inc)
+    | otherwise = return inc
     where
       missing = [n | (n, _) <- inc, not $ Set.member n (parserNodeExports n2)]
       contradict = [n | (n, _) <- inc, elem n exc]
 
+propagateTypedefs
+  :: DAG MVar [(EVar, EVar)] ParserNode
+  -> (DAG MVar [(EVar, EVar)] ParserNode)
+propagateTypedefs = MDD.depthFirstTransform f where
+  f :: ParserNode -> [(MVar, [(EVar, EVar)], ParserNode)] -> ParserNode
+  f n1 es = undefined
+
 desugarDag
-  :: DAG MVar (Map.Map EVar EVar) ParserNode
-  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) ParserNode)
+  :: DAG MVar [(EVar, EVar)] ParserNode
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)
 desugarDag = undefined
 -- desugarModule :: Module -> MorlocMonad Module
 -- desugarModule m = do
@@ -69,8 +79,8 @@ desugarDag = undefined
 --   return $ m { moduleBody = expr' }
 
 simplify
-  :: (DAG MVar (Map.Map EVar EVar) ParserNode)
-  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) PreparedNode)
+  :: (DAG MVar [(EVar, EVar)] ParserNode)
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
 simplify = undefined
 
 checkForSelfRecursion :: Map.Map TVar (Type, [TVar]) -> MorlocMonad ()

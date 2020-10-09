@@ -16,14 +16,13 @@ import qualified Control.Monad.Except as ME
 import qualified Control.Monad.Reader as MR
 import qualified Control.Monad.State as MS
 import qualified Control.Monad.Writer as MW
-import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer
 
 typecheck
-  :: DAG MVar (Map.Map EVar EVar) PreparedNode
-  -> MorlocMonad (DAG MVar (Map.Map EVar EVar) TypedNode)
+  :: DAG MVar [(EVar, EVar)] PreparedNode
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] TypedNode)
 typecheck = undefined
 -- typecheck ms = do
 --   verbosity <- MS.gets stateVerbosity

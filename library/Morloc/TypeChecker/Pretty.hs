@@ -10,10 +10,9 @@ Stability   : experimental
 module Morloc.TypeChecker.Pretty (cute, ugly) where
 
 import Morloc.Namespace
-import qualified Data.Map as Map
 
-cute :: DAG MVar (Map.Map EVar EVar) TypedNode -> IO ()
+cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute = undefined
 
-ugly :: DAG MVar (Map.Map EVar EVar) TypedNode -> IO ()
+ugly :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 ugly = undefined

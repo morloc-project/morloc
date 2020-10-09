@@ -35,8 +35,8 @@ import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck
-  :: DAG MVar (Map.Map EVar EVar) PreparedNode
-  -> Stack (DAG MVar (Map.Map EVar EVar) TypedNode)
+  :: DAG MVar [(EVar, EVar)] PreparedNode
+  -> Stack (DAG MVar [(EVar, EVar)] TypedNode)
 typecheck = undefined
 -- typecheck ms = do
 --

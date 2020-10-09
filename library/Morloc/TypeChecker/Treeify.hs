@@ -27,7 +27,7 @@ import qualified Data.Set as Set
 --   deriving(Show, Ord, Eq)
 
 treeify
-  :: DAG MVar (Map.Map EVar EVar) TypedNode
+  :: DAG MVar [(EVar, EVar)] TypedNode
   -> MorlocMonad [SAnno GMeta Many [CType]]
 treeify = undefined
 -- treeify :: [Module] -> MorlocMonad [SAnno GMeta Many [CType]]

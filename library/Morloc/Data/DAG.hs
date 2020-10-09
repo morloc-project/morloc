@@ -24,6 +24,7 @@ module Morloc.Data.DAG
   , mapEdgeWithNode
   , mapEdgeWithNodeM
   , mapNodeWithEdge
+  , depthFirstTransform
   ) where
 
 import Morloc.Namespace
@@ -148,3 +149,10 @@ mapEdgeWithNodeM f (DAG g d) = do
     lookupM m k = case Map.lookup k m of
       (Just v) -> return v
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, edge is missing object"
+
+depthFirstTransform
+  :: Ord k
+  => (n1 -> [(k, e, n2)] -> n2)
+  -> DAG k e n1
+  -> DAG k e n2
+depthFirstTransform = undefined
