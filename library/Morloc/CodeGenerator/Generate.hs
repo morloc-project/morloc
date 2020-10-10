@@ -15,7 +15,7 @@ module Morloc.CodeGenerator.Generate
 import Morloc.Namespace
 import Morloc.Data.Doc
 import Morloc.TypeChecker.PartialOrder
-import Morloc.Pretty (prettyType, prettyExpr)
+import Morloc.Pretty (prettyType)
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
