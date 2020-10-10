@@ -23,13 +23,12 @@ import qualified Morloc.TypeChecker.Infer as Infer
 typecheck
   :: DAG MVar [(EVar, EVar)] PreparedNode
   -> MorlocMonad (DAG MVar [(EVar, EVar)] TypedNode)
-typecheck = undefined
--- typecheck ms = do
---   verbosity <- MS.gets stateVerbosity
---   x <- liftIO $ runStack verbosity (Infer.typecheck ms)
---   case x of
---     ((Right result, _), _) -> return result
---     ((Left err, _), _) -> MM.throwError err
+typecheck d = do
+  verbosity <- MS.gets stateVerbosity
+  x <- liftIO $ runStack verbosity (Infer.typecheck d)
+  case x of
+    ((Right result, _), _) -> return result
+    ((Left err, _), _) -> MM.throwError err
 
 -- | currently I do nothing with the Reader and Writer monads, but I'm leaving
 -- them in for now since I will need them when I plug this all into Morloc.

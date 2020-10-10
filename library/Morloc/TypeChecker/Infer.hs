@@ -9,7 +9,7 @@ Stability   : experimental
 module Morloc.TypeChecker.Infer
   (
   -- * The main type checker
-  typecheck
+    typecheck
   -- * Internal functions used in testing
   , subtype
   , substitute
