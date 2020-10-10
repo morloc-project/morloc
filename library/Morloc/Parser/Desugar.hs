@@ -62,17 +62,20 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
 desugarDag
   :: DAG MVar [(EVar, EVar)] ParserNode
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)
-desugarDag = undefined
--- desugarModule :: Module -> MorlocMonad Module
--- desugarModule m = do
---   checkForSelfRecursion (moduleTypedefs m)
---   expr' <- mapM (desugarExpr (moduleTypedefs m)) (moduleBody m)
---   return $ m { moduleBody = expr' }
+desugarDag m = do
+  mapM_ checkForSelfRecursion (map parserNodeTypedefs (MDD.nodes m))
+  MDD.mapNodeWithKeyM (desugarParserNode m) m
 
 simplify
   :: (DAG MVar [(EVar, EVar)] ParserNode)
   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
-simplify = undefined
+simplify = return . MDD.mapNode prepare where
+  prepare :: ParserNode -> PreparedNode
+  prepare n1 = PreparedNode
+    { preparedNodePath = parserNodePath n1
+    , preparedNodeBody = parserNodeBody n1
+    , preparedNodeSourceMap = parserNodeSourceMap n1
+    }
 
 checkForSelfRecursion :: Map.Map TVar (Type, [TVar]) -> MorlocMonad ()
 checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] where
@@ -90,52 +93,65 @@ checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] 
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) (map snd rs)
 
-desugarExpr :: Map.Map TVar (Type, [TVar]) -> Expr -> MorlocMonad Expr
-desugarExpr _ e@(SrcE _) = return e
-desugarExpr h (Signature v t) = Signature v <$> desugarEType h t
-desugarExpr h (Declaration v e) = Declaration v <$> desugarExpr h e
-desugarExpr _ UniE = return UniE
-desugarExpr _ e@(VarE _) = return e
-desugarExpr h (ListE xs) = ListE <$> mapM (desugarExpr h) xs
-desugarExpr h (TupleE xs) = TupleE <$> mapM (desugarExpr h) xs
-desugarExpr h (LamE v e) = LamE v <$> desugarExpr h e
-desugarExpr h (AppE e1 e2) = AppE <$> desugarExpr h e1 <*> desugarExpr h e2
-desugarExpr h (AnnE e ts) = AnnE <$> desugarExpr h e <*> mapM (desugarType [] h) ts
-desugarExpr _ e@(NumE _) = return e
-desugarExpr _ e@(LogE _) = return e
-desugarExpr _ e@(StrE _) = return e
-desugarExpr h (RecE rs) = do
-  es <- mapM (desugarExpr h) (map snd rs)
+desugarParserNode :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> ParserNode -> MorlocMonad ParserNode
+desugarParserNode d k n = do
+  nodeBody <- mapM (desugarExpr d k) (parserNodeBody n)
+  return $ n { parserNodeBody = nodeBody }  
+
+desugarExpr :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> Expr -> MorlocMonad Expr
+desugarExpr _ _ e@(SrcE _) = return e
+desugarExpr d k (Signature v t) = Signature v <$> desugarEType d k t
+desugarExpr d k (Declaration v e) = Declaration v <$> desugarExpr d k e
+desugarExpr _ _ UniE = return UniE
+desugarExpr _ _ e@(VarE _) = return e
+desugarExpr d k (ListE xs) = ListE <$> mapM (desugarExpr d k) xs
+desugarExpr d k (TupleE xs) = TupleE <$> mapM (desugarExpr d k) xs
+desugarExpr d k (LamE v e) = LamE v <$> desugarExpr d k e
+desugarExpr d k (AppE e1 e2) = AppE <$> desugarExpr d k e1 <*> desugarExpr d k e2
+desugarExpr d k (AnnE e ts) = AnnE <$> desugarExpr d k e <*> mapM (desugarType [] d k) ts
+desugarExpr _ _ e@(NumE _) = return e
+desugarExpr _ _ e@(LogE _) = return e
+desugarExpr _ _ e@(StrE _) = return e
+desugarExpr d k (RecE rs) = do
+  es <- mapM (desugarExpr d k) (map snd rs)
   return (RecE (zip (map fst rs) es))
 
-desugarEType :: Map.Map TVar (Type, [TVar]) -> EType -> MorlocMonad EType
-desugarEType h (EType t ps cs) = EType <$> desugarType [] h t <*> pure ps <*> pure cs
+desugarEType :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> EType -> MorlocMonad EType
+desugarEType d k (EType t ps cs) = EType <$> desugarType [] d k t <*> pure ps <*> pure cs
 
-desugarType :: [TVar] -> Map.Map TVar (Type, [TVar]) -> Type -> MorlocMonad Type
-desugarType s h t0@(VarT v)
+desugarType :: [TVar] -> DAG MVar [(EVar, EVar)] ParserNode -> MVar -> Type -> MorlocMonad Type
+desugarType s d k t0@(VarT v)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
-  | otherwise = case Map.lookup v h of
-      (Just (t, [])) -> desugarType (v:s) h t
-      (Just (t, vs)) -> MM.throwError $ BadTypeAliasParameters v 0 (length vs)
-      Nothing -> return t0
-desugarType s h (ExistT v ts ds) = do
-  ts' <- mapM (desugarType s h) ts
-  ds' <- mapM (desugarType s h) (map unDefaultType ds)
+  | otherwise = case lookupTypedefs v k d of
+    [] -> return t0
+    [(t, [])] -> desugarType (v:s) d k t
+    [(t, vs)] -> MM.throwError $ BadTypeAliasParameters v 0 (length vs)
+    (_:_) -> MM.throwError . CallTheMonkeys $ "Conflicting type aliases"
+desugarType s d k (ExistT v ts ds) = do
+  ts' <- mapM (desugarType s d k) ts
+  ds' <- mapM (desugarType s d k) (map unDefaultType ds)
   return $ ExistT v ts' (map DefaultType ds')
-desugarType s h (Forall v t) = Forall v <$> desugarType s h t
-desugarType s h (FunT t1 t2) = FunT <$> desugarType s h t1 <*> desugarType s h t2
-desugarType s h t0@(ArrT v ts)
+desugarType s d k (Forall v t) = Forall v <$> desugarType s d k t
+desugarType s d k (FunT t1 t2) = FunT <$> desugarType s d k t1 <*> desugarType s d k t2
+desugarType s d k t0@(ArrT v ts)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
-  | otherwise = case Map.lookup v h of
-      (Just (t, vs)) ->
+  | otherwise = case lookupTypedefs v k d of
+      [] -> ArrT v <$> mapM (desugarType s d k) ts
+      [(t, vs)] ->
         if length ts == length vs
-        then desugarType (v:s) h (foldr parsub t (zip vs ts)) -- substitute parameters into alias
+        then desugarType (v:s) d k (foldr parsub t (zip vs ts)) -- substitute parameters into alias
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> ArrT v <$> mapM (desugarType s h) ts
-desugarType s h (NamT v rs) = do
+      (_:_) -> MM.throwError . CallTheMonkeys $ "Conflicting type aliases"
+desugarType s d k (NamT v rs) = do
   let keys = map fst rs
-  vals <- mapM (desugarType s h) (map snd rs)
+  vals <- mapM (desugarType s d k) (map snd rs)
   return (NamT v (zip keys vals))
+
+lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
+lookupTypedefs t@(TV _ v) k h
+  = catMaybes
+  . MDD.nodes
+  $ MDD.lookupAliasedTerm (EVar v) k (\n -> Map.lookup t (parserNodeTypedefs n)) h
 
 parsub :: (TVar, Type) -> Type -> Type
 parsub (v, t2) t1@(VarT v0)

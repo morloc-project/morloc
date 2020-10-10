@@ -20,11 +20,15 @@ module Morloc.Data.DAG
   , leafs
   , findCycle
   , mapNode
+  , mapNodeM
+  , mapNodeWithKey
+  , mapNodeWithKeyM
   , mapEdge
   , mapEdgeWithNode
   , mapNodeWithEdge
   , mapEdgeWithNodeM
   , lookupAliasedTerm
+  , lookupAliasedTermM
   ) where
 
 import Morloc.Namespace
@@ -105,6 +109,21 @@ findCycle d = case mapMaybe (findCycle' []) (roots d) of
 mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNode f d = Map.map (\(n, xs) -> (f n, xs)) d
 
+mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
+mapNodeWithKey f d = Map.mapWithKey (\k (n, xs) -> (f k n, xs)) d
+
+-- Map function over nodes independent of the edge data
+mapNodeM :: Ord k => (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
+mapNodeM f d
+  = mapM (\(k,(n,xs)) -> f n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
+  |>> Map.fromList
+
+-- Map function over nodes independent of the edge data
+mapNodeWithKeyM :: Ord k => (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
+mapNodeWithKeyM f d
+  = mapM (\(k,(n,xs)) -> f k n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
+  |>> Map.fromList
+
 -- Map function over edges independent of the node data
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k,e) <- xs]))
@@ -143,7 +162,7 @@ mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 lookupAliasedTerm
-  :: Ord k
+  :: (Ord k, Eq v)
   => v
   -- ^ look up this term
   -> k
@@ -152,7 +171,41 @@ lookupAliasedTerm
   -- ^ extract the desired data with this function
   -> DAG k [(v,v)] n
   -> DAG k [(v,v)] (Maybe a)
-lookupAliasedTerm = undefined
--- lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' mempty v0 k0 where
---   lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] n -> DAG k [(v,v)] n
---   lookupAliasedTerm' v k d = Map.lookup k
+lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
+  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
+  lookupAliasedTerm' v k d
+    | Map.member k d = d
+    | otherwise = case Map.lookup k d0 of
+        Nothing -> error "Could not find module"
+        (Just (n, xs)) ->
+          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
+                    | (k, vs) <- xs
+                    , elem v (map fst vs)]
+          in foldl (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
+                   (Map.insert k ((f n), xs') d)
+                   (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
+
+lookupAliasedTermM
+  :: (Monad m, Ord k, Eq v)
+  => v
+  -- ^ look up this term
+  -> k
+  -- ^ starting from this node
+  -> (n -> m (Maybe a))
+  -- ^ extract the desired data with this function
+  -> DAG k [(v,v)] n
+  -> m (DAG k [(v,v)] (Maybe a))
+lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
+  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
+  lookupAliasedTerm' v k d
+    | Map.member k d = return d
+    | otherwise = case Map.lookup k d0 of
+        Nothing -> error "Could not find module"
+        (Just (n, xs)) -> do
+          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
+                    | (k, vs) <- xs
+                    , elem v (map fst vs)]
+          n' <- f n
+          foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
+                (Map.insert k (n', xs') d)
+                (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
