@@ -71,7 +71,7 @@ module Morloc.Namespace
   , One(..)
   , Many(..)
   -- ** DAG and associated types
-  , DAG(..)
+  , DAG
   , ParserNode(..)
   , ParserDag
   , PreparedNode(..)
@@ -398,14 +398,7 @@ data GMeta = GMeta {
 
 
 -- | A general purpose Directed Acyclic Graph (DAG)
-data DAG key edge node = DAG {
-    dagGraph :: Map key [(key, edge)]
-  , dagData :: Map key node
-} deriving (Show, Ord, Eq)
-
-instance Ord k => Monoid (DAG k e n) where
-  mappend (DAG g1 d1) (DAG g2 d2) = DAG (M.union g1 g2) (M.union d1 d2) 
-  mempty = DAG (M.empty) (M.empty)
+type DAG key edge node = Map key (node, [(key, edge)])
 
 -- | The type returned from the Parser. It contains all the information in a
 -- single module but knows NOTHING about other modules.

@@ -24,8 +24,6 @@ desugar s
   -- DAG MVar Import ParserNode
   = resolveImports s
   -- DAG MVar (Map EVar EVar) ParserNode
-  |>> propagateTypedefs
-  -- DAG MVar (Map EVar EVar) ParserNode
   >>= desugarDag
   -- DAG MVar (Map EVar EVar) PreparedNode
   >>= simplify
@@ -60,13 +58,6 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
     where
       missing = [n | (n, _) <- inc, not $ Set.member n (parserNodeExports n2)]
       contradict = [n | (n, _) <- inc, elem n exc]
-
-propagateTypedefs
-  :: DAG MVar [(EVar, EVar)] ParserNode
-  -> (DAG MVar [(EVar, EVar)] ParserNode)
-propagateTypedefs = MDD.depthFirstTransform f where
-  f :: ParserNode -> [(MVar, [(EVar, EVar)], ParserNode)] -> ParserNode
-  f n1 es = undefined
 
 desugarDag
   :: DAG MVar [(EVar, EVar)] ParserNode

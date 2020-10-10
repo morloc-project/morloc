@@ -25,16 +25,18 @@ parse f (Code code) = parseImports (Parser.readProgram f code mempty)
     parseImports
       :: DAG MVar Import ParserNode
       -> MorlocMonad (DAG MVar Import ParserNode)
-    parseImports dag@(DAG g d)
-      | length unimported == 0 = return dag
+    parseImports d
+      | length unimported == 0 = return d
       | otherwise = do
-          importPath <- Mod.findModule (head imports)
+          importPath <- Mod.findModule (head unimported)
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
-          parseImports (Parser.readProgram path' code' dag)
+          parseImports (Parser.readProgram path' code' d)
       where
-        unimported = Set.difference (MDD.keysSet dag) (Map.keysSet d)
-        imports = [k | (k, _) <- concat (Map.elems g), Set.member k unimported]
+        g = MDD.edgelist d
+        parents = Set.fromList (map fst g)
+        children = Set.fromList (map snd g)
+        unimported = Set.toList $ Set.difference children parents
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)

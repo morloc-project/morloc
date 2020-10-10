@@ -25,7 +25,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.System as MS
 import qualified Text.Megaparsec.Char.Lexer as L
-import qualified Morloc.Data.DAG as MDD
 
 type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 
@@ -81,24 +80,9 @@ readProgram f sourceCode p =
          (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
     Left err -> error (show err)
-    Right (es, _) -> addin p es
+    Right (es, _) -> foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
   where
     pstate = emptyState { stateModulePath = f }
-
-    addin
-      :: DAG MVar Import ParserNode
-      -> [(MVar, [(MVar, Import)], ParserNode)]
-      -> DAG MVar Import ParserNode
-    addin d [] = d
-    addin d ((m, xs, n):rs) = addEdges m xs (MDD.insertNode m n d)
-
-    addEdges
-      :: MVar
-      -> [(MVar, Import)]
-      -> DAG MVar Import ParserNode
-      -> DAG MVar Import ParserNode 
-    addEdges _ [] d = d
-    addEdges m1 ((m2, e):xs) d = addEdges m1 xs (MDD.insertEdge m1 m2 e d)
 
 readType :: MT.Text -> Type
 readType typeStr =

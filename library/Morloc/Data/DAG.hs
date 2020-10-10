@@ -8,151 +8,151 @@ Stability   : experimental
 -}
 
 module Morloc.Data.DAG
-  ( insertNode
-  , insertNodeMaybe
+  ( edgelist
   , insertEdge
-  , member
-  , keysSet
-  , keys
   , edges
   , nodes
+  , lookupNode
+  , lookupEdge
+  , lookupEdgeTriple
+  , local
   , roots
   , leafs
   , findCycle
   , mapNode
   , mapEdge
   , mapEdgeWithNode
-  , mapEdgeWithNodeM
   , mapNodeWithEdge
-  , depthFirstTransform
+  , mapEdgeWithNodeM
+  , lookupAliasedTerm
   ) where
 
 import Morloc.Namespace
-import Morloc.Monad as MM
+import qualified Morloc.Monad as MM
 import qualified Data.Map as Map 
 import qualified Data.Set as Set 
 
--- | Determine if a key is in the DAG. The key needn't be in the graph, it may be
--- only in the data map (i.e., it is a singleton).
-member :: Ord k => k -> DAG k e n -> Bool
-member k (DAG _ d) = Map.member k d 
-
-insertNode :: Ord k => k -> n -> DAG k e n -> DAG k e n
-insertNode k n (DAG g d) = DAG g (Map.insert k n d)
-
-insertNodeMaybe :: Ord k => k -> n -> DAG k e n -> Maybe (DAG k e n)
-insertNodeMaybe k n (DAG g d)
-  | Map.member k d = Nothing
-  | otherwise = Just $ DAG g (Map.insert k n d)
+edgelist :: DAG k e n -> [(k,k)]
+edgelist d = concat [[(k,j) | (j,_) <- xs] | (k, (_, xs)) <- Map.toList d ]
 
 insertEdge :: Ord k => k -> k -> e -> DAG k e n -> DAG k e n
-insertEdge k1 k2 e (DAG g d) = DAG (Map.alter f k1 g) d
+insertEdge k1 k2 e d = Map.alter f k1 d
   where  
     -- f :: Maybe [(k, e)] -> Maybe [(k, e)]
-    f Nothing = Just [(k2, e)]
-    f (Just xs) = Just $ (k2,e):xs
-
--- | Get set of all keys
-keysSet :: Ord k => DAG k e n -> Set.Set k
-keysSet (DAG g d) = Set.union (Map.keysSet g) (Map.keysSet d)
-
--- | Get list of all keys
-keys :: Ord k => DAG k e n -> [k]
-keys = Set.toList . keysSet
+    f Nothing = error "Cannot add edge to non-existant node"
+    f (Just (n,xs)) = Just $ (n,(k2,e):xs)
 
 -- | Get all edges
 edges :: DAG k e n -> [e]
-edges (DAG g _) = map snd (concat $ Map.elems g)
+edges = map snd . concat . map snd . Map.elems
 
 -- | Get all nodes
 nodes :: DAG k e n -> [n]
-nodes (DAG _ d) = Map.elems d
+nodes = map fst . Map.elems
+
+lookupNode :: Ord k => k -> DAG k e n -> Maybe n
+lookupNode k d = case Map.lookup k d of
+  (Just (n,_)) -> Just n
+  Nothing -> Nothing
+
+lookupEdge :: (Ord k, Eq k) => k -> k -> DAG k e n -> Maybe e
+lookupEdge k1 k2 d = case Map.lookup k1 d of
+  (Just (_,xs)) -> lookup k2 xs
+  Nothing -> Nothing
+
+lookupEdgeTriple :: (Ord k, Eq k) => k -> k -> DAG k e n -> Maybe (n, e, n)
+lookupEdgeTriple k1 k2 d = do
+  (n1, xs) <- Map.lookup k1 d
+  e <- lookup k2 xs
+  (n2, _) <- Map.lookup k2 d
+  return (n1, e, n2)
+
+local :: Ord k => k -> DAG k e n -> Maybe (n, [(k, e, n)])
+local k d = do
+  (n1, xs) <- Map.lookup k d
+  ns <- mapM (flip lookupNode $ d) (map fst xs)
+  return $ (n1, [(k,e,n2) | (n2, (k, e)) <- zip ns xs])
 
 -- | Get all roots
 roots :: Ord k => DAG k e n -> [k]
-roots (DAG d _) = Set.toList $ Set.difference parents children
+roots d = Set.toList $ Set.difference parents children
   where
-    children = Set.fromList . map fst . concat . Map.elems $ d
-    parents = Map.keysSet d
+    g = edgelist d
+    parents = Set.fromList (map fst g)
+    children = Set.fromList (map snd g)
 
 -- | Get all leaves that have no children
 leafs :: Ord k => DAG k e n -> [k]
-leafs (DAG d _) = Set.toList $ Set.difference children parents
-  where
-    children = Set.fromList . map fst . concat . Map.elems $ d
-    parents = Map.keysSet d
-
+leafs d = [k | (k, (_, [])) <- Map.toList d]
 
 -- | Searches a DAG for a cycle, stops on the first observed cycle and returns
 -- the path.
 findCycle :: Ord k => DAG k e n -> Maybe [k]
-findCycle d@(DAG g _) = case mapMaybe (findCycle' []) (roots d) of 
+findCycle d = case mapMaybe (findCycle' []) (roots d) of 
   [] -> Nothing
   (x:_) -> Just x
   where
     -- findCycle' :: [k] -> k -> Maybe [k]
     findCycle' seen k
       | elem k seen = Just seen
-      | otherwise = case Map.lookup k g of
+      | otherwise = case Map.lookup k d of
           Nothing -> Nothing -- we have reached a leaf
-          (Just xs) -> case mapMaybe (findCycle' (k:seen)) (map fst xs) of
+          (Just (_,xs)) -> case mapMaybe (findCycle' (k:seen)) (map fst xs) of
             [] -> Nothing
             (x:_) -> Just x
 
 -- Map function over nodes independent of the edge data
 mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
-mapNode f (DAG g d) = DAG g (Map.map f d)
+mapNode f d = Map.map (\(n, xs) -> (f n, xs)) d
 
 -- Map function over edges independent of the node data
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
-mapEdge f (DAG g d) = DAG (Map.map (map (\(x,y) -> (x, f y))) g) d
+mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k,e) <- xs]))
 
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNode
   :: Ord k
   => (n -> e1 -> n -> e2)
   -> DAG k e1 n -> DAG k e2 n
-mapEdgeWithNode f (DAG g d) = DAG (Map.mapWithKey runit g) d where
-  -- runit :: Ord k => k -> [(k, a)] -> [(k, b)]
-  runit k1 xs = case Map.lookup k1 d of 
-    (Just n1) -> map (\(k2,e) -> (k2, f n1 e (fromJust (Map.lookup k2 d)))) xs
-    Nothing -> error "Incomplete DAG"
+mapEdgeWithNode f d = Map.mapWithKey runit d where
+  runit k _ = case local k d of
+    (Just (n1, xs)) -> (n1, [(k2, f n1 e n2) | (k2, e, n2) <- xs])
+    Nothing -> error "Bad DAG"
 
 -- | Map node data given edges and child data
 mapNodeWithEdge
   :: Ord k
   => (n1 -> [(k, e, n1)] -> n2)
   -> DAG k e n1 -> DAG k e n2
-mapNodeWithEdge f (DAG g d) = DAG g (Map.mapWithKey fkey d) where
-  -- fkey :: k -> n1 -> n2
-  fkey k1 n1 = case Map.lookup k1 g of
-    Nothing -> f n1 []
-    (Just xs) -> f n1 [(k2, e, fromJust (Map.lookup k2 d)) | (k2, e) <- xs]
+mapNodeWithEdge f d = Map.mapWithKey fkey d where
+  fkey k1 (_, xs0) = case local k1 d of
+    (Just (n1, xs1)) -> (f n1 xs1, xs0)
+    Nothing -> error "Bad DAG"
 
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNodeM
   :: Ord k
   => (n -> e1 -> n -> MorlocMonad e2)
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
-mapEdgeWithNodeM f (DAG g d) = do
-  g' <- mapM runit (Map.toList g) |>> Map.fromList
-  return $ DAG g' d
+mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
-    runit (k1, xs) = case Map.lookup k1 d of 
-      (Just n1) -> do
-        n2s <- mapM (lookupM d) (map fst xs)
-        es <- mapM (\(n2,(k2,e)) -> (,) <$> pure k2 <*> f n1 e n2) (zip n2s xs)
-        return (k1, es)
-      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, edge is missing subject"
+    runit (k1, _) = case local k1 d of 
+      (Just (n1, xs)) -> do
+        e2s <- mapM (\(k2, e, n2) -> f n1 e n2) xs
+        return (k1, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
-    lookupM :: Ord key => Map.Map key val -> key -> MorlocMonad val
-    lookupM m k = case Map.lookup k m of
-      (Just v) -> return v
-      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, edge is missing object"
-
-depthFirstTransform
+lookupAliasedTerm
   :: Ord k
-  => (n1 -> [(k, e, n2)] -> n2)
-  -> DAG k e n1
-  -> DAG k e n2
-depthFirstTransform = undefined
+  => v
+  -- ^ look up this term
+  -> k
+  -- ^ starting from this node
+  -> (n -> Maybe a)
+  -- ^ extract the desired data with this function
+  -> DAG k [(v,v)] n
+  -> DAG k [(v,v)] (Maybe a)
+lookupAliasedTerm = undefined
+-- lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' mempty v0 k0 where
+--   lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] n -> DAG k [(v,v)] n
+--   lookupAliasedTerm' v k d = Map.lookup k
