@@ -29,9 +29,7 @@ cuteImport m xs
   <+> tupled (map (\(v1,v2) -> pretty v1 <+> "as" <+> pretty v2) xs)
 
 cuteTypedNode :: TypedNode -> Doc AnsiStyle
-cuteTypedNode t = vsep (map prettyDecl (Map.toList (typedNodeBody t))) where
-  prettyDecl :: (EVar, Expr) -> Doc AnsiStyle
-  prettyDecl (k,e) = pretty k <+> "=" <+> prettyExpr e
+cuteTypedNode t = vsep (map prettyExpr (typedNodeBody t))
 
 -- FIXME: why exactly do I even have this ugly function???
 ugly :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()

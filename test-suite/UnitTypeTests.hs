@@ -11,11 +11,12 @@ import Morloc.Namespace
 import Morloc.Parser.Parser
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
-import Morloc.Data.Doc as Doc
+import qualified Morloc.Data.Doc as Doc
+import qualified Morloc.Data.DAG as MDD
 import Morloc.TypeChecker.Infer hiding(typecheck)
 import Morloc.Parser.Desugar (desugar)
 import Morloc (typecheck)
-import Morloc.Monad as MM
+import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.API as API
 import qualified Morloc.TypeChecker.PartialOrder as MP
 
@@ -25,19 +26,15 @@ import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
-main :: [Module] -> [Expr]
-main [] = error "Missing main"
-main [m] = moduleBody m
-main (m:ms)
-  | moduleName m == (MVar "Main") = moduleBody m
-  | otherwise = main ms
+main :: Ord k => (n -> a) -> DAG k e n -> a
+main f d = case MDD.roots d of
+  [] -> error "Missing or circular module"
+  [k] -> case Map.lookup k d of
+    (Just (m,_)) -> f m
+  _ -> error "Cannot handle multiple roots"
 
-mainDecMap :: [Module] -> [(EVar, Expr)]
-mainDecMap [] = error "Missing main"
-mainDecMap [m] = [(v, e) | (Declaration v e) <- moduleBody m]
-mainDecMap (m:ms)
-  | moduleName m == (MVar "Main") = [(v, e) | (Declaration v e) <- moduleBody m]
-  | otherwise = mainDecMap ms
+mainDecMap :: TypedDag -> [(EVar, Expr)]
+mainDecMap d = [(v, e) | (Declaration v e) <- main typedNodeBody d]
 
 -- get the toplevel type of a fully annotated expression
 typeof :: [Expr] -> [Type]
@@ -47,7 +44,7 @@ typeof es = f' . head . reverse $ es
     f' e@(AnnE _ ts) = ts
     f' t = error ("No annotation found for: " <> show t)
 
-run :: T.Text -> IO (Either MorlocError [Module])
+run :: T.Text -> IO (Either MorlocError TypedDag)
 run code = do
   ((x, _), _) <- MM.runMorlocMonad 0 emptyConfig (typecheck Nothing (Code code))
   return x
@@ -66,7 +63,7 @@ assertTerminalType msg code t = testCase msg $ do
   result <- run code
   case result of
     -- the order of the list is not important, so sort before comparing
-    (Right es') -> assertEqual "" (sort t) (sort (typeof (main es')))
+    (Right es') -> assertEqual "" (sort t) (sort (typeof (main typedNodeBody es')))
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 
@@ -97,7 +94,8 @@ assertTerminalExpr' f msg code expr = testCase msg $ do
   result <- run code
   case result of
     -- the order of the list is not important, so sort before comparing
-    (Right es') -> assertEqual "" expr (head . reverse . sort . f . main $ es')
+    (Right es') ->
+      assertEqual "" expr (head . reverse . sort . f . main typedNodeBody $ es')
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 
@@ -115,7 +113,10 @@ exprTestFull msg code expCode =
   testCase msg $ do
   result <- run code
   case result of
-    (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
+    (Right e)
+      -> assertEqual ""
+            (main typedNodeBody e)
+            (main parserNodeBody $ readProgram Nothing expCode Map.empty)
     (Left err) -> error (show err)
 
 -- assert the exact expressions

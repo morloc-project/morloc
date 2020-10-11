@@ -52,8 +52,7 @@ typecheck = MDD.synthesizeDAG typecheck'
       leave $ "module"
       return $ TypedNode
         { typedNodePath = preparedNodePath n
-          -- we can now throw out all expressions except Declarations
-        , typedNodeBody = Map.fromList [(v, e) | (Declaration v e) <- es]
+        , typedNodeBody = es
           -- the typemap is really only used when typchecking modules that
           -- import this module, so it technically could be removed deleted for
           -- being passed to the downstream generators.

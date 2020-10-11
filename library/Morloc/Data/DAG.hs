@@ -83,7 +83,7 @@ roots :: Ord k => DAG k e n -> [k]
 roots d = Set.toList $ Set.difference parents children
   where
     g = edgelist d
-    parents = Set.fromList (map fst g)
+    parents = Map.keysSet d
     children = Set.fromList (map snd g)
 
 -- | Get all leaves that have no children
