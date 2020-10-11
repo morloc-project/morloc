@@ -427,7 +427,6 @@ data TypedNode = TypedNode {
   , typedNodeBody :: Map EVar Expr
   , typedNodeTypeMap :: Map EVar TypeSet
   , typedNodeSourceMap :: Map (EVar, Lang) Source
-  , typedNodeExport :: Set EVar
 } deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
 

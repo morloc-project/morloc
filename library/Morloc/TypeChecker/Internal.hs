@@ -185,24 +185,6 @@ decDepth = do
 getDepth :: Stack Int
 getDepth = CMS.gets stateDepth
 
--- -- | Update a ModularGamma object with all exported terms from a module. Return
--- -- the resulting map was well as a private map containing all terms (whether
--- -- exported or not) in the module.
--- extendModularGamma ::
---      Gamma -- ^ context generated from typechecking this module
---   -> Module -- ^ the module that is being loaded into the modular context
---   -> ModularGamma -- ^ the previous object
---   -> Stack (Map.Map EVar TypeSet, ModularGamma)
--- extendModularGamma g m mg
---   | Map.member v mg = throwError $ MultipleModuleDeclarations [v]
---   | otherwise = return $ (Map.fromList privateMap, Map.insert v publicMap mg)
---   where
---     v = moduleName m
---     es = moduleExports m
---     privateMap = [(e,t) | AnnG (VarE e) t <- g]
---                ++ [(v,t) | AnnG (Declaration v _) t <- g]
---     publicMap = Map.fromList [(e,t) | (e,t) <- privateMap, Set.member e es]
-
 mapT :: (Type -> Type) -> Expr -> Expr
 mapT f (LamE v e) = LamE v (mapT f e)
 mapT f (ListE es) = ListE (map (mapT f) es)

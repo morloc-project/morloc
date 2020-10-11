@@ -29,6 +29,7 @@ module Morloc.Data.DAG
   , mapEdgeWithNodeM
   , lookupAliasedTerm
   , lookupAliasedTermM
+  , synthesizeDAG
   ) where
 
 import Morloc.Namespace
@@ -209,3 +210,11 @@ lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
           foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
                 (Map.insert k (n', xs') d)
                 (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
+
+synthesizeDAG
+  :: (Ord k, Monad m)
+  => (k -> n1 -> [(k, e, n2)] -> m n2)
+  -> DAG k e n1
+  -> m (DAG k e n2)
+synthesizeDAG f d0 = undefined
+-- type DAG key edge node = Map key (node, [(key, edge)])
