@@ -76,7 +76,6 @@ errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.un
 errmsg (BadImport mv ev) = "BadImport: " <> unMVar mv <> "::" <> unEVar ev
 errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
-errmsg CannotImportMain = "CannotImportMain"
 errmsg (SelfImport mv) = "SelfImport"
 errmsg BadRealization = "BadRealization"
 errmsg MissingSource = "MissingSource"

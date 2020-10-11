@@ -205,7 +205,6 @@ data MorlocError
   | BadImport MVar EVar
   | CannotFindModule MVar
   | CyclicDependency
-  | CannotImportMain
   | SelfImport MVar
   | BadRealization
   | TooManyRealizations

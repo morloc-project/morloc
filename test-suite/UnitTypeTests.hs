@@ -843,11 +843,6 @@ unitTypeTests =
         ";;;;;module foo{;42;  ;};"
         [num]
     , expectError
-        "fail on import of Main"
-        CannotImportMain $
-        T.unlines
-          ["module Main {export x; x = 42};", "module Foo {import Main (x)}"]
-    , expectError
         "fail on import of non-existing variable"
         (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines
