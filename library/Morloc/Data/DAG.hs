@@ -216,5 +216,32 @@ synthesizeDAG
   => (k -> n1 -> [(k, e, n2)] -> m n2)
   -> DAG k e n1
   -> m (DAG k e n2)
-synthesizeDAG f d0 = undefined
--- type DAG key edge node = Map key (node, [(key, edge)])
+synthesizeDAG f d0 = synthesizeDAG' Map.empty where
+  -- iteratively synthesize all nodes that have met dependencies
+  synthesizeDAG' dn
+    -- stop, we have completed the mapping. Jubilation.
+    | Map.size d0 == Map.size dn = return dn 
+    | otherwise = do
+        -- traverse the original making any nodes that now have met dependencies
+        dn' <- foldlM addIfPossible dn (Map.toList d0)
+        if Map.size dn' == Map.size dn
+          -- if map size hasn't changed, then nothing was added and we are stuck
+          then error "Could not reduce DAG"
+          -- otherwise move on to the next iteration
+          else synthesizeDAG' dn'
+
+  -- add leaves
+  addIfPossible dn (k1, (n1, []))
+    | Map.member k1 dn = return dn
+    | otherwise = do
+        n2 <- f k1 n1 []
+        return $ Map.insert k1 (n2, []) dn
+  -- add nodes where all children have been processed
+  addIfPossible dn (k1, (n1, xs))
+    | Map.member k1 dn = return dn
+    | otherwise = case mapM (\k -> Map.lookup k dn) (map fst xs) of
+        Nothing -> return dn
+        (Just children) -> do
+          let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs children]
+          n2 <- f k1 n1 augmented
+          return $ Map.insert k1 (n2, xs) dn
