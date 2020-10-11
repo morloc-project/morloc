@@ -34,7 +34,7 @@ parse f (Code code) = parseImports (Parser.readProgram f code mempty)
           parseImports (Parser.readProgram path' code' d)
       where
         g = MDD.edgelist d
-        parents = Set.fromList (map fst g)
+        parents = Map.keysSet d
         children = Set.fromList (map snd g)
         unimported = Set.toList $ Set.difference children parents
 
