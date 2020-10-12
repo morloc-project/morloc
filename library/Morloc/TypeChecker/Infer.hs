@@ -62,6 +62,7 @@ typecheck d = do
           -- being passed to the downstream generators.
         , typedNodeTypeMap = nodeTypeMapFromGamma g1
         , typedNodeSourceMap = preparedNodeSourceMap n
+        , typedNodeExports = preparedNodeExports n
         }
 
     nodeTypeMapFromGamma :: Gamma -> Map.Map EVar TypeSet

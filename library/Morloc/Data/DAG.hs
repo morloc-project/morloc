@@ -162,55 +162,6 @@ mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
         return (k1, (n1, zip (map (\(x,_,_)->x) xs) e2s))
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
-lookupAliasedTerm
-  :: (Ord k, Eq v)
-  => v
-  -- ^ look up this term
-  -> k
-  -- ^ starting from this node
-  -> (n -> Maybe a)
-  -- ^ extract the desired data with this function
-  -> DAG k [(v,v)] n
-  -> DAG k [(v,v)] (Maybe a)
-lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
-  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
-  lookupAliasedTerm' v k d
-    | Map.member k d = d
-    | otherwise = case Map.lookup k d0 of
-        Nothing -> error "Could not find module"
-        (Just (n, xs)) ->
-          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
-                    | (k, vs) <- xs
-                    , elem v (map fst vs)]
-          in foldl (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
-                   (Map.insert k ((f n), xs') d)
-                   (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
-
-lookupAliasedTermM
-  :: (Monad m, Ord k, Eq v)
-  => v
-  -- ^ look up this term
-  -> k
-  -- ^ starting from this node
-  -> (n -> m (Maybe a))
-  -- ^ extract the desired data with this function
-  -> DAG k [(v,v)] n
-  -> m (DAG k [(v,v)] (Maybe a))
-lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
-  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
-  lookupAliasedTerm' v k d
-    | Map.member k d = return d
-    | otherwise = case Map.lookup k d0 of
-        Nothing -> error "Could not find module"
-        (Just (n, xs)) -> do
-          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
-                    | (k, vs) <- xs
-                    , elem v (map fst vs)]
-          n' <- f n
-          foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
-                (Map.insert k (n', xs') d)
-                (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
-
 -- | Map a monadic function over a DAG yielding a new DAG with the same
 -- topology but a new node values. If the DAG contains cycles, Nothing is
 -- returned.
@@ -249,3 +200,57 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
           let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs children]
           n2 <- f k1 n1 augmented
           return $ Map.insert k1 (n2, xs) dn
+
+
+lookupAliasedTerm
+  :: (Ord k, Eq v)
+  => v
+  -- ^ look up this term
+  -> k
+  -- ^ starting from this node
+  -> (n -> a)
+  -- ^ extract the desired data with this function
+  -> DAG k [(v,v)] n
+  -- ^ original DAG where edges are "import as" statements
+  -> DAG k None (v,a)
+  -- ^ The final DAG with no edge attribute and the 
+lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
+  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
+  lookupAliasedTerm' v k d
+    | Map.member k d = d
+    | otherwise = case Map.lookup k d0 of
+        Nothing -> error "Could not find module"
+        (Just (n, xs)) ->
+          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
+                    | (k, vs) <- xs
+                    , elem v (map fst vs)]
+              edges = map (\(k, _) -> (k, None)) xs'
+          in foldl (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
+                   (Map.insert k ((v, f n), edges) d)
+                   (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
+
+lookupAliasedTermM
+  :: (Monad m, Ord k, Eq v)
+  => v
+  -- ^ look up this term
+  -> k
+  -- ^ starting from this node
+  -> (n -> m a)
+  -- ^ extract the desired data with this function
+  -> DAG k [(v,v)] n
+  -> m (DAG k None (v,a))
+lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
+  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
+  lookupAliasedTerm' v k d
+    | Map.member k d = return d
+    | otherwise = case Map.lookup k d0 of
+        Nothing -> error "Could not find module"
+        (Just (n, xs)) -> do
+          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
+                    | (k, vs) <- xs
+                    , elem v (map fst vs)]
+              edges = map (\(k, _) -> (k, None)) xs'
+          n' <- f n
+          foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
+                (Map.insert k ((v, n'), edges) d)
+                (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])

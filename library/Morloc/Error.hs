@@ -100,3 +100,4 @@ errmsg CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
 errmsg ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
 errmsg CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
 errmsg IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
+errmsg (DagMissingKey msg) = "DagMissingKey: " <> msg

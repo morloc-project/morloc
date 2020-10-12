@@ -68,6 +68,7 @@ module Morloc.Namespace
   , SAnno(..)
   , SExpr(..)
   , GMeta(..)
+  , None(..)
   , One(..)
   , Many(..)
   -- ** DAG and associated types
@@ -178,6 +179,8 @@ data MorlocError
   | SelfRecursiveTypeAlias TVar
   | MutuallyRecursiveTypeAlias [TVar]
   | BadTypeAliasParameters TVar Int Int 
+  -- | Problems with the directed acyclic graph datastructures
+  | DagMissingKey Text
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
   --------------- T Y P E   E R R O R S --------------------------------------
@@ -354,6 +357,7 @@ data Import =
 -- c: an annotation for the specific child tree
 data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 
+data None = None
 data One a = One a
 data Many a = Many [a]
 
@@ -416,6 +420,7 @@ data PreparedNode = PreparedNode {
     preparedNodePath :: Maybe Path
   , preparedNodeBody :: [Expr]
   , preparedNodeSourceMap :: Map (EVar, Lang) Source
+  , preparedNodeExports :: Set EVar
 } deriving (Show, Ord, Eq)
 type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
 
@@ -426,6 +431,7 @@ data TypedNode = TypedNode {
   , typedNodeBody :: [Expr]
   , typedNodeTypeMap :: Map EVar TypeSet
   , typedNodeSourceMap :: Map (EVar, Lang) Source
+  , typedNodeExports :: Set EVar
 } deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
 

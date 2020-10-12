@@ -75,6 +75,7 @@ simplify = return . MDD.mapNode prepare where
     { preparedNodePath = parserNodePath n1
     , preparedNodeBody = parserNodeBody n1
     , preparedNodeSourceMap = parserNodeSourceMap n1
+    , preparedNodeExports = parserNodeExports n1
     }
 
 checkForSelfRecursion :: Map.Map TVar (Type, [TVar]) -> MorlocMonad ()
@@ -150,6 +151,7 @@ desugarType s d k (NamT v rs) = do
 lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
 lookupTypedefs t@(TV _ v) k h
   = catMaybes
+  . map snd
   . MDD.nodes
   $ MDD.lookupAliasedTerm (EVar v) k (\n -> Map.lookup t (parserNodeTypedefs n)) h
 
