@@ -70,12 +70,11 @@ Minor changes
  - [ ] Add table handling
  - [ ] Add `data` keyword for defining data constructors
 
-0.28.0 [2020.10.xx]
+0.28.0 [2020.10.12]
 -------------------
 
- - [ ] Allow import/export of type aliases
- - [ ] Update `*base` libraries and tests with type imports/exports 
- - [ ] Fix the leaky existential crisis
+ * Allow import/export of type aliases
+ * Refactor with DAGs all through the parser and typechecker
 
 0.27.0 [2020.10.04]
 -------------------
