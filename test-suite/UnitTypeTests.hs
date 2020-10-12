@@ -402,6 +402,16 @@ typeAliasTests =
         )
         [fun [var "A", var "B"]]
     , assertTerminalType
+        "non-parametric, concrete type alias, reimported aliased"
+        (T.unlines
+          [ "module M3 { type Cpp Foo1 = \"int\"; type R Foo1 = \"integer\"; export Foo1;}"
+          , "module M2 { import M3 (Foo1 as Foo2); export Foo2;}"
+          , "module M1 { import M2 (Foo2 as Foo3); export Foo3;}"
+          , "module Main { import M1 (Foo3 as Foo4); f Cpp :: Foo4 -> \"double\";  f;}"
+          ]
+        )
+        [ fun [varc CppLang "int", varc CppLang "double"] ]
+    , assertTerminalType
         "non-parametric, general type alias, duplicate import"
         (T.unlines
           [ "module M2 { type Foo = A; export Foo;}"
