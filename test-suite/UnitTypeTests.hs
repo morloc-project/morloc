@@ -401,6 +401,24 @@ typeAliasTests =
           ]
         )
         [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, duplicate import"
+        (T.unlines
+          [ "module M2 { type Foo = A; export Foo;}"
+          , "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo); import M2 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "parametric alias, general type alias, duplicate import"
+        (T.unlines
+          [ "module M2 { type (Foo a b) = (a,b); export Foo; }"
+          , "module M1 { type (Foo c d) = (c,d); export Foo; }"
+          , "module Main { import M1 (Foo); import M2 (Foo); f :: Foo X Y -> Z; f; }"
+          ]
+        )
+        [fun [tuple [var "X", var "Y"], var "Z"]]
     ]
 
 typeOrderTests =

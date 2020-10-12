@@ -16,6 +16,7 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Morloc.TypeChecker.PartialOrder as MTP
 
 desugar
   :: DAG MVar Import ParserNode
@@ -120,14 +121,19 @@ desugarExpr d k (RecE rs) = do
 desugarEType :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> EType -> MorlocMonad EType
 desugarEType d k (EType t ps cs) = EType <$> desugarType [] d k t <*> pure ps <*> pure cs
 
-desugarType :: [TVar] -> DAG MVar [(EVar, EVar)] ParserNode -> MVar -> Type -> MorlocMonad Type
+desugarType
+  :: [TVar]
+  -> DAG MVar [(EVar, EVar)] ParserNode
+  -> MVar
+  -> Type
+  -> MorlocMonad Type
 desugarType s d k t0@(VarT v)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case lookupTypedefs v k d of
     [] -> return t0
-    [(t, [])] -> desugarType (v:s) d k t
-    [(t, vs)] -> MM.throwError $ BadTypeAliasParameters v 0 (length vs)
-    (_:_) -> MM.throwError . CallTheMonkeys $ "Conflicting type aliases"
+    ts'@(t':_) -> do
+      (t, _) <- foldlM (mergeAliases v 0) t' ts'
+      desugarType (v:s) d k t
 desugarType s d k (ExistT v ts ds) = do
   ts' <- mapM (desugarType s d k) ts
   ds' <- mapM (desugarType s d k) (map unDefaultType ds)
@@ -138,15 +144,34 @@ desugarType s d k t0@(ArrT v ts)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case lookupTypedefs v k d of
       [] -> ArrT v <$> mapM (desugarType s d k) ts
-      [(t, vs)] ->
+      (t':ts') -> do
+        (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
-        then desugarType (v:s) d k (foldr parsub t (zip vs ts)) -- substitute parameters into alias
-        else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      (_:_) -> MM.throwError . CallTheMonkeys $ "Conflicting type aliases"
+          -- substitute parameters into alias
+          then desugarType (v:s) d k (foldr parsub t (zip vs ts))
+          else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
 desugarType s d k (NamT v rs) = do
   let keys = map fst rs
   vals <- mapM (desugarType s d k) (map snd rs)
   return (NamT v (zip keys vals))
+
+-- When a type alias is imported from two places, this function reconciles them, if possible
+mergeAliases
+  :: TVar
+  -> Int
+  -> (Type, [TVar])
+  -> (Type, [TVar])
+  -> MorlocMonad (Type, [TVar])
+mergeAliases v i t@(t1, ts1) (t2, ts2)
+  | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
+  |    MTP.isSubtypeOf t1' t2'
+    && MTP.isSubtypeOf t2' t1'
+    && length ts1 == length ts2 = return t
+  | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
+  where
+    t1' = foldl (\t v -> Forall v t) t1 ts1 
+    t2' = foldl (\t v -> Forall v t) t2 ts2 
+
 
 lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
 lookupTypedefs t@(TV _ v) k h

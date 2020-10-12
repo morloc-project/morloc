@@ -179,6 +179,7 @@ data MorlocError
   | SelfRecursiveTypeAlias TVar
   | MutuallyRecursiveTypeAlias [TVar]
   | BadTypeAliasParameters TVar Int Int 
+  | ConflictingTypeAliases Type Type
   -- | Problems with the directed acyclic graph datastructures
   | DagMissingKey Text
   -- | Raised when a branch is reached that should not be possible
