@@ -74,19 +74,19 @@ typecheck d = do
     importTypes :: [(MVar, [(EVar, EVar)], TypedNode)] -> Stack Gamma
     importTypes xs
       -- [(EVar, [TypeSet])]
-      = mapM importTypes' xs |>> (groupSort . concat)
+      = (return . groupSort . concat . map importTypes') xs
       -- [(EVar, TypeSet)]
       >>= mapM mergeManyTypeSets
       -- [GammaIndex]
       |>> map (\(v, t) -> AnnG (VarE v) t)
 
-    importTypes' :: (MVar, [(EVar, EVar)], TypedNode) -> Stack [(EVar, TypeSet)]
-    importTypes' (_, xs, n) = mapM (lookupOne (typedNodeTypeMap n)) xs
+    importTypes' :: (MVar, [(EVar, EVar)], TypedNode) -> [(EVar, TypeSet)]
+    importTypes' (_, xs, n) = mapMaybe (lookupOne (typedNodeTypeMap n)) xs
 
-    lookupOne :: Map.Map EVar TypeSet -> (EVar, EVar) -> Stack (EVar, TypeSet)
+    lookupOne :: Map.Map EVar TypeSet -> (EVar, EVar) -> Maybe (EVar, TypeSet)
     lookupOne m (name, alias) = case Map.lookup name m of
       (Just t) -> return (name, t)
-      Nothing -> throwError . CallTheMonkeys $ "Malformed DAG"
+      Nothing -> Nothing
 
     -- Typecheck a set of expressions within a given context (i.e., one module).
     -- Return the modified context and a list of annotated expressions.

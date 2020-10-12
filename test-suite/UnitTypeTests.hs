@@ -364,6 +364,43 @@ typeAliasTests =
           , "foo"
           ]
         )
+    -- import tests ---------------------------------------
+    , assertTerminalType
+        "non-parametric, general type alias, imported"
+        (T.unlines
+          [ "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, reimported"
+        (T.unlines
+          [ "module M3 { type Foo = A; export Foo;}"
+          , "module M2 { import M3 (Foo); export Foo;}"
+          , "module M1 { import M2 (Foo); export Foo;}"
+          , "module Main { import M1 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, imported aliased"
+        (T.unlines
+          [ "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo as Bar); f :: Bar -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, reimported aliased"
+        (T.unlines
+          [ "module M3 { type Foo1 = A; export Foo1;}"
+          , "module M2 { import M3 (Foo1 as Foo2); export Foo2;}"
+          , "module M1 { import M2 (Foo2 as Foo3); export Foo3;}"
+          , "module Main { import M1 (Foo3 as Foo4); f :: Foo4 -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
     ]
 
 typeOrderTests =
