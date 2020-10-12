@@ -42,10 +42,12 @@ errmsg (SystemCallError cmd loc msg) =
 errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
 errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
 errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
-errmsg (BadTypeAliasParameters v exp obs)
-  =  "BadTypeAliasParameters: for type alias '" <> MT.show' v
-  <> "' expected " <> MT.show' exp
+errmsg (BadTypeAliasParameters (TV _ v) exp obs)
+  =  "BadTypeAliasParameters: for type alias " <> MT.show' v
+  <> " expected " <> MT.show' exp
   <> " parameters but found " <> MT.show' obs
+errmsg (ConflictingTypeAliases t1 t2)
+  = "ConflictingTypeAliases: (" <> MT.show' t1 <> ", " <> MT.show' t2 <> ")" 
 errmsg NoBenefits =
   "Manifolds in this context need to be fully resolved. " <>
   "This is probably due to a bug in the code."
@@ -76,7 +78,6 @@ errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.un
 errmsg (BadImport mv ev) = "BadImport: " <> unMVar mv <> "::" <> unEVar ev
 errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
-errmsg CannotImportMain = "CannotImportMain"
 errmsg (SelfImport mv) = "SelfImport"
 errmsg BadRealization = "BadRealization"
 errmsg MissingSource = "MissingSource"
@@ -101,3 +102,4 @@ errmsg CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
 errmsg ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
 errmsg CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
 errmsg IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
+errmsg (DagMissingKey msg) = "DagMissingKey: " <> msg

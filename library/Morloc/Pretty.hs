@@ -8,7 +8,6 @@ Stability   : experimental
 -}
 module Morloc.Pretty
   ( prettyExpr
-  , prettyModule
   , prettyType
   , prettyGreenType
   , prettyGammaIndex
@@ -60,18 +59,6 @@ screamStyle =
     , Style.ansiItalics = Nothing
     , Style.ansiUnderlining = Just Underlined
     }
-
-prettyModule :: Module -> Doc AnsiStyle
-prettyModule m = block 2 (pretty (moduleName m)) (prettyBlock m)
-
-prettyBlock :: Module -> Doc AnsiStyle
-prettyBlock m = vsep
-  [ vsep $ map prettyImport (moduleImports m)
-  , vsep $ map (\v -> "export" <+> pretty v) (Set.toList (moduleExports m))
-  , vsep $ map (\(v, (t, vs)) -> "type" <+> "(" <> hsep (map pretty (v:vs)) <> ") = " <> prettyType t)
-               (Map.toList (moduleTypedefs m))
-  , vsep $ map prettyExpr (moduleBody m)
-  ]
 
 prettyImport :: Import -> Doc AnsiStyle
 prettyImport imp =

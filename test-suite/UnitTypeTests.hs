@@ -11,11 +11,12 @@ import Morloc.Namespace
 import Morloc.Parser.Parser
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
-import Morloc.Data.Doc as Doc
+import qualified Morloc.Data.Doc as Doc
+import qualified Morloc.Data.DAG as MDD
 import Morloc.TypeChecker.Infer hiding(typecheck)
 import Morloc.Parser.Desugar (desugar)
 import Morloc (typecheck)
-import Morloc.Monad as MM
+import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.API as API
 import qualified Morloc.TypeChecker.PartialOrder as MP
 
@@ -25,19 +26,15 @@ import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
-main :: [Module] -> [Expr]
-main [] = error "Missing main"
-main [m] = moduleBody m
-main (m:ms)
-  | moduleName m == (MVar "Main") = moduleBody m
-  | otherwise = main ms
+main :: Ord k => (n -> a) -> DAG k e n -> a
+main f d = case MDD.roots d of
+  [] -> error "Missing or circular module"
+  [k] -> case Map.lookup k d of
+    (Just (m,_)) -> f m
+  _ -> error "Cannot handle multiple roots"
 
-mainDecMap :: [Module] -> [(EVar, Expr)]
-mainDecMap [] = error "Missing main"
-mainDecMap [m] = [(v, e) | (Declaration v e) <- moduleBody m]
-mainDecMap (m:ms)
-  | moduleName m == (MVar "Main") = [(v, e) | (Declaration v e) <- moduleBody m]
-  | otherwise = mainDecMap ms
+mainDecMap :: TypedDag -> [(EVar, Expr)]
+mainDecMap d = [(v, e) | (Declaration v e) <- main typedNodeBody d]
 
 -- get the toplevel type of a fully annotated expression
 typeof :: [Expr] -> [Type]
@@ -47,7 +44,7 @@ typeof es = f' . head . reverse $ es
     f' e@(AnnE _ ts) = ts
     f' t = error ("No annotation found for: " <> show t)
 
-run :: T.Text -> IO (Either MorlocError [Module])
+run :: T.Text -> IO (Either MorlocError TypedDag)
 run code = do
   ((x, _), _) <- MM.runMorlocMonad 0 emptyConfig (typecheck Nothing (Code code))
   return x
@@ -66,7 +63,7 @@ assertTerminalType msg code t = testCase msg $ do
   result <- run code
   case result of
     -- the order of the list is not important, so sort before comparing
-    (Right es') -> assertEqual "" (sort t) (sort (typeof (main es')))
+    (Right es') -> assertEqual "" (sort t) (sort (typeof (main typedNodeBody es')))
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 
@@ -97,7 +94,8 @@ assertTerminalExpr' f msg code expr = testCase msg $ do
   result <- run code
   case result of
     -- the order of the list is not important, so sort before comparing
-    (Right es') -> assertEqual "" expr (head . reverse . sort . f . main $ es')
+    (Right es') ->
+      assertEqual "" expr (head . reverse . sort . f . main typedNodeBody $ es')
     (Left err) -> error $
       "The following error was raised: " <> show err <> "\nin:\n" <> show code
 
@@ -115,7 +113,10 @@ exprTestFull msg code expCode =
   testCase msg $ do
   result <- run code
   case result of
-    (Right e) -> assertEqual "" (main e) (main $ readProgram Nothing expCode)
+    (Right e)
+      -> assertEqual ""
+            (main typedNodeBody e)
+            (main parserNodeBody $ readProgram Nothing expCode Map.empty)
     (Left err) -> error (show err)
 
 -- assert the exact expressions
@@ -363,6 +364,71 @@ typeAliasTests =
           , "foo"
           ]
         )
+    -- import tests ---------------------------------------
+    , assertTerminalType
+        "non-parametric, general type alias, imported"
+        (T.unlines
+          [ "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, reimported"
+        (T.unlines
+          [ "module M3 { type Foo = A; export Foo;}"
+          , "module M2 { import M3 (Foo); export Foo;}"
+          , "module M1 { import M2 (Foo); export Foo;}"
+          , "module Main { import M1 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, imported aliased"
+        (T.unlines
+          [ "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo as Bar); f :: Bar -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, general type alias, reimported aliased"
+        (T.unlines
+          [ "module M3 { type Foo1 = A; export Foo1;}"
+          , "module M2 { import M3 (Foo1 as Foo2); export Foo2;}"
+          , "module M1 { import M2 (Foo2 as Foo3); export Foo3;}"
+          , "module Main { import M1 (Foo3 as Foo4); f :: Foo4 -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "non-parametric, concrete type alias, reimported aliased"
+        (T.unlines
+          [ "module M3 { type Cpp Foo1 = \"int\"; type R Foo1 = \"integer\"; export Foo1;}"
+          , "module M2 { import M3 (Foo1 as Foo2); export Foo2;}"
+          , "module M1 { import M2 (Foo2 as Foo3); export Foo3;}"
+          , "module Main { import M1 (Foo3 as Foo4); f Cpp :: Foo4 -> \"double\";  f;}"
+          ]
+        )
+        [ fun [varc CppLang "int", varc CppLang "double"] ]
+    , assertTerminalType
+        "non-parametric, general type alias, duplicate import"
+        (T.unlines
+          [ "module M2 { type Foo = A; export Foo;}"
+          , "module M1 { type Foo = A; export Foo;}"
+          , "module Main { import M1 (Foo); import M2 (Foo); f :: Foo -> B;  f;}"
+          ]
+        )
+        [fun [var "A", var "B"]]
+    , assertTerminalType
+        "parametric alias, general type alias, duplicate import"
+        (T.unlines
+          [ "module M2 { type (Foo a b) = (a,b); export Foo; }"
+          , "module M1 { type (Foo c d) = (c,d); export Foo; }"
+          , "module Main { import M1 (Foo); import M2 (Foo); f :: Foo X Y -> Z; f; }"
+          ]
+        )
+        [fun [tuple [var "X", var "Y"], var "Z"]]
     ]
 
 typeOrderTests =
@@ -842,11 +908,6 @@ unitTypeTests =
         ";;;;;module foo{;42;  ;};"
         [num]
     , expectError
-        "fail on import of Main"
-        CannotImportMain $
-        T.unlines
-          ["module Main {export x; x = 42};", "module Foo {import Main (x)}"]
-    , expectError
         "fail on import of non-existing variable"
         (BadImport (MVar "Foo") (EVar "x")) $
         T.unlines
@@ -858,10 +919,6 @@ unitTypeTests =
           [ "module Foo {import Bar (y); export x; x = 42};"
           , "module Bar {import Foo (x); export y; y = 88}"
           ]
-    , expectError
-        "fail on redundant module declaration"
-        (MultipleModuleDeclarations [MVar "Foo"]) $
-        T.unlines ["module Foo {x = 42};", "module Foo {x = 88}"]
     , expectError "fail on self import"
         (SelfImport (MVar "Foo")) $
         T.unlines ["module Foo {import Foo (x); x = 42}"]

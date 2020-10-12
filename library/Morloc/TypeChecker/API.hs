@@ -9,7 +9,6 @@ Stability   : experimental
 module Morloc.TypeChecker.API
   ( typecheck
   , runStack
-  , Module(..)
   ) where
 
 import Morloc.Namespace
@@ -17,15 +16,16 @@ import qualified Control.Monad.Except as ME
 import qualified Control.Monad.Reader as MR
 import qualified Control.Monad.State as MS
 import qualified Control.Monad.Writer as MW
-import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.TypeChecker.Infer as Infer
 
-typecheck :: [Module] -> MorlocMonad [Module]
-typecheck ms = do
+typecheck
+  :: DAG MVar [(EVar, EVar)] PreparedNode
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] TypedNode)
+typecheck d = do
   verbosity <- MS.gets stateVerbosity
-  x <- liftIO $ runStack verbosity (Infer.typecheck ms)
+  x <- liftIO $ runStack verbosity (Infer.typecheck d)
   case x of
     ((Right result, _), _) -> return result
     ((Left err, _), _) -> MM.throwError err

@@ -1,8 +1,6 @@
 module Morloc
   ( writeProgram
   , typecheck
-  , P.cute
-  , P.ugly
   ) where
 
 import Morloc.Namespace
@@ -14,8 +12,9 @@ import qualified Morloc.TypeChecker.API as T
 import Morloc.Parser.Desugar (desugar) 
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
+import Morloc.TypeChecker.Treeify (treeify)
 
-typecheck :: Maybe Path -> Code -> MorlocMonad [T.Module]
+typecheck :: Maybe Path -> Code -> MorlocMonad TypedDag
 typecheck path code
   -- Maybe Path -> MT.Text -> [Module]
   -- parse code into unannotated modules
@@ -34,7 +33,9 @@ writeProgram ::
   -> MorlocMonad ()
 writeProgram path code
   = typecheck path code
-  -- [Module] -> (Script, [Script])
+  -- [Module] -> SAnno GMeta Many [CType]
+  >>= treeify
+  -- [SAnno GMeta Many [CType]] -> (Script, [Script])
   -- translate mtree into nexus and pool source code
   >>= generate
   -- (Script, [Script]) -> IO ()

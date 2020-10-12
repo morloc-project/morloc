@@ -69,14 +69,18 @@ appendGenerics v@(TV _ vstr) = do
       gs' = if isGeneric then v : gs else gs
   CMS.put (s {stateGenerics = gs'})
 
-readProgram :: Maybe Path -> MT.Text -> [Module]
-readProgram f sourceCode =
+readProgram
+  :: Maybe Path
+  -> MT.Text
+  -> DAG MVar Import ParserNode
+  -> DAG MVar Import ParserNode
+readProgram f sourceCode p =
   case runParser
          (CMS.runStateT (sc >> pProgram <* eof) pstate)
          (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
     Left err -> error (show err)
-    Right (es, _) -> es
+    Right (es, _) -> foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
   where
     pstate = emptyState { stateModulePath = f }
 
@@ -163,7 +167,7 @@ name = (lexeme . try) (p >>= check)
         else return x
 
 data Toplevel
-  = TModule Module
+  = TModule (MVar, [(MVar, Import)], ParserNode)
   | TModuleBody ModuleBody
 
 data ModuleBody
@@ -173,7 +177,7 @@ data ModuleBody
   | MBTypeDef TVar [TVar] Type
   | MBBody Expr
 
-pProgram :: Parser [Module]
+pProgram :: Parser [(MVar, [(MVar, Import)], ParserNode)]
 pProgram = do
   f <- CMS.gets stateModulePath
   -- allow ';' at the beginning (if you're into that sort of thing)
@@ -189,7 +193,7 @@ pToplevel =
   try (fmap TModule pModule <* optional delimiter) <|>
   fmap TModuleBody (pModuleBody <* optional delimiter)
 
-pModule :: Parser Module
+pModule :: Parser (MVar, [(MVar, Import)], ParserNode)
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
@@ -197,25 +201,22 @@ pModule = do
   mes <- braces (optional delimiter >> many1 pModuleBody)
   return $ makeModule f (MVar moduleName') mes
 
-makeModule :: Maybe Path -> MVar -> [ModuleBody] -> Module
-makeModule f n mes =
-  Module
-    { moduleName = n
-    , modulePath = f
-    , moduleBody = body'
-    , moduleExports = exports'
-    , moduleImports = imports'
-    , moduleSourceMap = (Map.fromList . concat)
-                        [[((srcAlias s, srcLang s), s) | s <- ss ]
-                        | (SrcE ss) <- body']
-    , moduleTypedefs = typedefmap
-    , moduleTypeMap = Map.empty -- will be created in Infer.hs
+makeModule :: Maybe Path -> MVar -> [ModuleBody] -> (MVar, [(MVar, Import)], ParserNode)
+makeModule f n mes = (n, edges, node) where
+  imports' = [x | (MBImport x) <- mes]
+  exports' = Set.fromList [x | (MBExport x) <- mes]
+  body' = [x | (MBBody x) <- mes]
+  typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
+  srcMap = (Map.fromList . concat)
+           [[((srcAlias s, srcLang s), s) | s <- ss ] | (SrcE ss) <- body']
+  edges = [(importModuleName i, i) | i <- imports']
+  node = ParserNode
+    { parserNodePath = f
+    , parserNodeBody = body'
+    , parserNodeSourceMap = srcMap
+    , parserNodeExports = exports'
+    , parserNodeTypedefs = typedefmap
     }
-  where
-    imports' = [x | (MBImport x) <- mes]
-    exports' = Set.fromList [x | (MBExport x) <- mes]
-    body' = [x | (MBBody x) <- mes]
-    typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
 
 pModuleBody :: Parser ModuleBody
 pModuleBody =

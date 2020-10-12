@@ -7,15 +7,10 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.CodeGenerator.Grammars.Common
-  ( SAnno(..)
-  , SExpr(..)
-  , GMeta(..)
-  , argType
+  ( argType
   , unpackArgument
   , prettyArgument
   , argId
-  , One(..)
-  , Many(..)
   , prettyExprM
   , prettyTypeM
   , typeOfExprM
@@ -44,40 +39,6 @@ import qualified Morloc.System as MS
 
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
-
--- g: an annotation for the group of child trees (what they have in common)
--- f: a collection - before realization this will probably be Set
---                 - after realization it will be One
--- c: an annotation for the specific child tree
-data SAnno g f c = SAnno (f (SExpr g f c, c)) g
-
-data One a = One a
-data Many a = Many [a]
-
-instance Functor One where
-  fmap f (One x) = One (f x)
-
-data SExpr g f c
-  = UniS
-  | VarS EVar
-  | ListS [SAnno g f c]
-  | TupleS [SAnno g f c]
-  | LamS [EVar] (SAnno g f c)
-  | AppS (SAnno g f c) [SAnno g f c]
-  | NumS Scientific
-  | LogS Bool
-  | StrS MT.Text
-  | RecS [(EVar, SAnno g f c)]
-  | CallS Source
-
--- | Description of the general manifold
-data GMeta = GMeta {
-    metaId :: Int
-  , metaGType :: Maybe GType
-  , metaName :: Maybe EVar -- the name, if relevant
-  , metaProperties :: Set.Set Property
-  , metaConstraints :: Set.Set Constraint
-} deriving (Show, Ord, Eq)
 
 
 prettyArgument :: Argument -> MDoc

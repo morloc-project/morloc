@@ -63,14 +63,18 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
 
-0.28.0 [2020.xx.xx]
+0.29.0 [2020.xx.xx]
 -------------------
 
  - [ ] Add type constructors for parameterized types
  - [ ] Add table handling
  - [ ] Add `data` keyword for defining data constructors
- - [ ] Fix the leaky existential crisis
- - [ ] Allow import/export of type aliases
+
+0.28.0 [2020.10.12]
+-------------------
+
+ * Allow import/export of type aliases
+ * Refactor with DAGs all through the parser and typechecker
 
 0.27.0 [2020.10.04]
 -------------------
