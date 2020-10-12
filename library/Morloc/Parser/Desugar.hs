@@ -95,12 +95,20 @@ checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] 
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) (map snd rs)
 
-desugarParserNode :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> ParserNode -> MorlocMonad ParserNode
+desugarParserNode
+  :: DAG MVar [(EVar, EVar)] ParserNode
+  -> MVar
+  -> ParserNode
+  -> MorlocMonad ParserNode
 desugarParserNode d k n = do
   nodeBody <- mapM (desugarExpr d k) (parserNodeBody n)
-  return $ n { parserNodeBody = nodeBody }  
+  return $ n { parserNodeBody = nodeBody }
 
-desugarExpr :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> Expr -> MorlocMonad Expr
+desugarExpr
+  :: DAG MVar [(EVar, EVar)] ParserNode
+  -> MVar
+  -> Expr
+  -> MorlocMonad Expr
 desugarExpr _ _ e@(SrcE _) = return e
 desugarExpr d k (Signature v t) = Signature v <$> desugarEType d k t
 desugarExpr d k (Declaration v e) = Declaration v <$> desugarExpr d k e
@@ -155,6 +163,14 @@ desugarType s d k (NamT v rs) = do
   vals <- mapM (desugarType s d k) (map snd rs)
   return (NamT v (zip keys vals))
 
+lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
+lookupTypedefs t@(TV lang v) k h
+  = catMaybes
+  . MDD.nodes
+  . MDD.mapNode (\(EVar v', typemap) -> Map.lookup (TV lang v') typemap)
+  $ MDD.lookupAliasedTerm (EVar v) k parserNodeTypedefs h
+
+
 -- When a type alias is imported from two places, this function reconciles them, if possible
 mergeAliases
   :: TVar
@@ -169,16 +185,9 @@ mergeAliases v i t@(t1, ts1) (t2, ts2)
     && length ts1 == length ts2 = return t
   | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
   where
-    t1' = foldl (\t v -> Forall v t) t1 ts1 
-    t2' = foldl (\t v -> Forall v t) t2 ts2 
+    t1' = foldl (\t v -> Forall v t) t1 ts1
+    t2' = foldl (\t v -> Forall v t) t2 ts2
 
-
-lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
-lookupTypedefs t@(TV _ v) k h
-  = catMaybes
-  . map snd
-  . MDD.nodes
-  $ MDD.lookupAliasedTerm (EVar v) k (\n -> Map.lookup t (parserNodeTypedefs n)) h
 
 parsub :: (TVar, Type) -> Type -> Type
 parsub (v, t2) t1@(VarT v0)

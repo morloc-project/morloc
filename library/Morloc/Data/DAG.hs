@@ -214,20 +214,7 @@ lookupAliasedTerm
   -- ^ original DAG where edges are "import as" statements
   -> DAG k None (v,a)
   -- ^ The final DAG with no edge attribute and the 
-lookupAliasedTerm v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
-  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
-  lookupAliasedTerm' v k d
-    | Map.member k d = d
-    | otherwise = case Map.lookup k d0 of
-        Nothing -> error "Could not find module"
-        (Just (n, xs)) ->
-          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
-                    | (k, vs) <- xs
-                    , elem v (map fst vs)]
-              edges = map (\(k, _) -> (k, None)) xs'
-          in foldl (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
-                   (Map.insert k ((v, f n), edges) d)
-                   (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
+lookupAliasedTerm v0 k0 f d0 = fromJust $ lookupAliasedTermM v0 k0 (Just . f) d0
 
 lookupAliasedTermM
   :: (Monad m, Ord k, Eq v)
@@ -240,17 +227,16 @@ lookupAliasedTermM
   -> DAG k [(v,v)] n
   -> m (DAG k None (v,a))
 lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
-  -- lookupAliasedTerm' :: v -> k -> DAG k [(v,v)] (Maybe a) -> DAG k [(v,v)] (Maybe a)
   lookupAliasedTerm' v k d
     | Map.member k d = return d
     | otherwise = case Map.lookup k d0 of
         Nothing -> error "Could not find module"
         (Just (n, xs)) -> do
-          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v1 == v])
+          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v2 == v])
                     | (k, vs) <- xs
-                    , elem v (map fst vs)]
+                    , elem v (map snd vs)]
               edges = map (\(k, _) -> (k, None)) xs'
           n' <- f n
           foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
                 (Map.insert k ((v, n'), edges) d)
-                (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
+                (concat [zip (repeat k) (map fst vs) | (k, vs) <- xs'])
