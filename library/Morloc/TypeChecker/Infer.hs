@@ -55,7 +55,8 @@ typecheck d = do
       (g1, es) <- typecheckExpr g0 (preparedNodeBody n)
       leave $ "module"
       return $ TypedNode
-        { typedNodePath = preparedNodePath n
+        { typedNodeModuleName = k
+        , typedNodePath = preparedNodePath n
         , typedNodeBody = es
           -- the typemap is really only used when typchecking modules that
           -- import this module, so it technically could be removed deleted for

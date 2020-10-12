@@ -427,7 +427,8 @@ type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
 -- | Node description after type checking. This will later be fed into
 -- `treeify` to make the SAnno objects that will be passed to Generator.
 data TypedNode = TypedNode {
-    typedNodePath :: Maybe Path
+    typedNodeModuleName :: MVar
+  , typedNodePath :: Maybe Path
   , typedNodeBody :: [Expr]
   , typedNodeTypeMap :: Map EVar TypeSet
   , typedNodeSourceMap :: Map (EVar, Lang) Source
