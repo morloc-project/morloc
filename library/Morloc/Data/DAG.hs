@@ -211,24 +211,28 @@ lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
                 (Map.insert k (n', xs') d)
                 (concat [zip (repeat k) (map snd vs) | (k, vs) <- xs'])
 
+-- | Map a monadic function over a DAG yielding a new DAG with the same
+-- topology but a new node values. If the DAG contains cycles, Nothing is
+-- returned.
 synthesizeDAG
   :: (Ord k, Monad m)
   => (k -> n1 -> [(k, e, n2)] -> m n2)
   -> DAG k e n1
-  -> m (DAG k e n2)
-synthesizeDAG f d0 = synthesizeDAG' Map.empty where
+  -> m (Maybe (DAG k e n2))
+synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
   -- iteratively synthesize all nodes that have met dependencies
-  synthesizeDAG' dn
+  synthesizeDAG' Nothing = return Nothing
+  synthesizeDAG' (Just dn)
     -- stop, we have completed the mapping. Jubilation.
-    | Map.size d0 == Map.size dn = return dn 
+    | Map.size d0 == Map.size dn = return (Just dn) 
     | otherwise = do
         -- traverse the original making any nodes that now have met dependencies
         dn' <- foldlM addIfPossible dn (Map.toList d0)
         if Map.size dn' == Map.size dn
           -- if map size hasn't changed, then nothing was added and we are stuck
-          then error "Could not reduce DAG"
+          then return Nothing
           -- otherwise move on to the next iteration
-          else synthesizeDAG' dn'
+          else synthesizeDAG' (Just dn')
 
   -- add leaves
   addIfPossible dn (k1, (n1, []))

@@ -38,7 +38,11 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 typecheck
   :: DAG MVar [(EVar, EVar)] PreparedNode
   -> Stack (DAG MVar [(EVar, EVar)] TypedNode)
-typecheck = MDD.synthesizeDAG typecheck'
+typecheck d = do
+  maybeDAG <- MDD.synthesizeDAG typecheck' d
+  case maybeDAG of
+    Nothing -> throwError CyclicDependency
+    (Just d') -> return d'
   where
     typecheck'
       :: MVar
