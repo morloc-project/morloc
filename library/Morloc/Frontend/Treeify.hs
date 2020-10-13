@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.TypeChecker.Treeify
+Module      : Morloc.Frontend.Treeify
 Description : I am groot
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -7,11 +7,11 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.TypeChecker.Treeify (treeify) where
+module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Namespace
 import Morloc.Data.Doc
-import Morloc.TypeChecker.PartialOrder
+import Morloc.Frontend.PartialOrder
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD

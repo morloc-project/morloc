@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.TypeChecker.Macro
+Module      : Morloc.Frontend.Macro
 Description : Expand parameters in concrete types
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -8,7 +8,7 @@ Stability   : experimental
 
 -}
 
-module Morloc.TypeChecker.Macro
+module Morloc.Frontend.Macro
 (
     expandMacro
   , buildCType

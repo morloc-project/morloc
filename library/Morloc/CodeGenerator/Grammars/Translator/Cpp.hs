@@ -20,7 +20,7 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.System as MS
-import qualified Morloc.TypeChecker.Macro as MTM
+import qualified Morloc.Frontend.Macro as MTM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 

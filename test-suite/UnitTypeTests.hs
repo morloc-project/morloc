@@ -8,17 +8,16 @@ module UnitTypeTests
   ) where
 
 import Morloc.Namespace
-import Morloc.Parser.Parser
+import Morloc.Frontend.Parser
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Data.DAG as MDD
-import Morloc.TypeChecker.Infer hiding(typecheck)
-import Morloc.Parser.Desugar (desugar)
+import Morloc.Frontend.Infer hiding(typecheck)
+import Morloc.Frontend.Desugar (desugar)
 import Morloc (typecheck)
 import qualified Morloc.Monad as MM
-import qualified Morloc.TypeChecker.API as API
-import qualified Morloc.TypeChecker.PartialOrder as MP
+import qualified Morloc.Frontend.PartialOrder as MP
 
 import qualified Data.Text as T
 import qualified Data.PartialOrd as DP

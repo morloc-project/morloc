@@ -1,12 +1,12 @@
 {-|
-Module      : Morloc.TypeChecker.Infer
+Module      : Morloc.Frontend.Infer
 Description : Core inference module
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.TypeChecker.Infer
+module Morloc.Frontend.Infer
   (
   -- * The main type checker
     typecheck
@@ -21,9 +21,9 @@ module Morloc.TypeChecker.Infer
   ) where
 
 import Morloc.Namespace
-import Morloc.TypeChecker.Internal
+import Morloc.Frontend.Internal
 import qualified Morloc.Language as ML
-import qualified Morloc.TypeChecker.PartialOrder as P
+import qualified Morloc.Frontend.PartialOrder as P
 import qualified Morloc.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.DAG as MDD
 import qualified Data.Map as Map

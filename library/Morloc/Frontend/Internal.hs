@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.TypeChecker.Internal
+Module      : Morloc.Frontend.Internal
 Description : Utilities for type checking
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.TypeChecker.Internal
+module Morloc.Frontend.Internal
   ( (+>)
   , (++>)
   , Renameable(..)
@@ -44,7 +44,7 @@ import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.TypeChecker.PartialOrder as P
+import qualified Morloc.Frontend.PartialOrder as P
 
 class HasManyLanguages a where
   langsOf :: Gamma -> a -> [Maybe Lang]

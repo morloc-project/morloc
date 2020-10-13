@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.TypeChecker.PartialOrder
+Module      : Morloc.Frontend.PartialOrder
 Description : Partial order implementation for types
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.TypeChecker.PartialOrder (
+module Morloc.Frontend.PartialOrder (
     substitute
   , free
   , isSubtypeOf

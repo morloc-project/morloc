@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.TypeChecker.Pretty
+Module      : Morloc.Frontend.Pretty
 Description : Pretty is as pretty does
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.TypeChecker.Pretty (cute, ugly) where
+module Morloc.Frontend.Pretty (cute, ugly) where
 
 import Morloc.Namespace
 import qualified Data.Map as Map

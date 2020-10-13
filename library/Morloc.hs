@@ -7,24 +7,23 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
-import qualified Morloc.Parser.API as P
-import qualified Morloc.TypeChecker.API as T
-import Morloc.Parser.Desugar (desugar) 
+import qualified Morloc.Frontend.API as F
+import Morloc.Frontend.Desugar (desugar) 
 import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
-import Morloc.TypeChecker.Treeify (treeify)
+import Morloc.Frontend.Treeify (treeify)
 
 typecheck :: Maybe Path -> Code -> MorlocMonad TypedDag
 typecheck path code
   -- Maybe Path -> MT.Text -> [Module]
   -- parse code into unannotated modules
-  = P.parse path code
+  = F.parse path code
   -- [Module] -> [Module]
   -- resolve type aliases and such
   >>= desugar
   -- [Module] -> [Module]
   -- add type annotations to sub-expressions and raise type errors
-  >>= T.typecheck
+  >>= F.typecheck
 
 -- | Build a program as a local executable
 writeProgram ::

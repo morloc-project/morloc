@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Parser.Desugar
+Module      : Morloc.Frontend.Desugar
 Description : Write Module objects to resolve type aliases and such
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Parser.Desugar (desugar, desugarType) where
+module Morloc.Frontend.Desugar (desugar, desugarType) where
 
 import Morloc.Namespace
 import qualified Morloc.Monad as MM
@@ -16,7 +16,7 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import qualified Morloc.TypeChecker.PartialOrder as MTP
+import qualified Morloc.Frontend.PartialOrder as MTP
 
 desugar
   :: DAG MVar Import ParserNode

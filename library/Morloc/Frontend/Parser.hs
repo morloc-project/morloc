@@ -1,12 +1,12 @@
 {-|
-Module      : Morloc.Parser.Parser
+Module      : Morloc.Frontend.Parser
 Description : Full parser for Morloc
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Parser.Parser
+module Morloc.Frontend.Parser
   ( readProgram
   , readType
   ) where
