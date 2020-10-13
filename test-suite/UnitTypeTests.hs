@@ -7,7 +7,7 @@ module UnitTypeTests
   , jsontype2jsonTests
   ) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)

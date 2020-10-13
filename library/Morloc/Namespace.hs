@@ -13,6 +13,7 @@ module Morloc.Namespace
     module Morloc.Internal
   -- ** Synonyms
   , MDoc
+  , DAG
   -- ** Newtypes
   , CType(..)
   , ctype
@@ -21,6 +22,7 @@ module Morloc.Namespace
   , DefaultType(..)
   , EVar(..)
   , MVar(..)
+  , TVar(..)
   , Name(..)
   , Path(..)
   , Code(..)
@@ -41,28 +43,13 @@ module Morloc.Namespace
   -- ** Package metadata
   , PackageMeta(..)
   , defaultPackageMeta
-  -- * Typechecking
-  , Expr(..)
-  , Gamma
-  , GammaIndex(..)
-  , Import(..)
-  , Source(..)
-  , Indexable(..)
-  , Stack
-  , StackState(..)
-  , TVar(..)
+  -- * Types
   , Type(..)
   , JsonType(..)
-  -- ** State manipulation
-  , StackConfig(..)
-  -- ** ModuleGamma paraphernalia
-  , ModularGamma
+  , Source(..)
   -- ** Type extensions
   , Constraint(..)
-  , EType(..)
   , Property(..)
-  , TypeSet(..)
-  , Typelike(..)
   , langOf
   -- ** Types used in post-typechecking tree
   , SAnno(..)
@@ -71,18 +58,13 @@ module Morloc.Namespace
   , None(..)
   , One(..)
   , Many(..)
-  -- ** DAG and associated types
-  , DAG
-  , ParserNode(..)
-  , ParserDag
-  , PreparedNode(..)
-  , PreparedDag
-  , TypedNode(..)
-  , TypedDag
   -- ** Types used in final translations
   , TypeM(..)
   , ExprM(..)
   , Argument(..)
+  -- ** Typeclasses
+  , HasOneLanguage(..)
+  , Typelike(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -106,6 +88,9 @@ import qualified Data.Set as S
 
 -- | no annotations for now
 type MDoc = Doc ()
+
+-- | A general purpose Directed Acyclic Graph (DAG)
+type DAG key edge node = Map key (node, [(key, edge)])
 
 type MorlocMonadGen c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
@@ -196,7 +181,6 @@ data MorlocError
   | OccursCheckFail
   | EmptyCut
   | TypeMismatch
-  | UnexpectedPattern Expr Type
   | ToplevelRedefinition
   | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
@@ -283,53 +267,10 @@ data Config =
 
 -- ================ T Y P E C H E C K I N G  =================================
 
-type Gamma = [GammaIndex]
-
 newtype EVar = EVar { unEVar :: Text } deriving (Show, Eq, Ord)
 newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
-
-type GeneralStack c e l s a
-   = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
-
-type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
-
-data StackConfig =
-  StackConfig
-    { stackConfigVerbosity :: Int
-    }
-
-data StackState =
-  StackState
-    { stateVar :: Int
-    , stateQul :: Int
-    , stateSer :: [(Type, Type)]
-    , stateDepth :: Int
-    }
-  deriving (Ord, Eq, Show)
-
--- | A context, see Dunfield Figure 6
-data GammaIndex
-  = VarG TVar
-  -- ^ (G,a)
-  | AnnG Expr TypeSet
-  -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar [Type] [DefaultType]
-  -- ^ (G,a^) unsolved existential variable
-  | SolvedG TVar Type
-  -- ^ (G,a^=t) Store a solved existential variable
-  | MarkG TVar
-  -- ^ (G,>a^) Store a type variable marker bound under a forall
-  | MarkEG EVar
-  -- ^ ...
-  | SrcG Source
-  -- ^ source
-  | UnsolvedConstraint Type Type
-  -- ^ Store an unsolved serialization constraint containing one or more
-  -- existential variables. When the existential variables are solved, the
-  -- constraint will be written into the Stack state.
-  deriving (Ord, Eq, Show)
 
 data Source =
   Source
@@ -340,15 +281,6 @@ data Source =
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
-    }
-  deriving (Ord, Eq, Show)
-
-data Import =
-  Import
-    { importModuleName :: MVar
-    , importInclude :: Maybe [(EVar, EVar)]
-    , importExclude :: [EVar]
-    , importNamespace :: Maybe EVar -- currently not used
     }
   deriving (Ord, Eq, Show)
 
@@ -400,74 +332,6 @@ data GMeta = GMeta {
 --   -- ^ Foo { bar :: A, baz :: B }
 --   deriving (Show, Ord, Eq)
 
-
--- | A general purpose Directed Acyclic Graph (DAG)
-type DAG key edge node = Map key (node, [(key, edge)])
-
--- | The type returned from the Parser. It contains all the information in a
--- single module but knows NOTHING about other modules.
-data ParserNode = ParserNode  {
-    parserNodePath :: Maybe Path
-  , parserNodeBody :: [Expr]
-  , parserNodeSourceMap :: Map (EVar, Lang) Source
-  , parserNodeTypedefs :: Map TVar (Type, [TVar])
-  , parserNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type ParserDag = DAG MVar Import ParserNode
-
--- | Node description after desugaring (substitute type aliases and resolve
--- imports/exports)
-data PreparedNode = PreparedNode {
-    preparedNodePath :: Maybe Path
-  , preparedNodeBody :: [Expr]
-  , preparedNodeSourceMap :: Map (EVar, Lang) Source
-  , preparedNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
-
--- | Node description after type checking. This will later be fed into
--- `treeify` to make the SAnno objects that will be passed to Generator.
-data TypedNode = TypedNode {
-    typedNodeModuleName :: MVar
-  , typedNodePath :: Maybe Path
-  , typedNodeBody :: [Expr]
-  , typedNodeTypeMap :: Map EVar TypeSet
-  , typedNodeSourceMap :: Map (EVar, Lang) Source
-  , typedNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
-
-
--- | Terms, see Dunfield Figure 1
-data Expr
-  = SrcE [Source]
-  -- ^ import "c" from "foo.c" ("f" as yolo)
-  | Signature EVar EType
-  -- ^ x :: A; e
-  | Declaration EVar Expr
-  -- ^ x=e1; e2
-  | UniE
-  -- ^ (())
-  | VarE EVar
-  -- ^ (x)
-  | ListE [Expr]
-  -- ^ [e]
-  | TupleE [Expr]
-  -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
-  | LamE EVar Expr
-  -- ^ (\x -> e)
-  | AppE Expr Expr
-  -- ^ (e e)
-  | AnnE Expr [Type]
-  -- ^ (e : A)
-  | NumE Scientific
-  -- ^ number of arbitrary size and precision
-  | LogE Bool
-  -- ^ boolean primitive
-  | StrE Text
-  -- ^ literal string
-  | RecE [(EVar, Expr)]
-  deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
@@ -531,32 +395,6 @@ newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
 
--- | Extended Type that may represent a language specific type as well as sets
--- of properties and constrains.
-data EType =
-  EType
-    { etype :: Type
-    , eprop :: Set Property
-    , econs :: Set Constraint
-    }
-  deriving (Show, Eq, Ord)
-
-data TypeSet =
-  TypeSet (Maybe EType) [EType]
-  deriving (Show, Eq, Ord)
-
-type ModularGamma = Map MVar (Map EVar TypeSet)
-
-class Indexable a where
-  index :: a -> GammaIndex
-
-instance Indexable GammaIndex where
-  index = id
-
-instance Indexable Type where
-  index (ExistT t ts ds) = ExistG t ts ds
-  index t = error $ "Can only index ExistT, found: " <> show t
-
 class Typelike a where
   typeOf :: a -> Type
 
@@ -568,9 +406,6 @@ class Typelike a where
 
 instance Typelike Type where
   typeOf = id
-
-instance Typelike EType where
-  typeOf = etype
 
 instance Typelike CType where
   typeOf (CType t) = t 
@@ -606,9 +441,6 @@ instance HasOneLanguage Type where
   langOf x@(NamT (TV lang _) ts)
     | all ((==) lang) (map (langOf . snd) ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
-
-instance HasOneLanguage EType where
-  langOf e = langOf (etype e) 
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang

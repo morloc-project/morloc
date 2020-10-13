@@ -17,7 +17,7 @@ module Morloc.Frontend.PartialOrder (
   , (<=)
 ) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.PartialOrd as P

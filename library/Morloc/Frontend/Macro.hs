@@ -14,7 +14,7 @@ module Morloc.Frontend.Macro
   , buildCType
 ) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.State as CMS

@@ -9,7 +9,7 @@ Stability   : experimental
 
 module Morloc.Frontend.Treeify (treeify) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder
 import qualified Morloc.Data.Text as MT

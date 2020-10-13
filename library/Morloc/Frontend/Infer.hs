@@ -20,7 +20,7 @@ module Morloc.Frontend.Infer
   , fromType
   ) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
 import qualified Morloc.Language as ML
 import qualified Morloc.Frontend.PartialOrder as P
@@ -32,7 +32,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.Reader as R
 
 import Morloc.Data.Doc hiding (putDoc)
-import Morloc.Pretty
+import Morloc.Frontend.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck

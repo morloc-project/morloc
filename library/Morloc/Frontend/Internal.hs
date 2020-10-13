@@ -39,7 +39,7 @@ module Morloc.Frontend.Internal
   ) where
 
 import Control.Monad.Except (throwError)
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Set as Set

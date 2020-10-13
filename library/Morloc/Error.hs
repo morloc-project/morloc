@@ -65,7 +65,6 @@ errmsg (UnboundVariable v) = "UnboundVariable: " <> unEVar v
 errmsg OccursCheckFail = "OccursCheckFail"
 errmsg EmptyCut = "EmptyCut"
 errmsg TypeMismatch = "TypeMismatch"
-errmsg (UnexpectedPattern e t) = "UnexpectedPattern"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg NoAnnotationFound = "NoAnnotationFound"
 errmsg (OtherError msg) = "OtherError: " <> msg

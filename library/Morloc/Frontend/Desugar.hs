@@ -9,7 +9,7 @@ Stability   : experimental
 
 module Morloc.Frontend.Desugar (desugar, desugarType) where
 
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Data.DAG as MDD

@@ -6,6 +6,7 @@ module Morloc
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+import Morloc.Frontend.Namespace (TypedDag)
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Desugar (desugar) 

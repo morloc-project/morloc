@@ -12,7 +12,7 @@ module Morloc.Frontend.Parser
   ) where
 
 import Data.Void (Void)
-import Morloc.Namespace
+import Morloc.Frontend.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Morloc.Lang.DefaultTypes as MLD
