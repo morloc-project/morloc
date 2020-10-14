@@ -12,7 +12,7 @@ module Morloc.CodeGenerator.Generate
   generate
 ) where
 
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import Morloc.Pretty (prettyType)
 import qualified Morloc.Config as MC

@@ -14,7 +14,7 @@ module Morloc.CodeGenerator.Grammars.Translator.R
     translate
   ) where
 
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi

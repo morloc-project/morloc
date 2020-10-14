@@ -28,7 +28,7 @@ module Morloc.CodeGenerator.Grammars.Common
   ) where
 
 import Morloc.Data.Doc
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.Pretty (prettyType)
 import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC

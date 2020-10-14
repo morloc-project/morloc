@@ -9,6 +9,7 @@ module UnitTypeTests
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser
+import Morloc.CodeGenerator.Namespace
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
