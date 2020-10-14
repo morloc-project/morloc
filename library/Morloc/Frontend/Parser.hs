@@ -15,7 +15,7 @@ import Data.Void (Void)
 import Morloc.Frontend.Namespace
 import Text.Megaparsec
 import Text.Megaparsec.Char
-import qualified Morloc.Lang.DefaultTypes as MLD
+import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import qualified Data.Scientific as DS
@@ -84,7 +84,7 @@ readProgram f sourceCode p =
   where
     pstate = emptyState { stateModulePath = f }
 
-readType :: MT.Text -> Type
+readType :: MT.Text -> UnresolvedType
 readType typeStr =
   case runParser (CMS.runStateT (pTypeGen <* eof) emptyState) "" typeStr of
     Left err -> error (show err)
@@ -174,7 +174,7 @@ data ModuleBody
   = MBImport Import
   -- ^ module name, function name and optional alias
   | MBExport EVar
-  | MBTypeDef TVar [TVar] Type
+  | MBTypeDef TVar [TVar] UnresolvedType
   | MBBody Expr
 
 pProgram :: Parser [(MVar, [(MVar, Import)], ParserNode)]
@@ -472,45 +472,45 @@ pVar = fmap VarE pEVar
 pEVar :: Parser EVar
 pEVar = fmap EVar name
 
-pTypeGen :: Parser Type
+pTypeGen :: Parser UnresolvedType
 pTypeGen = do
   resetGenerics
   t <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
   where
-    forallWrap :: [TVar] -> Type -> Type
+    forallWrap :: [TVar] -> UnresolvedType -> UnresolvedType
     forallWrap [] t = t
-    forallWrap (v:vs) t = Forall v (forallWrap vs t)
+    forallWrap (v:vs) t = ForallU v (forallWrap vs t)
 
-pType :: Parser Type
+pType :: Parser UnresolvedType
 pType =
       pExistential
-  <|> try pFunT
-  <|> try pUniT
-  <|> try pNamT
-  <|> try pArrT
+  <|> try pFunU
+  <|> try pUniU
+  <|> try pNamU
+  <|> try pArrU
   <|> try parensType
-  <|> pListT
-  <|> pTupleT
-  <|> pVarT
+  <|> pListU
+  <|> pTupleU
+  <|> pVarU
 
-pUniT :: Parser Type
-pUniT = do
+pUniU :: Parser UnresolvedType
+pUniU = do
   _ <- symbol "("
   _ <- symbol ")"
   lang <- CMS.gets stateLang
   v <- newvar lang
-  return (ExistT v [] (MLD.defaultNull lang))
+  return (ExistU v [] (MLD.defaultNull lang))
 
-parensType :: Parser Type
+parensType :: Parser UnresolvedType
 parensType = do
   _ <- tag (symbol "(")
   t <- parens pType
   return t
 
-pTupleT :: Parser Type
-pTupleT = do
+pTupleU :: Parser UnresolvedType
+pTupleU = do
   lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
@@ -518,54 +518,54 @@ pTupleT = do
   let dts = MLD.defaultTuple lang ts
   return $
     if lang == Nothing
-    then head (map unDefaultType dts)
-    else ExistT v ts dts
+    then head dts
+    else ExistU v ts dts
 
-pNamT :: Parser Type
-pNamT = do
+pNamU :: Parser UnresolvedType
+pNamU = do
   _ <- tag (symbol "{")
-  entries <- braces (sepBy1 pNamEntryT (symbol ","))
+  entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
   v <- newvar lang
   let dts = MLD.defaultRecord lang entries
   return $
     if lang == Nothing
-    then head (map unDefaultType dts)
-    else ExistT v [NamT (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
+    then head dts
+    else ExistU v [NamU (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
 
-pNamEntryT :: Parser (MT.Text, Type)
-pNamEntryT = do
+pNamEntryU :: Parser (MT.Text, UnresolvedType)
+pNamEntryU = do
   n <- name
   _ <- op "::"
   t <- pType
   return (n, t)
 
-pExistential :: Parser Type
+pExistential :: Parser UnresolvedType
 pExistential = do
   v <- angles name
-  return (ExistT (TV Nothing v) [] [])
+  return (ExistU (TV Nothing v) [] [])
 
-pArrT :: Parser Type
-pArrT = do
+pArrU :: Parser UnresolvedType
+pArrU = do
   lang <- CMS.gets stateLang
   _ <- tag (name <|> stringLiteral)
   n <- name <|> stringLiteral
   args <- many1 pType'
-  return $ ArrT (TV lang n) args
+  return $ ArrU (TV lang n) args
   where
-    pType' = try pUniT <|> try parensType <|> pVarT <|> pListT <|> pTupleT <|> pNamT
+    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
-pFunT :: Parser Type
-pFunT = do
+pFunU :: Parser UnresolvedType
+pFunU = do
   t <- pType'
   _ <- op "->"
   ts <- sepBy1 pType' (op "->")
-  return $ foldr1 FunT (t : ts)
+  return $ foldr1 FunU (t : ts)
   where
-    pType' = try pUniT <|> try parensType <|> try pArrT <|> pVarT <|> pListT <|> pTupleT <|> pNamT
+    pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
-pListT :: Parser Type
-pListT = do
+pListU :: Parser UnresolvedType
+pListU = do
   _ <- tag (symbol "[")
   t <- brackets pType
   lang <- CMS.gets stateLang
@@ -573,24 +573,24 @@ pListT = do
   let dts = MLD.defaultList lang t
   return $
     if lang == Nothing
-    then head (map unDefaultType dts)
-    else ExistT v [t] dts
+    then head dts
+    else ExistU v [t] dts
 
-pVarT :: Parser Type
-pVarT = try pVarConT <|> pVarGenT
+pVarU :: Parser UnresolvedType
+pVarU = try pVarConU <|> pVarGenU
 
-pVarConT :: Parser Type
-pVarConT = do
+pVarConU :: Parser UnresolvedType
+pVarConU = do
   lang <- CMS.gets stateLang
   _ <- tag stringLiteral
   n <- stringLiteral
-  return $ VarT (TV lang n)
+  return $ VarU (TV lang n)
 
-pVarGenT :: Parser Type
-pVarGenT = do
+pVarGenU :: Parser UnresolvedType
+pVarGenU = do
   lang <- CMS.gets stateLang
   _ <- tag name
   n <- name
   let v = TV lang n
   appendGenerics v  -- add the term to the generic list IF generic
-  return $ VarT v
+  return $ VarU v

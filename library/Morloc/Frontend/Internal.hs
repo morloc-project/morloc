@@ -24,9 +24,9 @@ module Morloc.Frontend.Internal
   , generalizeTypeSet
   , index
   , lookupE
-  , lookupT
-  , mapT
-  , mapT'
+  , lookupU
+  , mapU
+  , mapU'
   , newqul
   , newvar
   , newvarRich
@@ -77,31 +77,27 @@ class Renameable a where
   unrename :: a -> a
 
 instance Renameable Expr where
-  rename = mapT' rename
-  unrename = mapT unrename
+  rename = mapU' rename
+  unrename = mapU unrename
 
-instance Renameable Type where
-  rename t@(VarT _) = return t
-  rename (ExistT v ts ds) = ExistT <$> pure v <*> (mapM rename ts) <*> (mapM rename ds)
-  rename (Forall v t) = do
+instance Renameable UnresolvedType where
+  rename t@(VarU _) = return t
+  rename (ExistU v ts ds) = ExistU <$> pure v <*> (mapM rename ts) <*> (mapM rename ds)
+  rename (ForallU v t) = do
     v' <- rename v
-    t' <- rename (P.substitute v (VarT v') t)
-    return $ Forall v' t'
-  rename (FunT t1 t2) = FunT <$> rename t1 <*> rename t2
-  rename (ArrT v ts) = ArrT <$> pure v <*> mapM rename ts
-  rename (NamT v rs) =
-    NamT <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
+    t' <- rename (P.substitute v (VarU v') t)
+    return $ ForallU v' t'
+  rename (FunU t1 t2) = FunU <$> rename t1 <*> rename t2
+  rename (ArrU v ts) = ArrU <$> pure v <*> mapM rename ts
+  rename (NamU v rs) =
+    NamU <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
-  unrename (VarT v) = VarT (unrename v)
-  unrename (ExistT v ts ds) = ExistT v (map unrename ts) (map unrename ds)
-  unrename (Forall v t) = Forall (unrename v) (unrename t)
-  unrename (FunT t1 t2) = FunT (unrename t1) (unrename t2)
-  unrename (ArrT v ts) = ArrT v (map unrename ts)
-  unrename (NamT v rs) = NamT v [(x, unrename t) | (x, t) <- rs]
-
-instance Renameable DefaultType where
-  rename dt = fmap DefaultType $ rename (unDefaultType dt) 
-  unrename = DefaultType . unrename . unDefaultType
+  unrename (VarU v) = VarU (unrename v)
+  unrename (ExistU v ts ds) = ExistU v (map unrename ts) (map unrename ds)
+  unrename (ForallU v t) = ForallU (unrename v) (unrename t)
+  unrename (FunU t1 t2) = FunU (unrename t1) (unrename t2)
+  unrename (ArrU v ts) = ArrU v (map unrename ts)
+  unrename (NamU v rs) = NamU v [(x, unrename t) | (x, t) <- rs]
 
 instance Renameable TVar where
   unrename (TV l t) = TV l . head $ MT.splitOn "." t
@@ -112,32 +108,32 @@ class Applicable a where
   apply :: Gamma -> a -> a
 
 -- | Apply a context to a type (See Dunfield Figure 8).
-instance Applicable Type where
+instance Applicable UnresolvedType where
   -- [G]a = a
-  apply _ a@(VarT _) = a
+  apply _ a@(VarU _) = a
   -- [G](A->B) = ([G]A -> [G]B)
-  apply g (FunT a b) = FunT (apply g a) (apply g b)
-  -- [G]Forall a.a = forall a. [G]a
-  apply g (Forall x a) = Forall x (apply g a)
+  apply g (FunU a b) = FunU (apply g a) (apply g b)
+  -- [G]ForallU a.a = forall a. [G]a
+  apply g (ForallU x a) = ForallU x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
-  apply g (ExistT v ts ds) =
-    case lookupT v g of
+  apply g (ExistU v ts ds) =
+    case lookupU v g of
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
-      Nothing -> ExistT v (map (apply g) ts) (map (DefaultType . apply g . unDefaultType) ds)
-  apply g (ArrT v ts) = ArrT v (map (apply g) ts)
-  apply g (NamT v rs) = NamT v (map (\(n, t) -> (n, apply g t)) rs)
+      Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds)
+  apply g (ArrU v ts) = ArrU v (map (apply g) ts)
+  apply g (NamU v rs) = NamU v (map (\(n, t) -> (n, apply g t)) rs)
 
 instance Applicable Expr where
-  apply g e = mapT (apply g) e
+  apply g e = mapU (apply g) e
 
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
 
 class Typed a where
-  toType :: Maybe Lang -> a -> Maybe Type
-  fromType :: Maybe Lang -> Type -> a
+  toType :: Maybe Lang -> a -> Maybe UnresolvedType
+  fromType :: Maybe Lang -> UnresolvedType -> a
 
 instance Typed EType where
   toType lang e
@@ -163,7 +159,7 @@ instance Typed TypeSet where
 
 
 
-serialConstraint :: Type -> Type -> Stack ()
+serialConstraint :: UnresolvedType -> UnresolvedType -> Stack ()
 serialConstraint t1 t2 = do
   s <- CMS.get
   CMS.put (s {stateSer = (t1, t2):stateSer s})
@@ -185,31 +181,31 @@ decDepth = do
 getDepth :: Stack Int
 getDepth = CMS.gets stateDepth
 
-mapT :: (Type -> Type) -> Expr -> Expr
-mapT f (LamE v e) = LamE v (mapT f e)
-mapT f (ListE es) = ListE (map (mapT f) es)
-mapT f (TupleE es) = TupleE (map (mapT f) es)
-mapT f (RecE rs) = RecE (zip (map fst rs) (map (mapT f . snd) rs))
-mapT f (AppE e1 e2) = AppE (mapT f e1) (mapT f e2)
-mapT f (AnnE e ts) = AnnE (mapT f e) (map f ts)
-mapT f (Declaration v e) = Declaration v (mapT f e)
-mapT f (Signature v e) = Signature v $ e {etype = f (etype e)}
-mapT _ e = e
+mapU :: (UnresolvedType -> UnresolvedType) -> Expr -> Expr
+mapU f (LamE v e) = LamE v (mapU f e)
+mapU f (ListE es) = ListE (map (mapU f) es)
+mapU f (TupleE es) = TupleE (map (mapU f) es)
+mapU f (RecE rs) = RecE (zip (map fst rs) (map (mapU f . snd) rs))
+mapU f (AppE e1 e2) = AppE (mapU f e1) (mapU f e2)
+mapU f (AnnE e ts) = AnnE (mapU f e) (map f ts)
+mapU f (Declaration v e) = Declaration v (mapU f e)
+mapU f (Signature v e) = Signature v $ e {etype = f (etype e)}
+mapU _ e = e
 
-mapT' :: Monad m => (Type -> m Type) -> Expr -> m Expr
-mapT' f (LamE v e) = LamE <$> pure v <*> mapT' f e
-mapT' f (ListE es) = ListE <$> mapM (mapT' f) es
-mapT' f (RecE rs) = do
-  es' <- mapM (mapT' f . snd) rs
+mapU' :: Monad m => (UnresolvedType -> m UnresolvedType) -> Expr -> m Expr
+mapU' f (LamE v e) = LamE <$> pure v <*> mapU' f e
+mapU' f (ListE es) = ListE <$> mapM (mapU' f) es
+mapU' f (RecE rs) = do
+  es' <- mapM (mapU' f . snd) rs
   return $ RecE (zip (map fst rs) es')
-mapT' f (TupleE es) = TupleE <$> mapM (mapT' f) es
-mapT' f (AppE e1 e2) = AppE <$> mapT' f e1 <*> mapT' f e2
-mapT' f (AnnE e ts) = AnnE <$> mapT' f e <*> mapM f ts
-mapT' f (Declaration v e) = Declaration <$> pure v <*> mapT' f e
-mapT' f (Signature v e) = do
+mapU' f (TupleE es) = TupleE <$> mapM (mapU' f) es
+mapU' f (AppE e1 e2) = AppE <$> mapU' f e1 <*> mapU' f e2
+mapU' f (AnnE e ts) = AnnE <$> mapU' f e <*> mapM f ts
+mapU' f (Declaration v e) = Declaration <$> pure v <*> mapU' f e
+mapU' f (Signature v e) = do
   t' <- f (etype e)
   return $ Signature v (e {etype = t'})
-mapT' _ e = return e
+mapU' _ e = return e
 
 (+>) :: Indexable a => Gamma -> a -> Gamma
 (+>) xs x = (index x) : xs
@@ -236,12 +232,12 @@ lookupE v ((AnnG e@(VarE v') t):gs)
 lookupE v (_:gs) = lookupE v gs
 
 -- | Look up a solved existential type variable
-lookupT :: TVar -> Gamma -> Maybe Type
-lookupT _ [] = Nothing
-lookupT v ((SolvedG v' t):gs)
+lookupU :: TVar -> Gamma -> Maybe UnresolvedType
+lookupU _ [] = Nothing
+lookupU v ((SolvedG v' t):gs)
   | v == v' = Just t
-  | otherwise = lookupT v gs
-lookupT v (_:gs) = lookupT v gs
+  | otherwise = lookupU v gs
+lookupU v (_:gs) = lookupU v gs
 
 access1 :: TVar -> Gamma -> Maybe (Gamma, GammaIndex, Gamma)
 access1 v gs =
@@ -279,13 +275,13 @@ access2 lv rv gs =
         _ -> Nothing
     _ -> Nothing
 
-ann :: Expr -> Type -> Expr
+ann :: Expr -> UnresolvedType -> Expr
 ann (AnnE e _) t = AnnE e [t] 
 ann e@(Declaration _ _) _ = e
 ann e@(Signature _ _) _ = e
 ann e t = AnnE e [t]
 
-anns :: Expr -> [Type] -> Expr
+anns :: Expr -> [UnresolvedType] -> Expr
 anns (AnnE e _) ts = AnnE e ts 
 anns e@(Declaration _ _) _ = e
 anns e@(Signature _ _) _ = e
@@ -295,64 +291,64 @@ anns e ts = AnnE e ts
 -- This function is used to resolve remaining existentials when no further
 -- inferences about their type can be made. If the existentials have a default
 -- type, then that type can be used to replace the existential. Otherwise, the
--- existential can be cast as generic (Forall).
-generalize :: Type -> Type
+-- existential can be cast as generic (ForallU).
+generalize :: UnresolvedType -> UnresolvedType
 generalize t = generalize' existentialMap t'
   where
 
     t' = setDefaults t
 
-    generalize' :: [(TVar, Name)] -> Type -> Type
+    generalize' :: [(TVar, Name)] -> UnresolvedType -> UnresolvedType
     generalize' [] t' = t'
     generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
 
-    setDefaults :: Type -> Type
-    setDefaults (ExistT v ps []) = ExistT v (map setDefaults ps) []
-    setDefaults (ExistT _ _ (d:_)) = setDefaults (unDefaultType d)
-    setDefaults t@(VarT _) = t
-    setDefaults (Forall v t) = Forall v (setDefaults t)
-    setDefaults (FunT t1 t2) = FunT (setDefaults t1) (setDefaults t2)
-    setDefaults (ArrT v ts) = ArrT v (map setDefaults ts)
-    setDefaults (NamT v es) = NamT v (zip (map fst es) (map (setDefaults . snd) es))
+    setDefaults :: UnresolvedType -> UnresolvedType
+    setDefaults (ExistU v ps []) = ExistU v (map setDefaults ps) []
+    setDefaults (ExistU _ _ (d:_)) = setDefaults d
+    setDefaults t@(VarU _) = t
+    setDefaults (ForallU v t) = ForallU v (setDefaults t)
+    setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t2)
+    setDefaults (ArrU v ts) = ArrU v (map setDefaults ts)
+    setDefaults (NamU v es) = NamU v (zip (map fst es) (map (setDefaults . snd) es))
 
     existentialMap =
       zip (Set.toList (findExistentials t')) (map (Name . MT.pack) variables)
 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
-    findExistentials :: Type -> Set.Set TVar
-    findExistentials (VarT _) = Set.empty
-    findExistentials (ExistT v ts ds) =
+    findExistentials :: UnresolvedType -> Set.Set TVar
+    findExistentials (VarU _) = Set.empty
+    findExistentials (ExistU v ts ds) =
       Set.unions
         $ [Set.singleton v]
         ++ map findExistentials ts
-        ++ map (findExistentials . unDefaultType) ds
-    findExistentials (Forall v t') = Set.delete v (findExistentials t')
-    findExistentials (FunT t1 t2) =
+        ++ map findExistentials ds
+    findExistentials (ForallU v t') = Set.delete v (findExistentials t')
+    findExistentials (FunU t1 t2) =
       Set.union (findExistentials t1) (findExistentials t2)
-    findExistentials (ArrT _ ts) = Set.unions (map findExistentials ts)
-    findExistentials (NamT _ rs) = Set.unions (map (findExistentials . snd) rs)
+    findExistentials (ArrU _ ts) = Set.unions (map findExistentials ts)
+    findExistentials (NamU _ rs) = Set.unions (map (findExistentials . snd) rs)
 
-    generalizeOne :: TVar -> Name -> Type -> Type
-    generalizeOne v0@(TV lang _) r t0 = Forall (TV lang (unName r)) (f v0 t0)
+    generalizeOne :: TVar -> Name -> UnresolvedType -> UnresolvedType
+    generalizeOne v0@(TV lang _) r t0 = ForallU (TV lang (unName r)) (f v0 t0)
       where
-        f :: TVar -> Type -> Type
-        f v t1@(ExistT v' [] _)
-          | v == v' = VarT (TV lang (unName r))
+        f :: TVar -> UnresolvedType -> UnresolvedType
+        f v t1@(ExistU v' [] _)
+          | v == v' = VarU (TV lang (unName r))
           | otherwise = t1
-        f v t1@(ExistT v' ts _)
-          | v == v' = ArrT (TV lang (unName r)) (map (f v) ts)
-          | otherwise = ArrT v (map (f v) ts)
-        f v (FunT t1 t2) = FunT (f v t1) (f v t2)
-        f v t1@(Forall x t2)
-          | v /= x = Forall x (f v t2)
+        f v t1@(ExistU v' ts _)
+          | v == v' = ArrU (TV lang (unName r)) (map (f v) ts)
+          | otherwise = ArrU v (map (f v) ts)
+        f v (FunU t1 t2) = FunU (f v t1) (f v t2)
+        f v t1@(ForallU x t2)
+          | v /= x = ForallU x (f v t2)
           | otherwise = t1
-        f v (ArrT v' xs) = ArrT v' (map (f v) xs)
-        f v (NamT v' xs) = NamT v' (map (\(v', t) -> (v', f v t)) xs)
+        f v (ArrU v' xs) = ArrU v' (map (f v) xs)
+        f v (NamU v' xs) = NamU v' (map (\(v', t) -> (v', f v t)) xs)
         f _ t1 = t1
 
 generalizeE :: Expr -> Expr
-generalizeE = mapT generalize
+generalizeE = mapU generalize
 
 generalizeEType :: EType -> EType
 generalizeEType e = e {etype = generalize (etype e)}
@@ -361,15 +357,19 @@ generalizeTypeSet :: TypeSet -> TypeSet
 generalizeTypeSet (TypeSet t ts) =
   TypeSet (fmap generalizeEType t) (map generalizeEType ts)
 
-newvar :: Maybe Lang -> Stack Type
+newvar :: Maybe Lang -> Stack UnresolvedType
 newvar = newvarRich [] []
 
-newvarRich :: [Type] -> [DefaultType] -> Maybe Lang -> Stack Type
+newvarRich
+  :: [UnresolvedType]
+  -> [UnresolvedType] -- ^ default types
+  -> Maybe Lang
+  -> Stack UnresolvedType
 newvarRich ps ds lang = do
   s <- CMS.get
   let v = newvars !! stateVar s
   CMS.put $ s {stateVar = stateVar s + 1}
-  return (ExistT (TV lang v) ps ds)
+  return (ExistU (TV lang v) ps ds)
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])

@@ -29,6 +29,8 @@ module Morloc.Frontend.Namespace
   , GammaIndex
   , TypeSet(..)
   , Indexable(..)
+  , UnresolvedType(..)
+  , unresolvedType2type
   -- ** ModuleGamma paraphernalia
   , ModularGamma
   ) where
@@ -42,6 +44,31 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+
+-- | Types, see Dunfield Figure 6
+data UnresolvedType
+  = VarU TVar
+  -- ^ (a)
+  | ExistU TVar [UnresolvedType] [UnresolvedType]
+  -- ^ (a^) will be solved into one of the other types
+  | ForallU TVar UnresolvedType
+  -- ^ (Forall a . A)
+  | FunU UnresolvedType UnresolvedType
+  -- ^ (A->B)
+  | ArrU TVar [UnresolvedType] -- positional parameterized types
+  -- ^ f [UnresolvedType]
+  | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
+  -- ^ Foo { bar :: A, baz :: B }
+  deriving (Show, Ord, Eq)
+
+unresolvedType2type :: UnresolvedType -> Type 
+unresolvedType2type (VarU v) = (VarT v)
+unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
+unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
+unresolvedType2type (NamU v rs) = NamT v (zip (map fst rs) (map (unresolvedType2type . snd) rs))
+-- FIXME: leaky existential
+unresolvedType2type (ExistU v ts ds) = ExistT v (map unresolvedType2type ts) (map (DefaultType . unresolvedType2type) ds)
+unresolvedType2type (ForallU v t) = Forall v (unresolvedType2type t)
 
 -- | Terms, see Dunfield Figure 1
 data Expr
@@ -63,7 +90,7 @@ data Expr
   -- ^ (\x -> e)
   | AppE Expr Expr
   -- ^ (e e)
-  | AnnE Expr [Type]
+  | AnnE Expr [UnresolvedType]
   -- ^ (e : A)
   | NumE Scientific
   -- ^ number of arbitrary size and precision
@@ -78,7 +105,7 @@ data Expr
 -- of properties and constrains.
 data EType =
   EType
-    { etype :: Type
+    { etype :: UnresolvedType
     , eprop :: Set Property
     , econs :: Set Constraint
     }
@@ -87,9 +114,24 @@ data EType =
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
 
-instance Typelike EType where
-  typeOf = etype
-
+instance HasOneLanguage UnresolvedType where
+  langOf (VarU (TV lang _)) = lang
+  langOf x@(ExistU (TV lang _) ts _)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(ForallU (TV lang _) t)
+    | lang == langOf t = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(FunU t1 t2)
+    | langOf t1 == langOf t2 = langOf t1
+    | otherwise = error $ "inconsistent languages in" <> show x
+  langOf x@(ArrU (TV lang _) ts)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x 
+  langOf (NamU _ []) = error "empty records are not allowed"
+  langOf x@(NamU (TV lang _) ts)
+    | all ((==) lang) (map (langOf . snd) ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
 
 data Import =
   Import
@@ -106,9 +148,9 @@ data GammaIndex
   -- ^ (G,a)
   | AnnG Expr TypeSet
   -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar [Type] [DefaultType]
+  | ExistG TVar [UnresolvedType] [UnresolvedType]
   -- ^ (G,a^) unsolved existential variable
-  | SolvedG TVar Type
+  | SolvedG TVar UnresolvedType
   -- ^ (G,a^=t) Store a solved existential variable
   | MarkG TVar
   -- ^ (G,>a^) Store a type variable marker bound under a forall
@@ -116,7 +158,7 @@ data GammaIndex
   -- ^ ...
   | SrcG Source
   -- ^ source
-  | UnsolvedConstraint Type Type
+  | UnsolvedConstraint UnresolvedType UnresolvedType
   -- ^ Store an unsolved serialization constraint containing one or more
   -- existential variables. When the existential variables are solved, the
   -- constraint will be written into the Stack state.
@@ -136,8 +178,8 @@ class Indexable a where
 instance Indexable GammaIndex where
   index = id
 
-instance Indexable Type where
-  index (ExistT t ts ds) = ExistG t ts ds
+instance Indexable UnresolvedType where
+  index (ExistU t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
 
 
@@ -156,7 +198,7 @@ data StackState =
   StackState
     { stateVar :: Int
     , stateQul :: Int
-    , stateSer :: [(Type, Type)]
+    , stateSer :: [(UnresolvedType, UnresolvedType)]
     , stateDepth :: Int
     }
   deriving (Ord, Eq, Show)
@@ -169,7 +211,7 @@ data ParserNode = ParserNode  {
     parserNodePath :: Maybe Path
   , parserNodeBody :: [Expr]
   , parserNodeSourceMap :: Map (EVar, Lang) Source
-  , parserNodeTypedefs :: Map TVar (Type, [TVar])
+  , parserNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
   , parserNodeExports :: Set EVar
 } deriving (Show, Ord, Eq)
 type ParserDag = DAG MVar Import ParserNode

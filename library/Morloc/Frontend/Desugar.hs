@@ -79,19 +79,19 @@ simplify = return . MDD.mapNode prepare where
     , preparedNodeExports = parserNodeExports n1
     }
 
-checkForSelfRecursion :: Map.Map TVar (Type, [TVar]) -> MorlocMonad ()
+checkForSelfRecursion :: Map.Map TVar (UnresolvedType, [TVar]) -> MorlocMonad ()
 checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] where
-  f :: TVar -> Type -> MorlocMonad ()
-  f v (VarT v')
+  f :: TVar -> UnresolvedType -> MorlocMonad ()
+  f v (VarU v')
     | v == v' = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = return ()
-  f _ (ExistT _ _ _) = MM.throwError $ CallTheMonkeys "existential crisis"
-  f v (Forall _ t) = f v t
-  f v (FunT t1 t2) = f v t1 >> f v t2
-  f v (ArrT v0 ts)
+  f _ (ExistU _ _ _) = MM.throwError $ CallTheMonkeys "existential crisis"
+  f v (ForallU _ t) = f v t
+  f v (FunU t1 t2) = f v t1 >> f v t2
+  f v (ArrU v0 ts)
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) ts
-  f v (NamT v0 rs)
+  f v (NamU v0 rs)
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) (map snd rs)
 
@@ -133,37 +133,41 @@ desugarType
   :: [TVar]
   -> DAG MVar [(EVar, EVar)] ParserNode
   -> MVar
-  -> Type
-  -> MorlocMonad Type
-desugarType s d k t0@(VarT v)
+  -> UnresolvedType
+  -> MorlocMonad UnresolvedType
+desugarType s d k t0@(VarU v)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case lookupTypedefs v k d of
     [] -> return t0
     ts'@(t':_) -> do
       (t, _) <- foldlM (mergeAliases v 0) t' ts'
       desugarType (v:s) d k t
-desugarType s d k (ExistT v ts ds) = do
+desugarType s d k (ExistU v ts ds) = do
   ts' <- mapM (desugarType s d k) ts
-  ds' <- mapM (desugarType s d k) (map unDefaultType ds)
-  return $ ExistT v ts' (map DefaultType ds')
-desugarType s d k (Forall v t) = Forall v <$> desugarType s d k t
-desugarType s d k (FunT t1 t2) = FunT <$> desugarType s d k t1 <*> desugarType s d k t2
-desugarType s d k t0@(ArrT v ts)
+  ds' <- mapM (desugarType s d k) ds
+  return $ ExistU v ts' ds'
+desugarType s d k (ForallU v t) = ForallU v <$> desugarType s d k t
+desugarType s d k (FunU t1 t2) = FunU <$> desugarType s d k t1 <*> desugarType s d k t2
+desugarType s d k t0@(ArrU v ts)
   | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
   | otherwise = case lookupTypedefs v k d of
-      [] -> ArrT v <$> mapM (desugarType s d k) ts
+      [] -> ArrU v <$> mapM (desugarType s d k) ts
       (t':ts') -> do
         (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
           -- substitute parameters into alias
           then desugarType (v:s) d k (foldr parsub t (zip vs ts))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-desugarType s d k (NamT v rs) = do
+desugarType s d k (NamU v rs) = do
   let keys = map fst rs
   vals <- mapM (desugarType s d k) (map snd rs)
-  return (NamT v (zip keys vals))
+  return (NamU v (zip keys vals))
 
-lookupTypedefs :: TVar -> MVar -> DAG MVar [(EVar, EVar)] ParserNode -> [(Type, [TVar])]
+lookupTypedefs
+  :: TVar
+  -> MVar
+  -> DAG MVar [(EVar, EVar)] ParserNode
+  -> [(UnresolvedType, [TVar])]
 lookupTypedefs t@(TV lang v) k h
   = catMaybes
   . MDD.nodes
@@ -175,26 +179,26 @@ lookupTypedefs t@(TV lang v) k h
 mergeAliases
   :: TVar
   -> Int
-  -> (Type, [TVar])
-  -> (Type, [TVar])
-  -> MorlocMonad (Type, [TVar])
+  -> (UnresolvedType, [TVar])
+  -> (UnresolvedType, [TVar])
+  -> MorlocMonad (UnresolvedType, [TVar])
 mergeAliases v i t@(t1, ts1) (t2, ts2)
   | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
   |    MTP.isSubtypeOf t1' t2'
     && MTP.isSubtypeOf t2' t1'
     && length ts1 == length ts2 = return t
-  | otherwise = MM.throwError (ConflictingTypeAliases t1 t2)
+  | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
   where
-    t1' = foldl (\t v -> Forall v t) t1 ts1
-    t2' = foldl (\t v -> Forall v t) t2 ts2
+    t1' = foldl (\t v -> ForallU v t) t1 ts1
+    t2' = foldl (\t v -> ForallU v t) t2 ts2
 
 
-parsub :: (TVar, Type) -> Type -> Type
-parsub (v, t2) t1@(VarT v0)
+parsub :: (TVar, UnresolvedType) -> UnresolvedType -> UnresolvedType
+parsub (v, t2) t1@(VarU v0)
   | v0 == v = t2 -- substitute
   | otherwise = t1 -- keep the original
-parsub _ (ExistT _ _ _) = error "What the bloody hell is an existential doing down here?"
-parsub pair (Forall v t1) = Forall v (parsub pair t1)
-parsub pair (FunT a b) = FunT (parsub pair a) (parsub pair b)
-parsub pair (ArrT v ts) = ArrT v (map (parsub pair) ts)
-parsub pair (NamT v rs) = NamT v (zip (map fst rs) (map (parsub pair . snd) rs))
+parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
+parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
+parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
+parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
+parsub pair (NamU v rs) = NamU v (zip (map fst rs) (map (parsub pair . snd) rs))

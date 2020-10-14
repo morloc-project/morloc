@@ -84,7 +84,7 @@ makeGMeta name typemap gtype = do
       return $ GMeta
         { metaId = i
         , metaName = name
-        , metaGType = maybe (Just . GType $ etype e) Just gtype
+        , metaGType = maybe (Just . GType . unresolvedType2type $ etype e) Just gtype
         , metaProperties = eprop e
         , metaConstraints = econs e
         }
@@ -130,7 +130,7 @@ collectTerm d v n (Sourced src)
   = case Map.lookup v (typedNodeTypeMap n) of
     Nothing -> MM.throwError . CallTheMonkeys $ "No type found for this"
     (Just (TypeSet g es)) -> do
-      let ts = [CType (etype e) | e <- es, Just (srcLang src) == langOf e]
+      let ts = [CType ((unresolvedType2type . etype) e) | e <- es, Just (srcLang src) == langOf e]
       return (CallS src, ts)
 collectTerm d v n (Declared (AnnE e ts)) = do
       xs <- collectExpr d Set.empty n (getCTypes ts) e
@@ -258,15 +258,15 @@ partialApply (Forall v t) = do
 partialApply _ = MM.throwError . GeneratorError $
   "Cannot partially apply a non-function type"
 
-getCTypes :: [Type] -> [CType]
-getCTypes ts = [CType t | t <- ts, isJust (langOf t)]
+getCTypes :: [UnresolvedType] -> [CType]
+getCTypes ts = [CType . unresolvedType2type $ t | t <- ts, isJust (langOf t)]
 
 getExprName :: Expr -> Maybe EVar
 getExprName (VarE v) = Just v
 getExprName _ = Nothing
 
-getGType :: [Type] -> MorlocMonad (Maybe GType)
-getGType ts = case [GType t | t <- ts, isNothing (langOf t)] of
+getGType :: [UnresolvedType] -> MorlocMonad (Maybe GType)
+getGType ts = case [GType . unresolvedType2type $ t | t <- ts, isNothing (langOf t)] of
   [] -> return Nothing
   [x] -> return $ Just x
   xs -> MM.throwError . GeneratorError $

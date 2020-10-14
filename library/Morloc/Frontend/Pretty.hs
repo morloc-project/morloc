@@ -13,6 +13,7 @@ module Morloc.Frontend.Pretty
   , ugly
   , prettyExpr
   , prettyGammaIndex
+  , prettyGreenUnresolvedType
   ) where
 
 import Morloc.Frontend.Namespace
@@ -21,6 +22,9 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
+
+prettyGreenUnresolvedType :: UnresolvedType -> Doc AnsiStyle
+prettyGreenUnresolvedType = prettyGreenType . unresolvedType2type
 
 cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute d = mapM_ (putDoc . cute') (Map.toList d) where
@@ -44,9 +48,10 @@ ugly = cute
 
 prettyTypeSet :: TypeSet -> Doc AnsiStyle
 prettyTypeSet (TypeSet Nothing ts)
-  = encloseSep "(" ")" ";" (map (prettyGreenType . etype) ts)
+  = encloseSep "(" ")" ";" (map (prettyGreenUnresolvedType . etype) ts)
 prettyTypeSet (TypeSet (Just t) ts)
-  = encloseSep "(" ")" ";" (map (prettyGreenType . etype) (t:ts))
+  = encloseSep "(" ")" ";" (map (prettyGreenUnresolvedType . etype) (t:ts))
+
 
 prettyGammaIndex :: GammaIndex -> Doc AnsiStyle
 prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
@@ -54,13 +59,13 @@ prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e <+> prettyTypeSet ts
 prettyGammaIndex (ExistG tv ts ds)
   = "ExistG:"
   <+> pretty tv
-  <+> list (map (parens . prettyGreenType) ts)
-  <+> list (map (parens . prettyGreenType . unDefaultType) ds)
-prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenType t
+  <+> list (map (parens . prettyGreenUnresolvedType) ts)
+  <+> list (map (parens . prettyGreenUnresolvedType) ds)
+prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
 prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenType t1 <+> prettyGreenType t2
+prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 
 prettyImport :: Import -> Doc AnsiStyle
 prettyImport imp =
@@ -82,7 +87,7 @@ prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
 prettyExpr (AnnE e ts) = parens
   $   prettyExpr e
   <+> "::"
-  <+> encloseSep "(" ")" "; " (map prettyGreenType ts)
+  <+> encloseSep "(" ")" "; " (map prettyGreenUnresolvedType ts)
 prettyExpr (AppE e1@(LamE _ _) e2) = parens (prettyExpr e1) <+> prettyExpr e2
 prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
 prettyExpr (NumE x) = pretty (show x)
@@ -137,7 +142,7 @@ prettyExpr (Signature v e) =
         [] -> ""
         xs -> tupled (map prettyProperty xs) <+> "=> "
     etype' :: Doc AnsiStyle
-    etype' = prettyGreenType (etype e)
+    etype' = prettyGreenUnresolvedType (etype e)
     econs' :: Doc AnsiStyle
     econs' =
       case Set.toList (econs e) of

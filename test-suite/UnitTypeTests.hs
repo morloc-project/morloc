@@ -36,7 +36,7 @@ mainDecMap :: TypedDag -> [(EVar, Expr)]
 mainDecMap d = [(v, e) | (Declaration v e) <- main typedNodeBody d]
 
 -- get the toplevel type of a fully annotated expression
-typeof :: [Expr] -> [Type]
+typeof :: [Expr] -> [UnresolvedType]
 typeof es = f' . head . reverse $ es
   where
     f' (Signature _ e) = [etype e]
@@ -57,7 +57,7 @@ run code = do
         , configLangPerl = Path ""
         }
 
-assertTerminalType :: String -> T.Text -> [Type] -> TestTree
+assertTerminalType :: String -> T.Text -> [UnresolvedType] -> TestTree
 assertTerminalType msg code t = testCase msg $ do
   result <- run code
   case result of
@@ -169,36 +169,36 @@ testFalse :: String -> Bool -> TestTree
 testFalse msg x =
   testCase msg $ assertEqual "" x False
 
-bool = VarT (TV Nothing "Bool")
+bool = VarU (TV Nothing "Bool")
 
-num = VarT (TV Nothing "Num")
+num = VarU (TV Nothing "Num")
 
-str = VarT (TV Nothing "Str")
+str = VarU (TV Nothing "Str")
 
 fun [] = error "Cannot infer type of empty list"
 fun [t] = t
-fun (t:ts) = FunT t (fun ts)
+fun (t:ts) = FunU t (fun ts)
 
 forall [] t = t
-forall (s:ss) t = Forall (TV Nothing s) (forall ss t)
+forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
 
 forallc _ [] t = t
-forallc lang (s:ss) t = Forall (TV (Just lang) s) (forall ss t)
+forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forall ss t)
 
-var s = VarT (TV Nothing s)
-varc l s = VarT (TV (Just l) s)
+var s = VarU (TV Nothing s)
+varc l s = VarU (TV (Just l) s)
 
-arrc l s ts = ArrT (TV (Just l) s) ts
+arrc l s ts = ArrU (TV (Just l) s) ts
 
-arr s ts = ArrT (TV Nothing s) ts
+arr s ts = ArrU (TV Nothing s) ts
 
 lst t = arr "List" [t]
 
-tuple ts = ArrT v ts
+tuple ts = ArrU v ts
   where
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
-record rs = NamT (TV Nothing "Record") rs
+record rs = NamU (TV Nothing "Record") rs
 
 jsontype2jsonTests =
   testGroup
@@ -655,7 +655,7 @@ unitTypeTests =
     -- evaluation within containers
     , expectError
         "arguments to a function are monotypes"
-        (SubtypeError num bool)
+        (SubtypeError (unresolvedType2type num) (unresolvedType2type bool))
         "f :: a -> a; g = \\h -> (h 42, h True); g f"
     , assertTerminalType
         "polymorphism under lambdas (203f8c) (1)"
@@ -790,12 +790,12 @@ unitTypeTests =
     , assertTerminalType
         "unit as input"
         "f :: () -> Bool"
-        [fun [VarT (TV Nothing "Unit"), bool]]
+        [fun [VarU (TV Nothing "Unit"), bool]]
 
     , assertTerminalType
         "unit as output"
         "f :: Bool -> ()"
-        [fun [bool, VarT (TV Nothing "Unit")]]
+        [fun [bool, VarU (TV Nothing "Unit")]]
 
     -- -- TODO: reconsider what an empty tuple is
     -- -- I am inclined to cast it as the unit type
@@ -846,7 +846,7 @@ unitTypeTests =
         [fun [num, bool]]
     , expectError
         "primitive type mismatch should raise error"
-        (SubtypeError num bool)
+        (SubtypeError (unresolvedType2type num) (unresolvedType2type bool))
         "f :: Num -> Bool; f x = 9999"
 
     -- tags
@@ -1142,19 +1142,19 @@ unitTypeTests =
                 , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
               (AnnE (VarE (EVar "x"))
                 [num,varc CppLang "double"]))
-              [ FunT num num
-              , FunT (varc CppLang "double") (varc CppLang "double")])
+              [ FunU num num
+              , FunU (varc CppLang "double") (varc CppLang "double")])
             (AnnE (AppE
               (AnnE (VarE (EVar "sqrt"))
-                [ FunT num num
-                , FunT (varc CppLang "double") (varc CppLang "double")])
+                [ FunU num num
+                , FunU (varc CppLang "double") (varc CppLang "double")])
               (AnnE (VarE (EVar "x"))
                 [ num
                 , varc CppLang "double"]))
               [num,varc CppLang "double"]))
             [num,varc CppLang "double"]))
-          [ FunT num num
-          , FunT (varc CppLang "double") (varc CppLang "double")]))
+          [ FunU num num
+          , FunU (varc CppLang "double") (varc CppLang "double")]))
 
     -- internal
     , exprTestFull

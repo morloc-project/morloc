@@ -44,7 +44,7 @@ buildCType mkfun mkrec (CType t) = f t where
   f (ExistT (TV _ v) _ []) =
     error $ "Cannot resolve existential type '" <> show v <> "' with no type default" 
   -- FIXME: leaking existential
-  f (ExistT _ _ [t]) = buildCType mkfun mkrec (CType $ unDefaultType t)
+  f (ExistT _ _ [t]) = buildCType mkfun mkrec (CType (unDefaultType t))
   f (ExistT (TV _ v) _ _) =  
     error $ "Cannot resolve existential type'" <> show v <> "' with multiple type defaults" 
 
