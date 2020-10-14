@@ -33,6 +33,8 @@ module Morloc.Namespace
   , Lang(..)
   -- ** Data
   , Script(..)
+  -- ** Serialization
+  , UnresolvedPacker(..)
   --------------------
   -- ** Error handling
   , MorlocError(..)
@@ -112,6 +114,17 @@ data Script =
     , scriptCode :: !Code -- ^ full script source code
     , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
     , scriptInclude :: [Path] -- ^ paths to morloc module directories
+    }
+  deriving (Show, Ord, Eq)
+
+data UnresolvedPacker =
+  UnresolvedPacker
+    { unresolvedPackerCType   :: UnresolvedType -- The decomposed (unpacked) type
+    , unresolvedPackerForward :: [Source]
+    -- ^ The unpack function, there may be more than one, the compiler will make
+    -- a half-hearted effort to find the best one. It is called "Forward" since
+    -- it is moves one step towards serialization.
+    , unresolvedPackerReverse :: [Source]
     }
   deriving (Show, Ord, Eq)
 
@@ -303,6 +316,8 @@ data GMeta = GMeta {
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
+  , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
+  -- ^ The (un)packers available in this node's module scope. FIXME: find something more efficient
 } deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }
@@ -371,6 +386,23 @@ newtype Constraint =
 
 class Typelike a where
   typeOf :: a -> Type
+  -- utypeOf :: a -> UnresolvedType
+  --
+  -- nqualified :: a -> Int
+  -- nqualified t = nqualifiedU (utypeOf t) where
+  --   nqualifiedU (ForallU _ u) = 1 + nqualifiedU u
+  --   nqualifiedU _ = 0
+  --
+  -- qualifiedTerms :: a -> [TVar]
+  -- qualifiedTerms t = qt (utypeOf t) where
+  --   qt (ForallU v t) = v : qt t
+  --   qt _ = []
+  --
+  -- nargs :: a -> Int
+  -- nargs t = case utypeOf t of
+  --   (FunU _ t) -> 1 + nargs t
+  --   (ForallU _ t) -> nargs t
+  --   _ -> 0
 
   nargs :: a -> Int
   nargs t = case typeOf t of
@@ -380,11 +412,53 @@ class Typelike a where
 instance Typelike Type where
   typeOf = id
 
+  -- qualifiedTerms (UnkT v) = [v]
+  -- qualifiedTerms (VarT _) = []
+  -- qualifiedTerms (FunT t1 t2) = unique (qualifiedTerms t1) (qualifiedTerms t2)
+  -- qualifiedTerms (ArrT _ ts) = (unique . concat) (map qualifiedTerms ts)
+  -- qualifiedTerms (NamT _ rs) = (unique . concat) (map (qualifiedTerms . snd) ts)
+  --
+  -- utypeOf t = f (qualifiedTerms t) t where
+  --   f (v:vs) t = ForallU v (f vs t)
+  --   f [] (UnkT v) = VarT v
+  --   f [] (VarT v) = VarT v
+  --   f [] (FunT t1 t2) = FunU t1 t2
+  --   f [] (ArrT v ts) = ArrU v (map (f []) ts)
+  --   f [] (NamT v rs) = NamT v (zip (map fst rs) (map (f [] . snd) rs))
+  --
+  -- splitArgs = (\(vs,ts)->(vs, map typeOf ts)) . typeOf . splitArgs . utypeOf t
+
 instance Typelike CType where
   typeOf (CType t) = t 
 
+  -- splitArgs =
+  --   let (vs,ts) = splitArgs (typeOf t)
+  --   in (vs, map CType ts)
+  --
+  -- utypeOf t = utypeOf (typeOf t)
+
 instance Typelike GType where
   typeOf (GType t) = t 
+
+--   splitArgs =
+--     let (vs,ts) = splitArgs (typeOf t)
+--     in (vs, map GType ts)
+--
+--   utypeOf t = utypeOf (typeOf t)
+--
+-- instance Typelike UnresolvedType where
+--   utypeOf = id
+--
+--   typeOf = undefined
+--
+--   splitArgs (ForallU v u) =
+--     let (vs, ts) = splitArgs u
+--     in (v:vs, ts)
+--   splitArgs (FunU t1 t2) =
+--     let (vs, ts) = splitArgs t2
+--     in (vs, t1:ts)
+--   splitArgs t = ([], [t])
+
 
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
@@ -412,3 +486,22 @@ instance HasOneLanguage Type where
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
+
+instance HasOneLanguage UnresolvedType where
+  langOf (VarU (TV lang _)) = lang
+  langOf x@(ExistU (TV lang _) ts _)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(ForallU (TV lang _) t)
+    | lang == langOf t = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(FunU t1 t2)
+    | langOf t1 == langOf t2 = langOf t1
+    | otherwise = error $ "inconsistent languages in" <> show x
+  langOf x@(ArrU (TV lang _) ts)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x 
+  langOf (NamU _ []) = error "empty records are not allowed"
+  langOf x@(NamU (TV lang _) ts)
+    | all ((==) lang) (map (langOf . snd) ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x

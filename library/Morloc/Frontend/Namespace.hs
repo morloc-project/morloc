@@ -96,25 +96,6 @@ data EType =
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
 
-instance HasOneLanguage UnresolvedType where
-  langOf (VarU (TV lang _)) = lang
-  langOf x@(ExistU (TV lang _) ts _)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(ForallU (TV lang _) t)
-    | lang == langOf t = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(FunU t1 t2)
-    | langOf t1 == langOf t2 = langOf t1
-    | otherwise = error $ "inconsistent languages in" <> show x
-  langOf x@(ArrU (TV lang _) ts)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (NamU _ []) = error "empty records are not allowed"
-  langOf x@(NamU (TV lang _) ts)
-    | all ((==) lang) (map (langOf . snd) ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-
 data Import =
   Import
     { importModuleName :: MVar
@@ -205,6 +186,8 @@ data PreparedNode = PreparedNode {
   , preparedNodeBody :: [Expr]
   , preparedNodeSourceMap :: Map (EVar, Lang) Source
   , preparedNodeExports :: Set EVar
+  , preparedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
+  -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
 type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
 
@@ -217,5 +200,7 @@ data TypedNode = TypedNode {
   , typedNodeTypeMap :: Map EVar TypeSet
   , typedNodeSourceMap :: Map (EVar, Lang) Source
   , typedNodeExports :: Set EVar
+  , typedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
+  -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar [(EVar, EVar)] TypedNode

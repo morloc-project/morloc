@@ -28,6 +28,9 @@ desugar s
   >>= desugarDag
   -- DAG MVar (Map EVar EVar) PreparedNode
   >>= simplify
+  -- Add packer map
+  >>= addPackerMap
+
 
 -- | Consider export/import information to determine which terms are imported
 -- into each module. This step reduces the Import edge type to an m-to-n source
@@ -202,3 +205,85 @@ parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
 parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
 parsub pair (NamU v rs) = NamU v (zip (map fst rs) (map (parsub pair . snd) rs))
+
+
+
+
+addPackerMap
+  :: (DAG MVar [(EVar, EVar)] PreparedNode)
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
+addPackerMap d = do
+  maybeDAG <- MDD.synthesizeDAG gatherPackers d
+  case maybeDAG of
+    Nothing -> MM.throwError CyclicDependency
+    (Just d') -> return d'
+
+gatherPackers
+  :: MVar
+  -> PreparedNode
+  -> [(MVar, [(EVar, EVar)], PreparedNode)]
+  -> MorlocMonad PreparedNode
+gatherPackers k n1 es = do
+  let packers   = starpack n1 Pack
+      unpackers = starpack n1 Unpack
+  nodepackers <- makeNodePackers packers unpackers n1
+  let m = Map.unionsWith (<>) $ map (\(_, e, n2) -> inheritPackers e n2) es
+  return $ n1 { preparedNodePackers = Map.unionWith (<>) nodepackers m }
+
+starpack :: PreparedNode -> Property -> [(EVar, UnresolvedType, [Source])]
+starpack n pro
+  = map (\(v,t) -> (v, t, maybeToList $ Map.lookup (v, fromJust $ langOf t) (preparedNodeSourceMap n)))
+  $ [(v, t) | (Signature v (EType t p c)) <- preparedNodeBody n, Set.member pro p]
+
+makeNodePackers
+  :: [(EVar, UnresolvedType, [Source])]
+  -> [(EVar, UnresolvedType, [Source])]
+  -> PreparedNode
+  -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
+makeNodePackers xs ys n
+  = return . Map.fromList
+  $ [ ((TV (langOf t1) (unEVar v1), parity t1), [UnresolvedPacker (packerType t1) ss1 ss2])
+    | (v1, t1, ss1) <- xs, (v2, t2, ss2) <- ys, v1 == v2, packerTypesMatch t1 t2]
+
+parity :: UnresolvedType -> Int
+parity = length . fst . splitArgs
+
+packerTypesMatch :: UnresolvedType -> UnresolvedType -> Bool
+packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
+  ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
+    -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
+    && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
+  _ -> False
+
+packerType :: UnresolvedType -> UnresolvedType
+packerType t = case splitArgs t of
+  (_, [t1, _]) -> t1
+  _ -> error "bad packer"
+
+nargsU :: UnresolvedType -> Int
+nargsU (ForallU _ t) = nargsU t
+nargsU (FunU _ t) = 1 + nargsU t
+nargsU _ = 0
+
+qualify :: [TVar] -> UnresolvedType -> UnresolvedType
+qualify [] t = t
+qualify (v:vs) t = ForallU v (qualify vs t)
+
+splitArgs :: UnresolvedType -> ([TVar], [UnresolvedType])
+splitArgs (ForallU v u) =
+  let (vs, ts) = splitArgs u
+  in (v:vs, ts)
+splitArgs (FunU t1 t2) =
+  let (vs, ts) = splitArgs t2
+  in (vs, t1:ts)
+splitArgs t = ([], [t])
+
+inheritPackers
+  :: [(EVar, EVar)]
+  -> PreparedNode
+  -> Map.Map (TVar, Int) [UnresolvedPacker]
+inheritPackers es n =
+  let names = Set.fromList (map (unEVar . fst) es)
+  in   Map.mapKeysWith (<>)
+        (\(TV l v, i) -> (TV l . unEVar . fromJust . lookup (EVar v) $ es, i))
+     $ Map.filterWithKey (\(TV _ v, _) _ -> Set.member v names) (preparedNodePackers n)

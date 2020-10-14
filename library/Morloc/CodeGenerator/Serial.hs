@@ -21,34 +21,6 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 
-data UnresolvedPacker = UnresolvedPacker
-  { unresolvedPackerCType   :: UnresolvedType -- The decomposed (unpacked) type
-  , unresolvedPackerForward :: [Source]
-  -- ^ The unpack function, there may be more than one, the compiler will make
-  -- a half-hearted effort to find the best one. It is called "Forward" since
-  -- it is moves one step towards serialization.
-  , unresolvedPackerReverse :: [Source]
-  }
-
-data TypePacker = TypePacker
-  { typePackerCType   :: Type
-  , typePackerForward :: [Source]
-  , typePackerReverse :: [Source]
-  }
-
-data SerialAST f
-  = SerialPack (f (TypePacker, SerialAST f))
-  | SerialList (SerialAST f)
-  | SerialTuple [SerialAST f]
-  | SerialObject TVar [(MT.Text, SerialAST f)]
-  | SerialVar MT.Text
-  -- ^ this should be a type that is recognized by the default json serializer
-  -- for example, "double" or "std::string" in C++
-  | SerialUnknown MT.Text
-  -- ^ depending on the language, this may or may not raise an error down the
-  -- line, the parameter contains the variable name, which is useful only for
-  -- source code comments.
-
 makeSerialAST
   :: Map.Map (TVar, Int) [UnresolvedPacker]
   -> Type

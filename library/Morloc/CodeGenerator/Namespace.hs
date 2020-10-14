@@ -15,12 +15,34 @@ module Morloc.CodeGenerator.Namespace
   , Argument(..)
   , JsonType(..)
   , MData(..)
+  -- ** Serialization AST
+  , SerialAST(..)
+  , TypePacker(..)
   ) where
 
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Set (Set)
 import Data.Text (Text)
+
+data SerialAST f
+  = SerialPack (f (TypePacker, SerialAST f))
+  | SerialList (SerialAST f)
+  | SerialTuple [SerialAST f]
+  | SerialObject TVar [(Text, SerialAST f)]
+  | SerialVar Text
+  -- ^ this should be a type that is recognized by the default json serializer
+  -- for example, "double" or "std::string" in C++
+  | SerialUnknown Text
+  -- ^ depending on the language, this may or may not raise an error down the
+  -- line, the parameter contains the variable name, which is useful only for
+  -- source code comments.
+
+data TypePacker = TypePacker
+  { typePackerCType   :: Type
+  , typePackerForward :: [Source]
+  , typePackerReverse :: [Source]
+  }
 
 -- | A simplified subset of the Type record
 -- functions, existential, and universal types are removed

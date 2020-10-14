@@ -11,6 +11,7 @@ module Morloc.Frontend.PartialOrder (
     substitute
   , free
   , isSubtypeOf
+  , equivalent
   , mostGeneral
   , mostSpecific
   , mostSpecificSubtypes
@@ -151,6 +152,9 @@ isSubtypeOf :: UnresolvedType -> UnresolvedType -> Bool
 isSubtypeOf t1 t2 = case P.compare t1 t2 of
   (Just x) -> x <= EQ
   _ -> False
+
+equivalent :: UnresolvedType -> UnresolvedType -> Bool
+equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
 -- | find all types that are not greater than any other type
 mostGeneral :: [UnresolvedType] -> [UnresolvedType]
