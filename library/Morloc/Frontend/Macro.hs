@@ -40,13 +40,7 @@ buildCType mkfun mkrec (CType t) = f t where
   f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
   f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
   f (NamT (TV _ v) entries) = mkrec [(pretty k, f t) | (k, t) <- entries]
-  f (Forall _ _) = error "Concrete polymorphism is not supported"
-  f (ExistT (TV _ v) _ []) =
-    error $ "Cannot resolve existential type '" <> show v <> "' with no type default" 
-  -- FIXME: leaking existential
-  f (ExistT _ _ [t]) = buildCType mkfun mkrec (CType (unDefaultType t))
-  f (ExistT (TV _ v) _ _) =  
-    error $ "Cannot resolve existential type'" <> show v <> "' with multiple type defaults" 
+  f (UnkT _) = error "Cannot build unsolved type"
 
   typeArgs :: Type -> [Type]
   typeArgs (FunT t1 t2) = t1 : typeArgs t2

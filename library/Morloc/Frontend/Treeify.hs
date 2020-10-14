@@ -21,6 +21,36 @@ import qualified Data.Set as Set
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
 
+
+-- This functions removes qualified and existential types.
+--  * all qualified terms are replaced with UnkT
+--  * all existentials are replaced with default values if a possible
+--    FIXME: should I really just take the first in the list???
+solveUnsolved :: UnresolvedType -> MorlocMonad Type
+solveUnsolved (VarU v) = return $ VarT v
+solveUnsolved (FunU t1 t2) = FunT <$> solveUnsolved t1 <*> solveUnsolved t2
+solveUnsolved (ArrU v ts) = ArrT v <$> mapM solveUnsolved ts
+solveUnsolved (NamU v rs) = do
+  ts' <- mapM (solveUnsolved . snd) rs
+  return $ NamT v (zip (map fst rs) ts')
+solveUnsolved (ExistU v ts []) = MM.throwError UnsolvedExistentialTerm
+solveUnsolved (ExistU v ts (t:_)) = solveUnsolved t
+solveUnsolved (ForallU v t) = substituteT v (UnkT v) <$> solveUnsolved t
+
+-- | substitute all appearances of a given variable with a given new type
+substituteT :: TVar -> Type -> Type -> Type
+substituteT v r t = sub t
+  where
+    sub :: Type -> Type
+    sub t'@(UnkT _) = t'
+    sub t'@(VarT v')
+      | v == v' = r
+      | otherwise = t'
+    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
+    sub (ArrT v' ts) = ArrT v' (map sub ts)
+    sub (NamT v' rs) = NamT v' [(x, sub t') | (x, t') <- rs]
+
+
 treeify
   :: DAG MVar [(EVar, EVar)] TypedNode
   -> MorlocMonad [SAnno GMeta Many [CType]]
@@ -81,10 +111,11 @@ makeGMeta name typemap gtype = do
   i <- MM.getCounter
   case name >>= (flip Map.lookup) typemap of
     (Just (TypeSet (Just e) _)) -> do
+      g <- fmap (Just . GType) $ solveUnsolved (etype e)
       return $ GMeta
         { metaId = i
         , metaName = name
-        , metaGType = maybe (Just . GType . unresolvedType2type $ etype e) Just gtype
+        , metaGType = maybe g Just gtype
         , metaProperties = eprop e
         , metaConstraints = econs e
         }
@@ -130,14 +161,16 @@ collectTerm d v n (Sourced src)
   = case Map.lookup v (typedNodeTypeMap n) of
     Nothing -> MM.throwError . CallTheMonkeys $ "No type found for this"
     (Just (TypeSet g es)) -> do
-      let ts = [CType ((unresolvedType2type . etype) e) | e <- es, Just (srcLang src) == langOf e]
-      return (CallS src, ts)
+      let ts = [etype e | e <- es, Just (srcLang src) == langOf e]
+      ts' <- mapM solveUnsolved ts
+      return (CallS src, map CType ts')
 collectTerm d v n (Declared (AnnE e ts)) = do
-      xs <- collectExpr d Set.empty n (getCTypes ts) e
-      case xs of
-        [x] -> return x
-        _ -> MM.throwError . GeneratorError $
-          "Expected exactly one topology for a declared term"
+  ts' <- getCTypes ts
+  xs <- collectExpr d Set.empty n ts' e
+  case xs of
+    [x] -> return x
+    _ -> MM.throwError . GeneratorError $
+      "Expected exactly one topology for a declared term"
 collectTerm _ _ _ (Declared _) = MM.throwError . GeneratorError $
   "Invalid expression in CollectTerm Declared, expected AnnE"
 
@@ -151,9 +184,16 @@ collectAnno
 collectAnno d args n (AnnE e ts) = do
   gtype <- getGType ts
   gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) gtype
-  trees <- collectExpr d args n (getCTypes ts) e
+  ts' <- getCTypes ts
+  trees <- collectExpr d args n ts' e
   return $ SAnno (Many trees) gmeta
 collectAnno _ _ _ _ = error "impossible bug - unannotated expression"
+
+getCTypes :: [UnresolvedType] -> MorlocMonad [CType]
+getCTypes ts = do
+  ts' <- mapM solveUnsolved [t | t <- ts, isJust (langOf t)]
+  return $ map CType ts'
+
 
 
 collectExpr
@@ -239,38 +279,21 @@ partialApplyConcrete t =
 
 partialApply :: Type -> MorlocMonad Type
 partialApply (FunT _ t) = return t
-partialApply (Forall v t) = do
-  t' <- partialApply t
-  return $ if varIsUsed v t' then Forall v t' else t'
-  where
-    varIsUsed :: TVar -> Type -> Bool
-    varIsUsed v (VarT v') = v == v'
-    varIsUsed v (ExistT v' ts ds)
-      =  v == v'
-      || any (varIsUsed v) ts
-      || any (varIsUsed v) (map unDefaultType ds)
-    varIsUsed v (Forall v' t)
-      | v == v' = False
-      | otherwise = varIsUsed v t
-    varIsUsed v (FunT t1 t2) = varIsUsed v t1 || varIsUsed v t2
-    varIsUsed v (ArrT v' ts) = any (varIsUsed v) ts
-    varIsUsed v (NamT v' entries) = any (varIsUsed v) (map snd entries)
 partialApply _ = MM.throwError . GeneratorError $
   "Cannot partially apply a non-function type"
-
-getCTypes :: [UnresolvedType] -> [CType]
-getCTypes ts = [CType . unresolvedType2type $ t | t <- ts, isJust (langOf t)]
 
 getExprName :: Expr -> Maybe EVar
 getExprName (VarE v) = Just v
 getExprName _ = Nothing
 
 getGType :: [UnresolvedType] -> MorlocMonad (Maybe GType)
-getGType ts = case [GType . unresolvedType2type $ t | t <- ts, isNothing (langOf t)] of
-  [] -> return Nothing
-  [x] -> return $ Just x
-  xs -> MM.throwError . GeneratorError $
-    "Expected 0 or 1 general types, found " <> MT.show' (length xs)
+getGType ts = do
+  ts' <- mapM solveUnsolved [t | t <- ts, isNothing (langOf t)]
+  case map GType ts' of
+    [] -> return Nothing
+    [x] -> return $ Just x
+    xs -> MM.throwError . GeneratorError $
+      "Expected 0 or 1 general types, found " <> MT.show' (length xs)
 
 unrollLambda :: Expr -> ([EVar], Expr)
 unrollLambda (LamE v e2) = case unrollLambda e2 of

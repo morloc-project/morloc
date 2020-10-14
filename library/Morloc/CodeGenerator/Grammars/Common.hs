@@ -130,7 +130,6 @@ prettyTypeM (Serial c) = "Serial<" <> prettyType c <> ">"
 prettyTypeM (Native c) = "Native<" <> prettyType c <> ">"
 prettyTypeM (Function ts t) =
   "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
-prettyTypeM (ForallM vs t) = "Forall" <+> hsep (map pretty vs) <+> "." <+> prettyTypeM t
 
 invertExprM :: ExprM -> MorlocMonad ExprM
 invertExprM (ManifoldM i args e) = do
@@ -227,9 +226,6 @@ typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output
     inputs' -> Function inputs' output
-  (ForallM vs (Function inputs output))  -> case drop (length xs) inputs of
-    [] -> output
-    inputs' -> ForallM vs (Function inputs' output)
   _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (prettyTypeM $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
@@ -259,9 +255,7 @@ unpackTypeM t = t
 ctype2typeM :: CType -> TypeM
 ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
   (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
-ctype2typeM (CType (Forall v t)) = case ctype2typeM (CType t) of
-  (ForallM vs t') -> ForallM (v:vs) t'
-  t' -> ForallM [v] t'
+ctype2typeM (CType (UnkT _)) = Passthrough
 ctype2typeM c = Native c
 
 -- get input types to a function type
@@ -270,7 +264,6 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
   (t:ts) -> (reverse ts, t)
   where
     typeArgs (FunT t1 t2) = t1 : typeArgs t2
-    typeArgs (Forall _ t) = typeArgs t
     typeArgs t = [t]
 
 unpackExprM :: ExprM -> ExprM
@@ -286,13 +279,9 @@ packExprM e = case typeOfExprM e of
   _ -> e
 
 type2jsontype :: Type -> MorlocMonad JsonType
+type2jsontype (UnkT _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: UnkT"
 type2jsontype (VarT (TV _ v)) = return $ VarJ v
 type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
--- FIXME: leaking existential
-type2jsontype (ExistT _ _ [d]) = type2jsontype (unDefaultType d)
-type2jsontype (ExistT _ _ []) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with no default type"
-type2jsontype (ExistT _ _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with ambiguous default types"
-type2jsontype (Forall _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: Forall"
 type2jsontype (FunT _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: FunT"
 type2jsontype (NamT (TV _ v) rs) = do
   vs <- mapM type2jsontype (map snd rs)

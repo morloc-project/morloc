@@ -19,7 +19,6 @@ module Morloc.Namespace
   , ctype
   , GType(..)
   , generalType
-  , DefaultType(..)
   , EVar(..)
   , MVar(..)
   , TVar(..)
@@ -174,6 +173,7 @@ data MorlocError
   | AmbiguousGeneralType
   | SubtypeError Type Type
   | ExistentialError
+  | UnsolvedExistentialTerm
   | BadExistentialCast
   | AccessError Text
   | NonFunctionDerive
@@ -319,27 +319,10 @@ data GMeta = GMeta {
   , metaConstraints :: Set Constraint
 } deriving (Show, Ord, Eq)
 
--- -- | Replace Type with SimpleType after typechecking (where all types should
--- -- be resolved and all universal and existential types removed)
--- data SimpleType
---   = VarSimple TVar
---   -- ^ (a)
---   | FunSimple Type SimpleType
---   -- ^ (A->B)
---   | ArrSimple TVar [SimpleType] -- positional parameterized types
---   -- ^ f [Type]
---   | NamSimple TVar [(Text, SimpleType)] -- keyword parameterized types
---   -- ^ Foo { bar :: A, baz :: B }
---   deriving (Show, Ord, Eq)
-
-
 newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
 
 newtype GType = GType { unGType :: Type }
-  deriving (Show, Ord, Eq)
-
-newtype DefaultType = DefaultType { unDefaultType :: Type }
   deriving (Show, Ord, Eq)
 
 -- a safe alternative to the CType constructor
@@ -356,17 +339,18 @@ generalType t
 
 -- | Types, see Dunfield Figure 6
 data Type
-  = VarT TVar
+  = UnkT TVar
+  -- ^ Unknown type: these may be serialized forms that do not need to be
+  -- unserialized in the current environment but will later be passed to an
+  -- environment where they can be deserialized. Alternatively, terms that are
+  -- used within dynamic languages may need to type annotation.
+  | VarT TVar
   -- ^ (a)
-  | ExistT TVar [Type] [DefaultType]
-  -- ^ (a^) will be solved into one of the other types
-  | Forall TVar Type
-  -- ^ (Forall a . A)
   | FunT Type Type
-  -- ^ (A->B)
-  | ArrT TVar [Type] -- positional parameterized types
-  -- ^ f [Type]
-  | NamT TVar [(Text, Type)] -- keyword parameterized types
+  -- ^ (A->B)  -- positional parameterized types
+  | ArrT TVar [Type]
+  -- ^ f [Type]  -- keyword parameterized types
+  | NamT TVar [(Text, Type)] 
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
@@ -401,7 +385,6 @@ class Typelike a where
   nargs :: a -> Int
   nargs t = case typeOf t of
     (FunT _ t) -> 1 + nargs t
-    (Forall _ t) -> nargs t
     _ -> 0
 
 instance Typelike Type where
@@ -424,13 +407,8 @@ instance HasOneLanguage CType where
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
 instance HasOneLanguage Type where
+  langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
-  langOf x@(ExistT (TV lang _) ts _)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(Forall (TV lang _) t)
-    | lang == langOf t = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
   langOf x@(FunT t1 t2)
     | langOf t1 == langOf t2 = langOf t1
     | otherwise = error $ "inconsistent languages in" <> show x
@@ -472,7 +450,6 @@ data TypeM
   | Serial CType -- ^ serialized data that may be deserialized in this language
   | Native CType
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
-  | ForallM [TVar] TypeM
   deriving(Show, Eq, Ord)
 
 instance HasOneLanguage TypeM where

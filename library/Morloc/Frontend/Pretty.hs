@@ -24,7 +24,22 @@ import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 prettyGreenUnresolvedType :: UnresolvedType -> Doc AnsiStyle
-prettyGreenUnresolvedType = prettyGreenType . unresolvedType2type
+prettyGreenUnresolvedType (ExistU v ts ds)
+  = angles $ (pretty v)
+  <> list (map prettyGreenUnresolvedType ts)
+  <> list (map prettyGreenUnresolvedType ds)
+prettyGreenUnresolvedType t@(ForallU _ _) =
+  "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
+prettyGreenUnresolvedType t = prettyGreenType . unresolvedType2type $ t
+
+forallVars :: UnresolvedType -> [Doc AnsiStyle]
+forallVars (ForallU v t) = pretty v : forallVars t
+forallVars _ = []
+
+forallBlock :: UnresolvedType -> Doc AnsiStyle
+forallBlock (ForallU _ t) = forallBlock t
+forallBlock t = prettyGreenUnresolvedType t
+
 
 cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute d = mapM_ (putDoc . cute') (Map.toList d) where

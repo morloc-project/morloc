@@ -58,14 +58,6 @@ screamStyle =
     , Style.ansiUnderlining = Just Underlined
     }
 
-forallVars :: Type -> [Doc a]
-forallVars (Forall v t) = pretty v : forallVars t
-forallVars _ = []
-
-forallBlock :: Type -> Doc a
-forallBlock (Forall _ t) = forallBlock t
-forallBlock t = prettyType t
-
 prettyGreenType :: Type -> Doc AnsiStyle
 prettyGreenType t = annotate typeStyle (prettyType t)
 
@@ -80,17 +72,12 @@ class PrettyType a where
   prettyType :: a -> Doc ann
 
 instance PrettyType Type where
+  prettyType (UnkT (TV _ v)) = "*" <> pretty v
   prettyType (VarT (TV lang "Unit")) = "()"
   prettyType (VarT v) = pretty v
   prettyType (FunT t1@(FunT _ _) t2) =
     parens (prettyType t1) <+> "->" <+> prettyType t2
   prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
-  prettyType t@(Forall _ _) =
-    "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-  prettyType (ExistT v ts ds)
-    = angles $ (pretty v)
-    <> list (map prettyType ts)
-    <> list (map (prettyType . unDefaultType) ds)
   prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
   prettyType (NamT (TV Nothing _) entries) =
     encloseSep "{" "}" ", "

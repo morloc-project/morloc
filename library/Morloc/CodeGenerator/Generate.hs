@@ -403,15 +403,15 @@ rewritePartials
   -> MorlocMonad (SAnno GMeta One CType)
 rewritePartials s@(SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
   -- say $ writeAST id Nothing s
-  let gTypeArgs = maybe (repeat Nothing) typeArgsG (metaGType m)
+  let gTypeArgs = maybe (repeat Nothing) (map Just . typeArgsG) (metaGType m)
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
   lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
   let vs = map EVar . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
       ys = zipWith3 makeVar vs (typeArgsC ftype) gTypeArgs
-  -- unsafe, but should not fail for well-typed input
-      appType = fromJust . last . typeArgsC $ ftype
-      appMeta = m {metaGType = metaGType m >>= (last . typeArgsG)}
+      -- unsafe, but should not fail for well-typed input
+      appType = last . typeArgsC $ ftype
+      appMeta = m {metaGType = metaGType m >>= (last . map Just . typeArgsG)}
       lamMeta = m {metaGType = Just lamGType}
       lamCType = ftype
 
@@ -420,9 +420,8 @@ rewritePartials s@(SAnno (One (AppS f xs, ftype@(CType (FunT _ _)))) m) = do
     makeGType :: [Maybe GType] -> MorlocMonad GType
     makeGType ts = fmap GType . makeType . map unGType $ (map fromJust ts)
     -- make an sanno variable from variable name and type info
-    makeVar :: EVar -> Maybe CType -> Maybe GType -> SAnno GMeta One CType
-    makeVar _ Nothing _ = error "Yeah, so this can happen"
-    makeVar v (Just c) g = SAnno (One (VarS v, c))
+    makeVar :: EVar -> CType -> Maybe GType -> SAnno GMeta One CType
+    makeVar v c g = SAnno (One (VarS v, c))
       ( m { metaGType = g
           , metaName = Nothing
           , metaProperties = Set.empty
@@ -459,12 +458,9 @@ parameterize (SAnno (One (LamS vs x, t)) m) = do
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize (SAnno (One (CallS src, t)) m) = do
-  ts <- case sequence (typeArgsC t) of
-    (Just ts') -> return (init ts')
-    Nothing -> MM.throwError . TypeError . render $
-      "Unexpected type in parameterize CallS:" <+> prettyType t
-  let vs = map EVar (freshVarsAZ [])
-      args0 = zipWith makeArgument [0..] (map Just ts)
+  let ts = init (typeArgsC t)
+      vs = map EVar (freshVarsAZ [])
+      args0 = zipWith makeArgument [0..] ts
   return $ SAnno (One (CallS src, (t, zip vs args0))) m
 parameterize x = parameterize' [] x
 
@@ -518,9 +514,9 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
-makeArgument :: Int -> Maybe CType -> Argument
-makeArgument i (Just t) = SerialArgument i t
-makeArgument i Nothing = PassThroughArgument i
+makeArgument :: Int -> CType -> Argument
+makeArgument i (CType (UnkT _)) = PassThroughArgument i
+makeArgument i t = SerialArgument i t
 
 
 -- convert from unambiguous tree to non-segmented ExprM
@@ -805,45 +801,16 @@ say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 -- resolves a function into a list of types, for example:
 -- ((Num->String)->[Num]->[String]) would resolve to the list
--- [(Num->String),[Num],[String]]. Any unsolved variables (i.e., that are still
--- universally qualified) will be stored as Nothing. Such variables will always
--- be passthrough arguments that have unknown type in the current language, but
--- will be passed on to one where they are defined.
-typeArgsC :: CType -> [Maybe CType]
-typeArgsC t = map (fmap ctype) (typeArgs [] (unCType t))
+-- [(Num->String),[Num],[String]].
+typeArgsC :: CType -> [CType]
+typeArgsC t = map CType (typeArgs (unCType t))
 
-typeArgsG :: GType -> [Maybe GType]
-typeArgsG t = map (fmap GType) (typeArgs [] (unGType t))
+typeArgsG :: GType -> [GType]
+typeArgsG t = map GType (typeArgs (unGType t))
 
-typeArgs :: [TVar] -> Type -> [Maybe Type]
-typeArgs unsolved (FunT t1@(VarT v) t2)
-  | elem v unsolved = Nothing : typeArgs unsolved t2
-  | otherwise = Just t1 : typeArgs unsolved t2
-typeArgs unsolved (FunT t1 t2) = Just t1 : typeArgs unsolved t2
-typeArgs unsolved (Forall v t) = typeArgs (v:unsolved) t
-typeArgs unsolved t@(VarT v)
-  | elem v unsolved = [Nothing]
-  | otherwise = [Just t]
-typeArgs unsolved t = [Just t]
-
--- The typeArgs*' functions are like the typeArgs* functions except they
--- replace Nothing with `forall a . a`. Basically, Anything instead of Nothing.
-typeArgsC' :: CType -> [CType]
-typeArgsC' t = map ctype (typeArgs' [] (unCType t))
-
-typeArgsG' :: GType -> [GType]
-typeArgsG' t = map GType (typeArgs' [] (unGType t))
-
-typeArgs' :: [TVar] -> Type -> [Type]
-typeArgs' unsolved (FunT t1@(VarT v) t2)
-  | elem v unsolved = Forall v t1 : typeArgs' unsolved t2
-  | otherwise = t1 : typeArgs' unsolved t2
-typeArgs' unsolved (FunT t1 t2) = t1 : typeArgs' unsolved t2
-typeArgs' unsolved (Forall v t) = typeArgs' (v:unsolved) t
-typeArgs' unsolved t@(VarT v)
-  | elem v unsolved = [Forall v t]
-  | otherwise = [t]
-typeArgs' _ t = [t]
+typeArgs :: Type -> [Type]
+typeArgs (FunT t1 t2) = t1 : typeArgs t2
+typeArgs t = [t]
 
 makeManifoldName :: GMeta -> EVar
 makeManifoldName m = EVar $ "m" <> MT.show' (metaId m)

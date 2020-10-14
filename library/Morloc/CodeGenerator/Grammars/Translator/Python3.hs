@@ -174,8 +174,6 @@ typeSchema c = f (unCType c)
     f (VarT v) = lst [var v, "None"]
     f (ArrT v ps) = lst [var v, lst (map f ps)]
     f (NamT v es) = lst [var v, dict (map entry es)]
-    -- FIXME: leaking existential
-    f (ExistT _ _ [t]) = typeSchema (CType $ unDefaultType t)
     f t = error $ "Cannot serialize this type: " ++ show t
 
     entry :: (MT.Text, Type) -> MDoc
