@@ -29,7 +29,6 @@ module Morloc.Frontend.Namespace
   , GammaIndex
   , TypeSet(..)
   , Indexable(..)
-  , UnresolvedType(..)
   , unresolvedType2type
   -- ** ModuleGamma paraphernalia
   , ModularGamma
@@ -44,22 +43,6 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-
--- | Types, see Dunfield Figure 6
-data UnresolvedType
-  = VarU TVar
-  -- ^ (a)
-  | ExistU TVar [UnresolvedType] [UnresolvedType]
-  -- ^ (a^) will be solved into one of the other types
-  | ForallU TVar UnresolvedType
-  -- ^ (Forall a . A)
-  | FunU UnresolvedType UnresolvedType
-  -- ^ (A->B)
-  | ArrU TVar [UnresolvedType] -- positional parameterized types
-  -- ^ f [UnresolvedType]
-  | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
-  -- ^ Foo { bar :: A, baz :: B }
-  deriving (Show, Ord, Eq)
 
 unresolvedType2type :: UnresolvedType -> Type 
 unresolvedType2type (VarU v) = VarT v

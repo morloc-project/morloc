@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Treeify (treeify) where
+module Morloc.Frontend.Treeify (treeify, resolve, substituteT) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
@@ -26,16 +26,16 @@ data TermOrigin = Declared Expr | Sourced Source
 --  * all qualified terms are replaced with UnkT
 --  * all existentials are replaced with default values if a possible
 --    FIXME: should I really just take the first in the list???
-solveUnsolved :: UnresolvedType -> MorlocMonad Type
-solveUnsolved (VarU v) = return $ VarT v
-solveUnsolved (FunU t1 t2) = FunT <$> solveUnsolved t1 <*> solveUnsolved t2
-solveUnsolved (ArrU v ts) = ArrT v <$> mapM solveUnsolved ts
-solveUnsolved (NamU v rs) = do
-  ts' <- mapM (solveUnsolved . snd) rs
+resolve :: UnresolvedType -> MorlocMonad Type
+resolve (VarU v) = return $ VarT v
+resolve (FunU t1 t2) = FunT <$> resolve t1 <*> resolve t2
+resolve (ArrU v ts) = ArrT v <$> mapM resolve ts
+resolve (NamU v rs) = do
+  ts' <- mapM (resolve . snd) rs
   return $ NamT v (zip (map fst rs) ts')
-solveUnsolved (ExistU v ts []) = MM.throwError UnsolvedExistentialTerm
-solveUnsolved (ExistU v ts (t:_)) = solveUnsolved t
-solveUnsolved (ForallU v t) = substituteT v (UnkT v) <$> solveUnsolved t
+resolve (ExistU v ts []) = MM.throwError UnsolvedExistentialTerm
+resolve (ExistU v ts (t:_)) = resolve t
+resolve (ForallU v t) = substituteT v (UnkT v) <$> resolve t
 
 -- | substitute all appearances of a given variable with a given new type
 substituteT :: TVar -> Type -> Type -> Type
@@ -111,7 +111,7 @@ makeGMeta name typemap gtype = do
   i <- MM.getCounter
   case name >>= (flip Map.lookup) typemap of
     (Just (TypeSet (Just e) _)) -> do
-      g <- fmap (Just . GType) $ solveUnsolved (etype e)
+      g <- fmap (Just . GType) $ resolve (etype e)
       return $ GMeta
         { metaId = i
         , metaName = name
@@ -162,7 +162,7 @@ collectTerm d v n (Sourced src)
     Nothing -> MM.throwError . CallTheMonkeys $ "No type found for this"
     (Just (TypeSet g es)) -> do
       let ts = [etype e | e <- es, Just (srcLang src) == langOf e]
-      ts' <- mapM solveUnsolved ts
+      ts' <- mapM resolve ts
       return (CallS src, map CType ts')
 collectTerm d v n (Declared (AnnE e ts)) = do
   ts' <- getCTypes ts
@@ -191,7 +191,7 @@ collectAnno _ _ _ _ = error "impossible bug - unannotated expression"
 
 getCTypes :: [UnresolvedType] -> MorlocMonad [CType]
 getCTypes ts = do
-  ts' <- mapM solveUnsolved [t | t <- ts, isJust (langOf t)]
+  ts' <- mapM resolve [t | t <- ts, isJust (langOf t)]
   return $ map CType ts'
 
 
@@ -288,7 +288,7 @@ getExprName _ = Nothing
 
 getGType :: [UnresolvedType] -> MorlocMonad (Maybe GType)
 getGType ts = do
-  ts' <- mapM solveUnsolved [t | t <- ts, isNothing (langOf t)]
+  ts' <- mapM resolve [t | t <- ts, isNothing (langOf t)]
   case map GType ts' of
     [] -> return Nothing
     [x] -> return $ Just x

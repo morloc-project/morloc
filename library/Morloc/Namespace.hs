@@ -47,6 +47,7 @@ module Morloc.Namespace
   , defaultPackageMeta
   -- * Types
   , Type(..)
+  , UnresolvedType(..)
   , Source(..)
   -- ** Type extensions
   , Constraint(..)
@@ -336,6 +337,22 @@ data Type
   | ArrT TVar [Type]
   -- ^ f [Type]  -- keyword parameterized types
   | NamT TVar [(Text, Type)] 
+  -- ^ Foo { bar :: A, baz :: B }
+  deriving (Show, Ord, Eq)
+
+-- | Types, see Dunfield Figure 6
+data UnresolvedType
+  = VarU TVar
+  -- ^ (a)
+  | ExistU TVar [UnresolvedType] [UnresolvedType]
+  -- ^ (a^) will be solved into one of the other types
+  | ForallU TVar UnresolvedType
+  -- ^ (Forall a . A)
+  | FunU UnresolvedType UnresolvedType
+  -- ^ (A->B)
+  | ArrU TVar [UnresolvedType] -- positional parameterized types
+  -- ^ f [UnresolvedType]
+  | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
