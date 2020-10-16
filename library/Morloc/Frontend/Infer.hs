@@ -64,6 +64,7 @@ typecheck d = do
         , typedNodeTypeMap = nodeTypeMapFromGamma g1
         , typedNodeSourceMap = preparedNodeSourceMap n
         , typedNodeExports = preparedNodeExports n
+        , typedNodePackers = preparedNodePackers n
         }
 
     nodeTypeMapFromGamma :: Gamma -> Map.Map EVar TypeSet
