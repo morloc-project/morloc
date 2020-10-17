@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Translator.R
   ( 
     translate
+  , preprocess
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -22,22 +23,22 @@ import Morloc.Pretty (prettyType)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
+-- tree rewrites
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
 
-translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- tree rewrites
-  es' <- mapM invertExprM es
-
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
+  liftIO . putDoc $ (vsep $ map prettyExprM es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es'
+  mDocs <- mapM translateManifold es
 
   return $ makePool includeDocs mDocs
 
@@ -64,10 +65,10 @@ translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
 -- break a call tree into manifolds
-translateManifold :: ExprM -> MorlocMonad MDoc
+translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
-  f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f pargs m@(ManifoldM i args e) = do
+  f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc)
+  f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', body) <- f args e
     let head = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 head body
@@ -79,7 +80,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call)
 
-  f _ (PoolCallM t cmds args) = do
+  f _ (PoolCallM t _ cmds args) = do
     let quotedCmds = map dquotes cmds
         callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map makeArgument args)) <> ")"
         call = ".morloc_foreign_call" <> tupled([head quotedCmds, callArgs, dquotes "_", dquotes "_"])
@@ -122,12 +123,12 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "NULL")
-  f args (SerializeM e) = do
+  f args (SerializeM _ e) = do
     (ms, e') <- f args e
     let (Native t) = typeOfExprM e
     schema <- typeSchema t
     return (ms, "rmorlocinternals::mlc_serialize" <> tupled [e', schema])
-  f args (DeserializeM e) = do
+  f args (DeserializeM _ e) = do
     (ms, e') <- f args e
     let (Serial t) = typeOfExprM e
     schema <- typeSchema t

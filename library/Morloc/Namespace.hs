@@ -155,7 +155,7 @@ data MorlocError
   -- | Missing a serialization or deserialization function
   | SerializationError Text
   -- | Error in building a pool (i.e., in a compiled language)
-  | PoolBuildError Script Text
+  | PoolBuildError Text
   -- | Raise error if inappropriate function is called on unrealized manifold
   | NoBenefits
   -- | Raise when a type alias substitution fails

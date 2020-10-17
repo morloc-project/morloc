@@ -20,20 +20,54 @@ import Morloc.Frontend.Treeify (resolve, substituteT)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
+import qualified Morloc.Frontend.Lang.DefaultTypes as Def
+import Morloc.Pretty (prettyType)
+import Morloc.Data.Doc
+
+typeEqual :: Type -> UnresolvedType -> Bool
+typeEqual (VarT (TV _ v1)) (VarU (TV _ v2)) = v1 == v2
+typeEqual (ArrT (TV _ v1) ts1) (ArrU (TV _ v2) us2)
+  | length ts1 /= length us2 = False
+  | otherwise = foldl (&&) (v1 == v2) (zipWith typeEqual ts1 us2 )
+typeEqual _ _ = False
+
+-- Convert a default unresolved type to a standard type
+type2default :: Type -> UnresolvedType
+type2default (VarT v) = VarU v
+type2default (ArrT v ts) = ArrU v (map type2default ts)
+type2default (NamT v rs) = NamU v (zip (map fst rs) (map (type2default . snd) rs))
+type2default (FunT _ _) = error "default types should never be functions"
 
 makeSerialAST
-  :: Map.Map (TVar, Int) [UnresolvedPacker]
+  :: PackMap -- Map.Map (TVar, Int) [UnresolvedPacker]
   -> Type
   -> MorlocMonad (SerialAST Many)
 makeSerialAST _ (UnkT (TV _ v)) = return $ SerialUnknown v
-makeSerialAST m (VarT v) = makeSerialAST m (ArrT v [])
+makeSerialAST m t@(VarT v@(TV lang s))
+  | length nulls > 0 = return $ SerialNull s
+  | length bools > 0 = return $ SerialBool s
+  | length strings > 0 = return $ SerialString s
+  | length numbers > 0 = return $ SerialNum s
+  | otherwise = makeSerialAST m (ArrT v [])
+  where
+    nulls = filter (typeEqual t) (Def.defaultNull lang)
+    bools = filter (typeEqual t) (Def.defaultBool lang)
+    strings = filter (typeEqual t) (Def.defaultString lang)
+    numbers = filter (typeEqual t) (Def.defaultNumber lang)
 makeSerialAST _ (FunT _ _) = MM.throwError . SerializationError $ "Cannot serialize functions"
-makeSerialAST m (ArrT v ts) = case Map.lookup (v, length ts) m of
-  (Just ps) -> do        
-    ps' <- mapM (resolvePacker ts) ps
-    ts' <- mapM (makeSerialAST m) (map typePackerCType ps')
-    return $ SerialPack (Many (zip ps' ts'))
-  Nothing -> MM.throwError . SerializationError $ "Cannot find constructor" 
+makeSerialAST m t@(ArrT v@(TV lang s) ts)
+  | length ts == 1 && length (filter (typeEqual t) (Def.defaultList lang (type2default $ ts !! 0))) > 0
+    = SerialList <$> makeSerialAST m (ts !! 0)
+  | length tuples > 0 = SerialTuple <$> mapM (makeSerialAST m) ts
+  | otherwise = case Map.lookup (v, length ts) m of
+      (Just ps) -> do        
+        ps' <- mapM (resolvePacker ts) ps
+        ts' <- mapM (makeSerialAST m) (map typePackerCType ps')
+        return $ SerialPack (Many (zip ps' ts'))
+      Nothing -> MM.throwError . SerializationError . render
+        $ "Cannot find constructor for" <+> squotes (prettyType t)
+  where
+    tuples = filter (typeEqual t) (Def.defaultTuple lang (map type2default ts))
 makeSerialAST m (NamT v rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
   return $ SerialObject v (zip (map fst rs) ts) 
@@ -90,7 +124,10 @@ findSerializationCycles choose x y = f x y where
       where
         ts1 = map snd rs1
         ts2 = map snd rs1
-  f (SerialVar v1) (SerialVar v2) = Just (SerialVar v1, SerialVar v2)
+  f (SerialNum    x1) (SerialNum    x2) = Just (SerialNum    x1, SerialNum    x2)
+  f (SerialBool   x1) (SerialBool   x2) = Just (SerialBool   x1, SerialBool   x2)
+  f (SerialString x1) (SerialString x2) = Just (SerialString x1, SerialString x2)
+  f (SerialNull   x1) (SerialNull   x2) = Just (SerialNull   x1, SerialNull   x2)
   f (SerialUnknown v1) (SerialUnknown v2) = Just (SerialUnknown v1, SerialUnknown v2)
   f _ _ = Nothing
 
@@ -111,5 +148,8 @@ isSerializable (SerialPack _) = False
 isSerializable (SerialList x) = isSerializable x
 isSerializable (SerialTuple xs) = all isSerializable xs 
 isSerializable (SerialObject _ rs) = all isSerializable (map snd rs) 
-isSerializable (SerialVar _) = True -- we'll burn this bridge when we come to it
+isSerializable (SerialNum    _) = True
+isSerializable (SerialBool   _) = True
+isSerializable (SerialString _) = True
+isSerializable (SerialNull   _) = True
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?

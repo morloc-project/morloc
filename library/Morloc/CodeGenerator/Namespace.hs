@@ -18,21 +18,26 @@ module Morloc.CodeGenerator.Namespace
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
+  , PackMap
   ) where
 
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Set (Set)
+import Data.Map (Map)
 import Data.Text (Text)
+
+type PackMap = Map (TVar, Int) [UnresolvedPacker]
 
 data SerialAST f
   = SerialPack (f (TypePacker, SerialAST f))
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
   | SerialObject TVar [(Text, SerialAST f)]
-  | SerialVar Text
-  -- ^ this should be a type that is recognized by the default json serializer
-  -- for example, "double" or "std::string" in C++
+  | SerialNum Text
+  | SerialBool Text
+  | SerialString Text
+  | SerialNull Text
   | SerialUnknown Text
   -- ^ depending on the language, this may or may not raise an error down the
   -- line, the parameter contains the variable name, which is useful only for
@@ -42,7 +47,7 @@ data TypePacker = TypePacker
   { typePackerCType   :: Type
   , typePackerForward :: [Source]
   , typePackerReverse :: [Source]
-  }
+  } deriving (Show, Ord, Eq)
 
 -- | A simplified subset of the Type record
 -- functions, existential, and universal types are removed
@@ -75,7 +80,7 @@ data Argument
   -- functions of the same language.
   | NativeArgument Int CType
   -- ^ A native argument with the same parameters as above
-  | PassThroughArgument Int 
+  | PassThroughArgument Int
   -- ^ A serialized argument that is untyped in the current language. It cannot
   -- be deserialized, but will be passed eventually to a foreign argument where it
   -- does have a concrete type.
@@ -99,16 +104,15 @@ instance HasOneLanguage TypeM where
   langOf (Native c) = langOf c
   langOf (Function xs f) = listToMaybe $ catMaybes (map langOf (f:xs))
 
-
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
-data ExprM
-  = ManifoldM Int [Argument] ExprM
+data ExprM f
+  = ManifoldM GMeta [Argument] (ExprM f)
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
   | ForeignInterfaceM
       TypeM -- required type in the calling language
-      ExprM -- expression in the foreign language
+      (ExprM f) -- expression in the foreign language
   -- ^ A generic interface to an expression in another language. Currently it
   -- will be resolved only to the specfic pool call interface type, where
   -- system calls pass serialized information between pools in different
@@ -117,24 +121,25 @@ data ExprM
 
   | PoolCallM
       TypeM -- serialized return data
+      Int -- foreign manifold id
       [MDoc] -- shell command components that preceed the passed data
       [Argument] -- argument passed to the foreign function (must be serialized)
   -- ^ Make a system call to another language
 
-  | LetM Int ExprM ExprM
+  | LetM Int (ExprM f) (ExprM f)
   -- ^ let syntax allows fine control over order of operations in the generated
   -- code. The Int is an index for a LetVarM. It is also important in languages
   -- such as C++ where values need to be declared with explicit types and
   -- special constructors.
 
   | AppM
-      ExprM -- ManifoldM | SrcM | LamM
-      [ExprM] 
+      (ExprM f) -- ManifoldM | SrcM | LamM
+      [(ExprM f)]
 
   | SrcM TypeM Source
   -- ^ a within pool function call (cis)
 
-  | LamM [Argument] ExprM
+  | LamM [Argument] (ExprM f)
   -- ^ Nothing Evar will be auto generated
 
   | BndVarM TypeM Int
@@ -149,7 +154,7 @@ data ExprM
   --   \y -> mul 5 y
   -- So BndVarM does NOT include variables defined in the morloc script. It only
   -- includes lambda-bound variables. The only BndVarM is `y` (`mul` is SrcM). The
-  -- literal name "y" is replaced, though, with the integer 1. This required in
+  -- literal name "y" is replaced, though, with the integer 1. This is required in
   -- order to avoid name conflicts in concrete languages, for example consider
   -- the following (perfectly legal) morloc function:
   --   foo for = mul for 2
@@ -162,9 +167,9 @@ data ExprM
   -- variable name (e.g. [a0,a1,...] or [a,b,c,...]).
 
   -- containers
-  | ListM TypeM [ExprM]
-  | TupleM TypeM [ExprM]
-  | RecordM TypeM [(EVar, ExprM)]
+  | ListM TypeM [(ExprM f)]
+  | TupleM TypeM [(ExprM f)]
+  | RecordM TypeM [(EVar, (ExprM f))]
 
   -- primitives
   | LogM TypeM Bool
@@ -172,25 +177,23 @@ data ExprM
   | StrM TypeM Text
   | NullM TypeM
 
-  -- serialization - these must remain abstract, since required arguments
-  -- will vary between languages.
-  | SerializeM ExprM
-  | DeserializeM ExprM
+  -- serialization
+  | SerializeM (SerialAST f) (ExprM f)
+  | DeserializeM (SerialAST f) (ExprM f)
 
-  | ReturnM ExprM
+  | ReturnM (ExprM f)
   -- ^ The return value of a manifold. I need this to distinguish between the
   -- values assigned in let expressions and the final return value. In some
   -- languages, this may not be necessary (e.g., R).
-  deriving(Show)
 
-instance HasOneLanguage ExprM where
+instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang
   langOf (ManifoldM _ _ e) = langOf e
   langOf (ForeignInterfaceM t _) = langOf t
-  langOf (PoolCallM t _ _) = langOf t
+  langOf (PoolCallM t _ _ _) = langOf t
   langOf (LetM _ _ e2) = langOf e2
   langOf (AppM e _) = langOf e
-  langOf (SrcM _ src) = Just (srcLang src) 
+  langOf (SrcM _ src) = Just (srcLang src)
   langOf (LamM _ e) = langOf e
   langOf (BndVarM t _) = langOf t
   langOf (LetVarM t _) = langOf t
@@ -201,6 +204,6 @@ instance HasOneLanguage ExprM where
   langOf (NumM t _) = langOf t
   langOf (StrM t _) = langOf t
   langOf (NullM t) = langOf t
-  langOf (SerializeM e) = langOf e
-  langOf (DeserializeM e) = langOf e
+  langOf (SerializeM _ e) = langOf e
+  langOf (DeserializeM _ e) = langOf e
   langOf (ReturnM e) = langOf e

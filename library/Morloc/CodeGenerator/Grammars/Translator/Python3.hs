@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Translator.Python3
   (
     translate
+  , preprocess
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -25,8 +26,11 @@ import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 
+-- tree rewrites
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
 
-translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate srcs es = do
   -- setup library paths
   lib <- fmap pretty $ MM.asks MC.configLibrary
@@ -36,17 +40,14 @@ translate srcs es = do
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- tree rewrites
-  es' <- mapM invertExprM es
-
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
+  liftIO . putDoc $ (vsep $ map prettyExprM es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es'
+  mDocs <- mapM translateManifold es
 
   -- make code for dispatching to manifolds
-  let dispatch = makeDispatch es'
+  let dispatch = makeDispatch es
 
   return $ makePool lib includeDocs mDocs dispatch
 
@@ -77,10 +78,10 @@ translateSource (Path s) = do
   return $ "from" <+> mod <+> "import *"
 
 -- break a call tree into manifolds
-translateManifold :: ExprM -> MorlocMonad MDoc
+translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
-  f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f pargs m@(ManifoldM i args e) = do
+  f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc)
+  f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', body) <- f args e
     let mname = manNamer i
         head = "def" <+> mname <> tupled (map makeArgument args) <> ":"
@@ -102,7 +103,7 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
 
   f _ (SrcM t src) = return ([], pretty (srcName src))
 
-  f _ (PoolCallM t cmds args) = do
+  f _ (PoolCallM t _ cmds args) = do
     let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
     return ([], call)
 
@@ -127,11 +128,11 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "None")
-  f args (SerializeM e) = do
+  f args (SerializeM _ e) = do
     (ms, e') <- f args e
     let (Native t) = typeOfExprM e
     return (ms, "mlc_serialize" <> tupled [e', typeSchema t])
-  f args (DeserializeM e) = do
+  f args (DeserializeM _ e) = do
     (ms, e') <- f args e
     let (Serial t) = typeOfExprM e
     return (ms, "mlc_deserialize" <> tupled [e', typeSchema t])
@@ -157,14 +158,14 @@ makeArgument (SerialArgument i c) = bndNamer i
 makeArgument (NativeArgument i c) = bndNamer i
 makeArgument (PassThroughArgument i) = bndNamer i
 
-makeDispatch :: [ExprM] -> MDoc
+makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = align . vsep $
   [ align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
   , "result = dispatch[cmdID](*sys.argv[2:])"
   ]
   where
-    entry :: ExprM -> MDoc
-    entry (ManifoldM i _ _)
+    entry :: ExprM One -> MDoc
+    entry (ManifoldM (metaId->i) _ _)
       = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 

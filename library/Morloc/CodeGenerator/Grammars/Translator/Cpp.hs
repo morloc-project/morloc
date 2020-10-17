@@ -12,6 +12,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ( 
     translate
+  , preprocess
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -24,25 +25,25 @@ import qualified Morloc.Frontend.Macro as MTM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
+-- tree rewrites
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
 
-translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- tree rewrites
-  es' <- mapM invertExprM es
-
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
+  liftIO . putDoc $ (vsep $ map prettyExprM es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es'
+  mDocs <- mapM translateManifold es
 
-  let dispatch = makeDispatch es'
-      signatures = map makeSignature es'
+  let dispatch = makeDispatch es
+      signatures = map makeSignature es
 
   -- create and return complete pool script
   return $ makeMain includeDocs signatures mDocs dispatch
@@ -59,10 +60,10 @@ bndNamer i = "x" <> viaShow i
 serialType :: MDoc
 serialType = "std::string"
 
-makeSignature :: ExprM -> MDoc
+makeSignature :: ExprM One -> MDoc
 makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
-  f :: ExprM -> [MDoc]
-  f (ManifoldM i args e) =
+  f :: ExprM One -> [MDoc]
+  f (ManifoldM (metaId->i) args e) =
     let t = typeOfExprM e
         sig = showTypeM t <+> manNamer i <> tupled (map makeArg args) <> ";"
     in sig : f e
@@ -72,8 +73,8 @@ makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
   f (ListM _ es) = conmap f es
   f (TupleM _ es) = conmap f es
   f (RecordM _ entries) = conmap f (map snd entries)
-  f (SerializeM e) = f e
-  f (DeserializeM e) = f e
+  f (SerializeM _ e) = f e
+  f (DeserializeM _ e) = f e
   f (ReturnM e) = f e
   f _ = []
 
@@ -111,19 +112,19 @@ translateSource
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
-translateManifold :: ExprM -> MorlocMonad MDoc
+translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) =
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
   f :: [Argument]
-    -> ExprM
+    -> ExprM One
     -> MorlocMonad
        ( [MDoc] -- the collection of final manifolds
        , MDoc -- a call tag for this expression
        , [MDoc] -- a list of statements that should precede this assignment
        )
 
-  f args (LetM i (SerializeM e1) e2) = do
+  f args (LetM i (SerializeM _ e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showNativeTypeM (typeOfExprM e1)
@@ -132,10 +133,10 @@ translateManifold m@(ManifoldM _ args _) =
         serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{e1'}, #{schemaName});|]
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, serializing, e2'], [])
 
-  f _ (SerializeM _) = MM.throwError . OtherError
+  f _ (SerializeM _ _) = MM.throwError . OtherError
     $ "SerializeM should only appear in an assignment"
 
-  f args (LetM i (DeserializeM e1) e2) = do
+  f args (LetM i (DeserializeM _ e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showNativeTypeM (typeOfExprM e1)
@@ -143,7 +144,7 @@ translateManifold m@(ManifoldM _ args _) =
         schema = [idoc|#{t} #{schemaName};|]
         deserializeing = [idoc|#{t} #{letNamer i} = deserialize(#{e1'}, #{schemaName});|]
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, deserializeing, e2'], [])
-  f _ (DeserializeM _) = MM.throwError . OtherError
+  f _ (DeserializeM _ _) = MM.throwError . OtherError
     $ "DeserializeM should only appear in an assignment"
 
   f args (LetM i e1 e2) = do
@@ -162,7 +163,7 @@ translateManifold m@(ManifoldM _ args _) =
         sig = [idoc|#{showTypeM output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
     where
-      typeOfExprM' :: ExprM -> TypeM
+      typeOfExprM' :: ExprM One -> TypeM
       typeOfExprM' m@(ManifoldM _ args' _) = case splitArgs args' args of
         (_, []) -> typeOfExprM m
         (_, ts) -> Function (map arg2typeM ts) (typeOfExprM m)
@@ -172,7 +173,7 @@ translateManifold m@(ManifoldM _ args _) =
 
   f args (SrcM t src) = return ([], pretty $ srcName src, [])
 
-  f pargs m@(ManifoldM i args e) = do
+  f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', body, ps1) <- f args e
     let t = typeOfExprM e
         head = showTypeM t <+> manNamer i <> tupled (map makeArg args)
@@ -194,7 +195,7 @@ translateManifold m@(ManifoldM _ args _) =
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f _ (PoolCallM t cmds args) = do
+  f _ (PoolCallM t _ cmds args) = do
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds ++ map argName args
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
@@ -258,11 +259,11 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             then Left r
             else Right r
 
-makeDispatch :: [ExprM] -> MDoc
+makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
-    makeCase :: ExprM -> MDoc
-    makeCase (ManifoldM i args _) =
+    makeCase :: ExprM One -> MDoc
+    makeCase (ManifoldM (metaId->i) args _) =
       let args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
       in
         (nest 4 . vsep)

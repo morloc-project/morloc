@@ -79,7 +79,7 @@ collect d n v = do
 
   -- Just look at one x, since any should emit the same GMeta (if not, then
   -- something is broken upstream of GMeta is not general enough)
-  gmeta <- makeGMeta (Just v) (typedNodeTypeMap n) Nothing
+  gmeta <- makeGMeta (Just v) (typedNodeTypeMap n) (typedNodePackers n) Nothing
 
   return $ SAnno (Many trees) gmeta
 
@@ -105,9 +105,10 @@ collectSExprs d n v = do
 makeGMeta
   :: Maybe EVar
   -> Map.Map EVar TypeSet
+  -> Map.Map (TVar, Int) [UnresolvedPacker] 
   -> Maybe GType
   -> MorlocMonad GMeta
-makeGMeta name typemap gtype = do
+makeGMeta name typemap packer gtype = do
   i <- MM.getCounter
   case name >>= (flip Map.lookup) typemap of
     (Just (TypeSet (Just e) _)) -> do
@@ -118,6 +119,7 @@ makeGMeta name typemap gtype = do
         , metaGType = maybe g Just gtype
         , metaProperties = eprop e
         , metaConstraints = econs e
+        , metaPackers = packer
         }
     _ -> do
       return $ GMeta
@@ -126,6 +128,7 @@ makeGMeta name typemap gtype = do
         , metaGType = gtype
         , metaProperties = Set.empty
         , metaConstraints = Set.empty
+        , metaPackers = packer
         }
 
 
@@ -183,7 +186,7 @@ collectAnno
   -> MorlocMonad (SAnno GMeta Many [CType])
 collectAnno d args n (AnnE e ts) = do
   gtype <- getGType ts
-  gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) gtype
+  gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) (typedNodePackers n) gtype
   ts' <- getCTypes ts
   trees <- collectExpr d args n ts' e
   return $ SAnno (Many trees) gmeta

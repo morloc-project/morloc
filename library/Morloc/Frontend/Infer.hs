@@ -412,26 +412,26 @@ infer l g e = do
 --
 -- Num=>
 infer' Nothing g e@(NumE _) = do
-  let [t] = MLD.defaultNumber Nothing
+  let t = head $ MLD.defaultNumber Nothing
   return (g, [t], ann e t)
 infer' lang g e@(NumE _) = do
-  t <- newvarRich [] (MLD.defaultNumber lang) lang
+  t <- newvarRich [] [head $ MLD.defaultNumber lang] lang
   return (g +> t, [t], ann e t)
 
 -- Str=>
 infer' Nothing g e@(StrE _) = do
-  let [t] = MLD.defaultString Nothing
+  let t = head $ MLD.defaultString Nothing
   return (g, [t], ann e t)
 infer' lang g e@(StrE _) = do
-  t <- newvarRich [] (MLD.defaultString lang) lang
+  t <- newvarRich [] [head $ MLD.defaultString lang] lang
   return (g +> t, [t], ann e t)
 
 -- Log=>
 infer' Nothing g e@(LogE _) = do
-  let [t] = MLD.defaultBool Nothing
+  let t = head $ MLD.defaultBool Nothing
   return (g, [t], ann e t)
 infer' lang g e@(LogE _) = do
-  t <- newvarRich [] (MLD.defaultBool lang) lang
+  t <- newvarRich [] [head $ MLD.defaultBool lang] lang
   return (g +> t, [t], ann e t)
 
 -- Src=>

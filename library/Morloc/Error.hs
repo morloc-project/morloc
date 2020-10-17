@@ -39,7 +39,7 @@ errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
-errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
+errmsg (PoolBuildError msg) = "PoolBuildError: " <> msg
 errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
 errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
 errmsg (BadTypeAliasParameters (TV _ v) exp obs)
