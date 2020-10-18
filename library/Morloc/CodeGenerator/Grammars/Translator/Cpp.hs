@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (isSerializable)
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -112,6 +113,23 @@ translateSource
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
+
+serialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+serialize i t ename s = do
+  let schemaName = letNamer i <> "_schema"
+      schema = [idoc|#{t} #{schemaName};|]
+      serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{ename}, #{schemaName});|]
+  return [schema, serializing]
+
+
+deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+deserialize i t ename s = do
+  let schemaName = letNamer i <> "_schema"
+      schema = [idoc|#{t} #{schemaName};|]
+      deserializing = [idoc|#{t} #{letNamer i} = deserialize(#{ename}, #{schemaName});|]
+  return [schema, deserializing]
+
+
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) =
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
@@ -124,27 +142,24 @@ translateManifold m@(ManifoldM _ args _) =
        , [MDoc] -- a list of statements that should precede this assignment
        )
 
-  f args (LetM i (SerializeM _ e1) e2) = do
+  f args (LetM i (SerializeM s e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showNativeTypeM (typeOfExprM e1)
-    let schemaName = letNamer i <> "_schema"
-        schema = [idoc|#{t} #{schemaName};|]
-        serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, serializing, e2'], [])
+    serialized <- serialize i t e1' s
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ serialized ++ [e2'], [])
 
-  f _ (SerializeM _ _) = MM.throwError . OtherError
+  f args (LetM i (DeserializeM s e1) e2) = do
+    (ms1, e1', ps1) <- f args e1
+    (ms2, e2', ps2) <- f args e2
+    t <- showNativeTypeM (typeOfExprM e1)
+    deserialized <- deserialize i t e1' s
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ deserialized ++ [e2'], [])
+
+  f _ (SerializeM _ _) = MM.throwError . SerializationError
     $ "SerializeM should only appear in an assignment"
 
-  f args (LetM i (DeserializeM _ e1) e2) = do
-    (ms1, e1', ps1) <- f args e1
-    (ms2, e2', ps2) <- f args e2
-    t <- showNativeTypeM (typeOfExprM e1)
-    let schemaName = letNamer i <> "_schema"
-        schema = [idoc|#{t} #{schemaName};|]
-        deserializeing = [idoc|#{t} #{letNamer i} = deserialize(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, deserializeing, e2'], [])
-  f _ (DeserializeM _ _) = MM.throwError . OtherError
+  f _ (DeserializeM _ _) = MM.throwError . SerializationError
     $ "DeserializeM should only appear in an assignment"
 
   f args (LetM i e1 e2) = do

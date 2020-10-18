@@ -64,6 +64,21 @@ typeSchema c = do
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
+
+serialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
+serialize e e' s = do
+  let (Native t) = typeOfExprM e
+  schema <- typeSchema t
+  return $ "rmorlocinternals::mlc_serialize" <> tupled [e', schema]
+
+
+deserialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
+deserialize e e' s = do
+  let (Serial t) = typeOfExprM e
+  schema <- typeSchema t
+  return $ "rmorlocinternals::mlc_deserialize" <> tupled [e', schema]
+
+
 -- break a call tree into manifolds
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
@@ -123,16 +138,14 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
   f _ (NumM _ x) = return ([], viaShow x)
   f _ (StrM _ x) = return ([], dquotes $ pretty x)
   f _ (NullM _) = return ([], "NULL")
-  f args (SerializeM _ e) = do
+  f args (SerializeM s e) = do
     (ms, e') <- f args e
-    let (Native t) = typeOfExprM e
-    schema <- typeSchema t
-    return (ms, "rmorlocinternals::mlc_serialize" <> tupled [e', schema])
-  f args (DeserializeM _ e) = do
+    serialized <- serialize e e' s
+    return (ms, serialized)
+  f args (DeserializeM s e) = do
     (ms, e') <- f args e
-    let (Serial t) = typeOfExprM e
-    schema <- typeSchema t
-    return (ms, "rmorlocinternals::mlc_deserialize" <> tupled [e', schema])
+    deserialized <- deserialize e e' s
+    return (ms, deserialized)
   f args (ReturnM e) = do
     (ms, e') <- f args e
     return (ms, e')
