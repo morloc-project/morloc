@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.R
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (isSerializable)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
@@ -66,17 +67,21 @@ translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
 
 serialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
-serialize e e' s = do
-  let (Native t) = typeOfExprM e
-  schema <- typeSchema t
-  return $ "rmorlocinternals::mlc_serialize" <> tupled [e', schema]
+serialize e e' s
+  | isSerializable s = do
+      let (Native t) = typeOfExprM e
+      schema <- typeSchema t
+      return $ "rmorlocinternals::mlc_serialize" <> tupled [e', schema]
+  | otherwise = MM.throwError . SerializationError $ "Complex R serialization not yet supported"
 
 
 deserialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
-deserialize e e' s = do
-  let (Serial t) = typeOfExprM e
-  schema <- typeSchema t
-  return $ "rmorlocinternals::mlc_deserialize" <> tupled [e', schema]
+deserialize e e' s
+  | isSerializable s = do
+      let (Serial t) = typeOfExprM e
+      schema <- typeSchema t
+      return $ "rmorlocinternals::mlc_deserialize" <> tupled [e', schema]
+  | otherwise = MM.throwError . SerializationError $ "Complex R deserialization not yet supported"
 
 
 -- break a call tree into manifolds

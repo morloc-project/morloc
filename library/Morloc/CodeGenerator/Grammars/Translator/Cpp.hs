@@ -115,19 +115,23 @@ translateSource path = return $
 
 
 serialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-serialize i t ename s = do
-  let schemaName = letNamer i <> "_schema"
-      schema = [idoc|#{t} #{schemaName};|]
-      serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{ename}, #{schemaName});|]
-  return [schema, serializing]
+serialize i t ename s
+  | isSerializable s = do
+      let schemaName = letNamer i <> "_schema"
+          schema = [idoc|#{t} #{schemaName};|]
+          serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{ename}, #{schemaName});|]
+      return [schema, serializing]
+  | otherwise = MM.throwError . SerializationError $ "Complex C++ serialization not yet supported"
 
 
 deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-deserialize i t ename s = do
-  let schemaName = letNamer i <> "_schema"
-      schema = [idoc|#{t} #{schemaName};|]
-      deserializing = [idoc|#{t} #{letNamer i} = deserialize(#{ename}, #{schemaName});|]
-  return [schema, deserializing]
+deserialize i t ename s
+  | isSerializable s = do
+      let schemaName = letNamer i <> "_schema"
+          schema = [idoc|#{t} #{schemaName};|]
+          deserializing = [idoc|#{t} #{letNamer i} = deserialize(#{ename}, #{schemaName});|]
+      return [schema, deserializing]
+  | otherwise = MM.throwError . SerializationError $ "Complex C++ deserialization not yet supported"
 
 
 translateManifold :: ExprM One -> MorlocMonad MDoc

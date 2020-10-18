@@ -16,6 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
   ) where
 
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (isSerializable)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
@@ -79,15 +80,19 @@ translateSource (Path s) = do
 
 
 serialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
-serialize e e' s = do
-  let (Native t) = typeOfExprM e
-  return $ "mlc_serialize" <> tupled [e', typeSchema t]
+serialize e e' s
+  | isSerializable s = do
+      let (Native t) = typeOfExprM e
+      return $ "mlc_serialize" <> tupled [e', typeSchema t]
+  | otherwise = MM.throwError . SerializationError $ "Complex Python serialization not yet supported"
 
 
 deserialize :: ExprM One -> MDoc -> SerialAST One -> MorlocMonad MDoc
-deserialize e e' s = do
-  let (Serial t) = typeOfExprM e
-  return $ "mlc_deserialize" <> tupled [e', typeSchema t]
+deserialize e e' s
+  | isSerializable s = do
+      let (Serial t) = typeOfExprM e
+      return $ "mlc_deserialize" <> tupled [e', typeSchema t]
+  | otherwise = MM.throwError . SerializationError $ "Complex Python deserialization not yet supported"
 
 
 -- break a call tree into manifolds
