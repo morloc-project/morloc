@@ -75,7 +75,7 @@ prettyGreenType :: Type -> Doc AnsiStyle
 prettyGreenType t = annotate typeStyle (prettyType t)
 
 forallVars :: UnresolvedType -> [Doc AnsiStyle]
-forallVars (ForallU v t) = pretty v : forallVars t
+forallVars (ForallU (TV _ v) t) = pretty v : forallVars t
 forallVars _ = []
 
 forallBlock :: UnresolvedType -> Doc AnsiStyle
@@ -143,7 +143,8 @@ prettyUnresolvedType (NamU (TV (Just lang) t) entries) =
 
 prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
 prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep
-  [ pretty v <+> "=" <+> prettyGreenUnresolvedType t 
+  [ pretty v
+  , prettyGreenUnresolvedType t 
   , "forward:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) fs)
   , "reverse:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) rs)
   ]

@@ -256,7 +256,7 @@ makeNodePackers
 makeNodePackers xs ys n =
   let xs' = map (\(x,y,z)->(x, resolve y, z)) xs
       ys' = map (\(x,y,z)->(x, resolve y, z)) ys
-      items = [ ( packerKey t1
+      items = [ ( packerKey t2
                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
               | (v1, t1, ss1) <- xs'
               , (v2, t2, ss2) <- ys'

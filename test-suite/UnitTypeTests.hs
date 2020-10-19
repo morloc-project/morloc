@@ -217,38 +217,38 @@ packerTests =
   testGroup
     "Test building of packer maps"
     [ assertPacker "no import packer"
-        [r| source R from "map.R" ( "mlc_packMap" as packMap
-                                  , "mlc_unpackMap" as unpackMap);
+        [r| source Cpp from "map.h" ( "mlc_packMap" as packMap
+                                    , "mlc_unpackMap" as unpackMap);
             packMap :: pack => ([a],[b]) -> Map a b;
             unpackMap :: unpack => Map a b -> ([a],[b]);
-            packMap R :: pack => ([a],[b]) -> "list" a b;
-            unpackMap R :: unpack => "list" a b -> ([a],[b]);
+            packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b;
+            unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b]);
             export Map;
         |]
         ( Map.singleton
-            (TV (Just RLang) "tuple", 2)
+            (TV (Just CppLang) "std::map<$1,$2>", 2)
             [ UnresolvedPacker {
                 unresolvedPackerTerm = (Just (EVar "Map"))
               , unresolvedPackerCType
-                = forallc RLang ["a","b"]
-                  ( arrc RLang "tuple" [ arrc RLang "list" [varc RLang "a"]
-                                       , arrc RLang "list" [varc RLang "b"]])
+                = forallc CppLang ["a","b"]
+                  ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
+                                                     , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") RLang (Just (Path "map.R")) (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just (Path "map.h")) (EVar ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") RLang (Just (Path "map.R")) (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just (Path "map.h")) (EVar ("unpackMap"))]
               }
             ]
         )
 
     , assertPacker "with importing and aliases"
         [r| module A {
-              source R from "map.R" ( "mlc_packMap" as packMap
-                                    , "mlc_unpackMap" as unpackMap);
+              source Cpp from "map.h" ( "mlc_packMap" as packMap
+                                      , "mlc_unpackMap" as unpackMap);
               packMap :: pack => ([a],[b]) -> Map a b;
               unpackMap :: unpack => Map a b -> ([a],[b]);
-              packMap R :: pack => ([a],[b]) -> "list" a b;
-              unpackMap R :: unpack => "list" a b -> ([a],[b]);
+              packMap Cpp :: pack => ([a],[b]) -> "std::map<$1,$2>" a b;
+              unpackMap Cpp :: unpack => "std::map<$1,$2>" a b -> ([a],[b]);
               export Map;
             };
             module Main {
@@ -256,17 +256,17 @@ packerTests =
             }
         |]
         ( Map.singleton
-            (TV (Just RLang) "tuple", 2)
+            (TV (Just CppLang) "std::map<$1,$2>", 2)
             [ UnresolvedPacker {
                 unresolvedPackerTerm = (Just (EVar "Hash"))
               , unresolvedPackerCType
-                = forallc RLang ["a","b"]
-                  ( arrc RLang "tuple" [ arrc RLang "list" [varc RLang "a"]
-                                       , arrc RLang "list" [varc RLang "b"]])
+                = forallc CppLang ["a","b"]
+                  ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
+                                                     , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") RLang (Just (Path "map.R")) (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just (Path "map.h")) (EVar ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") RLang (Just (Path "map.R")) (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just (Path "map.h")) (EVar ("unpackMap"))]
               }
             ]
         )
