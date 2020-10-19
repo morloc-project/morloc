@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Serial
   , findSerializationCycles 
   , chooseSerializationCycle
   , isSerializable
+  , prettySerialOne
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -154,3 +155,16 @@ isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull   _) = True
 isSerializable (SerialUnknown _) = True -- are you feeling lucky?
+
+prettySerialOne :: SerialAST One -> MDoc
+prettySerialOne (SerialPack _) = "SerialPack"
+prettySerialOne (SerialList x) = "SerialList" <> parens (prettySerialOne x)
+prettySerialOne (SerialTuple xs) = "SerialTuple" <> tupled (map prettySerialOne xs)
+prettySerialOne (SerialObject _ rs)
+  = block 4 "SerialObject"
+  $ vsep (map (\(k,v) -> pretty k <> "=" <> prettySerialOne v) rs)
+prettySerialOne (SerialNum    _) = "SerialNum"
+prettySerialOne (SerialBool   _) = "SerialBool"
+prettySerialOne (SerialString _) = "SerialString"
+prettySerialOne (SerialNull   _) = "SerialNull"
+prettySerialOne (SerialUnknown _) = "SerialUnknown"

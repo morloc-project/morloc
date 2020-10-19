@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable)
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne)
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -114,29 +114,64 @@ translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
 
-serialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-serialize i t ename s
+-- give: let x_i = e1 in e2
+serialize
+  :: Int -- The let index `i`
+  -> MDoc -- The type of e1
+  -> MDoc -- A variable name pointing to e1
+  -> SerialAST One
+  -> MorlocMonad [MDoc]
+serialize letIndex typestr varname s
   | isSerializable s = do
-      let schemaName = letNamer i <> "_schema"
-          schema = [idoc|#{t} #{schemaName};|]
-          serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{ename}, #{schemaName});|]
+      let schemaName = varname <> "_schema"
+          schema = [idoc|#{typestr} #{schemaName};|]
+          serializing = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{varname}, #{schemaName});|]
       return [schema, serializing]
-  | otherwise = MM.throwError . SerializationError $ "Complex C++ serialization not yet supported"
+  | otherwise = serializeDescend letIndex typestr varname s
 
+serializeDescend :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+serializeDescend letIndex typestr varname (SerialPack (One (p, s'))) = do
+  i <- MM.getCounter
+  unpacker <- case typePackerReverse p of
+    [] -> MM.throwError . SerializationError $ "No unpacker found"
+    (x:_) -> return . pretty . srcAlias $ x
+  let varname' = "s" <> pretty i
+      typestr' = showType (CType $ typePackerCType p)
+      unpacked = [idoc|#{typestr'} #{varname'} = #{unpacker}(#{varname});|]
+  (:) unpacked <$> serialize letIndex typestr' varname' s'
+serializeDescend _ _ _ s = MM.throwError . SerializationError . render
+  $ "serializeDescend: " <> prettySerialOne s
 
+-- reverse of serialize, paramters are the same
 deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-deserialize i t ename s
+deserialize letIndex typestr varname s
   | isSerializable s = do
-      let schemaName = letNamer i <> "_schema"
-          schema = [idoc|#{t} #{schemaName};|]
-          deserializing = [idoc|#{t} #{letNamer i} = deserialize(#{ename}, #{schemaName});|]
+      let schemaName = varname <> "_schema"
+          schema = [idoc|#{typestr} #{schemaName};|]
+          deserializing = [idoc|#{typestr} #{letNamer letIndex} = deserialize(#{varname}, #{schemaName});|]
       return [schema, deserializing]
-  | otherwise = MM.throwError . SerializationError $ "Complex C++ deserialization not yet supported"
+  | otherwise = deserializeDescend letIndex typestr varname s
+
+deserializeDescend :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+deserializeDescend letIndex typestr varname (SerialPack (One (p, s'))) = do
+  i <- MM.getCounter
+  packer <- case typePackerForward p of
+    [] -> MM.throwError . SerializationError $ "No packer found"
+    (x:_) -> return . pretty . srcAlias $ x
+  let varname' = "s" <> pretty i
+      schemaName' = "_sub_schema_" <> pretty i
+      typestr' = showType (CType $ typePackerCType p)
+      schema = [idoc|#{typestr'} #{schemaName'};|]
+      deserializing = [idoc|#{typestr'} #{varname'} = #{packer}(#{varname}, #{schemaName'});|]
+  (++) [schema, deserializing] <$> deserialize letIndex typestr' varname' s'
+deserializeDescend _ _ _ s = MM.throwError . SerializationError . render
+  $ "deserializeDescend: " <> prettySerialOne s
 
 
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m@(ManifoldM _ args _) =
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
+  MM.startCounter >>
+    (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
   f :: [Argument]
     -> ExprM One
