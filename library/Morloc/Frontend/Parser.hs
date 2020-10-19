@@ -347,9 +347,9 @@ pProperty :: Parser Property
 pProperty = do
   ps <- many1 name
   case ps of
-    ["packs"] -> return Pack
-    ["unpacks"] -> return Unpack
-    ["casts"] -> return Cast
+    ["pack"] -> return Pack
+    ["unpack"] -> return Unpack
+    ["cast"] -> return Cast
     _ -> return (GeneralProperty ps)
 
 pConstraint :: Parser Constraint

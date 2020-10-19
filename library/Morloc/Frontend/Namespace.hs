@@ -29,7 +29,6 @@ module Morloc.Frontend.Namespace
   , GammaIndex
   , TypeSet(..)
   , Indexable(..)
-  , unresolvedType2type
   -- ** ModuleGamma paraphernalia
   , ModularGamma
   ) where
@@ -43,14 +42,6 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-
-unresolvedType2type :: UnresolvedType -> Type 
-unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
-unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
-unresolvedType2type (NamU v rs) = NamT v (zip (map fst rs) (map (unresolvedType2type . snd) rs))
-unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
-unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
 
 -- | Terms, see Dunfield Figure 1
 data Expr

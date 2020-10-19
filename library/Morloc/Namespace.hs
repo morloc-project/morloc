@@ -35,6 +35,7 @@ module Morloc.Namespace
   , Script(..)
   -- ** Serialization
   , UnresolvedPacker(..)
+  , PackMap
   --------------------
   -- ** Error handling
   , MorlocError(..)
@@ -50,6 +51,7 @@ module Morloc.Namespace
   -- * Types
   , Type(..)
   , UnresolvedType(..)
+  , unresolvedType2type
   , Source(..)
   -- ** Type extensions
   , Constraint(..)
@@ -119,7 +121,12 @@ data Script =
 
 data UnresolvedPacker =
   UnresolvedPacker
-    { unresolvedPackerCType   :: UnresolvedType -- The decomposed (unpacked) type
+    { unresolvedPackerTerm :: Maybe EVar
+    -- ^ The general import term used for this type. For example, the 'Map'
+    -- type may have language-specific realizations such as 'dict' or 'hash',
+    -- but it is imported as 'import xxx (Map)'.
+    , unresolvedPackerCType :: UnresolvedType
+    -- ^ The decomposed (unpacked) type
     , unresolvedPackerForward :: [Source]
     -- ^ The unpack function, there may be more than one, the compiler will make
     -- a half-hearted effort to find the best one. It is called "Forward" since
@@ -127,6 +134,8 @@ data UnresolvedPacker =
     , unresolvedPackerReverse :: [Source]
     }
   deriving (Show, Ord, Eq)
+
+type PackMap = Map (TVar, Int) [UnresolvedPacker]
 
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
@@ -370,6 +379,15 @@ data UnresolvedType
   | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
+
+unresolvedType2type :: UnresolvedType -> Type 
+unresolvedType2type (VarU v) = VarT v
+unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
+unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
+unresolvedType2type (NamU v rs) = NamT v (zip (map fst rs) (map (unresolvedType2type . snd) rs))
+unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
+unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
+
 
 data Property
   = Pack -- data structure to JSON

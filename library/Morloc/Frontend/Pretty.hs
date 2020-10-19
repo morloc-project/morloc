@@ -13,7 +13,6 @@ module Morloc.Frontend.Pretty
   , ugly
   , prettyExpr
   , prettyGammaIndex
-  , prettyGreenUnresolvedType
   ) where
 
 import Morloc.Frontend.Namespace
@@ -23,36 +22,23 @@ import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
-prettyGreenUnresolvedType :: UnresolvedType -> Doc AnsiStyle
-prettyGreenUnresolvedType (ExistU v ts ds)
-  = angles $ (pretty v)
-  <> list (map prettyGreenUnresolvedType ts)
-  <> list (map prettyGreenUnresolvedType ds)
-prettyGreenUnresolvedType t@(ForallU _ _) =
-  "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyGreenUnresolvedType t = prettyGreenType . unresolvedType2type $ t
-
-forallVars :: UnresolvedType -> [Doc AnsiStyle]
-forallVars (ForallU v t) = pretty v : forallVars t
-forallVars _ = []
-
-forallBlock :: UnresolvedType -> Doc AnsiStyle
-forallBlock (ForallU _ t) = forallBlock t
-forallBlock t = prettyGreenUnresolvedType t
-
-
 cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute d = mapM_ (putDoc . cute') (Map.toList d) where
   cute' :: (MVar, (TypedNode, [(MVar, [(EVar, EVar)])])) -> Doc AnsiStyle
   cute' (v, (n, xs)) = block 4 (pretty v) (cuteBody n xs)
 
 cuteBody :: TypedNode -> [(MVar, [(EVar, EVar)])] -> Doc AnsiStyle
-cuteBody t xs = vsep (map (uncurry cuteImport) xs) <> line <> cuteTypedNode t
+cuteBody t xs = prettyPackMap (typedNodePackers t) <> line
+ <> vsep (cuteSources (typedNodeSourceMap t)) <> line 
+ <> vsep (map (uncurry cuteImport) xs) <> line <> cuteTypedNode t
 
 cuteImport :: MVar -> [(EVar, EVar)] -> Doc AnsiStyle
 cuteImport m xs
   = "from" <+> pretty m <+> "import"
   <+> tupled (map (\(v1,v2) -> pretty v1 <+> "as" <+> pretty v2) xs)
+
+cuteSources :: Map.Map (EVar, Lang) Source -> [Doc AnsiStyle]
+cuteSources m = map (\((v,l),src) -> pretty v <> "@" <> pretty l <+> pretty src) (Map.toList m)
 
 cuteTypedNode :: TypedNode -> Doc AnsiStyle
 cuteTypedNode t = vsep (map prettyExpr (typedNodeBody t))

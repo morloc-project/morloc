@@ -10,8 +10,9 @@ Stability   : experimental
 module Morloc.Frontend.Desugar (desugar, desugarType) where
 
 import Morloc.Frontend.Namespace
+import Morloc.Pretty
+import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
@@ -53,11 +54,11 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
     | length contradict > 0
         = MM.throwError . CallTheMonkeys
         $ "Error: The following terms are both included and excluded: " <>
-          MD.render (MD.tupledNoFold $ map MD.pretty contradict)
+          render (tupledNoFold $ map pretty contradict)
     | length missing > 0
         = MM.throwError . CallTheMonkeys
         $ "Error: The following terms are not exported: " <>
-          MD.render (MD.tupledNoFold $ map MD.pretty missing)
+          render (tupledNoFold $ map pretty missing)
     | otherwise = return inc
     where
       missing = [n | (n, _) <- inc, not $ Set.member n (parserNodeExports n2)]
@@ -80,6 +81,7 @@ simplify = return . MDD.mapNode prepare where
     , preparedNodeBody = parserNodeBody n1
     , preparedNodeSourceMap = parserNodeSourceMap n1
     , preparedNodeExports = parserNodeExports n1
+    , preparedNodePackers = Map.empty -- This will be filled in in `addPackerMap`
     }
 
 checkForSelfRecursion :: Map.Map TVar (UnresolvedType, [TVar]) -> MorlocMonad ()
@@ -219,34 +221,70 @@ addPackerMap d = do
     (Just d') -> return d'
 
 gatherPackers
-  :: MVar
-  -> PreparedNode
-  -> [(MVar, [(EVar, EVar)], PreparedNode)]
+  :: MVar -- the importing module name
+  -> PreparedNode -- data about the importing module
+  -> [( MVar -- the name of an imported module
+        , [(EVar -- the name of a term in the imported module
+          , EVar -- the alias in the importing module
+          )]
+        , PreparedNode -- data about the imported module
+     )]
   -> MorlocMonad PreparedNode
 gatherPackers k n1 es = do
   let packers   = starpack n1 Pack
       unpackers = starpack n1 Unpack
   nodepackers <- makeNodePackers packers unpackers n1
   let m = Map.unionsWith (<>) $ map (\(_, e, n2) -> inheritPackers e n2) es
-  return $ n1 { preparedNodePackers = Map.unionWith (<>) nodepackers m }
+      m' = Map.unionWith (<>) nodepackers m
+  return $ n1 { preparedNodePackers = m' }
 
 starpack :: PreparedNode -> Property -> [(EVar, UnresolvedType, [Source])]
 starpack n pro
-  = map (\(v,t) -> (v, t, maybeToList $ Map.lookup (v, fromJust $ langOf t) (preparedNodeSourceMap n)))
-  $ [(v, t) | (Signature v (EType t p c)) <- preparedNodeBody n, Set.member pro p]
+  = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
+    | (Signature v e@(EType t p _)) <- preparedNodeBody n
+    , isJust (langOf e)
+    , Set.member pro p]
+  where
+    lookupSource :: EVar -> UnresolvedType -> Map.Map (EVar, Lang) Source -> Maybe Source
+    lookupSource v t m = langOf t >>= (\lang -> Map.lookup (v, lang) m)
 
 makeNodePackers
   :: [(EVar, UnresolvedType, [Source])]
   -> [(EVar, UnresolvedType, [Source])]
   -> PreparedNode
   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
-makeNodePackers xs ys n
-  = return . Map.fromList
-  $ [ ((TV (langOf t1) (unEVar v1), parity t1), [UnresolvedPacker (packerType t1) ss1 ss2])
-    | (v1, t1, ss1) <- xs, (v2, t2, ss2) <- ys, v1 == v2, packerTypesMatch t1 t2]
+makeNodePackers xs ys n =
+  let xs' = map (\(x,y,z)->(x, resolve y, z)) xs
+      ys' = map (\(x,y,z)->(x, resolve y, z)) ys
+      items = [ ( packerKey t1
+                , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
+              | (v1, t1, ss1) <- xs'
+              , (v2, t2, ss2) <- ys'
+              , packerTypesMatch t1 t2
+              ]
+  in return $ Map.fromList items
 
-parity :: UnresolvedType -> Int
-parity = length . fst . splitArgs
+packerTerm :: EVar -> PreparedNode -> Maybe EVar
+packerTerm v n = listToMaybe . catMaybes $
+  [ termOf e
+  | (Signature v' e) <- preparedNodeBody n
+  , v == v'
+  , isNothing (langOf e)
+  ]
+  where
+    termOf :: EType -> Maybe EVar
+    termOf e = case splitArgs (etype e) of
+      (_, [VarU (TV _ term), _]) -> Just $ EVar term
+      (_, [ArrU (TV _ term) _, _]) -> Just $ EVar term
+      _ -> Nothing
+
+resolve :: UnresolvedType -> UnresolvedType
+resolve (VarU v) = VarU v
+resolve (ExistU _ _ (t:_)) = (resolve t)
+resolve (ForallU v t) = ForallU v (resolve t)
+resolve (FunU t1 t2) = FunU (resolve t1) (resolve t2)
+resolve (ArrU v ts) = ArrU v (map resolve ts)
+resolve (NamU v recs) = NamU v (zip (map fst recs) (map (resolve . snd) recs))
 
 packerTypesMatch :: UnresolvedType -> UnresolvedType -> Bool
 packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
@@ -258,6 +296,13 @@ packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 packerType :: UnresolvedType -> UnresolvedType
 packerType t = case splitArgs t of
   (_, [t1, _]) -> t1
+  _ -> error "bad packer"
+
+packerKey :: UnresolvedType -> (TVar, Int)
+packerKey t = case splitArgs t of
+  (params, [VarU v, _])   -> (v, length params)
+  (params, [ArrU v _, _]) -> (v, length params)
+  (params, [NamU v _, _]) -> (v, length params)
   _ -> error "bad packer"
 
 nargsU :: UnresolvedType -> Int
@@ -279,11 +324,21 @@ splitArgs (FunU t1 t2) =
 splitArgs t = ([], [t])
 
 inheritPackers
-  :: [(EVar, EVar)]
+  :: [( EVar -- key in THIS module descrived in the PreparedNode argument
+      , EVar -- alias used in the importing module
+      )]
   -> PreparedNode
   -> Map.Map (TVar, Int) [UnresolvedPacker]
 inheritPackers es n =
+  -- names of terms exported from this module
   let names = Set.fromList (map (unEVar . fst) es)
-  in   Map.mapKeysWith (<>)
-        (\(TV l v, i) -> (TV l . unEVar . fromJust . lookup (EVar v) $ es, i))
-     $ Map.filterWithKey (\(TV _ v, _) _ -> Set.member v names) (preparedNodePackers n)
+  in   Map.map (map toAlias)
+     $ Map.filter (isImported names) (preparedNodePackers n)
+  where
+    toAlias :: UnresolvedPacker -> UnresolvedPacker
+    toAlias n' = n' { unresolvedPackerTerm = unresolvedPackerTerm n' >>= (flip lookup) es }
+
+    isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
+    isImported names' (n0:_) = case unresolvedPackerTerm n0 of
+      Nothing -> False
+      (Just (EVar v)) -> Set.member v names'

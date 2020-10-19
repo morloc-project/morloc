@@ -21,7 +21,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty (prettyType, prettyPackMap)
 import Morloc.Data.Doc
 
 typeEqual :: Type -> UnresolvedType -> Bool
@@ -65,7 +65,8 @@ makeSerialAST m t@(ArrT v@(TV lang s) ts)
         ts' <- mapM (makeSerialAST m) (map typePackerCType ps')
         return $ SerialPack (Many (zip ps' ts'))
       Nothing -> MM.throwError . SerializationError . render
-        $ "Cannot find constructor for" <+> squotes (prettyType t)
+        $ "Cannot find constructor for" <+> squotes (prettyType t) <+> "in packmap:\n" <>
+          prettyPackMap m 
   where
     tuples = filter (typeEqual t) (Def.defaultTuple lang (map type2default ts))
 makeSerialAST m (NamT v rs) = do

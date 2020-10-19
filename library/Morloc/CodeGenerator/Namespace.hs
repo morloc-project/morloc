@@ -18,7 +18,6 @@ module Morloc.CodeGenerator.Namespace
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
-  , PackMap
   ) where
 
 import Morloc.Namespace
@@ -26,8 +25,6 @@ import Data.Scientific (Scientific)
 import Data.Set (Set)
 import Data.Map (Map)
 import Data.Text (Text)
-
-type PackMap = Map (TVar, Int) [UnresolvedPacker]
 
 data SerialAST f
   = SerialPack (f (TypePacker, SerialAST f))
