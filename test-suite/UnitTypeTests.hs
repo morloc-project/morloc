@@ -5,6 +5,7 @@ module UnitTypeTests
   , typeOrderTests
   , typeAliasTests
   , jsontype2jsonTests
+  , packerTests
   ) where
 
 import Morloc.Frontend.Namespace
@@ -119,6 +120,17 @@ exprTestFull msg code expCode =
             (main parserNodeBody $ readProgram Nothing expCode Map.empty)
     (Left err) -> error (show err)
 
+assertPacker :: String -> T.Text -> Map.Map (TVar, Int) [UnresolvedPacker] -> TestTree
+assertPacker msg code expPacker =
+  testCase msg $ do
+  result <- run code
+  case result of
+    (Right e)
+      -> assertEqual ""
+            (main typedNodePackers e)
+            expPacker
+    (Left err) -> error (show err)
+
 -- assert the exact expressions
 exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
 exprTestFullDec msg code expCode =
@@ -184,7 +196,7 @@ forall [] t = t
 forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
 
 forallc _ [] t = t
-forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forall ss t)
+forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
 
 var s = VarU (TV Nothing s)
 varc l s = VarU (TV (Just l) s)
@@ -200,6 +212,65 @@ tuple ts = ArrU v ts
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
 record rs = NamU (TV Nothing "Record") rs
+
+packerTests =
+  testGroup
+    "Test building of packer maps"
+    [ assertPacker "no import packer"
+        [r| source R from "map.R" ( "mlc_packMap" as packMap
+                                  , "mlc_unpackMap" as unpackMap);
+            packMap :: pack => ([a],[b]) -> Map a b;
+            unpackMap :: unpack => Map a b -> ([a],[b]);
+            packMap R :: pack => ([a],[b]) -> "list" a b;
+            unpackMap R :: unpack => "list" a b -> ([a],[b]);
+            export Map;
+        |]
+        ( Map.singleton
+            (TV (Just RLang) "tuple", 2)
+            [ UnresolvedPacker {
+                unresolvedPackerTerm = (Just (EVar "Map"))
+              , unresolvedPackerCType
+                = forallc RLang ["a","b"]
+                  ( arrc RLang "tuple" [ arrc RLang "list" [varc RLang "a"]
+                                       , arrc RLang "list" [varc RLang "b"]])
+              , unresolvedPackerForward
+                = [Source (Name "mlc_packMap") RLang (Just (Path "map.R")) (EVar ("packMap"))]
+              , unresolvedPackerReverse
+                = [Source (Name "mlc_unpackMap") RLang (Just (Path "map.R")) (EVar ("unpackMap"))]
+              }
+            ]
+        )
+
+    , assertPacker "with importing and aliases"
+        [r| module A {
+              source R from "map.R" ( "mlc_packMap" as packMap
+                                    , "mlc_unpackMap" as unpackMap);
+              packMap :: pack => ([a],[b]) -> Map a b;
+              unpackMap :: unpack => Map a b -> ([a],[b]);
+              packMap R :: pack => ([a],[b]) -> "list" a b;
+              unpackMap R :: unpack => "list" a b -> ([a],[b]);
+              export Map;
+            };
+            module Main {
+              import A (Map as Hash);
+            }
+        |]
+        ( Map.singleton
+            (TV (Just RLang) "tuple", 2)
+            [ UnresolvedPacker {
+                unresolvedPackerTerm = (Just (EVar "Hash"))
+              , unresolvedPackerCType
+                = forallc RLang ["a","b"]
+                  ( arrc RLang "tuple" [ arrc RLang "list" [varc RLang "a"]
+                                       , arrc RLang "list" [varc RLang "b"]])
+              , unresolvedPackerForward
+                = [Source (Name "mlc_packMap") RLang (Just (Path "map.R")) (EVar ("packMap"))]
+              , unresolvedPackerReverse
+                = [Source (Name "mlc_unpackMap") RLang (Just (Path "map.R")) (EVar ("unpackMap"))]
+              }
+            ]
+        )
+    ]
 
 jsontype2jsonTests =
   testGroup

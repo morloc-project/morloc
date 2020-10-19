@@ -371,16 +371,24 @@ pExpr =
   <|> pLam
   <|> pVar
 
--- source "c" from "foo.c" ("Foo" as foo, "bar")
--- source "R" ("sqrt", "t.test" as t_test)
 pSrcE :: Parser Expr
 pSrcE = do
-  f <- CMS.gets stateModulePath
+  modulePath <- CMS.gets stateModulePath
   reserved "source"
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  let path = MS.combine <$> fmap MS.takeDirectory f <*> srcfile
+  path <- case (modulePath, srcfile) of
+    -- build a path to the source file by searching
+    -- > source "R" from "foo.R" ("Foo" as foo, "bar")
+    (Just f, Just srcfile') -> return . Just $ MS.combine (MS.takeDirectory f) srcfile'
+    -- we are sourcing from the language base
+    -- > source "R" ("sqrt", "t.test" as t_test)
+    (Just _, Nothing) -> return Nothing
+    -- this case SHOULD only occur in testing where the source file does not exist
+    -- file non-existence will be caught later
+    (Nothing, s) -> return s 
+  let path = maybe srcfile (\f -> MS.combine (MS.takeDirectory f) <$> srcfile) modulePath
   return $ SrcE [Source { srcName = name
                         , srcLang = language
                         , srcPath = path

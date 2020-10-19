@@ -295,7 +295,7 @@ packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 
 packerType :: UnresolvedType -> UnresolvedType
 packerType t = case splitArgs t of
-  (_, [t1, _]) -> t1
+  (params, [t1, _]) -> qualify params t1
   _ -> error "bad packer"
 
 packerKey :: UnresolvedType -> (TVar, Int)
