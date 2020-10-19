@@ -9,6 +9,6 @@ export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str (Person Str) -> Map Str (Person Str)
-foo r :: Map "str" (Person "str") -> Map "str" (Person "str")
+foo :: Person (Map Str Str) -> Person (Map Str Str)
+foo py :: Person (Map "str" "str") -> Person (Map "str" "str")
 foo xs = id xs

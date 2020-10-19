@@ -1,14 +1,14 @@
-import pybase (id, Map)
+import rbase (id)
 
-source py ("list" as Person)
+source R ("list" as Person)
 
 data (Person a) = Person {name :: Str, info :: a}
-data py (Person a) = Person {name :: "str", info :: a}
+data R (Person a) = Person {name :: "character", info :: a}
 
 export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str (Person Str) -> Map Str (Person Str)
-foo r :: Map "str" (Person "str") -> Map "str" (Person "str")
+foo :: Person Str -> Person Str
+foo r :: Person "character" -> Person "character"
 foo xs = id xs

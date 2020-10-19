@@ -1,9 +1,12 @@
-import cppbase (id, Map)
+import cppbase (id)
 
 export foo
 
+type Cpp Str = "std::string";
+type Cpp Int = "int";
+
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str Int -> Map Str Int
-foo cpp :: Map "std::string" "int" -> Map "std::string" "int"
-foo xs = id xs
+foo     :: [(Str, Int)] -> [(Str, Int)];
+foo cpp :: [(Str, Int)] -> [(Str, Int)];
+foo xs = id xs;

@@ -1,4 +1,4 @@
-import rbase (id)
+import rbase (id, Map)
 
 source R ("list" as Person)
 
@@ -9,6 +9,6 @@ export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: [Person Str] -> [Person Str]
-foo R :: [Person "character"] -> [Person "character"]
+foo :: Person (Map Str Str) -> Person (Map Str Str)
+foo r :: Person (Map "character" "character") -> Person (Map "character" "character")
 foo xs = id xs
