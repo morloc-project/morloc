@@ -123,7 +123,7 @@ desugarExpr d k (ListE xs) = ListE <$> mapM (desugarExpr d k) xs
 desugarExpr d k (TupleE xs) = TupleE <$> mapM (desugarExpr d k) xs
 desugarExpr d k (LamE v e) = LamE v <$> desugarExpr d k e
 desugarExpr d k (AppE e1 e2) = AppE <$> desugarExpr d k e1 <*> desugarExpr d k e2
-desugarExpr d k (AnnE e ts) = AnnE <$> desugarExpr d k e <*> mapM (desugarType [] d k) ts
+desugarExpr d k (AnnE e ts) = AnnE <$> desugarExpr d k e <*> mapM (desugarType d k) ts
 desugarExpr _ _ e@(NumE _) = return e
 desugarExpr _ _ e@(LogE _) = return e
 desugarExpr _ _ e@(StrE _) = return e
@@ -132,40 +132,37 @@ desugarExpr d k (RecE rs) = do
   return (RecE (zip (map fst rs) es))
 
 desugarEType :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> EType -> MorlocMonad EType
-desugarEType d k (EType t ps cs) = EType <$> desugarType [] d k t <*> pure ps <*> pure cs
+desugarEType d k (EType t ps cs) = EType <$> desugarType d k t <*> pure ps <*> pure cs
 
 desugarType
-  :: [TVar]
-  -> DAG MVar [(EVar, EVar)] ParserNode
+  :: DAG MVar [(EVar, EVar)] ParserNode
   -> MVar
   -> UnresolvedType
   -> MorlocMonad UnresolvedType
-desugarType s d k t0@(VarU v)
-  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
-  | otherwise = case lookupTypedefs v k d of
+desugarType d k t0@(VarU v) =
+  case lookupTypedefs v k d of
     [] -> return t0
     ts'@(t':_) -> do
       (t, _) <- foldlM (mergeAliases v 0) t' ts'
-      desugarType (v:s) d k t
-desugarType s d k (ExistU v ts ds) = do
-  ts' <- mapM (desugarType s d k) ts
-  ds' <- mapM (desugarType s d k) ds
+      desugarType d k t
+desugarType d k (ExistU v ts ds) = do
+  ts' <- mapM (desugarType d k) ts
+  ds' <- mapM (desugarType d k) ds
   return $ ExistU v ts' ds'
-desugarType s d k (ForallU v t) = ForallU v <$> desugarType s d k t
-desugarType s d k (FunU t1 t2) = FunU <$> desugarType s d k t1 <*> desugarType s d k t2
-desugarType s d k t0@(ArrU v ts)
-  | elem v s = MM.throwError . MutuallyRecursiveTypeAlias $ s
-  | otherwise = case lookupTypedefs v k d of
-      [] -> ArrU v <$> mapM (desugarType s d k) ts
-      (t':ts') -> do
-        (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
-        if length ts == length vs
-          -- substitute parameters into alias
-          then desugarType (v:s) d k (foldr parsub t (zip vs ts))
-          else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-desugarType s d k (NamU v rs) = do
+desugarType d k (ForallU v t) = ForallU v <$> desugarType d k t
+desugarType d k (FunU t1 t2) = FunU <$> desugarType d k t1 <*> desugarType d k t2
+desugarType d k t0@(ArrU v ts) =
+  case lookupTypedefs v k d of
+    [] -> ArrU v <$> mapM (desugarType d k) ts
+    (t':ts') -> do
+      (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
+      if length ts == length vs
+        -- substitute parameters into alias
+        then desugarType d k (foldr parsub t (zip vs ts))
+        else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
+desugarType d k (NamU v rs) = do
   let keys = map fst rs
-  vals <- mapM (desugarType s d k) (map snd rs)
+  vals <- mapM (desugarType d k) (map snd rs)
   return (NamU v (zip keys vals))
 
 lookupTypedefs
