@@ -409,6 +409,17 @@ typeAliasTests =
           ]
         )
         [fun [var "C", fun [var "C", var "C"]]]
+
+    , assertTerminalType
+        "existentials are resolved"
+        (T.unlines
+          [ "type Cpp (A a b) = \"map<$1,$2>\" a b;"
+          , "foo Cpp :: A D [B] -> X;"
+          , "foo"
+          ]
+        )
+        [fun [ arrc CppLang "map<$1,$2>" [varc CppLang "D", arrc CppLang "std::vector<$1>" [varc CppLang "B"]]
+             , varc CppLang "X"]]
     , expectError
         "fail neatly for self-recursive type aliases"
         (SelfRecursiveTypeAlias (TV Nothing "A"))

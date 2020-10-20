@@ -158,7 +158,7 @@ desugarType d k t0@(ArrU v ts) =
       (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
       if length ts == length vs
         -- substitute parameters into alias
-        then desugarType d k (foldr parsub t (zip vs ts))
+        then desugarType d k (foldr parsub (resolve t) (zip vs (map resolve ts)))
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
 desugarType d k (NamU v rs) = do
   let keys = map fst rs
