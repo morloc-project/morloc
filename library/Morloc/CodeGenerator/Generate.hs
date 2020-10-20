@@ -56,7 +56,7 @@ generate ms = do
     ]
 
   -- find all sources files
-  let srcs = unique . catMaybes . conmap (unpackSAnno getSrcs) $ rASTs
+  let srcs = unique . concat . conmap (unpackSAnno getSrcs) $ rASTs
 
   -- for each language, collect all functions into one "pool"
   pools
@@ -89,9 +89,14 @@ generate ms = do
     poolId _ (LamS _ (SAnno _ meta)) = metaId meta
     poolId meta _ = metaId meta
 
-    getSrcs :: SExpr g One c -> g -> c -> Maybe Source
-    getSrcs (CallS src) _ _ = Just src
-    getSrcs _ _ _ = Nothing
+    -- this is grossly inefficient ... but I'll deal with it later
+    getSrcs :: SExpr GMeta One c -> GMeta -> c -> [Source]
+    getSrcs (CallS src) g _ = src : (getSrcsFromGmeta g) 
+    getSrcs _ g _ = getSrcsFromGmeta g
+
+    getSrcsFromGmeta :: GMeta -> [Source]
+    getSrcsFromGmeta g = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
+                                | p <- (concat . Map.elems . metaPackers) g]
 
     writeRASTs :: [SAnno GMeta One (CType, [(EVar, Argument)])]
                -> MorlocMonad [SAnno GMeta One (CType, [(EVar, Argument)])]
