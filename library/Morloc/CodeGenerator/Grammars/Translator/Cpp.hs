@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne)
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType)
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -121,51 +121,66 @@ serialize
   -> MDoc -- A variable name pointing to e1
   -> SerialAST One
   -> MorlocMonad [MDoc]
-serialize letIndex typestr varname s
-  | isSerializable s = do
-      let schemaName = varname <> "_schema"
-          schema = [idoc|#{typestr} #{schemaName};|]
-          serializing = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{varname}, #{schemaName});|]
-      return [schema, serializing]
-  | otherwise = serializeDescend letIndex typestr varname s
+serialize letIndex typestr0 datavar0 s0 = do
+  (x, before) <- serialize' datavar0 s0
+  t0 <- serialAstToType CppLang s0
+  let schemaName = [idoc|#{letNamer letIndex}_schema|]
+      schema = [idoc|#{showType (CType t0)} #{schemaName};|]
+      final = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{x}, #{schemaName});|]
+  return (before ++ [schema, final])
+  
+  where
+    serialize' :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    serialize' v s
+      | isSerializable s = return (v, [])
+      | otherwise = serializeDescend v s
 
-serializeDescend :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-serializeDescend letIndex typestr varname (SerialPack (One (p, s'))) = do
-  i <- MM.getCounter
-  unpacker <- case typePackerReverse p of
-    [] -> MM.throwError . SerializationError $ "No unpacker found"
-    (x:_) -> return . pretty . srcName $ x
-  let varname' = "s" <> pretty i
-      typestr' = showType (CType $ typePackerCType p)
-      unpacked = [idoc|#{typestr'} #{varname'} = #{unpacker}(#{varname});|]
-  (:) unpacked <$> serialize letIndex typestr' varname' s'
-serializeDescend _ _ _ s = MM.throwError . SerializationError . render
-  $ "serializeDescend: " <> prettySerialOne s
+    serializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    serializeDescend v (SerialPack (One (p, s))) = do
+      unpacker <- case typePackerReverse p of
+        [] -> MM.throwError . SerializationError $ "No unpacker found"
+        (src:_) -> return . pretty . srcName $ src
+      (x, before) <- serialize' v s
+      let unpacked = [idoc|#{unpacker}(#{x})|]
+      return (unpacked, before)
 
--- reverse of serialize, paramters are the same
+    serializeDescend v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang lst
+      let v' = "s" <> idx 
+          decl = [idoc|#{showType (CType t)} #{v'};|]
+      (x, before) <- serialize' [idoc|#{v}[i#{idx}]|] s
+      let push = [idoc|#{v'}.push_back(#{x});|]
+          lst  = block 4 [idoc|"for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)"|] 
+                         (vsep (before ++ [push]))
+      return (v', [decl])
+
+    serializeDescend _ s = MM.throwError . SerializationError . render
+      $ "serializeDescend: " <> prettySerialOne s
+
+-- reverse of serialize, parameters are the same
 deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
 deserialize letIndex typestr0 varname0 s0 = do
-  (x, before) <- deserialize' typestr0 s0
+  (x, before) <- deserialize' varname0 s0
   let final = [idoc|#{typestr0} #{letNamer letIndex} = #{x};|] 
   return (before ++ [final])
   where
     deserialize' :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    deserialize' typestr s
+    deserialize' v s
       | isSerializable s = do
+          t <- serialAstToType CppLang s
           let schemaName = varname0 <> "_schema"
-              schema = [idoc|#{typestr} #{schemaName};|]
+              schema = [idoc|#{showType (CType t)} #{schemaName};|]
               deserializing = [idoc|deserialize(#{varname0}, #{schemaName})|]
           return (deserializing, [schema])
-      | otherwise = deserializeDescend typestr s
+      | otherwise = deserializeDescend v s
 
     deserializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    deserializeDescend typestr (SerialPack (One (p, s'))) = do
-      i <- MM.getCounter
+    deserializeDescend v (SerialPack (One (p, s'))) = do
       packer <- case typePackerForward p of
         [] -> MM.throwError . SerializationError $ "No packer found"
         (x:_) -> return . pretty . srcName $ x
-      let typestr' = showType (CType $ typePackerCType p)
-      (x, before) <- deserialize' typestr' s'
+      (x, before) <- deserialize' v s'
       let deserialized = [idoc|#{packer}(#{x})|]
       return (deserialized, before)
     deserializeDescend _ s = MM.throwError . SerializationError . render

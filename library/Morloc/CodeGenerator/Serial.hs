@@ -13,6 +13,7 @@ module Morloc.CodeGenerator.Serial
   , chooseSerializationCycle
   , isSerializable
   , prettySerialOne
+  , serialAstToType
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -38,6 +39,32 @@ type2default (VarT v) = VarU v
 type2default (ArrT v ts) = ArrU v (map type2default ts)
 type2default (NamT v rs) = NamU v (zip (map fst rs) (map (type2default . snd) rs))
 type2default (FunT _ _) = error "default types should never be functions"
+
+serialAstToType :: Lang -> SerialAST One -> MorlocMonad Type
+serialAstToType _    (SerialPack (One (p, _))) = return $ typePackerCType p
+serialAstToType lang (SerialList s) = do
+  t <- serialAstToType lang s
+  return . partialResolve . head . Def.defaultList (Just lang) $ partialUnresolve t
+serialAstToType lang (SerialTuple ss) = do
+  ts <- mapM (serialAstToType lang) ss
+  return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
+serialAstToType lang (SerialObject v rs) = return $ VarT v
+serialAstToType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
+serialAstToType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
+serialAstToType lang (SerialString x) = return $ VarT (TV (Just lang) x)
+serialAstToType lang (SerialNull   x) = return $ VarT (TV (Just lang) x)
+serialAstToType lang (SerialUnknown _) = MM.throwError . SerializationError
+                                       $ "Cannot guess serialization type"
+
+partialResolve :: UnresolvedType -> Type
+partialResolve (VarU v) = VarT v
+partialResolve (ArrU v ts) = ArrT v (map partialResolve ts)
+partialResolve (NamU v rs) = NamT v (zip (map fst rs) (map (partialResolve . snd) rs))
+
+partialUnresolve :: Type -> UnresolvedType
+partialUnresolve (VarT v) = VarU v
+partialUnresolve (ArrT v ts) = ArrU v (map partialUnresolve ts)
+partialUnresolve (NamT v rs) = NamU v (zip (map fst rs) (map (partialUnresolve . snd) rs))
 
 makeSerialAST
   :: PackMap -- Map.Map (TVar, Int) [UnresolvedPacker]
