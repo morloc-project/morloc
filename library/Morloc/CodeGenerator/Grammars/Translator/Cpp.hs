@@ -89,6 +89,9 @@ argName (SerialArgument i _) = bndNamer i
 argName (NativeArgument i _) = bndNamer i
 argName (PassThroughArgument i) = bndNamer i
 
+tupleKey :: Int -> MDoc -> MDoc
+tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
+
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
 -- `<stdio.h>`) or in quotes (e.g., `"myfile.h"`). The difference between these
@@ -142,9 +145,7 @@ serialize letIndex typestr0 datavar0 s0 = do
       unpacker <- case typePackerReverse p of
         [] -> MM.throwError . SerializationError $ "No unpacker found"
         (src:_) -> return . pretty . srcName $ src
-      (x, before) <- serialize' v s
-      let unpacked = [idoc|#{unpacker}(#{x})|]
-      return (unpacked, before)
+      serialize' [idoc|#{unpacker}(#{v})|] s
 
     serializeDescend v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
@@ -157,7 +158,14 @@ serialize letIndex typestr0 datavar0 s0 = do
                          (vsep (before ++ [push]))
       return (v', [decl, lst])
 
-    serializeDescend v tup@(SerialTuple ss) = return ("<SerialTuple>", [])
+    serializeDescend v tup@(SerialTuple ss) = do
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> serializeDescend (tupleKey i v) s) [0..] ss
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang tup
+      let v' = "s" <> idx
+          x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
+      return (v', concat befores ++ [x]);
+
     serializeDescend v rec@(SerialObject name rs) = return ("<SerialObject>", [])
     serializeDescend _ s = MM.throwError . SerializationError . render
       $ "serializeDescend: " <> prettySerialOne s
@@ -208,7 +216,14 @@ deserialize letIndex typestr0 varname0 s0
                          (vsep (before ++ [push]))
       return (v', [decl, lst])
 
-    construct v tup@(SerialTuple ss) = return ("<SerialTuple>", [])
+    construct v tup@(SerialTuple ss) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
+      t <- shallowType CppLang tup
+      let v' = "s" <> idx
+          x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
+      return (v', concat befores ++ [x]);
+
     construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
@@ -407,13 +422,6 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #{vsep includes}
 
 #{vsep signatures}
-
-template <class A, class B>
-std::vector<B> __utility_map__(std::function<B(A)> f, std::vector<A> xs){
-    std::vector<B> ys(xs.size());
-    std::transform(xs.begin(), xs.end(), ys.begin(), f);
-    return ys;
-}
 
 #{vsep manifolds}
 
