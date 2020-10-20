@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make foo.loc
-	./nexus.pl foo "a" '[["b",55],["a",42]]' > obs.txt
+	./nexus.pl foo '[[\"b\",[[\"c\",\"d\"],[1,5]]],[\"a\",[[\"e\"],[9]]]]' > obs.txt
 
 clean:
 	rm -f nexus* pool*
