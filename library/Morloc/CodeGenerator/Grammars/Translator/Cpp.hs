@@ -16,7 +16,7 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType)
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType, shallowType)
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -130,7 +130,9 @@ serialize letIndex typestr0 datavar0 s0 = do
   return (before ++ [schema, final])
   
   where
-    serialize' :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    serialize'
+      :: MDoc -- a variable name that stores the data described by the SerialAST object
+      -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
     serialize' v s
       | isSerializable s = return (v, [])
       | otherwise = serializeDescend v s
@@ -151,39 +153,64 @@ serialize letIndex typestr0 datavar0 s0 = do
           decl = [idoc|#{showType (CType t)} #{v'};|]
       (x, before) <- serialize' [idoc|#{v}[i#{idx}]|] s
       let push = [idoc|#{v'}.push_back(#{x});|]
-          lst  = block 4 [idoc|"for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)"|] 
+          lst  = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|] 
                          (vsep (before ++ [push]))
-      return (v', [decl])
+      return (v', [decl, lst])
 
+    serializeDescend v tup@(SerialTuple ss) = return ("<SerialTuple>", [])
+    serializeDescend v rec@(SerialObject name rs) = return ("<SerialObject>", [])
     serializeDescend _ s = MM.throwError . SerializationError . render
       $ "serializeDescend: " <> prettySerialOne s
 
 -- reverse of serialize, parameters are the same
 deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-deserialize letIndex typestr0 varname0 s0 = do
-  (x, before) <- deserialize' varname0 s0
-  let final = [idoc|#{typestr0} #{letNamer letIndex} = #{x};|] 
-  return (before ++ [final])
-  where
-    deserialize' :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    deserialize' v s
-      | isSerializable s = do
-          t <- serialAstToType CppLang s
-          let schemaName = varname0 <> "_schema"
-              schema = [idoc|#{showType (CType t)} #{schemaName};|]
-              deserializing = [idoc|deserialize(#{varname0}, #{schemaName})|]
-          return (deserializing, [schema])
-      | otherwise = deserializeDescend v s
+deserialize letIndex typestr0 varname0 s0
+  | isSerializable s0 = do 
+      let schemaName = [idoc|#{letNamer letIndex}_schema|]
+          schema = [idoc|#{typestr0} #{schemaName};|]
+          deserializing = [idoc|#{typestr0} #{letNamer letIndex} = deserialize(#{varname0}, #{schemaName});|]
+      return [schema, deserializing]
+  | otherwise = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang s0
+      let rawtype = showType (CType t)
+          schemaName = [idoc|#{letNamer letIndex}_schema|]
+          rawvar = "s" <> idx
+          schema = [idoc|#{rawtype} #{schemaName};|]
+          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(#{varname0}, #{schemaName});|]
+      (x, before) <- construct rawvar s0
+      let final = [idoc|#{typestr0} #{letNamer letIndex} = #{x};|]
+      return ([schema, deserializing] ++ before ++ [final])
 
-    deserializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    deserializeDescend v (SerialPack (One (p, s'))) = do
+  where
+    check :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    check v s
+      | isSerializable s = return (v, [])
+      | otherwise = construct v s
+
+    construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    construct v (SerialPack (One (p, s'))) = do
       packer <- case typePackerForward p of
         [] -> MM.throwError . SerializationError $ "No packer found"
         (x:_) -> return . pretty . srcName $ x
-      (x, before) <- deserialize' v s'
+      (x, before) <- check v s'
       let deserialized = [idoc|#{packer}(#{x})|]
       return (deserialized, before)
-    deserializeDescend _ s = MM.throwError . SerializationError . render
+
+    construct v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- fmap (showType . CType) $ shallowType CppLang lst
+      let v' = "s" <> idx 
+          decl = [idoc|#{t} #{v'};|]
+      (x, before) <- check [idoc|#{v}[i#{idx}]|] s
+      let push = [idoc|#{v'}.push_back(#{x});|]
+          lst  = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|] 
+                         (vsep (before ++ [push]))
+      return (v', [decl, lst])
+
+    construct v tup@(SerialTuple ss) = return ("<SerialTuple>", [])
+    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
 
@@ -370,6 +397,8 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
+#include <vector>
+#include <algorithm> // for std::transform
 
 #{Src.foreignCallFunction}
 
@@ -378,6 +407,13 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #{vsep includes}
 
 #{vsep signatures}
+
+template <class A, class B>
+std::vector<B> __utility_map__(std::function<B(A)> f, std::vector<A> xs){
+    std::vector<B> ys(xs.size());
+    std::transform(xs.begin(), xs.end(), ys.begin(), f);
+    return ys;
+}
 
 #{vsep manifolds}
 

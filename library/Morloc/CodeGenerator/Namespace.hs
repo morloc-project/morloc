@@ -42,6 +42,7 @@ data SerialAST f
 
 data TypePacker = TypePacker
   { typePackerCType   :: Type
+  , typePackerFrom    :: Type
   , typePackerForward :: [Source]
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)

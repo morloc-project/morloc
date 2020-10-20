@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Serial
   , isSerializable
   , prettySerialOne
   , serialAstToType
+  , shallowType
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -40,8 +41,9 @@ type2default (ArrT v ts) = ArrU v (map type2default ts)
 type2default (NamT v rs) = NamU v (zip (map fst rs) (map (type2default . snd) rs))
 type2default (FunT _ _) = error "default types should never be functions"
 
+-- | recurse all the way to a serializable type
 serialAstToType :: Lang -> SerialAST One -> MorlocMonad Type
-serialAstToType _    (SerialPack (One (p, _))) = return $ typePackerCType p
+serialAstToType lang (SerialPack (One (_, s))) = serialAstToType lang s
 serialAstToType lang (SerialList s) = do
   t <- serialAstToType lang s
   return . partialResolve . head . Def.defaultList (Just lang) $ partialUnresolve t
@@ -54,6 +56,23 @@ serialAstToType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialString x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialNull   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialUnknown _) = MM.throwError . SerializationError
+                                       $ "Cannot guess serialization type"
+
+-- | get only the toplevel type
+shallowType :: Lang -> SerialAST One -> MorlocMonad Type
+shallowType _    (SerialPack (One (p, _))) = return (typePackerFrom p)
+shallowType lang (SerialList s) = do
+  t <- shallowType lang s
+  return . partialResolve . head . Def.defaultList (Just lang) $ partialUnresolve t
+shallowType lang (SerialTuple ss) = do
+  ts <- mapM (shallowType lang) ss
+  return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
+shallowType lang (SerialObject v rs) = return $ VarT v
+shallowType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
+shallowType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
+shallowType lang (SerialString x) = return $ VarT (TV (Just lang) x)
+shallowType lang (SerialNull   x) = return $ VarT (TV (Just lang) x)
+shallowType lang (SerialUnknown _) = MM.throwError . SerializationError
                                        $ "Cannot guess serialization type"
 
 partialResolve :: UnresolvedType -> Type
@@ -89,7 +108,7 @@ makeSerialAST m t@(ArrT v@(TV lang s) ts)
   | length tuples > 0 = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (v, length ts) m of
       (Just ps) -> do        
-        ps' <- mapM (resolvePacker ts) ps
+        ps' <- mapM (resolvePacker t ts) ps
         ts' <- mapM (makeSerialAST m) (map typePackerCType ps')
         return $ SerialPack (Many (zip ps' ts'))
       Nothing -> MM.throwError . SerializationError . render
@@ -101,11 +120,12 @@ makeSerialAST m (NamT v rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
   return $ SerialObject v (zip (map fst rs) ts) 
 
-resolvePacker :: [Type] -> UnresolvedPacker -> MorlocMonad TypePacker
-resolvePacker ts u = do 
+resolvePacker :: Type -> [Type] -> UnresolvedPacker -> MorlocMonad TypePacker
+resolvePacker packedType ts u = do 
   t <- resolveType ts (unresolvedPackerCType u) 
   return $ TypePacker
     { typePackerCType = t
+    , typePackerFrom = packedType
     , typePackerForward = unresolvedPackerForward u
     , typePackerReverse = unresolvedPackerReverse u
     }
