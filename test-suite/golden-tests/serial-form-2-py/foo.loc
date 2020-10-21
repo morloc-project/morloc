@@ -1,4 +1,4 @@
-import pybase (id)
+import pybase (Map, id)
 
 export foo
 

@@ -117,7 +117,6 @@ translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
 
--- give: let x_i = e1 in e2
 serialize
   :: Int -- The let index `i`
   -> MDoc -- The type of e1
@@ -166,6 +165,7 @@ serialize letIndex typestr0 datavar0 s0 = do
           x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
+    -- TODO: add record handling here
     serializeDescend v rec@(SerialObject name rs) = return ("<SerialObject>", [])
     serializeDescend _ s = MM.throwError . SerializationError . render
       $ "serializeDescend: " <> prettySerialOne s
@@ -224,6 +224,7 @@ deserialize letIndex typestr0 varname0 s0
           x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
+    -- TODO: add record handling here
     construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s

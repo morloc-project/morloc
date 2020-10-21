@@ -4,6 +4,7 @@ export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str (Map Str Int) -> Map Str (Map Str Int)
-foo r :: Map "character" (Map "character" "integer") -> Map "character" (Map "character" "integer")
+foo :: Map Str (Map Int Num) -> Map Str (Map Int Num);
+foo r :: Map "character" (Map "integer" "double") -> Map "character" (Map "integer" "double");
+
 foo xs = id xs

@@ -1,9 +1,9 @@
-import pybase (id, Map)
+import pybase (id, Map);
 
-export foo
+export foo;
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str Int -> Map Str Int
-foo py :: Map "str" "int" -> Map "str" "int"
-foo xs = id xs
+foo :: Map Str [Int] -> Map Str [Int];
+foo py :: Map "str" ["int"] -> Map "str" ["int"];
+foo xs = id xs;
