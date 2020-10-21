@@ -93,10 +93,7 @@ serialize v0 s0 = do
       t <- serialAstToType RLang lst
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
-      let push = [idoc|#{v'}.append(#{x})|]
-          lst  = vsep [ [idoc|#{v'} = []|]
-                      , nest 4 (vsep ([idoc|for i#{idx} in #{v}:|] : before ++ [push]))
-                      ]
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
       return ([lst], v')
 
     construct v tup@(SerialTuple ss) = do
@@ -146,10 +143,7 @@ deserialize v0 s0
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
-      let push = [idoc|#{v'}.append(#{x});|]
-          lst = vsep [ [idoc|#{v'} <- c();|]
-                     , nest 4 (vsep ([idoc|for i#{idx} in #{v}:|] : before ++ [push]))
-                     ]
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
       return (v', [lst])
 
     construct v tup@(SerialTuple ss) = do
