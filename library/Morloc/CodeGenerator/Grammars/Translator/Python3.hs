@@ -220,7 +220,7 @@ translateManifold m@(ManifoldM _ args _) = do
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  f args (LamM lambdaArgs e) = undefined
+  f args (LamM lambdaArgs e) = undefined -- FIXME: this is defined in R
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
   f _ (LetVarM _ i) = return ([], letNamer i, [])
