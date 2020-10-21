@@ -63,12 +63,16 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
 
-0.29.0 [2020.xx.xx]
+0.30.0 [2020.xx.xx]
 -------------------
-
- - [ ] Add type constructors for parameterized types
  - [ ] Add table handling
  - [ ] Add `data` keyword for defining data constructors
+
+0.29.0 [2020.10.21]
+-------------------
+
+ * Add AST directed (de)serialization framework
+ * Add type constructors for parameterized types
 
 0.28.0 [2020.10.12]
 -------------------
