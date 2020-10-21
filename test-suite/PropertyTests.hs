@@ -3,10 +3,6 @@ module PropertyTests
   ) where
 
 import Morloc.Namespace
-import Morloc.Parser.Parser
-import Morloc.TypeChecker.Infer
-import Morloc.TypeChecker.Internal
-import Morloc.TypeChecker.API
 
 import qualified Control.Monad as CM
 import qualified Data.Set as Set

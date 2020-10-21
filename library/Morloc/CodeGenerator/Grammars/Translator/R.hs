@@ -12,9 +12,11 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Translator.R
   ( 
     translate
+  , preprocess
   ) where
 
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType, shallowType)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
@@ -22,22 +24,22 @@ import Morloc.Pretty (prettyType)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 
+-- tree rewrites
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
 
-translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- tree rewrites
-  es' <- mapM invertExprM es
-
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
+  liftIO . putDoc $ (vsep $ map prettyExprM es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es'
+  mDocs <- mapM translateManifold es
 
   return $ makePool includeDocs mDocs
 
@@ -63,46 +65,153 @@ typeSchema c = do
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
+tupleKey :: Int -> MDoc -> MDoc
+tupleKey i v = [idoc|#{v}[[#{pretty i}]]|]
+
+serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+serialize v0 s0 = do
+  (ms, v1) <- serialize' v0 s0
+  t <- serialAstToType RLang s0
+  schema <- typeSchema (CType t)
+  let v2 = "rmorlocinternals::mlc_serialize" <> tupled [v1, schema]
+  return (v2, ms)
+  where
+    serialize' :: MDoc -> SerialAST One -> MorlocMonad ([MDoc], MDoc)
+    serialize' v s
+      | isSerializable s = return ([], v)
+      | otherwise = construct v s
+
+    construct :: MDoc -> SerialAST One -> MorlocMonad ([MDoc], MDoc)
+    construct v (SerialPack (One (p, s))) = do
+      unpacker <- case typePackerReverse p of
+        [] -> MM.throwError . SerializationError $ "No unpacker found"
+        (src:_) -> return . pretty . srcName $ src
+      serialize' [idoc|#{unpacker}(#{v})|] s
+
+    construct v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType RLang lst
+      let v' = "s" <> idx
+      (before, x) <- serialize' [idoc|i#{idx}|] s
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
+      return ([lst], v')
+
+    construct v tup@(SerialTuple ss) = do
+      (befores, ss') <- fmap unzip $ zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+          x = [idoc|#{v'} <- list#{tupled ss'}|]
+      return (concat befores ++ [x], v');
+
+    -- TODO: add record handling here
+    construct v rec@(SerialObject name rs) = return ([], "<SerialObject>")
+    construct _ s = MM.throwError . SerializationError . render
+      $ "construct: " <> prettySerialOne s
+
+
+deserialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+deserialize v0 s0
+  | isSerializable s0 = do
+      t <- serialAstToType RLang s0
+      schema <- typeSchema (CType t)
+      let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+      return (deserializing, [])
+  | otherwise = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType RLang s0
+      schema <- typeSchema (CType t)
+      let rawvar = "s" <> idx
+          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+      (x, befores) <- check rawvar s0
+      return (x, deserializing:befores)
+  where
+    check :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    check v s
+      | isSerializable s = return (v, [])
+      | otherwise = construct v s
+
+    construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    construct v (SerialPack (One (p, s'))) = do
+      packer <- case typePackerForward p of
+        [] -> MM.throwError . SerializationError $ "No packer found"
+        (x:_) -> return . pretty . srcName $ x
+      (x, before) <- check v s'
+      let deserialized = [idoc|#{packer}(#{x})|]
+      return (deserialized, before)
+
+    construct v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+      (x, before) <- check [idoc|i#{idx}|] s
+      let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
+      return (v', [lst])
+
+    construct v tup@(SerialTuple ss) = do
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+          x = [idoc|#{v'} <- list#{tupled ss'};|]
+      return (v', concat befores ++ [x]);
+
+    -- TODO: add record handling here
+    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct _ s = MM.throwError . SerializationError . render
+      $ "deserializeDescend: " <> prettySerialOne s
+
+
+
 -- break a call tree into manifolds
-translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f args m where
-  f :: [Argument] -> ExprM -> MorlocMonad ([MDoc], MDoc)
-  f pargs m@(ManifoldM i args e) = do
-    (ms', body) <- f args e
+translateManifold :: ExprM One -> MorlocMonad MDoc
+translateManifold m@(ManifoldM _ args _) = do
+  MM.startCounter
+  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
+  where
+
+  f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc, [MDoc])
+  f pargs m@(ManifoldM (metaId->i) args e) = do
+    (ms', body, rs) <- f args e
     let head = manNamer i <+> "<- function" <> tupled (map makeArgument args)
-        mdoc = block 4 head body
+        mdoc = block 4 head (vsep $ rs ++ [body])
         mname = manNamer i
     -- TODO: handle partials BEFORE translation
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
       ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
       (([], vs), _) -> mname
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    return (mdoc : ms', call)
+    return (mdoc : ms', call, [])
 
-  f _ (PoolCallM t cmds args) = do
+  f _ (PoolCallM t _ cmds args) = do
     let quotedCmds = map dquotes cmds
         callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map makeArgument args)) <> ")"
         call = ".morloc_foreign_call" <> tupled([head quotedCmds, callArgs, dquotes "_", dquotes "_"])
-    return ([], call)
+    return ([], call, [])
 
   f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
+
   f args (LetM i e1 e2) = do
-    (ms1', e1') <- (f args) e1
-    (ms2', e2') <- (f args) e2
-    return (ms1' ++ ms2', letNamer i <+> "<-" <+> e1' <> line <> e2')
+    (ms1', e1', rs1) <- (f args) e1
+    (ms2', e2', rs2) <- (f args) e2
+    let rs = rs1 ++ [ letNamer i <+> "<-" <+> e1' ] ++ rs2
+    return (ms1' ++ ms2', e2', rs)
+
   f args (AppM (SrcM _ src) xs) = do
-    (mss', xs') <- mapM (f args) xs |>> unzip
-    return (concat mss', pretty (srcName src) <> tupled xs')
-  f _ (SrcM t src) = return ([], pretty (srcName src))
+    (mss', xs', rss') <- mapM (f args) xs |>> unzip3
+    return (concat mss', pretty (srcName src) <> tupled xs', concat rss')
+
+  f _ (SrcM t src) = return ([], pretty (srcName src), [])
+
   f args (LamM labmdaArgs e) = do
-    (ms', e') <- f args e
+    (ms', e', rs) <- f args e
     let vs = map (bndNamer . argId) labmdaArgs
-    return (ms', "function" <> tupled vs <> "{" <+> e' <> "}")
-  f _ (BndVarM _ i) = return ([], bndNamer i)
-  f _ (LetVarM _ i) = return ([], letNamer i)
+    return (ms', "function" <> tupled vs <> "{" <+> e' <> "}", rs)
+
+  f _ (BndVarM _ i) = return ([], bndNamer i, [])
+
+  f _ (LetVarM _ i) = return ([], letNamer i, [])
+
   f args (ListM t es) = do
-    (mss', es') <- mapM (f args) es |>> unzip
+    (mss', es', rss) <- mapM (f args) es |>> unzip3
     x' <- return $ case t of
       (Native (CType (ArrT _ [VarT et]))) -> case et of
         (TV _ "numeric") -> "c" <> tupled es'
@@ -110,31 +219,38 @@ translateManifold m@(ManifoldM _ args _) = (vsep . punctuate line . fst) <$> f a
         (TV _ "character") -> "c" <> tupled es'
         _ -> "list" <> tupled es'
       _ -> "list" <> tupled es'
-    return (concat mss', x')
+    return (concat mss', x', concat rss)
+
   f args (TupleM _ es) = do
-    (mss', es') <- mapM (f args) es |>> unzip
-    return (concat mss', "list" <> tupled es')
+    (mss', es', rss) <- mapM (f args) es |>> unzip3
+    return (concat mss', "list" <> tupled es', concat rss)
+
   f args (RecordM c entries) = do
-    (mss', es') <- mapM (f args . snd) entries |>> unzip
+    (mss', es', rss) <- mapM (f args . snd) entries |>> unzip3
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return (concat mss', "list" <> tupled entries')
-  f _ (LogM _ x) = return ([], if x then "TRUE" else "FALSE")
-  f _ (NumM _ x) = return ([], viaShow x)
-  f _ (StrM _ x) = return ([], dquotes $ pretty x)
-  f _ (NullM _) = return ([], "NULL")
-  f args (SerializeM e) = do
-    (ms, e') <- f args e
-    let (Native t) = typeOfExprM e
-    schema <- typeSchema t
-    return (ms, "rmorlocinternals::mlc_serialize" <> tupled [e', schema])
-  f args (DeserializeM e) = do
-    (ms, e') <- f args e
-    let (Serial t) = typeOfExprM e
-    schema <- typeSchema t
-    return (ms, "rmorlocinternals::mlc_deserialize" <> tupled [e', schema])
+    return (concat mss', "list" <> tupled entries', concat rss)
+
+  f _ (LogM _ x) = return ([], if x then "TRUE" else "FALSE", [])
+
+  f _ (NumM _ x) = return ([], viaShow x, [])
+
+  f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
+
+  f _ (NullM _) = return ([], "NULL", [])
+
+  f args (SerializeM s e) = do
+    (ms, e', rs1) <- f args e
+    (serialized, rs2) <- serialize e' s
+    return (ms, serialized, rs1 ++ rs2)
+
+  f args (DeserializeM s e) = do
+    (ms, e', rs1) <- f args e
+    (deserialized, rs2) <- deserialize e' s
+    return (ms, deserialized, rs1 ++ rs2)
+
   f args (ReturnM e) = do
-    (ms, e') <- f args e
-    return (ms, e')
+    (ms, e', rs) <- f args e
+    return (ms, e', rs)
 
 makeLambda :: [Argument] -> MDoc -> MDoc
 makeLambda args body = "function" <+> tupled (map makeArgument args) <> "{" <> body <> "}"

@@ -12,37 +12,39 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ( 
     translate
+  , preprocess
   ) where
 
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType, shallowType)
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.System as MS
-import qualified Morloc.TypeChecker.Macro as MTM
+import qualified Morloc.Frontend.Macro as MTM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
+-- tree rewrites
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
 
-translate :: [Source] -> [ExprM] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
     (unique . catMaybes . map srcPath $ srcs)
 
-  -- tree rewrites
-  es' <- mapM invertExprM es
-
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es')
+  liftIO . putDoc $ (vsep $ map prettyExprM es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es'
+  mDocs <- mapM translateManifold es
 
-  let dispatch = makeDispatch es'
-      signatures = map makeSignature es'
+  let dispatch = makeDispatch es
+      signatures = map makeSignature es
 
   -- create and return complete pool script
   return $ makeMain includeDocs signatures mDocs dispatch
@@ -59,10 +61,10 @@ bndNamer i = "x" <> viaShow i
 serialType :: MDoc
 serialType = "std::string"
 
-makeSignature :: ExprM -> MDoc
+makeSignature :: ExprM One -> MDoc
 makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
-  f :: ExprM -> [MDoc]
-  f (ManifoldM i args e) =
+  f :: ExprM One -> [MDoc]
+  f (ManifoldM (metaId->i) args e) =
     let t = typeOfExprM e
         sig = showTypeM t <+> manNamer i <> tupled (map makeArg args) <> ";"
     in sig : f e
@@ -72,8 +74,8 @@ makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
   f (ListM _ es) = conmap f es
   f (TupleM _ es) = conmap f es
   f (RecordM _ entries) = conmap f (map snd entries)
-  f (SerializeM e) = f e
-  f (DeserializeM e) = f e
+  f (SerializeM _ e) = f e
+  f (DeserializeM _ e) = f e
   f (ReturnM e) = f e
   f _ = []
 
@@ -86,6 +88,9 @@ argName :: Argument -> MDoc
 argName (SerialArgument i _) = bndNamer i
 argName (NativeArgument i _) = bndNamer i
 argName (PassThroughArgument i) = bndNamer i
+
+tupleKey :: Int -> MDoc -> MDoc
+tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -111,39 +116,151 @@ translateSource
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
 
-translateManifold :: ExprM -> MorlocMonad MDoc
-translateManifold m@(ManifoldM _ args _) =
+
+serialize
+  :: Int -- The let index `i`
+  -> MDoc -- The type of e1
+  -> MDoc -- A variable name pointing to e1
+  -> SerialAST One
+  -> MorlocMonad [MDoc]
+serialize letIndex typestr0 datavar0 s0 = do
+  (x, before) <- serialize' datavar0 s0
+  t0 <- serialAstToType CppLang s0
+  let schemaName = [idoc|#{letNamer letIndex}_schema|]
+      schema = [idoc|#{showType (CType t0)} #{schemaName};|]
+      final = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{x}, #{schemaName});|]
+  return (before ++ [schema, final])
+  
+  where
+    serialize'
+      :: MDoc -- a variable name that stores the data described by the SerialAST object
+      -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    serialize' v s
+      | isSerializable s = return (v, [])
+      | otherwise = serializeDescend v s
+
+    serializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    serializeDescend v (SerialPack (One (p, s))) = do
+      unpacker <- case typePackerReverse p of
+        [] -> MM.throwError . SerializationError $ "No unpacker found"
+        (src:_) -> return . pretty . srcName $ src
+      serialize' [idoc|#{unpacker}(#{v})|] s
+
+    serializeDescend v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang lst
+      let v' = "s" <> idx 
+          decl = [idoc|#{showType (CType t)} #{v'};|]
+      (x, before) <- serialize' [idoc|#{v}[i#{idx}]|] s
+      let push = [idoc|#{v'}.push_back(#{x});|]
+          lst  = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|] 
+                         (vsep (before ++ [push]))
+      return (v', [decl, lst])
+
+    serializeDescend v tup@(SerialTuple ss) = do
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> serializeDescend (tupleKey i v) s) [0..] ss
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang tup
+      let v' = "s" <> idx
+          x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
+      return (v', concat befores ++ [x]);
+
+    -- TODO: add record handling here
+    serializeDescend v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    serializeDescend _ s = MM.throwError . SerializationError . render
+      $ "serializeDescend: " <> prettySerialOne s
+
+-- reverse of serialize, parameters are the same
+deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+deserialize letIndex typestr0 varname0 s0
+  | isSerializable s0 = do 
+      let schemaName = [idoc|#{letNamer letIndex}_schema|]
+          schema = [idoc|#{typestr0} #{schemaName};|]
+          deserializing = [idoc|#{typestr0} #{letNamer letIndex} = deserialize(#{varname0}, #{schemaName});|]
+      return [schema, deserializing]
+  | otherwise = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- serialAstToType CppLang s0
+      let rawtype = showType (CType t)
+          schemaName = [idoc|#{letNamer letIndex}_schema|]
+          rawvar = "s" <> idx
+          schema = [idoc|#{rawtype} #{schemaName};|]
+          deserializing = [idoc|#{rawtype} #{rawvar} = deserialize(#{varname0}, #{schemaName});|]
+      (x, before) <- construct rawvar s0
+      let final = [idoc|#{typestr0} #{letNamer letIndex} = #{x};|]
+      return ([schema, deserializing] ++ before ++ [final])
+
+  where
+    check :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    check v s
+      | isSerializable s = return (v, [])
+      | otherwise = construct v s
+
+    construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    construct v (SerialPack (One (p, s'))) = do
+      packer <- case typePackerForward p of
+        [] -> MM.throwError . SerializationError $ "No packer found"
+        (x:_) -> return . pretty . srcName $ x
+      (x, before) <- check v s'
+      let deserialized = [idoc|#{packer}(#{x})|]
+      return (deserialized, before)
+
+    construct v lst@(SerialList s) = do
+      idx <- fmap pretty $ MM.getCounter
+      t <- fmap (showType . CType) $ shallowType CppLang lst
+      let v' = "s" <> idx 
+          decl = [idoc|#{t} #{v'};|]
+      (x, before) <- check [idoc|#{v}[i#{idx}]|] s
+      let push = [idoc|#{v'}.push_back(#{x});|]
+          lst  = block 4 [idoc|for(size_t i#{idx} = 0; i#{idx} < #{v}.size(); i#{idx}++)|] 
+                         (vsep (before ++ [push]))
+      return (v', [decl, lst])
+
+    construct v tup@(SerialTuple ss) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
+      t <- shallowType CppLang tup
+      let v' = "s" <> idx
+          x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
+      return (v', concat befores ++ [x]);
+
+    -- TODO: add record handling here
+    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct _ s = MM.throwError . SerializationError . render
+      $ "deserializeDescend: " <> prettySerialOne s
+
+
+translateManifold :: ExprM One -> MorlocMonad MDoc
+translateManifold m@(ManifoldM _ args _) = do
+  MM.startCounter
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
   f :: [Argument]
-    -> ExprM
+    -> ExprM One
     -> MorlocMonad
        ( [MDoc] -- the collection of final manifolds
        , MDoc -- a call tag for this expression
        , [MDoc] -- a list of statements that should precede this assignment
        )
 
-  f args (LetM i (SerializeM e1) e2) = do
+  f args (LetM i (SerializeM s e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
     t <- showNativeTypeM (typeOfExprM e1)
-    let schemaName = letNamer i <> "_schema"
-        schema = [idoc|#{t} #{schemaName};|]
-        serializing = [idoc|#{serialType} #{letNamer i} = serialize(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, serializing, e2'], [])
+    serialized <- serialize i t e1' s
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ serialized ++ [e2'], [])
 
-  f _ (SerializeM _) = MM.throwError . OtherError
+  f args (LetM i (DeserializeM s e1) e2) = do
+    (ms1, e1', ps1) <- f args e1
+    (ms2, e2', ps2) <- f args e2
+    t <- showNativeTypeM (typeOfExprM e1)
+    deserialized <- deserialize i t e1' s
+    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ deserialized ++ [e2'], [])
+
+  f _ (SerializeM _ _) = MM.throwError . SerializationError
     $ "SerializeM should only appear in an assignment"
 
-  f args (LetM i (DeserializeM e1) e2) = do
-    (ms1, e1', ps1) <- f args e1
-    (ms2, e2', ps2) <- f args e2
-    t <- showNativeTypeM (typeOfExprM e1)
-    let schemaName = letNamer i <> "_schema"
-        schema = [idoc|#{t} #{schemaName};|]
-        deserializeing = [idoc|#{t} #{letNamer i} = deserialize(#{e1'}, #{schemaName});|]
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ [schema, deserializeing, e2'], [])
-  f _ (DeserializeM _) = MM.throwError . OtherError
+  f _ (DeserializeM _ _) = MM.throwError . SerializationError
     $ "DeserializeM should only appear in an assignment"
 
   f args (LetM i e1 e2) = do
@@ -162,7 +279,7 @@ translateManifold m@(ManifoldM _ args _) =
         sig = [idoc|#{showTypeM output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
     where
-      typeOfExprM' :: ExprM -> TypeM
+      typeOfExprM' :: ExprM One -> TypeM
       typeOfExprM' m@(ManifoldM _ args' _) = case splitArgs args' args of
         (_, []) -> typeOfExprM m
         (_, ts) -> Function (map arg2typeM ts) (typeOfExprM m)
@@ -172,7 +289,7 @@ translateManifold m@(ManifoldM _ args _) =
 
   f args (SrcM t src) = return ([], pretty $ srcName src, [])
 
-  f pargs m@(ManifoldM i args e) = do
+  f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', body, ps1) <- f args e
     let t = typeOfExprM e
         head = showTypeM t <+> manNamer i <> tupled (map makeArg args)
@@ -194,7 +311,7 @@ translateManifold m@(ManifoldM _ args _) =
         return (v, [sig])
     return (mdoc : ms', call, ps1 ++ ps2)
 
-  f _ (PoolCallM t cmds args) = do
+  f _ (PoolCallM t _ cmds args) = do
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds ++ map argName args
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
@@ -258,11 +375,11 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             then Left r
             else Right r
 
-makeDispatch :: [ExprM] -> MDoc
+makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
-    makeCase :: ExprM -> MDoc
-    makeCase (ManifoldM i args _) =
+    makeCase :: ExprM One -> MDoc
+    makeCase (ManifoldM (metaId->i) args _) =
       let args' = take (length args) $ map (\i -> "argv[" <> viaShow i <> "]") [2..]
       in
         (nest 4 . vsep)
@@ -296,6 +413,8 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
+#include <vector>
+#include <algorithm> // for std::transform
 
 #{Src.foreignCallFunction}
 

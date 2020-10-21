@@ -21,6 +21,7 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
+  , message
   -- * reusable counter
   , startCounter
   , getCounter
@@ -101,6 +102,10 @@ runCommand loc cmd = do
   case exitCode of
     SE.ExitSuccess -> tell [MT.pack err]
     _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
+
+-- | Execute a system call
+message :: MT.Text -> MorlocMonad ()
+message msg = liftIO . MT.putStrLn $ msg
 
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith ::

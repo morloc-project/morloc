@@ -4,14 +4,8 @@ module GoldenMakefileTests
 
 import Test.Tasty
 import Test.Tasty.Golden
-import qualified Morloc.Config as Config
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import qualified Morloc.Parser.API as P
-import qualified Morloc.TypeChecker.API as T
 import qualified System.Process as SP
 import qualified System.Directory as SD
-import qualified GHC.IO.Handle as GIH
 import qualified System.IO as SI
 
 goldenMakefileTest :: String -> String -> TestTree

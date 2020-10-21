@@ -1,9 +1,0 @@
-import rbase (id)
-
-export foo
-
--- This function returns the input, but passes it though a language-specific id
--- function, which forces deserialization and then serialization.
-foo :: [(Str, Int)] -> [(Str, Int)]
-foo r :: [("character", "integer")] -> [("character", "integer")]
-foo xs = id xs

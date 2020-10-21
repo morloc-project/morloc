@@ -13,7 +13,7 @@ module Morloc.CodeGenerator.Nexus
   ) where
 
 import Morloc.Data.Doc
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
 import Morloc.Pretty (prettyType)
 import qualified Control.Monad as CM

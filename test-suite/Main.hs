@@ -2,7 +2,7 @@ import Test.Tasty
 import qualified System.Directory as SD
 
 import PropertyTests (propertyTests)
-import UnitTypeTests (typeOrderTests, unitTypeTests, typeAliasTests, jsontype2jsonTests)
+import UnitTypeTests
 import GoldenMakefileTests (goldenMakefileTest)
 
 main = do
@@ -11,7 +11,8 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ unitTypeTests
+      [ packerTests
+      , unitTypeTests
       , typeOrderTests
       , typeAliasTests
       , propertyTests
@@ -80,8 +81,8 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      , golden "records-1-py" "records-1-py"
-      , golden "records-1-r" "records-1-r"
+      -- , golden "records-1-py" "records-1-py"
+      -- , golden "records-1-r" "records-1-r"
       -- -- see github issue #8
       -- , golden "records-1-c" "records-1-c"
 
@@ -119,34 +120,43 @@ main = do
       , golden "module-form-n10" "module-form-n10"
 
       -- tests of serialization
+      -- , golden "c  S" "serial-form-1-c"
+      -- , golden "py S" "serial-form-1-py"
+      -- , golden "r  S" "serial-form-1-r"
+      , golden "c  C" "serial-form-2-c"
+      , golden "py C" "serial-form-2-py"
+      , golden "r  C" "serial-form-2-r"
+      -- , golden "c  R" "serial-form-3-c"
+      -- , golden "py R" "serial-form-3-py"
+      -- , golden "r  R" "serial-form-3-r"
       -- outer simple type
-      , golden "c  S(S)" "serial-form-1-c"
-      , golden "py S(S)" "serial-form-1-py"
-      , golden "r  S(S)" "serial-form-1-r"
-      -- , golden "c  S(C)" "serial-form-2-c"
-      -- , golden "py S(C)" "serial-form-2-py"
-      -- , golden "r  S(C)" "serial-form-2-r"
-      -- , golden "c  S(R)" "serial-form-3-c"
-      -- , golden "py S(R)" "serial-form-3-py"
-      -- , golden "r  S(R)" "serial-form-3-r"
+      , golden "c  S(S)" "serial-form-4-c"
+      , golden "py S(S)" "serial-form-4-py"
+      , golden "r  S(S)" "serial-form-4-r"
+      , golden "c  S(C)" "serial-form-5-c"
+      , golden "py S(C)" "serial-form-5-py"
+      , golden "r  S(C)" "serial-form-5-r"
+      -- , golden "c  S(R)" "serial-form-6-c"
+      -- , golden "py S(R)" "serial-form-6-py"
+      -- , golden "r  S(R)" "serial-form-6-r"
       -- -- outer constructed type
-      -- , golden "c  C(S)" "serial-form-4-c"
-      -- , golden "py C(S)" "serial-form-4-py"
-      -- , golden "r  C(S)" "serial-form-4-r"
-      -- , golden "c  C(C)" "serial-form-5-c"
-      -- , golden "py C(C)" "serial-form-5-py"
-      -- , golden "r  C(C)" "serial-form-5-r"
-      -- , golden "c  C(R)" "serial-form-6-c"
-      -- , golden "py C(R)" "serial-form-6-py"
-      -- , golden "r  C(R)" "serial-form-6-r"
+      , golden "c  C(S)" "serial-form-7-c"
+      , golden "py C(S)" "serial-form-7-py"
+      , golden "r  C(S)" "serial-form-7-r"
+      , golden "c  C(C)" "serial-form-8-c"
+      , golden "py C(C)" "serial-form-8-py"
+      , golden "r  C(C)" "serial-form-8-r"
+      -- , golden "c  C(R)" "serial-form-9-c"
+      -- , golden "py C(R)" "serial-form-9-py"
+      -- , golden "r  C(R)" "serial-form-9-r"
       -- -- outer record type
-      -- , golden "c  R(S)" "serial-form-7-c"
-      -- , golden "py R(S)" "serial-form-7-py"
-      -- , golden "r  R(S)" "serial-form-7-r"
-      -- , golden "c  R(C)" "serial-form-8-c"
-      -- , golden "py R(C)" "serial-form-8-py"
-      -- , golden "r  R(C)" "serial-form-8-r"
-      -- , golden "c  R(R)" "serial-form-9-c"
-      -- , golden "py R(R)" "serial-form-9-py"
-      -- , golden "r  R(R)" "serial-form-9-r"
+      -- , golden "c  R(S)" "serial-form-10-c"
+      -- , golden "py R(S)" "serial-form-10-py"
+      -- , golden "r  R(S)" "serial-form-10-r"
+      -- , golden "c  R(C)" "serial-form-11-c"
+      -- , golden "py R(C)" "serial-form-11-py"
+      -- , golden "r  R(C)" "serial-form-11-r"
+      -- , golden "c  R(R)" "serial-form-12-c"
+      -- , golden "py R(R)" "serial-form-12-py"
+      -- , golden "r  R(R)" "serial-form-12-r"
       ]

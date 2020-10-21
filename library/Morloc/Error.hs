@@ -39,7 +39,7 @@ errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
   loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
-errmsg (PoolBuildError _ msg) = "PoolBuildError: " <> msg
+errmsg (PoolBuildError msg) = "PoolBuildError: " <> msg
 errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
 errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
 errmsg (BadTypeAliasParameters (TV _ v) exp obs)
@@ -58,6 +58,7 @@ errmsg MissingGeneralType = "MissingGeneralType"
 errmsg AmbiguousGeneralType = "AmbiguousGeneralType"
 errmsg (SubtypeError t1 t2) = "SubtypeError: (" <> MT.show' t1 <> ") <: (" <> MT.show' t2 <> ")"
 errmsg ExistentialError = "ExistentialError"
+errmsg UnsolvedExistentialTerm = "UnsolvedExistentialTerm"
 errmsg BadExistentialCast = "BadExistentialCast"
 errmsg (AccessError msg) = "AccessError"
 errmsg NonFunctionDerive = "NonFunctionDerive"
@@ -65,7 +66,6 @@ errmsg (UnboundVariable v) = "UnboundVariable: " <> unEVar v
 errmsg OccursCheckFail = "OccursCheckFail"
 errmsg EmptyCut = "EmptyCut"
 errmsg TypeMismatch = "TypeMismatch"
-errmsg (UnexpectedPattern e t) = "UnexpectedPattern"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg NoAnnotationFound = "NoAnnotationFound"
 errmsg (OtherError msg) = "OtherError: " <> msg

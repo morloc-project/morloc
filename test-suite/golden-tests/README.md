@@ -21,15 +21,18 @@ forms, and constructed serial forms.
 
 The combinations are:
 
- 1. S(S) - `[(Str,Int)]`
- 2. S(C) - `[Map Str Int]`
- 3. S(R) - `[Person Str]
- 4. C(S) - `Map Str Int`
- 5. C(C) - `Map Str (Map Str Int)`
- 6. C(R) - `Map Str (Person Str)`
- 7. R(S) - `Person Str`
- 8. R(C) - `Person (Map Str Int)` 
- 9. R(R) - `Person (Person Str)`
+ 1.  S - (Str,Int,Bool)
+ 2.  C - Map Str Int
+ 3.  R - Person Str
+ 4.  S(S) - `[(Str,Int)]`
+ 5.  S(C) - `[Map Str Int]`
+ 6.  S(R) - `[Person Str]
+ 7.  C(S) - `Map Str Int`
+ 8.  C(C) - `Map Str (Map Str Int)`
+ 9.  C(R) - `Map Str (Person Str)`
+ 10. R(S) - `Person Str`
+ 11. R(C) - `Person (Map Str Int)` 
+ 12. R(R) - `Person (Person Str)`
 
 There are infinitely more complex forms, but all of these can be systematically
 reduced/expanded in (de)serialization. So long as these base cases work,

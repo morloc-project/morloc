@@ -1,4 +1,4 @@
-import pybase (id)
+import pybase (id, Map)
 
 source py ("list" as Person)
 
@@ -9,6 +9,6 @@ export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person (Person Str) -> Person (Person Str)
-foo r :: Person (Person "str") -> Person (Person "str")
+foo :: Map Str (Person Str) -> Map Str (Person Str)
+foo r :: Map "str" (Person "str") -> Map "str" (Person "str")
 foo xs = id xs

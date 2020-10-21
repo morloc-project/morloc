@@ -28,7 +28,7 @@ module Morloc.CodeGenerator.Grammars.Common
   ) where
 
 import Morloc.Data.Doc
-import Morloc.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.Pretty (prettyType)
 import qualified Data.Map.Strict as Map
 import qualified Morloc.Config as MC
@@ -36,6 +36,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+import qualified Morloc.CodeGenerator.Serial as MCS
 
 import Data.Scientific (Scientific)
 import qualified Data.Set as Set
@@ -67,18 +68,18 @@ nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
 
-prettyExprM :: ExprM -> MDoc
+prettyExprM :: ExprM f -> MDoc
 prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   manNamer :: Int -> MDoc
   manNamer i = "m" <> pretty i
 
-  f :: ExprM -> ([MDoc], MDoc)
-  f (ManifoldM i args e) =
+  f :: ExprM f -> ([MDoc], MDoc)
+  f (ManifoldM m args e) =
     let (ms', body) = f e
-        head = manNamer i <> tupled (map prettyArgument args)
+        head = manNamer (metaId m) <> tupled (map prettyArgument args)
         mdoc = block 4 head body
-    in (mdoc : ms', manNamer i)
-  f (PoolCallM t cmds args) =
+    in (mdoc : ms', manNamer (metaId m))
+  f (PoolCallM t _ cmds args) =
     let poolArgs = cmds ++ map prettyArgument args
     in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
   f (ForeignInterfaceM t e) =
@@ -114,10 +115,10 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   f (NumM _ x) = ([], viaShow x)
   f (StrM _ x) = ([], dquotes $ pretty x)
   f (NullM _) = ([], "null")
-  f (SerializeM e) =
+  f (SerializeM _ e) =
     let (ms, e') = f e
     in (ms, "PACK" <> tupled [e'])
-  f (DeserializeM e) =
+  f (DeserializeM _ e) =
     let (ms, e') = f e
     in (ms, "UNPACK" <> tupled [e'])
   f (ReturnM e) =
@@ -130,13 +131,22 @@ prettyTypeM (Serial c) = "Serial<" <> prettyType c <> ">"
 prettyTypeM (Native c) = "Native<" <> prettyType c <> ">"
 prettyTypeM (Function ts t) =
   "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
-prettyTypeM (ForallM vs t) = "Forall" <+> hsep (map pretty vs) <+> "." <+> prettyTypeM t
 
-invertExprM :: ExprM -> MorlocMonad ExprM
-invertExprM (ManifoldM i args e) = do
+-- see page 112 of my super-secret notes ...
+-- example:
+-- > f [g x, 42] (h 1 [1,2])
+-- converts to:
+-- > let a0 = g x
+-- > in let a1 = [a0, 42]
+-- >    in let a2 = [1,2]
+-- >       in let a3 = h 1 a2
+-- >          in f a1 a3
+-- expression inversion will not alter expression type
+invertExprM :: (ExprM f) -> MorlocMonad (ExprM f)
+invertExprM (ManifoldM m args e) = do
   MM.startCounter
   e' <- invertExprM e
-  return $ ManifoldM i args e'
+  return $ ManifoldM m args e'
 invertExprM (LetM v e1 e2) = do
   e2' <- invertExprM e2
   return $ LetM v e1 e2'
@@ -168,22 +178,22 @@ invertExprM (RecordM c entries) = do
       e = LetM v (RecordM c entries') (LetVarM c v)
       e' = foldl (\x y -> dependsOn x y) e es'
   return e'
-invertExprM (SerializeM e) = do
+invertExprM (SerializeM p e) = do
   e' <- invertExprM e
   v <- MM.getCounter
   let t' = packTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (SerializeM (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (DeserializeM e) = do
+  return $ dependsOn (LetM v (SerializeM p (terminalOf e')) (LetVarM t' v)) e'
+invertExprM (DeserializeM p e) = do
   e' <- invertExprM e
   v <- MM.getCounter
   let t' = unpackTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (DeserializeM (terminalOf e')) (LetVarM t' v)) e'
+  return $ dependsOn (LetM v (DeserializeM p (terminalOf e')) (LetVarM t' v)) e'
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM (PoolCallM t cmds args) = do
+invertExprM (PoolCallM t i cmds args) = do
   v <- MM.getCounter
-  return $ LetM v (PoolCallM t cmds args) (LetVarM t v)
+  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
 invertExprM e = return e
 
 -- transfer all let-dependencies from y to x
@@ -192,12 +202,12 @@ invertExprM e = return e
 -- resolve conflicts be substituting in fresh variable names. However, for
 -- now, I will trust that my name generator created names that are unique
 -- within the manifold.
-dependsOn :: ExprM -> ExprM -> ExprM
+dependsOn :: ExprM f -> ExprM f -> ExprM f
 dependsOn x (LetM v e y) = LetM v e (dependsOn x y)
 dependsOn x _ = x
 
 -- get the rightmost expression in a let-tree
-terminalOf :: ExprM -> ExprM
+terminalOf :: ExprM f -> ExprM f
 terminalOf (LetM _ _ e) = terminalOf e
 terminalOf e = e
 
@@ -207,7 +217,8 @@ typeOfTypeM t = fmap CType (typeOfTypeM' t) where
   typeOfTypeM' (Serial c) = Just (typeOf c)
   typeOfTypeM' (Native c) = Just (typeOf c)
   typeOfTypeM' (Function [] t) = typeOfTypeM' t
-  typeOfTypeM' (Function (ti:ts) to) = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
+  typeOfTypeM' (Function (ti:ts) to)
+    = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
 
 arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
@@ -218,18 +229,15 @@ arg2typeM (PassThroughArgument _) = Passthrough
 --
 -- The ExprM must have exactly enough type information to infer the type of any
 -- element without reference to the element's parent.
-typeOfExprM :: ExprM -> TypeM
+typeOfExprM :: ExprM f -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
 typeOfExprM (ForeignInterfaceM t _) = t
-typeOfExprM (PoolCallM t _ _) = t
+typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output
     inputs' -> Function inputs' output
-  (ForallM vs (Function inputs output))  -> case drop (length xs) inputs of
-    [] -> output
-    inputs' -> ForallM vs (Function inputs' output)
   _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (prettyTypeM $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
@@ -242,8 +250,8 @@ typeOfExprM (LogM t _) = t
 typeOfExprM (NumM t _) = t
 typeOfExprM (StrM t _) = t
 typeOfExprM (NullM t) = t
-typeOfExprM (SerializeM e) = packTypeM (typeOfExprM e)
-typeOfExprM (DeserializeM e) = unpackTypeM (typeOfExprM e)
+typeOfExprM (SerializeM _ e) = packTypeM (typeOfExprM e)
+typeOfExprM (DeserializeM _ e) = unpackTypeM (typeOfExprM e)
 typeOfExprM (ReturnM e) = typeOfExprM e
 
 packTypeM :: TypeM -> TypeM
@@ -259,9 +267,7 @@ unpackTypeM t = t
 ctype2typeM :: CType -> TypeM
 ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
   (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
-ctype2typeM (CType (Forall v t)) = case ctype2typeM (CType t) of
-  (ForallM vs t') -> ForallM (v:vs) t'
-  t' -> ForallM [v] t'
+ctype2typeM (CType (UnkT _)) = Passthrough
 ctype2typeM c = Native c
 
 -- get input types to a function type
@@ -270,30 +276,25 @@ typeParts c = case reverse . map CType $ typeArgs (unCType c) of
   (t:ts) -> (reverse ts, t)
   where
     typeArgs (FunT t1 t2) = t1 : typeArgs t2
-    typeArgs (Forall _ t) = typeArgs t
     typeArgs t = [t]
 
-unpackExprM :: ExprM -> ExprM
-unpackExprM e = case typeOfExprM e of
-  (Serial _) -> DeserializeM e
-  (Passthrough) -> error "Cannot unpack a passthrough typed expression"
-  _ -> e
+unpackExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM m e = case typeOfExprM e of
+  (Serial (CType t)) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
+  (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
+  _ -> return e
 
-packExprM :: ExprM -> ExprM
-packExprM e = case typeOfExprM e of
-  (Native _) -> SerializeM e
+packExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many)
+packExprM m e = case typeOfExprM e of
+  (Native (CType t)) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
   -- (Function _ _) -> error "Cannot pack a function"
-  _ -> e
+  _ -> return e
 
 type2jsontype :: Type -> MorlocMonad JsonType
+type2jsontype (UnkT _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
 type2jsontype (VarT (TV _ v)) = return $ VarJ v
 type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
--- FIXME: leaking existential
-type2jsontype (ExistT _ _ [d]) = type2jsontype (unDefaultType d)
-type2jsontype (ExistT _ _ []) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with no default type"
-type2jsontype (ExistT _ _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: ExistT with ambiguous default types"
-type2jsontype (Forall _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: Forall"
-type2jsontype (FunT _ _) = MM.throwError . CallTheMonkeys $ "Invalid JSON type: FunT"
+type2jsontype (FunT _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
 type2jsontype (NamT (TV _ v) rs) = do
   vs <- mapM type2jsontype (map snd rs)
   return $ NamJ v (zip (map fst rs) vs)

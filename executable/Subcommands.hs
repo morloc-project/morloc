@@ -23,9 +23,7 @@ import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import qualified Morloc.Parser.API as Papi
-import qualified Morloc.Parser.Parser as P
-import Morloc.TypeChecker.Pretty (ugly, cute)
+import qualified Morloc.Frontend.API as F
 
 type Subcommand = Arguments -> Config.Config -> IO ()
 
@@ -105,10 +103,10 @@ cmdTypecheck args config = do
           else Just (Path expr)
   let writer =
         if isPresent args (longOption "raw")
-          then ugly
-          else cute
+          then F.ugly
+          else F.cute
   if isPresent args (longOption "type")
-    then print $ P.readType expr'
+    then print $ F.readType expr'
     else MM.runMorlocMonad
            (getVerbosity args)
            config

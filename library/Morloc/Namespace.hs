@@ -13,14 +13,19 @@ module Morloc.Namespace
     module Morloc.Internal
   -- ** Synonyms
   , MDoc
+  , DAG
+  -- ** Other functors
+  , None(..)
+  , One(..)
+  , Many(..)
   -- ** Newtypes
   , CType(..)
   , ctype
   , GType(..)
   , generalType
-  , DefaultType(..)
   , EVar(..)
   , MVar(..)
+  , TVar(..)
   , Name(..)
   , Path(..)
   , Code(..)
@@ -28,8 +33,10 @@ module Morloc.Namespace
   , Lang(..)
   -- ** Data
   , Script(..)
+  -- ** Serialization
+  , UnresolvedPacker(..)
+  , PackMap
   --------------------
-  , MData(..)
   -- ** Error handling
   , MorlocError(..)
   -- ** Configuration
@@ -41,48 +48,22 @@ module Morloc.Namespace
   -- ** Package metadata
   , PackageMeta(..)
   , defaultPackageMeta
-  -- * Typechecking
-  , Expr(..)
-  , Gamma
-  , GammaIndex(..)
-  , Import(..)
-  , Source(..)
-  , Indexable(..)
-  , Stack
-  , StackState(..)
-  , TVar(..)
+  -- * Types
   , Type(..)
-  , JsonType(..)
-  -- ** State manipulation
-  , StackConfig(..)
-  -- ** ModuleGamma paraphernalia
-  , ModularGamma
+  , UnresolvedType(..)
+  , unresolvedType2type
+  , Source(..)
   -- ** Type extensions
   , Constraint(..)
-  , EType(..)
   , Property(..)
-  , TypeSet(..)
-  , Typelike(..)
   , langOf
   -- ** Types used in post-typechecking tree
   , SAnno(..)
   , SExpr(..)
   , GMeta(..)
-  , None(..)
-  , One(..)
-  , Many(..)
-  -- ** DAG and associated types
-  , DAG
-  , ParserNode(..)
-  , ParserDag
-  , PreparedNode(..)
-  , PreparedDag
-  , TypedNode(..)
-  , TypedDag
-  -- ** Types used in final translations
-  , TypeM(..)
-  , ExprM(..)
-  , Argument(..)
+  -- ** Typeclasses
+  , HasOneLanguage(..)
+  , Typelike(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -106,6 +87,9 @@ import qualified Data.Set as S
 
 -- | no annotations for now
 type MDoc = Doc ()
+
+-- | A general purpose Directed Acyclic Graph (DAG)
+type DAG key edge node = Map key (node, [(key, edge)])
 
 type MorlocMonadGen c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
@@ -135,15 +119,23 @@ data Script =
     }
   deriving (Show, Ord, Eq)
 
--- | The values are left unparsed, since they will be used as text
-data MData
-  = Num' Text
-  | Str' Text
-  | Log' Bool -- booleans are parsed, since representation depend on language
-  | Lst' [MData]
-  | Rec' [(Text, MData)]
-  | Tup' [MData]
-  deriving (Show, Eq, Ord)
+data UnresolvedPacker =
+  UnresolvedPacker
+    { unresolvedPackerTerm :: Maybe EVar
+    -- ^ The general import term used for this type. For example, the 'Map'
+    -- type may have language-specific realizations such as 'dict' or 'hash',
+    -- but it is imported as 'import xxx (Map)'.
+    , unresolvedPackerCType :: UnresolvedType
+    -- ^ The decomposed (unpacked) type
+    , unresolvedPackerForward :: [Source]
+    -- ^ The unpack function, there may be more than one, the compiler will make
+    -- a half-hearted effort to find the best one. It is called "Forward" since
+    -- it is moves one step towards serialization.
+    , unresolvedPackerReverse :: [Source]
+    }
+  deriving (Show, Ord, Eq)
+
+type PackMap = Map (TVar, Int) [UnresolvedPacker]
 
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
@@ -172,7 +164,7 @@ data MorlocError
   -- | Missing a serialization or deserialization function
   | SerializationError Text
   -- | Error in building a pool (i.e., in a compiled language)
-  | PoolBuildError Script Text
+  | PoolBuildError Text
   -- | Raise error if inappropriate function is called on unrealized manifold
   | NoBenefits
   -- | Raise when a type alias substitution fails
@@ -189,6 +181,7 @@ data MorlocError
   | AmbiguousGeneralType
   | SubtypeError Type Type
   | ExistentialError
+  | UnsolvedExistentialTerm
   | BadExistentialCast
   | AccessError Text
   | NonFunctionDerive
@@ -196,7 +189,6 @@ data MorlocError
   | OccursCheckFail
   | EmptyCut
   | TypeMismatch
-  | UnexpectedPattern Expr Type
   | ToplevelRedefinition
   | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
@@ -283,53 +275,10 @@ data Config =
 
 -- ================ T Y P E C H E C K I N G  =================================
 
-type Gamma = [GammaIndex]
-
 newtype EVar = EVar { unEVar :: Text } deriving (Show, Eq, Ord)
 newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
-
-type GeneralStack c e l s a
-   = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
-
-type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
-
-data StackConfig =
-  StackConfig
-    { stackConfigVerbosity :: Int
-    }
-
-data StackState =
-  StackState
-    { stateVar :: Int
-    , stateQul :: Int
-    , stateSer :: [(Type, Type)]
-    , stateDepth :: Int
-    }
-  deriving (Ord, Eq, Show)
-
--- | A context, see Dunfield Figure 6
-data GammaIndex
-  = VarG TVar
-  -- ^ (G,a)
-  | AnnG Expr TypeSet
-  -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar [Type] [DefaultType]
-  -- ^ (G,a^) unsolved existential variable
-  | SolvedG TVar Type
-  -- ^ (G,a^=t) Store a solved existential variable
-  | MarkG TVar
-  -- ^ (G,>a^) Store a type variable marker bound under a forall
-  | MarkEG EVar
-  -- ^ ...
-  | SrcG Source
-  -- ^ source
-  | UnsolvedConstraint Type Type
-  -- ^ Store an unsolved serialization constraint containing one or more
-  -- existential variables. When the existential variables are solved, the
-  -- constraint will be written into the Stack state.
-  deriving (Ord, Eq, Show)
 
 data Source =
   Source
@@ -340,15 +289,6 @@ data Source =
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
-    }
-  deriving (Ord, Eq, Show)
-
-data Import =
-  Import
-    { importModuleName :: MVar
-    , importInclude :: Maybe [(EVar, EVar)]
-    , importExclude :: [EVar]
-    , importNamespace :: Maybe EVar -- currently not used
     }
   deriving (Ord, Eq, Show)
 
@@ -385,97 +325,14 @@ data GMeta = GMeta {
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
+  , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
+  -- ^ The (un)packers available in this node's module scope. FIXME: find something more efficient
 } deriving (Show, Ord, Eq)
-
--- -- | Replace Type with SimpleType after typechecking (where all types should
--- -- be resolved and all universal and existential types removed)
--- data SimpleType
---   = VarSimple TVar
---   -- ^ (a)
---   | FunSimple Type SimpleType
---   -- ^ (A->B)
---   | ArrSimple TVar [SimpleType] -- positional parameterized types
---   -- ^ f [Type]
---   | NamSimple TVar [(Text, SimpleType)] -- keyword parameterized types
---   -- ^ Foo { bar :: A, baz :: B }
---   deriving (Show, Ord, Eq)
-
-
--- | A general purpose Directed Acyclic Graph (DAG)
-type DAG key edge node = Map key (node, [(key, edge)])
-
--- | The type returned from the Parser. It contains all the information in a
--- single module but knows NOTHING about other modules.
-data ParserNode = ParserNode  {
-    parserNodePath :: Maybe Path
-  , parserNodeBody :: [Expr]
-  , parserNodeSourceMap :: Map (EVar, Lang) Source
-  , parserNodeTypedefs :: Map TVar (Type, [TVar])
-  , parserNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type ParserDag = DAG MVar Import ParserNode
-
--- | Node description after desugaring (substitute type aliases and resolve
--- imports/exports)
-data PreparedNode = PreparedNode {
-    preparedNodePath :: Maybe Path
-  , preparedNodeBody :: [Expr]
-  , preparedNodeSourceMap :: Map (EVar, Lang) Source
-  , preparedNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
-
--- | Node description after type checking. This will later be fed into
--- `treeify` to make the SAnno objects that will be passed to Generator.
-data TypedNode = TypedNode {
-    typedNodeModuleName :: MVar
-  , typedNodePath :: Maybe Path
-  , typedNodeBody :: [Expr]
-  , typedNodeTypeMap :: Map EVar TypeSet
-  , typedNodeSourceMap :: Map (EVar, Lang) Source
-  , typedNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
-type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
-
-
--- | Terms, see Dunfield Figure 1
-data Expr
-  = SrcE [Source]
-  -- ^ import "c" from "foo.c" ("f" as yolo)
-  | Signature EVar EType
-  -- ^ x :: A; e
-  | Declaration EVar Expr
-  -- ^ x=e1; e2
-  | UniE
-  -- ^ (())
-  | VarE EVar
-  -- ^ (x)
-  | ListE [Expr]
-  -- ^ [e]
-  | TupleE [Expr]
-  -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
-  | LamE EVar Expr
-  -- ^ (\x -> e)
-  | AppE Expr Expr
-  -- ^ (e e)
-  | AnnE Expr [Type]
-  -- ^ (e : A)
-  | NumE Scientific
-  -- ^ number of arbitrary size and precision
-  | LogE Bool
-  -- ^ boolean primitive
-  | StrE Text
-  -- ^ literal string
-  | RecE [(EVar, Expr)]
-  deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
 
 newtype GType = GType { unGType :: Type }
-  deriving (Show, Ord, Eq)
-
-newtype DefaultType = DefaultType { unDefaultType :: Type }
   deriving (Show, Ord, Eq)
 
 -- a safe alternative to the CType constructor
@@ -492,31 +349,45 @@ generalType t
 
 -- | Types, see Dunfield Figure 6
 data Type
-  = VarT TVar
+  = UnkT TVar
+  -- ^ Unknown type: these may be serialized forms that do not need to be
+  -- unserialized in the current environment but will later be passed to an
+  -- environment where they can be deserialized. Alternatively, terms that are
+  -- used within dynamic languages may need to type annotation.
+  | VarT TVar
   -- ^ (a)
-  | ExistT TVar [Type] [DefaultType]
-  -- ^ (a^) will be solved into one of the other types
-  | Forall TVar Type
-  -- ^ (Forall a . A)
   | FunT Type Type
-  -- ^ (A->B)
-  | ArrT TVar [Type] -- positional parameterized types
-  -- ^ f [Type]
-  | NamT TVar [(Text, Type)] -- keyword parameterized types
+  -- ^ (A->B)  -- positional parameterized types
+  | ArrT TVar [Type]
+  -- ^ f [Type]  -- keyword parameterized types
+  | NamT TVar [(Text, Type)] 
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
--- | A simplified subset of the Type record
--- functions, existential, and universal types are removed
--- language-specific info is removed
-data JsonType
-  = VarJ Text
-  -- ^ {"int"}
-  | ArrJ Text [JsonType]
-  -- ^ {"list":["int"]}
-  | NamJ Text [(Text, JsonType)]
-  -- ^ {"Foo":{"bar":"A","baz":"B"}}
+-- | Types, see Dunfield Figure 6
+data UnresolvedType
+  = VarU TVar
+  -- ^ (a)
+  | ExistU TVar [UnresolvedType] [UnresolvedType]
+  -- ^ (a^) will be solved into one of the other types
+  | ForallU TVar UnresolvedType
+  -- ^ (Forall a . A)
+  | FunU UnresolvedType UnresolvedType
+  -- ^ (A->B)
+  | ArrU TVar [UnresolvedType] -- positional parameterized types
+  -- ^ f [UnresolvedType]
+  | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
+  -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
+
+unresolvedType2type :: UnresolvedType -> Type 
+unresolvedType2type (VarU v) = VarT v
+unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
+unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
+unresolvedType2type (NamU v rs) = NamT v (zip (map fst rs) (map (unresolvedType2type . snd) rs))
+unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
+unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
+
 
 data Property
   = Pack -- data structure to JSON
@@ -531,52 +402,81 @@ newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
 
--- | Extended Type that may represent a language specific type as well as sets
--- of properties and constrains.
-data EType =
-  EType
-    { etype :: Type
-    , eprop :: Set Property
-    , econs :: Set Constraint
-    }
-  deriving (Show, Eq, Ord)
-
-data TypeSet =
-  TypeSet (Maybe EType) [EType]
-  deriving (Show, Eq, Ord)
-
-type ModularGamma = Map MVar (Map EVar TypeSet)
-
-class Indexable a where
-  index :: a -> GammaIndex
-
-instance Indexable GammaIndex where
-  index = id
-
-instance Indexable Type where
-  index (ExistT t ts ds) = ExistG t ts ds
-  index t = error $ "Can only index ExistT, found: " <> show t
-
 class Typelike a where
   typeOf :: a -> Type
+  -- utypeOf :: a -> UnresolvedType
+  --
+  -- nqualified :: a -> Int
+  -- nqualified t = nqualifiedU (utypeOf t) where
+  --   nqualifiedU (ForallU _ u) = 1 + nqualifiedU u
+  --   nqualifiedU _ = 0
+  --
+  -- qualifiedTerms :: a -> [TVar]
+  -- qualifiedTerms t = qt (utypeOf t) where
+  --   qt (ForallU v t) = v : qt t
+  --   qt _ = []
+  --
+  -- nargs :: a -> Int
+  -- nargs t = case utypeOf t of
+  --   (FunU _ t) -> 1 + nargs t
+  --   (ForallU _ t) -> nargs t
+  --   _ -> 0
 
   nargs :: a -> Int
   nargs t = case typeOf t of
     (FunT _ t) -> 1 + nargs t
-    (Forall _ t) -> nargs t
     _ -> 0
 
 instance Typelike Type where
   typeOf = id
 
-instance Typelike EType where
-  typeOf = etype
+  -- qualifiedTerms (UnkT v) = [v]
+  -- qualifiedTerms (VarT _) = []
+  -- qualifiedTerms (FunT t1 t2) = unique (qualifiedTerms t1) (qualifiedTerms t2)
+  -- qualifiedTerms (ArrT _ ts) = (unique . concat) (map qualifiedTerms ts)
+  -- qualifiedTerms (NamT _ rs) = (unique . concat) (map (qualifiedTerms . snd) ts)
+  --
+  -- utypeOf t = f (qualifiedTerms t) t where
+  --   f (v:vs) t = ForallU v (f vs t)
+  --   f [] (UnkT v) = VarT v
+  --   f [] (VarT v) = VarT v
+  --   f [] (FunT t1 t2) = FunU t1 t2
+  --   f [] (ArrT v ts) = ArrU v (map (f []) ts)
+  --   f [] (NamT v rs) = NamT v (zip (map fst rs) (map (f [] . snd) rs))
+  --
+  -- splitArgs = (\(vs,ts)->(vs, map typeOf ts)) . typeOf . splitArgs . utypeOf t
 
 instance Typelike CType where
   typeOf (CType t) = t 
 
+  -- splitArgs =
+  --   let (vs,ts) = splitArgs (typeOf t)
+  --   in (vs, map CType ts)
+  --
+  -- utypeOf t = utypeOf (typeOf t)
+
 instance Typelike GType where
   typeOf (GType t) = t 
+
+--   splitArgs =
+--     let (vs,ts) = splitArgs (typeOf t)
+--     in (vs, map GType ts)
+--
+--   utypeOf t = utypeOf (typeOf t)
+--
+-- instance Typelike UnresolvedType where
+--   utypeOf = id
+--
+--   typeOf = undefined
+--
+--   splitArgs (ForallU v u) =
+--     let (vs, ts) = splitArgs u
+--     in (v:vs, ts)
+--   splitArgs (FunU t1 t2) =
+--     let (vs, ts) = splitArgs t2
+--     in (vs, t1:ts)
+--   splitArgs t = ([], [t])
+
 
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
@@ -589,13 +489,8 @@ instance HasOneLanguage CType where
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
 instance HasOneLanguage Type where
+  langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
-  langOf x@(ExistT (TV lang _) ts _)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(Forall (TV lang _) t)
-    | lang == langOf t = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
   langOf x@(FunT t1 t2)
     | langOf t1 == langOf t2 = langOf t1
     | otherwise = error $ "inconsistent languages in" <> show x
@@ -607,150 +502,24 @@ instance HasOneLanguage Type where
     | all ((==) lang) (map (langOf . snd) ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
 
-instance HasOneLanguage EType where
-  langOf e = langOf (etype e) 
-
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
 
-
--- | An argument that is passed to a manifold
-data Argument
-  = SerialArgument Int CType
-  -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
-  -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
-  -- may not be serializable. This is OK, so long as they are only used in
-  -- functions of the same language.
-  | NativeArgument Int CType
-  -- ^ A native argument with the same parameters as above
-  | PassThroughArgument Int 
-  -- ^ A serialized argument that is untyped in the current language. It cannot
-  -- be deserialized, but will be passed eventually to a foreign argument where it
-  -- does have a concrete type.
-  deriving (Show, Ord, Eq)
-
-instance HasOneLanguage Argument where
-  langOf (SerialArgument _ c) = langOf c
-  langOf (NativeArgument _ c) = langOf c
-  langOf (PassThroughArgument _) = Nothing
-
-
-data TypeM
-  = Passthrough -- ^ serialized data that cannot be deserialized in this language
-  | Serial CType -- ^ serialized data that may be deserialized in this language
-  | Native CType
-  | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
-  | ForallM [TVar] TypeM
-  deriving(Show, Eq, Ord)
-
-instance HasOneLanguage TypeM where
-  langOf Passthrough = Nothing
-  langOf (Serial c) = langOf c
-  langOf (Native c) = langOf c
-  langOf (Function xs f) = listToMaybe $ catMaybes (map langOf (f:xs))
-
-
--- | A grammar that describes the implementation of the pools. Expressions in
--- this grammar will be directly translated into concrete code.
-data ExprM
-  = ManifoldM Int [Argument] ExprM
-  -- ^ A wrapper around a single source call or (in some cases) a container.
-
-  | ForeignInterfaceM
-      TypeM -- required type in the calling language
-      ExprM -- expression in the foreign language
-  -- ^ A generic interface to an expression in another language. Currently it
-  -- will be resolved only to the specfic pool call interface type, where
-  -- system calls pass serialized information between pools in different
-  -- languages. Eventually, better methods will be added for certain pairs of
-  -- languages.
-
-  | PoolCallM
-      TypeM -- serialized return data
-      [MDoc] -- shell command components that preceed the passed data
-      [Argument] -- argument passed to the foreign function (must be serialized)
-  -- ^ Make a system call to another language
-
-  | LetM Int ExprM ExprM
-  -- ^ let syntax allows fine control over order of operations in the generated
-  -- code. The Int is an index for a LetVarM. It is also important in languages
-  -- such as C++ where values need to be declared with explicit types and
-  -- special constructors.
-
-  | AppM
-      ExprM -- ManifoldM | SrcM | LamM
-      [ExprM] 
-
-  | SrcM TypeM Source
-  -- ^ a within pool function call (cis)
-
-  | LamM [Argument] ExprM
-  -- ^ Nothing Evar will be auto generated
-
-  | BndVarM TypeM Int
-  -- ^ A lambda-bound variable. BndVarM only describes variables bound as positional
-  -- arguments in a manifold. The are represented as integers since the name
-  -- will be language-specific.
-  --
-  -- In the rewrite step, morloc declarations are removed. So the expression:
-  --   x = 5
-  --   foo y = mul x y
-  -- Is rewritten as:
-  --   \y -> mul 5 y
-  -- So BndVarM does NOT include variables defined in the morloc script. It only
-  -- includes lambda-bound variables. The only BndVarM is `y` (`mul` is SrcM). The
-  -- literal name "y" is replaced, though, with the integer 1. This required in
-  -- order to avoid name conflicts in concrete languages, for example consider
-  -- the following (perfectly legal) morloc function:
-  --   foo for = mul for 2
-  -- If the string "for" were retained as the variable name, this would fail in
-  -- many language where "for" is a keyword.
-
-  | LetVarM TypeM Int
-  -- ^ An internally generated variable id used in let assignments. When
-  -- translated into a language, the integer will be used to generate a unique
-  -- variable name (e.g. [a0,a1,...] or [a,b,c,...]).
-
-  -- containers
-  | ListM TypeM [ExprM]
-  | TupleM TypeM [ExprM]
-  | RecordM TypeM [(EVar, ExprM)]
-
-  -- primitives
-  | LogM TypeM Bool
-  | NumM TypeM Scientific
-  | StrM TypeM Text
-  | NullM TypeM
-
-  -- serialization - these must remain abstract, since required arguments
-  -- will vary between languages.
-  | SerializeM ExprM
-  | DeserializeM ExprM
-
-  | ReturnM ExprM
-  -- ^ The return value of a manifold. I need this to distinguish between the
-  -- values assigned in let expressions and the final return value. In some
-  -- languages, this may not be necessary (e.g., R).
-  deriving(Show)
-
-instance HasOneLanguage ExprM where
-  -- langOf :: a -> Maybe Lang
-  langOf (ManifoldM _ _ e) = langOf e
-  langOf (ForeignInterfaceM t _) = langOf t
-  langOf (PoolCallM t _ _) = langOf t
-  langOf (LetM _ _ e2) = langOf e2
-  langOf (AppM e _) = langOf e
-  langOf (SrcM _ src) = Just (srcLang src) 
-  langOf (LamM _ e) = langOf e
-  langOf (BndVarM t _) = langOf t
-  langOf (LetVarM t _) = langOf t
-  langOf (ListM t _) = langOf t
-  langOf (TupleM t _) = langOf t
-  langOf (RecordM t _) = langOf t
-  langOf (LogM t _) = langOf t
-  langOf (NumM t _) = langOf t
-  langOf (StrM t _) = langOf t
-  langOf (NullM t) = langOf t
-  langOf (SerializeM e) = langOf e
-  langOf (DeserializeM e) = langOf e
-  langOf (ReturnM e) = langOf e
+instance HasOneLanguage UnresolvedType where
+  langOf (VarU (TV lang _)) = lang
+  langOf x@(ExistU (TV lang _) ts _)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(ForallU (TV lang _) t)
+    | lang == langOf t = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
+  langOf x@(FunU t1 t2)
+    | langOf t1 == langOf t2 = langOf t1
+    | otherwise = error $ "inconsistent languages in" <> show x
+  langOf x@(ArrU (TV lang _) ts)
+    | all ((==) lang) (map langOf ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x 
+  langOf (NamU _ []) = error "empty records are not allowed"
+  langOf x@(NamU (TV lang _) ts)
+    | all ((==) lang) (map (langOf . snd) ts) = lang
+    | otherwise = error $ "inconsistent languages in " <> show x
