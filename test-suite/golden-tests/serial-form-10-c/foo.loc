@@ -1,14 +1,15 @@
 import cppbase (id)
 
-source cpp ("list" as Person)
-
-data (Person a) = Person {name :: Str, info :: a}
-data cpp (Person a) = Person {name :: "std::string", info :: a}
+object (Person a) = Person {name :: Str, info :: a};
+object cpp (Person a) = "person" {name :: "std::string", info :: a};
+--             ^           ^
+--  type name -'           |
+--    constructor name ----'
 
 export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person Str -> Person Str
-foo cpp :: Person "std::string" -> Person "std::string"
-foo xs = id xs
+foo :: Person Str -> Person Str;
+foo cpp :: Person "std::string" -> Person "std::string";
+foo xs = id xs;

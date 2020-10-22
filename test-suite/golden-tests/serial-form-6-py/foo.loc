@@ -2,13 +2,13 @@ import pybase (id)
 
 source py ("dict" as Person)
 
-data (Person a) = Person {name :: Str, info :: a}
-data py (Person a) = Person {name :: "str", info :: a}
+data (Person a) = Person {name :: Str, info :: a};
+data py (Person a) = Person {name :: "str", info :: a};
 
 export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: [Person Str] -> [Person Str]
-foo py :: [Person "str"] -> [Person "str"]
-foo xs = id xs
+foo :: [Person Str] -> [Person Str];
+foo py :: [Person "str"] -> [Person "str"];
+foo xs = id xs;

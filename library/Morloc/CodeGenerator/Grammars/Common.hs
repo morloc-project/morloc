@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyExprM
   , prettyTypeM
   , typeOfExprM
+  , typeOfTypeM
   , invertExprM
   , typeParts
   , ctype2typeM

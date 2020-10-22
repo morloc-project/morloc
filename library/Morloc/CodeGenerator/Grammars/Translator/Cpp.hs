@@ -40,14 +40,17 @@ translate srcs es = do
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es)
 
+  let recmap = unifyRecords . conmap collectRecords $ es
+      (declarations, serializers) = (\xs -> (conmap fst xs, conmap snd xs))
+                                  . map (uncurry makeSerializers) $ recmap
+      dispatch = makeDispatch es
+      signatures = map makeSignature es
+
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
 
-  let dispatch = makeDispatch es
-      signatures = map makeSignature es
-
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures mDocs dispatch
+  return $ makeMain includeDocs signatures (declarations ++ serializers) mDocs dispatch
 
 letNamer :: Int -> MDoc
 letNamer i = "a" <> viaShow i
@@ -393,8 +396,8 @@ showType = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc
   mkfun _ _ = "FUNCTION_TYPE"
 
-  mkrec :: [(MDoc, MDoc)] -> MDoc
-  mkrec _ = "RECORD_TYPE"
+  mkrec :: MDoc -> [(MDoc, MDoc)] -> MDoc
+  mkrec constructor _ = constructor
 
 showTypeM :: TypeM -> MDoc
 showTypeM Passthrough = serialType
@@ -408,8 +411,147 @@ showNativeTypeM (Serial t) = return $ showType t
 showNativeTypeM (Native t) = return $ showType t
 showNativeTypeM _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
-makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures manifolds dispatch = [idoc|#include <string>
+
+collectRecords :: ExprM One -> [(TVar, [(MT.Text, Type)])]
+collectRecords (ManifoldM _ _ e) = collectRecords e
+collectRecords (ForeignInterfaceM t e) = maybeToList (cleanRecord t) ++ collectRecords e
+collectRecords (PoolCallM t _ _ _) = maybeToList (cleanRecord t)
+collectRecords (LetM _ e1 e2) = collectRecords e1 ++ collectRecords e2
+collectRecords (AppM e es) = collectRecords e ++ conmap collectRecords es
+collectRecords (LamM _ e) = collectRecords e
+collectRecords (ListM _ es) = conmap collectRecords es
+collectRecords (TupleM _ es) = conmap collectRecords es
+collectRecords (RecordM t rs) = maybeToList (cleanRecord t) ++ conmap (collectRecords . snd) rs
+collectRecords (SerializeM _ e) = collectRecords e
+collectRecords (DeserializeM _ e) = collectRecords e
+collectRecords (ReturnM e) = collectRecords e
+collectRecords (BndVarM t _) = maybeToList (cleanRecord t)
+collectRecords (LetVarM t _) = maybeToList (cleanRecord t)
+collectRecords _ = []
+
+cleanRecord :: TypeM -> Maybe (TVar, [(MT.Text, Type)])
+cleanRecord tm = typeOfTypeM tm >>= toRecord where
+  toRecord :: CType -> Maybe (TVar, [(MT.Text, Type)])
+  toRecord (CType (NamT v rs)) = Just (v, rs) 
+  toRecord _ = Nothing
+
+unifyRecords :: [(TVar, [(MT.Text, Type)])] -> [(TVar, [(MT.Text, Maybe Type)])]
+unifyRecords = map (\(v, rss) -> (v, [unifyField fs | fs <- transpose rss])) . groupSort . unique
+
+unifyField :: [(MT.Text, Type)] -> (MT.Text, Maybe Type)
+unifyField [] = error "Empty field"
+unifyField rs@((v,_):_)
+  | not (all ((==) v) (map fst rs)) = error "Bad record - unequal fields"
+  | otherwise = case unique (map snd rs) of
+      [t] -> (v, Just t)
+      _ -> (v, Nothing)
+
+makeSerializers :: TVar -> [(MT.Text, Maybe Type)] -> ([MDoc],[MDoc])
+makeSerializers t rs = ([structDecl, serialDecl, deserialDecl], [serializer, deserializer]) where
+  templateTerms = zipWith (<>) (repeat "T") (map pretty ([1..] :: [Int]))
+  rs' = zip templateTerms rs
+
+  structDecl = makeStructDecl t rs' <> line
+  serialDecl = serialHeader t rs' <> ";"
+  deserialDecl = deserialHeader t rs' <> ";" <> line
+  serializer = makeSerializer t rs' <> line
+  deserializer = makeDeserializer t rs'
+
+makeStructDecl :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeStructDecl t@(TV _ v) rs = vsep [templateLine t rs, struct] where 
+  rs' = [(k, maybe t (showType . CType) v) | (t, (k, v)) <- rs] 
+  struct = block 4 ("struct" <+> pretty v) (vsep [v <+> pretty k <> ";" | (k,v) <- rs']) <> ";"
+
+-- Example
+-- > template <class T>
+-- > std::string serialize(person<T> x, person<T> schema);
+serialHeader :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+serialHeader t@(TV _ v) rs = vsep [templateLine t rs, decl] where
+  v' = pretty v <> recordTemplate t rs
+  decl = [idoc|std::string serialize(#{v'} x, #{v'} schema)|]
+
+-- Example:
+-- > template <class T>
+-- > bool deserialize(const std::string json, size_t &i, person<T> &x);
+deserialHeader :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+deserialHeader t@(TV _ v) rs = vsep [templateLine t rs, decl] where
+  v' = pretty v <> recordTemplate t rs
+  decl = [idoc|bool deserialize(const std::string json, size_t &i, #{v'} &x)|]
+
+templateLine :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+templateLine (TV _ v) rs = case [v | (v, (_, Nothing)) <- rs] of
+  [] -> ""
+  ts -> "template" <+> encloseSep "<" ">" "," (map (\t -> "class" <+> t) ts)
+
+recordTemplate :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+recordTemplate t@(TV _ v) rs = case [v | (v, (_, Nothing)) <- rs] of
+  [] -> ""
+  ts -> encloseSep "<" ">" "," ts
+
+makeSerializer :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeSerializer t@(TV _ v) rs = [idoc|
+#{template}
+std::string serialize(#{rtype} x, #{rtype} schema){
+    #{align $ vsep schemata}
+    std::ostringstream json;
+    json << "{" << #{align $ vsep (punctuate " << ',' <<" fields)} << "}";
+    return json.str();
+}
+|] where
+  template = templateLine t rs
+  rtype = pretty v <> recordTemplate t rs
+  rs' = [(pretty k, maybe t (showType . CType) v) | (t, (k, v)) <- rs]
+  schemata = map (\(k,t) -> t <+> pretty v <> "_" <> k <> ";") rs'
+  fields = map (\(k,t) -> dquotes (k <> "=") <+> "<<" <+> [idoc|serialize(x.#{k}, #{pretty v}_#{k})|] ) rs'
+
+makeDeserializer :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeDeserializer t@(TV _ v) rs = [idoc|
+#{template}
+bool deserialize(const std::string json, size_t &i, #{rtype} &x){
+    #{align $ vsep schemata}
+    try {
+        whitespace(json, i);
+        if(! match(json, "{", i))
+            throw 0;
+        whitespace(json, i);
+        #{align $ vsep (punctuate parseComma fields)}
+        if(! match(json, "}", i))
+            throw 900;
+        whitespace(json, i);
+    } catch (int e) {
+        std::cerr << "Parse error #" << e << std::endl;
+        return false;
+    }
+    return true;
+}
+|] where
+  template = templateLine t rs
+  rs' = [(pretty k, maybe t (showType . CType) v) | (t, (k, v)) <- rs]
+  schemata = map (\(k,t) -> t <+> pretty v <> "_" <> k <> ";") rs'
+  rtype = pretty v <> recordTemplate t rs
+  parseComma = [idoc|
+if(! match(json, ",", i))
+    throw 800;
+whitespace(json, i);|]
+  fields = zipWith (makeParseField (pretty v)) [1,4..] (map fst rs')
+
+makeParseField :: MDoc -> Int -> MDoc -> MDoc
+makeParseField rname i field = [idoc|
+if(! match(json, "#{field}", i))
+    throw #{pretty i};
+whitespace(json, i);
+if(! match(json, "=", i))
+    throw #{pretty (i+1)};
+whitespace(json, i);
+if(! deserialize(json, i, #{rname}_#{field}))
+    throw #{pretty (i+2)};
+x.#{field} = #{rname}_#{field};
+whitespace(json, i);|]
+
+
+
+makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+makeMain includes signatures serialization manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
@@ -423,6 +565,8 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #{vsep includes}
 
 #{vsep signatures}
+
+#{vsep serialization}
 
 #{vsep manifolds}
 

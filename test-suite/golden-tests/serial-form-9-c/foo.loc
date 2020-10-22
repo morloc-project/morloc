@@ -2,13 +2,13 @@ import cppbase (id, Map)
 
 source cpp ("list" as Person)
 
-data (Person a) = Person {name :: Str, info :: a}
-data cpp (Person a) = Person {name :: "std::string", info :: a}
+data (Person a) = Person {name :: Str, info :: a};
+data cpp (Person a) = Person {name :: "std::string", info :: a};
 
 export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str (Person Str) -> Map Str (Person Str)
-foo cpp :: Map "std::string" (Person "std::string") -> Map "std::string" (Person "std::string")
-foo xs = id xs
+foo :: Map Str (Person Str) -> Map Str (Person Str);
+foo cpp :: Map "std::string" (Person "std::string") -> Map "std::string" (Person "std::string");
+foo xs = id xs;
