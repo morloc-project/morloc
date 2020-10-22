@@ -12,7 +12,7 @@ import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser
 import Morloc.CodeGenerator.Namespace
 import Text.RawString.QQ
-import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
+import Morloc.CodeGenerator.Grammars.Translator.R (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Data.DAG as MDD
 import Morloc.Frontend.Infer hiding(typecheck)

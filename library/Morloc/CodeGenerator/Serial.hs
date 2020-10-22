@@ -61,8 +61,9 @@ serialAstToType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialString x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialNull   x) = return $ VarT (TV (Just lang) x)
-serialAstToType lang (SerialUnknown _) = MM.throwError . SerializationError
-                                       $ "Cannot guess serialization type"
+serialAstToType lang (SerialUnknown x)
+  = MM.throwError . SerializationError . render
+  $ "Cannot guess serialization type:" <+> pretty x
 
 -- | recurse all the way to a serializable type, unsafe
 serialAstToType' :: Lang -> SerialAST One -> Type
