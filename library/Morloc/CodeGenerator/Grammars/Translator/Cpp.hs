@@ -552,7 +552,7 @@ std::string serialize(#{rtype} x, #{rtype} schema){
   rtype = pretty v <> recordTemplate t rs
   rs' = [(pretty k, maybe t (showType . CType) v) | (t, (k, v)) <- rs]
   schemata = map (\(k,t) -> t <+> pretty v <> "_" <> k <> ";") rs'
-  fields = map (\(k,t) -> dquotes (k <> "=") <+> "<<" <+> [idoc|serialize(x.#{k}, #{pretty v}_#{k})|] ) rs'
+  fields = map (\(k,t) -> dquotes ("\\\"" <> k <> "\\\"" <> ":") <+> "<<" <+> [idoc|serialize(x.#{k}, #{pretty v}_#{k})|] ) rs'
 
 makeDeserializer :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
 makeDeserializer t@(TV _ v) rs = [idoc|
@@ -586,10 +586,10 @@ whitespace(json, i);|]
 
 makeParseField :: MDoc -> Int -> MDoc -> MDoc
 makeParseField rname i field = [idoc|
-if(! match(json, "#{field}", i))
+if(! match(json, "\"#{field}\"", i))
     throw #{pretty i};
 whitespace(json, i);
-if(! match(json, "=", i))
+if(! match(json, ":", i))
     throw #{pretty (i+1)};
 whitespace(json, i);
 if(! deserialize(json, i, #{rname}_#{field}))
