@@ -13,8 +13,6 @@ module Morloc.CodeGenerator.Grammars.Translator.R
   ( 
     translate
   , preprocess
-  , jsontype2json
-  -- ^ exported only for testing purposes
   ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -54,35 +52,6 @@ bndNamer i = "x" <> viaShow i
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
-serialType :: CType
-serialType = CType (VarT (TV (Just RLang) "character"))
-
--- For R, the type schema is the JSON representation of the type
-typeSchema :: CType -> MorlocMonad MDoc
-typeSchema c = do
-  json <- jsontype2json <$> type2jsontype (unCType c)
-  -- FIXME: Need to support single quotes inside strings
-  return $ "'" <> json <> "'"
-
-type2jsontype :: Type -> MorlocMonad JsonType
-type2jsontype (UnkT _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
-type2jsontype (VarT (TV _ v)) = return $ VarJ v
-type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (FunT _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype (NamT (TV _ v) rs) = do
-  vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ "record" (zip (map fst rs) vs)
-
-jsontype2json :: JsonType -> MDoc
-jsontype2json (VarJ v) = dquotes (pretty v)
-jsontype2json (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
-  key = dquotes (pretty v)
-  val = encloseSep "[" "]" "," (map jsontype2json ts)
-jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "}" "," rs' <> "}" where
-  keys = map (dquotes . pretty) (map fst rs) 
-  vals = map jsontype2json (map snd rs)
-  rs' = zipWith (\k v -> k <> ":" <> v) keys vals
-
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
@@ -111,7 +80,6 @@ serialize v0 s0 = do
 
     construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
-      t <- serialAstToType RLang lst
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
@@ -285,9 +253,16 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             else Right r
 
 makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument v c) = bndNamer v
-makeArgument (NativeArgument v c) = bndNamer v
+makeArgument (SerialArgument v _) = bndNamer v
+makeArgument (NativeArgument v _) = bndNamer v
 makeArgument (PassThroughArgument v) = bndNamer v
+
+-- For R, the type schema is the JSON representation of the type
+typeSchema :: CType -> MorlocMonad MDoc
+typeSchema c = do
+  json <- jsontype2json <$> type2jsontype (unCType c)
+  -- FIXME: Need to support single quotes inside strings
+  return $ "'" <> json <> "'"
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript

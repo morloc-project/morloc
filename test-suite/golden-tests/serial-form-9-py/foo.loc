@@ -8,5 +8,5 @@ export foo
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
 foo :: Map Str (Person Int) -> Map Str (Person Int);
-foo r :: Map "str" (Person "int") -> Map "str" (Person "int");
+foo py :: Map "str" (Person "int") -> Map "str" (Person "int");
 foo xs = id xs;
