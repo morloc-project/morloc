@@ -58,6 +58,9 @@ translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[[#{pretty i}]]|]
 
+recordAccess :: MDoc -> MDoc -> MDoc
+recordAccess record field = record <> "$" <> field
+
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
@@ -93,7 +96,13 @@ serialize v0 s0 = do
       return (concat befores ++ [x], v');
 
     -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ([], "<SerialObject>")
+    construct v rec@(SerialObject name rs) = do
+      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+          decl = [idoc|#{v'} = #{tupled ss'};|]
+      return (concat befores ++ [decl], v');
+
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
 
@@ -142,8 +151,13 @@ deserialize v0 s0
           x = [idoc|#{v'} <- list#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct v rec@(SerialObject name rs) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      let v' = "s" <> idx
+          decl = [idoc|#{v'} = #{tupled ss'};|]
+      return (v', concat befores ++ [decl]);
+
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 

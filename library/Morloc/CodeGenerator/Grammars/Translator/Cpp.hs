@@ -151,16 +151,16 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
       -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
     serialize' v s
       | isSerializable s = return (v, [])
-      | otherwise = serializeDescend v s
+      | otherwise = construct v s
 
-    serializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    serializeDescend v (SerialPack (One (p, s))) = do
+    construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    construct v (SerialPack (One (p, s))) = do
       unpacker <- case typePackerReverse p of
         [] -> MM.throwError . SerializationError $ "No unpacker found"
         (src:_) -> return . pretty . srcName $ src
       serialize' [idoc|#{unpacker}(#{v})|] s
 
-    serializeDescend v lst@(SerialList s) = do
+    construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType CppLang lst
       let v' = "s" <> idx 
@@ -171,7 +171,7 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
                          (vsep (before ++ [push]))
       return (v', [decl, lst])
 
-    serializeDescend v tup@(SerialTuple ss) = do
+    construct v tup@(SerialTuple ss) = do
       (ss', befores) <- fmap unzip $ zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType CppLang tup
@@ -180,7 +180,7 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
       return (v', concat befores ++ [x]);
 
     -- TODO: add record handling here
-    serializeDescend v rec@(SerialObject name rs) = do
+    construct v rec@(SerialObject name rs) = do
       (ss', befores) <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       t <- (showTypeM recmap . Native . CType) <$> serialAstToType CppLang rec
@@ -188,10 +188,9 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
           decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
       return (v', concat befores ++ [x]);
-      
 
-    serializeDescend _ s = MM.throwError . SerializationError . render
-      $ "serializeDescend: " <> prettySerialOne s
+    construct _ s = MM.throwError . SerializationError . render
+      $ "construct: " <> prettySerialOne s
 
 -- reverse of serialize, parameters are the same
 deserialize :: RecMap -> Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
