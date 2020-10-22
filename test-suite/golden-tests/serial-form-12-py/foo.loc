@@ -7,6 +7,6 @@ export foo;
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person (Person Str) -> Person (Person Str);
-foo r :: Person (Person "str") -> Person (Person "str");
+foo :: Person (Person Int) -> Person (Person Int);
+foo py :: Person (Person "int") -> Person (Person "int");
 foo xs = id xs;

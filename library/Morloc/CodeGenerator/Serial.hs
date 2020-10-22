@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Serial
   , isSerializable
   , prettySerialOne
   , serialAstToType
+  , serialAstToType'
   , shallowType
   ) where
 
@@ -54,13 +55,38 @@ serialAstToType lang (SerialList s) = do
 serialAstToType lang (SerialTuple ss) = do
   ts <- mapM (serialAstToType lang) ss
   return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
-serialAstToType lang (SerialObject v rs) = return $ VarT v
+serialAstToType lang (SerialObject v rs)
+  = return $ NamT v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
 serialAstToType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialString x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialNull   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialUnknown _) = MM.throwError . SerializationError
                                        $ "Cannot guess serialization type"
+
+-- | recurse all the way to a serializable type, unsafe
+serialAstToType' :: Lang -> SerialAST One -> Type
+serialAstToType' lang (SerialPack (One (_, s))) = serialAstToType' lang s
+serialAstToType' lang (SerialList s)
+  = partialResolve
+  . head
+  . Def.defaultList (Just lang)
+  . partialUnresolve
+  $ serialAstToType' lang s
+serialAstToType' lang (SerialTuple ss)
+  = partialResolve
+  . head
+  . Def.defaultTuple (Just lang)
+  . map partialUnresolve
+  $ map (serialAstToType' lang) ss
+serialAstToType' lang (SerialObject v rs)
+  = NamT v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
+serialAstToType' lang (SerialNum    x) = VarT (TV (Just lang) x)
+serialAstToType' lang (SerialBool   x) = VarT (TV (Just lang) x)
+serialAstToType' lang (SerialString x) = VarT (TV (Just lang) x)
+serialAstToType' lang (SerialNull   x) = VarT (TV (Just lang) x)
+serialAstToType' lang (SerialUnknown _) = error "Cannot guess serialization type"
+
 
 -- | get only the toplevel type
 shallowType :: Lang -> SerialAST One -> MorlocMonad Type
@@ -71,7 +97,9 @@ shallowType lang (SerialList s) = do
 shallowType lang (SerialTuple ss) = do
   ts <- mapM (shallowType lang) ss
   return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
-shallowType lang (SerialObject v rs) = return $ VarT v
+shallowType lang (SerialObject v rs) = do
+  ts <- mapM (shallowType lang) (map snd rs)
+  return $ NamT v (zip (map fst rs) ts)
 shallowType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
 shallowType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 shallowType lang (SerialString x) = return $ VarT (TV (Just lang) x)
