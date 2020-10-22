@@ -1,1 +1,1 @@
-42
+[["a","b"],[{name="alice",info=2},{name="bob",info=3}]]

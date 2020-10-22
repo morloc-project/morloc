@@ -414,26 +414,33 @@ showNativeTypeM _ = MM.throwError . OtherError $ "Expected a native or serialize
 
 collectRecords :: ExprM One -> [(TVar, [(MT.Text, Type)])]
 collectRecords (ManifoldM _ _ e) = collectRecords e
-collectRecords (ForeignInterfaceM t e) = maybeToList (cleanRecord t) ++ collectRecords e
-collectRecords (PoolCallM t _ _ _) = maybeToList (cleanRecord t)
+collectRecords (ForeignInterfaceM t e) = cleanRecord t ++ collectRecords e
+collectRecords (PoolCallM t _ _ _) = cleanRecord t
 collectRecords (LetM _ e1 e2) = collectRecords e1 ++ collectRecords e2
 collectRecords (AppM e es) = collectRecords e ++ conmap collectRecords es
 collectRecords (LamM _ e) = collectRecords e
-collectRecords (ListM _ es) = conmap collectRecords es
-collectRecords (TupleM _ es) = conmap collectRecords es
-collectRecords (RecordM t rs) = maybeToList (cleanRecord t) ++ conmap (collectRecords . snd) rs
+collectRecords (ListM t es) = cleanRecord t ++ conmap collectRecords es
+collectRecords (TupleM t es) = cleanRecord t ++ conmap collectRecords es
+collectRecords (RecordM t rs) = cleanRecord t ++ conmap (collectRecords . snd) rs
 collectRecords (SerializeM _ e) = collectRecords e
 collectRecords (DeserializeM _ e) = collectRecords e
 collectRecords (ReturnM e) = collectRecords e
-collectRecords (BndVarM t _) = maybeToList (cleanRecord t)
-collectRecords (LetVarM t _) = maybeToList (cleanRecord t)
+collectRecords (BndVarM t _) = cleanRecord t
+collectRecords (LetVarM t _) = cleanRecord t
 collectRecords _ = []
 
-cleanRecord :: TypeM -> Maybe (TVar, [(MT.Text, Type)])
-cleanRecord tm = typeOfTypeM tm >>= toRecord where
-  toRecord :: CType -> Maybe (TVar, [(MT.Text, Type)])
-  toRecord (CType (NamT v rs)) = Just (v, rs) 
-  toRecord _ = Nothing
+cleanRecord :: TypeM -> [(TVar, [(MT.Text, Type)])]
+cleanRecord tm = case typeOfTypeM tm of
+  (Just (CType t)) -> toRecord t
+  Nothing -> []
+  where
+    toRecord :: Type -> [(TVar, [(MT.Text, Type)])]
+    toRecord (UnkT _) = []
+    toRecord (VarT _) = []
+    toRecord (FunT t1 t2) = toRecord t1 ++ toRecord t2
+    toRecord (ArrT _ ts) = conmap toRecord ts
+    toRecord (NamT v rs) = [(v, rs)]
+
 
 unifyRecords :: [(TVar, [(MT.Text, Type)])] -> [(TVar, [(MT.Text, Maybe Type)])]
 unifyRecords = map (\(v, rss) -> (v, [unifyField fs | fs <- transpose rss])) . groupSort . unique
@@ -519,7 +526,6 @@ bool deserialize(const std::string json, size_t &i, #{rtype} &x){
             throw 900;
         whitespace(json, i);
     } catch (int e) {
-        std::cerr << "Parse error #" << e << std::endl;
         return false;
     }
     return true;
@@ -556,6 +562,7 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 #include <sstream>
 #include <functional>
 #include <vector>
+#include <string>
 #include <algorithm> // for std::transform
 
 #{Src.foreignCallFunction}

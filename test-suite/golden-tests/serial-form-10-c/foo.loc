@@ -2,9 +2,6 @@ import cppbase (id)
 
 object (Person a) = Person {name :: Str, info :: a};
 object cpp (Person a) = "person" {name :: "std::string", info :: a};
---             ^           ^
---  type name -'           |
---    constructor name ----'
 
 export foo
 

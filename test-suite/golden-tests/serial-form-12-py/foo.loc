@@ -1,9 +1,7 @@
 import pybase (id)
 
-source py ("list" as Person);
-
-data (Person a) = Person {name :: Str, info :: a};
-data py (Person a) = Person {name :: "str", info :: a};
+object (Person a) = Person {name :: Str, info :: a};
+object py (Person a) = "person" {name :: "str", info :: a};
 
 export foo;
 

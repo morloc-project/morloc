@@ -24,7 +24,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
-import Morloc.Pretty (prettyType, prettyPackMap)
+import Morloc.Pretty (prettyType, prettyPackMap, prettyGreenUnresolvedType)
 import Morloc.Data.Doc
 
 typeEqual :: Type -> UnresolvedType -> Bool
@@ -32,6 +32,10 @@ typeEqual (VarT (TV _ v1)) (VarU (TV _ v2)) = v1 == v2
 typeEqual (ArrT (TV _ v1) ts1) (ArrU (TV _ v2) us2)
   | length ts1 /= length us2 = False
   | otherwise = foldl (&&) (v1 == v2) (zipWith typeEqual ts1 us2 )
+typeEqual (NamT (TV _ v1) rs1) (NamU (TV _ v2) rs2)
+  = v1 == v2
+  && map fst rs1 == map fst rs2
+  && foldl (&&) True (zipWith typeEqual (map snd rs1) (map snd rs2))
 typeEqual _ _ = False
 
 -- Convert a default unresolved type to a standard type
@@ -107,13 +111,13 @@ makeSerialAST m t@(ArrT v@(TV lang s) ts)
     = SerialList <$> makeSerialAST m (ts !! 0)
   | length tuples > 0 = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (v, length ts) m of
-      (Just ps) -> do        
+      (Just ps) -> do
         ps' <- mapM (resolvePacker t ts) ps
         ts' <- mapM (makeSerialAST m) (map typePackerCType ps')
         return $ SerialPack (Many (zip ps' ts'))
       Nothing -> MM.throwError . SerializationError . render
-        $ "Cannot find constructor for" <+> squotes (prettyType t) <+> "in packmap:\n" <>
-          prettyPackMap m 
+        $ "Cannot find constructor" <+> dquotes (pretty s) <> "<" <> pretty (length ts) <> ">" <+> "in packmap:\n" <>
+          prettyPackMap m
   where
     tuples = filter (typeEqual t) (Def.defaultTuple lang (map type2default ts))
 makeSerialAST m (NamT v rs) = do
