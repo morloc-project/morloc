@@ -52,21 +52,14 @@ bndNamer i = "x" <> viaShow i
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
-serialType :: CType
-serialType = CType (VarT (TV (Just RLang) "character"))
-
--- For R, the type schema is the JSON representation of the type
-typeSchema :: CType -> MorlocMonad MDoc
-typeSchema c = do
-  json <- jsontype2json <$> type2jsontype (unCType c)
-  -- FIXME: Need to support single quotes inside strings
-  return $ "'" <> json <> "'"
-
 translateSource :: Path -> MorlocMonad MDoc
 translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[[#{pretty i}]]|]
+
+recordAccess :: MDoc -> MDoc -> MDoc
+recordAccess record field = record <> "$" <> field
 
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
@@ -90,7 +83,6 @@ serialize v0 s0 = do
 
     construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
-      t <- serialAstToType RLang lst
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
@@ -104,7 +96,14 @@ serialize v0 s0 = do
       return (concat befores ++ [x], v');
 
     -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ([], "<SerialObject>")
+    construct v rec@(SerialObject name rs) = do
+      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} <- list#{tupled entries};|]
+      return (concat befores ++ [decl], v');
+
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
 
@@ -153,8 +152,14 @@ deserialize v0 s0
           x = [idoc|#{v'} <- list#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct v rec@(SerialObject name rs) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      let v' = "s" <> idx
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} <- list#{tupled entries};|]
+      return (v', concat befores ++ [decl]);
+
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
@@ -264,9 +269,16 @@ splitArgs args1 args2 = partitionEithers $ map split args1 where
             else Right r
 
 makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument v c) = bndNamer v
-makeArgument (NativeArgument v c) = bndNamer v
+makeArgument (SerialArgument v _) = bndNamer v
+makeArgument (NativeArgument v _) = bndNamer v
 makeArgument (PassThroughArgument v) = bndNamer v
+
+-- For R, the type schema is the JSON representation of the type
+typeSchema :: CType -> MorlocMonad MDoc
+typeSchema c = do
+  json <- jsontype2json <$> type2jsontype (unCType c)
+  -- FIXME: Need to support single quotes inside strings
+  return $ "'" <> json <> "'"
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript

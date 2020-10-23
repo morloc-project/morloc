@@ -96,9 +96,7 @@ checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] 
   f v (ArrU v0 ts)
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) ts
-  f v (NamU v0 rs)
-    | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
-    | otherwise = mapM_ (f v) (map snd rs)
+  f v (NamU _ rs) = mapM_ (f v) (map snd rs)
 
 desugarParserNode
   :: DAG MVar [(EVar, EVar)] ParserNode

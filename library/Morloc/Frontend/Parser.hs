@@ -230,7 +230,10 @@ pModuleBody =
     pExpr' = fmap MBBody pExpr
 
 pTypedef :: Parser ModuleBody
-pTypedef = do
+pTypedef = pTypedefType <|> pTypedefObject
+
+pTypedefType :: Parser ModuleBody
+pTypedefType = do
   _ <- reserved "type"
   lang <- optional (try pLang)
   setLang lang
@@ -239,6 +242,19 @@ pTypedef = do
   t <- pType
   setLang Nothing
   return (MBTypeDef v vs t)
+
+pTypedefObject :: Parser ModuleBody
+pTypedefObject = do
+  _ <- reserved "object"
+  lang <- optional (try pLang)
+  setLang lang
+  (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
+  _ <- symbol "="
+  constructor <- name <|> stringLiteral
+  entries <- braces (sepBy1 pNamEntryU (symbol ","))
+  lang <- CMS.gets stateLang
+  setLang Nothing
+  return $ MBTypeDef v vs (NamU (TV lang constructor) entries)
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do

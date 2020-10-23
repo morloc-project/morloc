@@ -33,7 +33,7 @@ need to add handling for several very different languages (proofs-of-concept).
        - [ ] bioinformatics
 
 
-0.xx.x [2020.xx.xx]
+0.3x.x [2020.xx.xx]
 -------------------
 
 A usable language that is ready for serious beta testing but not production
@@ -63,10 +63,21 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
 
-0.30.0 [2020.xx.xx]
--------------------
+0.32.0 [2020.xx.xx]
+
  - [ ] Add table handling
- - [ ] Add `data` keyword for defining data constructors
+
+0.31.0 [2020.xx.xx]
+
+ - [ ] Add record data constructors
+ - [ ] Add record field access
+ - [ ] Add record arithmetic sugar
+
+0.30.0 [2020.10.23]
+-------------------
+
+ * Add `object` keyword for defining record types
+ * Add full record serialization handling (C++, py, R)
 
 0.29.0 [2020.10.21]
 -------------------

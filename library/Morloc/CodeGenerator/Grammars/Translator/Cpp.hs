@@ -16,7 +16,12 @@ module Morloc.CodeGenerator.Grammars.Translator.Cpp
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType, shallowType)
+import Morloc.CodeGenerator.Serial ( isSerializable
+                                   , prettySerialOne
+                                   , serialAstToType
+                                   , serialAstToType'
+                                   , shallowType
+                                   )
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -25,6 +30,8 @@ import qualified Morloc.System as MS
 import qualified Morloc.Frontend.Macro as MTM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
+
+type RecMap = [(TVar, [(MT.Text, Maybe Type)])]
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
@@ -40,14 +47,17 @@ translate srcs es = do
   -- diagnostics
   liftIO . putDoc $ (vsep $ map prettyExprM es)
 
-  -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM translateManifold es
+  let recmap = unifyRecords . conmap collectRecords $ es
+      (declarations, serializers) = (\xs -> (conmap fst xs, conmap snd xs))
+                                  . map (uncurry makeSerializers) $ recmap
+      dispatch = makeDispatch es
+      signatures = map (makeSignature recmap) es
 
-  let dispatch = makeDispatch es
-      signatures = map makeSignature es
+  -- translate each manifold tree, rooted on a call from nexus or another pool
+  mDocs <- mapM (translateManifold recmap) es
 
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures mDocs dispatch
+  return $ makeMain includeDocs signatures (declarations ++ serializers) mDocs dispatch
 
 letNamer :: Int -> MDoc
 letNamer i = "a" <> viaShow i
@@ -61,12 +71,12 @@ bndNamer i = "x" <> viaShow i
 serialType :: MDoc
 serialType = "std::string"
 
-makeSignature :: ExprM One -> MDoc
-makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
+makeSignature :: RecMap -> ExprM One -> MDoc
+makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM One -> [MDoc]
   f (ManifoldM (metaId->i) args e) =
     let t = typeOfExprM e
-        sig = showTypeM t <+> manNamer i <> tupled (map makeArg args) <> ";"
+        sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
     in sig : f e
   f (LetM _ e1 e2) = f e1 ++ f e2
   f (AppM e es) = f e ++ conmap f es
@@ -79,10 +89,10 @@ makeSignature e0@(ManifoldM _ _ _) = vsep (f e0) where
   f (ReturnM e) = f e
   f _ = []
 
-makeArg :: Argument -> MDoc
-makeArg (SerialArgument i _) = serialType <+> bndNamer i
-makeArg (NativeArgument i c) = showType c <+> bndNamer i
-makeArg (PassThroughArgument i) = serialType <+> bndNamer i
+makeArg :: RecMap -> Argument -> MDoc
+makeArg recmap (SerialArgument i _) = serialType <+> bndNamer i
+makeArg recmap (NativeArgument i c) = showTypeM recmap (Native c) <+> bndNamer i
+makeArg recmap (PassThroughArgument i) = serialType <+> bndNamer i
 
 argName :: Argument -> MDoc
 argName (SerialArgument i _) = bndNamer i
@@ -91,6 +101,9 @@ argName (PassThroughArgument i) = bndNamer i
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|std::get<#{pretty i}>(#{v})|]
+
+recordAccess :: MDoc -> MDoc -> MDoc
+recordAccess record field = record <> "." <> field
 
 -- TLDR: Use `#include "foo.h"` rather than `#include <foo.h>`
 -- Include statements in C can be either wrapped in angle brackets (e.g.,
@@ -118,35 +131,36 @@ translateSource path = return $
 
 
 serialize
-  :: Int -- The let index `i`
+  :: RecMap
+  -> Int -- The let index `i`
   -> MDoc -- The type of e1
   -> MDoc -- A variable name pointing to e1
   -> SerialAST One
   -> MorlocMonad [MDoc]
-serialize letIndex typestr0 datavar0 s0 = do
+serialize recmap letIndex typestr0 datavar0 s0 = do
   (x, before) <- serialize' datavar0 s0
-  t0 <- serialAstToType CppLang s0
+  t0 <- (showTypeM recmap . Native . CType) <$> serialAstToType CppLang s0
   let schemaName = [idoc|#{letNamer letIndex}_schema|]
-      schema = [idoc|#{showType (CType t0)} #{schemaName};|]
+      schema = [idoc|#{t0} #{schemaName};|]
       final = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{x}, #{schemaName});|]
   return (before ++ [schema, final])
-  
+
   where
     serialize'
       :: MDoc -- a variable name that stores the data described by the SerialAST object
       -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
     serialize' v s
       | isSerializable s = return (v, [])
-      | otherwise = serializeDescend v s
+      | otherwise = construct v s
 
-    serializeDescend :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    serializeDescend v (SerialPack (One (p, s))) = do
+    construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
+    construct v (SerialPack (One (p, s))) = do
       unpacker <- case typePackerReverse p of
         [] -> MM.throwError . SerializationError $ "No unpacker found"
         (src:_) -> return . pretty . srcName $ src
       serialize' [idoc|#{unpacker}(#{v})|] s
 
-    serializeDescend v lst@(SerialList s) = do
+    construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType CppLang lst
       let v' = "s" <> idx 
@@ -157,8 +171,8 @@ serialize letIndex typestr0 datavar0 s0 = do
                          (vsep (before ++ [push]))
       return (v', [decl, lst])
 
-    serializeDescend v tup@(SerialTuple ss) = do
-      (ss', befores) <- fmap unzip $ zipWithM (\i s -> serializeDescend (tupleKey i v) s) [0..] ss
+    construct v tup@(SerialTuple ss) = do
+      (ss', befores) <- fmap unzip $ zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType CppLang tup
       let v' = "s" <> idx
@@ -166,13 +180,21 @@ serialize letIndex typestr0 datavar0 s0 = do
       return (v', concat befores ++ [x]);
 
     -- TODO: add record handling here
-    serializeDescend v rec@(SerialObject name rs) = return ("<SerialObject>", [])
-    serializeDescend _ s = MM.throwError . SerializationError . render
-      $ "serializeDescend: " <> prettySerialOne s
+    construct v rec@(SerialObject name rs) = do
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty $ MM.getCounter
+      t <- (showTypeM recmap . Native . CType) <$> serialAstToType CppLang rec
+      let v' = "s" <> idx
+          decl = encloseSep "{" "}" "," ss'
+          x = [idoc|#{t} #{v'} = #{decl};|]
+      return (v', concat befores ++ [x]);
+
+    construct _ s = MM.throwError . SerializationError . render
+      $ "construct: " <> prettySerialOne s
 
 -- reverse of serialize, parameters are the same
-deserialize :: Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
-deserialize letIndex typestr0 varname0 s0
+deserialize :: RecMap -> Int -> MDoc -> MDoc -> SerialAST One -> MorlocMonad [MDoc]
+deserialize recmap letIndex typestr0 varname0 s0
   | isSerializable s0 = do 
       let schemaName = [idoc|#{letNamer letIndex}_schema|]
           schema = [idoc|#{typestr0} #{schemaName};|]
@@ -181,7 +203,7 @@ deserialize letIndex typestr0 varname0 s0
   | otherwise = do
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType CppLang s0
-      let rawtype = showType (CType t)
+      let rawtype = showTypeM recmap . Native . CType $ t
           schemaName = [idoc|#{letNamer letIndex}_schema|]
           rawvar = "s" <> idx
           schema = [idoc|#{rawtype} #{schemaName};|]
@@ -207,7 +229,7 @@ deserialize letIndex typestr0 varname0 s0
 
     construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
-      t <- fmap (showType . CType) $ shallowType CppLang lst
+      t <- fmap (showTypeM recmap . Native . CType) $ shallowType CppLang lst
       let v' = "s" <> idx 
           decl = [idoc|#{t} #{v'};|]
       (x, before) <- check [idoc|#{v}[i#{idx}]|] s
@@ -221,20 +243,28 @@ deserialize letIndex typestr0 varname0 s0
       (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
       t <- shallowType CppLang tup
       let v' = "s" <> idx
-          x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
+          x = [idoc|#{showTypeM recmap . Native . CType $ t} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct v rec@(SerialObject name rs) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      t <- fmap (showTypeM recmap . Native . CType) $ shallowType CppLang rec
+      let v' = "s" <> idx
+          decl = encloseSep "{" "}" "," ss'
+          x = [idoc|#{t} #{v'} = #{decl};|]
+      return (v', concat befores ++ [x]);
+
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
-
-translateManifold :: ExprM One -> MorlocMonad MDoc
-translateManifold m@(ManifoldM _ args _) = do
+translateManifold :: RecMap -> ExprM One -> MorlocMonad MDoc
+translateManifold recmap m@(ManifoldM _ args _) = do
   MM.startCounter
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
+
   f :: [Argument]
     -> ExprM One
     -> MorlocMonad
@@ -246,15 +276,15 @@ translateManifold m@(ManifoldM _ args _) = do
   f args (LetM i (SerializeM s e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- showNativeTypeM (typeOfExprM e1)
-    serialized <- serialize i t e1' s
+    t <- showNativeTypeM recmap (typeOfExprM e1)
+    serialized <- serialize recmap i t e1' s
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ serialized ++ [e2'], [])
 
   f args (LetM i (DeserializeM s e1) e2) = do
     (ms1, e1', ps1) <- f args e1
     (ms2, e2', ps2) <- f args e2
-    t <- showNativeTypeM (typeOfExprM e1)
-    deserialized <- deserialize i t e1' s
+    t <- showNativeTypeM recmap (typeOfExprM e1)
+    deserialized <- deserialize recmap i t e1' s
     return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ deserialized ++ [e2'], [])
 
   f _ (SerializeM _ _) = MM.throwError . SerializationError
@@ -266,7 +296,7 @@ translateManifold m@(ManifoldM _ args _) = do
   f args (LetM i e1 e2) = do
     (ms1', e1', ps1) <- (f args) e1
     (ms2', e2', ps2) <- (f args) e2
-    let t = showTypeM (typeOfExprM e1)
+    let t = showTypeM recmap (typeOfExprM e1)
         ps = ps1 ++ ps2 ++ [[idoc|#{t} #{letNamer i} = #{e1'};|], e2']
     return (ms1' ++ ms2', vsep ps, [])
 
@@ -275,8 +305,8 @@ translateManifold m@(ManifoldM _ args _) = do
     let
         name = pretty $ srcName src
         mangledName = name <> "_fun"
-        inputBlock = cat (punctuate "," (map showTypeM inputs))
-        sig = [idoc|#{showTypeM output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
+        inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
+        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
     where
       typeOfExprM' :: ExprM One -> TypeM
@@ -292,7 +322,7 @@ translateManifold m@(ManifoldM _ args _) = do
   f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', body, ps1) <- f args e
     let t = typeOfExprM e
-        head = showTypeM t <+> manNamer i <> tupled (map makeArg args)
+        head = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
         mdoc = block 4 head body
         mname = manNamer i
     (call, ps2) <- case (splitArgs args pargs, nargsTypeM t) of
@@ -300,8 +330,8 @@ translateManifold m@(ManifoldM _ args _) = do
       (([], vs), _) -> return (mname, [])
       ((rs, vs), _) -> do
         let v = mname <> "_fun"
-        lhs <- stdFunction t vs |>> (\x -> x <+> v)
-        castFunction <- staticCast t args mname
+        lhs <- stdFunction recmap t vs |>> (\x -> x <+> v)
+        castFunction <- staticCast recmap t args mname
         let vs' = take
                   (length vs)
                   (map (\i -> "std::placeholders::_" <> viaShow i) [1..])
@@ -346,26 +376,26 @@ translateManifold m@(ManifoldM _ args _) = do
     return (ms, "return(" <> e' <> ");", ps)
 
 
-stdFunction :: TypeM -> [Argument] -> MorlocMonad MDoc
-stdFunction t args = 
-  let argList = cat (punctuate "," (map argTypeM args))
-  in return [idoc|std::function<#{showTypeM t}(#{argList})>|]
+stdFunction :: RecMap -> TypeM -> [Argument] -> MorlocMonad MDoc
+stdFunction recmap t args = 
+  let argList = cat (punctuate "," (map (argTypeM recmap) args))
+  in return [idoc|std::function<#{showTypeM recmap t}(#{argList})>|]
 
 stdBind :: [MDoc] -> MDoc
 stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
-staticCast :: TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
-staticCast t args name = do
-  let output = showTypeM t
-      inputs = map argTypeM args
+staticCast :: RecMap -> TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
+staticCast recmap t args name = do
+  let output = showTypeM recmap t
+      inputs = map (argTypeM recmap) args
       argList = cat (punctuate "," inputs)
   return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name})|]
 
-argTypeM :: Argument -> MDoc
-argTypeM (SerialArgument _ _) = serialType
-argTypeM (NativeArgument _ c) = showType c
-argTypeM (PassThroughArgument _) = serialType
+argTypeM :: RecMap -> Argument -> MDoc
+argTypeM _ (SerialArgument _ _) = serialType
+argTypeM recmap (NativeArgument _ c) = showTypeM recmap (Native c)
+argTypeM _ (PassThroughArgument _) = serialType
 
 -- divide a list of arguments based on wheither they are in a second list
 splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
@@ -393,27 +423,188 @@ showType = MTM.buildCType mkfun mkrec where
   mkfun :: MDoc -> [MDoc] -> MDoc
   mkfun _ _ = "FUNCTION_TYPE"
 
-  mkrec :: [(MDoc, MDoc)] -> MDoc
-  mkrec _ = "RECORD_TYPE"
+  mkrec :: MDoc -> [(MDoc, MDoc)] -> MDoc
+  mkrec constructor _ = constructor
 
-showTypeM :: TypeM -> MDoc
-showTypeM Passthrough = serialType
-showTypeM (Serial t) = serialType
-showTypeM (Native t) = showType t
-showTypeM (Function ts t) = "std::function<" <> showTypeM t <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
+showTypeM :: RecMap -> TypeM -> MDoc
+showTypeM _ Passthrough = serialType
+showTypeM recmap (Serial t) = serialType
+showTypeM recmap (Native (CType (NamT v@(TV _ s) rs))) =
+  case lookup v recmap of
+    (Just rs') -> pretty s <> typeParams recmap (zip (map snd rs') (map snd rs))
+    Nothing -> pretty s
+showTypeM recmap (Native t) = showType t
+showTypeM recmap (Function ts t)
+  = "std::function<" <> showTypeM recmap t
+  <> "(" <> cat (punctuate "," (map (showTypeM recmap) ts)) <> ")>"
+
+typeParams :: RecMap -> [(Maybe Type, Type)] -> MDoc
+typeParams recmap ts
+  = case [showTypeM recmap (Native (CType t)) | (Nothing, t) <- ts] of
+      [] -> ""
+      ds -> encloseSep "<" ">" "," ds
+    
 
 -- for use in making schema, where the native type is needed
-showNativeTypeM :: TypeM -> MorlocMonad MDoc
-showNativeTypeM (Serial t) = return $ showType t
-showNativeTypeM (Native t) = return $ showType t
-showNativeTypeM _ = MM.throwError . OtherError $ "Expected a native or serialized type"
+showNativeTypeM :: RecMap -> TypeM -> MorlocMonad MDoc
+showNativeTypeM recmap (Serial t) = return $ showTypeM recmap (Native t)
+showNativeTypeM recmap (Native t) = return $ showTypeM recmap (Native t)
+showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
-makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
-makeMain includes signatures manifolds dispatch = [idoc|#include <string>
+
+collectRecords :: ExprM One -> [(TVar, [(MT.Text, Type)])]
+collectRecords (ManifoldM _ _ e) = collectRecords e
+collectRecords (ForeignInterfaceM t e) = cleanRecord t ++ collectRecords e
+collectRecords (PoolCallM t _ _ _) = cleanRecord t
+collectRecords (LetM _ e1 e2) = collectRecords e1 ++ collectRecords e2
+collectRecords (AppM e es) = collectRecords e ++ conmap collectRecords es
+collectRecords (LamM _ e) = collectRecords e
+collectRecords (ListM t es) = cleanRecord t ++ conmap collectRecords es
+collectRecords (TupleM t es) = cleanRecord t ++ conmap collectRecords es
+collectRecords (RecordM t rs) = cleanRecord t ++ conmap (collectRecords . snd) rs
+collectRecords (SerializeM s e)
+  = cleanRecord (Native (CType (serialAstToType' (fromJust $ langOf e) s))) ++ collectRecords e
+collectRecords (DeserializeM s e)
+  = cleanRecord (Serial (CType (serialAstToType' (fromJust $ langOf e) s))) ++ collectRecords e
+collectRecords (ReturnM e) = collectRecords e
+collectRecords (BndVarM t _) = cleanRecord t
+collectRecords (LetVarM t _) = cleanRecord t
+collectRecords _ = []
+
+cleanRecord :: TypeM -> [(TVar, [(MT.Text, Type)])]
+cleanRecord tm = case typeOfTypeM tm of
+  (Just (CType t)) -> toRecord t
+  Nothing -> []
+  where
+    toRecord :: Type -> [(TVar, [(MT.Text, Type)])]
+    toRecord (UnkT _) = []
+    toRecord (VarT _) = []
+    toRecord (FunT t1 t2) = toRecord t1 ++ toRecord t2
+    toRecord (ArrT _ ts) = conmap toRecord ts
+    toRecord (NamT v rs) = (v, rs) : conmap toRecord (map snd rs)
+
+
+unifyRecords :: [(TVar, [(MT.Text, Type)])] -> RecMap
+unifyRecords = map (\(v, rss) -> (v, [unifyField fs | fs <- transpose rss])) . groupSort . unique
+
+unifyField :: [(MT.Text, Type)] -> (MT.Text, Maybe Type)
+unifyField [] = error "Empty field"
+unifyField rs@((v,_):_)
+  | not (all ((==) v) (map fst rs)) = error "Bad record - unequal fields"
+  | otherwise = case unique (map snd rs) of
+      [t] -> (v, Just t)
+      _ -> (v, Nothing)
+
+makeSerializers :: TVar -> [(MT.Text, Maybe Type)] -> ([MDoc],[MDoc])
+makeSerializers t rs = ([structDecl, serialDecl, deserialDecl], [serializer, deserializer]) where
+  templateTerms = zipWith (<>) (repeat "T") (map pretty ([1..] :: [Int]))
+  rs' = zip templateTerms rs
+
+  structDecl = makeStructDecl t rs' <> line
+  serialDecl = serialHeader t rs' <> ";"
+  deserialDecl = deserialHeader t rs' <> ";" <> line
+  serializer = makeSerializer t rs' <> line
+  deserializer = makeDeserializer t rs'
+
+makeStructDecl :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeStructDecl t@(TV _ v) rs = vsep [templateLine t rs, struct] where 
+  rs' = [(k, maybe t (showType . CType) v) | (t, (k, v)) <- rs] 
+  struct = block 4 ("struct" <+> pretty v) (vsep [v <+> pretty k <> ";" | (k,v) <- rs']) <> ";"
+
+-- Example
+-- > template <class T>
+-- > std::string serialize(person<T> x, person<T> schema);
+serialHeader :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+serialHeader t@(TV _ v) rs = vsep [templateLine t rs, decl] where
+  v' = pretty v <> recordTemplate t rs
+  decl = [idoc|std::string serialize(#{v'} x, #{v'} schema)|]
+
+-- Example:
+-- > template <class T>
+-- > bool deserialize(const std::string json, size_t &i, person<T> &x);
+deserialHeader :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+deserialHeader t@(TV _ v) rs = vsep [templateLine t rs, decl] where
+  v' = pretty v <> recordTemplate t rs
+  decl = [idoc|bool deserialize(const std::string json, size_t &i, #{v'} &x)|]
+
+templateLine :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+templateLine (TV _ v) rs = case [v | (v, (_, Nothing)) <- rs] of
+  [] -> ""
+  ts -> "template" <+> encloseSep "<" ">" "," (map (\t -> "class" <+> t) ts)
+
+recordTemplate :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+recordTemplate t@(TV _ v) rs = case [v | (v, (_, Nothing)) <- rs] of
+  [] -> ""
+  ts -> encloseSep "<" ">" "," ts
+
+makeSerializer :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeSerializer t@(TV _ v) rs = [idoc|
+#{template}
+std::string serialize(#{rtype} x, #{rtype} schema){
+    #{align $ vsep schemata}
+    std::ostringstream json;
+    json << "{" << #{align $ vsep (punctuate " << ',' <<" fields)} << "}";
+    return json.str();
+}
+|] where
+  template = templateLine t rs
+  rtype = pretty v <> recordTemplate t rs
+  rs' = [(pretty k, maybe t (showType . CType) v) | (t, (k, v)) <- rs]
+  schemata = map (\(k,t) -> t <+> pretty v <> "_" <> k <> ";") rs'
+  fields = map (\(k,t) -> dquotes ("\\\"" <> k <> "\\\"" <> ":") <+> "<<" <+> [idoc|serialize(x.#{k}, #{pretty v}_#{k})|] ) rs'
+
+makeDeserializer :: TVar -> [(MDoc, (MT.Text, Maybe Type))] -> MDoc
+makeDeserializer t@(TV _ v) rs = [idoc|
+#{template}
+bool deserialize(const std::string json, size_t &i, #{rtype} &x){
+    #{align $ vsep schemata}
+    try {
+        whitespace(json, i);
+        if(! match(json, "{", i))
+            throw 0;
+        whitespace(json, i);
+        #{align $ vsep (punctuate parseComma fields)}
+        if(! match(json, "}", i))
+            throw 900;
+        whitespace(json, i);
+    } catch (int e) {
+        return false;
+    }
+    return true;
+}
+|] where
+  template = templateLine t rs
+  rs' = [(pretty k, maybe t (showType . CType) v) | (t, (k, v)) <- rs]
+  schemata = map (\(k,t) -> t <+> pretty v <> "_" <> k <> ";") rs'
+  rtype = pretty v <> recordTemplate t rs
+  parseComma = [idoc|
+if(! match(json, ",", i))
+    throw 800;
+whitespace(json, i);|]
+  fields = zipWith (makeParseField (pretty v)) [1,4..] (map fst rs')
+
+makeParseField :: MDoc -> Int -> MDoc -> MDoc
+makeParseField rname i field = [idoc|
+if(! match(json, "\"#{field}\"", i))
+    throw #{pretty i};
+whitespace(json, i);
+if(! match(json, ":", i))
+    throw #{pretty (i+1)};
+whitespace(json, i);
+if(! deserialize(json, i, #{rname}_#{field}))
+    throw #{pretty (i+2)};
+x.#{field} = #{rname}_#{field};
+whitespace(json, i);|]
+
+
+
+makeMain :: [MDoc] -> [MDoc] -> [MDoc] -> [MDoc] -> MDoc -> MDoc
+makeMain includes signatures serialization manifolds dispatch = [idoc|#include <string>
 #include <iostream>
 #include <sstream>
 #include <functional>
 #include <vector>
+#include <string>
 #include <algorithm> // for std::transform
 
 #{Src.foreignCallFunction}
@@ -423,6 +614,8 @@ makeMain includes signatures manifolds dispatch = [idoc|#include <string>
 #{vsep includes}
 
 #{vsep signatures}
+
+#{vsep serialization}
 
 #{vsep manifolds}
 

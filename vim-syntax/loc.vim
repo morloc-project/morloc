@@ -42,6 +42,7 @@ syn keyword reserved xor
 syn keyword reserved nand
 syn keyword reserved not
 syn keyword reserved type
+syn keyword reserved object
 
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword

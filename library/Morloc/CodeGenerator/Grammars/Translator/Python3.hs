@@ -81,11 +81,15 @@ translateSource (Path s) = do
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
+recordAccess :: MDoc -> MDoc -> MDoc
+recordAccess record field = record <> "[" <> dquotes field <> "]"
+
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   t <- serialAstToType Python3Lang s0
-  let v2 = "mlc_serialize" <> tupled [v1, typeSchema (CType t)]
+  schema <- typeSchema (CType t)
+  let v2 = "mlc_serialize" <> tupled [v1, schema]
   return (v2, ms)
   where
     serialize' :: MDoc -> SerialAST One -> MorlocMonad ([MDoc], MDoc)
@@ -102,7 +106,6 @@ serialize v0 s0 = do
 
     construct v lst@(SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
-      t <- serialAstToType Python3Lang lst
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let push = [idoc|#{v'}.append(#{x})|]
@@ -118,8 +121,14 @@ serialize v0 s0 = do
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ([], "<SerialObject>")
+    construct v rec@(SerialObject name rs) = do
+      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty $ MM.getCounter
+      let v' = "s" <> idx
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} = dict#{tupled (entries)};|]
+      return (concat befores ++ [decl], v');
+
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
 
@@ -129,13 +138,15 @@ deserialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
       t <- serialAstToType Python3Lang s0
-      let deserializing = [idoc|mlc_deserialize(#{v0}, #{typeSchema (CType t)});|]
+      schema <- typeSchema (CType t)
+      let deserializing = [idoc|mlc_deserialize(#{v0}, #{schema});|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty $ MM.getCounter
       t <- serialAstToType Python3Lang s0
+      schema <- typeSchema (CType t)
       let rawvar = "s" <> idx
-          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{typeSchema (CType t)});|]
+          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema});|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -170,8 +181,14 @@ deserialize v0 s0
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = return ("<SerialObject>", [])
+    construct v rec@(SerialObject name rs) = do
+      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      let v' = "s" <> idx
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} = dict#{tupled entries};|]
+      return (v', concat befores ++ [decl]);
+
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
@@ -183,6 +200,7 @@ translateManifold m@(ManifoldM _ args _) = do
   MM.startCounter
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
   where
+
   f :: [Argument]
     -> ExprM One
     -> MorlocMonad
@@ -201,6 +219,13 @@ translateManifold m@(ManifoldM _ args _) = do
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call, [])
 
+  f _ (PoolCallM t _ cmds args) = do
+    let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
+    return ([], call, [])
+
+  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+    "Foreign interfaces should have been resolved before passed to the translators"
+
   f args (LetM i e1 e2) = do
     (ms1', e1', rs1) <- (f args) e1
     (ms2', e2', rs2) <- (f args) e2
@@ -213,30 +238,31 @@ translateManifold m@(ManifoldM _ args _) = do
 
   f _ (SrcM t src) = return ([], pretty (srcName src), [])
 
-  f _ (PoolCallM t _ cmds args) = do
-    let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
-    return ([], call, [])
-
-  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
-    "Foreign interfaces should have been resolved before passed to the translators"
-
   f args (LamM lambdaArgs e) = undefined -- FIXME: this is defined in R
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
+
   f _ (LetVarM _ i) = return ([], letNamer i, [])
+
   f args (ListM t es) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3
     return (concat mss', list es', concat rss')
+
   f args (TupleM _ es) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3
     return (concat mss', tupled es', concat rss')
+
   f args (RecordM c entries) = do
     (mss', es', rss') <- mapM (f args . snd) entries |>> unzip3
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
     return (concat mss', "OrderedDict" <> tupled entries', concat rss')
+
   f _ (LogM _ x) = return ([], if x then "True" else "False", [])
+
   f _ (NumM _ x) = return ([], viaShow x, [])
+
   f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
+
   f _ (NullM _) = return ([], "None", [])
 
   f args (SerializeM s e) = do
@@ -267,9 +293,9 @@ makeLambda :: [Argument] -> MDoc -> MDoc
 makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
 
 makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument i c) = bndNamer i
-makeArgument (NativeArgument i c) = bndNamer i
-makeArgument (PassThroughArgument i) = bndNamer i
+makeArgument (SerialArgument v _) = bndNamer v
+makeArgument (NativeArgument v _) = bndNamer v
+makeArgument (PassThroughArgument v) = bndNamer v
 
 makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = align . vsep $
@@ -282,15 +308,15 @@ makeDispatch ms = align . vsep $
       = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 
-typeSchema :: CType -> MDoc
-typeSchema c = f (unCType c)
+typeSchema :: CType -> MorlocMonad MDoc
+typeSchema c = f <$> type2jsontype (unCType c)
   where
-    f (VarT v) = lst [var v, "None"]
-    f (ArrT v ps) = lst [var v, lst (map f ps)]
-    f (NamT v es) = lst [var v, dict (map entry es)]
-    f t = error $ "Cannot serialize this type: " ++ show t
+    f :: JsonType -> MDoc
+    f (VarJ v) = lst [var v, "None"]
+    f (ArrJ v ts) = lst [var v, lst (map f ts)]
+    f (NamJ v es) = lst [dquotes "record", dict (map entry es)]
 
-    entry :: (MT.Text, Type) -> MDoc
+    entry :: (MT.Text, JsonType) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
 
     dict :: [MDoc] -> MDoc
@@ -299,8 +325,8 @@ typeSchema c = f (unCType c)
     lst :: [MDoc] -> MDoc
     lst xs = encloseSep "(" ")" "," xs
 
-    var :: TVar -> MDoc
-    var (TV _ v) = dquotes (pretty v)
+    var :: MT.Text -> MDoc
+    var v = dquotes (pretty v)
 
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python

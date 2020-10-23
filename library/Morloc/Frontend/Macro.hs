@@ -31,7 +31,7 @@ data ParserState = ParserState {
 
 buildCType
   :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
-  -> ([(MDoc, MDoc)] -> MDoc) -- ^ make record type
+  -> (MDoc -> [(MDoc, MDoc)] -> MDoc) -- ^ make record type
   -> CType
   -> MDoc
 buildCType mkfun mkrec (CType t) = f t where
@@ -39,7 +39,7 @@ buildCType mkfun mkrec (CType t) = f t where
   f (VarT (TV _ x)) = pretty x
   f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
   f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
-  f (NamT (TV _ v) entries) = mkrec [(pretty k, f t) | (k, t) <- entries]
+  f (NamT (TV _ v) entries) = mkrec (pretty v) [(pretty k, f t) | (k, t) <- entries]
   f (UnkT _) = error "Cannot build unsolved type"
 
   typeArgs :: Type -> [Type]

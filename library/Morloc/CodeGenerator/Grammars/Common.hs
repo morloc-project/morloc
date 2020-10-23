@@ -14,6 +14,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyExprM
   , prettyTypeM
   , typeOfExprM
+  , typeOfTypeM
   , invertExprM
   , typeParts
   , ctype2typeM
@@ -23,8 +24,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , unpackTypeM
   , nargsTypeM
   , arg2typeM
-  , jsontype2json
   , type2jsontype
+  , jsontype2json
   ) where
 
 import Morloc.Data.Doc
@@ -297,7 +298,7 @@ type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
 type2jsontype (FunT _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
 type2jsontype (NamT (TV _ v) rs) = do
   vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ v (zip (map fst rs) vs)
+  return $ NamJ "record" (zip (map fst rs) vs)
 
 jsontype2json :: JsonType -> MDoc
 jsontype2json (VarJ v) = dquotes (pretty v)
