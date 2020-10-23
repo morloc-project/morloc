@@ -101,7 +101,7 @@ serialize v0 s0 = do
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
-          decl = [idoc|#{v'} <- list#{tupled ss'};|]
+          decl = [idoc|#{v'} <- list#{tupled entries};|]
       return (concat befores ++ [decl], v');
 
     construct _ s = MM.throwError . SerializationError . render
