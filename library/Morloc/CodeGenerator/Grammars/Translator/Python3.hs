@@ -82,7 +82,7 @@ tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
 recordAccess :: MDoc -> MDoc -> MDoc
-recordAccess record field = record <> "." <> field
+recordAccess record field = record <> "[" <> dquotes field <> "]"
 
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
@@ -125,7 +125,8 @@ serialize v0 s0 = do
       (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
-          decl = [idoc|#{v'} = #{tupled ss'};|]
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} = dict#{tupled (entries)};|]
       return (concat befores ++ [decl], v');
 
     construct _ s = MM.throwError . SerializationError . render
@@ -184,7 +185,8 @@ deserialize v0 s0
       idx <- fmap pretty $ MM.getCounter
       (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx
-          decl = [idoc|#{v'} = #{tupled ss'};|]
+          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          decl = [idoc|#{v'} = dict#{tupled entries};|]
       return (v', concat befores ++ [decl]);
 
     construct _ s = MM.throwError . SerializationError . render
