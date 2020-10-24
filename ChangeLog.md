@@ -63,15 +63,13 @@ Minor changes
  - [ ] generate error handling in pools
  - [ ] meaningful error messages
 
-0.32.0 [2020.xx.xx]
+0.31.0 [2020.10.2x]
 
+ - [ ] Distinguish 'record', 'object', and 'table'
+ - [ ] Add object handling
  - [ ] Add table handling
-
-0.31.0 [2020.xx.xx]
-
- - [ ] Add record data constructors
- - [ ] Add record field access
- - [ ] Add record arithmetic sugar
+ - [ ] Add record/table field access
+ - [ ] Add record/table arithmetic sugar
 
 0.30.0 [2020.10.23]
 -------------------
