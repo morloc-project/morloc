@@ -1,4 +1,4 @@
-sudo: false
+sudo: true
 
 language: python
 python:
@@ -21,7 +21,7 @@ before_install:
     # Set up R
     - mkdir -p ~/R/library
     - echo 'R_LIBS=~/R/library' >> ~/.Renviron
-    - R -e 'install.packages("devtools", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("devtools", dependencies=TRUE, repos="https://cloud.r-project.org")'
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
     # Download and unpack the stack executable
     - mkdir -p ~/.local/bin
