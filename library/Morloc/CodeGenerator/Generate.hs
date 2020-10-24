@@ -346,28 +346,34 @@ realize x = do
 --
 -- The idea could be elaborated into a full-fledged language.
 makeGAST :: SAnno GMeta Many [CType] -> MorlocMonad (SAnno GMeta One ())
-makeGAST (SAnno (Many [(UniS, _)]) m) = return (SAnno (One (UniS, ())) m)
-makeGAST (SAnno (Many [(VarS x, _)]) m) = return (SAnno (One (VarS x, ())) m)
-makeGAST (SAnno (Many [(NumS x, _)]) m) = return (SAnno (One (NumS x, ())) m)
-makeGAST (SAnno (Many [(LogS x, _)]) m) = return (SAnno (One (LogS x, ())) m)
-makeGAST (SAnno (Many [(StrS x, _)]) m) = return (SAnno (One (StrS x, ())) m)
-makeGAST (SAnno (Many [(ListS ss, _)]) m) = do
+makeGAST (SAnno (Many []) m) = case metaGType m of
+  (Just (GType t)) -> MM.throwError . CallTheMonkeys . render
+    $ "Cannot build general value from type" <+> dquotes (prettyType t)
+  Nothing -> MM.throwError . CallTheMonkeys . render
+          $ "Cannot build general value from type."
+          <+> "You probably tried to build a module that is meant to be imported."
+makeGAST (SAnno (Many ((UniS, _):_)) m) = return (SAnno (One (UniS, ())) m)
+makeGAST (SAnno (Many ((VarS x, _):_)) m) = return (SAnno (One (VarS x, ())) m)
+makeGAST (SAnno (Many ((NumS x, _):_)) m) = return (SAnno (One (NumS x, ())) m)
+makeGAST (SAnno (Many ((LogS x, _):_)) m) = return (SAnno (One (LogS x, ())) m)
+makeGAST (SAnno (Many ((StrS x, _):_)) m) = return (SAnno (One (StrS x, ())) m)
+makeGAST (SAnno (Many ((ListS ss, _):_)) m) = do
   ss' <- mapM makeGAST ss
   return $ SAnno (One (ListS ss', ())) m
-makeGAST (SAnno (Many [(TupleS ss, _)]) m) = do
+makeGAST (SAnno (Many ((TupleS ss, _):_)) m) = do
   ss' <- mapM makeGAST ss
   return $ SAnno (One (TupleS ss', ())) m
-makeGAST (SAnno (Many [(LamS vs s, _)]) m) = do
+makeGAST (SAnno (Many ((LamS vs s, _):_)) m) = do
   s' <- makeGAST s
   return $ SAnno (One (LamS vs s', ())) m
-makeGAST (SAnno (Many [(AppS f xs, _)]) m) = do
+makeGAST (SAnno (Many ((AppS f xs, _):_)) m) = do
   f' <- makeGAST f
   xs' <- mapM makeGAST xs
   return $ SAnno (One (AppS f' xs', ())) m
-makeGAST (SAnno (Many [(RecS es, _)]) m) = do
+makeGAST (SAnno (Many ((RecS es, _):_)) m) = do
   vs <- mapM (makeGAST . snd) es
   return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
-makeGAST (SAnno (Many [(CallS src, cs)]) m)
+makeGAST (SAnno (Many ((CallS src, cs):_)) m)
   = MM.throwError . OtherError . render
   $ "Function calls cannot be used in general code:" <+> pretty (srcName src)
 
@@ -547,6 +553,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
         x' <- packExprM p x
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
+  express' isTop _ (SAnno (One (ListS _, (CType t, _))) _) = MM.throwError . CallTheMonkeys $ "ListS can only be ArrT type"
 
   express' isTop _ (SAnno (One (TupleS xs, (c@(CType (ArrT _ ts)), args))) m) = do
     let p = metaPackers m
@@ -649,6 +656,9 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
     if langOf pc == langOf c
       then return manifold
       else return $ ForeignInterfaceM (ctype2typeM pc) manifold
+
+  express' _ _ (SAnno (One (_, (CType t, _))) m) = MM.throwError . CallTheMonkeys . render $
+    "Invalid input to express' in module (" <> viaShow (metaName m) <> ") - type: " <> prettyType t
 
 -- | Move let assignments to minimize number of foreign calls.  This step
 -- should be integrated with the optimizations performed in the realize step.
@@ -780,6 +790,7 @@ rehead (LamM _ e) = rehead e
 rehead (ManifoldM m args (ReturnM e)) = do
   e' <- packExprM (metaPackers m) e
   return $ ManifoldM m args (ReturnM e')
+rehead _ = MM.throwError $ CallTheMonkeys "Bad Head"
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM Many] -> MorlocMonad [(Lang, [ExprM Many])]
@@ -816,40 +827,47 @@ preprocess l _ = MM.throwError . PoolBuildError . render
                $ "Language '" <> viaShow l <> "' has no translator"
 
 chooseSerializer :: [ExprM Many] -> MorlocMonad [ExprM One]
-chooseSerializer xs = return $ map chooseSerializer' xs where
-  chooseSerializer' :: ExprM Many -> ExprM One
+chooseSerializer xs = mapM chooseSerializer' xs where
+  chooseSerializer' :: ExprM Many -> MorlocMonad (ExprM One)
   -- This is where the magic happens, the rest is just plumbing
-  chooseSerializer' (SerializeM s e) = SerializeM (oneSerial s) (chooseSerializer' e)
-  chooseSerializer' (DeserializeM s e) = DeserializeM (oneSerial s) (chooseSerializer' e)
+  chooseSerializer' (SerializeM s e) = SerializeM <$> oneSerial s <*> chooseSerializer' e
+  chooseSerializer' (DeserializeM s e) = DeserializeM <$> oneSerial s <*> chooseSerializer' e
   -- plumbing
-  chooseSerializer' (ManifoldM g args e) = ManifoldM g args (chooseSerializer' e)
-  chooseSerializer' (ForeignInterfaceM t e) = ForeignInterfaceM t (chooseSerializer' e)
-  chooseSerializer' (LetM i e1 e2) = LetM i (chooseSerializer' e1) (chooseSerializer' e2)
-  chooseSerializer' (AppM e es) = AppM (chooseSerializer' e) (map chooseSerializer' es)
-  chooseSerializer' (LamM args e) = LamM args (chooseSerializer' e)
-  chooseSerializer' (ListM t es) = ListM t (map chooseSerializer' es)
-  chooseSerializer' (TupleM t es) = TupleM t (map chooseSerializer' es)
-  chooseSerializer' (RecordM t rs) = RecordM t (zip (map fst rs) (map (chooseSerializer' . snd) rs))
-  chooseSerializer' (ReturnM e ) = ReturnM (chooseSerializer' e)
-  chooseSerializer' (SrcM t s) = SrcM t s
-  chooseSerializer' (PoolCallM t i d args) = PoolCallM t i d args
-  chooseSerializer' (BndVarM t i ) = BndVarM t i
-  chooseSerializer' (LetVarM t i) = LetVarM t i
-  chooseSerializer' (LogM t x) = LogM t x
-  chooseSerializer' (NumM t x) = NumM t x
-  chooseSerializer' (StrM t x) = StrM t x
-  chooseSerializer' (NullM t) = NullM t
+  chooseSerializer' (ManifoldM g args e) = ManifoldM g args <$> chooseSerializer' e
+  chooseSerializer' (ForeignInterfaceM t e) = ForeignInterfaceM t <$> chooseSerializer' e
+  chooseSerializer' (LetM i e1 e2) = LetM i <$> chooseSerializer' e1 <*> chooseSerializer' e2
+  chooseSerializer' (AppM e es) = AppM <$> chooseSerializer' e <*> mapM chooseSerializer' es
+  chooseSerializer' (LamM args e) = LamM args <$> chooseSerializer' e
+  chooseSerializer' (ListM t es) = ListM t <$> mapM chooseSerializer' es
+  chooseSerializer' (TupleM t es) = TupleM t <$> mapM chooseSerializer' es
+  chooseSerializer' (RecordM t rs) = do
+    ts <- mapM (chooseSerializer' . snd) rs
+    return $ RecordM t (zip (map fst rs) ts)
+  chooseSerializer' (ReturnM e ) = ReturnM <$> chooseSerializer' e
+  chooseSerializer' (SrcM t s) = return $ SrcM t s
+  chooseSerializer' (PoolCallM t i d args) = return $ PoolCallM t i d args
+  chooseSerializer' (BndVarM t i ) = return $ BndVarM t i
+  chooseSerializer' (LetVarM t i) = return $ LetVarM t i
+  chooseSerializer' (LogM t x) = return $ LogM t x
+  chooseSerializer' (NumM t x) = return $ NumM t x
+  chooseSerializer' (StrM t x) = return $ StrM t x
+  chooseSerializer' (NullM t) = return $ NullM t
 
-  oneSerial :: SerialAST Many -> SerialAST One
-  oneSerial (SerialPack (Many ((p,s):_))) = SerialPack (One (p, oneSerial s))
-  oneSerial (SerialList s) = SerialList (oneSerial s)
-  oneSerial (SerialTuple ss) = SerialTuple (map oneSerial ss)
-  oneSerial (SerialObject v rs) = SerialObject v (zip (map fst rs) (map (oneSerial . snd) rs))
-  oneSerial (SerialNum t) = SerialNum t
-  oneSerial (SerialBool t) = SerialBool t
-  oneSerial (SerialString t) = SerialString t
-  oneSerial (SerialNull t) = SerialNull t
-  oneSerial (SerialUnknown t) = SerialUnknown t
+  oneSerial :: SerialAST Many -> MorlocMonad (SerialAST One)
+  oneSerial (SerialPack (Many [])) = MM.throwError . SerializationError $ "No valid serializer found"
+  oneSerial (SerialPack (Many ((p,s):_))) = do
+    s' <- oneSerial s
+    return $ SerialPack (One (p, s'))
+  oneSerial (SerialList s) = SerialList <$> oneSerial s
+  oneSerial (SerialTuple ss) = SerialTuple <$> mapM oneSerial ss
+  oneSerial (SerialObject v rs) = do
+    ts <- mapM (oneSerial . snd) rs
+    return $ SerialObject v (zip (map fst rs) ts)
+  oneSerial (SerialNum t) = return $ SerialNum t
+  oneSerial (SerialBool t) = return $ SerialBool t
+  oneSerial (SerialString t) = return $ SerialString t
+  oneSerial (SerialNull t) = return $ SerialNull t
+  oneSerial (SerialUnknown t) = return $ SerialUnknown t
 
 translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate lang srcs es = do
@@ -1013,9 +1031,9 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
       <>  addExtra c
 
     name :: CType -> GMeta -> MDoc
-    name t g = case langOf t of
-      (Just lang) ->       
-        maybe
+    name t g =
+      let lang = fromJust (langOf t)
+      in maybe
           ("_" <+> viaShow lang <+> "::")
           (\x -> pretty x <+> viaShow lang <+> "::")
           (metaName g)
