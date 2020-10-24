@@ -245,7 +245,7 @@ pTypedefType = do
 
 pTypedefObject :: Parser ModuleBody
 pTypedefObject = do
-  _ <- reserved "object"
+  r <- pNamType
   lang <- optional (try pLang)
   setLang lang
   (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
@@ -254,7 +254,25 @@ pTypedefObject = do
   entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
   setLang Nothing
-  return $ MBTypeDef v vs (NamU NamRecord (TV lang constructor) entries)
+  return $ MBTypeDef v vs (NamU r (TV lang constructor) entries)
+
+pNamType :: Parser NamType
+pNamType = choice [pNamObject, pNamTable, pNamRecord] 
+
+pNamObject :: Parser NamType
+pNamObject = do
+  _ <- reserved "object" 
+  return NamObject
+
+pNamTable :: Parser NamType
+pNamTable = do
+  _ <- reserved "table" 
+  return NamTable
+
+pNamRecord :: Parser NamType
+pNamRecord = do
+  _ <- reserved "record" 
+  return NamRecord
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do

@@ -1,7 +1,7 @@
 import rbase (id, Map)
 
-object (Person a) = Person {name :: Str, info :: a};
-object R (Person a) = "person" {name :: "character", info :: a};
+record (Person a) = Person {name :: Str, info :: a};
+record R (Person a) = "person" {name :: "character", info :: a};
 
 export foo
 

@@ -1,7 +1,7 @@
 import cppbase (id)
 
-object (Person a) = Person {name :: Str, info :: a};
-object Cpp (Person a) = "person" {name :: "std::string", info :: a};
+record (Person a) = Person {name :: Str, info :: a};
+record Cpp (Person a) = "person" {name :: "std::string", info :: a};
 
 export foo
 

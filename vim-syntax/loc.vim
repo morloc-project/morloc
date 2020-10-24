@@ -43,6 +43,8 @@ syn keyword reserved nand
 syn keyword reserved not
 syn keyword reserved type
 syn keyword reserved object
+syn keyword reserved table
+syn keyword reserved record
 
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
