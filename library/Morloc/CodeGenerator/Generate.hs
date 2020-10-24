@@ -565,7 +565,7 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
-  express' isTop _ (SAnno (One (RecS entries, (c@(CType (NamT _ ts)), args))) m) = do
+  express' isTop _ (SAnno (One (RecS entries, (c@(CType (NamT _ _ ts)), args))) m) = do
     let p = metaPackers m
     xs' <- zipWithM (express' False) (map (CType . snd) ts) (map snd entries) >>= mapM (unpackExprM p)
     let x = RecordM (Native c) (zip (map fst entries) xs')
@@ -860,9 +860,9 @@ chooseSerializer xs = mapM chooseSerializer' xs where
     return $ SerialPack (One (p, s'))
   oneSerial (SerialList s) = SerialList <$> oneSerial s
   oneSerial (SerialTuple ss) = SerialTuple <$> mapM oneSerial ss
-  oneSerial (SerialObject v rs) = do
+  oneSerial (SerialObject r v rs) = do
     ts <- mapM (oneSerial . snd) rs
-    return $ SerialObject v (zip (map fst rs) ts)
+    return $ SerialObject r v (zip (map fst rs) ts)
   oneSerial (SerialNum t) = return $ SerialNum t
   oneSerial (SerialBool t) = return $ SerialBool t
   oneSerial (SerialString t) = return $ SerialString t

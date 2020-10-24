@@ -30,9 +30,9 @@ resolve :: UnresolvedType -> MorlocMonad Type
 resolve (VarU v) = return $ VarT v
 resolve (FunU t1 t2) = FunT <$> resolve t1 <*> resolve t2
 resolve (ArrU v ts) = ArrT v <$> mapM resolve ts
-resolve (NamU v rs) = do
+resolve (NamU r v rs) = do
   ts' <- mapM (resolve . snd) rs
-  return $ NamT v (zip (map fst rs) ts')
+  return $ NamT r v (zip (map fst rs) ts')
 resolve (ExistU v ts []) = MM.throwError UnsolvedExistentialTerm
 resolve (ExistU v ts (t:_)) = resolve t
 resolve (ForallU v t) = substituteT v (UnkT v) <$> resolve t
@@ -48,7 +48,7 @@ substituteT v r t = sub t
       | otherwise = t'
     sub (FunT t1 t2) = FunT (sub t1) (sub t2)
     sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (NamT v' rs) = NamT v' [(x, sub t') | (x, t') <- rs]
+    sub (NamT r v' rs) = NamT r v' [(x, sub t') | (x, t') <- rs]
 
 
 treeify

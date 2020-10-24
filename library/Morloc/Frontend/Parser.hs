@@ -254,7 +254,7 @@ pTypedefObject = do
   entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
   setLang Nothing
-  return $ MBTypeDef v vs (NamU (TV lang constructor) entries)
+  return $ MBTypeDef v vs (NamU NamRecord (TV lang constructor) entries)
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do
@@ -555,7 +555,7 @@ pNamU = do
   return $
     if lang == Nothing
     then head dts
-    else ExistU v [NamU (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
+    else ExistU v [NamU NamRecord (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do

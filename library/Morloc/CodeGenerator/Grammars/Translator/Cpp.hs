@@ -180,7 +180,7 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
       return (v', concat befores ++ [x]);
 
     -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = do
+    construct v rec@(SerialObject NamRecord name rs) = do
       (ss', befores) <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       t <- (showTypeM recmap . Native . CType) <$> serialAstToType CppLang rec
@@ -247,7 +247,7 @@ deserialize recmap letIndex typestr0 varname0 s0
       return (v', concat befores ++ [x]);
 
     -- TODO: add record handling here
-    construct v rec@(SerialObject name rs) = do
+    construct v rec@(SerialObject NamRecord name rs) = do
       idx <- fmap pretty $ MM.getCounter
       (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
       t <- fmap (showTypeM recmap . Native . CType) $ shallowType CppLang rec
@@ -429,7 +429,7 @@ showType = MTM.buildCType mkfun mkrec where
 showTypeM :: RecMap -> TypeM -> MDoc
 showTypeM _ Passthrough = serialType
 showTypeM recmap (Serial t) = serialType
-showTypeM recmap (Native (CType (NamT v@(TV _ s) rs))) =
+showTypeM recmap (Native (CType (NamT _ v@(TV _ s) rs))) =
   case lookup v recmap of
     (Just rs') -> pretty s <> typeParams recmap (zip (map snd rs') (map snd rs))
     Nothing -> pretty s
@@ -481,7 +481,7 @@ cleanRecord tm = case typeOfTypeM tm of
     toRecord (VarT _) = []
     toRecord (FunT t1 t2) = toRecord t1 ++ toRecord t2
     toRecord (ArrT _ ts) = conmap toRecord ts
-    toRecord (NamT v rs) = (v, rs) : conmap toRecord (map snd rs)
+    toRecord (NamT _ v rs) = (v, rs) : conmap toRecord (map snd rs)
 
 
 unifyRecords :: [(TVar, [(MT.Text, Type)])] -> RecMap

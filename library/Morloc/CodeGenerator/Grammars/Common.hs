@@ -296,9 +296,14 @@ type2jsontype (UnkT _) = MM.throwError . SerializationError $ "Invalid JSON type
 type2jsontype (VarT (TV _ v)) = return $ VarJ v
 type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
 type2jsontype (FunT _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype (NamT (TV _ v) rs) = do
+type2jsontype (NamT namType (TV _ v) rs) = do
   vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ "record" (zip (map fst rs) vs)
+  return $ NamJ jsontype (zip (map fst rs) vs)
+  where
+    jsontype = case namType of
+      NamRecord -> "record"
+      NamObject -> v
+      NamTable -> "table"
 
 jsontype2json :: JsonType -> MDoc
 jsontype2json (VarJ v) = dquotes (pretty v)

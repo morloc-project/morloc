@@ -33,8 +33,9 @@ typeEqual (VarT (TV _ v1)) (VarU (TV _ v2)) = v1 == v2
 typeEqual (ArrT (TV _ v1) ts1) (ArrU (TV _ v2) us2)
   | length ts1 /= length us2 = False
   | otherwise = foldl (&&) (v1 == v2) (zipWith typeEqual ts1 us2 )
-typeEqual (NamT (TV _ v1) rs1) (NamU (TV _ v2) rs2)
-  = v1 == v2
+typeEqual (NamT r1 (TV _ v1) rs1) (NamU r2 (TV _ v2) rs2)
+  =  v1 == v2
+  && r1 == r2
   && map fst rs1 == map fst rs2
   && foldl (&&) True (zipWith typeEqual (map snd rs1) (map snd rs2))
 typeEqual _ _ = False
@@ -43,7 +44,7 @@ typeEqual _ _ = False
 type2default :: Type -> UnresolvedType
 type2default (VarT v) = VarU v
 type2default (ArrT v ts) = ArrU v (map type2default ts)
-type2default (NamT v rs) = NamU v (zip (map fst rs) (map (type2default . snd) rs))
+type2default (NamT r v rs) = NamU r v (zip (map fst rs) (map (type2default . snd) rs))
 type2default (FunT _ _) = error "default types should never be functions"
 
 -- | recurse all the way to a serializable type
@@ -55,8 +56,8 @@ serialAstToType lang (SerialList s) = do
 serialAstToType lang (SerialTuple ss) = do
   ts <- mapM (serialAstToType lang) ss
   return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
-serialAstToType lang (SerialObject v rs)
-  = return $ NamT v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
+serialAstToType lang (SerialObject r v rs)
+  = return $ NamT r v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
 serialAstToType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 serialAstToType lang (SerialString x) = return $ VarT (TV (Just lang) x)
@@ -80,8 +81,8 @@ serialAstToType' lang (SerialTuple ss)
   . Def.defaultTuple (Just lang)
   . map partialUnresolve
   $ map (serialAstToType' lang) ss
-serialAstToType' lang (SerialObject v rs)
-  = NamT v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
+serialAstToType' lang (SerialObject r v rs)
+  = NamT r v (zip (map fst rs) (map (serialAstToType' lang . snd) rs))
 serialAstToType' lang (SerialNum    x) = VarT (TV (Just lang) x)
 serialAstToType' lang (SerialBool   x) = VarT (TV (Just lang) x)
 serialAstToType' lang (SerialString x) = VarT (TV (Just lang) x)
@@ -98,9 +99,9 @@ shallowType lang (SerialList s) = do
 shallowType lang (SerialTuple ss) = do
   ts <- mapM (shallowType lang) ss
   return . partialResolve . head . Def.defaultTuple (Just lang) . map partialUnresolve $ ts
-shallowType lang (SerialObject v rs) = do
+shallowType lang (SerialObject r v rs) = do
   ts <- mapM (shallowType lang) (map snd rs)
-  return $ NamT v (zip (map fst rs) ts)
+  return $ NamT r v (zip (map fst rs) ts)
 shallowType lang (SerialNum    x) = return $ VarT (TV (Just lang) x)
 shallowType lang (SerialBool   x) = return $ VarT (TV (Just lang) x)
 shallowType lang (SerialString x) = return $ VarT (TV (Just lang) x)
@@ -111,12 +112,12 @@ shallowType lang (SerialUnknown _) = MM.throwError . SerializationError
 partialResolve :: UnresolvedType -> Type
 partialResolve (VarU v) = VarT v
 partialResolve (ArrU v ts) = ArrT v (map partialResolve ts)
-partialResolve (NamU v rs) = NamT v (zip (map fst rs) (map (partialResolve . snd) rs))
+partialResolve (NamU r v rs) = NamT r v (zip (map fst rs) (map (partialResolve . snd) rs))
 
 partialUnresolve :: Type -> UnresolvedType
 partialUnresolve (VarT v) = VarU v
 partialUnresolve (ArrT v ts) = ArrU v (map partialUnresolve ts)
-partialUnresolve (NamT v rs) = NamU v (zip (map fst rs) (map (partialUnresolve . snd) rs))
+partialUnresolve (NamT r v rs) = NamU r v (zip (map fst rs) (map (partialUnresolve . snd) rs))
 
 makeSerialAST
   :: PackMap -- Map.Map (TVar, Int) [UnresolvedPacker]
@@ -149,9 +150,9 @@ makeSerialAST m t@(ArrT v@(TV lang s) ts)
           prettyPackMap m
   where
     tuples = filter (typeEqual t) (Def.defaultTuple lang (map type2default ts))
-makeSerialAST m (NamT v rs) = do
+makeSerialAST m (NamT r v rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
-  return $ SerialObject v (zip (map fst rs) ts) 
+  return $ SerialObject r v (zip (map fst rs) ts) 
 
 resolvePacker :: Type -> [Type] -> UnresolvedPacker -> MorlocMonad TypePacker
 resolvePacker packedType ts u = do 
@@ -197,12 +198,12 @@ findSerializationCycles choose x y = f x y where
     | otherwise = case fmap unzip . sequence $ zipWith f ts1 ts2 of
         (Just (xs,ys)) -> Just (SerialTuple xs, SerialTuple ys)
         Nothing -> Nothing
-  f (SerialObject v1 rs1) (SerialObject v2 rs2)
+  f (SerialObject r1 v1 rs1) (SerialObject r2 v2 rs2)
     | map fst rs1 /= map fst rs2 = Nothing 
     | otherwise = case fmap unzip . sequence $ zipWith f ts1 ts2 of
         Nothing -> Nothing
-        Just (rs1', rs2') -> Just ( SerialObject v1 (zip (map fst rs1) rs1')
-                                  , SerialObject v2 (zip (map fst rs2) rs2'))
+        Just (rs1', rs2') -> Just ( SerialObject r1 v1 (zip (map fst rs1) rs1')
+                                  , SerialObject r2 v2 (zip (map fst rs2) rs2'))
       where
         ts1 = map snd rs1
         ts2 = map snd rs1
@@ -229,7 +230,7 @@ isSerializable :: Functor f => SerialAST f -> Bool
 isSerializable (SerialPack _) = False
 isSerializable (SerialList x) = isSerializable x
 isSerializable (SerialTuple xs) = all isSerializable xs 
-isSerializable (SerialObject _ rs) = all isSerializable (map snd rs) 
+isSerializable (SerialObject _ _ rs) = all isSerializable (map snd rs) 
 isSerializable (SerialNum    _) = True
 isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
@@ -240,8 +241,8 @@ prettySerialOne :: SerialAST One -> MDoc
 prettySerialOne (SerialPack _) = "SerialPack"
 prettySerialOne (SerialList x) = "SerialList" <> parens (prettySerialOne x)
 prettySerialOne (SerialTuple xs) = "SerialTuple" <> tupled (map prettySerialOne xs)
-prettySerialOne (SerialObject _ rs)
-  = block 4 "SerialObject"
+prettySerialOne (SerialObject r _ rs)
+  = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> pretty k <> "=" <> prettySerialOne v) rs)
 prettySerialOne (SerialNum    _) = "SerialNum"
 prettySerialOne (SerialBool   _) = "SerialBool"

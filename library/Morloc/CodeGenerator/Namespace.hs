@@ -30,7 +30,7 @@ data SerialAST f
   = SerialPack (f (TypePacker, SerialAST f))
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject TVar [(Text, SerialAST f)]
+  | SerialObject NamType TVar [(Text, SerialAST f)]
   | SerialNum Text
   | SerialBool Text
   | SerialString Text

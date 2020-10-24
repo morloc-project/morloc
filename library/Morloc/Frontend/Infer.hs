@@ -209,7 +209,7 @@ subtype' t1@(ArrU v1@(TV l1 _) vs1) t2@(ArrU v2@(TV l2 _) vs2) g
     compareArr _ _ _ = throwError TypeMismatch
 
 -- subtype unordered records
-subtype' (NamU v1 rs1) (NamU v2 rs2) g = do
+subtype' (NamU _ v1 rs1) (NamU _ v2 rs2) g = do
   g' <- subtype (VarU v1) (VarU v2) g
   compareEntry (sort rs1) (sort rs2) g'
   where
@@ -699,7 +699,7 @@ infer' lang g1 e@(RecE rs) = do
   containerType <-
     if lang == Nothing
     then return (head dts)
-    else newvarRich [NamU (TV lang "__RECORD__") entries] dts lang -- see entry in Parser.hs
+    else newvarRich [NamU NamRecord (TV lang "__RECORD__") entries] dts lang -- see entry in Parser.hs
   return (g2, [containerType], ann (RecE (zip keys xs2)) containerType)
 
 
@@ -897,8 +897,8 @@ collateTypes ts1 ts2
     moreSpecific :: UnresolvedType -> UnresolvedType -> Stack UnresolvedType
     moreSpecific (FunU t11 t12) (FunU t21 t22) = FunU <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
     moreSpecific (ArrU v1 ts1) (ArrU v2 ts2) = ArrU v1 <$> zipWithM moreSpecific ts1 ts2
-    moreSpecific (NamU v1 ts1) (NamU v2 ts2)
-      | v1 == v2 = NamU <$> pure v1 <*> zipWithM mergeEntry (sort ts1) (sort ts2)
+    moreSpecific (NamU r1 v1 ts1) (NamU r2 v2 ts2)
+      | v1 == v2 && r1 == r2 = NamU r1 <$> pure v1 <*> zipWithM mergeEntry (sort ts1) (sort ts2)
       | otherwise = throwError . OtherError $ "Cannot collate records with unequal names/langs"
       where
       mergeEntry (k1, t1) (k2, t2)
