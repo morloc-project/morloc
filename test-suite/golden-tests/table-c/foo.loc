@@ -1,12 +1,12 @@
 import cppbase (id)
 
 table (Person a) = Person {name :: Str, info :: a};
-table Cpp (Person a) = "person" {name :: "character", info :: a};
+table Cpp (Person a) = "person" {name :: "std::string", info :: a};
 
 export foo;
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person (Map Str Int) -> Person (Map Str Int);
-foo Cpp :: Person "integer" -> Person "integer";
+foo :: Person Int -> Person Int;
+foo Cpp :: Person "int" -> Person "int";
 foo xs = id xs;

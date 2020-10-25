@@ -303,7 +303,7 @@ type2jsontype (NamT namType (TV _ v) rs) = do
     jsontype = case namType of
       NamRecord -> "record"
       NamObject -> v
-      NamTable -> "table"
+      NamTable -> v
 
 jsontype2json :: JsonType -> MDoc
 jsontype2json (VarJ v) = dquotes (pretty v)
