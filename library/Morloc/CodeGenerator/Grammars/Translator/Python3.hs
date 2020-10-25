@@ -81,8 +81,17 @@ translateSource (Path s) = do
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
 
+selectAccessor :: NamType -> MT.Text -> MorlocMonad (MDoc -> MDoc -> MDoc)
+selectAccessor NamTable  "dict" = return recordAccess
+selectAccessor NamRecord _      = return recordAccess
+selectAccessor NamTable  _      = return objectAccess
+selectAccessor NamObject _      = return objectAccess
+
 recordAccess :: MDoc -> MDoc -> MDoc
 recordAccess record field = record <> "[" <> dquotes field <> "]"
+
+objectAccess :: MDoc -> MDoc -> MDoc
+objectAccess object field = object <> "." <> field
 
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
@@ -121,8 +130,9 @@ serialize v0 s0 = do
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject NamRecord name rs) = do
-      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+    construct v rec@(SerialObject namType (TV _ constructor) rs) = do
+      accessField <- selectAccessor namType constructor
+      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (accessField v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
@@ -131,8 +141,6 @@ serialize v0 s0 = do
 
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
-
-
 
 deserialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 deserialize v0 s0
@@ -181,12 +189,13 @@ deserialize v0 s0
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject NamRecord name rs) = do
+    construct v rec@(SerialObject namType (TV _ constructor) rs) = do
       idx <- fmap pretty $ MM.getCounter
-      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      accessField <- selectAccessor namType constructor
+      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (accessField v (pretty k)) s) rs
       let v' = "s" <> idx
           entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
-          decl = [idoc|#{v'} = dict#{tupled entries};|]
+          decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries};|]
       return (v', concat befores ++ [decl]);
 
     construct _ s = MM.throwError . SerializationError . render

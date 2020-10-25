@@ -179,8 +179,7 @@ serialize recmap letIndex typestr0 datavar0 s0 = do
           x = [idoc|#{showType (CType t)} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    -- TODO: add record handling here
-    construct v rec@(SerialObject NamRecord name rs) = do
+    construct v rec@(SerialObject _ name rs) = do
       (ss', befores) <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       t <- (showTypeM recmap . Native . CType) <$> serialAstToType CppLang rec
