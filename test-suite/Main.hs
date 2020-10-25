@@ -159,4 +159,8 @@ main = do
       , golden "R(R) serial-form-12-c"  "serial-form-12-c"
       , golden "R(R) serial-form-12-py" "serial-form-12-py"
       , golden "R(R) serial-form-12-r"  "serial-form-12-r"
+      -- table handling
+      , golden "C++ table handling"     "table-c"
+      , golden "python3 table handling" "table-py"
+      , golden "R table handling"       "table-r"
       ]

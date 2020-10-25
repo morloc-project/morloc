@@ -251,10 +251,26 @@ pTypedefObject = do
   (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
   _ <- symbol "="
   constructor <- name <|> stringLiteral
-  entries <- braces (sepBy1 pNamEntryU (symbol ","))
+  entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
   lang <- CMS.gets stateLang
   setLang Nothing
-  return $ MBTypeDef v vs (NamU r (TV lang constructor) entries)
+  let t = (NamU r (TV lang constructor) entries)
+  return $ MBTypeDef v vs t
+
+desugarTableEntries
+  :: Maybe Lang
+  -> NamType
+  -> (MT.Text, UnresolvedType)
+  -> Parser (MT.Text, UnresolvedType)
+desugarTableEntries _ NamRecord entry = return entry
+desugarTableEntries _ NamObject entry = return entry
+desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
+  f :: UnresolvedType -> Parser UnresolvedType
+  f (ForallU v t) = ForallU v <$> f t
+  f t = do
+    v <- newvar lang
+    let dts = MLD.defaultList lang t
+    return $ head dts
 
 pNamType :: Parser NamType
 pNamType = choice [pNamObject, pNamTable, pNamRecord] 
