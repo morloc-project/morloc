@@ -1,0 +1,12 @@
+import rbase (id)
+
+table (Person a) = Person {name :: Str, info :: a};
+table R (Person a) = "data.frame" {name :: "character", info :: a};
+
+export foo;
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo :: Person Int -> Person Int;
+foo r :: Person "integer" -> Person "integer";
+foo xs = id xs;
