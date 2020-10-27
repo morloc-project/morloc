@@ -23,6 +23,8 @@ import Morloc.CodeGenerator.Serial ( isSerializable
                                    , serialAstToType'
                                    , shallowType
                                    )
+
+import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
@@ -46,7 +48,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es)
+  liftIO . putDoc . vsep $ "-- C++ translation --" : map prettyExprM es
 
   let recmap = unifyRecords . conmap collectRecords $ es
       (declarations, serializers) = (\xs -> (conmap fst xs, conmap snd xs))
@@ -71,6 +73,9 @@ bndNamer i = "x" <> viaShow i
 
 serialType :: MDoc
 serialType = "std::string"
+
+defaultRecordTerm :: MT.Text
+defaultRecordTerm = head [v | (NamU _ (TV Nothing v) _) <- Def.defaultRecord Nothing []]
 
 makeSignature :: RecMap -> ExprM One -> MDoc
 makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
@@ -496,7 +501,8 @@ unifyRecords = map (\(v, rss) -> (v, [unifyField fs | fs <- transpose rss])) . g
 unifyField :: [(PVar, TypeP)] -> (PVar, Maybe TypeP)
 unifyField [] = error "Empty field"
 unifyField rs@((v,_):_)
-  | not (all ((==) v) (map fst rs)) = error "Bad record - unequal fields"
+  | not (all ((==) v) (map fst rs))
+      = error $ "Bad record - unequal fields: " <> show (unique rs)
   | otherwise = case unique (map snd rs) of
       [t] -> (v, Just t)
       _ -> (v, Nothing)
