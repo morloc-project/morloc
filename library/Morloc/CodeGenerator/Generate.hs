@@ -212,9 +212,9 @@ realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One TypeP))
 realize x = do
-  say $ " --- realize ---"
-  say $ writeManyAST x
-  say $ " ---------------"
+  -- say $ " --- realize ---"
+  -- say $ writeManyAST x
+  -- say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     Nothing -> makeGAST x |>> Left

@@ -110,7 +110,7 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
   f (RecordM c entries) =
     let (mss', es') = unzip $ map (f . snd) entries
         entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    in (concat mss', "{" <> tupled entries' <> "}")
+    in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
   f (LogM _ x) = ([], if x then "true" else "false")
   f (NumM _ x) = ([], viaShow x)
   f (StrM _ x) = ([], dquotes $ pretty x)
@@ -125,9 +125,14 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     let (ms, e') = f e
     in (ms, "RETURN(" <> e' <> ")")
 
+prettyRecordPVar :: TypeM -> MDoc
+prettyRecordPVar (Serial (NamP _ v _)) = prettyPVar v
+prettyRecordPVar (Native (NamP _ v _)) = prettyPVar v
+prettyRecordPVar _ = "<UNKNOWN RECORD>"
+
 prettyPVar :: PVar -> MDoc
-prettyPVar (PV _ (Just g) t) = parens (pretty g <> " " <> pretty t)
-prettyPVar (PV _ Nothing t) = pretty t
+prettyPVar (PV _ (Just g) t) = parens (pretty g <+> pretty t)
+prettyPVar (PV _ Nothing t) = parens ("*" <+> pretty t)
 
 prettyTypeP :: TypeP -> MDoc
 prettyTypeP (UnkP v) = prettyPVar v 
