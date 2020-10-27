@@ -1,9 +1,9 @@
 import pybase (id)
 
-source py from "person.py" ("Person" as Person);
+source py from "person.py" ("PersonObj" as Person);
 
 table (Person a) = Person {name :: Str, info :: a};
-table py (Person a) = "Person" {name :: "str", info :: a};
+table py (Person a) = "PersonObj" {name :: "str", info :: a};
 
 export foo;
 

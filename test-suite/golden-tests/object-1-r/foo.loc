@@ -1,7 +1,7 @@
 import rbase (id)
 
-table (Person a) = Person {name :: Str, info :: a};
-table R (Person a) = "data.frame" {name :: "character", info :: a};
+object (Person a) = Person {name :: Str, info :: a};
+object R (Person a) = "person" {name :: "character", info :: a};
 
 export foo;
 

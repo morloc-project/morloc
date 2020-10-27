@@ -1,7 +1,7 @@
 import cppbase (id)
 
 table (Person a) = Person {name :: Str, info :: a};
-table Cpp (Person a) = "person" {name :: "std::string", info :: a};
+table Cpp (Person a) = "struct" {name :: "std::string", info :: a};
 
 export foo;
 

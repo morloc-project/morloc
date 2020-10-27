@@ -48,10 +48,10 @@ defaultTuple lang@(Just PerlLang) ts = [ArrU (TV lang "array") ts]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, UnresolvedType)] -> [UnresolvedType]
 defaultRecord lang@Nothing entries = [NamU NamRecord (TV lang "Record") entries]
-defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "record") entries]
-defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "record") entries]
+defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "dict") entries]
+defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "list") entries]
 defaultRecord lang@(Just CLang) entries = []
-defaultRecord lang@(Just CppLang) entries = []
+defaultRecord lang@(Just CppLang) entries = [NamU NamRecord (TV lang "struct") entries]
 defaultRecord lang@(Just PerlLang) entries = [NamU NamRecord (TV lang "hash") entries]
 
 defaultNull :: Maybe Lang -> [UnresolvedType]

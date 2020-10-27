@@ -427,6 +427,11 @@ showType recmap (NamP NamRecord v@(PV _ _ "struct") rs) =
   case lookup v recmap of
     (Just rs') -> autoStructName v <> typeParams recmap (zip (map snd rs') (map snd rs))
     Nothing -> autoStructName v
+showType recmap (NamP NamTable v@(PV _ _ "struct") rs) =
+  -- handle autogenated structs
+  case lookup v recmap of
+    (Just rs') -> autoStructName v <> typeParams recmap (zip (map snd rs') (map snd rs))
+    Nothing -> autoStructName v
 showType recmap (NamP _ v@(PV _ _ s) rs) =
   case lookup v recmap of
     (Just rs') -> pretty s <> typeParams recmap (zip (map snd rs') (map snd rs))

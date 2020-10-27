@@ -2,9 +2,9 @@
 #define __PERSON_H__
 
 template <class T>
-typedef struct person{
+struct person{
     std::string name;
-    T inf; 
-} person;
+    T info; 
+};
 
 #endif
