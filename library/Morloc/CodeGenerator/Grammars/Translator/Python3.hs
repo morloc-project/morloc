@@ -96,8 +96,8 @@ objectAccess object field = object <> "." <> field
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  t <- serialAstToType Python3Lang s0
-  schema <- typeSchema (CType t)
+  t <- serialAstToType s0
+  schema <- typeSchema t
   let v2 = "mlc_serialize" <> tupled [v1, schema]
   return (v2, ms)
   where
@@ -107,7 +107,7 @@ serialize v0 s0 = do
       | otherwise = construct v s
 
     construct :: MDoc -> SerialAST One -> MorlocMonad ([MDoc], MDoc)
-    construct v (SerialPack (One (p, s))) = do
+    construct v (SerialPack _ (One (p, s))) = do
       unpacker <- case typePackerReverse p of
         [] -> MM.throwError . SerializationError $ "No unpacker found"
         (src:_) -> return . pretty . srcName $ src
@@ -130,12 +130,12 @@ serialize v0 s0 = do
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject namType (TV _ constructor) rs) = do
+    construct v rec@(SerialObject namType (PV _ _ constructor) rs) = do
       accessField <- selectAccessor namType constructor
-      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (accessField v (pretty k)) s) rs
+      (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (accessField v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
-          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
           decl = [idoc|#{v'} = dict#{tupled (entries)};|]
       return (concat befores ++ [decl], v');
 
@@ -145,14 +145,14 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
-      t <- serialAstToType Python3Lang s0
-      schema <- typeSchema (CType t)
+      t <- serialAstToType s0
+      schema <- typeSchema t
       let deserializing = [idoc|mlc_deserialize(#{v0}, #{schema});|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty $ MM.getCounter
-      t <- serialAstToType Python3Lang s0
-      schema <- typeSchema (CType t)
+      t <- serialAstToType s0
+      schema <- typeSchema t
       let rawvar = "s" <> idx
           deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema});|]
       (x, befores) <- check rawvar s0
@@ -164,7 +164,7 @@ deserialize v0 s0
       | otherwise = construct v s
 
     construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    construct v (SerialPack (One (p, s'))) = do
+    construct v (SerialPack _ (One (p, s'))) = do
       packer <- case typePackerForward p of
         [] -> MM.throwError . SerializationError $ "No packer found"
         (x:_) -> return . pretty . srcName $ x
@@ -189,12 +189,12 @@ deserialize v0 s0
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject namType (TV _ constructor) rs) = do
+    construct v rec@(SerialObject namType (PV _ _ constructor) rs) = do
       idx <- fmap pretty $ MM.getCounter
       accessField <- selectAccessor namType constructor
-      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (accessField v (pretty k)) s) rs
+      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (accessField v (pretty k)) s) rs
       let v' = "s" <> idx
-          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
           decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries};|]
       return (v', concat befores ++ [decl]);
 
@@ -317,13 +317,13 @@ makeDispatch ms = align . vsep $
       = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 
-typeSchema :: CType -> MorlocMonad MDoc
-typeSchema c = f <$> type2jsontype (unCType c)
+typeSchema :: TypeP -> MorlocMonad MDoc
+typeSchema t = f <$> type2jsontype t
   where
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]
     f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ v es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ v es) = lst [dquotes (pretty v), dict (map entry es)]
 
     entry :: (MT.Text, JsonType) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t

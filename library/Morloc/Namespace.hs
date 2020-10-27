@@ -27,6 +27,7 @@ module Morloc.Namespace
   , EVar(..)
   , MVar(..)
   , TVar(..)
+  , unTVar
   , Name(..)
   , Path(..)
   , Code(..)
@@ -281,6 +282,10 @@ newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
+-- | Let the TVar type behave like the EVar and MVar newtypes
+unTVar :: TVar -> Text
+unTVar (TV _ t) = t
+
 data Source =
   Source
     { srcName :: Name
@@ -488,6 +493,9 @@ instance Typelike GType where
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
+
+  langOf x = Just (langOf' x) 
+  langOf' x = fromJust (langOf x)
 
 instance HasOneLanguage CType where
   langOf (CType t) = langOf t

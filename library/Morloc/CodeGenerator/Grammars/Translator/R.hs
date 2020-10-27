@@ -64,8 +64,8 @@ recordAccess record field = record <> "$" <> field
 serialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
-  t <- serialAstToType RLang s0
-  schema <- typeSchema (CType t)
+  t <- serialAstToType s0
+  schema <- typeSchema t
   let v2 = "rmorlocinternals::mlc_serialize" <> tupled [v1, schema]
   return (v2, ms)
   where
@@ -75,7 +75,7 @@ serialize v0 s0 = do
       | otherwise = construct v s
 
     construct :: MDoc -> SerialAST One -> MorlocMonad ([MDoc], MDoc)
-    construct v (SerialPack (One (p, s))) = do
+    construct v (SerialPack _ (One (p, s))) = do
       unpacker <- case typePackerReverse p of
         [] -> MM.throwError . SerializationError $ "No unpacker found"
         (src:_) -> return . pretty . srcName $ src
@@ -95,11 +95,11 @@ serialize v0 s0 = do
           x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject _ (TV _ constructor) rs) = do
-      (befores, ss') <- fmap unzip $ mapM (\(k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+    construct v rec@(SerialObject _ (PV _ _ constructor) rs) = do
+      (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
-          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries};|]
       return (concat befores ++ [decl], v');
 
@@ -110,14 +110,14 @@ serialize v0 s0 = do
 deserialize :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
-      t <- serialAstToType RLang s0
-      schema <- typeSchema (CType t)
+      t <- serialAstToType s0
+      schema <- typeSchema t
       let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty $ MM.getCounter
-      t <- serialAstToType RLang s0
-      schema <- typeSchema (CType t)
+      t <- serialAstToType s0
+      schema <- typeSchema t
       let rawvar = "s" <> idx
           deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
       (x, befores) <- check rawvar s0
@@ -129,7 +129,7 @@ deserialize v0 s0
       | otherwise = construct v s
 
     construct :: MDoc -> SerialAST One -> MorlocMonad (MDoc, [MDoc])
-    construct v (SerialPack (One (p, s'))) = do
+    construct v (SerialPack _ (One (p, s'))) = do
       packer <- case typePackerForward p of
         [] -> MM.throwError . SerializationError $ "No packer found"
         (x:_) -> return . pretty . srcName $ x
@@ -151,11 +151,11 @@ deserialize v0 s0
           x = [idoc|#{v'} <- list#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject _ (TV _ constructor) rs) = do
+    construct v rec@(SerialObject _ (PV _ _ constructor) rs) = do
       idx <- fmap pretty $ MM.getCounter
-      (ss', befores) <- fmap unzip $ mapM (\(k,s) -> check (recordAccess v (pretty k)) s) rs
+      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx
-          entries = zipWith (\k v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries};|]
       return (v', concat befores ++ [decl]);
 
@@ -217,10 +217,10 @@ translateManifold m@(ManifoldM _ args _) = do
   f args (ListM t es) = do
     (mss', es', rss) <- mapM (f args) es |>> unzip3
     x' <- return $ case t of
-      (Native (CType (ArrT _ [VarT et]))) -> case et of
-        (TV _ "numeric") -> "c" <> tupled es'
-        (TV _ "logical") -> "c" <> tupled es'
-        (TV _ "character") -> "c" <> tupled es'
+      (Native (ArrP _ [VarP et])) -> case et of
+        (PV _ _ "numeric") -> "c" <> tupled es'
+        (PV _ _ "logical") -> "c" <> tupled es'
+        (PV _ _ "character") -> "c" <> tupled es'
         _ -> "list" <> tupled es'
       _ -> "list" <> tupled es'
     return (concat mss', x', concat rss)
@@ -273,9 +273,9 @@ makeArgument (NativeArgument v _) = bndNamer v
 makeArgument (PassThroughArgument v) = bndNamer v
 
 -- For R, the type schema is the JSON representation of the type
-typeSchema :: CType -> MorlocMonad MDoc
-typeSchema c = do
-  json <- jsontype2json <$> type2jsontype (unCType c)
+typeSchema :: TypeP -> MorlocMonad MDoc
+typeSchema t = do
+  json <- jsontype2json <$> type2jsontype t
   -- FIXME: Need to support single quotes inside strings
   return $ "'" <> json <> "'"
 

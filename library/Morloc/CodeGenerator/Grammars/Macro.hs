@@ -1,20 +1,18 @@
 {-|
-Module      : Morloc.Frontend.Macro
+Module      : Morloc.CodeGenerator.Grammars.Macro
 Description : Expand parameters in concrete types
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
-
 -}
 
-module Morloc.Frontend.Macro
-(
-    expandMacro
-  , buildCType
+module Morloc.CodeGenerator.Grammars.Macro
+(   expandMacro
+  , expandType
 ) where
 
-import Morloc.Frontend.Namespace
+import Morloc.CodeGenerator.Namespace
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.State as CMS
@@ -29,21 +27,21 @@ data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
 
-buildCType
+expandType
   :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
   -> (MDoc -> [(MDoc, MDoc)] -> MDoc) -- ^ make record type
-  -> CType
+  -> TypeP
   -> MDoc
-buildCType mkfun mkrec (CType t) = f t where
-  f :: Type -> MDoc
-  f (VarT (TV _ x)) = pretty x
-  f t@(FunT t1 t2) = mkfun (f t1) (map f (typeArgs t))
-  f (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
-  f (NamT _ (TV _ v) entries) = mkrec (pretty v) [(pretty k, f t) | (k, t) <- entries]
-  f (UnkT _) = error "Cannot build unsolved type"
+expandType mkfun mkrec t = f t where
+  f :: TypeP -> MDoc
+  f (VarP (PV _ _ v)) = pretty v
+  f t@(FunP t1 t2) = mkfun (f t1) (map f (typeArgs t))
+  f (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
+  f (NamP _ (PV _ _ v) entries) = mkrec (pretty v) [(pretty k, f t) | ((PV _ _ k), t) <- entries]
+  f (UnkP _) = error "Cannot build unsolved type"
 
-  typeArgs :: Type -> [Type]
-  typeArgs (FunT t1 t2) = t1 : typeArgs t2
+  typeArgs :: TypeP -> [TypeP]
+  typeArgs (FunP t1 t2) = t1 : typeArgs t2
   typeArgs t = [t]
 
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text

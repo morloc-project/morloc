@@ -9,15 +9,10 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Common
   ( argType
   , unpackArgument
-  , prettyArgument
   , argId
-  , prettyExprM
-  , prettyTypeM
   , typeOfExprM
   , typeOfTypeM
   , invertExprM
-  , typeParts
-  , ctype2typeM
   , packTypeM
   , packExprM
   , unpackExprM
@@ -26,6 +21,10 @@ module Morloc.CodeGenerator.Grammars.Common
   , arg2typeM
   , type2jsontype
   , jsontype2json
+  , prettyArgument
+  , prettyExprM
+  , prettyTypeM
+  , prettyTypeP
   ) where
 
 import Morloc.Data.Doc
@@ -45,9 +44,9 @@ import qualified Data.Set as Set
 
 prettyArgument :: Argument -> MDoc
 prettyArgument (SerialArgument i c) =
-  "Serial" <+> "x" <> pretty i <+> parens (prettyType c)
+  "Serial" <+> "x" <> pretty i <+> parens (prettyTypeP c)
 prettyArgument (NativeArgument i c) =
-  "Native" <+> "x" <> pretty i <+> parens (prettyType c)
+  "Native" <+> "x" <> pretty i <+> parens (prettyTypeP c)
 prettyArgument (PassThroughArgument i) =
   "PassThrough" <+> "x" <> pretty i
 
@@ -56,7 +55,7 @@ argId (SerialArgument i _) = i
 argId (NativeArgument i _) = i
 argId (PassThroughArgument i ) = i
 
-argType :: Argument -> Maybe CType
+argType :: Argument -> Maybe TypeP
 argType (SerialArgument _ t) = Just t
 argType (NativeArgument _ t) = Just t
 argType (PassThroughArgument _) = Nothing
@@ -126,10 +125,23 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     let (ms, e') = f e
     in (ms, "RETURN(" <> e' <> ")")
 
+prettyPVar :: PVar -> MDoc
+prettyPVar (PV _ (Just g) t) = parens (pretty g <> " " <> pretty t)
+prettyPVar (PV _ Nothing t) = pretty t
+
+prettyTypeP :: TypeP -> MDoc
+prettyTypeP (UnkP v) = prettyPVar v 
+prettyTypeP (VarP v) = prettyPVar v 
+prettyTypeP (FunP t1 t2) = parens (prettyTypeP t1 <+> "->" <+> prettyTypeP t2)
+prettyTypeP (ArrP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
+prettyTypeP (NamP r v rs)
+  = viaShow r <+> prettyPVar v <+> encloseSep "{" "}" ","
+    (zipWith (\k v -> k <+> "=" <+> v) (map (prettyPVar . fst) rs) (map (prettyTypeP . snd) rs))
+
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
-prettyTypeM (Serial c) = "Serial<" <> prettyType c <> ">"
-prettyTypeM (Native c) = "Native<" <> prettyType c <> ">"
+prettyTypeM (Serial c) = "Serial<" <> prettyTypeP c <> ">"
+prettyTypeM (Native c) = "Native<" <> prettyTypeP c <> ">"
 prettyTypeM (Function ts t) =
   "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
 
@@ -212,14 +224,13 @@ terminalOf :: ExprM f -> ExprM f
 terminalOf (LetM _ _ e) = terminalOf e
 terminalOf e = e
 
-typeOfTypeM :: TypeM -> Maybe CType 
-typeOfTypeM t = fmap CType (typeOfTypeM' t) where
-  typeOfTypeM' Passthrough = Nothing
-  typeOfTypeM' (Serial c) = Just (typeOf c)
-  typeOfTypeM' (Native c) = Just (typeOf c)
-  typeOfTypeM' (Function [] t) = typeOfTypeM' t
-  typeOfTypeM' (Function (ti:ts) to)
-    = FunT <$> typeOfTypeM' ti <*> typeOfTypeM' (Function ts to)  
+typeOfTypeM :: TypeM -> Maybe TypeP 
+typeOfTypeM Passthrough = Nothing
+typeOfTypeM (Serial c) = Just c
+typeOfTypeM (Native c) = Just c
+typeOfTypeM (Function [] t) = typeOfTypeM t
+typeOfTypeM (Function (ti:ts) to)
+  = FunP <$> typeOfTypeM ti <*> typeOfTypeM (Function ts to)  
 
 arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
@@ -265,40 +276,26 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-ctype2typeM :: CType -> TypeM
-ctype2typeM f@(CType (FunT _ _)) = case typeParts f of
-  (inputs, output) -> Function (map ctype2typeM inputs) (ctype2typeM output)
-ctype2typeM (CType (UnkT _)) = Passthrough
-ctype2typeM c = Native c
-
--- get input types to a function type
-typeParts :: CType -> ([CType], CType)
-typeParts c = case reverse . map CType $ typeArgs (unCType c) of
-  (t:ts) -> (reverse ts, t)
-  where
-    typeArgs (FunT t1 t2) = t1 : typeArgs t2
-    typeArgs t = [t]
-
 unpackExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m e = case typeOfExprM e of
-  (Serial (CType t)) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
+  (Serial t) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
   (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
   _ -> return e
 
 packExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = case typeOfExprM e of
-  (Native (CType t)) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
+  (Native t) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
   -- (Function _ _) -> error "Cannot pack a function"
   _ -> return e
 
-type2jsontype :: Type -> MorlocMonad JsonType
-type2jsontype (UnkT _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
-type2jsontype (VarT (TV _ v)) = return $ VarJ v
-type2jsontype (ArrT (TV _ v) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (FunT _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype (NamT namType (TV _ v) rs) = do
+type2jsontype :: TypeP -> MorlocMonad JsonType
+type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
+type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
+type2jsontype (ArrP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
+type2jsontype (NamP namType (PV _ _ v) rs) = do
   vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ jsontype (zip (map fst rs) vs)
+  return $ NamJ jsontype (zip [v | (PV _ _ v, _) <- rs] vs)
   where
     jsontype = case namType of
       NamRecord -> "record"
