@@ -91,8 +91,9 @@ serialAstToType :: SerialAST One -> MorlocMonad TypeP
 serialAstToType (SerialPack _ (One (_, s))) = serialAstToType s
 serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
 serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
-serialAstToType (SerialObject r v rs)
-  = return $ NamP r v (zip (map fst rs) (map (serialAstToType' . snd) rs))
+serialAstToType (SerialObject r v rs) = do
+  rs' <- mapM (serialAstToType . snd) rs
+  return $ NamP r v (zip (map fst rs) rs')
 serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
