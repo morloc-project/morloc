@@ -81,10 +81,10 @@ main = do
       , golden "manifold-form-7_py" "manifold-form-7_py"
       , golden "manifold-form-7_r" "manifold-form-7_r"
 
-      -- , golden "records-1-py" "records-1-py"
-      -- , golden "records-1-r" "records-1-r"
-      -- -- see github issue #8
-      -- , golden "records-1-c" "records-1-c"
+      , golden "records-1-py" "records-1-py"
+      , golden "records-1-r" "records-1-r"
+      -- see github issue #8
+      , golden "records-1-c" "records-1-c"
 
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"

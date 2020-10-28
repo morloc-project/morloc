@@ -34,7 +34,14 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 
-type RecMap = [(PVar, [(PVar, Maybe TypeP)])]
+data RecEntry = RecEntry {
+    recAutoName :: MDoc -- ^ the automatically generated name for this anonymous type
+  , recFields :: [( PVar -- The field key
+                  , Maybe TypeP -- The field type if not generic
+                  )]
+}
+
+type RecMap = [((PVar, [PVar]), RecEntry)]
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
@@ -52,15 +59,18 @@ translate srcs es = do
 
   let recmap = unifyRecords . conmap collectRecords $ es
       (declarations, serializers) = (\xs -> (conmap fst xs, conmap snd xs))
-                                  . map (uncurry (makeSerializers recmap)) $ recmap
+                                  . map (uncurry (makeSerializers recmap))
+                                  . reverse $ recmap
       dispatch = makeDispatch es
       signatures = map (makeSignature recmap) es
+
+      serializationCode = declarations ++ serializers
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM (translateManifold recmap) es
 
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures (declarations ++ serializers) mDocs dispatch
+  return $ makeMain includeDocs signatures serializationCode mDocs dispatch
 
 letNamer :: Int -> MDoc
 letNamer i = "a" <> viaShow i
@@ -366,7 +376,14 @@ translateManifold recmap m@(ManifoldM _ args _) = do
     (mss', es', pss) <- mapM (f args) es |>> unzip3
     return (concat mss', "std::make_tuple" <> tupled es', concat pss)
 
-  f args (RecordM c entries) = error "C++ records not yet supported"
+  f args (RecordM c entries) = do
+    (mss', es', pss) <- mapM (f args . snd) entries |>> unzip3
+    idx <- fmap pretty $ MM.getCounter
+    let t = showTypeM recmap c
+        v' = "a" <> idx
+        decl = encloseSep "{" "}" "," es'
+        x = [idoc|#{t} #{v'} = #{decl};|]
+    return (concat mss', v', concat pss ++ [x])
 
   f _ (BndVarM c i) = return ([], bndNamer i, [])
   f _ (LetVarM c i) = return ([], letNamer i, [])
@@ -427,20 +444,15 @@ showType _ (UnkP _) = serialType
 showType _ (VarP (PV _ _ v)) = pretty v 
 showType recmap t@(FunP _ _) = showTypeM recmap (typeP2typeM t)
 showType recmap (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showType recmap) ts)
-showType recmap (NamP NamRecord v@(PV _ _ "struct") rs) =
+showType recmap (NamP _ v@(PV _ _ "struct") rs) =
   -- handle autogenated structs
-  case lookup v recmap of
-    (Just rs') -> autoStructName v <> typeParams recmap (zip (map snd rs') (map snd rs))
-    Nothing -> autoStructName v
-showType recmap (NamP NamTable v@(PV _ _ "struct") rs) =
-  -- handle autogenated structs
-  case lookup v recmap of
-    (Just rs') -> autoStructName v <> typeParams recmap (zip (map snd rs') (map snd rs))
-    Nothing -> autoStructName v
-showType recmap (NamP _ v@(PV _ _ s) rs) =
-  case lookup v recmap of
-    (Just rs') -> pretty s <> typeParams recmap (zip (map snd rs') (map snd rs))
-    Nothing -> pretty s
+  case lookup (v, map fst rs) recmap of
+    (Just rec) -> recAutoName rec <> typeParams recmap (zip (map snd (recFields rec)) (map snd rs))
+    Nothing -> error "Should not happen"
+showType recmap t@(NamP _ v@(PV _ _ s) rs) =
+  case lookup (v, map fst rs) recmap of
+    (Just rec) -> recAutoName rec <> typeParams recmap (zip (map snd (recFields rec)) (map snd rs))
+    Nothing -> error $ "FIXME: need to infer type parameters for named records: " <> show t
 
 typeParams :: RecMap -> [(Maybe TypeP, TypeP)] -> MDoc
 typeParams recmap ts
@@ -494,9 +506,24 @@ cleanRecord tm = case typeOfTypeM tm of
     toRecord (ArrP _ ts) = conmap toRecord ts
     toRecord (NamP _ v rs) = (v, rs) : conmap toRecord (map snd rs)
 
-
 unifyRecords :: [(PVar, [(PVar, TypeP)])] -> RecMap
-unifyRecords = map (\(v, rss) -> (v, [unifyField fs | fs <- transpose rss])) . groupSort . unique
+unifyRecords rs
+  = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
+  . map (\((v,ks), rss) -> ((v,ks), [unifyField fs | fs <- transpose rss]))
+  . groupSort
+  . unique
+  $ [((v, map fst es), es) | (v, es) <- rs]
+
+structName :: Int -> PVar -> MDoc
+structName i (PV _ (Just v1) "struct") = "mlc_" <> pretty v1 <> "_" <> pretty i 
+structName _ (PV _ _ v) = pretty v
+
+lookupAutoStruct :: PVar -> [(MDoc, (PVar, Maybe TypeP))] -> RecMap -> MDoc
+lookupAutoStruct v@(PV _ g _) rs recmap = case lookup (v, [k | (_,(k,_)) <- rs]) recmap of
+  (Just (RecEntry v _)) -> v -- an automatically generated type name
+  Nothing -> case g of
+    (Just g') -> pretty g -- an source type name
+    Nothing -> error "All your base are belong to us"
 
 unifyField :: [(PVar, TypeP)] -> (PVar, Maybe TypeP)
 unifyField [] = error "Empty field"
@@ -507,28 +534,31 @@ unifyField rs@((v,_):_)
       [t] -> (v, Just t)
       _ -> (v, Nothing)
 
-makeSerializers :: RecMap -> PVar -> [(PVar, Maybe TypeP)] -> ([MDoc],[MDoc])
-makeSerializers recmap t rs = ([structDecl, serialDecl, deserialDecl], [serializer, deserializer]) where
-  templateTerms = zipWith (<>) (repeat "T") (map pretty ([1..] :: [Int]))
-  rs' = zip templateTerms rs
+makeSerializers :: RecMap -> (PVar, [PVar]) -> RecEntry -> ([MDoc],[MDoc])
+makeSerializers recmap (t, _) rec
+  = ([structDecl, serialDecl, deserialDecl], [serializer, deserializer])
+  where
+    templateTerms = zipWith (<>) (repeat "T") (map pretty ([1..] :: [Int]))
+    rs' = zip templateTerms (recFields rec)
 
-  structDecl = makeStructDecl recmap t rs' <> line
-  serialDecl = serialHeader recmap t rs' <> ";"
-  deserialDecl = deserialHeader recmap t rs' <> ";" <> line
-  serializer = makeSerializer recmap t rs' <> line
-  deserializer = makeDeserializer recmap t rs'
+    structDecl = makeStructDecl recmap t rs' <> line
+    serialDecl = serialHeader recmap t rs' <> ";"
+    deserialDecl = deserialHeader recmap t rs' <> ";" <> line
+    serializer = makeSerializer recmap t rs' <> line
+    deserializer = makeDeserializer recmap t rs'
 
 makeStructDecl :: RecMap -> PVar -> [(MDoc, (PVar, Maybe TypeP))] -> MDoc
 makeStructDecl recmap v rs = vsep [templateLine v rs, struct] where 
   rs' = [(ek, maybe et (showType recmap) ev) | (et, (ek, ev)) <- rs] 
-  struct = block 4 ("struct" <+> autoStructName v) (vsep [v' <+> pretty k <> ";" | (PV _ _ k,v') <- rs']) <> ";"
+  struct = block 4 ("struct" <+> lookupAutoStruct v rs recmap)
+                   (vsep [v' <+> pretty k <> ";" | (PV _ _ k,v') <- rs']) <> ";"
 
 -- Example
 -- > template <class T>
 -- > std::string serialize(person<T> x, person<T> schema);
 serialHeader :: RecMap -> PVar -> [(MDoc, (PVar, Maybe TypeP))] -> MDoc
 serialHeader recmap v rs = vsep [templateLine v rs, decl] where
-  v' = autoStructName v <> recordTemplate rs
+  v' = lookupAutoStruct v rs recmap <> recordTemplate rs
   decl = [idoc|std::string serialize(#{v'} x, #{v'} schema)|]
 
 -- Example:
@@ -536,7 +566,7 @@ serialHeader recmap v rs = vsep [templateLine v rs, decl] where
 -- > bool deserialize(const std::string json, size_t &i, person<T> &x);
 deserialHeader :: RecMap -> PVar -> [(MDoc, (PVar, Maybe TypeP))] -> MDoc
 deserialHeader recmap v rs = vsep [templateLine v rs, decl] where
-  v' = autoStructName v <> recordTemplate rs
+  v' = lookupAutoStruct v rs recmap <> recordTemplate rs
   decl = [idoc|bool deserialize(const std::string json, size_t &i, #{v'} &x)|]
 
 templateLine :: PVar -> [(MDoc, (PVar, Maybe TypeP))] -> MDoc
@@ -555,11 +585,11 @@ std::string serialize(#{rtype} x, #{rtype} schema){
 }
 |] where
   template = templateLine v rs
-  rtype = autoStructName v <> recordTemplate rs
+  rtype = lookupAutoStruct v rs recmap <> recordTemplate rs
   rs' = [(pretty k, maybe t (showType recmap) v) | (t, (PV _ _ k, v)) <- rs]
-  schemata = map (\(k,t) -> t <+> autoStructName v <> "_" <> k <> ";") rs'
+  schemata = map (\(k,t) -> t <+> lookupAutoStruct v rs recmap <> "_" <> k <> ";") rs'
   fields = map (\(k,t) -> dquotes ("\\\"" <> k <> "\\\"" <> ":")
-         <+> "<<" <+> [idoc|serialize(x.#{k}, #{autoStructName v}_#{k})|] ) rs'
+         <+> "<<" <+> [idoc|serialize(x.#{k}, #{lookupAutoStruct v rs recmap}_#{k})|] ) rs'
 
 makeDeserializer :: RecMap -> PVar -> [(MDoc, (PVar, Maybe TypeP))] -> MDoc
 makeDeserializer recmap v rs = [idoc|
@@ -583,16 +613,13 @@ bool deserialize(const std::string json, size_t &i, #{rtype} &x){
 |] where
   template = templateLine v rs
   rs' = [(pretty k, maybe t (showType recmap) v') | (t, (PV _ _ k, v')) <- rs]
-  schemata = map (\(k,t) -> t <+> autoStructName v <> "_" <> k <> ";") rs'
-  rtype = autoStructName v <> recordTemplate rs
-  fields = zipWith (makeParseField (autoStructName v)) [1,4..] (map fst rs')
+  schemata = map (\(k,t) -> t <+> lookupAutoStruct v rs recmap <> "_" <> k <> ";") rs'
+  rtype = lookupAutoStruct v rs recmap <> recordTemplate rs
+  fields = zipWith (makeParseField (lookupAutoStruct v rs recmap)) [1,4..] (map fst rs')
   parseComma = [idoc|
 if(! match(json, ",", i))
     throw 800;
 whitespace(json, i);|]
-
-autoStructName :: PVar -> MDoc
-autoStructName (PV _ (Just v1) _) = "mlc_" <> pretty v1
 
 recordTemplate :: [(MDoc, (PVar, Maybe TypeP))] -> MDoc
 recordTemplate rs = case [v | (v, (_, Nothing)) <- rs] of

@@ -1,7 +1,56 @@
 import cppbase (id)
 
+{- record
+
+A record is a collection of data that is accessible by field names and exactly
+stores the data in the type.
+
+-}
+record Meta = Meta {age :: Int, pets :: [Str]};
+record Cpp Meta = "struct" {age :: "int", pets :: ["std::string"]};
+
+
+{- type
+
+A named type may be anything. The (un)pack functions serve as the object constructors.
+
+-}
+type (Group a) = Group a
+groupUnpack :: unpack => Group a -> [Person a]
+groupPack :: pack => [Person a] -> Group a
+
+
+{- object
+
+An object can be automatically constructed using the arguments in the record
+parameter, same as a "record". The fields can be accessed. Unlike a record,
+though, the object is not a generic container, but requires a definition in the
+source code.
+
+-}
 object (Person a) = Person {name :: Str, info :: a};
 object Cpp (Person a) = "person" {name :: "std::string", info :: a};
+
+
+source Cpp from "person.h"
+    ( "mlc_initials" as initials
+    , "mlc_person_unpack" as personUnpack
+    , "Person" as anonymous -- a overloaded constructor
+    , "mlc_group_unpack" as groupUnpack
+    , "mlc_group_pack" as groupPack
+    );
+
+
+initials :: Person a -> Str;
+initials Cpp :: Person a -> "std::string";
+
+
+personUnpack :: unpack => Person a -> (Str, a);
+personUnpack Cpp :: unpack => Person a -> ("std::string", a);
+
+
+anonymous :: a -> Person a;
+anonymous Cpp :: a -> Person a;
 
 export foo;
 
