@@ -1,9 +1,9 @@
 import cppbase (id)
 
-source Cpp from "person.h" ("person" as Person);
+source Cpp from "person.h" ("Person");
 
 table (Person a) = Person {name :: Str, info :: a};
-table Cpp (Person a) = "person" {name :: "std::string", info :: a};
+table Cpp (Person a) = Person {name :: "std::string", info :: a};
 
 export foo;
 

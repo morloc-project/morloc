@@ -94,8 +94,10 @@ generate ms = do
     getSrcs _ g _ = getSrcsFromGmeta g
 
     getSrcsFromGmeta :: GMeta -> [Source]
-    getSrcsFromGmeta g = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
-                                | p <- (concat . Map.elems . metaPackers) g]
+    getSrcsFromGmeta g
+      = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
+               | p <- (concat . Map.elems . metaPackers) g]
+      ++ Map.elems (metaConstructors g)
 
 
 -- | Eliminate morloc function calls

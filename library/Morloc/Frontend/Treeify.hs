@@ -21,6 +21,89 @@ import qualified Data.Set as Set
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
 
+treeify
+  :: DAG MVar [(EVar, EVar)] TypedNode
+  -> MorlocMonad [SAnno GMeta Many [CType]]
+treeify d
+  | Map.size d == 0 = return []
+  | otherwise = case MDD.roots d of
+    [] -> MM.throwError CyclicDependency
+    [k] -> case MDD.lookupNode k d of
+      Nothing -> MM.throwError . DagMissingKey . render $ pretty k
+      (Just n) -> do
+        -- initialize state counter to 0, used to index manifolds
+        MM.startCounter
+        mapM (collect d n) (Set.toList (typedNodeExports n))
+    _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
+
+
+-- -- | Build the call tree for a single nexus command. The result is ambiguous,
+-- -- with 1 or more possible tree topologies, each with one or more possible for
+-- -- each function.
+collect
+  :: DAG MVar [(EVar, EVar)] TypedNode
+  -> TypedNode
+  -> EVar
+  -> MorlocMonad (SAnno GMeta Many [CType])
+collect d n v = do
+  trees <- collectSExprs d n v
+
+  -- Just look at one x, since any should emit the same GMeta (if not, then
+  -- something is broken upstream of GMeta is not general enough)
+  gmeta <- makeGMeta (Just v) (typedNodeTypeMap n) (typedNodePackers n) (typedNodeConstructors n) Nothing
+
+  return $ SAnno (Many trees) gmeta
+
+collectSExprs
+  :: DAG MVar [(EVar, EVar)] TypedNode
+  -> TypedNode
+  -> EVar
+  -> MorlocMonad [(SExpr GMeta Many [CType], [CType])]
+collectSExprs d n v = do
+  -- DAG MVar None (EVar, (TypedNode, [TermOrigin]))
+  let termTree = MDD.lookupAliasedTerm v (typedNodeModuleName n) (makeTermOrigin v) d
+
+  -- DAG MVar None [(SExpr GMeta Many [CType], [CType])]
+  sexprTree <- MDD.mapNodeM (\(v,(n,ts)) -> collectTerms d v n ts) termTree
+
+  -- [(SExpr GMeta Many [CType], [CType])]
+  let trees = concat . MDD.nodes $ sexprTree
+
+  return trees
+
+
+-- | Find info common across realizations of a given term in a given module
+makeGMeta
+  :: Maybe EVar
+  -> Map.Map EVar TypeSet
+  -> Map.Map (TVar, Int) [UnresolvedPacker]
+  -> Map.Map TVar Source
+  -> Maybe GType
+  -> MorlocMonad GMeta
+makeGMeta name typemap packer constructors gtype = do
+  i <- MM.getCounter
+  case name >>= (flip Map.lookup) typemap of
+    (Just (TypeSet (Just e) _)) -> do
+      g <- fmap (Just . GType) $ resolve (etype e)
+      return $ GMeta
+        { metaId = i
+        , metaName = name
+        , metaGType = maybe g Just gtype
+        , metaProperties = eprop e
+        , metaConstraints = econs e
+        , metaPackers = packer
+        , metaConstructors = constructors
+        }
+    _ -> do
+      return $ GMeta
+        { metaId = i
+        , metaName = name
+        , metaGType = gtype
+        , metaProperties = Set.empty
+        , metaConstraints = Set.empty
+        , metaPackers = packer
+        , metaConstructors = constructors
+        }
 
 -- This functions removes qualified and existential types.
 --  * all qualified terms are replaced with UnkT
@@ -49,88 +132,6 @@ substituteT v r t = sub t
     sub (FunT t1 t2) = FunT (sub t1) (sub t2)
     sub (ArrT v' ts) = ArrT v' (map sub ts)
     sub (NamT r v' rs) = NamT r v' [(x, sub t') | (x, t') <- rs]
-
-
-treeify
-  :: DAG MVar [(EVar, EVar)] TypedNode
-  -> MorlocMonad [SAnno GMeta Many [CType]]
-treeify d
-  | Map.size d == 0 = return []
-  | otherwise = case MDD.roots d of
-    [] -> MM.throwError CyclicDependency
-    [k] -> case MDD.lookupNode k d of
-      Nothing -> MM.throwError . DagMissingKey . render $ pretty k
-      (Just n) -> do
-        -- initialize state counter to 0, used to index manifolds
-        MM.startCounter
-        mapM (collect d n) (Set.toList (typedNodeExports n))
-    _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
-
--- -- | Build the call tree for a single nexus command. The result is ambiguous,
--- -- with 1 or more possible tree topologies, each with one or more possible for
--- -- each function.
-collect
-  :: DAG MVar [(EVar, EVar)] TypedNode
-  -> TypedNode
-  -> EVar
-  -> MorlocMonad (SAnno GMeta Many [CType])
-collect d n v = do
-  trees <- collectSExprs d n v
-
-  -- Just look at one x, since any should emit the same GMeta (if not, then
-  -- something is broken upstream of GMeta is not general enough)
-  gmeta <- makeGMeta (Just v) (typedNodeTypeMap n) (typedNodePackers n) Nothing
-
-  return $ SAnno (Many trees) gmeta
-
-collectSExprs
-  :: DAG MVar [(EVar, EVar)] TypedNode
-  -> TypedNode
-  -> EVar
-  -> MorlocMonad [(SExpr GMeta Many [CType], [CType])]
-collectSExprs d n v = do
-  -- DAG MVar None (EVar, (TypedNode, [TermOrigin]))
-  let termTree = MDD.lookupAliasedTerm v (typedNodeModuleName n) (makeTermOrigin v) d
-
-  -- DAG MVar None [(SExpr GMeta Many [CType], [CType])]
-  sexprTree <- MDD.mapNodeM (\(v,(n,ts)) -> collectTerms d v n ts) termTree
-
-  -- [(SExpr GMeta Many [CType], [CType])]
-  let trees = concat . MDD.nodes $ sexprTree
-
-  return trees
-
-
--- | Find info common across realizations of a given term in a given module
-makeGMeta
-  :: Maybe EVar
-  -> Map.Map EVar TypeSet
-  -> Map.Map (TVar, Int) [UnresolvedPacker] 
-  -> Maybe GType
-  -> MorlocMonad GMeta
-makeGMeta name typemap packer gtype = do
-  i <- MM.getCounter
-  case name >>= (flip Map.lookup) typemap of
-    (Just (TypeSet (Just e) _)) -> do
-      g <- fmap (Just . GType) $ resolve (etype e)
-      return $ GMeta
-        { metaId = i
-        , metaName = name
-        , metaGType = maybe g Just gtype
-        , metaProperties = eprop e
-        , metaConstraints = econs e
-        , metaPackers = packer
-        }
-    _ -> do
-      return $ GMeta
-        { metaId = i
-        , metaName = name
-        , metaGType = gtype
-        , metaProperties = Set.empty
-        , metaConstraints = Set.empty
-        , metaPackers = packer
-        }
-
 
 makeTermOrigin
   :: EVar
@@ -186,7 +187,7 @@ collectAnno
   -> MorlocMonad (SAnno GMeta Many [CType])
 collectAnno d args n (AnnE e ts) = do
   gtype <- getGType ts
-  gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) (typedNodePackers n) gtype
+  gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) (typedNodePackers n) (typedNodeConstructors n) gtype
   ts' <- getCTypes ts
   trees <- collectExpr d args n ts' e
   return $ SAnno (Many trees) gmeta

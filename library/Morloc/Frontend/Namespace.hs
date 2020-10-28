@@ -192,6 +192,7 @@ data TypedNode = TypedNode {
   , typedNodeSourceMap :: Map (EVar, Lang) Source
   , typedNodeExports :: Set EVar
   , typedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
+  , typedNodeConstructors :: Map TVar Source
   -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar [(EVar, EVar)] TypedNode

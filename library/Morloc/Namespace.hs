@@ -332,7 +332,9 @@ data GMeta = GMeta {
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
   , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
-  -- ^ The (un)packers available in this node's module scope. FIXME: find something more efficient
+  -- ^ The (un)packers available in this node's module scope. FIXME: kludge
+  , metaConstructors :: Map TVar Source
+  -- ^ The constructors in this node's module scope. FIXME: kludge
 } deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }

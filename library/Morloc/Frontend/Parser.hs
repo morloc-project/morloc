@@ -206,9 +206,9 @@ makeModule f n mes = (n, edges, node) where
   imports' = [x | (MBImport x) <- mes]
   exports' = Set.fromList [x | (MBExport x) <- mes]
   body' = [x | (MBBody x) <- mes]
-  typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   srcMap = (Map.fromList . concat)
            [[((srcAlias s, srcLang s), s) | s <- ss ] | (SrcE ss) <- body']
+  typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   edges = [(importModuleName i, i) | i <- imports']
   node = ParserNode
     { parserNodePath = f

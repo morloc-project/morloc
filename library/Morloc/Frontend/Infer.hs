@@ -42,7 +42,11 @@ typecheck d = do
   maybeDAG <- MDD.synthesizeDAG typecheck' d
   case maybeDAG of
     Nothing -> throwError CyclicDependency
-    (Just d') -> return d'
+    (Just d') -> do
+      d'' <- MDD.synthesizeDAG propagateConstructors d'
+      case d'' of
+        (Just d''') -> return d'''
+        Nothing -> throwError CyclicDependency
   where
     typecheck'
       :: MVar
@@ -65,7 +69,54 @@ typecheck d = do
         , typedNodeSourceMap = preparedNodeSourceMap n
         , typedNodeExports = preparedNodeExports n
         , typedNodePackers = preparedNodePackers n
+        , typedNodeConstructors
+            = Map.fromList
+            . map (\src@(Source _ lang _ alias) -> (TV (Just lang) (unEVar alias), src))
+            . catMaybes
+            . map ((flip Map.lookup) (preparedNodeSourceMap n))
+            $ [ (EVar v, lang)
+              | (TV (Just lang) v) <- unique (conmap collectConstructors es)]
         }
+
+    collectConstructors :: Expr -> [TVar] 
+    collectConstructors (AnnE e ts) = collectConstructors e ++ (conmap findTVar ts)
+    collectConstructors (Declaration _ e) = collectConstructors e
+    collectConstructors (ListE es) = conmap collectConstructors es
+    collectConstructors (TupleE es) = conmap collectConstructors es
+    collectConstructors (LamE _ e) = collectConstructors e
+    collectConstructors (AppE e1 e2) = collectConstructors e1 ++ collectConstructors e2
+    collectConstructors (RecE rs) = conmap (collectConstructors . snd) rs
+    collectConstructors _ = []
+
+    findTVar :: UnresolvedType -> [TVar]
+    findTVar (VarU _) = []
+    findTVar (ExistU _ _ _) = []
+    findTVar (ForallU _ t) = findTVar t
+    findTVar (FunU t1 t2) = findTVar t1 ++ findTVar t2
+    findTVar (ArrU _ ts) = conmap findTVar ts
+    findTVar (NamU _ v rs) = v : conmap (findTVar . snd) rs
+
+    propagateConstructors
+      :: MVar -- the importing module name
+      -> TypedNode -- data about the importing module
+      -> [(   MVar -- the name of an imported module
+            , [(EVar -- the name of a term in the imported module
+              , EVar -- the alias in the importing module
+              )]
+            , TypedNode -- data about the imported module
+         )]
+      -> Stack TypedNode
+    propagateConstructors k n1 es = do
+      let cons = Map.union (typedNodeConstructors n1)
+               $ (Map.fromList . concat) [inherit n2 ps | (_, ps, n2) <- es] 
+      return $ n1 { typedNodeConstructors = cons }
+
+    inherit :: TypedNode -> [(EVar, EVar)] -> [(TVar, Source)]
+    inherit ((Map.toList . typedNodeConstructors) -> ms) es =
+      [ (TV lang (unEVar n'), Source n l p n')
+      | (TV lang _, Source n l p a) <- ms -- information from parent
+      , (a', n') <- es -- edge: a' imported term name
+      , a == a']
 
     nodeTypeMapFromGamma :: Gamma -> Map.Map EVar TypeSet
     nodeTypeMapFromGamma g

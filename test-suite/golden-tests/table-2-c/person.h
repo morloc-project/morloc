@@ -2,9 +2,15 @@
 #define __PERSON_H__
 
 template <class T>
-struct person{
-    std::string name;
-    T info; 
+class Person{
+    public:
+        std::vector<std::string> name;
+        std::vector<T> info; 
+
+        Person(std::string names_i, T infos_i){
+            name = names_i;
+            info = infos_i;
+        }
 };
 
 #endif
