@@ -11,6 +11,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , unpackArgument
   , argId
   , typeOfExprM
+  , gmetaOf
+  , argsOf
   , typeOfTypeM
   , invertExprM
   , packTypeM
@@ -281,13 +283,13 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m e = case typeOfExprM e of
   (Serial t) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
   (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
   _ -> return e
 
-packExprM :: PackMap -> ExprM Many -> MorlocMonad (ExprM Many)
+packExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = case typeOfExprM e of
   (Native t) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
   -- (Function _ _) -> error "Cannot pack a function"
@@ -316,3 +318,13 @@ jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "
   keys = map (dquotes . pretty) (map fst rs) 
   vals = map jsontype2json (map snd rs)
   rs' = zipWith (\k v -> k <> ":" <> v) keys vals
+
+argsOf :: ExprM f -> [Argument]
+argsOf (LamM args _) = args
+argsOf (ManifoldM _ args _) = args
+argsOf _ = []
+
+gmetaOf :: ExprM f -> GMeta
+gmetaOf (ManifoldM m _ _) = m
+gmetaOf (LamM _ e) = gmetaOf e
+gmetaOf _ = error "Malformed top-expression"

@@ -475,44 +475,46 @@ showNativeTypeM recmap (Native t) = return $ showTypeM recmap (Native t)
 showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 
-collectRecords :: ExprM One -> [(PVar, [(PVar, TypeP)])]
-collectRecords (ManifoldM _ _ e) = collectRecords e
-collectRecords (ForeignInterfaceM t e) = cleanRecord t ++ collectRecords e
-collectRecords (PoolCallM t _ _ _) = cleanRecord t
-collectRecords (LetM _ e1 e2) = collectRecords e1 ++ collectRecords e2
-collectRecords (AppM e es) = collectRecords e ++ conmap collectRecords es
-collectRecords (LamM _ e) = collectRecords e
-collectRecords (ListM t es) = cleanRecord t ++ conmap collectRecords es
-collectRecords (TupleM t es) = cleanRecord t ++ conmap collectRecords es
-collectRecords (RecordM t rs) = cleanRecord t ++ conmap (collectRecords . snd) rs
-collectRecords (SerializeM s e)
-  = cleanRecord (Native (serialAstToType' s)) ++ collectRecords e
-collectRecords (DeserializeM s e)
-  = cleanRecord (Serial (serialAstToType' s)) ++ collectRecords e
-collectRecords (ReturnM e) = collectRecords e
-collectRecords (BndVarM t _) = cleanRecord t
-collectRecords (LetVarM t _) = cleanRecord t
-collectRecords _ = []
+collectRecords :: ExprM One -> [(PVar, GMeta, [(PVar, TypeP)])]
+collectRecords e0 = f (gmetaOf e0) e0 where
+  f _ (ManifoldM m _ e) = f m e
+  f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
+  f m (PoolCallM t _ _ _) = cleanRecord m t
+  f m (LetM _ e1 e2) = f m e1 ++ f m e2
+  f m (AppM e es) = f m e ++ conmap (f m) es
+  f m (LamM _ e) = f m e
+  f m (ListM t es) = cleanRecord m t ++ conmap (f m) es
+  f m (TupleM t es) = cleanRecord m t ++ conmap (f m) es
+  f m (RecordM t rs) = cleanRecord m t ++ conmap (f m . snd) rs
+  f m (SerializeM s e)
+    = cleanRecord m (Native (serialAstToType' s)) ++ f m e
+  f m (DeserializeM s e)
+    = cleanRecord m (Serial (serialAstToType' s)) ++ f m e
+  f m (ReturnM e) = f m e
+  f m (BndVarM t _) = cleanRecord m t
+  f m (LetVarM t _) = cleanRecord m t
+  f m _ = []
 
-cleanRecord :: TypeM -> [(PVar, [(PVar, TypeP)])]
-cleanRecord tm = case typeOfTypeM tm of
+cleanRecord :: GMeta -> TypeM -> [(PVar, GMeta, [(PVar, TypeP)])]
+cleanRecord m tm = case typeOfTypeM tm of
   (Just t) -> toRecord t
   Nothing -> []
   where
-    toRecord :: TypeP -> [(PVar, [(PVar, TypeP)])]
+    toRecord :: TypeP -> [(PVar, GMeta, [(PVar, TypeP)])]
     toRecord (UnkP _) = []
     toRecord (VarP _) = []
     toRecord (FunP t1 t2) = toRecord t1 ++ toRecord t2
     toRecord (ArrP _ ts) = conmap toRecord ts
-    toRecord (NamP _ v rs) = (v, rs) : conmap toRecord (map snd rs)
+    toRecord (NamP _ v rs) = (v, m, rs) : conmap toRecord (map snd rs)
 
-unifyRecords :: [(PVar, [(PVar, TypeP)])] -> RecMap
+unifyRecords :: [(PVar, GMeta, [(PVar, TypeP)])] -> RecMap
 unifyRecords rs
   = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
-  . map (\((v,ks), rss) -> ((v,ks), [unifyField fs | fs <- transpose rss]))
+  . map (\((v,m,ks), rss) -> ((v,ks), [unifyField m fs | fs <- transpose rss]))
+  . map (\((v,ks), rss@((m,_):_)) -> ((v,m,ks), map snd rss))
   . groupSort
   . unique
-  $ [((v, map fst es), es) | (v, es) <- rs]
+  $ [((v, map fst es), (m, es)) | (v, m, es) <- rs]
 
 structName :: Int -> PVar -> MDoc
 structName i (PV _ (Just v1) "struct") = "mlc_" <> pretty v1 <> "_" <> pretty i 
@@ -525,9 +527,9 @@ lookupAutoStruct v@(PV _ g _) rs recmap = case lookup (v, [k | (_,(k,_)) <- rs])
     (Just g') -> pretty g -- an source type name
     Nothing -> error "All your base are belong to us"
 
-unifyField :: [(PVar, TypeP)] -> (PVar, Maybe TypeP)
-unifyField [] = error "Empty field"
-unifyField rs@((v,_):_)
+unifyField :: GMeta -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
+unifyField _ [] = error "Empty field"
+unifyField _ rs@((v,_):_)
   | not (all ((==) v) (map fst rs))
       = error $ "Bad record - unequal fields: " <> show (unique rs)
   | otherwise = case unique (map snd rs) of

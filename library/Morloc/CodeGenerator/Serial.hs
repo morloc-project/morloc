@@ -131,7 +131,7 @@ shallowType (SerialUnknown _) = MM.throwError . SerializationError
                                        $ "Cannot guess serialization type"
 
 makeSerialAST
-  :: PackMap -- Map.Map (TVar, Int) [UnresolvedPacker]
+  :: GMeta
   -> TypeP
   -> MorlocMonad (SerialAST Many)
 makeSerialAST _ (UnkP v) = return $ SerialUnknown v
@@ -147,7 +147,7 @@ makeSerialAST _ (FunP _ _)
 makeSerialAST m t@(ArrP v@(PV lang _ s) ts)
   | isList t = SerialList <$> makeSerialAST m (ts !! 0)
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
-  | otherwise = case Map.lookup (pv2tv v, length ts) m of
+  | otherwise = case Map.lookup (pv2tv v, length ts) (metaPackers m) of
       (Just ps) -> do
         ps' <- mapM (resolvePacker t ts) ps
         ts' <- mapM (makeSerialAST m) (map typePackerType ps')
@@ -155,7 +155,7 @@ makeSerialAST m t@(ArrP v@(PV lang _ s) ts)
       Nothing -> MM.throwError . SerializationError . render
         $ "Cannot find constructor" <+> dquotes (pretty s)
         <> "<" <> pretty (length ts) <> ">"
-        <+> "in packmap:\n" <> prettyPackMap m
+        <+> "in packmap:\n" <> prettyPackMap (metaPackers m)
 makeSerialAST m (NamP r v rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
   return $ SerialObject r v (zip (map fst rs) ts)
