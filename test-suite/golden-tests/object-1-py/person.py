@@ -1,4 +1,4 @@
 class PersonObj:
-  def __init__(self, name, age):
+  def __init__(self, name, info):
     self.name = name 
-    self.age = age 
+    self.info = info 

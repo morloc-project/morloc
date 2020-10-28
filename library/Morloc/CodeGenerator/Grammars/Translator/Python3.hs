@@ -323,7 +323,9 @@ typeSchema t = f <$> type2jsontype t
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]
     f (ArrJ v ts) = lst [var v, lst (map f ts)]
-    f (NamJ v es) = lst [dquotes (pretty v), dict (map entry es)]
+    f (NamJ "dict" es) = lst [dquotes "dict", dict (map entry es)]
+    f (NamJ "record" es) = lst [dquotes "record", dict (map entry es)]
+    f (NamJ v es) = lst [pretty v, dict (map entry es)]
 
     entry :: (MT.Text, JsonType) -> MDoc
     entry (v, t) = pretty v <> "=" <> f t
