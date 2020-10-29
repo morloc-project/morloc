@@ -558,7 +558,7 @@ makeSerializers recmap (t, _) rec
     deserialDecl = deserialHeaderTemplate params rtype
 
     serializer = serializerTemplate params rtype fields
-    deserializer = deserializerTemplate params rtype fields
+    deserializer = deserializerTemplate False params rtype fields
 
 
 
@@ -591,7 +591,7 @@ generateSourcedSerializers
 
     makeSerial :: TVar -> (Type, [TVar]) -> Maybe (MDoc, MDoc, MDoc, MDoc)
     makeSerial _ (NamT _ (TV _ "struct") _ _, _) = Nothing
-    makeSerial (TV (Just CppLang) _) (NamT _ (TV _ v) ts rs, ps)
+    makeSerial (TV (Just CppLang) _) (NamT r (TV _ v) ts rs, ps)
       = Just (serialDecl, serializer, deserialDecl, deserializer) where
 
         templateTerms = ["T" <> pretty p | (TV _ p) <- ps]
@@ -604,7 +604,8 @@ generateSourcedSerializers
         deserialDecl = deserialHeaderTemplate params rtype
 
         serializer = serializerTemplate params rtype fields
-        deserializer = deserializerTemplate params rtype fields
+
+        deserializer = deserializerTemplate (r == NamObject) params rtype fields
     makeSerial _ _ = Nothing
 
     showDefType :: [TVar] -> Type -> MDoc 
@@ -692,11 +693,12 @@ std::string serialize(#{rtype} x, #{rtype} schema){
 
 
 deserializerTemplate
-  :: [MDoc] -- ^ template parameters
+  :: Bool -- build object with constructor
+  -> [MDoc] -- ^ template parameters
   -> MDoc -- ^ type of thing being deserialized
   -> [(MDoc, MDoc)] -- ^ key and type for all fields
   -> MDoc -- ^ output deserializer function
-deserializerTemplate params rtype fields
+deserializerTemplate isObj params rtype fields
   = [idoc|
 #{makeTemplateHeader params}
 bool deserialize(const std::string json, size_t &i, #{rtype} &x){
@@ -713,12 +715,17 @@ bool deserialize(const std::string json, size_t &i, #{rtype} &x){
     } catch (int e) {
         return false;
     }
+    #{assign}
     return true;
 }
 |] where
   schemata = align $ vsep (map (\(k,t) -> t <+> k <> "_" <> ";") fields)
   fieldParsers = align $ vsep (punctuate parseComma (map (makeParseField . fst) fields))
-
+  values = [k <> "_" | (k,_) <- fields]
+  assign = if isObj
+           then [idoc|#{rtype} y#{tupled values}; x = y;|]
+           else let obj = encloseSep "{" "}" "," values
+                in [idoc|#{rtype} y = #{obj}; x = y;|]
 
 parseComma = [idoc|
 if(! match(json, ",", i))
@@ -735,7 +742,6 @@ if(! match(json, ":", i))
 whitespace(json, i);
 if(! deserialize(json, i, #{field}_))
     throw 1;
-x.#{field} = #{field}_;
 whitespace(json, i);|]
 
 
