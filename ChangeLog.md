@@ -1,77 +1,42 @@
 1.0.0 [202x.xx.xx]
 
-This will be the first stable version. It will be a product that I expect other
-people to use for important projects, therefore backwards compatibility will be
-important. The whole system needs extensive testing in real applications. Much
-of this will be done in the development of the core libraries. We will also
-need to add handling for several very different languages (proofs-of-concept).
+The first stable. It will be a product that I expect other people to use for
+important projects, therefore backwards compatibility will be important. The
+whole system needs extensive testing in real applications. Much of this will be
+done in the development of the core libraries. We will also need to add
+handling for several very different languages (proofs-of-concept).
 
  - [ ] typeclasses
  - [ ] semantic types - test in bioinformatics applications
  - [ ] constraints - refined types?
  - [ ] manifold hooks - caching, documentation, logging, effects
  - [ ] logic engine (z3?) - from typechecking to architecture design and debugging
- - [ ] ecosystem
-       - test suite
-       - linter
-       - package tools
-       - vim plugin
- - [ ] language support (at least the following)
-       - [x] Python3
-       - [x] R
-       - [x] C++
-       - [ ] Java - OOP
-       - [ ] Haskell - strongly-typed functional
-       - [ ] Scheme - weakly-typed functional
-       - [ ] Prolog - logic
- - [ ] well tested core libraries for
-       - [ ] math
-       - [ ] algorithms
-       - [ ] image processing
-       - [ ] audio processing
-       - [ ] machine learning
-       - [ ] bioinformatics
+ - [ ] ecosystem (test suite, linter, package tools, vim plugin)
+ - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
+ - [ ] well tested core libraries
 
 
-0.3x.x [2020.xx.xx]
--------------------
+0.33.0 [2020.11.08]
 
-A usable language that is ready for serious beta testing but not production
-(nobackwards compatibility guarantee). Make new github release and release to
-hackage.
+First hackage release
 
-Major changes
+ - [ ] Print general types after subcommands
+ - [ ] Allow spaces and no unecessary escape in input JSON data
  - [ ] Remove semicolon requirement
- - [ ] Rewrite perl manifold nexus in C++
-       - [ ] Add type annotations to printed help
-       - [ ] Allow stdin to replace '-' arguments
- - [ ] New build system
-       - [ ] Place pools and nexus in ~/.morloc/tmp
-       - [ ] Create scripts in the working directory that calls them
-       - [ ] Add compiler options for executable name, deletion, cache clearing, etc
- - [ ] Add a verbosity flag to `morloc make`
- - [ ] New compiler commands for managing modules
-       - [ ] `morloc install` - add option for installing working directory
-       - [ ] `morloc uninstall` - delete modules
-       - [ ] `morloc update` - update modules (i.e., git pull)
-       - [ ] `morloc list` - list all available modules
+ - [ ] Haddock documentation
+ - [ ] Update README
 
-Minor changes
- - [ ] add linter
- - [ ] address all compiler warnings
- - [ ] clean up haddock documentation
- - [ ] generate error handling in pools
- - [ ] meaningful error messages
+0.32.0 [2020.10.xx]
 
-0.32.0 [2020.xx.xx]
+ - [ ] Add record/table field access
+ - [ ] Add record/table arithmetic sugar
 
- - [ ] Add table handling
+0.31.0 [2020.10.29]
 
-0.31.0 [2020.xx.xx]
-
- - [ ] Add record data constructors
- - [ ] Add record field access
- - [ ] Add record arithmetic sugar
+ * Fix anonymous records in C++
+ * Distinguish 'record', 'object', and 'table'
+ * Add object handling
+ * Add table handling
 
 0.30.0 [2020.10.23]
 -------------------

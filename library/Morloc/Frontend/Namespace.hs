@@ -31,6 +31,9 @@ module Morloc.Frontend.Namespace
   , Indexable(..)
   -- ** ModuleGamma paraphernalia
   , ModularGamma
+  -- rifraf
+  , resolve
+  , substituteT
   ) where
 
 import Morloc.Namespace
@@ -42,6 +45,37 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+
+
+-- This functions removes qualified and existential types.
+--  * all qualified terms are replaced with UnkT
+--  * all existentials are replaced with default values if a possible
+--    FIXME: should I really just take the first in the list???
+resolve :: UnresolvedType -> Type
+resolve (VarU v) = VarT v
+resolve (FunU t1 t2) = FunT (resolve t1) (resolve t2)
+resolve (ArrU v ts) = ArrT v (map resolve ts)
+resolve (NamU r v ps rs) =
+  let ts' = map (resolve . snd) rs
+      ps' = map resolve ps 
+  in NamT r v ps' (zip (map fst rs) ts')
+resolve (ExistU v ts []) = error "UnsolvedExistentialTerm"
+resolve (ExistU v ts (t:_)) = resolve t
+resolve (ForallU v t) = substituteT v (UnkT v) (resolve t)
+
+-- | substitute all appearances of a given variable with a given new type
+substituteT :: TVar -> Type -> Type -> Type
+substituteT v r t = sub t
+  where
+    sub :: Type -> Type
+    sub t'@(UnkT _) = t'
+    sub t'@(VarT v')
+      | v == v' = r
+      | otherwise = t'
+    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
+    sub (ArrT v' ts) = ArrT v' (map sub ts)
+    sub (NamT r v' ts rs) = NamT r v' (map sub ts) [(x, sub t') | (x, t') <- rs]
+
 
 -- | Terms, see Dunfield Figure 1
 data Expr
@@ -177,6 +211,7 @@ data PreparedNode = PreparedNode {
   , preparedNodeBody :: [Expr]
   , preparedNodeSourceMap :: Map (EVar, Lang) Source
   , preparedNodeExports :: Set EVar
+  , preparedNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
   , preparedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
   -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
@@ -191,7 +226,9 @@ data TypedNode = TypedNode {
   , typedNodeTypeMap :: Map EVar TypeSet
   , typedNodeSourceMap :: Map (EVar, Lang) Source
   , typedNodeExports :: Set EVar
+  , typedNodeTypedefs :: Map TVar (Type, [TVar])
   , typedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
+  , typedNodeConstructors :: Map TVar Source
   -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
 type TypedDag = DAG MVar [(EVar, EVar)] TypedNode

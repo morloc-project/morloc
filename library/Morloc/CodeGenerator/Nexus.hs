@@ -33,7 +33,7 @@ say d = liftIO . putDoc $ " : " <> d <> "\n"
 fst3 :: (a,b,c) -> a
 fst3 (x,_,_) = x
 
-generate :: [(EVar, MDoc, [EVar])] -> [(CType, Int, Maybe EVar)] -> MorlocMonad Script
+generate :: [(EVar, MDoc, [EVar])] -> [(TypeP, Int, Maybe EVar)] -> MorlocMonad Script
 generate cs xs = do
   let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . fst3) cs
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
@@ -46,7 +46,7 @@ generate cs xs = do
       , scriptInclude = []
       }
 
-getFData :: (CType, Int, EVar) -> MorlocMonad FData
+getFData :: (TypeP, Int, EVar) -> MorlocMonad FData
 getFData (t, i, n) = do
   config <- MM.ask
   let lang = langOf t

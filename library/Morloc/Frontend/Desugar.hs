@@ -82,6 +82,7 @@ simplify = return . MDD.mapNode prepare where
     , preparedNodeSourceMap = parserNodeSourceMap n1
     , preparedNodeExports = parserNodeExports n1
     , preparedNodePackers = Map.empty -- This will be filled in in `addPackerMap`
+    , preparedNodeTypedefs = parserNodeTypedefs n1
     }
 
 checkForSelfRecursion :: Map.Map TVar (UnresolvedType, [TVar]) -> MorlocMonad ()
@@ -96,7 +97,7 @@ checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] 
   f v (ArrU v0 ts)
     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
     | otherwise = mapM_ (f v) ts
-  f v (NamU _ rs) = mapM_ (f v) (map snd rs)
+  f v (NamU _ _ _ rs) = mapM_ (f v) (map snd rs)
 
 desugarParserNode
   :: DAG MVar [(EVar, EVar)] ParserNode
@@ -156,12 +157,12 @@ desugarType d k t0@(ArrU v ts) =
       (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
       if length ts == length vs
         -- substitute parameters into alias
-        then desugarType d k (foldr parsub (resolve t) (zip vs (map resolve ts)))
+        then desugarType d k (foldr parsub (choiceExistential t) (zip vs (map choiceExistential ts)))
         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-desugarType d k (NamU v rs) = do
+desugarType d k (NamU r v ts rs) = do
   let keys = map fst rs
   vals <- mapM (desugarType d k) (map snd rs)
-  return (NamU v (zip keys vals))
+  return (NamU r v ts (zip keys vals))
 
 lookupTypedefs
   :: TVar
@@ -201,8 +202,7 @@ parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing do
 parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
 parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
 parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
-parsub pair (NamU v rs) = NamU v (zip (map fst rs) (map (parsub pair . snd) rs))
-
+parsub pair (NamU r v ts rs) = NamU r v (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
 
 
 
@@ -249,8 +249,8 @@ makeNodePackers
   -> PreparedNode
   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
 makeNodePackers xs ys n =
-  let xs' = map (\(x,y,z)->(x, resolve y, z)) xs
-      ys' = map (\(x,y,z)->(x, resolve y, z)) ys
+  let xs' = map (\(x,y,z)->(x, choiceExistential y, z)) xs
+      ys' = map (\(x,y,z)->(x, choiceExistential y, z)) ys
       items = [ ( packerKey t2
                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
               | (v1, t1, ss1) <- xs'
@@ -273,13 +273,13 @@ packerTerm v n = listToMaybe . catMaybes $
       (_, [ArrU (TV _ term) _, _]) -> Just $ EVar term
       _ -> Nothing
 
-resolve :: UnresolvedType -> UnresolvedType
-resolve (VarU v) = VarU v
-resolve (ExistU _ _ (t:_)) = (resolve t)
-resolve (ForallU v t) = ForallU v (resolve t)
-resolve (FunU t1 t2) = FunU (resolve t1) (resolve t2)
-resolve (ArrU v ts) = ArrU v (map resolve ts)
-resolve (NamU v recs) = NamU v (zip (map fst recs) (map (resolve . snd) recs))
+choiceExistential :: UnresolvedType -> UnresolvedType
+choiceExistential (VarU v) = VarU v
+choiceExistential (ExistU _ _ (t:_)) = (choiceExistential t)
+choiceExistential (ForallU v t) = ForallU v (choiceExistential t)
+choiceExistential (FunU t1 t2) = FunU (choiceExistential t1) (choiceExistential t2)
+choiceExistential (ArrU v ts) = ArrU v (map choiceExistential ts)
+choiceExistential (NamU r v ts recs) = NamU r v (map choiceExistential ts) (zip (map fst recs) (map (choiceExistential . snd) recs))
 
 packerTypesMatch :: UnresolvedType -> UnresolvedType -> Bool
 packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
@@ -297,7 +297,7 @@ packerKey :: UnresolvedType -> (TVar, Int)
 packerKey t = case splitArgs t of
   (params, [VarU v, _])   -> (v, length params)
   (params, [ArrU v _, _]) -> (v, length params)
-  (params, [NamU v _, _]) -> (v, length params)
+  (params, [NamU _ v _ _, _]) -> (v, length params)
   _ -> error "bad packer"
 
 nargsU :: UnresolvedType -> Int

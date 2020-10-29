@@ -15,6 +15,8 @@ module Morloc.CodeGenerator.Namespace
   , Argument(..)
   , JsonType(..)
   , MData(..)
+  , PVar(..)
+  , TypeP(..)
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -26,23 +28,47 @@ import Data.Set (Set)
 import Data.Map (Map)
 import Data.Text (Text)
 
+data PVar
+  = PV
+    Lang
+    (Maybe Text) -- ^ The general name for a type expression (if available)
+    Text
+  deriving (Show, Eq, Ord)
+
+-- | A solved type coupling a language specific form to a the general forms
+data TypeP
+  = UnkP PVar
+  | VarP PVar
+  | FunP TypeP TypeP
+  | ArrP PVar [TypeP]
+  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
+  deriving (Show, Ord, Eq)
+
+instance Typelike TypeP where
+  typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
+  typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
+  typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
+  typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
+  typeOf (NamP r (PV lang _ t) ps es)
+    = NamT r (TV (Just lang) t) (map typeOf ps) (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+
 data SerialAST f
-  = SerialPack (f (TypePacker, SerialAST f))
+  = SerialPack PVar (f (TypePacker, SerialAST f))
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject TVar [(Text, SerialAST f)]
-  | SerialNum Text
-  | SerialBool Text
-  | SerialString Text
-  | SerialNull Text
-  | SerialUnknown Text
+  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)]
+  | SerialNum PVar
+  | SerialBool PVar
+  | SerialString PVar
+  | SerialNull PVar
+  | SerialUnknown PVar
   -- ^ depending on the language, this may or may not raise an error down the
   -- line, the parameter contains the variable name, which is useful only for
   -- source code comments.
 
 data TypePacker = TypePacker
-  { typePackerCType   :: Type
-  , typePackerFrom    :: Type
+  { typePackerType    :: TypeP
+  , typePackerFrom    :: TypeP
   , typePackerForward :: [Source]
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)
@@ -71,12 +97,12 @@ data MData
 
 -- | An argument that is passed to a manifold
 data Argument
-  = SerialArgument Int CType
+  = SerialArgument Int TypeP
   -- ^ A serialized (e.g., JSON string) argument.  The parameters are 1)
   -- argument name (e.g., x), and 2) argument type (e.g., double). Some types
   -- may not be serializable. This is OK, so long as they are only used in
   -- functions of the same language.
-  | NativeArgument Int CType
+  | NativeArgument Int TypeP
   -- ^ A native argument with the same parameters as above
   | PassThroughArgument Int
   -- ^ A serialized argument that is untyped in the current language. It cannot
@@ -84,23 +110,13 @@ data Argument
   -- does have a concrete type.
   deriving (Show, Ord, Eq)
 
-instance HasOneLanguage Argument where
-  langOf (SerialArgument _ c) = langOf c
-  langOf (NativeArgument _ c) = langOf c
-  langOf (PassThroughArgument _) = Nothing
-
 data TypeM
   = Passthrough -- ^ serialized data that cannot be deserialized in this language
-  | Serial CType -- ^ serialized data that may be deserialized in this language
-  | Native CType
+  | Serial TypeP -- ^ serialized data that may be deserialized in this language
+  | Native TypeP
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
   deriving(Show, Eq, Ord)
 
-instance HasOneLanguage TypeM where
-  langOf Passthrough = Nothing
-  langOf (Serial c) = langOf c
-  langOf (Native c) = langOf c
-  langOf (Function xs f) = listToMaybe $ catMaybes (map langOf (f:xs))
 
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
@@ -184,24 +200,37 @@ data ExprM f
   -- values assigned in let expressions and the final return value. In some
   -- languages, this may not be necessary (e.g., R).
 
+instance HasOneLanguage (TypeP) where
+  langOf' (UnkP (PV lang _ _)) = lang
+  langOf' (VarP (PV lang _ _)) = lang
+  langOf' (FunP t _) = langOf' t
+  langOf' (ArrP (PV lang _ _) _) = lang
+  langOf' (NamP _ (PV lang _ _) _ _) = lang
+
+instance HasOneLanguage (TypeM) where
+  langOf Passthrough = Nothing 
+  langOf (Serial t) = langOf t
+  langOf (Native t) = langOf t
+  langOf (Function _ t) = langOf t
+
 instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang
-  langOf (ManifoldM _ _ e) = langOf e
-  langOf (ForeignInterfaceM t _) = langOf t
-  langOf (PoolCallM t _ _ _) = langOf t
-  langOf (LetM _ _ e2) = langOf e2
-  langOf (AppM e _) = langOf e
-  langOf (SrcM _ src) = Just (srcLang src)
-  langOf (LamM _ e) = langOf e
-  langOf (BndVarM t _) = langOf t
-  langOf (LetVarM t _) = langOf t
-  langOf (ListM t _) = langOf t
-  langOf (TupleM t _) = langOf t
-  langOf (RecordM t _) = langOf t
-  langOf (LogM t _) = langOf t
-  langOf (NumM t _) = langOf t
-  langOf (StrM t _) = langOf t
-  langOf (NullM t) = langOf t
-  langOf (SerializeM _ e) = langOf e
-  langOf (DeserializeM _ e) = langOf e
-  langOf (ReturnM e) = langOf e
+  langOf' (ManifoldM _ _ e) = langOf' e
+  langOf' (ForeignInterfaceM t _) = langOf' t
+  langOf' (PoolCallM t _ _ _) = langOf' t
+  langOf' (LetM _ _ e2) = langOf' e2
+  langOf' (AppM e _) = langOf' e
+  langOf' (SrcM _ src) = srcLang src
+  langOf' (LamM _ e) = langOf' e
+  langOf' (BndVarM t _) = langOf' t
+  langOf' (LetVarM t _) = langOf' t
+  langOf' (ListM t _) = langOf' t
+  langOf' (TupleM t _) = langOf' t
+  langOf' (RecordM t _) = langOf' t
+  langOf' (LogM t _) = langOf' t
+  langOf' (NumM t _) = langOf' t
+  langOf' (StrM t _) = langOf' t
+  langOf' (NullM t) = langOf' t
+  langOf' (SerializeM _ e) = langOf' e
+  langOf' (DeserializeM _ e) = langOf' e
+  langOf' (ReturnM e) = langOf' e

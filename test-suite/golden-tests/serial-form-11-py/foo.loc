@@ -1,7 +1,7 @@
 import pybase (id, Map)
 
-object (Person a) = Person {name :: Str, info :: a};
-object py (Person a) = "person" {name :: "str", info :: a};
+record (Person a) = Person {name :: Str, info :: a};
+record py (Person a) = "dict" {name :: "str", info :: a};
 
 export foo;
 

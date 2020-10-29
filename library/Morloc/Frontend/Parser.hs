@@ -206,9 +206,9 @@ makeModule f n mes = (n, edges, node) where
   imports' = [x | (MBImport x) <- mes]
   exports' = Set.fromList [x | (MBExport x) <- mes]
   body' = [x | (MBBody x) <- mes]
-  typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   srcMap = (Map.fromList . concat)
            [[((srcAlias s, srcLang s), s) | s <- ss ] | (SrcE ss) <- body']
+  typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   edges = [(importModuleName i, i) | i <- imports']
   node = ParserNode
     { parserNodePath = f
@@ -245,16 +245,50 @@ pTypedefType = do
 
 pTypedefObject :: Parser ModuleBody
 pTypedefObject = do
-  _ <- reserved "object"
+  r <- pNamType
   lang <- optional (try pLang)
   setLang lang
   (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
   _ <- symbol "="
   constructor <- name <|> stringLiteral
-  entries <- braces (sepBy1 pNamEntryU (symbol ","))
+  entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
   lang <- CMS.gets stateLang
   setLang Nothing
-  return $ MBTypeDef v vs (NamU (TV lang constructor) entries)
+  let t = NamU r (TV lang constructor) (map VarU vs) entries
+  return $ MBTypeDef v vs t
+
+desugarTableEntries
+  :: Maybe Lang
+  -> NamType
+  -> (MT.Text, UnresolvedType)
+  -> Parser (MT.Text, UnresolvedType)
+desugarTableEntries _ NamRecord entry = return entry
+desugarTableEntries _ NamObject entry = return entry
+desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
+  f :: UnresolvedType -> Parser UnresolvedType
+  f (ForallU v t) = ForallU v <$> f t
+  f t = do
+    v <- newvar lang
+    let dts = MLD.defaultList lang t
+    return $ head dts
+
+pNamType :: Parser NamType
+pNamType = choice [pNamObject, pNamTable, pNamRecord] 
+
+pNamObject :: Parser NamType
+pNamObject = do
+  _ <- reserved "object" 
+  return NamObject
+
+pNamTable :: Parser NamType
+pNamTable = do
+  _ <- reserved "table" 
+  return NamTable
+
+pNamRecord :: Parser NamType
+pNamRecord = do
+  _ <- reserved "record" 
+  return NamRecord
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do
@@ -555,7 +589,7 @@ pNamU = do
   return $
     if lang == Nothing
     then head dts
-    else ExistU v [NamU (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
+    else ExistU v [NamU NamRecord (TV lang "__RECORD__") [] entries] dts -- see entry in Infer.hs
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do

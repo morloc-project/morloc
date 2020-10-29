@@ -23,9 +23,11 @@ module Morloc.Namespace
   , ctype
   , GType(..)
   , generalType
+  , NamType(..)
   , EVar(..)
   , MVar(..)
   , TVar(..)
+  , unTVar
   , Name(..)
   , Path(..)
   , Code(..)
@@ -280,6 +282,10 @@ newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
 
+-- | Let the TVar type behave like the EVar and MVar newtypes
+unTVar :: TVar -> Text
+unTVar (TV _ t) = t
+
 data Source =
   Source
     { srcName :: Name
@@ -326,7 +332,12 @@ data GMeta = GMeta {
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
   , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
-  -- ^ The (un)packers available in this node's module scope. FIXME: find something more efficient
+  -- ^ The (un)packers available in this node's module scope. FIXME: kludge
+  , metaConstructors :: Map TVar Source
+  -- ^ The constructors in this node's module scope. FIXME: kludge
+  , metaTypedefs :: Map TVar (Type, [TVar])
+  -- ^ Everything needed to make the prototypes and serialization generic
+  -- functions in C++
 } deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }
@@ -347,6 +358,12 @@ generalType t
   | isNothing (langOf t) = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
+data NamType
+  = NamRecord
+  | NamObject
+  | NamTable
+  deriving(Show, Ord, Eq)
+
 -- | Types, see Dunfield Figure 6
 data Type
   = UnkT TVar
@@ -360,7 +377,7 @@ data Type
   -- ^ (A->B)  -- positional parameterized types
   | ArrT TVar [Type]
   -- ^ f [Type]  -- keyword parameterized types
-  | NamT TVar [(Text, Type)] 
+  | NamT NamType TVar [Type] [(Text, Type)] 
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
@@ -376,7 +393,7 @@ data UnresolvedType
   -- ^ (A->B)
   | ArrU TVar [UnresolvedType] -- positional parameterized types
   -- ^ f [UnresolvedType]
-  | NamU TVar [(Text, UnresolvedType)] -- keyword parameterized types
+  | NamU NamType TVar [UnresolvedType] [(Text, UnresolvedType)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
@@ -384,7 +401,7 @@ unresolvedType2type :: UnresolvedType -> Type
 unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
 unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
-unresolvedType2type (NamU v rs) = NamT v (zip (map fst rs) (map (unresolvedType2type . snd) rs))
+unresolvedType2type (NamU r v ts rs) = NamT r v (map unresolvedType2type ts) (zip (map fst rs) (map (unresolvedType2type . snd) rs))
 unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
 
@@ -482,6 +499,9 @@ class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
 
+  langOf x = Just (langOf' x) 
+  langOf' x = fromJust (langOf x)
+
 instance HasOneLanguage CType where
   langOf (CType t) = langOf t
 
@@ -497,8 +517,8 @@ instance HasOneLanguage Type where
   langOf x@(ArrT (TV lang _) ts)
     | all ((==) lang) (map langOf ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (NamT _ []) = error "empty records are not allowed"
-  langOf x@(NamT (TV lang _) ts)
+  langOf (NamT _ _ _ []) = error "empty records are not allowed"
+  langOf x@(NamT _ (TV lang _) _ ts)
     | all ((==) lang) (map (langOf . snd) ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
 
@@ -519,7 +539,7 @@ instance HasOneLanguage UnresolvedType where
   langOf x@(ArrU (TV lang _) ts)
     | all ((==) lang) (map langOf ts) = lang
     | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (NamU _ []) = error "empty records are not allowed"
-  langOf x@(NamU (TV lang _) ts)
-    | all ((==) lang) (map (langOf . snd) ts) = lang
+  langOf (NamU _ _ _ []) = error "empty records are not allowed"
+  langOf x@(NamU _ (TV lang _) _ rs)
+    | all ((==) lang) (map (langOf . snd) rs) = lang
     | otherwise = error $ "inconsistent languages in " <> show x

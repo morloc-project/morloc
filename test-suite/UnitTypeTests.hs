@@ -211,7 +211,7 @@ tuple ts = ArrU v ts
   where
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
-record rs = NamU (TV Nothing "Record") rs
+record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
 packerTests =
   testGroup

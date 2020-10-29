@@ -44,7 +44,7 @@ substitute v r t = sub t
       | v /= x = ForallU x (sub t'')
       | otherwise = t' -- allows shadowing of the variable
     sub (ArrU v' ts) = ArrU v' (map sub ts)
-    sub (NamU v' rs) = NamU v' [(x, sub t') | (x, t') <- rs]
+    sub (NamU namType v' ts rs) = NamU namType v' (map sub ts) [(x, sub t') | (x, t') <- rs]
     sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
     sub t' = t'
 
@@ -56,7 +56,7 @@ free (ExistU v ts _) = Set.unions $ Set.singleton (ArrU v ts) : map free ts
 free (FunU t1 t2) = Set.union (free t1) (free t2)
 free (ForallU v t) = Set.delete (VarU v) (free t)
 free (ArrU _ xs) = Set.unions (map free xs)
-free (NamU _ rs) = Set.unions [free t | (_, t) <- rs]
+free (NamU _ _ _ rs) = Set.unions [free t | (_, t) <- rs]
 
 -- Types are partially ordered, 'forall a . a' is lower (more generic) than
 -- Int. But 'forall a . a -> a' cannot be compared to 'forall a . a', since
@@ -78,7 +78,7 @@ instance P.PartialOrd UnresolvedType where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (NamU v1 es1) (NamU v2 es2)
+  (<=) (NamU _ v1 _ es1) (NamU _ v2 _ es2)
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
@@ -140,7 +140,7 @@ findFirst v (FunU t11 t12) (FunU t21 t22)
     _ -> Nothing
 findFirst v (ArrU _ ts1) (ArrU _ ts2)
   = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
-findFirst v (NamU _ es1) (NamU _ es2)
+findFirst v (NamU _ _ _ es1) (NamU _ _ _ es2)
   = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
     where
       ts1 = map snd es1
