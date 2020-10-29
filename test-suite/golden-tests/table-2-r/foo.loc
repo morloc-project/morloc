@@ -1,6 +1,6 @@
 import rbase (id)
 
-source R from "person.r" ("person" as Person);
+source R from "person.R" ("person");
 
 table (Person a) = Person {name :: Str, info :: a};
 table R (Person a) = "person" {name :: "character", info :: a};

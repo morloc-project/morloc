@@ -53,7 +53,9 @@ manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
 translateSource :: Path -> MorlocMonad MDoc
-translateSource p = return $ "source(" <> dquotes (pretty p) <> ")"
+translateSource (Path p) = do
+  let p' = MT.stripPrefixIfPresent "./" p
+  return $ "source(" <> dquotes (pretty p') <> ")"
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[[#{pretty i}]]|]
@@ -275,9 +277,24 @@ makeArgument (PassThroughArgument v) = bndNamer v
 -- For R, the type schema is the JSON representation of the type
 typeSchema :: TypeP -> MorlocMonad MDoc
 typeSchema t = do
-  json <- jsontype2json <$> type2jsontype t
+  json <- jsontype2rjson <$> type2jsontype t
   -- FIXME: Need to support single quotes inside strings
   return $ "'" <> json <> "'"
+
+jsontype2rjson :: JsonType -> MDoc
+jsontype2rjson (VarJ v) = dquotes (pretty v)
+jsontype2rjson (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
+  key = dquotes (pretty v)
+  val = encloseSep "[" "]" "," (map jsontype2rjson ts)
+jsontype2rjson (NamJ v rs) =
+  case v of
+    "data.frame" -> "{" <> dquotes "data.frame" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    "record" -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
+    _ -> encloseSep "{" "}" "," rs'
+  where
+  keys = map (dquotes . pretty) (map fst rs) 
+  vals = map jsontype2rjson (map snd rs)
+  rs' = zipWith (\k v -> k <> ":" <> v) keys vals
 
 makePool :: [MDoc] -> [MDoc] -> MDoc
 makePool sources manifolds = [idoc|#!/usr/bin/env Rscript

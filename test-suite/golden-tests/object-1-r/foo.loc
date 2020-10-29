@@ -1,7 +1,9 @@
 import rbase (id)
 
+source R from "person.R" ("PersonObj");
+
 object (Person a) = Person {name :: Str, info :: a};
-object R (Person a) = "person" {name :: "character", info :: a};
+object R (Person a) = "PersonObj" {name :: "character", info :: a};
 
 export foo;
 

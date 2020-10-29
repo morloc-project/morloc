@@ -30,8 +30,8 @@ First hackage release
 0.31.0 [2020.10.2x]
 
  - [x] Distinguish 'record', 'object', and 'table'
- - [ ] Add object handling
- - [.] Add table handling
+ - [.] Add object handling
+ - [x] Add table handling
  - [ ] Add record/table field access
  - [ ] Add record/table arithmetic sugar
 
