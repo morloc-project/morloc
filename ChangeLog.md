@@ -16,24 +16,27 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
 
 
-0.32.0 [2020.11.08]
+0.33.0 [2020.11.08]
 
 First hackage release
 
- - [ ] C++ nexus
  - [ ] Print general types after subcommands
  - [ ] Allow spaces and no unecessary escape in input JSON data
  - [ ] Remove semicolon requirement
  - [ ] Haddock documentation
  - [ ] Update README
 
-0.31.0 [2020.10.2x]
+0.32.0 [2020.10.xx]
 
- - [x] Distinguish 'record', 'object', and 'table'
- - [.] Add object handling
- - [x] Add table handling
  - [ ] Add record/table field access
  - [ ] Add record/table arithmetic sugar
+
+0.31.0 [2020.10.29]
+
+ * Fix anonymous records in C++
+ * Distinguish 'record', 'object', and 'table'
+ * Add object handling
+ * Add table handling
 
 0.30.0 [2020.10.23]
 -------------------
