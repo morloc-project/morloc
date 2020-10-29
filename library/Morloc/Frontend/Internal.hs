@@ -89,15 +89,15 @@ instance Renameable UnresolvedType where
     return $ ForallU v' t'
   rename (FunU t1 t2) = FunU <$> rename t1 <*> rename t2
   rename (ArrU v ts) = ArrU <$> pure v <*> mapM rename ts
-  rename (NamU r v rs) =
-    NamU r <$> pure v <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
+  rename (NamU r v ts rs) =
+    NamU r <$> pure v <*> mapM rename ts <*> mapM (\(x, t) -> (,) <$> pure x <*> rename t) rs
 
   unrename (VarU v) = VarU (unrename v)
   unrename (ExistU v ts ds) = ExistU v (map unrename ts) (map unrename ds)
   unrename (ForallU v t) = ForallU (unrename v) (unrename t)
   unrename (FunU t1 t2) = FunU (unrename t1) (unrename t2)
   unrename (ArrU v ts) = ArrU v (map unrename ts)
-  unrename (NamU r v rs) = NamU r v [(x, unrename t) | (x, t) <- rs]
+  unrename (NamU r v ts rs) = NamU r v (map unrename ts) [(x, unrename t) | (x, t) <- rs]
 
 instance Renameable TVar where
   unrename (TV l t) = TV l . head $ MT.splitOn "." t
@@ -122,7 +122,7 @@ instance Applicable UnresolvedType where
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds)
   apply g (ArrU v ts) = ArrU v (map (apply g) ts)
-  apply g (NamU r v rs) = NamU r v (map (\(n, t) -> (n, apply g t)) rs)
+  apply g (NamU r v ts rs) = NamU r v (map (apply g) ts) (map (\(n, t) -> (n, apply g t)) rs)
 
 instance Applicable Expr where
   apply g e = mapU (apply g) e
@@ -156,8 +156,6 @@ instance Typed TypeSet where
 
   fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
   fromType lang t = TypeSet Nothing [fromType lang t]
-
-
 
 serialConstraint :: UnresolvedType -> UnresolvedType -> Stack ()
 serialConstraint t1 t2 = do
@@ -309,7 +307,7 @@ generalize t = generalize' existentialMap t'
     setDefaults (ForallU v t) = ForallU v (setDefaults t)
     setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t2)
     setDefaults (ArrU v ts) = ArrU v (map setDefaults ts)
-    setDefaults (NamU r v es) = NamU r v (zip (map fst es) (map (setDefaults . snd) es))
+    setDefaults (NamU r v ts es) = NamU r v (map setDefaults ts) (zip (map fst es) (map (setDefaults . snd) es))
 
     existentialMap =
       zip (Set.toList (findExistentials t')) (map (Name . MT.pack) variables)
@@ -327,7 +325,7 @@ generalize t = generalize' existentialMap t'
     findExistentials (FunU t1 t2) =
       Set.union (findExistentials t1) (findExistentials t2)
     findExistentials (ArrU _ ts) = Set.unions (map findExistentials ts)
-    findExistentials (NamU _ _ rs) = Set.unions (map (findExistentials . snd) rs)
+    findExistentials (NamU _ _ ts rs) = Set.unions (map findExistentials ts ++ map (findExistentials . snd) rs)
 
     generalizeOne :: TVar -> Name -> UnresolvedType -> UnresolvedType
     generalizeOne v0@(TV lang _) r t0 = ForallU (TV lang (unName r)) (f v0 t0)
@@ -344,7 +342,7 @@ generalize t = generalize' existentialMap t'
           | v /= x = ForallU x (f v t2)
           | otherwise = t1
         f v (ArrU v' xs) = ArrU v' (map (f v) xs)
-        f v (NamU r v' xs) = NamU r v' (map (\(v', t) -> (v', f v t)) xs)
+        f v (NamU r v' ts xs) = NamU r v' (map (f v) ts) (map (\(v', t) -> (v', f v t)) xs)
         f _ t1 = t1
 
 generalizeE :: Expr -> Expr

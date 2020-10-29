@@ -254,7 +254,7 @@ pTypedefObject = do
   entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
   lang <- CMS.gets stateLang
   setLang Nothing
-  let t = (NamU r (TV lang constructor) entries)
+  let t = NamU r (TV lang constructor) (map VarU vs) entries
   return $ MBTypeDef v vs t
 
 desugarTableEntries
@@ -589,7 +589,7 @@ pNamU = do
   return $
     if lang == Nothing
     then head dts
-    else ExistU v [NamU NamRecord (TV lang "__RECORD__") entries] dts -- see entry in Infer.hs
+    else ExistU v [NamU NamRecord (TV lang "__RECORD__") [] entries] dts -- see entry in Infer.hs
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do

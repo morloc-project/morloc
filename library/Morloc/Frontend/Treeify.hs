@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Treeify (treeify, resolve, substituteT) where
+module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
@@ -50,7 +50,7 @@ collect d n v = do
 
   -- Just look at one x, since any should emit the same GMeta (if not, then
   -- something is broken upstream of GMeta is not general enough)
-  gmeta <- makeGMeta (Just v) (typedNodeTypeMap n) (typedNodePackers n) (typedNodeConstructors n) Nothing
+  gmeta <- makeGMeta (Just v) n Nothing
 
   return $ SAnno (Many trees) gmeta
 
@@ -75,63 +75,35 @@ collectSExprs d n v = do
 -- | Find info common across realizations of a given term in a given module
 makeGMeta
   :: Maybe EVar
-  -> Map.Map EVar TypeSet
-  -> Map.Map (TVar, Int) [UnresolvedPacker]
-  -> Map.Map TVar Source
+  -> TypedNode
   -> Maybe GType
   -> MorlocMonad GMeta
-makeGMeta name typemap packer constructors gtype = do
+makeGMeta name n gtype = do
   i <- MM.getCounter
-  case name >>= (flip Map.lookup) typemap of
+  case name >>= (flip Map.lookup) (typedNodeTypeMap n) of
     (Just (TypeSet (Just e) _)) -> do
-      g <- fmap (Just . GType) $ resolve (etype e)
+      let g = (Just . GType) $ resolve (etype e)
       return $ GMeta
         { metaId = i
-        , metaName = name
         , metaGType = maybe g Just gtype
+        , metaName = name
         , metaProperties = eprop e
         , metaConstraints = econs e
-        , metaPackers = packer
-        , metaConstructors = constructors
+        , metaPackers = typedNodePackers n
+        , metaConstructors = typedNodeConstructors n
+        , metaTypedefs = typedNodeTypedefs n
         }
     _ -> do
       return $ GMeta
         { metaId = i
-        , metaName = name
         , metaGType = gtype
+        , metaName = name
         , metaProperties = Set.empty
         , metaConstraints = Set.empty
-        , metaPackers = packer
-        , metaConstructors = constructors
+        , metaPackers = typedNodePackers n
+        , metaConstructors = typedNodeConstructors n
+        , metaTypedefs = typedNodeTypedefs n
         }
-
--- This functions removes qualified and existential types.
---  * all qualified terms are replaced with UnkT
---  * all existentials are replaced with default values if a possible
---    FIXME: should I really just take the first in the list???
-resolve :: UnresolvedType -> MorlocMonad Type
-resolve (VarU v) = return $ VarT v
-resolve (FunU t1 t2) = FunT <$> resolve t1 <*> resolve t2
-resolve (ArrU v ts) = ArrT v <$> mapM resolve ts
-resolve (NamU r v rs) = do
-  ts' <- mapM (resolve . snd) rs
-  return $ NamT r v (zip (map fst rs) ts')
-resolve (ExistU v ts []) = MM.throwError UnsolvedExistentialTerm
-resolve (ExistU v ts (t:_)) = resolve t
-resolve (ForallU v t) = substituteT v (UnkT v) <$> resolve t
-
--- | substitute all appearances of a given variable with a given new type
-substituteT :: TVar -> Type -> Type -> Type
-substituteT v r t = sub t
-  where
-    sub :: Type -> Type
-    sub t'@(UnkT _) = t'
-    sub t'@(VarT v')
-      | v == v' = r
-      | otherwise = t'
-    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
-    sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (NamT r v' rs) = NamT r v' [(x, sub t') | (x, t') <- rs]
 
 makeTermOrigin
   :: EVar
@@ -166,7 +138,7 @@ collectTerm d v n (Sourced src)
     Nothing -> MM.throwError . CallTheMonkeys $ "No type found for this"
     (Just (TypeSet g es)) -> do
       let ts = [etype e | e <- es, Just (srcLang src) == langOf e]
-      ts' <- mapM resolve ts
+          ts' = map resolve ts
       return (CallS src, map CType ts')
 collectTerm d v n (Declared (AnnE e ts)) = do
   ts' <- getCTypes ts
@@ -187,7 +159,7 @@ collectAnno
   -> MorlocMonad (SAnno GMeta Many [CType])
 collectAnno d args n (AnnE e ts) = do
   gtype <- getGType ts
-  gmeta <- makeGMeta (getExprName e) (typedNodeTypeMap n) (typedNodePackers n) (typedNodeConstructors n) gtype
+  gmeta <- makeGMeta (getExprName e) n gtype
   ts' <- getCTypes ts
   trees <- collectExpr d args n ts' e
   return $ SAnno (Many trees) gmeta
@@ -195,7 +167,7 @@ collectAnno _ _ _ _ = error "impossible bug - unannotated expression"
 
 getCTypes :: [UnresolvedType] -> MorlocMonad [CType]
 getCTypes ts = do
-  ts' <- mapM resolve [t | t <- ts, isJust (langOf t)]
+  let ts' = map resolve [t | t <- ts, isJust (langOf t)]
   return $ map CType ts'
 
 
@@ -292,7 +264,7 @@ getExprName _ = Nothing
 
 getGType :: [UnresolvedType] -> MorlocMonad (Maybe GType)
 getGType ts = do
-  ts' <- mapM resolve [t | t <- ts, isNothing (langOf t)]
+  let ts' = map resolve [t | t <- ts, isNothing (langOf t)]
   case map GType ts' of
     [] -> return Nothing
     [x] -> return $ Just x

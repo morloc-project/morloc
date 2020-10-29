@@ -128,8 +128,8 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     in (ms, "RETURN(" <> e' <> ")")
 
 prettyRecordPVar :: TypeM -> MDoc
-prettyRecordPVar (Serial (NamP _ v _)) = prettyPVar v
-prettyRecordPVar (Native (NamP _ v _)) = prettyPVar v
+prettyRecordPVar (Serial (NamP _ v _ _)) = prettyPVar v
+prettyRecordPVar (Native (NamP _ v _ _)) = prettyPVar v
 prettyRecordPVar _ = "<UNKNOWN RECORD>"
 
 prettyPVar :: PVar -> MDoc
@@ -141,7 +141,7 @@ prettyTypeP (UnkP v) = prettyPVar v
 prettyTypeP (VarP v) = prettyPVar v 
 prettyTypeP (FunP t1 t2) = parens (prettyTypeP t1 <+> "->" <+> prettyTypeP t2)
 prettyTypeP (ArrP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
-prettyTypeP (NamP r v rs)
+prettyTypeP (NamP r v _ rs)
   = viaShow r <+> prettyPVar v <+> encloseSep "{" "}" ","
     (zipWith (\k v -> k <+> "=" <+> v) (map (prettyPVar . fst) rs) (map (prettyTypeP . snd) rs))
 
@@ -300,7 +300,7 @@ type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
 type2jsontype (ArrP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
 type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype (NamP namType (PV _ _ v) rs) = do
+type2jsontype (NamP namType (PV _ _ v) _ rs) = do
   vs <- mapM type2jsontype (map snd rs)
   return $ NamJ jsontype (zip [v | (PV _ _ v, _) <- rs] vs)
   where

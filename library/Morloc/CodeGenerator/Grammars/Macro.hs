@@ -37,7 +37,7 @@ expandType mkfun mkrec t = f t where
   f (VarP (PV _ _ v)) = pretty v
   f t@(FunP t1 t2) = mkfun (f t1) (map f (typeArgs t))
   f (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
-  f (NamP _ v entries) = mkrec v [(k, f t) | (k, t) <- entries]
+  f (NamP _ v _ entries) = mkrec v [(k, f t) | (k, t) <- entries]
   f (UnkP _) = error "Cannot build unsolved type"
 
   typeArgs :: TypeP -> [TypeP]

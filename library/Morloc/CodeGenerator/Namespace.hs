@@ -41,7 +41,7 @@ data TypeP
   | VarP PVar
   | FunP TypeP TypeP
   | ArrP PVar [TypeP]
-  | NamP NamType PVar [(PVar, TypeP)]
+  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
 instance Typelike TypeP where
@@ -49,14 +49,14 @@ instance Typelike TypeP where
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
   typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
   typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
-  typeOf (NamP r (PV lang _ t) es)
-    = NamT r (TV (Just lang) t) (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+  typeOf (NamP r (PV lang _ t) ps es)
+    = NamT r (TV (Just lang) t) (map typeOf ps) (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
 
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f))
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject NamType PVar [(PVar, SerialAST f)]
+  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)]
   | SerialNum PVar
   | SerialBool PVar
   | SerialString PVar
@@ -205,7 +205,7 @@ instance HasOneLanguage (TypeP) where
   langOf' (VarP (PV lang _ _)) = lang
   langOf' (FunP t _) = langOf' t
   langOf' (ArrP (PV lang _ _) _) = lang
-  langOf' (NamP _ (PV lang _ _) _) = lang
+  langOf' (NamP _ (PV lang _ _) _ _) = lang
 
 instance HasOneLanguage (TypeM) where
   langOf Passthrough = Nothing 

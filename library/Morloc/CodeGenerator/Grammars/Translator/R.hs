@@ -97,7 +97,7 @@ serialize v0 s0 = do
           x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject _ (PV _ _ constructor) rs) = do
+    construct v rec@(SerialObject _ (PV _ _ constructor) _ rs) = do
       (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
@@ -153,7 +153,7 @@ deserialize v0 s0
           x = [idoc|#{v'} <- list#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject _ (PV _ _ constructor) rs) = do
+    construct v rec@(SerialObject _ (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty $ MM.getCounter
       (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx

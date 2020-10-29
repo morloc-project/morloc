@@ -102,10 +102,10 @@ instance PrettyType Type where
     parens (prettyType t1) <+> "->" <+> prettyType t2
   prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
   prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-  prettyType (NamT r (TV Nothing _) entries) =
+  prettyType (NamT r (TV Nothing _) _ entries) =
     viaShow r <> encloseSep "{" "}" ", "
       (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
-  prettyType (NamT r (TV (Just lang) t) entries) =
+  prettyType (NamT r (TV (Just lang) t) _ entries) =
     pretty t <> "@" <> viaShow lang <+>
     viaShow r <> 
     encloseSep "{" "}" ", "
@@ -135,10 +135,10 @@ prettyUnresolvedType (FunU t1@(FunU _ _) t2) =
   parens (prettyUnresolvedType t1) <+> "->" <+> prettyUnresolvedType t2
 prettyUnresolvedType (FunU t1 t2) = prettyUnresolvedType t1 <+> "->" <+> prettyUnresolvedType t2
 prettyUnresolvedType (ArrU v ts) = pretty v <+> hsep (map prettyUnresolvedType ts)
-prettyUnresolvedType (NamU r (TV Nothing _) entries) =
+prettyUnresolvedType (NamU r (TV Nothing _) _ entries) =
   viaShow r <> encloseSep "{" "}" ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyUnresolvedType e) entries)
-prettyUnresolvedType (NamU r (TV (Just lang) t) entries) =
+prettyUnresolvedType (NamU r (TV (Just lang) t) _ entries) =
   pretty t <> "@" <> viaShow lang <+>
   viaShow r <> encloseSep "{" "}" ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyUnresolvedType e) entries)

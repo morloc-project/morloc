@@ -130,7 +130,7 @@ serialize v0 s0 = do
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject namType (PV _ _ constructor) rs) = do
+    construct v rec@(SerialObject namType (PV _ _ constructor) _ rs) = do
       accessField <- selectAccessor namType constructor
       (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (accessField v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
@@ -189,7 +189,7 @@ deserialize v0 s0
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject namType (PV _ _ constructor) rs) = do
+    construct v rec@(SerialObject namType (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty $ MM.getCounter
       accessField <- selectAccessor namType constructor
       (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (accessField v (pretty k)) s) rs

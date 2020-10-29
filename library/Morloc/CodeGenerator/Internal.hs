@@ -45,13 +45,13 @@ weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
     f lang _ (ArrT (TV _ v) ts)
       = ArrP (PV lang Nothing v) (map (f lang Nothing) ts)
 
-    f lang (Just (NamT _ (TV _ v1) rs1)) (NamT r2 (TV _ v2) rs2)
-      = NamP r2 (PV lang (Just v1) v2)
+    f lang (Just (NamT _ (TV _ v1) ts1 rs1)) (NamT r2 (TV _ v2) ts2 rs2)
+      = NamP r2 (PV lang (Just v1) v2) (zipWith (f lang) (map Just ts1) ts2)
       $ zip
         (zipWith (PV lang) (map (Just . fst) rs1) (map fst rs2))
         (zipWith (f lang) (map (Just . snd) rs1) (map snd rs2))
-    f lang _ (NamT r (TV _ v) rs)
-      = NamP r (PV lang Nothing v)
+    f lang _ (NamT r (TV _ v) ts rs)
+      = NamP r (PV lang Nothing v) (map (f lang Nothing) ts)
       $ zip
         (map (PV lang Nothing) (map fst rs))
         (map (f lang Nothing) (map snd rs))

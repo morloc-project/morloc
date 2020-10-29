@@ -21,7 +21,7 @@ module Morloc.CodeGenerator.Serial
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.Frontend.PartialOrder (substitute)
-import Morloc.Frontend.Treeify (resolve, substituteT)
+import Morloc.Frontend.Namespace (resolve, substituteT)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
@@ -91,9 +91,9 @@ serialAstToType :: SerialAST One -> MorlocMonad TypeP
 serialAstToType (SerialPack _ (One (_, s))) = serialAstToType s
 serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
 serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
-serialAstToType (SerialObject r v rs) = do
+serialAstToType (SerialObject r v ps rs) = do
   rs' <- mapM (serialAstToType . snd) rs
-  return $ NamP r v (zip (map fst rs) rs')
+  return $ NamP r v ps (zip (map fst rs) rs')
 serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
@@ -107,7 +107,7 @@ serialAstToType' :: SerialAST One -> TypeP
 serialAstToType' (SerialPack _ (One (_, s))) = serialAstToType' s
 serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
 serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
-serialAstToType' (SerialObject r v rs) = NamP r v (zip (map fst rs) (map (serialAstToType' . snd) rs))
+serialAstToType' (SerialObject r v ps rs) = NamP r v ps (zip (map fst rs) (map (serialAstToType' . snd) rs))
 serialAstToType' (SerialNum    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
@@ -120,9 +120,9 @@ shallowType :: SerialAST One -> MorlocMonad TypeP
 shallowType (SerialPack _ (One (p, _))) = return (typePackerFrom p)
 shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
-shallowType (SerialObject r v rs) = do
+shallowType (SerialObject r v ps rs) = do
   ts <- mapM shallowType (map snd rs)
-  return $ NamP r v (zip (map fst rs) ts)
+  return $ NamP r v ps (zip (map fst rs) ts)
 shallowType (SerialNum    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
@@ -156,9 +156,9 @@ makeSerialAST m t@(ArrP v@(PV lang _ s) ts)
         $ "Cannot find constructor" <+> dquotes (pretty s)
         <> "<" <> pretty (length ts) <> ">"
         <+> "in packmap:\n" <> prettyPackMap (metaPackers m)
-makeSerialAST m (NamP r v rs) = do
+makeSerialAST m (NamP r v ps rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
-  return $ SerialObject r v (zip (map fst rs) ts)
+  return $ SerialObject r v ps (zip (map fst rs) ts)
 
 pvarEqual :: PVar -> PVar -> Bool
 pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
@@ -168,7 +168,7 @@ typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
 typeEqual (ArrP v1 ts1) (ArrP v2 ts2)
   | length ts1 /= length ts2 = False
   | otherwise = foldl (&&) (pvarEqual v1 v2) (zipWith typeEqual ts1 ts2 )
-typeEqual (NamP _ v1 rs1) (NamP _ v2 rs2)
+typeEqual (NamP _ v1 _ rs1) (NamP _ v2 _ rs2)
   =  (pvarEqual v1 v2)
   && map fst rs1 == map fst rs2
   && foldl (&&) True (zipWith typeEqual (map snd rs1) (map snd rs2))
@@ -187,7 +187,7 @@ resolvePacker packedType ts u = do
 
 resolveType :: [TypeP] -> UnresolvedType -> MorlocMonad TypeP
 resolveType [] (ForallU _ _) = MM.throwError . SerializationError $ "Packer parity error"
-resolveType [] u = resolve u >>= weaveTypes Nothing
+resolveType [] u = weaveTypes Nothing (resolve u)
 resolveType (t:ts) (ForallU v u) = substituteP v t <$> resolveType ts u
 resolveType (_:_) _ = MM.throwError . SerializationError $ "Packer parity error"
 
@@ -202,7 +202,7 @@ substituteP v r t = sub t
       | otherwise = t'
     sub (FunP t1 t2) = FunP (sub t1) (sub t2)
     sub (ArrP v' ts) = ArrP v' (map sub ts)
-    sub (NamP r v' rs) = NamP r v' [(x, sub t') | (x, t') <- rs]
+    sub (NamP r v' ps rs) = NamP r v' (map sub ps) [(x, sub t') | (x, t') <- rs]
 
 -- | Given serialization trees for two languages, where each serialization tree
 -- may contain, try to find
@@ -232,12 +232,12 @@ findSerializationCycles choose x y = f x y where
     | otherwise = case fmap unzip . sequence $ zipWith f ts1 ts2 of
         (Just (xs,ys)) -> Just (SerialTuple xs, SerialTuple ys)
         Nothing -> Nothing
-  f (SerialObject r1 v1 rs1) (SerialObject r2 v2 rs2)
+  f (SerialObject r1 v1 ps1 rs1) (SerialObject r2 v2 ps2 rs2)
     | map fst rs1 /= map fst rs2 = Nothing 
     | otherwise = case fmap unzip . sequence $ zipWith f ts1 ts2 of
         Nothing -> Nothing
-        Just (rs1', rs2') -> Just ( SerialObject r1 v1 (zip (map fst rs1) rs1')
-                                  , SerialObject r2 v2 (zip (map fst rs2) rs2'))
+        Just (rs1', rs2') -> Just ( SerialObject r1 v1 ps1 (zip (map fst rs1) rs1')
+                                  , SerialObject r2 v2 ps2 (zip (map fst rs2) rs2'))
       where
         ts1 = map snd rs1
         ts2 = map snd rs1
@@ -264,7 +264,7 @@ isSerializable :: Functor f => SerialAST f -> Bool
 isSerializable (SerialPack _ _) = False
 isSerializable (SerialList x) = isSerializable x
 isSerializable (SerialTuple xs) = all isSerializable xs 
-isSerializable (SerialObject _ _ rs) = all isSerializable (map snd rs) 
+isSerializable (SerialObject _ _ _ rs) = all isSerializable (map snd rs) 
 isSerializable (SerialNum    _) = True
 isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
@@ -275,7 +275,7 @@ prettySerialOne :: SerialAST One -> MDoc
 prettySerialOne (SerialPack _ _) = "SerialPack"
 prettySerialOne (SerialList x) = "SerialList" <> parens (prettySerialOne x)
 prettySerialOne (SerialTuple xs) = "SerialTuple" <> tupled (map prettySerialOne xs)
-prettySerialOne (SerialObject r _ rs)
+prettySerialOne (SerialObject r _ _ rs)
   = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
 prettySerialOne (SerialNum    _) = "SerialNum"
