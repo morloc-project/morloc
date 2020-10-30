@@ -150,7 +150,7 @@ sub call_#{pretty v}{
 }
 |]
   where
-    replacements = vsep (zipWith (\v i-> [idoc|$x =~ s/\Q<<#{pretty v}>>/$_[#{viaShow i}]/g;|]) vs [0..])
+    replacements = vsep (zipWith (\v i-> [idoc|$x =~ s/\Q<<#{pretty v}>>/$_[#{viaShow i}]/g;|]) vs ([0..] :: [Int]))
 
 argT :: Int -> MDoc
 argT i = "$_[" <> pretty i <> "]"

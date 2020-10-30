@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyExprM
   , prettyTypeM
   , prettyTypeP
+  , splitArgs
   ) where
 
 import Morloc.Data.Doc
@@ -335,3 +336,12 @@ gmetaOf :: ExprM f -> GMeta
 gmetaOf (ManifoldM m _ _) = m
 gmetaOf (LamM _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"
+
+-- divide a list of arguments based on wheither they are in a second list
+splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
+splitArgs args1 args2 = partitionEithers $ map splitOne args1 where
+  splitOne :: Argument -> Either Argument Argument
+  splitOne r = if elem r args2
+               then Left r
+               else Right r
+
