@@ -27,9 +27,6 @@ type FData =
   , Type -- argument type
   )
 
-say :: Doc ann -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
-
 fst3 :: (a,b,c) -> a
 fst3 (x,_,_) = x
 

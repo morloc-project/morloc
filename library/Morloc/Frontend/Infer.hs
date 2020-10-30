@@ -621,6 +621,7 @@ infer' lang g e@(VarE v) = do
     mapTS f (TypeSet (Just a) es) = map f (a:es)
     mapTS f (TypeSet Nothing es) = map f es
 
+
 infer' lang g (AccE e k) = do
   (g', record_ts, e') <- infer lang g e
   ts <- mapM (accessRecord k) record_ts

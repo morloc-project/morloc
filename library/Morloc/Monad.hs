@@ -21,7 +21,7 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
-  , message
+  , say
   -- * reusable counter
   , startCounter
   , getCounter
@@ -40,6 +40,7 @@ import Control.Monad.Trans
 import Control.Monad.Writer
 import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
+import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
@@ -103,9 +104,8 @@ runCommand loc cmd = do
     SE.ExitSuccess -> tell [MT.pack err]
     _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
 
--- | Execute a system call
-message :: MT.Text -> MorlocMonad ()
-message msg = liftIO . MT.putStrLn $ msg
+say :: MDoc -> MorlocMonad ()
+say d = liftIO . putDoc $ " : " <> d <> "\n"
 
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith ::

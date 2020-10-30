@@ -220,9 +220,9 @@ realize
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One TypeP))
 realize x = do
-  -- say $ " --- realize ---"
-  -- say $ writeManyAST x
-  -- say $ " ---------------"
+  -- MM.say $ " --- realize ---"
+  -- MM.say $ prettySAnnoMany x
+  -- MM.say $ " ---------------"
   realizationMay <- realizeAnno 0 Nothing x
   case realizationMay of
     Nothing -> makeGAST x |>> Left
@@ -429,7 +429,6 @@ rewritePartials
   :: SAnno GMeta One TypeP
   -> MorlocMonad (SAnno GMeta One TypeP)
 rewritePartials s@(SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
-  -- say $ writeAST id Nothing s
   let gTypeArgs = maybe (repeat Nothing) (map Just . typeArgsG) (metaGType m)
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
@@ -912,9 +911,6 @@ translate lang srcs es = do
 
 -------- Utility and lookup functions ----------------------------------------
 
-say :: Doc ann -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
-
 -- resolves a function into a list of types, for example:
 -- ((Num->String)->[Num]->[String]) would resolve to the list
 -- [(Num->String),[Num],[String]].
@@ -1015,22 +1011,6 @@ mapGCM f (SAnno (One (StrS x, c)) g) = do
   c' <- f g c
   return $ SAnno (One (StrS x, c')) g
 
-descSExpr :: SExpr g f c -> MDoc
-descSExpr (UniS) = "UniS"
-descSExpr (VarS v) = "VarS" <+> pretty v
-descSExpr (CallS src)
-  =   "CallS"
-  <+> pretty (srcAlias src) <+> "<" <> viaShow (srcLang src) <> ">"
-descSExpr (AccS e k) = "@" <> pretty k
-descSExpr (ListS _) = "ListS"
-descSExpr (TupleS _) = "TupleS"
-descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
-descSExpr (AppS _ _) = "AppS"
-descSExpr (NumS _) = "NumS"
-descSExpr (LogS _) = "LogS"
-descSExpr (StrS _) = "StrS"
-descSExpr (RecS _) = "RecS"
-
 packArg :: Argument -> Argument
 packArg (NativeArgument v t) = SerialArgument v t
 packArg x = x
@@ -1057,69 +1037,3 @@ makeType :: [Type] -> MorlocMonad Type
 makeType [] = MM.throwError . TypeError $ "empty type"
 makeType [t] = return t
 makeType (t:ts) = FunT <$> pure t <*> makeType ts
-
-writeManyAST :: SAnno GMeta Many [CType] -> MDoc
-writeManyAST (SAnno (Many xs) g) =
-     pretty (metaId g)
-  <> maybe "" (\n -> " " <> pretty n) (metaName g)
-  <+> "::" <+> maybe "_" prettyType (metaGType g)
-  <> line <> indent 5 (vsep (map writeSome xs))
-  where
-    writeSome :: (SExpr GMeta Many [CType], [CType]) -> MDoc
-    writeSome (s, ts)
-      =  "_ ::"
-      <+> encloseSep "{" "}" ";" (map prettyType ts)
-      <> line <> writeExpr s
-
-    writeExpr :: SExpr GMeta Many [CType] -> MDoc
-    writeExpr (AccS x k) = pretty k <+> "from " <> nest 2 (writeManyAST x) 
-    writeExpr (ListS xs) = list (map writeManyAST xs)
-    writeExpr (TupleS xs) = list (map writeManyAST xs)
-    writeExpr (RecS entries) = encloseSep "{" "}" "," $
-      map (\(k,v) -> pretty k <+> "=" <+> writeManyAST v) entries
-    writeExpr (LamS vs x)
-      = "LamS"
-      <+> list (map pretty vs)
-      <> line <> indent 2 (writeManyAST x)
-    writeExpr (AppS f xs) = "AppS" <+> indent 2 (vsep (writeManyAST f : map writeManyAST xs))
-    writeExpr x = descSExpr x
-
-writeAST
-  :: (a -> CType) -> Maybe (a -> MDoc) -> SAnno GMeta One a -> MDoc
-writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
-  where
-    addExtra x = case extra of
-      (Just f) -> " " <> f x
-      Nothing -> ""
-
-    describe (SAnno (One (x@(AccS _ _), _)) _) = descSExpr x
-    describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
-    describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
-    describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
-    describe (SAnno (One (x@(AppS f xs), c)) g) =
-      hang 2 . vsep $
-        [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
-        , describe f
-        ] ++ map describe xs
-    describe (SAnno (One (f@(LamS _ x), c)) g) = do
-      hang 2 . vsep $
-        [ pretty (metaId g)
-            <+> name (getType c) g
-            <+> descSExpr f
-            <+> parens (prettyType (getType c))
-            <> addExtra c
-        , describe x
-        ]
-    describe (SAnno (One (x, c)) g) =
-          pretty (metaId g)
-      <+> descSExpr x
-      <+> parens (prettyType (getType c))
-      <>  addExtra c
-
-    name :: CType -> GMeta -> MDoc
-    name t g =
-      let lang = fromJust (langOf t)
-      in maybe
-          ("_" <+> viaShow lang <+> "::")
-          (\x -> pretty x <+> viaShow lang <+> "::")
-          (metaName g)

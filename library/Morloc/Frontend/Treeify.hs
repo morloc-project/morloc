@@ -17,6 +17,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Morloc.Frontend.Pretty (prettyExpr)
 
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
@@ -222,21 +223,17 @@ collectExpr d args n ts (RecE entries) = do
 collectExpr d args n ts e@(LamE v x) = do
   case unrollLambda e of
     (args', e') -> do
-      -- say $ "in LamE:" <+> prettyExpr x
       e'' <- collectAnno d (Set.union args (Set.fromList args')) n e'
       return [(LamS args' e'', ts)]
 collectExpr d args n ts (AppE e1 e2) = do
-  -- say $ "in AppE:" <+> parens (prettyExpr e1) <+> parens (prettyExpr e2)
   -- The topology of e1' may vary. It could be a direct binary function. Or
   -- it could be a partially applied function. So it is necessary to map
   -- over the Many.
   e1'@(SAnno (Many fs) g1) <- collectAnno d args n e1
   e2' <- collectAnno d args n e2
-  -- say $ "in AppE e1':" <+> writeManyAST e1'
-  -- say $ "in AppE e2':" <+> writeManyAST e2'
   mapM (app g1 e2') fs
-collectExpr _ _ _ _ _ = MM.throwError . GeneratorError $
-  "Unexpected expression in collectExpr"
+collectExpr _ _ _ _ e = MM.throwError . GeneratorError . render $
+  "Unexpected expression in collectExpr:" <> prettyExpr e
 
 
 

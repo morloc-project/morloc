@@ -1,12 +1,13 @@
-import cppbase (sum)
+import cppbase (fold, add)
 
 table (Person a) = Person {name :: Str, info :: a};
 table Cpp (Person a) = "struct" {name :: "std::string", info :: a};
 
 export foo;
 
--- This function returns the input, but passes it though a language-specific id
--- function, which forces deserialization and then serialization.
-foo :: Person Int -> Int;
-foo Cpp :: Person "int" -> "int";
-foo x = sum p@info;
+-- foo :: Person Num -> Num;
+-- foo Cpp :: Person "double" -> "double";
+-- foo x = fold add 0 (x@info);
+
+foo :: Person Num -> [Num];
+foo x = x@info;
