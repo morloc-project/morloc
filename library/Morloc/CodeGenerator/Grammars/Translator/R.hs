@@ -216,6 +216,10 @@ translateManifold m@(ManifoldM _ args _) = do
 
   f _ (LetVarM _ i) = return ([], letNamer i, [])
 
+  f args (AccM e k) = do
+    (ms, e', ps) <- f args e
+    return (ms, e' <> "$" <> pretty k, ps)
+
   f args (ListM t es) = do
     (mss', es', rss) <- mapM (f args) es |>> unzip3
     x' <- return $ case t of

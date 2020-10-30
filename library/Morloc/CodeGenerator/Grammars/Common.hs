@@ -103,6 +103,9 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
   f (BndVarM c i) = ([], "x" <> pretty i)
   f (LetVarM c i) = ([], "a" <> pretty i)
+  f (AccM e k) =
+    let (ms, e') = f e
+    in (ms, parens e' <> "@" <> pretty k)
   f (ListM _ es) =
     let (mss', es') = unzip $ map f es
     in (concat mss', list es')
@@ -179,6 +182,9 @@ invertExprM e@(AppM f es) = do
   return $ foldl dependsOn appM' (f':es')
 -- you can't pull the body of the lambda out into a let statement
 invertExprM f@(LamM _ _) = return f
+invertExprM (AccM e k) = do
+  e' <- invertExprM e
+  return $ dependsOn (AccM (terminalOf e') k) e'
 invertExprM (ListM c es) = do
   es' <- mapM invertExprM es
   v <- MM.getCounter
@@ -262,6 +268,7 @@ typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
 typeOfExprM (LetVarM t _) = t
+typeOfExprM (AccM e _) = typeOfExprM e
 typeOfExprM (ListM t _) = t
 typeOfExprM (TupleM t _) = t
 typeOfExprM (RecordM t _) = t

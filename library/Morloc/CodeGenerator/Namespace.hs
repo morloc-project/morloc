@@ -227,6 +227,7 @@ instance HasOneLanguage (ExprM f) where
   langOf' (LamM _ e) = langOf' e
   langOf' (BndVarM t _) = langOf' t
   langOf' (LetVarM t _) = langOf' t
+  langOf' (AccM e _) = langOf' e
   langOf' (ListM t _) = langOf' t
   langOf' (TupleM t _) = langOf' t
   langOf' (RecordM t _) = langOf' t

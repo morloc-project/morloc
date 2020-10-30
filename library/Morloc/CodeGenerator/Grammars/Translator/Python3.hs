@@ -253,6 +253,13 @@ translateManifold m@(ManifoldM _ args _) = do
 
   f _ (LetVarM _ i) = return ([], letNamer i, [])
 
+  f args (AccM e k) = do
+    (ms, e', ps) <- f args e
+    x <- case typeOfTypeM (typeOfExprM e) of
+      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
+      Nothing -> MM.throwError . CallTheMonkeys $ "Bad record access"
+    return (ms, x, ps)
+
   f args (ListM t es) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3
     return (concat mss', list es', concat rss')

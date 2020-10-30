@@ -96,6 +96,7 @@ makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f (LetM _ e1 e2) = f e1 ++ f e2
   f (AppM e es) = f e ++ conmap f es
   f (LamM _ e) = f e
+  f (AccM e _) = f e
   f (ListM _ es) = conmap f es
   f (TupleM _ es) = conmap f es
   f (RecordM _ entries) = conmap f (map snd entries)
@@ -366,6 +367,10 @@ translateManifold recmap m@(ManifoldM _ args _) = do
 
   f args (LamM lambdaArgs e) = undefined
 
+  f args (AccM e k) = do
+    (ms, e', ps) <- f args e
+    return (ms, e' <> "." <> pretty k, ps)
+
   f args (ListM t es) = do
     (mss', es', pss) <- mapM (f args) es |>> unzip3
     let x' = encloseSep "{" "}" "," es'
@@ -480,6 +485,7 @@ collectRecords e0 = f (gmetaOf e0) e0 where
   f m (LetM _ e1 e2) = f m e1 ++ f m e2
   f m (AppM e es) = f m e ++ conmap (f m) es
   f m (LamM _ e) = f m e
+  f m (AccM e _) = f m e
   f m (ListM t es) = cleanRecord m t ++ conmap (f m) es
   f m (TupleM t es) = cleanRecord m t ++ conmap (f m) es
   f m (RecordM t rs) = cleanRecord m t ++ conmap (f m . snd) rs
@@ -578,6 +584,7 @@ generateSourcedSerializers
     collect' m (LetM _ e1 e2) = Map.union (collect' m e1) (collect' m e2)
     collect' m (AppM e es) = Map.unions $ collect' m e : map (collect' m) es
     collect' m (LamM _ e) = collect' m e
+    collect' m (AccM e _) = collect' m e
     collect' m (ListM _ es) = Map.unions $ map (collect' m) es
     collect' m (TupleM _ es) = Map.unions $ map (collect' m) es
     collect' m (RecordM _ entries) = Map.unions $ map (collect' m) (map snd entries)

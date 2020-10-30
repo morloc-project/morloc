@@ -135,6 +135,9 @@ rewrite (SAnno (Many es0) g0) = do
                     (SExpr g Many c, c)
         sepLamS (x@(LamS vs body), _) = Left (vs, body)
         sepLamS x = Right x
+    rewriteL0 (AccS x k, c) = do
+      x' <- rewrite x
+      return [(AccS x' k, c)]
     rewriteL0 (ListS xs, c) = do
       xs' <- mapM rewrite xs
       return [(ListS xs', c)]
@@ -179,6 +182,9 @@ rewrite (SAnno (Many es0) g0) = do
     substituteExpr v (SAnno (Many xs) _) x@(VarS v', _)
       | v == v' = return xs
       | otherwise = return [x]
+    substituteExpr v r (AccS x k, c) = do
+      x' <- substituteAnno v r x
+      return [(AccS x' k, c)]
     substituteExpr v r (ListS xs, c) = do
       xs' <- mapM (substituteAnno v r) xs
       return [(ListS xs, c)]
@@ -278,6 +284,13 @@ realize x = do
     realizeExpr' _ lang (VarS x) c
       | lang == langOf c = return $ Just (0, VarS x, c)
       | otherwise = return Nothing
+    realizeExpr' depth lang (AccS x k) c
+      | lang == langOf c = do
+        xMay <- realizeAnno depth lang x
+        case xMay of
+          Nothing -> return Nothing
+          (Just (i, x')) -> return $ Just (i, AccS x' k, c)
+      | otherwise = return Nothing
     -- simple recursion into ListS, TupleS, and RecS
     realizeExpr' depth lang (ListS xs) c
       | lang == langOf c = do
@@ -350,6 +363,9 @@ makeGAST (SAnno (Many ((VarS x, _):_)) m) = return (SAnno (One (VarS x, ())) m)
 makeGAST (SAnno (Many ((NumS x, _):_)) m) = return (SAnno (One (NumS x, ())) m)
 makeGAST (SAnno (Many ((LogS x, _):_)) m) = return (SAnno (One (LogS x, ())) m)
 makeGAST (SAnno (Many ((StrS x, _):_)) m) = return (SAnno (One (StrS x, ())) m)
+makeGAST (SAnno (Many ((AccS x k, _):_)) m) = do
+  x' <- makeGAST x
+  return (SAnno (One (AccS x' k, ())) m)
 makeGAST (SAnno (Many ((ListS ss, _):_)) m) = do
   ss' <- mapM makeGAST ss
   return $ SAnno (One (ListS ss', ())) m
@@ -385,6 +401,12 @@ generalSerial x@(SAnno _ g) = do
     generalSerial' (SAnno (One (NumS x, _)) _) = return (viaShow x, [])
     generalSerial' (SAnno (One (LogS x, _)) _) = return (if x then "true" else "false", [])
     generalSerial' (SAnno (One (StrS x, _)) _) = return (dquotes (pretty x), [])
+    generalSerial' (SAnno (One (AccS (SAnno (One (RecS es, _)) _) k, _)) _) =
+      case lookup k es of
+        Nothing -> MM.throwError . CallTheMonkeys $ "Record access fail"
+        (Just e) -> do
+          (e',vs) <- generalSerial' e 
+          return (e', vs)
     generalSerial' (SAnno (One (ListS xs, _)) _) = do
       (xs', _) <- mapM generalSerial' xs |>> unzip
       return (list xs', [])
@@ -442,6 +464,9 @@ rewritePartials (SAnno (One (AppS f xs, t)) m) = do
 rewritePartials (SAnno (One (LamS vs x, t)) m) = do
   x' <- rewritePartials x
   return $ SAnno (One (LamS vs x', t)) m
+rewritePartials (SAnno (One (AccS x k, t)) m) = do
+  x' <- rewritePartials x
+  return $ SAnno (One (AccS x' k, t)) m
 rewritePartials (SAnno (One (ListS xs, t)) m) = do
   xs' <- mapM rewritePartials xs
   return $ SAnno (One (ListS xs', t)) m
@@ -491,6 +516,10 @@ parameterize' args (SAnno (One (VarS v, c)) m) = do
 -- CallS Source
 parameterize' args (SAnno (One (CallS src, c)) m) = do
   return $ SAnno (One (CallS src, (c, []))) m
+-- record access
+parameterize' args (SAnno (One (AccS x k, c)) m) = do
+  x' <- parameterize' args x
+  return $ SAnno (One (AccS x' k, (c, args))) m
 -- containers
 parameterize' args (SAnno (One (ListS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
@@ -536,6 +565,11 @@ express s@(SAnno (One (_, (c, _))) _) = express' True c s where
   express' _ _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (Native c) x
   express' _ _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (Native c) x
   express' _ _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Native c)
+
+  -- record access
+  express' isTop pc (SAnno (One (AccS x k, c)) m) = do
+    x' <- express' isTop pc x >>= unpackExprM m
+    return (AccM x' k)
 
   -- containers
   express' isTop _ (SAnno (One (ListS xs, (c@(ArrP _ [t]), args))) m) = do
@@ -696,6 +730,10 @@ segment e0
     (ms2, e2') <- segment' m args e2
     return (ms1 ++ ms2, LetM i e1' e2')
 
+  segment' m args (AccM e k) = do
+    (ms, e') <- segment' m args e
+    return (ms, AccM e' k)
+
   segment' m args (ListM t es) = do
     (mss, es') <- mapM (segment' m args) es |>> unzip
     return (concat mss, ListM t es')
@@ -744,6 +782,9 @@ reparameterize e = snd (substituteBndArgs e) where
     let (vs1, e1') = substituteBndArgs e1
         (vs2, e2') = substituteBndArgs e2
     in (vs1 ++ vs2, LetM i e1' e2')
+  substituteBndArgs (AccM e k) =
+    let (vs, e') = substituteBndArgs e
+    in (vs, AccM e' k)
   substituteBndArgs (ListM t es) =
     let (vss, es') = unzip $ map substituteBndArgs es
     in (concat vss, ListM t es')
@@ -827,6 +868,7 @@ chooseSerializer xs = mapM chooseSerializer' xs where
   chooseSerializer' (LetM i e1 e2) = LetM i <$> chooseSerializer' e1 <*> chooseSerializer' e2
   chooseSerializer' (AppM e es) = AppM <$> chooseSerializer' e <*> mapM chooseSerializer' es
   chooseSerializer' (LamM args e) = LamM args <$> chooseSerializer' e
+  chooseSerializer' (AccM e k) = AccM <$> chooseSerializer' e <*> pure k
   chooseSerializer' (ListM t es) = ListM t <$> mapM chooseSerializer' es
   chooseSerializer' (TupleM t es) = TupleM t <$> mapM chooseSerializer' es
   chooseSerializer' (RecordM t rs) = do
@@ -898,6 +940,7 @@ makeArgumentName :: Int -> MDoc
 makeArgumentName i = "x" <> pretty i
 
 unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
+unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = f e g c : unpackSAnno f x
 unpackSAnno f (SAnno (One (e@(ListS xs),     c)) g) = f e g c : conmap (unpackSAnno f) xs
 unpackSAnno f (SAnno (One (e@(TupleS xs),    c)) g) = f e g c : conmap (unpackSAnno f) xs
 unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = f e g c : conmap (unpackSAnno f) (map snd entries)
@@ -909,6 +952,7 @@ sannoWithC :: (c -> a) -> SAnno g One c -> a
 sannoWithC f (SAnno (One (_, c)) _) = f c
 
 mapC :: (c -> a) -> SAnno g One c -> SAnno g One a
+mapC f (SAnno (One (AccS x k, c)) g) = (SAnno (One (AccS (mapC f x) k, f c)) g)
 mapC f (SAnno (One (ListS xs, c)) g) =
   SAnno (One (ListS (map (mapC f) xs), f c)) g
 mapC f (SAnno (One (TupleS xs, c)) g) =
@@ -927,6 +971,10 @@ mapC f (SAnno (One (LogS x, c)) g) = SAnno (One (LogS x, f c)) g
 mapC f (SAnno (One (StrS x, c)) g) = SAnno (One (StrS x, f c)) g
 
 mapGCM :: (g -> c -> MorlocMonad c') -> SAnno g One c -> MorlocMonad (SAnno g One c')
+mapGCM f (SAnno (One (AccS x k, c)) g) = do
+  x' <- mapGCM f x
+  c' <- f g c
+  return $ SAnno (One (AccS x' k, c')) g
 mapGCM f (SAnno (One (ListS xs, c)) g) = do
   xs' <- mapM (mapGCM f) xs
   c' <- f g c
@@ -973,6 +1021,7 @@ descSExpr (VarS v) = "VarS" <+> pretty v
 descSExpr (CallS src)
   =   "CallS"
   <+> pretty (srcAlias src) <+> "<" <> viaShow (srcLang src) <> ">"
+descSExpr (AccS e k) = "@" <> pretty k
 descSExpr (ListS _) = "ListS"
 descSExpr (TupleS _) = "TupleS"
 descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
@@ -1023,6 +1072,7 @@ writeManyAST (SAnno (Many xs) g) =
       <> line <> writeExpr s
 
     writeExpr :: SExpr GMeta Many [CType] -> MDoc
+    writeExpr (AccS x k) = pretty k <+> "from " <> nest 2 (writeManyAST x) 
     writeExpr (ListS xs) = list (map writeManyAST xs)
     writeExpr (TupleS xs) = list (map writeManyAST xs)
     writeExpr (RecS entries) = encloseSep "{" "}" "," $
@@ -1042,6 +1092,7 @@ writeAST getType extra s = hang 2 . vsep $ ["AST:", describe s]
       (Just f) -> " " <> f x
       Nothing -> ""
 
+    describe (SAnno (One (x@(AccS _ _), _)) _) = descSExpr x
     describe (SAnno (One (x@(ListS xs), _)) _) = descSExpr x
     describe (SAnno (One (x@(TupleS xs), _)) _) = descSExpr x
     describe (SAnno (One (x@(RecS xs), _)) _) = descSExpr x
