@@ -54,7 +54,7 @@ instance HasManyLanguages TypeSet where
   langsOf _ (TypeSet (Just e) es) = langOf e : map langOf es
 
 instance HasManyLanguages Expr where
-  langsOf g e = nub $ Nothing : langsOf' g e where
+  langsOf g e = unique $ Nothing : langsOf' g e where
     langsOf' _ (SrcE srcs) = map (Just . srcLang) srcs
     langsOf' _ (Signature _ t) = [langOf t] 
     langsOf' g (Declaration _ e) = langsOf' g e
@@ -62,6 +62,7 @@ instance HasManyLanguages Expr where
     langsOf' g (VarE v) = case lookupE v g of  
       (Just (_, ts)) -> langsOf g ts
       Nothing -> []
+    langsOf' g (AccE e _) = langsOf' g e
     langsOf' g (ListE es) = concat . map (langsOf' g) $ es
     langsOf' g (TupleE es) = concat . map (langsOf' g) $ es
     langsOf' g (LamE _ e) = langsOf' g e 

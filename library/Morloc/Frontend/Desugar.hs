@@ -118,6 +118,7 @@ desugarExpr d k (Signature v t) = Signature v <$> desugarEType d k t
 desugarExpr d k (Declaration v e) = Declaration v <$> desugarExpr d k e
 desugarExpr _ _ UniE = return UniE
 desugarExpr _ _ e@(VarE _) = return e
+desugarExpr d k (AccE e key) = AccE <$> desugarExpr d k e <*> pure key
 desugarExpr d k (ListE xs) = ListE <$> mapM (desugarExpr d k) xs
 desugarExpr d k (TupleE xs) = TupleE <$> mapM (desugarExpr d k) xs
 desugarExpr d k (LamE v e) = LamE v <$> desugarExpr d k e

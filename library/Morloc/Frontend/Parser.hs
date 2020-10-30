@@ -407,7 +407,8 @@ pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 pExpr :: Parser Expr
 pExpr =
-      try pNamE
+      try pAcc
+  <|> try pNamE
   <|> try pTuple
   <|> try pUni
   <|> try pAnn
@@ -475,6 +476,13 @@ pTuple = do
 
 pUni :: Parser Expr
 pUni = symbol "Null" >> return UniE
+
+pAcc :: Parser Expr
+pAcc = do
+  e <- parens pExpr <|> pNamE <|> pVar
+  _ <- symbol "@"
+  f <- name
+  return $ AccE e (EVar f) 
 
 pAnn :: Parser Expr
 pAnn = do

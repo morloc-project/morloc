@@ -6,6 +6,7 @@ module UnitTypeTests
   , typeAliasTests
   , jsontype2jsonTests
   , packerTests
+  , recordAccessTests
   ) where
 
 import Morloc.Frontend.Namespace
@@ -212,6 +213,45 @@ tuple ts = ArrU v ts
     v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
 
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
+
+recordAccessTests =
+  testGroup
+    "Test record access"
+    [ assertTerminalType 
+      "Access into anonymous record"
+      "{a = 5, b = \"asdf\"}@b;"
+      [str]
+    , assertTerminalType 
+      "Access record variable"
+      [r| record Person = Person {a :: Num, b :: Str};
+          bar :: Person;
+          bar@b;
+      |]
+      [str]
+    , assertTerminalType 
+      "Access record-returning expression"
+      [r| record Person = Person {a :: Num, b :: Str};
+          bar :: Num -> Person;
+          (bar 5)@b;
+      |]
+      [str]
+    , assertTerminalType 
+      "Access into tupled"
+      [r| record Person = Person {a :: Num, b :: Str};
+          bar :: Num -> Person;
+          ((bar 5)@a, (bar 6)@b);
+      |]
+      [tuple [num, str]]
+    , assertTerminalType 
+      "Access multiple languages"
+      [r| record Person = Person {a :: Num, b :: Str};
+          record R Person = Person {a :: "numeric", b :: "character"};
+          bar :: Person;
+          bar R :: Person;
+          bar@b;
+      |]
+      [str, varc RLang "character"]
+    ]
 
 packerTests =
   testGroup

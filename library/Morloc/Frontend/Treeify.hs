@@ -206,6 +206,9 @@ collectExpr d args n ts (VarE v)
           | t <- ts
           , t' <- ts'
           , langOf t == langOf t'])
+collectExpr d args n ts (AccE e k) = do
+  e' <- collectAnno d args n e
+  return [(AccS e' k, ts)]
 collectExpr d args n ts (ListE es) = do
   es' <- mapM (collectAnno d args n) es
   return [(ListS es', ts)]

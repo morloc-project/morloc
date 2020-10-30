@@ -67,6 +67,7 @@ errmsg OccursCheckFail = "OccursCheckFail"
 errmsg EmptyCut = "EmptyCut"
 errmsg TypeMismatch = "TypeMismatch"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
+errmsg BadRecordAccess = "BadRecordAccess" 
 errmsg NoAnnotationFound = "NoAnnotationFound"
 errmsg (OtherError msg) = "OtherError: " <> msg
 -- container errors

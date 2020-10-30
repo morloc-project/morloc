@@ -192,6 +192,7 @@ data MorlocError
   | EmptyCut
   | TypeMismatch
   | ToplevelRedefinition
+  | BadRecordAccess
   | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
   -- container errors
@@ -314,6 +315,7 @@ instance Functor One where
 data SExpr g f c
   = UniS
   | VarS EVar
+  | AccS (SAnno g f c) EVar
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
   | LamS [EVar] (SAnno g f c)

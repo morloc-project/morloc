@@ -89,6 +89,8 @@ data Expr
   -- ^ (())
   | VarE EVar
   -- ^ (x)
+  | AccE Expr EVar
+  -- ^ person@age - access a field in a record
   | ListE [Expr]
   -- ^ [e]
   | TupleE [Expr]

@@ -175,6 +175,9 @@ data ExprM f
   -- If the string "for" were retained as the variable name, this would fail in
   -- many language where "for" is a keyword.
 
+  | AccM (ExprM f) EVar 
+  -- ^ Access a field in record ExprM
+
   | LetVarM TypeM Int
   -- ^ An internally generated variable id used in let assignments. When
   -- translated into a language, the integer will be used to generate a unique

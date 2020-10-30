@@ -84,6 +84,7 @@ prettyImport imp =
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
 prettyExpr (VarE s) = pretty s
+prettyExpr (AccE e k) = parens (prettyExpr e) <> "@" <> pretty k 
 prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
 prettyExpr (AnnE e ts) = parens
   $   prettyExpr e

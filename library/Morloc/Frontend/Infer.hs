@@ -621,6 +621,18 @@ infer' lang g e@(VarE v) = do
     mapTS f (TypeSet (Just a) es) = map f (a:es)
     mapTS f (TypeSet Nothing es) = map f es
 
+infer' lang g (AccE e k) = do
+  (g', record_ts, e') <- infer lang g e
+  ts <- mapM (accessRecord k) record_ts
+  return (g', ts, AnnE e' ts)
+  where
+    accessRecord :: EVar -> UnresolvedType -> Stack UnresolvedType
+    accessRecord (EVar k) (NamU _ _ _ rs) =
+      case [t | (k', t) <- rs, k' == k] of
+        [] -> throwError BadRecordAccess
+        [t] -> return t
+        _ -> throwError  BadRecordAccess
+
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
