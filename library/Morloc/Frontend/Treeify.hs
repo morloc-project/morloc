@@ -17,7 +17,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Morloc.Frontend.Pretty (prettyExpr)
+import Morloc.Frontend.Pretty ()
 
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
@@ -232,8 +232,11 @@ collectExpr d args n _ (AppE e1 e2) = do
   (SAnno (Many fs) g1) <- collectAnno d args n e1
   e2' <- collectAnno d args n e2
   mapM (app g1 e2') fs
-collectExpr _ _ _ _ e = MM.throwError . GeneratorError . render $
-  "Unexpected expression in collectExpr:" <> prettyExpr e
+-- None of these should occur unless there is a bug in the code
+collectExpr _ _ _ _ x@(AnnE _ _) = error $ show x
+collectExpr _ _ _ _ x@(SrcE _) = error $ show x
+collectExpr _ _ _ _ x@(Signature _ _) = error $ show x
+collectExpr _ _ _ _ x@(Declaration _ _) = error $ show x
 
 
 
