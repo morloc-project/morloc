@@ -15,7 +15,6 @@ module Morloc.CodeGenerator.Nexus
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
-import Morloc.Pretty (prettyType)
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
 import qualified Morloc.Language as ML
@@ -118,7 +117,7 @@ usageLineT (_, name, t) =
   [idoc|print STDERR "  #{name} [#{pretty (nargs t)}]\n";|]
 
 usageLineConst :: (EVar, MDoc, [EVar]) -> MDoc
-usageLineConst (v, d, _) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
+usageLineConst (v, _, _) = [idoc|print STDERR "  #{pretty v} [0]\n";|]
 
 functionT :: FData -> MDoc
 functionT (cmd, name, t) =
@@ -137,11 +136,11 @@ sub call_#{name}{
     poolcall = hsep $ cmd : map argT [0 .. (n - 1)]
 
 functionCT :: (EVar, MDoc, [EVar]) -> MDoc
-functionCT (v, d, vs) =
+functionCT (cmd, d, vs) =
   [idoc|
-sub call_#{pretty v}{
+sub call_#{pretty cmd}{
     if(scalar(@_) != #{pretty $ length vs}){
-        print STDERR "Expected #{pretty $ length vs} arguments to '#{pretty v}', given " . scalar(@_) . "\n";
+        print STDERR "Expected #{pretty $ length vs} arguments to '#{pretty cmd}', given " . scalar(@_) . "\n";
         exit 1;
     }
     my $x = '#{d}';

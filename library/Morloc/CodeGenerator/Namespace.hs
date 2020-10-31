@@ -24,8 +24,6 @@ module Morloc.CodeGenerator.Namespace
 
 import Morloc.Namespace
 import Data.Scientific (Scientific)
-import Data.Set (Set)
-import Data.Map (Map)
 import Data.Text (Text)
 
 data PVar
@@ -50,7 +48,9 @@ instance Typelike TypeP where
   typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
   typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
   typeOf (NamP r (PV lang _ t) ps es)
-    = NamT r (TV (Just lang) t) (map typeOf ps) (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+    = NamT r (TV (Just lang) t)
+             (map typeOf ps)
+             (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
 
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f))

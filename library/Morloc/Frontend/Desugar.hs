@@ -10,7 +10,7 @@ Stability   : experimental
 module Morloc.Frontend.Desugar (desugar, desugarType) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Pretty
+import Morloc.Pretty ()
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
@@ -45,12 +45,12 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
     -> Import
     -> ParserNode
     -> MorlocMonad [(EVar, EVar)]
-  resolveImport _ (Import v Nothing exc _) n2
+  resolveImport _ (Import _ Nothing exc _) n2
     = return
     . map (\x -> (x,x)) -- alias is identical
     . Set.toList
     $ Set.difference (parserNodeExports n2) (Set.fromList exc)
-  resolveImport _ (Import v (Just inc) exc _) n2
+  resolveImport _ (Import _ (Just inc) exc _) n2
     | length contradict > 0
         = MM.throwError . CallTheMonkeys
         $ "Error: The following terms are both included and excluded: " <>
@@ -151,7 +151,7 @@ desugarType d k (ExistU v ts ds) = do
   return $ ExistU v ts' ds'
 desugarType d k (ForallU v t) = ForallU v <$> desugarType d k t
 desugarType d k (FunU t1 t2) = FunU <$> desugarType d k t1 <*> desugarType d k t2
-desugarType d k t0@(ArrU v ts) =
+desugarType d k (ArrU v ts) =
   case lookupTypedefs v k d of
     [] -> ArrU v <$> mapM (desugarType d k) ts
     (t':ts') -> do
@@ -170,7 +170,7 @@ lookupTypedefs
   -> MVar
   -> DAG MVar [(EVar, EVar)] ParserNode
   -> [(UnresolvedType, [TVar])]
-lookupTypedefs t@(TV lang v) k h
+lookupTypedefs (TV lang v) k h
   = catMaybes
   . MDD.nodes
   . MDD.mapNode (\(EVar v', typemap) -> Map.lookup (TV lang v') typemap)
@@ -191,8 +191,8 @@ mergeAliases v i t@(t1, ts1) (t2, ts2)
     && length ts1 == length ts2 = return t
   | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
   where
-    t1' = foldl (\t v -> ForallU v t) t1 ts1
-    t2' = foldl (\t v -> ForallU v t) t2 ts2
+    t1' = foldl (\t' v' -> ForallU v' t') t1 ts1
+    t2' = foldl (\t' v' -> ForallU v' t') t2 ts2
 
 
 parsub :: (TVar, UnresolvedType) -> UnresolvedType -> UnresolvedType
@@ -217,7 +217,7 @@ addPackerMap d = do
     (Just d') -> return d'
 
 gatherPackers
-  :: MVar -- the importing module name
+  :: MVar -- the importing module name (currently unused)
   -> PreparedNode -- data about the importing module
   -> [( MVar -- the name of an imported module
         , [(EVar -- the name of a term in the imported module
@@ -226,7 +226,7 @@ gatherPackers
         , PreparedNode -- data about the imported module
      )]
   -> MorlocMonad PreparedNode
-gatherPackers k n1 es = do
+gatherPackers _ n1 es = do
   let packers   = starpack n1 Pack
       unpackers = starpack n1 Unpack
   nodepackers <- makeNodePackers packers unpackers n1
@@ -254,7 +254,7 @@ makeNodePackers xs ys n =
       ys' = map (\(x,y,z)->(x, choiceExistential y, z)) ys
       items = [ ( packerKey t2
                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
-              | (v1, t1, ss1) <- xs'
+              | (_ , t1, ss1) <- xs'
               , (v2, t2, ss2) <- ys'
               , packerTypesMatch t1 t2
               ]
@@ -277,6 +277,7 @@ packerTerm v n = listToMaybe . catMaybes $
 choiceExistential :: UnresolvedType -> UnresolvedType
 choiceExistential (VarU v) = VarU v
 choiceExistential (ExistU _ _ (t:_)) = (choiceExistential t)
+choiceExistential (ExistU _ _ []) = error "Existential with no default value"
 choiceExistential (ForallU v t) = ForallU v (choiceExistential t)
 choiceExistential (FunU t1 t2) = FunU (choiceExistential t1) (choiceExistential t2)
 choiceExistential (ArrU v ts) = ArrU v (map choiceExistential ts)
@@ -300,11 +301,6 @@ packerKey t = case splitArgs t of
   (params, [ArrU v _, _]) -> (v, length params)
   (params, [NamU _ v _ _, _]) -> (v, length params)
   _ -> error "bad packer"
-
-nargsU :: UnresolvedType -> Int
-nargsU (ForallU _ t) = nargsU t
-nargsU (FunU _ t) = 1 + nargsU t
-nargsU _ = 0
 
 qualify :: [TVar] -> UnresolvedType -> UnresolvedType
 qualify [] t = t
@@ -335,6 +331,7 @@ inheritPackers es n =
     toAlias n' = n' { unresolvedPackerTerm = unresolvedPackerTerm n' >>= (flip lookup) es }
 
     isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
+    isImported _ [] = False
     isImported names' (n0:_) = case unresolvedPackerTerm n0 of
-      Nothing -> False
       (Just (EVar v)) -> Set.member v names'
+      _ -> False

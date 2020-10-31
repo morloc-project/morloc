@@ -32,17 +32,9 @@ module Morloc.CodeGenerator.Grammars.Common
 
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
-import Morloc.Pretty (prettyType)
-import qualified Data.Map.Strict as Map
-import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Morloc.System as MS
 import qualified Morloc.CodeGenerator.Serial as MCS
-
-import Data.Scientific (Scientific)
-import qualified Data.Set as Set
 
 
 prettyArgument :: Argument -> MDoc
@@ -72,21 +64,21 @@ nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
 
 prettyExprM :: ExprM f -> MDoc
-prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
+prettyExprM e0 = (vsep . punctuate line . fst $ f e0) <> line where
   manNamer :: Int -> MDoc
   manNamer i = "m" <> pretty i
 
   f :: ExprM f -> ([MDoc], MDoc)
   f (ManifoldM m args e) =
     let (ms', body) = f e
-        head = manNamer (metaId m) <> tupled (map prettyArgument args)
-        mdoc = block 4 head body
+        decl = manNamer (metaId m) <> tupled (map prettyArgument args)
+        mdoc = block 4 decl body
     in (mdoc : ms', manNamer (metaId m))
   f (PoolCallM t _ cmds args) =
     let poolArgs = cmds ++ map prettyArgument args
     in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
   f (ForeignInterfaceM t e) =
-    let (ms, e') = f e
+    let (ms, _) = f e
     in (ms, "ForeignInterface :: " <> prettyTypeM t)
   f (LetM v e1 e2) =
     let (ms1', e1') = f e1
@@ -96,14 +88,14 @@ prettyExprM e = (vsep . punctuate line . fst $ f e) <> line where
     let (ms', fun') = f fun
         (mss', xs') = unzip $ map f xs
     in (ms' ++ concat mss', fun' <> tupled xs')
-  f (SrcM c src) = ([], pretty (srcName src))
+  f (SrcM _ src) = ([], pretty (srcName src))
   f (LamM args e) =
     let (ms', e') = f e
         vsFull = map prettyArgument args
         vsNames = map (\r -> "x" <> pretty (argId r)) args
     in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
-  f (BndVarM c i) = ([], "x" <> pretty i)
-  f (LetVarM c i) = ([], "a" <> pretty i)
+  f (BndVarM _ i) = ([], "x" <> pretty i)
+  f (LetVarM _ i) = ([], "a" <> pretty i)
   f (AccM e k) =
     let (ms, e') = f e
     in (ms, parens e' <> "@" <> pretty k)
@@ -147,7 +139,9 @@ prettyTypeP (FunP t1 t2) = parens (prettyTypeP t1 <+> "->" <+> prettyTypeP t2)
 prettyTypeP (ArrP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
 prettyTypeP (NamP r v _ rs)
   = viaShow r <+> prettyPVar v <+> encloseSep "{" "}" ","
-    (zipWith (\k v -> k <+> "=" <+> v) (map (prettyPVar . fst) rs) (map (prettyTypeP . snd) rs))
+    (zipWith (\key val -> key <+> "=" <+> val)
+             (map (prettyPVar . fst) rs)
+             (map (prettyTypeP . snd) rs))
 
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
@@ -283,7 +277,7 @@ typeOfExprM (ReturnM e) = typeOfExprM e
 
 packTypeM :: TypeM -> TypeM
 packTypeM (Native t) = Serial t
-packTypeM (Function ts t) = error $ "BUG: Cannot pack a function"
+packTypeM (Function _ _) = error $ "BUG: Cannot pack a function"
 packTypeM t = t
 
 unpackTypeM :: TypeM -> TypeM
@@ -310,7 +304,7 @@ type2jsontype (ArrP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
 type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
 type2jsontype (NamP namType (PV _ _ v) _ rs) = do
   vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ jsontype (zip [v | (PV _ _ v, _) <- rs] vs)
+  return $ NamJ jsontype (zip [val | (PV _ _ val, _) <- rs] vs)
   where
     jsontype = case namType of
       NamRecord -> "record"
@@ -325,7 +319,7 @@ jsontype2json (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
 jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "}" "," rs' <> "}" where
   keys = map (dquotes . pretty) (map fst rs) 
   vals = map jsontype2json (map snd rs)
-  rs' = zipWith (\k v -> k <> ":" <> v) keys vals
+  rs' = zipWith (\key val -> key <> ":" <> val) keys vals
 
 argsOf :: ExprM f -> [Argument]
 argsOf (LamM args _) = args

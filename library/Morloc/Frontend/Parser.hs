@@ -252,9 +252,8 @@ pTypedefObject = do
   _ <- symbol "="
   constructor <- name <|> stringLiteral
   entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
-  lang <- CMS.gets stateLang
-  setLang Nothing
   let t = NamU r (TV lang constructor) (map VarU vs) entries
+  setLang Nothing
   return $ MBTypeDef v vs t
 
 desugarTableEntries
@@ -267,10 +266,7 @@ desugarTableEntries _ NamObject entry = return entry
 desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
   f :: UnresolvedType -> Parser UnresolvedType
   f (ForallU v t) = ForallU v <$> f t
-  f t = do
-    v <- newvar lang
-    let dts = MLD.defaultList lang t
-    return $ head dts
+  f t = return $ head (MLD.defaultList lang t)
 
 pNamType :: Parser NamType
 pNamType = choice [pNamObject, pNamTable, pNamRecord] 
@@ -429,7 +425,7 @@ pSrcE = do
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  path <- case (modulePath, srcfile) of
+  srcFile <- case (modulePath, srcfile) of
     -- build a path to the source file by searching
     -- > source "R" from "foo.R" ("Foo" as foo, "bar")
     (Just f, Just srcfile') -> return . Just $ MS.combine (MS.takeDirectory f) srcfile'
@@ -439,12 +435,11 @@ pSrcE = do
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
     (Nothing, s) -> return s 
-  let path = maybe srcfile (\f -> MS.combine (MS.takeDirectory f) <$> srcfile) modulePath
-  return $ SrcE [Source { srcName = name
+  return $ SrcE [Source { srcName = srcVar
                         , srcLang = language
-                        , srcPath = path
-                        , srcAlias = alias
-                        } | (name, alias) <- rs]
+                        , srcPath = srcFile
+                        , srcAlias = aliasVar
+                        } | (srcVar, aliasVar) <- rs]
 
 pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do

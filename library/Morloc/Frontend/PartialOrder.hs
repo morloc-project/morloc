@@ -46,7 +46,6 @@ substitute v r t = sub t
     sub (ArrU v' ts) = ArrU v' (map sub ts)
     sub (NamU namType v' ts rs) = NamU namType v' (map sub ts) [(x, sub t') | (x, t') <- rs]
     sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
-    sub t' = t'
 
 -- | TODO: document
 free :: UnresolvedType -> Set.Set UnresolvedType
@@ -112,6 +111,7 @@ getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
     findNew :: [String] -> Set.Set UnresolvedType -> TVar
+    findNew [] _ = error "Could not fresh variable in an infinite list ... odd"
     findNew (x:xs) ts
       | Set.member (VarU v) ts = findNew xs ts 
       | otherwise = v

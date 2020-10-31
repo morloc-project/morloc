@@ -11,7 +11,7 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import Morloc.Frontend.PartialOrder
+import Morloc.Frontend.PartialOrder ()
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
@@ -65,7 +65,7 @@ collectSExprs d n v = do
   let termTree = MDD.lookupAliasedTerm v (typedNodeModuleName n) (makeTermOrigin v) d
 
   -- DAG MVar None [(SExpr GMeta Many [CType], [CType])]
-  sexprTree <- MDD.mapNodeM (\(v,(n,ts)) -> collectTerms d v n ts) termTree
+  sexprTree <- MDD.mapNodeM (\(v',(n',ts)) -> collectTerms d v' n' ts) termTree
 
   -- [(SExpr GMeta Many [CType], [CType])]
   let trees = concat . MDD.nodes $ sexprTree
@@ -134,14 +134,14 @@ collectTerm
   -> TypedNode
   -> TermOrigin
   -> MorlocMonad (SExpr GMeta Many [CType], [CType])
-collectTerm d v n (Sourced src)
+collectTerm _ v n (Sourced src)
   = case Map.lookup v (typedNodeTypeMap n) of
     Nothing -> MM.throwError . CallTheMonkeys $ "No type found for this"
-    (Just (TypeSet g es)) -> do
+    (Just (TypeSet _ es)) -> do
       let ts = [etype e | e <- es, Just (srcLang src) == langOf e]
           ts' = map resolve ts
       return (CallS src, map CType ts')
-collectTerm d v n (Declared (AnnE e ts)) = do
+collectTerm d _ n (Declared (AnnE e ts)) = do
   ts' <- getCTypes ts
   xs <- collectExpr d Set.empty n ts' e
   case xs of
@@ -202,10 +202,10 @@ collectExpr d args n ts (VarE v)
       :: [CType]
       -> (SExpr GMeta Many [CType], [CType])
       -> (SExpr GMeta Many [CType], [CType])
-    chooseTypes ts (x, ts') =
+    chooseTypes ts1 (x, ts2) =
       (x, [ t
-          | t <- ts
-          , t' <- ts'
+          | t <- ts1
+          , t' <- ts2
           , langOf t == langOf t'])
 collectExpr d args n ts (AccE e k) = do
   e' <- collectAnno d args n e
@@ -220,16 +220,16 @@ collectExpr d args n ts (RecE entries) = do
   es' <- mapM (collectAnno d args n) (map snd entries)
   let entries' = zip (map fst entries) es'
   return [(RecS entries', ts)]
-collectExpr d args n ts e@(LamE v x) = do
+collectExpr d args n ts e@(LamE _ _) = do
   case unrollLambda e of
     (args', e') -> do
       e'' <- collectAnno d (Set.union args (Set.fromList args')) n e'
       return [(LamS args' e'', ts)]
-collectExpr d args n ts (AppE e1 e2) = do
-  -- The topology of e1' may vary. It could be a direct binary function. Or
+collectExpr d args n _ (AppE e1 e2) = do
+  -- The topology may vary. It could be a direct binary function. Or
   -- it could be a partially applied function. So it is necessary to map
   -- over the Many.
-  e1'@(SAnno (Many fs) g1) <- collectAnno d args n e1
+  (SAnno (Many fs) g1) <- collectAnno d args n e1
   e2' <- collectAnno d args n e2
   mapM (app g1 e2') fs
 collectExpr _ _ _ _ e = MM.throwError . GeneratorError . render $

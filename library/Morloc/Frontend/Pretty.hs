@@ -68,19 +68,6 @@ prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
 prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 
-prettyImport :: Import -> Doc AnsiStyle
-prettyImport imp =
-  "import" <+>
-  pretty (importModuleName imp) <+>
-  maybe
-    "*"
-    (\xs -> encloseSep "(" ")" ", " (map prettyImportOne xs))
-    (importInclude imp)
-  where
-    prettyImportOne (e, alias)
-      | e /= alias = pretty e
-      | otherwise = pretty e <+> "as" <+> pretty alias
-
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
 prettyExpr (VarE s) = pretty s

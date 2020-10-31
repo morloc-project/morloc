@@ -60,12 +60,12 @@ lookupNode k d = case Map.lookup k d of
   (Just (n,_)) -> Just n
   Nothing -> Nothing
 
-lookupEdge :: (Ord k, Eq k) => k -> k -> DAG k e n -> Maybe e
+lookupEdge :: (Ord k) => k -> k -> DAG k e n -> Maybe e
 lookupEdge k1 k2 d = case Map.lookup k1 d of
   (Just (_,xs)) -> lookup k2 xs
   Nothing -> Nothing
 
-lookupEdgeTriple :: (Ord k, Eq k) => k -> k -> DAG k e n -> Maybe (n, e, n)
+lookupEdgeTriple :: (Ord k) => k -> k -> DAG k e n -> Maybe (n, e, n)
 lookupEdgeTriple k1 k2 d = do
   (n1, xs) <- Map.lookup k1 d
   e <- lookup k2 xs
@@ -76,7 +76,7 @@ local :: Ord k => k -> DAG k e n -> Maybe (n, [(k, e, n)])
 local k d = do
   (n1, xs) <- Map.lookup k d
   ns <- mapM (flip lookupNode $ d) (map fst xs)
-  return $ (n1, [(k,e,n2) | (n2, (k, e)) <- zip ns xs])
+  return $ (n1, [(k',e,n2) | (n2, (k', e)) <- zip ns xs])
 
 -- | Get all roots
 roots :: Ord k => DAG k e n -> [k]
@@ -87,7 +87,7 @@ roots d = Set.toList $ Set.difference parents children
     children = Set.fromList (map snd g)
 
 -- | Get all leaves that have no children
-leafs :: Ord k => DAG k e n -> [k]
+leafs :: DAG k e n -> [k]
 leafs d = [k | (k, (_, [])) <- Map.toList d]
 
 -- | Searches a DAG for a cycle, stops on the first observed cycle and returns
@@ -158,7 +158,7 @@ mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
     runit (k1, _) = case local k1 d of 
       (Just (n1, xs)) -> do
-        e2s <- mapM (\(k2, e, n2) -> f n1 e n2) xs
+        e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
         return (k1, (n1, zip (map (\(x,_,_)->x) xs) e2s))
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
@@ -232,11 +232,11 @@ lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
     | otherwise = case Map.lookup k d0 of
         Nothing -> error "Could not find module"
         (Just (n, xs)) -> do
-          let xs' = [ (k, [(v1,v2) | (v1,v2) <- vs, v2 == v])
-                    | (k, vs) <- xs
+          let xs' = [ (k', [(v1,v2) | (v1,v2) <- vs, v2 == v])
+                    | (k', vs) <- xs
                     , elem v (map snd vs)]
-              edges = map (\(k, _) -> (k, None)) xs'
+              edges' = map (\(k', _) -> (k', None)) xs'
           n' <- f n
           foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)
-                (Map.insert k ((v, n'), edges) d)
-                (concat [zip (repeat k) (map fst vs) | (k, vs) <- xs'])
+                (Map.insert k ((v, n'), edges') d)
+                (concat [zip (repeat k') (map fst vs) | (k', vs) <- xs'])

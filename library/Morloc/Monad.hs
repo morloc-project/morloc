@@ -42,7 +42,6 @@ import Morloc.Error () -- for MorlocError Show instance
 import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
-import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified System.Directory as SD

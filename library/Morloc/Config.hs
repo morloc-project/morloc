@@ -23,9 +23,9 @@ import qualified Morloc.Language as ML
 import qualified Data.HashMap.Strict as H
 import qualified Data.Yaml.Config as YC
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
 import Morloc.Pretty ()
+
 
 getDefaultConfigFilepath :: IO Path
 getDefaultConfigFilepath =

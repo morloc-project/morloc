@@ -41,7 +41,6 @@ module Morloc.Frontend.Internal
 import Control.Monad.Except (throwError)
 import Morloc.Frontend.Namespace
 import qualified Control.Monad.State as CMS
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.PartialOrder as P
@@ -54,11 +53,11 @@ instance HasManyLanguages TypeSet where
   langsOf _ (TypeSet (Just e) es) = langOf e : map langOf es
 
 instance HasManyLanguages Expr where
-  langsOf g e = unique $ Nothing : langsOf' g e where
+  langsOf g0 e0 = unique $ Nothing : langsOf' g0 e0 where
     langsOf' _ (SrcE srcs) = map (Just . srcLang) srcs
     langsOf' _ (Signature _ t) = [langOf t] 
     langsOf' g (Declaration _ e) = langsOf' g e
-    langsOf' g UniE = [] 
+    langsOf' _ UniE = [] 
     langsOf' g (VarE v) = case lookupE v g of  
       (Just (_, ts)) -> langsOf g ts
       Nothing -> []
@@ -67,10 +66,10 @@ instance HasManyLanguages Expr where
     langsOf' g (TupleE es) = concat . map (langsOf' g) $ es
     langsOf' g (LamE _ e) = langsOf' g e 
     langsOf' g (AppE e1 e2) = langsOf' g e1 ++ langsOf' g e2 
-    langsOf' g (AnnE e ts) = map langOf ts
-    langsOf' g (NumE _) = []
-    langsOf' g (LogE _) = [] 
-    langsOf' g (StrE _) = []
+    langsOf' _ (AnnE _ ts) = map langOf ts
+    langsOf' _ (NumE _) = []
+    langsOf' _ (LogE _) = [] 
+    langsOf' _ (StrE _) = []
     langsOf' g (RecE entries) = concat . map (langsOf' g . snd) $ entries
 
 class Renameable a where
@@ -140,7 +139,7 @@ instance Typed EType where
   toType lang e
     | (langOf . etype) e == lang = Just (etype e)
     | otherwise = Nothing
-  fromType lang t =
+  fromType _ t =
     EType
       { etype = t
       , eprop = Set.empty
@@ -292,59 +291,57 @@ anns e ts = AnnE e ts
 -- type, then that type can be used to replace the existential. Otherwise, the
 -- existential can be cast as generic (ForallU).
 generalize :: UnresolvedType -> UnresolvedType
-generalize t = generalize' existentialMap t'
-  where
+generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
+  generalize' :: [(TVar, Name)] -> UnresolvedType -> UnresolvedType
+  generalize' [] t = t
+  generalize' ((e, r):xs) t = generalize' xs (generalizeOne e r t)
 
-    t' = setDefaults t
+  setDefaults :: UnresolvedType -> UnresolvedType
+  setDefaults (ExistU v ps []) = ExistU v (map setDefaults ps) []
+  setDefaults (ExistU _ _ (d:_)) = setDefaults d
+  setDefaults t@(VarU _) = t
+  setDefaults (ForallU v t) = ForallU v (setDefaults t)
+  setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t2)
+  setDefaults (ArrU v ts) = ArrU v (map setDefaults ts)
+  setDefaults (NamU r v ts es)
+    = NamU r v (map setDefaults ts) (zip (map fst es) (map (setDefaults . snd) es))
 
-    generalize' :: [(TVar, Name)] -> UnresolvedType -> UnresolvedType
-    generalize' [] t' = t'
-    generalize' ((e, r):xs) t' = generalize' xs (generalizeOne e r t')
+  variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
-    setDefaults :: UnresolvedType -> UnresolvedType
-    setDefaults (ExistU v ps []) = ExistU v (map setDefaults ps) []
-    setDefaults (ExistU _ _ (d:_)) = setDefaults d
-    setDefaults t@(VarU _) = t
-    setDefaults (ForallU v t) = ForallU v (setDefaults t)
-    setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t2)
-    setDefaults (ArrU v ts) = ArrU v (map setDefaults ts)
-    setDefaults (NamU r v ts es) = NamU r v (map setDefaults ts) (zip (map fst es) (map (setDefaults . snd) es))
+  existentialMap t =
+    zip (Set.toList (findExistentials t)) (map (Name . MT.pack) variables)
 
-    existentialMap =
-      zip (Set.toList (findExistentials t')) (map (Name . MT.pack) variables)
+  findExistentials :: UnresolvedType -> Set.Set TVar
+  findExistentials (VarU _) = Set.empty
+  findExistentials (ExistU v ts ds) =
+    Set.unions
+      $ [Set.singleton v]
+      ++ map findExistentials ts
+      ++ map findExistentials ds
+  findExistentials (ForallU v t) = Set.delete v (findExistentials t)
+  findExistentials (FunU t1 t2) =
+    Set.union (findExistentials t1) (findExistentials t2)
+  findExistentials (ArrU _ ts) = Set.unions (map findExistentials ts)
+  findExistentials (NamU _ _ ts rs)
+    = Set.unions (map findExistentials ts ++ map (findExistentials . snd) rs)
 
-    variables = [1 ..] >>= flip replicateM ['a' .. 'z']
-
-    findExistentials :: UnresolvedType -> Set.Set TVar
-    findExistentials (VarU _) = Set.empty
-    findExistentials (ExistU v ts ds) =
-      Set.unions
-        $ [Set.singleton v]
-        ++ map findExistentials ts
-        ++ map findExistentials ds
-    findExistentials (ForallU v t') = Set.delete v (findExistentials t')
-    findExistentials (FunU t1 t2) =
-      Set.union (findExistentials t1) (findExistentials t2)
-    findExistentials (ArrU _ ts) = Set.unions (map findExistentials ts)
-    findExistentials (NamU _ _ ts rs) = Set.unions (map findExistentials ts ++ map (findExistentials . snd) rs)
-
-    generalizeOne :: TVar -> Name -> UnresolvedType -> UnresolvedType
-    generalizeOne v0@(TV lang _) r t0 = ForallU (TV lang (unName r)) (f v0 t0)
-      where
-        f :: TVar -> UnresolvedType -> UnresolvedType
-        f v t1@(ExistU v' [] _)
-          | v == v' = VarU (TV lang (unName r))
-          | otherwise = t1
-        f v t1@(ExistU v' ts _)
-          | v == v' = ArrU (TV lang (unName r)) (map (f v) ts)
-          | otherwise = ArrU v (map (f v) ts)
-        f v (FunU t1 t2) = FunU (f v t1) (f v t2)
-        f v t1@(ForallU x t2)
-          | v /= x = ForallU x (f v t2)
-          | otherwise = t1
-        f v (ArrU v' xs) = ArrU v' (map (f v) xs)
-        f v (NamU r v' ts xs) = NamU r v' (map (f v) ts) (map (\(v', t) -> (v', f v t)) xs)
-        f _ t1 = t1
+  generalizeOne :: TVar -> Name -> UnresolvedType -> UnresolvedType
+  generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
+    where
+      f :: TVar -> UnresolvedType -> UnresolvedType
+      f v t1@(ExistU v' [] _)
+        | v == v' = VarU (TV lang0 (unName r0))
+        | otherwise = t1
+      f v (ExistU v' ts _)
+        | v == v' = ArrU (TV lang0 (unName r0)) (map (f v) ts)
+        | otherwise = ArrU v (map (f v) ts)
+      f v (FunU t1 t2) = FunU (f v t1) (f v t2)
+      f v t1@(ForallU x t2)
+        | v /= x = ForallU x (f v t2)
+        | otherwise = t1
+      f v (ArrU v' xs) = ArrU v' (map (f v) xs)
+      f v (NamU r v' ts xs) = NamU r v' (map (f v) ts) [(k, f v t) | (k, t) <- xs]
+      f _ t1 = t1
 
 generalizeE :: Expr -> Expr
 generalizeE = mapU generalize

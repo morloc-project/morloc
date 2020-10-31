@@ -22,7 +22,6 @@ module Morloc.Frontend.Infer
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
-import qualified Morloc.Language as ML
 import qualified Morloc.Frontend.PartialOrder as P
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.DAG as MDD
@@ -100,7 +99,7 @@ typecheck d = do
     findTVar (NamU _ v _ rs) = v : conmap (findTVar . snd) rs
 
     propagateConstructors
-      :: MVar -- the importing module name
+      :: MVar -- the importing module name (currently unused)
       -> TypedNode -- data about the importing module
       -> [(   MVar -- the name of an imported module
             , [(EVar -- the name of a term in the imported module
@@ -109,10 +108,11 @@ typecheck d = do
             , TypedNode -- data about the imported module
          )]
       -> Stack TypedNode
-    propagateConstructors k n1 es = do
-      let cons = Map.union (typedNodeConstructors n1)
-               $ (Map.fromList . concat) [inherit n2 ps | (_, ps, n2) <- es] 
-      return $ n1 { typedNodeConstructors = cons }
+    propagateConstructors _ n1 es = do
+      let constructor = Map.union (typedNodeConstructors n1)
+                      $ (Map.fromList . concat)
+                        [inherit n2 ps | (_, ps, n2) <- es] 
+      return $ n1 { typedNodeConstructors = constructor }
 
     inherit :: TypedNode -> [(EVar, EVar)] -> [(TVar, Source)]
     inherit ((Map.toList . typedNodeConstructors) -> ms) es =
@@ -139,16 +139,16 @@ typecheck d = do
     importTypes' (_, xs, n) = mapMaybe (lookupOne (typedNodeTypeMap n)) xs
 
     lookupOne :: Map.Map EVar TypeSet -> (EVar, EVar) -> Maybe (EVar, TypeSet)
-    lookupOne m (name, alias) = case Map.lookup name m of
+    lookupOne m (name, _) = case Map.lookup name m of
       (Just t) -> return (name, t)
       Nothing -> Nothing
 
     -- Typecheck a set of expressions within a given context (i.e., one module).
     -- Return the modified context and a list of annotated expressions.
     typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
-    typecheckExpr g e = do
-      es <- mapM rename e
-      (g', es') <- typecheckExpr' g [] es
+    typecheckExpr g1 e1 = do
+      es <- mapM rename e1
+      (g', es') <- typecheckExpr' g1 [] es
       let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
       return $ (g', map (generalizeE . unrename . apply g') es'')
       where
@@ -166,9 +166,9 @@ typecheck d = do
 
     mergeManyTypeSets :: (EVar, [TypeSet]) -> Stack (EVar, TypeSet)
     mergeManyTypeSets (v, ts) = do
-      generalType <- mergeGeneral $ catMaybes [gt | (TypeSet gt _) <- ts]
+      gtype <- mergeGeneral $ catMaybes [gt | (TypeSet gt _) <- ts]
       let concreteTypes = concat [cs | (TypeSet _ cs) <- ts]
-      return $ (v, TypeSet generalType concreteTypes)
+      return $ (v, TypeSet gtype concreteTypes)
 
     mergeGeneral :: [EType] -> Stack (Maybe EType)
     mergeGeneral [] = return Nothing
@@ -345,7 +345,7 @@ instantiate t1 t2 g1 = do
 --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- ----------------------------------------- InstLArr
 --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate' ta@(ExistU v@(TV lang _) [] _) (FunU t1 t2) g1 = do
+instantiate' (ExistU v@(TV lang _) [] _) (FunU t1 t2) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -360,7 +360,7 @@ instantiate' ta@(ExistU v@(TV lang _) [] _) (FunU t1 t2) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRArr
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate' t@(FunU t1 t2) tb@(ExistU v@(TV lang _) [] _) g1 = do
+instantiate' (FunU t1 t2) (ExistU v@(TV lang _) [] _) g1 = do
   ea1 <- newvar lang
   ea2 <- newvar lang
   g2 <-
@@ -435,7 +435,7 @@ instantiate' ta@(ExistU v [] []) tb g1
 
 -- if defaults are involved, no solving is done, but the subtypes of parameters
 -- and defaults needs to be checked. 
-instantiate' ta@(ExistU v1 ps1 ds1) tb@(ExistU v2 ps2 ds2) g1 = do
+instantiate' (ExistU _ ps1 ds1) (ExistU _ ps2 ds2) g1 = do
   g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
   g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
   return g3
@@ -464,6 +464,14 @@ infer l g e = do
 -- ----------------------------------------- <primitive>
 --  g |- <primitive expr> => <primitive type> -| g
 --
+-- Uni=>
+infer' Nothing g UniE = do
+  let t = head $ MLD.defaultNull Nothing
+  return (g, [t], ann UniE t)
+infer' lang g UniE = do
+  t <- newvarRich [] [head $ MLD.defaultNull lang] lang
+  return (g +> t, [t], ann UniE t)
+
 -- Num=>
 infer' Nothing g e@(NumE _) = do
   let t = head $ MLD.defaultNumber Nothing
@@ -507,28 +515,28 @@ infer' Nothing g1 s1@(SrcE srcs) = do
 
 -- Signature=>
 infer' (Just _) _ (Signature _ _) = throwError ToplevelStatementsHaveNoLanguage
-infer' Nothing g (Signature v e1) = do
-  g2 <- accessWith1 isAnnG (append' e1) (ifNotFound e1) g
-  return (g2, [], Signature v e1)
+infer' Nothing g1 (Signature v1 e1) = do
+  g2 <- accessWith1 isAnnG (append' e1) (ifNotFound e1) g1
+  return (g2, [], Signature v1 e1)
   where
 
     -- find a typeset
     isAnnG :: GammaIndex -> Bool
-    isAnnG (AnnG (VarE e1) _)
-      | v == e1 = True
+    isAnnG (AnnG (VarE e) _)
+      | v1 == e = True
       | otherwise = False
     isAnnG _ = False
 
     -- update the found typeset
     append' :: EType -> GammaIndex -> Stack GammaIndex
-    append' e (AnnG x@(VarE v) r2) = AnnG <$> pure x <*> appendTypeSet g v r2 e
+    append' e (AnnG x@(VarE _) r2) = AnnG <$> pure x <*> appendTypeSet r2 e
     append' _ _ = throwError $ OtherError "Bad Gamma"
 
     -- create a new typeset if none was found
     ifNotFound :: EType -> Gamma -> Stack Gamma
     ifNotFound e g' = case (langOf . etype) e of
-        lang@(Just _) -> return $ AnnG (VarE v) (TypeSet Nothing [e]) : g'
-        Nothing       -> return $ AnnG (VarE v) (TypeSet (Just e) []) : g'
+        (Just _) -> return $ AnnG (VarE v1) (TypeSet Nothing [e]) : g'
+        Nothing  -> return $ AnnG (VarE v1) (TypeSet (Just e) []) : g'
 
 -- Declaration=>
 infer' (Just _) _ (Declaration _ _) = throwError ToplevelStatementsHaveNoLanguage
@@ -543,13 +551,13 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       (g2, ts2, es2) <- foldM (foldCheck e1) (g1, [], []) xs1
       (g3, ts3, es3) <- mapM newvar langs
                      >>= foldM (foldCheckExist v e1) (g2, ts2, es2)
-      typeset2 <- foldM (appendTypeSet g3 v) typeset (map (toEType g3) ts3)
+      typeset2 <- foldM appendTypeSet typeset (map (toEType g3) ts3)
       return (generalizeTypeSet typeset2, g3, es3)
     -- InferDeclaration
     Nothing -> do
       (g3, ts3, es3) <- foldM (foldInfer v e1) (g1, [], []) (langsOf g1 e1)
       let ts4 = unique ts3
-      typeset2 <- typesetFromList g3 v (map generalize ts4)
+      typeset2 <- typesetFromList (map generalize ts4)
       return (typeset2, g3, es3)
 
   e2 <- collate es4
@@ -565,10 +573,10 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       -> (Gamma, [UnresolvedType], [Expr])
       -> Maybe Lang
       -> Stack (Gamma, [UnresolvedType], [Expr])
-    foldInfer v e' (g1', ts1, es) lang = do
-      (g2', ts2, e2) <- infer lang (g1' +> MarkEG v) e'
-      g3' <- cut (MarkEG v) g2'
-      return (g2', ts1 ++ ts2, e2:es)
+    foldInfer v' e' (g1', ts1, es) lang = do
+      (g2', ts2, e2) <- infer lang (g1' +> MarkEG v') e'
+      g3' <- cut (MarkEG v') g2'
+      return (g3', ts1 ++ ts2, e2:es)
 
     foldCheckExist
       :: EVar
@@ -576,10 +584,10 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       -> (Gamma, [UnresolvedType], [Expr])
       -> UnresolvedType
       -> Stack (Gamma, [UnresolvedType], [Expr])
-    foldCheckExist v e' (g1', ts, es) t' = do
-      (g2', t2', e2') <- check (g1' +> MarkEG v +> t') e' t'
-      g3' <- cut (MarkEG v) g2'
-      return (g2', t2':ts, e2':es)
+    foldCheckExist v' e' (g1', ts, es) t' = do
+      (g2', t2', e2') <- check (g1' +> MarkEG v' +> t') e' t'
+      g3' <- cut (MarkEG v') g2'
+      return (g3', t2':ts, e2':es)
 
     foldCheck ::
          Expr
@@ -591,7 +599,7 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       say (prettyExpr e2')
       return (g2', t2':ts, e2':es)
 
-    toEType g t = EType
+    toEType _ t = EType
       { etype = t
       , eprop = Set.empty
       , econs = Set.empty
@@ -627,17 +635,19 @@ infer' lang g (AccE e k) = do
   return (g', ts, AnnE e' ts)
   where
     accessRecord :: EVar -> UnresolvedType -> Stack UnresolvedType
-    accessRecord (EVar k) (NamU _ _ _ rs) =
-      case [t | (k', t) <- rs, k' == k] of
+    accessRecord (EVar key) (NamU _ _ _ rs) =
+      case [t | (k', t) <- rs, k' == key] of
+        -- FIXME: add error messages
         [] -> throwError BadRecordAccess
         [t] -> return t
         _ -> throwError  BadRecordAccess
+    accessRecord _ _ = throwError  BadRecordAccess
 
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
 -- ----------------------------------------- -->I=>
 --  g1 |- \x.e => Ea -> Eb -| g2
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
-infer' lang g1 e0@(LamE v e2) = do
+infer' lang g1 (LamE v e2) = do
   a <- newvar lang
   b <- newvar lang
   let anng = AnnG (VarE v) (fromType lang a)
@@ -669,8 +679,6 @@ infer' lang g1 (AppE e1 e2) = do
   -- result is a list of the types and expressions derived from e2
   (g2, fs, es2') <- foldM deriveF (d1, [], []) as1
 
-  let cs1 = [c | FunU _ c <- fs]
-
   e2' <- collate es2' 
 
   -- * e1' - e1 with type annotations
@@ -681,9 +689,9 @@ infer' lang g1 (AppE e1 e2) = do
   where
     -- pair input and output types by language and construct the function type
     applyConcrete :: Expr -> Expr -> [UnresolvedType] ->  Stack ([UnresolvedType], Expr)
-    applyConcrete (AnnE e1 f) e2 fs' = do
+    applyConcrete (AnnE e1' _) e2' fs' = do
       let (tas, tcs) = unzip [ (FunU a c, c) | (FunU a c) <- fs' ]
-      return (tcs, AnnE (AppE (AnnE e1 tas) e2) tcs)
+      return (tcs, AnnE (AppE (AnnE e1' tas) e2') tcs)
     applyConcrete e _ _ = do
       say $ prettyScream "ERROR!!!"
       say $ "e =" <+> prettyExpr e
@@ -723,7 +731,7 @@ infer' _ g (AnnE e [t]) =
 infer' _ g (AnnE e ts) = return (g, ts, e)
 
 -- List=>
-infer' lang g1 e1@(ListE xs1) = do
+infer' lang g1 (ListE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
   elementType <- case (P.mostSpecific . catMaybes)  (map fst pairs) of
     [] -> newvar lang
@@ -739,7 +747,7 @@ infer' lang g1 e1@(ListE xs1) = do
 -- Tuple=>
 infer' _ _ (TupleE []) = throwError EmptyTuple
 infer' _ _ (TupleE [_]) = throwError TupleSingleton
-infer' lang g1 e@(TupleE xs1) = do
+infer' lang g1 (TupleE xs1) = do
   (g2, pairs) <- chainInfer lang g1 xs1
   let (ts2may, xs2) = unzip pairs
   ts2 <- case sequence ts2may of
@@ -754,7 +762,7 @@ infer' lang g1 e@(TupleE xs1) = do
 
 -- Record=>
 infer' _ _ (RecE []) = throwError EmptyRecord
-infer' lang g1 e@(RecE rs) = do
+infer' lang g1 (RecE rs) = do
   (g2, pairs) <- chainInfer lang g1 (map snd rs)
   let (ts2may, xs2) = unzip pairs
       keys = map fst rs
@@ -850,7 +858,7 @@ derive' g e (ForallU x s) = derive (g +> ExistG x [] []) e (substitute x s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-derive' g e t@(ExistU v@(TV lang _) [] _) =
+derive' g e (ExistU v@(TV lang _) [] _) =
   case access1 v g of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
@@ -950,10 +958,10 @@ collateOne e1 e2 = throwError . OtherError . render $
   nest 2 . vsep $ ["collation failure - unequal expressions:", viaShow e1, viaShow e2]
 
 collateTypes :: [UnresolvedType] -> [UnresolvedType] -> Stack [UnresolvedType]
-collateTypes ts1 ts2
+collateTypes xs ys
   = mapM (collateByLang . snd)
   . groupSort
-  $ [(langOf t, t) | t <- nub (ts1 ++ ts2)]
+  $ [(langOf t, t) | t <- unique (xs ++ ys)]
   where
     collateByLang :: [UnresolvedType] -> Stack UnresolvedType
     collateByLang [] = throwError . OtherError $ "This should be impossible"
@@ -962,7 +970,7 @@ collateTypes ts1 ts2
 
     moreSpecific :: UnresolvedType -> UnresolvedType -> Stack UnresolvedType
     moreSpecific (FunU t11 t12) (FunU t21 t22) = FunU <$> moreSpecific t11 t21 <*> moreSpecific t12 t22
-    moreSpecific (ArrU v1 ts1) (ArrU v2 ts2) = ArrU v1 <$> zipWithM moreSpecific ts1 ts2
+    moreSpecific (ArrU v1 ts1) (ArrU _ ts2) = ArrU v1 <$> zipWithM moreSpecific ts1 ts2
     moreSpecific (NamU r1 v1 ps rs1) (NamU r2 v2 _ rs2)
       | v1 == v2 && r1 == r2 = NamU r1 <$> pure v1 <*> pure ps <*> zipWithM mergeEntry (sort rs1) (sort rs2)
       | otherwise = throwError . OtherError $ "Cannot collate records with unequal names/langs"
@@ -978,18 +986,18 @@ collateTypes ts1 ts2
 
 
 -- | merge the new data from a signature with any prior type data
-appendTypeSet :: Gamma -> EVar -> TypeSet -> EType -> Stack TypeSet
-appendTypeSet g v s e1 =
+appendTypeSet :: TypeSet -> EType -> Stack TypeSet
+appendTypeSet s e1 =
   case ((langOf . etype) e1, s) of
   -- if e is a general type, and there is no conflicting type, then set e
     (Nothing, TypeSet Nothing rs) -> do
       mapM_ (checkRealization e1) rs
       return $ TypeSet (Just e1) rs
   -- if e is a realization, and no general type is set, just add e to the list
-    (Just lang, TypeSet Nothing rs) -> do
+    (Just _, TypeSet Nothing rs) -> do
       return $ TypeSet Nothing (e1 : [r | r <- rs, r /= e1])
   -- if e is a realization, and a general type exists, append it and check
-    (Just lang, TypeSet (Just e2) rs) -> do
+    (Just _, TypeSet (Just e2) rs) -> do
       checkRealization e2 e1
       return $ TypeSet (Just e2) (e1 : [r | r <- rs, r /= e1])
   -- if e is general, and a general type exists, merge the general types
@@ -1012,7 +1020,7 @@ checkRealization e1 e2 = f' (etype e1) (etype e2)
     f' (ForallU _ x) y = f' x y
     f' x (ForallU _ y) = f' x y
     f' (ExistU _ [] _) (ExistU _ [] _) = return ()
-    f' (ExistU v (x:xs) ds1) (ExistU w (y:ys) ds2) = f' (ExistU v xs ds1) (ExistU w ys ds2)
+    f' (ExistU v (_:xs) ds1) (ExistU w (_:ys) ds2) = f' (ExistU v xs ds1) (ExistU w ys ds2)
     f' (ExistU _ _ _) (ExistU _ _ _) = throwError . OtherError $
       "BadRealization: unequal number of parameters"
     f' (ExistU _ _ _) _ = return ()
@@ -1029,8 +1037,8 @@ checkup g e t = do
   (g', t', e') <- check g e t
   return (g', [t'], e')
 
-typesetFromList :: Gamma -> EVar -> [UnresolvedType] -> Stack TypeSet
-typesetFromList g v ts = do 
+typesetFromList :: [UnresolvedType] -> Stack TypeSet
+typesetFromList ts = do 
   say "typesetFromList"
   let gentype = [makeEType t | t <- ts, (isNothing . langOf) t]
       contype = [makeEType t | t <- ts, (isJust . langOf) t]
@@ -1063,11 +1071,13 @@ chainInfer lang g0 es0 = do
       chainInfer' g' es ((t', e'):xs)
 
 chainCheck :: [(UnresolvedType, Expr)] -> Gamma -> Stack (Gamma, [UnresolvedType], [Expr])
-chainCheck xs g = do
-  (g, ts, es) <- foldM f (g, [], []) xs
+chainCheck xs g0 = do
+  (g, ts, es) <- foldM f (g0, [], []) xs
   return (g, reverse ts, reverse es)
   where
-    f :: (Gamma, [UnresolvedType], [Expr]) -> (UnresolvedType, Expr) -> Stack (Gamma, [UnresolvedType], [Expr])
+    f :: (Gamma, [UnresolvedType], [Expr])
+      -> (UnresolvedType, Expr)
+      -> Stack (Gamma, [UnresolvedType], [Expr])
     f (g', ts, es) (t', e') = do 
       (g'', t'', e'') <- check g' e' t'
       return (g'', t'':ts, e'':es)

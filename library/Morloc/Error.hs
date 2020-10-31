@@ -18,7 +18,6 @@ import Morloc.Namespace
 import Morloc.Pretty (prettyType)
 import Morloc.Data.Doc (render)
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Language as ML
 
 -- TODO: fix this orphan instance
 instance Show MorlocError where
@@ -42,9 +41,9 @@ errmsg (SystemCallError cmd loc msg) =
 errmsg (PoolBuildError msg) = "PoolBuildError: " <> msg
 errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
 errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
-errmsg (BadTypeAliasParameters (TV _ v) exp obs)
+errmsg (BadTypeAliasParameters (TV _ v) exp' obs)
   =  "BadTypeAliasParameters: for type alias " <> MT.show' v
-  <> " expected " <> MT.show' exp
+  <> " expected " <> MT.show' exp'
   <> " parameters but found " <> MT.show' obs
 errmsg (ConflictingTypeAliases t1 t2)
   = "ConflictingTypeAliases: (" <> MT.show' t1 <> ", " <> MT.show' t2 <> ")" 
@@ -60,7 +59,7 @@ errmsg (SubtypeError t1 t2) = "SubtypeError: (" <> MT.show' t1 <> ") <: (" <> MT
 errmsg ExistentialError = "ExistentialError"
 errmsg UnsolvedExistentialTerm = "UnsolvedExistentialTerm"
 errmsg BadExistentialCast = "BadExistentialCast"
-errmsg (AccessError msg) = "AccessError"
+errmsg (AccessError _) = "AccessError"
 errmsg NonFunctionDerive = "NonFunctionDerive"
 errmsg (UnboundVariable v) = "UnboundVariable: " <> unEVar v
 errmsg OccursCheckFail = "OccursCheckFail"
@@ -79,7 +78,7 @@ errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.un
 errmsg (BadImport mv ev) = "BadImport: " <> unMVar mv <> "::" <> unEVar ev
 errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"
-errmsg (SelfImport mv) = "SelfImport"
+errmsg (SelfImport _) = "SelfImport"
 errmsg BadRealization = "BadRealization"
 errmsg MissingSource = "MissingSource"
 -- serialization errors
@@ -90,10 +89,10 @@ errmsg (MissingUnpacker place t)
   = "SerializationError: no unpacker found for type ("
   <> render (prettyType (unCType t)) <> ") at " <> place
 -- type extension errors
-errmsg (AmbiguousPacker tv) = "AmbiguousPacker"
-errmsg (AmbiguousUnpacker tv) = "AmbiguousUnpacker"
-errmsg (AmbiguousCast tv1 tv2) = "AmbiguousCast"
-errmsg (IncompatibleRealization mv) = "IncompatibleRealization"
+errmsg (AmbiguousPacker _) = "AmbiguousPacker"
+errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
+errmsg (AmbiguousCast _ _) = "AmbiguousCast"
+errmsg (IncompatibleRealization _) = "IncompatibleRealization"
 errmsg MissingAbstractType = "MissingAbstractType"
 errmsg ExpectedAbstractType = "ExpectedAbstractType"
 errmsg CannotInferConcretePrimitiveType = "CannotInferConcretePrimitiveType"
@@ -104,3 +103,4 @@ errmsg ConflictingSignatures = "ConflictingSignatures: currently a given term ca
 errmsg CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
 errmsg IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
 errmsg (DagMissingKey msg) = "DagMissingKey: " <> msg
+errmsg TooManyRealizations = "TooManyRealizations"

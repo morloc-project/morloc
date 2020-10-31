@@ -58,7 +58,6 @@ module Morloc.Namespace
   -- ** Type extensions
   , Constraint(..)
   , Property(..)
-  , langOf
   -- ** Types used in post-typechecking tree
   , SAnno(..)
   , SExpr(..)
@@ -72,7 +71,6 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
-import Control.Monad.Identity (Identity)
 import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
@@ -83,9 +81,6 @@ import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec.Error (ParseError)
 import Morloc.Language (Lang(..))
-
-import qualified Data.Map.Strict as M
-import qualified Data.Set as S
 
 -- | no annotations for now
 type MDoc = Doc ()
@@ -244,6 +239,7 @@ data PackageMeta =
     }
   deriving (Show, Ord, Eq)
 
+defaultPackageMeta :: PackageMeta
 defaultPackageMeta =
   PackageMeta
     { packageName = ""
@@ -404,8 +400,8 @@ unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
 unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
 unresolvedType2type (NamU r v ts rs) = NamT r v (map unresolvedType2type ts) (zip (map fst rs) (map (unresolvedType2type . snd) rs))
-unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
-unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
+unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
+unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 
 
 data Property
@@ -443,7 +439,7 @@ class Typelike a where
 
   nargs :: a -> Int
   nargs t = case typeOf t of
-    (FunT _ t) -> 1 + nargs t
+    (FunT _ t') -> 1 + nargs t'
     _ -> 0
 
 instance Typelike Type where
