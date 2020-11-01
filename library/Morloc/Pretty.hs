@@ -14,13 +14,14 @@ module Morloc.Pretty
   , prettyLinePrefixes
   , prettyUnresolvedPacker
   , prettyPackMap
+  , prettySAnnoMany
+  , prettySAnnoOne
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
-import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
@@ -96,20 +97,20 @@ class PrettyType a where
 
 instance PrettyType Type where
   prettyType (UnkT (TV _ v)) = "*" <> pretty v
-  prettyType (VarT (TV lang "Unit")) = "()"
+  prettyType (VarT (TV _ "Unit")) = "()"
   prettyType (VarT v) = pretty v
   prettyType (FunT t1@(FunT _ _) t2) =
     parens (prettyType t1) <+> "->" <+> prettyType t2
   prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
+  prettyType (ArrT (TV Nothing "List") [t]) = brackets (prettyType t)
   prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-  prettyType (NamT r (TV Nothing _) _ entries) =
-    viaShow r <> encloseSep "{" "}" ", "
-      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
-  prettyType (NamT r (TV (Just lang) t) _ entries) =
+  prettyType (NamT _ (TV Nothing _) _ entries) =
+    encloseSep "{" "}" ","
+      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
+  prettyType (NamT _ (TV (Just lang) t) _ entries) =
     pretty t <> "@" <> viaShow lang <+>
-    viaShow r <> 
-    encloseSep "{" "}" ", "
-      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+    encloseSep "{" "}" ","
+      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
 
 
 instance PrettyType GType where
@@ -129,7 +130,7 @@ prettyUnresolvedType (ExistU v ts ds)
   <> list (map prettyUnresolvedType ds)
 prettyUnresolvedType t@(ForallU _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyUnresolvedType (VarU (TV lang "Unit")) = "()"
+prettyUnresolvedType (VarU (TV _ "Unit")) = "()"
 prettyUnresolvedType (VarU v) = pretty v
 prettyUnresolvedType (FunU t1@(FunU _ _) t2) =
   parens (prettyUnresolvedType t1) <+> "->" <+> prettyUnresolvedType t2
@@ -160,3 +161,87 @@ prettyPackMap m =  "----- pacmaps ----\n"
     block 4
       ("packmap" <+> pretty v <> parens (pretty i))
       (vsep $ map prettyUnresolvedPacker ps)
+
+
+prettySAnnoMany :: SAnno GMeta Many [CType] -> MDoc
+prettySAnnoMany (SAnno (Many xs0) g) =
+     pretty (metaId g)
+  <> maybe "" (\n -> " " <> pretty n) (metaName g)
+  <+> "::" <+> maybe "_" prettyType (metaGType g)
+  <> line <> indent 5 (vsep (map writeSome xs0))
+  where
+    writeSome :: (SExpr GMeta Many [CType], [CType]) -> MDoc
+    writeSome (s, ts)
+      =  "_ ::"
+      <+> encloseSep "{" "}" ";" (map prettyType ts)
+      <> line <> writeExpr s
+
+    writeExpr :: SExpr GMeta Many [CType] -> MDoc
+    writeExpr (AccS x k) = pretty k <+> "from " <> nest 2 (prettySAnnoMany x) 
+    writeExpr (ListS xs) = list (map prettySAnnoMany xs)
+    writeExpr (TupleS xs) = list (map prettySAnnoMany xs)
+    writeExpr (RecS entries) = encloseSep "{" "}" "," $
+      map (\(k,v) -> pretty k <+> "=" <+> prettySAnnoMany v) entries
+    writeExpr (LamS vs x)
+      = "LamS"
+      <+> list (map pretty vs)
+      <> line <> indent 2 (prettySAnnoMany x)
+    writeExpr (AppS f xs) = "AppS" <+> indent 2 (vsep (prettySAnnoMany f : map prettySAnnoMany xs))
+    writeExpr x = descSExpr x
+
+-- For example @prettySAnnoOne id Nothing@ for the most simple printer
+prettySAnnoOne
+  :: (a -> CType) -> Maybe (a -> MDoc) -> SAnno GMeta One a -> MDoc
+prettySAnnoOne getType extra s = hang 2 . vsep $ ["AST:", describe s]
+  where
+    addExtra x = case extra of
+      (Just f) -> " " <> f x
+      Nothing -> ""
+
+    describe (SAnno (One (x@(AccS _ _), _)) _) = descSExpr x
+    describe (SAnno (One (x@(ListS _), _)) _) = descSExpr x
+    describe (SAnno (One (x@(TupleS _), _)) _) = descSExpr x
+    describe (SAnno (One (x@(RecS _), _)) _) = descSExpr x
+    describe (SAnno (One (x@(AppS f xs), c)) g) =
+      hang 2 . vsep $
+        [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
+        , describe f
+        ] ++ map describe xs
+    describe (SAnno (One (f@(LamS _ x), c)) g) = do
+      hang 2 . vsep $
+        [ pretty (metaId g)
+            <+> name (getType c) g
+            <+> descSExpr f
+            <+> parens (prettyType (getType c))
+            <> addExtra c
+        , describe x
+        ]
+    describe (SAnno (One (x, c)) g) =
+          pretty (metaId g)
+      <+> descSExpr x
+      <+> parens (prettyType (getType c))
+      <>  addExtra c
+
+    name :: CType -> GMeta -> MDoc
+    name t g =
+      let lang = fromJust (langOf t)
+      in maybe
+          ("_" <+> viaShow lang <+> "::")
+          (\x -> pretty x <+> viaShow lang <+> "::")
+          (metaName g)
+
+descSExpr :: SExpr g f c -> MDoc
+descSExpr (UniS) = "UniS"
+descSExpr (VarS v) = "VarS" <+> pretty v
+descSExpr (CallS src)
+  =   "CallS"
+  <+> pretty (srcAlias src) <+> "<" <> viaShow (srcLang src) <> ">"
+descSExpr (AccS _ k) = "@" <> pretty k
+descSExpr (ListS _) = "ListS"
+descSExpr (TupleS _) = "TupleS"
+descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
+descSExpr (AppS _ _) = "AppS"
+descSExpr (NumS _) = "NumS"
+descSExpr (LogS _) = "LogS"
+descSExpr (StrS _) = "StrS"
+descSExpr (RecS _) = "RecS"

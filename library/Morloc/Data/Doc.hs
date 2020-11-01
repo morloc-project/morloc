@@ -11,7 +11,6 @@ This module re-exports Leijen's text builder along with a few other utilities.
 module Morloc.Data.Doc
   ( module Data.Text.Prettyprint.Doc
   , module Data.Text.Prettyprint.Doc.Render.Text
-  , putDoc
   , render
   , render'
   , textEsc'
@@ -25,7 +24,6 @@ module Morloc.Data.Doc
 
 import Data.Monoid ((<>))
 import qualified Data.Text as DT
-import qualified Data.Text.Lazy as DL
 import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Text
 

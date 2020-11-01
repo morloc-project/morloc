@@ -20,13 +20,11 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.Frontend.PartialOrder (substitute)
-import Morloc.Frontend.Namespace (resolve, substituteT)
+import Morloc.Frontend.Namespace (resolve)
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
-import Morloc.Pretty (prettyType, prettyPackMap, prettyGreenUnresolvedType)
+import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
 
 pv2tv :: PVar -> TVar
@@ -44,16 +42,16 @@ dummies lang = repeat $ VarU (TV lang "dummy")
 
 defaultListAll :: TypeP -> [TypeP]
 defaultListAll t =
-  [ ArrP (PV lang generalType v) [t]
+  [ ArrP (PV lang gtype v) [t]
   | (ArrU (TV (Just lang) v) _) <- Def.defaultList (langOf t) (head (dummies (langOf t)))
   ]
   where
-    generalType = case Def.defaultList Nothing (head (dummies Nothing)) of
+    gtype = case Def.defaultList Nothing (head (dummies Nothing)) of
       ((ArrU (TV _ v1) _):_) -> Just v1
-      [] -> Nothing
+      _ -> Nothing
 
 isList :: TypeP -> Bool
-isList t@(ArrP (PV lang _ v) [_]) =
+isList (ArrP (PV lang _ v) [_]) =
   let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
   in length [v' | (ArrU (TV _ v') _) <- ds, v == v'] > 0
 isList _ = False
@@ -61,16 +59,16 @@ isList _ = False
 defaultTupleAll :: [TypeP] -> [TypeP]
 defaultTupleAll [] = error $ "Illegal empty tuple"
 defaultTupleAll ts@(t:_) =
-    [ ArrP (PV lang generalType v) ts
+    [ ArrP (PV lang gtype v) ts
     | (ArrU (TV (Just lang) v) _) <- Def.defaultTuple (langOf t) (take (length ts) (dummies (langOf t)))
     ]
   where
-    generalType = case Def.defaultTuple Nothing (take (length ts) (dummies Nothing)) of
+    gtype = case Def.defaultTuple Nothing (take (length ts) (dummies Nothing)) of
       ((ArrU (TV _ v1) _):_) -> Just v1
-      [] -> Nothing
+      _ -> Nothing
 
 isTuple :: TypeP -> Bool
-isTuple t@(ArrP (PV lang _ v) ts) =
+isTuple (ArrP (PV lang _ v) ts) =
   let ds = Def.defaultTuple (Just lang) (take (length ts) (dummies (Just lang)))
   in length [v' | (ArrU (TV _ v') _) <- ds, v == v'] > 0
 isTuple _ = False
@@ -78,13 +76,13 @@ isTuple _ = False
 isPrimitiveType :: (Maybe Lang -> [UnresolvedType]) -> TypeP -> Bool
 isPrimitiveType lookupDefault t =
   let xs = filter (typeEqual t)
-         $ [ VarP (PV lang generalType v)
+         $ [ VarP (PV lang gtype v)
            | (VarU (TV (Just lang) v)) <- lookupDefault (langOf t)]
   in length xs > 0
   where
-    generalType = case lookupDefault Nothing of
-      ((VarU (TV lang generalType)):_) -> Just generalType
-      [] -> Nothing
+    gtype = case lookupDefault Nothing of
+      ((VarU (TV _ g)):_) -> Just g
+      _ -> Nothing
 
 -- | recurse all the way to a serializable type
 serialAstToType :: SerialAST One -> MorlocMonad TypeP
@@ -135,7 +133,7 @@ makeSerialAST
   -> TypeP
   -> MorlocMonad (SerialAST Many)
 makeSerialAST _ (UnkP v) = return $ SerialUnknown v
-makeSerialAST m t@(VarP v@(PV lang _ _))
+makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultNull   t = return $ SerialNull   v
   | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
   | isPrimitiveType Def.defaultString t = return $ SerialString v
@@ -144,7 +142,7 @@ makeSerialAST m t@(VarP v@(PV lang _ _))
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST m t@(ArrP v@(PV lang _ s) ts)
+makeSerialAST m t@(ArrP v@(PV _ _ s) ts)
   | isList t = SerialList <$> makeSerialAST m (ts !! 0)
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (pv2tv v, length ts) (metaPackers m) of
@@ -193,12 +191,12 @@ resolveType (_:_) _ = MM.throwError . SerializationError $ "Packer parity error"
 
 -- | substitute all appearances of a given variable with a given new type
 substituteP :: TVar -> TypeP -> TypeP -> TypeP
-substituteP v r t = sub t
+substituteP v0 r0 t0 = sub t0
   where
     sub :: TypeP -> TypeP
     sub t'@(UnkP _) = t'
-    sub t'@(VarP (PV lang g v'))
-      | v == (TV (Just lang) v') = r
+    sub t'@(VarP (PV lang _ v'))
+      | v0 == (TV (Just lang) v') = r0
       | otherwise = t'
     sub (FunP t1 t2) = FunP (sub t1) (sub t2)
     sub (ArrP v' ts) = ArrP v' (map sub ts)
@@ -212,7 +210,7 @@ findSerializationCycles
   -> SerialAST Many
   -> SerialAST Many
   -> Maybe (SerialAST One, SerialAST One)
-findSerializationCycles choose x y = f x y where
+findSerializationCycles choose x0 y0 = f x0 y0 where
   f :: SerialAST Many -> SerialAST Many -> Maybe (SerialAST One, SerialAST One) 
   -- reduce constructs until we get down to something that has general meaning
   f (SerialPack v (Many ss1)) s2

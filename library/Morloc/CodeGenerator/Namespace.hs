@@ -17,6 +17,9 @@ module Morloc.CodeGenerator.Namespace
   , MData(..)
   , PVar(..)
   , TypeP(..)
+  , JsonPath
+  , JsonAccessor(..)
+  , NexusCommand(..)
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -24,8 +27,6 @@ module Morloc.CodeGenerator.Namespace
 
 import Morloc.Namespace
 import Data.Scientific (Scientific)
-import Data.Set (Set)
-import Data.Map (Map)
 import Data.Text (Text)
 
 data PVar
@@ -44,13 +45,35 @@ data TypeP
   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
+type JsonPath = [JsonAccessor]
+data JsonAccessor
+  = JsonIndex Int
+  | JsonKey Text
+
+data NexusCommand = NexusCommand
+  { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
+  , commandType :: Type -- ^ the general type of the expression
+  , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
+  , commandArgs :: [EVar] -- ^ list of function arguments
+  , commandSubs :: [( JsonPath -- ^ path in JSON to value needs to be replaced
+                    , Text -- ^ function argument from which to pull replacement value
+                    , JsonPath -- ^ path to the replacement value
+                    )]
+  }
+
 instance Typelike TypeP where
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
   typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
   typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
   typeOf (NamP r (PV lang _ t) ps es)
-    = NamT r (TV (Just lang) t) (map typeOf ps) (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+    = NamT r (TV (Just lang) t)
+             (map typeOf ps)
+             (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+
+  decompose (FunP t1 t2) = case decompose t2 of 
+    (ts, finalType) -> (t1:ts, finalType) 
+  decompose t = ([], t)
 
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f))
@@ -175,6 +198,9 @@ data ExprM f
   -- If the string "for" were retained as the variable name, this would fail in
   -- many language where "for" is a keyword.
 
+  | AccM (ExprM f) EVar 
+  -- ^ Access a field in record ExprM
+
   | LetVarM TypeM Int
   -- ^ An internally generated variable id used in let assignments. When
   -- translated into a language, the integer will be used to generate a unique
@@ -200,6 +226,7 @@ data ExprM f
   -- values assigned in let expressions and the final return value. In some
   -- languages, this may not be necessary (e.g., R).
 
+
 instance HasOneLanguage (TypeP) where
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
@@ -224,6 +251,7 @@ instance HasOneLanguage (ExprM f) where
   langOf' (LamM _ e) = langOf' e
   langOf' (BndVarM t _) = langOf' t
   langOf' (LetVarM t _) = langOf' t
+  langOf' (AccM e _) = langOf' e
   langOf' (ListM t _) = langOf' t
   langOf' (TupleM t _) = langOf' t
   langOf' (RecordM t _) = langOf' t

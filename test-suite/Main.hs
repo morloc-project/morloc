@@ -17,6 +17,7 @@ main = do
       , typeAliasTests
       , propertyTests
       , jsontype2jsonTests
+      , recordAccessTests
 
       , golden "import-1" "import-1"
 
@@ -170,4 +171,9 @@ main = do
       , golden "C++ object handling"  "object-1-c"
       , golden "py3 object handling"  "object-1-py"
       , golden "R object handling"    "object-1-r"
+      -- record access
+      , golden "record-access-gen"    "record-access-gen"
+      , golden "record-access-c"      "record-access-c"
+      , golden "record-access-py"     "record-access-py"
+      , golden "record-access-r"      "record-access-r"
       ]

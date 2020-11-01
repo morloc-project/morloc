@@ -58,7 +58,6 @@ module Morloc.Namespace
   -- ** Type extensions
   , Constraint(..)
   , Property(..)
-  , langOf
   -- ** Types used in post-typechecking tree
   , SAnno(..)
   , SExpr(..)
@@ -72,7 +71,6 @@ import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
-import Control.Monad.Identity (Identity)
 import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
@@ -83,9 +81,6 @@ import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec.Error (ParseError)
 import Morloc.Language (Lang(..))
-
-import qualified Data.Map.Strict as M
-import qualified Data.Set as S
 
 -- | no annotations for now
 type MDoc = Doc ()
@@ -192,6 +187,7 @@ data MorlocError
   | EmptyCut
   | TypeMismatch
   | ToplevelRedefinition
+  | BadRecordAccess
   | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
   -- container errors
@@ -243,6 +239,7 @@ data PackageMeta =
     }
   deriving (Show, Ord, Eq)
 
+defaultPackageMeta :: PackageMeta
 defaultPackageMeta =
   PackageMeta
     { packageName = ""
@@ -314,6 +311,7 @@ instance Functor One where
 data SExpr g f c
   = UniS
   | VarS EVar
+  | AccS (SAnno g f c) EVar
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
   | LamS [EVar] (SAnno g f c)
@@ -402,8 +400,8 @@ unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
 unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
 unresolvedType2type (NamU r v ts rs) = NamT r v (map unresolvedType2type ts) (zip (map fst rs) (map (unresolvedType2type . snd) rs))
-unresolvedType2type (ExistU v ts ds) = error "Cannot cast existential type to Type"
-unresolvedType2type (ForallU v t) = error "Cannot cast universal type as Type"
+unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
+unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 
 
 data Property
@@ -421,79 +419,41 @@ newtype Constraint =
 
 class Typelike a where
   typeOf :: a -> Type
-  -- utypeOf :: a -> UnresolvedType
-  --
-  -- nqualified :: a -> Int
-  -- nqualified t = nqualifiedU (utypeOf t) where
-  --   nqualifiedU (ForallU _ u) = 1 + nqualifiedU u
-  --   nqualifiedU _ = 0
-  --
-  -- qualifiedTerms :: a -> [TVar]
-  -- qualifiedTerms t = qt (utypeOf t) where
-  --   qt (ForallU v t) = v : qt t
-  --   qt _ = []
-  --
-  -- nargs :: a -> Int
-  -- nargs t = case utypeOf t of
-  --   (FunU _ t) -> 1 + nargs t
-  --   (ForallU _ t) -> nargs t
-  --   _ -> 0
+
+  -- | Break a type into its input arguments, and final output
+  -- For example: decompose ((a -> b) -> [a] -> [b]) would 
+  -- yield ([(a->b), [a]], [b])
+  decompose :: a -> ([a], a)
+
+  -- | like @decompose@ but concatentates the output type
+  decomposeFull :: a -> [a]
+  decomposeFull t = case decompose t of
+    (xs, x) -> (xs ++ [x])
 
   nargs :: a -> Int
   nargs t = case typeOf t of
-    (FunT _ t) -> 1 + nargs t
+    (FunT _ t') -> 1 + nargs t'
     _ -> 0
 
 instance Typelike Type where
   typeOf = id
 
-  -- qualifiedTerms (UnkT v) = [v]
-  -- qualifiedTerms (VarT _) = []
-  -- qualifiedTerms (FunT t1 t2) = unique (qualifiedTerms t1) (qualifiedTerms t2)
-  -- qualifiedTerms (ArrT _ ts) = (unique . concat) (map qualifiedTerms ts)
-  -- qualifiedTerms (NamT _ rs) = (unique . concat) (map (qualifiedTerms . snd) ts)
-  --
-  -- utypeOf t = f (qualifiedTerms t) t where
-  --   f (v:vs) t = ForallU v (f vs t)
-  --   f [] (UnkT v) = VarT v
-  --   f [] (VarT v) = VarT v
-  --   f [] (FunT t1 t2) = FunU t1 t2
-  --   f [] (ArrT v ts) = ArrU v (map (f []) ts)
-  --   f [] (NamT v rs) = NamT v (zip (map fst rs) (map (f [] . snd) rs))
-  --
-  -- splitArgs = (\(vs,ts)->(vs, map typeOf ts)) . typeOf . splitArgs . utypeOf t
+  decompose (FunT t1 t2) = case decompose t2 of
+    (ts, finalType) -> (t1:ts, finalType) 
+  decompose t = ([], t)
+
 
 instance Typelike CType where
   typeOf (CType t) = t 
 
-  -- splitArgs =
-  --   let (vs,ts) = splitArgs (typeOf t)
-  --   in (vs, map CType ts)
-  --
-  -- utypeOf t = utypeOf (typeOf t)
+  decompose t0 = case (decompose (unCType t0)) of
+    (ts, t) -> (map CType ts, CType t)
 
 instance Typelike GType where
   typeOf (GType t) = t 
 
---   splitArgs =
---     let (vs,ts) = splitArgs (typeOf t)
---     in (vs, map GType ts)
---
---   utypeOf t = utypeOf (typeOf t)
---
--- instance Typelike UnresolvedType where
---   utypeOf = id
---
---   typeOf = undefined
---
---   splitArgs (ForallU v u) =
---     let (vs, ts) = splitArgs u
---     in (v:vs, ts)
---   splitArgs (FunU t1 t2) =
---     let (vs, ts) = splitArgs t2
---     in (vs, t1:ts)
---   splitArgs t = ([], [t])
-
+  decompose t0 = case (decompose (unGType t0)) of
+    (ts, t) -> (map GType ts, GType t)
 
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang

@@ -16,11 +16,10 @@ module Morloc.CodeGenerator.Grammars.Translator.Python3
   ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType, shallowType)
+import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType)
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
-import Morloc.Pretty (prettyType)
 import qualified Morloc.Config as MC
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
@@ -68,15 +67,15 @@ manNamer i = "m" <> viaShow i
 translateSource :: Path -> MorlocMonad MDoc
 translateSource (Path s) = do
   (Path lib) <- MM.asks configLibrary
-  let mod = pretty
-          . MT.liftToText (map DC.toLower)
-          . MT.replace "/" "."
-          . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
-          . MT.stripPrefixIfPresent "./" -- no path if relative to here
-          . MT.stripPrefixIfPresent lib  -- make the path relative to the library
-          . MT.liftToText SF.dropExtensions
-          $ s
-  return $ "from" <+> mod <+> "import *"
+  let moduleStr = pretty
+                . MT.liftToText (map DC.toLower)
+                . MT.replace "/" "."
+                . MT.stripPrefixIfPresent "/" -- strip the leading slash (if present)
+                . MT.stripPrefixIfPresent "./" -- no path if relative to here
+                . MT.stripPrefixIfPresent lib  -- make the path relative to the library
+                . MT.liftToText SF.dropExtensions
+                $ s
+  return $ "from" <+> moduleStr <+> "import *"
 
 tupleKey :: Int -> MDoc -> MDoc
 tupleKey i v = [idoc|#{v}[#{pretty i}]|]
@@ -113,7 +112,7 @@ serialize v0 s0 = do
         (src:_) -> return . pretty . srcName $ src
       serialize' [idoc|#{unpacker}(#{v})|] s
 
-    construct v lst@(SerialList s) = do
+    construct v (SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
@@ -123,19 +122,20 @@ serialize v0 s0 = do
                       ]
       return ([lst], v')
 
-    construct v tup@(SerialTuple ss) = do
+    construct v (SerialTuple ss) = do
       (befores, ss') <- fmap unzip $ zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
-    construct v rec@(SerialObject namType (PV _ _ constructor) _ rs) = do
+    construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
       accessField <- selectAccessor namType constructor
       (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (accessField v (pretty k)) s) rs
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
-          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
+                            (map fst rs) ss'
           decl = [idoc|#{v'} = dict#{tupled (entries)};|]
       return (concat befores ++ [decl], v');
 
@@ -172,7 +172,7 @@ deserialize v0 s0
       let deserialized = [idoc|#{packer}(#{x})|]
       return (deserialized, before)
 
-    construct v lst@(SerialList s) = do
+    construct v (SerialList s) = do
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
@@ -182,19 +182,20 @@ deserialize v0 s0
                      ]
       return (v', [lst])
 
-    construct v tup@(SerialTuple ss) = do
+    construct v (SerialTuple ss) = do
       (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
       idx <- fmap pretty $ MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
-    construct v rec@(SerialObject namType (PV _ _ constructor) _ rs) = do
+    construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty $ MM.getCounter
       accessField <- selectAccessor namType constructor
       (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (accessField v (pretty k)) s) rs
       let v' = "s" <> idx
-          entries = zipWith (\(PV _ _ k) v -> pretty k <> "=" <> v) (map fst rs) ss'
+          entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
+                            (map fst rs) ss'
           decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries};|]
       return (v', concat befores ++ [decl]);
 
@@ -205,9 +206,9 @@ deserialize v0 s0
 
 -- break a call tree into manifolds
 translateManifold :: ExprM One -> MorlocMonad MDoc
-translateManifold m@(ManifoldM _ args _) = do
+translateManifold m0@(ManifoldM _ args0 _) = do
   MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args m
+  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
   where
 
   f :: [Argument]
@@ -218,21 +219,21 @@ translateManifold m@(ManifoldM _ args _) = do
         , [MDoc] -- lines to precede the returned expression
         )
   f pargs m@(ManifoldM (metaId->i) args e) = do
-    (ms', body, rs) <- f args e
+    (ms', e', rs') <- f args e
     let mname = manNamer i
-        head = "def" <+> mname <> tupled (map makeArgument args) <> ":"
-        mdoc = nest 4 (vsep $ head:rs ++ [body])
+        def   = "def" <+> mname <> tupled (map makeArgument args) <> ":"
+        mdoc = nest 4 (vsep $ def:rs' ++ [e'])
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
       ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], vs), _) -> mname
+      (([], _ ), _) -> mname
       ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call, [])
 
-  f _ (PoolCallM t _ cmds args) = do
+  f _ (PoolCallM _ _ cmds args) = do
     let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
     return ([], call, [])
 
-  f args (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
@@ -245,15 +246,24 @@ translateManifold m@(ManifoldM _ args _) = do
     (mss', xs', rss') <- mapM (f args) xs |>> unzip3
     return (concat mss', pretty (srcName src) <> tupled xs', concat rss')
 
-  f _ (SrcM t src) = return ([], pretty (srcName src), [])
+  f _ (AppM _ _) = error "Can only apply functions"
 
-  f args (LamM lambdaArgs e) = undefined -- FIXME: this is defined in R
+  f _ (SrcM _ src) = return ([], pretty (srcName src), [])
+
+  f _ (LamM _ _) = undefined -- FIXME: this is defined in R
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 
   f _ (LetVarM _ i) = return ([], letNamer i, [])
 
-  f args (ListM t es) = do
+  f args (AccM e k) = do
+    (ms, e', ps) <- f args e
+    x <- case typeOfTypeM (typeOfExprM e) of
+      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
+      _ -> MM.throwError . CallTheMonkeys $ "Bad record access"
+    return (ms, x, ps)
+
+  f args (ListM _ es) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3
     return (concat mss', list es', concat rss')
 
@@ -261,7 +271,7 @@ translateManifold m@(ManifoldM _ args _) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3
     return (concat mss', tupled es', concat rss')
 
-  f args (RecordM c entries) = do
+  f args (RecordM _ entries) = do
     (mss', es', rss') <- mapM (f args . snd) entries |>> unzip3
     let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
     return (concat mss', "OrderedDict" <> tupled entries', concat rss')
@@ -287,15 +297,8 @@ translateManifold m@(ManifoldM _ args _) = do
   f args (ReturnM e) = do
     (ms, e', rs) <- f args e
     return (ms, "return(" <> e' <> ")", rs)
+translateManifold _ = error "Every ExprM object must start with a Manifold term"
 
-
--- divide a list of arguments based on wheither they are in a second list
-splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
-splitArgs args1 args2 = partitionEithers $ map split args1 where
-  split :: Argument -> Either Argument Argument
-  split r = if elem r args2
-            then Left r
-            else Right r
 
 
 makeLambda :: [Argument] -> MDoc -> MDoc
@@ -318,7 +321,7 @@ makeDispatch ms = align . vsep $
     entry _ = error "Expected ManifoldM"
 
 typeSchema :: TypeP -> MorlocMonad MDoc
-typeSchema t = f <$> type2jsontype t
+typeSchema t0 = f <$> type2jsontype t0
   where
     f :: JsonType -> MDoc
     f (VarJ v) = lst [var v, "None"]

@@ -117,8 +117,8 @@ conmap f = concat . map f
 
 -- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]
-unique xs = unique' Set.empty xs where 
-  unique' set [] = []
+unique xs0 = unique' Set.empty xs0 where 
+  unique' _   [] = []
   unique' set (x:xs)
     | Set.member x set = unique' set xs
     | otherwise = x : unique' (Set.insert x set) xs
@@ -127,7 +127,7 @@ unique xs = unique' Set.empty xs where
 duplicates :: Ord a => [a] -> [a] 
 duplicates xs = unique $ filter isDuplicated xs where
   -- countMap :: Ord a => Map.Map a Int
-  countMap = Map.fromList . map (\(k:ks) -> (k, length ks + 1)) . group . sort $ xs
+  countMap = Map.fromList . map (\ks -> (head ks, length ks)) . group . sort $ xs
 
   -- isDuplicated :: Ord a => a -> Bool
   isDuplicated k = fromJust (Map.lookup k countMap) > 1

@@ -13,7 +13,6 @@ module Morloc.CodeGenerator.Internal
   , weaveTypesGCP
   , weaveTypesGCM
   , typeP2typeM
-  , typePartsP
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -64,17 +63,7 @@ weaveTypesGCM :: GMeta -> CType -> MorlocMonad TypeM
 weaveTypesGCM g (CType t) = typeP2typeM <$> weaveTypes (unGType <$> metaGType g) t
 
 typeP2typeM :: TypeP -> TypeM
-typeP2typeM f@(FunP _ _) = case typePartsP f of
+typeP2typeM f@(FunP _ _) = case decompose f of
   (inputs, output) -> Function (map typeP2typeM inputs) (typeP2typeM output)
 typeP2typeM (UnkP _) = Passthrough
 typeP2typeM t = Native t
-
--- get input types to a function type
-typePartsP :: TypeP -> ([TypeP], TypeP)
-typePartsP t0 = case reverse $ typeArgs t0 of
-  [] -> error "This should not be possible"
-  [t] -> ([], t)
-  (t:ts) -> (reverse ts, t)
-  where
-    typeArgs (FunP t1 t2) = t1 : typeArgs t2
-    typeArgs t = [t]

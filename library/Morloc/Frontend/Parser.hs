@@ -252,9 +252,8 @@ pTypedefObject = do
   _ <- symbol "="
   constructor <- name <|> stringLiteral
   entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
-  lang <- CMS.gets stateLang
-  setLang Nothing
   let t = NamU r (TV lang constructor) (map VarU vs) entries
+  setLang Nothing
   return $ MBTypeDef v vs t
 
 desugarTableEntries
@@ -267,10 +266,7 @@ desugarTableEntries _ NamObject entry = return entry
 desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
   f :: UnresolvedType -> Parser UnresolvedType
   f (ForallU v t) = ForallU v <$> f t
-  f t = do
-    v <- newvar lang
-    let dts = MLD.defaultList lang t
-    return $ head dts
+  f t = return $ head (MLD.defaultList lang t)
 
 pNamType :: Parser NamType
 pNamType = choice [pNamObject, pNamTable, pNamRecord] 
@@ -407,7 +403,8 @@ pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
 
 pExpr :: Parser Expr
 pExpr =
-      try pNamE
+      try pAcc
+  <|> try pNamE
   <|> try pTuple
   <|> try pUni
   <|> try pAnn
@@ -428,7 +425,7 @@ pSrcE = do
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
-  path <- case (modulePath, srcfile) of
+  srcFile <- case (modulePath, srcfile) of
     -- build a path to the source file by searching
     -- > source "R" from "foo.R" ("Foo" as foo, "bar")
     (Just f, Just srcfile') -> return . Just $ MS.combine (MS.takeDirectory f) srcfile'
@@ -438,12 +435,11 @@ pSrcE = do
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
     (Nothing, s) -> return s 
-  let path = maybe srcfile (\f -> MS.combine (MS.takeDirectory f) <$> srcfile) modulePath
-  return $ SrcE [Source { srcName = name
+  return $ SrcE [Source { srcName = srcVar
                         , srcLang = language
-                        , srcPath = path
-                        , srcAlias = alias
-                        } | (name, alias) <- rs]
+                        , srcPath = srcFile
+                        , srcAlias = aliasVar
+                        } | (srcVar, aliasVar) <- rs]
 
 pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
@@ -475,6 +471,13 @@ pTuple = do
 
 pUni :: Parser Expr
 pUni = symbol "Null" >> return UniE
+
+pAcc :: Parser Expr
+pAcc = do
+  e <- parens pExpr <|> pNamE <|> pVar
+  _ <- symbol "@"
+  f <- name
+  return $ AccE e (EVar f) 
 
 pAnn :: Parser Expr
 pAnn = do
@@ -572,24 +575,14 @@ pTupleU = do
   lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  v <- newvar lang
-  let dts = MLD.defaultTuple lang ts
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v ts dts
+  return $ head (MLD.defaultTuple lang ts)
 
 pNamU :: Parser UnresolvedType
 pNamU = do
   _ <- tag (symbol "{")
   entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
-  v <- newvar lang
-  let dts = MLD.defaultRecord lang entries
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v [NamU NamRecord (TV lang "__RECORD__") [] entries] dts -- see entry in Infer.hs
+  return $ head (MLD.defaultRecord lang entries)
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do
@@ -627,12 +620,7 @@ pListU = do
   _ <- tag (symbol "[")
   t <- brackets pType
   lang <- CMS.gets stateLang
-  v <- newvar lang
-  let dts = MLD.defaultList lang t
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v [t] dts
+  return $ head (MLD.defaultList lang t)
 
 pVarU :: Parser UnresolvedType
 pVarU = try pVarConU <|> pVarGenU

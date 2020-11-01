@@ -40,7 +40,7 @@ defaultTuple :: Maybe Lang -> [UnresolvedType] -> [UnresolvedType]
 defaultTuple lang@Nothing ts = [ArrU (TV lang (MT.pack $ "Tuple" ++ show (length ts))) ts]
 defaultTuple lang@(Just Python3Lang) ts = [ArrU (TV lang "tuple") ts]
 defaultTuple lang@(Just RLang) ts = [ArrU (TV lang "tuple") ts]
-defaultTuple lang@(Just CLang) ts = []
+defaultTuple      (Just CLang) _ = []
 defaultTuple lang@(Just CppLang) ts = [ArrU (TV lang t) ts] where
   vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
   t = "std::tuple<" <> MT.intercalate "," vars <> ">"
@@ -50,7 +50,7 @@ defaultRecord :: Maybe Lang -> [(MT.Text, UnresolvedType)] -> [UnresolvedType]
 defaultRecord lang@Nothing entries = [NamU NamRecord (TV lang "Record") [] entries]
 defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "dict") [] entries]
 defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "list") [] entries]
-defaultRecord lang@(Just CLang) entries = []
+defaultRecord      (Just CLang) _ = []
 defaultRecord lang@(Just CppLang) entries = [NamU NamRecord (TV lang "struct") [] entries]
 defaultRecord lang@(Just PerlLang) entries = [NamU NamRecord (TV lang "hash") [] entries]
 

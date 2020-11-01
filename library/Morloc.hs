@@ -4,8 +4,6 @@ module Morloc
   ) where
 
 import Morloc.Namespace
-import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
 import Morloc.Frontend.Namespace (TypedDag)
 
 import qualified Morloc.Frontend.API as F
@@ -16,7 +14,7 @@ import Morloc.Frontend.Treeify (treeify)
 
 typecheck :: Maybe Path -> Code -> MorlocMonad TypedDag
 typecheck path code
-  -- Maybe Path -> MT.Text -> [Module]
+  -- Maybe Path -> Text -> [Module]
   -- parse code into unannotated modules
   = F.parse path code
   -- [Module] -> [Module]

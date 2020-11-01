@@ -10,11 +10,8 @@ Stability   : experimental
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace
   , Expr(..)
-  , Gamma
-  , GammaIndex(..)
   , Import(..)
-  , Indexable(..)
-  , Stack(..)
+  , Stack
   , StackState(..)
   , StackConfig(..)
   -- ** DAG and associated types
@@ -25,8 +22,9 @@ module Morloc.Frontend.Namespace
   , TypedNode(..)
   , TypedDag
   -- ** Typechecking
+  , Gamma
+  , GammaIndex(..)
   , EType(..)
-  , GammaIndex
   , TypeSet(..)
   , Indexable(..)
   -- ** ModuleGamma paraphernalia
@@ -47,6 +45,7 @@ import Data.Scientific (Scientific)
 import Data.Text (Text)
 
 
+
 -- This functions removes qualified and existential types.
 --  * all qualified terms are replaced with UnkT
 --  * all existentials are replaced with default values if a possible
@@ -59,22 +58,22 @@ resolve (NamU r v ps rs) =
   let ts' = map (resolve . snd) rs
       ps' = map resolve ps 
   in NamT r v ps' (zip (map fst rs) ts')
-resolve (ExistU v ts []) = error "UnsolvedExistentialTerm"
-resolve (ExistU v ts (t:_)) = resolve t
+resolve (ExistU _ _ []) = error "UnsolvedExistentialTerm"
+resolve (ExistU _ _ (t:_)) = resolve t
 resolve (ForallU v t) = substituteT v (UnkT v) (resolve t)
 
 -- | substitute all appearances of a given variable with a given new type
 substituteT :: TVar -> Type -> Type -> Type
-substituteT v r t = sub t
+substituteT v0 r0 t0 = sub t0
   where
     sub :: Type -> Type
-    sub t'@(UnkT _) = t'
-    sub t'@(VarT v')
-      | v == v' = r
-      | otherwise = t'
+    sub t@(UnkT _) = t
+    sub t@(VarT v)
+      | v0 == v = r0
+      | otherwise = t
     sub (FunT t1 t2) = FunT (sub t1) (sub t2)
-    sub (ArrT v' ts) = ArrT v' (map sub ts)
-    sub (NamT r v' ts rs) = NamT r v' (map sub ts) [(x, sub t') | (x, t') <- rs]
+    sub (ArrT v ts) = ArrT v (map sub ts)
+    sub (NamT r v ts rs) = NamT r v (map sub ts) [(x, sub t) | (x, t) <- rs]
 
 
 -- | Terms, see Dunfield Figure 1
@@ -89,6 +88,8 @@ data Expr
   -- ^ (())
   | VarE EVar
   -- ^ (x)
+  | AccE Expr EVar
+  -- ^ person@age - access a field in a record
   | ListE [Expr]
   -- ^ [e]
   | TupleE [Expr]

@@ -92,6 +92,7 @@ syn match operator /<=/
 syn match operator />=/
 syn match operator /!=/
 syn match operator /\./
+syn match operator /@/
 
 " -----------------------------------------------------------------------------
 hi def link operator Operator
