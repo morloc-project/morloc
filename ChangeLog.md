@@ -1,4 +1,5 @@
 1.0.0 [202x.xx.xx]
+------------------
 
 The first stable. It will be a product that I expect other people to use for
 important projects, therefore backwards compatibility will be important. The
@@ -17,6 +18,7 @@ handling for several very different languages (proofs-of-concept).
 
 
 0.33.0 [2020.11.08]
+-------------------
 
 First hackage release
 
@@ -25,6 +27,7 @@ First hackage release
  - [ ] Update README
 
 0.32.0 [2020.11.01]
+-------------------
 
  * Add record/table field access
  * Fix JSON handling in nexus
@@ -33,6 +36,7 @@ First hackage release
  * Resolve most GHC warnings
 
 0.31.0 [2020.10.29]
+-------------------
 
  * Fix anonymous records in C++
  * Distinguish 'record', 'object', and 'table'
