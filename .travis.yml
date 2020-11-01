@@ -23,6 +23,10 @@ before_install:
     - echo 'R_LIBS=~/R/library' >> ~/.Renviron
     - R -e 'install.packages("devtools", dependencies=TRUE, repos="https://cloud.r-project.org")'
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
+    # Set up Perl
+    - export PERL_MM_USE_DEFAULT=1
+    - export PERL_CANARY_STABILITY_NOPROMPT=1
+    - sudo perl -MCPAN -e 'install JSON::XS' 
     # Download and unpack the stack executable
     - mkdir -p ~/.local/bin
     - export PATH=$HOME/.local/bin:$PATH

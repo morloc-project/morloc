@@ -631,16 +631,16 @@ infer' lang g e@(VarE v) = do
 
 infer' lang g (AccE e k) = do
   (g', record_ts, e') <- infer lang g e
-  ts <- mapM (accessRecord k) record_ts
-  return (g', ts, AnnE e' ts)
+  ts <- mapM (accessRecord k) record_ts |>> catMaybes
+  return (g', ts, AnnE (AccE e' k) ts)
   where
-    accessRecord :: EVar -> UnresolvedType -> Stack UnresolvedType
-    accessRecord (EVar key) (NamU _ _ _ rs) =
-      case [t | (k', t) <- rs, k' == key] of
-        -- FIXME: add error messages
-        [] -> throwError BadRecordAccess
-        [t] -> return t
-        _ -> throwError  BadRecordAccess
+    accessRecord :: EVar -> UnresolvedType -> Stack (Maybe UnresolvedType)
+    accessRecord (EVar key) t@(NamU _ _ _ rs) =
+      case lookup key rs of
+        Nothing -> throwError BadRecordAccess
+        (Just val) -> if langOf t == lang
+                      then return (Just val)
+                      else return Nothing
     accessRecord _ _ = throwError  BadRecordAccess
 
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3

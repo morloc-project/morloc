@@ -172,7 +172,8 @@ main = do
       , golden "py3 object handling"  "object-1-py"
       , golden "R object handling"    "object-1-r"
       -- record access
-      , golden "C++ record access"    "record-access-c"
-      , golden "py3 record access"    "record-access-py"
-      , golden "R record access"      "record-access-r"
+      , golden "record-access-gen"    "record-access-gen"
+      , golden "record-access-c"      "record-access-c"
+      , golden "record-access-py"     "record-access-py"
+      , golden "record-access-r"      "record-access-r"
       ]

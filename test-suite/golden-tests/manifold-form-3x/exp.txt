@@ -1,1 +1,1 @@
-[[true], 42.0, "hello"]
+[[true],42,"hello"]

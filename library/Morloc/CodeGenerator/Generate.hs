@@ -386,42 +386,78 @@ makeGAST (SAnno (Many ((CallS src, _):_)) _)
 
 
 -- | Serialize a simple, general data type. This type can consists only of JSON
--- primitives and containers (lists, tuples, and records).
-generalSerial :: SAnno GMeta One () -> MorlocMonad (EVar, MDoc, [EVar])
-generalSerial x0@(SAnno _ g0) = do
-  (mdoc, vs) <- generalSerial' x0
-  case metaName g0 of
-    (Just evar) -> return (evar, mdoc, vs)
-    Nothing -> MM.throwError . OtherError $ "No name found for call-free function"
+-- primitives and containers (lists, tuples, and records) and accessors.
+generalSerial :: SAnno GMeta One () -> MorlocMonad NexusCommand
+generalSerial x0@(SAnno _ (metaName->(Just subcmd))) = generalSerial' [] x0
   where
-    generalSerial' :: SAnno GMeta One () -> MorlocMonad (MDoc, [EVar])
-    generalSerial' (SAnno (One (UniS, _)) _) = return ("null", [])
-    generalSerial' (SAnno (One (NumS x, _)) _) = return (viaShow x, [])
-    generalSerial' (SAnno (One (LogS x, _)) _) = return (if x then "true" else "false", [])
-    generalSerial' (SAnno (One (StrS x, _)) _) = return (dquotes (pretty x), [])
-    generalSerial' (SAnno (One (AccS (SAnno (One (RecS es, _)) _) k, _)) _) =
-      case lookup k es of
-        Nothing -> MM.throwError . CallTheMonkeys $ "Record access fail"
-        (Just e) -> do
-          (e',vs) <- generalSerial' e 
-          return (e', vs)
-    generalSerial' (SAnno (One (ListS xs, _)) _) = do
-      (xs', _) <- mapM generalSerial' xs |>> unzip
-      return (list xs', [])
-    generalSerial' (SAnno (One (TupleS xs, _)) _) = do
-      (xs', _)  <- mapM generalSerial' xs |>> unzip
-      return (list xs', [])
-    generalSerial' (SAnno (One (RecS es, _)) _) = do
-      (vs', _) <- mapM (generalSerial' . snd) es |>> unzip
-      let es' = zip (map fst es) vs'
-      return (encloseSep "{" "}" "," (map (\(k, v) -> pretty k <+> "=" <+> v) es'), [])
-    generalSerial' (SAnno (One (LamS vs x, _)) _) = do
-      (x', _) <- generalSerial' x
-      return (x', vs)
-    generalSerial' (SAnno (One (VarS v, _)) _) = return ("<<" <> pretty v <> ">>", [])
-    generalSerial' (SAnno (One _) m) = do
+    tmpvar = dquotes "_"
+
+    generalSerial' :: JsonPath -> SAnno GMeta One () -> MorlocMonad NexusCommand
+    generalSerial' _ (SAnno (One (UniS,   _)) _)
+      = return $ NexusCommand subcmd tmpvar [] []
+    generalSerial' _ (SAnno (One (NumS x, _)) _)
+      = return $ NexusCommand subcmd (viaShow x) [] []
+    generalSerial' _ (SAnno (One (LogS x, _)) _)
+      = return $ NexusCommand subcmd (if x then "true" else "false") [] []
+    generalSerial' _ (SAnno (One (StrS x, _)) _)
+      = return $ NexusCommand subcmd (dquotes (pretty x)) [] []
+    -- if a nested accessor is observed, evaluate the nested expression and
+    -- append the path 
+    generalSerial' ps (SAnno (One (AccS x@(SAnno (One (AccS _ _, _)) _) k, _)) _) = do
+      ncmd <- generalSerial' ps x
+      case ncmd of
+        (NexusCommand _ _ _ [(ps1, arg, ps2)]) ->
+          return $ ncmd { commandSubs = [(ps1, arg, JsonKey (unEVar k) : ps2)] }
+        _ -> error "Bad record access"
+    -- record the path to and from a record access, leave the value as null, it
+    -- will be set in the nexus
+    generalSerial' ps (SAnno (One (AccS (SAnno (One (VarS v, _)) g) k, _)) _) =
+      case g of
+        (metaGType->(Just (GType (NamT _ _ _ _)))) ->
+          return $ NexusCommand subcmd tmpvar [] [(ps, unEVar v, [JsonKey (unEVar k)])]
+        _ -> error "Attempted to use key access to non-record"
+    generalSerial' ps (SAnno (One (ListS xs, _)) _) = do
+      ncmds <- zipWithM generalSerial'
+                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+      return $ NexusCommand 
+        { commandName = subcmd
+        , commandJson = list (map commandJson ncmds)
+        , commandArgs = []
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' ps (SAnno (One (TupleS xs, _)) _) = do
+      ncmds <- zipWithM generalSerial'
+                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+      return $ NexusCommand 
+        { commandName = subcmd
+        , commandJson = list (map commandJson ncmds)
+        , commandArgs = []
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' ps (SAnno (One (RecS es, _)) _) = do
+      ncmds <- zipWithM generalSerial'
+                        [ps ++ [JsonKey (unEVar k)] | k <- (map fst es)]
+                        (map snd es)
+      let entries = zip (map fst es) (map commandJson ncmds)
+          obj = encloseSep "{" "}" ","
+                (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
+      return $ NexusCommand
+        { commandName = subcmd
+        , commandJson = obj
+        , commandArgs = []
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' ps (SAnno (One (LamS vs x, _)) _) = do
+      ncmd <- generalSerial' ps x
+      return $ ncmd { commandArgs = vs }
+    generalSerial' ps (SAnno (One (VarS (EVar v), _)) _) =
+      return $ NexusCommand subcmd tmpvar [] [(ps, v, [])]
+    generalSerial' _ (SAnno (One _) m) = do
       MM.throwError . OtherError . render $
         "Cannot serialize general type:" <+> prettyType (fromJust $ metaGType m)
+generalSerial (SAnno _ _)
+  = MM.throwError . OtherError
+  $ "No name found for call-free function"
 
 rewritePartials
   :: SAnno GMeta One TypeP

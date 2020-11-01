@@ -17,6 +17,9 @@ module Morloc.CodeGenerator.Namespace
   , MData(..)
   , PVar(..)
   , TypeP(..)
+  , JsonPath
+  , JsonAccessor(..)
+  , NexusCommand(..)
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -41,6 +44,21 @@ data TypeP
   | ArrP PVar [TypeP]
   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
+
+type JsonPath = [JsonAccessor]
+data JsonAccessor
+  = JsonIndex Int
+  | JsonKey Text
+
+data NexusCommand = NexusCommand
+  { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
+  , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
+  , commandArgs :: [EVar] -- ^ list of function arguments
+  , commandSubs :: [( JsonPath -- ^ path in JSON to value needs to be replaced
+                    , Text -- ^ function argument from which to pull replacement value
+                    , JsonPath -- ^ path to the replacement value
+                    )]
+  }
 
 instance Typelike TypeP where
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
