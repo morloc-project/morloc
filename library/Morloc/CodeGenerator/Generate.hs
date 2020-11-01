@@ -388,25 +388,30 @@ makeGAST (SAnno (Many ((CallS src, _):_)) _)
 -- | Serialize a simple, general data type. This type can consists only of JSON
 -- primitives and containers (lists, tuples, and records) and accessors.
 generalSerial :: SAnno GMeta One () -> MorlocMonad NexusCommand
-generalSerial x0@(SAnno _ (metaName->(Just subcmd))) = generalSerial' [] x0
+generalSerial (SAnno _ GMeta{metaName = Nothing})
+  = MM.throwError . OtherError $ "No general type found for call-free function"
+generalSerial (SAnno _ GMeta{metaGType = Nothing})
+  = MM.throwError . OtherError $ "No name found for call-free function"
+generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
+                               , metaGType = Just (GType cmdtype)}) = generalSerial' [] x0
   where
-    tmpvar = dquotes "_"
+    base = NexusCommand subcmd cmdtype (dquotes "_") [] []
 
     generalSerial' :: JsonPath -> SAnno GMeta One () -> MorlocMonad NexusCommand
     generalSerial' _ (SAnno (One (UniS,   _)) _)
-      = return $ NexusCommand subcmd tmpvar [] []
+      = return $ base { commandJson = "null" }
     generalSerial' _ (SAnno (One (NumS x, _)) _)
-      = return $ NexusCommand subcmd (viaShow x) [] []
+      = return $ base { commandJson = viaShow x }
     generalSerial' _ (SAnno (One (LogS x, _)) _)
-      = return $ NexusCommand subcmd (if x then "true" else "false") [] []
+      = return $ base { commandJson = if x then "true" else "false" }
     generalSerial' _ (SAnno (One (StrS x, _)) _)
-      = return $ NexusCommand subcmd (dquotes (pretty x)) [] []
+      = return $ base { commandJson = dquotes (pretty x) }
     -- if a nested accessor is observed, evaluate the nested expression and
     -- append the path 
     generalSerial' ps (SAnno (One (AccS x@(SAnno (One (AccS _ _, _)) _) k, _)) _) = do
       ncmd <- generalSerial' ps x
-      case ncmd of
-        (NexusCommand _ _ _ [(ps1, arg, ps2)]) ->
+      case commandSubs ncmd of
+        [(ps1, arg, ps2)] ->
           return $ ncmd { commandSubs = [(ps1, arg, JsonKey (unEVar k) : ps2)] }
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
@@ -414,24 +419,20 @@ generalSerial x0@(SAnno _ (metaName->(Just subcmd))) = generalSerial' [] x0
     generalSerial' ps (SAnno (One (AccS (SAnno (One (VarS v, _)) g) k, _)) _) =
       case g of
         (metaGType->(Just (GType (NamT _ _ _ _)))) ->
-          return $ NexusCommand subcmd tmpvar [] [(ps, unEVar v, [JsonKey (unEVar k)])]
+          return $ base { commandSubs = [(ps, unEVar v, [JsonKey (unEVar k)])] }
         _ -> error "Attempted to use key access to non-record"
     generalSerial' ps (SAnno (One (ListS xs, _)) _) = do
       ncmds <- zipWithM generalSerial'
                         [ps ++ [JsonIndex i] | i <- [0..]] xs
-      return $ NexusCommand 
-        { commandName = subcmd
-        , commandJson = list (map commandJson ncmds)
-        , commandArgs = []
+      return $ base 
+        { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
         }
     generalSerial' ps (SAnno (One (TupleS xs, _)) _) = do
       ncmds <- zipWithM generalSerial'
                         [ps ++ [JsonIndex i] | i <- [0..]] xs
-      return $ NexusCommand 
-        { commandName = subcmd
-        , commandJson = list (map commandJson ncmds)
-        , commandArgs = []
+      return $ base
+        { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
         }
     generalSerial' ps (SAnno (One (RecS es, _)) _) = do
@@ -441,37 +442,32 @@ generalSerial x0@(SAnno _ (metaName->(Just subcmd))) = generalSerial' [] x0
       let entries = zip (map fst es) (map commandJson ncmds)
           obj = encloseSep "{" "}" ","
                 (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
-      return $ NexusCommand
-        { commandName = subcmd
-        , commandJson = obj
-        , commandArgs = []
+      return $ base
+        { commandJson = obj
         , commandSubs = conmap commandSubs ncmds
         }
     generalSerial' ps (SAnno (One (LamS vs x, _)) _) = do
       ncmd <- generalSerial' ps x
       return $ ncmd { commandArgs = vs }
     generalSerial' ps (SAnno (One (VarS (EVar v), _)) _) =
-      return $ NexusCommand subcmd tmpvar [] [(ps, v, [])]
+      return $ base { commandSubs = [(ps, v, [])] }
     generalSerial' _ (SAnno (One _) m) = do
       MM.throwError . OtherError . render $
         "Cannot serialize general type:" <+> prettyType (fromJust $ metaGType m)
-generalSerial (SAnno _ _)
-  = MM.throwError . OtherError
-  $ "No name found for call-free function"
 
 rewritePartials
   :: SAnno GMeta One TypeP
   -> MorlocMonad (SAnno GMeta One TypeP)
 rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
-  let gTypeArgs = maybe (repeat Nothing) (map Just . typeArgsG) (metaGType m)
+  let gTypeArgs = maybe (repeat Nothing) (map Just . decomposeFull) (metaGType m)
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
   lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
   let vs = map EVar . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
-      ys = zipWith3 makeVar vs (typeArgsP ftype) gTypeArgs
+      ys = zipWith3 makeVar vs (decomposeFull ftype) gTypeArgs
       -- unsafe, but should not fail for well-typed input
-      appType = last . typeArgsP $ ftype
-      appMeta = m {metaGType = metaGType m >>= (last . map Just . typeArgsG)}
+      appType = last . decomposeFull $ ftype
+      appMeta = m {metaGType = metaGType m >>= (last . map Just . decomposeFull)}
       lamMeta = m {metaGType = Just lamGType}
       lamCType = ftype
 
@@ -518,11 +514,11 @@ parameterize
   :: SAnno GMeta One TypeP
   -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
 parameterize (SAnno (One (LamS vs x, t)) m) = do
-  let args0 = zip vs $ zipWith makeArgument [0..] (typeArgsP t)
+  let args0 = zip vs $ zipWith makeArgument [0..] (decomposeFull t)
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize (SAnno (One (CallS src, t)) m) = do
-  let ts = init (typeArgsP t)
+  let ts = init . decomposeFull $ t
       vs = map EVar (freshVarsAZ [])
       args0 = zipWith makeArgument [0..] ts
   return $ SAnno (One (CallS src, (t, zip vs args0))) m
@@ -572,7 +568,7 @@ parameterize' args (SAnno (One (RecS entries, c)) m) = do
 parameterize' args (SAnno (One (LamS vs x, c)) m) = do
   let args' = [(v, r) | (v, r) <- args, not (elem v vs)]
       startId = maximum (map (argId . snd) args) + 1
-      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] (typeArgsP c)
+      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] (decomposeFull c)
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
@@ -684,14 +680,14 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
                . ManifoldM m (map snd args)
                $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
     where
-      inputs = fst $ typeParts fc
+      (inputs, _) = decompose fc
       sameLanguage = langOf pc == langOf fc
       fullyApplied = length inputs == length xs
       f = SrcM (typeP2typeM fc) src
 
   -- CallS - direct export of a sourced function, e.g.:
   express' True _ (SAnno (One (CallS src, (c, _))) m) = do
-    let inputs = fst $ typeParts c
+    let (inputs, _) = decompose c
         lambdaArgs = zipWith SerialArgument [0 ..] inputs
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
@@ -700,7 +696,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
 
   -- An un-applied source call
   express' False pc (SAnno (One (CallS src, (c, _))) m) = do
-    let inputs = fst $ typeParts c
+    let (inputs, _) = decompose c
         lambdaTypes = map typeP2typeM inputs
         lambdaArgs = zipWith NativeArgument [0 ..] inputs
         lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
@@ -713,12 +709,6 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
 
   express' _ _ (SAnno (One (_, (t, _))) m) = MM.throwError . CallTheMonkeys . render $
     "Invalid input to express' in module (" <> viaShow (metaName m) <> ") - type: " <> prettyTypeP t
-
--- get input types to a function type
-typeParts :: TypeP -> ([TypeP], TypeP)
-typeParts c = case reverse (typeArgsP c) of
-  (t:ts) -> (reverse ts, t)
-  [] -> ([], c) -- typeArgsP should never return an empty value
 
 -- | Move let assignments to minimize number of foreign calls.  This step
 -- should be integrated with the optimizations performed in the realize step.
@@ -945,24 +935,6 @@ translate lang srcs es = do
 
 
 -------- Utility and lookup functions ----------------------------------------
-
--- -- resolves a function into a list of types, for example:
--- -- ((Num->String)->[Num]->[String]) would resolve to the list
--- -- [(Num->String),[Num],[String]].
--- typeArgsM :: TypeM -> [TypeM]
--- typeArgsM (Function ts t) = ts ++ [t]
--- typeArgsM t = [t]
-
-typeArgsP :: TypeP -> [TypeP]
-typeArgsP (FunP t1 t2) = t1 : typeArgsP t2
-typeArgsP t = [t]
-
-typeArgsG :: GType -> [GType]
-typeArgsG t = map GType (typeArgs (unGType t))
-
-typeArgs :: Type -> [Type]
-typeArgs (FunT t1 t2) = t1 : typeArgs t2
-typeArgs t = [t]
 
 unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
 unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = f e g c : unpackSAnno f x

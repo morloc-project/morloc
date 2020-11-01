@@ -52,6 +52,7 @@ data JsonAccessor
 
 data NexusCommand = NexusCommand
   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
+  , commandType :: Type -- ^ the general type of the expression
   , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
   , commandArgs :: [EVar] -- ^ list of function arguments
   , commandSubs :: [( JsonPath -- ^ path in JSON to value needs to be replaced
@@ -69,6 +70,10 @@ instance Typelike TypeP where
     = NamT r (TV (Just lang) t)
              (map typeOf ps)
              (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+
+  decompose (FunP t1 t2) = case decompose t2 of 
+    (ts, finalType) -> (t1:ts, finalType) 
+  decompose t = ([], t)
 
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f))

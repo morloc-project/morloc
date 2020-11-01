@@ -20,19 +20,17 @@ handling for several very different languages (proofs-of-concept).
 
 First hackage release
 
- - [ ] Print general types after subcommands
- - [ ] Allow spaces and no unecessary escape in input JSON data
  - [ ] Remove extra space printed at the end of R JSON
- - [ ] Remove semicolon requirement
  - [ ] Haddock documentation
  - [ ] Update README
 
-0.32.0 [2020.10.xx]
+0.32.0 [2020.11.01]
 
- - * Fix JSON handling in nexus
- - * Fix nexus bug necessitated escaping quotations and braces
  - [.] Add record/table field access
- - * Resolve most GHC warnings
+ * Fix JSON handling in nexus
+ * Fix nexus bug necessitated escaping quotations and braces
+ * Print general types in nexus help
+ * Resolve most GHC warnings
 
 0.31.0 [2020.10.29]
 

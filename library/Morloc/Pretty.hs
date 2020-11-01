@@ -102,15 +102,15 @@ instance PrettyType Type where
   prettyType (FunT t1@(FunT _ _) t2) =
     parens (prettyType t1) <+> "->" <+> prettyType t2
   prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
+  prettyType (ArrT (TV Nothing "List") [t]) = brackets (prettyType t)
   prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
   prettyType (NamT r (TV Nothing _) _ entries) =
-    viaShow r <> encloseSep "{" "}" ", "
-      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+    encloseSep "{" "}" ","
+      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
   prettyType (NamT r (TV (Just lang) t) _ entries) =
     pretty t <> "@" <> viaShow lang <+>
-    viaShow r <> 
-    encloseSep "{" "}" ", "
-      (map (\(v, e) -> pretty v <+> "=" <+> prettyType e) entries)
+    encloseSep "{" "}" ","
+      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
 
 
 instance PrettyType GType where
