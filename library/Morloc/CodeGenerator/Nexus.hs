@@ -171,4 +171,4 @@ readJsonArg ::EVar -> Int -> MDoc
 readJsonArg v i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
 
 argT :: Int -> MDoc
-argT i = "$_[" <> pretty i <> "]"
+argT i = "'$_[" <> pretty i <> "]'" 

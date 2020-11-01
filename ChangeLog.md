@@ -29,9 +29,10 @@ First hackage release
 
 0.32.0 [2020.10.xx]
 
+ - * Fix JSON handling in nexus
+ - * Fix nexus bug necessitated escaping quotations and braces
  - [.] Add record/table field access
- - [ ] Add record/table arithmetic sugar
- - [x] Resolve most GHC warnings
+ - * Resolve most GHC warnings
 
 0.31.0 [2020.10.29]
 
