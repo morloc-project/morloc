@@ -5,8 +5,6 @@ table R (Person a) = "data.frame" {name :: "character", info :: a};
 
 export foo;
 
--- This function returns the input, but passes it though a language-specific id
--- function, which forces deserialization and then serialization.
-foo :: Person Int -> Person Int;
-foo r :: Person "integer" -> "integer";
-foo x = sum x@info;
+foo :: Person Num -> Num;
+foo R :: Person "numeric" -> "numeric";
+foo x = sum (x@info);

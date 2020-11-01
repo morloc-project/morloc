@@ -635,12 +635,7 @@ infer' lang g (AccE e k) = do
   return (g', ts, AnnE (AccE e' k) ts)
   where
     accessRecord :: EVar -> UnresolvedType -> Stack (Maybe UnresolvedType)
-    accessRecord (EVar key) t@(NamU _ _ _ rs) =
-      case lookup key rs of
-        Nothing -> throwError BadRecordAccess
-        (Just val) -> if langOf t == lang
-                      then return (Just val)
-                      else return Nothing
+    accessRecord (EVar key) (NamU _ _ _ rs) = return $ lookup key rs
     accessRecord _ _ = throwError  BadRecordAccess
 
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
@@ -927,6 +922,10 @@ collateOne e@UniE UniE = return e
 collateOne e@(LogE _) (LogE _) = return e
 collateOne e@(NumE _) (NumE _) = return e
 collateOne e@(StrE _) (StrE _) = return e
+-- accessors
+collateOne (AccE e1 k1) (AccE e2 k2)
+  | k1 == k2 = AccE <$> collateOne e1 e2 <*> pure k1
+  | otherwise = throwError $ OtherError "collate error: unequal access keys"
 -- containers
 collateOne (ListE es1) (ListE es2)
   | length es1 == length es2 = ListE <$> zipWithM collateOne es1 es2

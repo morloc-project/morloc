@@ -26,7 +26,7 @@ First hackage release
 
 0.32.0 [2020.11.01]
 
- - [.] Add record/table field access
+ * Add record/table field access
  * Fix JSON handling in nexus
  * Fix nexus bug necessitated escaping quotations and braces
  * Print general types in nexus help

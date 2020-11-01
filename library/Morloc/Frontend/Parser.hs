@@ -575,24 +575,14 @@ pTupleU = do
   lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
-  v <- newvar lang
-  let dts = MLD.defaultTuple lang ts
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v ts dts
+  return $ head (MLD.defaultTuple lang ts)
 
 pNamU :: Parser UnresolvedType
 pNamU = do
   _ <- tag (symbol "{")
   entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
-  v <- newvar lang
-  let dts = MLD.defaultRecord lang entries
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v [NamU NamRecord (TV lang "__RECORD__") [] entries] dts -- see entry in Infer.hs
+  return $ head (MLD.defaultRecord lang entries)
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do
@@ -630,12 +620,7 @@ pListU = do
   _ <- tag (symbol "[")
   t <- brackets pType
   lang <- CMS.gets stateLang
-  v <- newvar lang
-  let dts = MLD.defaultList lang t
-  return $
-    if lang == Nothing
-    then head dts
-    else ExistU v [t] dts
+  return $ head (MLD.defaultList lang t)
 
 pVarU :: Parser UnresolvedType
 pVarU = try pVarConU <|> pVarGenU
