@@ -1,10 +1,10 @@
-sudo: true
+sudo: false
+dist: focal
+os: linux
 
 language: python
 python:
  - "3.6"
- - "3.7"
- - "3.8"
 
 addons:
     apt:
@@ -21,7 +21,17 @@ before_install:
     # Set up R
     - mkdir -p ~/R/library
     - echo 'R_LIBS=~/R/library' >> ~/.Renviron
-    - R -e 'install.packages("devtools", dependencies=TRUE, repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("digest", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("tibble", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("rematch2", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("usethis", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("covr", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("DT", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("memoise", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("rcmdcheck", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("roxygen2", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("testthat", lib="~/R/library", repos="https://cloud.r-project.org")'
+    - R -e 'install.packages("devtools", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
     # Set up Perl
     - export PERL_MM_USE_DEFAULT=1

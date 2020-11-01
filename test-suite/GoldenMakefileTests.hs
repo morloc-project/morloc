@@ -24,6 +24,7 @@ makeManifoldFile :: String -> IO ()
 makeManifoldFile path = do
   abspath <- SD.makeAbsolute path
   devnull <- SI.openFile "/dev/null" SI.WriteMode
+  stdout <- SI.openFile "/dev/stdout" SI.WriteMode
   SP.runProcess
     "make" -- command
     ["-C", abspath, "--quiet"] -- arguments
@@ -31,7 +32,7 @@ makeManifoldFile path = do
     Nothing -- optional environment
     Nothing -- stdin handle
     (Just devnull) -- stdout handle
-    (Just devnull) -- stderr handle
+    (Just stdout) -- stderr handle
     >>= SP.waitForProcess
 
   SP.callProcess "make" ["-C", abspath, "--quiet", "clean"]
