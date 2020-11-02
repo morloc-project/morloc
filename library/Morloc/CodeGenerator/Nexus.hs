@@ -116,8 +116,18 @@ sub usage{
 usageLineT :: FData -> MDoc
 usageLineT (_, name, t) = vsep
   ( [idoc|print STDERR "  #{name}\n";|]
-  : writeTypes (typeOf t)
+  : writeTypes (gtypeOf t)
   )
+
+gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
+gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
+gtypeOf (FunP t1 t2) = FunT (gtypeOf t1) (gtypeOf t2)
+gtypeOf (ArrP (PV _ (Just v) _) ts) = ArrT (TV Nothing v) (map gtypeOf ts)
+gtypeOf (NamP r (PV _ (Just v) _) ps es)
+  = NamT r (TV Nothing v)
+           (map gtypeOf ps)
+           (zip [k | (PV _ (Just k) _, _) <- es] (map (gtypeOf . snd) es))
+gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep

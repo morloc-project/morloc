@@ -62,12 +62,13 @@ message:
 ```
 $ ./nexus.pl -h
 The following commands are exported:
-  hello [0]
+  hello
+    return: Str
 ```
 
-The `[0]` states the number of arguments the "command" hello takes.
+The `return: Str` phrases states that hello returns a string value.
 
-The command is called as so:
+The command `hello` can be called as shown below:
 
 ```
 $ ./nexus.pl hello

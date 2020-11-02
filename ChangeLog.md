@@ -28,7 +28,8 @@ handling for several very different languages (proofs-of-concept).
 First hackage release
 
  - [ ] Haddock documentation
- - [ ] Update README
+ - [.] Update README
+ * In help statements write universal, not concrete, types
 
 0.32.0 [2020.11.01]
 -------------------
