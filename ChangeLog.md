@@ -16,13 +16,17 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
+0.34.0 [202x.xx.xx]
+-------------------
+
+ - [ ] Remove extra space printed at the end of R JSON
+ - [ ] Remove semicolon requirement
 
 0.33.0 [2020.11.08]
 -------------------
 
 First hackage release
 
- - [ ] Remove extra space printed at the end of R JSON
  - [ ] Haddock documentation
  - [ ] Update README
 
