@@ -5,29 +5,24 @@
 [![DOI](https://zenodo.org/badge/75355860.svg)](https://zenodo.org/badge/latestdoi/75355860)
 
 `morloc` is a functional programming language where functions are imported from
-foreign languages and unified through a common type system. The compiler
+foreign languages and unified under a common type system. The compiler
 generates the code needed to compose functions across languages and also to
 direct automation of mundane tasks such as data validation, type/format
-conversions, data caching, distributed computing, and file reading/writing. In
-the far future, I hope to develop `morloc` into a query language that returns
-optimized programs from an infinite "library" of functions and compositions of
-functions.
+conversions, data caching, distributed computing, and file reading/writing. The
+endgame is to develop `morloc` into a query language that returns optimized
+programs from an infinite library of functions and compositions of functions.
 
 See [the manual](https://morloc-project.github.io/docs) for more information.
 
 ## Status
 
-This project is under active development and may change radically without
-warning. There are lots of bugs. You may peruse the issues page for a small
-sample.
-
-Pull requests and issue reports are very welcome.
-
-All development and testing is done in Linux.
+This project is under active development with no stability guarantees until the
+v1.0 release. Pull requests, issue reports, and private messages are very
+welcome.
 
 ## Installation
 
-Compile and install the package as so (requires the Haskell utility `stack`):
+Compile and install the package (requires the Haskell utility `stack`):
 
 ```sh
 git clone https://github.com/morloc-project/morloc
@@ -35,7 +30,49 @@ cd morloc
 stack install --fast
 ```
 
-## Hello world!
+`morloc` also depends on the `JSON::XS` perl module from CPAN, which can be
+installed as follows:
+
+```sh
+export PERL_MM_USE_DEFAULT=1
+export PERL_CANARY_STABILITY_NOPROMPT=1
+sudo perl -MCPAN -e 'install JSON::XS' 
+```
+
+For Python support, you need to download the `pymorlocinternals` library from
+PyPi:
+
+```sh
+pip install pymorlocinternals
+# or on Mac:
+pip3 install pymorlocinternals
+```
+
+For R support, you need to install the `rmorlocinternals` library from github,
+in an R session, run:
+
+```sh
+R> install.packages("devtools")
+R> devtools::install_github("morloc-project/rmorlocinternals")
+```
+
+C++ support currently requires a GNU compiler that supports C++11.
+
+`morloc` modules can be installed from the `morloc`
+[library](https://github.com/morloclib) with the commands such as:
+
+```sh
+morloc install cppbase
+morloc install pybase
+morloc install rbase
+morloc install math
+```
+
+The `morloc install` commands will install the modules in the
+`$HOME/.morloc/lib` folder.
+
+
+## Getting Started
 
 ```
 export hello
@@ -75,7 +112,7 @@ $ ./nexus.pl hello
 Hello World
 ```
 
-## Simple example using math functions from C++
+## Composing C++ Functions
 
 The following code uses only C++ functions (`fold`, `map`, `add` and `mul`). 
 
@@ -98,27 +135,33 @@ morloc install cppbase
 morloc make example-1.loc
 ```
 
-The `install` command clones the `cppbase` repo from github into the
-local directory `~/.morloc/lib`. The `make` command will generate a file named
+The `install` command clones the `cppbase` repo from github
+[repo](https://github.com/morloclib/cppbase) into the local directory
+`~/.morloc/lib`. The `morloc make` command will generate a file named
 `nexus.pl`, which is an executable interface to the exported functions.
 
-You can see the exported functions and the number of arguments they take:
+You can see typed usage information for the exported functions with the `-h` flag:
 
 ```sh
-$ ./nexus.pl
-The following commands are exported
-  square [1]
-  rms [1]
+$ ./nexus.pl -h
+The following commands are exported:
+  square
+    param 1: Num
+    return: Num
+  sumOfSquares
+    param 1: [Num]
+    return: Num
 ```
 
-Then you can call the exported functions:
+Then you can call the exported functions (arguments are in JSON format):
 
 ```sh
-$ ./nexus.pl sumOfSquares [1,2,3]
+$ ./nexus.pl sumOfSquares '[1,2,3]'
 14
 ```
 
-The `nexus.pl` executable dispatches the command to the compiled C++ program, `pool-cpp.out`.
+The `nexus.pl` executable dispatches the command to the compiled C++ program,
+`pool-cpp.out`.
 
 
 ## Language interop
@@ -263,6 +306,8 @@ rand :: n:Int -> a:Num -> b:Num -> xs:[c:Num] where (
   , c >= a
   , c <= b
 );
+
+rand :: n:Int -> a:Num -> b:Num -> [Num_{a,b}]_n
 ```
 
 The constraints are optional, and `rand` could instead just be written as:
