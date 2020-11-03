@@ -1,0 +1,11 @@
+module bio {
+
+export revcom
+
+source Cpp from "bio.hpp" ("revcom")
+
+-- Take the reverse complement of a DNA sequence
+revcom :: Str -> Str;
+revcom Cpp :: "std::string" -> "std::string";
+
+}

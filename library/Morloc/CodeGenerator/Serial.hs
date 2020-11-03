@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.CodeGenerator.Serial
-Description : Short description
+Description : Process serialization trees
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com

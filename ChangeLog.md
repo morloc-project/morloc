@@ -16,15 +16,21 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
+0.34.0 [202x.xx.xx]
+-------------------
 
-0.33.0 [2020.11.08]
+ - [ ] Remove extra space printed at the end of R JSON
+ - [ ] Remove semicolon requirement
+
+0.33.0 [2020.11.03]
 -------------------
 
 First hackage release
 
- - [ ] Remove extra space printed at the end of R JSON
- - [ ] Haddock documentation
- - [ ] Update README
+ * Haddock documentation
+ * Update README
+ * In help statements write universal, not concrete, types
+ * Make default containers non-existential (probably a bad decision?)
 
 0.32.0 [2020.11.01]
 -------------------

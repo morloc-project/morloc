@@ -14,7 +14,6 @@ module Morloc.CodeGenerator.Namespace
   , ExprM(..)
   , Argument(..)
   , JsonType(..)
-  , MData(..)
   , PVar(..)
   , TypeP(..)
   , JsonPath
@@ -29,14 +28,15 @@ import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
+-- | Stores the language, general name and concrete name for a type expression
 data PVar
   = PV
     Lang
-    (Maybe Text) -- ^ The general name for a type expression (if available)
+    (Maybe Text)
     Text
   deriving (Show, Eq, Ord)
 
--- | A solved type coupling a language specific form to a the general forms
+-- | A solved type coupling a language specific form to an optional general form
 data TypeP
   = UnkP PVar
   | VarP PVar
@@ -55,10 +55,10 @@ data NexusCommand = NexusCommand
   , commandType :: Type -- ^ the general type of the expression
   , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
   , commandArgs :: [EVar] -- ^ list of function arguments
-  , commandSubs :: [( JsonPath -- ^ path in JSON to value needs to be replaced
-                    , Text -- ^ function argument from which to pull replacement value
-                    , JsonPath -- ^ path to the replacement value
-                    )]
+  , commandSubs :: [(JsonPath, Text, JsonPath)]
+  -- ^ list of tuples with values 1) path in JSON to value needs to be replaced
+  -- 2) the function argument from which to pull replacement value and 3) the
+  -- path to the replacement value
   }
 
 instance Typelike TypeP where
@@ -75,11 +75,12 @@ instance Typelike TypeP where
     (ts, finalType) -> (t1:ts, finalType) 
   decompose t = ([], t)
 
+-- | A tree describing how to (de)serialize an object
 data SerialAST f
-  = SerialPack PVar (f (TypePacker, SerialAST f))
+  = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)]
+  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)] -- ^ make a record, table, or object
   | SerialNum PVar
   | SerialBool PVar
   | SerialString PVar
@@ -108,16 +109,6 @@ data JsonType
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
--- | The values are left unparsed, since they will be used as text
-data MData
-  = Num Text
-  | Str Text
-  | Log Bool -- booleans are parsed, since representation depend on language
-  | Lst [MData]
-  | Rec [(Text, MData)]
-  | Tup [MData]
-  deriving (Show, Eq, Ord)
-
 -- | An argument that is passed to a manifold
 data Argument
   = SerialArgument Int TypeP
@@ -136,7 +127,7 @@ data Argument
 data TypeM
   = Passthrough -- ^ serialized data that cannot be deserialized in this language
   | Serial TypeP -- ^ serialized data that may be deserialized in this language
-  | Native TypeP
+  | Native TypeP -- ^ an unserialized native data type
   | Function [TypeM] TypeM -- ^ a function of n inputs and one output (cannot be serialized)
   deriving(Show, Eq, Ord)
 

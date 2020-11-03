@@ -1,0 +1,7 @@
+import cppbase (id)
+
+export foo;
+
+foo :: (Int, Int) -> (Int, Int);
+foo Cpp :: ("size_t", "long") -> ("size_t", "long");
+foo x = id x;

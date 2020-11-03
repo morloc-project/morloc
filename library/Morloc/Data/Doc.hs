@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.Data.Doc
-Description : A wrapper around Leijen's text builder
+Description : A wrapper around prettyprint
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com

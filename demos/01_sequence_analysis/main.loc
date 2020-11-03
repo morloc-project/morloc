@@ -1,0 +1,20 @@
+-- Import functions from the 'fasta' and 'bio' modules in the working directory
+import fasta (readFasta, writeFasta);
+import bio (revcom);
+
+-- Import the local cppbase module. To install this module run:
+--   $ morloc install cppbase
+-- This command will install the module in the folder ~/.morloc/lib
+-- `map_val` has the type `(b -> c) -> [(a,b)] -> [(a,c)]`
+import cppbase (map_val);
+
+-- Declare functions for export. These are the functions that are exported when
+-- this module is imported by another module AND the functions that become
+-- user-facing subcommands when this module is built as an executable.
+export readFasta
+export writeFasta
+export revcom
+export fasta_revcom
+
+-- take the reverse complement of all entries in a fasta file
+fasta_revcom filename = writeFasta (map_val revcom (readFasta filename))

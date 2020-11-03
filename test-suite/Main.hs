@@ -176,4 +176,6 @@ main = do
       , golden "record-access-c"      "record-access-c"
       , golden "record-access-py"     "record-access-py"
       , golden "record-access-r"      "record-access-r"
+      -- type identities
+      , golden "type-identities-c"    "type-identities-c"
       ]

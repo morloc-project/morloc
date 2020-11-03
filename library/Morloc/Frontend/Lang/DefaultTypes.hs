@@ -83,5 +83,10 @@ defaultNumber lang@Nothing = [VarU (TV lang "Num"), VarU (TV lang "Int")]
 defaultNumber lang@(Just Python3Lang) = [VarU (TV lang "float"), VarU (TV lang "int")]
 defaultNumber lang@(Just RLang) = [VarU (TV lang "numeric"), VarU (TV lang "integer")]
 defaultNumber lang@(Just CLang) = [VarU (TV lang "double"), VarU (TV lang "int")]
-defaultNumber lang@(Just CppLang) = [VarU (TV lang "double"), VarU (TV lang "int")]
+defaultNumber lang@(Just CppLang) =
+  [ VarU (TV lang "double")
+  , VarU (TV lang "int")
+  , VarU (TV lang "long")
+  , VarU (TV lang "size_t")
+  ]
 defaultNumber lang@(Just PerlLang) = [VarU (TV lang "double")]

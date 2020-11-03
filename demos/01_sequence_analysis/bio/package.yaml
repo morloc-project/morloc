@@ -1,0 +1,11 @@
+name: bio
+version: 0.0.0
+homepage: null
+synopsis: bioinformatics module
+description: Basic bioinformatics functions for genome analysis and all that.
+category: bioinformatics
+license: MIT
+author: "Zebulun Arendsee"
+maintainer: "zbwrnz@gmail.com"
+github: null
+bug-reports: null

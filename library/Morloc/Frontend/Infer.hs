@@ -676,8 +676,8 @@ infer' lang g1 (AppE e1 e2) = do
 
   e2' <- collate es2' 
 
-  -- * e1' - e1 with type annotations
-  -- * e2' - e2 with type annotations (after being applied to e2)
+  -- e1' - e1 with type annotations
+  -- e2' - e2 with type annotations (after being applied to e2)
   (as2, ek') <- applyConcrete e1' e2' fs
 
   return (g2, as2, ek')
@@ -886,7 +886,6 @@ derive' _ e t = do
 substitute :: TVar -> UnresolvedType -> UnresolvedType
 substitute v t = P.substitute v (ExistU v [] []) t
 
--- | TODO: document
 occursCheck :: UnresolvedType -> UnresolvedType -> Stack ()
 occursCheck t1 t2 = do
   -- say $ "occursCheck:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
@@ -1009,7 +1008,6 @@ appendTypeSet s e1 =
               }
       return $ TypeSet (Just e3) rs
 
--- | TODO: document
 checkRealization :: EType -> EType -> Stack ()
 checkRealization e1 e2 = f' (etype e1) (etype e2)
   where

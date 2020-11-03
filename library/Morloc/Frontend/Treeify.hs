@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.Frontend.Treeify
-Description : I am groot
+Description : Translate from the frontend DAG to the backend SAnno AST forest
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
