@@ -1,0 +1,11 @@
+import fasta (readFasta, writeFasta);
+import bio (revcom);
+import cppbase (map_val);
+
+export readFasta
+export writeFasta
+export revcom
+export fasta_revcom
+
+-- take the reverse complement of all entries in a fasta file
+fasta_revcom filename = writeFasta (map_val revcom (readFasta filename))

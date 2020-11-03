@@ -1,0 +1,10 @@
+module bio {
+
+export revcom
+
+source Cpp from "bio.hpp" ("revcom")
+
+revcom :: Str -> Str;
+revcom Cpp :: "std::string" -> "std::string";
+
+}

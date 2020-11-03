@@ -1,0 +1,25 @@
+module fasta {
+
+import cppbase (Str)
+
+export readFasta
+export writeFasta
+
+type (Fasta a) = [(a, Str)];
+type Cpp (Fasta a) = [(a, Str)];
+
+type Filename = Str;
+type Cpp Filename = Str;
+
+source Cpp from "fastaIO.hpp" ("readFasta", "writeFasta")
+
+-- `readFasta` and `writeFasta` are both IO operations. The `morloc` typesystem
+-- currently has no mechanism to describe this (e.g., no IO monad). I haven't
+-- yet settled on an effect handling system.
+readFasta :: Filename -> Fasta Str;
+readFasta Cpp :: Filename -> Fasta Str;
+
+writeFasta :: Fasta Str -> Str;
+writeFasta Cpp :: Fasta Str -> Str;
+
+}
