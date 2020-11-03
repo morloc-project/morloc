@@ -676,8 +676,8 @@ infer' lang g1 (AppE e1 e2) = do
 
   e2' <- collate es2' 
 
-  -- * e1' - e1 with type annotations
-  -- * e2' - e2 with type annotations (after being applied to e2)
+  -- e1' - e1 with type annotations
+  -- e2' - e2 with type annotations (after being applied to e2)
   (as2, ek') <- applyConcrete e1' e2' fs
 
   return (g2, as2, ek')

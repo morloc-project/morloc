@@ -29,10 +29,11 @@ import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
+-- | Stores the language, general name and concrete name for a type expression
 data PVar
   = PV
     Lang
-    (Maybe Text) -- ^ The general name for a type expression (if available)
+    (Maybe Text)
     Text
   deriving (Show, Eq, Ord)
 
@@ -55,10 +56,10 @@ data NexusCommand = NexusCommand
   , commandType :: Type -- ^ the general type of the expression
   , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
   , commandArgs :: [EVar] -- ^ list of function arguments
-  , commandSubs :: [( JsonPath -- ^ path in JSON to value needs to be replaced
-                    , Text -- ^ function argument from which to pull replacement value
-                    , JsonPath -- ^ path to the replacement value
-                    )]
+  , commandSubs :: [(JsonPath, Text, JsonPath)]
+  -- ^ list of tuples with values 1) path in JSON to value needs to be replaced
+  -- 2) the function argument from which to pull replacement value and 3) the
+  -- path to the replacement value
   }
 
 instance Typelike TypeP where
