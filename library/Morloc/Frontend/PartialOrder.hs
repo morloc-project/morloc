@@ -47,7 +47,6 @@ substitute v r t = sub t
     sub (NamU namType v' ts rs) = NamU namType v' (map sub ts) [(x, sub t') | (x, t') <- rs]
     sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
 
--- | TODO: document
 free :: UnresolvedType -> Set.Set UnresolvedType
 free v@(VarU _) = Set.singleton v
 free v@(ExistU _ [] _) = Set.singleton v

@@ -1,6 +1,6 @@
 {-|
 Module      : Morloc.CodeGenerator.Internal
-Description : Short description
+Description : Miscellaneous backend utilities
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com

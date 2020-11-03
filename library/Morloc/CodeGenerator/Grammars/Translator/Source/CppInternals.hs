@@ -2,12 +2,19 @@
 
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals
-Description : C++ translator
+Description : C++ serialization source code
 Copyright   : (c) Zebulun Arendsee, 2020
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+The @serializationHandling@ code is copy-and-pasted from
+@morloc-project/cppmorlocinternals/serial.hpp@. This is dreadful, I know, and I
+will find an alternative solution soon.
+
 -}
+
+
 
 module Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals
   ( foreignCallFunction
