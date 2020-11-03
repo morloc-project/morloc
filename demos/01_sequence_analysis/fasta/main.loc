@@ -1,21 +1,39 @@
 module fasta {
 
+{- Import the Str type alias from cppbase, this allows 'Str' to be used in
+place of the C++ value of 'std::string' -}
 import cppbase (Str)
 
-export readFasta
-export writeFasta
-
+{- A FASTA file contains a header, which is a string describing a sequence, and
+a biological sequence (DNA or protein). The type [(a, Str)] generalizes this by
+allowing any type to describe the sequence. Many libraries create complex OOP
+hierarchies to describe biological sequences. While `morloc` can work with the
+OOP paradigm (see the `test-suite/golden-tests/object-1*` tests), I strongly
+recommand this simpler more elegant approach. For one, all the rich functions
+for mapping over and parallelizing list operations will be immediately usable.
+Also the type is so universal that most languages will have no problem
+supporting it. -}
 type (Fasta a) = [(a, Str)];
 type Cpp (Fasta a) = [(a, Str)];
 
+{- Currently, the `type` keyword introduces a simple type aliases. The term
+'Filename' will disappear early in the compile process. So currently it is
+useful only to increase readability. However, in the future I will add semantic
+layer over the type system that will allow rich knowledge to be encoded about
+the type terms. -}
 type Filename = Str;
 type Cpp Filename = Str;
 
+{- Source and export functions for reading and writing the universal
+representations of sequence, [(a,Str)], to the FASTA format used commonly in
+bioinformatics. -}
 source Cpp from "fastaIO.hpp" ("readFasta", "writeFasta")
+export readFasta
+export writeFasta
 
--- `readFasta` and `writeFasta` are both IO operations. The `morloc` typesystem
--- currently has no mechanism to describe this (e.g., no IO monad). I haven't
--- yet settled on an effect handling system.
+{- `readFasta` and `writeFasta` are both IO operations. The `morloc` typesystem
+currently has no mechanism to describe this (e.g., no IO monad). I haven't yet
+settled on an effect handling system. -}
 readFasta :: Filename -> Fasta Str;
 readFasta Cpp :: Filename -> Fasta Str;
 

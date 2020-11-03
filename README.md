@@ -14,6 +14,9 @@ programs from an infinite library of functions and compositions of functions.
 
 See [the manual](https://morloc-project.github.io/docs) for more information.
 
+If you want to get straight to playing with code, go through the steps in the
+installation section and then go to the project in `demo/01_sequence_analysis`.
+
 ## Status
 
 This project is under active development with no stability guarantees until the
@@ -71,6 +74,14 @@ morloc install math
 The `morloc install` commands will install the modules in the
 `$HOME/.morloc/lib` folder.
 
+Last of all, if you are working in vim, you can install `morloc` syntax highlighting as follows:
+
+``` sh
+mkdir -p ~/.vim/syntax/
+mkdir -p ~/.vim/ftdetect/
+cp vim-syntax/loc.vim ~/.vim/syntax/
+echo 'au BufRead,BufNewFile *.loc set filetype=loc' > ~/.vim/ftdetect/loc.vim
+```
 
 ## Getting Started
 
