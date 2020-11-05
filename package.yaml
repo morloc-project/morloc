@@ -3,7 +3,7 @@ version:          0.33.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
-category:         Compiler
+category:         Language, Compiler, Code Generation
 license:          GPL-3
 license-file:     LICENSE
 author:           "Zebulun Arendsee" 
