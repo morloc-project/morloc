@@ -18,28 +18,29 @@ extra-source-files:
 
 dependencies:
   - base >= 4.7 && < 5
-  - aeson
-  - bytestring
-  - containers
-  - directory
-  - extra
-  - filepath
-  - haskell-src-meta
-  - megaparsec
-  - mtl
-  - parsec
-  - partial-order
-  - pretty-simple
-  - prettyprinter
-  - prettyprinter-ansi-terminal
-  - process
-  - raw-strings-qq
-  - safe
-  - scientific
-  - template-haskell
-  - text
-  - unordered-containers
-  - yaml
+  - aeson >= 1.2.4.0 && < 1.3
+  - bytestring >=0.10.8.2 && <0.11
+  - containers >=0.5.10.2 && <0.6
+  - directory >=1.3.0.2 && <1.4
+  - extra >=1.6.5 && <1.7
+  - filepath >=1.4.1.2 && <1.5
+  - haskell-src-meta >=0.8.0.2 && <0.9
+  - megaparsec >=6.4.1 && <6.5
+  - mtl >=2.2.2 && <2.3
+  - parsec >=3.1.13.0 && <3.2
+  - partial-order >=0.1.2.1 && <0.2
+  - pretty-simple >=2.1.0.0 && <2.2
+  - prettyprinter >=1.2.0.1 && <1.3
+  - prettyprinter-ansi-terminal >=1.1.1.2 && <1.2
+  - process >=1.6.1.0 && <1.7
+  - raw-strings-qq ==1.1.*
+  - safe >=0.3.17 && <0.4
+  - scientific >=0.3.5.3 && <0.4
+  - template-haskell >=2.12.0.0 && <2.13
+  - text >=1.2.3.0 && <1.3
+  - unordered-containers >=0.2.9.0 && <0.3
+  - yaml >=0.8.29 && <0.9
+
 
 default-extensions:
   - FlexibleContexts
@@ -74,10 +75,10 @@ executables:
       - -rtsopts
       - -with-rtsopts=-N
     dependencies:
-      - base >= 4.7 && < 5
       - morloc 
-      - docopt
-      - text
+      - base >= 4.7 && < 5
+      - docopt >=0.7.0.5 && <0.8
+      - text >=1.2.3.0 && <1.3
 
 tests:
   morloc-test:
@@ -88,10 +89,10 @@ tests:
       - -rtsopts
       - -with-rtsopts=-N
     dependencies:
-      - base
       - morloc
-      - QuickCheck
-      - tasty
-      - tasty-quickcheck
-      - tasty-hunit
-      - tasty-golden
+      - base >=4.10.1.0 && <4.11
+      - QuickCheck >=2.10.1 && <2.11
+      - tasty >=1.0.1.1 && <1.1
+      - tasty-golden >=2.3.1.3 && <2.4
+      - tasty-hunit >=0.10.0.1 && <0.11
+      - tasty-quickcheck >=0.9.2 && <0.10
