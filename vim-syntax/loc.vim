@@ -45,6 +45,7 @@ syn keyword reserved type
 syn keyword reserved object
 syn keyword reserved table
 syn keyword reserved record
+syn keyword reserved system
 
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
@@ -55,6 +56,8 @@ hi def link reserved Keyword
 "                           P R I M A T I V E S                                
 " -----------------------------------------------------------------------------
 syn region s_string start=/"/ end=/"/
+syn region s_execute start=/`/ end=/`/
+syn region s_execute start=/\[[a-zA-Z0-9]*|/ end=/|\]/
 syn match s_num '\([a-zA-Z_]\)\@<!\<[0-9]\+\>\([a-zA-Z_]\)\@!'
 syn match s_dbl '\([a-zA-Z_]\)\@<!\<[0-9]\+\.[0-9]\+\>\([a-zA-Z_]\)\@!'
 
@@ -65,6 +68,7 @@ syn match s_dbl '\([a-zA-Z_]\)\@<!\<[0-9]\+\.[0-9]\+\>\([a-zA-Z_]\)\@!'
 hi def link s_num      Number
 hi def link s_dbl      Number
 hi def link s_string   String
+hi def link s_execute  String
 
 " =============================================================================
 "                            O P E R A T O R S                                 
@@ -77,21 +81,8 @@ syn match operator /(/
 syn match operator /)/
 syn match operator /{/
 syn match operator /}/
-syn match operator /+/
-syn match operator /-/
-syn match operator /^/
-syn match operator /\//
-syn match operator /\/\//
-syn match operator /%/
 syn match operator /->/
 syn match operator /;/
-syn match operator /</
-syn match operator />/
-syn match operator /==/
-syn match operator /<=/
-syn match operator />=/
-syn match operator /!=/
-syn match operator /\./
 syn match operator /@/
 
 " -----------------------------------------------------------------------------

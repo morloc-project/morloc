@@ -21,6 +21,9 @@ handling for several very different languages (proofs-of-concept).
 
  - [ ] Remove extra space printed at the end of R JSON
  - [ ] Remove semicolon requirement
+ - [ ] Add let declaration syntax
+ - [ ] Allow inference of concrete type from general type
+ - [ ] Add lambdas
 
 0.33.0 [2020.11.03]
 -------------------
