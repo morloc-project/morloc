@@ -2,6 +2,7 @@ morloc version 0.33.0
 
 Usage:
   morloc make [--expression] [--config=<config>] [--vanilla] <script>
+  morloc wrap [--expression] [--config=<config>] [--vanilla] <lang> <pkgname> <script>
   morloc install [--github] [--config=<config>] [--vanilla] <name>
   morloc typecheck [--type] [--raw] [--expression] [--verbose] <script>
 
