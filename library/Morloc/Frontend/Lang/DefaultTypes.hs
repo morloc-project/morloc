@@ -85,6 +85,7 @@ defaultNumber lang@(Just RLang) = [VarU (TV lang "numeric"), VarU (TV lang "inte
 defaultNumber lang@(Just CLang) = [VarU (TV lang "double"), VarU (TV lang "int")]
 defaultNumber lang@(Just CppLang) =
   [ VarU (TV lang "double")
+  , VarU (TV lang "float")
   , VarU (TV lang "int")
   , VarU (TV lang "long")
   , VarU (TV lang "size_t")
