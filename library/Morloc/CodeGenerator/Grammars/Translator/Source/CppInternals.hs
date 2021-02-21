@@ -56,6 +56,7 @@ std::string serialize(int x, int schema);
 std::string serialize(int x, size_t schema);
 std::string serialize(int x, long schema);
 std::string serialize(double x, double schema);
+std::string serialize(float x, float schema);
 std::string serialize(std::string x, std::string schema);
 
 template <class A> std::string serialize(A x);
@@ -78,6 +79,7 @@ bool match(const std::string json, const std::string pattern, size_t &i);
 void whitespace(const std::string json, size_t &i);
 std::string digit_str(const std::string json, size_t &i);
 double read_double(std::string json);
+float read_float(std::string json);
 
 // attempt a run a parser, on failure, consume no input
 template <class A>
@@ -85,6 +87,7 @@ bool try_parse(std::string json, size_t &i, A &x, bool (*f)(std::string, size_t 
 
 bool deserialize(const std::string json, size_t &i, bool &x);
 bool deserialize(const std::string json, size_t &i, double &x);
+bool deserialize(const std::string json, size_t &i, float &x);
 bool deserialize(const std::string json, size_t &i, std::string &x);
 
 template <class A>
@@ -138,6 +141,12 @@ std::string serialize(int x, long schema){
 std::string serialize(double x, double schema){
     std::ostringstream s;
     s << std::setprecision(std::numeric_limits<double>::digits10 + 2) << x;
+    return(s.str());
+}
+
+std::string serialize(float x, float schema){
+    std::ostringstream s;
+    s << std::setprecision(std::numeric_limits<float>::digits10 + 2) << x;
     return(s.str());
 }
 
@@ -231,6 +240,10 @@ double read_double(std::string json){
     return std::stod(json.c_str());
 }
 
+float read_float(std::string json){
+    return std::stof(json.c_str());
+}
+
 // attempt a run a parser, on failure, consume no input
 template <class A>
 bool try_parse(std::string json, size_t &i, A &x, bool (*f)(std::string, size_t &, A &)){
@@ -289,6 +302,33 @@ bool deserialize(const std::string json, size_t &i, double &x){
 
     if(lhs.size() > 0){
         x = read_double(sign + lhs + '.' + rhs);  
+        return true;
+    } else {
+        return false;
+    }
+}
+
+// combinator parser for floats
+// FIXME: remove this code duplication
+bool deserialize(const std::string json, size_t &i, float &x){
+    std::string lhs = "";
+    std::string rhs = "";
+    char sign = '+';
+    
+    if(json[i] == '-'){
+        sign = '-';
+        i++;
+    }
+    lhs = digit_str(json, i);
+    if(json[i] == '.'){
+        i++;
+        rhs = digit_str(json, i);
+    } else {
+        rhs = "0";
+    }
+
+    if(lhs.size() > 0){
+        x = read_float(sign + lhs + '.' + rhs);  
         return true;
     } else {
         return false;
