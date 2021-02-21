@@ -40,7 +40,7 @@ instance FromJSON Config where
     withObject "object" $ \o ->
       Config
         <$> fmap Path (o .:? "home" .!= "$HOME/.morloc")
-        <*> fmap Path (o .:? "library" .!= "$HOME/.morloc/lib")
+        <*> fmap Path (o .:? "library" .!= "$HOME/.morloc/src")
         <*> fmap Path (o .:? "tmpdir" .!= "$HOME/.morloc/tmp" )
         <*> fmap Path (o .:? "lang_python3" .!= "python3")
         <*> fmap Path (o .:? "lang_R" .!= "Rscript")
@@ -116,7 +116,7 @@ getDefaultMorlocHome = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc")
 -- | Get the Morloc library directory (absolute path). Usually this will be a
 -- folder inside the home directory.
 getDefaultMorlocLibrary :: IO Path
-getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/lib")
+getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/src")
 
 -- | Get the Morloc default temporary directory. This will store generated
 -- SPARQL queries and rdf dumps that can be used in debugging.

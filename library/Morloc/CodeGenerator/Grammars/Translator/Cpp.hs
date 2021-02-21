@@ -144,7 +144,7 @@ recordAccess record field = record <> "." <> field
 -- through all the module paths for each file, which introduces the possibility
 -- of name conflicts.
 translateSource
-  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/src/foo.h`)
   -> MorlocMonad MDoc
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
