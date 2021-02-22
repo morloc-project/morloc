@@ -17,6 +17,7 @@ module Morloc.System
   , takeExtensions
   , dropExtensions 
   , combine
+  , joinPath
   , fileExists
   ) where
 
@@ -31,6 +32,9 @@ import qualified System.Directory as SD
 
 combine :: Path -> Path -> Path
 combine (Path x) (Path y) = Path . MT.pack $ Path.combine (MT.unpack x) (MT.unpack y)
+
+joinPath :: [Path] -> Path
+joinPath = Path . MT.pack . Path.joinPath . map (MT.unpack . unPath)
 
 fileExists :: Path -> IO Bool
 fileExists = SD.doesFileExist . MT.unpack . unPath

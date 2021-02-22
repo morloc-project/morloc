@@ -84,33 +84,47 @@ loadModuleMetadata main = do
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> MVar -> [Path]
-getModulePaths (Path lib) (MVar base) = map Path
-  [ base <> ".loc"                              -- "./${base}.loc"
-  , base <> "/" <> "main.loc"                   -- "${base}/main.loc"
-  , lib <> "/" <> base <> ".loc"                -- "${LIB}/${base}.loc"
-  , lib <> "/" <> base <> "/" <> "main.loc"     -- "${LIB}/${base}/main.loc"
-  , lib <> "/" <> base <> "/" <> base <> ".loc" -- "${LIB}/${base}/${base}.loc"
+getModulePaths (Path lib) (MVar base) = map (MS.joinPath . map Path)
+  [ [base <> ".loc"]
+  , [base, "main.loc"]
+  , [lib, base <> ".loc"]
+  , [lib, base, "main.loc"]
+  , [lib, base, base <> ".loc"]
   ]
 
-getHeaderPaths :: Path -> MT.Text -> [MT.Text] -> [Path]
-getHeaderPaths (Path lib) header exts = [Path (base <> ext) | base <- bases, ext <- exts]
+-- | An ordered list of where to search for C/C++ header files
+getHeaderPaths
+  :: Path      -- ^ the path the morloc home ("~/.morloc" be default)
+  -> MT.Text   -- ^ the base header name without an extension
+  -> [MT.Text] -- ^ a list of header options (e.g., ".h", ".hpp")
+  -> [Path]    -- ^ an ordered list of paths to search (foo.h, foo.hpp, include/foo.h ...)
+getHeaderPaths (Path lib) base exts = [Path (path <> ext) | (Path path) <- paths, ext <- exts]
   where
-    bases = [ header                          -- "${header}"
-            , "include" <> "/" <> header      -- "${PWD}/include/${header}"
-            , "src" <> "/" <> header          -- "${PWD}/src/${header}"
-            , lib <> "/" <> header            -- "${INCLUDE}/${header}"
-            , "/usr/include/" <> header       -- "/usr/include/${header}"
-            , "/usr/local/include/" <> header -- "/usr/local/include/${header}"
+    paths = map (MS.joinPath . map Path)
+            [ [base]
+            , ["include", base] 
+            , [base, base]
+            , [lib, "include", base]
+            , [lib, "src", base, base] 
+            , ["/usr/include", base]
+            , ["/usr/local/include", base]
             ]
 
-getLibraryPaths :: Path -> MT.Text -> [Path]
-getLibraryPaths (Path lib) library = map Path
-  [ library                       -- "${library}"
-  , "bin" <> "/" <> library       -- "${PWD}/include/${library}"
-  , "src" <> "/" <> library       -- "${PWD}/src/${library}"
-  , lib <> "/" <> library         -- "${INCLUDE}/${library}"
-  , "/usr/bin/" <> library        -- "/usr/include/${library}"
-  , "/usr/local/bin/" <> library  -- "/usr/local/include/${library}"
+-- | An ordered list of where to search for shared libraries
+getLibraryPaths
+  :: Path    -- ^ the path the morloc home ("~/.morloc" be default)
+  -> MT.Text -- ^ the base source name, e.g., "SimplexNoise"
+  -> MT.Text -- ^ the shared library name, e.g., "libsimplexnoise.so"
+  -> [Path]  -- ^ an ordered list of paths to search
+getLibraryPaths (Path lib) base sofile = map (MS.joinPath . map Path)
+  [ [sofile]
+  , ["lib", sofile]
+  , [base, sofile]
+  , [lib, "lib", sofile]
+  , [lib, "src", base, sofile]
+  , [lib, "src", base, "lib", sofile]
+  , ["/usr/bin", sofile]
+  , ["/usr/local/bin", sofile]
   ]
 
 makeFlagsForSharedLibraries :: Lang -> Source -> Maybe MDoc
@@ -161,7 +175,7 @@ flagAndPath src@(Source _ CppLang (Just p) _)
       home <- MM.asks configHome
       let libnamebase = MT.filter DC.isAlphaNum (MT.toLower base)
       let libname = "lib" <> libnamebase <> ".so"
-      let allPaths = getLibraryPaths home libname
+      let allPaths = getLibraryPaths home base libname
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (libpath:_) -> do

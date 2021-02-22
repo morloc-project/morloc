@@ -16,14 +16,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
+0.35.0 [202x.xx.xx]
+
+ - [ ] Add let syntax
+ - [ ] Add limited inference of concrete type from general type
+ - [ ] Add lambdas
+
 0.34.0 [202x.xx.xx]
 -------------------
 
+ - [x] add handling for C++ float primitives
+ - [x] let C++ programs be imported through a header and shared library
  - [ ] Remove extra space printed at the end of R JSON
  - [ ] Remove semicolon requirement
- - [ ] Add let declaration syntax
- - [ ] Allow inference of concrete type from general type
- - [ ] Add lambdas
 
 0.33.0 [2020.11.03]
 -------------------
