@@ -12,8 +12,6 @@ module Morloc.Config
   , loadDefaultMorlocConfig
   , buildPoolCallBase
   , getDefaultConfigFilepath
-  , getDefaultMorlocTmpDir
-  , makeLibSourceString
   ) where
 
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
@@ -40,7 +38,7 @@ instance FromJSON Config where
     withObject "object" $ \o ->
       Config
         <$> fmap Path (o .:? "home" .!= "$HOME/.morloc")
-        <*> fmap Path (o .:? "library" .!= "$HOME/.morloc/src")
+        <*> fmap Path (o .:? "source" .!= "$HOME/.morloc/src")
         <*> fmap Path (o .:? "tmpdir" .!= "$HOME/.morloc/tmp" )
         <*> fmap Path (o .:? "lang_python3" .!= "python3")
         <*> fmap Path (o .:? "lang_R" .!= "Rscript")
@@ -53,7 +51,7 @@ loadDefaultMorlocConfig = do
   return $
     Config
       (Path $ defaults H.! "home")
-      (Path $ defaults H.! "library")
+      (Path $ defaults H.! "source")
       (Path $ defaults H.! "tmpdir")
       (Path "python") -- lang_python3
       (Path "Rscript") -- lang_R
@@ -105,31 +103,36 @@ buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
 defaultFields :: IO (H.HashMap MT.Text MT.Text)
 defaultFields = do
   home <- fmap unPath getDefaultMorlocHome
-  lib <- fmap unPath getDefaultMorlocLibrary
+  lib <- fmap unPath getDefaultMorlocSource
   tmp <- fmap unPath getDefaultMorlocTmpDir
-  return $ H.fromList [("home", home), ("library", lib), ("tmpdir", tmp)]
+  return $ H.fromList [("home", home), ("source", lib), ("tmpdir", tmp)]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path
 getDefaultMorlocHome = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc")
 
--- | Get the Morloc library directory (absolute path). Usually this will be a
--- folder inside the home directory.
+-- | Get the Morloc source directory (absolute path). Usually this will be a
+-- folder inside the home directory. This is the path to the source data (often
+-- a get repo).
+getDefaultMorlocSource :: IO Path
+getDefaultMorlocSource = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/src")
+
+-- | Get the path to the morloc shared libraries folder 
 getDefaultMorlocLibrary :: IO Path
-getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/src")
+getDefaultMorlocLibrary = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/lib")
 
 -- | Get the Morloc default temporary directory. This will store generated
 -- SPARQL queries and rdf dumps that can be used in debugging.
 getDefaultMorlocTmpDir :: IO Path
 getDefaultMorlocTmpDir = MS.getHomeDirectory |>> MS.appendPath (Path ".morloc/tmp")
 
--- | Get a source string for a library module. This will 1) remove the
--- user-specific home directory and 2) replace '/' separators with '.'. An
--- input of Nothing indicates the input is a local file or STDIN.
-makeLibSourceString :: Maybe Path -> MorlocMonad (Maybe Path)
-makeLibSourceString (Just (Path x)) = do
-  homedir <- liftIO getDefaultMorlocLibrary
-  let x' = maybe x id (MT.stripPrefix (unPath homedir) x)
-  let x'' = maybe x' id (MT.stripPrefix "/" x')
-  return . Just . Path . MT.replace "/" "__" . MT.replace "." "_" $ x''
-makeLibSourceString Nothing = return Nothing
+-- -- | Get a source string for a library module. This will 1) remove the
+-- -- user-specific home directory and 2) replace '/' separators with '.'. An
+-- -- input of Nothing indicates the input is a local file or STDIN.
+-- makeLibSourceString :: Maybe Path -> MorlocMonad (Maybe Path)
+-- makeLibSourceString (Just (Path x)) = do
+--   homedir <- liftIO getDefaultMorlocSource
+--   let x' = maybe x id (MT.stripPrefix (unPath homedir) x)
+--   let x'' = maybe x' id (MT.stripPrefix "/" x')
+--   return . Just . Path . MT.replace "/" "__" . MT.replace "." "_" $ x''
+-- makeLibSourceString Nothing = return Nothing

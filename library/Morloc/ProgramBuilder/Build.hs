@@ -12,6 +12,7 @@ module Morloc.ProgramBuilder.Build
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 

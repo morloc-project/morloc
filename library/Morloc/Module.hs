@@ -11,10 +11,12 @@ module Morloc.Module
   , installModule
   , findModule
   , loadModuleMetadata
+  , handleFlagsAndPaths
   ) where
 
 import Morloc.Namespace
 import Morloc.Data.Doc
+import qualified Data.Char as DC
 import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
@@ -89,6 +91,90 @@ getModulePaths (Path lib) (MVar base) = map Path
   , lib <> "/" <> base <> "/" <> "main.loc"     -- "${LIB}/${base}/main.loc"
   , lib <> "/" <> base <> "/" <> base <> ".loc" -- "${LIB}/${base}/${base}.loc"
   ]
+
+getHeaderPaths :: Path -> MT.Text -> [MT.Text] -> [Path]
+getHeaderPaths (Path lib) header exts = [Path (base <> ext) | base <- bases, ext <- exts]
+  where
+    bases = [ header                          -- "${header}"
+            , "include" <> "/" <> header      -- "${PWD}/include/${header}"
+            , "src" <> "/" <> header          -- "${PWD}/src/${header}"
+            , lib <> "/" <> header            -- "${INCLUDE}/${header}"
+            , "/usr/include/" <> header       -- "/usr/include/${header}"
+            , "/usr/local/include/" <> header -- "/usr/local/include/${header}"
+            ]
+
+getLibraryPaths :: Path -> MT.Text -> [Path]
+getLibraryPaths (Path lib) library = map Path
+  [ library                       -- "${library}"
+  , "bin" <> "/" <> library       -- "${PWD}/include/${library}"
+  , "src" <> "/" <> library       -- "${PWD}/src/${library}"
+  , lib <> "/" <> library         -- "${INCLUDE}/${library}"
+  , "/usr/bin/" <> library        -- "/usr/include/${library}"
+  , "/usr/local/bin/" <> library  -- "/usr/local/include/${library}"
+  ]
+
+makeFlagsForSharedLibraries :: Lang -> Source -> Maybe MDoc
+makeFlagsForSharedLibraries = undefined
+
+handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [MT.Text], [Path])
+handleFlagsAndPaths CppLang srcs = do
+  state <- MM.get
+  let gccflags = filter (/= "") . map packageGccFlags $ statePackageMeta state
+  
+  (srcs', libflags, paths) <-
+      fmap unzip3
+    . mapM flagAndPath
+    . unique
+    $ [s | s <- srcs, srcLang s == CppLang]
+
+  return ( filter (isJust . srcPath) srcs' -- all sources that have a defined path (import something)
+         , gccflags ++ concat libflags     -- compiler flags and shared libraries
+         , unique (catMaybes paths)        -- paths to files to include
+         )
+handleFlagsAndPaths _ srcs = return (srcs, [], [])
+
+flagAndPath :: Source -> MorlocMonad (Source, [MT.Text], Maybe Path)
+flagAndPath src@(Source _ CppLang (Just p) _)
+  = case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
+    -- lookup up "<base>.h" and "lib<base>.so"
+    (Path ".", base, "") -> do
+      header <- lookupHeader base
+      libFlags <- lookupLib base
+      return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
+    -- use "<base>.h" and lookup "lib<base>.so"
+    (dir, base, ext) -> do
+      libFlags <- lookupLib base
+      return (src, libFlags, Just dir)
+  where
+    lookupHeader :: MT.Text -> MorlocMonad Path
+    lookupHeader base = do
+      home <- MM.asks configHome
+      let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
+      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
+      case existingPaths of
+        (x:_) -> return x
+        [] -> MM.throwError . OtherError $ "Header file " <> base <> ".* not found"
+
+
+    lookupLib :: MT.Text -> MorlocMonad [MT.Text]
+    lookupLib base = do
+      home <- MM.asks configHome
+      let libnamebase = MT.filter DC.isAlphaNum (MT.toLower base)
+      let libname = "lib" <> libnamebase <> ".so"
+      let allPaths = getLibraryPaths home libname
+      existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
+      case existingPaths of
+        (libpath:_) -> do
+          libdir <- fmap unPath . liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
+          return
+            [ "-Wl,-rpath=" <> libdir
+            , "-L" <> libdir
+            , "-l" <> libnamebase
+            ]
+        [] -> return []
+flagAndPath src@(Source _ CppLang Nothing _) = return (src, [], Nothing)
+flagAndPath (Source _ _ _ _) = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
+
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do

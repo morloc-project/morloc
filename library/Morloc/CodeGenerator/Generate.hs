@@ -49,6 +49,7 @@ import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
 import qualified Morloc.System as MS
+import qualified Morloc.Module as Mod
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
@@ -887,20 +888,20 @@ encode
 encode srcs (lang, xs) = do
   state <- MM.get
 
-  let srcs' = unique [s | s <- srcs, srcLang s == lang]
+  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
+  (sources, flags, includes) <- Mod.handleFlagsAndPaths lang
+    $ unique [s | s <- srcs, srcLang s == lang]
 
   xs' <- mapM (preprocess lang) xs >>= chooseSerializer
   -- translate each node in the AST to code
-  code <- translate lang srcs' xs'
+  code <- translate lang sources xs'
 
   return $ Script
     { scriptBase = "pool"
     , scriptLang = lang
     , scriptCode = Code . render $ code
-    , scriptCompilerFlags =
-        filter (/= "") . map packageGccFlags $ statePackageMeta state
-    , scriptInclude = unique . map MS.takeDirectory $
-        (unique . catMaybes) (map srcPath srcs')
+    , scriptCompilerFlags = flags
+    , scriptInclude = includes
     }
 
 preprocess :: Lang -> ExprM Many -> MorlocMonad (ExprM Many)

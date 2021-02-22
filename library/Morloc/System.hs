@@ -9,9 +9,13 @@ Stability   : experimental
 module Morloc.System
   ( loadYamlConfig
   , getHomeDirectory
+  , getCurrentDirectory
+  , canonicalizePath
   , appendPath
   , takeDirectory
   , takeFileName
+  , takeExtensions
+  , dropExtensions 
   , combine
   , fileExists
   ) where
@@ -37,12 +41,24 @@ takeDirectory (Path x) = Path . MT.pack . Path.takeDirectory $ MT.unpack x
 takeFileName :: Path -> Path
 takeFileName (Path x) = Path . MT.pack . Path.takeFileName $ MT.unpack x
 
+takeExtensions :: Path -> MT.Text
+takeExtensions (Path x) = MT.pack . Path.takeExtensions $ MT.unpack x
+
+dropExtensions :: Path -> MT.Text
+dropExtensions (Path x) = MT.pack . Path.dropExtensions $ MT.unpack x
+
 -- | Append POSIX paths encoded as Text
 appendPath :: Path -> Path -> Path
 appendPath base path = combine path base
 
 getHomeDirectory :: IO Path
 getHomeDirectory = fmap (Path . MT.pack) Sys.getHomeDirectory
+
+getCurrentDirectory :: IO Path
+getCurrentDirectory = fmap (Path . MT.pack) SD.getCurrentDirectory
+
+canonicalizePath :: Path -> IO Path
+canonicalizePath (Path x) = fmap (Path . MT.pack) (SD.canonicalizePath (MT.unpack x))
 
 loadYamlConfig ::
      FromJSON a
