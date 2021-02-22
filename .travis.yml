@@ -57,6 +57,6 @@ script:
   - morloc install math
   - stack --no-terminal test --fast
 
-cache:
-  directories:
-    - $HOME/.stack
+# cache:
+#   directories:
+#     - $HOME/.stack
