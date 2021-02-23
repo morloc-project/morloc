@@ -22,7 +22,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
 
-0.34.0 [202x.xx.xx]
+0.34.0 [2020.xx.xx]
 -------------------
 
  - [x] add handling for C++ float primitives
