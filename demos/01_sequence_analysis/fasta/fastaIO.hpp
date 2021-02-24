@@ -39,13 +39,15 @@ std::vector<std::tuple<std::string,std::string>> readFasta(std::string filename)
     return out;
 }
 
-std::string writeFasta(std::vector<std::tuple<std::string,std::string>> bioseq){
-    std::ostringstream fasta;
+std::string writeFasta(std::string filename, std::vector<std::tuple<std::string,std::string>> bioseq){
+    std::ofstream fh;
+    fh.open(filename);
     for(size_t i = 0; i < bioseq.size(); i++){
-        fasta << ">" << std::get<0>(bioseq[i]) << '\n';
-        fasta << std::get<1>(bioseq[i]) << '\n';
+        fh << ">" << std::get<0>(bioseq[i]) << '\n';
+        fh << std::get<1>(bioseq[i]) << '\n';
     }
-    return(fasta.str());
+    fh.close();
+    return filename;
 }
 
 #endif

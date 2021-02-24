@@ -37,7 +37,9 @@ settled on an effect handling system. -}
 readFasta :: Filename -> Fasta Str;
 readFasta Cpp :: Filename -> Fasta Str;
 
-writeFasta :: Fasta Str -> Str;
-writeFasta Cpp :: Fasta Str -> Str;
+{- While a more idiomatic C++ implementation would be to return `void`,
+returning the filename makes it easier to continue the pipeline. -}
+writeFasta :: Filename -> Fasta Str -> Filename;
+writeFasta Cpp :: Filename -> Fasta Str -> Filename;
 
 }
