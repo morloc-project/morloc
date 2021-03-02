@@ -29,6 +29,10 @@ handling for several very different languages (proofs-of-concept).
  - [x] let C++ programs be imported through a header and shared library
  - [ ] Remove extra space printed at the end of R JSON
  - [ ] Remove semicolon requirement
+ - [x] Add hie.yaml for compatibility with hsl
+ - [ ] Update dependency set to LTS-17.4
+ - [ ] Replace docopt with pcapriotti/optparse-applicative 
+ - [ ] Add `-o` option to compiler to specify output executable name
 
 0.33.0 [2020.11.03]
 -------------------
