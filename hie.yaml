@@ -1,0 +1,17 @@
+# Generated via gen-hie: https://github.com/Avi-D-coder/implicit-hie
+cradle:
+  stack:
+    - path: "./library"
+      component: "morloc:lib"
+
+    - path: "./executable/Main.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./executable/Subcommands.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./executable/Paths_morloc.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./test-suite"
+      component: "morloc:test:morloc-test"
