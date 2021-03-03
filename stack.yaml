@@ -15,7 +15,7 @@
 # resolver:
 #  name: custom-snapshot
 #  location: "./custom-snapshot.yaml"
-resolver: lts-11.4
+resolver: lts-17.4
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
@@ -40,10 +40,7 @@ packages:
 # Dependency packages to be pulled from upstream that are not in the resolver
 # (e.g., acme-missiles-0.3)
 extra-deps:
-  - hgal-2.0.0.2
-  - yaml-0.11.5.0@sha256:499783456cb70964b6ff29e310d1785829e57eb872ec143a9a81da0edb69cb61,5109
-  - libyaml-0.1.2@sha256:7f14f69ceb14659699974e8e47e1ea6f226ea21ff42a802db03e721c319d201d,2125
-
+ - partial-order-0.2.0.0@sha256:a0d6ddc9ebcfa965a5cbcff1d06d46a79d44ea5a0335c583c2a51bcb41334487,2275
 
 # Override default flag values for local packages and extra-deps
 # flags: {}

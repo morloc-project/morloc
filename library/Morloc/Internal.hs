@@ -63,7 +63,7 @@ import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
 import Data.Char (isUpper, isLower)
-import Safe hiding (at)
+import Safe hiding (at, headDef, lastDef)
 import System.FilePath
 import qualified Data.Map as Map
 import qualified Data.Set as Set

@@ -18,6 +18,7 @@ import Morloc.Namespace
 import Morloc.Pretty (prettyType)
 import Morloc.Data.Doc (render)
 import qualified Morloc.Data.Text as MT
+import Text.Megaparsec.Error (parseErrorPretty)
 
 -- TODO: fix this orphan instance
 instance Show MorlocError where
@@ -30,7 +31,7 @@ errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
 errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) =
   "'" <> lang <> "' is not recognized as a supported language"
-errmsg (SyntaxError err) = "SyntaxError: " <> MT.show' err
+errmsg (SyntaxError err) = "SyntaxError: " <> MT.pack (parseErrorPretty err)
 errmsg (SerializationError t) = "SerializationError: " <> t
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
 errmsg (TypeError msg) = "TypeError: " <> msg

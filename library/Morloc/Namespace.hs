@@ -143,7 +143,7 @@ data MorlocError
   -- | Raised for unsupported features (such as specific languages)
   | NotSupported Text
   -- | Raised by parsec on parse errors
-  | SyntaxError (ParseError Char Void)
+  | SyntaxError (ParseError String Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
   -- | Raised when an unsupported language is encountered
@@ -220,7 +220,6 @@ data MorlocError
   | ConflictingSignatures
   | CompositionsMustBeGeneral
   | IllegalConcreteAnnotation
-  deriving (Eq)
 
 data PackageMeta =
   PackageMeta
