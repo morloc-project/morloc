@@ -1,4 +1,4 @@
-module Smurf.Lexer
+module Morloc.Frontend.Smurf.Lexer
     ( Parser
     , integer
     , float
@@ -39,7 +39,7 @@ import Data.Char as DC
 import Data.Void
 import Control.Monad
 
-import qualified Smurf.Data as D
+import qualified Morloc.Frontend.Smurf.Data as D
 type Parser = Parsec Void String
 
 lexeme :: Parser a -> Parser a
@@ -51,7 +51,7 @@ comments =  L.skipLineComment "--"
         <?> "comment"
 
 spaces :: Parser ()
-spaces = void $ oneOf " \t\r\v"
+spaces = void $ oneOf (" \t\r\v" :: String)
 
 whiteSpace :: Parser ()
 whiteSpace = L.space spaces comments empty
@@ -63,7 +63,7 @@ indent :: Ordering -> Pos -> Parser Pos
 indent ord pos =
     -- indentGuard doesn't work for me :/
     do
-        many $ oneOf " \t"
+        many $ oneOf (" \t" :: String)
         level <- L.indentLevel
         let correct = case ord of
                 EQ -> pos == level
@@ -134,7 +134,7 @@ name :: Parser String
 name = lexeme $
     do
         head <- letterChar <|> char '_'
-        tail <- many $ alphaNumChar <|> oneOf "_.'"
+        tail <- many $ alphaNumChar <|> oneOf ("_.'" :: String)
         let v = head : tail
         if v `elem` reservedNames then
             fail "used reserved word as an identifier"
@@ -165,7 +165,7 @@ tag p =
 stringLiteral :: Parser String
 stringLiteral = lexeme $ do
   _ <- char '"'
-  s <- many ((char '\\' >> char '"' ) <|> noneOf "\"")
+  s <- many ((char '\\' >> char '"' ) <|> noneOf ("\"" :: String))
   _ <- char '"'
   return s
 
@@ -197,12 +197,12 @@ genericType :: Parser String
 genericType = lexeme $
     do
         head <- satisfy (\c -> ('a' <= c && c <= 'z') || c == '_')
-        tail <- many $ alphaNumChar <|> oneOf "_.'"
+        tail <- many $ alphaNumChar <|> oneOf ("_.'" :: String)
         return $ head : tail
 
 -- | match any non-space character
 nonSpace :: Parser Char
-nonSpace = noneOf " \n\t\r\v"
+nonSpace = noneOf (" \n\t\r\v" :: String)
 
 path :: Parser [String]
 path = lexeme $ sepBy1 name (symbol "/")

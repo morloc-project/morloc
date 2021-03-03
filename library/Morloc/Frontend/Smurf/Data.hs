@@ -1,4 +1,4 @@
-module Smurf.Data (
+module Morloc.Frontend.Smurf.Data (
     Top(..)
   , Statement(..)
   , Expression(..)

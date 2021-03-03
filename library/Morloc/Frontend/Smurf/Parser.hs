@@ -1,4 +1,4 @@
-module Smurf.Parser (smurf) where
+module Morloc.Frontend.Smurf.Parser (smurf) where
 
 import Control.Monad.State
 import Text.Megaparsec
@@ -6,8 +6,8 @@ import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
 import Data.Maybe
 
-import Smurf.Data
-import qualified Smurf.Lexer as Tok
+import Morloc.Frontend.Smurf.Data
+import qualified Morloc.Frontend.Smurf.Lexer as Tok
 
 smurf :: Tok.Parser [Top]
 smurf = Tok.whiteSpaceNewline >>
