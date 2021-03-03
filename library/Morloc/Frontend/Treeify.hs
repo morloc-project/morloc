@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Treeify
 Description : Translate from the frontend DAG to the backend SAnno AST forest
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.System
-Description : Handle dependencies and environment setup
-Copyright   : (c) Zebulun Arendsee, 2020
+Description : General file system functions
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

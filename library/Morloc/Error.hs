@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Error
 Description : Prepare error messages from MorlocError types
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

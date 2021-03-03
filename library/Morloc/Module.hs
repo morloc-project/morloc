@@ -1,10 +1,16 @@
 {-|
 Module      : Module
 Description : Morloc module imports and paths 
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
+
+All information about morloc module structure should be defined here.
+ * define package YAML metadata
+ * finding modules on the local filesystem
+ * finding headers and shared libraries required by modules
+ * installation of modules from github
 -}
 module Morloc.Module
   ( ModuleSource(..)
