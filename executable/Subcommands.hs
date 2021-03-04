@@ -16,7 +16,7 @@ module Subcommands
   , cmdTypecheck
   ) where
 
-import Data (CliCommand)
+import UI
 import Morloc.Namespace
 import qualified Morloc as M
 import qualified Morloc.Config as Config
