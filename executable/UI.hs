@@ -32,6 +32,7 @@ cliParser = hsubparser
 data MakeCommand = MakeCommand
   { makeExpression :: Bool
   , makeConfig :: String
+  , makeVerbose :: Bool
   , makeVanilla :: Bool
   , makeOutfile :: String
   , makeScript :: String
@@ -41,6 +42,7 @@ makeCommandParser :: Parser MakeCommand
 makeCommandParser = MakeCommand
   <$> optExpression 
   <*> optConfig
+  <*> optVerbose
   <*> optVanilla
   <*> optOutfile
   <*> optScript
@@ -51,6 +53,8 @@ makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc 
 
 data InstallCommand = InstallCommand
   { installConfig :: String
+  , installVerbose :: Bool
+  , installGithub :: Bool
   , installVanilla :: Bool
   , installModuleName :: String
   }
@@ -58,6 +62,8 @@ data InstallCommand = InstallCommand
 makeInstallParser :: Parser InstallCommand
 makeInstallParser = InstallCommand
   <$> optConfig
+  <*> optVerbose
+  <*> optGithub
   <*> optVanilla
   <*> optModuleName
 
@@ -66,7 +72,9 @@ installSubcommand = command "install" (info (CmdInstall <$> makeInstallParser) (
 
 
 data TypecheckCommand = TypecheckCommand
-  { typecheckType :: Bool
+  { typecheckConfig :: String
+  , typecheckVanilla :: Bool
+  , typecheckType :: Bool
   , typecheckRaw :: Bool
   , typecheckExpression :: Bool
   , typecheckVerbose :: Bool
@@ -75,7 +83,9 @@ data TypecheckCommand = TypecheckCommand
 
 makeTypecheckParser :: Parser TypecheckCommand
 makeTypecheckParser = TypecheckCommand
-  <$> optType
+  <$> optConfig
+  <*> optVanilla
+  <*> optType
   <*> optRaw
   <*> optExpression
   <*> optVerbose
@@ -110,6 +120,12 @@ optVerbose = switch
   ( long "verbose"
   <> short 'v'
   <> help "print debugging information"
+  )
+
+optGithub :: Parser Bool
+optGithub = switch
+  ( long "github"
+  <> help "install module from github"
   )
 
 optConfig :: Parser String

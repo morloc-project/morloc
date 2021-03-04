@@ -21,18 +21,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add let syntax
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
+ - [ ] Remove extra space printed at the end of R JSON
 
 0.34.0 [2020.xx.xx]
 -------------------
 
  - [x] add handling for C++ float primitives
  - [x] let C++ programs be imported through a header and shared library
- - [ ] Remove extra space printed at the end of R JSON
  - [ ] Remove semicolon requirement
  - [x] Add hie.yaml for compatibility with hsl
- - [ ] Update dependency set to LTS-17.4
- - [ ] Replace docopt with pcapriotti/optparse-applicative 
+ - [x] Update dependency set to LTS-17.4
+ - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
  - [ ] Add `-o` option to compiler to specify output executable name
+ - [ ] Add `uninstall` function to uninstall a module
 
 0.33.0 [2020.11.03]
 -------------------
