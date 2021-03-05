@@ -1,9 +1,9 @@
 import rbase
 
-source r from "rms.R" (
-    "rms1" as rms
+source r from "rms.R"
+  ( "rms1" as rms
   , "rms2" as rms
-)
+  )
 
 export rms
 
