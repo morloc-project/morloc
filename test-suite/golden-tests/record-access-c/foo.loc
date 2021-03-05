@@ -1,10 +1,10 @@
 import cppbase (fold, add)
 
-table (Person a) = Person {name :: Str, info :: a};
-table Cpp (Person a) = "struct" {name :: "std::string", info :: a};
+table (Person a) = Person {name :: Str, info :: a}
+table Cpp (Person a) = "struct" {name :: "std::string", info :: a}
 
-export foo;
+export foo
 
-foo :: Person Num -> Num;
-foo Cpp :: Person "double" -> "double";
-foo x = fold add 0 (x@info);
+foo :: Person Num -> Num
+foo Cpp :: Person "double" -> "double"
+foo x = fold add 0 (x@info)

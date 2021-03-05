@@ -3,4 +3,4 @@ import rbase (map, mul)
 export foo
 
 -- literal function with constant application
-foo xs = map (mul 2) xs;
+foo xs = map (mul 2) xs

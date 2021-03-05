@@ -1,2 +1,2 @@
 export foo
-foo = [];
+foo = []

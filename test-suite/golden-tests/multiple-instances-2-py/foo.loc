@@ -1,5 +1,5 @@
-import math (sqrt, mean, mul);
-import cppbase (map);
+import math (sqrt, mean, mul)
+import cppbase (map)
 
 export rms
 
@@ -8,9 +8,9 @@ source py from "rms.py" (
   , "rms2" as rms
 )
 
-square x = mul x x;
-rms xs = sqrt (mean (map square xs));
+square x = mul x x
+rms xs = sqrt (mean (map square xs))
 
-rms :: [Num] -> Num;
-rms py :: ["float"] -> "float";
-rms cpp :: ["double"] -> "double";
+rms :: [Num] -> Num
+rms py :: ["float"] -> "float"
+rms cpp :: ["double"] -> "double"

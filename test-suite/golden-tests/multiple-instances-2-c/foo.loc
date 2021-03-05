@@ -1,5 +1,5 @@
-import math (sqrt, mean, mul);
-import cppbase (map);
+import math (sqrt, mean, mul)
+import cppbase (map)
 
 export rms
 
@@ -8,8 +8,8 @@ source cpp from "rms.h" (
   , "rms2" as rms
 )
 
-square x = mul x x;
-rms xs = sqrt (mean (map square xs));
+square x = mul x x
+rms xs = sqrt (mean (map square xs))
 
-rms cpp :: ["double"] -> "double";
-rms :: [Num] -> Num;
+rms cpp :: ["double"] -> "double"
+rms :: [Num] -> Num

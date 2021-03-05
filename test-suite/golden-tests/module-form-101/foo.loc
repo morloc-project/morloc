@@ -1,8 +1,8 @@
 -- 101 - source 1, declare 1
 
-import pybase  (sub, add, mul);
-import cppbase (sub, add, mul);
-import rbase   (sub, add, mul);
+import pybase  (sub, add, mul)
+import cppbase (sub, add, mul)
+import rbase   (sub, add, mul)
 
 source py from "foo.py" ("foo_loc" as foo)
 

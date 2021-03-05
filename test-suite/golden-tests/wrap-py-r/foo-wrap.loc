@@ -1,8 +1,8 @@
 import foo
 
 -- provide the required missing signatures for the future wrapped function
-inc r :: "numeric" -> "numeric";
-fac r :: "integer" -> "integer";
+inc r :: "numeric" -> "numeric"
+fac r :: "integer" -> "integer"
 
 export inc
 export dec

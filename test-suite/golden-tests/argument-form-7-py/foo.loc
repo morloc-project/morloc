@@ -3,4 +3,4 @@ import pybase (map, mul)
 export foo
 
 -- literal partially-applied function passed as argument
-foo xs = map (mul 2) xs;
+foo xs = map (mul 2) xs

@@ -1,14 +1,14 @@
 import pybase (id)
 
-source py from "person.py" ("PersonObj");
+source py from "person.py" ("PersonObj")
 
-table (Person a) = Person {name :: Str, info :: a};
-table py (Person a) = "PersonObj" {name :: "str", info :: a};
+table (Person a) = Person {name :: Str, info :: a}
+table py (Person a) = "PersonObj" {name :: "str", info :: a}
 
-export foo;
+export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person Int -> Person Int;
-foo py :: Person "int" -> Person "int";
-foo xs = id xs;
+foo :: Person Int -> Person Int
+foo py :: Person "int" -> Person "int"
+foo xs = id xs

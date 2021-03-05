@@ -3,4 +3,4 @@ import cppbase (zipWith, mul)
 export foo
 
 -- literal function with no application
-foo xs ys = zipWith mul xs ys;
+foo xs ys = zipWith mul xs ys

@@ -15,5 +15,5 @@ module Arithmetic {
 module Main {
     import Arithmetic (add)
     export foo
-    foo x y = add x (add y 42);
+    foo x y = add x (add y 42)
 }

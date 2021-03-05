@@ -9,6 +9,6 @@ source r from "foo.R" ("sub_loc" as sub)
 
 export sub
 
-sub :: Num -> Num -> Num;
-sub py :: "float" -> "float" -> "float";
-sub r :: "numeric" -> "numeric" -> "numeric";
+sub :: Num -> Num -> Num
+sub py :: "float" -> "float" -> "float"
+sub r :: "numeric" -> "numeric" -> "numeric"
