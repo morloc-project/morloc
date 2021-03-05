@@ -528,11 +528,11 @@ pListE = ListE <$> brackets (sepBy pExpr (symbol ","))
 
 pTuple :: Parser Expr
 pTuple = do
-  _ <- op "("
+  _ <- symbol "("
   e <- pExpr
-  _ <- op ","
-  es <- sepBy1 pExpr (op ",")
-  _ <- op ")"
+  _ <- symbol ","
+  es <- sepBy1 pExpr (symbol ",")
+  _ <- symbol ")"
   return (TupleE (e : es))
 
 pUni :: Parser Expr
