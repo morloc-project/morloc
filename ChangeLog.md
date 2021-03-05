@@ -28,12 +28,14 @@ handling for several very different languages (proofs-of-concept).
 
  - [x] add handling for C++ float primitives
  - [x] let C++ programs be imported through a header and shared library
- - [ ] Remove semicolon requirement
+ - [x] Remove semicolon requirement
  - [x] Add hie.yaml for compatibility with hsl
  - [x] Update dependency set to LTS-17.4
  - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
  - [ ] Add `-o` option to compiler to specify output executable name
  - [ ] Add `uninstall` function to uninstall a module
+ - [x] Remove brace requirement for modules
+ - [x] Remove brace requirement for `where` statements
 
 0.33.0 [2020.11.03]
 -------------------
