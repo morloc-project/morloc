@@ -166,7 +166,7 @@ comments =  L.skipLineComment "--"
         <?> "comment"
 
 number :: Parser DS.Scientific
-number = lexeme $ L.signed empty L.scientific -- `empty` because no space is allowed
+number = lexeme $ L.signed sc L.scientific
 
 surround :: Parser l -> Parser r -> Parser a -> Parser a
 surround l r v = do
