@@ -16,14 +16,21 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
-0.35.0 [202x.xx.xx]
+0.3x.0 [2021.xx.xx]
+-------------------
 
  - [ ] Add let syntax
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
+ - [ ] Add `uninstall` function to uninstall a module
  - [ ] Remove extra space printed at the end of R JSON
 
-0.34.0 [2020.xx.xx]
+0.35.0 [2021.xx.xx]
+-------------------
+
+ - [ ] Rust support
+
+0.34.0 [2020.03.07]
 -------------------
 
  - [x] add handling for C++ float primitives
@@ -32,10 +39,9 @@ handling for several very different languages (proofs-of-concept).
  - [x] Add hie.yaml for compatibility with hsl
  - [x] Update dependency set to LTS-17.4
  - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
- - [ ] Add `-o` option to compiler to specify output executable name
- - [ ] Add `uninstall` function to uninstall a module
- - [x] Remove brace requirement for modules
- - [x] Remove brace requirement for `where` statements
+ - [x] Remove brace requirement for modules and `where` statements
+ - [ ] Add `-o` option to compiler to specify output executable names
+ - [ ] Acceptable error messages
 
 0.33.0 [2020.11.03]
 -------------------
