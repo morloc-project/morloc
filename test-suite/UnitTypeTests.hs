@@ -417,8 +417,7 @@ typeAliasTests =
         [r|
            type Num = "numeric"
            f R :: [Num] -> "integer"
-           f"
-          
+           f
         |]
         [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
     , assertTerminalType
@@ -880,22 +879,22 @@ unitTypeTests =
         [arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]]]
     , assertTerminalType
         "language inference in lists #1"
-        (T.unlines
-          [ "bar Cpp :: \"float\" -> \"std::vector<$1>\" \"float\""
-          , "bar x = [x]"
-          , "bar 5"
-          ])
+        [r|
+           bar Cpp :: "float" -> "std::vector<$1>" "float"
+           bar x = [x]
+           bar 5
+        |]
         [arrc CppLang "std::vector<$1>" [varc CppLang "float"], lst (var "Num")]
     , assertTerminalType
         "language inference in lists #2"
-        (T.unlines
-          [ "mul :: Num -> Num -> Num"
-          , "mul Cpp :: \"int\" -> \"int\" -> \"int\""
-          , "foo = mul 2"
-          , "bar Cpp :: \"int\" -> \"std::vector<$1>\" \"int\""
-          , "bar x = [foo x, 42]"
-          , "bar 5"
-          ])
+        [r|
+           mul :: Num -> Num -> Num
+           mul Cpp :: "int" -> "int" -> "int"
+           foo = mul 2
+           bar Cpp :: "int" -> "std::vector<$1>" "int"
+           bar x = [foo x, 42]
+           bar 5
+        |]
         [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
 
     -- type signatures and higher-order functions
@@ -1069,58 +1068,78 @@ unitTypeTests =
     , assertTerminalType "property syntax (4)" "f :: (Foo a) => Num\nf" [num]
     , assertTerminalType "property syntax (5)" "f :: (Foo a, Bar b) => Num\nf" [num]
     -- constraints
-    , assertTerminalType "constraint syntax (1)" "f :: Num where {ladida}\nf" [num]
     , assertTerminalType
         "constraint syntax (1)"
-        "f :: Num where { ladida \nfoo }\nf"
+        [r|
+           f :: Num where
+             ladida
+           f
+        |]
+        [num]
+    , assertTerminalType
+        "constraint syntax (2)"
+        [r|
+           f :: Num where
+             first relation
+               and more
+             second relation
+           f
+        |]
         [num]
 
     -- tests modules
-    , assertTerminalType "basic Main module" "module Main {[1,2,3]}" [lst num]
+    , assertTerminalType
+        "basic Main module"
+        [r|
+           module Main
+           [1,2,3]
+        |]
+        [lst num]
     , (flip $ assertTerminalType "import/export") [lst num] $
       [r|
-module Foo
-export x
-x = 42
-
-module Bar
-export f
-f :: a -> [a]
-
-module Main
-import Foo (x)
-import Bar (f)
-f x
+         module Foo
+         export x
+         x = 42
+         
+         module Bar
+         export f
+         f :: a -> [a]
+         
+         module Main
+         import Foo (x)
+         import Bar (f)
+         f x
       |]
     , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
       [r|
-module Foo
-export x
-x = [1,2,3]
-
-module Bar
-export f
-f R :: ["numeric"] -> "numeric"
-
-module Main {import Foo (x)
-import Bar (f)
-f x
+         module Foo
+         export x
+         x = [1,2,3]
+         
+         module Bar
+         export f
+         f R :: ["numeric"] -> "numeric"
+         
+         module Main
+         import Foo (x)
+         import Bar (f)
+         f x
       |]
 
     , (flip $ assertTerminalType "multiple imports") [varc Python3Lang "float", varc RLang "numeric"] $
       [r|
-module Foo
-export f
-f py :: ["float"] -> "float"
-
-module Bar
-export f
-f R :: ["numeric"] -> "numeric"
-
-module Main
-import Foo (f)
-import Bar (f)
-f [1,2,3]
+         module Foo
+         export f
+         f py :: ["float"] -> "float"
+         
+         module Bar
+         export f
+         f R :: ["numeric"] -> "numeric"
+         
+         module Main
+         import Foo (f)
+         import Bar (f)
+         f [1,2,3]
       |]
 
     , expectError
@@ -1224,7 +1243,7 @@ f [1,2,3]
            f r :: "integer" -> "integer"
            f :: Num -> Num
            f c :: "int" -> "int"
-           f 44"
+           f 44
         |]
         [num, varc CLang "int", varc RLang "integer"]
     , assertTerminalType
@@ -1298,7 +1317,7 @@ f [1,2,3]
       [r|
          map cpp :: (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
          f cpp :: "double" -> "double"
-         map f [1,2]"
+         map f [1,2]
       |]
       [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
     , assertTerminalType
