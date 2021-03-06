@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Translator.Cpp
 Description : C++ translator
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -31,6 +31,7 @@ import qualified Morloc.System as MS
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
+import qualified Morloc.Data.Text as MT
 
 -- | @RecEntry@ stores the common name, keys, and types of records that are not
 -- imported from C++ source. These records are generated as structs in the C++
@@ -143,7 +144,7 @@ recordAccess record field = record <> "." <> field
 -- through all the module paths for each file, which introduces the possibility
 -- of name conflicts.
 translateSource
-  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/lib/foo.h`)
+  :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/src/foo.h`)
   -> MorlocMonad MDoc
 translateSource path = return $
   "#include" <+> (dquotes . pretty . MS.takeFileName) path
@@ -319,7 +320,7 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
     (mss', xs', pss) <- mapM (f args) xs |>> unzip3
     let
         name = pretty $ srcName src
-        mangledName = name <> "_fun"
+        mangledName = mangleSourceName name
         inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
         sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
@@ -395,6 +396,13 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
     (ms, e', ps) <- f args e
     return (ms, "return(" <> e' <> ");", ps)
 translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
+
+-- take a name from the source and return a new function name
+-- this must work even if there is a namespace, for example:
+--   SimpleNoise::noise  -->  noise__fun
+mangleSourceName :: MDoc -> MDoc
+mangleSourceName var = case MT.breakOnEnd "::" (render var) of
+  (_, var') -> pretty $ var' <> "_fun"
 
 stdFunction :: RecMap -> TypeM -> [Argument] -> MorlocMonad MDoc
 stdFunction recmap t args = 

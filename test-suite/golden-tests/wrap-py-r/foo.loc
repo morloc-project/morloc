@@ -1,0 +1,15 @@
+source py from "foo.loc" ("inc", "math.factorial" as fac)
+source R from "foo.R" ("dec")
+
+dec :: Num -> Num
+dec R :: "numeric" -> "numeric"
+
+inc :: Num -> Num
+inc py :: "float" -> "float"
+
+fac :: Int -> Int
+fac py :: "int" -> "int"
+
+export inc
+export dec
+export fac

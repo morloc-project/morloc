@@ -1,9 +1,9 @@
 -- 011 - import 1, declare 1
 
-import pybase (sub);
-import cppbase (mul, add);
-import rbase (mul, add);
+import pybase (sub)
+import cppbase (mul, add)
+import rbase (mul, add)
 
-export sub;
+export sub
 
-sub x y = add x (mul -1 y);
+sub x y = add x (mul -1 y)

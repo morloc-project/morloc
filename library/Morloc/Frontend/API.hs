@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.API
 Description : Morloc frontend API
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -34,7 +34,9 @@ parse ::
      Maybe Path
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ParserNode)
-parse f (Code code) = parseImports (Parser.readProgram f code mempty)
+parse f (Code code) = case Parser.readProgram f code mempty of
+  (Left err) -> MM.throwError $ SyntaxError err
+  (Right x) -> parseImports x
   where
     parseImports
       :: DAG MVar Import ParserNode
@@ -45,7 +47,9 @@ parse f (Code code) = parseImports (Parser.readProgram f code mempty)
           importPath <- Mod.findModule (head unimported)
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
-          parseImports (Parser.readProgram path' code' d)
+          case Parser.readProgram path' code' d of
+            (Left err) -> MM.throwError $ SyntaxError err
+            (Right x) -> parseImports x
       where
         g = MDD.edgelist d
         parents = Map.keysSet d

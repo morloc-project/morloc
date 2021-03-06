@@ -1,9 +1,8 @@
 source R from "rms.R" ("rms1" as rms, "rms2" as rms) 
 import rbase (add)
-
-rms :: [Num] -> Num;
-rms R :: ["numeric"] -> "numeric";
-
 export foo
 
-foo xs ys = add (rms xs) (rms ys);
+rms :: [Num] -> Num
+rms R :: ["numeric"] -> "numeric"
+
+foo xs ys = add (rms xs) (rms ys)

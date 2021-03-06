@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Generate
 Description : Translate AST forests into target language source code
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -48,7 +48,7 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.System as MS
+import qualified Morloc.Module as Mod
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
@@ -119,7 +119,7 @@ generate ms = do
 
     -- this is grossly inefficient ... but I'll deal with it later
     getSrcs :: SExpr GMeta One c -> GMeta -> c -> [Source]
-    getSrcs (CallS src) g _ = src : (getSrcsFromGmeta g) 
+    getSrcs (CallS src) g _ = src : getSrcsFromGmeta g
     getSrcs _ g _ = getSrcsFromGmeta g
 
     getSrcsFromGmeta :: GMeta -> [Source]
@@ -141,7 +141,7 @@ rewrite
   :: SAnno GMeta Many [CType]
   -> MorlocMonad (SAnno GMeta Many [CType])
 rewrite (SAnno (Many es0) g0) = do
-  es0' <- fmap concat $ mapM rewriteL0 es0
+  es0' <- concat <$> mapM rewriteL0 es0
   return $ SAnno (Many es0') g0
   where
     rewriteL0
@@ -155,7 +155,7 @@ rewrite (SAnno (Many es0) g0) = do
       -- separate LamS expressions from all others
       let (es1LamS, es1CallS) = partitionEithers (map sepLamS es1)
       -- rewrite the LamS expressions, each expression will yields 1 or more
-      es1LamS' <- fmap concat $ mapM (rewriteL1 args') es1LamS
+      es1LamS' <- concat <$> mapM (rewriteL1 args') es1LamS
       return $ (AppS (SAnno (Many es1CallS) g1) args', c1) : es1LamS'
       where
         sepLamS
@@ -174,7 +174,7 @@ rewrite (SAnno (Many es0) g0) = do
       xs' <- mapM rewrite xs
       return [(TupleS xs', c)]
     rewriteL0 (RecS entries, c) = do
-      xs' <- mapM rewrite (map snd entries)
+      xs' <- mapM (rewrite . snd) entries
       return [(RecS $ zip (map fst entries) xs', c)]
     rewriteL0 (LamS vs x, c) = do
       x' <- rewrite x
@@ -188,7 +188,7 @@ rewrite (SAnno (Many es0) g0) = do
       -> MorlocMonad [(SExpr g Many c, c)]
     rewriteL1 args (vs, SAnno (Many es2) _)
       | length vs == length args =
-          fmap concat $ mapM (substituteExprs (zip vs args)) es2
+          concat <$> mapM (substituteExprs (zip vs args)) es2
       | length vs > length args = MM.throwError . NotImplemented $
           "Partial function application not yet implemented (coming soon)"
       | length vs < length args = MM.throwError . TypeError $
@@ -203,7 +203,7 @@ rewrite (SAnno (Many es0) g0) = do
     substituteExprs [] x = return [x]
     substituteExprs ((v, r):rs) x = do
       xs' <- substituteExpr v r x
-      fmap concat $ mapM (substituteExprs rs) xs'
+      concat <$> mapM (substituteExprs rs) xs'
 
     substituteExpr
       :: EVar
@@ -223,7 +223,7 @@ rewrite (SAnno (Many es0) g0) = do
       xs' <- mapM (substituteAnno v r) xs
       return [(TupleS xs', c)]
     substituteExpr v r (RecS entries, c) = do
-      xs' <- mapM (substituteAnno v r) (map snd entries)
+      xs' <- mapM (substituteAnno v r . snd) entries
       return [(RecS (zip (map fst entries) xs'), c)]
     substituteExpr v r (LamS vs x, c) = do
       x' <- substituteAnno v r x
@@ -241,7 +241,7 @@ rewrite (SAnno (Many es0) g0) = do
       -> SAnno g Many c -- search branch
       -> MorlocMonad (SAnno g Many c)
     substituteAnno v r (SAnno (Many xs) g) = do
-      xs' <- fmap concat $ mapM (substituteExpr v r) xs
+      xs' <- concat <$> mapM (substituteExpr v r) xs
       return $ SAnno (Many xs') g
 
 -- | Select a single concrete language for each sub-expression.  Store the
@@ -290,7 +290,7 @@ realize x0 = do
       -> CType
       -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
     -- always choose the primitive that is in the same language as the parent
-    realizeExpr' _ lang (UniS) c
+    realizeExpr' _ lang UniS c
       | lang == langOf c = return $ Just (0, UniS, c)
       | otherwise = return Nothing
     realizeExpr' _ lang (NumS x) c
@@ -336,7 +336,7 @@ realize x0 = do
       | otherwise = return Nothing
     realizeExpr' depth lang (RecS entries) c
       | lang == langOf c = do
-          xsMay <- mapM (realizeAnno depth lang) (map snd entries)
+          xsMay <- mapM (realizeAnno depth lang . snd) entries
           case (fmap unzip . sequence) xsMay of
             (Just (scores, vals)) -> return $ Just (sum scores, RecS (zip (map fst entries) vals), c)
             Nothing -> return Nothing
@@ -448,7 +448,7 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
     -- will be set in the nexus
     generalSerial' ps (SAnno (One (AccS (SAnno (One (VarS v, _)) g) k, _)) _) =
       case g of
-        (metaGType->(Just (GType (NamT _ _ _ _)))) ->
+        (metaGType->(Just (GType (NamT {})))) ->
           return $ base { commandSubs = [(ps, unEVar v, [JsonKey (unEVar k)])] }
         _ -> error "Attempted to use key access to non-record"
     generalSerial' ps (SAnno (One (ListS xs, _)) _) = do
@@ -467,7 +467,7 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
         }
     generalSerial' ps (SAnno (One (RecS es, _)) _) = do
       ncmds <- zipWithM generalSerial'
-                        [ps ++ [JsonKey (unEVar k)] | k <- (map fst es)]
+                        [ps ++ [JsonKey (unEVar k)] | k <- map fst es]
                         (map snd es)
       let entries = zip (map fst es) (map commandJson ncmds)
           obj = encloseSep "{" "}" ","
@@ -504,7 +504,7 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
   return $ SAnno (One (LamS vs (SAnno (One (AppS f' (xs' ++ ys), appType)) appMeta), lamCType)) lamMeta
   where
     makeGType :: [Maybe GType] -> MorlocMonad GType
-    makeGType ts = fmap GType . makeType . map unGType $ (map fromJust ts)
+    makeGType ts = fmap GType . makeType . map (unGType . fromJust) $ ts
 
     -- make an sanno variable from variable name and type info
     makeVar :: EVar -> TypeP -> Maybe GType -> SAnno GMeta One TypeP
@@ -534,7 +534,7 @@ rewritePartials (SAnno (One (TupleS xs, t)) m) = do
   return $ SAnno (One (TupleS xs', t)) m
 rewritePartials (SAnno (One (RecS entries, t)) m) = do
   let keys = map fst entries
-  vals <- mapM rewritePartials (map snd entries)
+  vals <- mapM (rewritePartials . snd) entries
   return $ SAnno (One (RecS (zip keys vals), t)) m
 rewritePartials x = return x
 
@@ -582,21 +582,21 @@ parameterize' args (SAnno (One (AccS x k, c)) m) = do
 -- containers
 parameterize' args (SAnno (One (ListS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst . unique . concat . map sannoSnd $ xs'
+  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (ListS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupleS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst . unique . concat . map sannoSnd $ xs'
+  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (TupleS xs', (c, args'))) m
 parameterize' args (SAnno (One (RecS entries, c)) m) = do
-  vs' <- mapM (parameterize' args) (map snd entries)
-  let usedArgs = map fst . unique . concat . map sannoSnd $ vs'
+  vs' <- mapM (parameterize' args . snd) entries
+  let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c)) m) = do
-  let args' = [(v, r) | (v, r) <- args, not (elem v vs)]
+  let args' = [(v, r) | (v, r) <- args, notElem v vs]
       startId = maximum (map (argId . snd) args) + 1
       args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] (decomposeFull c)
   x' <- parameterize' (args' ++ args0) x
@@ -604,7 +604,7 @@ parameterize' args (SAnno (One (LamS vs x, c)) m) = do
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst $ (sannoSnd x' ++ (unique . concat . map sannoSnd $ xs'))
+  let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
@@ -633,7 +633,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
   -- containers
   express' isTop _ (SAnno (One (ListS xs, (c@(ArrP _ [t]), args))) m) = do
     xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
-    let x = (ListM (Native c) xs')
+    let x = ListM (Native c) xs'
     if isTop
       then do
         x' <- packExprM m x
@@ -643,7 +643,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
 
   express' isTop _ (SAnno (One (TupleS xs, (c@(ArrP _ ts), args))) m) = do
     xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
-    let x = (TupleM (Native c) xs')
+    let x = TupleM (Native c) xs'
     if isTop
       then do
         x' <- packExprM m x
@@ -744,7 +744,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
 -- should be integrated with the optimizations performed in the realize step.
 -- FIXME: replace stub
 letOptimize :: ExprM Many -> MorlocMonad (ExprM Many)
-letOptimize e = return e
+letOptimize = return
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
 segment e0
@@ -776,7 +776,7 @@ segment e0
     return (ms ++ concat mss, AppM e' es')
 
   segment' m args0 (LamM args1 e) = do
-    (ms, e') <- (segment' m (args0 ++ args1)) e
+    (ms, e') <- segment' m (args0 ++ args1) e
     return (ms, LamM args1 e')
 
   segment' m args (LetM i e1 e2) = do
@@ -797,7 +797,7 @@ segment e0
     return (concat mss, TupleM t es')
 
   segment' m args (RecordM t entries) = do
-    (mss, es') <- mapM (segment' m args) (map snd entries) |>> unzip
+    (mss, es') <- mapM (segment' m args . snd) entries |>> unzip
     return (concat mss, RecordM t (zip (map fst entries) es'))
 
   segment' m args (SerializeM s e) = do
@@ -887,20 +887,20 @@ encode
 encode srcs (lang, xs) = do
   state <- MM.get
 
-  let srcs' = unique [s | s <- srcs, srcLang s == lang]
+  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
+  (sources, flags, includes) <- Mod.handleFlagsAndPaths lang
+    $ unique [s | s <- srcs, srcLang s == lang]
 
   xs' <- mapM (preprocess lang) xs >>= chooseSerializer
   -- translate each node in the AST to code
-  code <- translate lang srcs' xs'
+  code <- translate lang sources xs'
 
   return $ Script
     { scriptBase = "pool"
     , scriptLang = lang
     , scriptCode = Code . render $ code
-    , scriptCompilerFlags =
-        filter (/= "") . map packageGccFlags $ statePackageMeta state
-    , scriptInclude = unique . map MS.takeDirectory $
-        (unique . catMaybes) (map srcPath srcs')
+    , scriptCompilerFlags = flags
+    , scriptInclude = includes
     }
 
 preprocess :: Lang -> ExprM Many -> MorlocMonad (ExprM Many)
@@ -1037,4 +1037,4 @@ freshVarsAZ exclude =
 makeType :: [Type] -> MorlocMonad Type
 makeType [] = MM.throwError . TypeError $ "empty type"
 makeType [t] = return t
-makeType (t:ts) = FunT <$> pure t <*> makeType ts
+makeType (t:ts) = pure (FunT t) <*> makeType ts

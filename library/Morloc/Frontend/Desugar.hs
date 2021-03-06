@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Desugar
 Description : Write Module objects to resolve type aliases and such
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

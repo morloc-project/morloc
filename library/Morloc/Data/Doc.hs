@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Data.Doc
 Description : A wrapper around prettyprint
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -22,7 +22,6 @@ module Morloc.Data.Doc
   , block
   ) where
 
-import Data.Monoid ((<>))
 import qualified Data.Text as DT
 import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Text

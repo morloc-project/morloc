@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Parser
 Description : Full parser for Morloc
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -14,7 +14,7 @@ module Morloc.Frontend.Parser
 import Data.Void (Void)
 import Morloc.Frontend.Namespace
 import Text.Megaparsec
-import Text.Megaparsec.Char
+import Text.Megaparsec.Char hiding (eol)
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -34,7 +34,9 @@ data ParserState = ParserState {
   , stateIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
                             -- you should reset the field before parsing a new type 
-}
+  , stateMinPos :: Pos
+  , stateAccepting :: Bool
+} deriving(Show)
 
 emptyState :: ParserState
 emptyState = ParserState {
@@ -42,6 +44,8 @@ emptyState = ParserState {
   , stateModulePath = Nothing
   , stateIndex = 1
   , stateGenerics = []
+  , stateMinPos = mkPos 1
+  , stateAccepting = False
 }
 
 newvar :: Maybe Lang -> Parser TVar
@@ -55,6 +59,66 @@ setLang :: Maybe Lang -> Parser ()
 setLang lang = do
   s <- CMS.get
   CMS.put (s { stateLang = lang })
+
+
+setMinPos :: Parser ()
+setMinPos = do
+  s <- CMS.get
+  level <- L.indentLevel
+  CMS.put (s { stateMinPos = level })
+
+-- Require elements all start on the same line as the first element
+align :: Parser a -> Parser [a] 
+align p = do
+  s <- CMS.get
+  let minPos = stateMinPos s 
+      accept = stateAccepting s
+  curPos <- L.indentLevel
+  xs <- many (CMS.put (s {stateMinPos = curPos, stateAccepting = True}) >> p)
+  -- put everything back the way it was
+  CMS.put (s {stateMinPos = minPos, stateAccepting = accept})
+  return xs
+
+alignInset :: Parser a -> Parser [a]
+alignInset p = isInset >> align p
+
+isInset :: Parser ()
+isInset = do
+  minPos <- CMS.gets stateMinPos
+  curPos <- L.indentLevel
+  if curPos <= minPos
+    then
+      L.incorrectIndent GT minPos curPos
+    else
+      return ()
+
+sc = L.space space1 comments empty
+
+symbol = lexeme . L.symbol sc
+
+lexemeBase :: Parser a -> Parser a
+lexemeBase = L.lexeme sc
+
+lexeme :: Parser a -> Parser a
+lexeme p = do
+  minPos <- CMS.gets stateMinPos
+  accepting <- CMS.gets stateAccepting
+  s <- CMS.get
+  curPos <- L.indentLevel
+  if accepting
+    then
+      if curPos == minPos
+        then
+          CMS.put (s { stateAccepting = False }) >> lexemeBase p
+        else
+          L.incorrectIndent GT minPos curPos
+    else
+      if minPos < curPos
+        then
+          lexemeBase p
+        else 
+          L.incorrectIndent GT minPos curPos
+
 
 resetGenerics :: Parser ()
 resetGenerics = do
@@ -73,22 +137,25 @@ readProgram
   :: Maybe Path
   -> MT.Text
   -> DAG MVar Import ParserNode
-  -> DAG MVar Import ParserNode
+  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ParserNode)
 readProgram f sourceCode p =
   case runParser
-         (CMS.runStateT (sc >> pProgram <* eof) pstate)
+         (CMS.runStateT (pProgram <* eof) pstate)
          (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
-    Left err -> error (show err)
-    Right (es, _) -> foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
+    Left err -> Left err
+    Right (es, _) -> Right $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
   where
     pstate = emptyState { stateModulePath = f }
 
-readType :: MT.Text -> UnresolvedType
+readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) UnresolvedType
 readType typeStr =
-  case runParser (CMS.runStateT (pTypeGen <* eof) emptyState) "" typeStr of
-    Left err -> error (show err)
-    Right (es, _) -> es
+  case runParser (CMS.runStateT (pTypeGen <* eof) state) "" typeStr of
+    Left err -> Left err
+    Right (es, _) -> Right es
+  where
+    state = emptyState {stateMinPos = mkPos 1, stateAccepting = True}
+
 
 many1 :: Parser a -> Parser [a]
 many1 p = do
@@ -96,33 +163,32 @@ many1 p = do
   xs <- many p
   return (x : xs)
 
--- sc stands for space consumer
-sc :: Parser ()
-sc = L.space space1 lineComment blockComment
-  where
-    lineComment = L.skipLineComment "--"
-    blockComment = L.skipBlockComment "{-" "-}"
-
-symbol = L.symbol sc
-
--- A lexer where space is consumed after every token (but not before)
-lexeme :: Parser a -> Parser a
-lexeme = L.lexeme sc
+comments :: Parser ()
+comments =  L.skipLineComment "--"
+        <|> L.skipBlockCommentNested "{-" "-}"
+        <?> "comment"
 
 number :: Parser DS.Scientific
-number = lexeme $ L.signed sc L.scientific -- `empty` because no space is allowed
+number = lexeme $ L.signed sc L.scientific
 
-parens :: Parser a -> Parser a
-parens p = lexeme $ between (symbol "(") (symbol ")") p
+surround :: Parser l -> Parser r -> Parser a -> Parser a
+surround l r v = do
+  l
+  v' <- v
+  r
+  return v'
 
 brackets :: Parser a -> Parser a
-brackets p = lexeme $ between (symbol "[") (symbol "]") p
+brackets = surround (symbol "[") (symbol "]")
+
+parens :: Parser a -> Parser a
+parens = surround (symbol "(") (symbol ")")
 
 braces :: Parser a -> Parser a
-braces p = lexeme $ between (symbol "{") (symbol "}") p
+braces = surround (symbol "{") (symbol "}")
 
 angles :: Parser a -> Parser a
-angles p = lexeme $ between (symbol "<") (symbol ">") p
+angles = surround (symbol "<") (symbol ">")
 
 reservedWords :: [MT.Text]
 reservedWords =
@@ -141,9 +207,6 @@ reservedWords =
 operatorChars :: String
 operatorChars = ":!$%&*+./<=>?@\\^|-~#"
 
-delimiter :: Parser ()
-delimiter = many1 (symbol ";") >> return ()
-
 op :: MT.Text -> Parser MT.Text
 op o = (lexeme . try) (symbol o <* notFollowedBy (oneOf operatorChars))
 
@@ -151,10 +214,10 @@ reserved :: MT.Text -> Parser MT.Text
 reserved w = try (symbol w)
 
 stringLiteral :: Parser MT.Text
-stringLiteral = do
-  _ <- symbol "\""
+stringLiteral = lexeme $ do
+  _ <- char '\"'
   s <- many (noneOf ['"'])
-  _ <- symbol "\""
+  _ <- char '\"'
   return $ MT.pack s
 
 name :: Parser MT.Text
@@ -180,25 +243,23 @@ data ModuleBody
 pProgram :: Parser [(MVar, [(MVar, Import)], ParserNode)]
 pProgram = do
   f <- CMS.gets stateModulePath
-  -- allow ';' at the beginning (if you're into that sort of thing)
-  optional delimiter
-  es <- many pToplevel
+  L.space space1 comments empty
+  setMinPos
+  es <- align pToplevel
   let mods = [m | (TModule m) <- es]
   case [e | (TModuleBody e) <- es] of
     [] -> return mods
     es' -> return $ makeModule f (MVar "Main") es' : mods
 
 pToplevel :: Parser Toplevel
-pToplevel =
-  try (fmap TModule pModule <* optional delimiter) <|>
-  fmap TModuleBody (pModuleBody <* optional delimiter)
+pToplevel = try (fmap TModule pModule) <|> fmap TModuleBody pModuleBody
 
 pModule :: Parser (MVar, [(MVar, Import)], ParserNode)
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
   moduleName' <- name
-  mes <- braces (optional delimiter >> many1 pModuleBody)
+  mes <- align pModuleBody
   return $ makeModule f (MVar moduleName') mes
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> (MVar, [(MVar, Import)], ParserNode)
@@ -220,11 +281,11 @@ makeModule f n mes = (n, edges, node) where
 
 pModuleBody :: Parser ModuleBody
 pModuleBody =
-        try pTypedef <* optional delimiter
-    <|> try pImport <* optional delimiter 
-    <|> try pExport <* optional delimiter 
-    <|> try pStatement' <* optional delimiter
-    <|> pExpr' <* optional delimiter
+        try pTypedef
+    <|> try pImport
+    <|> try pExport
+    <|> try pStatement'
+    <|> pExpr'
   where
     pStatement' = fmap MBBody pStatement
     pExpr' = fmap MBBody pExpr
@@ -331,7 +392,7 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
 pDataDeclaration :: Parser Expr
 pDataDeclaration = do
   v <- name
-  _ <- symbol "="
+  symbol "="
   e <- pExpr
   return (Declaration (EVar v) e)
 
@@ -354,8 +415,7 @@ pSignature = do
   _ <- op "::"
   props <- option [] (try pPropertyList)
   t <- pTypeGen
-  constraints <-
-    option [] $ reserved "where" >> braces (sepBy pConstraint (symbol ";"))
+  constraints <- option [] pConstraints
   setLang Nothing
   return $
     Signature
@@ -385,9 +445,11 @@ tag p = optional (try tag')
       return l
 
 pPropertyList :: Parser [Property]
-pPropertyList =
-  (parens (sepBy1 pProperty (symbol ",")) <|> sepBy1 pProperty (symbol ",")) <*
-  op "=>"
+pPropertyList = do
+  ps <-  parens (sepBy1 pProperty (symbol ","))
+     <|> sepBy1 pProperty (symbol ",")
+  _ <- op "=>"
+  return ps
 
 pProperty :: Parser Property
 pProperty = do
@@ -398,8 +460,15 @@ pProperty = do
     ["cast"] -> return Cast
     _ -> return (GeneralProperty ps)
 
+pConstraints :: Parser [Constraint]
+pConstraints = reserved "where" >> alignInset pConstraint
+
+-- FIXME: this is a stub
 pConstraint :: Parser Constraint
-pConstraint = fmap (Con . MT.pack) (many (noneOf ['{', '}']))
+pConstraint = fmap (Con . MT.unwords) (many1 pWord) where
+  pWord :: Parser MT.Text
+  pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
+
 
 pExpr :: Parser Expr
 pExpr =
@@ -448,7 +517,7 @@ pImportSourceTerm = do
   return (Name n, EVar a)
 
 pNamE :: Parser Expr
-pNamE = fmap RecE $ braces (sepBy1 pNamEntryE (symbol ","))
+pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))
 
 pNamEntryE :: Parser (EVar, Expr)
 pNamEntryE = do
@@ -458,15 +527,15 @@ pNamEntryE = do
   return (EVar n, e)
 
 pListE :: Parser Expr
-pListE = fmap ListE $ brackets (sepBy pExpr (symbol ","))
+pListE = ListE <$> brackets (sepBy pExpr (symbol ","))
 
 pTuple :: Parser Expr
 pTuple = do
-  _ <- op "("
+  _ <- symbol "("
   e <- pExpr
-  _ <- op ","
-  es <- sepBy1 pExpr (op ",")
-  _ <- op ")"
+  _ <- symbol ","
+  es <- sepBy1 pExpr (symbol ",")
+  _ <- symbol ")"
   return (TupleE (e : es))
 
 pUni :: Parser Expr
@@ -610,7 +679,7 @@ pFunU :: Parser UnresolvedType
 pFunU = do
   t <- pType'
   _ <- op "->"
-  ts <- sepBy1 pType' (op "->")
+  ts <- sepBy1 (pType') (op "->")
   return $ foldr1 FunU (t : ts)
   where
     pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pNamU

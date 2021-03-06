@@ -1,12 +1,12 @@
 -- 10n - source 1, declare n
 
-import pybase  (sub, add, mul);
-import cppbase (sub, add, mul);
-import rbase   (sub, add, mul);
+import pybase  (sub, add, mul)
+import cppbase (sub, add, mul)
+import rbase   (sub, add, mul)
 
-source py from "foo.py" ("foo_loc" as foo);
+source py from "foo.py" ("foo_loc" as foo)
 
-export foo;
+export foo
 
-foo x = add 1 x;
-foo x = add 0 (add 1 x);
+foo x = add 1 x
+foo x = add 0 (add 1 x)

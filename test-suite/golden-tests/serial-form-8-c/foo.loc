@@ -4,6 +4,6 @@ export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Map Str (Map Int Num) -> Map Str (Map Int Num);
-foo cpp :: Map "std::string" (Map "int" "double") -> Map "std::string" (Map "int" "double");
-foo xs = id xs;
+foo :: Map Str (Map Int Num) -> Map Str (Map Int Num)
+foo cpp :: Map "std::string" (Map "int" "double") -> Map "std::string" (Map "int" "double")
+foo xs = id xs

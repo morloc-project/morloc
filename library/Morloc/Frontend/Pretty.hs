@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Pretty
 Description : Pretty is as pretty does
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -13,6 +13,7 @@ module Morloc.Frontend.Pretty
   , ugly
   , prettyExpr
   , prettyGammaIndex
+  , prettyParserError
   ) where
 
 import Morloc.Frontend.Namespace
@@ -21,6 +22,12 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
+import qualified Text.Megaparsec as Mega
+import qualified Morloc.Data.Text as MT 
+import Data.Void (Void)
+
+prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
+prettyParserError = undefined
 
 cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute d = mapM_ (putDoc . cute') (Map.toList d) where

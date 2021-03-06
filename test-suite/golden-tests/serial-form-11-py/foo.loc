@@ -1,12 +1,12 @@
 import pybase (id, Map)
 
-record (Person a) = Person {name :: Str, info :: a};
-record py (Person a) = "dict" {name :: "str", info :: a};
+record (Person a) = Person {name :: Str, info :: a}
+record py (Person a) = "dict" {name :: "str", info :: a}
 
-export foo;
+export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.
-foo :: Person (Map Str Int) -> Person (Map Str Int);
-foo py :: Person (Map "str" "int") -> Person (Map "str" "int");
-foo xs = id xs;
+foo :: Person (Map Str Int) -> Person (Map Str Int)
+foo py :: Person (Map "str" "int") -> Person (Map "str" "int")
+foo xs = id xs

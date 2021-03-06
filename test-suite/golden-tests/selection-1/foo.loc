@@ -6,7 +6,6 @@
 
 import pybase (add)
 import cppbase (add)
-
 export foo
 
-foo x y = add x (add y 42);
+foo x y = add x (add y 42)

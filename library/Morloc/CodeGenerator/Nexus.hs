@@ -3,7 +3,7 @@
 {-|
 Module      : Morloc.CodeGenerator.Nexus
 Description : Templates for generating a Perl nexus
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental

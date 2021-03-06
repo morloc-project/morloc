@@ -1,4 +1,4 @@
-module Arithmetic {
+module Arithmetic
 
 -- Imports multiple instances and exports all of them. I expect
 -- this will be a very common pattern.
@@ -11,5 +11,3 @@ export add
 export mul
 export div 
 export sub
-
-}

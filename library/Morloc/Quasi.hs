@@ -1,5 +1,13 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
+{-|
+Module      : Morloc.Quasi
+Description : Define idoc quasiquotation for string interpolation
+Copyright   : (c) Zebulun Arendsee, 2021
+License     : GPL-3
+Maintainer  : zbwrnz@gmail.com
+Stability   : experimental
+-}
 module Morloc.Quasi
   ( idoc
   ) where

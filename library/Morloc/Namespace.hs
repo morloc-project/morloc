@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Namespace
 Description : All types and datastructures
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -79,7 +79,8 @@ import Data.Text (Text)
 import Data.Text.Prettyprint.Doc (Doc)
 import Data.Void (Void)
 import Morloc.Internal
-import Text.Megaparsec.Error (ParseError)
+import Text.Megaparsec (ParseErrorBundle)
+import Text.Megaparsec ()
 import Morloc.Language (Lang(..))
 
 -- | no annotations for now
@@ -97,6 +98,7 @@ data MorlocState = MorlocState {
     statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
   , stateCounter :: Int
+  , stateOutfile :: Maybe Path
 }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
@@ -143,7 +145,7 @@ data MorlocError
   -- | Raised for unsupported features (such as specific languages)
   | NotSupported Text
   -- | Raised by parsec on parse errors
-  | SyntaxError (ParseError Char Void)
+  | SyntaxError (ParseErrorBundle Text Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
   -- | Raised when an unsupported language is encountered
@@ -220,7 +222,6 @@ data MorlocError
   | ConflictingSignatures
   | CompositionsMustBeGeneral
   | IllegalConcreteAnnotation
-  deriving (Eq)
 
 data PackageMeta =
   PackageMeta

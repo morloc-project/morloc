@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Error
 Description : Prepare error messages from MorlocError types
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -18,6 +18,7 @@ import Morloc.Namespace
 import Morloc.Pretty (prettyType)
 import Morloc.Data.Doc (render)
 import qualified Morloc.Data.Text as MT
+import Text.Megaparsec.Error (errorBundlePretty)
 
 -- TODO: fix this orphan instance
 instance Show MorlocError where
@@ -30,7 +31,7 @@ errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
 errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) =
   "'" <> lang <> "' is not recognized as a supported language"
-errmsg (SyntaxError err) = "SyntaxError: " <> MT.show' err
+errmsg (SyntaxError err) = "SyntaxError: " <> MT.pack (errorBundlePretty err)
 errmsg (SerializationError t) = "SerializationError: " <> t
 errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
 errmsg (TypeError msg) = "TypeError: " <> msg

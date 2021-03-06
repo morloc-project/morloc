@@ -180,12 +180,12 @@ The `nexus.pl` executable dispatches the command to the compiled C++ program,
 `morloc` can compose functions across languages. For example:
 
 ```
-import math (fibonacci)
-import rbase (plotVectorPDF)
+import math (fibonacci);
+import rbase (plotVectorPDF, ints2reals);
 
 export fibplot
 
-fibplot n = plotVectorPDF (fibonacci n) "fibonacci-plot.pdf";
+fibplot n = plotVectorPDF (ints2reals (fibonacci n)) "fibonacci-plot.pdf";
 ```
 
 The `fibplot` function calculates Fibonacci numbers using a C++ function and

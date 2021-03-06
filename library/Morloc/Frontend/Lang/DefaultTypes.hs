@@ -1,7 +1,7 @@
 {-|
 Module      : Morloc.Frontend.Lang.DefaultTypes
 Description : Define default types for each language
-Copyright   : (c) Zebulun Arendsee, 2020
+Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
@@ -85,6 +85,7 @@ defaultNumber lang@(Just RLang) = [VarU (TV lang "numeric"), VarU (TV lang "inte
 defaultNumber lang@(Just CLang) = [VarU (TV lang "double"), VarU (TV lang "int")]
 defaultNumber lang@(Just CppLang) =
   [ VarU (TV lang "double")
+  , VarU (TV lang "float")
   , VarU (TV lang "int")
   , VarU (TV lang "long")
   , VarU (TV lang "size_t")

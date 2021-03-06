@@ -1,11 +1,11 @@
 -- 111 - source 1, import 1, declare 1
 
-import pybase (add, mul);
-import rbase (add, mul);
-import cppbase (add, mul, sub); -- import sub
+import pybase (add, mul)
+import rbase (add, mul)
+import cppbase (add, mul, sub) -- import sub
 
-source py from "foo.py" ("sub_loc" as sub); -- source sub
+source py from "foo.py" ("sub_loc" as sub) -- source sub
 
-export sub;
+export sub
 
-sub x y = add x (mul -1 y); -- declare sub
+sub x y = add x (mul -1 y) -- declare sub

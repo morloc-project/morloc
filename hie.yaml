@@ -1,0 +1,19 @@
+cradle:
+  stack:
+    - path: "./library"
+      component: "morloc:lib"
+
+    - path: "./executable/Main.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./executable/Subcommands.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./executable/UI.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./executable/Paths_morloc.hs"
+      component: "morloc:exe:morloc"
+
+    - path: "./test-suite"
+      component: "morloc:test:morloc-test"

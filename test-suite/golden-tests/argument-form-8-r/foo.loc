@@ -3,4 +3,4 @@ import rbase (map, mul)
 export foo
 
 -- variable partially-applied function passed as argument
-foo x xs = map (mul x) xs;
+foo x xs = map (mul x) xs

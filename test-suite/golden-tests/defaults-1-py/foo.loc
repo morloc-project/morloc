@@ -2,9 +2,9 @@ import pybase (add, map)
 
 export foo
 
-xs = [1,2,3];
+xs = [1,2,3]
 
 -- external constant
 -- y will be turned into a manifold, making this the same as the f2 case
 -- can optimize out the manifold
-foo x = map (add x) xs;
+foo x = map (add x) xs
