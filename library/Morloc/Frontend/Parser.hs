@@ -150,9 +150,12 @@ readProgram f sourceCode p =
 
 readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) UnresolvedType
 readType typeStr =
-  case runParser (CMS.runStateT (pTypeGen <* eof) emptyState) "" typeStr of
+  case runParser (CMS.runStateT (pTypeGen <* eof) state) "" typeStr of
     Left err -> Left err
     Right (es, _) -> Right es
+  where
+    state = emptyState {stateMinPos = mkPos 1, stateAccepting = True}
+
 
 many1 :: Parser a -> Parser [a]
 many1 p = do
