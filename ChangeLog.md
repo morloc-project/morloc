@@ -41,7 +41,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
  - [x] Remove brace requirement for modules and `where` statements
  - [ ] Add `-o` option to compiler to specify output executable names
- - [ ] Acceptable error messages
+ - [x] Acceptable syntax error messages
 
 0.33.0 [2020.11.03]
 -------------------

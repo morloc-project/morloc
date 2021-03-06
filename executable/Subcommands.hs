@@ -15,9 +15,11 @@ import Morloc.Namespace
 import qualified Morloc.Config as Config
 import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import Text.Megaparsec.Error (errorBundlePretty)
 
 
 runMorloc :: CliCommand -> IO () 
@@ -78,7 +80,7 @@ cmdTypecheck args verbosity config = do
   let writer = if typecheckRaw args then F.ugly else F.cute
   if typecheckType args
     then case F.readType (unCode code) of
-      (Left err) -> error (show err)
+      (Left err) -> print (errorBundlePretty err)
       (Right x) -> print x 
     else MM.runMorlocMonad
            verbosity

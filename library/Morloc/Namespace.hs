@@ -79,7 +79,8 @@ import Data.Text (Text)
 import Data.Text.Prettyprint.Doc (Doc)
 import Data.Void (Void)
 import Morloc.Internal
-import Text.Megaparsec.Error (ParseError)
+import Text.Megaparsec (ParseErrorBundle)
+import Text.Megaparsec ()
 import Morloc.Language (Lang(..))
 
 -- | no annotations for now
@@ -143,7 +144,7 @@ data MorlocError
   -- | Raised for unsupported features (such as specific languages)
   | NotSupported Text
   -- | Raised by parsec on parse errors
-  | SyntaxError (ParseError String Void)
+  | SyntaxError (ParseErrorBundle Text Void)
   -- | Raised when someone didn't customize their error messages
   | UnknownError
   -- | Raised when an unsupported language is encountered

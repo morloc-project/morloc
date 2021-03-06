@@ -22,7 +22,6 @@ module Morloc.Data.Doc
   , block
   ) where
 
-import Data.Monoid ((<>))
 import qualified Data.Text as DT
 import Data.Text.Prettyprint.Doc hiding ((<>))
 import Data.Text.Prettyprint.Doc.Render.Text

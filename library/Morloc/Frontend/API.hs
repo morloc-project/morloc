@@ -35,7 +35,7 @@ parse ::
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ParserNode)
 parse f (Code code) = case Parser.readProgram f code mempty of
-  (Left err) -> error (show err)
+  (Left err) -> MM.throwError $ SyntaxError err
   (Right x) -> parseImports x
   where
     parseImports
@@ -48,7 +48,7 @@ parse f (Code code) = case Parser.readProgram f code mempty of
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
           case Parser.readProgram path' code' d of
-            (Left err) -> error (show err)
+            (Left err) -> MM.throwError $ SyntaxError err
             (Right x) -> parseImports x
       where
         g = MDD.edgelist d

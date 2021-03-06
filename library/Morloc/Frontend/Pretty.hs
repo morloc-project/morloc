@@ -13,6 +13,7 @@ module Morloc.Frontend.Pretty
   , ugly
   , prettyExpr
   , prettyGammaIndex
+  , prettyParserError
   ) where
 
 import Morloc.Frontend.Namespace
@@ -21,6 +22,12 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
+import qualified Text.Megaparsec as Mega
+import qualified Morloc.Data.Text as MT 
+import Data.Void (Void)
+
+prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
+prettyParserError = undefined
 
 cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
 cute d = mapM_ (putDoc . cute') (Map.toList d) where
