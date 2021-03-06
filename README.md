@@ -130,12 +130,12 @@ The following code uses only C++ functions (`fold`, `map`, `add` and `mul`).
 ```
 import cppbase (fold, map, add, mul)
 
-export square;
-export sumOfSquares;
+export square
+export sumOfSquares
 
-square x = mul x x;
+square x = mul x x
 
-sumOfSquares xs = fold add 0 (map square xs);
+sumOfSquares xs = fold add 0 (map square xs)
 ```
 
 If this script is pasted into the file "example-1.loc", it can be compiled as
@@ -180,12 +180,12 @@ The `nexus.pl` executable dispatches the command to the compiled C++ program,
 `morloc` can compose functions across languages. For example:
 
 ```
-import math (fibonacci);
-import rbase (plotVectorPDF, ints2reals);
+import math (fibonacci)
+import rbase (plotVectorPDF, ints2reals)
 
 export fibplot
 
-fibplot n = plotVectorPDF (ints2reals (fibonacci n)) "fibonacci-plot.pdf";
+fibplot n = plotVectorPDF (ints2reals (fibonacci n)) "fibonacci-plot.pdf"
 ```
 
 The `fibplot` function calculates Fibonacci numbers using a C++ function and
@@ -229,12 +229,12 @@ The following example is available in `examples/rmsWithTypes.loc`:
 ```
 import cppbase (fold, map, add, mul)
 
-export square;
-export sumOfSquares;
+export square
+export sumOfSquares
 
-square x = mul x x;
+square x = mul x x
 
-sumOfSquares xs = fold add 0 (map square xs);
+sumOfSquares xs = fold add 0 (map square xs)
 ```
 
 This example cannot be compiled since none of the functions are imported or
@@ -245,21 +245,21 @@ morloc typecheck examples/rmsWithTypes.loc
 ```
 
 ```
-add :: Num -> Num -> Num;
-add Cpp :: double -> double -> double;
+add :: Num -> Num -> Num
+add Cpp :: double -> double -> double
 
-mul :: Num -> Num -> Num;
-mul Cpp :: double -> double -> double;
+mul :: Num -> Num -> Num
+mul Cpp :: double -> double -> double
 
-fold     :: (b -> a -> b) -> b -> [a] -> b;
-fold Cpp :: (b -> a -> b) -> b -> "std::vector<$1>" a -> b;
+fold     :: (b -> a -> b) -> b -> [a] -> b
+fold Cpp :: (b -> a -> b) -> b -> "std::vector<$1>" a -> b
 
-map :: (a -> b) -> [a] -> [b];
+map :: (a -> b) -> [a] -> [b]
 map Cpp :: (a -> b) -> "std::vector<$1>" a
-                    -> "std::vector<$1>" b;
+                    -> "std::vector<$1>" b
 
-square x = mul x x;
-sumOfSquares xs = fold add 0 (map square xs);
+square x = mul x x
+sumOfSquares xs = fold add 0 (map square xs)
 ```
 
 The typechecker associates each sub-expression of the program with a set of
