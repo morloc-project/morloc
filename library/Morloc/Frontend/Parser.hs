@@ -137,22 +137,22 @@ readProgram
   :: Maybe Path
   -> MT.Text
   -> DAG MVar Import ParserNode
-  -> DAG MVar Import ParserNode
+  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ParserNode)
 readProgram f sourceCode p =
   case runParser
          (CMS.runStateT (pProgram <* eof) pstate)
          (maybe "<expr>" (MT.unpack . unPath) f)
          sourceCode of
-    Left err -> error (show err)
-    Right (es, _) -> foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
+    Left err -> Left err
+    Right (es, _) -> Right $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
   where
     pstate = emptyState { stateModulePath = f }
 
-readType :: MT.Text -> UnresolvedType
+readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) UnresolvedType
 readType typeStr =
   case runParser (CMS.runStateT (pTypeGen <* eof) emptyState) "" typeStr of
-    Left err -> error (show err)
-    Right (es, _) -> es
+    Left err -> Left err
+    Right (es, _) -> Right es
 
 many1 :: Parser a -> Parser [a]
 many1 p = do

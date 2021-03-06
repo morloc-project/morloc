@@ -77,7 +77,9 @@ cmdTypecheck args verbosity config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
   let writer = if typecheckRaw args then F.ugly else F.cute
   if typecheckType args
-    then print $ F.readType (unCode code)
+    then case F.readType (unCode code) of
+      (Left err) -> error (show err)
+      (Right x) -> print x 
     else MM.runMorlocMonad
            verbosity
            config

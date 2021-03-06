@@ -115,11 +115,13 @@ exprTestFull msg code expCode =
   testCase msg $ do
   result <- run code
   case result of
-    (Right e)
-      -> assertEqual ""
-            (main typedNodeBody e)
-            (main parserNodeBody $ readProgram Nothing expCode Map.empty)
     (Left err) -> error (show err)
+    (Right e)
+      -> case readProgram Nothing expCode Map.empty of
+           (Left err) -> error (show err)
+           (Right x) -> assertEqual ""
+              (main typedNodeBody e)
+              (main parserNodeBody x)
 
 assertPacker :: String -> T.Text -> Map.Map (TVar, Int) [UnresolvedPacker] -> TestTree
 assertPacker msg code expPacker =
