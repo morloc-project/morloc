@@ -40,7 +40,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Update dependency set to LTS-17.4
  - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
  - [x] Remove brace requirement for modules and `where` statements
- - [ ] Add `-o` option to compiler to specify output executable names
+ - [x] Add `-o` option to compiler to specify output executable names
  - [x] Acceptable syntax error messages
 
 0.33.0 [2020.11.03]

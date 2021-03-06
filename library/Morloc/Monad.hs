@@ -14,7 +14,6 @@ Except, and Reader monad.
 module Morloc.Monad
   ( MorlocReturn
   , runMorlocMonad
-  , evalMorlocMonad
   , writeMorlocReturn
   , runCommand
   , runCommandWith
@@ -49,27 +48,16 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 
 runMorlocMonad ::
-     Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
-runMorlocMonad v config ev =
-  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState v)
+     Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
+runMorlocMonad outfile v config ev =
+  runStateT (runWriterT (runExceptT (runReaderT ev config))) (emptyState outfile v)
 
--- | Evaluate a morloc monad
-evalMorlocMonad ::
-     Int
-  -> Config -- ^ use default config object if Nothing
-  -> MorlocMonad a
-  -> IO a
-evalMorlocMonad v config m = do
-  ((x, _), _) <- runMorlocMonad v config m
-  case x of
-    (Left err) -> error (show err)
-    (Right value) -> return value 
-
-emptyState :: Int -> MorlocState
-emptyState v = MorlocState {
+emptyState :: Maybe Path -> Int -> MorlocState
+emptyState path v = MorlocState {
     statePackageMeta = []
   , stateVerbosity = v
   , stateCounter = -1
+  , stateOutfile = path
 }
 
 startCounter :: MorlocMonad ()

@@ -48,7 +48,7 @@ typeof es = f' . head . reverse $ es
 
 run :: T.Text -> IO (Either MorlocError TypedDag)
 run code = do
-  ((x, _), _) <- MM.runMorlocMonad 0 emptyConfig (typecheck Nothing (Code code))
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
   return x
   where
     emptyConfig =  Config

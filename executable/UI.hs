@@ -141,7 +141,7 @@ optOutfile = strOption
   ( long "outfile"
   <> short 'o'
   <> metavar "OUT"
-  <> value "nexus.pl"
+  <> value ""
   <> showDefault
   <> help "the name of the generated executable"
   )

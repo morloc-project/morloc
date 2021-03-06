@@ -98,6 +98,7 @@ data MorlocState = MorlocState {
     statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
   , stateCounter :: Int
+  , stateOutfile :: Maybe Path
 }
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a

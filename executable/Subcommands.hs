@@ -58,7 +58,7 @@ readScript _ filename = do
 -- | install a module
 cmdInstall :: InstallCommand -> Int -> Config.Config -> IO ()
 cmdInstall args verbosity conf =
-  MM.runMorlocMonad verbosity conf cmdInstall' >>= MM.writeMorlocReturn
+  MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
       let name = MT.pack $ installModuleName args
@@ -70,7 +70,10 @@ cmdInstall args verbosity conf =
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
 cmdMake args verbosity config = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
-  MM.runMorlocMonad verbosity config (M.writeProgram path code) >>=
+  outfile <- case makeOutfile args of
+    "" -> return Nothing
+    x -> return . Just . Path . MT.pack $ x
+  MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
 -- | run the typechecker on a module but do not build it
@@ -83,6 +86,7 @@ cmdTypecheck args verbosity config = do
       (Left err) -> print (errorBundlePretty err)
       (Right x) -> print x 
     else MM.runMorlocMonad
+           Nothing
            verbosity
            config
            (M.typecheck path code >>= MM.liftIO . writer) >>=
