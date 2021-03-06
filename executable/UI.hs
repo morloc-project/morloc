@@ -11,8 +11,8 @@ import Options.Applicative
 opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper)
   (    fullDesc
-    <> progDesc "morloc ladida"
-    <> header "morloc v0.33.0"
+    <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
+    <> header "morloc v0.34.0"
   )
 
 

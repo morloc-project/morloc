@@ -30,18 +30,18 @@ handling for several very different languages (proofs-of-concept).
 
  - [ ] Rust support
 
-0.34.0 [2020.03.07]
+0.34.0 [2020.03.05]
 -------------------
 
- - [x] add handling for C++ float primitives
- - [x] let C++ programs be imported through a header and shared library
- - [x] Remove semicolon requirement
- - [x] Add hie.yaml for compatibility with hsl
- - [x] Update dependency set to LTS-17.4
- - [x] Add subparsers to CLI with pcapriotti/optparse-applicative 
- - [x] Remove brace requirement for modules and `where` statements
- - [x] Add `-o` option to compiler to specify output executable names
- - [x] Acceptable syntax error messages
+ * add handling for C++ float primitives
+ * let C++ programs be imported through a header and shared library
+ * Remove semicolon requirement
+ * Add hie.yaml for compatibility with hsl
+ * Update dependency set to LTS-17.4
+ * Add subparsers to CLI with pcapriotti/optparse-applicative 
+ * Remove brace requirement for modules and `where` statements
+ * Add `-o` option to compiler to specify output executable names
+ * Acceptable syntax error messages
 
 0.33.0 [2020.11.03]
 -------------------
