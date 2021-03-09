@@ -24,8 +24,7 @@ module Morloc.Language
   , pairwiseCost
   ) where
 
-import Morloc.Internal
-import Data.Text (Text)
+import Data.Text (Text, toLower)
 
 -- | Programming languages in the Morloc ecosystem. This is the type that
 -- should be used to refer to a language (don't use raw strings). Some of these
@@ -36,6 +35,7 @@ data Lang
   | RLang
   | CLang
   | CppLang
+  | RustLang
   | PerlLang
   deriving (Ord, Eq, Show)
 
@@ -46,6 +46,7 @@ mapLang f =
   , f RLang
   , f CLang
   , f CppLang
+  , f RustLang
   , f PerlLang
   ]
 
@@ -55,17 +56,20 @@ pairwiseCost :: Lang -> Lang -> Maybe Int
 -- functional overhead in each language
 pairwiseCost CLang       CLang       = Just 1
 pairwiseCost CppLang     CppLang     = Just 1
+pairwiseCost RustLang    RustLang    = Just 1
 pairwiseCost PerlLang    PerlLang    = Just 10
 pairwiseCost Python3Lang Python3Lang = Just 10
 pairwiseCost RLang       RLang       = Just 100
 -- pairs of languages for which foreign calls are optimized
 pairwiseCost CppLang CLang = Just 1
 -- cost of naive foreign function calls
-pairwiseCost _ CLang       = Just 100
-pairwiseCost _ CppLang     = Just 100
-pairwiseCost _ Python3Lang = Just 10000
-pairwiseCost _ PerlLang    = Just 10000
-pairwiseCost _ RLang       = Just 1000000
+pairwiseCost _ CLang       = Just 500 -- the cost of a system call
+pairwiseCost _ CppLang     = Just 500
+pairwiseCost _ RustLang    = Just 500
+pairwiseCost _ Python3Lang = Just 50000 -- the cost of opening the python interpreter and loading modules
+pairwiseCost _ PerlLang    = Just 50000
+-- this could be optimized by running R server
+pairwiseCost _ RLang       = Just 5000000 -- an arm and a leg
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang
@@ -76,6 +80,7 @@ parseExtension "c" = Just CLang
 parseExtension "h" = Just CLang
 parseExtension "cpp" = Just CppLang
 parseExtension "hpp" = Just CppLang
+parseExtension "rs" = Just RustLang
 parseExtension "pl" = Just PerlLang
 parseExtension _ = Nothing
 
@@ -85,6 +90,7 @@ makeExtension Python3Lang = "py"
 makeExtension RLang = "R"
 makeExtension CLang = "c"
 makeExtension CppLang = "cpp"
+makeExtension RustLang = "rs"
 makeExtension PerlLang = "pl"
 
 -- | Create the name of a given language. This is the internal standard name
@@ -94,6 +100,7 @@ showLangName Python3Lang = "python3"
 showLangName RLang = "R"
 showLangName CLang = "C"
 showLangName CppLang = "Cpp"
+showLangName RustLang = "Rust"
 showLangName PerlLang = "Perl"
 
 -- | Read the name of a given language and try to translate it
@@ -126,6 +133,7 @@ makeExecutableName ::
   -> Text -- ^ executable file basename
 makeExecutableName CLang base = base <> "-c.out"
 makeExecutableName CppLang base = base <> "-cpp.out"
+makeExecutableName RustLang base = base <> "-STUB" 
 makeExecutableName lang base = makeSourceName lang base -- For interpreted languages
 
 -- TODO: Use this function at the parsing stage to standardize names

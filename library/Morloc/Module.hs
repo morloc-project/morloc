@@ -151,6 +151,7 @@ handleFlagsAndPaths CppLang srcs = do
          , gccflags ++ concat libflags     -- compiler flags and shared libraries
          , unique (catMaybes paths)        -- paths to files to include
          )
+handleFlagsAndPaths RustLang srcs = return (srcs, [], []) -- FIXME
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
 
 flagAndPath :: Source -> MorlocMonad (Source, [MT.Text], Maybe Path)
@@ -193,6 +194,7 @@ flagAndPath src@(Source _ CppLang (Just p) _)
             ]
         [] -> return []
 flagAndPath src@(Source _ CppLang Nothing _) = return (src, [], Nothing)
+flagAndPath src@(Source _ RustLang _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
 flagAndPath (Source _ _ _ _) = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 

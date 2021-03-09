@@ -34,6 +34,7 @@ defaultList lang@(Just Python3Lang) t = [ArrU (TV lang "list") [t]]
 defaultList lang@(Just RLang) t = [ArrU (TV lang "list") [t]]
 defaultList lang@(Just CLang) t = [ArrU (TV lang "$1*") [t]]
 defaultList lang@(Just CppLang) t = [ArrU (TV lang "std::vector<$1>") [t]]
+defaultList lang@(Just RustLang) t = [ArrU (TV lang "Vec<$1>") [t]]
 defaultList lang@(Just PerlLang) t = [ArrU (TV lang "array") [t]]
 
 defaultTuple :: Maybe Lang -> [UnresolvedType] -> [UnresolvedType]
@@ -44,6 +45,9 @@ defaultTuple      (Just CLang) _ = []
 defaultTuple lang@(Just CppLang) ts = [ArrU (TV lang t) ts] where
   vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
   t = "std::tuple<" <> MT.intercalate "," vars <> ">"
+defaultTuple lang@(Just RustLang) ts = [ArrU (TV lang t) ts] where
+  vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
+  t = "(" <> MT.intercalate "," vars <> ")"
 defaultTuple lang@(Just PerlLang) ts = [ArrU (TV lang "array") ts]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, UnresolvedType)] -> [UnresolvedType]
@@ -52,14 +56,19 @@ defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "dict")
 defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "list") [] entries]
 defaultRecord      (Just CLang) _ = []
 defaultRecord lang@(Just CppLang) entries = [NamU NamRecord (TV lang "struct") [] entries]
+defaultRecord lang@(Just RustLang) entries = [NamU NamRecord (TV lang "struct") [] entries]
 defaultRecord lang@(Just PerlLang) entries = [NamU NamRecord (TV lang "hash") [] entries]
 
+-- | This is the value returned by a functions that doesn't return, for example,
+-- an print statement. It needs to be defined even for languages that don't
+-- have an explicit NULL (such as Rust).
 defaultNull :: Maybe Lang -> [UnresolvedType]
 defaultNull lang@Nothing = [VarU (TV lang "Unit")]
 defaultNull lang@(Just Python3Lang) = [VarU (TV lang "None")]
 defaultNull lang@(Just RLang) = [VarU (TV lang "NULL")]
 defaultNull lang@(Just CLang) = [VarU (TV lang "null")]
 defaultNull lang@(Just CppLang) = [VarU (TV lang "null")]
+defaultNull lang@(Just RustLang) = [VarU (TV lang "<VOID>")] -- Rust doesn't have an explicit NULL
 defaultNull lang@(Just PerlLang) = [VarU (TV lang "NULL")]
 
 defaultBool :: Maybe Lang -> [UnresolvedType]
@@ -68,6 +77,7 @@ defaultBool lang@(Just Python3Lang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just RLang) = [VarU (TV lang "logical" )]
 defaultBool lang@(Just CLang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just CppLang) = [VarU (TV lang "bool")]
+defaultBool lang@(Just RustLang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just PerlLang) = [VarU (TV lang "bool")]
 
 defaultString :: Maybe Lang -> [UnresolvedType]
@@ -76,8 +86,10 @@ defaultString lang@(Just Python3Lang) = [VarU (TV lang "str")]
 defaultString lang@(Just RLang) = [VarU (TV lang "character")]
 defaultString lang@(Just CLang) = [VarU (TV lang "char*")]
 defaultString lang@(Just CppLang) = [VarU (TV lang "std::string")]
+defaultString lang@(Just RustLang) = [VarU (TV lang "String"), VarU (TV lang "str")]
 defaultString lang@(Just PerlLang) = [VarU (TV lang "str")]
 
+-- a primitive number can automatically be promoted into any of the default numbers listed below
 defaultNumber :: Maybe Lang -> [UnresolvedType]
 defaultNumber lang@Nothing = [VarU (TV lang "Num"), VarU (TV lang "Int")]
 defaultNumber lang@(Just Python3Lang) = [VarU (TV lang "float"), VarU (TV lang "int")]
@@ -89,5 +101,21 @@ defaultNumber lang@(Just CppLang) =
   , VarU (TV lang "int")
   , VarU (TV lang "long")
   , VarU (TV lang "size_t")
+  ]
+defaultNumber lang@(Just RustLang) =
+  [ VarU (TV lang "f64")
+  , VarU (TV lang "f32")
+  , VarU (TV lang "i128")
+  , VarU (TV lang "i64")
+  , VarU (TV lang "i32")
+  , VarU (TV lang "i16")
+  , VarU (TV lang "i8")
+  , VarU (TV lang "isize")
+  , VarU (TV lang "u8")
+  , VarU (TV lang "u16")
+  , VarU (TV lang "u32")
+  , VarU (TV lang "u64")
+  , VarU (TV lang "u128")
+  , VarU (TV lang "usize")
   ]
 defaultNumber lang@(Just PerlLang) = [VarU (TV lang "double")]

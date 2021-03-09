@@ -53,6 +53,7 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
+import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 
@@ -905,6 +906,7 @@ encode srcs (lang, xs) = do
 
 preprocess :: Lang -> ExprM Many -> MorlocMonad (ExprM Many)
 preprocess CppLang es = Cpp.preprocess es
+preprocess RustLang es = Rust.preprocess es
 preprocess RLang es = R.preprocess es
 preprocess Python3Lang es = Python3.preprocess es
 preprocess l _ = MM.throwError . PoolBuildError . render
@@ -958,6 +960,7 @@ translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad MDoc
 translate lang srcs es = do
   case lang of
     CppLang -> Cpp.translate srcs es
+    RustLang -> Rust.translate srcs es
     RLang -> R.translate srcs es
     Python3Lang -> Python3.translate srcs es
     x -> MM.throwError . PoolBuildError . render

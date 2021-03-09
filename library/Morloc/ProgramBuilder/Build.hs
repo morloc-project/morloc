@@ -12,7 +12,6 @@ module Morloc.ProgramBuilder.Build
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 import qualified Control.Monad.State as CMS
@@ -33,6 +32,7 @@ build filename s =
     (PerlLang, name) -> liftIO $ writeInterpreted name s
     (CLang, name) -> gccBuild name s "gcc"
     (CppLang, name) -> gccBuild name s "g++ --std=c++11" -- TODO: I need more rigorous build handling
+    (RustLang, _) -> MM.throwError . OtherError $ "echo 'Rust does not work yet'" -- FIXME: implement this
   where
     exeName = Path $ makeExecutableName filename (scriptLang s) (MT.pack (scriptBase s))
 

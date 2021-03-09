@@ -93,6 +93,8 @@ buildPoolCallBase _ (Just CLang) i =
   Just ["./" <> pretty (ML.makeExecutableName CLang "pool"), pretty i]
 buildPoolCallBase _ (Just CppLang) i =
   Just ["./" <> pretty (ML.makeExecutableName CppLang "pool"), pretty i]
+buildPoolCallBase _ (Just RustLang) i =
+  Just ["./" <> pretty (ML.makeExecutableName RustLang "pool"), pretty i]
 buildPoolCallBase c (Just RLang) i =
   Just [pretty (configLangR c), pretty (ML.makeExecutableName RLang "pool"), pretty i]
 buildPoolCallBase c (Just Python3Lang) i =
