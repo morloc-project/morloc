@@ -98,20 +98,17 @@ showLangName PerlLang = "Perl"
 
 -- | Read the name of a given language and try to translate it
 readLangName :: Text -> Maybe Lang
-readLangName "python" = Just Python3Lang
-readLangName "python3" = Just Python3Lang
-readLangName "py" = Just Python3Lang
-readLangName "R" = Just RLang
-readLangName "r" = Just RLang
-readLangName "C" = Just CLang
-readLangName "c" = Just CLang
-readLangName "cpp" = Just CppLang
-readLangName "Cpp" = Just CppLang
-readLangName "C++" = Just CppLang
-readLangName "c++" = Just CppLang
-readLangName "Perl" = Just PerlLang
-readLangName "perl" = Just PerlLang
-readLangName _ = Nothing
+readLangName name = case toLower name of
+  "python" -> Just Python3Lang
+  "python3" -> Just Python3Lang
+  "py" -> Just Python3Lang
+  "r" -> Just RLang
+  "c" -> Just CLang
+  "cpp" -> Just CppLang
+  "c++" -> Just CppLang
+  "rust" -> Just CppLang
+  "perl" -> Just PerlLang
+  _ -> Nothing
 
 -- | Generate a name for a pool top-level source file given a language.
 makeSourceName ::
