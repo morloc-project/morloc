@@ -23,10 +23,6 @@ class PersonObj{
 
         PersonObj(){ }
 
-        std::tuple<std::string,T> unpack(){
-            return std::make_tuple(name, info); 
-        }
-
         std::string initials(){
             std::string n = "";
             bool in = false;
