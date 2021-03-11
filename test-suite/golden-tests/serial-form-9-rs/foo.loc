@@ -1,0 +1,12 @@
+import rustbase (id, Map)
+
+record (Person a) = Person {name :: Str, info :: a}
+record Rust (Person a) = "struct" {name :: "String", info :: a}
+
+export foo
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo :: Map Str (Person Int) -> Map Str (Person Int)
+foo Rust :: Map "String" (Person "i64") -> Map "String" (Person "i64")
+foo xs = id xs

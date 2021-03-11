@@ -1,0 +1,7 @@
+import rustbase (id)
+
+export foo
+
+foo :: (Int, Int) -> (Int, Int)
+foo Rust :: ("usize", "i128") -> ("usize", "i128")
+foo x = id x
