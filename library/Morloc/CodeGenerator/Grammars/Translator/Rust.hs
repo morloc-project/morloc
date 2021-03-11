@@ -9,9 +9,37 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-{- Example 1
-use super::serial;
+module Morloc.CodeGenerator.Grammars.Translator.Rust
+  ( 
+    translate
+  , preprocess
+  ) where
+
+import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Grammars.Common
+import Morloc.Quasi
+
+preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
+preprocess = invertExprM
+
+translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate _ _ = makePool
+
+makePool :: MorlocMonad MDoc
+makePool = return [idoc|// Rust template
+use rustmorlocinternals::serial;
 use std::env;
+use std::process::{Command, Stdio};
+
+fn foreign_call(cmd: &str, args: &[&str]) -> String {
+    let mut cmd = Command::new(cmd);
+    for arg in args {
+        cmd.arg(*arg);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.spawn().unwrap().wait().unwrap();
+    String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+}
 
 pub fn m0(x0: &str) -> String {
     let a0: String = serial::deserialize(x0).into();
@@ -31,23 +59,10 @@ fn main() {
     }
     println!("{}", result);
 }
- - -}
+|]
+
 
 {- Example 2
-use std::env;
-use std::process::{Command, Stdio};
-
-use super::serial;
-
-fn foreign_call(cmd: &str, args: &[&str]) -> String {
-    let mut cmd = Command::new(cmd);
-    for arg in args {
-        cmd.arg(*arg);
-    }
-    cmd.stdout(Stdio::piped());
-    cmd.spawn().unwrap().wait().unwrap();
-    String::from_utf8(cmd.output().unwrap().stdout).unwrap()
-}
 
 // Translated from the python file
 
@@ -82,17 +97,3 @@ fn main() {
     println!("{}", result);
 }
  - -}
-
-module Morloc.CodeGenerator.Grammars.Translator.Rust
-  ( 
-    translate
-  , preprocess
-  ) where
-
-import Morloc.CodeGenerator.Namespace
-
-preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
-preprocess = undefined
-
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
-translate = undefined

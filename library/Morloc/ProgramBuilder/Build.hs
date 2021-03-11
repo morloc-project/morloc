@@ -32,7 +32,7 @@ build filename s =
     (PerlLang, name) -> liftIO $ writeInterpreted name s
     (CLang, name) -> gccBuild name s "gcc"
     (CppLang, name) -> gccBuild name s "g++ --std=c++11" -- TODO: I need more rigorous build handling
-    (RustLang, _) -> MM.throwError . OtherError $ "echo 'Rust does not work yet'" -- FIXME: implement this
+    (RustLang, name) -> rustBuild name s "rustc"
   where
     exeName = Path $ makeExecutableName filename (scriptLang s) (MT.pack (scriptBase s))
 
@@ -48,6 +48,14 @@ gccBuild (Path exe) s cmd = do
   liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
   MM.runCommand "GccBuild" $
     MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
+
+-- | Compile a C program
+rustBuild :: Path -> Script -> MT.Text -> MorlocMonad ()
+rustBuild (Path exe) s cmd = do
+  let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
+  liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
+  MM.runCommand "RustBuild" $
+    MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s)
 
 -- | Build an interpreted script.
 writeInterpreted :: Path -> Script -> IO ()

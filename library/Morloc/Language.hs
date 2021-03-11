@@ -113,7 +113,7 @@ readLangName name = case toLower name of
   "c" -> Just CLang
   "cpp" -> Just CppLang
   "c++" -> Just CppLang
-  "rust" -> Just CppLang
+  "rust" -> Just RustLang
   "perl" -> Just PerlLang
   _ -> Nothing
 
@@ -133,7 +133,7 @@ makeExecutableName ::
   -> Text -- ^ executable file basename
 makeExecutableName CLang base = base <> "-c.out"
 makeExecutableName CppLang base = base <> "-cpp.out"
-makeExecutableName RustLang base = base <> "-STUB" 
+makeExecutableName RustLang base = base <> "-rust.out" 
 makeExecutableName lang base = makeSourceName lang base -- For interpreted languages
 
 -- TODO: Use this function at the parsing stage to standardize names

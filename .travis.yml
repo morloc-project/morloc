@@ -33,6 +33,9 @@ before_install:
     - R -e 'install.packages("testthat", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("devtools", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
+    # Set up Rust
+    - curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+    - cargo install serde
     # Set up Perl
     - export PERL_MM_USE_DEFAULT=1
     - export PERL_CANARY_STABILITY_NOPROMPT=1
@@ -54,6 +57,7 @@ script:
   - morloc install rbase
   - morloc install pybase
   - morloc install cppbase
+  - morloc install rustbase
   - morloc install math
   - stack --no-terminal test --fast
 
