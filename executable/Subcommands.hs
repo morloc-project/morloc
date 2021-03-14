@@ -41,7 +41,7 @@ getConfig (CmdTypecheck g) = getConfig' (typecheckConfig g) (typecheckVanilla g)
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
 getConfig' "" _ = Config.loadMorlocConfig Nothing
-getConfig' filename _ = Config.loadMorlocConfig (Just (Path (MT.pack filename)))
+getConfig' filename _ = Config.loadMorlocConfig (Just filename)
 
 getVerbosity :: CliCommand -> Int
 getVerbosity (CmdMake      g) = if makeVerbose      g then 1 else 0
@@ -52,7 +52,7 @@ readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
 readScript _ filename = do
   code <- MT.readFile filename
-  return (Just (Path (MT.pack filename)), Code code)
+  return (Just filename, Code code)
 
 
 -- | install a module
@@ -61,7 +61,7 @@ cmdInstall args verbosity conf =
   MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
-      let name = MT.pack $ installModuleName args
+      let name = installModuleName args
       if installGithub args
         then Mod.installModule (Mod.GithubRepo name)
         else Mod.installModule (Mod.CoreGithubRepo name)
@@ -72,7 +72,7 @@ cmdMake args verbosity config = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
   outfile <- case makeOutfile args of
     "" -> return Nothing
-    x -> return . Just . Path . MT.pack $ x
+    x -> return . Just $ x
   MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 

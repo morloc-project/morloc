@@ -43,9 +43,9 @@ import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
-import qualified System.Directory as SD
 import qualified System.Exit as SE
 import qualified System.Process as SP
+import qualified Morloc.System as MS
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
@@ -116,8 +116,8 @@ logFile ::
   -> MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
-  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
+  liftIO $ MS.createDirectoryIfMissing True tmpdir
+  let path = MS.combine tmpdir s
   liftIO $ MT.writeFile path (MT.pretty m)
   return m
 
@@ -130,8 +130,8 @@ logFileWith ::
   -> MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
-  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
+  liftIO $ MS.createDirectoryIfMissing True tmpdir
+  let path = MS.combine tmpdir s
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 

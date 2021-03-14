@@ -29,7 +29,7 @@ module Morloc.Namespace
   , TVar(..)
   , unTVar
   , Name(..)
-  , Path(..)
+  , Path
   , Code(..)
   -- ** Language
   , Lang(..)
@@ -104,7 +104,7 @@ data MorlocState = MorlocState {
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
 newtype Name = Name {unName :: Text} deriving (Show, Eq, Ord)
-newtype Path = Path {unPath :: Text} deriving (Show, Eq, Ord)
+type Path = String
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
 -- | Stores everything needed to build one file

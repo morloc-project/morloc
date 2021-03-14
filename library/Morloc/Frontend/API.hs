@@ -59,7 +59,7 @@ parse f (Code code) = case Parser.readProgram f code mempty of
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
 openLocalModule filename = do
-  code <- liftIO $ MT.readFile (MT.unpack . unPath $ filename)
+  code <- liftIO $ MT.readFile filename
   return (Just filename, code)
 
 

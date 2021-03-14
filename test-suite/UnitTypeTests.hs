@@ -52,12 +52,12 @@ run code = do
   return x
   where
     emptyConfig =  Config
-        { configHome = Path ""
-        , configLibrary = Path ""
-        , configTmpDir = Path ""
-        , configLangPython3 = Path ""
-        , configLangR = Path ""
-        , configLangPerl = Path ""
+        { configHome = ""
+        , configLibrary = ""
+        , configTmpDir = ""
+        , configLangPython3 = ""
+        , configLangR = ""
+        , configLangPerl = ""
         }
 
 assertTerminalType :: String -> T.Text -> [UnresolvedType] -> TestTree
@@ -281,9 +281,9 @@ packerTests =
                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") CppLang (Just (Path "map.h")) (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EVar ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") CppLang (Just (Path "map.h")) (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EVar ("unpackMap"))]
               }
             ]
         )
@@ -311,9 +311,9 @@ import A (Map as Hash)
                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") CppLang (Just (Path "map.h")) (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EVar ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") CppLang (Just (Path "map.h")) (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EVar ("unpackMap"))]
               }
             ]
         )

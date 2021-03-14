@@ -141,7 +141,7 @@ readProgram
 readProgram f sourceCode p =
   case runParser
          (CMS.runStateT (pProgram <* eof) pstate)
-         (maybe "<expr>" (MT.unpack . unPath) f)
+         (maybe "<expr>" id f)
          sourceCode of
     Left err -> Left err
     Right (es, _) -> Right $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p es 
@@ -492,7 +492,7 @@ pSrcE = do
   modulePath <- CMS.gets stateModulePath
   reserved "source"
   language <- pLang
-  srcfile <- optional (reserved "from" >> stringLiteral |>> Path)
+  srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
   srcFile <- case (modulePath, srcfile) of
     -- build a path to the source file by searching

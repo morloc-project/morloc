@@ -31,9 +31,6 @@ instance Pretty MVar where
 instance Pretty EVar where
   pretty = pretty . unEVar
 
-instance Pretty Path where
-  pretty = pretty . unPath
-
 instance Pretty Code where
   pretty = pretty . unCode
 

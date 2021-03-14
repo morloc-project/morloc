@@ -52,8 +52,8 @@ manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
 translateSource :: Path -> MorlocMonad MDoc
-translateSource (Path p) = do
-  let p' = MT.stripPrefixIfPresent "./" p
+translateSource p = do
+  let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
   return $ "source(" <> dquotes (pretty p') <> ")"
 
 tupleKey :: Int -> MDoc -> MDoc

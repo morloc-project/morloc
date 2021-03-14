@@ -65,8 +65,8 @@ manNamer i = "m" <> viaShow i
 
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
-translateSource (Path s) = do
-  (Path lib) <- MM.asks configLibrary
+translateSource s = do
+  lib <- fmap MT.pack $ MM.asks configLibrary
   let moduleStr = pretty
                 . MT.liftToText (map DC.toLower)
                 . MT.replace "/" "."
@@ -74,7 +74,7 @@ translateSource (Path s) = do
                 . MT.stripPrefixIfPresent "./" -- no path if relative to here
                 . MT.stripPrefixIfPresent lib  -- make the path relative to the library
                 . MT.liftToText SF.dropExtensions
-                $ s
+                $ MT.pack s
   return $ "from" <+> moduleStr <+> "import *"
 
 tupleKey :: Int -> MDoc -> MDoc

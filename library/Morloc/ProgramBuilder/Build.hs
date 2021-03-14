@@ -14,8 +14,8 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 import qualified Control.Monad.State as CMS
-
 import qualified System.Directory as SD
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
@@ -32,35 +32,32 @@ build filename s =
     (PerlLang, name) -> liftIO $ writeInterpreted name s
     (CLang, name) -> gccBuild name s "gcc"
     (CppLang, name) -> gccBuild name s "g++ --std=c++11" -- TODO: I need more rigorous build handling
-    (RustLang, name) -> rustBuild name s "rustc"
+    (RustLang, name) -> rustBuild name s
   where
-    exeName = Path $ makeExecutableName filename (scriptLang s) (MT.pack (scriptBase s))
+    exeName = makeExecutableName filename (scriptLang s) (scriptBase s)
 
-makeExecutableName :: Maybe Path -> Lang -> MT.Text -> MT.Text
+makeExecutableName :: Maybe Path -> Lang -> String -> Path
 makeExecutableName Nothing lang base = ML.makeExecutableName lang base
-makeExecutableName (Just (Path filename)) _ _ = filename
+makeExecutableName (Just filename) _ _ = filename
 
 -- | Compile a C program
 gccBuild :: Path -> Script -> MT.Text -> MorlocMonad ()
-gccBuild (Path exe) s cmd = do
-  let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
-  let inc = ["-I" <> unPath i | i <- scriptInclude s]
-  liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
+gccBuild exe s cmd = do
+  let src = ML.makeSourceName (scriptLang s) (scriptBase s)
+  let inc = ["-I" <> i | i <- scriptInclude s]
+  liftIO $ MT.writeFile src (unCode (scriptCode s))
   MM.runCommand "GccBuild" $
-    MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
+    MT.unwords ([cmd, "-o", MT.pack exe, MT.pack src] ++ scriptCompilerFlags s ++ map MT.pack inc)
 
 -- | Compile a C program
-rustBuild :: Path -> Script -> MT.Text -> MorlocMonad ()
-rustBuild (Path exe) s cmd = do
-  let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
-  liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
-  MM.runCommand "RustBuild" $
-    MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s)
+rustBuild :: Path -> Script -> MorlocMonad ()
+rustBuild exeName s = do
+  let poolCargoDir = MS.dropExtensions exeName <> "-mod"
+  liftIO $ SD.createDirectoryIfMissing True poolCargoDir
 
 -- | Build an interpreted script.
 writeInterpreted :: Path -> Script -> IO ()
 writeInterpreted path s = do
-  let exe = MT.unpack . unPath $ path
-  MT.writeFile exe (unCode (scriptCode s))
-  p <- SD.getPermissions exe
-  SD.setPermissions exe (p {SD.executable = True})
+  MT.writeFile path (unCode (scriptCode s))
+  p <- SD.getPermissions path
+  SD.setPermissions path (p {SD.executable = True})

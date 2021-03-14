@@ -85,7 +85,7 @@ parseExtension "pl" = Just PerlLang
 parseExtension _ = Nothing
 
 -- | Create an extension for a given language
-makeExtension :: Lang -> Text
+makeExtension :: Lang -> String
 makeExtension Python3Lang = "py"
 makeExtension RLang = "R"
 makeExtension CLang = "c"
@@ -120,17 +120,17 @@ readLangName name = case toLower name of
 -- | Generate a name for a pool top-level source file given a language.
 makeSourceName ::
      Lang
-  -> Text -- ^ basename
-  -> Text -- ^ source file basename
-makeSourceName lang base = base <> "." <> makeExtension lang
+  -> String -- ^ basename
+  -> String -- ^ source file basename
+makeSourceName lang base = base ++ "." ++ makeExtension lang
 
 -- | Generate a name for a pool executable file given a language. For
 -- interpreted languages this will be the same as the output of the
 -- @makeSourceName@ function.
 makeExecutableName ::
      Lang
-  -> Text -- ^ basename
-  -> Text -- ^ executable file basename
+  -> String -- ^ basename
+  -> String -- ^ executable file basename
 makeExecutableName CLang base = base <> "-c.out"
 makeExecutableName CppLang base = base <> "-cpp.out"
 makeExecutableName RustLang base = base <> "-rust.out" 
