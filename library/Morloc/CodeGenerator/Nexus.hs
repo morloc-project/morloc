@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
@@ -30,15 +31,15 @@ type FData =
 
 generate :: [NexusCommand] -> [(TypeP, Int, Maybe EVar)] -> MorlocMonad Script
 generate cs xs = do
-  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . commandName) cs
+  let names = [pretty n | (_, _, Just n) <- xs] ++ map (pretty . commandName) cs
   fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
+  outfile <- fmap (maybe "nexus.pl" id) $ CMS.gets stateOutfile
   return $
     Script
-      { scriptBase = "nexus"
+      { scriptBase = outfile
       , scriptLang = ML.PerlLang
-      , scriptCode = Code . render $ main names fdata cs
-      , scriptCompilerFlags = []
-      , scriptInclude = []
+      , scriptCode = "." :/ File outfile (Code . render $ main names fdata cs)
+      , scriptMake = [SysExe outfile]
       }
 
 getFData :: (TypeP, Int, EVar) -> MorlocMonad FData

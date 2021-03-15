@@ -15,18 +15,40 @@ module Morloc.CodeGenerator.Grammars.Translator.Rust
   , preprocess
   ) where
 
+import Morloc.Namespace
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
+import Morloc.Data.Doc
+
+-- -- | Compile a Rust program
+-- rustBuild :: Path -> Script -> MorlocMonad ()
+-- rustBuild = undefined
+-- -- rustBuild exeName s = do
+-- --   let poolCargoDir = MS.dropExtensions exeName <> "-mod"
+-- --   liftIO $ SD.createDirectoryIfMissing True poolCargoDir
 
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
-translate _ _ = makePool
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
+translate srcs es = do
+  code <- makePool es
 
-makePool :: MorlocMonad MDoc
-makePool = return [idoc|// Rust template
+  maker <- makeTheMaker srcs 
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = RustLang 
+    , scriptCode = "." :/ File "pool.rs" (Code . render $ code)
+    , scriptMake = maker
+    }
+
+makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
+makeTheMaker = undefined
+
+makePool :: [ExprM One] -> MorlocMonad MDoc
+makePool _ = return [idoc|// Rust template
 use rustmorlocinternals::serial;
 use std::env;
 use std::process::{Command, Stdio};

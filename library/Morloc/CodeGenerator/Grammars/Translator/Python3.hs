@@ -25,12 +25,13 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
+import qualified Morloc.Language as ML
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- setup library paths
   lib <- fmap pretty $ MM.asks MC.configLibrary
@@ -49,7 +50,15 @@ translate srcs es = do
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es
 
-  return $ makePool lib includeDocs mDocs dispatch
+  let code = makePool lib includeDocs mDocs dispatch
+  let outfile = ML.makeExecutableName Python3Lang "pool"
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = Python3Lang 
+    , scriptCode = "." :/ File "pool.py" (Code . render $ code)
+    , scriptMake = [SysExe outfile]
+    }
 
 -- create an internal variable based on a unique id
 letNamer :: Int -> MDoc

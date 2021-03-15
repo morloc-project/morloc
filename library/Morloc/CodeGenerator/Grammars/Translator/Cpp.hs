@@ -32,6 +32,8 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Module as Mod
+import qualified Morloc.Language as ML
 
 -- | @RecEntry@ stores the common name, keys, and types of records that are not
 -- imported from C++ source. These records are generated as structs in the C++
@@ -54,7 +56,7 @@ type RecMap = [((PVar, [PVar]), RecEntry)]
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
@@ -75,7 +77,32 @@ translate srcs es = do
   mDocs <- mapM (translateManifold recmap) es
 
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures serializationCode mDocs dispatch
+  let code = makeMain includeDocs signatures serializationCode mDocs dispatch
+
+  maker <- makeTheMaker srcs
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = CppLang
+    , scriptCode = "." :/ File "pool.cpp" (Code . render $ code)
+    , scriptMake = maker
+    }
+
+makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
+makeTheMaker srcs = do
+  let outfile = pretty $ ML.makeExecutableName CppLang "pool"
+  let src = pretty (ML.makeSourceName CppLang "pool")
+
+  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
+  (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs
+
+  let incs = [pretty ("-I" <> i) | i <- includes]
+  let flags' = map pretty flags
+
+  -- let cmd = SysRun . Code $ MT.unwords (["g++ --std=c++11", "-o", MT.pack outfile, MT.pack src] ++ flags ++ map MT.pack incs)
+  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++11 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+
+  return [cmd]
 
 letNamer :: Int -> MDoc
 letNamer i = "a" <> viaShow i

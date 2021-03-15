@@ -220,8 +220,8 @@ stringLiteral = lexeme $ do
   _ <- char '\"'
   return $ MT.pack s
 
-name :: Parser MT.Text
-name = (lexeme . try) (p >>= check)
+freename :: Parser MT.Text
+freename = (lexeme . try) (p >>= check)
   where
     p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
     check x =
@@ -258,7 +258,7 @@ pModule :: Parser (MVar, [(MVar, Import)], ParserNode)
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
-  moduleName' <- name
+  moduleName' <- freename
   mes <- align pModuleBody
   return $ makeModule f (MVar moduleName') mes
 
@@ -311,7 +311,7 @@ pTypedefObject = do
   setLang lang
   (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
   _ <- symbol "="
-  constructor <- name <|> stringLiteral
+  constructor <- freename <|> stringLiteral
   entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
   let t = NamU r (TV lang constructor) (map VarU vs) entries
   setLang Nothing
@@ -349,23 +349,23 @@ pNamRecord = do
 
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do
-  v <- name
+  v <- freename
   lang <- CMS.gets stateLang
   return (TV lang v, [])
 
 pTypedefTermPar :: Parser (TVar, [TVar])
 pTypedefTermPar = do
-  vs <- parens (many1 name)
+  vs <- parens (many1 freename)
   lang <- CMS.gets stateLang
   return (TV lang (head vs), map (TV lang) (tail vs))
 
 pImport :: Parser ModuleBody
 pImport = do
   _ <- reserved "import"
-  n <- name
+  n <- freename
   imports <-
     optional $
-    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EVar x, EVar x)]) name
+    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EVar x, EVar x)]) freename
   return . MBImport $
     Import
       { importModuleName = MVar n
@@ -376,12 +376,12 @@ pImport = do
 
 pImportTerm :: Parser (EVar, EVar)
 pImportTerm = do
-  n <- name
-  a <- option n (reserved "as" >> name)
+  n <- freename
+  a <- option n (reserved "as" >> freename)
   return (EVar n, EVar a)
 
 pExport :: Parser ModuleBody
-pExport = fmap (MBExport . EVar) $ reserved "export" >> name
+pExport = fmap (MBExport . EVar) $ reserved "export" >> freename
 
 pStatement :: Parser Expr
 pStatement = try pDeclaration <|> pSignature
@@ -391,15 +391,15 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
 
 pDataDeclaration :: Parser Expr
 pDataDeclaration = do
-  v <- name
+  v <- freename
   symbol "="
   e <- pExpr
   return (Declaration (EVar v) e)
 
 pFunctionDeclaration :: Parser Expr
 pFunctionDeclaration = do
-  v <- name
-  args <- many1 name
+  v <- freename
+  args <- many1 freename
   _ <- op "="
   e <- pExpr
   return $ Declaration (EVar v) (curryLamE (map EVar args) e)
@@ -409,7 +409,7 @@ pFunctionDeclaration = do
 
 pSignature :: Parser Expr
 pSignature = do
-  v <- name
+  v <- freename
   lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
@@ -428,7 +428,7 @@ pSignature = do
 
 pLang :: Parser Lang
 pLang = do
-  langStr <- name
+  langStr <- freename
   case ML.readLangName langStr of
     (Just lang) -> return lang
     Nothing -> fancyFailure . Set.singleton . ErrorFail
@@ -439,7 +439,7 @@ tag :: Parser a -> Parser (Maybe MT.Text)
 tag p = optional (try tag')
   where
     tag' = do
-      l <- name
+      l <- freename
       _ <- op ":"
       _ <- lookAhead p
       return l
@@ -453,7 +453,7 @@ pPropertyList = do
 
 pProperty :: Parser Property
 pProperty = do
-  ps <- many1 name
+  ps <- many1 freename
   case ps of
     ["pack"] -> return Pack
     ["unpack"] -> return Unpack
@@ -513,7 +513,7 @@ pSrcE = do
 pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
-  a <- option n (reserved "as" >> name)
+  a <- option n (reserved "as" >> freename)
   return (Name n, EVar a)
 
 pNamE :: Parser Expr
@@ -521,7 +521,7 @@ pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))
 
 pNamEntryE :: Parser (EVar, Expr)
 pNamEntryE = do
-  n <- name
+  n <- freename
   _ <- symbol "="
   e <- pExpr
   return (EVar n, e)
@@ -545,7 +545,7 @@ pAcc :: Parser Expr
 pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
-  f <- name
+  f <- freename
   return $ AccE e (EVar f) 
 
 pAnn :: Parser Expr
@@ -600,7 +600,7 @@ pVar :: Parser Expr
 pVar = fmap VarE pEVar
 
 pEVar :: Parser EVar
-pEVar = fmap EVar name
+pEVar = fmap EVar freename
 
 pTypeGen :: Parser UnresolvedType
 pTypeGen = do
@@ -655,21 +655,21 @@ pNamU = do
 
 pNamEntryU :: Parser (MT.Text, UnresolvedType)
 pNamEntryU = do
-  n <- name
+  n <- freename
   _ <- op "::"
   t <- pType
   return (n, t)
 
 pExistential :: Parser UnresolvedType
 pExistential = do
-  v <- angles name
+  v <- angles freename
   return (ExistU (TV Nothing v) [] [])
 
 pArrU :: Parser UnresolvedType
 pArrU = do
   lang <- CMS.gets stateLang
-  _ <- tag (name <|> stringLiteral)
-  n <- name <|> stringLiteral
+  _ <- tag (freename <|> stringLiteral)
+  n <- freename <|> stringLiteral
   args <- many1 pType'
   return $ ArrU (TV lang n) args
   where
@@ -704,8 +704,8 @@ pVarConU = do
 pVarGenU :: Parser UnresolvedType
 pVarGenU = do
   lang <- CMS.gets stateLang
-  _ <- tag name
-  n <- name
+  _ <- tag freename
+  n <- freename
   let v = TV lang n
   appendGenerics v  -- add the term to the generic list IF generic
   return $ VarU v

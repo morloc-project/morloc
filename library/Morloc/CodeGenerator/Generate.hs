@@ -48,7 +48,6 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.Module as Mod
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
@@ -886,23 +885,10 @@ encode
   -> (Lang, [ExprM Many])
   -> MorlocMonad Script
 encode srcs (lang, xs) = do
-  state <- MM.get
-
-  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
-  (sources, flags, includes) <- Mod.handleFlagsAndPaths lang
-    $ unique [s | s <- srcs, srcLang s == lang]
-
+  let srcs' = unique [s | s <- srcs, srcLang s == lang]
   xs' <- mapM (preprocess lang) xs >>= chooseSerializer
   -- translate each node in the AST to code
-  code <- translate lang sources xs'
-
-  return $ Script
-    { scriptBase = "pool"
-    , scriptLang = lang
-    , scriptCode = Code . render $ code
-    , scriptCompilerFlags = flags
-    , scriptInclude = includes
-    }
+  translate lang srcs' xs'
 
 preprocess :: Lang -> ExprM Many -> MorlocMonad (ExprM Many)
 preprocess CppLang es = Cpp.preprocess es
@@ -956,7 +942,7 @@ chooseSerializer xs = mapM chooseSerializer' xs where
   oneSerial (SerialNull t) = return $ SerialNull t
   oneSerial (SerialUnknown t) = return $ SerialUnknown t
 
-translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad Script
 translate lang srcs es = do
   case lang of
     CppLang -> Cpp.translate srcs es

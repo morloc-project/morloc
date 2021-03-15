@@ -22,12 +22,13 @@ import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
@@ -40,7 +41,15 @@ translate srcs es = do
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
 
-  return $ makePool includeDocs mDocs
+  let code = makePool includeDocs mDocs
+  let outfile = ML.makeExecutableName RLang "pool"
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = RLang 
+    , scriptCode = "." :/ File "pool.R" (Code . render $ code)
+    , scriptMake = [SysExe outfile]
+    }
 
 letNamer :: Int -> MDoc 
 letNamer i = "a" <> viaShow i

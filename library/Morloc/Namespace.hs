@@ -31,10 +31,13 @@ module Morloc.Namespace
   , Name(..)
   , Path
   , Code(..)
+  , DirTree(..)
+  , AnchoredDirTree(..)
   -- ** Language
   , Lang(..)
   -- ** Data
   , Script(..)
+  , SysCommand(..)
   -- ** Serialization
   , UnresolvedPacker(..)
   , PackMap
@@ -81,6 +84,7 @@ import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
 import Text.Megaparsec ()
+import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
 -- | no annotations for now
@@ -107,14 +111,21 @@ newtype Name = Name {unName :: Text} deriving (Show, Eq, Ord)
 type Path = String
 newtype Code = Code {unCode :: Text} deriving (Show, Eq, Ord)
 
--- | Stores everything needed to build one file
+data SysCommand
+  = SysExe Path
+  | SysMove Path Path
+  | SysRun Code
+  | SysInstall Path
+  | SysUnlink Path
+  deriving (Show, Ord, Eq)
+
+-- | Stores everything needed to build one package
 data Script =
   Script
     { scriptBase :: !String -- ^ script basename (no extension)
     , scriptLang :: !Lang -- ^ script language
-    , scriptCode :: !Code -- ^ full script source code
-    , scriptCompilerFlags :: [Text] -- ^ compiler/interpreter flags
-    , scriptInclude :: [Path] -- ^ paths to morloc module directories
+    , scriptCode :: !(AnchoredDirTree Code) -- ^ file tree containing all code and metadata
+    , scriptMake :: ![SysCommand] -- ^ Bash code to build the script 
     }
   deriving (Show, Ord, Eq)
 
