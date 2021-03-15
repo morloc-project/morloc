@@ -35,7 +35,6 @@ before_install:
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
     # Set up Rust
     - curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
-    - cargo install serde
     # Set up Perl
     - export PERL_MM_USE_DEFAULT=1
     - export PERL_CANARY_STABILITY_NOPROMPT=1
