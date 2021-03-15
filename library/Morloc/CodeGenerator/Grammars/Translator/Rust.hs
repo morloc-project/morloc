@@ -20,6 +20,8 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
 import Morloc.Data.Doc
+import qualified Morloc.Monad as MM
+import qualified Morloc.System as MS
 
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
@@ -47,16 +49,57 @@ translate srcs es = do
       ]
 
 makeCargo :: [Source] -> MorlocMonad Code 
-makeCargo _ = return . Code . render $ [idoc|[package]
+makeCargo srcs = do
+  homedir <- liftIO MS.getHomeDirectory
+  let guts = MS.combine homedir ".morloc/dev/rustmorlocinternals"
+  dependencies <- mapM makeDependency . unique . catMaybes . map srcPath $ srcs
+  return . Code . render $ [idoc|[package]
 name = "pool-rs"
 version = "0.1.0"
 authors = ["H. G. Wells"]
 edition = "2018"
 
 [dependencies]
-rustmorlocinternals = { path = "/home/z/.morloc/dev/rustmorlocinternals" }
-rustbase = { path = "/home/z/.morloc/src/rustbase" }
+rustmorlocinternals = { path = "#{pretty guts}" }
+#{vsep dependencies}
 |]
+
+-- An example of a dependency entry:
+--    rustbase = { path = "/home/username/.morloc/src/rustbase" }
+makeDependency :: Path -> MorlocMonad MDoc
+makeDependency pathRaw = do
+  path <- liftIO $ MS.canonicalizePath pathRaw
+
+  pkgName <- findPkgName path
+
+  return [idoc|#{pretty pkgName} = { path = "#{pretty path}" }|]
+
+
+findPkgName :: Path -> MorlocMonad String
+findPkgName path = do
+  isDirectory <- liftIO $ MS.doesDirectoryExist path
+  -- if is directory and has Cargo.toml file
+  -- then assume it is a Rust crate with the package name matching the bottom folder
+  
+  dir <- case isDirectory of
+    True -> liftIO $ MS.readDirectory path
+    False -> MM.throwError . PoolBuildError . render $
+      "Expected a Rust crate directory, found:" <+> squotes (pretty path)
+
+  pkgName <- case dir of
+    (_ :/ Failed _ ioerr) -> MM.throwError . PoolBuildError . render
+      $ "While trying to load what I thought as a Rust crate at"
+      <+> squotes (pretty path)
+      <+> "I encountered the following IO exception:"
+      <+> viaShow ioerr
+    (_ :/ (File _ _)) -> MM.throwError . PoolBuildError $ "Expected directory"
+    (_ :/ Dir modName fs) -> if elem "Cargo.toml" [x | File x _ <- fs]
+      then return modName
+      else MM.throwError . PoolBuildError . render $
+          "Expected" <+> squotes (pretty path) <+> "to be a Rust crate, but found no Cargo.toml file"
+
+  return pkgName
+
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
 makeTheMaker _ = return
@@ -102,10 +145,7 @@ fn main() {
 |]
 
 
-{- Example 2
-
-// Translated from the python file
-
+{-
 // py2c x y = add (mul x y) 100
 fn m0(x0: &str, x1: &str) -> String {
     let a0: f64 = serial::deserialize(x0).into();
@@ -136,4 +176,4 @@ fn main() {
     }
     println!("{}", result);
 }
- - -}
+-}
