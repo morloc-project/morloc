@@ -4,4 +4,4 @@ all:
 	./nexus.pl foo '[12345678,987654321]' >> obs.txt
 
 clean:
-	rm -f nexus* pool*
+	rm -rf nexus* pool*

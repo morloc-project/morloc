@@ -21,13 +21,6 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
 import Morloc.Data.Doc
 
--- -- | Compile a Rust program
--- rustBuild :: Path -> Script -> MorlocMonad ()
--- rustBuild = undefined
--- -- rustBuild exeName s = do
--- --   let poolCargoDir = MS.dropExtensions exeName <> "-mod"
--- --   liftIO $ SD.createDirectoryIfMissing True poolCargoDir
-
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
@@ -35,21 +28,46 @@ translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   code <- makePool es
 
+  cargo <- makeCargo srcs
+
   maker <- makeTheMaker srcs 
 
   return $ Script
     { scriptBase = "pool"
     , scriptLang = RustLang 
-    , scriptCode = "." :/ File "pool.rs" (Code . render $ code)
+    , scriptCode = "." :/ pkg cargo code
     , scriptMake = maker
     }
+  where
+    pkg cargo code = Dir "pool-rust"
+      [ File "Cargo.toml" cargo
+      , Dir "src"
+        [ File "main.rs" code
+        ]
+      ]
+
+makeCargo :: [Source] -> MorlocMonad Code 
+makeCargo _ = return . Code . render $ [idoc|[package]
+name = "pool-rs"
+version = "0.1.0"
+authors = ["H. G. Wells"]
+edition = "2018"
+
+[dependencies]
+rustmorlocinternals = { path = "/home/z/.morloc/dev/rustmorlocinternals" }
+rustbase = { path = "/home/z/.morloc/src/rustbase" }
+|]
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
-makeTheMaker = undefined
+makeTheMaker _ = return
+  [ SysRun (Code "cd pool-rust && cargo build && cd ..")
+  , SysRun (Code "cp pool-rust/target/debug/pool-rs pool-rust.out")
+  ]
 
-makePool :: [ExprM One] -> MorlocMonad MDoc
-makePool _ = return [idoc|// Rust template
+makePool :: [ExprM One] -> MorlocMonad Code
+makePool _ = return . Code . render $ [idoc|// Rust template
 use rustmorlocinternals::serial;
+use rustbase;
 use std::env;
 use std::process::{Command, Stdio};
 
@@ -64,14 +82,14 @@ fn foreign_call(cmd: &str, args: &[&str]) -> String {
 }
 
 pub fn m0(x0: &str) -> String {
-    let a0: String = serial::deserialize(x0).into();
-    let a1 = morloc_id(&a0);
+    let a0: i64 = serial::deserialize(x0).into();
+    let a1 = rustbase::morloc_id(&a0);
     let a2 = serial::serialize(&a1);
     a2
 }
 
 fn main() {
-    let args = env::args();
+    let mut args = env::args();
     args.next();
     let cmd_id: u64 = args.next().unwrap().parse().unwrap();
     let result;
