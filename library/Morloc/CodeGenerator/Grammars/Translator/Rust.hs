@@ -28,9 +28,16 @@ preprocess = invertExprM
 
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
-  code <- makePool es
 
-  cargo <- makeCargo srcs
+  deps <- getDependencies srcs
+
+  let imports = map (makeImport . pretty . fst) deps
+
+  cargo <- makeCargo deps
+
+  manifolds <- mapM makeManifold es
+
+  code <- makePool manifolds imports es
 
   maker <- makeTheMaker srcs 
 
@@ -48,11 +55,17 @@ translate srcs es = do
         ]
       ]
 
-makeCargo :: [Source] -> MorlocMonad Code 
-makeCargo srcs = do
+makeImport :: MDoc -> MDoc
+makeImport n = "use" <+> n <> ";"
+
+makeManifold :: ExprM One -> MorlocMonad MDoc
+makeManifold (ManifoldM (metaId->i) _ _) = return [idoc|fn #{manNamer i}(){}|]
+makeManifold _ = error "Well, that wasn't suppose to happen"
+
+makeCargo :: [(String, Path)] -> MorlocMonad Code 
+makeCargo deps = do
   homedir <- liftIO MS.getHomeDirectory
   let guts = MS.combine homedir ".morloc/dev/rustmorlocinternals"
-  dependencies <- mapM makeDependency . unique . catMaybes . map srcPath $ srcs
   return . Code . render $ [idoc|[package]
 name = "pool-rs"
 version = "0.1.0"
@@ -61,19 +74,20 @@ edition = "2018"
 
 [dependencies]
 rustmorlocinternals = { path = "#{pretty guts}" }
-#{vsep dependencies}
+#{vsep (map makeDependency deps)}
 |]
 
 -- An example of a dependency entry:
 --    rustbase = { path = "/home/username/.morloc/src/rustbase" }
-makeDependency :: Path -> MorlocMonad MDoc
-makeDependency pathRaw = do
-  path <- liftIO $ MS.canonicalizePath pathRaw
+makeDependency :: (String, Path) -> MDoc
+makeDependency (pkgName, path) = do
+  [idoc|#{pretty pkgName} = { path = "#{pretty path}" }|]
 
-  pkgName <- findPkgName path
-
-  return [idoc|#{pretty pkgName} = { path = "#{pretty path}" }|]
-
+getDependencies :: [Source] -> MorlocMonad [(String, Path)]
+getDependencies srcs = do
+  paths <- liftIO . mapM MS.canonicalizePath . unique . catMaybes . map srcPath $ srcs
+  names <- mapM findPkgName paths
+  return $ zip names paths
 
 findPkgName :: Path -> MorlocMonad String
 findPkgName path = do
@@ -122,10 +136,10 @@ makeDispatch varin varout ms
 
     defaultCase = [idoc|_ => panic!("invalid function!")|]
 
-makePool :: [ExprM One] -> MorlocMonad Code
-makePool es = return . Code . render $ [idoc|// Rust template
+makePool :: [MDoc] -> [MDoc] -> [ExprM One] -> MorlocMonad Code
+makePool manifolds imports es = return . Code . render $ [idoc|// Rust template
 use rustmorlocinternals::serial;
-use rustbase;
+#{vsep imports}
 use std::env;
 use std::process::{Command, Stdio};
 
@@ -139,12 +153,7 @@ fn foreign_call(cmd: &str, args: &[&str]) -> String {
     String::from_utf8(cmd.output().unwrap().stdout).unwrap()
 }
 
-pub fn m0(x0: &str) -> String {
-    let a0: i64 = serial::deserialize(x0).into();
-    let a1 = rustbase::morloc_id(&a0);
-    let a2 = serial::serialize(&a1);
-    a2
-}
+#{vsep manifolds}
 
 fn main() {
     let mut args = env::args();
@@ -154,7 +163,15 @@ fn main() {
     #{makeDispatch "cmd_id" "result" es}
     println!("{}", result);
 }
-|]
+|] where
+
+-- pub fn m0(x0: &str) -> String {
+--     let a0: i64 = serial::deserialize(x0).into();
+--     let a1 = rustbase::morloc_id(&a0);
+--     let a2 = serial::serialize(&a1);
+--     a2
+-- }
+
 
 
 {-
