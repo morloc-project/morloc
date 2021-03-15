@@ -107,8 +107,23 @@ makeTheMaker _ = return
   , SysRun (Code "cp pool-rust/target/debug/pool-rs pool-rust.out")
   ]
 
+manNamer :: Int -> MDoc
+manNamer i = "m" <> viaShow i
+
+makeDispatch :: MDoc -> MDoc -> [ExprM One] -> MDoc
+makeDispatch varin varout ms
+  = block 4 ("match" <+> varin) (vsep (map makeCase ms ++ [defaultCase]))
+  where
+    makeCase :: ExprM One -> MDoc
+    makeCase (ManifoldM (metaId->i) args _) =
+        let args' = take (length args) $ repeat "&args.next().unwrap()"
+        in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args'},|]
+    makeCase _ = error "Every ExprM must start with a manifold object"
+
+    defaultCase = [idoc|_ => panic!("invalid function!")|]
+
 makePool :: [ExprM One] -> MorlocMonad Code
-makePool _ = return . Code . render $ [idoc|// Rust template
+makePool es = return . Code . render $ [idoc|// Rust template
 use rustmorlocinternals::serial;
 use rustbase;
 use std::env;
@@ -136,10 +151,7 @@ fn main() {
     args.next();
     let cmd_id: u64 = args.next().unwrap().parse().unwrap();
     let result;
-    match cmd_id {
-        0 => result = m0(&args.next().unwrap()),
-        _ => panic!("invalid function!")
-    }
+    #{makeDispatch "cmd_id" "result" es}
     println!("{}", result);
 }
 |]
