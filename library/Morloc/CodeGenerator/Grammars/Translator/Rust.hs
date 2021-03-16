@@ -75,7 +75,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
-        def = "fn" <+> mname <> tupled (map makeArgument args)
+        def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM (typeOfExprM e)
         body = vsep $ rs' ++ [e']
         mdoc = block 4 def body
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
@@ -156,7 +156,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f args (ReturnM e) = do
     (ms, e', rs) <- f args e
-    return (ms, e' <> ";", rs) -- returned things are wrapped in nothin'
+    return (ms, "return" <+> e' <> ";", rs) -- returned things are wrapped in nothin'
 translateManifold _ = error "Every ExprM object must start with a Manifold term"
 
 makeArgument :: Argument -> MDoc
@@ -170,6 +170,14 @@ showTypeP (VarP (PV _ _ v)) = pretty v
 showTypeP (FunP t1 t2) = [idoc|FUNCTION(#{showTypeP t1} -> (#{showTypeP t2}))|]
 showTypeP (ArrP (PV _ _ v) ts) = pretty v <> encloseSep "<" ">" "," (map showTypeP ts)
 showTypeP (NamP _ (PV _ _ v) _ _) = pretty v
+
+showTypeM :: TypeM -> MDoc
+showTypeM Passthrough = serialType
+showTypeM (Serial _) = serialType
+showTypeM (Native t) = showTypeP t
+showTypeM (Function ts t)
+  = "std::function<" <> showTypeM t
+  <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
 
 serialType :: MDoc
 serialType = "&str"
@@ -294,45 +302,3 @@ fn main() {
     println!("{}", result);
 }
 |] where
-
--- pub fn m0(x0: &str) -> String {
---     let a0: i64 = serial::deserialize(x0).into();
---     let a1 = rustbase::morloc_id(&a0);
---     let a2 = serial::serialize(&a1);
---     a2
--- }
-
-
-
-{-
-// py2c x y = add (mul x y) 100
-fn m0(x0: &str, x1: &str) -> String {
-    let a0: f64 = serial::deserialize(x0).into();
-    let a1: f64 = serial::deserialize(x1).into();
-    let a2 = morloc_add(a0, a1);
-    let a3 = serial::serialize(a2);
-    a3
-}
-
-// c2py x y = mul (add x y) 100
-fn m1(x0: &str, x1: &str) -> String {
-    let a0 = foreign_call("./pool-cpp.out", &["13", x0, x1]);
-    let a1: f64 = serial::deserialize(x0).into();
-    let a2 = morloc_add(a1, 100.0);
-    let a3 = serial::serialize(a2);
-    a3
-}
-
-fn main() {
-    let args = env::args();
-    args.next();
-    let cmd_id: u64 = args.next().unwrap().parse().unwrap();
-    let result;
-    match cmd_id {
-        0 => result = m0(&args.next().unwrap(), &args.next().unwrap()),
-        1 => result = m1(&args.next().unwrap(), &args.next().unwrap()),
-        _ => panic!("invalid function!")
-    }
-    println!("{}", result);
-}
--}
