@@ -29,21 +29,13 @@ preprocess = invertExprM
 
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
-
   deps <- getDependencies srcs
-
   let imports = map (makeImport . pretty . fst) deps
-
   funcmap <- mapM getFunction srcs
-
   cargo <- makeCargo deps
-
   manifolds <- mapM (translateManifold funcmap) es
-
   code <- makePool manifolds imports es
-
   maker <- makeTheMaker srcs 
-
   return $ Script
     { scriptBase = "pool"
     , scriptLang = RustLang 
@@ -57,6 +49,8 @@ translate srcs es = do
         [ File "main.rs" code
         ]
       ]
+
+data Three = In | Out | NoOneCares
 
 makeImport :: MDoc -> MDoc
 makeImport n = "use" <+> n <> ";"
@@ -77,7 +71,7 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
   f pargs m@(ManifoldM (metaId->i) args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
-        def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM (typeOfExprM e)
+        def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM Out (typeOfExprM e)
         body = vsep $ rs' ++ [e']
         mdoc = block 4 def body
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
@@ -165,9 +159,9 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
 translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
 
 makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument i _) = bndNamer i <> ":" <+> serialType
+makeArgument (SerialArgument i _) = bndNamer i <> ":" <+> inSerialType
 makeArgument (NativeArgument i t) = bndNamer i <> ":" <+> showTypeP t
-makeArgument (PassThroughArgument i) = bndNamer i <> ":" <+> serialType
+makeArgument (PassThroughArgument i) = bndNamer i <> ":" <+> inSerialType
 
 showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
@@ -176,16 +170,21 @@ showTypeP (FunP t1 t2) = [idoc|FUNCTION(#{showTypeP t1} -> (#{showTypeP t2}))|]
 showTypeP (ArrP (PV _ _ v) ts) = pretty v <> encloseSep "<" ">" "," (map showTypeP ts)
 showTypeP (NamP _ (PV _ _ v) _ _) = pretty v
 
-showTypeM :: TypeM -> MDoc
-showTypeM Passthrough = serialType
-showTypeM (Serial _) = serialType
-showTypeM (Native t) = showTypeP t
-showTypeM (Function ts t)
-  = "std::function<" <> showTypeM t
-  <> "(" <> cat (punctuate "," (map showTypeM ts)) <> ")>"
+showTypeM :: Three -> TypeM -> MDoc
+showTypeM _ Passthrough = inSerialType
+showTypeM In (Serial _) = inSerialType
+showTypeM Out (Serial _) = outSerialType
+showTypeM NoOneCares (Serial _) = error "But we do care!"
+showTypeM _ (Native t) = showTypeP t
+showTypeM _ (Function ts t)
+  = "std::function<" <> showTypeM NoOneCares t
+  <> "(" <> cat (punctuate "," (map (showTypeM NoOneCares) ts)) <> ")>"
 
-serialType :: MDoc
-serialType = "&str"
+inSerialType :: MDoc
+inSerialType = "&str"
+
+outSerialType :: MDoc
+outSerialType = "String"
 
 makeLambda :: [Argument] -> MDoc -> MDoc
 makeLambda _ _ = "LAMBDA"
