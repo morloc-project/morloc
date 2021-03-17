@@ -20,6 +20,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Quasi
 import Morloc.Data.Doc
+import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
@@ -172,8 +173,9 @@ showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
 showTypeP (VarP (PV _ _ v)) = pretty v
 showTypeP (FunP t1 t2) = [idoc|FUNCTION(#{showTypeP t1} -> (#{showTypeP t2}))|]
-showTypeP (ArrP (PV _ _ v) ts) = pretty v <> encloseSep "<" ">" "," (map showTypeP ts)
+showTypeP (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showTypeP) ts)
 showTypeP (NamP _ (PV _ _ v) _ _) = pretty v
+
 
 showTypeM :: Three -> TypeM -> MDoc
 showTypeM _ Passthrough = inSerialType
