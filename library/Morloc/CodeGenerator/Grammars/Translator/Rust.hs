@@ -34,9 +34,11 @@ translate srcs es = do
 
   let imports = map (makeImport . pretty . fst) deps
 
+  funcmap <- mapM getFunction srcs
+
   cargo <- makeCargo deps
 
-  manifolds <- mapM translateManifold es
+  manifolds <- mapM (translateManifold funcmap) es
 
   code <- makePool manifolds imports es
 
@@ -59,8 +61,8 @@ translate srcs es = do
 makeImport :: MDoc -> MDoc
 makeImport n = "use" <+> n <> ";"
 
-translateManifold :: ExprM One -> MorlocMonad MDoc
-translateManifold m0@(ManifoldM _ args0 _) = do
+translateManifold :: [(Name, MDoc)] -> ExprM One -> MorlocMonad MDoc
+translateManifold funmap m0@(ManifoldM _ args0 _) = do
   MM.startCounter
   (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
   where
@@ -107,7 +109,10 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f args (AppM (SrcM _ src) xs) = do
     (mss', xs', rss') <- mapM (f args) xs |>> unzip3
-    return (concat mss', pretty (srcName src) <> tupled xs', concat rss')
+    fullname <- case lookup (srcName src) funmap of
+      Nothing -> MM.throwError (OtherError "Fuck shit and die")
+      (Just n) -> return n
+    return (concat mss', fullname <> tupled xs', concat rss')
 
   f _ (AppM _ _) = error "Can only apply functions"
 
@@ -157,7 +162,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f args (ReturnM e) = do
     (ms, e', rs) <- f args e
     return (ms, "return" <+> e' <> ";", rs) -- returned things are wrapped in nothin'
-translateManifold _ = error "Every ExprM object must start with a Manifold term"
+translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
 
 makeArgument :: Argument -> MDoc
 makeArgument (SerialArgument i _) = bndNamer i <> ":" <+> serialType
@@ -223,6 +228,14 @@ rustmorlocinternals = { path = "#{pretty guts}" }
 makeDependency :: (String, Path) -> MDoc
 makeDependency (pkgName, path) = do
   [idoc|#{pretty pkgName} = { path = "#{pretty path}" }|]
+
+getFunction :: Source -> MorlocMonad (Name, MDoc)
+getFunction (Source func RustLang Nothing _) = return (func, pretty func)
+getFunction (Source func RustLang (Just path) _) = do
+  fullpath <- liftIO (MS.canonicalizePath path)
+  namespace <- findPkgName fullpath 
+  return (func, pretty namespace <> "::" <> pretty func)
+getFunction (Source _ _ _ _) = error "Expected Rust function"
 
 getDependencies :: [Source] -> MorlocMonad [(String, Path)]
 getDependencies srcs = do
