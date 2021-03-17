@@ -4,4 +4,4 @@ all:
 	./nexus.pl foo > obs.txt
 
 clean:
-	rm -rf nexus* *out pool*
+	rm -rf nexus* *out *out

@@ -4,4 +4,4 @@ all:
 	./nexus.pl foo '{"name":["alice","bob"],"info":[34,35]}' > obs.txt
 
 clean:
-	rm -rf nexus* pool*
+	rm -rf nexus* *out

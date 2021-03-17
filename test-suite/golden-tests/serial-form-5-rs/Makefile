@@ -4,4 +4,4 @@ all:
 	./nexus.pl foo '[[["a","b"],[1,5]],[["c","d"],[2,6]]]' > obs.txt
 
 clean:
-	rm -rf nexus* pool*
+	rm -rf nexus* *out
