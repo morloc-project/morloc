@@ -75,13 +75,13 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
         body = vsep $ rs' ++ [e']
         mdoc = block 4 def body
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+      ((rs, []), _) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
       (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do
-    let call = "foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
+    let call = "foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return ([], call, [])
 
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
@@ -162,6 +162,11 @@ makeArgument :: Argument -> MDoc
 makeArgument (SerialArgument i _) = bndNamer i <> ":" <+> inSerialType
 makeArgument (NativeArgument i t) = bndNamer i <> ":" <+> showTypeP t
 makeArgument (PassThroughArgument i) = bndNamer i <> ":" <+> inSerialType
+
+argName :: Argument -> MDoc
+argName (SerialArgument i _) = bndNamer i
+argName (NativeArgument i _) = bndNamer i
+argName (PassThroughArgument i) = bndNamer i
 
 showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
