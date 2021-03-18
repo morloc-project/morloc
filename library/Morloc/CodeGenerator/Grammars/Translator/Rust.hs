@@ -321,3 +321,27 @@ fn main() {
     println!("{}", result);
 }
 |] where
+
+-- struct Person {
+--     name: String,
+--     info: i64
+-- }
+--
+-- impl serial::Serialize for Person {
+--     fn serialize(&self) -> String {
+--         format!("{{\"name\": {}, \"info\": {}}}", self.name.serialize(), self.info.serialize())
+--     }
+-- }
+--
+-- impl From<serial::DeSerialResult> for Person {
+--     fn from(s: serial::DeSerialResult) -> Person {
+--         match s {
+--             serial::DeSerialResult::Struct(mut map) => Person {
+--                 name: map.remove("name").unwrap().into(),
+--                 info: map.remove("info").unwrap().into()
+--             },
+--
+--             _ => panic!("cannot convert {:?} into Person", s)
+--         }
+--     }
+-- }
