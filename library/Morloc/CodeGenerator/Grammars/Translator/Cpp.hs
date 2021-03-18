@@ -785,6 +785,7 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 #include <vector>
 #include <string>
 #include <algorithm> // for std::transform
+using namespace std;
 
 #{Src.foreignCallFunction}
 
