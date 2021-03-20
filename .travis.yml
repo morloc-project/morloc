@@ -53,6 +53,8 @@ script:
   - "echo library : $HOME/.morloc/lib >> ~/.morloc/config"
   - "echo tmpdir : $HOME/.morloc/tmp >> ~/.morloc/config"
   - "echo lang_python3 : python3 >> ~/.morloc/config"
+  - morloc install base
+  - morloc install conventions
   - morloc install rbase
   - morloc install pybase
   - morloc install cppbase
