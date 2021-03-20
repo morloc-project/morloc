@@ -25,10 +25,13 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add `uninstall` function to uninstall a module
  - [ ] Remove extra space printed at the end of R JSON
 
-0.35.0 [2021.xx.xx]
+0.35.0 [2021.04.xx]
 -------------------
 
  - [ ] Rust support
+ - [ ] Move exports to the module definition (as in Haskell)
+ - [ ] Add `*` wildcard to exports and imports
+ - [ ] Add `import Foo hiding (...)` syntax
 
 0.34.0 [2020.03.05]
 -------------------
