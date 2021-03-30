@@ -1,3 +1,7 @@
+# Ecosystem
+
+ [ ] add Language Server Protocol implementation (https://microsoft.github.io/language-server-protocol/)
+
 # Features
 
  [x] composable serialization/deserialization functions
@@ -19,6 +23,7 @@
    [+] R
    [+] Python3
    [+] C++
+   [.] Rust
    [.] C
    [ ] bash
    [ ] Haskell
@@ -45,13 +50,13 @@
 
  * In the compiler ...
 
-   [ ] Add meaningful error messages to parser
-   [ ] Replace the naked `error` calls everywhere
+   [x] Add meaningful error messages to parser
+   [.] Replace the naked `error` calls everywhere
 
  * In the generated code ...
 
    [ ] On exceptions in generated code, return Morloc file and line number
-   [ ] Raise errors in pools when no manifold is found
+   [x] Raise errors in pools when no manifold is found
 
 # Testing
 
@@ -64,7 +69,7 @@
 
 # Syntax
 
- [ ] Remove semicolon requirement
+ [x] Remove semicolon requirement
 
 # UI and configuration 
 
@@ -72,7 +77,7 @@
    [ ] print the short doc string
 
  * in the function-specific detailed printout:
-   [ ] print the type signature of each exported function
+   [x] print the type signature of each exported function
    [ ] print the long doc string
 
  * configuration
@@ -91,11 +96,11 @@
  [ ] Add haddock for every function
  [ ] Write basic manual
 
- * Extend README with
-   [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
-   [ ] A deeper discussion of the type system
+ * github pages manual
+   [.] A discussion of the architecture (JSON, MorlocIO, etc)
+   [.] A deeper discussion of the type system
    [ ] More examples
-   [ ] A contribution and future work section
+   [.] A contribution and future work section
 
 # Libraries
 
@@ -105,7 +110,7 @@
        many language-specific alternatives. In C-morloc, the user specified the
        language of each function. I want to automate the choice.
    [ ] Add taxonomy library
-   [ ] Add `math` library
+   [.] Add `math` library
        [x] basic functions from `math.h`
        [ ] advanced functions from GNU Scientific Library
    [ ] Add `learning` library for machine learning
