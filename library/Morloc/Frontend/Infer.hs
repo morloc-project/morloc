@@ -73,7 +73,7 @@ typecheck d = do
             . map (\src@(Source _ lang _ alias) -> (TV (Just lang) (unEVar alias), src))
             . catMaybes
             . map ((flip Map.lookup) (preparedNodeSourceMap n))
-            $ [ (EVar v, lang)
+            $ [ (EV [] v, lang)
               | (TV (Just lang) v) <- unique (conmap collectConstructors es)]
 
         , typedNodeTypedefs = Map.map (\(t,ps) -> (resolve t, ps)) (preparedNodeTypedefs n)
@@ -634,8 +634,8 @@ infer' lang g (AccE e k) = do
   ts <- mapM (accessRecord k) record_ts |>> catMaybes
   return (g', ts, AnnE (AccE e' k) ts)
   where
-    accessRecord :: EVar -> UnresolvedType -> Stack (Maybe UnresolvedType)
-    accessRecord (EVar key) (NamU _ _ _ rs) = return $ lookup key rs
+    accessRecord :: MT.Text -> UnresolvedType -> Stack (Maybe UnresolvedType)
+    accessRecord key (NamU _ _ _ rs) = return $ lookup key rs
     accessRecord _ _ = throwError  BadRecordAccess
 
 --  g1,Ea,Eb,x:Ea |- e <= Eb -| g2,x:Ea,g3
@@ -762,7 +762,7 @@ infer' lang g1 (RecE rs) = do
   let (ts2may, xs2) = unzip pairs
       keys = map fst rs
   entries <- case sequence ts2may of
-    (Just ts2) -> return $ zip (map unEVar keys) ts2
+    (Just ts2) -> return $ zip keys ts2
     Nothing -> throwError . OtherError $ "Could not infer record type"
   let dts = MLD.defaultRecord lang entries
   containerType <-

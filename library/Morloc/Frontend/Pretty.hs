@@ -100,9 +100,9 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
   pretty f <+>
   tupled
     (map
-       (\(n, a) ->
+       (\(n, EV _ a) ->
           pretty n <>
-          if unName n == unEVar a
+          if unName n == a
             then ""
             else (" as" <> pretty a))
        rs)
@@ -113,9 +113,9 @@ prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
   viaShow lang <+>
   tupled
     (map
-       (\(n, a) ->
+       (\(n, EV _ a) ->
           pretty n <>
-          if unName n == unEVar a
+          if unName n == a
             then ""
             else (" as" <> pretty a))
        rs)

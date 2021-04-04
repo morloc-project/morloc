@@ -29,7 +29,7 @@ instance Pretty MVar where
   pretty = pretty . unMVar
 
 instance Pretty EVar where
-  pretty = pretty . unEVar
+  pretty (EV _ v) = pretty v
 
 instance Pretty Code where
   pretty = pretty . unCode

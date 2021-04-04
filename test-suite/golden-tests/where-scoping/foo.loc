@@ -10,8 +10,6 @@ export f7
 export f8
 export f9
 export f10
-export f11
-export f12
 
 k = 42
 m = 20
@@ -85,18 +83,20 @@ f10 = bar (bif 2) where
     bar :: Num -> Num
     bar x = add x 30
 
--- imports are allowed in where-scopes
-f11 :: Num
-f11 = x where
-    import pybase (sub)
-    x = sub 44 2
-
--- source statements are allowed in where-scopes
-f12 :: Num
-f12 = theAnswer where
-    source py from "theAnswer.py" (theAnswer)
-    theAnswer :: Num
-    theAnswer py :: "int"
+-- -- imports are allowed in where-scopes
+-- -- FIXME: imports and sources should be legal in where statements
+-- -- eventually, but I don't want to worry about it yet
+-- f11 :: Num
+-- f11 = x where
+--     import pybase (sub)
+--     x = sub 44 2
+--
+-- -- source statements are allowed in where-scopes
+-- f12 :: Num
+-- f12 = theAnswer where
+--     source py from "theAnswer.py" (theAnswer)
+--     theAnswer :: Num
+--     theAnswer py :: "int"
 
 -- should break! Cannot use a 
 -- m = 20

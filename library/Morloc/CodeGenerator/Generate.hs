@@ -442,14 +442,14 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
       ncmd <- generalSerial' ps x
       case commandSubs ncmd of
         [(ps1, arg, ps2)] ->
-          return $ ncmd { commandSubs = [(ps1, arg, JsonKey (unEVar k) : ps2)] }
+          return $ ncmd { commandSubs = [(ps1, arg, JsonKey k : ps2)] }
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
     -- will be set in the nexus
     generalSerial' ps (SAnno (One (AccS (SAnno (One (VarS v, _)) g) k, _)) _) =
       case g of
         (metaGType->(Just (GType (NamT {})))) ->
-          return $ base { commandSubs = [(ps, unEVar v, [JsonKey (unEVar k)])] }
+          return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
         _ -> error "Attempted to use key access to non-record"
     generalSerial' ps (SAnno (One (ListS xs, _)) _) = do
       ncmds <- zipWithM generalSerial'
@@ -467,7 +467,7 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
         }
     generalSerial' ps (SAnno (One (RecS es, _)) _) = do
       ncmds <- zipWithM generalSerial'
-                        [ps ++ [JsonKey (unEVar k)] | k <- map fst es]
+                        [ps ++ [JsonKey k] | k <- map fst es]
                         (map snd es)
       let entries = zip (map fst es) (map commandJson ncmds)
           obj = encloseSep "{" "}" ","
@@ -479,7 +479,7 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
     generalSerial' ps (SAnno (One (LamS vs x, _)) _) = do
       ncmd <- generalSerial' ps x
       return $ ncmd { commandArgs = vs }
-    generalSerial' ps (SAnno (One (VarS (EVar v), _)) _) =
+    generalSerial' ps (SAnno (One (VarS (EV _ v), _)) _) =
       return $ base { commandSubs = [(ps, v, [])] }
     generalSerial' _ (SAnno (One _) m) = do
       MM.throwError . OtherError . render $
@@ -493,7 +493,8 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
   lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
-  let vs = map EVar . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
+  -- FIXME: use the correct scope
+  let vs = map (EV []) . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
       ys = zipWith3 makeVar vs (decomposeFull ftype) gTypeArgs
       -- unsafe, but should not fail for well-typed input
       appType = last . decomposeFull $ ftype
@@ -549,7 +550,7 @@ parameterize (SAnno (One (LamS vs x, t)) m) = do
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize (SAnno (One (CallS src, t)) m) = do
   let ts = init . decomposeFull $ t
-      vs = map EVar (freshVarsAZ [])
+      vs = map (EV []) (freshVarsAZ [])
       args0 = zipWith makeArgument [0..] ts
   return $ SAnno (One (CallS src, (t, zip vs args0))) m
 parameterize x = parameterize' [] x

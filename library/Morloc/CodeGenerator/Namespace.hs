@@ -189,7 +189,7 @@ data ExprM f
   -- If the string "for" were retained as the variable name, this would fail in
   -- many language where "for" is a keyword.
 
-  | AccM (ExprM f) EVar 
+  | AccM (ExprM f) Text
   -- ^ Access a field in record ExprM
 
   | LetVarM TypeM Int
@@ -200,7 +200,7 @@ data ExprM f
   -- containers
   | ListM TypeM [(ExprM f)]
   | TupleM TypeM [(ExprM f)]
-  | RecordM TypeM [(EVar, (ExprM f))]
+  | RecordM TypeM [(Text, (ExprM f))]
 
   -- primitives
   | LogM TypeM Bool

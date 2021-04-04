@@ -173,8 +173,8 @@ lookupTypedefs
 lookupTypedefs (TV lang v) k h
   = catMaybes
   . MDD.nodes
-  . MDD.mapNode (\(EVar v', typemap) -> Map.lookup (TV lang v') typemap)
-  $ MDD.lookupAliasedTerm (EVar v) k parserNodeTypedefs h
+  . MDD.mapNode (\(EV _ v', typemap) -> Map.lookup (TV lang v') typemap)
+  $ MDD.lookupAliasedTerm (EV [] v) k parserNodeTypedefs h
 
 
 -- When a type alias is imported from two places, this function reconciles them, if possible
@@ -270,8 +270,9 @@ packerTerm v n = listToMaybe . catMaybes $
   where
     termOf :: EType -> Maybe EVar
     termOf e = case splitArgs (etype e) of
-      (_, [VarU (TV _ term), _]) -> Just $ EVar term
-      (_, [ArrU (TV _ term) _, _]) -> Just $ EVar term
+      -- packers are all global (right?)
+      (_, [VarU (TV _ term), _]) -> Just $ EV [] term
+      (_, [ArrU (TV _ term) _, _]) -> Just $ EV [] term
       _ -> Nothing
 
 choiceExistential :: UnresolvedType -> UnresolvedType
@@ -323,7 +324,7 @@ inheritPackers
   -> Map.Map (TVar, Int) [UnresolvedPacker]
 inheritPackers es n =
   -- names of terms exported from this module
-  let names = Set.fromList (map (unEVar . fst) es)
+  let names = Set.fromList [ v | (EV _ v, _) <- es]
   in   Map.map (map toAlias)
      $ Map.filter (isImported names) (preparedNodePackers n)
   where
@@ -333,5 +334,5 @@ inheritPackers es n =
     isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
     isImported _ [] = False
     isImported names' (n0:_) = case unresolvedPackerTerm n0 of
-      (Just (EVar v)) -> Set.member v names'
+      (Just (EV _ v)) -> Set.member v names'
       _ -> False

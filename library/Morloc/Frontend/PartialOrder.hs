@@ -25,7 +25,7 @@ import qualified Data.PartialOrd as P
 
 -- | substitute all appearances of a given variable with a given new type
 substitute :: TVar -> UnresolvedType -> UnresolvedType -> UnresolvedType
-substitute v (ForallU q r) t = 
+substitute v@(TV _ _) (ForallU q r) t = 
   if Set.member (VarU q) (free t)
   then
     let q' = getNewVariable r t -- get unused variable name from [a, ..., z, aa, ...]
@@ -88,7 +88,7 @@ instance P.PartialOrd UnresolvedType where
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
   (<=) _ _ = False
 
-  (==) (ForallU v1 t1) (ForallU v2 t2) =
+  (==) (ForallU v1@(TV _ _) t1) (ForallU v2 t2) =
     if Set.member (VarU v1) (free t2)
     then
       let v = getNewVariable t1 t2
@@ -103,7 +103,7 @@ substituteFirst v t1 t2 = case findFirst v t1 t2 of
   (Just t) -> substitute v t t1
   Nothing -> t1
 
--- | get a fresh variable name that is not used in t1 or t2
+-- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
 getNewVariable :: UnresolvedType -> UnresolvedType -> TVar
 getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
   where 

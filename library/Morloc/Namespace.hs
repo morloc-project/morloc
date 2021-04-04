@@ -27,12 +27,13 @@ module Morloc.Namespace
   , EVar(..)
   , MVar(..)
   , TVar(..)
-  , unTVar
   , Name(..)
   , Path
   , Code(..)
   , DirTree(..)
   , AnchoredDirTree(..)
+  , unEVar
+  , unTVar
   -- ** Language
   , Lang(..)
   -- ** Data
@@ -68,6 +69,7 @@ module Morloc.Namespace
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
+  , Scoped(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -286,14 +288,24 @@ data Config =
 
 -- ================ T Y P E C H E C K I N G  =================================
 
-newtype EVar = EVar { unEVar :: Text } deriving (Show, Eq, Ord)
 newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
-data TVar = TV (Maybe Lang) Text deriving (Show, Eq, Ord)
+-- | An expression variable. [Text] is scope of the variable relative to the
+-- module. The definition of the term must be along this path. The path is a
+-- stack, so if the term is in the global namespace, then the list is empty.
+-- Every step into a `where` statement puts a new name on the stack. So the
+-- namespace path is reverse order of normal filesystem paths, with the root
+-- global namespace as the last element.
+data EVar = EV [Text] Text deriving (Show, Eq, Ord)
 
--- | Let the TVar type behave like the EVar and MVar newtypes
+data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
+
+-- | Let the TVar type behave like the MVar newtype
 unTVar :: TVar -> Text
 unTVar (TV _ t) = t
+
+unEVar :: EVar -> Text
+unEVar (EV _ e) = e
 
 data Source =
   Source
@@ -323,7 +335,7 @@ instance Functor One where
 data SExpr g f c
   = UniS
   | VarS EVar
-  | AccS (SAnno g f c) EVar
+  | AccS (SAnno g f c) Text
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
   | LamS [EVar] (SAnno g f c)
@@ -331,7 +343,7 @@ data SExpr g f c
   | NumS Scientific
   | LogS Bool
   | StrS Text
-  | RecS [(EVar, SAnno g f c)]
+  | RecS [(Text, SAnno g f c)]
   | CallS Source
 
 -- | Description of the general manifold
@@ -428,6 +440,12 @@ data Property
 newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
+
+class Scoped a where
+  scopeOf :: a -> [Text]
+
+instance Scoped EVar where
+  scopeOf (EV ns _) = ns
 
 class Typelike a where
   typeOf :: a -> Type

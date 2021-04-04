@@ -79,16 +79,16 @@ substituteT v0 r0 t0 = sub t0
 -- | Terms, see Dunfield Figure 1
 data Expr
   = SrcE [Source]
-  -- ^ import "c" from "foo.c" ("f" as yolo)
+  -- ^ import "c" from "foo.c" ("f" as yolo).
   | Signature EVar EType
-  -- ^ x :: A; e
+  -- ^ x :: A
   | Declaration EVar Expr
-  -- ^ x=e1; e2
+  -- ^ x=e1
   | UniE
   -- ^ (())
   | VarE EVar
   -- ^ (x)
-  | AccE Expr EVar
+  | AccE Expr Text
   -- ^ person@age - access a field in a record
   | ListE [Expr]
   -- ^ [e]
@@ -106,7 +106,7 @@ data Expr
   -- ^ boolean primitive
   | StrE Text
   -- ^ literal string
-  | RecE [(EVar, Expr)]
+  | RecE [(Text, Expr)]
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -118,6 +118,26 @@ data EType =
     , econs :: Set Constraint
     }
   deriving (Show, Eq, Ord)
+
+instance Scoped Expr where
+  scopeOf (SrcE _) = []
+  scopeOf (Signature v _) = scopeOf v
+  scopeOf (Declaration v _) = scopeOf v
+  scopeOf (UniE) = []
+  scopeOf (VarE v) = scopeOf v 
+  scopeOf (AccE e _) = scopeOf e
+  scopeOf (ListE []) = []
+  scopeOf (ListE (x:_)) = scopeOf x
+  scopeOf (TupleE []) = []
+  scopeOf (TupleE (x:_)) = scopeOf x
+  scopeOf (LamE v _) = scopeOf v
+  scopeOf (AppE e _) = scopeOf e
+  scopeOf (AnnE e _) = scopeOf e
+  scopeOf (NumE _) = []
+  scopeOf (LogE _) = []
+  scopeOf (StrE _) = []
+  scopeOf (RecE []) = []
+  scopeOf (RecE ((_, e):_)) = scopeOf e
 
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 

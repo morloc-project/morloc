@@ -10,8 +10,6 @@ all:
 	./nexus.pl f8 >> obs.txt
 	./nexus.pl f9 >> obs.txt
 	./nexus.pl f10 >> obs.txt
-	./nexus.pl f11 >> obs.txt
-	./nexus.pl f12 >> obs.txt
 
 clean:
 	rm -f nexus* pool*

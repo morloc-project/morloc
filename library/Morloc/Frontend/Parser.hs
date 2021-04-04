@@ -36,6 +36,7 @@ data ParserState = ParserState {
                             -- you should reset the field before parsing a new type 
   , stateMinPos :: Pos
   , stateAccepting :: Bool
+  , stateNamespace :: [MT.Text]
 } deriving(Show)
 
 emptyState :: ParserState
@@ -46,20 +47,41 @@ emptyState = ParserState {
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
+  , stateNamespace = []
 }
+
+evar :: MT.Text -> Parser EVar
+evar v = do
+  namespace <- CMS.gets stateNamespace
+  return $ EV namespace v
+
+tvar :: MT.Text -> Parser TVar
+tvar v = do
+  lang <- CMS.gets stateLang
+  return $ TV lang v
 
 newvar :: Maybe Lang -> Parser TVar
 newvar lang = do
   s <- CMS.get
   let i = stateIndex s 
+      n = "p" <> MT.show' i
   CMS.put (s {stateIndex = i + 1}) 
-  return (TV lang ("p" <> MT.show' i))
+  tvar n
 
 setLang :: Maybe Lang -> Parser ()
 setLang lang = do
   s <- CMS.get
   CMS.put (s { stateLang = lang })
 
+incNamespace :: MT.Text -> Parser ()
+incNamespace v = do
+  s <- CMS.get
+  CMS.put (s {stateNamespace = v : stateNamespace s})
+
+decNamespace :: Parser ()
+decNamespace = do
+  s <- CMS.get
+  CMS.put (s {stateNamespace = tail (stateNamespace s)})
 
 setMinPos :: Parser ()
 setMinPos = do
@@ -231,7 +253,7 @@ freename = (lexeme . try) (p >>= check)
 
 data Toplevel
   = TModule (MVar, [(MVar, Import)], ParserNode)
-  | TModuleBody ModuleBody
+  | TModuleBody [ModuleBody]
 
 data ModuleBody
   = MBImport Import
@@ -247,7 +269,7 @@ pProgram = do
   setMinPos
   es <- align pToplevel
   let mods = [m | (TModule m) <- es]
-  case [e | (TModuleBody e) <- es] of
+  case concat [e | (TModuleBody e) <- es] of
     [] -> return mods
     es' -> return $ makeModule f (MVar "Main") es' : mods
 
@@ -259,8 +281,8 @@ pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
   moduleName' <- freename
-  mes <- align pModuleBody
-  return $ makeModule f (MVar moduleName') mes
+  mess <- align pModuleBody
+  return $ makeModule f (MVar moduleName') (concat mess)
 
 makeModule :: Maybe Path -> MVar -> [ModuleBody] -> (MVar, [(MVar, Import)], ParserNode)
 makeModule f n mes = (n, edges, node) where
@@ -279,16 +301,16 @@ makeModule f n mes = (n, edges, node) where
     , parserNodeTypedefs = typedefmap
     }
 
-pModuleBody :: Parser ModuleBody
+pModuleBody :: Parser [ModuleBody]
 pModuleBody =
-        try pTypedef
-    <|> try pImport
-    <|> try pExport
+        try (fmap return pTypedef)
+    <|> try (fmap return pImport)
+    <|> try (fmap return pExport)
     <|> try pStatement'
     <|> pExpr'
   where
-    pStatement' = fmap MBBody pStatement
-    pExpr' = fmap MBBody pExpr
+    pStatement' = fmap (map MBBody) pStatement
+    pExpr' = fmap (return . MBBody) pExpr
 
 pTypedef :: Parser ModuleBody
 pTypedef = pTypedefType <|> pTypedefObject
@@ -350,14 +372,15 @@ pNamRecord = do
 pTypedefTermUnpar :: Parser (TVar, [TVar])
 pTypedefTermUnpar = do
   v <- freename
-  lang <- CMS.gets stateLang
-  return (TV lang v, [])
+  t <- tvar v
+  return (t, [])
 
 pTypedefTermPar :: Parser (TVar, [TVar])
 pTypedefTermPar = do
   vs <- parens (many1 freename)
-  lang <- CMS.gets stateLang
-  return (TV lang (head vs), map (TV lang) (tail vs))
+  t <- tvar (head vs)
+  ts <- mapM tvar (tail vs)
+  return (t, ts)
 
 pImport :: Parser ModuleBody
 pImport = do
@@ -365,7 +388,7 @@ pImport = do
   n <- freename
   imports <-
     optional $
-    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(EVar x, EVar x)]) freename
+    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
   return . MBImport $
     Import
       { importModuleName = MVar n
@@ -376,40 +399,62 @@ pImport = do
 
 pImportTerm :: Parser (EVar, EVar)
 pImportTerm = do
-  n <- freename
-  a <- option n (reserved "as" >> freename)
-  return (EVar n, EVar a)
+  n <- pEVar
+  a <- option n (reserved "as" >> pEVar)
+  return (n, a)
 
 pExport :: Parser ModuleBody
-pExport = fmap (MBExport . EVar) $ reserved "export" >> freename
+pExport = do
+  reserved "export"
+  v <- pEVar
+  return $ MBExport v
 
-pStatement :: Parser Expr
-pStatement = try pDeclaration <|> pSignature
+pStatement :: Parser [Expr]
+pStatement = try pDeclaration <|> fmap return pSignature
 
-pDeclaration :: Parser Expr
+pDeclaration :: Parser [Expr]
 pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
 
-pDataDeclaration :: Parser Expr
+pDataDeclaration :: Parser [Expr]
 pDataDeclaration = do
   v <- freename
+  v' <- evar v
   symbol "="
+  -- enter data declaration scope
+  incNamespace v
   e <- pExpr
-  return (Declaration (EVar v) e)
+  subExpressions <- reserved "where" >> alignInset whereTerm |>> concat
+  decNamespace
+  -- exit scope
+  return $ Declaration v' e : subExpressions
 
-pFunctionDeclaration :: Parser Expr
+pFunctionDeclaration :: Parser [Expr]
 pFunctionDeclaration = do
   v <- freename
+  v' <- evar v
+  -- enter function scope
+  incNamespace v
   args <- many1 freename
+  args' <- mapM evar args
   _ <- op "="
   e <- pExpr
-  return $ Declaration (EVar v) (curryLamE (map EVar args) e)
+  subExpressions <- reserved "where" >> alignInset whereTerm |>> concat
+  decNamespace
+  -- exit scope
+  return $ Declaration v' (curryLamE args' e) : subExpressions
   where
     curryLamE [] e' = e'
     curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
 
+whereTerm :: Parser [Expr]
+whereTerm = (fmap return pSignature) <|> pDeclaration
+
 pSignature :: Parser Expr
 pSignature = do
   v <- freename
+  v' <- evar v
+  -- enter signature scope
+  incNamespace v
   lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
@@ -417,9 +462,11 @@ pSignature = do
   t <- pTypeGen
   constraints <- option [] pConstraints
   setLang Nothing
+  decNamespace
+  -- leave scope
   return $
     Signature
-      (EVar v)
+      v'
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -513,18 +560,19 @@ pSrcE = do
 pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
+  v <- evar n
   a <- option n (reserved "as" >> freename)
-  return (Name n, EVar a)
+  return (Name n, v)
 
 pNamE :: Parser Expr
 pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))
 
-pNamEntryE :: Parser (EVar, Expr)
+pNamEntryE :: Parser (MT.Text, Expr)
 pNamEntryE = do
   n <- freename
   _ <- symbol "="
   e <- pExpr
-  return (EVar n, e)
+  return (n, e)
 
 pListE :: Parser Expr
 pListE = ListE <$> brackets (sepBy pExpr (symbol ","))
@@ -546,7 +594,7 @@ pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freename
-  return $ AccE e (EVar f) 
+  return $ AccE e f
 
 pAnn :: Parser Expr
 pAnn = do
@@ -600,7 +648,7 @@ pVar :: Parser Expr
 pVar = fmap VarE pEVar
 
 pEVar :: Parser EVar
-pEVar = fmap EVar freename
+pEVar = freename >>= evar
 
 pTypeGen :: Parser UnresolvedType
 pTypeGen = do
@@ -667,11 +715,11 @@ pExistential = do
 
 pArrU :: Parser UnresolvedType
 pArrU = do
-  lang <- CMS.gets stateLang
   _ <- tag (freename <|> stringLiteral)
   n <- freename <|> stringLiteral
+  t <- tvar n
   args <- many1 pType'
-  return $ ArrU (TV lang n) args
+  return $ ArrU t args
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
@@ -696,16 +744,15 @@ pVarU = try pVarConU <|> pVarGenU
 
 pVarConU :: Parser UnresolvedType
 pVarConU = do
-  lang <- CMS.gets stateLang
   _ <- tag stringLiteral
   n <- stringLiteral
-  return $ VarU (TV lang n)
+  t <- tvar n
+  return $ VarU t
 
 pVarGenU :: Parser UnresolvedType
 pVarGenU = do
-  lang <- CMS.gets stateLang
   _ <- tag freename
   n <- freename
-  let v = TV lang n
-  appendGenerics v  -- add the term to the generic list IF generic
-  return $ VarU v
+  t <- tvar n
+  appendGenerics t  -- add the term to the generic list IF generic
+  return $ VarU t
