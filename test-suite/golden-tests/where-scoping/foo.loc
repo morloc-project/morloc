@@ -1,0 +1,105 @@
+import pybase (add)
+
+export f1
+export f2
+export f3
+export f4
+export f5
+export f6
+export f7
+export f8
+export f9
+export f10
+export f11
+export f12
+
+k = 42
+m = 20
+n = 22
+z = 99
+
+-- a function can use terms from the global scope
+f1 :: Num
+f1 = k
+
+-- a function's parameters may shadow terms from the global scope
+f2 :: Num -> Num
+f2 m = m
+
+-- a function may use terms from its where-scope
+f3 :: Num
+f3 = x where
+    x = 42
+
+-- terms in the function's where-scope may shadow global terms
+f4 :: Num
+f4 = z where
+    z = 42
+
+-- terms in the function's where-scope are unordered and share scope
+f5 :: Num
+f5 = x where
+    x = add a b
+    a = 1
+    b = 41
+
+-- where scopes may be nested
+f6 :: Num
+f6 = x where
+    x = y where
+        y = 42
+
+-- where-scopes inherit the scope of their parent
+f7 :: Num
+f7 = x where
+    x = y where
+        y = add a b
+        a = 1
+    b = 41
+
+-- where-scopes inherit the scope of all their ancestors
+f8 :: Num
+f8 = x where
+    x = y where
+        y = z where
+            z = sum [n, a, b]
+            a = 1
+        b = 2
+    c = 19
+
+-- cousins do not interfere with one another
+f9 :: Num
+f9 = x where
+    x = add a b
+    a = add 19 c where
+        c = 1
+    b = add 1 c where
+        c = 21 
+
+-- functions with or without signatures may be defined in the where-scope
+f10 :: Num
+f10 = bar (bif 2) where
+
+    bif x = add x 10
+
+    bar :: Num -> Num
+    bar x = add x 30
+
+-- imports are allowed in where-scopes
+f11 :: Num
+f11 = x where
+    import pybase (sub)
+    x = sub 44 2
+
+-- source statements are allowed in where-scopes
+f12 :: Num
+f12 = theAnswer where
+    source py from "theAnswer.py" (theAnswer)
+    theAnswer :: Num
+    theAnswer py :: "int"
+
+-- should break! Cannot use a 
+-- m = 20
+-- f10 :: Num
+-- f10 = m where
+--     m = add m 22

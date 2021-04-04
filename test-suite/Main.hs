@@ -206,4 +206,6 @@ main = do
       -- type identities
       , golden "type-identities-c" "type-identities-c"
       , golden "type-identities-rs" "type-identities-rs"
+      -- where-scope
+      , golden "where-scoping" "where-scoping"
       ]

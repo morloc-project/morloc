@@ -19,7 +19,6 @@ handling for several very different languages (proofs-of-concept).
 0.3x.0 [2021.xx.xx]
 -------------------
 
- - [ ] Add let syntax
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
  - [ ] Add `uninstall` function to uninstall a module
@@ -32,6 +31,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
+ - [ ] Add `where` scoping
 
 0.34.0 [2020.03.05]
 -------------------
