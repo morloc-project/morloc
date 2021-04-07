@@ -82,6 +82,7 @@ syn match operator /)/
 syn match operator /{/
 syn match operator /}/
 syn match operator /->/
+syn match operator /=>/
 syn match operator /;/
 syn match operator /@/
 
