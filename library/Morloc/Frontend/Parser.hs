@@ -458,7 +458,7 @@ pDataDeclaration :: Parser [Expr]
 pDataDeclaration = do
   v <- freename
   v' <- evar v
-  symbol "="
+  _ <- op "="
   -- enter data declaration scope
   incNamespace v
   e <- pExpr
@@ -486,7 +486,7 @@ pFunctionDeclaration = do
     curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
 
 whereTerm :: Parser [Expr]
-whereTerm = (fmap return pSignature) <|> pDeclaration
+whereTerm = try (fmap return pSignature) <|> pDeclaration
 
 pSignature :: Parser Expr
 pSignature = do

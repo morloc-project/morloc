@@ -72,7 +72,7 @@ f9 = x where
     a = add 19 c where
         c = 1
     b = add 1 c where
-        c = 21 
+        c = 21
 
 -- functions with or without signatures may be defined in the where-scope
 f10 :: Num
@@ -98,7 +98,7 @@ f10 = bar (bif 2) where
 --     theAnswer :: Num
 --     theAnswer py :: "int"
 
--- should break! Cannot use a 
+-- should break! Cannot use a
 -- m = 20
 -- f10 :: Num
 -- f10 = m where
