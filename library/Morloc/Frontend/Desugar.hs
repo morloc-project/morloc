@@ -34,8 +34,8 @@ desugar s
 
 
 -- | Consider export/import information to determine which terms are imported
--- into each module. This step reduces the Import edge type to an m-to-n source
--- name to alias map.
+-- into each module. This step reduces the Import edge type from an m-to-n
+-- source name to an alias map.
 resolveImports
   :: DAG MVar Import ParserNode
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)

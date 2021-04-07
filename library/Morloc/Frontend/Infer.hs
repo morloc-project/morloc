@@ -606,7 +606,7 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       }
 
 infer' lang g e@(VarE v) = do
-  say $ "----------------------------------"
+  say $ "---------------------------------- VarE"
   say $ pretty v
   case (lang, lookupE v g) of
     (Just _, Just (VarE v', t@(TypeSet _ []))) -> 

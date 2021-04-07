@@ -76,7 +76,7 @@ setLang lang = do
 incNamespace :: MT.Text -> Parser ()
 incNamespace v = do
   s <- CMS.get
-  CMS.put (s {stateNamespace = v : stateNamespace s})
+  CMS.put (s {stateNamespace = stateNamespace s ++ [v]})
 
 decNamespace :: Parser ()
 decNamespace = do
@@ -262,6 +262,45 @@ data ModuleBody
   | MBTypeDef TVar [TVar] UnresolvedType
   | MBBody Expr
 
+
+rescope :: ParserNode -> ParserNode
+rescope p = p { parserNodeBody = map rescopeExpr (parserNodeBody p) } where
+  defs :: Map.Map MT.Text [[MT.Text]]
+  defs =  Map.fromList . groupSort $ conmap collectDefs (parserNodeBody p)
+  
+  collectDefs :: Expr -> [(MT.Text, [MT.Text])]
+  collectDefs (Declaration (EV ns v) e) = (v, ns) : collectDefs e
+  collectDefs (AccE e _) = collectDefs e
+  collectDefs (ListE es) = conmap collectDefs es
+  collectDefs (TupleE es) = conmap collectDefs es
+  collectDefs (LamE (EV ns v) e) = (v, ns) : collectDefs e
+  collectDefs (AppE e1 e2) = collectDefs e1 ++ collectDefs e2
+  collectDefs (AnnE e _) = collectDefs e
+  collectDefs (RecE entries) = conmap collectDefs $ map snd entries
+  collectDefs _ = []
+
+  rescopeExpr :: Expr -> Expr
+  rescopeExpr (Declaration v e) = Declaration v (rescopeExpr e)
+  rescopeExpr (AccE e k) = AccE (rescopeExpr e) k
+  rescopeExpr (ListE es) = ListE (map rescopeExpr es)
+  rescopeExpr (TupleE es) = TupleE (map rescopeExpr es)
+  rescopeExpr (LamE v e) = LamE v (rescopeExpr e)
+  rescopeExpr (VarE v) = VarE (rescopeEvar v) 
+  rescopeExpr (AppE e1 e2) = AppE (rescopeExpr e1) (rescopeExpr e2)
+  rescopeExpr (AnnE e ts) = AnnE (rescopeExpr e) ts
+  rescopeExpr (RecE entries) = RecE (map (\(k,e) -> (k, rescopeExpr e)) entries)
+  rescopeExpr e = e
+
+  rescopeEvar :: EVar -> EVar
+  rescopeEvar (EV ns v) = case Map.lookup v defs of
+    (Just nss) -> EV (foldl (longerMatch ns) [] nss) v
+    Nothing -> EV [] v
+
+  longerMatch :: [MT.Text] -> [MT.Text] -> [MT.Text] -> [MT.Text]
+  longerMatch ori best cur
+    | isPrefixOf cur ori && length best < length cur = cur
+    | otherwise = best
+
 pProgram :: Parser [(MVar, [(MVar, Import)], ParserNode)]
 pProgram = do
   f <- CMS.gets stateModulePath
@@ -293,7 +332,7 @@ makeModule f n mes = (n, edges, node) where
            [[((srcAlias s, srcLang s), s) | s <- ss ] | (SrcE ss) <- body']
   typedefmap = Map.fromList [(v, (t, vs)) | MBTypeDef v vs t <- mes]
   edges = [(importModuleName i, i) | i <- imports']
-  node = ParserNode
+  node = rescope $ ParserNode
     { parserNodePath = f
     , parserNodeBody = body'
     , parserNodeSourceMap = srcMap
@@ -423,7 +462,7 @@ pDataDeclaration = do
   -- enter data declaration scope
   incNamespace v
   e <- pExpr
-  subExpressions <- reserved "where" >> alignInset whereTerm |>> concat
+  subExpressions <- option [] $ reserved "where" >> alignInset whereTerm |>> concat
   decNamespace
   -- exit scope
   return $ Declaration v' e : subExpressions
@@ -438,7 +477,7 @@ pFunctionDeclaration = do
   args' <- mapM evar args
   _ <- op "="
   e <- pExpr
-  subExpressions <- reserved "where" >> alignInset whereTerm |>> concat
+  subExpressions <- option [] $ reserved "where" >> alignInset whereTerm |>> concat
   decNamespace
   -- exit scope
   return $ Declaration v' (curryLamE args' e) : subExpressions
@@ -453,8 +492,6 @@ pSignature :: Parser Expr
 pSignature = do
   v <- freename
   v' <- evar v
-  -- enter signature scope
-  incNamespace v
   lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
@@ -462,8 +499,6 @@ pSignature = do
   t <- pTypeGen
   constraints <- option [] pConstraints
   setLang Nothing
-  decNamespace
-  -- leave scope
   return $
     Signature
       v'
@@ -561,8 +596,8 @@ pImportSourceTerm :: Parser (Name, EVar)
 pImportSourceTerm = do
   n <- stringLiteral
   v <- evar n
-  a <- option n (reserved "as" >> freename)
-  return (Name n, v)
+  a <- option v (reserved "as" >> freename >>= evar)
+  return (Name n, a)
 
 pNamE :: Parser Expr
 pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))

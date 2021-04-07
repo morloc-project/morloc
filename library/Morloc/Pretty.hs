@@ -29,7 +29,7 @@ instance Pretty MVar where
   pretty = pretty . unMVar
 
 instance Pretty EVar where
-  pretty (EV _ v) = pretty v
+  pretty (EV ns v) = pretty $ MT.intercalate "/" (ns ++ [v])
 
 instance Pretty Code where
   pretty = pretty . unCode

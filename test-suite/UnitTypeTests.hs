@@ -275,15 +275,15 @@ packerTests =
         ( Map.singleton
             (TV (Just CppLang) "std::map<$1,$2>", 2)
             [ UnresolvedPacker {
-                unresolvedPackerTerm = (Just (EVar "Map"))
+                unresolvedPackerTerm = (Just (EV [] "Map"))
               , unresolvedPackerCType
                 = forallc CppLang ["a","b"]
                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
               }
             ]
         )
@@ -305,15 +305,15 @@ import A (Map as Hash)
         ( Map.singleton
             (TV (Just CppLang) "std::map<$1,$2>", 2)
             [ UnresolvedPacker {
-                unresolvedPackerTerm = (Just (EVar "Hash"))
+                unresolvedPackerTerm = (Just (EV [] "Hash"))
               , unresolvedPackerCType
                 = forallc CppLang ["a","b"]
                   ( arrc CppLang "std::tuple<$1,$2>" [ arrc CppLang "std::vector<$1>" [varc CppLang "a"]
                                                      , arrc CppLang "std::vector<$1>" [varc CppLang "b"]])
               , unresolvedPackerForward
-                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EVar ("packMap"))]
+                = [Source (Name "mlc_packMap") CppLang (Just "map.h") (EV [] ("packMap"))]
               , unresolvedPackerReverse
-                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EVar ("unpackMap"))]
+                = [Source (Name "mlc_unpackMap") CppLang (Just "map.h") (EV [] ("unpackMap"))]
               }
             ]
         )
@@ -774,7 +774,7 @@ unitTypeTests =
     , assertTerminalExpr
         "functions return lambda expressions"
         "\\x -> 42"
-        (LamE (EVar "x") (NumE 42.0))
+        (LamE (EV [] "x") (NumE 42.0))
     , assertTerminalType
         "functions can be passed"
         "g f = f 42\ng"
@@ -1146,7 +1146,7 @@ unitTypeTests =
 
     , expectError
         "fail on import of non-existing variable"
-        (BadImport (MVar "Foo") (EVar "x")) $
+        (BadImport (MVar "Foo") (EV [] "x")) $
         [r|
            module Foo
            export y
@@ -1179,7 +1179,7 @@ unitTypeTests =
         |]
     , expectError
         "fail on import of non-exported variable"
-        (BadImport (MVar "Foo") (EVar "x")) $
+        (BadImport (MVar "Foo") (EV [] "x")) $
         [r|
             module Foo {x = 42}
             module Main
@@ -1419,22 +1419,22 @@ unitTypeTests =
          sqrt Cpp :: "double" -> "double"
          foo x = snd x (sqrt x)
       |]
-      (Declaration (EVar "foo")
-        (AnnE (LamE (EVar "x")
+      (Declaration (EV [] "foo")
+        (AnnE (LamE (EV ["foo"] "x")
           (AnnE (AppE
             (AnnE (AppE
-              (AnnE (VarE (EVar "snd"))
+              (AnnE (VarE (EV [] "snd"))
                 [ fun [num, num, num]
                 , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
-              (AnnE (VarE (EVar "x"))
+              (AnnE (VarE (EV ["foo"] "x"))
                 [num,varc CppLang "double"]))
               [ FunU num num
               , FunU (varc CppLang "double") (varc CppLang "double")])
             (AnnE (AppE
-              (AnnE (VarE (EVar "sqrt"))
+              (AnnE (VarE (EV [] "sqrt"))
                 [ FunU num num
                 , FunU (varc CppLang "double") (varc CppLang "double")])
-              (AnnE (VarE (EVar "x"))
+              (AnnE (VarE (EV ["foo"] "x"))
                 [ num
                 , varc CppLang "double"]))
               [num,varc CppLang "double"]))
@@ -1459,22 +1459,22 @@ unitTypeTests =
     --       , "foo = id y;"
     --       ]
     --     )
-    --     [ (EVar "foo",
+    --     [ (EV [] "foo",
     --       AnnE (AppE
-    --           (AnnE (VarE (EVar "id")) [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
-    --           (AnnE (VarE (EVar "y")) [num, varc CLang "int"])
+    --           (AnnE (VarE (EV [] "id")) [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
+    --           (AnnE (VarE (EV [] "y")) [num, varc CLang "int"])
     --                                      -- ^ The purpose of this test is to assert that the above
     --                                      -- type is defined. As of commit 'c31660a0', `y` was assigned
     --                                      -- only the general type Num.
     --         )
     --       [num, varc CLang "int"]
     --       )
-    --     , (EVar "id",
-    --       AnnE (LamE (EVar "x")
-    --           (AnnE (VarE (EVar "x"))
+    --     , (EV [] "id",
+    --       AnnE (LamE (EV [] "x")
+    --           (AnnE (VarE (EV [] "x"))
     --             [num, varc CLang "int"]))
     --         [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
-    --     , (EVar "y", AnnE (NumE 40.0) [num])
+    --     , (EV [] "y", AnnE (NumE 40.0) [num])
     --     ]
 
     -- default list evaluation of arguments
