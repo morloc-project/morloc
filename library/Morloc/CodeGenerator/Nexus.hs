@@ -43,7 +43,7 @@ generate cs xs = do
       }
 
 getFData :: (TypeP, Int, EVar) -> MorlocMonad FData
-getFData (t, i, n) = do
+getFData (t, i, (EV _ n)) = do
   config <- MM.ask
   let lang = langOf t
   case MC.buildPoolCallBase config lang i of
@@ -194,7 +194,7 @@ pathElement (JsonIndex i) = brackets (pretty i)
 pathElement (JsonKey key) = braces (pretty key)
 
 readJsonArg ::EVar -> Int -> MDoc
-readJsonArg v i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
+readJsonArg (EV _ v) i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
 
 argT :: Int -> MDoc
 argT i = "'$_[" <> pretty i <> "]'" 

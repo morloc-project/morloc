@@ -16,7 +16,7 @@ module Morloc.Pretty
   , prettyPackMap
   , prettySAnnoMany
   , prettySAnnoOne
-  , prettyScopedEVar
+  , prettyUnscopedEVar
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -30,10 +30,10 @@ instance Pretty MVar where
   pretty = pretty . unMVar
 
 instance Pretty EVar where
-  pretty (EV _ v) = pretty v
+  pretty (EV ns v) = pretty $ MT.intercalate "/" (ns ++ [v])
 
-prettyScopedEVar :: EVar -> Doc ann
-prettyScopedEVar (EV ns v) = pretty $ MT.intercalate "/" (ns ++ [v])
+prettyUnscopedEVar :: EVar -> Doc ann
+prettyUnscopedEVar (EV _ v) = pretty v
 
 instance Pretty Code where
   pretty = pretty . unCode
