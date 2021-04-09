@@ -16,14 +16,11 @@ import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Data.DAG as MDD
-import Morloc.Frontend.Infer hiding(typecheck)
-import Morloc.Frontend.Desugar (desugar)
 import Morloc (typecheck)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 
 import qualified Data.Text as T
-import qualified Data.PartialOrd as DP
 import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -33,17 +30,15 @@ main f d = case MDD.roots d of
   [] -> error "Missing or circular module"
   [k] -> case Map.lookup k d of
     (Just (m,_)) -> f m
+    Nothing -> error "Bad DAG"
   _ -> error "Cannot handle multiple roots"
-
-mainDecMap :: TypedDag -> [(EVar, Expr)]
-mainDecMap d = [(v, e) | (Declaration v e) <- main typedNodeBody d]
 
 -- get the toplevel type of a fully annotated expression
 typeof :: [Expr] -> [UnresolvedType]
 typeof es = f' . head . reverse $ es
   where
     f' (Signature _ e) = [etype e]
-    f' e@(AnnE _ ts) = ts
+    f' (AnnE _ ts) = ts
     f' t = error ("No annotation found for: " <> show t)
 
 run :: T.Text -> IO (Either MorlocError TypedDag)
@@ -66,20 +61,20 @@ assertTerminalType msg code t = testCase msg $ do
   case result of
     -- the order of the list is not important, so sort before comparing
     (Right es') -> assertEqual "" (sort t) (sort (typeof (main typedNodeBody es')))
-    (Left err) -> error $
-      "The following error was raised: " <> show err <> "\nin:\n" <> show code
+    (Left e) -> error $
+      "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 -- remove all type annotations and type signatures
 unannotate :: [Expr] -> [Expr]
 unannotate = mapMaybe unannotate' where
   unannotate' :: Expr -> Maybe Expr
-  unannotate' (AnnE e t) = unannotate' e
+  unannotate' (AnnE e _) = unannotate' e
   unannotate' (ListE xs) = Just $ ListE (unannotate xs)
   unannotate' (TupleE xs) = Just $ TupleE (unannotate xs)
   unannotate' (LamE v e) = LamE <$> pure v <*> unannotate' e
   unannotate' (AppE e1 e2) = AppE <$> unannotate' e1 <*> unannotate' e2
   unannotate' (Declaration v e) = Declaration <$> pure v <*> unannotate' e
-  unannotate' (Signature v t) = Nothing
+  unannotate' (Signature _ _) = Nothing
   unannotate' e = Just e
 
 -- assert the full expression with all annotations removed
@@ -98,8 +93,8 @@ assertTerminalExpr' f msg code expr = testCase msg $ do
     -- the order of the list is not important, so sort before comparing
     (Right es') ->
       assertEqual "" expr (head . reverse . sort . f . main typedNodeBody $ es')
-    (Left err) -> error $
-      "The following error was raised: " <> show err <> "\nin:\n" <> show code
+    (Left e) -> error $
+      "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 =
@@ -115,10 +110,10 @@ exprTestFull msg code expCode =
   testCase msg $ do
   result <- run code
   case result of
-    (Left err) -> error (show err)
+    (Left e) -> error (show e)
     (Right e)
       -> case readProgram Nothing expCode Map.empty of
-           (Left err) -> error (show err)
+           (Left e') -> error (show e')
            (Right x) -> assertEqual ""
               (main typedNodeBody e)
               (main parserNodeBody x)
@@ -132,16 +127,19 @@ assertPacker msg code expPacker =
       -> assertEqual ""
             (main typedNodePackers e)
             expPacker
-    (Left err) -> error (show err)
+    (Left e) -> error (show e)
 
--- assert the exact expressions
-exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
-exprTestFullDec msg code expCode =
-  testCase msg $ do
-  result <- run code
-  case result of
-    (Right e) -> assertEqual "" (mainDecMap e) expCode
-    (Left err) -> error (show err)
+-- -- assert the exact expressions
+-- exprTestFullDec :: String -> T.Text -> [(EVar, Expr)] -> TestTree
+-- exprTestFullDec msg code expCode =
+--   testCase msg $ do
+--   result <- run code
+--   case result of
+--     (Right e) -> assertEqual "" (mainDecMap e) expCode
+--     (Left err) -> error (show err)
+--
+-- mainDecMap :: TypedDag -> [(EVar, Expr)]
+-- mainDecMap d = [(v, e) | (Declaration v e) <- main typedNodeBody d]
 
 exprTestBad :: String -> T.Text -> TestTree
 exprTestBad msg code =
@@ -151,31 +149,19 @@ exprTestBad msg code =
     (Right _) -> assertFailure . T.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
 
+-- FIXME: check that the correct error type is raised, but don't check message
+-- (tweaking messages shouldn't break tests)
 expectError :: String -> MorlocError -> T.Text -> TestTree
-expectError msg err code =
+expectError msg _ code =
   testCase msg $ do
   result <- run code
   case result of
     (Right _) -> assertFailure . T.unpack $ "Expected failure"
-    (Left err) -> return ()
-
-testPasses :: String -> T.Text -> TestTree
-testPasses msg code =
-  testCase msg $ do
-  result <- run code
-  case result of
-    (Right _) -> return ()
-    (Left e) ->
-      assertFailure $
-      "Expected this test to pass, but it failed with the message: " <> show e
+    (Left _) -> return ()
 
 testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
 testEqual msg x y =
   testCase msg $ assertEqual "" x y
-
-testNotEqual :: Eq a => String -> a -> a -> TestTree
-testNotEqual msg x y =
-  testCase msg $ assertEqual "" (x == y) False
 
 testTrue :: String -> Bool -> TestTree
 testTrue msg x =

@@ -36,9 +36,11 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
 typecheck
   :: DAG MVar [(EVar, EVar)] PreparedNode
+  -- ^ A directed acyclic graph of modules. The edges contain a list of (name,
+  -- alias) pairs. The PreparedNode type contains everything about a module.
   -> Stack (DAG MVar [(EVar, EVar)] TypedNode)
 typecheck d = do
-  maybeDAG <- MDD.synthesizeDAG typecheck' d
+  maybeDAG <- MDD.synthesizeDAG typecheckModule d
   case maybeDAG of
     Nothing -> throwError CyclicDependency
     (Just d') -> do
@@ -47,15 +49,17 @@ typecheck d = do
         (Just d''') -> return d'''
         Nothing -> throwError CyclicDependency
   where
-    typecheck'
+    typecheckModule
       :: MVar
       -> PreparedNode
       -> [(MVar, [(EVar, EVar)], TypedNode)]
       -> Stack TypedNode
-    typecheck' k n xs = do
+    typecheckModule k n xs = do
       enter $ "entering module '" <> viaShow k <> "'"
+      -- load imported terms and their type annotations as the initial context
       g0 <- importTypes xs
-      (g1, es) <- typecheckExpr g0 (preparedNodeBody n)
+      -- typecheck all the expressions in this module
+      (g1, es) <- typecheckBody g0 (preparedNodeBody n)
       leave $ "module"
       return $ TypedNode
         { typedNodeModuleName = k
@@ -75,7 +79,6 @@ typecheck d = do
             . map ((flip Map.lookup) (preparedNodeSourceMap n))
             $ [ (EV [] v, lang)
               | (TV (Just lang) v) <- unique (conmap collectConstructors es)]
-
         , typedNodeTypedefs = Map.map (\(t,ps) -> (resolve t, ps)) (preparedNodeTypedefs n)
         }
 
@@ -139,16 +142,16 @@ typecheck d = do
     importTypes' (_, xs, n) = mapMaybe (lookupOne (typedNodeTypeMap n)) xs
 
     lookupOne :: Map.Map EVar TypeSet -> (EVar, EVar) -> Maybe (EVar, TypeSet)
-    lookupOne m (name, _) = case Map.lookup name m of
-      (Just t) -> return (name, t)
+    lookupOne m (termName, _) = case Map.lookup termName m of
+      (Just t) -> return (termName, t)
       Nothing -> Nothing
 
     -- Typecheck a set of expressions within a given context (i.e., one module).
     -- Return the modified context and a list of annotated expressions.
-    typecheckExpr :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
-    typecheckExpr g1 e1 = do
+    typecheckBody :: Gamma -> [Expr] -> Stack (Gamma, [Expr])
+    typecheckBody g1 e1 = do
       es <- mapM rename e1
-      (g', es') <- typecheckExpr' g1 [] es
+      (g', es') <- typecheckExpr g1 [] es
       let es'' = concat [toExpr v t | (AnnG (VarE v) t) <- g'] ++ reverse es'
       return $ (g', map (generalizeE . unrename . apply g') es'')
       where
@@ -156,13 +159,17 @@ typecheck d = do
         toExpr v (TypeSet (Just e) es) = [Signature v t | t <- (e : es)]
         toExpr v (TypeSet Nothing es) = [Signature v t | t <- es]
 
-        typecheckExpr' :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
-        typecheckExpr' g es [] = return (g, es)
-        typecheckExpr' g es (x:xs) = do
+        -- recurse through the expressions in the module body
+        typecheckExpr :: Gamma -> [Expr] -> [Expr] -> Stack (Gamma, [Expr])
+        typecheckExpr g es [] = return (g, es)
+        typecheckExpr g es (x:xs) = do
+          -- run the typechecker on a single expresion
           (g', _, e') <- infer Nothing g x
           case e' of
-            (Signature _ _) -> typecheckExpr' g' es xs
-            _ -> typecheckExpr' g' (e' : es) xs
+            -- if the expression is a Signature, keep the updated context but yield nothing
+            (Signature _ _) -> typecheckExpr g' es xs
+            -- in all other cases, store the type annotated expression
+            _ -> typecheckExpr g' (e' : es) xs
 
     mergeManyTypeSets :: (EVar, [TypeSet]) -> Stack (EVar, TypeSet)
     mergeManyTypeSets (v, ts) = do
@@ -623,7 +630,13 @@ infer' lang g e@(VarE v) = do
     (_, Just (_, typeset)) ->
       let ts = mapTS etype typeset
       in return (g, ts, AnnE e ts)
-    (_, Nothing) -> throwError (UnboundVariable v)
+    -- initialize an existential variable for an unknown term
+    -- this may be defined later, or it may be an illegal unbound variable,
+    -- which will be cauhgt after typechecking
+    (_, Nothing) -> do
+       t <- newvar lang     
+       return (g +> t, [t], AnnE e [t])
+
   where
     mapTS :: (EType -> a) -> TypeSet -> [a]
     mapTS f (TypeSet (Just a) es) = map f (a:es)

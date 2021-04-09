@@ -407,7 +407,9 @@ data Type
 data UnresolvedType
   = VarU TVar
   -- ^ (a)
-  | ExistU TVar [UnresolvedType] [UnresolvedType]
+  | ExistU TVar
+    [UnresolvedType] -- ???
+    [UnresolvedType] -- default types
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar UnresolvedType
   -- ^ (Forall a . A)

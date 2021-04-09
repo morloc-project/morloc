@@ -157,7 +157,9 @@ data GammaIndex
   -- ^ (G,a)
   | AnnG Expr TypeSet
   -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar [UnresolvedType] [UnresolvedType]
+  | ExistG TVar
+    [UnresolvedType] -- FIXME: document
+    [UnresolvedType] -- default types
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar UnresolvedType
   -- ^ (G,a^=t) Store a solved existential variable
