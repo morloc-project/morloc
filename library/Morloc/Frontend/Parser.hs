@@ -458,7 +458,7 @@ pDataDeclaration :: Parser [Expr]
 pDataDeclaration = do
   v <- freename
   v' <- evar v
-  _ <- op "="
+  _ <- symbol "="
   -- enter data declaration scope
   incNamespace v
   e <- pExpr
@@ -475,7 +475,7 @@ pFunctionDeclaration = do
   incNamespace v
   args <- many1 freename
   args' <- mapM evar args
-  _ <- op "="
+  _ <- symbol "="
   e <- pExpr
   subExpressions <- option [] $ reserved "where" >> alignInset whereTerm |>> concat
   decNamespace
