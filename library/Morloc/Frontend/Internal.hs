@@ -36,6 +36,7 @@ module Morloc.Frontend.Internal
   , decDepth
   , getDepth
   , langsOf
+  , toEType
   ) where
 
 import Control.Monad.Except (throwError)
@@ -146,6 +147,12 @@ instance Typed EType where
       , econs = Set.empty
       }
 
+toEType :: UnresolvedType -> EType
+toEType t = EType
+  { etype = t
+  , eprop = Set.empty
+  , econs = Set.empty
+  }
 
 instance Typed TypeSet where
   toType Nothing (TypeSet e _) = e >>= toType Nothing

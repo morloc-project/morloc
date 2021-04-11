@@ -58,7 +58,7 @@ resolve (NamU r v ps rs) =
   let ts' = map (resolve . snd) rs
       ps' = map resolve ps 
   in NamT r v ps' (zip (map fst rs) ts')
-resolve (ExistU _ _ []) = error "UnsolvedExistentialTerm"
+resolve (ExistU v _ []) = resolve (ForallU v (VarU v)) -- whatever
 resolve (ExistU _ _ (t:_)) = resolve t
 resolve (ForallU v t) = substituteT v (UnkT v) (resolve t)
 
@@ -165,8 +165,6 @@ data GammaIndex
   -- ^ (G,a^=t) Store a solved existential variable
   | MarkG TVar
   -- ^ (G,>a^) Store a type variable marker bound under a forall
-  | MarkEG EVar
-  -- ^ ...
   | SrcG Source
   -- ^ source
   | UnsolvedConstraint UnresolvedType UnresolvedType

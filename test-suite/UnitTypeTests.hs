@@ -7,6 +7,8 @@ module UnitTypeTests
   , jsontype2jsonTests
   , packerTests
   , recordAccessTests
+  , whereTests
+  , orderInvarianceTests
   ) where
 
 import Morloc.Frontend.Namespace
@@ -605,6 +607,53 @@ typeAliasTests =
         [fun [tuple [var "X", var "Y"], var "Z"]]
     ]
 
+
+whereTests =
+  testGroup
+  "Test of where statements"
+  [ 
+      assertTerminalType
+        "simple where"
+        [r|
+            f :: Num
+            f = z where
+                z = 42
+            f
+        |]
+        [num]
+    , assertTerminalType
+        "calling simple where"
+        [r|
+            f :: Num
+            f = inc z where
+                z = 42
+            inc
+        |]
+        [fun [num, num]]
+  ]
+
+orderInvarianceTests =
+  testGroup
+  "Test order invariance"
+  [ 
+      assertTerminalType
+        "terms may be defined before they are used"
+        [r|
+          a = 1
+          f = a
+          f
+        |]
+        [num]
+    , assertTerminalType
+        "terms they may be defined after they are used"
+        [r|
+          f = a
+          a = 1
+          f
+        |]
+        [num]
+  ]
+
 typeOrderTests =
   testGroup
     "Tests of type partial ordering (subtype)"
@@ -809,7 +858,7 @@ unitTypeTests =
         [forall ["a"] (fun [var "a", num])]
     , exprTestBad
         "applications with too many arguments fail"
-        "f :: a\nf Bool 12"
+        "f :: a -> a\nf True 12"
     , exprTestBad
         "applications with mismatched types fail (1)"
         "abs :: Num -> Num\nabs True"
@@ -849,8 +898,8 @@ unitTypeTests =
         "x = 42\nx"
         [num]
     , exprTestBad
-        "unannotated variables without definitions are illegal ('\\x -> y')"
-        "\\x -> y"
+        "unannotated variables without definitions are illegal ('x')"
+        "x"
 
     -- parameterized types
     , assertTerminalType

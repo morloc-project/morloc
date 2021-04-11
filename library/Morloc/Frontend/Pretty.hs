@@ -71,7 +71,6 @@ prettyGammaIndex (ExistG tv ts ds)
   <+> list (map (parens . prettyGreenUnresolvedType) ds)
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
-prettyGammaIndex (MarkEG ev) = "MarkG:" <+> pretty ev
 prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 

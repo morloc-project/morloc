@@ -17,7 +17,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Morloc.Frontend.Pretty ()
+import Morloc.Frontend.Pretty (prettyExpr)
 
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
@@ -147,7 +147,7 @@ collectTerm d _ n (Declared (AnnE e ts)) = do
   case xs of
     [x] -> return x
     _ -> MM.throwError . GeneratorError $
-      "Expected exactly one topology for a declared term"
+      "Expected exactly one topology for declared term, no language-specific type found for expression: " <> render (prettyExpr e)
 collectTerm _ _ _ (Declared _) = MM.throwError . GeneratorError $
   "Invalid expression in CollectTerm Declared, expected AnnE"
 

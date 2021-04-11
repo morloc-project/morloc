@@ -15,8 +15,6 @@ module Morloc.Frontend.Infer
   , substitute
   , apply
   , infer
-  , rename
-  , unrename
   , fromType
   ) where
 
@@ -198,7 +196,7 @@ typecheck d = do
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
 subtype :: UnresolvedType -> UnresolvedType -> Gamma -> Stack Gamma
 subtype t1 t2 g = do
-  enter $ prettyGreenUnresolvedType t1 <+> "<:" <+> prettyGreenUnresolvedType t2
+  enter $ "subtype:" <+> prettyGreenUnresolvedType t1 <+> "<:" <+> prettyGreenUnresolvedType t2
   seeGamma g
   g' <- subtype' t1 t2 g
   leave "subtype"
@@ -551,50 +549,45 @@ infer' Nothing g1 e0@(Declaration v e1) = do
   (typeset3, g4, es4) <- case lookupE v g1 of
     -- CheckDeclaration
     (Just (_, typeset@(TypeSet t ts))) -> do
+      say "checkDeclaration"
       let xs1 = map etype (maybeToList t ++ ts)
           tlangs = langsOf g1 typeset
           langs = [lang | lang <- langsOf g1 e1, not (elem lang tlangs)]
       -- Check each of the signatures against the expression.
       (g2, ts2, es2) <- foldM (foldCheck e1) (g1, [], []) xs1
       (g3, ts3, es3) <- mapM newvar langs
-                     >>= foldM (foldCheckExist v e1) (g2, ts2, es2)
-      typeset2 <- foldM appendTypeSet typeset (map (toEType g3) ts3)
+                     >>= foldM (foldCheckExist e1) (g2, ts2, es2)
+      typeset2 <- foldM appendTypeSet typeset (map toEType ts3)
       return (generalizeTypeSet typeset2, g3, es3)
     -- InferDeclaration
     Nothing -> do
-      (g3, ts3, es3) <- foldM (foldInfer v e1) (g1, [], []) (langsOf g1 e1)
-      let ts4 = unique ts3
-      typeset2 <- typesetFromList (map generalize ts4)
+      say "inferDeclaration"
+      (g3, ts3, es3) <- foldM (foldInfer e1) (g1, [], []) (langsOf g1 e1)
+      typeset2 <- typesetFromList (unique ts3)
       return (typeset2, g3, es3)
-
   e2 <- collate es4
-
-  let e5 = Declaration v (generalizeE e2)
-
+  let e5 = Declaration v e2
   return (g4 +> AnnG e0 typeset3, [], e5)
   where
 
     foldInfer
-      :: EVar
-      -> Expr
+      :: Expr
       -> (Gamma, [UnresolvedType], [Expr])
       -> Maybe Lang
       -> Stack (Gamma, [UnresolvedType], [Expr])
-    foldInfer v' e' (g1', ts1, es) lang = do
-      (g2', ts2, e2) <- infer lang (g1' +> MarkEG v') e'
-      g3' <- cut (MarkEG v') g2'
-      return (g3', ts1 ++ ts2, e2:es)
+    foldInfer e' (g1', ts1, es) lang = do
+      (g2', ts2, e2) <- infer lang g1' e'
+      return (g2', ts1 ++ ts2, e2:es)
 
     foldCheckExist
-      :: EVar
-      -> Expr
+      :: Expr
       -> (Gamma, [UnresolvedType], [Expr])
       -> UnresolvedType
       -> Stack (Gamma, [UnresolvedType], [Expr])
-    foldCheckExist v' e' (g1', ts, es) t' = do
-      (g2', t2', e2') <- check (g1' +> MarkEG v' +> t') e' t'
-      g3' <- cut (MarkEG v') g2'
-      return (g3', t2':ts, e2':es)
+    foldCheckExist e' (g1', ts, es) t' = do
+      say $ "foldCheckExist"
+      (g2', t2', e2') <- check (g1' +> t') e' t'
+      return (g2', t2':ts, e2':es)
 
     foldCheck ::
          Expr
@@ -602,15 +595,10 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       -> UnresolvedType
       -> Stack (Gamma, [UnresolvedType], [Expr])
     foldCheck e' (g1', ts, es) t' = do
+      say $ "foldCheck"
       (g2', t2', e2') <- check g1' e' t'
-      say (prettyExpr e2')
       return (g2', t2':ts, e2':es)
 
-    toEType _ t = EType
-      { etype = t
-      , eprop = Set.empty
-      , econs = Set.empty
-      }
 
 infer' lang g e@(VarE v) = do
   say $ "---------------------------------- VarE"
@@ -634,13 +622,22 @@ infer' lang g e@(VarE v) = do
     -- this may be defined later, or it may be an illegal unbound variable,
     -- which will be cauhgt after typechecking
     (_, Nothing) -> do
-       t <- newvar lang     
-       return (g +> t, [t], AnnE e [t])
+       (t, ts) <- getExistential lang
+       -- `g ++ i` creates an index that cannot be cut - this is a bit wonky
+       return (g ++ [AnnG e ts] +> t, [t], AnnE e [t])
 
   where
     mapTS :: (EType -> a) -> TypeSet -> [a]
     mapTS f (TypeSet (Just a) es) = map f (a:es)
     mapTS f (TypeSet Nothing es) = map f es
+
+    getExistential :: Maybe Lang -> Stack (UnresolvedType, TypeSet)
+    getExistential Nothing = do
+      t <- newvar Nothing
+      return $ (t, TypeSet (Just (toEType t)) [])
+    getExistential lang' = do
+      t <- newvar lang'
+      return $ (t, TypeSet Nothing [toEType t])
 
 infer' lang g (AccE e k) = do
   (g', record_ts, e') <- infer lang g e

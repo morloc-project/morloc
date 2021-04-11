@@ -18,6 +18,8 @@ main = do
       , propertyTests
       , jsontype2jsonTests
       , recordAccessTests
+      , whereTests
+      , orderInvarianceTests
 
       , golden "import-1" "import-1"
 

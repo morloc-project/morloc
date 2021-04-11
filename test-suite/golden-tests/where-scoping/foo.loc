@@ -1,10 +1,12 @@
 import pybase (add)
+add :: Num -> Num -> Num
 
 export f1
 export f2
 export f3
 export f4
-export f5
+export f5a
+export f5b
 export f6
 export f7
 export f8
@@ -34,9 +36,12 @@ f4 :: Num
 f4 = z where
     z = 42
 
+f5a = add a b where
+    a = 1
+    b = 41
+
 -- terms in the function's where-scope are unordered and share scope
-f5 :: Num
-f5 = x where
+f5b = x where
     x = add a b
     a = 1
     b = 41
