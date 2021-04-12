@@ -652,6 +652,26 @@ orderInvarianceTests =
           f
         |]
         [num]
+    , assertTerminalType
+        "declarations before use gain concrete types"
+        [r|
+          add :: Num -> Num -> Num
+          add c :: "int" -> "int" -> "int"
+          b = 5
+          f = add 1 b
+          b
+        |]
+        [num, varc CLang "int"]
+    , assertTerminalType
+        "declarations after use gains concrete types"
+        [r|
+          add :: Num -> Num -> Num
+          add c :: "int" -> "int" -> "int"
+          f = add 1 b
+          b = 5
+          b
+        |]
+        [num, varc CLang "int"]
   ]
 
 typeOrderTests =

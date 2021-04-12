@@ -1,4 +1,5 @@
-import pybase (add)
+-- import pybase (add)
+add Py :: "float" -> "float" -> "float"
 add :: Num -> Num -> Num
 
 export f1
@@ -19,26 +20,18 @@ n = 22
 z = 99
 
 -- a function can use terms from the global scope
-f1 :: Num
 f1 = k
 
 -- a function's parameters may shadow terms from the global scope
-f2 :: Num -> Num
 f2 m = m
 
 -- a function may use terms from its where-scope
-f3 :: Num
 f3 = x where
     x = 42
 
 -- terms in the function's where-scope may shadow global terms
-f4 :: Num
 f4 = z where
     z = 42
-
-f5a = add a b where
-    a = 1
-    b = 41
 
 -- terms in the function's where-scope are unordered and share scope
 f5b = x where
@@ -47,13 +40,11 @@ f5b = x where
     b = 41
 
 -- where scopes may be nested
-f6 :: Num
 f6 = x where
     x = y where
         y = 42
 
 -- where-scopes inherit the scope of their parent
-f7 :: Num
 f7 = x where
     x = y where
         y = add a b
@@ -61,17 +52,15 @@ f7 = x where
     b = 41
 
 -- where-scopes inherit the scope of all their ancestors
-f8 :: Num
 f8 = x where
     x = y where
         y = z where
-            z = sum [n, a, b]
+            z = add n (add a b)
             a = 1
         b = 2
     c = 19
 
 -- cousins do not interfere with one another
-f9 :: Num
 f9 = x where
     x = add a b
     a = add 19 c where
@@ -80,7 +69,6 @@ f9 = x where
         c = 21
 
 -- functions with or without signatures may be defined in the where-scope
-f10 :: Num
 f10 = bar (bif 2) where
 
     bif x = add x 10

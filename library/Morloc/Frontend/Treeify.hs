@@ -147,7 +147,8 @@ collectTerm d _ n (Declared (AnnE e ts)) = do
   case xs of
     [x] -> return x
     _ -> MM.throwError . GeneratorError $
-      "Expected exactly one topology for declared term, no language-specific type found for expression: " <> render (prettyExpr e)
+      "Expected exactly one topology for declared term, no language-specific type found for expression: " <> render (viaShow e <+> " ; ts':" <+> viaShow ts')
+      -- "Expected exactly one topology for declared term, no language-specific type found for expression:" <+> render ((prettyExpr e) <+> "ts':" <+> viaShow ts' <+> "ts" <+> viaShow ts
 collectTerm _ _ _ (Declared _) = MM.throwError . GeneratorError $
   "Invalid expression in CollectTerm Declared, expected AnnE"
 
