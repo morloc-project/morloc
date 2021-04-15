@@ -14,6 +14,7 @@ module Morloc.Frontend.Pretty
   , prettyExpr
   , prettyGammaIndex
   , prettyParserError
+  , prettyTypeSet
   ) where
 
 import Morloc.Frontend.Namespace

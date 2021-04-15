@@ -502,7 +502,6 @@ infer' lang g e@(LogE _) = do
   return (g +> t, [t], ann e t)
 
 -- Src=>
--- -- FIXME: the expressions are now NOT sorted ... need to fix
 -- Since the expressions in a Morloc script are sorted before being
 -- evaluated, the SrcE expressions will be considered before the Signature
 -- and Declaration expressions. Thus every term that originates in source
@@ -549,7 +548,7 @@ infer' Nothing g1 e0@(Declaration v e1) = do
   (typeset3, g4, es4) <- case lookupE v g1 of
     -- CheckDeclaration
     (Just (_, typeset@(TypeSet t ts))) -> do
-      say "checkDeclaration"
+      say $ "checkDeclaration against" <+> prettyTypeSet typeset
       let xs1 = map etype (maybeToList t ++ ts)
           tlangs = langsOf g1 typeset
           langs = [lang | lang <- langsOf g1 e1, not (elem lang tlangs)]
@@ -561,8 +560,9 @@ infer' Nothing g1 e0@(Declaration v e1) = do
       return (generalizeTypeSet typeset2, g3, es3)
     -- InferDeclaration
     Nothing -> do
-      say "inferDeclaration"
-      (g3, ts3, es3) <- foldM (foldInfer e1) (g1, [], []) (langsOf g1 e1)
+      let langs = unique (Nothing : langsOf g1 e0)
+      say $ "inferDeclaration over" <+> pretty langs
+      (g3, ts3, es3) <- foldM (foldInfer e1) (g1, [], []) langs
       typeset2 <- typesetFromList (unique ts3)
       return (typeset2, g3, es3)
   e2 <- collate es4

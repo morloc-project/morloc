@@ -236,7 +236,7 @@ data PreparedNode = PreparedNode {
   , preparedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
   -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
-type PreparedDag = DAG MVar [(EVar, EVar)] ParserNode
+type PreparedDag = DAG MVar [(EVar, EVar)] PreparedNode
 
 -- | Node description after type checking. This will later be fed into
 -- `treeify` to make the SAnno objects that will be passed to Generator.
