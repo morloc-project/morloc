@@ -80,14 +80,4 @@ cmdMake args verbosity config = do
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
 cmdTypecheck args verbosity config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
-  let writer = if typecheckRaw args then F.ugly else F.cute
-  if typecheckType args
-    then case F.readType (unCode code) of
-      (Left err) -> print (errorBundlePretty err)
-      (Right x) -> print x 
-    else MM.runMorlocMonad
-           Nothing
-           verbosity
-           config
-           (M.typecheck path code >>= MM.liftIO . writer) >>=
-         MM.writeMorlocReturn
+  return ()

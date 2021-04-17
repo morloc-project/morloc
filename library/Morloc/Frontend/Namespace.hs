@@ -19,8 +19,6 @@ module Morloc.Frontend.Namespace
   , ParserDag
   , PreparedNode(..)
   , PreparedDag
-  , TypedNode(..)
-  , TypedDag
   -- ** Typechecking
   , Gamma
   , GammaIndex(..)
@@ -237,19 +235,3 @@ data PreparedNode = PreparedNode {
   -- ^ The (un)packers available in this module scope.
 } deriving (Show, Ord, Eq)
 type PreparedDag = DAG MVar [(EVar, EVar)] PreparedNode
-
--- | Node description after type checking. This will later be fed into
--- `treeify` to make the SAnno objects that will be passed to Generator.
-data TypedNode = TypedNode {
-    typedNodeModuleName :: MVar
-  , typedNodePath :: Maybe Path
-  , typedNodeBody :: [Expr]
-  , typedNodeTypeMap :: Map EVar TypeSet
-  , typedNodeSourceMap :: Map (EVar, Lang) Source
-  , typedNodeExports :: Set EVar
-  , typedNodeTypedefs :: Map TVar (Type, [TVar])
-  , typedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
-  , typedNodeConstructors :: Map TVar Source
-  -- ^ The (un)packers available in this module scope.
-} deriving (Show, Ord, Eq)
-type TypedDag = DAG MVar [(EVar, EVar)] TypedNode

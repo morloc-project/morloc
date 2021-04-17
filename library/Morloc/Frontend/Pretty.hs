@@ -9,8 +9,6 @@ Stability   : experimental
 
 module Morloc.Frontend.Pretty
   ( module Morloc.Pretty
-  , cute
-  , ugly
   , prettyExpr
   , prettyGammaIndex
   , prettyParserError
@@ -18,42 +16,16 @@ module Morloc.Frontend.Pretty
   ) where
 
 import Morloc.Frontend.Namespace
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
-import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
+import Data.Text.Prettyprint.Doc.Render.Terminal (AnsiStyle)
 import qualified Text.Megaparsec as Mega
 import qualified Morloc.Data.Text as MT 
 import Data.Void (Void)
 
 prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
 prettyParserError = undefined
-
-cute :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
-cute d = mapM_ (putDoc . cute') (Map.toList d) where
-  cute' :: (MVar, (TypedNode, [(MVar, [(EVar, EVar)])])) -> Doc AnsiStyle
-  cute' (v, (n, xs)) = block 4 (pretty v) (cuteBody n xs)
-
-cuteBody :: TypedNode -> [(MVar, [(EVar, EVar)])] -> Doc AnsiStyle
-cuteBody t xs = prettyPackMap (typedNodePackers t) <> line
- <> vsep (cuteSources (typedNodeSourceMap t)) <> line 
- <> vsep (map (uncurry cuteImport) xs) <> line <> cuteTypedNode t
-
-cuteImport :: MVar -> [(EVar, EVar)] -> Doc AnsiStyle
-cuteImport m xs
-  = "from" <+> pretty m <+> "import"
-  <+> tupled (map (\(v1,v2) -> pretty v1 <+> "as" <+> pretty v2) xs)
-
-cuteSources :: Map.Map (EVar, Lang) Source -> [Doc AnsiStyle]
-cuteSources m = map (\((v,l),src) -> pretty v <> "@" <> pretty l <+> pretty src) (Map.toList m)
-
-cuteTypedNode :: TypedNode -> Doc AnsiStyle
-cuteTypedNode t = vsep (map prettyExpr (typedNodeBody t))
-
--- FIXME: why exactly do I even have this ugly function???
-ugly :: DAG MVar [(EVar, EVar)] TypedNode -> IO ()
-ugly = cute 
 
 prettyTypeSet :: TypeSet -> Doc AnsiStyle
 prettyTypeSet (TypeSet Nothing ts)
