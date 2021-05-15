@@ -97,18 +97,18 @@ Paste this into a file (e.g. "hello.loc") and then it can be imported by other
 is a subcommand.
 
 ```
-morloc make hello.loc
+morloc make -o nexus hello.loc
 ```
 
-This will generate a single file named "nexus.pl". The nexus is the executable
+This will generate a single file named "nexus". The nexus file is the executable
 script that the user will interact with. For this simple example, it is the
-only generated file. It is currently written in Perl. 
+only generated file. 
 
-Calling "nexus.pl" with no arguemtns or with the `-h` flag, will print a help
+Calling "nexus" with no arguments or with the `-h` flag, will print a help
 message:
 
 ```
-$ ./nexus.pl -h
+$ ./nexus -h
 The following commands are exported:
   hello
     return: Str
@@ -119,7 +119,7 @@ The `return: Str` phrases states that hello returns a string value.
 The command `hello` can be called as shown below:
 
 ```
-$ ./nexus.pl hello
+$ ./nexus hello
 Hello World
 ```
 
@@ -143,18 +143,18 @@ follows:
 
 ```sh
 morloc install cppbase
-morloc make example-1.loc
+morloc make -o nexus example-1.loc
 ```
 
 The `install` command clones the `cppbase` repo from github
 [repo](https://github.com/morloclib/cppbase) into the local directory
-`~/.morloc/lib`. The `morloc make` command will generate a file named
-`nexus.pl`, which is an executable interface to the exported functions.
+`~/.morloc/lib`. The `morloc make -o nexus` command will generate a file named
+`nexus`, which is an executable interface to the exported functions.
 
 You can see typed usage information for the exported functions with the `-h` flag:
 
 ```sh
-$ ./nexus.pl -h
+$ ./nexus -h
 The following commands are exported:
   square
     param 1: Num
@@ -167,11 +167,11 @@ The following commands are exported:
 Then you can call the exported functions (arguments are in JSON format):
 
 ```sh
-$ ./nexus.pl sumOfSquares '[1,2,3]'
+$ ./nexus sumOfSquares '[1,2,3]'
 14
 ```
 
-The `nexus.pl` executable dispatches the command to the compiled C++ program,
+The `nexus` executable dispatches the command to the compiled C++ program,
 `pool-cpp.out`.
 
 
