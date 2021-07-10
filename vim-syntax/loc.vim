@@ -83,6 +83,19 @@ syn match operator /{/
 syn match operator /}/
 syn match operator /->/
 syn match operator /=>/
+
+" operators allowed in constraints
+syn match operator />/
+syn match operator /</
+syn match operator />=/
+syn match operator /<=/
+syn match operator /+/
+syn match operator /-/
+syn match operator /\//
+syn match operator /\/\// " integer division
+syn match operator /%/ " modulus
+syn match operator /^/ " exponentiation
+
 syn match operator /;/
 syn match operator /@/
 
