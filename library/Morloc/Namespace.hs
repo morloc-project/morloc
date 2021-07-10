@@ -92,7 +92,9 @@ import Morloc.Language (Lang(..))
 -- | no annotations for now
 type MDoc = Doc ()
 
--- | A general purpose Directed Acyclic Graph (DAG)
+-- | A general purpose Directed Acyclic Graph (DAG). Technically this structure
+-- needn't be acyclic, but it will raise errors. You can use `findCycle` to
+-- check whether a given stucture has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
 type MorlocMonadGen c e l s a
@@ -349,7 +351,6 @@ data SExpr g f c
 -- | Description of the general manifold
 data GMeta = GMeta {
     metaId :: Int
-  , metaGType :: Maybe GType
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
@@ -359,7 +360,7 @@ data GMeta = GMeta {
   -- ^ The constructors in this node's module scope. FIXME: kludge
   , metaTypedefs :: Map TVar (Type, [TVar])
   -- ^ Everything needed to make the prototypes and serialization generic
-  -- functions in C++
+  -- functions in C++. FIXME: kludge
 } deriving (Show, Ord, Eq)
 
 newtype CType = CType { unCType :: Type }
@@ -392,7 +393,7 @@ data Type
   -- ^ Unknown type: these may be serialized forms that do not need to be
   -- unserialized in the current environment but will later be passed to an
   -- environment where they can be deserialized. Alternatively, terms that are
-  -- used within dynamic languages may need to type annotation.
+  -- used within dynamic languages may need no type annotation.
   | VarT TVar
   -- ^ (a)
   | FunT Type Type
