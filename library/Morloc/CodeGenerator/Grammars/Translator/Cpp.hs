@@ -500,7 +500,7 @@ showNativeTypeM recmap (Native t) = return $ showTypeM recmap (Native t)
 showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 
-collectRecords :: ExprM One -> [(PVar, GMeta, [(PVar, TypeP)])]
+collectRecords :: ExprM One -> [(PVar, GR, [(PVar, TypeP)])]
 collectRecords e0 = f (gmetaOf e0) e0 where
   f _ (ManifoldM m _ e) = f m e
   f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
@@ -521,12 +521,12 @@ collectRecords e0 = f (gmetaOf e0) e0 where
   f m (LetVarM t _) = cleanRecord m t
   f _ _ = []
 
-cleanRecord :: GMeta -> TypeM -> [(PVar, GMeta, [(PVar, TypeP)])]
+cleanRecord :: GR -> TypeM -> [(PVar, GR, [(PVar, TypeP)])]
 cleanRecord m tm = case typeOfTypeM tm of
   (Just t) -> toRecord t
   Nothing -> []
   where
-    toRecord :: TypeP -> [(PVar, GMeta, [(PVar, TypeP)])]
+    toRecord :: TypeP -> [(PVar, GR, [(PVar, TypeP)])]
     toRecord (UnkP _) = []
     toRecord (VarP _) = []
     toRecord (FunP t1 t2) = toRecord t1 ++ toRecord t2
@@ -537,14 +537,14 @@ cleanRecord m tm = case typeOfTypeM tm of
 -- unify records with the same name/keys
 unifyRecords
   :: [(PVar -- The "v" in (NamP _ v@(PV _ _ "struct") _ rs)
-     , GMeta -- The GMeta object stored in the records ManifoldM term
+     , GR -- The GR object stored in the records ManifoldM term
      , [(PVar, TypeP)]) -- key/type terms for this record
      ] -> RecMap
 unifyRecords xs
   = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
   . map (\((v,m,ks), rss) -> ((v,ks), [unifyField m fs | fs <- transpose rss]))
   . map (\((v,ks), rss) -> ((v, fst (head rss),ks), map snd rss))
-  -- [((record_name, record_keys), [(GMeta, [(key,type)])])]
+  -- [((record_name, record_keys), [(GR, [(key,type)])])]
   -- associate unique pairs of record name and keys with their edge types
   . groupSort
   . unique
@@ -554,7 +554,7 @@ structName :: Int -> PVar -> MDoc
 structName i (PV _ (Just v1) "struct") = "mlc_" <> pretty v1 <> "_" <> pretty i 
 structName _ (PV _ _ v) = pretty v
 
-unifyField :: GMeta -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
+unifyField :: GR -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
 unifyField _ [] = error "Empty field"
 unifyField _ rs@((v,_):_)
   | not (all ((==) v) (map fst rs))

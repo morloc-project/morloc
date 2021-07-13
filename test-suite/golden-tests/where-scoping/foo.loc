@@ -90,8 +90,10 @@ f10 = bar (bif 2) where
 --     source py from "theAnswer.py" (theAnswer)
 --     theAnswer :: Num
 --     theAnswer py :: "int"
-
--- should break! Cannot use a
+--
+-- -- should break! The `m` in `add m 22` could be 20 or the recursive value `add m 22`:
+-- --   add (add( ... (add m 22) ...)) 
+-- -- of course this never terminates, but it should be perfectly legal
 -- m = 20
 -- f10 :: Num
 -- f10 = m where

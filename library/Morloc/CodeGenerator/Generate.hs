@@ -9,16 +9,16 @@ Stability   : experimental
 The single @generate@ function wraps the entire AST forest to source code
 translation process.
 
-The input the @generate@ is of type @[SAnno GMeta Many [CType]]@. The @SAnno
-GMeta Many [CType]@ elements each represent a single command exported from the
-main function. The @GMeta@ type stores all general information about a given
+The input the @generate@ is of type @[SAnno GR Many [CType]]@. The @SAnno
+GR Many [CType]@ elements each represent a single command exported from the
+main function. The @GR@ type stores all general information about a given
 "manifold" (a node in the function graph and all its wrappings). The term
 @Many@ states that there may be one of more AST describing each expression. The
 term @[CType]@ states that there may be multiple concrete, language-specific
 types associated with any term.
 
-The @generate@ function converts the @SAnno GMeta Many [CType]@ types into
-@SAnno GMeta One CType@ unambiguous ASTs. This step is an important
+The @generate@ function converts the @SAnno GR Many [CType]@ types into
+@SAnno GR One CType@ unambiguous ASTs. This step is an important
 optimization step in the morloc build pipeline. Currently the compiler uses a
 flat scoring matrix for the cost of interop between languages (e.g., 0 for C++
 to C++, 1000 for anything to R, 5 for R to R since there is a function call
@@ -28,7 +28,7 @@ performance model is a major goal.
 Additional manipulations of the AST can reduce the number of required foreign
 calls, (de)serialization calls, and duplicate computation.
 
-The @SAnno GMeta One CType@ expression is ultimately translated into a simple
+The @SAnno GR One CType@ expression is ultimately translated into a simple
 @ExprM@ type that is then passed to a language-specific translator.
 
 -}
@@ -58,7 +58,7 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 
 -- | Translate typed, abstract syntax forests into compilable code
 generate ::
-  [SAnno GMeta Many [CType]]
+  [SAnno GR Many [CType]]
   -- ^ one AST forest for each command exported from main
   -> MorlocMonad (Script, [Script]) 
   -- ^ the nexus code and the source code for each language pool
@@ -68,7 +68,7 @@ generate ms = do
     -- eliminate morloc composition abstractions
     <-  mapM rewrite ms
     -- select a single instance at each node in the tree
-    >>= mapM realize   -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
+    >>= mapM realize   -- [Either (SAnno GR One CType) (SAnno GR One CType)]
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
@@ -113,16 +113,16 @@ generate ms = do
   where
     -- map from nexus id to pool id
     -- these differ when a declared variable is exported
-    poolId :: GMeta -> SExpr GMeta One TypeP -> Int
+    poolId :: GR -> SExpr GR One TypeP -> Int
     poolId _ (LamS _ (SAnno _ meta)) = metaId meta
     poolId meta _ = metaId meta
 
     -- this is grossly inefficient ... but I'll deal with it later
-    getSrcs :: SExpr GMeta One c -> GMeta -> c -> [Source]
+    getSrcs :: SExpr GR One c -> GR -> c -> [Source]
     getSrcs (CallS src) g _ = src : getSrcsFromGmeta g
     getSrcs _ g _ = getSrcsFromGmeta g
 
-    getSrcsFromGmeta :: GMeta -> [Source]
+    getSrcsFromGmeta :: GR -> [Source]
     getSrcsFromGmeta g
       = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
                | p <- (concat . Map.elems . metaPackers) g]
@@ -138,15 +138,15 @@ generate ms = do
 --    foo x y = add x (div y 5)
 -- Notice that no morloc abstractions appear on the right hand side.
 rewrite
-  :: SAnno GMeta Many [CType]
-  -> MorlocMonad (SAnno GMeta Many [CType])
+  :: SAnno GR Many [CType]
+  -> MorlocMonad (SAnno GR Many [CType])
 rewrite (SAnno (Many es0) g0) = do
   es0' <- concat <$> mapM rewriteL0 es0
   return $ SAnno (Many es0') g0
   where
     rewriteL0
-      :: (SExpr GMeta Many [CType], [CType])
-      -> MorlocMonad [(SExpr GMeta Many [CType], [CType])]
+      :: (SExpr GR Many [CType], [CType])
+      -> MorlocMonad [(SExpr GR Many [CType], [CType])]
     rewriteL0 (AppS (SAnno (Many es1) g1) args, c1) = do
       args' <- mapM rewrite args
       -- originally es1 consists of a list of CallS and LamS constructors
@@ -248,8 +248,8 @@ rewrite (SAnno (Many es0) g0) = do
 -- concrete type and the general type (if available).  Select pack/unpack
 -- functions.
 realize
-  :: SAnno GMeta Many [CType]
-  -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One TypeP))
+  :: SAnno GR Many [CType]
+  -> MorlocMonad (Either (SAnno GR One ()) (SAnno GR One TypeP))
 realize x0 = do
   -- MM.say $ " --- realize ---"
   -- MM.say $ prettySAnnoMany x
@@ -263,8 +263,8 @@ realize x0 = do
     realizeAnno
       :: Int
       -> Maybe Lang
-      -> SAnno GMeta Many [CType]
-      -> MorlocMonad (Maybe (Int, SAnno GMeta One CType))
+      -> SAnno GR Many [CType]
+      -> MorlocMonad (Maybe (Int, SAnno GR One CType))
     realizeAnno depth langMay (SAnno (Many xs) m) = do
       asts <- mapM (\(x, cs) -> mapM (realizeExpr (depth+1) langMay x) cs) xs |>> concat
       case minimumOnMay (\(s,_,_) -> s) (catMaybes asts) of
@@ -276,9 +276,9 @@ realize x0 = do
     realizeExpr
       :: Int
       -> Maybe Lang
-      -> SExpr GMeta Many [CType]
+      -> SExpr GR Many [CType]
       -> CType
-      -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
+      -> MorlocMonad (Maybe (Int, SExpr GR One CType, CType))
     realizeExpr depth lang x c = do
       let lang' = if isJust lang then lang else langOf c
       realizeExpr' depth lang' x c
@@ -286,9 +286,9 @@ realize x0 = do
     realizeExpr'
       :: Int
       -> Maybe Lang
-      -> SExpr GMeta Many [CType]
+      -> SExpr GR Many [CType]
       -> CType
-      -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
+      -> MorlocMonad (Maybe (Int, SExpr GR One CType, CType))
     -- always choose the primitive that is in the same language as the parent
     realizeExpr' _ lang UniS c
       | lang == langOf c = return $ Just (0, UniS, c)
@@ -379,7 +379,7 @@ realize x0 = do
 --  f6 (x,y) = (y,x)
 --
 -- The idea could be elaborated into a full-fledged language.
-makeGAST :: SAnno GMeta Many [CType] -> MorlocMonad (SAnno GMeta One ())
+makeGAST :: SAnno GR Many [CType] -> MorlocMonad (SAnno GR One ())
 makeGAST (SAnno (Many []) m) = case metaGType m of
   (Just (GType t)) -> MM.throwError . CallTheMonkeys . render
     $ "Cannot build general value from type" <+> dquotes (prettyType t)
@@ -417,17 +417,17 @@ makeGAST (SAnno (Many ((CallS src, _):_)) _)
 
 -- | Serialize a simple, general data type. This type can consists only of JSON
 -- primitives and containers (lists, tuples, and records) and accessors.
-generalSerial :: SAnno GMeta One () -> MorlocMonad NexusCommand
-generalSerial (SAnno _ GMeta{metaName = Nothing})
+generalSerial :: SAnno GR One () -> MorlocMonad NexusCommand
+generalSerial (SAnno _ GR{metaName = Nothing})
   = MM.throwError . OtherError $ "No general type found for call-free function"
-generalSerial (SAnno _ GMeta{metaGType = Nothing})
+generalSerial (SAnno _ GR{metaGType = Nothing})
   = MM.throwError . OtherError $ "No name found for call-free function"
-generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
+generalSerial x0@(SAnno _ GR{ metaName = Just subcmd
                                , metaGType = Just (GType cmdtype)}) = generalSerial' [] x0
   where
     base = NexusCommand subcmd cmdtype (dquotes "_") [] []
 
-    generalSerial' :: JsonPath -> SAnno GMeta One () -> MorlocMonad NexusCommand
+    generalSerial' :: JsonPath -> SAnno GR One () -> MorlocMonad NexusCommand
     generalSerial' _ (SAnno (One (UniS,   _)) _)
       = return $ base { commandJson = "null" }
     generalSerial' _ (SAnno (One (NumS x, _)) _)
@@ -486,8 +486,8 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
         "Cannot serialize general type:" <+> prettyType (fromJust $ metaGType m)
 
 rewritePartials
-  :: SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One TypeP)
+  :: SAnno GR One TypeP
+  -> MorlocMonad (SAnno GR One TypeP)
 rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
   let gTypeArgs = maybe (repeat Nothing) (map Just . decomposeFull) (metaGType m)
   f' <- rewritePartials f
@@ -508,7 +508,7 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
     makeGType ts = fmap GType . makeType . map (unGType . fromJust) $ ts
 
     -- make an sanno variable from variable name and type info
-    makeVar :: EVar -> TypeP -> Maybe GType -> SAnno GMeta One TypeP
+    makeVar :: EVar -> TypeP -> Maybe GType -> SAnno GR One TypeP
     makeVar v c g = SAnno (One (VarS v, c))
       ( m { metaGType = g
           , metaName = Nothing
@@ -542,8 +542,8 @@ rewritePartials x = return x
 -- | Add arguments that are required for each term. Unneeded arguments are
 -- removed at each step.
 parameterize
-  :: SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
+  :: SAnno GR One TypeP
+  -> MorlocMonad (SAnno GR One (TypeP, [(EVar, Argument)]))
 parameterize (SAnno (One (LamS vs x, t)) m) = do
   let args0 = zip vs $ zipWith makeArgument [0..] (decomposeFull t)
   x' <- parameterize' args0 x
@@ -562,8 +562,8 @@ parameterize x = parameterize' [] x
 -- call, for instance.
 parameterize'
   :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
-  -> SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
+  -> SAnno GR One TypeP
+  -> MorlocMonad (SAnno GR One (TypeP, [(EVar, Argument)]))
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
 parameterize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
@@ -615,10 +615,10 @@ makeArgument i t = SerialArgument i t
 
 
 -- convert from unambiguous tree to non-segmented ExprM
-express :: SAnno GMeta One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+express :: SAnno GR One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
 express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
 
-  express' :: Bool -> TypeP -> SAnno GMeta One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+  express' :: Bool -> TypeP -> SAnno GR One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
 
   -- primitives
   express' _ _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (Native c) x

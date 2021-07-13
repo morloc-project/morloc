@@ -66,10 +66,11 @@ module Morloc.Namespace
   , SAnno(..)
   , SExpr(..)
   , GMeta(..)
+  , GU
+  , GR
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
-  , Scoped(..)
   ) where
 
 import Control.Monad.Except (ExceptT)
@@ -292,13 +293,7 @@ data Config =
 
 newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
--- | An expression variable. [Text] is scope of the variable relative to the
--- module. The definition of the term must be along this path. The path is a
--- stack, so if the term is in the global namespace, then the list is empty.
--- Every step into a `where` statement puts a new name on the stack. So the
--- namespace path is reverse order of normal filesystem paths, with the root
--- global namespace as the last element.
-data EVar = EV [Text] Text deriving (Show, Eq, Ord)
+data EVar = EV Text deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
 
@@ -307,7 +302,7 @@ unTVar :: TVar -> Text
 unTVar (TV _ t) = t
 
 unEVar :: EVar -> Text
-unEVar (EV _ e) = e
+unEVar (EV e) = e
 
 data Source =
   Source
@@ -322,7 +317,7 @@ data Source =
   deriving (Ord, Eq, Show)
 
 -- g: an annotation for the group of child trees (what they have in common)
--- f: a collection - before realization this will probably be Set
+-- f: a collection - before realization this will be Many
 --                 - after realization it will be One
 -- c: an annotation for the specific child tree
 data SAnno g f c = SAnno (f (SExpr g f c, c)) g
@@ -340,6 +335,7 @@ data SExpr g f c
   | AccS (SAnno g f c) Text
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
+  | ScopeS [(EVar, SAnno g f c)] (SAnno g f c)
   | LamS [EVar] (SAnno g f c)
   | AppS (SAnno g f c) [SAnno g f c]
   | NumS Scientific
@@ -349,8 +345,11 @@ data SExpr g f c
   | CallS Source
 
 -- | Description of the general manifold
-data GMeta = GMeta {
+data GMeta t = GMeta {
     metaId :: Int
+  , metaGType :: t
+  -- ^ General type. Before type inference the general type is unresolved. In
+  -- the realization phase it is usually (always?) known.
   , metaName :: Maybe EVar -- the name, if relevant
   , metaProperties :: Set Property
   , metaConstraints :: Set Constraint
@@ -362,6 +361,12 @@ data GMeta = GMeta {
   -- ^ Everything needed to make the prototypes and serialization generic
   -- functions in C++. FIXME: kludge
 } deriving (Show, Ord, Eq)
+
+-- General unresolved metadata and type - used before type inference
+type GU = GMeta (Maybe UnresolvedType)
+
+-- General resolved metadata and type - used after type inference
+type GR = GMeta (Maybe GType)
 
 newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
@@ -387,7 +392,7 @@ data NamType
   | NamTable
   deriving(Show, Ord, Eq)
 
--- | Types, see Dunfield Figure 6
+-- | A basic type
 data Type
   = UnkT TVar
   -- ^ Unknown type: these may be serialized forms that do not need to be
@@ -404,7 +409,7 @@ data Type
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
 
--- | Types, see Dunfield Figure 6
+-- | A type with existentials and universals
 data UnresolvedType
   = VarU TVar
   -- ^ (a)
@@ -443,12 +448,6 @@ data Property
 newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
-
-class Scoped a where
-  scopeOf :: a -> [Text]
-
-instance Scoped EVar where
-  scopeOf (EV ns _) = ns
 
 class Typelike a where
   typeOf :: a -> Type

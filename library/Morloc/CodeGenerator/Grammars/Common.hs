@@ -285,13 +285,13 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM :: GR -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m e = case typeOfExprM e of
   (Serial t) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
   (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
   _ -> return e
 
-packExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many)
+packExprM :: GR -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = case typeOfExprM e of
   (Native t) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
   -- (Function _ _) -> error "Cannot pack a function"
@@ -326,7 +326,7 @@ argsOf (LamM args _) = args
 argsOf (ManifoldM _ args _) = args
 argsOf _ = []
 
-gmetaOf :: ExprM f -> GMeta
+gmetaOf :: ExprM f -> GR
 gmetaOf (ManifoldM m _ _) = m
 gmetaOf (LamM _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"

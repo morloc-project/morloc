@@ -40,7 +40,7 @@ data TermOrigin = Declared Expr | Sourced Source
 
 treeify
   :: DAG MVar [(EVar, EVar)] PreparedNode
-  -> MorlocMonad [SAnno (GMeta UnresolvedType) Many [UnresolvedType]]
+  -> MorlocMonad [SAnno GU Many [UnresolvedType]]
 treeify d
   | Map.size d == 0 = return []
   | otherwise = case MDD.roots d of
@@ -67,12 +67,12 @@ collect
   :: DAG MVar [(EVar, EVar)] PreparedNode
   -> PreparedNode
   -> EVar
-  -> MorlocMonad (SAnno (GMeta UnresolvedType) Many [UnresolvedType])
+  -> MorlocMonad (SAnno GU Many [UnresolvedType])
 collect d n v = do
   trees <- collectSExprs d n v
 
   -- Just look at one x, since any should emit the same GMeta (if not, then
-  -- something is broken upstream of GMeta is not general enough)
+  -- something is broken upstream or GMeta is not general enough)
   gmeta <- makeGMeta (Just v) n Nothing
 
   return $ SAnno (Many trees) gmeta
@@ -81,15 +81,15 @@ collectSExprs
   :: DAG MVar [(EVar, EVar)] PreparedNode
   -> PreparedNode
   -> EVar
-  -> MorlocMonad [(SExpr (GMeta UnresolvedType) Many [UnresolvedType], [UnresolvedType])]
+  -> MorlocMonad [(SExpr GU Many [UnresolvedType], [UnresolvedType])]
 collectSExprs d n v = do
   -- DAG MVar None (EVar, (PreparedNode, [TermOrigin]))
-  let termTree = MDD.lookupAliasedTerm v m (makeTermOrigin v) d
+  let termTree = MDD.lookupAliasedTerm v n (makeTermOrigin v) d
 
-  -- DAG MVar None [(SExpr GMeta Many [CType], [CType])]
+  -- DAG MVar None [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
   sexprTree <- MDD.mapNodeM (\(v',(n',ts)) -> collectTerms d v' n' ts) termTree
 
-  -- [(SExpr GMeta Many [CType], [CType])]
+  -- [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
   let trees = concat . MDD.nodes $ sexprTree
 
   return trees
@@ -100,7 +100,7 @@ makeGMeta
   :: Maybe EVar
   -> PreparedNode
   -> Maybe UnresolvedType
-  -> MorlocMonad GMeta
+  -> MorlocMonad GU
 makeGMeta name n gtype = do
   i <- MM.getCounter
   case name >>= (flip Map.lookup) (typedNodeTypeMap n) of

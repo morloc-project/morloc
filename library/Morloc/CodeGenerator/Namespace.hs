@@ -135,7 +135,7 @@ data TypeM
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
 data ExprM f
-  = ManifoldM GMeta [Argument] (ExprM f)
+  = ManifoldM GR [Argument] (ExprM f)
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
   | ForeignInterfaceM

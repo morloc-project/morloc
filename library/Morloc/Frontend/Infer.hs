@@ -28,7 +28,12 @@ import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Frontend.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 
-typecheck :: [SAnno GMeta Many [UnresolvedType]] -> Stack [SAnno GMeta Many [CType]]
+-- | Each SAnno object in the input list represents one exported function.
+-- Modules, scopes, imports and and everything else are abstracted away,
+-- wrapped into GMeta or stored in the Stack state.
+typecheck
+  ::       [SAnno GU Many [UnresolvedType]]
+  -> Stack [SAnno GR Many [CType         ]]
 typecheck = undefined
 
 subtype :: UnresolvedType -> UnresolvedType -> Gamma -> Stack Gamma

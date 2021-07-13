@@ -76,7 +76,11 @@ substituteT v0 r0 t0 = sub t0
 
 -- | Terms, see Dunfield Figure 1
 data Expr
-  = SrcE [Source]
+  = ModE EVar
+  -- ^ the toplevel expression in a module
+  | ExpE EVar
+  -- ^ a term that is exported from a module (should only exist at the toplevel)
+  | SrcE [Source]
   -- ^ import "c" from "foo.c" ("f" as yolo).
   | Signature EVar EType
   -- ^ x :: A
@@ -116,26 +120,6 @@ data EType =
     , econs :: Set Constraint
     }
   deriving (Show, Eq, Ord)
-
-instance Scoped Expr where
-  scopeOf (SrcE _) = []
-  scopeOf (Signature v _) = scopeOf v
-  scopeOf (Declaration v _) = scopeOf v
-  scopeOf (UniE) = []
-  scopeOf (VarE v) = scopeOf v 
-  scopeOf (AccE e _) = scopeOf e
-  scopeOf (ListE []) = []
-  scopeOf (ListE (x:_)) = scopeOf x
-  scopeOf (TupleE []) = []
-  scopeOf (TupleE (x:_)) = scopeOf x
-  scopeOf (LamE v _) = scopeOf v
-  scopeOf (AppE e _) = scopeOf e
-  scopeOf (AnnE e _) = scopeOf e
-  scopeOf (NumE _) = []
-  scopeOf (LogE _) = []
-  scopeOf (StrE _) = []
-  scopeOf (RecE []) = []
-  scopeOf (RecE ((_, e):_)) = scopeOf e
 
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
@@ -211,17 +195,27 @@ data StackState =
   deriving (Ord, Eq, Show)
 
 
-
 -- | The type returned from the Parser. It contains all the information in a
 -- single module but knows NOTHING about other modules.
-data ParserNode = ParserNode  {
-    parserNodePath :: Maybe Path
-  , parserNodeBody :: [Expr]
-  , parserNodeSourceMap :: Map (EVar, Lang) Source
-  , parserNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
-  , parserNodeExports :: Set EVar
-} deriving (Show, Ord, Eq)
+data ParserNode = ParserNode {
+    parserNodeExports :: Set EVar
+  , parserNodeBody :: RootedRoseTree Expr 
+  -- ^ each plain in the rose tree represents a scope. Given `Rose e ks`,
+  -- expression `e` looks up values first in the `[x ; Rose x _ <- ks]` then
+  -- looks up through parent scopes
+}
 type ParserDag = DAG MVar Import ParserNode
+
+-- -- | The type returned from the Parser. It contains all the information in a
+-- -- single module but knows NOTHING about other modules.
+-- data ParserNode = ParserNode  {
+--     parserNodePath :: Maybe Path
+--   , parserNodeBody :: [Expr]
+--   , parserNodeSourceMap :: Map (EVar, Lang) Source
+--   , parserNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
+--   , parserNodeExports :: Set EVar
+-- } deriving (Show, Ord, Eq)
+-- type ParserDag = DAG MVar Import ParserNode
 
 -- | Node description after desugaring (substitute type aliases and resolve
 -- imports/exports)
