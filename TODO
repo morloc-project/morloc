@@ -1,5 +1,6 @@
 # Features
 
+ [ ] where syntax
  [x] composable serialization/deserialization functions
  [x] composable default types
  [ ] auto-casting
@@ -20,6 +21,7 @@
    [+] Python3
    [+] C++
    [.] C
+   [.] Ruse
    [ ] bash
    [ ] Haskell
    [ ] Perl
@@ -35,18 +37,12 @@
 
  [ ] Make a Docker image
 
-# RDF representation
-
- [ ] Write specification
- [x] Handle import scoping (maybe follow R environment model)
- [x] Remove dependency on `arq` (too slow)
-
 # Error reporting
 
  * In the compiler ...
 
-   [ ] Add meaningful error messages to parser
-   [ ] Replace the naked `error` calls everywhere
+   [x] Add meaningful error messages to parser
+   [.] Replace the naked `error` calls everywhere
 
  * In the generated code ...
 
@@ -64,7 +60,8 @@
 
 # Syntax
 
- [ ] Remove semicolon requirement
+ [x] Remove semicolon requirement
+ [ ] Allow semicolons
 
 # UI and configuration 
 
@@ -72,29 +69,25 @@
    [ ] print the short doc string
 
  * in the function-specific detailed printout:
-   [ ] print the type signature of each exported function
+   [x] print the type signature of each exported function
    [ ] print the long doc string
-
- * configuration
-   [ ] parse to RDF and upload to local SPARQL database
 
 # typechecking
 
  [x] Add a full type inference system, this is just one layer of the type
      system, but is an essential one. Eventually this can be ported to the
      rule-engine.
- [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
 
 # Documentation
 
  [ ] Write TensorFlow example
  [ ] Add haddock for every function
- [ ] Write basic manual
+ [x] Write basic manual
 
  * Extend README with
-   [ ] A discussion of the architecture (SPARQL, JSON, MorlocIO, etc)
-   [ ] A deeper discussion of the type system
-   [ ] More examples
+   [ ] A discussion of the architecture (JSON, MorlocIO, etc)
+   [x] A deeper discussion of the type system
+   [x] More examples
    [ ] A contribution and future work section
 
 # Libraries
