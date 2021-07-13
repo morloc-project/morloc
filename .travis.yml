@@ -21,6 +21,7 @@ before_install:
     # Set up R
     - mkdir -p ~/R/library
     - echo 'R_LIBS=~/R/library' >> ~/.Renviron
+    - R -e 'install.packages("devtools", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("digest", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("tibble", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("rematch2", lib="~/R/library", repos="https://cloud.r-project.org")'
@@ -31,7 +32,6 @@ before_install:
     - R -e 'install.packages("rcmdcheck", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("roxygen2", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'install.packages("testthat", lib="~/R/library", repos="https://cloud.r-project.org")'
-    - R -e 'install.packages("devtools", lib="~/R/library", repos="https://cloud.r-project.org")'
     - R -e 'devtools::install_github("morloc-project/rmorlocinternals")'
     # Set up Perl
     - export PERL_MM_USE_DEFAULT=1
