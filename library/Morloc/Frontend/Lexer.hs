@@ -22,7 +22,9 @@ module Morloc.Frontend.Lexer
   , lexeme
   , lexemeBase
   , many1
+  , freename
   , name
+  , tvar
   , newvar
   , number
   , op
@@ -74,6 +76,11 @@ emptyState = ParserState {
   , stateMinPos = mkPos 1
   , stateAccepting = False
 }
+
+tvar :: MT.Text -> Parser TVar
+tvar v = do
+  lang <- CMS.gets stateLang
+  return $ TV lang v
 
 newvar :: Maybe Lang -> Parser TVar
 newvar lang = do
@@ -222,6 +229,15 @@ stringLiteral = lexeme $ do
   s <- many (noneOf ['"'])
   _ <- char '\"'
   return $ MT.pack s
+
+freename :: Parser MT.Text
+freename = (lexeme . try) (p >>= check)
+  where
+    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
+    check x =
+      if elem x reservedWords
+        then failure Nothing Set.empty -- TODO: error message
+        else return x
 
 name :: Parser MT.Text
 name = (lexeme . try) (p >>= check)

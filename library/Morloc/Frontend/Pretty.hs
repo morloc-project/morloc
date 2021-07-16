@@ -49,6 +49,13 @@ prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGr
 
 prettyExpr :: Expr -> Doc AnsiStyle
 prettyExpr UniE = "()"
+prettyExpr (ModE v es) = align . vsep $ ("module" <+> pretty v) : map prettyExpr es
+prettyExpr (TypE v vs t) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenUnresolvedType t
+prettyExpr (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
+prettyExpr (ImpE (Import m (Just xs) _ _))
+  = "import" <+> pretty m
+  <+> tupled [dquotes (pretty n) <+> "as" <+> pretty alias | (n,alias) <- xs] 
+prettyExpr (ExpE v) = "export" <+> pretty v
 prettyExpr (VarE s) = pretty s
 prettyExpr (AccE e k) = parens (prettyExpr e) <> "@" <> pretty k 
 prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
@@ -61,7 +68,7 @@ prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x
-prettyExpr (Declaration v e) = pretty v <+> "=" <+> prettyExpr e
+prettyExpr (Declaration v e es) = pretty v <+> "=" <+> prettyExpr e <+> "where" <+> (align . vsep . map prettyExpr) es
 prettyExpr (ListE xs) = list (map prettyExpr xs)
 prettyExpr (TupleE xs) = tupled (map prettyExpr xs)
 prettyExpr (SrcE []) = ""
@@ -72,7 +79,7 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
   pretty f <+>
   tupled
     (map
-       (\(n, EV _ a) ->
+       (\(n, EV a) ->
           pretty n <>
           if unName n == a
             then ""
@@ -85,7 +92,7 @@ prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
   viaShow lang <+>
   tupled
     (map
-       (\(n, EV _ a) ->
+       (\(n, EV a) ->
           pretty n <>
           if unName n == a
             then ""

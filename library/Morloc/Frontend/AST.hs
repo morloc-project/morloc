@@ -18,15 +18,15 @@ import Morloc.Frontend.Namespace
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
 -- Imports may only be at the top level (FIXME: allow local imports in declaration where statements)
 findEdges :: Expr -> (MVar, [(MVar, Import)], Expr)
-findEdges e@(Mod n es) = (n, [(moduleName i, i); i@(ImpE _) <- es] , e)
+findEdges e@(ModE n es) = (n, [(importModuleName i, i)| (ImpE i) <- es], e)
 findEdges _ = error "Expected a module"
 
 findExports :: Expr -> [EVar]
 findExports (ExpE v) = [v]
-findExports (Mod _ es) = conmap findExports es
+findExports (ModE _ es) = conmap findExports es
 findExports _ = []
 
 findTypedefs :: Expr -> [(TVar, [TVar], UnresolvedType)]
-findTypedefs t@(TypE _ _ _) = [t] 
-findTypedefs (Mod _ es) = conmap findTypedefs es
+findTypedefs (TypE v vs t) = [(v, vs, t)] 
+findTypedefs (ModE _ es) = conmap findTypedefs es
 findTypedefs _ = []

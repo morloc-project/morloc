@@ -418,12 +418,12 @@ makeGAST (SAnno (Many ((CallS src, _):_)) _)
 -- | Serialize a simple, general data type. This type can consists only of JSON
 -- primitives and containers (lists, tuples, and records) and accessors.
 generalSerial :: SAnno GR One () -> MorlocMonad NexusCommand
-generalSerial (SAnno _ GR{metaName = Nothing})
+generalSerial (SAnno _ (GMeta {metaName = Nothing}))
   = MM.throwError . OtherError $ "No general type found for call-free function"
-generalSerial (SAnno _ GR{metaGType = Nothing})
+generalSerial (SAnno _ (GMeta {metaGType = Nothing}))
   = MM.throwError . OtherError $ "No name found for call-free function"
-generalSerial x0@(SAnno _ GR{ metaName = Just subcmd
-                               , metaGType = Just (GType cmdtype)}) = generalSerial' [] x0
+generalSerial x0@(SAnno _ (GMeta { metaName = Just subcmd
+                                 , metaGType = Just (GType cmdtype)})) = generalSerial' [] x0
   where
     base = NexusCommand subcmd cmdtype (dquotes "_") [] []
 
@@ -479,7 +479,7 @@ generalSerial x0@(SAnno _ GR{ metaName = Just subcmd
     generalSerial' ps (SAnno (One (LamS vs x, _)) _) = do
       ncmd <- generalSerial' ps x
       return $ ncmd { commandArgs = vs }
-    generalSerial' ps (SAnno (One (VarS (EV _ v), _)) _) =
+    generalSerial' ps (SAnno (One (VarS (EV v), _)) _) =
       return $ base { commandSubs = [(ps, v, [])] }
     generalSerial' _ (SAnno (One _) m) = do
       MM.throwError . OtherError . render $
@@ -493,8 +493,7 @@ rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
   f' <- rewritePartials f
   xs' <- mapM rewritePartials xs
   lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
-  -- FIXME: use the correct scope
-  let vs = map (EV []) . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
+  let vs = map EV . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
       ys = zipWith3 makeVar vs (decomposeFull ftype) gTypeArgs
       -- unsafe, but should not fail for well-typed input
       appType = last . decomposeFull $ ftype
@@ -550,7 +549,7 @@ parameterize (SAnno (One (LamS vs x, t)) m) = do
   return $ SAnno (One (LamS vs x', (t, args0))) m
 parameterize (SAnno (One (CallS src, t)) m) = do
   let ts = init . decomposeFull $ t
-      vs = map (EV []) (freshVarsAZ [])
+      vs = map EV (freshVarsAZ [])
       args0 = zipWith makeArgument [0..] ts
   return $ SAnno (One (CallS src, (t, zip vs args0))) m
 parameterize x = parameterize' [] x

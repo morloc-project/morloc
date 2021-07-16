@@ -129,7 +129,7 @@ shallowType (SerialUnknown _) = MM.throwError . SerializationError
                                        $ "Cannot guess serialization type"
 
 makeSerialAST
-  :: GMeta
+  :: GR
   -> TypeP
   -> MorlocMonad (SerialAST Many)
 makeSerialAST _ (UnkP v) = return $ SerialUnknown v

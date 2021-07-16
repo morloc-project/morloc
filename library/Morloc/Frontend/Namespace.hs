@@ -27,7 +27,7 @@ module Morloc.Frontend.Namespace
   , substituteT
   ) where
 
-import Morloc.Namespace
+import Morloc.Namespace hiding (name)
 import Data.Set (Set)
 import Data.Map.Strict (Map)
 import Control.Monad.Except (ExceptT)
@@ -91,8 +91,6 @@ data Expr
   -- 1. term name
   -- 2. term
   -- 3. term where statements
-  | ConE Text
-  -- ^ a constraint FIXME: the string representation of a constraint is just a placeholder
   | UniE
   -- ^ (())
   | VarE EVar

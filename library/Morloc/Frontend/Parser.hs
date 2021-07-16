@@ -63,7 +63,7 @@ pProgram = do
   f <- CMS.gets stateModulePath
   L.space space1 comments empty
   setMinPos
-  return $ align (many pToplevel)
+  many pToplevel
 
 pToplevel :: Parser Expr
 pToplevel = try pModule <|> pMain
@@ -74,12 +74,12 @@ pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
   es <- align pExpr
-  moduleName' <- freename
-  return $ ModE freename es
+  moduleName <- freename
+  return $ ModE (MVar moduleName) es
 
 -- | match an implicit "main" module
 pMain :: Parser Expr
-pMain = ModE (EV "Main") <*> many pExpr
+pMain = ModE (MVar "Main") <$> many pExpr
 
 pExpr :: Parser Expr
 pExpr =
@@ -145,7 +145,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- symbol "="
     t <- pType
     setLang Nothing
-    return $ TypE v vs t)
+    return (TypE v vs t)
 
   pTypedefObject :: Parser Expr
   pTypedefObject = do
@@ -158,7 +158,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
     let t = NamU r (TV lang constructor) (map VarU vs) entries
     setLang Nothing
-    return $ TypE v vs t
+    return (TypE v vs t)
 
   desugarTableEntries
     :: Maybe Lang
@@ -210,31 +210,20 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
 
   pDataDeclaration :: Parser Expr
   pDataDeclaration = do
-    v <- freename
-    v' <- evar v
+    v <- pEVar
     _ <- symbol "="
-    -- enter data declaration scope
-    incNamespace v
     e <- pExpr
-    subExpressions <- option [] $ reserved "where" >> alignInset whereTerm |>> concat
-    decNamespace
-    -- exit scope
-    return $ Declaration v' e subExpressions
+    subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
+    return $ Declaration v e subExpressions
 
   pFunctionDeclaration :: Parser Expr
   pFunctionDeclaration = do
-    v <- freename
-    v' <- evar v
-    -- enter function scope
-    incNamespace v
-    args <- many1 freename
-    args' <- mapM evar args
+    v <- pEVar
+    args <- many1 pEVar
     _ <- symbol "="
     e <- pExpr
-    subExpressions <- option [] $ reserved "where" >> alignInset whereTerm |>> concat
-    decNamespace
-    -- exit scope
-    return $ Declaration v' (curryLamE args' e) subExpressions
+    subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
+    return $ Declaration v (curryLamE args e) subExpressions
     where
       curryLamE [] e' = e'
       curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
@@ -244,13 +233,12 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
   -- could not be here. Exports probably should NOT be allowed since they would
   -- break scope.
   whereTerm :: Parser Expr
-  whereTerm = try (fmap return pSignature) <|> pDeclaration
+  whereTerm = try pSignature <|> pDeclaration
 
 
 pSignature :: Parser Expr
 pSignature = do
   v <- freename
-  v' <- evar v
   lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
@@ -260,7 +248,7 @@ pSignature = do
   setLang Nothing
   return $
     Signature
-      v'
+      (EV v)
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -322,9 +310,8 @@ pSrcE = do
   pImportSourceTerm :: Parser (Name, EVar)
   pImportSourceTerm = do
     n <- stringLiteral
-    v <- evar n
-    a <- option v (reserved "as" >> freename >>= evar)
-    return (Name n, a)
+    a <- option n (reserved "as" >> freename)
+    return (Name n, EV a)
 
 pNamE :: Parser Expr
 pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))
@@ -411,7 +398,7 @@ pVar :: Parser Expr
 pVar = fmap VarE pEVar
 
 pEVar :: Parser EVar
-pEVar = freename >>= evar
+pEVar = fmap EV freename
 
 pTypeGen :: Parser UnresolvedType
 pTypeGen = do

@@ -335,7 +335,7 @@ data SExpr g f c
   | AccS (SAnno g f c) Text
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
-  | ScopeS [(EVar, SAnno g f c)] (SAnno g f c)
+  | WhereS (SAnno g f c) [(EVar, SAnno g f c)]
   | LamS [EVar] (SAnno g f c)
   | AppS (SAnno g f c) [SAnno g f c]
   | NumS Scientific

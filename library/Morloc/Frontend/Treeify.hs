@@ -18,115 +18,109 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
--- -- | Node description after type checking. This will later be fed into
--- -- `treeify` to make the SAnno objects that will be passed to Generator.
--- data TypedNode = TypedNode {
---     typedNodeModuleName :: MVar
---   , typedNodePath :: Maybe Path
---   , typedNodeBody :: [Expr]
---   , typedNodeTypeMap :: Map EVar TypeSet
---   , typedNodeSourceMap :: Map (EVar, Lang) Source
---   , typedNodeExports :: Set EVar
---   , typedNodeTypedefs :: Map TVar (Type, [TVar])
---   , typedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
---   , typedNodeConstructors :: Map TVar Source
---   -- ^ The (un)packers available in this module scope.
--- } deriving (Show, Ord, Eq)
--- type TypedDag = DAG MVar [(EVar, EVar)] TypedNode
-
-
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
 
 treeify
-  :: DAG MVar [(EVar, EVar)] PreparedNode
+  :: DAG MVar [(EVar, EVar)] Expr
   -> MorlocMonad [SAnno GU Many [UnresolvedType]]
-treeify d
-  | Map.size d == 0 = return []
-  | otherwise = case MDD.roots d of
-    -- if no parentless element exists, then the graph must be empty or cyclic
-    [] -> MM.throwError CyclicDependency
-    [k] -> case MDD.lookupNode k d of
-      Nothing -> MM.throwError . DagMissingKey . render $ pretty k
-      (Just n) -> do
-        -- initialize state counter to 0, used to index manifolds
-        MM.startCounter
-        mapM (collect d n) (Set.toList (preparedNodeExports n))
-    -- There is no currently supported use case that exposes multiple roots in
-    -- one compilation process. The compiler executable takes a single morloc
-    -- file as input, therefore this MUST be the root. In the future compiling
-    -- multiple projects in parallel with potentially shared information and
-    -- constraints could be valuable.
-    _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
+treeify = undefined
+-- treeify
+--   :: DAG MVar [(EVar, EVar)] PreparedNode
+--   -> MorlocMonad [SAnno GU Many [UnresolvedType]]
+-- treeify d
+--   | Map.size d == 0 = return []
+--   | otherwise = case MDD.roots d of
+--     -- if no parentless element exists, then the graph must be empty or cyclic
+--     [] -> MM.throwError CyclicDependency
+--     [k] -> case MDD.lookupNode k d of
+--       Nothing -> MM.throwError . DagMissingKey . render $ pretty k
+--       (Just n) -> do
+--         -- initialize state counter to 0, used to index manifolds
+--         MM.startCounter
+--         mapM (collect d n) (Set.toList (preparedNodeExports n))
+--     -- There is no currently supported use case that exposes multiple roots in
+--     -- one compilation process. The compiler executable takes a single morloc
+--     -- file as input, therefore this MUST be the root. In the future compiling
+--     -- multiple projects in parallel with potentially shared information and
+--     -- constraints could be valuable.
+--     _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
 
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
 -- with 1 or more possible tree topologies, each with one or more possible for
 -- each function.
 collect
-  :: DAG MVar [(EVar, EVar)] PreparedNode
-  -> PreparedNode
+  :: DAG MVar [(EVar, EVar)] Expr
+  -> Expr
   -> EVar
   -> MorlocMonad (SAnno GU Many [UnresolvedType])
-collect d n v = do
-  trees <- collectSExprs d n v
+collect = undefined
 
-  -- Just look at one x, since any should emit the same GMeta (if not, then
-  -- something is broken upstream or GMeta is not general enough)
-  gmeta <- makeGMeta (Just v) n Nothing
+-- collect
+--   :: DAG MVar [(EVar, EVar)] PreparedNode
+--   -> PreparedNode
+--   -> EVar
+--   -> MorlocMonad (SAnno GU Many [UnresolvedType])
+-- collect d n v = do
+--   trees <- collectSExprs d n v
+--
+--   -- Just look at one x, since any should emit the same GMeta (if not, then
+--   -- something is broken upstream or GMeta is not general enough)
+--   gmeta <- makeGMeta (Just v) n Nothing
+--
+--   return $ SAnno (Many trees) gmeta
 
-  return $ SAnno (Many trees) gmeta
-
-collectSExprs
-  :: DAG MVar [(EVar, EVar)] PreparedNode
-  -> PreparedNode
-  -> EVar
-  -> MorlocMonad [(SExpr GU Many [UnresolvedType], [UnresolvedType])]
-collectSExprs d n v = do
-  -- DAG MVar None (EVar, (PreparedNode, [TermOrigin]))
-  let termTree = MDD.lookupAliasedTerm v n (makeTermOrigin v) d
-
-  -- DAG MVar None [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
-  sexprTree <- MDD.mapNodeM (\(v',(n',ts)) -> collectTerms d v' n' ts) termTree
-
-  -- [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
-  let trees = concat . MDD.nodes $ sexprTree
-
-  return trees
-
-
--- | Find info common across realizations of a given term in a given module
-makeGMeta
-  :: Maybe EVar
-  -> PreparedNode
-  -> Maybe UnresolvedType
-  -> MorlocMonad GU
-makeGMeta name n gtype = do
-  i <- MM.getCounter
-  case name >>= (flip Map.lookup) (typedNodeTypeMap n) of
-    (Just (TypeSet (Just e) _)) -> do
-      let g = (Just . GType) $ resolve (etype e)
-      return $ GMeta
-        { metaId = i
-        , metaGType = maybe g Just gtype
-        , metaName = name
-        , metaProperties = eprop e
-        , metaConstraints = econs e
-        , metaPackers = typedNodePackers n
-        , metaConstructors = typedNodeConstructors n
-        , metaTypedefs = typedNodeTypedefs n
-        }
-    _ -> do
-      return $ GMeta
-        { metaId = i
-        , metaGType = gtype
-        , metaName = name
-        , metaProperties = Set.empty
-        , metaConstraints = Set.empty
-        , metaPackers = typedNodePackers n
-        , metaConstructors = typedNodeConstructors n
-        , metaTypedefs = typedNodeTypedefs n
-        }
+-- collectSExprs
+--   :: DAG MVar [(EVar, EVar)] PreparedNode
+--   -> PreparedNode
+--   -> EVar
+--   -> MorlocMonad [(SExpr GU Many [UnresolvedType], [UnresolvedType])]
+-- collectSExprs d n v = do
+--   -- DAG MVar None (EVar, (PreparedNode, [TermOrigin]))
+--   let termTree = MDD.lookupAliasedTerm v n (makeTermOrigin v) d
+--
+--   -- DAG MVar None [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
+--   sexprTree <- MDD.mapNodeM (\(v',(n',ts)) -> collectTerms d v' n' ts) termTree
+--
+--   -- [(SExpr (GMeta UnresolvedType) Many [CType], [CType])]
+--   let trees = concat . MDD.nodes $ sexprTree
+--
+--   return trees
+--
+--
+-- -- | Find info common across realizations of a given term in a given module
+-- makeGMeta
+--   :: Maybe EVar
+--   -> PreparedNode
+--   -> Maybe UnresolvedType
+--   -> MorlocMonad GU
+-- makeGMeta name n gtype = do
+--   i <- MM.getCounter
+--   case name >>= (flip Map.lookup) (typedNodeTypeMap n) of
+--     (Just (TypeSet (Just e) _)) -> do
+--       let g = (Just . GType) $ resolve (etype e)
+--       return $ GMeta
+--         { metaId = i
+--         , metaGType = maybe g Just gtype
+--         , metaName = name
+--         , metaProperties = eprop e
+--         , metaConstraints = econs e
+--         , metaPackers = typedNodePackers n
+--         , metaConstructors = typedNodeConstructors n
+--         , metaTypedefs = typedNodeTypedefs n
+--         }
+--     _ -> do
+--       return $ GMeta
+--         { metaId = i
+--         , metaGType = gtype
+--         , metaName = name
+--         , metaProperties = Set.empty
+--         , metaConstraints = Set.empty
+--         , metaPackers = typedNodePackers n
+--         , metaConstructors = typedNodeConstructors n
+--         , metaTypedefs = typedNodeTypedefs n
+--         }
 
 -- makeTermOrigin
 --   :: EVar

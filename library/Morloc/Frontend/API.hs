@@ -31,28 +31,33 @@ import qualified Morloc.Frontend.Pretty as Pretty
 parse ::
      Maybe Path
   -> Code -- ^ code of the current module
-  -> MorlocMonad (DAG MVar Import ParserNode)
-parse f (Code code) = case Parser.readProgram f code mempty of
-  (Left err) -> MM.throwError $ SyntaxError err
-  (Right x) -> parseImports x
-  where
-    parseImports
-      :: DAG MVar Import ParserNode
-      -> MorlocMonad (DAG MVar Import ParserNode)
-    parseImports d
-      | length unimported == 0 = return d
-      | otherwise = do
-          importPath <- Mod.findModule (head unimported)
-          Mod.loadModuleMetadata importPath
-          (path', code') <- openLocalModule importPath
-          case Parser.readProgram path' code' d of
-            (Left err) -> MM.throwError $ SyntaxError err
-            (Right x) -> parseImports x
-      where
-        g = MDD.edgelist d
-        parents = Map.keysSet d
-        children = Set.fromList (map snd g)
-        unimported = Set.toList $ Set.difference children parents
+  -> MorlocMonad (DAG MVar Import Expr)
+parse = undefined
+-- parse ::
+--      Maybe Path
+--   -> Code -- ^ code of the current module
+--   -> MorlocMonad (DAG MVar Import ParserNode)
+-- parse f (Code code) = case Parser.readProgram f code mempty of
+--   (Left err) -> MM.throwError $ SyntaxError err
+--   (Right x) -> parseImports x
+--   where
+--     parseImports
+--       :: DAG MVar Import ParserNode
+--       -> MorlocMonad (DAG MVar Import ParserNode)
+--     parseImports d
+--       | length unimported == 0 = return d
+--       | otherwise = do
+--           importPath <- Mod.findModule (head unimported)
+--           Mod.loadModuleMetadata importPath
+--           (path', code') <- openLocalModule importPath
+--           case Parser.readProgram path' code' d of
+--             (Left err) -> MM.throwError $ SyntaxError err
+--             (Right x) -> parseImports x
+--       where
+--         g = MDD.edgelist d
+--         parents = Map.keysSet d
+--         children = Set.fromList (map snd g)
+--         unimported = Set.toList $ Set.difference children parents
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
@@ -62,9 +67,9 @@ openLocalModule filename = do
 
 
 typecheck
-  :: [SAnno GMeta Many [UnresolvedType]]
-  -> MorlocMonad [SAnno GMeta Many [CType]]
-typecheck ts = undefined
+  :: [SAnno GU Many [UnresolvedType]]
+  -> MorlocMonad [SAnno GR Many [CType]]
+typecheck = undefined
 -- typecheck d = do
 --   verbosity <- MS.gets stateVerbosity
 --   x <- liftIO $ runStack verbosity (Infer.typecheck d)
