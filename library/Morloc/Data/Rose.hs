@@ -7,7 +7,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Data.Rose
+module Morloc.Data.Rose
   ( Rose(..)
   , search
   , filter
@@ -15,7 +15,7 @@ module Data.Rose
   , flatten
   ) where
 
-data Rose = Nil | Rose a [Rose a]
+data Rose a = Nil | Rose a [Rose a]
 
 instance Functor Rose where
   fmap f (Rose x xs) = Rose (f x) (map (fmap f) xs)
@@ -30,13 +30,13 @@ search f = filter f . flatten
 -- | Make list of values
 flatten :: Rose a -> [a]
 flatten Nil = []
-flatten (Rose x xs) = x : conmap flatten xs 
+flatten (Rose x xs) = x : (concat . map flatten) xs 
 
 
 -- | Remove branches where the value of the predicate returns true
 prune :: (a -> Bool) -> Rose a -> Rose a
 prune _ Nil = Nil
-prune f (Rose x xs) = Rose x [prune f t; t@(Rose x _) <- xs if not (f x)]
+prune f (Rose x xs) = Rose x [prune f t | t@(Rose x _) <- xs, not (f x)]
 
 
 -- | Map with folded context from the local scope. Given `Rose x xs`, each `x`
@@ -51,5 +51,5 @@ mapScope
   -> Rose c
 mapScope _ _ _ Nil = Nil
 mapScope f g b (Rose x kids) =
-  let bn = foldl f mempty [k; Rose k _ <- kids] <> b
-  in Rose (g bn x) (map (mapScope bn) xs)
+  let bn = foldl f mempty [k | Rose k _ <- kids] <> b
+  in Rose (g x bn) (map (mapScope f g bn) kids)
