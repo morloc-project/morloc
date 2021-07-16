@@ -14,11 +14,6 @@ module Morloc.Frontend.Namespace
   , Stack
   , StackState(..)
   , StackConfig(..)
-  -- ** DAG and associated types
-  , ParserNode(..)
-  , ParserDag
-  , PreparedNode(..)
-  , PreparedDag
   -- ** Typechecking
   , Gamma
   , GammaIndex(..)
@@ -76,16 +71,28 @@ substituteT v0 r0 t0 = sub t0
 
 -- | Terms, see Dunfield Figure 1
 data Expr
-  = ModE EVar
+  = ModE MVar [Expr]
   -- ^ the toplevel expression in a module
+  | TypE TVar [TVar] UnresolvedType
+  -- ^ a type definition
+  --   1. type name
+  --   2. parameters
+  --   3. type
+  | ImpE Import
+  -- ^ a morloc module import
   | ExpE EVar
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE [Source]
   -- ^ import "c" from "foo.c" ("f" as yolo).
   | Signature EVar EType
   -- ^ x :: A
-  | Declaration EVar Expr
+  | Declaration EVar Expr [Expr]
   -- ^ x=e1
+  -- 1. term name
+  -- 2. term
+  -- 3. term where statements
+  | ConE Text
+  -- ^ a constraint FIXME: the string representation of a constraint is just a placeholder
   | UniE
   -- ^ (())
   | VarE EVar
@@ -193,39 +200,3 @@ data StackState =
     , stateDepth :: Int
     }
   deriving (Ord, Eq, Show)
-
-
--- | The type returned from the Parser. It contains all the information in a
--- single module but knows NOTHING about other modules.
-data ParserNode = ParserNode {
-    parserNodeExports :: Set EVar
-  , parserNodeBody :: RootedRoseTree Expr 
-  -- ^ each plain in the rose tree represents a scope. Given `Rose e ks`,
-  -- expression `e` looks up values first in the `[x ; Rose x _ <- ks]` then
-  -- looks up through parent scopes
-}
-type ParserDag = DAG MVar Import ParserNode
-
--- -- | The type returned from the Parser. It contains all the information in a
--- -- single module but knows NOTHING about other modules.
--- data ParserNode = ParserNode  {
---     parserNodePath :: Maybe Path
---   , parserNodeBody :: [Expr]
---   , parserNodeSourceMap :: Map (EVar, Lang) Source
---   , parserNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
---   , parserNodeExports :: Set EVar
--- } deriving (Show, Ord, Eq)
--- type ParserDag = DAG MVar Import ParserNode
-
--- | Node description after desugaring (substitute type aliases and resolve
--- imports/exports)
-data PreparedNode = PreparedNode {
-    preparedNodePath :: Maybe Path
-  , preparedNodeBody :: [Expr]
-  , preparedNodeSourceMap :: Map (EVar, Lang) Source
-  , preparedNodeExports :: Set EVar
-  , preparedNodeTypedefs :: Map TVar (UnresolvedType, [TVar])
-  , preparedNodePackers :: Map (TVar, Int) [UnresolvedPacker]
-  -- ^ The (un)packers available in this module scope.
-} deriving (Show, Ord, Eq)
-type PreparedDag = DAG MVar [(EVar, EVar)] PreparedNode
