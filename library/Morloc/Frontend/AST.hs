@@ -15,6 +15,7 @@ module Morloc.Frontend.AST
   , findTypedefs
   , findSignatureTypeTerms
   , checkExpr
+  , findSources
   ) where
 
 import Morloc.Frontend.Namespace
@@ -35,6 +36,11 @@ findExports :: Expr -> [EVar]
 findExports (ExpE v) = [v]
 findExports (ModE _ es) = conmap findExports es
 findExports _ = []
+
+findSources :: Expr -> [Source]
+findSources (SrcE ss) = ss
+findSources (ModE _ es) = conmap findSources es
+findSources _ = []
 
 findTypedefs :: Expr -> Map.Map TVar ([TVar], UnresolvedType)
 findTypedefs (TypE v vs t) = Map.singleton v (vs, t)

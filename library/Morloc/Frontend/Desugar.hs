@@ -175,7 +175,7 @@ desugarType h d k t0 = f t0 where
         (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
           -- substitute parameters into alias
-          then f (foldr parsub (choiceExistential t) (zip vs (map choiceExistential ts)))
+          then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
       Nothing -> MM.throwError . CallTheMonkeys $ "Type term in ArrU missing from type map"
   f (NamU r v ts rs) = do
@@ -210,9 +210,18 @@ desugarType h d k t0 = f t0 where
       t1' = foldl (\t' v' -> ForallU v' t') t1 ts1
       t2' = foldl (\t' v' -> ForallU v' t') t2 ts2
 
+-- | Resolve existentials by choosing the first default type (if it exists)
+-- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary
+chooseExistential :: UnresolvedType -> UnresolvedType
+chooseExistential (VarU v) = VarU v
+chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
+chooseExistential (ExistU _ _ []) = error "Existential with no default value"
+chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
+chooseExistential (FunU t1 t2) = FunU (chooseExistential t1) (chooseExistential t2)
+chooseExistential (ArrU v ts) = ArrU v (map chooseExistential ts)
+chooseExistential (NamU r v ts recs) = NamU r v (map chooseExistential ts) (zip (map fst recs) (map (chooseExistential . snd) recs))
 
 
--- -- FIXME: This needs to go in the Treeify module where the packers will be rolled into the GMeta objects
 -- addPackerMap
 --   :: (DAG MVar [(EVar, EVar)] Expr)
 --   -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
@@ -260,8 +269,8 @@ desugarType h d k t0 = f t0 where
 -- --   -> PreparedNode
 -- --   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
 -- -- makeNodePackers xs ys n =
--- --   let xs' = map (\(x,y,z)->(x, choiceExistential y, z)) xs
--- --       ys' = map (\(x,y,z)->(x, choiceExistential y, z)) ys
+-- --   let xs' = map (\(x,y,z)->(x, chooseExistential y, z)) xs
+-- --       ys' = map (\(x,y,z)->(x, chooseExistential y, z)) ys
 -- --       items = [ ( packerKey t2
 -- --                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
 -- --               | (_ , t1, ss1) <- xs'
@@ -284,16 +293,7 @@ desugarType h d k t0 = f t0 where
 -- --       (_, [VarU (TV _ term), _]) -> Just $ EV term
 -- --       (_, [ArrU (TV _ term) _, _]) -> Just $ EV term
 -- --       _ -> Nothing
---
--- choiceExistential :: UnresolvedType -> UnresolvedType
--- choiceExistential (VarU v) = VarU v
--- choiceExistential (ExistU _ _ (t:_)) = (choiceExistential t)
--- choiceExistential (ExistU _ _ []) = error "Existential with no default value"
--- choiceExistential (ForallU v t) = ForallU v (choiceExistential t)
--- choiceExistential (FunU t1 t2) = FunU (choiceExistential t1) (choiceExistential t2)
--- choiceExistential (ArrU v ts) = ArrU v (map choiceExistential ts)
--- choiceExistential (NamU r v ts recs) = NamU r v (map choiceExistential ts) (zip (map fst recs) (map (choiceExistential . snd) recs))
---
+
 -- packerTypesMatch :: UnresolvedType -> UnresolvedType -> Bool
 -- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 --   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
