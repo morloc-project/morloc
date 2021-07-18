@@ -50,7 +50,6 @@ import Text.Megaparsec.Char hiding (eol)
 import qualified Control.Monad.State as CMS
 import qualified Data.Scientific as DS
 import qualified Data.Set as Set
-import qualified Data.Char as DC
 import qualified Morloc.Data.Text as MT
 import qualified Text.Megaparsec.Char.Lexer as L
 import qualified Morloc.Language as ML
@@ -160,11 +159,10 @@ resetGenerics = do
   CMS.put (s { stateGenerics = [] })
 
 appendGenerics :: TVar -> Parser ()
-appendGenerics v@(TV _ vstr) = do
+appendGenerics v = do
   s <- CMS.get
-  let isGeneric = maybe False (DC.isLower . fst) (MT.uncons vstr)
-      gs = stateGenerics s
-      gs' = if isGeneric then v : gs else gs
+  let gs = stateGenerics s
+      gs' = if isGeneric v then v : gs else gs
   CMS.put (s {stateGenerics = gs'})
 
 many1 :: Parser a -> Parser [a]

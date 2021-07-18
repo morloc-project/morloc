@@ -21,6 +21,10 @@ import qualified Data.Set as Set
 data TermOrigin = Declared Expr | Sourced Source
   deriving(Show, Ord, Eq)
 
+-- FIXME: Need to handle packers somewhere in this module
+  -- -- Add packer map
+  -- >>= addPackerMap
+
 treeify
   :: DAG MVar [(EVar, EVar)] Expr
   -> MorlocMonad [SAnno GU Many [UnresolvedType]]

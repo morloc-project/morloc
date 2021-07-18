@@ -12,6 +12,7 @@ module Morloc.Frontend.Desugar (desugar, desugarType) where
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
 import Morloc.Data.Doc
+import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
@@ -20,272 +21,269 @@ import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
 
 
+-- | Resolve type aliases, term aliases and import/exports
 desugar
   :: DAG MVar Import Expr
   -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
-desugar = undefined
--- desugar
---   :: DAG MVar Import ParserNode
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
--- desugar s
---   -- DAG MVar Import ParserNode
---   = resolveImports s
---   -- DAG MVar (Map EVar EVar) ParserNode
---   >>= desugarDag
---   -- DAG MVar (Map EVar EVar) PreparedNode
---   >>= simplify
---   -- Add packer map
---   >>= addPackerMap
+desugar s
+  = resolveImports s
+  >>= checkForSelfRecursion
+  >>= desugarDag
 
 
--- -- | Consider export/import information to determine which terms are imported
--- -- into each module. This step reduces the Import edge type from an m-to-n
--- -- source name to an alias map.
--- resolveImports
---   :: DAG MVar Import ParserNode
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)
--- resolveImports = MDD.mapEdgeWithNodeM resolveImport where
---   resolveImport
---     :: ParserNode
---     -> Import
---     -> ParserNode
---     -> MorlocMonad [(EVar, EVar)]
---   resolveImport _ (Import _ Nothing exc _) n2
---     = return
---     . map (\x -> (x,x)) -- alias is identical
---     . Set.toList
---     $ Set.difference (parserNodeExports n2) (Set.fromList exc)
---   resolveImport _ (Import _ (Just inc) exc _) n2
---     | length contradict > 0
---         = MM.throwError . CallTheMonkeys
---         $ "Error: The following terms are both included and excluded: " <>
---           render (tupledNoFold $ map pretty contradict)
---     | length missing > 0
---         = MM.throwError . CallTheMonkeys
---         $ "Error: The following terms are not exported: " <>
---           render (tupledNoFold $ map pretty missing)
---     | otherwise = return inc
---     where
---       missing = [n | (n, _) <- inc, not $ Set.member n (parserNodeExports n2)]
---       contradict = [n | (n, _) <- inc, elem n exc]
---
--- desugarDag
---   :: DAG MVar [(EVar, EVar)] ParserNode
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] ParserNode)
--- desugarDag m = do
---   mapM_ checkForSelfRecursion (map parserNodeTypedefs (MDD.nodes m))
---   MDD.mapNodeWithKeyM (desugarParserNode m) m
---
--- simplify
---   :: (DAG MVar [(EVar, EVar)] ParserNode)
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
--- simplify = return . MDD.mapNode prepare where
---   prepare :: ParserNode -> PreparedNode
---   prepare n1 = PreparedNode
---     { preparedNodePath = parserNodePath n1
---     , preparedNodeBody = parserNodeBody n1
---     , preparedNodeSourceMap = parserNodeSourceMap n1
---     , preparedNodeExports = parserNodeExports n1
---     , preparedNodePackers = Map.empty -- This will be filled in in `addPackerMap`
---     , preparedNodeTypedefs = parserNodeTypedefs n1
---     }
---
--- checkForSelfRecursion :: Map.Map TVar (UnresolvedType, [TVar]) -> MorlocMonad ()
--- checkForSelfRecursion h = mapM_ (uncurry f) [(v,t) | (v,(t,_)) <- Map.toList h] where
---   f :: TVar -> UnresolvedType -> MorlocMonad ()
---   f v (VarU v')
---     | v == v' = MM.throwError . SelfRecursiveTypeAlias $ v
---     | otherwise = return ()
---   f _ (ExistU _ _ _) = MM.throwError $ CallTheMonkeys "existential crisis"
---   f v (ForallU _ t) = f v t
---   f v (FunU t1 t2) = f v t1 >> f v t2
---   f v (ArrU v0 ts)
---     | v == v0 = MM.throwError . SelfRecursiveTypeAlias $ v
---     | otherwise = mapM_ (f v) ts
---   f v (NamU _ _ _ rs) = mapM_ (f v) (map snd rs)
---
--- desugarParserNode
---   :: DAG MVar [(EVar, EVar)] ParserNode
---   -> MVar
---   -> ParserNode
---   -> MorlocMonad ParserNode
--- desugarParserNode d k n = do
---   nodeBody <- mapM (desugarExpr d k) (parserNodeBody n)
---   return $ n { parserNodeBody = nodeBody }
---
--- desugarExpr
---   :: DAG MVar [(EVar, EVar)] ParserNode
---   -> MVar
---   -> Expr
---   -> MorlocMonad Expr
--- desugarExpr _ _ e@(SrcE _) = return e
--- desugarExpr d k (Signature v t) = Signature v <$> desugarEType d k t
--- desugarExpr d k (Declaration v e) = Declaration v <$> desugarExpr d k e
--- desugarExpr _ _ UniE = return UniE
--- desugarExpr _ _ e@(VarE _) = return e
--- desugarExpr d k (AccE e key) = AccE <$> desugarExpr d k e <*> pure key
--- desugarExpr d k (ListE xs) = ListE <$> mapM (desugarExpr d k) xs
--- desugarExpr d k (TupleE xs) = TupleE <$> mapM (desugarExpr d k) xs
--- desugarExpr d k (LamE v e) = LamE v <$> desugarExpr d k e
--- desugarExpr d k (AppE e1 e2) = AppE <$> desugarExpr d k e1 <*> desugarExpr d k e2
--- desugarExpr d k (AnnE e ts) = AnnE <$> desugarExpr d k e <*> mapM (desugarType d k) ts
--- desugarExpr _ _ e@(NumE _) = return e
--- desugarExpr _ _ e@(LogE _) = return e
--- desugarExpr _ _ e@(StrE _) = return e
--- desugarExpr d k (RecE rs) = do
---   es <- mapM (desugarExpr d k) (map snd rs)
---   return (RecE (zip (map fst rs) es))
---
--- desugarEType :: DAG MVar [(EVar, EVar)] ParserNode -> MVar -> EType -> MorlocMonad EType
--- desugarEType d k (EType t ps cs) = EType <$> desugarType d k t <*> pure ps <*> pure cs
+-- | Consider export/import information to determine which terms are imported
+-- into each module. This step reduces the Import edge type from an m-to-n
+-- source name to an alias map.
+resolveImports
+  :: DAG MVar Import Expr
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+resolveImports = MDD.mapEdgeWithNodeM resolveImport where
+  resolveImport
+    :: Expr
+    -> Import
+    -> Expr
+    -> MorlocMonad [(EVar, EVar)]
+  resolveImport _ (Import _ Nothing exc _) n2
+    = return
+    . map (\x -> (x,x)) -- alias is identical
+    . Set.toList
+    $ Set.difference (AST.findExportSet n2) (Set.fromList exc)
+  resolveImport _ (Import _ (Just inc) exc _) n2
+    | length contradict > 0
+        = MM.throwError . CallTheMonkeys
+        $ "Error: The following terms are both included and excluded: " <>
+          render (tupledNoFold $ map pretty contradict)
+    | length missing > 0
+        = MM.throwError . CallTheMonkeys
+        $ "Error: The following terms are not exported: " <>
+          render (tupledNoFold $ map pretty missing)
+    | otherwise = return inc
+    where
+      missing = [n | (n, _) <- inc, not $ Set.member n (AST.findExportSet n2)]
+      contradict = [n | (n, _) <- inc, elem n exc]
+
+checkForSelfRecursion :: DAG MVar [(EVar, EVar)] Expr -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+checkForSelfRecursion d = do
+  MDD.mapNodeM (AST.checkExpr isExprSelfRecursive) d
+  return d
+  where
+    -- A typedef is self-recursive if its name appears in its definition
+    isExprSelfRecursive :: Expr -> MorlocMonad ()
+    isExprSelfRecursive (TypE v _ t)
+      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v 
+      | otherwise = return ()
+    isExprSelfRecursive _ = return ()
+
+    -- check if a given term appears in a type
+    hasTerm :: TVar -> UnresolvedType -> Bool
+    hasTerm v (VarU v') = v == v'
+    hasTerm v (ForallU _ t) = hasTerm v t
+    hasTerm v (FunU t1 t2) = hasTerm v t1 || hasTerm v t2
+    hasTerm v (ArrU v0 ts) = v == v0 || any (hasTerm v) ts
+    hasTerm v (NamU _ _ _ rs) = any (hasTerm v) (map snd rs)
+    hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
+
+desugarDag
+  :: DAG MVar [(EVar, EVar)] Expr
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+desugarDag m = MDD.mapNodeWithKeyM (desugarExpr m) m where
+  
+desugarExpr
+  :: DAG MVar [(EVar, EVar)] Expr
+  -> MVar
+  -> Expr
+  -> MorlocMonad Expr
+desugarExpr d k e0 = f e0 where
+
+  f :: Expr -> MorlocMonad Expr
+  f (ModE v es)
+    | v /= k = MM.throwError $ CallTheMonkeys "Module in DAG and module in ModE disagree"
+    | otherwise = ModE v <$> (mapM f es)
+  f e@(TypE _ _ _) = return e
+  f e@(ImpE _) = return e
+  f e@(ExpE _) = return e
+  f e@(SrcE _) = return e
+  f (Signature v t) = Signature v <$> desugarEType termmap d k t
+  f (Declaration v e ws)
+    =   Declaration v
+    <$> f e
+    -- no special scope handling is necessary here since type aliases are only
+    -- allowed at the top level scope
+    <*> mapM f ws
+  f UniE = return UniE
+  f e@(VarE _) = return e
+  f (AccE e key) = AccE <$> f e <*> pure key
+  f (ListE xs) = ListE <$> mapM f xs
+  f (TupleE xs) = TupleE <$> mapM f xs
+  f (LamE v e) = LamE v <$> f e
+  f (AppE e1 e2) = AppE <$> f e1 <*> f e2
+  f (AnnE e ts) = AnnE <$> f e <*> mapM (desugarType termmap d k) ts
+  f e@(NumE _) = return e
+  f e@(LogE _) = return e
+  f e@(StrE _) = return e
+  f (RecE rs) = do
+    es <- mapM f (map snd rs)
+    return (RecE (zip (map fst rs) es))
+
+  termmap :: Map.Map TVar [([TVar], UnresolvedType)]
+  termmap =
+    let terms = AST.findSignatureTypeTerms e0
+    in Map.fromList $ zip terms (map lookupTypedefs terms)
+
+  lookupTypedefs
+    :: TVar
+    -> [([TVar], UnresolvedType)]
+  lookupTypedefs (TV lang v)
+    = catMaybes
+    . MDD.nodes
+    . MDD.mapNode (\(EV v', typemap) -> Map.lookup (TV lang v') typemap)
+    $ MDD.lookupAliasedTerm (EV v) k AST.findTypedefs d
+
+
+desugarEType
+  :: Map.Map TVar [([TVar], UnresolvedType)]
+  -> DAG MVar [(EVar, EVar)] Expr
+  -> MVar -> EType -> MorlocMonad EType
+desugarEType h d k (EType t ps cs) = EType <$> desugarType h d k t <*> pure ps <*> pure cs
 
 
 desugarType
-  :: DAG MVar [(EVar, EVar)] Expr
+  :: Map.Map TVar [([TVar], UnresolvedType)]
+  -> DAG MVar [(EVar, EVar)] Expr
   -> MVar
   -> UnresolvedType
   -> MorlocMonad UnresolvedType
-desugarType = undefined
--- desugarType
---   :: DAG MVar [(EVar, EVar)] ParserNode
---   -> MVar
---   -> UnresolvedType
---   -> MorlocMonad UnresolvedType
--- desugarType d k t0@(VarU v) =
---   case lookupTypedefs v k d of
---     [] -> return t0
---     ts'@(t':_) -> do
---       (t, _) <- foldlM (mergeAliases v 0) t' ts'
---       desugarType d k t
--- desugarType d k (ExistU v ts ds) = do
---   ts' <- mapM (desugarType d k) ts
---   ds' <- mapM (desugarType d k) ds
---   return $ ExistU v ts' ds'
--- desugarType d k (ForallU v t) = ForallU v <$> desugarType d k t
--- desugarType d k (FunU t1 t2) = FunU <$> desugarType d k t1 <*> desugarType d k t2
--- desugarType d k (ArrU v ts) =
---   case lookupTypedefs v k d of
---     [] -> ArrU v <$> mapM (desugarType d k) ts
---     (t':ts') -> do
---       (t, vs) <- foldlM (mergeAliases v (length ts)) t' ts'
---       if length ts == length vs
---         -- substitute parameters into alias
---         then desugarType d k (foldr parsub (choiceExistential t) (zip vs (map choiceExistential ts)))
---         else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
--- desugarType d k (NamU r v ts rs) = do
---   let keys = map fst rs
---   vals <- mapM (desugarType d k) (map snd rs)
---   return (NamU r v ts (zip keys vals))
+desugarType h d k t0 = f t0 where
+  f :: UnresolvedType -> MorlocMonad UnresolvedType
+  f t0@(VarU v) =
+    case Map.lookup v h of
+      (Just []) -> return t0
+      (Just ts'@(t':_)) -> do
+        (_, t) <- foldlM (mergeAliases v 0) t' ts'
+        f t
+      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
+  f (ExistU v ts ds) = do
+    ts' <- mapM f ts
+    ds' <- mapM f ds
+    return $ ExistU v ts' ds'
+  f (ForallU v t) = ForallU v <$> f t
+  f (FunU t1 t2) = FunU <$> f t1 <*> f t2
+  f (ArrU v ts) =
+    case Map.lookup v h of
+      (Just []) -> ArrU v <$> mapM f ts
+      (Just (t':ts')) -> do
+        (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
+        if length ts == length vs
+          -- substitute parameters into alias
+          then f (foldr parsub (choiceExistential t) (zip vs (map choiceExistential ts)))
+          else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
+      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in ArrU missing from type map"
+  f (NamU r v ts rs) = do
+    let keys = map fst rs
+    vals <- mapM f (map snd rs)
+    return (NamU r v ts (zip keys vals))
 
--- lookupTypedefs
---   :: TVar
---   -> MVar
---   -> DAG MVar [(EVar, EVar)] ParserNode
---   -> [(UnresolvedType, [TVar])]
--- lookupTypedefs (TV lang v) k h
---   = catMaybes
---   . MDD.nodes
---   . MDD.mapNode (\(EV _ v', typemap) -> Map.lookup (TV lang v') typemap)
---   $ MDD.lookupAliasedTerm (EV [] v) k parserNodeTypedefs h
---
---
--- -- When a type alias is imported from two places, this function reconciles them, if possible
--- mergeAliases
---   :: TVar
---   -> Int
---   -> (UnresolvedType, [TVar])
---   -> (UnresolvedType, [TVar])
---   -> MorlocMonad (UnresolvedType, [TVar])
--- mergeAliases v i t@(t1, ts1) (t2, ts2)
---   | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
---   |    MTP.isSubtypeOf t1' t2'
---     && MTP.isSubtypeOf t2' t1'
---     && length ts1 == length ts2 = return t
---   | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
---   where
---     t1' = foldl (\t' v' -> ForallU v' t') t1 ts1
---     t2' = foldl (\t' v' -> ForallU v' t') t2 ts2
---
---
--- parsub :: (TVar, UnresolvedType) -> UnresolvedType -> UnresolvedType
--- parsub (v, t2) t1@(VarU v0)
---   | v0 == v = t2 -- substitute
---   | otherwise = t1 -- keep the original
--- parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
--- parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
--- parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
--- parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
--- parsub pair (NamU r v ts rs) = NamU r v (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
---
---
---
+  parsub :: (TVar, UnresolvedType) -> UnresolvedType -> UnresolvedType
+  parsub (v, t2) t1@(VarU v0)
+    | v0 == v = t2 -- substitute
+    | otherwise = t1 -- keep the original
+  parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
+  parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
+  parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
+  parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
+  parsub pair (NamU r v ts rs) = NamU r v (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
+
+  -- When a type alias is imported from two places, this function reconciles them, if possible
+  mergeAliases
+    :: TVar
+    -> Int
+    -> ([TVar], UnresolvedType)
+    -> ([TVar], UnresolvedType)
+    -> MorlocMonad ([TVar], UnresolvedType)
+  mergeAliases v i t@(ts1, t1) (ts2, t2)
+    | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
+    |    MTP.isSubtypeOf t1' t2'
+      && MTP.isSubtypeOf t2' t1'
+      && length ts1 == length ts2 = return t
+    | otherwise = MM.throwError (ConflictingTypeAliases (unresolvedType2type t1) (unresolvedType2type t2))
+    where
+      t1' = foldl (\t' v' -> ForallU v' t') t1 ts1
+      t2' = foldl (\t' v' -> ForallU v' t') t2 ts2
+
+
+
+-- -- FIXME: This needs to go in the Treeify module where the packers will be rolled into the GMeta objects
 -- addPackerMap
---   :: (DAG MVar [(EVar, EVar)] PreparedNode)
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
--- addPackerMap d = do
---   maybeDAG <- MDD.synthesizeDAG gatherPackers d
---   case maybeDAG of
---     Nothing -> MM.throwError CyclicDependency
---     (Just d') -> return d'
---
--- gatherPackers
---   :: MVar -- the importing module name (currently unused)
---   -> PreparedNode -- data about the importing module
---   -> [( MVar -- the name of an imported module
---         , [(EVar -- the name of a term in the imported module
---           , EVar -- the alias in the importing module
---           )]
---         , PreparedNode -- data about the imported module
---      )]
---   -> MorlocMonad PreparedNode
--- gatherPackers _ n1 es = do
---   let packers   = starpack n1 Pack
---       unpackers = starpack n1 Unpack
---   nodepackers <- makeNodePackers packers unpackers n1
---   let m = Map.unionsWith (<>) $ map (\(_, e, n2) -> inheritPackers e n2) es
---       m' = Map.unionWith (<>) nodepackers m
---   return $ n1 { preparedNodePackers = m' }
---
--- starpack :: PreparedNode -> Property -> [(EVar, UnresolvedType, [Source])]
--- starpack n pro
---   = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
---     | (Signature v e@(EType t p _)) <- preparedNodeBody n
---     , isJust (langOf e)
---     , Set.member pro p]
---   where
---     lookupSource :: EVar -> UnresolvedType -> Map.Map (EVar, Lang) Source -> Maybe Source
---     lookupSource v t m = langOf t >>= (\lang -> Map.lookup (v, lang) m)
---
--- makeNodePackers
---   :: [(EVar, UnresolvedType, [Source])]
---   -> [(EVar, UnresolvedType, [Source])]
---   -> PreparedNode
---   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
--- makeNodePackers xs ys n =
---   let xs' = map (\(x,y,z)->(x, choiceExistential y, z)) xs
---       ys' = map (\(x,y,z)->(x, choiceExistential y, z)) ys
---       items = [ ( packerKey t2
---                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
---               | (_ , t1, ss1) <- xs'
---               , (v2, t2, ss2) <- ys'
---               , packerTypesMatch t1 t2
---               ]
---   in return $ Map.fromList items
---
--- packerTerm :: EVar -> PreparedNode -> Maybe EVar
--- packerTerm v n = listToMaybe . catMaybes $
---   [ termOf e
---   | (Signature v' e) <- preparedNodeBody n
---   , v == v'
---   , isNothing (langOf e)
---   ]
---   where
---     termOf :: EType -> Maybe EVar
---     termOf e = case splitArgs (etype e) of
---       -- packers are all global (right?)
---       (_, [VarU (TV _ term), _]) -> Just $ EV [] term
---       (_, [ArrU (TV _ term) _, _]) -> Just $ EV [] term
---       _ -> Nothing
+--   :: (DAG MVar [(EVar, EVar)] Expr)
+--   -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+-- addPackerMap = undefined
+-- -- addPackerMap
+-- --   :: (DAG MVar [(EVar, EVar)] PreparedNode)
+-- --   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
+-- -- addPackerMap d = do
+-- --   maybeDAG <- MDD.synthesizeDAG gatherPackers d
+-- --   case maybeDAG of
+-- --     Nothing -> MM.throwError CyclicDependency
+-- --     (Just d') -> return d'
+-- --
+-- -- gatherPackers
+-- --   :: MVar -- the importing module name (currently unused)
+-- --   -> PreparedNode -- data about the importing module
+-- --   -> [( MVar -- the name of an imported module
+-- --         , [(EVar -- the name of a term in the imported module
+-- --           , EVar -- the alias in the importing module
+-- --           )]
+-- --         , PreparedNode -- data about the imported module
+-- --      )]
+-- --   -> MorlocMonad PreparedNode
+-- -- gatherPackers _ n1 es = do
+-- --   let packers   = starpack n1 Pack
+-- --       unpackers = starpack n1 Unpack
+-- --   nodepackers <- makeNodePackers packers unpackers n1
+-- --   let m = Map.unionsWith (<>) $ map (\(_, e, n2) -> inheritPackers e n2) es
+-- --       m' = Map.unionWith (<>) nodepackers m
+-- --   return $ n1 { preparedNodePackers = m' }
+-- --
+-- -- starpack :: PreparedNode -> Property -> [(EVar, UnresolvedType, [Source])]
+-- -- starpack n pro
+-- --   = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
+-- --     | (Signature v e@(EType t p _)) <- preparedNodeBody n
+-- --     , isJust (langOf e)
+-- --     , Set.member pro p]
+-- --   where
+-- --     lookupSource :: EVar -> UnresolvedType -> Map.Map (EVar, Lang) Source -> Maybe Source
+-- --     lookupSource v t m = langOf t >>= (\lang -> Map.lookup (v, lang) m)
+-- --
+-- -- makeNodePackers
+-- --   :: [(EVar, UnresolvedType, [Source])]
+-- --   -> [(EVar, UnresolvedType, [Source])]
+-- --   -> PreparedNode
+-- --   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
+-- -- makeNodePackers xs ys n =
+-- --   let xs' = map (\(x,y,z)->(x, choiceExistential y, z)) xs
+-- --       ys' = map (\(x,y,z)->(x, choiceExistential y, z)) ys
+-- --       items = [ ( packerKey t2
+-- --                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
+-- --               | (_ , t1, ss1) <- xs'
+-- --               , (v2, t2, ss2) <- ys'
+-- --               , packerTypesMatch t1 t2
+-- --               ]
+-- --   in return $ Map.fromList items
+-- --
+-- -- packerTerm :: EVar -> Expr -> Maybe EVar
+-- -- packerTerm v n = listToMaybe . catMaybes $
+-- --   [ termOf t
+-- --   | (v', t) <- AST.findSignatures n
+-- --   , v == v'
+-- --   , isNothing (langOf t)
+-- --   ]
+-- --   where
+-- --     termOf :: EType -> Maybe EVar
+-- --     termOf e = case splitArgs (etype e) of
+-- --       -- packers are all global (right?)
+-- --       (_, [VarU (TV _ term), _]) -> Just $ EV term
+-- --       (_, [ArrU (TV _ term) _, _]) -> Just $ EV term
+-- --       _ -> Nothing
 --
 -- choiceExistential :: UnresolvedType -> UnresolvedType
 -- choiceExistential (VarU v) = VarU v
@@ -328,23 +326,41 @@ desugarType = undefined
 --   in (vs, t1:ts)
 -- splitArgs t = ([], [t])
 --
+--
+-- -- | Packers need to be passed along with the types the pack, they are imported
+-- -- explicitly with the type and they pack. Should packers be universal? The
+-- -- packers describe how a term may be simplified. But often there are multiple
+-- -- reasonable ways to simplify a term, for example `Map a b` could simplify to
+-- -- `[(a,b)]` or `([a],[b])`. The former is semantically richer (since it
+-- -- naturally maintains the one-to-one variant), but the latter may be more
+-- -- efficient or natural in some languages. For any interface, both sides must
+-- -- adopt the same forms. The easiest way to enforce this is to require one
+-- -- global packer, but ultimately it would be better to resolve packers
+-- -- case-by-base as yet another optimization degree of freedom.
 -- inheritPackers
---   :: [( EVar -- key in THIS module descrived in the PreparedNode argument
+--   :: [( EVar -- key in THIS module described in the PreparedNode argument
 --       , EVar -- alias used in the importing module
 --       )]
---   -> PreparedNode
+--   -> Expr
 --   -> Map.Map (TVar, Int) [UnresolvedPacker]
--- inheritPackers es n =
---   -- names of terms exported from this module
---   let names = Set.fromList [ v | (EV _ v, _) <- es]
---   in   Map.map (map toAlias)
---      $ Map.filter (isImported names) (preparedNodePackers n)
---   where
---     toAlias :: UnresolvedPacker -> UnresolvedPacker
---     toAlias n' = n' { unresolvedPackerTerm = unresolvedPackerTerm n' >>= (flip lookup) es }
---
---     isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
---     isImported _ [] = False
---     isImported names' (n0:_) = case unresolvedPackerTerm n0 of
---       (Just (EV _ v)) -> Set.member v names'
---       _ -> False
+-- inheritPackers = undefined
+-- -- inheritPackers
+-- --   :: [( EVar -- key in THIS module descrived in the PreparedNode argument
+-- --       , EVar -- alias used in the importing module
+-- --       )]
+-- --   -> PreparedNode
+-- --   -> Map.Map (TVar, Int) [UnresolvedPacker]
+-- -- inheritPackers es n =
+-- --   -- names of terms exported from this module
+-- --   let names = Set.fromList [ v | (EV v, _) <- es]
+-- --   in   Map.map (map toAlias)
+-- --      $ Map.filter (isImported names) (preparedNodePackers n)
+-- --   where
+-- --     toAlias :: UnresolvedPacker -> UnresolvedPacker
+-- --     toAlias n' = n' { unresolvedPackerTerm = unresolvedPackerTerm n' >>= (flip lookup) es }
+-- --
+-- --     isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
+-- --     isImported _ [] = False
+-- --     isImported names' (n0:_) = case unresolvedPackerTerm n0 of
+-- --       (Just (EV v)) -> Set.member v names'
+-- --       _ -> False

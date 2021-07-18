@@ -25,6 +25,7 @@ module Morloc.Frontend.Namespace
   -- rifraf
   , resolve
   , substituteT
+  , isGeneric
   ) where
 
 import Morloc.Namespace hiding (name)
@@ -36,6 +37,8 @@ import Control.Monad.State (StateT)
 import Control.Monad.Writer (WriterT)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+import qualified Data.Char as DC
+import qualified Data.Text as DT
 
 
 
@@ -68,6 +71,9 @@ substituteT v0 r0 t0 = sub t0
     sub (ArrT v ts) = ArrT v (map sub ts)
     sub (NamT r v ts rs) = NamT r v (map sub ts) [(x, sub t) | (x, t) <- rs]
 
+-- | Determine if a type term is generic (i.e., is the first letter lowercase?)
+isGeneric :: TVar -> Bool
+isGeneric (TV _ typeStr) = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 
 -- | Terms, see Dunfield Figure 1
 data Expr
