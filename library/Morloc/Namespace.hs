@@ -335,7 +335,6 @@ data SExpr g f c
   | AccS (SAnno g f c) Text
   | ListS [SAnno g f c]
   | TupleS [SAnno g f c]
-  | WhereS (SAnno g f c) [(EVar, SAnno g f c)]
   | LamS [EVar] (SAnno g f c)
   | AppS (SAnno g f c) [SAnno g f c]
   | NumS Scientific
@@ -355,6 +354,7 @@ data GMeta t = GMeta {
   , metaConstraints :: Set Constraint
   , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
   -- ^ The (un)packers available in this node's module scope. FIXME: kludge
+  -- In (TVar, Int), TVar is that type to be (de)serialied and Int is the number of arguments the packer takes
   , metaConstructors :: Map TVar Source
   -- ^ The constructors in this node's module scope. FIXME: kludge
   , metaTypedefs :: Map TVar (Type, [TVar])
@@ -362,8 +362,8 @@ data GMeta t = GMeta {
   -- functions in C++. FIXME: kludge
 } deriving (Show, Ord, Eq)
 
--- General unresolved metadata and type - used before type inference
-type GU = GMeta (Maybe UnresolvedType)
+-- Metadata for a general type before it has been resolved
+type GU = GMeta Void
 
 -- General resolved metadata and type - used after type inference
 type GR = GMeta (Maybe GType)

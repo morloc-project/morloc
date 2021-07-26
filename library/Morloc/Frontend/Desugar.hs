@@ -23,8 +23,8 @@ import qualified Morloc.Frontend.PartialOrder as MTP
 
 -- | Resolve type aliases, term aliases and import/exports
 desugar
-  :: DAG MVar Import Expr
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+  :: DAG MVar Import ExprI
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 desugar s
   = resolveImports s
   >>= checkForSelfRecursion
@@ -35,13 +35,13 @@ desugar s
 -- into each module. This step reduces the Import edge type from an m-to-n
 -- source name to an alias map.
 resolveImports
-  :: DAG MVar Import Expr
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+  :: DAG MVar Import ExprI
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 resolveImports = MDD.mapEdgeWithNodeM resolveImport where
   resolveImport
-    :: Expr
+    :: ExprI
     -> Import
-    -> Expr
+    -> ExprI
     -> MorlocMonad [(EVar, EVar)]
   resolveImport _ (Import _ Nothing exc _) n2
     = return
@@ -62,14 +62,14 @@ resolveImports = MDD.mapEdgeWithNodeM resolveImport where
       missing = [n | (n, _) <- inc, not $ Set.member n (AST.findExportSet n2)]
       contradict = [n | (n, _) <- inc, elem n exc]
 
-checkForSelfRecursion :: DAG MVar [(EVar, EVar)] Expr -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+checkForSelfRecursion :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 checkForSelfRecursion d = do
-  MDD.mapNodeM (AST.checkExpr isExprSelfRecursive) d
+  MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
   where
     -- A typedef is self-recursive if its name appears in its definition
-    isExprSelfRecursive :: Expr -> MorlocMonad ()
-    isExprSelfRecursive (TypE v _ t)
+    isExprSelfRecursive :: ExprI -> MorlocMonad ()
+    isExprSelfRecursive (ExprI _ (TypE v _ t))
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v 
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
@@ -84,46 +84,21 @@ checkForSelfRecursion d = do
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
 desugarDag
-  :: DAG MVar [(EVar, EVar)] Expr
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
+  :: DAG MVar [(EVar, EVar)] ExprI
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 desugarDag m = MDD.mapNodeWithKeyM (desugarExpr m) m where
   
 desugarExpr
-  :: DAG MVar [(EVar, EVar)] Expr
+  :: DAG MVar [(EVar, EVar)] ExprI
   -> MVar
-  -> Expr
-  -> MorlocMonad Expr
-desugarExpr d k e0 = f e0 where
+  -> ExprI
+  -> MorlocMonad ExprI
+desugarExpr d k e0 = mapExprM f e0 where
 
   f :: Expr -> MorlocMonad Expr
-  f (ModE v es)
-    | v /= k = MM.throwError $ CallTheMonkeys "Module in DAG and module in ModE disagree"
-    | otherwise = ModE v <$> (mapM f es)
-  f e@(TypE _ _ _) = return e
-  f e@(ImpE _) = return e
-  f e@(ExpE _) = return e
-  f e@(SrcE _) = return e
   f (Signature v t) = Signature v <$> desugarEType termmap d k t
-  f (Declaration v e ws)
-    =   Declaration v
-    <$> f e
-    -- no special scope handling is necessary here since type aliases are only
-    -- allowed at the top level scope
-    <*> mapM f ws
-  f UniE = return UniE
-  f e@(VarE _) = return e
-  f (AccE e key) = AccE <$> f e <*> pure key
-  f (ListE xs) = ListE <$> mapM f xs
-  f (TupleE xs) = TupleE <$> mapM f xs
-  f (LamE v e) = LamE v <$> f e
-  f (AppE e1 e2) = AppE <$> f e1 <*> f e2
-  f (AnnE e ts) = AnnE <$> f e <*> mapM (desugarType termmap d k) ts
-  f e@(NumE _) = return e
-  f e@(LogE _) = return e
-  f e@(StrE _) = return e
-  f (RecE rs) = do
-    es <- mapM f (map snd rs)
-    return (RecE (zip (map fst rs) es))
+  f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
+  f e = return e
 
   termmap :: Map.Map TVar [([TVar], UnresolvedType)]
   termmap =
@@ -142,14 +117,14 @@ desugarExpr d k e0 = f e0 where
 
 desugarEType
   :: Map.Map TVar [([TVar], UnresolvedType)]
-  -> DAG MVar [(EVar, EVar)] Expr
+  -> DAG MVar [(EVar, EVar)] ExprI
   -> MVar -> EType -> MorlocMonad EType
 desugarEType h d k (EType t ps cs) = EType <$> desugarType h d k t <*> pure ps <*> pure cs
 
 
 desugarType
   :: Map.Map TVar [([TVar], UnresolvedType)]
-  -> DAG MVar [(EVar, EVar)] Expr
+  -> DAG MVar [(EVar, EVar)] ExprI
   -> MVar
   -> UnresolvedType
   -> MorlocMonad UnresolvedType

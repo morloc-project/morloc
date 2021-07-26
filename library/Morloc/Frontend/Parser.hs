@@ -32,8 +32,8 @@ readProgram
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
   -> MT.Text -- ^ Source code
-  -> DAG MVar Import Expr -- ^ Possibly empty directed graph of previously observed modules
-  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import Expr)
+  -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
+  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI)
 readProgram f sourceCode p =
   case runParser
          (CMS.runStateT (pProgram <* eof) pstate)
@@ -43,7 +43,7 @@ readProgram f sourceCode p =
     Right (es, _) -> Right
       $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d)
               p
-              (map AST.findEdges es) -- [(MVar, [(MVar, Import)], Expr)]
+              (map AST.findEdges es) -- [(MVar, [(MVar, Import)], ExprI)]
   where
     pstate = emptyState { stateModulePath = f }
 
@@ -58,30 +58,30 @@ readType typeStr =
     state = emptyState {stateMinPos = mkPos 1, stateAccepting = True}
 
 -- | The output is rolled into the final DAG of modules
-pProgram :: Parser [Expr]
+pProgram :: Parser [ExprI]
 pProgram = do
   f <- CMS.gets stateModulePath
   L.space space1 comments empty
   setMinPos
   many pToplevel
 
-pToplevel :: Parser Expr
+pToplevel :: Parser ExprI
 pToplevel = try pModule <|> pMain
 
 -- | match a named module
-pModule :: Parser Expr
+pModule :: Parser ExprI
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
   es <- align pExpr
   moduleName <- freename
-  return $ ModE (MVar moduleName) es
+  exprI $ ModE (MVar moduleName) es
 
 -- | match an implicit "main" module
-pMain :: Parser Expr
-pMain = ModE (MVar "Main") <$> many pExpr
+pMain :: Parser ExprI
+pMain = (ModE (MVar "Main") <$> many pExpr) >>= exprI
 
-pExpr :: Parser Expr
+pExpr :: Parser ExprI
 pExpr =
       try pImport
   <|> try pExport
@@ -104,14 +104,14 @@ pExpr =
   <|> pVar
 
 
-pImport :: Parser Expr
+pImport :: Parser ExprI
 pImport = do
   _ <- reserved "import"
   n <- freename
   imports <-
     optional $
     parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
-  return . ImpE $
+  exprI . ImpE $
     Import
       { importModuleName = MVar n
       , importInclude = imports
@@ -126,17 +126,17 @@ pImport = do
     a <- option n (reserved "as" >> pEVar)
     return (n, a)
 
-pExport :: Parser Expr
+pExport :: Parser ExprI
 pExport = do
   reserved "export"
   v <- pEVar
-  return $ ExpE v
+  exprI $ ExpE v
 
 
-pTypedef :: Parser Expr
+pTypedef :: Parser ExprI
 pTypedef = try pTypedefType <|> pTypedefObject where
 
-  pTypedefType :: Parser Expr
+  pTypedefType :: Parser ExprI
   pTypedefType = do
     _ <- reserved "type"
     lang <- optional (try pLang)
@@ -145,9 +145,9 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- symbol "="
     t <- pType
     setLang Nothing
-    return (TypE v vs t)
+    exprI (TypE v vs t)
 
-  pTypedefObject :: Parser Expr
+  pTypedefObject :: Parser ExprI
   pTypedefObject = do
     r <- pNamType
     lang <- optional (try pLang)
@@ -158,7 +158,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
     let t = NamU r (TV lang constructor) (map VarU vs) entries
     setLang Nothing
-    return (TypE v vs t)
+    exprI (TypE v vs t)
 
   desugarTableEntries
     :: Maybe Lang
@@ -204,39 +204,37 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     return (t, ts)
 
 
-pDeclaration :: Parser Expr
+pDeclaration :: Parser ExprI
 pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
   where
 
-  pDataDeclaration :: Parser Expr
+  pDataDeclaration :: Parser ExprI
   pDataDeclaration = do
     v <- pEVar
     _ <- symbol "="
     e <- pExpr
     subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-    return $ Declaration v e subExpressions
+    exprI $ Declaration v e subExpressions
 
-  pFunctionDeclaration :: Parser Expr
+  pFunctionDeclaration :: Parser ExprI
   pFunctionDeclaration = do
     v <- pEVar
     args <- many1 pEVar
     _ <- symbol "="
     e <- pExpr
     subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-    return $ Declaration v (curryLamE args e) subExpressions
-    where
-      curryLamE [] e' = e'
-      curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
+    e' <- curryLamE args e
+    exprI $ Declaration v e' subExpressions
 
   -- | For now, only type signatures and declarations are allowed in function
   -- where statements. There is no particularly reason why source and imports
   -- could not be here. Exports probably should NOT be allowed since they would
   -- break scope.
-  whereTerm :: Parser Expr
+  whereTerm :: Parser ExprI
   whereTerm = try pSignature <|> pDeclaration
 
 
-pSignature :: Parser Expr
+pSignature :: Parser ExprI
 pSignature = do
   v <- freename
   lang <- optional (try pLang)
@@ -246,7 +244,7 @@ pSignature = do
   t <- pTypeGen
   constraints <- option [] pConstraints
   setLang Nothing
-  return $
+  exprI $
     Signature
       (EV v)
       (EType
@@ -283,7 +281,7 @@ pSignature = do
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
 
-pSrcE :: Parser Expr
+pSrcE :: Parser ExprI
 pSrcE = do
   modulePath <- CMS.gets stateModulePath
   reserved "source"
@@ -300,11 +298,11 @@ pSrcE = do
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
     (Nothing, s) -> return s 
-  return $ SrcE [Source { srcName = srcVar
-                        , srcLang = language
-                        , srcPath = srcFile
-                        , srcAlias = aliasVar
-                        } | (srcVar, aliasVar) <- rs]
+  exprI $ SrcE [Source { srcName = srcVar
+                       , srcLang = language
+                       , srcPath = srcFile
+                       , srcAlias = aliasVar
+                       } | (srcVar, aliasVar) <- rs]
   where
 
   pImportSourceTerm :: Parser (Name, EVar)
@@ -313,52 +311,54 @@ pSrcE = do
     a <- option n (reserved "as" >> freename)
     return (Name n, EV a)
 
-pNamE :: Parser Expr
-pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ","))
+pNamE :: Parser ExprI
+pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ",")) >>= exprI
   where
 
-  pNamEntryE :: Parser (MT.Text, Expr)
+  pNamEntryE :: Parser (MT.Text, ExprI)
   pNamEntryE = do
     n <- freename
     _ <- symbol "="
     e <- pExpr
     return (n, e)
 
-pListE :: Parser Expr
-pListE = ListE <$> brackets (sepBy pExpr (symbol ","))
+pListE :: Parser ExprI
+pListE = do
+  e <- ListE <$> brackets (sepBy pExpr (symbol ","))
+  exprI e
 
-pTuple :: Parser Expr
+pTuple :: Parser ExprI
 pTuple = do
   _ <- symbol "("
   e <- pExpr
   _ <- symbol ","
   es <- sepBy1 pExpr (symbol ",")
   _ <- symbol ")"
-  return (TupleE (e : es))
+  exprI $ TupleE (e : es)
 
-pUni :: Parser Expr
-pUni = symbol "Null" >> return UniE
+pUni :: Parser ExprI
+pUni = symbol "Null" >> exprI UniE
 
-pAcc :: Parser Expr
+pAcc :: Parser ExprI
 pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freename
-  return $ AccE e f
+  exprI $ AccE e f
 
-pAnn :: Parser Expr
+pAnn :: Parser ExprI
 pAnn = do
   e <-
     parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pTypeGen
-  return $ AnnE e [t]
+  exprI $ AnnE e [t]
 
-pApp :: Parser Expr
+pApp :: Parser ExprI
 pApp = do
   f <- parens pExpr <|> pVar
-  (e:es) <- many1 s
-  return $ foldl AppE (AppE f e) es
+  es <- many1 s
+  foldApp f es
   where
     s =   try pAnn
       <|> try (parens pExpr)
@@ -371,31 +371,47 @@ pApp = do
       <|> pNamE
       <|> pVar
 
-pLogE :: Parser Expr
-pLogE = pTrue <|> pFalse
+    foldApp :: ExprI -> [ExprI] -> Parser ExprI
+    foldApp _ [] = error "This cannot happen"
+    foldApp f [e] = ExprI <$> exprId <*> pure (AppE f e)
+    foldApp f (e:es) = do
+      i <- exprId
+      let f' = ExprI i (AppE f e)
+      foldApp f' es
+
+
+pLogE :: Parser ExprI
+pLogE = do
+  e <- pTrue <|> pFalse
+  exprI e
   where
     pTrue = reserved "True" >> return (LogE True)
     pFalse = reserved "False" >> return (LogE False)
 
-pStrE :: Parser Expr
-pStrE = fmap StrE stringLiteral
+pStrE :: Parser ExprI
+pStrE = fmap StrE stringLiteral >>= exprI
 
-pNumE :: Parser Expr
-pNumE = fmap NumE number
+pNumE :: Parser ExprI
+pNumE = fmap NumE number >>= exprI
 
-pLam :: Parser Expr
+pLam :: Parser ExprI
 pLam = do
   _ <- symbol "\\"
   vs <- many1 pEVar
   _ <- symbol "->"
   e <- pExpr
-  return (curryLamE vs e)
-  where
-    curryLamE [] e' = e'
-    curryLamE (v:vs') e' = LamE v (curryLamE vs' e')
+  curryLamE vs e
 
-pVar :: Parser Expr
-pVar = fmap VarE pEVar
+curryLamE :: [EVar] -> ExprI -> Parser ExprI
+curryLamE [] e' = return e'
+curryLamE (v:vs') e' = do
+  i <- exprId
+  e'' <- LamE v <$> curryLamE vs' e'
+  return (ExprI i e'')
+
+pVar :: Parser ExprI
+pVar = fmap VarE pEVar >>= exprI
+
 
 pEVar :: Parser EVar
 pEVar = fmap EV freename

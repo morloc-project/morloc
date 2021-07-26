@@ -14,7 +14,7 @@ module Morloc.Frontend.AST
   , findSignatures
   , findTypedefs
   , findSignatureTypeTerms
-  , checkExpr
+  , checkExprI
   , findSources
   ) where
 
@@ -25,34 +25,34 @@ import qualified Data.Map as Map
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
 -- Imports may only be at the top level (FIXME: allow local imports in declaration where statements)
-findEdges :: Expr -> (MVar, [(MVar, Import)], Expr)
-findEdges e@(ModE n es) = (n, [(importModuleName i, i)| (ImpE i) <- es], e)
+findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
+findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i)| (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
-findExportSet :: Expr -> Set.Set EVar
+findExportSet :: ExprI -> Set.Set EVar
 findExportSet = Set.fromList . findExports
 
-findExports :: Expr -> [EVar]
-findExports (ExpE v) = [v]
-findExports (ModE _ es) = conmap findExports es
+findExports :: ExprI -> [EVar]
+findExports (ExprI _ (ExpE v)) = [v]
+findExports (ExprI _ (ModE _ es)) = conmap findExports es
 findExports _ = []
 
-findSources :: Expr -> [Source]
-findSources (SrcE ss) = ss
-findSources (ModE _ es) = conmap findSources es
+findSources :: ExprI -> [Source]
+findSources (ExprI _ (SrcE ss)) = ss
+findSources (ExprI _ (ModE _ es)) = conmap findSources es
 findSources _ = []
 
-findTypedefs :: Expr -> Map.Map TVar ([TVar], UnresolvedType)
-findTypedefs (TypE v vs t) = Map.singleton v (vs, t)
-findTypedefs (ModE _ es) = Map.unions (map findTypedefs es)
+findTypedefs :: ExprI -> Map.Map TVar ([TVar], UnresolvedType)
+findTypedefs (ExprI _ (TypE v vs t)) = Map.singleton v (vs, t)
+findTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findTypedefs es)
 findTypedefs _ = Map.empty
 
-findSignatureTypeTerms :: Expr -> [TVar]
+findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
-  f :: Expr -> [TVar]
-  f (ModE _ es) = conmap f es
-  f (Signature _ (EType t _ _)) = findTypeTerms t
-  f (Declaration _ _ es) = conmap f es
+  f :: ExprI -> [TVar]
+  f (ExprI _ (ModE _ es)) = conmap f es
+  f (ExprI _ (Signature _ (EType t _ _))) = findTypeTerms t
+  f (ExprI _ (Declaration _ _ es)) = conmap f es
   f _ = []
 
 -- | find all the non-generic terms in an unresolved type
@@ -69,20 +69,20 @@ findTypeTerms (NamU _ v es rs) = findTypeTerms (VarU v) ++ conmap findTypeTerms 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
 -- expression is a declaration.
-findSignatures :: Expr -> [(EVar, EType)]
-findSignatures (ModE _ es) = [(v, t) | (Signature v t) <- es]
-findSignatures (Declaration _ _ es) = [(v, t) | (Signature v t) <- es]
-findSignatures (Signature v t) = [(v,t)]
+findSignatures :: ExprI -> [(EVar, EType)]
+findSignatures (ExprI _ (ModE _ es)) = [(v, t) | (ExprI _ (Signature v t)) <- es]
+findSignatures (ExprI _ (Declaration _ _ es)) = [(v, t) | (ExprI _ (Signature v t)) <- es]
+findSignatures (ExprI _ (Signature v t)) = [(v,t)]
 findSignatures _ = []
 
-checkExpr :: Monad m => (Expr -> m ()) -> Expr -> m ()
-checkExpr f e@(ModE _ es) = f e >> mapM_ (checkExpr f) es
-checkExpr f e@(AccE e' _) = f e >> checkExpr f e'
-checkExpr f e@(AnnE e' _) = f e >> checkExpr f e'
-checkExpr f e@(AppE e1 e2) = f e >> checkExpr f e1 >> checkExpr f e2
-checkExpr f e@(Declaration _ e' es') = f e >> checkExpr f e' >> mapM_ f es'
-checkExpr f e@(LamE _ e') = f e >> checkExpr f e'
-checkExpr f e@(ListE es') = f e >> mapM_ f es'
-checkExpr f e@(RecE rs) = f e >> mapM_ f (map snd rs)
-checkExpr f e@(TupleE es') = f e >> mapM_ f es'
-checkExpr f e = f e
+checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()
+checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
+checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (AppE e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (Declaration _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
+checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
+checkExprI f e@(ExprI _ (ListE es')) = f e >> mapM_ f es'
+checkExprI f e@(ExprI _ (RecE rs)) = f e >> mapM_ f (map snd rs)
+checkExprI f e@(ExprI _ (TupleE es')) = f e >> mapM_ f es'
+checkExprI f e = f e

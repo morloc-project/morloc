@@ -41,6 +41,8 @@ module Morloc.Frontend.Lexer
   , symbol
   , pLang
   , tag
+  , exprId
+  , exprI
   ) where
 
 import Data.Void (Void)
@@ -59,7 +61,8 @@ type Parser a = CMS.StateT ParserState (Parsec Void MT.Text) a
 data ParserState = ParserState {
     stateLang :: Maybe Lang
   , stateModulePath :: Maybe Path
-  , stateIndex :: Int
+  , stateVarIndex :: Int
+  , stateExpIndex :: Int
   , stateGenerics :: [TVar] -- store the observed generic variables in the current type
                             -- you should reset the field before parsing a new type 
   , stateMinPos :: Pos
@@ -70,7 +73,8 @@ emptyState :: ParserState
 emptyState = ParserState {
     stateLang = Nothing
   , stateModulePath = Nothing
-  , stateIndex = 1
+  , stateVarIndex = 1
+  , stateExpIndex = 1
   , stateGenerics = []
   , stateMinPos = mkPos 1
   , stateAccepting = False
@@ -84,9 +88,19 @@ tvar v = do
 newvar :: Maybe Lang -> Parser TVar
 newvar lang = do
   s <- CMS.get
-  let i = stateIndex s 
-  CMS.put (s {stateIndex = i + 1}) 
+  let i = stateVarIndex s 
+  CMS.put (s {stateVarIndex = i + 1}) 
   return (TV lang ("p" <> MT.show' i))
+
+exprId :: Parser Int
+exprId = do
+  s <- CMS.get
+  let i = stateExpIndex s
+  CMS.put (s { stateExpIndex = i + 1 })
+  return i
+
+exprI :: Expr -> Parser ExprI
+exprI e = ExprI <$> exprId <*> pure e
 
 setLang :: Maybe Lang -> Parser ()
 setLang lang = do

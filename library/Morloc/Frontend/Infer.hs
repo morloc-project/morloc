@@ -32,8 +32,8 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 -- Modules, scopes, imports and and everything else are abstracted away,
 -- wrapped into GMeta or stored in the Stack state.
 typecheck
-  ::       [SAnno GU Many [UnresolvedType]]
-  -> Stack [SAnno GR Many [CType         ]]
+  :: [SAnno GU Many [Int]]
+  -> Stack [SAnno GR Many [CType]]
 typecheck = undefined
 
 subtype :: UnresolvedType -> UnresolvedType -> Gamma -> Stack Gamma

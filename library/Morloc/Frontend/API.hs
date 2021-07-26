@@ -31,7 +31,7 @@ import qualified Morloc.Frontend.Pretty as Pretty
 parse ::
      Maybe Path
   -> Code -- ^ code of the current module
-  -> MorlocMonad (DAG MVar Import Expr)
+  -> MorlocMonad (DAG MVar Import ExprI)
 parse = undefined
 -- parse ::
 --      Maybe Path
@@ -67,7 +67,7 @@ openLocalModule filename = do
 
 
 typecheck
-  :: [SAnno GU Many [UnresolvedType]]
+  :: [SAnno GU Many [Int]]
   -> MorlocMonad [SAnno GR Many [CType]]
 typecheck = undefined
 -- typecheck d = do

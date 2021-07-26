@@ -47,32 +47,32 @@ prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 
-prettyExpr :: Expr -> Doc AnsiStyle
-prettyExpr UniE = "()"
-prettyExpr (ModE v es) = align . vsep $ ("module" <+> pretty v) : map prettyExpr es
-prettyExpr (TypE v vs t) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenUnresolvedType t
-prettyExpr (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
-prettyExpr (ImpE (Import m (Just xs) _ _))
+prettyExpr :: ExprI -> Doc AnsiStyle
+prettyExpr (ExprI _ UniE) = "()"
+prettyExpr (ExprI _ (ModE v es)) = align . vsep $ ("module" <+> pretty v) : map prettyExpr es
+prettyExpr (ExprI _ (TypE v vs t)) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenUnresolvedType t
+prettyExpr (ExprI _ (ImpE (Import m Nothing _ _))) = "import" <+> pretty m 
+prettyExpr (ExprI _ (ImpE (Import m (Just xs) _ _)))
   = "import" <+> pretty m
   <+> tupled [dquotes (pretty n) <+> "as" <+> pretty alias | (n,alias) <- xs] 
-prettyExpr (ExpE v) = "export" <+> pretty v
-prettyExpr (VarE s) = pretty s
-prettyExpr (AccE e k) = parens (prettyExpr e) <> "@" <> pretty k 
-prettyExpr (LamE n e) = "\\" <> pretty n <+> "->" <+> prettyExpr e
-prettyExpr (AnnE e ts) = parens
+prettyExpr (ExprI _ (ExpE v)) = "export" <+> pretty v
+prettyExpr (ExprI _ (VarE s)) = pretty s
+prettyExpr (ExprI _ (AccE e k)) = parens (prettyExpr e) <> "@" <> pretty k 
+prettyExpr (ExprI _ (LamE n e)) = "\\" <> pretty n <+> "->" <+> prettyExpr e
+prettyExpr (ExprI _ (AnnE e ts)) = parens
   $   prettyExpr e
   <+> "::"
   <+> encloseSep "(" ")" "; " (map prettyGreenUnresolvedType ts)
-prettyExpr (AppE e1@(LamE _ _) e2) = parens (prettyExpr e1) <+> prettyExpr e2
-prettyExpr (AppE e1 e2) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
-prettyExpr (NumE x) = pretty (show x)
-prettyExpr (StrE x) = dquotes (pretty x)
-prettyExpr (LogE x) = pretty x
-prettyExpr (Declaration v e es) = pretty v <+> "=" <+> prettyExpr e <+> "where" <+> (align . vsep . map prettyExpr) es
-prettyExpr (ListE xs) = list (map prettyExpr xs)
-prettyExpr (TupleE xs) = tupled (map prettyExpr xs)
-prettyExpr (SrcE []) = ""
-prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
+prettyExpr (ExprI _ (AppE e1@(ExprI _ (LamE _ _)) e2)) = parens (prettyExpr e1) <+> prettyExpr e2
+prettyExpr (ExprI _ (AppE e1 e2)) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
+prettyExpr (ExprI _ (NumE x)) = pretty (show x)
+prettyExpr (ExprI _ (StrE x)) = dquotes (pretty x)
+prettyExpr (ExprI _ (LogE x)) = pretty x
+prettyExpr (ExprI _ (Declaration v e es)) = pretty v <+> "=" <+> prettyExpr e <+> "where" <+> (align . vsep . map prettyExpr) es
+prettyExpr (ExprI _ (ListE xs)) = list (map prettyExpr xs)
+prettyExpr (ExprI _ (TupleE xs)) = tupled (map prettyExpr xs)
+prettyExpr (ExprI _ (SrcE [])) = ""
+prettyExpr (ExprI _ (SrcE srcs@(Source _ lang (Just f) _ : _))) =
   "source" <+>
   viaShow lang <+>
   "from" <+>
@@ -87,7 +87,7 @@ prettyExpr (SrcE srcs@(Source _ lang (Just f) _ : _)) =
        rs)
   where
     rs = [(n, a) | (Source n _ _ a) <- srcs]
-prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
+prettyExpr (ExprI _ (SrcE srcs@(Source _ lang Nothing _ : _))) =
   "source" <+>
   viaShow lang <+>
   tupled
@@ -100,13 +100,13 @@ prettyExpr (SrcE srcs@(Source _ lang Nothing _ : _)) =
        rs)
   where
     rs = [(n,a) | (Source n _ _ a) <- srcs]
-prettyExpr (RecE entries) =
+prettyExpr (ExprI _ (RecE entries)) =
   encloseSep
     "{"
     "}"
     ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
-prettyExpr (Signature v e) =
+prettyExpr (ExprI _ (Signature v e)) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle

@@ -9,7 +9,9 @@ Stability   : experimental
 
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace
+  , ExprI(..)
   , Expr(..)
+  , mapExprM
   , Import(..)
   , Stack
   , StackState(..)
@@ -75,9 +77,38 @@ substituteT v0 r0 t0 = sub t0
 isGeneric :: TVar -> Bool
 isGeneric (TV _ typeStr) = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 
+data ExprI = ExprI Int Expr
+  deriving (Show, Ord, Eq)
+
+mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
+mapExpr f e0 = g e0 where
+  g (ExprI i (ModE v xs)) = ExprI i (f $ ModE v (map g xs))
+  g (ExprI i (Declaration v e es)) = ExprI i (f $ Declaration v (g e) (map g es))
+  g (ExprI i (AccE e k)) = ExprI i (f $ AccE (g e) k)
+  g (ExprI i (ListE xs)) = ExprI i (f $ ListE (map g xs))
+  g (ExprI i (TupleE xs)) = ExprI i (f $ TupleE (map g xs))
+  g (ExprI i (LamE v e)) = ExprI i (f $ LamE v (g e))
+  g (ExprI i (AppE e1 e2)) = ExprI i (f $ AppE (g e1) (g e2))
+  g (ExprI i (AnnE e ts)) = ExprI i (f $ AnnE (g e) ts)
+  g (ExprI i (RecE rs)) = ExprI i (f $ RecE (zip (map fst rs) (map g (map snd rs))))
+  g (ExprI i e) = ExprI i (f e)
+
+mapExprM :: Monad m => (Expr -> m Expr) -> ExprI -> m ExprI
+mapExprM f e0 = g e0 where
+  g (ExprI i (ModE v xs)) = ExprI i <$> ((ModE v <$> mapM g xs) >>= f)
+  g (ExprI i (Declaration v e es)) = ExprI i <$> ((Declaration v <$> g e <*> mapM g es) >>= f)
+  g (ExprI i (AccE e k)) = ExprI i <$> ((AccE <$> g e <*> pure k) >>= f)
+  g (ExprI i (ListE xs)) = ExprI i <$> ((ListE <$> mapM g xs) >>= f)
+  g (ExprI i (TupleE xs)) = ExprI i <$> ((TupleE <$> mapM g xs) >>= f)
+  g (ExprI i (LamE v e)) = ExprI i <$> ((LamE v <$> g e) >>= f)
+  g (ExprI i (AppE e1 e2)) = ExprI i <$> ((AppE <$> g e1 <*> g e2) >>= f)
+  g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
+  g (ExprI i (RecE rs)) = ExprI i <$> ((RecE <$> (zip (map fst rs) <$> mapM g (map snd rs))) >>= f)
+  g (ExprI i e) = ExprI i <$> f e
+
 -- | Terms, see Dunfield Figure 1
 data Expr
-  = ModE MVar [Expr]
+  = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
   | TypE TVar [TVar] UnresolvedType
   -- ^ a type definition
@@ -92,7 +123,7 @@ data Expr
   -- ^ import "c" from "foo.c" ("f" as yolo).
   | Signature EVar EType
   -- ^ x :: A
-  | Declaration EVar Expr [Expr]
+  | Declaration EVar ExprI [ExprI]
   -- ^ x=e1
   -- 1. term name
   -- 2. term
@@ -101,17 +132,17 @@ data Expr
   -- ^ (())
   | VarE EVar
   -- ^ (x)
-  | AccE Expr Text
+  | AccE ExprI Text
   -- ^ person@age - access a field in a record
-  | ListE [Expr]
+  | ListE [ExprI]
   -- ^ [e]
-  | TupleE [Expr]
+  | TupleE [ExprI]
   -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
-  | LamE EVar Expr
+  | LamE EVar ExprI
   -- ^ (\x -> e)
-  | AppE Expr Expr
+  | AppE ExprI ExprI
   -- ^ (e e)
-  | AnnE Expr [UnresolvedType]
+  | AnnE ExprI [UnresolvedType]
   -- ^ (e : A)
   | NumE Scientific
   -- ^ number of arbitrary size and precision
@@ -119,7 +150,7 @@ data Expr
   -- ^ boolean primitive
   | StrE Text
   -- ^ literal string
-  | RecE [(Text, Expr)]
+  | RecE [(Text, ExprI)]
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -148,7 +179,7 @@ data Import =
 data GammaIndex
   = VarG TVar
   -- ^ (G,a)
-  | AnnG Expr TypeSet
+  | AnnG ExprI TypeSet
   -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
   | ExistG TVar
     [UnresolvedType] -- FIXME: document
