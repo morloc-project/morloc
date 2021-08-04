@@ -29,6 +29,19 @@ findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
 findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i)| (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
+-- findTermIndicesInScope :: ExprI -> Map.Map EVar [Int]
+-- findTermIndicesInScope e0 = f Map.empty e0 where
+--   f m e@(ExprI _ (ModE _ es)) = Map.unionsWith concat (map (f m) es)
+--   f m e@(ExprI _ (AccE e _)) = f e
+--   f m e@(ExprI _ (AnnE e t)) = f e
+--   f m e@(ExprI _ (AppE e1 e2)) = f (f m e1) e2
+--   f m e@(ExprI _ (Declaration _ e' es')) =
+--   f m e@(ExprI _ (LamE _ e')) =
+--   f m e@(ExprI _ (ListE es')) =
+--   f m e@(ExprI _ (RecE rs)) =
+--   f m e@(ExprI _ (TupleE es')) =
+--   f m _ = m
+
 findExportSet :: ExprI -> Set.Set EVar
 findExportSet = Set.fromList . findExports
 

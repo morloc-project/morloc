@@ -42,6 +42,7 @@ import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Language as ML
 import qualified System.Exit as SE
 import qualified System.Process as SP
@@ -57,6 +58,7 @@ emptyState path v = MorlocState {
     statePackageMeta = []
   , stateVerbosity = v
   , stateCounter = -1
+  , stateSignatures = GMap.empty
   , stateOutfile = path
 }
 

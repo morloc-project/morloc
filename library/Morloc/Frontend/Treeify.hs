@@ -30,37 +30,83 @@ data TermOrigin = Declared ExprI | Sourced Source
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
   -> MorlocMonad [SAnno GU Many [Int]]
-treeify = undefined
--- treeify d = do
---   h = DAG.synthesizeDAG collect
+treeify d
+ | Map.size d == 0 = return []
+ | otherwise = case MDD.roots d of
+   -- if no parentless element exists, then the graph must be empty or cyclic
+   [] -> MM.throwError CyclicDependency
+   -- else if exactly one module name key (k) is found
+   [k] -> case MDD.lookupNode k d of
+     -- if the key is not in the DAG, then something is dreadfully wrong codewise
+     Nothing -> MM.throwError . DagMissingKey . render $ pretty k
+     (Just e) -> do
+       -- build a map
+       -- - fill stateSignatures map in the MorlocState reader monad
+       --       stateSignatures :: GMap Int Int [EType]
+       -- - this is a map from term (VarE) indices to signature sets
+       -- - after this step, all signatures and type annotation expressions are redundant
+       -- - the map won't be used until the type inference step in Infer.hs
+       _ <- MDD.synthesizeDAG linkSignaturesModule d
 
---  -- | Map.size d == 0 = return []
---  -- | otherwise = case MDD.roots d of
---  --   -- if no parentless element exists, then the graph must be empty or cyclic
---  --   [] -> MM.throwError CyclicDependency
---  --   [k] -> case MDD.lookupNode k d of
---  --     Nothing -> MM.throwError . DagMissingKey . render $ pretty k
---  --     (Just e) -> do
---  --       -- initialize state counter to 0, used to index manifolds
---  --       MM.startCounter
---  --       mapM (collect d e) (Set.toList (AST.findExportSet e))
---  --   -- There is no currently supported use case that exposes multiple roots in
---  --   -- one compilation process. The compiler executable takes a single morloc
---  --   -- file as input, therefore this MUST be the root. In the future compiling
---  --   -- multiple projects in parallel with potentially shared information and
---  --   -- constraints could be valuable.
---  --   _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
+       -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
+       mapM (collect d e) (Set.toList (AST.findExportSet e))
 
--- -- each of these inherits imported context, includes global context, and tracks
--- -- local context (i.e., signatures and declarations in `where` blocks).
--- typemap :: Map.Map Int [UnresolvedType]
+   -- There is no currently supported use case that exposes multiple roots in
+   -- one compilation process. The compiler executable takes a single morloc
+   -- file as input, therefore this MUST be the root. In the future compiling
+   -- multiple projects in parallel with potentially shared information and
+   -- constraints could be valuable.
+   _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
+
+-- in each scope (top of a module or after descending into a where statement) 
+--  1 collect all type signatures (Map EVar [EType])
+--  2 find all equivalent appearences of a given term across modules (including across aliases)
+linkSignaturesModule
+  :: MVar
+  -> ExprI
+  -> [(MVar, [(EVar, EVar)], Map.Map EVar [EType])]
+  -> MorlocMonad (Map.Map EVar [EType])
+linkSignaturesModule _ (ExprI _ (ModE _ es)) edges = linkSignatures es m where
+  -- a map from alias to all signatures associated with the alias
+  m :: Map.Map EVar [EType]
+  m = Map.unionsWith concat [inheritSignature es' m' | (_, es', m') <- edges]
+
+-- map from a srcname linking to an alias linking
+-- NOTE: This is NOT a one to one mapping. Many sources may map to one alias.
+inheritSignature :: [(EVar, EVar)] -> Map.Map EVar [EType] -> Map.Map EVar [EType]
+inheritSignature = undefined
+-- inheritSignature es0 m =
+--   let alias = Map.fromList . groupSort $ [(alias, srcname) | (srcname, alias) <- es0]
+--   in Map.map (mapMaybe (flip Map.lookup $ m)) alias
+
+
+linkSignatures :: [ExprI] -> Map.Map EVar [EType] -> MorlocMonad ()
+linkSignatures = undefined
+
+
+findSignatures :: ExprI -> Map.Map EVar [EType]
+findSignatures = undefined
+
+
+linkSignature
+  :: EVar
+  -> [EType]
+  -> ExprI
+  -> MorlocMonad ()
+linkSignature = undefined
+
+
+-- -- -- each of these inherits imported context, includes global context, and tracks
+-- -- -- local context (i.e., signatures and declarations in `where` blocks).
+-- -- typemap :: Map.Map Int [UnresolvedType]
+-- --
+-- -- declmap :: Map.Map Int [TermOrigin]
+-- -- packmap :: Map.Map (TVar, Int) [UnresolvedPacker]
 --
--- declmap :: Map.Map Int [TermOrigin]
--- packmap :: Map.Map (TVar, Int) [UnresolvedPacker]
-
-
-
-{-
+--
+-- -- Two steps,
+-- --  1) move type annotations into MorlocState stateSignatures
+-- --  2) move translate every module from ExprI into SAnno
 
 
 -- When I see a term, I need to look it up. To do so, I need to walk up through
@@ -74,17 +120,17 @@ treeify = undefined
 --  * manual type annotations or signatures
 --  * inferred type annotations
 --  *
---
--- -}
---
--- -- | Build the call tree for a single nexus command. The result is ambiguous,
--- -- with 1 or more possible tree topologies, each with one or more possible for
--- -- each function.
--- collect
---   :: DAG MVar [(EVar, EVar)] (Map.Map EVar ([TermOrigin], [EType]))
---   -> ExprI
---   -> EVar
---   -> MorlocMonad (SAnno GU Many [Int], GMap.GMap Int Int [EType])
+
+-- | Build the call tree for a single nexus command. The result is ambiguous,
+-- with 1 or more possible tree topologies, each with one or more possible for
+-- each function.
+collect
+  :: DAG MVar [(EVar, EVar)] ExprI
+  -> ExprI
+  -> EVar
+  -> MorlocMonad (SAnno GU Many [Int])
+collect = undefined
+
 -- collect d (ModE m es) v = undefined
 --   -- build module scope
 --   --   * find all imports, call collect on each var
@@ -140,12 +186,12 @@ statefulMapM f s (x:xs) = do
   (s'', xs') <- statefulMapM f s' xs
   return (s'', x':xs')
 
-yIsX' :: (Ord a) => GMap.GMap a b c -> a -> a -> MorlocMonad (GMap.GMap a b c)
+yIsX' :: (Ord a) => GMap a b c -> a -> a -> MorlocMonad (GMap a b c)
 yIsX' m k1 k2 = case GMap.yIsX m k1 k2 of
   Nothing -> MM.throwError . CallTheMonkeys $ "Internal key error"
   (Just m') -> return m'
 
-reindex :: GMap.GMap Int Int [EType] -> SAnno GU Many [Int] -> MorlocMonad (GMap.GMap Int Int [EType], SAnno GU Many [Int])
+reindex :: GMap Int Int [EType] -> SAnno GU Many [Int] -> MorlocMonad (GMap Int Int [EType], SAnno GU Many [Int])
 reindex m (SAnno (Many xs) g) = do
   i <- MM.getCounter
   m' <- yIsX' m (metaId g) i
@@ -153,13 +199,13 @@ reindex m (SAnno (Many xs) g) = do
   (m'', xs') <- statefulMapM reindexSExpr m' xs
   return (m'', SAnno (Many xs') g')
 
-reindexSExpr :: GMap.GMap Int Int [EType] -> (SExpr GU Many [Int], [Int]) -> MorlocMonad (GMap.GMap Int Int [EType], (SExpr GU Many [Int], [Int]))
+reindexSExpr :: GMap Int Int [EType] -> (SExpr GU Many [Int], [Int]) -> MorlocMonad (GMap Int Int [EType], (SExpr GU Many [Int], [Int]))
 reindexSExpr m0 (s0, ts0) = do
   (m', ts') <- statefulMapM reindexOne m0 ts0 
   (m'', s') <- f m' s0
   return (m'', (s', ts'))
   where
-  f :: GMap.GMap Int Int [EType] -> SExpr GU Many [Int] -> MorlocMonad (GMap.GMap Int Int [EType], SExpr GU Many [Int])
+  f :: GMap Int Int [EType] -> SExpr GU Many [Int] -> MorlocMonad (GMap Int Int [EType], SExpr GU Many [Int])
   f m (AccS x t) = do
     (m', x') <- reindex m x
     return (m', AccS x' t)
@@ -181,7 +227,7 @@ reindexSExpr m0 (s0, ts0) = do
     return (m', RecS (zip (map fst rs) xs'))
   f m x = return (m, x)
 
-  reindexOne :: GMap.GMap Int Int [EType] -> Int -> MorlocMonad (GMap.GMap Int Int [EType], Int)
+  reindexOne :: GMap Int Int [EType] -> Int -> MorlocMonad (GMap Int Int [EType], Int)
   reindexOne m i = do
     i' <- MM.getCounter
     m' <- yIsX' m i i'

@@ -428,7 +428,6 @@ pTypeGen = do
     forallWrap (v:vs) t = ForallU v (forallWrap vs t)
 
 
-
 pType :: Parser UnresolvedType
 pType =
       pExistential

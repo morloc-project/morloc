@@ -39,6 +39,8 @@ module Morloc.Namespace
   -- ** Data
   , Script(..)
   , SysCommand(..)
+  , GMap(..)
+  , GMapRet(..)
   -- ** Serialization
   , UnresolvedPacker(..)
   , PackMap
@@ -57,6 +59,7 @@ module Morloc.Namespace
   -- * Types
   , Type(..)
   , UnresolvedType(..)
+  , EType(..)
   , unresolvedType2type
   , Source(..)
   -- ** Type extensions
@@ -98,6 +101,15 @@ type MDoc = Doc ()
 -- check whether a given stucture has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
+data GMap a b c = GMap (Map a b) (Map b c)
+  deriving(Show, Ord, Eq)
+
+data GMapRet c
+  = GMapNoFst -- ^ Failure on the first key
+  | GMapNoSnd -- ^ Failure on the internal key (possible bug)
+  | GMapJust c
+  deriving(Show, Ord, Eq)
+
 type MorlocMonadGen c e l s a
    = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
 
@@ -107,6 +119,7 @@ data MorlocState = MorlocState {
     statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
   , stateCounter :: Int
+  , stateSignatures :: GMap Int Int [EType]
   , stateOutfile :: Maybe Path
 }
 
@@ -363,7 +376,7 @@ data GMeta t = GMeta {
 } deriving (Show, Ord, Eq)
 
 -- Metadata for a general type before it has been resolved
-type GU = GMeta Void
+type GU = GMeta Int
 
 -- General resolved metadata and type - used after type inference
 type GR = GMeta (Maybe GType)
@@ -426,6 +439,19 @@ data UnresolvedType
   | NamU NamType TVar [UnresolvedType] [(Text, UnresolvedType)] -- keyword parameterized types
   -- ^ Foo { bar :: A, baz :: B }
   deriving (Show, Ord, Eq)
+
+-- | Extended Type that may represent a language specific type as well as sets
+-- of properties and constrains.
+data EType =
+  EType
+    { etype :: UnresolvedType
+    , eprop :: Set Property
+    , econs :: Set Constraint
+    }
+  deriving (Show, Eq, Ord)
+
+instance HasOneLanguage EType where
+  langOf e = langOf (etype e) 
 
 unresolvedType2type :: UnresolvedType -> Type 
 unresolvedType2type (VarU v) = VarT v

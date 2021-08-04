@@ -153,19 +153,6 @@ data Expr
   | RecE [(Text, ExprI)]
   deriving (Show, Ord, Eq)
 
--- | Extended Type that may represent a language specific type as well as sets
--- of properties and constrains.
-data EType =
-  EType
-    { etype :: UnresolvedType
-    , eprop :: Set Property
-    , econs :: Set Constraint
-    }
-  deriving (Show, Eq, Ord)
-
-instance HasOneLanguage EType where
-  langOf e = langOf (etype e) 
-
 data Import =
   Import
     { importModuleName :: MVar

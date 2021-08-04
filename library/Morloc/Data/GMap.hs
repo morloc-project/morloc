@@ -8,8 +8,7 @@ Stability   : experimental
 -}
 
 module Morloc.Data.GMap
-  ( GMap(..)
-  , elems
+  ( elems
   , empty
   , innerKeys
   , insert
@@ -21,16 +20,10 @@ module Morloc.Data.GMap
   , yIsX
   ) where
 
+import Morloc.Namespace hiding (insert, lookup)
 import Prelude hiding (lookup)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-
-data GMap a b c = GMap (Map.Map a b) (Map.Map b c)
-
-data GMapRet c
-  = GMapNoFst -- ^ Failure on the first key
-  | GMapNoSnd -- ^ Failure on the internal key (possible bug)
-  | GMapJust c
 
 mapVals :: (c -> c') -> GMap a b c -> GMap a b c'
 mapVals f (GMap x y) = GMap x (Map.map f y)
