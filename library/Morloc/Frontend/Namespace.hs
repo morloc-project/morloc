@@ -121,8 +121,9 @@ data Expr
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE [Source]
   -- ^ import "c" from "foo.c" ("f" as yolo).
-  | Signature EVar EType
-  -- ^ x :: A
+  | Signature EVar (Maybe Text) EType
+  -- ^ A type signature, the three parameters correspond to the term name, the
+  -- optional label, and the type
   | Declaration EVar ExprI [ExprI]
   -- ^ x=e1
   -- 1. term name

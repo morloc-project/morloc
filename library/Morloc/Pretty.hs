@@ -45,10 +45,11 @@ instance Pretty Lang where
   pretty = viaShow
 
 instance Pretty Source where
-  pretty (Source name lang pathmay alias)
-    = "source" <+> pretty lang
-    <> maybe "" (\path->" from" <+> dquotes (pretty path)) pathmay
-    <+> dquotes (pretty name) <+> "as" <+> pretty alias
+  pretty s
+    = "source" <+> pretty (srcLang s)
+    <> maybe "" (\ path -> " from" <+> dquotes (pretty path)) (srcPath s)
+    <+> dquotes (pretty (srcName s))
+    <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
 typeStyle =
   Style.SetAnsiStyle

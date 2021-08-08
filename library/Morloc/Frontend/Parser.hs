@@ -236,6 +236,7 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
 
 pSignature :: Parser ExprI
 pSignature = do
+  label <- tag freename
   v <- freename
   lang <- optional (try pLang)
   setLang lang
@@ -247,6 +248,7 @@ pSignature = do
   exprI $
     Signature
       (EV v)
+      label
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -302,14 +304,16 @@ pSrcE = do
                        , srcLang = language
                        , srcPath = srcFile
                        , srcAlias = aliasVar
-                       } | (srcVar, aliasVar) <- rs]
+                       , srcLabel = label
+                       } | (srcVar, aliasVar, label) <- rs]
   where
 
-  pImportSourceTerm :: Parser (Name, EVar)
+  pImportSourceTerm :: Parser (Name, EVar, Maybe MT.Text)
   pImportSourceTerm = do
+    t <- tag stringLiteral
     n <- stringLiteral
     a <- option n (reserved "as" >> freename)
-    return (Name n, EV a)
+    return (Name n, EV a, t)
 
 pNamE :: Parser ExprI
 pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ",")) >>= exprI

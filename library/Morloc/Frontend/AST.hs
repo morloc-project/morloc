@@ -21,6 +21,7 @@ module Morloc.Frontend.AST
 import Morloc.Frontend.Namespace
 import qualified Data.Set as Set
 import qualified Data.Map as Map
+import qualified Morloc.Data.Text as MT
 
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
@@ -64,7 +65,7 @@ findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
   f (ExprI _ (ModE _ es)) = conmap f es
-  f (ExprI _ (Signature _ (EType t _ _))) = findTypeTerms t
+  f (ExprI _ (Signature _ _ (EType t _ _))) = findTypeTerms t
   f (ExprI _ (Declaration _ _ es)) = conmap f es
   f _ = []
 
@@ -82,10 +83,10 @@ findTypeTerms (NamU _ v es rs) = findTypeTerms (VarU v) ++ conmap findTypeTerms 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
 -- expression is a declaration.
-findSignatures :: ExprI -> [(EVar, EType)]
-findSignatures (ExprI _ (ModE _ es)) = [(v, t) | (ExprI _ (Signature v t)) <- es]
-findSignatures (ExprI _ (Declaration _ _ es)) = [(v, t) | (ExprI _ (Signature v t)) <- es]
-findSignatures (ExprI _ (Signature v t)) = [(v,t)]
+findSignatures :: ExprI -> [(EVar, Maybe MT.Text, EType)]
+findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (Signature v l t)) <- es]
+findSignatures (ExprI _ (Declaration _ _ es)) = [(v, l, t) | (ExprI _ (Signature v l t)) <- es]
+findSignatures (ExprI _ (Signature v l t)) = [(v, l, t)]
 findSignatures _ = []
 
 checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()

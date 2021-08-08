@@ -44,7 +44,7 @@ prettyGammaIndex (ExistG tv ts ds)
   <+> list (map (parens . prettyGreenUnresolvedType) ds)
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
-prettyGammaIndex (SrcG (Source ev1 lang _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 
 prettyExpr :: ExprI -> Doc AnsiStyle
@@ -72,7 +72,7 @@ prettyExpr (ExprI _ (Declaration v e es)) = pretty v <+> "=" <+> prettyExpr e <+
 prettyExpr (ExprI _ (ListE xs)) = list (map prettyExpr xs)
 prettyExpr (ExprI _ (TupleE xs)) = tupled (map prettyExpr xs)
 prettyExpr (ExprI _ (SrcE [])) = ""
-prettyExpr (ExprI _ (SrcE srcs@(Source _ lang (Just f) _ : _))) =
+prettyExpr (ExprI _ (SrcE srcs@(Source _ lang (Just f) _ _ : _))) =
   "source" <+>
   viaShow lang <+>
   "from" <+>
@@ -86,8 +86,8 @@ prettyExpr (ExprI _ (SrcE srcs@(Source _ lang (Just f) _ : _))) =
             else (" as" <> pretty a))
        rs)
   where
-    rs = [(n, a) | (Source n _ _ a) <- srcs]
-prettyExpr (ExprI _ (SrcE srcs@(Source _ lang Nothing _ : _))) =
+    rs = [(n, a) | (Source n _ _ a _) <- srcs]
+prettyExpr (ExprI _ (SrcE srcs@(Source _ lang Nothing _ _ : _))) =
   "source" <+>
   viaShow lang <+>
   tupled
@@ -99,14 +99,14 @@ prettyExpr (ExprI _ (SrcE srcs@(Source _ lang Nothing _ : _))) =
             else (" as" <> pretty a))
        rs)
   where
-    rs = [(n,a) | (Source n _ _ a) <- srcs]
+    rs = [(n,a) | (Source n _ _ a _) <- srcs]
 prettyExpr (ExprI _ (RecE entries)) =
   encloseSep
     "{"
     "}"
     ", "
     (map (\(v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
-prettyExpr (ExprI _ (Signature v e)) =
+prettyExpr (ExprI _ (Signature v _ e)) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle

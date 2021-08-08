@@ -52,6 +52,7 @@ module Morloc.Namespace
   -- ** Morloc monad
   , MorlocMonad
   , MorlocState(..)
+  , TermTypes(..)
   , MorlocReturn
   -- ** Package metadata
   , PackageMeta(..)
@@ -119,9 +120,67 @@ data MorlocState = MorlocState {
     statePackageMeta :: [PackageMeta]
   , stateVerbosity :: Int
   , stateCounter :: Int
-  , stateSignatures :: GMap Int Int [EType]
+  , stateSignatures :: GMap Int Int TermTypes
   , stateOutfile :: Maybe Path
 }
+
+{-
+       A           - There can be only one general signature for a term within a scope
+      / \          - All parental constraints are inherited
+     /   \         - Order of constraint application does not matter
+    /     \        - If you import two terms under the same alias, then they must be the same
+   A+c1    A+c2      at the general level
+    \     /   \    - You are, of course, free to import them under different aliases, in which
+     \   /     \     case they will not be unified
+      \ /       \
+      A+c3       A+c4
+      ---        ----
+      A+c1+c2+c3 A+c2+c4
+
+       a           - Is there a fundamental difference between types and constraints?
+      / \          - A constraint reduces the set of elements contained in the type
+     /   \         - A type specifies the broadest set, but this is still just a constraint
+    /     \          of the set from all things to one kind of thing
+   A+c1    B+c2    - The problem with the generic `a` being specialized into A and B and then being
+    \     /   \      imported is that probably the intersection between A and B is empty. But maybe
+     \   /     \      it would make more sense for the result to be a union type, where X may be 
+      \ /       \      either A or B. And which it is is determined at compile time from context.
+       X         B+c4    Maybe A and B are two representations of the same thing, like a `map` type
+      ---        ----     may be represented as either `[(a,b)]` or `([a]_n,[b]_n)`.
+      error?     B+c2+c4  - No, that is too complicated. For now, there may be only one base type
+    or union?               per scope and all imported types must agree (only constraints may
+                            differ).
+
+     f.1  f.2  f.3  -- Three different concrete type signatures for f, possibly with different sources
+         / \           but all in the same language. Different languages do not interact, so add no
+        /   \          new type-level complexity.
+       /     \
+    f.4       `-------.      -- Concrete type signatures may only be added where new functions
+    --------------     \        are sourced.
+    f.1 f.2 f.3 f.4     \
+       \                 f.5
+        `---------.     ---------------
+                   \    f.1 f.2 f.3 f.5
+                    \   /
+                     \ /
+                     ( )    -- no new sources
+                     ---
+                     f.1 f.2 f.3 f.4 f.5   -- We need to merge duplicates here, f.[123] are the same
+                                              since they were all defined in the first scope. Since
+                                              concrete types cannot be appended, this merging is
+                                              trivial.
+
+  -- In the downstream realization phase, the compiler needs to choose one instance for each function.
+  -- Currently, this step consists only of choosing which language to use by minimizing the number of
+  -- interops required and preferring "faster" languages.
+-}
+
+data TermTypes = TermTypes {
+    termGeneral :: Maybe EType
+  -- ^ A term may have many general types (up to one in each scope)
+  , termConcrete :: [(MVar, Source, [EType])]
+  -- ^ The module name (MVar) is needed to lookup package metadata (if needed)
+} 
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
@@ -221,6 +280,7 @@ data MorlocError
   | BadRecordAccess
   | NoAnnotationFound -- I don't know what this is for
   | OtherError Text -- TODO: remove this option
+  | IncompatibleGeneralType UnresolvedType UnresolvedType
   -- container errors
   | EmptyTuple
   | TupleSingleton
@@ -326,6 +386,8 @@ data Source =
     , srcAlias :: EVar
       -- ^ the morloc alias for the function (if no alias is explicitly given,
       -- this will be equal to the name
+    , srcLabel :: Maybe Text
+      -- ^ an additional label for distinguishing this term from its synonyms
     }
   deriving (Ord, Eq, Show)
 
@@ -452,6 +514,10 @@ data EType =
 
 instance HasOneLanguage EType where
   langOf e = langOf (etype e) 
+
+instance HasOneLanguage Source where
+  langOf s = Just (srcLang s)
+  langOf' s = srcLang s
 
 unresolvedType2type :: UnresolvedType -> Type 
 unresolvedType2type (VarU v) = VarT v

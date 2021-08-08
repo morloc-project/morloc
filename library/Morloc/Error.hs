@@ -70,6 +70,8 @@ errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg BadRecordAccess = "BadRecordAccess" 
 errmsg NoAnnotationFound = "NoAnnotationFound"
 errmsg (OtherError msg) = "OtherError: " <> msg
+-- TODO: this will be a common class of errors and needs an informative message
+errmsg (IncompatibleGeneralType _ _) = "Incompatible general types"
 -- container errors
 errmsg EmptyTuple = "EmptyTuple"
 errmsg TupleSingleton = "TupleSingleton"

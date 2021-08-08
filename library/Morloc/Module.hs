@@ -159,7 +159,7 @@ handleFlagsAndPaths RustLang srcs = return (srcs, [], []) -- FIXME
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
 
 flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
-flagAndPath src@(Source _ CppLang (Just p) _)
+flagAndPath src@(Source _ CppLang (Just p) _ _)
   = case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     -- lookup up "<base>.h" and "lib<base>.so"
     (".", base, "") -> do
@@ -197,9 +197,9 @@ flagAndPath src@(Source _ CppLang (Just p) _)
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ CppLang Nothing _) = return (src, [], Nothing)
-flagAndPath src@(Source _ RustLang _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
-flagAndPath (Source _ _ _ _) = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
+flagAndPath src@(Source _ CppLang Nothing _ _) = return (src, [], Nothing)
+flagAndPath src@(Source _ RustLang _ _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
+flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 
 getFile :: Path -> IO (Maybe Path)

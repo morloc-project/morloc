@@ -236,12 +236,12 @@ makeDependency (pkgName, path) = do
   [idoc|#{pretty pkgName} = { path = "#{pretty path}" }|]
 
 getFunction :: Source -> MorlocMonad (Name, MDoc)
-getFunction (Source func RustLang Nothing _) = return (func, pretty func)
-getFunction (Source func RustLang (Just path) _) = do
+getFunction (Source func RustLang Nothing _ _) = return (func, pretty func)
+getFunction (Source func RustLang (Just path) _ _) = do
   fullpath <- liftIO (MS.canonicalizePath path)
   namespace <- findPkgName fullpath 
   return (func, pretty namespace <> "::" <> pretty func)
-getFunction (Source _ _ _ _) = error "Expected Rust function"
+getFunction _ = error "Expected Rust function"
 
 getDependencies :: [Source] -> MorlocMonad [(String, Path)]
 getDependencies srcs = do
