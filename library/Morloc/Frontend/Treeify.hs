@@ -17,7 +17,7 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
-import qualified Data.Map as Map
+import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.GMap as GMap
 
@@ -82,8 +82,8 @@ linkSignaturesModule
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   -- a map from alias to all signatures associated with the alias
-  = mapMapM (foldlM combineTermTypes (TermTypes Nothing []))
-            (Map.unionsWith (<>) [unalias es' m' | (_, es', m') <- edges]) >>=
+  = Map.mapM (foldlM combineTermTypes (TermTypes Nothing []))
+              (Map.unionsWith (<>) [unalias es' m' | (_, es', m') <- edges]) >>=
     linkSignatures v es
   where
   -- map from a srcname linking to an alias linking
@@ -106,7 +106,7 @@ linkSignatures v es m = do
   terms <- unifyTermTypes v es m
 
   -- Map EVar (Int, TermTypes)
-  iterms <- mapMapM indexTerm terms
+  iterms <- Map.mapM indexTerm terms
 
   -- link terms to types
   _ <- linkVariablesToTermTypes v iterms es
@@ -144,9 +144,9 @@ linkVariablesToTermTypes mod m = mapM_ (link m) where
 
 unifyTermTypes :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
 unifyTermTypes mod xs m0
-  = mergeMapsM fb fc fbc sigs srcs
-  >>= mapKeysWithM combineTermTypes (\(v,_,_) -> v)
-  >>= unionWithM combineTermTypes m0
+  = Map.mergeMapsM fb fc fbc sigs srcs
+  >>= Map.mapKeysWithM combineTermTypes (\(v,_,_) -> v)
+  >>= Map.unionWithM combineTermTypes m0
   where
   sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (Signature v l t)) <- xs] 
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [s]) | s <- concat [ss | (ExprI _ (SrcE ss)) <- xs]]
@@ -172,72 +172,6 @@ unifyTermTypes mod xs m0
       -- TODO: don't call the monkeys
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
     return $ TermTypes gtype [(mod, src, csigs) | src <- srcs]
-
-
-unionWithM :: (Monad m, Ord a) => (b -> b -> m b) -> Map.Map a b -> Map.Map a b -> m (Map.Map a b)
-unionWithM f m1 m2 = do
-  pairs <- mapM (onSndM (uncurry f)) (Map.toList $ Map.intersectionWith (,) m1 m2)
-
-  return $ Map.unions
-    [ Map.difference m1 m2
-    , Map.fromList pairs
-    , Map.difference m2 m1
-    ]
-
-unionsWithM :: (Monad m, Ord a) => (b -> b -> m b) -> [Map.Map a b] -> m (Map.Map a b)
-unionsWithM f = foldlM (unionWithM f) Map.empty
-
-
-mapKeysWithM
-  :: (Monad m, Ord k1, Ord k2)
-  => (a -> a -> m a)
-  -> (k1 -> k2)
-  -> Map.Map k1 a
-  -> m (Map.Map k2 a)
-mapKeysWithM f g m
-  = fmap Map.fromList
-  $ mapM (\(k, (v:vs)) -> (,) k <$> foldM f v vs)
-         (groupSort $ map (\(k,x) -> (g k, x)) (Map.toList m))
-   
-
-mergeMaps
-  :: Ord a
-  => (b -> d)
-  -> (c -> d)
-  -> (b -> c -> d)
-  -> Map.Map a b
-  -> Map.Map a c
-  -> Map.Map a d
-mergeMaps fb fc fbc m1 m2 = Map.unions
-  [ Map.map fb (Map.difference m1 m2)
-  , Map.mapMaybeWithKey (\k v -> fbc v <$> Map.lookup k m2) (Map.intersection m1 m2)
-  , Map.map fc (Map.difference m2 m1)
-  ]
-
-
-mergeMapsM
-  :: (Ord a, Monad m)
-  => (b -> m d)
-  -> (c -> m d)
-  -> (b -> c -> m d)
-  -> Map.Map a b
-  -> Map.Map a c
-  -> m (Map.Map a d)
-mergeMapsM fb fc fbc m1 m2 = do
-  bs <- mapM (onSndM fb) . Map.toList $ Map.difference m1 m2
-  bcs <- mapM (onSndM (uncurry fbc)) . Map.toList $ Map.intersectionWith (,) m1 m2
-  cs <- mapM (onSndM fc) . Map.toList $ Map.difference m2 m1
-  return $ Map.fromList (bs <> bcs <> cs)
-
-onSndM :: Monad m => (b -> m c) -> (a, b) -> m (a, c)
-onSndM f (x, y) = (,) x <$> f y
-
-
-mapMapM :: (Ord k, Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)
-mapMapM f m = do
-  let xs = Map.toList m
-  xs' <- mapM (\(k,x) -> (,) k <$> f x) xs
-  return $ Map.fromList xs'
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
