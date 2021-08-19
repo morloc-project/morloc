@@ -58,48 +58,25 @@ prettyExpr (ExprI _ (ImpE (Import m (Just xs) _ _)))
 prettyExpr (ExprI _ (ExpE v)) = "export" <+> pretty v
 prettyExpr (ExprI _ (VarE s)) = pretty s
 prettyExpr (ExprI _ (AccE e k)) = parens (prettyExpr e) <> "@" <> pretty k 
-prettyExpr (ExprI _ (LamE n e)) = "\\" <> pretty n <+> "->" <+> prettyExpr e
+prettyExpr (ExprI _ (LamE vs e)) = "\\" <> pretty (MT.unwords [v | (EV v) <- vs]) <+> "->" <+> prettyExpr e
 prettyExpr (ExprI _ (AnnE e ts)) = parens
   $   prettyExpr e
   <+> "::"
   <+> encloseSep "(" ")" "; " (map prettyGreenUnresolvedType ts)
-prettyExpr (ExprI _ (AppE e1@(ExprI _ (LamE _ _)) e2)) = parens (prettyExpr e1) <+> prettyExpr e2
-prettyExpr (ExprI _ (AppE e1 e2)) = parens (prettyExpr e1) <+> parens (prettyExpr e2)
+prettyExpr (ExprI _ (AppE f es)) = prettyExpr f <+> hsep (map (parens . prettyExpr) es)
 prettyExpr (ExprI _ (NumE x)) = pretty (show x)
 prettyExpr (ExprI _ (StrE x)) = dquotes (pretty x)
 prettyExpr (ExprI _ (LogE x)) = pretty x
 prettyExpr (ExprI _ (Declaration v e es)) = pretty v <+> "=" <+> prettyExpr e <+> "where" <+> (align . vsep . map prettyExpr) es
 prettyExpr (ExprI _ (ListE xs)) = list (map prettyExpr xs)
 prettyExpr (ExprI _ (TupleE xs)) = tupled (map prettyExpr xs)
-prettyExpr (ExprI _ (SrcE [])) = ""
-prettyExpr (ExprI _ (SrcE srcs@(Source _ lang (Just f) _ _ : _))) =
-  "source" <+>
-  viaShow lang <+>
-  "from" <+>
-  pretty f <+>
-  tupled
-    (map
-       (\(n, EV a) ->
-          pretty n <>
-          if unName n == a
-            then ""
-            else (" as" <> pretty a))
-       rs)
-  where
-    rs = [(n, a) | (Source n _ _ a _) <- srcs]
-prettyExpr (ExprI _ (SrcE srcs@(Source _ lang Nothing _ _ : _))) =
-  "source" <+>
-  viaShow lang <+>
-  tupled
-    (map
-       (\(n, EV a) ->
-          pretty n <>
-          if unName n == a
-            then ""
-            else (" as" <> pretty a))
-       rs)
-  where
-    rs = [(n,a) | (Source n _ _ a _) <- srcs]
+prettyExpr (ExprI _ (SrcE (Source name lang file alias label)))
+  = "source"
+  <+> viaShow lang
+  <> maybe "" (\f -> "from" <+> pretty f) file 
+  <+> "("
+  <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
+  <> ")"
 prettyExpr (ExprI _ (RecE entries)) =
   encloseSep
     "{"

@@ -21,15 +21,16 @@ module Morloc.Monad
   , logFileWith
   , readLang
   , say
-  -- * reusable counter
-  , startCounter
-  , getCounter
   -- * re-exports
   , module Control.Monad.Trans
   , module Control.Monad.Except
   , module Control.Monad.Reader
   , module Control.Monad.State
   , module Control.Monad.Writer
+  -- * reusable counter
+  , startCounter
+  , getCounter
+  , setCounter
   ) where
 
 import Control.Monad.Except
@@ -73,6 +74,12 @@ getCounter = do
   let i = stateCounter s
   put $ s {stateCounter = (stateCounter s) + 1}
   return i
+
+setCounter :: Int -> MorlocMonad ()
+setCounter i = do
+  s <- get
+  put $ s {stateCounter = i}
+  return ()
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err, msgs), _)

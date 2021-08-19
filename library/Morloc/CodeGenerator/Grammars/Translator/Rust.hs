@@ -69,7 +69,7 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM (metaId->i) args e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
         def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM Out (typeOfExprM e)
@@ -286,7 +286,7 @@ makeDispatch varin varout ms
   = block 4 ("match" <+> varin) (vsep (map makeCase ms ++ [defaultCase]))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM (metaId->i) args _) =
+    makeCase (ManifoldM i args _) =
         let args' = take (length args) $ repeat "&args.next().unwrap()"
         in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args'},|]
     makeCase _ = error "Every ExprM must start with a manifold object"

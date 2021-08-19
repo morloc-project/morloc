@@ -227,7 +227,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM (metaId->i) args e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
         def   = "def" <+> mname <> tupled (map makeArgument args) <> ":"
@@ -325,7 +325,7 @@ makeDispatch ms = align . vsep $
   ]
   where
     entry :: ExprM One -> MDoc
-    entry (ManifoldM (metaId->i) _ _)
+    entry (ManifoldM i _ _)
       = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 

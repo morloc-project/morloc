@@ -67,8 +67,8 @@ openLocalModule filename = do
 
 
 typecheck
-  :: [SAnno GU Many [Int]]
-  -> MorlocMonad [SAnno GR Many [CType]]
+  :: [SAnno Int Many [EType]]
+  -> MorlocMonad [SAnno (Indexed Type) Many [Type]]
 typecheck = undefined
 -- typecheck d = do
 --   verbosity <- MS.gets stateVerbosity

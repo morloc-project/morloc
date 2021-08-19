@@ -23,17 +23,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add lambdas
  - [ ] Add `uninstall` function to uninstall a module
  - [ ] Remove extra space printed at the end of R JSON
-
-0.35.0 [2021.04.xx]
--------------------
-
  - [ ] Rust support
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
- - [ ] Add `where` scoping
 
-0.34.0 [2020.03.05]
+0.35.0 [2021.08.xx]
+-------------------
+
+ - [ ] Add `where` scoping
+ - [ ] Statements are order invariant
+ - [ ] Thread link from expression to source expression down to generators 
+
+0.34.0 [2021.03.05]
 -------------------
 
  * add handling for C++ float primitives

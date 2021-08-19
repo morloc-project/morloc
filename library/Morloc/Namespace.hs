@@ -18,6 +18,9 @@ module Morloc.Namespace
   , None(..)
   , One(..)
   , Many(..)
+  -- ** Indexed
+  , Indexed(..)
+  , GIndex
   -- ** Newtypes
   , CType(..)
   , ctype
@@ -34,6 +37,14 @@ module Morloc.Namespace
   , AnchoredDirTree(..)
   , unEVar
   , unTVar
+  -- ** lookup info stored
+  , metaConstraints
+  , metaProperties
+  , metaConstructors
+  , metaType
+  , metaName
+  , metaPackers
+  , metaTypedefs
   -- ** Language
   , Lang(..)
   -- ** Data
@@ -63,15 +74,16 @@ module Morloc.Namespace
   , EType(..)
   , unresolvedType2type
   , Source(..)
+  -- * Mostly frontend expressions
+  , Expr(..)
+  , ExprI(..)
+  , Import(..)
   -- ** Type extensions
   , Constraint(..)
   , Property(..)
   -- ** Types used in post-typechecking tree
   , SAnno(..)
   , SExpr(..)
-  , GMeta(..)
-  , GU
-  , GR
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
@@ -159,8 +171,8 @@ data MorlocState = MorlocState {
     --------------     \        are sourced.
     f.1 f.2 f.3 f.4     \
        \                 f.5
-        `---------.     ---------------
-                   \    f.1 f.2 f.3 f.5
+        `---------.      ---------------
+                   \     f.1 f.2 f.3 f.5
                     \   /
                      \ /
                      ( )    -- no new sources
@@ -175,12 +187,80 @@ data MorlocState = MorlocState {
   -- interops required and preferring "faster" languages.
 -}
 
+-- | stores everything that is given about a term
 data TermTypes = TermTypes {
     termGeneral :: Maybe EType
   -- ^ A term may have many general types (up to one in each scope)
   , termConcrete :: [(MVar, Source, [EType])]
   -- ^ The module name (MVar) is needed to lookup package metadata (if needed)
+  , termDecl :: [ExprI]
+  -- ^ all declarations of this type
+  --      Declaration EVar ExprI [ExprI]
+  --                   ^     ^      ^----- TermType knows nothing about this
+  --                   '      '--- each ExprI in [ExprI] is one of these
+  --                   '--- this will match the term name
 } 
+
+data ExprI = ExprI Int Expr
+  deriving (Show, Ord, Eq)
+
+-- | Terms, see Dunfield Figure 1
+data Expr
+  = ModE MVar [ExprI]
+  -- ^ the toplevel expression in a module
+  | TypE TVar [TVar] UnresolvedType
+  -- ^ a type definition
+  --   1. type name
+  --   2. parameters
+  --   3. type
+  | ImpE Import
+  -- ^ a morloc module import
+  | ExpE EVar
+  -- ^ a term that is exported from a module (should only exist at the toplevel)
+  | SrcE Source
+  -- ^ import "c" from "foo.c" ("f" as yolo).
+  | Signature EVar (Maybe Text) EType
+  -- ^ A type signature, the three parameters correspond to the term name, the
+  -- optional label, and the type
+  | Declaration EVar ExprI [ExprI]
+  -- ^ x=e1
+  -- 1. term name
+  -- 2. term
+  -- 3. term where statements
+  | UniE
+  -- ^ (())
+  | VarE EVar
+  -- ^ (x)
+  | AccE ExprI Text
+  -- ^ person@age - access a field in a record
+  | ListE [ExprI]
+  -- ^ [e]
+  | TupleE [ExprI]
+  -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
+  | LamE [EVar] ExprI
+  -- ^ (\x -> e)
+  | AppE ExprI [ExprI]
+  -- ^ (e e)
+  | AnnE ExprI [UnresolvedType]
+  -- ^ (e : A)
+  | NumE Scientific
+  -- ^ number of arbitrary size and precision
+  | LogE Bool
+  -- ^ boolean primitive
+  | StrE Text
+  -- ^ literal string
+  | RecE [(Text, ExprI)]
+  deriving (Show, Ord, Eq)
+
+data Import =
+  Import
+    { importModuleName :: MVar
+    , importInclude :: Maybe [(EVar, EVar)]
+    , importExclude :: [EVar]
+    , importNamespace :: Maybe EVar -- currently not used
+    }
+  deriving (Ord, Eq, Show)
+
 
 type MorlocMonad a = MorlocMonadGen Config MorlocError [Text] MorlocState a
 
@@ -416,32 +496,16 @@ data SExpr g f c
   | LogS Bool
   | StrS Text
   | RecS [(Text, SAnno g f c)]
+  | FixS -- TODO: Recursion is not yet supported
   | CallS Source
 
--- | Description of the general manifold
-data GMeta t = GMeta {
-    metaId :: Int
-  , metaGType :: t
-  -- ^ General type. Before type inference the general type is unresolved. In
-  -- the realization phase it is usually (always?) known.
-  , metaName :: Maybe EVar -- the name, if relevant
-  , metaProperties :: Set Property
-  , metaConstraints :: Set Constraint
-  , metaPackers :: Map (TVar, Int) [UnresolvedPacker]
-  -- ^ The (un)packers available in this node's module scope. FIXME: kludge
-  -- In (TVar, Int), TVar is that type to be (de)serialied and Int is the number of arguments the packer takes
-  , metaConstructors :: Map TVar Source
-  -- ^ The constructors in this node's module scope. FIXME: kludge
-  , metaTypedefs :: Map TVar (Type, [TVar])
-  -- ^ Everything needed to make the prototypes and serialization generic
-  -- functions in C++. FIXME: kludge
-} deriving (Show, Ord, Eq)
+data Indexed a = Idx Int a
 
--- Metadata for a general type before it has been resolved
-type GU = GMeta Int
+-- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
+type GIndex = Int
 
--- General resolved metadata and type - used after type inference
-type GR = GMeta (Maybe GType)
+instance Functor Indexed where
+  fmap f (Idx i x) = Idx i (f x)
 
 newtype CType = CType { unCType :: Type }
   deriving (Show, Ord, Eq)
@@ -627,3 +691,25 @@ instance HasOneLanguage UnresolvedType where
   langOf x@(NamU _ (TV lang _) _ rs)
     | all ((==) lang) (map (langOf . snd) rs) = lang
     | otherwise = error $ "inconsistent languages in " <> show x
+
+
+metaConstraints :: Int -> MorlocMonad [Constraint]
+metaConstraints = undefined
+
+metaProperties :: Int -> MorlocMonad [Property]
+metaProperties = undefined
+
+metaConstructors :: Int -> MorlocMonad [EVar]
+metaConstructors = undefined
+
+metaType :: Int -> MorlocMonad (Maybe Type)
+metaType = undefined
+
+metaName :: Int -> MorlocMonad (Maybe EVar)
+metaName = undefined
+
+metaPackers :: Int -> MorlocMonad PackMap
+metaPackers = undefined
+
+metaTypedefs :: Int -> MorlocMonad (Map TVar (Type, [TVar]))
+metaTypedefs = undefined

@@ -132,6 +132,15 @@ duplicates xs = unique $ filter isDuplicated xs where
   -- isDuplicated :: Ord a => a -> Bool
   isDuplicated k = fromJust (Map.lookup k countMap) > 1
 
+
+statefulMapM :: Monad m => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
+statefulMapM _ s [] = return (s, [])
+statefulMapM f s (x:xs) = do
+  (s', x') <- f s x
+  (s'', xs') <- statefulMapM f s' xs
+  return (s'', x':xs')
+
+
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>
 

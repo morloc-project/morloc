@@ -16,6 +16,7 @@ module Morloc.Frontend.AST
   , findSignatureTypeTerms
   , checkExprI
   , findSources
+  , maxIndex
   ) where
 
 import Morloc.Frontend.Namespace
@@ -30,29 +31,16 @@ findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
 findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i)| (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
--- findTermIndicesInScope :: ExprI -> Map.Map EVar [Int]
--- findTermIndicesInScope e0 = f Map.empty e0 where
---   f m e@(ExprI _ (ModE _ es)) = Map.unionsWith concat (map (f m) es)
---   f m e@(ExprI _ (AccE e _)) = f e
---   f m e@(ExprI _ (AnnE e t)) = f e
---   f m e@(ExprI _ (AppE e1 e2)) = f (f m e1) e2
---   f m e@(ExprI _ (Declaration _ e' es')) =
---   f m e@(ExprI _ (LamE _ e')) =
---   f m e@(ExprI _ (ListE es')) =
---   f m e@(ExprI _ (RecE rs)) =
---   f m e@(ExprI _ (TupleE es')) =
---   f m _ = m
-
 findExportSet :: ExprI -> Set.Set EVar
-findExportSet = Set.fromList . findExports
+findExportSet = Set.fromList . map snd . findExports
 
-findExports :: ExprI -> [EVar]
-findExports (ExprI _ (ExpE v)) = [v]
-findExports (ExprI _ (ModE _ es)) = conmap findExports es
+findExports :: ExprI -> [(Int, EVar)]
+findExports (ExprI i (ExpE v)) = [(i, v)]
+findExports (ExprI i (ModE _ es)) = conmap findExports es
 findExports _ = []
 
 findSources :: ExprI -> [Source]
-findSources (ExprI _ (SrcE ss)) = ss
+findSources (ExprI _ (SrcE ss)) = [ss]
 findSources (ExprI _ (ModE _ es)) = conmap findSources es
 findSources _ = []
 
@@ -93,10 +81,22 @@ checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (AppE e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (AppE g es)) = f e >> checkExprI f g >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (Declaration _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (ListE es')) = f e >> mapM_ f es'
 checkExprI f e@(ExprI _ (RecE rs)) = f e >> mapM_ f (map snd rs)
 checkExprI f e@(ExprI _ (TupleE es')) = f e >> mapM_ f es'
 checkExprI f e = f e
+
+maxIndex :: ExprI -> Int
+maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
+maxIndex (ExprI i (AccE e _)) = max i (maxIndex e)
+maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
+maxIndex (ExprI i (AppE f es)) = maximum ([i, maxIndex f] <> map maxIndex es)
+maxIndex (ExprI i (Declaration _ e es)) = maximum (i : map maxIndex (e:es))
+maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
+maxIndex (ExprI i (ListE es)) = maximum (i : map maxIndex es)
+maxIndex (ExprI i (TupleE es)) = maximum (i : map maxIndex es)
+maxIndex (ExprI i (RecE rs)) = maximum (i : map maxIndex (map snd rs))
+maxIndex (ExprI i _) = i

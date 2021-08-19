@@ -56,11 +56,11 @@ weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
         (map (f lang Nothing) (map snd rs))
 
 
-weaveTypesGCP :: GR -> CType -> MorlocMonad TypeP
-weaveTypesGCP g (CType t) = weaveTypes (unGType <$> metaGType g) t
+weaveTypesGCP :: (Indexed Type) -> Type -> MorlocMonad TypeP
+weaveTypesGCP (Idx i _) t = metaType i >>= (flip weaveTypes) t
 
-weaveTypesGCM :: GR -> CType -> MorlocMonad TypeM
-weaveTypesGCM g (CType t) = typeP2typeM <$> weaveTypes (unGType <$> metaGType g) t
+weaveTypesGCM :: (Indexed Type) -> Type -> MorlocMonad TypeM
+weaveTypesGCM (Idx i _) t = metaType i >>= (flip weaveTypes) t |>> typeP2typeM
 
 typeP2typeM :: TypeP -> TypeM
 typeP2typeM f@(FunP _ _) = case decompose f of

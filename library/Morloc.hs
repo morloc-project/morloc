@@ -11,7 +11,7 @@ import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
-typecheck :: Maybe Path -> Code -> MorlocMonad [SAnno GR Many [CType]]
+typecheck :: Maybe Path -> Code -> MorlocMonad [SAnno (Indexed Type) Many [Type]]
 typecheck path code
   -- Maybe Path -> Text -> [Module]
   -- parse code into unannotated modules

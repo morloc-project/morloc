@@ -71,9 +71,9 @@ prettyExprM e0 = (vsep . punctuate line . fst $ f e0) <> line where
   f :: ExprM f -> ([MDoc], MDoc)
   f (ManifoldM m args e) =
     let (ms', body) = f e
-        decl = manNamer (metaId m) <> tupled (map prettyArgument args)
+        decl = manNamer m <> tupled (map prettyArgument args)
         mdoc = block 4 decl body
-    in (mdoc : ms', manNamer (metaId m))
+    in (mdoc : ms', manNamer m)
   f (PoolCallM t _ cmds args) =
     let poolArgs = cmds ++ map prettyArgument args
     in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
@@ -285,15 +285,15 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: GR -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m e = case typeOfExprM e of
-  (Serial t) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
+  (Serial t) -> DeserializeM <$> (metaPackers m >>= (flip MCS.makeSerialAST) t) <*> pure e
   (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
   _ -> return e
 
-packExprM :: GR -> ExprM Many -> MorlocMonad (ExprM Many)
+packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = case typeOfExprM e of
-  (Native t) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
+  (Native t) -> SerializeM <$> (metaPackers m >>= (flip MCS.makeSerialAST) t) <*> pure e
   -- (Function _ _) -> error "Cannot pack a function"
   _ -> return e
 
@@ -326,7 +326,7 @@ argsOf (LamM args _) = args
 argsOf (ManifoldM _ args _) = args
 argsOf _ = []
 
-gmetaOf :: ExprM f -> GR
+gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m
 gmetaOf (LamM _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"

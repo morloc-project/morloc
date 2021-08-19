@@ -73,22 +73,32 @@ pModule :: Parser ExprI
 pModule = do
   f <- CMS.gets stateModulePath
   _ <- reserved "module"
-  es <- align pExpr
+  ess <- align pTopExpr
   moduleName <- freename
-  exprI $ ModE (MVar moduleName) es
+  exprI $ ModE (MVar moduleName) (concat ess)
 
 -- | match an implicit "main" module
 pMain :: Parser ExprI
-pMain = (ModE (MVar "Main") <$> many pExpr) >>= exprI
+pMain = (ModE (MVar "Main") <$> fmap concat (many pTopExpr)) >>= exprI
 
+-- | Expressions including ones that are allowed only at the top-level of a scope
+pTopExpr :: Parser [ExprI]
+pTopExpr = 
+      try (plural pImport) -- TODO simplify Import expression to be singular
+  <|> try (plural pExport) -- TODO allow many exports from one statement
+  <|> try (plural pTypedef)
+  <|> try (plural pDeclaration)
+  <|> try (plural pSignature)
+  <|> try pSrcE
+  <|> try (plural pExpr)
+  where
+    plural :: Functor m => m a -> m [a]
+    plural = fmap return 
+
+-- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pImport
-  <|> try pExport
-  <|> try pTypedef
-  <|> try pDeclaration
-  <|> try pSignature
-  <|> try pAcc
+      try pAcc
   <|> try pNamE
   <|> try pTuple
   <|> try pUni
@@ -97,7 +107,6 @@ pExpr =
   <|> try pStrE
   <|> try pLogE
   <|> try pNumE
-  <|> try pSrcE
   <|> pListE
   <|> parens pExpr
   <|> pLam
@@ -223,8 +232,8 @@ pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
     _ <- symbol "="
     e <- pExpr
     subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-    e' <- curryLamE args e
-    exprI $ Declaration v e' subExpressions
+    f <- exprI (LamE args e)
+    exprI $ Declaration v f subExpressions
 
   -- | For now, only type signatures and declarations are allowed in function
   -- where statements. There is no particularly reason why source and imports
@@ -283,7 +292,7 @@ pSignature = do
     pWord =  MT.pack <$> lexeme (many1 alphaNumChar)
 
 
-pSrcE :: Parser ExprI
+pSrcE :: Parser [ExprI]
 pSrcE = do
   modulePath <- CMS.gets stateModulePath
   reserved "source"
@@ -300,12 +309,12 @@ pSrcE = do
     -- this case SHOULD only occur in testing where the source file does not exist
     -- file non-existence will be caught later
     (Nothing, s) -> return s 
-  exprI $ SrcE [Source { srcName = srcVar
-                       , srcLang = language
-                       , srcPath = srcFile
-                       , srcAlias = aliasVar
-                       , srcLabel = label
-                       } | (srcVar, aliasVar, label) <- rs]
+  mapM exprI [SrcE $ Source { srcName = srcVar
+                            , srcLang = language
+                            , srcPath = srcFile
+                            , srcAlias = aliasVar
+                            , srcLabel = label
+                            } | (srcVar, aliasVar, label) <- rs]
   where
 
   pImportSourceTerm :: Parser (Name, EVar, Maybe MT.Text)
@@ -362,7 +371,7 @@ pApp :: Parser ExprI
 pApp = do
   f <- parens pExpr <|> pVar
   es <- many1 s
-  foldApp f es
+  exprI $ AppE f es
   where
     s =   try pAnn
       <|> try (parens pExpr)
@@ -374,14 +383,6 @@ pApp = do
       <|> pTuple
       <|> pNamE
       <|> pVar
-
-    foldApp :: ExprI -> [ExprI] -> Parser ExprI
-    foldApp _ [] = error "This cannot happen"
-    foldApp f [e] = ExprI <$> exprId <*> pure (AppE f e)
-    foldApp f (e:es) = do
-      i <- exprId
-      let f' = ExprI i (AppE f e)
-      foldApp f' es
 
 
 pLogE :: Parser ExprI
@@ -404,14 +405,7 @@ pLam = do
   vs <- many1 pEVar
   _ <- symbol "->"
   e <- pExpr
-  curryLamE vs e
-
-curryLamE :: [EVar] -> ExprI -> Parser ExprI
-curryLamE [] e' = return e'
-curryLamE (v:vs') e' = do
-  i <- exprId
-  e'' <- LamE v <$> curryLamE vs' e'
-  return (ExprI i e'')
+  exprI $ LamE vs e
 
 pVar :: Parser ExprI
 pVar = fmap VarE pEVar >>= exprI

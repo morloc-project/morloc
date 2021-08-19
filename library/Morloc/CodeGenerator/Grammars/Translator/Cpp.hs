@@ -66,9 +66,10 @@ translate srcs es = do
   -- diagnostics
   liftIO . putDoc . vsep $ "-- C++ translation --" : map prettyExprM es
 
+  (srcDecl, srcSerial) <- generateSourcedSerializers es
+
   let recmap = unifyRecords . conmap collectRecords $ es
       (autoDecl, autoSerial) = generateAnonymousStructs recmap
-      (srcDecl, srcSerial) = generateSourcedSerializers es
       dispatch = makeDispatch es
       signatures = map (makeSignature recmap) es
       serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
@@ -119,7 +120,7 @@ serialType = "std::string"
 makeSignature :: RecMap -> ExprM One -> MDoc
 makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM One -> [MDoc]
-  f (ManifoldM (metaId->i) args e) =
+  f (ManifoldM i args e) =
     let t = typeOfExprM e
         sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
     in sig : f e
@@ -356,7 +357,7 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return ([], pretty $ srcName src, [])
 
-  f pargs (ManifoldM (metaId->i) args e) = do
+  f pargs (ManifoldM i args e) = do
     (ms', body, ps1) <- f args e
     let t = typeOfExprM e
         decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
@@ -456,7 +457,7 @@ makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM (metaId->i) args _) =
+    makeCase (ManifoldM i args _) =
       let args' = take (length args) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
       in
         (nest 4 . vsep)
@@ -500,7 +501,7 @@ showNativeTypeM recmap (Native t) = return $ showTypeM recmap (Native t)
 showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 
-collectRecords :: ExprM One -> [(PVar, GR, [(PVar, TypeP)])]
+collectRecords :: ExprM One -> [(PVar, GIndex, [(PVar, TypeP)])]
 collectRecords e0 = f (gmetaOf e0) e0 where
   f _ (ManifoldM m _ e) = f m e
   f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
@@ -521,12 +522,12 @@ collectRecords e0 = f (gmetaOf e0) e0 where
   f m (LetVarM t _) = cleanRecord m t
   f _ _ = []
 
-cleanRecord :: GR -> TypeM -> [(PVar, GR, [(PVar, TypeP)])]
+cleanRecord :: GIndex -> TypeM -> [(PVar, GIndex, [(PVar, TypeP)])]
 cleanRecord m tm = case typeOfTypeM tm of
   (Just t) -> toRecord t
   Nothing -> []
   where
-    toRecord :: TypeP -> [(PVar, GR, [(PVar, TypeP)])]
+    toRecord :: TypeP -> [(PVar, GIndex, [(PVar, TypeP)])]
     toRecord (UnkP _) = []
     toRecord (VarP _) = []
     toRecord (FunP t1 t2) = toRecord t1 ++ toRecord t2
@@ -537,14 +538,14 @@ cleanRecord m tm = case typeOfTypeM tm of
 -- unify records with the same name/keys
 unifyRecords
   :: [(PVar -- The "v" in (NamP _ v@(PV _ _ "struct") _ rs)
-     , GR -- The GR object stored in the records ManifoldM term
+     , GIndex
      , [(PVar, TypeP)]) -- key/type terms for this record
      ] -> RecMap
 unifyRecords xs
   = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
   . map (\((v,m,ks), rss) -> ((v,ks), [unifyField m fs | fs <- transpose rss]))
   . map (\((v,ks), rss) -> ((v, fst (head rss),ks), map snd rss))
-  -- [((record_name, record_keys), [(GR, [(key,type)])])]
+  -- [((record_name, record_keys), [(GIndex, [(key,type)])])]
   -- associate unique pairs of record name and keys with their edge types
   . groupSort
   . unique
@@ -554,7 +555,7 @@ structName :: Int -> PVar -> MDoc
 structName i (PV _ (Just v1) "struct") = "mlc_" <> pretty v1 <> "_" <> pretty i 
 structName _ (PV _ _ v) = pretty v
 
-unifyField :: GR -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
+unifyField :: GIndex -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
 unifyField _ [] = error "Empty field"
 unifyField _ rs@((v,_):_)
   | not (all ((==) v) (map fst rs))
@@ -592,30 +593,31 @@ makeSerializers recmap rec
 
 
 
-generateSourcedSerializers :: [ExprM One] -> ([MDoc],[MDoc])
-generateSourcedSerializers
-  = foldl groupQuad ([],[])
-  . Map.elems
-  . Map.mapMaybeWithKey makeSerial
-  . foldl collect' Map.empty
+generateSourcedSerializers :: [ExprM One] -> MorlocMonad ([MDoc],[MDoc])
+generateSourcedSerializers es0
+  =   (foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey makeSerial)
+  <$> foldlM collect' Map.empty es0
   where
     collect'
       :: Map.Map TVar (Type, [TVar])
       -> ExprM One
-      -> Map.Map TVar (Type, [TVar])
-    collect' m (ManifoldM g _ e) = collect' (Map.union m (metaTypedefs g)) e
+      -> MorlocMonad (Map.Map TVar (Type, [TVar]))
+    collect' m (ManifoldM g _ e) = metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
     collect' m (ForeignInterfaceM _ e) = collect' m e
-    collect' m (LetM _ e1 e2) = Map.union (collect' m e1) (collect' m e2)
-    collect' m (AppM e es) = Map.unions $ collect' m e : map (collect' m) es
+    collect' m (LetM _ e1 e2) = Map.union <$> collect' m e1 <*> collect' m e2
+    collect' m (AppM e es) = do
+      e' <- collect' m e
+      es' <- mapM (collect' m) es
+      return $ Map.unions (e':es')
     collect' m (LamM _ e) = collect' m e
     collect' m (AccM e _) = collect' m e
-    collect' m (ListM _ es) = Map.unions $ map (collect' m) es
-    collect' m (TupleM _ es) = Map.unions $ map (collect' m) es
-    collect' m (RecordM _ entries) = Map.unions $ map (collect' m) (map snd entries)
+    collect' m (ListM _ es) = Map.unions <$> mapM (collect' m) es
+    collect' m (TupleM _ es) = Map.unions <$> mapM (collect' m) es
+    collect' m (RecordM _ entries) = Map.unions <$> mapM (collect' m) (map snd entries)
     collect' m (SerializeM _ e) = collect' m e
     collect' m (DeserializeM _ e) = collect' m e
     collect' m (ReturnM e) = collect' m e
-    collect' m _ = m
+    collect' m _ = return m
 
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
     groupQuad (xs,ys) (x1, y1, x2, y2) = (x1:x2:xs, y1:y2:ys)

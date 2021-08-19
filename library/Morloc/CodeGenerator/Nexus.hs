@@ -29,10 +29,13 @@ type FData =
   , TypeP -- argument type
   )
 
-generate :: [NexusCommand] -> [(TypeP, Int, Maybe EVar)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
 generate cs xs = do
-  let names = [pretty n | (_, _, Just n) <- xs] ++ map (pretty . commandName) cs
-  fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
+
+  callNames <- mapM metaName (map snd xs) |>> catMaybes |>> map pretty
+  let gastNames = map (pretty . commandName) cs
+      names = callNames <> gastNames 
+  fdata <- CM.mapM getFData xs -- [FData]
   outfile <- fmap (maybe "nexus.pl" id) $ CMS.gets stateOutfile
   return $
     Script
@@ -42,15 +45,19 @@ generate cs xs = do
       , scriptMake = [SysExe outfile]
       }
 
-getFData :: (TypeP, Int, EVar) -> MorlocMonad FData
-getFData (t, i, (EV n)) = do
-  config <- MM.ask
-  let lang = langOf t
-  case MC.buildPoolCallBase config lang i of
-    (Just cmds) -> return (hsep cmds, pretty n, t)
-    Nothing ->
-      MM.throwError . GeneratorError $
-      "No execution method found for language: " <> ML.showLangName (fromJust lang)
+getFData :: (TypeP, Int) -> MorlocMonad FData
+getFData (t, i) = do
+  mayName <- metaName i
+  case mayName of
+    (Just name) -> do
+      config <- MM.ask
+      let lang = langOf t
+      case MC.buildPoolCallBase config lang i of
+        (Just cmds) -> return (hsep cmds, pretty name, t)
+        Nothing ->
+          MM.throwError . GeneratorError $
+          "No execution method found for language: " <> ML.showLangName (fromJust lang)
+    (Nothing) -> MM.throwError . GeneratorError $ "No name in FData"
 
 main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
 main names fdata cdata =

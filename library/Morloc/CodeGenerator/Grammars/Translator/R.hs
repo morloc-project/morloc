@@ -183,7 +183,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
 
   f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc, [MDoc])
-  f pargs m@(ManifoldM (metaId->i) args e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', body, rs') <- f args e
     let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 decl (vsep $ rs' ++ [body])

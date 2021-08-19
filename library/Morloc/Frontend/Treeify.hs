@@ -16,7 +16,7 @@ import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.DAG as MDD
+import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.GMap as GMap
@@ -25,19 +25,29 @@ import qualified Morloc.Data.GMap as GMap
 data TermOrigin = Declared ExprI | Sourced Source
   deriving(Show, Ord, Eq)
 
+-- When I see a term, I need to look it up. To do so, I need to walk up through
+-- scope until I find a source/declaration and all type annotations. This involves
+-- walking up through where statements (shadowing is possible), up through lambdas
+-- (where again shadowing is possible), to the module scope, and to the imported
+-- scope (where shadowing is not allowed).
+--
+-- Generate integers for all positions in the tree, use these to map into a table that includes:
+--  * manual type annotations or signatures
+--  * inferred type annotations
+
 -- all expressions are mapped to integers that serve as indices linking
 -- expressions to their ultimate type annotations. The indices also match terms
 -- to their signatures or (eventually) to locations in source code.
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad [SAnno GU Many [Int]]
+  -> MorlocMonad [SAnno Int Many [EType]]
 treeify d
  | Map.size d == 0 = return []
- | otherwise = case MDD.roots d of
+ | otherwise = case DAG.roots d of
    -- if no parentless element exists, then the graph must be empty or cyclic
    [] -> MM.throwError CyclicDependency
    -- else if exactly one module name key (k) is found
-   [k] -> case MDD.lookupNode k d of
+   [k] -> case DAG.lookupNode k d of
      -- if the key is not in the DAG, then something is dreadfully wrong codewise
      Nothing -> MM.throwError . DagMissingKey . render $ pretty k
      (Just e) -> do
@@ -50,10 +60,13 @@ treeify d
        -- - this is a map from term (VarE) indices to signature sets
        -- - after this step, all signatures and type annotation expressions are redundant
        -- - the map won't be used until the type inference step in Infer.hs
-       _ <- MDD.synthesizeDAG linkSignaturesModule d
+       _ <- DAG.synthesizeDAG linkSignaturesModule d
+
+       -- set counter for reindexing expressions in collect
+       MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
        -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-       mapM (collect d e) (Set.toList (AST.findExportSet e))
+       mapM (collect e) (AST.findExports e)
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -82,7 +95,7 @@ linkSignaturesModule
   -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   -- a map from alias to all signatures associated with the alias
-  = Map.mapM (foldlM combineTermTypes (TermTypes Nothing []))
+  = Map.mapM (foldlM combineTermTypes (TermTypes Nothing [] []))
               (Map.unionsWith (<>) [unalias es' m' | (_, es', m') <- edges]) >>=
     linkSignatures v es
   where
@@ -121,46 +134,55 @@ indexTerm x = do
   return (i, x)
 
 linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
-linkVariablesToTermTypes mod m = mapM_ (link m) where 
+linkVariablesToTermTypes mod m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   link m (ExprI _ (ModE v es)) = undefined -- TODO: how should nested modules behave?
-  -- shadow all bound terms
-  link m (ExprI i (Declaration v (ExprI _ (LamE k e)) es)) = link (Map.delete k m) (ExprI i (Declaration v e es))
-  link m (ExprI _ (Declaration _ e es)) = linkSignatures mod (e:es) (Map.map snd m) >> return ()
-  link m (ExprI i (VarE v)) = case Map.lookup v m of 
+  link m (ExprI i (ExpE v)) = setType m i v
+  link m (ExprI i (Declaration v (ExprI _ (LamE ks e)) es)) = do
+    -- shadow all bound terms
+    let m' = foldr Map.delete m ks
+    setType m' i v
+    linkSignatures mod (e:es) (Map.map snd m')
+    return ()
+  link m (ExprI i (VarE v)) = setType m i v
+  link m (ExprI _ (AccE e _)) = link m e
+  link m (ExprI _ (ListE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (TupleE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
+  link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
+  link m (ExprI _ (AnnE e _)) = link m e
+  link m (ExprI _ (RecE rs)) = mapM_ (link m) (map snd rs)
+  link _ _ = return ()
+
+  setType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
+  setType m i v = case Map.lookup v m of 
     (Just (j, t)) -> do
       s <- CMS.get
       CMS.put (s {stateSignatures = GMap.insert i j t (stateSignatures s)})
       return ()
     Nothing -> return ()
-  link m (ExprI _ (AccE e _)) = link m e
-  link m (ExprI _ (ListE xs)) = mapM_ (link m) xs
-  link m (ExprI _ (TupleE xs)) = mapM_ (link m) xs
-  link m (ExprI _ (LamE v e)) = link (Map.delete v m) e
-  link m (ExprI _ (AppE f e)) = link m f >> link m e
-  link m (ExprI _ (AnnE e _)) = link m e
-  link m (ExprI _ (RecE rs)) = mapM_ (link m) (map snd rs)
-  link _ _ = return ()
 
 unifyTermTypes :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
 unifyTermTypes mod xs m0
   = Map.mergeMapsM fb fc fbc sigs srcs
   >>= Map.mapKeysWithM combineTermTypes (\(v,_,_) -> v)
   >>= Map.unionWithM combineTermTypes m0
+  >>= Map.unionWithM combineTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (Signature v l t)) <- xs] 
-  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [s]) | s <- concat [ss | (ExprI _ (SrcE ss)) <- xs]]
+  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (Signature v l t)) <- xs]
+  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [s]) | (ExprI _ (SrcE s)) <- xs]
+  decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (Declaration v e _)) <- xs]
 
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
-  fb [e] = return $ TermTypes (Just e) []
+  fb [e] = return $ TermTypes (Just e) [] []
   -- TODO: clean up the error messages to say exactly what went wrong (and
   -- don't call the monkeys, this is not an internal error).
   fb es = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
 
   -- Should we even allow concrete terms with no type signatures?
   fc :: [Source] -> MorlocMonad TermTypes
-  fc srcs = return $ TermTypes Nothing [(mod, src, []) | src <- srcs]
+  fc srcs = return $ TermTypes Nothing [(mod, src, []) | src <- srcs] []
 
   fbc :: [EType] -> [Source] -> MorlocMonad TermTypes
   fbc sigs srcs = do
@@ -171,14 +193,15 @@ unifyTermTypes mod xs m0
       [] -> return Nothing
       -- TODO: don't call the monkeys
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gtype [(mod, src, csigs) | src <- srcs]
+    return $ TermTypes gtype [(mod, src, csigs) | src <- srcs] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
-combineTermTypes (TermTypes g1 cs1) (TermTypes g2 cs2)
+combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
   = TermTypes
   <$> (sequence $ mergeEType <$> g1 <*> g2)
   <*> pure (unique (cs1 <> cs2))
+  <*> pure (unique (es1 <> es2))
 
 
 -- | This function defines who general types are merged. There are decisions
@@ -203,140 +226,152 @@ mergeUnresolvedTypes (ArrU v1 ps1) (ArrU v2 ps2) = undefined
 mergeUnresolvedTypes (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
 mergeUnresolvedTypes t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 
-
--- -- -- each of these inherits imported context, includes global context, and tracks
--- -- -- local context (i.e., signatures and declarations in `where` blocks).
--- -- typemap :: Map.Map Int [UnresolvedType]
--- --
--- -- declmap :: Map.Map Int [TermOrigin]
--- -- packmap :: Map.Map (TVar, Int) [UnresolvedPacker]
---
---
--- -- Two steps,
--- --  1) move type annotations into MorlocState stateSignatures
--- --  2) move translate every module from ExprI into SAnno
-
-
--- When I see a term, I need to look it up. To do so, I need to walk up through
--- scope until I find a source/declaration and all type annotations. This involves
--- walking up through where statements (shadowing is possible), up through lambdas
--- (where again shadowing is possible), to the module scope, and to the imported
--- scope (where shadowing is not allowed).
---
---
--- Generate integers for all positions in the tree, use these to map into a table that includes:
---  * manual type annotations or signatures
---  * inferred type annotations
---  *
-
 -- | Build the call tree for a single nexus command. The result is ambiguous,
 -- with 1 or more possible tree topologies, each with one or more possible for
 -- each function.
+--
+-- Recursion
+--   [ ] handle recursion and mutual recursion
+--       - to detect recursion, I need to remember every term that has been expanded, 
+-- collect v declarations or sources
 collect
-  :: DAG MVar [(EVar, EVar)] ExprI
-  -> ExprI
-  -> EVar
-  -> MorlocMonad (SAnno GU Many [Int])
-collect = undefined
+  :: ExprI
+  -> (Int, EVar) -- The Int is the index for the export term
+  -> MorlocMonad (SAnno Int Many [EType])
+collect (ExprI _ (ModE _ _)) (i, v) = do
+  t <- lookupSig i
+  case t of
+    -- if Nothing, then the term is a bound variable
+    Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
+    -- otherwise is an alias that should be replaced with its value(s)
+    (Just t) -> do
+      let calls = [(CallS src, ts) | (_, src, ts) <- termConcrete t]
+      declarations <- mapM collectSExpr (termDecl t)
+      return $ SAnno (Many (calls <> declarations)) i
+collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
--- collect d (ModE m es) v = undefined
---   -- build module scope
---   --   * find all imports, call collect on each var
---   --   * find all declarations
---   --   * find all signatures
---   --   * handle recursion and mutual recursion
---   --   * support arbitrary order
---   -- collect v declarations or sources
---
--- -- | Find the user provided, or module imported, general type annotations and
--- -- collect info needed for the GMeta object
--- collectSAnno
---   :: Map.Map EVar ([TermOrigin], [EType])
---   -> ExprI
---   -> MorlocMonad (SAnno GU Many [Int])
--- collectSAnno d e = do
---   i <- MM.getCounter
---   xs <- collectSExpr d e
---   gmeta <- makeGMeta d e
---   return $ SAnno (Many xs) gmeta
---
--- -- | Find all definitions of a term and collect their type annotations, if available
--- collectSExpr
---   :: Map.Map EVar ([TermOrigin], [EType])
---   -> Expr
---   -> MorlocMonad [(SExpr Int Many [Int], [Int])]
--- collectSExpr d0 e0 = (,) <$> f d0 e0 <*> MM.getCounter where
---   f _ (TypE _ _ _) = return []
---   f _ (ImpE _) = return []
---   f _ (ExpE _) = return []
---   f _ (SrcE _) = return []
---   f _ (Signature _ _) = return []
---   f d (Declaration v e wheres) = undefined -- roll where statements into scope with shadowing
---   f _ (UniE) = return UniS
---   f d (VarE v) = undefined -- lookup v, this is the one expression that may return multiple values
---   f d (AccE e x) = AccS <$> collectSAnno d e <*> pure x
---   f d (ListE es) = ListS <$> mapM collectSAnno d es
---   f d (TupleE es) = TupleS <$> mapM collectSAnno d es
---   f d (RecE rs) = do
---     xs <- mapM (collectSAnno d) (map snd rs)
---     return $ RecS zip (map fst rs) xs
---   f d (LamE v e) = undefined -- replace `v` in scope with bound term
---   f d (AppE e1 e2) = AppS <$> collectSAnno d e1 <*> collectSAnno d e2
---   f d (AnnE e ts) = undefined -- add `ts` to the symbol table for `e`
---   f d (NumE x) = return (NumS x)
---   f d (LogE x) = return (LogS x)
---   f d (StrE x) = return (StrS x)
+-- | Find the user provided, or module imported, general type annotations and
+-- collect info needed for the GMeta object
+collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many [EType])
+collectSAnno e@(ExprI i (VarE v)) = do
+  t <- lookupSig i
+  es <- case t of
+    -- if Nothing, then the term is a bound variable
+    Nothing -> collectSExpr e |>> return
+    -- otherwise is an alias that should be replaced with its value(s)
+    (Just t) -> do
+      let calls = [(CallS src, ts) | (_, src, ts) <- termConcrete t]
+      declarations <- mapM reindexExprI (termDecl t) >>= mapM collectSExpr
+      return $ (calls <> declarations)
+  return $ SAnno (Many es) i
 
-statefulMapM :: Monad m => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
-statefulMapM _ s [] = return (s, [])
-statefulMapM f s (x:xs) = do
-  (s', x') <- f s x
-  (s'', xs') <- statefulMapM f s' xs
-  return (s'', x':xs')
+-- expression type annotations should have already been accounted for, so ignore
+collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
+collectSAnno e@(ExprI i _) = do
+  e' <- collectSExpr e 
+  return $ SAnno (Many [e']) i
+
+-- | Find all definitions of a term and collect their type annotations, if available
+collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many [EType], [EType])
+collectSExpr (ExprI i e0) = f e0 where
+  f (VarE v) = noTypes (VarS v) -- this must be a bound variable
+  f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
+  f (ListE es) = (ListS <$> mapM collectSAnno es) >>= noTypes
+  f (TupleE es) = (TupleS <$> mapM collectSAnno es) >>= noTypes
+  f (RecE rs) = do
+    xs <- mapM collectSAnno (map snd rs)
+    noTypes $ RecS (zip (map fst rs) xs)
+  f (LamE v e) = LamS v <$> collectSAnno e >>= noTypes
+  f (AppE e es) = (AppS <$> collectSAnno e <*> mapM collectSAnno es) >>= noTypes
+  f UniE = noTypes UniS
+  f (NumE x) = noTypes (NumS x)
+  f (LogE x) = noTypes (LogS x)
+  f (StrE x) = noTypes (StrS x)
+
+  -- none of the following cases should every occur
+  f (AnnE _ _) = undefined
+  f (TypE _ _ _) = undefined
+  f (ImpE _) = undefined
+  f (ExpE _) = undefined
+  f (SrcE _) = undefined
+  f (Signature _ _ _) = undefined
+  f (Declaration _ _ _) = undefined
+
+  noTypes x = return (x, [])
+
+reindexExprI :: ExprI -> MorlocMonad ExprI
+reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e
+
+reindexExpr :: Expr -> MorlocMonad Expr
+reindexExpr (ModE m es) = ModE m <$> mapM reindexExprI es
+reindexExpr (AccE e x) = AccE <$> reindexExprI e <*> pure x
+reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
+reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
+reindexExpr (Declaration v e es) = Declaration v <$> reindexExprI e <*> mapM reindexExprI es
+reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
+reindexExpr (ListE es) = ListE <$> mapM reindexExprI es
+reindexExpr (RecE rs) = RecE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
+reindexExpr (TupleE es) = TupleE <$> mapM reindexExprI es
+reindexExpr e = return e
+
+
+-- FIXME: when I add linking to line numbers, I'll need to update that map
+-- also. The trace should be recorded.
+newIndex :: Int -> MorlocMonad Int
+newIndex i = do
+  i' <- MM.getCounter
+  copyState i i'
+  return i'
 
 yIsX' :: (Ord a) => GMap a b c -> a -> a -> MorlocMonad (GMap a b c)
 yIsX' m k1 k2 = case GMap.yIsX m k1 k2 of
   Nothing -> MM.throwError . CallTheMonkeys $ "Internal key error"
   (Just m') -> return m'
 
-reindex :: GMap Int Int [EType] -> SAnno GU Many [Int] -> MorlocMonad (GMap Int Int [EType], SAnno GU Many [Int])
-reindex m (SAnno (Many xs) g) = do
-  i <- MM.getCounter
-  m' <- yIsX' m (metaId g) i
-  let g' = g {metaId = i}
-  (m'', xs') <- statefulMapM reindexSExpr m' xs
-  return (m'', SAnno (Many xs') g')
-
-reindexSExpr :: GMap Int Int [EType] -> (SExpr GU Many [Int], [Int]) -> MorlocMonad (GMap Int Int [EType], (SExpr GU Many [Int], [Int]))
-reindexSExpr m0 (s0, ts0) = do
-  (m', ts') <- statefulMapM reindexOne m0 ts0 
-  (m'', s') <- f m' s0
-  return (m'', (s', ts'))
-  where
-  f :: GMap Int Int [EType] -> SExpr GU Many [Int] -> MorlocMonad (GMap Int Int [EType], SExpr GU Many [Int])
-  f m (AccS x t) = do
-    (m', x') <- reindex m x
-    return (m', AccS x' t)
-  f m (ListS xs) = do
-    (m', xs') <- statefulMapM reindex m xs
-    return (m', ListS xs')
-  f m (TupleS xs) = do
-    (m', xs') <- statefulMapM reindex m xs
-    return (m', TupleS xs')
-  f m (LamS v x) = do
-    (m', x') <- reindex m x
-    return (m', LamS v x')
-  f m (AppS x xs) = do
-    (m', x') <- reindex m x
-    (m'', xs') <- statefulMapM reindex m' xs
-    return (m'', AppS x' xs')
-  f m (RecS rs) = do
-    (m', xs') <- statefulMapM reindex m (map snd rs)
-    return (m', RecS (zip (map fst rs) xs'))
-  f m x = return (m, x)
-
-  reindexOne :: GMap Int Int [EType] -> Int -> MorlocMonad (GMap Int Int [EType], Int)
-  reindexOne m i = do
-    i' <- MM.getCounter
-    m' <- yIsX' m i i'
-    return (m', i')
+-- reindex
+--   :: GMap Int Int [EType]
+--   -> SAnno Int Many [Int]
+--   -> MorlocMonad (GMap Int Int [EType], SAnno Int Many [Int])
+-- reindex m (SAnno (Many xs) g) = do
+--   i <- MM.getCounter
+--   m' <- yIsX' m (metaId g) i
+--   let g' = g {metaId = i}
+--   (m'', xs') <- statefulMapM reindexSExpr m' xs
+--   return (m'', SAnno (Many xs') g')
+--
+-- reindexSExpr
+--   :: GMap Int Int [EType]
+--   -> (SExpr Int Many [Int], [Int])
+--   -> MorlocMonad (GMap Int Int [EType], (SExpr Int Many [Int], [Int]))
+-- reindexSExpr m0 (s0, ts0) = do
+--   (m', ts') <- statefulMapM reindexOne m0 ts0
+--   (m'', s') <- f m' s0
+--   return (m'', (s', ts'))
+--   where
+--   f :: GMap Int Int [EType] -> SExpr Int Many [Int] -> MorlocMonad (GMap Int Int [EType], SExpr Int Many [Int])
+--   f m (AccS x t) = do
+--     (m', x') <- reindex m x
+--     return (m', AccS x' t)
+--   f m (ListS xs) = do
+--     (m', xs') <- statefulMapM reindex m xs
+--     return (m', ListS xs')
+--   f m (TupleS xs) = do
+--     (m', xs') <- statefulMapM reindex m xs
+--     return (m', TupleS xs')
+--   f m (LamS v x) = do
+--     (m', x') <- reindex m x
+--     return (m', LamS v x')
+--   f m (AppS x xs) = do
+--     (m', x') <- reindex m x
+--     (m'', xs') <- statefulMapM reindex m' xs
+--     return (m'', AppS x' xs')
+--   f m (RecS rs) = do
+--     (m', xs') <- statefulMapM reindex m (map snd rs)
+--     return (m', RecS (zip (map fst rs) xs'))
+--   f m x = return (m, x)
+--
+--   reindexOne :: GMap Int Int [EType] -> Int -> MorlocMonad (GMap Int Int [EType], Int)
+--   reindexOne m i = do
+--     i' <- MM.getCounter
+--     m' <- yIsX' m i i'
+--     return (m', i')
