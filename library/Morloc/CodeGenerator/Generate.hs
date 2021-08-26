@@ -68,3 +68,14 @@ realize
   :: SAnno (Indexed Type) Many Int
   -> MorlocMonad (SAnno (Indexed Type) One (Indexed Type))
 realize = undefined
+
+solutions
+  :: SAnno (Indexed Type) Many Int
+  -> MorlocMonad [Map Int (Int, Int)]
+solutions = undefined
+
+score
+  :: SAnno (Indexed Type) Many (Indexed Type)
+  -> Map Int (Int, Int)
+  -> MorlocMonad Int
+score = undefined
