@@ -191,8 +191,9 @@ data MorlocState = MorlocState {
 data TermTypes = TermTypes {
     termGeneral :: Maybe EType
   -- ^ A term may have many general types (up to one in each scope)
-  , termConcrete :: [(MVar, Source, [EType])]
-  -- ^ The module name (MVar) is needed to lookup package metadata (if needed)
+  , termConcrete :: [(MVar, Source, [EType], Int)]
+  -- ^ The module name (MVar) is needed to lookup package metadata (if needed),
+  -- the final Int type refers to the concrete index for the source.
   , termDecl :: [ExprI]
   -- ^ all declarations of this type
   --      Declaration EVar ExprI [ExprI]

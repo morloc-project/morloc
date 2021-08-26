@@ -40,7 +40,7 @@ data TermOrigin = Declared ExprI | Sourced Source
 -- to their signatures or (eventually) to locations in source code.
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad [SAnno Int Many [EType]]
+  -> MorlocMonad [SAnno Int Many Int]
 treeify d
  | Map.size d == 0 = return []
  | otherwise = case DAG.roots d of
@@ -170,7 +170,7 @@ unifyTermTypes mod xs m0
   >>= Map.unionWithM combineTermTypes decs
   where
   sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (Signature v l t)) <- xs]
-  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [s]) | (ExprI _ (SrcE s)) <- xs]
+  srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
   decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (Declaration v e _)) <- xs]
 
   fb :: [EType] -> MorlocMonad TermTypes
@@ -181,10 +181,10 @@ unifyTermTypes mod xs m0
   fb es = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
 
   -- Should we even allow concrete terms with no type signatures?
-  fc :: [Source] -> MorlocMonad TermTypes
-  fc srcs = return $ TermTypes Nothing [(mod, src, []) | src <- srcs] []
+  fc :: [(Source, Int)] -> MorlocMonad TermTypes
+  fc srcs = return $ TermTypes Nothing [(mod, src, [], i) | (src, i) <- srcs] []
 
-  fbc :: [EType] -> [Source] -> MorlocMonad TermTypes
+  fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
   fbc sigs srcs = do
     let gsigs = [t | t <- sigs, isJust (langOf t)]
     let csigs = [t | t <- sigs, isNothing (langOf t)]
@@ -193,7 +193,7 @@ unifyTermTypes mod xs m0
       [] -> return Nothing
       -- TODO: don't call the monkeys
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gtype [(mod, src, csigs) | src <- srcs] []
+    return $ TermTypes gtype [(mod, src, csigs, i) | (src, i) <- srcs] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -237,7 +237,7 @@ mergeUnresolvedTypes t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
-  -> MorlocMonad (SAnno Int Many [EType])
+  -> MorlocMonad (SAnno Int Many Int)
 collect (ExprI _ (ModE _ _)) (i, v) = do
   t <- lookupSig i
   case t of
@@ -245,14 +245,14 @@ collect (ExprI _ (ModE _ _)) (i, v) = do
     Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t) -> do
-      let calls = [(CallS src, ts) | (_, src, ts) <- termConcrete t]
+      let calls = [(CallS src, i) | (_, src, _, i) <- termConcrete t]
       declarations <- mapM collectSExpr (termDecl t)
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
 -- | Find the user provided, or module imported, general type annotations and
 -- collect info needed for the GMeta object
-collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many [EType])
+collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
   t <- lookupSig i
   es <- case t of
@@ -260,7 +260,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
     Nothing -> collectSExpr e |>> return
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t) -> do
-      let calls = [(CallS src, ts) | (_, src, ts) <- termConcrete t]
+      let calls = [(CallS src, i) | (_, src, _, i) <- termConcrete t]
       declarations <- mapM reindexExprI (termDecl t) >>= mapM collectSExpr
       return $ (calls <> declarations)
   return $ SAnno (Many es) i
@@ -272,7 +272,7 @@ collectSAnno e@(ExprI i _) = do
   return $ SAnno (Many [e']) i
 
 -- | Find all definitions of a term and collect their type annotations, if available
-collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many [EType], [EType])
+collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
 collectSExpr (ExprI i e0) = f e0 where
   f (VarE v) = noTypes (VarS v) -- this must be a bound variable
   f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
@@ -297,7 +297,7 @@ collectSExpr (ExprI i e0) = f e0 where
   f (Signature _ _ _) = undefined
   f (Declaration _ _ _) = undefined
 
-  noTypes x = return (x, [])
+  noTypes x = return (x, i)
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e

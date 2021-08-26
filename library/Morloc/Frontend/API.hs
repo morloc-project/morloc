@@ -8,9 +8,8 @@ Stability   : experimental
 -}
 module Morloc.Frontend.API
   ( parse
-  , typecheck
-  , runStack
   , Parser.readType
+  , Infer.typecheck
   ) where
 
 import Morloc.Frontend.Namespace
@@ -32,64 +31,30 @@ parse ::
      Maybe Path
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
-parse = undefined
--- parse ::
---      Maybe Path
---   -> Code -- ^ code of the current module
---   -> MorlocMonad (DAG MVar Import ParserNode)
--- parse f (Code code) = case Parser.readProgram f code mempty of
---   (Left err) -> MM.throwError $ SyntaxError err
---   (Right x) -> parseImports x
---   where
---     parseImports
---       :: DAG MVar Import ParserNode
---       -> MorlocMonad (DAG MVar Import ParserNode)
---     parseImports d
---       | length unimported == 0 = return d
---       | otherwise = do
---           importPath <- Mod.findModule (head unimported)
---           Mod.loadModuleMetadata importPath
---           (path', code') <- openLocalModule importPath
---           case Parser.readProgram path' code' d of
---             (Left err) -> MM.throwError $ SyntaxError err
---             (Right x) -> parseImports x
---       where
---         g = MDD.edgelist d
---         parents = Map.keysSet d
---         children = Set.fromList (map snd g)
---         unimported = Set.toList $ Set.difference children parents
+parse f (Code code) = case Parser.readProgram f code mempty of
+  (Left err) -> MM.throwError $ SyntaxError err
+  (Right x) -> parseImports x
+  where
+    parseImports
+      :: DAG MVar Import ExprI
+      -> MorlocMonad (DAG MVar Import ExprI)
+    parseImports d
+      | length unimported == 0 = return d
+      | otherwise = do
+          importPath <- Mod.findModule (head unimported)
+          Mod.loadModuleMetadata importPath
+          (path', code') <- openLocalModule importPath
+          case Parser.readProgram path' code' d of
+            (Left err) -> MM.throwError $ SyntaxError err
+            (Right x) -> parseImports x
+      where
+        g = MDD.edgelist d
+        parents = Map.keysSet d
+        children = Set.fromList (map snd g)
+        unimported = Set.toList $ Set.difference children parents
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
 openLocalModule filename = do
   code <- liftIO $ MT.readFile filename
   return (Just filename, code)
-
-
-typecheck
-  :: [SAnno Int Many [EType]]
-  -> MorlocMonad [SAnno (Indexed Type) Many [Type]]
-typecheck = undefined
--- typecheck d = do
---   verbosity <- MS.gets stateVerbosity
---   x <- liftIO $ runStack verbosity (Infer.typecheck d)
---   case x of
---     ((Right result, _), _) -> return result
---     ((Left err, _), _) -> MM.throwError err
-
--- | currently I do nothing with the Reader and Writer monads, but I'm leaving
--- them in for now since I will need them when I plug this all into Morloc.
-runStack :: Int -> Stack a -> IO ((Either MorlocError a, [MT.Text]), StackState)
-runStack verbosity e
-  = flip MS.runStateT emptyState
-  . MW.runWriterT
-  . ME.runExceptT
-  . MR.runReaderT e
-  $ StackConfig verbosity
-
-emptyState = StackState
-  { stateVar = 0
-  , stateQul = 0
-  , stateSer = []
-  , stateDepth = 0
-  }
