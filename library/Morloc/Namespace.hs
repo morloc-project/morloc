@@ -700,7 +700,7 @@ metaConstraints = undefined
 metaProperties :: Int -> MorlocMonad [Property]
 metaProperties = undefined
 
-metaConstructors :: Int -> MorlocMonad [EVar]
+metaConstructors :: Int -> MorlocMonad [Source]
 metaConstructors = undefined
 
 metaType :: Int -> MorlocMonad (Maybe Type)

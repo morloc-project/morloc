@@ -12,6 +12,7 @@ abandon the default prelude and create my own. But not just yet.
 module Morloc.Internal
   ( ifelse
   , conmap
+  , conmapM
   , unique
   , duplicates
   , module Data.Maybe
@@ -114,6 +115,9 @@ ifelse False _ y = y
 
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
+
+conmapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
+conmapM f = fmap concat . mapM f
 
 -- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]

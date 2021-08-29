@@ -84,7 +84,7 @@ generate es = do
     [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs']
 
   -- find all sources files
-  let srcs = unique . concat . conmap (unpackSAnno getSrcs) $ rASTs'
+  srcs <- mapM (unpackSAnno getSrcs) rASTs' |>> (unique . concat . concat)
 
   -- for each language, collect all functions into one "pool"
   pools
@@ -298,17 +298,80 @@ makeGAST = mapCM (\(Idx _ _) -> return ())
 
 
 generalSerial :: SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
-generalSerial = undefined
--- data NexusCommand = NexusCommand
---   { commandName :: EVar -- ^ user-exposed subcommand name in the nexus
---   , commandType :: Type -- ^ the general type of the expression
---   , commandJson :: MDoc -- ^ JSON output with null's where values will be replaced
---   , commandArgs :: [EVar] -- ^ list of function arguments
---   , commandSubs :: [(JsonPath, Text, JsonPath)]
---   -- ^ list of tuples with values 1) path in JSON to value needs to be replaced
---   -- 2) the function argument from which to pull replacement value and 3) the
---   -- path to the replacement value
---   }
+generalSerial x0@(SAnno _ (Idx i t)) = do
+  mayName <- metaName i
+  name <- case mayName of
+    Nothing -> MM.throwError . OtherError $ "No general type found for call-free function"
+    (Just name) -> return name
+  let base = NexusCommand {
+      commandName = name -- EVar -- user-exposed subcommand name in the nexus
+    , commandType = t -- Type -- the general type of the expression
+    , commandJson = (dquotes "_") -- MDoc -- JSON output with null's where values will be replaced
+    , commandArgs = [] -- [EVar] -- list of function arguments
+    , commandSubs = [] -- [(JsonPath, Text, JsonPath)]
+    -- list of tuples with values 1) path in JSON to value needs to be replaced
+    -- 2) the function argument from which to pull replacement value and 3) the
+    -- path to the replacement value
+    }
+  generalSerial' base [] x0
+  where
+    generalSerial' :: NexusCommand -> JsonPath -> SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
+    generalSerial' base _ (SAnno (One (UniS,   _)) _)
+      = return $ base { commandJson = "null" }
+    generalSerial' base _ (SAnno (One (NumS x, _)) _)
+      = return $ base { commandJson = viaShow x }
+    generalSerial' base _ (SAnno (One (LogS x, _)) _)
+      = return $ base { commandJson = if x then "true" else "false" }
+    generalSerial' base _ (SAnno (One (StrS x, _)) _)
+      = return $ base { commandJson = dquotes (pretty x) }
+    -- if a nested accessor is observed, evaluate the nested expression and
+    -- append the path 
+    generalSerial' base ps (SAnno (One (AccS x@(SAnno (One (AccS _ _, _)) _) k, _)) _) = do
+      ncmd <- generalSerial' base ps x
+      case commandSubs ncmd of
+        [(ps1, arg, ps2)] ->
+          return $ ncmd { commandSubs = [(ps1, arg, JsonKey k : ps2)] }
+        _ -> error "Bad record access"
+    -- record the path to and from a record access, leave the value as null, it
+    -- will be set in the nexus
+    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ g)) k, _)) _) =
+      case g of
+        (NamT {}) ->
+          return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
+        _ -> error "Attempted to use key access to non-record"
+    generalSerial' base ps (SAnno (One (ListS xs, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+      return $ base 
+        { commandJson = list (map commandJson ncmds)
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' base ps (SAnno (One (TupleS xs, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+      return $ base
+        { commandJson = list (map commandJson ncmds)
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' base ps (SAnno (One (RecS es, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonKey k] | k <- map fst es]
+                        (map snd es)
+      let entries = zip (map fst es) (map commandJson ncmds)
+          obj = encloseSep "{" "}" ","
+                (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
+      return $ base
+        { commandJson = obj
+        , commandSubs = conmap commandSubs ncmds
+        }
+    generalSerial' base ps (SAnno (One (LamS vs x, _)) _) = do
+      ncmd <- generalSerial' base ps x
+      return $ ncmd { commandArgs = vs }
+    generalSerial' base ps (SAnno (One (VarS (EV v), _)) _) =
+      return $ base { commandSubs = [(ps, v, [])] }
+    generalSerial' _ _ (SAnno (One _) (Idx _ t)) = do
+      MM.throwError . OtherError . render $
+        "Cannot serialize general type:" <+> prettyType t
 
 
 typecheck
@@ -321,145 +384,213 @@ typecheck = undefined
 -- removed at each step.
 parameterize
   :: SAnno Int One (Indexed TypeP)
-  -> MorlocMonad (SAnno Int One (Indexed (TypeP, [(EVar, Argument)])))
-parameterize = undefined
--- parameterize (SAnno (One (LamS vs x, t)) m) = do
---   let args0 = zip vs $ zipWith makeArgument [0..] (decomposeFull t)
---   x' <- parameterize' args0 x
---   return $ SAnno (One (LamS vs x', (t, args0))) m
--- parameterize (SAnno (One (CallS src, t)) m) = do
---   let ts = init . decomposeFull $ t
---       vs = map EVar (freshVarsAZ [])
---       args0 = zipWith makeArgument [0..] ts
---   return $ SAnno (One (CallS src, (t, zip vs args0))) m
--- parameterize x = parameterize' [] x
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
+parameterize (SAnno (One (LamS vs x, c@(Idx _ t))) m) = do
+  let args0 = zip vs $ zipWith makeArgument [0..] (decomposeFull t)
+  x' <- parameterize' args0 x
+  return $ SAnno (One (LamS vs x', (c, args0))) m
+parameterize (SAnno (One (CallS src, c@(Idx _ t))) m) = do
+  let ts = init . decomposeFull $ t
+      vs = map EV (freshVarsAZ [])
+      args0 = zipWith makeArgument [0..] ts
+  return $ SAnno (One (CallS src, (c, zip vs args0))) m
+parameterize x = parameterize' [] x
+
+-- parameterize
+--   :: SAnno GMeta One TypeP
+--   -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
+-- parameterize'
+--   :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
+--   -> SAnno GMeta One TypeP
+--   -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
+
+-- TODO: the arguments coupled to every term should be the arguments USED
+-- (not inherited) by the term. I need to ensure the argument threading
+-- leads to correct passing of serialized/unserialized arguments. AppS should
+-- "know" that it needs to deserialize functions that are passed to a foreign
+-- call, for instance.
+parameterize'
+  :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
+  -> SAnno Int One (Indexed TypeP)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
+-- primitives, no arguments are required for a primitive, so empty lists
+parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
+parameterize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
+parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
+parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
+parameterize' _ (SAnno (One (FixS, c)) m) = return $ SAnno (One (FixS, (c, []))) m
+-- VarS EVar
+parameterize' args (SAnno (One (VarS v, c)) m) = do
+  let args' = [(v', r) | (v', r) <- args, v' == v]
+  return $ SAnno (One (VarS v, (c, args'))) m
+-- CallS Source
+parameterize' _ (SAnno (One (CallS src, c)) m) = do
+  return $ SAnno (One (CallS src, (c, []))) m
+-- record access
+parameterize' args (SAnno (One (AccS x k, c)) m) = do
+  x' <- parameterize' args x
+  return $ SAnno (One (AccS x' k, (c, args))) m
+-- containers
+parameterize' args (SAnno (One (ListS xs, c)) m) = do
+  xs' <- mapM (parameterize' args) xs
+  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+  return $ SAnno (One (ListS xs', (c, args'))) m
+parameterize' args (SAnno (One (TupleS xs, c)) m) = do
+  xs' <- mapM (parameterize' args) xs
+  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+  return $ SAnno (One (TupleS xs', (c, args'))) m
+parameterize' args (SAnno (One (RecS entries, c)) m) = do
+  vs' <- mapM (parameterize' args . snd) entries
+  let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+  return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
+parameterize' args (SAnno (One (LamS vs x, c@(Idx _ t))) m) = do
+  let args' = [(v, r) | (v, r) <- args, notElem v vs]
+      startId = maximum (map (argId . snd) args) + 1
+      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] (decomposeFull t)
+  x' <- parameterize' (args' ++ args0) x
+  return $ SAnno (One (LamS vs x', (c, args'))) m
+parameterize' args (SAnno (One (AppS x xs, c)) m) = do
+  x' <- parameterize' args x
+  xs' <- mapM (parameterize' args) xs
+  let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
+      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+  return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 
-express :: SAnno Int One (Indexed (TypeP, [(EVar, Argument)])) -> MorlocMonad (ExprM Many)
-express = undefined
--- express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
---   express' :: Bool -> TypeP -> SAnno GMeta One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
---
---   -- primitives
---   express' _ _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (Native c) x
---   express' _ _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (Native c) x
---   express' _ _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (Native c) x
---   express' _ _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Native c)
---
---   -- record access
---   express' isTop pc (SAnno (One (AccS x k, _)) m) = do
---     x' <- express' isTop pc x >>= unpackExprM m
---     return (AccM x' k)
---
---   -- containers
---   express' isTop _ (SAnno (One (ListS xs, (c@(ArrP _ [t]), args))) m) = do
---     xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
---     let x = ListM (Native c) xs'
---     if isTop
---       then do
---         x' <- packExprM m x
---         return $ ManifoldM m (map snd args) (ReturnM x')
---       else return x
---   express' _ _ (SAnno (One (ListS _, _)) _) = MM.throwError . CallTheMonkeys $ "ListS can only be ArrP type"
---
---   express' isTop _ (SAnno (One (TupleS xs, (c@(ArrP _ ts), args))) m) = do
---     xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
---     let x = TupleM (Native c) xs'
---     if isTop
---       then do
---         x' <- packExprM m x
---         return $ ManifoldM m (map snd args) (ReturnM x')
---       else return x
---
---   express' isTop _ (SAnno (One (RecS entries, (c@(NamP _ _ _ rs), args))) m) = do
---     xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m)
---     let x = RecordM (Native c) (zip (map fst entries) xs')
---     if isTop
---       then do
---         x' <- packExprM m x
---         return $ ManifoldM m (map snd args) (ReturnM x')
---       else return x
---
---   -- lambda
---   express' isTop _ (SAnno (One (LamS _ x@(SAnno (One (_, (c,_))) _), _)) _) = express' isTop c x
---
---   -- var
---   express' _ _ (SAnno (One (VarS v, (c, rs))) _) =
---     case [r | (v', r) <- rs, v == v'] of
---       [r] -> case r of
---         (SerialArgument i _) -> return $ BndVarM (Serial c) i
---         (NativeArgument i _) -> return $ BndVarM (Native c) i
---         -- NOT passthrough, since it doesn't
---         -- After segmentation, this type will be used to resolve passthroughs everywhere
---         (PassThroughArgument i) -> return $ BndVarM (Serial c) i
---       _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
---
---   -- Apply arguments to a sourced function
---   -- The CallS object may be in a foreign language. These inter-language
---   -- connections will be snapped apart in the segment step.
---   express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m)
---     -- case #1
---     | sameLanguage && fullyApplied = do
---         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
---         return . ManifoldM m (map snd args) $
---           ReturnM (AppM f xs')
---
---     -- case #2
---     | sameLanguage && not fullyApplied = do
---         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
---         let startId = maximum (map (argId . snd) args) + 1
---             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
---             lambdaArgs = zipWith NativeArgument [startId ..] inputs
---             lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
---         return . ManifoldM m (map snd args) $
---           ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
---
---     -- case #3
---     | not sameLanguage && fullyApplied = do
---           xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
---           return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
---             ReturnM (AppM f xs')
---
---     -- case #4
---     | not sameLanguage && not fullyApplied = do
---         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
---         let startId = maximum (map (argId . snd) args) + 1
---             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
---             lambdaArgs = zipWith NativeArgument [startId ..] inputs
---             lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
---         return . ForeignInterfaceM (packTypeM (typeP2typeM pc))
---                . ManifoldM m (map snd args)
---                $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
---     where
---       (inputs, _) = decompose fc
---       sameLanguage = langOf pc == langOf fc
---       fullyApplied = length inputs == length xs
---       f = SrcM (typeP2typeM fc) src
---
---   -- CallS - direct export of a sourced function, e.g.:
---   express' True _ (SAnno (One (CallS src, (c, _))) m) = do
---     let (inputs, _) = decompose c
---         lambdaArgs = zipWith SerialArgument [0 ..] inputs
---         lambdaTypes = map (packTypeM . typeP2typeM) inputs
---         f = SrcM (typeP2typeM c) src
---     lambdaVals <- mapM (unpackExprM m) $ zipWith BndVarM lambdaTypes [0 ..]
---     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
---
---   -- An un-applied source call
---   express' False pc (SAnno (One (CallS src, (c, _))) m) = do
---     let (inputs, _) = decompose c
---         lambdaTypes = map typeP2typeM inputs
---         lambdaArgs = zipWith NativeArgument [0 ..] inputs
---         lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
---         f = SrcM (typeP2typeM c) src
---         manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
---
---     if langOf pc == langOf c
---       then return manifold
---       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
---
---   express' _ _ (SAnno (One (_, (t, _))) m) = MM.throwError . CallTheMonkeys . render $
---     "Invalid input to express' in module (" <> viaShow (metaName m) <> ") - type: " <> prettyTypeP t
+makeArgument :: Int -> TypeP -> Argument
+makeArgument i (UnkP _) = PassThroughArgument i
+makeArgument i t = SerialArgument i t
+
+
+express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
+  express' :: Bool -> TypeP -> SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+
+  -- primitives
+  express' _ _ (SAnno (One (NumS x, (Idx _ c, _))) _) = return $ NumM (Native c) x
+  express' _ _ (SAnno (One (LogS x, (Idx _ c, _))) _) = return $ LogM (Native c) x
+  express' _ _ (SAnno (One (StrS x, (Idx _ c, _))) _) = return $ StrM (Native c) x
+  express' _ _ (SAnno (One (UniS, (Idx _ c, _))) _) = return $ NullM (Native c)
+
+  -- record access
+  express' isTop pc (SAnno (One (AccS x k, _)) m) = do
+    x' <- express' isTop pc x >>= unpackExprM m
+    return (AccM x' k)
+
+  -- containers
+  express' isTop _ (SAnno (One (ListS xs, (Idx _ c@(ArrP _ [t]), args))) m) = do
+    xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
+    let x = ListM (Native c) xs'
+    if isTop
+      then do
+        x' <- packExprM m x
+        return $ ManifoldM m (map snd args) (ReturnM x')
+      else return x
+  express' _ _ (SAnno (One (ListS _, _)) _) = MM.throwError . CallTheMonkeys $ "ListS can only be ArrP type"
+
+  express' isTop _ (SAnno (One (TupleS xs, (Idx _ c@(ArrP _ ts), args))) m) = do
+    xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
+    let x = TupleM (Native c) xs'
+    if isTop
+      then do
+        x' <- packExprM m x
+        return $ ManifoldM m (map snd args) (ReturnM x')
+      else return x
+
+  express' isTop _ (SAnno (One (RecS entries, (Idx _ c@(NamP _ _ _ rs), args))) m) = do
+    xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m)
+    let x = RecordM (Native c) (zip (map fst entries) xs')
+    if isTop
+      then do
+        x' <- packExprM m x
+        return $ ManifoldM m (map snd args) (ReturnM x')
+      else return x
+
+  -- lambda
+  express' isTop _ (SAnno (One (LamS _ x@(SAnno (One (_, (Idx _ c,_))) _), _)) _) = express' isTop c x
+
+  -- var
+  express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) =
+    case [r | (v', r) <- rs, v == v'] of
+      [r] -> case r of
+        (SerialArgument i _) -> return $ BndVarM (Serial c) i
+        (NativeArgument i _) -> return $ BndVarM (Native c) i
+        -- NOT passthrough, since it doesn't
+        -- After segmentation, this type will be used to resolve passthroughs everywhere
+        (PassThroughArgument i) -> return $ BndVarM (Serial c) i
+      _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
+
+  -- Apply arguments to a sourced function
+  -- The CallS object may be in a foreign language. These inter-language
+  -- connections will be snapped apart in the segment step.
+  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc, _))) _) xs, (_, args))) m)
+    -- case #1
+    | sameLanguage && fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+        return . ManifoldM m (map snd args) $
+          ReturnM (AppM f xs')
+
+    -- case #2
+    | sameLanguage && not fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+        let startId = maximum (map (argId . snd) args) + 1
+            lambdaTypes = drop (length xs) (map typeP2typeM inputs)
+            lambdaArgs = zipWith NativeArgument [startId ..] inputs
+            lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
+        return . ManifoldM m (map snd args) $
+          ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+
+    -- case #3
+    | not sameLanguage && fullyApplied = do
+          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+          return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
+            ReturnM (AppM f xs')
+
+    -- case #4
+    | not sameLanguage && not fullyApplied = do
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+        let startId = maximum (map (argId . snd) args) + 1
+            lambdaTypes = drop (length xs) (map typeP2typeM inputs)
+            lambdaArgs = zipWith NativeArgument [startId ..] inputs
+            lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
+        return . ForeignInterfaceM (packTypeM (typeP2typeM pc))
+               . ManifoldM m (map snd args)
+               $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+    where
+      (inputs, _) = decompose fc
+      sameLanguage = langOf pc == langOf fc
+      fullyApplied = length inputs == length xs
+      f = SrcM (typeP2typeM fc) src
+
+  -- CallS - direct export of a sourced function, e.g.:
+  express' True _ (SAnno (One (CallS src, (Idx _ c, _))) m) = do
+    let (inputs, _) = decompose c
+        lambdaArgs = zipWith SerialArgument [0 ..] inputs
+        lambdaTypes = map (packTypeM . typeP2typeM) inputs
+        f = SrcM (typeP2typeM c) src
+    lambdaVals <- mapM (unpackExprM m) $ zipWith BndVarM lambdaTypes [0 ..]
+    return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
+
+  -- An un-applied source call
+  express' False pc (SAnno (One (CallS src, (Idx _ c, _))) m) = do
+    let (inputs, _) = decompose c
+        lambdaTypes = map typeP2typeM inputs
+        lambdaArgs = zipWith NativeArgument [0 ..] inputs
+        lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
+        f = SrcM (typeP2typeM c) src
+        manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
+
+    if langOf pc == langOf c
+      then return manifold
+      else return $ ForeignInterfaceM (typeP2typeM pc) manifold
+
+  express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
+    name <- metaName m
+    MM.throwError . CallTheMonkeys . render $
+      "Invalid input to express' in module (" <> viaShow name <> ") - type: " <> prettyTypeP t
 
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
@@ -724,24 +855,39 @@ mapCM f (SAnno (One (FixS, c)) g) = do
   c' <- f c
   return $ SAnno (One (FixS, c')) g
 
-unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
-unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = f e g c : unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(ListS xs),     c)) g) = f e g c : conmap (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(TupleS xs),    c)) g) = f e g c : conmap (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = f e g c : conmap (unpackSAnno f) (map snd entries)
-unpackSAnno f (SAnno (One (e@(LamS _ x),     c)) g) = f e g c : unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(AppS x xs),    c)) g) = f e g c : conmap (unpackSAnno f) (x:xs)
-unpackSAnno f (SAnno (One (e, c)) g)                = [f e g c]
+sannoSnd :: SAnno g One (a, b) -> b
+sannoSnd (SAnno (One (_, (_, x))) _) = x
+
+unpackSAnno :: (SExpr g One c -> g -> c -> MorlocMonad a) -> SAnno g One c -> MorlocMonad [a]
+unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = (:) <$> f e g c <*> unpackSAnno f x
+unpackSAnno f (SAnno (One (e@(ListS xs),     c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) xs
+unpackSAnno f (SAnno (One (e@(TupleS xs),    c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) xs
+unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) (map snd entries)
+unpackSAnno f (SAnno (One (e@(LamS _ x),     c)) g) = (:) <$> f e g c <*> unpackSAnno f x
+unpackSAnno f (SAnno (One (e@(AppS x xs),    c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) (x:xs)
+unpackSAnno f (SAnno (One (e, c)) g)                = f e g c |>> return
+
+
+-- generate infinite list of fresh variables of form
+-- ['a','b',...,'z','aa','ab',...,'zz',...]
+freshVarsAZ
+  :: [MT.Text] -- variables to exclude
+  -> [MT.Text]
+freshVarsAZ exclude =
+  filter
+    (\x -> not (elem x exclude))
+    ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
 
 
 -- | find all sources required, both in CallS statements and those used for serialization
-getSrcs :: SExpr Int One c -> Int -> c -> [Source]
-getSrcs = undefined
--- getSrcs (CallS src) g _ = src : getSrcsFromGmeta g
--- getSrcs _ g _ = getSrcsFromGmeta g
---
--- getSrcsFromGmeta :: GMeta -> [Source]
--- getSrcsFromGmeta g
---   = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
---            | p <- (concat . Map.elems . metaPackers) g]
---   ++ Map.elems (metaConstructors g)
+getSrcs :: SExpr Int One c -> Int -> c -> MorlocMonad [Source]
+getSrcs (CallS src) g _ = (:) src <$> getSrcsFromManifold g
+getSrcs _ g _ = getSrcsFromManifold g
+
+getSrcsFromManifold :: Int -> MorlocMonad [Source]
+getSrcsFromManifold g = do
+  packers <- metaPackers g |>> Map.elems |>> concat
+  constructors <- metaConstructors g
+  return . unique
+    $  concat [unresolvedPackerForward p <> unresolvedPackerReverse p | p <- packers]
+    <> constructors
