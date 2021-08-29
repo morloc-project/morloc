@@ -116,16 +116,16 @@ realize
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
                          (SAnno (Indexed Type) One (Indexed Lang)))
 realize s0 = do
-  e@(SAnno (One (_, li)) _) <- scoreAnno [] s0 >>= collapse
+  e@(SAnno (One (_, li)) _) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left 
     (Idx _ _) -> Right <$> mapCM unmaybeIdx e
   where
-  scoreAnno
+  scoreSAnno
     :: [Lang]
     -> SAnno (Indexed Type) Many Int
     -> MorlocMonad (SAnno (Indexed Type) Many (Indexed [(Lang, Int)]))
-  scoreAnno langs (SAnno (Many xs) t) = do
+  scoreSAnno langs (SAnno (Many xs) t) = do
     xs' <- mapM (scoreExpr langs) xs
     return (SAnno (Many xs') t)
 
@@ -133,140 +133,136 @@ realize s0 = do
     :: [Lang]
     -> (SExpr (Indexed Type) Many Int, Int)
     -> MorlocMonad (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
-  scoreExpr = undefined
-  -- scoreExpr langs (AccS x k, i) = do
-  --   x' <- realizeSAnno langs x
-  --   return (AccS x' k, Idx i (scoresOf x'))
-  -- scoreExpr _ (ListS xs, i) = do
-  --   (xs', best) <- realizeMany langs xs
-  --   return (ListS xs', Idx i best)
-  -- scoreExpr langs (TupleS xs, i) = do
-  --   (xs', best) <- realizeMany langs xs
-  --   return (TupleS xs', Idx i best)
-  -- scoreExpr langs (LamS vs x, i) = do
-  --   x' <- scoreAnno langs x
-  --   return (LamS vs x', Idx i (scoresOf x'))
-  -- scoreExpr _ (AppS f xs, i) = do
-  --   f' <- scoreAnno [] f
-  --   let scores = scoresOf f'
-  --   xs' <- mapM (scoreAnno (unique $ map fst scores)) xs
-  --   pairss <- [maxPairs [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
-  --   let best = [ (l1, sum [ maximum [s1 + s2 + Lang.pairwiseCost l1 l2
-  --                         | (l2, s2) <- pairs] | pairs <- pairss])
-  --              | (l1, s1) <- scores]
-  --   return (AppS f' xs', Idx i best)
-  -- scoreExpr langs (RecS rs, i) = do
-  --   (xs, best) <- realizeMany langs (map snd rs)
-  --   return $ (RecS (zip (map fst rs) xs), Idx i best)
-  -- scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, 0)])
-  -- scoreExpr langs (e, i) = return (e, Idx i (zip langs (repeat 0)))
+  scoreExpr langs (AccS x k, i) = do
+    x' <- scoreSAnno langs x
+    return (AccS x' k, Idx i (scoresOf x'))
+  scoreExpr langs (ListS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (ListS xs', Idx i best)
+  scoreExpr langs (TupleS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (TupleS xs', Idx i best)
+  scoreExpr langs (LamS vs x, i) = do
+    x' <- scoreSAnno langs x
+    return (LamS vs x', Idx i (scoresOf x'))
+  scoreExpr _ (AppS f xs, i) = do
+    f' <- scoreSAnno [] f
+    let scores = scoresOf f'
+    xs' <- mapM (scoreSAnno (unique $ map fst scores)) xs
+    let pairss = [(maxPairs . concat) [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
+        best = [ (l1, sum [ maximum [s1 + s2 + Lang.pairwiseCost l1 l2
+                          | (l2, s2) <- pairs] | pairs <- pairss])
+               | (l1, s1) <- scores]
+    return (AppS f' xs', Idx i best)
+  scoreExpr langs (RecS rs, i) = do
+    (xs, best) <- scoreMany langs (map snd rs)
+    return $ (RecS (zip (map fst rs) xs), Idx i best)
+  scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, 0)])
+  -- non-recursive expressions
+  scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
+  scoreExpr langs (VarS v, i) = return (VarS v, zipLang i langs)
+  scoreExpr langs (NumS x, i) = return (NumS x, zipLang i langs)
+  scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
+  scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
+  scoreExpr langs (FixS, i) = return (FixS, zipLang i langs)
+
+  zipLang :: Int -> [Lang] -> Indexed [(Lang, Int)]
+  zipLang i langs = Idx i (zip langs (repeat 0))
 
   scoresOf :: SAnno a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
   scoresOf (SAnno (Many xs) _) = maxPairs . concat $ [xs' | (_, Idx _ xs') <- xs]
 
-  realizeMany
+  scoreMany
     :: [Lang]
     -> [SAnno (Indexed Type) Many Int]
     -> MorlocMonad ([SAnno (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
-  -- realizeMany langs xs = do
-  --   xs' <- mapM scoreAnno xs
-  --   return (xs', scoreMany xs')
-  --   where
-  --     scoreMany :: [Lang] -> [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
-  --     scoreMany langs0 xs =
-  --       let pairss = [maxPairs [xs'' | (_, Idx _ xs'') <- xs'] | SAnno (Many xs') _ <- xs]
-  --           langs = unique (langs0 <> (concat . map (map fst)) pairss)
-  --       in [(l1, sum [ maximum [score + Lang.pairwiseCost l1 l2 | (l2, score) <- pairs] | pairs <- pairss]) | l1 <- langs]
-
-  collapse
-    :: SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
-    -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
-  collapse (SAnno (Many xs) t) = do
-    let (x, Idx i lang) = bestSExpr (head xs) (tail xs)
-    x' <- collapseExpr lang x
-    return (SAnno (One x') t)
+  scoreMany langs xs0 = do
+    xs1 <- mapM (scoreSAnno langs) xs0
+    return (xs1, scoreMany xs1)
     where
-      bestSExpr :: (a, Indexed [(Lang, Int)]) -> [(a, Indexed [(Lang, Int)])] -> (a, Indexed (Maybe Lang))
-      bestSExpr (x, Idx i ys) [] = (x, Idx i (fmap fst (maxScore ys)))
-      bestSExpr  (e1, Idx i1 (maxScore -> Just (x1, y1)))
-                ((e2, Idx i2 (maxScore -> Just (x2, y2))) : rs)
-        | y1 > y2   = bestSExpr (e1, Idx i1 [(x1, y1)]) rs
-        | otherwise = bestSExpr (e2, Idx i2 [(x2, y2)]) rs
+      scoreMany :: [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
+      scoreMany xs =
+        let pairss = [(maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs'] | SAnno (Many xs') _ <- xs]
+            langs = unique (langs <> (concat . map (map fst)) pairss)
+        in [(l1, sum [maximum [score + Lang.pairwiseCost l1 l2 | (l2, score) <- pairs] | pairs <- pairss]) | l1 <- langs]
+
 
   collapseSAnno
     :: Maybe Lang
     -> SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
-    -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
-  collapseSAnno = undefined  
+    -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+  collapseSAnno l1 (SAnno (Many es) t) = do
+    e <- case maxBy (\(_, Idx _ ss) -> maximumMay [cost l1 l2 s | (l2, s) <- ss]) es of
+      Nothing -> MM.throwError . CallTheMonkeys $ "A SAnno must contain an SExpr"
+      (Just x@(e, Idx _ ss)) -> collapseExpr (fmap fst (maxBy snd ss)) x
+    return (SAnno (One e) t)
+
+
+  cost
+    :: Maybe Lang -- parent language (if given)
+    -> Lang -- child lang (should always be given if we are working from scored pairs)
+    -> Int -- score
+    -> Int
+  cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
+  cost _ _ score = score
+
 
   collapseExpr
     :: Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
-    -> SExpr (Indexed Type) Many (Indexed [(Lang, Int)])
+    -> (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), (Indexed [(Lang, Int)]))
     -> MorlocMonad (SExpr (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
-  collapseExpr = undefined
-  -- -- collapse GAST expressions
-  -- collapseExpr Nothing (AccS x k, Idx i _) = do
-  --   x' <- collapseSAnno Nothing x
-  --   return (AccS x' k, Idx i Nothing)
-  -- collapseExpr Nothing (ListS xs, Idx i _) = do
-  --   xs' <- mapM (collapseSAnno Nothing) xs
-  --   return (ListS xs', Idx i Nothing)
-  -- collapseExpr Nothing (TupleS xs, Idx i _) = do
-  --   xs' <- mapM (collapseSAnno Nothing) xs
-  --   return (TupleS xs', Idx i Nothing)
-  -- collapseExpr Nothing (LamS vs x, Idx i _) = do
-  --   x' <- collapseSAnno Nothing x
-  --   return (LamS vs x', Idx i Nothing)
-  -- collapseExpr Nothing (AppS f xs, Idx i _) = do
-  --   f' <- collapseSAnno Nothing f
-  --   xs' <- mapM (collapseSAnno Nothing) xs
-  --   return (AppS f' xs', Idx i Nothing)
-  -- collapseExpr Nothing (RecS rs, Idx i _) = do
-  --   xs' <- mapM (collapseSAnno Nothing . snd) rs
-  --   return (RecS (zip (map fst rs) xs'), Idx i Nothing)
-  -- -- collapse using parent language
-  -- collapseExpr (Just l1) (AccS x k, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   x' <- collapseSAnno (Just lang) x
-  --   return (AccS x' k, Idx i (Just lang))
-  -- collapseExpr (Just l1) (ListS xs, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   xs' <- mapM (collapseSAnno (Just lang)) xs
-  --   return (ListS xs', Idx i (Just lang))
-  -- collapseExpr (Just l1) (TupleS xs, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   xs' <- mapM (collapseSAnno (Just lang)) xs
-  --   return (TupleS xs', Idx i (Just lang))
-  -- collapseExpr (Just l1) (LamS vs x, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   x' <- collapseSAnno (Just lang) x
-  --   return (LamS vs x', Idx i (Just lang))
-  -- collapseExpr (Just l1) (AppS f xs, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   f' <- collapseSAnno (Just lang) f
-  --   xs' <- mapM (collapseSAnno (Just lang)) xs
-  --   return (AppS f' xs', Idx i (Just lang))
-  -- collapseExpr (Just l1) (RecS rs, Idx i ss) = do
-  --   lang <- chooseLanguage l1 ss
-  --   xs' <- mapM (collapseSAnno (Just lang) . snd) rs
-  --   return (RecS (zip (map fst rs) xs'), Idx i (Just lang))
-  -- -- collapse leaf expressions
-  -- collapseExpr lang (e, Idx i _) = return (e, Idx i lang)
+  collapseExpr l1 (AccS x k, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseSAnno lang x
+    return (AccS x' k, Idx i lang)
+  collapseExpr _ (CallS src, Idx i _) = do
+   return (CallS src, Idx i (Just $ srcLang src))
+  collapseExpr l1 (ListS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang) xs
+    return (ListS xs', Idx i lang)
+  collapseExpr l1 (TupleS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang) xs
+    return (TupleS xs', Idx i lang)
+  collapseExpr l1 (LamS vs x, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseSAnno lang x
+    return (LamS vs x', Idx i lang)
+  collapseExpr l1 (AppS f xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    f' <- collapseSAnno lang f
+    xs' <- mapM (collapseSAnno lang) xs
+    return (AppS f' xs', Idx i lang)
+  collapseExpr l1 (RecS rs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang . snd) rs
+    return (RecS (zip (map fst rs) xs'), Idx i lang)
+  -- collapse leaf expressions
+  collapseExpr lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
+  collapseExpr lang (VarS v, Idx i _) = return (VarS v, Idx i lang)
+  collapseExpr lang (NumS x, Idx i _) = return (NumS x, Idx i lang)
+  collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
+  collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+  collapseExpr lang (FixS,   Idx i _) = return (FixS,   Idx i lang)
 
-  chooseLanguage :: Lang -> [(Lang, Int)] -> MorlocMonad Lang
+  chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss =
-    case maxScore [(l2, s2 + Lang.pairwiseCost l1 l2) | (l2, s2) <- ss] of
+    case maxBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
       Nothing -> MM.throwError . CallTheMonkeys $ "This shouldn't happen"
-      (Just (l3, _)) -> return l3
+      (Just (l3, _)) -> return (Just l3)
 
 
-  maxScore :: [(a, Int)] -> Maybe (a, Int)
-  maxScore [] = Nothing
-  maxScore (x0:rs0) = f x0 rs0 where
-    f (x, v) [] = Just (x, v)
-    f (x1, i1) ((x2, i2):rs)
-      | i2 > i1 = f (x2, i2) rs
-      | otherwise = f (x1, i1) rs
+  maxBy :: Ord b => (a -> b) -> [a] -> Maybe a
+  maxBy _ [] = Nothing
+  maxBy _ [x] = Just x
+  maxBy f (x1:rs) = case maxBy f rs of
+    Nothing -> Just x1
+    (Just x2) -> if f x1 >= f x2 then Just x1 else Just x2
+
+  maximumMay :: Ord a => [a] -> Maybe a
+  maximumMay [] = Nothing
+  maximumMay xs = Just (maximum xs)
 
   -- find the highest scoring value for each key
   maxPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
@@ -345,3 +341,6 @@ mapCM f (SAnno (One (LogS x, c)) g) = do
 mapCM f (SAnno (One (StrS x, c)) g) = do
   c' <- f c
   return $ SAnno (One (StrS x, c')) g
+mapCM f (SAnno (One (FixS, c)) g) = do
+  c' <- f c
+  return $ SAnno (One (FixS, c')) g
