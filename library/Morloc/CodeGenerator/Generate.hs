@@ -40,6 +40,7 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
+import Morloc.CodeGenerator.Typecheck (typecheck)
 import Morloc.Data.Doc
 import Morloc.Pretty (prettyType)
 import qualified Morloc.Config as MC
@@ -374,12 +375,6 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
         "Cannot serialize general type:" <+> prettyType t
 
 
-typecheck
-  :: SAnno (Indexed Type) One (Indexed Lang)
-  -> MorlocMonad (SAnno Int One (Indexed TypeP))
-typecheck = undefined
-
-
 -- | Add arguments that are required for each term. Unneeded arguments are
 -- removed at each step.
 parameterize
@@ -395,14 +390,6 @@ parameterize (SAnno (One (CallS src, c@(Idx _ t))) m) = do
       args0 = zipWith makeArgument [0..] ts
   return $ SAnno (One (CallS src, (c, zip vs args0))) m
 parameterize x = parameterize' [] x
-
--- parameterize
---   :: SAnno GMeta One TypeP
---   -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
--- parameterize'
---   :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
---   -> SAnno GMeta One TypeP
---   -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
 
 -- TODO: the arguments coupled to every term should be the arguments USED
 -- (not inherited) by the term. I need to ensure the argument threading

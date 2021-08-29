@@ -12,6 +12,7 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder ()
+import Morloc.Typecheck.Internal (lookupSig)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Data.Text as MT

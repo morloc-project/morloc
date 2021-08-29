@@ -32,8 +32,8 @@ import Data.Text (Text)
 data PVar
   = PV
     Lang
-    (Maybe Text)
-    Text
+    (Maybe Text) -- ^ general name of the type variable (if known)
+    Text -- ^ concrete name of type variable
   deriving (Show, Eq, Ord)
 
 -- | A solved type coupling a language specific form to an optional general form

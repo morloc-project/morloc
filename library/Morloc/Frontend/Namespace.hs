@@ -9,28 +9,19 @@ Stability   : experimental
 
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace
+  , module Morloc.Typecheck.Namespace
   , mapExprM
   , Stack
   , StackState(..)
   , StackConfig(..)
-  -- ** Typechecking
-  , Gamma
-  , GammaIndex(..)
-  , EType(..)
-  , TypeSet(..)
-  , Indexable(..)
-  -- ** ModuleGamma paraphernalia
-  , ModularGamma
   -- rifraf
-  , resolve
-  , substituteT
   , isGeneric
   -- * accessing state
-  , lookupSig
   , copyState
   ) where
 
 import Morloc.Namespace hiding (name)
+import Morloc.Typecheck.Namespace
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import Data.Set (Set)
@@ -44,36 +35,6 @@ import Data.Text (Text)
 import qualified Data.Char as DC
 import qualified Data.Text as DT
 
-
-
--- This functions removes qualified and existential types.
---  * all qualified terms are replaced with UnkT
---  * all existentials are replaced with default values if a possible
---    FIXME: should I really just take the first in the list???
-resolve :: UnresolvedType -> Type
-resolve (VarU v) = VarT v
-resolve (FunU t1 t2) = FunT (resolve t1) (resolve t2)
-resolve (ArrU v ts) = ArrT v (map resolve ts)
-resolve (NamU r v ps rs) =
-  let ts' = map (resolve . snd) rs
-      ps' = map resolve ps 
-  in NamT r v ps' (zip (map fst rs) ts')
-resolve (ExistU v _ []) = resolve (ForallU v (VarU v)) -- whatever
-resolve (ExistU _ _ (t:_)) = resolve t
-resolve (ForallU v t) = substituteT v (UnkT v) (resolve t)
-
--- | substitute all appearances of a given variable with a given new type
-substituteT :: TVar -> Type -> Type -> Type
-substituteT v0 r0 t0 = sub t0
-  where
-    sub :: Type -> Type
-    sub t@(UnkT _) = t
-    sub t@(VarT v)
-      | v0 == v = r0
-      | otherwise = t
-    sub (FunT t1 t2) = FunT (sub t1) (sub t2)
-    sub (ArrT v ts) = ArrT v (map sub ts)
-    sub (NamT r v ts rs) = NamT r v (map sub ts) [(x, sub t) | (x, t) <- rs]
 
 -- | Determine if a type term is generic (i.e., is the first letter lowercase?)
 isGeneric :: TVar -> Bool
@@ -105,14 +66,6 @@ mapExprM f e0 = g e0 where
   g (ExprI i (RecE rs)) = ExprI i <$> ((RecE <$> (zip (map fst rs) <$> mapM g (map snd rs))) >>= f)
   g (ExprI i e) = ExprI i <$> f e
 
-lookupSig :: Int -> MorlocMonad (Maybe TermTypes)
-lookupSig i = do
-  s <- MM.get
-  case GMap.lookup i (stateSignatures s) of
-    GMapNoFst -> return Nothing
-    GMapNoSnd -> MM.throwError . CallTheMonkeys $ "Internal GMap key missing"
-    (GMapJust t) -> return (Just t)
-
 -- | 
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
@@ -120,47 +73,6 @@ copyState oldIndex newIndex = do
   case GMap.yIsX (stateSignatures s) oldIndex newIndex of
     (Just x) -> MM.put $ s {stateSignatures = x}
     Nothing -> MM.throwError . CallTheMonkeys $ "Failed to copy state"
-
--- | A context, see Dunfield Figure 6
-data GammaIndex
-  = VarG TVar
-  -- ^ (G,a)
-  | AnnG ExprI TypeSet
-  -- ^ (G,x:A) looked up in the (Var) and cut in (-->I)
-  | ExistG TVar
-    [UnresolvedType] -- FIXME: document
-    [UnresolvedType] -- default types
-  -- ^ (G,a^) unsolved existential variable
-  | SolvedG TVar UnresolvedType
-  -- ^ (G,a^=t) Store a solved existential variable
-  | MarkG TVar
-  -- ^ (G,>a^) Store a type variable marker bound under a forall
-  | SrcG Source
-  -- ^ source
-  | UnsolvedConstraint UnresolvedType UnresolvedType
-  -- ^ Store an unsolved serialization constraint containing one or more
-  -- existential variables. When the existential variables are solved, the
-  -- constraint will be written into the Stack state.
-  deriving (Ord, Eq, Show)
-
-type Gamma = [GammaIndex]
-
-data TypeSet =
-  TypeSet (Maybe EType) [EType]
-  deriving (Show, Eq, Ord)
-
-type ModularGamma = Map MVar (Map EVar TypeSet)
-
-class Indexable a where
-  index :: a -> GammaIndex
-
-instance Indexable GammaIndex where
-  index = id
-
-instance Indexable UnresolvedType where
-  index (ExistU t ts ds) = ExistG t ts ds
-  index t = error $ "Can only index ExistT, found: " <> show t
-
 
 
 type GeneralStack c e l s a

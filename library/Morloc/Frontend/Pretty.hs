@@ -10,9 +10,7 @@ Stability   : experimental
 module Morloc.Frontend.Pretty
   ( module Morloc.Pretty
   , prettyExpr
-  , prettyGammaIndex
   , prettyParserError
-  , prettyTypeSet
   ) where
 
 import Morloc.Frontend.Namespace
@@ -26,26 +24,6 @@ import Data.Void (Void)
 
 prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
 prettyParserError = undefined
-
-prettyTypeSet :: TypeSet -> Doc AnsiStyle
-prettyTypeSet (TypeSet Nothing ts)
-  = encloseSep "(" ")" ";" (map (prettyGreenUnresolvedType . etype) ts)
-prettyTypeSet (TypeSet (Just t) ts)
-  = encloseSep "(" ")" ";" (map (prettyGreenUnresolvedType . etype) (t:ts))
-
-
-prettyGammaIndex :: GammaIndex -> Doc AnsiStyle
-prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
-prettyGammaIndex (AnnG e ts) = "AnnG:" <+> prettyExpr e <+> prettyTypeSet ts
-prettyGammaIndex (ExistG tv ts ds)
-  = "ExistG:"
-  <+> pretty tv
-  <+> list (map (parens . prettyGreenUnresolvedType) ts)
-  <+> list (map (parens . prettyGreenUnresolvedType) ds)
-prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
-prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
-prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
 
 prettyExpr :: ExprI -> Doc AnsiStyle
 prettyExpr (ExprI _ UniE) = "()"

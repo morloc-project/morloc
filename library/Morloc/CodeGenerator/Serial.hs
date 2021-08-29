@@ -20,7 +20,7 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.Frontend.Namespace (resolve)
+import Morloc.Typecheck.Internal (resolve)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
