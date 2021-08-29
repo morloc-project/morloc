@@ -11,7 +11,7 @@ module Morloc.Typecheck.Pretty
   ( prettyGammaIndex
   ) where
 
-import Morloc.Typecheck.Namespace
+import Morloc.Namespace
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (AnsiStyle)
@@ -29,4 +29,4 @@ prettyGammaIndex (ExistG tv ts ds)
 prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-prettyGammaIndex (UnsolvedConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
+prettyGammaIndex (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2

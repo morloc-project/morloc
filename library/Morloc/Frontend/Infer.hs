@@ -10,7 +10,6 @@ module Morloc.Frontend.Infer (typecheck) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
-import qualified Morloc.Frontend.PartialOrder as P
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap

@@ -9,7 +9,6 @@ Stability   : experimental
 
 module Morloc.Frontend.Namespace
   ( module Morloc.Namespace
-  , module Morloc.Typecheck.Namespace
   , mapExprM
   , Stack
   , StackState(..)
@@ -21,7 +20,6 @@ module Morloc.Frontend.Namespace
   ) where
 
 import Morloc.Namespace hiding (name)
-import Morloc.Typecheck.Namespace
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 import Data.Set (Set)

@@ -52,19 +52,9 @@ errmsg NoBenefits =
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
 errmsg (GeneratorError msg) = "GeneratorError: " <> msg
-errmsg MissingGeneralType = "MissingGeneralType"
-errmsg AmbiguousGeneralType = "AmbiguousGeneralType"
-errmsg ExistentialError = "ExistentialError"
-errmsg UnsolvedExistentialTerm = "UnsolvedExistentialTerm"
-errmsg BadExistentialCast = "BadExistentialCast"
-errmsg (AccessError _) = "AccessError"
-errmsg NonFunctionDerive = "NonFunctionDerive"
-errmsg (UnboundVariable (EV v)) = "UnboundVariable: " <> v
-errmsg OccursCheckFail = "OccursCheckFail"
-errmsg EmptyCut = "EmptyCut"
+errmsg (ConcreteTypeError _) = "ConcreteTypeError"
+errmsg (GeneralTypeError _) = "ConcreteTypeError"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
-errmsg BadRecordAccess = "BadRecordAccess" 
-errmsg NoAnnotationFound = "NoAnnotationFound"
 errmsg (OtherError msg) = "OtherError: " <> msg
 -- TODO: this will be a common class of errors and needs an informative message
 errmsg (IncompatibleGeneralType _ _) = "Incompatible general types"

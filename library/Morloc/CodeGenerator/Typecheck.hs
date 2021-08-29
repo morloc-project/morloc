@@ -15,52 +15,27 @@ module Morloc.CodeGenerator.Typecheck
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.Typecheck.Namespace
 import Morloc.Typecheck.Internal
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
--- data SExpr g f c
---   = UniS
---   | VarS EVar
---   | AccS (SAnno g f c) Text
---   | ListS [SAnno g f c]
---   | TupleS [SAnno g f c]
---   | LamS [EVar] (SAnno g f c)
---   | AppS (SAnno g f c) [SAnno g f c]
---   | NumS Scientific
---   | LogS Bool
---   | StrS Text
---   | RecS [(Text, SAnno g f c)]
---   | FixS -- TODO: Recursion is not yet supported
---   | CallS Source
-
--- -- | Stores the language, general name and concrete name for a type expression
--- data PVar
---   = PV
---     Lang
---     (Maybe Text)
---     Text
---   deriving (Show, Eq, Ord)
-
--- -- | A solved type coupling a language specific form to an optional general form
--- data TypeP
---   = UnkP PVar
---   | VarP PVar
---   | FunP TypeP TypeP
---   | ArrP PVar [TypeP]
---   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
---   deriving (Show, Ord, Eq)
-
 typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 typecheck e = do
-  (_, _, e') <- synth [] e
-  weaveAndResolve e'
+  packers <- MM.gets statePackers
+  e' <- retrieveTypes e
+  let g0 = Gamma {gammaCounter = 0, gammaContext = []}
+  case synth g0 e' of
+    (Left err) -> MM.throwError . ConcreteTypeError $ err
+    (Right (_, _, e'')) -> weaveAndResolve e''
 
+retrieveTypes
+  :: SAnno (Indexed Type) One (Indexed Lang)
+  -> MorlocMonad (SAnno (Indexed Type) One (Indexed [EType]))
+retrieveTypes = undefined
 
 weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed UnresolvedType)
@@ -70,20 +45,22 @@ weaveAndResolve = undefined
 
 synth
   :: Gamma
-  -> SAnno (Indexed Type) One (Indexed Lang)
-  -> MorlocMonad
-        ( Gamma
-        , UnresolvedType
-        , SAnno (Indexed Type) One (Indexed UnresolvedType)
-        )
+  -> SAnno (Indexed Type) One (Indexed [EType])
+  -> Either
+       TypeError
+       ( Gamma
+       , UnresolvedType
+       , SAnno (Indexed Type) One (Indexed UnresolvedType)
+       )
 synth = undefined
 
 
 check
   :: Gamma
-  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> SAnno (Indexed Type) One (Indexed [EType])
   -> UnresolvedType
-  -> MorlocMonad
+  -> Either
+        TypeError
         ( Gamma
         , UnresolvedType
         , SAnno (Indexed Type) One (Indexed UnresolvedType)
@@ -93,9 +70,10 @@ check = undefined
 
 synthApply
   :: Gamma
-  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> SAnno (Indexed Type) One [EType]
   -> UnresolvedType
-  -> MorlocMonad
+  -> Either
+       TypeError
        ( Gamma
        , UnresolvedType
        , SAnno (Indexed Type) One (Indexed UnresolvedType)

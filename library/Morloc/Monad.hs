@@ -48,6 +48,7 @@ import qualified Morloc.Language as ML
 import qualified System.Exit as SE
 import qualified System.Process as SP
 import qualified Morloc.System as MS
+import qualified Data.Map as Map
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
@@ -61,6 +62,7 @@ emptyState path v = MorlocState {
   , stateCounter = -1
   , stateSignatures = GMap.empty
   , stateOutfile = path
+  , statePackers = Map.empty
 }
 
 startCounter :: MorlocMonad ()

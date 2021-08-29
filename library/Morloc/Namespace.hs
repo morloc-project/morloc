@@ -43,7 +43,6 @@ module Morloc.Namespace
   , metaConstructors
   , metaType
   , metaName
-  , metaPackers
   , metaTypedefs
   -- ** Language
   , Lang(..)
@@ -58,6 +57,7 @@ module Morloc.Namespace
   --------------------
   -- ** Error handling
   , MorlocError(..)
+  , TypeError(..)
   -- ** Configuration
   , Config(..)
   -- ** Morloc monad
@@ -74,6 +74,9 @@ module Morloc.Namespace
   , EType(..)
   , unresolvedType2type
   , Source(..)
+  -- * Typechecking
+  , Gamma(..)
+  , GammaIndex(..)
   -- * Mostly frontend expressions
   , Expr(..)
   , ExprI(..)
@@ -134,6 +137,7 @@ data MorlocState = MorlocState {
   , stateCounter :: Int
   , stateSignatures :: GMap Int Int TermTypes
   , stateOutfile :: Maybe Path
+  , statePackers :: PackMap
 }
 
 {-
@@ -305,6 +309,42 @@ data UnresolvedPacker =
 
 type PackMap = Map (TVar, Int) [UnresolvedPacker]
 
+
+-- | A context, see Dunfield Figure 6
+data GammaIndex
+  = VarG TVar
+  -- ^ (G,a)
+  | ExistG TVar
+    [UnresolvedType] -- FIXME: document
+    [UnresolvedType] -- default types
+  -- ^ (G,a^) unsolved existential variable
+  | SolvedG TVar UnresolvedType
+  -- ^ (G,a^=t) Store a solved existential variable
+  | MarkG TVar
+  -- ^ (G,>a^) Store a type variable marker bound under a forall
+  | SrcG Source
+  -- ^ source
+  | SerialConstraint UnresolvedType UnresolvedType
+  -- ^ Store an unsolved serialization constraint containing one or more
+  -- existential variables. When the existential variables are solved, the
+  -- constraint will be written into the Stack state.
+  deriving (Ord, Eq, Show)
+
+
+data Gamma = Gamma
+  { gammaCounter :: Int
+  , gammaContext :: [GammaIndex]
+  }
+
+
+data TypeError
+  = SubtypeError UnresolvedType UnresolvedType Text
+  | InstantiationError UnresolvedType UnresolvedType Text
+  | EmptyCut GammaIndex
+  | OccursCheckFail UnresolvedType UnresolvedType Text
+    -- ^ the msg should an identifier for the place where the occurs check failed
+  | NotYetImplemented UnresolvedType UnresolvedType Text 
+
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
   -- occur for RDF that has been validated.
@@ -341,19 +381,9 @@ data MorlocError
   -- | Raised when a branch is reached that should not be possible
   | CallTheMonkeys Text
   --------------- T Y P E   E R R O R S --------------------------------------
-  | MissingGeneralType
-  | AmbiguousGeneralType
-  | ExistentialError
-  | UnsolvedExistentialTerm
-  | BadExistentialCast
-  | AccessError Text
-  | NonFunctionDerive
-  | UnboundVariable EVar
-  | OccursCheckFail
-  | EmptyCut
+  | ConcreteTypeError TypeError
+  | GeneralTypeError TypeError
   | ToplevelRedefinition
-  | BadRecordAccess
-  | NoAnnotationFound -- I don't know what this is for
   | IncompatibleGeneralType UnresolvedType UnresolvedType
   | OtherError Text -- TODO: remove this option
   -- container errors
@@ -702,9 +732,6 @@ metaType = undefined
 
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName = undefined
-
-metaPackers :: Int -> MorlocMonad PackMap
-metaPackers = undefined
 
 metaTypedefs :: Int -> MorlocMonad (Map TVar (Type, [TVar]))
 metaTypedefs = undefined

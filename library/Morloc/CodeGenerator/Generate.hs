@@ -84,9 +84,6 @@ generate es = do
     gSerial
     [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs']
 
-  -- find all sources files
-  srcs <- mapM (unpackSAnno getSrcs) rASTs' |>> (unique . concat . concat)
-
   -- for each language, collect all functions into one "pool"
   pools
     -- thread arguments across the tree
@@ -108,7 +105,9 @@ generate es = do
     -- nuanced.
     >>= pool
     -- Generate the code for each pool
-    >>= mapM (encode srcs)
+    >>= mapM findSources
+    -- find sources dependencies for each concrete AST
+    >>= mapM (uncurry encode)
 
   return (nexus, pools)
 
@@ -717,14 +716,34 @@ rehead _ = MM.throwError $ CallTheMonkeys "Bad Head"
 pool :: [ExprM Many] -> MorlocMonad [(Lang, [ExprM Many])]
 pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
 
+findSources
+  :: (Lang, [ExprM Many])
+  -> MorlocMonad (Lang, [([Source], ExprM Many)])
+findSources = undefined
+-- -- | find all sources required, both in CallS statements and those used for serialization
+-- getSrcs :: SExpr Int One c -> Int -> c -> MorlocMonad [Source]
+-- getSrcs (CallS src) g _ = (:) src <$> getSrcsFromManifold g
+-- getSrcs _ g _ = getSrcsFromManifold g
+--
+-- getSrcsFromManifold :: Int -> MorlocMonad [Source]
+-- getSrcsFromManifold g = do
+--   packers <- MM.gets statePackers |>> Map.elems |>> concat
+--   constructors <- metaConstructors g
+--   return . unique
+--     $  concat [unresolvedPackerForward p <> unresolvedPackerReverse p | p <- packers]
+--     <> constructors
 
 encode
-  :: [Source]
-  -> (Lang, [ExprM Many])
+  :: Lang
+  -> [([Source], ExprM Many)]
+  -- ^ The input preserves the connection between the AST and the specific
+  -- sources it uses, currently this information is not used. However, in the
+  -- future it may sometimes be necessary to split the functions in one
+  -- language into multiple pools (e.g., to resolve version conflicts).
   -> MorlocMonad Script
-encode srcs (lang, xs) = do
-  let srcs' = unique [s | s <- srcs, srcLang s == lang]
-  xs' <- mapM (preprocess lang) xs >>= chooseSerializer
+encode lang xss = do
+  let srcs' = unique [s | s <- concat (map fst xss), srcLang s == lang]
+  xs' <- mapM (preprocess lang) (map snd xss) >>= chooseSerializer
   -- translate each node in the AST to code
   translate lang srcs' xs'
 
@@ -864,17 +883,3 @@ freshVarsAZ exclude =
   filter
     (\x -> not (elem x exclude))
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
-
-
--- | find all sources required, both in CallS statements and those used for serialization
-getSrcs :: SExpr Int One c -> Int -> c -> MorlocMonad [Source]
-getSrcs (CallS src) g _ = (:) src <$> getSrcsFromManifold g
-getSrcs _ g _ = getSrcsFromManifold g
-
-getSrcsFromManifold :: Int -> MorlocMonad [Source]
-getSrcsFromManifold g = do
-  packers <- metaPackers g |>> Map.elems |>> concat
-  constructors <- metaConstructors g
-  return . unique
-    $  concat [unresolvedPackerForward p <> unresolvedPackerReverse p | p <- packers]
-    <> constructors

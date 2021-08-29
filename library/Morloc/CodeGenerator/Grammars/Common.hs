@@ -286,16 +286,20 @@ unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
 unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprM m e = case typeOfExprM e of
-  (Serial t) -> DeserializeM <$> (metaPackers m >>= (flip MCS.makeSerialAST) t) <*> pure e
-  (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
-  _ -> return e
+unpackExprM m e = do
+  packers <- MM.gets statePackers
+  case typeOfExprM e of
+    (Serial t) -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
+    (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
+    _ -> return e
 
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
-packExprM m e = case typeOfExprM e of
-  (Native t) -> SerializeM <$> (metaPackers m >>= (flip MCS.makeSerialAST) t) <*> pure e
-  -- (Function _ _) -> error "Cannot pack a function"
-  _ -> return e
+packExprM m e = do
+  packers <- MM.gets statePackers
+  case typeOfExprM e of
+    (Native t) -> SerializeM <$> MCS.makeSerialAST packers t <*> pure e
+    -- (Function _ _) -> error "Cannot pack a function"
+    _ -> return e
 
 type2jsontype :: TypeP -> MorlocMonad JsonType
 type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
