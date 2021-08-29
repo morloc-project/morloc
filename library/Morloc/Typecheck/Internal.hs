@@ -10,6 +10,8 @@ Stability   : experimental
 module Morloc.Typecheck.Internal
   ( resolve
   , substituteT
+  , subtype
+  , instantiate
   -- * accessing state
   , lookupSig
   ) where
@@ -17,6 +19,23 @@ module Morloc.Typecheck.Internal
 import Morloc.Typecheck.Namespace
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
+
+
+subtype
+  :: UnresolvedType
+  -> UnresolvedType
+  -> Gamma
+  -> Either TypeError Gamma
+subtype = undefined
+
+
+instantiate
+  :: UnresolvedType
+  -> UnresolvedType
+  -> Gamma
+  -> Either TypeError Gamma
+instantiate = undefined
+
 
 -- This functions removes qualified and existential types.
 --  * all qualified terms are replaced with UnkT
@@ -33,6 +52,7 @@ resolve (NamU r v ps rs) =
 resolve (ExistU v _ []) = resolve (ForallU v (VarU v)) -- whatever
 resolve (ExistU _ _ (t:_)) = resolve t
 resolve (ForallU v t) = substituteT v (UnkT v) (resolve t)
+
 
 -- | substitute all appearances of a given variable with a given new type
 substituteT :: TVar -> Type -> Type -> Type

@@ -33,8 +33,6 @@ errmsg (UnknownLanguage lang) =
   "'" <> lang <> "' is not recognized as a supported language"
 errmsg (SyntaxError err) = "SyntaxError: " <> MT.pack (errorBundlePretty err)
 errmsg (SerializationError t) = "SerializationError: " <> t
-errmsg (TypeConflict t1 t2) = "TypeConflict: cannot cast " <> t1 <> " as " <> t2
-errmsg (TypeError msg) = "TypeError: " <> msg
 errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError cmd loc msg) =
   "System call failed at (" <>
@@ -56,7 +54,6 @@ errmsg (CallTheMonkeys msg) =
 errmsg (GeneratorError msg) = "GeneratorError: " <> msg
 errmsg MissingGeneralType = "MissingGeneralType"
 errmsg AmbiguousGeneralType = "AmbiguousGeneralType"
-errmsg (SubtypeError t1 t2) = "SubtypeError: (" <> MT.show' t1 <> ") <: (" <> MT.show' t2 <> ")"
 errmsg ExistentialError = "ExistentialError"
 errmsg UnsolvedExistentialTerm = "UnsolvedExistentialTerm"
 errmsg BadExistentialCast = "BadExistentialCast"
@@ -65,7 +62,6 @@ errmsg NonFunctionDerive = "NonFunctionDerive"
 errmsg (UnboundVariable (EV v)) = "UnboundVariable: " <> v
 errmsg OccursCheckFail = "OccursCheckFail"
 errmsg EmptyCut = "EmptyCut"
-errmsg TypeMismatch = "TypeMismatch"
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg BadRecordAccess = "BadRecordAccess" 
 errmsg NoAnnotationFound = "NoAnnotationFound"

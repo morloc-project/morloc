@@ -6,13 +6,7 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Infer
-  (
-  -- * The main type checker
-    typecheck
-  -- * Internal functions used in testing
-  , subtype
-  ) where
+module Morloc.Frontend.Infer (typecheck) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
@@ -33,11 +27,6 @@ import qualified Control.Monad.State as CMS
 -- true things to remember:
 --   * indexing is a good idea, I need it at very least to link source code lines to
 --     error messages
-
-data TypeError
-  = SubtypeError UnresolvedType UnresolvedType
-  | TypeMismatch UnresolvedType UnresolvedType
-  | OtherTypeError MT.Text
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and and everything else are abstracted away,
@@ -71,20 +60,6 @@ typecheckGeneralPure
   -> SAnno Int Many Int
   -> Either (Indexed TypeError) (SAnno (Indexed Type) Many Int)
 typecheckGeneralPure = undefined
-
-subtype
-  :: UnresolvedType
-  -> UnresolvedType
-  -> Gamma
-  -> Either TypeError Gamma
-subtype = undefined
-
-instantiate
-  :: UnresolvedType
-  -> UnresolvedType
-  -> Gamma
-  -> Either TypeError Gamma
-instantiate = undefined
 
 infer
   :: Gamma

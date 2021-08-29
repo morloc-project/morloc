@@ -22,20 +22,86 @@ import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
+-- data SExpr g f c
+--   = UniS
+--   | VarS EVar
+--   | AccS (SAnno g f c) Text
+--   | ListS [SAnno g f c]
+--   | TupleS [SAnno g f c]
+--   | LamS [EVar] (SAnno g f c)
+--   | AppS (SAnno g f c) [SAnno g f c]
+--   | NumS Scientific
+--   | LogS Bool
+--   | StrS Text
+--   | RecS [(Text, SAnno g f c)]
+--   | FixS -- TODO: Recursion is not yet supported
+--   | CallS Source
+
+-- -- | Stores the language, general name and concrete name for a type expression
+-- data PVar
+--   = PV
+--     Lang
+--     (Maybe Text)
+--     Text
+--   deriving (Show, Eq, Ord)
+
+-- -- | A solved type coupling a language specific form to an optional general form
+-- data TypeP
+--   = UnkP PVar
+--   | VarP PVar
+--   | FunP TypeP TypeP
+--   | ArrP PVar [TypeP]
+--   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
+--   deriving (Show, Ord, Eq)
+
 typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-typecheck = undefined
+typecheck e = do
+  (_, _, e') <- synth [] e
+  weaveAndResolve e'
 
+
+weaveAndResolve
+  :: SAnno (Indexed Type) One (Indexed UnresolvedType)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP))
+weaveAndResolve = undefined
+
+
+synth
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> MorlocMonad
+        ( Gamma
+        , UnresolvedType
+        , SAnno (Indexed Type) One (Indexed UnresolvedType)
+        )
 synth = undefined
 
+
+check
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> UnresolvedType
+  -> MorlocMonad
+        ( Gamma
+        , UnresolvedType
+        , SAnno (Indexed Type) One (Indexed UnresolvedType)
+        )
 check = undefined
 
+
+synthApply
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> UnresolvedType
+  -> MorlocMonad
+       ( Gamma
+       , UnresolvedType
+       , SAnno (Indexed Type) One (Indexed UnresolvedType)
+       )
 synthApply = undefined
 
-instantiate = undefined
-
-subtype = undefined
 
 lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
 lookupSourceTypes i src = do

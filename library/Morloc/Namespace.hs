@@ -319,10 +319,6 @@ data MorlocError
   | UnknownError
   -- | Raised when an unsupported language is encountered
   | UnknownLanguage Text
-  -- | Raised when parent and child types conflict
-  | TypeConflict Text Text
-  -- | Raised for general type errors
-  | TypeError Text
   -- | Raised when a module cannot be loaded 
   | CannotLoadModule Text
   -- | System call failed
@@ -347,7 +343,6 @@ data MorlocError
   --------------- T Y P E   E R R O R S --------------------------------------
   | MissingGeneralType
   | AmbiguousGeneralType
-  | SubtypeError Type Type
   | ExistentialError
   | UnsolvedExistentialTerm
   | BadExistentialCast
@@ -356,12 +351,11 @@ data MorlocError
   | UnboundVariable EVar
   | OccursCheckFail
   | EmptyCut
-  | TypeMismatch
   | ToplevelRedefinition
   | BadRecordAccess
   | NoAnnotationFound -- I don't know what this is for
-  | OtherError Text -- TODO: remove this option
   | IncompatibleGeneralType UnresolvedType UnresolvedType
+  | OtherError Text -- TODO: remove this option
   -- container errors
   | EmptyTuple
   | TupleSingleton

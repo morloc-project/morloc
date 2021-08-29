@@ -13,10 +13,16 @@ module Morloc.Typecheck.Namespace
   , Gamma
   , GammaIndex(..)
   , EType(..)
+  , TypeError(..)
   ) where
 
 import Morloc.Namespace hiding (name)
+import qualified Morloc.Data.Text as MT
 
+data TypeError
+  = SubtypeError UnresolvedType UnresolvedType
+  | TypeMismatch UnresolvedType UnresolvedType
+  | OtherTypeError MT.Text
 
 -- | A context, see Dunfield Figure 6
 data GammaIndex
