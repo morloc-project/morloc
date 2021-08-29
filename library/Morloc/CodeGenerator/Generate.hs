@@ -168,7 +168,6 @@ realize s0 = do
     :: [Lang]
     -> [SAnno (Indexed Type) Many Int]
     -> MorlocMonad ([SAnno (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
-  realizeMany = undefined
   -- realizeMany langs xs = do
   --   xs' <- mapM scoreAnno xs
   --   return (xs', scoreMany xs')
@@ -182,18 +181,17 @@ realize s0 = do
   collapse
     :: SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
     -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
-  collapse = undefined
-  -- collapse (SAnno (Many xs) t) = do
-  --   let (x, Idx i lang) = bestSExpr (head xs) (tail xs)
-  --   x' <- collapseExpr lang x
-  --   return (SAnno (One x') t)
-  --   where
-  --     bestSExpr :: (a, [(Lang, Int)]) -> [(a, [(Lang, Int)])] -> (a, Maybe Lang)
-  --     bestSExpr (a, []) [] = (a, Nothing)
-  --     bestSExpr (a, xs) [] = (a, Nothing)
-  --     bestSExpr (x1, y1) ((x2, y2):rs)
-  --       | y2 > y1 = bestSExpr (x2, y2) rs
-  --       | otherwise = bestSExpr (x1, y1) rs
+  collapse (SAnno (Many xs) t) = do
+    let (x, Idx i lang) = bestSExpr (head xs) (tail xs)
+    x' <- collapseExpr lang x
+    return (SAnno (One x') t)
+    where
+      bestSExpr :: (a, Indexed [(Lang, Int)]) -> [(a, Indexed [(Lang, Int)])] -> (a, Indexed (Maybe Lang))
+      bestSExpr (x, Idx i ys) [] = (x, Idx i (fmap fst (maxScore ys)))
+      bestSExpr  (e1, Idx i1 (maxScore -> Just (x1, y1)))
+                ((e2, Idx i2 (maxScore -> Just (x2, y2))) : rs)
+        | y1 > y2   = bestSExpr (e1, Idx i1 [(x1, y1)]) rs
+        | otherwise = bestSExpr (e2, Idx i2 [(x2, y2)]) rs
 
   collapseSAnno
     :: Maybe Lang
@@ -256,16 +254,16 @@ realize s0 = do
   -- collapseExpr lang (e, Idx i _) = return (e, Idx i lang)
 
   chooseLanguage :: Lang -> [(Lang, Int)] -> MorlocMonad Lang
-  chooseLanguage = undefined
-  -- chooseLanguage l1 ss =
-  --   case maxScore [(l2, s2 + Lang.pairwiseCost l1 l2) | (l2, s2) <- ss] of
-  --     Nothing -> MM.throwError . CallTheMonkeys $ "This shouldn't happen"
-  --     (Just (l3, s3)) -> return l3
+  chooseLanguage l1 ss =
+    case maxScore [(l2, s2 + Lang.pairwiseCost l1 l2) | (l2, s2) <- ss] of
+      Nothing -> MM.throwError . CallTheMonkeys $ "This shouldn't happen"
+      (Just (l3, _)) -> return l3
 
-  maxScore :: [(a, Int)] -> Maybe a
+
+  maxScore :: [(a, Int)] -> Maybe (a, Int)
   maxScore [] = Nothing
   maxScore (x0:rs0) = f x0 rs0 where
-    f (x, _) [] = Just x
+    f (x, v) [] = Just (x, v)
     f (x1, i1) ((x2, i2):rs)
       | i2 > i1 = f (x2, i2) rs
       | otherwise = f (x1, i1) rs

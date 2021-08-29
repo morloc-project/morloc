@@ -51,25 +51,24 @@ mapLang f =
   ]
 
 -- | very rough function overhead costs that can be used when no benchmark info is available
--- `Nothing` indicates that the language pair are not interoperable
-pairwiseCost :: Lang -> Lang -> Maybe Int
+pairwiseCost :: Lang -> Lang -> Int
 -- functional overhead in each language
-pairwiseCost CLang       CLang       = Just 1
-pairwiseCost CppLang     CppLang     = Just 1
-pairwiseCost RustLang    RustLang    = Just 1
-pairwiseCost PerlLang    PerlLang    = Just 10
-pairwiseCost Python3Lang Python3Lang = Just 10
-pairwiseCost RLang       RLang       = Just 100
+pairwiseCost CLang       CLang       = 1
+pairwiseCost CppLang     CppLang     = 1
+pairwiseCost RustLang    RustLang    = 1
+pairwiseCost PerlLang    PerlLang    = 10
+pairwiseCost Python3Lang Python3Lang = 10
+pairwiseCost RLang       RLang       = 100
 -- pairs of languages for which foreign calls are optimized
-pairwiseCost CppLang CLang = Just 1
+pairwiseCost CppLang CLang = 1
 -- cost of naive foreign function calls
-pairwiseCost _ CLang       = Just 500 -- the cost of a system call
-pairwiseCost _ CppLang     = Just 500
-pairwiseCost _ RustLang    = Just 500
-pairwiseCost _ Python3Lang = Just 50000 -- the cost of opening the python interpreter and loading modules
-pairwiseCost _ PerlLang    = Just 50000
+pairwiseCost _ CLang       = 500 -- the cost of a system call
+pairwiseCost _ CppLang     = 500
+pairwiseCost _ RustLang    = 500
+pairwiseCost _ Python3Lang = 50000 -- the cost of opening the python interpreter and loading modules
+pairwiseCost _ PerlLang    = 50000
 -- this could be optimized by running R server
-pairwiseCost _ RLang       = Just 5000000 -- an arm and a leg
+pairwiseCost _ RLang       = 5000000 -- an arm and a leg
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang
