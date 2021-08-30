@@ -94,6 +94,7 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
   return $ SAnno (One (x', Idx i pt)) j
 
 
+
 synth
   :: Gamma
   -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
@@ -139,7 +140,6 @@ synth g (SAnno (One (LogS x, (Idx i (lang, _)))) gt) = do
       (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
   return (g' +> t, t, SAnno (One (LogS x, Idx i t)) gt)
 
--- TODO: fill FixS or make it into something useful
 synth _ (SAnno (One (FixS, (Idx i (lang, _)))) gt) = undefined
 synth g (SAnno (One (VarS v, Idx i (lang, _))) gt) = undefined
 synth g (SAnno (One (AccS x k, Idx i (lang, _))) gt) = undefined
@@ -162,7 +162,22 @@ check
         , UnresolvedType
         , SAnno (Indexed Type) One (Indexed UnresolvedType)
         )
-check = undefined
+--  g1,x:A |- e <= B -| g2,x:A,g3
+-- ----------------------------------------- -->I
+--  g1 |- \x.e <= A -> B -| g2
+check g1 (SAnno (One (LamS vs x, _)) _) t1@(FunU a b) = undefined
+
+--  g1,x |- e <= A -| g2,x,g3
+-- ----------------------------------------- Forall.I
+--  g1 |- e <= Forall x.A -| g2
+check g1 e1 t2@(ForallU x a) = undefined
+
+--  g1 |- e => A -| g2
+--  g2 |- [g2]A <: [g2]B -| g3
+-- ----------------------------------------- Sub
+--  g1 |- e <= B -| g3
+check g1 e1 b = undefined
+
 
 
 synthApply
@@ -175,7 +190,22 @@ synthApply
        , UnresolvedType
        , SAnno (Indexed Type) One (Indexed UnresolvedType)
        )
-synthApply = undefined
+--  g1 |- e <= A -| g2
+-- ----------------------------------------- -->App
+--  g1 |- A->C o e =>> C -| g2
+synthApply g e (FunU a b) = undefined
+
+--  g1,Ea |- [Ea/a]A o e =>> C -| g2
+-- ----------------------------------------- Forall App
+--  g1 |- Forall x.A o e =>> C -| g2
+synthApply g e (ForallU x s) = undefined
+
+--  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
+-- ----------------------------------------- EaApp
+--  g1[Ea] |- Ea o e =>> Ea2 -| g2
+synthApply g e (ExistU v@(TV lang _) [] _) = undefined
+
+synthApply _ e t = undefined
 
 
 lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
