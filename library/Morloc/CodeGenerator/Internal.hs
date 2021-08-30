@@ -10,6 +10,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Internal
 (
     weaveTypes
+  , weaveResolvedTypes
   , weaveTypesGCP
   , weaveTypesGCM
   , typeP2typeM
@@ -54,6 +55,28 @@ weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
       $ zip
         (map (PV lang Nothing) (map fst rs))
         (map (f lang Nothing) (map snd rs))
+
+
+weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
+weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
+  (_, Nothing) -> MM.throwError . CallTheMonkeys
+    $ "Expected a language-specific type as the second argument"
+  (Just _, _) -> MM.throwError . CallTheMonkeys
+    $ "Expected a general type as the first argument"
+  (_, Just lang) -> return $ f lang g0 t0
+  where
+    f :: Lang -> Type -> Type -> TypeP
+    f lang (UnkT (TV _ v1)) (UnkT (TV _ v2)) = UnkP (PV lang (Just v1) v2)
+    f lang (VarT (TV _ v1)) (VarT (TV _ v2)) = VarP (PV lang (Just v1) v2)
+    f lang (FunT t11 t12) (FunT t21 t22)
+      = FunP (f lang t11 t21) (f lang t12 t22)
+    f lang (ArrT (TV _ v1) ts1) (ArrT (TV _ v2) ts2)
+      = ArrP (PV lang (Just v1) v2) (zipWith (f lang) ts1 ts2)
+    f lang (NamT _ (TV _ v1) ts1 rs1) (NamT r2 (TV _ v2) ts2 rs2)
+      = NamP r2 (PV lang (Just v1) v2) (zipWith (f lang) ts1 ts2)
+      $ zip
+        (zipWith (PV lang) (map (Just . fst) rs1) (map fst rs2))
+        (zipWith (f lang) (map snd rs1) (map snd rs2))
 
 
 weaveTypesGCP :: (Indexed Type) -> Type -> MorlocMonad TypeP

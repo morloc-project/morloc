@@ -32,15 +32,68 @@ typecheck e = do
     (Left err) -> MM.throwError . ConcreteTypeError $ err
     (Right (_, _, e'')) -> weaveAndResolve e''
 
+
+-- | Load the known concrete types into the tree. This is all the information
+-- necessary for concrete type checking.
 retrieveTypes
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno (Indexed Type) One (Indexed [EType]))
-retrieveTypes = undefined
+retrieveTypes (SAnno (One (UniS, Idx i _)) g) = return $ SAnno (One (UniS, Idx i [])) g
+retrieveTypes (SAnno (One (VarS v, Idx i _)) g) = return $ SAnno (One (VarS v, Idx i [])) g
+retrieveTypes (SAnno (One (AccS x k, Idx i _)) g) = do 
+  x' <- retrieveTypes x
+  return $ SAnno (One (AccS x' k, Idx i [])) g
+retrieveTypes (SAnno (One (ListS xs, Idx i _)) g) = do
+  xs' <- mapM retrieveTypes xs
+  return $ SAnno (One (ListS xs', Idx i [])) g
+retrieveTypes (SAnno (One (TupleS xs, Idx i _)) g) = do
+  xs' <- mapM retrieveTypes xs
+  return $ SAnno (One (TupleS xs', Idx i [])) g
+retrieveTypes (SAnno (One (LamS vs f, Idx i _)) g) = do
+  f' <- retrieveTypes f
+  return $ SAnno (One (LamS vs f', Idx i [])) g
+retrieveTypes (SAnno (One (AppS f xs, Idx i _)) g) = do
+  f' <- retrieveTypes f
+  xs' <- mapM retrieveTypes xs
+  return $ SAnno (One (AppS f' xs', Idx i [])) g
+retrieveTypes (SAnno (One (NumS x, Idx i _)) g) = return $ SAnno (One (NumS x, Idx i [])) g
+retrieveTypes (SAnno (One (LogS x, Idx i _)) g) = return $ SAnno (One (LogS x, Idx i [])) g
+retrieveTypes (SAnno (One (StrS x, Idx i _)) g) = return $ SAnno (One (StrS x, Idx i [])) g
+retrieveTypes (SAnno (One (RecS rs, Idx i _)) g) = do
+  xs' <- mapM (retrieveTypes . snd) rs
+  return $ SAnno (One (RecS (zip (map fst rs) xs'), Idx i [])) g
+retrieveTypes (SAnno (One (FixS, Idx i _)) g) = return $ SAnno (One (FixS, Idx i [])) g
+retrieveTypes (SAnno (One (CallS src, Idx i lang)) g@(Idx j _)) = do
+  mayts <- lookupSig j
+  case fmap termConcrete mayts of
+    (Just ts) -> case [es | (_, src', es, _) <- ts, src == src] of
+      [es] -> return $ SAnno (One (CallS src, Idx i es)) g
+      _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
+    Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
+
 
 weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed UnresolvedType)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-weaveAndResolve = undefined
+weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
+  pt <- weaveResolvedTypes gt (resolve ct)
+  x' <- case x of
+    UniS -> return UniS
+    (VarS v) -> return $ VarS v
+    (AccS x k) -> AccS <$> weaveAndResolve x <*> pure k
+    (ListS xs) -> ListS <$> mapM weaveAndResolve xs
+    (TupleS xs) -> TupleS <$> mapM weaveAndResolve xs
+    (LamS vs x) -> LamS vs <$> weaveAndResolve x
+    (AppS f xs) -> AppS <$> weaveAndResolve f <*> mapM weaveAndResolve xs
+    (NumS x) -> return $ NumS x
+    (LogS x) -> return $ LogS x
+    (StrS x) -> return $ StrS x
+    (RecS rs) -> do
+      xs <- mapM (weaveAndResolve . snd) rs
+      return $ RecS (zip (map fst rs) xs)
+    FixS -> return FixS
+    (CallS src) -> return $ CallS src
+  return $ SAnno (One (x', Idx i pt)) j
 
 
 synth
