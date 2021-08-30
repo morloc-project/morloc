@@ -521,7 +521,6 @@ data SExpr g f c
   | LogS Bool
   | StrS Text
   | RecS [(Text, SAnno g f c)]
-  | FixS -- TODO: Recursion is not yet supported
   | CallS Source
 
 data Indexed a = Idx Int a

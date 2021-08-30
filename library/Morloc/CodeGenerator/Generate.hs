@@ -168,7 +168,6 @@ realize s0 = do
   scoreExpr langs (NumS x, i) = return (NumS x, zipLang i langs)
   scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
   scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
-  scoreExpr langs (FixS, i) = return (FixS, zipLang i langs)
 
   zipLang :: Int -> [Lang] -> Indexed [(Lang, Int)]
   zipLang i langs = Idx i (zip langs (repeat 0))
@@ -248,7 +247,6 @@ realize s0 = do
   collapseExpr lang (NumS x, Idx i _) = return (NumS x, Idx i lang)
   collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
   collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
-  collapseExpr lang (FixS,   Idx i _) = return (FixS,   Idx i lang)
 
   chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss =
@@ -404,7 +402,6 @@ parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, [])))
 parameterize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
 parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
-parameterize' _ (SAnno (One (FixS, c)) m) = return $ SAnno (One (FixS, (c, []))) m
 -- VarS EVar
 parameterize' args (SAnno (One (VarS v, c)) m) = do
   let args' = [(v', r) | (v', r) <- args, v' == v]
@@ -857,9 +854,6 @@ mapCM f (SAnno (One (LogS x, c)) g) = do
 mapCM f (SAnno (One (StrS x, c)) g) = do
   c' <- f c
   return $ SAnno (One (StrS x, c')) g
-mapCM f (SAnno (One (FixS, c)) g) = do
-  c' <- f c
-  return $ SAnno (One (FixS, c')) g
 
 sannoSnd :: SAnno g One (a, b) -> b
 sannoSnd (SAnno (One (_, (_, x))) _) = x

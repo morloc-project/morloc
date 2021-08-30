@@ -64,7 +64,6 @@ retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
     (RecS rs) -> do
       xs' <- mapM (retrieveTypes . snd) rs
       return $ RecS (zip (map fst rs) xs')
-    (FixS) -> return $ FixS
     (CallS src) -> return $ CallS src
 
   return $ SAnno (One (x', Idx i (lang, ts))) g
@@ -89,7 +88,6 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
     (RecS rs) -> do
       xs <- mapM (weaveAndResolve . snd) rs
       return $ RecS (zip (map fst rs) xs)
-    FixS -> return FixS
     (CallS src) -> return $ CallS src
   return $ SAnno (One (x', Idx i pt)) j
 
@@ -140,7 +138,6 @@ synth g (SAnno (One (LogS x, (Idx i (lang, _)))) gt) = do
       (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
   return (g' +> t, t, SAnno (One (LogS x, Idx i t)) gt)
 
-synth _ (SAnno (One (FixS, (Idx i (lang, _)))) gt) = undefined
 synth g (SAnno (One (VarS v, Idx i (lang, _))) gt) = undefined
 synth g (SAnno (One (AccS x k, Idx i (lang, _))) gt) = undefined
 synth g (SAnno (One (ListS xs, Idx i (lang, _))) gt) = undefined
