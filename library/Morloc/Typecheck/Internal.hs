@@ -16,6 +16,8 @@ module Morloc.Typecheck.Internal
   , instantiate
   -- * accessing state
   , lookupSig
+  , newvar
+  , newvarRich
   -- * Typeclasses
   , Applicable(..)
   , Indexable(..)
@@ -415,8 +417,8 @@ newvar = newvarRich [] []
 
 
 newvarRich
-  :: [UnresolvedType]
-  -> [UnresolvedType] -- ^ default types
+  :: [UnresolvedType] -- ^ type parameters
+  -> [UnresolvedType] -- ^ type defaults
   -> Maybe Lang
   -> Gamma
   -> (Gamma, UnresolvedType)

@@ -20,6 +20,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 
 typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
@@ -37,39 +38,36 @@ typecheck e = do
 -- necessary for concrete type checking.
 retrieveTypes
   :: SAnno (Indexed Type) One (Indexed Lang)
-  -> MorlocMonad (SAnno (Indexed Type) One (Indexed [EType]))
-retrieveTypes (SAnno (One (UniS, Idx i _)) g) = return $ SAnno (One (UniS, Idx i [])) g
-retrieveTypes (SAnno (One (VarS v, Idx i _)) g) = return $ SAnno (One (VarS v, Idx i [])) g
-retrieveTypes (SAnno (One (AccS x k, Idx i _)) g) = do 
-  x' <- retrieveTypes x
-  return $ SAnno (One (AccS x' k, Idx i [])) g
-retrieveTypes (SAnno (One (ListS xs, Idx i _)) g) = do
-  xs' <- mapM retrieveTypes xs
-  return $ SAnno (One (ListS xs', Idx i [])) g
-retrieveTypes (SAnno (One (TupleS xs, Idx i _)) g) = do
-  xs' <- mapM retrieveTypes xs
-  return $ SAnno (One (TupleS xs', Idx i [])) g
-retrieveTypes (SAnno (One (LamS vs f, Idx i _)) g) = do
-  f' <- retrieveTypes f
-  return $ SAnno (One (LamS vs f', Idx i [])) g
-retrieveTypes (SAnno (One (AppS f xs, Idx i _)) g) = do
-  f' <- retrieveTypes f
-  xs' <- mapM retrieveTypes xs
-  return $ SAnno (One (AppS f' xs', Idx i [])) g
-retrieveTypes (SAnno (One (NumS x, Idx i _)) g) = return $ SAnno (One (NumS x, Idx i [])) g
-retrieveTypes (SAnno (One (LogS x, Idx i _)) g) = return $ SAnno (One (LogS x, Idx i [])) g
-retrieveTypes (SAnno (One (StrS x, Idx i _)) g) = return $ SAnno (One (StrS x, Idx i [])) g
-retrieveTypes (SAnno (One (RecS rs, Idx i _)) g) = do
-  xs' <- mapM (retrieveTypes . snd) rs
-  return $ SAnno (One (RecS (zip (map fst rs) xs'), Idx i [])) g
-retrieveTypes (SAnno (One (FixS, Idx i _)) g) = return $ SAnno (One (FixS, Idx i [])) g
-retrieveTypes (SAnno (One (CallS src, Idx i lang)) g@(Idx j _)) = do
-  mayts <- lookupSig j
-  case fmap termConcrete mayts of
-    (Just ts) -> case [es | (_, src', es, _) <- ts, src == src] of
-      [es] -> return $ SAnno (One (CallS src, Idx i es)) g
-      _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
-    Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
+  -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Lang, [EType])))
+retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
+  ts <- case x of
+    (CallS src) -> do
+      mayts <- lookupSig j
+      case fmap termConcrete mayts of
+        (Just ts) -> case [es | (_, src', es, _) <- ts, src == src] of
+          [es] -> return es
+          _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
+        Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
+    _ -> return []
+
+  x' <- case x of
+    UniS -> return UniS
+    (VarS v) -> return $ VarS v
+    (AccS x k) -> AccS <$> retrieveTypes x <*> pure k
+    (ListS xs) -> ListS <$> mapM retrieveTypes xs
+    (TupleS xs) -> TupleS <$> mapM retrieveTypes xs
+    (LamS vs f) -> LamS vs <$> retrieveTypes f
+    (AppS f xs) -> AppS <$> retrieveTypes f <*> mapM retrieveTypes xs
+    (NumS x) -> return $ NumS x
+    (LogS x) -> return $ LogS x
+    (StrS x) -> return $ StrS x
+    (RecS rs) -> do
+      xs' <- mapM (retrieveTypes . snd) rs
+      return $ RecS (zip (map fst rs) xs')
+    (FixS) -> return $ FixS
+    (CallS src) -> return $ CallS src
+
+  return $ SAnno (One (x', Idx i (lang, ts))) g
 
 
 weaveAndResolve
@@ -98,19 +96,65 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
 
 synth
   :: Gamma
-  -> SAnno (Indexed Type) One (Indexed [EType])
+  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
   -> Either
        TypeError
        ( Gamma
        , UnresolvedType
        , SAnno (Indexed Type) One (Indexed UnresolvedType)
        )
-synth = undefined
+--
+-- ----------------------------------------- <primitive>
+--  g |- <primitive expr> => <primitive type> -| g
+--
+--  Primitive types may have many possible defaults in a given language. For
+--  example, in Rust a primitive Num may be a signed or unsigned, be a float or
+--  an int, and have a size ranging from 8 to 128 bits. If no concrete types
+--  are available, then the first default value will be used when the
+--  UnresolvedType is resolved. 
+
+-- Uni=>
+synth g (SAnno (One (UniS, (Idx i (lang, _)))) gt) = do
+  let ts = MLD.defaultNull (Just lang)
+      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+  return (g' +> t, t, SAnno (One (UniS, Idx i t)) gt)
+synth _ _ = undefined
+
+-- Num=>
+synth g (SAnno (One (NumS x, (Idx i (lang, _)))) gt) = do
+  let ts = MLD.defaultNumber (Just lang)
+      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+  return (g' +> t, t, SAnno (One (NumS x, Idx i t)) gt)
+synth _ _ = undefined
+
+-- Str=>
+synth g (SAnno (One (StrS x, (Idx i (lang, _)))) gt) = do
+  let ts = MLD.defaultString (Just lang)
+      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+  return (g' +> t, t, SAnno (One (StrS x, Idx i t)) gt)
+
+-- Log=>
+synth g (SAnno (One (LogS x, (Idx i (lang, _)))) gt) = do
+  let ts = MLD.defaultBool (Just lang)
+      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+  return (g' +> t, t, SAnno (One (LogS x, Idx i t)) gt)
+
+-- TODO: fill FixS or make it into something useful
+synth _ (SAnno (One (FixS, (Idx i (lang, _)))) gt) = undefined
+synth g (SAnno (One (VarS v, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (AccS x k, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (ListS xs, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (TupleS xs, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (LamS vs f, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (AppS f xs, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (RecS rs, Idx i (lang, _))) gt) = undefined
+synth g (SAnno (One (CallS src, Idx i (lang, es))) gt) = undefined
+
 
 
 check
   :: Gamma
-  -> SAnno (Indexed Type) One (Indexed [EType])
+  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
   -> UnresolvedType
   -> Either
         TypeError
@@ -123,7 +167,7 @@ check = undefined
 
 synthApply
   :: Gamma
-  -> SAnno (Indexed Type) One [EType]
+  -> SAnno (Indexed Type) One (Lang, [EType])
   -> UnresolvedType
   -> Either
        TypeError

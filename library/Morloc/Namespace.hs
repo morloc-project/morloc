@@ -315,8 +315,8 @@ data GammaIndex
   = VarG TVar
   -- ^ (G,a)
   | ExistG TVar
-    [UnresolvedType] -- FIXME: document
-    [UnresolvedType] -- default types
+    [UnresolvedType] -- type parameters
+    [UnresolvedType] -- type defaults
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar UnresolvedType
   -- ^ (G,a^=t) Store a solved existential variable
