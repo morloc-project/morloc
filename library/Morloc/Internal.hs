@@ -49,6 +49,9 @@ module Morloc.Internal
   , minimumOnMay
   , maximumOnDef
   , minimumOnDef
+  -- ** other useful functions
+  , statefulMap
+  , statefulMapM
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -136,6 +139,12 @@ duplicates xs = unique $ filter isDuplicated xs where
   -- isDuplicated :: Ord a => a -> Bool
   isDuplicated k = fromJust (Map.lookup k countMap) > 1
 
+statefulMap :: (s -> a -> (s, b)) -> s -> [a] -> (s, [b])
+statefulMap _ s [] = (s, [])
+statefulMap f s0 (x:xs) =
+  let (s1, y) = f s0 x
+  in  let (sn, ys) = statefulMap f s1 xs
+      in (sn, y:ys)
 
 statefulMapM :: Monad m => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
 statefulMapM _ s [] = return (s, [])

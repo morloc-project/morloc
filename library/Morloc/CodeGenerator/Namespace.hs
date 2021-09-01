@@ -97,9 +97,8 @@ data TypePacker = TypePacker
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)
 
--- | A simplified subset of the Type record
--- functions, existential, and universal types are removed
--- language-specific info is removed
+-- | A simplified subset of the Type record where functions, existentials,
+-- universals and language-specific info are removed
 data JsonType
   = VarJ Text
   -- ^ {"int"}

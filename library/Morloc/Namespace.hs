@@ -314,6 +314,8 @@ type PackMap = Map (TVar, Int) [UnresolvedPacker]
 data GammaIndex
   = VarG TVar
   -- ^ (G,a)
+  | AnnG EVar UnresolvedType
+  -- ^ store a bound variable
   | ExistG TVar
     [UnresolvedType] -- type parameters
     [UnresolvedType] -- type defaults
@@ -344,6 +346,8 @@ data TypeError
   | OccursCheckFail UnresolvedType UnresolvedType Text
     -- ^ the msg should an identifier for the place where the occurs check failed
   | NotYetImplemented UnresolvedType UnresolvedType Text 
+  | UnboundVariable EVar
+  | KeyError Text UnresolvedType
 
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not

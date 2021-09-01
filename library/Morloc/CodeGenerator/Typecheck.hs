@@ -92,6 +92,8 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
   return $ SAnno (One (x', Idx i pt)) j
 
 
+-- Concrete typechecking must deal with primitive defaults, containter
+-- defaults, and function overloading.
 
 synth
   :: Gamma
@@ -138,14 +140,75 @@ synth g (SAnno (One (LogS x, (Idx i (lang, _)))) gt) = do
       (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
   return (g' +> t, t, SAnno (One (LogS x, Idx i t)) gt)
 
-synth g (SAnno (One (VarS v, Idx i (lang, _))) gt) = undefined
-synth g (SAnno (One (AccS x k, Idx i (lang, _))) gt) = undefined
-synth g (SAnno (One (ListS xs, Idx i (lang, _))) gt) = undefined
-synth g (SAnno (One (TupleS xs, Idx i (lang, _))) gt) = undefined
-synth g (SAnno (One (LamS vs f, Idx i (lang, _))) gt) = undefined
-synth g (SAnno (One (AppS f xs, Idx i (lang, _))) gt) = undefined
+-- In SAnno, a VarS can only be a bound variable, thus it should only ever be
+-- checked against since it's type will be known at a higher level.
+synth _ (SAnno (One (VarS v, _)) _) = Left $ UnboundVariable v
+
+synth g0 (SAnno (One (AccS x k, Idx i (lang, _))) gt) = undefined -- do
+  -- (g1, tx, x1) <- synth g0 x
+  -- tk <- accessRecord k tx
+  -- return (g1, tk, (SAnno (One (AccS tx k, Idx i tk)) gt))
+  -- where
+  --   accessRecord :: MT.Text -> UnresolvedType -> Either TypeError UnresolvedType
+  --   accessRecord k (NamU _ _ _ rs) = return $ lookup k rs
+  --   accessRecord k r = Left $ KeyError k r
+
+-- The elements in xs are all of the same general type, however they may be in
+-- different languages.
+synth g0 (SAnno (One (ListS xs, Idx i (lang, _))) gt) = undefined -- do
+  -- -- t is an existential type representing the upper type
+  -- let (g1, t) = newvar (Just lang) g0
+  -- -- xs' is a list of mixed language types
+  -- (gn, xs') <- chainCheck g1 t xs
+  -- containerType <- newvarRich [t] (MLD.defaultList lang t) lang
+  -- return (gn, containerType, SAnno (One (ListS xs', Idx i containerType) gt))
+
+synth g (SAnno (One (TupleS xs, Idx i (lang, _))) gt) = undefined -- do
+  -- (gn, xs') <- chain2 synth g xs
+  -- let ts = map fst xs'
+  -- containerType <- newvarRich [ts] (MLD.defaultTuple (Just lang) ts) lang
+  -- return (gn, containerType, SAnno (One (TupleS xs', Idx i containerType) gt))
+
 synth g (SAnno (One (RecS rs, Idx i (lang, _))) gt) = undefined
+  -- (gn, xs') <- chain2 synth g (map snd rs)
+  -- let ts = map fst xs'
+  --     t = newvarRich [NamU NamRecord (TV lang "__RECORD__") [] entries] dts lang
+
+-- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
+synth g0 (SAnno (One (LamS vs x, Idx i (lang, _))) gt) = undefined
+  -- let (g1, ts) = statefulMap (bindTerm lang) g0 vs
+  -- (g2, tx, x') <- synth g1 x lang
+  -- let t = foldr1 FunU (ts ++ [tx])
+  -- return (g2, t, SAnno (One (LamS vs x', Idx i t)) gt)
+
+synth g (SAnno (One (AppS f xs, Idx i (lang, _))) gt) = undefined
+
 synth g (SAnno (One (CallS src, Idx i (lang, es))) gt) = undefined
+  
+
+bindTerm :: Lang -> Gamma -> EVar -> (Gamma, UnresolvedType)
+bindTerm lang g0 v =
+  let (g1, t) = newvar (Just lang) g0
+      idx = AnnG v t
+  in (g1 +> idx, t)
+
+
+chainCheck
+  :: Gamma
+  -> [SAnno (Indexed Type) One (Indexed (Lang, [EType]))]
+  -> UnresolvedType
+  -> Either
+        TypeError
+        ( Gamma
+        , [( UnresolvedType
+           , SAnno (Indexed Type) One (Indexed UnresolvedType)
+          )]
+        )
+chainCheck g0 [] _ = Right (g0, [])
+chainCheck g0 (x0:rs) t0 = do
+  (g1, t1, x1) <- check g0 x0 t0
+  (gn, rs') <- chainCheck g1 rs t1
+  return (gn, (t1, x1):rs')
 
 
 
@@ -159,10 +222,11 @@ check
         , UnresolvedType
         , SAnno (Indexed Type) One (Indexed UnresolvedType)
         )
+
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-check g1 (SAnno (One (LamS vs x, _)) _) t1@(FunU a b) = undefined
+check g1 (SAnno (One (LamS vs x, Idx _ (lang, _))) _) t1@(FunU a b) = undefined
 
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
@@ -177,7 +241,7 @@ check g1 e1 b = undefined
 
 
 
-synthApply
+application
   :: Gamma
   -> SAnno (Indexed Type) One (Lang, [EType])
   -> UnresolvedType
@@ -190,19 +254,19 @@ synthApply
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-synthApply g e (FunU a b) = undefined
+application g e (FunU a b) = undefined
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-synthApply g e (ForallU x s) = undefined
+application g e (ForallU x s) = undefined
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-synthApply g e (ExistU v@(TV lang _) [] _) = undefined
+application g e (ExistU v@(TV lang _) [] _) = undefined
 
-synthApply _ e t = undefined
+application _ e t = undefined
 
 
 lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
@@ -213,6 +277,14 @@ lookupSourceTypes i src = do
     (Just ts) -> case [ es | (_, src', es, _) <- termConcrete ts, src' == src] of
       [es'] -> return es'
       _ -> MM.throwError . CallTheMonkeys $ "Expected exactly one list of types for a source"
+
+
+chain2 :: Monad m => (s -> a -> m (s, b, c)) -> s -> [a] -> m (s, [(b, c)])
+chain2 f s0 [] = return (s0, [])
+chain2 f s0 (x:xs) = do
+  (s1, x, y) <- f s0 x
+  (sn, xs') <- chain2 f s1 xs
+  return (sn, (x,y):xs')
 
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
