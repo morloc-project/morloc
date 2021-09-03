@@ -348,6 +348,8 @@ data TypeError
   | NotYetImplemented UnresolvedType UnresolvedType Text 
   | UnboundVariable EVar
   | KeyError Text UnresolvedType
+  | MissingConcreteSignature Source
+  deriving (Ord, Eq, Show)
 
 data MorlocError
   -- | Raised when assumptions about the input RDF are broken. This should not
