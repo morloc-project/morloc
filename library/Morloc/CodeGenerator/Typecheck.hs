@@ -371,6 +371,7 @@ synth g (SAnno (One (x, Idx i (l, cts@(_:_)))) gt) =
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
 synth g (SAnno (One (x, Idx i (l, []))) gt) = do
   (g', t, x') <- synthExpr l g x
+  checkAgreement (Idx i t) gt
   return (g', t, SAnno (One (x', Idx i t)) gt)
 
 
@@ -461,11 +462,11 @@ synthExpr lang g0 (RecS rs) = do
 -- Lam=>
 --
 -- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr lang g0 (LamS vs x) = do
-  let (g1, ts) = statefulMap (bindTerm lang) g0 vs
-  (g2, tx, x') <- synth g1 x lang
-  let t = foldr1 FunU (ts ++ [tx])
-  return (g2, t, SAnno (One (LamS vs x', Idx i t)) gt)
+synthExpr lang g0 (LamS vs x) = undefined -- do
+  -- let (g1, ts) = statefulMap (bindTerm lang) g0 vs
+  -- (g2, tx, x') <- synth g1 x lang
+  -- let t = foldr1 FunU (ts ++ [tx])
+  -- return (g2, t, LamS vs x')
 
 -- App=>
 --
@@ -516,6 +517,7 @@ check
         )
 check g (SAnno (One (x, Idx i (l, _))) gt) t = do
   (g', t', x') <- checkExpr l g x t
+  checkAgreement (Idx i t') gt
   return $ (g', t', SAnno (One (x', Idx i t')) gt)
 
 checkExpr
@@ -574,6 +576,12 @@ application g e (ForallU x s) = undefined
 application g e (ExistU v@(TV lang _) [] _) = undefined
 
 application _ e t = undefined
+
+
+
+checkAgreement :: Indexed UnresolvedType -> Indexed Type -> Either TypeError ()
+checkAgreement = undefined
+
 
 
 lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
