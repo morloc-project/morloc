@@ -69,6 +69,8 @@ module Morloc.Namespace
   , PackageMeta(..)
   , defaultPackageMeta
   -- * Types
+  , NamType(..)
+  , CatType(..)
   , Type(..)
   , UnresolvedType(..)
   , EType(..)
@@ -209,7 +211,7 @@ data TermTypes = TermTypes {
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
-data CatTag = List | Tuple | Record
+data CatTag = List | Tuple | Record | Entry | Application
 
 -- | Terms, see Dunfield Figure 1
 data Expr
@@ -241,11 +243,9 @@ data Expr
   | AccE ExprI Text
   -- ^ person@age - access a field in a record
   | CatE CatTag ExprI ExprI
-  -- ^ A general container type
+  -- ^ A general container type (where application is just a kind of container)
   | LamE EVar ExprI
   -- ^ (\x -> e)
-  | AppE ExprI ExprI
-  -- ^ (e e)
   | AnnE ExprI [UnresolvedType]
   -- ^ (e : A)
   | NumE Scientific
@@ -518,14 +518,11 @@ data SExpr g f c
   = UniS
   | VarS EVar
   | AccS (SAnno g f c) Text
-  | ListS [SAnno g f c]
-  | TupleS [SAnno g f c]
-  | LamS [EVar] (SAnno g f c)
-  | AppS (SAnno g f c) [SAnno g f c]
+  | CatS (SAnno g f c) (SAnno g f c)
+  | LamS EVar (SAnno g f c)
   | NumS Scientific
   | LogS Bool
   | StrS Text
-  | RecS [(Text, SAnno g f c)]
   | CallS Source
 
 data Indexed a = Idx Int a
@@ -560,6 +557,11 @@ data NamType
   | NamTable
   deriving(Show, Ord, Eq)
 
+data CatType
+  = CatTypeFun
+  | CatTypeArr
+  | CatTypeNamed NamType TVar [TVar]
+
 -- | A basic type
 data Type
   = UnkT TVar
@@ -569,12 +571,8 @@ data Type
   -- used within dynamic languages may need no type annotation.
   | VarT TVar
   -- ^ (a)
-  | FunT Type Type
-  -- ^ (A->B)  -- positional parameterized types
-  | ArrT TVar [Type]
-  -- ^ f [Type]  -- keyword parameterized types
-  | NamT NamType TVar [Type] [(Text, Type)] 
-  -- ^ Foo { bar :: A, baz :: B }
+  | CatT CatType Type Type
+  -- ^ type trees to build functions, parameterized types, and records
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -587,12 +585,8 @@ data UnresolvedType
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar UnresolvedType
   -- ^ (Forall a . A)
-  | FunU UnresolvedType UnresolvedType
-  -- ^ (A->B)
-  | ArrU TVar [UnresolvedType] -- positional parameterized types
-  -- ^ f [UnresolvedType]
-  | NamU NamType TVar [UnresolvedType] [(Text, UnresolvedType)] -- keyword parameterized types
-  -- ^ Foo { bar :: A, baz :: B }
+  | CatU CatType UnresolvedType UnresolvedType
+  -- ^ type trees
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets

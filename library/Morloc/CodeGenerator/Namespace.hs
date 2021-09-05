@@ -40,9 +40,7 @@ data PVar
 data TypeP
   = UnkP PVar
   | VarP PVar
-  | FunP TypeP TypeP
-  | ArrP PVar [TypeP]
-  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
+  | CatP CatType TypeP TypeP 
   deriving (Show, Ord, Eq)
 
 type JsonPath = [JsonAccessor]

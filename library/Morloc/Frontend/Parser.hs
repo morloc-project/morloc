@@ -324,21 +324,8 @@ pSrcE = do
     a <- option n (reserved "as" >> freename)
     return (Name n, EV a, t)
 
-pNamE :: Parser ExprI
-pNamE = RecE <$> braces (sepBy1 pNamEntryE (symbol ",")) >>= exprI
-  where
-
-  pNamEntryE :: Parser (MT.Text, ExprI)
-  pNamEntryE = do
-    n <- freename
-    _ <- symbol "="
-    e <- pExpr
-    return (n, e)
-
 pListE :: Parser ExprI
-pListE = do
-  e <- ListE <$> brackets (sepBy pExpr (symbol ","))
-  exprI e
+pListE = brackets (sepBy pExpr (symbol ",")) >>= container List
 
 pTuple :: Parser ExprI
 pTuple = do
@@ -347,7 +334,29 @@ pTuple = do
   _ <- symbol ","
   es <- sepBy1 pExpr (symbol ",")
   _ <- symbol ")"
-  exprI $ TupleE (e : es)
+  container Tuple (e:es)
+
+pNamE :: Parser ExprI
+pNamE = do
+  es <- braces (sepBy1 pNamEntryE (symbol ","))
+  container Record es
+
+pNamEntryE :: Parser ExprI
+pNamEntryE = do
+  n <- freename >>= exprI
+  _ <- symbol "="
+  e <- pExpr
+  exprI $ CatE Entry n e
+
+
+container :: CatTag -> [ExprI] -> Parser ExprI
+container t [] = exprI $ CatE t UniE UniE
+container t [x] = exprI $ CatE t x UniE
+container t xs = f' t xs where
+  f' _ [] = exprI UniE
+  f' _ [x] = x
+  f' t [x,y] = exprI $ CatE t x y
+  f' t (x:xs) = (CatE t x <$> f' t xs) >>= exprI
 
 pUni :: Parser ExprI
 pUni = symbol "Null" >> exprI UniE
