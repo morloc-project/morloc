@@ -44,7 +44,7 @@ findSources (ExprI _ (SrcE ss)) = [ss]
 findSources (ExprI _ (ModE _ es)) = conmap findSources es
 findSources _ = []
 
-findTypedefs :: ExprI -> Map.Map TVar ([TVar], UnresolvedType)
+findTypedefs :: ExprI -> Map.Map TVar ([TVar], TypeU)
 findTypedefs (ExprI _ (TypE v vs t)) = Map.singleton v (vs, t)
 findTypedefs (ExprI _ (ModE _ es)) = Map.unions (map findTypedefs es)
 findTypedefs _ = Map.empty
@@ -58,7 +58,7 @@ findSignatureTypeTerms = unique . f where
   f _ = []
 
 -- | find all the non-generic terms in an unresolved type
-findTypeTerms :: UnresolvedType -> [TVar]
+findTypeTerms :: TypeU -> [TVar]
 findTypeTerms (VarU v)
   | isGeneric v = [ ]
   | otherwise   = [v]

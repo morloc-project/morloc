@@ -211,21 +211,21 @@ combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
 --  * What if constraints are contradictory?
 mergeEType :: EType -> EType -> MorlocMonad EType
 mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
-  = EType <$> mergeUnresolvedTypes t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2)
+  = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2)
 
 
-mergeUnresolvedTypes :: UnresolvedType -> UnresolvedType -> MorlocMonad UnresolvedType
-mergeUnresolvedTypes t1@(VarU v1) t2@(VarU v2)
+mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
+mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeUnresolvedTypes t@(ExistU _ _ _) (ExistU _ _ _) = return t
-mergeUnresolvedTypes (ExistU _ _ _) t = return t
-mergeUnresolvedTypes t (ExistU _ _ _) = return t
-mergeUnresolvedTypes (ForallU v1 t1) (ForallU v2 t2) = undefined
-mergeUnresolvedTypes (FunU f1 x1) (FunU f2 x2) = undefined
-mergeUnresolvedTypes (ArrU v1 ps1) (ArrU v2 ps2) = undefined
-mergeUnresolvedTypes (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
-mergeUnresolvedTypes t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
+mergeTypeUs t@(ExistU _ _ _) (ExistU _ _ _) = return t
+mergeTypeUs (ExistU _ _ _) t = return t
+mergeTypeUs t (ExistU _ _ _) = return t
+mergeTypeUs (ForallU v1 t1) (ForallU v2 t2) = undefined
+mergeTypeUs (FunU f1 x1) (FunU f2 x2) = undefined
+mergeTypeUs (ArrU v1 ps1) (ArrU v2 ps2) = undefined
+mergeTypeUs (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
+mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
 -- with 1 or more possible tree topologies, each with one or more possible for

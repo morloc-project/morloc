@@ -24,9 +24,9 @@ prettyGammaIndex (VarG tv) = "VarG:" <+> pretty tv
 prettyGammaIndex (ExistG tv ts ds)
   = "ExistG:"
   <+> pretty tv
-  <+> list (map (parens . prettyGreenUnresolvedType) ts)
-  <+> list (map (parens . prettyGreenUnresolvedType) ds)
-prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenUnresolvedType t
+  <+> list (map (parens . prettyGreenTypeU) ts)
+  <+> list (map (parens . prettyGreenTypeU) ds)
+prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGreenTypeU t
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
-prettyGammaIndex (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenUnresolvedType t1 <+> prettyGreenUnresolvedType t2
+prettyGammaIndex (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenTypeU t1 <+> prettyGreenTypeU t2

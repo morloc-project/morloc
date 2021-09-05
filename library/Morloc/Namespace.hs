@@ -25,18 +25,14 @@ module Morloc.Namespace
   , CType(..)
   , ctype
   , GType(..)
-  , generalType
-  , NamType(..)
+  , gtype
   , EVar(..)
   , MVar(..)
-  , TVar(..)
   , Name(..)
   , Path
   , Code(..)
   , DirTree(..)
   , AnchoredDirTree(..)
-  , unEVar
-  , unTVar
   -- ** lookup info stored
   , metaConstraints
   , metaProperties
@@ -72,7 +68,7 @@ module Morloc.Namespace
   , NamType(..)
   , CatType(..)
   , Type(..)
-  , UnresolvedType(..)
+  , TypeU(..)
   , EType(..)
   , unresolvedType2type
   , Source(..)
@@ -217,7 +213,7 @@ data CatTag = List | Tuple | Record | Entry | Application
 data Expr
   = ModE MVar [ExprI]
   -- ^ the toplevel expression in a module
-  | TypE TVar [TVar] UnresolvedType
+  | TypE TVar [TVar] TypeU
   -- ^ a type definition
   --   1. type name
   --   2. parameters
@@ -246,7 +242,7 @@ data Expr
   -- ^ A general container type (where application is just a kind of container)
   | LamE EVar ExprI
   -- ^ (\x -> e)
-  | AnnE ExprI [UnresolvedType]
+  | AnnE ExprI [TypeU]
   -- ^ (e : A)
   | NumE Scientific
   -- ^ number of arbitrary size and precision
@@ -295,7 +291,7 @@ data UnresolvedPacker =
     -- ^ The general import term used for this type. For example, the 'Map'
     -- type may have language-specific realizations such as 'dict' or 'hash',
     -- but it is imported as 'import xxx (Map)'.
-    , unresolvedPackerCType :: UnresolvedType
+    , unresolvedPackerCType :: TypeU
     -- ^ The decomposed (unpacked) type
     , unresolvedPackerForward :: [Source]
     -- ^ The unpack function, there may be more than one, the compiler will make
@@ -312,19 +308,19 @@ type PackMap = Map (TVar, Int) [UnresolvedPacker]
 data GammaIndex
   = VarG TVar
   -- ^ (G,a)
-  | AnnG EVar UnresolvedType
+  | AnnG EVar TypeU
   -- ^ store a bound variable
   | ExistG TVar
-    [UnresolvedType] -- type parameters
-    [UnresolvedType] -- type defaults
+    [TypeU] -- type parameters
+    [TypeU] -- type defaults
   -- ^ (G,a^) unsolved existential variable
-  | SolvedG TVar UnresolvedType
+  | SolvedG TVar TypeU
   -- ^ (G,a^=t) Store a solved existential variable
   | MarkG TVar
   -- ^ (G,>a^) Store a type variable marker bound under a forall
   | SrcG Source
   -- ^ source
-  | SerialConstraint UnresolvedType UnresolvedType
+  | SerialConstraint TypeU TypeU
   -- ^ Store an unsolved serialization constraint containing one or more
   -- existential variables. When the existential variables are solved, the
   -- constraint will be written into the Stack state.
@@ -338,14 +334,14 @@ data Gamma = Gamma
 
 
 data TypeError
-  = SubtypeError UnresolvedType UnresolvedType Text
-  | InstantiationError UnresolvedType UnresolvedType Text
+  = SubtypeError TypeU TypeU Text
+  | InstantiationError TypeU TypeU Text
   | EmptyCut GammaIndex
-  | OccursCheckFail UnresolvedType UnresolvedType Text
+  | OccursCheckFail TypeU TypeU Text
     -- ^ the msg should an identifier for the place where the occurs check failed
-  | NotYetImplemented UnresolvedType UnresolvedType Text 
+  | NotYetImplemented TypeU TypeU Text 
   | UnboundVariable EVar
-  | KeyError Text UnresolvedType
+  | KeyError Text TypeU
   | MissingConcreteSignature Source
   | ApplicationOfNonFunction
   deriving (Ord, Eq, Show)
@@ -389,7 +385,7 @@ data MorlocError
   | ConcreteTypeError TypeError
   | GeneralTypeError TypeError
   | ToplevelRedefinition
-  | IncompatibleGeneralType UnresolvedType UnresolvedType
+  | IncompatibleGeneralType TypeU TypeU
   | OtherError Text -- TODO: remove this option
   -- container errors
   | EmptyTuple
@@ -478,7 +474,7 @@ newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data EVar = EV Text deriving (Show, Eq, Ord)
 
-data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
+data (TVar a) = TV a Text deriving(Show, Eq, Ord)
 
 -- | Let the TVar type behave like the MVar newtype
 unTVar :: TVar -> Text
@@ -546,8 +542,8 @@ ctype t
   | otherwise = error "COMPILER BUG - incorrect assignment to concrete type"
 
 -- a safe alternative to the GType constructor
-generalType :: Type -> GType
-generalType t
+gtype :: Type -> GType
+gtype t
   | isNothing (langOf t) = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
@@ -576,16 +572,16 @@ data Type
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
-data UnresolvedType
+data TypeU
   = VarU TVar
   -- ^ (a)
   | ExistU TVar
-    [UnresolvedType] -- ???
-    [UnresolvedType] -- default types
+    [TypeU] -- ???
+    [TypeU] -- default types
   -- ^ (a^) will be solved into one of the other types
-  | ForallU TVar UnresolvedType
+  | ForallU TVar TypeU
   -- ^ (Forall a . A)
-  | CatU CatType UnresolvedType UnresolvedType
+  | CatU CatType TypeU TypeU
   -- ^ type trees
   deriving (Show, Ord, Eq)
 
@@ -593,7 +589,7 @@ data UnresolvedType
 -- of properties and constrains.
 data EType =
   EType
-    { etype :: UnresolvedType
+    { etype :: TypeU
     , eprop :: Set Property
     , econs :: Set Constraint
     }
@@ -606,7 +602,7 @@ instance HasOneLanguage Source where
   langOf s = Just (srcLang s)
   langOf' s = srcLang s
 
-unresolvedType2type :: UnresolvedType -> Type 
+unresolvedType2type :: TypeU -> Type 
 unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
 unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
@@ -654,18 +650,6 @@ instance Typelike Type where
   decompose t = ([], t)
 
 
-instance Typelike CType where
-  typeOf (CType t) = t 
-
-  decompose t0 = case (decompose (unCType t0)) of
-    (ts, t) -> (map CType ts, CType t)
-
-instance Typelike GType where
-  typeOf (GType t) = t 
-
-  decompose t0 = case (decompose (unGType t0)) of
-    (ts, t) -> (map GType ts, GType t)
-
 class HasOneLanguage a where
   langOf :: a -> Maybe Lang
   langOf' :: a -> Lang
@@ -696,7 +680,7 @@ instance HasOneLanguage Type where
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
 
-instance HasOneLanguage UnresolvedType where
+instance HasOneLanguage TypeU where
   langOf (VarU (TV lang _)) = lang
   langOf x@(ExistU (TV lang _) ts _)
     | all ((==) lang) (map langOf ts) = lang

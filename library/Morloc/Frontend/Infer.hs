@@ -44,7 +44,7 @@ typecheckGeneral x = do
     (Left err) -> undefined
     (Right x') -> return x'
   where
-    lookupType :: GMap Int Int TermTypes -> Int -> Maybe UnresolvedType
+    lookupType :: GMap Int Int TermTypes -> Int -> Maybe TypeU
     lookupType m i = case GMap.lookup i m of
       GMapNoFst -> Nothing
       GMapNoSnd -> Nothing
@@ -55,7 +55,7 @@ typecheckGeneral x = do
 -- for type consistency, correctness of packers, inferences of packers (both
 -- for serialization and for casting).
 typecheckGeneralPure
-  :: (Int -> Maybe UnresolvedType)
+  :: (Int -> Maybe TypeU)
   -> SAnno Int Many Int
   -> Either (Indexed TypeError) (SAnno (Indexed Type) Many Int)
 typecheckGeneralPure = undefined
@@ -66,7 +66,7 @@ infer
   -> Either
        TypeError
        ( Gamma
-       , [UnresolvedType]
+       , [TypeU]
        , SAnno (Indexed Type) Many Int
        )
 infer = undefined
@@ -74,11 +74,11 @@ infer = undefined
 check
   :: Gamma
   -> SAnno Int Many Int
-  -> UnresolvedType
+  -> TypeU
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
+       , TypeU
        , SAnno (Indexed Type) Many Int
        )
 check = undefined
@@ -86,11 +86,11 @@ check = undefined
 derive ::
      Gamma
   -> SAnno Int Many Int
-  -> UnresolvedType
+  -> TypeU
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
+       , TypeU
        , SAnno (Indexed Type) Many Int
        )
 derive = undefined

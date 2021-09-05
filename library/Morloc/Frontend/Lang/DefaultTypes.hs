@@ -28,7 +28,7 @@ module Morloc.Frontend.Lang.DefaultTypes
 import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 
-defaultList :: Maybe Lang -> UnresolvedType -> [UnresolvedType]
+defaultList :: Maybe Lang -> TypeU -> [TypeU]
 defaultList lang@Nothing t = [ArrU (TV lang "List") [t]]
 defaultList lang@(Just Python3Lang) t = [ArrU (TV lang "list") [t]]
 defaultList lang@(Just RLang) t = [ArrU (TV lang "list") [t]]
@@ -37,7 +37,7 @@ defaultList lang@(Just CppLang) t = [ArrU (TV lang "std::vector<$1>") [t]]
 defaultList lang@(Just RustLang) t = [ArrU (TV lang "Vec<$1>") [t]]
 defaultList lang@(Just PerlLang) t = [ArrU (TV lang "array") [t]]
 
-defaultTuple :: Maybe Lang -> [UnresolvedType] -> [UnresolvedType]
+defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
 defaultTuple lang@Nothing ts = [ArrU (TV lang (MT.pack $ "Tuple" ++ show (length ts))) ts]
 defaultTuple lang@(Just Python3Lang) ts = [ArrU (TV lang "tuple") ts]
 defaultTuple lang@(Just RLang) ts = [ArrU (TV lang "tuple") ts]
@@ -50,7 +50,7 @@ defaultTuple lang@(Just RustLang) ts = [ArrU (TV lang t) ts] where
   t = "(" <> MT.intercalate "," vars <> ")"
 defaultTuple lang@(Just PerlLang) ts = [ArrU (TV lang "array") ts]
 
-defaultRecord :: Maybe Lang -> [(MT.Text, UnresolvedType)] -> [UnresolvedType]
+defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
 defaultRecord lang@Nothing entries = [NamU NamRecord (TV lang "Record") [] entries]
 defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "dict") [] entries]
 defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "list") [] entries]
@@ -62,7 +62,7 @@ defaultRecord lang@(Just PerlLang) entries = [NamU NamRecord (TV lang "hash") []
 -- | This is the value returned by a functions that doesn't return, for example,
 -- an print statement. It needs to be defined even for languages that don't
 -- have an explicit NULL (such as Rust).
-defaultNull :: Maybe Lang -> [UnresolvedType]
+defaultNull :: Maybe Lang -> [TypeU]
 defaultNull lang@Nothing = [VarU (TV lang "Unit")]
 defaultNull lang@(Just Python3Lang) = [VarU (TV lang "None")]
 defaultNull lang@(Just RLang) = [VarU (TV lang "NULL")]
@@ -71,7 +71,7 @@ defaultNull lang@(Just CppLang) = [VarU (TV lang "null")]
 defaultNull lang@(Just RustLang) = [VarU (TV lang "<VOID>")] -- Rust doesn't have an explicit NULL
 defaultNull lang@(Just PerlLang) = [VarU (TV lang "NULL")]
 
-defaultBool :: Maybe Lang -> [UnresolvedType]
+defaultBool :: Maybe Lang -> [TypeU]
 defaultBool lang@Nothing = [VarU (TV lang "Bool")]
 defaultBool lang@(Just Python3Lang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just RLang) = [VarU (TV lang "logical" )]
@@ -80,7 +80,7 @@ defaultBool lang@(Just CppLang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just RustLang) = [VarU (TV lang "bool")]
 defaultBool lang@(Just PerlLang) = [VarU (TV lang "bool")]
 
-defaultString :: Maybe Lang -> [UnresolvedType]
+defaultString :: Maybe Lang -> [TypeU]
 defaultString lang@Nothing = [VarU (TV lang "Str")]
 defaultString lang@(Just Python3Lang) = [VarU (TV lang "str")]
 defaultString lang@(Just RLang) = [VarU (TV lang "character")]
@@ -90,7 +90,7 @@ defaultString lang@(Just RustLang) = [VarU (TV lang "String"), VarU (TV lang "st
 defaultString lang@(Just PerlLang) = [VarU (TV lang "str")]
 
 -- a primitive number can automatically be promoted into any of the default numbers listed below
-defaultNumber :: Maybe Lang -> [UnresolvedType]
+defaultNumber :: Maybe Lang -> [TypeU]
 defaultNumber lang@Nothing = [VarU (TV lang "Num"), VarU (TV lang "Int")]
 defaultNumber lang@(Just Python3Lang) = [VarU (TV lang "float"), VarU (TV lang "int")]
 defaultNumber lang@(Just RLang) = [VarU (TV lang "numeric"), VarU (TV lang "integer")]

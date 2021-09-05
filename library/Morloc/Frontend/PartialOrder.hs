@@ -24,7 +24,7 @@ import qualified Data.Set as Set
 import qualified Data.PartialOrd as P
 
 -- | substitute all appearances of a given variable with a given new type
-substitute :: TVar -> UnresolvedType -> UnresolvedType -> UnresolvedType
+substitute :: TVar -> TypeU -> TypeU -> TypeU
 substitute v@(TV _ _) (ForallU q r) t = 
   if Set.member (VarU q) (free t)
   then
@@ -35,7 +35,7 @@ substitute v@(TV _ _) (ForallU q r) t =
     ForallU q (substitute v r t)
 substitute v r t = sub t
   where
-    sub :: UnresolvedType -> UnresolvedType
+    sub :: TypeU -> TypeU
     sub t'@(VarU v')
       | v == v' = r
       | otherwise = t'
@@ -47,7 +47,7 @@ substitute v r t = sub t
     sub (NamU namType v' ts rs) = NamU namType v' (map sub ts) [(x, sub t') | (x, t') <- rs]
     sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
 
-free :: UnresolvedType -> Set.Set UnresolvedType
+free :: TypeU -> Set.Set TypeU
 free v@(VarU _) = Set.singleton v
 free v@(ExistU _ [] _) = Set.singleton v
 free (ExistU v ts _) = Set.unions $ Set.singleton (ArrU v ts) : map free ts
@@ -61,7 +61,7 @@ free (NamU _ _ _ rs) = Set.unions [free t | (_, t) <- rs]
 -- they are different kinds.
 -- The order of types is used to choose the most specific serialization functions.
 -- As far as serialization is concerned, properties and constraints do not matter.
-instance P.PartialOrd UnresolvedType where
+instance P.PartialOrd TypeU where
   (<=) (VarU v1) (VarU v2) = v1 == v2
   (<=) (ExistU v1 [] _) (ExistU v2 [] _) = v1 == v2
   (<=) (ExistU v1 ts1 _) (ExistU v2 ts2 _)
@@ -98,18 +98,18 @@ instance P.PartialOrd UnresolvedType where
 
 -- Substitute all v for the first term in t2 that corresponds to v in t1. If v
 -- does not occur in t1, then t1 is returned unchanged (e.g., `forall a . Int`).
-substituteFirst :: TVar -> UnresolvedType -> UnresolvedType -> UnresolvedType
+substituteFirst :: TVar -> TypeU -> TypeU -> TypeU
 substituteFirst v t1 t2 = case findFirst v t1 t2 of
   (Just t) -> substitute v t t1
   Nothing -> t1
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
-getNewVariable :: UnresolvedType -> UnresolvedType -> TVar
+getNewVariable :: TypeU -> TypeU -> TVar
 getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
   where 
     variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
-    findNew :: [String] -> Set.Set UnresolvedType -> TVar
+    findNew :: [String] -> Set.Set TypeU -> TVar
     findNew [] _ = error "Could not fresh variable in an infinite list ... odd"
     findNew (x:xs) ts
       | Set.member (VarU v) ts = findNew xs ts 
@@ -117,12 +117,12 @@ getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
       where
         v = TV (langOf t1) (MT.pack x)
 
-    allVars :: UnresolvedType -> Set.Set UnresolvedType
+    allVars :: TypeU -> Set.Set TypeU
     allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
     allVars t = free t
 
 
-findFirst :: TVar -> UnresolvedType -> UnresolvedType -> Maybe UnresolvedType
+findFirst :: TVar -> TypeU -> TypeU -> Maybe TypeU
 findFirst v (VarU v') t2
   | v == v' = Just t2
   | otherwise = Nothing
@@ -147,22 +147,22 @@ findFirst v (NamU _ _ _ es1) (NamU _ _ _ es2)
 findFirst _ _ _ = Nothing
 
 -- | is t1 a generalization of t2?
-isSubtypeOf :: UnresolvedType -> UnresolvedType -> Bool
+isSubtypeOf :: TypeU -> TypeU -> Bool
 isSubtypeOf t1 t2 = case P.compare t1 t2 of
   (Just x) -> x <= EQ
   _ -> False
 
-equivalent :: UnresolvedType -> UnresolvedType -> Bool
+equivalent :: TypeU -> TypeU -> Bool
 equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
 -- | find all types that are not greater than any other type
-mostGeneral :: [UnresolvedType] -> [UnresolvedType]
+mostGeneral :: [TypeU] -> [TypeU]
 mostGeneral ts = P.minima ts
 
 -- | find all types that are not less than any other type
-mostSpecific :: [UnresolvedType] -> [UnresolvedType]
+mostSpecific :: [TypeU] -> [TypeU]
 mostSpecific ts = P.maxima ts
 
 -- | find the most specific subtypes
-mostSpecificSubtypes :: UnresolvedType -> [UnresolvedType] -> [UnresolvedType]
+mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
 mostSpecificSubtypes t ts = mostSpecific $ filter (\t2 -> isSubtypeOf t2 t) ts

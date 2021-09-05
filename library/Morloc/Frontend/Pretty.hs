@@ -28,7 +28,7 @@ prettyParserError = undefined
 prettyExpr :: ExprI -> Doc AnsiStyle
 prettyExpr (ExprI _ UniE) = "()"
 prettyExpr (ExprI _ (ModE v es)) = align . vsep $ ("module" <+> pretty v) : map prettyExpr es
-prettyExpr (ExprI _ (TypE v vs t)) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenUnresolvedType t
+prettyExpr (ExprI _ (TypE v vs t)) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenTypeU t
 prettyExpr (ExprI _ (ImpE (Import m Nothing _ _))) = "import" <+> pretty m 
 prettyExpr (ExprI _ (ImpE (Import m (Just xs) _ _)))
   = "import" <+> pretty m
@@ -40,7 +40,7 @@ prettyExpr (ExprI _ (LamE vs e)) = "\\" <> pretty (MT.unwords [v | (EV v) <- vs]
 prettyExpr (ExprI _ (AnnE e ts)) = parens
   $   prettyExpr e
   <+> "::"
-  <+> encloseSep "(" ")" "; " (map prettyGreenUnresolvedType ts)
+  <+> encloseSep "(" ")" "; " (map prettyGreenTypeU ts)
 prettyExpr (ExprI _ (AppE f es)) = prettyExpr f <+> hsep (map (parens . prettyExpr) es)
 prettyExpr (ExprI _ (NumE x)) = pretty (show x)
 prettyExpr (ExprI _ (StrE x)) = dquotes (pretty x)
@@ -72,7 +72,7 @@ prettyExpr (ExprI _ (Signature v _ e)) =
         [] -> ""
         xs -> tupled (map prettyProperty xs) <+> "=> "
     etype' :: Doc AnsiStyle
-    etype' = prettyGreenUnresolvedType (etype e)
+    etype' = prettyGreenTypeU (etype e)
     econs' :: Doc AnsiStyle
     econs' =
       case Set.toList (econs e) of

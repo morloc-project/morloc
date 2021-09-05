@@ -24,13 +24,13 @@ import qualified Morloc.Frontend.PartialOrder as P
 -- inferences about their type can be made. If the existentials have a default
 -- type, then that type can be used to replace the existential. Otherwise, the
 -- existential can be cast as generic (ForallU).
-generalize :: UnresolvedType -> UnresolvedType
+generalize :: TypeU -> TypeU
 generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
-  generalize' :: [(TVar, Name)] -> UnresolvedType -> UnresolvedType
+  generalize' :: [(TVar, Name)] -> TypeU -> TypeU
   generalize' [] t = t
   generalize' ((e, r):xs) t = generalize' xs (generalizeOne e r t)
 
-  setDefaults :: UnresolvedType -> UnresolvedType
+  setDefaults :: TypeU -> TypeU
   setDefaults (ExistU v ps []) = ExistU v (map setDefaults ps) []
   setDefaults (ExistU _ _ (d:_)) = setDefaults d
   setDefaults t@(VarU _) = t
@@ -45,7 +45,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   existentialMap t =
     zip (Set.toList (findExistentials t)) (map (Name . MT.pack) variables)
 
-  findExistentials :: UnresolvedType -> Set.Set TVar
+  findExistentials :: TypeU -> Set.Set TVar
   findExistentials (VarU _) = Set.empty
   findExistentials (ExistU v ts ds) =
     Set.unions
@@ -59,10 +59,10 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   findExistentials (NamU _ _ ts rs)
     = Set.unions (map findExistentials ts ++ map (findExistentials . snd) rs)
 
-  generalizeOne :: TVar -> Name -> UnresolvedType -> UnresolvedType
+  generalizeOne :: TVar -> Name -> TypeU -> TypeU
   generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
     where
-      f :: TVar -> UnresolvedType -> UnresolvedType
+      f :: TVar -> TypeU -> TypeU
       f v t1@(ExistU v' [] _)
         | v == v' = VarU (TV lang0 (unName r0))
         | otherwise = t1
@@ -120,7 +120,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   -- rename = mapU' rename
 --   -- unrename = mapU unrename
 --
--- instance Renameable UnresolvedType where
+-- instance Renameable TypeU where
 --   rename = undefined
 --   unrename = undefined
 --   -- rename t@(VarU _) = return t
@@ -152,7 +152,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   apply :: Gamma -> a -> a
 --
 -- -- | Apply a context to a type (See Dunfield Figure 8).
--- instance Applicable UnresolvedType where
+-- instance Applicable TypeU where
 --   apply = undefined
 --   -- -- [G]a = a
 --   -- apply _ a@(VarU _) = a
@@ -179,8 +179,8 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --
 --
 -- class Typed a where
---   toType :: Maybe Lang -> a -> Maybe UnresolvedType
---   fromType :: Maybe Lang -> UnresolvedType -> a
+--   toType :: Maybe Lang -> a -> Maybe TypeU
+--   fromType :: Maybe Lang -> TypeU -> a
 --
 -- instance Typed EType where
 --   toType = undefined
@@ -196,7 +196,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   --     , econs = Set.empty
 --   --     }
 --
--- toEType :: UnresolvedType -> EType
+-- toEType :: TypeU -> EType
 -- toEType = undefined
 -- -- toEType t = EType
 -- --   { etype = t
@@ -216,7 +216,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   -- fromType Nothing t = TypeSet (Just (fromType Nothing t)) []
 --   -- fromType lang t = TypeSet Nothing [fromType lang t]
 --
--- serialConstraint :: UnresolvedType -> UnresolvedType -> Stack ()
+-- serialConstraint :: TypeU -> TypeU -> Stack ()
 -- serialConstraint = undefined
 -- -- serialConstraint t1 t2 = do
 -- --   s <- CMS.get
@@ -242,7 +242,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- getDepth = undefined
 -- -- getDepth = CMS.gets stateDepth
 --
--- mapU :: (UnresolvedType -> UnresolvedType) -> Expr -> Expr
+-- mapU :: (TypeU -> TypeU) -> Expr -> Expr
 -- mapU = undefined
 -- -- mapU f (LamE v e) = LamE v (mapU f e)
 -- -- mapU f (ListE es) = ListE (map (mapU f) es)
@@ -254,7 +254,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- mapU f (Signature v e) = Signature v $ e {etype = f (etype e)}
 -- -- mapU _ e = e
 --
--- mapU' :: Monad m => (UnresolvedType -> m UnresolvedType) -> Expr -> m Expr
+-- mapU' :: Monad m => (TypeU -> m TypeU) -> Expr -> m Expr
 -- mapU' = undefined
 -- -- mapU' f (LamE v e) = LamE <$> pure v <*> mapU' f e
 -- -- mapU' f (ListE es) = ListE <$> mapM (mapU' f) es
@@ -299,7 +299,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- lookupE v (_:gs) = lookupE v gs
 --
 -- -- | Look up a solved existential type variable
--- lookupU :: TVar -> Gamma -> Maybe UnresolvedType
+-- lookupU :: TVar -> Gamma -> Maybe TypeU
 -- lookupU = undefined
 -- -- lookupU _ [] = Nothing
 -- -- lookupU v ((SolvedG v' t):gs)
@@ -346,14 +346,14 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- --         _ -> Nothing
 -- --     _ -> Nothing
 --
--- ann :: Expr -> UnresolvedType -> Expr
+-- ann :: Expr -> TypeU -> Expr
 -- ann = undefined
 -- -- ann (AnnE e _) t = AnnE e [t]
 -- -- ann e@(Declaration _ _) _ = e
 -- -- ann e@(Signature _ _) _ = e
 -- -- ann e t = AnnE e [t]
 --
--- anns :: Expr -> [UnresolvedType] -> Expr
+-- anns :: Expr -> [TypeU] -> Expr
 -- anns = undefined
 -- -- anns (AnnE e _) ts = AnnE e ts
 -- -- anns e@(Declaration _ _) _ = e
@@ -373,15 +373,15 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- generalizeTypeSet (TypeSet t ts) =
 -- --   TypeSet (fmap generalizeEType t) (map generalizeEType ts)
 --
--- newvar :: Maybe Lang -> Stack UnresolvedType
+-- newvar :: Maybe Lang -> Stack TypeU
 -- newvar = undefined
 -- -- newvar = newvarRich [] []
 --
 -- newvarRich
---   :: [UnresolvedType]
---   -> [UnresolvedType] -- ^ default types
+--   :: [TypeU]
+--   -> [TypeU] -- ^ default types
 --   -> Maybe Lang
---   -> Stack UnresolvedType
+--   -> Stack TypeU
 -- newvarRich = undefined
 -- -- newvarRich ps ds lang = do
 -- --   s <- CMS.get

@@ -71,7 +71,7 @@ retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
 
 
 weaveAndResolve
-  :: SAnno (Indexed Type) One (Indexed UnresolvedType)
+  :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
   pt <- weaveResolvedTypes gt (resolve ct)
@@ -95,7 +95,7 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
  
 
 -- | type 1 is more polymorphic than type 2 (Dunfield Figure 9)
-subtype :: UnresolvedType -> UnresolvedType -> Gamma -> Either TypeError Gamma
+subtype :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
 -- VarU vs VarT
 subtype t1@(VarU (TV lang1 a1)) t2@(VarU (TV lang2 a2)) g
@@ -155,7 +155,7 @@ subtype t1@(ArrU v1@(TV l1 _) vs1) t2@(ArrU v2@(TV l2 _) vs2) g
   | v1 == v2 = compareArr vs1 vs2 g
   | otherwise = Left $ SubtypeError t1 t2 "<:App - Unequal names in ArrU of the same language" 
   where
-    compareArr :: [UnresolvedType] -> [UnresolvedType] -> Gamma -> Either TypeError Gamma
+    compareArr :: [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
     compareArr [] [] g' = return g'
     compareArr (t1':ts1') (t2':ts2') g' = do
       g'' <- subtype t1' t2' g'
@@ -167,7 +167,7 @@ subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = do
   g' <- subtype (VarU v1) (VarU v2) g
   compareEntry (sort rs1) (sort rs2) g'
   where
-    compareEntry :: [(MT.Text, UnresolvedType)] -> [(MT.Text, UnresolvedType)] -> Gamma -> Either TypeError Gamma
+    compareEntry :: [(MT.Text, TypeU)] -> [(MT.Text, TypeU)] -> Gamma -> Either TypeError Gamma
     compareEntry [] [] g2 = return g2
     compareEntry ((k1, t1):rs1') ((k2, t2):rs2') g2
       | l1 == l2 = do
@@ -232,7 +232,7 @@ subtype a b _ = Left $ SubtypeError a b "Type mismatch"
 
 
 -- | Dunfield Figure 10 -- type-level structural recursion
-instantiate :: UnresolvedType -> UnresolvedType -> Gamma -> Either TypeError Gamma
+instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
 --  g2 |- Ea2 <=: [g2]A2 -| g3
@@ -346,8 +346,8 @@ synth
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
-       , SAnno (Indexed Type) One (Indexed UnresolvedType)
+       , TypeU
+       , SAnno (Indexed Type) One (Indexed TypeU)
        )
 --
 -- ----------------------------------------- <primitive>
@@ -357,7 +357,7 @@ synth
 --  example, in Rust a primitive Num may be a signed or unsigned, be a float or
 --  an int, and have a size ranging from 8 to 128 bits. If no concrete types
 --  are available, then the first default value will be used when the
---  UnresolvedType is resolved. 
+--  TypeU is resolved. 
 
 -- AnnoOne=>
 synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) gt)
@@ -382,8 +382,8 @@ synthExpr
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
-       , SExpr (Indexed Type) One (Indexed UnresolvedType)
+       , TypeU
+       , SExpr (Indexed Type) One (Indexed TypeU)
        )
 
 
@@ -421,7 +421,7 @@ synthExpr lang g0 (AccS x k) = do
   tk <- accessRecord k tx
   return (g1, tk, AccS x1 k)
   where
-    accessRecord :: MT.Text -> UnresolvedType -> Either TypeError UnresolvedType
+    accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
     accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
       (Just t) -> return t
       Nothing -> Left $ KeyError k r 
@@ -482,12 +482,12 @@ synthExpr lang g0 (AppS f0 xs) = do
 
   -- :: Gamma
   -- -> [SAnno (Indexed Type) One (Lang, [EType])]
-  -- -> UnresolvedType
+  -- -> TypeU
   -- -> Either
   --      TypeError
   --      ( Gamma
-  --      , UnresolvedType
-  --      , [SAnno (Indexed Type) One (Indexed UnresolvedType)]
+  --      , TypeU
+  --      , [SAnno (Indexed Type) One (Indexed TypeU)]
   --      )
 
 -- For now, sources must be annotated by a concrete type signature. Annotations
@@ -497,7 +497,7 @@ synthExpr lang g0 (AppS f0 xs) = do
 synthExpr _ _ (CallS src) = Left $ MissingConcreteSignature src
   
 
-bindTerm :: Lang -> Gamma -> EVar -> (Gamma, UnresolvedType)
+bindTerm :: Lang -> Gamma -> EVar -> (Gamma, TypeU)
 bindTerm lang g0 v =
   let (g1, t) = newvar (Just lang) g0
       idx = AnnG v t
@@ -507,12 +507,12 @@ bindTerm lang g0 v =
 chainCheck
   :: Gamma
   -> [SAnno (Indexed Type) One (Indexed (Lang, [EType]))]
-  -> UnresolvedType
+  -> TypeU
   -> Either
         TypeError
         ( Gamma
-        , [( UnresolvedType
-           , SAnno (Indexed Type) One (Indexed UnresolvedType)
+        , [( TypeU
+           , SAnno (Indexed Type) One (Indexed TypeU)
           )]
         )
 chainCheck g0 [] _ = Right (g0, [])
@@ -526,12 +526,12 @@ chainCheck g0 (x0:rs) t0 = do
 check
   :: Gamma
   -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
-  -> UnresolvedType
+  -> TypeU
   -> Either
         TypeError
         ( Gamma
-        , UnresolvedType
-        , SAnno (Indexed Type) One (Indexed UnresolvedType)
+        , TypeU
+        , SAnno (Indexed Type) One (Indexed TypeU)
         )
 check g (SAnno (One (x, Idx i (l, _))) gt) t = do
   (g', t', x') <- checkExpr l g x t
@@ -542,12 +542,12 @@ checkExpr
   :: Lang
   -> Gamma
   -> SExpr (Indexed Type) One (Indexed (Lang, [EType]))
-  -> UnresolvedType
+  -> TypeU
   -> Either
         TypeError
         ( Gamma
-        , UnresolvedType
-        , SExpr (Indexed Type) One (Indexed UnresolvedType)
+        , TypeU
+        , SExpr (Indexed Type) One (Indexed TypeU)
         )
 
 --  g1,x:A |- e <= B -| g2,x:A,g3
@@ -571,12 +571,12 @@ checkExpr lang g1 e1 b = undefined
 applicationMany
   :: Gamma
   -> [SAnno (Indexed Type) One (Lang, [EType])]
-  -> UnresolvedType
+  -> TypeU
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
-       , [SAnno (Indexed Type) One (Indexed UnresolvedType)]
+       , TypeU
+       , [SAnno (Indexed Type) One (Indexed TypeU)]
        )
 applicationMany g0 [] t0 = return (g0, t0, [])
 applicationMany g0 (e0:es0) t0 = do
@@ -587,12 +587,12 @@ applicationMany g0 (e0:es0) t0 = do
 application
   :: Gamma
   -> SAnno (Indexed Type) One (Lang, [EType])
-  -> UnresolvedType
+  -> TypeU
   -> Either
        TypeError
        ( Gamma
-       , UnresolvedType
-       , SAnno (Indexed Type) One (Indexed UnresolvedType)
+       , TypeU
+       , SAnno (Indexed Type) One (Indexed TypeU)
        )
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
@@ -634,7 +634,7 @@ application _ _ _ = Left ApplicationOfNonFunction
 
 
 
-checkAgreement :: Indexed UnresolvedType -> Indexed Type -> Either TypeError ()
+checkAgreement :: Indexed TypeU -> Indexed Type -> Either TypeError ()
 checkAgreement = undefined
 
 

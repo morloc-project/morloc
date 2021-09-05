@@ -75,7 +75,7 @@ checkForSelfRecursion d = do
     isExprSelfRecursive _ = return ()
 
     -- check if a given term appears in a type
-    hasTerm :: TVar -> UnresolvedType -> Bool
+    hasTerm :: TVar -> TypeU -> Bool
     hasTerm v (VarU v') = v == v'
     hasTerm v (ForallU _ t) = hasTerm v t
     hasTerm v (FunU t1 t2) = hasTerm v t1 || hasTerm v t2
@@ -100,14 +100,14 @@ desugarExpr d k e0 = mapExprM f e0 where
   f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
   f e = return e
 
-  termmap :: Map.Map TVar [([TVar], UnresolvedType)]
+  termmap :: Map.Map TVar [([TVar], TypeU)]
   termmap =
     let terms = AST.findSignatureTypeTerms e0
     in Map.fromList $ zip terms (map lookupTypedefs terms)
 
   lookupTypedefs
     :: TVar
-    -> [([TVar], UnresolvedType)]
+    -> [([TVar], TypeU)]
   lookupTypedefs (TV lang v)
     = catMaybes
     . MDD.nodes
@@ -116,20 +116,20 @@ desugarExpr d k e0 = mapExprM f e0 where
 
 
 desugarEType
-  :: Map.Map TVar [([TVar], UnresolvedType)]
+  :: Map.Map TVar [([TVar], TypeU)]
   -> DAG MVar [(EVar, EVar)] ExprI
   -> MVar -> EType -> MorlocMonad EType
 desugarEType h d k (EType t ps cs) = EType <$> desugarType h d k t <*> pure ps <*> pure cs
 
 
 desugarType
-  :: Map.Map TVar [([TVar], UnresolvedType)]
+  :: Map.Map TVar [([TVar], TypeU)]
   -> DAG MVar [(EVar, EVar)] ExprI
   -> MVar
-  -> UnresolvedType
-  -> MorlocMonad UnresolvedType
+  -> TypeU
+  -> MorlocMonad TypeU
 desugarType h d k t0 = f t0 where
-  f :: UnresolvedType -> MorlocMonad UnresolvedType
+  f :: TypeU -> MorlocMonad TypeU
   f t0@(VarU v) =
     case Map.lookup v h of
       (Just []) -> return t0
@@ -158,7 +158,7 @@ desugarType h d k t0 = f t0 where
     vals <- mapM f (map snd rs)
     return (NamU r v ts (zip keys vals))
 
-  parsub :: (TVar, UnresolvedType) -> UnresolvedType -> UnresolvedType
+  parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
     | v0 == v = t2 -- substitute
     | otherwise = t1 -- keep the original
@@ -172,9 +172,9 @@ desugarType h d k t0 = f t0 where
   mergeAliases
     :: TVar
     -> Int
-    -> ([TVar], UnresolvedType)
-    -> ([TVar], UnresolvedType)
-    -> MorlocMonad ([TVar], UnresolvedType)
+    -> ([TVar], TypeU)
+    -> ([TVar], TypeU)
+    -> MorlocMonad ([TVar], TypeU)
   mergeAliases v i t@(ts1, t1) (ts2, t2)
     | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
     |    MTP.isSubtypeOf t1' t2'
@@ -187,7 +187,7 @@ desugarType h d k t0 = f t0 where
 
 -- | Resolve existentials by choosing the first default type (if it exists)
 -- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary
-chooseExistential :: UnresolvedType -> UnresolvedType
+chooseExistential :: TypeU -> TypeU
 chooseExistential (VarU v) = VarU v
 chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
 chooseExistential (ExistU _ _ []) = error "Existential with no default value"
@@ -228,19 +228,19 @@ chooseExistential (NamU r v ts recs) = NamU r v (map chooseExistential ts) (zip 
 -- --       m' = Map.unionWith (<>) nodepackers m
 -- --   return $ n1 { preparedNodePackers = m' }
 -- --
--- -- starpack :: PreparedNode -> Property -> [(EVar, UnresolvedType, [Source])]
+-- -- starpack :: PreparedNode -> Property -> [(EVar, TypeU, [Source])]
 -- -- starpack n pro
 -- --   = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
 -- --     | (Signature v _ e@(EType t p _)) <- preparedNodeBody n
 -- --     , isJust (langOf e)
 -- --     , Set.member pro p]
 -- --   where
--- --     lookupSource :: EVar -> UnresolvedType -> Map.Map (EVar, Lang) Source -> Maybe Source
+-- --     lookupSource :: EVar -> TypeU -> Map.Map (EVar, Lang) Source -> Maybe Source
 -- --     lookupSource v t m = langOf t >>= (\lang -> Map.lookup (v, lang) m)
 -- --
 -- -- makeNodePackers
--- --   :: [(EVar, UnresolvedType, [Source])]
--- --   -> [(EVar, UnresolvedType, [Source])]
+-- --   :: [(EVar, TypeU, [Source])]
+-- --   -> [(EVar, TypeU, [Source])]
 -- --   -> PreparedNode
 -- --   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
 -- -- makeNodePackers xs ys n =
@@ -269,30 +269,30 @@ chooseExistential (NamU r v ts recs) = NamU r v (map chooseExistential ts) (zip 
 -- --       (_, [ArrU (TV _ term) _, _]) -> Just $ EV term
 -- --       _ -> Nothing
 
--- packerTypesMatch :: UnresolvedType -> UnresolvedType -> Bool
+-- packerTypesMatch :: TypeU -> TypeU -> Bool
 -- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 --   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
 --     -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
 --     && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
 --   _ -> False
 --
--- packerType :: UnresolvedType -> UnresolvedType
+-- packerType :: TypeU -> TypeU
 -- packerType t = case splitArgs t of
 --   (params, [t1, _]) -> qualify params t1
 --   _ -> error "bad packer"
 --
--- packerKey :: UnresolvedType -> (TVar, Int)
+-- packerKey :: TypeU -> (TVar, Int)
 -- packerKey t = case splitArgs t of
 --   (params, [VarU v, _])   -> (v, length params)
 --   (params, [ArrU v _, _]) -> (v, length params)
 --   (params, [NamU _ v _ _, _]) -> (v, length params)
 --   _ -> error "bad packer"
 --
--- qualify :: [TVar] -> UnresolvedType -> UnresolvedType
+-- qualify :: [TVar] -> TypeU -> TypeU
 -- qualify [] t = t
 -- qualify (v:vs) t = ForallU v (qualify vs t)
 --
--- splitArgs :: UnresolvedType -> ([TVar], [UnresolvedType])
+-- splitArgs :: TypeU -> ([TVar], [TypeU])
 -- splitArgs (ForallU v u) =
 --   let (vs, ts) = splitArgs u
 --   in (v:vs, ts)

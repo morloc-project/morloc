@@ -49,7 +49,7 @@ readProgram f sourceCode p =
 
 -- | Parse a single type. This function used only in debugging in command line
 -- calls such as: `morloc typecheck -te "A -> B"`.
-readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) UnresolvedType
+readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
 readType typeStr =
   case runParser (CMS.runStateT (pTypeGen <* eof) state) "" typeStr of
     Left err -> Left err
@@ -172,12 +172,12 @@ pTypedef = try pTypedefType <|> pTypedefObject where
   desugarTableEntries
     :: Maybe Lang
     -> NamType
-    -> (MT.Text, UnresolvedType)
-    -> Parser (MT.Text, UnresolvedType)
+    -> (MT.Text, TypeU)
+    -> Parser (MT.Text, TypeU)
   desugarTableEntries _ NamRecord entry = return entry
   desugarTableEntries _ NamObject entry = return entry
   desugarTableEntries lang NamTable (k0, t0) = (,) k0 <$> f t0 where
-    f :: UnresolvedType -> Parser UnresolvedType
+    f :: TypeU -> Parser TypeU
     f (ForallU v t) = ForallU v <$> f t
     f t = return $ head (MLD.defaultList lang t)
 
@@ -423,19 +423,19 @@ pVar = fmap VarE pEVar >>= exprI
 pEVar :: Parser EVar
 pEVar = fmap EV freename
 
-pTypeGen :: Parser UnresolvedType
+pTypeGen :: Parser TypeU
 pTypeGen = do
   resetGenerics
   t <- pType
   s <- CMS.get
   return $ forallWrap (unique (reverse (stateGenerics s))) t
   where
-    forallWrap :: [TVar] -> UnresolvedType -> UnresolvedType
+    forallWrap :: [TVar] -> TypeU -> TypeU
     forallWrap [] t = t
     forallWrap (v:vs) t = ForallU v (forallWrap vs t)
 
 
-pType :: Parser UnresolvedType
+pType :: Parser TypeU
 pType =
       pExistential
   <|> try pFunU
@@ -447,7 +447,7 @@ pType =
   <|> pTupleU
   <|> pVarU
 
-pUniU :: Parser UnresolvedType
+pUniU :: Parser TypeU
 pUniU = do
   _ <- symbol "("
   _ <- symbol ")"
@@ -455,39 +455,39 @@ pUniU = do
   v <- newvar lang
   return (ExistU v [] (MLD.defaultNull lang))
 
-parensType :: Parser UnresolvedType
+parensType :: Parser TypeU
 parensType = do
   _ <- tag (symbol "(")
   t <- parens pType
   return t
 
-pTupleU :: Parser UnresolvedType
+pTupleU :: Parser TypeU
 pTupleU = do
   lang <- CMS.gets stateLang
   _ <- tag (symbol "(")
   ts <- parens (sepBy1 pType (symbol ","))
   return $ head (MLD.defaultTuple lang ts)
 
-pNamU :: Parser UnresolvedType
+pNamU :: Parser TypeU
 pNamU = do
   _ <- tag (symbol "{")
   entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
   return $ head (MLD.defaultRecord lang entries)
 
-pNamEntryU :: Parser (MT.Text, UnresolvedType)
+pNamEntryU :: Parser (MT.Text, TypeU)
 pNamEntryU = do
   n <- freename
   _ <- op "::"
   t <- pType
   return (n, t)
 
-pExistential :: Parser UnresolvedType
+pExistential :: Parser TypeU
 pExistential = do
   v <- angles freename
   return (ExistU (TV Nothing v) [] [])
 
-pArrU :: Parser UnresolvedType
+pArrU :: Parser TypeU
 pArrU = do
   _ <- tag (freename <|> stringLiteral)
   n <- freename <|> stringLiteral
@@ -497,7 +497,7 @@ pArrU = do
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
-pFunU :: Parser UnresolvedType
+pFunU :: Parser TypeU
 pFunU = do
   t <- pType'
   _ <- op "->"
@@ -506,23 +506,23 @@ pFunU = do
   where
     pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
-pListU :: Parser UnresolvedType
+pListU :: Parser TypeU
 pListU = do
   _ <- tag (symbol "[")
   t <- brackets pType
   lang <- CMS.gets stateLang
   return $ head (MLD.defaultList lang t)
 
-pVarU :: Parser UnresolvedType
+pVarU :: Parser TypeU
 pVarU = try pVarConU <|> pVarGenU where
-  pVarConU :: Parser UnresolvedType
+  pVarConU :: Parser TypeU
   pVarConU = do
     _ <- tag stringLiteral
     n <- stringLiteral
     t <- tvar n
     return $ VarU t
 
-  pVarGenU :: Parser UnresolvedType
+  pVarGenU :: Parser TypeU
   pVarGenU = do
     _ <- tag freename
     n <- freename

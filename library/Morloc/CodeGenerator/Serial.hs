@@ -37,7 +37,7 @@ defaultTupleFirst :: [TypeP] -> TypeP
 defaultTupleFirst ts = defaultTupleAll ts !! 0
 
 -- | A metaphor for America
-dummies :: Maybe Lang -> [UnresolvedType]
+dummies :: Maybe Lang -> [TypeU]
 dummies lang = repeat $ VarU (TV lang "dummy")
 
 defaultListAll :: TypeP -> [TypeP]
@@ -73,7 +73,7 @@ isTuple (ArrP (PV lang _ v) ts) =
   in length [v' | (ArrU (TV _ v') _) <- ds, v == v'] > 0
 isTuple _ = False
 
-isPrimitiveType :: (Maybe Lang -> [UnresolvedType]) -> TypeP -> Bool
+isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
 isPrimitiveType lookupDefault t =
   let xs = filter (typeEqual t)
          $ [ VarP (PV lang gtype v)
@@ -183,7 +183,7 @@ resolvePacker packedType ts u = do
     , typePackerReverse = unresolvedPackerReverse u
     }
 
-resolveType :: [TypeP] -> UnresolvedType -> MorlocMonad TypeP
+resolveType :: [TypeP] -> TypeU -> MorlocMonad TypeP
 resolveType [] (ForallU _ _) = MM.throwError . SerializationError $ "Packer parity error"
 resolveType [] u = weaveTypes Nothing (resolve u)
 resolveType (t:ts) (ForallU v u) = substituteP v t <$> resolveType ts u

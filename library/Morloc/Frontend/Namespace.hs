@@ -87,7 +87,7 @@ data StackState =
   StackState
     { stateVar :: Int
     , stateQul :: Int
-    , stateSer :: [(UnresolvedType, UnresolvedType)]
+    , stateSer :: [(TypeU, TypeU)]
     , stateDepth :: Int
     }
   deriving (Ord, Eq, Show)

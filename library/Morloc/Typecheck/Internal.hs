@@ -47,7 +47,7 @@ class Applicable a where
   apply :: Gamma -> a -> a
 
 -- | Apply a context to a type (See Dunfield Figure 8).
-instance Applicable UnresolvedType where
+instance Applicable TypeU where
   -- [G]a = a
   apply _ a@(VarU _) = a
   -- [G](A->B) = ([G]A -> [G]B)
@@ -73,7 +73,7 @@ class Indexable a where
 instance Indexable GammaIndex where
   index = id
 
-instance Indexable UnresolvedType where
+instance Indexable TypeU where
   index (ExistU t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
 
@@ -87,7 +87,7 @@ instance Indexable UnresolvedType where
 
 
 
-occursCheck :: UnresolvedType -> UnresolvedType -> MT.Text -> Either TypeError ()
+occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
 occursCheck t1 t2 place = do
   case Set.member t1 (P.free t2) of
     True -> Left $ OccursCheckFail t1 t2 place
@@ -99,7 +99,7 @@ occursCheck t1 t2 place = do
 --  * all qualified terms are replaced with UnkT
 --  * all existentials are replaced with default values if a possible
 --    FIXME: should I really just take the first in the list???
-resolve :: UnresolvedType -> Type
+resolve :: TypeU -> Type
 resolve (VarU v) = VarT v
 resolve (FunU t1 t2) = FunT (resolve t1) (resolve t2)
 resolve (ArrU v ts) = ArrT v (map resolve ts)
@@ -128,7 +128,7 @@ substituteT v0 r0 t0 = sub t0
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
-substitute :: TVar -> UnresolvedType -> UnresolvedType
+substitute :: TVar -> TypeU -> TypeU
 substitute v t = P.substitute v (ExistU v [] []) t
 
 
@@ -159,7 +159,7 @@ access2 lv rv gs =
 
 
 -- | Look up a solved existential type variable
-lookupU :: TVar -> Gamma -> Maybe UnresolvedType
+lookupU :: TVar -> Gamma -> Maybe TypeU
 lookupU v (gammaContext -> gs0) = f gs0 where
   f [] = Nothing
   f ((SolvedG v' t):gs)
@@ -181,16 +181,16 @@ cut i g = do
     | otherwise = f xs
 
 
-newvar :: Maybe Lang -> Gamma -> (Gamma, UnresolvedType)
+newvar :: Maybe Lang -> Gamma -> (Gamma, TypeU)
 newvar = newvarRich [] []
 
 
 newvarRich
-  :: [UnresolvedType] -- ^ type parameters
-  -> [UnresolvedType] -- ^ type defaults
+  :: [TypeU] -- ^ type parameters
+  -> [TypeU] -- ^ type defaults
   -> Maybe Lang
   -> Gamma
-  -> (Gamma, UnresolvedType)
+  -> (Gamma, TypeU)
 newvarRich ps ds lang g =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, ExistU (TV lang (newvars !! i)) ps ds)

@@ -9,7 +9,7 @@ Stability   : experimental
 module Morloc.Pretty
   ( prettyType
   , prettyGreenType
-  , prettyGreenUnresolvedType
+  , prettyGreenTypeU
   , prettyScream
   , prettyLinePrefixes
   , prettyUnresolvedPacker
@@ -73,13 +73,13 @@ screamStyle =
 prettyGreenType :: Type -> Doc AnsiStyle
 prettyGreenType t = annotate typeStyle (prettyType t)
 
-forallVars :: UnresolvedType -> [Doc AnsiStyle]
+forallVars :: TypeU -> [Doc AnsiStyle]
 forallVars (ForallU (TV _ v) t) = pretty v : forallVars t
 forallVars _ = []
 
-forallBlock :: UnresolvedType -> Doc AnsiStyle
+forallBlock :: TypeU -> Doc AnsiStyle
 forallBlock (ForallU _ t) = forallBlock t
-forallBlock t = prettyGreenUnresolvedType t
+forallBlock t = prettyGreenTypeU t
 
 
 prettyScream :: MT.Text -> Doc AnsiStyle
@@ -118,34 +118,34 @@ instance PrettyType CType where
   prettyType = prettyType . unCType
 
 
-prettyGreenUnresolvedType :: UnresolvedType -> Doc AnsiStyle
-prettyGreenUnresolvedType t = annotate typeStyle (prettyUnresolvedType t)
+prettyGreenTypeU :: TypeU -> Doc AnsiStyle
+prettyGreenTypeU t = annotate typeStyle (prettyTypeU t)
 
-prettyUnresolvedType :: UnresolvedType -> Doc AnsiStyle
-prettyUnresolvedType (ExistU v ts ds)
+prettyTypeU :: TypeU -> Doc AnsiStyle
+prettyTypeU (ExistU v ts ds)
   = angles $ (pretty v)
-  <> list (map prettyUnresolvedType ts)
-  <> list (map prettyUnresolvedType ds)
-prettyUnresolvedType t@(ForallU _ _) =
+  <> list (map prettyTypeU ts)
+  <> list (map prettyTypeU ds)
+prettyTypeU t@(ForallU _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyUnresolvedType (VarU (TV _ "Unit")) = "()"
-prettyUnresolvedType (VarU v) = pretty v
-prettyUnresolvedType (FunU t1@(FunU _ _) t2) =
-  parens (prettyUnresolvedType t1) <+> "->" <+> prettyUnresolvedType t2
-prettyUnresolvedType (FunU t1 t2) = prettyUnresolvedType t1 <+> "->" <+> prettyUnresolvedType t2
-prettyUnresolvedType (ArrU v ts) = pretty v <+> hsep (map prettyUnresolvedType ts)
-prettyUnresolvedType (NamU r (TV Nothing _) _ entries) =
+prettyTypeU (VarU (TV _ "Unit")) = "()"
+prettyTypeU (VarU v) = pretty v
+prettyTypeU (FunU t1@(FunU _ _) t2) =
+  parens (prettyTypeU t1) <+> "->" <+> prettyTypeU t2
+prettyTypeU (FunU t1 t2) = prettyTypeU t1 <+> "->" <+> prettyTypeU t2
+prettyTypeU (ArrU v ts) = pretty v <+> hsep (map prettyTypeU ts)
+prettyTypeU (NamU r (TV Nothing _) _ entries) =
   viaShow r <> encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyUnresolvedType e) entries)
-prettyUnresolvedType (NamU r (TV (Just lang) t) _ entries) =
+    (map (\(v, e) -> pretty v <+> "=" <+> prettyTypeU e) entries)
+prettyTypeU (NamU r (TV (Just lang) t) _ entries) =
   pretty t <> "@" <> viaShow lang <+>
   viaShow r <> encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyUnresolvedType e) entries)
+    (map (\(v, e) -> pretty v <+> "=" <+> prettyTypeU e) entries)
 
 prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
 prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep
   [ pretty v
-  , prettyGreenUnresolvedType t 
+  , prettyGreenTypeU t 
   , "forward:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) fs)
   , "reverse:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) rs)
   ]
@@ -165,7 +165,7 @@ prettyPackMap m =  "----- pacmaps ----\n"
 -- prettySAnnoMany (SAnno (Many xs0) g) =
 --      pretty (metaId g)
 --   <> maybe "" (\n -> " " <> pretty n) (metaName g)
---   <+> "::" <+> maybe "_" prettyGreenUnresolvedType (metaGType g)
+--   <+> "::" <+> maybe "_" prettyGreenTypeU (metaGType g)
 --   <> line <> indent 5 (vsep (map writeSome xs0))
 --   where
 --     writeSome (s, ts)
