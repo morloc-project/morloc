@@ -209,6 +209,8 @@ data TermTypes = TermTypes {
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
+data CatTag = List | Tuple | Record
+
 -- | Terms, see Dunfield Figure 1
 data Expr
   = ModE MVar [ExprI]
@@ -238,13 +240,11 @@ data Expr
   -- ^ (x)
   | AccE ExprI Text
   -- ^ person@age - access a field in a record
-  | ListE [ExprI]
-  -- ^ [e]
-  | TupleE [ExprI]
-  -- ^ (e1), (e1,e2), ... (e1,e2,...,en)
-  | LamE [EVar] ExprI
+  | CatE CatTag ExprI ExprI
+  -- ^ A general container type
+  | LamE EVar ExprI
   -- ^ (\x -> e)
-  | AppE ExprI [ExprI]
+  | AppE ExprI ExprI
   -- ^ (e e)
   | AnnE ExprI [UnresolvedType]
   -- ^ (e : A)
@@ -253,8 +253,6 @@ data Expr
   | LogE Bool
   -- ^ boolean primitive
   | StrE Text
-  -- ^ literal string
-  | RecE [(Text, ExprI)]
   deriving (Show, Ord, Eq)
 
 data Import =
