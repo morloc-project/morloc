@@ -349,6 +349,7 @@ data TypeError
   | UnboundVariable EVar
   | KeyError Text UnresolvedType
   | MissingConcreteSignature Source
+  | ApplicationOfNonFunction
   deriving (Ord, Eq, Show)
 
 data MorlocError

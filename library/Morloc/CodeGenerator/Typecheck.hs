@@ -462,15 +462,33 @@ synthExpr lang g0 (RecS rs) = do
 -- Lam=>
 --
 -- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr lang g0 (LamS vs x) = undefined -- do
-  -- let (g1, ts) = statefulMap (bindTerm lang) g0 vs
-  -- (g2, tx, x') <- synth g1 x lang
-  -- let t = foldr1 FunU (ts ++ [tx])
-  -- return (g2, t, LamS vs x')
+synthExpr lang g0 (LamS vs@(EV v:_) x) = do
+  let mark = MarkG (TV (Just lang) v)
+      g1 = g0 +> mark
+      (g2, ts) = statefulMap (bindTerm lang) g1 vs
+  (g3, tx, x') <- synth g2 x
+  let t = foldr1 FunU (ts ++ [tx])
+  g4 <- cut mark g3
+  return (g4, t, LamS vs x')
 
 -- App=>
 --
-synthExpr lang g (AppS f xs) = undefined
+synthExpr lang g0 (AppS f0 xs) = do
+  (g1, t0, f1) <- synth f0
+  (g2, t1, f2) <- applicationMany g1 xs t0
+  -- is f2 are "real thing?"
+  
+
+
+  -- :: Gamma
+  -- -> [SAnno (Indexed Type) One (Lang, [EType])]
+  -- -> UnresolvedType
+  -- -> Either
+  --      TypeError
+  --      ( Gamma
+  --      , UnresolvedType
+  --      , [SAnno (Indexed Type) One (Indexed UnresolvedType)]
+  --      )
 
 -- For now, sources must be annotated by a concrete type signature. Annotations
 -- are stored in the (Indexed [EType) term. If this term were not empty, it
@@ -550,6 +568,22 @@ checkExpr lang g1 e1 b = undefined
 
 
 
+applicationMany
+  :: Gamma
+  -> [SAnno (Indexed Type) One (Lang, [EType])]
+  -> UnresolvedType
+  -> Either
+       TypeError
+       ( Gamma
+       , UnresolvedType
+       , [SAnno (Indexed Type) One (Indexed UnresolvedType)]
+       )
+applicationMany g0 [] t0 = return (g0, t0, [])
+applicationMany g0 (e0:es0) t0 = do
+  (g1, t1, e1) <- application g0 e0 t0
+  (g2, t2, es1) <- applicationMany g1 es0 t1
+  return (g2, FunU t1 t2, e1:es1)
+
 application
   :: Gamma
   -> SAnno (Indexed Type) One (Lang, [EType])
@@ -563,19 +597,40 @@ application
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-application g e (FunU a b) = undefined
+application g0 (e0:es) (FunU a b) = do
+  (g1, a1, e1) <- check g e0 a
+  (g2, a2, e2) <- application g1 es b
+  let b' = apply g1 b
+  return (g1, FunU a' b', apply g' e')
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-application g e (ForallU x s) = undefined
+application g e (ForallU x s) = application (g +> ExistG x [] []) e (substitute x s)
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application g e (ExistU v@(TV lang _) [] _) = undefined
+application g e (ExistU v@(TV lang _) [] _) =
+  case access1 v g of
+    -- replace <t0> with <t0>:<ea1> -> <ea2>
+    Just (rs, _, ls) -> do
+      ea1 <- newvar lang
+      ea2 <- newvar lang
+      let t' = FunU ea1 ea2
+          g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
+      (g3, a', e2) <- check g2 e ea1
+      let f' = FunU a' (apply g3 ea2)
+      return (g3, f', e2)
+    -- if the variable has already been solved, use solved value
+    Nothing -> case lookupU v g of
+      (Just (FunU t1 t2)) -> do
+        (g2, _, e2) <- check g e t1
+        return (g2, FunU t1 t2, e2)
+      _ -> Left ApplicationOfNonFunction
+    
 
-application _ e t = undefined
+application _ _ _ = Left ApplicationOfNonFunction
 
 
 
