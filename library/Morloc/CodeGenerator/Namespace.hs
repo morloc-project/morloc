@@ -62,14 +62,9 @@ data NexusCommand = NexusCommand
 instance Typelike TypeP where
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
-  typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
-  typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
-  typeOf (NamP r (PV lang _ t) ps es)
-    = NamT r (TV (Just lang) t)
-             (map typeOf ps)
-             (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+  typeOf (CatP k t1 t2) = CatT k (typeOf t1) (typeOf t2)
 
-  decompose (FunP t1 t2) = case decompose t2 of 
+  decompose (CatP CatTypeFun t1 t2) = case decompose t2 of 
     (ts, finalType) -> (t1:ts, finalType) 
   decompose t = ([], t)
 
@@ -218,15 +213,17 @@ data ExprM f
 instance HasOneLanguage (TypeP) where
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
-  langOf' (FunP t _) = langOf' t
-  langOf' (ArrP (PV lang _ _) _) = lang
-  langOf' (NamP _ (PV lang _ _) _ _) = lang
+  langOf' (CatP _ ( langOf' -> l1) (langOf' -> l2))
+    | l1 == l2 = l1
+    | otherwise = error "Language mismatch - this is a compiler logic bug"
+
 
 instance HasOneLanguage (TypeM) where
   langOf Passthrough = Nothing 
   langOf (Serial t) = langOf t
   langOf (Native t) = langOf t
   langOf (Function _ t) = langOf t
+
 
 instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang

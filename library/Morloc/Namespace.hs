@@ -27,6 +27,7 @@ module Morloc.Namespace
   , GType(..)
   , gtype
   , EVar(..)
+  , TVar(..)
   , MVar(..)
   , Name(..)
   , Path
@@ -207,7 +208,13 @@ data TermTypes = TermTypes {
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
-data CatTag = List | Tuple | Record | Entry | Application
+data CatTag
+  = CatTagLst
+  | CatTagTup
+  | CatTagRec
+  | CatTagEnt
+  | CatTagApp
+  deriving(Show, Ord, Eq)
 
 -- | Terms, see Dunfield Figure 1
 data Expr
@@ -474,7 +481,7 @@ newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data EVar = EV Text deriving (Show, Eq, Ord)
 
-data (TVar a) = TV a Text deriving(Show, Eq, Ord)
+data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
 
 -- | Let the TVar type behave like the MVar newtype
 unTVar :: TVar -> Text
@@ -557,6 +564,7 @@ data CatType
   = CatTypeFun
   | CatTypeArr
   | CatTypeNamed NamType TVar [TVar]
+  deriving(Show, Ord, Eq)
 
 -- | A basic type
 data Type
@@ -603,12 +611,10 @@ instance HasOneLanguage Source where
   langOf' s = srcLang s
 
 unresolvedType2type :: TypeU -> Type 
-unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (FunU t1 t2) = FunT (unresolvedType2type t1) (unresolvedType2type t2) 
-unresolvedType2type (ArrU v ts) = ArrT v (map unresolvedType2type ts)
-unresolvedType2type (NamU r v ts rs) = NamT r v (map unresolvedType2type ts) (zip (map fst rs) (map (unresolvedType2type . snd) rs))
 unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
+unresolvedType2type (VarU v) = VarT v
+unresolvedType2type (CatU k t1 t2) = CatT k (unresolvedType2type t1) (unresolvedType2type t2)
 
 
 data Property
@@ -639,13 +645,13 @@ class Typelike a where
 
   nargs :: a -> Int
   nargs t = case typeOf t of
-    (FunT _ t') -> 1 + nargs t'
+    (CatT CatTypeFun _ t') -> 1 + nargs t'
     _ -> 0
 
 instance Typelike Type where
   typeOf = id
 
-  decompose (FunT t1 t2) = case decompose t2 of
+  decompose (CatT CatTypeFun t1 t2) = case decompose t2 of
     (ts, finalType) -> (t1:ts, finalType) 
   decompose t = ([], t)
 
@@ -666,16 +672,9 @@ instance HasOneLanguage CType where
 instance HasOneLanguage Type where
   langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
-  langOf x@(FunT t1 t2)
+  langOf t@(CatT _ t1 t2)
     | langOf t1 == langOf t2 = langOf t1
-    | otherwise = error $ "inconsistent languages in" <> show x
-  langOf x@(ArrT (TV lang _) ts)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (NamT _ _ _ []) = error "empty records are not allowed"
-  langOf x@(NamT _ (TV lang _) _ ts)
-    | all ((==) lang) (map (langOf . snd) ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
+    | otherwise = error $ "inconsistent languages in" <> show t
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
@@ -688,16 +687,9 @@ instance HasOneLanguage TypeU where
   langOf x@(ForallU (TV lang _) t)
     | lang == langOf t = lang
     | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(FunU t1 t2)
+  langOf x@(CatU _ t1 t2)
     | langOf t1 == langOf t2 = langOf t1
     | otherwise = error $ "inconsistent languages in" <> show x
-  langOf x@(ArrU (TV lang _) ts)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x 
-  langOf (NamU _ _ _ []) = error "empty records are not allowed"
-  langOf x@(NamU _ (TV lang _) _ rs)
-    | all ((==) lang) (map (langOf . snd) rs) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
 
 
 metaConstraints :: Int -> MorlocMonad [Constraint]
