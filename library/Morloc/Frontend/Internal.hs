@@ -35,10 +35,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   setDefaults (ExistU _ _ (d:_)) = setDefaults d
   setDefaults t@(VarU _) = t
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
-  setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t2)
-  setDefaults (ArrU v ts) = ArrU v (map setDefaults ts)
-  setDefaults (NamU r v ts es)
-    = NamU r v (map setDefaults ts) (zip (map fst es) (map (setDefaults . snd) es))
+  setDefaults (CatU k t1 t2) = CatU k (setDefaults t1) (setDefaults t2)
 
   variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
@@ -53,11 +50,8 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       ++ map findExistentials ts
       ++ map findExistentials ds
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
-  findExistentials (FunU t1 t2) =
+  findExistentials (CatU _ t1 t2) =
     Set.union (findExistentials t1) (findExistentials t2)
-  findExistentials (ArrU _ ts) = Set.unions (map findExistentials ts)
-  findExistentials (NamU _ _ ts rs)
-    = Set.unions (map findExistentials ts ++ map (findExistentials . snd) rs)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
   generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
@@ -67,18 +61,16 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
         | v == v' = VarU (TV lang0 (unName r0))
         | otherwise = t1
       f v (ExistU v' ts _)
-        | v == v' = ArrU (TV lang0 (unName r0)) (map (f v) ts)
-        | otherwise = ArrU v (map (f v) ts)
-      f v (FunU t1 t2) = FunU (f v t1) (f v t2)
+        | v == v' = arr lang0 (unName r0) (map (f v) ts)
+        | otherwise = arr lang0 (unTVar v) (map (f v) ts)
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)
         | otherwise = t1
-      f v (ArrU v' xs) = ArrU v' (map (f v) xs)
-      f v (NamU r v' ts xs) = NamU r v' (map (f v) ts) [(k, f v t) | (k, t) <- xs]
-      f _ t1 = t1
+      f v (CatU k t1 t2) = CatU k (f v t1) (f v t2)
 
-
-
+      arr :: Maybe Lang -> MT.Text -> [TypeU] -> TypeU
+      arr l v (t:ts) = CatU CatTypeArr t (arr l v ts)
+      arr l v [] = CatU CatTypeArr (VarU (TV l v)) NulU
 
 
 -- class HasManyLanguages a where

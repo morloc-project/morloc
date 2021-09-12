@@ -76,11 +76,10 @@ checkForSelfRecursion d = do
 
     -- check if a given term appears in a type
     hasTerm :: TVar -> TypeU -> Bool
+    hasTerm _ NulU = False
     hasTerm v (VarU v') = v == v'
     hasTerm v (ForallU _ t) = hasTerm v t
-    hasTerm v (FunU t1 t2) = hasTerm v t1 || hasTerm v t2
-    hasTerm v (ArrU v0 ts) = v == v0 || any (hasTerm v) ts
-    hasTerm v (NamU _ _ _ rs) = any (hasTerm v) (map snd rs)
+    hasTerm v (CatU _ t1 t2) = hasTerm v t1 || hasTerm v t2
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
 desugarDag
@@ -141,11 +140,9 @@ desugarType h d k t0 = f t0 where
     ts' <- mapM f ts
     ds' <- mapM f ds
     return $ ExistU v ts' ds'
-  f (ForallU v t) = ForallU v <$> f t
-  f (FunU t1 t2) = FunU <$> f t1 <*> f t2
-  f (ArrU v ts) =
-    case Map.lookup v h of
-      (Just []) -> ArrU v <$> mapM f ts
+  f t@(CatU CatTypeArr t1 t2) = case decompose t of
+    (ts, VarU v) -> case Map.lookup v h of
+      (Just []) -> CatU CatTypeArr <$> f t1 <*> f t2
       (Just (t':ts')) -> do
         (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
@@ -153,10 +150,8 @@ desugarType h d k t0 = f t0 where
           then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
       Nothing -> MM.throwError . CallTheMonkeys $ "Type term in ArrU missing from type map"
-  f (NamU r v ts rs) = do
-    let keys = map fst rs
-    vals <- mapM f (map snd rs)
-    return (NamU r v ts (zip keys vals))
+    (_, _) -> MM.throwError . CallTheMonkeys $ "ArrU has an illegal type"
+  f (CatU k t1 t2) = CatU k <$> f t1 <*> f t2
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
@@ -164,9 +159,7 @@ desugarType h d k t0 = f t0 where
     | otherwise = t1 -- keep the original
   parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
-  parsub pair (FunU a b) = FunU (parsub pair a) (parsub pair b)
-  parsub pair (ArrU v ts) = ArrU v (map (parsub pair) ts)
-  parsub pair (NamU r v ts rs) = NamU r v (map (parsub pair) ts) (zip (map fst rs) (map (parsub pair . snd) rs))
+  parsub pair (CatU k a b) = CatU k (parsub pair a) (parsub pair b)
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
   mergeAliases
@@ -188,13 +181,12 @@ desugarType h d k t0 = f t0 where
 -- | Resolve existentials by choosing the first default type (if it exists)
 -- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary
 chooseExistential :: TypeU -> TypeU
+chooseExistential NulU = NulU
 chooseExistential (VarU v) = VarU v
 chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
 chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
-chooseExistential (FunU t1 t2) = FunU (chooseExistential t1) (chooseExistential t2)
-chooseExistential (ArrU v ts) = ArrU v (map chooseExistential ts)
-chooseExistential (NamU r v ts recs) = NamU r v (map chooseExistential ts) (zip (map fst recs) (map (chooseExistential . snd) recs))
+chooseExistential (CatU k t1 t2) = CatU k (chooseExistential t1) (chooseExistential t2)
 
 
 -- addPackerMap

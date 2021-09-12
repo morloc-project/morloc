@@ -267,8 +267,8 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f args (AccM e k) = do
     (ms, e', ps) <- f args e
-    x <- case typeOfTypeM (typeOfExprM e) of
-      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
+    x <- case fmap decompose (typeOfTypeM (typeOfExprM e)) of
+      (Just ((CatP r _ _):_, VarP v)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
       _ -> MM.throwError . CallTheMonkeys $ "Bad record access"
     return (ms, x, ps)
 

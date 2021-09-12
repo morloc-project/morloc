@@ -231,16 +231,16 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     (ms, e', ps) <- f args e
     return (ms, e' <> "$" <> pretty k, ps)
 
-  f args (ListM t es) = do
-    (mss', es', rss) <- mapM (f args) es |>> unzip3
-    x' <- return $ case t of
-      (Native (ArrP _ [VarP et])) -> case et of
-        (PV _ _ "numeric") -> "c" <> tupled es'
-        (PV _ _ "logical") -> "c" <> tupled es'
-        (PV _ _ "character") -> "c" <> tupled es'
-        _ -> "list" <> tupled es'
-      _ -> "list" <> tupled es'
-    return (concat mss', x', concat rss)
+  f args (ListM t es) = undefined -- do
+    -- (mss', es', rss) <- mapM (f args) es |>> unzip3
+    -- x' <- return $ case t of
+    --   (Native (CatP _ (CatP _ (VarP et) _))) -> case et of
+    --     (PV _ _ "numeric") -> "c" <> tupled es'
+    --     (PV _ _ "logical") -> "c" <> tupled es'
+    --     (PV _ _ "character") -> "c" <> tupled es'
+    --     _ -> "list" <> tupled es'
+    --   _ -> "list" <> tupled es'
+    -- return (concat mss', x', concat rss)
 
   f args (TupleM _ es) = do
     (mss', es', rss) <- mapM (f args) es |>> unzip3

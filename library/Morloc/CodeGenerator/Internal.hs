@@ -10,6 +10,7 @@ Stability   : experimental
 module Morloc.CodeGenerator.Internal
 (
     weaveTypes
+  , weaveTypes'
   , weaveResolvedTypes
   , weaveTypesGCP
   , weaveTypesGCM
@@ -25,37 +26,31 @@ weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
     $ "Expected a language-specific type as the second argument"
   (Just _, _) -> MM.throwError . CallTheMonkeys
     $ "Expected a general type as the first argument"
-  (_, Just lang) -> return $ f lang g0 t0
-  where
-    f :: Lang -> Maybe Type -> Type -> TypeP
+  (_, Just lang) -> return $ w lang g0 t0
 
-    f lang (Just (UnkT (TV _ v1))) (UnkT (TV _ v2)) = UnkP (PV lang (Just v1) v2)
-    f lang _ (UnkT (TV _ v)) = UnkP (PV lang Nothing v)
+weaveTypes' :: Type -> Type -> TypeP
+weaveTypes' gt ct = w (langOf' ct) (Just gt) ct
 
-    f lang (Just (VarT (TV _ v1))) (VarT (TV _ v2)) = VarP (PV lang (Just v1) v2)
-    f lang _ (VarT (TV _ v2)) = VarP (PV lang Nothing v2)
+w :: Lang -> Maybe Type -> Type -> TypeP
+w lang _ NulT = NulP
+w lang (Just (UnkT (TV _ v1))) (UnkT (TV _ v2)) = UnkP (PV lang (Just v1) v2)
+w lang _ (UnkT (TV _ v)) = UnkP (PV lang Nothing v)
+w lang (Just (VarT (TV _ v1))) (VarT (TV _ v2)) = VarP (PV lang (Just v1) v2)
+w lang _ (VarT (TV _ v2)) = VarP (PV lang Nothing v2)
+w lang (Just (CatT gk t11 t12)) (CatT ck t21 t22)
+  = CatP (mergeCat (Just gk) ck) (w lang (Just t11) t21) (w lang (Just t12) t22)
+w lang Nothing (CatT k t1 t2)
+  = CatP (mergeCat Nothing k) (w lang Nothing t1) (w lang Nothing t2)
 
-    f lang (Just (FunT t11 t12)) (FunT t21 t22)
-      = FunP (f lang (Just t11) t21) (f lang (Just t12) t22)
-    f lang _ (FunT t1 t2)
-      = FunP (f lang Nothing t1) (f lang Nothing t2)
-
-    f lang (Just (ArrT (TV _ v1) ts1)) (ArrT (TV _ v2) ts2)
-      = ArrP (PV lang (Just v1) v2) (zipWith (f lang) (map Just ts1) ts2)
-    f lang _ (ArrT (TV _ v) ts)
-      = ArrP (PV lang Nothing v) (map (f lang Nothing) ts)
-
-    f lang (Just (NamT _ (TV _ v1) ts1 rs1)) (NamT r2 (TV _ v2) ts2 rs2)
-      = NamP r2 (PV lang (Just v1) v2) (zipWith (f lang) (map Just ts1) ts2)
-      $ zip
-        (zipWith (PV lang) (map (Just . fst) rs1) (map fst rs2))
-        (zipWith (f lang) (map (Just . snd) rs1) (map snd rs2))
-    f lang _ (NamT r (TV _ v) ts rs)
-      = NamP r (PV lang Nothing v) (map (f lang Nothing) ts)
-      $ zip
-        (map (PV lang Nothing) (map fst rs))
-        (map (f lang Nothing) (map snd rs))
-
+mergeCat :: Maybe CatType -> CatType -> CatTypeP
+mergeCat _ CatTypeFun = CatTypeFunP
+mergeCat _ CatTypeArr = CatTypeArrP
+mergeCat _ CatTypeEnt = CatTypeEntP
+mergeCat Nothing (CatTypeRec t ps)
+  = CatTypeRecP t [PV lang Nothing v | (TV (Just lang) v) <- ps]
+mergeCat (Just (CatTypeRec _ psg)) (CatTypeRec t psc)
+  = CatTypeRecP t [PV lang (Just vg) vc | (TV _ vg, TV (Just lang) vc) <- zip psg psc]
+mergeCat _ _ = undefined
 
 weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
 weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
@@ -63,21 +58,13 @@ weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
     $ "Expected a language-specific type as the second argument"
   (Just _, _) -> MM.throwError . CallTheMonkeys
     $ "Expected a general type as the first argument"
-  (_, Just lang) -> return $ f lang g0 t0
+  (Nothing, Just lang) -> return $ f lang g0 t0
   where
     f :: Lang -> Type -> Type -> TypeP
+    f _ NulT NulT = NulP
     f lang (UnkT (TV _ v1)) (UnkT (TV _ v2)) = UnkP (PV lang (Just v1) v2)
     f lang (VarT (TV _ v1)) (VarT (TV _ v2)) = VarP (PV lang (Just v1) v2)
-    f lang (FunT t11 t12) (FunT t21 t22)
-      = FunP (f lang t11 t21) (f lang t12 t22)
-    f lang (ArrT (TV _ v1) ts1) (ArrT (TV _ v2) ts2)
-      = ArrP (PV lang (Just v1) v2) (zipWith (f lang) ts1 ts2)
-    f lang (NamT _ (TV _ v1) ts1 rs1) (NamT r2 (TV _ v2) ts2 rs2)
-      = NamP r2 (PV lang (Just v1) v2) (zipWith (f lang) ts1 ts2)
-      $ zip
-        (zipWith (PV lang) (map (Just . fst) rs1) (map fst rs2))
-        (zipWith (f lang) (map snd rs1) (map snd rs2))
-
+    f lang (CatT gk t11 t12) (CatT ck t21 t22) = CatP (mergeCat (Just gk) ck) (f lang t11 t21) (f lang t12 t22)
 
 weaveTypesGCP :: (Indexed Type) -> Type -> MorlocMonad TypeP
 weaveTypesGCP (Idx i _) t = metaType i >>= (flip weaveTypes) t
@@ -86,7 +73,7 @@ weaveTypesGCM :: (Indexed Type) -> Type -> MorlocMonad TypeM
 weaveTypesGCM (Idx i _) t = metaType i >>= (flip weaveTypes) t |>> typeP2typeM
 
 typeP2typeM :: TypeP -> TypeM
-typeP2typeM f@(FunP _ _) = case decompose f of
+typeP2typeM f@(CatP CatTypeFunP _ _) = case decompose f of
   (inputs, output) -> Function (map typeP2typeM inputs) (typeP2typeM output)
 typeP2typeM (UnkP _) = Passthrough
 typeP2typeM t = Native t

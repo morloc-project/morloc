@@ -648,10 +648,11 @@ generateSourcedSerializers es0
     showDefType ps (VarT v@(TV _ s))
       | elem v ps = "T" <> pretty s
       | otherwise = pretty s
-    showDefType _ (FunT _ _) = error "Cannot serialize functions"
-    showDefType ps (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
-    showDefType ps (NamT _ (TV _ v) ts _)
-      = pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+    showDefType _ _ = undefined
+    -- showDefType _ (FunT _ _) = error "Cannot serialize functions"
+    -- showDefType ps (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
+    -- showDefType ps (NamT _ (TV _ v) ts _)
+    --   = pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
 
 
 makeTemplateHeader :: [MDoc] -> MDoc

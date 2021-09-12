@@ -84,7 +84,7 @@ pMain = (ModE (MVar "Main") <$> fmap concat (many pTopExpr)) >>= exprI
 -- | Expressions including ones that are allowed only at the top-level of a scope
 pTopExpr :: Parser [ExprI]
 pTopExpr = 
-      try (plural pImport) -- TODO simplify Import expression to be singular
+      try (plural pImport)
   <|> try (plural pExport) -- TODO allow many exports from one statement
   <|> try (plural pTypedef)
   <|> try (plural pDeclaration)
@@ -99,15 +99,15 @@ pTopExpr =
 pExpr :: Parser ExprI
 pExpr =
       try pAcc
-  <|> try pNamE
-  <|> try pTuple
+  <|> try pRecE
+  <|> try pTupE
   <|> try pUni
   <|> try pAnn
   <|> try pApp
   <|> try pStrE
   <|> try pLogE
   <|> try pNumE
-  <|> pListE
+  <|> pLstE
   <|> parens pExpr
   <|> pLam
   <|> pVar
@@ -164,7 +164,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
-    entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
+    entries <- braces (sepBy1 pRecEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
     let t = NamU r (TV lang constructor) (map VarU vs) entries
     setLang Nothing
     exprI (TypE v vs t)
@@ -324,54 +324,62 @@ pSrcE = do
     a <- option n (reserved "as" >> freename)
     return (Name n, EV a, t)
 
-pListE :: Parser ExprI
-pListE = brackets (sepBy pExpr (symbol ",")) >>= container List
 
-pTuple :: Parser ExprI
-pTuple = do
+pLstE :: Parser ExprI
+pLstE = brackets (sepBy pExpr (symbol ",")) >>= foldlM consM LstE where
+  consM :: (ExprI -> ExprI -> ExprI) -> [ExprI] -> Parser ExprI
+  consM t [] = exprI $ t UniE UniE
+  consM t [x] = exprI $ t x UniE
+  consM t (x:xs) = (t x <$> consM t xs) >>= exprI 
+
+
+pTupE :: Parser ExprI
+pTupE = do
   _ <- symbol "("
   e <- pExpr
   _ <- symbol ","
   es <- sepBy1 pExpr (symbol ",")
   _ <- symbol ")"
-  container Tuple (e:es)
+  return $ foldTuple (e:es)
+  where
+    foldTuple [ExprI] -> Parser ExprI
+    foldTuple [] -> exprI $ TupE NulE NulE
+    foldTuple [x] -> exprI $ TupE NulE x
+    foldTuple (x:xs) -> (TupE <$> foldTuple [x] <*> foldTuple xs) >>= exprI
 
-pNamE :: Parser ExprI
-pNamE = do
-  es <- braces (sepBy1 pNamEntryE (symbol ","))
-  container Record es
 
-pNamEntryE :: Parser ExprI
-pNamEntryE = do
-  n <- freename >>= exprI
+pRecE :: Parser ExprI
+pRecE = braces (sepBy1 pRecEntryE (symbol ",")) >>= foldRecord where
+  foldRecord :: [(Mt.Text, ExprI)] -> ExprI 
+  foldRecord [] = error "sepBy1 guaranttees this cannot happen"
+  foldRecord [x] = RecE NulE x 
+  foldRecord (x:xs) = (RecE <$> foldRecord [x] <*> foldRecord xs) >>= exprI
+
+
+pRecEntryE :: Parser (MT.Text, ExprI)
+pRecEntryE = do
+  n <- freename
   _ <- symbol "="
   e <- pExpr
-  exprI $ CatE Entry n e
+  return (n, e)
 
-
-container :: CatTag -> [ExprI] -> Parser ExprI
-container t [] = exprI $ CatE t UniE UniE
-container t [x] = exprI $ CatE t x UniE
-container t xs = f' t xs where
-  f' _ [] = exprI UniE
-  f' _ [x] = x
-  f' t [x,y] = exprI $ CatE t x y
-  f' t (x:xs) = (CatE t x <$> f' t xs) >>= exprI
 
 pUni :: Parser ExprI
 pUni = symbol "Null" >> exprI UniE
 
+
 pAcc :: Parser ExprI
 pAcc = do
-  e <- parens pExpr <|> pNamE <|> pVar
+  e <- parens pExpr <|> pRecE <|> pVar
   _ <- symbol "@"
   f <- freename
   exprI $ AccE e f
 
+
 pAnn :: Parser ExprI
 pAnn = do
   e <-
-    parens pExpr <|> pVar <|> pListE <|> try pNumE <|> pLogE <|> pStrE
+    parens pExpr <|> pVar <|> pLstE <|> try pNumE <|> pLogE <|> pStrE
   _ <- op "::"
   t <- pTypeGen
   exprI $ AnnE e [t]
@@ -388,9 +396,9 @@ pApp = do
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE
-      <|> pListE
-      <|> pTuple
-      <|> pNamE
+      <|> pLstE
+      <|> pTupE
+      <|> pRecE
       <|> pVar
 
 
@@ -440,7 +448,7 @@ pType =
       pExistential
   <|> try pFunU
   <|> try pUniU
-  <|> try pNamU
+  <|> try pRecU
   <|> try pArrU
   <|> try parensType
   <|> pListU
@@ -468,15 +476,22 @@ pTupleU = do
   ts <- parens (sepBy1 pType (symbol ","))
   return $ head (MLD.defaultTuple lang ts)
 
-pNamU :: Parser TypeU
-pNamU = do
+pRecU :: Parser TypeU
+pRecU = do
   _ <- tag (symbol "{")
-  entries <- braces (sepBy1 pNamEntryU (symbol ","))
+  entries <- braces (sepBy1 pRecEntryU (symbol ","))
   lang <- CMS.gets stateLang
-  return $ head (MLD.defaultRecord lang entries)
+  let base = MLD.defaultRecord lang entries
+  return $ foldRecord entries
+  where
+    foldRecord :: [(Mt.Text, TypeU)] -> TypeU 
+    foldRecord [] = error "sepBy1 guaranttees this cannot happen"
+    foldRecord [x] = RecE NulE x 
+    foldRecord (x:xs) = (RecE <$> foldRecord [x] <*> foldRecord xs) >>= exprI
 
-pNamEntryU :: Parser (MT.Text, TypeU)
-pNamEntryU = do
+
+pRecEntryU :: Parser (MT.Text, TypeU)
+pRecEntryU = do
   n <- freename
   _ <- op "::"
   t <- pType
@@ -495,7 +510,7 @@ pArrU = do
   args <- many1 pType'
   return $ ArrU t args
   where
-    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
+    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 
 pFunU :: Parser TypeU
 pFunU = do
@@ -504,7 +519,7 @@ pFunU = do
   ts <- sepBy1 (pType') (op "->")
   return $ foldr1 FunU (t : ts)
   where
-    pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
+    pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 
 pListU :: Parser TypeU
 pListU = do

@@ -10,6 +10,7 @@ Stability   : experimental
 module Morloc.Frontend.Pretty
   ( module Morloc.Pretty
   , prettyExpr
+  , prettyExprI
   , prettyParserError
   ) where
 
@@ -25,43 +26,44 @@ import Data.Void (Void)
 prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
 prettyParserError = undefined
 
-prettyExpr :: ExprI -> Doc AnsiStyle
-prettyExpr (ExprI _ UniE) = "()"
-prettyExpr (ExprI _ (ModE v es)) = align . vsep $ ("module" <+> pretty v) : map prettyExpr es
-prettyExpr (ExprI _ (TypE v vs t)) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenTypeU t
-prettyExpr (ExprI _ (ImpE (Import m Nothing _ _))) = "import" <+> pretty m 
-prettyExpr (ExprI _ (ImpE (Import m (Just xs) _ _)))
+prettyExprI :: ExprI -> Doc AnsiStyle
+prettyExprI (ExprI _ e) = prettyExpr e
+
+prettyExpr :: Expr -> Doc AnsiStyle
+prettyExpr UniE = "()"
+prettyExpr (ModE v es) = align . vsep $ ("module" <+> pretty v) : map prettyExprI es
+prettyExpr (TypE v vs t) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> prettyGreenTypeU t
+prettyExpr (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
+prettyExpr (ImpE (Import m (Just xs) _ _))
   = "import" <+> pretty m
   <+> tupled [dquotes (pretty n) <+> "as" <+> pretty alias | (n,alias) <- xs] 
-prettyExpr (ExprI _ (ExpE v)) = "export" <+> pretty v
-prettyExpr (ExprI _ (VarE s)) = pretty s
-prettyExpr (ExprI _ (AccE e k)) = parens (prettyExpr e) <> "@" <> pretty k 
-prettyExpr (ExprI _ (LamE vs e)) = "\\" <> pretty (MT.unwords [v | (EV v) <- vs]) <+> "->" <+> prettyExpr e
-prettyExpr (ExprI _ (AnnE e ts)) = parens
-  $   prettyExpr e
+prettyExpr (ExpE v) = "export" <+> pretty v
+prettyExpr (VarE s) = pretty s
+prettyExpr (AccE e k) = parens (prettyExprI e) <> "@" <> pretty k 
+prettyExpr (LamE v e) = "\\" <+> pretty v <+> "->" <+> prettyExprI e
+prettyExpr (AnnE e ts) = parens
+  $   prettyExprI e
   <+> "::"
   <+> encloseSep "(" ")" "; " (map prettyGreenTypeU ts)
-prettyExpr (ExprI _ (AppE f es)) = prettyExpr f <+> hsep (map (parens . prettyExpr) es)
-prettyExpr (ExprI _ (NumE x)) = pretty (show x)
-prettyExpr (ExprI _ (StrE x)) = dquotes (pretty x)
-prettyExpr (ExprI _ (LogE x)) = pretty x
-prettyExpr (ExprI _ (Declaration v e es)) = pretty v <+> "=" <+> prettyExpr e <+> "where" <+> (align . vsep . map prettyExpr) es
-prettyExpr (ExprI _ (ListE xs)) = list (map prettyExpr xs)
-prettyExpr (ExprI _ (TupleE xs)) = tupled (map prettyExpr xs)
-prettyExpr (ExprI _ (SrcE (Source name lang file alias label)))
+prettyExpr t@(CatE k _ _) = case (decomposeFull t, k) of
+  (xs, CatTagLst) -> list $ map prettyExpr xs
+  (xs, CatTagTup) -> tupled $ map prettyExpr xs
+  (xs, CatTagApp) -> hsep $ map (parens . prettyExpr) xs
+  (xs, CatTagRec) -> encloseSep "{" "}" ", " (map prettyExpr xs)
+  ([k,v], CatTagEnt) -> prettyExpr k <+> "=" <+> prettyExpr v
+  (_, CatTagEnt) -> error "Malformed record entry"
+prettyExpr (NumE x) = pretty (show x)
+prettyExpr (StrE x) = dquotes (pretty x)
+prettyExpr (LogE x) = pretty x
+prettyExpr (Declaration v e es) = pretty v <+> "=" <+> prettyExprI e <+> "where" <+> (align . vsep . map prettyExprI) es
+prettyExpr (SrcE (Source name lang file alias label))
   = "source"
   <+> viaShow lang
   <> maybe "" (\f -> "from" <+> pretty f) file 
   <+> "("
   <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
   <> ")"
-prettyExpr (ExprI _ (RecE entries)) =
-  encloseSep
-    "{"
-    "}"
-    ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyExpr e) entries)
-prettyExpr (ExprI _ (Signature v _ e)) =
+prettyExpr (Signature v _ e) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle

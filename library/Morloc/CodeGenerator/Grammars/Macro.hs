@@ -9,7 +9,6 @@ Stability   : experimental
 
 module Morloc.CodeGenerator.Grammars.Macro
 (   expandMacro
-  , expandType
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -27,19 +26,6 @@ data ParserState = ParserState {
     stateParameters :: [MT.Text]
 }
 
-expandType
-  :: (MDoc -> [MDoc] -> MDoc) -- ^ make function type
-  -> (PVar -> [(PVar, MDoc)] -> MDoc) -- ^ make record type
-  -> TypeP
-  -> MDoc
-expandType mkfun mkrec t0 = f t0 where
-  f :: TypeP -> MDoc
-  f (VarP (PV _ _ v)) = pretty v
-  f t@(FunP t1 _) = mkfun (f t1) (map f (decomposeFull t))
-  f (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . f) ts)
-  f (NamP _ v _ entries) = mkrec v [(k, f t) | (k, t) <- entries]
-  f (UnkP _) = error "Cannot build unsolved type"
-
 expandMacro :: MT.Text -> [MT.Text] -> MT.Text
 expandMacro t [] = t
 expandMacro t ps =
@@ -49,6 +35,7 @@ expandMacro t ps =
          t of
     Left err -> error (show err)
     Right (es, _) -> es
+
 
 many1 :: Parser a -> Parser [a]
 many1 p = do

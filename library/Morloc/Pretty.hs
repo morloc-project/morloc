@@ -97,18 +97,12 @@ instance PrettyType Type where
   prettyType (UnkT (TV _ v)) = "*" <> pretty v
   prettyType (VarT (TV _ "Unit")) = "()"
   prettyType (VarT v) = pretty v
-  prettyType (FunT t1@(FunT _ _) t2) =
-    parens (prettyType t1) <+> "->" <+> prettyType t2
-  prettyType (FunT t1 t2) = prettyType t1 <+> "->" <+> prettyType t2
-  prettyType (ArrT (TV Nothing "List") [t]) = brackets (prettyType t)
-  prettyType (ArrT v ts) = pretty v <+> hsep (map prettyType ts)
-  prettyType (NamT _ (TV Nothing _) _ entries) =
-    encloseSep "{" "}" ","
-      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
-  prettyType (NamT _ (TV (Just lang) t) _ entries) =
-    pretty t <> "@" <> viaShow lang <+>
-    encloseSep "{" "}" ","
-      (map (\(v, e) -> pretty v <> ":" <> prettyType e) entries)
+  prettyType t@(CatT k _ _) = case (decompose t, k) of
+   ((ins, out), CatTypeFun) -> encloseSep "(" ")" " -> " (map prettyType (ins <> [out]) )
+   ((ins, out), CatTypeArr) -> encloseSep "(" ")" " " (map prettyType $ out : ins)
+   ((ins, out), CatTypeRec _ _) -> prettyType out <+> encloseSep "{" "}" "," (map prettyType ins)
+   (([key], val), CatTypeEnt) -> prettyType key <+> "=" <+> prettyType val 
+   _ -> error "Malformed or misplaced record entry"
 
 
 instance PrettyType GType where
@@ -130,17 +124,12 @@ prettyTypeU t@(ForallU _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
 prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU t1@(FunU _ _) t2) =
-  parens (prettyTypeU t1) <+> "->" <+> prettyTypeU t2
-prettyTypeU (FunU t1 t2) = prettyTypeU t1 <+> "->" <+> prettyTypeU t2
-prettyTypeU (ArrU v ts) = pretty v <+> hsep (map prettyTypeU ts)
-prettyTypeU (NamU r (TV Nothing _) _ entries) =
-  viaShow r <> encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyTypeU e) entries)
-prettyTypeU (NamU r (TV (Just lang) t) _ entries) =
-  pretty t <> "@" <> viaShow lang <+>
-  viaShow r <> encloseSep "{" "}" ", "
-    (map (\(v, e) -> pretty v <+> "=" <+> prettyTypeU e) entries)
+prettyTypeU t@(CatU k _ _) = case (decompose t, k) of
+   ((ins, out), CatTypeFun) -> encloseSep "(" ")" " -> " (map prettyTypeU (ins <> [out]) )
+   ((ins, out), CatTypeArr) -> encloseSep "(" ")" " " (map prettyTypeU $ out : ins)
+   ((ins, out), CatTypeRec _ _) -> prettyTypeU out <+> encloseSep "{" "}" "," (map prettyTypeU ins)
+   (([key], val), CatTypeEnt) -> prettyTypeU key <+> "=" <+> prettyTypeU val 
+   _ -> error "Malformed or misplaced record entry"
 
 prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
 prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep

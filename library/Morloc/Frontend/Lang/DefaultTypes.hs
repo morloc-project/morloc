@@ -16,48 +16,85 @@ needed.
 -}
 
 module Morloc.Frontend.Lang.DefaultTypes
-  ( defaultBool
+  (
+  -- * retrieve default types by language
+    defaultBool
   , defaultList
   , defaultNull
   , defaultNumber
   , defaultRecord
   , defaultString
   , defaultTuple
+  -- * dictionaries of base collection names
+  , listG
+  , listC
+  , tupleG
+  , tupleC
+  , recordG
+  , recordC
   ) where
 
 import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 
+
+listG :: MT.Text
+listG = "List"
+
+listC :: Lang -> [MT.Text]
+listC Python3Lang = ["list"]
+listC RLang = ["list"]
+listC CLang = ["$1*"]
+listC CppLang = ["std::vector<$1>"]
+listC RustLang = ["Vec<$1>"]
+listC PerlLang = ["array"]
+
 defaultList :: Maybe Lang -> TypeU -> [TypeU]
-defaultList lang@Nothing t = [ArrU (TV lang "List") [t]]
-defaultList lang@(Just Python3Lang) t = [ArrU (TV lang "list") [t]]
-defaultList lang@(Just RLang) t = [ArrU (TV lang "list") [t]]
-defaultList lang@(Just CLang) t = [ArrU (TV lang "$1*") [t]]
-defaultList lang@(Just CppLang) t = [ArrU (TV lang "std::vector<$1>") [t]]
-defaultList lang@(Just RustLang) t = [ArrU (TV lang "Vec<$1>") [t]]
-defaultList lang@(Just PerlLang) t = [ArrU (TV lang "array") [t]]
+defaultList Nothing t = [arr (TV Nothing listG) [t]]
+defaultList lang@(Just l) t = [arr (TV lang v) [t] | v <- listC l] 
+
+
+
+tupleG :: Int -> MT.Text
+tupleG i = MT.pack $ "Tuple" ++ show i
+
+tupleC :: Int -> Lang -> [MT.Text]
+tupleC i Python3Lang = ["tuple"]
+tupleC i RLang = ["tuple"]
+tupleC i CLang = []
+tupleC i CppLang =
+  let vars = ["$" <> MT.show' i | i <- [1..i]]
+  in ["std::tuple<" <> MT.intercalate "," vars <> ">"]
+tupleC i RustLang =
+  let vars = ["$" <> MT.show' i | i <- [1..i]]
+  in ["(" <> MT.intercalate "," vars <> ")"]
+tupleC i PerlLang = ["array"]
 
 defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
-defaultTuple lang@Nothing ts = [ArrU (TV lang (MT.pack $ "Tuple" ++ show (length ts))) ts]
-defaultTuple lang@(Just Python3Lang) ts = [ArrU (TV lang "tuple") ts]
-defaultTuple lang@(Just RLang) ts = [ArrU (TV lang "tuple") ts]
-defaultTuple      (Just CLang) _ = []
-defaultTuple lang@(Just CppLang) ts = [ArrU (TV lang t) ts] where
-  vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
-  t = "std::tuple<" <> MT.intercalate "," vars <> ">"
-defaultTuple lang@(Just RustLang) ts = [ArrU (TV lang t) ts] where
-  vars = ["$" <> MT.show' i | i <- [1 .. length ts]]
-  t = "(" <> MT.intercalate "," vars <> ")"
-defaultTuple lang@(Just PerlLang) ts = [ArrU (TV lang "array") ts]
+defaultTuple Nothing ts = [arr (TV Nothing (tupleG (length ts))) ts]
+defaultTuple lang@(Just l) ts = [arr (TV lang v) ts | v <- tupleC (length ts) l]
+
+
+
+recordG :: MT.Text
+recordG = "Record"
+
+recordC :: Lang -> [MT.Text]
+recordC Python3Lang = ["dict"]
+recordC RLang = ["list"]
+recordC CLang = []
+recordC CppLang = ["struct"]
+recordC RustLang = ["struct"]
+recordC PerlLang = ["hash"]
 
 defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
-defaultRecord lang@Nothing entries = [NamU NamRecord (TV lang "Record") [] entries]
-defaultRecord lang@(Just Python3Lang) entries = [NamU NamRecord (TV lang "dict") [] entries]
-defaultRecord lang@(Just RLang) entries = [NamU NamRecord (TV lang "list") [] entries]
-defaultRecord      (Just CLang) _ = []
-defaultRecord lang@(Just CppLang) entries = [NamU NamRecord (TV lang "struct") [] entries]
-defaultRecord lang@(Just RustLang) entries = [NamU NamRecord (TV lang "struct") [] entries]
-defaultRecord lang@(Just PerlLang) entries = [NamU NamRecord (TV lang "hash") [] entries]
+defaultRecord Nothing entries = [foldRecord (TV Nothing recordG) entries]
+defaultRecord lang@(Just l) entries = [foldRecord (TV lang v) entries | v <- recordC l]
+
+foldRecord :: TVar -> [(MT.Text, TypeU)] -> TypeU
+foldRecord v [] = RecU
+
+
 
 -- | This is the value returned by a functions that doesn't return, for example,
 -- an print statement. It needs to be defined even for languages that don't

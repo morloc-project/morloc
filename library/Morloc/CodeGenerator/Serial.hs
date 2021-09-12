@@ -20,13 +20,14 @@ module Morloc.CodeGenerator.Serial
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.Typecheck.Internal (resolve)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 
+-- extracts the language specific term from the paired term
 pv2tv :: PVar -> TVar
 pv2tv (PV lang _ v) = TV (Just lang) v
 
@@ -36,41 +37,35 @@ defaultListFirst t = defaultListAll t !! 0
 defaultTupleFirst :: [TypeP] -> TypeP
 defaultTupleFirst ts = defaultTupleAll ts !! 0
 
--- | A metaphor for America
+-- | An infinite line of dummies ...
 dummies :: Maybe Lang -> [TypeU]
 dummies lang = repeat $ VarU (TV lang "dummy")
 
 defaultListAll :: TypeP -> [TypeP]
-defaultListAll t =
-  [ ArrP (PV lang gtype v) [t]
-  | (ArrU (TV (Just lang) v) _) <- Def.defaultList (langOf t) (head (dummies (langOf t)))
-  ]
-  where
-    gtype = case Def.defaultList Nothing (head (dummies Nothing)) of
-      ((ArrU (TV _ v1) _):_) -> Just v1
-      _ -> Nothing
+defaultListAll t@(langOf' -> lang)
+  = [arrP (PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
 
 isList :: TypeP -> Bool
-isList (ArrP (PV lang _ v) [_]) =
-  let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
-  in length [v' | (ArrU (TV _ v') _) <- ds, v == v'] > 0
+isList t@(CatP CatTypeArrP _ _) = case decompose t of
+  (_, VarP (PV lang _ v)) ->
+    let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
+    in length [v' | (_, VarU (TV _ v')) <- map decompose ds, v == v'] > 0
+  _ -> False
 isList _ = False
 
 defaultTupleAll :: [TypeP] -> [TypeP]
 defaultTupleAll [] = error $ "Illegal empty tuple"
 defaultTupleAll ts@(t:_) =
-    [ ArrP (PV lang gtype v) ts
-    | (ArrU (TV (Just lang) v) _) <- Def.defaultTuple (langOf t) (take (length ts) (dummies (langOf t)))
-    ]
-  where
-    gtype = case Def.defaultTuple Nothing (take (length ts) (dummies Nothing)) of
-      ((ArrU (TV _ v1) _):_) -> Just v1
-      _ -> Nothing
+  let lang = langOf' t
+      gt = Just $ Def.tupleG (length ts)
+      cts = Def.tupleC (length ts) lang
+  in [arrP (PV lang gt ct) ts | ct <- cts]
+
 
 isTuple :: TypeP -> Bool
-isTuple (ArrP (PV lang _ v) ts) =
-  let ds = Def.defaultTuple (Just lang) (take (length ts) (dummies (Just lang)))
-  in length [v' | (ArrU (TV _ v') _) <- ds, v == v'] > 0
+isTuple t@(CatP CatTypeArrP _ _) = case decompose t of
+  (length -> i, VarP (PV lang _ v)) -> elem v (Def.tupleC i lang)
+  _ -> False
 isTuple _ = False
 
 isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
@@ -89,9 +84,9 @@ serialAstToType :: SerialAST One -> MorlocMonad TypeP
 serialAstToType (SerialPack _ (One (_, s))) = serialAstToType s
 serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
 serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
-serialAstToType (SerialObject r v ps rs) = do
-  rs' <- mapM (serialAstToType . snd) rs
-  return $ NamP r v ps (zip (map fst rs) rs')
+serialAstToType (SerialObject k v ps rs) = do
+  ts <- mapM (serialAstToType . snd) rs
+  return $ recP (CatTypeRecP k ps) v (zip (map fst rs) ts)
 serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
@@ -105,7 +100,9 @@ serialAstToType' :: SerialAST One -> TypeP
 serialAstToType' (SerialPack _ (One (_, s))) = serialAstToType' s
 serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
 serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
-serialAstToType' (SerialObject r v ps rs) = NamP r v ps (zip (map fst rs) (map (serialAstToType' . snd) rs))
+serialAstToType' (SerialObject r v ps rs)
+  = let rs' = zip (map fst rs) (map (serialAstToType' . snd) rs)
+    in recP (CatTypeRecP r ps) v rs'
 serialAstToType' (SerialNum    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
@@ -120,7 +117,7 @@ shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
 shallowType (SerialObject r v ps rs) = do
   ts <- mapM shallowType (map snd rs)
-  return $ NamP r v ps (zip (map fst rs) ts)
+  return $ recP (CatTypeRecP r ps) v (zip (map fst rs) ts)
 shallowType (SerialNum    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
@@ -138,14 +135,15 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
   | isPrimitiveType Def.defaultString t = return $ SerialString v
   | isPrimitiveType Def.defaultNumber t = return $ SerialNum    v
-  | otherwise = makeSerialAST m (ArrP v [])
-makeSerialAST _ (FunP _ _)
+  | otherwise = makeSerialAST m (CatP CatTypeArrP t NulP)
+makeSerialAST _ (CatP CatTypeFunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST m t@(ArrP v@(PV _ _ s) ts)
-  | isList t = SerialList <$> makeSerialAST m (ts !! 0)
-  | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
-  | otherwise = case Map.lookup (pv2tv v, length ts) m of
+makeSerialAST m t@(CatP CatTypeArrP t1 _) = case decompose t of
+  (ts, VarP v@(PV _ _ s)) -> case (isList t, isTuple t) of 
+    (True, _) -> SerialList <$> makeSerialAST m t1 
+    (_, True) -> SerialTuple <$> mapM (makeSerialAST m) (fst . decompose $ t1)
+    (_, _) -> case Map.lookup (pv2tv v, length ts) m of
       (Just ps) -> do
         ps' <- mapM (resolvePacker t ts) ps
         ts' <- mapM (makeSerialAST m) (map typePackerType ps')
@@ -154,22 +152,20 @@ makeSerialAST m t@(ArrP v@(PV _ _ s) ts)
         $ "Cannot find constructor" <+> dquotes (pretty s)
         <> "<" <> pretty (length ts) <> ">"
         <+> "in packmap:\n" <> prettyPackMap m
-makeSerialAST m (NamP r v ps rs) = do
-  ts <- mapM (makeSerialAST m) (map snd rs)
-  return $ SerialObject r v ps (zip (map fst rs) ts)
+  (_, _) -> MM.throwError . CallTheMonkeys $ "Malformed Arr in makeSerialAST"
+makeSerialAST m t@(CatP (CatTypeRecP r ps) _ _) = case decompose t of 
+  (rs, VarP v) -> do 
+    ts <- mapM (makeSerialAST m) [t | (CatP CatTypeEntP _ t) <- rs]
+    let keys = [key | (CatP CatTypeEntP (VarP key) _) <- rs]
+    return $ SerialObject r v ps (zip keys ts)
 
 pvarEqual :: PVar -> PVar -> Bool
 pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
 
 typeEqual :: TypeP -> TypeP -> Bool
+typeEqual NulP NulP = True 
 typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
-typeEqual (ArrP v1 ts1) (ArrP v2 ts2)
-  | length ts1 /= length ts2 = False
-  | otherwise = foldl (&&) (pvarEqual v1 v2) (zipWith typeEqual ts1 ts2 )
-typeEqual (NamP _ v1 _ rs1) (NamP _ v2 _ rs2)
-  =  (pvarEqual v1 v2)
-  && map fst rs1 == map fst rs2
-  && foldl (&&) True (zipWith typeEqual (map snd rs1) (map snd rs2))
+typeEqual (CatP _ t11 t12) (CatP _ t21 t22) = typeEqual t11 t12 && typeEqual t21 t22 
 typeEqual _ _ = False
 
 
@@ -185,22 +181,9 @@ resolvePacker packedType ts u = do
 
 resolveType :: [TypeP] -> TypeU -> MorlocMonad TypeP
 resolveType [] (ForallU _ _) = MM.throwError . SerializationError $ "Packer parity error"
-resolveType [] u = weaveTypes Nothing (resolve u)
-resolveType (t:ts) (ForallU v u) = substituteP v t <$> resolveType ts u
+resolveType [] u = weaveTypes Nothing (typeOf u)
+resolveType (t:ts) (ForallU v u) = substituteTVar v t <$> resolveType ts u
 resolveType (_:_) _ = MM.throwError . SerializationError $ "Packer parity error"
-
--- | substitute all appearances of a given variable with a given new type
-substituteP :: TVar -> TypeP -> TypeP -> TypeP
-substituteP v0 r0 t0 = sub t0
-  where
-    sub :: TypeP -> TypeP
-    sub t'@(UnkP _) = t'
-    sub t'@(VarP (PV lang _ v'))
-      | v0 == (TV (Just lang) v') = r0
-      | otherwise = t'
-    sub (FunP t1 t2) = FunP (sub t1) (sub t2)
-    sub (ArrP v' ts) = ArrP v' (map sub ts)
-    sub (NamP r v' ps rs) = NamP r v' (map sub ps) [(x, sub t') | (x, t') <- rs]
 
 -- | Given serialization trees for two languages, where each serialization tree
 -- may contain, try to find

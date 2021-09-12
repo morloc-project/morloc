@@ -8,9 +8,7 @@ Stability   : experimental
 -}
 
 module Morloc.Frontend.PartialOrder (
-    substitute
-  , free
-  , isSubtypeOf
+    isSubtypeOf
   , equivalent
   , mostGeneral
   , mostSpecific
@@ -22,39 +20,6 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.PartialOrd as P
-
--- | substitute all appearances of a given variable with a given new type
-substitute :: TVar -> TypeU -> TypeU -> TypeU
-substitute v@(TV _ _) (ForallU q r) t = 
-  if Set.member (VarU q) (free t)
-  then
-    let q' = getNewVariable r t -- get unused variable name from [a, ..., z, aa, ...]
-        r' = substitute q (VarU q') r -- substitute the new variable into the unqualified type
-    in ForallU q' (substitute v r' t)
-  else
-    ForallU q (substitute v r t)
-substitute v r t = sub t
-  where
-    sub :: TypeU -> TypeU
-    sub t'@(VarU v')
-      | v == v' = r
-      | otherwise = t'
-    sub (FunU t1 t2) = FunU (sub t1) (sub t2)
-    sub t'@(ForallU x t'')
-      | v /= x = ForallU x (sub t'')
-      | otherwise = t' -- allows shadowing of the variable
-    sub (ArrU v' ts) = ArrU v' (map sub ts)
-    sub (NamU namType v' ts rs) = NamU namType v' (map sub ts) [(x, sub t') | (x, t') <- rs]
-    sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
-
-free :: TypeU -> Set.Set TypeU
-free v@(VarU _) = Set.singleton v
-free v@(ExistU _ [] _) = Set.singleton v
-free (ExistU v ts _) = Set.unions $ Set.singleton (ArrU v ts) : map free ts
-free (FunU t1 t2) = Set.union (free t1) (free t2)
-free (ForallU v t) = Set.delete (VarU v) (free t)
-free (ArrU _ xs) = Set.unions (map free xs)
-free (NamU _ _ _ rs) = Set.unions [free t | (_, t) <- rs]
 
 -- Types are partially ordered, 'forall a . a' is lower (more generic) than
 -- Int. But 'forall a . a -> a' cannot be compared to 'forall a . a', since
@@ -68,21 +33,10 @@ instance P.PartialOrd TypeU where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (FunU t11 t12) (FunU t21 t22)
-    =  (P.<=) t11 t21
+  (<=) (CatU k1 t11 t12) (CatU k2 t21 t22)
+    = k1 == k2
+    && (P.<=) t11 t21
     && (P.<=) t22 t12
-  (<=) (ArrU v1 []) (ArrU v2 []) = v1 == v2
-  (<=) (ArrU v1 ts1) (ArrU v2 ts2)
-    =  v1 == v2
-    && length ts1 == length ts2
-    && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (NamU _ v1 _ es1) (NamU _ v2 _ es2)
-    =  v1 == v2
-    && length ts1 == length ts2
-    && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-    where
-      ts1 = map snd es1
-      ts2 = catMaybes $ map (\(k,_) -> lookup k es2) es1
   (<=) (ForallU v t1) t2
     | (P.==) (ForallU v t1) t2 = True
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
@@ -91,36 +45,17 @@ instance P.PartialOrd TypeU where
   (==) (ForallU v1@(TV _ _) t1) (ForallU v2 t2) =
     if Set.member (VarU v1) (free t2)
     then
-      let v = getNewVariable t1 t2
-      in (P.==) (substitute v1 (VarU v) t1) (substitute v2 (VarU v) t2)
-    else (P.==) t1 (substitute v2 (VarU v1) t2)
+      let v = newVariable t1 t2
+      in (P.==) (substituteTVar v1 (VarU v) t1) (substituteTVar v2 (VarU v) t2)
+    else (P.==) t1 (substituteTVar v2 (VarU v1) t2)
   (==) a b = a == b
 
 -- Substitute all v for the first term in t2 that corresponds to v in t1. If v
 -- does not occur in t1, then t1 is returned unchanged (e.g., `forall a . Int`).
 substituteFirst :: TVar -> TypeU -> TypeU -> TypeU
 substituteFirst v t1 t2 = case findFirst v t1 t2 of
-  (Just t) -> substitute v t t1
+  (Just t) -> substituteTVar v t t1
   Nothing -> t1
-
--- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
-getNewVariable :: TypeU -> TypeU -> TVar
-getNewVariable t1 t2 = findNew variables (Set.union (allVars t1) (allVars t2))
-  where 
-    variables = [1 ..] >>= flip replicateM ['a' .. 'z']
-
-    findNew :: [String] -> Set.Set TypeU -> TVar
-    findNew [] _ = error "Could not fresh variable in an infinite list ... odd"
-    findNew (x:xs) ts
-      | Set.member (VarU v) ts = findNew xs ts 
-      | otherwise = v
-      where
-        v = TV (langOf t1) (MT.pack x)
-
-    allVars :: TypeU -> Set.Set TypeU
-    allVars (ForallU v t) = Set.union (Set.singleton (VarU v)) (allVars t)
-    allVars t = free t
-
 
 findFirst :: TVar -> TypeU -> TypeU -> Maybe TypeU
 findFirst v (VarU v') t2
@@ -128,22 +63,15 @@ findFirst v (VarU v') t2
   | otherwise = Nothing
 findFirst v (ForallU v1 t1) (ForallU v2 t2)
   | v == v1 = Nothing
-  | otherwise = findFirst v t1 (substitute v2 (VarU v1) t2)
+  | otherwise = findFirst v t1 (substituteTVar v2 (VarU v1) t2)
 findFirst v (ForallU v1 t1) t2
   | v == v1 = Nothing
-  | otherwise = findFirst v (substitute v1 (VarU v1) t1) t2
-findFirst v (FunU t11 t12) (FunU t21 t22)
-  = case (findFirst v t11 t21, findFirst v t12 t22) of
+  | otherwise = findFirst v (substituteTVar v1 (VarU v1) t1) t2
+findFirst v (CatU k1 t11 t12) (CatU k2 t21 t22)
+  | k1 == k2 = case (findFirst v t11 t21, findFirst v t12 t22) of
     (Just t, _) -> Just t
     (_, Just t) -> Just t
     _ -> Nothing
-findFirst v (ArrU _ ts1) (ArrU _ ts2)
-  = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
-findFirst v (NamU _ _ _ es1) (NamU _ _ _ es2)
-  = listToMaybe . catMaybes $ zipWith (findFirst v) ts1 ts2
-    where
-      ts1 = map snd es1
-      ts2 = catMaybes $ map (\(k,_) -> lookup k es2) es1
 findFirst _ _ _ = Nothing
 
 -- | is t1 a generalization of t2?

@@ -59,14 +59,13 @@ findSignatureTypeTerms = unique . f where
 
 -- | find all the non-generic terms in an unresolved type
 findTypeTerms :: TypeU -> [TVar]
+findTypeTerms NulU = []
 findTypeTerms (VarU v)
   | isGeneric v = [ ]
   | otherwise   = [v]
 findTypeTerms (ExistU _ es1 es2) = conmap findTypeTerms (es1 ++ es2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
-findTypeTerms (FunU e1 e2) = findTypeTerms e1 ++ findTypeTerms e2
-findTypeTerms (ArrU v es) = findTypeTerms (VarU v) ++ conmap findTypeTerms es
-findTypeTerms (NamU _ v es rs) = findTypeTerms (VarU v) ++ conmap findTypeTerms (es ++ map snd rs)
+findTypeTerms (CatU _ t1 t2) = findTypeTerms t1 ++ findTypeTerms t2
 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
@@ -81,22 +80,16 @@ checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()
 checkExprI f e@(ExprI _ (ModE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (AppE g es)) = f e >> checkExprI f g >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (Declaration _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (ListE es')) = f e >> mapM_ f es'
-checkExprI f e@(ExprI _ (RecE rs)) = f e >> mapM_ f (map snd rs)
-checkExprI f e@(ExprI _ (TupleE es')) = f e >> mapM_ f es'
+checkExprI f e@(ExprI _ (CatE _ e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
 checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
 maxIndex (ExprI i (ModE _ es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (AccE e _)) = max i (maxIndex e)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
-maxIndex (ExprI i (AppE f es)) = maximum ([i, maxIndex f] <> map maxIndex es)
 maxIndex (ExprI i (Declaration _ e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
-maxIndex (ExprI i (ListE es)) = maximum (i : map maxIndex es)
-maxIndex (ExprI i (TupleE es)) = maximum (i : map maxIndex es)
-maxIndex (ExprI i (RecE rs)) = maximum (i : map maxIndex (map snd rs))
+maxIndex (ExprI i (CatE _ e1 e2)) = maximum [i, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i _) = i

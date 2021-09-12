@@ -74,7 +74,7 @@ weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
-  pt <- weaveResolvedTypes gt (resolve ct)
+  pt <- weaveResolvedTypes gt (typeOf ct)
   x' <- case x of
     UniS -> return UniS
     (VarS v) -> return $ VarS v

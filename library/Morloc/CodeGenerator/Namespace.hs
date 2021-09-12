@@ -16,6 +16,8 @@ module Morloc.CodeGenerator.Namespace
   , JsonType(..)
   , PVar(..)
   , TypeP(..)
+  , arrP
+  , recP
   , JsonPath
   , JsonAccessor(..)
   , NexusCommand(..)
@@ -27,6 +29,7 @@ module Morloc.CodeGenerator.Namespace
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+import qualified Data.Set as Set
 
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
@@ -40,8 +43,20 @@ data PVar
 data TypeP
   = UnkP PVar
   | VarP PVar
-  | CatP CatType TypeP TypeP 
+  | NulP -- terminator
+  | FunP TypeP TypeP
+  | ArrP TypeP TypeP
+  | RecP NamType TypeP PVar TypeP
   deriving (Show, Ord, Eq)
+
+
+arrP :: PVar -> [TypeP] -> TypeP
+arrP p [] = CatP CatTypeArrP (VarP p) NulP
+arrP p (t:ts) = CatP CatTypeArrP t (arrP p ts)
+
+recP :: CatTypeP -> PVar -> [(PVar, TypeP)] -> TypeP 
+recP cat v [] = CatP cat (VarP v) NulP
+recP cat v ((k, t):rs) = CatP cat (CatP CatTypeEntP (VarP k) t) (recP cat v rs)
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor
@@ -60,20 +75,61 @@ data NexusCommand = NexusCommand
   }
 
 instance Typelike TypeP where
+  typeOf NulP = NulT
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
-  typeOf (CatP k t1 t2) = CatT k (typeOf t1) (typeOf t2)
+  typeOf (CatP k t1 t2) = CatT (catP2T k) (typeOf t1) (typeOf t2) where
+    catP2T CatTypeFunP = CatTypeFun
+    catP2T CatTypeArrP = CatTypeArr
+    catP2T (CatTypeRecP k ps) = CatTypeRec k [TV (Just lang) t | (PV lang _ t) <- ps] 
+    catP2T CatTypeEntP = CatTypeEnt
 
-  decompose (CatP CatTypeFun t1 t2) = case decompose t2 of 
-    (ts, finalType) -> (t1:ts, finalType) 
-  decompose t = ([], t)
+
+  -- | substitute all appearances of a given variable with a given new type
+  substituteTVar v0 r0 t0 = sub t0
+    where
+      sub :: TypeP -> TypeP
+      sub NulP = NulP
+      sub t'@(UnkP _) = t'
+      sub t'@(VarP (PV lang _ v'))
+        | v0 == (TV (Just lang) v') = r0
+        | otherwise = t'
+      sub (CatP k t1 t2) = CatP k (sub t1) (sub t2)
+
+  free v@(VarP _) = Set.singleton v
+  free v@(UnkP _) = Set.singleton v
+  free (CatP _ t1 t2) = Set.union (free t1) (free t2)
+  free NulP = Set.empty
+
+instance Decomposable TypeP where
+  -- split a composite type into its inputs and outputs
+  -- * functions are separated into intpus and output
+  --   a -> b -> c  ==>  ([a, b], c)
+  -- * parameterized types are type functions that construct the base type
+  --   (a, (b, c))  ==> ([a, (b, c)], Tuple2)
+  --   Map a (a -> b)  ==>  ([a, a -> b], Map)
+  -- * records/objects/tables are broken into key/value pairs
+  --   Person {name :: Str, age :: Int}  ==> ([("name", Str), ("age", Int)], Person)
+  -- * type variables have no input:
+  --   Bool  ==>  ([], Bool)
+  decompose x0@(CatP k _ _) = f x0 where
+    f t@(CatP k' t1 t2)
+      | k == k' = case f t2 of
+        (ts, finalType) -> (t1:ts, finalType)
+      | otherwise = ([], t)
+    f t = ([], t)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)] -- ^ make a record, table, or object
+  | SerialObject NamType PVar [PVar] [(PVar, SerialAST f)]
+  -- ^ Make a record, table, or object. The parameters indicate
+  --   1) NamType - record/table/object
+  --   2) PVar - telling the name of the object (e.g., "Person")
+  --   3) [PVar] - listing the generic metavariable names
+  --   4) [(PVar, SerialAST f)] - entries with keys for concrete and general cases
   | SerialNum PVar
   | SerialBool PVar
   | SerialString PVar
@@ -211,6 +267,7 @@ data ExprM f
 
 
 instance HasOneLanguage (TypeP) where
+  langOf' NulP = error "The empty type has no concrete language - though it probably should"
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
   langOf' (CatP _ ( langOf' -> l1) (langOf' -> l2))
