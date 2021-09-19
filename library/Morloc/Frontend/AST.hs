@@ -59,13 +59,15 @@ findSignatureTypeTerms = unique . f where
 
 -- | find all the non-generic terms in an unresolved type
 findTypeTerms :: TypeU -> [TVar]
-findTypeTerms NulU = []
 findTypeTerms (VarU v)
   | isGeneric v = [ ]
   | otherwise   = [v]
 findTypeTerms (ExistU _ es1 es2) = conmap findTypeTerms (es1 ++ es2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
-findTypeTerms (CatU _ t1 t2) = findTypeTerms t1 ++ findTypeTerms t2
+findTypeTerms NulU = []
+findTypeTerms (FunU t1 t2) = findTypeTerms t1 ++ findTypeTerms t2
+findTypeTerms (AppU t1 t2) = findTypeTerms t1 ++ findTypeTerms t2
+findTypeTerms (RecU _ t1 _ t2) = findTypeTerms t1 ++ findTypeTerms t2
 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
@@ -82,7 +84,11 @@ checkExprI f e@(ExprI _ (AccE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AnnE e' _)) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (Declaration _ e' es')) = f e >> checkExprI f e' >> mapM_ f es'
 checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
-checkExprI f e@(ExprI _ (CatE _ e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (AppE e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (LstE e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (TupE e1 e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+checkExprI f e@(ExprI _ (RecE _ e1 _ e2)) = f e >> checkExprI f e1 >> checkExprI f e2
+
 checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
@@ -91,5 +97,8 @@ maxIndex (ExprI i (AccE e _)) = max i (maxIndex e)
 maxIndex (ExprI i (AnnE e _)) = max i (maxIndex e)
 maxIndex (ExprI i (Declaration _ e es)) = maximum (i : map maxIndex (e:es))
 maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
-maxIndex (ExprI i (CatE _ e1 e2)) = maximum [i, maxIndex e1, maxIndex e2]
+maxIndex (ExprI i (AppE e1 e2) = maximum [i, maxIndex e1, maxIndex e2]
+maxIndex (ExprI i (LstE e1 e2) = maximum [i, maxIndex e1, maxIndex e2]
+maxIndex (ExprI i (TupE e1 e2) = maximum [i, maxIndex e1, maxIndex e2]
+maxIndex (ExprI i (RecE _ e1 _ e2) = maximum [i, maxIndex e1, maxIndex e2]
 maxIndex (ExprI i _) = i

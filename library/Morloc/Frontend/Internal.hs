@@ -35,7 +35,11 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   setDefaults (ExistU _ _ (d:_)) = setDefaults d
   setDefaults t@(VarU _) = t
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
-  setDefaults (CatU k t1 t2) = CatU k (setDefaults t1) (setDefaults t2)
+  setDefaults _ NulU = NulU 
+  setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t1)
+  setDefaults (AppU t1 t2) = AppU (setDefaults t1) (setDefaults t1)
+  setDefaults (RecU r t1 k t2) = RecU r (setDefaults t1) k (setDefaults t2)
+
 
   variables = [1 ..] >>= flip replicateM ['a' .. 'z']
 
@@ -50,27 +54,30 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       ++ map findExistentials ts
       ++ map findExistentials ds
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
-  findExistentials (CatU _ t1 t2) =
-    Set.union (findExistentials t1) (findExistentials t2)
+  findExistentials _ NulU =  Set.empty
+  findExistentials (FunU t1 t2) = Set.union (findExistentials t1) (findExistentials t2)
+  findExistentials (AppU t1 t2) = Set.union (findExistentials t1) (findExistentials t2)
+  findExistentials (RecU _ t1 _ t2) = Set.union (findExistentials t1) (findExistentials t2)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
   generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
     where
+      v0 = VarU (TV lang0 (unName r0)) -- the type term that is being substitute in
+
       f :: TVar -> TypeU -> TypeU
       f v t1@(ExistU v' [] _)
         | v == v' = VarU (TV lang0 (unName r0))
         | otherwise = t1
       f v (ExistU v' ts _)
-        | v == v' = arr lang0 (unName r0) (map (f v) ts)
-        | otherwise = arr lang0 (unTVar v) (map (f v) ts)
+        | v == v' = foldr AppU v0 (map (f v) ts)
+        | otherwise = foldr AppU (unTVar v) (map (f v) ts)
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)
         | otherwise = t1
-      f v (CatU k t1 t2) = CatU k (f v t1) (f v t2)
-
-      arr :: Maybe Lang -> MT.Text -> [TypeU] -> TypeU
-      arr l v (t:ts) = CatU CatTypeArr t (arr l v ts)
-      arr l v [] = CatU CatTypeArr (VarU (TV l v)) NulU
+      f _ NulU = NulU 
+      f (FunU t1 t2) = FunU (f t1) (f t1)
+      f (AppU t1 t2) = AppU (f t1) (f t1)
+      f (RecU r t1 k t2) = RecU r (f t1) k (f t2)
 
 
 -- class HasManyLanguages a where

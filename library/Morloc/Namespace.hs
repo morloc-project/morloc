@@ -69,7 +69,6 @@ module Morloc.Namespace
   , defaultPackageMeta
   -- * Types
   , NamType(..)
-  , CatType(..)
   , Type(..)
   , TypeU(..)
   , EType(..)
@@ -91,8 +90,7 @@ module Morloc.Namespace
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
-  , Decomposable(..)
-  , TypeTreeLike(..)
+  -- , Decomposable(..)
   -- ** kludge
   , newVariable
   ) where
@@ -279,7 +277,7 @@ data Expr
   -- `AppU [TypeU]`. While superficially simpler, these definitions complicate
   -- structural recursion.
 
-  | RecE ExprI (Text, ExprI)
+  | RecE ExprI Text ExprI
   -- ^ A record, the initial (Text ExprI) terms are a key-value pair, the final
   --
   --                            Type (A = AppT or AppU)     Expr (E = TupE or TupS)   0 is NulT/NulU/NulS/NulE
@@ -290,6 +288,7 @@ data Expr
   --  M {}                      <undefined>                 <undefined>
   --  M {a=x}                   RecU M a x                  RecE M a x
   --  M {a=x, b=y}              RecU (RecE M a x) b y       RecE (RecE M a x) b y
+
   | AppE ExprI ExprI
   -- ^ Function application
   | LamE EVar ExprI
@@ -621,7 +620,7 @@ data Type
   -- ^ used for empty leafs in cat trees
   | FunT Type Type -- right associative function
   | AppT Type Type -- left associative type application
-  | RecT NamType Type (TVar, Type)  -- left associative named type application
+  | RecT NamType Type TVar Type  -- left associative named type application
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -640,22 +639,22 @@ data TypeU
   | AppU TypeU TypeU -- type application
   | RecU NamType -- record / object / table
          TypeU -- left associated type
-         (TVar, TypeU) -- one key/value pair
+         TVar TypeU -- one key/value pair
   deriving (Show, Ord, Eq)
 
-class TypeTreeLike a where
-  rec :: TVar -> [(Text, a)] -> a
-  arr :: TVar -> [a] -> a
-
-instance TypeTreeLike TypeU where
-  arr v [] = CatU CatTypeArr (VarU v) NulU
-  arr v (t:ts) = CatU CatTypeArr t (arr v ts)
-
-  rec v [] = CatU (CatTypeRec NamRecord []) (VarU v) NulU
-  rec v@(TV lang _) ((k, t):rs)
-    = CatU (CatTypeRec NamRecord [])
-           (CatU CatTypeEnt (VarU (TV lang k)) t)
-           (rec v rs)
+-- class TypeTreeLike a where
+--   rec :: TVar -> [(Text, a)] -> a
+--   arr :: TVar -> [a] -> a
+--
+-- instance TypeTreeLike TypeU where
+--   arr v [] = CatU CatTypeArr (VarU v) NulU
+--   arr v (t:ts) = CatU CatTypeArr t (arr v ts)
+--
+--   rec v [] = CatU (CatTypeRec NamRecord []) (VarU v) NulU
+--   rec v@(TV lang _) ((k, t):rs)
+--     = CatU (CatTypeRec NamRecord [])
+--            (CatU CatTypeEnt (VarU (TV lang k)) t)
+--            (rec v rs)
 
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -696,34 +695,34 @@ newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
 
-class Decomposable a where
-  -- | Break a type into its input arguments, and final output
-  -- For example: decompose ((a -> b) -> [a] -> [b]) would 
-  -- yield ([(a->b), [a]], [b])
-  decompose :: a -> ([a], a)
-
-  -- | like @decompose@ but concatentates the output type
-  decomposeFull :: a -> [a]
-  decomposeFull t = case decompose t of
-    (xs, x) -> (xs ++ [x])
-
-instance Decomposable Type where
-  decompose (CatT _ t1 NulT) = ([], t1)
-  decompose (CatT _ t1 t2) = case decompose t2 of
-    (ts, finalType) -> (t1:ts, finalType) 
-  decompose t = ([], t)
-
-instance Decomposable TypeU where
-  decompose (CatU _ t1 NulU) = ([], t1)
-  decompose (CatU _ t1 t2) = case decompose t2 of
-    (ts, finalType) -> (t1:ts, finalType) 
-  decompose t = ([], t)
-
-instance Decomposable Expr where
-  decompose (CatE _ (ExprI _ e) (ExprI _ UniE)) = ([], e)
-  decompose (CatE _ (ExprI _ e1) (ExprI _ e2)) = case decompose e2 of
-    (es, finalExpr) -> (e1:es, finalExpr)
-  decompose e = ([], e)
+-- class Decomposable a where
+--   -- | Break a type into its input arguments, and final output
+--   -- For example: decompose ((a -> b) -> [a] -> [b]) would
+--   -- yield ([(a->b), [a]], [b])
+--   decompose :: a -> ([a], a)
+--
+--   -- | like @decompose@ but concatentates the output type
+--   decomposeFull :: a -> [a]
+--   decomposeFull t = case decompose t of
+--     (xs, x) -> (xs ++ [x])
+--
+-- instance Decomposable Type where
+--   decompose (CatT _ t1 NulT) = ([], t1)
+--   decompose (CatT _ t1 t2) = case decompose t2 of
+--     (ts, finalType) -> (t1:ts, finalType)
+--   decompose t = ([], t)
+--
+-- instance Decomposable TypeU where
+--   decompose (CatU _ t1 NulU) = ([], t1)
+--   decompose (CatU _ t1 t2) = case decompose t2 of
+--     (ts, finalType) -> (t1:ts, finalType)
+--   decompose t = ([], t)
+--
+-- instance Decomposable Expr where
+--   decompose (CatE _ (ExprI _ e) (ExprI _ UniE)) = ([], e)
+--   decompose (CatE _ (ExprI _ e1) (ExprI _ e2)) = case decompose e2 of
+--     (es, finalExpr) -> (e1:es, finalExpr)
+--   decompose e = ([], e)
 
 class Typelike a where
   typeOf :: a -> Type

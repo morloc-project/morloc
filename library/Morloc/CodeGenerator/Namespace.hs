@@ -45,18 +45,18 @@ data TypeP
   | VarP PVar
   | NulP -- terminator
   | FunP TypeP TypeP
-  | ArrP TypeP TypeP
+  | AppP TypeP TypeP
   | RecP NamType TypeP PVar TypeP
   deriving (Show, Ord, Eq)
 
 
-arrP :: PVar -> [TypeP] -> TypeP
-arrP p [] = CatP CatTypeArrP (VarP p) NulP
-arrP p (t:ts) = CatP CatTypeArrP t (arrP p ts)
-
-recP :: CatTypeP -> PVar -> [(PVar, TypeP)] -> TypeP 
-recP cat v [] = CatP cat (VarP v) NulP
-recP cat v ((k, t):rs) = CatP cat (CatP CatTypeEntP (VarP k) t) (recP cat v rs)
+-- arrP :: PVar -> [TypeP] -> TypeP
+-- arrP p [] = CatP CatTypeArrP (VarP p) NulP
+-- arrP p (t:ts) = CatP CatTypeArrP t (arrP p ts)
+--
+-- recP :: CatTypeP -> PVar -> [(PVar, TypeP)] -> TypeP
+-- recP cat v [] = CatP cat (VarP v) NulP
+-- recP cat v ((k, t):rs) = CatP cat (CatP CatTypeEntP (VarP k) t) (recP cat v rs)
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor
@@ -78,11 +78,9 @@ instance Typelike TypeP where
   typeOf NulP = NulT
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
-  typeOf (CatP k t1 t2) = CatT (catP2T k) (typeOf t1) (typeOf t2) where
-    catP2T CatTypeFunP = CatTypeFun
-    catP2T CatTypeArrP = CatTypeArr
-    catP2T (CatTypeRecP k ps) = CatTypeRec k [TV (Just lang) t | (PV lang _ t) <- ps] 
-    catP2T CatTypeEntP = CatTypeEnt
+  typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
+  typeOf (AppP t1 t2) = AppT (typeOf t1) (typeOf t2)
+  typeOf (RecP r t1 (PV l _ v) t2) = RecP r (typeOf t1) (TV (Just l) v) (typeOf t2)
 
 
   -- | substitute all appearances of a given variable with a given new type
@@ -94,30 +92,35 @@ instance Typelike TypeP where
       sub t'@(VarP (PV lang _ v'))
         | v0 == (TV (Just lang) v') = r0
         | otherwise = t'
-      sub (CatP k t1 t2) = CatP k (sub t1) (sub t2)
+      sub (FunP t1 t2) = FunT (sub t1) (sub t2)
+      sub (AppP t1 t2) = AppT (sub t1) (sub t2)
+      sub (RecP r t1 k t2) = RecP r (sub t1) (TV k (sub t2)
 
   free v@(VarP _) = Set.singleton v
   free v@(UnkP _) = Set.singleton v
-  free (CatP _ t1 t2) = Set.union (free t1) (free t2)
+  free (FunP t1 t2) = Set.union (free t1) (free t2)
+  free (AppP t1 t2) = Set.union (free t1) (free t2)
+  free (RecP _ t1 _ t2) = Set.union (free t1) (free t2)
   free NulP = Set.empty
 
-instance Decomposable TypeP where
-  -- split a composite type into its inputs and outputs
-  -- * functions are separated into intpus and output
-  --   a -> b -> c  ==>  ([a, b], c)
-  -- * parameterized types are type functions that construct the base type
-  --   (a, (b, c))  ==> ([a, (b, c)], Tuple2)
-  --   Map a (a -> b)  ==>  ([a, a -> b], Map)
-  -- * records/objects/tables are broken into key/value pairs
-  --   Person {name :: Str, age :: Int}  ==> ([("name", Str), ("age", Int)], Person)
-  -- * type variables have no input:
-  --   Bool  ==>  ([], Bool)
-  decompose x0@(CatP k _ _) = f x0 where
-    f t@(CatP k' t1 t2)
-      | k == k' = case f t2 of
-        (ts, finalType) -> (t1:ts, finalType)
-      | otherwise = ([], t)
-    f t = ([], t)
+-- -- Decomposition is betrayal of structure, the elegant solution should not need it
+-- instance Decomposable TypeP where
+--   -- split a composite type into its inputs and outputs
+--   -- * functions are separated into intpus and output
+--   --   a -> b -> c  ==>  ([a, b], c)
+--   -- * parameterized types are type functions that construct the base type
+--   --   (a, (b, c))  ==> ([a, (b, c)], Tuple2)
+--   --   Map a (a -> b)  ==>  ([a, a -> b], Map)
+--   -- * records/objects/tables are broken into key/value pairs
+--   --   Person {name :: Str, age :: Int}  ==> ([("name", Str), ("age", Int)], Person)
+--   -- * type variables have no input:
+--   --   Bool  ==>  ([], Bool)
+--   decompose x0@(CatP k _ _) = f x0 where
+--     f t@(CatP k' t1 t2)
+--       | k == k' = case f t2 of
+--         (ts, finalType) -> (t1:ts, finalType)
+--       | otherwise = ([], t)
+--     f t = ([], t)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
@@ -270,9 +273,9 @@ instance HasOneLanguage (TypeP) where
   langOf' NulP = error "The empty type has no concrete language - though it probably should"
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
-  langOf' (CatP _ ( langOf' -> l1) (langOf' -> l2))
-    | l1 == l2 = l1
-    | otherwise = error "Language mismatch - this is a compiler logic bug"
+  langOf' (FunP t _) = langOf' t 
+  langOf' (AppP t _) = langOf' t
+  langOf' (RecP _ t _) = langOf' t
 
 
 instance HasOneLanguage (TypeM) where

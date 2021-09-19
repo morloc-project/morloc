@@ -28,10 +28,13 @@ module Morloc.Frontend.Lang.DefaultTypes
   -- * dictionaries of base collection names
   , listG
   , listC
+  , listGC
   , tupleG
   , tupleC
+  , tupleGC
   , recordG
   , recordC
+  , recordGC
   ) where
 
 import Morloc.Frontend.Namespace
@@ -48,6 +51,10 @@ listC CLang = ["$1*"]
 listC CppLang = ["std::vector<$1>"]
 listC RustLang = ["Vec<$1>"]
 listC PerlLang = ["array"]
+
+listGC :: Maybe Lang -> [MT.Text]
+listGC Nothing = [listG]
+listGC (Just lang) = listC lang
 
 defaultList :: Maybe Lang -> TypeU -> [TypeU]
 defaultList Nothing t = [arr (TV Nothing listG) [t]]
@@ -70,6 +77,10 @@ tupleC i RustLang =
   in ["(" <> MT.intercalate "," vars <> ")"]
 tupleC i PerlLang = ["array"]
 
+tupleGC :: Maybe Lang -> Int -> [MT.Text]
+tupleGC Nothing i = [tupleG i]
+tupleGC (Just lang) i = tupleC i lang
+
 defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
 defaultTuple Nothing ts = [arr (TV Nothing (tupleG (length ts))) ts]
 defaultTuple lang@(Just l) ts = [arr (TV lang v) ts | v <- tupleC (length ts) l]
@@ -86,6 +97,10 @@ recordC CLang = []
 recordC CppLang = ["struct"]
 recordC RustLang = ["struct"]
 recordC PerlLang = ["hash"]
+
+recordGC :: Maybe Lang -> [MT.Text]
+recordGC Nothing = [recordG]
+recordGC (Just lang) = recordC lang
 
 defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
 defaultRecord Nothing entries = [foldRecord (TV Nothing recordG) entries]

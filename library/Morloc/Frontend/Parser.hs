@@ -449,7 +449,7 @@ pType =
   <|> try pFunU
   <|> try pUniU
   <|> try pRecU
-  <|> try pArrU
+  <|> try pAppU
   <|> try parensType
   <|> pListU
   <|> pTupleU
@@ -481,13 +481,15 @@ pRecU = do
   _ <- tag (symbol "{")
   entries <- braces (sepBy1 pRecEntryU (symbol ","))
   lang <- CMS.gets stateLang
-  let base = MLD.defaultRecord lang entries
-  return $ foldRecord entries
+  constructor <- case MLD.defaultRecord lang entries of
+    [t] -> return t
+    ts -> ExistU <$> freename <*> pure [] <*> pure ts
+  return $ foldRecord constructors entries
   where
-    foldRecord :: [(Mt.Text, TypeU)] -> TypeU 
-    foldRecord [] = error "sepBy1 guaranttees this cannot happen"
-    foldRecord [x] = RecE NulE x 
-    foldRecord (x:xs) = (RecE <$> foldRecord [x] <*> foldRecord xs) >>= exprI
+    foldRecord :: TypeU -> [(Mt.Text, TypeU)] -> TypeU 
+    foldRecord _ [] = error "sepBy1 guaranttees this cannot happen"
+    foldRecord c [x] = RecU c x 
+    foldRecord c (x:xs) = (RecU <$> foldRecord c [x] <*> foldRecord NulE xs) >>= exprI
 
 
 pRecEntryU :: Parser (MT.Text, TypeU)
@@ -502,13 +504,13 @@ pExistential = do
   v <- angles freename
   return (ExistU (TV Nothing v) [] [])
 
-pArrU :: Parser TypeU
-pArrU = do
+pAppU :: Parser TypeU
+pAppU = do
   _ <- tag (freename <|> stringLiteral)
   n <- freename <|> stringLiteral
   t <- tvar n
   args <- many1 pType'
-  return $ ArrU t args
+  return $ foldr AppU t args
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 
@@ -519,7 +521,7 @@ pFunU = do
   ts <- sepBy1 (pType') (op "->")
   return $ foldr1 FunU (t : ts)
   where
-    pType' = try pUniU <|> try parensType <|> try pArrU <|> pVarU <|> pListU <|> pTupleU <|> pRecU
+    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 
 pListU :: Parser TypeU
 pListU = do

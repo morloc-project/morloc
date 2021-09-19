@@ -33,10 +33,14 @@ instance P.PartialOrd TypeU where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) (CatU k1 t11 t12) (CatU k2 t21 t22)
-    = k1 == k2
-    && (P.<=) t11 t21
-    && (P.<=) t22 t12
+  (<=) NulU NulU = True
+  (<=) (FunU t11 t12) (FunU t21 t22) = t11 <= t21 && t12 <= t22
+  (<=) (AppU t11 t12) (AppU t21 t22) = t11 <= t21 && t12 <= t22
+  (<=) (RecU r1 t11 k1 t12) (RecU r2 t21 k2 t22)
+    = r1 == r2 
+    && t11 <= t21
+    && t12 <= t22
+    && k1 == k2
   (<=) (ForallU v t1) t2
     | (P.==) (ForallU v t1) t2 = True
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
@@ -67,12 +71,20 @@ findFirst v (ForallU v1 t1) (ForallU v2 t2)
 findFirst v (ForallU v1 t1) t2
   | v == v1 = Nothing
   | otherwise = findFirst v (substituteTVar v1 (VarU v1) t1) t2
-findFirst v (CatU k1 t11 t12) (CatU k2 t21 t22)
-  | k1 == k2 = case (findFirst v t11 t21, findFirst v t12 t22) of
-    (Just t, _) -> Just t
-    (_, Just t) -> Just t
-    _ -> Nothing
+findFirst v (FunU t11 t12) (FunU t21 t22)
+  = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
+findFirst v (AppU t11 t12) (AppU t21 t22)
+  = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
+findFirst v (RecU r1 t11 k1 t12) (RecU r2 t21 k2 t22)
+  | r1 == r2 && k1 == k2 = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
+  | otherwise = Nothing
 findFirst _ _ _ = Nothing
+
+firstOf :: Maybe a -> Maybe a -> Maybe a
+firstOf (Just x) _ = Just x
+firstOf _ (Just x) = Just x
+firstOf _ _ = Nothing
+
 
 -- | is t1 a generalization of t2?
 isSubtypeOf :: TypeU -> TypeU -> Bool

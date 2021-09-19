@@ -40,12 +40,15 @@ isGeneric (TV _ typeStr) = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 
 mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f e0 = g e0 where
-  g (ExprI i (ModE v xs)) = ExprI i (f $ ModE v (map g xs))
-  g (ExprI i (Declaration v e es)) = ExprI i (f $ Declaration v (g e) (map g es))
-  g (ExprI i (AccE e k)) = ExprI i (f $ AccE (g e) k)
-  g (ExprI i (CatE k t1 t2)) = ExprI i (f $ CatE k (g t1) (g t2))
-  g (ExprI i (LamE vs e)) = ExprI i (f $ LamE vs (g e))
-  g (ExprI i (AnnE e ts)) = ExprI i (f $ AnnE (g e) ts)
+  g (ExprI i (ModE v xs)) = ExprI i . f $ ModE v (map g xs)
+  g (ExprI i (Declaration v e es)) = ExprI i . f $ Declaration v (g e) (map g es)
+  g (ExprI i (AccE e k)) = ExprI i . f $ AccE (g e) k
+  g (ExprI i (LstE e1 e2)) = ExprI i . f $ LstE (g e1) (g e2)
+  g (ExprI i (TupE e1 e2) = ExprI i . f $ TupE (g e1) (g e2)
+  g (ExprI i (AppE e1 e2) = ExprI i . f $ AppE (g e1) (g e2)
+  g (ExprI i (RecE e1 k e2) = ExprI i . f $ RecE (g e1) k (g e2)
+  g (ExprI i (LamE vs e)) = ExprI i . f $ LamE vs (g e)
+  g (ExprI i (AnnE e ts)) = ExprI i . f $ AnnE (g e) ts
   g (ExprI i e) = ExprI i (f e)
 
 mapExprM :: Monad m => (Expr -> m Expr) -> ExprI -> m ExprI
@@ -53,7 +56,10 @@ mapExprM f e0 = g e0 where
   g (ExprI i (ModE v xs)) = ExprI i <$> ((ModE v <$> mapM g xs) >>= f)
   g (ExprI i (Declaration v e es)) = ExprI i <$> ((Declaration v <$> g e <*> mapM g es) >>= f)
   g (ExprI i (AccE e k)) = ExprI i <$> ((AccE <$> g e <*> pure k) >>= f)
-  g (ExprI i (CatE k t1 t2)) = ExprI i <$> ((CatE k <$> g t1 <*> g t2) >>= f)
+  g (ExprI i (LstE e1 e2)) = ExprI i <$> ((LstE <$> g e1 <*> g e2) >>= f)
+  g (ExprI i (TupE e1 e2) = ExprI i <$> ((TupE <$> g e1 <*> g e2) >>= f)
+  g (ExprI i (AppE e1 e2) = ExprI i <$> ((AppE <$> g e1 <*> g e2) >>= f)
+  g (ExprI i (RecE e1 k e2) = ExprI i <$> ((RecE <$> g e1 <*> pure k <*> g e2) >>= f)
   g (ExprI i (LamE vs e)) = ExprI i <$> ((LamE vs <$> g e) >>= f)
   g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
   g (ExprI i e) = ExprI i <$> f e

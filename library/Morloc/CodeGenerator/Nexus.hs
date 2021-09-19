@@ -130,7 +130,9 @@ usageLineT (_, name, t) = vsep
 gtypeOf NulP = NulT
 gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
 gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (CatP k t1 t2) = CatT k (gtypeOf t1) (gtypeOf t2)
+gtypeOf (FunP t1 t2) = FunT (gtypeOf t1) (gtypeOf t2)
+gtypeOf (AppP t1 t2) = AppT (gtypeOf t1) (gtypeOf t2)
+gtypeOf (RecP r t1 (PV _ (Just k) _) t2) = RecT r (gtypeOf t1) (TV Nothing k) (gtypeOf t2)
 gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 

@@ -124,9 +124,17 @@ prettyExprM e0 = (vsep . punctuate line . fst $ f e0) <> line where
     in (ms, "RETURN(" <> e' <> ")")
 
 prettyRecordPVar :: TypeM -> MDoc
-prettyRecordPVar (Serial (decompose -> ((CatP (CatTypeRecP _ _) _ _):_, VarP v))) = prettyPVar v
-prettyRecordPVar (Native (decompose -> ((CatP (CatTypeRecP _ _) _ _):_, VarP v))) = prettyPVar v
+prettyRecordPVar (Serial (RecP _ t1 _ _)) = recordPVar t1 
+prettyRecordPVar (Native (RecP _ t1 _ _)) = recordPVar t1
 prettyRecordPVar _ = "<UNKNOWN RECORD>"
+
+recordPVar :: TypeP -> MDoc
+recordPVar (VarP (PV _ _ v)) = pretty v
+recordPVar (UnkP (PV _ _ v)) = pretty v
+recordPVar (NulP) = "<NulP>" -- illegal value
+recordPVar (FunP t1 t2) = "<FunP>" -- illegal value
+recordPVar (AppP t1 t2) = "<AppP>" -- illegal value
+recordPVar (RecP _ t _ _) = recordPVar t
 
 
 prettyPVar :: PVar -> MDoc
@@ -136,13 +144,18 @@ prettyPVar (PV _ Nothing t) = parens ("*" <+> pretty t)
 prettyTypeP :: TypeP -> MDoc
 prettyTypeP (UnkP v) = prettyPVar v 
 prettyTypeP (VarP v) = prettyPVar v 
-prettyTypeP t@(CatP k _ _)
-  = case (decompose t, k) of
-    ((ts, v), CatTypeFunP) -> encloseSep "(" ")" "->" (map prettyTypeP (ts <> [v]))
-    ((ts, v), CatTypeArrP) -> encloseSep "(" ")" " "  (map prettyTypeP (ts <> [v]))
-    ((ts, VarP v), CatTypeRecP _ _) -> prettyPVar v <+> encloseSep "{" "}" ","  (map prettyTypeP ts)
-    (([VarP k], t), CatTypeEntP) -> prettyPVar k <+> "=" <+> prettyTypeP t
-    (_, CatTypeEntP) -> error "Improperly formateed CatTypeEntP"
+prettyTypeP (FunP t1 t2) = prettyTypeP t1 <+> "->" <+> parens (prettyTypeP t2)
+prettyTypeP (AppP t1 t2) = parens prettyTypeP t1 <+> parens (prettyTypeP t2)
+prettyTypeP t@(RecP r _ _ _) = case decomposeRecP t of 
+  (entries, constructor)
+    -> viaShow r <+> prettyTypeP constructor <+> encloseSep "{" "}" "," (map prettyTypeP entries)
+
+decomposeRecP :: TypeP -> ([TypeP], TypeP)
+decomposeRecP (RecP r t1 k t2) = case decomposeRecP t1 of
+  (entries, constructor) -> (entries <> (k, t2), constructor) 
+  ([], constructor) -> ([], constructor)
+decomposeRecP t@(VarP _) = ([], t)
+decomposeRecP _ = error "This doesn't seem to be a RecP"
 
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
@@ -237,16 +250,9 @@ typeOfTypeM :: TypeM -> Maybe TypeP
 typeOfTypeM Passthrough = Nothing
 typeOfTypeM (Serial c) = Just c
 typeOfTypeM (Native c) = Just c
-typeOfTypeM (Function [] t) = CatP CatTypeFunP <$> typeOfTypeM t <*> pure NulP
-typeOfTypeM (Function (ti:ts) to)
-  = CatP CatTypeFunP <$> typeOfTypeM ti <*> typeOfTypeM (Function ts to)  
-
--- -- in the case of TypeP, Unit is an instance of VarP, e.g., VarP "Unit"
--- -- although, I wonder if this is a good choice? perhaps it should have it's
--- -- own term?
--- () -> a        ==>  Cat Unit (Cat a Nul)
--- a -> ()        ==>  Cat a (Cat Unit Nul)
--- a -> b -> ()   ==>  Cat a (Cat b (Cat Unit Nul))
+typeOfTypeM (Function ins out) =
+  let (t:ts) = map typeOfTypeM $ ins <> [out]
+  in foldr FunT t ts
 
 arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
@@ -310,21 +316,22 @@ packExprM m e = do
     _ -> return e
 
 type2jsontype :: TypeP -> MorlocMonad JsonType
-type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype t@(CatP CatTypeArrP _ _) = case decompose t of
-  (ps, VarP (PV _ _ v)) -> ArrJ v <$> mapM type2jsontype ps
-type2jsontype t@(CatP CatTypeFunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype t@(CatP (CatTypeRecP k _) _ _) = case decompose t of
-  (ps, VarP (PV _ _ v)) -> do
-    let (ks, ts) = unzip [(k,v) | CatP CatTypeEntP (VarP (PV _ _ k)) v <- ps]
-    ts' <- mapM type2jsontype ts
-    return $ NamJ jsontype (zip ks ts')
-    where
-      jsontype = case k of
-        NamRecord -> "record"
-        NamObject -> v
-        NamTable -> v
+type2jsontype (AppP f1 t1) = do
+  j <- type2jsontype f1
+  case j of
+    (ArrJ v ts) -> return $ ArrJ v (t1:ts)
+    (VarJ v) -> return $ ArrJ v [t1]
+    (NamJ _ _) -> MM.throwError . SerializationError $ "An ArrJ type cannot have a NamJ at the base"
+type2jsontype (RecP r t1 k t2) = do
+  t2' <- type2jsontype t2
+  t1' <- type2jsontype t1
+  case t1' of
+    (ArrJ _ _) -> MM.throwError . SerializationError $ "An NamJ type cannot have a ArrJ at the base"
+    (VarJ v) -> return $ NamJ v [(k, t2')]
+    (NamJ v ts) -> return $ NamJ v (ts <> [(k, t2')])
+type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
+type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
 
 jsontype2json :: JsonType -> MDoc
 jsontype2json (VarJ v) = dquotes (pretty v)
