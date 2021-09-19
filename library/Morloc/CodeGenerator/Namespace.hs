@@ -43,20 +43,10 @@ data PVar
 data TypeP
   = UnkP PVar
   | VarP PVar
-  | NulP -- terminator
-  | FunP TypeP TypeP
-  | AppP TypeP TypeP
-  | RecP NamType TypeP PVar TypeP
+  | FunP [TypeP] TypeP
+  | AppP TypeP [TypeP]
+  | RecP NamType [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
-
-
--- arrP :: PVar -> [TypeP] -> TypeP
--- arrP p [] = CatP CatTypeArrP (VarP p) NulP
--- arrP p (t:ts) = CatP CatTypeArrP t (arrP p ts)
---
--- recP :: CatTypeP -> PVar -> [(PVar, TypeP)] -> TypeP
--- recP cat v [] = CatP cat (VarP v) NulP
--- recP cat v ((k, t):rs) = CatP cat (CatP CatTypeEntP (VarP k) t) (recP cat v rs)
 
 type JsonPath = [JsonAccessor]
 data JsonAccessor

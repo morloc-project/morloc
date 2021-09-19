@@ -41,7 +41,7 @@ isGeneric (TV _ typeStr) = maybe False (DC.isLower . fst) (DT.uncons typeStr)
 mapExpr :: (Expr -> Expr) -> ExprI -> ExprI
 mapExpr f e0 = g e0 where
   g (ExprI i (ModE v xs)) = ExprI i . f $ ModE v (map g xs)
-  g (ExprI i (Declaration v e es)) = ExprI i . f $ Declaration v (g e) (map g es)
+  g (ExprI i (AssE v e es)) = ExprI i . f $ AssE v (g e) (map g es)
   g (ExprI i (AccE e k)) = ExprI i . f $ AccE (g e) k
   g (ExprI i (LstE e1 e2)) = ExprI i . f $ LstE (g e1) (g e2)
   g (ExprI i (TupE e1 e2) = ExprI i . f $ TupE (g e1) (g e2)
@@ -54,7 +54,7 @@ mapExpr f e0 = g e0 where
 mapExprM :: Monad m => (Expr -> m Expr) -> ExprI -> m ExprI
 mapExprM f e0 = g e0 where
   g (ExprI i (ModE v xs)) = ExprI i <$> ((ModE v <$> mapM g xs) >>= f)
-  g (ExprI i (Declaration v e es)) = ExprI i <$> ((Declaration v <$> g e <*> mapM g es) >>= f)
+  g (ExprI i (AssE v e es)) = ExprI i <$> ((AssE v <$> g e <*> mapM g es) >>= f)
   g (ExprI i (AccE e k)) = ExprI i <$> ((AccE <$> g e <*> pure k) >>= f)
   g (ExprI i (LstE e1 e2)) = ExprI i <$> ((LstE <$> g e1 <*> g e2) >>= f)
   g (ExprI i (TupE e1 e2) = ExprI i <$> ((TupE <$> g e1 <*> g e2) >>= f)

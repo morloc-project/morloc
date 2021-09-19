@@ -97,7 +97,7 @@ desugarExpr
 desugarExpr d k e0 = mapExprM f e0 where
 
   f :: Expr -> MorlocMonad Expr
-  f (Signature v l t) = Signature v l <$> desugarEType termmap d k t
+  f (SigE v l t) = SigE v l <$> desugarEType termmap d k t
   f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
   f e = return e
 
@@ -257,7 +257,7 @@ chooseExistential (RecU k t1 v t2) = RecU k (chooseExistential t1) v (chooseExis
 -- -- starpack :: PreparedNode -> Property -> [(EVar, TypeU, [Source])]
 -- -- starpack n pro
 -- --   = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
--- --     | (Signature v _ e@(EType t p _)) <- preparedNodeBody n
+-- --     | (SigE v _ e@(EType t p _)) <- preparedNodeBody n
 -- --     , isJust (langOf e)
 -- --     , Set.member pro p]
 -- --   where

@@ -139,7 +139,7 @@ linkVariablesToTermTypes mod m0 = mapM_ (link m0) where
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   link m (ExprI _ (ModE v es)) = undefined -- TODO: how should nested modules behave?
   link m (ExprI i (ExpE v)) = setType m i v
-  link m (ExprI i (Declaration v (ExprI _ (LamE ks e)) es)) = do
+  link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
     -- shadow all bound terms
     let m' = foldr Map.delete m ks
     setType m' i v
@@ -170,9 +170,9 @@ unifyTermTypes mod xs m0
   >>= Map.unionWithM combineTermTypes m0
   >>= Map.unionWithM combineTermTypes decs
   where
-  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (Signature v l t)) <- xs]
+  sigs = Map.fromListWith (<>) [((v, l, langOf t), [t]) | (ExprI _ (SigE v l t)) <- xs]
   srcs = Map.fromListWith (<>) [((srcAlias s, srcLabel s, langOf s), [(s, i)]) | (ExprI i (SrcE s)) <- xs]
-  decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (Declaration v e _)) <- xs]
+  decs = Map.map (TermTypes Nothing []) $ Map.fromListWith (<>) [(v, [e]) | (ExprI _ (AssE v e _)) <- xs]
 
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
@@ -295,8 +295,8 @@ collectSExpr (ExprI i e0) = f e0 where
   f (ImpE _) = undefined
   f (ExpE _) = undefined
   f (SrcE _) = undefined
-  f (Signature _ _ _) = undefined
-  f (Declaration _ _ _) = undefined
+  f (SigE _ _ _) = undefined
+  f (AssE _ _ _) = undefined
 
   noTypes x = return (x, i)
 
@@ -308,7 +308,7 @@ reindexExpr (ModE m es) = ModE m <$> mapM reindexExprI es
 reindexExpr (AccE e x) = AccE <$> reindexExprI e <*> pure x
 reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
 reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
-reindexExpr (Declaration v e es) = Declaration v <$> reindexExprI e <*> mapM reindexExprI es
+reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
 reindexExpr (ListE es) = ListE <$> mapM reindexExprI es
 reindexExpr (RecE rs) = RecE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs

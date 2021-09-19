@@ -53,8 +53,8 @@ findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
   f (ExprI _ (ModE _ es)) = conmap f es
-  f (ExprI _ (Signature _ _ (EType t _ _))) = findTypeTerms t
-  f (ExprI _ (Declaration _ _ es)) = conmap f es
+  f (ExprI _ (SigE _ _ (EType t _ _))) = findTypeTerms t
+  f (ExprI _ (AssE _ _ es)) = conmap f es
   f _ = []
 
 -- | find all the non-generic terms in an unresolved type
@@ -73,9 +73,9 @@ findTypeTerms (RecU _ t1 _ t2) = findTypeTerms t1 ++ findTypeTerms t2
 -- descend recursively into declaration where statements except if the input
 -- expression is a declaration.
 findSignatures :: ExprI -> [(EVar, Maybe MT.Text, EType)]
-findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (Signature v l t)) <- es]
-findSignatures (ExprI _ (Declaration _ _ es)) = [(v, l, t) | (ExprI _ (Signature v l t)) <- es]
-findSignatures (ExprI _ (Signature v l t)) = [(v, l, t)]
+findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
+findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
+findSignatures (ExprI _ (SigE v l t)) = [(v, l, t)]
 findSignatures _ = []
 
 checkExprI :: Monad m => (ExprI -> m ()) -> ExprI -> m ()

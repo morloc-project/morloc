@@ -87,8 +87,8 @@ pTopExpr =
       try (plural pImport)
   <|> try (plural pExport) -- TODO allow many exports from one statement
   <|> try (plural pTypedef)
-  <|> try (plural pDeclaration)
-  <|> try (plural pSignature)
+  <|> try (plural pAssE)
+  <|> try (plural pSigE)
   <|> try pSrcE
   <|> try (plural pExpr)
   where
@@ -213,38 +213,38 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     return (t, ts)
 
 
-pDeclaration :: Parser ExprI
-pDeclaration = try pFunctionDeclaration <|> pDataDeclaration
+pAssE :: Parser ExprI
+pAssE = try pFunctionAssE <|> pDataAssE
   where
 
-  pDataDeclaration :: Parser ExprI
-  pDataDeclaration = do
+  pDataAssE :: Parser ExprI
+  pDataAssE = do
     v <- pEVar
     _ <- symbol "="
     e <- pExpr
     subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
-    exprI $ Declaration v e subExpressions
+    exprI $ AssE v e subExpressions
 
-  pFunctionDeclaration :: Parser ExprI
-  pFunctionDeclaration = do
+  pFunctionAssE :: Parser ExprI
+  pFunctionAssE = do
     v <- pEVar
     args <- many1 pEVar
     _ <- symbol "="
     e <- pExpr
     subExpressions <- option [] $ reserved "where" >> alignInset whereTerm
     f <- exprI (LamE args e)
-    exprI $ Declaration v f subExpressions
+    exprI $ AssE v f subExpressions
 
   -- | For now, only type signatures and declarations are allowed in function
   -- where statements. There is no particularly reason why source and imports
   -- could not be here. Exports probably should NOT be allowed since they would
   -- break scope.
   whereTerm :: Parser ExprI
-  whereTerm = try pSignature <|> pDeclaration
+  whereTerm = try pSigE <|> pAssE
 
 
-pSignature :: Parser ExprI
-pSignature = do
+pSigE :: Parser ExprI
+pSigE = do
   label <- tag freename
   v <- freename
   lang <- optional (try pLang)
@@ -255,7 +255,7 @@ pSignature = do
   constraints <- option [] pConstraints
   setLang Nothing
   exprI $
-    Signature
+    SigE
       (EV v)
       label
       (EType

@@ -205,10 +205,10 @@ data TermTypes = TermTypes {
   -- the final Int type refers to the concrete index for the source.
   , termDecl :: [ExprI]
   -- ^ all declarations of this type
-  --      Declaration EVar ExprI [ExprI]
-  --                   ^     ^      ^----- TermType knows nothing about this
-  --                   '      '--- each ExprI in [ExprI] is one of these
-  --                   '--- this will match the term name
+  --      DecE EVar ExprI [ExprI]
+  --            ^     ^      ^----- TermType knows nothing about this
+  --            '      '--- each ExprI in [ExprI] is one of these
+  --            '--- this will match the term name
 } 
 
 data ExprI = ExprI Int Expr
@@ -229,10 +229,10 @@ data Expr
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
-  | Signature EVar (Maybe Text) EType
+  | SigE EVar (Maybe Text) EType
   -- ^ A type signature, the three parameters correspond to the term name, the
   -- optional label, and the type
-  | Declaration EVar ExprI [ExprI]
+  | DecE EVar ExprI [ExprI]
   -- ^ x=e1
   -- 1. term name
   -- 2. term
@@ -243,55 +243,12 @@ data Expr
   -- ^ (x)
   | AccE ExprI Text
   -- ^ person@age - access a field in a record
-  | NulE
-  -- ^ empty leaf from a cat tree
-
-  | LstE ExprI ExprI
-  -- ^ a homogenous list
-  --
-  -- LstE/LstS will have types AppU, but they are structurally different
-  --
-  --            Type (A = AppT or AppU)   Expr (E = TupE or TupS)   0 is NulT/NulU/NulS/NulE
-  --  --------------------------------------------------------------------------------------------
-  -- []         A List a                  E 0 0
-  -- [x]        A List a                  E x 0
-  -- [x,y]      A List a                  E x (E y 0)             -- check the right against the synthesized left type 
-  -- [x,y,z]    A List a                  E x (E y (E z 0))
-
-  | TupE ExprI ExprI
-  -- ^ an arbitrary tuple
-  --
-  -- The TupE/TupS and AppU/AppT data types should be structurally isomorphic.
-  --
-  --                  Type (A = AppT or AppU)                   Expr (E = TupE or TupS)   0 is NulT/NulU/NulS/NulE
-  --  ------------------------------------------------------------------------------------------------------------
-  --  ()              A Tuple0 0                                E 0 0
-  --  (a)             A Tuple1 a                                E 0 a
-  --  (a,b)           A (A Tuple2 a) b                          E (E 0 a) b
-  --  (a,b,c)         A (A (A Tuple3 a) b) c                    E (E (E 0 a) b) c
-  --  ((a,b),c)       A (A Tuple2 (A (A Tuple2 a) b)) c         E (E 0 (E (E 0 a) b)) c
-  --  (a,(b,c))       A (A Tuple2 x) (A (A Tuple2 b) c)         E (E 0 x) (E (E 0 b) c)
-  --  (a, b, (c, d))  A (A (A Tuple3 a) b) (A (A Tuple2 c) d)   E (E (E 0 a) b) (E (E 0 c) d)
-  --
-  -- Alternative definitions for TupE and AppU would be `TupE' [ExprI]` and
-  -- `AppU [TypeU]`. While superficially simpler, these definitions complicate
-  -- structural recursion.
-
-  | RecE ExprI Text ExprI
-  -- ^ A record, the initial (Text ExprI) terms are a key-value pair, the final
-  --
-  --                            Type (A = AppT or AppU)     Expr (E = TupE or TupS)   0 is NulT/NulU/NulS/NulE
-  --  ---------------------------------------------------------------------------------------------------------
-  --  {}                        <undefined>                 <undefined> ? this type could appear if we allow field removal
-  --  {a=x}                     RecU 0 a x                  RecE 0 a x
-  --  {a=x, b=y}                RecU (RecE 0 a x) b y       RecE (RecE 0 a x) b y
-  --  M {}                      <undefined>                 <undefined>
-  --  M {a=x}                   RecU M a x                  RecE M a x
-  --  M {a=x, b=y}              RecU (RecE M a x) b y       RecE (RecE M a x) b y
-
-  | AppE ExprI ExprI
+  | LstE [ExprI]
+  | TupE [ExprI]
+  | RecE [(Text, ExprI)]
+  | AppE ExprI [ExprI]
   -- ^ Function application
-  | LamE EVar ExprI
+  | LamE [EVar] ExprI
   -- ^ (\x -> e)
   | AnnE ExprI [TypeU]
   -- ^ (e : A)
@@ -565,13 +522,12 @@ data SExpr g f c
   = UniS
   | VarS EVar
   | AccS (SAnno g f c) Text
-  | AppS (SAnno g f c) (SAnno g f c)
-  | LamS EVar (SAnno g f c)
+  | AppS (SAnno g f c) [(SAnno g f c)]
+  | LamS [EVar] (SAnno g f c)
   -- containers
-  | NulS -- don't confuse with UniS (unit), NulS is the container terminator
-  | LstS (SAnno g f c) (SAnno g f c)
-  | TupS (SAnno g f c) (SAnno g f c)
-  | RecS (SAnno g f c) Text (SAnno g f c)
+  | LstS [SAnno g f c]
+  | TupS [SAnno g f c]
+  | RecS [(Text, SAnno g f c)]
   -- primitives
   | NumS Scientific
   | LogS Bool
@@ -618,9 +574,9 @@ data Type
   -- ^ (a)
   | NulT
   -- ^ used for empty leafs in cat trees
-  | FunT Type Type -- right associative function
-  | AppT Type Type -- left associative type application
-  | RecT NamType Type TVar Type  -- left associative named type application
+  | FunT [Type] Type
+  | AppT Type [Type]
+  | RecT NamType [(TVar, Type)]
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -631,31 +587,13 @@ data TypeU
     [TypeU] -- type parameters
     [TypeU] -- default types
   -- ^ (a^) will be solved into one of the other types
-  | ForallU TVar TypeU
+  | ForallU [TVar] TypeU
   -- ^ (Forall a . A)
-  | NulU
-  -- ^ empty type, mostly used for empty sets in containers, for example, the end of a tuple
-  | FunU TypeU TypeU -- function
-  | AppU TypeU TypeU -- type application
+  | FunU [TypeU] TypeU -- function
+  | AppU TypeU [TypeU] -- type application
   | RecU NamType -- record / object / table
-         TypeU -- left associated type
-         TVar TypeU -- one key/value pair
+         [(TVar, TypeU)]
   deriving (Show, Ord, Eq)
-
--- class TypeTreeLike a where
---   rec :: TVar -> [(Text, a)] -> a
---   arr :: TVar -> [a] -> a
---
--- instance TypeTreeLike TypeU where
---   arr v [] = CatU CatTypeArr (VarU v) NulU
---   arr v (t:ts) = CatU CatTypeArr t (arr v ts)
---
---   rec v [] = CatU (CatTypeRec NamRecord []) (VarU v) NulU
---   rec v@(TV lang _) ((k, t):rs)
---     = CatU (CatTypeRec NamRecord [])
---            (CatU CatTypeEnt (VarU (TV lang k)) t)
---            (rec v rs)
-
 
 -- | Extended Type that may represent a language specific type as well as sets
 -- of properties and constrains.
@@ -675,11 +613,12 @@ instance HasOneLanguage Source where
   langOf' s = srcLang s
 
 unresolvedType2type :: TypeU -> Type 
-unresolvedType2type NulU = NulT
+unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
-unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (CatU k t1 t2) = CatT k (unresolvedType2type t1) (unresolvedType2type t2)
+unresolvedType2type (FunU ts t) = FunU (map unresolvedType2type ts) (unresolvedType2type t)
+unresolvedType2type (AppU t ts) = AppU (unresolvedType2type t) (map unresolvedType2type ts)
+unresolvedType2type (RecU t rs) = RecU t [(k, unresolvedType2type e) | (k, e) <- rs]
 
 
 data Property
@@ -695,35 +634,6 @@ newtype Constraint =
   Con Text
   deriving (Show, Eq, Ord)
 
--- class Decomposable a where
---   -- | Break a type into its input arguments, and final output
---   -- For example: decompose ((a -> b) -> [a] -> [b]) would
---   -- yield ([(a->b), [a]], [b])
---   decompose :: a -> ([a], a)
---
---   -- | like @decompose@ but concatentates the output type
---   decomposeFull :: a -> [a]
---   decomposeFull t = case decompose t of
---     (xs, x) -> (xs ++ [x])
---
--- instance Decomposable Type where
---   decompose (CatT _ t1 NulT) = ([], t1)
---   decompose (CatT _ t1 t2) = case decompose t2 of
---     (ts, finalType) -> (t1:ts, finalType)
---   decompose t = ([], t)
---
--- instance Decomposable TypeU where
---   decompose (CatU _ t1 NulU) = ([], t1)
---   decompose (CatU _ t1 t2) = case decompose t2 of
---     (ts, finalType) -> (t1:ts, finalType)
---   decompose t = ([], t)
---
--- instance Decomposable Expr where
---   decompose (CatE _ (ExprI _ e) (ExprI _ UniE)) = ([], e)
---   decompose (CatE _ (ExprI _ e1) (ExprI _ e2)) = case decompose e2 of
---     (es, finalExpr) -> (e1:es, finalExpr)
---   decompose e = ([], e)
-
 class Typelike a where
   typeOf :: a -> Type
 
@@ -733,9 +643,8 @@ class Typelike a where
   substituteTVar :: TVar -> a -> a -> a
 
   nargs :: a -> Int
-  nargs t = case typeOf t of
-    (CatT CatTypeFun _ t') -> 1 + nargs t'
-    _ -> 0
+  nargs (typeOf -> FunT ts _) = length ts
+  nargs _ = 0
   
 
 instance Typelike Type where
@@ -759,40 +668,43 @@ instance Typelike TypeU where
   --  * all qualified terms are replaced with UnkT
   --  * all existentials are replaced with default values if a possible
   --    FIXME: should I really just take the first in the list???
-  typeOf NulU = NulT
   typeOf (VarU v) = VarT v
-  typeOf (CatU k t1 t2) = CatT k (typeOf t1) (typeOf t2)
   typeOf (ExistU v _ []) = typeOf (ForallU v (VarU v)) -- whatever
   typeOf (ExistU _ _ (t:_)) = typeOf t
-  typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
+  typeOf (ForallU vs t) = foldl (v -> substituteTVar v (UnkT v)) (typeOf t) vs 
+  typeOf (FunU ts t) = FunU (map typeOf ts) (typeOf t)
+  typeOf (AppU t ts) = AppU (typeOf t) (map typeOf ts)
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ [] _) = Set.singleton v
-  free (ExistU v ts _) = Set.unions $ Set.singleton (makeArru v ts) : map free ts
-    where
-      makeArru :: TVar -> [TypeU] -> TypeU
-      makeArru v [] = CatU CatTypeArr (VarU v) NulU
-      makeArru v (t:ts) = CatU CatTypeArr t (makeArru v ts)
-  free (ForallU v t) = Set.delete (VarU v) (free t)
-  free (CatU _ t1 t2) = Set.union (free t1) (free t2)
-  free _ = Set.empty
+  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ForallU vs t) = Set.difference (free t) (map VarU vs)
+  free (AppU t ts) = Set.unions $ map free (t:ts)
+  free (FunU ts t) = Set.unions $ map free (t:ts)
+  free (RecU _ rs) = Set.unions $ map (free . snd) rs
   
   substituteTVar v0 r0 t0 = sub t0
     where
       sub t@(VarU v)
-        | v0 == v = r0
+        | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (CatU k t1 t2) = CatU k (sub t1) (sub t2)
-      sub t = t
+      sub (ExistU v (map sub -> ps) (map sub -> ts)) = ExistU v ps ts
+      sub (ForallU vs t)
+        | elem v0 vs = ForallU vs t -- stop looking if we hit a bound variable of the same name
+        | otherwise = ForallU vs (sub t)
+      sub (FunU ts t) = FunU (map sub ts) (sub t)
+      sub (AppU t ts) = AppU (sub t) (map sub ts)
+      sub (RecU r rs) = RecU r [(k, sub t) | (k, t) <- rs]
 
   substituteTVar v@(TV _ _) (ForallU q r) t = 
     if Set.member (VarU q) (free t)
     then
       let q' = newVariable r t -- get unused variable name from [a, ..., z, aa, ...]
-          r' = substituteTVar q (VarU q') r -- substitute the new variable into the unqualified type
+          r' = substituteTVar (VarU q') q r -- substitute the new variable into the unqualified type
       in ForallU q' (substituteTVar v r' t)
     else
-      ForallU q (substituteTVar v r t)
+      ForallU q (substituteTVar r v t)
+
   substituteTVar v r t = sub t
     where
       sub :: TypeU -> TypeU
@@ -801,6 +713,9 @@ instance Typelike TypeU where
         | otherwise = t'
       sub (CatU k t1 t2) = CatU k (sub t1) (sub t2)
       sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
+
+freeVariables :: Set TVar -> [TVar] -> [TVar]
+freeVariable 
 
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
@@ -836,28 +751,22 @@ instance HasOneLanguage CType where
 -- Inconsistency in language should be impossible at the syntactic level, thus
 -- an error in this function indicates a logical bug in the typechecker.
 instance HasOneLanguage Type where
-  langOf NulT = error "NulT has no language and should be left alone"
   langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
-  langOf t@(CatT _ t1 t2)
-    | langOf t1 == langOf t2 = langOf t1
-    | otherwise = error $ "inconsistent languages in" <> show t
+  langOf (FunT _ t) = langOf t
+  langOf (AppT t _) = langOf t
+  langOf (RecT _ ((_, t):_)) = langOf t
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
 
 instance HasOneLanguage TypeU where
-  langOf NulU = error "NulU has no language and should be left alone"
   langOf (VarU (TV lang _)) = lang
-  langOf x@(ExistU (TV lang _) ts _)
-    | all ((==) lang) (map langOf ts) = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(ForallU (TV lang _) t)
-    | lang == langOf t = lang
-    | otherwise = error $ "inconsistent languages in " <> show x
-  langOf x@(CatU _ t1 t2)
-    | langOf t1 == langOf t2 = langOf t1
-    | otherwise = error $ "inconsistent languages in" <> show x
+  langOf (ExistU (TV lang _) _ _) = lang
+  langOf (ForallU (TV lang _ : _) t) = lang
+  langOf (FunU _ t) = langOf t
+  langOf (AppU t _) = langOf t
+  langOf (RecU _ ((_, t):_)) = langOf t
 
 
 metaConstraints :: Int -> MorlocMonad [Constraint]

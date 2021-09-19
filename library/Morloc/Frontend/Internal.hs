@@ -92,8 +92,8 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   langsOf = undefined
 --   -- langsOf g0 e0 = unique $ Nothing : langsOf' g0 e0 where
 --   --   langsOf' _ (SrcE srcs) = map (Just . srcLang) srcs
---   --   langsOf' _ (Signature _ t) = [langOf t]
---   --   langsOf' g (Declaration _ e) = langsOf' g e
+--   --   langsOf' _ (SigE _ t) = [langOf t]
+--   --   langsOf' g (AssE _ e) = langsOf' g e
 --   --   langsOf' _ UniE = []
 --   --   langsOf' g (VarE v) = case lookupE v g of
 --   --     (Just (_, ts)) -> langsOf g ts
@@ -249,8 +249,8 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- mapU f (RecE rs) = RecE (zip (map fst rs) (map (mapU f . snd) rs))
 -- -- mapU f (AppE e1 e2) = AppE (mapU f e1) (mapU f e2)
 -- -- mapU f (AnnE e ts) = AnnE (mapU f e) (map f ts)
--- -- mapU f (Declaration v e) = Declaration v (mapU f e)
--- -- mapU f (Signature v e) = Signature v $ e {etype = f (etype e)}
+-- -- mapU f (AssE v e) = AssE v (mapU f e)
+-- -- mapU f (SigE v e) = SigE v $ e {etype = f (etype e)}
 -- -- mapU _ e = e
 --
 -- mapU' :: Monad m => (TypeU -> m TypeU) -> Expr -> m Expr
@@ -263,10 +263,10 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- mapU' f (TupleE es) = TupleE <$> mapM (mapU' f) es
 -- -- mapU' f (AppE e1 e2) = AppE <$> mapU' f e1 <*> mapU' f e2
 -- -- mapU' f (AnnE e ts) = AnnE <$> mapU' f e <*> mapM f ts
--- -- mapU' f (Declaration v e) = Declaration <$> pure v <*> mapU' f e
--- -- mapU' f (Signature v e) = do
+-- -- mapU' f (AssE v e) = AssE <$> pure v <*> mapU' f e
+-- -- mapU' f (SigE v e) = do
 -- --   t' <- f (etype e)
--- --   return $ Signature v (e {etype = t'})
+-- --   return $ SigE v (e {etype = t'})
 -- -- mapU' _ e = return e
 --
 -- (+>) :: Indexable a => Gamma -> a -> Gamma
@@ -289,7 +289,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- lookupE :: EVar -> Gamma -> Maybe (Expr, TypeSet)
 -- lookupE = undefined
 -- -- lookupE _ [] = Nothing
--- -- lookupE v ((AnnG (Declaration v' e) t):gs)
+-- -- lookupE v ((AnnG (AssE v' e) t):gs)
 -- --   | v == v' = Just (e, t)
 -- --   | otherwise = lookupE v gs
 -- -- lookupE v ((AnnG e@(VarE v') t):gs)
@@ -348,15 +348,15 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- ann :: Expr -> TypeU -> Expr
 -- ann = undefined
 -- -- ann (AnnE e _) t = AnnE e [t]
--- -- ann e@(Declaration _ _) _ = e
--- -- ann e@(Signature _ _) _ = e
+-- -- ann e@(AssE _ _) _ = e
+-- -- ann e@(SigE _ _) _ = e
 -- -- ann e t = AnnE e [t]
 --
 -- anns :: Expr -> [TypeU] -> Expr
 -- anns = undefined
 -- -- anns (AnnE e _) ts = AnnE e ts
--- -- anns e@(Declaration _ _) _ = e
--- -- anns e@(Signature _ _) _ = e
+-- -- anns e@(AssE _ _) _ = e
+-- -- anns e@(SigE _ _) _ = e
 -- -- anns e ts = AnnE e ts
 --
 -- generalizeE :: Expr -> Expr

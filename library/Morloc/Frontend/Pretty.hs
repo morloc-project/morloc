@@ -61,7 +61,7 @@ prettyExpr t@(RecE e1 k e2) = rec e1 <+> pretty k <+> "=" <+> prettyExpr e2 <> "
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x
-prettyExpr (Declaration v e es) = pretty v <+> "=" <+> prettyExprI e <+> "where" <+> (align . vsep . map prettyExprI) es
+prettyExpr (AssE v e es) = pretty v <+> "=" <+> prettyExprI e <+> "where" <+> (align . vsep . map prettyExprI) es
 prettyExpr (SrcE (Source name lang file alias label))
   = "source"
   <+> viaShow lang
@@ -69,7 +69,7 @@ prettyExpr (SrcE (Source name lang file alias label))
   <+> "("
   <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
   <> ")"
-prettyExpr (Signature v _ e) =
+prettyExpr (SigE v _ e) =
   pretty v <+> elang' <> "::" <+> eprop' <> etype' <> econs'
   where
     elang' :: Doc AnsiStyle
