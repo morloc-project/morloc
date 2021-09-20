@@ -124,17 +124,16 @@ prettyExprM e0 = (vsep . punctuate line . fst $ f e0) <> line where
     in (ms, "RETURN(" <> e' <> ")")
 
 prettyRecordPVar :: TypeM -> MDoc
-prettyRecordPVar (Serial (RecP _ t1 _ _)) = recordPVar t1 
-prettyRecordPVar (Native (RecP _ t1 _ _)) = recordPVar t1
+prettyRecordPVar (Serial _) = "HELPME_ME_SERIAL_RECORD"
+prettyRecordPVar (Native _) = "HELPME_ME_NATIVE_RECORD"
 prettyRecordPVar _ = "<UNKNOWN RECORD>"
 
 recordPVar :: TypeP -> MDoc
 recordPVar (VarP (PV _ _ v)) = pretty v
 recordPVar (UnkP (PV _ _ v)) = pretty v
-recordPVar (NulP) = "<NulP>" -- illegal value
 recordPVar (FunP t1 t2) = "<FunP>" -- illegal value
 recordPVar (AppP t1 t2) = "<AppP>" -- illegal value
-recordPVar (RecP _ t _ _) = recordPVar t
+recordPVar (RecP _ _) = "WHY_THE_BLOODY_HELL_IS_THERE_NO_NAME_FOR_YOUR_RECORD???"
 
 
 prettyPVar :: PVar -> MDoc
@@ -144,18 +143,9 @@ prettyPVar (PV _ Nothing t) = parens ("*" <+> pretty t)
 prettyTypeP :: TypeP -> MDoc
 prettyTypeP (UnkP v) = prettyPVar v 
 prettyTypeP (VarP v) = prettyPVar v 
-prettyTypeP (FunP t1 t2) = prettyTypeP t1 <+> "->" <+> parens (prettyTypeP t2)
-prettyTypeP (AppP t1 t2) = parens prettyTypeP t1 <+> parens (prettyTypeP t2)
-prettyTypeP t@(RecP r _ _ _) = case decomposeRecP t of 
-  (entries, constructor)
-    -> viaShow r <+> prettyTypeP constructor <+> encloseSep "{" "}" "," (map prettyTypeP entries)
-
-decomposeRecP :: TypeP -> ([TypeP], TypeP)
-decomposeRecP (RecP r t1 k t2) = case decomposeRecP t1 of
-  (entries, constructor) -> (entries <> (k, t2), constructor) 
-  ([], constructor) -> ([], constructor)
-decomposeRecP t@(VarP _) = ([], t)
-decomposeRecP _ = error "This doesn't seem to be a RecP"
+prettyTypeP (FunP ts t) = encloseSep "(" ")" " -> " (map prettyTypeP (ts <> [t]))
+prettyTypeP (AppP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
+prettyTypeP (RecP n rs) = block 4 (viaShow n) (vsep [prettyPVar k <+> "::" <+> prettyTypeP x | (k, x) <- rs])
 
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
@@ -250,9 +240,7 @@ typeOfTypeM :: TypeM -> Maybe TypeP
 typeOfTypeM Passthrough = Nothing
 typeOfTypeM (Serial c) = Just c
 typeOfTypeM (Native c) = Just c
-typeOfTypeM (Function ins out) =
-  let (t:ts) = map typeOfTypeM $ ins <> [out]
-  in foldr FunT t ts
+typeOfTypeM (Function ins out) = FunP <$> mapM typeOfTypeM ins <*> typeOfTypeM out
 
 arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
@@ -317,19 +305,10 @@ packExprM m e = do
 
 type2jsontype :: TypeP -> MorlocMonad JsonType
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype (AppP f1 t1) = do
-  j <- type2jsontype f1
-  case j of
-    (ArrJ v ts) -> return $ ArrJ v (t1:ts)
-    (VarJ v) -> return $ ArrJ v [t1]
-    (NamJ _ _) -> MM.throwError . SerializationError $ "An ArrJ type cannot have a NamJ at the base"
-type2jsontype (RecP r t1 k t2) = do
-  t2' <- type2jsontype t2
-  t1' <- type2jsontype t1
-  case t1' of
-    (ArrJ _ _) -> MM.throwError . SerializationError $ "An NamJ type cannot have a ArrJ at the base"
-    (VarJ v) -> return $ NamJ v [(k, t2')]
-    (NamJ v ts) -> return $ NamJ v (ts <> [(k, t2')])
+type2jsontype (AppP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (RecP _ rs) = do
+  ts <- mapM (type2jsontype . snd) rs
+  return $ NamJ "Bob" (zip [v | (PV _ _ v, _) <- rs] ts) 
 type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
 type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
 

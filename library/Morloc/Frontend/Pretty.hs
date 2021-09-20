@@ -45,19 +45,10 @@ prettyExpr (AnnE e ts) = parens
   $   prettyExprI e
   <+> "::"
   <+> encloseSep "(" ")" "; " (map prettyGreenTypeU ts)
-prettyExpr t@(LstE e1 e2) = "[" <> prettyExpr r1 <> lst e2 where
-  lst (LstE e1' NulE) = "," <+> prettyExpr e1' <> "]"
-  lst (LstE e1' e2') = "," <+> prettyExpr e1' <> lst e2' 
-  lst = error "Expected LstE"
-prettyExpr t@(TupE e1 e2) = tup e1 <+> prettyExpr e2 <> ")" where
-  tup (TupE NulE e) = "(" <> prettyExpr e <> ","
-  tup (TupE e1' e2') = tup e1' <> prettyExpr e2' <> ","
-  tup = error "Expected TupE"
-prettyExpr t@(AppE e1 e2) = prettyExpr e1 <+> prettyExpr e2 where
-prettyExpr t@(RecE e1 k e2) = rec e1 <+> pretty k <+> "=" <+> prettyExpr e2 <> "}" where
-  rec (RecE e1'@(RecE _ _ _) k' e2') = rec e1 <+> pretty k <+> "=" <+> prettyExpr e2 <> ","
-  rec (RecE NulE k' e2') = "{" <> pretty k <+> "=" <+> prettyExpr e2 <> ","
-  rec (RecE c k' e2') = prettyExpr c <+> "{" <> pretty k <+> "=" <+> prettyExpr e2 <> ","
+prettyExpr (LstE es) = encloseSep "[" "]" "," (map prettyExprI es)
+prettyExpr (TupE es) = encloseSep "[" "]" "," (map prettyExprI es)
+prettyExpr (AppE f es) = vsep (map prettyExprI (f:es))
+prettyExpr (RecE rs) = block 4 "<RECORD>" (vsep [pretty k <+> "::" <+> prettyExprI x | (k, x) <- rs])
 prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x

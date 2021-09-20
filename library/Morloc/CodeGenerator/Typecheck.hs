@@ -55,8 +55,8 @@ retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
     UniS -> return UniS
     (VarS v) -> return $ VarS v
     (AccS x k) -> AccS <$> retrieveTypes x <*> pure k
-    (ListS xs) -> ListS <$> mapM retrieveTypes xs
-    (TupleS xs) -> TupleS <$> mapM retrieveTypes xs
+    (LstS xs) -> LstS <$> mapM retrieveTypes xs
+    (TupS xs) -> TupS <$> mapM retrieveTypes xs
     (LamS vs f) -> LamS vs <$> retrieveTypes f
     (AppS f xs) -> AppS <$> retrieveTypes f <*> mapM retrieveTypes xs
     (NumS x) -> return $ NumS x
@@ -79,8 +79,8 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
     UniS -> return UniS
     (VarS v) -> return $ VarS v
     (AccS x k) -> AccS <$> weaveAndResolve x <*> pure k
-    (ListS xs) -> ListS <$> mapM weaveAndResolve xs
-    (TupleS xs) -> TupleS <$> mapM weaveAndResolve xs
+    (LstS xs) -> LstS <$> mapM weaveAndResolve xs
+    (TupS xs) -> TupS <$> mapM weaveAndResolve xs
     (LamS vs x) -> LamS vs <$> weaveAndResolve x
     (AppS f xs) -> AppS <$> weaveAndResolve f <*> mapM weaveAndResolve xs
     (NumS x) -> return $ NumS x
@@ -135,50 +135,52 @@ subtype a@(ExistU (TV l1 _) _ _) b@(ExistU (TV l2 _) _ _) g
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
 --  g1 |- A1 -> A2 <: B1 -> B2 -| g3
-subtype (FunU a1 a2) (FunU b1 b2) g1
-  -- function subtypes are *contravariant* with respect to the input, that is,
-  -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
- = do
-  g2 <- subtype b1 a1 g1
-  subtype (apply g2 a2) (apply g2 b2) g2
+subtype (FunU _ _) (FunU _ _) _ = undefined 
+-- subtype (FunU a1 a2) (FunU b1 b2) g1
+--   -- function subtypes are *contravariant* with respect to the input, that is,
+--   -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
+--  = do
+--   g2 <- subtype b1 a1 g1
+--   subtype (apply g2 a2) (apply g2 b2) g2
 
 --  g1 |- A1 <: B1
 -- ----------------------------------------- <:App
 --  g1 |- A1 A2 <: B1 B2 -| g2
 --  unparameterized types are the same as VarT, so subtype on that instead
-subtype t1@(ArrU v1 []) t2@(ArrU v2 []) g
+subtype t1@(AppU v1 []) t2@(AppU v2 []) g
   | langOf v1 == langOf v2 = subtype (VarU v1) (VarU v2) g
   | otherwise = Left $ SubtypeError t1 t2 "<:App - Cannot compare between languages" 
-subtype t1@(ArrU v1@(TV l1 _) vs1) t2@(ArrU v2@(TV l2 _) vs2) g
+subtype t1@(AppU v1@(TV l1 _) vs1) t2@(AppU v2@(TV l2 _) vs2) g
   | length vs1 /= length vs2 = Left $ SubtypeError t1 t2 "<:App - Cannot subtype types with unequal parameter count"
   | l1 /= l2 = return $ g +> SerialConstraint t1 t2
-  | v1 == v2 = compareArr vs1 vs2 g
-  | otherwise = Left $ SubtypeError t1 t2 "<:App - Unequal names in ArrU of the same language" 
+  | v1 == v2 = compareApp vs1 vs2 g
+  | otherwise = Left $ SubtypeError t1 t2 "<:App - Unequal names in AppU of the same language" 
   where
-    compareArr :: [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
-    compareArr [] [] g' = return g'
-    compareArr (t1':ts1') (t2':ts2') g' = do
+    compareApp :: [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
+    compareApp [] [] g' = return g'
+    compareApp (t1':ts1') (t2':ts2') g' = do
       g'' <- subtype t1' t2' g'
-      compareArr ts1' ts2' g''
-    compareArr _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in ArrU"
+      compareApp ts1' ts2' g''
+    compareApp _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in AppU"
 
 -- subtype unordered records
-subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = do
-  g' <- subtype (VarU v1) (VarU v2) g
-  compareEntry (sort rs1) (sort rs2) g'
-  where
-    compareEntry :: [(MT.Text, TypeU)] -> [(MT.Text, TypeU)] -> Gamma -> Either TypeError Gamma
-    compareEntry [] [] g2 = return g2
-    compareEntry ((k1, t1):rs1') ((k2, t2):rs2') g2
-      | l1 == l2 = do
-          g3 <- subtype (VarU (TV l1 k1)) (VarU (TV l2 k2)) g2
-          g4 <- subtype t1 t2 g3
-          compareEntry rs1' rs2' g4
-      | otherwise = return $ g +> SerialConstraint t1 t2
-      where
-        l1 = langOf t1
-        l2 = langOf t2
-    compareEntry _ _ _ = Left $ SubtypeError t1 t2 "Type mismatch in NamU"
+subtype (RecU _ _) (RecU _ _) _ = undefined -- FIXME - name records
+-- subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = do
+  -- g' <- subtype (VarU v1) (VarU v2) g
+  -- compareEntry (sort rs1) (sort rs2) g'
+  -- where
+  --   compareEntry :: [(MT.Text, TypeU)] -> [(MT.Text, TypeU)] -> Gamma -> Either TypeError Gamma
+  --   compareEntry [] [] g2 = return g2
+  --   compareEntry ((k1, t1):rs1') ((k2, t2):rs2') g2
+  --     | l1 == l2 = do
+  --         g3 <- subtype (VarU (TV l1 k1)) (VarU (TV l2 k2)) g2
+  --         g4 <- subtype t1 t2 g3
+  --         compareEntry rs1' rs2' g4
+  --     | otherwise = return $ g +> SerialConstraint t1 t2
+  --     where
+  --       l1 = langOf t1
+  --       l2 = langOf t2
+  --   compareEntry _ _ _ = Left $ SubtypeError t1 t2 "Type mismatch in NamU"
 
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
@@ -195,10 +197,10 @@ subtype a@(ExistU _ [] _) b g
   | langOf a /= langOf b = return g -- incomparable
   | otherwise = occursCheck b a "InstantiateL" >> instantiate a b g
 
-subtype a@(ArrU v1 ps1) b@(ExistU v2 ps2 _) g
+subtype a@(AppU v1 ps1) b@(ExistU v2 ps2 _) g
   | langOf a /= langOf b = return g -- incomparable
-  | otherwise = subtype (ArrU v1 ps1) (ExistU v2 ps2 []) g
-subtype t1@(ExistU v1 ps1 _) t2@(ArrU v2 ps2) g1
+  | otherwise = subtype (AppU v1 ps1) (ExistU v2 ps2 []) g
+subtype t1@(ExistU v1 ps1 _) t2@(AppU v2 ps2) g1
   | langOf v1 /= langOf v2 = return g1 -- incomparable
   | length ps1 /= length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"
   | otherwise = do
@@ -216,7 +218,7 @@ subtype (ForallU v@(TV lang _) a) b g0
   | lang /= langOf b = return g0
   | otherwise = do
       let (g1, a') = newvar lang g0
-      g2 <- subtype (P.substitute v a' a) b (g1 +> MarkG v +> a')
+      g2 <- subtype (substituteTVar v a' a) b (g1 +> MarkG v +> a')
       cut (MarkG v) g2
 
 --  g1,a |- A <: B -| g2,a,g3
@@ -234,36 +236,41 @@ subtype a b _ = Left $ SubtypeError a b "Type mismatch"
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
---  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
---  g2 |- Ea2 <=: [g2]A2 -| g3
--- ----------------------------------------- InstLArr
---  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU t1 t2) g1 = do
-  let (g2, ea1) = newvar lang g1
-      (g3, ea2) = newvar lang g2
-  g4 <-
-    case access1 v (gammaContext g3) of
-      Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
-      Nothing -> Left $ InstantiationError ta tb "Error in InstLArr"
-  g5 <- instantiate t1 ea1 g4
-  g6 <- instantiate ea2 (apply g5 t2) g5
-  return g6
+-- --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
+-- --  g2 |- Ea2 <=: [g2]A2 -| g3
+-- -- ----------------------------------------- InstLApp
+-- --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
+instantiate (ExistU _ _ _) (FunU _ _) _ = undefined
+-- instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU t1 t2) g1 = do
+--   let (g2, ea1) = newvar lang g1
+--       (g3, ea2) = newvar lang g2
+--   g4 <-
+--     case access1 v (gammaContext g3) of
+--       Just (rs, _, ls) ->
+--         return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
+--       Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
+--   g5 <- instantiate t1 ea1 g4
+--   g6 <- instantiate ea2 (apply g5 t2) g5
+--   return g6
+
 --  g1[Ea2,Ea1,Ea=Ea1->Ea2] |- Ea1 <=: A1 -| g2
 --  g2 |- [g2]A2 <=: Ea2 -| g3
--- ----------------------------------------- InstRArr
+-- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-instantiate ta@(FunU t1 t2) tb@(ExistU v@(TV lang _) [] _) g1 = do
-  let (g2, ea1) = newvar lang g1
-      (g3, ea2) = newvar lang g2
-  g4 <-
-    case access1 v (gammaContext g3) of
-      Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
-      Nothing -> Left $ InstantiationError ta tb "Error in InstRArr"
-  g5 <- instantiate t1 ea1 g4
-  g6 <- instantiate ea2 (apply g5 t2) g5
-  return g6
+
+instantiate (FunU _ _) (ExistU _ _ _) _ = undefined
+-- instantiate ta@(FunU t1 t2) tb@(ExistU v@(TV lang _) [] _) g1 = do
+--   let (g2, ea1) = newvar lang g1
+--       (g3, ea2) = newvar lang g2
+--   g4 <-
+--     case access1 v (gammaContext g3) of
+--       Just (rs, _, ls) ->
+--         return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
+--       Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
+--   g5 <- instantiate t1 ea1 g4
+--   g6 <- instantiate ea2 (apply g5 t2) g5
+--   return g6
+
 --
 -- ----------------------------------------- InstLAllR
 --
@@ -416,67 +423,67 @@ synthExpr lang g (LogS x) = do
 synthExpr _ _ (VarS v) = Left $ UnboundVariable v
 
 -- Acc=>
-synthExpr lang g0 (AccS x k) = do
-  (g1, tx, x1) <- synth g0 x
-  tk <- accessRecord k tx
-  return (g1, tk, AccS x1 k)
-  where
-    accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
-    accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
-      (Just t) -> return t
-      Nothing -> Left $ KeyError k r 
-    accessRecord k r = Left $ KeyError k r
+synthExpr lang g0 (AccS x k) = undefined
+  -- (g1, tx, x1) <- synth g0 x
+  -- tk <- accessRecord k tx
+  -- return (g1, tk, AccS x1 k)
+  -- where
+  --   accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
+  --   accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
+  --     (Just t) -> return t
+  --     Nothing -> Left $ KeyError k r
+  --   accessRecord k r = Left $ KeyError k r
 
 -- List=>
 --
 -- The elements in xs are all of the same general type, however they may be in
 -- different languages.
-synthExpr lang g0 (ListS xs) = do
-  -- t is an existential type representing the upper type
-  let (g1, t) = newvar (Just lang) g0
-  -- xs' is a list of mixed language types
-  (g2, ps') <- chainCheck g1 xs t
-  let (g3, containerType) = newvarRich [t] (MLD.defaultList (Just lang) t) (Just lang) g2
-  return (g3, containerType, ListS (map snd ps'))
+synthExpr lang g0 (LstS xs) = undefined
+  -- -- t is an existential type representing the upper type
+  -- let (g1, t) = newvar (Just lang) g0
+  -- -- xs' is a list of mixed language types
+  -- (g2, ps') <- chainCheck g1 xs t
+  -- let (g3, containerType) = newvarRich [t] (MLD.defaultList (Just lang) t) (Just lang) g2
+  -- return (g3, containerType, ListS (map snd ps'))
 
 -- Tuple=>
 --
-synthExpr lang g0 (TupleS xs) = do
-  (g1, xs') <- chain2 synth g0 xs
-  let ts = map fst xs'
-      dts = MLD.defaultTuple (Just lang) ts
-  let (g2, containerType) = newvarRich ts dts (Just lang) g1
-  return (g2, containerType, TupleS (map snd xs'))
+synthExpr lang g0 (TupS xs) = undefined
+  -- (g1, xs') <- chain2 synth g0 xs
+  -- let ts = map fst xs'
+  --     dts = MLD.defaultTuple (Just lang) ts
+  -- let (g2, containerType) = newvarRich ts dts (Just lang) g1
+  -- return (g2, containerType, TupleS (map snd xs'))
 
 -- Rec=>
 --
-synthExpr lang g0 (RecS rs) = do
-  (g1, xs') <- chain2 synth g0 (map snd rs)
-  let typeEntries = zip (map fst rs) (map fst xs')
-      exprEntries = zip (map fst rs) (map snd xs')
-      dts = MLD.defaultRecord (Just lang) typeEntries
-      p = NamU NamRecord (TV (Just lang) "__RECORD__") [] typeEntries
-      (g2, t) = newvarRich [p] dts (Just lang) g1
-  return (g2, t, RecS exprEntries)
+synthExpr lang g0 (RecS rs) = undefined
+  -- (g1, xs') <- chain2 synth g0 (map snd rs)
+  -- let typeEntries = zip (map fst rs) (map fst xs')
+  --     exprEntries = zip (map fst rs) (map snd xs')
+  --     dts = MLD.defaultRecord (Just lang) typeEntries
+  --     p = NamU NamRecord (TV (Just lang) "__RECORD__") [] typeEntries
+  --     (g2, t) = newvarRich [p] dts (Just lang) g1
+  -- return (g2, t, RecS exprEntries)
 
 -- Lam=>
 --
 -- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr lang g0 (LamS vs@(EV v:_) x) = do
-  let mark = MarkG (TV (Just lang) v)
-      g1 = g0 +> mark
-      (g2, ts) = statefulMap (bindTerm lang) g1 vs
-  (g3, tx, x') <- synth g2 x
-  let t = foldr1 FunU (ts ++ [tx])
-  g4 <- cut mark g3
-  return (g4, t, LamS vs x')
+synthExpr lang g0 (LamS vs@(EV v:_) x) = undefined
+  -- let mark = MarkG (TV (Just lang) v)
+  --     g1 = g0 +> mark
+  --     (g2, ts) = statefulMap (bindTerm lang) g1 vs
+  -- (g3, tx, x') <- synth g2 x
+  -- let t = foldr1 FunU (ts ++ [tx])
+  -- g4 <- cut mark g3
+  -- return (g4, t, LamS vs x')
 
 -- App=>
 --
-synthExpr lang g0 (AppS f0 xs) = do
-  (g1, t0, f1) <- synth f0
-  (g2, t1, f2) <- applicationMany g1 xs t0
-  -- is f2 are "real thing?"
+synthExpr lang g0 (AppS v xs) = undefined
+  -- (g1, t0, f1) <- synth f0
+  -- (g2, t1, f2) <- applicationMany g1 xs t0
+  -- -- is f2 are "real thing?"
   
 
 
@@ -579,10 +586,11 @@ applicationMany
        , [SAnno (Indexed Type) One (Indexed TypeU)]
        )
 applicationMany g0 [] t0 = return (g0, t0, [])
-applicationMany g0 (e0:es0) t0 = do
-  (g1, t1, e1) <- application g0 e0 t0
-  (g2, t2, es1) <- applicationMany g1 es0 t1
-  return (g2, FunU t1 t2, e1:es1)
+applicationMany _ _ _ = undefined
+-- applicationMany g0 (e0:es0) t0 = do
+--   (g1, t1, e1) <- application g0 e0 t0
+--   (g2, t2, es1) <- applicationMany g1 es0 t1
+--   return (g2, FunU t1 t2, e1:es1)
 
 application
   :: Gamma
@@ -597,11 +605,13 @@ application
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-application g0 (e0:es) (FunU a b) = do
-  (g1, a1, e1) <- check g e0 a
-  (g2, a2, e2) <- application g1 es b
-  let b' = apply g1 b
-  return (g1, FunU a' b', apply g' e')
+
+application _ _ (FunU ts t) = undefined
+-- application g0 (e0:es) (FunU a b) = do
+--   (g1, a1, e1) <- check g e0 a
+--   (g2, a2, e2) <- application g1 es b
+--   let b' = apply g1 b
+--   return (g1, FunU a' b', apply g' e')
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
@@ -611,23 +621,23 @@ application g e (ForallU x s) = application (g +> ExistG x [] []) e (substitute 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application g e (ExistU v@(TV lang _) [] _) =
-  case access1 v g of
-    -- replace <t0> with <t0>:<ea1> -> <ea2>
-    Just (rs, _, ls) -> do
-      ea1 <- newvar lang
-      ea2 <- newvar lang
-      let t' = FunU ea1 ea2
-          g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
-      (g3, a', e2) <- check g2 e ea1
-      let f' = FunU a' (apply g3 ea2)
-      return (g3, f', e2)
-    -- if the variable has already been solved, use solved value
-    Nothing -> case lookupU v g of
-      (Just (FunU t1 t2)) -> do
-        (g2, _, e2) <- check g e t1
-        return (g2, FunU t1 t2, e2)
-      _ -> Left ApplicationOfNonFunction
+application g e (ExistU v@(TV lang _) [] _) = undefined
+  -- case access1 v g of
+  --   -- replace <t0> with <t0>:<ea1> -> <ea2>
+  --   Just (rs, _, ls) -> do
+  --     ea1 <- newvar lang
+  --     ea2 <- newvar lang
+  --     let t' = FunU ea1 ea2
+  --         g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
+  --     (g3, a', e2) <- check g2 e ea1
+  --     let f' = FunU a' (apply g3 ea2)
+  --     return (g3, f', e2)
+  --   -- if the variable has already been solved, use solved value
+  --   Nothing -> case lookupU v g of
+  --     (Just (FunU t1 t2)) -> do
+  --       (g2, _, e2) <- check g e t1
+  --       return (g2, FunU t1 t2, e2)
+  --     _ -> Left ApplicationOfNonFunction
     
 
 application _ _ _ = Left ApplicationOfNonFunction

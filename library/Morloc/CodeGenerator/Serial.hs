@@ -43,29 +43,23 @@ dummies lang = repeat $ VarU (TV lang "dummy")
 
 defaultListAll :: TypeP -> [TypeP]
 defaultListAll t@(langOf' -> lang)
-  = [arrP (PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
+  = [AppP (PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
 
-isList :: TypeP -> Bool
-isList t@(CatP CatTypeArrP _ _) = case decompose t of
-  (_, VarP (PV lang _ v)) ->
-    let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
-    in length [v' | (_, VarU (TV _ v')) <- map decompose ds, v == v'] > 0
-  _ -> False
+isList (AppP (PV lang _ v) [_]) =
+  let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
+  in length [v' | (AppU (TV _ v') _) <- ds, v == v'] > 0
 isList _ = False
 
 defaultTupleAll :: [TypeP] -> [TypeP]
-defaultTupleAll [] = error $ "Illegal empty tuple"
 defaultTupleAll ts@(t:_) =
   let lang = langOf' t
       gt = Just $ Def.tupleG (length ts)
       cts = Def.tupleC (length ts) lang
-  in [arrP (PV lang gt ct) ts | ct <- cts]
+  in [AppP (PV lang gt ct) ts | ct <- cts]
 
 
 isTuple :: TypeP -> Bool
-isTuple t@(CatP CatTypeArrP _ _) = case decompose t of
-  (length -> i, VarP (PV lang _ v)) -> elem v (Def.tupleC i lang)
-  _ -> False
+isTuple (AppP (PV lang _ v) (length -> i)) = elem v (Def.tupleC i lang)
 isTuple _ = False
 
 isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
@@ -86,7 +80,7 @@ serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
 serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
 serialAstToType (SerialObject k v ps rs) = do
   ts <- mapM (serialAstToType . snd) rs
-  return $ recP (CatTypeRecP k ps) v (zip (map fst rs) ts)
+  return $ RecP k (zip (map fst rs) ts)
 serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
@@ -101,8 +95,7 @@ serialAstToType' (SerialPack _ (One (_, s))) = serialAstToType' s
 serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
 serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
 serialAstToType' (SerialObject r v ps rs)
-  = let rs' = zip (map fst rs) (map (serialAstToType' . snd) rs)
-    in recP (CatTypeRecP r ps) v rs'
+  = RecP r (zip (map fst rs) (map (serialAstToType' . snd) rs)) -- FIXME - lost n and ps
 serialAstToType' (SerialNum    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
@@ -117,7 +110,7 @@ shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
 shallowType (SerialObject r v ps rs) = do
   ts <- mapM shallowType (map snd rs)
-  return $ recP (CatTypeRecP r ps) v (zip (map fst rs) ts)
+  return $ RecP r (zip (map fst rs) ts) -- FIXME - lost n and ps
 shallowType (SerialNum    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
@@ -135,15 +128,14 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
   | isPrimitiveType Def.defaultString t = return $ SerialString v
   | isPrimitiveType Def.defaultNumber t = return $ SerialNum    v
-  | otherwise = makeSerialAST m (CatP CatTypeArrP t NulP)
-makeSerialAST _ (CatP CatTypeFunP _ _)
+  | otherwise = makeSerialAST m (AppP v [])
+makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST m t@(CatP CatTypeArrP t1 _) = case decompose t of
-  (ts, VarP v@(PV _ _ s)) -> case (isList t, isTuple t) of 
-    (True, _) -> SerialList <$> makeSerialAST m t1 
-    (_, True) -> SerialTuple <$> mapM (makeSerialAST m) (fst . decompose $ t1)
-    (_, _) -> case Map.lookup (pv2tv v, length ts) m of
+makeSerialAST m t@(AppP v@(PV _ _ s) ts)
+  | isList t = SerialList <$> makeSerialAST m (ts !! 0)
+  | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
+  | otherwise = case Map.lookup (pv2tv v, length ts) m of
       (Just ps) -> do
         ps' <- mapM (resolvePacker t ts) ps
         ts' <- mapM (makeSerialAST m) (map typePackerType ps')
@@ -152,20 +144,26 @@ makeSerialAST m t@(CatP CatTypeArrP t1 _) = case decompose t of
         $ "Cannot find constructor" <+> dquotes (pretty s)
         <> "<" <> pretty (length ts) <> ">"
         <+> "in packmap:\n" <> prettyPackMap m
-  (_, _) -> MM.throwError . CallTheMonkeys $ "Malformed Arr in makeSerialAST"
-makeSerialAST m t@(CatP (CatTypeRecP r ps) _ _) = case decompose t of 
-  (rs, VarP v) -> do 
-    ts <- mapM (makeSerialAST m) [t | (CatP CatTypeEntP _ t) <- rs]
-    let keys = [key | (CatP CatTypeEntP (VarP key) _) <- rs]
-    return $ SerialObject r v ps (zip keys ts)
+makeSerialAST m t@(RecP r rs) = do
+  ts <- mapM (makeSerialAST m) (map snd rs)
+  let ps = [] -- FIXME - previously the parameters were passed in the RecP object
+  return $ SerialObject r (PV (langOf' t) (Just "Bob G") "Bob C") ps (zip (map fst rs) ts)
+
 
 pvarEqual :: PVar -> PVar -> Bool
 pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
 
 typeEqual :: TypeP -> TypeP -> Bool
-typeEqual NulP NulP = True 
 typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
-typeEqual (CatP _ t11 t12) (CatP _ t21 t22) = typeEqual t11 t12 && typeEqual t21 t22 
+typeEqual (FunP [] t1) (FunP [] t2) = typeEqual t1 t2
+typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
+ = typeEqual t11 t21 && typeEqual (FunP rs1 t12) (FunP rs2 t22)
+typeEqual (AppP v1 []) (AppP v2 []) = v1 == v2
+typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
+ = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
+typeEqual (RecP n1 []) (RecP n2 []) = n1 == n2
+typeEqual (RecP n1 ((k1,t1):rs1)) (RecP n2 ((k2,t2):rs2))
+  = k1 == k2 && typeEqual t1 t2 && typeEqual (RecP n1 rs1) (RecP n2 rs2)
 typeEqual _ _ = False
 
 

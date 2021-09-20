@@ -172,12 +172,9 @@ argName (PassThroughArgument i) = bndNamer i
 showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
 showTypeP (VarP (PV _ _ v)) = pretty v
-showTypeP (CatP CatTypeFunP t1 t2) = [idoc|FUNCTION(#{showTypeP t1} -> (#{showTypeP t2}))|]
-showTypeP t@(CatP CatTypeArrP _ _) = case decompose t of
-  (ts, VarP (TV _ _ v)) -> pretty $ expandMacro v (map (render . showTypeP) ts)
-showTypeP t@(CatP (CatTypeRecP _ _) _ _) = case decompose t of
-  (_, VarP (Pv _ _ v)) -> pretty v
-  _ -> error "Unexpected value in showTypeP"
+showTypeP (FunP ts t) = "FUNCTION#" <> encloseSep "(" ")" " -> " (map showTypeP (ts <> [t]))
+showTypeP (AppP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showTypeP) ts)
+showTypeP (RecP _ rs) = "REQUIRE_RECORD_NAME"
 
 
 showTypeM :: Three -> TypeM -> MDoc

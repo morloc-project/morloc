@@ -147,8 +147,8 @@ linkVariablesToTermTypes mod m0 = mapM_ (link m0) where
     return ()
   link m (ExprI i (VarE v)) = setType m i v
   link m (ExprI _ (AccE e _)) = link m e
-  link m (ExprI _ (ListE xs)) = mapM_ (link m) xs
-  link m (ExprI _ (TupleE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
+  link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
   link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
   link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
   link m (ExprI _ (AnnE e _)) = link m e
@@ -223,8 +223,9 @@ mergeTypeUs (ExistU _ _ _) t = return t
 mergeTypeUs t (ExistU _ _ _) = return t
 mergeTypeUs (ForallU v1 t1) (ForallU v2 t2) = undefined
 mergeTypeUs (FunU f1 x1) (FunU f2 x2) = undefined
-mergeTypeUs (ArrU v1 ps1) (ArrU v2 ps2) = undefined
-mergeTypeUs (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
+mergeTypeUs (AppU v1 ps1) (AppU v2 ps2) = undefined
+mergeTypeUs (RecU _ _) (RecU _ _) = undefined -- FIXME record names
+-- mergeTypeUs (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
 mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -277,8 +278,8 @@ collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
 collectSExpr (ExprI i e0) = f e0 where
   f (VarE v) = noTypes (VarS v) -- this must be a bound variable
   f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
-  f (ListE es) = (ListS <$> mapM collectSAnno es) >>= noTypes
-  f (TupleE es) = (TupleS <$> mapM collectSAnno es) >>= noTypes
+  f (LstE es) = (LstS <$> mapM collectSAnno es) >>= noTypes
+  f (TupE es) = (TupS <$> mapM collectSAnno es) >>= noTypes
   f (RecE rs) = do
     xs <- mapM collectSAnno (map snd rs)
     noTypes $ RecS (zip (map fst rs) xs)
@@ -310,9 +311,9 @@ reindexExpr (AnnE e ts) = AnnE <$> reindexExprI e <*> pure ts
 reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
-reindexExpr (ListE es) = ListE <$> mapM reindexExprI es
+reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
 reindexExpr (RecE rs) = RecE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
-reindexExpr (TupleE es) = TupleE <$> mapM reindexExprI es
+reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr e = return e
 
 
@@ -353,12 +354,12 @@ yIsX' m k1 k2 = case GMap.yIsX m k1 k2 of
 --   f m (AccS x t) = do
 --     (m', x') <- reindex m x
 --     return (m', AccS x' t)
---   f m (ListS xs) = do
+--   f m (LstS xs) = do
 --     (m', xs') <- statefulMapM reindex m xs
---     return (m', ListS xs')
---   f m (TupleS xs) = do
+--     return (m', LstS xs')
+--   f m (TupS xs) = do
 --     (m', xs') <- statefulMapM reindex m xs
---     return (m', TupleS xs')
+--     return (m', TupS xs')
 --   f m (LamS v x) = do
 --     (m', x') <- reindex m x
 --     return (m', LamS v x')

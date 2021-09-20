@@ -57,8 +57,8 @@ listGC Nothing = [listG]
 listGC (Just lang) = listC lang
 
 defaultList :: Maybe Lang -> TypeU -> [TypeU]
-defaultList Nothing t = [arr (TV Nothing listG) [t]]
-defaultList lang@(Just l) t = [arr (TV lang v) [t] | v <- listC l] 
+defaultList Nothing t = [AppU (TV Nothing listG) [t]]
+defaultList lang@(Just l) t = [AppU (TV lang v) [t] | v <- listC l] 
 
 
 
@@ -82,8 +82,8 @@ tupleGC Nothing i = [tupleG i]
 tupleGC (Just lang) i = tupleC i lang
 
 defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
-defaultTuple Nothing ts = [arr (TV Nothing (tupleG (length ts))) ts]
-defaultTuple lang@(Just l) ts = [arr (TV lang v) ts | v <- tupleC (length ts) l]
+defaultTuple Nothing ts = [AppU (TV Nothing (tupleG (length ts))) ts]
+defaultTuple lang@(Just l) ts = [AppU (TV lang v) ts | v <- tupleC (length ts) l]
 
 
 
@@ -103,12 +103,8 @@ recordGC Nothing = [recordG]
 recordGC (Just lang) = recordC lang
 
 defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
-defaultRecord Nothing entries = [foldRecord (TV Nothing recordG) entries]
-defaultRecord lang@(Just l) entries = [foldRecord (TV lang v) entries | v <- recordC l]
-
-foldRecord :: TVar -> [(MT.Text, TypeU)] -> TypeU
-foldRecord v [] = RecU
-
+defaultRecord Nothing entries = [RecU NamRecord entries] -- FIXME recordG?
+defaultRecord lang@(Just l) entries = [RecU NamRecord entries | v <- recordC l] -- FIXME
 
 
 -- | This is the value returned by a functions that doesn't return, for example,

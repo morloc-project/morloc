@@ -35,10 +35,9 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   setDefaults (ExistU _ _ (d:_)) = setDefaults d
   setDefaults t@(VarU _) = t
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
-  setDefaults _ NulU = NulU 
-  setDefaults (FunU t1 t2) = FunU (setDefaults t1) (setDefaults t1)
-  setDefaults (AppU t1 t2) = AppU (setDefaults t1) (setDefaults t1)
-  setDefaults (RecU r t1 k t2) = RecU r (setDefaults t1) k (setDefaults t2)
+  setDefaults (FunU ts t) = FunU (map setDefaults ts) (setDefaults t)
+  setDefaults (AppU v ts) = AppU v (map setDefaults ts)
+  setDefaults (RecU r rs) = RecU r [(k, setDefaults t) | (k, t) <- rs]
 
 
   variables = [1 ..] >>= flip replicateM ['a' .. 'z']
@@ -54,30 +53,29 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       ++ map findExistentials ts
       ++ map findExistentials ds
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
-  findExistentials _ NulU =  Set.empty
-  findExistentials (FunU t1 t2) = Set.union (findExistentials t1) (findExistentials t2)
-  findExistentials (AppU t1 t2) = Set.union (findExistentials t1) (findExistentials t2)
-  findExistentials (RecU _ t1 _ t2) = Set.union (findExistentials t1) (findExistentials t2)
+  findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
+  findExistentials (AppU v ts) = Set.unions (map findExistentials ts)
+  findExistentials (RecU _ rs) = Set.unions (map (findExistentials . snd) rs)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
   generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
     where
-      v0 = VarU (TV lang0 (unName r0)) -- the type term that is being substitute in
+     -- the type term that is being substitute in
+      replacementTerm = TV lang0 (unName r0)
 
       f :: TVar -> TypeU -> TypeU
       f v t1@(ExistU v' [] _)
-        | v == v' = VarU (TV lang0 (unName r0))
+        | v == v' = VarU replacementTerm -- substitute
         | otherwise = t1
       f v (ExistU v' ts _)
-        | v == v' = foldr AppU v0 (map (f v) ts)
-        | otherwise = foldr AppU (unTVar v) (map (f v) ts)
+        | v == v' = AppU replacementTerm (map (f v) ts) -- substitute
+        | otherwise = AppU v (map (f v) ts)
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)
         | otherwise = t1
-      f _ NulU = NulU 
-      f (FunU t1 t2) = FunU (f t1) (f t1)
-      f (AppU t1 t2) = AppU (f t1) (f t1)
-      f (RecU r t1 k t2) = RecU r (f t1) k (f t2)
+      f v (FunU ts t) = FunU (map (f v) ts) (f v t)
+      f v (AppU v' ts) = AppU v' (map (f v) ts)
+      f v (RecU r rs) = RecU r [(k, f v t) | (k, t) <- rs]
 
 
 -- class HasManyLanguages a where

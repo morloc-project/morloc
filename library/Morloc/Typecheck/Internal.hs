@@ -49,7 +49,7 @@ instance Applicable TypeU where
   -- [G]a = a
   apply _ a@(VarU _) = a
   -- [G](A->B) = ([G]A -> [G]B)
-  apply g (FunU a b) = FunU (apply g a) (apply g b)
+  apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
   -- [G]ForallU a.a = forall a. [G]a
   apply g (ForallU x a) = ForallU x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
@@ -58,8 +58,9 @@ instance Applicable TypeU where
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds)
-  apply g (ArrU v ts) = ArrU v (map (apply g) ts)
-  apply g (NamU r v ts rs) = NamU r v (map (apply g) ts) (map (\(n, t) -> (n, apply g t)) rs)
+  apply g (AppU v ts) = AppU v (map (apply g) ts)
+  apply g (RecU _ _) = undefined -- FIXME name records
+  -- apply g (NamU r v ts rs) = NamU r v (map (apply g) ts) (map (\(n, t) -> (n, apply g t)) rs)
 
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
@@ -87,7 +88,7 @@ instance Indexable TypeU where
 
 occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
 occursCheck t1 t2 place = do
-  case Set.member t1 (P.free t2) of
+  case Set.member t1 (free t2) of
     True -> Left $ OccursCheckFail t1 t2 place
     False -> Right ()
 
@@ -96,7 +97,7 @@ occursCheck t1 t2 place = do
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> TypeU -> TypeU
-substitute v t = P.substitute v (ExistU v [] []) t
+substitute v t = substituteTVar v (ExistU v [] []) t
 
 
 access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])

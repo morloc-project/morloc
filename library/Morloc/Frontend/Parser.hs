@@ -165,7 +165,8 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
     entries <- braces (sepBy1 pRecEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
-    let t = NamU r (TV lang constructor) (map VarU vs) entries
+    -- let t = NamU r (TV lang constructor) (map VarU vs) entries
+    let t = RecU r entries -- FIXME - add in constructor and parameters
     setLang Nothing
     exprI (TypE v vs t)
 
@@ -326,11 +327,7 @@ pSrcE = do
 
 
 pLstE :: Parser ExprI
-pLstE = brackets (sepBy pExpr (symbol ",")) >>= foldlM consM LstE where
-  consM :: (ExprI -> ExprI -> ExprI) -> [ExprI] -> Parser ExprI
-  consM t [] = exprI $ t UniE UniE
-  consM t [x] = exprI $ t x UniE
-  consM t (x:xs) = (t x <$> consM t xs) >>= exprI 
+pLstE = (LstE <$> brackets (sepBy pExpr (symbol ","))) >>= exprI
 
 
 pTupE :: Parser ExprI
@@ -340,21 +337,14 @@ pTupE = do
   _ <- symbol ","
   es <- sepBy1 pExpr (symbol ",")
   _ <- symbol ")"
-  return $ foldTuple (e:es)
-  where
-    foldTuple [ExprI] -> Parser ExprI
-    foldTuple [] -> exprI $ TupE NulE NulE
-    foldTuple [x] -> exprI $ TupE NulE x
-    foldTuple (x:xs) -> (TupE <$> foldTuple [x] <*> foldTuple xs) >>= exprI
+  exprI $ TupE (e:es)
 
 
 pRecE :: Parser ExprI
-pRecE = braces (sepBy1 pRecEntryE (symbol ",")) >>= foldRecord where
-  foldRecord :: [(Mt.Text, ExprI)] -> ExprI 
-  foldRecord [] = error "sepBy1 guaranttees this cannot happen"
-  foldRecord [x] = RecE NulE x 
-  foldRecord (x:xs) = (RecE <$> foldRecord [x] <*> foldRecord xs) >>= exprI
-
+pRecE = do
+  rs <- braces (sepBy1 pRecEntryE (symbol ","))
+  -- FIXME
+  exprI $ RecE rs
 
 pRecEntryE :: Parser (MT.Text, ExprI)
 pRecEntryE = do
@@ -481,15 +471,11 @@ pRecU = do
   _ <- tag (symbol "{")
   entries <- braces (sepBy1 pRecEntryU (symbol ","))
   lang <- CMS.gets stateLang
+  -- FIXME - USE THE NAME OF THE GODDAMN CONSTRUCTOR PLEASE
   constructor <- case MLD.defaultRecord lang entries of
     [t] -> return t
-    ts -> ExistU <$> freename <*> pure [] <*> pure ts
-  return $ foldRecord constructors entries
-  where
-    foldRecord :: TypeU -> [(Mt.Text, TypeU)] -> TypeU 
-    foldRecord _ [] = error "sepBy1 guaranttees this cannot happen"
-    foldRecord c [x] = RecU c x 
-    foldRecord c (x:xs) = (RecU <$> foldRecord c [x] <*> foldRecord NulE xs) >>= exprI
+    ts -> ExistU <$> (freename >>= tvar) <*> pure [] <*> pure ts
+  return $ RecU NamRecord entries
 
 
 pRecEntryU :: Parser (MT.Text, TypeU)
@@ -510,7 +496,7 @@ pAppU = do
   n <- freename <|> stringLiteral
   t <- tvar n
   args <- many1 pType'
-  return $ foldr AppU t args
+  return $ AppU t args
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 
@@ -519,7 +505,7 @@ pFunU = do
   t <- pType'
   _ <- op "->"
   ts <- sepBy1 (pType') (op "->")
-  return $ foldr1 FunU (t : ts)
+  return $ FunU ts t
   where
     pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pRecU
 

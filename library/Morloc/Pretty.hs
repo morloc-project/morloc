@@ -86,8 +86,7 @@ prettyScream :: MT.Text -> Doc AnsiStyle
 prettyScream x = annotate screamStyle (pretty x)
 
 prettyLinePrefixes :: MT.Text -> Doc ann -> Doc ann 
-prettyLinePrefixes prefix d =
-  pretty . MT.unlines . map (\l -> prefix <> l) $ MT.lines (render d)
+prettyLinePrefixes prefix d = pretty . MT.unlines . map (\l -> prefix <> l) $ MT.lines (render d)
 
 
 class PrettyType a where
@@ -97,13 +96,9 @@ instance PrettyType Type where
   prettyType (UnkT (TV _ v)) = "*" <> pretty v
   prettyType (VarT (TV _ "Unit")) = "()"
   prettyType (VarT v) = pretty v
-  prettyType t@(CatT k _ _) = case (decompose t, k) of
-   ((ins, out), CatTypeFun) -> encloseSep "(" ")" " -> " (map prettyType (ins <> [out]) )
-   ((ins, out), CatTypeArr) -> encloseSep "(" ")" " " (map prettyType $ out : ins)
-   ((ins, out), CatTypeRec _ _) -> prettyType out <+> encloseSep "{" "}" "," (map prettyType ins)
-   (([key], val), CatTypeEnt) -> prettyType key <+> "=" <+> prettyType val 
-   _ -> error "Malformed or misplaced record entry"
-
+  prettyType (FunT ts t) = encloseSep "(" ")" " -> " (map prettyType (ts <> [t]))
+  prettyType (AppT v ts) = pretty v <+> hsep (map prettyType ts)
+  prettyType (RecT n rs) = block 4 (viaShow n) (vsep [pretty k <+> "::" <+> prettyType x | (k, x) <- rs])
 
 instance PrettyType GType where
   prettyType = prettyType . unGType
@@ -124,12 +119,9 @@ prettyTypeU t@(ForallU _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
 prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
-prettyTypeU t@(CatU k _ _) = case (decompose t, k) of
-   ((ins, out), CatTypeFun) -> encloseSep "(" ")" " -> " (map prettyTypeU (ins <> [out]) )
-   ((ins, out), CatTypeArr) -> encloseSep "(" ")" " " (map prettyTypeU $ out : ins)
-   ((ins, out), CatTypeRec _ _) -> prettyTypeU out <+> encloseSep "{" "}" "," (map prettyTypeU ins)
-   (([key], val), CatTypeEnt) -> prettyTypeU key <+> "=" <+> prettyTypeU val 
-   _ -> error "Malformed or misplaced record entry"
+prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
+prettyTypeU (AppU v ts) = pretty v <+> vsep (map prettyTypeU ts)
+prettyTypeU (RecU n rs) = block 4 (viaShow n) (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
 prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep

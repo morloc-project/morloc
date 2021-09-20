@@ -20,6 +20,8 @@ import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.PartialOrd as P
+import qualified Data.List as DL
+import qualified Data.Foldable as DF
 
 -- Types are partially ordered, 'forall a . a' is lower (more generic) than
 -- Int. But 'forall a . a -> a' cannot be compared to 'forall a . a', since
@@ -33,17 +35,19 @@ instance P.PartialOrd TypeU where
     =  v1 == v2
     && length ts1 == length ts2
     && foldl (&&) True (zipWith (P.<=) ts1 ts2)
-  (<=) NulU NulU = True
-  (<=) (FunU t11 t12) (FunU t21 t22) = t11 <= t21 && t12 <= t22
-  (<=) (AppU t11 t12) (AppU t21 t22) = t11 <= t21 && t12 <= t22
-  (<=) (RecU r1 t11 k1 t12) (RecU r2 t21 k2 t22)
-    = r1 == r2 
-    && t11 <= t21
-    && t12 <= t22
-    && k1 == k2
   (<=) (ForallU v t1) t2
     | (P.==) (ForallU v t1) t2 = True
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
+  (<=) (FunU (t11:rs1) t12) (FunU (t21:rs2) t22) = t11 <= t21 && FunU rs1 t12 <= FunU rs2 t22
+  (<=) (FunU [] t12) (FunU [] t22) = t12 <= t22 
+  (<=) (AppU v1 (t11:rs1)) (AppU v2 (t21:rs2)) = t11 <= t21 && AppU v1 rs1 <= AppU v2 rs2
+  (<=) (AppU v1 []) (AppU v2 []) = v1 == v2
+  -- the records do not need to be in the same order to be equivalent
+  (<=) (RecU r1 ((k1,e1):rs1)) (RecU r2 rs2)
+    = case DL.partition ((== k1) . fst) rs2 of
+       ([(k2,e2)], rs2) -> e1 <= e2 && RecU r1 rs1 <= RecU r2 rs2
+       _ -> False
+  (<=) (RecU r1 []) (RecU r2 []) = r1 == r2
   (<=) _ _ = False
 
   (==) (ForallU v1@(TV _ _) t1) (ForallU v2 t2) =
@@ -62,28 +66,30 @@ substituteFirst v t1 t2 = case findFirst v t1 t2 of
   Nothing -> t1
 
 findFirst :: TVar -> TypeU -> TypeU -> Maybe TypeU
-findFirst v (VarU v') t2
-  | v == v' = Just t2
-  | otherwise = Nothing
-findFirst v (ForallU v1 t1) (ForallU v2 t2)
-  | v == v1 = Nothing
-  | otherwise = findFirst v t1 (substituteTVar v2 (VarU v1) t2)
-findFirst v (ForallU v1 t1) t2
-  | v == v1 = Nothing
-  | otherwise = findFirst v (substituteTVar v1 (VarU v1) t1) t2
-findFirst v (FunU t11 t12) (FunU t21 t22)
-  = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
-findFirst v (AppU t11 t12) (AppU t21 t22)
-  = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
-findFirst v (RecU r1 t11 k1 t12) (RecU r2 t21 k2 t22)
-  | r1 == r2 && k1 == k2 = foldL firstOf Nothing (zipWith (findFirst v) [(t11, t21), (t12, t22)]) of
-  | otherwise = Nothing
-findFirst _ _ _ = Nothing
+findFirst v = f where
+  f (VarU v') t2
+    | v == v' = Just t2
+    | otherwise = Nothing
+  f (ForallU v1 t1) (ForallU v2 t2)
+    | v == v1 = Nothing
+    | otherwise = f t1 (substituteTVar v2 (VarU v1) t2)
+  f (ForallU v1 t1) t2
+    | v == v1 = Nothing
+    | otherwise = f (substituteTVar v1 (VarU v1) t1) t2
+  f (FunU ts1 t1) (FunU ts2 t2)
+    = foldl firstOf Nothing (zipWith f (ts1 <> [t1]) (ts2 <> [t2]))
+  f (AppU _ ts1) (AppU _ ts2)
+    = foldl firstOf Nothing (zipWith f ts1 ts2)
+  f (RecU r1 ((k1,e1):rs1)) (RecU r2 rs2)
+    = case DL.partition ((== k1) . fst) rs2 of
+       ([(k2,e2)],rs2) -> firstOf (f e1 e2) (f (RecU r1 rs1) (RecU r2 rs2))
+       _ -> Nothing 
+  f _ _ = Nothing
 
-firstOf :: Maybe a -> Maybe a -> Maybe a
-firstOf (Just x) _ = Just x
-firstOf _ (Just x) = Just x
-firstOf _ _ = Nothing
+  firstOf :: Maybe a -> Maybe a -> Maybe a
+  firstOf (Just x) _ = Just x
+  firstOf _ (Just x) = Just x
+  firstOf _ _ = Nothing
 
 
 -- | is t1 a generalization of t2?

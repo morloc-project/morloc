@@ -205,7 +205,7 @@ data TermTypes = TermTypes {
   -- the final Int type refers to the concrete index for the source.
   , termDecl :: [ExprI]
   -- ^ all declarations of this type
-  --      DecE EVar ExprI [ExprI]
+  --      AssE EVar ExprI [ExprI]
   --            ^     ^      ^----- TermType knows nothing about this
   --            '      '--- each ExprI in [ExprI] is one of these
   --            '--- this will match the term name
@@ -232,7 +232,7 @@ data Expr
   | SigE EVar (Maybe Text) EType
   -- ^ A type signature, the three parameters correspond to the term name, the
   -- optional label, and the type
-  | DecE EVar ExprI [ExprI]
+  | AssE EVar ExprI [ExprI]
   -- ^ x=e1
   -- 1. term name
   -- 2. term
@@ -575,8 +575,8 @@ data Type
   | NulT
   -- ^ used for empty leafs in cat trees
   | FunT [Type] Type
-  | AppT Type [Type]
-  | RecT NamType [(TVar, Type)]
+  | AppT TVar [Type]
+  | RecT NamType [(Text, Type)]
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -587,12 +587,12 @@ data TypeU
     [TypeU] -- type parameters
     [TypeU] -- default types
   -- ^ (a^) will be solved into one of the other types
-  | ForallU [TVar] TypeU
+  | ForallU TVar TypeU
   -- ^ (Forall a . A)
   | FunU [TypeU] TypeU -- function
-  | AppU TypeU [TypeU] -- type application
+  | AppU TVar [TypeU] -- type application
   | RecU NamType -- record / object / table
-         [(TVar, TypeU)]
+         [(Text, TypeU)]
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -616,9 +616,9 @@ unresolvedType2type :: TypeU -> Type
 unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
-unresolvedType2type (FunU ts t) = FunU (map unresolvedType2type ts) (unresolvedType2type t)
-unresolvedType2type (AppU t ts) = AppU (unresolvedType2type t) (map unresolvedType2type ts)
-unresolvedType2type (RecU t rs) = RecU t [(k, unresolvedType2type e) | (k, e) <- rs]
+unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
+unresolvedType2type (AppU v ts) = AppT v (map unresolvedType2type ts)
+unresolvedType2type (RecU t rs) = RecT t [(k, unresolvedType2type e) | (k, e) <- rs]
 
 
 data Property
@@ -652,15 +652,20 @@ instance Typelike Type where
 
   substituteTVar v0 r0 t0 = sub t0
     where
+      sub t@(UnkT v) = t
       sub t@(VarT v)
         | v0 == v = r0
         | otherwise = t
-      sub (CatT k t1 t2) = CatT k (sub t1) (sub t2)
-      sub t = t
+      sub (FunT ts t) = FunT (map sub ts) (sub t)
+      sub (AppT v ts) = AppT v (map sub ts)
+      sub (RecT r es) = RecT r [(k, sub t) | (k, t) <- es]
 
+  free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
-  free (CatT _ t1 t2) = Set.union (free t1) (free t2)
-  free _ = Set.empty
+  free (FunT ts t) = Set.unions (map free (t:ts))
+  free (AppT v ts) = Set.unions (map free ts)
+  free (RecT _ es) = Set.unions (map (free . snd) es)
+
 
 
 instance Typelike TypeU where
@@ -671,51 +676,40 @@ instance Typelike TypeU where
   typeOf (VarU v) = VarT v
   typeOf (ExistU v _ []) = typeOf (ForallU v (VarU v)) -- whatever
   typeOf (ExistU _ _ (t:_)) = typeOf t
-  typeOf (ForallU vs t) = foldl (v -> substituteTVar v (UnkT v)) (typeOf t) vs 
-  typeOf (FunU ts t) = FunU (map typeOf ts) (typeOf t)
-  typeOf (AppU t ts) = AppU (typeOf t) (map typeOf ts)
+  typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
+  typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
+  typeOf (AppU v ts) = AppT v (map typeOf ts)
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ [] _) = Set.singleton v
-  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
-  free (ForallU vs t) = Set.difference (free t) (map VarU vs)
-  free (AppU t ts) = Set.unions $ map free (t:ts)
+  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU v ts) : map free ts
+  free (ForallU v t) = Set.delete (VarU v) (free t)
+  free (AppU v ts) = Set.unions $ map free ts
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (RecU _ rs) = Set.unions $ map (free . snd) rs
   
+
+  substituteTVar v@(TV _ _) (ForallU q r) t = 
+    if Set.member (VarU q) (free t)
+    then
+      let q' = newVariable r t -- get unused variable name from [a, ..., z, aa, ...]
+          r' = substituteTVar q (VarU q') r -- substitute the new variable into the unqualified type
+      in ForallU q' (substituteTVar v r' t)
+    else
+      ForallU q (substituteTVar v r t)
+
   substituteTVar v0 r0 t0 = sub t0
     where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
       sub (ExistU v (map sub -> ps) (map sub -> ts)) = ExistU v ps ts
-      sub (ForallU vs t)
-        | elem v0 vs = ForallU vs t -- stop looking if we hit a bound variable of the same name
-        | otherwise = ForallU vs (sub t)
+      sub (ForallU v t)
+        | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
+        | otherwise = ForallU v (sub t)
       sub (FunU ts t) = FunU (map sub ts) (sub t)
-      sub (AppU t ts) = AppU (sub t) (map sub ts)
+      sub (AppU v ts) = AppU v (map sub ts)
       sub (RecU r rs) = RecU r [(k, sub t) | (k, t) <- rs]
-
-  substituteTVar v@(TV _ _) (ForallU q r) t = 
-    if Set.member (VarU q) (free t)
-    then
-      let q' = newVariable r t -- get unused variable name from [a, ..., z, aa, ...]
-          r' = substituteTVar (VarU q') q r -- substitute the new variable into the unqualified type
-      in ForallU q' (substituteTVar v r' t)
-    else
-      ForallU q (substituteTVar r v t)
-
-  substituteTVar v r t = sub t
-    where
-      sub :: TypeU -> TypeU
-      sub t'@(VarU v')
-        | v == v' = r
-        | otherwise = t'
-      sub (CatU k t1 t2) = CatU k (sub t1) (sub t2)
-      sub (ExistU v' ps ds) = ExistU v' (map sub ps) (map sub ds)
-
-freeVariables :: Set TVar -> [TVar] -> [TVar]
-freeVariable 
 
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
@@ -754,7 +748,7 @@ instance HasOneLanguage Type where
   langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
   langOf (FunT _ t) = langOf t
-  langOf (AppT t _) = langOf t
+  langOf (AppT (TV lang _) _) = lang
   langOf (RecT _ ((_, t):_)) = langOf t
 
 instance HasOneLanguage TVar where
@@ -763,9 +757,9 @@ instance HasOneLanguage TVar where
 instance HasOneLanguage TypeU where
   langOf (VarU (TV lang _)) = lang
   langOf (ExistU (TV lang _) _ _) = lang
-  langOf (ForallU (TV lang _ : _) t) = lang
+  langOf (ForallU (TV lang _) t) = lang
   langOf (FunU _ t) = langOf t
-  langOf (AppU t _) = langOf t
+  langOf (AppU (TV lang _) _) = lang
   langOf (RecU _ ((_, t):_)) = langOf t
 
 

@@ -76,12 +76,18 @@ checkForSelfRecursion d = do
 
     -- check if a given term appears in a type
     hasTerm :: TVar -> TypeU -> Bool
-    hasTerm _ NulU = False
     hasTerm v (VarU v') = v == v'
     hasTerm v (ForallU _ t) = hasTerm v t
-    hasTerm v (FunU t1 t2) = hasTerm v t1 || hasTerm v t2
-    hasTerm v (AppU t1 t2) = hasTerm v t1 || hasTerm v t2
-    hasTerm v (RecU _ t1 (_, t2)) = hasTerm v t1 || hasTerm v t2
+
+    hasTerm v (FunU (t1:rs) t2) = hasTerm v t1 || hasTerm v (FunU rs t2)
+    hasTerm v (FunU [] t) = hasTerm v t
+
+    hasTerm v (AppU t1 (t2:rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
+    hasTerm v (AppU v' []) = v == v'
+
+    hasTerm v (RecU n ((_, t):rs)) = hasTerm v t || hasTerm v (RecU n rs)
+    hasTerm v (RecU _ []) = False
+
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
 desugarDag
@@ -129,22 +135,24 @@ desugarType
   -> MVar
   -> TypeU
   -> MorlocMonad TypeU
-desugarType h d k t0 = f [] t0
+desugarType h d k t0 = f t0
   where
 
-  f :: [TypeU] -> TypeU -> MorlocMonad TypeU
+  f :: TypeU -> MorlocMonad TypeU
 
   --   (Just []) -> return (t0, [])
   --   (Just ts'@(t':_)) -> do
   --     (_, t) <- foldlM (mergeAliases v 0) t' ts'
   --     f t
   --   Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
-  f ts (ExistU v ps ds) = do
-    ps' <- mapM (f ts) ps
-    ds' <- mapM (f ts) ds
+  f (ExistU v ps ds) = do
+    ps' <- mapM f ps
+    ds' <- mapM f ds
     return $ ExistU v ps' ds'
-  f _ (FunU t1 t2) = FunU <$> f [] t1 <*> f [] t2
-  f _ (RecU r t1 k t2) = RecU r <$> f [] t1 <*> pure k <$> f [] t2
+  f (FunU ts t) = FunU <$> mapM f ts <*> f t
+  f (RecU n rs) = do 
+    ts <- mapM (f . snd) rs
+    return $ RecU n (zip (map fst rs) ts)
 
   -- type Cpp (A a b) = "map<$1,$2>" a b
   -- foo Cpp :: A D [B] -> X
@@ -156,29 +164,28 @@ desugarType h d k t0 = f [] t0
   -- -----------------
   -- f :: (Int, A) -> B
   --
-  f ts (AppU a b) = do
-    b' <- f [] b
-    -- the right terms are passed left with each unwrapped App, when the type
-    -- function is reached (which should be a VarU), the the right terms will
-    -- be substituted in
-    f (b':ts) a
+  f (AppU v ts) =
+    case Map.lookup v h of
+      (Just []) -> AppU v <$> mapM f ts
+      (Just (t':ts')) -> do
+        (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
+        if length ts == length vs
+          -- substitute parameters into alias
+          then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
+          else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
+      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in ArrU missing from type map"
 
   -- type Foo = A     
   -- f :: Foo -> B    
   -- -----------------
   -- f :: A -> B      
-  f ts1 t0@(VarU v) =
-    case Map.lookup v h of
-      Nothing -> t0
-      (Just (r:rs)) -> do
-        (ps2, t1) <- mergeAliases v (length ts1) r rs
-        expand ps2 ts1 t1
-    where
-      expand :: [TVar] -> [TypeU] -> TypeU -> MorlocMonad TypeU
-      expand [] [] t = return t
-      expand [] (_:_) _ = MM.throwError . CallTheMonkeys $ "Test and annotate this error"
-      expand (_:_) [] _ = MM.throwError . CallTheMoneksy $ "Test and annotate this error"
-      expand (v:vs) (r:rs) t = expand vs rs <$> parsub (v, (chooseExistential r)) (chooseExistential t) 
+  f t0@(VarU v) =
+     case Map.lookup v h of
+      (Just []) -> return t0
+      (Just ts'@(t':_)) -> do
+        (_, t) <- foldlM (mergeAliases v 0) t' ts'
+        f t
+      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
@@ -186,10 +193,9 @@ desugarType h d k t0 = f [] t0
     | otherwise = t1 -- keep the original
   parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
-  parsub _ NulU = NulU 
-  parsub pair (FunU t1 t2) = FunU (parsub pair t1) (parsub pair t1)
-  parsub pair (AppU t1 t2) = AppU (parsub pair t1) (parsub pair t1)
-  parsub pair (RecU r t1 k t2) = RecU r (parsub pair t1) k (parsub pair t2)
+  parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
+  parsub pair (AppU v ts ) = AppU v (map (parsub pair) ts)
+  parsub pair (RecU n rs) = RecU n [(k, parsub pair t) | (k, t) <- rs]
 
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
@@ -213,14 +219,13 @@ desugarType h d k t0 = f [] t0
 -- FIXME: How this is done (and why) is of deep relevance to understanding morloc, the decision should not be arbitrary
 -- FIXME: And why is it done? Resloving existentials before typechecking seems sketch
 chooseExistential :: TypeU -> TypeU
-chooseExistential NulU = NulU
 chooseExistential (VarU v) = VarU v
 chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
 chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
-chooseExistential (FunU t1 t2) = FunU (chooseExistential t1) (chooseExistential t2)
-chooseExistential (AppU t1 t2) = AppU (chooseExistential t1) (chooseExistential t2)
-chooseExistential (RecU k t1 v t2) = RecU k (chooseExistential t1) v (chooseExistential t2)
+chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
+chooseExistential (AppU v ts) = AppU v (map chooseExistential ts)
+chooseExistential (RecU n rs) = RecU n [(k, chooseExistential t) | (k,t) <- rs]
 
 
 -- addPackerMap

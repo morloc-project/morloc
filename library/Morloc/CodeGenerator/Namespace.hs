@@ -16,8 +16,6 @@ module Morloc.CodeGenerator.Namespace
   , JsonType(..)
   , PVar(..)
   , TypeP(..)
-  , arrP
-  , recP
   , JsonPath
   , JsonAccessor(..)
   , NexusCommand(..)
@@ -44,7 +42,7 @@ data TypeP
   = UnkP PVar
   | VarP PVar
   | FunP [TypeP] TypeP
-  | AppP TypeP [TypeP]
+  | AppP PVar [TypeP]
   | RecP NamType [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
@@ -65,52 +63,29 @@ data NexusCommand = NexusCommand
   }
 
 instance Typelike TypeP where
-  typeOf NulP = NulT
   typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
   typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
-  typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
-  typeOf (AppP t1 t2) = AppT (typeOf t1) (typeOf t2)
-  typeOf (RecP r t1 (PV l _ v) t2) = RecP r (typeOf t1) (TV (Just l) v) (typeOf t2)
+  typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
+  typeOf (AppP (PV lang _ t) ts) = AppT (TV (Just lang) t) (map typeOf ts)
+  typeOf (RecP r es) = RecT r [(v, typeOf t) | (PV l _ v, t) <- es]
 
 
   -- | substitute all appearances of a given variable with a given new type
-  substituteTVar v0 r0 t0 = sub t0
+  substituteTVar v0@(TV lang v) r0 t0 = sub t0
     where
       sub :: TypeP -> TypeP
-      sub NulP = NulP
       sub t'@(UnkP _) = t'
       sub t'@(VarP (PV lang _ v'))
-        | v0 == (TV (Just lang) v') = r0
+        | v0 == TV (Just lang) v' = r0
         | otherwise = t'
-      sub (FunP t1 t2) = FunT (sub t1) (sub t2)
-      sub (AppP t1 t2) = AppT (sub t1) (sub t2)
-      sub (RecP r t1 k t2) = RecP r (sub t1) (TV k (sub t2)
+      sub (FunP ts t) = FunP (map sub ts) (sub t)
+      sub (AppP v ts) = AppP v (map sub ts)
+      sub (RecP r es) = RecP r [(k, sub t) | (k, t) <- es]
 
   free v@(VarP _) = Set.singleton v
-  free v@(UnkP _) = Set.singleton v
-  free (FunP t1 t2) = Set.union (free t1) (free t2)
-  free (AppP t1 t2) = Set.union (free t1) (free t2)
-  free (RecP _ t1 _ t2) = Set.union (free t1) (free t2)
-  free NulP = Set.empty
-
--- -- Decomposition is betrayal of structure, the elegant solution should not need it
--- instance Decomposable TypeP where
---   -- split a composite type into its inputs and outputs
---   -- * functions are separated into intpus and output
---   --   a -> b -> c  ==>  ([a, b], c)
---   -- * parameterized types are type functions that construct the base type
---   --   (a, (b, c))  ==> ([a, (b, c)], Tuple2)
---   --   Map a (a -> b)  ==>  ([a, a -> b], Map)
---   -- * records/objects/tables are broken into key/value pairs
---   --   Person {name :: Str, age :: Int}  ==> ([("name", Str), ("age", Int)], Person)
---   -- * type variables have no input:
---   --   Bool  ==>  ([], Bool)
---   decompose x0@(CatP k _ _) = f x0 where
---     f t@(CatP k' t1 t2)
---       | k == k' = case f t2 of
---         (ts, finalType) -> (t1:ts, finalType)
---       | otherwise = ([], t)
---     f t = ([], t)
+  free (FunP ts t) = Set.unions (map free (t:ts))
+  free (AppP _ ts) = Set.unions (map free ts)
+  free (RecP _ es) = Set.unions (map (free . snd) es)
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
@@ -260,12 +235,11 @@ data ExprM f
 
 
 instance HasOneLanguage (TypeP) where
-  langOf' NulP = error "The empty type has no concrete language - though it probably should"
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
-  langOf' (FunP t _) = langOf' t 
-  langOf' (AppP t _) = langOf' t
-  langOf' (RecP _ t _) = langOf' t
+  langOf' (FunP _ t) = langOf' t 
+  langOf' (AppP (PV lang _ _) _) = lang
+  langOf' (RecP _ ((_, t):_)) = langOf' t
 
 
 instance HasOneLanguage (TypeM) where

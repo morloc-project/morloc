@@ -127,12 +127,11 @@ usageLineT (_, name, t) = vsep
   : writeTypes (gtypeOf t)
   )
 
-gtypeOf NulP = NulT
 gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
 gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (FunP t1 t2) = FunT (gtypeOf t1) (gtypeOf t2)
-gtypeOf (AppP t1 t2) = AppT (gtypeOf t1) (gtypeOf t2)
-gtypeOf (RecP r t1 (PV _ (Just k) _) t2) = RecT r (gtypeOf t1) (TV Nothing k) (gtypeOf t2)
+gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
+gtypeOf (AppP (PV _ (Just v) _) ts) = AppT (TV Nothing v) (map gtypeOf ts)
+gtypeOf (RecP r rs) = RecT r [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
 gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 
@@ -143,9 +142,10 @@ usageLineConst cmd = vsep
   )
 
 writeTypes :: Type -> [MDoc]
-writeTypes t =
-  let (inputs, output) = decompose t
-  in zipWith writeType [Just i | i <- [1..]] inputs ++ [writeType Nothing output]
+writeTypes (FunT inputs output)
+  = zipWith writeType (map Just [1..]) inputs
+  ++ writeTypes output
+writeTypes t = [writeType Nothing t]
 
 writeType :: Maybe Int -> Type -> MDoc
 writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{prettyType t}}, "\n";|]
