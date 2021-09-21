@@ -66,7 +66,7 @@ findTypeTerms (ExistU _ es1 es2) = conmap findTypeTerms (es1 ++ es2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = conmap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU v ts) = conmap findTypeTerms (VarU v : ts)
-findTypeTerms (RecU _ rs) = conmap (findTypeTerms . snd) rs
+findTypeTerms (NamU _ _ _ rs) = conmap (findTypeTerms . snd) rs
 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
@@ -86,7 +86,7 @@ checkExprI f e@(ExprI _ (LamE _ e')) = f e >> checkExprI f e'
 checkExprI f e@(ExprI _ (AppE _ es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (LstE es)) = f e >> mapM_ (checkExprI f) es
 checkExprI f e@(ExprI _ (TupE es)) = f e >> mapM_ (checkExprI f) es
-checkExprI f e@(ExprI _ (RecE rs)) = f e >> mapM_ (checkExprI f . snd) rs
+checkExprI f e@(ExprI _ (NamE rs)) = f e >> mapM_ (checkExprI f . snd) rs
 checkExprI f e = f e
 
 maxIndex :: ExprI -> Int
@@ -98,5 +98,5 @@ maxIndex (ExprI i (LamE _ e)) = max i (maxIndex e)
 maxIndex (ExprI i (AppE _ es)) = maximum [i, maximum (map maxIndex es)]
 maxIndex (ExprI i (LstE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
-maxIndex (ExprI i (RecE rs)) = maximum (i : map (maxIndex . snd) rs)
+maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i _) = i

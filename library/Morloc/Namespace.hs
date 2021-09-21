@@ -245,7 +245,7 @@ data Expr
   -- ^ person@age - access a field in a record
   | LstE [ExprI]
   | TupE [ExprI]
-  | RecE [(Text, ExprI)]
+  | NamE [(Text, ExprI)]
   | AppE ExprI [ExprI]
   -- ^ Function application
   | LamE [EVar] ExprI
@@ -527,7 +527,7 @@ data SExpr g f c
   -- containers
   | LstS [SAnno g f c]
   | TupS [SAnno g f c]
-  | RecS [(Text, SAnno g f c)]
+  | NamS [(Text, SAnno g f c)]
   -- primitives
   | NumS Scientific
   | LogS Bool
@@ -576,7 +576,7 @@ data Type
   -- ^ used for empty leafs in cat trees
   | FunT [Type] Type
   | AppT TVar [Type]
-  | RecT NamType [(Text, Type)]
+  | NamT NamType TVar [TVar] [(Text, Type)]
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -591,8 +591,7 @@ data TypeU
   -- ^ (Forall a . A)
   | FunU [TypeU] TypeU -- function
   | AppU TVar [TypeU] -- type application
-  | RecU NamType -- record / object / table
-         [(Text, TypeU)]
+  | NamU NamType TVar [TVar] [(Text, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -618,7 +617,7 @@ unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT v (map unresolvedType2type ts)
-unresolvedType2type (RecU t rs) = RecT t [(k, unresolvedType2type e) | (k, e) <- rs]
+unresolvedType2type (NamU t n ps rs) = NamT t n ps [(k, unresolvedType2type e) | (k, e) <- rs]
 
 
 data Property
@@ -658,13 +657,13 @@ instance Typelike Type where
         | otherwise = t
       sub (FunT ts t) = FunT (map sub ts) (sub t)
       sub (AppT v ts) = AppT v (map sub ts)
-      sub (RecT r es) = RecT r [(k, sub t) | (k, t) <- es]
+      sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
   free (FunT ts t) = Set.unions (map free (t:ts))
   free (AppT v ts) = Set.unions (map free ts)
-  free (RecT _ es) = Set.unions (map (free . snd) es)
+  free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
 
 
 
@@ -686,7 +685,7 @@ instance Typelike TypeU where
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (AppU v ts) = Set.unions $ map free ts
   free (FunU ts t) = Set.unions $ map free (t:ts)
-  free (RecU _ rs) = Set.unions $ map (free . snd) rs
+  free (NamU _ _ _ rs) = Set.unions $ map (free . snd) rs
   
 
   substituteTVar v@(TV _ _) (ForallU q r) t = 
@@ -709,7 +708,7 @@ instance Typelike TypeU where
         | otherwise = ForallU v (sub t)
       sub (FunU ts t) = FunU (map sub ts) (sub t)
       sub (AppU v ts) = AppU v (map sub ts)
-      sub (RecU r rs) = RecU r [(k, sub t) | (k, t) <- rs]
+      sub (NamU r n ps rs) = NamU r n ps [(k, sub t) | (k, t) <- rs]
 
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
@@ -749,7 +748,7 @@ instance HasOneLanguage Type where
   langOf (VarT (TV lang _)) = lang
   langOf (FunT _ t) = langOf t
   langOf (AppT (TV lang _) _) = lang
-  langOf (RecT _ ((_, t):_)) = langOf t
+  langOf (NamT _ (TV lang _) _ _) = lang
 
 instance HasOneLanguage TVar where
   langOf (TV lang _) = lang
@@ -760,7 +759,7 @@ instance HasOneLanguage TypeU where
   langOf (ForallU (TV lang _) t) = lang
   langOf (FunU _ t) = langOf t
   langOf (AppU (TV lang _) _) = lang
-  langOf (RecU _ ((_, t):_)) = langOf t
+  langOf (NamU _ (TV lang _) _ _) = lang
 
 
 metaConstraints :: Int -> MorlocMonad [Constraint]

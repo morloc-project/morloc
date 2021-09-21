@@ -152,7 +152,7 @@ linkVariablesToTermTypes mod m0 = mapM_ (link m0) where
   link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
   link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
   link m (ExprI _ (AnnE e _)) = link m e
-  link m (ExprI _ (RecE rs)) = mapM_ (link m) (map snd rs)
+  link m (ExprI _ (NamE rs)) = mapM_ (link m) (map snd rs)
   link _ _ = return ()
 
   setType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
@@ -221,11 +221,21 @@ mergeTypeUs t1@(VarU v1) t2@(VarU v2)
 mergeTypeUs t@(ExistU _ _ _) (ExistU _ _ _) = return t
 mergeTypeUs (ExistU _ _ _) t = return t
 mergeTypeUs t (ExistU _ _ _) = return t
-mergeTypeUs (ForallU v1 t1) (ForallU v2 t2) = undefined
-mergeTypeUs (FunU f1 x1) (FunU f2 x2) = undefined
-mergeTypeUs (AppU v1 ps1) (AppU v2 ps2) = undefined
-mergeTypeUs (RecU _ _) (RecU _ _) = undefined -- FIXME record names
--- mergeTypeUs (NamU t1 v1 ps1 ks1) (NamU t2 v2 ps2 ks2) = undefined
+
+-- Two universally qualified types may be merged if they are the same up to
+-- named of bound variables, for example:
+--  mergeTypeUs (forall a . a) (forall b . b) --> forall b . b
+mergeTypeUs (ForallU v1 t1) (ForallU v2 t2)
+  = ForallU v1 <$> mergeTypeUs (substituteTVar v2 (VarU v1) t2) t1
+mergeTypeUs (FunU ts1 t1) (FunU ts2 t2) = FunU <$> zipWithM mergeTypeUs ts1 ts2 <*> mergeTypeUs t1 t2 
+mergeTypeUs t1@(AppU v1 ps1) t2@(AppU v2 ps2)
+  | v1 == v2 = AppU v1 <$> zipWithM mergeTypeUs ps1 ps2
+  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
+mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
+  | o1 == o2 && n1 == n2 && length ps1 == length ps2 = do
+      ts1 <- zipWithM mergeTypeUs (map snd ks1) (map snd ks2)
+      return $ NamU o1 n1 ps1 (zip (map fst ks1) ts1)
+  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
@@ -280,9 +290,9 @@ collectSExpr (ExprI i e0) = f e0 where
   f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
   f (LstE es) = (LstS <$> mapM collectSAnno es) >>= noTypes
   f (TupE es) = (TupS <$> mapM collectSAnno es) >>= noTypes
-  f (RecE rs) = do
+  f (NamE rs) = do
     xs <- mapM collectSAnno (map snd rs)
-    noTypes $ RecS (zip (map fst rs) xs)
+    noTypes $ NamS (zip (map fst rs) xs)
   f (LamE v e) = LamS v <$> collectSAnno e >>= noTypes
   f (AppE e es) = (AppS <$> collectSAnno e <*> mapM collectSAnno es) >>= noTypes
   f UniE = noTypes UniS
@@ -312,7 +322,7 @@ reindexExpr (AppE e es) = AppE <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (AssE v e es) = AssE v <$> reindexExprI e <*> mapM reindexExprI es
 reindexExpr (LamE vs e) = LamE vs <$> reindexExprI e
 reindexExpr (LstE es) = LstE <$> mapM reindexExprI es
-reindexExpr (RecE rs) = RecE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
+reindexExpr (NamE rs) = NamE <$> mapM (\(k, e) -> (,) k <$> reindexExprI e) rs
 reindexExpr (TupE es) = TupE <$> mapM reindexExprI es
 reindexExpr e = return e
 
@@ -367,9 +377,9 @@ yIsX' m k1 k2 = case GMap.yIsX m k1 k2 of
 --     (m', x') <- reindex m x
 --     (m'', xs') <- statefulMapM reindex m' xs
 --     return (m'', AppS x' xs')
---   f m (RecS rs) = do
+--   f m (NamS o n ps rs) = do
 --     (m', xs') <- statefulMapM reindex m (map snd rs)
---     return (m', RecS (zip (map fst rs) xs'))
+--     return (m', NamS o n ps (zip (map fst rs) xs'))
 --   f m x = return (m, x)
 --
 --   reindexOne :: GMap Int Int [EType] -> Int -> MorlocMonad (GMap Int Int [EType], Int)

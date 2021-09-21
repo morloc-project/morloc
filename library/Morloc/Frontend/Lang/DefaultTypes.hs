@@ -103,8 +103,8 @@ recordGC Nothing = [recordG]
 recordGC (Just lang) = recordC lang
 
 defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
-defaultRecord Nothing entries = [RecU NamRecord entries] -- FIXME recordG?
-defaultRecord lang@(Just l) entries = [RecU NamRecord entries | v <- recordC l] -- FIXME
+defaultRecord Nothing entries = [NamU NamRecord (TV Nothing recordG) [] entries]
+defaultRecord lang@(Just l) entries = [NamU NamRecord (TV lang v) [] entries | v <- recordC l]
 
 
 -- | This is the value returned by a functions that doesn't return, for example,

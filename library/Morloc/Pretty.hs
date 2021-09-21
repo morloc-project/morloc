@@ -98,7 +98,9 @@ instance PrettyType Type where
   prettyType (VarT v) = pretty v
   prettyType (FunT ts t) = encloseSep "(" ")" " -> " (map prettyType (ts <> [t]))
   prettyType (AppT v ts) = pretty v <+> hsep (map prettyType ts)
-  prettyType (RecT n rs) = block 4 (viaShow n) (vsep [pretty k <+> "::" <+> prettyType x | (k, x) <- rs])
+  prettyType (NamT o n ps rs)
+    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+              (vsep [pretty k <+> "::" <+> prettyType x | (k, x) <- rs])
 
 instance PrettyType GType where
   prettyType = prettyType . unGType
@@ -121,7 +123,9 @@ prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
 prettyTypeU (AppU v ts) = pretty v <+> vsep (map prettyTypeU ts)
-prettyTypeU (RecU n rs) = block 4 (viaShow n) (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
+prettyTypeU (NamU o n ps rs)
+    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+              (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
 prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep
@@ -157,7 +161,7 @@ prettyPackMap m =  "----- pacmaps ----\n"
 --     writeExpr (AccS x k) = pretty k <+> "from " <> nest 2 (prettySAnnoMany x)
 --     writeExpr (ListS xs) = list (map prettySAnnoMany xs)
 --     writeExpr (TupleS xs) = list (map prettySAnnoMany xs)
---     writeExpr (RecS entries) = encloseSep "{" "}" "," $
+--     writeExpr (NamS entries) = encloseSep "{" "}" "," $
 --       map (\(k,v) -> pretty k <+> "=" <+> prettySAnnoMany v) entries
 --     writeExpr (LamS vs x)
 --       = "LamS"
@@ -178,7 +182,7 @@ prettyPackMap m =  "----- pacmaps ----\n"
 --     describe (SAnno (One (x@(AccS _ _), _)) _) = descSExpr x
 --     describe (SAnno (One (x@(ListS _), _)) _) = descSExpr x
 --     describe (SAnno (One (x@(TupleS _), _)) _) = descSExpr x
---     describe (SAnno (One (x@(RecS _), _)) _) = descSExpr x
+--     describe (SAnno (One (x@(NamS _), _)) _) = descSExpr x
 --     describe (SAnno (One (x@(AppS f xs), c)) g) =
 --       hang 2 . vsep $
 --         [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
@@ -221,4 +225,4 @@ prettyPackMap m =  "----- pacmaps ----\n"
 -- descSExpr (NumS _) = "NumS"
 -- descSExpr (LogS _) = "LogS"
 -- descSExpr (StrS _) = "StrS"
--- descSExpr (RecS _) = "RecS"
+-- descSExpr (NamS _) = "NamS"

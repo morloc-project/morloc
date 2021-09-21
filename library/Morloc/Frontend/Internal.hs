@@ -37,7 +37,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
   setDefaults (FunU ts t) = FunU (map setDefaults ts) (setDefaults t)
   setDefaults (AppU v ts) = AppU v (map setDefaults ts)
-  setDefaults (RecU r rs) = RecU r [(k, setDefaults t) | (k, t) <- rs]
+  setDefaults (NamU o n ps rs) = NamU o n ps [(k, setDefaults t) | (k, t) <- rs]
 
 
   variables = [1 ..] >>= flip replicateM ['a' .. 'z']
@@ -55,7 +55,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
   findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
   findExistentials (AppU v ts) = Set.unions (map findExistentials ts)
-  findExistentials (RecU _ rs) = Set.unions (map (findExistentials . snd) rs)
+  findExistentials (NamU _ _ _ rs) = Set.unions (map (findExistentials . snd) rs)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
   generalizeOne v0@(TV lang0 _) r0 t0 = ForallU (TV lang0 (unName r0)) (f v0 t0)
@@ -75,7 +75,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
         | otherwise = t1
       f v (FunU ts t) = FunU (map (f v) ts) (f v t)
       f v (AppU v' ts) = AppU v' (map (f v) ts)
-      f v (RecU r rs) = RecU r [(k, f v t) | (k, t) <- rs]
+      f v (NamU o n ps rs) = NamU o n ps [(k, f v t) | (k, t) <- rs]
 
 
 -- class HasManyLanguages a where
@@ -105,7 +105,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 --   --   langsOf' _ (NumE _) = []
 --   --   langsOf' _ (LogE _) = []
 --   --   langsOf' _ (StrE _) = []
---   --   langsOf' g (RecE entries) = concat . map (langsOf' g . snd) $ entries
+--   --   langsOf' g (NamE entries) = concat . map (langsOf' g . snd) $ entries
 --
 -- class Renameable a where
 --   rename :: a -> Stack a
@@ -244,7 +244,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- -- mapU f (LamE v e) = LamE v (mapU f e)
 -- -- mapU f (ListE es) = ListE (map (mapU f) es)
 -- -- mapU f (TupleE es) = TupleE (map (mapU f) es)
--- -- mapU f (RecE rs) = RecE (zip (map fst rs) (map (mapU f . snd) rs))
+-- -- mapU f (NamE rs) = NamE (zip (map fst rs) (map (mapU f . snd) rs))
 -- -- mapU f (AppE e1 e2) = AppE (mapU f e1) (mapU f e2)
 -- -- mapU f (AnnE e ts) = AnnE (mapU f e) (map f ts)
 -- -- mapU f (AssE v e) = AssE v (mapU f e)
@@ -255,9 +255,9 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 -- mapU' = undefined
 -- -- mapU' f (LamE v e) = LamE <$> pure v <*> mapU' f e
 -- -- mapU' f (ListE es) = ListE <$> mapM (mapU' f) es
--- -- mapU' f (RecE rs) = do
+-- -- mapU' f (NamE rs) = do
 -- --   es' <- mapM (mapU' f . snd) rs
--- --   return $ RecE (zip (map fst rs) es')
+-- --   return $ NamE (zip (map fst rs) es')
 -- -- mapU' f (TupleE es) = TupleE <$> mapM (mapU' f) es
 -- -- mapU' f (AppE e1 e2) = AppE <$> mapU' f e1 <*> mapU' f e2
 -- -- mapU' f (AnnE e ts) = AnnE <$> mapU' f e <*> mapM f ts

@@ -47,10 +47,16 @@ w lang (Just (AppT (TV _ v1) ts1)) (AppT (TV _ v2) ts2)
 w lang Nothing (AppT (TV _ v) ts)
   = AppP (PV lang Nothing v) (map (w lang Nothing) ts)
 
-w lang (Just (RecT n rs1)) (RecT _ rs2)
-  = RecP n [(PV lang (Just k1) k2, w lang (Just t1) t2) | ((k1,t1),(k2,t2)) <- zip rs1 rs2]
-w lang Nothing (RecT n rs)
-  = RecP n [(PV lang Nothing k, w lang Nothing t) | (k,t) <- rs]
+w lang (Just (NamT o (TV _ n1) ps1 rs1)) (NamT _ (TV _ n2) ps2 rs2)
+  = NamP o
+         (PV lang (Just n1) n2)
+         (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
+         [(PV lang (Just k1) k2, w lang (Just t1) t2) | ((k1,t1),(k2,t2)) <- zip rs1 rs2]
+w lang Nothing (NamT o (TV _ n) ps rs)
+  = NamP o
+         (PV lang Nothing n)
+         [PV lang Nothing v | (TV _ v) <- ps]
+         [(PV lang Nothing k, w lang Nothing t) | (k,t) <- rs]
 
 
 weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
@@ -66,8 +72,10 @@ weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
     f lang (VarT (TV _ v1)) (VarT (TV _ v2)) = VarP (PV lang (Just v1) v2)
     f lang (FunT ts1 t1) (FunT ts2 t2) = FunP (zipWith (f lang) ts1 ts2) (f lang t1 t2)
     f lang (AppT (TV _ v1) ts1) (AppT (TV _ v2) ts2) = AppP (PV lang (Just v1) v2) (zipWith (f lang) ts1 ts2)
-    f lang (RecT n rs1) (RecT _ rs2)
-      = RecP n [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
+    f lang (NamT o (TV _ n1) ps1 rs1) (NamT _ (TV _ n2) ps2 rs2)
+      = NamP o (PV lang (Just n1) n2)
+               (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
+               [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
 
 weaveTypesGCP :: (Indexed Type) -> Type -> MorlocMonad TypeP
 weaveTypesGCP (Idx i _) t = metaType i >>= (flip weaveTypes) t

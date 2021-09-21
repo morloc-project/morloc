@@ -27,6 +27,7 @@ module Morloc.CodeGenerator.Grammars.Common
   , prettyExprM
   , prettyTypeM
   , prettyTypeP
+  , prettyPVar
   , splitArgs
   ) where
 
@@ -133,7 +134,7 @@ recordPVar (VarP (PV _ _ v)) = pretty v
 recordPVar (UnkP (PV _ _ v)) = pretty v
 recordPVar (FunP t1 t2) = "<FunP>" -- illegal value
 recordPVar (AppP t1 t2) = "<AppP>" -- illegal value
-recordPVar (RecP _ _) = "WHY_THE_BLOODY_HELL_IS_THERE_NO_NAME_FOR_YOUR_RECORD???"
+recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
 
 
 prettyPVar :: PVar -> MDoc
@@ -145,7 +146,10 @@ prettyTypeP (UnkP v) = prettyPVar v
 prettyTypeP (VarP v) = prettyPVar v 
 prettyTypeP (FunP ts t) = encloseSep "(" ")" " -> " (map prettyTypeP (ts <> [t]))
 prettyTypeP (AppP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
-prettyTypeP (RecP n rs) = block 4 (viaShow n) (vsep [prettyPVar k <+> "::" <+> prettyTypeP x | (k, x) <- rs])
+prettyTypeP (NamP o n ps rs)
+    = block 4 (viaShow o <+> prettyPVar n <> encloseSep "<" ">" "," (map prettyPVar ps))
+              (vsep [prettyPVar k <+> "::" <+> prettyTypeP x | (k, x) <- rs])
+
 
 prettyTypeM :: TypeM -> MDoc
 prettyTypeM Passthrough = "Passthrough"
@@ -306,9 +310,9 @@ packExprM m e = do
 type2jsontype :: TypeP -> MorlocMonad JsonType
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
 type2jsontype (AppP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (RecP _ rs) = do
+type2jsontype (NamP _ (PV _ _ v) _ rs) = do
   ts <- mapM (type2jsontype . snd) rs
-  return $ NamJ "Bob" (zip [v | (PV _ _ v, _) <- rs] ts) 
+  return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
 type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
 type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
 

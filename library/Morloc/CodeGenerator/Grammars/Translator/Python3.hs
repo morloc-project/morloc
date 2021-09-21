@@ -265,12 +265,12 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f _ (LetVarM _ i) = return ([], letNamer i, [])
 
-  f args (AccM e k) = undefined -- FIXME - add record names
-    -- (ms, e', ps) <- f args e
-    -- x <- case typeOfTypeM (typeOfExprM e) of
-    --   (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
-    --   _ -> MM.throwError . CallTheMonkeys $ "Bad record access"
-    -- return (ms, x, ps)
+  f args (AccM e k) = do
+    (ms, e', ps) <- f args e
+    x <- case typeOfTypeM (typeOfExprM e) of
+      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
+      _ -> MM.throwError . CallTheMonkeys $ "Bad record access"
+    return (ms, x, ps)
 
   f args (ListM _ es) = do
     (mss', es', rss') <- mapM (f args) es |>> unzip3

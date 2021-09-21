@@ -43,7 +43,7 @@ data TypeP
   | VarP PVar
   | FunP [TypeP] TypeP
   | AppP PVar [TypeP]
-  | RecP NamType [(PVar, TypeP)]
+  | NamP NamType PVar [PVar] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
 type JsonPath = [JsonAccessor]
@@ -63,12 +63,15 @@ data NexusCommand = NexusCommand
   }
 
 instance Typelike TypeP where
-  typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
-  typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
+  typeOf (UnkP v) = UnkT (pvar2tvar v)
+  typeOf (VarP v) = VarT (pvar2tvar v)
   typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
-  typeOf (AppP (PV lang _ t) ts) = AppT (TV (Just lang) t) (map typeOf ts)
-  typeOf (RecP r es) = RecT r [(v, typeOf t) | (PV l _ v, t) <- es]
-
+  typeOf (AppP v ts) = AppT (pvar2tvar v) (map typeOf ts)
+  typeOf (NamP o n ps es) =
+    let n' = pvar2tvar n
+        ps' = (map pvar2tvar ps)
+        es' = [(v, typeOf t) | (PV l _ v, t) <- es]
+    in NamT o n' ps' es'
 
   -- | substitute all appearances of a given variable with a given new type
   substituteTVar v0@(TV lang v) r0 t0 = sub t0
@@ -80,12 +83,15 @@ instance Typelike TypeP where
         | otherwise = t'
       sub (FunP ts t) = FunP (map sub ts) (sub t)
       sub (AppP v ts) = AppP v (map sub ts)
-      sub (RecP r es) = RecP r [(k, sub t) | (k, t) <- es]
+      sub (NamP o n ps es) = NamP o n ps [(k, sub t) | (k, t) <- es]
 
   free v@(VarP _) = Set.singleton v
   free (FunP ts t) = Set.unions (map free (t:ts))
   free (AppP _ ts) = Set.unions (map free ts)
-  free (RecP _ es) = Set.unions (map (free . snd) es)
+  free (NamP _ _ _ es) = Set.unions (map (free . snd) es)
+
+pvar2tvar :: PVar -> TVar
+pvar2tvar (PV lang _ v) = TV (Just lang) v
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
@@ -239,7 +245,7 @@ instance HasOneLanguage (TypeP) where
   langOf' (VarP (PV lang _ _)) = lang
   langOf' (FunP _ t) = langOf' t 
   langOf' (AppP (PV lang _ _) _) = lang
-  langOf' (RecP _ ((_, t):_)) = langOf' t
+  langOf' (NamP _ (PV lang _ _) _ _) = lang
 
 
 instance HasOneLanguage (TypeM) where

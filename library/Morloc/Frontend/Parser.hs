@@ -99,7 +99,7 @@ pTopExpr =
 pExpr :: Parser ExprI
 pExpr =
       try pAcc
-  <|> try pRecE
+  <|> try pNamE
   <|> try pTupE
   <|> try pUni
   <|> try pAnn
@@ -158,15 +158,14 @@ pTypedef = try pTypedefType <|> pTypedefObject where
 
   pTypedefObject :: Parser ExprI
   pTypedefObject = do
-    r <- pNamType
+    o <- pNamType
     lang <- optional (try pLang)
     setLang lang
     (v, vs) <- pTypedefTermUnpar <|> pTypedefTermPar
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
-    entries <- braces (sepBy1 pRecEntryU (symbol ",")) >>= mapM (desugarTableEntries lang r)
-    -- let t = NamU r (TV lang constructor) (map VarU vs) entries
-    let t = RecU r entries -- FIXME - add in constructor and parameters
+    entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang o)
+    let t = NamU o (TV lang constructor) vs entries
     setLang Nothing
     exprI (TypE v vs t)
 
@@ -340,14 +339,17 @@ pTupE = do
   exprI $ TupE (e:es)
 
 
-pRecE :: Parser ExprI
-pRecE = do
-  rs <- braces (sepBy1 pRecEntryE (symbol ","))
-  -- FIXME
-  exprI $ RecE rs
+pNamE :: Parser ExprI
+pNamE = do
+  rs <- braces (sepBy1 pNamEntryE (symbol ","))
+  -- FIXME - making records without constructors is a bit sketch, for now it is
+  -- allowed (and heavily tested) and I will leave it for the moment. But
+  -- eventually the syntax should be `Person {Age = 5, Name = "Juicebox"}` or
+  -- whatever.
+  exprI $ NamE rs
 
-pRecEntryE :: Parser (MT.Text, ExprI)
-pRecEntryE = do
+pNamEntryE :: Parser (MT.Text, ExprI)
+pNamEntryE = do
   n <- freename
   _ <- symbol "="
   e <- pExpr
@@ -360,7 +362,7 @@ pUni = symbol "Null" >> exprI UniE
 
 pAcc :: Parser ExprI
 pAcc = do
-  e <- parens pExpr <|> pRecE <|> pVar
+  e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
   f <- freename
   exprI $ AccE e f
@@ -388,7 +390,7 @@ pApp = do
       <|> try pNumE
       <|> pLstE
       <|> pTupE
-      <|> pRecE
+      <|> pNamE
       <|> pVar
 
 
@@ -438,7 +440,7 @@ pType =
       pExistential
   <|> try pFunU
   <|> try pUniU
-  <|> try pRecU
+  <|> try pNamU
   <|> try pAppU
   <|> try parensType
   <|> pListU
@@ -466,20 +468,20 @@ pTupleU = do
   ts <- parens (sepBy1 pType (symbol ","))
   return $ head (MLD.defaultTuple lang ts)
 
-pRecU :: Parser TypeU
-pRecU = do
+-- A naked record with default constructor.  Currently this is legal in a
+-- signature, but it probably shouldn't be (it isn't in haskell), instead it
+-- should only be used in type definitions (pTypeDef).
+pNamU :: Parser TypeU
+pNamU = do
   _ <- tag (symbol "{")
-  entries <- braces (sepBy1 pRecEntryU (symbol ","))
+  entries <- braces (sepBy1 pNamEntryU (symbol ","))
   lang <- CMS.gets stateLang
-  -- FIXME - USE THE NAME OF THE GODDAMN CONSTRUCTOR PLEASE
-  constructor <- case MLD.defaultRecord lang entries of
-    [t] -> return t
-    ts -> ExistU <$> (freename >>= tvar) <*> pure [] <*> pure ts
-  return $ RecU NamRecord entries
+  return $ head (MLD.defaultRecord lang entries)
 
 
-pRecEntryU :: Parser (MT.Text, TypeU)
-pRecEntryU = do
+
+pNamEntryU :: Parser (MT.Text, TypeU)
+pNamEntryU = do
   n <- freename
   _ <- op "::"
   t <- pType
@@ -498,7 +500,7 @@ pAppU = do
   args <- many1 pType'
   return $ AppU t args
   where
-    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pRecU
+    pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
 pFunU :: Parser TypeU
 pFunU = do
@@ -507,7 +509,7 @@ pFunU = do
   ts <- sepBy1 (pType') (op "->")
   return $ FunU ts t
   where
-    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pRecU
+    pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
 pListU :: Parser TypeU
 pListU = do

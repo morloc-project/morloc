@@ -131,7 +131,10 @@ gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
 gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
 gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
 gtypeOf (AppP (PV _ (Just v) _) ts) = AppT (TV Nothing v) (map gtypeOf ts)
-gtypeOf (RecP r rs) = RecT r [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
+gtypeOf (NamP o (PV _ (Just n) _) ps rs)
+  = NamT o (TV Nothing n)
+    [TV Nothing p | PV _ (Just p) _ <- ps]
+    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
 gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 

@@ -62,9 +62,9 @@ retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
     (NumS x) -> return $ NumS x
     (LogS x) -> return $ LogS x
     (StrS x) -> return $ StrS x
-    (RecS rs) -> do
+    (NamS rs) -> do
       xs' <- mapM (retrieveTypes . snd) rs
-      return $ RecS (zip (map fst rs) xs')
+      return $ NamS (zip (map fst rs) xs')
     (CallS src) -> return $ CallS src
 
   return $ SAnno (One (x', Idx i (lang, ts))) g
@@ -86,9 +86,9 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
     (NumS x) -> return $ NumS x
     (LogS x) -> return $ LogS x
     (StrS x) -> return $ StrS x
-    (RecS rs) -> do
+    (NamS rs) -> do
       xs <- mapM (weaveAndResolve . snd) rs
-      return $ RecS (zip (map fst rs) xs)
+      return $ NamS (zip (map fst rs) xs)
     (CallS src) -> return $ CallS src
   return $ SAnno (One (x', Idx i pt)) j
 
@@ -164,8 +164,7 @@ subtype t1@(AppU v1@(TV l1 _) vs1) t2@(AppU v2@(TV l2 _) vs2) g
     compareApp _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in AppU"
 
 -- subtype unordered records
-subtype (RecU _ _) (RecU _ _) _ = undefined -- FIXME - name records
--- subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = do
+subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = undefined -- do
   -- g' <- subtype (VarU v1) (VarU v2) g
   -- compareEntry (sort rs1) (sort rs2) g'
   -- where
@@ -457,14 +456,14 @@ synthExpr lang g0 (TupS xs) = undefined
 
 -- Rec=>
 --
-synthExpr lang g0 (RecS rs) = undefined
+synthExpr lang g0 (NamS rs) = undefined
   -- (g1, xs') <- chain2 synth g0 (map snd rs)
   -- let typeEntries = zip (map fst rs) (map fst xs')
   --     exprEntries = zip (map fst rs) (map snd xs')
   --     dts = MLD.defaultRecord (Just lang) typeEntries
   --     p = NamU NamRecord (TV (Just lang) "__RECORD__") [] typeEntries
   --     (g2, t) = newvarRich [p] dts (Just lang) g1
-  -- return (g2, t, RecS exprEntries)
+  -- return (g2, t, NamS exprEntries)
 
 -- Lam=>
 --

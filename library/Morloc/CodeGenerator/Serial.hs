@@ -78,9 +78,9 @@ serialAstToType :: SerialAST One -> MorlocMonad TypeP
 serialAstToType (SerialPack _ (One (_, s))) = serialAstToType s
 serialAstToType (SerialList s) = serialAstToType s |>> defaultListFirst
 serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
-serialAstToType (SerialObject k v ps rs) = do
+serialAstToType (SerialObject o n ps rs) = do
   ts <- mapM (serialAstToType . snd) rs
-  return $ RecP k (zip (map fst rs) ts)
+  return $ NamP o n ps (zip (map fst rs) ts)
 serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
@@ -94,8 +94,8 @@ serialAstToType' :: SerialAST One -> TypeP
 serialAstToType' (SerialPack _ (One (_, s))) = serialAstToType' s
 serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
 serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
-serialAstToType' (SerialObject r v ps rs)
-  = RecP r (zip (map fst rs) (map (serialAstToType' . snd) rs)) -- FIXME - lost n and ps
+serialAstToType' (SerialObject o n ps rs)
+  = NamP o n ps (zip (map fst rs) (map (serialAstToType' . snd) rs))
 serialAstToType' (SerialNum    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
@@ -108,9 +108,9 @@ shallowType :: SerialAST One -> MorlocMonad TypeP
 shallowType (SerialPack _ (One (p, _))) = return (typePackerFrom p)
 shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
-shallowType (SerialObject r v ps rs) = do
+shallowType (SerialObject o n ps rs) = do
   ts <- mapM shallowType (map snd rs)
-  return $ RecP r (zip (map fst rs) ts) -- FIXME - lost n and ps
+  return $ NamP o n ps (zip (map fst rs) ts)
 shallowType (SerialNum    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
@@ -144,10 +144,9 @@ makeSerialAST m t@(AppP v@(PV _ _ s) ts)
         $ "Cannot find constructor" <+> dquotes (pretty s)
         <> "<" <> pretty (length ts) <> ">"
         <+> "in packmap:\n" <> prettyPackMap m
-makeSerialAST m t@(RecP r rs) = do
+makeSerialAST m (NamP o n ps rs) = do
   ts <- mapM (makeSerialAST m) (map snd rs)
-  let ps = [] -- FIXME - previously the parameters were passed in the RecP object
-  return $ SerialObject r (PV (langOf' t) (Just "Bob G") "Bob C") ps (zip (map fst rs) ts)
+  return $ SerialObject o n ps (zip (map fst rs) ts)
 
 
 pvarEqual :: PVar -> PVar -> Bool
@@ -161,9 +160,12 @@ typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
 typeEqual (AppP v1 []) (AppP v2 []) = v1 == v2
 typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
  = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
-typeEqual (RecP n1 []) (RecP n2 []) = n1 == n2
-typeEqual (RecP n1 ((k1,t1):rs1)) (RecP n2 ((k2,t2):rs2))
-  = k1 == k2 && typeEqual t1 t2 && typeEqual (RecP n1 rs1) (RecP n2 rs2)
+typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
+  = o1 == o2 && n1 == n1 && length ps1 == length ps1
+typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 ((k2,t2):rs2))
+  =  k1 == k2
+  && typeEqual t1 t2
+  && typeEqual (NamP o1 n1 ps1 rs1) (NamP o1 n1 ps1 rs2)
 typeEqual _ _ = False
 
 

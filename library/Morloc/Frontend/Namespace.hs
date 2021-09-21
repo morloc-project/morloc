@@ -46,7 +46,7 @@ mapExpr f e0 = g e0 where
   g (ExprI i (LstE es)) = ExprI i . f $ LstE (map g es)
   g (ExprI i (TupE es)) = ExprI i . f $ TupE (map g es)
   g (ExprI i (AppE e es)) = ExprI i . f $ AppE (g e) (map g es)
-  g (ExprI i (RecE rs)) = ExprI i . f $ RecE [(k, g e) | (k, e) <- rs]
+  g (ExprI i (NamE rs)) = ExprI i . f $ NamE [(k, g e) | (k, e) <- rs]
   g (ExprI i (LamE vs e)) = ExprI i . f $ LamE vs (g e)
   g (ExprI i (AnnE e ts)) = ExprI i . f $ AnnE (g e) ts
   g (ExprI i e) = ExprI i (f e)
@@ -59,9 +59,9 @@ mapExprM f e0 = g e0 where
   g (ExprI i (LstE es)) = ExprI i <$> ((LstE <$> mapM g es) >>= f)
   g (ExprI i (TupE es)) = ExprI i <$> ((TupE <$> mapM g es) >>= f)
   g (ExprI i (AppE e es)) = ExprI i <$> ((AppE <$> g e <*> mapM g es) >>= f)
-  g (ExprI i (RecE rs)) = do
+  g (ExprI i (NamE rs)) = do
     es' <- mapM (g . snd) rs
-    ExprI i <$> f (RecE (zip (map fst rs) es'))
+    ExprI i <$> f (NamE (zip (map fst rs) es'))
   g (ExprI i (LamE vs e)) = ExprI i <$> ((LamE vs <$> g e) >>= f)
   g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
   g (ExprI i e) = ExprI i <$> f e

@@ -85,8 +85,8 @@ checkForSelfRecursion d = do
     hasTerm v (AppU t1 (t2:rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
     hasTerm v (AppU v' []) = v == v'
 
-    hasTerm v (RecU n ((_, t):rs)) = hasTerm v t || hasTerm v (RecU n rs)
-    hasTerm v (RecU _ []) = False
+    hasTerm v (NamU o n ps ((_, t):rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
+    hasTerm v (NamU _ _ _ []) = False
 
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
@@ -150,9 +150,9 @@ desugarType h d k t0 = f t0
     ds' <- mapM f ds
     return $ ExistU v ps' ds'
   f (FunU ts t) = FunU <$> mapM f ts <*> f t
-  f (RecU n rs) = do 
+  f (NamU o n ps rs) = do 
     ts <- mapM (f . snd) rs
-    return $ RecU n (zip (map fst rs) ts)
+    return $ NamU o n ps (zip (map fst rs) ts)
 
   -- type Cpp (A a b) = "map<$1,$2>" a b
   -- foo Cpp :: A D [B] -> X
@@ -195,7 +195,7 @@ desugarType h d k t0 = f t0
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU v ts ) = AppU v (map (parsub pair) ts)
-  parsub pair (RecU n rs) = RecU n [(k, parsub pair t) | (k, t) <- rs]
+  parsub pair (NamU o n ps rs) = NamU o n ps [(k, parsub pair t) | (k, t) <- rs]
 
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
@@ -225,7 +225,7 @@ chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
 chooseExistential (AppU v ts) = AppU v (map chooseExistential ts)
-chooseExistential (RecU n rs) = RecU n [(k, chooseExistential t) | (k,t) <- rs]
+chooseExistential (NamU o n ps rs) = NamU o n ps [(k, chooseExistential t) | (k,t) <- rs]
 
 
 -- addPackerMap

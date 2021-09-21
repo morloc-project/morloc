@@ -59,8 +59,7 @@ instance Applicable TypeU where
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds)
   apply g (AppU v ts) = AppU v (map (apply g) ts)
-  apply g (RecU _ _) = undefined -- FIXME name records
-  -- apply g (NamU r v ts rs) = NamU r v (map (apply g) ts) (map (\(n, t) -> (n, apply g t)) rs)
+  apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
 
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }

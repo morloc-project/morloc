@@ -174,7 +174,7 @@ showTypeP (UnkP (PV _ _ v)) = pretty v
 showTypeP (VarP (PV _ _ v)) = pretty v
 showTypeP (FunP ts t) = "FUNCTION#" <> encloseSep "(" ")" " -> " (map showTypeP (ts <> [t]))
 showTypeP (AppP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showTypeP) ts)
-showTypeP (RecP _ rs) = "REQUIRE_RECORD_NAME"
+showTypeP (NamP _ (PV _ _ v) _ rs) = pretty v
 
 
 showTypeM :: Three -> TypeM -> MDoc
