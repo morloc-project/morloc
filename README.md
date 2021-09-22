@@ -74,6 +74,8 @@ morloc install math
 The `morloc install` commands will install the modules in the
 `$HOME/.morloc/lib` folder.
 
+`morloc install conventions` can be used to install the `conventions` module, which is a dependency for most MacOS programs importing modules.
+
 Last of all, if you are working in vim, you can install `morloc` syntax highlighting as follows:
 
 ``` sh
