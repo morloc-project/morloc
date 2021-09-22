@@ -31,6 +31,13 @@ module Morloc.Monad
   , startCounter
   , getCounter
   , setCounter
+  -- * metadata accessors
+  , metaConstraints
+  , metaConstructors
+  , metaName
+  , metaProperties
+  , metaType
+  , metaTypedefs
   ) where
 
 import Control.Monad.Except
@@ -49,6 +56,7 @@ import qualified System.Exit as SE
 import qualified System.Process as SP
 import qualified Morloc.System as MS
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
@@ -153,3 +161,60 @@ readLang langStr =
   case ML.readLangName langStr of
     (Just x) -> return x
     Nothing -> throwError $ UnknownLanguage langStr
+
+
+-- | The general constraints as defined in the general type signature. These
+-- are not used anywhere yet.
+metaConstraints :: Int -> MorlocMonad [Constraint]
+metaConstraints i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (econs e)
+    _ -> []
+
+-- | Properties are cunrrently not used after Sanno types are created. The only
+-- properties that are considered are the pack/unpack properties. Eventually
+-- properties will be part of the typeclass system.
+metaProperties :: Int -> MorlocMonad [Property]
+metaProperties i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
+    _ -> []
+
+-- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
+metaConstructors :: Int -> MorlocMonad [Source]
+metaConstructors = undefined
+
+-- | Store type annotations for an expression. These are the original user
+-- provided types NOT the types checked or inferred by the typechecker.
+metaType :: Int -> MorlocMonad (Maybe TypeU)
+metaType i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) ->
+      if langOf e == Nothing
+        then Just (etype e) 
+        else Nothing
+    _ -> Nothing
+
+-- | The name of a morloc composition. These names are stored in the monad
+-- after they are resolved away. For example in:
+--   import math
+--   export foo
+--   bar x y = add x (inc y)
+--   foo x = add (bar x 5) 1
+-- `foo` and `bar` are morloc composition. `foo` will be resolved to
+--   add (add x (inc 5) 1
+-- The terms "foo" and "bar" have disappeared. They aren't technically needed
+-- anymore. However, the nexus needs a subcommand name to give the user for
+-- calling "foo". In the generated code and in error messages, it is also nice
+-- to keep the label "bar" attached to the second `add` function. `metaName`
+-- can retrieve these names based on the index of the CallS expressions that
+-- wrap the two `add` functions.
+metaName :: Int -> MorlocMonad (Maybe EVar)
+metaName = undefined
+
+-- | This is currently only used in the C++ translator.
+metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
+metaTypedefs = undefined

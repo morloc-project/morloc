@@ -602,7 +602,7 @@ generateSourcedSerializers es0
       :: Map.Map TVar (Type, [TVar])
       -> ExprM One
       -> MorlocMonad (Map.Map TVar (Type, [TVar]))
-    collect' m (ManifoldM g _ e) = metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
+    collect' m (ManifoldM g _ e) = MM.metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
     collect' m (ForeignInterfaceM _ e) = collect' m e
     collect' m (LetM _ e1 e2) = Map.union <$> collect' m e1 <*> collect' m e2
     collect' m (AppM e es) = do

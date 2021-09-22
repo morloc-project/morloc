@@ -32,7 +32,7 @@ type FData =
 generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
 generate cs xs = do
 
-  callNames <- mapM metaName (map snd xs) |>> catMaybes |>> map pretty
+  callNames <- mapM MM.metaName (map snd xs) |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames 
   fdata <- CM.mapM getFData xs -- [FData]
@@ -47,7 +47,7 @@ generate cs xs = do
 
 getFData :: (TypeP, Int) -> MorlocMonad FData
 getFData (t, i) = do
-  mayName <- metaName i
+  mayName <- MM.metaName i
   case mayName of
     (Just name) -> do
       config <- MM.ask

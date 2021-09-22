@@ -12,8 +12,6 @@ module Morloc.CodeGenerator.Internal
     weaveTypes
   , weaveTypes'
   , weaveResolvedTypes
-  , weaveTypesGCP
-  , weaveTypesGCM
   , typeP2typeM
 ) where
 
@@ -76,12 +74,6 @@ weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
       = NamP o (PV lang (Just n1) n2)
                (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
                [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
-
-weaveTypesGCP :: (Indexed Type) -> Type -> MorlocMonad TypeP
-weaveTypesGCP (Idx i _) t = metaType i >>= (flip weaveTypes) t
-
-weaveTypesGCM :: (Indexed Type) -> Type -> MorlocMonad TypeM
-weaveTypesGCM (Idx i _) t = metaType i >>= (flip weaveTypes) t |>> typeP2typeM
 
 typeP2typeM :: TypeP -> TypeM
 typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)

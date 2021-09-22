@@ -297,7 +297,7 @@ makeGAST = mapCM (\(Idx _ _) -> return ())
 
 generalSerial :: SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
 generalSerial x0@(SAnno _ (Idx i t)) = do
-  mayName <- metaName i
+  mayName <- MM.metaName i
   name <- case mayName of
     Nothing -> MM.throwError . OtherError $ "No general type found for call-free function"
     (Just name) -> return name
@@ -567,7 +567,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
   express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
-    name <- metaName m
+    name <- MM.metaName m
     MM.throwError . CallTheMonkeys . render $
       "Invalid input to express' in module (" <> viaShow name <> ") - type: " <> prettyTypeP t
 
