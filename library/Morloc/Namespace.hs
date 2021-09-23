@@ -136,6 +136,8 @@ data MorlocState = MorlocState {
   , stateSignatures :: GMap Int Int TermTypes
   , stateOutfile :: Maybe Path
   , statePackers :: PackMap
+  , stateName :: Map Int EVar
+    -- ^ store the names of morloc compositions
 }
 
 {-

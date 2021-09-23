@@ -272,8 +272,14 @@ collectSAnno e@(ExprI i (VarE v)) = do
     Nothing -> collectSExpr e |>> return
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t) -> do
+      -- collect all the concrete calls with this name
       let calls = [(CallS src, i) | (_, src, _, i) <- termConcrete t]
+      -- collect all the morloc compositions with this name
       declarations <- mapM reindexExprI (termDecl t) >>= mapM collectSExpr
+      -- link this index to the name that is removed
+      s <- CMS.get
+      CMS.put (s { stateName = Map.insert i v (stateName s) })
+      -- pool all the calls and compositions with this name
       return $ (calls <> declarations)
   return $ SAnno (Many es) i
 

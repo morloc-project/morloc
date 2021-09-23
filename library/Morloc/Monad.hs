@@ -71,6 +71,7 @@ emptyState path v = MorlocState {
   , stateSignatures = GMap.empty
   , stateOutfile = path
   , statePackers = Map.empty
+  , stateName = Map.empty
 }
 
 startCounter :: MorlocMonad ()
@@ -212,8 +213,10 @@ metaType i = do
 -- to keep the label "bar" attached to the second `add` function. `metaName`
 -- can retrieve these names based on the index of the CallS expressions that
 -- wrap the two `add` functions.
+--
+-- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
-metaName = undefined
+metaName i = Map.lookup i <$> gets stateName
 
 -- | This is currently only used in the C++ translator.
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
