@@ -293,7 +293,7 @@ unpackTypeM t = t
 
 unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m e = do
-  packers <- MM.gets statePackers
+  packers <- MM.metaPackMap m
   case typeOfExprM e of
     (Serial t) -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
     (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
@@ -301,7 +301,7 @@ unpackExprM m e = do
 
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = do
-  packers <- MM.gets statePackers
+  packers <- MM.metaPackMap m
   case typeOfExprM e of
     (Native t) -> SerializeM <$> MCS.makeSerialAST packers t <*> pure e
     -- (Function _ _) -> error "Cannot pack a function"

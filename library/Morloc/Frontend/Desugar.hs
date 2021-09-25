@@ -16,6 +16,7 @@ import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.GMap as GMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
@@ -29,6 +30,7 @@ desugar s
   = resolveImports s
   >>= checkForSelfRecursion
   >>= desugarDag
+  >>= addPackerMap
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -227,146 +229,139 @@ chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistenti
 chooseExistential (AppU v ts) = AppU v (map chooseExistential ts)
 chooseExistential (NamU o n ps rs) = NamU o n ps [(k, chooseExistential t) | (k,t) <- rs]
 
+-- | Packers need to be passed along with the types the pack, they are imported
+-- explicitly with the type and they pack. Should packers be universal? The
+-- packers describe how a term may be simplified. But often there are multiple
+-- reasonable ways to simplify a term, for example `Map a b` could simplify to
+-- `[(a,b)]` or `([a],[b])`. The former is semantically richer (since it
+-- naturally maintains the one-to-one variant), but the latter may be more
+-- efficient or natural in some languages. For any interface, both sides must
+-- adopt the same forms. The easiest way to enforce this is to require one
+-- global packer, but ultimately it would be better to resolve packers
+-- case-by-base as yet another optimization degree of freedom.
+addPackerMap
+  :: (DAG MVar [(EVar, EVar)] ExprI)
+  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+addPackerMap d = do
+  maybeDAG <- MDD.synthesizeDAG gatherPackers d
+  case maybeDAG of
+    Nothing -> MM.throwError CyclicDependency
+    (Just d') -> return $ MDD.mapNode fst d'
 
--- addPackerMap
---   :: (DAG MVar [(EVar, EVar)] Expr)
---   -> MorlocMonad (DAG MVar [(EVar, EVar)] Expr)
--- addPackerMap = undefined
--- -- addPackerMap
--- --   :: (DAG MVar [(EVar, EVar)] PreparedNode)
--- --   -> MorlocMonad (DAG MVar [(EVar, EVar)] PreparedNode)
--- -- addPackerMap d = do
--- --   maybeDAG <- MDD.synthesizeDAG gatherPackers d
--- --   case maybeDAG of
--- --     Nothing -> MM.throwError CyclicDependency
--- --     (Just d') -> return d'
--- --
--- -- gatherPackers
--- --   :: MVar -- the importing module name (currently unused)
--- --   -> PreparedNode -- data about the importing module
--- --   -> [( MVar -- the name of an imported module
--- --         , [(EVar -- the name of a term in the imported module
--- --           , EVar -- the alias in the importing module
--- --           )]
--- --         , PreparedNode -- data about the imported module
--- --      )]
--- --   -> MorlocMonad PreparedNode
--- -- gatherPackers _ n1 es = do
--- --   let packers   = starpack n1 Pack
--- --       unpackers = starpack n1 Unpack
--- --   nodepackers <- makeNodePackers packers unpackers n1
--- --   let m = Map.unionsWith (<>) $ map (\(_, e, n2) -> inheritPackers e n2) es
--- --       m' = Map.unionWith (<>) nodepackers m
--- --   return $ n1 { preparedNodePackers = m' }
--- --
--- -- starpack :: PreparedNode -> Property -> [(EVar, TypeU, [Source])]
--- -- starpack n pro
--- --   = [ (v, t, maybeToList $ lookupSource v t (preparedNodeSourceMap n))
--- --     | (SigE v _ e@(EType t p _)) <- preparedNodeBody n
--- --     , isJust (langOf e)
--- --     , Set.member pro p]
--- --   where
--- --     lookupSource :: EVar -> TypeU -> Map.Map (EVar, Lang) Source -> Maybe Source
--- --     lookupSource v t m = langOf t >>= (\lang -> Map.lookup (v, lang) m)
--- --
--- -- makeNodePackers
--- --   :: [(EVar, TypeU, [Source])]
--- --   -> [(EVar, TypeU, [Source])]
--- --   -> PreparedNode
--- --   -> MorlocMonad (Map.Map (TVar, Int) [UnresolvedPacker])
--- -- makeNodePackers xs ys n =
--- --   let xs' = map (\(x,y,z)->(x, chooseExistential y, z)) xs
--- --       ys' = map (\(x,y,z)->(x, chooseExistential y, z)) ys
--- --       items = [ ( packerKey t2
--- --                 , [UnresolvedPacker (packerTerm v2 n) (packerType t1) ss1 ss2])
--- --               | (_ , t1, ss1) <- xs'
--- --               , (v2, t2, ss2) <- ys'
--- --               , packerTypesMatch t1 t2
--- --               ]
--- --   in return $ Map.fromList items
--- --
--- -- packerTerm :: EVar -> Expr -> Maybe EVar
--- -- packerTerm v n = listToMaybe . catMaybes $
--- --   [ termOf t
--- --   | (v', t) <- AST.findSignatures n
--- --   , v == v'
--- --   , isNothing (langOf t)
--- --   ]
--- --   where
--- --     termOf :: EType -> Maybe EVar
--- --     termOf e = case splitArgs (etype e) of
--- --       -- packers are all global (right?)
--- --       (_, [VarU (TV _ term), _]) -> Just $ EV term
--- --       (_, [ArrU (TV _ term) _, _]) -> Just $ EV term
--- --       _ -> Nothing
 
--- packerTypesMatch :: TypeU -> TypeU -> Bool
--- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
---   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
---     -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
---     && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
---   _ -> False
---
--- packerType :: TypeU -> TypeU
--- packerType t = case splitArgs t of
---   (params, [t1, _]) -> qualify params t1
---   _ -> error "bad packer"
---
--- packerKey :: TypeU -> (TVar, Int)
--- packerKey t = case splitArgs t of
---   (params, [VarU v, _])   -> (v, length params)
---   (params, [ArrU v _, _]) -> (v, length params)
---   (params, [NamU _ v _ _, _]) -> (v, length params)
---   _ -> error "bad packer"
---
--- qualify :: [TVar] -> TypeU -> TypeU
--- qualify [] t = t
--- qualify (v:vs) t = ForallU v (qualify vs t)
---
--- splitArgs :: TypeU -> ([TVar], [TypeU])
--- splitArgs (ForallU v u) =
---   let (vs, ts) = splitArgs u
---   in (v:vs, ts)
--- splitArgs (FunU t1 t2) =
---   let (vs, ts) = splitArgs t2
---   in (vs, t1:ts)
--- splitArgs t = ([], [t])
---
---
--- -- | Packers need to be passed along with the types the pack, they are imported
--- -- explicitly with the type and they pack. Should packers be universal? The
--- -- packers describe how a term may be simplified. But often there are multiple
--- -- reasonable ways to simplify a term, for example `Map a b` could simplify to
--- -- `[(a,b)]` or `([a],[b])`. The former is semantically richer (since it
--- -- naturally maintains the one-to-one variant), but the latter may be more
--- -- efficient or natural in some languages. For any interface, both sides must
--- -- adopt the same forms. The easiest way to enforce this is to require one
--- -- global packer, but ultimately it would be better to resolve packers
--- -- case-by-base as yet another optimization degree of freedom.
--- inheritPackers
---   :: [( EVar -- key in THIS module described in the PreparedNode argument
---       , EVar -- alias used in the importing module
---       )]
---   -> Expr
---   -> Map.Map (TVar, Int) [UnresolvedPacker]
--- inheritPackers = undefined
--- -- inheritPackers
--- --   :: [( EVar -- key in THIS module descrived in the PreparedNode argument
--- --       , EVar -- alias used in the importing module
--- --       )]
--- --   -> PreparedNode
--- --   -> Map.Map (TVar, Int) [UnresolvedPacker]
--- -- inheritPackers es n =
--- --   -- names of terms exported from this module
--- --   let names = Set.fromList [ v | (EV v, _) <- es]
--- --   in   Map.map (map toAlias)
--- --      $ Map.filter (isImported names) (preparedNodePackers n)
--- --   where
--- --     toAlias :: UnresolvedPacker -> UnresolvedPacker
--- --     toAlias n' = n' { unresolvedPackerTerm = unresolvedPackerTerm n' >>= (flip lookup) es }
--- --
--- --     isImported :: Set.Set MT.Text -> [UnresolvedPacker] -> Bool
--- --     isImported _ [] = False
--- --     isImported names' (n0:_) = case unresolvedPackerTerm n0 of
--- --       (Just (EV v)) -> Set.member v names'
--- --       _ -> False
+gatherPackers
+  :: MVar -- the importing module name (currently unused)
+  -> ExprI -- data about the importing module
+  -> [( MVar -- the name of an imported module
+      , [(EVar , EVar)]
+      , (ExprI, (Map.Map (TVar, Int) [UnresolvedPacker])) -- data about the imported module
+     )]
+  -> MorlocMonad (ExprI, (Map.Map (TVar, Int) [UnresolvedPacker]))
+gatherPackers mv e xs =
+  case findPackers e of
+    (Left err) -> MM.throwError err
+    (Right m) -> do
+      let m' = Map.unionsWith (<>) (m : [m' | (_, _, (_, m')) <- xs])
+      attachPackers mv e m'
+      return (e, m')
+
+attachPackers :: MVar -> ExprI -> Map.Map (TVar, Int) [UnresolvedPacker] -> MorlocMonad ()
+attachPackers mv e m = do
+  s <- MM.get
+  let p = GMap.insertMany (collectIndices e) mv m (statePackers s)
+  MM.put (s {statePackers = p})
+
+collectIndices :: ExprI -> [Int]
+collectIndices (ExprI i e) = i : collectIndicesExpr e
+
+collectIndicesExpr :: Expr -> [Int]
+collectIndicesExpr (ModE _ es) = conmap collectIndices es
+collectIndicesExpr (AssE _ e es) = collectIndices e <> conmap collectIndices es
+collectIndicesExpr (AccE e _) = collectIndices e
+collectIndicesExpr (LstE es) = conmap collectIndices es
+collectIndicesExpr (TupE es) = conmap collectIndices es
+collectIndicesExpr (NamE es) = conmap collectIndices (map snd es)
+collectIndicesExpr (AppE e es) = collectIndices e <> conmap collectIndices es
+collectIndicesExpr (LamE _ e) = collectIndices e
+collectIndicesExpr (AnnE e _) = collectIndices e
+collectIndicesExpr _ = []
+
+
+findPackers :: ExprI -> Either MorlocError (Map.Map (TVar, Int) [UnresolvedPacker])
+findPackers expr
+  = fmap (Map.fromList . groupSort . map toPackerPair . groupSort)
+  $ mapM toPair
+    [ (src, t)
+    | (alias1, t) <- packers
+    , src@(Source _ lang2 _ alias2 _) <- sources
+    , alias1 == alias2
+    , langOf t == Just lang2
+    ]
+  where
+    sources :: [Source]
+    sources = AST.findSources expr
+
+    packers :: [(EVar, EType)]
+    packers = [ (v, e)
+              | (v, _, e) <- AST.findSignatures expr -- drop the label (eventually this may need to be added back in
+              ,  isPacker e || isUnpacker e]
+
+    isPacker :: EType -> Bool
+    isPacker e = Set.member Pack (eprop e)
+
+    isUnpacker :: EType -> Bool
+    isUnpacker e = Set.member Unpack (eprop e)
+
+    toPackerPair :: ((TVar, Int), [(Property, TypeU, Source)]) -> ((TVar, Int), UnresolvedPacker)
+    toPackerPair (k@(v, _), xs) = (,) k $
+      UnresolvedPacker
+        { unresolvedPackerTerm = Just (EV "Bob") -- TODO: replace this with the general name
+        , unresolvedPackerCType = unifyTypes [t | (_, t, _) <- xs, langOf t == langOf v ]
+        , unresolvedPackerForward = [src | (Pack, _, src) <- xs]
+        , unresolvedPackerReverse = [src | (Unpack, _, src) <- xs]
+        }
+
+    toPair :: (Source, EType) -> Either MorlocError ((TVar, Int), (Property, TypeU, Source))
+    toPair (src, e@(EType (FunU [a] b) _ _)) = do
+      case packerKeyVal e of
+          (Right (Just (key, t, p))) -> return (key, (p, t, src))
+          (Right Nothing) -> impossible -- this is called after filtering away general types
+          Left err -> Left err
+
+    packerKeyVal :: EType -> Either MorlocError (Maybe ((TVar, Int), TypeU, Property))
+    packerKeyVal e@(EType t@(FunU [a] b) p _) = case (isPacker e, isUnpacker e) of
+      (True, True) -> Left $ CyclicPacker t
+      (True, False) -> Right (Just (packerKey a, b, Pack))
+      (False, True) -> Right (Just (packerKey b, a, Unpack))
+      (False, False) -> Right Nothing
+
+    packerKey :: TypeU -> (TVar, Int)
+    packerKey t = case splitArgs t of
+      (params, [VarU v, _])   -> (v, length params)
+      (params, [AppU v _, _]) -> (v, length params)
+      (params, [NamU _ v _ _, _]) -> (v, length params)
+      _ -> error "bad packer"
+
+    -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
+    unifyTypes :: [TypeU] -> TypeU
+    unifyTypes [] = impossible -- This cannot occur since the right hand list accumulated in groupSort is never empty
+    unifyTypes (x:_) = x -- FIXME: need to actually check that they all agree
+
+
+packerTypesMatch :: TypeU -> TypeU -> Bool
+packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
+  ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
+    -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
+    && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
+  _ -> False
+
+qualify :: [TVar] -> TypeU -> TypeU
+qualify [] t = t
+qualify (v:vs) t = ForallU v (qualify vs t)
+
+splitArgs :: TypeU -> ([TVar], [TypeU])
+splitArgs (ForallU v u) =
+  let (vs, ts) = splitArgs u
+  in (v:vs, ts)
+splitArgs (FunU ts t) = ([], ts <> [t])
+splitArgs t = ([], [t])

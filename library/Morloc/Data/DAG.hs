@@ -163,7 +163,7 @@ mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | Map a monadic function over a DAG yielding a new DAG with the same
--- topology but a new node values. If the DAG contains cycles, Nothing is
+-- topology but new node values. If the DAG contains cycles, Nothing is
 -- returned.
 synthesizeDAG
   :: (Ord k, Monad m)

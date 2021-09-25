@@ -72,6 +72,9 @@ findTypeTerms (NamU _ _ _ rs) = conmap (findTypeTerms . snd) rs
 -- descend recursively into declaration where statements except if the input
 -- expression is a declaration.
 findSignatures :: ExprI -> [(EVar, Maybe MT.Text, EType)]
+-- v is the name of the type
+-- l is the optional label for the signature
+-- t is the type
 findSignatures (ExprI _ (ModE _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
 findSignatures (ExprI _ (AssE _ _ es)) = [(v, l, t) | (ExprI _ (SigE v l t)) <- es]
 findSignatures (ExprI _ (SigE v l t)) = [(v, l, t)]

@@ -38,6 +38,7 @@ module Morloc.Monad
   , metaProperties
   , metaType
   , metaTypedefs
+  , metaPackMap
   ) where
 
 import Control.Monad.Except
@@ -70,7 +71,7 @@ emptyState path v = MorlocState {
   , stateCounter = -1
   , stateSignatures = GMap.empty
   , stateOutfile = path
-  , statePackers = Map.empty
+  , statePackers = GMap.empty
   , stateName = Map.empty
 }
 
@@ -217,6 +218,13 @@ metaType i = do
 -- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
 metaName i = Map.lookup i <$> gets stateName
+
+metaPackMap :: Int -> MorlocMonad PackMap
+metaPackMap i = do
+    p <- gets statePackers
+    case GMap.lookup i p of
+      (GMapJust p) -> return p
+      _ -> impossible -- all indices were originally linked to pacmaps, if no map is found, not even an empty one, then there is a bug
 
 -- | This is currently only used in the C++ translator.
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))

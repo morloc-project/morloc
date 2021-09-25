@@ -12,6 +12,7 @@ module Morloc.Data.GMap
   , empty
   , innerKeys
   , insert
+  , insertMany
   , keys
   , lookup
   , mapInnerKeys
@@ -48,6 +49,11 @@ empty = GMap Map.empty Map.empty
 
 insert :: (Ord a, Ord b) => a -> b -> c -> GMap a b c -> GMap a b c
 insert k1 k2 x (GMap m1 m2) = GMap (Map.insert k1 k2 m1) (Map.insert k2 x m2) 
+
+insertMany :: (Ord a, Ord b) => [a] -> b -> c -> GMap a b c -> GMap a b c
+insertMany ks k2 x (GMap m1 m2) = GMap m1' m2' where
+  m1' = Map.union (Map.fromList (zip ks (repeat k2))) m1
+  m2' = Map.insert k2 x m2
 
 -- | Given `yIsX gmap x y`, the value `y` points to will be replaced with the
 -- value `x` points to. If `x` is not in `gmap`, then Nothing is returned. If
