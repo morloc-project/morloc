@@ -499,14 +499,27 @@ synthExpr lang g0 (NamS ((k,x):rs)) = do
 -- Lam=>
 --
 -- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr lang g0 (LamS vs@(EV v:_) x) = undefined
-  -- let mark = MarkG (TV (Just lang) v)
-  --     g1 = g0 +> mark
-  --     (g2, ts) = statefulMap (bindTerm lang) g1 vs
-  -- (g3, tx, x') <- synth g2 x
-  -- let t = foldr1 FunU (ts ++ [tx])
-  -- g4 <- cut mark g3
-  -- return (g4, t, LamS vs x')
+synthExpr lang g0 (LamS [] x0) = do
+  (g1, bodyType, bodyExpr) <- synth g0 x0
+  return (g1, FunU [] bodyType, LamS [] bodyExpr)
+synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
+  let mark = MarkG (TV (Just lang) n)
+      g1 = g0 +> mark
+      (g2, headType) = bindTerm lang g1 v
+
+  (g3, tailType, tailExpr) <- synthExpr lang g2 (LamS vs x) 
+
+  fullType <- case tailType of
+    (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
+    _ -> impossible -- LamS type is always a function (see base case)
+
+  fullExpr <- case tailExpr of
+    (LamS vs x) -> return $ LamS (v:vs) x
+    _ -> impossible -- synthExpr does not change data constructors
+
+  g4 <- cut mark g3
+
+  return (g4, fullType, fullExpr)
 
 -- App=>
 --
