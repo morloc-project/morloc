@@ -392,7 +392,6 @@ synthExpr
        , SExpr (Indexed Type) One (Indexed TypeU)
        )
 
-
 -- Uni=>
 synthExpr lang g UniS = do
   let ts = MLD.defaultNull (Just lang)
@@ -422,37 +421,58 @@ synthExpr lang g (LogS x) = do
 synthExpr _ _ (VarS v) = Left $ UnboundVariable v
 
 -- Acc=>
-synthExpr lang g0 (AccS x k) = undefined
-  -- (g1, tx, x1) <- synth g0 x
-  -- tk <- accessRecord k tx
-  -- return (g1, tk, AccS x1 k)
-  -- where
-  --   accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
-  --   accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
-  --     (Just t) -> return t
-  --     Nothing -> Left $ KeyError k r
-  --   accessRecord k r = Left $ KeyError k r
+synthExpr lang g0 (AccS x k) = do
+  (g1, tx, x1) <- synth g0 x
+  tk <- accessRecord k tx
+  return (g1, tk, AccS x1 k)
+  where
+    accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
+    accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
+      (Just t) -> return t
+      Nothing -> Left $ KeyError k r
+    accessRecord k r = Left $ KeyError k r
 
 -- List=>
 --
 -- The elements in xs are all of the same general type, however they may be in
 -- different languages.
-synthExpr lang g0 (LstS xs) = undefined
-  -- -- t is an existential type representing the upper type
-  -- let (g1, t) = newvar (Just lang) g0
-  -- -- xs' is a list of mixed language types
-  -- (g2, ps') <- chainCheck g1 xs t
-  -- let (g3, containerType) = newvarRich [t] (MLD.defaultList (Just lang) t) (Just lang) g2
-  -- return (g3, containerType, ListS (map snd ps'))
+synthExpr lang g0 (LstS (x:xs)) = do
+  -- here t1 is the element type
+  (g1, t1, x1) <- synth g0 x
+
+  -- create an existential container type with sensible default
+  let (g2, containerType) = newvarRich [t1] (MLD.defaultList (Just lang) t1) (Just lang) g1
+
+  -- and t2 is the list type
+  (g3, t2, listExpr) <- checkExpr lang g2 (LstS xs) containerType
+
+  case listExpr of
+    (LstS xs2) -> return (g3, t2, (LstS (x1:xs2)))
+    _ -> impossible -- check never changes the top data constructor
 
 -- Tuple=>
 --
-synthExpr lang g0 (TupS xs) = undefined
-  -- (g1, xs') <- chain2 synth g0 xs
-  -- let ts = map fst xs'
-  --     dts = MLD.defaultTuple (Just lang) ts
-  -- let (g2, containerType) = newvarRich ts dts (Just lang) g1
-  -- return (g2, containerType, TupleS (map snd xs'))
+synthExpr lang g0 (TupS []) = do
+  let (g1, t) = newvarRich [] (MLD.defaultTuple (Just lang) []) (Just lang) g0
+  return (g1, t, TupS [])
+
+synthExpr lang g0 (TupS (x:xs)) = do
+  -- type the head element
+  (g1, t, x') <- synth g0 x
+
+  -- type the remaining elements
+  (g2, tupleType, tupleExpr) <- synthExpr lang g1 (TupS xs)
+
+  -- merge the head with the remaining and return
+  (g3, t3) <- case tupleType of
+    (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) (Just lang) g2
+    _ -> impossible -- the tuple was created by newvarRich which can only return existentials
+
+  xs' <- case tupleExpr of
+    (TupS xs') -> return xs'
+    _ -> impossible -- synth does not change data constructors
+
+  return (g3, t3, TupS (x':xs'))
 
 -- Rec=>
 --
