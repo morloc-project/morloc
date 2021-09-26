@@ -33,20 +33,35 @@ import qualified Control.Monad.State as CMS
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed Type) Many Int]
-typecheck es = mapM typecheckGeneral es
+typecheck es = mapM typecheckGeneral es |>> map resolveTypes
+
+resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
+resolveTypes (SAnno (Many es) (Idx i t)) = SAnno (Many (map (\(e, i) -> (f e, i)) es)) (Idx i (typeOf t)) where
+  f :: SExpr (Indexed TypeU) Many Int -> SExpr (Indexed Type) Many Int
+  f (AccS x k) = AccS (resolveTypes x) k
+  f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs) 
+  f (LamS vs x) = LamS vs (resolveTypes x)
+  f (LstS xs) = LstS (map resolveTypes xs)
+  f (TupS xs) = TupS (map resolveTypes xs)
+  f (NamS rs) = NamS (zip (map fst rs) (map (resolveTypes . snd) rs))
+  f (NumS x) = NumS x
+  f (LogS x) = LogS x
+  f (StrS x) = StrS x
+  f (CallS x) = CallS x
+  f UniS = UniS
+
 
 typecheckGeneral
   :: SAnno Int Many Int
-  -> MorlocMonad (SAnno (Indexed Type) Many Int)
+  -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
 typecheckGeneral x = do
   s <- CMS.gets stateSignatures
-  case typecheckGeneralPure (initialContext s) x of
+  case typecheckGeneralPure (lookupType s) initialContext x of
     (Left err) -> undefined
     (Right x') -> return x'
   where
-    initialContext s0 = Gamma
+    initialContext = Gamma
       { gammaCounter = 0
-      , gammaLookup = lookupType s0
       , gammaContext = []
       }
     
@@ -61,43 +76,93 @@ typecheckGeneral x = do
 -- for type consistency, correctness of packers, inferences of packers (both
 -- for serialization and for casting).
 typecheckGeneralPure
-  :: Gamma
+  :: (Int -> Maybe TypeU)
+  -> Gamma
   -> SAnno Int Many Int
-  -> Either (Indexed TypeError) (SAnno (Indexed Type) Many Int)
-typecheckGeneralPure g e = fmap (\(_,_,e) -> e) (infer g e)
+  -> Either (Indexed TypeError) (SAnno (Indexed TypeU) Many Int)
+typecheckGeneralPure f g e = fmap (\(_,_,e) -> e) (inferG f g e)
 
-infer
-  :: Gamma
+inferG
+  :: (Int -> Maybe TypeU)
+  -> Gamma
   -> SAnno Int Many Int
   -> Either
        (Indexed TypeError)
        ( Gamma
-       , [TypeU]
-       , SAnno (Indexed Type) Many Int
+       , TypeU
+       , SAnno (Indexed TypeU) Many Int
        )
-infer _ (SAnno (Many []) _) = impossible
-infer g (SAnno (Many es) i) = undefined
+inferG _ _ (SAnno (Many []) _) = impossible
+inferG l g0 (SAnno (Many ((e, j):es)) i) = do
+  (g1, t1, e') <- inferE l i g0 e
+  (g2, t2, SAnno (Many es') _) <- checkG l g1 (SAnno (Many es) i) t1
+  return (g2, t2, SAnno (Many ((e', j):es')) (Idx i t2))
 
-check
-  :: Gamma
+checkG
+  :: (Int -> Maybe TypeU)
+  -> Gamma
   -> SAnno Int Many Int
   -> TypeU
   -> Either
        (Indexed TypeError)
        ( Gamma
        , TypeU
-       , SAnno (Indexed Type) Many Int
+       , SAnno (Indexed TypeU) Many Int
        )
-check = undefined
+checkG l g (SAnno (Many []) i) t = return (g, t, SAnno (Many []) (Idx i t)) 
+checkG l g0 (SAnno (Many ((e, j):es)) i) t0 = do 
+  (g1, t1, e') <- checkE l g0 e t0
+  (g2, t2, SAnno (Many es') idType) <- checkG l g1 (SAnno (Many es) i) t1
+  return (g2, t2, SAnno (Many ((e', j):es')) idType)
 
-derive ::
-     Gamma
+
+inferE
+  :: (Int -> Maybe TypeU)
+  -> Int
+  -> Gamma
+  -> SExpr Int Many Int
+  -> Either
+       (Indexed TypeError)
+       ( Gamma
+       , TypeU
+       , SExpr (Indexed TypeU) Many Int
+       )
+inferE l i g UniS = undefined
+inferE l i g (VarS v) = undefined
+inferE l i g (AccS e k) = undefined
+inferE l i g (AppS e es) = undefined
+inferE l i g (LamS vs e) = undefined
+inferE l i g (LstS es) = undefined
+inferE l i g (TupS es) = undefined
+inferE l i g (NamS rs) = undefined
+inferE l i g (NumS x) = undefined
+inferE l i g (LogS x) = undefined
+inferE l i g (StrS x) = undefined
+inferE l i g (CallS src) = undefined
+
+
+checkE
+  :: (Int -> Maybe TypeU)
+  -> Gamma
+  -> SExpr Int Many Int
+  -> TypeU
+  -> Either
+       (Indexed TypeError)
+       ( Gamma
+       , TypeU
+       , SExpr (Indexed TypeU) Many Int
+       )
+checkE = undefined
+
+derive
+  :: (Int -> Maybe TypeU)
+  -> Gamma
   -> SAnno Int Many Int
   -> TypeU
   -> Either
        (Indexed TypeError)
        ( Gamma
        , TypeU
-       , SAnno (Indexed Type) Many Int
+       , SAnno (Indexed TypeU) Many Int
        )
 derive = undefined
