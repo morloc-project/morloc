@@ -455,15 +455,14 @@ synthExpr lang g0 (LstS (x:xs)) = do
 synthExpr lang g0 (TupS []) = do
   let (g1, t) = newvarRich [] (MLD.defaultTuple (Just lang) []) (Just lang) g0
   return (g1, t, TupS [])
-
 synthExpr lang g0 (TupS (x:xs)) = do
-  -- type the head element
+  -- type the head
   (g1, t, x') <- synth g0 x
 
-  -- type the remaining elements
+  -- type the tail
   (g2, tupleType, tupleExpr) <- synthExpr lang g1 (TupS xs)
 
-  -- merge the head with the remaining and return
+  -- merge the head and tail
   (g3, t3) <- case tupleType of
     (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) (Just lang) g2
     _ -> impossible -- the tuple was created by newvarRich which can only return existentials
@@ -476,14 +475,26 @@ synthExpr lang g0 (TupS (x:xs)) = do
 
 -- Rec=>
 --
-synthExpr lang g0 (NamS rs) = undefined
-  -- (g1, xs') <- chain2 synth g0 (map snd rs)
-  -- let typeEntries = zip (map fst rs) (map fst xs')
-  --     exprEntries = zip (map fst rs) (map snd xs')
-  --     dts = MLD.defaultRecord (Just lang) typeEntries
-  --     p = NamU NamRecord (TV (Just lang) "__RECORD__") [] typeEntries
-  --     (g2, t) = newvarRich [p] dts (Just lang) g1
-  -- return (g2, t, NamS exprEntries)
+synthExpr lang g0 (NamS []) = do
+  let (g1, t) = newvarRich [] (MLD.defaultRecord (Just lang) []) (Just lang) g0
+  return (g1, t, NamS [])
+synthExpr lang g0 (NamS ((k,x):rs)) = do
+  -- type the head
+  (g1, headType, headExpr) <- synth g0 x
+
+  -- type the tail
+  (g2, tailType, tailExpr) <- synthExpr lang g1 (NamS rs)
+
+  -- merge the head with tail
+  (g3, t3) <- case tailType of
+    (ExistU _ _ [NamU _ _ _ rs]) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs)) (Just lang) g2
+    _ -> impossible -- the record was created by newvarRich which can only return existentials
+
+  tailExprs <- case tailExpr of
+    (NamS xs') -> return xs'
+    _ -> impossible -- synth does not change data constructors
+
+  return (g3, t3, NamS ((k, headExpr):tailExprs))
 
 -- Lam=>
 --
