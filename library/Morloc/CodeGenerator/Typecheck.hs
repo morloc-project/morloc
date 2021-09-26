@@ -43,7 +43,7 @@ retrieveTypes
 retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
   ts <- case x of
     (CallS src) -> do
-      mayts <- lookupSig j
+      mayts <- MM.metaTermTypes j
       case fmap termConcrete mayts of
         (Just ts) -> case [es | (_, src', es, _) <- ts, src == src] of
           [es] -> return es
@@ -650,7 +650,7 @@ checkAgreement = undefined
 
 lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
 lookupSourceTypes i src = do
-  mayts <- lookupSig i
+  mayts <- MM.metaTermTypes i
   case mayts of
     Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes for source"
     (Just ts) -> case [ es | (_, src', es, _) <- termConcrete ts, src' == src] of
@@ -675,7 +675,7 @@ chain2 f s0 (x:xs) = do
 -- -- | Ensure that all concrete source signatures match general types
 -- checkSources :: SAnno (Indexed Type) One (Indexed Lang) -> MorlocMonad ()
 -- checkSources (SAnno (Many xs) i) = do
---   mayts <- lookupSig i
+--   mayts <- MM.metaTermTypes i
 --   case mayts |>> toTypePairs >>= mapM (uncurry checkConcrete) of
 --     (Just ((e1, e2):_)) -> undefined -- create error message for mismatched general/concrete types
 --     _ -> return ()

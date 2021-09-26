@@ -32,6 +32,7 @@ module Morloc.Monad
   , getCounter
   , setCounter
   -- * metadata accessors
+  , metaTermTypes
   , metaConstraints
   , metaConstructors
   , metaName
@@ -165,6 +166,16 @@ readLang langStr =
     Nothing -> throwError $ UnknownLanguage langStr
 
 
+metaTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaTermTypes i = do
+  s <- get
+  case GMap.lookup i (stateSignatures s) of
+    GMapNoFst -> return Nothing
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    (GMapJust t) -> return (Just t)
+
+-- TODO: rename the meta* functions
+
 -- | The general constraints as defined in the general type signature. These
 -- are not used anywhere yet.
 metaConstraints :: Int -> MorlocMonad [Constraint]
@@ -225,6 +236,7 @@ metaPackMap i = do
     case GMap.lookup i p of
       (GMapJust p) -> return p
       _ -> impossible -- all indices were originally linked to pacmaps, if no map is found, not even an empty one, then there is a bug
+
 
 -- | This is currently only used in the C++ translator.
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))

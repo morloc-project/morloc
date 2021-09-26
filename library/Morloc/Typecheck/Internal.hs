@@ -16,7 +16,6 @@ module Morloc.Typecheck.Internal
   ( (+>)
   , (++>)
   -- * accessing state
-  , lookupSig
   , newvar
   , newvarRich
   -- * Typeclasses
@@ -170,13 +169,3 @@ newqul :: TVar -> Gamma -> (Gamma, TVar)
 newqul (TV l v) g
   = let i = gammaCounter g
     in (g {gammaCounter = i + 1}, TV l (v <> "." <> (MT.pack . show $ i)))
-
-
-
-lookupSig :: Int -> MorlocMonad (Maybe TermTypes)
-lookupSig i = do
-  s <- MM.get
-  case GMap.lookup i (stateSignatures s) of
-    GMapNoFst -> return Nothing
-    GMapNoSnd -> MM.throwError . CallTheMonkeys $ "Internal GMap key missing"
-    (GMapJust t) -> return (Just t)

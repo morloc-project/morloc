@@ -12,7 +12,6 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder ()
-import Morloc.Typecheck.Internal (lookupSig)
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Data.Text as MT
@@ -251,7 +250,7 @@ collect
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
 collect (ExprI _ (ModE _ _)) (i, v) = do
-  t <- lookupSig i
+  t <- MM.metaTermTypes i
   case t of
     -- if Nothing, then the term is a bound variable
     Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
@@ -266,7 +265,7 @@ collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a mo
 -- collect info needed for the GMeta object
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
-  t <- lookupSig i
+  t <- MM.metaTermTypes i
   es <- case t of
     -- if Nothing, then the term is a bound variable
     Nothing -> collectSExpr e |>> return

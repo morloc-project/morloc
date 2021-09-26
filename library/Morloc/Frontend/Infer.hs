@@ -23,7 +23,7 @@ import Morloc.Frontend.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 import qualified Control.Monad.State as CMS
 
--- true things to remember:
+-- true facts to keep in mind:
 --   * indexing is a good idea, I need it at very least to link source code lines to
 --     error messages
 
@@ -40,10 +40,16 @@ typecheckGeneral
   -> MorlocMonad (SAnno (Indexed Type) Many Int)
 typecheckGeneral x = do
   s <- CMS.gets stateSignatures
-  case typecheckGeneralPure (lookupType s) x of
+  case typecheckGeneralPure (initialContext s) x of
     (Left err) -> undefined
     (Right x') -> return x'
   where
+    initialContext s0 = Gamma
+      { gammaCounter = 0
+      , gammaLookup = lookupType s0
+      , gammaContext = []
+      }
+    
     lookupType :: GMap Int Int TermTypes -> Int -> Maybe TypeU
     lookupType m i = case GMap.lookup i m of
       GMapNoFst -> Nothing
@@ -55,28 +61,29 @@ typecheckGeneral x = do
 -- for type consistency, correctness of packers, inferences of packers (both
 -- for serialization and for casting).
 typecheckGeneralPure
-  :: (Int -> Maybe TypeU)
+  :: Gamma
   -> SAnno Int Many Int
   -> Either (Indexed TypeError) (SAnno (Indexed Type) Many Int)
-typecheckGeneralPure = undefined
+typecheckGeneralPure g e = fmap (\(_,_,e) -> e) (infer g e)
 
 infer
   :: Gamma
   -> SAnno Int Many Int
   -> Either
-       TypeError
+       (Indexed TypeError)
        ( Gamma
        , [TypeU]
        , SAnno (Indexed Type) Many Int
        )
-infer = undefined
+infer _ (SAnno (Many []) _) = impossible
+infer g (SAnno (Many es) i) = undefined
 
 check
   :: Gamma
   -> SAnno Int Many Int
   -> TypeU
   -> Either
-       TypeError
+       (Indexed TypeError)
        ( Gamma
        , TypeU
        , SAnno (Indexed Type) Many Int
@@ -88,7 +95,7 @@ derive ::
   -> SAnno Int Many Int
   -> TypeU
   -> Either
-       TypeError
+       (Indexed TypeError)
        ( Gamma
        , TypeU
        , SAnno (Indexed Type) Many Int

@@ -342,6 +342,7 @@ data GammaIndex
 
 data Gamma = Gamma
   { gammaCounter :: Int
+  , gammaLookup :: Int -> (Maybe TypeU)
   , gammaContext :: [GammaIndex]
   }
 
