@@ -59,7 +59,7 @@ treeify d
        --       stateSignatures :: GMap Int Int [EType]
        -- - this is a map from term (VarE) indices to signature sets
        -- - after this step, all signatures and type annotation expressions are redundant
-       -- - the map won't be used until the type inference step in Infer.hs
+       -- - the map won't be used until the type inference step in Typecheck.hs
        _ <- DAG.synthesizeDAG linkSignaturesModule d
 
        -- set counter for reindexing expressions in collect

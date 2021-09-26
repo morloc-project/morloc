@@ -1,12 +1,12 @@
 {-|
-Module      : Morloc.Frontend.Infer
+Module      : Morloc.Frontend.Typecheck
 Description : Core inference module
 Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Infer (typecheck) where
+module Morloc.Frontend.Typecheck (typecheck) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
@@ -80,9 +80,9 @@ typecheckGeneralPure
   -> Gamma
   -> SAnno Int Many Int
   -> Either (Indexed TypeError) (SAnno (Indexed TypeU) Many Int)
-typecheckGeneralPure f g e = fmap (\(_,_,e) -> e) (inferG f g e)
+typecheckGeneralPure f g e = fmap (\(_,_,e) -> e) (synthG f g e)
 
-inferG
+synthG
   :: (Int -> Maybe TypeU)
   -> Gamma
   -> SAnno Int Many Int
@@ -92,9 +92,9 @@ inferG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-inferG _ _ (SAnno (Many []) _) = impossible
-inferG l g0 (SAnno (Many ((e, j):es)) i) = do
-  (g1, t1, e') <- inferE l i g0 e
+synthG _ _ (SAnno (Many []) _) = impossible
+synthG l g0 (SAnno (Many ((e, j):es)) i) = do
+  (g1, t1, e') <- synthE l i g0 e
   (g2, t2, SAnno (Many es') _) <- checkG l g1 (SAnno (Many es) i) t1
   return (g2, t2, SAnno (Many ((e', j):es')) (Idx i t2))
 
@@ -116,7 +116,7 @@ checkG l g0 (SAnno (Many ((e, j):es)) i) t0 = do
   return (g2, t2, SAnno (Many ((e', j):es')) idType)
 
 
-inferE
+synthE
   :: (Int -> Maybe TypeU)
   -> Int
   -> Gamma
@@ -127,18 +127,18 @@ inferE
        , TypeU
        , SExpr (Indexed TypeU) Many Int
        )
-inferE l i g UniS = undefined
-inferE l i g (VarS v) = undefined
-inferE l i g (AccS e k) = undefined
-inferE l i g (AppS e es) = undefined
-inferE l i g (LamS vs e) = undefined
-inferE l i g (LstS es) = undefined
-inferE l i g (TupS es) = undefined
-inferE l i g (NamS rs) = undefined
-inferE l i g (NumS x) = undefined
-inferE l i g (LogS x) = undefined
-inferE l i g (StrS x) = undefined
-inferE l i g (CallS src) = undefined
+synthE l i g UniS = undefined
+synthE l i g (VarS v) = undefined
+synthE l i g (AccS e k) = undefined
+synthE l i g (AppS e es) = undefined
+synthE l i g (LamS vs e) = undefined
+synthE l i g (LstS es) = undefined
+synthE l i g (TupS es) = undefined
+synthE l i g (NamS rs) = undefined
+synthE l i g (NumS x) = undefined
+synthE l i g (LogS x) = undefined
+synthE l i g (StrS x) = undefined
+synthE l i g (CallS src) = undefined
 
 
 checkE
@@ -154,7 +154,7 @@ checkE
        )
 checkE = undefined
 
-derive
+application
   :: (Int -> Maybe TypeU)
   -> Gamma
   -> SAnno Int Many Int
@@ -165,4 +165,4 @@ derive
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-derive = undefined
+application = undefined

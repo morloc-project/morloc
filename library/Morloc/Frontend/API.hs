@@ -9,7 +9,7 @@ Stability   : experimental
 module Morloc.Frontend.API
   ( parse
   , Parser.readType
-  , Infer.typecheck
+  , Typecheck.typecheck
   ) where
 
 import Morloc.Frontend.Namespace
@@ -24,7 +24,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
-import qualified Morloc.Frontend.Infer as Infer
+import qualified Morloc.Frontend.Typecheck as Typecheck
 import qualified Morloc.Frontend.Pretty as Pretty
 
 parse ::
