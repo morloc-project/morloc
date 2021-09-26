@@ -32,26 +32,28 @@
 
 # Refactoring
 
- [x] Replace Type with SolvedType after typechecking (see 6bdcf5a4): 
- [x] Build a tree object in the parser and typecheck it, rather than the
-     awkward Module list
+ [ ] Reimplement data types with recursion schemes. This should be able to
+ eliminate much of the boilerplat that makes refactoring so time consuming and
+ the code so ugly. We should be able to tease out the deeper structure of the
+ program, such as the relationship between parsing and printing (algebras and
+ coalgrebras?) and the alternating structures of SAnno and ExprS.
 
 # Usability
 
  [ ] Make a Docker image
-
-# RDF representation
-
- [ ] Write specification
- [x] Handle import scoping (maybe follow R environment model)
- [x] Remove dependency on `arq` (too slow)
 
 # Error reporting
 
  * In the compiler ...
 
    [x] Add meaningful error messages to parser
-   [.] Replace the naked `error` calls everywhere
+
+   [ ] Use `impossible` for
+   patterns that match against unreachable branches - calling them imlies a bug
+   and should kill the program. Any mistake a user can make should raise a
+   clear error message, but any mistake in the compiler itself, should just
+   die. The default Haskell message raised on `undefined` is good enough. The
+   maintainer can find the location and diagnose the problem. 
 
  * In the generated code ...
 
@@ -65,7 +67,7 @@
  [ ] performance profiling
  [ ] code linting
  [ ] test coverage reports
- [ ] property testing (resurrect it)
+ [ ] property testing
 
 # Syntax
 
@@ -88,7 +90,6 @@
  [x] Add a full type inference system, this is just one layer of the type
      system, but is an essential one. Eventually this can be ported to the
      rule-engine.
- [ ] specify rules in OWL, join this with the morloc RDF, and then check validity
 
 # Documentation
 
