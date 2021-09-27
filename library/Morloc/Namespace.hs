@@ -357,6 +357,7 @@ data TypeError
   | KeyError Text TypeU
   | MissingConcreteSignature Source
   | ApplicationOfNonFunction
+  | TooManyArguments
   deriving (Ord, Eq, Show)
 
 data MorlocError

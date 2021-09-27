@@ -523,28 +523,91 @@ synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
 
 -- App=>
 --
-synthExpr lang g0 (AppS v xs) = undefined
-  -- (g1, t0, f1) <- synth f0
-  -- (g2, t1, f2) <- applicationMany g1 xs t0
-  -- -- is f2 are "real thing?"
+synthExpr lang g0 (AppS f []) = do
+  (g1, t1, f1) <- synth g0 f
+  return (g1, t1, AppS f1 [])
+synthExpr lang g0 (AppS f xs) = do
+
+  -- get the potentially qualified function type and expression
+  (g1, qfunType, qfunExpr) <- synth g0 f
+
+  -- unqualify the expression
+  (g2, uFunType, uFunExpr) <- application g1 qfunType qfunExpr
+
+  -- extract output type from the type of f
+  (ts, outputType) <- case uFunType of
+    (FunU ts t) -> return (ts, t)
+    _ -> impossible
+
+  -- create a tuple from the input arguments
+  let tupleType = head $ MLD.defaultTuple (Just lang) ts
+
+  -- check the tuple of argument expressions against a tuple of argument types,
+  -- collect the types of missing arguments (partial application)
+  (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
+    -- there are more inputs than arguments: partial application
+    GT -> case splitAt (length xs) ts of
+      (args, remainder) -> checkExpr lang g2 (TupS xs) tupleType |>> (,) remainder
+    -- there are the same number of inputs and arguments: full application
+    EQ -> checkExpr lang g2 (TupS xs) tupleType |>> (,) []
+    -- there are more arguments than inputs: TYPE ERROR!!!
+    LT -> Left TooManyArguments
+
+  -- extract the types of the input arguments
+  inputTypes <- case argTupleType of
+    (AppU _ ts') -> return ts'
+    _ -> impossible
+
+  -- extract the input expressions
+  inputExprs <- case argTupleExpr of
+    (TupS xs') -> return xs'
+    _ -> impossible
+
+  -- synthesize the final type
+  finalType <- case leftoverTypes of
+    -- full application, just return the output type
+    [] -> return outputType
+    -- partial application, create a new function with unapplied types
+    ts -> return (FunU ts outputType)
+
+  -- put the AppS back together with the synthesized function and input expressions
+  return (g3, finalType, AppS uFunExpr inputExprs)
   
-
-
-  -- :: Gamma
-  -- -> [SAnno (Indexed Type) One (Lang, [EType])]
-  -- -> TypeU
-  -- -> Either
-  --      TypeError
-  --      ( Gamma
-  --      , TypeU
-  --      , [SAnno (Indexed Type) One (Indexed TypeU)]
-  --      )
 
 -- For now, sources must be annotated by a concrete type signature. Annotations
 -- are stored in the (Indexed [EType) term. If this term were not empty, it
 -- would have been matched by either the AnnoOne=> or AnnoMany=> rules
 -- where the expression would be checked against the annotation.
 synthExpr _ _ (CallS src) = Left $ MissingConcreteSignature src
+
+
+application
+  :: Gamma
+  -> TypeU
+  -> SAnno (Indexed Type) One (Indexed TypeU)
+  -> Either
+       TypeError
+       ( Gamma
+       , TypeU
+       , SAnno (Indexed Type) One (Indexed TypeU)
+       )
+application g0 t0 (SAnno (One (e0, (Idx j _))) gt) = do
+  (g1, t1, e1) <- applicationExpr g0 t0 e0
+  return (g1, t1, SAnno (One (e1, Idx j t1)) gt) 
+
+applicationExpr
+  :: Gamma
+  -> TypeU
+  -> SExpr (Indexed Type) One (Indexed TypeU)
+  -> Either
+       TypeError
+       ( Gamma
+       , TypeU
+       , SExpr (Indexed Type) One (Indexed TypeU)
+       )
+applicationExpr g0 (ForallU v t) e = applicationExpr (g0 +> ExistG v [] []) (substitute v t) e
+applicationExpr g0 t@(FunU _ _) e = return (g0, t, e)
+applicationExpr _ _ _ = undefined -- FIXME: left error, make a good error message
   
 
 bindTerm :: Lang -> Gamma -> EVar -> (Gamma, TypeU)
@@ -552,25 +615,6 @@ bindTerm lang g0 v =
   let (g1, t) = newvar (Just lang) g0
       idx = AnnG v t
   in (g1 +> idx, t)
-
-
-chainCheck
-  :: Gamma
-  -> [SAnno (Indexed Type) One (Indexed (Lang, [EType]))]
-  -> TypeU
-  -> Either
-        TypeError
-        ( Gamma
-        , [( TypeU
-           , SAnno (Indexed Type) One (Indexed TypeU)
-          )]
-        )
-chainCheck g0 [] _ = Right (g0, [])
-chainCheck g0 (x0:rs) t0 = do
-  (g1, t1, x1) <- check g0 x0 t0
-  (gn, rs') <- chainCheck g1 rs t1
-  return (gn, (t1, x1):rs')
-
 
 
 check
@@ -635,55 +679,55 @@ applicationMany _ _ _ = undefined
 --   (g2, t2, es1) <- applicationMany g1 es0 t1
 --   return (g2, FunU t1 t2, e1:es1)
 
-application
-  :: Gamma
-  -> SAnno (Indexed Type) One (Lang, [EType])
-  -> TypeU
-  -> Either
-       TypeError
-       ( Gamma
-       , TypeU
-       , SAnno (Indexed Type) One (Indexed TypeU)
-       )
---  g1 |- e <= A -| g2
--- ----------------------------------------- -->App
---  g1 |- A->C o e =>> C -| g2
-
-application _ _ (FunU ts t) = undefined
--- application g0 (e0:es) (FunU a b) = do
---   (g1, a1, e1) <- check g e0 a
---   (g2, a2, e2) <- application g1 es b
---   let b' = apply g1 b
---   return (g1, FunU a' b', apply g' e')
-
---  g1,Ea |- [Ea/a]A o e =>> C -| g2
--- ----------------------------------------- Forall App
---  g1 |- Forall x.A o e =>> C -| g2
-application g e (ForallU x s) = application (g +> ExistG x [] []) e (substitute x s)
-
---  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
--- ----------------------------------------- EaApp
---  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application g e (ExistU v@(TV lang _) [] _) = undefined
-  -- case access1 v g of
-  --   -- replace <t0> with <t0>:<ea1> -> <ea2>
-  --   Just (rs, _, ls) -> do
-  --     ea1 <- newvar lang
-  --     ea2 <- newvar lang
-  --     let t' = FunU ea1 ea2
-  --         g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
-  --     (g3, a', e2) <- check g2 e ea1
-  --     let f' = FunU a' (apply g3 ea2)
-  --     return (g3, f', e2)
-  --   -- if the variable has already been solved, use solved value
-  --   Nothing -> case lookupU v g of
-  --     (Just (FunU t1 t2)) -> do
-  --       (g2, _, e2) <- check g e t1
-  --       return (g2, FunU t1 t2, e2)
-  --     _ -> Left ApplicationOfNonFunction
-    
-
-application _ _ _ = Left ApplicationOfNonFunction
+-- application
+--   :: Gamma
+--   -> SAnno (Indexed Type) One (Lang, [EType])
+--   -> TypeU
+--   -> Either
+--        TypeError
+--        ( Gamma
+--        , TypeU
+--        , SAnno (Indexed Type) One (Indexed TypeU)
+--        )
+-- --  g1 |- e <= A -| g2
+-- -- ----------------------------------------- -->App
+-- --  g1 |- A->C o e =>> C -| g2
+--
+-- application _ _ (FunU ts t) = undefined
+-- -- application g0 (e0:es) (FunU a b) = do
+-- --   (g1, a1, e1) <- check g e0 a
+-- --   (g2, a2, e2) <- application g1 es b
+-- --   let b' = apply g1 b
+-- --   return (g1, FunU a' b', apply g' e')
+--
+-- --  g1,Ea |- [Ea/a]A o e =>> C -| g2
+-- -- ----------------------------------------- Forall App
+-- --  g1 |- Forall x.A o e =>> C -| g2
+-- application g e (ForallU x s) = application (g +> ExistG x [] []) e (substitute x s)
+--
+-- --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
+-- -- ----------------------------------------- EaApp
+-- --  g1[Ea] |- Ea o e =>> Ea2 -| g2
+-- application g e (ExistU v@(TV lang _) [] _) = undefined
+--   -- case access1 v g of
+--   --   -- replace <t0> with <t0>:<ea1> -> <ea2>
+--   --   Just (rs, _, ls) -> do
+--   --     ea1 <- newvar lang
+--   --     ea2 <- newvar lang
+--   --     let t' = FunU ea1 ea2
+--   --         g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
+--   --     (g3, a', e2) <- check g2 e ea1
+--   --     let f' = FunU a' (apply g3 ea2)
+--   --     return (g3, f', e2)
+--   --   -- if the variable has already been solved, use solved value
+--   --   Nothing -> case lookupU v g of
+--   --     (Just (FunU t1 t2)) -> do
+--   --       (g2, _, e2) <- check g e t1
+--   --       return (g2, FunU t1 t2, e2)
+--   --     _ -> Left ApplicationOfNonFunction
+--
+--
+-- application _ _ _ = Left ApplicationOfNonFunction
 
 
 
@@ -692,24 +736,16 @@ checkAgreement = undefined
 
 
 
-lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
-lookupSourceTypes i src = do
-  mayts <- MM.metaTermTypes i
-  case mayts of
-    Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes for source"
-    (Just ts) -> case [ es | (_, src', es, _) <- termConcrete ts, src' == src] of
-      [es'] -> return es'
-      _ -> MM.throwError . CallTheMonkeys $ "Expected exactly one list of types for a source"
-
-
-chain2 :: Monad m => (s -> a -> m (s, b, c)) -> s -> [a] -> m (s, [(b, c)])
-chain2 f s0 [] = return (s0, [])
-chain2 f s0 (x:xs) = do
-  (s1, x, y) <- f s0 x
-  (sn, xs') <- chain2 f s1 xs
-  return (sn, (x,y):xs')
-
-
+-- lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]
+-- lookupSourceTypes i src = do
+--   mayts <- MM.metaTermTypes i
+--   case mayts of
+--     Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes for source"
+--     (Just ts) -> case [ es | (_, src', es, _) <- termConcrete ts, src' == src] of
+--       [es'] -> return es'
+--       _ -> MM.throwError . CallTheMonkeys $ "Expected exactly one list of types for a source"
+--
+--
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
 -- they hae the same general types and the general types define the packed
