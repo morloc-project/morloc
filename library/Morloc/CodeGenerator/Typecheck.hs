@@ -607,7 +607,7 @@ applicationExpr
        )
 applicationExpr g0 (ForallU v t) e = applicationExpr (g0 +> ExistG v [] []) (substitute v t) e
 applicationExpr g0 t@(FunU _ _) e = return (g0, t, e)
-applicationExpr _ _ _ = undefined -- FIXME: left error, make a good error message
+applicationExpr _ _ _ = Left ApplicationOfNonFunction
   
 
 bindTerm :: Lang -> Gamma -> EVar -> (Gamma, TypeU)
@@ -644,91 +644,52 @@ checkExpr
         , SExpr (Indexed Type) One (Indexed TypeU)
         )
 
+------ this rule is for the deep style, not the new wide style
 --  g1,x:A |- e <= B -| g2,x:A,g3
 -- ----------------------------------------- -->I
 --  g1 |- \x.e <= A -> B -| g2
-checkExpr lang g1 (LamS vs x) t1@(FunU a b) = undefined
+--
+-- t2 will have form (FunU [] b) if the function is fully applied, but partial application is allowed
+checkExpr lang g1 (LamS [] e1) t1@(FunU _ _) = do
+  (g2, t2, e2) <- check g1 e1 b1
+  return (g2, t2, LamS [] e2)
+checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
+  -- defined x:A
+  let vardef = AnnG v a1
+      g2 = g1 +> vardef 
+  -- peal off one layer of bound terms and check
+  (g3, t3, e2) <- checkExpr lang g2 (LamS vs e1) (FunU as1 b1)
+
+  -- ignore trailing context `x:A,g3`
+  g4 <- cut vardef g3
+
+  -- construct the final type
+  t4 <- case t3 of
+    (FunU as2 b2) -> return $ FunU (a1:as2) b2
+    _ -> impossible
+
+  -- construct the final expression
+  e3 <- case e2 of
+    (LamS vs' body) -> return $ LamS (v:vs') body
+    _ -> impossible
+
+  return (g4, t4, e3)
+  
 
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
 checkExpr lang g1 e1 t2@(ForallU x a) = undefined
+  -- (g2, _, e2) <- check (g1 +> VarG x) e1 a
+  -- g3 <- cut (VarG x) g2
+  -- let t3 = apply g3 t2
+  -- return (g3, t3, ann e2 t3)
 
 --  g1 |- e => A -| g2
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
 checkExpr lang g1 e1 b = undefined
-
-
-
-applicationMany
-  :: Gamma
-  -> [SAnno (Indexed Type) One (Lang, [EType])]
-  -> TypeU
-  -> Either
-       TypeError
-       ( Gamma
-       , TypeU
-       , [SAnno (Indexed Type) One (Indexed TypeU)]
-       )
-applicationMany g0 [] t0 = return (g0, t0, [])
-applicationMany _ _ _ = undefined
--- applicationMany g0 (e0:es0) t0 = do
---   (g1, t1, e1) <- application g0 e0 t0
---   (g2, t2, es1) <- applicationMany g1 es0 t1
---   return (g2, FunU t1 t2, e1:es1)
-
--- application
---   :: Gamma
---   -> SAnno (Indexed Type) One (Lang, [EType])
---   -> TypeU
---   -> Either
---        TypeError
---        ( Gamma
---        , TypeU
---        , SAnno (Indexed Type) One (Indexed TypeU)
---        )
--- --  g1 |- e <= A -| g2
--- -- ----------------------------------------- -->App
--- --  g1 |- A->C o e =>> C -| g2
---
--- application _ _ (FunU ts t) = undefined
--- -- application g0 (e0:es) (FunU a b) = do
--- --   (g1, a1, e1) <- check g e0 a
--- --   (g2, a2, e2) <- application g1 es b
--- --   let b' = apply g1 b
--- --   return (g1, FunU a' b', apply g' e')
---
--- --  g1,Ea |- [Ea/a]A o e =>> C -| g2
--- -- ----------------------------------------- Forall App
--- --  g1 |- Forall x.A o e =>> C -| g2
--- application g e (ForallU x s) = application (g +> ExistG x [] []) e (substitute x s)
---
--- --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
--- -- ----------------------------------------- EaApp
--- --  g1[Ea] |- Ea o e =>> Ea2 -| g2
--- application g e (ExistU v@(TV lang _) [] _) = undefined
---   -- case access1 v g of
---   --   -- replace <t0> with <t0>:<ea1> -> <ea2>
---   --   Just (rs, _, ls) -> do
---   --     ea1 <- newvar lang
---   --     ea2 <- newvar lang
---   --     let t' = FunU ea1 ea2
---   --         g2 = rs ++ [SolvedG v t', index ea1, index ea2] ++ ls
---   --     (g3, a', e2) <- check g2 e ea1
---   --     let f' = FunU a' (apply g3 ea2)
---   --     return (g3, f', e2)
---   --   -- if the variable has already been solved, use solved value
---   --   Nothing -> case lookupU v g of
---   --     (Just (FunU t1 t2)) -> do
---   --       (g2, _, e2) <- check g e t1
---   --       return (g2, FunU t1 t2, e2)
---   --     _ -> Left ApplicationOfNonFunction
---
---
--- application _ _ _ = Left ApplicationOfNonFunction
-
 
 
 checkAgreement :: Indexed TypeU -> Indexed Type -> Either TypeError ()
