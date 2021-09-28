@@ -239,18 +239,17 @@ instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 -- --  g2 |- Ea2 <=: [g2]A2 -| g3
 -- -- ----------------------------------------- InstLApp
 -- --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
-instantiate (ExistU _ _ _) (FunU _ _) _ = undefined
--- instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU t1 t2) g1 = do
---   let (g2, ea1) = newvar lang g1
---       (g3, ea2) = newvar lang g2
---   g4 <-
---     case access1 v (gammaContext g3) of
---       Just (rs, _, ls) ->
---         return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
---       Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
---   g5 <- instantiate t1 ea1 g4
---   g6 <- instantiate ea2 (apply g5 t2) g5
---   return g6
+instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
+  let (g2, eas) = statefulMap (\g _ -> newvar lang g) g1 as 
+      (g3, eb) = newvar lang g2
+  g4 <- case access1 v (gammaContext g3) of
+      Just (rs, _, ls) ->
+        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ map index eas ++ ls }
+      Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
+  g5 <- foldlM (\g (e, t) -> instantiate e t g) g4 (zip eas as)
+  instantiate eb (apply g5 b) g5 
+
+
 
 --  g1[Ea2,Ea1,Ea=Ea1->Ea2] |- Ea1 <=: A1 -| g2
 --  g2 |- [g2]A2 <=: Ea2 -| g3
