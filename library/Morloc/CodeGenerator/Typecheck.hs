@@ -689,7 +689,12 @@ checkExpr lang g1 e1 t2@(ForallU x a) = do
 --  g2 |- [g2]A <: [g2]B -| g3
 -- ----------------------------------------- Sub
 --  g1 |- e <= B -| g3
-checkExpr lang g1 e1 b = undefined
+checkExpr lang g1 e1 b = do
+  (g2, a, e2) <- synthExpr lang g1 e1
+  let a' = apply g2 a
+      b' = apply g2 b
+  g3 <- subtype a' b' g2
+  return (g3, a', e2)
 
 
 checkAgreement :: Indexed TypeU -> Indexed Type -> Either TypeError ()
