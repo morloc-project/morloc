@@ -360,20 +360,24 @@ synth
 --  TypeU is resolved. 
 
 -- AnnoOne=>
-synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) gt)
-  = check g (SAnno (One (x, Idx i (l, []))) gt) ct
+synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
+  = check g (SAnno (One (x, Idx i (l, []))) m) ct
 
 -- AnnoMany=>
-synth g (SAnno (One (x, Idx i (l, cts@(_:_)))) gt) =
+synth g (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
   let (g', t) = newvarRich [] [t | (EType t _ _) <- cts] (Just l) g
-  in check g' (SAnno (One (x, Idx i (l, []))) gt) t
+  in check g' (SAnno (One (x, Idx i (l, []))) m) t
 
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
-synth g (SAnno (One (x, Idx i (l, []))) gt) = do
-  (g', t, x') <- synthExpr l g x
-  checkAgreement (Idx i t) gt
-  return (g', t, SAnno (One (x', Idx i t)) gt)
+synth g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
+  (g1, t, x') <- synthExpr l g0 x
+  g2 <- subtype t (type2typeu tg) g1
+  return (g2, t, SAnno (One (x', Idx i t)) m)
 
+-- check g0 (SAnno (One (x, Idx i (l, _))) m@(Idx _ tg)) t = do
+--   (g1, t', x') <- checkExpr l g0 x t
+--   g2 <- subtype t' (type2typeu tg) g1
+--   return $ (g2, t', SAnno (One (x', Idx i t')) m)
 
 synthExpr
   :: Lang
@@ -621,10 +625,11 @@ check
         , TypeU
         , SAnno (Indexed Type) One (Indexed TypeU)
         )
-check g (SAnno (One (x, Idx i (l, _))) gt) t = do
-  (g', t', x') <- checkExpr l g x t
-  checkAgreement (Idx i t') gt
-  return $ (g', t', SAnno (One (x', Idx i t')) gt)
+check g0 (SAnno (One (x, Idx i (l, _))) m@(Idx _ tg)) t = do
+  (g1, t', x') <- checkExpr l g0 x t
+  g2 <- subtype t' (type2typeu tg) g1
+  return $ (g2, t', SAnno (One (x', Idx i t')) m)
+
 
 checkExpr
   :: Lang
@@ -691,9 +696,12 @@ checkExpr lang g1 e1 b = do
   return (g3, a', e2)
 
 
-checkAgreement :: Indexed TypeU -> Indexed Type -> Either TypeError ()
-checkAgreement = undefined
-
+type2typeu :: Type -> TypeU
+type2typeu (VarT v) = VarU v
+type2typeu (UnkT v) = ForallU v (VarU v)
+type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
+type2typeu (AppT v ts) = AppU v (map type2typeu ts)
+type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]
 
 
 -- lookupSourceTypes :: Int -> Source -> MorlocMonad [EType]

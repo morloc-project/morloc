@@ -580,8 +580,6 @@ data Type
   -- used within dynamic languages may need no type annotation.
   | VarT TVar
   -- ^ (a)
-  | NulT
-  -- ^ used for empty leafs in cat trees
   | FunT [Type] Type
   | AppT TVar [Type]
   | NamT NamType TVar [TVar] [(Text, Type)]
