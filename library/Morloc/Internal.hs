@@ -52,6 +52,7 @@ module Morloc.Internal
   -- ** other useful functions
   , statefulMap
   , statefulMapM
+  , filterApart
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -153,6 +154,13 @@ statefulMapM f s (x:xs) = do
   (s'', xs') <- statefulMapM f s' xs
   return (s'', x':xs')
 
+
+-- pull one element from a list
+filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
+filterApart f (x:xs)
+  | f x = (Just x, xs)  
+  | otherwise = case filterApart f xs of 
+    (r, xs') -> (r, x:xs') 
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

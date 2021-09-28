@@ -164,22 +164,20 @@ subtype t1@(AppU v1@(TV l1 _) vs1) t2@(AppU v2@(TV l2 _) vs2) g
     compareApp _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in AppU"
 
 -- subtype unordered records
-subtype t1@(NamU _ v1 _ rs1) t2@(NamU _ v2 _ rs2) g = undefined -- do
-  -- g' <- subtype (VarU v1) (VarU v2) g
-  -- compareEntry (sort rs1) (sort rs2) g'
-  -- where
-  --   compareEntry :: [(MT.Text, TypeU)] -> [(MT.Text, TypeU)] -> Gamma -> Either TypeError Gamma
-  --   compareEntry [] [] g2 = return g2
-  --   compareEntry ((k1, t1):rs1') ((k2, t2):rs2') g2
-  --     | l1 == l2 = do
-  --         g3 <- subtype (VarU (TV l1 k1)) (VarU (TV l2 k2)) g2
-  --         g4 <- subtype t1 t2 g3
-  --         compareEntry rs1' rs2' g4
-  --     | otherwise = return $ g +> SerialConstraint t1 t2
-  --     where
-  --       l1 = langOf t1
-  --       l2 = langOf t2
-  --   compareEntry _ _ _ = Left $ SubtypeError t1 t2 "Type mismatch in NamU"
+subtype (NamU _ v1 _ []) (NamU _ v2 _ []) g = subtype (VarU v1) (VarU v2) g
+subtype t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) g =
+  Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
+subtype t1@(NamU _ _ _ _ ) t2@(NamU _ _ _ []) g =
+  Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
+subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 rs2') g0
+  | langOf v1 == langOf t2 =
+    case filterApart (\(k2, x) -> k2 == k1) rs2' of
+      (Nothing, _) -> Left $ SubtypeError t1 t2 "NamU - Unequal fields"
+      (Just (_, x2), rs2) -> do
+          g1 <- subtype x1 x2 g0
+          g2 <- subtype (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2') g1
+          return g2
+  | otherwise = return g0 -- incomparable
 
 --  Ea not in FV(a)
 --  g1[Ea] |- A <=: Ea -| g2
