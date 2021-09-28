@@ -135,13 +135,13 @@ subtype a@(ExistU (TV l1 _) _ _) b@(ExistU (TV l2 _) _ _) g
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
 -- ----------------------------------------- <:-->
 --  g1 |- A1 -> A2 <: B1 -> B2 -| g3
-subtype (FunU _ _) (FunU _ _) _ = undefined 
--- subtype (FunU a1 a2) (FunU b1 b2) g1
---   -- function subtypes are *contravariant* with respect to the input, that is,
---   -- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
---  = do
---   g2 <- subtype b1 a1 g1
---   subtype (apply g2 a2) (apply g2 b2) g2
+-- 
+-- function subtypes are *contravariant* with respect to the input, that is,
+-- the subtypes are reversed so we have b1<:a1 instead of a1<:b1.
+subtype (FunU [] a2) (FunU [] b2) g = subtype a2 b2 g
+subtype (FunU (a1:rs1) a2) (FunU (b1:rs2) b2) g1 = do
+  g2 <- subtype b1 a1 g1
+  subtype (apply g2 (FunU rs1 a2)) (apply g2 (FunU rs2 b2)) g2
 
 --  g1 |- A1 <: B1
 -- ----------------------------------------- <:App
