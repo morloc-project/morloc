@@ -253,19 +253,16 @@ instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
-
-instantiate (FunU _ _) (ExistU _ _ _) _ = undefined
--- instantiate ta@(FunU t1 t2) tb@(ExistU v@(TV lang _) [] _) g1 = do
---   let (g2, ea1) = newvar lang g1
---       (g3, ea2) = newvar lang g2
---   g4 <-
---     case access1 v (gammaContext g3) of
---       Just (rs, _, ls) ->
---         return $ g3 { gammaContext = rs ++ [SolvedG v (FunU ea1 ea2), index ea1, index ea2] ++ ls }
---       Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
---   g5 <- instantiate t1 ea1 g4
---   g6 <- instantiate ea2 (apply g5 t2) g5
---   return g6
+instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _) g1 = do
+  let (g2, eas) = statefulMap (\g _ -> newvar lang g) g1 as 
+      (g3, eb) = newvar lang g2
+  g4 <- case access1 v (gammaContext g3) of
+    Just (rs, _, ls) ->
+        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ map index eas ++ ls }
+    Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
+  g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
+  g6 <- instantiate eb (apply g5 b) g5
+  return g6
 
 --
 -- ----------------------------------------- InstLAllR
