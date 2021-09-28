@@ -650,9 +650,9 @@ checkExpr
 --  g1 |- \x.e <= A -> B -| g2
 --
 -- t2 will have form (FunU [] b) if the function is fully applied, but partial application is allowed
-checkExpr lang g1 (LamS [] e1) t1@(FunU _ _) = do
-  (g2, t2, e2) <- check g1 e1 b1
-  return (g2, t2, LamS [] e2)
+checkExpr lang g1 (LamS [] e1) (FunU as1 b1) = do
+  (g2, b2, e2) <- check g1 e1 b1
+  return (g2, FunU as1 b2, LamS [] e2)
 checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- defined x:A
   let vardef = AnnG v a1
@@ -679,11 +679,11 @@ checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
 --  g1,x |- e <= A -| g2,x,g3
 -- ----------------------------------------- Forall.I
 --  g1 |- e <= Forall x.A -| g2
-checkExpr lang g1 e1 t2@(ForallU x a) = undefined
-  -- (g2, _, e2) <- check (g1 +> VarG x) e1 a
-  -- g3 <- cut (VarG x) g2
-  -- let t3 = apply g3 t2
-  -- return (g3, t3, ann e2 t3)
+checkExpr lang g1 e1 t2@(ForallU x a) = do
+  (g2, _, e2) <- checkExpr lang (g1 +> VarG x) e1 a
+  g3 <- cut (VarG x) g2
+  let t3 = apply g3 t2
+  return (g3, t3, e2)
 
 --  g1 |- e => A -| g2
 --  g2 |- [g2]A <: [g2]B -| g3
