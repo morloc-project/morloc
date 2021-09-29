@@ -16,9 +16,8 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
-0.3x.0 [2021.xx.xx]
+0.3x.0 [2022.03.xx]
 -------------------
-
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
  - [ ] Add `uninstall` function to uninstall a module
@@ -28,7 +27,17 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
 
-0.35.0 [2021.08.xx]
+0.36.0 [2021.12.xx]
+-------------------
+ * Tidy source for collaborations in 2022 (no new features)
+
+ - [ ] Replace recursive data structures with recursion schemes
+ - [ ] Describe the core data structures and algorithms
+ - [ ] Haddock documentation
+ - [ ] Linting, formatting, and benchmarking
+ - [ ] Clean up error handling (remove unused error types)
+
+0.35.0 [2021.09.xx]
 -------------------
 
  - [ ] Add `where` scoping
