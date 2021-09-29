@@ -10,6 +10,7 @@ module Morloc.Frontend.Typecheck (typecheck) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
+import Morloc.Typecheck.Internal
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
@@ -141,8 +142,37 @@ synthE l i g (AccS e k) = do
   return (g1, valType, AccS e1 k)
 synthE l i g (AppS e es) = undefined
 synthE l i g (LamS vs e) = undefined
-synthE l i g (LstS es) = undefined
-synthE l i g (TupS es) = undefined
+synthE l i g (LstS []) =
+  let (g1, itemType) = newvar Nothing g
+      tupleType = head $ MLD.defaultList Nothing itemType
+  in return (g, tupleType, LstS [])
+synthE l i g (LstS (e:es)) = do
+  (g1, itemType, itemExpr) <- synthG l g e 
+  (g2, listType, listExpr) <- checkE l g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  case listExpr of
+    (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
+    _ -> impossible
+synthE l i g (TupS []) =
+  let t = head $ MLD.defaultTuple Nothing []
+  in return (g, t, LstS [])
+synthE l i g (TupS (e:es)) = do
+  -- synthesize head
+  (g1, itemType, itemExpr) <- synthG l g e
+
+  -- synthesize tail
+  (g2, tupleType, tupleExpr) <- synthE l i g (TupS es)
+
+  -- merge the head and tail
+  t3 <- case tupleType of
+    (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (itemType:ts)
+    _ -> impossible -- the general tuple will always be (AppU _ _)
+
+  xs' <- case tupleExpr of
+    (TupS xs') -> return xs'
+    _ -> impossible -- synth does not change data constructors
+
+  return (g2, t3, TupS (itemExpr:xs'))
+
 synthE l i g (NamS rs) = undefined
 synthE l i g (CallS src) = undefined
 synthE l i g (VarS v) = Left $ (Idx i (UnboundVariable v))
