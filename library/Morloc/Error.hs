@@ -64,6 +64,7 @@ errmsg TupleSingleton = "TupleSingleton"
 errmsg EmptyRecord = "EmptyRecord"
 -- module errors
 errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.unwords (map unMVar mv) 
+errmsg (NestedModule name) = "Nested modules are currently illegal: " <> unMVar name
 errmsg (BadImport mv (EV v)) = "BadImport: " <> unMVar mv <> "::" <> v
 errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
 errmsg CyclicDependency = "CyclicDependency"

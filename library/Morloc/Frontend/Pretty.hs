@@ -11,7 +11,6 @@ module Morloc.Frontend.Pretty
   ( module Morloc.Pretty
   , prettyExpr
   , prettyExprI
-  , prettyParserError
   ) where
 
 import Morloc.Frontend.Namespace
@@ -22,9 +21,6 @@ import Data.Text.Prettyprint.Doc.Render.Terminal (AnsiStyle)
 import qualified Text.Megaparsec as Mega
 import qualified Morloc.Data.Text as MT 
 import Data.Void (Void)
-
-prettyParserError :: Mega.ParseErrorBundle MT.Text Void -> Doc AnsiStyle
-prettyParserError = undefined
 
 prettyExprI :: ExprI -> Doc AnsiStyle
 prettyExprI (ExprI _ e) = prettyExpr e

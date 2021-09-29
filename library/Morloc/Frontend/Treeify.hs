@@ -136,7 +136,7 @@ indexTerm x = do
 linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
 linkVariablesToTermTypes mod m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
-  link m (ExprI _ (ModE v es)) = undefined -- TODO: how should nested modules behave?
+  link m (ExprI _ (ModE v _)) = MM.throwError (NestedModule v)
   link m (ExprI i (ExpE v)) = setType m i v
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
     -- shadow all bound terms
@@ -306,13 +306,13 @@ collectSExpr (ExprI i e0) = f e0 where
   f (StrE x) = noTypes (StrS x)
 
   -- none of the following cases should every occur
-  f (AnnE _ _) = undefined
-  f (TypE _ _ _) = undefined
-  f (ImpE _) = undefined
-  f (ExpE _) = undefined
-  f (SrcE _) = undefined
-  f (SigE _ _ _) = undefined
-  f (AssE _ _ _) = undefined
+  f (AnnE _ _) = impossible
+  f (TypE _ _ _) = impossible
+  f (ImpE _) = impossible
+  f (ExpE _) = impossible
+  f (SrcE _) = impossible
+  f (SigE _ _ _) = impossible
+  f (AssE _ _ _) = impossible
 
   noTypes x = return (x, i)
 

@@ -407,6 +407,7 @@ data MorlocError
   | EmptyRecord
   -- module errors
   | MultipleModuleDeclarations [MVar]
+  | NestedModule MVar
   | BadImport MVar EVar
   | CannotFindModule MVar
   | CyclicDependency
