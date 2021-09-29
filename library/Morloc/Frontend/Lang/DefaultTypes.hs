@@ -25,6 +25,8 @@ module Morloc.Frontend.Lang.DefaultTypes
   , defaultRecord
   , defaultString
   , defaultTuple
+  -- * very partial convenience functions
+  , defaultGeneralType
   -- * dictionaries of base collection names
   , listG
   , listC
@@ -106,6 +108,13 @@ defaultRecord :: Maybe Lang -> [(MT.Text, TypeU)] -> [TypeU]
 defaultRecord Nothing entries = [NamU NamRecord (TV Nothing recordG) [] entries]
 defaultRecord lang@(Just l) entries = [NamU NamRecord (TV lang v) [] entries | v <- recordC l]
 
+-- this is an internal convenience wrapper, it is partial, so don't misuse it
+defaultGeneralType :: SExpr g f c -> TypeU
+defaultGeneralType UniS = head $ defaultNull Nothing
+defaultGeneralType (LogS _) = head $ defaultBool Nothing
+defaultGeneralType (StrS _) = head $ defaultString Nothing
+defaultGeneralType (NumS _) = head $ defaultNumber Nothing
+defaultGeneralType _ = error "Fill this out if you feel like it, not my problem"
 
 -- | This is the value returned by a functions that doesn't return, for example,
 -- an print statement. It needs to be defined even for languages that don't

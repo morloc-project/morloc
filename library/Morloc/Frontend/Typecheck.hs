@@ -127,7 +127,10 @@ synthE
        , TypeU
        , SExpr (Indexed TypeU) Many Int
        )
-synthE l i g UniS = undefined
+synthE l i g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
+synthE l i g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
+synthE l i g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
+synthE l i g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 synthE l i g (VarS v) = undefined
 synthE l i g (AccS e k) = undefined
 synthE l i g (AppS e es) = undefined
@@ -135,9 +138,6 @@ synthE l i g (LamS vs e) = undefined
 synthE l i g (LstS es) = undefined
 synthE l i g (TupS es) = undefined
 synthE l i g (NamS rs) = undefined
-synthE l i g (NumS x) = undefined
-synthE l i g (LogS x) = undefined
-synthE l i g (StrS x) = undefined
 synthE l i g (CallS src) = undefined
 
 
