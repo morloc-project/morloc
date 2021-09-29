@@ -131,14 +131,21 @@ synthE l i g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
 synthE l i g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
 synthE l i g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
 synthE l i g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
-synthE l i g (VarS v) = undefined
-synthE l i g (AccS e k) = undefined
+synthE l i g (AccS e k) = do
+  (g1, t1, e1) <- synthG l g e
+  valType <- case t1 of
+    (NamU _ _ _ rs) -> case lookup k rs of
+      Nothing -> Left $ Idx i (KeyError k t1)
+      (Just t) -> return t
+    _ -> Left $ Idx i (KeyError k t1)
+  return (g1, valType, AccS e1 k)
 synthE l i g (AppS e es) = undefined
 synthE l i g (LamS vs e) = undefined
 synthE l i g (LstS es) = undefined
 synthE l i g (TupS es) = undefined
 synthE l i g (NamS rs) = undefined
 synthE l i g (CallS src) = undefined
+synthE l i g (VarS v) = Left $ (Idx i (UnboundVariable v))
 
 
 checkE
