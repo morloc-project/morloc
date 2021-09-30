@@ -38,10 +38,10 @@ parse f (Code code) = case Parser.readProgram f code mempty of
     parseImports
       :: DAG MVar Import ExprI
       -> MorlocMonad (DAG MVar Import ExprI)
-    parseImports d
-      | length unimported == 0 = return d
-      | otherwise = do
-          importPath <- Mod.findModule (head unimported)
+    parseImports d = case unimported of
+      [] -> return d
+      (child:_) -> do
+          importPath <- Mod.findModule child
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
           case Parser.readProgram path' code' d of
@@ -49,7 +49,7 @@ parse f (Code code) = case Parser.readProgram f code mempty of
             (Right x) -> parseImports x
       where
         g = MDD.edgelist d
-        parents = Map.keysSet d
+        parents = Set.fromList (map fst g)
         children = Set.fromList (map snd g)
         unimported = Set.toList $ Set.difference children parents
 

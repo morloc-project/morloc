@@ -489,7 +489,7 @@ data Config =
 
 -- ================ T Y P E C H E C K I N G  =================================
 
-newtype MVar = MVar { unMVar :: Text } deriving (Show, Eq, Ord)
+newtype MVar = MV { unMVar :: Text } deriving (Show, Eq, Ord)
 
 data EVar = EV Text deriving (Show, Eq, Ord)
 

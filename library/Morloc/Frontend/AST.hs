@@ -26,9 +26,8 @@ import qualified Morloc.Data.Text as MT
 
 
 -- | In the DAG, the two MVar are the two keys, Import is the edge data, Expr is the node data
--- Imports may only be at the top level (FIXME: allow local imports in declaration where statements)
 findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
-findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i)| (ExprI _ (ImpE i)) <- es], e)
+findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
 findExportSet :: ExprI -> Set.Set EVar

@@ -66,7 +66,7 @@ treeify d
        MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
        -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-       mapM (collect e) (AST.findExports e)
+       mapM (collect e) (mainExpr k e <> AST.findExports e)
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -75,6 +75,19 @@ treeify d
    -- constraints could be valuable.
    _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
 
+mainExpr :: MVar -> ExprI -> [(Int, EVar)]
+mainExpr (MV "Main") (ExprI _ (ModE _ es)) = case lastMay es of
+  Nothing -> []
+  (Just (ExprI i e)) -> case e of
+    (ModE _ _) -> []
+    (TypE _ _ _) -> []
+    (ImpE _) -> []
+    (SrcE _) -> []
+    (SigE _ _ _) -> []
+    (AssE _ _ _) -> []
+    (ExpE _) -> []
+    x -> [(i, EV "__MAIN__")]
+mainExpr _ _ = []
 
 {-
                 ,--n-> Source <-m--n-> Concrete Signature
@@ -249,6 +262,11 @@ collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
+-- collect the final expression of a main module
+collect (ExprI _ (ModE _ es)) (i, EV "__MAIN__") = case lastMay es of
+  Nothing -> impossible
+  (Just e) -> collectSAnno e 
+-- collect standard exported terms
 collect (ExprI _ (ModE _ _)) (i, v) = do
   t <- MM.metaTermTypes i
   case t of

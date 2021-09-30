@@ -40,12 +40,13 @@ readProgram f sourceCode p =
          (maybe "<expr>" id f)
          sourceCode of
     Left err -> Left err
+    -- all will be ModE expressions, since pTopLevel can return only these
     Right (es, _) -> Right
       $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d)
               p
               (map AST.findEdges es) -- [(MVar, [(MVar, Import)], ExprI)]
   where
-    pstate = emptyState { stateModulePath = f }
+    pstate = emptyState { stateModulePath = f, stateAccepting = True }
 
 -- | Parse a single type. This function used only in debugging in command line
 -- calls such as: `morloc typecheck -te "A -> B"`.
@@ -63,7 +64,7 @@ pProgram = do
   f <- CMS.gets stateModulePath
   L.space space1 comments empty
   setMinPos
-  many pToplevel
+  many1 pToplevel
 
 pToplevel :: Parser ExprI
 pToplevel = try pModule <|> pMain
@@ -75,11 +76,13 @@ pModule = do
   _ <- reserved "module"
   ess <- align pTopExpr
   moduleName <- freename
-  exprI $ ModE (MVar moduleName) (concat ess)
+  exprI $ ModE (MV moduleName) (concat ess)
 
 -- | match an implicit "main" module
 pMain :: Parser ExprI
-pMain = (ModE (MVar "Main") <$> fmap concat (many pTopExpr)) >>= exprI
+pMain = do
+  ess <- many1 pTopExpr
+  exprI $ ModE (MV "Main") (concat ess)
 
 -- | Expressions including ones that are allowed only at the top-level of a scope
 pTopExpr :: Parser [ExprI]
@@ -90,7 +93,7 @@ pTopExpr =
   <|> try (plural pAssE)
   <|> try (plural pSigE)
   <|> try pSrcE
-  <|> try (plural pExpr)
+  <|> (plural pExpr)
   where
     plural :: Functor m => m a -> m [a]
     plural = fmap return 
@@ -111,6 +114,7 @@ pExpr =
   <|> parens pExpr
   <|> pLam
   <|> pVar
+  <?> "Bad expression"
 
 
 pImport :: Parser ExprI
@@ -122,7 +126,7 @@ pImport = do
     parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
   exprI . ImpE $
     Import
-      { importModuleName = MVar n
+      { importModuleName = MV n
       , importInclude = imports
       , importExclude = []
       , importNamespace = Nothing

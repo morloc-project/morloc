@@ -57,6 +57,7 @@ assertGeneralType :: String -> T.Text -> Type -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
+    (Right []) -> error "Empty list in assertGeneralType"
     -- the order of the list is not important, so sort before comparing
     (Right xs) -> assertEqual "" t (gtypeof $ last xs)
     (Left e) -> error $

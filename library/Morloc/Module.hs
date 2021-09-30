@@ -90,7 +90,7 @@ loadModuleMetadata main = do
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> MVar -> [Path]
-getModulePaths lib (MVar base) = map MS.joinPath
+getModulePaths lib (MV base) = map MS.joinPath
   [ [MT.unpack base <> ".loc"]
   , [MT.unpack base, "main.loc"]
   , [lib, MT.unpack base <> ".loc"]
