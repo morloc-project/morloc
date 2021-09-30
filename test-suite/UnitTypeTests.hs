@@ -312,35 +312,33 @@ packerTests =
 jsontype2jsonTests =
   testGroup
     "Test conversion of JsonType's to JSON text"
-    [ testEqual "json test" 1 1 ]
-
-  --   [ jsontest "value"
-  --       (VarJ "int")
-  --       [r|"int"|]
-  --   , jsontest "array(value)"
-  --       (ArrJ "list" [VarJ "int"])
-  --       [r|{"list":["int"]}|]
-  --   , jsontest "object(value)"
-  --       (NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])
-  --       [r|{"Person":{"name":"Str","age":"Int"}}|]
-  --   , jsontest "array(array)"
-  --       (ArrJ "list" [ArrJ "matrix" [VarJ "int"]])
-  --       [r|{"list":[{"matrix":["int"]}]}|]
-  --   , jsontest "array(object)"
-  --       (ArrJ "list" [(NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])])
-  --       [r|{"list":[{"Person":{"name":"Str","age":"Int"}}]}|]
-  --   , jsontest "object(array)"
-  --       (NamJ "Person" [("name", VarJ "Str"), ("friends", ArrJ "list" [VarJ "Str"])])
-  --       [r|{"Person":{"name":"Str","friends":{"list":["Str"]}}}|]
-  --   , jsontest "object(object)"
-  --       (NamJ "Person"
-  --         [ ("name", VarJ "Str")
-  --         , ("pet", NamJ "Animal" [("name", VarJ "Str"), ("species", VarJ "Str")])
-  --         ])
-  --       [r|{"Person":{"name":"Str","pet":{"Animal":{"name":"Str","species":"Str"}}}}|]
-  --   ]
-  -- where
-  --   jsontest msg t j = testEqual msg (Doc.render $ jsontype2json t) j
+    [ jsontest "value"
+        (VarJ "int")
+        [r|"int"|]
+    , jsontest "array(value)"
+        (ArrJ "list" [VarJ "int"])
+        [r|{"list":["int"]}|]
+    , jsontest "object(value)"
+        (NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])
+        [r|{"Person":{"name":"Str","age":"Int"}}|]
+    , jsontest "array(array)"
+        (ArrJ "list" [ArrJ "matrix" [VarJ "int"]])
+        [r|{"list":[{"matrix":["int"]}]}|]
+    , jsontest "array(object)"
+        (ArrJ "list" [(NamJ "Person" [("name", VarJ "Str"), ("age", VarJ "Int")])])
+        [r|{"list":[{"Person":{"name":"Str","age":"Int"}}]}|]
+    , jsontest "object(array)"
+        (NamJ "Person" [("name", VarJ "Str"), ("friends", ArrJ "list" [VarJ "Str"])])
+        [r|{"Person":{"name":"Str","friends":{"list":["Str"]}}}|]
+    , jsontest "object(object)"
+        (NamJ "Person"
+          [ ("name", VarJ "Str")
+          , ("pet", NamJ "Animal" [("name", VarJ "Str"), ("species", VarJ "Str")])
+          ])
+        [r|{"Person":{"name":"Str","pet":{"Animal":{"name":"Str","species":"Str"}}}}|]
+    ]
+  where
+    jsontest msg t j = testEqual msg (Doc.render $ jsontype2json t) j
 
 typeAliasTests =
   testGroup
