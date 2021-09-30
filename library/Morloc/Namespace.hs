@@ -21,6 +21,7 @@ module Morloc.Namespace
   , Many(..)
   -- ** Indexed
   , Indexed(..)
+  , unindex
   , GIndex
   -- ** Newtypes
   , CType(..)
@@ -544,6 +545,9 @@ data SExpr g f c
   | CallS Source
 
 data Indexed a = Idx Int a
+
+unindex :: Indexed a -> a
+unindex (Idx _ x) = x
 
 -- TODO: This should probably be a newtype, I want to avoid ambiguous Int's in signatures
 type GIndex = Int

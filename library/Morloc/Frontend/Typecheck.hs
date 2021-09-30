@@ -140,7 +140,56 @@ synthE l i g (AccS e k) = do
       (Just t) -> return t
     _ -> Left $ Idx i (KeyError k t1)
   return (g1, valType, AccS e1 k)
-synthE l i g (AppS e es) = undefined
+synthE l i g (AppS f []) = do
+  (g1, t1, f1) <- synthG l g f
+  return (g1, t1, AppS f1 [])
+synthE l i g0 (AppS f xs) = do
+
+  -- get the potentially qualified function type and expression
+  (g1, qfunType, qfunExpr) <- synthG l g0 f
+
+  -- unqualify the expression
+  (g2, uFunType, uFunExpr) <- application g1 qfunType qfunExpr
+
+  -- extract output type from the type of f
+  (ts, outputType) <- case uFunType of
+    (FunU ts t) -> return (ts, t)
+    _ -> impossible
+
+  -- create a tuple from the input arguments
+  let tupleType = head $ MLD.defaultTuple Nothing ts
+
+  -- check the tuple of argument expressions against a tuple of argument types,
+  -- collect the types of missing arguments (partial application)
+  (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
+    -- there are more inputs than arguments: partial application
+    GT -> case splitAt (length xs) ts of
+      (args, remainder) -> checkE l g2 (TupS xs) tupleType |>> (,) remainder
+    -- there are the same number of inputs and arguments: full application
+    EQ -> checkE l g2 (TupS xs) tupleType |>> (,) []
+    -- there are more arguments than inputs: TYPE ERROR!!!
+    LT -> Left (Idx i TooManyArguments)
+
+  -- extract the types of the input arguments
+  inputTypes <- case argTupleType of
+    (AppU _ ts') -> return ts'
+    _ -> impossible
+
+  -- extract the input expressions
+  inputExprs <- case argTupleExpr of
+    (TupS xs') -> return xs'
+    _ -> impossible
+
+  -- synthesize the final type
+  finalType <- case leftoverTypes of
+    -- full application, just return the output type
+    [] -> return outputType
+    -- partial application, create a new function with unapplied types
+    ts -> return (FunU ts outputType)
+
+  -- put the AppS back together with the synthesized function and input expressions
+  return (g3, finalType, AppS uFunExpr inputExprs)
+
 synthE l i g (LamS vs e) = undefined
 synthE l i g (LstS []) =
   let (g1, itemType) = newvar Nothing g
@@ -191,15 +240,35 @@ checkE
        )
 checkE = undefined
 
+
 application
-  :: (Int -> Maybe TypeU)
-  -> Gamma
-  -> SAnno Int Many Int
+  :: Gamma
   -> TypeU
+  -> SAnno (Indexed TypeU) Many Int
   -> Either
        (Indexed TypeError)
        ( Gamma
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-application = undefined
+application g0 t0 (SAnno (Many ((e0, i):es0)) m@(Idx j _)) = do
+  (g1, t1, e1) <- applicationExpr j g0 t0 e0
+  (g2, t2, e2) <- application g1 t1 (SAnno (Many es0) m)
+  case e2 of
+    (SAnno (Many es1) _) -> return (g2, t2, SAnno (Many ((e1, i):es1)) m) 
+    _ -> impossible
+
+applicationExpr
+  :: Int
+  -> Gamma
+  -> TypeU
+  -> SExpr (Indexed TypeU) Many Int
+  -> Either
+       (Indexed TypeError)
+       ( Gamma
+       , TypeU
+       , SExpr (Indexed TypeU) Many Int
+       )
+applicationExpr i g0 (ForallU v t) e = applicationExpr i (g0 +> ExistG v [] []) (substitute v t) e
+applicationExpr _ g0 t@(FunU _ _) e = return (g0, t, e)
+applicationExpr i _ _ _ = Left (Idx i ApplicationOfNonFunction)
