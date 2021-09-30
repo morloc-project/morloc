@@ -357,6 +357,7 @@ data TypeError
   | UnboundVariable EVar
   | KeyError Text TypeU
   | MissingConcreteSignature Source
+  | MissingGeneralSignature Source
   | ApplicationOfNonFunction
   | TooManyArguments
   deriving (Ord, Eq, Show)

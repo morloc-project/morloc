@@ -128,10 +128,12 @@ synthE
        , TypeU
        , SExpr (Indexed TypeU) Many Int
        )
+
 synthE l i g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
 synthE l i g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
 synthE l i g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
 synthE l i g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
+
 synthE l i g (AccS e k) = do
   (g1, t1, e1) <- synthG l g e
   valType <- case t1 of
@@ -215,8 +217,6 @@ synthE l i g0 (LamS (v@(EV n):vs) x) = do
           idx = AnnG v t
       in (g1 +> idx, t)
 
-
-
 synthE l i g (LstS []) =
   let (g1, itemType) = newvar Nothing g
       tupleType = head $ MLD.defaultList Nothing itemType
@@ -227,6 +227,7 @@ synthE l i g (LstS (e:es)) = do
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> impossible
+
 synthE l i g (TupS []) =
   let t = head $ MLD.defaultTuple Nothing []
   in return (g, t, LstS [])
@@ -248,8 +249,34 @@ synthE l i g (TupS (e:es)) = do
 
   return (g2, t3, TupS (itemExpr:xs'))
 
-synthE l i g (NamS rs) = undefined
-synthE l i g (CallS src) = undefined
+synthE _ _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
+synthE l i g0 (NamS ((k,x):rs)) = do
+  -- type the head
+  (g1, headType, headExpr) <- synthG l g0 x
+
+  -- type the tail
+  (g2, tailType, tailExpr) <- synthE l i g1 (NamS rs)
+
+  -- merge the head with tail
+  t <- case tailType of
+    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, headType):rs1)
+    _ -> impossible -- the synthE on NamS will always return NamU type
+
+  tailExprs <- case tailExpr of
+    (NamS xs') -> return xs'
+    _ -> impossible -- synth does not change data constructors
+
+  return (g2, t, NamS ((k, headExpr):tailExprs))
+
+-- Sources are axiomatic. They are they type they are said to be.
+synthE l i g (CallS src) = do
+  t <- case l i of 
+    (Just t) -> return t
+    Nothing -> Left (Idx i (MissingGeneralSignature src))
+  return (g, t, CallS src)
+
+-- Any morloc variables should have been expanded by treeify. Any bound
+-- variables should be checked against. I think (this needs formalization).
 synthE l i g (VarS v) = Left $ (Idx i (UnboundVariable v))
 
 
