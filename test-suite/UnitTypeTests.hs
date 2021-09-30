@@ -27,8 +27,7 @@ import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
-main :: Ord k => (n -> a) -> DAG k e n -> a
-main = undefined
+-- main :: Ord k => (n -> a) -> DAG k e n -> a
 -- main f d = case MDD.roots d of
 --   [] -> error "Missing or circular module"
 --   [k] -> case Map.lookup k d of
@@ -36,29 +35,32 @@ main = undefined
 --     Nothing -> error "Bad DAG"
 --   _ -> error "Cannot handle multiple roots"
 
--- get the toplevel type of a fully annotated expression
-typeof :: [Expr] -> [TypeU]
-typeof = undefined
--- typeof es = f' . head . reverse $ es
---   where
---     f' (Signature _ e) = [etype e]
---     f' (AnnE _ ts) = ts
---     f' t = error ("No annotation found for: " <> show t)
+-- get the toplevel general type of a typechecked expression
+gtypeof :: (SAnno (Indexed Type) f c) -> Type
+gtypeof (SAnno _ (Idx _ t)) = t
 
-run :: T.Text -> IO (Either MorlocError [SAnno (Indexed Type) Many Int])
-run = undefined
--- run code = do
---   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
---   return x
---   where
---     emptyConfig =  Config
---         { configHome = ""
---         , configLibrary = ""
---         , configTmpDir = ""
---         , configLangPython3 = ""
---         , configLangR = ""
---         , configLangPerl = ""
---         }
+runFront :: T.Text -> IO (Either MorlocError [SAnno (Indexed Type) Many Int])
+runFront code = do
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
+  return x
+  where
+    emptyConfig =  Config
+        { configHome = ""
+        , configLibrary = ""
+        , configTmpDir = ""
+        , configLangPython3 = ""
+        , configLangR = ""
+        , configLangPerl = ""
+        }
+
+assertGeneralType :: String -> T.Text -> Type -> TestTree
+assertGeneralType msg code t = testCase msg $ do
+  result <- runFront code
+  case result of
+    -- the order of the list is not important, so sort before comparing
+    (Right xs) -> assertEqual "" t (gtypeof $ last xs)
+    (Left e) -> error $
+      "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 assertTerminalType :: String -> T.Text -> [TypeU] -> TestTree
 assertTerminalType = undefined
@@ -176,7 +178,7 @@ testFalse msg x =
 
 bool = VarU (TV Nothing "Bool")
 
-num = VarU (TV Nothing "Num")
+num = VarT (TV Nothing "Num")
 
 str = VarU (TV Nothing "Str")
 
@@ -787,9 +789,9 @@ typeOrderTests =
 unitTypeTests =
   testGroup
     "Typechecker unit tests"
-    [ testEqual "typechecker tests" 1 1 ]
-    -- -- comments
-    -- [ assertTerminalType "block comments (1)" "{- -} 42" [num]
+    -- comments
+    [ assertGeneralType "block comments (1)" "{- -} 42" num
+    ]
     -- , assertTerminalType "block comments (2)" " {--} 42{-   foo -} " [num]
     -- , assertTerminalType "line comments (3)" "-- foo\n 42" [num]
     -- -- primitives
