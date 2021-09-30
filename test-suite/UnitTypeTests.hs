@@ -63,52 +63,6 @@ assertGeneralType msg code t = testCase msg $ do
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
-assertTerminalType :: String -> T.Text -> [TypeU] -> TestTree
-assertTerminalType = undefined
--- assertTerminalType msg code t = testCase msg $ do
---   result <- run code
---   case result of
---     -- the order of the list is not important, so sort before comparing
---     (Right es') -> assertEqual "" (sort t) (sort (typeof (main typedNodeBody es')))
---     (Left e) -> error $
---       "The following error was raised: " <> show e <> "\nin:\n" <> show code
-
--- remove all type annotations and type signatures
-unannotate :: [Expr] -> [Expr]
-unannotate = undefined
--- unannotate = mapMaybe unannotate' where
---   unannotate' :: Expr -> Maybe Expr
---   unannotate' (AnnE e _) = unannotate' e
---   unannotate' (ListE xs) = Just $ ListE (unannotate xs)
---   unannotate' (TupleE xs) = Just $ TupleE (unannotate xs)
---   unannotate' (LamE v e) = LamE <$> pure v <*> unannotate' e
---   unannotate' (AppE e1 e2) = AppE <$> unannotate' e1 <*> unannotate' e2
---   unannotate' (Declaration v e) = Declaration <$> pure v <*> unannotate' e
---   unannotate' (Signature _ _) = Nothing
---   unannotate' e = Just e
-
--- assert the full expression with all annotations removed
-assertTerminalExpr :: String -> T.Text -> Expr -> TestTree
-assertTerminalExpr = undefined
--- assertTerminalExpr = assertTerminalExpr' unannotate
-
--- assert the full expression with complete sub-expression annotations
-assertTerminalExprWithAnnot :: String -> T.Text -> Expr -> TestTree
-assertTerminalExprWithAnnot = undefined
--- assertTerminalExprWithAnnot = assertTerminalExpr' id
-
--- assert the last expression in the main module, process the expression with f
-assertTerminalExpr' :: ([Expr] -> [Expr]) -> String -> T.Text -> Expr -> TestTree
-assertTerminalExpr' = undefined
--- assertTerminalExpr' f msg code expr = testCase msg $ do
---   result <- run code
---   case result of
---     -- the order of the list is not important, so sort before comparing
---     (Right es') ->
---       assertEqual "" expr (head . reverse . sort . f . main typedNodeBody $ es')
---     (Left e) -> error $
---       "The following error was raised: " <> show e <> "\nin:\n" <> show code
-
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual = undefined
 -- exprEqual msg code1 code2 =
@@ -811,68 +765,67 @@ unitTypeTests =
        num
     , assertGeneralType "primitive boolean" "True" bool
     , assertGeneralType "primitive string" "\"this is a string literal\"" str
-    -- , assertGeneralType "primitive integer annotation" "42 :: Num" num
-    -- , assertGeneralType "primitive boolean annotation" "True :: Bool" bool
-    -- , assertGeneralType "primitive double annotation" "4.2 :: Num" num
-    -- , assertGeneralType
-    --     "primitive string annotation"
-    --     "\"this is a string literal\" :: Str"
-    --     str
-    -- , assertGeneralType "primitive declaration" "x = True\n4.2" num
-    ]
-    -- -- declarations
-    -- , assertTerminalType
-    --     "identity function declaration and application"
-    --     "f x = x\nf 42"
-    --    [num]
-    -- , assertTerminalType
-    --     "snd function declaration and application"
-    --     "snd x y = y\nsnd True 42"
-    --     [num]
-    --
-    -- , assertTerminalType
-    --     "explicit annotation within an application"
-    --     "f :: Num -> Num\nf (42 :: Num)"
-    --     [num]
-    --
-    -- -- lambdas
+    , assertGeneralType "primitive integer annotation" "42 :: Num" num
+    , assertGeneralType "primitive boolean annotation" "True :: Bool" bool
+    , assertGeneralType "primitive double annotation" "4.2 :: Num" num
+    , assertGeneralType
+        "primitive string annotation"
+        "\"this is a string literal\" :: Str"
+        str
+    , assertGeneralType "primitive declaration" "x = True\n4.2" num
+    -- declarations
+    , assertGeneralType
+        "identity function declaration and application"
+        "f x = x\nf 42"
+        num
+    , assertGeneralType
+        "snd function declaration and application"
+        "snd x y = y\nsnd True 42"
+        num
+
+    , assertGeneralType
+        "explicit annotation within an application"
+        "f :: Num -> Num\nf (42 :: Num)"
+        num
+
+    -- lambdas
     -- , assertTerminalExpr
     --     "functions return lambda expressions"
     --     "\\x -> 42"
-    --     (LamE (EV [] "x") (NumE 42.0))
-    -- , assertTerminalType
-    --     "functions can be passed"
-    --     "g f = f 42\ng"
-    --     [forall ["a"] (fun [(fun [num, var "a"]), var "a"])]
-    -- , assertTerminalType
-    --     "function with parameterized types"
-    --     "f :: A B -> C\nf"
-    --     [fun [arr "A" [var "B"], var "C"]]
-    -- , assertTerminalType "fully applied lambda (1)" "(\\x y -> x) 1 True" [num]
-    -- , assertTerminalType "fully applied lambda (2)" "(\\x -> True) 42" [bool]
-    -- , assertTerminalType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" [bool]
-    -- , assertTerminalType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" [num]
-    -- , assertTerminalType
-    --     "unapplied lambda, polymorphic (1)"
-    --     "(\\x -> True)"
-    --     [forall ["a"] (fun [var "a", bool])]
-    -- , assertTerminalType
-    --     "unapplied lambda, polymorphic (2)"
-    --     "(\\x y -> x) :: a -> b -> a"
-    --     [forall ["a", "b"] (fun [var "a", var "b", var "a"])]
-    -- , assertTerminalType
-    --     "annotated, fully applied lambda"
-    --     "((\\x -> x) :: a -> a) True"
-    --     [bool]
-    -- , assertTerminalType
-    --     "annotated, partially applied lambda"
-    --     "((\\x y -> x) :: a -> b -> a) True"
-    --     [forall ["a"] (fun [var "a", bool])]
-    -- , assertTerminalType
-    --     "recursive functions are A-OK"
-    --     "\\f -> f 5"
-    --     [forall ["a"] (fun [fun [num, var "a"], var "a"])]
-    --
+    --     (LamE [EV "x"] (ExprI 1 (NumE 42.0)))
+    , assertGeneralType
+        "functions can be passed"
+        "g f = f 42\ng"
+        (forall ["a"] (fun [(fun [num, var "a"]), var "a"]))
+    , assertGeneralType
+        "function with parameterized types"
+        "f :: A B -> C\nf"
+        (fun [arr "A" [var "B"], var "C"])
+    , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" num
+    , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
+    , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
+    , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" num
+    , assertGeneralType
+        "unapplied lambda, polymorphic (1)"
+        "(\\x -> True)"
+        (forall ["a"] (fun [var "a", bool]))
+    , assertGeneralType
+        "unapplied lambda, polymorphic (2)"
+        "(\\x y -> x) :: a -> b -> a"
+        (forall ["a", "b"] (fun [var "a", var "b", var "a"]))
+    , assertGeneralType
+        "annotated, fully applied lambda"
+        "((\\x -> x) :: a -> a) True"
+        bool
+    , assertGeneralType
+        "annotated, partially applied lambda"
+        "((\\x y -> x) :: a -> b -> a) True"
+        (forall ["a"] (fun [var "a", bool]))
+    , assertGeneralType
+        "recursive functions are A-OK"
+        "\\f -> f 5"
+        (forall ["a"] (fun [fun [num, var "a"], var "a"]))
+
     -- -- applications
     -- , assertTerminalType
     --     "primitive variable in application"
@@ -1552,4 +1505,4 @@ unitTypeTests =
     --        snd [1,2,3]
     --     |]
     --     [num, varc RLang "numeric"]
-    -- ]
+    ]
