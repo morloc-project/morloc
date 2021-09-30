@@ -190,7 +190,33 @@ synthE l i g0 (AppS f xs) = do
   -- put the AppS back together with the synthesized function and input expressions
   return (g3, finalType, AppS uFunExpr inputExprs)
 
-synthE l i g (LamS vs e) = undefined
+synthE l i g0 (LamS (v@(EV n):vs) x) = do
+  let mark = MarkG (TV Nothing n)
+      g1 = g0 +> mark
+      (g2, headType) = bindTerm g1 v
+
+  (g3, tailType, tailExpr) <- synthE l i g2 (LamS vs x)
+
+  fullType <- case tailType of
+    (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
+    _ -> impossible -- LamS type is always a function (see base case)
+
+  fullExpr <- case tailExpr of
+    (LamS vs x) -> return $ LamS (v:vs) x
+    _ -> impossible -- synthExpr does not change data constructors
+
+  g4 <- cut' i mark g3
+
+  return (g4, fullType, fullExpr)
+  where
+    bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
+    bindTerm g0 v =
+      let (g1, t) = newvar Nothing g0
+          idx = AnnG v t
+      in (g1 +> idx, t)
+
+
+
 synthE l i g (LstS []) =
   let (g1, itemType) = newvar Nothing g
       tupleType = head $ MLD.defaultList Nothing itemType
@@ -272,3 +298,8 @@ applicationExpr
 applicationExpr i g0 (ForallU v t) e = applicationExpr i (g0 +> ExistG v [] []) (substitute v t) e
 applicationExpr _ g0 t@(FunU _ _) e = return (g0, t, e)
 applicationExpr i _ _ _ = Left (Idx i ApplicationOfNonFunction)
+
+cut' :: Int -> GammaIndex -> Gamma -> Either (Indexed TypeError) Gamma
+cut' i idx g = case cut idx g of
+  (Left x) -> Left (Idx i x)
+  (Right x) -> Right x
