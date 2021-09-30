@@ -6,7 +6,7 @@ License     : GPL-3
 Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
-module Morloc.Frontend.Typecheck (typecheck) where
+module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Internal
@@ -33,11 +33,12 @@ import qualified Control.Monad.State as CMS
 -- wrapped into GMeta or stored in the Stack state.
 typecheck
   :: [SAnno Int Many Int]
-  -> MorlocMonad [SAnno (Indexed Type) Many Int]
-typecheck es = mapM typecheckGeneral es |>> map resolveTypes
+  -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
+typecheck es = mapM typecheckGeneral es
 
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
-resolveTypes (SAnno (Many es) (Idx i t)) = SAnno (Many (map (\(e, i) -> (f e, i)) es)) (Idx i (typeOf t)) where
+resolveTypes (SAnno (Many es) (Idx i t))
+  = SAnno (Many (map (\(e, i) -> (f e, i)) es)) (Idx i (typeOf t)) where
   f :: SExpr (Indexed TypeU) Many Int -> SExpr (Indexed Type) Many Int
   f (AccS x k) = AccS (resolveTypes x) k
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs) 

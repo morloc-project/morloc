@@ -11,7 +11,7 @@ import Morloc.CodeGenerator.Generate (generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
-typecheck :: Maybe Path -> Code -> MorlocMonad [SAnno (Indexed Type) Many Int]
+typecheck :: Maybe Path -> Code -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
 typecheck path code
   -- Maybe Path -> Text -> [Module]
   -- parse code into unannotated modules
@@ -32,6 +32,8 @@ writeProgram path code
   = typecheck path code
   -- [SAnno GMeta Many [CType]] -> (Script, [Script])
   -- translate mtree into nexus and pool source code
+  |>> map F.resolveTypes
+  -- resolve all TypeU types to Type
   >>= generate
   -- (Script, [Script]) -> IO ()
   -- write the code and compile as needed

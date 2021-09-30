@@ -10,6 +10,7 @@ module Morloc.Frontend.API
   ( parse
   , Parser.readType
   , Typecheck.typecheck
+  , Typecheck.resolveTypes
   ) where
 
 import Morloc.Frontend.Namespace

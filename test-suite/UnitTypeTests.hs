@@ -36,10 +36,10 @@ import Test.Tasty.HUnit
 --   _ -> error "Cannot handle multiple roots"
 
 -- get the toplevel general type of a typechecked expression
-gtypeof :: (SAnno (Indexed Type) f c) -> Type
+gtypeof :: (SAnno (Indexed TypeU) f c) -> TypeU
 gtypeof (SAnno _ (Idx _ t)) = t
 
-runFront :: T.Text -> IO (Either MorlocError [SAnno (Indexed Type) Many Int])
+runFront :: T.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
   return x
@@ -53,7 +53,7 @@ runFront code = do
         , configLangPerl = ""
         }
 
-assertGeneralType :: String -> T.Text -> Type -> TestTree
+assertGeneralType :: String -> T.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
@@ -179,7 +179,7 @@ testFalse msg x =
 
 bool = VarU (TV Nothing "Bool")
 
-num = VarT (TV Nothing "Num")
+num = VarU (TV Nothing "Num")
 
 str = VarU (TV Nothing "Str")
 
@@ -792,34 +792,34 @@ unitTypeTests =
     "Typechecker unit tests"
     -- comments
     [ assertGeneralType "block comments (1)" "{- -} 42" num
-    ]
-    -- , assertTerminalType "block comments (2)" " {--} 42{-   foo -} " [num]
-    -- , assertTerminalType "line comments (3)" "-- foo\n 42" [num]
-    -- -- primitives
-    -- , assertTerminalType "primitive integer" "42" [num]
-    -- , assertTerminalType "primitive big integer" "123456789123456789123456789" [num]
-    -- , assertTerminalType "primitive decimal" "4.2" [num]
-    -- , assertTerminalType "primitive negative number" "-4.2" [num]
-    -- , assertTerminalType "primitive positive number (with sign)" "+4.2" [num]
-    -- , assertTerminalType "primitive scientific large exponent" "4.2e3000" [num]
-    -- , assertTerminalType
-    --     "primitive scientific irregular"
-    --     "123456789123456789123456789e-3000"
-    --    [num]
-    -- , assertTerminalType
-    --     "primitive big real"
-    --     "123456789123456789123456789.123456789123456789123456789"
-    --    [num]
-    -- , assertTerminalType "primitive boolean" "True" [bool]
-    -- , assertTerminalType "primitive string" "\"this is a string literal\"" [str]
-    -- , assertTerminalType "primitive integer annotation" "42 :: Num" [num]
-    -- , assertTerminalType "primitive boolean annotation" "True :: Bool" [bool]
-    -- , assertTerminalType "primitive double annotation" "4.2 :: Num" [num]
-    -- , assertTerminalType
+    , assertGeneralType "block comments (2)" " {--} 42{-   foo -} " num
+    , assertGeneralType "line comments (3)" "-- foo\n 42" num
+    -- primitives
+    , assertGeneralType "primitive integer" "42" num
+    , assertGeneralType "primitive big integer" "123456789123456789123456789" num
+    , assertGeneralType "primitive decimal" "4.2" num
+    , assertGeneralType "primitive negative number" "-4.2" num
+    , assertGeneralType "primitive positive number (with sign)" "+4.2" num
+    , assertGeneralType "primitive scientific large exponent" "4.2e3000" num
+    , assertGeneralType
+        "primitive scientific irregular"
+        "123456789123456789123456789e-3000"
+       num
+    , assertGeneralType
+        "primitive big real"
+        "123456789123456789123456789.123456789123456789123456789"
+       num
+    , assertGeneralType "primitive boolean" "True" bool
+    , assertGeneralType "primitive string" "\"this is a string literal\"" str
+    -- , assertGeneralType "primitive integer annotation" "42 :: Num" num
+    -- , assertGeneralType "primitive boolean annotation" "True :: Bool" bool
+    -- , assertGeneralType "primitive double annotation" "4.2 :: Num" num
+    -- , assertGeneralType
     --     "primitive string annotation"
     --     "\"this is a string literal\" :: Str"
-    --     [str]
-    -- , assertTerminalType "primitive declaration" "x = True\n4.2" [num]
+    --     str
+    -- , assertGeneralType "primitive declaration" "x = True\n4.2" num
+    ]
     -- -- declarations
     -- , assertTerminalType
     --     "identity function declaration and application"
