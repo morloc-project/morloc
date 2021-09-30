@@ -112,7 +112,7 @@ checkG
        )
 checkG l g (SAnno (Many []) i) t = return (g, t, SAnno (Many []) (Idx i t)) 
 checkG l g0 (SAnno (Many ((e, j):es)) i) t0 = do 
-  (g1, t1, e') <- checkE l g0 e t0
+  (g1, t1, e') <- checkE l i g0 e t0
   (g2, t2, SAnno (Many es') idType) <- checkG l g1 (SAnno (Many es) i) t1
   return (g2, t2, SAnno (Many ((e', j):es')) idType)
 
@@ -166,9 +166,9 @@ synthE l i g0 (AppS f xs) = do
   (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
     -- there are more inputs than arguments: partial application
     GT -> case splitAt (length xs) ts of
-      (args, remainder) -> checkE l g2 (TupS xs) tupleType |>> (,) remainder
+      (args, remainder) -> checkE l i g2 (TupS xs) tupleType |>> (,) remainder
     -- there are the same number of inputs and arguments: full application
-    EQ -> checkE l g2 (TupS xs) tupleType |>> (,) []
+    EQ -> checkE l i g2 (TupS xs) tupleType |>> (,) []
     -- there are more arguments than inputs: TYPE ERROR!!!
     LT -> Left (Idx i TooManyArguments)
 
@@ -223,7 +223,7 @@ synthE l i g (LstS []) =
   in return (g, tupleType, LstS [])
 synthE l i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG l g e 
-  (g2, listType, listExpr) <- checkE l g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  (g2, listType, listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> impossible
@@ -282,6 +282,7 @@ synthE l i g (VarS v) = Left $ (Idx i (UnboundVariable v))
 
 checkE
   :: (Int -> Maybe TypeU)
+  -> Int
   -> Gamma
   -> SExpr Int Many Int
   -> TypeU
@@ -291,7 +292,45 @@ checkE
        , TypeU
        , SExpr (Indexed TypeU) Many Int
        )
-checkE = undefined
+checkE l _ g1 (LamS [] e1) (FunU as1 b1) = do
+  (g2, b2, e2) <- checkG l g1 e1 b1
+  return (g2, FunU as1 b2, LamS [] e2)
+checkE l i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
+  -- defined x:A
+  let vardef = AnnG v a1
+      g2 = g1 +> vardef
+  -- peal off one layer of bound terms and check
+  (g3, t3, e2) <- checkE l i g2 (LamS vs e1) (FunU as1 b1)
+
+  -- ignore trailing context `x:A,g3`
+  g4 <- cut' i vardef g3
+
+  -- construct the final type
+  t4 <- case t3 of
+    (FunU as2 b2) -> return $ FunU (a1:as2) b2
+    _ -> impossible
+
+  -- construct the final expression
+  e3 <- case e2 of
+    (LamS vs' body) -> return $ LamS (v:vs') body
+    _ -> impossible
+
+  return (g4, t4, e3)
+
+checkE l i g1 e1 t2@(ForallU x a) = do
+  (g2, _, e2) <- checkE l i (g1 +> VarG x) e1 a
+  g3 <- cut' i (VarG x) g2
+  let t3 = apply g3 t2
+  return (g3, t3, e2)
+
+checkE l i g1 e1 b = do
+  (g2, a, e2) <- synthE l i g1 e1
+  let a' = apply g2 a
+      b' = apply g2 b
+  g3 <- case subtype a' b' g2 of
+    (Left err) -> Left (Idx i err) 
+    (Right x) -> Right x
+  return (g3, a', e2)
 
 
 application
