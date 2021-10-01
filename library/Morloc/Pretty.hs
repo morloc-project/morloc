@@ -14,8 +14,8 @@ module Morloc.Pretty
   , prettyLinePrefixes
   , prettyUnresolvedPacker
   , prettyPackMap
-  -- , prettySAnnoMany
-  -- , prettySAnnoOne
+  , prettySAnno
+  , prettySExpr
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -145,84 +145,34 @@ prettyPackMap m =  "----- pacmaps ----\n"
       ("packmap" <+> pretty v <> parens (pretty i))
       (vsep $ map prettyUnresolvedPacker ps)
 
+-- For example @prettySAnnoMany id Nothing@ for the most simple printer
+prettySAnno
+  :: Foldable f
+  => (c -> Doc ann)
+  -> (g -> Doc ann)
+  -> SAnno g f c
+  -> Doc ann
+prettySAnno writeCon writeGen (SAnno e g)
+  = foldr (prettySExpr writeCon writeGen) ("G:" <+> writeGen g) e
 
--- prettySAnnoMany :: SAnno GMeta Many [CType] -> Doc AnsiStyle
--- prettySAnnoMany (SAnno (Many xs0) g) =
---      pretty (metaId g)
---   <> maybe "" (\n -> " " <> pretty n) (metaName g)
---   <+> "::" <+> maybe "_" prettyGreenTypeU (metaGType g)
---   <> line <> indent 5 (vsep (map writeSome xs0))
---   where
---     writeSome (s, ts)
---       =  "_ ::"
---       <+> encloseSep "{" "}" ";" (map prettyType ts)
---       <> line <> writeExpr s
---
---     writeExpr (AccS x k) = pretty k <+> "from " <> nest 2 (prettySAnnoMany x)
---     writeExpr (ListS xs) = list (map prettySAnnoMany xs)
---     writeExpr (TupleS xs) = list (map prettySAnnoMany xs)
---     writeExpr (NamS entries) = encloseSep "{" "}" "," $
---       map (\(k,v) -> pretty k <+> "=" <+> prettySAnnoMany v) entries
---     writeExpr (LamS vs x)
---       = "LamS"
---       <+> list (map pretty vs)
---       <> line <> indent 2 (prettySAnnoMany x)
---     writeExpr (AppS f xs) = "AppS" <+> indent 2 (vsep (prettySAnnoMany f : map prettySAnnoMany xs))
---     writeExpr x = descSExpr x
---
--- -- For example @prettySAnnoOne id Nothing@ for the most simple printer
--- prettySAnnoOne
---   :: (a -> CType) -> Maybe (a -> Doc ann) -> SAnno GMeta One a -> Doc ann
--- prettySAnnoOne getType extra s = hang 2 . vsep $ ["AST:", describe s]
---   where
---     addExtra x = case extra of
---       (Just f) -> " " <> f x
---       Nothing -> ""
---
---     describe (SAnno (One (x@(AccS _ _), _)) _) = descSExpr x
---     describe (SAnno (One (x@(ListS _), _)) _) = descSExpr x
---     describe (SAnno (One (x@(TupleS _), _)) _) = descSExpr x
---     describe (SAnno (One (x@(NamS _), _)) _) = descSExpr x
---     describe (SAnno (One (x@(AppS f xs), c)) g) =
---       hang 2 . vsep $
---         [ pretty (metaId g) <+> descSExpr x <+> parens (prettyType (getType c)) <> addExtra c
---         , describe f
---         ] ++ map describe xs
---     describe (SAnno (One (f@(LamS _ x), c)) g) = do
---       hang 2 . vsep $
---         [ pretty (metaId g)
---             <+> name (getType c) g
---             <+> descSExpr f
---             <+> parens (prettyType (getType c))
---             <> addExtra c
---         , describe x
---         ]
---     describe (SAnno (One (x, c)) g) =
---           pretty (metaId g)
---       <+> descSExpr x
---       <+> parens (prettyType (getType c))
---       <>  addExtra c
---
---     name :: CType -> GMeta -> Doc ann
---     name t g =
---       let lang = fromJust (langOf t)
---       in maybe
---           ("_" <+> viaShow lang <+> "::")
---           (\x -> pretty x <+> viaShow lang <+> "::")
---           (metaName g)
---
--- descSExpr :: SExpr g f c -> Doc ann
--- descSExpr (UniS) = "UniS"
--- descSExpr (VarS v) = "VarS" <+> pretty v
--- descSExpr (CallS src)
---   =   "CallS"
---   <+> pretty (srcAlias src) <+> "<" <> viaShow (srcLang src) <> ">"
--- descSExpr (AccS _ k) = "@" <> pretty k
--- descSExpr (ListS _) = "ListS"
--- descSExpr (TupleS _) = "TupleS"
--- descSExpr (LamS vs _) = "LamS" <+> hsep (map pretty vs)
--- descSExpr (AppS _ _) = "AppS"
--- descSExpr (NumS _) = "NumS"
--- descSExpr (LogS _) = "LogS"
--- descSExpr (StrS _) = "StrS"
--- descSExpr (NamS _) = "NamS"
+prettySExpr
+  :: Foldable f
+  => (c -> Doc ann)
+  -> (g -> Doc ann)
+  -> (SExpr g f c, c)
+  -> Doc ann
+  -> Doc ann
+prettySExpr fc fg (s, c) p = hang 2 . vsep $ [p, "C:" <+> fc c, f s] where
+  f (UniS) = "UniS"
+  f (VarS v) = "VarS:" <> pretty v
+  f (AccS x k ) = hang 2 . vsep $ ["AccS[" <> pretty k <> "]", prettySAnno fc fg x]
+  f (AppS x xs) = hang 2 . vsep $ ("AppS" <+> prettySAnno fc fg x) : map (prettySAnno fc fg) xs
+  f (LamS vs x) = hang 2 . vsep $ ["LamS" <+> hsep (map pretty vs), prettySAnno fc fg x]
+  f (LstS xs) = hang 2 . vsep $ ("LstS" : map (prettySAnno fc fg) xs)
+  f (TupS xs) = hang 2 . vsep $ ("LstS" : map (prettySAnno fc fg) xs)
+  f (NamS es)
+    = block 4 "NamS" (vsep [pretty k <+> "=" <+> prettySAnno fc fg x | (k, x) <- es])
+  f (NumS x) = "NumS(" <> viaShow x <> ")"
+  f (LogS x) = "LogS(" <> viaShow x <> ")"
+  f (StrS x) = "StrS(" <> viaShow x <> ")"
+  f (CallS src) = "Calls(" <> pretty src <> ")"

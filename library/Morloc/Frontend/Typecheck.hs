@@ -10,9 +10,11 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
+import Morloc.Pretty
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc (viaShow, render)
 
 import qualified Control.Monad.State as CMS
 
@@ -52,6 +54,8 @@ typecheckGeneral
 typecheckGeneral x = do
   s <- CMS.gets stateSignatures
   case typecheckGeneralPure (lookupType s) initialContext x of
+    -- -- to see the SAnno expression
+    -- (Left _) -> error . show . render . prettySAnno viaShow viaShow $ x
     (Left (Idx _ err')) -> MM.throwError $ GeneralTypeError err'
     (Right x') -> return x'
   where

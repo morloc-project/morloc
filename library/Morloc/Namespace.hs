@@ -529,6 +529,16 @@ data Many a = Many [a]
 instance Functor One where
   fmap f (One x) = One (f x)
 
+instance Functor Many where
+  fmap f (Many x) = Many (map f x)
+
+instance Foldable One where
+  foldr f b (One a) = f a b
+
+instance Foldable Many where
+  foldr f b (Many xs) = foldr f b xs
+
+
 data SExpr g f c
   = UniS
   | VarS EVar
