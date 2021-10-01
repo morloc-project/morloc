@@ -596,19 +596,14 @@ whereTests =
 orderInvarianceTests =
   testGroup
   "Test order invariance"
-  [
-      assertGeneralType
-        "terms may be defined before they are used"
-        "a = 1\nf = a\nf"
-        num
-  --   , assertTerminalType
-  --       "terms they may be defined after they are used"
-  --       [r|
-  --         f = a
-  --         a = 1
-  --         f
-  --       |]
-  --       [num]
+  [ assertGeneralType
+      "definitions work"
+      "x = 42\nx"
+      num
+  , assertGeneralType
+      "terms may be defined before they are used"
+      "y = 42\nx = y\nx"
+      num
   --   , assertTerminalType
   --       "declarations before use gain concrete types"
   --       [r|

@@ -215,7 +215,7 @@ data TermTypes = TermTypes {
   --            ^     ^      ^----- TermType knows nothing about this
   --            '      '--- each ExprI in [ExprI] is one of these
   --            '--- this will match the term name
-} 
+} deriving (Show)
 
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)

@@ -282,6 +282,7 @@ collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a mo
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
   t0 <- MM.metaTermTypes i
+  error $ show (i, t0)
   es <- case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> collectSExpr e |>> return
