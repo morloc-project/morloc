@@ -596,16 +596,11 @@ whereTests =
 orderInvarianceTests =
   testGroup
   "Test order invariance"
-  [ testEqual "order test" 1 1 ]
-  -- [
-  --     assertTerminalType
-  --       "terms may be defined before they are used"
-  --       [r|
-  --         a = 1
-  --         f = a
-  --         f
-  --       |]
-  --       [num]
+  [
+      assertGeneralType
+        "terms may be defined before they are used"
+        "a = 1\nf = a\nf"
+        num
   --   , assertTerminalType
   --       "terms they may be defined after they are used"
   --       [r|
@@ -634,7 +629,7 @@ orderInvarianceTests =
   --         b
   --       |]
   --       [num, varc CLang "int"]
-  -- ]
+  ]
 
 typeOrderTests =
   testGroup
@@ -771,7 +766,7 @@ unitTypeTests =
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         str
-    -- , assertGeneralType "primitive declaration" "x = True\n4.2" num
+    , assertGeneralType "primitive declaration" "x = True\n4.2" num
     -- -- declarations
     -- , assertGeneralType
     --     "identity function declaration and application"
