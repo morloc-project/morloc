@@ -132,8 +132,8 @@ prettyRecordPVar _ = "<UNKNOWN RECORD>"
 recordPVar :: TypeP -> MDoc
 recordPVar (VarP (PV _ _ v)) = pretty v
 recordPVar (UnkP (PV _ _ v)) = pretty v
-recordPVar (FunP t1 t2) = "<FunP>" -- illegal value
-recordPVar (AppP t1 t2) = "<AppP>" -- illegal value
+recordPVar (FunP _ _) = "<FunP>" -- illegal value
+recordPVar (AppP _ _) = "<AppP>" -- illegal value
 recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
 
 

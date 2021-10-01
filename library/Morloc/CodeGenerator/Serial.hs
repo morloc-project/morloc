@@ -25,7 +25,6 @@ import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 
 -- extracts the language specific term from the paired term
 pv2tv :: PVar -> TVar
@@ -51,6 +50,7 @@ isList (AppP (PV lang _ v) [_]) =
 isList _ = False
 
 defaultTupleAll :: [TypeP] -> [TypeP]
+defaultTupleAll [] = error "Cannot have an empty tuple?"
 defaultTupleAll ts@(t:_) =
   let lang = langOf' t
       gt = Just $ Def.tupleG (length ts)
@@ -65,11 +65,11 @@ isTuple _ = False
 isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
 isPrimitiveType lookupDefault t =
   let xs = filter (typeEqual t)
-         $ [ VarP (PV lang gtype v)
+         $ [ VarP (PV lang generalType v)
            | (VarU (TV (Just lang) v)) <- lookupDefault (langOf t)]
   in length xs > 0
   where
-    gtype = case lookupDefault Nothing of
+    generalType = case lookupDefault Nothing of
       ((VarU (TV _ g)):_) -> Just g
       _ -> Nothing
 
@@ -161,11 +161,17 @@ typeEqual (AppP v1 []) (AppP v2 []) = v1 == v2
 typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
  = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
 typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
-  = o1 == o2 && n1 == n1 && length ps1 == length ps1
-typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 ((k2,t2):rs2))
-  =  k1 == k2
-  && typeEqual t1 t2
-  && typeEqual (NamP o1 n1 ps1 rs1) (NamP o1 n1 ps1 rs2)
+  = o1 == o2 && n1 == n2 && length ps1 == length ps2
+typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 es2) =
+  -- equality does not depend on order
+  case filterApart (\(k2, _) -> k1 == k2) es2 of 
+    -- if the key was found
+    (Just (_, t2), rs2) ->
+         -- then ensure the values are the same
+         typeEqual t1 t2
+         -- and check the (n-1) records
+      && typeEqual (NamP o1 n1 ps1 rs1) (NamP o2 n2 ps2 rs2)
+    (Nothing, _) -> False
 typeEqual _ _ = False
 
 
