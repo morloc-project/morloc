@@ -33,11 +33,7 @@ module Morloc.Typecheck.Internal
   ) where
 
 import Morloc.Namespace
-import qualified Morloc.Frontend.PartialOrder as P
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Monad as MM
-import qualified Morloc.Data.GMap as GMap
-import qualified Morloc.Monad as Mod
 
 import qualified Data.Set as Set
 
@@ -156,17 +152,17 @@ subtype t1@(AppU v1@(TV l1 _) vs1) t2@(AppU v2@(TV l2 _) vs2) g
 
 -- subtype unordered records
 subtype (NamU _ v1 _ []) (NamU _ v2 _ []) g = subtype (VarU v1) (VarU v2) g
-subtype t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) g =
+subtype t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
-subtype t1@(NamU _ _ _ _ ) t2@(NamU _ _ _ []) g =
+subtype t1@(NamU _ _ _ _ ) t2@(NamU _ _ _ []) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
-subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 rs2') g0
+subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0
   | langOf v1 == langOf t2 =
-    case filterApart (\(k2, x) -> k2 == k1) rs2' of
+    case filterApart (\(k2, _) -> k2 == k1) es2 of
       (Nothing, _) -> Left $ SubtypeError t1 t2 "NamU - Unequal fields"
       (Just (_, x2), rs2) -> do
           g1 <- subtype x1 x2 g0
-          g2 <- subtype (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2') g1
+          g2 <- subtype (NamU o1 v1 p1 rs1) (NamU o2 v2 p2 rs2) g1
           return g2
   | otherwise = return g0 -- incomparable
 
@@ -406,9 +402,3 @@ newvarRich ps ds lang g =
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])
-
--- | create a new variable such as "a.0"
-newqul :: TVar -> Gamma -> (Gamma, TVar)
-newqul (TV l v) g
-  = let i = gammaCounter g
-    in (g {gammaCounter = i + 1}, TV l (v <> "." <> (MT.pack . show $ i)))

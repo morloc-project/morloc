@@ -12,7 +12,6 @@ module Morloc.CodeGenerator.Grammars.Macro
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad.State as CMS
 import Text.Megaparsec
@@ -33,7 +32,7 @@ expandMacro t ps =
          (CMS.runStateT (pBase <* eof) (ParserState ps))
          "typemacro"
          t of
-    Left err -> error (show err)
+    Left err' -> error (show err')
     Right (es, _) -> es
 
 

@@ -157,6 +157,7 @@ statefulMapM f s (x:xs) = do
 
 -- pull one element from a list
 filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
+filterApart _ [] = (Nothing, [])
 filterApart f (x:xs)
   | f x = (Just x, xs)  
   | otherwise = case filterApart f xs of 

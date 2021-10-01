@@ -12,6 +12,7 @@ module Morloc.Config
   , loadDefaultMorlocConfig
   , buildPoolCallBase
   , getDefaultConfigFilepath
+  , getDefaultMorlocLibrary
   ) where
 
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)

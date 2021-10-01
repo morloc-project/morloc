@@ -9,20 +9,11 @@ Stability   : experimental
 module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Frontend.Internal
 import Morloc.Typecheck.Internal
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
-import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Data.Map as Map
-import qualified Data.Set as Set
-import qualified Morloc.Data.Text as MT
-import qualified Control.Monad.Reader as R
 
-import Morloc.Data.Doc hiding (putDoc)
-import Morloc.Frontend.Pretty
-import Data.Text.Prettyprint.Doc.Render.Terminal (putDoc, AnsiStyle)
 import qualified Control.Monad.State as CMS
 
 -- true facts to keep in mind:
@@ -39,7 +30,7 @@ typecheck es = mapM typecheckGeneral es
 
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
 resolveTypes (SAnno (Many es) (Idx i t))
-  = SAnno (Many (map (\(e, i) -> (f e, i)) es)) (Idx i (typeOf t)) where
+  = SAnno (Many (map (\(e, i') -> (f e, i')) es)) (Idx i (typeOf t)) where
   f :: SExpr (Indexed TypeU) Many Int -> SExpr (Indexed Type) Many Int
   f (AccS x k) = AccS (resolveTypes x) k
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs) 
@@ -52,6 +43,7 @@ resolveTypes (SAnno (Many es) (Idx i t))
   f (StrS x) = StrS x
   f (CallS x) = CallS x
   f UniS = UniS
+  f (VarS x) = VarS x
 
 
 typecheckGeneral
@@ -60,7 +52,7 @@ typecheckGeneral
 typecheckGeneral x = do
   s <- CMS.gets stateSignatures
   case typecheckGeneralPure (lookupType s) initialContext x of
-    (Left (Idx _ err)) -> MM.throwError $ GeneralTypeError err
+    (Left (Idx _ err')) -> MM.throwError $ GeneralTypeError err'
     (Right x') -> return x'
   where
     initialContext = Gamma
@@ -83,7 +75,7 @@ typecheckGeneralPure
   -> Gamma
   -> SAnno Int Many Int
   -> Either (Indexed TypeError) (SAnno (Indexed TypeU) Many Int)
-typecheckGeneralPure f g e = fmap (\(_,_,e) -> e) (synthG f g e)
+typecheckGeneralPure f g e = fmap (\(_, _, e') -> e') (synthG f g e)
 
 synthG
   :: (Int -> Maybe TypeU)
@@ -112,7 +104,7 @@ checkG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-checkG l g (SAnno (Many []) i) t = return (g, t, SAnno (Many []) (Idx i t)) 
+checkG _ g (SAnno (Many []) i) t = return (g, t, SAnno (Many []) (Idx i t)) 
 checkG l g0 (SAnno (Many ((e, j):es)) i) t0 = do 
   (g1, t1, e') <- checkE l i g0 e t0
   (g2, t2, SAnno (Many es') idType) <- checkG l g1 (SAnno (Many es) i) t1
@@ -131,10 +123,10 @@ synthE
        , SExpr (Indexed TypeU) Many Int
        )
 
-synthE l i g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
-synthE l i g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
-synthE l i g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
-synthE l i g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
+synthE _ _ g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
+synthE _ _ g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
+synthE _ _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
+synthE _ _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
 synthE l i g (AccS e k) = do
   (g1, t1, e1) <- synthG l g e
@@ -144,7 +136,7 @@ synthE l i g (AccS e k) = do
       (Just t) -> return t
     _ -> Left $ Idx i (KeyError k t1)
   return (g1, valType, AccS e1 k)
-synthE l i g (AppS f []) = do
+synthE l _ g (AppS f []) = do
   (g1, t1, f1) <- synthG l g f
   return (g1, t1, AppS f1 [])
 synthE l i g0 (AppS f xs) = do
@@ -168,7 +160,7 @@ synthE l i g0 (AppS f xs) = do
   (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
     -- there are more inputs than arguments: partial application
     GT -> case splitAt (length xs) ts of
-      (args, remainder) -> checkE l i g2 (TupS xs) tupleType |>> (,) remainder
+      (_, remainder) -> checkE l i g2 (TupS xs) tupleType |>> (,) remainder
     -- there are the same number of inputs and arguments: full application
     EQ -> checkE l i g2 (TupS xs) tupleType |>> (,) []
     -- there are more arguments than inputs: TYPE ERROR!!!
@@ -189,12 +181,12 @@ synthE l i g0 (AppS f xs) = do
     -- full application, just return the output type
     [] -> return outputType
     -- partial application, create a new function with unapplied types
-    ts -> return (FunU ts outputType)
+    ts' -> return (FunU ts' outputType)
 
   -- put the AppS back together with the synthesized function and input expressions
   return (g3, finalType, AppS uFunExpr inputExprs)
 
-synthE l i g0 (LamS [] x0) = do 
+synthE l _ g0 (LamS [] x0) = do 
   (g1, t1, x1) <- synthG l g0 x0
   return (g1, FunU [] t1, LamS [] x1)
 synthE l i g0 (LamS (v@(EV n):vs) x) = do
@@ -209,7 +201,7 @@ synthE l i g0 (LamS (v@(EV n):vs) x) = do
     _ -> impossible -- LamS type is always a function (see base case)
 
   fullExpr <- case tailExpr of
-    (LamS vs x) -> return $ LamS (v:vs) x
+    (LamS vs' x') -> return $ LamS (v:vs') x'
     _ -> impossible -- synthExpr does not change data constructors
 
   g4 <- cut' i mark g3
@@ -217,15 +209,15 @@ synthE l i g0 (LamS (v@(EV n):vs) x) = do
   return (g4, fullType, fullExpr)
   where
     bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
-    bindTerm g0 v =
-      let (g1, t) = newvar Nothing g0
-          idx = AnnG v t
-      in (g1 +> idx, t)
+    bindTerm g0' v' =
+      let (g1', t) = newvar Nothing g0'
+          idx = AnnG v' t
+      in (g1' +> idx, t)
 
-synthE l i g (LstS []) =
+synthE _ _ g (LstS []) =
   let (g1, itemType) = newvar Nothing g
       tupleType = head $ MLD.defaultList Nothing itemType
-  in return (g, tupleType, LstS [])
+  in return (g1, tupleType, LstS [])
 synthE l i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG l g e 
   (g2, listType, listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
@@ -233,7 +225,7 @@ synthE l i g (LstS (e:es)) = do
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> impossible
 
-synthE l i g (TupS []) =
+synthE _ _ g (TupS []) =
   let t = head $ MLD.defaultTuple Nothing []
   in return (g, t, LstS [])
 synthE l i g (TupS (e:es)) = do
@@ -241,7 +233,7 @@ synthE l i g (TupS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG l g e
 
   -- synthesize tail
-  (g2, tupleType, tupleExpr) <- synthE l i g (TupS es)
+  (g2, tupleType, tupleExpr) <- synthE l i g1 (TupS es)
 
   -- merge the head and tail
   t3 <- case tupleType of
@@ -282,7 +274,7 @@ synthE l i g (CallS src) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE l i g (VarS v) = Left $ (Idx i (UnboundVariable v))
+synthE _ i _ (VarS v) = Left $ (Idx i (UnboundVariable v))
 
 
 checkE
@@ -333,7 +325,7 @@ checkE l i g1 e1 b = do
   let a' = apply g2 a
       b' = apply g2 b
   g3 <- case subtype a' b' g2 of
-    (Left err) -> Left (Idx i err) 
+    (Left err') -> Left (Idx i err')
     (Right x) -> Right x
   return (g3, a', e2)
 
@@ -354,7 +346,6 @@ application g0 t0 (SAnno (Many ((e0, i):es0)) m@(Idx j _)) = do
   (g2, t2, e2) <- application g1 t1 (SAnno (Many es0) m)
   case e2 of
     (SAnno (Many es1) _) -> return (g2, t2, SAnno (Many ((e1, i):es1)) m) 
-    _ -> impossible
 
 applicationExpr
   :: Int

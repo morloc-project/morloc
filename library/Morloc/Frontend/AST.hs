@@ -35,7 +35,7 @@ findExportSet = Set.fromList . map snd . findExports
 
 findExports :: ExprI -> [(Int, EVar)]
 findExports (ExprI i (ExpE v)) = [(i, v)]
-findExports (ExprI i (ModE _ es)) = conmap findExports es
+findExports (ExprI _ (ModE _ es)) = conmap findExports es
 findExports _ = []
 
 findSources :: ExprI -> [Source]

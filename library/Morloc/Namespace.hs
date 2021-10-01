@@ -663,7 +663,7 @@ instance Typelike Type where
 
   substituteTVar v0 r0 t0 = sub t0
     where
-      sub t@(UnkT v) = t
+      sub t@(UnkT _) = t
       sub t@(VarT v)
         | v0 == v = r0
         | otherwise = t
@@ -674,7 +674,7 @@ instance Typelike Type where
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
   free (FunT ts t) = Set.unions (map free (t:ts))
-  free (AppT v ts) = Set.unions (map free ts)
+  free (AppT _ ts) = Set.unions (map free ts)
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
 
 
@@ -690,12 +690,13 @@ instance Typelike TypeU where
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU v ts) = AppT v (map typeOf ts)
+  typeOf (NamU n o ps rs) = NamT n o ps (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ [] _) = Set.singleton v
   free (ExistU v ts _) = Set.unions $ Set.singleton (AppU v ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
-  free (AppU v ts) = Set.unions $ map free ts
+  free (AppU _ ts) = Set.unions $ map free ts
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (NamU _ _ _ rs) = Set.unions $ map (free . snd) rs
   
@@ -768,7 +769,7 @@ instance HasOneLanguage TVar where
 instance HasOneLanguage TypeU where
   langOf (VarU (TV lang _)) = lang
   langOf (ExistU (TV lang _) _ _) = lang
-  langOf (ForallU (TV lang _) t) = lang
+  langOf (ForallU (TV lang _) _) = lang
   langOf (FunU _ t) = langOf t
   langOf (AppU (TV lang _) _) = lang
   langOf (NamU _ (TV lang _) _ _) = lang

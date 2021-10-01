@@ -15,7 +15,6 @@ import Morloc.Data.Doc
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.GMap as GMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -88,7 +87,7 @@ checkForSelfRecursion d = do
     hasTerm v (AppU v' []) = v == v'
 
     hasTerm v (NamU o n ps ((_, t):rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
-    hasTerm v (NamU _ _ _ []) = False
+    hasTerm _ (NamU _ _ _ []) = False
 
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
@@ -137,7 +136,7 @@ desugarType
   -> MVar
   -> TypeU
   -> MorlocMonad TypeU
-desugarType h d k = f
+desugarType h _ _ = f
   where
 
   f :: TypeU -> MorlocMonad TypeU
@@ -188,6 +187,8 @@ desugarType h d k = f
         (_, t2) <- foldlM (mergeAliases v 0) t1 ts1
         f t2
       Nothing -> return t0
+
+  f (ForallU _ _) = undefined
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
@@ -259,7 +260,7 @@ gatherPackers
   -> MorlocMonad (ExprI, (Map.Map (TVar, Int) [UnresolvedPacker]))
 gatherPackers mv e xs =
   case findPackers e of
-    (Left err) -> MM.throwError err
+    (Left err') -> MM.throwError err'
     (Right m0) -> do
       let m2 = Map.unionsWith (<>) (m0 : [m1 | (_, _, (_, m1)) <- xs])
       attachPackers mv e m2
@@ -322,7 +323,7 @@ findPackers expr
         }
 
     toPair :: (Source, EType) -> Either MorlocError ((TVar, Int), (Property, TypeU, Source))
-    toPair (src, e@(EType (FunU [a] _) _ _)) = do
+    toPair (src, e@(EType (FunU [_] _) _ _)) = do
       case packerKeyVal e of
           (Right (Just (key, t, p))) -> return (key, (p, t, src))
           (Right Nothing) -> impossible -- this is called after filtering away general types

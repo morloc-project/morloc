@@ -68,16 +68,16 @@ tupleG :: Int -> MT.Text
 tupleG i = MT.pack $ "Tuple" ++ show i
 
 tupleC :: Int -> Lang -> [MT.Text]
-tupleC i Python3Lang = ["tuple"]
-tupleC i RLang = ["tuple"]
-tupleC i CLang = []
+tupleC _ Python3Lang = ["tuple"]
+tupleC _ RLang = ["tuple"]
+tupleC _ CLang = []
 tupleC i CppLang =
-  let vars = ["$" <> MT.show' i | i <- [1..i]]
+  let vars = ["$" <> MT.show' i' | i' <- [1..i]]
   in ["std::tuple<" <> MT.intercalate "," vars <> ">"]
 tupleC i RustLang =
-  let vars = ["$" <> MT.show' i | i <- [1..i]]
+  let vars = ["$" <> MT.show' i' | i' <- [1..i]]
   in ["(" <> MT.intercalate "," vars <> ")"]
-tupleC i PerlLang = ["array"]
+tupleC _ PerlLang = ["array"]
 
 tupleGC :: Maybe Lang -> Int -> [MT.Text]
 tupleGC Nothing i = [tupleG i]

@@ -24,7 +24,6 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
-import qualified Morloc.Data.GMap as GMap
 
 instance Pretty MVar where
   pretty = pretty . unMVar

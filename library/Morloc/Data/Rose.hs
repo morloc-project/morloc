@@ -13,13 +13,14 @@ module Morloc.Data.Rose
   , filter
   , mapScope
   , flatten
+  , prune
   ) where
 
 data Rose a = Nil | Rose a [Rose a]
 
 instance Functor Rose where
   fmap f (Rose x xs) = Rose (f x) (map (fmap f) xs)
-  fmap f Nil = Nil
+  fmap _ Nil = Nil
 
 
 -- | Find all values that match a predicate

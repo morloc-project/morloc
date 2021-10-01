@@ -47,7 +47,7 @@ unionsWithM f = foldM (unionWithM f) Map.empty
 
 -- | monadic version of Data.Map mapKeysWith
 mapKeysWithM
-  :: (Monad m, Ord k1, Ord k2)
+  :: (Monad m, Ord k2)
   => (a -> a -> m a)
   -> (k1 -> k2)
   -> Map.Map k1 a

@@ -11,12 +11,9 @@ module Morloc.Frontend.Internal
   ( generalize
   ) where
 
-import Control.Monad.Except (throwError)
 import Morloc.Frontend.Namespace
-import qualified Control.Monad.State as CMS
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Frontend.PartialOrder as P
 
 
 -- | Deal with existentials.
@@ -54,7 +51,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       ++ map findExistentials ds
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
   findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
-  findExistentials (AppU v ts) = Set.unions (map findExistentials ts)
+  findExistentials (AppU _ ts) = Set.unions (map findExistentials ts)
   findExistentials (NamU _ _ _ rs) = Set.unions (map (findExistentials . snd) rs)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
@@ -76,3 +73,4 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       f v (FunU ts t) = FunU (map (f v) ts) (f v t)
       f v (AppU v' ts) = AppU v' (map (f v) ts)
       f v (NamU o n ps rs) = NamU o n ps [(k, f v t) | (k, t) <- rs]
+      f _ t@(VarU _) = t

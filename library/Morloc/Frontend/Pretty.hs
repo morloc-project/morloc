@@ -18,9 +18,6 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (AnsiStyle)
-import qualified Text.Megaparsec as Mega
-import qualified Morloc.Data.Text as MT 
-import Data.Void (Void)
 
 prettyExprI :: ExprI -> Doc AnsiStyle
 prettyExprI (ExprI _ e) = prettyExpr e
@@ -49,10 +46,10 @@ prettyExpr (NumE x) = pretty (show x)
 prettyExpr (StrE x) = dquotes (pretty x)
 prettyExpr (LogE x) = pretty x
 prettyExpr (AssE v e es) = pretty v <+> "=" <+> prettyExprI e <+> "where" <+> (align . vsep . map prettyExprI) es
-prettyExpr (SrcE (Source name lang file alias label))
+prettyExpr (SrcE (Source name lang file' alias label))
   = "source"
   <+> viaShow lang
-  <> maybe "" (\f -> "from" <+> pretty f) file 
+  <> maybe "" (\f -> "from" <+> pretty f) file' 
   <+> "("
   <> dquotes (pretty name) <+> "as" <+>  pretty alias <> maybe "" (\s -> ":" <> pretty s) label
   <> ")"

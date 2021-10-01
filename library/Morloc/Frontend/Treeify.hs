@@ -14,11 +14,9 @@ import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as DAG
 import qualified Morloc.Data.Map as Map
-import qualified Data.Set as Set
 import qualified Morloc.Data.GMap as GMap
 
 -- | Every term must either be sourced or declared.
@@ -86,7 +84,7 @@ mainExpr (MV "Main") (ExprI _ (ModE _ es)) = case lastMay es of
     (SigE _ _ _) -> []
     (AssE _ _ _) -> []
     (ExpE _) -> []
-    x -> [(i, EV "__MAIN__")]
+    _ -> [(i, EV "__MAIN__")]
 mainExpr _ _ = []
 
 {-
@@ -147,15 +145,15 @@ indexTerm x = do
   return (i, x)
 
 linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
-linkVariablesToTermTypes mod m0 = mapM_ (link m0) where 
+linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
-  link m (ExprI _ (ModE v _)) = MM.throwError (NestedModule v)
+  link _ (ExprI _ (ModE v _)) = MM.throwError (NestedModule v)
   link m (ExprI i (ExpE v)) = setType m i v
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
     -- shadow all bound terms
     let m' = foldr Map.delete m ks
     setType m' i v
-    linkSignatures mod (e:es) (Map.map snd m')
+    linkSignatures mv (e:es) (Map.map snd m')
     return ()
   link m (ExprI i (VarE v)) = setType m i v
   link m (ExprI _ (AccE e _)) = link m e
@@ -176,7 +174,7 @@ linkVariablesToTermTypes mod m0 = mapM_ (link m0) where
     Nothing -> return ()
 
 unifyTermTypes :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
-unifyTermTypes mod xs m0
+unifyTermTypes mv xs m0
   = Map.mergeMapsM fb fc fbc sigs srcs
   >>= Map.mapKeysWithM combineTermTypes (\(v,_,_) -> v)
   >>= Map.unionWithM combineTermTypes m0
@@ -191,22 +189,22 @@ unifyTermTypes mod xs m0
   fb [e] = return $ TermTypes (Just e) [] []
   -- TODO: clean up the error messages to say exactly what went wrong (and
   -- don't call the monkeys, this is not an internal error).
-  fb es = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
+  fb _ = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
 
   -- Should we even allow concrete terms with no type signatures?
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
-  fc srcs = return $ TermTypes Nothing [(mod, src, [], i) | (src, i) <- srcs] []
+  fc srcs' = return $ TermTypes Nothing [(mv, src, [], i) | (src, i) <- srcs'] []
 
   fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
-  fbc sigs srcs = do
-    let gsigs = [t | t <- sigs, isJust (langOf t)]
-    let csigs = [t | t <- sigs, isNothing (langOf t)]
-    gtype <- case gsigs of
+  fbc sigs' srcs' = do
+    let gsigs = [t | t <- sigs', isJust (langOf t)]
+    let csigs = [t | t <- sigs', isNothing (langOf t)]
+    gt <- case gsigs of
       [e] -> return (Just e)
       [] -> return Nothing
       -- TODO: don't call the monkeys
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gtype [(mod, src, csigs, i) | (src, i) <- srcs] []
+    return $ TermTypes gt [(mv, src, csigs, i) | (src, i) <- srcs'] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -263,19 +261,19 @@ collect
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
 -- collect the final expression of a main module
-collect (ExprI _ (ModE _ es)) (i, EV "__MAIN__") = case lastMay es of
+collect (ExprI _ (ModE _ es)) (_, EV "__MAIN__") = case lastMay es of
   Nothing -> impossible
   (Just e) -> collectSAnno e 
 -- collect standard exported terms
-collect (ExprI _ (ModE _ _)) (i, v) = do
-  t <- MM.metaTermTypes i
-  case t of
+collect (ExprI _ (ModE _ _)) (i, _) = do
+  t0 <- MM.metaTermTypes i
+  case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
     -- otherwise is an alias that should be replaced with its value(s)
-    (Just t) -> do
-      let calls = [(CallS src, i) | (_, src, _, i) <- termConcrete t]
-      declarations <- mapM collectSExpr (termDecl t)
+    (Just t1) -> do
+      let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
+      declarations <- mapM collectSExpr (termDecl t1)
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
@@ -283,16 +281,16 @@ collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a mo
 -- collect info needed for the GMeta object
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
-  t <- MM.metaTermTypes i
-  es <- case t of
+  t0 <- MM.metaTermTypes i
+  es <- case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> collectSExpr e |>> return
     -- otherwise is an alias that should be replaced with its value(s)
-    (Just t) -> do
+    (Just t1) -> do
       -- collect all the concrete calls with this name
-      let calls = [(CallS src, i) | (_, src, _, i) <- termConcrete t]
+      let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
       -- collect all the morloc compositions with this name
-      declarations <- mapM reindexExprI (termDecl t) >>= mapM collectSExpr
+      declarations <- mapM reindexExprI (termDecl t1) >>= mapM collectSExpr
       -- link this index to the name that is removed
       s <- CMS.get
       CMS.put (s { stateName = Map.insert i v (stateName s) })
@@ -324,6 +322,7 @@ collectSExpr (ExprI i e0) = f e0 where
   f (StrE x) = noTypes (StrS x)
 
   -- none of the following cases should every occur
+  f (ModE _ _) = impossible
   f (AnnE _ _) = impossible
   f (TypE _ _ _) = impossible
   f (ImpE _) = impossible
@@ -357,8 +356,3 @@ newIndex i = do
   i' <- MM.getCounter
   copyState i i'
   return i'
-
-yIsX' :: (Ord a) => GMap a b c -> a -> a -> MorlocMonad (GMap a b c)
-yIsX' m k1 k2 = case GMap.yIsX m k1 k2 of
-  Nothing -> MM.throwError . CallTheMonkeys $ "Internal key error"
-  (Just m') -> return m'

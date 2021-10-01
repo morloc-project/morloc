@@ -133,9 +133,6 @@ getLibraryPaths lib base sofile = map MS.joinPath
   , ["/usr/local/bin", sofile]
   ]
 
-makeFlagsForSharedLibraries :: Lang -> Source -> Maybe MDoc
-makeFlagsForSharedLibraries = undefined
-
 handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [MT.Text], [Path])
 handleFlagsAndPaths CppLang srcs = do
   state <- MM.get
@@ -198,7 +195,7 @@ flagAndPath src@(Source _ CppLang (Just p) _ _)
             ]
         [] -> return []
 flagAndPath src@(Source _ CppLang Nothing _ _) = return (src, [], Nothing)
-flagAndPath src@(Source _ RustLang _ _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
+flagAndPath (Source _ RustLang _ _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
 flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 
@@ -225,8 +222,8 @@ installGithubRepo repo url = do
 installModule :: ModuleSource -> MorlocMonad ()
 installModule (GithubRepo repo) =
   installGithubRepo repo ("https://github.com/" <> repo)
-installModule (CoreGithubRepo name) =
-  installGithubRepo name ("https://github.com/morloclib/" <> name)
+installModule (CoreGithubRepo name') =
+  installGithubRepo name' ("https://github.com/morloclib/" <> name')
 installModule (LocalModule Nothing) =
   MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just _)) =

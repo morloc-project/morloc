@@ -17,11 +17,9 @@ module Morloc.Frontend.PartialOrder (
 ) where
 
 import Morloc.Frontend.Namespace
-import qualified Morloc.Data.Text as MT
 import qualified Data.Set as Set
 import qualified Data.PartialOrd as P
 import qualified Data.List as DL
-import qualified Data.Foldable as DF
 
 -- Types are partially ordered, 'forall a . a' is lower (more generic) than
 -- Int. But 'forall a . a -> a' cannot be compared to 'forall a . a', since
@@ -43,12 +41,12 @@ instance P.PartialOrd TypeU where
   (<=) (AppU v1 (t11:rs1)) (AppU v2 (t21:rs2)) = t11 <= t21 && AppU v1 rs1 <= AppU v2 rs2
   (<=) (AppU v1 []) (AppU v2 []) = v1 == v2
   -- the records do not need to be in the same order to be equivalent
-  (<=) (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 rs2)
-    = case DL.partition ((== k1) . fst) rs2 of
-       ([(k2,e2)], rs2) -> e1 <= e2 && NamU o1 n1 ps1 rs1 <= NamU o2 n2 ps2 rs2
+  (<=) (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 es2)
+    = case DL.partition ((== k1) . fst) es2 of
+       ([(_,e2)], rs2) -> e1 <= e2 && NamU o1 n1 ps1 rs1 <= NamU o2 n2 ps2 rs2
        _ -> False
   (<=) (NamU o1 n1 ps1 []) (NamU o2 n2 ps2 [])
-    = o1 == o2 && n1 == n1 && length ps1 == length ps2
+    = o1 == o2 && n1 == n2 && length ps1 == length ps2
   (<=) _ _ = False
 
   (==) (ForallU v1@(TV _ _) t1) (ForallU v2 t2) =
@@ -81,9 +79,9 @@ findFirst v = f where
     = foldl firstOf Nothing (zipWith f (ts1 <> [t1]) (ts2 <> [t2]))
   f (AppU _ ts1) (AppU _ ts2)
     = foldl firstOf Nothing (zipWith f ts1 ts2)
-  f (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 rs2)
-    = case DL.partition ((== k1) . fst) rs2 of
-       ([(k2,e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
+  f (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 es2)
+    = case DL.partition ((== k1) . fst) es2 of
+       ([(_,e2)], rs2) -> firstOf (f e1 e2) (f (NamU o1 n1 ps1 rs1) (NamU o2 n2 ps2 rs2))
        _ -> Nothing 
   f _ _ = Nothing
 

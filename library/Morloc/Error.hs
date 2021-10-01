@@ -32,7 +32,7 @@ errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
 errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) =
   "'" <> lang <> "' is not recognized as a supported language"
-errmsg (SyntaxError err) = "SyntaxError: " <> MT.pack (errorBundlePretty err)
+errmsg (SyntaxError err') = "SyntaxError: " <> MT.pack (errorBundlePretty err')
 errmsg (SerializationError t) = "SerializationError: " <> t
 errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
 errmsg (SystemCallError cmd loc msg) =
@@ -53,8 +53,8 @@ errmsg NoBenefits =
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
 errmsg (GeneratorError msg) = "GeneratorError: " <> msg
-errmsg (ConcreteTypeError err) = "Concrete type error: " <> showTypeError err
-errmsg (GeneralTypeError err) = "General type error: " <> showTypeError err
+errmsg (ConcreteTypeError err') = "Concrete type error: " <> showTypeError err'
+errmsg (GeneralTypeError err') = "General type error: " <> showTypeError err'
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg (OtherError msg) = "OtherError: " <> msg
 -- TODO: this will be a common class of errors and needs an informative message
@@ -65,9 +65,9 @@ errmsg TupleSingleton = "TupleSingleton"
 errmsg EmptyRecord = "EmptyRecord"
 -- module errors
 errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.unwords (map unMVar mv) 
-errmsg (NestedModule name) = "Nested modules are currently illegal: " <> unMVar name
+errmsg (NestedModule name') = "Nested modules are currently illegal: " <> unMVar name'
 errmsg (BadImport mv (EV v)) = "BadImport: " <> unMVar mv <> "::" <> v
-errmsg (CannotFindModule name) = "Cannot find morloc module '" <> unMVar name <> "'"
+errmsg (CannotFindModule name') = "Cannot find morloc module '" <> unMVar name' <> "'"
 errmsg CyclicDependency = "CyclicDependency"
 errmsg (SelfImport _) = "SelfImport"
 errmsg BadRealization = "BadRealization"
@@ -79,6 +79,7 @@ errmsg (MissingPacker place t)
 errmsg (MissingUnpacker place t)
   = "SerializationError: no unpacker found for type ("
   <> render (P.prettyType (unCType t)) <> ") at " <> place
+errmsg (CyclicPacker _) = "CyclicPacker"
 -- type extension errors
 errmsg (AmbiguousPacker _) = "AmbiguousPacker"
 errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
@@ -107,8 +108,8 @@ showTypeError (InstantiationError t1 t2 msg)
   $ "InstantiationError:" <+> pretty msg <> "\n  "
   <> "(" <> P.prettyGreenTypeU t1 <+> "<:=" <+> P.prettyGreenTypeU t2 <> ")"
 showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> MTP.prettyGammaIndex gi
-showTypeError (OccursCheckFail t1 t2 msg) = render $ "OccursCheckFail"
-showTypeError (NotYetImplemented t1 t2 msg) = render $ "NotYetImplemented"
+showTypeError (OccursCheckFail _ _ _) = render $ "OccursCheckFail"
+showTypeError (NotYetImplemented _ _ _) = render $ "NotYetImplemented"
 showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v
 showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> P.prettyGreenTypeU t
 showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignature for" <+> pretty src 

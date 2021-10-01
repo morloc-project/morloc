@@ -39,7 +39,7 @@ readProgram f sourceCode p =
          (CMS.runStateT (pProgram <* eof) pstate)
          (maybe "<expr>" id f)
          sourceCode of
-    Left err -> Left err
+    Left err' -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
     Right (es, _) -> Right
       $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d)
@@ -53,7 +53,7 @@ readProgram f sourceCode p =
 readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
 readType typeStr =
   case runParser (CMS.runStateT (pTypeGen <* eof) state) "" typeStr of
-    Left err -> Left err
+    Left err' -> Left err'
     Right (es, _) -> Right es
   where
     state = emptyState {stateMinPos = mkPos 1, stateAccepting = True}
@@ -61,7 +61,6 @@ readType typeStr =
 -- | The output is rolled into the final DAG of modules
 pProgram :: Parser [ExprI]
 pProgram = do
-  f <- CMS.gets stateModulePath
   L.space space1 comments empty
   setMinPos
   many1 pToplevel
@@ -72,7 +71,6 @@ pToplevel = try pModule <|> pMain
 -- | match a named module
 pModule :: Parser ExprI
 pModule = do
-  f <- CMS.gets stateModulePath
   _ <- reserved "module"
   ess <- align pTopExpr
   moduleName <- freename
@@ -249,7 +247,7 @@ pAssE = try pFunctionAssE <|> pDataAssE
 
 pSigE :: Parser ExprI
 pSigE = do
-  label <- tag freename
+  label' <- tag freename
   v <- freename
   lang <- optional (try pLang)
   setLang lang
@@ -261,7 +259,7 @@ pSigE = do
   exprI $
     SigE
       (EV v)
-      label
+      label'
       (EType
          { etype = t
          , eprop = Set.fromList props
@@ -317,8 +315,8 @@ pSrcE = do
                             , srcLang = language
                             , srcPath = srcFile
                             , srcAlias = aliasVar
-                            , srcLabel = label
-                            } | (srcVar, aliasVar, label) <- rs]
+                            , srcLabel = label'
+                            } | (srcVar, aliasVar, label') <- rs]
   where
 
   pImportSourceTerm :: Parser (Name, EVar, Maybe MT.Text)

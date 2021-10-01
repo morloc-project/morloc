@@ -95,9 +95,9 @@ setCounter i = do
   return ()
 
 writeMorlocReturn :: MorlocReturn a -> IO ()
-writeMorlocReturn ((Left err, msgs), _)
+writeMorlocReturn ((Left err', msgs), _)
   =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStrLn stderr (MT.show' err) -- write terminal failing message
+  >> MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStrLn stderr (MT.unlines msgs)
 
 -- | Execute a system call
@@ -107,11 +107,11 @@ runCommand ::
   -> MorlocMonad ()
 runCommand loc cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, _, err) <-
+  (exitCode, _, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
-    SE.ExitSuccess -> tell [MT.pack err]
-    _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
+    SE.ExitSuccess -> tell [MT.pack err']
+    _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> (\_ -> ())
 
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
@@ -124,11 +124,11 @@ runCommandWith ::
   -> MorlocMonad a
 runCommandWith loc f cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, out, err) <-
+  (exitCode, out, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> return $ f (MT.pack out)
-    _ -> throwError (SystemCallError cmd loc (MT.pack err))
+    _ -> throwError (SystemCallError cmd loc (MT.pack err'))
 
 -- | Write a object to a file in the Morloc temporary directory
 logFile ::
@@ -234,7 +234,7 @@ metaPackMap :: Int -> MorlocMonad PackMap
 metaPackMap i = do
     p <- gets statePackers
     case GMap.lookup i p of
-      (GMapJust p) -> return p
+      (GMapJust p') -> return p'
       _ -> impossible -- all indices were originally linked to pacmaps, if no map is found, not even an empty one, then there is a bug
 
 

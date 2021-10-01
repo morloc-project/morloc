@@ -15,8 +15,6 @@ import Morloc.Namespace
 import Morloc.Data.Doc hiding (putDoc)
 import Morloc.Pretty
 import Data.Text.Prettyprint.Doc.Render.Terminal (AnsiStyle)
-import qualified Text.Megaparsec as Mega
-import qualified Morloc.Data.Text as MT 
 
 
 prettyGammaIndex :: GammaIndex -> Doc AnsiStyle

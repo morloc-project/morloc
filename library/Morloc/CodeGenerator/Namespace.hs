@@ -70,17 +70,17 @@ instance Typelike TypeP where
   typeOf (NamP o n ps es) =
     let n' = pvar2tvar n
         ps' = (map pvar2tvar ps)
-        es' = [(v, typeOf t) | (PV l _ v, t) <- es]
+        es' = [(v, typeOf t) | (PV _ _ v, t) <- es]
     in NamT o n' ps' es'
 
   -- | substitute all appearances of a given variable with a given new type
-  substituteTVar v0@(TV lang v) r0 t0 = sub t0
+  substituteTVar v0 r0 t0 = sub t0
     where
       sub :: TypeP -> TypeP
-      sub t'@(UnkP _) = t'
-      sub t'@(VarP (PV lang _ v'))
-        | v0 == TV (Just lang) v' = r0
-        | otherwise = t'
+      sub t@(UnkP _) = t
+      sub t@(VarP (PV lang _ v))
+        | v0 == TV (Just lang) v = r0
+        | otherwise = t
       sub (FunP ts t) = FunP (map sub ts) (sub t)
       sub (AppP v ts) = AppP v (map sub ts)
       sub (NamP o n ps es) = NamP o n ps [(k, sub t) | (k, t) <- es]
@@ -89,6 +89,7 @@ instance Typelike TypeP where
   free (FunP ts t) = Set.unions (map free (t:ts))
   free (AppP _ ts) = Set.unions (map free ts)
   free (NamP _ _ _ es) = Set.unions (map (free . snd) es)
+  free (UnkP _) = Set.empty -- are UnkP free?
 
 pvar2tvar :: PVar -> TVar
 pvar2tvar (PV lang _ v) = TV (Just lang) v
