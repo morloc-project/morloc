@@ -15,9 +15,10 @@ to the user.
 module Morloc.Error () where
 
 import Morloc.Namespace
-import Morloc.Pretty (prettyType)
-import Morloc.Data.Doc (render)
+import Morloc.Data.Doc
+import qualified Morloc.Pretty as P
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Typecheck.Pretty as MTP
 import Text.Megaparsec.Error (errorBundlePretty)
 
 -- TODO: fix this orphan instance
@@ -52,8 +53,8 @@ errmsg NoBenefits =
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
 errmsg (GeneratorError msg) = "GeneratorError: " <> msg
-errmsg (ConcreteTypeError _) = "ConcreteTypeError"
-errmsg (GeneralTypeError _) = "ConcreteTypeError"
+errmsg (ConcreteTypeError err) = "Concrete type error: " <> showTypeError err
+errmsg (GeneralTypeError err) = "General type error: " <> showTypeError err
 errmsg ToplevelRedefinition = "ToplevelRedefinition"
 errmsg (OtherError msg) = "OtherError: " <> msg
 -- TODO: this will be a common class of errors and needs an informative message
@@ -74,10 +75,10 @@ errmsg MissingSource = "MissingSource"
 -- serialization errors
 errmsg (MissingPacker place t)
   = "SerializationError: no packer found for type ("
-  <> render (prettyType (unCType t)) <> ") at " <> place 
+  <> render (P.prettyType (unCType t)) <> ") at " <> place 
 errmsg (MissingUnpacker place t)
   = "SerializationError: no unpacker found for type ("
-  <> render (prettyType (unCType t)) <> ") at " <> place
+  <> render (P.prettyType (unCType t)) <> ") at " <> place
 -- type extension errors
 errmsg (AmbiguousPacker _) = "AmbiguousPacker"
 errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
@@ -94,3 +95,22 @@ errmsg CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
 errmsg IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
 errmsg (DagMissingKey msg) = "DagMissingKey: " <> msg
 errmsg TooManyRealizations = "TooManyRealizations"
+
+showTypeError :: TypeError -> MT.Text
+showTypeError (SubtypeError t1 t2 msg)
+  = render
+  $ "SubtypeError:" <+> pretty msg <> "\n  "
+  <> "(" <> P.prettyGreenTypeU t1 <+> "<:" <+> P.prettyGreenTypeU t2 <> ")"
+showTypeError (InstantiationError t1 t2 msg)
+  = render
+  $ "InstantiationError:" <+> pretty msg <> "\n  "
+  <> "(" <> P.prettyGreenTypeU t1 <+> "<:=" <+> P.prettyGreenTypeU t2 <> ")"
+showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> MTP.prettyGammaIndex gi
+showTypeError (OccursCheckFail t1 t2 msg) = render $ "OccursCheckFail"
+showTypeError (NotYetImplemented t1 t2 msg) = render $ "NotYetImplemented"
+showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v
+showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> P.prettyGreenTypeU t
+showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignature for" <+> pretty src 
+showTypeError (MissingGeneralSignature src) = render $ "MissingGeneralSignature for" <+> pretty src
+showTypeError (ApplicationOfNonFunction) = render $ "ApplicationOfNonFunction"
+showTypeError (TooManyArguments) = render $ "TooManyArguments"

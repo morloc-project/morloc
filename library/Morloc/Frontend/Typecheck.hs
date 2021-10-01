@@ -14,6 +14,7 @@ import Morloc.Typecheck.Internal
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
@@ -59,7 +60,7 @@ typecheckGeneral
 typecheckGeneral x = do
   s <- CMS.gets stateSignatures
   case typecheckGeneralPure (lookupType s) initialContext x of
-    (Left err) -> undefined
+    (Left (Idx _ err)) -> MM.throwError $ GeneralTypeError err
     (Right x') -> return x'
   where
     initialContext = Gamma
