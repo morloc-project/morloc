@@ -83,6 +83,7 @@ errmsg (MissingUnpacker place t)
 errmsg (AmbiguousPacker _) = "AmbiguousPacker"
 errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
 errmsg (AmbiguousCast _ _) = "AmbiguousCast"
+errmsg (IllegalPacker t) = render $ "IllegalPacker:" <+> P.prettyGreenTypeU t
 errmsg (IncompatibleRealization _) = "IncompatibleRealization"
 errmsg MissingAbstractType = "MissingAbstractType"
 errmsg ExpectedAbstractType = "ExpectedAbstractType"

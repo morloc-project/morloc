@@ -137,7 +137,7 @@ desugarType
   -> MVar
   -> TypeU
   -> MorlocMonad TypeU
-desugarType h d k t0 = f t0
+desugarType h d k = f
   where
 
   f :: TypeU -> MorlocMonad TypeU
@@ -184,9 +184,9 @@ desugarType h d k t0 = f t0
   f t0@(VarU v) =
      case Map.lookup v h of
       (Just []) -> return t0
-      (Just ts'@(t':_)) -> do
-        (_, t) <- foldlM (mergeAliases v 0) t' ts'
-        f t
+      (Just ts1@(t1:_)) -> do
+        (_, t2) <- foldlM (mergeAliases v 0) t1 ts1
+        f t2
       Nothing -> return t0
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
@@ -197,7 +197,7 @@ desugarType h d k t0 = f t0
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU v ts ) = AppU v (map (parsub pair) ts)
-  parsub pair (NamU o n ps rs) = NamU o n ps [(k, parsub pair t) | (k, t) <- rs]
+  parsub pair (NamU o n ps rs) = NamU o n ps [(k', parsub pair t) | (k', t) <- rs]
 
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
@@ -260,10 +260,10 @@ gatherPackers
 gatherPackers mv e xs =
   case findPackers e of
     (Left err) -> MM.throwError err
-    (Right m) -> do
-      let m' = Map.unionsWith (<>) (m : [m' | (_, _, (_, m')) <- xs])
-      attachPackers mv e m'
-      return (e, m')
+    (Right m0) -> do
+      let m2 = Map.unionsWith (<>) (m0 : [m1 | (_, _, (_, m1)) <- xs])
+      attachPackers mv e m2
+      return (e, m2)
 
 attachPackers :: MVar -> ExprI -> Map.Map (TVar, Int) [UnresolvedPacker] -> MorlocMonad ()
 attachPackers mv e m = do
@@ -322,18 +322,20 @@ findPackers expr
         }
 
     toPair :: (Source, EType) -> Either MorlocError ((TVar, Int), (Property, TypeU, Source))
-    toPair (src, e@(EType (FunU [a] b) _ _)) = do
+    toPair (src, e@(EType (FunU [a] _) _ _)) = do
       case packerKeyVal e of
           (Right (Just (key, t, p))) -> return (key, (p, t, src))
           (Right Nothing) -> impossible -- this is called after filtering away general types
-          Left err -> Left err
+          Left err' -> Left err'
+    toPair (_, (EType t _ _)) = Left $ IllegalPacker t
 
     packerKeyVal :: EType -> Either MorlocError (Maybe ((TVar, Int), TypeU, Property))
-    packerKeyVal e@(EType t@(FunU [a] b) p _) = case (isPacker e, isUnpacker e) of
+    packerKeyVal e@(EType t@(FunU [a] b) _ _) = case (isPacker e, isUnpacker e) of
       (True, True) -> Left $ CyclicPacker t
       (True, False) -> Right (Just (packerKey a, b, Pack))
       (False, True) -> Right (Just (packerKey b, a, Unpack))
       (False, False) -> Right Nothing
+    packerKeyVal (EType t _ _) = Left $ IllegalPacker t
 
     packerKey :: TypeU -> (TVar, Int)
     packerKey t = case splitArgs t of

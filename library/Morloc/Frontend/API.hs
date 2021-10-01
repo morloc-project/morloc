@@ -14,11 +14,6 @@ module Morloc.Frontend.API
   ) where
 
 import Morloc.Frontend.Namespace
-import qualified Control.Monad.Except as ME
-import qualified Control.Monad.Reader as MR
-import qualified Control.Monad.State as MS
-import qualified Control.Monad.Writer as MW
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
@@ -26,14 +21,13 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
 import qualified Morloc.Frontend.Typecheck as Typecheck
-import qualified Morloc.Frontend.Pretty as Pretty
 
 parse ::
      Maybe Path
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
 parse f (Code code) = case Parser.readProgram f code mempty of
-  (Left err) -> MM.throwError $ SyntaxError err
+  (Left err') -> MM.throwError $ SyntaxError err'
   (Right x) -> parseImports x
   where
     parseImports
@@ -46,7 +40,7 @@ parse f (Code code) = case Parser.readProgram f code mempty of
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
           case Parser.readProgram path' code' d of
-            (Left err) -> MM.throwError $ SyntaxError err
+            (Left err') -> MM.throwError $ SyntaxError err'
             (Right x) -> parseImports x
       where
         g = MDD.edgelist d

@@ -49,11 +49,11 @@ getFData :: (TypeP, Int) -> MorlocMonad FData
 getFData (t, i) = do
   mayName <- MM.metaName i
   case mayName of
-    (Just name) -> do
+    (Just name') -> do
       config <- MM.ask
       let lang = langOf t
       case MC.buildPoolCallBase config lang i of
-        (Just cmds) -> return (hsep cmds, pretty name, t)
+        (Just cmds) -> return (hsep cmds, pretty name', t)
         Nothing ->
           MM.throwError . GeneratorError $
           "No execution method found for language: " <> ML.showLangName (fromJust lang)
@@ -122,8 +122,8 @@ sub usage{
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name, t) = vsep
-  ( [idoc|print STDERR "  #{name}\n";|]
+usageLineT (_, name', t) = vsep
+  ( [idoc|print STDERR "  #{name'}\n";|]
   : writeTypes (gtypeOf t)
   )
 
@@ -156,11 +156,11 @@ writeType (Nothing) t = [idoc|print STDERR q{    return: #{prettyType t}}, "\n";
 
 
 functionT :: FData -> MDoc
-functionT (cmd, name, t) =
+functionT (cmd, name', t) =
   [idoc|
-sub call_#{name}{
+sub call_#{name'}{
     if(scalar(@_) != #{pretty n}){
-        print STDERR "Expected #{pretty n} arguments to '#{name}', given " . 
+        print STDERR "Expected #{pretty n} arguments to '#{name'}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }

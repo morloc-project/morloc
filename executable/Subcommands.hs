@@ -17,7 +17,6 @@ import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
-import qualified Morloc.Frontend.API as F
 
 
 runMorloc :: CliCommand -> IO () 

@@ -424,7 +424,7 @@ data MorlocError
   | AmbiguousPacker TVar
   | AmbiguousUnpacker TVar
   | AmbiguousCast TVar TVar
-  | IllegalPacker EVar TypeU
+  | IllegalPacker TypeU
   | CyclicPacker TypeU
   | IncompatibleRealization MVar
   | MissingAbstractType
