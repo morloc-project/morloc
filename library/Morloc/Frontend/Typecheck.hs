@@ -193,6 +193,9 @@ synthE l i g0 (AppS f xs) = do
   -- put the AppS back together with the synthesized function and input expressions
   return (g3, finalType, AppS uFunExpr inputExprs)
 
+synthE l i g0 (LamS [] x0) = do 
+  (g1, t1, x1) <- synthG l g0 x0
+  return (g1, FunU [] t1, LamS [] x1)
 synthE l i g0 (LamS (v@(EV n):vs) x) = do
   let mark = MarkG (TV Nothing n)
       g1 = g0 +> mark
@@ -344,6 +347,7 @@ application
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
+application g0 t0 e0@(SAnno (Many []) _) = return (g0, t0, e0)
 application g0 t0 (SAnno (Many ((e0, i):es0)) m@(Idx j _)) = do
   (g1, t1, e1) <- applicationExpr j g0 t0 e0
   (g2, t2, e2) <- application g1 t1 (SAnno (Many es0) m)

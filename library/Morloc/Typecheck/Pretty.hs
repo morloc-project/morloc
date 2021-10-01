@@ -30,3 +30,4 @@ prettyGammaIndex (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> prettyGre
 prettyGammaIndex (MarkG tv) = "MarkG:" <+> pretty tv
 prettyGammaIndex (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
 prettyGammaIndex (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> prettyGreenTypeU t1 <+> prettyGreenTypeU t2
+prettyGammaIndex (AnnG v t) = pretty v <+> "::" <+> prettyGreenTypeU t
