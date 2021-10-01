@@ -81,7 +81,7 @@ pModule = do
 -- | match an implicit "main" module
 pMain :: Parser ExprI
 pMain = do
-  ess <- many1 pTopExpr
+  ess <- align pTopExpr -- FYI - using `many` rather than `many1` makes infinite loop
   exprI $ ModE (MV "Main") (concat ess)
 
 -- | Expressions including ones that are allowed only at the top-level of a scope

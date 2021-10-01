@@ -114,14 +114,15 @@ setMinPos = do
   level <- L.indentLevel
   CMS.put (s { stateMinPos = level })
 
--- Require elements all start on the same line as the first element
+-- | Require elements all start on the same line as the first element. At least
+-- one expression must match.
 align :: Parser a -> Parser [a] 
 align p = do
   s <- CMS.get
   let minPos = stateMinPos s 
       accept = stateAccepting s
   curPos <- L.indentLevel
-  xs <- many (CMS.put (s {stateMinPos = curPos, stateAccepting = True}) >> p)
+  xs <- many1 (CMS.put (s {stateMinPos = curPos, stateAccepting = True}) >> p)
   -- put everything back the way it was
   CMS.put (s {stateMinPos = minPos, stateAccepting = accept})
   return xs
