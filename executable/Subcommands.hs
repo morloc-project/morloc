@@ -15,11 +15,9 @@ import Morloc.Namespace
 import qualified Morloc.Config as Config
 import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
-import Text.Megaparsec.Error (errorBundlePretty)
 
 
 runMorloc :: CliCommand -> IO () 
@@ -61,10 +59,10 @@ cmdInstall args verbosity conf =
   MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
-      let name = installModuleName args
+      let name' = installModuleName args
       if installGithub args
-        then Mod.installModule (Mod.GithubRepo name)
-        else Mod.installModule (Mod.CoreGithubRepo name)
+        then Mod.installModule (Mod.GithubRepo name')
+        else Mod.installModule (Mod.CoreGithubRepo name')
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
@@ -78,6 +76,6 @@ cmdMake args verbosity config = do
 
 -- | run the typechecker on a module but do not build it
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
-cmdTypecheck args verbosity config = do
-  (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
+cmdTypecheck args _ _ = do
+  (_, _) <- readScript (typecheckExpression args) (typecheckScript args)
   return ()

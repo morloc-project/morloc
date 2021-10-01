@@ -347,10 +347,10 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
   f args (AppM (SrcM (Function inputs output) src) xs) = do
     (mss', xs', pss) <- mapM (f args) xs |>> unzip3
     let
-        name = pretty $ srcName src
-        mangledName = mangleSourceName name
+        name' = pretty $ srcName src
+        mangledName = mangleSourceName name'
         inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
-        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
+        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name'};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
 
   f _ (AppM _ _) = error "Can only apply functions"
@@ -442,11 +442,11 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 staticCast :: RecMap -> TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
-staticCast recmap t args name = do
+staticCast recmap t args name' = do
   let output = showTypeM recmap t
       inputs = map (argTypeM recmap) args
       argList = cat (punctuate "," inputs)
-  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name})|]
+  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
 
 argTypeM :: RecMap -> Argument -> MDoc
 argTypeM _ (SerialArgument _ _) = serialType
@@ -477,7 +477,7 @@ showType recmap (NamP _ v@(PV _ _ "struct") _ rs) =
   case lookup (v, map fst rs) recmap of
     (Just rec) -> recName rec <> typeParams recmap (zip (map snd (recFields rec)) (map snd rs))
     Nothing -> error "Should not happen"
-showType recmap (NamP _ (PV _ _ s) ps _) =
+showType _ (NamP _ (PV _ _ s) ps _) =
     pretty s <>  encloseSep "<" ">" "," (map prettyPVar ps)
 
 typeParams :: RecMap -> [(Maybe TypeP, TypeP)] -> MDoc

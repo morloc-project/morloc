@@ -49,8 +49,6 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
@@ -181,13 +179,17 @@ realize s0 = do
     -> MorlocMonad ([SAnno (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
   scoreMany langs xs0 = do
     xs1 <- mapM (scoreSAnno langs) xs0
-    return (xs1, scoreMany xs1)
+    return (xs1, scoreMany' xs1)
     where
-      scoreMany :: [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
-      scoreMany xs =
-        let pairss = [(maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs'] | SAnno (Many xs') _ <- xs]
-            langs = unique (langs <> (concat . map (map fst)) pairss)
-        in [(l1, sum [maximum [score + Lang.pairwiseCost l1 l2 | (l2, score) <- pairs] | pairs <- pairss]) | l1 <- langs]
+      scoreMany' :: [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
+      scoreMany' xs =
+        let pairss = [ (maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
+                     | SAnno (Many xs') _ <- xs]
+            langs' = unique (langs' <> (concat . map (map fst)) pairss)
+        in [(l1, sum [ maximum [ score + Lang.pairwiseCost l1 l2
+                               | (l2, score) <- pairs]
+                     | pairs <- pairss])
+           | l1 <- langs']
 
 
   collapseSAnno
@@ -197,7 +199,7 @@ realize s0 = do
   collapseSAnno l1 (SAnno (Many es) t) = do
     e <- case maxBy (\(_, Idx _ ss) -> maximumMay [cost l1 l2 s | (l2, s) <- ss]) es of
       Nothing -> MM.throwError . CallTheMonkeys $ "A SAnno must contain an SExpr"
-      (Just x@(e, Idx _ ss)) -> collapseExpr (fmap fst (maxBy snd ss)) x
+      (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (maxBy snd ss)) x
     return (SAnno (One e) t)
 
 
@@ -298,11 +300,11 @@ makeGAST = mapCM (\(Idx _ _) -> return ())
 generalSerial :: SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
 generalSerial x0@(SAnno _ (Idx i t)) = do
   mayName <- MM.metaName i
-  name <- case mayName of
+  n <- case mayName of
     Nothing -> MM.throwError . OtherError $ "No general type found for call-free function"
-    (Just name) -> return name
+    (Just n') -> return n'
   let base = NexusCommand {
-      commandName = name -- EVar -- user-exposed subcommand name in the nexus
+      commandName = n -- EVar -- user-exposed subcommand name in the nexus
     , commandType = t -- Type -- the general type of the expression
     , commandJson = (dquotes "_") -- MDoc -- JSON output with null's where values will be replaced
     , commandArgs = [] -- [EVar] -- list of function arguments
@@ -332,21 +334,21 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
     -- will be set in the nexus
-    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ g)) k, _)) _) = undefined -- FIXME record names
+    generalSerial' _ _ (SAnno (One (AccS (SAnno (One (VarS _, _)) _) _, _)) _) = undefined -- FIXME record names
       -- case g of
       --   (NamT {}) ->
       --     return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
       --   _ -> error "Attempted to use key access to non-record"
     generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
-                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+                        [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base 
         { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (TupS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
-                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+                        [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
         { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
@@ -367,9 +369,9 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
       return $ ncmd { commandArgs = vs }
     generalSerial' base ps (SAnno (One (VarS (EV v), _)) _) =
       return $ base { commandSubs = [(ps, v, [])] }
-    generalSerial' _ _ (SAnno (One _) (Idx _ t)) = do
+    generalSerial' _ _ (SAnno (One _) (Idx _ gt)) = do
       MM.throwError . OtherError . render $
-        "Cannot serialize general type:" <+> prettyType t
+        "Cannot serialize general type:" <+> prettyType gt
 
 
 -- | Add arguments that are required for each term. Unneeded arguments are
@@ -377,11 +379,11 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
 parameterize
   :: SAnno Int One (Indexed TypeP)
   -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
-parameterize (SAnno (One (LamS vs x, c@(Idx _ t@(FunP inputs _)))) m) = do
+parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   let args0 = zip vs $ zipWith makeArgument [0..] inputs 
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
-parameterize (SAnno (One (CallS src, c@(Idx _ t@(FunP inputs _)))) m) = do
+parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
   let vs = map EV (freshVarsAZ [])
       args0 = zipWith makeArgument [0..] inputs
   return $ SAnno (One (CallS src, (c, zip vs args0))) m
@@ -428,12 +430,14 @@ parameterize' args (SAnno (One (NamS entries, c)) m) = do
   let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
-parameterize' args (SAnno (One (LamS vs x, c@(Idx _ t@(FunP inputs _)))) m) = do
+parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   let args' = [(v, r) | (v, r) <- args, notElem v vs]
       startId = maximum (map (argId . snd) args) + 1
       args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
+-- LamS MUST have a functional type, deviations would have been caught by the typechecker
+parameterize' _ (SAnno (One (LamS _ _, _)) _) = impossible
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
@@ -567,9 +571,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
   express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
-    name <- MM.metaName m
+    name' <- MM.metaName m
     MM.throwError . CallTheMonkeys . render $
-      "Invalid input to express' in module (" <> viaShow name <> ") - type: " <> prettyTypeP t
+      "Invalid input to express' in module (" <> viaShow name' <> ") - type: " <> prettyTypeP t
 
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
@@ -853,16 +857,6 @@ mapCM f (SAnno (One (StrS x, c)) g) = do
 
 sannoSnd :: SAnno g One (a, b) -> b
 sannoSnd (SAnno (One (_, (_, x))) _) = x
-
-unpackSAnno :: (SExpr g One c -> g -> c -> MorlocMonad a) -> SAnno g One c -> MorlocMonad [a]
-unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = (:) <$> f e g c <*> unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(LstS xs),     c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(TupS xs),    c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(NamS entries), c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) (map snd entries)
-unpackSAnno f (SAnno (One (e@(LamS _ x),     c)) g) = (:) <$> f e g c <*> unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(AppS x xs),    c)) g) = (:) <$> f e g c <*> conmapM (unpackSAnno f) (x:xs)
-unpackSAnno f (SAnno (One (e, c)) g)                = f e g c |>> return
-
 
 -- generate infinite list of fresh variables of form
 -- ['a','b',...,'z','aa','ab',...,'zz',...]

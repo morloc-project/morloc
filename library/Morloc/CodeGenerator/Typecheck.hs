@@ -14,14 +14,11 @@ module Morloc.CodeGenerator.Typecheck
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Typecheck.Internal
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
-import qualified Morloc.Frontend.PartialOrder as P
+import Morloc.Frontend.PartialOrder ()
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -33,11 +30,12 @@ typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 typecheck e = do
-  packers <- MM.gets statePackers
+  -- -- FIXME: should typechecking here consider the packers?
+  -- packers <- MM.gets statePackers
   e' <- retrieveTypes e
   let g0 = Gamma {gammaCounter = 0, gammaContext = []}
   case synth g0 e' of
-    (Left err) -> MM.throwError . ConcreteTypeError $ err
+    (Left err') -> MM.throwError . ConcreteTypeError $ err'
     (Right (_, _, e'')) -> weaveAndResolve e''
 
 
@@ -46,18 +44,18 @@ typecheck e = do
 retrieveTypes
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Lang, [EType])))
-retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
-  ts <- case x of
+retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
+  ts <- case x0 of
     (CallS src) -> do
       mayts <- MM.metaTermTypes j
       case fmap termConcrete mayts of
-        (Just ts) -> case [es | (_, src', es, _) <- ts, src == src] of
+        (Just ts) -> case [es | (_, src', es, _) <- ts, src' == src] of
           [es] -> return es
           _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
         Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
     _ -> return []
 
-  x' <- case x of
+  x1 <- case x0 of
     UniS -> return UniS
     (VarS v) -> return $ VarS v
     (AccS x k) -> AccS <$> retrieveTypes x <*> pure k
@@ -73,15 +71,15 @@ retrieveTypes (SAnno (One (x, Idx i lang)) g@(Idx j _)) = do
       return $ NamS (zip (map fst rs) xs')
     (CallS src) -> return $ CallS src
 
-  return $ SAnno (One (x', Idx i (lang, ts))) g
+  return $ SAnno (One (x1, Idx i (lang, ts))) g
 
 
 weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
+weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
   pt <- weaveResolvedTypes gt (typeOf ct)
-  x' <- case x of
+  x1 <- case x0 of
     UniS -> return UniS
     (VarS v) -> return $ VarS v
     (AccS x k) -> AccS <$> weaveAndResolve x <*> pure k
@@ -96,7 +94,7 @@ weaveAndResolve (SAnno (One (x, Idx i ct)) (Idx j gt)) = do
       xs <- mapM (weaveAndResolve . snd) rs
       return $ NamS (zip (map fst rs) xs)
     (CallS src) -> return $ CallS src
-  return $ SAnno (One (x', Idx i pt)) j
+  return $ SAnno (One (x1, Idx i pt)) j
 
 -- Concrete typechecking must deal with primitive defaults, containter
 -- defaults, and function overloading.
@@ -125,9 +123,9 @@ synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
   = check g (SAnno (One (x, Idx i (l, []))) m) ct
 
 -- AnnoMany=>
-synth g (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
-  let (g', t) = newvarRich [] [t | (EType t _ _) <- cts] (Just l) g
-  in check g' (SAnno (One (x, Idx i (l, []))) m) t
+synth g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
+  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] (Just l) g0
+  in check g1 (SAnno (One (x, Idx i (l, []))) m) t
 
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
 synth g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
@@ -154,25 +152,25 @@ synthExpr
 -- Uni=>
 synthExpr lang g UniS = do
   let ts = MLD.defaultNull (Just lang)
-      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+      (g', t) = newvarRich [] ts (Just lang) g
   return (g' +> t, t, UniS)
 
 -- Num=>
 synthExpr lang g (NumS x) = do
   let ts = MLD.defaultNumber (Just lang)
-      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+      (g', t) = newvarRich [] ts (Just lang) g
   return (g' +> t, t, NumS x)
 
 -- Str=>
 synthExpr lang g (StrS x) = do
   let ts = MLD.defaultString (Just lang)
-      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+      (g', t) = newvarRich [] ts (Just lang) g
   return (g' +> t, t, StrS x)
 
 -- Log=>
 synthExpr lang g (LogS x) = do
   let ts = MLD.defaultBool (Just lang)
-      (g', t) = newvarRich [] (MLD.defaultNull (Just lang)) (Just lang) g
+      (g', t) = newvarRich [] ts (Just lang) g
   return (g' +> t, t, LogS x)
 
 -- In SAnno, a VarS can only be a bound variable, thus it should only ever be
@@ -180,21 +178,26 @@ synthExpr lang g (LogS x) = do
 synthExpr _ _ (VarS v) = Left $ UnboundVariable v
 
 -- Acc=>
-synthExpr lang g0 (AccS x k) = do
+synthExpr _ g0 (AccS x k) = do
   (g1, tx, x1) <- synth g0 x
   tk <- accessRecord k tx
   return (g1, tk, AccS x1 k)
   where
     accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
-    accessRecord k r@(NamU _ _ _ rs) = case lookup k rs of
+    accessRecord k' r@(NamU _ _ _ rs) = case lookup k' rs of
       (Just t) -> return t
-      Nothing -> Left $ KeyError k r
-    accessRecord k r = Left $ KeyError k r
+      Nothing -> Left $ KeyError k' r
+    accessRecord k' r = Left $ KeyError k' r
 
 -- List=>
 --
 -- The elements in xs are all of the same general type, however they may be in
 -- different languages.
+synthExpr lang g0 (LstS []) = do
+  let (g1, elementType) = newvar (Just lang) g0
+      defaultListTypes = MLD.defaultList (Just lang) elementType
+      (g2, listType) = newvarRich [elementType] defaultListTypes (Just lang) g1
+  return (g2, listType, LstS [])
 synthExpr lang g0 (LstS (x:xs)) = do
   -- here t1 is the element type
   (g1, t1, x1) <- synth g0 x
@@ -246,7 +249,7 @@ synthExpr lang g0 (NamS ((k,x):rs)) = do
 
   -- merge the head with tail
   (g3, t3) <- case tailType of
-    (ExistU _ _ [NamU _ _ _ rs]) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs)) (Just lang) g2
+    (ExistU _ _ [NamU _ _ _ rs']) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs')) (Just lang) g2
     _ -> impossible -- the record was created by newvarRich which can only return existentials
 
   tailExprs <- case tailExpr of
@@ -258,7 +261,7 @@ synthExpr lang g0 (NamS ((k,x):rs)) = do
 -- Lam=>
 --
 -- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr lang g0 (LamS [] x0) = do
+synthExpr _ g0 (LamS [] x0) = do
   (g1, bodyType, bodyExpr) <- synth g0 x0
   return (g1, FunU [] bodyType, LamS [] bodyExpr)
 synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
@@ -273,7 +276,7 @@ synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
     _ -> impossible -- LamS type is always a function (see base case)
 
   fullExpr <- case tailExpr of
-    (LamS vs x) -> return $ LamS (v:vs) x
+    (LamS vs' x') -> return $ LamS (v:vs') x'
     _ -> impossible -- synthExpr does not change data constructors
 
   g4 <- cut mark g3
@@ -282,7 +285,7 @@ synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
 
 -- App=>
 --
-synthExpr lang g0 (AppS f []) = do
+synthExpr _ g0 (AppS f []) = do
   (g1, t1, f1) <- synth g0 f
   return (g1, t1, AppS f1 [])
 synthExpr lang g0 (AppS f xs) = do
@@ -306,12 +309,13 @@ synthExpr lang g0 (AppS f xs) = do
   (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
     -- there are more inputs than arguments: partial application
     GT -> case splitAt (length xs) ts of
-      (args, remainder) -> checkExpr lang g2 (TupS xs) tupleType |>> (,) remainder
+      (_, remainder) -> checkExpr lang g2 (TupS xs) tupleType |>> (,) remainder
     -- there are the same number of inputs and arguments: full application
     EQ -> checkExpr lang g2 (TupS xs) tupleType |>> (,) []
     -- there are more arguments than inputs: TYPE ERROR!!!
     LT -> Left TooManyArguments
 
+  -- FIXME: this is NOT USED ... bug?
   -- extract the types of the input arguments
   inputTypes <- case argTupleType of
     (AppU _ ts') -> return ts'
@@ -327,7 +331,7 @@ synthExpr lang g0 (AppS f xs) = do
     -- full application, just return the output type
     [] -> return outputType
     -- partial application, create a new function with unapplied types
-    ts -> return (FunU ts outputType)
+    ts' -> return (FunU ts' outputType)
 
   -- put the AppS back together with the synthesized function and input expressions
   return (g3, finalType, AppS uFunExpr inputExprs)
@@ -410,7 +414,7 @@ checkExpr
 --  g1 |- \x.e <= A -> B -| g2
 --
 -- t2 will have form (FunU [] b) if the function is fully applied, but partial application is allowed
-checkExpr lang g1 (LamS [] e1) (FunU as1 b1) = do
+checkExpr _ g1 (LamS [] e1) (FunU as1 b1) = do
   (g2, b2, e2) <- check g1 e1 b1
   return (g2, FunU as1 b2, LamS [] e2)
 checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do

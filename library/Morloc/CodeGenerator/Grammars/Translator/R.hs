@@ -231,7 +231,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     (ms, e', ps) <- f args e
     return (ms, e' <> "$" <> pretty k, ps)
 
-  f args (ListM t es) = undefined -- do
+  f _ (ListM _ _) = undefined -- do
     -- (mss', es', rss) <- mapM (f args) es |>> unzip3
     -- x' <- return $ case t of
     --   (Native (CatP _ (CatP _ (VarP et) _))) -> case et of
