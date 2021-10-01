@@ -639,107 +639,106 @@ orderInvarianceTests =
 typeOrderTests =
   testGroup
     "Tests of type partial ordering (subtype)"
-    [ testEqual "partial order test" 1 1 ]
-    -- [ testTrue
-    --     "a <: Num"
-    --     (MP.isSubtypeOf (forall ["a"] (var "a")) num)
-    -- , testFalse
-    --     "Num !< forall a . a"
-    --     (MP.isSubtypeOf num (forall ["a"] (var "a")))
-    -- , testTrue
-    --     "forall a . (Num, a) <: (Num, Str)"
-    --     (MP.isSubtypeOf (forall ["a"] (tuple [num, var "a"])) (tuple [num, str]))
-    -- , testTrue
-    --     "forall a b . (a, b) <: (Num, Str)"
-    --     (MP.isSubtypeOf (forall ["a", "b"] (tuple [var "a", var "b"])) (tuple [num, str]))
-    -- , testTrue
-    --     "forall a . (Num, a) <: forall b . (Num, b)"
-    --     (MP.isSubtypeOf
-    --       (forall ["a"] (tuple [num, var "a"]))
-    --       (forall ["b"] (tuple [num, var "b"])))
-    -- , testTrue
-    --     "forall a . a <: (Num, Str)"
-    --     (MP.isSubtypeOf (forall ["a"] (var "a")) (tuple [num, str]))
-    -- , testTrue
-    --     "forall a . a <: forall a b . (a, b)"
-    --     (MP.isSubtypeOf (forall ["a"] (var "a")) (forall ["a", "b"] (tuple [var "a", var "b"])))
-    -- -- cannot compare
-    -- , testFalse
-    --     "[Num] !< Num"
-    --     (MP.isSubtypeOf (lst num) num)
-    -- , testFalse
-    --     "Num !< [Num]"
-    --     (MP.isSubtypeOf num (lst num))
-    -- -- partial order of types
-    -- , testTrue
-    --     "forall a . [a] <= [Int]"
-    --     ((forall ["a"] (lst (var "a"))) MP.<= (lst (var "a")))
-    -- , testFalse
-    --     "[Int] !< forall a . [a]"
-    --     ((lst (var "a")) MP.<= (forall ["a"] (lst (var "a"))))
-    -- , testTrue
-    --     "forall a . (Num, a) <= (Num, Bool)"
-    --     ((forall ["a"] (tuple [num, var "a"])) MP.<= (tuple [num, bool]))
-    -- , testFalse
-    --     "(Num, Bool) !<= forall a . (Num, a)"
-    --     ((tuple [num, bool]) MP.<= (forall ["a"] (tuple [num, var "a"])))
-    -- , testTrue
-    --     "forall a b . (a, b) <= forall c . (Num, c)"
-    --     ((forall ["a", "b"] (tuple [var "a", var "b"])) MP.<= (forall ["c"] (tuple [num, var "c"])))
-    -- , testFalse
-    --     "forall c . (Num, c) !<= forall a b . (a, b)"
-    --     ((forall ["c"] (tuple [num, var "c"])) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
-    -- , testTrue
-    --     "forall a . a <= forall a b . (a, b)"
-    --     ((forall ["a"] (var "a")) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
-    -- -- test "mostSpecific"
-    -- , testEqual
-    --     "mostSpecific [Num, Str, forall a . a] = [Num, Str]"
-    --     (MP.mostSpecific [num, str, forall ["a"] (var "a")])
-    --     [num, str]
-    -- -- test "mostGeneral"
-    -- , testEqual
-    --     "mostGeneral [Num, Str, forall a . a] = forall a . a"
-    --     (MP.mostGeneral [num, str, forall ["a"] (var "a")])
-    --     [forall ["a"] (var "a")]
-    -- -- test mostSpecificSubtypes
-    -- , testEqual
-    --     "mostSpecificSubtypes: Num against [forall a . a]"
-    --     (MP.mostSpecificSubtypes num [forall ["a"] (var "a")])
-    --     [forall ["a"] (var "a")]
-    --
-    -- -- test mostSpecificSubtypes different languages
-    -- , testEqual
-    --     "mostSpecificSubtypes: different languages"
-    --     (MP.mostSpecificSubtypes (varc RLang "num") [forallc CLang ["a"] (var "a")])
-    --     []
-    --
-    -- -- test mostSpecificSubtypes for tuples
-    -- , testEqual
-    --     "mostSpecificSubtypes: tuples"
-    --     (MP.mostSpecificSubtypes
-    --       (tuple [num, num])
-    --       [ forall ["a"] (var "a")
-    --       , forall ["a", "b"] (tuple [var "a", var "b"])
-    --       , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
-    --       ]
-    --     )
-    --     [forall ["a", "b"] (tuple [var "a", var "b"])]
-    --
-    -- -- test mostSpecificSubtypes for tuples
-    -- , testEqual
-    --     "mostSpecificSubtypes: with partially generic tuples"
-    --     (MP.mostSpecificSubtypes
-    --       (forall ["a"] (tuple [num, var "a"]))
-    --       [ forall ["a"] (var "a")
-    --       , forall ["a", "b"] (tuple [var "a", var "b"])
-    --       , forall ["a"] (tuple [num, var "a"])
-    --       , forall ["a"] (tuple [num, bool])
-    --       , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
-    --       ]
-    --     )
-    --     [forall ["a"] (tuple [num, var "a"])]
-    -- ]
+    [ testTrue
+        "a <: Num"
+        (MP.isSubtypeOf (forall ["a"] (var "a")) num)
+    , testFalse
+        "Num !< forall a . a"
+        (MP.isSubtypeOf num (forall ["a"] (var "a")))
+    , testTrue
+        "forall a . (Num, a) <: (Num, Str)"
+        (MP.isSubtypeOf (forall ["a"] (tuple [num, var "a"])) (tuple [num, str]))
+    , testTrue
+        "forall a b . (a, b) <: (Num, Str)"
+        (MP.isSubtypeOf (forall ["a", "b"] (tuple [var "a", var "b"])) (tuple [num, str]))
+    , testTrue
+        "forall a . (Num, a) <: forall b . (Num, b)"
+        (MP.isSubtypeOf
+          (forall ["a"] (tuple [num, var "a"]))
+          (forall ["b"] (tuple [num, var "b"])))
+    , testTrue
+        "forall a . a <: (Num, Str)"
+        (MP.isSubtypeOf (forall ["a"] (var "a")) (tuple [num, str]))
+    , testTrue
+        "forall a . a <: forall a b . (a, b)"
+        (MP.isSubtypeOf (forall ["a"] (var "a")) (forall ["a", "b"] (tuple [var "a", var "b"])))
+    -- cannot compare
+    , testFalse
+        "[Num] !< Num"
+        (MP.isSubtypeOf (lst num) num)
+    , testFalse
+        "Num !< [Num]"
+        (MP.isSubtypeOf num (lst num))
+    -- partial order of types
+    , testTrue
+        "forall a . [a] <= [Int]"
+        ((forall ["a"] (lst (var "a"))) MP.<= (lst (var "a")))
+    , testFalse
+        "[Int] !< forall a . [a]"
+        ((lst (var "a")) MP.<= (forall ["a"] (lst (var "a"))))
+    , testTrue
+        "forall a . (Num, a) <= (Num, Bool)"
+        ((forall ["a"] (tuple [num, var "a"])) MP.<= (tuple [num, bool]))
+    , testFalse
+        "(Num, Bool) !<= forall a . (Num, a)"
+        ((tuple [num, bool]) MP.<= (forall ["a"] (tuple [num, var "a"])))
+    , testTrue
+        "forall a b . (a, b) <= forall c . (Num, c)"
+        ((forall ["a", "b"] (tuple [var "a", var "b"])) MP.<= (forall ["c"] (tuple [num, var "c"])))
+    , testFalse
+        "forall c . (Num, c) !<= forall a b . (a, b)"
+        ((forall ["c"] (tuple [num, var "c"])) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
+    , testTrue
+        "forall a . a <= forall a b . (a, b)"
+        ((forall ["a"] (var "a")) MP.<= (forall ["a", "b"] (tuple [var "a", var "b"])))
+    -- test "mostSpecific"
+    , testEqual
+        "mostSpecific [Num, Str, forall a . a] = [Num, Str]"
+        (MP.mostSpecific [num, str, forall ["a"] (var "a")])
+        [num, str]
+    -- test "mostGeneral"
+    , testEqual
+        "mostGeneral [Num, Str, forall a . a] = forall a . a"
+        (MP.mostGeneral [num, str, forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
+    -- test mostSpecificSubtypes
+    , testEqual
+        "mostSpecificSubtypes: Num against [forall a . a]"
+        (MP.mostSpecificSubtypes num [forall ["a"] (var "a")])
+        [forall ["a"] (var "a")]
+
+    -- test mostSpecificSubtypes different languages
+    , testEqual
+        "mostSpecificSubtypes: different languages"
+        (MP.mostSpecificSubtypes (varc RLang "num") [forallc CLang ["a"] (var "a")])
+        []
+
+    -- test mostSpecificSubtypes for tuples
+    , testEqual
+        "mostSpecificSubtypes: tuples"
+        (MP.mostSpecificSubtypes
+          (tuple [num, num])
+          [ forall ["a"] (var "a")
+          , forall ["a", "b"] (tuple [var "a", var "b"])
+          , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+          ]
+        )
+        [forall ["a", "b"] (tuple [var "a", var "b"])]
+
+    -- test mostSpecificSubtypes for tuples
+    , testEqual
+        "mostSpecificSubtypes: with partially generic tuples"
+        (MP.mostSpecificSubtypes
+          (forall ["a"] (tuple [num, var "a"]))
+          [ forall ["a"] (var "a")
+          , forall ["a", "b"] (tuple [var "a", var "b"])
+          , forall ["a"] (tuple [num, var "a"])
+          , forall ["a"] (tuple [num, bool])
+          , forall ["a", "b", "c"] (tuple [var "a", var "b", var "c"])
+          ]
+        )
+        [forall ["a"] (tuple [num, var "a"])]
+    ]
 
 unitTypeTests =
   testGroup
