@@ -772,59 +772,59 @@ unitTypeTests =
         "primitive string annotation"
         "\"this is a string literal\" :: Str"
         str
-    , assertGeneralType "primitive declaration" "x = True\n4.2" num
-    -- declarations
-    , assertGeneralType
-        "identity function declaration and application"
-        "f x = x\nf 42"
-        num
-    , assertGeneralType
-        "snd function declaration and application"
-        "snd x y = y\nsnd True 42"
-        num
+    -- , assertGeneralType "primitive declaration" "x = True\n4.2" num
+    -- -- declarations
+    -- , assertGeneralType
+    --     "identity function declaration and application"
+    --     "f x = x\nf 42"
+    --     num
+    -- , assertGeneralType
+    --     "snd function declaration and application"
+    --     "snd x y = y\nsnd True 42"
+    --     num
+    --
+    -- , assertGeneralType
+    --     "explicit annotation within an application"
+    --     "f :: Num -> Num\nf (42 :: Num)"
+    --     num
 
-    , assertGeneralType
-        "explicit annotation within an application"
-        "f :: Num -> Num\nf (42 :: Num)"
-        num
-
-    -- lambdas
-    -- , assertTerminalExpr
-    --     "functions return lambda expressions"
-    --     "\\x -> 42"
-    --     (LamE [EV "x"] (ExprI 1 (NumE 42.0)))
-    , assertGeneralType
-        "functions can be passed"
-        "g f = f 42\ng"
-        (forall ["a"] (fun [(fun [num, var "a"]), var "a"]))
-    , assertGeneralType
-        "function with parameterized types"
-        "f :: A B -> C\nf"
-        (fun [arr "A" [var "B"], var "C"])
-    , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" num
-    , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
-    , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
-    , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" num
-    , assertGeneralType
-        "unapplied lambda, polymorphic (1)"
-        "(\\x -> True)"
-        (forall ["a"] (fun [var "a", bool]))
-    , assertGeneralType
-        "unapplied lambda, polymorphic (2)"
-        "(\\x y -> x) :: a -> b -> a"
-        (forall ["a", "b"] (fun [var "a", var "b", var "a"]))
-    , assertGeneralType
-        "annotated, fully applied lambda"
-        "((\\x -> x) :: a -> a) True"
-        bool
-    , assertGeneralType
-        "annotated, partially applied lambda"
-        "((\\x y -> x) :: a -> b -> a) True"
-        (forall ["a"] (fun [var "a", bool]))
-    , assertGeneralType
-        "recursive functions are A-OK"
-        "\\f -> f 5"
-        (forall ["a"] (fun [fun [num, var "a"], var "a"]))
+    -- -- lambdas
+    -- -- , assertTerminalExpr
+    -- --     "functions return lambda expressions"
+    -- --     "\\x -> 42"
+    -- --     (LamE [EV "x"] (ExprI 1 (NumE 42.0)))
+    -- , assertGeneralType
+    --     "functions can be passed"
+    --     "g f = f 42\ng"
+    --     (forall ["a"] (fun [(fun [num, var "a"]), var "a"]))
+    -- , assertGeneralType
+    --     "function with parameterized types"
+    --     "f :: A B -> C\nf"
+    --     (fun [arr "A" [var "B"], var "C"])
+    -- , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" num
+    -- , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
+    -- , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
+    -- , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" num
+    -- , assertGeneralType
+    --     "unapplied lambda, polymorphic (1)"
+    --     "(\\x -> True)"
+    --     (forall ["a"] (fun [var "a", bool]))
+    -- , assertGeneralType
+    --     "unapplied lambda, polymorphic (2)"
+    --     "(\\x y -> x) :: a -> b -> a"
+    --     (forall ["a", "b"] (fun [var "a", var "b", var "a"]))
+    -- , assertGeneralType
+    --     "annotated, fully applied lambda"
+    --     "((\\x -> x) :: a -> a) True"
+    --     bool
+    -- , assertGeneralType
+    --     "annotated, partially applied lambda"
+    --     "((\\x y -> x) :: a -> b -> a) True"
+    --     (forall ["a"] (fun [var "a", bool]))
+    -- , assertGeneralType
+    --     "recursive functions are A-OK"
+    --     "\\f -> f 5"
+    --     (forall ["a"] (fun [fun [num, var "a"], var "a"]))
 
     -- -- applications
     -- , assertTerminalType

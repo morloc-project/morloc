@@ -187,7 +187,7 @@ desugarType h d k t0 = f t0
       (Just ts'@(t':_)) -> do
         (_, t) <- foldlM (mergeAliases v 0) t' ts'
         f t
-      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
+      Nothing -> return t0
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
