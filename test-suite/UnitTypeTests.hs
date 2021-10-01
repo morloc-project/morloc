@@ -767,11 +767,11 @@ unitTypeTests =
         "\"this is a string literal\" :: Str"
         str
     , assertGeneralType "primitive declaration" "x = True\n4.2" num
-    -- -- declarations
-    -- , assertGeneralType
-    --     "identity function declaration and application"
-    --     "f x = x\nf 42"
-    --     num
+    -- declarations
+    , assertGeneralType
+        "identity function declaration and application"
+        "f x = x\nf 42"
+        num
     -- , assertGeneralType
     --     "snd function declaration and application"
     --     "snd x y = y\nsnd True 42"
@@ -781,7 +781,7 @@ unitTypeTests =
     --     "explicit annotation within an application"
     --     "f :: Num -> Num\nf (42 :: Num)"
     --     num
-
+    --
     -- -- lambdas
     -- -- , assertTerminalExpr
     -- --     "functions return lambda expressions"
