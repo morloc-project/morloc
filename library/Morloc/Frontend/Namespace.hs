@@ -64,7 +64,7 @@ mapExprM f e0 = g e0 where
   g (ExprI i (AnnE e ts)) = ExprI i <$> ((AnnE <$> g e <*> pure ts) >>= f)
   g (ExprI i e) = ExprI i <$> f e
 
--- | 
+
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
   s <- MM.get

@@ -326,7 +326,7 @@ findPackers expr
     toPair (src, e@(EType (FunU [_] _) _ _)) = do
       case packerKeyVal e of
           (Right (Just (key, t, p))) -> return (key, (p, t, src))
-          (Right Nothing) -> impossible -- this is called after filtering away general types
+          (Right Nothing) -> error "impossible" -- this is called after filtering away general types
           Left err' -> Left err'
     toPair (_, (EType t _ _)) = Left $ IllegalPacker t
 
@@ -347,7 +347,7 @@ findPackers expr
 
     -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
     unifyTypes :: [TypeU] -> TypeU
-    unifyTypes [] = impossible -- This cannot occur since the right hand list accumulated in groupSort is never empty
+    unifyTypes [] = error "impossible" -- This cannot occur since the right hand list accumulated in groupSort is never empty
     unifyTypes (x:_) = x -- FIXME: need to actually check that they all agree
 
 

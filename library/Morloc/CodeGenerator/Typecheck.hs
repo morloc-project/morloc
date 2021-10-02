@@ -210,7 +210,7 @@ synthExpr lang g0 (LstS (x:xs)) = do
 
   case listExpr of
     (LstS xs2) -> return (g3, t2, (LstS (x1:xs2)))
-    _ -> impossible -- check never changes the top data constructor
+    _ -> error "impossible" -- check never changes the top data constructor
 
 -- Tuple=>
 --
@@ -227,11 +227,11 @@ synthExpr lang g0 (TupS (x:xs)) = do
   -- merge the head and tail
   (g3, t3) <- case tupleType of
     (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) (Just lang) g2
-    _ -> impossible -- the tuple was created by newvarRich which can only return existentials
+    _ -> error "impossible" -- the tuple was created by newvarRich which can only return existentials
 
   xs' <- case tupleExpr of
     (TupS xs') -> return xs'
-    _ -> impossible -- synth does not change data constructors
+    _ -> error "impossible" -- synth does not change data constructors
 
   return (g3, t3, TupS (x':xs'))
 
@@ -250,11 +250,11 @@ synthExpr lang g0 (NamS ((k,x):rs)) = do
   -- merge the head with tail
   (g3, t3) <- case tailType of
     (ExistU _ _ [NamU _ _ _ rs']) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs')) (Just lang) g2
-    _ -> impossible -- the record was created by newvarRich which can only return existentials
+    _ -> error "impossible" -- the record was created by newvarRich which can only return existentials
 
   tailExprs <- case tailExpr of
     (NamS xs') -> return xs'
-    _ -> impossible -- synth does not change data constructors
+    _ -> error "impossible" -- synth does not change data constructors
 
   return (g3, t3, NamS ((k, headExpr):tailExprs))
 
@@ -273,11 +273,11 @@ synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
 
   fullType <- case tailType of
     (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
-    _ -> impossible -- LamS type is always a function (see base case)
+    _ -> error "impossible" -- LamS type is always a function (see base case)
 
   fullExpr <- case tailExpr of
     (LamS vs' x') -> return $ LamS (v:vs') x'
-    _ -> impossible -- synthExpr does not change data constructors
+    _ -> error "impossible" -- synthExpr does not change data constructors
 
   g4 <- cut mark g3
 
@@ -299,7 +299,7 @@ synthExpr lang g0 (AppS f xs) = do
   -- extract output type from the type of f
   (ts, outputType) <- case uFunType of
     (FunU ts t) -> return (ts, t)
-    _ -> impossible
+    _ -> error "impossible"
 
   -- create a tuple from the input arguments
   let tupleType = head $ MLD.defaultTuple (Just lang) ts
@@ -319,12 +319,12 @@ synthExpr lang g0 (AppS f xs) = do
   -- extract the types of the input arguments
   inputTypes <- case argTupleType of
     (AppU _ ts') -> return ts'
-    _ -> impossible
+    _ -> error "impossible"
 
   -- extract the input expressions
   inputExprs <- case argTupleExpr of
     (TupS xs') -> return xs'
-    _ -> impossible
+    _ -> error "impossible"
 
   -- synthesize the final type
   finalType <- case leftoverTypes of
@@ -430,12 +430,12 @@ checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- construct the final type
   t4 <- case t3 of
     (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> impossible
+    _ -> error "impossible"
 
   -- construct the final expression
   e3 <- case e2 of
     (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> impossible
+    _ -> error "impossible"
 
   return (g4, t4, e3)
   

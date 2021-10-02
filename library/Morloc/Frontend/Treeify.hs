@@ -1,5 +1,5 @@
 {-|
-Module      : Morloc.Frontend.Treeify
+Mnkodule      : Morloc.Frontend.Treeify
 Description : Translate from the frontend DAG to the backend SAnno AST forest
 Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
@@ -45,26 +45,32 @@ treeify d
    -- if no parentless element exists, then the graph must be empty or cyclic
    [] -> MM.throwError CyclicDependency
    -- else if exactly one module name key (k) is found
-   [k] -> case DAG.lookupNode k d of
-     -- if the key is not in the DAG, then something is dreadfully wrong codewise
-     Nothing -> MM.throwError . DagMissingKey . render $ pretty k
-     (Just e) -> do
-       -- start counter for type keys
-       MM.startCounter
+   [k] -> do
+     -- find all expressions with annotations and link the expression index to its type
+     -- in the typecheckers, these types will be trigger a switch to checking mode.
+     d' <- DAG.mapNodeM linkAndRemoveAnnotations d
 
-       -- build a map
-       -- - fill stateSignatures map in the MorlocState reader monad
-       --       stateSignatures :: GMap Int Int [EType]
-       -- - this is a map from term (VarE) indices to signature sets
-       -- - after this step, all signatures and type annotation expressions are redundant
-       -- - the map won't be used until the type inference step in Typecheck.hs
-       _ <- DAG.synthesizeDAG linkSignaturesModule d
+     -- start counter for type keys
+     MM.startCounter
 
-       -- set counter for reindexing expressions in collect
-       MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
+     -- build a map
+     -- - fill stateSignatures map in the MorlocState reader monad
+     --       stateSignatures :: GMap Int Int [EType]
+     -- - this is a map from term (VarE) indices to signature sets
+     -- - after this step, all signatures and type annotation expressions are redundant
+     -- - the map won't be used until the type inference step in Typecheck.hs
+     _ <- DAG.synthesizeDAG linkSignaturesModule d'
 
-       -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-       mapM (collect e) (mainExpr k e <> AST.findExports e)
+     case DAG.lookupNode k d' of
+       -- if the key is not in the DAG, then something is dreadfully wrong codewise
+       Nothing -> MM.throwError . DagMissingKey . render $ pretty k
+       (Just e) -> do
+
+         -- set counter for reindexing expressions in collect
+         MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
+
+         -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
+         mapM (collect e) (AST.findExports e)
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
@@ -72,20 +78,6 @@ treeify d
    -- multiple projects in parallel with potentially shared information and
    -- constraints could be valuable.
    _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
-
-mainExpr :: MVar -> ExprI -> [(Int, EVar)]
-mainExpr (MV "Main") (ExprI _ (ModE _ es)) = case lastMay es of
-  Nothing -> []
-  (Just (ExprI i e)) -> case e of
-    (ModE _ _) -> []
-    (TypE _ _ _) -> []
-    (ImpE _) -> []
-    (SrcE _) -> []
-    (SigE _ _ _) -> []
-    (AssE _ _ _) -> []
-    (ExpE _) -> []
-    _ -> [(i, EV "__MAIN__")]
-mainExpr _ _ = []
 
 {-
                 ,--n-> Source <-m--n-> Concrete Signature
@@ -143,6 +135,7 @@ indexTerm x = do
   let i = stateCounter s
   CMS.put (s { stateCounter = i + 1 })
   return (i, x)
+
 
 linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
 linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
@@ -248,6 +241,29 @@ mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 
+
+linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
+linkAndRemoveAnnotations = f where
+  f :: ExprI -> MorlocMonad ExprI
+  f (ExprI _ (AnnE e@(ExprI i _) ts)) = do
+    --     ^                ^-- this one is connected to the given types
+    --     '-- this index disappears with the lost annotation node
+    s <- CMS.get
+    CMS.put $ s {stateAnnotations = Map.insert i ts (stateAnnotations s)}
+    f e -- notice the topology change
+  -- everything below is boilerplate (this is why I need recursion schemes)
+  f (ExprI i (ModE v es)) = ExprI i <$> (ModE v <$> mapM f es)
+  f (ExprI i (AssE v e es)) = ExprI i <$> (AssE v <$> f e <*> mapM f es)
+  f (ExprI i (AccE e k)) = ExprI i <$> (AccE <$> f e <*> pure k)
+  f (ExprI i (LstE es)) = ExprI i <$> (LstE <$> mapM f es)
+  f (ExprI i (TupE es)) = ExprI i <$> (TupE <$> mapM f es)
+  f (ExprI i (NamE rs)) = do
+    es' <- mapM (f . snd) rs
+    return . ExprI i $ NamE (zip (map fst rs) es')
+  f (ExprI i (AppE e es)) = ExprI i <$> (AppE <$> f e <*> mapM f es)
+  f (ExprI i (LamE vs e)) = ExprI i <$> (LamE vs <$> f e)
+  f e@(ExprI _ _) = return e
+
 -- | Build the call tree for a single nexus command. The result is ambiguous,
 -- with 1 or more possible tree topologies, each with one or more possible for
 -- each function.
@@ -260,11 +276,6 @@ collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
--- collect the final expression of a main module
-collect (ExprI _ (ModE _ es)) (_, EV "__MAIN__") = case lastMay es of
-  Nothing -> impossible
-  (Just e) -> collectSAnno e 
--- collect standard exported terms
 collect (ExprI _ (ModE _ _)) (i, _) = do
   t0 <- MM.metaTermTypes i
   case t0 of
@@ -282,7 +293,6 @@ collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a mo
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
   t0 <- MM.metaTermTypes i
-  error $ show (i, t0)
   es <- case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> collectSExpr e |>> return
@@ -298,7 +308,6 @@ collectSAnno e@(ExprI i (VarE v)) = do
       -- pool all the calls and compositions with this name
       return $ (calls <> declarations)
   return $ SAnno (Many es) i
-
 -- expression type annotations should have already been accounted for, so ignore
 collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
 collectSAnno e@(ExprI i _) = do
@@ -323,14 +332,14 @@ collectSExpr (ExprI i e0) = f e0 where
   f (StrE x) = noTypes (StrS x)
 
   -- none of the following cases should every occur
-  f (ModE _ _) = impossible
-  f (AnnE _ _) = impossible
-  f (TypE _ _ _) = impossible
-  f (ImpE _) = impossible
-  f (ExpE _) = impossible
-  f (SrcE _) = impossible
-  f (SigE _ _ _) = impossible
-  f (AssE _ _ _) = impossible
+  f (AnnE _ _) = error "impossible"
+  f (ModE _ _) = error "impossible"
+  f (TypE _ _ _) = error "impossible"
+  f (ImpE _) = error "impossible"
+  f (ExpE _) = error "impossible"
+  f (SrcE _) = error "impossible"
+  f (SigE _ _ _) = error "impossible"
+  f (AssE _ _ _) = error "impossible"
 
   noTypes x = return (x, i)
 

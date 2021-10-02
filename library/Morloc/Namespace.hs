@@ -9,9 +9,8 @@ Stability   : experimental
 
 module Morloc.Namespace
   (
-    impossible
   -- ** re-export supplements to Prelude
-  , module Morloc.Internal
+    module Morloc.Internal
   -- ** Synonyms
   , MDoc
   , DAG
@@ -109,15 +108,6 @@ import Morloc.Language (Lang(..))
 import qualified Data.Set as Set
 import qualified Data.Text as DT
 
--- The impossible term is used for branches of the code that should be
--- unreachable. Their evaluation implies a logic error in the code and should
--- result in the program crashing. No time or space should be wasted crafting
--- careful error handling for these cases. The term "undefined" I will reserve
--- for temporary use when functions have been typed but not implemented. There
--- should be no undefined terms in production code, but there should be
--- "impossible" terms.
-impossible = error "What should not happen has happend. Complain to the maintainer."
-
 -- | no annotations for now
 type MDoc = Doc ()
 
@@ -145,6 +135,7 @@ data MorlocState = MorlocState {
   , stateVerbosity :: Int
   , stateCounter :: Int
   , stateSignatures :: GMap Int Int TermTypes
+  , stateAnnotations :: Map Int [TypeU]
   , stateOutfile :: Maybe Path
   , statePackers :: GMap Int MVar PackMap
   , stateName :: Map Int EVar

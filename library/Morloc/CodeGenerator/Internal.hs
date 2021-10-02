@@ -55,7 +55,7 @@ w lang Nothing (NamT o (TV _ n) ps rs)
          (PV lang Nothing n)
          [PV lang Nothing v | (TV _ v) <- ps]
          [(PV lang Nothing k, w lang Nothing t) | (k,t) <- rs]
-w _ _ _ = impossible -- the typechecker shouldn't let this happen
+w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 
 
 weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP

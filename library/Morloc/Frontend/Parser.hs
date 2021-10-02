@@ -66,7 +66,13 @@ pProgram = do
   many1 pToplevel
 
 pToplevel :: Parser ExprI
-pToplevel = try pModule <|> pMain
+pToplevel = do
+  e <- try pModule <|> pMain
+  case e of
+    (ExprI i (ModE m@(MV "Main") es)) -> do
+      es' <- createMainFunction es
+      return $ ExprI i (ModE m es')
+    _ -> return e
 
 -- | match a named module
 pModule :: Parser ExprI
@@ -81,6 +87,21 @@ pMain :: Parser ExprI
 pMain = do
   ess <- align pTopExpr -- FYI - using `many` rather than `many1` makes infinite loop
   exprI $ ModE (MV "Main") (concat ess)
+
+createMainFunction :: [ExprI] -> Parser [ExprI]
+createMainFunction es = case (init es, last es) of
+    (_, ExprI _ (ModE _ _))   -> return es
+    (_, ExprI _ (TypE _ _ _)) -> return es
+    (_, ExprI _ (ImpE _))     -> return es
+    (_, ExprI _ (SrcE _))     -> return es
+    (_, ExprI _ (SigE _ _ _)) -> return es
+    (_, ExprI _ (AssE _ _ _)) -> return es
+    (_, ExprI _ (ExpE _))     -> return es
+    (rs, terminalExpr) -> do
+      expMain <- exprI $ ExpE (EV "__main__")
+      assMain <- exprI $ AssE (EV "__main__") terminalExpr []
+      return (expMain : (assMain : rs))
+
 
 -- | Expressions including ones that are allowed only at the top-level of a scope
 pTopExpr :: Parser [ExprI]

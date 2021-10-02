@@ -91,7 +91,7 @@ synthG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-synthG _ _ (SAnno (Many []) _) = impossible
+synthG _ _ (SAnno (Many []) _) = error "impossible"
 synthG l g0 (SAnno (Many ((e, j):es)) i) = do
   (g1, t1, e') <- synthE l i g0 e
   (g2, t2, SAnno (Many es') _) <- checkG l g1 (SAnno (Many es) i) t1
@@ -154,7 +154,7 @@ synthE l i g0 (AppS f xs) = do
   -- extract output type from the type of f
   (ts, outputType) <- case uFunType of
     (FunU ts t) -> return (ts, t)
-    _ -> impossible
+    _ -> error "impossible"
 
   -- create a tuple from the input arguments
   let tupleType = head $ MLD.defaultTuple Nothing ts
@@ -173,12 +173,12 @@ synthE l i g0 (AppS f xs) = do
   -- extract the types of the input arguments
   inputTypes <- case argTupleType of
     (AppU _ ts') -> return ts'
-    _ -> impossible
+    _ -> error "impossible"
 
   -- extract the input expressions
   inputExprs <- case argTupleExpr of
     (TupS xs') -> return xs'
-    _ -> impossible
+    _ -> error "impossible"
 
   -- synthesize the final type
   finalType <- case leftoverTypes of
@@ -202,11 +202,11 @@ synthE l i g0 (LamS (v@(EV n):vs) x) = do
 
   fullType <- case tailType of
     (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
-    _ -> impossible -- LamS type is always a function (see base case)
+    _ -> error "impossible" -- LamS type is always a function (see base case)
 
   fullExpr <- case tailExpr of
     (LamS vs' x') -> return $ LamS (v:vs') x'
-    _ -> impossible -- synthExpr does not change data constructors
+    _ -> error "impossible" -- synthExpr does not change data constructors
 
   g4 <- cut' i mark g3
 
@@ -227,7 +227,7 @@ synthE l i g (LstS (e:es)) = do
   (g2, listType, listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
-    _ -> impossible
+    _ -> error "impossible"
 
 synthE _ _ g (TupS []) =
   let t = head $ MLD.defaultTuple Nothing []
@@ -242,11 +242,11 @@ synthE l i g (TupS (e:es)) = do
   -- merge the head and tail
   t3 <- case tupleType of
     (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (itemType:ts)
-    _ -> impossible -- the general tuple will always be (AppU _ _)
+    _ -> error "impossible" -- the general tuple will always be (AppU _ _)
 
   xs' <- case tupleExpr of
     (TupS xs') -> return xs'
-    _ -> impossible -- synth does not change data constructors
+    _ -> error "impossible" -- synth does not change data constructors
 
   return (g2, t3, TupS (itemExpr:xs'))
 
@@ -261,11 +261,11 @@ synthE l i g0 (NamS ((k,x):rs)) = do
   -- merge the head with tail
   t <- case tailType of
     (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, headType):rs1)
-    _ -> impossible -- the synthE on NamS will always return NamU type
+    _ -> error "impossible" -- the synthE on NamS will always return NamU type
 
   tailExprs <- case tailExpr of
     (NamS xs') -> return xs'
-    _ -> impossible -- synth does not change data constructors
+    _ -> error "impossible" -- synth does not change data constructors
 
   return (g2, t, NamS ((k, headExpr):tailExprs))
 
@@ -309,12 +309,12 @@ checkE l i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- construct the final type
   t4 <- case t3 of
     (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> impossible
+    _ -> error "impossible"
 
   -- construct the final expression
   e3 <- case e2 of
     (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> impossible
+    _ -> error "impossible"
 
   return (g4, t4, e3)
 

@@ -437,7 +437,7 @@ parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
 -- LamS MUST have a functional type, deviations would have been caught by the typechecker
-parameterize' _ (SAnno (One (LamS _ _, _)) _) = impossible
+parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs

@@ -57,9 +57,8 @@ assertGeneralType :: String -> T.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
-    (Right []) -> error "Empty list in assertGeneralType"
-    -- the order of the list is not important, so sort before comparing
-    (Right xs) -> assertEqual "" t (gtypeof $ last xs)
+    (Right [x]) -> assertEqual "" t (gtypeof x)
+    (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
