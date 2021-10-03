@@ -34,6 +34,8 @@ module Morloc.Typecheck.Internal
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
+import Morloc.Data.Doc
+import Morloc.Typecheck.Pretty
 
 import qualified Data.Set as Set
 
@@ -310,7 +312,8 @@ instantiate ta@(ExistU v [] []) tb g1
         Nothing ->
           case lookupU v g1 of
             (Just _) -> return g1
-            Nothing -> Left $ InstantiationError ta tb "Error in InstLSolve"
+            Nothing -> Left . InstantiationError ta tb . render
+              $ "Error in InstLSolve:" <+> tupled (map prettyGammaIndex (gammaContext g1))
 
 -- if defaults are involved, no solving is done, but the subtypes of parameters
 -- and defaults needs to be checked. 
@@ -398,7 +401,8 @@ newvarRich
   -> (Gamma, TypeU)
 newvarRich ps ds lang g =
   let i = gammaCounter g
-  in (g {gammaCounter = i + 1}, ExistU (TV lang (newvars !! i)) ps ds)
+      v = TV lang (newvars !! i)
+  in (g {gammaCounter = i + 1} +> ExistG v ps ds, ExistU v ps ds)
   where
     newvars =
       zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])

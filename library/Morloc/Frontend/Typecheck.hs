@@ -221,11 +221,12 @@ synthE l i g0 (LamS (v@(EV n):vs) x) = do
 
 synthE _ _ g (LstS []) =
   let (g1, itemType) = newvar Nothing g
-      tupleType = head $ MLD.defaultList Nothing itemType
-  in return (g1, tupleType, LstS [])
+      listType = head $ MLD.defaultList Nothing itemType
+  in return (g1, listType, LstS [])
 synthE l i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG l g e 
-  (g2, listType, listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  (g2, listType', listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+  let listType = apply g2 listType'
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> error "impossible"
@@ -296,6 +297,10 @@ checkE
        , TypeU
        , SExpr (Indexed TypeU) Many Int
        )
+checkE l i g1 (LstS (e:es)) (AppU v [t]) = do
+  (g2, t2, e2) <- checkG l g1 e t 
+  -- LstS [] will go to the normal Sub case
+  checkE l i g2 (LstS es) (AppU v [t2])
 checkE l _ g1 (LamS [] e1) (FunU as1 b1) = do
   (g2, b2, e2) <- checkG l g1 e1 b1
   return (g2, FunU as1 b2, LamS [] e2)
