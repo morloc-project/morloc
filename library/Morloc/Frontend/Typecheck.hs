@@ -279,7 +279,9 @@ synthE l i g (CallS src) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE _ i _ (VarS v) = Left $ (Idx i (UnboundVariable v))
+synthE _ i g (VarS v) = do
+  let (g', t) = newvar Nothing g
+  return (g', t, VarS v)
 
 
 checkE

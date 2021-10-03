@@ -765,6 +765,10 @@ unitTypeTests =
         "\"this is a string literal\" :: Str"
         str
     , assertGeneralType "primitive declaration" "x = True\n4.2" num
+    -- containers
+    , assertGeneralType "list of primitives" "[1,2,3]" (lst num)
+    , assertGeneralType "tuple of primitives" "(1,2,True)" (lst num)
+
     -- declarations
     , assertGeneralType
         "identity function declaration and application"
@@ -1102,11 +1106,8 @@ unitTypeTests =
     -- -- tests modules
     -- , assertTerminalType
     --     "basic Main module"
-    --     [r|
-    --        module Main
-    --        [1,2,3]
-    --     |]
-    --     [lst num]
+    --     "module Main\n[1,2,3]"
+    --     (lst num)
     -- , (flip $ assertTerminalType "import/export") [lst num] $
     --   [r|
     --      module Foo
