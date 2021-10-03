@@ -232,7 +232,7 @@ synthE l i g (LstS (e:es)) = do
 
 synthE _ _ g (TupS []) =
   let t = head $ MLD.defaultTuple Nothing []
-  in return (g, t, LstS [])
+  in return (g, t, TupS [])
 synthE l i g (TupS (e:es)) = do
   -- synthesize head
   (g1, itemType, itemExpr) <- synthG l g e

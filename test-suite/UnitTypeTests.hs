@@ -766,8 +766,10 @@ unitTypeTests =
         str
     , assertGeneralType "primitive declaration" "x = True\n4.2" num
     -- containers
-    , assertGeneralType "list of primitives" "[1,2,3]" (lst num)
-    , assertGeneralType "tuple of primitives" "(1,2,True)" (lst num)
+    , assertGeneralType "list of one primitive" "[1]" (lst num)
+    , assertGeneralType "list of many primitives" "[1,2,3]" (lst num)
+    , assertGeneralType "tuple of primitives" "(1,2,True)" (tuple [num, num, bool])
+    , assertGeneralType "tuple with containers" "(1,(2,True))" (tuple [num, tuple [num, bool]])
 
     -- declarations
     , assertGeneralType
