@@ -23,6 +23,7 @@ module Morloc.Frontend.Namespace
 import Morloc.Namespace hiding (name)
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc
 import Control.Monad.Except (ExceptT)
 import Control.Monad.Reader (ReaderT)
 import Control.Monad.State (StateT)
@@ -65,12 +66,13 @@ mapExprM f e0 = g e0 where
   g (ExprI i e) = ExprI i <$> f e
 
 
+-- WARNING: silent bad things happen if this function does not copy all indices
 copyState :: Int -> Int -> MorlocMonad ()
 copyState oldIndex newIndex = do
   s <- MM.get
   case GMap.yIsX (stateSignatures s) oldIndex newIndex of
     (Just x) -> MM.put $ s {stateSignatures = x}
-    Nothing -> MM.throwError . CallTheMonkeys $ "Failed to copy state"
+    Nothing -> return ()
 
 
 type GeneralStack c e l s a

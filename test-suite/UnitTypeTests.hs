@@ -858,12 +858,12 @@ unitTypeTests =
     --     "polymorphism under lambdas (203f8c) (2)"
     --     "f :: a -> a\ng = \\h -> [h 42, h 1234]\ng f"
     --     [lst num]
-    --
+
     -- -- binding
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "annotated variables without definition are legal"
     --     "x :: Num"
-    --     [num]
+    --     num
     -- , assertTerminalType
     --     "unannotated variables with definition are legal"
     --     "x = 42\nx"
