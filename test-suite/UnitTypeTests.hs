@@ -766,11 +766,38 @@ unitTypeTests =
         str
     , assertGeneralType "primitive declaration" "x = True\n4.2" num
     -- containers
+    -- - lists
     , assertGeneralType "list of one primitive" "[1]" (lst num)
     , assertGeneralType "list of many primitives" "[1,2,3]" (lst num)
     , assertGeneralType "list of many containers" "[(True,1),(False,2)]" (lst (tuple [bool, num]))
+    -- - tuples
     , assertGeneralType "tuple of primitives" "(1,2,True)" (tuple [num, num, bool])
     , assertGeneralType "tuple with containers" "(1,(2,True))" (tuple [num, tuple [num, bool]])
+    -- - records
+    , assertGeneralType
+        "primitive record statement"
+        "{x=42, y=\"yolo\"}"
+        (record [("x", num), ("y", str)])
+    -- , assertTerminalType
+    --     "primitive record signature"
+    --     "Foo :: {x :: Num, y :: Str}"
+    --     [record [("x", num), ("y", str)]]
+    , assertGeneralType
+        "primitive record declaration"
+        "foo = {x = 42, y = \"yolo\"}\nfoo"
+        (record [("x", num), ("y", str)])
+    , assertGeneralType
+        "nested records"
+        "{x = 42, y = {bob = 24601, tod = \"listen now closely and hear how I've planned it\"}}"
+        (record [("x", num), ("y", record [("bob", num), ("tod", str)])])
+    -- , assertGeneralType
+    --     "records with variables"
+    --     "a=42\nb={x=a, y=\"yolo\"}\nf=\\b->b\nf b"
+    --     (record [("x", num), ("y", str)])
+    -- , assertTerminalType
+    --     "records with bound variables"
+    --     "foo a = {x=a, y=\"yolo\"}\nfoo 42"
+    --     [record [("x", num), ("y", str)]]
 
     -- declarations
     , assertGeneralType
@@ -1004,32 +1031,6 @@ unitTypeTests =
     -- -- -- TODO: reconsider what an empty tuple is
     -- -- -- I am inclined to cast it as the unit type
     -- -- , assertTerminalType "empty tuples are of unit type" "f :: ()" UniT
-    --
-    -- -- records
-    -- , assertTerminalType
-    --     "primitive record statement"
-    --     "{x=42, y=\"yolo\"}"
-    --     [record [("x", num), ("y", str)]]
-    -- , assertTerminalType
-    --     "primitive record signature"
-    --     "Foo :: {x :: Num, y :: Str}"
-    --     [record [("x", num), ("y", str)]]
-    -- , assertTerminalType
-    --     "primitive record declaration"
-    --     "foo = {x = 42, y = \"yolo\"}\nfoo"
-    --     [record [("x", num), ("y", str)]]
-    -- , assertTerminalType
-    --     "nested records"
-    --     "Foo :: {x :: Num, y :: {bob :: Num, tod :: Str}}"
-    --     [record [("x", num), ("y", record [("bob", num), ("tod", str)])]]
-    -- , assertTerminalType
-    --     "records with variables"
-    --     "a=42\nb={x=a, y=\"yolo\"}\nf=\\b->b\nf b"
-    --     [record [("x", num), ("y", str)]]
-    -- , assertTerminalType
-    --     "records with bound variables"
-    --     "foo a = {x=a, y=\"yolo\"}\nfoo 42"
-    --     [record [("x", num), ("y", str)]]
     --
     -- -- extra space
     -- , assertTerminalType "leading space" " 42" [num]
