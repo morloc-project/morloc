@@ -778,10 +778,10 @@ unitTypeTests =
         "primitive record statement"
         "{x=42, y=\"yolo\"}"
         (record [("x", num), ("y", str)])
-    -- , assertTerminalType
-    --     "primitive record signature"
-    --     "Foo :: {x :: Num, y :: Str}"
-    --     [record [("x", num), ("y", str)]]
+    , assertGeneralType
+        "primitive record signature"
+        "Foo :: {x :: Num, y :: Str}\nf :: Int -> Foo\nf 42"
+        (record [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record declaration"
         "foo = {x = 42, y = \"yolo\"}\nfoo"
@@ -790,14 +790,10 @@ unitTypeTests =
         "nested records"
         "{x = 42, y = {bob = 24601, tod = \"listen now closely and hear how I've planned it\"}}"
         (record [("x", num), ("y", record [("bob", num), ("tod", str)])])
-    -- , assertGeneralType
-    --     "records with variables"
-    --     "a=42\nb={x=a, y=\"yolo\"}\nf=\\b->b\nf b"
-    --     (record [("x", num), ("y", str)])
-    -- , assertTerminalType
-    --     "records with bound variables"
-    --     "foo a = {x=a, y=\"yolo\"}\nfoo 42"
-    --     [record [("x", num), ("y", str)]]
+    , assertGeneralType
+        "records with bound variables"
+        "foo a = {x=a, y=\"yolo\"}\nfoo 42"
+        (record [("x", num), ("y", str)])
 
     -- declarations
     , assertGeneralType
