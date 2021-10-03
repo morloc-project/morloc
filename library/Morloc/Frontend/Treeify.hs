@@ -12,6 +12,7 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder ()
+import Morloc.Pretty
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -61,10 +62,31 @@ treeify d
      -- - the map won't be used until the type inference step in Typecheck.hs
      _ <- DAG.synthesizeDAG linkSignaturesModule d'
 
+     {- example d' for
+      -  x = 42
+      -  x
+        fromList [
+          ( MV {unMVar = "Main"}
+          , (ExprI 4 (ModE (MV {unMVar = "Main"})
+              [ ExprI 5 (ExpE (EV "__main__"))
+              , ExprI 6 (AssE (EV "__main__") (ExprI 3 (VarE (EV "x"))) [])
+              , ExprI 2 (AssE (EV "x") (ExprI 1 (NumE 42.0)) [])
+              ]
+          ),[]))]
+     -}
+
      case DAG.lookupNode k d' of
        -- if the key is not in the DAG, then something is dreadfully wrong codewise
        Nothing -> MM.throwError . DagMissingKey . render $ pretty k
        (Just e) -> do
+
+         {- Following the prior example, here e is the root module
+              ExprI 4 (ModE (MV {unMVar = "Main"})
+                [ ExprI 5 (ExpE (EV "__main__"))
+                , ExprI 6 (AssE (EV "__main__") (ExprI 3 (VarE (EV "x"))) [])
+                , ExprI 2 (AssE (EV "x") (ExprI 1 (NumE 42.0)) [])
+                ])
+         -}
 
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
@@ -112,7 +134,12 @@ linkSignaturesModule _ (ExprI _ (ModE v es)) edges
     in Map.map (mapMaybe (flip Map.lookup $ m)) aliases
 linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level" 
 
-linkSignatures :: MVar -> [ExprI] -> Map.Map EVar TermTypes -> MorlocMonad (Map.Map EVar TermTypes)
+
+linkSignatures
+  :: MVar -- ^ the current module name
+  -> [ExprI] -- ^ all expressions in the module
+  -> Map.Map EVar TermTypes -- ^ the inherited termtypes form imported modules 
+  -> MorlocMonad (Map.Map EVar TermTypes)
 linkSignatures v es m = do
   -- find all top-level terms in this module
   --   terms :: Map.Map EVar TermTypes
@@ -137,25 +164,42 @@ indexTerm x = do
   return (i, x)
 
 
-linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
+linkVariablesToTermTypes
+  :: MVar -- ^ the current module
+  -> Map.Map EVar (Int, TermTypes) -- ^ a map term terms to types, Int is the inner GMAp key
+  -> [ExprI] -- ^ list of expressions in the module
+  -> MorlocMonad ()
 linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
-  link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
+  -- The following have terms associated with them:
+  -- 1. exports
   link m (ExprI i (ExpE v)) = setType m i v
+  -- 2. variables
+  link m (ExprI i (VarE v)) = setType m i v
+  -- 3. assignments
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
-    -- shadow all bound terms
+    setType m i v
+    -- shadow all terms bound under the lambda
     let m' = foldr Map.delete m ks
-    setType m' i v
+    -- then link the assignment term and all local "where" statements (es)
     linkSignatures mv (e:es) (Map.map snd m')
     return ()
-  link m (ExprI i (VarE v)) = setType m i v
+  -- 4. assignments that have no parameters
+  link m (ExprI i (AssE v e es)) = do
+    setType m i v
+    -- then link the assignment term and all local "where" statements (es)
+    linkSignatures mv (e:es) (Map.map snd m)
+    return ()
+  -- modules currently cannot be nested (should this be allowed?)
+  link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
+  -- everything below boilerplate
   link m (ExprI _ (AccE e _)) = link m e
   link m (ExprI _ (LstE xs)) = mapM_ (link m) xs
   link m (ExprI _ (TupE xs)) = mapM_ (link m) xs
   link m (ExprI _ (LamE vs e)) = link (foldr Map.delete m vs) e
   link m (ExprI _ (AppE f es)) = link m f >> mapM_ (link m) es
   link m (ExprI _ (AnnE e _)) = link m e
-  link m (ExprI _ (NamE rs)) = mapM_ (link m) (map snd rs)
+  link m (ExprI _ (NamE rs)) = mapM_ (link m . snd) rs
   link _ _ = return ()
 
   setType :: Map.Map EVar (Int, TermTypes) -> Int -> EVar -> MorlocMonad ()
@@ -278,13 +322,21 @@ collect
   -> MorlocMonad (SAnno Int Many Int)
 collect (ExprI _ (ModE _ _)) (i, _) = do
   t0 <- MM.metaTermTypes i
+
+  {- Following example of `x = 42; x`, t0 is
+ 
+      Just (TermTypes {termGeneral = Nothing, termConcrete = [], termDecl = [ExprI 3 (VarE (EV "x"))]})
+
+  - The only export from the expression was `__main__` (with implicit `export __main__` and `__main__ = x` terms).
+  -}
+
   case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
-      declarations <- mapM collectSExpr (termDecl t1)
+      declarations <- mapM replaceExpr (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
@@ -301,22 +353,33 @@ collectSAnno e@(ExprI i (VarE v)) = do
       -- collect all the concrete calls with this name
       let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
       -- collect all the morloc compositions with this name
-      declarations <- mapM reindexExprI (termDecl t1) >>= mapM collectSExpr
+      declarations <- mapM reindexExprI (termDecl t1) >>= mapM replaceExpr |>> concat
       -- link this index to the name that is removed
       s <- CMS.get
       CMS.put (s { stateName = Map.insert i v (stateName s) })
       -- pool all the calls and compositions with this name
       return $ (calls <> declarations)
   return $ SAnno (Many es) i
+
 -- expression type annotations should have already been accounted for, so ignore
 collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
 collectSAnno e@(ExprI i _) = do
   e' <- collectSExpr e 
   return $ SAnno (Many [e']) i
 
+replaceExpr :: ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
+-- this will be a nested variable
+replaceExpr e@(ExprI _ (VarE _)) = do
+  x <- collectSAnno e
+  case x of
+    (SAnno (Many es) _) -> return es
+replaceExpr e = collectSExpr e |>> return
+
 -- | Find all definitions of a term and collect their type annotations, if available
 collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
-collectSExpr (ExprI i e0) = f e0 where
+collectSExpr e@(ExprI i e0) = do
+  f e0
+  where
   f (VarE v) = noTypes (VarS v) -- this must be a bound variable
   f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
   f (LstE es) = (LstS <$> mapM collectSAnno es) >>= noTypes
