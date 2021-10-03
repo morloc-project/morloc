@@ -32,31 +32,31 @@ readProgram
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
   -> MT.Text -- ^ Source code
+  -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
-  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI)
-readProgram f sourceCode p =
+  -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
+readProgram f sourceCode pstate p =
   case runParser
-         (CMS.runStateT (pProgram <* eof) pstate)
+         (CMS.runStateT (pProgram <* eof) (reenter pstate))
          (maybe "<expr>" id f)
          sourceCode of
-    Left err' -> Left err'
+    (Left err') -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
-    Right (es, _) -> Right
-      $ foldl (\d (k,xs,n) -> Map.insert k (n,xs) d)
-              p
-              (map AST.findEdges es) -- [(MVar, [(MVar, Import)], ExprI)]
-  where
-    pstate = emptyState { stateModulePath = f, stateAccepting = True }
+    (Right (es, s)) ->
+      let dag = foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p (map AST.findEdges es)
+      in Right (dag, s)
 
 -- | Parse a single type. This function used only in debugging in command line
 -- calls such as: `morloc typecheck -te "A -> B"`.
 readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
 readType typeStr =
-  case runParser (CMS.runStateT (pTypeGen <* eof) state) "" typeStr of
+  case runParser (CMS.runStateT (pTypeGen <* eof) (reenter emptyState)) "" typeStr of
     Left err' -> Left err'
     Right (es, _) -> Right es
-  where
-    state = emptyState {stateMinPos = mkPos 1, stateAccepting = True}
+
+-- prepare the state for reading of a new file (keeping past counters)
+reenter :: ParserState -> ParserState
+reenter p = p {stateMinPos = mkPos 1, stateAccepting = True}
 
 -- | The output is rolled into the final DAG of modules
 pProgram :: Parser [ExprI]

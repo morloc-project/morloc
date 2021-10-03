@@ -20,28 +20,30 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
+import qualified Morloc.Frontend.Lexer as Lexer
 import qualified Morloc.Frontend.Typecheck as Typecheck
 
 parse ::
      Maybe Path
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
-parse f (Code code) = case Parser.readProgram f code mempty of
+parse f (Code code) = case Parser.readProgram f code Lexer.emptyState mempty of
   (Left err') -> MM.throwError $ SyntaxError err'
-  (Right x) -> parseImports x
+  (Right (x, s)) -> parseImports x s
   where
     parseImports
       :: DAG MVar Import ExprI
+      -> Lexer.ParserState
       -> MorlocMonad (DAG MVar Import ExprI)
-    parseImports d = case unimported of
+    parseImports d s = case unimported of
       [] -> return d
       (child:_) -> do
           importPath <- Mod.findModule child
           Mod.loadModuleMetadata importPath
           (path', code') <- openLocalModule importPath
-          case Parser.readProgram path' code' d of
+          case Parser.readProgram path' code' s d of
             (Left err') -> MM.throwError $ SyntaxError err'
-            (Right x) -> parseImports x
+            (Right (x, s')) -> parseImports x s'
       where
         g = MDD.edgelist d
         parents = Set.fromList (map fst g)

@@ -14,7 +14,8 @@ import Morloc.Pretty
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import Morloc.Data.Doc (viaShow, render)
+import qualified Morloc.Data.Doc as Doc
+import Morloc.Data.Doc ((<+>))
 
 import qualified Control.Monad.State as CMS
 

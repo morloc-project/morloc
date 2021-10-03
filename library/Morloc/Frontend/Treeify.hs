@@ -140,7 +140,7 @@ indexTerm x = do
 linkVariablesToTermTypes :: MVar -> Map.Map EVar (Int, TermTypes) -> [ExprI] -> MorlocMonad ()
 linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
-  link _ (ExprI _ (ModE v _)) = MM.throwError (NestedModule v)
+  link _ (ExprI _ (ModE v _)) = MM.throwError $ NestedModule v
   link m (ExprI i (ExpE v)) = setType m i v
   link m (ExprI i (AssE v (ExprI _ (LamE ks e)) es)) = do
     -- shadow all bound terms
