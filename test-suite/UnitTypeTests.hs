@@ -603,6 +603,10 @@ orderInvarianceTests =
       "terms may be defined before they are used"
       "y = 42\nx = y\nx"
       num
+  , assertGeneralType
+      "long chains of substitution are OK too"
+      "z = 42\ny = z\nx = y\nx"
+      num
   --   , assertTerminalType
   --       "declarations before use gain concrete types"
   --       [r|
