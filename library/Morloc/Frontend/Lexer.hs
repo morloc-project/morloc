@@ -96,7 +96,7 @@ exprId :: Parser Int
 exprId = do
   s <- CMS.get
   let i = stateExpIndex s
-  CMS.put (s { stateExpIndex = i + 1 })
+  CMS.put $ s { stateExpIndex = i + 1 }
   return i
 
 exprI :: Expr -> Parser ExprI
@@ -122,10 +122,14 @@ align p = do
   let minPos = stateMinPos s 
       accept = stateAccepting s
   curPos <- L.indentLevel
-  xs <- many1 (CMS.put (s {stateMinPos = curPos, stateAccepting = True}) >> p)
+  xs <- many1 (resetPos minPos accept >> p)
   -- put everything back the way it was
-  CMS.put (s {stateMinPos = minPos, stateAccepting = accept})
+  resetPos minPos accept
   return xs
+  where
+    resetPos i r = do
+      s' <- CMS.get
+      CMS.put (s' {stateMinPos = i, stateAccepting = r})
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p

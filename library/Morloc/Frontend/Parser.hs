@@ -78,8 +78,8 @@ pToplevel = do
 pModule :: Parser ExprI
 pModule = do
   _ <- reserved "module"
-  ess <- align pTopExpr
   moduleName <- freename
+  ess <- align pTopExpr
   exprI $ ModE (MV moduleName) (concat ess)
 
 -- | match an implicit "main" module
@@ -100,7 +100,7 @@ createMainFunction es = case (init es, last es) of
     (rs, terminalExpr) -> do
       expMain <- exprI $ ExpE (EV "__main__")
       assMain <- exprI $ AssE (EV "__main__") terminalExpr []
-      return (expMain : (assMain : rs))
+      return $ expMain : (assMain : rs)
 
 
 -- | Expressions including ones that are allowed only at the top-level of a scope
@@ -112,7 +112,7 @@ pTopExpr =
   <|> try (plural pAssE)
   <|> try (plural pSigE)
   <|> try pSrcE
-  <|> (plural pExpr)
+  <|> plural pExpr
   where
     plural :: Functor m => m a -> m [a]
     plural = fmap return 
