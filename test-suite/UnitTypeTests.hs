@@ -797,6 +797,10 @@ unitTypeTests =
 
     -- declarations
     , assertGeneralType
+        "simple function"
+        "f x = True\nf 42"
+        num
+    , assertGeneralType
         "identity function declaration and application"
         "f x = x\nf 42"
         num

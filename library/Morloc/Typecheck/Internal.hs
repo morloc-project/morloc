@@ -298,8 +298,8 @@ instantiate ta tb@(ExistU v [] []) g1
         Nothing ->
           case lookupU v g1 of
             (Just _) -> return g1
-            Nothing ->
-              Left $ InstantiationError ta tb "Error in InstRSolve"
+            Nothing -> Left . InstantiationError ta tb . render
+              $ "Error in InstRSolve:" <+> tupled (map prettyGammaIndex (gammaContext g1))
 
 --  g1 |- t
 -- ----------------------------------------- instLSolve
