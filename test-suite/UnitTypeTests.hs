@@ -804,6 +804,11 @@ unitTypeTests =
         "identity function declaration and application"
         "f x = x\nf 42"
         num
+    , assertGeneralType
+        "application of function with only signature"
+        "f :: Int -> Bool\nf 42"
+        bool
+
     -- , assertGeneralType
     --     "snd function declaration and application"
     --     "snd x y = y\nsnd True 42"

@@ -11,11 +11,10 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
+import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Doc as Doc
-import Morloc.Data.Doc ((<+>))
 
 import qualified Control.Monad.State as CMS
 
@@ -92,7 +91,10 @@ synthG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-synthG _ _ (SAnno (Many []) _) = error "impossible"
+synthG l g e@(SAnno (Many []) i) = do
+  case l i of
+    (Just t) -> Right (g, t, SAnno (Many []) (Idx i t))
+    Nothing -> Left $ Idx i EmptyExpression
 synthG l g0 (SAnno (Many ((e, j):es)) i) = do
   (g1, t1, e') <- synthE l i g0 e
   (g2, t2, SAnno (Many es') _) <- checkG l g1 (SAnno (Many es) i) t1

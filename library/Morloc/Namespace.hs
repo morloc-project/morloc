@@ -351,6 +351,7 @@ data TypeError
   | MissingGeneralSignature Source
   | ApplicationOfNonFunction
   | TooManyArguments
+  | EmptyExpression
   deriving (Ord, Eq, Show)
 
 data MorlocError
