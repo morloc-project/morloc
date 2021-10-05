@@ -157,17 +157,16 @@ synthE l i g0 e@(AppS f xs) = do
     (FunU ts t) -> return (ts, t)
     _ -> error "impossible"
 
-  -- create a tuple from the input arguments
-  let tupleType = head $ MLD.defaultTuple Nothing ts
-
   -- check the tuple of argument expressions against a tuple of argument types,
   -- collect the types of missing arguments (partial application)
   (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
     -- there are more inputs than arguments: partial application
     GT -> case splitAt (length xs) ts of
-      (_, remainder) -> checkE l i g2 (TupS xs) tupleType |>> (,) remainder
+      (ts', remainder) -> let tupleType = head $ MLD.defaultTuple Nothing ts'
+                          in checkE l i g2 (TupS xs) tupleType |>> (,) remainder
     -- there are the same number of inputs and arguments: full application
-    EQ -> checkE l i g2 (TupS xs) tupleType |>> (,) []
+    EQ -> let tupleType = head $ MLD.defaultTuple Nothing ts
+          in checkE l i g2 (TupS xs) tupleType |>> (,) []
     -- there are more arguments than inputs: TYPE ERROR!!!
     LT -> Left (Idx i TooManyArguments)
 
