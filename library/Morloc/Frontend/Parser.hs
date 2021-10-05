@@ -527,10 +527,9 @@ pAppU = do
 
 pFunU :: Parser TypeU
 pFunU = do
-  t <- pType'
-  _ <- op "->"
   ts <- sepBy1 (pType') (op "->")
-  return $ FunU ts t
+  case (init ts, last ts) of
+    (inputs, output) -> return $ FunU inputs output
   where
     pType' = try pUniU <|> try parensType <|> try pAppU <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 

@@ -109,10 +109,15 @@ showTypeError (InstantiationError t1 t2 msg)
   <> "(" <> P.prettyGreenTypeU t1 <+> "<:=" <+> P.prettyGreenTypeU t2 <> ")"
 showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> MTP.prettyGammaIndex gi
 showTypeError (OccursCheckFail _ _ _) = render $ "OccursCheckFail"
-showTypeError (NotYetImplemented _ _ _) = render $ "NotYetImplemented"
+showTypeError (NotYetImplemented t1 t2 msg)
+  = render
+  $ "NotYetImplemented"
+  <+> tupled ["t1=" <> P.prettyGreenTypeU t1, "t2=" <> P.prettyGreenTypeU t2]
+  <+> pretty msg
 showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v
 showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> P.prettyGreenTypeU t
 showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignature for" <+> pretty src 
 showTypeError (MissingGeneralSignature src) = render $ "MissingGeneralSignature for" <+> pretty src
 showTypeError (ApplicationOfNonFunction) = render $ "ApplicationOfNonFunction"
 showTypeError (TooManyArguments) = render $ "TooManyArguments"
+showTypeError EmptyExpression = render $ "EmptyExpression"

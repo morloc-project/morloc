@@ -254,6 +254,7 @@ data Expr
   | LogE Bool
   -- ^ boolean primitive
   | StrE Text
+  -- ^ string primitive
   deriving (Show, Ord, Eq)
 
 data Import =

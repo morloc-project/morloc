@@ -359,7 +359,11 @@ collectSAnno e@(ExprI i (VarE v)) = do
       CMS.put (s { stateName = Map.insert i v (stateName s) })
       -- pool all the calls and compositions with this name
       return $ (calls <> declarations)
-  return $ SAnno (Many es) i
+  case es of
+    [] -> do
+      j <- MM.getCounter
+      return $ SAnno (Many [(VarS v, j)]) i
+    es -> return $ SAnno (Many es) i
 
 -- expression type annotations should have already been accounted for, so ignore
 collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e

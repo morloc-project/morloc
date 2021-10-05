@@ -91,10 +91,7 @@ synthG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-synthG l g e@(SAnno (Many []) i) = do
-  case l i of
-    (Just t) -> Right (g, t, SAnno (Many []) (Idx i t))
-    Nothing -> Left $ Idx i EmptyExpression
+synthG _ _ (SAnno (Many []) i) = Left $ Idx i EmptyExpression
 synthG l g0 (SAnno (Many ((e, j):es)) i) = do
   (g1, t1, e') <- synthE l i g0 e
   (g2, t2, SAnno (Many es') _) <- checkG l g1 (SAnno (Many es) i) t1
@@ -282,9 +279,12 @@ synthE l i g (CallS src) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE _ i g (VarS v) = do
-  let (g', t) = newvar Nothing g
-  return (g', t, VarS v)
+synthE l i g (VarS v) =
+  case l i of 
+    (Just t) -> return (g, t, VarS v)
+    Nothing ->
+      let (g', t) = newvar Nothing g
+      in return (g', t, VarS v)
 
 
 checkE
@@ -341,7 +341,7 @@ checkE l i g1 e1 b = do
   g3 <- case subtype a' b' g2 of
     (Left err') -> Left (Idx i err')
     (Right x) -> Right x
-  return (g3, a', e2)
+  return (g3, apply g3 a', e2)
 
 
 application

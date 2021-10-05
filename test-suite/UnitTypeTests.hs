@@ -780,7 +780,7 @@ unitTypeTests =
         (record [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record signature"
-        "Foo :: {x :: Num, y :: Str}\nf :: Int -> Foo\nf 42"
+        "Foo :: {x :: Num, y :: Str}\nf :: Num -> Foo\nf 42"
         (record [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record declaration"
@@ -806,7 +806,7 @@ unitTypeTests =
         num
     , assertGeneralType
         "application of function with only signature"
-        "f :: Int -> Bool\nf 42"
+        "f :: Num -> Bool\nf 42"
         bool
 
     -- , assertGeneralType

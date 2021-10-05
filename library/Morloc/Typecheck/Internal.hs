@@ -301,6 +301,7 @@ instantiate ta tb@(ExistU v [] []) g1
             Nothing -> Left . InstantiationError ta tb . render
               $ "Error in InstRSolve:" <+> tupled (map prettyGammaIndex (gammaContext g1))
 
+
 --  g1 |- t
 -- ----------------------------------------- instLSolve
 --  g1,Ea,g2 |- Ea <=: t -| g1,Ea=t,g2
