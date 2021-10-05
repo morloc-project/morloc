@@ -795,19 +795,39 @@ unitTypeTests =
         "foo a = {x=a, y=\"yolo\"}\nfoo 42"
         (record [("x", num), ("y", str)])
 
-    -- declarations
+    -- functions
     , assertGeneralType
-        "simple function"
+        "1-arg function declaration without signature"
         "f x = True\nf 42"
         bool
+    , assertGeneralType
+        "2-arg function declaration without signature"
+        "f x y = True\nf 42 True"
+        bool
+    , assertGeneralType
+        "1-arg function signature without declaration"
+        "f :: Num -> Bool\nf 42"
+        bool
+    , assertGeneralType
+        "2-arg function signature without declaration"
+        "f :: Num -> Bool -> Str\nf 42 True"
+        str
+    , assertGeneralType
+        "partial 1-2 function signature without declaration"
+        "f :: Num -> Bool -> Str\nf 42"
+        (fun [bool, str])
     , assertGeneralType
         "identity function declaration and application"
         "f x = x\nf 42"
         num
     , assertGeneralType
-        "application of function with only signature"
-        "f :: Num -> Bool\nf 42"
-        bool
+        "const function"
+        "const x y = x\nconst 42 True"
+        num
+    , assertGeneralType
+        "map snd over tuple list"
+        "map :: (a -> b) -> [a] -> [b]\nfst :: (a,b) -> a\nmap fst [(1,True),(2,False)]"
+        (lst num)
 
     -- , assertGeneralType
     --     "snd function declaration and application"
