@@ -169,7 +169,7 @@ prettySExpr fc fg (s, c) p = hang 2 . vsep $ [p, "C:" <+> fc c, f s] where
   f (AppS x xs) = hang 2 . vsep $ ("AppS" <+> prettySAnno fc fg x) : map (prettySAnno fc fg) xs
   f (LamS vs x) = hang 2 . vsep $ ["LamS" <+> hsep (map pretty vs), prettySAnno fc fg x]
   f (LstS xs) = hang 2 . vsep $ ("LstS" : map (prettySAnno fc fg) xs)
-  f (TupS xs) = hang 2 . vsep $ ("LstS" : map (prettySAnno fc fg) xs)
+  f (TupS xs) = hang 2 . vsep $ ("TupS" : map (prettySAnno fc fg) xs)
   f (NamS es)
     = block 4 "NamS" (vsep [pretty k <+> "=" <+> prettySAnno fc fg x | (k, x) <- es])
   f (NumS x) = "NumS(" <> viaShow x <> ")"

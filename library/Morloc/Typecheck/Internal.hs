@@ -25,6 +25,7 @@ module Morloc.Typecheck.Internal
   , access1
   , access2
   , lookupU
+  , lookupE
   , cut
   , substitute
   , occursCheck
@@ -376,6 +377,16 @@ lookupU v (gammaContext -> gs0) = f gs0 where
     | otherwise = f gs
   f (_:gs) = f gs
 
+
+-- | Look up a solved existential type variable
+lookupE :: EVar -> Gamma -> Maybe TypeU
+lookupE v (gammaContext -> gs0) = f gs0 where
+  f :: [GammaIndex] -> Maybe TypeU
+  f [] = Nothing
+  f ((AnnG v' t):gs)
+    | v == v' = Just t
+    | otherwise = f gs
+  f (_:gs) = f gs
 
 
 -- | remove context up to a marker

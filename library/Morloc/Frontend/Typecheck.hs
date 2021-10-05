@@ -11,6 +11,7 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
+import Morloc.Typecheck.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
@@ -143,7 +144,7 @@ synthE l i g (AccS e k) = do
 synthE l _ g (AppS f []) = do
   (g1, t1, f1) <- synthG l g f
   return (g1, t1, AppS f1 [])
-synthE l i g0 (AppS f xs) = do
+synthE l i g0 e@(AppS f xs) = do
 
   -- get the potentially qualified function type and expression
   (g1, qfunType, qfunExpr) <- synthG l g0 f
@@ -188,29 +189,17 @@ synthE l i g0 (AppS f xs) = do
     ts' -> return (FunU ts' outputType)
 
   -- put the AppS back together with the synthesized function and input expressions
-  return (g3, finalType, AppS uFunExpr inputExprs)
+  return (g3, apply g3 finalType, AppS uFunExpr inputExprs)
 
-synthE l _ g0 (LamS [] x0) = do 
-  (g1, t1, x1) <- synthG l g0 x0
-  return (g1, FunU [] t1, LamS [] x1)
-synthE l i g0 (LamS (v@(EV n):vs) x) = do
-  let mark = MarkG (TV Nothing n)
-      g1 = g0 +> mark
-      (g2, headType) = bindTerm g1 v
-
-  (g3, tailType, tailExpr) <- synthE l i g2 (LamS vs x)
-
-  fullType <- case tailType of
-    (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
-    _ -> error "impossible" -- LamS type is always a function (see base case)
-
-  fullExpr <- case tailExpr of
-    (LamS vs' x') -> return $ LamS (v:vs') x'
-    _ -> error "impossible" -- synthExpr does not change data constructors
-
-  g4 <- cut' i mark g3
-
-  return (g4, fullType, fullExpr)
+synthE l i g0 (LamS vs x) = do
+  let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
+      (g2, t) = newvar Nothing g1
+      marks = zipWith AnnG vs ts
+      g3 = g2 ++> marks 
+  (g4, t', x') <- checkG l g3 x t
+  let funType = apply g4 (FunU ts t')
+  g5 <- cut' i (head marks) g4
+  return (g5, funType, LamS vs x')
   where
     bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
     bindTerm g0' v' =
@@ -279,12 +268,18 @@ synthE l i g (CallS src) = do
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE l i g (VarS v) =
-  case l i of 
+synthE l i g (VarS v) = do
+  -- is this a bound variable that has already been solved
+  case lookupE v g of 
+    -- yes, return the solved type
     (Just t) -> return (g, t, VarS v)
-    Nothing ->
-      let (g', t) = newvar Nothing g
-      in return (g', t, VarS v)
+    -- no, so is it a variable that has a type annotation?
+    Nothing -> case l i of 
+      (Just t) -> return (g, t, VarS v)
+      -- no, then I have no idea what it is, so make a new existential
+      Nothing ->
+        let (g', t) = newvar Nothing g
+        in return (g', t, VarS v)
 
 
 checkE
@@ -300,7 +295,7 @@ checkE
        , SExpr (Indexed TypeU) Many Int
        )
 checkE l i g1 (LstS (e:es)) (AppU v [t]) = do
-  (g2, t2, e2) <- checkG l g1 e t 
+  (g2, t2, _) <- checkG l g1 e t 
   -- LstS [] will go to the normal Sub case
   checkE l i g2 (LstS es) (AppU v [t2])
 checkE l _ g1 (LamS [] e1) (FunU as1 b1) = do
