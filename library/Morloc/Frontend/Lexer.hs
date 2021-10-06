@@ -22,6 +22,7 @@ module Morloc.Frontend.Lexer
   , lexeme
   , lexemeBase
   , many1
+  , sepBy2
   , freename
   , name
   , tvar
@@ -189,6 +190,14 @@ many1 p = do
   x <- p
   xs <- many p
   return (x : xs)
+
+sepBy2 :: Parser a -> Parser s -> Parser [a]
+sepBy2 p s = do
+  x <- p
+  _ <- s
+  xs <- sepBy1 p s
+  return (x:xs)
+  
 
 comments :: Parser ()
 comments =  L.skipLineComment "--"

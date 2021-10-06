@@ -96,6 +96,7 @@ instance PrettyType Type where
   prettyType (UnkT (TV _ v)) = "*" <> pretty v
   prettyType (VarT (TV _ "Unit")) = "()"
   prettyType (VarT v) = pretty v
+  prettyType (FunT [] t) = "<MISSING> -> " <> prettyType t
   prettyType (FunT ts t) = encloseSep "(" ")" " -> " (map prettyType (ts <> [t]))
   prettyType (AppT v ts) = pretty v <+> hsep (map prettyType ts)
   prettyType (NamT o n ps rs)
@@ -121,6 +122,7 @@ prettyTypeU t@(ForallU _ _) =
   "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
 prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
+prettyTypeU (FunU [] t) = "<MISSING> -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
 prettyTypeU (AppU v ts) = pretty v <+> vsep (map prettyTypeU ts)
 prettyTypeU (NamU o n ps rs)

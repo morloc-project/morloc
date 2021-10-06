@@ -527,7 +527,7 @@ pAppU = do
 
 pFunU :: Parser TypeU
 pFunU = do
-  ts <- sepBy1 (pType') (op "->")
+  ts <- sepBy2 pType' (op "->")
   case (init ts, last ts) of
     (inputs, output) -> return $ FunU inputs output
   where

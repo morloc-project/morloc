@@ -147,10 +147,10 @@ synthE l _ g (AppS f []) = do
 synthE l i g0 e@(AppS f xs) = do
 
   -- get the potentially qualified function type and expression
-  (g1, qfunType, qfunExpr) <- synthG l g0 f
+  (g1, qFunType, qFunExpr) <- synthG l g0 f
 
   -- unqualify the expression
-  (g2, uFunType, uFunExpr) <- application g1 qfunType qfunExpr
+  (g2, uFunType, uFunExpr) <- application g1 qFunType qFunExpr
 
   -- extract output type from the type of f
   (ts, outputType) <- case uFunType of
@@ -329,6 +329,9 @@ checkE l i g1 e1 t2@(ForallU x a) = do
   return (g3, t3, e2)
 
 checkE l i g1 e1 b = do
+
+{- e1:  TupS [TupS [NumS(42.0), LogS(True)]] -}
+
   (g2, a, e2) <- synthE l i g1 e1
   let a' = apply g2 a
       b' = apply g2 b
