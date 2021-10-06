@@ -95,7 +95,7 @@ cmdTypecheck args _ config = do
          MM.writeMorlocReturn
   where
     sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
-    sannoManyWriter = putDoc . vsep . map (prettySAnno showConcrete showGeneral)
+    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
 
     showConcrete = viaShow
 

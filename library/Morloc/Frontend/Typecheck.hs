@@ -399,12 +399,36 @@ checkG' g x t = do
 
 synthE' i g x = do
   enter "synthE"
-  r <- synthE i g x 
+  peak x
+  seeGamma g
+  r@(g', t, _) <- synthE i g x 
   leave "synthE"
+  seeGamma g'
+  say $ prettyGreenTypeU t
   return r
 
 checkE' i g x t = do
   enter "checkE"
-  r <- checkE i g x t 
+  peak x
+  say $ prettyGreenTypeU t
+  seeGamma g
+  r@(g', t', _) <- checkE i g x t 
   leave "checkE"
+  say $ prettyGreenTypeU t'
+  seeGamma g'
   return r
+
+peak :: SExpr g f c -> MorlocMonad ()
+peak x = say $ f x where
+  f (UniS) = "UniS"
+  f (VarS v) = "VarS" <+> pretty v
+  f (AccS x k ) = "AccS x" <+> pretty k
+  f (AppS f xs) = "AppS f xs"
+  f (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> "x"
+  f (LstS xs) = "LstS xs"
+  f (TupS xs) = "TupS xs"
+  f (NamS rs) = "NamS rs"
+  f (NumS x) = "NumS<" <> viaShow x <> ">"
+  f (LogS x) = "LogS<" <> viaShow x <> ">"
+  f (StrS x) = "StrS<" <> viaShow x <> ">"
+  f (CallS src) = "NumS<" <> pretty src <> ">"
