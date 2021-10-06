@@ -17,6 +17,10 @@ import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
+import qualified Morloc.Frontend.API as F
+import Morloc.Pretty
+import Morloc.Data.Doc
+import Text.Megaparsec.Error (errorBundlePretty)
 
 
 runMorloc :: CliCommand -> IO () 
@@ -75,6 +79,24 @@ cmdMake args verbosity config = do
 
 -- | run the typechecker on a module but do not build it
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
-cmdTypecheck args _ _ = do
-  (_, _) <- readScript (typecheckExpression args) (typecheckScript args)
-  return ()
+cmdTypecheck args _ config = do
+  (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
+  let writer = sannoManyWriter -- FIXME add in pretty and raw versions (typecheckRaw arg)
+      verbosity = if typecheckVerbose args then 1 else 0
+  if typecheckType args
+    then case F.readType (unCode code) of
+      (Left err) -> print (errorBundlePretty err)
+      (Right x) -> print x 
+    else MM.runMorlocMonad
+           Nothing
+           verbosity
+           config
+           (M.typecheck path code >>= MM.liftIO . writer) >>=
+         MM.writeMorlocReturn
+  where
+    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
+    sannoManyWriter = putDoc . vsep . map (prettySAnno showConcrete showGeneral)
+
+    showConcrete = viaShow
+
+    showGeneral (Idx _ t) = prettyGreenTypeU t
