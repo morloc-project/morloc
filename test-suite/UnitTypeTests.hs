@@ -821,11 +821,31 @@ unitTypeTests =
         "f x = x\nf 42"
         num
     , assertGeneralType
-        "const function"
+        "const declared function"
         "const x y = x\nconst 42 True"
         num
     , assertGeneralType
-        "map snd over tuple list"
+        "identity signature function"
+        "id :: a -> a\nid 42"
+        num
+    , assertGeneralType
+        "const signature function"
+        "const :: a -> b -> a\nconst 42 True"
+        num
+    , assertGeneralType
+        "fst signature function"
+        "fst :: (a,b) -> a\nfst (42,True)"
+        num
+    , assertGeneralType
+        "value to list function"
+        "single :: a -> [a]\nsingle 42"
+        (lst num)
+    , assertGeneralType
+        "head function"
+        "head :: [a] -> a\nhead [1,2,3]"
+        num
+    , assertGeneralType
+        "map fst over tuple list"
         "map :: (a -> b) -> [a] -> [b]\nfst :: (a,b) -> a\nmap fst [(1,True),(2,False)]"
         (lst num)
 

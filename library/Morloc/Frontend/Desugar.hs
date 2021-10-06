@@ -188,7 +188,7 @@ desugarType h _ _ = f
         f t2
       Nothing -> return t0
 
-  f (ForallU _ _) = undefined
+  f (ForallU v t) = ForallU v <$> f t
 
   parsub :: (TVar, TypeU) -> TypeU -> TypeU
   parsub (v, t2) t1@(VarU v0)
