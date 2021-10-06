@@ -40,6 +40,11 @@ module Morloc.Monad
   , metaType
   , metaTypedefs
   , metaPackMap
+  -- * handling tree depth
+  , incDepth
+  , getDepth
+  , decDepth
+  , setDepth
   ) where
 
 import Control.Monad.Except
@@ -70,6 +75,7 @@ emptyState path v = MorlocState {
     statePackageMeta = []
   , stateVerbosity = v
   , stateCounter = -1
+  , stateDepth = 0
   , stateSignatures = GMap.empty
   , stateOutfile = path
   , statePackers = GMap.empty
@@ -92,6 +98,29 @@ setCounter :: Int -> MorlocMonad ()
 setCounter i = do
   s <- get
   put $ s {stateCounter = i}
+  return ()
+
+incDepth :: MorlocMonad Int
+incDepth = do
+  s <- get
+  let i = stateDepth s + 1
+  put $ s {stateDepth = i}
+  return i
+
+getDepth :: MorlocMonad Int
+getDepth = gets stateDepth
+
+decDepth :: MorlocMonad Int
+decDepth = do
+  s <- get
+  let i = stateDepth s - 1
+  put $ s {stateDepth = i}
+  return i
+
+setDepth :: Int -> MorlocMonad ()
+setDepth i = do
+  s <- get
+  put $ s {stateDepth = i}
   return ()
 
 writeMorlocReturn :: MorlocReturn a -> IO ()

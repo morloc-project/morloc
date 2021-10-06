@@ -11,9 +11,6 @@ module Morloc.Frontend.Namespace
   ( module Morloc.Namespace
   , mapExpr
   , mapExprM
-  , Stack
-  , StackState(..)
-  , StackConfig(..)
   -- rifraf
   , isGeneric
   -- * accessing state
@@ -73,23 +70,3 @@ copyState oldIndex newIndex = do
   case GMap.yIsX (stateSignatures s) oldIndex newIndex of
     (Just x) -> MM.put $ s {stateSignatures = x}
     Nothing -> return ()
-
-
-type GeneralStack c e l s a
-   = ReaderT c (ExceptT e (WriterT l (StateT s IO))) a
-
-type Stack a = GeneralStack StackConfig MorlocError [Text] StackState a
-
-data StackConfig =
-  StackConfig
-    { stackConfigVerbosity :: Int
-    }
-
-data StackState =
-  StackState
-    { stateVar :: Int
-    , stateQul :: Int
-    , stateSer :: [(TypeU, TypeU)]
-    , stateDepth :: Int
-    }
-  deriving (Ord, Eq, Show)

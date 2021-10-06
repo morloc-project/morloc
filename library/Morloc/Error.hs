@@ -26,6 +26,7 @@ instance Show MorlocError where
   show = MT.unpack . errmsg
 
 errmsg :: MorlocError -> MT.Text
+errmsg (IndexedError i e) = render $ "At index" <+> pretty i <> ":" <+> pretty (errmsg e)
 errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
 errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) =
