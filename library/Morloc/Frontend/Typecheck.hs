@@ -157,6 +157,15 @@ synthE l i g0 e@(AppS f xs) = do
     (FunU ts t) -> return (ts, t)
     _ -> error "impossible"
 
+  {- Showing `map fst [(1,True),(2,False)]` as an example
+  qFunType:   forall a b . (a -> b) -> List a -> List b
+  g1: []
+  uFunType:   (<a[][]> -> <b[][]>) -> List <a[][]>\n -> List <b[][]>
+  g2: [ExistG b [] [], ExistG a [] []]
+  g3: [ExistG: t1 [] [], SolvedG: t0 = Tuple2 Num Bool, ExistG: b [] [], SolvedG: a = Tuple2 <t1[][]> <t2[][]>]
+  finalType: List <b[][]>
+  -}
+ 
   -- check the tuple of argument expressions against a tuple of argument types,
   -- collect the types of missing arguments (partial application)
   (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
@@ -169,6 +178,8 @@ synthE l i g0 e@(AppS f xs) = do
           in checkE l i g2 (TupS xs) tupleType |>> (,) []
     -- there are more arguments than inputs: TYPE ERROR!!!
     LT -> Left (Idx i TooManyArguments)
+
+  -- error . show . render . vsep $ map prettyGammaIndex (gammaContext g3)
 
   -- extract the types of the input arguments
   inputTypes <- case argTupleType of
@@ -186,6 +197,8 @@ synthE l i g0 e@(AppS f xs) = do
     [] -> return outputType
     -- partial application, create a new function with unapplied types
     ts' -> return (FunU ts' outputType)
+
+  -- error . show . render $ prettyGreenTypeU finalType <+> "||" <+> prettyGreenTypeU (apply g3 finalType)
 
   -- put the AppS back together with the synthesized function and input expressions
   return (g3, apply g3 finalType, AppS uFunExpr inputExprs)
@@ -212,8 +225,7 @@ synthE _ _ g (LstS []) =
   in return (g1, listType, LstS [])
 synthE l i g (LstS (e:es)) = do
   (g1, itemType, itemExpr) <- synthG l g e 
-  (g2, listType', listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
-  let listType = apply g2 listType'
+  (g2, listType, listExpr) <- checkE l i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
   case listExpr of
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> error "impossible"
@@ -230,7 +242,7 @@ synthE l i g (TupS (e:es)) = do
 
   -- merge the head and tail
   t3 <- case tupleType of
-    (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (itemType:ts)
+    (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (apply g2 itemType : ts)
     _ -> error "impossible" -- the general tuple will always be (AppU _ _)
 
   xs' <- case tupleExpr of
@@ -249,7 +261,7 @@ synthE l i g0 (NamS ((k,x):rs)) = do
 
   -- merge the head with tail
   t <- case tailType of
-    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, headType):rs1)
+    (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, apply g2 headType):rs1)
     _ -> error "impossible" -- the synthE on NamS will always return NamU type
 
   tailExprs <- case tailExpr of
@@ -307,20 +319,22 @@ checkE l i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- peal off one layer of bound terms and check
   (g3, t3, e2) <- checkE l i g2 (LamS vs e1) (FunU as1 b1)
 
-  -- ignore trailing context `x:A,g3`
-  g4 <- cut' i vardef g3
-
   -- construct the final type
   t4 <- case t3 of
     (FunU as2 b2) -> return $ FunU (a1:as2) b2
     _ -> error "impossible"
+
+  let t5 = apply g3 t4
 
   -- construct the final expression
   e3 <- case e2 of
     (LamS vs' body) -> return $ LamS (v:vs') body
     _ -> error "impossible"
 
-  return (g4, t4, e3)
+  -- ignore trailing context `x:A,g3`
+  g4 <- cut' i vardef g3
+
+  return (g4, t5, e3)
 
 checkE l i g1 e1 t2@(ForallU x a) = do
   (g2, _, e2) <- checkE l i (g1 +> VarG x) e1 a
@@ -329,9 +343,6 @@ checkE l i g1 e1 t2@(ForallU x a) = do
   return (g3, t3, e2)
 
 checkE l i g1 e1 b = do
-
-{- e1:  TupS [TupS [NumS(42.0), LogS(True)]] -}
-
   (g2, a, e2) <- synthE l i g1 e1
   let a' = apply g2 a
       b' = apply g2 b
