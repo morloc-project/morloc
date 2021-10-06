@@ -845,15 +845,14 @@ unitTypeTests =
         "head :: [a] -> a\nhead [1,2,3]"
         num
     , assertGeneralType
+        "map id over number list"
+        "map :: (a -> b) -> [a] -> [b]\nid :: a -> a\nmap id [1,2,3]"
+        (lst num)
+    , assertGeneralType
         "map fst over tuple list"
         "map :: (a -> b) -> [a] -> [b]\nfst :: (a,b) -> a\nmap fst [(1,True),(2,False)]"
         (lst num)
 
-    -- , assertGeneralType
-    --     "snd function declaration and application"
-    --     "snd x y = y\nsnd True 42"
-    --     num
-    --
     -- , assertGeneralType
     --     "explicit annotation within an application"
     --     "f :: Num -> Num\nf (42 :: Num)"
