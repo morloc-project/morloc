@@ -356,17 +356,14 @@ data TypeError
   deriving (Ord, Eq, Show)
 
 data MorlocError
-  -- | Raised when assumptions about the input RDF are broken. This should not
-  -- occur for RDF that has been validated.
-  = InvalidRDF Text
+  -- | An error that is associated with an expression index
+  = IndexedError Int MorlocError
   -- | Raised for calls to unimplemented features
   | NotImplemented Text
   -- | Raised for unsupported features (such as specific languages)
   | NotSupported Text
   -- | Raised by parsec on parse errors
   | SyntaxError (ParseErrorBundle Text Void)
-  -- | Raised when someone didn't customize their error messages
-  | UnknownError
   -- | Raised when an unsupported language is encountered
   | UnknownLanguage Text
   -- | Raised when a module cannot be loaded 
@@ -379,8 +376,6 @@ data MorlocError
   | SerializationError Text
   -- | Error in building a pool (i.e., in a compiled language)
   | PoolBuildError Text
-  -- | Raise error if inappropriate function is called on unrealized manifold
-  | NoBenefits
   -- | Raise when a type alias substitution fails
   | SelfRecursiveTypeAlias TVar
   | MutuallyRecursiveTypeAlias [TVar]

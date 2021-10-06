@@ -26,8 +26,6 @@ instance Show MorlocError where
   show = MT.unpack . errmsg
 
 errmsg :: MorlocError -> MT.Text
-errmsg UnknownError = "UnknownError"
-errmsg (InvalidRDF msg) = "Invalid RDF: " <> msg
 errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
 errmsg (NotSupported msg) = "NotSupported: " <> msg
 errmsg (UnknownLanguage lang) =
@@ -47,9 +45,6 @@ errmsg (BadTypeAliasParameters (TV _ v) exp' obs)
   <> " parameters but found " <> MT.show' obs
 errmsg (ConflictingTypeAliases t1 t2)
   = "ConflictingTypeAliases: (" <> MT.show' t1 <> ", " <> MT.show' t2 <> ")" 
-errmsg NoBenefits =
-  "Manifolds in this context need to be fully resolved. " <>
-  "This is probably due to a bug in the code."
 errmsg (CallTheMonkeys msg) =
   "There is a bug in the code, send this message to the maintainer: " <> msg
 errmsg (GeneratorError msg) = "GeneratorError: " <> msg
