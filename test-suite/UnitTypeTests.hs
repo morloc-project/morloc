@@ -844,6 +844,65 @@ unitTypeTests =
         "head function"
         "head :: [a] -> a\nhead [1,2,3]"
         num
+
+    , assertGeneralType
+        "make list function"
+        "f :: a -> [a]\nf 1"
+        (lst num)
+
+    , assertGeneralType
+        "make list function"
+        "single :: a -> [a]\nsingle 1"
+        (lst num)
+
+    , assertGeneralType
+        "app single function"
+        "app :: (a -> b) -> a -> b\nf :: a -> [a]\napp f 42"
+        (lst num)
+
+    , assertGeneralType
+        "app head function"
+        "app :: (a -> b) -> a -> b\nf :: [a] -> a\napp f [42]"
+        (lst num)
+
+    , assertGeneralType
+      "nested calls"
+      "f x y = (x, y)\ng x y = (x, f 1 y)\ng True \"hi\""
+      (tuple [bool, tuple [bool, str]])
+
+    , assertGeneralType
+      "zip pair"
+      "pair x y = (x, y)\nzip :: (x -> y -> z) -> [x] -> [y] -> [z]\nzip pair [1,2] [True, False]"
+      (lst (tuple [num, bool]))
+
+    -- -- This raises a subtype error
+    -- snd :: (a, b) -> b
+    -- snd (snd (1, (1, 1)))
+    --
+    , assertGeneralType
+      "snd( snd (1,(1,True)) )"
+      "snd :: (a, b) -> b\nsnd (snd (1, (1, 1)))"
+      bool
+
+    , assertGeneralType
+      "nested identity"
+      "id :: a -> a\nid (id (id 1))"
+      num
+
+    -- -- This should give a straight error, none of that nonsense about within language conversion
+    -- f x = [x, 1]
+    -- f True
+
+
+    -- -- This fails to fail
+    -- f x y = [x, y]
+    -- f 1 True
+
+    , assertGeneralType
+        "map head function"
+        "map :: (a -> b) -> [a] -> [b]\nhead :: [a] -> a\nmap head [[1],[1,2,3]]"
+        (lst num)
+
     , assertGeneralType
         "map id over number list"
         "map :: (a -> b) -> [a] -> [b]\nid :: a -> a\nmap id [1,2,3]"
