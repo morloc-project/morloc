@@ -20,6 +20,7 @@ module Morloc.Typecheck.Internal
   , newvarRich
   -- * Typeclasses
   , Applicable(..)
+  , applyS
   , Indexable(..)
   -- * manipulating context
   , access1
@@ -64,6 +65,10 @@ instance Applicable TypeU where
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
+-- apply context to a SAnno
+applyS :: (Functor gf, Functor f, Applicable g)
+       => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
+applyS g = mapSAnno (fmap (apply g)) id
 
 class Indexable a where
   index :: a -> GammaIndex

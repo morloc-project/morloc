@@ -126,31 +126,22 @@ synthE i g (AccS e k) = do
 synthE _ g (AppS f []) = do
   (g1, t1, f1) <- synthG' g f
   return (g1, t1, AppS f1 [])
-synthE i g0 e@(AppS f xs) = do
-  -- get the potentially qualified function type and expression
-  (g1, qFunType, qFunExpr) <- synthG' g0 f
+synthE i g0 e@(AppS f xs0) = do
+  -- synthesize the type of the function
+  (g1, funType0, funExpr0) <- synthG g0 f
 
-  -- unqualify the expression
-  (g2, uFunType, uFunExpr) <- application' i g1 qFunType qFunExpr
+  -- extend the function type with the type of the expressions it is applied to
+  (g2, funType1, inputExprs) <- application i g1 xs0 funType0
 
-  -- extract output type from the type of f
-  (ts, outputType) <- case uFunType of
-    (FunU ts t) -> return (ts, t)
+  -- determine the type after application
+  appliedType <- case funType1 of
+    (FunU ts t) -> case drop (length inputExprs) ts of 
+      [] -> return t -- full application
+      rs -> return $ FunU rs t -- partial application
     _ -> error "impossible"
 
-  (g3, inputTypes, inputExprs, leftoverTypes) <- zipCheck' i g2 xs ts
-
-  -- synthesize the final type
-  finalType' <- case leftoverTypes of
-    -- full application, just return the output type
-    [] -> return outputType
-    -- partial application, create a new function with unapplied types
-    ts' -> return (FunU ts' outputType)
-
-  let finalType = apply g3 finalType'
-
   -- put the AppS back together with the synthesized function and input expressions
-  return (g3, finalType, AppS uFunExpr inputExprs)
+  return (g2, appliedType, AppS funExpr0 inputExprs)
 
 synthE i g0 (LamS vs x) = do
   let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
@@ -245,6 +236,57 @@ synthE i g (VarS v) = do
           in return (g', t, VarS v)
 
 
+application
+  :: Int
+  -> Gamma
+  -> [SAnno Int Many Int] -- the expressions that are passed to the function
+  -> TypeU -- the function type
+  -> MorlocMonad
+      ( Gamma
+      , TypeU -- output function type
+      , [SAnno (Indexed TypeU) Many Int] -- @e@, with type annotation
+      )
+
+--  g1 |- e <= A -| g2
+-- ----------------------------------------- -->App
+--  g1 |- A->C o e =>> C -| g2
+application i g0 es0 (FunU as0 b0) = do
+  (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
+  let b1 = apply g1 b0
+      es2 = map (applyS g1) es1 
+      funType = FunU (as1 <> remainder) b1
+  return (g1, funType, es2)
+
+--  g1,Ea |- [Ea/a]A o e =>> C -| g2
+-- ----------------------------------------- Forall App
+--  g1 |- Forall x.A o e =>> C -| g2
+application i g es (ForallU v s) = application i (g +> ExistG v [] []) es (substitute v s)
+
+--  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
+-- ----------------------------------------- EaApp
+--  g1[Ea] |- Ea o e =>> Ea2 -| g2
+application i g0 es (ExistU v [] _) =
+  case access1 v (gammaContext g0) of
+    -- replace <t0> with <t0>:<ea1> -> <ea2>
+    Just (rs, _, ls) -> do
+      let (_, eas) = statefulMap (\g _ -> newvar Nothing g) g0 es -- DO NOT USE THE GAMMA
+          (_, ea) = newvar Nothing g0 -- DO NOT USE THE GAMMA
+          f = FunU eas ea
+          g1 = g0 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+      (g2, _, es', _) <- zipCheck i g1 es eas
+      return (g2, apply g2 f, es')
+    -- if the variable has already been solved, use solved value
+    Nothing -> case lookupU v g0 of
+      (Just (FunU ts t)) -> do
+        (g1, ts', es', _) <- zipCheck i g0 es ts
+        return (g1, apply g1 (FunU ts' t), es')
+      _ -> gerr i ApplicationOfNonFunction
+
+application i _ e t = do
+  gerr i ApplicationOfNonFunction
+
+
+
 -- Tip together the arguments passed to an application
 zipCheck
   :: Int
@@ -325,30 +367,14 @@ checkE i g1 e1 b = do
   return (g3, apply g3 b', e2)
 
 
-application
-  :: Int
-  -> Gamma
-  -> TypeU
-  -> SAnno (Indexed TypeU) Many Int
-  -> MorlocMonad
-       ( Gamma
-       , TypeU
-       , SAnno (Indexed TypeU) Many Int
-       )
-application i g (ForallU v t) e = do
-  let (g', a) = newvar Nothing g
-      t' = substituteTVar v a t
-      e' = mapSAnno (fmap (substituteTVar v a)) id e
-  application i g' t' e'
-application _ g t@(FunU _ _) e = return (g, t, e)
-application i _ _ _ = gerr i ApplicationOfNonFunction
-
-
 cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of
   (Left terr) -> gerr i terr
   (Right x) -> return x
 
+unpartial :: TypeU -> TypeU
+unpartial (FunU ts1 (FunU ts2 x)) = unpartial $ FunU (ts1 <> ts2) x
+unpartial x = x
 
 ---- debugging
 
@@ -379,16 +405,6 @@ debugLog d = do
   if verbosity > 0
     then (liftIO . putDoc) d
     else return ()
-
-application' i g t x = do
-  enter "application"
-  seeType t
-  seeGamma g
-  r@(g', t', _) <- application i g t x
-  leave "application"
-  seeType t'
-  seeGamma g'
-  return r
 
 zipCheck' i g es ts = do
   enter "zipCheck" 
