@@ -105,9 +105,9 @@ showTypeError (InstantiationError t1 t2 msg)
   <> "(" <> P.prettyGreenTypeU t1 <+> "<:=" <+> P.prettyGreenTypeU t2 <> ")"
 showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> MTP.prettyGammaIndex gi
 showTypeError (OccursCheckFail _ _ _) = render $ "OccursCheckFail"
-showTypeError (NotYetImplemented t1 t2 msg)
+showTypeError (Mismatch t1 t2 msg)
   = render
-  $ "NotYetImplemented"
+  $ "Mismatch"
   <+> tupled ["t1=" <> P.prettyGreenTypeU t1, "t2=" <> P.prettyGreenTypeU t2]
   <+> pretty msg
 showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v

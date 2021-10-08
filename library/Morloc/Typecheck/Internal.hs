@@ -101,7 +101,7 @@ subtype t1@(VarU (TV lang1 a1)) t2@(VarU (TV lang2 a2)) g
   | lang1 /= lang2 = return $ g +> SerialConstraint t1 t2
 
   -- If languages are same, but types are different, raise error
-  | lang1 == lang2 && a1 /= a2 = Left $ NotYetImplemented t1 t2 "Within language type conversion not yet implemented"
+  | lang1 == lang2 && a1 /= a2 = Left $ Mismatch t1 t2 "Unequal types with no conversion rule"
 
 subtype a@(ExistU (TV l1 _) _ _) b@(ExistU (TV l2 _) _ _) g
   --

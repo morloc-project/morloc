@@ -81,6 +81,8 @@ module Morloc.Namespace
   -- ** Types used in post-typechecking tree
   , SAnno(..)
   , SExpr(..)
+  , mapSAnno
+  , mapSExpr
   -- ** Typeclasses
   , HasOneLanguage(..)
   , Typelike(..)
@@ -346,7 +348,7 @@ data TypeError
   | EmptyCut GammaIndex
   | OccursCheckFail TypeU TypeU Text
     -- ^ the msg should an identifier for the place where the occurs check failed
-  | NotYetImplemented TypeU TypeU Text 
+  | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
   | KeyError Text TypeU
   | MissingConcreteSignature Source
@@ -543,6 +545,26 @@ data SExpr g f c
   | LogS Bool
   | StrS Text
   | CallS Source
+
+mapSAnno :: Functor f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
+mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr fg fc) e) (fg g)
+
+mapSExpr :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
+mapSExpr fg fc (e0, c) = (fe e0, fc c) where 
+  m = mapSAnno fg fc
+  fe (UniS) = UniS
+  fe (VarS v) = VarS v
+  fe (AccS x k) = AccS (m x) k
+  fe (AppS x xs) = AppS (m x) (map m xs)
+  fe (LamS vs x) = LamS vs (m x)
+  fe (LstS xs) = LstS (map m xs)
+  fe (TupS xs) = TupS (map m xs)
+  fe (NamS rs) = NamS (zip (map fst rs) (map (m . snd) rs))
+  fe (NumS x) = NumS x
+  fe (LogS x) = LogS x
+  fe (StrS x) = StrS x
+  fe (CallS src) = CallS src
+   
 
 data Indexed a = Idx Int a
 

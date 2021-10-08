@@ -881,7 +881,7 @@ unitTypeTests =
     --
     , assertGeneralType
       "snd( snd (1,(1,True)) )"
-      "snd :: (a, b) -> b\nsnd (snd (1, (1, 1)))"
+      "snd :: (a, b) -> b\nsnd (snd (1, (1, True)))"
       bool
 
     , assertGeneralType

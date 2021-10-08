@@ -127,50 +127,30 @@ synthE _ g (AppS f []) = do
   (g1, t1, f1) <- synthG' g f
   return (g1, t1, AppS f1 [])
 synthE i g0 e@(AppS f xs) = do
-
   -- get the potentially qualified function type and expression
   (g1, qFunType, qFunExpr) <- synthG' g0 f
 
   -- unqualify the expression
-  (g2, uFunType, uFunExpr) <- application g1 qFunType qFunExpr
+  (g2, uFunType, uFunExpr) <- application' i g1 qFunType qFunExpr
 
   -- extract output type from the type of f
   (ts, outputType) <- case uFunType of
     (FunU ts t) -> return (ts, t)
     _ -> error "impossible"
 
-  -- check the tuple of argument expressions against a tuple of argument types,
-  -- collect the types of missing arguments (partial application)
-  (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
-    -- there are more inputs than arguments: partial application
-    GT -> case splitAt (length xs) ts of
-      (ts', remainder) -> let tupleType = head $ MLD.defaultTuple Nothing ts'
-                          in checkE' i g2 (TupS xs) tupleType |>> (,) remainder
-    -- there are the same number of inputs and arguments: full application
-    EQ -> let tupleType = head $ MLD.defaultTuple Nothing ts
-          in checkE' i g2 (TupS xs) tupleType |>> (,) []
-    -- there are more arguments than inputs: TYPE ERROR!!!
-    LT -> gerr i TooManyArguments
-
-  -- extract the types of the input arguments
-  inputTypes <- case argTupleType of
-    (AppU _ ts') -> return ts'
-    _ -> error "impossible"
-
-  -- extract the input expressions
-  inputExprs <- case argTupleExpr of
-    (TupS xs') -> return xs'
-    _ -> error "impossible"
+  (g3, inputTypes, inputExprs, leftoverTypes) <- zipCheck' i g2 xs ts
 
   -- synthesize the final type
-  finalType <- case leftoverTypes of
+  finalType' <- case leftoverTypes of
     -- full application, just return the output type
     [] -> return outputType
     -- partial application, create a new function with unapplied types
     ts' -> return (FunU ts' outputType)
 
+  let finalType = apply g3 finalType'
+
   -- put the AppS back together with the synthesized function and input expressions
-  return (g3, apply g3 finalType, AppS uFunExpr inputExprs)
+  return (g3, finalType, AppS uFunExpr inputExprs)
 
 synthE i g0 (LamS vs x) = do
   let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
@@ -180,7 +160,7 @@ synthE i g0 (LamS vs x) = do
   (g4, t', x') <- checkG' g3 x t
   let funType = apply g4 (FunU ts t')
   g5 <- cut' i (head marks) g4
-  return (g5, funType, LamS vs x')
+  return (g4, funType, LamS vs x')
   where
     bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
     bindTerm g0' v' =
@@ -265,6 +245,29 @@ synthE i g (VarS v) = do
           in return (g', t, VarS v)
 
 
+-- Tip together the arguments passed to an application
+zipCheck
+  :: Int
+  -> Gamma
+  -> [SAnno Int Many Int]
+  -> [TypeU]
+  -> MorlocMonad
+    ( Gamma
+    , [TypeU]
+    , [SAnno (Indexed TypeU) Many Int]
+    , [TypeU] -- remainder
+    )
+-- check the first elements, cdr down the remaining values
+zipCheck i g0 (x0:xs0) (t0:ts0) = do
+  (g1, t1, x1) <- checkG' g0 x0 t0
+  (g2, ts1, xs1, remainder) <- zipCheck i g1 xs0 ts0
+  return (g2, t1:ts1, x1:xs1, remainder)
+-- If there are fewer arguments than types, this may be OK, just partial application
+zipCheck _ g0 [] ts = return (g0, [], [], ts)
+-- If there are fewer types than arguments, then die
+zipCheck i _ es [] = gerr i TooManyArguments
+
+
 checkE
   :: Int
   -> Gamma
@@ -319,11 +322,12 @@ checkE i g1 e1 b = do
   g3 <- case subtype a' b' g2 of
     (Left err') -> gerr i err'
     (Right x) -> return x
-  return (g3, apply g3 a', e2)
+  return (g3, apply g3 b', e2)
 
 
 application
-  :: Gamma
+  :: Int
+  -> Gamma
   -> TypeU
   -> SAnno (Indexed TypeU) Many Int
   -> MorlocMonad
@@ -331,26 +335,14 @@ application
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-application g0 t0 e0@(SAnno (Many []) _) = return (g0, t0, e0)
-application g0 t0 (SAnno (Many ((e0, i):es0)) m@(Idx j _)) = do
-  (g1, t1, e1) <- applicationExpr j g0 t0 e0
-  (g2, t2, e2) <- application g1 t1 (SAnno (Many es0) m)
-  case e2 of
-    (SAnno (Many es1) _) -> return (g2, t2, SAnno (Many ((e1, i):es1)) m) 
+application i g (ForallU v t) e = do
+  let (g', a) = newvar Nothing g
+      t' = substituteTVar v a t
+      e' = mapSAnno (fmap (substituteTVar v a)) id e
+  application i g' t' e'
+application _ g t@(FunU _ _) e = return (g, t, e)
+application i _ _ _ = gerr i ApplicationOfNonFunction
 
-applicationExpr
-  :: Int
-  -> Gamma
-  -> TypeU
-  -> SExpr (Indexed TypeU) Many Int
-  -> MorlocMonad
-       ( Gamma
-       , TypeU
-       , SExpr (Indexed TypeU) Many Int
-       )
-applicationExpr i g0 (ForallU v t) e = applicationExpr i (g0 +> ExistG v [] []) (substitute v t) e
-applicationExpr _ g0 t@(FunU _ _) e = return (g0, t, e)
-applicationExpr i _ _ _ = gerr i ApplicationOfNonFunction
 
 cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of
@@ -363,20 +355,23 @@ cut' i idx g = case cut idx g of
 enter :: Doc R.AnsiStyle -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
-  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> align d <> "\n"
+  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
 
 say :: Doc R.AnsiStyle -> MorlocMonad ()
 say d = do
   depth <- MM.getDepth
-  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> align d <> "\n"
+  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
 
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gammaContext g)))
 
+seeType :: TypeU -> MorlocMonad ()
+seeType t = say $ prettyGreenTypeU t
+
 leave :: Doc R.AnsiStyle -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
-  debugLog $ "<" <> pretty (take depth (repeat '-')) <+> align d <> "\n"
+  debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
 
 debugLog :: Doc R.AnsiStyle -> MorlocMonad ()
 debugLog d = do
@@ -385,16 +380,32 @@ debugLog d = do
     then (liftIO . putDoc) d
     else return ()
 
+application' i g t x = do
+  enter "application"
+  seeType t
+  seeGamma g
+  r@(g', t', _) <- application i g t x
+  leave "application"
+  seeType t'
+  seeGamma g'
+  return r
+
+zipCheck' i g es ts = do
+  enter "zipCheck" 
+  r@(g, ts, es, rs) <- zipCheck i g es ts
+  leave "zipCheck"
+  return r
+
 synthG' g x = do
-  enter "synthG"
+  -- enter "synthG"
   r <- synthG g x
-  leave "synthG"
+  -- leave "synthG"
   return r
 
 checkG' g x t = do
-  enter "checkG"
+  -- enter "checkG"
   r <- checkG g x t
-  leave "checkG"
+  -- leave "checkG"
   return r
 
 synthE' i g x = do
@@ -404,31 +415,38 @@ synthE' i g x = do
   r@(g', t, _) <- synthE i g x 
   leave "synthE"
   seeGamma g'
-  say $ prettyGreenTypeU t
+  seeType t
   return r
 
 checkE' i g x t = do
   enter "checkE"
   peak x
-  say $ prettyGreenTypeU t
+  seeType t
   seeGamma g
   r@(g', t', _) <- checkE i g x t 
   leave "checkE"
-  say $ prettyGreenTypeU t'
+  seeType t'
   seeGamma g'
   return r
 
-peak :: SExpr g f c -> MorlocMonad ()
-peak x = say $ f x where
-  f (UniS) = "UniS"
-  f (VarS v) = "VarS" <+> pretty v
-  f (AccS x k ) = "AccS x" <+> pretty k
-  f (AppS f xs) = "AppS f xs"
-  f (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> "x"
-  f (LstS xs) = "LstS xs"
-  f (TupS xs) = "TupS xs"
-  f (NamS rs) = "NamS rs"
-  f (NumS x) = "NumS<" <> viaShow x <> ">"
-  f (LogS x) = "LogS<" <> viaShow x <> ">"
-  f (StrS x) = "StrS<" <> viaShow x <> ">"
-  f (CallS src) = "NumS<" <> pretty src <> ">"
+prettyCon :: SExpr g Many Int -> Doc ann
+prettyCon (UniS) = "UniS"
+prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
+prettyCon (AccS x k ) = "AccS" <+> prettyGen x <+> pretty k
+prettyCon (AppS f xs) = "AppS" <+> prettyGen f <+> tupled (map prettyGen xs)
+prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> prettyGen x
+prettyCon (LstS xs) = "LstS" <+> tupled (map prettyGen xs)
+prettyCon (TupS xs) = "TupS" <+> tupled (map prettyGen xs)
+prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettyGen x) rs)
+prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
+prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
+prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
+prettyCon (CallS src) = "NumS<" <> pretty src <> ">"
+
+prettyGen :: SAnno g Many Int -> Doc ann
+prettyGen (SAnno (Many [(e, _)]) _) = prettyCon e
+prettyGen (SAnno (Many _) _) = "..."
+
+peak :: SExpr g Many Int -> MorlocMonad ()
+peak = say . prettyCon
+-- peak x = say $ f x where

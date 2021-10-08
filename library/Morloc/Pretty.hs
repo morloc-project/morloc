@@ -119,12 +119,12 @@ prettyTypeU (ExistU v ts ds)
   <> list (map prettyTypeU ts)
   <> list (map prettyTypeU ds)
 prettyTypeU t@(ForallU _ _) =
-  "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
+  parens $ "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
 prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU [] t) = "<MISSING> -> " <> prettyTypeU t
+prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
-prettyTypeU (AppU v ts) = pretty v <+> vsep (map prettyTypeU ts)
+prettyTypeU (AppU v ts) = parens $ pretty v <+> vsep (map prettyTypeU ts)
 prettyTypeU (NamU o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
