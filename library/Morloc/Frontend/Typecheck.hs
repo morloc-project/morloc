@@ -19,6 +19,7 @@ import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
 
 import qualified Control.Monad.State as CMS
+import qualified Data.Map as Map
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and and everything else are abstracted away,
@@ -31,7 +32,14 @@ import qualified Control.Monad.State as CMS
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
-typecheck es = mapM (synthG' initialContext) es |>> map getSanno where
+typecheck es = mapM run es where
+    run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
+    run e0 = do
+      -- standardize names for lambda bound variables (e.g., x0, x1 ...)
+      let ((_, g), e1) = renameSAnno (Map.empty, initialContext) e0
+      (_, _, e2) <- synthG' g e1 
+      return e2
+
     -- FIXME: do I really want to reinitialize gamma for each export?
     initialContext = Gamma
       { gammaCounter = 0
@@ -141,7 +149,7 @@ synthE i g0 e@(AppS f xs0) = do
     _ -> error "impossible"
 
   -- put the AppS back together with the synthesized function and input expressions
-  return (g2, appliedType, AppS funExpr0 inputExprs)
+  return (g2, apply g2 appliedType, AppS (applyS g2 funExpr0) inputExprs)
 
 synthE i g0 (LamS vs x) = do
   let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
@@ -253,15 +261,14 @@ application
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let b1 = apply g1 b0
-      es2 = map (applyS g1) es1 
-      funType = FunU (as1 <> remainder) b1
+  let es2 = map (applyS g1) es1 
+      funType = apply g1 $ FunU (as1 <> remainder) b0
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-application i g es (ForallU v s) = application i (g +> ExistG v [] []) es (substitute v s)
+application i g es (ForallU v s) = application' i (g +> ExistG v [] []) es (substitute v s)
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
@@ -322,9 +329,10 @@ checkE
        , SExpr (Indexed TypeU) Many Int
        )
 checkE i g1 (LstS (e:es)) (AppU v [t]) = do
-  (g2, t2, _) <- checkG' g1 e t 
+  (g2, t2, e') <- checkG' g1 e t 
   -- LstS [] will go to the normal Sub case
-  checkE i g2 (LstS es) (AppU v [t2])
+  (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
+  return (g3, t3, (LstS (map (applyS g3) (e':es'))))
 checkE _ g1 (LamS [] e1) (FunU as1 b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
   return (g2, FunU as1 b2, LamS [] e2)
@@ -462,9 +470,9 @@ application' i g es t = do
 prettyCon :: SExpr g Many Int -> Doc ann
 prettyCon (UniS) = "UniS"
 prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
-prettyCon (AccS x k ) = "AccS" <+> prettyGen x <+> pretty k
-prettyCon (AppS f xs) = "AppS" <+> prettyGen f <+> tupled (map prettyGen xs)
-prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> prettyGen x
+prettyCon (AccS x k ) = "AccS" <+> pretty k <+> parens (prettyGen x)
+prettyCon (AppS f xs) = "AppS" <+> parens (prettyGen f) <+> tupled (map prettyGen xs)
+prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> braces (prettyGen x)
 prettyCon (LstS xs) = "LstS" <+> tupled (map prettyGen xs)
 prettyCon (TupS xs) = "TupS" <+> tupled (map prettyGen xs)
 prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettyGen x) rs)

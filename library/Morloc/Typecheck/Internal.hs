@@ -30,6 +30,7 @@ module Morloc.Typecheck.Internal
   , cut
   , substitute
   , rename
+  , renameSAnno
   , occursCheck
   -- * subtyping
   , subtype
@@ -41,6 +42,7 @@ import Morloc.Data.Doc
 import Morloc.Typecheck.Pretty
 
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 
 
 class Applicable a where
@@ -80,19 +82,6 @@ instance Indexable GammaIndex where
 instance Indexable TypeU where
   index (ExistU t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
-
--- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
-rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV lang _) t0) = 
-  let i = gammaCounter g0
-      v' = TV lang (MT.pack $ "v" <> show i)
-      g1 = g0 {gammaCounter = i + 1}
-      (g2, t1) = rename g1 t0
-      t2 = substituteTVar v (VarU v') t1
-  in (g2, ForallU v' t2)
--- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
-rename g t = (g, t)
-
 
 (+>) :: Indexable a => Gamma -> a -> Gamma
 (+>) g x = g {gammaContext = (index x) : gammaContext g}
@@ -430,6 +419,59 @@ newvarRich
   -> Gamma
   -> (Gamma, TypeU)
 newvarRich ps ds lang g =
+  let (g', v) = tvarname g "v" lang
+  in (g' +> ExistG v ps ds, ExistU v ps ds)
+
+
+-- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
+rename :: Gamma -> TypeU -> (Gamma, TypeU)
+rename g0 (ForallU v@(TV lang _) t0) = 
+  let (g1, v') = tvarname g0 "q" lang
+      (g2, t1) = rename g1 t0
+      t2 = substituteTVar v (VarU v') t1
+  in (g2, ForallU v' t2)
+-- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
+rename g t = (g, t)
+
+renameSAnno :: (Map.Map EVar EVar, Gamma) -> SAnno g Many c -> ((Map.Map EVar EVar, Gamma), SAnno g Many c)
+renameSAnno context (SAnno (Many xs) gt) =
+  let (context', es) = statefulMap renameSExpr context (map fst xs)
+  in (context', SAnno (Many (zip es (map snd xs))) gt)
+
+renameSExpr :: (Map.Map EVar EVar, Gamma) -> SExpr g Many c -> ((Map.Map EVar EVar, Gamma), SExpr g Many c)
+renameSExpr c0@(m, g) e0 = case e0 of
+  (VarS v) -> case Map.lookup v m of
+    (Just v') -> (c0, VarS v')
+    Nothing -> (c0, VarS v)
+  (LamS vs x) ->
+    let (g', vs') = statefulMap (\g' _ -> evarname g' "x") g vs
+        m' = foldr (uncurry Map.insert) m (zip vs vs')
+        (c1, x') = renameSAnno (m', g') x
+    in (c1, LamS vs' x')
+  (AccS e k) ->
+    let (c1, e') = renameSAnno c0 e
+    in (c1, AccS e' k)
+  (AppS e es) ->
+    let (c1, es') = statefulMap renameSAnno c0 es
+        (c2, e') = renameSAnno c1 e -- order matters here, the arguments are bound under the PARENT
+    in (c2, AppS e' es')
+  (LstS es) ->
+    let (c1, es') = statefulMap renameSAnno c0 es
+    in (c1, LstS es')
+  (TupS es) ->
+    let (c1, es') = statefulMap renameSAnno c0 es
+    in (c1, TupS es')
+  (NamS rs) ->
+    let (c1, es') = statefulMap renameSAnno c0 (map snd rs)
+    in (c1, NamS (zip (map fst rs) es'))
+  e -> (c0, e)
+
+tvarname :: Gamma -> MT.Text -> Maybe Lang -> (Gamma, TVar)
+tvarname g prefix lang =
   let i = gammaCounter g
-      v = TV lang (MT.pack $ "v" <> show i)
-  in (g {gammaCounter = i + 1} +> ExistG v ps ds, ExistU v ps ds)
+  in (g {gammaCounter = i + 1}, TV lang (prefix <> MT.pack (show i)))
+
+evarname :: Gamma -> MT.Text -> (Gamma, EVar)
+evarname g prefix =
+  let i = gammaCounter g
+  in (g {gammaCounter = i + 1}, EV (prefix <> MT.pack (show i)))

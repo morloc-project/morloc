@@ -866,6 +866,11 @@ unitTypeTests =
         (lst num)
 
     , assertGeneralType
+      "simple nested call"
+      "f x = x\ng x = f x\ng 1"
+      num
+
+    , assertGeneralType
       "nested calls"
       "f x y = (x, y)\ng x y = (x, f 1 y)\ng True \"hi\""
       (tuple [bool, tuple [bool, str]])
@@ -898,6 +903,12 @@ unitTypeTests =
     -- -- This fails to fail
     -- f x y = [x, y]
     -- f 1 True
+
+
+    , assertGeneralType
+        "f x y = [x, y]"
+        "f x y = [x, y]\nf 1"
+        (fun [num, lst num])
 
     , assertGeneralType
         "map head function"
