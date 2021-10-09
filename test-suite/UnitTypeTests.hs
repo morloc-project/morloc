@@ -875,19 +875,20 @@ unitTypeTests =
       "pair x y = (x, y)\nzip :: (x -> y -> z) -> [x] -> [y] -> [z]\nzip pair [1,2] [True, False]"
       (lst (tuple [num, bool]))
 
-    -- -- This raises a subtype error
-    -- snd :: (a, b) -> b
-    -- snd (snd (1, (1, 1)))
-    --
-    , assertGeneralType
-      "snd( snd (1,(1,True)) )"
-      "snd :: (a, b) -> b\nsnd (snd (1, (1, True)))"
-      bool
-
     , assertGeneralType
       "nested identity"
       "id :: a -> a\nid (id (id 1))"
       num
+
+    , assertGeneralType
+      "head (head [[1]])"
+      "head :: [a] -> a\nhead (head [[42]])"
+      num
+
+    , assertGeneralType
+      "snd (snd (1,(1,True)))"
+      "snd :: (a, b) -> b\nsnd (snd (1, (1, True)))"
+      bool
 
     -- -- This should give a straight error, none of that nonsense about within language conversion
     -- f x = [x, 1]

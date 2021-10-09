@@ -131,7 +131,7 @@ synthE i g0 e@(AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
 
   -- extend the function type with the type of the expressions it is applied to
-  (g2, funType1, inputExprs) <- application i g1 xs0 funType0
+  (g2, funType1, inputExprs) <- application' i g1 xs0 funType0
 
   -- determine the type after application
   appliedType <- case funType1 of
@@ -213,27 +213,28 @@ synthE i g0 (NamS ((k,x):rs)) = do
 -- Sources are axiomatic. They are they type they are said to be.
 synthE i g (CallS src) = do
   maybeType <- lookupType i
-  t <- case maybeType of 
-    (Just t) -> return t
+  (g', t') <- case maybeType of 
+    (Just t) -> return $ rename g t
     Nothing -> gerr i (MissingGeneralSignature src)
-  return (g, t, CallS src)
+  return (g', t', CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  case lookupE v g of 
+  (g', t') <- case lookupE v g of 
     -- yes, return the solved type
-    (Just t) -> return (g, t, VarS v)
+    (Just t) -> return (g, t)
     -- no, so is it a variable that has a type annotation?
     Nothing -> do
       maybeType <- lookupType i
       case maybeType of
-        (Just t) -> return (g, t, VarS v)
+        (Just t) -> return $ rename g t
         -- no, then I have no idea what it is, so make a new existential
         _ ->
           let (g', t) = newvar Nothing g
-          in return (g', t, VarS v)
+          in return (g', t)
+  return (g', t', VarS v)
 
 
 application
@@ -445,6 +446,19 @@ checkE' i g x t = do
   seeGamma g'
   return r
 
+application' i g es t = do
+  enter "application"
+  seeGamma g
+  seeType t
+  mapM_ peakGen es
+  r@(g',t',es') <- application i g es t
+  leave "application"
+  seeGamma g'
+  seeType t'
+  mapM_ peakGen es'
+  return r
+
+
 prettyCon :: SExpr g Many Int -> Doc ann
 prettyCon (UniS) = "UniS"
 prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
@@ -465,4 +479,8 @@ prettyGen (SAnno (Many _) _) = "..."
 
 peak :: SExpr g Many Int -> MorlocMonad ()
 peak = say . prettyCon
+-- peak x = say $ f x where
+
+peakGen :: SAnno g Many Int -> MorlocMonad ()
+peakGen = say . prettyGen
 -- peak x = say $ f x where

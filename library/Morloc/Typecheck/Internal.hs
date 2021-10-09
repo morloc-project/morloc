@@ -29,6 +29,7 @@ module Morloc.Typecheck.Internal
   , lookupE
   , cut
   , substitute
+  , rename
   , occursCheck
   -- * subtyping
   , subtype
@@ -79,6 +80,18 @@ instance Indexable GammaIndex where
 instance Indexable TypeU where
   index (ExistU t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
+
+-- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
+rename :: Gamma -> TypeU -> (Gamma, TypeU)
+rename g0 (ForallU v@(TV lang _) t0) = 
+  let i = gammaCounter g0
+      v' = TV lang (MT.pack $ "v" <> show i)
+      g1 = g0 {gammaCounter = i + 1}
+      (g2, t1) = rename g1 t0
+      t2 = substituteTVar v (VarU v') t1
+  in (g2, ForallU v' t2)
+-- Unless I add N-rank types, foralls can only be on top, so no need to recurse.
+rename g t = (g, t)
 
 
 (+>) :: Indexable a => Gamma -> a -> Gamma
@@ -418,8 +431,5 @@ newvarRich
   -> (Gamma, TypeU)
 newvarRich ps ds lang g =
   let i = gammaCounter g
-      v = TV lang (newvars !! i)
+      v = TV lang (MT.pack $ "v" <> show i)
   in (g {gammaCounter = i + 1} +> ExistG v ps ds, ExistU v ps ds)
-  where
-    newvars =
-      zipWith (\x y -> MT.pack (x ++ show y)) (repeat "t") ([0 ..] :: [Integer])
