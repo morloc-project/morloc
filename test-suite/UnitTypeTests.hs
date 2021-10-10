@@ -27,14 +27,6 @@ import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
 
--- main :: Ord k => (n -> a) -> DAG k e n -> a
--- main f d = case MDD.roots d of
---   [] -> error "Missing or circular module"
---   [k] -> case Map.lookup k d of
---     (Just (m,_)) -> f m
---     Nothing -> error "Bad DAG"
---   _ -> error "Cannot handle multiple roots"
-
 -- get the toplevel general type of a typechecked expression
 gtypeof :: (SAnno (Indexed TypeU) f c) -> TypeU
 gtypeof (SAnno _ (Idx _ t)) = t
@@ -367,6 +359,15 @@ typeAliasTests =
            type Foo = A
            g :: Foo -> Int
            f = g
+           export f
+        |]
+        (fun [var "A", var "Int"])
+    , assertGeneralType
+        "state is inherited across binding"
+        [r|
+           type Foo = A
+           f :: Foo -> Int
+           f = g  {- yes, g isn't defined -}
            export f
         |]
         (fun [var "A", var "Int"])

@@ -165,7 +165,7 @@ desugarType h _ _ = f
   -- -----------------
   -- f :: (Int, A) -> B
   --
-  f (AppU v ts) =
+  f t@(AppU v ts) =
     case Map.lookup v h of
       (Just []) -> AppU v <$> mapM f ts
       (Just (t':ts')) -> do
@@ -174,8 +174,8 @@ desugarType h _ _ = f
           -- substitute parameters into alias
           then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> MM.throwError . CallTheMonkeys . render
-        $ "Type term in ArrU missing from type map:" <+> pretty v 
+      -- default types like "Int" or "Tuple2" won't be in the map
+      Nothing -> return t
 
   -- type Foo = A     
   -- f :: Foo -> B    

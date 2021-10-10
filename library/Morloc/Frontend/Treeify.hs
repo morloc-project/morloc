@@ -247,9 +247,16 @@ unifyTermTypes mv xs m0
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
 combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
   = TermTypes
-  <$> (sequence $ mergeEType <$> g1 <*> g2)
+  <$> maybeCombine mergeEType g1 g2
   <*> pure (unique (cs1 <> cs2))
   <*> pure (unique (es1 <> es2))
+  where
+  -- either combine terms or take the first on that is defined, or whatever
+  maybeCombine :: Monad m => (a -> a -> m a) -> Maybe a -> Maybe a -> m (Maybe a)
+  maybeCombine f (Just a) (Just b) = Just <$> f a b
+  maybeCombine _ (Just a) _ = return $ Just a
+  maybeCombine _ _ (Just b) = return $ Just b
+  maybeCombine _ _ _ = return Nothing
 
 
 -- | This function defines who general types are merged. There are decisions
@@ -261,11 +268,14 @@ mergeEType (EType t1 ps1 cs1) (EType t2 ps2 cs2)
   = EType <$> mergeTypeUs t1 t2 <*> pure (ps1 <> ps2) <*> pure (cs1 <> cs2)
 
 
+-- merge two general types
 mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t@(ExistU _ _ _) (ExistU _ _ _) = return t
+mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1) t2@(ExistU (TV l2 _) ps2 ds2)
+  | l1 == l2 = ExistU v <$> zipWithM mergeTypeUs ps1 ps2 <*> pure ds1
+  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
 mergeTypeUs (ExistU _ _ _) t = return t
 mergeTypeUs t (ExistU _ _ _) = return t
 
@@ -374,8 +384,26 @@ collectSAnno e@(ExprI i _) = do
 replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
 -- this will be a nested variable
 replaceExpr i e@(ExprI j (VarE _)) = do
-  copyState j i
   x <- collectSAnno e
+  -- unify the data between the equated terms
+  tiMay <- MM.metaTermTypes i
+  tjMay <- MM.metaTermTypes j
+  t <- case (tiMay, tjMay) of
+    (Just ti, Just tj) -> combineTermTypes ti tj 
+    (Just ti, _) -> return ti
+    (_, Just tj) -> return tj
+
+  s <- MM.get
+
+  case GMap.change i t (stateSignatures s) of
+    (Just m) -> MM.modify (\s -> s {stateSignatures = m})
+    _ -> error "impossible"
+
+  case GMap.yIsX (stateSignatures s) j i of
+    (Just m) -> MM.put (s {stateSignatures = m})
+    Nothing -> return ()
+
+  -- pass on just the children
   case x of
     (SAnno (Many es) _) -> return es
 replaceExpr _ e = collectSExpr e |>> return

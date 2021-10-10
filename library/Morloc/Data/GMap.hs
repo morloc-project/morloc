@@ -12,6 +12,7 @@ module Morloc.Data.GMap
   , empty
   , innerKeys
   , insert
+  , change
   , insertMany
   , keys
   , lookup
@@ -49,6 +50,13 @@ empty = GMap Map.empty Map.empty
 
 insert :: (Ord a, Ord b) => a -> b -> c -> GMap a b c -> GMap a b c
 insert k1 k2 x (GMap m1 m2) = GMap (Map.insert k1 k2 m1) (Map.insert k2 x m2) 
+
+-- | Given an outer key, change the inner value. This may change the values
+-- associated with many other outer keys.
+change :: (Ord a, Ord b) => a -> c -> GMap a b c -> Maybe (GMap a b c)
+change k1 v (GMap x y) = do
+  k2 <- Map.lookup k1 x
+  return $ GMap x (Map.insert k2 v y)
 
 insertMany :: (Ord a, Ord b) => [a] -> b -> c -> GMap a b c -> GMap a b c
 insertMany ks k2 x (GMap m1 m2) = GMap m1' m2' where
