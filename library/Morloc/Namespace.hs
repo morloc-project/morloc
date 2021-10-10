@@ -514,8 +514,14 @@ data Source =
 data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 
 data None = None
+  deriving (Show)
+
 data One a = One a
+  deriving (Show)
+
 data Many a = Many [a]
+  deriving (Show)
+
 
 instance Functor One where
   fmap f (One x) = One (f x)

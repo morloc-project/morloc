@@ -336,7 +336,7 @@ collect (ExprI _ (ModE _ _)) (i, _) = do
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
-      declarations <- mapM replaceExpr (termDecl t1) |>> concat
+      declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
@@ -353,7 +353,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
       -- collect all the concrete calls with this name
       let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
       -- collect all the morloc compositions with this name
-      declarations <- mapM reindexExprI (termDecl t1) >>= mapM replaceExpr |>> concat
+      declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
       -- link this index to the name that is removed
       s <- CMS.get
       CMS.put (s { stateName = Map.insert i v (stateName s) })
@@ -371,13 +371,14 @@ collectSAnno e@(ExprI i _) = do
   e' <- collectSExpr e 
   return $ SAnno (Many [e']) i
 
-replaceExpr :: ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
+replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
 -- this will be a nested variable
-replaceExpr e@(ExprI _ (VarE _)) = do
+replaceExpr i e@(ExprI j (VarE _)) = do
+  copyState j i
   x <- collectSAnno e
   case x of
     (SAnno (Many es) _) -> return es
-replaceExpr e = collectSExpr e |>> return
+replaceExpr _ e = collectSExpr e |>> return
 
 -- | Find all definitions of a term and collect their type annotations, if available
 collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)

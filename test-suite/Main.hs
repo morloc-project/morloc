@@ -12,12 +12,12 @@ main = do
     testGroup
       "Morloc tests"
       [ packerTests
+      , recordAccessTests
       , unitTypeTests
       , typeOrderTests
       , typeAliasTests
       , propertyTests
       , jsontype2jsonTests
-      , recordAccessTests
       , whereTests
       , orderInvarianceTests
       ]

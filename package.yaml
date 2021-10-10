@@ -49,6 +49,7 @@ default-extensions:
   - BangPatterns
   - GeneralizedNewtypeDeriving
   - ViewPatterns
+  - StandaloneDeriving
 
 ghc-options:
   - -Wall

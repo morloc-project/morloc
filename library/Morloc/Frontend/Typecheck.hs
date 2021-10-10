@@ -37,7 +37,7 @@ typecheck es = mapM run es where
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let ((_, g), e1) = renameSAnno (Map.empty, initialContext) e0
-      (_, _, e2) <- synthG' g e1 
+      (_, _, e2) <- synthG' g e1
       return e2
 
     -- FIXME: do I really want to reinitialize gamma for each export?
@@ -86,7 +86,13 @@ synthG
        , TypeU
        , SAnno (Indexed TypeU) Many Int
        )
-synthG _ (SAnno (Many []) i) = gerr i EmptyExpression
+-- it is possible to export just a type signature
+synthG g (SAnno (Many []) i) = do
+  maybeType <- lookupType i
+  case maybeType of
+    (Just t) -> return (g, t, SAnno (Many []) (Idx i t))
+    Nothing -> gerr i EmptyExpression
+
 synthG g0 (SAnno (Many ((e, j):es)) i) = do
   (g1, t1, e') <- synthE' i g0 e
   (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
@@ -159,7 +165,7 @@ synthE i g0 (LamS vs x) = do
   (g4, t', x') <- checkG' g3 x t
   let funType = apply g4 (FunU ts t')
   g5 <- cut' i (head marks) g4
-  return (g4, funType, LamS vs x')
+  return (g5, funType, LamS vs x')
   where
     bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
     bindTerm g0' v' =

@@ -163,36 +163,35 @@ record rs = NamU NamRecord (TV Nothing "Record") [] rs
 recordAccessTests =
   testGroup
     "Test record access"
-    [ testEqual "record test" 1 1 ]
-    -- [ assertTerminalType
-    --   "Access into anonymous record"
-    --   [r|{a = 5, b = "asdf"}@b|]
-    --   [str]
-    -- , assertTerminalType
-    --   "Access record variable"
-    --   [r|
-    --       record Person = Person {a :: Num, b :: Str}
-    --       bar :: Person
-    --       bar@b
-    --   |]
-    --   [str]
-    -- , assertTerminalType
-    --   "Access record-returning expression"
-    --   [r|
-    --       record Person = Person {a :: Num, b :: Str}
-    --       bar :: Num -> Person
-    --       (bar 5)@b
-    --   |]
-    --   [str]
-    -- , assertTerminalType
-    --   "Access into tupled"
-    --   [r|
-    --      record Person = Person {a :: Num, b :: Str}
-    --      bar :: Num -> Person
-    --      ((bar 5)@a, (bar 6)@b)
-    --   |]
-    --   [tuple [num, str]]
-    -- , assertTerminalType
+    [ assertGeneralType
+      "Access into anonymous record"
+      [r|{a = 5, b = "asdf"}@b|]
+      str
+    , assertGeneralType
+      "Access record variable"
+      [r|
+          record Person = Person {a :: Num, b :: Str}
+          bar :: Person
+          bar@b
+      |]
+      str
+    , assertGeneralType
+      "Access record-returning expression"
+      [r|
+          record Person = Person {a :: Num, b :: Str}
+          bar :: Num -> Person
+          (bar 5)@b
+      |]
+      str
+    , assertGeneralType
+      "Access into tupled"
+      [r|
+         record Person = Person {a :: Num, b :: Str}
+         bar :: Num -> Person
+         ((bar 5)@a, (bar 6)@b)
+      |]
+      (tuple [num, str])
+    -- , assertGeneralType
     --   "Access multiple languages"
     --   [r|
     --       record Person = Person {a :: Num, b :: Str}
@@ -202,7 +201,7 @@ recordAccessTests =
     --       bar@b
     --   |]
     --   [str, varc RLang "character"]
-    -- ]
+    ]
 
 packerTests =
   testGroup
@@ -299,61 +298,87 @@ jsontype2jsonTests =
 typeAliasTests =
   testGroup
     "Test type alias substitutions"
-    [ testEqual "alias test" 1 1 ]
-    -- [ assertTerminalType
-    --     "non-parametric, general type alias"
-    --     (T.unlines
-    --       [ "type Foo = A"
-    --       , "f :: Foo -> B"
-    --       , "f"
-    --       ]
-    --     )
-    --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
-    --     "deep type substitution: `[Foo] -> B`"
-    --     (T.unlines
-    --       [ "type Foo = A"
-    --       , "f :: [Foo] -> B"
-    --       , "f"
-    --       ]
-    --     )
-    --     [fun [lst (var "A"), var "B"]]
-    -- , assertTerminalType
-    --     "deep type substitution: `[Foo] -> Foo`"
-    --     (T.unlines
-    --       [ "type Foo = A"
-    --       , "f :: [Foo] -> Foo"
-    --       , "f"
-    --       ]
-    --     )
-    --     [fun [lst (var "A"), var "A"]]
-    -- , assertTerminalType
-    --     "deep type substitution: `[Foo] -> { a = Foo }`"
-    --     (T.unlines
-    --       [ "type Foo = A"
-    --       , "f :: [Foo] -> { a :: Foo }"
-    --       , "f"
-    --       ]
-    --     )
-    --     [fun [lst (var "A"), record [("a", var "A")]]]
-    -- , assertTerminalType
-    --     "parametric alias, general type alias"
-    --     (T.unlines
-    --       [ "type (Foo a b) = (a,b)"
-    --       , "f :: Foo X Y -> Z"
-    --       , "f"
-    --       ]
-    --     )
-    --     [fun [tuple [var "X", var "Y"], var "Z"]]
-    -- , assertTerminalType
+    [ assertGeneralType
+        "general type alias"
+        (T.unlines
+          [ "type Foo = A"
+          , "f :: Foo"
+          , "export f"
+          ]
+        )
+        (var "A")
+    , assertGeneralType
+        "non-parametric, general type alias"
+        (T.unlines
+          [ "type Foo = A"
+          , "f :: Foo -> B"
+          , "export f"
+          ]
+        )
+        (fun [var "A", var "B"])
+    , assertGeneralType
+        "deep type substitution: `[Foo] -> B`"
+        (T.unlines
+          [ "type Foo = A"
+          , "f :: [Foo] -> B"
+          , "export f"
+          ]
+        )
+        (fun [lst (var "A"), var "B"])
+    , assertGeneralType
+        "deep type substitution: `[Foo] -> Foo`"
+        (T.unlines
+          [ "type Foo = A"
+          , "f :: [Foo] -> Foo"
+          , "export f"
+          ]
+        )
+        (fun [lst (var "A"), var "A"])
+    , assertGeneralType
+        "deep type substitution: `[Foo] -> { a = Foo }`"
+        (T.unlines
+          [ "type Foo = A"
+          , "f :: [Foo] -> { a :: Foo }"
+          , "export f"
+          ]
+        )
+        (fun [lst (var "A"), record [("a", var "A")]])
+    , assertGeneralType
+        "parametric alias, general type alias"
+        (T.unlines
+          [ "type (Foo a b) = (a,b)"
+          , "f :: Foo X Y -> Z"
+          , "export f"
+          ]
+        )
+        (fun [tuple [var "X", var "Y"], var "Z"])
+    , assertGeneralType
+        "nested types"
+        [r|
+           type A = B
+           type B = C
+           foo :: A -> B -> C
+           export foo
+        |]
+        (fun [var "C", var "C", var "C"])
+    , assertGeneralType
+        "state is preserved across binding"
+        [r|
+           type Foo = A
+           g :: Foo -> Int
+           f = g
+           export f
+        |]
+        (fun [var "A", var "Int"])
+    -- , assertGeneralType
     --     "non-parametric alias, concrete type alias"
     --     [r|
     --        type C Num = double
     --        f C :: Num -> "int"
     --        f
     --     |]
-    --     [fun [varc CLang "double", varc CLang "int"]]
-    -- , assertTerminalType
+    --     (fun [varc CLang "double", varc CLang "int"])
+    -- , assertGeneralType
     --     "language-specific types are be nested"
     --     [r|
     --        type R Num = "numeric"
@@ -361,7 +386,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [arrc RLang "list" [varc RLang "numeric"], varc RLang "integer"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "no substitution is across languages"
     --     [r|
     --        type Num = "numeric"
@@ -369,7 +394,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [arrc RLang "list" [varc RLang "Num"], varc RLang "integer"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "parametric alias, concrete type alias"
     --     [r|
     --        type Cpp (Map a b) = "std::map<$1,$2>" a b
@@ -378,7 +403,7 @@ typeAliasTests =
     --     |]
     --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "int", varc CppLang "double"]
     --           , varc CppLang "int"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "nested in signature"
     --     [r|
     --        type Cpp (Map a b) = "std::map<$1,$2>" a b
@@ -388,17 +413,8 @@ typeAliasTests =
     --     [ fun [arrc CppLang "std::map<$1,$2>" [varc CppLang "string"
     --           , arrc CppLang "std::map<$1,$2>" [varc CppLang "double", varc CppLang "int"]]
     --           , varc CppLang "int"]]
-    -- , assertTerminalType
-    --     "nested types"
-    --     [r|
-    --        type A = B
-    --        type B = C
-    --        foo :: A -> B -> C
-    --        foo
-    --     |]
-    --     [fun [var "C", fun [var "C", var "C"]]]
-    --
-    -- , assertTerminalType
+
+    -- , assertGeneralType
     --     "existentials are resolved"
     --     [r|
     --        type Cpp (A a b) = "map<$1,$2>" a b
@@ -443,7 +459,7 @@ typeAliasTests =
     --        foo
     --     |]
     -- -- import tests ---------------------------------------
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, general type alias, imported"
     --     [r|
     --        module M1
@@ -455,7 +471,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, general type alias, reimported"
     --     [r|
     --        module M3
@@ -473,7 +489,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, general type alias, imported aliased"
     --     [r|
     --        module M1
@@ -485,7 +501,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, general type alias, reimported aliased"
     --     [r|
     --        module M3
@@ -506,7 +522,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, concrete type alias, reimported aliased"
     --     [r|
     --        module M3
@@ -528,7 +544,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [ fun [varc CppLang "int", varc CppLang "double"] ]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "non-parametric, general type alias, duplicate import"
     --     [r|
     --        module M2
@@ -546,7 +562,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [var "A", var "B"]]
-    -- , assertTerminalType
+    -- , assertGeneralType
     --     "parametric alias, general type alias, duplicate import"
     --     [r|
     --        module M2
@@ -564,7 +580,7 @@ typeAliasTests =
     --        f
     --     |]
     --     [fun [tuple [var "X", var "Y"], var "Z"]]
-    -- ]
+    ]
 
 
 whereTests =
@@ -873,7 +889,7 @@ unitTypeTests =
     , assertGeneralType
       "nested calls"
       "f x y = (x, y)\ng x y = (x, f 1 y)\ng True \"hi\""
-      (tuple [bool, tuple [bool, str]])
+      (tuple [bool, tuple [num, str]])
 
     , assertGeneralType
       "zip pair"
@@ -924,11 +940,15 @@ unitTypeTests =
         "map :: (a -> b) -> [a] -> [b]\nfst :: (a,b) -> a\nmap fst [(1,True),(2,False)]"
         (lst num)
 
+    , assertGeneralType
+        "variable annotation"
+        "f :: Foo\nexport f"
+        (var "Foo")
     -- , assertGeneralType
     --     "explicit annotation within an application"
     --     "f :: Num -> Num\nf (42 :: Num)"
     --     num
-    --
+
     -- -- lambdas
     -- -- , assertTerminalExpr
     -- --     "functions return lambda expressions"

@@ -26,10 +26,10 @@ desugar
   :: DAG MVar Import ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 desugar s
-  = resolveImports s
-  >>= checkForSelfRecursion
-  >>= desugarDag
-  >>= addPackerMap
+  = resolveImports s -- rewrite DAG edges to map imported terms to their aliases
+  >>= checkForSelfRecursion -- modules should not import themselves
+  >>= desugarDag -- substitute type aliases
+  >>= addPackerMap -- add the packers to state
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -95,7 +95,7 @@ desugarDag
   :: DAG MVar [(EVar, EVar)] ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 desugarDag m = MDD.mapNodeWithKeyM (desugarExpr m) m where
-  
+
 desugarExpr
   :: DAG MVar [(EVar, EVar)] ExprI
   -> MVar
@@ -174,7 +174,8 @@ desugarType h _ _ = f
           -- substitute parameters into alias
           then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
-      Nothing -> MM.throwError . CallTheMonkeys $ "Type term in ArrU missing from type map"
+      Nothing -> MM.throwError . CallTheMonkeys . render
+        $ "Type term in ArrU missing from type map:" <+> pretty v 
 
   -- type Foo = A     
   -- f :: Foo -> B    
