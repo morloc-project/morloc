@@ -476,7 +476,11 @@ pUniU = do
   _ <- symbol ")"
   lang <- CMS.gets stateLang
   v <- newvar lang
-  return (ExistU v [] (MLD.defaultNull lang))
+  case (lang, MLD.defaultNull lang) of
+    (Nothing, [t]) -> return t -- there is a unique general unit type
+    (_, []) -> fancyFailure . Set.singleton . ErrorFail
+      $ "No NULL type is defined for language" <> maybe "Morloc" show lang
+    (_, ts) -> return $ ExistU v [] ts  -- other languages maybe have multiple definitions
 
 parensType :: Parser TypeU
 parensType = do
