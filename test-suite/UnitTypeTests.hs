@@ -90,13 +90,12 @@ assertPacker = undefined
 --     (Left e) -> error (show e)
 
 exprTestBad :: String -> T.Text -> TestTree
-exprTestBad = undefined
--- exprTestBad msg code =
---   testCase msg $ do
---   result <- run code
---   case result of
---     (Right _) -> assertFailure . T.unpack $ "Expected '" <> code <> "' to fail"
---     (Left _) -> return ()
+exprTestBad msg code =
+  testCase msg $ do
+  result <- runFront code
+  case result of
+    (Right _) -> assertFailure . T.unpack $ "Expected '" <> code <> "' to fail"
+    (Left _) -> return ()
 
 -- FIXME: check that the correct error type is raised, but don't check message
 -- (tweaking messages shouldn't break tests)
@@ -588,27 +587,37 @@ typeAliasTests =
 whereTests =
   testGroup
   "Test of where statements"
-  [ testEqual "where test" 1 1 ]
-  -- [
-  --     assertTerminalType
-  --       "simple where"
-  --       [r|
-  --           f :: Num
-  --           f = z where
-  --               z = 42
-  --           f
-  --       |]
-  --       [num]
-  --   , assertTerminalType
-  --       "calling simple where"
-  --       [r|
-  --           f :: Num
-  --           f = inc z where
-  --               z = 42
-  --           inc
-  --       |]
-  --       [fun [num, num]]
-  -- ]
+  [
+      assertGeneralType
+        "simple where"
+        [r|
+            f :: Num
+            f = z where
+                z = 42
+            f
+        |]
+        num
+    , assertGeneralType
+        "calling simple where"
+        [r|
+            inc :: Num -> Num
+            f = inc z where
+                z = 42
+            f
+        |]
+        num
+    , assertGeneralType
+        "calling deeper where"
+        [r|
+            id :: a -> a
+            inc :: Num -> Num
+            f = id z where
+                z = inc y where
+                  y = 42
+            f
+        |]
+        num
+  ]
 
 orderInvarianceTests =
   testGroup
@@ -993,28 +1002,28 @@ unitTypeTests =
     --     "\\f -> f 5"
     --     (forall ["a"] (fun [fun [num, var "a"], var "a"]))
 
-    -- -- applications
-    -- , assertTerminalType
-    --     "primitive variable in application"
-    --     "x = True\n(\\y -> y) x"
-    --     [bool]
-    -- , assertTerminalType
-    --     "function variable in application"
-    --     "f = (\\x y -> x)\nf 42"
-    --     [forall ["a"] (fun [var "a", num])]
-    -- , assertTerminalType
-    --     "partially applied function variable in application"
-    --     "f = (\\x y -> x)\nx = f 42\nx"
-    --     [forall ["a"] (fun [var "a", num])]
-    -- , exprTestBad
-    --     "applications with too many arguments fail"
-    --     "f :: a -> a\nf True 12"
-    -- , exprTestBad
-    --     "applications with mismatched types fail (1)"
-    --     "abs :: Num -> Num\nabs True"
-    -- , exprTestBad
-    --     "applications with mismatched types fail (2)"
-    --     "f = 14\ng = \\x h -> h x\n(g True) f"
+    -- applications
+    , assertGeneralType
+        "primitive variable in application"
+        "x = True\n(\\y -> y) x"
+        bool
+    , assertGeneralType
+        "function variable in application"
+        "f = (\\x y -> x)\nf 42"
+        (forall ["a"] (fun [var "a", num]))
+    , assertGeneralType
+        "partially applied function variable in application"
+        "f = (\\x y -> x)\nx = f 42\nx"
+        (forall ["a"] (fun [var "a", num]))
+    , exprTestBad
+        "applications with too many arguments fail"
+        "f :: a -> a\nf True 12"
+    , exprTestBad
+        "applications with mismatched types fail (1)"
+        "abs :: Num -> Num\nabs True"
+    , exprTestBad
+        "applications with mismatched types fail (2)"
+        "f = 14\ng = \\x h -> h x\n(g True) f"
     , expectError
         "applications of non-functions should fail (1)"
         (GeneralTypeError ApplicationOfNonFunction)
@@ -1029,41 +1038,41 @@ unitTypeTests =
         "arguments to a function are monotypes"
         (GeneralTypeError (SubtypeError num bool "Expect monotype"))
         "f :: a -> a\ng = \\h -> (h 42, h True)\ng f"
-    -- , assertTerminalType
-    --     "polymorphism under lambdas (203f8c) (1)"
-    --     "f :: a -> a\ng = \\h -> (h 42, h 1234)\ng f"
-    --     [tuple [num, num]]
-    -- , assertTerminalType
-    --     "polymorphism under lambdas (203f8c) (2)"
-    --     "f :: a -> a\ng = \\h -> [h 42, h 1234]\ng f"
-    --     [lst num]
+    , assertGeneralType
+        "polymorphism under lambdas (203f8c) (1)"
+        "f :: a -> a\ng = \\h -> (h 42, h 1234)\ng f"
+        (tuple [num, num])
+    , assertGeneralType
+        "polymorphism under lambdas (203f8c) (2)"
+        "f :: a -> a\ng = \\h -> [h 42, h 1234]\ng f"
+        (lst num)
 
-    -- -- binding
-    -- , assertGeneralType
-    --     "annotated variables without definition are legal"
-    --     "x :: Num"
-    --     num
-    -- , assertTerminalType
-    --     "unannotated variables with definition are legal"
-    --     "x = 42\nx"
-    --     [num]
+    -- binding
+    , assertGeneralType
+        "annotated variables without definition are legal"
+        "x :: Num\nexport x"
+        num
+    , assertGeneralType
+        "unannotated variables with definition are legal"
+        "x = 42\nx"
+        num
     -- , exprTestBad
     --     "unannotated variables without definitions are illegal ('x')"
     --     "x"
-    --
-    -- -- parameterized types
-    -- , assertTerminalType
-    --     "parameterized type (n=1)"
-    --     "xs :: Foo A"
-    --     [arr "Foo" [var "A"]]
-    -- , assertTerminalType
-    --     "parameterized type (n=2)"
-    --     "xs :: Foo A B"
-    --     [arr "Foo" [var "A", var "B"]]
-    -- , assertTerminalType
-    --     "nested parameterized type"
-    --     "xs :: Foo (Bar A) [B]"
-    --     [arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]]]
+
+    -- parameterized types
+    , assertGeneralType
+        "parameterized type (n=1)"
+        "xs :: Foo A\nexport xs"
+        (arr "Foo" [var "A"])
+    , assertGeneralType
+        "parameterized type (n=2)"
+        "xs :: Foo A B\nexport xs"
+        (arr "Foo" [var "A", var "B"])
+    , assertGeneralType
+        "nested parameterized type"
+        "xs :: Foo (Bar A) [B]\nexport xs"
+        (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
     -- , assertTerminalType
     --     "language inference in lists #1"
     --     [r|
@@ -1083,113 +1092,113 @@ unitTypeTests =
     --        bar 5
     --     |]
     --     [lst (var "Num"), arrc CppLang "std::vector<$1>" [varc CppLang "int"]]
-    --
-    -- -- type signatures and higher-order functions
-    -- , assertTerminalType
-    --     "type signature: identity function"
-    --     "f :: a -> a\nf 42"
-    --     [num]
-    -- , assertTerminalType
-    --     "type signature: apply function with primitives"
-    --     "apply :: (Num -> Bool) -> Num -> Bool\nf :: Num -> Bool\napply f 42"
-    --     [bool]
-    -- , assertTerminalType
-    --     "type signature: generic apply function"
-    --     "apply :: (a->b) -> a -> b\nf :: Num -> Bool\napply f 42"
-    --     [bool]
-    -- , assertTerminalType
-    --     "type signature: map"
-    --     "map :: (a->b) -> [a] -> [b]\nf :: Num -> Bool\nmap f [5,2]"
-    --     [lst bool]
-    -- , assertTerminalType
+
+    -- type signatures and higher-order functions
+    , assertGeneralType
+        "type signature: identity function"
+        "f :: a -> a\nf 42"
+        num
+    , assertGeneralType
+        "type signature: apply function with primitives"
+        "apply :: (Num -> Bool) -> Num -> Bool\nf :: Num -> Bool\napply f 42"
+        bool
+    , assertGeneralType
+        "type signature: generic apply function"
+        "apply :: (a->b) -> a -> b\nf :: Num -> Bool\napply f 42"
+        bool
+    , assertGeneralType
+        "type signature: map"
+        "map :: (a->b) -> [a] -> [b]\nf :: Num -> Bool\nmap f [5,2]"
+        (lst bool)
+    -- , assertGeneralType
     --     "type signature: sqrt with realizations"
     --     "sqrt :: Num -> Num\nsqrt R :: \"numeric\" -> \"numeric\"\nsqrt"
     --     [ fun [num, num]
     --     , fun [varc RLang "numeric", varc RLang "numeric"]]
-    --
-    -- -- shadowing
-    -- , assertTerminalType
-    --     "name shadowing in lambda expressions"
-    --     "f x = (14,x)\ng x f = f x\ng True f"
-    --     [tuple [num, bool]]
-    -- , assertTerminalType
-    --     "function passing without shadowing"
-    --     "f x = (14,x)\ng foo = foo True\ng f"
-    --     [tuple [num, bool]]
-    -- , assertTerminalType
-    --     "shadowed qualified type variables (7ffd52a)"
-    --     "f :: a -> a\ng :: a -> Num\ng f"
-    --     [num]
-    -- , assertTerminalType
-    --     "non-shadowed qualified type variables (7ffd52a)"
-    --     "f :: a -> a\ng :: b -> Num\ng f"
-    --     [num]
-    --
-    -- -- lists
-    -- , assertTerminalType "list of primitives" "[1,2,3]" [lst num]
-    -- , assertTerminalType
-    --     "list containing an applied variable"
-    --     "f :: a -> a\n[53, f 34]"
-    --     [lst num]
-    -- , assertTerminalType "empty list" "[]" [forall ["a"] (lst (var "a"))]
-    -- , assertTerminalType
-    --     "list in function signature and application"
-    --     "f :: [Num] -> Bool\nf [1]"
-    --     [bool]
-    -- , assertTerminalType
+
+    -- shadowing
+    , assertGeneralType
+        "name shadowing in lambda expressions"
+        "f x = (14,x)\ng x f = f x\ng True f"
+        (tuple [num, bool])
+    , assertGeneralType
+        "function passing without shadowing"
+        "f x = (14,x)\ng foo = foo True\ng f"
+        (tuple [num, bool])
+    , assertGeneralType
+        "shadowed qualified type variables (7ffd52a)"
+        "f :: a -> a\ng :: a -> Num\ng f"
+        num
+    , assertGeneralType
+        "non-shadowed qualified type variables (7ffd52a)"
+        "f :: a -> a\ng :: b -> Num\ng f"
+        num
+
+    -- lists
+    , assertGeneralType "list of primitives" "[1,2,3]" (lst num)
+    , assertGeneralType
+        "list containing an applied variable"
+        "f :: a -> a\n[53, f 34]"
+        (lst num)
+    , assertGeneralType "empty list" "[]" (forall ["a"] (lst (var "a")))
+    , assertGeneralType
+        "list in function signature and application"
+        "f :: [Num] -> Bool\nf [1]"
+        bool
+    -- , assertGeneralType
     --     "list in generic function signature and application"
     --     "f :: [a] -> Bool\nf [1]"
     --     [bool]
     -- , exprTestBad "failure on heterogenous list" "[1,2,True]"
-    --
-    -- -- tuples
-    -- , assertTerminalType
-    --     "tuple of primitives"
-    --     "(4.2, True)"
-    --     [tuple [num, bool]]
-    -- , assertTerminalType
-    --     "tuple containing an applied variable"
-    --     "f :: a -> a\n(f 53, True)"
-    --     [tuple [num, bool]]
-    -- , assertTerminalType
-    --     "check 2-tuples type signature"
-    --     "f :: (Num, Str)"
-    --     [tuple [num, str]]
-    -- , assertTerminalType "1-tuples are just for grouping" "f :: (Num)" [num]
-    --
-    -- --- FIXME - distinguish between Unit an Null
-    -- -- unit type
-    -- , assertTerminalType
-    --     "unit as input"
-    --     "f :: () -> Bool"
-    --     [fun [VarU (TV Nothing "Unit"), bool]]
-    --
-    -- , assertTerminalType
-    --     "unit as output"
-    --     "f :: Bool -> ()"
-    --     [fun [bool, VarU (TV Nothing "Unit")]]
-    --
-    -- -- -- TODO: reconsider what an empty tuple is
-    -- -- -- I am inclined to cast it as the unit type
-    -- -- , assertTerminalType "empty tuples are of unit type" "f :: ()" UniT
-    --
-    -- -- extra space
-    -- , assertTerminalType "leading space" " 42" [num]
-    -- , assertTerminalType "trailing space" "42 " [num]
-    --
-    -- -- adding signatures to declarations
-    -- , assertTerminalType
-    --     "declaration with a signature (1)"
-    --     "f :: a -> a\nf x = x\nf 42"
-    --     [num]
-    -- , assertTerminalType
-    --     "declaration with a signature (2)"
-    --     "f :: Num -> Bool\nf x = True\nf 42"
-    --     [bool]
-    -- , assertTerminalType
-    --     "declaration with a signature (3)"
-    --     "f :: Num -> Bool\nf x = True\nf"
-    --     [fun [num, bool]]
+
+    -- tuples
+    , assertGeneralType
+        "tuple of primitives"
+        "(4.2, True)"
+        (tuple [num, bool])
+    , assertGeneralType
+        "tuple containing an applied variable"
+        "f :: a -> a\n(f 53, True)"
+        (tuple [num, bool])
+    , assertGeneralType
+        "check 2-tuples type signature"
+        "f :: (Num, Str)\nexport f"
+        (tuple [num, str])
+    , assertGeneralType "1-tuples are just for grouping" "f :: (Num)\nexport f" num
+
+    --- FIXME - distinguish between Unit an Null
+    -- unit type
+    , assertGeneralType
+        "unit as input"
+        "f :: () -> Bool\nexport f"
+        (fun [VarU (TV Nothing "Unit"), bool])
+
+    , assertGeneralType
+        "unit as output"
+        "f :: Bool -> ()\nexport f"
+        (fun [bool, VarU (TV Nothing "Unit")])
+
+    -- FIXME - I really don't like "Unit" being a normal var ...
+    -- I am inclined to cast it as the unit type
+    , assertGeneralType "empty tuples are of unit type" "f :: ()\nexport f" (var "Unit")
+
+    -- extra space
+    , assertGeneralType "leading space" " 42" num
+    , assertGeneralType "trailing space" "42 " num
+
+    -- adding signatures to declarations
+    , assertGeneralType
+        "declaration with a signature (1)"
+        "f :: a -> a\nf x = x\nf 42"
+        num
+    , assertGeneralType
+        "declaration with a signature (2)"
+        "f :: Num -> Bool\nf x = True\nf 42"
+        bool
+    , assertGeneralType
+        "declaration with a signature (3)"
+        "f :: Num -> Bool\nf x = True\nf"
+        (fun [num, bool])
     , expectError
         "primitive type mismatch should raise error"
         (GeneralTypeError (SubtypeError num bool "mismatch"))
@@ -1221,53 +1230,56 @@ unitTypeTests =
     --     "nested tags (record)"
     --     "F :: {x::Int, y::Str}"
     --     "F :: foo:{x::(i:Int), y::Str}"
-    --
-    -- -- properties
-    -- , assertTerminalType "property syntax (1)" "f :: Foo => Num\nf" [num]
-    -- , assertTerminalType "property syntax (2)" "f :: Foo bar => Num\nf" [num]
-    -- , assertTerminalType "property syntax (3)" "f :: Foo a, Bar b => Num\nf" [num]
-    -- , assertTerminalType "property syntax (4)" "f :: (Foo a) => Num\nf" [num]
-    -- , assertTerminalType "property syntax (5)" "f :: (Foo a, Bar b) => Num\nf" [num]
-    -- -- constraints
-    -- , assertTerminalType
-    --     "constraint syntax (1)"
-    --     [r|
-    --        f :: Num where
-    --          ladida
-    --        f
-    --     |]
-    --     [num]
-    -- , assertTerminalType
-    --     "constraint syntax (2)"
-    --     [r|
-    --        f :: Num where
-    --          first relation
-    --            and more
-    --          second relation
-    --        f
-    --     |]
-    --     [num]
-    --
-    -- -- tests modules
-    -- , assertTerminalType
-    --     "basic Main module"
-    --     "module Main\n[1,2,3]"
-    --     (lst num)
-    -- , (flip $ assertTerminalType "import/export") [lst num] $
-    --   [r|
-    --      module Foo
-    --      export x
-    --      x = 42
-    --
-    --      module Bar
-    --      export f
-    --      f :: a -> [a]
-    --
-    --      module Main
-    --      import Foo (x)
-    --      import Bar (f)
-    --      f x
-    --   |]
+
+    -- properties
+    , assertGeneralType "property syntax (1)" "f :: Foo => Num\nexport f" num
+    , assertGeneralType "property syntax (2)" "f :: Foo bar => Num\nexport f" num
+    , assertGeneralType "property syntax (3)" "f :: Foo a, Bar b => Num\nexport f" num
+    , assertGeneralType "property syntax (4)" "f :: (Foo a) => Num\nf" num
+    , assertGeneralType "property syntax (5)" "f :: (Foo a, Bar b) => Num\nexport f" num
+
+    -- constraints
+    , assertGeneralType
+        "constraint syntax (1)"
+        [r|
+           f :: Num where
+             ladida
+           f
+        |]
+        num
+    , assertGeneralType
+        "constraint syntax (2)"
+        [r|
+           f :: Num where
+             first relation
+               and more
+             second relation
+           f
+        |]
+        num
+
+    -- tests modules
+    , assertGeneralType
+        "basic Main module"
+        [r|module Main
+        [1,2,3]
+        |]
+        (lst num)
+    , (flip $ assertGeneralType "import/export") (lst num) $
+      [r|
+module Foo
+  export x
+  x = 42
+
+module Bar
+  export f
+  f :: a -> [a]
+
+module Main
+  import Foo (x)
+  import Bar (f)
+  f x
+|]
     -- , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
     --   [r|
     --      module Foo
