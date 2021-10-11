@@ -55,14 +55,13 @@ assertGeneralType msg code t = testCase msg $ do
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
-exprEqual = undefined
--- exprEqual msg code1 code2 =
---   testCase msg $ do
---   result1 <- run code1
---   result2 <- run code2
---   case (result1, result2) of
---     (Right e1, Right e2) -> assertEqual "" e1 e2
---     _ -> error $ "Expected equal"
+exprEqual msg code1 code2 = undefined
+  -- testCase msg $ do
+  -- result1 <- runFront code1
+  -- result2 <- runFront code2
+  -- case (result1, result2) of
+  --   (Right e1, Right e2) -> assertEqual "" e1 e2
+  --   _ -> error $ "Expected equal"
 
 exprTestFull :: String -> T.Text -> T.Text -> TestTree
 exprTestFull = undefined
@@ -102,13 +101,13 @@ exprTestBad = undefined
 -- FIXME: check that the correct error type is raised, but don't check message
 -- (tweaking messages shouldn't break tests)
 expectError :: String -> MorlocError -> T.Text -> TestTree
-expectError = undefined
--- expectError msg _ code =
---   testCase msg $ do
---   result <- run code
---   case result of
---     (Right _) -> assertFailure . T.unpack $ "Expected failure"
---     (Left _) -> return ()
+expectError msg _ code =
+  testCase msg $ do
+  result <- runFront code
+  case result of
+    (Right _) -> assertFailure . T.unpack $ "Expected failure"
+    (Left _) -> return ()
+
 
 testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
 testEqual msg x y =
@@ -426,41 +425,41 @@ typeAliasTests =
     --     |]
     --     [fun [ arrc CppLang "map<$1,$2>" [varc CppLang "D", arrc CppLang "std::vector<$1>" [varc CppLang "B"]]
     --          , varc CppLang "X"]]
+    , expectError
+        "fail neatly for self-recursive type aliases"
+        (SelfRecursiveTypeAlias (TV Nothing "A"))
+        [r|
+           type A = (A,A)
+           foo :: A -> B -> C
+           foo
+        |]
+    -- -- TODO: find a way to catch mutually recursive type aliases
     -- , expectError
-    --     "fail neatly for self-recursive type aliases"
-    --     (SelfRecursiveTypeAlias (TV Nothing "A"))
-    --     [r|
-    --        type A = (A,A)
-    --        foo :: A -> B -> C
-    --        foo
-    --     |]
-    -- -- -- TODO: find a way to catch mutually recursive type aliases
-    -- -- , expectError
-    -- --     "fail neatly for mutually-recursive type aliases"
-    -- --     (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
-    -- --     (T.unlines
-    -- --       [ "type A = B"
-    -- --       , "type B = A"
-    -- --       , "foo :: A -> B -> C"
-    -- --       , "foo"
-    -- --       ]
-    -- --     )
-    -- , expectError
-    --     "fail on too many type aliases parameters"
-    --     (BadTypeAliasParameters (TV Nothing "A") 0 1)
-    --     [r|
-    --        type A = B
-    --        foo :: A Int -> C
-    --        foo
-    --     |]
-    -- , expectError
-    --     "fail on too few type aliases parameters"
-    --     (BadTypeAliasParameters (TV Nothing "A") 1 0)
-    --     [r|
-    --        type (A a) = (a,a)
-    --        foo :: A -> C
-    --        foo
-    --     |]
+    --     "fail neatly for mutually-recursive type aliases"
+    --     (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
+    --     (T.unlines
+    --       [ "type A = B"
+    --       , "type B = A"
+    --       , "foo :: A -> B -> C"
+    --       , "foo"
+    --       ]
+    --     )
+    , expectError
+        "fail on too many type aliases parameters"
+        (BadTypeAliasParameters (TV Nothing "A") 0 1)
+        [r|
+           type A = B
+           foo :: A Int -> C
+           foo
+        |]
+    , expectError
+        "fail on too few type aliases parameters"
+        (BadTypeAliasParameters (TV Nothing "A") 1 0)
+        [r|
+           type (A a) = (a,a)
+           foo :: A -> C
+           foo
+        |]
     -- -- import tests ---------------------------------------
     -- , assertGeneralType
     --     "non-parametric, general type alias, imported"
@@ -1016,20 +1015,20 @@ unitTypeTests =
     -- , exprTestBad
     --     "applications with mismatched types fail (2)"
     --     "f = 14\ng = \\x h -> h x\n(g True) f"
-    -- , expectError
-    --     "applications of non-functions should fail (1)"
-    --     NonFunctionDerive
-    --     "f = 5\ng = \\x -> f x\ng 12"
-    -- , expectError
-    --     "applications of non-functions should fail (2)"
-    --     NonFunctionDerive
-    --     "f = 5\ng = \\h -> h 5\ng f"
-    --
-    -- -- evaluation within containers
-    -- , expectError
-    --     "arguments to a function are monotypes"
-    --     (SubtypeError (unresolvedType2type num) (unresolvedType2type bool))
-    --     "f :: a -> a\ng = \\h -> (h 42, h True)\ng f"
+    , expectError
+        "applications of non-functions should fail (1)"
+        (GeneralTypeError ApplicationOfNonFunction)
+        "f = 5\ng = \\x -> f x\ng 12"
+    , expectError
+        "applications of non-functions should fail (2)"
+        (GeneralTypeError ApplicationOfNonFunction)
+        "f = 5\ng = \\h -> h 5\ng f"
+
+    -- evaluation within containers
+    , expectError
+        "arguments to a function are monotypes"
+        (GeneralTypeError (SubtypeError num bool "Expect monotype"))
+        "f :: a -> a\ng = \\h -> (h 42, h True)\ng f"
     -- , assertTerminalType
     --     "polymorphism under lambdas (203f8c) (1)"
     --     "f :: a -> a\ng = \\h -> (h 42, h 1234)\ng f"
@@ -1191,11 +1190,11 @@ unitTypeTests =
     --     "declaration with a signature (3)"
     --     "f :: Num -> Bool\nf x = True\nf"
     --     [fun [num, bool]]
-    -- , expectError
-    --     "primitive type mismatch should raise error"
-    --     (SubtypeError (unresolvedType2type num) (unresolvedType2type bool))
-    --     "f :: Num -> Bool\nf x = 9999"
-    --
+    , expectError
+        "primitive type mismatch should raise error"
+        (GeneralTypeError (SubtypeError num bool "mismatch"))
+        "f :: Num -> Bool\nf x = 9999\nexport f"
+
     -- -- tags
     -- , exprEqual
     --     "variable tags"
