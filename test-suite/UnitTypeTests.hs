@@ -152,6 +152,8 @@ tuple ts = AppU v ts
 
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
+record' n rs = NamU NamRecord (TV Nothing n) [] rs
+
 recordAccessTests =
   testGroup
     "Test record access"
@@ -797,8 +799,12 @@ unitTypeTests =
         (record [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record signature"
-        "Foo :: {x :: Num, y :: Str}\nf :: Num -> Foo\nf 42"
-        (record [("x", num), ("y", str)])
+        [r|
+        record Foo = Foo {x :: Num, y :: Str}
+        f :: Num -> Foo
+        f 42
+        |]
+        (record' "Foo" [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record declaration"
         "foo = {x = 42, y = \"yolo\"}\nfoo"
