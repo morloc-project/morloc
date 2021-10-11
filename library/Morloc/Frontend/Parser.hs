@@ -62,11 +62,11 @@ reenter p = p {stateMinPos = mkPos 1, stateAccepting = True}
 pProgram :: Parser [ExprI]
 pProgram = do
   L.space space1 comments empty
-  setMinPos
   many1 pToplevel
 
 pToplevel :: Parser ExprI
 pToplevel = do
+  setMinPos
   e <- try pModule <|> pMain
   case e of
     (ExprI i (ModE m@(MV "Main") es)) -> do
@@ -113,6 +113,7 @@ pTopExpr =
   <|> try (plural pSigE)
   <|> try pSrcE
   <|> plural pExpr
+  <?> "Bad toplevel expression"
   where
     plural :: Functor m => m a -> m [a]
     plural = fmap return 

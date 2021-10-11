@@ -1270,15 +1270,24 @@ unitTypeTests =
 module Foo
   export x
   x = 42
-
 module Bar
   export f
   f :: a -> [a]
-
 module Main
   import Foo (x)
   import Bar (f)
   f x
+|]
+    , (flip $ assertGeneralType "complex parse (1)") num $
+      [r|
+module Foo
+    export x
+    add :: Num -> Num -> Num
+    x = add a y where
+        a = 1
+        y = add b z where
+            b = 42
+    z = 19
 |]
     -- , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
     --   [r|
