@@ -93,10 +93,21 @@ synthG g (SAnno (Many []) i) = do
     (Just t) -> return (g, t, SAnno (Many []) (Idx i t))
     Nothing -> gerr i EmptyExpression
 
-synthG g0 (SAnno (Many ((e, j):es)) i) = do
-  (g1, t1, e') <- synthE' i g0 e
+synthG g0 (SAnno (Many ((e0, j):es)) i) = do
+  -- if a type annotation exists for this term, check against it
+  -- otherwise synthesize a type
+  maybeType <- lookupType i
+  (g1, t1, e1) <- case maybeType of
+    Nothing  -> synthE' i g0 e0
+    (Just t) -> checkE' i g0 e0 t
+
+  -- then check all other implementations against the first one
   (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
-  return (g2, t2, SAnno (Many ((e', j):es')) (Idx i t2))
+
+  -- finally cons the head element back and apply everything we learned
+  let finalExpr = applyS g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
+
+  return (g2, t2, finalExpr)
 
 checkG
   :: Gamma
@@ -157,21 +168,13 @@ synthE i g0 e@(AppS f xs0) = do
   -- put the AppS back together with the synthesized function and input expressions
   return (g2, apply g2 appliedType, AppS (applyS g2 funExpr0) inputExprs)
 
-synthE i g0 (LamS vs x) = do
+synthE i g0 f@(LamS vs x) = do
+  -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
-      (g2, t) = newvar Nothing g1
-      marks = zipWith AnnG vs ts
-      g3 = g2 ++> marks 
-  (g4, t', x') <- checkG' g3 x t
-  let funType = apply g4 (FunU ts t')
-  g5 <- cut' i (head marks) g4
-  return (g5, funType, LamS vs x')
-  where
-    bindTerm :: Gamma -> EVar -> (Gamma, TypeU)
-    bindTerm g0' v' =
-      let (g1', t) = newvar Nothing g0'
-          idx = AnnG v' t
-      in (g1' +> idx, t)
+      (g2, ft) = newvar Nothing g1
+      (g3, fv) = tvarname g2 "v" Nothing
+      finalType = FunU ts ft
+  checkE' i g3 f finalType
 
 synthE _ g (LstS []) =
   let (g1, itemType) = newvar Nothing g
@@ -283,12 +286,14 @@ application i g0 es (ExistU v [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
-      let (_, eas) = statefulMap (\g _ -> newvar Nothing g) g0 es -- DO NOT USE THE GAMMA
-          (_, ea) = newvar Nothing g0 -- DO NOT USE THE GAMMA
+      let (g1, veas) = statefulMap (\g _ -> tvarname g "v" Nothing) g0 es
+          (g2, vea) = tvarname g1 "v" Nothing
+          eas = [ExistU v [] [] | v <- veas]
+          ea = ExistU vea [] []
           f = FunU eas ea
-          g1 = g0 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
-      (g2, _, es', _) <- zipCheck i g1 es eas
-      return (g2, apply g2 f, es')
+          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+      (g4, _, es', _) <- zipCheck i g3 es eas
+      return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
@@ -339,13 +344,17 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
   -- LstS [] will go to the normal Sub case
   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
   return (g3, t3, (LstS (map (applyS g3) (e':es'))))
-checkE _ g1 (LamS [] e1) (FunU as1 b1) = do
+checkE _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
-  return (g2, FunU as1 b2, LamS [] e2)
+  return (g2, FunU [] b2, LamS [] e2)
+checkE _ g1 (LamS [] e1) t = do
+  (g2, t, e2) <- checkG' g1 e1 t
+  return (g2, t, LamS [] e2)
 checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- defined x:A
   let vardef = AnnG v a1
       g2 = g1 +> vardef
+
   -- peal off one layer of bound terms and check
   (g3, t3, e2) <- checkE' i g2 (LamS vs e1) (FunU as1 b1)
 
@@ -376,11 +385,13 @@ checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a
       b' = apply g2 b
-  g3 <- case subtype a' b' g2 of
-    (Left err') -> gerr i err'
-    (Right x) -> return x
+  g3 <- subtype' i a' b' g2
   return (g3, apply g3 b', e2)
 
+subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
+subtype' i a b g = case subtype a b g of
+  (Left err') -> gerr i err'
+  (Right x) -> return x
 
 cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of

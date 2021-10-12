@@ -17,6 +17,7 @@ module Morloc.Typecheck.Internal
   , (++>)
   -- * accessing state
   , newvar
+  , tvarname
   , newvarRich
   -- * Typeclasses
   , Applicable(..)

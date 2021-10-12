@@ -1162,18 +1162,18 @@ unitTypeTests =
     , assertGeneralType
         "function variable in application"
         [r|
-        f = (\x y -> x)
-        f 42
+        f x y = x
+        f 42 True
         |]
-        (forall ["a"] (fun [var "a", num]))
+        num
     , assertGeneralType
         "partially applied function variable in application"
         [r|
-        f = (\x y -> x)
+        f x y = x
         x = f 42
         x
         |]
-        (forall ["a"] (fun [var "a", num]))
+        (fun [exist "v3", num])
     , exprTestBad
         "applications with too many arguments fail"
         [r|
