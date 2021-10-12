@@ -989,6 +989,19 @@ unitTypeTests =
         (lst num)
 
     , assertGeneralType
+        "existential application"
+        "f 1"
+        (exist "v2")
+
+    , assertGeneralType
+        "existential function passing"
+        [r|
+        g f = f True
+        export g
+        |]
+        (fun [fun [bool, exist "v5"], exist "v5"])
+
+    , assertGeneralType
         "app single function"
         [r|
         app :: (a -> b) -> a -> b

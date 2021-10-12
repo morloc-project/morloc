@@ -277,7 +277,10 @@ application i g0 es0 (FunU as0 b0) = do
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-application i g es (ForallU v s) = application' i (g +> ExistG v [] []) es (substitute v s)
+application i g0 es (ForallU v s) = do
+  let (g1, v1) = tvarname g0 "v" Nothing
+      existType = ExistU v1 [] []
+  application' i (g1 +> ExistG v1 [] []) es (substituteTVar v existType s)
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
