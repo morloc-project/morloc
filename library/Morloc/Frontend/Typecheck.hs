@@ -379,9 +379,10 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   return (g4, t5, e3)
 
 checkE i g1 e1 t2@(ForallU x a) = do
-  (g2, _, e2) <- checkE' i (g1 +> VarG x) e1 a
-  g3 <- cut' i (VarG x) g2
-  let t3 = apply g3 t2
+  let (g2, v1) = tvarname g1 "v" Nothing
+      et = ExistU v1 [] []
+      a' = substituteTVar x et a
+  (g3, t3, e2) <- checkE' i (g2 +> et) e1 a'
   return (g3, t3, e2)
 
 checkE i g1 e1 b = do

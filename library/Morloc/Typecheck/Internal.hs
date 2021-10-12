@@ -212,7 +212,8 @@ subtype t1@(ExistU v1 ps1 _) t2@(AppU v2 ps2) g1
 subtype (ForallU v@(TV lang _) a) b g0
   | lang /= langOf b = return g0
   | otherwise = do
-      let (g1, a') = newvar lang g0
+      let (g1, v') = tvarname g0 "v" lang
+          a' = ExistU v' [] []
       g2 <- subtype (substituteTVar v a' a) b (g1 +> MarkG v +> a')
       cut (MarkG v) g2
 

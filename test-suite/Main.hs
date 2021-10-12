@@ -21,6 +21,7 @@ main = do
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
+      , substituteTVarTests
       ]
 
   --     , golden "import-1" "import-1"

@@ -1,7 +1,8 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 module UnitTypeTests
-  ( unitTypeTests
+  ( substituteTVarTests
+  , unitTypeTests
   , typeOrderTests
   , typeAliasTests
   , jsontype2jsonTests
@@ -138,6 +139,7 @@ exist v = ExistU (TV Nothing v) [] []
 forallc _ [] t = t
 forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
 
+v s = TV Nothing s 
 var s = VarU (TV Nothing s)
 varc l s = VarU (TV (Just l) s)
 
@@ -154,6 +156,14 @@ tuple ts = AppU v ts
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
 record' n rs = NamU NamRecord (TV Nothing n) [] rs
+
+substituteTVarTests =
+  testGroup
+    "test variable substitution"
+    [ testEqual "[x/y]Num" (substituteTVar (v "x") (var "y") num) num
+    , testEqual "[y/x]([x] -> x)" (substituteTVar (v "x") (var "y") (fun [lst (var "x"), var "x"]))
+        (fun [lst (var "y"), var "y"]) 
+    ]
 
 whitespaceTests =
   testGroup
