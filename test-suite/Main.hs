@@ -11,7 +11,8 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ packerTests
+      [ whitespaceTests
+      , packerTests
       , recordAccessTests
       , unitTypeTests
       , typeOrderTests

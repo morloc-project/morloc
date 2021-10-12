@@ -63,28 +63,17 @@ pProgram :: Parser [ExprI]
 pProgram = sc >> many1 pToplevel
 
 pToplevel :: Parser ExprI
-pToplevel = do
-  setMinPos
-  e <- try pModule <|> pMain
-  case e of
-    (ExprI i (ModE m@(MV "Main") es)) -> do
-      es' <- createMainFunction es
-      return $ ExprI i (ModE m es')
-    _ -> return e
+pToplevel = setMinPos >> pModule
 
 -- | match a named module
 pModule :: Parser ExprI
 pModule = do
-  _ <- reserved "module"
-  moduleName <- freename
-  ess <- align pTopExpr
-  exprI $ ModE (MV moduleName) (concat ess)
-
--- | match an implicit "main" module
-pMain :: Parser ExprI
-pMain = do
-  ess <- align pTopExpr -- FYI - using `many` rather than `many1` makes infinite loop
-  exprI $ ModE (MV "Main") (concat ess)
+  moduleName <- option "Main" (reserved "module" >> freename)
+  es <- align pTopExpr |>> concat
+  es' <- case moduleName of
+    "Main" -> createMainFunction es
+    _ -> return es
+  exprI $ ModE (MV moduleName) es'
 
 createMainFunction :: [ExprI] -> Parser [ExprI]
 createMainFunction es = case (init es, last es) of

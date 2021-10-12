@@ -9,6 +9,7 @@ module UnitTypeTests
   , recordAccessTests
   , whereTests
   , orderInvarianceTests
+  , whitespaceTests
   ) where
 
 import Morloc.Frontend.Namespace
@@ -151,6 +152,17 @@ tuple ts = AppU v ts
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
 record' n rs = NamU NamRecord (TV Nothing n) [] rs
+
+whitespaceTests =
+  testGroup
+    "Tests for whitespace handling"
+    [ assertGeneralType
+      "initial space is allowed"
+      [r|
+      a = 1
+      |]
+      num
+    ]
 
 recordAccessTests =
   testGroup
