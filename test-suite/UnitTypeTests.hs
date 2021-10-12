@@ -133,6 +133,8 @@ fun ts = FunU (init ts) (last ts)
 forall [] t = t
 forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
 
+exist v = ExistU (TV Nothing v) [] []
+
 forallc _ [] t = t
 forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
 
@@ -155,11 +157,47 @@ record' n rs = NamU NamRecord (TV Nothing n) [] rs
 
 whitespaceTests =
   testGroup
-    "Tests for whitespace handling"
+    "Tests whitespace handling for modules"
     [ assertGeneralType
-      "initial space is allowed"
+      "module indent == 1 and top indent == module indent"
+      "module Foo\nx = 1\ny = 2\nexport y"
+      num
+    , assertGeneralType
+      "module indent == 1 and top indent > module indent"
+      "module Foo\n  x = 1\n  y = 2\n  export y"
+      num
+    , assertGeneralType
+      "module indent > 1 and top indent > module indent"
+      " module Foo\n   x = 1\n   y = 2\n   export y"
+      num
+    , assertGeneralType
+      "module indent > 1 and top indent = module indent"
+      "  module Foo\n  x = 1\n  y = 2\n  export y"
+      num
+    -- indenting main
+    , assertGeneralType
+      "main indent == 1"
+      "x = 1\ny = 2\nexport y"
+      num
+    , assertGeneralType
+      "main indent > 1"
+      "  x = 1\n  y = 2\n  export y"
+      num
+    -- multiple modules
+    , assertGeneralType
+      "multiple modules at pos 1 with pos > 1 exprs"
       [r|
-      a = 1
+module Foo
+  x = True
+  export x
+module Bar
+  import Foo
+  y = True
+  export y
+module Main
+  import Bar
+  z = 1
+  export z
       |]
       num
     ]
@@ -349,12 +387,11 @@ typeAliasTests =
         (fun [lst (var "A"), record [("a", var "A")]])
     , assertGeneralType
         "parametric alias, general type alias"
-        (T.unlines
-          [ "type (Foo a b) = (a,b)"
-          , "f :: Foo X Y -> Z"
-          , "export f"
-          ]
-        )
+        [r|
+        type (Foo a b) = (a,b)
+        f :: Foo X Y -> Z
+        export f
+        |]
         (fun [tuple [var "X", var "Y"], var "Z"])
     , assertGeneralType
         "nested types"
@@ -477,63 +514,63 @@ typeAliasTests =
         "non-parametric, general type alias, imported"
         [r|
            module M1
-           type Foo = A
-           export Foo
+             type Foo = A
+             export Foo
            module Main
-           import M1 (Foo)
-           f :: Foo -> B
-           f
+             import M1 (Foo)
+             f :: Foo -> B
+             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported"
         [r|
            module M3
-           type Foo = A
-           export Foo
+             type Foo = A
+             export Foo
            module M2
-           import M3 (Foo)
-           export Foo
+             import M3 (Foo)
+             export Foo
            module M1
-           import M2 (Foo)
-           export Foo
+             import M2 (Foo)
+             export Foo
            module Main
-           import M1 (Foo)
-           f :: Foo -> B
-           f
+             import M1 (Foo)
+             f :: Foo -> B
+             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, imported aliased"
         [r|
            module M1
-           type Foo = A
-           export Foo
+             type Foo = A
+             export Foo
            module Main
-           import M1 (Foo as Bar)
-           f :: Bar -> B
-           f
+             import M1 (Foo as Bar)
+             f :: Bar -> B
+             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported aliased"
         [r|
            module M3
-           type Foo1 = A
-           export Foo1
+             type Foo1 = A
+             export Foo1
 
            module M2
-           import M3 (Foo1 as Foo2)
-           export Foo2
+             import M3 (Foo1 as Foo2)
+             export Foo2
 
            module M1
-           import M2 (Foo2 as Foo3)
-           export Foo3
+             import M2 (Foo2 as Foo3)
+             export Foo3
 
            module Main
-           import M1 (Foo3 as Foo4)
-           f :: Foo4 -> B
-           f
+             import M1 (Foo3 as Foo4)
+             f :: Foo4 -> B
+             export f
         |]
         (fun [var "A", var "B"])
     -- , assertGeneralType
@@ -562,36 +599,36 @@ typeAliasTests =
         "non-parametric, general type alias, duplicate import"
         [r|
            module M2
-           type Foo = A
-           export Foo
+             type Foo = A
+             export Foo
 
            module M1
-           type Foo = A
-           export Foo
+             type Foo = A
+             export Foo
 
            module Main
-           import M1 (Foo)
-           import M2 (Foo)
-           f :: Foo -> B
-           f
+             import M1 (Foo)
+             import M2 (Foo)
+             f :: Foo -> B
+             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "parametric alias, general type alias, duplicate import"
         [r|
            module M2
-           type (Foo a b) = (a,b)
-           export Foo
+             type (Foo a b) = (a,b)
+             export Foo
 
            module M1
-           type (Foo c d) = (c,d)
-           export Foo
+             type (Foo c d) = (c,d)
+             export Foo
 
            module Main
-           import M1 (Foo)
-           import M2 (Foo)
-           f :: Foo X Y -> Z
-           f
+             import M1 (Foo)
+             import M2 (Foo)
+             f :: Foo X Y -> Z
+             export f
         |]
         (fun [tuple [var "X", var "Y"], var "Z"])
     ]
@@ -1063,11 +1100,17 @@ unitTypeTests =
     -- binding
     , assertGeneralType
         "annotated variables without definition are legal"
-        "x :: Num\nexport x"
+        [r|
+        x :: Num
+        export x
+        |]
         num
     , assertGeneralType
         "unannotated variables with definition are legal"
-        "x = 42\nx"
+        [r|
+        x = 42
+        x
+        |]
         num
     -- , exprTestBad
     --     "unannotated variables without definitions are illegal ('x')"
@@ -1076,15 +1119,24 @@ unitTypeTests =
     -- parameterized types
     , assertGeneralType
         "parameterized type (n=1)"
-        "xs :: Foo A\nexport xs"
+        [r|
+        xs :: Foo A
+        export xs
+        |]
         (arr "Foo" [var "A"])
     , assertGeneralType
         "parameterized type (n=2)"
-        "xs :: Foo A B\nexport xs"
+        [r|
+        xs :: Foo A B
+        export xs
+        |]
         (arr "Foo" [var "A", var "B"])
     , assertGeneralType
         "nested parameterized type"
-        "xs :: Foo (Bar A) [B]\nexport xs"
+        [r|
+        xs :: Foo (Bar A) [B]
+        export xs
+        |]
         (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
     -- , assertTerminalType
     --     "language inference in lists #1"
@@ -1109,19 +1161,34 @@ unitTypeTests =
     -- type signatures and higher-order functions
     , assertGeneralType
         "type signature: identity function"
-        "f :: a -> a\nf 42"
+        [r|
+        f :: a -> a
+        f 42
+        |]
         num
     , assertGeneralType
         "type signature: apply function with primitives"
-        "apply :: (Num -> Bool) -> Num -> Bool\nf :: Num -> Bool\napply f 42"
+        [r|
+        apply :: (Num -> Bool) -> Num -> Bool
+        f :: Num -> Bool
+        apply f 42
+        |]
         bool
     , assertGeneralType
         "type signature: generic apply function"
-        "apply :: (a->b) -> a -> b\nf :: Num -> Bool\napply f 42"
+        [r|
+        apply :: (a->b) -> a -> b
+        f :: Num -> Bool
+        apply f 42
+        |]
         bool
     , assertGeneralType
         "type signature: map"
-        "map :: (a->b) -> [a] -> [b]\nf :: Num -> Bool\nmap f [5,2]"
+        [r|
+        map :: (a->b) -> [a] -> [b]
+        f :: Num -> Bool
+        map f [5,2]
+        |]
         (lst bool)
     -- , assertGeneralType
     --     "type signature: sqrt with realizations"
@@ -1132,19 +1199,35 @@ unitTypeTests =
     -- shadowing
     , assertGeneralType
         "name shadowing in lambda expressions"
-        "f x = (14,x)\ng x f = f x\ng True f"
+        [r|
+        f x = (14, x)
+        g x f = f x
+        g True f
+        |]
         (tuple [num, bool])
     , assertGeneralType
         "function passing without shadowing"
-        "f x = (14,x)\ng foo = foo True\ng f"
+        [r|
+        f x = (14, x)
+        g foo = foo True
+        g f
+        |]
         (tuple [num, bool])
     , assertGeneralType
         "shadowed qualified type variables (7ffd52a)"
-        "f :: a -> a\ng :: a -> Num\ng f"
+        [r|
+        f :: a -> a
+        g :: a -> Num
+        g f
+        |]
         num
     , assertGeneralType
         "non-shadowed qualified type variables (7ffd52a)"
-        "f :: a -> a\ng :: b -> Num\ng f"
+        [r|
+        f :: a -> a
+        g :: b -> Num
+        g f
+        |]
         num
 
     -- lists
@@ -1153,7 +1236,8 @@ unitTypeTests =
         "list containing an applied variable"
         "f :: a -> a\n[53, f 34]"
         (lst num)
-    , assertGeneralType "empty list" "[]" (forall ["a"] (lst (var "a")))
+      -- NOTE: this test relies on internal renaming implementation
+    , assertGeneralType "empty list" "[]" (lst (exist "v0"))
     , assertGeneralType
         "list in function signature and application"
         "f :: [Num] -> Bool\nf [1]"
@@ -1274,34 +1358,37 @@ unitTypeTests =
     -- tests modules
     , assertGeneralType
         "basic Main module"
-        [r|module Main
-        [1,2,3]
+        [r|
+          module Main
+            x = [1,2,3]
+            export x
         |]
         (lst num)
     , (flip $ assertGeneralType "import/export") (lst num) $
-      [r|
-module Foo
-  export x
-  x = 42
-module Bar
-  export f
-  f :: a -> [a]
-module Main
-  import Foo (x)
-  import Bar (f)
-  f x
-|]
+        [r|
+          module Foo
+            export x
+            x = 42
+          module Bar
+            export f
+            f :: a -> [a]
+          module Main
+            import Foo (x)
+            import Bar (f)
+            z = f x
+            export z
+        |]
     , (flip $ assertGeneralType "complex parse (1)") num $
       [r|
-module Foo
-    export x
-    add :: Num -> Num -> Num
-    x = add a y where
-        a = 1
-        y = add b z where
-            b = 42
-    z = 19
-|]
+         module Foo
+           export x
+           add :: Num -> Num -> Num
+           x = add a y where
+             a = 1
+             y = add b z where
+               b = 42
+           z = 19
+      |]
     -- , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
     --   [r|
     --      module Foo

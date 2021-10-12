@@ -11,8 +11,7 @@ main = do
   defaultMain $
     testGroup
       "Morloc tests"
-      [ whitespaceTests
-      , packerTests
+      [ packerTests
       , recordAccessTests
       , unitTypeTests
       , typeOrderTests
@@ -21,6 +20,7 @@ main = do
       , jsontype2jsonTests
       , whereTests
       , orderInvarianceTests
+      , whitespaceTests
       ]
 
   --     , golden "import-1" "import-1"

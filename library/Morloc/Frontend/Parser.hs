@@ -37,7 +37,7 @@ readProgram
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
 readProgram f sourceCode pstate p =
   case runParser
-         (CMS.runStateT (pProgram <* eof) (reenter pstate))
+         (CMS.runStateT (sc >> pProgram <* eof) (reenter pstate))
          (maybe "<expr>" id f)
          sourceCode of
     (Left err') -> Left err'
@@ -50,7 +50,7 @@ readProgram f sourceCode pstate p =
 -- calls such as: `morloc typecheck -te "A -> B"`.
 readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
 readType typeStr =
-  case runParser (CMS.runStateT (pTypeGen <* eof) (reenter emptyState)) "" typeStr of
+  case runParser (CMS.runStateT (sc >> pTypeGen <* eof) (reenter emptyState)) "" typeStr of
     Left err' -> Left err'
     Right (es, _) -> Right es
 
@@ -58,22 +58,27 @@ readType typeStr =
 reenter :: ParserState -> ParserState
 reenter p = p {stateMinPos = mkPos 1, stateAccepting = True}
 
--- | The output is rolled into the final DAG of modules
+-- | The output will be rolled into the final DAG of modules. There may be
+-- EITHER one implicit main module OR one or more named modules.
 pProgram :: Parser [ExprI]
-pProgram = sc >> many1 pToplevel
-
-pToplevel :: Parser ExprI
-pToplevel = setMinPos >> pModule
+pProgram = try (align pModule) <|> plural pMain
 
 -- | match a named module
 pModule :: Parser ExprI
 pModule = do
-  moduleName <- option "Main" (reserved "module" >> freename)
+  moduleName <- reserved "module" >> freename
   es <- align pTopExpr |>> concat
-  es' <- case moduleName of
-    "Main" -> createMainFunction es
-    _ -> return es
-  exprI $ ModE (MV moduleName) es'
+  exprI $ ModE (MV moduleName) es
+
+-- | match an implicit Main module
+pMain :: Parser ExprI
+pMain = do
+  setMinPos
+  es <- align pTopExpr |>> concat >>= createMainFunction
+  exprI $ ModE (MV "Main") es
+
+plural :: Functor m => m a -> m [a]
+plural = fmap return 
 
 createMainFunction :: [ExprI] -> Parser [ExprI]
 createMainFunction es = case (init es, last es) of
@@ -100,10 +105,7 @@ pTopExpr =
   <|> try (plural pSigE)
   <|> try pSrcE
   <|> plural pExpr
-  <?> "Bad toplevel expression"
-  where
-    plural :: Functor m => m a -> m [a]
-    plural = fmap return 
+  <?> "statement"
 
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
@@ -121,7 +123,7 @@ pExpr =
   <|> parens pExpr
   <|> pLam
   <|> pVar
-  <?> "Bad expression"
+  <?> "expression"
 
 
 pImport :: Parser ExprI

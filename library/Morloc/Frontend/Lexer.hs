@@ -117,23 +117,17 @@ setMinPos = do
 align :: Parser a -> Parser [a] 
 align p = do
   s <- CMS.get
-  let minPos = stateMinPos s 
-      accept = stateAccepting s
+  let minPos0 = stateMinPos s 
+      accept0 = stateAccepting s
   curPos <- L.indentLevel
-  xs <- many1 (checkPos curPos >> resetPos minPos accept >> p)
+  xs <- many1 (resetPos curPos True >> p)
   -- put everything back the way it was
-  resetPos minPos accept
+  resetPos minPos0 accept0
   return xs
   where
     resetPos i r = do
       s' <- CMS.get
       CMS.put (s' {stateMinPos = i, stateAccepting = r})
-
-    checkPos origin = return () -- do
-      -- i <- L.indentLevel
-      -- case compare i origin of
-      --   EQ -> return ()
-      --   _ -> L.incorrectIndent EQ i origin
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p
@@ -167,13 +161,13 @@ lexeme p = do
         then
           CMS.put (s { stateAccepting = False }) >> lexemeBase p
         else
-          L.incorrectIndent GT minPos curPos
+          L.incorrectIndent EQ minPos curPos
     else
       if minPos < curPos
         then
           lexemeBase p
         else 
-          L.incorrectIndent GT minPos curPos
+          L.incorrectIndent LT minPos curPos
 
 
 resetGenerics :: Parser ()

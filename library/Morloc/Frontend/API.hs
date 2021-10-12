@@ -15,6 +15,7 @@ module Morloc.Frontend.API
 
 import Morloc.Frontend.Namespace
 import qualified Data.Set as Set
+import qualified Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
@@ -45,10 +46,9 @@ parse f (Code code) = case Parser.readProgram f code Lexer.emptyState mempty of
             (Left err') -> MM.throwError $ SyntaxError err'
             (Right (x, s')) -> parseImports x s'
       where
-        g = MDD.edgelist d
-        parents = Set.fromList (map fst g)
-        children = Set.fromList (map snd g)
-        unimported = Set.toList $ Set.difference children parents
+        imported = Set.fromList (map snd (MDD.edgelist d))
+        parsed = Map.keysSet d
+        unimported = Set.toList $ Set.difference imported parsed
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)
