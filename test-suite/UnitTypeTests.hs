@@ -853,7 +853,9 @@ unitTypeTests =
     -- - records
     , assertGeneralType
         "primitive record statement"
-        "{x=42, y=\"yolo\"}"
+        [r|
+        {x=42, y="yolo"}
+        |]
         (record [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record signature"
@@ -865,115 +867,194 @@ unitTypeTests =
         (record' "Foo" [("x", num), ("y", str)])
     , assertGeneralType
         "primitive record declaration"
-        "foo = {x = 42, y = \"yolo\"}\nfoo"
+        [r|
+        foo = {x = 42, y = "yolo"}
+        foo
+        |]
         (record [("x", num), ("y", str)])
     , assertGeneralType
         "nested records"
-        "{x = 42, y = {bob = 24601, tod = \"listen now closely and hear how I've planned it\"}}"
+        [r|
+        {x = 42, y = {bob = 24601, tod = "listen now closely and hear how I've planned it"}}
+        |]
         (record [("x", num), ("y", record [("bob", num), ("tod", str)])])
     , assertGeneralType
         "records with bound variables"
-        "foo a = {x=a, y=\"yolo\"}\nfoo 42"
+        [r|
+        foo a = {x=a, y="yolo"}
+        foo 42
+        |]
         (record [("x", num), ("y", str)])
 
     -- functions
     , assertGeneralType
         "1-arg function declaration without signature"
-        "f x = True\nf 42"
+        [r|
+        f x = True
+        f 42
+        |]
         bool
     , assertGeneralType
         "2-arg function declaration without signature"
-        "f x y = True\nf 42 True"
+        [r|
+        f x y = True
+        f 42 True
+        |]
         bool
     , assertGeneralType
         "1-arg function signature without declaration"
-        "f :: Num -> Bool\nf 42"
+        [r|
+        f :: Num -> Bool
+        f 42
+        |]
         bool
     , assertGeneralType
         "2-arg function signature without declaration"
-        "f :: Num -> Bool -> Str\nf 42 True"
+        [r|
+        f :: Num -> Bool -> Str
+        f 42 True
+        |]
         str
     , assertGeneralType
         "partial 1-2 function signature without declaration"
-        "f :: Num -> Bool -> Str\nf 42"
+        [r|
+        f :: Num -> Bool -> Str
+        f 42
+        |]
         (fun [bool, str])
     , assertGeneralType
         "identity function declaration and application"
-        "f x = x\nf 42"
+        [r|
+        f x = x
+        f 42
+        |]
         num
     , assertGeneralType
         "const declared function"
-        "const x y = x\nconst 42 True"
+        [r|
+        const x y = x
+        const 42 True
+        |]
         num
     , assertGeneralType
         "identity signature function"
-        "id :: a -> a\nid 42"
+        [r|
+        id :: a -> a
+        id 42
+        |]
         num
     , assertGeneralType
         "const signature function"
-        "const :: a -> b -> a\nconst 42 True"
+        [r|
+        const :: a -> b -> a
+        const 42 True
+        |]
         num
     , assertGeneralType
         "fst signature function"
-        "fst :: (a,b) -> a\nfst (42,True)"
+        [r|
+        fst :: (a,b) -> a
+        fst (42,True)
+        |]
         num
     , assertGeneralType
         "value to list function"
-        "single :: a -> [a]\nsingle 42"
+        [r|
+        single :: a -> [a]
+        single 42
+        |]
         (lst num)
     , assertGeneralType
         "head function"
-        "head :: [a] -> a\nhead [1,2,3]"
+        [r|
+        head :: [a] -> a
+        head [1,2,3]
+        |]
         num
 
     , assertGeneralType
         "make list function"
-        "f :: a -> [a]\nf 1"
+        [r|
+        f :: a -> [a]
+        f 1
+        |]
         (lst num)
 
     , assertGeneralType
         "make list function"
-        "single :: a -> [a]\nsingle 1"
+        [r|
+        single :: a -> [a]
+        single 1
+        |]
         (lst num)
 
     , assertGeneralType
         "app single function"
-        "app :: (a -> b) -> a -> b\nf :: a -> [a]\napp f 42"
+        [r|
+        app :: (a -> b) -> a -> b
+        f :: a -> [a]
+        app f 42
+        |]
         (lst num)
 
     , assertGeneralType
         "app head function"
-        "app :: (a -> b) -> a -> b\nf :: [a] -> a\napp f [42]"
+        [r|
+        app :: (a -> b) -> a -> b
+        f :: [a] -> a
+        app f [42]
+        |]
         (lst num)
 
     , assertGeneralType
       "simple nested call"
-      "f x = x\ng x = f x\ng 1"
+      [r|
+      f x = x
+      g x = f x
+      g 1
+      |]
       num
 
     , assertGeneralType
       "nested calls"
-      "f x y = (x, y)\ng x y = (x, f 1 y)\ng True \"hi\""
+      [r|
+      f x y = (x, y)
+      g x y = (x, f 1 y)
+      g True "hi"
+      |]
       (tuple [bool, tuple [num, str]])
 
     , assertGeneralType
       "zip pair"
-      "pair x y = (x, y)\nzip :: (x -> y -> z) -> [x] -> [y] -> [z]\nzip pair [1,2] [True, False]"
+      [r|
+      pair x y = (x, y)
+      zip :: (x -> y -> z) -> [x] -> [y] -> [z]
+      zip pair [1,2] [True, False]
+      |]
       (lst (tuple [num, bool]))
 
     , assertGeneralType
       "nested identity"
-      "id :: a -> a\nid (id (id 1))"
+      [r|
+      id :: a -> a
+      id (id (id 1))
+      |]
       num
 
     , assertGeneralType
       "head (head [[1]])"
-      "head :: [a] -> a\nhead (head [[42]])"
+      [r|
+      head :: [a] -> a
+      head (head [[42]])
+      |]
       num
 
     , assertGeneralType
       "snd (snd (1,(1,True)))"
-      "snd :: (a, b) -> b\nsnd (snd (1, (1, True)))"
+      [r|
+      snd :: (a, b) -> b
+      snd (snd (1, (1, True)))
+      |]
       bool
 
     -- -- This should give a straight error, none of that nonsense about within language conversion
@@ -988,26 +1069,44 @@ unitTypeTests =
 
     , assertGeneralType
         "f x y = [x, y]"
-        "f x y = [x, y]\nf 1"
+        [r|
+        f x y = [x, y]
+        f 1
+        |]
         (fun [num, lst num])
 
     , assertGeneralType
         "map head function"
-        "map :: (a -> b) -> [a] -> [b]\nhead :: [a] -> a\nmap head [[1],[1,2,3]]"
+        [r|
+        map :: (a -> b) -> [a] -> [b]
+        head :: [a] -> a
+        map head [[1],[1,2,3]]
+        |]
         (lst num)
 
     , assertGeneralType
         "map id over number list"
-        "map :: (a -> b) -> [a] -> [b]\nid :: a -> a\nmap id [1,2,3]"
+        [r|
+        map :: (a -> b) -> [a] -> [b]
+        id :: a -> a
+        map id [1,2,3]
+        |]
         (lst num)
     , assertGeneralType
         "map fst over tuple list"
-        "map :: (a -> b) -> [a] -> [b]\nfst :: (a,b) -> a\nmap fst [(1,True),(2,False)]"
+        [r|
+        map :: (a -> b) -> [a] -> [b]
+        fst :: (a,b) -> a
+        map fst [(1,True),(2,False)]
+        |]
         (lst num)
 
     , assertGeneralType
         "variable annotation"
-        "f :: Foo\nexport f"
+        [r|
+        f :: Foo
+        export f
+        |]
         (var "Foo")
     -- , assertGeneralType
     --     "explicit annotation within an application"
@@ -1055,46 +1154,86 @@ unitTypeTests =
     -- applications
     , assertGeneralType
         "primitive variable in application"
-        "x = True\n(\\y -> y) x"
+        [r|
+        x = True
+        (\y -> y) x
+        |]
         bool
     , assertGeneralType
         "function variable in application"
-        "f = (\\x y -> x)\nf 42"
+        [r|
+        f = (\x y -> x)
+        f 42
+        |]
         (forall ["a"] (fun [var "a", num]))
     , assertGeneralType
         "partially applied function variable in application"
-        "f = (\\x y -> x)\nx = f 42\nx"
+        [r|
+        f = (\x y -> x)
+        x = f 42
+        x
+        |]
         (forall ["a"] (fun [var "a", num]))
     , exprTestBad
         "applications with too many arguments fail"
-        "f :: a -> a\nf True 12"
+        [r|
+        f :: a -> a
+        f True 12
+        |]
     , exprTestBad
         "applications with mismatched types fail (1)"
-        "abs :: Num -> Num\nabs True"
+        [r|
+        abs :: Num -> Num
+        abs True
+        |]
     , exprTestBad
         "applications with mismatched types fail (2)"
-        "f = 14\ng = \\x h -> h x\n(g True) f"
+        [r|
+        f = 14
+        g = \x h -> h x
+        (g True) f
+        |]
     , expectError
         "applications of non-functions should fail (1)"
         (GeneralTypeError ApplicationOfNonFunction)
-        "f = 5\ng = \\x -> f x\ng 12"
+        [r|
+        f = 5
+        g = \x -> f x
+        g 12
+        |]
     , expectError
         "applications of non-functions should fail (2)"
         (GeneralTypeError ApplicationOfNonFunction)
-        "f = 5\ng = \\h -> h 5\ng f"
+        [r|
+        f = 5
+        g = \h -> h 5
+        g f
+        |]
 
     -- evaluation within containers
     , expectError
         "arguments to a function are monotypes"
         (GeneralTypeError (SubtypeError num bool "Expect monotype"))
-        "f :: a -> a\ng = \\h -> (h 42, h True)\ng f"
+        [r|
+        f :: a -> a
+        g = \h -> (h 42, h True)
+        g f
+        |]
     , assertGeneralType
         "polymorphism under lambdas (203f8c) (1)"
-        "f :: a -> a\ng = \\h -> (h 42, h 1234)\ng f"
+        [r|
+        f :: a -> a
+        g = \h -> (h 42, h 1234)
+        g f
+        |]
         (tuple [num, num])
     , assertGeneralType
         "polymorphism under lambdas (203f8c) (2)"
-        "f :: a -> a\ng = \\h -> [h 42, h 1234]\ng f"
+        [r|
+        f :: a -> a
+        g = \h -> [h 42, h 1234]
+        g f
+        |]
         (lst num)
 
     -- binding
@@ -1234,13 +1373,19 @@ unitTypeTests =
     , assertGeneralType "list of primitives" "[1,2,3]" (lst num)
     , assertGeneralType
         "list containing an applied variable"
-        "f :: a -> a\n[53, f 34]"
+        [r|
+        f :: a -> a
+        [53, f 34]
+        |]
         (lst num)
       -- NOTE: this test relies on internal renaming implementation
     , assertGeneralType "empty list" "[]" (lst (exist "v0"))
     , assertGeneralType
         "list in function signature and application"
-        "f :: [Num] -> Bool\nf [1]"
+        [r|
+        f :: [Num] -> Bool
+        f [1]
+        |]
         bool
     -- , assertGeneralType
     --     "list in generic function signature and application"
@@ -1251,15 +1396,23 @@ unitTypeTests =
     -- tuples
     , assertGeneralType
         "tuple of primitives"
-        "(4.2, True)"
+        [r|
+        (4.2, True)
+        |]
         (tuple [num, bool])
     , assertGeneralType
         "tuple containing an applied variable"
-        "f :: a -> a\n(f 53, True)"
+        [r|
+        f :: a -> a
+        (f 53, True)
+        |]
         (tuple [num, bool])
     , assertGeneralType
         "check 2-tuples type signature"
-        "f :: (Num, Str)\nexport f"
+        [r|
+        f :: (Num, Str)
+        export f
+        |]
         (tuple [num, str])
     , assertGeneralType "1-tuples are just for grouping" "f :: (Num)\nexport f" num
 
@@ -1267,12 +1420,18 @@ unitTypeTests =
     -- unit type
     , assertGeneralType
         "unit as input"
-        "f :: () -> Bool\nexport f"
+        [r|
+        f :: () -> Bool
+        export f
+        |]
         (fun [VarU (TV Nothing "Unit"), bool])
 
     , assertGeneralType
         "unit as output"
-        "f :: Bool -> ()\nexport f"
+        [r|
+        f :: Bool -> ()
+        export f
+        |]
         (fun [bool, VarU (TV Nothing "Unit")])
 
     -- FIXME - I really don't like "Unit" being a normal var ...
@@ -1286,20 +1445,36 @@ unitTypeTests =
     -- adding signatures to declarations
     , assertGeneralType
         "declaration with a signature (1)"
-        "f :: a -> a\nf x = x\nf 42"
+        [r|
+        f :: a -> a
+        f x = x
+        f 42
+        |]
         num
     , assertGeneralType
         "declaration with a signature (2)"
-        "f :: Num -> Bool\nf x = True\nf 42"
+        [r|
+        f :: Num -> Bool
+        f x = True
+        f 42
+        |]
         bool
     , assertGeneralType
         "declaration with a signature (3)"
-        "f :: Num -> Bool\nf x = True\nf"
+        [r|
+        f :: Num -> Bool
+        f x = True
+        f
+        |]
         (fun [num, bool])
     , expectError
         "primitive type mismatch should raise error"
         (GeneralTypeError (SubtypeError num bool "mismatch"))
-        "f :: Num -> Bool\nf x = 9999\nexport f"
+        [r|
+        f :: Num -> Bool
+        f x = 9999
+        export f"
+        |]
 
     -- -- tags
     -- , exprEqual
