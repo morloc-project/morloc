@@ -459,70 +459,71 @@ typeAliasTests =
            foo :: A -> C
            foo
         |]
-    -- -- import tests ---------------------------------------
-    -- , assertGeneralType
-    --     "non-parametric, general type alias, imported"
-    --     [r|
-    --        module M1
-    --        type Foo = A
-    --        export Foo
-    --        module Main
-    --        import M1 (Foo)
-    --        f :: Foo -> B
-    --        f
-    --     |]
-    --     [fun [var "A", var "B"]]
-    -- , assertGeneralType
-    --     "non-parametric, general type alias, reimported"
-    --     [r|
-    --        module M3
-    --        type Foo = A
-    --        export Foo
-    --        module M2
-    --        import M3 (Foo)
-    --        export Foo
-    --        module M1
-    --        import M2 (Foo)
-    --        export Foo
-    --        module Main
-    --        import M1 (Foo)
-    --        f :: Foo -> B
-    --        f
-    --     |]
-    --     [fun [var "A", var "B"]]
-    -- , assertGeneralType
-    --     "non-parametric, general type alias, imported aliased"
-    --     [r|
-    --        module M1
-    --        type Foo = A
-    --        export Foo
-    --        module Main
-    --        import M1 (Foo as Bar)
-    --        f :: Bar -> B
-    --        f
-    --     |]
-    --     [fun [var "A", var "B"]]
-    -- , assertGeneralType
-    --     "non-parametric, general type alias, reimported aliased"
-    --     [r|
-    --        module M3
-    --        type Foo1 = A
-    --        export Foo1
-    --
-    --        module M2
-    --        import M3 (Foo1 as Foo2)
-    --        export Foo2
-    --
-    --        module M1
-    --        import M2 (Foo2 as Foo3)
-    --        export Foo3
-    --
-    --        module Main
-    --        import M1 (Foo3 as Foo4)
-    --        f :: Foo4 -> B
-    --        f
-    --     |]
-    --     [fun [var "A", var "B"]]
+
+    -- import tests ---------------------------------------
+    , assertGeneralType
+        "non-parametric, general type alias, imported"
+        [r|
+           module M1
+           type Foo = A
+           export Foo
+           module Main
+           import M1 (Foo)
+           f :: Foo -> B
+           f
+        |]
+        (fun [var "A", var "B"])
+    , assertGeneralType
+        "non-parametric, general type alias, reimported"
+        [r|
+           module M3
+           type Foo = A
+           export Foo
+           module M2
+           import M3 (Foo)
+           export Foo
+           module M1
+           import M2 (Foo)
+           export Foo
+           module Main
+           import M1 (Foo)
+           f :: Foo -> B
+           f
+        |]
+        (fun [var "A", var "B"])
+    , assertGeneralType
+        "non-parametric, general type alias, imported aliased"
+        [r|
+           module M1
+           type Foo = A
+           export Foo
+           module Main
+           import M1 (Foo as Bar)
+           f :: Bar -> B
+           f
+        |]
+        (fun [var "A", var "B"])
+    , assertGeneralType
+        "non-parametric, general type alias, reimported aliased"
+        [r|
+           module M3
+           type Foo1 = A
+           export Foo1
+
+           module M2
+           import M3 (Foo1 as Foo2)
+           export Foo2
+
+           module M1
+           import M2 (Foo2 as Foo3)
+           export Foo3
+
+           module Main
+           import M1 (Foo3 as Foo4)
+           f :: Foo4 -> B
+           f
+        |]
+        (fun [var "A", var "B"])
     -- , assertGeneralType
     --     "non-parametric, concrete type alias, reimported aliased"
     --     [r|
@@ -545,42 +546,42 @@ typeAliasTests =
     --        f
     --     |]
     --     [ fun [varc CppLang "int", varc CppLang "double"] ]
-    -- , assertGeneralType
-    --     "non-parametric, general type alias, duplicate import"
-    --     [r|
-    --        module M2
-    --        type Foo = A
-    --        export Foo
-    --
-    --        module M1
-    --        type Foo = A
-    --        export Foo
-    --
-    --        module Main
-    --        import M1 (Foo)
-    --        import M2 (Foo)
-    --        f :: Foo -> B
-    --        f
-    --     |]
-    --     [fun [var "A", var "B"]]
-    -- , assertGeneralType
-    --     "parametric alias, general type alias, duplicate import"
-    --     [r|
-    --        module M2
-    --        type (Foo a b) = (a,b)
-    --        export Foo
-    --
-    --        module M1
-    --        type (Foo c d) = (c,d)
-    --        export Foo
-    --
-    --        module Main
-    --        import M1 (Foo)
-    --        import M2 (Foo)
-    --        f :: Foo X Y -> Z
-    --        f
-    --     |]
-    --     [fun [tuple [var "X", var "Y"], var "Z"]]
+    , assertGeneralType
+        "non-parametric, general type alias, duplicate import"
+        [r|
+           module M2
+           type Foo = A
+           export Foo
+
+           module M1
+           type Foo = A
+           export Foo
+
+           module Main
+           import M1 (Foo)
+           import M2 (Foo)
+           f :: Foo -> B
+           f
+        |]
+        (fun [var "A", var "B"])
+    , assertGeneralType
+        "parametric alias, general type alias, duplicate import"
+        [r|
+           module M2
+           type (Foo a b) = (a,b)
+           export Foo
+
+           module M1
+           type (Foo c d) = (c,d)
+           export Foo
+
+           module Main
+           import M1 (Foo)
+           import M2 (Foo)
+           f :: Foo X Y -> Z
+           f
+        |]
+        (fun [tuple [var "X", var "Y"], var "Z"])
     ]
 
 

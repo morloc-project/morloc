@@ -18,9 +18,7 @@ module Morloc.Frontend.Lexer
   , brackets
   , comments
   , emptyState
-  , isInset
   , lexeme
-  , lexemeBase
   , many1
   , sepBy2
   , freename
@@ -29,7 +27,6 @@ module Morloc.Frontend.Lexer
   , newvar
   , number
   , op
-  , operatorChars
   , parens
   , reserved
   , reservedWords
@@ -123,7 +120,7 @@ align p = do
   let minPos = stateMinPos s 
       accept = stateAccepting s
   curPos <- L.indentLevel
-  xs <- many1 (resetPos minPos accept >> p)
+  xs <- many1 (checkPos curPos >> resetPos minPos accept >> p)
   -- put everything back the way it was
   resetPos minPos accept
   return xs
@@ -131,6 +128,12 @@ align p = do
     resetPos i r = do
       s' <- CMS.get
       CMS.put (s' {stateMinPos = i, stateAccepting = r})
+
+    checkPos origin = return () -- do
+      -- i <- L.indentLevel
+      -- case compare i origin of
+      --   EQ -> return ()
+      --   _ -> L.incorrectIndent EQ i origin
 
 alignInset :: Parser a -> Parser [a]
 alignInset p = isInset >> align p

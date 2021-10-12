@@ -60,9 +60,7 @@ reenter p = p {stateMinPos = mkPos 1, stateAccepting = True}
 
 -- | The output is rolled into the final DAG of modules
 pProgram :: Parser [ExprI]
-pProgram = do
-  L.space space1 comments empty
-  many1 pToplevel
+pProgram = sc >> many1 pToplevel
 
 pToplevel :: Parser ExprI
 pToplevel = do
