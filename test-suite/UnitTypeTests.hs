@@ -195,6 +195,8 @@ subtypeTests =
       [eag, ebg] (tuple [a, b]) (tuple [ea, eb]) [solvedA a, solvedB b]
     , assertSubtypeGamma "<a>, <b> -| (<a>, <b>) <: (A, B) |- <a>:A, <b>:B"
       [eag, ebg] (tuple [ea, eb]) (tuple [a, b]) [solvedA a, solvedB b]
+    , assertSubtypeGamma "<a>, <b>, <c>, <d> -| (<a>, <b>) <: (<c>, <d>) -| <a>:<c>, <b>:<d>, <c>, <d>"
+      [eag, ebg, ecg, edg] (tuple [ea, eb]) (tuple [ec, ed]) [solvedA ec, solvedB ed, ecg, edg]
     ]
   where
     a = var "A"
@@ -202,10 +204,16 @@ subtypeTests =
     c = var "C"
     ea = ExistU (v "x1") [] []
     eb = ExistU (v "x2") [] []
+    ec = ExistU (v "x3") [] []
+    ed = ExistU (v "x4") [] []
     eag = ExistG (v "x1") [] []
     ebg = ExistG (v "x2") [] []
+    ecg = ExistG (v "x3") [] []
+    edg = ExistG (v "x4") [] []
     solvedA t = SolvedG (v "x1") t
     solvedB t = SolvedG (v "x2") t
+    solvedC t = SolvedG (v "x3") t
+    solvedD t = SolvedG (v "x4") t
 
 substituteTVarTests =
   testGroup
@@ -1059,7 +1067,7 @@ unitTypeTests =
         g f = f True
         export g
         |]
-        (fun [fun [bool, exist "v5"], exist "v5"])
+        (fun [fun [bool, exist "v4"], exist "v4"])
 
     , assertGeneralType
         "app single function"
@@ -1173,6 +1181,30 @@ unitTypeTests =
         map fst [(1,True),(2,False)]
         |]
         (lst num)
+    , assertGeneralType
+        "map fstG over (G a b) list"
+        [r|
+        map :: (a -> b) -> [a] -> [b]
+        fstF :: G a b -> a
+        map fstF [G 1 True, G 2 False]
+        |]
+        (lst num)
+    , assertGeneralType
+        "fmap fstG over functor"
+        [r|
+        fmap :: (a -> b) -> f a -> f b
+        fstG :: f a b -> a
+        fmap fst [G 1 True]
+        |]
+        (lst num)
+    , assertGeneralType
+        "fmap generic fst over functor"
+        [r|
+        fmap :: (a -> b) -> f a -> f b
+        fst :: f a b -> a
+        fmap fst [G 1 True]
+        |]
+        (lst num)
 
     , assertGeneralType
         "variable annotation"
@@ -1217,7 +1249,7 @@ unitTypeTests =
     , assertGeneralType
         "recursive functions are A-OK"
         "\\f -> f 5"
-        (fun [fun [num, exist "v5"], exist "v5"])
+        (fun [fun [num, exist "v4"], exist "v4"])
 
     -- applications
     , assertGeneralType

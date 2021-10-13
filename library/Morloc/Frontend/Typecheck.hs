@@ -42,9 +42,6 @@ typecheck es = mapM run es where
       (_, _, e2) <- synthG' g e1
       return e2
 
-    -- remove the final Gamma and return type.
-    getSanno (_, _, e) = e
-
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
 resolveTypes (SAnno (Many es) (Idx i t))
   = SAnno (Many (map (\(e, i') -> (f e, i')) es)) (Idx i (typeOf t)) where
@@ -169,9 +166,8 @@ synthE i g0 f@(LamS vs x) = do
   -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
       (g2, ft) = newvar Nothing g1
-      (g3, fv) = tvarname g2 "v" Nothing
       finalType = FunU ts ft
-  checkE' i g3 f finalType
+  checkE' i g2 f finalType
 
 synthE _ g (LstS []) =
   let (g1, itemType) = newvar Nothing g
@@ -266,7 +262,7 @@ application i g0 es0 (FunU as0 b0) = do
 application i g0 es (ForallU v s) = do
   let (g1, v1) = tvarname g0 "v" Nothing
       existType = ExistU v1 [] []
-  application' i (g1 +> ExistG v1 [] []) es (substituteTVar v existType s)
+  application' i (g1 +> index existType) es (substituteTVar v existType s)
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
@@ -280,7 +276,7 @@ application i g0 es (ExistU v [] _) =
           eas = [ExistU v [] [] | v <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea
-          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> (index ea : map index eas) <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
       return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value
@@ -366,6 +362,8 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   g4 <- cut' i vardef g3
 
   return (g4, t5, e3)
+
+  return (g3, t5, e3)
 
 checkE i g1 e1 t2@(ForallU x a) = do
   let (g2, v1) = tvarname g1 "v" Nothing

@@ -246,36 +246,37 @@ subtype a b _ = Left $ SubtypeError a b "Type mismatch"
 -- | Dunfield Figure 10 -- type-level structural recursion
 instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
--- --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- A1 <=: Ea1 -| g2
--- --  g2 |- Ea2 <=: [g2]A2 -| g3
--- -- ----------------------------------------- InstLApp
--- --  g1[Ea] |- Ea <=: A1 -> A2 -| g3
 instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
-  let (g2, eas) = statefulMap (\g _ -> newvar lang g) g1 as 
-      (g3, eb) = newvar lang g2
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "v" lang) g1 as
+      (g3, veb) = tvarname g2 "v" lang
+      eas = [ExistU v [] [] | v <- veas]
+      eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
       Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ map index eas ++ ls }
+        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ (index eb : map index eas) ++ ls }
       Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
   g5 <- foldlM (\g (e, t) -> instantiate e t g) g4 (zip eas as)
-  instantiate eb (apply g5 b) g5 
-
-
+  instantiate eb (apply g5 b) g5
 
 --  g1[Ea2,Ea1,Ea=Ea1->Ea2] |- Ea1 <=: A1 -| g2
 --  g2 |- [g2]A2 <=: Ea2 -| g3
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
 instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _) g1 = do
-  let (g2, eas) = statefulMap (\g _ -> newvar lang g) g1 as 
-      (g3, eb) = newvar lang g2
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "v" lang) g1 as
+      (g3, veb) = tvarname g2 "v" lang
+      eas = [ExistU v [] [] | v <- veas]
+      eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
     Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ map index eas ++ ls }
+        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ (index eb : map index eas) ++ ls }
     Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
   g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
   g6 <- instantiate eb (apply g5 b) g5
   return g6
+
+
+
 
 --
 -- ----------------------------------------- InstLAllR
