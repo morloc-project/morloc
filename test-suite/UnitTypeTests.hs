@@ -191,6 +191,10 @@ subtypeTests =
       -- nested types
     , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
     , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
+    , assertSubtypeGamma "<a>, <b> -| (A, B) <: (<a>, <b>) |- <a>:A, <b>:B"
+      [eag, ebg] (tuple [a, b]) (tuple [ea, eb]) [solvedA a, solvedB b]
+    , assertSubtypeGamma "<a>, <b> -| (<a>, <b>) <: (A, B) |- <a>:A, <b>:B"
+      [eag, ebg] (tuple [ea, eb]) (tuple [a, b]) [solvedA a, solvedB b]
     ]
   where
     a = var "A"
