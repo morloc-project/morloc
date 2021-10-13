@@ -72,6 +72,15 @@ instance Applicable TypeU where
 instance Applicable EType where
   apply g e = e { etype = apply g (etype e) }
 
+instance Applicable Gamma where
+  apply g1 g2 = g2 {gammaContext = map f (gammaContext g2)} where 
+    f :: GammaIndex -> GammaIndex
+    f (AnnG v t) = AnnG v (apply g1 t)
+    f (ExistG v ps ds) = ExistG v (map (apply g1) ps) (map (apply g1) ds)
+    f (SolvedG v t) = SolvedG v (apply g1 t)
+    f (SerialConstraint t1 t2) = SerialConstraint (apply g1 t1) (apply g1 t2)
+    f x = x 
+
 -- apply context to a SAnno
 applyS :: (Functor gf, Functor f, Applicable g)
        => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
@@ -217,8 +226,9 @@ subtype (ForallU v@(TV lang _) a) b g0
   | otherwise = do
       let (g1, v') = tvarname g0 "v" lang
           a' = ExistU v' [] []
-      g2 <- subtype (substituteTVar v a' a) b (g1 +> MarkG v +> a')
-      cut (MarkG v) g2
+      g2 <- subtype (substituteTVar v a' a) b (g1 +> SolvedG v a' +> MarkG v +> a')
+      let g3 = apply g2 g2 
+      cut (MarkG v) g3
 
 --  g1,a |- A <: B -| g2,a,g3
 -- ----------------------------------------- <:ForallR

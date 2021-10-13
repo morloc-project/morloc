@@ -333,12 +333,15 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
   -- LstS [] will go to the normal Sub case
   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
   return (g3, t3, (LstS (map (applyS g3) (e':es'))))
+
 checkE _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
   return (g2, FunU [] b2, LamS [] e2)
+
 checkE _ g1 (LamS [] e1) t = do
   (g2, t, e2) <- checkG' g1 e1 t
   return (g2, t, LamS [] e2)
+
 checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- defined x:A
   let vardef = AnnG v a1
@@ -379,9 +382,11 @@ checkE i g1 e1 b = do
   return (g3, apply g3 b', e2)
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
-subtype' i a b g = case subtype a b g of
-  (Left err') -> gerr i err'
-  (Right x) -> return x
+subtype' i a b g = do
+  say $ parens (prettyGreenTypeU a) <+> "<:" <+> parens (prettyGreenTypeU b)
+  case subtype a b g of
+    (Left err') -> gerr i err'
+    (Right x) -> return x
 
 cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of

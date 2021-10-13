@@ -1,7 +1,8 @@
 {-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
 
 module UnitTypeTests
-  ( substituteTVarTests
+  ( subtypeTests
+  , substituteTVarTests
   , unitTypeTests
   , typeOrderTests
   , typeAliasTests
@@ -23,6 +24,7 @@ import qualified Morloc.Data.DAG as MDD
 import Morloc (typecheck)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
+import qualified Morloc.Typecheck.Internal as MTI
 
 import qualified Data.Text as T
 import qualified Data.Map as Map
@@ -55,6 +57,13 @@ assertGeneralType msg code t = testCase msg $ do
     (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
+
+assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
+assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
+  let g0 = Gamma {gammaCounter = 0, gammaContext = gs1}
+  case MTI.subtype a b g0 of
+    Left err -> error $ show err
+    Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
 
 exprEqual :: String -> T.Text -> T.Text -> TestTree
 exprEqual msg code1 code2 = undefined
@@ -156,6 +165,29 @@ tuple ts = AppU v ts
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
 record' n rs = NamU NamRecord (TV Nothing n) [] rs
+
+subtypeTests =
+  testGroup
+    "Test subtype within context"
+    [ assertSubtypeGamma "G -| A <: A |- G" [] a a []
+    , assertSubtypeGamma "<a>, <b> -| <a> <: <b> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
+    , assertSubtypeGamma "<a>, <b> -| <b> <: <a> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
+    , assertSubtypeGamma "<a> -| <a> <: A |- <a>:A" [eag] ea a [solvedA a]
+    , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
+    ]
+  where
+    a = var "A"
+    b = var "B"
+    ea = ExistU (v "x1") [] []
+    eb = ExistU (v "x2") [] []
+    eag = ExistG (v "x1") [] []
+    ebg = ExistG (v "x2") [] []
+    solvedA t = SolvedG (v "x1") t
+    solvedB t = SolvedG (v "x2") t
+    
+
+    existg x = ExistG (v x) [] []
+    solvedg x t = SolvedG (v x) t
 
 substituteTVarTests =
   testGroup

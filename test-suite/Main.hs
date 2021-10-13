@@ -22,6 +22,7 @@ main = do
       , orderInvarianceTests
       , whitespaceTests
       , substituteTVarTests
+      , subtypeTests
       ]
 
   --     , golden "import-1" "import-1"
