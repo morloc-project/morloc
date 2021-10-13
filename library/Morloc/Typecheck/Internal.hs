@@ -204,9 +204,10 @@ subtype a@(ExistU _ [] _) b g
   | langOf a /= langOf b = return g -- incomparable
   | otherwise = occursCheck b a "InstantiateL" >> instantiate a b g
 
-subtype a@(AppU v1 ps1) b@(ExistU v2 ps2 _) g
+subtype a@(AppU _ _) b@(ExistU _ _ _) g
   | langOf a /= langOf b = return g -- incomparable
-  | otherwise = subtype (AppU v1 ps1) (ExistU v2 ps2 []) g
+  | otherwise = subtype b a g
+
 subtype t1@(ExistU v1 ps1 _) t2@(AppU v2 ps2) g1
   | langOf v1 /= langOf v2 = return g1 -- incomparable
   | length ps1 /= length ps2 = Left $ SubtypeError t1 t2 "InstantiateL - Expected equal number of type parameters"

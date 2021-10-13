@@ -182,12 +182,10 @@ subtypeTests =
     , assertSubtypeGamma "<a> -| A <: <a> |- <a>:A" [eag] a ea [solvedA a]
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
-
-    -- , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |-" [eag, ebg]
-    --     (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst eb), solvedB c]
-    -- , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |-" [eag, ebg]
-    --     (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst eb), solvedB c]
-
+    , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
+        (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
+    , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
+        (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
     , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
       -- nested types
@@ -204,8 +202,6 @@ subtypeTests =
     ebg = ExistG (v "x2") [] []
     solvedA t = SolvedG (v "x1") t
     solvedB t = SolvedG (v "x2") t
-    existg x = ExistG (v x) [] []
-    solvedg x t = SolvedG (v x) t
 
 substituteTVarTests =
   testGroup
@@ -1077,7 +1073,7 @@ unitTypeTests =
         f :: [a] -> a
         app f [42]
         |]
-        (lst num)
+        num
 
     , assertGeneralType
       "simple nested call"
