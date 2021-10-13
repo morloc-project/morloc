@@ -1182,43 +1182,38 @@ unitTypeTests =
     --     "f :: Num -> Num\nf (42 :: Num)"
     --     num
 
-    -- -- lambdas
-    -- -- , assertTerminalExpr
-    -- --     "functions return lambda expressions"
-    -- --     "\\x -> 42"
-    -- --     (LamE [EV "x"] (ExprI 1 (NumE 42.0)))
-    -- , assertGeneralType
-    --     "functions can be passed"
-    --     "g f = f 42\ng"
-    --     (forall ["a"] (fun [(fun [num, var "a"]), var "a"]))
-    -- , assertGeneralType
-    --     "function with parameterized types"
-    --     "f :: A B -> C\nf"
-    --     (fun [arr "A" [var "B"], var "C"])
-    -- , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" num
-    -- , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
-    -- , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
-    -- , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" num
-    -- , assertGeneralType
-    --     "unapplied lambda, polymorphic (1)"
-    --     "(\\x -> True)"
-    --     (forall ["a"] (fun [var "a", bool]))
-    -- , assertGeneralType
-    --     "unapplied lambda, polymorphic (2)"
-    --     "(\\x y -> x) :: a -> b -> a"
-    --     (forall ["a", "b"] (fun [var "a", var "b", var "a"]))
-    -- , assertGeneralType
-    --     "annotated, fully applied lambda"
-    --     "((\\x -> x) :: a -> a) True"
-    --     bool
-    -- , assertGeneralType
-    --     "annotated, partially applied lambda"
-    --     "((\\x y -> x) :: a -> b -> a) True"
-    --     (forall ["a"] (fun [var "a", bool]))
-    -- , assertGeneralType
-    --     "recursive functions are A-OK"
-    --     "\\f -> f 5"
-    --     (forall ["a"] (fun [fun [num, var "a"], var "a"]))
+    -- lambdas
+    , assertGeneralType
+        "function with parameterized types"
+        [r|
+        f :: A B -> C
+        export f
+        |]
+        (fun [arr "A" [var "B"], var "C"])
+    , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" num
+    , assertGeneralType "fully applied lambda (2)" "(\\x -> True) 42" bool
+    , assertGeneralType "fully applied lambda (3)" "(\\x -> (\\y -> True) x) 42" bool
+    , assertGeneralType "fully applied lambda (4)" "(\\x -> (\\y -> x) True) 42" num
+    , assertGeneralType
+        "unapplied lambda, polymorphic (1)"
+        [r|\x -> True|]
+        (fun [exist "v1", bool])
+    , assertGeneralType
+        "unapplied lambda, polymorphic (2)"
+        "(\\x y -> x) :: a -> b -> a"
+        (fun [exist "v2", exist "v3", exist "v2"])
+    , assertGeneralType
+        "annotated, fully applied lambda"
+        "((\\x -> x) :: a -> a) True"
+        bool
+    , assertGeneralType
+        "annotated, partially applied lambda"
+        "((\\x y -> x) :: a -> b -> a) True"
+        (fun [exist "v3", bool])
+    , assertGeneralType
+        "recursive functions are A-OK"
+        "\\f -> f 5"
+        (fun [fun [num, exist "v5"], exist "v5"])
 
     -- applications
     , assertGeneralType
