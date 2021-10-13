@@ -35,16 +35,12 @@ typecheck
 typecheck es = mapM run es where
     run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
     run e0 = do
+      initialContext <- createGeneralContext e0
+
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let ((_, g), e1) = renameSAnno (Map.empty, initialContext) e0
       (_, _, e2) <- synthG' g e1
       return e2
-
-    -- FIXME: do I really want to reinitialize gamma for each export?
-    initialContext = Gamma
-      { gammaCounter = 0
-      , gammaContext = []
-      }
 
     -- remove the final Gamma and return type.
     getSanno (_, _, e) = e
@@ -67,11 +63,12 @@ resolveTypes (SAnno (Many es) (Idx i t))
   f (VarS x) = VarS x
 
 -- lookup a general type associated with an index
-lookupType :: Int -> MorlocMonad (Maybe TypeU)
-lookupType i = do
+-- standardize naming of qualifiers
+lookupType :: Int -> Gamma -> MorlocMonad (Maybe (Gamma, TypeU))
+lookupType i g = do
   m <- CMS.gets stateSignatures
   return $ case GMap.lookup i m of
-    GMapJust (TermTypes t _ _) -> fmap etype t
+    GMapJust (TermTypes (Just (EType t _ _)) _ _) -> Just $ rename g t
     _ -> Nothing
 
 -- prepare a general, indexed typechecking error
@@ -88,18 +85,18 @@ synthG
        )
 -- it is possible to export just a type signature
 synthG g (SAnno (Many []) i) = do
-  maybeType <- lookupType i
+  maybeType <- lookupType i g
   case maybeType of
-    (Just t) -> return (g, t, SAnno (Many []) (Idx i t))
+    (Just (g', t)) -> return (g', t, SAnno (Many []) (Idx i t))
     Nothing -> gerr i EmptyExpression
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
-  -- if a type annotation exists for this term, check against it
+  -- if a type annotation exists for this term check against it
   -- otherwise synthesize a type
-  maybeType <- lookupType i
+  maybeType <- lookupType i g0
   (g1, t1, e1) <- case maybeType of
     Nothing  -> synthE' i g0 e0
-    (Just t) -> checkE' i g0 e0 t
+    (Just (g', t)) -> say "fetching annotation" >> checkE' i g' e0 t
 
   -- then check all other implementations against the first one
   (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
@@ -228,29 +225,17 @@ synthE i g0 (NamS ((k,x):rs)) = do
   return (g2, t, NamS ((k, headExpr):tailExprs))
 
 -- Sources are axiomatic. They are they type they are said to be.
-synthE i g (CallS src) = do
-  maybeType <- lookupType i
-  (g', t') <- case maybeType of 
-    (Just t) -> return $ rename g t
-    Nothing -> gerr i (MissingGeneralSignature src)
-  return (g', t', CallS src)
+synthE i g (CallS src) = gerr i (MissingGeneralSignature src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- case lookupE v g of 
+  (g', t') <- return $ case lookupE v g of 
     -- yes, return the solved type
-    (Just t) -> return (g, t)
+    (Just t) -> (g, t)
     -- no, so is it a variable that has a type annotation?
-    Nothing -> do
-      maybeType <- lookupType i
-      case maybeType of
-        (Just t) -> return $ rename g t
-        -- no, then I have no idea what it is, so make a new existential
-        _ ->
-          let (g', t) = newvar Nothing g
-          in return (g', t)
+    Nothing -> newvar Nothing g
   return (g', t', VarS v)
 
 
@@ -272,6 +257,7 @@ application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyS g1) es1 
       funType = apply g1 $ FunU (as1 <> remainder) b0
+  say $ "remainder:" <+> vsep (map prettyGreenTypeU remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
