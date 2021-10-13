@@ -1166,6 +1166,20 @@ unitTypeTests =
         (lst num)
 
     , assertGeneralType
+        "f a -> a"
+        [r|
+        out :: f a -> a
+        out (G 1)
+        |]
+        num
+    , assertGeneralType
+        "f a b -> b"
+        [r|
+        snd :: f a b -> b
+        snd (G 1 True)
+        |]
+        bool 
+    , assertGeneralType
         "map id over number list"
         [r|
         map :: (a -> b) -> [a] -> [b]
