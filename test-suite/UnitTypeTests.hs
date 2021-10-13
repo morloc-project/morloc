@@ -169,23 +169,41 @@ record' n rs = NamU NamRecord (TV Nothing n) [] rs
 subtypeTests =
   testGroup
     "Test subtype within context"
-    [ assertSubtypeGamma "G -| A <: A |- G" [] a a []
+    [ -- basic general cases
+      assertSubtypeGamma "G -| A <: A |- G" [] a a []
     , assertSubtypeGamma "<a>, <b> -| <a> <: <b> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
     , assertSubtypeGamma "<a>, <b> -| <b> <: <a> |- <a>:<b>, <b>" [eag, ebg] ea eb [solvedA eb, ebg]
+    , assertSubtypeGamma "G -| (A -> B) <: (A -> B) |- G" [] (fun [a, b]) (fun [a, b]) []
+    , assertSubtypeGamma "G -| [A] <: [A] |- G" [] (lst a) (lst a) []
+    , assertSubtypeGamma "G -| {K :: a, L :: b} <: {K :: a, L :: b}" []
+        (record' "Foo" [("K", a), ("L", b)]) 
+        (record' "Foo" [("K", a), ("L", b)]) []
     , assertSubtypeGamma "<a> -| <a> <: A |- <a>:A" [eag] ea a [solvedA a]
+    , assertSubtypeGamma "<a> -| A <: <a> |- <a>:A" [eag] a ea [solvedA a]
+    , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
+    , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
+
+    -- , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |-" [eag, ebg]
+    --     (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst eb), solvedB c]
+    -- , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |-" [eag, ebg]
+    --     (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst eb), solvedB c]
+
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
+    , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
+      -- nested types
+    , assertSubtypeGamma "<b> -| [A] <: [<b>] |- <b>:A" [ebg] (lst a) (lst eb) [solvedB a]
+    , assertSubtypeGamma "<a> -| [<a>] <: [B] |- <a>:B" [eag] (lst b) (lst ea) [solvedA b]
     ]
   where
     a = var "A"
     b = var "B"
+    c = var "C"
     ea = ExistU (v "x1") [] []
     eb = ExistU (v "x2") [] []
     eag = ExistG (v "x1") [] []
     ebg = ExistG (v "x2") [] []
     solvedA t = SolvedG (v "x1") t
     solvedB t = SolvedG (v "x2") t
-    
-
     existg x = ExistG (v x) [] []
     solvedg x t = SolvedG (v x) t
 
