@@ -1173,7 +1173,7 @@ unitTypeTests =
         (lst num)
 
     , assertGeneralType
-        "f a -> a"
+        "t a -> a"
         [r|
         out :: f a -> a
         out (G 1)

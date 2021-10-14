@@ -96,6 +96,9 @@ instance Indexable TypeU where
   index (ExistU t ts ds) = ExistG t ts ds
   index t = error $ "Can only index ExistT, found: " <> show t
 
+instance Indexable TVar where
+  index v = ExistG v [] []
+
 (+>) :: Indexable a => Gamma -> a -> Gamma
 (+>) g x = g {gammaContext = (index x) : gammaContext g}
 
@@ -221,11 +224,9 @@ subtype t1@(ExistU v1 ps1 _) t2@(AppU v2 ps2) g1
 subtype (ForallU v@(TV lang _) a) b g0
   | lang /= langOf b = return g0
   | otherwise = do
-      let (g1, v') = tvarname g0 "v" lang
-          a' = ExistU v' [] []
-      g2 <- subtype (substituteTVar v a' a) b (g1 +> SolvedG v a' +> MarkG v +> a')
-      let g3 = apply g2 g2 
-      cut (MarkG v) g3
+      g1 <- subtype (substitute v a) b (g0 +> v +> MarkG v)
+      let g2 = apply g1 g1
+      cut (MarkG v) g2
 
 --  g1,a |- A <: B -| g2,a,g3
 -- ----------------------------------------- <:ForallR

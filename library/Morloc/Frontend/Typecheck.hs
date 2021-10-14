@@ -259,10 +259,7 @@ application i g0 es0 (FunU as0 b0) = do
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
 -- ----------------------------------------- Forall App
 --  g1 |- Forall x.A o e =>> C -| g2
-application i g0 es (ForallU v s) = do
-  let (g1, v1) = tvarname g0 "v" Nothing
-      existType = ExistU v1 [] []
-  application' i (g1 +> index existType) es (substituteTVar v existType s)
+application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
@@ -276,7 +273,7 @@ application i g0 es (ExistU v [] _) =
           eas = [ExistU v [] [] | v <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea
-          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> (index ea : map index eas) <> ls}
+          g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
       return (g4, apply g4 f, es')
     -- if the variable has already been solved, use solved value
@@ -365,12 +362,7 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
 
   return (g3, t5, e3)
 
-checkE i g1 e1 t2@(ForallU x a) = do
-  let (g2, v1) = tvarname g1 "v" Nothing
-      et = ExistU v1 [] []
-      a' = substituteTVar x et a
-  (g3, t3, e2) <- checkE' i (g2 +> et) e1 a'
-  return (g3, t3, e2)
+checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
