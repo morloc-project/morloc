@@ -98,7 +98,7 @@ instance PrettyType Type where
   prettyType (VarT v) = pretty v
   prettyType (FunT [] t) = "<MISSING> -> " <> prettyType t
   prettyType (FunT ts t) = encloseSep "(" ")" " -> " (map prettyType (ts <> [t]))
-  prettyType (AppT v ts) = pretty v <+> hsep (map prettyType ts)
+  prettyType (AppT t ts) = hsep (map prettyType (t:ts))
   prettyType (NamT o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyType x | (k, x) <- rs])
@@ -124,7 +124,7 @@ prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
-prettyTypeU (AppU v ts) = parens $ pretty v <+> hsep (map prettyTypeU ts)
+prettyTypeU (AppU t ts) = parens . hsep $ map prettyTypeU (t:ts)
 prettyTypeU (NamU o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])

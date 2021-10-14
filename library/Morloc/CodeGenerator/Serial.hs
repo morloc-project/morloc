@@ -42,11 +42,11 @@ dummies lang = repeat $ VarU (TV lang "dummy")
 
 defaultListAll :: TypeP -> [TypeP]
 defaultListAll t@(langOf' -> lang)
-  = [AppP (PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
+  = [AppP (VarP $ PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
 
-isList (AppP (PV lang _ v) [_]) =
+isList (AppP (VarP (PV lang _ v)) [_]) =
   let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
-  in length [v' | (AppU (TV _ v') _) <- ds, v == v'] > 0
+  in length [v' | (AppU (VarU (TV _ v')) _) <- ds, v == v'] > 0
 isList _ = False
 
 defaultTupleAll :: [TypeP] -> [TypeP]
@@ -55,11 +55,11 @@ defaultTupleAll ts@(t:_) =
   let lang = langOf' t
       gt = Just $ Def.tupleG (length ts)
       cts = Def.tupleC (length ts) lang
-  in [AppP (PV lang gt ct) ts | ct <- cts]
+  in [AppP (VarP (PV lang gt ct)) ts | ct <- cts]
 
 
 isTuple :: TypeP -> Bool
-isTuple (AppP (PV lang _ v) (length -> i)) = elem v (Def.tupleC i lang)
+isTuple (AppP (VarP (PV lang _ v)) (length -> i)) = elem v (Def.tupleC i lang)
 isTuple _ = False
 
 isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
@@ -128,11 +128,11 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
   | isPrimitiveType Def.defaultString t = return $ SerialString v
   | isPrimitiveType Def.defaultNumber t = return $ SerialNum    v
-  | otherwise = makeSerialAST m (AppP v [])
+  | otherwise = makeSerialAST m (AppP (VarP v) [])
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST m t@(AppP v@(PV _ _ s) ts)
+makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts)
   | isList t = SerialList <$> makeSerialAST m (ts !! 0)
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (pv2tv v, length ts) m of
@@ -157,7 +157,7 @@ typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
 typeEqual (FunP [] t1) (FunP [] t2) = typeEqual t1 t2
 typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
  = typeEqual t11 t21 && typeEqual (FunP rs1 t12) (FunP rs2 t22)
-typeEqual (AppP v1 []) (AppP v2 []) = v1 == v2
+typeEqual (AppP v1 []) (AppP v2 []) = typeEqual v1 v2
 typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
  = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
 typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])

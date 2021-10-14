@@ -42,7 +42,7 @@ data TypeP
   = UnkP PVar
   | VarP PVar
   | FunP [TypeP] TypeP
-  | AppP PVar [TypeP]
+  | AppP TypeP [TypeP]
   | NamP NamType PVar [PVar] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
@@ -66,7 +66,7 @@ instance Typelike TypeP where
   typeOf (UnkP v) = UnkT (pvar2tvar v)
   typeOf (VarP v) = VarT (pvar2tvar v)
   typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
-  typeOf (AppP v ts) = AppT (pvar2tvar v) (map typeOf ts)
+  typeOf (AppP v ts) = AppT (typeOf v) (map typeOf ts)
   typeOf (NamP o n ps es) =
     let n' = pvar2tvar n
         ps' = (map pvar2tvar ps)
@@ -82,12 +82,12 @@ instance Typelike TypeP where
         | v0 == TV (Just lang) v = r0
         | otherwise = t
       sub (FunP ts t) = FunP (map sub ts) (sub t)
-      sub (AppP v ts) = AppP v (map sub ts)
+      sub (AppP v ts) = AppP (sub v) (map sub ts)
       sub (NamP o n ps es) = NamP o n ps [(k, sub t) | (k, t) <- es]
 
   free v@(VarP _) = Set.singleton v
   free (FunP ts t) = Set.unions (map free (t:ts))
-  free (AppP _ ts) = Set.unions (map free ts)
+  free (AppP t ts) = Set.unions (map free (t:ts))
   free (NamP _ _ _ es) = Set.unions (map (free . snd) es)
   free (UnkP _) = Set.empty -- are UnkP free?
 
@@ -245,7 +245,7 @@ instance HasOneLanguage (TypeP) where
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
   langOf' (FunP _ t) = langOf' t 
-  langOf' (AppP (PV lang _ _) _) = lang
+  langOf' (AppP t _) = langOf' t
   langOf' (NamP _ (PV lang _ _) _ _) = lang
 
 

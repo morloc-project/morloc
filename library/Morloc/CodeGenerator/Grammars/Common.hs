@@ -145,7 +145,7 @@ prettyTypeP :: TypeP -> MDoc
 prettyTypeP (UnkP v) = prettyPVar v 
 prettyTypeP (VarP v) = prettyPVar v 
 prettyTypeP (FunP ts t) = encloseSep "(" ")" " -> " (map prettyTypeP (ts <> [t]))
-prettyTypeP (AppP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
+prettyTypeP (AppP t ts) = hsep (map prettyTypeP (t:ts))
 prettyTypeP (NamP o n ps rs)
     = block 4 (viaShow o <+> prettyPVar n <> encloseSep "<" ">" "," (map prettyPVar ps))
               (vsep [prettyPVar k <+> "::" <+> prettyTypeP x | (k, x) <- rs])
@@ -309,7 +309,8 @@ packExprM m e = do
 
 type2jsontype :: TypeP -> MorlocMonad JsonType
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype (AppP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
 type2jsontype (NamP _ (PV _ _ v) _ rs) = do
   ts <- mapM (type2jsontype . snd) rs
   return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 

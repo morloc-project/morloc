@@ -511,11 +511,9 @@ pExistential = do
 
 pAppU :: Parser TypeU
 pAppU = do
-  _ <- tag (freename <|> stringLiteral)
-  n <- freename <|> stringLiteral
-  t <- tvar n
+  t <- pTerm -- TODO: generalize?
   args <- many1 pType'
-  return $ AppU t args
+  return $ AppU (VarU t) args
   where
     pType' = try pUniU <|> try parensType <|> pVarU <|> pListU <|> pTupleU <|> pNamU
 
@@ -535,18 +533,20 @@ pListU = do
   return $ head (MLD.defaultList lang t)
 
 pVarU :: Parser TypeU
-pVarU = try pVarConU <|> pVarGenU where
-  pVarConU :: Parser TypeU
+pVarU = VarU <$> pTerm
+
+pTerm :: Parser TVar
+pTerm = try pVarConU <|> pVarGenU where
+  pVarConU :: Parser TVar
   pVarConU = do
     _ <- tag stringLiteral
     n <- stringLiteral
-    t <- tvar n
-    return $ VarU t
+    tvar n
 
-  pVarGenU :: Parser TypeU
+  pVarGenU :: Parser TVar
   pVarGenU = do
     _ <- tag freename
     n <- freename
     t <- tvar n
     appendGenerics t  -- add the term to the generic list IF generic
-    return $ VarU t
+    return t

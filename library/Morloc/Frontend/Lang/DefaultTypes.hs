@@ -59,8 +59,8 @@ listGC Nothing = [listG]
 listGC (Just lang) = listC lang
 
 defaultList :: Maybe Lang -> TypeU -> [TypeU]
-defaultList Nothing t = [AppU (TV Nothing listG) [t]]
-defaultList lang@(Just l) t = [AppU (TV lang v) [t] | v <- listC l] 
+defaultList Nothing t = [AppU (VarU (TV Nothing listG)) [t]]
+defaultList lang@(Just l) t = [AppU (VarU (TV lang v)) [t] | v <- listC l] 
 
 
 
@@ -84,8 +84,8 @@ tupleGC Nothing i = [tupleG i]
 tupleGC (Just lang) i = tupleC i lang
 
 defaultTuple :: Maybe Lang -> [TypeU] -> [TypeU]
-defaultTuple Nothing ts = [AppU (TV Nothing (tupleG (length ts))) ts]
-defaultTuple lang@(Just l) ts = [AppU (TV lang v) ts | v <- tupleC (length ts) l]
+defaultTuple Nothing ts = [AppU (VarU (TV Nothing (tupleG (length ts)))) ts]
+defaultTuple lang@(Just l) ts = [AppU (VarU (TV lang v)) ts | v <- tupleC (length ts) l]
 
 
 

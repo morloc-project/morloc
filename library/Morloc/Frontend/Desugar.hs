@@ -84,7 +84,7 @@ checkForSelfRecursion d = do
     hasTerm v (FunU [] t) = hasTerm v t
 
     hasTerm v (AppU t1 (t2:rs)) = hasTerm v t2 || hasTerm v (AppU t1 rs)
-    hasTerm v (AppU v' []) = v == v'
+    hasTerm v (AppU t1 []) = hasTerm v t1
 
     hasTerm v (NamU o n ps ((_, t):rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
     hasTerm _ (NamU _ _ _ []) = False
@@ -165,9 +165,9 @@ desugarType h _ _ = f
   -- -----------------
   -- f :: (Int, A) -> B
   --
-  f t@(AppU v ts) =
+  f t@(AppU (VarU v) ts) =
     case Map.lookup v h of
-      (Just []) -> AppU v <$> mapM f ts
+      (Just []) -> AppU (VarU v) <$> mapM f ts
       (Just (t':ts')) -> do
         (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
@@ -198,7 +198,7 @@ desugarType h _ _ = f
   parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
-  parsub pair (AppU v ts ) = AppU v (map (parsub pair) ts)
+  parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
   parsub pair (NamU o n ps rs) = NamU o n ps [(k', parsub pair t) | (k', t) <- rs]
 
 
@@ -228,7 +228,7 @@ chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
 chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
-chooseExistential (AppU v ts) = AppU v (map chooseExistential ts)
+chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
 chooseExistential (NamU o n ps rs) = NamU o n ps [(k, chooseExistential t) | (k,t) <- rs]
 
 -- | Packers need to be passed along with the types the pack, they are imported
@@ -342,7 +342,7 @@ findPackers expr
     packerKey :: TypeU -> (TVar, Int)
     packerKey t = case splitArgs t of
       (params, [VarU v, _])   -> (v, length params)
-      (params, [AppU v _, _]) -> (v, length params)
+      (params, [AppU (VarU v) _, _]) -> (v, length params)
       (params, [NamU _ v _ _, _]) -> (v, length params)
       _ -> error "bad packer"
 

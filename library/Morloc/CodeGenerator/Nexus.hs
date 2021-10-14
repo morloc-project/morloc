@@ -130,7 +130,7 @@ usageLineT (_, name', t) = vsep
 gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
 gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
 gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
-gtypeOf (AppP (PV _ (Just v) _) ts) = AppT (TV Nothing v) (map gtypeOf ts)
+gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
 gtypeOf (NamP o (PV _ (Just n) _) ps rs)
   = NamT o (TV Nothing n)
     [TV Nothing p | PV _ (Just p) _ <- ps]

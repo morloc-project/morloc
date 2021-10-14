@@ -152,15 +152,15 @@ v s = TV Nothing s
 var s = VarU (TV Nothing s)
 varc l s = VarU (TV (Just l) s)
 
-arrc l s ts = AppU (TV (Just l) s) ts
+arrc l s ts = AppU (VarU (TV (Just l) s)) ts
 
-arr s ts = AppU (TV Nothing s) ts
+arr s ts = AppU (VarU (TV Nothing s)) ts
 
 lst t = arr "List" [t]
 
 tuple ts = AppU v ts
   where
-    v = (TV Nothing . T.pack) ("Tuple" ++ show (length ts))
+    v = VarU . TV Nothing . T.pack $ "Tuple" ++ show (length ts)
 
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
@@ -417,6 +417,13 @@ typeAliasTests =
           ]
         )
         (var "A")
+    , assertGeneralType
+        "parameterized generic"
+        [r|
+        f :: m (a -> b)
+        export f
+        |]
+        (forall ["q0", "q1", "q2"] (arr "q0" [fun [var "q1", var "q2"]]))
     , assertGeneralType
         "non-parametric, general type alias"
         (T.unlines

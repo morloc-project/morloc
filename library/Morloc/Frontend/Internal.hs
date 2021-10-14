@@ -33,7 +33,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   setDefaults t@(VarU _) = t
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
   setDefaults (FunU ts t) = FunU (map setDefaults ts) (setDefaults t)
-  setDefaults (AppU v ts) = AppU v (map setDefaults ts)
+  setDefaults (AppU t ts) = AppU (setDefaults t) (map setDefaults ts)
   setDefaults (NamU o n ps rs) = NamU o n ps [(k, setDefaults t) | (k, t) <- rs]
 
 
@@ -51,7 +51,7 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       ++ map findExistentials ds
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
   findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
-  findExistentials (AppU _ ts) = Set.unions (map findExistentials ts)
+  findExistentials (AppU t ts) = Set.unions (findExistentials t : map findExistentials ts)
   findExistentials (NamU _ _ _ rs) = Set.unions (map (findExistentials . snd) rs)
 
   generalizeOne :: TVar -> Name -> TypeU -> TypeU
@@ -65,12 +65,12 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
         | v == v' = VarU replacementTerm -- substitute
         | otherwise = t1
       f v (ExistU v' ts _)
-        | v == v' = AppU replacementTerm (map (f v) ts) -- substitute
-        | otherwise = AppU v (map (f v) ts)
+        | v == v' = AppU (VarU replacementTerm) (map (f v) ts) -- substitute
+        | otherwise = AppU (VarU v) (map (f v) ts)
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)
         | otherwise = t1
       f v (FunU ts t) = FunU (map (f v) ts) (f v t)
-      f v (AppU v' ts) = AppU v' (map (f v) ts)
+      f v (AppU t ts) = AppU (f v t) (map (f v) ts)
       f v (NamU o n ps rs) = NamU o n ps [(k, f v t) | (k, t) <- rs]
       f _ t@(VarU _) = t

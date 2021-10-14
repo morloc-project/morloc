@@ -173,7 +173,7 @@ showTypeP :: TypeP -> MDoc
 showTypeP (UnkP (PV _ _ v)) = pretty v
 showTypeP (VarP (PV _ _ v)) = pretty v
 showTypeP (FunP ts t) = "FUNCTION#" <> encloseSep "(" ")" " -> " (map showTypeP (ts <> [t]))
-showTypeP (AppP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showTypeP) ts)
+showTypeP (AppP (VarP (PV _ _ v)) ts) = pretty $ expandMacro v (map (render . showTypeP) ts)
 showTypeP (NamP _ (PV _ _ v) _ _) = pretty v
 
 

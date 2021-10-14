@@ -285,9 +285,7 @@ mergeTypeUs t (ExistU _ _ _) = return t
 mergeTypeUs (ForallU v1 t1) (ForallU v2 t2)
   = ForallU v1 <$> mergeTypeUs (substituteTVar v2 (VarU v1) t2) t1
 mergeTypeUs (FunU ts1 t1) (FunU ts2 t2) = FunU <$> zipWithM mergeTypeUs ts1 ts2 <*> mergeTypeUs t1 t2 
-mergeTypeUs t1@(AppU v1 ps1) t2@(AppU v2 ps2)
-  | v1 == v2 = AppU v1 <$> zipWithM mergeTypeUs ps1 ps2
-  | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
+mergeTypeUs (AppU t1 ps1) (AppU t2 ps2) = AppU <$> mergeTypeUs t1 t2 <*> zipWithM mergeTypeUs ps1 ps2
 mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
   | o1 == o2 && n1 == n2 && length ps1 == length ps2 = do
       ts1 <- zipWithM mergeTypeUs (map snd ks1) (map snd ks2)

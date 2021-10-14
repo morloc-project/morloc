@@ -614,7 +614,7 @@ data Type
   | VarT TVar
   -- ^ (a)
   | FunT [Type] Type
-  | AppT TVar [Type]
+  | AppT Type [Type]
   | NamT NamType TVar [TVar] [(Text, Type)]
   deriving (Show, Ord, Eq)
 
@@ -629,7 +629,7 @@ data TypeU
   | ForallU TVar TypeU
   -- ^ (Forall a . A)
   | FunU [TypeU] TypeU -- function
-  | AppU TVar [TypeU] -- type application
+  | AppU TypeU [TypeU] -- type application
   | NamU NamType TVar [TVar] [(Text, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
 
@@ -655,7 +655,7 @@ unresolvedType2type (VarU v) = VarT v
 unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
-unresolvedType2type (AppU v ts) = AppT v (map unresolvedType2type ts)
+unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
 unresolvedType2type (NamU t n ps rs) = NamT t n ps [(k, unresolvedType2type e) | (k, e) <- rs]
 
 
@@ -695,13 +695,13 @@ instance Typelike Type where
         | v0 == v = r0
         | otherwise = t
       sub (FunT ts t) = FunT (map sub ts) (sub t)
-      sub (AppT v ts) = AppT v (map sub ts)
+      sub (AppT v ts) = AppT (sub v) (map sub ts)
       sub (NamT r n ps es) = NamT r n ps [(k, sub t) | (k, t) <- es]
 
   free (UnkT _) = Set.empty
   free v@(VarT _) = Set.singleton v
   free (FunT ts t) = Set.unions (map free (t:ts))
-  free (AppT _ ts) = Set.unions (map free ts)
+  free (AppT t ts) = Set.unions (map free (t:ts))
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
 
 
@@ -716,15 +716,16 @@ instance Typelike TypeU where
   typeOf (ExistU _ _ (t:_)) = typeOf t
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
-  typeOf (AppU v ts) = AppT v (map typeOf ts)
+  typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o ps (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ [] _) = Set.singleton v
-  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU v ts) : map free ts
+  -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
+  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
-  free (AppU _ ts) = Set.unions $ map free ts
   free (FunU ts t) = Set.unions $ map free (t:ts)
+  free (AppU t ts) = Set.unions $ map free (t:ts)
   free (NamU _ _ _ rs) = Set.unions $ map (free . snd) rs
   
 
@@ -747,7 +748,7 @@ instance Typelike TypeU where
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
       sub (FunU ts t) = FunU (map sub ts) (sub t)
-      sub (AppU v ts) = AppU v (map sub ts)
+      sub (AppU t ts) = AppU (sub t) (map sub ts)
       sub (NamU r n ps rs) = NamU r n ps [(k, sub t) | (k, t) <- rs]
 
 
@@ -787,7 +788,7 @@ instance HasOneLanguage Type where
   langOf (UnkT (TV lang _)) = lang
   langOf (VarT (TV lang _)) = lang
   langOf (FunT _ t) = langOf t
-  langOf (AppT (TV lang _) _) = lang
+  langOf (AppT t _) = langOf t
   langOf (NamT _ (TV lang _) _ _) = lang
 
 instance HasOneLanguage TVar where
@@ -798,5 +799,5 @@ instance HasOneLanguage TypeU where
   langOf (ExistU (TV lang _) _ _) = lang
   langOf (ForallU (TV lang _) _) = lang
   langOf (FunU _ t) = langOf t
-  langOf (AppU (TV lang _) _) = lang
+  langOf (AppU t _) = langOf t
   langOf (NamU _ (TV lang _) _ _) = lang

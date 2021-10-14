@@ -58,6 +58,7 @@ instance Applicable TypeU where
   apply _ a@(VarU _) = a
   -- [G](A->B) = ([G]A -> [G]B)
   apply g (FunU ts t) = FunU (map (apply g) ts) (apply g t)
+  apply g (AppU t ts) = AppU (apply g t) (map (apply g) ts)
   -- [G]ForallU a.a = forall a. [G]a
   apply g (ForallU x a) = ForallU x (apply g a)
   -- [G[a=t]]a = [G[a=t]]t
@@ -66,7 +67,6 @@ instance Applicable TypeU where
       -- FIXME: this seems problematic - do I keep the previous parameters or the new ones?
       (Just t') -> apply g t' -- reduce an existential; strictly smaller term
       Nothing -> ExistU v (map (apply g) ts) (map (apply g) ds)
-  apply g (AppU v ts) = AppU v (map (apply g) ts)
   apply g (NamU o n ps rs) = NamU o n ps [(k, apply g t) | (k, t) <- rs]
 
 instance Applicable EType where
@@ -157,14 +157,10 @@ subtype (FunU (a1:rs1) a2) (FunU (b1:rs2) b2) g1 = do
 -- ----------------------------------------- <:App
 --  g1 |- A1 A2 <: B1 B2 -| g2
 --  unparameterized types are the same as VarT, so subtype on that instead
-subtype t1@(AppU v1 []) t2@(AppU v2 []) g
-  | langOf v1 == langOf v2 = subtype (VarU v1) (VarU v2) g
-  | otherwise = Left $ SubtypeError t1 t2 "<:App - Cannot compare between languages" 
-subtype t1@(AppU v1@(TV l1 _) vs1) t2@(AppU v2@(TV l2 _) vs2) g
+subtype t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
   | length vs1 /= length vs2 = Left $ SubtypeError t1 t2 "<:App - Cannot subtype types with unequal parameter count"
-  | l1 /= l2 = return $ g +> SerialConstraint t1 t2
-  | v1 == v2 = compareApp vs1 vs2 g
-  | otherwise = Left $ SubtypeError t1 t2 "<:App - Unequal names in AppU of the same language" 
+  | langOf v1 /= langOf v2 = return $ g +> SerialConstraint t1 t2
+  | otherwise = compareApp (v1:vs1) (v2:vs2) g
   where
     compareApp :: [TypeU] -> [TypeU] -> Gamma -> Either TypeError Gamma
     compareApp [] [] g' = return g'

@@ -465,5 +465,5 @@ type2typeu :: Type -> TypeU
 type2typeu (VarT v) = VarU v
 type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
-type2typeu (AppT v ts) = AppU v (map type2typeu ts)
+type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
 type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]
