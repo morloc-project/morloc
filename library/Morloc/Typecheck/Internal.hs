@@ -24,7 +24,6 @@ module Morloc.Typecheck.Internal
   , applyS
   , Indexable(..)
   -- * manipulating context
-  , createGeneralContext
   , access1
   , access2
   , lookupU
@@ -489,42 +488,3 @@ evarname :: Gamma -> MT.Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, EV (prefix <> MT.pack (show i)))
-
-createGeneralContext :: SAnno Int Many c -> MorlocMonad Gamma
-createGeneralContext
-  = fmap (contextualize . unique . catMaybes)
-  . mapM asGI
-  . findTerms
-  where
-
-  contextualize :: [GammaIndex] -> Gamma
-  contextualize xs = let (g', xs') = statefulMap renameG g0 xs
-                     in g' {gammaContext = xs'}
-
-  renameG :: Gamma -> GammaIndex -> (Gamma, GammaIndex)
-  renameG g (AnnG v t) =
-    let (g', t') = rename g t
-    in (g', AnnG v t')
-  renameG g i = (g, i)
-
-  g0 = Gamma {gammaCounter = 0, gammaContext = []}
-
-  asGI :: (EVar, Int) -> MorlocMonad (Maybe GammaIndex)
-  asGI (v, i) = do
-    m <- CMS.gets stateSignatures
-    return $ case GMap.lookup i m of
-      GMapJust (TermTypes (Just (EType t _ _)) _ _) -> Just (AnnG v t)
-      _ -> Nothing
-
-  findTerms :: SAnno Int Many c -> [(EVar, Int)] 
-  findTerms (SAnno (Many es) i) = conmap (findTermsExpr i . fst) es
-
-  findTermsExpr :: Int -> SExpr Int Many c -> [(EVar, Int)]
-  findTermsExpr i (VarS v) = [(v, i)]
-  findTermsExpr _ (AccS x _) = findTerms x
-  findTermsExpr _ (AppS x xs) = findTerms x <> conmap findTerms xs
-  findTermsExpr _ (LamS _ x) = findTerms x
-  findTermsExpr _ (LstS xs) = conmap findTerms xs
-  findTermsExpr _ (TupS xs) = conmap findTerms xs
-  findTermsExpr _ (NamS rs) = conmap (findTerms . snd) rs
-  findTermsExpr _ _ = []

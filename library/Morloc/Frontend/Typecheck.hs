@@ -35,11 +35,10 @@ typecheck
 typecheck es = mapM run es where
     run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
     run e0 = do
-      initialContext <- createGeneralContext e0
-
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
-      let ((_, g), e1) = renameSAnno (Map.empty, initialContext) e0
-      (_, _, e2) <- synthG' g e1
+      let g0 = Gamma {gammaCounter = 0, gammaContext = []}
+          ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
+      (_, _, e2) <- synthG' g1 e1
       return e2
 
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
@@ -227,11 +226,15 @@ synthE i g (CallS src) = gerr i (MissingGeneralSignature src)
 -- variables should be checked against. I think (this needs formalization).
 synthE i g (VarS v) = do
   -- is this a bound variable that has already been solved
-  (g', t') <- return $ case lookupE v g of 
+  (g', t') <- case lookupE v g of 
     -- yes, return the solved type
-    (Just t) -> (g, t)
+    (Just t) -> return (g, t)
+    Nothing -> do
     -- no, so is it a variable that has a type annotation?
-    Nothing -> newvar Nothing g
+      maybeType <- lookupType i g 
+      case maybeType of
+        Just x -> return x 
+        Nothing -> return $ newvar Nothing g
   return (g', t', VarS v)
 
 
