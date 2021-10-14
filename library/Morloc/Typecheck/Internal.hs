@@ -243,8 +243,8 @@ subtype a b _ = Left $ SubtypeError a b "Type mismatch"
 instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 
 instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
-  let (g2, veas) = statefulMap (\g _ -> tvarname g "v" lang) g1 as
-      (g3, veb) = tvarname g2 "v" lang
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
+      (g3, veb) = tvarname g2 "to" lang
       eas = [ExistU v [] [] | v <- veas]
       eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
@@ -259,8 +259,8 @@ instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
 -- ----------------------------------------- InstRApp
 --  g1[Ea] |- A1 -> A2 <=: Ea -| g3
 instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _) g1 = do
-  let (g2, veas) = statefulMap (\g _ -> tvarname g "v" lang) g1 as
-      (g3, veb) = tvarname g2 "v" lang
+  let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
+      (g3, veb) = tvarname g2 "to" lang
       eas = [ExistU v [] [] | v <- veas]
       eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
@@ -421,25 +421,25 @@ cut i g = do
     | otherwise = f xs
 
 
-newvar :: Maybe Lang -> Gamma -> (Gamma, TypeU)
+newvar :: MT.Text -> Maybe Lang -> Gamma -> (Gamma, TypeU)
 newvar = newvarRich [] []
 
 
 newvarRich
   :: [TypeU] -- ^ type parameters
   -> [TypeU] -- ^ type defaults
+  -> MT.Text -- ^ prefix, just for readability
   -> Maybe Lang
   -> Gamma
   -> (Gamma, TypeU)
-newvarRich ps ds lang g =
-  let (g', v) = tvarname g "v" lang
+newvarRich ps ds prefix lang g =
+  let (g', v) = tvarname g prefix lang
   in (g' +> ExistG v ps ds, ExistU v ps ds)
-
 
 -- | standardize quantifier names, for example, replace `a -> b` with `v0 -> v1`.
 rename :: Gamma -> TypeU -> (Gamma, TypeU)
-rename g0 (ForallU v@(TV lang _) t0) = 
-  let (g1, v') = tvarname g0 "q" lang
+rename g0 (ForallU v@(TV lang s) t0) = 
+  let (g1, v') = tvarname g0 (s <> "_q") lang
       (g2, t1) = rename g1 t0
       t2 = substituteTVar v (VarU v') t1
   in (g2, ForallU v' t2)
@@ -457,7 +457,7 @@ renameSExpr c0@(m, g) e0 = case e0 of
     (Just v') -> (c0, VarS v')
     Nothing -> (c0, VarS v)
   (LamS vs x) ->
-    let (g', vs') = statefulMap (\g' _ -> evarname g' "x") g vs
+    let (g', vs') = statefulMap (\g' (EV v) -> evarname g' (v <> "_e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')
         (c1, x') = renameSAnno (m', g') x
     in (c1, LamS vs' x')

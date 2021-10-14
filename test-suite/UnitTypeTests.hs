@@ -26,7 +26,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
 
-import qualified Data.Text as T
+import qualified Data.Text as MT
 import qualified Data.Map as Map
 import Test.Tasty
 import Test.Tasty.HUnit
@@ -35,7 +35,7 @@ import Test.Tasty.HUnit
 gtypeof :: (SAnno (Indexed TypeU) f c) -> TypeU
 gtypeof (SAnno _ (Idx _ t)) = t
 
-runFront :: T.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
+runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
   return x
@@ -49,14 +49,43 @@ runFront code = do
         , configLangPerl = ""
         }
 
-assertGeneralType :: String -> T.Text -> TypeU -> TestTree
+assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
   result <- runFront code
   case result of
-    (Right [x]) -> assertEqual "" t (gtypeof x)
+    (Right [x]) -> assertEqual "" t (renameExistentials (gtypeof x))
     (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
+
+renameExistentials :: TypeU -> TypeU
+renameExistentials = snd . f (0, Map.empty) where
+ f s (VarU v) = (s, VarU v)
+ f (i,m) (ExistU v@(TV lang _) ps ds) =
+  case Map.lookup v m of
+    (Just v') -> ((i, m), ExistU v' ps ds)
+    Nothing ->
+      let v' = TV lang ("e" <> MT.pack (show i))
+          i' = i+1
+          m' = Map.insert v v' m
+          (s', ps') = statefulMap f (i', m') ps 
+          (s'', ds') = statefulMap f s' ds
+      in (s'', ExistU v' ps' ds')
+ f s (ForallU v t) =
+  let (s', t') = f s t
+  in (s', ForallU v t') 
+ f s (FunU ts t) =
+  let (s', ts') = statefulMap f s ts
+      (s'', t') = f s' t
+  in (s'', FunU ts' t')
+ f s (AppU t ts) =
+  let (s', t') = f s t
+      (s'', ts') = statefulMap f s' ts
+  in (s'', AppU t' ts')
+ f s (NamU o n vs rs) =
+  let (s', ts') = statefulMap f s (map snd rs)
+  in (s', NamU o n vs (zip (map fst rs) ts'))
+
 
 assertSubtypeGamma :: String -> [GammaIndex] -> TypeU -> TypeU -> [GammaIndex] -> TestTree
 assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
@@ -65,7 +94,7 @@ assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
     Left err -> error $ show err
     Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
 
-exprEqual :: String -> T.Text -> T.Text -> TestTree
+exprEqual :: String -> MT.Text -> MT.Text -> TestTree
 exprEqual msg code1 code2 = undefined
   -- testCase msg $ do
   -- result1 <- runFront code1
@@ -74,7 +103,7 @@ exprEqual msg code1 code2 = undefined
   --   (Right e1, Right e2) -> assertEqual "" e1 e2
   --   _ -> error $ "Expected equal"
 
-exprTestFull :: String -> T.Text -> T.Text -> TestTree
+exprTestFull :: String -> MT.Text -> MT.Text -> TestTree
 exprTestFull = undefined
 -- exprTestFull msg code expCode =
 --   testCase msg $ do
@@ -88,7 +117,7 @@ exprTestFull = undefined
 --               (main typedNodeBody e)
 --               (main parserNodeBody x)
 
-assertPacker :: String -> T.Text -> Map.Map (TVar, Int) [UnresolvedPacker] -> TestTree
+assertPacker :: String -> MT.Text -> Map.Map (TVar, Int) [UnresolvedPacker] -> TestTree
 assertPacker = undefined
 -- assertPacker msg code expPacker =
 --   testCase msg $ do
@@ -100,22 +129,22 @@ assertPacker = undefined
 --             expPacker
 --     (Left e) -> error (show e)
 
-exprTestBad :: String -> T.Text -> TestTree
+exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =
   testCase msg $ do
   result <- runFront code
   case result of
-    (Right _) -> assertFailure . T.unpack $ "Expected '" <> code <> "' to fail"
+    (Right _) -> assertFailure . MT.unpack $ "Expected '" <> code <> "' to fail"
     (Left _) -> return ()
 
 -- FIXME: check that the correct error type is raised, but don't check message
 -- (tweaking messages shouldn't break tests)
-expectError :: String -> MorlocError -> T.Text -> TestTree
+expectError :: String -> MorlocError -> MT.Text -> TestTree
 expectError msg _ code =
   testCase msg $ do
   result <- runFront code
   case result of
-    (Right _) -> assertFailure . T.unpack $ "Expected failure"
+    (Right _) -> assertFailure . MT.unpack $ "Expected failure"
     (Left _) -> return ()
 
 
@@ -160,7 +189,7 @@ lst t = arr "List" [t]
 
 tuple ts = AppU v ts
   where
-    v = VarU . TV Nothing . T.pack $ "Tuple" ++ show (length ts)
+    v = VarU . TV Nothing . MT.pack $ "Tuple" ++ show (length ts)
 
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
@@ -410,12 +439,11 @@ typeAliasTests =
     "Test type alias substitutions"
     [ assertGeneralType
         "general type alias"
-        (T.unlines
-          [ "type Foo = A"
-          , "f :: Foo"
-          , "export f"
-          ]
-        )
+        [r|
+        type Foo = A
+        f :: Foo
+        export f
+        |]
         (var "A")
     , assertGeneralType
         "parameterized generic"
@@ -423,42 +451,38 @@ typeAliasTests =
         f :: m (a -> b)
         export f
         |]
-        (forall ["q0", "q1", "q2"] (arr "q0" [fun [var "q1", var "q2"]]))
+        (forall ["m_q0", "a_q1", "b_q2"] (arr "m_q0" [fun [var "a_q1", var "b_q2"]]))
     , assertGeneralType
         "non-parametric, general type alias"
-        (T.unlines
-          [ "type Foo = A"
-          , "f :: Foo -> B"
-          , "export f"
-          ]
-        )
+        [r|
+        type Foo = A
+        f :: Foo -> B
+        export f
+        |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> B`"
-        (T.unlines
-          [ "type Foo = A"
-          , "f :: [Foo] -> B"
-          , "export f"
-          ]
-        )
+        [r|
+        type Foo = A
+        f :: [Foo] -> B
+        export f
+        |]
         (fun [lst (var "A"), var "B"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> Foo`"
-        (T.unlines
-          [ "type Foo = A"
-          , "f :: [Foo] -> Foo"
-          , "export f"
-          ]
-        )
+        [r|
+        type Foo = A
+        f :: [Foo] -> Foo
+        export f
+        |]
         (fun [lst (var "A"), var "A"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> { a = Foo }`"
-        (T.unlines
-          [ "type Foo = A"
-          , "f :: [Foo] -> { a :: Foo }"
-          , "export f"
-          ]
-        )
+        [r|
+        type Foo = A
+        f :: [Foo] -> { a :: Foo }
+        export f
+        |]
         (fun [lst (var "A"), record [("a", var "A")]])
     , assertGeneralType
         "parametric alias, general type alias"
@@ -560,7 +584,7 @@ typeAliasTests =
     -- , expectError
     --     "fail neatly for mutually-recursive type aliases"
     --     (MutuallyRecursiveTypeAlias [TV Nothing "A", TV Nothing "B"])
-    --     (T.unlines
+    --     (MT.unlines
     --       [ "type A = B"
     --       , "type B = A"
     --       , "foo :: A -> B -> C"
@@ -1066,7 +1090,7 @@ unitTypeTests =
     , assertGeneralType
         "existential application"
         "f 1"
-        (exist "v2")
+        (exist "e0")
 
     , assertGeneralType
         "existential function passing"
@@ -1074,7 +1098,7 @@ unitTypeTests =
         g f = f True
         export g
         |]
-        (fun [fun [bool, exist "v4"], exist "v4"])
+        (fun [fun [bool, exist "e0"], exist "e0"])
 
     , assertGeneralType
         "app single function"
@@ -1254,11 +1278,11 @@ unitTypeTests =
     , assertGeneralType
         "unapplied lambda, polymorphic (1)"
         [r|\x -> True|]
-        (fun [exist "v1", bool])
+        (fun [exist "e0", bool])
     , assertGeneralType
         "unapplied lambda, polymorphic (2)"
         "(\\x y -> x) :: a -> b -> a"
-        (fun [exist "v2", exist "v3", exist "v2"])
+        (fun [exist "e0", exist "e1", exist "e0"])
     , assertGeneralType
         "annotated, fully applied lambda"
         "((\\x -> x) :: a -> a) True"
@@ -1266,11 +1290,11 @@ unitTypeTests =
     , assertGeneralType
         "annotated, partially applied lambda"
         "((\\x y -> x) :: a -> b -> a) True"
-        (fun [exist "v3", bool])
+        (fun [exist "e0", bool])
     , assertGeneralType
         "recursive functions are A-OK"
         "\\f -> f 5"
-        (fun [fun [num, exist "v4"], exist "v4"])
+        (fun [fun [num, exist "e0"], exist "e0"])
 
     -- applications
     , assertGeneralType
@@ -1294,7 +1318,7 @@ unitTypeTests =
         x = f 42
         x
         |]
-        (fun [exist "v3", num])
+        (fun [exist "e0", num])
     , exprTestBad
         "applications with too many arguments fail"
         [r|
@@ -1500,7 +1524,7 @@ unitTypeTests =
         |]
         (lst num)
       -- NOTE: this test relies on internal renaming implementation
-    , assertGeneralType "empty list" "[]" (lst (exist "v0"))
+    , assertGeneralType "empty list" "[]" (lst (exist "e0"))
     , assertGeneralType
         "list in function signature and application"
         [r|
@@ -2024,7 +2048,7 @@ unitTypeTests =
     -- -- -- TODO: resurrect to test github issue #7
     -- -- , exprTestFullDec
     -- --     "concrete types should be inferred for declared variables"
-    -- --     (T.unlines
+    -- --     (MT.unlines
     -- --       [ "id :: Num -> Num;"
     -- --       , "id C :: \"int\" -> \"int\";"
     -- --       , "id x = x;"

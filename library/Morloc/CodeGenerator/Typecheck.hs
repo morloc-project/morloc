@@ -124,7 +124,7 @@ synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
 
 -- AnnoMany=>
 synth g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
-  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] (Just l) g0
+  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] "x" (Just l) g0
   in check g1 (SAnno (One (x, Idx i (l, []))) m) t
 
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
@@ -152,25 +152,25 @@ synthExpr
 -- Uni=>
 synthExpr lang g UniS = do
   let ts = MLD.defaultNull (Just lang)
-      (g', t) = newvarRich [] ts (Just lang) g
+      (g', t) = newvarRich [] ts "uni_" (Just lang) g
   return (g' +> t, t, UniS)
 
 -- Num=>
 synthExpr lang g (NumS x) = do
   let ts = MLD.defaultNumber (Just lang)
-      (g', t) = newvarRich [] ts (Just lang) g
+      (g', t) = newvarRich [] ts "num_" (Just lang) g
   return (g' +> t, t, NumS x)
 
 -- Str=>
 synthExpr lang g (StrS x) = do
   let ts = MLD.defaultString (Just lang)
-      (g', t) = newvarRich [] ts (Just lang) g
+      (g', t) = newvarRich [] ts "str_" (Just lang) g
   return (g' +> t, t, StrS x)
 
 -- Log=>
 synthExpr lang g (LogS x) = do
   let ts = MLD.defaultBool (Just lang)
-      (g', t) = newvarRich [] ts (Just lang) g
+      (g', t) = newvarRich [] ts "log_" (Just lang) g
   return (g' +> t, t, LogS x)
 
 -- In SAnno, a VarS can only be a bound variable, thus it should only ever be
@@ -194,16 +194,16 @@ synthExpr _ g0 (AccS x k) = do
 -- The elements in xs are all of the same general type, however they may be in
 -- different languages.
 synthExpr lang g0 (LstS []) = do
-  let (g1, elementType) = newvar (Just lang) g0
+  let (g1, elementType) = newvar "itemType_" (Just lang) g0
       defaultListTypes = MLD.defaultList (Just lang) elementType
-      (g2, listType) = newvarRich [elementType] defaultListTypes (Just lang) g1
+      (g2, listType) = newvarRich [elementType] defaultListTypes "lstContainerType_" (Just lang) g1
   return (g2, listType, LstS [])
 synthExpr lang g0 (LstS (x:xs)) = do
   -- here t1 is the element type
   (g1, t1, x1) <- synth g0 x
 
   -- create an existential container type with sensible default
-  let (g2, containerType) = newvarRich [t1] (MLD.defaultList (Just lang) t1) (Just lang) g1
+  let (g2, containerType) = newvarRich [t1] (MLD.defaultList (Just lang) t1) "lstContainerType_" (Just lang) g1
 
   -- and t2 is the list type
   (g3, t2, listExpr) <- checkExpr lang g2 (LstS xs) containerType
@@ -215,7 +215,7 @@ synthExpr lang g0 (LstS (x:xs)) = do
 -- Tuple=>
 --
 synthExpr lang g0 (TupS []) = do
-  let (g1, t) = newvarRich [] (MLD.defaultTuple (Just lang) []) (Just lang) g0
+  let (g1, t) = newvarRich [] (MLD.defaultTuple (Just lang) []) "tupContainerType_" (Just lang) g0
   return (g1, t, TupS [])
 synthExpr lang g0 (TupS (x:xs)) = do
   -- type the head
@@ -226,7 +226,7 @@ synthExpr lang g0 (TupS (x:xs)) = do
 
   -- merge the head and tail
   (g3, t3) <- case tupleType of
-    (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) (Just lang) g2
+    (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) "tupContainerType_" (Just lang) g2
     _ -> error "impossible" -- the tuple was created by newvarRich which can only return existentials
 
   xs' <- case tupleExpr of
@@ -238,7 +238,7 @@ synthExpr lang g0 (TupS (x:xs)) = do
 -- Rec=>
 --
 synthExpr lang g0 (NamS []) = do
-  let (g1, t) = newvarRich [] (MLD.defaultRecord (Just lang) []) (Just lang) g0
+  let (g1, t) = newvarRich [] (MLD.defaultRecord (Just lang) []) "recordContainerType_" (Just lang) g0
   return (g1, t, NamS [])
 synthExpr lang g0 (NamS ((k,x):rs)) = do
   -- type the head
@@ -249,7 +249,7 @@ synthExpr lang g0 (NamS ((k,x):rs)) = do
 
   -- merge the head with tail
   (g3, t3) <- case tailType of
-    (ExistU _ _ [NamU _ _ _ rs']) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs')) (Just lang) g2
+    (ExistU _ _ [NamU _ _ _ rs']) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs')) "recordContainerType_" (Just lang) g2
     _ -> error "impossible" -- the record was created by newvarRich which can only return existentials
 
   tailExprs <- case tailExpr of
@@ -375,7 +375,7 @@ applicationExpr _ _ _ = Left ApplicationOfNonFunction
 
 bindTerm :: Lang -> Gamma -> EVar -> (Gamma, TypeU)
 bindTerm lang g0 v =
-  let (g1, t) = newvar (Just lang) g0
+  let (g1, t) = newvar (unEVar v <> "_") (Just lang) g0
       idx = AnnG v t
   in (g1 +> idx, t)
 

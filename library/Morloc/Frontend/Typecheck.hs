@@ -87,14 +87,22 @@ synthG g (SAnno (Many []) i) = do
     Nothing -> gerr i EmptyExpression
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
-  -- if a type annotation exists for this term check against it
-  -- otherwise synthesize a type
+
+  -- Check for any existing type signature annotations
   maybeType <- lookupType i g0
   (g1, t1, e1) <- case maybeType of
+    -- If there are no annotations, synthesize
     Nothing  -> synthE' i g0 e0
-    (Just (g', t)) -> say "fetching annotation" >> checkE' i g' e0 t
+    -- If there are annotations ...
+    (Just (g', t)) -> case e0 of
+      -- If the annotation is of a variable name, return the annotation. Caling
+      -- check would just re-synthesize the same type and check that it was
+      -- equal to itself.
+      (VarS v) -> return (g', t, VarS v)
+      -- Otherwise check the annotation type
+      _ -> checkE' i g' e0 t
 
-  -- then check all other implementations against the first one
+  -- Check all other implementations against the first one
   (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
 
   -- finally cons the head element back and apply everything we learned
@@ -141,10 +149,14 @@ synthE i g (AccS e k) = do
       (Just t) -> return t
     _ -> gerr i (KeyError k t1)
   return (g1, valType, AccS e1 k)
+
+--   -->E0
 synthE _ g (AppS f []) = do
   (g1, t1, f1) <- synthG' g f
   return (g1, t1, AppS f1 [])
-synthE i g0 e@(AppS f xs0) = do
+
+--   -->E
+synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
@@ -161,15 +173,17 @@ synthE i g0 e@(AppS f xs0) = do
   -- put the AppS back together with the synthesized function and input expressions
   return (g2, apply g2 appliedType, AppS (applyS g2 funExpr0) inputExprs)
 
+--   -->I==>
 synthE i g0 f@(LamS vs x) = do
   -- create existentials for everything and pass it off to check
-  let (g1, ts) = statefulMap (\g' _ -> newvar Nothing g') g0 vs
-      (g2, ft) = newvar Nothing g1
+  let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
+      (g2, ft) = newvar "o_" Nothing g1
       finalType = FunU ts ft
   checkE' i g2 f finalType
 
+--   List
 synthE _ g (LstS []) =
-  let (g1, itemType) = newvar Nothing g
+  let (g1, itemType) = newvar "itemType_" Nothing g
       listType = head $ MLD.defaultList Nothing itemType
   in return (g1, listType, LstS [])
 synthE i g (LstS (e:es)) = do
@@ -179,6 +193,7 @@ synthE i g (LstS (e:es)) = do
     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
     _ -> error "impossible"
 
+--   Tuple
 synthE _ g (TupS []) =
   let t = head $ MLD.defaultTuple Nothing []
   in return (g, t, TupS [])
@@ -200,6 +215,7 @@ synthE i g (TupS (e:es)) = do
 
   return (g2, t3, TupS (itemExpr:xs'))
 
+--   Records
 synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
 synthE i g0 (NamS ((k,x):rs)) = do
   -- type the head
@@ -234,7 +250,9 @@ synthE i g (VarS v) = do
       maybeType <- lookupType i g 
       case maybeType of
         Just x -> return x 
-        Nothing -> return $ newvar Nothing g
+        -- no, then I don't know what it is and will return an existential
+        -- if this existential is never solved, then it will become universal later 
+        Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
   return (g', t', VarS v)
 
 
@@ -267,18 +285,18 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v [] _) =
+application i g0 es (ExistU v@(TV _ s) [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
-      let (g1, veas) = statefulMap (\g _ -> tvarname g "v" Nothing) g0 es
-          (g2, vea) = tvarname g1 "v" Nothing
+      let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
+          (g2, vea) = tvarname g1 (s <> "o_") Nothing
           eas = [ExistU v [] [] | v <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
-      return (g4, apply g4 f, es')
+      return (g4, apply g4 f, map (applyS g4) es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
@@ -367,6 +385,7 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
 
 checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
+--   Sub
 checkE i g1 e1 b = do
   (g2, a, e2) <- synthE' i g1 e1
   let a' = apply g2 a
