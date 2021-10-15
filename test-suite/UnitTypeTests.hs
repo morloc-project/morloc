@@ -71,7 +71,7 @@ assertConcreteType :: String -> MT.Text -> TypeP -> TestTree
 assertConcreteType msg code t = testCase msg $ do
   result <- runBackendCheck code
   case result of
-    (Right (_, [x])) -> undefined
+    (Right (_, [SAnno (One (_, Idx _ x)) _])) -> assertEqual "" t x
     (Right _) -> error "Expected exactly one export from Main for assertConcreteType"
     (Left e) -> error $ "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
@@ -111,41 +111,6 @@ assertSubtypeGamma msg gs1 a b gs2 = testCase msg $ do
     Left err -> error $ show err
     Right (Gamma _ gs2') -> assertEqual "" gs2 gs2'
 
-exprEqual :: String -> MT.Text -> MT.Text -> TestTree
-exprEqual msg code1 code2 = undefined
-  -- testCase msg $ do
-  -- result1 <- runFront code1
-  -- result2 <- runFront code2
-  -- case (result1, result2) of
-  --   (Right e1, Right e2) -> assertEqual "" e1 e2
-  --   _ -> error $ "Expected equal"
-
-exprTestFull :: String -> MT.Text -> MT.Text -> TestTree
-exprTestFull = undefined
--- exprTestFull msg code expCode =
---   testCase msg $ do
---   result <- run code
---   case result of
---     (Left e) -> error (show e)
---     (Right e)
---       -> case readProgram Nothing expCode Map.empty of
---            (Left e') -> error (show e')
---            (Right x) -> assertEqual ""
---               (main typedNodeBody e)
---               (main parserNodeBody x)
-
-assertPacker :: String -> MT.Text -> Map.Map (TVar, Int) [UnresolvedPacker] -> TestTree
-assertPacker = undefined
--- assertPacker msg code expPacker =
---   testCase msg $ do
---   result <- run code
---   case result of
---     (Right e)
---       -> assertEqual ""
---             (main typedNodePackers e)
---             expPacker
---     (Left e) -> error (show e)
-
 exprTestBad :: String -> MT.Text -> TestTree
 exprTestBad msg code =
   testCase msg $ do
@@ -163,7 +128,6 @@ expectError msg _ code =
   case result of
     (Right _) -> assertFailure . MT.unpack $ "Expected failure"
     (Left _) -> return ()
-
 
 testEqual :: (Eq a, Show a) => String -> a -> a -> TestTree
 testEqual msg x y =
@@ -211,6 +175,10 @@ tuple ts = AppU v ts
 record rs = NamU NamRecord (TV Nothing "Record") [] rs
 
 record' n rs = NamU NamRecord (TV Nothing n) [] rs
+
+unkp lang gv cv = UnkP (PV lang gv cv) 
+
+varp lang gv cv = VarP (PV lang gv cv)
 
 subtypeTests =
   testGroup
@@ -1001,6 +969,15 @@ unitTypeTests =
         foo 42
         |]
         (record [("x", num), ("y", str)])
+    -- language-specific primitives
+    , assertConcreteType
+        "C++ string"
+        [r|
+        s :: Str
+        s Cpp :: "string"
+        export s
+        |]
+        (varp CppLang (Just "Str") "string")
 
     -- functions
     , assertGeneralType

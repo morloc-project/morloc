@@ -259,7 +259,7 @@ combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
   maybeCombine _ _ _ = return Nothing
 
 
--- | This function defines who general types are merged. There are decisions
+-- | This function defines how general types are merged. There are decisions
 -- encoded in this function that should be vary carefully considered.
 --  * Can properties simply be concatenated?
 --  * What if constraints are contradictory?
