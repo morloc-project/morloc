@@ -222,10 +222,11 @@ subtype t1@(ExistU v1 ps1 _) t2@(AppU v2 ps2) g1
 --
 subtype (ForallU v@(TV lang _) a) b g0
   | lang /= langOf b = return g0
-  | otherwise = do
-      g1 <- subtype (substitute v a) b (g0 +> v +> MarkG v)
-      let g2 = apply g1 g1
-      cut (MarkG v) g2
+  | otherwise = subtype (substitute v a) b (g0 +> v)
+  -- NOTE: I am deviating from the rules here by not cutting. It is not
+  -- necessary to do so since I rewrote all qualifiers to be globally unique.
+  -- Also, when I cut here I lose my only link to v, and that caused `map fst`
+  -- to not compile.
 
 --  g1,a |- A <: B -| g2,a,g3
 -- ----------------------------------------- <:ForallR
