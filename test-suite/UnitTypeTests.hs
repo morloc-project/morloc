@@ -1199,15 +1199,17 @@ unitTypeTests =
     , assertGeneralType
         "t a -> a"
         [r|
+        gify :: a -> G a
         out :: f a -> a
-        out (G 1)
+        out (gify 1)
         |]
         num
     , assertGeneralType
         "f a b -> b"
         [r|
+        gify :: a -> b -> G a b
         snd :: f a b -> b
-        snd (G 1 True)
+        snd (gify 1 True)
         |]
         bool 
     , assertGeneralType
@@ -1229,27 +1231,21 @@ unitTypeTests =
     , assertGeneralType
         "map fstG over (G a b) list"
         [r|
+        gify :: a -> b -> G a b
         map :: (a -> b) -> [a] -> [b]
-        fstF :: G a b -> a
-        map fstF [G 1 True, G 2 False]
-        |]
-        (lst num)
-    , assertGeneralType
-        "fmap fstG over functor"
-        [r|
-        fmap :: (a -> b) -> f a -> f b
-        fstG :: f a b -> a
-        fmap fst [G 1 True]
+        fstF :: f a b -> a
+        map fstF [gify 1 True, gify 2 False]
         |]
         (lst num)
     , assertGeneralType
         "fmap generic fst over functor"
         [r|
+        gify :: a -> G a
         fmap :: (a -> b) -> f a -> f b
-        fst :: f a b -> a
-        fmap fst [G 1 True]
+        out :: f a -> a
+        fmap out (gify [1])
         |]
-        (lst num)
+        (arr "G" [num])
 
     , assertGeneralType
         "variable annotation"
