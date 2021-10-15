@@ -15,10 +15,16 @@ module Morloc.CodeGenerator.Typecheck
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
+import Morloc.Typecheck.Pretty
+import Morloc.Pretty
+import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
+import qualified Control.Monad.State as CMS
+import qualified Morloc.Data.GMap as GMap
+import qualified Data.Text.Prettyprint.Doc.Render.Terminal as R
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -34,7 +40,7 @@ typecheck e = do
   -- packers <- MM.gets statePackers
   e' <- retrieveTypes e
   let g0 = Gamma {gammaCounter = 0, gammaContext = []}
-  case synth g0 e' of
+  case synthG g0 e' of
     (Left err') -> MM.throwError . ConcreteTypeError $ err'
     (Right (_, _, e'')) -> weaveAndResolve e''
 
@@ -49,7 +55,7 @@ retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
     (CallS src) -> do
       mayts <- MM.metaTermTypes j
       case fmap termConcrete mayts of
-        (Just ts) -> case [es | (_, src', es, _) <- ts, src' == src] of
+        (Just ts) -> case [es | (_, es, Just (Idx _ src')) <- ts, src' == src] of
           [es] -> return es
           _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
         Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
@@ -99,7 +105,20 @@ weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
 -- Concrete typechecking must deal with primitive defaults, containter
 -- defaults, and function overloading.
 
-synth
+-- lookup a general type associated with an index
+-- standardize naming of qualifiers
+lookupType :: Int -> Gamma -> MorlocMonad (Maybe (Gamma, TypeU))
+lookupType i g = do
+  m <- CMS.gets stateSignatures
+  return $ case GMap.lookup i m of
+    GMapJust (TermTypes (Just (EType t _ _)) _ _) -> Just $ rename g t
+    _ -> Nothing
+
+-- prepare a general, indexed typechecking error
+gerr :: Int -> TypeError -> MorlocMonad a
+gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)
+
+synthG
   :: Gamma
   -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
   -> Either
@@ -108,362 +127,432 @@ synth
        , TypeU
        , SAnno (Indexed Type) One (Indexed TypeU)
        )
---
--- ----------------------------------------- <primitive>
---  g |- <primitive expr> => <primitive type> -| g
---
---  Primitive types may have many possible defaults in a given language. For
---  example, in Rust a primitive Num may be a signed or unsigned, be a float or
---  an int, and have a size ranging from 8 to 128 bits. If no concrete types
---  are available, then the first default value will be used when the
---  TypeU is resolved. 
+synthG g0 (SAnno (One (e0, c)) g) = undefined
+  --
+  -- -- Check for any existing type signature annotations
+  -- maybeType <- lookupType i g0
+  -- (g1, t1, e1) <- case maybeType of
+  --   -- If there are no annotations, synthesize
+  --   Nothing  -> synthE' i g0 e0
+  --   -- If there are annotations ...
+  --   (Just (g', t)) -> case e0 of
+  --     -- If the annotation is of a variable name, return the annotation. Caling
+  --     -- check would just re-synthesize the same type and check that it was
+  --     -- equal to itself.
+  --     (VarS v) -> return (g', t, VarS v)
+  --     -- Otherwise check the annotation type
+  --     _ -> checkE' i g' e0 t
+  --
+  -- -- Check all other implementations against the first one
+  -- (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
+  --
+  -- -- finally cons the head element back and apply everything we learned
+  -- let finalExpr = applyS g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
+  --
+  -- return (g2, t2, finalExpr)
 
--- AnnoOne=>
-synth g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
-  = check g (SAnno (One (x, Idx i (l, []))) m) ct
+checkG
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
+  -> TypeU
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , SAnno (Indexed Type) One (Indexed TypeU)
+       )
+checkG g0 (SAnno (One (e, c)) g) t0 = undefined
+  -- (g1, t1, e') <- checkE' i g0 e t0
+  -- (g2, t2, SAnno (Many es') idType) <- checkG' g1 (SAnno (Many es) i) t1
+  -- return (g2, t2, SAnno (Many ((e', j):es')) idType)
 
--- AnnoMany=>
-synth g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
-  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] "x" (Just l) g0
-  in check g1 (SAnno (One (x, Idx i (l, []))) m) t
 
--- if there are no annotations, the SAnno can be simplified and synth' can be called
-synth g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
-  (g1, t, x') <- synthExpr l g0 x
-  g2 <- subtype t (type2typeu tg) g1
-  return (g2, t, SAnno (One (x', Idx i t)) m)
-
--- check g0 (SAnno (One (x, Idx i (l, _))) m@(Idx _ tg)) t = do
---   (g1, t', x') <- checkExpr l g0 x t
---   g2 <- subtype t' (type2typeu tg) g1
---   return $ (g2, t', SAnno (One (x', Idx i t')) m)
-
-synthExpr
-  :: Lang
+synthE
+  :: Int
+  -> Lang
   -> Gamma
   -> SExpr (Indexed Type) One (Indexed (Lang, [EType]))
-  -> Either
-       TypeError
+  -> MorlocMonad
        ( Gamma
        , TypeU
        , SExpr (Indexed Type) One (Indexed TypeU)
        )
+synthE _ _ g (UniS) = undefined -- return (g, MLD.defaultGeneralType UniS, UniS)
+synthE _ _ g (NumS x) = undefined -- return (g, MLD.defaultGeneralType (NumS x), NumS x)
+synthE _ _ g (LogS x) = undefined -- return (g, MLD.defaultGeneralType (LogS x), LogS x)
+synthE _ _ g (StrS x) = undefined -- return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
--- Uni=>
-synthExpr lang g UniS = do
-  let ts = MLD.defaultNull (Just lang)
-      (g', t) = newvarRich [] ts "uni_" (Just lang) g
-  return (g' +> t, t, UniS)
+synthE i lang g (AccS e k) = undefined -- do
+--   (g1, t1, e1) <- synthG' g e
+--   valType <- case t1 of
+--     (NamU _ _ _ rs) -> case lookup k rs of
+--       Nothing -> gerr i (KeyError k t1)
+--       (Just t) -> return t
+--     _ -> gerr i (KeyError k t1)
+--   return (g1, valType, AccS e1 k)
 
--- Num=>
-synthExpr lang g (NumS x) = do
-  let ts = MLD.defaultNumber (Just lang)
-      (g', t) = newvarRich [] ts "num_" (Just lang) g
-  return (g' +> t, t, NumS x)
+--   -->E0
+synthE _ lang g (AppS f []) = undefined -- do
+--   (g1, t1, f1) <- synthG' g f
+--   return (g1, t1, AppS f1 [])
 
--- Str=>
-synthExpr lang g (StrS x) = do
-  let ts = MLD.defaultString (Just lang)
-      (g', t) = newvarRich [] ts "str_" (Just lang) g
-  return (g' +> t, t, StrS x)
-
--- Log=>
-synthExpr lang g (LogS x) = do
-  let ts = MLD.defaultBool (Just lang)
-      (g', t) = newvarRich [] ts "log_" (Just lang) g
-  return (g' +> t, t, LogS x)
-
--- In SAnno, a VarS can only be a bound variable, thus it should only ever be
--- checked against since it's type will be known at a higher level.
-synthExpr _ _ (VarS v) = Left $ UnboundVariable v
-
--- Acc=>
-synthExpr _ g0 (AccS x k) = do
-  (g1, tx, x1) <- synth g0 x
-  tk <- accessRecord k tx
-  return (g1, tk, AccS x1 k)
-  where
-    accessRecord :: MT.Text -> TypeU -> Either TypeError TypeU
-    accessRecord k' r@(NamU _ _ _ rs) = case lookup k' rs of
-      (Just t) -> return t
-      Nothing -> Left $ KeyError k' r
-    accessRecord k' r = Left $ KeyError k' r
-
--- List=>
+--   -->E
+synthE i lang g0 (AppS f xs0) = undefined -- do
+--   -- synthesize the type of the function
+--   (g1, funType0, funExpr0) <- synthG g0 f
 --
--- The elements in xs are all of the same general type, however they may be in
--- different languages.
-synthExpr lang g0 (LstS []) = do
-  let (g1, elementType) = newvar "itemType_" (Just lang) g0
-      defaultListTypes = MLD.defaultList (Just lang) elementType
-      (g2, listType) = newvarRich [elementType] defaultListTypes "lstContainerType_" (Just lang) g1
-  return (g2, listType, LstS [])
-synthExpr lang g0 (LstS (x:xs)) = do
-  -- here t1 is the element type
-  (g1, t1, x1) <- synth g0 x
-
-  -- create an existential container type with sensible default
-  let (g2, containerType) = newvarRich [t1] (MLD.defaultList (Just lang) t1) "lstContainerType_" (Just lang) g1
-
-  -- and t2 is the list type
-  (g3, t2, listExpr) <- checkExpr lang g2 (LstS xs) containerType
-
-  case listExpr of
-    (LstS xs2) -> return (g3, t2, (LstS (x1:xs2)))
-    _ -> error "impossible" -- check never changes the top data constructor
-
--- Tuple=>
+--   -- extend the function type with the type of the expressions it is applied to
+--   (g2, funType1, inputExprs) <- application' i g1 xs0 funType0
 --
-synthExpr lang g0 (TupS []) = do
-  let (g1, t) = newvarRich [] (MLD.defaultTuple (Just lang) []) "tupContainerType_" (Just lang) g0
-  return (g1, t, TupS [])
-synthExpr lang g0 (TupS (x:xs)) = do
-  -- type the head
-  (g1, t, x') <- synth g0 x
-
-  -- type the tail
-  (g2, tupleType, tupleExpr) <- synthExpr lang g1 (TupS xs)
-
-  -- merge the head and tail
-  (g3, t3) <- case tupleType of
-    (ExistU _ ts _) -> return $ newvarRich (t:ts) (MLD.defaultTuple (Just lang) (t:ts)) "tupContainerType_" (Just lang) g2
-    _ -> error "impossible" -- the tuple was created by newvarRich which can only return existentials
-
-  xs' <- case tupleExpr of
-    (TupS xs') -> return xs'
-    _ -> error "impossible" -- synth does not change data constructors
-
-  return (g3, t3, TupS (x':xs'))
-
--- Rec=>
+--   -- determine the type after application
+--   appliedType <- case funType1 of
+--     (FunU ts t) -> case drop (length inputExprs) ts of
+--       [] -> return t -- full application
+--       rs -> return $ FunU rs t -- partial application
+--     _ -> error "impossible"
 --
-synthExpr lang g0 (NamS []) = do
-  let (g1, t) = newvarRich [] (MLD.defaultRecord (Just lang) []) "recordContainerType_" (Just lang) g0
-  return (g1, t, NamS [])
-synthExpr lang g0 (NamS ((k,x):rs)) = do
-  -- type the head
-  (g1, headType, headExpr) <- synth g0 x
+--   -- put the AppS back together with the synthesized function and input expressions
+--   return (g2, apply g2 appliedType, AppS (applyS g2 funExpr0) inputExprs)
 
-  -- type the tail
-  (g2, tailType, tailExpr) <- synthExpr lang g1 (NamS rs)
+--   -->I==>
+synthE i lang g0 f@(LamS vs x) = undefined -- do
+--   -- create existentials for everything and pass it off to check
+--   let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
+--       (g2, ft) = newvar "o_" Nothing g1
+--       finalType = FunU ts ft
+--   checkE' i g2 f finalType
 
-  -- merge the head with tail
-  (g3, t3) <- case tailType of
-    (ExistU _ _ [NamU _ _ _ rs']) -> return $ newvarRich [] (MLD.defaultRecord (Just lang) ((k,headType):rs')) "recordContainerType_" (Just lang) g2
-    _ -> error "impossible" -- the record was created by newvarRich which can only return existentials
+--   List
+synthE _ lang g (LstS []) = undefined
+--   let (g1, itemType) = newvar "itemType_" Nothing g
+--       listType = head $ MLD.defaultList Nothing itemType
+--   in return (g1, listType, LstS [])
+-- synthE i g (LstS (e:es)) = do
+--   (g1, itemType, itemExpr) <- synthG' g e
+--   (g2, listType, listExpr) <- checkE' i g1 (LstS es) (head $ MLD.defaultList Nothing itemType)
+--   case listExpr of
+--     (LstS es') -> return (g2, listType, LstS (itemExpr:es'))
+--     _ -> error "impossible"
 
-  tailExprs <- case tailExpr of
-    (NamS xs') -> return xs'
-    _ -> error "impossible" -- synth does not change data constructors
-
-  return (g3, t3, NamS ((k, headExpr):tailExprs))
-
--- Lam=>
+--   Tuple
+synthE _ lang g (TupS []) = undefined
+--   let t = head $ MLD.defaultTuple Nothing []
+--   in return (g, t, TupS [])
+-- synthE i g (TupS (e:es)) = do
+--   -- synthesize head
+--   (g1, itemType, itemExpr) <- synthG' g e
 --
--- foo xs ys = zipWith (\x y -> [1,y,x]) xs ys
-synthExpr _ g0 (LamS [] x0) = do
-  (g1, bodyType, bodyExpr) <- synth g0 x0
-  return (g1, FunU [] bodyType, LamS [] bodyExpr)
-synthExpr lang g0 (LamS (v@(EV n):vs) x) = do
-  let mark = MarkG (TV (Just lang) n)
-      g1 = g0 +> mark
-      (g2, headType) = bindTerm lang g1 v
-
-  (g3, tailType, tailExpr) <- synthExpr lang g2 (LamS vs x) 
-
-  fullType <- case tailType of
-    (FunU tailInputs tailOutput) -> return (FunU (headType:tailInputs) tailOutput)
-    _ -> error "impossible" -- LamS type is always a function (see base case)
-
-  fullExpr <- case tailExpr of
-    (LamS vs' x') -> return $ LamS (v:vs') x'
-    _ -> error "impossible" -- synthExpr does not change data constructors
-
-  g4 <- cut mark g3
-
-  return (g4, fullType, fullExpr)
-
--- App=>
+--   -- synthesize tail
+--   (g2, tupleType, tupleExpr) <- synthE' i g1 (TupS es)
 --
-synthExpr _ g0 (AppS f []) = do
-  (g1, t1, f1) <- synth g0 f
-  return (g1, t1, AppS f1 [])
-synthExpr lang g0 (AppS f xs) = do
+--   -- merge the head and tail
+--   t3 <- case tupleType of
+--     (AppU _ ts) -> return . head $ MLD.defaultTuple Nothing (apply g2 itemType : ts)
+--     _ -> error "impossible" -- the general tuple will always be (AppU _ _)
+--
+--   xs' <- case tupleExpr of
+--     (TupS xs') -> return xs'
+--     _ -> error "impossible" -- synth does not change data constructors
+--
+--   return (g2, t3, TupS (itemExpr:xs'))
 
-  -- get the potentially qualified function type and expression
-  (g1, qfunType, qfunExpr) <- synth g0 f
+--   Records
+synthE _ lang g (NamS []) = undefined -- return (g, head $ MLD.defaultRecord Nothing [], NamS [])
+synthE i lang g0 (NamS ((k,x):rs)) = undefined -- do
+--   -- type the head
+--   (g1, headType, headExpr) <- synthG' g0 x
+--
+--   -- type the tail
+--   (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
+--
+--   -- merge the head with tail
+--   t <- case tailType of
+--     (NamU o1 n1 ps1 rs1) -> return $ NamU o1 n1 ps1 ((k, apply g2 headType):rs1)
+--     _ -> error "impossible" -- the synthE on NamS will always return NamU type
+--
+--   tailExprs <- case tailExpr of
+--     (NamS xs') -> return xs'
+--     _ -> error "impossible" -- synth does not change data constructors
+--
+--   return (g2, t, NamS ((k, headExpr):tailExprs))
 
-  -- unqualify the expression
-  (g2, uFunType, uFunExpr) <- application g1 qfunType qfunExpr
+-- Sources are axiomatic. They are they type they are said to be.
+synthE i lang g (CallS src) = undefined -- do
+--   maybeType <- lookupType i g
+--   (g', t) <- case maybeType of
+--     Just x -> return x
+--     -- no, then I don't know what it is and will return an existential
+--     -- if this existential is never solved, then it will become universal later
+--     Nothing -> return $ newvar "src_"  Nothing g
+--   return (g', t, CallS src)
 
-  -- extract output type from the type of f
-  (ts, outputType) <- case uFunType of
-    (FunU ts t) -> return (ts, t)
-    _ -> error "impossible"
-
-  -- create a tuple from the input arguments
-  let tupleType = head $ MLD.defaultTuple (Just lang) ts
-
-  -- check the tuple of argument expressions against a tuple of argument types,
-  -- collect the types of missing arguments (partial application)
-  (leftoverTypes, (g3, argTupleType, argTupleExpr)) <- case compare (length ts) (length xs) of
-    -- there are more inputs than arguments: partial application
-    GT -> case splitAt (length xs) ts of
-      (_, remainder) -> checkExpr lang g2 (TupS xs) tupleType |>> (,) remainder
-    -- there are the same number of inputs and arguments: full application
-    EQ -> checkExpr lang g2 (TupS xs) tupleType |>> (,) []
-    -- there are more arguments than inputs: TYPE ERROR!!!
-    LT -> Left TooManyArguments
-
-  -- FIXME: this is NOT USED ... bug?
-  -- extract the types of the input arguments
-  inputTypes <- case argTupleType of
-    (AppU _ ts') -> return ts'
-    _ -> error "impossible"
-
-  -- extract the input expressions
-  inputExprs <- case argTupleExpr of
-    (TupS xs') -> return xs'
-    _ -> error "impossible"
-
-  -- synthesize the final type
-  finalType <- case leftoverTypes of
-    -- full application, just return the output type
-    [] -> return outputType
-    -- partial application, create a new function with unapplied types
-    ts' -> return (FunU ts' outputType)
-
-  -- put the AppS back together with the synthesized function and input expressions
-  return (g3, finalType, AppS uFunExpr inputExprs)
-  
-
--- For now, sources must be annotated by a concrete type signature. Annotations
--- are stored in the (Indexed [EType) term. If this term were not empty, it
--- would have been matched by either the AnnoOne=> or AnnoMany=> rules
--- where the expression would be checked against the annotation.
-synthExpr _ _ (CallS src) = Left $ MissingConcreteSignature src
+-- Any morloc variables should have been expanded by treeify. Any bound
+-- variables should be checked against. I think (this needs formalization).
+synthE i lang g (VarS v) = undefined -- do
+--   -- is this a bound variable that has already been solved
+--   (g', t') <- case lookupE v g of
+--     -- yes, return the solved type
+--     (Just t) -> return (g, t)
+--     Nothing -> do
+--     -- no, so is it a variable that has a type annotation?
+--       maybeType <- lookupType i g
+--       case maybeType of
+--         Just x -> return x
+--         -- no, then I don't know what it is and will return an existential
+--         -- if this existential is never solved, then it will become universal later
+--         Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
+--   return (g', t', VarS v)
 
 
 application
-  :: Gamma
-  -> TypeU
-  -> SAnno (Indexed Type) One (Indexed TypeU)
-  -> Either
-       TypeError
-       ( Gamma
-       , TypeU
-       , SAnno (Indexed Type) One (Indexed TypeU)
-       )
-application g0 t0 (SAnno (One (e0, (Idx j _))) gt) = do
-  (g1, t1, e1) <- applicationExpr g0 t0 e0
-  return (g1, t1, SAnno (One (e1, Idx j t1)) gt) 
+  :: Int
+  -> Lang
+  -> Gamma
+  -> [SAnno (Indexed Type) One (Indexed (Lang, [EType]))]
+  -> TypeU -- the function type
+  -> MorlocMonad
+      ( Gamma
+      , TypeU -- output function type
+      , [SAnno (Indexed TypeU) One (Indexed TypeU)] -- @e@, with type annotation
+      )
 
-applicationExpr
-  :: Gamma
-  -> TypeU
-  -> SExpr (Indexed Type) One (Indexed TypeU)
-  -> Either
-       TypeError
-       ( Gamma
-       , TypeU
-       , SExpr (Indexed Type) One (Indexed TypeU)
-       )
-applicationExpr g0 (ForallU v t) e = applicationExpr (g0 +> ExistG v [] []) (substitute v t) e
-applicationExpr g0 t@(FunU _ _) e = return (g0, t, e)
-applicationExpr _ _ _ = Left ApplicationOfNonFunction
-  
+--  g1 |- e <= A -| g2
+-- ----------------------------------------- -->App
+--  g1 |- A->C o e =>> C -| g2
+application i lang g0 es0 (FunU as0 b0) = undefined -- do
+--   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
+--   let es2 = map (applyS g1) es1
+--       funType = apply g1 $ FunU (as1 <> remainder) b0
+--   say $ "remainder:" <+> vsep (map prettyGreenTypeU remainder)
+--   return (g1, funType, es2)
 
-bindTerm :: Lang -> Gamma -> EVar -> (Gamma, TypeU)
-bindTerm lang g0 v =
-  let (g1, t) = newvar (unEVar v <> "_") (Just lang) g0
-      idx = AnnG v t
-  in (g1 +> idx, t)
+--  g1,Ea |- [Ea/a]A o e =>> C -| g2
+-- ----------------------------------------- Forall App
+--  g1 |- Forall x.A o e =>> C -| g2
+application i lang g0 es (ForallU v s) = undefined -- application' i (g0 +> v) es (substitute v s)
+
+--  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
+-- ----------------------------------------- EaApp
+--  g1[Ea] |- Ea o e =>> Ea2 -| g2
+application i lang g0 es (ExistU v@(TV _ s) [] _) = undefined
+--   case access1 v (gammaContext g0) of
+--     -- replace <t0> with <t0>:<ea1> -> <ea2>
+--     Just (rs, _, ls) -> do
+--       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
+--           (g2, vea) = tvarname g1 (s <> "o_") Nothing
+--           eas = [ExistU v [] [] | v <- veas]
+--           ea = ExistU vea [] []
+--           f = FunU eas ea
+--           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
+--       (g4, _, es', _) <- zipCheck i g3 es eas
+--       return (g4, apply g4 f, map (applyS g4) es')
+--     -- if the variable has already been solved, use solved value
+--     Nothing -> case lookupU v g0 of
+--       (Just (FunU ts t)) -> do
+--         (g1, ts', es', _) <- zipCheck i g0 es ts
+--         return (g1, apply g1 (FunU ts' t), es')
+--       _ -> gerr i ApplicationOfNonFunction
+
+application i lang _ e t = undefined -- do
+--   gerr i ApplicationOfNonFunction
+ 
+
+-- Tip together the arguments passed to an application
+zipCheck
+  :: Int
+  -> Lang
+  -> Gamma
+  -> [SAnno (Indexed Type) One (Indexed TypeU)]
+  -> [TypeU]
+  -> MorlocMonad
+    ( Gamma
+    , [TypeU]
+    , [SAnno (Indexed Type) One (Indexed TypeU)]
+    , [TypeU] -- remainder
+    )
+-- check the first elements, cdr down the remaining values
+zipCheck i lang g0 (x0:xs0) (t0:ts0) = undefined -- do
+--   (g1, t1, x1) <- checkG' g0 x0 t0
+--   (g2, ts1, xs1, remainder) <- zipCheck i g1 xs0 ts0
+--   return (g2, t1:ts1, x1:xs1, remainder)
+-- If there are fewer arguments than types, this may be OK, just partial application
+zipCheck _ lang g0 [] ts = undefined -- return (g0, [], [], ts)
+-- If there are fewer types than arguments, then die
+zipCheck i lang _ es [] = undefined -- gerr i TooManyArguments
 
 
-check
-  :: Gamma
-  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
-  -> TypeU
-  -> Either
-        TypeError
-        ( Gamma
-        , TypeU
-        , SAnno (Indexed Type) One (Indexed TypeU)
-        )
-check g0 (SAnno (One (x, Idx i (l, _))) m@(Idx _ tg)) t = do
-  (g1, t', x') <- checkExpr l g0 x t
-  g2 <- subtype t' (type2typeu tg) g1
-  return $ (g2, t', SAnno (One (x', Idx i t')) m)
-
-
-checkExpr
-  :: Lang
+checkE
+  :: Int
+  -> Lang
   -> Gamma
   -> SExpr (Indexed Type) One (Indexed (Lang, [EType]))
   -> TypeU
-  -> Either
-        TypeError
+  -> MorlocMonad
         ( Gamma
         , TypeU
         , SExpr (Indexed Type) One (Indexed TypeU)
         )
+checkE i lang g1 (LstS (e:es)) (AppU v [t]) = undefined -- do
+--   (g2, t2, e') <- checkG' g1 e t
+--   -- LstS [] will go to the normal Sub case
+--   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
+--   return (g3, t3, (LstS (map (applyS g3) (e':es'))))
 
------- this rule is for the deep style, not the new wide style
---  g1,x:A |- e <= B -| g2,x:A,g3
--- ----------------------------------------- -->I
---  g1 |- \x.e <= A -> B -| g2
+checkE _ lang g1 (LamS [] e1) (FunU [] b1) = undefined -- do
+--   (g2, b2, e2) <- checkG' g1 e1 b1
+--   return (g2, FunU [] b2, LamS [] e2)
+
+checkE _ lang g1 (LamS [] e1) t = undefined -- do
+--   (g2, t, e2) <- checkG' g1 e1 t
+--   return (g2, t, LamS [] e2)
+
+checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = undefined -- do
+--   -- defined x:A
+--   let vardef = AnnG v a1
+--       g2 = g1 +> vardef
 --
--- t2 will have form (FunU [] b) if the function is fully applied, but partial application is allowed
-checkExpr _ g1 (LamS [] e1) (FunU as1 b1) = do
-  (g2, b2, e2) <- check g1 e1 b1
-  return (g2, FunU as1 b2, LamS [] e2)
-checkExpr lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
-  -- defined x:A
-  let vardef = AnnG v a1
-      g2 = g1 +> vardef 
-  -- peal off one layer of bound terms and check
-  (g3, t3, e2) <- checkExpr lang g2 (LamS vs e1) (FunU as1 b1)
+--   -- peal off one layer of bound terms and check
+--   (g3, t3, e2) <- checkE' i g2 (LamS vs e1) (FunU as1 b1)
+--
+--   -- construct the final type
+--   t4 <- case t3 of
+--     (FunU as2 b2) -> return $ FunU (a1:as2) b2
+--     _ -> error "impossible"
+--
+--   let t5 = apply g3 t4
+--
+--   -- construct the final expression
+--   e3 <- case e2 of
+--     (LamS vs' body) -> return $ LamS (v:vs') body
+--     _ -> error "impossible"
+--
+--   -- ignore trailing context `x:A,g3`
+--   g4 <- cut' i vardef g3
+--
+--   return (g4, t5, e3)
 
-  -- ignore trailing context `x:A,g3`
-  g4 <- cut vardef g3
+checkE i lang g1 e1 (ForallU v a) = undefined -- checkE' i (g1 +> v) e1 (substitute v a)
 
-  -- construct the final type
-  t4 <- case t3 of
-    (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> error "impossible"
+--   Sub
+checkE i lang g1 e1 b = undefined -- do
+--   (g2, a, e2) <- synthE' i g1 e1
+--   let a' = apply g2 a
+--       b' = apply g2 b
+--   g3 <- subtype' i a' b' g2
+--   return (g3, apply g3 b', e2)
 
-  -- construct the final expression
-  e3 <- case e2 of
-    (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> error "impossible"
+subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
+subtype' i a b g = do
+  say $ parens (prettyGreenTypeU a) <+> "<:" <+> parens (prettyGreenTypeU b)
+  case subtype a b g of
+    (Left err') -> gerr i err'
+    (Right x) -> return x
 
-  return (g4, t4, e3)
-  
+cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
+cut' i idx g = case cut idx g of
+  (Left terr) -> gerr i terr
+  (Right x) -> return x
 
---  g1,x |- e <= A -| g2,x,g3
--- ----------------------------------------- Forall.I
---  g1 |- e <= Forall x.A -| g2
-checkExpr lang g1 e1 t2@(ForallU x a) = do
-  (g2, _, e2) <- checkExpr lang (g1 +> VarG x) e1 a
-  g3 <- cut (VarG x) g2
-  let t3 = apply g3 t2
-  return (g3, t3, e2)
+---- debugging
 
---  g1 |- e => A -| g2
---  g2 |- [g2]A <: [g2]B -| g3
--- ----------------------------------------- Sub
---  g1 |- e <= B -| g3
-checkExpr lang g1 e1 b = do
-  (g2, a, e2) <- synthExpr lang g1 e1
-  let a' = apply g2 a
-      b' = apply g2 b
-  g3 <- subtype a' b' g2
-  return (g3, a', e2)
+enter :: Doc R.AnsiStyle -> MorlocMonad ()
+enter d = do
+  depth <- MM.incDepth
+  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
+
+say :: Doc R.AnsiStyle -> MorlocMonad ()
+say d = do
+  depth <- MM.getDepth
+  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
+
+seeGamma :: Gamma -> MorlocMonad ()
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gammaContext g)))
+
+seeType :: TypeU -> MorlocMonad ()
+seeType t = say $ prettyGreenTypeU t
+
+leave :: Doc R.AnsiStyle -> MorlocMonad ()
+leave d = do
+  depth <- MM.decDepth
+  debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
+
+debugLog :: Doc R.AnsiStyle -> MorlocMonad ()
+debugLog d = do
+  verbosity <- MM.gets stateVerbosity
+  if verbosity > 0
+    then (liftIO . putDoc) d
+    else return ()
+
+zipCheck' i l g es ts = do
+  enter "zipCheck"
+  r@(g, ts, es, rs) <- zipCheck i l g es ts
+  leave "zipCheck"
+  return r
+
+synthG' g x = do
+  -- enter "synthG"
+  r <- synthG g x
+  -- leave "synthG"
+  return r
+
+checkG' g x t = do
+  -- enter "checkG"
+  r <- checkG g x t
+  -- leave "checkG"
+  return r
+
+synthE' i l g x = do
+  enter "synthE"
+  peak x
+  seeGamma g
+  r@(g', t, _) <- synthE i l g x
+  leave "synthE"
+  seeGamma g'
+  seeType t
+  return r
+
+checkE' i l g x t = do
+  enter "checkE"
+  peak x
+  seeType t
+  seeGamma g
+  r@(g', t', _) <- checkE i l g x t
+  leave "checkE"
+  seeType t'
+  seeGamma g'
+  return r
+
+application' i l g es t = do
+  enter "application"
+  seeGamma g
+  seeType t
+  mapM_ peakGen es
+  r@(g',t',es') <- application i l g es t
+  leave "application"
+  seeGamma g'
+  seeType t'
+  mapM_ peakGen es'
+  return r
 
 
-type2typeu :: Type -> TypeU
-type2typeu (VarT v) = VarU v
-type2typeu (UnkT v) = ForallU v (VarU v)
-type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
-type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
-type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]
+prettyCon :: SExpr g One c -> Doc ann
+prettyCon (UniS) = "UniS"
+prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
+prettyCon (AccS x k ) = "AccS" <+> pretty k <+> parens (prettyGen x)
+prettyCon (AppS f xs) = "AppS" <+> parens (prettyGen f) <+> tupled (map prettyGen xs)
+prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> braces (prettyGen x)
+prettyCon (LstS xs) = "LstS" <+> tupled (map prettyGen xs)
+prettyCon (TupS xs) = "TupS" <+> tupled (map prettyGen xs)
+prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettyGen x) rs)
+prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
+prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
+prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
+prettyCon (CallS src) = "NumS<" <> pretty src <> ">"
+
+prettyGen :: SAnno g One c -> Doc ann
+prettyGen (SAnno (One (e, _)) _) = prettyCon e
+
+peak :: SExpr g One c -> MorlocMonad ()
+peak = say . prettyCon
+
+peakGen :: SAnno g One c -> MorlocMonad ()
+peakGen = say . prettyGen

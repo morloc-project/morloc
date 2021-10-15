@@ -72,6 +72,7 @@ assertConcreteType msg code t = testCase msg $ do
   result <- runBackendCheck code
   case result of
     (Right (_, [SAnno (One (_, Idx _ x)) _])) -> assertEqual "" t x
+    (Right (_, [])) -> error "No exports from main found in assertConcreteType"
     (Right _) -> error "Expected exactly one export from Main for assertConcreteType"
     (Left e) -> error $ "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
@@ -971,11 +972,12 @@ unitTypeTests =
         (record [("x", num), ("y", str)])
     -- language-specific primitives
     , assertConcreteType
-        "C++ string"
+        "C++ add"
         [r|
-        s :: Str
-        s Cpp :: "string"
-        export s
+        source cpp from "_" ("add")
+        add Cpp :: "double" -> "double" -> "double" 
+        add :: Num -> Num -> Num
+        export add
         |]
         (varp CppLang (Just "Str") "string")
 

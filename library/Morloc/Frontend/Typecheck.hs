@@ -236,7 +236,14 @@ synthE i g0 (NamS ((k,x):rs)) = do
   return (g2, t, NamS ((k, headExpr):tailExprs))
 
 -- Sources are axiomatic. They are they type they are said to be.
-synthE i g (CallS src) = gerr i (MissingGeneralSignature src)
+synthE i g (CallS src) = do
+  maybeType <- lookupType i g 
+  (g', t) <- case maybeType of
+    Just x -> return x
+    -- no, then I don't know what it is and will return an existential
+    -- if this existential is never solved, then it will become universal later 
+    Nothing -> return $ newvar "src_"  Nothing g
+  return (g', t, CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
@@ -381,8 +388,6 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
 
   return (g4, t5, e3)
 
-  return (g3, t5, e3)
-
 checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
 --   Sub
@@ -404,10 +409,6 @@ cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of
   (Left terr) -> gerr i terr
   (Right x) -> return x
-
-unpartial :: TypeU -> TypeU
-unpartial (FunU ts1 (FunU ts2 x)) = unpartial $ FunU (ts1 <> ts2) x
-unpartial x = x
 
 ---- debugging
 

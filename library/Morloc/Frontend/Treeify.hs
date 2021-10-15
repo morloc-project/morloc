@@ -223,25 +223,27 @@ unifyTermTypes mv xs m0
 
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
-  fb [e] = return $ TermTypes (Just e) [] []
+  fb [e] = case langOf e of
+    (Just _) -> return $ TermTypes Nothing [(mv, [e], Nothing)] []
+    _ -> return $ TermTypes (Just e) [] []
   -- TODO: clean up the error messages to say exactly what went wrong (and
   -- don't call the monkeys, this is not an internal error).
   fb _ = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
 
   -- Should we even allow concrete terms with no type signatures?
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
-  fc srcs' = return $ TermTypes Nothing [(mv, src, [], i) | (src, i) <- srcs'] []
+  fc srcs' = return $ TermTypes Nothing [(mv, [], Just (Idx i src)) | (src, i) <- srcs'] []
 
   fbc :: [EType] -> [(Source, Int)] -> MorlocMonad TermTypes
   fbc sigs' srcs' = do
-    let gsigs = [t | t <- sigs', isJust (langOf t)]
-    let csigs = [t | t <- sigs', isNothing (langOf t)]
+    let csigs = [t | t <- sigs', isJust (langOf t)]
+    let gsigs = [t | t <- sigs', isNothing (langOf t)]
     gt <- case gsigs of
       [e] -> return (Just e)
       [] -> return Nothing
       -- TODO: don't call the monkeys
       _ -> MM.throwError . CallTheMonkeys $ "Expected a single general type"
-    return $ TermTypes gt [(mv, src, csigs, i) | (src, i) <- srcs'] []
+    return $ TermTypes gt [(mv, csigs, Just (Idx i src)) | (src, i) <- srcs'] []
 
 
 combineTermTypes :: TermTypes -> TermTypes -> MorlocMonad TermTypes
@@ -330,20 +332,12 @@ collect
   -> MorlocMonad (SAnno Int Many Int)
 collect (ExprI _ (ModE _ _)) (i, _) = do
   t0 <- MM.metaTermTypes i
-
-  {- Following example of `x = 42; x`, t0 is
- 
-      Just (TermTypes {termGeneral = Nothing, termConcrete = [], termDecl = [ExprI 3 (VarE (EV "x"))]})
-
-  - The only export from the expression was `__main__` (with implicit `export __main__` and `__main__ = x` terms).
-  -}
-
   case t0 of
     -- if Nothing, then the term is a bound variable
     Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
-      let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
       declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
@@ -359,7 +353,7 @@ collectSAnno e@(ExprI i (VarE v)) = do
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       -- collect all the concrete calls with this name
-      let calls = [(CallS src, i') | (_, src, _, i') <- termConcrete t1]
+      let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
       -- collect all the morloc compositions with this name
       declarations <- mapM reindexExprI (termDecl t1) >>= mapM (replaceExpr i) |>> concat
       -- link this index to the name that is removed

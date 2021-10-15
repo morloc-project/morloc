@@ -200,9 +200,10 @@ data MorlocState = MorlocState {
 data TermTypes = TermTypes {
     termGeneral :: Maybe EType
   -- ^ A term may have many general types (up to one in each scope)
-  , termConcrete :: [(MVar, Source, [EType], Int)]
-  -- ^ The module name (MVar) is needed to lookup package metadata (if needed),
-  -- the final Int type refers to the concrete index for the source.
+  , termConcrete :: [(MVar, [EType], Maybe (Indexed Source))]
+  -- ^ The module name (MVar) is needed to lookup package metadata (if needed).
+  -- The source is optional, since language-specific types may specified
+  -- without sources as interfaces.
   , termDecl :: [ExprI]
   -- ^ all declarations of this type
   --      AssE EVar ExprI [ExprI]
@@ -573,6 +574,7 @@ mapSExpr fg fc (e0, c) = (fe e0, fc c) where
    
 
 data Indexed a = Idx Int a
+  deriving (Show, Ord, Eq)
 
 unindex :: Indexed a -> a
 unindex (Idx _ x) = x
