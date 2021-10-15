@@ -35,7 +35,8 @@ The @SAnno (Indexed Type) One Type@ expression is ultimately translated into a s
 
 module Morloc.CodeGenerator.Generate
 (
-  generate
+    realityCheck
+  , generate
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -55,13 +56,13 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 
--- | Translate typed, abstract syntax forests into compilable code
-generate ::
-  [SAnno (Indexed Type) Many Int]
+realityCheck
+  :: [SAnno (Indexed Type) Many Int]
   -- ^ one AST forest for each command exported from main
-  -> MorlocMonad (Script, [Script]) 
-  -- ^ the nexus code and the source code for each language pool
-generate es = do
+  -> MorlocMonad ( [SAnno (Indexed Type) One ()]
+                 , [SAnno Int One (Indexed TypeP)]
+                 )
+realityCheck es = do
   -- translate modules into bitrees
   (gASTs, rASTs)
     -- select a single instance at each node in the tree
@@ -69,10 +70,20 @@ generate es = do
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
+  -- concrete typecheck fully realized tree
+  rASTs' <- mapM typecheck rASTs
+
+  return (gASTs, rASTs')
+
+-- | Translate typed, abstract syntax forests into compilable code
+generate
+  :: [SAnno (Indexed Type) One ()]
+  -> [SAnno Int One (Indexed TypeP)]
+  -> MorlocMonad (Script, [Script]) 
+  -- ^ the nexus code and the source code for each language pool
+generate gASTs rASTs' = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
-
-  rASTs' <- mapM typecheck rASTs
 
   -- build nexus
   -- -----------
@@ -108,6 +119,7 @@ generate es = do
     >>= mapM (uncurry encode)
 
   return (nexus, pools)
+
 
 
 -- | Choose a single concrete implementation. This function is algorithmically

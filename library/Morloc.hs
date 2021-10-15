@@ -7,7 +7,7 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.Frontend.Desugar (desugar) 
-import Morloc.CodeGenerator.Generate (generate)
+import Morloc.CodeGenerator.Generate (realityCheck, generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
 
@@ -34,7 +34,9 @@ writeProgram path code
   -- translate mtree into nexus and pool source code
   |>> map F.resolveTypes
   -- resolve all TypeU types to Type
-  >>= generate
+  >>= realityCheck
+  -- realization and concrete typechecking
+  >>= uncurry generate
   -- (Script, [Script]) -> IO ()
   -- write the code and compile as needed
   >>= buildProgram

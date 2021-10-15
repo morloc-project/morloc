@@ -17,6 +17,7 @@ module UnitTypeTests
 import Morloc.Frontend.Namespace
 import Morloc.Frontend.Parser
 import Morloc.CodeGenerator.Namespace
+import Morloc.CodeGenerator.Generate (realityCheck)
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
@@ -25,6 +26,7 @@ import Morloc (typecheck)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
+import qualified Morloc.Frontend.API as F
 
 import qualified Data.Text as MT
 import qualified Data.Map as Map
@@ -39,15 +41,22 @@ runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
   ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
   return x
-  where
-    emptyConfig =  Config
-        { configHome = ""
-        , configLibrary = ""
-        , configTmpDir = ""
-        , configLangPython3 = ""
-        , configLangR = ""
-        , configLangPerl = ""
-        }
+
+runBackendCheck
+  :: MT.Text
+  -> IO (Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]))
+runBackendCheck code = do
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code) |>> map F.resolveTypes >>= realityCheck)
+  return x
+  
+emptyConfig =  Config
+    { configHome = ""
+    , configLibrary = ""
+    , configTmpDir = ""
+    , configLangPython3 = ""
+    , configLangR = ""
+    , configLangPerl = ""
+    }
 
 assertGeneralType :: String -> MT.Text -> TypeU -> TestTree
 assertGeneralType msg code t = testCase msg $ do
@@ -57,6 +66,14 @@ assertGeneralType msg code t = testCase msg $ do
     (Right _) -> error "Expected exactly one export from Main for assertGeneralType"
     (Left e) -> error $
       "The following error was raised: " <> show e <> "\nin:\n" <> show code
+
+assertConcreteType :: String -> MT.Text -> TypeP -> TestTree
+assertConcreteType msg code t = testCase msg $ do
+  result <- runBackendCheck code
+  case result of
+    (Right (_, [x])) -> undefined
+    (Right _) -> error "Expected exactly one export from Main for assertConcreteType"
+    (Left e) -> error $ "The following error was raised: " <> show e <> "\nin:\n" <> show code
 
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
