@@ -357,6 +357,7 @@ data TypeError
   | ApplicationOfNonFunction
   | TooManyArguments
   | EmptyExpression
+  | MissingFeature Text
   deriving (Ord, Eq, Show)
 
 data MorlocError

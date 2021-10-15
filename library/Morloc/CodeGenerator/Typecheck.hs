@@ -35,14 +35,12 @@ import qualified Data.Text.Prettyprint.Doc.Render.Terminal as R
 typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-typecheck e = do
+typecheck e0 = do
   -- -- FIXME: should typechecking here consider the packers?
   -- packers <- MM.gets statePackers
-  e' <- retrieveTypes e
-  let g0 = Gamma {gammaCounter = 0, gammaContext = []}
-  case synthG g0 e' of
-    (Left err') -> MM.throwError . ConcreteTypeError $ err'
-    (Right (_, _, e'')) -> weaveAndResolve e''
+  e1 <- retrieveTypes e0
+  (_, _, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
+  weaveAndResolve e2
 
 
 -- | Load the known concrete types into the tree. This is all the information
@@ -115,41 +113,25 @@ lookupType i g = do
     _ -> Nothing
 
 -- prepare a general, indexed typechecking error
-gerr :: Int -> TypeError -> MorlocMonad a
-gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)
+cerr :: Int -> TypeError -> MorlocMonad a
+cerr i e = MM.throwError $ IndexedError i (ConcreteTypeError e)
 
-synthG
-  :: Gamma
-  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
-  -> Either
-       TypeError
-       ( Gamma
-       , TypeU
-       , SAnno (Indexed Type) One (Indexed TypeU)
-       )
-synthG g0 (SAnno (One (e0, c)) g) = undefined
-  --
-  -- -- Check for any existing type signature annotations
-  -- maybeType <- lookupType i g0
-  -- (g1, t1, e1) <- case maybeType of
-  --   -- If there are no annotations, synthesize
-  --   Nothing  -> synthE' i g0 e0
-  --   -- If there are annotations ...
-  --   (Just (g', t)) -> case e0 of
-  --     -- If the annotation is of a variable name, return the annotation. Caling
-  --     -- check would just re-synthesize the same type and check that it was
-  --     -- equal to itself.
-  --     (VarS v) -> return (g', t, VarS v)
-  --     -- Otherwise check the annotation type
-  --     _ -> checkE' i g' e0 t
-  --
-  -- -- Check all other implementations against the first one
-  -- (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
-  --
-  -- -- finally cons the head element back and apply everything we learned
-  -- let finalExpr = applyS g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
-  --
-  -- return (g2, t2, finalExpr)
+
+-- AnnoOne=>
+synthG g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
+  = checkG g (SAnno (One (x, Idx i (l, []))) m) ct
+
+-- AnnoMany=>
+synthG g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
+  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] "x" (Just l) g0
+  in checkG g1 (SAnno (One (x, Idx i (l, []))) m) t
+
+-- if there are no annotations, the SAnno can be simplified and synth' can be called
+synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
+  (g1, t, x') <- synthE i l g0 x
+  g2 <- subtype' i t (type2typeu tg) g1
+  return (g2, t, SAnno (One (x', Idx i t)) m)
+
 
 checkG
   :: Gamma
@@ -160,10 +142,10 @@ checkG
        , TypeU
        , SAnno (Indexed Type) One (Indexed TypeU)
        )
-checkG g0 (SAnno (One (e, c)) g) t0 = undefined
-  -- (g1, t1, e') <- checkE' i g0 e t0
-  -- (g2, t2, SAnno (Many es') idType) <- checkG' g1 (SAnno (Many es) i) t1
-  -- return (g2, t2, SAnno (Many ((e', j):es')) idType)
+checkG g0 (SAnno (One (e0, Idx i (l, _))) m@(Idx _ tg)) t0 = do
+  (g1, t1, e1) <- checkE i l g0 e0 t0
+  g2 <- subtype' i t1 (type2typeu tg) g1
+  return $ (g2, t1, SAnno (One (e1, Idx i t1)) m)
 
 
 synthE
@@ -176,18 +158,37 @@ synthE
        , TypeU
        , SExpr (Indexed Type) One (Indexed TypeU)
        )
-synthE _ _ g (UniS) = undefined -- return (g, MLD.defaultGeneralType UniS, UniS)
-synthE _ _ g (NumS x) = undefined -- return (g, MLD.defaultGeneralType (NumS x), NumS x)
-synthE _ _ g (LogS x) = undefined -- return (g, MLD.defaultGeneralType (LogS x), LogS x)
-synthE _ _ g (StrS x) = undefined -- return (g, MLD.defaultGeneralType (StrS x), StrS x)
+-- Uni=>
+synthE _ lang g UniS = do
+  let ts = MLD.defaultNull (Just lang)
+      (g', t) = newvarRich [] ts "uni_" (Just lang) g
+  return (g' +> t, t, UniS)
+
+-- Num=>
+synthE _ lang g (NumS x) = do
+  let ts = MLD.defaultNumber (Just lang)
+      (g', t) = newvarRich [] ts "num_" (Just lang) g
+  return (g' +> t, t, NumS x)
+
+-- Str=>
+synthE _ lang g (StrS x) = do
+  let ts = MLD.defaultString (Just lang)
+      (g', t) = newvarRich [] ts "str_" (Just lang) g
+  return (g' +> t, t, StrS x)
+
+-- Log=>
+synthE _ lang g (LogS x) = do
+  let ts = MLD.defaultBool (Just lang)
+      (g', t) = newvarRich [] ts "log_" (Just lang) g
+  return (g' +> t, t, LogS x)
 
 synthE i lang g (AccS e k) = undefined -- do
 --   (g1, t1, e1) <- synthG' g e
 --   valType <- case t1 of
 --     (NamU _ _ _ rs) -> case lookup k rs of
---       Nothing -> gerr i (KeyError k t1)
+--       Nothing -> cerr i (KeyError k t1)
 --       (Just t) -> return t
---     _ -> gerr i (KeyError k t1)
+--     _ -> cerr i (KeyError k t1)
 --   return (g1, valType, AccS e1 k)
 
 --   -->E0
@@ -350,10 +351,10 @@ application i lang g0 es (ExistU v@(TV _ s) [] _) = undefined
 --       (Just (FunU ts t)) -> do
 --         (g1, ts', es', _) <- zipCheck i g0 es ts
 --         return (g1, apply g1 (FunU ts' t), es')
---       _ -> gerr i ApplicationOfNonFunction
+--       _ -> cerr i ApplicationOfNonFunction
 
 application i lang _ e t = undefined -- do
---   gerr i ApplicationOfNonFunction
+--   cerr i ApplicationOfNonFunction
  
 
 -- Tip together the arguments passed to an application
@@ -377,7 +378,7 @@ zipCheck i lang g0 (x0:xs0) (t0:ts0) = undefined -- do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ lang g0 [] ts = undefined -- return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i lang _ es [] = undefined -- gerr i TooManyArguments
+zipCheck i lang _ es [] = undefined -- cerr i TooManyArguments
 
 
 checkE
@@ -444,12 +445,12 @@ subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
   say $ parens (prettyGreenTypeU a) <+> "<:" <+> parens (prettyGreenTypeU b)
   case subtype a b g of
-    (Left err') -> gerr i err'
+    (Left err') -> cerr i err'
     (Right x) -> return x
 
 cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
 cut' i idx g = case cut idx g of
-  (Left terr) -> gerr i terr
+  (Left terr) -> cerr i terr
   (Right x) -> return x
 
 ---- debugging
@@ -556,3 +557,10 @@ peak = say . prettyCon
 
 peakGen :: SAnno g One c -> MorlocMonad ()
 peakGen = say . prettyGen
+
+type2typeu :: Type -> TypeU
+type2typeu (VarT v) = VarU v
+type2typeu (UnkT v) = ForallU v (VarU v)
+type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
+type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
+type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]

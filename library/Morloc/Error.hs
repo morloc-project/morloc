@@ -116,4 +116,5 @@ showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignatur
 showTypeError (MissingGeneralSignature src) = render $ "MissingGeneralSignature for" <+> pretty src
 showTypeError (ApplicationOfNonFunction) = render $ "ApplicationOfNonFunction"
 showTypeError (TooManyArguments) = render $ "TooManyArguments"
+showTypeError (MissingFeature msg) = "MissingFeature: " <> msg
 showTypeError EmptyExpression = render $ "EmptyExpression"
