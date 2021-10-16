@@ -324,20 +324,19 @@ findPackers expr
         }
 
     toPair :: (Source, EType) -> Either MorlocError ((TVar, Int), (Property, TypeU, Source))
-    toPair (src, e@(EType (FunU [_] _) _ _)) = do
-      case packerKeyVal e of
-          (Right (Just (key, t, p))) -> return (key, (p, t, src))
-          (Right Nothing) -> error "impossible" -- this is called after filtering away general types
-          Left err' -> Left err'
-    toPair (_, (EType t _ _)) = Left $ IllegalPacker t
+    toPair (src, e) = case packerKeyVal e of
+      (Right (Just (key, t, p))) -> return (key, (p, t, src))
+      (Right Nothing) -> error "impossible" -- this is called after filtering away general types
+      Left err' -> Left err'
 
     packerKeyVal :: EType -> Either MorlocError (Maybe ((TVar, Int), TypeU, Property))
-    packerKeyVal e@(EType t@(FunU [a] b) _ _) = case (isPacker e, isUnpacker e) of
-      (True, True) -> Left $ CyclicPacker t
-      (True, False) -> Right (Just (packerKey a, b, Pack))
-      (False, True) -> Right (Just (packerKey b, a, Unpack))
-      (False, False) -> Right Nothing
-    packerKeyVal (EType t _ _) = Left $ IllegalPacker t
+    packerKeyVal e@(EType t _ _) = case unqualify t of
+      (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
+        (True, True) -> Left $ CyclicPacker (qualify vs t)
+        (True, False) -> Right (Just (packerKey a, qualify vs b, Pack))
+        (False, True) -> Right (Just (packerKey b, qualify vs a, Unpack))
+        (False, False) -> Right Nothing
+      (vs, t) -> Left $ IllegalPacker (qualify vs t)
 
     packerKey :: TypeU -> (TVar, Int)
     packerKey t = case splitArgs t of
@@ -362,6 +361,10 @@ packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 qualify :: [TVar] -> TypeU -> TypeU
 qualify [] t = t
 qualify (v:vs) t = ForallU v (qualify vs t)
+
+unqualify :: TypeU -> ([TVar], TypeU)
+unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
+unqualify t = ([], t)
 
 splitArgs :: TypeU -> ([TVar], [TypeU])
 splitArgs (ForallU v u) =
