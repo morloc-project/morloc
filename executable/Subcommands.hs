@@ -18,6 +18,8 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import Morloc.CodeGenerator.Grammars.Common (prettyTypeP)
+import Morloc.CodeGenerator.Namespace (TypeP)
 import Morloc.Pretty
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -94,9 +96,12 @@ cmdTypecheck args _ config = do
            (M.typecheck path code >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn
   where
-    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
-    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
+    sannoManyWriter :: ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]) -> IO ()
+    sannoManyWriter (gasts, rasts) = do
+      putDoc "------------------ gasts ---------------------"
+      putDoc . vsep . map (prettySAnno (const "_") (fi prettyGreenType)) $ gasts
+      putDoc "------------------ rasts ---------------------"
+      putDoc . vsep . map (prettySAnno (fi prettyTypeP) (const "_")) $ rasts
 
-    showConcrete = viaShow
-
-    showGeneral (Idx _ t) = prettyGreenTypeU t
+    fi :: (a -> b) -> Indexed a -> b 
+    fi f (Idx _ x) = f x

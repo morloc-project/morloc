@@ -125,6 +125,8 @@ generate gASTs rASTs' = do
 -- | Choose a single concrete implementation. This function is algorithmically
 -- the most complex component of the morloc compiler. In the future, it will
 -- probably need to be implemented using an optimizing SMT solver.
+--
+-- This function also needs to work with input that is not fully defined.
 realize
   :: SAnno (Indexed Type) Many Int
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
@@ -265,7 +267,7 @@ realize s0 = do
   chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss =
     case maxBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
-      Nothing -> MM.throwError . CallTheMonkeys $ "This shouldn't happen"
+      Nothing -> return Nothing
       (Just (l3, _)) -> return (Just l3)
 
 

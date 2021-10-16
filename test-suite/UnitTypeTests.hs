@@ -22,7 +22,7 @@ import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Data.DAG as MDD
-import Morloc (typecheck)
+import Morloc (typecheck, typecheckFrontend)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
@@ -39,14 +39,14 @@ gtypeof (SAnno _ (Idx _ t)) = t
 
 runFront :: MT.Text -> IO (Either MorlocError [SAnno (Indexed TypeU) Many Int])
 runFront code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheckFrontend Nothing (Code code))
   return x
 
 runBackendCheck
   :: MT.Text
   -> IO (Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]))
 runBackendCheck code = do
-  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code) |>> map F.resolveTypes >>= realityCheck)
+  ((x, _), _) <- MM.runMorlocMonad Nothing 0 emptyConfig (typecheck Nothing (Code code))
   return x
   
 emptyConfig =  Config
@@ -180,6 +180,9 @@ record' n rs = NamU NamRecord (TV Nothing n) [] rs
 unkp lang gv cv = UnkP (PV lang gv cv) 
 
 varp lang gv cv = VarP (PV lang gv cv)
+
+funp [] = error "Cannot infer type of empty list"
+funp ts = FunP (init ts) (last ts)
 
 subtypeTests =
   testGroup
@@ -658,7 +661,7 @@ typeAliasTests =
              export f
         |]
         (fun [var "A", var "B"])
-    -- , assertGeneralType
+    -- , assertConcreteType
     --     "non-parametric, concrete type alias, reimported aliased"
     --     [r|
     --        module M3
@@ -676,10 +679,11 @@ typeAliasTests =
     --
     --        module Main
     --        import M1 (Foo3 as Foo4)
+    --        source cpp from "_" ("f")
     --        f Cpp :: Foo4 -> "double"
-    --        f
+    --        export f
     --     |]
-    --     [ fun [varc CppLang "int", varc CppLang "double"] ]
+    --     ( funp [varp CppLang Nothing "int", varp CppLang Nothing "double"] )
     , assertGeneralType
         "non-parametric, general type alias, duplicate import"
         [r|
@@ -769,26 +773,6 @@ orderInvarianceTests =
       "long chains of substitution are OK too"
       "z = 42\ny = z\nx = y\nx"
       num
-  --   , assertTerminalType
-  --       "declarations before use gain concrete types"
-  --       [r|
-  --         add :: Num -> Num -> Num
-  --         add c :: "int" -> "int" -> "int"
-  --         b = 5
-  --         f = add 1 b
-  --         b
-  --       |]
-  --       [num, varc CLang "int"]
-  --   , assertTerminalType
-  --       "declarations after use gains concrete types"
-  --       [r|
-  --         add :: Num -> Num -> Num
-  --         add c :: "int" -> "int" -> "int"
-  --         f = add 1 b
-  --         b = 5
-  --         b
-  --       |]
-  --       [num, varc CLang "int"]
   ]
 
 typeOrderTests =
@@ -1167,16 +1151,6 @@ unitTypeTests =
       |]
       bool
 
-    -- -- This should give a straight error, none of that nonsense about within language conversion
-    -- f x = [x, 1]
-    -- f True
-
-
-    -- -- This fails to fail
-    -- f x y = [x, y]
-    -- f 1 True
-
-
     , assertGeneralType
         "f x y = [x, y]"
         [r|
@@ -1252,10 +1226,20 @@ unitTypeTests =
         export f
         |]
         (var "Foo")
-    -- , assertGeneralType
-    --     "explicit annotation within an application"
-    --     "f :: Num -> Num\nf (42 :: Num)"
-    --     num
+
+    -- concrete functions
+    , assertConcreteType
+        "id over add"
+        [r|
+        source cpp from "_" ("id", "add")
+        add :: Num -> Num -> Num 
+        add Cpp :: "double" -> "double" -> "double"
+        id :: a -> a
+        id Cpp :: a -> a
+        f x y = id (add x y)
+        export f
+        |]
+        (varp CppLang (Just "Num") "double")
 
     -- lambdas
     , assertGeneralType
