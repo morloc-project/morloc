@@ -21,7 +21,6 @@ module Morloc.Typecheck.Internal
   , newvarRich
   -- * Typeclasses
   , Applicable(..)
-  , applyS
   , Indexable(..)
   -- * manipulating context
   , access1
@@ -79,11 +78,6 @@ instance Applicable Gamma where
     f (SolvedG v t) = SolvedG v (apply g1 t)
     f (SerialConstraint t1 t2) = SerialConstraint (apply g1 t1) (apply g1 t2)
     f x = x 
-
--- apply context to a SAnno
-applyS :: (Functor gf, Functor f, Applicable g)
-       => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
-applyS g = mapSAnno (fmap (apply g)) id
 
 class Indexable a where
   index :: a -> GammaIndex

@@ -979,7 +979,9 @@ unitTypeTests =
         add :: Num -> Num -> Num
         export add
         |]
-        (varp CppLang (Just "Str") "string")
+        (FunP [ varp CppLang (Just "Num") "double"
+              , varp CppLang (Just "Num") "double" ]
+              ( varp CppLang (Just "Num") "double" ))
 
     -- functions
     , assertGeneralType

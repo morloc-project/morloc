@@ -106,7 +106,7 @@ synthG g0 (SAnno (Many ((e0, j):es)) i) = do
   (g2, t2, SAnno (Many es') _) <- checkG' g1 (SAnno (Many es) i) t1
 
   -- finally cons the head element back and apply everything we learned
-  let finalExpr = applyS g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
+  let finalExpr = applyGen g2 $ SAnno (Many ((e1, j):es')) (Idx i t2)
 
   return (g2, t2, finalExpr)
 
@@ -171,7 +171,7 @@ synthE i g0 (AppS f xs0) = do
     _ -> error "impossible"
 
   -- put the AppS back together with the synthesized function and input expressions
-  return (g2, apply g2 appliedType, AppS (applyS g2 funExpr0) inputExprs)
+  return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 --   -->I==>
 synthE i g0 f@(LamS vs x) = do
@@ -279,7 +279,7 @@ application
 --  g1 |- A->C o e =>> C -| g2
 application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
-  let es2 = map (applyS g1) es1 
+  let es2 = map (applyGen g1) es1 
       funType = apply g1 $ FunU (as1 <> remainder) b0
   say $ "remainder:" <+> vsep (map prettyGreenTypeU remainder)
   return (g1, funType, es2)
@@ -303,7 +303,7 @@ application i g0 es (ExistU v@(TV _ s) [] _) =
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
-      return (g4, apply g4 f, map (applyS g4) es')
+      return (g4, apply g4 f, map (applyGen g4) es')
     -- if the variable has already been solved, use solved value
     Nothing -> case lookupU v g0 of
       (Just (FunU ts t)) -> do
@@ -353,7 +353,7 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
   (g2, t2, e') <- checkG' g1 e t 
   -- LstS [] will go to the normal Sub case
   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
-  return (g3, t3, (LstS (map (applyS g3) (e':es'))))
+  return (g3, t3, (LstS (map (applyGen g3) (e':es'))))
 
 checkE _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
@@ -517,3 +517,8 @@ peak = say . prettyCon
 peakGen :: SAnno g Many Int -> MorlocMonad ()
 peakGen = say . prettyGen
 -- peak x = say $ f x where
+
+-- apply context to a SAnno
+applyGen :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
+applyGen g = mapSAnno (fmap (apply g)) id
