@@ -17,13 +17,14 @@ module Morloc.CodeGenerator.Internal
 
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Monad as MM
+import Morloc.Data.Doc
 
 weaveTypes :: Maybe Type -> Type -> MorlocMonad TypeP
 weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
-  (_, Nothing) -> MM.throwError . CallTheMonkeys
-    $ "Expected a language-specific type as the second argument"
-  (Just _, _) -> MM.throwError . CallTheMonkeys
-    $ "Expected a general type as the first argument"
+  (_, Nothing) -> MM.throwError . CallTheMonkeys . render
+    $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
+  (Just _, _) -> MM.throwError . CallTheMonkeys . render
+    $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
   (_, Just lang) -> return $ w lang g0 t0
 
 weaveTypes' :: Type -> Type -> TypeP
@@ -60,10 +61,10 @@ w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 
 weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
 weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
-  (_, Nothing) -> MM.throwError . CallTheMonkeys
-    $ "Expected a language-specific type as the second argument"
-  (Just _, _) -> MM.throwError . CallTheMonkeys
-    $ "Expected a general type as the first argument"
+  (_, Nothing) -> MM.throwError . CallTheMonkeys . render
+    $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
+  (Just _, _) -> MM.throwError . CallTheMonkeys . render
+    $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
   (Nothing, Just lang) -> return $ f lang g0 t0
   where
     f :: Lang -> Type -> Type -> TypeP

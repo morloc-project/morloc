@@ -1239,8 +1239,9 @@ unitTypeTests =
         f x y = id (add x y)
         export f
         |]
-        (varp CppLang (Just "Num") "double")
-
+        (funp [ varp CppLang (Just "Num") "double"
+              , varp CppLang (Just "Num") "double"
+              , varp CppLang (Just "Num") "double"])
     -- lambdas
     , assertGeneralType
         "function with parameterized types"

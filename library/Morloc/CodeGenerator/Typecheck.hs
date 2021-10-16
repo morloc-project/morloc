@@ -81,7 +81,7 @@ retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
 weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
+weaveAndResolve e@(SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
   pt <- weaveResolvedTypes gt (typeOf ct)
   x1 <- case x0 of
     UniS -> return UniS
@@ -128,9 +128,10 @@ synthG g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
 
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
 synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
-  (g1, t, x') <- synthE i l g0 x
-  g2 <- subtype' i t (type2typeu tg) g1
-  return (g2, t, SAnno (One (x', Idx i t)) m)
+  (g1, t, x') <- synthE' i l g0 x
+  -- g2 <- subtype' i t (type2typeu tg) g1
+  -- return (g2, t, SAnno (One (x', Idx i t)) m)
+  return (g1, t, SAnno (One (x', Idx i t)) m)
 
 
 checkG
@@ -144,8 +145,9 @@ checkG
        )
 checkG g0 (SAnno (One (e0, Idx i (l, _))) m@(Idx _ tg)) t0 = do
   (g1, t1, e1) <- checkE i l g0 e0 t0
-  g2 <- subtype' i t1 (type2typeu tg) g1
-  return $ (g2, t1, SAnno (One (e1, Idx i t1)) m)
+  -- g2 <- subtype' i t1 (type2typeu tg) g1
+  -- return $ (g2, t1, SAnno (One (e1, Idx i t1)) m)
+  return (g1, t1, SAnno (One (e1, Idx i t1)) m)
 
 
 synthE
@@ -217,14 +219,14 @@ synthE i lang g0 (AppS f xs0) = do
 --   -->I==>
 synthE i lang g0 f@(LamS vs x) = do
   -- create existentials for everything and pass it off to check
-  let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
-      (g2, ft) = newvar "o_" Nothing g1
+  let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") (Just lang) g') g0 vs
+      (g2, ft) = newvar "o_" (Just lang) g1
       finalType = FunU ts ft
   checkE' i lang g2 f finalType
 
 --   List
 synthE _ lang g (LstS []) =
-  let (g1, itemType) = newvar "itemType_" Nothing g
+  let (g1, itemType) = newvar "itemType_" (Just lang) g
       listType = head $ MLD.defaultList (Just lang) itemType
   in return (g1, listType, LstS [])
 synthE i lang g (LstS (e:es)) = do
@@ -278,7 +280,7 @@ synthE i lang g0 (NamS ((k,x):rs)) = do
 
 -- Sources are axiomatic. They are they type they are said to be.
 synthE i lang g (CallS src) = do
-  let (g', t) = newvar "src_"  Nothing g
+  let (g', t) = newvar "src_" (Just lang) g
   return (g', t, CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
@@ -288,7 +290,7 @@ synthE i lang g (VarS v) = do
   (g', t') <- case lookupE v g of
     -- yes, return the solved type
     (Just t) -> return (g, t)
-    Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
+    Nothing -> return $ newvar (unEVar v <> "_u") (Just lang) g
   return (g', t', VarS v)
 
 
@@ -418,6 +420,9 @@ checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   return (g4, t5, e3)
 
 checkE i lang g1 e1 (ForallU v a) = checkE' i lang (g1 +> v) e1 (substitute v a)
+
+-- Called functions are axiomatic
+checkE i lang g1 (CallS src) t = return (g1, t, CallS src)
 
 --   Sub
 checkE i lang g1 e1 b = do

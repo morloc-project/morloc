@@ -223,12 +223,11 @@ unifyTermTypes mv xs m0
 
   fb :: [EType] -> MorlocMonad TermTypes
   fb [] = MM.throwError . CallTheMonkeys $ "This case should not appear given the construction of the map"
-  fb [e] = case langOf e of
-    (Just _) -> return $ TermTypes Nothing [(mv, [e], Nothing)] []
-    _ -> return $ TermTypes (Just e) [] []
-  -- TODO: clean up the error messages to say exactly what went wrong (and
-  -- don't call the monkeys, this is not an internal error).
-  fb _ = MM.throwError . CallTheMonkeys $ "Either you wrote a concrete type signature with no associated source function or you wrote multiple general type signatures for a single term in a single scope - either way, you can't do that."
+  fb (e0:es) = do
+    e' <- foldlM mergeEType e0 es
+    case langOf e' of
+      (Just _) -> return $ TermTypes Nothing [(mv, [e'], Nothing)] []
+      _ -> return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
@@ -258,8 +257,7 @@ combineTermTypes (TermTypes g1 cs1 es1) (TermTypes g2 cs2 es2)
   maybeCombine f (Just a) (Just b) = Just <$> f a b
   maybeCombine _ (Just a) _ = return $ Just a
   maybeCombine _ _ (Just b) = return $ Just b
-  maybeCombine _ _ _ = return Nothing
-
+  maybeCombine _ _ _ = return Nothing 
 
 -- | This function defines how general types are merged. There are decisions
 -- encoded in this function that should be vary carefully considered.
