@@ -81,7 +81,7 @@ generate
   -> [SAnno Int One (Indexed TypeP)]
   -> MorlocMonad (Script, [Script]) 
   -- ^ the nexus code and the source code for each language pool
-generate gASTs rASTs' = do
+generate gASTs rASTs = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
@@ -91,12 +91,12 @@ generate gASTs rASTs' = do
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
     gSerial
-    [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs']
+    [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
 
   -- for each language, collect all functions into one "pool"
   pools
     -- thread arguments across the tree
-    <- mapM parameterize rASTs'
+    <- mapM parameterize rASTs
     -- convert from AST to manifold tree
     >>= mapM express
 
@@ -467,7 +467,11 @@ makeArgument i t = SerialArgument i t
 
 express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
 express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
-  express' :: Bool -> TypeP -> SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+  express'
+    :: Bool -- is this a top-level expression that the nexus will record?
+    -> TypeP
+    -> SAnno Int One (Indexed TypeP, [(EVar, Argument)])
+    -> MorlocMonad (ExprM Many)
 
   -- primitives
   express' _ _ (SAnno (One (NumS x, (Idx _ c, _))) _) = return $ NumM (Native c) x
@@ -509,8 +513,16 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
+
+  -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
+  -- move the index from the lambda to the application
+  -- changing indices is a BAD idea, it breaks the link to the source code
+  -- I do it here so that the nexus indices and pool indices match, but there
+  -- should be a more elegant solution.
+  -- ***************************************************************************
   -- lambda
-  express' isTop _ (SAnno (One (LamS _ x@(SAnno (One (_, (Idx _ c,_))) _), _)) _) = express' isTop c x
+  express' isTop _ (SAnno (One (LamS _ (SAnno x@(One (_, (Idx _ c, _))) _), _)) m)
+    = express' isTop c (SAnno x m)
 
   -- var
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) =
