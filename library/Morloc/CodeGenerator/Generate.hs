@@ -166,7 +166,7 @@ realize s0 = do
     let scores = scoresOf f'
     xs' <- mapM (scoreSAnno (unique $ map fst scores)) xs
     let pairss = [(maxPairs . concat) [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
-        best = [ (l1, sum [ maximum [s1 + s2 + Lang.pairwiseCost l1 l2
+        best = [ (l1, sum [ maximumDef 0 [s1 + s2 + Lang.pairwiseCost l1 l2
                           | (l2, s2) <- pairs] | pairs <- pairss])
                | (l1, s1) <- scores]
     return (AppS f' xs', Idx i best)
@@ -200,7 +200,7 @@ realize s0 = do
         let pairss = [ (maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
                      | SAnno (Many xs') _ <- xs]
             langs' = unique (langs' <> (concat . map (map fst)) pairss)
-        in [(l1, sum [ maximum [ score + Lang.pairwiseCost l1 l2
+        in [(l1, sum [ maximumDef 0 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
                      | pairs <- pairss])
            | l1 <- langs']
@@ -279,6 +279,7 @@ realize s0 = do
     (Just x2) -> if f x1 >= f x2 then Just x1 else Just x2
 
   -- find the highest scoring value for each key
+  -- the groupSort function will never yield an empty value for vs, so `maximum` is safe
   maxPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
   maxPairs xs = map (\(k, vs) -> (k, maximum vs)) $ groupSort xs
 
@@ -446,7 +447,7 @@ parameterize' args (SAnno (One (NamS entries, c)) m) = do
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   let args' = [(v, r) | (v, r) <- args, notElem v vs]
-      startId = maximum (map (argId . snd) args) + 1
+      startId = maximumDef 0 (map (argId . snd) args) + 1
       args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
@@ -548,7 +549,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
     -- case #2
     | sameLanguage && not fullyApplied = do
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
-        let startId = maximum (map (argId . snd) args) + 1
+        let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
@@ -564,7 +565,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
     -- case #4
     | not sameLanguage && not fullyApplied = do
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
-        let startId = maximum (map (argId . snd) args) + 1
+        let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
@@ -808,7 +809,6 @@ preprocess RLang es = R.preprocess es
 preprocess Python3Lang es = Python3.preprocess es
 preprocess l _ = MM.throwError . PoolBuildError . render
                $ "Language '" <> viaShow l <> "' has no translator"
-
 
 chooseSerializer :: [ExprM Many] -> MorlocMonad [ExprM One]
 chooseSerializer xs = mapM chooseSerializer' xs where
