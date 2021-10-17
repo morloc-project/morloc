@@ -79,7 +79,6 @@ cmdMake args verbosity config = do
   MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
--- | run the typechecker on a module but do not build it
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
 cmdTypecheck args _ config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
@@ -93,15 +92,12 @@ cmdTypecheck args _ config = do
            Nothing
            verbosity
            config
-           (M.typecheck path code >>= MM.liftIO . writer) >>=
+           (M.typecheckFrontend path code >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn
   where
-    sannoManyWriter :: ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]) -> IO ()
-    sannoManyWriter (gasts, rasts) = do
-      putDoc "------------------ gasts ---------------------"
-      putDoc . vsep . map (prettySAnno (const "_") (fi prettyGreenType)) $ gasts
-      putDoc "------------------ rasts ---------------------"
-      putDoc . vsep . map (prettySAnno (fi prettyTypeP) (const "_")) $ rasts
+    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
+    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
 
-    fi :: (a -> b) -> Indexed a -> b 
-    fi f (Idx _ x) = f x
+    showConcrete = viaShow
+
+    showGeneral (Idx _ t) = prettyGreenTypeU t
