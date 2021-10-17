@@ -39,7 +39,10 @@ typecheck e0 = do
   -- -- FIXME: should typechecking here consider the packers?
   -- packers <- MM.gets statePackers
   e1 <- retrieveTypes e0
-  (_, _, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
+  (g, t, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
+  -- show the final gamma and type if verbose
+  seeGamma g
+  say $ viaShow t
   weaveAndResolve e2
 
 

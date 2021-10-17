@@ -78,7 +78,7 @@ weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
       = NamP o (PV lang (Just n1) n2)
           (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
           [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
-    f _ _ _ = error "General and concrete types are not compatible"
+    f lang t1 t2 = error $ "General and concrete types are not compatible: " <> show (lang, t1, t2)
 
 typeP2typeM :: TypeP -> TypeM
 typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)
