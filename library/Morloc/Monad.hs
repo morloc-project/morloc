@@ -269,4 +269,4 @@ metaPackMap i = do
 
 -- | This is currently only used in the C++ translator.
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
-metaTypedefs = undefined
+metaTypedefs _ = return Map.empty -- FIXME - leaving this empty breaks the C++ translator

@@ -206,7 +206,8 @@ linkVariablesToTermTypes mv m0 = mapM_ (link m0) where
   setType m i v = case Map.lookup v m of 
     (Just (j, t)) -> do
       s <- CMS.get
-      CMS.put (s {stateSignatures = GMap.insert i j t (stateSignatures s)})
+      CMS.put (s { stateSignatures = GMap.insert i j t (stateSignatures s)
+                 , stateName = Map.insert i v (stateName s) } )
       return ()
     Nothing -> return ()
 

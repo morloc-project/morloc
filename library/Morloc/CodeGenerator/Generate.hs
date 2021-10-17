@@ -730,7 +730,26 @@ pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
 findSources
   :: (Lang, [ExprM Many])
   -> MorlocMonad (Lang, [([Source], ExprM Many)])
-findSources = undefined
+findSources (lang, es0) = return (lang, [ (f e, e) | e <- es0])
+  where
+    f :: ExprM Many -> [Source] 
+    f (SrcM _ src) = [src]
+    f (ManifoldM _ _ e) = f e
+    f (ForeignInterfaceM _ e) = f e
+    f (LetM _ e1 e2) = f e1 <> f e2
+    f (AppM e es) = f e <> conmap f es
+    f (LamM _ e) = f e
+    f (AccM e _) = f e
+    f (ListM _ es) = conmap f es
+    f (TupleM _ es) = conmap f es
+    f (RecordM _ rs) = conmap (f . snd) rs
+    f (SerializeM _ e) = f e
+    f (DeserializeM _ e) = f e
+    f (ReturnM e) = f e
+    f _ = []
+    ----------------- note to later me:
+--------------- here's the old code, I think the code above is missing the packers
+--------------- 
 -- -- | find all sources required, both in CallS statements and those used for serialization
 -- getSrcs :: SExpr Int One c -> Int -> c -> MorlocMonad [Source]
 -- getSrcs (CallS src) g _ = (:) src <$> getSrcsFromManifold g
