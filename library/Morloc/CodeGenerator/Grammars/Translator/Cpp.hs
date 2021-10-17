@@ -389,7 +389,11 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  f _ (LamM _ _) = undefined
+  -- this should not happen
+  f args (LamM lambdaArgs e) = do
+    (ms', e', rs) <- f args e
+    let vs = map (bndNamer . argId) lambdaArgs
+    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f args (AccM e k) = do
     (ms, e', ps) <- f args e

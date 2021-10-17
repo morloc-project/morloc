@@ -259,7 +259,11 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return ([], pretty (srcName src), [])
 
-  f _ (LamM _ _) = undefined -- FIXME: this is defined in R
+  -- this should not happen
+  f args (LamM lambdaArgs e) = do
+    (ms', e', rs) <- f args e
+    let vs = map (bndNamer . argId) lambdaArgs
+    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 

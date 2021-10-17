@@ -101,7 +101,6 @@ generate gASTs rASTs = do
     >>= mapM express
 
     -- -- rewrite lets to minimize the number of foreign calls
-    -- -- FIXME: let optimization is not possible until an effect system is implemented since it only is correct for pure functions
     -- >>= mapM letOptimize
 
     -- Separate the call trees into mono-lingual segments terminated in
@@ -119,7 +118,6 @@ generate gASTs rASTs = do
     >>= mapM (uncurry encode)
 
   return (nexus, pools)
-
 
 
 -- | Choose a single concrete implementation. This function is algorithmically
@@ -551,10 +549,10 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
         let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
-            lambdaArgs = zipWith NativeArgument [startId ..] inputs
-            lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
-        return . ManifoldM m (map snd args) $
-          ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+            lambdaArgs = zipWith NativeArgument [startId ..] (drop (length xs) inputs)
+            lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
+        return . ManifoldM m lambdaArgs $
+          ReturnM (AppM f (xs' ++ lambdaVals))
 
     -- case #3
     | not sameLanguage && fullyApplied = do
