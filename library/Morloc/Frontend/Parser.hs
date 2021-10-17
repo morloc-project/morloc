@@ -37,7 +37,7 @@ readProgram
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
 readProgram f sourceCode pstate p =
   case runParser
-         (CMS.runStateT (sc >> pProgram <* eof) (reenter pstate))
+         (CMS.runStateT (sc >> pProgram <* eof) (reenter f pstate))
          (maybe "<expr>" id f)
          sourceCode of
     (Left err') -> Left err'
@@ -50,13 +50,13 @@ readProgram f sourceCode pstate p =
 -- calls such as: `morloc typecheck -te "A -> B"`.
 readType :: MT.Text -> Either (ParseErrorBundle MT.Text Void) TypeU
 readType typeStr =
-  case runParser (CMS.runStateT (sc >> pTypeGen <* eof) (reenter emptyState)) "" typeStr of
+  case runParser (CMS.runStateT (sc >> pTypeGen <* eof) (reenter Nothing emptyState)) "" typeStr of
     Left err' -> Left err'
     Right (es, _) -> Right es
 
 -- prepare the state for reading of a new file (keeping past counters)
-reenter :: ParserState -> ParserState
-reenter p = p {stateMinPos = mkPos 1, stateAccepting = True}
+reenter :: Maybe Path -> ParserState -> ParserState
+reenter f p = p {stateMinPos = mkPos 1, stateAccepting = True, stateModulePath = f}
 
 -- | The output will be rolled into the final DAG of modules. There may be
 -- EITHER one implicit main module OR one or more named modules.
