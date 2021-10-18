@@ -133,7 +133,7 @@ realize s0 = do
   e@(SAnno (One (_, li)) (Idx _ gt)) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left 
-    (Idx _ _) -> Right <$> mapCM unmaybeIdx e
+    (Idx _ _) -> Right <$> propagateDown e
   where
   scoreSAnno
     :: [Lang]
@@ -281,10 +281,29 @@ realize s0 = do
   maxPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
   maxPairs xs = map (\(k, vs) -> (k, maximum vs)) $ groupSort xs
 
-  unmaybeIdx :: (Indexed (Maybe a)) -> MorlocMonad (Indexed a)
-  unmaybeIdx (Idx _ Nothing) = MM.throwError . CallTheMonkeys $ "Expected no Nothings"
-  unmaybeIdx (Idx i (Just x)) = return (Idx i x)
-
+  propagateDown
+    ::             (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+    -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
+  propagateDown (SAnno (One (_, (Idx _ Nothing))) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+  propagateDown e@(SAnno (One (_, Idx _ (Just lang0))) _) = f lang0 e where
+    f :: Lang ->     (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+      -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
+    f lang (SAnno (One (e, (Idx i Nothing))) g) = f lang (SAnno (One (e, (Idx i (Just lang)))) g)
+    f _ (SAnno (One (e, Idx i (Just lang))) g) = do 
+      e' <- case e of
+        (AccS x k) -> AccS <$> f lang x <*> pure k
+        (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
+        (LamS vs x) -> LamS vs <$> f lang x
+        (LstS xs) -> LstS <$> mapM (f lang) xs
+        (TupS xs) -> TupS <$> mapM (f lang) xs
+        (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
+        (UniS) -> return UniS
+        (VarS x) -> return (VarS x)
+        (NumS x) -> return (NumS x)
+        (LogS x) -> return (LogS x)
+        (StrS x) -> return (StrS x)
+        (CallS x) -> return (CallS x)
+      return (SAnno (One (e', Idx i lang)) g)
 
 -- | This function is called on trees that contain no language-specific
 -- components.  "GAST" refers to General Abstract Syntax Tree. The most common
