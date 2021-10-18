@@ -264,7 +264,7 @@ metaPackMap i = do
     p <- gets statePackers
     case GMap.lookup i p of
       (GMapJust p') -> return p'
-      _ -> error "impossible" -- all indices were originally linked to pacmaps, if no map is found, not even an empty one, then there is a bug
+      _ -> return Map.empty
 
 
 -- | This is currently only used in the C++ translator.
