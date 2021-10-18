@@ -551,8 +551,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] (drop (length xs) inputs)
             lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
-        return . ManifoldM m lambdaArgs $
-          ReturnM (AppM f (xs' ++ lambdaVals))
+        return . ManifoldM m (map snd args <> lambdaArgs) $
+          ReturnM (AppM f (xs' <> lambdaVals))
 
     -- case #3
     | not sameLanguage && fullyApplied = do
