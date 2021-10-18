@@ -16,6 +16,7 @@ module Morloc.Pretty
   , prettyPackMap
   , prettySAnno
   , prettySExpr
+  , prettyIndex
   ) where
 
 import Data.Text.Prettyprint.Doc.Render.Terminal
@@ -155,26 +156,36 @@ prettySAnno
   -> SAnno g f c
   -> Doc ann
 prettySAnno writeCon writeGen (SAnno e g)
-  = foldr (prettySExpr writeCon writeGen) ("G:" <+> writeGen g) e
+  = foldr (prettyCon writeCon writeGen) (writeGen g) e
+  where
+  prettyCon
+    :: Foldable f
+    => (c -> Doc ann)
+    -> (g -> Doc ann)
+    -> (SExpr g f c, c)
+    -> Doc ann
+    -> Doc ann
+  prettyCon fc fg (s, c) p = hang 2 . vsep $ [p, fc c, prettySExpr fc fg s]
 
 prettySExpr
   :: Foldable f
   => (c -> Doc ann)
   -> (g -> Doc ann)
-  -> (SExpr g f c, c)
+  -> (SExpr g f c)
   -> Doc ann
-  -> Doc ann
-prettySExpr fc fg (s, c) p = hang 2 . vsep $ [p, "C:" <+> fc c, f s] where
-  f (UniS) = "UniS"
-  f (VarS v) = "VarS:" <> pretty v
-  f (AccS x k ) = hang 2 . vsep $ ["AccS[" <> pretty k <> "]", prettySAnno fc fg x]
-  f (AppS x xs) = hang 2 . vsep $ ("AppS" <+> prettySAnno fc fg x) : map (prettySAnno fc fg) xs
-  f (LamS vs x) = hang 2 . vsep $ ["LamS" <+> hsep (map pretty vs), prettySAnno fc fg x]
-  f (LstS xs) = hang 2 . vsep $ ("LstS" : map (prettySAnno fc fg) xs)
-  f (TupS xs) = hang 2 . vsep $ ("TupS" : map (prettySAnno fc fg) xs)
-  f (NamS es)
-    = block 4 "NamS" (vsep [pretty k <+> "=" <+> prettySAnno fc fg x | (k, x) <- es])
-  f (NumS x) = "NumS(" <> viaShow x <> ")"
-  f (LogS x) = "LogS(" <> viaShow x <> ")"
-  f (StrS x) = "StrS(" <> viaShow x <> ")"
-  f (CallS src) = "Calls(" <> pretty src <> ")"
+prettySExpr fc fg x = case x of
+  (UniS) -> "UniS"
+  (VarS v) -> "VarS<" <> pretty v <> ">"
+  (AccS x k ) -> "AccS" <+> pretty k <+> parens (prettySAnno fc fg x)
+  (AppS x xs) -> "AppS" <+> parens (prettySAnno fc fg x) <+> tupled (map (prettySAnno fc fg) xs)
+  (LamS vs x) -> "LamS" <+> tupled (map pretty vs) <+> braces (prettySAnno fc fg x)
+  (LstS xs) -> "LstS" <+> tupled (map (prettySAnno fc fg) xs)
+  (TupS xs) -> "TupS" <+> tupled (map (prettySAnno fc fg) xs)
+  (NamS rs) -> "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettySAnno fc fg x) rs)
+  (NumS x) -> "NumS<" <> viaShow x <> ">"
+  (LogS x) -> "LogS<" <> viaShow x <> ">"
+  (StrS x) -> "StrS<" <> viaShow x <> ">"
+  (CallS src) -> "CallS<" <> pretty src <> ">"
+
+prettyIndex :: (a -> Doc ann) -> Indexed a ->  Doc ann
+prettyIndex f (Idx i x) = viaShow i <> "@" <> f x 

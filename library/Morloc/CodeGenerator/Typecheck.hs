@@ -24,7 +24,6 @@ import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Data.GMap as GMap
-import qualified Data.Text.Prettyprint.Doc.Render.Terminal as R
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -463,14 +462,19 @@ cut' i idx g = case cut idx g of
   (Left terr) -> cerr i terr
   (Right x) -> return x
 
+-- apply context to a SAnno
+applyCon :: (Functor cf, Functor f, Applicable c)
+         => Gamma -> SAnno g f (cf c) -> SAnno g f (cf c)
+applyCon g = mapSAnno id (fmap (apply g))
+
 ---- debugging
 
-enter :: Doc R.AnsiStyle -> MorlocMonad ()
+enter :: Doc ann -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
   debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
 
-say :: Doc R.AnsiStyle -> MorlocMonad ()
+say :: Doc ann -> MorlocMonad ()
 say d = do
   depth <- MM.getDepth
   debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
@@ -481,17 +485,23 @@ seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gam
 seeType :: TypeU -> MorlocMonad ()
 seeType t = say $ prettyGreenTypeU t
 
-leave :: Doc R.AnsiStyle -> MorlocMonad ()
+leave :: Doc ann -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
   debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
 
-debugLog :: Doc R.AnsiStyle -> MorlocMonad ()
+debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
   verbosity <- MM.gets stateVerbosity
   if verbosity > 0
     then (liftIO . putDoc) d
     else return ()
+
+peak :: (Show g, Show c) => SExpr g One c -> MorlocMonad ()
+peak = say . prettySExpr viaShow viaShow
+
+peakGen :: (Show g, Show c) => SAnno g One c -> MorlocMonad ()
+peakGen = say . prettySAnno viaShow viaShow
 
 zipCheck' i g es ts = do
   enter "zipCheck"
@@ -544,39 +554,3 @@ application' i l g es t = do
   seeType t'
   mapM_ peakGen es'
   return r
-
-
-prettyCon :: Show c => SExpr g One c -> Doc ann
-prettyCon (UniS) = "UniS"
-prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
-prettyCon (AccS x k ) = "AccS" <+> pretty k <+> parens (prettyGen x)
-prettyCon (AppS f xs) = "AppS" <+> parens (prettyGen f) <+> tupled (map prettyGen xs)
-prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> braces (prettyGen x)
-prettyCon (LstS xs) = "LstS" <+> tupled (map prettyGen xs)
-prettyCon (TupS xs) = "TupS" <+> tupled (map prettyGen xs)
-prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettyGen x) rs)
-prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
-prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
-prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
-prettyCon (CallS src) = "CallS<" <> pretty src <> ">"
-
-prettyGen :: Show c => SAnno g One c -> Doc ann
-prettyGen (SAnno (One (e, c)) _) = (prettyCon e <+> ":" <+> viaShow c)
-
-peak :: Show c => SExpr g One c -> MorlocMonad ()
-peak = say . prettyCon
-
-peakGen :: Show c => SAnno g One c -> MorlocMonad ()
-peakGen = say . prettyGen
-
-type2typeu :: Type -> TypeU
-type2typeu (VarT v) = VarU v
-type2typeu (UnkT v) = ForallU v (VarU v)
-type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
-type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
-type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]
-
--- apply context to a SAnno
-applyCon :: (Functor cf, Functor f, Applicable c)
-         => Gamma -> SAnno g f (cf c) -> SAnno g f (cf c)
-applyCon g = mapSAnno id (fmap (apply g))

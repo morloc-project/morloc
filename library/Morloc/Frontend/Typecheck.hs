@@ -13,7 +13,6 @@ import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Typecheck.Pretty
 import Morloc.Data.Doc
-import qualified Data.Text.Prettyprint.Doc.Render.Terminal as R
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
@@ -412,12 +411,12 @@ cut' i idx g = case cut idx g of
 
 ---- debugging
 
-enter :: Doc R.AnsiStyle -> MorlocMonad ()
+enter :: Doc ann -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
   debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
 
-say :: Doc R.AnsiStyle -> MorlocMonad ()
+say :: Doc ann -> MorlocMonad ()
 say d = do
   depth <- MM.getDepth
   debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
@@ -428,12 +427,12 @@ seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gam
 seeType :: TypeU -> MorlocMonad ()
 seeType t = say $ prettyGreenTypeU t
 
-leave :: Doc R.AnsiStyle -> MorlocMonad ()
+leave :: Doc ann -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
   debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
 
-debugLog :: Doc R.AnsiStyle -> MorlocMonad ()
+debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
   verbosity <- MM.gets stateVerbosity
   if verbosity > 0
@@ -491,31 +490,12 @@ application' i g es t = do
   mapM_ peakGen es'
   return r
 
-
-prettyCon :: SExpr g Many Int -> Doc ann
-prettyCon (UniS) = "UniS"
-prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
-prettyCon (AccS x k ) = "AccS" <+> pretty k <+> parens (prettyGen x)
-prettyCon (AppS f xs) = "AppS" <+> parens (prettyGen f) <+> tupled (map prettyGen xs)
-prettyCon (LamS vs x) = "LamS" <+> tupled (map pretty vs) <+> braces (prettyGen x)
-prettyCon (LstS xs) = "LstS" <+> tupled (map prettyGen xs)
-prettyCon (TupS xs) = "TupS" <+> tupled (map prettyGen xs)
-prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettyGen x) rs)
-prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
-prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
-prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
-prettyCon (CallS src) = "CallS<" <> pretty src <> ">"
-
-prettyGen :: SAnno g Many Int -> Doc ann
-prettyGen (SAnno (Many [(e, _)]) _) = prettyCon e
-prettyGen (SAnno (Many _) _) = "..."
-
-peak :: SExpr g Many Int -> MorlocMonad ()
-peak = say . prettyCon
+peak :: Foldable f => SExpr g f c -> MorlocMonad ()
+peak = say . prettySExpr (\_ -> "") (\_ -> "")
 -- peak x = say $ f x where
 
-peakGen :: SAnno g Many Int -> MorlocMonad ()
-peakGen = say . prettyGen
+peakGen :: Foldable f => SAnno g f c -> MorlocMonad ()
+peakGen = say . prettySAnno (\_ -> "") (\_ -> "")
 -- peak x = say $ f x where
 
 -- apply context to a SAnno

@@ -43,7 +43,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Typecheck (typecheck)
 import Morloc.Data.Doc
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
@@ -130,7 +130,7 @@ realize
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
                          (SAnno (Indexed Type) One (Indexed Lang)))
 realize s0 = do
-  e@(SAnno (One (_, li)) _) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
+  e@(SAnno (One (_, li)) (Idx _ gt)) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left 
     (Idx _ _) -> Right <$> mapCM unmaybeIdx e
@@ -197,7 +197,7 @@ realize s0 = do
       scoreMany' xs =
         let pairss = [ (maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
                      | SAnno (Many xs') _ <- xs]
-            langs' = unique (langs' <> (concat . map (map fst)) pairss)
+            langs' = unique (langs <> (concat . map (map fst)) pairss)
         in [(l1, sum [ maximumDef 0 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
                      | pairs <- pairss])
@@ -263,7 +263,7 @@ realize s0 = do
   collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
 
   chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
-  chooseLanguage l1 ss =
+  chooseLanguage l1 ss = do
     case maxBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
       Nothing -> return Nothing
       (Just (l3, _)) -> return (Just l3)
