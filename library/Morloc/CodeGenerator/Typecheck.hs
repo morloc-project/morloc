@@ -41,8 +41,10 @@ typecheck e0 = do
   e1 <- retrieveTypes e0
   (g, t, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
   -- show the final gamma and type if verbose
+  say "------ concrete typecheck finished ------"
   seeGamma g
   say $ viaShow t
+  say "-----------------------------------------"
   weaveAndResolve e2
 
 
@@ -51,7 +53,7 @@ typecheck e0 = do
 retrieveTypes
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Lang, [EType])))
-retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
+retrieveTypes e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
   ts <- case x0 of
     (CallS src) -> do
       mayts <- MM.metaTermTypes j
@@ -61,6 +63,11 @@ retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
           _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
         Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
     _ -> return []
+
+  say $ "retrieveTypes" <+> viaShow i
+  say $ viaShow ts
+  peakGen e
+  say $ "----------------------"
 
   x1 <- case x0 of
     UniS -> return UniS
@@ -78,7 +85,11 @@ retrieveTypes (SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
       return $ NamS (zip (map fst rs) xs')
     (CallS src) -> return $ CallS src
 
-  return $ SAnno (One (x1, Idx i (lang, ts))) g
+  let e2 = SAnno (One (x1, Idx i (lang, ts))) g
+  peakGen e2
+  say $ "======================"
+
+  return e2
 
 
 weaveAndResolve
@@ -146,8 +157,13 @@ checkG
        , TypeU
        , SAnno (Indexed Type) One (Indexed TypeU)
        )
-checkG g0 (SAnno (One (e0, Idx i (l, _))) m@(Idx _ tg)) t0 = do
+checkG g0 (SAnno (One (e0, Idx i (l, (et:ets)))) m) t0 = do
+  g1 <- subtype' i (etype et) t0 g0
+  checkG g1 (SAnno (One (e0, Idx i (l, ets))) m) (apply g1 t0)
+
+checkG g0 (SAnno (One (e0, Idx i (l, []))) m@(Idx _ tg)) t0 = do
   (g1, t1, e1) <- checkE i l g0 e0 t0
+  -- FIXME: I do need to somewhere ensure that concrete and general agree
   -- g2 <- subtype' i t1 (type2typeu tg) g1
   -- return $ (g2, t1, SAnno (One (e1, Idx i t1)) m)
   return (g1, t1, SAnno (One (e1, Idx i t1)) m)
@@ -484,15 +500,16 @@ zipCheck' i g es ts = do
   return r
 
 synthG' g x = do
-  -- enter "synthG"
+  enter "synthG"
   r <- synthG g x
-  -- leave "synthG"
+  leave "synthG"
   return r
 
 checkG' g x t = do
-  -- enter "checkG"
+  enter "checkG"
+  seeType t
   r <- checkG g x t
-  -- leave "checkG"
+  leave "checkG"
   return r
 
 synthE' i l g x = do
@@ -529,7 +546,7 @@ application' i l g es t = do
   return r
 
 
-prettyCon :: SExpr g One c -> Doc ann
+prettyCon :: Show c => SExpr g One c -> Doc ann
 prettyCon (UniS) = "UniS"
 prettyCon (VarS v) = "VarS<" <> pretty v <> ">"
 prettyCon (AccS x k ) = "AccS" <+> pretty k <+> parens (prettyGen x)
@@ -541,15 +558,15 @@ prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> pre
 prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
 prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
 prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
-prettyCon (CallS src) = "NumS<" <> pretty src <> ">"
+prettyCon (CallS src) = "CallS<" <> pretty src <> ">"
 
-prettyGen :: SAnno g One c -> Doc ann
-prettyGen (SAnno (One (e, _)) _) = prettyCon e
+prettyGen :: Show c => SAnno g One c -> Doc ann
+prettyGen (SAnno (One (e, c)) _) = (prettyCon e <+> ":" <+> viaShow c)
 
-peak :: SExpr g One c -> MorlocMonad ()
+peak :: Show c => SExpr g One c -> MorlocMonad ()
 peak = say . prettyCon
 
-peakGen :: SAnno g One c -> MorlocMonad ()
+peakGen :: Show c => SAnno g One c -> MorlocMonad ()
 peakGen = say . prettyGen
 
 type2typeu :: Type -> TypeU

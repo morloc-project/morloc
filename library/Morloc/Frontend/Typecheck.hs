@@ -504,7 +504,7 @@ prettyCon (NamS rs) = "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> pre
 prettyCon (NumS x) = "NumS<" <> viaShow x <> ">"
 prettyCon (LogS x) = "LogS<" <> viaShow x <> ">"
 prettyCon (StrS x) = "StrS<" <> viaShow x <> ">"
-prettyCon (CallS src) = "NumS<" <> pretty src <> ">"
+prettyCon (CallS src) = "CallS<" <> pretty src <> ">"
 
 prettyGen :: SAnno g Many Int -> Doc ann
 prettyGen (SAnno (Many [(e, _)]) _) = prettyCon e
