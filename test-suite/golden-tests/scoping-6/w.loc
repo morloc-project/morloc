@@ -1,0 +1,10 @@
+import pybase (add)
+
+export f
+
+-- where-scopes inherit the scope of their parent
+f = x where
+   x = y where
+       y = add a b
+       a = 1
+   b = 41

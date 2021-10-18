@@ -1,0 +1,12 @@
+import pybase (add)
+
+export f
+
+-- where-scopes inherit the scope of all their ancestors
+f = x where
+   x = y where
+       y = z where
+           z = add c (add a b)
+           a = 1
+       b = 2
+   c = 19

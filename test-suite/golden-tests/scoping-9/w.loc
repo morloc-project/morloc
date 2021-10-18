@@ -1,0 +1,11 @@
+import pybase (add)
+
+export f
+
+-- functions with or without signatures may be defined in the where-scope
+f = bar (bif 2) where
+
+   bif x = add x 10
+
+   bar :: Num -> Num
+   bar x = add x 30

@@ -1,0 +1,11 @@
+import pybase (add)
+
+export f
+
+-- cousins do not interfere with one another
+f = x where
+   x = add a b
+   a = add 19 c where
+       c = 1
+   b = add 1 c where
+       c = 21

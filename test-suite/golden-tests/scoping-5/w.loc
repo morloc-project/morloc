@@ -1,0 +1,8 @@
+import pybase (add)
+
+export f
+
+-- where scopes may be nested
+f = x where
+    x = y where
+        y = 42
