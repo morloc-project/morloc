@@ -16,9 +16,8 @@ module Morloc.Error () where
 
 import Morloc.Namespace
 import Morloc.Data.Doc
-import qualified Morloc.Pretty as P
+import Morloc.Pretty ()
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Typecheck.Pretty as MTP
 import Text.Megaparsec.Error (errorBundlePretty)
 
 -- TODO: fix this orphan instance
@@ -71,16 +70,16 @@ errmsg MissingSource = "MissingSource"
 -- serialization errors
 errmsg (MissingPacker place t)
   = "SerializationError: no packer found for type ("
-  <> render (P.prettyType (unCType t)) <> ") at " <> place 
+  <> render (pretty (unCType t)) <> ") at " <> place 
 errmsg (MissingUnpacker place t)
   = "SerializationError: no unpacker found for type ("
-  <> render (P.prettyType (unCType t)) <> ") at " <> place
+  <> render (pretty (unCType t)) <> ") at " <> place
 errmsg (CyclicPacker _) = "CyclicPacker"
 -- type extension errors
 errmsg (AmbiguousPacker _) = "AmbiguousPacker"
 errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
 errmsg (AmbiguousCast _ _) = "AmbiguousCast"
-errmsg (IllegalPacker t) = render $ "IllegalPacker:" <+> P.prettyGreenTypeU t
+errmsg (IllegalPacker t) = render $ "IllegalPacker:" <+> pretty t
 errmsg (IncompatibleRealization _) = "IncompatibleRealization"
 errmsg MissingAbstractType = "MissingAbstractType"
 errmsg ExpectedAbstractType = "ExpectedAbstractType"
@@ -98,20 +97,20 @@ showTypeError :: TypeError -> MT.Text
 showTypeError (SubtypeError t1 t2 msg)
   = render
   $ "SubtypeError:" <+> pretty msg <> "\n  "
-  <> "(" <> P.prettyGreenTypeU t1 <+> "<:" <+> P.prettyGreenTypeU t2 <> ")"
+  <> "(" <> pretty t1 <+> "<:" <+> pretty t2 <> ")"
 showTypeError (InstantiationError t1 t2 msg)
   = render
   $ "InstantiationError:" <+> pretty msg <> "\n  "
-  <> "(" <> P.prettyGreenTypeU t1 <+> "<:=" <+> P.prettyGreenTypeU t2 <> ")"
-showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> MTP.prettyGammaIndex gi
+  <> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")"
+showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> pretty gi
 showTypeError (OccursCheckFail _ _ _) = render $ "OccursCheckFail"
 showTypeError (Mismatch t1 t2 msg)
   = render
   $ "Mismatch"
-  <+> tupled ["t1=" <> P.prettyGreenTypeU t1, "t2=" <> P.prettyGreenTypeU t2]
+  <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
   <+> pretty msg
 showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v
-showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> P.prettyGreenTypeU t
+showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
 showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignature for" <+> pretty src 
 showTypeError (MissingGeneralSignature src) = render $ "MissingGeneralSignature for" <+> pretty src
 showTypeError (ApplicationOfNonFunction) = render $ "ApplicationOfNonFunction"

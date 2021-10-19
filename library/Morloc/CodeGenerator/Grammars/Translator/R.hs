@@ -36,7 +36,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es)
+  liftIO . putDoc $ (vsep $ map pretty es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es

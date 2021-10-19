@@ -40,8 +40,8 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
 import qualified Morloc.Data.GMap as GMap
-import Morloc.Typecheck.Pretty
 import qualified Control.Monad.State as CMS
+import Morloc.Pretty
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
@@ -315,7 +315,7 @@ instantiate ta tb@(ExistU v [] []) g1
           case lookupU v g1 of
             (Just _) -> return g1
             Nothing -> Left . InstantiationError ta tb . render
-              $ "Error in InstRSolve:" <+> tupled (map prettyGammaIndex (gammaContext g1))
+              $ "Error in InstRSolve:" <+> tupled (map pretty (gammaContext g1))
 
 
 --  g1 |- t
@@ -330,7 +330,7 @@ instantiate ta@(ExistU v [] []) tb g1
           case lookupU v g1 of
             (Just _) -> return g1
             Nothing -> Left . InstantiationError ta tb . render
-              $ "Error in InstLSolve:" <+> tupled (map prettyGammaIndex (gammaContext g1))
+              $ "Error in InstLSolve:" <+> tupled (map pretty (gammaContext g1))
 
 -- if defaults are involved, no solving is done, but the subtypes of parameters
 -- and defaults needs to be checked. 

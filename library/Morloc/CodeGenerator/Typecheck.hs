@@ -15,7 +15,6 @@ module Morloc.CodeGenerator.Typecheck
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
-import Morloc.Typecheck.Pretty
 import Morloc.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
@@ -35,15 +34,25 @@ typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 typecheck e0 = do
+
+  say "------ entering typechecker ------"
+  peakGen e0
+  say "---------------^------------------"
+
   -- -- FIXME: should typechecking here consider the packers?
   -- packers <- MM.gets statePackers
   e1 <- retrieveTypes e0
+
+  say "------ exprssion after type retrieval ------"
+  peakGen e1
+  say "----------------------^---------------------"
+
   (g, t, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
   -- show the final gamma and type if verbose
-  say "------ concrete typecheck finished ------"
+  say "------ exiting typechecker ------"
   seeGamma g
   say $ viaShow t
-  say "-----------------------------------------"
+  say "---------------^-----------------"
   weaveAndResolve e2
 
 
@@ -331,7 +340,7 @@ application i lang g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyCon g1) es1
       funType = apply g1 $ FunU (as1 <> remainder) b0
-  say $ "remainder:" <+> vsep (map prettyGreenTypeU remainder)
+  say $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
@@ -452,7 +461,7 @@ checkE i lang g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  say $ parens (prettyGreenTypeU a) <+> "<:" <+> parens (prettyGreenTypeU b)
+  say $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype a b g of
     (Left err') -> cerr i err'
     (Right x) -> return x
@@ -480,10 +489,10 @@ say d = do
   debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
 
 seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gammaContext g)))
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map pretty (gammaContext g)))
 
 seeType :: TypeU -> MorlocMonad ()
-seeType t = say $ prettyGreenTypeU t
+seeType t = say $ pretty t
 
 leave :: Doc ann -> MorlocMonad ()
 leave d = do
@@ -497,11 +506,14 @@ debugLog d = do
     then (liftIO . putDoc) d
     else return ()
 
-peak :: (Show g, Show c) => SExpr g One c -> MorlocMonad ()
-peak = say . prettySExpr viaShow viaShow
+peak :: (Show c) => SExpr (Indexed Type) One c -> MorlocMonad ()
+peak = say . prettySExpr viaShow showGen
 
-peakGen :: (Show g, Show c) => SAnno g One c -> MorlocMonad ()
-peakGen = say . prettySAnno viaShow viaShow
+peakGen :: (Show c) => SAnno (Indexed Type) One c -> MorlocMonad ()
+peakGen = say . prettySAnno viaShow showGen
+
+showGen :: (Indexed Type) -> Doc ann
+showGen (Idx _ t) = pretty t
 
 zipCheck' i g es ts = do
   enter "zipCheck"

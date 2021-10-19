@@ -7,24 +7,15 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 module Morloc.Pretty
-  ( prettyType
-  , prettyGreenType
-  , prettyGreenTypeU
-  , prettyScream
-  , prettyLinePrefixes
-  , prettyUnresolvedPacker
-  , prettyPackMap
+  ( prettyPackMap
   , prettySAnno
   , prettySExpr
-  , prettyIndex
   ) where
 
-import Data.Text.Prettyprint.Doc.Render.Terminal
 import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
-import qualified Data.Text.Prettyprint.Doc.Render.Terminal.Internal as Style
 
 instance Pretty MVar where
   pretty = pretty . unMVar
@@ -52,101 +43,68 @@ instance Pretty Source where
     <+> dquotes (pretty (srcName s))
     <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
-typeStyle =
-  Style.SetAnsiStyle
-    { Style.ansiForeground = Just (Vivid, Green)
-    , Style.ansiBackground = Nothing
-    , Style.ansiBold = Nothing
-    , Style.ansiItalics = Nothing
-    , Style.ansiUnderlining = Just Underlined
-    }
-
-screamStyle =
-  Style.SetAnsiStyle
-    { Style.ansiForeground = Just (Vivid, Red)
-    , Style.ansiBackground = Nothing
-    , Style.ansiBold = Nothing
-    , Style.ansiItalics = Nothing
-    , Style.ansiUnderlining = Just Underlined
-    }
-
-
-prettyGreenType :: Type -> Doc AnsiStyle
-prettyGreenType t = annotate typeStyle (prettyType t)
-
-forallVars :: TypeU -> [Doc AnsiStyle]
+forallVars :: TypeU -> [Doc ann]
 forallVars (ForallU (TV _ v) t) = pretty v : forallVars t
 forallVars _ = []
 
-forallBlock :: TypeU -> Doc AnsiStyle
+forallBlock :: TypeU -> Doc ann
 forallBlock (ForallU _ t) = forallBlock t
-forallBlock t = prettyGreenTypeU t
+forallBlock t = pretty t
 
 
-prettyScream :: MT.Text -> Doc AnsiStyle
-prettyScream x = annotate screamStyle (pretty x)
-
-prettyLinePrefixes :: MT.Text -> Doc ann -> Doc ann 
-prettyLinePrefixes prefix d = pretty . MT.unlines . map (\l -> prefix <> l) $ MT.lines (render d)
-
-
-class PrettyType a where
-  prettyType :: a -> Doc ann
-
-instance PrettyType Type where
-  prettyType (UnkT (TV _ v)) = "*" <> pretty v
-  prettyType (VarT (TV _ "Unit")) = "()"
-  prettyType (VarT v) = pretty v
-  prettyType (FunT [] t) = "<MISSING> -> " <> prettyType t
-  prettyType (FunT ts t) = encloseSep "(" ")" " -> " (map prettyType (ts <> [t]))
-  prettyType (AppT t ts) = hsep (map prettyType (t:ts))
-  prettyType (NamT o n ps rs)
+instance Pretty Type where
+  pretty (UnkT (TV _ v)) = "*" <> pretty v
+  pretty (VarT (TV _ "Unit")) = "()"
+  pretty (VarT v) = pretty v
+  pretty (FunT [] t) = "<MISSING> -> " <> pretty t
+  pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
+  pretty (AppT t ts) = hsep (map pretty (t:ts))
+  pretty (NamT o n ps rs)
     = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-              (vsep [pretty k <+> "::" <+> prettyType x | (k, x) <- rs])
+              (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
 
-instance PrettyType GType where
-  prettyType = prettyType . unGType
+instance Pretty GType where
+  pretty = pretty . unGType
 
-instance PrettyType CType where
-  prettyType = prettyType . unCType
+instance Pretty CType where
+  pretty = pretty . unCType
+
+instance Pretty TypeU where
+  pretty (ExistU v ts ds)
+    = angles $ (pretty v)
+    <> list (map pretty ts)
+    <> list (map pretty ds)
+  pretty t@(ForallU _ _) =
+    parens $ "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
+  pretty (VarU (TV _ "Unit")) = "()"
+  pretty (VarU v) = pretty v
+  pretty (FunU [] t) = parens $ "<MISSING> -> " <> pretty t
+  pretty (FunU ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
+  pretty (AppU t ts) = parens . hsep $ map pretty (t:ts)
+  pretty (NamU o n ps rs)
+      = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+                (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+
+instance Pretty UnresolvedPacker where
+  pretty (UnresolvedPacker v t fs rs) = vsep
+    [ pretty v
+    , pretty t 
+    , "forward:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) fs)
+    , "reverse:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) rs)
+    ]
 
 
-prettyGreenTypeU :: TypeU -> Doc AnsiStyle
-prettyGreenTypeU t = annotate typeStyle (prettyTypeU t)
 
-prettyTypeU :: TypeU -> Doc AnsiStyle
-prettyTypeU (ExistU v ts ds)
-  = angles $ (pretty v)
-  <> list (map prettyTypeU ts)
-  <> list (map prettyTypeU ds)
-prettyTypeU t@(ForallU _ _) =
-  parens $ "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-prettyTypeU (VarU (TV _ "Unit")) = "()"
-prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
-prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
-prettyTypeU (AppU t ts) = parens . hsep $ map prettyTypeU (t:ts)
-prettyTypeU (NamU o n ps rs)
-    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-              (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
-
-prettyUnresolvedPacker :: UnresolvedPacker -> Doc AnsiStyle
-prettyUnresolvedPacker (UnresolvedPacker v t fs rs) = vsep
-  [ pretty v
-  , prettyGreenTypeU t 
-  , "forward:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) fs)
-  , "reverse:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) rs)
-  ]
-
-prettyPackMap :: PackMap -> Doc AnsiStyle
+prettyPackMap :: PackMap -> Doc ann
 prettyPackMap m =  "----- pacmaps ----\n"
                 <> vsep (map f (Map.toList m))
                 <> "\n------------------" where
-  f :: ((TVar, Int), [UnresolvedPacker]) -> Doc AnsiStyle
+  f :: ((TVar, Int), [UnresolvedPacker]) -> Doc ann
   f ((v, i), ps) =
     block 4
       ("packmap" <+> pretty v <> parens (pretty i))
-      (vsep $ map prettyUnresolvedPacker ps)
+      (vsep $ map pretty ps)
+
 
 -- For example @prettySAnnoMany id Nothing@ for the most simple printer
 prettySAnno
@@ -187,5 +145,18 @@ prettySExpr fc fg x = case x of
   (StrS x) -> "StrS<" <> viaShow x <> ">"
   (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
 
-prettyIndex :: (a -> Doc ann) -> Indexed a ->  Doc ann
-prettyIndex f (Idx i x) = viaShow i <> "@" <> f x 
+instance Pretty a => Pretty (Indexed a) where
+  pretty (Idx i x) = parens (viaShow i <> ":" <+> pretty x) 
+
+instance Pretty GammaIndex where
+  pretty (VarG tv) = "VarG:" <+> pretty tv
+  pretty (ExistG tv ts ds)
+    = "ExistG:"
+    <+> pretty tv
+    <+> list (map (parens . pretty) ts)
+    <+> list (map (parens . pretty) ds)
+  pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
+  pretty (MarkG tv) = "MarkG:" <+> pretty tv
+  pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang
+  pretty (SerialConstraint t1 t2) = "UnsolvedConstraint:" <+> pretty t1 <+> pretty t2
+  pretty (AnnG v t) = pretty v <+> "::" <+> pretty t

@@ -18,7 +18,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
-import Morloc.CodeGenerator.Grammars.Common (prettyTypeP)
 import Morloc.CodeGenerator.Namespace (TypeP)
 import Morloc.Pretty
 import Morloc.Data.Doc
@@ -100,4 +99,4 @@ cmdTypecheck args _ config = do
 
     showConcrete = viaShow
 
-    showGeneral (Idx _ t) = prettyGreenTypeU t
+    showGeneral (Idx _ t) = pretty t

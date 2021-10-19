@@ -1028,28 +1028,28 @@ unitTypeTests =
 
     -- concrete functions
     , assertConcreteType
-        "C++ add"
+        "py - add"
         [r|
-        source cpp from "_" ("add")
-        add Cpp :: "double" -> "double" -> "double" 
+        source py from "_" ("add")
+        add py :: "float" -> "float" -> "float" 
         add :: Num -> Num -> Num
         export add
         |]
-        (FunP [ varp CppLang (Just "Num") "double"
-              , varp CppLang (Just "Num") "double" ]
-              ( varp CppLang (Just "Num") "double" ))
+        (FunP [ varp Python3Lang (Just "Num") "float"
+              , varp Python3Lang (Just "Num") "float" ]
+              ( varp Python3Lang (Just "Num") "float" ))
 
     , assertConcreteType
-        "C++: foo x = add 5 x"
+        "py - foo x = add 5 x"
         [r|
-        source cpp from "_" ("add")
-        add Cpp :: "double" -> "double" -> "double" 
+        source py from "_" ("add")
+        add py :: "float" -> "float" -> "float" 
         add :: Num -> Num -> Num
         foo x = add 5 x
         export foo
         |]
-        (FunP [ varp CppLang (Just "Num") "double" ]
-              ( varp CppLang (Just "Num") "double" ))
+        (FunP [ varp Python3Lang (Just "Num") "float" ]
+              ( varp Python3Lang (Just "Num") "float" ))
 
     , assertConcreteType
         "py: foo x = [x, id 1]"
@@ -1337,19 +1337,20 @@ unitTypeTests =
 
     -- concrete functions
     , assertConcreteType
-        "id over add"
+        "py - id over add"
         [r|
-        source cpp from "_" ("id", "add")
+        source py from "_" ("id", "add")
         add :: Num -> Num -> Num 
-        add Cpp :: "double" -> "double" -> "double"
+        add py :: "float" -> "float" -> "float"
         id :: a -> a
-        id Cpp :: a -> a
+        id py :: a -> a
         f x y = id (add x y)
         export f
         |]
-        (funp [ varp CppLang (Just "Num") "double"
-              , varp CppLang (Just "Num") "double"
-              , varp CppLang (Just "Num") "double"])
+        (funp [ varp Python3Lang (Just "Num") "float"
+              , varp Python3Lang (Just "Num") "float"
+              , varp Python3Lang (Just "Num") "float"])
+
     -- lambdas
     , assertGeneralType
         "function with parameterized types"

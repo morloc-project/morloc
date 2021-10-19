@@ -64,7 +64,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc . vsep $ "-- C++ translation --" : map prettyExprM es
+  liftIO . putDoc . vsep $ "-- C++ translation --" : map pretty es
 
   (srcDecl, srcSerial) <- generateSourcedSerializers es
 
@@ -482,7 +482,7 @@ showType recmap (NamP _ v@(PV _ _ "struct") _ rs) =
     (Just rec) -> recName rec <> typeParams recmap (zip (map snd (recFields rec)) (map snd rs))
     Nothing -> error "Should not happen"
 showType _ (NamP _ (PV _ _ s) ps _) =
-    pretty s <>  encloseSep "<" ">" "," (map prettyPVar ps)
+    pretty s <>  encloseSep "<" ">" "," (map pretty ps)
 
 typeParams :: RecMap -> [(Maybe TypeP, TypeP)] -> MDoc
 typeParams recmap ts

@@ -32,7 +32,6 @@ dependencies:
   - partial-order >=0.1.2.1 && <0.3
   - pretty-simple >=2.1.0.0 && <4.1
   - prettyprinter >=1.2.0.1 && <1.8
-  - prettyprinter-ansi-terminal >=1.1.1.2 && <1.2
   - process >=1.6.1.0 && <1.7
   - raw-strings-qq ==1.1.*
   - safe >=0.3.17 && <0.4

@@ -16,7 +16,7 @@ import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty ()
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
@@ -151,8 +151,8 @@ writeTypes (FunT inputs output)
 writeTypes t = [writeType Nothing t]
 
 writeType :: Maybe Int -> Type -> MDoc
-writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{prettyType t}}, "\n";|]
-writeType (Nothing) t = [idoc|print STDERR q{    return: #{prettyType t}}, "\n";|]
+writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{pretty t}}, "\n";|]
+writeType (Nothing) t = [idoc|print STDERR q{    return: #{pretty t}}, "\n";|]
 
 
 functionT :: FData -> MDoc

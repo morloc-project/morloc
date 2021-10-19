@@ -11,7 +11,6 @@ module Morloc.Frontend.Typecheck (typecheck, resolveTypes) where
 import Morloc.Frontend.Namespace
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
-import Morloc.Typecheck.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
@@ -280,7 +279,7 @@ application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyGen g1) es1 
       funType = apply g1 $ FunU (as1 <> remainder) b0
-  say $ "remainder:" <+> vsep (map prettyGreenTypeU remainder)
+  say $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
@@ -399,7 +398,7 @@ checkE i g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  say $ parens (prettyGreenTypeU a) <+> "<:" <+> parens (prettyGreenTypeU b)
+  say $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype a b g of
     (Left err') -> gerr i err'
     (Right x) -> return x
@@ -422,10 +421,10 @@ say d = do
   debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
 
 seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map prettyGammaIndex (gammaContext g)))
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map pretty (gammaContext g)))
 
 seeType :: TypeU -> MorlocMonad ()
-seeType t = say $ prettyGreenTypeU t
+seeType t = say $ pretty t
 
 leave :: Doc ann -> MorlocMonad ()
 leave d = do

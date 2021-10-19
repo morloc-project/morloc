@@ -403,7 +403,7 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
       return $ base { commandSubs = [(ps, v, [])] }
     generalSerial' _ _ (SAnno (One _) (Idx _ gt)) = do
       MM.throwError . OtherError . render $
-        "Cannot serialize general type:" <+> prettyType gt
+        "Cannot serialize general type:" <+> pretty gt
 
 
 -- | Add arguments that are required for each term. Unneeded arguments are
@@ -617,7 +617,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
   express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
     name' <- MM.metaName m
     MM.throwError . CallTheMonkeys . render $
-      "Invalid input to express' in module (" <> viaShow name' <> ") - type: " <> prettyTypeP t
+      "Invalid input to express' in module (" <> viaShow name' <> ") - type: " <> pretty t
 
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
