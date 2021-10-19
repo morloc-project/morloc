@@ -24,8 +24,8 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
-      -- , golden "import-1" "import-1"
-      --
+      , golden "import-1" "import-1"
+
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"
       , golden "argument-form-1-r" "argument-form-1-r"

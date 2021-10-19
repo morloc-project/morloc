@@ -954,7 +954,79 @@ unitTypeTests =
         foo 42
         |]
         (record [("x", num), ("y", str)])
-    -- language-specific primitives
+
+
+    -- language-specific containers and primitives
+    , assertConcreteType
+        "py: id [1, 2]"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = id [1, 2]
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "float"])
+
+    , assertConcreteType
+        "py: [id 1, 2]"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = [id 1, 2]
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "float"])
+
+    , assertConcreteType
+        "py: [id 1, id 2]"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = [id 1, id 2]
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "float"])
+
+    , assertConcreteType
+        "py: id (1, True)"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = id (1, True)
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
+              [varp Python3Lang (Just "Num") "float", varp Python3Lang (Just "Bool") "bool"])
+
+    , assertConcreteType
+        "py: (id 1, True)"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = (id 1, True)
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
+              [varp Python3Lang (Just "Num") "float", varp Python3Lang (Just "Bool") "bool"])
+
+    , assertConcreteType
+        "py: id (id 1, id True)"
+        [r|
+        source py from "_" ("id")
+        id :: a -> a
+        id py :: a -> a
+        foo = id (id 1, id True)
+        export foo
+        |]
+        (AppP (varp Python3Lang (Just "Tuple2") "tuple")
+              [varp Python3Lang (Just "Num") "float", varp Python3Lang (Just "Bool") "bool"])
+
+    -- concrete functions
     , assertConcreteType
         "C++ add"
         [r|
@@ -966,6 +1038,42 @@ unitTypeTests =
         (FunP [ varp CppLang (Just "Num") "double"
               , varp CppLang (Just "Num") "double" ]
               ( varp CppLang (Just "Num") "double" ))
+
+    , assertConcreteType
+        "C++: foo x = add 5 x"
+        [r|
+        source cpp from "_" ("add")
+        add Cpp :: "double" -> "double" -> "double" 
+        add :: Num -> Num -> Num
+        foo x = add 5 x
+        export foo
+        |]
+        (FunP [ varp CppLang (Just "Num") "double" ]
+              ( varp CppLang (Just "Num") "double" ))
+
+    , assertConcreteType
+        "py: foo x = [x, id 1]"
+        [r|
+        source py from "_" ("id")
+        id py :: a -> a
+        id :: a -> a
+        foo x = [x, id 1]
+        export foo
+        |]
+        (FunP [varp Python3Lang (Just "Num") "float"]
+              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "float"] ))
+
+    , assertConcreteType
+        "py: foo x = [id 1, x]"
+        [r|
+        source py from "_" ("id")
+        id py :: a -> a
+        id :: a -> a
+        foo x = [id 1, x]
+        export foo
+        |]
+        (FunP [varp Python3Lang (Just "Num") "float"]
+              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "float"] ))
 
     -- functions
     , assertGeneralType
@@ -1688,6 +1796,7 @@ unitTypeTests =
                b = 42
            z = 19
       |]
+
     -- , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
     --   [r|
     --      module Foo
@@ -2063,4 +2172,5 @@ unitTypeTests =
     --        snd [1,2,3]
     --     |]
     --     [num, varc RLang "numeric"]
+
     ]
