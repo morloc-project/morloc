@@ -165,7 +165,7 @@ prettySAnno writeCon writeGen (SAnno e g)
     -> (SExpr g f c, c)
     -> Doc ann
     -> Doc ann
-  prettyCon fc fg (s, c) p = hang 2 . vsep $ [p, fc c, prettySExpr fc fg s]
+  prettyCon fc fg (s, c) p = vsep $ [p, fc c, prettySExpr fc fg s]
 
 prettySExpr
   :: Foldable f
@@ -185,7 +185,7 @@ prettySExpr fc fg x = case x of
   (NumS x) -> "NumS<" <> viaShow x <> ">"
   (LogS x) -> "LogS<" <> viaShow x <> ">"
   (StrS x) -> "StrS<" <> viaShow x <> ">"
-  (CallS src) -> "CallS<" <> pretty src <> ">"
+  (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"
 
 prettyIndex :: (a -> Doc ann) -> Indexed a ->  Doc ann
 prettyIndex f (Idx i x) = viaShow i <> "@" <> f x 
