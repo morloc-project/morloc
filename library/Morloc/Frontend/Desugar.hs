@@ -167,7 +167,6 @@ desugarType h _ _ = f
   --
   f t@(AppU (VarU v) ts) =
     case Map.lookup v h of
-      (Just []) -> AppU (VarU v) <$> mapM f ts
       (Just (t':ts')) -> do
         (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
         if length ts == length vs
@@ -175,7 +174,7 @@ desugarType h _ _ = f
           then f (foldr parsub (chooseExistential t) (zip vs (map chooseExistential ts)))
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
       -- default types like "Int" or "Tuple2" won't be in the map
-      Nothing -> return t
+      _ -> AppU (VarU v) <$> mapM f ts
 
   -- type Foo = A     
   -- f :: Foo -> B    
