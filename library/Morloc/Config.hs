@@ -50,7 +50,7 @@ loadDefaultMorlocConfig = do
       (MT.unpack $ defaults H.! "home")
       (MT.unpack $ defaults H.! "source")
       (MT.unpack $ defaults H.! "tmpdir")
-      "python" -- lang_python3
+      "python3" -- lang_python3
       "Rscript" -- lang_R
       "perl" -- lang_perl
 
