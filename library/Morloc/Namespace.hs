@@ -358,7 +358,6 @@ data TypeError
   | TooManyArguments
   | EmptyExpression
   | MissingFeature Text
-  deriving (Ord, Eq, Show)
 
 data MorlocError
   -- | An error that is associated with an expression index

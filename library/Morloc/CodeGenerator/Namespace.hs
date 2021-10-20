@@ -31,6 +31,7 @@ import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Set as Set
 import Morloc.Data.Doc
+import Morloc.Pretty ()
 
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
@@ -297,67 +298,66 @@ instance Pretty Argument where
     "PassThrough" <+> "x" <> pretty i
 
 instance Pretty (ExprM f) where
-  pretty e = undefined
-  -- pretty e0 = (vsep . punctuate line . fst $ f e0) <> line where
-  --   manNamer i = "m" <> pretty i
-  --
-    -- f (ManifoldM m args e) =
-    --   let (ms', body) = f e
-    --       decl = manNamer m <> tupled (map pretty args)
-    --       mdoc = block 4 decl body
-    --   in (mdoc : ms', manNamer m)
-    -- f (PoolCallM t _ cmds args) =
-    --   let poolArgs = cmds ++ map pretty args
-    --   in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> pretty t)
-    -- f (ForeignInterfaceM t e) =
-    --   let (ms, _) = f e
-    --   in (ms, "ForeignInterface :: " <> pretty t)
-    -- f (LetM v e1 e2) =
-    --   let (ms1', e1') = f e1
-    --       (ms2', e2') = f e2
-    --   in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
-    -- f (AppM fun xs) =
-    --   let (ms', fun') = f fun
-    --       (mss', xs') = unzip $ map f xs
-    --   in (ms' ++ concat mss', fun' <> tupled xs')
-    -- f (SrcM _ src) = ([], pretty (srcName src))
-    -- f (LamM args e) =
-    --   let (ms', e') = f e
-    --       vsFull = map pretty args
-    --       vsNames = map (\r -> "x" <> pretty (argId r)) args
-    --   in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
-    -- f (BndVarM _ i) = ([], "x" <> pretty i)
-    -- f (LetVarM _ i) = ([], "a" <> pretty i)
-    -- f (AccM e k) =
-    --   let (ms, e') = f e
-    --   in (ms, parens e' <> "@" <> pretty k)
-    -- f (ListM _ es) =
-    --   let (mss', es') = unzip $ map f es
-    --   in (concat mss', list es')
-    -- f (TupleM _ es) =
-    --   let (mss', es') = unzip $ map f es
-    --   in (concat mss', tupled es')
-    -- f (RecordM c entries) =
-    --   let (mss', es') = unzip $ map (f . snd) entries
-    --       entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    --   in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
-    -- f (LogM _ x) = ([], if x then "true" else "false")
-    -- f (NumM _ x) = ([], viaShow x)
-    -- f (StrM _ x) = ([], dquotes $ pretty x)
-    -- f (NullM _) = ([], "null")
-    -- f (SerializeM _ e) =
-    --   let (ms, e') = f e
-    --   in (ms, "PACK" <> tupled [e'])
-    -- f (DeserializeM _ e) =
-    --   let (ms, e') = f e
-    --   in (ms, "UNPACK" <> tupled [e'])
-    -- f (ReturnM e) =
-    --   let (ms, e') = f e
-    --   in (ms, "RETURN(" <> e' <> ")")
-    --
-    -- prettyRecordPVar (Serial _) = "HELPME_ME_SERIAL_RECORD"
-    -- prettyRecordPVar (Native _) = "HELPME_ME_NATIVE_RECORD"
-    -- prettyRecordPVar _ = "<UNKNOWN RECORD>"
+  pretty e0 = (vsep . punctuate line . fst $ f e0) <> line where
+    manNamer i = "m" <> pretty i
+
+    f (ManifoldM m args e) =
+      let (ms', body) = f e
+          decl = manNamer m <> tupled (map pretty args)
+          mdoc = block 4 decl body
+      in (mdoc : ms', manNamer m)
+    f (PoolCallM t _ cmds args) =
+      let poolArgs = cmds ++ map pretty args
+      in ([], "PoolCallM" <> list (map (pretty . render) poolArgs) <+> "::" <+> pretty t)
+    f (ForeignInterfaceM t e) =
+      let (ms, _) = f e
+      in (ms, "ForeignInterface :: " <> pretty t)
+    f (LetM v e1 e2) =
+      let (ms1', e1') = f e1
+          (ms2', e2') = f e2
+      in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
+    f (AppM fun xs) =
+      let (ms', fun') = f fun
+          (mss', xs') = unzip $ map f xs
+      in (ms' ++ concat mss', fun' <> tupled xs')
+    f (SrcM _ src) = ([], pretty (srcName src))
+    f (LamM args e) =
+      let (ms', e') = f e
+          vsFull = map pretty args
+          vsNames = map (\r -> "x" <> pretty (argId r)) args
+      in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
+    f (BndVarM _ i) = ([], "x" <> pretty i)
+    f (LetVarM _ i) = ([], "a" <> pretty i)
+    f (AccM e k) =
+      let (ms, e') = f e
+      in (ms, parens e' <> "@" <> pretty k)
+    f (ListM _ es) =
+      let (mss', es') = unzip $ map f es
+      in (concat mss', list es')
+    f (TupleM _ es) =
+      let (mss', es') = unzip $ map f es
+      in (concat mss', tupled es')
+    f (RecordM c entries) =
+      let (mss', es') = unzip $ map (f . snd) entries
+          entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+      in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
+    f (LogM _ x) = ([], if x then "true" else "false")
+    f (NumM _ x) = ([], viaShow x)
+    f (StrM _ x) = ([], dquotes $ pretty x)
+    f (NullM _) = ([], "null")
+    f (SerializeM _ e) =
+      let (ms, e') = f e
+      in (ms, "PACK" <> tupled [e'])
+    f (DeserializeM _ e) =
+      let (ms, e') = f e
+      in (ms, "UNPACK" <> tupled [e'])
+    f (ReturnM e) =
+      let (ms, e') = f e
+      in (ms, "RETURN(" <> e' <> ")")
+
+    prettyRecordPVar (Serial _) = "HELPME_ME_SERIAL_RECORD"
+    prettyRecordPVar (Native _) = "HELPME_ME_NATIVE_RECORD"
+    prettyRecordPVar _ = "<UNKNOWN RECORD>"
 
 instance Pretty PVar where
   pretty (PV _ (Just g) t) = parens (pretty g <+> pretty t)

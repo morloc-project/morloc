@@ -20,100 +20,99 @@ import Morloc.Pretty ()
 import qualified Morloc.Data.Text as MT
 import Text.Megaparsec.Error (errorBundlePretty)
 
--- TODO: fix this orphan instance
 instance Show MorlocError where
-  show = MT.unpack . errmsg
+  show = MT.unpack . render . pretty
 
-errmsg :: MorlocError -> MT.Text
-errmsg (IndexedError i e) = render $ "At index" <+> pretty i <> ":" <+> pretty (errmsg e)
-errmsg (NotImplemented msg) = "Not yet implemented: " <> msg
-errmsg (NotSupported msg) = "NotSupported: " <> msg
-errmsg (UnknownLanguage lang) =
-  "'" <> lang <> "' is not recognized as a supported language"
-errmsg (SyntaxError err') = "SyntaxError: " <> MT.pack (errorBundlePretty err')
-errmsg (SerializationError t) = "SerializationError: " <> t
-errmsg (CannotLoadModule t) = "CannotLoadModule: " <> t
-errmsg (SystemCallError cmd loc msg) =
-  "System call failed at (" <>
-  loc <> "):\n" <> " cmd> " <> cmd <> "\n" <> " msg>\n" <> msg
-errmsg (PoolBuildError msg) = "PoolBuildError: " <> msg
-errmsg (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> MT.show' v
-errmsg (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> MT.unwords (map MT.show' vs)
-errmsg (BadTypeAliasParameters (TV _ v) exp' obs)
-  =  "BadTypeAliasParameters: for type alias " <> MT.show' v
-  <> " expected " <> MT.show' exp'
-  <> " parameters but found " <> MT.show' obs
-errmsg (ConflictingTypeAliases t1 t2)
-  = "ConflictingTypeAliases: (" <> MT.show' t1 <> ", " <> MT.show' t2 <> ")" 
-errmsg (CallTheMonkeys msg) =
-  "There is a bug in the code, send this message to the maintainer: " <> msg
-errmsg (GeneratorError msg) = "GeneratorError: " <> msg
-errmsg (ConcreteTypeError err') = "Concrete type error: " <> showTypeError err'
-errmsg (GeneralTypeError err') = "General type error: " <> showTypeError err'
-errmsg ToplevelRedefinition = "ToplevelRedefinition"
-errmsg (OtherError msg) = "OtherError: " <> msg
--- TODO: this will be a common class of errors and needs an informative message
-errmsg (IncompatibleGeneralType _ _) = "Incompatible general types"
--- container errors
-errmsg EmptyTuple = "EmptyTuple"
-errmsg TupleSingleton = "TupleSingleton"
-errmsg EmptyRecord = "EmptyRecord"
--- module errors
-errmsg (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> MT.unwords (map unMVar mv) 
-errmsg (NestedModule name') = "Nested modules are currently illegal: " <> unMVar name'
-errmsg (BadImport mv (EV v)) = "BadImport: " <> unMVar mv <> "::" <> v
-errmsg (CannotFindModule name') = "Cannot find morloc module '" <> unMVar name' <> "'"
-errmsg CyclicDependency = "CyclicDependency"
-errmsg (SelfImport _) = "SelfImport"
-errmsg BadRealization = "BadRealization"
-errmsg MissingSource = "MissingSource"
--- serialization errors
-errmsg (MissingPacker place t)
-  = "SerializationError: no packer found for type ("
-  <> render (pretty (unCType t)) <> ") at " <> place 
-errmsg (MissingUnpacker place t)
-  = "SerializationError: no unpacker found for type ("
-  <> render (pretty (unCType t)) <> ") at " <> place
-errmsg (CyclicPacker _) = "CyclicPacker"
--- type extension errors
-errmsg (AmbiguousPacker _) = "AmbiguousPacker"
-errmsg (AmbiguousUnpacker _) = "AmbiguousUnpacker"
-errmsg (AmbiguousCast _ _) = "AmbiguousCast"
-errmsg (IllegalPacker t) = render $ "IllegalPacker:" <+> pretty t
-errmsg (IncompatibleRealization _) = "IncompatibleRealization"
-errmsg MissingAbstractType = "MissingAbstractType"
-errmsg ExpectedAbstractType = "ExpectedAbstractType"
-errmsg CannotInferConcretePrimitiveType = "CannotInferConcretePrimitiveType"
-errmsg ToplevelStatementsHaveNoLanguage = "ToplevelStatementsHaveNoLanguage"
-errmsg InconsistentWithinTypeLanguage = "InconsistentWithinTypeLanguage"
-errmsg CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
-errmsg ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
-errmsg CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
-errmsg IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
-errmsg (DagMissingKey msg) = "DagMissingKey: " <> msg
-errmsg TooManyRealizations = "TooManyRealizations"
+instance Show TypeError where
+  show = MT.unpack . render . pretty
 
-showTypeError :: TypeError -> MT.Text
-showTypeError (SubtypeError t1 t2 msg)
-  = render
-  $ "SubtypeError:" <+> pretty msg <> "\n  "
-  <> "(" <> pretty t1 <+> "<:" <+> pretty t2 <> ")"
-showTypeError (InstantiationError t1 t2 msg)
-  = render
-  $ "InstantiationError:" <+> pretty msg <> "\n  "
-  <> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")"
-showTypeError (EmptyCut gi) = render $ "EmptyCut:" <+> pretty gi
-showTypeError (OccursCheckFail _ _ _) = render $ "OccursCheckFail"
-showTypeError (Mismatch t1 t2 msg)
-  = render
-  $ "Mismatch"
-  <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
-  <+> pretty msg
-showTypeError (UnboundVariable v) = render $ "UnboundVariable:" <+> pretty v
-showTypeError (KeyError k t) = render $ "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
-showTypeError (MissingConcreteSignature src) = render $ "MissingConcreteSignature for" <+> pretty src 
-showTypeError (MissingGeneralSignature src) = render $ "MissingGeneralSignature for" <+> pretty src
-showTypeError (ApplicationOfNonFunction) = render $ "ApplicationOfNonFunction"
-showTypeError (TooManyArguments) = render $ "TooManyArguments"
-showTypeError (MissingFeature msg) = "MissingFeature: " <> msg
-showTypeError EmptyExpression = render $ "EmptyExpression"
+instance Pretty MorlocError where
+  pretty (IndexedError i e) = "At index" <+> pretty i <> ":" <+> pretty e
+  pretty (NotImplemented msg) = "Not yet implemented: " <> pretty msg
+  pretty (NotSupported msg) = "NotSupported: " <> pretty msg
+  pretty (UnknownLanguage lang) =
+    "'" <> pretty lang <> "' is not recognized as a supported language"
+  pretty (SyntaxError err') = "SyntaxError: " <> pretty (errorBundlePretty err')
+  pretty (SerializationError t) = "SerializationError: " <> pretty t
+  pretty (CannotLoadModule t) = "CannotLoadModule: " <> pretty t
+  pretty (SystemCallError cmd loc msg) =
+    "System call failed at (" <>
+    pretty loc <> "):\n" <> " cmd> " <> pretty cmd <> "\n" <> " msg>\n" <> pretty msg
+  pretty (PoolBuildError msg) = "PoolBuildError: " <> pretty msg
+  pretty (SelfRecursiveTypeAlias v) = "SelfRecursiveTypeAlias: " <> pretty v
+  pretty (MutuallyRecursiveTypeAlias vs) = "MutuallyRecursiveTypeAlias: " <> tupled (map pretty vs)
+  pretty (BadTypeAliasParameters (TV _ v) exp' obs)
+    =  "BadTypeAliasParameters: for type alias " <> pretty v
+    <> " expected " <> pretty exp'
+    <> " parameters but found " <> pretty obs
+  pretty (ConflictingTypeAliases t1 t2)
+    = "ConflictingTypeAliases: (" <> pretty t1 <> ", " <> pretty t2 <> ")" 
+  pretty (CallTheMonkeys msg) =
+    "There is a bug in the code, send this message to the maintainer: " <> pretty msg
+  pretty (GeneratorError msg) = "GeneratorError: " <> pretty msg
+  pretty (ConcreteTypeError err') = "Concrete type error: " <> pretty err'
+  pretty (GeneralTypeError err') = "General type error: " <> pretty err'
+  pretty ToplevelRedefinition = "ToplevelRedefinition"
+  pretty (OtherError msg) = "OtherError: " <> pretty msg
+  -- TODO: this will be a common class of errors and needs an informative message
+  pretty (IncompatibleGeneralType _ _) = "Incompatible general types"
+  -- container errors
+  pretty EmptyTuple = "EmptyTuple"
+  pretty TupleSingleton = "TupleSingleton"
+  pretty EmptyRecord = "EmptyRecord"
+  -- module errors
+  pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv) 
+  pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
+  pretty (BadImport mv ev) = "BadImport: " <> pretty mv <> "::" <> pretty ev
+  pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
+  pretty CyclicDependency = "CyclicDependency"
+  pretty (SelfImport _) = "SelfImport"
+  pretty BadRealization = "BadRealization"
+  pretty MissingSource = "MissingSource"
+  -- serialization errors
+  pretty (MissingPacker place t)
+    = "SerializationError: no packer found for type ("
+    <> pretty t <> ") at " <> pretty place 
+  pretty (MissingUnpacker place t)
+    = "SerializationError: no unpacker found for type ("
+    <> pretty t <> ") at " <> pretty place
+  pretty (CyclicPacker _) = "CyclicPacker"
+  -- type extension errors
+  pretty (AmbiguousPacker _) = "AmbiguousPacker"
+  pretty (AmbiguousUnpacker _) = "AmbiguousUnpacker"
+  pretty (AmbiguousCast _ _) = "AmbiguousCast"
+  pretty (IllegalPacker t) = "IllegalPacker:" <+> pretty t
+  pretty (IncompatibleRealization _) = "IncompatibleRealization"
+  pretty MissingAbstractType = "MissingAbstractType"
+  pretty ExpectedAbstractType = "ExpectedAbstractType"
+  pretty CannotInferConcretePrimitiveType = "CannotInferConcretePrimitiveType"
+  pretty ToplevelStatementsHaveNoLanguage = "ToplevelStatementsHaveNoLanguage"
+  pretty InconsistentWithinTypeLanguage = "InconsistentWithinTypeLanguage"
+  pretty CannotInferLanguageOfEmptyRecord = "CannotInferLanguageOfEmptyRecord"
+  pretty ConflictingSignatures = "ConflictingSignatures: currently a given term can have only one type per language"
+  pretty CompositionsMustBeGeneral = "CompositionsMustBeGeneral"
+  pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
+  pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
+  pretty TooManyRealizations = "TooManyRealizations"
+
+instance Pretty TypeError where
+  pretty (SubtypeError t1 t2 msg)
+    = "SubtypeError:" <+> pretty msg <> "\n  "
+    <> "(" <> pretty t1 <+> "<:" <+> pretty t2 <> ")"
+  pretty (InstantiationError t1 t2 msg)
+    = "InstantiationError:" <+> pretty msg <> "\n  "
+    <> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")"
+  pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
+  pretty (OccursCheckFail _ _ _) = "OccursCheckFail"
+  pretty (Mismatch t1 t2 msg)
+    = "Mismatch"
+    <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
+    <+> pretty msg
+  pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
+  pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
+  pretty (MissingConcreteSignature src) = "MissingConcreteSignature for" <+> pretty src 
+  pretty (MissingGeneralSignature src) = "MissingGeneralSignature for" <+> pretty src
+  pretty (ApplicationOfNonFunction) = "ApplicationOfNonFunction"
+  pretty (TooManyArguments) = "TooManyArguments"
+  pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
+  pretty EmptyExpression = "EmptyExpression"

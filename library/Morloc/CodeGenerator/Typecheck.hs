@@ -39,65 +39,80 @@ typecheck e0 = do
   peakGen e0
   say "---------------^------------------"
 
+  let g0 = Gamma {gammaCounter = 0, gammaContext = []}
+
   -- -- FIXME: should typechecking here consider the packers?
   -- packers <- MM.gets statePackers
-  e1 <- retrieveTypes e0
+  (g1, e1) <- retrieveTypes g0 e0
 
   say "------ exprssion after type retrieval ------"
   peakGen e1
   say "----------------------^---------------------"
 
-  (g, t, e2) <- synthG (Gamma {gammaCounter = 0, gammaContext = []}) e1
+  (g2, t, e2) <- synthG g1 e1
   -- show the final gamma and type if verbose
   say "------ exiting typechecker ------"
-  seeGamma g
-  say $ viaShow t
+  seeGamma g2
+  say $ pretty t
   say "---------------^-----------------"
   weaveAndResolve e2
-
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
 retrieveTypes
-  :: SAnno (Indexed Type) One (Indexed Lang)
-  -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Lang, [EType])))
-retrieveTypes e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
-  ts <- case x0 of
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed Lang)
+  -> MorlocMonad (Gamma, SAnno (Indexed Type) One (Indexed (Lang, [EType])))
+retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
+  (g1, ts) <- case x0 of
     (CallS src) -> do
       mayts <- MM.metaTermTypes j
       case fmap termConcrete mayts of
         (Just ts) -> case [es | (_, es, Just (Idx _ src')) <- ts, src' == src] of
-          [es] -> return es
+          [es] -> do
+              let (g1', ts') = statefulMap rename g0 (map etype es)
+              return $ (g1', zipWith (\e t -> e {etype = t}) es ts')
           _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
         Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
-    _ -> return []
+    _ -> return (g0, [])
 
-  say $ "retrieveTypes" <+> viaShow i
-  say $ viaShow ts
+  say $ "retrieveTypes" <+> pretty i
+  say $ pretty ts
   peakGen e
   say $ "----------------------"
 
-  x1 <- case x0 of
-    UniS -> return UniS
-    (VarS v) -> return $ VarS v
-    (AccS x k) -> AccS <$> retrieveTypes x <*> pure k
-    (LstS xs) -> LstS <$> mapM retrieveTypes xs
-    (TupS xs) -> TupS <$> mapM retrieveTypes xs
-    (LamS vs f) -> LamS vs <$> retrieveTypes f
-    (AppS f xs) -> AppS <$> retrieveTypes f <*> mapM retrieveTypes xs
-    (NumS x) -> return $ NumS x
-    (LogS x) -> return $ LogS x
-    (StrS x) -> return $ StrS x
+  (g2, x1) <- case x0 of
+    UniS -> return (g1, UniS)
+    (VarS v) -> return $ (g1, VarS v)
+    (AccS x k) -> do
+      (g', x') <- retrieveTypes g1 x
+      return (g', AccS x' k)
+    (LstS xs) -> do
+      (g', xs') <- statefulMapM retrieveTypes g1 xs
+      return (g', LstS xs')
+    (TupS xs) -> do
+      (g', xs') <- statefulMapM retrieveTypes g1 xs
+      return (g', TupS xs')
+    (LamS vs x) -> do
+      (g', x') <- retrieveTypes g1 x
+      return (g', LamS vs x')
+    (AppS x xs) -> do
+      (g', x') <- retrieveTypes g1 x
+      (g'', xs') <- statefulMapM retrieveTypes g' xs
+      return (g'', AppS x' xs')
+    (NumS x) -> return $ (g1, NumS x)
+    (LogS x) -> return $ (g1, LogS x)
+    (StrS x) -> return $ (g1, StrS x)
     (NamS rs) -> do
-      xs' <- mapM (retrieveTypes . snd) rs
-      return $ NamS (zip (map fst rs) xs')
-    (CallS src) -> return $ CallS src
+      (g', xs') <- statefulMapM retrieveTypes g1 (map snd rs)
+      return $ (g', NamS (zip (map fst rs) xs'))
+    (CallS src) -> return $ (g1, CallS src)
 
   let e2 = SAnno (One (x1, Idx i (lang, ts))) g
   peakGen e2
   say $ "======================"
 
-  return e2
+  return (g2, e2)
 
 
 weaveAndResolve
@@ -506,14 +521,14 @@ debugLog d = do
     then (liftIO . putDoc) d
     else return ()
 
-peak :: (Show c) => SExpr (Indexed Type) One c -> MorlocMonad ()
-peak = say . prettySExpr viaShow showGen
+peak :: (Pretty c) => SExpr (Indexed Type) One c -> MorlocMonad ()
+peak = say . prettySExpr pretty showGen
 
-peakGen :: (Show c) => SAnno (Indexed Type) One c -> MorlocMonad ()
-peakGen = say . prettySAnno viaShow showGen
+peakGen :: (Pretty c) => SAnno (Indexed Type) One c -> MorlocMonad ()
+peakGen = say . prettySAnno pretty showGen
 
 showGen :: (Indexed Type) -> Doc ann
-showGen (Idx _ t) = pretty t
+showGen (Idx _ t) = parens (pretty t)
 
 zipCheck' i g es ts = do
   enter "zipCheck"

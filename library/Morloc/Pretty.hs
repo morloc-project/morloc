@@ -16,6 +16,7 @@ import Morloc.Data.Doc
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 instance Pretty MVar where
   pretty = pretty . unMVar
@@ -68,6 +69,27 @@ instance Pretty GType where
 
 instance Pretty CType where
   pretty = pretty . unCType
+
+instance Pretty EType where
+  pretty (EType t (Set.toList -> ps) (Set.toList -> cs)) = case (ps, cs) of 
+    ([], []) -> pretty t
+    _ -> parens (psStr ps <> pretty t <> csStr cs)
+    where
+      psStr [] = ""
+      psStr [x] = pretty x <+> "=> "
+      psStr xs = tupled (map pretty xs) <+> "=> "
+
+      csStr [] = ""
+      csStr xs = " |" <+> hsep (punctuate semi (map pretty xs))
+
+instance Pretty Property where
+  pretty Pack = "pack"
+  pretty Unpack = "unpack"
+  pretty Cast = "cast"
+  pretty (GeneralProperty ts) = hsep (map pretty ts)
+
+instance Pretty Constraint where
+  pretty (Con x) = pretty x
 
 instance Pretty TypeU where
   pretty (ExistU v ts ds)

@@ -65,9 +65,3 @@ instance Pretty Expr where
         case Set.toList (econs e) of
           [] -> ""
           xs -> " where" <+> tupled (map (\(Con x) -> pretty x) xs)
-
-instance Pretty Property where
-  pretty Pack = "pack"
-  pretty Unpack = "unpack"
-  pretty Cast = "cast"
-  pretty (GeneralProperty ts) = hsep (map pretty ts)
