@@ -49,13 +49,14 @@ typecheck e0 = do
   peakGen e1
   say "----------------------^---------------------"
 
-  (g2, t, e2) <- synthG g1 e1
+  (g2, t, e2) <- synthG g1 e1 
+
   -- show the final gamma and type if verbose
   say "------ exiting typechecker ------"
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve e2
+  weaveAndResolve (applyCon g2 e2)
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.

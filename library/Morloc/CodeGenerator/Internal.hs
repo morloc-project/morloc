@@ -61,12 +61,14 @@ w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 
 
 weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
-weaveResolvedTypes g0 t0 = case (langOf g0, langOf t0) of
-  (_, Nothing) -> MM.throwError . CallTheMonkeys . render
-    $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
-  (Just _, _) -> MM.throwError . CallTheMonkeys . render
-    $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
-  (Nothing, Just lang) -> return $ f lang g0 t0
+weaveResolvedTypes g0 t0 = do
+  MM.say $ "weaving:" <+> parens (pretty g0) <+> "with" <+> parens (pretty t0)
+  case (langOf g0, langOf t0) of
+    (_, Nothing) -> MM.throwError . CallTheMonkeys . render
+      $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
+    (Just _, _) -> MM.throwError . CallTheMonkeys . render
+      $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
+    (Nothing, Just lang) -> return $ f lang g0 t0
   where
     f :: Lang -> Type -> Type -> TypeP
     f lang (UnkT (TV _ v1)) (UnkT (TV _ v2)) = UnkP (PV lang (Just v1) v2)
