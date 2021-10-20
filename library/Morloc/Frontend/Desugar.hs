@@ -333,17 +333,16 @@ findPackers expr
     packerKeyVal e@(EType t _ _) = case unqualify t of
       (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
         (True, True) -> Left $ CyclicPacker (qualify vs t)
-        (True, False) -> Right (Just (packerKey a, qualify vs b, Pack))
-        (False, True) -> Right (Just (packerKey b, qualify vs a, Unpack))
+        (True, False) -> Right (Just ((packerKey b, length vs), qualify vs b, Pack))
+        (False, True) -> Right (Just ((packerKey a, length vs), qualify vs a, Unpack))
         (False, False) -> Right Nothing
       (vs, t) -> Left $ IllegalPacker (qualify vs t)
 
-    packerKey :: TypeU -> (TVar, Int)
-    packerKey t = case splitArgs t of
-      (params, [VarU v, _])   -> (v, length params)
-      (params, [AppU (VarU v) _, _]) -> (v, length params)
-      (params, [NamU _ v _ _, _]) -> (v, length params)
-      _ -> error "bad packer"
+    packerKey :: TypeU -> TVar
+    packerKey (VarU v)   = v
+    packerKey (AppU (VarU v) _) = v
+    packerKey (NamU _ v _ _) = v
+    packerKey t = error $ "bad packer: " <> show t
 
     -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
     unifyTypes :: [TypeU] -> TypeU

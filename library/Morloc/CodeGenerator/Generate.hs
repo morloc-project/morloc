@@ -44,6 +44,7 @@ import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Typecheck (typecheck)
 import Morloc.Data.Doc
 import Morloc.Pretty
+import qualified Data.Map as Map
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
@@ -760,38 +761,35 @@ pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
 findSources
   :: (Lang, [ExprM Many])
   -> MorlocMonad (Lang, [([Source], ExprM Many)])
-findSources (lang, es0) = return (lang, [ (f e, e) | e <- es0])
+findSources (lang, es0) = do
+  srcss <- mapM f es0
+  return $ (lang, zipWith joinSrcs srcss es0)
   where
-    f :: ExprM Many -> [Source] 
-    f (SrcM _ src) = [src]
-    f (ManifoldM _ _ e) = f e
+    f :: ExprM Many -> MorlocMonad [Source] 
+    f (SrcM _ src) = return [src]
+    f (ManifoldM i _ e) = (<>) <$> f e <*> lookupPackers i
     f (ForeignInterfaceM _ e) = f e
-    f (LetM _ e1 e2) = f e1 <> f e2
-    f (AppM e es) = f e <> conmap f es
+    f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
+    f (AppM e es) = (<>) <$> f e <*> conmapM f es
     f (LamM _ e) = f e
     f (AccM e _) = f e
-    f (ListM _ es) = conmap f es
-    f (TupleM _ es) = conmap f es
-    f (RecordM _ rs) = conmap (f . snd) rs
+    f (ListM _ es) = conmapM f es
+    f (TupleM _ es) = conmapM f es
+    f (RecordM _ rs) = conmapM f (map snd rs)
     f (SerializeM _ e) = f e
     f (DeserializeM _ e) = f e
     f (ReturnM e) = f e
-    f _ = []
-    ----------------- note to later me:
---------------- here's the old code, I think the code above is missing the packers
---------------- 
--- -- | find all sources required, both in CallS statements and those used for serialization
--- getSrcs :: SExpr Int One c -> Int -> c -> MorlocMonad [Source]
--- getSrcs (CallS src) g _ = (:) src <$> getSrcsFromManifold g
--- getSrcs _ g _ = getSrcsFromManifold g
---
--- getSrcsFromManifold :: Int -> MorlocMonad [Source]
--- getSrcsFromManifold g = do
---   packers <- MM.gets statePackers |>> Map.elems |>> concat
---   constructors <- metaConstructors g
---   return . unique
---     $  concat [unresolvedPackerForward p <> unresolvedPackerReverse p | p <- packers]
---     <> constructors
+    f _ = return []
+
+    lookupPackers :: Int -> MorlocMonad [Source]
+    lookupPackers i = do
+      packers <- MM.metaPackMap i
+      return $ concat . concat $ [map unresolvedPackerForward p <> map unresolvedPackerReverse p | p <- Map.elems packers]
+
+    joinSrcs :: [Source] -> ExprM Many -> ([Source], ExprM Many)
+    joinSrcs srcs e =
+      let srcs' = unique [src | src <- srcs, srcLang src == lang]
+      in (srcs', e)
 
 encode
   :: Lang
