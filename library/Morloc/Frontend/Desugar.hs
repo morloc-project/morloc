@@ -101,17 +101,23 @@ desugarExpr
   -> MVar
   -> ExprI
   -> MorlocMonad ExprI
-desugarExpr d k e0 = mapExprM f e0 where
+desugarExpr d k e0 = do
+  s <- MM.get  
+  MM.put (s {stateSources = GMap.insertMany (AST.getIndices e0) k objSources (stateSources s)} )
+  mapExprM f e0
+  where
 
   f :: Expr -> MorlocMonad Expr
   f (SigE v l t) = SigE v l <$> desugarEType termmap d k t
   f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
   f e = return e
 
+  terms = AST.findSignatureTypeTerms e0
+
   termmap :: Map.Map TVar [([TVar], TypeU)]
-  termmap =
-    let terms = AST.findSignatureTypeTerms e0
-    in Map.fromList $ zip terms (map lookupTypedefs terms)
+  termmap = Map.fromList $ zip terms (map lookupTypedefs terms)
+
+  objSources = [src | src <- AST.findSources e0]
 
   lookupTypedefs
     :: TVar

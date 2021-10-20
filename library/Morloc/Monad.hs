@@ -34,7 +34,7 @@ module Morloc.Monad
   -- * metadata accessors
   , metaTermTypes
   , metaConstraints
-  , metaConstructors
+  , metaSources
   , metaName
   , metaProperties
   , metaType
@@ -77,6 +77,7 @@ emptyState path v = MorlocState {
   , stateCounter = -1
   , stateDepth = 0
   , stateSignatures = GMap.empty
+  , stateSources = GMap.empty
   , stateOutfile = path
   , statePackers = GMap.empty
   , stateName = Map.empty
@@ -203,6 +204,15 @@ metaTermTypes i = do
     GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
     (GMapJust t) -> return (Just t)
 
+-- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
+metaSources :: Int -> MorlocMonad [Source]
+metaSources i = do
+  s <- gets stateSources
+  case GMap.lookup i s of
+    GMapNoFst -> return []
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    (GMapJust srcs) -> return srcs
+
 -- TODO: rename the meta* functions
 
 -- | The general constraints as defined in the general type signature. These
@@ -223,10 +233,6 @@ metaProperties i = do
   return $ case GMap.lookup i s of
     (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
     _ -> []
-
--- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
-metaConstructors :: Int -> MorlocMonad [Source]
-metaConstructors = undefined
 
 -- | Store type annotations for an expression. These are the original user
 -- provided types NOT the types checked or inferred by the typechecker.

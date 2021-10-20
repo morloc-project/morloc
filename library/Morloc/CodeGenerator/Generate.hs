@@ -767,7 +767,16 @@ findSources (lang, es0) = do
   where
     f :: ExprM Many -> MorlocMonad [Source] 
     f (SrcM _ src) = return [src]
-    f (ManifoldM i _ e) = (<>) <$> f e <*> lookupPackers i
+    f (ManifoldM i _ e) = do
+        ss1 <- f e
+        ss2 <- lookupPackers i
+        ss3 <- lookupConstructors i
+        MM.say "----------vvv-----------"
+        MM.say $ tupled (map pretty ss1)
+        MM.say $ tupled (map pretty ss2)
+        MM.say $ tupled (map pretty ss3)
+        MM.say "----------^^^-----------"
+        return $ ss1 <> ss2 <> ss3
     f (ForeignInterfaceM _ e) = f e
     f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
     f (AppM e es) = (<>) <$> f e <*> conmapM f es
@@ -785,6 +794,14 @@ findSources (lang, es0) = do
     lookupPackers i = do
       packers <- MM.metaPackMap i
       return $ concat . concat $ [map unresolvedPackerForward p <> map unresolvedPackerReverse p | p <- Map.elems packers]
+
+    lookupConstructors :: Int -> MorlocMonad [Source]
+    lookupConstructors i = do
+      packers <- MM.metaPackMap i
+      let xs = [v | (TV lang' v, _) <- Map.keys packers, lang' == Just lang]
+      srcs <- MM.metaSources i
+      -- this should probably be filtered ... but hey, why not just import everything?
+      return [src | src <- srcs]
 
     joinSrcs :: [Source] -> ExprM Many -> ([Source], ExprM Many)
     joinSrcs srcs e =

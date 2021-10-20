@@ -17,6 +17,7 @@ module Morloc.Frontend.AST
   , checkExprI
   , findSources
   , maxIndex
+  , getIndices
   ) where
 
 import Morloc.Frontend.Namespace
@@ -102,3 +103,15 @@ maxIndex (ExprI i (LstE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (TupE es)) = maximum (i : map maxIndex es)
 maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i _) = i
+
+getIndices :: ExprI -> [Int]
+getIndices (ExprI i (ModE _ es)) = i : conmap getIndices es
+getIndices (ExprI i (AccE e _)) = i : getIndices e
+getIndices (ExprI i (AnnE e _)) = i : getIndices e
+getIndices (ExprI i (AssE _ e es)) = i : conmap getIndices (e:es)
+getIndices (ExprI i (LamE _ e)) = i : getIndices e
+getIndices (ExprI i (AppE e es)) = i : conmap getIndices (e:es)
+getIndices (ExprI i (LstE es)) = i : conmap getIndices es
+getIndices (ExprI i (TupE es)) = i : conmap getIndices es
+getIndices (ExprI i (NamE rs)) = i : conmap (getIndices . snd) rs
+getIndices (ExprI i _) = [i]

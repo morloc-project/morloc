@@ -138,6 +138,7 @@ data MorlocState = MorlocState {
   , stateCounter :: Int
   , stateDepth :: Int -- ^ store depth in a tree, for debugging
   , stateSignatures :: GMap Int Int TermTypes
+  , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
   , stateOutfile :: Maybe Path
   , statePackers :: GMap Int MVar PackMap
