@@ -65,19 +65,17 @@ retrieveTypes
   -> SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (Gamma, SAnno (Indexed Type) One (Indexed (Lang, [EType])))
 retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
-  (g1, ts) <- case x0 of
-    (CallS src) -> do
-      mayts <- MM.metaTermTypes j
-      case fmap termConcrete mayts of
-        (Just ts) -> case [es | (_, es, Just (Idx _ src')) <- ts, src' == src] of
-          [es] -> do
-              let (g1', ts') = statefulMap rename g0 (map etype es)
-              return $ (g1', zipWith (\e t -> e {etype = t}) es ts')
-          _ -> MM.throwError . CallTheMonkeys $ "Malformed TermTypes"
-        Nothing -> MM.throwError . CallTheMonkeys $ "Missing TermTypes"
-    _ -> return (g0, [])
+  mayts <- MM.metaTermTypes j
 
-  say $ "retrieveTypes" <+> pretty i
+  -- find all associated type annotations for this language
+  (g1, ts) <- case fmap termConcrete mayts of
+    (Just ts') -> do
+      let es = filter ((==) (Just lang) . langOf) (conmap (\(_, t, _) -> t) ts')
+          (g1', ts'') = statefulMap rename g0 (map etype es)
+      return $ (g1', zipWith (\e t -> e {etype = t}) es ts'')
+    Nothing -> return (g0, [])
+
+  say $ "retrieveTypes" <+> pretty i <+> pretty j
   say $ pretty ts
   peakGen e
   say $ "----------------------"
@@ -141,19 +139,25 @@ weaveAndResolve e@(SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
 -- Concrete typechecking must deal with primitive defaults, containter
 -- defaults, and function overloading.
 
--- lookup a general type associated with an index
--- standardize naming of qualifiers
-lookupType :: Int -> Gamma -> MorlocMonad (Maybe (Gamma, TypeU))
-lookupType i g = do
-  m <- CMS.gets stateSignatures
-  return $ case GMap.lookup i m of
-    GMapJust (TermTypes (Just (EType t _ _)) _ _) -> Just $ rename g t
-    _ -> Nothing
-
 -- prepare a general, indexed typechecking error
 cerr :: Int -> TypeError -> MorlocMonad a
 cerr i e = MM.throwError $ IndexedError i (ConcreteTypeError e)
 
+synthG
+  :: Gamma
+  -> SAnno (Indexed Type) One (Indexed (Lang, [EType]))
+  -> MorlocMonad
+       ( Gamma
+       , TypeU
+       , SAnno (Indexed Type) One (Indexed TypeU)
+       )
+
+-- if there are no annotations, the SAnno can be simplified and synth' can be called
+synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
+  (g1, t, x') <- synthE' i l g0 x
+  -- g2 <- subtype' i t (type2typeu tg) g1
+  -- return (g2, t, SAnno (One (x', Idx i t)) m)
+  return (g1, t, SAnno (One (x', Idx i t)) m)
 
 -- AnnoOne=>
 synthG g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
@@ -164,12 +168,6 @@ synthG g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
   let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] "x" (Just l) g0
   in checkG g1 (SAnno (One (x, Idx i (l, []))) m) t
 
--- if there are no annotations, the SAnno can be simplified and synth' can be called
-synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
-  (g1, t, x') <- synthE' i l g0 x
-  -- g2 <- subtype' i t (type2typeu tg) g1
-  -- return (g2, t, SAnno (One (x', Idx i t)) m)
-  return (g1, t, SAnno (One (x', Idx i t)) m)
 
 
 checkG
