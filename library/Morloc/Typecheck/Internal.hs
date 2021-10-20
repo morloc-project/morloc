@@ -131,11 +131,10 @@ subtype a@(ExistU (TV l1 _) _ _) b@(ExistU (TV l2 _) _ _) g
   --
   -- ----------------------------------------- <:InstantiateL/<:InstantiateR
   --  G[E.a] |- Ea <: Ea -| G[E.a]
-  | otherwise
+  | otherwise = instantiate a b g
       -- formally, an `Ea notin FV(G)` check should be done here, but since the
       -- types involved are all existentials, it will always pass, so I omit
       -- it.
-   = instantiate a b g
 
 --  g1 |- B1 <: A1 -| g2
 --  g2 |- [g2]A2 <: [g2]B2 -| g3
@@ -336,8 +335,11 @@ instantiate ta@(ExistU v [] []) tb g1
 -- and defaults needs to be checked. 
 instantiate (ExistU _ ps1 ds1) (ExistU _ ps2 ds2) g1 = do
   g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
-  g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
-  return g3
+  return g2
+  ----- FIXME: how should defaults be handled?
+  -- certainly NOT this:
+  -- g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
+  -- return g3
 
 -- bad
 instantiate _ _ g = return g
