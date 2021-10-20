@@ -181,10 +181,18 @@ main = do
       , golden "record-access-c" "record-access-c"
       , golden "record-access-py" "record-access-py"
       , golden "record-access-r" "record-access-r"
+      -- scoping
+      , golden "scoping-1" "scoping-1"
+      , golden "scoping-2" "scoping-2"
+      , golden "scoping-3" "scoping-3"
+      , golden "scoping-4" "scoping-4"
+      , golden "scoping-5" "scoping-5"
+      , golden "scoping-6" "scoping-6"
+      , golden "scoping-7" "scoping-7"
+      , golden "scoping-8" "scoping-8"
+      , golden "scoping-9" "scoping-9"
       -- type identities
       , golden "type-identities-c" "type-identities-c"
-      -- where-scope
-      , golden "where-scoping" "where-scoping"
 
       -- , golden "argument-form-1-rs" "argument-form-1-rs"
       -- , golden "argument-form-2-rs" "argument-form-2-rs"
