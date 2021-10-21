@@ -9,4 +9,4 @@ f = x where
            z = add c (add a b)
            a = 1
        b = 2
-   c = 19
+   c = 39

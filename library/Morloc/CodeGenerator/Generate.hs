@@ -96,8 +96,9 @@ generate gASTs rASTs = do
 
   -- for each language, collect all functions into one "pool"
   pools
+    <- mapM applyLambdas rASTs
     -- thread arguments across the tree
-    <- mapM parameterize rASTs
+    >>= mapM parameterize
     -- convert from AST to manifold tree
     >>= mapM express
 
@@ -407,6 +408,159 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
         "Cannot serialize general type:" <+> pretty gt
 
 
+{- | Remove lambdas introduced through substitution
+
+For example:
+
+ bif x = add x 10
+ bar py :: "int" -> "int"
+ bar y = add y 30
+ f z = bar (bif z)
+
+In Treeify.hs, the morloc declarations will be substituted in as lambdas. But
+we want to preserve the link to any annotations (in this case, the annotation
+that `bar` should be in terms of python ints). The morloc declarations can be
+substituted in as follows: 
+
+ f z = (\y -> add y 30) ((\x -> add x 10) z) 
+
+The indices for bif and bar that link the annotations to the functions are
+relative to the lambda expressions, so this substitution preserves the link.
+Typechecking can proceed safely.
+
+The expression can be simplified:
+
+ f z = (\y -> add y 30) ((\x -> add x 10) z) 
+ f z = (\y -> add y 30) (add z 10)            -- [z / x]
+ f z = add (add z 10) 30                      -- [add z 10 / y]
+
+The simplified expression is what should be written in the generated code. It
+would also be easier to typecheck and debug. So should these substitutions be
+done immediately after parsing? We need to preserve
+ 1. links to locations in the original source code (for error messages)
+ 2. type annotations.
+ 3. declaration names for generated comments and subcommands
+
+Here is the original expression again, but annotated and indexed
+
+ (\x -> add_2 x_3 10_4)_1 
+ (\y -> add_6 y_7 30_8)_5
+ (\z -> bar_10 (bif_11 z_12))_9
+
+ 1: name="bif"
+ 5: name="bar", type="int"@py -> "int"@py
+ 9: name="f"
+
+Each add is also associated with a type defined in a signature in an
+unmentioned imported library, but those will be looked up by the typechecker
+and will not be affected by rewriting.
+
+Substitution requires reindexing. A definition can be used multiple times and
+we need to distinguish between the use cases.
+
+Replace bif and bar with their definition and create fresh indices:
+  
+ (\z -> (\y -> add_18 y_19 30_20)_17 ((\x -> add_14 x_15 10_16)_13 z_12)_9
+
+ 13,1: name="bif"
+ 17,5: name="bar", type="int"@py -> "int"@py
+ 9: name="f"
+
+Now we can substitute for y
+
+ (\z -> add_18 ((\x -> add_14 x_15 10_16)_13 z_12)_9 30_20)
+
+But this destroyed index 17 and the link to the python annotation. We can
+preserve the type by splitting the annotation of bar.
+
+ 13,1: name="bif"
+ 18,17,5: name="bar"
+ 12: "int"@py
+ 13: "int"@py
+ 9: name="f"
+
+Index 18 should be associated with the *name* "bar", but not the type, since it
+has been applied. The type of bar is now split between indices 12 and 13.
+
+This case works fine, but it breaks down when types are polymorphic. If the
+annotation of bar had been `a -> a`, then how would we type 12 and 13? We can't
+say that `12 :: forall a . a` and be `13 :: forall a . a`, since this
+eliminates the constraint that the `a`s must be the same.
+
+If instead we rewrite lambdas after typechecking, then everything works out.
+
+Thus applyLambdas is done here, rather than in Treeify.hs or Desugar.hs.
+
+It also must be done BEFORE conversion to ExprM in `express`, where manifolds
+are resolved.
+-}
+applyLambdas
+  :: SAnno Int One (Indexed TypeP)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP))
+-- eliminate empty lambdas
+applyLambdas (SAnno (One (AppS ( SAnno (One (LamS [] (SAnno e _), _)) _) [], _)) i) = applyLambdas $ SAnno e i
+
+-- eliminate empty applications
+applyLambdas (SAnno (One (AppS (SAnno e _) [], _)) i) = applyLambdas $ SAnno e i
+
+-- substitute applied lambdas
+applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 (FunP (ta1:tas) tb2))) i2) (e1:es), tb1)) i1) = do
+  let e2' = substituteSAnno v e1 e2
+  applyLambdas (SAnno (One (AppS (SAnno (One (LamS vs e2', Idx j2 (FunP tas tb2))) i2) es, tb1)) i1)
+
+-- propagate the changes
+applyLambdas (SAnno (One (AppS f es, c)) g) = do
+  f' <- applyLambdas f
+  es' <- mapM applyLambdas es
+  return (SAnno (One (AppS f' es', c)) g)
+applyLambdas (SAnno (One (AccS e k, c)) g) = do
+  e' <- applyLambdas e
+  return (SAnno (One (AccS e' k, c)) g)
+applyLambdas (SAnno (One (LamS vs e, c)) g) = do
+  e' <- applyLambdas e
+  return (SAnno (One (LamS vs e', c)) g)
+applyLambdas (SAnno (One (LstS es, c)) g) = do
+  es' <- mapM applyLambdas es
+  return (SAnno (One (LstS es', c)) g)
+applyLambdas (SAnno (One (TupS es, c)) g) = do
+  es' <- mapM applyLambdas es
+  return (SAnno (One (TupS es', c)) g)
+applyLambdas (SAnno (One (NamS rs, c)) g) = do
+  es' <- mapM (applyLambdas . snd) rs
+  return (SAnno (One (NamS (zip (map fst rs) es'), c)) g)
+applyLambdas x = return x
+
+substituteSAnno
+  :: EVar
+  -> SAnno Int One (Indexed TypeP)
+  -> SAnno Int One (Indexed TypeP)
+  -> SAnno Int One (Indexed TypeP)
+substituteSAnno v r e0 = f e0 where
+  f e@(SAnno (One (VarS v', _)) _)
+    | v == v' = r
+    | otherwise = e
+  -- propagate the changes
+  f (SAnno (One (AppS e es, c)) g) =
+    let f' = f e
+        es' = map f es
+    in (SAnno (One (AppS f' es', c)) g)
+  f (SAnno (One (AccS e k, c)) g) =
+    let e' = f e
+    in (SAnno (One (AccS e' k, c)) g)
+  f (SAnno (One (LamS vs e, c)) g) =
+    let e' = f e
+    in (SAnno (One (LamS vs e', c)) g)
+  f (SAnno (One (LstS es, c)) g) =
+    let es' = map f es
+    in (SAnno (One (LstS es', c)) g)
+  f (SAnno (One (TupS es, c)) g) =
+    let es' = map f es
+    in (SAnno (One (TupS es', c)) g)
+  f (SAnno (One (NamS rs, c)) g) =
+    let es' = map (f . snd) rs
+    in (SAnno (One (NamS (zip (map fst rs) es'), c)) g)
+  f x = x
+
 -- | Add arguments that are required for each term. Unneeded arguments are
 -- removed at each step.
 parameterize
@@ -615,11 +769,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       then return manifold
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
-  express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
+  express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     name' <- MM.metaName m
-    MM.throwError . CallTheMonkeys . render $
-      "Invalid input to express' in module (" <> viaShow name' <> ") - type: " <> pretty t
-
+    MM.throwError . CallTheMonkeys . render
+      $ "Invalid input to express' in function (" <> viaShow name' <> ") - type: " <> pretty t
+      <+> "at expression" <+> prettySExpr (const "") (const "") e
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
 segment e0
