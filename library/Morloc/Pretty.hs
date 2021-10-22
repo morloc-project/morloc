@@ -37,6 +37,9 @@ instance Pretty TVar where
 instance Pretty Lang where
   pretty = viaShow
 
+instance Pretty NamType where
+  pretty = viaShow
+
 instance Pretty Source where
   pretty s
     = "source" <+> pretty (srcLang s)
@@ -111,8 +114,8 @@ instance Pretty UnresolvedPacker where
   pretty (UnresolvedPacker v t fs rs) = vsep
     [ pretty v
     , pretty t 
-    , "forward:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) fs)
-    , "reverse:" <+> hsep (map (\s -> pretty (srcAlias s) <> "@" <> pretty (srcLang s)) rs)
+    , "forward:" <+> tupled (map pretty fs)
+    , "reverse:" <+> tupled (map pretty rs)
     ]
 
 

@@ -135,12 +135,10 @@ makeSerialAST _ (FunP _ _)
 makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts)
   | isList t = SerialList <$> makeSerialAST m (ts !! 0)
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
-  | otherwise = do
-      MM.say $ "makeSerialAST:" <+> pretty t 
-      case Map.lookup (pv2tv v, length ts) m of
+  | otherwise = case Map.lookup (pv2tv v, length ts) m of
         (Just ps) -> do
           ps' <- mapM (resolvePacker t ts) ps
-          ts' <- mapM (makeSerialAST m) ts
+          ts' <- mapM (makeSerialAST m) (map typePackerType ps')
           return $ SerialPack v (Many (zip ps' ts'))
         Nothing -> MM.throwError . SerializationError . render
           $ "Cannot find constructor" <+> dquotes (pretty s)

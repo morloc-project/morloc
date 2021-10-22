@@ -338,8 +338,8 @@ findPackers expr
     packerKeyVal e@(EType t _ _) = case unqualify t of
       (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
         (True, True) -> Left $ CyclicPacker (qualify vs t)
-        (True, False) -> Right (Just ((packerKey b, length vs), qualify vs b, Pack))
-        (False, True) -> Right (Just ((packerKey a, length vs), qualify vs a, Unpack))
+        (True, False) -> Right (Just ((packerKey b, length vs), qualify vs a, Pack))
+        (False, True) -> Right (Just ((packerKey a, length vs), qualify vs b, Unpack))
         (False, False) -> Right Nothing
       (vs, t) -> Left $ IllegalPacker (qualify vs t)
 

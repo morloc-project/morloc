@@ -45,7 +45,7 @@ typecheck e0 = do
   -- packers <- MM.gets statePackers
   (g1, e1) <- retrieveTypes g0 e0
 
-  say "------ exprssion after type retrieval ------"
+  say "------ expression after type retrieval ------"
   peakGen e1
   say "----------------------^---------------------"
 

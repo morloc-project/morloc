@@ -118,12 +118,35 @@ data SerialAST f
   -- line, the parameter contains the variable name, which is useful only for
   -- source code comments.
 
+instance Foldable f => Pretty (SerialAST f) where
+  pretty (SerialPack v packers) = parens
+    $ "SerialPack" <+> pretty v
+    <+> braces (foldr (\(p, x) s -> s <+> tupled [pretty p, pretty x]) "" packers)
+  pretty (SerialList ef) = parens $ "SerialList" <+> pretty ef 
+  pretty (SerialTuple efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
+  pretty (SerialObject o p vs rs) = parens
+    $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
+    <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
+  pretty (SerialNum v) = parens ("SerialNum" <+> pretty v)
+  pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
+  pretty (SerialString v) = parens ("SerialString" <+> pretty v)
+  pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
+  pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
+
 data TypePacker = TypePacker
   { typePackerType    :: TypeP
   , typePackerFrom    :: TypeP
   , typePackerForward :: [Source]
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)
+
+instance Pretty TypePacker where
+  pretty p = "TypePacker" <+> encloseSep "{" "}" ","
+    [ "typePackerType" <+> "=" <+> pretty (typePackerType p)
+    , "typePackerFrom" <+> "=" <+> pretty (typePackerFrom p)
+    , "typePackerForward" <+> "=" <+> list (map pretty (typePackerForward p))
+    , "typePackerReverse" <+> "=" <+> list (map pretty (typePackerReverse p))
+    ]
 
 -- | A simplified subset of the Type record where functions, existentials,
 -- universals and language-specific info are removed

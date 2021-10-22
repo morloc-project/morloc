@@ -925,11 +925,6 @@ findSources (lang, es0) = do
         ss1 <- f e
         ss2 <- lookupPackers i
         ss3 <- lookupConstructors i
-        MM.say "----------vvv-----------"
-        MM.say $ tupled (map pretty ss1)
-        MM.say $ tupled (map pretty ss2)
-        MM.say $ tupled (map pretty ss3)
-        MM.say "----------^^^-----------"
         return $ ss1 <> ss2 <> ss3
     f (ForeignInterfaceM _ e) = f e
     f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
