@@ -36,8 +36,14 @@ typecheck es = mapM run es where
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
           ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
-      (_, _, e2) <- synthG' g1 e1
-      return e2
+      (g2, _, e2) <- synthG' g1 e1
+      say $ "-------- leaving frontend typechecker ------------------"
+      say "g2:"
+      seeGamma g2
+      say "e2:"
+      peakGen e2
+      say $ "========================================================"
+      return (applyGen g2 e2)
 
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
 resolveTypes (SAnno (Many es) (Idx i t))
@@ -381,10 +387,12 @@ checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
     (LamS vs' body) -> return $ LamS (v:vs') body
     _ -> error "impossible"
 
+  let e4 = applyCon g3 e3
+
   -- ignore trailing context `x:A,g3`
   g4 <- cut' i vardef g3
 
-  return (g4, t5, e3)
+  return (g4, t5, e4)
 
 checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
@@ -501,3 +509,7 @@ peakGen = say . prettySAnno (\_ -> "") (\_ -> "")
 applyGen :: (Functor gf, Functor f, Applicable g)
          => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
 applyGen g = mapSAnno (fmap (apply g)) id
+
+applyCon :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> (SExpr (gf g) f c) -> (SExpr (gf g) f c)
+applyCon g = mapSExpr (fmap (apply g)) id

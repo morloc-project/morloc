@@ -555,10 +555,12 @@ data SExpr g f c
   | CallS Source
 
 mapSAnno :: Functor f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
-mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr fg fc) e) (fg g)
+mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr' fg fc) e) (fg g) where
+  mapSExpr' :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
+  mapSExpr' fg fc (e0, c) = (mapSExpr fg fc e0, fc c)
 
-mapSExpr :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
-mapSExpr fg fc (e0, c) = (fe e0, fc c) where 
+mapSExpr :: Functor f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
+mapSExpr fg fc e0 = fe e0 where 
   m = mapSAnno fg fc
   fe (UniS) = UniS
   fe (VarS v) = VarS v
