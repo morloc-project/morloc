@@ -175,8 +175,9 @@ checkG
        , SAnno (Indexed Type) One (Indexed TypeU)
        )
 checkG g0 (SAnno (One (e0, Idx i (l, (et:ets)))) m) t0 = do
-  g1 <- subtype' i (etype et) t0 g0
-  checkG g1 (SAnno (One (e0, Idx i (l, ets))) m) (apply g1 t0)
+  (g1, t1, e1) <- checkE i l g0 e0 (etype et)
+  g2 <- subtype' i t1 t0 g1
+  checkG g2 (SAnno (One (e0, Idx i (l, ets))) m) (apply g2 t1)
 
 checkG g0 (SAnno (One (e0, Idx i (l, []))) m@(Idx _ tg)) t0 = do
   (g1, t1, e1) <- checkE i l g0 e0 t0

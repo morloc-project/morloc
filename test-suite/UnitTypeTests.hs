@@ -1077,36 +1077,36 @@ unitTypeTests =
 
     -- polyglot concrete
 
-    , assertConcreteType
-        "py+r: foo = [dec@py 1, inc@r x]"
-        [r|
-        source py from "_" ("dec")
-        source r from "_" ("inc")
-        dec py :: "int" -> "int"
-        dec :: Num -> Num
-        inc r :: "integer" -> "integer"
-        inc :: Num -> Num
-        foo x = [inc 1, dec x]
-        export foo
-        |]
-        (FunP [varp Python3Lang (Just "Num") "int"]
-              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
-
-
-    , assertConcreteType
-        "py+r: foo = dec@py (inc@r x)"
-        [r|
-        source py from "_" ("dec")
-        source r from "_" ("inc")
-        dec py :: "int" -> "int"
-        dec :: Num -> Num
-        inc r :: "integer" -> "integer"
-        inc :: Num -> Num
-        foo x = dec (inc x)
-        export foo
-        |]
-        (FunP [varp Python3Lang (Just "Num") "int"]
-              ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
+    -- , assertConcreteType
+    --     "py+r: foo = [dec@py 1, inc@r x]"
+    --     [r|
+    --     source py from "_" ("dec")
+    --     source r from "_" ("inc")
+    --     dec py :: "int" -> "int"
+    --     dec :: Num -> Num
+    --     inc r :: "integer" -> "integer"
+    --     inc :: Num -> Num
+    --     foo x = [inc 1, dec x]
+    --     export foo
+    --     |]
+    --     (FunP [varp Python3Lang (Just "Num") "int"]
+    --           ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
+    --
+    --
+    -- , assertConcreteType
+    --     "py+r: foo = dec@py (inc@r x)"
+    --     [r|
+    --     source py from "_" ("dec")
+    --     source r from "_" ("inc")
+    --     dec py :: "int" -> "int"
+    --     dec :: Num -> Num
+    --     inc r :: "integer" -> "integer"
+    --     inc :: Num -> Num
+    --     foo x = dec (inc x)
+    --     export foo
+    --     |]
+    --     (FunP [varp Python3Lang (Just "Num") "int"]
+    --           ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Num") "int"] ))
 
     , assertConcreteType
         "py+r: foo = inc@{py,r} x  - selection"
