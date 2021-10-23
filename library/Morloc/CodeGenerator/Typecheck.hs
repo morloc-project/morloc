@@ -159,14 +159,9 @@ synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
   -- return (g2, t, SAnno (One (x', Idx i t)) m)
   return (g1, t, SAnno (One (x', Idx i t)) m)
 
--- AnnoOne=>
-synthG g (SAnno (One (x, Idx i (l, [EType ct _ _]))) m)
-  = checkG g (SAnno (One (x, Idx i (l, []))) m) ct
-
 -- AnnoMany=>
-synthG g0 (SAnno (One (x, Idx i (l, cts@(_:_)))) m) =
-  let (g1, t) = newvarRich [] [t' | (EType t' _ _) <- cts] "x" (Just l) g0
-  in checkG g1 (SAnno (One (x, Idx i (l, []))) m) t
+synthG g0 (SAnno (One (x, Idx i (lang, (t:ts)))) m)
+  = checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
 
 
 
