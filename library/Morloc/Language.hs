@@ -22,6 +22,7 @@ module Morloc.Language
   , makeSourceName
   , standardizeLangName
   , pairwiseCost
+  , languageCost
   ) where
 
 import Data.Text (Text, toLower)
@@ -69,6 +70,16 @@ pairwiseCost _ Python3Lang = 50000 -- the cost of opening the python interpreter
 pairwiseCost _ PerlLang    = 50000
 -- this could be optimized by running R server
 pairwiseCost _ RLang       = 5000000 -- an arm and a leg
+
+
+-- | hello flame wars - these costs are mostly intended to break ties
+languageCost :: Lang -> Int
+languageCost CppLang = 0
+languageCost CLang = 1
+languageCost RustLang = 2
+languageCost Python3Lang = 3
+languageCost RLang = 4
+languageCost PerlLang = 5
 
 -- | Try to determine the source language for a file from its extension
 parseExtension :: Text -> Maybe Lang

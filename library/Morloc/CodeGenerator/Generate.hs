@@ -173,7 +173,7 @@ realize s0 = do
   scoreExpr langs (NamS rs, i) = do
     (xs, best) <- scoreMany langs (map snd rs)
     return $ (NamS (zip (map fst rs) xs), Idx i best)
-  scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, 0)])
+  scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, callCost s)])
   -- non-recursive expressions
   scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
   scoreExpr langs (VarS v, i) = return (VarS v, zipLang i langs)
@@ -226,6 +226,10 @@ realize s0 = do
   cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
   cost _ _ score = score
 
+  -- FIXME: in the future, this function should be replaced by an estimate of
+  -- the function runtime, for now I will just base it off languages.
+  callCost :: Source -> Int
+  callCost src = Lang.languageCost (srcLang src)
 
   collapseExpr
     :: Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)

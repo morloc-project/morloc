@@ -258,7 +258,7 @@ synthE i lang g0 (AppS f xs0) = do
   return (g2, apply g2 appliedType, AppS (applyCon g2 funExpr0) inputExprs)
 
 --   -->I==>
-synthE i lang g0 f@(LamS vs x) = do
+synthE i _ g0 f@(LamS vs x@(SAnno (One (_, Idx _ (lang, _))) _)) = do
   -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") (Just lang) g') g0 vs
       (g2, ft) = newvar "o_" (Just lang) g1
@@ -365,7 +365,7 @@ application i lang g0 es (ForallU v s) = application' i lang (g0 +> v) es (subst
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i lang g0 es (ExistU v@(TV _ s) [] _) =
+application i _ g0 es (ExistU v@(TV (Just lang) s) [] _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
