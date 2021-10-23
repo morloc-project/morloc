@@ -368,11 +368,11 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
     -- will be set in the nexus
-    generalSerial' _ _ (SAnno (One (AccS (SAnno (One (VarS _, _)) _) _, _)) _) = undefined -- FIXME record names
-      -- case g of
-      --   (NamT {}) ->
-      --     return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
-      --   _ -> error "Attempted to use key access to non-record"
+    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ (NamT _ _ _ _))) k, _)) _) =
+      return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
+    -- If the accessed type is not a record, then die
+    generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t)) _, _)) _) =
+        MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t
     generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
                         [ps ++ [JsonIndex j] | j <- [0..]] xs
