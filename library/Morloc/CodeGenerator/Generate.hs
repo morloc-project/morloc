@@ -122,11 +122,9 @@ generate gASTs rASTs = do
   return (nexus, pools)
 
 
--- | Choose a single concrete implementation. This function is algorithmically
--- the most complex component of the morloc compiler. In the future, it will
+-- | Choose a single concrete implementation. In the future, this component
+-- will likely be the most complex component of the morloc compiler. It will
 -- probably need to be implemented using an optimizing SMT solver.
---
--- This function also needs to work with input that is not fully defined.
 realize
   :: SAnno (Indexed Type) Many Int
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
@@ -165,8 +163,10 @@ realize s0 = do
     f' <- scoreSAnno [] f
     let scores = scoresOf f'
     xs' <- mapM (scoreSAnno (unique $ map fst scores)) xs
-    let pairss = [(maxPairs . concat) [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
-        best = [ (l1, sum [ maximumDef 0 [s1 + s2 + Lang.pairwiseCost l1 l2
+    -- FIXME: using an arbitrary big number as the default minimum is obviously a bad idea.
+    -- I could transform the scores such that this is a maximization problem.
+    let pairss = [(minPairs . concat) [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
+        best = [ (l1, sum [ minimumDef 999999999 [s1 + s2 + Lang.pairwiseCost l1 l2
                           | (l2, s2) <- pairs] | pairs <- pairss])
                | (l1, s1) <- scores]
     return (AppS f' xs', Idx i best)
@@ -185,8 +185,9 @@ realize s0 = do
   zipLang i langs = Idx i (zip langs (repeat 0))
 
   scoresOf :: SAnno a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
-  scoresOf (SAnno (Many xs) _) = maxPairs . concat $ [xs' | (_, Idx _ xs') <- xs]
+  scoresOf (SAnno (Many xs) _) = minPairs . concat $ [xs' | (_, Idx _ xs') <- xs]
 
+  -- find the scores of all implementations from all possible language contexts
   scoreMany
     :: [Lang]
     -> [SAnno (Indexed Type) Many Int]
@@ -197,10 +198,10 @@ realize s0 = do
     where
       scoreMany' :: [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
       scoreMany' xs =
-        let pairss = [ (maxPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
+        let pairss = [ (minPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
                      | SAnno (Many xs') _ <- xs]
             langs' = unique (langs <> (concat . map (map fst)) pairss)
-        in [(l1, sum [ maximumDef 0 [ score + Lang.pairwiseCost l1 l2
+        in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
                      | pairs <- pairss])
            | l1 <- langs']
@@ -211,9 +212,9 @@ realize s0 = do
     -> SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
     -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
   collapseSAnno l1 (SAnno (Many es) t) = do
-    e <- case maxBy (\(_, Idx _ ss) -> maximumMay [cost l1 l2 s | (l2, s) <- ss]) es of
+    e <- case minBy (\(_, Idx _ ss) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) es of
       Nothing -> MM.throwError . CallTheMonkeys $ "A SAnno must contain an SExpr"
-      (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (maxBy snd ss)) x
+      (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (minBy snd ss)) x
     return (SAnno (One e) t)
 
 
@@ -266,22 +267,22 @@ realize s0 = do
 
   chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss = do
-    case maxBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+    case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
       Nothing -> return Nothing
       (Just (l3, _)) -> return (Just l3)
 
 
-  maxBy :: Ord b => (a -> b) -> [a] -> Maybe a
-  maxBy _ [] = Nothing
-  maxBy _ [x] = Just x
-  maxBy f (x1:rs) = case maxBy f rs of
+  minBy :: Ord b => (a -> b) -> [a] -> Maybe a
+  minBy _ [] = Nothing
+  minBy _ [x] = Just x
+  minBy f (x1:rs) = case minBy f rs of
     Nothing -> Just x1
-    (Just x2) -> if f x1 >= f x2 then Just x1 else Just x2
+    (Just x2) -> if f x1 <= f x2 then Just x1 else Just x2
 
-  -- find the highest scoring value for each key
-  -- the groupSort function will never yield an empty value for vs, so `maximum` is safe
-  maxPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
-  maxPairs xs = map (\(k, vs) -> (k, maximum vs)) $ groupSort xs
+  -- find the lowest cost function for each key
+  -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
+  minPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
+  minPairs xs = map (\(k, vs) -> (k, minimum vs)) $ groupSort xs
 
   propagateDown
     ::             (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
