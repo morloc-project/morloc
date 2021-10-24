@@ -41,12 +41,13 @@ import qualified Morloc.Language as ML
 -- name and keys. The unified records may have different types, but they will
 -- all be instances of the same generic struct. That is, any fields that differ
 -- between instances will be made generic.
-data RecEntry = RecEntry {
-    recName :: MDoc -- ^ the automatically generated name for this anonymous type
+data RecEntry = RecEntry
+  { recName :: MDoc -- ^ the automatically generated name for this anonymous type
   , recFields :: [( PVar -- The field key
                   , Maybe TypeP -- The field type if not generic
                   )]
-}
+  }
+  deriving (Show)
 
 -- | @RecMap@ is used to lookup up the struct name shared by all records that
 -- are not imported from C++ source.
@@ -481,8 +482,8 @@ showType recmap (NamP _ v@(PV _ _ "struct") _ rs) =
   case lookup (v, map fst rs) recmap of
     (Just rec) -> recName rec <> typeParams recmap (zip (map snd (recFields rec)) (map snd rs))
     Nothing -> error "Should not happen"
-showType _ (NamP _ (PV _ _ s) ps _) =
-    pretty s <>  encloseSep "<" ">" "," (map pretty ps)
+showType recmap (NamP _ (PV _ _ s) ps _) =
+    pretty s <>  encloseSep "<" ">" "," (map (showType recmap) ps)
 
 typeParams :: RecMap -> [(Maybe TypeP, TypeP)] -> MDoc
 typeParams recmap ts
@@ -652,11 +653,11 @@ generateSourcedSerializers es0
     showDefType ps (VarT v@(TV _ s))
       | elem v ps = "T" <> pretty s
       | otherwise = pretty s
-    showDefType _ _ = undefined
-    -- showDefType _ (FunT _ _) = error "Cannot serialize functions"
-    -- showDefType ps (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
-    -- showDefType ps (NamT _ (TV _ v) ts _)
-    --   = pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+    showDefType _ (FunT _ _) = error "Cannot serialize functions"
+    showDefType ps (NamT _ (TV _ v) ts _)
+      = undefined -- pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+    showDefType ps (AppT (VarT (TV _ v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
+    showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
 
 
 makeTemplateHeader :: [MDoc] -> MDoc

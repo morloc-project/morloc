@@ -41,6 +41,7 @@ instance P.PartialOrd TypeU where
   (<=) (AppU t1 (t11:rs1)) (AppU t2 (t21:rs2)) = t11 <= t21 && AppU t1 rs1 <= AppU t2 rs2
   (<=) (AppU t1 []) (AppU t2 []) = t1 <= t2
   -- the records do not need to be in the same order to be equivalent
+  -- ---- do I need to sort on ps1/ps2 as well?
   (<=) (NamU o1 n1 ps1 ((k1,e1):rs1)) (NamU o2 n2 ps2 es2)
     = case DL.partition ((== k1) . fst) es2 of
        ([(_,e2)], rs2) -> e1 <= e2 && NamU o1 n1 ps1 rs1 <= NamU o2 n2 ps2 rs2

@@ -87,7 +87,8 @@ checkForSelfRecursion d = do
     hasTerm v (AppU t1 []) = hasTerm v t1
 
     hasTerm v (NamU o n ps ((_, t):rs)) = hasTerm v t || hasTerm v (NamU o n ps rs)
-    hasTerm _ (NamU _ _ _ []) = False
+    hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
+    hasTerm _ (NamU _ _ [] []) = False
 
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
@@ -159,7 +160,8 @@ desugarType h _ _ = f
   f (FunU ts t) = FunU <$> mapM f ts <*> f t
   f (NamU o n ps rs) = do 
     ts <- mapM (f . snd) rs
-    return $ NamU o n ps (zip (map fst rs) ts)
+    ps' <- mapM f ps
+    return $ NamU o n ps' (zip (map fst rs) ts)
 
   -- type Cpp (A a b) = "map<$1,$2>" a b
   -- foo Cpp :: A D [B] -> X
@@ -204,7 +206,7 @@ desugarType h _ _ = f
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
-  parsub pair (NamU o n ps rs) = NamU o n ps [(k', parsub pair t) | (k', t) <- rs]
+  parsub pair (NamU o n ps rs) = NamU o n (map (parsub pair) ps) [(k', parsub pair t) | (k', t) <- rs]
 
 
   -- When a type alias is imported from two places, this function reconciles them, if possible
@@ -234,7 +236,7 @@ chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
 chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
-chooseExistential (NamU o n ps rs) = NamU o n ps [(k, chooseExistential t) | (k,t) <- rs]
+chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, chooseExistential t) | (k,t) <- rs]
 
 -- | Packers need to be passed along with the types the pack, they are imported
 -- explicitly with the type and they pack. Should packers be universal? The

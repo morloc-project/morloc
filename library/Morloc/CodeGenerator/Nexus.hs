@@ -133,7 +133,7 @@ gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
 gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
 gtypeOf (NamP o (PV _ (Just n) _) ps rs)
   = NamT o (TV Nothing n)
-    [TV Nothing p | PV _ (Just p) _ <- ps]
+    (map gtypeOf ps)
     [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
 gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 

@@ -66,7 +66,7 @@ findTypeTerms (ExistU _ es1 es2) = conmap findTypeTerms (es1 ++ es2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
 findTypeTerms (FunU ts t) = conmap findTypeTerms ts <> findTypeTerms t
 findTypeTerms (AppU t ts) = findTypeTerms t <> conmap findTypeTerms ts
-findTypeTerms (NamU _ _ _ rs) = conmap (findTypeTerms . snd) rs
+findTypeTerms (NamU _ _ ps rs) = conmap findTypeTerms (map snd rs <> ps)
 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input

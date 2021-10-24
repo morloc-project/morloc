@@ -47,7 +47,7 @@ data TypeP
   | VarP PVar
   | FunP [TypeP] TypeP
   | AppP TypeP [TypeP]
-  | NamP NamType PVar [PVar] [(PVar, TypeP)]
+  | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
 type JsonPath = [JsonAccessor]
@@ -73,7 +73,7 @@ instance Typelike TypeP where
   typeOf (AppP v ts) = AppT (typeOf v) (map typeOf ts)
   typeOf (NamP o n ps es) =
     let n' = pvar2tvar n
-        ps' = (map pvar2tvar ps)
+        ps' = (map typeOf ps)
         es' = [(v, typeOf t) | (PV _ _ v, t) <- es]
     in NamT o n' ps' es'
 
@@ -87,12 +87,12 @@ instance Typelike TypeP where
         | otherwise = t
       sub (FunP ts t) = FunP (map sub ts) (sub t)
       sub (AppP v ts) = AppP (sub v) (map sub ts)
-      sub (NamP o n ps es) = NamP o n ps [(k, sub t) | (k, t) <- es]
+      sub (NamP o n ps es) = NamP o n (map sub ps) [(k, sub t) | (k, t) <- es]
 
   free v@(VarP _) = Set.singleton v
   free (FunP ts t) = Set.unions (map free (t:ts))
   free (AppP t ts) = Set.unions (map free (t:ts))
-  free (NamP _ _ _ es) = Set.unions (map (free . snd) es)
+  free (NamP _ _ ps es) = Set.unions (map free (map snd es <> ps))
   free (UnkP _) = Set.empty -- are UnkP free?
 
 pvar2tvar :: PVar -> TVar
@@ -103,11 +103,11 @@ data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject NamType PVar [PVar] [(PVar, SerialAST f)]
+  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)]
   -- ^ Make a record, table, or object. The parameters indicate
   --   1) NamType - record/table/object
   --   2) PVar - telling the name of the object (e.g., "Person")
-  --   3) [PVar] - listing the generic metavariable names
+  --   3) [TypeP] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
   --   4) [(PVar, SerialAST f)] - entries with keys for concrete and general cases
   | SerialNum PVar
   | SerialBool PVar

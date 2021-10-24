@@ -290,7 +290,8 @@ mergeTypeUs (AppU t1 ps1) (AppU t2 ps2) = AppU <$> mergeTypeUs t1 t2 <*> zipWith
 mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
   | o1 == o2 && n1 == n2 && length ps1 == length ps2 = do
       ts1 <- zipWithM mergeTypeUs (map snd ks1) (map snd ks2)
-      return $ NamU o1 n1 ps1 (zip (map fst ks1) ts1)
+      ps' <- zipWithM mergeTypeUs ps1 ps2 
+      return $ NamU o1 n1 ps' (zip (map fst ks1) ts1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
 

@@ -162,6 +162,9 @@ typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
  = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
 typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
   = o1 == o2 && n1 == n2 && length ps1 == length ps2
+
+-- ps1 and ps2 don't need to be tested, since the typechecker will have
+-- ensured they are equivalent IF the main records are equivalent.
 typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 es2) =
   -- equality does not depend on order
   case filterApart (\(k2, _) -> k1 == k2) es2 of 

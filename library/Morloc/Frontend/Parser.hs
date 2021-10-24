@@ -178,7 +178,7 @@ pTypedef = try pTypedefType <|> pTypedefObject where
     _ <- symbol "="
     constructor <- freename <|> stringLiteral
     entries <- braces (sepBy1 pNamEntryU (symbol ",")) >>= mapM (desugarTableEntries lang o)
-    let t = NamU o (TV lang constructor) vs entries
+    let t = NamU o (TV lang constructor) (map VarU vs) entries
     setLang Nothing
     exprI (TypE v vs t)
 

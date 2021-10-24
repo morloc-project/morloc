@@ -50,12 +50,12 @@ w lang Nothing (AppT v ts)
 w lang (Just (NamT o (TV _ n1) ps1 rs1)) (NamT _ (TV _ n2) ps2 rs2)
   = NamP o
          (PV lang (Just n1) n2)
-         (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
+         (zipWith (w lang) (map Just ps1) ps2)
          [(PV lang (Just k1) k2, w lang (Just t1) t2) | ((k1,t1),(k2,t2)) <- zip rs1 rs2]
 w lang Nothing (NamT o (TV _ n) ps rs)
   = NamP o
          (PV lang Nothing n)
-         [PV lang Nothing v | (TV _ v) <- ps]
+         (zipWith (w lang) (repeat Nothing) ps)
          [(PV lang Nothing k, w lang Nothing t) | (k,t) <- rs]
 w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 
@@ -78,7 +78,7 @@ weaveResolvedTypes g0 t0 = do
       = AppP (f lang v1 v2) (zipWith (f lang) ts1 ts2)
     f lang (NamT o (TV _ n1) ps1 rs1) (NamT _ (TV _ n2) ps2 rs2)
       = NamP o (PV lang (Just n1) n2)
-          (zipWith (\(TV _ p1) (TV _ p2) -> PV lang (Just p1) p2) ps1 ps2)
+          (zipWith (f lang) ps1 ps2)
           [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
     f lang _ (UnkT (TV _ v)) = UnkP (PV lang Nothing v) 
     f lang t1 t2 = error $ "General and concrete types are not compatible: " <> show (lang, t1, t2)
@@ -93,4 +93,4 @@ type2typeu (VarT v) = VarU v
 type2typeu (UnkT v) = ForallU v (VarU v)
 type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
 type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
-type2typeu (NamT o n ps rs) = NamU o n ps [(k, type2typeu x) | (k,x) <- rs]
+type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k,x) <- rs]

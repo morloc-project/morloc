@@ -620,7 +620,7 @@ data Type
   -- ^ (a)
   | FunT [Type] Type
   | AppT Type [Type]
-  | NamT NamType TVar [TVar] [(Text, Type)]
+  | NamT NamType TVar [Type] [(Text, Type)]
   deriving (Show, Ord, Eq)
 
 -- | A type with existentials and universals
@@ -635,7 +635,7 @@ data TypeU
   -- ^ (Forall a . A)
   | FunU [TypeU] TypeU -- function
   | AppU TypeU [TypeU] -- type application
-  | NamU NamType TVar [TVar] [(Text, TypeU)] -- record / object / table
+  | NamU NamType TVar [TypeU] [(Text, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
 
 -- | Extended Type that may represent a language specific type as well as sets
@@ -661,7 +661,7 @@ unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)
-unresolvedType2type (NamU t n ps rs) = NamT t n ps [(k, unresolvedType2type e) | (k, e) <- rs]
+unresolvedType2type (NamU t n ps rs) = NamT t n (map unresolvedType2type ps) [(k, unresolvedType2type e) | (k, e) <- rs]
 
 
 data Property
@@ -722,7 +722,7 @@ instance Typelike TypeU where
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
-  typeOf (NamU n o ps rs) = NamT n o ps (zip (map fst rs) (map (typeOf . snd) rs))
+  typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
   free v@(ExistU _ [] _) = Set.singleton v
@@ -731,7 +731,7 @@ instance Typelike TypeU where
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
-  free (NamU _ _ _ rs) = Set.unions $ map (free . snd) rs
+  free (NamU _ _ ps rs) = Set.unions $ map free (map snd rs <> ps)
   
 
   substituteTVar v@(TV _ _) (ForallU q r) t = 
@@ -754,7 +754,7 @@ instance Typelike TypeU where
         | otherwise = ForallU v (sub t)
       sub (FunU ts t) = FunU (map sub ts) (sub t)
       sub (AppU t ts) = AppU (sub t) (map sub ts)
-      sub (NamU r n ps rs) = NamU r n ps [(k, sub t) | (k, t) <- rs]
+      sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
 
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
