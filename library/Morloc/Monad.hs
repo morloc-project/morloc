@@ -77,6 +77,7 @@ emptyState path v = MorlocState {
   , stateCounter = -1
   , stateDepth = 0
   , stateSignatures = GMap.empty
+  , stateTypedefs = GMap.empty
   , stateSources = GMap.empty
   , stateOutfile = path
   , statePackers = GMap.empty
@@ -275,4 +276,8 @@ metaPackMap i = do
 
 -- | This is currently only used in the C++ translator.
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
-metaTypedefs _ = return Map.empty -- FIXME - leaving this empty breaks the C++ translator
+metaTypedefs i = do
+    p <- gets stateTypedefs
+    case GMap.lookup i p of
+      (GMapJust p') -> return p'
+      _ -> return Map.empty

@@ -104,7 +104,8 @@ desugarExpr
   -> MorlocMonad ExprI
 desugarExpr d k e0 = do
   s <- MM.get  
-  MM.put (s {stateSources = GMap.insertMany (AST.getIndices e0) k objSources (stateSources s)} )
+  MM.put (s { stateSources = GMap.insertMany indices k objSources (stateSources s)
+            , stateTypedefs = GMap.insertMany indices k typedefs (stateTypedefs s) } )
   mapExprM f e0
   where
 
@@ -117,6 +118,13 @@ desugarExpr d k e0 = do
 
   termmap :: Map.Map TVar [([TVar], TypeU)]
   termmap = Map.fromList $ zip terms (map lookupTypedefs terms)
+
+  indices = AST.getIndices e0
+
+  -- FIXME: should a term be allowed to have multiple type definitions within a language?
+  typedefs :: Map.Map TVar (Type, [TVar])
+  typedefs = Map.map (\(vs, t) -> (typeOf t, vs))
+    (Map.map head (Map.filter (\xs -> length xs > 0) termmap))
 
   objSources = [src | src <- AST.findSources e0]
 
@@ -277,24 +285,8 @@ gatherPackers mv e xs =
 attachPackers :: MVar -> ExprI -> Map.Map (TVar, Int) [UnresolvedPacker] -> MorlocMonad ()
 attachPackers mv e m = do
   s <- MM.get
-  let p = GMap.insertMany (collectIndices e) mv m (statePackers s)
+  let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
   MM.put (s {statePackers = p})
-
-collectIndices :: ExprI -> [Int]
-collectIndices (ExprI i e) = i : collectIndicesExpr e
-
-collectIndicesExpr :: Expr -> [Int]
-collectIndicesExpr (ModE _ es) = conmap collectIndices es
-collectIndicesExpr (AssE _ e es) = collectIndices e <> conmap collectIndices es
-collectIndicesExpr (AccE e _) = collectIndices e
-collectIndicesExpr (LstE es) = conmap collectIndices es
-collectIndicesExpr (TupE es) = conmap collectIndices es
-collectIndicesExpr (NamE es) = conmap collectIndices (map snd es)
-collectIndicesExpr (AppE e es) = collectIndices e <> conmap collectIndices es
-collectIndicesExpr (LamE _ e) = collectIndices e
-collectIndicesExpr (AnnE e _) = collectIndices e
-collectIndicesExpr _ = []
-
 
 findPackers :: ExprI -> Either MorlocError (Map.Map (TVar, Int) [UnresolvedPacker])
 findPackers expr
