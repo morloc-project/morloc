@@ -12,6 +12,7 @@ abandon the default prelude and create my own. But not just yet.
 module Morloc.Internal
   ( ifelse
   , conmap
+  , conmapM
   , unique
   , duplicates
   , module Data.Maybe
@@ -48,6 +49,10 @@ module Morloc.Internal
   , minimumOnMay
   , maximumOnDef
   , minimumOnDef
+  -- ** other useful functions
+  , statefulMap
+  , statefulMapM
+  , filterApart
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
@@ -115,6 +120,9 @@ ifelse False _ y = y
 conmap :: (a -> [b]) -> [a] -> [b]
 conmap f = concat . map f
 
+conmapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
+conmapM f = fmap concat . mapM f
+
 -- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]
 unique xs0 = unique' Set.empty xs0 where 
@@ -131,6 +139,29 @@ duplicates xs = unique $ filter isDuplicated xs where
 
   -- isDuplicated :: Ord a => a -> Bool
   isDuplicated k = fromJust (Map.lookup k countMap) > 1
+
+statefulMap :: (s -> a -> (s, b)) -> s -> [a] -> (s, [b])
+statefulMap _ s [] = (s, [])
+statefulMap f s0 (x:xs) =
+  let (s1, y) = f s0 x
+  in  let (sn, ys) = statefulMap f s1 xs
+      in (sn, y:ys)
+
+statefulMapM :: Monad m => (s -> a -> m (s, b)) -> s -> [a] -> m (s, [b])
+statefulMapM _ s [] = return (s, [])
+statefulMapM f s (x:xs) = do
+  (s', x') <- f s x
+  (s'', xs') <- statefulMapM f s' xs
+  return (s'', x':xs')
+
+
+-- pull one element from a list
+filterApart :: (a -> Bool) -> [a] -> (Maybe a, [a])
+filterApart _ [] = (Nothing, [])
+filterApart f (x:xs)
+  | f x = (Just x, xs)  
+  | otherwise = case filterApart f xs of 
+    (r, xs') -> (r, x:xs') 
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

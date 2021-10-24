@@ -9,16 +9,16 @@ Stability   : experimental
 The single @generate@ function wraps the entire AST forest to source code
 translation process.
 
-The input the @generate@ is of type @[SAnno GMeta Many [CType]]@. The @SAnno
-GMeta Many [CType]@ elements each represent a single command exported from the
-main function. The @GMeta@ type stores all general information about a given
+The input the @generate@ is of type @[SAnno (Indexed Type) Many [Type]]@. The @SAnno
+(Indexed Type) Many [Type]@ elements each represent a single command exported from the
+main function. The @(Indexed Type)@ type stores all general information about a given
 "manifold" (a node in the function graph and all its wrappings). The term
 @Many@ states that there may be one of more AST describing each expression. The
-term @[CType]@ states that there may be multiple concrete, language-specific
+term @[Type]@ states that there may be multiple concrete, language-specific
 types associated with any term.
 
-The @generate@ function converts the @SAnno GMeta Many [CType]@ types into
-@SAnno GMeta One CType@ unambiguous ASTs. This step is an important
+The @generate@ function converts the @SAnno (Indexed Type) Many [Type]@ types into
+@SAnno (Indexed Type) One Type@ unambiguous ASTs. This step is an important
 optimization step in the morloc build pipeline. Currently the compiler uses a
 flat scoring matrix for the cost of interop between languages (e.g., 0 for C++
 to C++, 1000 for anything to R, 5 for R to R since there is a function call
@@ -28,50 +28,61 @@ performance model is a major goal.
 Additional manipulations of the AST can reduce the number of required foreign
 calls, (de)serialization calls, and duplicate computation.
 
-The @SAnno GMeta One CType@ expression is ultimately translated into a simple
+The @SAnno (Indexed Type) One Type@ expression is ultimately translated into a simple
 @ExprM@ type that is then passed to a language-specific translator.
 
 -}
 
 module Morloc.CodeGenerator.Generate
 (
-  generate
+    realityCheck
+  , generate
 ) where
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
+import Morloc.CodeGenerator.Typecheck (typecheck)
 import Morloc.Data.Doc
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty
+import qualified Data.Map as Map
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.Module as Mod
-import qualified Data.Map as Map
-import qualified Data.Set as Set
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
+import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
 
--- | Translate typed, abstract syntax forests into compilable code
-generate ::
-  [SAnno GMeta Many [CType]]
+realityCheck
+  :: [SAnno (Indexed Type) Many Int]
   -- ^ one AST forest for each command exported from main
-  -> MorlocMonad (Script, [Script]) 
-  -- ^ the nexus code and the source code for each language pool
-generate ms = do
+  -> MorlocMonad ( [SAnno (Indexed Type) One ()]
+                 , [SAnno Int One (Indexed TypeP)]
+                 )
+realityCheck es = do
   -- translate modules into bitrees
   (gASTs, rASTs)
-    -- eliminate morloc composition abstractions
-    <-  mapM rewrite ms
     -- select a single instance at each node in the tree
-    >>= mapM realize   -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
+    <- mapM realize es  -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
+  -- concrete typecheck fully realized tree
+  rASTs' <- mapM typecheck rASTs
+
+  return (gASTs, rASTs')
+
+-- | Translate typed, abstract syntax forests into compilable code
+generate
+  :: [SAnno (Indexed Type) One ()]
+  -> [SAnno Int One (Indexed TypeP)]
+  -> MorlocMonad (Script, [Script]) 
+  -- ^ the nexus code and the source code for each language pool
+generate gASTs rASTs = do
   -- Collect all call-free data
   gSerial <- mapM generalSerial gASTs
 
@@ -81,21 +92,19 @@ generate ms = do
   -- The call passes the pool an index for the function (manifold) that will be called.
   nexus <- Nexus.generate
     gSerial
-    [ (t, poolId m x, metaName m)
-    | SAnno (One (x, t)) m <- rASTs
-    ]
-
-  -- find all sources files
-  let srcs = unique . concat . conmap (unpackSAnno getSrcs) $ rASTs
+    [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
 
   -- for each language, collect all functions into one "pool"
   pools
+    <- mapM applyLambdas rASTs
     -- thread arguments across the tree
-    <- mapM parameterize rASTs
+    >>= mapM parameterize
     -- convert from AST to manifold tree
     >>= mapM express
-    -- rewrite lets to minimize the number of foreign calls
-    >>= mapM letOptimize
+
+    -- -- rewrite lets to minimize the number of foreign calls
+    -- >>= mapM letOptimize
+
     -- Separate the call trees into mono-lingual segments terminated in
     -- primitives or foreign calls.
     >>= mapM segment |>> concat
@@ -106,258 +115,202 @@ generate ms = do
     -- nuanced.
     >>= pool
     -- Generate the code for each pool
-    >>= mapM (encode srcs)
+    >>= mapM findSources
+    -- find sources dependencies for each concrete AST
+    >>= mapM (uncurry encode)
 
-  -- return the nexus script and each pool script
   return (nexus, pools)
-  where
-    -- map from nexus id to pool id
-    -- these differ when a declared variable is exported
-    poolId :: GMeta -> SExpr GMeta One TypeP -> Int
-    poolId _ (LamS _ (SAnno _ meta)) = metaId meta
-    poolId meta _ = metaId meta
-
-    -- this is grossly inefficient ... but I'll deal with it later
-    getSrcs :: SExpr GMeta One c -> GMeta -> c -> [Source]
-    getSrcs (CallS src) g _ = src : getSrcsFromGmeta g
-    getSrcs _ g _ = getSrcsFromGmeta g
-
-    getSrcsFromGmeta :: GMeta -> [Source]
-    getSrcsFromGmeta g
-      = concat [unresolvedPackerForward p ++ unresolvedPackerReverse p
-               | p <- (concat . Map.elems . metaPackers) g]
-      ++ Map.elems (metaConstructors g)
 
 
--- | Eliminate morloc function calls
--- For example:
---    foo x y = bar x (baz y)
---    bar x y = add x y
---    baz x = div x 5
--- Can be rewritten as:
---    foo x y = add x (div y 5)
--- Notice that no morloc abstractions appear on the right hand side.
-rewrite
-  :: SAnno GMeta Many [CType]
-  -> MorlocMonad (SAnno GMeta Many [CType])
-rewrite (SAnno (Many es0) g0) = do
-  es0' <- concat <$> mapM rewriteL0 es0
-  return $ SAnno (Many es0') g0
-  where
-    rewriteL0
-      :: (SExpr GMeta Many [CType], [CType])
-      -> MorlocMonad [(SExpr GMeta Many [CType], [CType])]
-    rewriteL0 (AppS (SAnno (Many es1) g1) args, c1) = do
-      args' <- mapM rewrite args
-      -- originally es1 consists of a list of CallS and LamS constructors
-      --  - CallS are irreducible source functions
-      --  - LamS are Morloc abstractions that can be reduced
-      -- separate LamS expressions from all others
-      let (es1LamS, es1CallS) = partitionEithers (map sepLamS es1)
-      -- rewrite the LamS expressions, each expression will yields 1 or more
-      es1LamS' <- concat <$> mapM (rewriteL1 args') es1LamS
-      return $ (AppS (SAnno (Many es1CallS) g1) args', c1) : es1LamS'
-      where
-        sepLamS
-          :: (SExpr g Many c, c)
-          -> Either ([EVar], SAnno g Many c)
-                    (SExpr g Many c, c)
-        sepLamS (LamS vs body, _) = Left (vs, body)
-        sepLamS x = Right x
-    rewriteL0 (AccS x k, c) = do
-      x' <- rewrite x
-      return [(AccS x' k, c)]
-    rewriteL0 (ListS xs, c) = do
-      xs' <- mapM rewrite xs
-      return [(ListS xs', c)]
-    rewriteL0 (TupleS xs, c) = do
-      xs' <- mapM rewrite xs
-      return [(TupleS xs', c)]
-    rewriteL0 (RecS entries, c) = do
-      xs' <- mapM (rewrite . snd) entries
-      return [(RecS $ zip (map fst entries) xs', c)]
-    rewriteL0 (LamS vs x, c) = do
-      x' <- rewrite x
-      return [(LamS vs x', c)]
-    -- VarS UniS NumS LogS StrS CallS
-    rewriteL0 x = return [x]
-
-    rewriteL1
-      :: [SAnno g Many c]
-      -> ([EVar], SAnno g Many c) -- lambda variables and body
-      -> MorlocMonad [(SExpr g Many c, c)]
-    rewriteL1 args (vs, SAnno (Many es2) _)
-      | length vs == length args =
-          concat <$> mapM (substituteExprs (zip vs args)) es2
-      | length vs > length args = MM.throwError . NotImplemented $
-          "Partial function application not yet implemented (coming soon)"
-      | length vs < length args = MM.throwError . TypeError $
-          "Type error: too many arguments applied to lambda"
-    rewriteL1 _ (_, SAnno (Many _) _) = error "GHC warnings tell me this is a missing case, but why?"
-
-
-    substituteExprs
-      :: [(EVar, SAnno g Many c)]
-      -> (SExpr g Many c, c) -- body
-      -> MorlocMonad [(SExpr g Many c, c)] -- substituted bodies
-    substituteExprs [] x = return [x]
-    substituteExprs ((v, r):rs) x = do
-      xs' <- substituteExpr v r x
-      concat <$> mapM (substituteExprs rs) xs'
-
-    substituteExpr
-      :: EVar
-      -> SAnno g Many c -- replacement
-      -> (SExpr g Many c, c) -- expression
-      -> MorlocMonad [(SExpr g Many c, c)]
-    substituteExpr v (SAnno (Many xs) _) x@(VarS v', _)
-      | v == v' = return xs
-      | otherwise = return [x]
-    substituteExpr v r (AccS x k, c) = do
-      x' <- substituteAnno v r x
-      return [(AccS x' k, c)]
-    substituteExpr v r (ListS xs, c) = do
-      xs' <- mapM (substituteAnno v r) xs
-      return [(ListS xs', c)]
-    substituteExpr v r (TupleS xs, c) = do
-      xs' <- mapM (substituteAnno v r) xs
-      return [(TupleS xs', c)]
-    substituteExpr v r (RecS entries, c) = do
-      xs' <- mapM (substituteAnno v r . snd) entries
-      return [(RecS (zip (map fst entries) xs'), c)]
-    substituteExpr v r (LamS vs x, c) = do
-      x' <- substituteAnno v r x
-      return [(LamS vs x', c)]
-    substituteExpr v r (AppS f xs, c) = do
-      f' <- substituteAnno v r f
-      xs' <- mapM (substituteAnno v r) xs
-      return [(AppS f' xs', c)]
-    -- UniS NumS LogS StrS CallS
-    substituteExpr _ _ x = return [x]
-
-    substituteAnno
-      :: EVar -- variable to replace
-      -> SAnno g Many c -- replacement branch set
-      -> SAnno g Many c -- search branch
-      -> MorlocMonad (SAnno g Many c)
-    substituteAnno v r (SAnno (Many xs) g) = do
-      xs' <- concat <$> mapM (substituteExpr v r) xs
-      return $ SAnno (Many xs') g
-
--- | Select a single concrete language for each sub-expression.  Store the
--- concrete type and the general type (if available).  Select pack/unpack
--- functions.
+-- | Choose a single concrete implementation. In the future, this component
+-- will likely be the most complex component of the morloc compiler. It will
+-- probably need to be implemented using an optimizing SMT solver.
 realize
-  :: SAnno GMeta Many [CType]
-  -> MorlocMonad (Either (SAnno GMeta One ()) (SAnno GMeta One TypeP))
-realize x0 = do
-  -- MM.say $ " --- realize ---"
-  -- MM.say $ prettySAnnoMany x
-  -- MM.say $ " ---------------"
-  realizationMay <- realizeAnno 0 Nothing x0
-  case realizationMay of
-    Nothing -> makeGAST x0 |>> Left
-    (Just (_, realization)) -> do
-       mapGCM weaveTypesGCP realization >>= rewritePartials |>> Right
+  :: SAnno (Indexed Type) Many Int
+  -> MorlocMonad (Either (SAnno (Indexed Type) One ())
+                         (SAnno (Indexed Type) One (Indexed Lang)))
+realize s0 = do
+  e@(SAnno (One (_, li)) (Idx _ gt)) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
+  case li of
+    (Idx _ Nothing) -> makeGAST e |>> Left 
+    (Idx _ _) -> Right <$> propagateDown e
   where
-    realizeAnno
-      :: Int
-      -> Maybe Lang
-      -> SAnno GMeta Many [CType]
-      -> MorlocMonad (Maybe (Int, SAnno GMeta One CType))
-    realizeAnno depth langMay (SAnno (Many xs) m) = do
-      asts <- mapM (\(x, cs) -> mapM (realizeExpr (depth+1) langMay x) cs) xs |>> concat
-      case minimumOnMay (\(s,_,_) -> s) (catMaybes asts) of
-        Just (i, x, c) -> do
-          return $ Just (i, SAnno (One (x, c)) m)
-        Nothing -> do
-          return Nothing
+  scoreSAnno
+    :: [Lang]
+    -> SAnno (Indexed Type) Many Int
+    -> MorlocMonad (SAnno (Indexed Type) Many (Indexed [(Lang, Int)]))
+  scoreSAnno langs (SAnno (Many xs) t) = do
+    xs' <- mapM (scoreExpr langs) xs
+    return (SAnno (Many xs') t)
 
-    realizeExpr
-      :: Int
-      -> Maybe Lang
-      -> SExpr GMeta Many [CType]
-      -> CType
-      -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
-    realizeExpr depth lang x c = do
-      let lang' = if isJust lang then lang else langOf c
-      realizeExpr' depth lang' x c
+  scoreExpr
+    :: [Lang]
+    -> (SExpr (Indexed Type) Many Int, Int)
+    -> MorlocMonad (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
+  scoreExpr langs (AccS x k, i) = do
+    x' <- scoreSAnno langs x
+    return (AccS x' k, Idx i (scoresOf x'))
+  scoreExpr langs (LstS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (LstS xs', Idx i best)
+  scoreExpr langs (TupS xs, i) = do
+    (xs', best) <- scoreMany langs xs
+    return (TupS xs', Idx i best)
+  scoreExpr langs (LamS vs x, i) = do
+    x' <- scoreSAnno langs x
+    return (LamS vs x', Idx i (scoresOf x'))
+  scoreExpr _ (AppS f xs, i) = do
+    f' <- scoreSAnno [] f
+    let scores = scoresOf f'
+    xs' <- mapM (scoreSAnno (unique $ map fst scores)) xs
+    -- FIXME: using an arbitrary big number as the default minimum is obviously a bad idea.
+    -- I could transform the scores such that this is a maximization problem.
+    let pairss = [(minPairs . concat) [xs''' | (_, Idx _ xs''') <- xs''] | SAnno (Many xs'') _ <- xs']
+        best = [ (l1, sum [ minimumDef 999999999 [s1 + s2 + Lang.pairwiseCost l1 l2
+                          | (l2, s2) <- pairs] | pairs <- pairss])
+               | (l1, s1) <- scores]
+    return (AppS f' xs', Idx i best)
+  scoreExpr langs (NamS rs, i) = do
+    (xs, best) <- scoreMany langs (map snd rs)
+    return $ (NamS (zip (map fst rs) xs), Idx i best)
+  scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, callCost s)])
+  -- non-recursive expressions
+  scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
+  scoreExpr langs (VarS v, i) = return (VarS v, zipLang i langs)
+  scoreExpr langs (NumS x, i) = return (NumS x, zipLang i langs)
+  scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
+  scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
 
-    realizeExpr'
-      :: Int
-      -> Maybe Lang
-      -> SExpr GMeta Many [CType]
-      -> CType
-      -> MorlocMonad (Maybe (Int, SExpr GMeta One CType, CType))
-    -- always choose the primitive that is in the same language as the parent
-    realizeExpr' _ lang UniS c
-      | lang == langOf c = return $ Just (0, UniS, c)
-      | otherwise = return Nothing
-    realizeExpr' _ lang (NumS x) c
-      | lang == langOf c = return $ Just (0, NumS x, c)
-      | otherwise = return Nothing
-    realizeExpr' _ lang (LogS x) c
-      | lang == langOf c = return $ Just (0, LogS x, c)
-      | otherwise = return Nothing
-    realizeExpr' _ lang (StrS x) c
-      | lang == langOf c = return $ Just (0, StrS x, c)
-      | otherwise = return Nothing
-    -- Q: a call should also be of the same language as the parent, shouldn't it?
-    -- A: not necessarily, specifically if the parent includes many child calls, say in a list
-    realizeExpr' _ lang (CallS src) c
-      -- FIXME: assuming function calls have 0 cost is perhaps not realistic
-      | lang == langOf c = return $ Just (0, CallS src, c)
-      | otherwise = return Nothing
-    -- and a var?
-    realizeExpr' _ lang (VarS x) c
-      | lang == langOf c = return $ Just (0, VarS x, c)
-      | otherwise = return Nothing
-    realizeExpr' depth lang (AccS x k) c
-      | lang == langOf c = do
-        xMay <- realizeAnno depth lang x
-        case xMay of
-          Nothing -> return Nothing
-          (Just (i, x')) -> return $ Just (i, AccS x' k, c)
-      | otherwise = return Nothing
-    -- simple recursion into ListS, TupleS, and RecS
-    realizeExpr' depth lang (ListS xs) c
-      | lang == langOf c = do
-        xsMay <- mapM (realizeAnno depth lang) xs
-        case (fmap unzip . sequence) xsMay of
-          (Just (scores, xs')) -> return $ Just (sum scores, ListS xs', c)
-          Nothing -> return Nothing
-      | otherwise = return Nothing
-    realizeExpr' depth lang (TupleS xs) c
-      | lang == langOf c = do
-        xsMay <- mapM (realizeAnno depth lang) xs
-        case (fmap unzip . sequence) xsMay of
-          (Just (scores, xs')) -> return $ Just (sum scores, TupleS xs', c)
-          Nothing -> return Nothing
-      | otherwise = return Nothing
-    realizeExpr' depth lang (RecS entries) c
-      | lang == langOf c = do
-          xsMay <- mapM (realizeAnno depth lang . snd) entries
-          case (fmap unzip . sequence) xsMay of
-            (Just (scores, vals)) -> return $ Just (sum scores, RecS (zip (map fst entries) vals), c)
-            Nothing -> return Nothing
-      | otherwise = return Nothing
-    --
-    realizeExpr' depth _ (LamS vs x) c = do
-      xMay <- realizeAnno depth (langOf c) x
-      case xMay of
-        (Just (score, x')) -> return $ Just (score, LamS vs x', c)
-        Nothing -> return Nothing
-    -- AppS
-    realizeExpr' _ Nothing _ _ = MM.throwError . OtherError $ "Expected concrete type"
-    realizeExpr' depth (Just lang) (AppS f xs) c = do
-      let lang' = (fromJust . langOf) c 
-      fMay <- realizeAnno depth (Just lang') f
-      xsMay <- mapM (realizeAnno depth (Just lang')) xs
-      case (fMay, (fmap unzip . sequence) xsMay, Lang.pairwiseCost lang lang') of
-        (Just (fscore, f'), Just (scores, xs'), Just interopCost) ->
-          return $ Just (fscore + sum scores + interopCost, AppS f' xs', c)
-        _ -> return Nothing
+  zipLang :: Int -> [Lang] -> Indexed [(Lang, Int)]
+  zipLang i langs = Idx i (zip langs (repeat 0))
 
+  scoresOf :: SAnno a Many (Indexed [(Lang, Int)]) -> [(Lang, Int)]
+  scoresOf (SAnno (Many xs) _) = minPairs . concat $ [xs' | (_, Idx _ xs') <- xs]
+
+  -- find the scores of all implementations from all possible language contexts
+  scoreMany
+    :: [Lang]
+    -> [SAnno (Indexed Type) Many Int]
+    -> MorlocMonad ([SAnno (Indexed Type) Many (Indexed [(Lang, Int)])], [(Lang, Int)])
+  scoreMany langs xs0 = do
+    xs1 <- mapM (scoreSAnno langs) xs0
+    return (xs1, scoreMany' xs1)
+    where
+      scoreMany' :: [SAnno (Indexed Type) Many (Indexed [(Lang, Int)])] -> [(Lang, Int)]
+      scoreMany' xs =
+        let pairss = [ (minPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
+                     | SAnno (Many xs') _ <- xs]
+            langs' = unique (langs <> (concat . map (map fst)) pairss)
+        in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
+                               | (l2, score) <- pairs]
+                     | pairs <- pairss])
+           | l1 <- langs']
+
+
+  collapseSAnno
+    :: Maybe Lang
+    -> SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
+    -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+  collapseSAnno l1 (SAnno (Many es) t) = do
+    e <- case minBy (\(_, Idx _ ss) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) es of
+      Nothing -> MM.throwError . CallTheMonkeys $ "A SAnno must contain an SExpr"
+      (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (minBy snd ss)) x
+    return (SAnno (One e) t)
+
+
+  cost
+    :: Maybe Lang -- parent language (if given)
+    -> Lang -- child lang (should always be given if we are working from scored pairs)
+    -> Int -- score
+    -> Int
+  cost (Just l1) l2 score = score + Lang.pairwiseCost l1 l2
+  cost _ _ score = score
+
+  -- FIXME: in the future, this function should be replaced by an estimate of
+  -- the function runtime, for now I will just base it off languages.
+  callCost :: Source -> Int
+  callCost src = Lang.languageCost (srcLang src)
+
+  collapseExpr
+    :: Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
+    -> (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), (Indexed [(Lang, Int)]))
+    -> MorlocMonad (SExpr (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
+  collapseExpr l1 (AccS x k, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseSAnno lang x
+    return (AccS x' k, Idx i lang)
+  collapseExpr _ (CallS src, Idx i _) = do
+   return (CallS src, Idx i (Just $ srcLang src))
+  collapseExpr l1 (LstS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang) xs
+    return (LstS xs', Idx i lang)
+  collapseExpr l1 (TupS xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang) xs
+    return (TupS xs', Idx i lang)
+  collapseExpr l1 (LamS vs x, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    x' <- collapseSAnno lang x
+    return (LamS vs x', Idx i lang)
+  collapseExpr l1 (AppS f xs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    f' <- collapseSAnno lang f
+    xs' <- mapM (collapseSAnno lang) xs
+    return (AppS f' xs', Idx i lang)
+  collapseExpr l1 (NamS rs, Idx i ss) = do
+    lang <- chooseLanguage l1 ss
+    xs' <- mapM (collapseSAnno lang . snd) rs
+    return (NamS (zip (map fst rs) xs'), Idx i lang)
+  -- collapse leaf expressions
+  collapseExpr lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
+  collapseExpr lang (VarS v, Idx i _) = return (VarS v, Idx i lang)
+  collapseExpr lang (NumS x, Idx i _) = return (NumS x, Idx i lang)
+  collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
+  collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
+
+  chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
+  chooseLanguage l1 ss = do
+    case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
+      Nothing -> return Nothing
+      (Just (l3, _)) -> return (Just l3)
+
+
+  minBy :: Ord b => (a -> b) -> [a] -> Maybe a
+  minBy _ [] = Nothing
+  minBy _ [x] = Just x
+  minBy f (x1:rs) = case minBy f rs of
+    Nothing -> Just x1
+    (Just x2) -> if f x1 <= f x2 then Just x1 else Just x2
+
+  -- find the lowest cost function for each key
+  -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
+  minPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
+  minPairs xs = map (\(k, vs) -> (k, minimum vs)) $ groupSort xs
+
+  propagateDown
+    ::             (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+    -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
+  propagateDown (SAnno (One (_, (Idx _ Nothing))) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+  propagateDown e@(SAnno (One (_, Idx _ (Just lang0))) _) = f lang0 e where
+    f :: Lang ->     (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+      -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
+    f lang (SAnno (One (e, (Idx i Nothing))) g) = f lang (SAnno (One (e, (Idx i (Just lang)))) g)
+    f _ (SAnno (One (e, Idx i (Just lang))) g) = do 
+      e' <- case e of
+        (AccS x k) -> AccS <$> f lang x <*> pure k
+        (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
+        (LamS vs x) -> LamS vs <$> f lang x
+        (LstS xs) -> LstS <$> mapM (f lang) xs
+        (TupS xs) -> TupS <$> mapM (f lang) xs
+        (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
+        (UniS) -> return UniS
+        (VarS x) -> return (VarS x)
+        (NumS x) -> return (NumS x)
+        (LogS x) -> return (LogS x)
+        (StrS x) -> return (StrS x)
+        (CallS x) -> return (CallS x)
+      return (SAnno (One (e', Idx i lang)) g)
 
 -- | This function is called on trees that contain no language-specific
 -- components.  "GAST" refers to General Abstract Syntax Tree. The most common
@@ -379,95 +332,69 @@ realize x0 = do
 --  f6 (x,y) = (y,x)
 --
 -- The idea could be elaborated into a full-fledged language.
-makeGAST :: SAnno GMeta Many [CType] -> MorlocMonad (SAnno GMeta One ())
-makeGAST (SAnno (Many []) m) = case metaGType m of
-  (Just (GType t)) -> MM.throwError . CallTheMonkeys . render
-    $ "Cannot build general value from type" <+> dquotes (prettyType t)
-  Nothing -> MM.throwError . CallTheMonkeys . render
-          $ "Cannot build general value from type."
-          <+> "You probably tried to build a module that is meant to be imported."
-makeGAST (SAnno (Many ((UniS, _):_)) m) = return (SAnno (One (UniS, ())) m)
-makeGAST (SAnno (Many ((VarS x, _):_)) m) = return (SAnno (One (VarS x, ())) m)
-makeGAST (SAnno (Many ((NumS x, _):_)) m) = return (SAnno (One (NumS x, ())) m)
-makeGAST (SAnno (Many ((LogS x, _):_)) m) = return (SAnno (One (LogS x, ())) m)
-makeGAST (SAnno (Many ((StrS x, _):_)) m) = return (SAnno (One (StrS x, ())) m)
-makeGAST (SAnno (Many ((AccS x k, _):_)) m) = do
-  x' <- makeGAST x
-  return (SAnno (One (AccS x' k, ())) m)
-makeGAST (SAnno (Many ((ListS ss, _):_)) m) = do
-  ss' <- mapM makeGAST ss
-  return $ SAnno (One (ListS ss', ())) m
-makeGAST (SAnno (Many ((TupleS ss, _):_)) m) = do
-  ss' <- mapM makeGAST ss
-  return $ SAnno (One (TupleS ss', ())) m
-makeGAST (SAnno (Many ((LamS vs s, _):_)) m) = do
-  s' <- makeGAST s
-  return $ SAnno (One (LamS vs s', ())) m
-makeGAST (SAnno (Many ((AppS f xs, _):_)) m) = do
-  f' <- makeGAST f
-  xs' <- mapM makeGAST xs
-  return $ SAnno (One (AppS f' xs', ())) m
-makeGAST (SAnno (Many ((RecS es, _):_)) m) = do
-  vs <- mapM (makeGAST . snd) es
-  return $ SAnno (One (RecS (zip (map fst es) vs), ())) m
-makeGAST (SAnno (Many ((CallS src, _):_)) _)
-  = MM.throwError . OtherError . render
-  $ "Function calls cannot be used in general code:" <+> pretty (srcName src)
+makeGAST :: SAnno (Indexed Type) One (Indexed (Maybe Lang)) -> MorlocMonad (SAnno (Indexed Type) One ())
+makeGAST = mapCM (\(Idx _ _) -> return ())
 
 
--- | Serialize a simple, general data type. This type can consists only of JSON
--- primitives and containers (lists, tuples, and records) and accessors.
-generalSerial :: SAnno GMeta One () -> MorlocMonad NexusCommand
-generalSerial (SAnno _ GMeta{metaName = Nothing})
-  = MM.throwError . OtherError $ "No general type found for call-free function"
-generalSerial (SAnno _ GMeta{metaGType = Nothing})
-  = MM.throwError . OtherError $ "No name found for call-free function"
-generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
-                               , metaGType = Just (GType cmdtype)}) = generalSerial' [] x0
+generalSerial :: SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
+generalSerial x0@(SAnno _ (Idx i t)) = do
+  mayName <- MM.metaName i
+  n <- case mayName of
+    Nothing -> MM.throwError . OtherError $ "No general type found for call-free function"
+    (Just n') -> return n'
+  let base = NexusCommand {
+      commandName = n -- EVar -- user-exposed subcommand name in the nexus
+    , commandType = t -- Type -- the general type of the expression
+    , commandJson = (dquotes "_") -- MDoc -- JSON output with null's where values will be replaced
+    , commandArgs = [] -- [EVar] -- list of function arguments
+    , commandSubs = [] -- [(JsonPath, Text, JsonPath)]
+    -- list of tuples with values 1) path in JSON to value needs to be replaced
+    -- 2) the function argument from which to pull replacement value and 3) the
+    -- path to the replacement value
+    }
+  generalSerial' base [] x0
   where
-    base = NexusCommand subcmd cmdtype (dquotes "_") [] []
-
-    generalSerial' :: JsonPath -> SAnno GMeta One () -> MorlocMonad NexusCommand
-    generalSerial' _ (SAnno (One (UniS,   _)) _)
+    generalSerial' :: NexusCommand -> JsonPath -> SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
+    generalSerial' base _ (SAnno (One (UniS,   _)) _)
       = return $ base { commandJson = "null" }
-    generalSerial' _ (SAnno (One (NumS x, _)) _)
+    generalSerial' base _ (SAnno (One (NumS x, _)) _)
       = return $ base { commandJson = viaShow x }
-    generalSerial' _ (SAnno (One (LogS x, _)) _)
+    generalSerial' base _ (SAnno (One (LogS x, _)) _)
       = return $ base { commandJson = if x then "true" else "false" }
-    generalSerial' _ (SAnno (One (StrS x, _)) _)
+    generalSerial' base _ (SAnno (One (StrS x, _)) _)
       = return $ base { commandJson = dquotes (pretty x) }
     -- if a nested accessor is observed, evaluate the nested expression and
     -- append the path 
-    generalSerial' ps (SAnno (One (AccS x@(SAnno (One (AccS _ _, _)) _) k, _)) _) = do
-      ncmd <- generalSerial' ps x
+    generalSerial' base ps (SAnno (One (AccS x@(SAnno (One (AccS _ _, _)) _) k, _)) _) = do
+      ncmd <- generalSerial' base ps x
       case commandSubs ncmd of
         [(ps1, arg, ps2)] ->
-          return $ ncmd { commandSubs = [(ps1, arg, JsonKey (unEVar k) : ps2)] }
+          return $ ncmd { commandSubs = [(ps1, arg, JsonKey k : ps2)] }
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
     -- will be set in the nexus
-    generalSerial' ps (SAnno (One (AccS (SAnno (One (VarS v, _)) g) k, _)) _) =
-      case g of
-        (metaGType->(Just (GType (NamT {})))) ->
-          return $ base { commandSubs = [(ps, unEVar v, [JsonKey (unEVar k)])] }
-        _ -> error "Attempted to use key access to non-record"
-    generalSerial' ps (SAnno (One (ListS xs, _)) _) = do
-      ncmds <- zipWithM generalSerial'
-                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ (NamT _ _ _ _))) k, _)) _) =
+      return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
+    -- If the accessed type is not a record, then die
+    generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t)) _, _)) _) =
+        MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t
+    generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base 
         { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
         }
-    generalSerial' ps (SAnno (One (TupleS xs, _)) _) = do
-      ncmds <- zipWithM generalSerial'
-                        [ps ++ [JsonIndex i] | i <- [0..]] xs
+    generalSerial' base ps (SAnno (One (TupS xs, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
         { commandJson = list (map commandJson ncmds)
         , commandSubs = conmap commandSubs ncmds
         }
-    generalSerial' ps (SAnno (One (RecS es, _)) _) = do
-      ncmds <- zipWithM generalSerial'
-                        [ps ++ [JsonKey (unEVar k)] | k <- map fst es]
+    generalSerial' base ps (SAnno (One (NamS es, _)) _) = do
+      ncmds <- zipWithM (generalSerial' base)
+                        [ps ++ [JsonKey k] | k <- map fst es]
                         (map snd es)
       let entries = zip (map fst es) (map commandJson ncmds)
           obj = encloseSep "{" "}" ","
@@ -476,82 +403,182 @@ generalSerial x0@(SAnno _ GMeta{ metaName = Just subcmd
         { commandJson = obj
         , commandSubs = conmap commandSubs ncmds
         }
-    generalSerial' ps (SAnno (One (LamS vs x, _)) _) = do
-      ncmd <- generalSerial' ps x
+    generalSerial' base ps (SAnno (One (LamS vs x, _)) _) = do
+      ncmd <- generalSerial' base ps x
       return $ ncmd { commandArgs = vs }
-    generalSerial' ps (SAnno (One (VarS (EVar v), _)) _) =
+    generalSerial' base ps (SAnno (One (VarS (EV v), _)) _) =
       return $ base { commandSubs = [(ps, v, [])] }
-    generalSerial' _ (SAnno (One _) m) = do
+    generalSerial' _ _ (SAnno (One _) (Idx _ gt)) = do
       MM.throwError . OtherError . render $
-        "Cannot serialize general type:" <+> prettyType (fromJust $ metaGType m)
+        "Cannot serialize general type:" <+> pretty gt
 
-rewritePartials
-  :: SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One TypeP)
-rewritePartials (SAnno (One (AppS f xs, ftype@(FunP _ _))) m) = do
-  let gTypeArgs = maybe (repeat Nothing) (map Just . decomposeFull) (metaGType m)
-  f' <- rewritePartials f
-  xs' <- mapM rewritePartials xs
-  lamGType <- makeGType $ [metaGType g | (SAnno _ g) <- xs'] ++ gTypeArgs
-  let vs = map EVar . take (nargs ftype) $ freshVarsAZ [] -- TODO: exclude existing arguments
-      ys = zipWith3 makeVar vs (decomposeFull ftype) gTypeArgs
-      -- unsafe, but should not fail for well-typed input
-      appType = last . decomposeFull $ ftype
-      appMeta = m {metaGType = metaGType m >>= (last . map Just . decomposeFull)}
-      lamMeta = m {metaGType = Just lamGType}
-      lamCType = ftype
 
-  return $ SAnno (One (LamS vs (SAnno (One (AppS f' (xs' ++ ys), appType)) appMeta), lamCType)) lamMeta
-  where
-    makeGType :: [Maybe GType] -> MorlocMonad GType
-    makeGType ts = fmap GType . makeType . map (unGType . fromJust) $ ts
+{- | Remove lambdas introduced through substitution
 
-    -- make an sanno variable from variable name and type info
-    makeVar :: EVar -> TypeP -> Maybe GType -> SAnno GMeta One TypeP
-    makeVar v c g = SAnno (One (VarS v, c))
-      ( m { metaGType = g
-          , metaName = Nothing
-          , metaProperties = Set.empty
-          , metaConstraints = Set.empty
-          }
-      )
--- apply the pattern above down the AST
-rewritePartials (SAnno (One (AppS f xs, t)) m) = do
-  xs' <- mapM rewritePartials xs
-  f' <- rewritePartials f
-  return $ SAnno (One (AppS f' xs', t)) m
-rewritePartials (SAnno (One (LamS vs x, t)) m) = do
-  x' <- rewritePartials x
-  return $ SAnno (One (LamS vs x', t)) m
-rewritePartials (SAnno (One (AccS x k, t)) m) = do
-  x' <- rewritePartials x
-  return $ SAnno (One (AccS x' k, t)) m
-rewritePartials (SAnno (One (ListS xs, t)) m) = do
-  xs' <- mapM rewritePartials xs
-  return $ SAnno (One (ListS xs', t)) m
-rewritePartials (SAnno (One (TupleS xs, t)) m) = do
-  xs' <- mapM rewritePartials xs
-  return $ SAnno (One (TupleS xs', t)) m
-rewritePartials (SAnno (One (RecS entries, t)) m) = do
-  let keys = map fst entries
-  vals <- mapM (rewritePartials . snd) entries
-  return $ SAnno (One (RecS (zip keys vals), t)) m
-rewritePartials x = return x
+For example:
+
+ bif x = add x 10
+ bar py :: "int" -> "int"
+ bar y = add y 30
+ f z = bar (bif z)
+
+In Treeify.hs, the morloc declarations will be substituted in as lambdas. But
+we want to preserve the link to any annotations (in this case, the annotation
+that `bar` should be in terms of python ints). The morloc declarations can be
+substituted in as follows: 
+
+ f z = (\y -> add y 30) ((\x -> add x 10) z) 
+
+The indices for bif and bar that link the annotations to the functions are
+relative to the lambda expressions, so this substitution preserves the link.
+Typechecking can proceed safely.
+
+The expression can be simplified:
+
+ f z = (\y -> add y 30) ((\x -> add x 10) z) 
+ f z = (\y -> add y 30) (add z 10)            -- [z / x]
+ f z = add (add z 10) 30                      -- [add z 10 / y]
+
+The simplified expression is what should be written in the generated code. It
+would also be easier to typecheck and debug. So should these substitutions be
+done immediately after parsing? We need to preserve
+ 1. links to locations in the original source code (for error messages)
+ 2. type annotations.
+ 3. declaration names for generated comments and subcommands
+
+Here is the original expression again, but annotated and indexed
+
+ (\x -> add_2 x_3 10_4)_1 
+ (\y -> add_6 y_7 30_8)_5
+ (\z -> bar_10 (bif_11 z_12))_9
+
+ 1: name="bif"
+ 5: name="bar", type="int"@py -> "int"@py
+ 9: name="f"
+
+Each add is also associated with a type defined in a signature in an
+unmentioned imported library, but those will be looked up by the typechecker
+and will not be affected by rewriting.
+
+Substitution requires reindexing. A definition can be used multiple times and
+we need to distinguish between the use cases.
+
+Replace bif and bar with their definition and create fresh indices:
+  
+ (\z -> (\y -> add_18 y_19 30_20)_17 ((\x -> add_14 x_15 10_16)_13 z_12)_9
+
+ 13,1: name="bif"
+ 17,5: name="bar", type="int"@py -> "int"@py
+ 9: name="f"
+
+Now we can substitute for y
+
+ (\z -> add_18 ((\x -> add_14 x_15 10_16)_13 z_12)_9 30_20)
+
+But this destroyed index 17 and the link to the python annotation. We can
+preserve the type by splitting the annotation of bar.
+
+ 13,1: name="bif"
+ 18,17,5: name="bar"
+ 12: "int"@py
+ 13: "int"@py
+ 9: name="f"
+
+Index 18 should be associated with the *name* "bar", but not the type, since it
+has been applied. The type of bar is now split between indices 12 and 13.
+
+This case works fine, but it breaks down when types are polymorphic. If the
+annotation of bar had been `a -> a`, then how would we type 12 and 13? We can't
+say that `12 :: forall a . a` and be `13 :: forall a . a`, since this
+eliminates the constraint that the `a`s must be the same.
+
+If instead we rewrite lambdas after typechecking, then everything works out.
+
+Thus applyLambdas is done here, rather than in Treeify.hs or Desugar.hs.
+
+It also must be done BEFORE conversion to ExprM in `express`, where manifolds
+are resolved.
+-}
+applyLambdas
+  :: SAnno Int One (Indexed TypeP)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP))
+-- eliminate empty lambdas
+applyLambdas (SAnno (One (AppS ( SAnno (One (LamS [] (SAnno e _), _)) _) [], _)) i) = applyLambdas $ SAnno e i
+
+-- eliminate empty applications
+applyLambdas (SAnno (One (AppS (SAnno e _) [], _)) i) = applyLambdas $ SAnno e i
+
+-- substitute applied lambdas
+applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 (FunP (ta1:tas) tb2))) i2) (e1:es), tb1)) i1) = do
+  let e2' = substituteSAnno v e1 e2
+  applyLambdas (SAnno (One (AppS (SAnno (One (LamS vs e2', Idx j2 (FunP tas tb2))) i2) es, tb1)) i1)
+
+-- propagate the changes
+applyLambdas (SAnno (One (AppS f es, c)) g) = do
+  f' <- applyLambdas f
+  es' <- mapM applyLambdas es
+  return (SAnno (One (AppS f' es', c)) g)
+applyLambdas (SAnno (One (AccS e k, c)) g) = do
+  e' <- applyLambdas e
+  return (SAnno (One (AccS e' k, c)) g)
+applyLambdas (SAnno (One (LamS vs e, c)) g) = do
+  e' <- applyLambdas e
+  return (SAnno (One (LamS vs e', c)) g)
+applyLambdas (SAnno (One (LstS es, c)) g) = do
+  es' <- mapM applyLambdas es
+  return (SAnno (One (LstS es', c)) g)
+applyLambdas (SAnno (One (TupS es, c)) g) = do
+  es' <- mapM applyLambdas es
+  return (SAnno (One (TupS es', c)) g)
+applyLambdas (SAnno (One (NamS rs, c)) g) = do
+  es' <- mapM (applyLambdas . snd) rs
+  return (SAnno (One (NamS (zip (map fst rs) es'), c)) g)
+applyLambdas x = return x
+
+substituteSAnno
+  :: EVar
+  -> SAnno Int One (Indexed TypeP)
+  -> SAnno Int One (Indexed TypeP)
+  -> SAnno Int One (Indexed TypeP)
+substituteSAnno v r e0 = f e0 where
+  f e@(SAnno (One (VarS v', _)) _)
+    | v == v' = r
+    | otherwise = e
+  -- propagate the changes
+  f (SAnno (One (AppS e es, c)) g) =
+    let f' = f e
+        es' = map f es
+    in (SAnno (One (AppS f' es', c)) g)
+  f (SAnno (One (AccS e k, c)) g) =
+    let e' = f e
+    in (SAnno (One (AccS e' k, c)) g)
+  f (SAnno (One (LamS vs e, c)) g) =
+    let e' = f e
+    in (SAnno (One (LamS vs e', c)) g)
+  f (SAnno (One (LstS es, c)) g) =
+    let es' = map f es
+    in (SAnno (One (LstS es', c)) g)
+  f (SAnno (One (TupS es, c)) g) =
+    let es' = map f es
+    in (SAnno (One (TupS es', c)) g)
+  f (SAnno (One (NamS rs, c)) g) =
+    let es' = map (f . snd) rs
+    in (SAnno (One (NamS (zip (map fst rs) es'), c)) g)
+  f x = x
 
 -- | Add arguments that are required for each term. Unneeded arguments are
 -- removed at each step.
 parameterize
-  :: SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
-parameterize (SAnno (One (LamS vs x, t)) m) = do
-  let args0 = zip vs $ zipWith makeArgument [0..] (decomposeFull t)
+  :: SAnno Int One (Indexed TypeP)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
+parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
+  let args0 = zip vs $ zipWith makeArgument [0..] inputs 
   x' <- parameterize' args0 x
-  return $ SAnno (One (LamS vs x', (t, args0))) m
-parameterize (SAnno (One (CallS src, t)) m) = do
-  let ts = init . decomposeFull $ t
-      vs = map EVar (freshVarsAZ [])
-      args0 = zipWith makeArgument [0..] ts
-  return $ SAnno (One (CallS src, (t, zip vs args0))) m
+  return $ SAnno (One (LamS vs x', (c, args0))) m
+parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
+  let vs = map EV (freshVarsAZ [])
+      args0 = zipWith makeArgument [0..] inputs
+  return $ SAnno (One (CallS src, (c, zip vs args0))) m
 parameterize x = parameterize' [] x
 
 -- TODO: the arguments coupled to every term should be the arguments USED
@@ -561,8 +588,8 @@ parameterize x = parameterize' [] x
 -- call, for instance.
 parameterize'
   :: [(EVar, Argument)] -- arguments in parental scope (child needn't retain them)
-  -> SAnno GMeta One TypeP
-  -> MorlocMonad (SAnno GMeta One (TypeP, [(EVar, Argument)]))
+  -> SAnno Int One (Indexed TypeP)
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
 parameterize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
@@ -580,27 +607,29 @@ parameterize' args (SAnno (One (AccS x k, c)) m) = do
   x' <- parameterize' args x
   return $ SAnno (One (AccS x' k, (c, args))) m
 -- containers
-parameterize' args (SAnno (One (ListS xs, c)) m) = do
+parameterize' args (SAnno (One (LstS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
-  return $ SAnno (One (ListS xs', (c, args'))) m
-parameterize' args (SAnno (One (TupleS xs, c)) m) = do
+  return $ SAnno (One (LstS xs', (c, args'))) m
+parameterize' args (SAnno (One (TupS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
-  return $ SAnno (One (TupleS xs', (c, args'))) m
-parameterize' args (SAnno (One (RecS entries, c)) m) = do
+  return $ SAnno (One (TupS xs', (c, args'))) m
+parameterize' args (SAnno (One (NamS entries, c)) m) = do
   vs' <- mapM (parameterize' args . snd) entries
   let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
-  return $ SAnno (One (RecS (zip (map fst entries) vs'), (c, args'))) m
-parameterize' args (SAnno (One (LamS vs x, c)) m) = do
+  return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
+parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   let args' = [(v, r) | (v, r) <- args, notElem v vs]
-      startId = maximum (map (argId . snd) args) + 1
-      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] (decomposeFull c)
+      startId = maximumDef 0 (map (argId . snd) args) + 1
+      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
+-- LamS MUST have a functional type, deviations would have been caught by the typechecker
+parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
@@ -608,22 +637,25 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
       args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
+
 makeArgument :: Int -> TypeP -> Argument
 makeArgument i (UnkP _) = PassThroughArgument i
 makeArgument i t = SerialArgument i t
 
 
--- convert from unambiguous tree to non-segmented ExprM
-express :: SAnno GMeta One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
-express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
-
-  express' :: Bool -> TypeP -> SAnno GMeta One (TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
+  express'
+    :: Bool -- is this a top-level expression that the nexus will record?
+    -> TypeP
+    -> SAnno Int One (Indexed TypeP, [(EVar, Argument)])
+    -> MorlocMonad (ExprM Many)
 
   -- primitives
-  express' _ _ (SAnno (One (NumS x, (c, _))) _) = return $ NumM (Native c) x
-  express' _ _ (SAnno (One (LogS x, (c, _))) _) = return $ LogM (Native c) x
-  express' _ _ (SAnno (One (StrS x, (c, _))) _) = return $ StrM (Native c) x
-  express' _ _ (SAnno (One (UniS, (c, _))) _) = return $ NullM (Native c)
+  express' _ _ (SAnno (One (NumS x, (Idx _ c, _))) _) = return $ NumM (Native c) x
+  express' _ _ (SAnno (One (LogS x, (Idx _ c, _))) _) = return $ LogM (Native c) x
+  express' _ _ (SAnno (One (StrS x, (Idx _ c, _))) _) = return $ StrM (Native c) x
+  express' _ _ (SAnno (One (UniS, (Idx _ c, _))) _) = return $ NullM (Native c)
 
   -- record access
   express' isTop pc (SAnno (One (AccS x k, _)) m) = do
@@ -631,7 +663,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
     return (AccM x' k)
 
   -- containers
-  express' isTop _ (SAnno (One (ListS xs, (c@(ArrP _ [t]), args))) m) = do
+  express' isTop _ (SAnno (One (LstS xs, (Idx _ c@(AppP _ [t]), args))) m) = do
     xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
     let x = ListM (Native c) xs'
     if isTop
@@ -639,9 +671,9 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
         x' <- packExprM m x
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
-  express' _ _ (SAnno (One (ListS _, _)) _) = MM.throwError . CallTheMonkeys $ "ListS can only be ArrP type"
+  express' _ _ (SAnno (One (LstS _, _)) _) = MM.throwError . CallTheMonkeys $ "LstS can only be AppP type"
 
-  express' isTop _ (SAnno (One (TupleS xs, (c@(ArrP _ ts), args))) m) = do
+  express' isTop _ (SAnno (One (TupS xs, (Idx _ c@(AppP _ ts), args))) m) = do
     xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
     let x = TupleM (Native c) xs'
     if isTop
@@ -650,7 +682,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
-  express' isTop _ (SAnno (One (RecS entries, (c@(NamP _ _ _ rs), args))) m) = do
+  express' isTop _ (SAnno (One (NamS entries, (Idx _ c@(NamP _ _ _ rs), args))) m) = do
     xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m)
     let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
@@ -659,11 +691,19 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
+
+  -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
+  -- move the index from the lambda to the application
+  -- changing indices is a BAD idea, it breaks the link to the source code
+  -- I do it here so that the nexus indices and pool indices match, but there
+  -- should be a more elegant solution.
+  -- ***************************************************************************
   -- lambda
-  express' isTop _ (SAnno (One (LamS _ x@(SAnno (One (_, (c,_))) _), _)) _) = express' isTop c x
+  express' isTop _ (SAnno (One (LamS _ (SAnno x@(One (_, (Idx _ c, _))) _), _)) m)
+    = express' isTop c (SAnno x m)
 
   -- var
-  express' _ _ (SAnno (One (VarS v, (c, rs))) _) =
+  express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) =
     case [r | (v', r) <- rs, v == v'] of
       [r] -> case r of
         (SerialArgument i _) -> return $ BndVarM (Serial c) i
@@ -676,7 +716,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
   -- connections will be snapped apart in the segment step.
-  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (fc, _))) _) xs, (_, args))) m)
+  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inputs _), _))) _) xs, (_, args))) m)
     -- case #1
     | sameLanguage && fullyApplied = do
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
@@ -686,12 +726,12 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
     -- case #2
     | sameLanguage && not fullyApplied = do
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
-        let startId = maximum (map (argId . snd) args) + 1
+        let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
-            lambdaArgs = zipWith NativeArgument [startId ..] inputs
-            lambdaVals = zipWith BndVarM          lambdaTypes [startId ..]
-        return . ManifoldM m (map snd args) $
-          ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+            lambdaArgs = zipWith NativeArgument [startId ..] (drop (length xs) inputs)
+            lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
+        return . ManifoldM m (map snd args <> lambdaArgs) $
+          ReturnM (AppM f (xs' <> lambdaVals))
 
     -- case #3
     | not sameLanguage && fullyApplied = do
@@ -702,7 +742,7 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
     -- case #4
     | not sameLanguage && not fullyApplied = do
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
-        let startId = maximum (map (argId . snd) args) + 1
+        let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] inputs
             lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
@@ -710,24 +750,21 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
                . ManifoldM m (map snd args)
                $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
     where
-      (inputs, _) = decompose fc
       sameLanguage = langOf pc == langOf fc
       fullyApplied = length inputs == length xs
       f = SrcM (typeP2typeM fc) src
 
   -- CallS - direct export of a sourced function, e.g.:
-  express' True _ (SAnno (One (CallS src, (c, _))) m) = do
-    let (inputs, _) = decompose c
-        lambdaArgs = zipWith SerialArgument [0 ..] inputs
+  express' True _ (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
+    let lambdaArgs = zipWith SerialArgument [0 ..] inputs
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
     lambdaVals <- mapM (unpackExprM m) $ zipWith BndVarM lambdaTypes [0 ..]
     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
   -- An un-applied source call
-  express' False pc (SAnno (One (CallS src, (c, _))) m) = do
-    let (inputs, _) = decompose c
-        lambdaTypes = map typeP2typeM inputs
+  express' False pc (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
+    let lambdaTypes = map typeP2typeM inputs
         lambdaArgs = zipWith NativeArgument [0 ..] inputs
         lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
         f = SrcM (typeP2typeM c) src
@@ -737,14 +774,11 @@ express s0@(SAnno (One (_, (c0, _))) _) = express' True c0 s0 where
       then return manifold
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
-  express' _ _ (SAnno (One (_, (t, _))) m) = MM.throwError . CallTheMonkeys . render $
-    "Invalid input to express' in module (" <> viaShow (metaName m) <> ") - type: " <> prettyTypeP t
-
--- | Move let assignments to minimize number of foreign calls.  This step
--- should be integrated with the optimizations performed in the realize step.
--- FIXME: replace stub
-letOptimize :: ExprM Many -> MorlocMonad (ExprM Many)
-letOptimize = return
+  express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
+    name' <- MM.metaName m
+    MM.throwError . CallTheMonkeys . render
+      $ "Invalid input to express' in function (" <> viaShow name' <> ") - type: " <> pretty t
+      <+> "at expression" <+> prettySExpr (const "") (const "") e
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
 segment e0
@@ -756,8 +790,8 @@ segment e0
   segment' _ args (ForeignInterfaceM t e@(ManifoldM m args' _)) = do
     (ms, e') <- segment' m args' e
     config <- MM.ask
-    case MC.buildPoolCallBase config (langOf e') (metaId m) of
-      (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) (metaId m) cmds args)
+    case MC.buildPoolCallBase config (langOf e') m of
+      (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) m cmds args)
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
   segment' m args (SerializeM _ (AppM e@(ForeignInterfaceM _ _) es)) = do
@@ -814,6 +848,7 @@ segment e0
 
   segment' _ _ e = return ([], e)
 
+
 -- Now that the AST is segmented by language, we can resolve passed-through
 -- arguments where possible.
 reparameterize :: (ExprM Many) -> (ExprM Many)
@@ -869,6 +904,7 @@ reparameterize e0 = snd (substituteBndArgs e0) where
     _ -> r 
   sub _ r = r
 
+
 rehead :: ExprM Many -> MorlocMonad (ExprM Many)
 rehead (LamM _ e) = rehead e
 rehead (ManifoldM m args (ReturnM e)) = do
@@ -876,35 +912,85 @@ rehead (ManifoldM m args (ReturnM e)) = do
   return $ ManifoldM m args (ReturnM e')
 rehead _ = MM.throwError $ CallTheMonkeys "Bad Head"
 
+
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM Many] -> MorlocMonad [(Lang, [ExprM Many])]
 pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
 
+findSources
+  :: (Lang, [ExprM Many])
+  -> MorlocMonad (Lang, [([Source], ExprM Many)])
+findSources (lang, es0) = do
+  srcss <- mapM f es0
+  return $ (lang, zipWith joinSrcs srcss es0)
+  where
+    f :: ExprM Many -> MorlocMonad [Source] 
+    f (SrcM _ src) = return [src]
+    f (ManifoldM i _ e) = do
+        ss1 <- f e
+        ss2 <- lookupPackers i
+        ss3 <- lookupConstructors i
+        return $ ss1 <> ss2 <> ss3
+    f (ForeignInterfaceM _ e) = f e
+    f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
+    f (AppM e es) = (<>) <$> f e <*> conmapM f es
+    f (LamM _ e) = f e
+    f (AccM e _) = f e
+    f (ListM _ es) = conmapM f es
+    f (TupleM _ es) = conmapM f es
+    f (RecordM _ rs) = conmapM f (map snd rs)
+    f (SerializeM _ e) = f e
+    f (DeserializeM _ e) = f e
+    f (ReturnM e) = f e
+    f _ = return []
+
+    lookupPackers :: Int -> MorlocMonad [Source]
+    lookupPackers i = do
+      packers <- MM.metaPackMap i
+      return $ concat . concat $ [map unresolvedPackerForward p <> map unresolvedPackerReverse p | p <- Map.elems packers]
+
+    lookupConstructors :: Int -> MorlocMonad [Source]
+    lookupConstructors i = do
+      packers <- MM.metaPackMap i
+      let xs = [v | (TV lang' v, _) <- Map.keys packers, lang' == Just lang]
+      srcs <- MM.metaSources i
+      -- this should probably be filtered ... but hey, why not just import everything?
+      return [src | src <- srcs]
+
+    joinSrcs :: [Source] -> ExprM Many -> ([Source], ExprM Many)
+    joinSrcs srcs e =
+      let srcs' = unique [src | src <- srcs, srcLang src == lang]
+      in (srcs', e)
+
 encode
-  :: [Source]
-  -> (Lang, [ExprM Many])
+  :: Lang
+  -> [([Source], ExprM Many)]
+  -- ^ The input preserves the connection between the AST and the specific
+  -- sources it uses, currently this information is not used. However, in the
+  -- future it may sometimes be necessary to split the functions in one
+  -- language into multiple pools (e.g., to resolve version conflicts).
   -> MorlocMonad Script
-encode srcs (lang, xs) = do
-  state <- MM.get
-
-  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
-  (sources, flags, includes) <- Mod.handleFlagsAndPaths lang
-    $ unique [s | s <- srcs, srcLang s == lang]
-
-  xs' <- mapM (preprocess lang) xs >>= chooseSerializer
+encode lang xss = do
+  let srcs' = unique [s | s <- concat (map fst xss), srcLang s == lang]
+  xs' <- mapM (preprocess lang) (map snd xss) >>= chooseSerializer
   -- translate each node in the AST to code
-  code <- translate lang sources xs'
+  translate lang srcs' xs'
 
-  return $ Script
-    { scriptBase = "pool"
-    , scriptLang = lang
-    , scriptCode = Code . render $ code
-    , scriptCompilerFlags = flags
-    , scriptInclude = includes
-    }
+
+translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad Script
+translate lang srcs es = do
+  case lang of
+    CppLang -> Cpp.translate srcs es
+    RustLang -> Rust.translate srcs es
+    RLang -> R.translate srcs es
+    Python3Lang -> Python3.translate srcs es
+    x -> MM.throwError . PoolBuildError . render
+      $ "Language '" <> viaShow x <> "' has no translator"
+
 
 preprocess :: Lang -> ExprM Many -> MorlocMonad (ExprM Many)
 preprocess CppLang es = Cpp.preprocess es
+preprocess RustLang es = Rust.preprocess es
 preprocess RLang es = R.preprocess es
 preprocess Python3Lang es = Python3.preprocess es
 preprocess l _ = MM.throwError . PoolBuildError . render
@@ -954,70 +1040,50 @@ chooseSerializer xs = mapM chooseSerializer' xs where
   oneSerial (SerialNull t) = return $ SerialNull t
   oneSerial (SerialUnknown t) = return $ SerialUnknown t
 
-translate :: Lang -> [Source] -> [ExprM One] -> MorlocMonad MDoc
-translate lang srcs es = do
-  case lang of
-    CppLang -> Cpp.translate srcs es
-    RLang -> R.translate srcs es
-    Python3Lang -> Python3.translate srcs es
-    x -> MM.throwError . PoolBuildError . render
-      $ "Language '" <> viaShow x <> "' has no translator"
 
-
--------- Utility and lookup functions ----------------------------------------
-
-unpackSAnno :: (SExpr g One c -> g -> c -> a) -> SAnno g One c -> [a]
-unpackSAnno f (SAnno (One (e@(AccS x _),     c)) g) = f e g c : unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(ListS xs),     c)) g) = f e g c : conmap (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(TupleS xs),    c)) g) = f e g c : conmap (unpackSAnno f) xs
-unpackSAnno f (SAnno (One (e@(RecS entries), c)) g) = f e g c : conmap (unpackSAnno f) (map snd entries)
-unpackSAnno f (SAnno (One (e@(LamS _ x),     c)) g) = f e g c : unpackSAnno f x
-unpackSAnno f (SAnno (One (e@(AppS x xs),    c)) g) = f e g c : conmap (unpackSAnno f) (x:xs)
-unpackSAnno f (SAnno (One (e, c)) g)                = [f e g c]
-
-mapGCM :: (g -> c -> MorlocMonad c') -> SAnno g One c -> MorlocMonad (SAnno g One c')
-mapGCM f (SAnno (One (AccS x k, c)) g) = do
-  x' <- mapGCM f x
-  c' <- f g c
+mapCM :: (c -> MorlocMonad c') -> SAnno g One c -> MorlocMonad (SAnno g One c')
+mapCM f (SAnno (One (AccS x k, c)) g) = do
+  x' <- mapCM f x
+  c' <- f c
   return $ SAnno (One (AccS x' k, c')) g
-mapGCM f (SAnno (One (ListS xs, c)) g) = do
-  xs' <- mapM (mapGCM f) xs
-  c' <- f g c
-  return $ SAnno (One (ListS xs', c')) g
-mapGCM f (SAnno (One (TupleS xs, c)) g) = do
-  xs' <- mapM (mapGCM f) xs
-  c' <- f g c
-  return $ SAnno (One (TupleS xs', c')) g
-mapGCM f (SAnno (One (RecS entries, c)) g) = do
-  xs' <- mapM (mapGCM f) (map snd entries)
-  c' <- f g c
-  return $ SAnno (One (RecS (zip (map fst entries) xs'), c')) g
-mapGCM f (SAnno (One (LamS vs x, c)) g) = do
-  x' <- mapGCM f x
-  c' <- f g c
+mapCM f (SAnno (One (LstS xs, c)) g) = do
+  xs' <- mapM (mapCM f) xs
+  c' <- f c
+  return $ SAnno (One (LstS xs', c')) g
+mapCM f (SAnno (One (TupS xs, c)) g) = do
+  xs' <- mapM (mapCM f) xs
+  c' <- f c
+  return $ SAnno (One (TupS xs', c')) g
+mapCM f (SAnno (One (NamS entries, c)) g) = do
+  xs' <- mapM (mapCM f) (map snd entries)
+  c' <- f c
+  return $ SAnno (One (NamS (zip (map fst entries) xs'), c')) g
+mapCM f (SAnno (One (LamS vs x, c)) g) = do
+  x' <- mapCM f x
+  c' <- f c
   return $ SAnno (One (LamS vs x', c')) g
-mapGCM f (SAnno (One (AppS x xs, c)) g) = do
-  x' <- mapGCM f x
-  xs' <- mapM (mapGCM f) xs
-  c' <- f g c
+mapCM f (SAnno (One (AppS x xs, c)) g) = do
+  x' <- mapCM f x
+  xs' <- mapM (mapCM f) xs
+  c' <- f c
   return $ SAnno (One (AppS x' xs', c')) g
-mapGCM f (SAnno (One (VarS x, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (VarS x, c)) g) = do
+  c' <- f c
   return $ SAnno (One (VarS x, c')) g
-mapGCM f (SAnno (One (CallS src, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (CallS src, c)) g) = do
+  c' <- f c
   return $ SAnno (One (CallS src, c')) g
-mapGCM f (SAnno (One (UniS, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (UniS, c)) g) = do
+  c' <- f c
   return $ SAnno (One (UniS, c')) g
-mapGCM f (SAnno (One (NumS x, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (NumS x, c)) g) = do
+  c' <- f c
   return $ SAnno (One (NumS x, c')) g
-mapGCM f (SAnno (One (LogS x, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (LogS x, c)) g) = do
+  c' <- f c
   return $ SAnno (One (LogS x, c')) g
-mapGCM f (SAnno (One (StrS x, c)) g) = do
-  c' <- f g c
+mapCM f (SAnno (One (StrS x, c)) g) = do
+  c' <- f c
   return $ SAnno (One (StrS x, c')) g
 
 sannoSnd :: SAnno g One (a, b) -> b
@@ -1032,9 +1098,3 @@ freshVarsAZ exclude =
   filter
     (\x -> not (elem x exclude))
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)
-
--- turn type list into a function
-makeType :: [Type] -> MorlocMonad Type
-makeType [] = MM.throwError . TypeError $ "empty type"
-makeType [t] = return t
-makeType (t:ts) = pure (FunT t) <*> makeType ts

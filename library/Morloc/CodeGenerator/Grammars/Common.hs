@@ -9,7 +9,6 @@ Stability   : experimental
 module Morloc.CodeGenerator.Grammars.Common
   ( argType
   , unpackArgument
-  , argId
   , typeOfExprM
   , gmetaOf
   , argsOf
@@ -23,10 +22,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , arg2typeM
   , type2jsontype
   , jsontype2json
-  , prettyArgument
-  , prettyExprM
-  , prettyTypeM
-  , prettyTypeP
   , splitArgs
   ) where
 
@@ -36,19 +31,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Serial as MCS
 
-
-prettyArgument :: Argument -> MDoc
-prettyArgument (SerialArgument i c) =
-  "Serial" <+> "x" <> pretty i <+> parens (prettyTypeP c)
-prettyArgument (NativeArgument i c) =
-  "Native" <+> "x" <> pretty i <+> parens (prettyTypeP c)
-prettyArgument (PassThroughArgument i) =
-  "PassThrough" <+> "x" <> pretty i
-
-argId :: Argument -> Int
-argId (SerialArgument i _) = i
-argId (NativeArgument i _) = i
-argId (PassThroughArgument i ) = i
 
 argType :: Argument -> Maybe TypeP
 argType (SerialArgument _ t) = Just t
@@ -63,92 +45,12 @@ nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
 
-prettyExprM :: ExprM f -> MDoc
-prettyExprM e0 = (vsep . punctuate line . fst $ f e0) <> line where
-  manNamer :: Int -> MDoc
-  manNamer i = "m" <> pretty i
-
-  f :: ExprM f -> ([MDoc], MDoc)
-  f (ManifoldM m args e) =
-    let (ms', body) = f e
-        decl = manNamer (metaId m) <> tupled (map prettyArgument args)
-        mdoc = block 4 decl body
-    in (mdoc : ms', manNamer (metaId m))
-  f (PoolCallM t _ cmds args) =
-    let poolArgs = cmds ++ map prettyArgument args
-    in ([], "PoolCallM" <> list (poolArgs) <+> "::" <+> prettyTypeM t) 
-  f (ForeignInterfaceM t e) =
-    let (ms, _) = f e
-    in (ms, "ForeignInterface :: " <> prettyTypeM t)
-  f (LetM v e1 e2) =
-    let (ms1', e1') = f e1
-        (ms2', e2') = f e2
-    in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
-  f (AppM fun xs) =
-    let (ms', fun') = f fun
-        (mss', xs') = unzip $ map f xs
-    in (ms' ++ concat mss', fun' <> tupled xs')
-  f (SrcM _ src) = ([], pretty (srcName src))
-  f (LamM args e) =
-    let (ms', e') = f e
-        vsFull = map prettyArgument args
-        vsNames = map (\r -> "x" <> pretty (argId r)) args
-    in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
-  f (BndVarM _ i) = ([], "x" <> pretty i)
-  f (LetVarM _ i) = ([], "a" <> pretty i)
-  f (AccM e k) =
-    let (ms, e') = f e
-    in (ms, parens e' <> "@" <> pretty k)
-  f (ListM _ es) =
-    let (mss', es') = unzip $ map f es
-    in (concat mss', list es')
-  f (TupleM _ es) =
-    let (mss', es') = unzip $ map f es
-    in (concat mss', tupled es')
-  f (RecordM c entries) =
-    let (mss', es') = unzip $ map (f . snd) entries
-        entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
-  f (LogM _ x) = ([], if x then "true" else "false")
-  f (NumM _ x) = ([], viaShow x)
-  f (StrM _ x) = ([], dquotes $ pretty x)
-  f (NullM _) = ([], "null")
-  f (SerializeM _ e) =
-    let (ms, e') = f e
-    in (ms, "PACK" <> tupled [e'])
-  f (DeserializeM _ e) =
-    let (ms, e') = f e
-    in (ms, "UNPACK" <> tupled [e'])
-  f (ReturnM e) =
-    let (ms, e') = f e
-    in (ms, "RETURN(" <> e' <> ")")
-
-prettyRecordPVar :: TypeM -> MDoc
-prettyRecordPVar (Serial (NamP _ v _ _)) = prettyPVar v
-prettyRecordPVar (Native (NamP _ v _ _)) = prettyPVar v
-prettyRecordPVar _ = "<UNKNOWN RECORD>"
-
-prettyPVar :: PVar -> MDoc
-prettyPVar (PV _ (Just g) t) = parens (pretty g <+> pretty t)
-prettyPVar (PV _ Nothing t) = parens ("*" <+> pretty t)
-
-prettyTypeP :: TypeP -> MDoc
-prettyTypeP (UnkP v) = prettyPVar v 
-prettyTypeP (VarP v) = prettyPVar v 
-prettyTypeP (FunP t1 t2) = parens (prettyTypeP t1 <+> "->" <+> prettyTypeP t2)
-prettyTypeP (ArrP v ts) = prettyPVar v <+> hsep (map prettyTypeP ts)
-prettyTypeP (NamP r v _ rs)
-  = viaShow r <+> prettyPVar v <+> encloseSep "{" "}" ","
-    (zipWith (\key val -> key <+> "=" <+> val)
-             (map (prettyPVar . fst) rs)
-             (map (prettyTypeP . snd) rs))
-
-prettyTypeM :: TypeM -> MDoc
-prettyTypeM Passthrough = "Passthrough"
-prettyTypeM (Serial c) = "Serial<" <> prettyTypeP c <> ">"
-prettyTypeM (Native c) = "Native<" <> prettyTypeP c <> ">"
-prettyTypeM (Function ts t) =
-  "Function<" <> hsep (punctuate "->" (map prettyTypeM (ts ++ [t]))) <> ">"
+recordPVar :: TypeP -> MDoc
+recordPVar (VarP (PV _ _ v)) = pretty v
+recordPVar (UnkP (PV _ _ v)) = pretty v
+recordPVar (FunP _ _) = "<FunP>" -- illegal value
+recordPVar (AppP _ _) = "<AppP>" -- illegal value
+recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
 
 -- see page 112 of my super-secret notes ...
 -- example:
@@ -236,9 +138,7 @@ typeOfTypeM :: TypeM -> Maybe TypeP
 typeOfTypeM Passthrough = Nothing
 typeOfTypeM (Serial c) = Just c
 typeOfTypeM (Native c) = Just c
-typeOfTypeM (Function [] t) = typeOfTypeM t
-typeOfTypeM (Function (ti:ts) to)
-  = FunP <$> typeOfTypeM ti <*> typeOfTypeM (Function ts to)  
+typeOfTypeM (Function ins out) = FunP <$> mapM typeOfTypeM ins <*> typeOfTypeM out
 
 arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
@@ -258,7 +158,7 @@ typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output
     inputs' -> Function inputs' output
-  _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (prettyTypeM $ typeOfExprM f)
+  _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (pretty $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
@@ -285,31 +185,31 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprM m e = case typeOfExprM e of
-  (Serial t) -> DeserializeM <$> MCS.makeSerialAST m t <*> pure e
-  (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
-  _ -> return e
+unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM m e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Serial t) -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
+    (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
+    _ -> return e
 
-packExprM :: GMeta -> ExprM Many -> MorlocMonad (ExprM Many)
-packExprM m e = case typeOfExprM e of
-  (Native t) -> SerializeM <$> MCS.makeSerialAST m t <*> pure e
-  -- (Function _ _) -> error "Cannot pack a function"
-  _ -> return e
+packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
+packExprM m e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Native t) -> SerializeM <$> MCS.makeSerialAST packers t <*> pure e
+    -- (Function _ _) -> error "Cannot pack a function"
+    _ -> return e
 
 type2jsontype :: TypeP -> MorlocMonad JsonType
-type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
 type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype (ArrP (PV _ _ v) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: FunT"
-type2jsontype (NamP namType (PV _ _ v) _ rs) = do
-  vs <- mapM type2jsontype (map snd rs)
-  return $ NamJ jsontype (zip [val | (PV _ _ val, _) <- rs] vs)
-  where
-    jsontype = case namType of
-      NamRecord -> "record"
-      NamObject -> v
-      NamTable -> v
+type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
+type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
+type2jsontype (NamP _ (PV _ _ v) _ rs) = do
+  ts <- mapM (type2jsontype . snd) rs
+  return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
+type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
+type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
 
 jsontype2json :: JsonType -> MDoc
 jsontype2json (VarJ v) = dquotes (pretty v)
@@ -326,7 +226,7 @@ argsOf (LamM args _) = args
 argsOf (ManifoldM _ args _) = args
 argsOf _ = []
 
-gmetaOf :: ExprM f -> GMeta
+gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m
 gmetaOf (LamM _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"

@@ -21,15 +21,30 @@ module Morloc.Monad
   , logFileWith
   , readLang
   , say
-  -- * reusable counter
-  , startCounter
-  , getCounter
   -- * re-exports
   , module Control.Monad.Trans
   , module Control.Monad.Except
   , module Control.Monad.Reader
   , module Control.Monad.State
   , module Control.Monad.Writer
+  -- * reusable counter
+  , startCounter
+  , getCounter
+  , setCounter
+  -- * metadata accessors
+  , metaTermTypes
+  , metaConstraints
+  , metaSources
+  , metaName
+  , metaProperties
+  , metaType
+  , metaTypedefs
+  , metaPackMap
+  -- * handling tree depth
+  , incDepth
+  , getDepth
+  , decDepth
+  , setDepth
   ) where
 
 import Control.Monad.Except
@@ -42,10 +57,13 @@ import Morloc.Namespace
 import Morloc.Data.Doc
 import System.IO (stderr)
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Language as ML
-import qualified System.Directory as SD
 import qualified System.Exit as SE
 import qualified System.Process as SP
+import qualified Morloc.System as MS
+import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 runMorlocMonad ::
      Maybe Path -> Int -> Config -> MorlocMonad a -> IO (MorlocReturn a)
@@ -57,7 +75,13 @@ emptyState path v = MorlocState {
     statePackageMeta = []
   , stateVerbosity = v
   , stateCounter = -1
+  , stateDepth = 0
+  , stateSignatures = GMap.empty
+  , stateTypedefs = GMap.empty
+  , stateSources = GMap.empty
   , stateOutfile = path
+  , statePackers = GMap.empty
+  , stateName = Map.empty
 }
 
 startCounter :: MorlocMonad ()
@@ -72,10 +96,39 @@ getCounter = do
   put $ s {stateCounter = (stateCounter s) + 1}
   return i
 
+setCounter :: Int -> MorlocMonad ()
+setCounter i = do
+  s <- get
+  put $ s {stateCounter = i}
+  return ()
+
+incDepth :: MorlocMonad Int
+incDepth = do
+  s <- get
+  let i = stateDepth s + 1
+  put $ s {stateDepth = i}
+  return i
+
+getDepth :: MorlocMonad Int
+getDepth = gets stateDepth
+
+decDepth :: MorlocMonad Int
+decDepth = do
+  s <- get
+  let i = stateDepth s - 1
+  put $ s {stateDepth = i}
+  return i
+
+setDepth :: Int -> MorlocMonad ()
+setDepth i = do
+  s <- get
+  put $ s {stateDepth = i}
+  return ()
+
 writeMorlocReturn :: MorlocReturn a -> IO ()
-writeMorlocReturn ((Left err, msgs), _)
+writeMorlocReturn ((Left err', msgs), _)
   =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
-  >> MT.hPutStrLn stderr (MT.show' err) -- write terminal failing message
+  >> MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
 writeMorlocReturn ((_, msgs), _) = MT.hPutStrLn stderr (MT.unlines msgs)
 
 -- | Execute a system call
@@ -85,11 +138,11 @@ runCommand ::
   -> MorlocMonad ()
 runCommand loc cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, _, err) <-
+  (exitCode, _, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
-    SE.ExitSuccess -> tell [MT.pack err]
-    _ -> throwError (SystemCallError cmd loc (MT.pack err)) |>> (\_ -> ())
+    SE.ExitSuccess -> tell [MT.pack err']
+    _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> (\_ -> ())
 
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
@@ -102,11 +155,11 @@ runCommandWith ::
   -> MorlocMonad a
 runCommandWith loc f cmd = do
   liftIO . MT.putStrLn $ "$ " <> cmd
-  (exitCode, out, err) <-
+  (exitCode, out, err') <-
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> return $ f (MT.pack out)
-    _ -> throwError (SystemCallError cmd loc (MT.pack err))
+    _ -> throwError (SystemCallError cmd loc (MT.pack err'))
 
 -- | Write a object to a file in the Morloc temporary directory
 logFile ::
@@ -116,8 +169,8 @@ logFile ::
   -> MorlocMonad a
 logFile s m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
-  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
+  liftIO $ MS.createDirectoryIfMissing True tmpdir
+  let path = MS.combine tmpdir s
   liftIO $ MT.writeFile path (MT.pretty m)
   return m
 
@@ -130,8 +183,8 @@ logFileWith ::
   -> MorlocMonad a
 logFileWith s f m = do
   tmpdir <- asks configTmpDir
-  liftIO $ SD.createDirectoryIfMissing True (MT.unpack . unPath $ tmpdir)
-  let path = (MT.unpack . unPath $ tmpdir) <> "/" <> s
+  liftIO $ MS.createDirectoryIfMissing True tmpdir
+  let path = MS.combine tmpdir s
   liftIO $ MT.writeFile path (MT.pretty (f m))
   return m
 
@@ -142,3 +195,89 @@ readLang langStr =
   case ML.readLangName langStr of
     (Just x) -> return x
     Nothing -> throwError $ UnknownLanguage langStr
+
+
+metaTermTypes :: Int -> MorlocMonad (Maybe TermTypes)
+metaTermTypes i = do
+  s <- get
+  case GMap.lookup i (stateSignatures s) of
+    GMapNoFst -> return Nothing
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    (GMapJust t) -> return (Just t)
+
+-- | Return sources for constructing an object. These are used by `NamE NamObject` expressions.
+metaSources :: Int -> MorlocMonad [Source]
+metaSources i = do
+  s <- gets stateSources
+  case GMap.lookup i s of
+    GMapNoFst -> return []
+    GMapNoSnd -> throwError . CallTheMonkeys $ "Internal GMap key missing"
+    (GMapJust srcs) -> return srcs
+
+-- TODO: rename the meta* functions
+
+-- | The general constraints as defined in the general type signature. These
+-- are not used anywhere yet.
+metaConstraints :: Int -> MorlocMonad [Constraint]
+metaConstraints i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (econs e)
+    _ -> []
+
+-- | Properties are cunrrently not used after Sanno types are created. The only
+-- properties that are considered are the pack/unpack properties. Eventually
+-- properties will be part of the typeclass system.
+metaProperties :: Int -> MorlocMonad [Property]
+metaProperties i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) -> Set.toList (eprop e)
+    _ -> []
+
+-- | Store type annotations for an expression. These are the original user
+-- provided types NOT the types checked or inferred by the typechecker.
+metaType :: Int -> MorlocMonad (Maybe TypeU)
+metaType i = do
+  s <- gets stateSignatures 
+  return $ case GMap.lookup i s of
+    (GMapJust (TermTypes (Just e) _ _)) ->
+      if langOf e == Nothing
+        then Just (etype e) 
+        else Nothing
+    _ -> Nothing
+
+-- | The name of a morloc composition. These names are stored in the monad
+-- after they are resolved away. For example in:
+--   import math
+--   export foo
+--   bar x y = add x (inc y)
+--   foo x = add (bar x 5) 1
+-- `foo` and `bar` are morloc composition. `foo` will be resolved to
+--   add (add x (inc 5) 1
+-- The terms "foo" and "bar" have disappeared. They aren't technically needed
+-- anymore. However, the nexus needs a subcommand name to give the user for
+-- calling "foo". In the generated code and in error messages, it is also nice
+-- to keep the label "bar" attached to the second `add` function. `metaName`
+-- can retrieve these names based on the index of the CallS expressions that
+-- wrap the two `add` functions.
+--
+-- The name is linked to the SAnno general data structure.
+metaName :: Int -> MorlocMonad (Maybe EVar)
+metaName i = Map.lookup i <$> gets stateName
+
+metaPackMap :: Int -> MorlocMonad PackMap
+metaPackMap i = do
+    p <- gets statePackers
+    case GMap.lookup i p of
+      (GMapJust p') -> return p'
+      _ -> return Map.empty
+
+
+-- | This is currently only used in the C++ translator.
+metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
+metaTypedefs i = do
+    p <- gets stateTypedefs
+    case GMap.lookup i p of
+      (GMapJust p') -> return p'
+      _ -> return Map.empty

@@ -1,0 +1,6 @@
+export f
+
+m = 20
+
+-- a function's parameters may shadow terms from the global scope
+f m = m

@@ -1,0 +1,9 @@
+import pybase (add)
+
+export f
+
+-- terms in the function's where-scope are unordered and share scope
+f = x where
+    a = 1
+    x = add a b
+    b = 41

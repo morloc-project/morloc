@@ -1,0 +1,4 @@
+import rustbase (fold, mul, add)
+export foo
+
+foo = fold add 0 [1, 2, 3, mul 1 4]

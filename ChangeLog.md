@@ -16,21 +16,43 @@ handling for several very different languages (proofs-of-concept).
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
 
-0.3x.0 [2021.xx.xx]
+0.3x.0 [2022.03.xx]
 -------------------
-
- - [ ] Add let syntax
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
  - [ ] Add `uninstall` function to uninstall a module
  - [ ] Remove extra space printed at the end of R JSON
+ - [ ] Rust support
+ - [ ] Move exports to the module definition (as in Haskell)
+ - [ ] Add `*` wildcard to exports and imports
+ - [ ] Add `import Foo hiding (...)` syntax
 
-0.35.0 [2021.xx.xx]
+0.36.0 [2021.12.xx]
+-------------------
+ * Tidy source for collaborations in 2022 (no new features)
+
+ - [ ] Replace recursive data structures with recursion schemes
+ - [ ] Describe the core data structures and algorithms
+ - [ ] Haddock documentation
+ - [ ] Linting, formatting, and benchmarking
+ - [ ] Clean up error handling (remove unused error types)
+
+0.35.0 [2021.10.24]
 -------------------
 
- - [ ] Rust support
+Where scoping and a total architecture refactor
 
-0.34.0 [2020.03.05]
+ * Fix handling for generic parameterized types
+ * Improve whitespace handling
+ * Statements are order invariant
+ * Thread link from expression to source expression down to generators 
+ * Typecheck over final abstract syntax trees rather than expressions
+ * Separate general and concrete typechecking
+ * Pretty instances for all data types
+ * More testing
+ * Agonized over deep and wide structures
+
+0.34.0 [2021.03.05]
 -------------------
 
  * add handling for C++ float primitives

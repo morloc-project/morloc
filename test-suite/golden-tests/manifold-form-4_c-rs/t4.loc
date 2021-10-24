@@ -1,0 +1,4 @@
+import rustbase (mul)
+export foo
+
+foo = ((True, 42.0), mul 1 4)

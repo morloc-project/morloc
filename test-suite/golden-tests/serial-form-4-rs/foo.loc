@@ -1,0 +1,12 @@
+import rustbase (id)
+
+export foo
+
+type Rust Str = "String"
+type Rust Int = "i64"
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo     :: [(Str, Int)] -> [(Str, Int)]
+foo Rust :: [(Str, Int)] -> [(Str, Int)]
+foo xs = id xs

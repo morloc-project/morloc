@@ -32,6 +32,8 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Module as Mod
+import qualified Morloc.Language as ML
 
 -- | @RecEntry@ stores the common name, keys, and types of records that are not
 -- imported from C++ source. These records are generated as structs in the C++
@@ -39,12 +41,13 @@ import qualified Morloc.Data.Text as MT
 -- name and keys. The unified records may have different types, but they will
 -- all be instances of the same generic struct. That is, any fields that differ
 -- between instances will be made generic.
-data RecEntry = RecEntry {
-    recName :: MDoc -- ^ the automatically generated name for this anonymous type
+data RecEntry = RecEntry
+  { recName :: MDoc -- ^ the automatically generated name for this anonymous type
   , recFields :: [( PVar -- The field key
                   , Maybe TypeP -- The field type if not generic
                   )]
-}
+  }
+  deriving (Show)
 
 -- | @RecMap@ is used to lookup up the struct name shared by all records that
 -- are not imported from C++ source.
@@ -54,7 +57,7 @@ type RecMap = [((PVar, [PVar]), RecEntry)]
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
@@ -62,11 +65,12 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc . vsep $ "-- C++ translation --" : map prettyExprM es
+  liftIO . putDoc . vsep $ "-- C++ translation --" : map pretty es
+
+  (srcDecl, srcSerial) <- generateSourcedSerializers es
 
   let recmap = unifyRecords . conmap collectRecords $ es
       (autoDecl, autoSerial) = generateAnonymousStructs recmap
-      (srcDecl, srcSerial) = generateSourcedSerializers es
       dispatch = makeDispatch es
       signatures = map (makeSignature recmap) es
       serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
@@ -75,7 +79,32 @@ translate srcs es = do
   mDocs <- mapM (translateManifold recmap) es
 
   -- create and return complete pool script
-  return $ makeMain includeDocs signatures serializationCode mDocs dispatch
+  let code = makeMain includeDocs signatures serializationCode mDocs dispatch
+
+  maker <- makeTheMaker srcs
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = CppLang
+    , scriptCode = "." :/ File "pool.cpp" (Code . render $ code)
+    , scriptMake = maker
+    }
+
+makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
+makeTheMaker srcs = do
+  let outfile = pretty $ ML.makeExecutableName CppLang "pool"
+  let src = pretty (ML.makeSourceName CppLang "pool")
+
+  -- this function cleans up source names (if needed) and generates compiler flags and paths to search
+  (_, flags, includes) <- Mod.handleFlagsAndPaths CppLang srcs
+
+  let incs = [pretty ("-I" <> i) | i <- includes]
+  let flags' = map pretty flags
+
+  -- let cmd = SysRun . Code $ MT.unwords (["g++ --std=c++11", "-o", MT.pack outfile, MT.pack src] ++ flags ++ map MT.pack incs)
+  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++11 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+
+  return [cmd]
 
 letNamer :: Int -> MDoc
 letNamer i = "a" <> viaShow i
@@ -92,7 +121,7 @@ serialType = "std::string"
 makeSignature :: RecMap -> ExprM One -> MDoc
 makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM One -> [MDoc]
-  f (ManifoldM (metaId->i) args e) =
+  f (ManifoldM i args e) =
     let t = typeOfExprM e
         sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
     in sig : f e
@@ -319,17 +348,17 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
   f args (AppM (SrcM (Function inputs output) src) xs) = do
     (mss', xs', pss) <- mapM (f args) xs |>> unzip3
     let
-        name = pretty $ srcName src
-        mangledName = mangleSourceName name
+        name' = pretty $ srcName src
+        mangledName = mangleSourceName name'
         inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
-        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name};|]
+        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name'};|]
     return (concat mss', mangledName <> tupled xs', sig : concat pss)
 
   f _ (AppM _ _) = error "Can only apply functions"
 
   f _ (SrcM _ src) = return ([], pretty $ srcName src, [])
 
-  f pargs (ManifoldM (metaId->i) args e) = do
+  f pargs (ManifoldM i args e) = do
     (ms', body, ps1) <- f args e
     let t = typeOfExprM e
         decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
@@ -361,7 +390,11 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  f _ (LamM _ _) = undefined
+  -- this should not happen
+  f args (LamM lambdaArgs e) = do
+    (ms', e', rs) <- f args e
+    let vs = map (bndNamer . argId) lambdaArgs
+    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f args (AccM e k) = do
     (ms, e', ps) <- f args e
@@ -414,11 +447,11 @@ stdBind xs = [idoc|std::bind(#{args})|] where
   args = cat (punctuate "," xs)
 
 staticCast :: RecMap -> TypeM -> [Argument] -> MDoc -> MorlocMonad MDoc
-staticCast recmap t args name = do
+staticCast recmap t args name' = do
   let output = showTypeM recmap t
       inputs = map (argTypeM recmap) args
       argList = cat (punctuate "," inputs)
-  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name})|]
+  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
 
 argTypeM :: RecMap -> Argument -> MDoc
 argTypeM _ (SerialArgument _ _) = serialType
@@ -429,7 +462,7 @@ makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM (metaId->i) args _) =
+    makeCase (ManifoldM i args _) =
       let args' = take (length args) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
       in
         (nest 4 . vsep)
@@ -443,7 +476,7 @@ showType :: RecMap -> TypeP -> MDoc
 showType _ (UnkP _) = serialType
 showType _ (VarP (PV _ _ v)) = pretty v 
 showType recmap t@(FunP _ _) = showTypeM recmap (typeP2typeM t)
-showType recmap (ArrP (PV _ _ v) ts) = pretty $ expandMacro v (map (render . showType recmap) ts)
+showType recmap (AppP (VarP (PV _ _ v)) ts) = pretty $ expandMacro v (map (render . showType recmap) ts)
 showType recmap (NamP _ v@(PV _ _ "struct") _ rs) =
   -- handle autogenerated structs
   case lookup (v, map fst rs) recmap of
@@ -473,7 +506,7 @@ showNativeTypeM recmap (Native t) = return $ showTypeM recmap (Native t)
 showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or serialized type"
 
 
-collectRecords :: ExprM One -> [(PVar, GMeta, [(PVar, TypeP)])]
+collectRecords :: ExprM One -> [(PVar, GIndex, [(PVar, TypeP)])]
 collectRecords e0 = f (gmetaOf e0) e0 where
   f _ (ManifoldM m _ e) = f m e
   f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
@@ -494,30 +527,30 @@ collectRecords e0 = f (gmetaOf e0) e0 where
   f m (LetVarM t _) = cleanRecord m t
   f _ _ = []
 
-cleanRecord :: GMeta -> TypeM -> [(PVar, GMeta, [(PVar, TypeP)])]
+cleanRecord :: GIndex -> TypeM -> [(PVar, GIndex, [(PVar, TypeP)])]
 cleanRecord m tm = case typeOfTypeM tm of
   (Just t) -> toRecord t
   Nothing -> []
   where
-    toRecord :: TypeP -> [(PVar, GMeta, [(PVar, TypeP)])]
+    toRecord :: TypeP -> [(PVar, GIndex, [(PVar, TypeP)])]
     toRecord (UnkP _) = []
     toRecord (VarP _) = []
-    toRecord (FunP t1 t2) = toRecord t1 ++ toRecord t2
-    toRecord (ArrP _ ts) = conmap toRecord ts
+    toRecord (FunP ts t) = conmap toRecord (t:ts)
+    toRecord (AppP t ts) = conmap toRecord (t:ts)
     toRecord (NamP _ v@(PV _ _ "struct") _ rs) = (v, m, rs) : conmap toRecord (map snd rs)
     toRecord (NamP _ _ _ rs) = conmap toRecord (map snd rs)
 
 -- unify records with the same name/keys
 unifyRecords
   :: [(PVar -- The "v" in (NamP _ v@(PV _ _ "struct") _ rs)
-     , GMeta -- The GMeta object stored in the records ManifoldM term
+     , GIndex
      , [(PVar, TypeP)]) -- key/type terms for this record
      ] -> RecMap
 unifyRecords xs
   = zipWith (\i ((v,ks),es) -> ((v,ks), RecEntry (structName i v) es)) [1..]
   . map (\((v,m,ks), rss) -> ((v,ks), [unifyField m fs | fs <- transpose rss]))
   . map (\((v,ks), rss) -> ((v, fst (head rss),ks), map snd rss))
-  -- [((record_name, record_keys), [(GMeta, [(key,type)])])]
+  -- [((record_name, record_keys), [(GIndex, [(key,type)])])]
   -- associate unique pairs of record name and keys with their edge types
   . groupSort
   . unique
@@ -527,7 +560,7 @@ structName :: Int -> PVar -> MDoc
 structName i (PV _ (Just v1) "struct") = "mlc_" <> pretty v1 <> "_" <> pretty i 
 structName _ (PV _ _ v) = pretty v
 
-unifyField :: GMeta -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
+unifyField :: GIndex -> [(PVar, TypeP)] -> (PVar, Maybe TypeP)
 unifyField _ [] = error "Empty field"
 unifyField _ rs@((v,_):_)
   | not (all ((==) v) (map fst rs))
@@ -565,30 +598,31 @@ makeSerializers recmap rec
 
 
 
-generateSourcedSerializers :: [ExprM One] -> ([MDoc],[MDoc])
-generateSourcedSerializers
-  = foldl groupQuad ([],[])
-  . Map.elems
-  . Map.mapMaybeWithKey makeSerial
-  . foldl collect' Map.empty
+generateSourcedSerializers :: [ExprM One] -> MorlocMonad ([MDoc],[MDoc])
+generateSourcedSerializers es0
+  =   (foldl groupQuad ([],[]) . Map.elems . Map.mapMaybeWithKey makeSerial)
+  <$> foldlM collect' Map.empty es0
   where
     collect'
       :: Map.Map TVar (Type, [TVar])
       -> ExprM One
-      -> Map.Map TVar (Type, [TVar])
-    collect' m (ManifoldM g _ e) = collect' (Map.union m (metaTypedefs g)) e
+      -> MorlocMonad (Map.Map TVar (Type, [TVar]))
+    collect' m (ManifoldM g _ e) = MM.metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
     collect' m (ForeignInterfaceM _ e) = collect' m e
-    collect' m (LetM _ e1 e2) = Map.union (collect' m e1) (collect' m e2)
-    collect' m (AppM e es) = Map.unions $ collect' m e : map (collect' m) es
+    collect' m (LetM _ e1 e2) = Map.union <$> collect' m e1 <*> collect' m e2
+    collect' m (AppM e es) = do
+      e' <- collect' m e
+      es' <- mapM (collect' m) es
+      return $ Map.unions (e':es')
     collect' m (LamM _ e) = collect' m e
     collect' m (AccM e _) = collect' m e
-    collect' m (ListM _ es) = Map.unions $ map (collect' m) es
-    collect' m (TupleM _ es) = Map.unions $ map (collect' m) es
-    collect' m (RecordM _ entries) = Map.unions $ map (collect' m) (map snd entries)
+    collect' m (ListM _ es) = Map.unions <$> mapM (collect' m) es
+    collect' m (TupleM _ es) = Map.unions <$> mapM (collect' m) es
+    collect' m (RecordM _ entries) = Map.unions <$> mapM (collect' m) (map snd entries)
     collect' m (SerializeM _ e) = collect' m e
     collect' m (DeserializeM _ e) = collect' m e
     collect' m (ReturnM e) = collect' m e
-    collect' m _ = m
+    collect' m _ = return m
 
     groupQuad :: ([a],[a]) -> (a, a, a, a) -> ([a],[a])
     groupQuad (xs,ys) (x1, y1, x2, y2) = (x1:x2:xs, y1:y2:ys)
@@ -620,9 +654,10 @@ generateSourcedSerializers
       | elem v ps = "T" <> pretty s
       | otherwise = pretty s
     showDefType _ (FunT _ _) = error "Cannot serialize functions"
-    showDefType ps (ArrT (TV _ v) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
     showDefType ps (NamT _ (TV _ v) ts _)
-      = pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+      = undefined -- pretty v <> encloseSep "<" ">" "," (map (showDefType ps) ts)
+    showDefType ps (AppT (VarT (TV _ v)) ts) = pretty $ expandMacro v (map (render . showDefType ps) ts)
+    showDefType _ (AppT _ _) = error "AppT is only OK with VarT, for now"
 
 
 makeTemplateHeader :: [MDoc] -> MDoc
@@ -758,6 +793,7 @@ makeMain includes signatures serialization manifolds dispatch = [idoc|#include <
 #include <vector>
 #include <string>
 #include <algorithm> // for std::transform
+using namespace std;
 
 #{Src.foreignCallFunction}
 

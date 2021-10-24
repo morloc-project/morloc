@@ -48,11 +48,11 @@ instance FromJSON PackageMeta where
 
 -- | Specify where a module is located 
 data ModuleSource
-  = LocalModule (Maybe MT.Text)
+  = LocalModule (Maybe String)
   -- ^ A module in the working directory
-  | GithubRepo MT.Text
+  | GithubRepo String
   -- ^ A module stored in an arbitrary Github repo: "<username>/<reponame>"
-  | CoreGithubRepo MT.Text
+  | CoreGithubRepo String
   -- ^ The repo name of a core package, e.g., "math"
 
 -- | Look for a local morloc module.
@@ -73,14 +73,14 @@ findModule moduleName = do
 -- as the main "*.loc" file. 
 findModuleMetadata :: Path -> IO (Maybe Path)
 findModuleMetadata mainFile =
-  getFile $ MS.combine (MS.takeDirectory mainFile) (Path "package.yaml")
+  getFile $ MS.combine (MS.takeDirectory mainFile) "package.yaml"
 
 loadModuleMetadata :: Path -> MorlocMonad ()
 loadModuleMetadata main = do
   maybef <- liftIO $ findModuleMetadata main
   meta <-
     case maybef of
-      (Just f) -> liftIO $ YC.loadYamlSettings [MT.unpack . unPath $ f] [] YC.ignoreEnv
+      (Just f) -> liftIO $ YC.loadYamlSettings [f] [] YC.ignoreEnv
       Nothing -> return defaultPackageMeta
   state <- MM.get
   MM.put (appendMeta meta state)
@@ -90,23 +90,23 @@ loadModuleMetadata main = do
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> MVar -> [Path]
-getModulePaths (Path lib) (MVar base) = map (MS.joinPath . map Path)
-  [ [base <> ".loc"]
-  , [base, "main.loc"]
-  , [lib, base <> ".loc"]
-  , [lib, base, "main.loc"]
-  , [lib, base, base <> ".loc"]
+getModulePaths lib (MV base) = map MS.joinPath
+  [ [MT.unpack base <> ".loc"]
+  , [MT.unpack base, "main.loc"]
+  , [lib, MT.unpack base <> ".loc"]
+  , [lib, MT.unpack base, "main.loc"]
+  , [lib, MT.unpack base, MT.unpack base <> ".loc"]
   ]
 
 -- | An ordered list of where to search for C/C++ header files
 getHeaderPaths
   :: Path      -- ^ the path the morloc home ("~/.morloc" be default)
-  -> MT.Text   -- ^ the base header name without an extension
-  -> [MT.Text] -- ^ a list of header options (e.g., ".h", ".hpp")
+  -> String   -- ^ the base header name without an extension
+  -> [String] -- ^ a list of header options (e.g., ".h", ".hpp")
   -> [Path]    -- ^ an ordered list of paths to search (foo.h, foo.hpp, include/foo.h ...)
-getHeaderPaths (Path lib) base exts = [Path (path <> ext) | (Path path) <- paths, ext <- exts]
+getHeaderPaths lib base exts = [path <> ext | path <- paths, ext <- exts]
   where
-    paths = map (MS.joinPath . map Path)
+    paths = map MS.joinPath
             [ [base]
             , ["include", base] 
             , [base, base]
@@ -119,10 +119,10 @@ getHeaderPaths (Path lib) base exts = [Path (path <> ext) | (Path path) <- paths
 -- | An ordered list of where to search for shared libraries
 getLibraryPaths
   :: Path    -- ^ the path the morloc home ("~/.morloc" be default)
-  -> MT.Text -- ^ the base source name, e.g., "SimplexNoise"
-  -> MT.Text -- ^ the shared library name, e.g., "libsimplexnoise.so"
+  -> String -- ^ the base source name, e.g., "SimplexNoise"
+  -> String -- ^ the shared library name, e.g., "libsimplexnoise.so"
   -> [Path]  -- ^ an ordered list of paths to search
-getLibraryPaths (Path lib) base sofile = map (MS.joinPath . map Path)
+getLibraryPaths lib base sofile = map MS.joinPath
   [ [sofile]
   , ["lib", sofile]
   , [base, sofile]
@@ -132,9 +132,6 @@ getLibraryPaths (Path lib) base sofile = map (MS.joinPath . map Path)
   , ["/usr/bin", sofile]
   , ["/usr/local/bin", sofile]
   ]
-
-makeFlagsForSharedLibraries :: Lang -> Source -> Maybe MDoc
-makeFlagsForSharedLibraries = undefined
 
 handleFlagsAndPaths :: Lang -> [Source] -> MorlocMonad ([Source], [MT.Text], [Path])
 handleFlagsAndPaths CppLang srcs = do
@@ -147,58 +144,64 @@ handleFlagsAndPaths CppLang srcs = do
     . unique
     $ [s | s <- srcs, srcLang s == CppLang]
 
-  return ( filter (isJust . srcPath) srcs' -- all sources that have a defined path (import something)
-         , gccflags ++ concat libflags     -- compiler flags and shared libraries
-         , unique (catMaybes paths)        -- paths to files to include
+  return (
+         -- all sources that have a defined path (import something)
+           filter (isJust . srcPath) srcs'
+         -- compiler flags and shared libraries
+         , gccflags ++ (map MT.pack . concat) libflags
+         -- paths to files to include
+         , unique (catMaybes paths) 
          )
+handleFlagsAndPaths RustLang srcs = return (srcs, [], []) -- FIXME
 handleFlagsAndPaths _ srcs = return (srcs, [], [])
 
-flagAndPath :: Source -> MorlocMonad (Source, [MT.Text], Maybe Path)
-flagAndPath src@(Source _ CppLang (Just p) _)
+flagAndPath :: Source -> MorlocMonad (Source, [String], Maybe Path)
+flagAndPath src@(Source _ CppLang (Just p) _ _)
   = case (MS.takeDirectory p, MS.dropExtensions (MS.takeFileName p), MS.takeExtensions p) of
     -- lookup up "<base>.h" and "lib<base>.so"
-    (Path ".", base, "") -> do
+    (".", base, "") -> do
       header <- lookupHeader base
       libFlags <- lookupLib base
       return (src {srcPath = Just header}, libFlags, Just (MS.takeDirectory header))
     -- use "<base>.h" and lookup "lib<base>.so"
-    (dir, base, ext) -> do
+    (dir, base, _) -> do
       libFlags <- lookupLib base
       return (src, libFlags, Just dir)
   where
-    lookupHeader :: MT.Text -> MorlocMonad Path
+    lookupHeader :: String -> MorlocMonad Path
     lookupHeader base = do
       home <- MM.asks configHome
       let allPaths = getHeaderPaths home base [".h", ".hpp", ".hxx"]
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (x:_) -> return x
-        [] -> MM.throwError . OtherError $ "Header file " <> base <> ".* not found"
+        [] -> MM.throwError . OtherError $ "Header file " <> MT.pack base <> ".* not found"
 
 
-    lookupLib :: MT.Text -> MorlocMonad [MT.Text]
+    lookupLib :: String -> MorlocMonad [String]
     lookupLib base = do
       home <- MM.asks configHome
-      let libnamebase = MT.filter DC.isAlphaNum (MT.toLower base)
+      let libnamebase = filter DC.isAlphaNum (map DC.toLower base)
       let libname = "lib" <> libnamebase <> ".so"
       let allPaths = getLibraryPaths home base libname
       existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
       case existingPaths of
         (libpath:_) -> do
-          libdir <- fmap unPath . liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
+          libdir <- liftIO . MS.canonicalizePath . MS.takeDirectory $ libpath
           return
             [ "-Wl,-rpath=" <> libdir
             , "-L" <> libdir
             , "-l" <> libnamebase
             ]
         [] -> return []
-flagAndPath src@(Source _ CppLang Nothing _) = return (src, [], Nothing)
-flagAndPath (Source _ _ _ _) = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
+flagAndPath src@(Source _ CppLang Nothing _ _) = return (src, [], Nothing)
+flagAndPath (Source _ RustLang _ _ _) = MM.throwError . OtherError $ "FIXME: add Rust support in Module:flagAndPath"
+flagAndPath _ = MM.throwError . OtherError $ "flagAndPath should only be called for C++ functions"
 
 
 getFile :: Path -> IO (Maybe Path)
 getFile x = do
-  exists <- MS.fileExists x
+  exists <- MS.doesFileExist x
   return $
     if exists
       then Just x
@@ -206,21 +209,21 @@ getFile x = do
 
 -- | Attempt to clone a package from github
 installGithubRepo ::
-     MT.Text -- ^ the repo path ("<username>/<reponame>")
-  -> MT.Text -- ^ the url for github (e.g., "https://github.com/")
+     String -- ^ the repo path ("<username>/<reponame>")
+  -> String -- ^ the url for github (e.g., "https://github.com/")
   -> MorlocMonad ()
 installGithubRepo repo url = do
   config <- MM.ask
-  let (Path lib) = Config.configLibrary config
-  let cmd = MT.unwords ["git clone", url, lib <> "/" <> repo]
-  MM.runCommand "installGithubRepo" cmd
+  let lib = Config.configLibrary config
+  let cmd = unwords ["git clone", url, MS.combine lib repo]
+  MM.runCommand "installGithubRepo" (MT.pack cmd)
 
 -- | Install a morloc module
 installModule :: ModuleSource -> MorlocMonad ()
 installModule (GithubRepo repo) =
   installGithubRepo repo ("https://github.com/" <> repo)
-installModule (CoreGithubRepo name) =
-  installGithubRepo name ("https://github.com/morloclib/" <> name)
+installModule (CoreGithubRepo name') =
+  installGithubRepo name' ("https://github.com/morloclib/" <> name')
 installModule (LocalModule Nothing) =
   MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just _)) =

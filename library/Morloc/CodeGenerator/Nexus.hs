@@ -12,10 +12,11 @@ module Morloc.CodeGenerator.Nexus
   ( generate
   ) where
 
+import qualified Control.Monad.State as CMS
 import Morloc.Data.Doc
 import Morloc.CodeGenerator.Namespace
 import Morloc.Quasi
-import Morloc.Pretty (prettyType)
+import Morloc.Pretty ()
 import qualified Morloc.Data.Text as MT
 import qualified Control.Monad as CM
 import qualified Morloc.Config as MC
@@ -28,28 +29,35 @@ type FData =
   , TypeP -- argument type
   )
 
-generate :: [NexusCommand] -> [(TypeP, Int, Maybe EVar)] -> MorlocMonad Script
+generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
 generate cs xs = do
-  let names = [pretty name | (_, _, Just name) <- xs] ++ map (pretty . commandName) cs
-  fdata <- CM.mapM getFData [(t, i, n) | (t, i, Just n) <- xs] -- [FData]
+
+  callNames <- mapM MM.metaName (map snd xs) |>> catMaybes |>> map pretty
+  let gastNames = map (pretty . commandName) cs
+      names = callNames <> gastNames 
+  fdata <- CM.mapM getFData xs -- [FData]
+  outfile <- fmap (maybe "nexus.pl" id) $ CMS.gets stateOutfile
   return $
     Script
-      { scriptBase = "nexus"
+      { scriptBase = outfile
       , scriptLang = ML.PerlLang
-      , scriptCode = Code . render $ main names fdata cs
-      , scriptCompilerFlags = []
-      , scriptInclude = []
+      , scriptCode = "." :/ File outfile (Code . render $ main names fdata cs)
+      , scriptMake = [SysExe outfile]
       }
 
-getFData :: (TypeP, Int, EVar) -> MorlocMonad FData
-getFData (t, i, n) = do
-  config <- MM.ask
-  let lang = langOf t
-  case MC.buildPoolCallBase config lang i of
-    (Just cmds) -> return (hsep cmds, pretty n, t)
-    Nothing ->
-      MM.throwError . GeneratorError $
-      "No execution method found for language: " <> ML.showLangName (fromJust lang)
+getFData :: (TypeP, Int) -> MorlocMonad FData
+getFData (t, i) = do
+  mayName <- MM.metaName i
+  case mayName of
+    (Just name') -> do
+      config <- MM.ask
+      let lang = langOf t
+      case MC.buildPoolCallBase config lang i of
+        (Just cmds) -> return (hsep cmds, pretty name', t)
+        Nothing ->
+          MM.throwError . GeneratorError $
+          "No execution method found for language: " <> ML.showLangName (fromJust lang)
+    (Nothing) -> MM.throwError . GeneratorError $ "No name in FData"
 
 main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
 main names fdata cdata =
@@ -114,20 +122,21 @@ sub usage{
 |]
 
 usageLineT :: FData -> MDoc
-usageLineT (_, name, t) = vsep
-  ( [idoc|print STDERR "  #{name}\n";|]
+usageLineT (_, name', t) = vsep
+  ( [idoc|print STDERR "  #{name'}\n";|]
   : writeTypes (gtypeOf t)
   )
 
 gtypeOf (UnkP (PV _ (Just v) _)) = UnkT (TV Nothing v)
 gtypeOf (VarP (PV _ (Just v) _)) = VarT (TV Nothing v)
-gtypeOf (FunP t1 t2) = FunT (gtypeOf t1) (gtypeOf t2)
-gtypeOf (ArrP (PV _ (Just v) _) ts) = ArrT (TV Nothing v) (map gtypeOf ts)
-gtypeOf (NamP r (PV _ (Just v) _) ps es)
-  = NamT r (TV Nothing v)
-           (map gtypeOf ps)
-           (zip [k | (PV _ (Just k) _, _) <- es] (map (gtypeOf . snd) es))
+gtypeOf (FunP ts t) = FunT (map gtypeOf ts) (gtypeOf t)
+gtypeOf (AppP t ts) = AppT (gtypeOf t) (map gtypeOf ts)
+gtypeOf (NamP o (PV _ (Just n) _) ps rs)
+  = NamT o (TV Nothing n)
+    (map gtypeOf ps)
+    [(k, gtypeOf t) | (PV _ (Just k) _, t) <- rs]
 gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
+
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep
@@ -136,21 +145,22 @@ usageLineConst cmd = vsep
   )
 
 writeTypes :: Type -> [MDoc]
-writeTypes t =
-  let (inputs, output) = decompose t
-  in zipWith writeType [Just i | i <- [1..]] inputs ++ [writeType Nothing output]
+writeTypes (FunT inputs output)
+  = zipWith writeType (map Just [1..]) inputs
+  ++ writeTypes output
+writeTypes t = [writeType Nothing t]
 
 writeType :: Maybe Int -> Type -> MDoc
-writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{prettyType t}}, "\n";|]
-writeType (Nothing) t = [idoc|print STDERR q{    return: #{prettyType t}}, "\n";|]
+writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{pretty t}}, "\n";|]
+writeType (Nothing) t = [idoc|print STDERR q{    return: #{pretty t}}, "\n";|]
 
 
 functionT :: FData -> MDoc
-functionT (cmd, name, t) =
+functionT (cmd, name', t) =
   [idoc|
-sub call_#{name}{
+sub call_#{name'}{
     if(scalar(@_) != #{pretty n}){
-        print STDERR "Expected #{pretty n} arguments to '#{name}', given " . 
+        print STDERR "Expected #{pretty n} arguments to '#{name'}', given " . 
         scalar(@_) . "\n";
         exit 1;
     }
@@ -193,7 +203,7 @@ pathElement (JsonIndex i) = brackets (pretty i)
 pathElement (JsonKey key) = braces (pretty key)
 
 readJsonArg ::EVar -> Int -> MDoc
-readJsonArg v i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
+readJsonArg (EV v) i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
 
 argT :: Int -> MDoc
 argT i = "'$_[" <> pretty i <> "]'" 

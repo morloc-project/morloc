@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.34.0
+version:          0.35.0
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -22,6 +22,7 @@ dependencies:
   - bytestring >=0.10.8.2 && <0.11
   - containers >=0.5.10.2 && <0.7
   - directory >=1.3.0.2 && <1.4
+  - directory-tree >=0.12.1 && < 0.13.0
   - extra >=1.6.5 && <1.8
   - filepath >=1.4.1.2 && <1.5
   - haskell-src-meta >=0.8.0.2 && <0.9
@@ -31,7 +32,6 @@ dependencies:
   - partial-order >=0.1.2.1 && <0.3
   - pretty-simple >=2.1.0.0 && <4.1
   - prettyprinter >=1.2.0.1 && <1.8
-  - prettyprinter-ansi-terminal >=1.1.1.2 && <1.2
   - process >=1.6.1.0 && <1.7
   - raw-strings-qq ==1.1.*
   - safe >=0.3.17 && <0.4
@@ -48,6 +48,7 @@ default-extensions:
   - BangPatterns
   - GeneralizedNewtypeDeriving
   - ViewPatterns
+  - StandaloneDeriving
 
 ghc-options:
   - -Wall

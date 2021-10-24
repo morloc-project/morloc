@@ -5,3 +5,7 @@ rms1 <- function(xs){
 rms2 <- function(xs){
   sqrt (mean (xs ^ 2))
 }
+
+add <- function(x, y){
+  x + y
+}

@@ -12,47 +12,25 @@ module Morloc.ProgramBuilder.Build
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as MD
-import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
-import qualified Control.Monad.State as CMS
-
+import qualified Morloc.System as MS
 import qualified System.Directory as SD
 
 buildProgram :: (Script, [Script]) -> MorlocMonad ()
-buildProgram (nexus, pools) = do
-  mapM_ (build Nothing) pools
-  outfile <- CMS.gets stateOutfile
-  build outfile nexus
+buildProgram (nexus, pools) = mapM_ build (nexus:pools) 
 
-build :: Maybe Path -> Script -> MorlocMonad ()
-build filename s =
-  case (scriptLang s, exeName) of
-    (Python3Lang, name) -> liftIO $ writeInterpreted name s
-    (RLang, name) -> liftIO $ writeInterpreted name s
-    (PerlLang, name) -> liftIO $ writeInterpreted name s
-    (CLang, name) -> gccBuild name s "gcc"
-    (CppLang, name) -> gccBuild name s "g++ --std=c++11" -- TODO: I need more rigorous build handling
-  where
-    exeName = Path $ makeExecutableName filename (scriptLang s) (MT.pack (scriptBase s))
+build :: Script -> MorlocMonad ()
+build s = do
+  -- write the required file structure
+  liftIO $ MS.writeDirectoryWith (\f c -> MT.writeFile f (unCode c)) (scriptCode s)
+  -- execute all make commands
+  mapM_ runSysCommand (scriptMake s)
 
-makeExecutableName :: Maybe Path -> Lang -> MT.Text -> MT.Text
-makeExecutableName Nothing lang base = ML.makeExecutableName lang base
-makeExecutableName (Just (Path filename)) _ _ = filename
-
--- | Compile a C program
-gccBuild :: Path -> Script -> MT.Text -> MorlocMonad ()
-gccBuild (Path exe) s cmd = do
-  let src = ML.makeSourceName (scriptLang s) (MT.pack (scriptBase s))
-  let inc = ["-I" <> unPath i | i <- scriptInclude s]
-  liftIO $ MT.writeFile (MT.unpack src) (unCode (scriptCode s))
-  MM.runCommand "GccBuild" $
-    MT.unwords ([cmd, "-o", exe, src] ++ scriptCompilerFlags s ++ inc)
-
--- | Build an interpreted script.
-writeInterpreted :: Path -> Script -> IO ()
-writeInterpreted path s = do
-  let exe = MT.unpack . unPath $ path
-  MT.writeFile exe (unCode (scriptCode s))
-  p <- SD.getPermissions exe
-  SD.setPermissions exe (p {SD.executable = True})
+runSysCommand :: SysCommand -> MorlocMonad ()
+runSysCommand (SysExe path) = do
+  p <- liftIO $ SD.getPermissions path
+  liftIO $ SD.setPermissions path (p {SD.executable = True})
+runSysCommand (SysMove _ _) = undefined
+runSysCommand (SysRun (Code cmd)) = MM.runCommand "runSysCommand" cmd
+runSysCommand (SysInstall _) = undefined
+runSysCommand (SysUnlink _) = undefined

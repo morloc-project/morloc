@@ -1,0 +1,6 @@
+export f
+
+k = 42
+
+-- a function can use terms from the global scope
+f = k

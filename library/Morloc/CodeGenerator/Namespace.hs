@@ -22,26 +22,31 @@ module Morloc.CodeGenerator.Namespace
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
+  -- ** Accessors
+  , argId
   ) where
 
 import Morloc.Namespace
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+import qualified Data.Set as Set
+import Morloc.Data.Doc
+import Morloc.Pretty ()
 
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
   = PV
     Lang
-    (Maybe Text)
-    Text
+    (Maybe Text) -- ^ general name of the type variable (if known)
+    Text -- ^ concrete name of type variable
   deriving (Show, Eq, Ord)
 
 -- | A solved type coupling a language specific form to an optional general form
 data TypeP
   = UnkP PVar
   | VarP PVar
-  | FunP TypeP TypeP
-  | ArrP PVar [TypeP]
+  | FunP [TypeP] TypeP
+  | AppP TypeP [TypeP]
   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
@@ -62,25 +67,48 @@ data NexusCommand = NexusCommand
   }
 
 instance Typelike TypeP where
-  typeOf (UnkP (PV lang _ t)) = UnkT (TV (Just lang) t)
-  typeOf (VarP (PV lang _ t)) = VarT (TV (Just lang) t)
-  typeOf (FunP t1 t2) = FunT (typeOf t1) (typeOf t2)
-  typeOf (ArrP (PV lang _ v) ts) = ArrT (TV (Just lang) v) (map typeOf ts)
-  typeOf (NamP r (PV lang _ t) ps es)
-    = NamT r (TV (Just lang) t)
-             (map typeOf ps)
-             (zip [v | (PV _ _ v, _) <- es] (map (typeOf . snd) es))
+  typeOf (UnkP v) = UnkT (pvar2tvar v)
+  typeOf (VarP v) = VarT (pvar2tvar v)
+  typeOf (FunP ts t) = FunT (map typeOf ts) (typeOf t)
+  typeOf (AppP v ts) = AppT (typeOf v) (map typeOf ts)
+  typeOf (NamP o n ps es) =
+    let n' = pvar2tvar n
+        ps' = (map typeOf ps)
+        es' = [(v, typeOf t) | (PV _ _ v, t) <- es]
+    in NamT o n' ps' es'
 
-  decompose (FunP t1 t2) = case decompose t2 of 
-    (ts, finalType) -> (t1:ts, finalType) 
-  decompose t = ([], t)
+  -- | substitute all appearances of a given variable with a given new type
+  substituteTVar v0 r0 t0 = sub t0
+    where
+      sub :: TypeP -> TypeP
+      sub t@(UnkP _) = t
+      sub t@(VarP (PV lang _ v))
+        | v0 == TV (Just lang) v = r0
+        | otherwise = t
+      sub (FunP ts t) = FunP (map sub ts) (sub t)
+      sub (AppP v ts) = AppP (sub v) (map sub ts)
+      sub (NamP o n ps es) = NamP o n (map sub ps) [(k, sub t) | (k, t) <- es]
+
+  free v@(VarP _) = Set.singleton v
+  free (FunP ts t) = Set.unions (map free (t:ts))
+  free (AppP t ts) = Set.unions (map free (t:ts))
+  free (NamP _ _ ps es) = Set.unions (map free (map snd es <> ps))
+  free (UnkP _) = Set.empty -- are UnkP free?
+
+pvar2tvar :: PVar -> TVar
+pvar2tvar (PV lang _ v) = TV (Just lang) v
 
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
   | SerialList (SerialAST f)
   | SerialTuple [SerialAST f]
-  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)] -- ^ make a record, table, or object
+  | SerialObject NamType PVar [TypeP] [(PVar, SerialAST f)]
+  -- ^ Make a record, table, or object. The parameters indicate
+  --   1) NamType - record/table/object
+  --   2) PVar - telling the name of the object (e.g., "Person")
+  --   3) [TypeP] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
+  --   4) [(PVar, SerialAST f)] - entries with keys for concrete and general cases
   | SerialNum PVar
   | SerialBool PVar
   | SerialString PVar
@@ -90,6 +118,21 @@ data SerialAST f
   -- line, the parameter contains the variable name, which is useful only for
   -- source code comments.
 
+instance Foldable f => Pretty (SerialAST f) where
+  pretty (SerialPack v packers) = parens
+    $ "SerialPack" <+> pretty v
+    <+> braces (foldr (\(p, x) s -> s <+> tupled [pretty p, pretty x]) "" packers)
+  pretty (SerialList ef) = parens $ "SerialList" <+> pretty ef 
+  pretty (SerialTuple efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
+  pretty (SerialObject o p vs rs) = parens
+    $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
+    <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
+  pretty (SerialNum v) = parens ("SerialNum" <+> pretty v)
+  pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
+  pretty (SerialString v) = parens ("SerialString" <+> pretty v)
+  pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
+  pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
+
 data TypePacker = TypePacker
   { typePackerType    :: TypeP
   , typePackerFrom    :: TypeP
@@ -97,9 +140,16 @@ data TypePacker = TypePacker
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)
 
--- | A simplified subset of the Type record
--- functions, existential, and universal types are removed
--- language-specific info is removed
+instance Pretty TypePacker where
+  pretty p = "TypePacker" <+> encloseSep "{" "}" ","
+    [ "typePackerType" <+> "=" <+> pretty (typePackerType p)
+    , "typePackerFrom" <+> "=" <+> pretty (typePackerFrom p)
+    , "typePackerForward" <+> "=" <+> list (map pretty (typePackerForward p))
+    , "typePackerReverse" <+> "=" <+> list (map pretty (typePackerReverse p))
+    ]
+
+-- | A simplified subset of the Type record where functions, existentials,
+-- universals and language-specific info are removed
 data JsonType
   = VarJ Text
   -- ^ {"int"}
@@ -124,6 +174,11 @@ data Argument
   -- does have a concrete type.
   deriving (Show, Ord, Eq)
 
+argId :: Argument -> Int
+argId (SerialArgument i _) = i
+argId (NativeArgument i _) = i
+argId (PassThroughArgument i ) = i
+
 data TypeM
   = Passthrough -- ^ serialized data that cannot be deserialized in this language
   | Serial TypeP -- ^ serialized data that may be deserialized in this language
@@ -135,7 +190,7 @@ data TypeM
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
 data ExprM f
-  = ManifoldM GMeta [Argument] (ExprM f)
+  = ManifoldM Int [Argument] (ExprM f)
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
   | ForeignInterfaceM
@@ -189,7 +244,7 @@ data ExprM f
   -- If the string "for" were retained as the variable name, this would fail in
   -- many language where "for" is a keyword.
 
-  | AccM (ExprM f) EVar 
+  | AccM (ExprM f) Text
   -- ^ Access a field in record ExprM
 
   | LetVarM TypeM Int
@@ -200,7 +255,7 @@ data ExprM f
   -- containers
   | ListM TypeM [(ExprM f)]
   | TupleM TypeM [(ExprM f)]
-  | RecordM TypeM [(EVar, (ExprM f))]
+  | RecordM TypeM [(Text, (ExprM f))]
 
   -- primitives
   | LogM TypeM Bool
@@ -221,15 +276,17 @@ data ExprM f
 instance HasOneLanguage (TypeP) where
   langOf' (UnkP (PV lang _ _)) = lang
   langOf' (VarP (PV lang _ _)) = lang
-  langOf' (FunP t _) = langOf' t
-  langOf' (ArrP (PV lang _ _) _) = lang
+  langOf' (FunP _ t) = langOf' t 
+  langOf' (AppP t _) = langOf' t
   langOf' (NamP _ (PV lang _ _) _ _) = lang
+
 
 instance HasOneLanguage (TypeM) where
   langOf Passthrough = Nothing 
   langOf (Serial t) = langOf t
   langOf (Native t) = langOf t
   langOf (Function _ t) = langOf t
+
 
 instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang
@@ -253,3 +310,95 @@ instance HasOneLanguage (ExprM f) where
   langOf' (SerializeM _ e) = langOf' e
   langOf' (DeserializeM _ e) = langOf' e
   langOf' (ReturnM e) = langOf' e
+
+
+instance Pretty Argument where
+  pretty (SerialArgument i c) =
+    "Serial" <+> "x" <> pretty i <+> parens (pretty c)
+  pretty (NativeArgument i c) =
+    "Native" <+> "x" <> pretty i <+> parens (pretty c)
+  pretty (PassThroughArgument i) =
+    "PassThrough" <+> "x" <> pretty i
+
+instance Pretty (ExprM f) where
+  pretty e0 = (vsep . punctuate line . fst $ f e0) <> line where
+    manNamer i = "m" <> pretty i
+
+    f (ManifoldM m args e) =
+      let (ms', body) = f e
+          decl = manNamer m <> tupled (map pretty args)
+          mdoc = block 4 decl body
+      in (mdoc : ms', manNamer m)
+    f (PoolCallM t _ cmds args) =
+      let poolArgs = cmds ++ map pretty args
+      in ([], "PoolCallM" <> list (map (pretty . render) poolArgs) <+> "::" <+> pretty t)
+    f (ForeignInterfaceM t e) =
+      let (ms, _) = f e
+      in (ms, "ForeignInterface :: " <> pretty t)
+    f (LetM v e1 e2) =
+      let (ms1', e1') = f e1
+          (ms2', e2') = f e2
+      in (ms1' ++ ms2', "a" <> pretty v <+> "=" <+> e1' <> line <> e2')
+    f (AppM fun xs) =
+      let (ms', fun') = f fun
+          (mss', xs') = unzip $ map f xs
+      in (ms' ++ concat mss', fun' <> tupled xs')
+    f (SrcM _ src) = ([], pretty (srcName src))
+    f (LamM args e) =
+      let (ms', e') = f e
+          vsFull = map pretty args
+          vsNames = map (\r -> "x" <> pretty (argId r)) args
+      in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
+    f (BndVarM _ i) = ([], "x" <> pretty i)
+    f (LetVarM _ i) = ([], "a" <> pretty i)
+    f (AccM e k) =
+      let (ms, e') = f e
+      in (ms, parens e' <> "@" <> pretty k)
+    f (ListM _ es) =
+      let (mss', es') = unzip $ map f es
+      in (concat mss', list es')
+    f (TupleM _ es) =
+      let (mss', es') = unzip $ map f es
+      in (concat mss', tupled es')
+    f (RecordM c entries) =
+      let (mss', es') = unzip $ map (f . snd) entries
+          entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+      in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
+    f (LogM _ x) = ([], if x then "true" else "false")
+    f (NumM _ x) = ([], viaShow x)
+    f (StrM _ x) = ([], dquotes $ pretty x)
+    f (NullM _) = ([], "null")
+    f (SerializeM _ e) =
+      let (ms, e') = f e
+      in (ms, "PACK" <> tupled [e'])
+    f (DeserializeM _ e) =
+      let (ms, e') = f e
+      in (ms, "UNPACK" <> tupled [e'])
+    f (ReturnM e) =
+      let (ms, e') = f e
+      in (ms, "RETURN(" <> e' <> ")")
+
+    prettyRecordPVar (Serial _) = "HELPME_ME_SERIAL_RECORD"
+    prettyRecordPVar (Native _) = "HELPME_ME_NATIVE_RECORD"
+    prettyRecordPVar _ = "<UNKNOWN RECORD>"
+
+instance Pretty PVar where
+  pretty (PV _ (Just g) t) = parens (pretty g <+> pretty t)
+  pretty (PV _ Nothing t) = parens ("*" <+> pretty t)
+
+instance Pretty TypeP where
+  pretty (UnkP v) = pretty v 
+  pretty (VarP v) = pretty v 
+  pretty (FunP ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
+  pretty (AppP t ts) = hsep (map pretty (t:ts))
+  pretty (NamP o n ps rs)
+      = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+                (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+
+
+instance Pretty TypeM where
+  pretty Passthrough = "Passthrough"
+  pretty (Serial c) = "Serial<" <> pretty c <> ">"
+  pretty (Native c) = "Native<" <> pretty c <> ">"
+  pretty (Function ts t) =
+    "Function<" <> hsep (punctuate "->" (map pretty (ts ++ [t]))) <> ">"

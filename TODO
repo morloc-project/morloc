@@ -1,3 +1,7 @@
+# Ecosystem
+
+ [ ] add Language Server Protocol implementation (https://microsoft.github.io/language-server-protocol/)
+
 # Features
 
  [ ] where syntax
@@ -20,6 +24,7 @@
    [+] R
    [+] Python3
    [+] C++
+   [.] Rust
    [.] C
    [.] Ruse
    [ ] bash
@@ -29,9 +34,11 @@
 
 # Refactoring
 
- [x] Replace Type with SolvedType after typechecking (see 6bdcf5a4): 
- [x] Build a tree object in the parser and typecheck it, rather than the
-     awkward Module list
+ [ ] Reimplement data types with recursion schemes. This should be able to
+ eliminate much of the boilerplat that makes refactoring so time consuming and
+ the code so ugly. We should be able to tease out the deeper structure of the
+ program, such as the relationship between parsing and printing (algebras and
+ coalgrebras?) and the alternating structures of SAnno and ExprS.
 
 # Usability
 
@@ -47,7 +54,7 @@
  * In the generated code ...
 
    [ ] On exceptions in generated code, return Morloc file and line number
-   [ ] Raise errors in pools when no manifold is found
+   [x] Raise errors in pools when no manifold is found
 
 # Testing
 
@@ -56,7 +63,7 @@
  [ ] performance profiling
  [ ] code linting
  [ ] test coverage reports
- [ ] property testing (resurrect it)
+ [ ] property testing
 
 # Syntax
 
@@ -90,6 +97,12 @@
    [x] More examples
    [ ] A contribution and future work section
 
+ * github pages manual
+   [.] A discussion of the architecture (JSON, MorlocIO, etc)
+   [.] A deeper discussion of the type system
+   [ ] More examples
+   [.] A contribution and future work section
+
 # Libraries
 
  * Extend the libraries
@@ -98,7 +111,7 @@
        many language-specific alternatives. In C-morloc, the user specified the
        language of each function. I want to automate the choice.
    [ ] Add taxonomy library
-   [ ] Add `math` library
+   [.] Add `math` library
        [x] basic functions from `math.h`
        [ ] advanced functions from GNU Scientific Library
    [ ] Add `learning` library for machine learning

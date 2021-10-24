@@ -25,12 +25,13 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
+import qualified Morloc.Language as ML
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- setup library paths
   lib <- fmap pretty $ MM.asks MC.configLibrary
@@ -41,7 +42,7 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es)
+  liftIO . putDoc $ (vsep $ map pretty es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
@@ -49,7 +50,15 @@ translate srcs es = do
   -- make code for dispatching to manifolds
   let dispatch = makeDispatch es
 
-  return $ makePool lib includeDocs mDocs dispatch
+  let code = makePool lib includeDocs mDocs dispatch
+  let outfile = ML.makeExecutableName Python3Lang "pool"
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = Python3Lang 
+    , scriptCode = "." :/ File "pool.py" (Code . render $ code)
+    , scriptMake = [SysExe outfile]
+    }
 
 -- create an internal variable based on a unique id
 letNamer :: Int -> MDoc
@@ -65,8 +74,8 @@ manNamer i = "m" <> viaShow i
 
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
-translateSource (Path s) = do
-  (Path lib) <- MM.asks configLibrary
+translateSource s = do
+  lib <- fmap MT.pack $ MM.asks configLibrary
   let moduleStr = pretty
                 . MT.liftToText (map DC.toLower)
                 . MT.replace "/" "."
@@ -74,7 +83,7 @@ translateSource (Path s) = do
                 . MT.stripPrefixIfPresent "./" -- no path if relative to here
                 . MT.stripPrefixIfPresent lib  -- make the path relative to the library
                 . MT.liftToText SF.dropExtensions
-                $ s
+                $ MT.pack s
   return $ "from" <+> moduleStr <+> "import *"
 
 tupleKey :: Int -> MDoc -> MDoc
@@ -218,7 +227,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM (metaId->i) args e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
         def   = "def" <+> mname <> tupled (map makeArgument args) <> ":"
@@ -250,7 +259,11 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return ([], pretty (srcName src), [])
 
-  f _ (LamM _ _) = undefined -- FIXME: this is defined in R
+  -- this should not happen
+  f args (LamM lambdaArgs e) = do
+    (ms', e', rs) <- f args e
+    let vs = map (bndNamer . argId) lambdaArgs
+    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 
@@ -316,7 +329,7 @@ makeDispatch ms = align . vsep $
   ]
   where
     entry :: ExprM One -> MDoc
-    entry (ManifoldM (metaId->i) _ _)
+    entry (ManifoldM i _ _)
       = pretty i <> ":" <+> manNamer i <> ","
     entry _ = error "Expected ManifoldM"
 

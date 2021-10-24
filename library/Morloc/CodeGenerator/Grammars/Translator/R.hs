@@ -22,12 +22,13 @@ import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Language as ML
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
 
-translate :: [Source] -> [ExprM One] -> MorlocMonad MDoc
+translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- translate sources
   includeDocs <- mapM
@@ -35,12 +36,20 @@ translate srcs es = do
     (unique . catMaybes . map srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map prettyExprM es)
+  liftIO . putDoc $ (vsep $ map pretty es)
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
 
-  return $ makePool includeDocs mDocs
+  let code = makePool includeDocs mDocs
+  let outfile = ML.makeExecutableName RLang "pool"
+
+  return $ Script
+    { scriptBase = "pool"
+    , scriptLang = RLang 
+    , scriptCode = "." :/ File "pool.R" (Code . render $ code)
+    , scriptMake = [SysExe outfile]
+    }
 
 letNamer :: Int -> MDoc 
 letNamer i = "a" <> viaShow i
@@ -52,8 +61,8 @@ manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
 
 translateSource :: Path -> MorlocMonad MDoc
-translateSource (Path p) = do
-  let p' = MT.stripPrefixIfPresent "./" p
+translateSource p = do
+  let p' = MT.stripPrefixIfPresent "./" (MT.pack p)
   return $ "source(" <> dquotes (pretty p') <> ")"
 
 tupleKey :: Int -> MDoc -> MDoc
@@ -174,7 +183,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
 
   f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc, [MDoc])
-  f pargs m@(ManifoldM (metaId->i) args e) = do
+  f pargs m@(ManifoldM i args e) = do
     (ms', body, rs') <- f args e
     let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 decl (vsep $ rs' ++ [body])
@@ -209,10 +218,11 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return ([], pretty (srcName src), [])
 
-  f args (LamM labmdaArgs e) = do
+  -- this should not happen
+  f args (LamM lambdaArgs e) = do
     (ms', e', rs) <- f args e
-    let vs = map (bndNamer . argId) labmdaArgs
-    return (ms', "function" <> tupled vs <> "{" <+> e' <> "}", rs)
+    let vs = map (bndNamer . argId) lambdaArgs
+    return (ms', "LAMBDA" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 
@@ -225,7 +235,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f args (ListM t es) = do
     (mss', es', rss) <- mapM (f args) es |>> unzip3
     x' <- return $ case t of
-      (Native (ArrP _ [VarP et])) -> case et of
+      (Native (AppP _ [VarP et])) -> case et of
         (PV _ _ "numeric") -> "c" <> tupled es'
         (PV _ _ "logical") -> "c" <> tupled es'
         (PV _ _ "character") -> "c" <> tupled es'

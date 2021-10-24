@@ -15,10 +15,12 @@ import Morloc.Namespace
 import qualified Morloc.Config as Config
 import qualified Morloc as M
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as Doc
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import Morloc.CodeGenerator.Namespace (TypeP)
+import Morloc.Pretty
+import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 
 
@@ -41,7 +43,7 @@ getConfig (CmdTypecheck g) = getConfig' (typecheckConfig g) (typecheckVanilla g)
 getConfig' :: String -> Bool -> IO Config.Config
 getConfig' _ True = Config.loadMorlocConfig Nothing
 getConfig' "" _ = Config.loadMorlocConfig Nothing
-getConfig' filename _ = Config.loadMorlocConfig (Just (Path (MT.pack filename)))
+getConfig' filename _ = Config.loadMorlocConfig (Just filename)
 
 getVerbosity :: CliCommand -> Int
 getVerbosity (CmdMake      g) = if makeVerbose      g then 1 else 0
@@ -52,7 +54,7 @@ readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
 readScript _ filename = do
   code <- MT.readFile filename
-  return (Just (Path (MT.pack filename)), Code code)
+  return (Just filename, Code code)
 
 
 -- | install a module
@@ -61,10 +63,10 @@ cmdInstall args verbosity conf =
   MM.runMorlocMonad Nothing verbosity conf cmdInstall' >>= MM.writeMorlocReturn
   where
     cmdInstall' = do
-      let name = MT.pack $ installModuleName args
+      let name' = installModuleName args
       if installGithub args
-        then Mod.installModule (Mod.GithubRepo name)
-        else Mod.installModule (Mod.CoreGithubRepo name)
+        then Mod.installModule (Mod.GithubRepo name')
+        else Mod.installModule (Mod.CoreGithubRepo name')
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
@@ -72,15 +74,15 @@ cmdMake args verbosity config = do
   (path, code) <- readScript (makeExpression args) (makeScript args)
   outfile <- case makeOutfile args of
     "" -> return Nothing
-    x -> return . Just . Path . MT.pack $ x
+    x -> return . Just $ x
   MM.runMorlocMonad outfile verbosity config (M.writeProgram path code) >>=
     MM.writeMorlocReturn
 
--- | run the typechecker on a module but do not build it
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
-cmdTypecheck args verbosity config = do
+cmdTypecheck args _ config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
-  let writer = if typecheckRaw args then F.ugly else F.cute
+  let writer = sannoManyWriter -- FIXME add in pretty and raw versions (typecheckRaw arg)
+      verbosity = if typecheckVerbose args then 1 else 0
   if typecheckType args
     then case F.readType (unCode code) of
       (Left err) -> print (errorBundlePretty err)
@@ -89,5 +91,12 @@ cmdTypecheck args verbosity config = do
            Nothing
            verbosity
            config
-           (M.typecheck path code >>= MM.liftIO . writer) >>=
+           (M.typecheckFrontend path code >>= MM.liftIO . writer) >>=
          MM.writeMorlocReturn
+  where
+    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
+    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
+
+    showConcrete = viaShow
+
+    showGeneral (Idx _ t) = pretty t

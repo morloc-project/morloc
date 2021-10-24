@@ -106,26 +106,26 @@ findCycle d = case mapMaybe (findCycle' []) (roots d) of
             [] -> Nothing
             (x:_) -> Just x
 
--- Map function over nodes independent of the edge data
+-- | Map function over nodes independent of the edge data
 mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNode f d = Map.map (\(n, xs) -> (f n, xs)) d
 
 mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNodeWithKey f d = Map.mapWithKey (\k (n, xs) -> (f k n, xs)) d
 
--- Map function over nodes independent of the edge data
+-- | Map function over nodes independent of the edge data
 mapNodeM :: Ord k => (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
 mapNodeM f d
   = mapM (\(k,(n,xs)) -> f n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
   |>> Map.fromList
 
--- Map function over nodes independent of the edge data
+-- | Map function over nodes independent of the edge data
 mapNodeWithKeyM :: Ord k => (k -> n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
 mapNodeWithKeyM f d
   = mapM (\(k,(n,xs)) -> f k n >>= (\n' -> return (k, (n',xs)))) (Map.toList d)
   |>> Map.fromList
 
--- Map function over edges independent of the node data
+-- | Map function over edges independent of the node data
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k,e) <- xs]))
 
@@ -163,7 +163,7 @@ mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | Map a monadic function over a DAG yielding a new DAG with the same
--- topology but a new node values. If the DAG contains cycles, Nothing is
+-- topology but new node values. If the DAG contains cycles, Nothing is
 -- returned.
 synthesizeDAG
   :: (Ord k, Monad m)

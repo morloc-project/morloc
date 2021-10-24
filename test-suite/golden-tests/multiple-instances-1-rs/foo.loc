@@ -1,0 +1,11 @@
+import rustbase
+
+source Rust from "rms.h"
+  ( "rms1" as rms
+  , "rms2" as rms
+  )
+
+export rms
+
+rms Rust :: ["f64"] -> "f64"
+rms :: [Num] -> Num

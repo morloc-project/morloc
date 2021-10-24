@@ -1,0 +1,9 @@
+import rustbase (id, Map)
+
+export foo
+
+-- This function returns the input, but passes it though a language-specific id
+-- function, which forces deserialization and then serialization.
+foo :: Map Str [Int] -> Map Str [Int]
+foo Rust :: Map "String" ["i64"] -> Map "String" ["i64"]
+foo xs = id xs
