@@ -37,12 +37,20 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Linting, formatting, and benchmarking
  - [ ] Clean up error handling (remove unused error types)
 
-0.35.0 [2021.09.xx]
+0.35.0 [2021.10.24]
 -------------------
 
- - [ ] Add `where` scoping
- - [ ] Statements are order invariant
- - [ ] Thread link from expression to source expression down to generators 
+Where scoping and a total architecture refactor
+
+ * Fix handling for generic parameterized types
+ * Improve whitespace handling
+ * Statements are order invariant
+ * Thread link from expression to source expression down to generators 
+ * Typecheck over final abstract syntax trees rather than expressions
+ * Separate general and concrete typechecking
+ * Pretty instances for all data types
+ * More testing
+ * Agonized over deep and wide structures
 
 0.34.0 [2021.03.05]
 -------------------
