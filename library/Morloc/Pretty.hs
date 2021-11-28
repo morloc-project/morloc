@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
+
 {-|
 Module      : Morloc.Pretty
 Description : Pretty print instances

@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Internal
 Description : Miscellaneous backend utilities

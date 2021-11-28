@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Typecheck
 Description : Check the concrete type of an unambiguous AST (SAnno One)

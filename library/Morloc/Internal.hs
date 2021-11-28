@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Internal
 Description : Internal utility functions

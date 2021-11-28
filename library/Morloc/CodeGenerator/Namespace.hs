@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Namespace
 Description : All code generator types and datastructures

@@ -12,7 +12,7 @@ opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header "morloc v0.35.0-dev"
+    <> header "morloc v0.36.0-dev"  -- FIXME: HARDCODED VERSION NUMBER!!!
   )
 
 

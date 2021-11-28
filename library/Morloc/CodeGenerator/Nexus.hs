@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell, QuasiQuotes, OverloadedStrings #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Nexus
