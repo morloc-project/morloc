@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Common
 Description : A common set of utility functions for language templates

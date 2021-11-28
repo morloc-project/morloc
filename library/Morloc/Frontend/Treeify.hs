@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Mnkodule      : Morloc.Frontend.Treeify
 Description : Translate from the frontend DAG to the backend SAnno AST forest

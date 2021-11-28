@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Frontend.Desugar
 Description : Write Module objects to resolve type aliases and such

@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Data.DAG
 Description : Functions for working with directed acyclic graphs

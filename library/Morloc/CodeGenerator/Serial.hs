@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Serial
 Description : Process serialization trees

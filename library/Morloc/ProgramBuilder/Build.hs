@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.ProgramBuilder.Build
 Description : Manage system requirements and project building for pools

@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Typecheck.Internal
 Description : Functions for type checking and type manipulation

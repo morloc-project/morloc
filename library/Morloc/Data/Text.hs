@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-} 
+
 {-|
 Module      : Morloc.Data.Text
 Description : All things text

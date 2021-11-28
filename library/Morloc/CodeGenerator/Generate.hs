@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.CodeGenerator.Generate
 Description : Translate AST forests into target language source code

@@ -1,3 +1,5 @@
+{-# LANGUAGE ViewPatterns, OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Namespace
 Description : All types and datastructures

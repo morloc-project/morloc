@@ -29,7 +29,7 @@ handling for several very different languages (proofs-of-concept).
 
 0.36.0 [2021.12.xx]
 -------------------
- * Tidy source for collaborations in 2022 (no new features)
+ * Remove global extensions from package.yaml
 
  - [ ] Replace recursive data structures with recursion schemes
  - [ ] Describe the core data structures and algorithms

@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Frontend.Lang.DefaultTypes
 Description : Define default types for each language

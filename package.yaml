@@ -1,5 +1,5 @@
 name:             morloc
-version:          0.35.0
+version:          0.36.0-dev
 homepage:         https://github.com/morloc-project/morloc
 synopsis:         A multi-lingual, typed, workflow language
 description:      See GitHub README <https://github.com/morloc-project/morloc#readme>
@@ -41,14 +41,6 @@ dependencies:
   - unordered-containers >=0.2.9.0 && <0.3
   - yaml >=0.11.1.2 && <0.12
 
-
-default-extensions:
-  - FlexibleContexts
-  - OverloadedStrings
-  - BangPatterns
-  - GeneralizedNewtypeDeriving
-  - ViewPatterns
-  - StandaloneDeriving
 
 ghc-options:
   - -Wall

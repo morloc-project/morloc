@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 {-|
 Module      : Morloc.Frontend.Lexer
 Description : Lexing functions used in the parser Morloc
@@ -125,6 +127,7 @@ align p = do
   resetPos minPos0 accept0
   return xs
   where
+    resetPos :: Pos -> Bool -> Parser ()
     resetPos i r = do
       s' <- CMS.get
       CMS.put (s' {stateMinPos = i, stateAccepting = r})
