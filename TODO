@@ -4,7 +4,7 @@
 
 # Features
 
- [ ] where syntax
+ [x] where syntax
  [x] composable serialization/deserialization functions
  [x] composable default types
  [ ] auto-casting
