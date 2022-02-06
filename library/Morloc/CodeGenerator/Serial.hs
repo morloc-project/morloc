@@ -87,9 +87,8 @@ serialAstToType (SerialNum    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
 serialAstToType (SerialNull   x) = return $ VarP x
-serialAstToType (SerialUnknown x)
-  = MM.throwError . SerializationError . render
-  $ "Cannot guess serialization type:" <+> viaShow x
+serialAstToType (SerialUnknown v)
+  = error . render' $ complainAboutUnresolvedGenerics "serialAstToType" v
 
 -- | recurse all the way to a serializable type, unsafe
 serialAstToType' :: SerialAST One -> TypeP
@@ -102,7 +101,8 @@ serialAstToType' (SerialNum    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
 serialAstToType' (SerialNull   x) = VarP x
-serialAstToType' (SerialUnknown _) = error "Cannot guess serialization type"
+serstToType' (SerialUnknown v)
+  = error . render' $ complainAboutUnresolvedGenerics "serialAstToType'" v
 
 
 -- | get only the toplevel type
@@ -117,8 +117,14 @@ shallowType (SerialNum    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
 shallowType (SerialNull   x) = return $ VarP x
-shallowType (SerialUnknown _) = MM.throwError . SerializationError
-                                       $ "Cannot guess serialization type"
+shallowType (SerialUnknown v) 
+  = MM.throwError . SerializationError . render
+  $ complainAboutUnresolvedGenerics "shallowType" v
+
+complainAboutUnresolvedGenerics :: MDoc -> PVar -> MDoc
+complainAboutUnresolvedGenerics place (PV lang _ name)
+  = "Cannot guess serialization type for" <+> viaShow lang <+> "type named" <+> viaShow name <+> "in" <+> place <> "."
+  <+> "This is likely caused by usage of an unresolved generic"
 
 makeSerialAST
   :: PackMap -- type PackMap = Map (TVar, Int) [UnresolvedPacker]
