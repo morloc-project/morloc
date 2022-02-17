@@ -257,8 +257,10 @@ data Expr
   -- ^ (\x -> e)
   | AnnE ExprI [TypeU]
   -- ^ (e : A)
-  | NumE Scientific
+  | RealE Scientific
   -- ^ number of arbitrary size and precision
+  | IntE Integer
+  -- ^ integer of arbitrayr size
   | LogE Bool
   -- ^ boolean primitive
   | StrE Text
@@ -552,7 +554,8 @@ data SExpr g f c
   | TupS [SAnno g f c]
   | NamS [(Text, SAnno g f c)]
   -- primitives
-  | NumS Scientific
+  | RealS Scientific
+  | IntS Integer
   | LogS Bool
   | StrS Text
   | CallS Source
@@ -573,7 +576,8 @@ mapSExpr fg fc e0 = fe e0 where
   fe (LstS xs) = LstS (map m xs)
   fe (TupS xs) = TupS (map m xs)
   fe (NamS rs) = NamS (zip (map fst rs) (map (m . snd) rs))
-  fe (NumS x) = NumS x
+  fe (RealS x) = RealS x
+  fe (IntS x) = IntS x
   fe (LogS x) = LogS x
   fe (StrS x) = StrS x
   fe (CallS src) = CallS src

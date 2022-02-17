@@ -1,4 +1,4 @@
 import pybase (div)
 export foo
 
-foo x = (True, x, div 4 x)
+foo x = (True, x, div 4.0 x)

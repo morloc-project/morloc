@@ -5,7 +5,7 @@ import pybase (add, fold)
 export sum
 
 source py from "foo.py" ("sum_loc" as sum)
-sum :: [Num] -> Num
+sum :: [Real] -> Real
 sum py :: ["float"] -> "float"
 
-sum xs = fold add 0 xs
+sum xs = fold add 0.0 xs

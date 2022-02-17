@@ -421,7 +421,11 @@ pStrE :: Parser ExprI
 pStrE = fmap StrE stringLiteral >>= exprI
 
 pNumE :: Parser ExprI
-pNumE = fmap NumE number >>= exprI
+pNumE = do
+  x <- number
+  exprI $ case x of
+    (Left i) -> IntE i
+    (Right f) -> RealE f
 
 pLam :: Parser ExprI
 pLam = do

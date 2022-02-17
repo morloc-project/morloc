@@ -3,9 +3,9 @@ import pybase (add)
 export f
 
 -- functions with or without signatures may be defined in the where-scope
-f = bar (bif 2) where
+f = bar (bif 2.0) where
 
-   bif x = add x 10
+   bif x = add x 10.0
 
-   bar :: Num -> Num
-   bar x = add x 30
+   bar :: Real -> Real
+   bar x = add x 30.0

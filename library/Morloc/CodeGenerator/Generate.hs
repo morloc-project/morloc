@@ -179,7 +179,8 @@ realize s0 = do
   -- non-recursive expressions
   scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
   scoreExpr langs (VarS v, i) = return (VarS v, zipLang i langs)
-  scoreExpr langs (NumS x, i) = return (NumS x, zipLang i langs)
+  scoreExpr langs (RealS x, i) = return (RealS x, zipLang i langs)
+  scoreExpr langs (IntS x, i) = return (IntS x, zipLang i langs)
   scoreExpr langs (LogS x, i) = return (LogS x, zipLang i langs)
   scoreExpr langs (StrS x, i) = return (StrS x, zipLang i langs)
 
@@ -267,7 +268,8 @@ realize s0 = do
   -- collapse leaf expressions
   collapseExpr lang (UniS,   Idx i _) = return (UniS,   Idx i lang)
   collapseExpr lang (VarS v, Idx i _) = return (VarS v, Idx i lang)
-  collapseExpr lang (NumS x, Idx i _) = return (NumS x, Idx i lang)
+  collapseExpr lang (RealS x, Idx i _) = return (RealS x, Idx i lang)
+  collapseExpr lang (IntS x, Idx i _) = return (IntS x, Idx i lang)
   collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
   collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
 
@@ -308,7 +310,8 @@ realize s0 = do
         (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
         (UniS) -> return UniS
         (VarS x) -> return (VarS x)
-        (NumS x) -> return (NumS x)
+        (RealS x) -> return (RealS x)
+        (IntS x) -> return (IntS x)
         (LogS x) -> return (LogS x)
         (StrS x) -> return (StrS x)
         (CallS x) -> return (CallS x)
@@ -359,7 +362,9 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
     generalSerial' :: NexusCommand -> JsonPath -> SAnno (Indexed Type) One () -> MorlocMonad NexusCommand
     generalSerial' base _ (SAnno (One (UniS,   _)) _)
       = return $ base { commandJson = "null" }
-    generalSerial' base _ (SAnno (One (NumS x, _)) _)
+    generalSerial' base _ (SAnno (One (RealS x, _)) _)
+      = return $ base { commandJson = viaShow x }
+    generalSerial' base _ (SAnno (One (IntS x, _)) _)
       = return $ base { commandJson = viaShow x }
     generalSerial' base _ (SAnno (One (LogS x, _)) _)
       = return $ base { commandJson = if x then "true" else "false" }
@@ -594,7 +599,8 @@ parameterize'
   -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
-parameterize' _ (SAnno (One (NumS x, c)) m) = return $ SAnno (One (NumS x, (c, []))) m
+parameterize' _ (SAnno (One (RealS x, c)) m) = return $ SAnno (One (RealS x, (c, []))) m
+parameterize' _ (SAnno (One (IntS x, c)) m) = return $ SAnno (One (IntS x, (c, []))) m
 parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
 -- VarS EVar
@@ -654,7 +660,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
     -> MorlocMonad (ExprM Many)
 
   -- primitives
-  express' _ _ (SAnno (One (NumS x, (Idx _ c, _))) _) = return $ NumM (Native c) x
+  express' _ _ (SAnno (One (RealS x, (Idx _ c, _))) _) = return $ RealM (Native c) x
+  express' _ _ (SAnno (One (IntS x, (Idx _ c, _))) _) = return $ IntM (Native c) x
   express' _ _ (SAnno (One (LogS x, (Idx _ c, _))) _) = return $ LogM (Native c) x
   express' _ _ (SAnno (One (StrS x, (Idx _ c, _))) _) = return $ StrM (Native c) x
   express' _ _ (SAnno (One (UniS, (Idx _ c, _))) _) = return $ NullM (Native c)
@@ -1022,7 +1029,8 @@ chooseSerializer xs = mapM chooseSerializer' xs where
   chooseSerializer' (BndVarM t i ) = return $ BndVarM t i
   chooseSerializer' (LetVarM t i) = return $ LetVarM t i
   chooseSerializer' (LogM t x) = return $ LogM t x
-  chooseSerializer' (NumM t x) = return $ NumM t x
+  chooseSerializer' (RealM t x) = return $ RealM t x
+  chooseSerializer' (IntM t x) = return $ IntM t x
   chooseSerializer' (StrM t x) = return $ StrM t x
   chooseSerializer' (NullM t) = return $ NullM t
 
@@ -1036,7 +1044,8 @@ chooseSerializer xs = mapM chooseSerializer' xs where
   oneSerial (SerialObject r v ps rs) = do
     ts <- mapM (oneSerial . snd) rs
     return $ SerialObject r v ps (zip (map fst rs) ts)
-  oneSerial (SerialNum t) = return $ SerialNum t
+  oneSerial (SerialReal t) = return $ SerialReal t
+  oneSerial (SerialInt t) = return $ SerialInt t
   oneSerial (SerialBool t) = return $ SerialBool t
   oneSerial (SerialString t) = return $ SerialString t
   oneSerial (SerialNull t) = return $ SerialNull t
@@ -1078,9 +1087,12 @@ mapCM f (SAnno (One (CallS src, c)) g) = do
 mapCM f (SAnno (One (UniS, c)) g) = do
   c' <- f c
   return $ SAnno (One (UniS, c')) g
-mapCM f (SAnno (One (NumS x, c)) g) = do
+mapCM f (SAnno (One (RealS x, c)) g) = do
   c' <- f c
-  return $ SAnno (One (NumS x, c')) g
+  return $ SAnno (One (RealS x, c')) g
+mapCM f (SAnno (One (IntS x, c)) g) = do
+  c' <- f c
+  return $ SAnno (One (IntS x, c')) g
 mapCM f (SAnno (One (LogS x, c)) g) = do
   c' <- f c
   return $ SAnno (One (LogS x, c')) g

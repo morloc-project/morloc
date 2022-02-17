@@ -101,7 +101,8 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
       (g', x') <- retrieveTypes g1 x
       (g'', xs') <- statefulMapM retrieveTypes g' xs
       return (g'', AppS x' xs')
-    (NumS x) -> return $ (g1, NumS x)
+    (RealS x) -> return $ (g1, RealS x)
+    (IntS x) -> return $ (g1, IntS x)
     (LogS x) -> return $ (g1, LogS x)
     (StrS x) -> return $ (g1, StrS x)
     (NamS rs) -> do
@@ -129,7 +130,8 @@ weaveAndResolve e@(SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
     (TupS xs) -> TupS <$> mapM weaveAndResolve xs
     (LamS vs x) -> LamS vs <$> weaveAndResolve x
     (AppS f xs) -> AppS <$> weaveAndResolve f <*> mapM weaveAndResolve xs
-    (NumS x) -> return $ NumS x
+    (RealS x) -> return $ RealS x
+    (IntS x) -> return $ IntS x
     (LogS x) -> return $ LogS x
     (StrS x) -> return $ StrS x
     (NamS rs) -> do
@@ -205,11 +207,17 @@ synthE _ lang g UniS = do
       (g', t) = newvarRich [] ts "uni_" (Just lang) g
   return (g' +> t, t, UniS)
 
--- Num=>
-synthE _ lang g (NumS x) = do
-  let ts = MLD.defaultNumber (Just lang)
-      (g', t) = newvarRich [] ts "num_" (Just lang) g
-  return (g' +> t, t, NumS x)
+-- Real=>
+synthE _ lang g (RealS x) = do
+  let ts = MLD.defaultReal (Just lang)
+      (g', t) = newvarRich [] ts "real_" (Just lang) g
+  return (g' +> t, t, RealS x)
+
+-- Int=>
+synthE _ lang g (IntS x) = do
+  let ts = MLD.defaultInt (Just lang)
+      (g', t) = newvarRich [] ts "int_" (Just lang) g
+  return (g' +> t, t, IntS x)
 
 -- Str=>
 synthE _ lang g (StrS x) = do

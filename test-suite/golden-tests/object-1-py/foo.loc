@@ -1,6 +1,6 @@
 import pybase (id)
 
-source py from "person.py" ("PersonObj")
+source py from "person.py" ("PersonObj" as Person)
 
 object (Person a) = Person {name :: Str, info :: a}
 object py (Person a) = "PersonObj" {name :: "str", info :: a}

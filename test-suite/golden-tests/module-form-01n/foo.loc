@@ -6,5 +6,5 @@ import rbase (add, mul)
 
 export sub
 
-sub x y = add x (mul -1 y)
-sub x y = mul 1 (add x (mul -1 y))
+sub x y = add x (mul -1.0 y)
+sub x y = mul 1.0 (add x (mul -1.0 y))

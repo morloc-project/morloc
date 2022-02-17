@@ -39,7 +39,8 @@ instance Pretty Expr where
   pretty (TupE es) = encloseSep "[" "]" "," (map pretty es)
   pretty (AppE f es) = vsep (map pretty (f:es))
   pretty (NamE rs) = block 4 "<RECORD>" (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
-  pretty (NumE x) = pretty (show x)
+  pretty (RealE x) = pretty (show x)
+  pretty (IntE x) = pretty (show x)
   pretty (StrE x) = dquotes (pretty x)
   pretty (LogE x) = pretty x
   pretty (AssE v e es) = pretty v <+> "=" <+> pretty e <+> "where" <+> (align . vsep . map pretty) es

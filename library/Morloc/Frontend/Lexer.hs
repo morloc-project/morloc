@@ -204,8 +204,38 @@ comments =  L.skipLineComment "--"
         <|> L.skipBlockCommentNested "{-" "-}"
         <?> "comment"
 
-number :: Parser DS.Scientific
-number = lexeme $ L.signed sc L.scientific
+data Sign = Pos | Neg
+
+number :: Parser (Either Integer DS.Scientific)
+number = lexeme $ number_
+
+number_ :: Parser (Either Integer DS.Scientific)
+number_ = do
+  x  <- try (fmap (Right . DS.fromFloatDigits) (L.signed sc L.float)) <|> (fmap Left (L.signed sc L.decimal))
+  e <- optional _exp
+  return $ case (x, e) of
+    (Left i,  Nothing) -> Left i
+    (Right f, Nothing) -> Right f
+    -- anything in scientific notation is cast as a real
+    (Left i,  Just (Neg, expval)) -> Right  $ DS.scientific i ((-1) * expval)
+    (Left i,  Just (Pos, expval)) -> Right $ DS.scientific i expval
+    (Right f, Just (Pos, expval)) -> Right $ f * (10 ^^ expval)
+    (Right f, Just (Neg, expval)) -> Right $ f * (10 ^^ (-1 * expval))
+  where
+
+  _exp :: Parser (Sign, Int)
+  _exp = do
+    _ <- (char 'e')
+    expsign <- _sign
+    expval <- L.decimal
+    return (expsign, expval)
+
+  _sign :: Parser Sign
+  _sign = do
+    sign <- optional (char '-' <|> char '+')
+    case sign of
+      (Just '-') -> return Neg
+      _ -> return Pos
 
 surround :: Parser l -> Parser r -> Parser a -> Parser a
 surround l r v = do

@@ -2,7 +2,7 @@ import rustbase (add)
 
 export foo
 
-y = 40
+y = 40.0
 
 -- external constant
 -- y will be turned into a manifold, making this the same as the f2 case

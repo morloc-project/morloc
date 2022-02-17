@@ -167,7 +167,8 @@ prettySExpr fc fg x = case x of
   (LstS xs) -> "LstS" <+> tupled (map (prettySAnno fc fg) xs)
   (TupS xs) -> "TupS" <+> tupled (map (prettySAnno fc fg) xs)
   (NamS rs) -> "NamS" <+> tupled (map (\(k,x) -> pretty k <+> "=" <+> prettySAnno fc fg x) rs)
-  (NumS x) -> "NumS<" <> viaShow x <> ">"
+  (RealS x) -> "RealS<" <> viaShow x <> ">"
+  (IntS x) -> "IntS<" <> viaShow x <> ">"
   (LogS x) -> "LogS<" <> viaShow x <> ">"
   (StrS x) -> "StrS<" <> viaShow x <> ">"
   (CallS src) -> "CallS<" <> pretty (srcName src) <> "@" <> pretty (srcLang src) <> ">"

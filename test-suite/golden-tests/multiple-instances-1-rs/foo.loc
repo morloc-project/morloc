@@ -8,4 +8,4 @@ source Rust from "rms.h"
 export rms
 
 rms Rust :: ["f64"] -> "f64"
-rms :: [Num] -> Num
+rms :: [Real] -> Real

@@ -15,8 +15,9 @@ handling for several very different languages (proofs-of-concept).
  - [ ] ecosystem (test suite, linter, package tools, vim plugin)
  - [ ] language support (Python3, R, C++, Java, Haskell, Scheme, Prolog)
  - [ ] well tested core libraries
+ - [ ] Replace recursive data structures with recursion schemes
 
-0.3x.0 [2022.03.xx]
+0.3x.0 [2022.xx.xx]
 -------------------
  - [ ] Add limited inference of concrete type from general type
  - [ ] Add lambdas
@@ -26,16 +27,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
+ - [ ] Haddock documentation
+ - [ ] Describe the core data structures and algorithms
 
-0.36.0 [2021.12.xx]
+0.36.0 [2022.02.xx]
 -------------------
  * Remove global extensions from package.yaml
-
- - [ ] Replace recursive data structures with recursion schemes
- - [ ] Describe the core data structures and algorithms
- - [ ] Haddock documentation
- - [ ] Linting, formatting, and benchmarking
- - [ ] Clean up error handling (remove unused error types)
+ [ ] Separate reals from integers
+ [ ] Add complete constraint parsing (syntax, not semantics, for now)
+ [ ] Add algebraic types
+ [ ] Add pattern matching
+ [ ] Add effects
+ [ ] Add typeclasses
+ [ ] Clean up error handling (remove unused error types)
 
 0.35.0 [2021.10.24]
 -------------------

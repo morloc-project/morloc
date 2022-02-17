@@ -8,4 +8,4 @@ source py from "foo.py" ("foo_loc" as foo)
 
 export foo
 
-foo x = add 1 x
+foo x = add 1.0 x

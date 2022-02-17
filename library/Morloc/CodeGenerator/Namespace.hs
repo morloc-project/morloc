@@ -111,7 +111,8 @@ data SerialAST f
   --   2) PVar - telling the name of the object (e.g., "Person")
   --   3) [TypeP] - the types of the parameters (used as parameters in C++ templates, e.g., map<int, map<int,string>>)
   --   4) [(PVar, SerialAST f)] - entries with keys for concrete and general cases
-  | SerialNum PVar
+  | SerialReal PVar
+  | SerialInt PVar
   | SerialBool PVar
   | SerialString PVar
   | SerialNull PVar
@@ -129,7 +130,8 @@ instance Foldable f => Pretty (SerialAST f) where
   pretty (SerialObject o p vs rs) = parens
     $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
     <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
-  pretty (SerialNum v) = parens ("SerialNum" <+> pretty v)
+  pretty (SerialReal v) = parens ("SerialReal" <+> pretty v)
+  pretty (SerialInt v) = parens ("SerialInt" <+> pretty v)
   pretty (SerialBool v) = parens ("SerialBool" <+> pretty v)
   pretty (SerialString v) = parens ("SerialString" <+> pretty v)
   pretty (SerialNull v) = parens ("SerialNull" <+> pretty v)
@@ -261,7 +263,8 @@ data ExprM f
 
   -- primitives
   | LogM TypeM Bool
-  | NumM TypeM Scientific
+  | RealM TypeM Scientific
+  | IntM TypeM Integer
   | StrM TypeM Text
   | NullM TypeM
 
@@ -306,7 +309,8 @@ instance HasOneLanguage (ExprM f) where
   langOf' (TupleM t _) = langOf' t
   langOf' (RecordM t _) = langOf' t
   langOf' (LogM t _) = langOf' t
-  langOf' (NumM t _) = langOf' t
+  langOf' (RealM t _) = langOf' t
+  langOf' (IntM t _) = langOf' t
   langOf' (StrM t _) = langOf' t
   langOf' (NullM t) = langOf' t
   langOf' (SerializeM _ e) = langOf' e
@@ -367,7 +371,8 @@ instance Pretty (ExprM f) where
           entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
       in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
     f (LogM _ x) = ([], if x then "true" else "false")
-    f (NumM _ x) = ([], viaShow x)
+    f (RealM _ x) = ([], viaShow x)
+    f (IntM _ x) = ([], viaShow x)
     f (StrM _ x) = ([], dquotes $ pretty x)
     f (NullM _) = ([], "null")
     f (SerializeM _ e) =

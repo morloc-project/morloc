@@ -138,7 +138,9 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
 
   f _ (LogM _ x) = return ([], if x then "true" else "false", [])
 
-  f _ (NumM _ x) = return ([], viaShow x, [])
+  f _ (RealM _ x) = return ([], viaShow x, [])
+
+  f _ (IntM _ x) = return ([], viaShow x, [])
 
   f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
 
