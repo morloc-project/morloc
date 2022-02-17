@@ -5,6 +5,6 @@ table py (Person a) = "dict" {name :: "str", info :: a}
 
 export foo
 
-foo :: Person Num -> Num
+foo :: Person Real -> Real
 foo py :: Person "float" -> "float"
-foo x = fold add 0 (x@info)
+foo x = fold add 0.0 (x@info)

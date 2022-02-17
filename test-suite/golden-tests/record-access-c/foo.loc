@@ -5,6 +5,6 @@ table Cpp (Person a) = "struct" {name :: "std::string", info :: a}
 
 export foo
 
-foo :: Person Num -> Num
+foo :: Person Real -> Real
 foo Cpp :: Person "double" -> "double"
-foo x = fold add 0 (x@info)
+foo x = fold add 0.0 (x@info)

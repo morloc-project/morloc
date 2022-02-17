@@ -2,5 +2,5 @@ record (Person a) = Person {name :: Str, info :: a}
 
 export foo
 
-foo :: Person Num -> {y :: Num, z :: {a :: [Str], b :: [Num]}}
+foo :: Person Int -> {y :: Int, z :: {a :: [Str], b :: [Int]}}
 foo x = {y = x@info, z = {a = [x@name, "bob"], b = [1,2,3]}}

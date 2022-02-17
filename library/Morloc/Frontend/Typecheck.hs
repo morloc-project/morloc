@@ -57,7 +57,8 @@ resolveTypes (SAnno (Many es) (Idx i t))
   f (LstS xs) = LstS (map resolveTypes xs)
   f (TupS xs) = TupS (map resolveTypes xs)
   f (NamS rs) = NamS (zip (map fst rs) (map (resolveTypes . snd) rs))
-  f (NumS x) = NumS x
+  f (RealS x) = RealS x
+  f (IntS x) = IntS x
   f (LogS x) = LogS x
   f (StrS x) = StrS x
   f (CallS x) = CallS x
@@ -143,7 +144,8 @@ synthE
        )
 
 synthE _ g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
-synthE _ g (NumS x) = return (g, MLD.defaultGeneralType (NumS x), NumS x)
+synthE _ g (RealS x) = return (g, MLD.defaultGeneralType (RealS x), RealS x)
+synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
 synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
 synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 

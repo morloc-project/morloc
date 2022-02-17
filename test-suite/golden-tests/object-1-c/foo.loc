@@ -1,4 +1,4 @@
-import cppbase (id)
+import cppbase (id, add)
 
 source Cpp from "person.h" ("PersonObj")
 

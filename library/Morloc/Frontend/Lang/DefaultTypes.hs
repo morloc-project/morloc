@@ -23,7 +23,8 @@ module Morloc.Frontend.Lang.DefaultTypes
     defaultBool
   , defaultList
   , defaultNull
-  , defaultNumber
+  , defaultReal
+  , defaultInt
   , defaultRecord
   , defaultString
   , defaultTuple
@@ -115,7 +116,8 @@ defaultGeneralType :: SExpr g f c -> TypeU
 defaultGeneralType UniS = head $ defaultNull Nothing
 defaultGeneralType (LogS _) = head $ defaultBool Nothing
 defaultGeneralType (StrS _) = head $ defaultString Nothing
-defaultGeneralType (NumS _) = head $ defaultNumber Nothing
+defaultGeneralType (RealS _) = head $ defaultReal Nothing
+defaultGeneralType (IntS _) = head $ defaultInt Nothing
 defaultGeneralType _ = error "Fill this out if you feel like it, not my problem"
 
 -- | This is the value returned by a functions that doesn't return, for example,
@@ -149,23 +151,34 @@ defaultString lang@(Just RustLang) = [VarU (TV lang "String"), VarU (TV lang "st
 defaultString lang@(Just PerlLang) = [VarU (TV lang "str")]
 
 -- a primitive number can automatically be promoted into any of the default numbers listed below
-defaultNumber :: Maybe Lang -> [TypeU]
-defaultNumber lang@Nothing = [VarU (TV lang "Num"), VarU (TV lang "Int")]
-defaultNumber lang@(Just Python3Lang) = [VarU (TV lang "float"), VarU (TV lang "int")]
-defaultNumber lang@(Just RLang) = [VarU (TV lang "numeric"), VarU (TV lang "integer")]
-defaultNumber lang@(Just CLang) = [VarU (TV lang "double"), VarU (TV lang "int")]
-defaultNumber lang@(Just CppLang) =
+defaultReal :: Maybe Lang -> [TypeU]
+defaultReal lang@Nothing = [VarU (TV lang "Real")]
+defaultReal lang@(Just Python3Lang) = [VarU (TV lang "float")]
+defaultReal lang@(Just RLang) = [VarU (TV lang "numeric")]
+defaultReal lang@(Just CLang) = [VarU (TV lang "double")]
+defaultReal lang@(Just CppLang) =
   [ VarU (TV lang "double")
   , VarU (TV lang "float")
-  , VarU (TV lang "int")
+  ]
+defaultReal lang@(Just RustLang) =
+  [ VarU (TV lang "f64")
+  , VarU (TV lang "f32")
+  ]
+defaultReal lang@(Just PerlLang) = [VarU (TV lang "double")]
+
+defaultInt :: Maybe Lang -> [TypeU]
+defaultInt lang@Nothing = [VarU (TV lang "Int")]
+defaultInt lang@(Just Python3Lang) = [VarU (TV lang "int")]
+defaultInt lang@(Just RLang) = [VarU (TV lang "integer")]
+defaultInt lang@(Just CLang) = [VarU (TV lang "int")]
+defaultInt lang@(Just CppLang) =
+  [ VarU (TV lang "int")
   , VarU (TV lang "long")
   , VarU (TV lang "size_t")
   ]
-defaultNumber lang@(Just RustLang) =
-  [ VarU (TV lang "f64")
-  , VarU (TV lang "f32")
+defaultInt lang@(Just RustLang) =
+  [ VarU (TV lang "i64")
   , VarU (TV lang "i128")
-  , VarU (TV lang "i64")
   , VarU (TV lang "i32")
   , VarU (TV lang "i16")
   , VarU (TV lang "i8")
@@ -177,4 +190,4 @@ defaultNumber lang@(Just RustLang) =
   , VarU (TV lang "u128")
   , VarU (TV lang "usize")
   ]
-defaultNumber lang@(Just PerlLang) = [VarU (TV lang "double")]
+defaultInt lang@(Just PerlLang) = [VarU (TV lang "integer")]

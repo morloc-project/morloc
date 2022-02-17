@@ -5,6 +5,6 @@ table Rust (Person a) = "struct" {name :: "String", info :: a}
 
 export foo
 
-foo :: Person Num -> Num
+foo :: Person Real -> Real
 foo Rust :: Person "f64" -> "f64"
-foo x = fold add 0 (x@info)
+foo x = fold add 0.0 (x@info)

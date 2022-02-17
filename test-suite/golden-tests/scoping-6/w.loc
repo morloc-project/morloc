@@ -6,5 +6,5 @@ export f
 f = x where
    x = y where
        y = add a b
-       a = 1
-   b = 41
+       a = 1.0
+   b = 41.0

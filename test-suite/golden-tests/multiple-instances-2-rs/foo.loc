@@ -12,4 +12,4 @@ square x = mul x x
 rms xs = sqrt (mean (map square xs))
 
 rms Rust :: ["f64"] -> "f64"
-rms :: [Num] -> Num
+rms :: [Real] -> Real

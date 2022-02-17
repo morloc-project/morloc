@@ -2,7 +2,7 @@ import rbase (add, mul)
 
 export foo
 
-f = mul 20 2
+f = mul 20.0 2.0
 
 -- external 0 input argument
 -- cannot optimize out the manifold

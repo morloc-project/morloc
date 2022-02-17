@@ -8,4 +8,4 @@ source r from "rms.R"
 export rms
 
 rms r :: ["numeric"] -> "numeric"
-rms :: [Num] -> Num
+rms :: [Real] -> Real

@@ -5,7 +5,7 @@ export f
 -- cousins do not interfere with one another
 f = x where
    x = add a b
-   a = add 19 c where
-       c = 1
-   b = add 1 c where
-       c = 21
+   a = add 19.0 c where
+       c = 1.0
+   b = add 1.0 c where
+       c = 21.0

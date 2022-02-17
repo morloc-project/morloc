@@ -83,7 +83,8 @@ serialAstToType (SerialTuple ss) = mapM serialAstToType ss |>> defaultTupleFirst
 serialAstToType (SerialObject o n ps rs) = do
   ts <- mapM (serialAstToType . snd) rs
   return $ NamP o n ps (zip (map fst rs) ts)
-serialAstToType (SerialNum    x) = return $ VarP x
+serialAstToType (SerialReal   x) = return $ VarP x
+serialAstToType (SerialInt    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
 serialAstToType (SerialNull   x) = return $ VarP x
@@ -97,7 +98,8 @@ serialAstToType' (SerialList s) = defaultListFirst $ serialAstToType' s
 serialAstToType' (SerialTuple ss) = defaultTupleFirst $ map serialAstToType' ss
 serialAstToType' (SerialObject o n ps rs)
   = NamP o n ps (zip (map fst rs) (map (serialAstToType' . snd) rs))
-serialAstToType' (SerialNum    x) = VarP x
+serialAstToType' (SerialReal   x) = VarP x
+serialAstToType' (SerialInt    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
 serialAstToType' (SerialNull   x) = VarP x
@@ -113,7 +115,8 @@ shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
 shallowType (SerialObject o n ps rs) = do
   ts <- mapM shallowType (map snd rs)
   return $ NamP o n ps (zip (map fst rs) ts)
-shallowType (SerialNum    x) = return $ VarP x
+shallowType (SerialReal   x) = return $ VarP x
+shallowType (SerialInt    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
 shallowType (SerialNull   x) = return $ VarP x
@@ -135,7 +138,8 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultNull   t = return $ SerialNull   v
   | isPrimitiveType Def.defaultBool   t = return $ SerialBool   v
   | isPrimitiveType Def.defaultString t = return $ SerialString v
-  | isPrimitiveType Def.defaultNumber t = return $ SerialNum    v
+  | isPrimitiveType Def.defaultReal   t = return $ SerialReal   v
+  | isPrimitiveType Def.defaultInt    t = return $ SerialInt    v
   | otherwise = makeSerialAST m (AppP (VarP v) [])
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
@@ -239,7 +243,8 @@ findSerializationCycles choose x0 y0 = f x0 y0 where
       where
         ts1 = map snd rs1
         ts2 = map snd rs1
-  f (SerialNum    x1) (SerialNum    x2) = Just (SerialNum    x1, SerialNum    x2)
+  f (SerialReal   x1) (SerialReal   x2) = Just (SerialReal   x1, SerialReal   x2)
+  f (SerialInt    x1) (SerialInt    x2) = Just (SerialInt    x1, SerialInt    x2)
   f (SerialBool   x1) (SerialBool   x2) = Just (SerialBool   x1, SerialBool   x2)
   f (SerialString x1) (SerialString x2) = Just (SerialString x1, SerialString x2)
   f (SerialNull   x1) (SerialNull   x2) = Just (SerialNull   x1, SerialNull   x2)
@@ -263,7 +268,8 @@ isSerializable (SerialPack _ _) = False
 isSerializable (SerialList x) = isSerializable x
 isSerializable (SerialTuple xs) = all isSerializable xs 
 isSerializable (SerialObject _ _ _ rs) = all isSerializable (map snd rs) 
-isSerializable (SerialNum    _) = True
+isSerializable (SerialReal   _) = True
+isSerializable (SerialInt    _) = True
 isSerializable (SerialBool   _) = True
 isSerializable (SerialString _) = True
 isSerializable (SerialNull   _) = True
@@ -276,7 +282,8 @@ prettySerialOne (SerialTuple xs) = "SerialTuple" <> tupled (map prettySerialOne 
 prettySerialOne (SerialObject r _ _ rs)
   = block 4 ("SerialObject@" <> viaShow r)
   $ vsep (map (\(k,v) -> parens (viaShow k) <> "=" <> prettySerialOne v) rs)
-prettySerialOne (SerialNum    _) = "SerialNum"
+prettySerialOne (SerialReal   _) = "SerialReal"
+prettySerialOne (SerialInt    _) = "SerialInt"
 prettySerialOne (SerialBool   _) = "SerialBool"
 prettySerialOne (SerialString _) = "SerialString"
 prettySerialOne (SerialNull   _) = "SerialNull"

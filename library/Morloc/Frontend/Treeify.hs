@@ -72,7 +72,7 @@ treeify d
           , (ExprI 4 (ModE (MV {unMVar = "Main"})
               [ ExprI 5 (ExpE (EV "__main__"))
               , ExprI 6 (AssE (EV "__main__") (ExprI 3 (VarE (EV "x"))) [])
-              , ExprI 2 (AssE (EV "x") (ExprI 1 (NumE 42.0)) [])
+              , ExprI 2 (AssE (EV "x") (ExprI 1 (RealE 42.0)) [])
               ]
           ),[]))]
      -}
@@ -86,7 +86,7 @@ treeify d
               ExprI 4 (ModE (MV {unMVar = "Main"})
                 [ ExprI 5 (ExpE (EV "__main__"))
                 , ExprI 6 (AssE (EV "__main__") (ExprI 3 (VarE (EV "x"))) [])
-                , ExprI 2 (AssE (EV "x") (ExprI 1 (NumE 42.0)) [])
+                , ExprI 2 (AssE (EV "x") (ExprI 1 (RealE 42.0)) [])
                 ])
          -}
 
@@ -417,7 +417,8 @@ collectSExpr e@(ExprI i e0) = do
   f (LamE v e) = LamS v <$> collectSAnno e >>= noTypes
   f (AppE e es) = (AppS <$> collectSAnno e <*> mapM collectSAnno es) >>= noTypes
   f UniE = noTypes UniS
-  f (NumE x) = noTypes (NumS x)
+  f (RealE x) = noTypes (RealS x)
+  f (IntE x) = noTypes (IntS x)
   f (LogE x) = noTypes (LogS x)
   f (StrE x) = noTypes (StrS x)
 

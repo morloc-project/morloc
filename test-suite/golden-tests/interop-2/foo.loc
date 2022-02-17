@@ -3,4 +3,4 @@ import cppbase (map, add)
 
 export foo
 
-foo xs = plotVectorPDF (map (add 2) xs) "foo.pdf"
+foo xs = plotVectorPDF (map (add 2.0) xs) "foo.pdf"

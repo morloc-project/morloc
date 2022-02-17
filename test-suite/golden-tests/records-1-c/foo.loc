@@ -1,4 +1,4 @@
 import cppbase
 export foo
 
-foo x = {a = add x 5, b = {c = [add x 2], d = "yolo"}}
+foo x = {a = add x 5.0, b = {c = [add x 2.0], d = "yolo"}}
