@@ -30,16 +30,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
 
-0.36.0 [2022.02.xx]
+0.37.0 [2022.xx.xx]
+ - [ ] Add complete constraint parsing (syntax, not semantics, for now)
+ - [ ] Add algebraic types
+ - [ ] Add pattern matching
+ - [ ] Add effects
+ - [ ] Add typeclasses
+ - [ ] Clean up error handling (remove unused error types)
+
+0.36.0 [2022.02.17]
 -------------------
- * Remove global extensions from package.yaml
- [ ] Separate reals from integers
- [ ] Add complete constraint parsing (syntax, not semantics, for now)
- [ ] Add algebraic types
- [ ] Add pattern matching
- [ ] Add effects
- [ ] Add typeclasses
- [ ] Clean up error handling (remove unused error types)
+
+ * Separate reals from integers
+ * Remove global haskell extensions from package.yaml
 
 0.35.0 [2021.10.24]
 -------------------
@@ -59,8 +62,8 @@ Where scoping and a total architecture refactor
 0.34.0 [2021.03.05]
 -------------------
 
- * add handling for C++ float primitives
- * let C++ programs be imported through a header and shared library
+ * Add handling for C++ float primitives
+ * Let C++ programs be imported through a header and shared library
  * Remove semicolon requirement
  * Add hie.yaml for compatibility with hsl
  * Update dependency set to LTS-17.4
