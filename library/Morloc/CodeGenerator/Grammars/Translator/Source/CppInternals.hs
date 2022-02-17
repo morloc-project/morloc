@@ -61,14 +61,6 @@ std::string serialize(std::string x, std::string schema);
 
 template <class A> std::string serialize(A x);
 
-template<std::size_t I, class... Rs>
-inline typename std::enable_if<I == sizeof...(Rs), std::string>::type
-  _serialize_tuple(std::tuple<Rs...> x);
-
-template<std::size_t I, class... Rs>
-inline typename std::enable_if<I < sizeof...(Rs), std::string>::type
-  _serialize_tuple(std::tuple<Rs...> x);
-
 template <class... A>
 std::string serialize(std::tuple<A...> x, std::tuple<A...> schema);
 
