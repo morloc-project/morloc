@@ -3,21 +3,93 @@ on: [push]
 jobs:
   linux-test:
     runs-on: ubuntu-latest      
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+
     steps:
-      - run: echo "Set up Haskell environment" 
-      - run: echo "Set up Python environment" 
-      - run: echo "Set up R environment" 
-      - run: echo "Set up C++ environment" 
-      - run: echo "Build Morloc" 
-      - run: echo "Install required Morloc modules" 
-      - run: echo "Run tests"
-  macos-test:
-    runs-on: macOS-latest
-    steps:
-      - run: echo "Set up Haskell environment" 
-      - run: echo "Set up Python environment" 
-      - run: echo "Set up R environment" 
-      - run: echo "Set up C++ environment" 
-      - run: echo "Build Morloc" 
-      - run: echo "Install required Morloc modules" 
-      - run: echo "Run tests"
+
+      - name: Checkout Morloc code
+        uses: actions/checkout@v2
+
+      - name: Set up the environment
+        run: |
+          sudo apt-get update
+
+      - name: Set up Python environment
+        run: |
+          sudo apt-get install -y python3
+          sudo apt-get install -y python3-pip
+          pip install pymorlocinternals
+
+      - name: Set up C++ environment
+        run: |
+          echo "nothing so far"
+
+      - uses: r-lib/actions/setup-r@master
+
+      - name: "Set up R caching"
+        uses: actions/cache@v1
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          # key: ${{ runner.os }}-r-${{ matrix.config.r }}-${{ hashFiles('DESCRIPTION') }}  ## for matrix
+          key: r-${{ hashFiles('DESCRIPTION') }}
+
+      - name: "Set up R environment"
+        run: |
+          sudo apt-get install -y r-base
+          sudo apt-get install -y libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev
+          R -e 'install.packages("devtools", repos="https://cloud.r-project.org")'
+          R -e 'devtools::install_github("morloc-project/rmorlocinternals", dependencies=TRUE)'
+
+      - name: "Setup perl"
+        run: |
+          export PERL_MM_USE_DEFAULT=1
+          export PERL_CANARY_STABILITY_NOPROMPT=1
+          # stuff cpan says I need
+          PATH="$HOME/perl5/bin${PATH:+:${PATH}}"; export PATH;
+          PERL5LIB="$HOME/perl5/lib/perl5${PERL5LIB:+:${PERL5LIB}}"; export PERL5LIB;
+          PERL_LOCAL_LIB_ROOT="/home/runner/perl5${PERL_LOCAL_LIB_ROOT:+:${PERL_LOCAL_LIB_ROOT}}"; export PERL_LOCAL_LIB_ROOT;
+          PERL_MB_OPT="--install_base \"/home/runner/perl5\""; export PERL_MB_OPT;
+          PERL_MM_OPT="INSTALL_BASE=/home/runner/perl5"; export PERL_MM_OPT;
+          sudo perl -MCPAN -e 'install JSON::XS'
+
+      - name: "Build Morloc"
+        run: |
+          sudo apt-get install haskell-stack
+          stack upgrade
+          stack install --fast
+
+      - name: "Load morloc modules"
+        run: |
+          pwd
+          mkdir -p $HOME/.morloc/lib
+          mkdir -p $HOME/.morloc/tmp
+          echo "home : $HOME/.morloc" > ~/.morloc/config
+          echo "library : $HOME/.morloc/lib" >> $HOME/.morloc/config
+          echo "tmpdir : $HOME/.morloc/tmp" >> $HOME/.morloc/config
+          echo "lang_python3 : python3" >> $HOME/.morloc/config
+          sudo apt-get install git # required for installations below
+          morloc install base
+          morloc install conventions
+          morloc install rbase
+          morloc install pybase
+          morloc install cppbase
+          # morloc install rustbase
+          morloc install math
+
+      - name: "Test morloc"
+        run: |
+          stack test --fast
+
+
+  # macos-test:
+  #   runs-on: macOS-latest
+  #   steps:
+  #     - run: echo "Set up Haskell environment"
+  #     - run: echo "Set up Python environment"
+  #     - run: echo "Set up R environment"
+  #     - run: echo "Set up C++ environment"
+  #     - run: echo "Build Morloc"
+  #     - run: echo "Install required Morloc modules"
+  #     - run: echo "Run tests"
