@@ -1,0 +1,23 @@
+name: Test Morloc
+on: [push]
+jobs:
+  linux-test:
+    runs-on: ubuntu-latest      
+    steps:
+      - run: echo "Set up Haskell environment" 
+      - run: echo "Set up Python environment" 
+      - run: echo "Set up R environment" 
+      - run: echo "Set up C++ environment" 
+      - run: echo "Build Morloc" 
+      - run: echo "Install required Morloc modules" 
+      - run: echo "Run tests"
+  macos-test:
+    runs-on: macOS-latest
+    steps:
+      - run: echo "Set up Haskell environment" 
+      - run: echo "Set up Python environment" 
+      - run: echo "Set up R environment" 
+      - run: echo "Set up C++ environment" 
+      - run: echo "Build Morloc" 
+      - run: echo "Install required Morloc modules" 
+      - run: echo "Run tests"
