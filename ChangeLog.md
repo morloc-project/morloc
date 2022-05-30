@@ -19,24 +19,27 @@ handling for several very different languages (proofs-of-concept).
 
 0.3x.0 [2022.xx.xx]
 -------------------
- - [ ] Add limited inference of concrete type from general type
- - [ ] Add lambdas
- - [ ] Add `uninstall` function to uninstall a module
- - [ ] Remove extra space printed at the end of R JSON
+ - [ ] typeclasses
+ - [ ] algebraic types
+ - [ ] pattern matching
+ - [ ] constraint checking
+ - [ ] effect checking
+ - [ ] limited inference of concrete type from general type
+ - [ ] lambdas
  - [ ] Rust support
+ - [ ] Haddock documentation
+ - [ ] Describe the core data structures and algorithms
+ - [ ] Add `uninstall` function to uninstall a module
+ - [ ] Clean up error handling (remove unused error types)
+
+0.37.0 [2022.xx.xx]
+ - [ ] Add constraint syntax
+ - [ ] Add effects syntax
+ - [ ] Add extensible record type syntax
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
- - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
-
-0.37.0 [2022.xx.xx]
- - [ ] Add complete constraint parsing (syntax, not semantics, for now)
- - [ ] Add algebraic types
- - [ ] Add pattern matching
- - [ ] Add effects
- - [ ] Add typeclasses
- - [ ] Clean up error handling (remove unused error types)
+ - [ ] Remove extra space printed at the end of R JSON
 
 0.36.0 [2022.02.17]
 -------------------
