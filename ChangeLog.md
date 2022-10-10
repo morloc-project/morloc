@@ -31,15 +31,18 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Describe the core data structures and algorithms
  - [ ] Add `uninstall` function to uninstall a module
  - [ ] Clean up error handling (remove unused error types)
+ - [ ] Move exports to the module definition (as in Haskell)
+ - [ ] Add `*` wildcard to exports and imports
+ - [ ] Add `import Foo hiding (...)` syntax
 
 0.37.0 [2022.xx.xx]
  - [ ] Add constraint syntax
  - [ ] Add effects syntax
  - [ ] Add extensible record type syntax
- - [ ] Move exports to the module definition (as in Haskell)
- - [ ] Add `*` wildcard to exports and imports
- - [ ] Add `import Foo hiding (...)` syntax
- - [ ] Remove extra space printed at the end of R JSON
+ - [ ] Add style syntax
+ - [ ] Add typeclass syntax
+ - [ ] What does it all mean
+ - [x] Remove extra space printed at the end of R JSON
 
 0.36.0 [2022.02.17]
 -------------------
