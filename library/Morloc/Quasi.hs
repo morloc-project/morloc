@@ -30,10 +30,10 @@ pIs :: Parser [I]
 pIs = many1 (try pV <|> try pS <|> try pE) <* eof
 
 pV :: Parser I
-pV = fmap V $ between (string "#{") (char '}') (many1 (noneOf "}"))
+pV = V <$> between (string "#{") (char '}') (many1 (noneOf "}"))
 
 pS :: Parser I
-pS = fmap S $ many1 (noneOf "#")
+pS = S <$> many1 (noneOf "#")
 
 -- | match a literal '#' sign
 pE :: Parser I
@@ -55,7 +55,7 @@ idoc =
         Left err -> error $ show err
         Right xs -> return $ AppE (VarE 'G.hcat) (ListE (map qI xs))
           where qI :: I -> Exp
-                qI (S x) = (LitE (StringL x))
+                qI (S x) = LitE (StringL x)
                 qI (V x) =
                   case MP.parseExp x of
                     (Right hask) -> hask -- a Haskell expression

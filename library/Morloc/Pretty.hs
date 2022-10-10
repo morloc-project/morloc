@@ -98,7 +98,7 @@ instance Pretty Constraint where
 
 instance Pretty TypeU where
   pretty (ExistU v ts ds)
-    = angles $ (pretty v)
+    = angles $ pretty v
     <> list (map pretty ts)
     <> list (map pretty ds)
   pretty t@(ForallU _ _) =
@@ -150,16 +150,16 @@ prettySAnno writeCon writeGen (SAnno e g)
     -> (SExpr g f c, c)
     -> Doc ann
     -> Doc ann
-  prettyCon fc fg (s, c) p = vsep $ [p, fc c, prettySExpr fc fg s]
+  prettyCon fc fg (s, c) p = vsep [p, fc c, prettySExpr fc fg s]
 
 prettySExpr
   :: Foldable f
   => (c -> Doc ann)
   -> (g -> Doc ann)
-  -> (SExpr g f c)
+  -> SExpr g f c
   -> Doc ann
-prettySExpr fc fg x = case x of
-  (UniS) -> "UniS"
+prettySExpr fc fg x0 = case x0 of
+  UniS -> "UniS"
   (VarS v) -> "VarS<" <> pretty v <> ">"
   (AccS x k ) -> "AccS" <+> pretty k <+> parens (prettySAnno fc fg x)
   (AppS x xs) -> "AppS" <+> parens (prettySAnno fc fg x) <+> tupled (map (prettySAnno fc fg) xs)

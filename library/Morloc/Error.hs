@@ -105,7 +105,7 @@ instance Pretty TypeError where
     = "InstantiationError:" <+> pretty msg <> "\n  "
     <> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")"
   pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
-  pretty (OccursCheckFail _ _ _) = "OccursCheckFail"
+  pretty OccursCheckFail {} = "OccursCheckFail"
   pretty (Mismatch t1 t2 msg)
     = "Mismatch"
     <+> tupled ["t1=" <> pretty t1, "t2=" <> pretty t2]
@@ -114,7 +114,7 @@ instance Pretty TypeError where
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
   pretty (MissingConcreteSignature src) = "MissingConcreteSignature for" <+> pretty src 
   pretty (MissingGeneralSignature src) = "MissingGeneralSignature for" <+> pretty src
-  pretty (ApplicationOfNonFunction) = "ApplicationOfNonFunction"
-  pretty (TooManyArguments) = "TooManyArguments"
+  pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
+  pretty TooManyArguments = "TooManyArguments"
   pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
   pretty EmptyExpression = "EmptyExpression"

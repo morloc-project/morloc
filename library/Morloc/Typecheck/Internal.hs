@@ -95,7 +95,7 @@ instance Indexable TVar where
   index v = ExistG v [] []
 
 (+>) :: Indexable a => Gamma -> a -> Gamma
-(+>) g x = g {gammaContext = (index x) : gammaContext g}
+(+>) g x = g {gammaContext = index x : gammaContext g}
 
 
 (++>) :: Indexable a => Gamma -> [a] -> Gamma

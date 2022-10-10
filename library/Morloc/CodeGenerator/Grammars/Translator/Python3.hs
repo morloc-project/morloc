@@ -34,15 +34,15 @@ preprocess = invertExprM
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
   -- setup library paths
-  lib <- fmap pretty $ MM.asks MC.configLibrary
+  lib <- pretty <$> MM.asks MC.configLibrary
 
   -- translate sources
   includeDocs <- mapM
     translateSource
-    (unique . catMaybes . map srcPath $ srcs)
+    (unique . mapMaybe srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map pretty es)
+  liftIO . putDoc . vsep $ map pretty es
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
@@ -75,7 +75,7 @@ manNamer i = "m" <> viaShow i
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
-  lib <- fmap MT.pack $ MM.asks configLibrary
+  lib <- MT.pack <$> MM.asks configLibrary
   let moduleStr = pretty
                 . MT.liftToText (map DC.toLower)
                 . MT.replace "/" "."
@@ -122,7 +122,7 @@ serialize v0 s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let push = [idoc|#{v'}.append(#{x})|]
@@ -132,16 +132,16 @@ serialize v0 s0 = do
       return ([lst], v')
 
     construct v (SerialTuple ss) = do
-      (befores, ss') <- fmap unzip $ zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty $ MM.getCounter
+      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v');
 
     construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
       accessField <- selectAccessor namType constructor
-      (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (accessField v (pretty k)) s) rs
-      idx <- fmap pretty $ MM.getCounter
+      (befores, ss') <- mapAndUnzipM (\(PV _ _ k,s) -> serialize' (accessField v (pretty k)) s) rs
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
@@ -159,7 +159,7 @@ deserialize v0 s0
       let deserializing = [idoc|mlc_deserialize(#{v0}, #{schema});|]
       return (deserializing, [])
   | otherwise = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
       schema <- typeSchema t
       let rawvar = "s" <> idx
@@ -182,7 +182,7 @@ deserialize v0 s0
       return (deserialized, before)
 
     construct v (SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
       let push = [idoc|#{v'}.append(#{x});|]
@@ -192,16 +192,16 @@ deserialize v0 s0
       return (v', [lst])
 
     construct v (SerialTuple ss) = do
-      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       accessField <- selectAccessor namType constructor
-      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (accessField v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (accessField v (pretty k)) s) rs
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
@@ -217,7 +217,7 @@ deserialize v0 s0
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m0@(ManifoldM _ args0 _) = do
   MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
+  vsep . punctuate line . (\(x,_,_)->x) <$> f args0 m0
   where
 
   f :: [Argument]
@@ -235,7 +235,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
       ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
       (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5.
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do
@@ -246,8 +246,8 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
-    (ms1', e1', rs1) <- (f args) e1
-    (ms2', e2', rs2) <- (f args) e2
+    (ms1', e1', rs1) <- f args e1
+    (ms2', e2', rs2) <- f args e2
     let rs = rs1 ++ [ letNamer i <+> "=" <+> e1' ] ++ rs2
     return (ms1' ++ ms2', e2', rs)
 

@@ -58,6 +58,7 @@ import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
+import Data.Bifunctor (second)
 
 realityCheck
   :: [SAnno (Indexed Type) Many Int]
@@ -174,7 +175,7 @@ realize s0 = do
     return (AppS f' xs', Idx i best)
   scoreExpr langs (NamS rs, i) = do
     (xs, best) <- scoreMany langs (map snd rs)
-    return $ (NamS (zip (map fst rs) xs), Idx i best)
+    return (NamS (zip (map fst rs) xs), Idx i best)
   scoreExpr _ (CallS s, i) = return (CallS s, Idx i [(srcLang s, callCost s)])
   -- non-recursive expressions
   scoreExpr langs (UniS, i) = return (UniS, zipLang i langs)
@@ -273,12 +274,11 @@ realize s0 = do
   collapseExpr lang (LogS x, Idx i _) = return (LogS x, Idx i lang)
   collapseExpr lang (StrS x, Idx i _) = return (StrS x, Idx i lang)
 
-  chooseLanguage :: (Maybe Lang) -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
+  chooseLanguage :: Maybe Lang -> [(Lang, Int)] -> MorlocMonad (Maybe Lang)
   chooseLanguage l1 ss = do
     case minBy snd [(l2, cost l1 l2 s2) | (l2, s2) <- ss] of
       Nothing -> return Nothing
       (Just (l3, _)) -> return (Just l3)
-
 
   minBy :: Ord b => (a -> b) -> [a] -> Maybe a
   minBy _ [] = Nothing
@@ -290,32 +290,32 @@ realize s0 = do
   -- find the lowest cost function for each key
   -- the groupSort function will never yield an empty value for vs, so `minimum` is safe
   minPairs :: (Ord a, Ord b) => [(a, b)] -> [(a, b)]
-  minPairs xs = map (\(k, vs) -> (k, minimum vs)) $ groupSort xs
+  minPairs = map (second minimum) . groupSort
 
   propagateDown
-    ::             (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+    ::             SAnno (Indexed Type) One (Indexed (Maybe Lang))
     -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
-  propagateDown (SAnno (One (_, (Idx _ Nothing))) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
+  propagateDown (SAnno (One (_, Idx _ Nothing)) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
   propagateDown e@(SAnno (One (_, Idx _ (Just lang0))) _) = f lang0 e where
-    f :: Lang ->     (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
+    f :: Lang ->     SAnno (Indexed Type) One (Indexed (Maybe Lang))
       -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
-    f lang (SAnno (One (e, (Idx i Nothing))) g) = f lang (SAnno (One (e, (Idx i (Just lang)))) g)
-    f _ (SAnno (One (e, Idx i (Just lang))) g) = do 
-      e' <- case e of
+    f lang (SAnno (One (e', Idx i Nothing)) g) = f lang (SAnno (One (e', Idx i (Just lang))) g)
+    f _ (SAnno (One (e', Idx i (Just lang))) g) = do 
+      e'' <- case e' of
         (AccS x k) -> AccS <$> f lang x <*> pure k
         (AppS x xs) -> AppS <$> f lang x <*> mapM (f lang) xs
         (LamS vs x) -> LamS vs <$> f lang x
         (LstS xs) -> LstS <$> mapM (f lang) xs
         (TupS xs) -> TupS <$> mapM (f lang) xs
         (NamS rs) -> NamS <$> (zip (map fst rs) <$> mapM (f lang . snd) rs)
-        (UniS) -> return UniS
+        UniS -> return UniS
         (VarS x) -> return (VarS x)
         (RealS x) -> return (RealS x)
         (IntS x) -> return (IntS x)
         (LogS x) -> return (LogS x)
         (StrS x) -> return (StrS x)
         (CallS x) -> return (CallS x)
-      return (SAnno (One (e', Idx i lang)) g)
+      return (SAnno (One (e'', Idx i lang)) g)
 
 -- | This function is called on trees that contain no language-specific
 -- components.  "GAST" refers to General Abstract Syntax Tree. The most common
@@ -350,7 +350,7 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
   let base = NexusCommand {
       commandName = n -- EVar -- user-exposed subcommand name in the nexus
     , commandType = t -- Type -- the general type of the expression
-    , commandJson = (dquotes "_") -- MDoc -- JSON output with null's where values will be replaced
+    , commandJson = dquotes "_" -- MDoc -- JSON output with null's where values will be replaced
     , commandArgs = [] -- [EVar] -- list of function arguments
     , commandSubs = [] -- [(JsonPath, Text, JsonPath)]
     -- list of tuples with values 1) path in JSON to value needs to be replaced
@@ -380,24 +380,24 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
         _ -> error "Bad record access"
     -- record the path to and from a record access, leave the value as null, it
     -- will be set in the nexus
-    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ (NamT _ _ _ _))) k, _)) _) =
+    generalSerial' base ps (SAnno (One (AccS (SAnno (One (VarS v, _)) (Idx _ NamT {})) k, _)) _) =
       return $ base { commandSubs = [(ps, unEVar v, [JsonKey k])] }
     -- If the accessed type is not a record, then die
-    generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t)) _, _)) _) =
-        MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t
+    generalSerial' _ _ (SAnno (One (AccS (SAnno _ (Idx _ t')) _, _)) _) =
+        MM.throwError . OtherError . render $ "Non-record access of type:" <+> pretty t'
     generalSerial' base ps (SAnno (One (LstS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
                         [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base 
         { commandJson = list (map commandJson ncmds)
-        , commandSubs = conmap commandSubs ncmds
+        , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (TupS xs, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
                         [ps ++ [JsonIndex j] | j <- [0..]] xs
       return $ base
         { commandJson = list (map commandJson ncmds)
-        , commandSubs = conmap commandSubs ncmds
+        , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (NamS es, _)) _) = do
       ncmds <- zipWithM (generalSerial' base)
@@ -408,7 +408,7 @@ generalSerial x0@(SAnno _ (Idx i t)) = do
                 (map (\(k, v) -> dquotes (pretty k) <> ":" <> v) entries)
       return $ base
         { commandJson = obj
-        , commandSubs = conmap commandSubs ncmds
+        , commandSubs = concatMap commandSubs ncmds
         }
     generalSerial' base ps (SAnno (One (LamS vs x, _)) _) = do
       ncmd <- generalSerial' base ps x
@@ -547,7 +547,7 @@ substituteSAnno
   -> SAnno Int One (Indexed TypeP)
   -> SAnno Int One (Indexed TypeP)
   -> SAnno Int One (Indexed TypeP)
-substituteSAnno v r e0 = f e0 where
+substituteSAnno v r = f where
   f e@(SAnno (One (VarS v', _)) _)
     | v == v' = r
     | otherwise = e
@@ -555,22 +555,22 @@ substituteSAnno v r e0 = f e0 where
   f (SAnno (One (AppS e es, c)) g) =
     let f' = f e
         es' = map f es
-    in (SAnno (One (AppS f' es', c)) g)
+    in SAnno (One (AppS f' es', c)) g
   f (SAnno (One (AccS e k, c)) g) =
     let e' = f e
-    in (SAnno (One (AccS e' k, c)) g)
+    in SAnno (One (AccS e' k, c)) g
   f (SAnno (One (LamS vs e, c)) g) =
     let e' = f e
-    in (SAnno (One (LamS vs e', c)) g)
+    in SAnno (One (LamS vs e', c)) g
   f (SAnno (One (LstS es, c)) g) =
     let es' = map f es
-    in (SAnno (One (LstS es', c)) g)
+    in SAnno (One (LstS es', c)) g
   f (SAnno (One (TupS es, c)) g) =
     let es' = map f es
-    in (SAnno (One (TupS es', c)) g)
+    in SAnno (One (TupS es', c)) g
   f (SAnno (One (NamS rs, c)) g) =
     let es' = map (f . snd) rs
-    in (SAnno (One (NamS (zip (map fst rs) es'), c)) g)
+    in SAnno (One (NamS (zip (map fst rs) es'), c)) g
   f x = x
 
 -- | Add arguments that are required for each term. Unneeded arguments are
@@ -618,20 +618,20 @@ parameterize' args (SAnno (One (AccS x k, c)) m) = do
 parameterize' args (SAnno (One (LstS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
-      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (LstS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupS xs, c)) m) = do
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
-      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (TupS xs', (c, args'))) m
 parameterize' args (SAnno (One (NamS entries, c)) m) = do
   vs' <- mapM (parameterize' args . snd) entries
   let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
-      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
-  let args' = [(v, r) | (v, r) <- args, notElem v vs]
+  let args' = [(v, r) | (v, r) <- args, v `notElem` vs]
       startId = maximumDef 0 (map (argId . snd) args) + 1
       args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
   x' <- parameterize' (args' ++ args0) x
@@ -642,7 +642,7 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
-      args' = [(v, r) | (v, r) <- args, elem v usedArgs] 
+      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 
@@ -860,9 +860,9 @@ segment e0
 
 -- Now that the AST is segmented by language, we can resolve passed-through
 -- arguments where possible.
-reparameterize :: (ExprM Many) -> (ExprM Many)
+reparameterize :: ExprM Many -> ExprM Many
 reparameterize e0 = snd (substituteBndArgs e0) where 
-  substituteBndArgs :: (ExprM Many) -> ([(Int, TypeM)], ExprM Many) 
+  substituteBndArgs :: ExprM Many -> ([(Int, TypeM)], ExprM Many) 
   substituteBndArgs (ForeignInterfaceM i e) =
     let (vs, e') = substituteBndArgs e
     in (vs, ForeignInterfaceM i (snd $ substituteBndArgs e'))
@@ -890,7 +890,7 @@ reparameterize e0 = snd (substituteBndArgs e0) where
     let (vss, es') = unzip $ map substituteBndArgs es
     in (concat vss, TupleM t es')
   substituteBndArgs (RecordM t entries) =
-    let (vss, es') = unzip $ map substituteBndArgs (map snd entries)
+    let (vss, es') = unzip $ map (substituteBndArgs . snd) entries
     in (concat vss, RecordM t (zip (map fst entries) es'))
   substituteBndArgs (SerializeM s e) =
     let (vs, e') = substituteBndArgs e
@@ -931,7 +931,7 @@ findSources
   -> MorlocMonad (Lang, [([Source], ExprM Many)])
 findSources (lang, es0) = do
   srcss <- mapM f es0
-  return $ (lang, zipWith joinSrcs srcss es0)
+  return (lang, zipWith joinSrcs srcss es0)
   where
     f :: ExprM Many -> MorlocMonad [Source] 
     f (SrcM _ src) = return [src]
@@ -942,12 +942,12 @@ findSources (lang, es0) = do
         return $ ss1 <> ss2 <> ss3
     f (ForeignInterfaceM _ e) = f e
     f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
-    f (AppM e es) = (<>) <$> f e <*> conmapM f es
+    f (AppM e es) = (<>) <$> f e <*> concatMapM f es
     f (LamM _ e) = f e
     f (AccM e _) = f e
-    f (ListM _ es) = conmapM f es
-    f (TupleM _ es) = conmapM f es
-    f (RecordM _ rs) = conmapM f (map snd rs)
+    f (ListM _ es) = concatMapM f es
+    f (TupleM _ es) = concatMapM f es
+    f (RecordM _ rs) = concatMapM f (map snd rs)
     f (SerializeM _ e) = f e
     f (DeserializeM _ e) = f e
     f (ReturnM e) = f e
@@ -960,8 +960,9 @@ findSources (lang, es0) = do
 
     lookupConstructors :: Int -> MorlocMonad [Source]
     lookupConstructors i = do
-      packers <- MM.metaPackMap i
-      let xs = [v | (TV lang' v, _) <- Map.keys packers, lang' == Just lang]
+      -- TODO do I not need these?
+      -- packers <- MM.metaPackMap i
+      -- let xs = [v | (TV lang' v, _) <- Map.keys packers, lang' == Just lang]
       srcs <- MM.metaSources i
       -- this should probably be filtered ... but hey, why not just import everything?
       return [src | src <- srcs]
@@ -980,8 +981,8 @@ encode
   -- language into multiple pools (e.g., to resolve version conflicts).
   -> MorlocMonad Script
 encode lang xss = do
-  let srcs' = unique [s | s <- concat (map fst xss), srcLang s == lang]
-  xs' <- mapM (preprocess lang) (map snd xss) >>= chooseSerializer
+  let srcs' = unique [s | s <- concatMap fst xss, srcLang s == lang]
+  xs' <- mapM (preprocess lang . snd) xss >>= chooseSerializer
   -- translate each node in the AST to code
   translate lang srcs' xs'
 
@@ -1006,7 +1007,7 @@ preprocess l _ = MM.throwError . PoolBuildError . render
                $ "Language '" <> viaShow l <> "' has no translator"
 
 chooseSerializer :: [ExprM Many] -> MorlocMonad [ExprM One]
-chooseSerializer xs = mapM chooseSerializer' xs where
+chooseSerializer = mapM chooseSerializer' where
   chooseSerializer' :: ExprM Many -> MorlocMonad (ExprM One)
   -- This is where the magic happens, the rest is just plumbing
   chooseSerializer' (SerializeM s e) = SerializeM <$> oneSerial s <*> chooseSerializer' e
@@ -1066,7 +1067,7 @@ mapCM f (SAnno (One (TupS xs, c)) g) = do
   c' <- f c
   return $ SAnno (One (TupS xs', c')) g
 mapCM f (SAnno (One (NamS entries, c)) g) = do
-  xs' <- mapM (mapCM f) (map snd entries)
+  xs' <- mapM (mapCM f . snd) entries
   c' <- f c
   return $ SAnno (One (NamS (zip (map fst entries) xs'), c')) g
 mapCM f (SAnno (One (LamS vs x, c)) g) = do
@@ -1110,5 +1111,5 @@ freshVarsAZ
   -> [MT.Text]
 freshVarsAZ exclude =
   filter
-    (\x -> not (elem x exclude))
+    (`notElem` exclude)
     ([1 ..] >>= flip replicateM ['a' .. 'z'] |>> MT.pack)

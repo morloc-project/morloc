@@ -88,7 +88,7 @@ loadModuleMetadata main = do
   MM.put (appendMeta meta state)
   where
     appendMeta :: PackageMeta -> MorlocState -> MorlocState
-    appendMeta m s = s {statePackageMeta = m : (statePackageMeta s)}
+    appendMeta m s = s {statePackageMeta = m : statePackageMeta s}
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> MVar -> [Path]

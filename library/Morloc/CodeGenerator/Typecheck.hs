@@ -72,7 +72,7 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
   -- find all associated type annotations for this language
   (g1, ts) <- case fmap termConcrete mayts of
     (Just ts') -> do
-      let es = filter ((==) (Just lang) . langOf) (conmap (\(_, t, _) -> t) ts')
+      let es = filter ((==) (Just lang) . langOf) (concatMap (\(_, t, _) -> t) ts')
           (g1', ts'') = statefulMap rename g0 (map etype es)
       return $ (g1', zipWith (\e t -> e {etype = t}) es ts'')
     Nothing -> return (g0, [])

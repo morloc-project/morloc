@@ -341,7 +341,7 @@ pSrcE = do
 
 
 pLstE :: Parser ExprI
-pLstE = (LstE <$> brackets (sepBy pExpr (symbol ","))) >>= exprI
+pLstE = brackets (sepBy pExpr (symbol ",")) >>= exprI . LstE
 
 
 pTupE :: Parser ExprI
@@ -418,7 +418,7 @@ pLogE = do
     pFalse = reserved "False" >> return (LogE False)
 
 pStrE :: Parser ExprI
-pStrE = fmap StrE stringLiteral >>= exprI
+pStrE = stringLiteral >>= exprI . StrE
 
 pNumE :: Parser ExprI
 pNumE = do
@@ -436,7 +436,7 @@ pLam = do
   exprI $ LamE vs e
 
 pVar :: Parser ExprI
-pVar = fmap VarE pEVar >>= exprI
+pVar = pEVar >>= exprI . VarE
 
 
 pEVar :: Parser EVar
@@ -479,10 +479,7 @@ pUniU = do
     (_, ts) -> return $ ExistU v [] ts  -- other languages maybe have multiple definitions
 
 parensType :: Parser TypeU
-parensType = do
-  _ <- tag (symbol "(")
-  t <- parens pType
-  return t
+parensType = tag (symbol "(") >> parens pType
 
 pTupleU :: Parser TypeU
 pTupleU = do
