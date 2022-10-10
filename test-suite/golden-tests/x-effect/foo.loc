@@ -1,0 +1,16 @@
+type Fasta = (Str, Str)
+type Filename = ?
+
+-- effects
+-- * IO
+-- * NDet
+-- * Console
+-- * Exp
+-- * Div
+
+read_fasta :: Filename -> <IO> Fasta
+write_fasta :: Fasta -> Filename -> <IO> ()
+
+warn_read :: Filename -> <IO,Console> String
+
+-- generic effects versus constant effects, capitolization? Or do I ever need to specify it?

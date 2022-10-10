@@ -1,0 +1,70 @@
+-- dimensional refinements of tensors
+reverse :: [a]_n -> [a]_n
+
+-- For matrices especially, there really isn't a pretty alternative to the
+-- `_{m,n}` syntax. We need to specify the rectangularity to distinguish it
+-- from a ragged list of lists.
+
+reverse :: m:[a] -> {n:[a] | len n == len m}
+
+-- This is cleaner than
+zip :: [a]_m -> [b]_m -> [(a, b)]_m
+-- this
+zip :: xs:[a] -> ys:[b] -> zs:[(a, b)] where
+    len xs == len ys
+    len ys == len zs
+
+-- This is elegant, generalizing lists to n-dimensional arrays
+transpose :: [a]_{m,n} -> [a]_{n,m}
+-- The alternative of nested lists is ugly as hell
+transpose :: xs:[[a]] -> ys:[[a]] where
+    -- ? this now requires looping and indexing and checking ... ugly
+-- Especially for higher dimensions (ugh)
+transpose :: xs:[[[[a]]]] -> ys:[[[[a]]]] where
+    -- ? same, but worse
+-- Alternatively an object could be used. This requires extending the type system to allow lists
+transpose :: Matrix2D a m n -> Matrix2D a n m -- can this be generalized?
+-- it would need new semantics, for example:
+transpose :: Matrix a {m, n} -> Matrix a {n, m}
+-- which might as well be, indicating the dimensionality of Matrix:
+transpose :: Matrix_{m, n} a -> Matrix_{n, m} a
+
+-- or perhaps more generally, they describe integers that describe the Matrix
+-- type. And since `[]` is just an alias for `List`. Thus we have returned to
+-- the original syntax.
+
+-- What about arrays of unknown dimension, for example, a slice function? This
+-- also returns to the indexing problem (0-base versus 1-base). Tricky ...
+
+-- slice :: ds:[(Int, Int)]_n -> [a]_{..es; m > k + l - 1  | (m, (k, l)) <- zip es ds} -> [a]_{}
+
+-- with literal dimension values
+random :: n:Int -> [Num]_n
+nth :: n:Int -> [a]_{m; m >= n} -> a
+
+runif :: Int_{n, n >= 0} -> l:Num -> r:Num -> [x:Num; l <= x <= r]_n
+
+-- What of 0-base versus 1-base indices? Just don't use them.
+
+
+-- constraints
+filter :: (a -> Bool) -> [a]_m -> [a]_{n; n <= m}
+get :: i:Int -> [a]_{m; i < m} -> a
+head :: [a]_{n; n > 0} -> a
+
+-- functions
+take :: n:Int -> [a]_m -> [a]_{l; min m n}
+
+
+-- refinements of type declarations
+type Counting = {x:Int; x > 0}
+type PositiveInt = {x:Int; x >= 0}
+type Probability = {x:Num; 0 <= x <= 1 }
+type PositiveReal = {x:Num; x >= 0}
+type Odd = {x:Int; x > 0, x % 2 == 1}
+
+-- inplace refinements
+type (MNist label) =
+     ( ([Int]_{n=60000,28,28}, [Int]_n)
+     , ([Int]_{m=10000,28,28}, [Int]_m)
+     )

@@ -38,3 +38,8 @@ There are infinitely more complex forms, but all of these can be systematically
 reduced/expanded in (de)serialization. So long as these base cases work,
 everything should be awesome. I might add a 10th case for valid recursive
 structures (trees) and maybe an 11th really deep structure just for good feels.
+
+# Experimental tests
+
+The `x-` tests cover unimplemented features with syntactic support. They are
+just tests of the parser.

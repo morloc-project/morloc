@@ -1,0 +1,53 @@
+{-
+
+Unifying functions across languages will often require changing the order of
+parameters, using keyword arguments, setting extra arguments to a function, the
+use of objects, and mutation. The mutable effect itself will be semantically
+handled through the effect system. But when mutability substitutes for an
+explicitly returned value, then we need to tell the language specific code
+generator. That is the purpose of styles.
+
+There are four styles:
+ * Function - a normal function with order/keyword changes
+ * Mutation - the input that is mutated into the return type is specified
+ * ObjFunction - the self object is specified
+ * ObjMutation - the self object is specified and the mutated return
+
+All four allow the order of positional arguments and use of keywords to be
+added. The styles must always use all arguments they are given. They should not
+change the semantics.
+
+Arguments may also have styles in some languages. They may be pass by reference
+or pass by value. They may be `const`.
+
+ * V - pass-by-value or something that behaves similarly
+ * R - pass-by-reference (implies mutable)
+ * C - constant
+
+These can be written as added flags?
+
+-}
+
+
+min :: (Ord a) => a -> a -> a
+min Rust :: a -> a -> a
+
+source Rust (min)
+source R (runif)
+
+runif :: Double -> Double -> Int -> [Double]
+runif R :: "numeric" -> "numeric" -> "integer" -> ["numeric"]
+
+-- customize the R function runif setting x as the one positional parameter and
+-- min and max as keyword arguments and add no additional defaulted args
+%R runif min max x = Function [x] [("min", min), ("max", max)] []
+
+%python foo x y o = ObjFunction o [V y] [("xthing", V x)] []
+%python bar x y o = ObjMutation o [V y] [("xthing", V x)] []
+
+-- introduces a mutable constraint that must be respected: the mutated input cannot be used elsewhere
+sort python :: <mut> [a]_n -> [a]_n
+-- x is the positional input argument and x is mutated to the output that is used downstream
+%python sort x = Mutation x [x] [] []
+
+%rust min x y = ObjFunction x [y]
