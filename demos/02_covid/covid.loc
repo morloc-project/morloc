@@ -1,0 +1,90 @@
+type Filename = Str
+type Tag = Str
+type Jsonpath = [Str]
+type Identifier = Str
+type Sequence = Str
+
+{-
+QA:
+ * How are functions passed? They can't be serialized.
+ * What if a language cannot pass functions as arguments?
+ * What about OOP methods?
+ * What about mutability?
+ * What about laziness?
+ * How are arguments passed (i.e., pass-by-reference versus pass-by-value)?
+ * What about `const` keywords and other random hints different languages add?
+-}
+
+analysis :: Filename -> ()
+analysis f = chain (writeTree "tree.newick" tree) (writeSvg "tree.svg" (viewTree viewNode viewEdge viewLeaf tree))
+    where
+    tree = treeOf buildTree (
+                onFsts align (
+                    augment lookupSequence (
+                        jsonListFilterMap parseRecord selectRecord f [...]
+                    )
+                )
+            )
+
+chain :: a -> b -> b
+chain a b = b
+
+
+-- filter a large file, create raw strings for individual elements
+jsonListFilterMap
+    :: (String -> a)  -- Convert an element string
+    -> (a -> Bool)    -- Decide whether to keep the parsed object
+    -> Filename       -- Path to the JSON file
+    -> [Tag]          -- Path to the array in the JSON structure
+    -> [a]            -- Final list of things of interest
+
+lookupSequence :: Identifier -> Sequence
+
+ungap :: Str -> Str
+
+align :: [Str] -> [Str] where
+    map ungap (align xs) == xs
+
+readFasta :: Filename -> [(ann, seq)]
+
+onFsts :: ([a] -> [a]) -> [(a, b)] -> [(a, b)] where
+    onFst xs id == xs
+
+treeOf :: ([seq] -> NelTree n e Int) -> [(ann, seq)] -> NelTree n e (ann, seq)
+
+nodes :: NelTree n e l -> [n]
+edges :: NelTree n e l -> [e]
+leafs :: NelTree n e l -> [l]
+
+filterNode :: (n -> Bool) -> NelTree n e l -> NelTree n e l
+filterEdge :: (e -> Bool) -> NelTree n e l -> NelTree n e l
+filterLeaf :: (v -> Bool) -> NelTree n e l -> NelTree n e l
+
+mapNode :: (n -> n') -> NelTree n e l -> NelTree n' e l 
+mapEdge :: (e -> e') -> NelTree n e l -> NelTree n e' l
+mapLeaf :: (v -> v') -> NelTree n e l -> NelTree n e l'
+
+alterChildren :: (n -> [(e, NelTree n e l)]) -> NelTree n e l -> NelTree n e l
+
+viewTree :: NelTree n e l -> SVG
+
+augment :: (a -> b) -> [a] -> [(a, b)]
+
+toSimplePhylo :: Tree n e l -> SimplePhylo
+
+-- A simple phylogenetic tree where leafs have names, edges have lengths, and
+-- nodes have certainties and names (possibly empty strings)
+packSimplePhylo ::   pack   => ([(Int, String)], [(Int, Double, String)], [(Int, Int, Double)], [(Int, Int)]) -> SimplePhylo
+unpackSimplePhylo :: unpack => SimplePhylo -> ([(Int, String)], [(Int, Double, String)], [(Int, Int, Double)], [(Int, Int)])
+
+-- Where c is the edge type and a is the leaf type
+packNelTree   :: pack   => ([(Int, n)], [(Int, Int, e)], [(Int, l)]) -> NelTree n e l 
+unpackNelTree :: unpack => NelTree n e l -> ([(Int, n)], [(Int, Int, e)], [(Int, l)])
+
+-- Where [a] has length 1 or 0
+packMaybe   :: pack   => [a] -> Maybe a
+unpackMaybe :: unpack => Maybe a -> [a]
+
+-- Where either [a] or [b] is empty and the other has length 1
+packEither   :: pack   => ([a], [b]) -> Either a b
+unpackEither :: unpack => Either a b -> ([a], [b])
