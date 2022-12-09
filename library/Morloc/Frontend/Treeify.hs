@@ -332,11 +332,11 @@ collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
-collect (ExprI _ (ModE _ _)) (i, _) = do
+collect (ExprI _ (ModE moduleName _)) (i, exportName) = do
   t0 <- MM.metaTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
-    Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
+    Nothing -> MM.throwError $ BadExport moduleName exportName
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]

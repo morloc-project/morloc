@@ -38,11 +38,11 @@ handling for several very different languages (proofs-of-concept).
 0.37.0 [2022.xx.xx]
  - [ ] Add constraint syntax
  - [ ] Add effects syntax
- - [ ] Add extensible record type syntax
+ - [ ] Add extensible record/table type syntax
  - [ ] Add style syntax
  - [ ] Add typeclass syntax
- - [ ] What does it all mean
  - [x] Remove extra space printed at the end of R JSON
+ - [x] Clarify error message for missing exports
 
 0.36.0 [2022.02.17]
 -------------------
