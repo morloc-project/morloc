@@ -43,6 +43,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add typeclass syntax
  - [x] Remove extra space printed at the end of R JSON
  - [x] Clarify error message for missing exports
+ - [x] Clarify error message for missing concrete signature
 
 0.36.0 [2022.02.17]
 -------------------

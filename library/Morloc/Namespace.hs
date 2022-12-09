@@ -358,8 +358,8 @@ data TypeError
   | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
   | KeyError Text TypeU
-  | MissingConcreteSignature Source
-  | MissingGeneralSignature Source
+  | MissingConcreteSignature EVar Lang
+  | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | TooManyArguments
   | EmptyExpression

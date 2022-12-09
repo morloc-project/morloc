@@ -783,11 +783,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       then return manifold
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
-  express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
+  express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
     name' <- MM.metaName m
-    MM.throwError . CallTheMonkeys . render
-      $ "Invalid input to express' in function (" <> viaShow name' <> ") - type: " <> pretty t
-      <+> "at expression" <+> prettySExpr (const "") (const "") e
+    case name' of
+        (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
+        Nothing ->  MM.throwError . ConcreteTypeError $ MissingConcreteSignature (EV "--") (langOf' t)
+--
+-- express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
 segment e0
