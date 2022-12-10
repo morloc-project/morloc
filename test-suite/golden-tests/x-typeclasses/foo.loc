@@ -1,17 +1,35 @@
 source py from "xxx.py" ("mlc_add" as pyadd, "mlc_mul" as pymul, "mlc_neg" as pyneg, "mlc_rec" as pyrec)
 
-class (Numeric a)
+class (Eq a) => (Ord a)
+    gt :: a -> a -> Bool
+
+-- When extending a class, must check that no names are shadowed
+class (Ord a) => (Numeric a)
     add :: a -> a -> a
     mul :: a -> a -> a
     neg :: a -> a
-    rec :: a -> a & err
+    rec :: a -> a
+    sub :: a -> a -> a
+    div :: a -> a -> a 
+
     -- default implementations
     sub x y = add x (neg y) 
     div x y = mul x (rec y)
 
+class (Nat a)
+    add :: a -> a -> a
+    mul :: a -> a -> a
+
+class (Nat a) => Integral a
+    neg :: a -> a
+    sub :: a -> a -> a
+
+    sub x y = add x (neg y) 
+    
+
 class (Exponentiable a)
     pow :: a -> a -> a
-    log :: a -> a -> a & err
+    log :: a -> a -> <Exc> a
 
 class (Continuous a)
     exp :: a -> a -> a

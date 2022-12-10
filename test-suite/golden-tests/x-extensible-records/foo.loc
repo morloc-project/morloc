@@ -1,0 +1,69 @@
+-- look up notes in tablet
+
+
+-- A `Person` must have exactly these fields, losing or retyping them removes
+-- the `Person` type. This is especially important for objects in some languages
+-- where fields cannot be arbitrarily added.
+type Person = Person {age :: Int, name :: Str}
+
+-- A Person type with additional fields allowed
+type Patient = Person {...}
+
+-- An annonymous patient record replaces the name with an id
+type AnonymousPatient = Patient { !name, id :: Int }
+
+type Cancer = Cancer { cancerType :: Str, treatments :: [Str], ... }
+
+-- What becomes of the two `...`s from Patient and Cancer? It would probably be
+-- better practice in general to nest the Cancer in its own field rather than
+-- joining at the top. But this syntax should still be legal. The `...` fields
+-- would all be merged, thus `AnonymousCancerPatient` would be a shortcut for
+-- {id :: Int, age :: Int, cancerType :: Str, treatments :: [Str], ...}.
+type AnonymousCancerPatient = AnonymousPatient + Cancer
+
+-- Read a file that at least has the `age` and `name` attributes of `Patient`, but may have additional fields
+readPatientFile :: File -> <IO> Patient
+
+setBirthday :: Date -> r -> r {Birthday :: Date}
+
+-- Remove a hard-coded field and add a new hard-coded field
+removeName :: r -> r { !name }
+
+-- Remove a field from a record and require that the field exist
+tryRemoveField :: k:Str -> r { $k :: a} -> r { !$k }
+
+-- Remove a field from a record if the field exists
+tryRemoveField :: k:Str -> r -> r { !$k }
+
+-- Nothing very hancy here
+checkFieldExists :: Str -> r -> Bool
+
+-- The field must not exist in the input record, otherwise the output type is undefined
+addField :: k:Str -> v:a -> r { !$k } -> r { $k :: a }
+
+-- Set the value of an existing field
+setField :: k:Str -> v:a -> r { $k :: a } -> r { $k :: a }
+
+-- Set of add a field, if the field does exist in the record, the types must match
+setOrAddField :: k:Str -> v:a -> r { ?$k :: a } -> r { $k :: a }
+
+-- Add all fields from a and b, type error if fields overlap
+recordUnion :: a { ... } -> b { ... } -> a + b
+
+-- Add fields from b that are not in a. If b has a field that is in a, then that field is ignored
+recordJoin :: a { ... } -> b { ... } -> a + (b / a)
+
+-- empty record
+empty :: a {} 
+
+-- stub record
+stubRecord :: names:[Str] -> r { [$k :: () | k <- names] }
+stubRecord names = fold ((flip addField) Null ) empty names  
+
+names :: r { ... } -> [Str]
+
+-- Select fields from a record, all fields must be present. Since the input
+-- string list `ks` is not known at compile time, this cannot generally be
+-- typechecked. In most cases, a constraint will be to defined and generated as a
+-- runtime test.
+select :: ks:[Str] -> a { ...xs, ...ys } -> b { ...ys | ks / keys ys == ks }

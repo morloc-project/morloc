@@ -1,7 +1,11 @@
 type Fasta = (Str, Str)
+
+-- eventually I need something like OverLoadedStrings extension, so that I can
+-- make strings like `x-*/*.loc` that are then parsed into globs. Or just use
+-- functions. Since vanilla functions suffice, this really is no priority.
 type Filename = ?
 
--- effects
+-- effects - from Koka
 -- * IO
 -- * NDet
 -- * Console
@@ -13,4 +17,6 @@ write_fasta :: Fasta -> Filename -> <IO> ()
 
 warn_read :: Filename -> <IO,Console> String
 
--- generic effects versus constant effects, capitolization? Or do I ever need to specify it?
+-- read up on Koka, try actually writing something in that language
+
+-- generic effects versus constant effects, capitalization? Or do I ever need to specify it?

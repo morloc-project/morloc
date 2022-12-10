@@ -4,14 +4,14 @@ Unifying functions across languages will often require changing the order of
 parameters, using keyword arguments, setting extra arguments to a function, the
 use of objects, and mutation. The mutable effect itself will be semantically
 handled through the effect system. But when mutability substitutes for an
-explicitly returned value, then we need to tell the language specific code
-generator. That is the purpose of styles.
+explicitly returned value, then we need to tell the language-specific code
+generator. That is handled with styles.
 
 There are four styles:
  * Function - a normal function with order/keyword changes
  * Mutation - the input that is mutated into the return type is specified
  * ObjFunction - the self object is specified
- * ObjMutation - the self object is specified and the mutated return
+ * ObjMutation - the self object is specified and the mutated returned
 
 All four allow the order of positional arguments and use of keywords to be
 added. The styles must always use all arguments they are given. They should not

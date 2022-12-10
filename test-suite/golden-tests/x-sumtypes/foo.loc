@@ -1,4 +1,4 @@
--- ENUMS
+-- support for sumtypes
 
 -- extensible records is a case of the more general extensible algebraic types
 -- here we can extend that to extensible sum types

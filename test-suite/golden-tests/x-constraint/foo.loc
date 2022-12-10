@@ -1,3 +1,22 @@
+{-
+
+The `[]` syntax by itself is the same as Haskell:
+
+ * [a] - a list
+ * [[a]] - a list of lists
+ * etc
+
+When adding explicit dimensions, we generalize this to tensors.
+
+ * [[a]] != [a]_{m,n}
+ * [[a]] != [[a]_n]
+ * [[a]]_n == [[a]]  -- unless a constraint is placed on n
+
+The right hand expressions of the first two cases add the constraints that all
+rows have the same length.
+
+-}
+
 -- dimensional refinements of tensors
 reverse :: [a]_n -> [a]_n
 
