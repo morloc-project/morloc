@@ -22,7 +22,6 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
 
-
 -- | Resolve type aliases, term aliases and import/exports
 desugar
   :: DAG MVar Import ExprI

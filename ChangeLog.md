@@ -7,9 +7,7 @@ whole system needs extensive testing in real applications. Much of this will be
 done in the development of the core libraries. We will also need to add
 handling for several very different languages (proofs-of-concept).
 
- - [ ] typeclasses
  - [ ] semantic types - test in bioinformatics applications
- - [ ] constraints - refined types?
  - [ ] manifold hooks - caching, documentation, logging, effects
  - [ ] logic engine (z3?) - from typechecking to architecture design and debugging
  - [ ] ecosystem (test suite, linter, package tools, vim plugin)
@@ -17,7 +15,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
  - [ ] Replace recursive data structures with recursion schemes
 
-0.3x.0 [2022.xx.xx]
+0.3x.0 [2023.xx.xx]
 -------------------
  - [ ] typeclasses
  - [ ] algebraic types
@@ -33,17 +31,12 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Clean up error handling (remove unused error types)
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
- - [ ] Add `import Foo hiding (...)` syntax
 
 0.37.0 [2022.xx.xx]
- - [ ] Add constraint syntax
- - [ ] Add effects syntax
- - [ ] Add extensible record/table type syntax
- - [ ] Add style syntax
- - [ ] Add typeclass syntax
  - [x] Remove extra space printed at the end of R JSON
  - [x] Clarify error message for missing exports
  - [x] Clarify error message for missing concrete signature
+ - [x] Fix exponential time bug in parser
 
 0.36.0 [2022.02.17]
 -------------------

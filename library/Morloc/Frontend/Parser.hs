@@ -25,7 +25,6 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import qualified Text.Megaparsec.Char.Lexer as L
 
 -- | Parse a single file or string that may contain multiple modules. Each
 -- module is written written into the DAG of previously observed modules.
@@ -112,8 +111,8 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pAcc
-  <|> try pNamE
+      try pAcc    -- access <expr>@
+  <|> try pNamE   -- record
   <|> try pTupE
   <|> try pUni
   <|> try pAnn
@@ -309,8 +308,8 @@ pSigE = do
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
-  modulePath <- CMS.gets stateModulePath
   reserved "source"
+  modulePath <- CMS.gets stateModulePath
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
@@ -397,8 +396,7 @@ pApp = do
   es <- many1 s
   exprI $ AppE f es
   where
-    s =   try pAnn
-      <|> try (parens pExpr)
+    s =   try (parens pExpr)
       <|> try pUni
       <|> try pStrE
       <|> try pLogE
