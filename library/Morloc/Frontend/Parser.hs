@@ -29,21 +29,23 @@ import qualified Morloc.System as MS
 -- | Parse a single file or string that may contain multiple modules. Each
 -- module is written written into the DAG of previously observed modules.
 readProgram
-  :: Maybe Path
+  :: Maybe MVar
+  -- ^ The expected module name, 
+  -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
   -> MT.Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
-readProgram f sourceCode pstate p =
+readProgram moduleName modulePath sourceCode pstate p =
   case runParser
-         (CMS.runStateT (sc >> pProgram <* eof) (reenter f pstate))
-         (maybe "<expr>" id f)
+         (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
+         (maybe "<expr>" id modulePath)
          sourceCode of
     (Left err') -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
-    (Right (es, s)) ->
+    (Right (es, s)) -> 
       let dag = foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p (map AST.findEdges es)
       in Right (dag, s)
 
@@ -61,14 +63,21 @@ reenter f p = p {stateMinPos = mkPos 1, stateAccepting = True, stateModulePath =
 
 -- | The output will be rolled into the final DAG of modules. There may be
 -- EITHER one implicit main module OR one or more named modules.
-pProgram :: Parser [ExprI]
-pProgram = try (align pModule) <|> plural pMain
+pProgram
+    :: Maybe MVar -- ^ The expected module path (fail if it doesn't match)
+    -> Parser [ExprI]
+pProgram m = try (align (pModule m)) <|> plural pMain
 
 -- | match a named module
-pModule :: Parser ExprI
-pModule = do
+pModule
+    :: Maybe MVar -- ^ The expected module path
+    -> Parser ExprI
+pModule expModuleName = do
   reserved "module"
-  moduleName <- MT.intercalate "." <$> sepBy freename (symbol ".")
+
+  moduleName <- case expModuleName of
+    Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
+    (Just (MV n)) -> symbol n
 
   es <- align pTopExpr |>> concat
   exprI $ ModE (MV moduleName) es

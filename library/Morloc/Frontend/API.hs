@@ -21,6 +21,7 @@ import qualified Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Data.Doc as MD
+import Morloc.Data.Doc ((<+>))
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
@@ -32,8 +33,8 @@ parse ::
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
 parse f (Code code) = do
-  MM.say $ MD.viaShow f
-  case Parser.readProgram f code Lexer.emptyState mempty of
+  MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
+  case Parser.readProgram Nothing f code Lexer.emptyState mempty of
     (Left e) -> MM.throwError $ SyntaxError e
     (Right (mainDag, mainState)) -> parseImports mainDag  mainState
   where
@@ -48,13 +49,16 @@ parse f (Code code) = do
           importPath <- Mod.findModule child
           Mod.loadModuleMetadata importPath
           (childPath, code') <- openLocalModule importPath
-          MM.say . MD.viaShow $ "Parsing " <> importPath 
-          case Parser.readProgram childPath code' s d of
+          MM.say $ "Parsing module" <+> (MD.viaShow . unMVar) child <+> "from" <+>  MD.viaShow importPath 
+          case Parser.readProgram (Just child) childPath code' s d of
             (Left e) -> MM.throwError $ SyntaxError e
             (Right (d', s')) -> parseImports d' s'
       where
+        -- all modules that are imported
         imported = Set.fromList (map snd (MDD.edgelist d))
+        -- all modules that have already been parsed
         parsed = Map.keysSet d
+        -- the modules that have not been parsed yet
         unimported = Set.toList $ Set.difference imported parsed
 
 -- | assume @t@ is a filename and open it, return file name and contents

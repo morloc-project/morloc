@@ -39,6 +39,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Fix exponential time bug in parser
  - [x] Allow prime characters in names after first position
  - [x] Allow '.' to separate namespaces in imports/modules
+ - [x] Fix infinite loop bug when module name != import name
 
 0.36.0 [2022.02.17]
 -------------------
