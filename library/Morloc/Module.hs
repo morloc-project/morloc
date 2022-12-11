@@ -29,6 +29,7 @@ import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+import qualified Data.List as DL
 
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import qualified Data.Yaml.Config as YC
@@ -92,13 +93,27 @@ loadModuleMetadata main = do
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> MVar -> [Path]
-getModulePaths lib (MV base) = map MS.joinPath
-  [ [MT.unpack base <> ".loc"]
-  , [MT.unpack base, "main.loc"]
-  , [lib, MT.unpack base <> ".loc"]
-  , [lib, MT.unpack base, "main.loc"]
-  , [lib, MT.unpack base, MT.unpack base <> ".loc"]
-  ]
+getModulePaths lib (MV base) = map MS.joinPath paths where
+    -- an import name like "math" or "alice.math" 
+    basePath = splitOn "." (MT.unpack base)
+
+    -- either search the working directory for a life like "math.loc" or look
+    -- for a folder named after the module with with a "main.loc" script
+    localPaths = [
+            init basePath <> [last basePath <> ".loc"]
+          , basePath <> ["main.loc"]
+        ]
+
+    -- if nothing is local, look for system libraries. The system libraries MUST
+    -- be in a folder named after the module. The main script may either have
+    -- the name of the final import feild (e.g., "math" in the imports "math" or
+    -- "alice.math") or by "main.loc"
+    systemPaths = [
+            lib : init basePath <> [last basePath <> ".loc"]
+          , lib : basePath <> ["main.loc"]
+        ]
+
+    paths = localPaths <> systemPaths
 
 -- | An ordered list of where to search for C/C++ header files
 getHeaderPaths

@@ -20,6 +20,7 @@ import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
+import qualified Morloc.Data.Doc as MD
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser
@@ -27,13 +28,16 @@ import qualified Morloc.Frontend.Lexer as Lexer
 import qualified Morloc.Frontend.Typecheck as Typecheck
 
 parse ::
-     Maybe Path
+     Maybe Path -- ^ path to the current module (if we are reading from a file)
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
-parse f (Code code) = case Parser.readProgram f code Lexer.emptyState mempty of
-  (Left err') -> MM.throwError $ SyntaxError err'
-  (Right (x, s)) -> parseImports x s
+parse f (Code code) = do
+  MM.say $ MD.viaShow f
+  case Parser.readProgram f code Lexer.emptyState mempty of
+    (Left e) -> MM.throwError $ SyntaxError e
+    (Right (mainDag, mainState)) -> parseImports mainDag  mainState
   where
+    -- descend recursively into imports
     parseImports
       :: DAG MVar Import ExprI
       -> Lexer.ParserState
@@ -43,10 +47,11 @@ parse f (Code code) = case Parser.readProgram f code Lexer.emptyState mempty of
       (child:_) -> do
           importPath <- Mod.findModule child
           Mod.loadModuleMetadata importPath
-          (path', code') <- openLocalModule importPath
-          case Parser.readProgram path' code' s d of
-            (Left err') -> MM.throwError $ SyntaxError err'
-            (Right (x, s')) -> parseImports x s'
+          (childPath, code') <- openLocalModule importPath
+          MM.say . MD.viaShow $ "Parsing " <> importPath 
+          case Parser.readProgram childPath code' s d of
+            (Left e) -> MM.throwError $ SyntaxError e
+            (Right (d', s')) -> parseImports d' s'
       where
         imported = Set.fromList (map snd (MDD.edgelist d))
         parsed = Map.keysSet d

@@ -67,7 +67,9 @@ pProgram = try (align pModule) <|> plural pMain
 -- | match a named module
 pModule :: Parser ExprI
 pModule = do
-  moduleName <- reserved "module" >> freename
+  reserved "module"
+  moduleName <- MT.intercalate "." <$> sepBy freename (symbol ".")
+
   es <- align pTopExpr |>> concat
   exprI $ ModE (MV moduleName) es
 
@@ -130,7 +132,8 @@ pExpr =
 pImport :: Parser ExprI
 pImport = do
   _ <- reserved "import"
-  n <- freename
+  -- There may be '.' in import names, these represent folders/namespaces of modules
+  n <- MT.intercalate "." <$> sepBy freename (symbol ".")
   imports <-
     optional $
     parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
