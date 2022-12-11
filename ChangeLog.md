@@ -37,6 +37,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Clarify error message for missing exports
  - [x] Clarify error message for missing concrete signature
  - [x] Fix exponential time bug in parser
+ - [x] Allow prime characters in names after first position
 
 0.36.0 [2022.02.17]
 -------------------
