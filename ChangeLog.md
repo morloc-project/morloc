@@ -36,6 +36,11 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
 
+0.38.0 [2023.01.xx]
+-------------------
+
+ - [ ] Choose casing convention
+
 0.37.0 [2022.12.11]
 -------------------
 
