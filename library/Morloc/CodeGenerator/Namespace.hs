@@ -35,6 +35,7 @@ import qualified Data.Set as Set
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 
+
 -- | Stores the language, general name and concrete name for a type expression
 data PVar
   = PV
@@ -48,7 +49,7 @@ data TypeP
   = UnkP PVar
   | VarP PVar
   | FunP [TypeP] TypeP
-  | AppP TypeP [TypeP]
+  | AppP TypeP [TypeP] -- FIXME: this allows representation of things that cannot be applied
   | NamP NamType PVar [TypeP] [(PVar, TypeP)]
   deriving (Show, Ord, Eq)
 
@@ -127,7 +128,7 @@ instance Foldable f => Pretty (SerialAST f) where
     <+> braces (foldr (\(p, x) s -> s <+> tupled [pretty p, pretty x]) "" packers)
   pretty (SerialList ef) = parens $ "SerialList" <+> pretty ef 
   pretty (SerialTuple efs) = parens $ "SerialTuple" <+> tupled (map pretty efs)
-  pretty (SerialObject o p vs rs) = parens
+  pretty (SerialObject o _ vs rs) = parens
     $ "SerialObject" <+> pretty o <+> tupled (map pretty vs)
     <+> encloseSep "{" "}" "," [pretty k <+> "=" <+> pretty p | (k, p) <- rs]
   pretty (SerialReal v) = parens ("SerialReal" <+> pretty v)

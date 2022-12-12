@@ -21,7 +21,6 @@ import qualified Morloc.Monad as MM
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import Data.Bifunctor (first)
-import Control.Monad (when)
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and and everything else are abstracted away,
@@ -184,7 +183,7 @@ synthE i g0 (AppS f xs0) = do
   return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 --   -->I==>
-synthE i g0 f@(LamS vs x) = do
+synthE i g0 f@(LamS vs _) = do
   -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
       (g2, ft) = newvar "o_" Nothing g1

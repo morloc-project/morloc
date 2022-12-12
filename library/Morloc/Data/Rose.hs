@@ -31,13 +31,13 @@ search f = filter f . flatten
 -- | Make list of values
 flatten :: Rose a -> [a]
 flatten Nil = []
-flatten (Rose x xs) = x : (concat . map flatten) xs 
+flatten (Rose x xs) = x : concatMap flatten xs 
 
 
 -- | Remove branches where the value of the predicate returns true
 prune :: (a -> Bool) -> Rose a -> Rose a
 prune _ Nil = Nil
-prune f (Rose x xs) = Rose x [prune f t | t@(Rose x _) <- xs, not (f x)]
+prune f (Rose x xs) = Rose x [prune f t | t@(Rose x' _) <- xs, not (f x')]
 
 
 -- | Map with folded context from the local scope. Given `Rose x xs`, each `x`

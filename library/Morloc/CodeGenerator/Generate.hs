@@ -45,7 +45,7 @@ import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Typecheck (typecheck)
 import Morloc.Data.Doc
-import Morloc.Pretty
+import Morloc.Pretty ()
 import qualified Data.Map as Map
 import qualified Morloc.Config as MC
 import qualified Morloc.Data.Text as MT
@@ -133,7 +133,7 @@ realize
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
                          (SAnno (Indexed Type) One (Indexed Lang)))
 realize s0 = do
-  e@(SAnno (One (_, li)) (Idx _ gt)) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
+  e@(SAnno (One (_, li)) (Idx _ _)) <- scoreSAnno [] s0 >>= collapseSAnno Nothing
   case li of
     (Idx _ Nothing) -> makeGAST e |>> Left 
     (Idx _ _) -> Right <$> propagateDown e
@@ -204,7 +204,7 @@ realize s0 = do
       scoreMany' xs =
         let pairss = [ (minPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
                      | SAnno (Many xs') _ <- xs]
-            langs' = unique (langs <> (concat . map (map fst)) pairss)
+            langs' = unique (langs <> concatMap (map fst) pairss)
         in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
                      | pairs <- pairss])
@@ -237,7 +237,7 @@ realize s0 = do
 
   collapseExpr
     :: Maybe Lang -- the language of the parent expression (if Nothing, then this is a GAST)
-    -> (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), (Indexed [(Lang, Int)]))
+    -> (SExpr (Indexed Type) Many (Indexed [(Lang, Int)]), Indexed [(Lang, Int)])
     -> MorlocMonad (SExpr (Indexed Type) One (Indexed (Maybe Lang)), Indexed (Maybe Lang))
   collapseExpr l1 (AccS x k, Idx i ss) = do
     lang <- chooseLanguage l1 ss
@@ -516,7 +516,7 @@ applyLambdas (SAnno (One (AppS ( SAnno (One (LamS [] (SAnno e _), _)) _) [], _))
 applyLambdas (SAnno (One (AppS (SAnno e _) [], _)) i) = applyLambdas $ SAnno e i
 
 -- substitute applied lambdas
-applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 (FunP (ta1:tas) tb2))) i2) (e1:es), tb1)) i1) = do
+applyLambdas (SAnno (One (AppS (SAnno (One (LamS (v:vs) e2, Idx j2 (FunP (_:tas) tb2))) i2) (e1:es), tb1)) i1) = do
   let e2' = substituteSAnno v e1 e2
   applyLambdas (SAnno (One (AppS (SAnno (One (LamS vs e2', Idx j2 (FunP tas tb2))) i2) es, tb1)) i1)
 

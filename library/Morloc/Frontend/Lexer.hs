@@ -206,11 +206,11 @@ comments =  L.skipLineComment "--"
 data Sign = Pos | Neg
 
 number :: Parser (Either Integer DS.Scientific)
-number = lexeme $ number_
+number = lexeme number_
 
 number_ :: Parser (Either Integer DS.Scientific)
 number_ = do
-  x  <- try (fmap (Right . DS.fromFloatDigits) (L.signed sc L.float)) <|> (fmap Left (L.signed sc L.decimal))
+  x  <- try (fmap (Right . DS.fromFloatDigits) (L.signed sc L.float)) <|> fmap Left (L.signed sc L.decimal)
   e <- optional _exp
   return $ case (x, e) of
     (Left i,  Nothing) -> Left i
@@ -224,7 +224,7 @@ number_ = do
 
   _exp :: Parser (Sign, Int)
   _exp = do
-    _ <- (char 'e')
+    _ <- char 'e'
     expsign <- _sign
     expval <- L.decimal
     return (expsign, expval)

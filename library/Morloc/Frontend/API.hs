@@ -33,7 +33,7 @@ parse ::
   -> Code -- ^ code of the current module
   -> MorlocMonad (DAG MVar Import ExprI)
 parse f (Code code) = do
-  MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
+  -- MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
   case Parser.readProgram Nothing f code Lexer.emptyState mempty of
     (Left e) -> MM.throwError $ SyntaxError e
     (Right (mainDag, mainState)) -> parseImports mainDag  mainState
@@ -49,7 +49,7 @@ parse f (Code code) = do
           importPath <- Mod.findModule child
           Mod.loadModuleMetadata importPath
           (childPath, code') <- openLocalModule importPath
-          MM.say $ "Parsing module" <+> (MD.viaShow . unMVar) child <+> "from" <+>  MD.viaShow importPath 
+          -- MM.say $ "Parsing module" <+> (MD.viaShow . unMVar) child <+> "from" <+>  MD.viaShow importPath
           case Parser.readProgram (Just child) childPath code' s d of
             (Left e) -> MM.throwError $ SyntaxError e
             (Right (d', s')) -> parseImports d' s'

@@ -16,7 +16,6 @@ module Morloc.Pretty
 
 import Morloc.Data.Doc
 import Morloc.Namespace
-import qualified Morloc.Data.Text as MT
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 

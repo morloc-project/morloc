@@ -29,7 +29,6 @@ import qualified Morloc.Config as Config
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
-import qualified Data.List as DL
 
 import Data.Aeson (FromJSON(..), (.!=), (.:?), withObject)
 import qualified Data.Yaml.Config as YC

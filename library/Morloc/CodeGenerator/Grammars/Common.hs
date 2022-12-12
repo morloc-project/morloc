@@ -47,12 +47,12 @@ nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
 
-recordPVar :: TypeP -> MDoc
-recordPVar (VarP (PV _ _ v)) = pretty v
-recordPVar (UnkP (PV _ _ v)) = pretty v
-recordPVar (FunP _ _) = "<FunP>" -- illegal value
-recordPVar (AppP _ _) = "<AppP>" -- illegal value
-recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
+-- recordPVar :: TypeP -> MDoc
+-- recordPVar (VarP (PV _ _ v)) = pretty v
+-- recordPVar (UnkP (PV _ _ v)) = pretty v
+-- recordPVar (FunP _ _) = "<FunP>" -- illegal value
+-- recordPVar (AppP _ _) = "<AppP>" -- illegal value
+-- recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
 
 -- see page 112 of my super-secret notes ...
 -- example:

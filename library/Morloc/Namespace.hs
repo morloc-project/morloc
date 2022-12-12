@@ -30,7 +30,6 @@ module Morloc.Namespace
   , GType(..)
   , gtype
   , EVar(..)
-  , unEVar
   , TVar(..)
   , unTVar
   , MVar(..)
@@ -101,11 +100,10 @@ import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Data.Text.Prettyprint.Doc (Doc)
+import Prettyprinter (Doc)
 import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
-import Text.Megaparsec ()
 import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
