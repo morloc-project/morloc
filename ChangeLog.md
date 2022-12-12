@@ -32,14 +32,16 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
 
-0.37.0 [2022.xx.xx]
- - [x] Remove extra space printed at the end of R JSON
- - [x] Clarify error message for missing exports
- - [x] Clarify error message for missing concrete signature
- - [x] Fix exponential time bug in parser
- - [x] Allow prime characters in names after first position
- - [x] Allow '.' to separate namespaces in imports/modules
- - [x] Fix infinite loop bug when module name != import name
+0.37.0 [2022.12.11]
+-------------------
+
+ * Remove extra space printed at the end of R JSON
+ * Clarify error message for missing exports
+ * Clarify error message for missing concrete signature
+ * Fix exponential time bug in parser
+ * Allow prime characters in names after first position
+ * Allow '.' to separate namespaces in imports/modules
+ * Fix infinite loop bug when module name != import name
 
 0.36.0 [2022.02.17]
 -------------------
