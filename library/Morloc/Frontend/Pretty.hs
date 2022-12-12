@@ -22,7 +22,7 @@ instance Pretty ExprI where
 instance Pretty Expr where
   pretty UniE = "()"
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
-  pretty (TypE v vs t) = "type" <+> (pretty v) <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> pretty t
+  pretty (TypE v vs t) = "type" <+> pretty v <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
   pretty (ImpE (Import m (Just xs) _ _))
     = "import" <+> pretty m

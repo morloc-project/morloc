@@ -24,7 +24,6 @@ module Morloc.Frontend.Lexer
   , many1
   , sepBy2
   , freename
-  , name
   , tvar
   , newvar
   , number
@@ -225,7 +224,7 @@ number_ = do
 
   _exp :: Parser (Sign, Int)
   _exp = do
-    _ <- (char 'e')
+    _ <- char 'e'
     expsign <- _sign
     expval <- L.decimal
     return (expsign, expval)
@@ -289,16 +288,7 @@ stringLiteral = lexeme $ do
 freename :: Parser MT.Text
 freename = (lexeme . try) (p >>= check)
   where
-    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
-    check x =
-      if elem x reservedWords
-        then failure Nothing Set.empty -- TODO: error message
-        else return x
-
-name :: Parser MT.Text
-name = (lexeme . try) (p >>= check)
-  where
-    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_')
+    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_' <|> char '\'')
     check x =
       if elem x reservedWords
         then failure Nothing Set.empty -- TODO: error message

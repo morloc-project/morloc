@@ -18,7 +18,6 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
-import Morloc.CodeGenerator.Namespace (TypeP)
 import Morloc.Pretty
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
@@ -85,7 +84,7 @@ cmdTypecheck args _ config = do
       verbosity = if typecheckVerbose args then 1 else 0
   if typecheckType args
     then case F.readType (unCode code) of
-      (Left err) -> print (errorBundlePretty err)
+      (Left e) -> print (errorBundlePretty e)
       (Right x) -> print x 
     else MM.runMorlocMonad
            Nothing

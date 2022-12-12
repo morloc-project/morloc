@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-|
-Mnkodule      : Morloc.Frontend.Treeify
+Module      : Morloc.Frontend.Treeify
 Description : Translate from the frontend DAG to the backend SAnno AST forest
 Copyright   : (c) Zebulun Arendsee, 2021
 License     : GPL-3
@@ -14,7 +14,7 @@ module Morloc.Frontend.Treeify (treeify) where
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
 import Morloc.Frontend.PartialOrder ()
-import Morloc.Pretty
+import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
@@ -133,7 +133,7 @@ linkSignaturesModule _ (ExprI _ (ModE v es)) edges
   unalias :: [(EVar, EVar)] -> Map.Map EVar a -> Map.Map EVar [a]
   unalias es0 m =
     let aliases = Map.fromList . groupSort $ [(alias, srcname) | (srcname, alias) <- es0]
-    in Map.map (mapMaybe (flip Map.lookup $ m)) aliases
+    in Map.map (mapMaybe (`Map.lookup` m)) aliases
 linkSignaturesModule _ _ _ = MM.throwError . CallTheMonkeys $ "Expected a module at the top level" 
 
 
@@ -276,11 +276,11 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1) t2@(ExistU (TV l2 _) ps2 ds2)
+mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1) t2@(ExistU (TV l2 _) ps2 _)
   | l1 == l2 = ExistU v <$> zipWithM mergeTypeUs ps1 ps2 <*> pure ds1
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs (ExistU _ _ _) t = return t
-mergeTypeUs t (ExistU _ _ _) = return t
+mergeTypeUs ExistU {} t = return t
+mergeTypeUs t ExistU {} = return t
 
 -- Two universally qualified types may be merged if they are the same up to
 -- named of bound variables, for example:
@@ -332,11 +332,11 @@ collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
-collect (ExprI _ (ModE _ _)) (i, _) = do
+collect (ExprI _ (ModE moduleName _)) (i, exportName) = do
   t0 <- MM.metaTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
-    Nothing -> MM.throwError . CallTheMonkeys $ "Exported terms should map to signatures"
+    Nothing -> MM.throwError $ BadExport moduleName exportName
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
@@ -362,12 +362,12 @@ collectSAnno e@(ExprI i (VarE v)) = do
       s <- CMS.get
       CMS.put (s { stateName = Map.insert i v (stateName s) })
       -- pool all the calls and compositions with this name
-      return $ (calls <> declarations)
+      return (calls <> declarations)
   case es of
     [] -> do
       j <- MM.getCounter
       return $ SAnno (Many [(VarS v, j)]) i
-    es -> return $ SAnno (Many es) i
+    es' -> return $ SAnno (Many es') i
 
 -- expression type annotations should have already been accounted for, so ignore
 collectSAnno (ExprI _ (AnnE e _)) = collectSAnno e
@@ -386,15 +386,16 @@ replaceExpr i e@(ExprI j (VarE _)) = do
     (Just ti, Just tj) -> combineTermTypes ti tj 
     (Just ti, _) -> return ti
     (_, Just tj) -> return tj
+    _ -> error "You shouldn't have done that"
 
-  s <- MM.get
+  st <- MM.get
 
-  case GMap.change i t (stateSignatures s) of
+  case GMap.change i t (stateSignatures st) of
     (Just m) -> MM.modify (\s -> s {stateSignatures = m})
     _ -> error "impossible"
 
-  case GMap.yIsX (stateSignatures s) j i of
-    (Just m) -> MM.put (s {stateSignatures = m})
+  case GMap.yIsX (stateSignatures st) j i of
+    (Just m) -> MM.put (st {stateSignatures = m})
     Nothing -> return ()
 
   -- pass on just the children
@@ -404,17 +405,17 @@ replaceExpr _ e = collectSExpr e |>> return
 
 -- | Find all definitions of a term and collect their type annotations, if available
 collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
-collectSExpr e@(ExprI i e0) = do
+collectSExpr (ExprI i e0) = do
   f e0
   where
   f (VarE v) = noTypes (VarS v) -- this must be a bound variable
   f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
-  f (LstE es) = (LstS <$> mapM collectSAnno es) >>= noTypes
-  f (TupE es) = (TupS <$> mapM collectSAnno es) >>= noTypes
+  f (LstE es) = mapM collectSAnno es >>= noTypes . LstS
+  f (TupE es) = mapM collectSAnno es >>= noTypes . TupS
   f (NamE rs) = do
-    xs <- mapM collectSAnno (map snd rs)
+    xs <- mapM (collectSAnno . snd) rs
     noTypes $ NamS (zip (map fst rs) xs)
-  f (LamE v e) = LamS v <$> collectSAnno e >>= noTypes
+  f (LamE v e) = collectSAnno e >>= noTypes . LamS v
   f (AppE e es) = (AppS <$> collectSAnno e <*> mapM collectSAnno es) >>= noTypes
   f UniE = noTypes UniS
   f (RealE x) = noTypes (RealS x)
@@ -425,12 +426,12 @@ collectSExpr e@(ExprI i e0) = do
   -- none of the following cases should every occur
   f (AnnE _ _) = error "impossible"
   f (ModE _ _) = error "impossible"
-  f (TypE _ _ _) = error "impossible"
+  f TypE {} = error "impossible"
   f (ImpE _) = error "impossible"
   f (ExpE _) = error "impossible"
   f (SrcE _) = error "impossible"
-  f (SigE _ _ _) = error "impossible"
-  f (AssE _ _ _) = error "impossible"
+  f SigE {} = error "impossible"
+  f AssE {} = error "impossible"
 
   noTypes x = return (x, i)
 

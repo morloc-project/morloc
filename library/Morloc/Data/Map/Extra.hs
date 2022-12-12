@@ -53,10 +53,12 @@ mapKeysWithM
   -> Map.Map k1 a
   -> m (Map.Map k2 a)
 mapKeysWithM f g m
-  = fmap Map.fromList
-  $ Prelude.mapM (\(k, (v:vs)) -> (,) k <$> foldM f v vs)
+  = Map.fromList
+  <$> Prelude.mapM foldValues
       (groupSort $ map (\(k,x) -> (g k, x)) (Map.toList m))
-
+  where
+    foldValues (k, v:vs) = (,) k <$> foldM f v vs
+    foldValues _ = undefined -- there will never be empty values
 
 -- | monadic version of Data.Map mapKeysWith
 mapM :: (Ord k, Monad m) => (a -> m b) -> Map.Map k a -> m (Map.Map k b)

@@ -13,8 +13,7 @@ abandon the default prelude and create my own. But not just yet.
 -}
 module Morloc.Internal
   ( ifelse
-  , conmap
-  , conmapM
+  , concatMapM
   , unique
   , duplicates
   , module Data.Maybe
@@ -75,6 +74,7 @@ import System.FilePath
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
+
 maximumOnMay :: Ord b => (a -> b) -> [a] -> Maybe a
 maximumOnMay _ [] = Nothing
 maximumOnMay f xs = Just $ maximumOn f xs
@@ -95,7 +95,7 @@ uncurry3 :: (a -> b -> c -> d) -> (a, b, c) -> d
 uncurry3 f (x, y, z) = f x y z
 
 curry3 :: ((a, b, c) -> d) -> a -> b -> c -> d
-curry3 f = \x y z -> f (x, y, z)
+curry3 f x y z = f (x, y, z)
 
 third :: (a, b, c) -> c
 third (_, _, x) = x
@@ -119,15 +119,12 @@ ifelse :: Bool -> a -> a -> a
 ifelse True x _ = x
 ifelse False _ y = y
 
-conmap :: (a -> [b]) -> [a] -> [b]
-conmap f = concat . map f
-
-conmapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
-conmapM f = fmap concat . mapM f
+concatMapM :: Monad m => (a -> m [b]) -> [a] -> m [b]
+concatMapM f = fmap concat . mapM f
 
 -- | remove duplicated elements in a list while preserving order
 unique :: Ord a => [a] -> [a]
-unique xs0 = unique' Set.empty xs0 where 
+unique = unique' Set.empty where 
   unique' _   [] = []
   unique' set (x:xs)
     | Set.member x set = unique' set xs

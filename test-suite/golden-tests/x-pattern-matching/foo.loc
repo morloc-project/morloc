@@ -1,0 +1,27 @@
+{- Make patterns at least as expressive as Haskell. What opportunities are there
+for greater expressiveness? Don't think in those directions. I don't even need
+pattern matching yet. -}
+
+type Alignment = Good | Bad | Ugly
+
+-- dispatches to a function depending on value of an enum
+doit :: Alignment -> a -> b
+
+---- haskell syntax
+doit Good x = f1 x
+doit Bad x = f2 x
+doit Ugly x = f3 x
+-- downside with this is that it could get confusing if there are multiple
+-- implementations of the function written (which is allowed)
+
+---- guard syntax (perhaps combining conditional guards with pattern matching?)
+doit | Good x = f1 x
+     | Bad x = f2 x
+     | Ugly (x; x > 10) = f3 x
+     | Ugly x = f4 x
+
+-- or a match keyword:
+doit x = match x
+    Good -> f1 x
+    Bad -> f2 x
+    Ugly -> f3 x

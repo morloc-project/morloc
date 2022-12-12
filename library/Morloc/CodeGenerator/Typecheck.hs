@@ -19,12 +19,9 @@ import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
-import qualified Control.Monad.State as CMS
-import qualified Morloc.Data.GMap as GMap
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -72,19 +69,19 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
   -- find all associated type annotations for this language
   (g1, ts) <- case fmap termConcrete mayts of
     (Just ts') -> do
-      let es = filter ((==) (Just lang) . langOf) (conmap (\(_, t, _) -> t) ts')
+      let es = filter ((==) (Just lang) . langOf) (concatMap (\(_, t, _) -> t) ts')
           (g1', ts'') = statefulMap rename g0 (map etype es)
-      return $ (g1', zipWith (\e t -> e {etype = t}) es ts'')
+      return (g1', zipWith (\e' t -> e' {etype = t}) es ts'')
     Nothing -> return (g0, [])
 
   say $ "retrieveTypes" <+> pretty i <+> pretty j
   say $ pretty ts
   peakGen e
-  say $ "----------------------"
+  say "----------------------"
 
   (g2, x1) <- case x0 of
     UniS -> return (g1, UniS)
-    (VarS v) -> return $ (g1, VarS v)
+    (VarS v) -> return (g1, VarS v)
     (AccS x k) -> do
       (g', x') <- retrieveTypes g1 x
       return (g', AccS x' k)
@@ -101,18 +98,18 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
       (g', x') <- retrieveTypes g1 x
       (g'', xs') <- statefulMapM retrieveTypes g' xs
       return (g'', AppS x' xs')
-    (RealS x) -> return $ (g1, RealS x)
-    (IntS x) -> return $ (g1, IntS x)
-    (LogS x) -> return $ (g1, LogS x)
-    (StrS x) -> return $ (g1, StrS x)
+    (RealS x) -> return (g1, RealS x)
+    (IntS x) -> return (g1, IntS x)
+    (LogS x) -> return (g1, LogS x)
+    (StrS x) -> return (g1, StrS x)
     (NamS rs) -> do
       (g', xs') <- statefulMapM retrieveTypes g1 (map snd rs)
-      return $ (g', NamS (zip (map fst rs) xs'))
-    (CallS src) -> return $ (g1, CallS src)
+      return (g', NamS (zip (map fst rs) xs'))
+    (CallS src) -> return (g1, CallS src)
 
   let e2 = SAnno (One (x1, Idx i (lang, ts))) g
   peakGen e2
-  say $ "======================"
+  say "======================"
 
   return (g2, e2)
 
@@ -120,7 +117,7 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
 weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
-weaveAndResolve e@(SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
+weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
   pt <- weaveResolvedTypes gt (typeOf ct)
   x1 <- case x0 of
     UniS -> return UniS
@@ -157,14 +154,14 @@ synthG
        )
 
 -- if there are no annotations, the SAnno can be simplified and synth' can be called
-synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ tg)) = do
+synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ _)) = do
   (g1, t, x') <- synthE' i l g0 x
   -- g2 <- subtype' i t (type2typeu tg) g1
   -- return (g2, t, SAnno (One (x', Idx i t)) m)
   return (g1, t, SAnno (One (x', Idx i t)) m)
 
 -- AnnoMany=>
-synthG g0 (SAnno (One (x, Idx i (lang, (t:ts)))) m)
+synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m)
   = checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
 
 
@@ -178,12 +175,12 @@ checkG
        , TypeU
        , SAnno (Indexed Type) One (Indexed TypeU)
        )
-checkG g0 (SAnno (One (e0, Idx i (l, (et:ets)))) m) t0 = do
-  (g1, t1, e1) <- checkE i l g0 e0 (etype et)
+checkG g0 (SAnno (One (e0, Idx i (l, et:ets))) m) t0 = do
+  (g1, t1, _) <- checkE i l g0 e0 (etype et)
   g2 <- subtype' i t1 t0 g1
   checkG g2 (SAnno (One (e0, Idx i (l, ets))) m) (apply g2 t1)
 
-checkG g0 (SAnno (One (e0, Idx i (l, []))) m@(Idx _ tg)) t0 = do
+checkG g0 (SAnno (One (e0, Idx i (l, []))) m@(Idx _ _)) t0 = do
   (g1, t1, e1) <- checkE i l g0 e0 t0
   -- FIXME: I do need to somewhere ensure that concrete and general agree
   -- g2 <- subtype' i t1 (type2typeu tg) g1
@@ -231,7 +228,7 @@ synthE _ lang g (LogS x) = do
       (g', t) = newvarRich [] ts "log_" (Just lang) g
   return (g' +> t, t, LogS x)
 
-synthE i lang g (AccS e k) = do
+synthE i _ g (AccS e k) = do
   (g1, t1, e1) <- synthG' g e
   valType <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
@@ -241,7 +238,7 @@ synthE i lang g (AccS e k) = do
   return (g1, valType, AccS e1 k)
 
 --   -->E0
-synthE _ lang g (AppS f []) = do
+synthE _ _ g (AppS f []) = do
   (g1, t1, f1) <- synthG' g f
   return (g1, t1, AppS f1 [])
 
@@ -264,7 +261,7 @@ synthE i lang g0 (AppS f xs0) = do
   return (g2, apply g2 appliedType, AppS (applyCon g2 funExpr0) inputExprs)
 
 --   -->I==>
-synthE i _ g0 f@(LamS vs x@(SAnno (One (_, Idx _ (lang, _))) _)) = do
+synthE i _ g0 f@(LamS vs (SAnno (One (_, Idx _ (lang, _))) _)) = do
   -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") (Just lang) g') g0 vs
       (g2, ft) = newvar "o_" (Just lang) g1
@@ -326,13 +323,13 @@ synthE i lang g0 (NamS ((k,x):rs)) = do
   return (g2, t, NamS ((k, headExpr):tailExprs))
 
 -- Sources are axiomatic. They are they type they are said to be.
-synthE i lang g (CallS src) = do
+synthE _ lang g (CallS src) = do
   let (g', t) = newvar "src_" (Just lang) g
   return (g', t, CallS src)
 
 -- Any morloc variables should have been expanded by treeify. Any bound
 -- variables should be checked against. I think (this needs formalization).
-synthE i lang g (VarS v) = do
+synthE _ lang g (VarS v) = do
   -- is this a bound variable that has already been solved
   (g', t') <- case lookupE v g of
     -- yes, return the solved type
@@ -356,7 +353,7 @@ application
 --  g1 |- e <= A -| g2
 -- ----------------------------------------- -->App
 --  g1 |- A->C o e =>> C -| g2
-application i lang g0 es0 (FunU as0 b0) = do
+application i _ g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyCon g1) es1
       funType = apply g1 $ FunU (as1 <> remainder) b0
@@ -377,7 +374,7 @@ application i _ g0 es (ExistU v@(TV (Just lang) s) [] _) =
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" (Just lang)) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") (Just lang)
-          eas = [ExistU v [] [] | v <- veas]
+          eas = [ExistU v' [] [] | v' <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
@@ -390,7 +387,7 @@ application i _ g0 es (ExistU v@(TV (Just lang) s) [] _) =
         return (g1, apply g1 (FunU ts' t), es')
       _ -> cerr i ApplicationOfNonFunction
 
-application i lang _ e t = cerr i ApplicationOfNonFunction
+application i _ _ _ _ = cerr i ApplicationOfNonFunction
  
 
 -- Tip together the arguments passed to an application
@@ -413,7 +410,7 @@ zipCheck i g0 (x0:xs0) (t0:ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ es [] = cerr i TooManyArguments
+zipCheck i _ _ [] = cerr i TooManyArguments
 
 
 checkE
@@ -431,15 +428,15 @@ checkE i lang g1 (LstS (e:es)) (AppU v [t]) = do
   (g2, t2, e') <- checkG' g1 e t
   -- LstS [] will go to the normal Sub case
   (g3, t3, LstS es') <- checkE i lang g2 (LstS es) (AppU v [t2])
-  return (g3, t3, (LstS (map (applyCon g3) (e':es'))))
+  return (g3, t3, LstS (map (applyCon g3) (e':es')))
 
-checkE _ lang g1 (LamS [] e1) (FunU [] b1) = do
+checkE _ _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
   return (g2, FunU [] b2, LamS [] e2)
 
-checkE _ lang g1 (LamS [] e1) t = do
-  (g2, t, e2) <- checkG' g1 e1 t
-  return (g2, t, LamS [] e2)
+checkE _ _ g1 (LamS [] e1) t0 = do
+  (g2, t1, e2) <- checkG' g1 e1 t0
+  return (g2, t1, LamS [] e2)
 
 checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- defined x:A
@@ -469,7 +466,7 @@ checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
 checkE i lang g1 e1 (ForallU v a) = checkE' i lang (g1 +> v) e1 (substitute v a)
 
 -- Called functions are axiomatic
-checkE i lang g1 (CallS src) t = return (g1, t, CallS src)
+checkE _ _ g1 (CallS src) t = return (g1, t, CallS src)
 
 --   Sub
 checkE i lang g1 e1 b = do
@@ -501,15 +498,15 @@ applyCon g = mapSAnno id (fmap (apply g))
 enter :: Doc ann -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
-  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
+  debugLog $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
 
 say :: Doc ann -> MorlocMonad ()
 say d = do
   depth <- MM.getDepth
-  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
+  debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
 
 seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map pretty (gammaContext g)))
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
 seeType :: TypeU -> MorlocMonad ()
 seeType t = say $ pretty t
@@ -517,14 +514,12 @@ seeType t = say $ pretty t
 leave :: Doc ann -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
-  debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
+  debugLog $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
   verbosity <- MM.gets stateVerbosity
-  if verbosity > 0
-    then (liftIO . putDoc) d
-    else return ()
+  when (verbosity > 0) $ (liftIO . putDoc) d
 
 peak :: (Pretty c) => SExpr (Indexed Type) One c -> MorlocMonad ()
 peak = say . prettySExpr pretty showGen
@@ -532,14 +527,8 @@ peak = say . prettySExpr pretty showGen
 peakGen :: (Pretty c) => SAnno (Indexed Type) One c -> MorlocMonad ()
 peakGen = say . prettySAnno pretty showGen
 
-showGen :: (Indexed Type) -> Doc ann
+showGen :: Indexed Type -> Doc ann
 showGen (Idx _ t) = parens (pretty t)
-
-zipCheck' i g es ts = do
-  enter "zipCheck"
-  r@(g, ts, es, rs) <- zipCheck i g es ts
-  leave "zipCheck"
-  return r
 
 synthG' g x = do
   enter "synthG"

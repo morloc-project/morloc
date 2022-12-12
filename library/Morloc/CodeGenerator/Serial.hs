@@ -103,7 +103,7 @@ serialAstToType' (SerialInt    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
 serialAstToType' (SerialNull   x) = VarP x
-serstToType' (SerialUnknown v)
+serialAstToType' (SerialUnknown v)
   = error . render' $ complainAboutUnresolvedGenerics "serialAstToType'" v
 
 
@@ -125,8 +125,8 @@ shallowType (SerialUnknown v)
   $ complainAboutUnresolvedGenerics "shallowType" v
 
 complainAboutUnresolvedGenerics :: MDoc -> PVar -> MDoc
-complainAboutUnresolvedGenerics place (PV lang _ name)
-  = "Cannot guess serialization type for" <+> viaShow lang <+> "type named" <+> viaShow name <+> "in" <+> place <> "."
+complainAboutUnresolvedGenerics place (PV lang _ name')
+  = "Cannot guess serialization type for" <+> viaShow lang <+> "type named" <+> viaShow name' <+> "in" <+> place <> "."
   <+> "This is likely caused by usage of an unresolved generic"
 
 makeSerialAST
@@ -144,21 +144,23 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts)
-  | isList t = SerialList <$> makeSerialAST m (ts !! 0)
+makeSerialAST _ (AppP _ []) = undefined
+makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts@(t0:_))
+  | isList t = SerialList <$> makeSerialAST m t0
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (pv2tv v, length ts) m of
         (Just ps) -> do
           ps' <- mapM (resolvePacker t ts) ps
-          ts' <- mapM (makeSerialAST m) (map typePackerType ps')
+          ts' <- mapM (makeSerialAST m . typePackerType) ps'
           return $ SerialPack v (Many (zip ps' ts'))
         Nothing -> MM.throwError . SerializationError . render
           $ "Cannot find constructor" <+> dquotes (pretty s)
           <> "<" <> pretty (length ts) <> ">"
           <+> "in packmap:\n" <> prettyPackMap m
 makeSerialAST m (NamP o n ps rs) = do
-  ts <- mapM (makeSerialAST m) (map snd rs)
+  ts <- mapM (makeSerialAST m . snd) rs
   return $ SerialObject o n ps (zip (map fst rs) ts)
+makeSerialAST _ _ = undefined
 
 
 pvarEqual :: PVar -> PVar -> Bool

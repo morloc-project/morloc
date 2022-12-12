@@ -41,9 +41,7 @@ module Morloc.Typecheck.Internal
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
-import qualified Morloc.Data.GMap as GMap
-import qualified Control.Monad.State as CMS
-import Morloc.Pretty
+import Morloc.Pretty ()
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
@@ -95,7 +93,7 @@ instance Indexable TVar where
   index v = ExistG v [] []
 
 (+>) :: Indexable a => Gamma -> a -> Gamma
-(+>) g x = g {gammaContext = (index x) : gammaContext g}
+(+>) g x = g {gammaContext = index x : gammaContext g}
 
 
 (++>) :: Indexable a => Gamma -> [a] -> Gamma
@@ -241,7 +239,7 @@ instantiate :: TypeU -> TypeU -> Gamma -> Either TypeError Gamma
 instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
       (g3, veb) = tvarname g2 "to" lang
-      eas = [ExistU v [] [] | v <- veas]
+      eas = [ExistU v' [] [] | v' <- veas]
       eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
       Just (rs, _, ls) ->
@@ -257,15 +255,14 @@ instantiate ta@(ExistU v@(TV lang _) [] _) tb@(FunU as b) g1 = do
 instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _) g1 = do
   let (g2, veas) = statefulMap (\g _ -> tvarname g "ta" lang) g1 as
       (g3, veb) = tvarname g2 "to" lang
-      eas = [ExistU v [] [] | v <- veas]
+      eas = [ExistU v' [] [] | v' <- veas]
       eb = ExistU veb [] []
   g4 <- case access1 v (gammaContext g3) of
     Just (rs, _, ls) ->
         return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ (index eb : map index eas) ++ ls }
     Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
   g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
-  g6 <- instantiate eb (apply g5 b) g5
-  return g6
+  instantiate eb (apply g5 b) g5
 
 
 
@@ -326,7 +323,7 @@ instantiate ta@(ExistU v [] []) tb g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       case access1 v (gammaContext g1) of
-        (Just (ls, _, rs)) -> return $ g1 { gammaContext = ls ++ (SolvedG v tb) : rs }
+        (Just (ls, _, rs)) -> return $ g1 { gammaContext = ls ++ SolvedG v tb : rs }
         Nothing ->
           case lookupU v g1 of
             (Just _) -> return g1
@@ -335,9 +332,7 @@ instantiate ta@(ExistU v [] []) tb g1
 
 -- if defaults are involved, no solving is done, but the subtypes of parameters
 -- and defaults needs to be checked. 
-instantiate (ExistU _ ps1 ds1) (ExistU _ ps2 ds2) g1 = do
-  g2 <- foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
-  return g2
+instantiate (ExistU _ ps1 _) (ExistU _ ps2 _) g1 = foldM (\g (t1, t2) -> subtype t1 t2 g) g1 (zip ps1 ps2)
   ----- FIXME: how should defaults be handled?
   -- certainly NOT this:
   -- g3 <- foldM (\g d1 -> foldM (\g' d2 -> subtype d1 d2 g') g ds2) g2 ds1
@@ -456,7 +451,7 @@ renameSExpr c0@(m, g) e0 = case e0 of
     (Just v') -> (c0, VarS v')
     Nothing -> (c0, VarS v)
   (LamS vs x) ->
-    let (g', vs') = statefulMap (\g' (EV v) -> evarname g' (v <> "_e")) g vs
+    let (g', vs') = statefulMap (\g'' (EV v) -> evarname g'' (v <> "_e")) g vs
         m' = foldr (uncurry Map.insert) m (zip vs vs')
         (c1, x') = renameSAnno (m', g') x
     in (c1, LamS vs' x')

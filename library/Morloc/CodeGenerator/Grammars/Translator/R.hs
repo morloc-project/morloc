@@ -33,10 +33,10 @@ translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
-    (unique . catMaybes . map srcPath $ srcs)
+    (unique . mapMaybe srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc $ (vsep $ map pretty es)
+  liftIO . putDoc . vsep $ map pretty es
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
@@ -92,22 +92,22 @@ serialize v0 s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
       return ([lst], v')
 
     construct v (SerialTuple ss) = do
-      (befores, ss') <- fmap unzip $ zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
-      idx <- fmap pretty $ MM.getCounter
+      (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [1..] ss
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} <- list#{tupled ss'}|]
       return (concat befores ++ [x], v');
 
     construct v (SerialObject _ _ _ rs) = do
-      (befores, ss') <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
-      idx <- fmap pretty $ MM.getCounter
+      (befores, ss') <- mapAndUnzipM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- list#{tupled entries};|]
@@ -125,7 +125,7 @@ deserialize v0 s0
       let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
       return (deserializing, [])
   | otherwise = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
       schema <- typeSchema t
       let rawvar = "s" <> idx
@@ -148,22 +148,23 @@ deserialize v0 s0
       return (deserialized, before)
 
     construct v (SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
       let lst = block 4 [idoc|#{v'} <- lapply(#{v}, function(i#{idx})|] (vsep (before ++ [x])) <> ")"
       return (v', [lst])
 
     construct v (SerialTuple ss) = do
-      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
-      idx <- fmap pretty $ MM.getCounter
+      (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
+      idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} <- list#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     construct v (SerialObject _ (PV _ _ constructor) _ rs) = do
-      idx <- fmap pretty $ MM.getCounter
-      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
+      idx <- fmap pretty MM.getCounter
+      
+      (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
           decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries};|]
@@ -178,7 +179,7 @@ deserialize v0 s0
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m0@(ManifoldM _ args0 _) = do
   MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
+  vsep . punctuate line . (\(x,_,_)->x) <$> f args0 m0
   where
 
 
@@ -198,15 +199,15 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f _ (PoolCallM _ _ cmds args) = do
     let quotedCmds = map dquotes cmds
         callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map makeArgument args)) <> ")"
-        call = ".morloc_foreign_call" <> tupled([head quotedCmds, callArgs, dquotes "_", dquotes "_"])
+        call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
     return ([], call, [])
 
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
-    (ms1', e1', rs1) <- (f args) e1
-    (ms2', e2', rs2) <- (f args) e2
+    (ms1', e1', rs1) <- f args e1
+    (ms2', e2', rs2) <- f args e2
     let rs = rs1 ++ [ letNamer i <+> "<-" <+> e1' ] ++ rs2
     return (ms1' ++ ms2', e2', rs)
 
@@ -303,8 +304,8 @@ jsontype2rjson (NamJ objType rs) =
     "record" -> "{" <> dquotes "record" <> ":" <> encloseSep "{" "}" "," rs' <> "}"
     _ -> encloseSep "{" "}" "," rs'
   where
-  keys = map (dquotes . pretty) (map fst rs) 
-  vals = map jsontype2rjson (map snd rs)
+  keys = map (dquotes . pretty . fst) rs
+  vals = map (jsontype2rjson . snd) rs
   rs' = zipWith (\key val -> key <> ":" <> val) keys vals
 
 makePool :: [MDoc] -> [MDoc] -> MDoc

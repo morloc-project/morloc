@@ -81,6 +81,7 @@ emptyState path v = MorlocState {
   , stateSignatures = GMap.empty
   , stateTypedefs = GMap.empty
   , stateSources = GMap.empty
+  , stateAnnotations = Map.empty
   , stateOutfile = path
   , statePackers = GMap.empty
   , stateName = Map.empty
@@ -95,7 +96,7 @@ getCounter :: MorlocMonad Int
 getCounter = do
   s <- get
   let i = stateCounter s
-  put $ s {stateCounter = (stateCounter s) + 1}
+  put $ s {stateCounter = stateCounter s + 1}
   return i
 
 setCounter :: Int -> MorlocMonad ()
@@ -144,7 +145,7 @@ runCommand loc cmd = do
     liftIO $ SP.readCreateProcessWithExitCode (SP.shell . MT.unpack $ cmd) []
   case exitCode of
     SE.ExitSuccess -> tell [MT.pack err']
-    _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> (\_ -> ())
+    _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> const ()
 
 say :: MDoc -> MorlocMonad ()
 say d = liftIO . putDoc $ " : " <> d <> "\n"
@@ -244,7 +245,7 @@ metaType i = do
   s <- gets stateSignatures 
   return $ case GMap.lookup i s of
     (GMapJust (TermTypes (Just e) _ _)) ->
-      if langOf e == Nothing
+      if isNothing (langOf e)
         then Just (etype e) 
         else Nothing
     _ -> Nothing
@@ -266,7 +267,7 @@ metaType i = do
 --
 -- The name is linked to the SAnno general data structure.
 metaName :: Int -> MorlocMonad (Maybe EVar)
-metaName i = Map.lookup i <$> gets stateName
+metaName i = gets (Map.lookup i . stateName)
 
 metaPackMap :: Int -> MorlocMonad PackMap
 metaPackMap i = do

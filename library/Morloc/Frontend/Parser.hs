@@ -25,26 +25,27 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.System as MS
-import qualified Text.Megaparsec.Char.Lexer as L
 
 -- | Parse a single file or string that may contain multiple modules. Each
 -- module is written written into the DAG of previously observed modules.
 readProgram
-  :: Maybe Path
+  :: Maybe MVar
+  -- ^ The expected module name, 
+  -> Maybe Path
   -- ^ An optional path to the file the source code was read from. If no path
   -- is given, then the source code was provided as a string.
   -> MT.Text -- ^ Source code
   -> ParserState
   -> DAG MVar Import ExprI -- ^ Possibly empty directed graph of previously observed modules
   -> Either (ParseErrorBundle MT.Text Void) (DAG MVar Import ExprI, ParserState)
-readProgram f sourceCode pstate p =
+readProgram moduleName modulePath sourceCode pstate p =
   case runParser
-         (CMS.runStateT (sc >> pProgram <* eof) (reenter f pstate))
-         (maybe "<expr>" id f)
+         (CMS.runStateT (sc >> pProgram moduleName <* eof) (reenter modulePath pstate))
+         (maybe "<expr>" id modulePath)
          sourceCode of
     (Left err') -> Left err'
     -- all will be ModE expressions, since pTopLevel can return only these
-    (Right (es, s)) ->
+    (Right (es, s)) -> 
       let dag = foldl (\d (k,xs,n) -> Map.insert k (n,xs) d) p (map AST.findEdges es)
       in Right (dag, s)
 
@@ -62,13 +63,22 @@ reenter f p = p {stateMinPos = mkPos 1, stateAccepting = True, stateModulePath =
 
 -- | The output will be rolled into the final DAG of modules. There may be
 -- EITHER one implicit main module OR one or more named modules.
-pProgram :: Parser [ExprI]
-pProgram = try (align pModule) <|> plural pMain
+pProgram
+    :: Maybe MVar -- ^ The expected module path (fail if it doesn't match)
+    -> Parser [ExprI]
+pProgram m = try (align (pModule m)) <|> plural pMain
 
 -- | match a named module
-pModule :: Parser ExprI
-pModule = do
-  moduleName <- reserved "module" >> freename
+pModule
+    :: Maybe MVar -- ^ The expected module path
+    -> Parser ExprI
+pModule expModuleName = do
+  reserved "module"
+
+  moduleName <- case expModuleName of
+    Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
+    (Just (MV n)) -> symbol n
+
   es <- align pTopExpr |>> concat
   exprI $ ModE (MV moduleName) es
 
@@ -112,8 +122,8 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pAcc
-  <|> try pNamE
+      try pAcc    -- access <expr>@
+  <|> try pNamE   -- record
   <|> try pTupE
   <|> try pUni
   <|> try pAnn
@@ -131,7 +141,8 @@ pExpr =
 pImport :: Parser ExprI
 pImport = do
   _ <- reserved "import"
-  n <- freename
+  -- There may be '.' in import names, these represent folders/namespaces of modules
+  n <- MT.intercalate "." <$> sepBy freename (symbol ".")
   imports <-
     optional $
     parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
@@ -309,8 +320,8 @@ pSigE = do
 
 pSrcE :: Parser [ExprI]
 pSrcE = do
-  modulePath <- CMS.gets stateModulePath
   reserved "source"
+  modulePath <- CMS.gets stateModulePath
   language <- pLang
   srcfile <- optional (reserved "from" >> stringLiteral |>> MT.unpack)
   rs <- parens (sepBy1 pImportSourceTerm (symbol ","))
@@ -341,7 +352,7 @@ pSrcE = do
 
 
 pLstE :: Parser ExprI
-pLstE = (LstE <$> brackets (sepBy pExpr (symbol ","))) >>= exprI
+pLstE = brackets (sepBy pExpr (symbol ",")) >>= exprI . LstE
 
 
 pTupE :: Parser ExprI
@@ -397,8 +408,7 @@ pApp = do
   es <- many1 s
   exprI $ AppE f es
   where
-    s =   try pAnn
-      <|> try (parens pExpr)
+    s =   try (parens pExpr)
       <|> try pUni
       <|> try pStrE
       <|> try pLogE
@@ -418,7 +428,7 @@ pLogE = do
     pFalse = reserved "False" >> return (LogE False)
 
 pStrE :: Parser ExprI
-pStrE = fmap StrE stringLiteral >>= exprI
+pStrE = stringLiteral >>= exprI . StrE
 
 pNumE :: Parser ExprI
 pNumE = do
@@ -436,7 +446,7 @@ pLam = do
   exprI $ LamE vs e
 
 pVar :: Parser ExprI
-pVar = fmap VarE pEVar >>= exprI
+pVar = pEVar >>= exprI . VarE
 
 
 pEVar :: Parser EVar
@@ -479,10 +489,7 @@ pUniU = do
     (_, ts) -> return $ ExistU v [] ts  -- other languages maybe have multiple definitions
 
 parensType :: Parser TypeU
-parensType = do
-  _ <- tag (symbol "(")
-  t <- parens pType
-  return t
+parensType = tag (symbol "(") >> parens pType
 
 pTupleU :: Parser TypeU
 pTupleU = do

@@ -20,6 +20,7 @@ import qualified Morloc.Monad as MM
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
+import Data.Bifunctor (first)
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and and everything else are abstracted away,
@@ -32,24 +33,24 @@ import qualified Data.Map as Map
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
-typecheck es = mapM run es where
+typecheck = mapM run where
     run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
     run e0 = do
       -- standardize names for lambda bound variables (e.g., x0, x1 ...)
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
           ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
       (g2, _, e2) <- synthG' g1 e1
-      say $ "-------- leaving frontend typechecker ------------------"
+      say "-------- leaving frontend typechecker ------------------"
       say "g2:"
       seeGamma g2
       say "e2:"
       peakGen e2
-      say $ "========================================================"
+      say "========================================================"
       return (applyGen g2 e2)
 
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
 resolveTypes (SAnno (Many es) (Idx i t))
-  = SAnno (Many (map (\(e, i') -> (f e, i')) es)) (Idx i (typeOf t)) where
+  = SAnno (Many (map (first f) es)) (Idx i (typeOf t)) where
   f :: SExpr (Indexed TypeU) Many Int -> SExpr (Indexed Type) Many Int
   f (AccS x k) = AccS (resolveTypes x) k
   f (AppS x xs) = AppS (resolveTypes x) (map resolveTypes xs) 
@@ -143,7 +144,7 @@ synthE
        , SExpr (Indexed TypeU) Many Int
        )
 
-synthE _ g (UniS) = return (g, MLD.defaultGeneralType UniS, UniS)
+synthE _ g UniS = return (g, MLD.defaultGeneralType UniS, UniS)
 synthE _ g (RealS x) = return (g, MLD.defaultGeneralType (RealS x), RealS x)
 synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
 synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
@@ -182,7 +183,7 @@ synthE i g0 (AppS f xs0) = do
   return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 --   -->I==>
-synthE i g0 f@(LamS vs x) = do
+synthE i g0 f@(LamS vs _) = do
   -- create existentials for everything and pass it off to check
   let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
       (g2, ft) = newvar "o_" Nothing g1
@@ -306,7 +307,7 @@ application i g0 es (ExistU v@(TV _ s) [] _) =
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") Nothing
-          eas = [ExistU v [] [] | v <- veas]
+          eas = [ExistU v' [] [] | v' <- veas]
           ea = ExistU vea [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
@@ -319,7 +320,7 @@ application i g0 es (ExistU v@(TV _ s) [] _) =
         return (g1, apply g1 (FunU ts' t), es')
       _ -> gerr i ApplicationOfNonFunction
 
-application i _ e t = do
+application i _ _ _ = do
   gerr i ApplicationOfNonFunction
 
 
@@ -344,7 +345,7 @@ zipCheck i g0 (x0:xs0) (t0:ts0) = do
 -- If there are fewer arguments than types, this may be OK, just partial application
 zipCheck _ g0 [] ts = return (g0, [], [], ts)
 -- If there are fewer types than arguments, then die
-zipCheck i _ es [] = gerr i TooManyArguments
+zipCheck i _ _ [] = gerr i TooManyArguments
 
 
 checkE
@@ -361,15 +362,15 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
   (g2, t2, e') <- checkG' g1 e t 
   -- LstS [] will go to the normal Sub case
   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
-  return (g3, t3, (LstS (map (applyGen g3) (e':es'))))
+  return (g3, t3, LstS (map (applyGen g3) (e':es')))
 
 checkE _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
   return (g2, FunU [] b2, LamS [] e2)
 
-checkE _ g1 (LamS [] e1) t = do
-  (g2, t, e2) <- checkG' g1 e1 t
-  return (g2, t, LamS [] e2)
+checkE _ g1 (LamS [] e1) t0 = do
+  (g2, t1, e2) <- checkG' g1 e1 t0
+  return (g2, t1, LamS [] e2)
 
 checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
   -- defined x:A
@@ -425,15 +426,15 @@ cut' i idx g = case cut idx g of
 enter :: Doc ann -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
-  debugLog $ pretty (take depth (repeat '-')) <> ">" <+> d <> "\n"
+  debugLog $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
 
 say :: Doc ann -> MorlocMonad ()
 say d = do
   depth <- MM.getDepth
-  debugLog $ pretty (take depth (repeat ' ')) <> ":" <+> d <> "\n"
+  debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
 
 seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> (vsep (map pretty (gammaContext g)))
+seeGamma g = say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
 seeType :: TypeU -> MorlocMonad ()
 seeType t = say $ pretty t
@@ -441,31 +442,23 @@ seeType t = say $ pretty t
 leave :: Doc ann -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
-  debugLog $ "<" <> pretty (take (depth+1) (repeat '-')) <+> d <> "\n"
+  debugLog $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
   verbosity <- MM.gets stateVerbosity
-  if verbosity > 0
-    then (liftIO . putDoc) d
-    else return ()
-
-zipCheck' i g es ts = do
-  enter "zipCheck" 
-  r@(g, ts, es, rs) <- zipCheck i g es ts
-  leave "zipCheck"
-  return r
+  when (verbosity > 0) $ (liftIO . putDoc) d
 
 synthG' g x = do
-  -- enter "synthG"
+  enter "synthG"
   r <- synthG g x
-  -- leave "synthG"
+  leave "synthG"
   return r
 
 checkG' g x t = do
-  -- enter "checkG"
+  enter "checkG"
   r <- checkG g x t
-  -- leave "checkG"
+  leave "checkG"
   return r
 
 synthE' i g x = do
@@ -502,11 +495,11 @@ application' i g es t = do
   return r
 
 peak :: Foldable f => SExpr g f c -> MorlocMonad ()
-peak = say . prettySExpr (\_ -> "") (\_ -> "")
+peak = say . prettySExpr (const "") (const "")
 -- peak x = say $ f x where
 
 peakGen :: Foldable f => SAnno g f c -> MorlocMonad ()
-peakGen = say . prettySAnno (\_ -> "") (\_ -> "")
+peakGen = say . prettySAnno (const "") (const "")
 -- peak x = say $ f x where
 
 -- apply context to a SAnno
@@ -515,5 +508,5 @@ applyGen :: (Functor gf, Functor f, Applicable g)
 applyGen g = mapSAnno (fmap (apply g)) id
 
 applyCon :: (Functor gf, Functor f, Applicable g)
-         => Gamma -> (SExpr (gf g) f c) -> (SExpr (gf g) f c)
+         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
 applyCon g = mapSExpr (fmap (apply g)) id

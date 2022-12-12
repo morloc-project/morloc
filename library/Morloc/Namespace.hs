@@ -30,7 +30,6 @@ module Morloc.Namespace
   , GType(..)
   , gtype
   , EVar(..)
-  , unEVar
   , TVar(..)
   , unTVar
   , MVar(..)
@@ -101,11 +100,10 @@ import Data.Map.Strict (Map)
 import Data.Monoid
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import Data.Text.Prettyprint.Doc (Doc)
+import Prettyprinter (Doc)
 import Data.Void (Void)
 import Morloc.Internal
 import Text.Megaparsec (ParseErrorBundle)
-import Text.Megaparsec ()
 import System.Directory.Tree (DirTree(..), AnchoredDirTree(..))
 import Morloc.Language (Lang(..))
 
@@ -358,8 +356,8 @@ data TypeError
   | Mismatch TypeU TypeU Text
   | UnboundVariable EVar
   | KeyError Text TypeU
-  | MissingConcreteSignature Source
-  | MissingGeneralSignature Source
+  | MissingConcreteSignature EVar Lang
+  | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | TooManyArguments
   | EmptyExpression
@@ -409,6 +407,7 @@ data MorlocError
   | MultipleModuleDeclarations [MVar]
   | NestedModule MVar
   | BadImport MVar EVar
+  | BadExport MVar EVar
   | CannotFindModule MVar
   | CyclicDependency
   | SelfImport MVar
@@ -489,16 +488,13 @@ data Config =
 
 newtype MVar = MV { unMVar :: Text } deriving (Show, Eq, Ord)
 
-data EVar = EV Text deriving (Show, Eq, Ord)
+newtype EVar = EV { unEVar :: Text } deriving (Show, Eq, Ord)
 
 data TVar = TV (Maybe Lang) Text deriving(Show, Eq, Ord)
 
 -- | Let the TVar type behave like the MVar newtype
 unTVar :: TVar -> Text
 unTVar (TV _ t) = t
-
-unEVar :: EVar -> Text
-unEVar (EV e) = e
 
 data Source =
   Source
@@ -523,10 +519,10 @@ data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 data None = None
   deriving (Show)
 
-data One a = One a
+newtype One a = One a
   deriving (Show)
 
-data Many a = Many [a]
+newtype Many a = Many [a]
   deriving (Show)
 
 
@@ -547,7 +543,7 @@ data SExpr g f c
   = UniS
   | VarS EVar
   | AccS (SAnno g f c) Text
-  | AppS (SAnno g f c) [(SAnno g f c)]
+  | AppS (SAnno g f c) [SAnno g f c]
   | LamS [EVar] (SAnno g f c)
   -- containers
   | LstS [SAnno g f c]
@@ -563,12 +559,12 @@ data SExpr g f c
 mapSAnno :: Functor f => (g -> g') -> (c -> c') -> SAnno g f c -> SAnno g' f c'
 mapSAnno fg fc (SAnno e g) = SAnno (fmap (mapSExpr' fg fc) e) (fg g) where
   mapSExpr' :: Functor f => (g -> g') -> (c -> c') -> (SExpr g f c, c) -> (SExpr g' f c', c')
-  mapSExpr' fg fc (e0, c) = (mapSExpr fg fc e0, fc c)
+  mapSExpr' fg' fc' (e', c) = (mapSExpr fg' fc' e', fc' c)
 
 mapSExpr :: Functor f => (g -> g') -> (c -> c') -> SExpr g f c -> SExpr g' f c'
-mapSExpr fg fc e0 = fe e0 where 
+mapSExpr fg fc = fe where 
   m = mapSAnno fg fc
-  fe (UniS) = UniS
+  fe UniS = UniS
   fe (VarS v) = VarS v
   fe (AccS x k) = AccS (m x) k
   fe (AppS x xs) = AppS (m x) (map m xs)
@@ -664,7 +660,7 @@ instance HasOneLanguage Source where
 
 unresolvedType2type :: TypeU -> Type 
 unresolvedType2type (VarU v) = VarT v
-unresolvedType2type (ExistU _ _ _) = error "Cannot cast existential type to Type"
+unresolvedType2type ExistU {} = error "Cannot cast existential type to Type"
 unresolvedType2type (ForallU _ _) = error "Cannot cast universal type as Type"
 unresolvedType2type (FunU ts t) = FunT (map unresolvedType2type ts) (unresolvedType2type t)
 unresolvedType2type (AppU v ts) = AppT (unresolvedType2type v) (map unresolvedType2type ts)

@@ -32,7 +32,7 @@ instance P.PartialOrd TypeU where
   (<=) (ExistU v1 ts1 _) (ExistU v2 ts2 _)
     =  v1 == v2
     && length ts1 == length ts2
-    && foldl (&&) True (zipWith (P.<=) ts1 ts2)
+    && and (zipWith (P.<=) ts1 ts2)
   (<=) (ForallU v t1) t2
     | (P.==) (ForallU v t1) t2 = True
     | otherwise = (P.<=) (substituteFirst v t1 t2) t2
@@ -103,12 +103,12 @@ equivalent t1 t2 = isSubtypeOf t1 t2 && isSubtypeOf t2 t1
 
 -- | find all types that are not greater than any other type
 mostGeneral :: [TypeU] -> [TypeU]
-mostGeneral ts = P.minima ts
+mostGeneral = P.minima
 
 -- | find all types that are not less than any other type
 mostSpecific :: [TypeU] -> [TypeU]
-mostSpecific ts = P.maxima ts
+mostSpecific = P.maxima
 
 -- | find the most specific subtypes
 mostSpecificSubtypes :: TypeU -> [TypeU] -> [TypeU]
-mostSpecificSubtypes t ts = mostSpecific $ filter (\t2 -> isSubtypeOf t2 t) ts
+mostSpecificSubtypes t ts = mostSpecific $ filter (`isSubtypeOf` t) ts

@@ -103,9 +103,9 @@ buildPoolCallBase _ _ _ = Nothing -- FIXME: add error handling
 -- A key value map
 defaultFields :: IO (H.HashMap MT.Text MT.Text)
 defaultFields = do
-  home <- fmap MT.pack $ getDefaultMorlocHome
-  lib <- fmap MT.pack $ getDefaultMorlocSource
-  tmp <- fmap MT.pack $ getDefaultMorlocTmpDir
+  home <- MT.pack <$> getDefaultMorlocHome
+  lib <- MT.pack <$> getDefaultMorlocSource
+  tmp <- MT.pack <$> getDefaultMorlocTmpDir
   return $ H.fromList [("home", home), ("source", lib), ("tmpdir", tmp)]
 
 -- | Get the Morloc home directory (absolute path)

@@ -36,12 +36,12 @@ findExportSet = Set.fromList . map snd . findExports
 
 findExports :: ExprI -> [(Int, EVar)]
 findExports (ExprI i (ExpE v)) = [(i, v)]
-findExports (ExprI _ (ModE _ es)) = conmap findExports es
+findExports (ExprI _ (ModE _ es)) = concatMap findExports es
 findExports _ = []
 
 findSources :: ExprI -> [Source]
 findSources (ExprI _ (SrcE ss)) = [ss]
-findSources (ExprI _ (ModE _ es)) = conmap findSources es
+findSources (ExprI _ (ModE _ es)) = concatMap findSources es
 findSources _ = []
 
 findTypedefs :: ExprI -> Map.Map TVar ([TVar], TypeU)
@@ -52,9 +52,9 @@ findTypedefs _ = Map.empty
 findSignatureTypeTerms :: ExprI -> [TVar]
 findSignatureTypeTerms = unique . f where
   f :: ExprI -> [TVar]
-  f (ExprI _ (ModE _ es)) = conmap f es
+  f (ExprI _ (ModE _ es)) = concatMap f es
   f (ExprI _ (SigE _ _ (EType t _ _))) = findTypeTerms t
-  f (ExprI _ (AssE _ _ es)) = conmap f es
+  f (ExprI _ (AssE _ _ es)) = concatMap f es
   f _ = []
 
 -- | find all the non-generic terms in an unresolved type
@@ -62,11 +62,11 @@ findTypeTerms :: TypeU -> [TVar]
 findTypeTerms (VarU v)
   | isGeneric v = [ ]
   | otherwise   = [v]
-findTypeTerms (ExistU _ es1 es2) = conmap findTypeTerms (es1 ++ es2)
+findTypeTerms (ExistU _ es1 es2) = concatMap findTypeTerms (es1 ++ es2)
 findTypeTerms (ForallU _ e) = findTypeTerms e
-findTypeTerms (FunU ts t) = conmap findTypeTerms ts <> findTypeTerms t
-findTypeTerms (AppU t ts) = findTypeTerms t <> conmap findTypeTerms ts
-findTypeTerms (NamU _ _ ps rs) = conmap findTypeTerms (map snd rs <> ps)
+findTypeTerms (FunU ts t) = concatMap findTypeTerms ts <> findTypeTerms t
+findTypeTerms (AppU t ts) = findTypeTerms t <> concatMap findTypeTerms ts
+findTypeTerms (NamU _ _ ps rs) = concatMap findTypeTerms (map snd rs <> ps)
 
 -- | Find type signatures that are in the scope of the input expression. Do not
 -- descend recursively into declaration where statements except if the input
@@ -105,13 +105,13 @@ maxIndex (ExprI i (NamE rs)) = maximum (i : map (maxIndex . snd) rs)
 maxIndex (ExprI i _) = i
 
 getIndices :: ExprI -> [Int]
-getIndices (ExprI i (ModE _ es)) = i : conmap getIndices es
+getIndices (ExprI i (ModE _ es)) = i : concatMap getIndices es
 getIndices (ExprI i (AccE e _)) = i : getIndices e
 getIndices (ExprI i (AnnE e _)) = i : getIndices e
-getIndices (ExprI i (AssE _ e es)) = i : conmap getIndices (e:es)
+getIndices (ExprI i (AssE _ e es)) = i : concatMap getIndices (e:es)
 getIndices (ExprI i (LamE _ e)) = i : getIndices e
-getIndices (ExprI i (AppE e es)) = i : conmap getIndices (e:es)
-getIndices (ExprI i (LstE es)) = i : conmap getIndices es
-getIndices (ExprI i (TupE es)) = i : conmap getIndices es
-getIndices (ExprI i (NamE rs)) = i : conmap (getIndices . snd) rs
+getIndices (ExprI i (AppE e es)) = i : concatMap getIndices (e:es)
+getIndices (ExprI i (LstE es)) = i : concatMap getIndices es
+getIndices (ExprI i (TupE es)) = i : concatMap getIndices es
+getIndices (ExprI i (NamE rs)) = i : concatMap (getIndices . snd) rs
 getIndices (ExprI i _) = [i]

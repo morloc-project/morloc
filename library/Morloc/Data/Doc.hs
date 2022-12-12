@@ -11,8 +11,8 @@ Stability   : experimental
 This module re-exports Leijen's text builder along with a few other utilities.
 -}
 module Morloc.Data.Doc
-  ( module Data.Text.Prettyprint.Doc
-  , module Data.Text.Prettyprint.Doc.Render.Text
+  ( module Prettyprinter
+  , module Prettyprinter.Render.Text
   , render
   , render'
   , textEsc'
@@ -25,8 +25,8 @@ module Morloc.Data.Doc
   ) where
 
 import qualified Data.Text as DT
-import Data.Text.Prettyprint.Doc hiding ((<>))
-import Data.Text.Prettyprint.Doc.Render.Text
+import Prettyprinter hiding ((<>))
+import Prettyprinter.Render.Text
 
 render :: Doc ann -> DT.Text
 render = renderStrict . layoutPretty defaultLayoutOptions

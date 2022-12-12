@@ -22,7 +22,6 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
 
-
 -- | Resolve type aliases, term aliases and import/exports
 desugar
   :: DAG MVar Import ExprI
@@ -183,7 +182,7 @@ desugarType h _ _ = f
   -- -----------------
   -- f :: (Int, A) -> B
   --
-  f t@(AppU (VarU v) ts) =
+  f (AppU (VarU v) ts) =
     case Map.lookup v h of
       (Just (t':ts')) -> do
         (vs, t) <- foldlM (mergeAliases v (length ts)) t' ts'
@@ -193,6 +192,9 @@ desugarType h _ _ = f
           else MM.throwError $ BadTypeAliasParameters v (length vs) (length ts)
       -- default types like "Int" or "Tuple2" won't be in the map
       _ -> AppU (VarU v) <$> mapM f ts
+
+  -- Can only apply VarU? Will need to fix this when we get lambdas.
+  f (AppU _ _) = undefined
 
   -- type Foo = A     
   -- f :: Foo -> B    
@@ -241,7 +243,7 @@ desugarType h _ _ = f
 -- FIXME: And why is it done? Resloving existentials before typechecking seems sketch
 chooseExistential :: TypeU -> TypeU
 chooseExistential (VarU v) = VarU v
-chooseExistential (ExistU _ _ (t:_)) = (chooseExistential t)
+chooseExistential (ExistU _ _ (t:_)) = chooseExistential t
 chooseExistential (ExistU _ _ []) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
@@ -331,7 +333,7 @@ findPackers expr
       Left err' -> Left err'
 
     packerKeyVal :: EType -> Either MorlocError (Maybe ((TVar, Int), TypeU, Property))
-    packerKeyVal e@(EType t _ _) = case unqualify t of
+    packerKeyVal e@(EType t0 _ _) = case unqualify t0 of
       (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
         (True, True) -> Left $ CyclicPacker (qualify vs t)
         (True, False) -> Right (Just ((packerKey b, length vs), qualify vs a, Pack))
@@ -351,24 +353,23 @@ findPackers expr
     unifyTypes (x:_) = x -- FIXME: need to actually check that they all agree
 
 
-packerTypesMatch :: TypeU -> TypeU -> Bool
-packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
-  ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
-    -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
-    && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
-  _ -> False
+-- packerTypesMatch :: TypeU -> TypeU -> Bool
+-- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
+--   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
+--     -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
+--     && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
+--   _ -> False
 
 qualify :: [TVar] -> TypeU -> TypeU
-qualify [] t = t
-qualify (v:vs) t = ForallU v (qualify vs t)
+qualify vs t = foldr ForallU t vs
 
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
 unqualify t = ([], t)
 
-splitArgs :: TypeU -> ([TVar], [TypeU])
-splitArgs (ForallU v u) =
-  let (vs, ts) = splitArgs u
-  in (v:vs, ts)
-splitArgs (FunU ts t) = ([], ts <> [t])
-splitArgs t = ([], [t])
+-- splitArgs :: TypeU -> ([TVar], [TypeU])
+-- splitArgs (ForallU v u) =
+--   let (vs, ts) = splitArgs u
+--   in (v:vs, ts)
+-- splitArgs (FunU ts t) = ([], ts <> [t])
+-- splitArgs t = ([], [t])

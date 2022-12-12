@@ -7,9 +7,7 @@ whole system needs extensive testing in real applications. Much of this will be
 done in the development of the core libraries. We will also need to add
 handling for several very different languages (proofs-of-concept).
 
- - [ ] typeclasses
  - [ ] semantic types - test in bioinformatics applications
- - [ ] constraints - refined types?
  - [ ] manifold hooks - caching, documentation, logging, effects
  - [ ] logic engine (z3?) - from typechecking to architecture design and debugging
  - [ ] ecosystem (test suite, linter, package tools, vim plugin)
@@ -17,26 +15,43 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
  - [ ] Replace recursive data structures with recursion schemes
 
-0.3x.0 [2022.xx.xx]
+0.3x.0 [2023.xx.xx]
 -------------------
- - [ ] Add limited inference of concrete type from general type
- - [ ] Add lambdas
- - [ ] Add `uninstall` function to uninstall a module
- - [ ] Remove extra space printed at the end of R JSON
+
+ - [ ] typeclasses
+ - [ ] algebraic types
+ - [ ] pattern matching
+ - [ ] constraint checking
+ - [ ] effect checking
+ - [ ] limited inference of concrete type from general type
+ - [ ] lambdas
  - [ ] Rust support
+ - [ ] Haddock documentation
+ - [ ] Describe the core data structures and algorithms
+ - [ ] Add `uninstall` function to uninstall a module
+ - [ ] Clean up error handling (remove unused error types)
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
 
-0.37.0 [2022.xx.xx]
- - [ ] Add complete constraint parsing (syntax, not semantics, for now)
- - [ ] Add algebraic types
- - [ ] Add pattern matching
- - [ ] Add effects
- - [ ] Add typeclasses
- - [ ] Clean up error handling (remove unused error types)
+0.37.0 [2022.12.11]
+-------------------
+
+ * Remove extra space printed at the end of R JSON
+ * Clarify error message for missing exports
+ * Clarify error message for missing concrete signature
+ * Fix exponential time bug in parser
+ * Allow prime characters in names after first position
+ * Allow '.' to separate namespaces in imports/modules
+ * Fix infinite loop bug when module name != import name
+
+0.36.0 [2022.02.17]
+-------------------
+
+ * Separate reals from integers
+ * Remove global haskell extensions from package.yaml
 
 0.36.0 [2022.02.17]
 -------------------
