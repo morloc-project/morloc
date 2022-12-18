@@ -360,7 +360,7 @@ data TypeError
   | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | TooManyArguments
-  | EmptyExpression
+  | EmptyExpression EVar
   | MissingFeature Text
 
 data MorlocError
