@@ -65,8 +65,7 @@ instance Pretty MorlocError where
   -- module errors
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv) 
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
-  pretty (BadImport mv ev) = "BadImport: " <> pretty mv <> "::" <> pretty ev
-  pretty (BadExport mv ev) = "BadExport: " <> pretty mv <> "::" <> pretty ev
+  pretty (ImportExportError (MV m) msg) = "Error in module '" <> pretty m <> "': "  <> pretty msg
   pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
   pretty CyclicDependency = "CyclicDependency"
   pretty (SelfImport _) = "SelfImport"

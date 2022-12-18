@@ -39,7 +39,10 @@ handling for several very different languages (proofs-of-concept).
 0.38.0 [2023.01.xx]
 -------------------
 
- - [ ] Choose casing convention
+ - [x] Choose casing convention
+ - [ ] Fix module path handling
+ - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+ - [x] Better error messages for import/export errors
 
 0.37.0 [2022.12.11]
 -------------------

@@ -336,7 +336,7 @@ collect (ExprI _ (ModE moduleName _)) (i, exportName) = do
   t0 <- MM.metaTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
-    Nothing -> MM.throwError $ BadExport moduleName exportName
+    Nothing -> MM.throwError . ImportExportError moduleName $ "Undefined variable " <> unEVar exportName
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]

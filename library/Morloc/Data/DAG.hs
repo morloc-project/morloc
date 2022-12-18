@@ -27,8 +27,9 @@ module Morloc.Data.DAG
   , mapNodeWithKeyM
   , mapEdge
   , mapEdgeWithNode
+  , mapEdgeWithNodeAndKey
   , mapNodeWithEdge
-  , mapEdgeWithNodeM
+  , mapEdgeWithNodeAndKeyM
   , lookupAliasedTerm
   , lookupAliasedTermM
   , synthesizeDAG
@@ -141,6 +142,16 @@ mapEdgeWithNode f d = Map.mapWithKey runit d where
     (Just (n1, xs)) -> (n1, [(k2, f n1 e n2) | (k2, e, n2) <- xs])
     Nothing -> error "Bad DAG"
 
+-- | map over edges given the nodes the edge connects
+mapEdgeWithNodeAndKey
+  :: Ord k
+  => (k -> n -> e1 -> n -> e2)
+  -> DAG k e1 n -> DAG k e2 n
+mapEdgeWithNodeAndKey f d = Map.mapWithKey runit d where
+  runit k _ = case local k d of
+    (Just (n1, xs)) -> (n1, [(k2, f k n1 e n2) | (k2, e, n2) <- xs])
+    Nothing -> error "Bad DAG"
+
 -- | Map node data given edges and child data
 mapNodeWithEdge
   :: Ord k
@@ -158,10 +169,23 @@ mapEdgeWithNodeM
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
 mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
-    runit (k1, _) = case local k1 d of 
+    runit (k, _) = case local k d of 
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
-        return (k1, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
+
+-- | map over edges given the nodes the edge connects
+mapEdgeWithNodeAndKeyM
+  :: Ord k
+  => (k -> n -> e1 -> n -> MorlocMonad e2)
+  -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
+mapEdgeWithNodeAndKeyM f d = mapM runit (Map.toList d) |>> Map.fromList
+  where
+    runit (k, _) = case local k d of 
+      (Just (n1, xs)) -> do
+        e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
+        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | Map a monadic function over a DAG yielding a new DAG with the same

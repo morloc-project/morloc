@@ -39,25 +39,26 @@ desugar s
 resolveImports
   :: DAG MVar Import ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-resolveImports = MDD.mapEdgeWithNodeM resolveImport where
+resolveImports = MDD.mapEdgeWithNodeAndKeyM resolveImport where
   resolveImport
-    :: ExprI
+    :: MVar
+    -> ExprI
     -> Import
     -> ExprI
     -> MorlocMonad [(EVar, EVar)]
-  resolveImport _ (Import _ Nothing exc _) n2
+  resolveImport _ _ (Import _ Nothing exc _) n2
     = return
     . map (\x -> (x,x)) -- alias is identical
     . Set.toList
     $ Set.difference (AST.findExportSet n2) (Set.fromList exc)
-  resolveImport _ (Import _ (Just inc) exc _) n2
+  resolveImport m1 _ (Import m2 (Just inc) exc _) n2
     | length contradict > 0
-        = MM.throwError . CallTheMonkeys
-        $ "Error: The following terms are both included and excluded: " <>
+        = MM.throwError . ImportExportError m1
+        $ "The following terms imported from module '" <> unMVar m2 <> "' are both included and excluded: " <>
           render (tupledNoFold $ map pretty contradict)
     | length missing > 0
-        = MM.throwError . CallTheMonkeys
-        $ "Error: The following terms are not exported: " <>
+        = MM.throwError . ImportExportError m1
+        $ "The following imported terms are not exported from module '" <> unMVar m2 <> "': " <>
           render (tupledNoFold $ map pretty missing)
     | otherwise = return inc
     where
@@ -72,7 +73,7 @@ checkForSelfRecursion d = do
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
     isExprSelfRecursive (ExprI _ (TypE v _ t))
-      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v 
+      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -104,7 +105,7 @@ desugarExpr
   -> ExprI
   -> MorlocMonad ExprI
 desugarExpr d k e0 = do
-  s <- MM.get  
+  s <- MM.get
   MM.put (s { stateSources = GMap.insertMany indices k objSources (stateSources s)
             , stateTypedefs = GMap.insertMany indices k typedefs (stateTypedefs s) } )
   mapExprM f e0
@@ -167,7 +168,7 @@ desugarType h _ _ = f
     ds' <- mapM f ds
     return $ ExistU v ps' ds'
   f (FunU ts t) = FunU <$> mapM f ts <*> f t
-  f (NamU o n ps rs) = do 
+  f (NamU o n ps rs) = do
     ts <- mapM (f . snd) rs
     ps' <- mapM f ps
     return $ NamU o n ps' (zip (map fst rs) ts)
@@ -196,10 +197,10 @@ desugarType h _ _ = f
   -- Can only apply VarU? Will need to fix this when we get lambdas.
   f (AppU _ _) = undefined
 
-  -- type Foo = A     
-  -- f :: Foo -> B    
+  -- type Foo = A
+  -- f :: Foo -> B
   -- -----------------
-  -- f :: A -> B      
+  -- f :: A -> B
   f t0@(VarU v) =
      case Map.lookup v h of
       (Just []) -> return t0

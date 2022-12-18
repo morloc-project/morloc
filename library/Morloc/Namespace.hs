@@ -406,8 +406,7 @@ data MorlocError
   -- module errors
   | MultipleModuleDeclarations [MVar]
   | NestedModule MVar
-  | BadImport MVar EVar
-  | BadExport MVar EVar
+  | ImportExportError MVar Text
   | CannotFindModule MVar
   | CyclicDependency
   | SelfImport MVar
