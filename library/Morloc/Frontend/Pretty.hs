@@ -24,9 +24,7 @@ instance Pretty Expr where
   pretty (ModE v es) = align . vsep $ ("module" <+> pretty v) : map pretty es
   pretty (TypE v vs t) = "type" <+> pretty v <+> sep [pretty v' | TV _ v' <- vs] <+> "=" <+> pretty t
   pretty (ImpE (Import m Nothing _ _)) = "import" <+> pretty m 
-  pretty (ImpE (Import m (Just xs) _ _))
-    = "import" <+> pretty m
-    <+> tupled [dquotes (pretty n) <+> "as" <+> pretty alias | (n,alias) <- xs] 
+  pretty (ImpE (Import m (Just xs) _ _)) = "import" <+> pretty m <+> tupled (map pretty xs)
   pretty (ExpE v) = "export" <+> pretty v
   pretty (VarE s) = pretty s
   pretty (AccE e k) = parens (pretty e) <> "@" <> pretty k 

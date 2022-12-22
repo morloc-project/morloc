@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Data.DAG
@@ -19,6 +20,7 @@ module Morloc.Data.DAG
   , lookupEdgeTriple
   , local
   , roots
+  , shake
   , leafs
   , findCycle
   , mapNode
@@ -26,6 +28,7 @@ module Morloc.Data.DAG
   , mapNodeWithKey
   , mapNodeWithKeyM
   , mapEdge
+  , filterEdge
   , mapEdgeWithNode
   , mapEdgeWithNodeAndKey
   , mapNodeWithEdge
@@ -131,6 +134,23 @@ mapNodeWithKeyM f d
 -- | Map function over edges independent of the node data
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k,e) <- xs]))
+
+-- | Filter the edges in a DAG
+filterEdge :: (k -> n -> k -> e -> Bool) -> DAG k e n -> DAG k e n
+filterEdge f = Map.mapWithKey (\k (n, xs) -> (n, filter (uncurry (f k n)) xs))
+
+-- | Removes everything not connected to the root
+shake :: Ord k => k -> DAG k e n -> DAG k e n
+shake rootKey d =
+    let children = rootChildren rootKey
+    in Map.filterWithKey (\k _ -> Set.member k children) d
+    where
+        rootChildren localRootKey = case Map.lookup localRootKey d of 
+            Nothing -> Set.singleton localRootKey
+            (Just (_, map fst -> children)) -> Set.insert localRootKey $ Set.unions (map rootChildren children)
+
+-- trim d =
+--     let isChild = Set.unions $ concat $ Map.elems $ Map.mapKey (\(_, xs) -> map fst) d
 
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNode
@@ -239,7 +259,7 @@ lookupAliasedTerm
   -> DAG k [(v,v)] n
   -- ^ original DAG where edges are "import as" statements
   -> DAG k None (v,a)
-  -- ^ The final DAG with no edge attribute and the 
+  -- ^ The final DAG with no edge attribute
 lookupAliasedTerm v0 k0 f d0 = fromJust $ lookupAliasedTermM v0 k0 (Just . f) d0
 
 lookupAliasedTermM

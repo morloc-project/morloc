@@ -19,6 +19,16 @@ import Morloc.Namespace
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 
+instance Pretty Symbol where
+  pretty (TypeSymbol x) = viaShow x
+  pretty (TermSymbol x) = viaShow x
+
+instance Pretty AliasedSymbol where
+  pretty (AliasedType x alias) = pretty (AliasedTerm x alias)
+  pretty (AliasedTerm x alias)
+    | x == alias = pretty x
+    | otherwise = pretty x <+> "as" <+> pretty alias
+
 instance Pretty MVar where
   pretty = pretty . unMVar
 

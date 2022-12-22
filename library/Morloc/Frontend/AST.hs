@@ -31,10 +31,10 @@ findEdges :: ExprI -> (MVar, [(MVar, Import)], ExprI)
 findEdges e@(ExprI _ (ModE n es)) = (n, [(importModuleName i, i) | (ExprI _ (ImpE i)) <- es], e)
 findEdges _ = error "Expected a module"
 
-findExportSet :: ExprI -> Set.Set EVar
+findExportSet :: ExprI -> Set.Set Symbol
 findExportSet = Set.fromList . map snd . findExports
 
-findExports :: ExprI -> [(Int, EVar)]
+findExports :: ExprI -> [(Int, Symbol)]
 findExports (ExprI i (ExpE v)) = [(i, v)]
 findExports (ExprI _ (ModE _ es)) = concatMap findExports es
 findExports _ = []

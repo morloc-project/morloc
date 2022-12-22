@@ -96,8 +96,10 @@ synthG g (SAnno (Many []) i) = do
     Nothing -> do
         maybeName <- CMS.gets (Map.lookup i . stateName)
         case maybeName of
-            (Just e) -> gerr i (EmptyExpression e)
-            Nothing -> undefined -- this should not happen
+            -- This branch is entered for exported type definitions
+            -- FIXME: return all definitions and their parameters, check parameter count
+            (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
+            Nothing ->  error ("Shit output for index " <> show i)-- this should not happen
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
 

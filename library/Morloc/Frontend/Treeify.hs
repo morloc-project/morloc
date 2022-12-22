@@ -94,14 +94,15 @@ treeify d
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (collect e) (AST.findExports e)
+         mapM (collect e) [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc
    -- file as input, therefore this MUST be the root. In the future compiling
    -- multiple projects in parallel with potentially shared information and
    -- constraints could be valuable.
-   _ -> MM.throwError . CallTheMonkeys $ "How did you end up with so many roots?"
+   roots -> MM.throwError . CallTheMonkeys . render $ "How did you end up with so many roots?" <+> tupled (map pretty roots)
+
 
 {-
                 ,--n-> Source <-m--n-> Concrete Signature
@@ -109,6 +110,7 @@ term --<i>--.--<
              \  `--m-> Declaration
               `------------------------n--> General Signature
 -}
+
 
 
 -- in each scope (top of a module or after descending into a where statement) 
@@ -174,8 +176,8 @@ linkVariablesToTermTypes
 linkVariablesToTermTypes mv m0 = mapM_ (link m0) where 
   link :: Map.Map EVar (Int, TermTypes) -> ExprI -> MorlocMonad ()
   -- The following have terms associated with them:
-  -- 1. exports
-  link m (ExprI i (ExpE v)) = setType m i v
+  -- 1. exported terms (but not exported types)
+  link m (ExprI i (ExpE (TermSymbol v))) = setType m i (EV v)
   -- 2. variables
   link m (ExprI i (VarE v)) = setType m i v
   -- 3. assignments
@@ -332,11 +334,11 @@ collect
   :: ExprI
   -> (Int, EVar) -- The Int is the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
-collect (ExprI _ (ModE moduleName _)) (i, exportName) = do
+collect (ExprI _ (ModE moduleName _)) (i, _) = do
   t0 <- MM.metaTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
-    Nothing -> MM.throwError . ImportExportError moduleName $ "Undefined variable " <> unEVar exportName
+    Nothing -> return (SAnno (Many []) i)
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
