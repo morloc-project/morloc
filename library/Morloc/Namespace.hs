@@ -145,6 +145,8 @@ data MorlocState = MorlocState {
   , stateAnnotations :: Map Int [TypeU]
   , stateOutfile :: Maybe Path
   , statePackers :: GMap Int MVar PackMap
+  , stateExports :: [Int]
+  -- ^ The indices of each exported term
   , stateName :: Map Int EVar
     -- ^ store the names of morloc compositions
 }

@@ -18,9 +18,12 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import qualified Morloc.Data.GMap as GMap
+import Morloc.CodeGenerator.Namespace (TypeP)
 import Morloc.Pretty
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
+import qualified Data.Map as Map
 
 
 runMorloc :: CliCommand -> IO () 
@@ -80,22 +83,31 @@ cmdMake args verbosity config = do
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
 cmdTypecheck args _ config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
-  let writer = sannoManyWriter -- FIXME add in pretty and raw versions (typecheckRaw arg)
-      verbosity = if typecheckVerbose args then 1 else 0
+  let verbosity = if typecheckVerbose args then 1 else 0
   if typecheckType args
     then case F.readType (unCode code) of
-      (Left e) -> print (errorBundlePretty e)
+      (Left err') -> print (errorBundlePretty err')
       (Right x) -> print x 
     else MM.runMorlocMonad
            Nothing
            verbosity
            config
-           (M.typecheckFrontend path code >>= MM.liftIO . writer) >>=
-         MM.writeMorlocReturn
-  where
-    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
-    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
+           (M.typecheckFrontend path code) |>> writeTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
 
-    showConcrete = viaShow
+writeTypecheckOutput :: Int -> ((Either MorlocError a, [MT.Text]), MorlocState) -> MDoc
+writeTypecheckOutput _ ((Left e, _), _) = pretty e
+writeTypecheckOutput 0 (_, s) = writeExports s
+writeTypecheckOutput 1 (_, s) = "\nExports:\n\n" <> writeExports s
+writeTypecheckOutput _ _ = "I don't know how to be that verbose"
 
-    showGeneral (Idx _ t) = pretty t
+ 
+writeExports :: MorlocState -> MDoc
+writeExports s = msg where
+   ids = stateExports s 
+   names = map (`Map.lookup` (stateName s)) ids
+   sigs = map (`GMap.lookup` (stateSignatures s)) ids
+   msg = vsep $ zipWith writeTerm names sigs
+
+   writeTerm :: Maybe EVar -> GMapRet TermTypes -> MDoc
+   writeTerm (Just v) (GMapJust (TermTypes {termGeneral = Just t})) = pretty v <+> "::" <+> pretty t
+   writeTerm _ _ = "MISSING"

@@ -42,7 +42,7 @@ translate srcs es = do
     (unique . mapMaybe srcPath $ srcs)
 
   -- diagnostics
-  liftIO . putDoc . vsep $ map pretty es
+  debugLog (vsep (map pretty es))
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
   mDocs <- mapM translateManifold es
@@ -59,6 +59,11 @@ translate srcs es = do
     , scriptCode = "." :/ File "pool.py" (Code . render $ code)
     , scriptMake = [SysExe outfile]
     }
+
+debugLog :: Doc ann -> MorlocMonad ()
+debugLog d = do
+  verbosity <- MM.gets stateVerbosity
+  when (verbosity > 0) $ (liftIO . putDoc) d
 
 -- create an internal variable based on a unique id
 letNamer :: Int -> MDoc

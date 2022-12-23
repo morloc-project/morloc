@@ -93,8 +93,20 @@ treeify d
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
+         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
+
+         -- store all exported indices in state
+         MM.modify(\s -> s {stateExports = map fst exports})
+
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (collect e) [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
+         mapM (collect e) exports
+
+
+
+
+-- storeExports :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+-- storeExports d = do
+--     s <- MM.get
 
    -- There is no currently supported use case that exposes multiple roots in
    -- one compilation process. The compiler executable takes a single morloc

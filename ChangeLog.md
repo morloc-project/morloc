@@ -43,6 +43,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Choose casing convention
  - [x] Fix sub-module handling
  - [x] Better error messages for import/export errors
+ - [x] Nicely formatted `typecheck` subcommand output 
 
 0.37.0 [2022.12.11]
 -------------------
