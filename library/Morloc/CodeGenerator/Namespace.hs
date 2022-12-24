@@ -26,6 +26,8 @@ module Morloc.CodeGenerator.Namespace
   , TypePacker(..)
   -- ** Accessors
   , argId
+  -- ** Other
+  , prettyGenTypeP
   ) where
 
 import Morloc.Namespace
@@ -395,14 +397,21 @@ instance Pretty PVar where
   pretty (PV _ Nothing t) = parens ("*" <+> pretty t)
 
 instance Pretty TypeP where
-  pretty (UnkP v) = pretty v 
-  pretty (VarP v) = pretty v 
-  pretty (FunP ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
-  pretty (AppP t ts) = hsep (map pretty (t:ts))
-  pretty (NamP o n ps rs)
-      = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-                (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+  pretty = pretty . typeOf
 
+prettyGenTypeP :: TypeP -> MDoc
+prettyGenTypeP (UnkP (PV _ (Just v) _)) = pretty v 
+prettyGenTypeP (UnkP (PV _ Nothing _)) =  "?"
+prettyGenTypeP (VarP (PV _ (Just v) _)) = pretty v 
+prettyGenTypeP (VarP (PV _ Nothing _)) = "?"
+prettyGenTypeP (FunP ts t) = encloseSep "(" ")" " -> " (map prettyGenTypeP (ts <> [t]))
+prettyGenTypeP (AppP t ts) = hsep (map prettyGenTypeP (t:ts))
+prettyGenTypeP (NamP o (PV _ (Just n) _) ps rs)
+    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map prettyGenTypeP ps))
+              (vsep [(\(PV _ v _) -> maybe "?" pretty v) k <+> "::" <+> prettyGenTypeP x | (k, x) <- rs])
+prettyGenTypeP (NamP o (PV _ Nothing _) ps rs)
+    = block 4 (viaShow o <+> "?" <> encloseSep "<" ">" "," (map prettyGenTypeP ps))
+              (vsep [(\(PV _ v _) -> maybe "?" pretty v) k <+> "::" <+> prettyGenTypeP x | (k, x) <- rs])
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"

@@ -58,15 +58,6 @@ instance Pretty Source where
     <+> dquotes (pretty (srcName s))
     <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
-forallVars :: TypeU -> [Doc ann]
-forallVars (ForallU (TV _ v) t) = pretty v : forallVars t
-forallVars _ = []
-
-forallBlock :: TypeU -> Doc ann
-forallBlock (ForallU _ t) = forallBlock t
-forallBlock t = pretty t
-
-
 instance Pretty Type where
   pretty (UnkT (TV _ v)) = "*" <> pretty v
   pretty (VarT (TV _ "Unit")) = "()"
@@ -106,20 +97,26 @@ instance Pretty Constraint where
   pretty (Con x) = pretty x
 
 instance Pretty TypeU where
-  pretty (ExistU v ts ds)
-    = angles $ pretty v
-    <> list (map pretty ts)
-    <> list (map pretty ds)
-  pretty t@(ForallU _ _) =
-    parens $ "forall" <+> hsep (forallVars t) <+> "." <+> forallBlock t
-  pretty (VarU (TV _ "Unit")) = "()"
-  pretty (VarU v) = pretty v
-  pretty (FunU [] t) = parens $ "<MISSING> -> " <> pretty t
-  pretty (FunU ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
-  pretty (AppU t ts) = parens . hsep $ map pretty (t:ts)
-  pretty (NamU o n ps rs)
-      = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
-                (vsep [pretty k <+> "::" <+> pretty x | (k, x) <- rs])
+  pretty (FunU [] t) = "<MISSING> -> " <> prettyTypeU t 
+  pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
+  pretty (ForallU _ t) = pretty t
+  pretty t = prettyTypeU t
+
+prettyTypeU (ExistU v ts ds)
+  = angles $ pretty v
+  <> list (map prettyTypeU ts)
+  <> list (map prettyTypeU ds)
+prettyTypeU (ForallU _ t) = prettyTypeU t
+prettyTypeU (VarU (TV _ "Unit")) = "()"
+prettyTypeU (VarU v) = pretty v
+prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
+prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
+prettyTypeU (AppU t ts) = hsep $ map parenTypeU (t:ts) where
+    parenTypeU t'@(AppU _ _) = parens $ prettyTypeU t'
+    parenTypeU t' = prettyTypeU t'
+prettyTypeU (NamU o n ps rs)
+    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+              (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 instance Pretty UnresolvedPacker where
   pretty (UnresolvedPacker v t fs rs) = vsep

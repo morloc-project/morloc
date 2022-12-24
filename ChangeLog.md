@@ -43,7 +43,8 @@ handling for several very different languages (proofs-of-concept).
  - [x] Choose casing convention
  - [x] Fix sub-module handling
  - [x] Better error messages for import/export errors
- - [x] Nicely formatted `typecheck` subcommand output 
+ - [x] Somewhat formatted `typecheck` subcommand output 
+ - [x] Add option to typecheck backend (concrete types and language selection)
 
 0.37.0 [2022.12.11]
 -------------------
