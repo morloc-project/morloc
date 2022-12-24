@@ -21,24 +21,24 @@
 
 
 -- import packages from central morloc hub OR the local module IF in module path
-import bio.io
+-- import bio.io
 -- -- import from a special namespace
 -- import alice:bio.io
 -- -- import from a github repo
 -- import alice@github:bio.io
 
-import bio.io (read_fasta, write_fasta)
+import bio.io (readFasta, writeFasta)
 import bio.tree (NelTree)
-import bio.algo (nj_tree as build_tree, foo_msa as align)
-import bio.algo (nj_tree as build_tree, foo_msa as align)
+import bio.algo (njTree as buildTree, fooMsa as align)
+import bio.algo (njTree as buildTree, fooMsa as align)
 
-import base (with_vals, seq, toSnd, map)
+import base (withVals, seq, toSnd, map)
 
 
 export analysis
 
 augment :: (a -> b) -> [a] -> [(a, b)]
-augment f xs = map (couple_right f) xs 
+augment f xs = map (coupleRight f) xs 
 
 -- type Filename = Str
 -- type Tag = Str
@@ -47,16 +47,16 @@ augment f xs = map (couple_right f) xs
 -- type Sequence = Str
 
 analysis :: Filename -> ()
-analysis gisaid_file = fold seq
-      [ write_tree "tree.newick" tree
-      , view_tree "tree.pdf" tree,
+analysis gisaidFile = fold seq
+      [ writeTree "tree.newick" tree
+      , viewTree "tree.pdf" tree,
       ]
     where
-        tree = tree_of build_tree alignment
+        tree = treeOf buildTree alignment
 
-        alignment = with_vals align (
-            augment lookup_sequence (
-                json_list_filter_map parse_record select_record gisaid_file ["x", "y"]
+        alignment = withVals align (
+            augment lookupSequence (
+                jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
 
                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
             )
@@ -64,19 +64,19 @@ analysis gisaid_file = fold seq
 
 
 -- filter a large file, create raw strings for individual elements
-json_list_filter_map
+jsonListFilterMap
     :: (String -> a)  -- Convert an element string
     -> (a -> Bool)    -- Decide whether to keep the parsed object
     -> Filename       -- Path to the JSON file
     -> [Tag]          -- Path to the array in the JSON structure
     -> [a]            -- Final list of things of interest
 
-lookup_sequence :: Identifier -> Sequence
+lookupSequence :: Identifier -> Sequence
 
 align xs =
     seq (seq
-        (write_fasta (map (with_fst show) (enumerate xs)) tmpfile)
-        (map snd (read_fasta (third (shell_cmd ["mafft", tmpfile]))))
+        (writeFasta (map (withFst show) (enumerate xs)) tmpfile)
+        (map snd (readFasta (third (shellCmd ["mafft", tmpfile]))))
     )
         (rm tmpfile)
     where
