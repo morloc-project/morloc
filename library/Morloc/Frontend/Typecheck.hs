@@ -92,7 +92,14 @@ synthG g (SAnno (Many []) i) = do
   maybeType <- lookupType i g
   case maybeType of
     (Just (g', t)) -> return (g', t, SAnno (Many []) (Idx i t))
-    Nothing -> gerr i EmptyExpression
+    -- if a term is associated with no expression or type
+    Nothing -> do
+        maybeName <- CMS.gets (Map.lookup i . stateName)
+        case maybeName of
+            -- This branch is entered for exported type definitions
+            -- FIXME: return all definitions and their parameters, check parameter count
+            (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
+            Nothing ->  error ("Shit output for index " <> show i)-- this should not happen
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
 
@@ -103,7 +110,7 @@ synthG g0 (SAnno (Many ((e0, j):es)) i) = do
     Nothing  -> synthE' i g0 e0
     -- If there are annotations ...
     (Just (g', t)) -> case e0 of
-      -- If the annotation is of a variable name, return the annotation. Caling
+      -- If the annotation is of a variable name, return the annotation. Calling
       -- check would just re-synthesize the same type and check that it was
       -- equal to itself.
       (VarS v) -> return (g', t, VarS v)

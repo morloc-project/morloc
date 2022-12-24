@@ -18,9 +18,12 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
+import qualified Morloc.Data.GMap as GMap
+import Morloc.CodeGenerator.Namespace (TypeP, prettyGenTypeP)
 import Morloc.Pretty
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
+import qualified Data.Map as Map
 
 
 runMorloc :: CliCommand -> IO () 
@@ -80,22 +83,73 @@ cmdMake args verbosity config = do
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
 cmdTypecheck args _ config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
-  let writer = sannoManyWriter -- FIXME add in pretty and raw versions (typecheckRaw arg)
-      verbosity = if typecheckVerbose args then 1 else 0
+  let verbosity = if typecheckVerbose args then 1 else 0
   if typecheckType args
     then case F.readType (unCode code) of
-      (Left e) -> print (errorBundlePretty e)
+      (Left err') -> print (errorBundlePretty err')
       (Right x) -> print x 
-    else MM.runMorlocMonad
-           Nothing
-           verbosity
-           config
-           (M.typecheckFrontend path code >>= MM.liftIO . writer) >>=
-         MM.writeMorlocReturn
-  where
-    sannoManyWriter :: [SAnno (Indexed TypeU) Many Int] -> IO ()
-    sannoManyWriter xs = putDoc $ vsep (map (prettySAnno showConcrete showGeneral) xs) <> "\n"
+    else if typecheckRealize args
+        then
+            MM.runMorlocMonad
+               Nothing
+               verbosity
+               config
+               (M.typecheck path code) |>> writeTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
+        else
+            MM.runMorlocMonad
+               Nothing
+               verbosity
+               config
+               (M.typecheckFrontend path code) |>> writeFrontendTypecheckOutput verbosity >>= (\s -> putDoc (s <> "\n"))
 
-    showConcrete = viaShow
+writeFrontendTypecheckOutput :: Int -> ((Either MorlocError [SAnno (Indexed TypeU) Many Int], [MT.Text]), MorlocState) -> MDoc
+writeFrontendTypecheckOutput _ ((Left e, _), _) = pretty e
+writeFrontendTypecheckOutput 0 ((Right xs, _), s) = vsep (map (writeFrontendTypes s) xs)
+writeFrontendTypecheckOutput 1 ((Right xs, _), s) = "\nExports:\n\n" <> vsep (map (writeFrontendTypes s) xs)
+writeFrontendTypecheckOutput _ _ = "I don't know how to be that verbose"
 
-    showGeneral (Idx _ t) = pretty t
+writeFrontendTypes :: MorlocState -> SAnno (Indexed TypeU) Many Int -> MDoc
+writeFrontendTypes  s (SAnno _ (Idx gidx t)) = writeTerm s gidx (pretty t)
+
+writeTerm :: MorlocState -> Int -> MDoc -> MDoc
+writeTerm s i typeDoc =
+    case ( Map.lookup i (stateName s)
+         ,  GMap.lookup i (stateSignatures s))
+    of
+        (Just v, GMapJust (TermTypes {termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
+        (Just v, _) -> pretty v <+> "|-" <+> typeDoc
+        _ -> "MISSING"
+
+
+writeTypecheckOutput :: Int -> ((Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]), [MT.Text]), MorlocState) -> MDoc
+writeTypecheckOutput _ ((Left e, _), _) = pretty e
+writeTypecheckOutput 0 ((Right (_, rasts), _), s) = vsep (map (writeRast 0 s) rasts)
+writeTypecheckOutput 1 ((Right (_, rasts), _), s) = "\nExports:\n\n" <> vsep (map (writeRast 1 s) rasts)
+writeTypecheckOutput _ _ = "I don't know how to be that verbose"
+
+ 
+-- data SAnno g f c = SAnno (f (SExpr g f c, c)) g
+writeRast :: Int -> MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
+writeRast _ s (SAnno (One (e, Idx _ t)) gidx) = msg where
+
+  msg = generalSignatures <> "\n  " <> writeRealizedTermC e
+
+  generalSignatures = writeTerm s gidx (prettyGenTypeP t)
+
+  writeRealizedTermC :: SExpr Int One (Indexed TypeP) -> MDoc
+  writeRealizedTermC UniS = "Unit"
+  writeRealizedTermC (VarS v) = pretty v
+  writeRealizedTermC (AccS x k) = parens (writeRealizedTermG x) <> "@" <> pretty k
+  writeRealizedTermC (AppS x xs) = parens $ hsep (map writeRealizedTermG (x:xs)) 
+  writeRealizedTermC (LamS vs x) = parens $ "\\" <+> hsep (map pretty vs) <+> "->" <+> writeRealizedTermG x
+  writeRealizedTermC (LstS xs) = list $ map writeRealizedTermG xs
+  writeRealizedTermC (TupS xs) = tupled $ map writeRealizedTermG xs
+  writeRealizedTermC (NamS ks) = encloseSep "{" "}" "," [pretty k <+> "=" <+> writeRealizedTermG x | (k,x) <- ks]
+  writeRealizedTermC (RealS v) = viaShow v
+  writeRealizedTermC (IntS v) = pretty v
+  writeRealizedTermC (LogS v) = pretty v
+  writeRealizedTermC (StrS v) = dquotes (pretty v)
+  writeRealizedTermC (CallS src) = pretty src
+
+  writeRealizedTermG :: SAnno Int One (Indexed TypeP) -> MDoc
+  writeRealizedTermG (SAnno (One (e', t')) _) = parens (writeRealizedTermC e') <+> "::" <+> parens (pretty t')

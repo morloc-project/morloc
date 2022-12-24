@@ -65,8 +65,8 @@ instance Pretty MorlocError where
   -- module errors
   pretty (MultipleModuleDeclarations mv) = "MultipleModuleDeclarations: " <> tupled (map pretty mv) 
   pretty (NestedModule name') = "Nested modules are currently illegal: " <> pretty name'
-  pretty (BadImport mv ev) = "BadImport: " <> pretty mv <> "::" <> pretty ev
-  pretty (BadExport mv ev) = "BadExport: " <> pretty mv <> "::" <> pretty ev
+  pretty (NonSingularRoot ms) = "Expected exactly one root module, found" <+> list (map pretty ms) 
+  pretty (ImportExportError (MV m) msg) = "Error in module '" <> pretty m <> "': "  <> pretty msg
   pretty (CannotFindModule name') = "Cannot find morloc module '" <> pretty name' <> "'"
   pretty CyclicDependency = "CyclicDependency"
   pretty (SelfImport _) = "SelfImport"
@@ -113,9 +113,9 @@ instance Pretty TypeError where
     <+> pretty msg
   pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
-  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named '" <> pretty e <> "'" 
-  pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> pretty e
+  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <> squotes (pretty e) 
+  pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> squotes (pretty e)
   pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
   pretty TooManyArguments = "TooManyArguments"
   pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
-  pretty EmptyExpression = "EmptyExpression"
+  pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"

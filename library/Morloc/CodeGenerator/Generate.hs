@@ -215,9 +215,14 @@ realize s0 = do
     :: Maybe Lang
     -> SAnno (Indexed Type) Many (Indexed [(Lang, Int)])
     -> MorlocMonad (SAnno (Indexed Type) One (Indexed (Maybe Lang)))
-  collapseSAnno l1 (SAnno (Many es) t) = do
+  collapseSAnno l1 (SAnno (Many es) t@(Idx i _)) = do
     e <- case minBy (\(_, Idx _ ss) -> minimumMay [cost l1 l2 s | (l2, s) <- ss]) es of
-      Nothing -> MM.throwError . CallTheMonkeys $ "A SAnno must contain an SExpr"
+      Nothing -> do
+        s <- MM.get
+        case Map.lookup i (stateName s) of
+            (Just generalName) -> MM.throwError . GeneratorError . render $
+                "No implementation found for" <+> squotes (pretty generalName)
+            Nothing -> undefined
       (Just x@(_, Idx _ ss)) -> collapseExpr (fmap fst (minBy snd ss)) x
     return (SAnno (One e) t)
 

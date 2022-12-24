@@ -24,6 +24,8 @@ module Morloc.Frontend.Lexer
   , many1
   , sepBy2
   , freename
+  , freenameU
+  , freenameL
   , tvar
   , newvar
   , number
@@ -285,14 +287,23 @@ stringLiteral = lexeme $ do
   _ <- char '\"'
   return $ MT.pack s
 
-freename :: Parser MT.Text
-freename = (lexeme . try) (p >>= check)
+mkFreename :: Parser Char -> Parser MT.Text
+mkFreename firstLetter = (lexeme . try) (p >>= check)
   where
-    p = fmap MT.pack $ (:) <$> letterChar <*> many (alphaNumChar <|> char '_' <|> char '\'')
+    p = fmap MT.pack $ (:) <$> firstLetter <*> many (alphaNumChar <|> char '\'')
     check x =
       if elem x reservedWords
         then failure Nothing Set.empty -- TODO: error message
         else return x
+
+freename :: Parser MT.Text
+freename = mkFreename letterChar
+
+freenameL :: Parser MT.Text
+freenameL = mkFreename lowerChar
+
+freenameU :: Parser MT.Text
+freenameU = mkFreename upperChar
 
 -- | match the name of a supported language
 pLang :: Parser Lang
@@ -308,7 +319,7 @@ tag :: Parser a -> Parser (Maybe MT.Text)
 tag p = optional (try tag')
   where
     tag' = do
-      l <- freename
+      l <- freenameL
       _ <- op ":"
       _ <- lookAhead p
       return l

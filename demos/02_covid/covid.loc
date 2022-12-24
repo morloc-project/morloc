@@ -20,17 +20,25 @@
 --    This is challenging. The styles is intended to address that partially.
 
 
+-- import packages from central morloc hub OR the local module IF in module path
+-- import bio.io
+-- -- import from a special namespace
+-- import alice:bio.io
+-- -- import from a github repo
+-- import alice@github:bio.io
+
 import bio.io (readFasta, writeFasta)
 import bio.tree (NelTree)
-import bio.algo (nj_tree as buildTree, foo_msa as align)
+import bio.algo (njTree as buildTree, fooMsa as align)
+import bio.algo (njTree as buildTree, fooMsa as align)
 
-import base (with_vals, seq, couple_right, map)
+import base (withVals, seq, toSnd, map)
 
 
 export analysis
 
 augment :: (a -> b) -> [a] -> [(a, b)]
-augment f xs = map (couple_right f) xs 
+augment f xs = map (coupleRight f) xs 
 
 -- type Filename = Str
 -- type Tag = Str
@@ -46,8 +54,10 @@ analysis gisaidFile = fold seq
     where
         tree = treeOf buildTree alignment
 
-        alignment = with_vals align (
+        alignment = withVals align (
             augment lookupSequence (
+                jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
+
                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
             )
         )
@@ -65,7 +75,7 @@ lookupSequence :: Identifier -> Sequence
 
 align xs =
     seq (seq
-        (writeFasta (map (with_fst show) (enumerate xs)) tmpfile)
+        (writeFasta (map (withFst show) (enumerate xs)) tmpfile)
         (map snd (readFasta (third (shellCmd ["mafft", tmpfile]))))
     )
         (rm tmpfile)
@@ -73,9 +83,9 @@ align xs =
         tmpfile = "tmp.fa"
 
 -- -- Where [a] has length 1 or 0
--- packMaybe   :: pack   => [a] -> Maybe a
--- unpackMaybe :: unpack => Maybe a -> [a]
+-- pack_maybe   :: pack   => [a] -> Maybe a
+-- unpack_maybe :: unpack => Maybe a -> [a]
 --
 -- -- Where either [a] or [b] is empty and the other has length 1
--- packEither   :: pack   => ([a], [b]) -> Either a b
--- unpackEither :: unpack => Either a b -> ([a], [b])
+-- pack_either   :: pack   => ([a], [b]) -> Either a b
+-- unpack_either :: unpack => Either a b -> ([a], [b])

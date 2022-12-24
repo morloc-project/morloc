@@ -73,6 +73,8 @@ module Morloc.Namespace
   , Gamma(..)
   , GammaIndex(..)
   -- * Mostly frontend expressions
+  , Symbol(..)
+  , AliasedSymbol(..)
   , Expr(..)
   , ExprI(..)
   , Import(..)
@@ -114,8 +116,8 @@ import qualified Data.Text as DT
 type MDoc = Doc ()
 
 -- | A general purpose Directed Acyclic Graph (DAG). Technically this structure
--- needn't be acyclic, but it will raise errors. You can use `findCycle` to
--- check whether a given stucture has cycles.
+-- needn't be acyclic. You can use `findCycle` to check whether a given stucture
+-- has cycles.
 type DAG key edge node = Map key (node, [(key, edge)])
 
 data GMap a b c = GMap (Map a b) (Map b c)
@@ -143,6 +145,8 @@ data MorlocState = MorlocState {
   , stateAnnotations :: Map Int [TypeU]
   , stateOutfile :: Maybe Path
   , statePackers :: GMap Int MVar PackMap
+  , stateExports :: [Int]
+  -- ^ The indices of each exported term
   , stateName :: Map Int EVar
     -- ^ store the names of morloc compositions
 }
@@ -214,6 +218,15 @@ data TermTypes = TermTypes {
   --            '--- this will match the term name
 } deriving (Show)
 
+
+-- | Distinguishes between term and type symbols in import/export expression
+-- before they are separated in Treeify.
+data Symbol = TypeSymbol DT.Text | TermSymbol DT.Text
+  deriving (Show, Ord, Eq)
+
+data AliasedSymbol = AliasedTerm DT.Text DT.Text | AliasedType DT.Text DT.Text
+  deriving (Show, Ord, Eq)
+
 data ExprI = ExprI Int Expr
   deriving (Show, Ord, Eq)
 
@@ -228,7 +241,7 @@ data Expr
   --   3. type
   | ImpE Import
   -- ^ a morloc module import
-  | ExpE EVar
+  | ExpE Symbol
   -- ^ a term that is exported from a module (should only exist at the toplevel)
   | SrcE Source
   -- ^ import "c" from "foo.c" ("f" as yolo).
@@ -268,8 +281,8 @@ data Expr
 data Import =
   Import
     { importModuleName :: MVar
-    , importInclude :: Maybe [(EVar, EVar)]
-    , importExclude :: [EVar]
+    , importInclude :: Maybe [AliasedSymbol]
+    , importExclude :: [Symbol]
     , importNamespace :: Maybe EVar -- currently not used
     }
   deriving (Ord, Eq, Show)
@@ -360,7 +373,7 @@ data TypeError
   | MissingGeneralSignature EVar
   | ApplicationOfNonFunction
   | TooManyArguments
-  | EmptyExpression
+  | EmptyExpression EVar
   | MissingFeature Text
 
 data MorlocError
@@ -406,8 +419,8 @@ data MorlocError
   -- module errors
   | MultipleModuleDeclarations [MVar]
   | NestedModule MVar
-  | BadImport MVar EVar
-  | BadExport MVar EVar
+  | NonSingularRoot [MVar]
+  | ImportExportError MVar Text
   | CannotFindModule MVar
   | CyclicDependency
   | SelfImport MVar

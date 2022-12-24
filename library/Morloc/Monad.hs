@@ -132,7 +132,8 @@ writeMorlocReturn :: MorlocReturn a -> IO ()
 writeMorlocReturn ((Left err', msgs), _)
   =  MT.hPutStrLn stderr (MT.unlines msgs) -- write messages
   >> MT.hPutStrLn stderr (MT.show' err') -- write terminal failing message
-writeMorlocReturn ((_, msgs), _) = MT.hPutStrLn stderr (MT.unlines msgs)
+writeMorlocReturn ((Right _, _), s) = do
+    print $ stateExports s
 
 -- | Execute a system call
 runCommand ::

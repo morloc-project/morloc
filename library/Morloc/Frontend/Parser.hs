@@ -102,7 +102,7 @@ createMainFunction es = case (init es, last es) of
     (_, ExprI _ (AssE _ _ _)) -> return es
     (_, ExprI _ (ExpE _))     -> return es
     (rs, terminalExpr) -> do
-      expMain <- exprI $ ExpE (EV "__main__")
+      expMain <- exprI $ ExpE (TermSymbol "__main__")
       assMain <- exprI $ AssE (EV "__main__") terminalExpr []
       return $ expMain : (assMain : rs)
 
@@ -137,6 +137,9 @@ pExpr =
   <|> pVar
   <?> "expression"
 
+-- Either a lowercase term name or an uppercase type name
+pSymbol :: Parser Symbol
+pSymbol = (TermSymbol <$> freenameL) <|> (TypeSymbol <$> freenameU)
 
 pImport :: Parser ExprI
 pImport = do
@@ -145,7 +148,7 @@ pImport = do
   n <- MT.intercalate "." <$> sepBy freename (symbol ".")
   imports <-
     optional $
-    parens (sepBy pImportTerm (symbol ",")) <|> fmap (\x -> [(x, x)]) pEVar
+    parens (sepBy pImportItem (symbol ","))
   exprI . ImpE $
     Import
       { importModuleName = MV n
@@ -155,16 +158,25 @@ pImport = do
       }
   where
 
-  pImportTerm :: Parser (EVar, EVar)
+  pImportItem :: Parser AliasedSymbol
+  pImportItem = pImportType <|> pImportTerm
+
+  pImportTerm :: Parser AliasedSymbol
   pImportTerm = do
-    n <- pEVar
-    a <- option n (reserved "as" >> pEVar)
-    return (n, a)
+    n <- freenameL
+    a <- option n (reserved "as" >> freenameL)
+    return (AliasedTerm n a)
+
+  pImportType :: Parser AliasedSymbol
+  pImportType = do
+    n <- freenameU
+    a <- option n (reserved "as" >> freenameU)
+    return (AliasedType n a)
 
 pExport :: Parser ExprI
 pExport = do
   reserved "export"
-  v <- pEVar
+  v <- pSymbol
   exprI $ ExpE v
 
 
@@ -227,13 +239,13 @@ pTypedef = try pTypedefType <|> pTypedefObject where
 
   pTypedefTermUnpar :: Parser (TVar, [TVar])
   pTypedefTermUnpar = do
-    v <- freename
+    v <- freenameU
     t <- tvar v
     return (t, [])
 
   pTypedefTermPar :: Parser (TVar, [TVar])
   pTypedefTermPar = do
-    vs <- parens (many1 freename)
+    vs <- parens ((:) <$> freenameU <*> many freenameL)
     t <- tvar (head vs)
     ts <- mapM tvar (tail vs)
     return (t, ts)
@@ -272,7 +284,7 @@ pAssE = try pFunctionAssE <|> pDataAssE
 pSigE :: Parser ExprI
 pSigE = do
   label' <- tag freename
-  v <- freename
+  v <- freenameL
   lang <- optional (try pLang)
   setLang lang
   _ <- op "::"
@@ -376,7 +388,7 @@ pNamE = do
 
 pNamEntryE :: Parser (MT.Text, ExprI)
 pNamEntryE = do
-  n <- freename
+  n <- freenameL
   _ <- symbol "="
   e <- pExpr
   return (n, e)
@@ -390,7 +402,7 @@ pAcc :: Parser ExprI
 pAcc = do
   e <- parens pExpr <|> pNamE <|> pVar
   _ <- symbol "@"
-  f <- freename
+  f <- freenameL
   exprI $ AccE e f
 
 
@@ -450,7 +462,7 @@ pVar = pEVar >>= exprI . VarE
 
 
 pEVar :: Parser EVar
-pEVar = fmap EV freename
+pEVar = fmap EV freenameL
 
 pTypeGen :: Parser TypeU
 pTypeGen = do
@@ -519,7 +531,7 @@ pNamEntryU = do
 
 pExistential :: Parser TypeU
 pExistential = do
-  v <- angles freename
+  v <- angles freenameL
   return (ExistU (TV Nothing v) [] [])
 
 pAppU :: Parser TypeU

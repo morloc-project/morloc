@@ -12,7 +12,7 @@ opts :: ParserInfo CliCommand
 opts = info (cliParser <**> helper)
   (    fullDesc
     <> progDesc "call 'morloc make -h', 'morloc install -h', etc for details"
-    <> header "morloc v0.37.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
+    <> header "morloc v0.38.0"  -- FIXME: HARDCODED VERSION NUMBER!!!
   )
 
 
@@ -78,6 +78,7 @@ data TypecheckCommand = TypecheckCommand
   , typecheckRaw :: Bool
   , typecheckExpression :: Bool
   , typecheckVerbose :: Bool
+  , typecheckRealize :: Bool
   , typecheckScript :: String
   }
 
@@ -89,6 +90,7 @@ makeTypecheckParser = TypecheckCommand
   <*> optRaw
   <*> optExpression
   <*> optVerbose
+  <*> optRealize
   <*> optScript
 
 typecheckSubcommand :: Mod CommandFields CliCommand 
@@ -120,6 +122,13 @@ optVerbose = switch
   ( long "verbose"
   <> short 'v'
   <> help "print debugging information"
+  )
+
+optRealize :: Parser Bool
+optRealize = switch
+  ( long "realize"
+  <> short 'r'
+  <> help "typecheck the composition realizations"
   )
 
 optGithub :: Parser Bool

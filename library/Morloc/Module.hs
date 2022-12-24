@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Module
@@ -58,14 +59,15 @@ data ModuleSource
   -- ^ The repo name of a core package, e.g., "math"
 
 -- | Look for a local morloc module.
-findModule :: MVar -> MorlocMonad Path
-findModule moduleName = do
+findModule :: Maybe (Path, MVar) -> MVar -> MorlocMonad Path
+findModule currentModuleM importModule = do
   config <- MM.ask
   let lib = Config.configLibrary config
-  let allPaths = getModulePaths lib moduleName
+  let allPaths = getModulePaths lib currentModuleM importModule
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
-    (x:_) -> return x
+    [x] -> return x
+    (x:_) -> return x -- should shadowing raise a warning?
     [] ->
       MM.throwError . CannotLoadModule . render $
         "module not found among the paths:" <+> list (map pretty allPaths)
@@ -90,17 +92,41 @@ loadModuleMetadata main = do
     appendMeta :: PackageMeta -> MorlocState -> MorlocState
     appendMeta m s = s {statePackageMeta = m : statePackageMeta s}
 
+splitModuleName :: MVar -> [String]
+splitModuleName (MV x) = map MT.unpack $ MT.splitOn "." x
+
+commonPrefix :: Eq a => [a] -> [a] -> [a]
+commonPrefix (x:xs) (y:ys)
+    | x == y = x : commonPrefix xs ys
+    | otherwise = []
+commonPrefix _ _ = []
+
+removeSuffix :: Eq a => [a] -> [a] -> [a]
+removeSuffix xs ys 
+    | last xs == last ys = removeSuffix (init xs) (init ys)
+    | otherwise = ys
+
 -- | Find an ordered list of possible locations to search for a module
-getModulePaths :: Path -> MVar -> [Path]
-getModulePaths lib (MV base) = map MS.joinPath paths where
-    -- an import name like "math" or "alice.math" 
-    basePath = splitOn "." (MT.unpack base)
+getModulePaths :: Path -> Maybe (Path, MVar) -> MVar -> [Path]
+-- CASE #1
+--   If we are not in a module, then the import may be from the system or
+--   the local "working" directory.
+--
+-- Example:
+--   Give the following code in  /../src/foo/bar/baz/main.loc
+-- ```
+-- import bif.buf
+-- ```
+-- `bif.buf` may be imported locally or from the system
+-- --  1. /../src/foo/bar/baz/bif/buf/main.loc
+-- --  2. $MORLOC_LIB/src/bif/buf/main.loc
+getModulePaths lib Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
 
     -- either search the working directory for a life like "math.loc" or look
     -- for a folder named after the module with with a "main.loc" script
     localPaths = [
-            init basePath <> [last basePath <> ".loc"]
-          , basePath <> ["main.loc"]
+            init namePath <> [last namePath <> ".loc"]
+          , namePath <> ["main.loc"]
         ]
 
     -- if nothing is local, look for system libraries. The system libraries MUST
@@ -108,11 +134,56 @@ getModulePaths lib (MV base) = map MS.joinPath paths where
     -- the name of the final import feild (e.g., "math" in the imports "math" or
     -- "alice.math") or by "main.loc"
     systemPaths = [
-            lib : init basePath <> [last basePath <> ".loc"]
-          , lib : basePath <> ["main.loc"]
+            lib : init namePath <> [last namePath <> ".loc"]
+          , lib : namePath <> ["main.loc"]
         ]
 
     paths = localPaths <> systemPaths
+
+getModulePaths lib (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
+    case commonPrefix moduleName importName of
+    -- CASE #2
+    --   If we are in a module, and if the module name path and the import name
+    --   path do no share a common root, then look for the import in the system
+    --   library.
+    --
+    -- Example:
+    --   Give the following code in file /../src/foo/bar/baz/main.loc
+    -- ```
+    -- module foo.bar.baz
+    -- import bif.buf
+    -- ```
+    -- The only where `bif.buf` may be foud is the system library:
+    --   $MORLOC_LIB/src/bif/buf/main.loc
+        [] ->  map MS.joinPath [
+                  lib : init importName <> [last importName <> ".loc"]
+                , lib : importName <> ["main.loc"]
+              ]
+
+    -- CASE #3
+    --   If we are in a module, and if the module name path shares a common
+    --   root with the import name path, then the module file paths must
+    --   share a common root.
+    -- Example:
+    -- Give the following code in file /../src/foo/bar/baz/main.loc
+    --
+    -- ```
+    -- module foo.bar.baz
+    -- import foo.bif
+    -- ```
+    --
+    -- The only place where `foo.bif` may be found is:
+    --    /../src/foo/bif/main.loc
+        _ -> let rootPath = if last modulePath == "main.loc"
+                            -- e.g., `/../src/foo/bar/baz/main.loc` -> '/../src/'
+                            then removeSuffix moduleName (init modulePath)
+                            -- e.g., `/../src/foo/bar/baz.loc`  -> '/../src/'
+                            else removeSuffix (init moduleName) (init modulePath)
+             in map MS.joinPath [
+                        rootPath <> importName <> ["main.loc"]
+                    ,   rootPath <> init importName <> [last importName <> ".loc"]
+                 ]
+
 
 -- | An ordered list of where to search for C/C++ header files
 getHeaderPaths

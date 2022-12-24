@@ -36,30 +36,32 @@ parse f (Code code) = do
   -- MM.say $ "Parsing" <+> maybe "<stdin>" MD.viaShow f
   case Parser.readProgram Nothing f code Lexer.emptyState mempty of
     (Left e) -> MM.throwError $ SyntaxError e
-    (Right (mainDag, mainState)) -> parseImports mainDag  mainState
+    (Right (mainDag, mainState)) -> parseImports mainDag mainState Map.empty
   where
     -- descend recursively into imports
     parseImports
       :: DAG MVar Import ExprI
       -> Lexer.ParserState
+      -> Map.Map MVar Path
       -> MorlocMonad (DAG MVar Import ExprI)
-    parseImports d s = case unimported of
+    parseImports d s m = case unimported of
       [] -> return d
-      (child:_) -> do
-          importPath <- Mod.findModule child
+      ((mainModule, importedModule):_) -> do
+          importPath <- case Map.lookup mainModule m of
+              (Just mainPath) -> Mod.findModule (Just (mainPath, mainModule)) importedModule
+              Nothing -> Mod.findModule Nothing importedModule
           Mod.loadModuleMetadata importPath
           (childPath, code') <- openLocalModule importPath
           -- MM.say $ "Parsing module" <+> (MD.viaShow . unMVar) child <+> "from" <+>  MD.viaShow importPath
-          case Parser.readProgram (Just child) childPath code' s d of
+          case Parser.readProgram (Just importedModule) childPath code' s d of
             (Left e) -> MM.throwError $ SyntaxError e
-            (Right (d', s')) -> parseImports d' s'
+            (Right (d', s')) -> parseImports d' s' (maybe m (\v -> Map.insert importedModule v m) childPath)
       where
-        -- all modules that are imported
-        imported = Set.fromList (map snd (MDD.edgelist d))
         -- all modules that have already been parsed
         parsed = Map.keysSet d
-        -- the modules that have not been parsed yet
-        unimported = Set.toList $ Set.difference imported parsed
+        -- find all (module to module) edges in the graph where the imported
+        -- module has not yet been parsed
+        unimported = filter (\(_, importMod) -> not (Set.member importMod parsed)) (MDD.edgelist d)
 
 -- | assume @t@ is a filename and open it, return file name and contents
 openLocalModule :: Path -> MorlocMonad (Maybe Path, MT.Text)

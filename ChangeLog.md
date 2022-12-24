@@ -35,6 +35,19 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Add `import Foo hiding (...)` syntax
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
+ - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+
+0.38.0 [2022.12.23]
+-------------------
+
+ * Choose casing convention
+   * camel case for terms (for now, underscore is illegal)
+   * pascal case for types
+ * Fix sub-module handling
+ * Fix import/export of type definitions
+ * Better error messages for import/export errors
+ * Somewhat formatted `typecheck` subcommand output 
+ * Add option to typecheck backend (concrete types and language selection)
 
 0.37.0 [2022.12.11]
 -------------------

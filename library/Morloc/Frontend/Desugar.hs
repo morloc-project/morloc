@@ -27,44 +27,13 @@ desugar
   :: DAG MVar Import ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 desugar s
-  = resolveImports s -- rewrite DAG edges to map imported terms to their aliases
-  >>= checkForSelfRecursion -- modules should not import themselves
+  = checkForSelfRecursion s -- modules should not import themselves
+  >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= desugarDag -- substitute type aliases
+  >>= removeTypeImports -- Remove type imports and exports
   >>= addPackerMap -- add the packers to state
 
-
--- | Consider export/import information to determine which terms are imported
--- into each module. This step reduces the Import edge type from an m-to-n
--- source name to an alias map.
-resolveImports
-  :: DAG MVar Import ExprI
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-resolveImports = MDD.mapEdgeWithNodeM resolveImport where
-  resolveImport
-    :: ExprI
-    -> Import
-    -> ExprI
-    -> MorlocMonad [(EVar, EVar)]
-  resolveImport _ (Import _ Nothing exc _) n2
-    = return
-    . map (\x -> (x,x)) -- alias is identical
-    . Set.toList
-    $ Set.difference (AST.findExportSet n2) (Set.fromList exc)
-  resolveImport _ (Import _ (Just inc) exc _) n2
-    | length contradict > 0
-        = MM.throwError . CallTheMonkeys
-        $ "Error: The following terms are both included and excluded: " <>
-          render (tupledNoFold $ map pretty contradict)
-    | length missing > 0
-        = MM.throwError . CallTheMonkeys
-        $ "Error: The following terms are not exported: " <>
-          render (tupledNoFold $ map pretty missing)
-    | otherwise = return inc
-    where
-      missing = [n | (n, _) <- inc, not $ Set.member n (AST.findExportSet n2)]
-      contradict = [n | (n, _) <- inc, elem n exc]
-
-checkForSelfRecursion :: DAG MVar [(EVar, EVar)] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
   MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
   return d
@@ -72,7 +41,7 @@ checkForSelfRecursion d = do
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
     isExprSelfRecursive (ExprI _ (TypE v _ t))
-      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v 
+      | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
 
@@ -93,18 +62,67 @@ checkForSelfRecursion d = do
 
     hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
 
+
+-- | Consider export/import information to determine which terms are imported
+-- into each module. This step reduces the Import edge type to an alias map.
+resolveImports
+  :: DAG MVar Import ExprI
+  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+resolveImports = MDD.mapEdgeWithNodeAndKeyM resolveImport where
+  resolveImport
+    :: MVar
+    -> ExprI
+    -> Import
+    -> ExprI
+    -> MorlocMonad [AliasedSymbol]
+  -- import everything except the excluded and use no aliases
+  resolveImport _ _ (Import _ Nothing exc _) n2
+    = return
+    . map toAliasedSymbol
+    . Set.toList
+    $ Set.difference (AST.findExportSet n2) (Set.fromList exc)
+  -- import only the selected values with (possibly identical) aliases
+  resolveImport m1 _ (Import m2 (Just inc) exc _) n2
+    | not (null contradict)
+        = MM.throwError . ImportExportError m1
+        $ "The following terms imported from module '" <> unMVar m2 <> "' are both included and excluded: " <>
+          render (tupledNoFold $ map pretty contradict)
+    | not (null missing)
+        = MM.throwError . ImportExportError m1
+        $ "The following imported terms are not exported from module '" <> unMVar m2 <> "': " <>
+          render (tupledNoFold $ map pretty missing)
+    | otherwise = return inc
+    where
+      exportSet = AST.findExportSet n2
+      -- terms that are imported from n2 but that n2 does not export
+      missing = filter (not . (`Set.member` exportSet)) (map unalias inc)
+      -- terms that are both included and excluded
+      contradict = filter (`elem` exc) (map unalias inc)
+
+  unalias :: AliasedSymbol -> Symbol
+  unalias (AliasedType x _) = TypeSymbol x
+  unalias (AliasedTerm x _) = TermSymbol x
+
+  toAliasedSymbol :: Symbol -> AliasedSymbol
+  toAliasedSymbol (TypeSymbol x) = AliasedType x x
+  toAliasedSymbol (TermSymbol x) = AliasedTerm x x
+
 desugarDag
-  :: DAG MVar [(EVar, EVar)] ExprI
-  -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
-desugarDag m = MDD.mapNodeWithKeyM (desugarExpr m) m where
+  :: DAG MVar [AliasedSymbol] ExprI
+  -> MorlocMonad (DAG MVar [AliasedSymbol] ExprI)
+desugarDag m = MDD.mapNodeWithKeyM (desugarExpr m) m
 
 desugarExpr
-  :: DAG MVar [(EVar, EVar)] ExprI
-  -> MVar
-  -> ExprI
+  :: DAG MVar [AliasedSymbol] ExprI -- ^ The DAG of all modules
+  -> MVar -- ^ The name of the current module
+  -> ExprI -- ^ The syntax tree for the current module
   -> MorlocMonad ExprI
 desugarExpr d k e0 = do
-  s <- MM.get  
+  s <- MM.get
+
+  -- Here we are creating links from every indexed term in the module to the module
+  -- sources and aliases. When the module abstractions are factored out later,
+  -- this will be the only way to access module-specific info.
   MM.put (s { stateSources = GMap.insertMany indices k objSources (stateSources s)
             , stateTypedefs = GMap.insertMany indices k typedefs (stateTypedefs s) } )
   mapExprM f e0
@@ -115,40 +133,55 @@ desugarExpr d k e0 = do
   f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
   f e = return e
 
+  -- Find all non-generic type terms used in this module
+  -- These are the terms that may need alias expansion
+  terms :: [TVar]
   terms = AST.findSignatureTypeTerms e0
 
+  -- Map of type variables to their definitions/aliases (TypE terms)
+  -- This includes simple aliases, such as:
+  --   type Foo = Int
+  -- As well as complex data declarations, such as:
+  --   object (Person a) = Person {name :: Str, age :: Int}
   termmap :: Map.Map TVar [([TVar], TypeU)]
   termmap = Map.fromList $ zip terms (map lookupTypedefs terms)
-
-  indices = AST.getIndices e0
-
-  -- FIXME: should a term be allowed to have multiple type definitions within a language?
-  typedefs :: Map.Map TVar (Type, [TVar])
-  typedefs = Map.map (\(vs, t) -> (typeOf t, vs))
-    (Map.map head (Map.filter (\xs -> length xs > 0) termmap))
-
-  objSources = [src | src <- AST.findSources e0]
 
   lookupTypedefs
     :: TVar
     -> [([TVar], TypeU)]
   lookupTypedefs (TV lang v)
     = catMaybes
+    -- Maybe ([TVar], TypeU)
     . MDD.nodes
-    . MDD.mapNode (\(EV v', typemap) -> Map.lookup (TV lang v') typemap)
-    $ MDD.lookupAliasedTerm (EV v) k AST.findTypedefs d
+    -- DAG MVar None (Maybe ([TVar], TypeU))
+    . MDD.mapNode (\(v', typemap) -> Map.lookup (TV lang v') typemap)
+    -- DAG MVar None (Text, Map.Map TVar ([TVar], TypeU))
+    . MDD.lookupAliasedTerm v k AST.findTypedefs
+    -- DAG MVar [(Text,Text)] ExprI
+    . MDD.mapEdge (\xs -> [(x,y) | AliasedType x y <- xs])
+    -- DAG MVar [AliasedSymbol] ExprI
+    $ d
+
+  indices = AST.getIndices e0
+
+  -- FIXME: should a term be allowed to have multiple type definitions within a language?
+  typedefs :: Map.Map TVar (Type, [TVar])
+  typedefs = Map.map (\(vs, t) -> (typeOf t, vs))
+    (Map.map head (Map.filter (not . null) termmap))
+
+  objSources = [src | src <- AST.findSources e0]
 
 
 desugarEType
   :: Map.Map TVar [([TVar], TypeU)]
-  -> DAG MVar [(EVar, EVar)] ExprI
+  -> DAG MVar [AliasedSymbol] ExprI
   -> MVar -> EType -> MorlocMonad EType
 desugarEType h d k (EType t ps cs) = EType <$> desugarType h d k t <*> pure ps <*> pure cs
 
 
 desugarType
   :: Map.Map TVar [([TVar], TypeU)]
-  -> DAG MVar [(EVar, EVar)] ExprI
+  -> DAG MVar [AliasedSymbol] ExprI
   -> MVar
   -> TypeU
   -> MorlocMonad TypeU
@@ -167,7 +200,7 @@ desugarType h _ _ = f
     ds' <- mapM f ds
     return $ ExistU v ps' ds'
   f (FunU ts t) = FunU <$> mapM f ts <*> f t
-  f (NamU o n ps rs) = do 
+  f (NamU o n ps rs) = do
     ts <- mapM (f . snd) rs
     ps' <- mapM f ps
     return $ NamU o n ps' (zip (map fst rs) ts)
@@ -196,10 +229,10 @@ desugarType h _ _ = f
   -- Can only apply VarU? Will need to fix this when we get lambdas.
   f (AppU _ _) = undefined
 
-  -- type Foo = A     
-  -- f :: Foo -> B    
+  -- type Foo = A
+  -- f :: Foo -> B
   -- -----------------
-  -- f :: A -> B      
+  -- f :: A -> B
   f t0@(VarU v) =
      case Map.lookup v h of
       (Just []) -> return t0
@@ -250,6 +283,24 @@ chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistenti
 chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
 chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, chooseExistential t) | (k,t) <- rs]
 
+
+removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
+removeTypeImports d = case MDD.roots d of
+  [root] -> return 
+          . MDD.shake root
+          . MDD.filterEdge filterEmpty
+          . MDD.mapEdge (mapMaybe maybeEVar)
+          $ d
+  roots -> MM.throwError $ NonSingularRoot roots
+  where 
+    maybeEVar :: AliasedSymbol -> Maybe (EVar, EVar)
+    maybeEVar (AliasedTerm x y) = Just (EV x, EV y)
+    maybeEVar (AliasedType _ _) = Nothing -- remove type symbols, they have already been used
+
+    filterEmpty :: k -> n -> k -> [a] -> Bool
+    filterEmpty _ _ _ [] = False
+    filterEmpty _ _ _ _ = True
+
 -- | Packers need to be passed along with the types the pack, they are imported
 -- explicitly with the type and they pack. Should packers be universal? The
 -- packers describe how a term may be simplified. But often there are multiple
@@ -261,7 +312,7 @@ chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, ch
 -- global packer, but ultimately it would be better to resolve packers
 -- case-by-base as yet another optimization degree of freedom.
 addPackerMap
-  :: (DAG MVar [(EVar, EVar)] ExprI)
+  :: DAG MVar [(EVar, EVar)] ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
 addPackerMap d = do
   maybeDAG <- MDD.synthesizeDAG gatherPackers d
@@ -275,9 +326,9 @@ gatherPackers
   -> ExprI -- data about the importing module
   -> [( MVar -- the name of an imported module
       , [(EVar , EVar)]
-      , (ExprI, (Map.Map (TVar, Int) [UnresolvedPacker])) -- data about the imported module
+      , (ExprI, Map.Map (TVar, Int) [UnresolvedPacker]) -- data about the imported module
      )]
-  -> MorlocMonad (ExprI, (Map.Map (TVar, Int) [UnresolvedPacker]))
+  -> MorlocMonad (ExprI, Map.Map (TVar, Int) [UnresolvedPacker])
 gatherPackers mv e xs =
   case findPackers e of
     (Left err') -> MM.throwError err'
@@ -294,8 +345,11 @@ attachPackers mv e m = do
 
 findPackers :: ExprI -> Either MorlocError (Map.Map (TVar, Int) [UnresolvedPacker])
 findPackers expr
-  = fmap (Map.fromList . groupSort . map toPackerPair . groupSort)
-  $ mapM toPair
+  = Map.fromList
+  . groupSort
+  . map toPackerPair
+  . groupSort
+  <$> mapM toPair
     [ (src, t)
     | (alias1, t) <- packers
     , src@(Source _ lang2 _ alias2 _) <- sources

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Data.DAG
@@ -19,6 +20,7 @@ module Morloc.Data.DAG
   , lookupEdgeTriple
   , local
   , roots
+  , shake
   , leafs
   , findCycle
   , mapNode
@@ -26,9 +28,11 @@ module Morloc.Data.DAG
   , mapNodeWithKey
   , mapNodeWithKeyM
   , mapEdge
+  , filterEdge
   , mapEdgeWithNode
+  , mapEdgeWithNodeAndKey
   , mapNodeWithEdge
-  , mapEdgeWithNodeM
+  , mapEdgeWithNodeAndKeyM
   , lookupAliasedTerm
   , lookupAliasedTermM
   , synthesizeDAG
@@ -131,6 +135,23 @@ mapNodeWithKeyM f d
 mapEdge :: (e1 -> e2) -> DAG k e1 n -> DAG k e2 n
 mapEdge f = Map.map (\(n, xs) -> (n, [(k, f e) | (k,e) <- xs]))
 
+-- | Filter the edges in a DAG
+filterEdge :: (k -> n -> k -> e -> Bool) -> DAG k e n -> DAG k e n
+filterEdge f = Map.mapWithKey (\k (n, xs) -> (n, filter (uncurry (f k n)) xs))
+
+-- | Removes everything not connected to the root
+shake :: Ord k => k -> DAG k e n -> DAG k e n
+shake rootKey d =
+    let children = rootChildren rootKey
+    in Map.filterWithKey (\k _ -> Set.member k children) d
+    where
+        rootChildren localRootKey = case Map.lookup localRootKey d of 
+            Nothing -> Set.singleton localRootKey
+            (Just (_, map fst -> children)) -> Set.insert localRootKey $ Set.unions (map rootChildren children)
+
+-- trim d =
+--     let isChild = Set.unions $ concat $ Map.elems $ Map.mapKey (\(_, xs) -> map fst) d
+
 -- | map over edges given the nodes the edge connects
 mapEdgeWithNode
   :: Ord k
@@ -139,6 +160,16 @@ mapEdgeWithNode
 mapEdgeWithNode f d = Map.mapWithKey runit d where
   runit k _ = case local k d of
     (Just (n1, xs)) -> (n1, [(k2, f n1 e n2) | (k2, e, n2) <- xs])
+    Nothing -> error "Bad DAG"
+
+-- | map over edges given the nodes the edge connects
+mapEdgeWithNodeAndKey
+  :: Ord k
+  => (k -> n -> e1 -> n -> e2)
+  -> DAG k e1 n -> DAG k e2 n
+mapEdgeWithNodeAndKey f d = Map.mapWithKey runit d where
+  runit k _ = case local k d of
+    (Just (n1, xs)) -> (n1, [(k2, f k n1 e n2) | (k2, e, n2) <- xs])
     Nothing -> error "Bad DAG"
 
 -- | Map node data given edges and child data
@@ -158,10 +189,23 @@ mapEdgeWithNodeM
   -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
 mapEdgeWithNodeM f d = mapM runit (Map.toList d) |>> Map.fromList
   where
-    runit (k1, _) = case local k1 d of 
+    runit (k, _) = case local k d of 
       (Just (n1, xs)) -> do
         e2s <- mapM (\(_, e, n2) -> f n1 e n2) xs
-        return (k1, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
+      Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
+
+-- | map over edges given the nodes the edge connects
+mapEdgeWithNodeAndKeyM
+  :: Ord k
+  => (k -> n -> e1 -> n -> MorlocMonad e2)
+  -> DAG k e1 n -> MorlocMonad (DAG k e2 n)
+mapEdgeWithNodeAndKeyM f d = mapM runit (Map.toList d) |>> Map.fromList
+  where
+    runit (k, _) = case local k d of 
+      (Just (n1, xs)) -> do
+        e2s <- mapM (\(_, e, n2) -> f k n1 e n2) xs
+        return (k, (n1, zip (map (\(x,_,_)->x) xs) e2s))
       Nothing -> MM.throwError . CallTheMonkeys $ "Incomplete DAG, missing object"
 
 -- | Map a monadic function over a DAG yielding a new DAG with the same
@@ -215,7 +259,7 @@ lookupAliasedTerm
   -> DAG k [(v,v)] n
   -- ^ original DAG where edges are "import as" statements
   -> DAG k None (v,a)
-  -- ^ The final DAG with no edge attribute and the 
+  -- ^ The final DAG with no edge attribute
 lookupAliasedTerm v0 k0 f d0 = fromJust $ lookupAliasedTermM v0 k0 (Just . f) d0
 
 lookupAliasedTermM
