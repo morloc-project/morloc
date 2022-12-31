@@ -1,0 +1,4 @@
+import base (map, add)
+export foo
+
+foo = map (add 1.0)

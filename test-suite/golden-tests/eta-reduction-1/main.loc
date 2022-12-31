@@ -1,0 +1,10 @@
+import base (mul, add)
+export foo
+
+-- fully eta-reduced
+neg = mul -1.0
+
+-- partly eta-reduced
+bar x = mul (add 1.0 x)
+
+foo = neg . bar 4.0

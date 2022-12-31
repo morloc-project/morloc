@@ -40,6 +40,11 @@ main = do
       , golden "argument-form-3-r" "argument-form-3-r"
 
       , golden "composition" "composition"
+      , golden "eta-reduction-1" "eta-reduction-1"
+      , golden "eta-reduction-2" "eta-reduction-2"
+      , golden "eta-reduction-3" "eta-reduction-3"
+      , golden "eta-reduction-4" "eta-reduction-4"
+      , golden "eta-reduction-5" "eta-reduction-5"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"

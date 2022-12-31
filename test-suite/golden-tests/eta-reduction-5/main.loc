@@ -1,0 +1,8 @@
+import base (zipWith, add)
+export foo0
+export foo1
+export foo2
+
+foo0 = zipWith add
+foo1 xs = zipWith add xs
+foo2 xs ys = zipWith add xs ys
