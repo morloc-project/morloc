@@ -113,7 +113,7 @@ instance Pretty TypeError where
     <+> pretty msg
   pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
-  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <> squotes (pretty e) 
+  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <+> squotes (pretty e) 
   pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> squotes (pretty e)
   pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
   pretty TooManyArguments = "TooManyArguments"

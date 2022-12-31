@@ -39,6 +39,8 @@ main = do
       , golden "argument-form-3-py" "argument-form-3-py"
       , golden "argument-form-3-r" "argument-form-3-r"
 
+      , golden "composition" "composition"
+
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
       , golden "argument-form-4-r" "argument-form-4-r"

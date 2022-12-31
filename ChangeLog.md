@@ -37,6 +37,11 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Describe the core data structures and algorithms
  - [ ] Allow module namespaces (e.g., `alice:math.complex`)
 
+0.39.0 [2022.12.xx]
+-------------------
+
+ - [x] Add compose operator
+
 0.38.0 [2022.12.23]
 -------------------
 
