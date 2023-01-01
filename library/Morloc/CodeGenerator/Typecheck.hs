@@ -70,15 +70,24 @@ typecheck e0 = do
 pseudoindex :: Int
 pseudoindex = -1
 
+-- Replace patially applied functions with lambdas and lambdas that return
+-- functions for fully applied lambdas.
+-- For example:
+--    map add  -->  \xs -> map add xs
+--    \xs -> zipWith add xs  -->  \xs ys -> zipWith add xs ys
 etaExpansion :: SAnno Int One (Indexed TypeP) -> SAnno Int One (Indexed TypeP)
 etaExpansion (SAnno (One (e@(AppS x xs), Idx i t@(FunP ts@(length -> n) outputType))) g) = 
     let vs =  take n (newvars e)
         x' = SAnno (One (AppS x (xs <> zipWith sannoVar ts vs), Idx pseudoindex outputType)) g
     in SAnno (One (LamS vs x', Idx i t)) g
-    where
-        sannoVar :: TypeP -> EVar -> SAnno Int One (Indexed TypeP)
-        sannoVar vt v = SAnno (One (VarS v, Idx pseudoindex vt)) pseudoindex
+etaExpansion (SAnno (One (e@(LamS vs0 (SAnno (One (AppS x xs, Idx _ (FunP ts0@(length -> n) outputType))) g0)), Idx i1 (FunP ts1 _))) g1) =
+    let vs = take n (newvars e)
+        x' = SAnno (One (AppS x (xs <> zipWith sannoVar ts0 vs), Idx pseudoindex outputType)) g0
+    in SAnno (One (LamS (vs0 <> vs) x', Idx i1 (FunP (ts1 <> ts0) outputType))) g1
 etaExpansion x = x
+
+sannoVar :: TypeP -> EVar -> SAnno Int One (Indexed TypeP)
+sannoVar vt v = SAnno (One (VarS v, Idx pseudoindex vt)) pseudoindex
 
 newvars :: SExpr g One c -> [EVar]
 newvars e = filter (not . flip Set.member used) vars where
