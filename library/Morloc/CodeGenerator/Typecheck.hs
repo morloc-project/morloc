@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Typecheck
@@ -11,7 +12,10 @@ Stability   : experimental
 
 module Morloc.CodeGenerator.Typecheck
 (
-  typecheck
+    typecheck
+  , peak
+  , peakGen
+  , say
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -19,9 +23,11 @@ import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
+import qualified Data.Set as Set
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -55,7 +61,44 @@ typecheck e0 = do
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve (applyCon g2 e2)
+  weaveAndResolve (applyCon g2 e2) |>> etaExpansion
+
+-- eta expansion generates terms that do not appear in the original source
+-- tree. These terms thus are not indexed. For now, I will simply set them to
+-- -1, but with some effort it should be possible to link these to locations in
+-- the source code, types, and all that.
+pseudoindex :: Int
+pseudoindex = -1
+
+etaExpansion :: SAnno Int One (Indexed TypeP) -> SAnno Int One (Indexed TypeP)
+etaExpansion (SAnno (One (e@(AppS x xs), Idx i t@(FunP ts@(length -> n) outputType))) g) = 
+    let vs =  take n (newvars e)
+        x' = SAnno (One (AppS x (xs <> zipWith sannoVar ts vs), Idx pseudoindex outputType)) g
+    in SAnno (One (LamS vs x', Idx i t)) g
+    where
+        sannoVar :: TypeP -> EVar -> SAnno Int One (Indexed TypeP)
+        sannoVar vt v = SAnno (One (VarS v, Idx pseudoindex vt)) pseudoindex
+etaExpansion x = x
+
+newvars :: SExpr g One c -> [EVar]
+newvars e = filter (not . flip Set.member used) vars where
+    vars :: [EVar]
+    vars = [EV ("v" <> MT.show' i) | i <- [(0 :: Integer) ..]]
+    used = findUsedVars e
+
+    findUsedVars :: SExpr g One c -> Set.Set EVar
+    findUsedVars (VarS v) = Set.singleton v
+    findUsedVars (AccS x _) = findUsedVars (sexpr x)
+    findUsedVars (AppS x xs) = Set.unions $ map (findUsedVars . sexpr) (x : xs)
+    findUsedVars (LamS vs x) = Set.union (Set.fromList vs) (findUsedVars (sexpr x))
+    findUsedVars (LstS xs) = Set.unions $ map (findUsedVars . sexpr) xs
+    findUsedVars (TupS xs) = Set.unions $ map (findUsedVars . sexpr) xs
+    findUsedVars (NamS ks) = Set.unions $ Set.fromList (map (EV . fst) ks) : map (findUsedVars . sexpr . snd) ks
+    findUsedVars _ = Set.empty
+
+    sexpr :: SAnno g One c -> SExpr g One c
+    sexpr (SAnno (One (x, _)) _) = x
+
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -521,14 +564,14 @@ debugLog d = do
   verbosity <- MM.gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-peak :: (Pretty c) => SExpr (Indexed Type) One c -> MorlocMonad ()
+peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
 peak = say . prettySExpr pretty showGen
 
-peakGen :: (Pretty c) => SAnno (Indexed Type) One c -> MorlocMonad ()
+peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
 peakGen = say . prettySAnno pretty showGen
 
-showGen :: Indexed Type -> Doc ann
-showGen (Idx _ t) = parens (pretty t)
+showGen :: Pretty g => g -> Doc ann
+showGen g = parens (pretty g)
 
 synthG' g x = do
   enter "synthG"

@@ -27,8 +27,6 @@ typecheckFrontend path code
   >>= treeify
   -- add type annotations to sub-expressions and raise type errors
   >>= F.typecheck
-  -- [SAnno GMeta Many [CType]] -> (Script, [Script])
-  -- translate mtree into nexus and pool source code
 
 typecheck
   :: Maybe Path

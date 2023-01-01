@@ -43,7 +43,7 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.CodeGenerator.Typecheck (typecheck)
+import Morloc.CodeGenerator.Typecheck (typecheck, say, peak, peakGen)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import qualified Data.Map as Map
@@ -70,7 +70,7 @@ realityCheck es = do
   -- translate modules into bitrees
   (gASTs, rASTs)
     -- select a single instance at each node in the tree
-    <- mapM realize es  -- [Either (SAnno GMeta One CType) (SAnno GMeta One CType)]
+    <- mapM realize es
     -- separate unrealized (general) ASTs (uASTs) from realized ASTs (rASTs)
     |>> partitionEithers
 
@@ -501,7 +501,7 @@ has been applied. The type of bar is now split between indices 12 and 13.
 
 This case works fine, but it breaks down when types are polymorphic. If the
 annotation of bar had been `a -> a`, then how would we type 12 and 13? We can't
-say that `12 :: forall a . a` and be `13 :: forall a . a`, since this
+say that `12 :: forall a . a` and `13 :: forall a . a`, since this
 eliminates the constraint that the `a`s must be the same.
 
 If instead we rewrite lambdas after typechecking, then everything works out.
@@ -657,7 +657,13 @@ makeArgument i t = SerialArgument i t
 
 
 express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
-express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
+express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
+  say "Entering express"
+  final <- express' True c0 s0
+  say "Exiting express"
+  return final
+
+  where
   express'
     :: Bool -- is this a top-level expression that the nexus will record?
     -> TypeP
@@ -665,19 +671,21 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
     -> MorlocMonad (ExprM Many)
 
   -- primitives
-  express' _ _ (SAnno (One (RealS x, (Idx _ c, _))) _) = return $ RealM (Native c) x
-  express' _ _ (SAnno (One (IntS x, (Idx _ c, _))) _) = return $ IntM (Native c) x
-  express' _ _ (SAnno (One (LogS x, (Idx _ c, _))) _) = return $ LogM (Native c) x
-  express' _ _ (SAnno (One (StrS x, (Idx _ c, _))) _) = return $ StrM (Native c) x
-  express' _ _ (SAnno (One (UniS, (Idx _ c, _))) _) = return $ NullM (Native c)
+  express' _ _ (SAnno (One (e@(RealS x), (Idx _ c, _))) _) = peak e >> return (RealM (Native c) x)
+  express' _ _ (SAnno (One (e@(IntS x), (Idx _ c, _))) _) = peak e >> return (IntM (Native c) x)
+  express' _ _ (SAnno (One (e@(LogS x), (Idx _ c, _))) _) = peak e >> return (LogM (Native c) x)
+  express' _ _ (SAnno (One (e@(StrS x), (Idx _ c, _))) _) = peak e >> return (StrM (Native c) x)
+  express' _ _ (SAnno (One (e@UniS, (Idx _ c, _))) _) = peak e >> return (NullM (Native c))
 
   -- record access
-  express' isTop pc (SAnno (One (AccS x k, _)) m) = do
+  express' isTop pc (SAnno (One (e@(AccS x k), _)) m) = do
+    peak e
     x' <- express' isTop pc x >>= unpackExprM m
     return (AccM x' k)
 
   -- containers
-  express' isTop _ (SAnno (One (LstS xs, (Idx _ c@(AppP _ [t]), args))) m) = do
+  express' isTop _ (SAnno (One (e@(LstS xs), (Idx _ c@(AppP _ [t]), args))) m) = do
+    peak e
     xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
     let x = ListM (Native c) xs'
     if isTop
@@ -687,7 +695,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       else return x
   express' _ _ (SAnno (One (LstS _, _)) _) = MM.throwError . CallTheMonkeys $ "LstS can only be AppP type"
 
-  express' isTop _ (SAnno (One (TupS xs, (Idx _ c@(AppP _ ts), args))) m) = do
+  express' isTop _ (SAnno (One (e@(TupS xs), (Idx _ c@(AppP _ ts), args))) m) = do
+    peak e
     xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
     let x = TupleM (Native c) xs'
     if isTop
@@ -696,7 +705,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
-  express' isTop _ (SAnno (One (NamS entries, (Idx _ c@(NamP _ _ _ rs), args))) m) = do
+  express' isTop _ (SAnno (One (e@(NamS entries), (Idx _ c@(NamP _ _ _ rs), args))) m) = do
+    peak e
     xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m)
     let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
@@ -713,11 +723,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
   -- should be a more elegant solution.
   -- ***************************************************************************
   -- lambda
-  express' isTop _ (SAnno (One (LamS _ (SAnno x@(One (_, (Idx _ c, _))) _), _)) m)
-    = express' isTop c (SAnno x m)
+  express' isTop _ (SAnno (One (e@(LamS _ (SAnno x@(One (_, (Idx _ c, _))) _)), _)) m)
+    = say "Lambda expression" >> peak e >> express' isTop c (SAnno x m)
 
   -- var
-  express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) =
+  express' _ _ (SAnno (One (e@(VarS v), (Idx _ c, rs))) _) = do
+    say "VarS expression"
+    peak e
     case [r | (v', r) <- rs, v == v'] of
       [r] -> case r of
         (SerialArgument i _) -> return $ BndVarM (Serial c) i
@@ -730,15 +742,19 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
   -- connections will be snapped apart in the segment step.
-  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inputs _), _))) _) xs, (_, args))) m)
+  express' isTop pc (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (_, args))) m)
     -- case #1
     | sameLanguage && fullyApplied = do
+        say "case #1:"
+        peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
         return . ManifoldM m (map snd args) $
           ReturnM (AppM f xs')
 
     -- case #2
     | sameLanguage && not fullyApplied = do
+        say "case #2:"
+        peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
         let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
@@ -749,12 +765,16 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
 
     -- case #3
     | not sameLanguage && fullyApplied = do
+          say "case #3:"
+          peak e
           xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
           return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
             ReturnM (AppM f xs')
 
     -- case #4
     | not sameLanguage && not fullyApplied = do
+        say "case #4:"
+        peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
         let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
@@ -769,7 +789,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       f = SrcM (typeP2typeM fc) src
 
   -- CallS - direct export of a sourced function, e.g.:
-  express' True _ (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
+  express' True _ (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
+    say "CallS - direct export"
+    peak e
     let lambdaArgs = zipWith SerialArgument [0 ..] inputs
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
@@ -777,7 +799,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
   -- An un-applied source call
-  express' False pc (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
+  express' False pc (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
+    say "Un-applied source call"
+    peak e
     let lambdaTypes = map typeP2typeM inputs
         lambdaArgs = zipWith NativeArgument [0 ..] inputs
         lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
@@ -788,7 +812,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = express' True c0 s0 where
       then return manifold
       else return $ ForeignInterfaceM (typeP2typeM pc) manifold
 
-  express' _ _ (SAnno (One (_, (Idx _ t, _))) m) = do
+  express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
+    say "Bad case"
+    peak e
     name' <- MM.metaName m
     case name' of
         (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)

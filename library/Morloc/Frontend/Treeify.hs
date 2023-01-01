@@ -358,8 +358,6 @@ collect (ExprI _ (ModE moduleName _)) (i, _) = do
       return $ SAnno (Many (calls <> declarations)) i
 collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
--- | Find the user provided, or module imported, general type annotations and
--- collect info needed for the GMeta object
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
   t0 <- MM.metaTermTypes i

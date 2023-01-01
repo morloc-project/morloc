@@ -23,13 +23,11 @@ import qualified Data.Map as Map
 import Data.Bifunctor (first)
 
 -- | Each SAnno object in the input list represents one exported function.
--- Modules, scopes, imports and and everything else are abstracted away,
--- wrapped into GMeta or stored in the Stack state.
+-- Modules, scopes, imports and everything else are abstracted away.
 --
 -- Check the general types, do nothing to the concrete types which may only be
 -- solved after segregation. Later the concrete types will need to be checked
--- for type consistency, correctness of packers, inferences of packers (both
--- for serialization and for casting).
+-- for type consistency and correctness of packers.
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
