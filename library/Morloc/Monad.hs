@@ -85,6 +85,7 @@ emptyState path v = MorlocState {
   , stateOutfile = path
   , statePackers = GMap.empty
   , stateName = Map.empty
+  , stateExports = []
 }
 
 startCounter :: MorlocMonad ()

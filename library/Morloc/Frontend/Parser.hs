@@ -122,7 +122,8 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pAcc    -- access <expr>@
+      try pComposition
+  <|> try pAcc    -- access <expr>@
   <|> try pNamE   -- record
   <|> try pTupE
   <|> try pUni
@@ -136,6 +137,37 @@ pExpr =
   <|> pLam
   <|> pVar
   <?> "expression"
+
+pComposition :: Parser ExprI
+pComposition = do
+
+    fs <- sepBy pFunction (symbol ".")
+
+    case length fs of
+        0 -> failure Nothing Set.empty
+        1 -> failure Nothing Set.empty
+        _ -> do
+
+            s <- CMS.get
+            let v = EV ("x" <> MT.show' (stateExpIndex s + 1))
+
+            v' <- exprI (VarE v)
+            
+            inner <- case last fs of
+                (ExprI i (AppE x xs)) -> return $ ExprI i (AppE x (xs <> [v']))
+                e -> exprI $ AppE e [v']
+            
+            composition <- foldM compose inner (reverse (init fs))
+
+            exprI $ LamE [v] composition 
+
+    where
+
+    pFunction = parens pFunction <|> try pApp <|> try pVar <|> pLam
+
+    compose :: ExprI -> ExprI -> Parser ExprI
+    compose inner (ExprI i (AppE x xs)) = return $ ExprI i (AppE x (xs <> [inner]))
+    compose inner outer = exprI (AppE outer [inner])
 
 -- Either a lowercase term name or an uppercase type name
 pSymbol :: Parser Symbol
@@ -255,6 +287,9 @@ pAssE :: Parser ExprI
 pAssE = try pFunctionAssE <|> pDataAssE
   where
 
+  -- The name pDataAssE is a deceptive. The right hand value is not necessarily
+  -- data, it may be an unapplied function that will need to undergo eta
+  -- expansion later.
   pDataAssE :: Parser ExprI
   pDataAssE = do
     v <- pEVar

@@ -43,3 +43,34 @@ structures (trees) and maybe an 11th really deep structure just for good feels.
 
 The `x-` tests cover unimplemented features with syntactic support. They are
 just tests of the parser.
+import pybase (map, add)
+export foo
+
+# Eta reduction
+
+```
+foo = map (add 1.0)
+```
+
+ 1. Synthesize map type |- (a -> b) -> [a] -> [b]
+ 2. (type args map) == 2
+ 3. (expr args map) == 1
+ 4. So add an expr arg:
+       `map (add 1.0)  -->  `\xs -> map (add 1.0) xs`
+ 5. And do the same for add
+       `\xs -> map (\x -> add 1.0 x) xs`
+
+
+If an expression has too many arguments:
+
+```
+bar x = add (mul 2 x)
+foo y = bar 4 y 
+```
+
+This is not really an eta-reduction problem, but a currying problem. The type of
+bar is `Real -> (Real -> Real)`. This should be equivalent to `Real -> Real ->
+Real`, but due to the how functions are encoded the number of expected arguments
+is set to 1, rather than 2. I need to normalize the function definitions.
+Better, I should rewrite them to naturally curry and avoid all this non-sense
+from the start.

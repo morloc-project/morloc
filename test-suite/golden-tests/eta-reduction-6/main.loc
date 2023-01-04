@@ -1,0 +1,5 @@
+import base (add, mul)
+export foo
+
+bar = add (mul 4.2 2.0)
+foo x = bar (add 1.0 x)

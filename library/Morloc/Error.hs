@@ -57,7 +57,7 @@ instance Pretty MorlocError where
   pretty ToplevelRedefinition = "ToplevelRedefinition"
   pretty (OtherError msg) = "OtherError: " <> pretty msg
   -- TODO: this will be a common class of errors and needs an informative message
-  pretty (IncompatibleGeneralType _ _) = "Incompatible general types"
+  pretty (IncompatibleGeneralType a b) = "Incompatible general types:" <+> parens (pretty a) <+> "vs" <+> parens (pretty b)
   -- container errors
   pretty EmptyTuple = "EmptyTuple"
   pretty TupleSingleton = "TupleSingleton"
@@ -113,7 +113,7 @@ instance Pretty TypeError where
     <+> pretty msg
   pretty (UnboundVariable v) = "UnboundVariable:" <+> pretty v
   pretty (KeyError k t) = "KeyError:" <+> dquotes (pretty k) <+> "not found in record" <+> pretty t
-  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <> squotes (pretty e) 
+  pretty (MissingConcreteSignature e lang) = "No concrete signature found for" <+> pretty lang <+> "function named" <+> squotes (pretty e) 
   pretty (MissingGeneralSignature e) = "MissingGeneralSignature for" <+> squotes (pretty e)
   pretty ApplicationOfNonFunction = "ApplicationOfNonFunction"
   pretty TooManyArguments = "TooManyArguments"

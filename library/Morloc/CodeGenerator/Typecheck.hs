@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Typecheck
@@ -11,7 +12,10 @@ Stability   : experimental
 
 module Morloc.CodeGenerator.Typecheck
 (
-  typecheck
+    typecheck
+  , peak
+  , peakGen
+  , say
 ) where
 
 import Morloc.CodeGenerator.Namespace
@@ -22,6 +26,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
+import qualified Morloc.Data.Text as MT
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -55,7 +60,7 @@ typecheck e0 = do
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve (applyCon g2 e2)
+  weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -248,7 +253,7 @@ synthE i lang g0 (AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
 
   -- extend the function type with the type of the expressions it is applied to
-  (g2, funType1, inputExprs) <- application' i lang g1 xs0 funType0
+  (g2, funType1, inputExprs) <- application' i lang g1 xs0 (normalizeType funType0)
 
   -- determine the type after application
   appliedType <- case funType1 of
@@ -521,14 +526,14 @@ debugLog d = do
   verbosity <- MM.gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
-peak :: (Pretty c) => SExpr (Indexed Type) One c -> MorlocMonad ()
+peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
 peak = say . prettySExpr pretty showGen
 
-peakGen :: (Pretty c) => SAnno (Indexed Type) One c -> MorlocMonad ()
+peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
 peakGen = say . prettySAnno pretty showGen
 
-showGen :: Indexed Type -> Doc ann
-showGen (Idx _ t) = parens (pretty t)
+showGen :: Pretty g => g -> Doc ann
+showGen g = parens (pretty g)
 
 synthG' g x = do
   enter "synthG"

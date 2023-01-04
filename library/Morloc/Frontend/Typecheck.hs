@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.Frontend.Typecheck
@@ -17,22 +18,22 @@ import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
 import Data.Bifunctor (first)
 
 -- | Each SAnno object in the input list represents one exported function.
--- Modules, scopes, imports and and everything else are abstracted away,
--- wrapped into GMeta or stored in the Stack state.
+-- Modules, scopes, imports and everything else are abstracted away.
 --
 -- Check the general types, do nothing to the concrete types which may only be
 -- solved after segregation. Later the concrete types will need to be checked
--- for type consistency, correctness of packers, inferences of packers (both
--- for serialization and for casting).
+-- for type consistency and correctness of packers.
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
+-- typecheck xs = error . MT.unpack . render . vsep . map (prettySAnno viaShow viaShow) $ xs
 typecheck = mapM run where
     run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
     run e0 = do
@@ -46,8 +47,9 @@ typecheck = mapM run where
       say "e2:"
       peakGen e2
       say "========================================================"
-      return (applyGen g2 e2)
+      return . mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
+-- TypeU --> Type
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int
 resolveTypes (SAnno (Many es) (Idx i t))
   = SAnno (Many (map (first f) es)) (Idx i (typeOf t)) where
@@ -99,7 +101,7 @@ synthG g (SAnno (Many []) i) = do
             -- This branch is entered for exported type definitions
             -- FIXME: return all definitions and their parameters, check parameter count
             (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
-            Nothing ->  error ("Shit output for index " <> show i)-- this should not happen
+            Nothing -> error ("Shit output for index " <> show i)-- this should not happen
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
 
@@ -176,26 +178,49 @@ synthE i g0 (AppS f xs0) = do
   -- synthesize the type of the function
   (g1, funType0, funExpr0) <- synthG g0 f
 
-  -- extend the function type with the type of the expressions it is applied to
-  (g2, funType1, inputExprs) <- application' i g1 xs0 funType0
+  -- eta expand
+  mayExpanded <- etaExpand g1 f xs0 funType0
 
-  -- determine the type after application
-  appliedType <- case funType1 of
-    (FunU ts t) -> case drop (length inputExprs) ts of 
-      [] -> return t -- full application
-      rs -> return $ FunU rs t -- partial application
-    _ -> error "impossible"
+  case mayExpanded of
+    -- If the term was eta-expanded, retypecheck it
+    (Just (g', x')) -> synthE i g' x'
+    -- Otherwise proceed
+    Nothing -> do
 
-  -- put the AppS back together with the synthesized function and input expressions
-  return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
+      -- extend the function type with the type of the expressions it is applied to
+      (g2, funType1, inputExprs) <- application' i g1 xs0 (normalizeType funType0)
+      
+      -- determine the type after application
+      appliedType <- case funType1 of
+        (FunU ts t) -> case drop (length inputExprs) ts of 
+          [] -> return t -- full application
+          rs -> return $ FunU rs t -- partial application
+        _ -> error "impossible"
+      
+      -- put the AppS back together with the synthesized function and input expressions
+      return (g2, apply g2 appliedType, AppS (applyGen g2 funExpr0) inputExprs)
 
 --   -->I==>
-synthE i g0 f@(LamS vs _) = do
-  -- create existentials for everything and pass it off to check
-  let (g1, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g0 vs
-      (g2, ft) = newvar "o_" Nothing g1
-      finalType = FunU ts ft
-  checkE' i g2 f finalType
+synthE i g0 f@(LamS vs x) = do
+  (g1, bodyType, _) <- synthG g0 x
+
+  let n = nfargs bodyType
+  if n > 0
+    then do
+      (g2, f2) <- expand n g1 f
+      say $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
+      synthE i g2 f2
+    else do
+      -- create existentials for everything and pass it off to check
+      let (g2, ts) = statefulMap (\g' v -> newvar (unEVar v <> "_x") Nothing g') g1 vs
+          (g3, ft) = newvar "o_" Nothing g2
+          finalType = FunU ts ft
+      checkE' i g3 f finalType
+  where
+    nfargs :: TypeU -> Int
+    nfargs (FunU ts _) = length ts
+    nfargs (ForallU _ f') = nfargs f'
+    nfargs _ = 0
 
 --   List
 synthE _ g (LstS []) =
@@ -277,6 +302,48 @@ synthE i g (VarS v) = do
         -- if this existential is never solved, then it will become universal later 
         Nothing -> return $ newvar (unEVar v <> "_u")  Nothing g
   return (g', t', VarS v)
+
+
+etaExpand :: Gamma -> SAnno Int Many Int -> [SAnno Int Many Int] -> TypeU -> MorlocMonad (Maybe (Gamma, SExpr Int Many Int))
+-- etaExpand _ x f _ =  error . MT.unpack . render $ tupled [prettySAnno viaShow viaShow $ x, viaShow f]
+etaExpand g0 f0 xs0@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
+    | termSize == typeSize = return Nothing 
+    | otherwise = Just <$> etaExpandE g0 (AppS f0 xs0)
+    where
+
+    etaExpandE :: Gamma -> SExpr Int Many Int -> MorlocMonad (Gamma, SExpr Int Many Int)
+    etaExpandE g e@(AppS _ _) = tryExpand (typeSize - termSize) g e
+    etaExpandE g e@(LamS vs _) = tryExpand (typeSize - termSize - length vs) g e
+    etaExpandE g e = return (g, e)
+
+    tryExpand n g e
+        -- A partially applied term intended to return a function (e.g., `(\x y -> add x y) x |- Real -> Real`)
+        -- A fully applied term
+        | n <= 0 = return (g, e)
+        | otherwise = expand n g e
+
+etaExpand _ _ _ _ = return Nothing
+
+
+expand :: Int -> Gamma -> SExpr Int Many Int -> MorlocMonad (Gamma, SExpr Int Many Int)
+expand 0 g x = return (g, x)
+expand n g e@(AppS _ _) = do
+    let (g', v') = evarname g "v"
+        e' = applyExistential v' e
+        x' = LamS [v'] (SAnno (Many [(e', (-1))]) (-1))
+    expand (n-1) g' x'
+expand n g (LamS vs' (SAnno (Many es0') t)) = do
+    let (g', v') = evarname g "v"
+        es1' = zip (map (applyExistential v' . fst) es0') (map snd es0')
+    expand (n-1) g' (LamS (vs' <> [v']) (SAnno (Many es1') t))
+expand _ g x = return (g, x)
+
+
+applyExistential :: EVar -> SExpr Int Many Int -> SExpr Int Many Int
+applyExistential v' (AppS f xs') = AppS f (xs' <> [SAnno (Many [(VarS v', (-1))]) (-1)])
+-- possibly illegal application, will type check after expansion
+applyExistential v' e = AppS (SAnno (Many [(e, (-1))]) (-1)) [SAnno (Many [(VarS v', (-1))]) (-1)]
+
 
 
 application
@@ -374,6 +441,10 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
 checkE _ g1 (LamS [] e1) (FunU [] b1) = do
   (g2, b2, e2) <- checkG' g1 e1 b1
   return (g2, FunU [] b2, LamS [] e2)
+
+checkE i g e@(LamS [] _) t@(FunU ts _) = do
+    (g', e') <- expand (length ts) g e
+    checkE i g' e' t
 
 checkE _ g1 (LamS [] e1) t0 = do
   (g2, t1, e2) <- checkG' g1 e1 t0
