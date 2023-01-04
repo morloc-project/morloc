@@ -737,7 +737,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         -- NOT passthrough, since it doesn't
         -- After segmentation, this type will be used to resolve passthroughs everywhere
         (PassThroughArgument i) -> return $ BndVarM (Serial c) i
-      _ -> MM.throwError . OtherError $ "Expected VarS to match exactly one argument"
+      rs' -> MM.throwError . OtherError . render $ "Expected VarS to match exactly one argument, found:" <+> list (map pretty rs')
 
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language

@@ -134,22 +134,33 @@ type MorlocMonadGen c e l s a
 
 type MorlocReturn a = ((Either MorlocError a, [Text]), MorlocState)
 
-data MorlocState = MorlocState {
-    statePackageMeta :: [PackageMeta]
+data MorlocState = MorlocState
+  { statePackageMeta :: [PackageMeta]
+  -- ^ The parsed contents of a package.yaml file
   , stateVerbosity :: Int
   , stateCounter :: Int
-  , stateDepth :: Int -- ^ store depth in a tree, for debugging
+  -- ^ Used in Treeify generate new indices (starting from max parser index).
+  -- Also used (after resetting to 0) in each of the backend generators.
+  , stateDepth :: Int
+  -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
   , stateTypedefs :: GMap Int MVar (Map TVar (Type, [TVar]))
+  -- ^ Stores all type definitions available to an index e.g.:
+  --   `type Cpp (Map k v) = "std::map<$1,$2>" k v`
+  --   Where `TVar` is `Map`
+  --         `Type` is `"std::map<$1,$2>" k v`
+  --         `[TVar]` is `[k,v]`
   , stateSources :: GMap Int MVar [Source]
   , stateAnnotations :: Map Int [TypeU]
+  -- ^ Stores non-top-level annotations.
   , stateOutfile :: Maybe Path
+  -- ^ The nexus filename ("nexus.pl" by default, though I should ditch perl)
   , statePackers :: GMap Int MVar PackMap
   , stateExports :: [Int]
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
     -- ^ store the names of morloc compositions
-}
+  }
 
 {-
        A           - There can be only one general signature for a term within a scope
@@ -704,6 +715,13 @@ class Typelike a where
   nargs :: a -> Int
   nargs (typeOf -> FunT ts _) = length ts
   nargs _ = 0
+
+  -- | Curry function types. This converts types like `a -> (a -> a)` to  
+  -- `a -> a -> a`. Ideally, this should not be necessary, since these are
+  -- equivalent types. Ideally, this equivalence would be deeply baked into
+  -- the system and I wouldn't have to worry about fixing it ...
+  -- FIXME: make it so
+  normalizeType :: a -> a
   
 
 instance Typelike Type where
@@ -725,6 +743,10 @@ instance Typelike Type where
   free (AppT t ts) = Set.unions (map free (t:ts))
   free (NamT _ _ _ es) = Set.unions (map (free . snd) es)
 
+  normalizeType (FunT ts1 (FunT ts2 ft)) = normalizeType $ FunT (ts1 <> ts2) ft 
+  normalizeType (AppT t ts) = AppT (normalizeType t) (map normalizeType ts)
+  normalizeType (NamT n v ds ks) = NamT n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
+  normalizeType t = t
 
 
 instance Typelike TypeU where
@@ -771,6 +793,31 @@ instance Typelike TypeU where
       sub (FunU ts t) = FunU (map sub ts) (sub t)
       sub (AppU t ts) = AppU (sub t) (map sub ts)
       sub (NamU r n ps rs) = NamU r n (map sub ps) [(k, sub t) | (k, t) <- rs]
+
+  normalizeType (FunU ts1 (FunU ts2 ft)) = normalizeType $ FunU (ts1 <> ts2) ft
+  normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
+  normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
+  normalizeType (ForallU v t) = ForallU v (normalizeType t)
+  normalizeType (ExistU v ps ds) = ExistU v (map normalizeType ps) (map normalizeType ds)
+  normalizeType t = t
+
+-- -- | A type with existentials and universals
+-- data TypeU
+--   = VarU TVar
+--   -- ^ (a)
+--   | ExistU TVar
+--     [TypeU] -- type parameters
+--     [TypeU] -- default types
+--   -- ^ (a^) will be solved into one of the other types
+--   | ForallU TVar TypeU
+--   -- ^ (Forall a . A)
+--   | FunU [TypeU] TypeU -- function
+--   | AppU TypeU [TypeU] -- type application
+--   | NamU NamType TVar [TypeU] [(Text, TypeU)] -- record / object / table
+--   deriving (Show, Ord, Eq)
+
+
+
 
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type

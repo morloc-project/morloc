@@ -1,10 +1,19 @@
 import base (mul, add)
 export foo
 
--- fully eta-reduced
-neg = mul -1.0
+bar y = mul (add 1.0 y)
 
--- partly eta-reduced
-bar x = mul (add 1.0 x)
+foo x = bar 4.0 x
 
-foo = neg . bar 4.0
+--   \x -> (\y -> mul (add 1 y)) y x
+--   \x -> (\y -> \z -> mul (add 1 y) z) y x
+
+-- This expression enters the typechecker (sans alternate implementations):
+--   \x -> (\y -> mul (add 1 y)) y x
+-- Given `mul (add 1 y) |- Real -> Real`, and given two arguments are passed to
+-- it, we should rewrite the expression as:
+--   \x -> (\y x -> mul (add 1 y) x) y x
+-- The first lambda layer isn't relevant, so just rewrite this:
+--   (\y -> mul (add 1 y)) y x
+-- As
+--   (\y x -> mul (add 1 y) x) y x

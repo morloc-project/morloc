@@ -13,7 +13,7 @@ module Morloc.Frontend.Treeify (treeify) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Data.Doc
-import Morloc.Frontend.PartialOrder ()
+import qualified Morloc.Frontend.PartialOrder as PO
 import Morloc.Pretty ()
 import qualified Control.Monad.State as CMS
 import qualified Morloc.Frontend.AST as AST
@@ -93,13 +93,13 @@ treeify d
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
-         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
+         let exports = [i | (i, _) <- AST.findExports e]
 
          -- store all exported indices in state
-         MM.modify(\s -> s {stateExports = map fst exports})
+         MM.modify (\s -> s {stateExports = exports})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM (collect e) exports
+         mapM collect exports
 
 
 
@@ -310,6 +310,10 @@ mergeTypeUs t1@(NamU o1 n1 ps1 ks1) t2@(NamU o2 n2 ps2 ks2)
       return $ NamU o1 n1 ps' (zip (map fst ks1) ts1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 mergeTypeUs t1 t2 = MM.throwError $ IncompatibleGeneralType t1 t2
+-- mergeTypeUs t1 t2
+--   | t1 `PO.isSubtypeOf` t2 = return t2
+--   | t2 `PO.isSubtypeOf` t1 = return t1
+--   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2
 
 
 linkAndRemoveAnnotations :: ExprI -> MorlocMonad ExprI
@@ -335,18 +339,17 @@ linkAndRemoveAnnotations = f where
   f e@(ExprI _ _) = return e
 
 -- | Build the call tree for a single nexus command. The result is ambiguous,
--- with 1 or more possible tree topologies, each with one or more possible for
--- each function.
+-- with 1 or more possible tree topologies, each with one or more possible
+-- implementations for each function.
 --
 -- Recursion
 --   [ ] handle recursion and mutual recursion
 --       - to detect recursion, I need to remember every term that has been expanded, 
 -- collect v declarations or sources
 collect
-  :: ExprI
-  -> (Int, EVar) -- The Int is the index for the export term
+  :: Int -- ^ the index for the export term
   -> MorlocMonad (SAnno Int Many Int)
-collect (ExprI _ (ModE moduleName _)) (i, _) = do
+collect i = do
   t0 <- MM.metaTermTypes i
   case t0 of
     -- if Nothing, then the term is a bound variable
@@ -356,14 +359,13 @@ collect (ExprI _ (ModE moduleName _)) (i, _) = do
       let calls = [(CallS src, i') | (_, _, Just (Idx i' src)) <- termConcrete t1]
       declarations <- mapM (replaceExpr i) (termDecl t1) |>> concat
       return $ SAnno (Many (calls <> declarations)) i
-collect (ExprI _ _) _ = MM.throwError . CallTheMonkeys $ "The top should be a module"
 
 collectSAnno :: ExprI -> MorlocMonad (SAnno Int Many Int)
 collectSAnno e@(ExprI i (VarE v)) = do
   t0 <- MM.metaTermTypes i
   es <- case t0 of
     -- if Nothing, then the term is a bound variable
-    Nothing -> collectSExpr e |>> return
+    Nothing -> return <$> collectSExpr e
     -- otherwise is an alias that should be replaced with its value(s)
     (Just t1) -> do
       -- collect all the concrete calls with this name
@@ -387,8 +389,11 @@ collectSAnno e@(ExprI i _) = do
   e' <- collectSExpr e 
   return $ SAnno (Many [e']) i
 
+-- | This function will handle terms that have been set to be equal
 replaceExpr :: Int -> ExprI -> MorlocMonad [(SExpr Int Many Int, Int)]
 -- this will be a nested variable
+-- e.g.:
+--   foo = bar
 replaceExpr i e@(ExprI j (VarE _)) = do
   x <- collectSAnno e
   -- unify the data between the equated terms
@@ -413,27 +418,33 @@ replaceExpr i e@(ExprI j (VarE _)) = do
   -- pass on just the children
   case x of
     (SAnno (Many es) _) -> return es
-replaceExpr _ e = collectSExpr e |>> return
+-- -- two terms may also be equivalent when applied, for example:
+-- --   foo x = bar x
+-- -- this would be rewritten in the parse as `foo = \x -> bar x`
+-- -- meaning foo and bar are equivalent after eta-reduction
+-- replaceExpr i e@(ExprI _ (LamE vs (ExprI _ (AppE e2@(ExprI _ (VarE _)) xs))))
+--     | map VarE vs == [v | (ExprI _ v) <- xs] = replaceExpr i e2
+--     | otherwise = return <$> collectSExpr e
+replaceExpr _ e = return <$> collectSExpr e
 
--- | Find all definitions of a term and collect their type annotations, if available
+-- | Translate ExprI to SExpr tree
 collectSExpr :: ExprI -> MorlocMonad (SExpr Int Many Int, Int)
-collectSExpr (ExprI i e0) = do
-  f e0
+collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   where
-  f (VarE v) = noTypes (VarS v) -- this must be a bound variable
-  f (AccE e x) = (AccS <$> collectSAnno e <*> pure x) >>= noTypes
-  f (LstE es) = mapM collectSAnno es >>= noTypes . LstS
-  f (TupE es) = mapM collectSAnno es >>= noTypes . TupS
+  f (VarE v) = return (VarS v) -- this must be a bound variable
+  f (AccE e x) = AccS <$> collectSAnno e <*> pure x
+  f (LstE es) = LstS <$> mapM collectSAnno es
+  f (TupE es) = TupS <$> mapM collectSAnno es
   f (NamE rs) = do
     xs <- mapM (collectSAnno . snd) rs
-    noTypes $ NamS (zip (map fst rs) xs)
-  f (LamE v e) = collectSAnno e >>= noTypes . LamS v
-  f (AppE e es) = (AppS <$> collectSAnno e <*> mapM collectSAnno es) >>= noTypes
-  f UniE = noTypes UniS
-  f (RealE x) = noTypes (RealS x)
-  f (IntE x) = noTypes (IntS x)
-  f (LogE x) = noTypes (LogS x)
-  f (StrE x) = noTypes (StrS x)
+    return $ NamS (zip (map fst rs) xs)
+  f (LamE v e) = LamS v <$> collectSAnno e
+  f (AppE e es) = AppS <$> collectSAnno e <*> mapM collectSAnno es
+  f UniE = return UniS
+  f (RealE x) = return (RealS x)
+  f (IntE x) = return (IntS x)
+  f (LogE x) = return (LogS x)
+  f (StrE x) = return (StrS x)
 
   -- none of the following cases should every occur
   f (AnnE _ _) = error "impossible"
@@ -444,8 +455,6 @@ collectSExpr (ExprI i e0) = do
   f (SrcE _) = error "impossible"
   f SigE {} = error "impossible"
   f AssE {} = error "impossible"
-
-  noTypes x = return (x, i)
 
 reindexExprI :: ExprI -> MorlocMonad ExprI
 reindexExprI (ExprI i e) = ExprI <$> newIndex i <*> reindexExpr e

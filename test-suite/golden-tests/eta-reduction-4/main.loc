@@ -1,4 +1,4 @@
-import base (map, add)
+import pybase (map, add)
 export foo
 
 foo = map (add 1.0)

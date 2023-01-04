@@ -21,6 +21,7 @@ module Morloc.Typecheck.Internal
   , newvar
   , tvarname
   , newvarRich
+  , evarname
   -- * Typeclasses
   , Applicable(..)
   , Indexable(..)

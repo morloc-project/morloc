@@ -57,7 +57,7 @@ instance Pretty MorlocError where
   pretty ToplevelRedefinition = "ToplevelRedefinition"
   pretty (OtherError msg) = "OtherError: " <> pretty msg
   -- TODO: this will be a common class of errors and needs an informative message
-  pretty (IncompatibleGeneralType _ _) = "Incompatible general types"
+  pretty (IncompatibleGeneralType a b) = "Incompatible general types:" <+> parens (pretty a) <+> "vs" <+> parens (pretty b)
   -- container errors
   pretty EmptyTuple = "EmptyTuple"
   pretty TupleSingleton = "TupleSingleton"

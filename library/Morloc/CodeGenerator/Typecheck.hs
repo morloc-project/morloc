@@ -23,11 +23,10 @@ import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
 import Morloc.Pretty
 import Morloc.Data.Doc
-import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
-import qualified Data.Set as Set
+import qualified Morloc.Data.Text as MT
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -61,53 +60,7 @@ typecheck e0 = do
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve (applyCon g2 e2) |>> etaExpansion
-
--- eta expansion generates terms that do not appear in the original source
--- tree. These terms thus are not indexed. For now, I will simply set them to
--- -1, but with some effort it should be possible to link these to locations in
--- the source code, types, and all that.
-pseudoindex :: Int
-pseudoindex = -1
-
--- Replace patially applied functions with lambdas and lambdas that return
--- functions for fully applied lambdas.
--- For example:
---    map add  -->  \xs -> map add xs
---    \xs -> zipWith add xs  -->  \xs ys -> zipWith add xs ys
-etaExpansion :: SAnno Int One (Indexed TypeP) -> SAnno Int One (Indexed TypeP)
-etaExpansion (SAnno (One (e@(AppS x xs), Idx i t@(FunP ts@(length -> n) outputType))) g) = 
-    let vs =  take n (newvars e)
-        x' = SAnno (One (AppS x (xs <> zipWith sannoVar ts vs), Idx pseudoindex outputType)) g
-    in SAnno (One (LamS vs x', Idx i t)) g
-etaExpansion (SAnno (One (e@(LamS vs0 (SAnno (One (AppS x xs, Idx _ (FunP ts0@(length -> n) outputType))) g0)), Idx i1 (FunP ts1 _))) g1) =
-    let vs = take n (newvars e)
-        x' = SAnno (One (AppS x (xs <> zipWith sannoVar ts0 vs), Idx pseudoindex outputType)) g0
-    in SAnno (One (LamS (vs0 <> vs) x', Idx i1 (FunP (ts1 <> ts0) outputType))) g1
-etaExpansion x = x
-
-sannoVar :: TypeP -> EVar -> SAnno Int One (Indexed TypeP)
-sannoVar vt v = SAnno (One (VarS v, Idx pseudoindex vt)) pseudoindex
-
-newvars :: SExpr g One c -> [EVar]
-newvars e = filter (not . flip Set.member used) vars where
-    vars :: [EVar]
-    vars = [EV ("v" <> MT.show' i) | i <- [(0 :: Integer) ..]]
-    used = findUsedVars e
-
-    findUsedVars :: SExpr g One c -> Set.Set EVar
-    findUsedVars (VarS v) = Set.singleton v
-    findUsedVars (AccS x _) = findUsedVars (sexpr x)
-    findUsedVars (AppS x xs) = Set.unions $ map (findUsedVars . sexpr) (x : xs)
-    findUsedVars (LamS vs x) = Set.union (Set.fromList vs) (findUsedVars (sexpr x))
-    findUsedVars (LstS xs) = Set.unions $ map (findUsedVars . sexpr) xs
-    findUsedVars (TupS xs) = Set.unions $ map (findUsedVars . sexpr) xs
-    findUsedVars (NamS ks) = Set.unions $ Set.fromList (map (EV . fst) ks) : map (findUsedVars . sexpr . snd) ks
-    findUsedVars _ = Set.empty
-
-    sexpr :: SAnno g One c -> SExpr g One c
-    sexpr (SAnno (One (x, _)) _) = x
-
+  weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -300,7 +253,7 @@ synthE i lang g0 (AppS f xs0) = do
   (g1, funType0, funExpr0) <- synthG g0 f
 
   -- extend the function type with the type of the expressions it is applied to
-  (g2, funType1, inputExprs) <- application' i lang g1 xs0 funType0
+  (g2, funType1, inputExprs) <- application' i lang g1 xs0 (normalizeType funType0)
 
   -- determine the type after application
   appliedType <- case funType1 of

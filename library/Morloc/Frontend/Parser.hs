@@ -287,6 +287,9 @@ pAssE :: Parser ExprI
 pAssE = try pFunctionAssE <|> pDataAssE
   where
 
+  -- The name pDataAssE is a deceptive. The right hand value is not necessarily
+  -- data, it may be an unapplied function that will need to undergo eta
+  -- expansion later.
   pDataAssE :: Parser ExprI
   pDataAssE = do
     v <- pEVar
