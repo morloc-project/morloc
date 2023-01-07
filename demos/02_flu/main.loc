@@ -30,6 +30,42 @@
 import bio.io (readFasta, writeFasta)
 import bio.tree (NelTree, treeOf, viewTree)
 import bio.algo (njTree as tree, fooMsa as align)
+import bio.db (searchEntrez, nucleotideAccessionToXml)
+
+record VirusEntry = VirusEntry
+    { accession :: Str
+    , strain :: Str
+    , date :: Str
+    , host :: Str
+    , location :: Str
+    , spike :: Str
+    }
+
+accession :: VirusEntry -> Str
+accession x = x.accession
+
+spike :: VirusEntry -> Str
+spike x = x.spike
+
+parseEntrezNucleotideXml :: Str -> VirusEntry
+
+retrieve = concat
+         . map ( sleep 1
+               . map parseEntrezNucleotideXml
+               . cache (md5sum . join) nucleotideAccessionToXml
+               )
+         . chunks 1000
+         . sort
+         . searchEntrez
+
+makeTree xs = mapLeaf (at xs)
+            . cache (md5sum . join . map snd) tree
+            . cache (md5sum . join . map accession) (align . map spike)
+
+result = sampleTree
+       . makeTree
+       . retrieve "Influenza+A+Virus[Organism]" "2022/01" "2022/12"
+
 
 import base (withVals, seq, toSnd, map)
 
@@ -42,9 +78,8 @@ augment f xs = map (coupleRight f) xs
 
 
 
-fetch :: Conditions -> [GenbankRecord]
+fetch :: Conditions -> [VirusEntry]
 
-makeTree xs = mapLeaf (at xs) (tree (align (map gbkToSeq xs)))
 
 partitionTree = mapLeafs (toSnd . regexCapture "(human|swine)")
 
