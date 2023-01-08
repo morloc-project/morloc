@@ -43,6 +43,7 @@ import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
 import Morloc.Pretty ()
+import Morloc.Frontend.Lang.DefaultTypes (recordGC)
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
@@ -166,13 +167,18 @@ subtype t1@(AppU v1 vs1) t2@(AppU v2 vs2) g
     compareApp _ _ _ = Left $ SubtypeError t1 t2 "<:App - Type mismatch in AppU"
 
 -- subtype unordered records
-subtype (NamU _ v1 _ []) (NamU _ v2 _ []) g = subtype (VarU v1) (VarU v2) g
+subtype (NamU _ v1@(TV lang1 n1) _ []) (NamU _ v2@(TV lang2 n2) _ []) g
+    -- If one of the records is generic, allow promotion
+    | lang1 == lang2 && (elem n1 (recordGC lang1) || elem n2 (recordGC lang2))  = return g
+    -- Otherwise subtype the variable names
+    | otherwise = subtype (VarU v1) (VarU v2) g
+
 subtype t1@(NamU _ _ _ []) t2@(NamU _ _ _ _) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
 subtype t1@(NamU _ _ _ _ ) t2@(NamU _ _ _ []) _ =
   Left $ SubtypeError t1 t2 "NamU - Unequal number of fields"
 subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0
-  | langOf v1 == langOf t2 =
+  | langOf v1 == langOf v2 =
     case filterApart (\(k2, _) -> k2 == k1) es2 of
       (Nothing, _) -> Left $ SubtypeError t1 t2 "NamU - Unequal fields"
       (Just (_, x2), rs2) -> do

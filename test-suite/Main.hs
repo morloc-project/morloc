@@ -46,6 +46,7 @@ main = do
       , golden "eta-reduction-4" "eta-reduction-4"
       , golden "eta-reduction-5" "eta-reduction-5"
       , golden "eta-reduction-6" "eta-reduction-6"
+      , golden "eta-reduction-7" "eta-reduction-7"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
@@ -99,6 +100,9 @@ main = do
       , golden "records-1-r" "records-1-r"
       -- see github issue #8
       , golden "records-1-c" "records-1-c"
+
+      , golden "record-promotion-1" "record-promotion-1"
+      , golden "record-promotion-2" "record-promotion-2"
 
       , golden "selection-1" "selection-1"
       , golden "selection-2" "selection-2"
