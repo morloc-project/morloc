@@ -4,7 +4,7 @@ bar :: Real -> [Real] -> [Real]
 bar Py :: "float" -> ["float"] -> ["float"]
 bar x = map id
 
--- -- substituting for this bar works ...
--- bar x = map (add 1.0)
+foo x = map (add 1.0)
 
 export bar
+export foo

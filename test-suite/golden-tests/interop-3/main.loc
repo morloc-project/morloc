@@ -1,5 +1,5 @@
 import pybase (map, add)
-import rbase (fold, add)
+import rbase (fold)
 export foo
 export sum
 

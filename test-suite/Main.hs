@@ -73,6 +73,8 @@ main = do
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
       , golden "interop-2" "interop-2"
+      , golden "interop-3" "interop-3"
+      , golden "interop-4" "interop-4"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"
