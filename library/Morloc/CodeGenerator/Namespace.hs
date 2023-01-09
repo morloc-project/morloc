@@ -224,7 +224,7 @@ data ExprM f
 
   | AppM
       (ExprM f) -- ManifoldM | SrcM | LamM
-      [(ExprM f)]
+      [ExprM f]
 
   | SrcM TypeM Source
   -- ^ a within pool function call (cis)
@@ -234,7 +234,7 @@ data ExprM f
 
   | BndVarM TypeM Int
   -- ^ A lambda-bound variable. BndVarM only describes variables bound as positional
-  -- arguments in a manifold. The are represented as integers since the name
+  -- arguments in a manifold. They are represented as integers since the name
   -- will be language-specific.
   --
   -- In the rewrite step, morloc declarations are removed. So the expression:

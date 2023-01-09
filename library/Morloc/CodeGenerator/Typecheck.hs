@@ -60,7 +60,10 @@ typecheck e0 = do
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  say "--- weaving ---"
+  w <- weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  say "--- weaving done ---"
+  return w
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -123,7 +126,11 @@ weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
+  say $ pretty i
+  say $ " ct: " <+> pretty ct
+  say $ " gt: " <+> pretty gt
   pt <- weaveResolvedTypes gt (typeOf ct)
+  say $ " pt: " <+> pretty pt
   x1 <- case x0 of
     UniS -> return UniS
     (VarS v) -> return $ VarS v
@@ -166,8 +173,11 @@ synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ _)) = do
   return (g1, t, SAnno (One (x', Idx i t)) m)
 
 -- AnnoMany=>
-synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m)
-  = checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
+synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m) = do
+  say $ "Checking against annotation:" <+> pretty t
+  say $ "ts:" <+> vsep (map pretty ts)
+  say $ " -- that's all "
+  checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
 
 
 

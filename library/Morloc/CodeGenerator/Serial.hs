@@ -28,6 +28,12 @@ import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
 
+defaultSerialType :: Lang -> TypeP
+defaultSerialType Python3Lang = VarP (PV Python3Lang (Just "Str") ("str"))
+defaultSerialType RLang = VarP (PV RLang (Just "Str") ("character"))
+defaultSerialType CppLang = VarP (PV CppLang (Just "Str") ("std::string"))
+defaultSerialType _ = error "Ah hell, you know I don't know that language"
+
 -- extracts the language specific term from the paired term
 pv2tv :: PVar -> TVar
 pv2tv (PV lang _ v) = TV (Just lang) v
@@ -88,8 +94,7 @@ serialAstToType (SerialInt    x) = return $ VarP x
 serialAstToType (SerialBool   x) = return $ VarP x
 serialAstToType (SerialString x) = return $ VarP x
 serialAstToType (SerialNull   x) = return $ VarP x
-serialAstToType (SerialUnknown v)
-  = error . render' $ complainAboutUnresolvedGenerics "serialAstToType" v
+serialAstToType (SerialUnknown (PV lang _ _)) = return $ defaultSerialType lang
 
 -- | recurse all the way to a serializable type, unsafe
 serialAstToType' :: SerialAST One -> TypeP
@@ -103,8 +108,7 @@ serialAstToType' (SerialInt    x) = VarP x
 serialAstToType' (SerialBool   x) = VarP x
 serialAstToType' (SerialString x) = VarP x
 serialAstToType' (SerialNull   x) = VarP x
-serialAstToType' (SerialUnknown v)
-  = error . render' $ complainAboutUnresolvedGenerics "serialAstToType'" v
+serialAstToType' (SerialUnknown (PV lang _ _)) = defaultSerialType lang
 
 
 -- | get only the toplevel type
@@ -120,14 +124,7 @@ shallowType (SerialInt    x) = return $ VarP x
 shallowType (SerialBool   x) = return $ VarP x
 shallowType (SerialString x) = return $ VarP x
 shallowType (SerialNull   x) = return $ VarP x
-shallowType (SerialUnknown v) 
-  = MM.throwError . SerializationError . render
-  $ complainAboutUnresolvedGenerics "shallowType" v
-
-complainAboutUnresolvedGenerics :: MDoc -> PVar -> MDoc
-complainAboutUnresolvedGenerics place (PV lang _ name')
-  = "Cannot guess serialization type for" <+> viaShow lang <+> "type named" <+> viaShow name' <+> "in" <+> place <> "."
-  <+> "This is likely caused by usage of an unresolved generic"
+shallowType (SerialUnknown (PV lang _ _)) = return $ defaultSerialType lang
 
 makeSerialAST
   :: PackMap -- type PackMap = Map (TVar, Int) [UnresolvedPacker]

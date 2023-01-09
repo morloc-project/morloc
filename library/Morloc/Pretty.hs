@@ -59,7 +59,7 @@ instance Pretty Source where
     <+> "as" <+> pretty (srcAlias s) <> maybe "" (\t -> ":" <> pretty t) (srcLabel s)
 
 instance Pretty Type where
-  pretty (UnkT (TV _ v)) = "*" <> pretty v
+  pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
   pretty (VarT (TV _ "Unit")) = "()"
   pretty (VarT v) = pretty v
   pretty (FunT [] t) = "<MISSING> -> " <> pretty t

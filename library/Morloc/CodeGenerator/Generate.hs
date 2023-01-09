@@ -43,7 +43,7 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.CodeGenerator.Typecheck (typecheck, say, peak, peakGen)
+import Morloc.CodeGenerator.Typecheck (typecheck, say, peak)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import qualified Data.Map as Map
@@ -53,6 +53,7 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
+import qualified Morloc.CodeGenerator.Serial as MCS
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
@@ -584,14 +585,29 @@ parameterize
   :: SAnno Int One (Indexed TypeP)
   -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Argument)]))
 parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
+  say "Entering parameterize LamS"
+  say $ "m" <> pretty m
+  say $ "vs =" <+> list (map pretty vs)
+  say $ "input types =" <+> list (map pretty inputs) 
+    
   let args0 = zip vs $ zipWith makeArgument [0..] inputs 
+
+  say $ "args0 =" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
+
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
 parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
+  say $ "Entering parameterize CallS - " <> pretty (srcName src) <> "@" <> pretty (srcLang src)
+
   let vs = map EV (freshVarsAZ [])
-      args0 = zipWith makeArgument [0..] inputs
-  return $ SAnno (One (CallS src, (c, zip vs args0))) m
-parameterize x = parameterize' [] x
+      args0 = zip vs (zipWith makeArgument [0..] inputs)
+
+  say $ "  args0 = " <>  list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
+
+  return $ SAnno (One (CallS src, (c, args0))) m
+parameterize x = do
+  say "Entering parameterize Other"
+  parameterize' [] x
 
 -- TODO: the arguments coupled to every term should be the arguments USED
 -- (not inherited) by the term. I need to ensure the argument threading
@@ -610,44 +626,66 @@ parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, [
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
 -- VarS EVar
 parameterize' args (SAnno (One (VarS v, c)) m) = do
+
   let args' = [(v', r) | (v', r) <- args, v' == v]
+  say $ "parameterize VarS" <+> pretty v <> ": args =" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
+
   return $ SAnno (One (VarS v, (c, args'))) m
 -- CallS Source
 parameterize' _ (SAnno (One (CallS src, c)) m) = do
+  say $ "parameterize CallS" <+> pretty (srcName src) <> ": args = []"
   return $ SAnno (One (CallS src, (c, []))) m
 -- record access
 parameterize' args (SAnno (One (AccS x k, c)) m) = do
+  say "parameterize AccS"
   x' <- parameterize' args x
   return $ SAnno (One (AccS x' k, (c, args))) m
 -- containers
 parameterize' args (SAnno (One (LstS xs, c)) m) = do
+  say "parameterize LstS"
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (LstS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupS xs, c)) m) = do
+  say "parameterize TupS"
   xs' <- mapM (parameterize' args) xs
   let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
       args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (TupS xs', (c, args'))) m
 parameterize' args (SAnno (One (NamS entries, c)) m) = do
+  say "parameterize NamS"
   vs' <- mapM (parameterize' args . snd) entries
   let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
       args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
-  let args' = [(v, r) | (v, r) <- args, v `notElem` vs]
+  say "parameterize LamS"
+  let args' = [(v, r) | (v, r) <- args, v `notElem` vs] -- remove shadowed arguments
       startId = maximumDef 0 (map (argId . snd) args) + 1
       args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
+
+  say $ "  LamS: vs" <+> viaShow vs
+  say $ "  LamS: args':" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
+  say $ "  LamS: args0:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
+
   x' <- parameterize' (args' ++ args0) x
   return $ SAnno (One (LamS vs x', (c, args'))) m
 -- LamS MUST have a functional type, deviations would have been caught by the typechecker
 parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
+  say "parameterize AppS -- going into x"
+  say $ "  length xs = " <> pretty (length xs)
+
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
+  -- let args' = args
   let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
-      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
+      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs]
+
+  say " -- continuing parameterize AppS"
+  say $ "args':" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
+
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 
@@ -664,6 +702,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   return final
 
   where
+
   express'
     :: Bool -- is this a top-level expression that the nexus will record?
     -> TypeP
@@ -678,15 +717,15 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express' _ _ (SAnno (One (e@UniS, (Idx _ c, _))) _) = peak e >> return (NullM (Native c))
 
   -- record access
-  express' isTop pc (SAnno (One (e@(AccS x k), _)) m) = do
+  express' isTop pc (SAnno (One (e@(AccS x k), (Idx _ c, _))) m) = do
     peak e
-    x' <- express' isTop pc x >>= unpackExprM m
+    x' <- express' isTop pc x >>= unpackExprM m c
     return (AccM x' k)
 
   -- containers
   express' isTop _ (SAnno (One (e@(LstS xs), (Idx _ c@(AppP _ [t]), args))) m) = do
     peak e
-    xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m)
+    xs' <- mapM (express' False t) xs >>= mapM (unpackExprM m c)
     let x = ListM (Native c) xs'
     if isTop
       then do
@@ -697,7 +736,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   express' isTop _ (SAnno (One (e@(TupS xs), (Idx _ c@(AppP _ ts), args))) m) = do
     peak e
-    xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m)
+    xs' <- zipWithM (express' False) ts xs >>= mapM (unpackExprM m c)
     let x = TupleM (Native c) xs'
     if isTop
       then do
@@ -707,7 +746,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   express' isTop _ (SAnno (One (e@(NamS entries), (Idx _ c@(NamP _ _ _ rs), args))) m) = do
     peak e
-    xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m)
+    xs' <- zipWithM (express' False) (map snd rs) (map snd entries) >>= mapM (unpackExprM m c)
     let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
       then do
@@ -724,12 +763,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- ***************************************************************************
   -- lambda
   express' isTop _ (SAnno (One (e@(LamS _ (SAnno x@(One (_, (Idx _ c, _))) _)), _)) m)
-    = say "Lambda expression" >> peak e >> express' isTop c (SAnno x m)
+    = say "express' LamS" >> peak e >> express' isTop c (SAnno x m)
 
   -- var
-  express' _ _ (SAnno (One (e@(VarS v), (Idx _ c, rs))) _) = do
-    say "VarS expression"
-    peak e
+  express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
+    say $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
     case [r | (v', r) <- rs, v == v'] of
       [r] -> case r of
         (SerialArgument i _) -> return $ BndVarM (Serial c) i
@@ -742,20 +780,34 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
   -- connections will be snapped apart in the segment step.
-  express' isTop pc (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (_, args))) m)
+  express' _ pc (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ ac, args))) m)
     -- case #1
     | sameLanguage && fullyApplied = do
-        say "case #1:"
+        say $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
+        say $ "length xs:" <+> pretty (length xs)
+        say $ "input types:" <+> list (map pretty inputs) 
+        say $ "args:" <+> list (map pretty args)
         peak e
-        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+
+        -- xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+
+        foofoo <- zipWithM (express' False) inputs xs
+        say $ "foofoo:" <+> list (map pretty foofoo)
+        xs' <- mapM (unpackExprM m ac) foofoo
+
+        say "  leaving case #1"
         return . ManifoldM m (map snd args) $
           ReturnM (AppM f xs')
 
     -- case #2
     | sameLanguage && not fullyApplied = do
-        say "case #2:"
+        say $ "case #2 - " <> parens (pretty (srcName src)) <> ":"
+        say $ "length xs:" <+> pretty (length xs)
+        say $ "input types:" <+> list (map pretty inputs) 
+        say $ "args:" <+> list (map pretty args)
         peak e
-        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+        say "  leaving case #2"
         let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] (drop (length xs) inputs)
@@ -765,17 +817,25 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
     -- case #3
     | not sameLanguage && fullyApplied = do
-          say "case #3:"
+          say $ "case #3 - " <> parens (pretty (srcName src)) <> ":"
+          say $ "length xs:" <+> pretty (length xs)
+          say $ "input types:" <+> list (map pretty inputs) 
+          say $ "args:" <+> list (map pretty args)
           peak e
-          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+          say "  leaving case #3"
           return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
             ReturnM (AppM f xs')
 
     -- case #4
     | not sameLanguage && not fullyApplied = do
-        say "case #4:"
+        say $ "case #4 - " <> parens (pretty (srcName src)) <> ":"
+        say $ "length xs:" <+> pretty (length xs)
+        say $ "input types:" <+> list (map pretty inputs) 
+        say $ "args:" <+> list (map pretty args)
         peak e
-        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m)
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+        say "  leaving case #4"
         let startId = maximumDef 0 (map (argId . snd) args) + 1
             lambdaTypes = drop (length xs) (map typeP2typeM inputs)
             lambdaArgs = zipWith NativeArgument [startId ..] inputs
@@ -790,12 +850,12 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   -- CallS - direct export of a sourced function, e.g.:
   express' True _ (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
-    say "CallS - direct export"
+    say $ "express' CallS - direct export:" <+> parens (pretty $ srcName src) <+> "::" <+> pretty c
     peak e
     let lambdaArgs = zipWith SerialArgument [0 ..] inputs
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
-    lambdaVals <- mapM (unpackExprM m) $ zipWith BndVarM lambdaTypes [0 ..]
+    lambdaVals <- mapM (unpackExprM m c) $ zipWith BndVarM lambdaTypes [0 ..]
     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
   -- An un-applied source call
@@ -814,13 +874,22 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     say "Bad case"
+    say $ "  t :: " <> pretty t
     peak e
     name' <- MM.metaName m
     case name' of
         (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
         Nothing ->  MM.throwError . ConcreteTypeError $ MissingConcreteSignature (EV "--") (langOf' t)
---
--- express :: SAnno Int One (Indexed TypeP, [(EVar, Argument)]) -> MorlocMonad (ExprM Many)
+
+
+unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM m p e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    _ -> return e
+
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
 segment e0

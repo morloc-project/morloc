@@ -1,7 +1,7 @@
-import pybase (add)
-import rbase (map)
+import pybase (id)
+import rbase (add)
 
-foo R :: ["numeric"] -> ["numeric"]
-foo = map (add 1.0)
+foo py :: "float" -> "float"
+foo x = id (add 1.0 x)
 
 export foo

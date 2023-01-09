@@ -1,17 +1,10 @@
--- import pybase (map, fst, snd)
---
--- record Person = Person { name :: Str, age :: Int, parent :: Str }
--- record Py Person = "dict" { name :: "str", age :: "int", parent :: "str" }
---
--- siblings :: Str -> [(Str, Int)] -> [Person]
--- siblings Py :: "str" -> [("str", "int")] -> [Person]
--- siblings parent = map (\child -> { name = fst child, age = snd child, parent = parent })
--- export siblings
+import pybase (map, fst, snd)
 
-import cppbase (map, id)
+record Person = Person { name :: Str, age :: Int, parent :: Str }
+record Py Person = "dict" { name :: "str", age :: "int", parent :: "str" }
 
-bar :: Int -> [Int] -> [Int]
-bar Cpp :: "int" -> ["int"] -> ["int"]
-bar x = map id
+siblings :: Str -> [(Str, Int)] -> [Person]
+siblings Py :: "str" -> [("str", "int")] -> [Person]
+siblings parent = map (\child -> { name = fst child, age = snd child, parent = parent })
 
-export bar
+export siblings

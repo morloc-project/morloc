@@ -47,7 +47,7 @@ typecheck = mapM run where
       say "e2:"
       peakGen e2
       say "========================================================"
-      return . mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
+      return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
 -- TypeU --> Type
 resolveTypes :: SAnno (Indexed TypeU) Many Int -> SAnno (Indexed Type) Many Int

@@ -18,7 +18,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , invertExprM
   , packTypeM
   , packExprM
-  , unpackExprM
   , unpackTypeM
   , nargsTypeM
   , arg2typeM
@@ -188,14 +187,6 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprM m e = do
-  packers <- MM.metaPackMap m
-  case typeOfExprM e of
-    (Serial t) -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
-    (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
-    _ -> return e
-
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = do
   packers <- MM.metaPackMap m
@@ -241,4 +232,3 @@ splitArgs args1 args2 = partitionEithers $ map splitOne args1 where
   splitOne r = if elem r args2
                then Left r
                else Right r
-
