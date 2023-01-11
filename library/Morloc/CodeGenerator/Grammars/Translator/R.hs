@@ -188,7 +188,13 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   where
 
 
-  f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc, [MDoc])
+  f :: [Argument]
+    -> ExprM One
+    -> MorlocMonad
+        ( [MDoc] -- completely generated manifolds
+        , MDoc   -- a tag for the returned expression
+        , [MDoc] -- lines to precede the returned expression
+        )
   f pargs m@(ManifoldM i args e) = do
     (ms', body, rs') <- f args e
     let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)

@@ -679,7 +679,6 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
 
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
-  -- let args' = args
   let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
       args' = [(v, r) | (v, r) <- args, v `elem` usedArgs]
 
