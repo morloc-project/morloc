@@ -364,10 +364,10 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
         decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
         mdoc = block 4 decl body
         mname = manNamer i
-    (call, ps2) <- case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
-      (([], _ ), _) -> return (mname, [])
-      ((rs, vs), _) -> do
+    (call, ps2) <- case splitArgs args pargs of
+      (rs, []) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
+      ([], _ ) -> return (mname, [])
+      (rs, vs) -> do
         let v = mname <> "_fun"
         lhs <- stdFunction recmap t vs |>> (\x -> x <+> v)
         castFunction <- staticCast recmap t args mname

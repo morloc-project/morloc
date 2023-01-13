@@ -237,10 +237,10 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     let mname = manNamer i
         def   = "def" <+> mname <> tupled (map makeArgument args) <> ":"
         mdoc = nest 4 (vsep $ def:rs' ++ [e'])
-    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5.
+        call = case splitArgs args pargs of
+          (rs, []) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+          ([], _ ) -> mname
+          (rs, vs) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5.
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do

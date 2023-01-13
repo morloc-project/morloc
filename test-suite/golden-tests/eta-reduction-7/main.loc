@@ -1,10 +1,7 @@
-import pybase (map, id, add)
+import pybase (map, id)
 
-bar :: Real -> [Real] -> [Real]
-bar Py :: "float" -> ["float"] -> ["float"]
-bar x = map id
+foo :: Real -> [Real] -> [Real]
+foo Py :: "float" -> ["float"] -> ["float"]
+foo x = map id
 
-foo x = map (add 1.0)
-
-export bar
 export foo

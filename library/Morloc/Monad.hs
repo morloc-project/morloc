@@ -33,6 +33,7 @@ module Morloc.Monad
   , startCounter
   , getCounter
   , setCounter
+  , takeFromCounter
   -- * metadata accessors
   , metaTermTypes
   , metaConstraints
@@ -99,6 +100,13 @@ getCounter = do
   let i = stateCounter s
   put $ s {stateCounter = stateCounter s + 1}
   return i
+
+takeFromCounter :: Int -> MorlocMonad [Int]
+takeFromCounter 0 = return []
+takeFromCounter i = do
+    x <- getCounter
+    xs <- takeFromCounter (i-1)
+    return (x:xs)
 
 setCounter :: Int -> MorlocMonad ()
 setCounter i = do

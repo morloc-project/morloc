@@ -98,6 +98,10 @@ generate gASTs rASTs = do
     gSerial
     [(t, i) | (SAnno (One (_, Idx _ t)) i) <- rASTs]
 
+
+  -- initialize counter for use in express
+  MM.startCounter
+
   -- for each language, collect all functions into one "pool"
   pools
     <- mapM applyLambdas rASTs
@@ -589,8 +593,10 @@ parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   say $ "m" <> pretty m
   say $ "vs =" <+> list (map pretty vs)
   say $ "input types =" <+> list (map pretty inputs) 
-    
-  let args0 = zip vs $ zipWith makeArgument [0..] inputs 
+
+
+  ids <- MM.takeFromCounter (length inputs)  
+  let args0 = zip vs $ zipWith makeArgument ids inputs 
 
   say $ "args0 =" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
 
@@ -599,8 +605,9 @@ parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
 parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
   say $ "Entering parameterize CallS - " <> pretty (srcName src) <> "@" <> pretty (srcLang src)
 
+  ids <- MM.takeFromCounter (length inputs)
   let vs = map EV (freshVarsAZ [])
-      args0 = zip vs (zipWith makeArgument [0..] inputs)
+      args0 = zip vs (zipWith makeArgument ids inputs)
 
   say $ "  args0 = " <>  list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
 
@@ -661,9 +668,9 @@ parameterize' args (SAnno (One (NamS entries, c)) m) = do
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   say "parameterize LamS"
+  ids <- MM.takeFromCounter (length inputs)
   let args' = [(v, r) | (v, r) <- args, v `notElem` vs] -- remove shadowed arguments
-      startId = maximumDef 0 (map (argId . snd) args) + 1
-      args0 = zip vs $ map unpackArgument $ zipWith makeArgument [startId..] inputs
+      args0 = zip vs $ map unpackArgument $ zipWith makeArgument ids inputs
 
   say $ "  LamS: vs" <+> viaShow vs
   say $ "  LamS: args':" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
@@ -807,10 +814,12 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
         say "  leaving case #2"
-        let startId = maximumDef 0 (map (argId . snd) args) + 1
-            lambdaTypes = drop (length xs) (map typeP2typeM inputs)
-            lambdaArgs = zipWith NativeArgument [startId ..] (drop (length xs) inputs)
-            lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
+        let nLambdaArgs = length inputs - length xs
+        ids <- MM.takeFromCounter nLambdaArgs
+        say $ "ids: " <> viaShow ids
+        let lambdaTypes = drop (length xs) (map typeP2typeM inputs)
+            lambdaArgs = evilZipWith NativeArgument ids (drop (length xs) inputs)
+            lambdaVals = evilZipWith BndVarM lambdaTypes ids
         return . ManifoldM m (map snd args <> lambdaArgs) $
           ReturnM (AppM f (xs' <> lambdaVals))
 
@@ -835,10 +844,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
         say "  leaving case #4"
-        let startId = maximumDef 0 (map (argId . snd) args) + 1
-            lambdaTypes = drop (length xs) (map typeP2typeM inputs)
-            lambdaArgs = zipWith NativeArgument [startId ..] inputs
-            lambdaVals = zipWith BndVarM lambdaTypes [startId ..]
+        ids <- MM.takeFromCounter (length inputs)
+        say $ "ids: " <> viaShow ids
+        let lambdaTypes = drop (length xs) (map typeP2typeM inputs)
+            lambdaArgs = evilZipWith NativeArgument ids inputs
+            lambdaVals = evilZipWith BndVarM lambdaTypes ids
         return . ForeignInterfaceM (packTypeM (typeP2typeM pc))
                . ManifoldM m (map snd args)
                $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
@@ -851,19 +861,23 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express' True _ (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
     say $ "express' CallS - direct export:" <+> parens (pretty $ srcName src) <+> "::" <+> pretty c
     peak e
-    let lambdaArgs = zipWith SerialArgument [0 ..] inputs
+    ids <- MM.takeFromCounter (length inputs)
+    say $ "ids: " <> viaShow ids
+    let lambdaArgs = evilZipWith SerialArgument ids inputs
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
-    lambdaVals <- mapM (unpackExprM m c) $ zipWith BndVarM lambdaTypes [0 ..]
+    lambdaVals <- mapM (unpackExprM m c) $ evilZipWith BndVarM lambdaTypes ids
     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
   -- An un-applied source call
   express' False pc (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
     say "Un-applied source call"
     peak e
+    ids <- MM.takeFromCounter (length inputs)
+    say $ "ids: " <> viaShow ids
     let lambdaTypes = map typeP2typeM inputs
-        lambdaArgs = zipWith NativeArgument [0 ..] inputs
-        lambdaVals = zipWith BndVarM lambdaTypes [0 ..]
+        lambdaArgs = evilZipWith NativeArgument ids inputs
+        lambdaVals = evilZipWith BndVarM lambdaTypes ids
         f = SrcM (typeP2typeM c) src
         manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
@@ -880,6 +894,10 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
         Nothing ->  MM.throwError . ConcreteTypeError $ MissingConcreteSignature (EV "--") (langOf' t)
 
+evilZipWith :: (a -> b -> c) -> [a] -> [b] -> [c]
+evilZipWith _ [] [] = []
+evilZipWith f (x:xs) (y:ys) = f x y : evilZipWith f xs ys
+evilZipWith _ _ _ = error "Equality wot wot!"
 
 unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m p e = do

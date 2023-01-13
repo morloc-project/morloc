@@ -195,16 +195,18 @@ translateManifold m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM i args e) = do
+  f pargs (ManifoldM i args e) = do
     (ms', body, rs') <- f args e
     let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 decl (vsep $ rs' ++ [body])
         mname = manNamer i
-    -- TODO: handle partials BEFORE translation
-    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
+        -- TODO: handle partials BEFORE translation
+        call = case splitArgs args pargs of
+          -- rs: args in pargs
+          -- vs: args not in pargs
+          (rs, []) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+          ([], _ ) -> mname
+          (rs, vs) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do
