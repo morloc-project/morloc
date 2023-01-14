@@ -473,10 +473,14 @@ checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
     (LamS vs' body) -> return $ LamS (v:vs') body
     _ -> error "impossible"
 
+  -- apply everything we know
+  let e4 = applyConE g3 e3
+
   -- ignore trailing context `x:A,g3`
   g4 <- cut' i vardef g3
 
-  return (g4, t5, e3)
+  return (g4, t5, e4)
+
 
 checkE i lang g1 e1 (ForallU v a) = checkE' i lang (g1 +> v) e1 (substitute v a)
 
@@ -507,6 +511,11 @@ cut' i idx g = case cut idx g of
 applyCon :: (Functor cf, Functor f, Applicable c)
          => Gamma -> SAnno g f (cf c) -> SAnno g f (cf c)
 applyCon g = mapSAnno id (fmap (apply g))
+
+-- apply context to a SExpr
+applyConE :: (Functor cf, Functor f, Applicable c)
+         => Gamma -> SExpr g f (cf c) -> SExpr g f (cf c)
+applyConE g = mapSExpr id (fmap (apply g))
 
 ---- debugging
 
