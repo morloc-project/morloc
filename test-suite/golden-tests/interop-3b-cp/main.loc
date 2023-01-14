@@ -1,0 +1,6 @@
+import cppbase (map)
+import pybase (add)
+export foo
+
+foo Cpp :: ["double"] -> ["double"]
+foo xs = map (add 1.0) xs

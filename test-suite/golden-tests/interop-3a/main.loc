@@ -1,6 +1,0 @@
-import pybase (add)
-import rbase (fold)
-export foo
-
-foo R :: ["numeric"] -> "numeric"
-foo xs = fold add 0.0 xs

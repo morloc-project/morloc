@@ -1,0 +1,6 @@
+import pybase (map)
+import rbase (neg)
+export foo
+
+foo Py :: ["float"] -> ["float"]
+foo xs = map neg xs
