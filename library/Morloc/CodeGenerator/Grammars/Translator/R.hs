@@ -20,6 +20,7 @@ import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstTo
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
+import Morloc.CodeGenerator.Typecheck (say)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
@@ -197,6 +198,9 @@ translateManifold m0@(ManifoldM _ args0 _) = do
         )
   f pargs (ManifoldM i args e) = do
     (ms', body, rs') <- f args e
+    say $ "translateManifold" <+> pretty i
+    say $ "pargs:" <+> list (map pretty pargs)
+    say $ "args:" <+> list (map pretty args)
     let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)
         mdoc = block 4 decl (vsep $ rs' ++ [body])
         mname = manNamer i
@@ -236,7 +240,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f args (LamM lambdaArgs e) = do
     (ms', e', rs) <- f args e
     let vs = map (bndNamer . argId) lambdaArgs
-    return (ms', "LAMBDA" <> tupled vs <> "{" <+> e' <> "}", rs)
+    return (ms', "function" <> tupled vs <> "{" <+> e' <> "}", rs)
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 

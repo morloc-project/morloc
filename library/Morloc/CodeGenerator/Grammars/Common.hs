@@ -179,12 +179,12 @@ typeOfExprM (ReturnM e) = typeOfExprM e
 
 packTypeM :: TypeM -> TypeM
 packTypeM (Native t) = Serial t
-packTypeM (Function _ _) = error $ "BUG: Cannot pack a function"
+packTypeM (Function _ _) = error "BUG: Cannot pack a function"
 packTypeM t = t
 
 unpackTypeM :: TypeM -> TypeM
 unpackTypeM (Serial t) = Native t
-unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
+unpackTypeM Passthrough = error "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)

@@ -870,20 +870,34 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     return $ ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
 
   -- An un-applied source call
-  express' False pc (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m) = do
-    say "Un-applied source call"
-    peak e
-    ids <- MM.takeFromCounter (length inputs)
-    say $ "ids: " <> viaShow ids
-    let lambdaTypes = map typeP2typeM inputs
-        lambdaArgs = evilZipWith NativeArgument ids inputs
-        lambdaVals = evilZipWith BndVarM lambdaTypes ids
-        f = SrcM (typeP2typeM c) src
-        manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
+  express' False pc@(FunP pinputs pout) (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m)
+    | langOf pc == langOf c = do
+        say $ "Un-applied cis source call:" <+> pretty (srcName src)
+        peak e
+        ids <- MM.takeFromCounter (length inputs)
+        say $ "ids: " <> viaShow ids
+        let lambdaTypes = map typeP2typeM inputs
+            lambdaArgs = evilZipWith NativeArgument ids inputs
+            lambdaVals = evilZipWith BndVarM lambdaTypes ids
+            f = SrcM (typeP2typeM c) src
+            manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
+        return manifold
+    | otherwise = do
+        say $ "Un-applied trans source call:" <+> pretty (srcName src)
+        peak e
+        ids <- MM.takeFromCounter (length inputs)
+        pids <- MM.takeFromCounter (length inputs)
+        say $ "ids: " <> viaShow ids
+        let lambdaTypes = map (packTypeM . typeP2typeM) inputs
+            lambdaArgs = evilZipWith SerialArgument ids inputs
+        lambdaVals <- mapM (unpackExprM m pout) $ evilZipWith BndVarM lambdaTypes ids
 
-    if langOf pc == langOf c
-      then return manifold
-      else return $ ForeignInterfaceM (typeP2typeM pc) manifold
+        say $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
+
+        let pLambdaArgs = evilZipWith NativeArgument pids pinputs
+            manifold = ManifoldM m lambdaArgs (ReturnM $ AppM (SrcM (typeP2typeM c) src) lambdaVals)
+        poolCall <- unpackExprM m pout $ ForeignInterfaceM (Serial pout) manifold
+        return $ LamM pLambdaArgs poolCall
 
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     say "Bad case"
@@ -937,8 +951,8 @@ segment e0
     (mss, es') <- mapM (segment' m args) es |>> unzip
     return (ms ++ concat mss, AppM e' es')
 
-  segment' m args0 (LamM args1 e) = do
-    (ms, e') <- segment' m (args0 ++ args1) e
+  segment' m _ (LamM args1 e) = do
+    (ms, e') <- segment' m args1 e
     return (ms, LamM args1 e')
 
   segment' m args (LetM i e1 e2) = do
