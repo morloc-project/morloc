@@ -141,7 +141,7 @@ serialize v0 s0 = do
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'}|]
-      return (concat befores ++ [x], v');
+      return (concat befores ++ [x], v')
 
     construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
       accessField <- selectAccessor namType constructor
@@ -150,8 +150,8 @@ serialize v0 s0 = do
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
-          decl = [idoc|#{v'} = dict#{tupled (entries)};|]
-      return (concat befores ++ [decl], v');
+          decl = [idoc|#{v'} = dict#{tupled (entries)}|]
+      return (concat befores ++ [decl], v')
 
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
@@ -161,14 +161,14 @@ deserialize v0 s0
   | isSerializable s0 = do
       t <- serialAstToType s0
       schema <- typeSchema t
-      let deserializing = [idoc|mlc_deserialize(#{v0}, #{schema});|]
+      let deserializing = [idoc|mlc_deserialize(#{v0}, #{schema})|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
       schema <- typeSchema t
       let rawvar = "s" <> idx
-          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema});|]
+          deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -190,8 +190,8 @@ deserialize v0 s0
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
-      let push = [idoc|#{v'}.append(#{x});|]
-          lst = vsep [ [idoc|#{v'} = [];|]
+      let push = [idoc|#{v'}.append(#{x})|]
+          lst = vsep [ [idoc|#{v'} = []|]
                      , nest 4 (vsep ([idoc|for i#{idx} in #{v}:|] : before ++ [push]))
                      ]
       return (v', [lst])
@@ -200,8 +200,8 @@ deserialize v0 s0
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
-          x = [idoc|#{v'} = #{tupled ss'};|]
-      return (v', concat befores ++ [x]);
+          x = [idoc|#{v'} = #{tupled ss'}|]
+      return (v', concat befores ++ [x])
 
     construct v (SerialObject namType (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty MM.getCounter
@@ -210,8 +210,8 @@ deserialize v0 s0
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
-          decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries};|]
-      return (v', concat befores ++ [decl]);
+          decl = [idoc|#{v'} = #{pretty constructor}#{tupled entries}|]
+      return (v', concat befores ++ [decl])
 
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
@@ -268,7 +268,7 @@ translateManifold m0@(ManifoldM _ args0 _) = do
   f args (LamM lambdaArgs e) = do
     (ms', e', rs) <- f args e
     let vs = map (bndNamer . argId) lambdaArgs
-    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
+    return (ms', "lambda" <+> encloseSep "" "" ", " vs <> ":" <+> e', rs)
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 
