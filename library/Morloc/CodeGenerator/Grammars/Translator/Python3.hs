@@ -222,101 +222,113 @@ deserialize v0 s0
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m0@(ManifoldM _ args0 _) = do
   MM.startCounter
-  vsep . punctuate line . (\(x,_,_)->x) <$> f args0 m0
+  e <- f args0 m0
+  return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
   f :: [Argument]
     -> ExprM One
-    -> MorlocMonad
-        ( [MDoc] -- completely generated manifolds
-        , MDoc   -- a tag for the returned expression
-        , [MDoc] -- lines to precede the returned expression
-        )
+    -> MorlocMonad PoolDocs
   f pargs (ManifoldM i args e) = do
-    (ms', e', rs') <- f args e
+    (PoolDocs completeManifolds body priorLines priorExprs) <- f args e
     let mname = manNamer i
-        def   = "def" <+> mname <> tupled (map argName args) <> ":"
-        mdoc = nest 4 (vsep $ def:rs' ++ [e'])
+        def = "def" <+> mname <> tupled (map argName args) <> ":"
+        newManifold = nest 4 (vsep $ def:priorLines <> [body])
         call = case splitArgs args pargs of
+          -- rs: args in pargs
+          -- vs: args not in pargs
           (rs, []) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
           ([], _ ) -> mname
-          (rs, vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5.
-    return (mdoc : ms', call, [])
+          (rs, vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+    return $ PoolDocs
+        { poolCompleteManifolds = newManifold : completeManifolds
+        , poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = priorExprs
+        }
+
 
   f _ (PoolCallM _ _ cmds args) = do
     let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
-    return ([], call, [])
+    return $ PoolDocs [] call [] [] 
 
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
-    (ms1', e1', rs1) <- f args e1
-    (ms2', e2', rs2) <- f args e2
+    (PoolDocs ms1' e1' rs1 pes1) <- f args e1
+    (PoolDocs ms2' e2' rs2 pes2) <- f args e2
     let rs = rs1 ++ [ letNamer i <+> "=" <+> e1' ] ++ rs2
-    return (ms1' ++ ms2', e2', rs)
+    return $ PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-  f args (AppM (SrcM _ src) xs) = do
-    (mss', xs', rss') <- mapM (f args) xs |>> unzip3
-    return (concat mss', pretty (srcName src) <> tupled xs', concat rss')
+  f args (AppM (SrcM _ src) xs)
+    = mergePoolDocs (\xs' -> pretty (srcName src) <> tupled xs')
+    <$> mapM (f args) xs
 
   f _ (AppM _ _) = error "Can only apply functions"
 
-  f _ (SrcM _ src) = return ([], pretty (srcName src), [])
+  f _ (SrcM _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
 
-  -- this should not happen
-  f args (LamM lambdaArgs e) = do
-    (ms', e', rs) <- f args e
+  f args (LamM lambdaArgs body) = do
+    p <- f args body
+    i <- MM.getCounter
     let vs = map (bndNamer . argId) lambdaArgs
-    return (ms', "lambda" <+> encloseSep "" "" ", " vs <> ":" <+> e', rs)
+        lambdaName = "mlc_lam_" <> pretty i
+        def = "def" <+> lambdaName <> tupled vs <> ":"
+        lambdaDef = nest 4 (vsep $ def:poolPriorLines p <> [poolExpr p])
+        call = lambdaName
+    return $ p
+        { poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = [lambdaDef]
+        }
 
-  f _ (BndVarM _ i) = return ([], bndNamer i, [])
+  f _ (BndVarM _ i) = return $ PoolDocs [] (bndNamer i) [] []
 
-  f _ (LetVarM _ i) = return ([], letNamer i, [])
+  f _ (LetVarM _ i) = return $ PoolDocs [] (letNamer i) [] []
 
   f args (AccM e k) = do
-    (ms, e', ps) <- f args e
+    p <- f args e
     x <- case typeOfTypeM (typeOfExprM e) of
-      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure e' <*> pure (pretty k)
+      (Just (NamP r (PV _ _ v) _ _)) -> selectAccessor r v <*> pure (poolExpr p) <*> pure (pretty k)
       _ -> MM.throwError . CallTheMonkeys $ "Bad record access"
-    return (ms, x, ps)
+    return $ p {poolExpr = x}
 
-  f args (ListM _ es) = do
-    (mss', es', rss') <- mapM (f args) es |>> unzip3
-    return (concat mss', list es', concat rss')
+  f args (ListM _ es) = mapM (f args) es |>> mergePoolDocs list
 
-  f args (TupleM _ es) = do
-    (mss', es', rss') <- mapM (f args) es |>> unzip3
-    return (concat mss', tupled es', concat rss')
+  f args (TupleM _ es) = mapM (f args) es |>> mergePoolDocs tupled
 
-  f args (RecordM _ entries) = do
-    (mss', es', rss') <- mapM (f args . snd) entries |>> unzip3
-    let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return (concat mss', "OrderedDict" <> tupled entries', concat rss')
+  f args (RecordM _ entries) = mapM (f args . snd) entries |>> mergePoolDocs pyDict
+    where
+        pyDict es' =
+            let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+            in "OrderedDict" <> tupled entries'
 
-  f _ (LogM _ x) = return ([], if x then "True" else "False", [])
 
-  f _ (RealM _ x) = return ([], viaShow x, [])
+  f _ (LogM _ x) = return $ PoolDocs [] (if x then "True" else "False") [] []
 
-  f _ (IntM _ x) = return ([], viaShow x, [])
+  f _ (RealM _ x) = return $ PoolDocs [] (viaShow x) [] []
 
-  f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
+  f _ (IntM _ x) = return $ PoolDocs [] (viaShow x) [] []
 
-  f _ (NullM _) = return ([], "None", [])
+  f _ (StrM _ x) = return $ PoolDocs [] (dquotes $ pretty x) [] []
+
+  f _ (NullM _) = return $ PoolDocs [] "None" [] []
 
   f args (SerializeM s e) = do
-    (ms, e', rs1) <- f args e
-    (serialized, rs2) <- serialize e' s
-    return (ms, serialized, rs1 ++ rs2)
+    p <- f args e
+    (serialized, assignments) <- serialize (poolExpr p) s
+    return $ p {poolExpr = serialized, poolPriorLines = poolPriorLines p <> assignments}
 
   f args (DeserializeM s e) = do
-    (ms, e', rs1) <- f args e
-    (deserialized, rs2) <- deserialize e' s
-    return (ms, deserialized, rs1 ++ rs2)
+    p <- f args e
+    (deserialized, assignments) <- deserialize (poolExpr p) s
+    return $ p {poolExpr = deserialized, poolPriorLines = poolPriorLines p <> assignments}
 
   f args (ReturnM e) = do
-    (ms, e', rs) <- f args e
-    return (ms, "return(" <> e' <> ")", rs)
+    p <- f args e
+    return $ p { poolExpr = "return(" <> poolExpr p <> ")" }
+
 translateManifold _ = error "Every ExprM object must start with a Manifold term"
 
 

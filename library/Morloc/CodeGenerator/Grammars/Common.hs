@@ -24,6 +24,8 @@ module Morloc.CodeGenerator.Grammars.Common
   , type2jsontype
   , jsontype2json
   , splitArgs
+  , PoolDocs(..)
+  , mergePoolDocs
   ) where
 
 import Morloc.Data.Doc
@@ -32,6 +34,30 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Serial as MCS
 
+
+-- Stores pieces of code made while building a pool
+data PoolDocs = PoolDocs
+  { poolCompleteManifolds :: [MDoc]
+    -- ^ completely generated manifolds
+  , poolExpr :: MDoc
+    -- ^ the inplace expression
+  , poolPriorLines :: [MDoc]
+    -- ^ lines to precede the returned expression
+  , poolPriorExprs :: [MDoc]
+    -- ^ expressions that should precede this manifold, may include helper
+    -- functions or imports
+  }
+
+-- | Merge a series of pools, keeping prior lines, expression and manifolds, but
+-- merging bodies with a function. For example, merge all elements in a list and
+-- process the poolExpr variales into list syntax in the given language.
+mergePoolDocs :: ([MDoc] -> MDoc) -> [PoolDocs] -> PoolDocs
+mergePoolDocs f ms = PoolDocs
+    { poolCompleteManifolds = concatMap poolCompleteManifolds ms
+    , poolExpr = f (map poolExpr ms)
+    , poolPriorLines = concatMap poolPriorLines ms
+    , poolPriorExprs = concatMap poolPriorExprs ms
+    }
 
 argType :: Argument -> Maybe TypeP
 argType (SerialArgument _ t) = Just t

@@ -180,30 +180,6 @@ deserialize v0 s0
       $ "deserializeDescend: " <> prettySerialOne s
 
 
-data PoolDocs = PoolDocs
-  { poolCompleteManifolds :: [MDoc]
-    -- ^ completely generated manifolds
-  , poolExpr :: MDoc
-    -- ^ the inplace expression
-  , poolPriorLines :: [MDoc]
-    -- ^ lines to precede the returned expression
-  , poolPriorExprs :: [MDoc]
-    -- ^ expressions that should precede this manifold, may include helper
-    -- functions or imports
-  }
-
--- | Merge a series of pools, keeping prior lines, expression and manifolds, but
--- merging bodies with a function. For example, merge all elements in a list and
--- process the poolExpr variales into list syntax in the given language.
-mergePoolDocs :: ([MDoc] -> MDoc) -> [PoolDocs] -> PoolDocs
-mergePoolDocs f ms = PoolDocs
-    { poolCompleteManifolds = concatMap poolCompleteManifolds ms
-    , poolExpr = f (map poolExpr ms)
-    , poolPriorLines = concatMap poolPriorLines ms
-    , poolPriorExprs = concatMap poolPriorExprs ms
-    }
-
-
 -- break a call tree into manifolds
 translateManifold :: ExprM One -> MorlocMonad MDoc
 translateManifold m0@(ManifoldM _ args0 _) = do

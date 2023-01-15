@@ -897,7 +897,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         let pLambdaArgs = evilZipWith NativeArgument pids pinputs
             manifold = ManifoldM m lambdaArgs (ReturnM $ AppM (SrcM (typeP2typeM c) src) lambdaVals)
         poolCall <- unpackExprM m pout $ ForeignInterfaceM (Serial pout) manifold
-        return $ LamM pLambdaArgs poolCall
+        return $ LamM pLambdaArgs (ReturnM poolCall)
 
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     say "Bad case"
