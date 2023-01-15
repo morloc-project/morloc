@@ -232,19 +232,19 @@ translateManifold m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM i args e) = do
+  f pargs (ManifoldM i args e) = do
     (ms', e', rs') <- f args e
     let mname = manNamer i
-        def   = "def" <+> mname <> tupled (map makeArgument args) <> ":"
+        def   = "def" <+> mname <> tupled (map argName args) <> ":"
         mdoc = nest 4 (vsep $ def:rs' ++ [e'])
         call = case splitArgs args pargs of
-          (rs, []) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
+          (rs, []) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
           ([], _ ) -> mname
-          (rs, vs) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5.
+          (rs, vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5.
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do
-    let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map makeArgument args) <> ")"
+    let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return ([], call, [])
 
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
@@ -322,12 +322,12 @@ translateManifold _ = error "Every ExprM object must start with a Manifold term"
 
 
 makeLambda :: [Argument] -> MDoc -> MDoc
-makeLambda args body = "lambda" <+> hsep (punctuate "," (map makeArgument args)) <> ":" <+> body
+makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
 
-makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument v _) = bndNamer v
-makeArgument (NativeArgument v _) = bndNamer v
-makeArgument (PassThroughArgument v) = bndNamer v
+argName :: Argument -> MDoc
+argName (SerialArgument v _) = bndNamer v
+argName (NativeArgument v _) = bndNamer v
+argName (PassThroughArgument v) = bndNamer v
 
 makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = align . vsep $

@@ -40,7 +40,9 @@ handling for several very different languages (proofs-of-concept).
 0.40.0 [2023.01.03]
 -------------------
 
- - [ ] Infer types of records
+ - [x] Infer types of records
+ - [x] Fix bug in concrete type inference
+ - [ ] Fix bugs in foreign higher order function code generation
 
 0.39.0 [2023.01.03]
 -------------------

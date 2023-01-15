@@ -330,8 +330,12 @@ instance Pretty Argument where
     "PassThrough" <+> "x" <> pretty i
 
 instance Pretty (ExprM f) where
-  pretty e0 = (vsep . punctuate line . fst $ f e0) <> line where
+  pretty e0 = prettyExpr where
     manNamer i = "m" <> pretty i
+
+    prettyExpr = case f e0 of
+        ([], x) -> x
+        (xs, _) -> (vsep . punctuate line $ xs) <> line
 
     f (ManifoldM m args e) =
       let (ms', body) = f e

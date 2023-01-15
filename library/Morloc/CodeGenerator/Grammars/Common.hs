@@ -63,7 +63,7 @@ nargsTypeM _ = 0
 -- >       in let a3 = h 1 a2
 -- >          in f a1 a3
 -- expression inversion will not alter expression type
-invertExprM :: (ExprM f) -> MorlocMonad (ExprM f)
+invertExprM :: ExprM f -> MorlocMonad (ExprM f)
 invertExprM (ManifoldM m args e) = do
   MM.startCounter
   e' <- invertExprM e
@@ -77,9 +77,17 @@ invertExprM e@(AppM f es) = do
   v <- MM.getCounter
   let t = typeOfExprM e
       appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
-  return $ foldl dependsOn appM' (f':es')
--- you can't pull the body of the lambda out into a let statement
-invertExprM f@(LamM _ _) = return f
+  return $ foldl dependsOn appM' (f':es') 
+-- A LamM will generate a new function declaration in the output code. This
+-- function will be like a manifold, but lighter, since at the moment the only
+-- thing it is used for is wrapping higher order functions that call external manifolds.
+invertExprM (LamM vs body) = do
+  -- restart the counter, this is NOT a lambda expression so variables are NOT
+  -- in the parent scope, the body will be in a fresh function declaration and
+  -- this function will be called with
+  -- arguments `vs`
+  MM.startCounter
+  LamM vs <$> invertExprM body
 invertExprM (AccM e k) = do
   e' <- invertExprM e
   return $ dependsOn (AccM (terminalOf e') k) e'
@@ -87,20 +95,20 @@ invertExprM (ListM c es) = do
   es' <- mapM invertExprM es
   v <- MM.getCounter
   let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (TupleM c es) = do
   es' <- mapM invertExprM es
   v <- MM.getCounter
   let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (RecordM c entries) = do
-  es' <- mapM invertExprM (map snd entries)
+  es' <- mapM (invertExprM . snd) entries
   v <- MM.getCounter
   let entries' = zip (map fst entries) (map terminalOf es')
       e = LetM v (RecordM c entries') (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (SerializeM p e) = do
   e' <- invertExprM e
