@@ -32,6 +32,9 @@ import bio.tree (NelTree, treeOf, viewTree)
 import bio.algo (njTree as tree, fooMsa as align)
 import bio.db (searchEntrez, nucleotideAccessionToXml)
 
+import db (cache)
+import local (cache)
+
 record VirusEntry = VirusEntry
     { accession :: Str
     , strain :: Str
@@ -49,6 +52,7 @@ spike x = x.spike
 
 parseEntrezNucleotideXml :: Str -> VirusEntry
 
+
 retrieve = concat
          . map ( sleep 1
                . map parseEntrezNucleotideXml
@@ -57,6 +61,8 @@ retrieve = concat
          . chunks 1000
          . sort
          . searchEntrez
+
+
 
 makeTree xs = mapLeaf (at xs)
             . cache (md5sum . join . map snd) tree

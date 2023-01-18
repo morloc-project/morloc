@@ -97,6 +97,12 @@ invertExprM (ManifoldM m args e) = do
 invertExprM (LetM v e1 e2) = do
   e2' <- invertExprM e2
   return $ LetM v e1 e2'
+invertExprM (AppM c@(PoolCallM _ _ _ _) es) = do
+  es' <- mapM invertExprM es
+  return $ foldl dependsOn (AppM c (map terminalOf es')) es'
+invertExprM (PoolCallM t i cmds args) = do
+  v <- MM.getCounter
+  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
 invertExprM e@(AppM f es) = do
   f' <- invertExprM f
   es' <- mapM invertExprM es
@@ -149,9 +155,6 @@ invertExprM (DeserializeM p e) = do
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM (PoolCallM t i cmds args) = do
-  v <- MM.getCounter
-  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
 invertExprM e = return e
 
 -- transfer all let-dependencies from y to x
@@ -186,9 +189,12 @@ arg2typeM (PassThroughArgument _) = Passthrough
 -- element without reference to the element's parent.
 typeOfExprM :: ExprM f -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
-typeOfExprM (ForeignInterfaceM t _) = t
 typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+-- Applications of foreign interfaces should occur only in that are passed to
+-- other functions.
+typeOfExprM (AppM (ForeignInterfaceM t _) _) = t
+typeOfExprM (ForeignInterfaceM t _) = t -- FIXME this is totally wrong
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output

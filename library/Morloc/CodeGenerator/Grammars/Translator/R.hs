@@ -230,7 +230,13 @@ translateManifold m0@(ManifoldM _ args0 _) = do
     = mergePoolDocs (\xs' -> pretty (srcName src) <> tupled xs')
     <$> mapM (f args) xs
 
-  f _ (AppM _ _) = error "Can only apply functions"
+  f args (AppM (PoolCallM _ _ cmds _) xs) = mapM (f args) xs |>> mergePoolDocs makePoolCall where
+    makePoolCall xs' =
+        let quotedCmds = map dquotes cmds
+            callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ xs')) <> ")"
+        in ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
+
+  f _ (AppM f _) = error . MT.unpack . render $ "Can only apply functions, found:" <+> pretty f
 
   f _ (SrcM _ src) = return (PoolDocs [] (pretty (srcName src)) [] [])
 

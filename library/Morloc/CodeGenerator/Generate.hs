@@ -794,13 +794,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         say $ "input types:" <+> list (map pretty inputs) 
         say $ "args:" <+> list (map pretty args)
         peak e
-
-        -- xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
-
-        foofoo <- zipWithM (express' False) inputs xs
-        say $ "foofoo:" <+> list (map pretty foofoo)
-        xs' <- mapM (unpackExprM m ac) foofoo
-
+        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
         say "  leaving case #1"
         return . ManifoldM m (map snd args) $
           ReturnM (AppM f xs')
@@ -835,7 +829,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
           return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
             ReturnM (AppM f xs')
 
-    -- case #4
+    -- case #4 - higher order foreign function
     | not sameLanguage && not fullyApplied = do
         say $ "case #4 - " <> parens (pretty (srcName src)) <> ":"
         say $ "length xs:" <+> pretty (length xs)
@@ -882,22 +876,32 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
             f = SrcM (typeP2typeM c) src
             manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
         return manifold
+
+    -- higher order foreign function
     | otherwise = do
         say $ "Un-applied trans source call:" <+> pretty (srcName src)
         peak e
+
         ids <- MM.takeFromCounter (length inputs)
-        pids <- MM.takeFromCounter (length inputs)
-        say $ "ids: " <> viaShow ids
         let lambdaTypes = map (packTypeM . typeP2typeM) inputs
             lambdaArgs = evilZipWith SerialArgument ids inputs
         lambdaVals <- mapM (unpackExprM m pout) $ evilZipWith BndVarM lambdaTypes ids
 
-        say $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
-
+        pids <- MM.takeFromCounter (length inputs)
         let pLambdaArgs = evilZipWith NativeArgument pids pinputs
-            manifold = ManifoldM m lambdaArgs (ReturnM $ AppM (SrcM (typeP2typeM c) src) lambdaVals)
-        poolCall <- unpackExprM m pout $ ForeignInterfaceM (Serial pout) manifold
-        return $ LamM pLambdaArgs (ReturnM poolCall)
+        pLambdaVals <- mapM (packExprM m . argument2ExprM) pLambdaArgs
+
+        LamM pLambdaArgs . ReturnM
+         <$> unpackExprM m pout
+             ( AppM
+               ( ForeignInterfaceM (Serial pout)
+               . ManifoldM m lambdaArgs
+               . ReturnM
+               . AppM (SrcM (typeP2typeM c) src)
+               $ lambdaVals
+               )
+               pLambdaVals
+             )
 
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     say "Bad case"
@@ -913,6 +917,7 @@ evilZipWith _ [] [] = []
 evilZipWith f (x:xs) (y:ys) = f x y : evilZipWith f xs ys
 evilZipWith _ _ _ = error "Equality wot wot!"
 
+
 unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m p e = do
   packers <- MM.metaPackMap m
@@ -920,6 +925,11 @@ unpackExprM m p e = do
     (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
     Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
     _ -> return e
+
+argument2ExprM :: Argument -> ExprM f
+argument2ExprM (SerialArgument i t) = BndVarM (Serial t) i
+argument2ExprM (NativeArgument i t) = BndVarM (Native t) i
+argument2ExprM (PassThroughArgument i) = BndVarM Passthrough i
 
 
 segment :: ExprM Many -> MorlocMonad [ExprM Many]
@@ -936,7 +946,7 @@ segment e0
       (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) m cmds args)
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
-  segment' m args (SerializeM _ (AppM e@(ForeignInterfaceM _ _) es)) = do
+  segment' m args (AppM e@(ForeignInterfaceM _ _) es) = do
     (ms, e') <- segment' m args e
     (mss, es') <- mapM (segment' m args) es |>> unzip
     es'' <- mapM (packExprM m) es'
