@@ -191,10 +191,8 @@ typeOfExprM :: ExprM f -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
 typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
--- Applications of foreign interfaces should occur only in that are passed to
--- other functions.
-typeOfExprM (AppM (ForeignInterfaceM t _) _) = t
-typeOfExprM (ForeignInterfaceM t _) = t -- FIXME this is totally wrong
+typeOfExprM (ForeignInterfaceM t _) = t -- FIXME, this is just the return type
+typeOfExprM (AppM (ForeignInterfaceM t _) _) = t -- FIXME, only correct when fully applied
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output

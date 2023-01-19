@@ -877,7 +877,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
             manifold = ManifoldM m lambdaArgs (ReturnM $ AppM f lambdaVals)
         return manifold
 
-    -- higher order foreign function
+    -- unapplied higher order foreign function
     | otherwise = do
         say $ "Un-applied trans source call:" <+> pretty (srcName src)
         peak e
