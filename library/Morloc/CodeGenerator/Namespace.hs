@@ -355,7 +355,7 @@ instance Pretty (ExprM f) where
     f (AppM fun xs) =
       let (ms', fun') = f fun
           (mss', xs') = unzip $ map f xs
-      in (ms' ++ concat mss', fun' <> tupled xs')
+      in (ms' ++ concat mss', "AppM" <> tupled (fun':xs'))
     f (SrcM _ src) = ([], pretty (srcName src))
     f (LamM args e) =
       let (ms', e') = f e

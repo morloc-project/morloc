@@ -191,8 +191,14 @@ typeOfExprM :: ExprM f -> TypeM
 typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
 typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
-typeOfExprM (ForeignInterfaceM t _) = t -- FIXME, this is just the return type
+
+-- ------------------------------------------
+-- FIXME: I clearly need to store more type info foreign calls
+typeOfExprM (ForeignInterfaceM t _) = t          -- FIXME, this is just the return type, should be a function
+typeOfExprM (AppM (PoolCallM t _ _ _) _) = t     -- FIXME, only correct when fully applied
 typeOfExprM (AppM (ForeignInterfaceM t _) _) = t -- FIXME, only correct when fully applied
+-- ------------------------------------------
+
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output

@@ -332,6 +332,7 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
     (PoolDocs ms1 e1' ps1 pes1) <- f args e1
     (PoolDocs ms2 e2' ps2 pes2) <- f args e2
     say "ERROR IS RAISED HERE"
+    say $ pretty e1
     t <- showNativeTypeM recmap (typeOfExprM e1)
     say "------"
     deserialized <- deserialize recmap i t e1' s
@@ -404,7 +405,7 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
       ([], _ ) -> return (mname, [])
       (rs, vs) -> do
         let v = mname <> "_fun"
-        lhs <- stdFunction recmap t vs |>> (\x -> x <+> v)
+        lhs <- stdFunction recmap t vs |>> (<+> v)
         castFunction <- staticCast recmap t args mname
         let vs' = take
                   (length vs)
@@ -425,10 +426,13 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
 
   f args (LamM lambdaArgs body) = do
     p <- f args body
-    let vs = map (bndNamer . argId) lambdaArgs
+    idx <- MM.getCounter
+    let t = typeOfExprM body
+        lambdaName = "f" <> pretty idx
+        declaration = showTypeM recmap t <+> lambdaName <> tupled (map (makeArg recmap) lambdaArgs)
     return $ p
-      { poolExpr = "<LAMBDA>" <> tupled vs <> "{" <+> poolExpr p <> "}"
-      , poolPriorExprs = poolPriorExprs p <> ["HELPER"]
+      { poolExpr = lambdaName
+      , poolPriorExprs = poolPriorExprs p <> [block 4 declaration (poolExpr p)]
       }
 
   f args (AccM e k) = do
