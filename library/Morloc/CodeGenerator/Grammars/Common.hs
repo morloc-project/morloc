@@ -10,6 +10,7 @@ Stability   : experimental
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( argType
+  , packArgument
   , unpackArgument
   , typeOfExprM
   , gmetaOf
@@ -67,6 +68,10 @@ argType (PassThroughArgument _) = Nothing
 unpackArgument :: Argument -> Argument
 unpackArgument (SerialArgument i t) = NativeArgument i t
 unpackArgument x = x
+
+packArgument :: Argument -> Argument
+packArgument (NativeArgument i t) = SerialArgument i t
+packArgument x = x
 
 nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts

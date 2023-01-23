@@ -760,17 +760,6 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         return $ ManifoldM m (map snd args) (ReturnM x')
       else return x
 
-
-  -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
-  -- move the index from the lambda to the application
-  -- changing indices is a BAD idea, it breaks the link to the source code
-  -- I do it here so that the nexus indices and pool indices match, but there
-  -- should be a more elegant solution.
-  -- ***************************************************************************
-  -- lambda
-  express' isTop _ (SAnno (One (e@(LamS _ (SAnno x@(One (_, (Idx _ c, _))) _)), _)) m)
-    = say "express' LamS" >> peak e >> express' isTop c (SAnno x m)
-
   -- var
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
     say $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
@@ -783,12 +772,22 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         (PassThroughArgument i) -> return $ BndVarM (Serial c) i
       rs' -> MM.throwError . OtherError . render $ "Expected VarS to match exactly one argument, found:" <+> list (map pretty rs')
 
+  -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
+  -- move the index from the lambda to the application
+  -- changing indices is a BAD idea, it breaks the link to the source code
+  -- I do it here so that the nexus indices and pool indices match, but there
+  -- should be a more elegant solution.
+  -- ***************************************************************************
+  -- lambda
+  express' True _ (SAnno (One (e@(LamS _ (SAnno x@(One (_, (Idx _ c, _))) _)), _)) m)
+    = say "express' LamS" >> peak e >> express' True c (SAnno x m)
+
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
   -- connections will be snapped apart in the segment step.
   express' _ pc (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ ac, args))) m)
     -- case #1
-    | sameLanguage && fullyApplied = do
+    | sameLanguage = do
         say $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
         say $ "length xs:" <+> pretty (length xs)
         say $ "input types:" <+> list (map pretty inputs) 
@@ -799,12 +798,32 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         return . ManifoldM m (map snd args) $
           ReturnM (AppM f xs')
 
+    -- case #3
+    | not sameLanguage = do
+          say $ "case #3 - " <> parens (pretty (srcName src)) <> ":"
+          say $ "length xs:" <+> pretty (length xs)
+          say $ "input types:" <+> list (map pretty inputs) 
+          say $ "args:" <+> list (map pretty args)
+          peak e
+          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+          say "  leaving case #3"
+          return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
+            ReturnM (AppM f xs')
+
+    where
+      sameLanguage = langOf pc == langOf fc
+      f = SrcM (typeP2typeM fc) src
+
+  -- partially applied functions
+  express' False pc (SAnno (One (LamS vs
+        (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ ac, args))) _)
+        , (Idx _ (FunP lambdaTypes outType), lArgs))) m)
     -- case #2
-    | sameLanguage && not fullyApplied = do
+    | sameLanguage = do
         say $ "case #2 - " <> parens (pretty (srcName src)) <> ":"
+        say $ "vs:" <+> pretty vs
         say $ "length xs:" <+> pretty (length xs)
-        say $ "input types:" <+> list (map pretty inputs) 
-        say $ "args:" <+> list (map pretty args)
+        say $ "input types:" <+> list (map pretty inputs)
         peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
         say "  leaving case #2"
@@ -817,38 +836,37 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         return . ManifoldM m (map snd args <> lambdaArgs) $
           ReturnM (AppM f (xs' <> lambdaVals))
 
-    -- case #3
-    | not sameLanguage && fullyApplied = do
-          say $ "case #3 - " <> parens (pretty (srcName src)) <> ":"
-          say $ "length xs:" <+> pretty (length xs)
-          say $ "input types:" <+> list (map pretty inputs) 
-          say $ "args:" <+> list (map pretty args)
-          peak e
-          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
-          say "  leaving case #3"
-          return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (map snd args) $
-            ReturnM (AppM f xs')
-
     -- case #4 - higher order foreign function
-    | not sameLanguage && not fullyApplied = do
+    | not sameLanguage = do
         say $ "case #4 - " <> parens (pretty (srcName src)) <> ":"
-        say $ "length xs:" <+> pretty (length xs)
-        say $ "input types:" <+> list (map pretty inputs) 
+        say $ "vs:" <+> pretty vs
         say $ "args:" <+> list (map pretty args)
+        say $ "lArgs:" <+> list (map pretty lArgs)
+        say $ "length xs:" <+> pretty (length xs)
+        say $ "input types:" <+> list (map pretty inputs)
+        say $ "outType:" <+> pretty outType
         peak e
-        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
-        say "  leaving case #4"
-        ids <- MM.takeFromCounter (length inputs)
+        ids <- MM.takeFromCounter (length lambdaTypes)
         say $ "ids: " <> viaShow ids
-        let lambdaTypes = drop (length xs) (map typeP2typeM inputs)
-            lambdaArgs = evilZipWith NativeArgument ids inputs
-            lambdaVals = evilZipWith BndVarM lambdaTypes ids
-        return . ForeignInterfaceM (packTypeM (typeP2typeM pc))
-               . ManifoldM m (map snd args)
-               $ ReturnM (LamM lambdaArgs (AppM f (xs' ++ lambdaVals)))
+        lambdaVals <- zipWithM (\t x -> unpackExprM m t (BndVarM (unpackTypeM $ typeP2typeM t) x)) lambdaTypes (map (argId . snd) args)
+
+        let nLocal = length xs - length lArgs
+        localArguments <- mapM (express' False fc) (take nLocal xs)
+        passedArguments <- mapM (\(t, x) -> express' False t x >>= unpackExprMByType m t) (drop nLocal $ zip inputs xs)
+
+        LamM (map snd args) . ReturnM <$>
+             unpackExprMByType m outType (
+                 AppM
+                   ( ForeignInterfaceM (Serial outType)
+                   . ManifoldM m (map (packArgument . snd) args)
+                   . ReturnM
+                   . AppM (SrcM (typeP2typeM fc) src)
+                   $ localArguments <> passedArguments
+                   )
+                   lambdaVals -- the values passed to the foreign pool from the caller
+                )
     where
       sameLanguage = langOf pc == langOf fc
-      fullyApplied = length inputs == length xs
       f = SrcM (typeP2typeM fc) src
 
   -- CallS - direct export of a sourced function, e.g.:
@@ -918,6 +936,7 @@ evilZipWith f (x:xs) (y:ys) = f x y : evilZipWith f xs ys
 evilZipWith _ _ _ = error "Equality wot wot!"
 
 
+-- FIXME needing both of these functions is fucked up
 unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m p e = do
   packers <- MM.metaPackMap m
@@ -925,6 +944,11 @@ unpackExprM m p e = do
     (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
     Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
     _ -> return e
+
+unpackExprMByType :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprMByType m p e = do
+  packers <- MM.metaPackMap m
+  DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
 
 argument2ExprM :: Argument -> ExprM f
 argument2ExprM (SerialArgument i t) = BndVarM (Serial t) i
