@@ -778,9 +778,18 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- I do it here so that the nexus indices and pool indices match, but there
   -- should be a more elegant solution.
   -- ***************************************************************************
+  -- Semi-eval rewrite - here we pass the index and the arguments from the
+  -- top-level lamda expression to the application. The arguments for the lambda
+  -- will include the specific arguments the type signature and declaration
+  -- specify, the arguments that the user expects to enter. However, the
+  -- application will prune any arguments that are not used. So here we want the
+  -- lambda, not the application.
+  -- ----
   -- lambda
-  express' True _ (SAnno (One (e@(LamS _ (SAnno x@(One (_, (Idx _ c, _))) _)), _)) m)
-    = say "express' LamS" >> peak e >> express' True c (SAnno x m)
+  express' True _ (SAnno (One (e@(LamS _ (SAnno (One (x, (Idx i c, _))) _)), (_, lambdaArgs))) lambdaIndex) = do
+    say "express' LamS"
+    peak e
+    express' True c (SAnno (One (x, (Idx i c, lambdaArgs))) lambdaIndex)
 
   -- Apply arguments to a sourced function
   -- The CallS object may be in a foreign language. These inter-language
@@ -792,6 +801,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         say $ "length xs:" <+> pretty (length xs)
         say $ "input types:" <+> list (map pretty inputs) 
         say $ "args:" <+> list (map pretty args)
+        say $ "fc:" <+> pretty fc
         peak e
         xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
         say "  leaving case #1"
