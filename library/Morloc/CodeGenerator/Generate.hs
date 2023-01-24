@@ -778,12 +778,12 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- I do it here so that the nexus indices and pool indices match, but there
   -- should be a more elegant solution.
   -- ***************************************************************************
-  -- Semi-eval rewrite - here we pass the index and the arguments from the
-  -- top-level lamda expression to the application. The arguments for the lambda
-  -- will include the specific arguments the type signature and declaration
-  -- specify, the arguments that the user expects to enter. However, the
-  -- application will prune any arguments that are not used. So here we want the
-  -- lambda, not the application.
+  -- We pass the index and the arguments from the top-level lamda expression
+  -- to the application. The arguments for the lambda will include the specific
+  -- arguments the type signature and declaration specify, the arguments that
+  -- the user expects to enter. However, the application will prune any
+  -- arguments that are not used. So here we want the lambda, not the
+  -- application.
   -- ----
   -- lambda
   express' True _ (SAnno (One (e@(LamS _ (SAnno (One (x, (Idx i c, _))) _)), (_, lambdaArgs))) lambdaIndex) = do
