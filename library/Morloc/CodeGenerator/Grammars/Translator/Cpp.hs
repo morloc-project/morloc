@@ -122,13 +122,14 @@ serialType = "std::string"
 makeSignature :: RecMap -> ExprM One -> MDoc
 makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM One -> [MDoc]
-  f (ManifoldM i args e) =
+  f (ManifoldM i form e) =
     let t = typeOfExprM e
+        args = manifoldArgs form
         sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
     in sig : f e
   f (LetM _ e1 e2) = f e1 ++ f e2
   f (AppM e es) = f e ++ concatMap f es
-  f (LamM _ e) = f e
+  f (LamM _ _ e) = f e
   f (AccM e _) = f e
   f (ListM _ es) = concatMap f es
   f (TupleM _ es) = concatMap f es
@@ -307,9 +308,9 @@ deserialize recmap letIndex typestr0 varname0 s0
       $ "deserializeDescend: " <> prettySerialOne s
 
 translateManifold :: RecMap -> ExprM One -> MorlocMonad MDoc
-translateManifold recmap m0@(ManifoldM _ args0 _) = do
+translateManifold recmap m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  e <- f args0 m0
+  e <- f (manifoldArgs form0) m0
   return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
@@ -394,16 +395,17 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return $ PoolDocs [] (pretty $ srcName src) [] []
 
-  f pargs (ManifoldM i args e) = do
+  f _ (ManifoldM i form e) = do
+    let args = manifoldArgs form
     (PoolDocs ms' body ps1 pes1) <- f args e
     let t = typeOfExprM e
         decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
         mdoc = block 4 decl body
         mname = manNamer i
-    (call, ps2) <- case splitArgs args pargs of
-      (rs, []) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
-      ([], _ ) -> return (mname, [])
-      (rs, vs) -> do
+    (call, ps2) <- case form of
+      (ManifoldFull rs) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
+      (ManifoldPass _) -> return (mname, [])
+      (ManifoldPart rs vs) -> do
         let v = mname <> "_fun"
         lhs <- stdFunction recmap t vs |>> (<+> v)
         castFunction <- staticCast recmap t args mname
@@ -424,16 +426,19 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
   f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  f args (LamM lambdaArgs body) = do
-    p <- f args body
-    idx <- MM.getCounter
-    let t = typeOfExprM body
-        lambdaName = "f" <> pretty idx
-        declaration = showTypeM recmap t <+> lambdaName <> tupled (map (makeArg recmap) lambdaArgs)
-    return $ p
-      { poolExpr = lambdaName
-      , poolPriorExprs = poolPriorExprs p <> [block 4 declaration (poolExpr p)]
-      }
+  f args (LamM manifoldArgs boundArgs body) = undefined -- do
+    -- p <- f (manifoldArgs <> boundArgs) e
+    -- return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
+
+    -- p <- f args body
+    -- idx <- MM.getCounter
+    -- let t = typeOfExprM body
+    --     lambdaName = "f" <> pretty idx
+    --     declaration = showTypeM recmap t <+> lambdaName <> tupled (map (makeArg recmap) lambdaArgs)
+    -- return $ p
+    --   { poolExpr = lambdaName
+    --   , poolPriorExprs = poolPriorExprs p <> [block 4 declaration (poolExpr p)]
+    --   }
 
   f args (AccM e k) = do
     p <- f args e
@@ -486,7 +491,7 @@ staticCast recmap t args name' = do
   let output = showTypeM recmap t
       inputs = map (argTypeM recmap) args
       argList = cat (punctuate "," inputs)
-  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
+  return [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
 
 argTypeM :: RecMap -> Argument -> MDoc
 argTypeM _ (SerialArgument _ _) = serialType
@@ -497,8 +502,8 @@ makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM i args _) =
-      let args' = take (length args) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
+    makeCase (ManifoldM i form _) =
+      let args' = take (length (manifoldArgs form)) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
@@ -549,7 +554,7 @@ collectRecords e0 = f (gmetaOf e0) e0 where
   f m (PoolCallM t _ _ _) = cleanRecord m t
   f m (LetM _ e1 e2) = f m e1 ++ f m e2
   f m (AppM e es) = f m e ++ concatMap (f m) es
-  f m (LamM _ e) = f m e
+  f m (LamM _ _ e) = f m e
   f m (AccM e _) = f m e
   f m (ListM t es) = cleanRecord m t ++ concatMap (f m) es
   f m (TupleM t es) = cleanRecord m t ++ concatMap (f m) es
@@ -650,7 +655,7 @@ generateSourcedSerializers es0
       e' <- collect' m e
       es' <- mapM (collect' m) es
       return $ Map.unions (e':es')
-    collect' m (LamM _ e) = collect' m e
+    collect' m (LamM _ _ e) = collect' m e
     collect' m (AccM e _) = collect' m e
     collect' m (ListM _ es) = Map.unions <$> mapM (collect' m) es
     collect' m (TupleM _ es) = Map.unions <$> mapM (collect' m) es

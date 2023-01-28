@@ -182,27 +182,25 @@ deserialize v0 s0
 
 -- break a call tree into manifolds
 translateManifold :: ExprM One -> MorlocMonad MDoc
-translateManifold m0@(ManifoldM _ args0 _) = do
+translateManifold m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  e <- f args0 m0
+  e <- f (manifoldArgs form0) m0
   return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
   f :: [Argument]
     -> ExprM One
     -> MorlocMonad PoolDocs
-  f pargs (ManifoldM i args e) = do
+  f _ (ManifoldM i form e) = do
+    let args = manifoldArgs form
     (PoolDocs completeManifolds body priorLines priorExprs) <- f args e
     let decl = manNamer i <+> "<- function" <> tupled (map argName args)
         newManifold = block 4 decl (vsep $ priorLines ++ [body])
         mname = manNamer i
-        -- TODO: handle partials BEFORE translation
-        call = case splitArgs args pargs of
-          -- rs: args in pargs
-          -- vs: args not in pargs
-          (rs, []) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
-          ([], _ ) -> mname
-          (rs, vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+        call = case form of
+          (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+          (ManifoldPass _) -> mname
+          (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
     return $ PoolDocs
         { poolCompleteManifolds = newManifold : completeManifolds
         , poolExpr = call
@@ -240,19 +238,22 @@ translateManifold m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return (PoolDocs [] (pretty (srcName src)) [] [])
 
-  f args (LamM lambdaArgs body) = do
-    p <- f args body
-    i <- MM.getCounter
-    let vs = map (bndNamer . argId) lambdaArgs
-        lambdaName = "mlc_lam_" <> pretty i
-        decl = lambdaName <+> "<- function" <> tupled vs
-        lambdaDef = block 4 decl (vsep $ poolPriorLines p <> [poolExpr p])
-        call = lambdaName
-    return $ p
-        { poolExpr = call
-        , poolPriorLines = []
-        , poolPriorExprs = [lambdaDef]
-        }
+  f _ (LamM manifoldArgs boundArgs body) = do
+    p <- f (manifoldArgs <> boundArgs) body 
+    return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
+  -- f args (LamM lambdaArgs body) = do
+  --   p <- f args body
+  --   i <- MM.getCounter
+  --   let vs = map (bndNamer . argId) lambdaArgs
+  --       lambdaName = "mlc_lam_" <> pretty i
+  --       decl = lambdaName <+> "<- function" <> tupled vs
+  --       lambdaDef = block 4 decl (vsep $ poolPriorLines p <> [poolExpr p])
+  --       call = lambdaName
+  --   return $ p
+  --       { poolExpr = call
+  --       , poolPriorLines = []
+  --       , poolPriorExprs = [lambdaDef]
+  --       }
 
   f _ (BndVarM _ i) = return $ PoolDocs [] (bndNamer i) [] []
 

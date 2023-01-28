@@ -21,6 +21,7 @@ module Morloc.CodeGenerator.Namespace
   , JsonPath
   , JsonAccessor(..)
   , NexusCommand(..)
+  , ManifoldForm(..)
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -28,6 +29,8 @@ module Morloc.CodeGenerator.Namespace
   , argId
   -- ** Other
   , prettyGenTypeP
+  , manifoldArgs
+  , mapManifoldArgs
   ) where
 
 import Morloc.Namespace
@@ -194,10 +197,38 @@ data TypeM
   deriving(Show, Eq, Ord)
 
 
+data ManifoldForm
+  = ManifoldPass [Argument]
+  -- ^ Unapplied function passed as argument
+  | ManifoldFull [Argument]
+  -- ^ Fully applied function
+  | ManifoldPart [Argument] [Argument]
+  -- ^ Partially applied function
+  deriving(Show, Eq, Ord)
+
+instance Pretty ManifoldForm where
+    pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
+    pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
+    pretty (ManifoldPart contextArgs boundArgs)
+        = "ManifoldPart" <> tupled
+            [ "context:" <+> list (map pretty contextArgs)
+            , "bound:"   <+> list (map pretty boundArgs)
+            ]
+
+manifoldArgs :: ManifoldForm -> [Argument]
+manifoldArgs (ManifoldPass args) = args
+manifoldArgs (ManifoldFull args) = args
+manifoldArgs (ManifoldPart contextArgs boundArgs) = contextArgs <> boundArgs
+
+mapManifoldArgs :: (Argument -> Argument) -> ManifoldForm -> ManifoldForm
+mapManifoldArgs f (ManifoldPass args) = ManifoldPass (map f args)
+mapManifoldArgs f (ManifoldFull args) = ManifoldFull (map f args)
+mapManifoldArgs f (ManifoldPart contextArgs boundArgs) = ManifoldPart (map f contextArgs) (map f boundArgs)
+
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
 data ExprM f
-  = ManifoldM Int [Argument] (ExprM f)
+  = ManifoldM Int ManifoldForm (ExprM f)
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
   | ForeignInterfaceM
@@ -229,8 +260,11 @@ data ExprM f
   | SrcM TypeM Source
   -- ^ a within pool function call (cis)
 
-  | LamM [Argument] (ExprM f)
-  -- ^ Nothing Evar will be auto generated
+  | LamM
+        [Argument] -- arguments from scope used in body
+        [Argument] -- formal arguments to the lambda
+        (ExprM f)  -- body
+  -- ^ This will appear as a lambda in the generated code
 
   | BndVarM TypeM Int
   -- ^ A lambda-bound variable. BndVarM only describes variables bound as positional
@@ -304,7 +338,7 @@ instance HasOneLanguage (ExprM f) where
   langOf' (LetM _ _ e2) = langOf' e2
   langOf' (AppM e _) = langOf' e
   langOf' (SrcM _ src) = srcLang src
-  langOf' (LamM _ e) = langOf' e
+  langOf' (LamM _ _ e) = langOf' e
   langOf' (BndVarM t _) = langOf' t
   langOf' (LetVarM t _) = langOf' t
   langOf' (AccM e _) = langOf' e
@@ -323,11 +357,11 @@ instance HasOneLanguage (ExprM f) where
 
 instance Pretty Argument where
   pretty (SerialArgument i c) =
-    "Serial" <+> "x" <> pretty i <+> parens (pretty c)
+    "SerialArgument" <+> "x" <> pretty i <+> parens (pretty c)
   pretty (NativeArgument i c) =
-    "Native" <+> "x" <> pretty i <+> parens (pretty c)
+    "NativeArgument" <+> "x" <> pretty i <+> parens (pretty c)
   pretty (PassThroughArgument i) =
-    "PassThrough" <+> "x" <> pretty i
+    "PassThroughArgument" <+> "x" <> pretty i
 
 instance Pretty (ExprM f) where
   pretty e0 = prettyExpr where
@@ -337,9 +371,9 @@ instance Pretty (ExprM f) where
         ([], x) -> x
         (xs, _) -> (vsep . punctuate line $ xs) <> line
 
-    f (ManifoldM m args e) =
+    f (ManifoldM m form e) =
       let (ms', body) = f e
-          decl = manNamer m <> tupled (map pretty args)
+          decl = manNamer m <> tupled (map pretty (manifoldArgs form))
           mdoc = block 4 decl body
       in (mdoc : ms', manNamer m)
     f (PoolCallM t _ cmds args) =
@@ -357,10 +391,10 @@ instance Pretty (ExprM f) where
           (mss', xs') = unzip $ map f xs
       in (ms' ++ concat mss', "AppM" <> tupled (fun':xs'))
     f (SrcM _ src) = ([], pretty (srcName src))
-    f (LamM args e) =
+    f (LamM manifoldArgs boundArgs e) =
       let (ms', e') = f e
-          vsFull = map pretty args
-          vsNames = map (\r -> "x" <> pretty (argId r)) args
+          vsFull = map pretty manifoldArgs <> map pretty boundArgs
+          vsNames = map (\r -> "x" <> pretty (argId r)) (manifoldArgs <> boundArgs)
       in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
     f (BndVarM _ i) = ([], "x" <> pretty i)
     f (LetVarM _ i) = ([], "a" <> pretty i)

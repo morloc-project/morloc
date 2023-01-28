@@ -328,21 +328,27 @@ etaExpand _ _ _ _ = return Nothing
 expand :: Int -> Gamma -> SExpr Int Many Int -> MorlocMonad (Gamma, SExpr Int Many Int)
 expand 0 g x = return (g, x)
 expand n g e@(AppS _ _) = do
+    newIndex <- MM.getCounter
     let (g', v') = evarname g "v"
-        e' = applyExistential v' e
-        x' = LamS [v'] (SAnno (Many [(e', (-1))]) (-1))
+    e' <- applyExistential v' e
+    let x' = LamS [v'] (SAnno (Many [(e', newIndex)]) newIndex)
     expand (n-1) g' x'
 expand n g (LamS vs' (SAnno (Many es0') t)) = do
     let (g', v') = evarname g "v"
-        es1' = zip (map (applyExistential v' . fst) es0') (map snd es0')
-    expand (n-1) g' (LamS (vs' <> [v']) (SAnno (Many es1') t))
+    es1' <- mapM (applyExistential v' . fst) es0'
+    expand (n-1) g' (LamS (vs' <> [v']) (SAnno (Many (zip es1' (map snd es0'))) t))
 expand _ g x = return (g, x)
 
 
-applyExistential :: EVar -> SExpr Int Many Int -> SExpr Int Many Int
-applyExistential v' (AppS f xs') = AppS f (xs' <> [SAnno (Many [(VarS v', (-1))]) (-1)])
+applyExistential :: EVar -> SExpr Int Many Int -> MorlocMonad (SExpr Int Many Int)
+applyExistential v' (AppS f xs') = do
+    newIndex <- MM.getCounter  
+    return $ AppS f (xs' <> [SAnno (Many [(VarS v', newIndex)]) newIndex])
 -- possibly illegal application, will type check after expansion
-applyExistential v' e = AppS (SAnno (Many [(e, (-1))]) (-1)) [SAnno (Many [(VarS v', (-1))]) (-1)]
+applyExistential v' e = do
+    appIndex <- MM.getCounter
+    varIndex <- MM.getCounter
+    return $ AppS (SAnno (Many [(e, appIndex)]) appIndex) [SAnno (Many [(VarS v', varIndex)]) varIndex]
 
 
 

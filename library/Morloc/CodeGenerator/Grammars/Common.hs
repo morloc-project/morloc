@@ -14,13 +14,13 @@ module Morloc.CodeGenerator.Grammars.Common
   , unpackArgument
   , typeOfExprM
   , gmetaOf
-  , argsOf
   , typeOfTypeM
   , invertExprM
   , packTypeM
   , packExprM
   , unpackTypeM
   , nargsTypeM
+  , argsOf
   , arg2typeM
   , type2jsontype
   , jsontype2json
@@ -35,6 +35,7 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Serial as MCS
 
+import qualified Data.Set as Set
 
 -- Stores pieces of code made while building a pool
 data PoolDocs = PoolDocs
@@ -77,6 +78,22 @@ nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
 
+argsOf :: ExprM f -> Set.Set Argument
+argsOf (ManifoldM _ form x) = Set.fromList (manifoldArgs form) `Set.union` argsOf x
+argsOf (ForeignInterfaceM _ x) = argsOf x
+argsOf (PoolCallM _ _ _ args) = Set.fromList args
+argsOf (LetM _ _ x) = argsOf x
+argsOf (AppM x xs) = Set.unions (map argsOf (x:xs))
+argsOf (LamM manifoldArgs boundArgs x) = (argsOf x `Set.union` Set.fromList manifoldArgs) `Set.difference` Set.fromList boundArgs
+argsOf (AccM x _) = argsOf x
+argsOf (ListM _ xs) = Set.unions (map argsOf xs)
+argsOf (TupleM _ xs) = Set.unions (map argsOf xs)
+argsOf (RecordM _ ks) = Set.unions (map (argsOf . snd) ks)
+argsOf (SerializeM _ x) = argsOf x
+argsOf (DeserializeM _ x) = argsOf x
+argsOf (ReturnM x) = argsOf x
+argsOf _ = Set.empty
+
 -- recordPVar :: TypeP -> MDoc
 -- recordPVar (VarP (PV _ _ v)) = pretty v
 -- recordPVar (UnkP (PV _ _ v)) = pretty v
@@ -95,10 +112,10 @@ nargsTypeM _ = 0
 -- >          in f a1 a3
 -- expression inversion will not alter expression type
 invertExprM :: ExprM f -> MorlocMonad (ExprM f)
-invertExprM (ManifoldM m args e) = do
+invertExprM (ManifoldM m form e) = do
   MM.startCounter
   e' <- invertExprM e
-  return $ ManifoldM m args e'
+  return $ ManifoldM m form e'
 invertExprM (LetM v e1 e2) = do
   e2' <- invertExprM e2
   return $ LetM v e1 e2'
@@ -118,13 +135,13 @@ invertExprM e@(AppM f es) = do
 -- A LamM will generate a new function declaration in the output code. This
 -- function will be like a manifold, but lighter, since at the moment the only
 -- thing it is used for is wrapping higher order functions that call external manifolds.
-invertExprM (LamM vs body) = do
+invertExprM (LamM manifoldArgs boundArgs body) = do
   -- restart the counter, this is NOT a lambda expression so variables are NOT
   -- in the parent scope, the body will be in a fresh function declaration and
   -- this function will be called with
   -- arguments `vs`
   MM.startCounter
-  LamM vs <$> invertExprM body
+  LamM manifoldArgs boundArgs <$> invertExprM body
 invertExprM (AccM e k) = do
   e' <- invertExprM e
   return $ dependsOn (AccM (terminalOf e') k) e'
@@ -193,7 +210,7 @@ arg2typeM (PassThroughArgument _) = Passthrough
 -- The ExprM must have exactly enough type information to infer the type of any
 -- element without reference to the element's parent.
 typeOfExprM :: ExprM f -> TypeM
-typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
+typeOfExprM (ManifoldM _ form e) = Function (map arg2typeM (manifoldArgs form)) (typeOfExprM e)
 typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
 
@@ -210,7 +227,9 @@ typeOfExprM (AppM f xs) = case typeOfExprM f of
     inputs' -> Function inputs' output
   _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (pretty $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
-typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
+-- The lambda function will pass scoped arguments to its children, but only the
+-- bound arguments are part of the type signature
+typeOfExprM (LamM _ boundArgs x) = Function (map arg2typeM boundArgs) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
 typeOfExprM (LetVarM t _) = t
 typeOfExprM (AccM e _) = typeOfExprM e
@@ -264,14 +283,9 @@ jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "
   vals = map jsontype2json (map snd rs)
   rs' = zipWith (\key val -> key <> ":" <> val) keys vals
 
-argsOf :: ExprM f -> [Argument]
-argsOf (LamM args _) = args
-argsOf (ManifoldM _ args _) = args
-argsOf _ = []
-
 gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m
-gmetaOf (LamM _ e) = gmetaOf e
+gmetaOf (LamM _ _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"
 
 -- divide a list of arguments based on wheither they are in a second list
