@@ -6,4 +6,4 @@ all:
 	# [8, 11, 15]
 
 clean:
-	rm -f nexus* pool* *pdf log
+	rm -f nexus* pool* *pdf

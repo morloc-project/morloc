@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make main.loc
+	morloc make -v main.loc > log
 	./nexus.pl siblings '"Eve"' > obs.txt
 
 clean:
