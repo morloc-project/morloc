@@ -305,7 +305,6 @@ synthE i g (VarS v) = do
 
 
 etaExpand :: Gamma -> SAnno Int Many Int -> [SAnno Int Many Int] -> TypeU -> MorlocMonad (Maybe (Gamma, SExpr Int Many Int))
--- etaExpand _ x f _ =  error . MT.unpack . render $ tupled [prettySAnno viaShow viaShow $ x, viaShow f]
 etaExpand g0 f0 xs0@(length -> termSize) (normalizeType -> FunU (length -> typeSize) _)
     | termSize == typeSize = return Nothing 
     | otherwise = Just <$> etaExpandE g0 (AppS f0 xs0)

@@ -735,19 +735,20 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     express' True c (SAnno (One (x, (Idx i c, lambdaArgs))) lambdaIndex)
 
 
-  -- partially applied functions
+  -- these cases will include partially applied functions and explicit lambdas
+  -- the former is transformed into the latter in the frontend typechecker
   express' False pc
     (SAnno (One (LamS vs
       (SAnno (One (AppS
         (SAnno (One (CallS src
-                    , (Idx _ callType@(FunP callInputTypes callOutType), _)
+                    , (Idx _ callType@(FunP callInputTypes _), _)
                     )
                ) _)
         xs
                   , (Idx _ appType, appArgs)
                   )
              ) _)
-                , (Idx _ (FunP lamInputTypes lamOutType), lamArgs))
+                , (Idx _ (FunP lamInputTypes lamOutType), _))
            ) m)
 
     ----------------------------------------------------------------------------------------
@@ -762,9 +763,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | sameLanguage && length appArgs == length vs = do
         say "case #3"
-        xs' <- zipWithM (express' False) callInputTypes xs >>= mapM (unpackExprM m appType)
-        return . ManifoldM m (ManifoldPass (map snd appArgs)) $
-          ReturnM (AppM f xs')
+        xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
+        return
+            . ManifoldM m (ManifoldPass (map snd appArgs))
+            . ReturnM
+            $ AppM f xs'
 
     ----------------------------------------------------------------------------------------
     -- #4 cis partial lambda                                     | contextArgs | boundArgs |
@@ -776,15 +779,37 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | sameLanguage = do
+        let nContextArgs = length appArgs - length vs
+            args = map snd appArgs
+
+        xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
+
         say "case #4"
-        ids <- MM.takeFromCounter (length vs)
-        let n = length callInputTypes - length vs
-            lambdaArgs = equalZipWith NativeArgument ids (drop n callInputTypes)
-            lambdaTypeMs = drop n (map typeP2typeM callInputTypes)
-            lambdaVals = equalZipWith BndVarM lambdaTypeMs ids
-        xs' <- zipWithM (express' False) callInputTypes xs >>= mapM (unpackExprM m appType)
-        return . ManifoldM m (ManifoldPart (take n (map snd appArgs)) lambdaArgs) $
-          ReturnM (AppM f (take n xs' <> lambdaVals))
+        say $ "src:" <+> pretty src
+        say $ "length(xs)" <+> pretty (length xs)
+        say $ "xs':" <+> list (map pretty xs')
+        say $ "types of xs':" <+> list (map (pretty . typeOfExprM) xs')
+        say $ "appArgs:" <+> list (map (pretty . snd) appArgs)
+        say $ "vs:" <+> list (map pretty vs)
+        say $ "callInputTypes:" <+> list (map pretty callInputTypes)
+        say $ "nContextArgs:" <+> pretty nContextArgs
+
+        return
+          . ManifoldM m (ManifoldPart (take nContextArgs args) (drop nContextArgs args))
+          . ReturnM
+          $ AppM f xs'
+
+        -- ids <- MM.takeFromCounter (length vs)
+        -- let n = length callInputTypes - length vs
+        --     lambdaArgs = equalZipWith NativeArgument ids (drop n callInputTypes)
+        --     lambdaTypeMs = drop n (map typeP2typeM callInputTypes)
+        --     lambdaVals = equalZipWith BndVarM lambdaTypeMs ids
+        -- xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
+        --
+        -- return
+        --   . ManifoldM m (ManifoldPart (take (length appArgs - length vs) (map snd appArgs)) lambdaArgs)
+        --   . ReturnM
+        --   $ AppM f (take n xs' <> lambdaVals)
 
 
     ----------------------------------------------------------------------------------------
@@ -806,29 +831,42 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage && length appArgs == length vs = do
         say "case #7"
-
         -- all arguments passed need to be deserialized
         let n = length xs - length vs
         xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
         xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
         let xs' = xsPassed <> xsLocal
-            callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
 
-        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs) 
+        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
 
-        outerXs <- mapM (packExprM m . argument2ExprM . snd) appArgs 
-
-        ManifoldM m (ManifoldPass (map snd appArgs))
+        return
+          . ManifoldM m (ManifoldPass (map snd appArgs))
           . ReturnM
-          <$> unpackExprMByType m lamOutType (
-            AppM
-              ( ForeignInterfaceM (Serial lamOutType)
-              . ManifoldM m (ManifoldFull (map packArgument callArgs))
-              . ReturnM
-              $ AppM (SrcM (typeP2typeM callType) src) xs'
-              )
-            outerXs
-          )
+          . ForeignInterfaceM (Serial lamOutType)
+          $ AppM (SrcM (typeP2typeM callType) src) xs'
+
+        -- -- all arguments passed need to be deserialized
+        -- let n = length xs - length vs
+        -- xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
+        -- xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
+        -- let xs' = xsPassed <> xsLocal
+        --     callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
+        --
+        -- say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
+        --
+        -- outerXs <- mapM (packExprM m . argument2ExprM . snd) appArgs
+        --
+        -- ManifoldM m (ManifoldPass (map snd appArgs))
+        --   . ReturnM
+        --   <$> unpackExprMByType m lamOutType (
+        --     AppM
+        --       ( ForeignInterfaceM (Serial lamOutType)
+        --       . ManifoldM m (ManifoldFull (map packArgument callArgs))
+        --       . ReturnM
+        --       $ AppM (SrcM (typeP2typeM callType) src) xs'
+        --       )
+        --     outerXs
+        --   )
 
     ----------------------------------------------------------------------------------------
     -- #8 trans partial lambda                                   | contextArgs | boundArgs |
@@ -852,23 +890,35 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
             -- These are native arguments on the caller side
             lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
             contextArgs = take n (map snd appArgs)
-            callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
-
-        xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
-
-        outerXs <- mapM (packExprM m . argument2ExprM) (contextArgs <> lambdaArgs)
-
-        ManifoldM m (ManifoldPart contextArgs lambdaArgs)
+        xs' <- zipWithM (express' False) callInputTypes xs
+        return
+          . ManifoldM m (ManifoldPart contextArgs lambdaArgs)
           . ReturnM
-          <$> unpackExprMByType m lamOutType (
-            AppM
-              ( ForeignInterfaceM (Serial lamOutType)
-              . ManifoldM m (ManifoldFull (map packArgument callArgs))
-              . ReturnM
-              $ AppM (SrcM (typeP2typeM callType) src) xs'
-              )
-            outerXs
-          )
+          . ForeignInterfaceM (Serial lamOutType)
+          $ AppM (SrcM (typeP2typeM callType) src) xs'
+
+        -- ids <- MM.takeFromCounter (length vs)
+        -- let n = length callInputTypes - length vs
+        --     -- These are native arguments on the caller side
+        --     lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
+        --     contextArgs = take n (map snd appArgs)
+        --     callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
+        --
+        -- xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
+        --
+        -- outerXs <- mapM (packExprM m . argument2ExprM) (contextArgs <> lambdaArgs)
+        --
+        -- ManifoldM m (ManifoldPart contextArgs lambdaArgs)
+        --   . ReturnM
+        --   <$> unpackExprMByType m lamOutType (
+        --     AppM
+        --       ( ForeignInterfaceM (Serial lamOutType)
+        --       . ManifoldM m (ManifoldFull (map packArgument callArgs))
+        --       . ReturnM
+        --       $ AppM (SrcM (typeP2typeM callType) src) xs'
+        --       )
+        --     outerXs
+        --   )
 
     where
       sameLanguage = langOf pc == langOf callType
@@ -885,7 +935,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   --   connections will be snapped apart in the segment step.
   -- * These applications will be fully applied, the case of partially applied
   --   functions will have been handled previously by LamM
-  express' _ pc (SAnno (One (AppS (SAnno (One (e@(CallS src), (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ ac, args))) m)
+  express' _ pc (SAnno (One (AppS (SAnno (One (CallS src, (Idx _ fc@(FunP inputs _), _))) _) xs, (Idx _ ac, args))) m)
 
     ----------------------------------------------------------------------------------------
     -- #1 cis applied                                            | contextArgs | boundArgs |
@@ -898,18 +948,16 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | sameLanguage = do
         say $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
-        say $ "length xs:" <+> pretty (length xs)
-        say $ "input types:" <+> list (map pretty inputs) 
-        say $ "args:" <+> list (map pretty args)
-        say $ "fc:" <+> pretty fc
-        peak e
         -- There should be an equal number of input types and input arguments
         -- That is, the function should be fully applied. If it were partially
         -- applied, the lambda case would have been entered previously instead.
-        xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
+        xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) inputs xs
+
         say "  leaving case #1"
-        return . ManifoldM m (ManifoldFull (map snd args)) $
-          ReturnM (AppM f xs')
+        return
+            . ManifoldM m (ManifoldFull (map snd args))
+            . ReturnM
+            $ AppM f xs'
 
     ----------------------------------------------------------------------------------------
     -- #5 trans applied                                          | contextArgs | boundArgs |
@@ -928,15 +976,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
-          say $ "case #3 - " <> parens (pretty (srcName src)) <> ":"
-          say $ "length xs:" <+> pretty (length xs)
-          say $ "input types:" <+> list (map pretty inputs) 
-          say $ "args:" <+> list (map pretty args)
-          peak e
-          xs' <- zipWithM (express' False) inputs xs >>= mapM (unpackExprM m ac)
-          say "  leaving case #3"
-          return . ForeignInterfaceM (packTypeM (typeP2typeM pc)) . ManifoldM m (ManifoldFull (map snd args)) $
-            ReturnM (AppM f xs')
+          say $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
+          xs' <- zipWithM (express' False) inputs xs
+          return
+            . ForeignInterfaceM (packTypeM (typeP2typeM pc))
+            . ManifoldM m (ManifoldFull (map snd args))
+            . ReturnM
+            $ AppM f xs'
 
     where
       sameLanguage = langOf pc == langOf fc
@@ -952,10 +998,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         lambdaTypes = map (packTypeM . typeP2typeM) inputs
         f = SrcM (typeP2typeM c) src
     lambdaVals <- mapM (unpackExprM m c) $ equalZipWith BndVarM lambdaTypes ids
-    return $ ManifoldM m (ManifoldFull lambdaArgs) (ReturnM $ AppM f lambdaVals)
+    return
+      . ManifoldM m (ManifoldFull lambdaArgs)
+      . ReturnM
+      $ AppM f lambdaVals
 
   -- An un-applied source call
-  express' False pc@(FunP pinputs pout) (SAnno (One (e@(CallS src), (Idx _ c@(FunP inputs _), _))) m)
+  express' False pc@(FunP pinputs pout) (SAnno (One (e@(CallS src), (Idx _ c@(FunP callInputs _), _))) m)
     ----------------------------------------------------------------------------------------
     -- #2 cis passed                                             | contextArgs | boundArgs |
     ----------------------------------------------------------------------------------------
@@ -967,18 +1016,14 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | langOf pc == langOf c = do
         say $ "Un-applied cis source call:" <+> pretty (srcName src)
-        peak e
-        ids <- MM.takeFromCounter (length inputs)
-        say $ "ids: " <> viaShow ids
-        let lambdaTypes = map typeP2typeM inputs
-            lambdaArgs = equalZipWith NativeArgument ids inputs
+        ids <- MM.takeFromCounter (length callInputs)
+        let lambdaTypes = map typeP2typeM callInputs
+            lambdaArgs = equalZipWith NativeArgument ids callInputs
             lambdaVals = equalZipWith BndVarM lambdaTypes ids
-            f = SrcM (typeP2typeM c) src
-        -- The argumentless LamM implies this manifold is passed as an argument
-        -- For example:
-        --   map m4 xs
-        -- Where native values from the list `xs` are passed to the manifold `m4`
-        return $ ManifoldM m (ManifoldPass lambdaArgs) (ReturnM $ AppM f lambdaVals)
+        return
+          . ManifoldM m (ManifoldPass lambdaArgs)
+          . ReturnM
+          $ AppM (SrcM (typeP2typeM c) src) lambdaVals
 
     ----------------------------------------------------------------------------------------
     -- #6 trans passed                                           | contextArgs | boundArgs |
@@ -996,29 +1041,36 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | otherwise = do
         say $ "Un-applied trans source call:" <+> pretty (srcName src)
-        peak e
-
-        ids <- MM.takeFromCounter (length inputs)
-        let lambdaTypes = map (packTypeM . typeP2typeM) inputs
-            lambdaArgs = equalZipWith SerialArgument ids inputs
-        lambdaVals <- mapM (unpackExprM m pout) $ equalZipWith BndVarM lambdaTypes ids
-
-        pids <- MM.takeFromCounter (length inputs)
-        let pLambdaArgs = equalZipWith NativeArgument pids pinputs
-        pLambdaVals <- mapM (packExprM m . argument2ExprM) pLambdaArgs
-
-        ManifoldM m (ManifoldPass pLambdaArgs)
+        ids <- MM.takeFromCounter (length callInputs)
+        let lambdaArgs = equalZipWith NativeArgument ids pinputs
+            callVals = zipWith BndVarM (map Native callInputs) ids
+        return
+         . ManifoldM m (ManifoldPass lambdaArgs)
          . ReturnM
-         <$> unpackExprM m pout
-             ( AppM
-               ( ForeignInterfaceM (Serial pout)
-               . ManifoldM m (ManifoldFull lambdaArgs)
-               . ReturnM
-               . AppM (SrcM (typeP2typeM c) src)
-               $ lambdaVals
-               )
-               pLambdaVals
-             )
+         . ForeignInterfaceM (Serial pout)
+         $ AppM (SrcM (typeP2typeM c) src) callVals
+
+        -- ids <- MM.takeFromCounter (length callInputs)
+        -- let lambdaTypes = map (packTypeM . typeP2typeM) callInputs
+        --     lambdaArgs = equalZipWith SerialArgument ids callInputs
+        -- lambdaVals <- mapM (unpackExprM m pout) $ equalZipWith BndVarM lambdaTypes ids
+        --
+        -- pids <- MM.takeFromCounter (length callInputs)
+        -- let pLambdaArgs = equalZipWith NativeArgument pids pinputs
+        -- pLambdaVals <- mapM (packExprM m . argument2ExprM) pLambdaArgs
+        --
+        -- ManifoldM m (ManifoldPass pLambdaArgs)
+        --  . ReturnM
+        --  <$> unpackExprM m pout
+        --      ( AppM
+        --        ( ForeignInterfaceM (Serial pout)
+        --        . ManifoldM m (ManifoldFull lambdaArgs)
+        --        . ReturnM
+        --        . AppM (SrcM (typeP2typeM c) src)
+        --        $ lambdaVals
+        --        )
+        --        pLambdaVals
+        --      )
 
   -- bound variables
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
@@ -1100,6 +1152,7 @@ equalZipWithM f xs ys
     | otherwise = error . MT.unpack . render $ "Unequal lengths in equalZipWith:" <+> "xs=" <> list (map pretty xs) <+> "ys=" <> list (map pretty ys)
 
 
+-- Deserializes anything that is not already Native
 -- FIXME needing both of these functions is fucked up
 unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprM m p e = do
@@ -1109,10 +1162,14 @@ unpackExprM m p e = do
     Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
     _ -> return e
 
+-- Deserializes anything that is not already Native
 unpackExprMByType :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
 unpackExprMByType m p e = do
   packers <- MM.metaPackMap m
-  DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+  case typeOfExprM e of
+    (Serial _)  -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    _ -> return e
 
 argument2ExprM :: Argument -> ExprM f
 argument2ExprM (SerialArgument i t) = BndVarM (Serial t) i
@@ -1131,6 +1188,8 @@ segment e0
   topArgsOf (LamM _ _ _) = error "Top lambda should not have manifold args"
   topArgsOf (ManifoldM _ form _) = manifoldArgs form
   topArgsOf _ = []
+
+-- FMRA - MRFA
 
   -- This is where segmentation happens, every other match is just traversal
   segment' _ args (ForeignInterfaceM t e@(ManifoldM m form _)) = do
