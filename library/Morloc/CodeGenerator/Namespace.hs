@@ -233,6 +233,7 @@ data ExprM f
 
   | ForeignInterfaceM
       TypeM -- required type in the calling language
+      [(Argument, Argument)] -- arguments in the foreign language
       (ExprM f) -- expression in the foreign language
   -- ^ A generic interface to an expression in another language. Currently it
   -- will be resolved only to the specfic pool call interface type, where
@@ -333,7 +334,7 @@ instance HasOneLanguage (TypeM) where
 instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang
   langOf' (ManifoldM _ _ e) = langOf' e
-  langOf' (ForeignInterfaceM t _) = langOf' t
+  langOf' (ForeignInterfaceM t _ _) = langOf' t
   langOf' (PoolCallM t _ _ _) = langOf' t
   langOf' (LetM _ _ e2) = langOf' e2
   langOf' (AppM e _) = langOf' e
@@ -379,7 +380,7 @@ instance Pretty (ExprM f) where
     f (PoolCallM t _ cmds args) =
       let poolArgs = cmds ++ map pretty args
       in ([], "PoolCallM" <> list (map (pretty . render) poolArgs) <+> "::" <+> pretty t)
-    f (ForeignInterfaceM t e) =
+    f (ForeignInterfaceM t _ e) =
       let (ms, _) = f e
       in (ms, "ForeignInterface :: " <> pretty t)
     f (LetM v e1 e2) =

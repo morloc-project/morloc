@@ -274,7 +274,7 @@ translateManifold m0@(ManifoldM _ form0 _) = do
     let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return $ PoolDocs [] call [] [] 
 
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
@@ -294,8 +294,8 @@ translateManifold m0@(ManifoldM _ form0 _) = do
 
   f _ (SrcM _ src) = return $ PoolDocs [] (pretty (srcName src)) [] []
 
-  f _ (LamM manifoldArgs boundArgs e) = do
-    p <- f (manifoldArgs <> boundArgs) e 
+  f _ (LamM contextArgs boundArgs e) = do
+    p <- f (contextArgs <> boundArgs) e 
     return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
   -- f args (LamM lambdaArgs body) = do
   --   p <- f args body

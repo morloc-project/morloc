@@ -423,7 +423,7 @@ translateManifold recmap m0@(ManifoldM _ form0 _) = do
       , poolPriorExprs = pes1
       }
 
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LamM manifoldArgs boundArgs body) = undefined -- do
@@ -550,7 +550,7 @@ showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or seriali
 collectRecords :: ExprM One -> [(PVar, GIndex, [(PVar, TypeP)])]
 collectRecords e0 = f (gmetaOf e0) e0 where
   f _ (ManifoldM m _ e) = f m e
-  f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
+  f m (ForeignInterfaceM t _ e) = cleanRecord m t ++ f m e
   f m (PoolCallM t _ _ _) = cleanRecord m t
   f m (LetM _ e1 e2) = f m e1 ++ f m e2
   f m (AppM e es) = f m e ++ concatMap (f m) es
@@ -649,7 +649,7 @@ generateSourcedSerializers es0
       -> ExprM One
       -> MorlocMonad (Map.Map TVar (Type, [TVar]))
     collect' m (ManifoldM g _ e) = MM.metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
-    collect' m (ForeignInterfaceM _ e) = collect' m e
+    collect' m (ForeignInterfaceM _ _ e) = collect' m e
     collect' m (LetM _ e1 e2) = Map.union <$> collect' m e1 <*> collect' m e2
     collect' m (AppM e es) = do
       e' <- collect' m e

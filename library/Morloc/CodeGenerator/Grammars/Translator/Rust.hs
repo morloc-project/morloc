@@ -87,7 +87,7 @@ translateManifold funmap m0@(ManifoldM _ form0 _) = do
     let call = "foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return ([], call, [])
 
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i (DeserializeM s e1) e2) = do

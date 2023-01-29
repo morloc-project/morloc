@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Common
@@ -81,7 +82,7 @@ nargsTypeM _ = 0
 
 argsOf :: ExprM f -> Set.Set Argument
 argsOf (ManifoldM _ form x) = Set.fromList (manifoldArgs form) `Set.union` argsOf x
-argsOf (ForeignInterfaceM _ x) = argsOf x
+argsOf (ForeignInterfaceM _ (unzip -> (largs, fargs)) x) = Set.union (Set.fromList (largs <> fargs)) (argsOf x)
 argsOf (PoolCallM _ _ _ args) = Set.fromList args
 argsOf (LetM _ _ x) = argsOf x
 argsOf (AppM x xs) = Set.unions (map argsOf (x:xs))
@@ -222,9 +223,9 @@ typeOfExprM (LetM _ _ e2) = typeOfExprM e2
 
 -- ------------------------------------------
 -- FIXME: I clearly need to store more type info foreign calls
-typeOfExprM (ForeignInterfaceM t _) = t          -- FIXME, this is just the return type, should be a function
+typeOfExprM (ForeignInterfaceM t _ _) = t          -- FIXME, this is just the return type, should be a function
 typeOfExprM (AppM (PoolCallM t _ _ _) _) = t     -- FIXME, only correct when fully applied
-typeOfExprM (AppM (ForeignInterfaceM t _) _) = t -- FIXME, only correct when fully applied
+typeOfExprM (AppM (ForeignInterfaceM t _ _) _) = t -- FIXME, only correct when fully applied
 -- ------------------------------------------
 
 typeOfExprM (AppM f xs) = case typeOfExprM f of

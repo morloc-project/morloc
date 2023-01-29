@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Generate
@@ -748,7 +749,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
                   , (Idx _ appType, appArgs)
                   )
              ) _)
-                , (Idx _ (FunP lamInputTypes lamOutType), _))
+                , (Idx _ (FunP lamInputTypes lamOutType), lamArgs))
            ) m)
 
     ----------------------------------------------------------------------------------------
@@ -781,35 +782,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     | sameLanguage = do
         let nContextArgs = length appArgs - length vs
             args = map snd appArgs
-
         xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
-
-        say "case #4"
-        say $ "src:" <+> pretty src
-        say $ "length(xs)" <+> pretty (length xs)
-        say $ "xs':" <+> list (map pretty xs')
-        say $ "types of xs':" <+> list (map (pretty . typeOfExprM) xs')
-        say $ "appArgs:" <+> list (map (pretty . snd) appArgs)
-        say $ "vs:" <+> list (map pretty vs)
-        say $ "callInputTypes:" <+> list (map pretty callInputTypes)
-        say $ "nContextArgs:" <+> pretty nContextArgs
-
         return
           . ManifoldM m (ManifoldPart (take nContextArgs args) (drop nContextArgs args))
           . ReturnM
           $ AppM f xs'
-
-        -- ids <- MM.takeFromCounter (length vs)
-        -- let n = length callInputTypes - length vs
-        --     lambdaArgs = equalZipWith NativeArgument ids (drop n callInputTypes)
-        --     lambdaTypeMs = drop n (map typeP2typeM callInputTypes)
-        --     lambdaVals = equalZipWith BndVarM lambdaTypeMs ids
-        -- xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
-        --
-        -- return
-        --   . ManifoldM m (ManifoldPart (take (length appArgs - length vs) (map snd appArgs)) lambdaArgs)
-        --   . ReturnM
-        --   $ AppM f (take n xs' <> lambdaVals)
 
 
     ----------------------------------------------------------------------------------------
@@ -831,42 +808,21 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage && length appArgs == length vs = do
         say "case #7"
+        say $ "src:" <+> pretty src
+        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
+        say $ "lamArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) lamArgs)
         -- all arguments passed need to be deserialized
         let n = length xs - length vs
         xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
         xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
         let xs' = xsPassed <> xsLocal
 
-        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
-
+        -- MRFA pass
         return
           . ManifoldM m (ManifoldPass (map snd appArgs))
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType)
+          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) (map snd appArgs))
           $ AppM (SrcM (typeP2typeM callType) src) xs'
-
-        -- -- all arguments passed need to be deserialized
-        -- let n = length xs - length vs
-        -- xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
-        -- xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
-        -- let xs' = xsPassed <> xsLocal
-        --     callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
-        --
-        -- say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
-        --
-        -- outerXs <- mapM (packExprM m . argument2ExprM . snd) appArgs
-        --
-        -- ManifoldM m (ManifoldPass (map snd appArgs))
-        --   . ReturnM
-        --   <$> unpackExprMByType m lamOutType (
-        --     AppM
-        --       ( ForeignInterfaceM (Serial lamOutType)
-        --       . ManifoldM m (ManifoldFull (map packArgument callArgs))
-        --       . ReturnM
-        --       $ AppM (SrcM (typeP2typeM callType) src) xs'
-        --       )
-        --     outerXs
-        --   )
 
     ----------------------------------------------------------------------------------------
     -- #8 trans partial lambda                                   | contextArgs | boundArgs |
@@ -885,40 +841,23 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
         say "case #8"
+        say $ "src:" <+> pretty src
+        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
+        say $ "lamArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) lamArgs)
+
         ids <- MM.takeFromCounter (length vs)
         let n = length callInputTypes - length vs
             -- These are native arguments on the caller side
             lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
             contextArgs = take n (map snd appArgs)
         xs' <- zipWithM (express' False) callInputTypes xs
+
+        -- MRFA
         return
           . ManifoldM m (ManifoldPart contextArgs lambdaArgs)
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType)
+          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) (map snd appArgs))
           $ AppM (SrcM (typeP2typeM callType) src) xs'
-
-        -- ids <- MM.takeFromCounter (length vs)
-        -- let n = length callInputTypes - length vs
-        --     -- These are native arguments on the caller side
-        --     lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
-        --     contextArgs = take n (map snd appArgs)
-        --     callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
-        --
-        -- xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
-        --
-        -- outerXs <- mapM (packExprM m . argument2ExprM) (contextArgs <> lambdaArgs)
-        --
-        -- ManifoldM m (ManifoldPart contextArgs lambdaArgs)
-        --   . ReturnM
-        --   <$> unpackExprMByType m lamOutType (
-        --     AppM
-        --       ( ForeignInterfaceM (Serial lamOutType)
-        --       . ManifoldM m (ManifoldFull (map packArgument callArgs))
-        --       . ReturnM
-        --       $ AppM (SrcM (typeP2typeM callType) src) xs'
-        --       )
-        --     outerXs
-        --   )
 
     where
       sameLanguage = langOf pc == langOf callType
@@ -977,9 +916,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
           say $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
-          xs' <- zipWithM (express' False) inputs xs
+          xs' <- zipWithM (\t e -> express' False t e >>= unpackExprMByType m t) inputs xs
           return
-            . ForeignInterfaceM (packTypeM (typeP2typeM pc))
+            . ForeignInterfaceM (packTypeM (typeP2typeM pc)) [] -- no args are passed, so empty
             . ManifoldM m (ManifoldFull (map snd args))
             . ReturnM
             $ AppM f xs'
@@ -1015,6 +954,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          g(m2, xs)                                        |             |           |
     ----------------------------------------------------------------------------------------
     | langOf pc == langOf c = do
+        say $ "case #2"
         say $ "Un-applied cis source call:" <+> pretty (srcName src)
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaTypes = map typeP2typeM callInputs
@@ -1040,37 +980,19 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          return g(m2, xs)                                 |             |           |
     ----------------------------------------------------------------------------------------
     | otherwise = do
+        say $ "case #6"
         say $ "Un-applied trans source call:" <+> pretty (srcName src)
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = equalZipWith NativeArgument ids pinputs
-            callVals = zipWith BndVarM (map Native callInputs) ids
+            foreignArgs = equalZipWith SerialArgument ids callInputs
+        callVals <- zipWithM (\t i -> unpackExprMByType m t (BndVarM (Serial t) i)) callInputs ids
+
+        -- MRFA pass
         return
          . ManifoldM m (ManifoldPass lambdaArgs)
          . ReturnM
-         . ForeignInterfaceM (Serial pout)
+         . ForeignInterfaceM (Serial pout) (zip lambdaArgs foreignArgs)
          $ AppM (SrcM (typeP2typeM c) src) callVals
-
-        -- ids <- MM.takeFromCounter (length callInputs)
-        -- let lambdaTypes = map (packTypeM . typeP2typeM) callInputs
-        --     lambdaArgs = equalZipWith SerialArgument ids callInputs
-        -- lambdaVals <- mapM (unpackExprM m pout) $ equalZipWith BndVarM lambdaTypes ids
-        --
-        -- pids <- MM.takeFromCounter (length callInputs)
-        -- let pLambdaArgs = equalZipWith NativeArgument pids pinputs
-        -- pLambdaVals <- mapM (packExprM m . argument2ExprM) pLambdaArgs
-        --
-        -- ManifoldM m (ManifoldPass pLambdaArgs)
-        --  . ReturnM
-        --  <$> unpackExprM m pout
-        --      ( AppM
-        --        ( ForeignInterfaceM (Serial pout)
-        --        . ManifoldM m (ManifoldFull lambdaArgs)
-        --        . ReturnM
-        --        . AppM (SrcM (typeP2typeM c) src)
-        --        $ lambdaVals
-        --        )
-        --        pLambdaVals
-        --      )
 
   -- bound variables
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
@@ -1189,21 +1111,29 @@ segment e0
   topArgsOf (ManifoldM _ form _) = manifoldArgs form
   topArgsOf _ = []
 
--- FMRA - MRFA
+  segment' :: Int -> [Argument] -> ExprM Many -> MorlocMonad ([ExprM Many], ExprM Many)
 
   -- This is where segmentation happens, every other match is just traversal
-  segment' _ args (ForeignInterfaceM t e@(ManifoldM m form _)) = do
+  segment' _ args (ForeignInterfaceM t _ e@(ManifoldM m form _)) = do
     (ms, e') <- segment' m (manifoldArgs form) e
     config <- MM.ask
     case MC.buildPoolCallBase config (langOf e') m of
       (Just cmds) -> return (e':ms, PoolCallM (packTypeM t) m cmds args)
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
-  segment' m args (AppM e@(ForeignInterfaceM _ _) es) = do
-    (ms, e') <- segment' m args e
-    (mss, es') <- mapM (segment' m args) es |>> unzip
-    _ <- mapM_ (packExprM m) [] -- for some fucking reason my fucking shit compiler freaks out if I delete this dumbass line
-    return (ms ++ concat mss, AppM e' es')
+  segment' m _ (ForeignInterfaceM t@(Serial tp) (unzip -> (localArgs, foreignArgs)) e) = do
+    (ms, e') <- segment' m foreignArgs e
+    -- create the foriegn manifold, make sure all arugments are packed
+    let foreignManifold = ManifoldM m (ManifoldFull (map packArgument foreignArgs)) (ReturnM e')
+    -- pack the arguments that will be passed to the foreign manifold
+    es' <- mapM (packExprM m . argument2ExprM) localArgs
+    config <- MM.ask
+    -- create the body of the local helper function
+    localFun <- case MC.buildPoolCallBase config (langOf e') m of
+      (Just cmds) -> unpackExprM m tp $ AppM (PoolCallM (packTypeM t) m cmds localArgs) es'
+      Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
+
+    return (foreignManifold:ms, localFun)
 
   segment' _ _ (ManifoldM m form e) = do
     (ms, e') <- segment' m (manifoldArgs form) e
@@ -1214,9 +1144,9 @@ segment e0
     (mss, es') <- mapM (segment' m args) es |>> unzip
     return (ms ++ concat mss, AppM e' es')
 
-  segment' m _ (LamM manifoldArgs boundArgs e) = do
-    (ms, e') <- segment' m (manifoldArgs <> boundArgs) e
-    return (ms, LamM manifoldArgs boundArgs e')
+  segment' m _ (LamM contextArgs boundArgs e) = do
+    (ms, e') <- segment' m (contextArgs <> boundArgs) e
+    return (ms, LamM contextArgs boundArgs e')
 
   segment' m args (LetM i e1 e2) = do
     (ms1, e1') <- segment' m args e1
@@ -1259,9 +1189,9 @@ segment e0
 reparameterize :: ExprM Many -> ExprM Many
 reparameterize e0 = snd (substituteBndArgs e0) where 
   substituteBndArgs :: ExprM Many -> ([(Int, TypeM)], ExprM Many) 
-  substituteBndArgs (ForeignInterfaceM i e) =
+  substituteBndArgs (ForeignInterfaceM i (unzip -> (largs, fargs)) e) =
     let (vs, e') = substituteBndArgs e
-    in (vs, ForeignInterfaceM i (snd $ substituteBndArgs e'))
+    in (vs, ForeignInterfaceM i (zip (map (sub vs) largs) (map (sub vs) fargs)) (snd $ substituteBndArgs e'))
   substituteBndArgs (ManifoldM m form e) =
     let (vs, e') = substituteBndArgs e
     in (vs, ManifoldM m (mapManifoldArgs (sub vs) form) e')
@@ -1336,7 +1266,7 @@ findSources (lang, es0) = do
         ss2 <- lookupPackers i
         ss3 <- lookupConstructors i
         return $ ss1 <> ss2 <> ss3
-    f (ForeignInterfaceM _ e) = f e
+    f (ForeignInterfaceM _ _ e) = f e
     f (LetM _ e1 e2) = (<>) <$> f e1 <*> f e2
     f (AppM e es) = (<>) <$> f e <*> concatMapM f es
     f (LamM _ _ e) = f e
@@ -1410,7 +1340,7 @@ chooseSerializer = mapM chooseSerializer' where
   chooseSerializer' (DeserializeM s e) = DeserializeM <$> oneSerial s <*> chooseSerializer' e
   -- plumbing
   chooseSerializer' (ManifoldM g form e) = ManifoldM g form <$> chooseSerializer' e
-  chooseSerializer' (ForeignInterfaceM t e) = ForeignInterfaceM t <$> chooseSerializer' e
+  chooseSerializer' (ForeignInterfaceM t args e) = ForeignInterfaceM t args <$> chooseSerializer' e
   chooseSerializer' (LetM i e1 e2) = LetM i <$> chooseSerializer' e1 <*> chooseSerializer' e2
   chooseSerializer' (AppM e es) = AppM <$> chooseSerializer' e <*> mapM chooseSerializer' es
   chooseSerializer' (LamM manifoldArgs boundArgs e) = LamM manifoldArgs boundArgs <$> chooseSerializer' e
