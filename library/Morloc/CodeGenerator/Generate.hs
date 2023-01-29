@@ -740,7 +740,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     (SAnno (One (LamS vs
       (SAnno (One (AppS
         (SAnno (One (CallS src
-                    , (Idx _ callType@(FunP callInputTypes callOutType), callArgs)
+                    , (Idx _ callType@(FunP callInputTypes callOutType), _)
                     )
                ) _)
         xs
@@ -806,9 +806,29 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage && length appArgs == length vs = do
         say "case #7"
-        xs' <- zipWithM (express' False) callInputTypes xs >>= mapM (unpackExprM m appType)
-        return . ManifoldM m (ManifoldPass (map snd appArgs)) $
-          ReturnM (AppM f xs')
+
+        -- all arguments passed need to be deserialized
+        let n = length xs - length vs
+        xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
+        xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
+        let xs' = xsPassed <> xsLocal
+            callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
+
+        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs) 
+
+        outerXs <- mapM (packExprM m . argument2ExprM . snd) appArgs 
+
+        ManifoldM m (ManifoldPass (map snd appArgs))
+          . ReturnM
+          <$> unpackExprMByType m lamOutType (
+            AppM
+              ( ForeignInterfaceM (Serial lamOutType)
+              . ManifoldM m (ManifoldFull (map packArgument callArgs))
+              . ReturnM
+              $ AppM (SrcM (typeP2typeM callType) src) xs'
+              )
+            outerXs
+          )
 
     ----------------------------------------------------------------------------------------
     -- #8 trans partial lambda                                   | contextArgs | boundArgs |
@@ -832,20 +852,22 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
             -- These are native arguments on the caller side
             lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
             contextArgs = take n (map snd appArgs)
+            callArgs = zipWith replaceArgumentType callInputTypes (map snd appArgs)
 
         xs' <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes xs
 
-        ManifoldM m (ManifoldPart contextArgs lambdaArgs)   -- good
+        outerXs <- mapM (packExprM m . argument2ExprM) (contextArgs <> lambdaArgs)
+
+        ManifoldM m (ManifoldPart contextArgs lambdaArgs)
           . ReturnM
           <$> unpackExprMByType m lamOutType (
             AppM
               ( ForeignInterfaceM (Serial lamOutType)
-              . ManifoldM m (ManifoldFull (map snd appArgs))
+              . ManifoldM m (ManifoldFull (map packArgument callArgs))
               . ReturnM
               $ AppM (SrcM (typeP2typeM callType) src) xs'
               )
-            -- `segment` will handle serialization
-            (map argument2ExprM (contextArgs <> lambdaArgs))
+            outerXs
           )
 
     where
@@ -985,12 +1007,12 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         let pLambdaArgs = equalZipWith NativeArgument pids pinputs
         pLambdaVals <- mapM (packExprM m . argument2ExprM) pLambdaArgs
 
-        ManifoldM m (ManifoldFull pLambdaArgs)
+        ManifoldM m (ManifoldPass pLambdaArgs)
          . ReturnM
          <$> unpackExprM m pout
              ( AppM
                ( ForeignInterfaceM (Serial pout)
-               . ManifoldM m (ManifoldPass lambdaArgs)
+               . ManifoldM m (ManifoldFull lambdaArgs)
                . ReturnM
                . AppM (SrcM (typeP2typeM c) src)
                $ lambdaVals
@@ -1121,8 +1143,8 @@ segment e0
   segment' m args (AppM e@(ForeignInterfaceM _ _) es) = do
     (ms, e') <- segment' m args e
     (mss, es') <- mapM (segment' m args) es |>> unzip
-    es'' <- mapM (packExprM m) es'
-    return (ms ++ concat mss, AppM e' es'')
+    _ <- mapM_ (packExprM m) [] -- for some fucking reason my fucking shit compiler freaks out if I delete this dumbass line
+    return (ms ++ concat mss, AppM e' es')
 
   segment' _ _ (ManifoldM m form e) = do
     (ms, e') <- segment' m (manifoldArgs form) e

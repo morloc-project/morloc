@@ -12,6 +12,7 @@ module Morloc.CodeGenerator.Grammars.Common
   ( argType
   , packArgument
   , unpackArgument
+  , replaceArgumentType
   , typeOfExprM
   , gmetaOf
   , typeOfTypeM
@@ -204,6 +205,11 @@ arg2typeM :: Argument -> TypeM
 arg2typeM (SerialArgument _ c) = Serial c
 arg2typeM (NativeArgument _ c) = Native c
 arg2typeM (PassThroughArgument _) = Passthrough
+
+replaceArgumentType :: TypeP -> Argument -> Argument
+replaceArgumentType t (SerialArgument i _) = SerialArgument i t
+replaceArgumentType t (NativeArgument i _) = NativeArgument i t
+replaceArgumentType _ (PassThroughArgument i) = PassThroughArgument i
 
 -- | Get the manifold type of an expression
 --
