@@ -1,0 +1,4 @@
+import pybase (map, add)
+export foo
+
+foo x xs = map (add x) xs

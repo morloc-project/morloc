@@ -5,3 +5,4 @@ obs.txt
 __pycache__/
 pool-rust
 good-*
+log
