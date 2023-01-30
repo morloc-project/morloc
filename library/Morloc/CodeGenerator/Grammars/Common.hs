@@ -137,13 +137,13 @@ invertExprM e@(AppM f es) = do
 -- A LamM will generate a new function declaration in the output code. This
 -- function will be like a manifold, but lighter, since at the moment the only
 -- thing it is used for is wrapping higher order functions that call external manifolds.
-invertExprM (LamM manifoldArgs boundArgs body) = do
+invertExprM (LamM contextArgs boundArgs body) = do
   -- restart the counter, this is NOT a lambda expression so variables are NOT
   -- in the parent scope, the body will be in a fresh function declaration and
   -- this function will be called with
   -- arguments `vs`
   MM.startCounter
-  LamM manifoldArgs boundArgs <$> invertExprM body
+  LamM contextArgs boundArgs <$> invertExprM body
 invertExprM (AccM e k) = do
   e' <- invertExprM e
   return $ dependsOn (AccM (terminalOf e') k) e'

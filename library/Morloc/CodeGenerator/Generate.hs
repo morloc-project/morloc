@@ -746,7 +746,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
                     )
                ) _)
         xs
-                  , (Idx _ appType, appArgs)
+                  , (Idx _ _, appArgs)
                   )
              ) _)
                 , (Idx _ (FunP lamInputTypes lamOutType), lamArgs))
@@ -808,21 +808,29 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage && length appArgs == length vs = do
         say "case #7"
+        let n = length xs - length vs
+        xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
+
+        let callArgs = map packArgument $ zipWith replaceArgumentType callInputTypes (map snd appArgs)
+        xsPassed <- zipWithM (unpackExprMByType m) (drop n callInputTypes) (map argument2ExprM callArgs)
+        let xs' = xsLocal <> xsPassed
+
+        say $ "callArgs:" <+> list (map pretty callArgs)
         say $ "src:" <+> pretty src
         say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
         say $ "lamArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) lamArgs)
-        -- all arguments passed need to be deserialized
-        let n = length xs - length vs
-        xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
-        xsPassed <- zipWithM (\t x -> express' False t x >>= unpackExprMByType m t) callInputTypes (drop n xs)
-        let xs' = xsPassed <> xsLocal
+        say $ "n:" <+> pretty n
+        say $ "callInputTypes:" <+> list (map pretty callInputTypes)
+        say $ "xsPassed:" <+> list (map pretty xsPassed)
+        say $ "xsLocal:" <+> list (map pretty xsLocal)
 
         -- MRFA pass
         return
           . ManifoldM m (ManifoldPass (map snd appArgs))
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) (map snd appArgs))
+          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) callArgs)
           $ AppM (SrcM (typeP2typeM callType) src) xs'
+
 
     ----------------------------------------------------------------------------------------
     -- #8 trans partial lambda                                   | contextArgs | boundArgs |
@@ -840,23 +848,28 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          return g(lambda z, x: m2(x, y, z))               |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
-        say "case #8"
-        say $ "src:" <+> pretty src
-        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
-        say $ "lamArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) lamArgs)
-
         ids <- MM.takeFromCounter (length vs)
         let n = length callInputTypes - length vs
             -- These are native arguments on the caller side
             lambdaArgs = equalZipWith NativeArgument ids lamInputTypes
             contextArgs = take n (map snd appArgs)
+            -- callArgs = map packArgument $ zipWith replaceArgumentType callInputTypes (map snd appArgs) -- WRONG - appArgs may be longer
+            callArgs = (map snd appArgs) 
         xs' <- zipWithM (express' False) callInputTypes xs
+        
+        say "case #8"
+        say $ "ids:" <+> list (map pretty ids)
+        say $ "src:" <+> pretty src
+        say $ "appArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) appArgs)
+        say $ "lamArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) lamArgs)
+        say $ "callArgs:" <+> list (map pretty callArgs)
+        say $ "length xs:" <+> pretty (length xs)
 
         -- MRFA
         return
           . ManifoldM m (ManifoldPart contextArgs lambdaArgs)
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) (map snd appArgs))
+          . ForeignInterfaceM (Serial lamOutType) (zip (map snd appArgs) callArgs)
           $ AppM (SrcM (typeP2typeM callType) src) xs'
 
     where
