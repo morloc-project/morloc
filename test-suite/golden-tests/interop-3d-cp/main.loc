@@ -1,11 +1,6 @@
-import cppbase (zipWith, mul)
-import pybase (add)
+import cppbase (map)
+import pybase (add, neg)
 export foo
 
-add3 x y z = add x (add y z)
-
-foo Cpp :: "double" -> ["double"] -> ["double"] -> ["double"]
-foo x = zipWith (\y -> add3 (mul x y) y)
---                          |-> z <-|
--- Tests the case where z is dependent on both a context argument (x) and a
--- lambda argument (y)
+foo Cpp :: "double" -> ["double"] -> ["double"]
+foo x ys = map (\y -> add x (neg y)) ys

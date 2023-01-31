@@ -73,22 +73,32 @@ main = do
       , golden "interop-1-py" "interop-1-py"
       , golden "interop-1-r" "interop-1-r"
       , golden "interop-2" "interop-2"
+      -- 3a
       , golden "interop-3a-cp" "interop-3a-cp"
       , golden "interop-3a-pr" "interop-3a-pr"
       , golden "interop-3a-rc" "interop-3a-rc"
       , golden "interop-3a-pp" "interop-3a-pp"
+      -- 3b
       , golden "interop-3b-cp" "interop-3b-cp"
       , golden "interop-3b-pr" "interop-3b-pr"
       , golden "interop-3b-rc" "interop-3b-rc"
       , golden "interop-3b-pp" "interop-3b-pp"
+      -- 3c
       , golden "interop-3c-cp" "interop-3c-cp"
       , golden "interop-3c-pr" "interop-3c-pr"
       , golden "interop-3c-rc" "interop-3c-rc"
       , golden "interop-3c-pp" "interop-3c-pp"
+      -- 3d
       , golden "interop-3d-cp" "interop-3d-cp"
       , golden "interop-3d-pr" "interop-3d-pr"
       , golden "interop-3d-rc" "interop-3d-rc"
       , golden "interop-3d-pp" "interop-3d-pp"
+      -- 3e
+      , golden "interop-3e-cp" "interop-3e-cp"
+      , golden "interop-3e-pr" "interop-3e-pr"
+      , golden "interop-3e-rc" "interop-3e-rc"
+      , golden "interop-3e-pp" "interop-3e-pp"
+      -- other random interop tests (I should kill them)
       , golden "interop-4" "interop-4"
       , golden "interop-5" "interop-5"
       , golden "interop-6" "interop-6"

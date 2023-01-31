@@ -252,9 +252,10 @@ typeOfExprM (SerializeM _ e) = packTypeM (typeOfExprM e)
 typeOfExprM (DeserializeM _ e) = unpackTypeM (typeOfExprM e)
 typeOfExprM (ReturnM e) = typeOfExprM e
 
+-- | Serialize a type if possible, otherwise return the original value
 packTypeM :: TypeM -> TypeM
 packTypeM (Native t) = Serial t
-packTypeM (Function _ _) = error "BUG: Cannot pack a function"
+packTypeM t@(Function _ _) = t -- functions cannot be serialized
 packTypeM t = t
 
 unpackTypeM :: TypeM -> TypeM

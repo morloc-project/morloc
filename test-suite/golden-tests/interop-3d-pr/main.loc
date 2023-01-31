@@ -1,8 +1,6 @@
-import pybase (zipWith, mul)
-import rbase (add)
+import pybase (map)
+import rbase (add, neg)
 export foo
 
-add3 x y z = add x (add y z)
-
-foo Py :: "float" -> ["float"] -> ["float"] -> ["float"]
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo Py :: "float" -> ["float"] -> ["float"]
+foo x ys = map (\y -> add x (neg y)) ys

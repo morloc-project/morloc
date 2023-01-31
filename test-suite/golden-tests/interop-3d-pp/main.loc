@@ -1,6 +1,4 @@
-import pybase (zipWith, mul, add)
+import pybase (map, add, neg)
 export foo
 
-add3 x y z = add x (add y z)
-
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo x ys = map (\y -> add x (neg y)) ys

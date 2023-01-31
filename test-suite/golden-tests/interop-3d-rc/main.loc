@@ -1,8 +1,6 @@
-import rbase (zipWith, mul)
-import cppbase (add)
+import rbase (map)
+import cppbase (add, neg)
 export foo
 
-add3 x y z = add x (add y z)
-
-foo R :: "numeric" -> ["numeric"] -> ["numeric"] -> ["numeric"]
-foo x = zipWith (\y -> add3 (mul x y) y)
+foo R :: "numeric" -> ["numeric"] -> ["numeric"]
+foo x ys = map (\y -> add x (neg y)) ys

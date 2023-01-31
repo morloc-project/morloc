@@ -1,0 +1,8 @@
+import rbase (zipWith, mul)
+import cppbase (add)
+export foo
+
+add3 x y z = add x (add y z)
+
+foo R :: "numeric" -> ["numeric"] -> ["numeric"] -> ["numeric"]
+foo x = zipWith (\y -> add3 (mul x y) y)
