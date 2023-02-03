@@ -20,13 +20,14 @@ module Morloc.CodeGenerator.Grammars.Common
   , invertExprM
   , packTypeM
   , packExprM
+  , unpackExprMByType
+  , unpackExprM
   , unpackTypeM
   , nargsTypeM
   , argsOf
   , arg2typeM
   , type2jsontype
   , jsontype2json
-  , splitArgs
   , PoolDocs(..)
   , mergePoolDocs
   ) where
@@ -82,11 +83,11 @@ nargsTypeM _ = 0
 
 argsOf :: ExprM f -> Set.Set Argument
 argsOf (ManifoldM _ form x) = Set.fromList (manifoldArgs form) `Set.union` argsOf x
-argsOf (ForeignInterfaceM _ (unzip -> (largs, fargs)) x) = Set.union (Set.fromList (largs <> fargs)) (argsOf x)
+argsOf (ForeignInterfaceM _ _ x) = argsOf x
 argsOf (PoolCallM _ _ _ args) = Set.fromList args
 argsOf (LetM _ _ x) = argsOf x
 argsOf (AppM x xs) = Set.unions (map argsOf (x:xs))
-argsOf (LamM manifoldArgs boundArgs x) = (argsOf x `Set.union` Set.fromList manifoldArgs) `Set.difference` Set.fromList boundArgs
+argsOf (LamM contextArgs boundArgs x) = (argsOf x `Set.union` Set.fromList contextArgs) `Set.difference` Set.fromList boundArgs
 argsOf (AccM x _) = argsOf x
 argsOf (ListM _ xs) = Set.unions (map argsOf xs)
 argsOf (TupleM _ xs) = Set.unions (map argsOf xs)
@@ -263,6 +264,25 @@ unpackTypeM (Serial t) = Native t
 unpackTypeM Passthrough = error "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
+-- Deserializes anything that is not already Native
+-- FIXME needing both of these functions is fucked up
+unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM m p e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    _ -> return e
+
+-- Deserializes anything that is not already Native
+unpackExprMByType :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprMByType m p e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Serial _)  -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    _ -> return e
+
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
 packExprM m e = do
   packers <- MM.metaPackMap m
@@ -295,11 +315,3 @@ gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m
 gmetaOf (LamM _ _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"
-
--- divide a list of arguments based on wheither they are in a second list
-splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
-splitArgs args1 args2 = partitionEithers $ map splitOne args1 where
-  splitOne :: Argument -> Either Argument Argument
-  splitOne r = if elem r args2
-               then Left r
-               else Right r

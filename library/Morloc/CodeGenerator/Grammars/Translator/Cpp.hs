@@ -297,7 +297,7 @@ deserialize recmap letIndex typestr0 varname0 s0
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
       idx <- fmap pretty MM.getCounter
-      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
+      (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       t <- showType recmap <$> shallowType rec
       let v' = "s" <> idx
           decl = encloseSep "{" "}" "," ss'
@@ -332,10 +332,7 @@ translateManifold recmap m0@(ManifoldM _ form0 _) = do
   f args (LetM i (DeserializeM s e1) e2) = do
     (PoolDocs ms1 e1' ps1 pes1) <- f args e1
     (PoolDocs ms2 e2' ps2 pes2) <- f args e2
-    say "ERROR IS RAISED HERE"
-    say $ pretty e1
     t <- showNativeTypeM recmap (typeOfExprM e1)
-    say "------"
     deserialized <- deserialize recmap i t e1' s
     return $ PoolDocs
       { poolCompleteManifolds = ms1 <> ms2
@@ -578,8 +575,8 @@ cleanRecord m tm = case typeOfTypeM tm of
     toRecord (VarP _) = []
     toRecord (FunP ts t) = concatMap toRecord (t:ts)
     toRecord (AppP t ts) = concatMap toRecord (t:ts)
-    toRecord (NamP _ v@(PV _ _ "struct") _ rs) = (v, m, rs) : concatMap toRecord (map snd rs)
-    toRecord (NamP _ _ _ rs) = concatMap toRecord (map snd rs)
+    toRecord (NamP _ v@(PV _ _ "struct") _ rs) = (v, m, rs) : concatMap (toRecord . snd) rs
+    toRecord (NamP _ _ _ rs) = concatMap (toRecord . snd) rs
 
 -- unify records with the same name/keys
 unifyRecords

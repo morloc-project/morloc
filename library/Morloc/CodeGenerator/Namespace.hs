@@ -233,7 +233,7 @@ data ExprM f
 
   | ForeignInterfaceM
       TypeM -- required type in the calling language
-      [(Argument, Argument)] -- arguments in the foreign language
+      [Int] -- the argument ids that are passed between pools
       (ExprM f) -- expression in the foreign language
   -- ^ A generic interface to an expression in another language. Currently it
   -- will be resolved only to the specfic pool call interface type, where
@@ -248,7 +248,10 @@ data ExprM f
       [Argument] -- argument passed to the foreign function (must be serialized)
   -- ^ Make a system call to another language
 
-  | LetM Int (ExprM f) (ExprM f)
+  | LetM
+      Int -- index for the newly bound variable
+      (ExprM f) -- the value bound to the new variable
+      (ExprM f) -- the remaining code
   -- ^ let syntax allows fine control over order of operations in the generated
   -- code. The Int is an index for a LetVarM. It is also important in languages
   -- such as C++ where values need to be declared with explicit types and
