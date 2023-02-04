@@ -1,5 +1,5 @@
 import pybase (id)
-import rbase (add)
+import cppbase (add)
 
 foo py :: "float" -> "float"
 foo x = id (add 1.0 x)

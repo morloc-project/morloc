@@ -8,5 +8,5 @@ sum xs b = fold add b xs
 
 foo xs = sum (map (add 1.0) xs) 0.0
 
--- foo xs = fold add b (map (add 1.0) xs) 0.0
---          R    Py     Py   Py
+-- foo xs = fold add (map (add 1.0) xs) 0.0
+--          R    Py   Py   Py

@@ -849,10 +849,11 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
           . ReturnM
           . AppM
               ( ForeignInterfaceM (Serial lamOutType) passedParentArgs
+              . ManifoldM m (ManifoldFull (map pass args))
               . ReturnM
               $ AppM call xs'
               )
-          $ [BndVarM (Serial p) i | PreArgument i _ p <- lamArgs]
+          $ [BndVarM (Serial p) i | PreArgument i _ p <- appArgs]
 
     where
       sameLanguage = langOf pc == langOf callType
@@ -915,12 +916,19 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
           say $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
+          say $ "args:" <+> list (map pretty args)
+
           xs' <- zipWithM (express' False) inputs xs
           return
-            . ForeignInterfaceM (packTypeM (typeP2typeM pc)) [] -- no args are passed, so empty
             . ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args])
             . ReturnM
-            $ AppM f xs'
+            . AppM
+                ( ForeignInterfaceM (packTypeM (typeP2typeM pc)) [] -- no args are passed, so empty
+                . ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args])
+                . ReturnM
+                $ AppM f xs'
+                )
+            $ [BndVarM (Serial p) i | PreArgument i _ p <- args]
 
     where
       sameLanguage = langOf pc == langOf fc
@@ -1210,7 +1218,7 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         lambdaScope (argId -> i) = case Map.lookup i typemap of
             (Just (Just t)) -> NativeArgument i t
             (Just Nothing) -> PassThroughArgument i
-            _ -> error "Expected lambdas to always be native"
+            Nothing -> error "Missing index"
 
         rescope :: Map.Map Int Argument -> ManifoldForm -> ManifoldForm
         rescope _ form@(ManifoldPass _) = mapManifoldArgs lambdaScope form
@@ -1223,7 +1231,8 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         package :: Int -> Request -> TypeM -> ExprM Many -> MorlocMonad (ExprM Many)
         package m r t e = case (r, typeOfTypeM t) of
             (SerialContent, Nothing) -> return e
-            (NativeContent, Nothing) -> error "Cannot deserialize passthrough type"
+            (NativeContent, Nothing) -> error . MT.unpack . render
+                $ "Cannot deserialize passthrough type:" <+> pretty t
             (SerialContent, _) -> packExprM m e
             (NativeContent, Just p) -> unpackExprMByType m p e
 
