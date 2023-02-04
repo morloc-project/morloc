@@ -864,10 +864,15 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
       chain (f:fs) x = chain fs (f x)
 
 
-  express' False _ (SAnno (One (LamS vs body@(SAnno (One (_, (_, bodyArgs))) _), (Idx _ lambdaType, manifoldArguments))) _) = do
+  express' False _ (SAnno (One (LamS vs body@(SAnno (One (_, (_, bodyArgs))) _), (Idx _ lambdaType, manifoldArguments))) m) = do
     body' <- express' False lambdaType body
-    let boundArguments = drop (length bodyArgs - length vs) bodyArgs   -- arguments bound by the lambda
-    return $ LamM [pass i | PreArgument i _ _ <- manifoldArguments] [pass i | PreArgument i _ _ <- boundArguments] body'
+    let nBound = length bodyArgs - length vs
+        contextArguments = [pass i | PreArgument i _ _ <- manifoldArguments]
+        boundArguments = [pass i | PreArgument i _ _ <- drop nBound bodyArgs]   -- arguments bound by the lambda
+    return
+      . ManifoldM m (ManifoldPart contextArguments boundArguments)
+      . ReturnM
+      $ body'
 
   -- Apply arguments to a sourced function
   -- * The CallS object may be in a foreign language. These inter-language
