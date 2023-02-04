@@ -589,18 +589,15 @@ substituteSAnno v r = f where
 -- removed at each step.
 parameterize
   :: SAnno Int One (Indexed TypeP)
-  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Int)]))
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [PreArgument]))
 parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   say "Entering parameterize LamS"
   say $ "m" <> pretty m
   say $ "vs =" <+> list (map pretty vs)
   say $ "input types =" <+> list (map pretty inputs) 
 
-
-  ids <- MM.takeFromCounter (length inputs)  
-  let args0 = zip vs ids
-
-  say $ "args0 =" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
+  ids <- MM.takeFromCounter (length inputs)
+  let args0 = zipWith3 PreArgument ids vs inputs
 
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
@@ -609,9 +606,7 @@ parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
 
   ids <- MM.takeFromCounter (length inputs)
   let vs = map EV (freshVarsAZ [])
-      args0 = zip vs ids
-
-  say $ "  args0 = " <>  list (map (\(v,r) -> tupled [pretty v, pretty r]) args0)
+      args0 = zipWith3 PreArgument ids vs inputs
 
   return $ SAnno (One (CallS src, (c, args0))) m
 parameterize x = do
@@ -624,80 +619,55 @@ parameterize x = do
 -- "know" that it needs to deserialize functions that are passed to a foreign
 -- call, for instance.
 parameterize'
-  :: [(EVar, Int)] -- arguments in parental scope (child needn't retain them)
+  :: [PreArgument] -- arguments in parental scope (child needn't retain them)
   -> SAnno Int One (Indexed TypeP)
-  -> MorlocMonad (SAnno Int One (Indexed TypeP, [(EVar, Int)]))
+  -> MorlocMonad (SAnno Int One (Indexed TypeP, [PreArgument]))
 -- primitives, no arguments are required for a primitive, so empty lists
 parameterize' _ (SAnno (One (UniS, c)) m) = return $ SAnno (One (UniS, (c, []))) m
 parameterize' _ (SAnno (One (RealS x, c)) m) = return $ SAnno (One (RealS x, (c, []))) m
 parameterize' _ (SAnno (One (IntS x, c)) m) = return $ SAnno (One (IntS x, (c, []))) m
 parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
--- VarS EVar
 parameterize' args (SAnno (One (VarS v, c)) m) = do
-
-  let args' = [(v', r) | (v', r) <- args, v' == v]
-  say $ "parameterize VarS" <+> pretty v <> ": args =" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
-
+  let args' = [r | r@(PreArgument _ v' _) <- args, v' == v]
   return $ SAnno (One (VarS v, (c, args'))) m
--- CallS Source
 parameterize' _ (SAnno (One (CallS src, c)) m) = do
-  say $ "parameterize CallS" <+> pretty (srcName src) <> ": args = []"
   return $ SAnno (One (CallS src, (c, []))) m
--- record access
 parameterize' args (SAnno (One (AccS x k, c)) m) = do
-  say "parameterize AccS"
   x' <- parameterize' args x
   return $ SAnno (One (AccS x' k, (c, args))) m
--- containers
 parameterize' args (SAnno (One (LstS xs, c)) m) = do
-  say "parameterize LstS"
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
-      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
+  let usedArgs = [i | PreArgument i _ _ <- unique . concatMap sannoSnd $ xs']
+      args' = [r | r@(PreArgument i _ _) <- args, i `elem` usedArgs]
   return $ SAnno (One (LstS xs', (c, args'))) m
 parameterize' args (SAnno (One (TupS xs, c)) m) = do
-  say "parameterize TupS"
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst . unique . concatMap sannoSnd $ xs'
-      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
+  let usedArgs = [i | PreArgument i _ _ <- unique . concatMap sannoSnd $ xs']
+      args' = [r | r@(PreArgument i _ _) <- args, i `elem` usedArgs]
   return $ SAnno (One (TupS xs', (c, args'))) m
 parameterize' args (SAnno (One (NamS entries, c)) m) = do
-  say "parameterize NamS"
   vs' <- mapM (parameterize' args . snd) entries
-  let usedArgs = map fst . unique . concatMap sannoSnd $ vs'
-      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs] 
+  let usedArgs = [i | PreArgument i _ _ <- unique . concatMap sannoSnd $ vs']
+      args' = [r | r@(PreArgument i _ _) <- args, i `elem` usedArgs]
   return $ SAnno (One (NamS (zip (map fst entries) vs'), (c, args'))) m
 parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
-  say "parameterize LamS"
   ids <- MM.takeFromCounter (length inputs)
-  let contextArgs = [(v, r) | (v, r) <- args, v `notElem` vs] -- remove shadowed arguments
-      boundArgs = zip vs ids
-
-  say $ "  LamS: vs" <+> viaShow vs
-  say $ "  LamS: contextArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) contextArgs)
-  say $ "  LamS: boundArgs:" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) boundArgs)
-
+  let contextArgs = [r | r@(PreArgument _ v _) <- args, v `notElem` vs] -- remove shadowed arguments
+      boundArgs = zipWith3 PreArgument ids vs inputs
   x' <- parameterize' (contextArgs ++ boundArgs) x
   return $ SAnno (One (LamS vs x', (c, contextArgs))) m
 -- LamS MUST have a functional type, deviations would have been caught by the typechecker
 parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
-  say "parameterize AppS -- going into x"
-  say $ "  length xs = " <> pretty (length xs)
-
   x' <- parameterize' args x
   xs' <- mapM (parameterize' args) xs
-  let usedArgs = map fst $ sannoSnd x' ++ (unique . concatMap sannoSnd $ xs')
-      args' = [(v, r) | (v, r) <- args, v `elem` usedArgs]
-
-  say " -- continuing parameterize AppS"
-  say $ "args':" <+> list (map (\(v,r) -> tupled [pretty v, pretty r]) args')
-
+  let usedArgs = [v | (PreArgument _ v _) <- sannoSnd x' <> (unique . concatMap sannoSnd $ xs')]
+      args' = [r | r@(PreArgument _ v _) <- args, v `elem` usedArgs]
   return $ SAnno (One (AppS x' xs', (c, args'))) m
 
 
-express :: SAnno Int One (Indexed TypeP, [(EVar, Int)]) -> MorlocMonad (ExprM Many)
+express :: SAnno Int One (Indexed TypeP, [PreArgument]) -> MorlocMonad (ExprM Many)
 express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   say "Entering express"
   final <- express' True c0 s0
@@ -709,7 +679,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express'
     :: Bool -- is this a top-level expression that the nexus will record?
     -> TypeP
-    -> SAnno Int One (Indexed TypeP, [(EVar, Int)])
+    -> SAnno Int One (Indexed TypeP, [PreArgument])
     -> MorlocMonad (ExprM Many)
 
   -- *****************  EVIL INDEX REWRITE HACK WARNING ************************
@@ -745,7 +715,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
                   , (Idx _ _, appArgs)
                   )
              ) _)
-                , (Idx _ (FunP _ lamOutType), lamArgs))
+                , (Idx _ (FunP lamInputTypes lamOutType), lamArgs))
            ) m)
 
     ----------------------------------------------------------------------------------------
@@ -760,7 +730,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     ----------------------------------------------------------------------------------------
     | sameLanguage && length appArgs == length vs = do
         say "case #3"
-        let args = map (pass . snd) appArgs
+        let args = [pass i | PreArgument i _ _ <- appArgs]
         xs' <- zipWithM (express' False) callInputTypes xs
         return
             . ManifoldM m (ManifoldPass args)
@@ -777,8 +747,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | sameLanguage = do
+        say "case #4"
         let nContextArgs = length appArgs - length vs
-            args = map (pass . snd) appArgs
+            args = [pass i | PreArgument i _ _ <- appArgs]
         xs' <- zipWithM (express' False) callInputTypes xs 
         return
           . ManifoldM m (ManifoldPart (take nContextArgs args) (drop nContextArgs args))
@@ -808,16 +779,20 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         let n = length xs - length vs
         xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
 
-        
-        let xsPassed = zipWith BndVarM (map Serial $ drop n callInputTypes) (map snd appArgs)
+        let args = [i | PreArgument i _ _ <- appArgs]
+            xsPassed = zipWith BndVarM (map Serial $ drop n callInputTypes) args
             xs' = xsLocal <> xsPassed
-            args = map snd appArgs
 
         return
           . ManifoldM m (ManifoldPass (map pass args))
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType) args
-          $ AppM call xs'
+          . AppM
+            ( ForeignInterfaceM (Serial lamOutType) args
+            . ManifoldM m (ManifoldFull (map pass args))
+            . ReturnM
+            $ AppM call xs'
+            )
+          $ [BndVarM (Serial p) i | PreArgument i _ p <- appArgs]
 
 
     ----------------------------------------------------------------------------------------
@@ -836,6 +811,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          return g(lambda z, x: m2(x, y, z))               |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
+        say "case #8"
         -- 1. express all xs under the foreign type if they are in the foreign language or
         --    the parent type (pc) if they are in the parent language
         --
@@ -859,20 +835,24 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         let xs' = map (\(_, _, e) -> e) xsInfo
             -- arguments on the foreign side
             callArgs = Set.toList $ Set.fromList (concatMap (\(rs, _, _) -> rs) xsInfo)
-            allParentArgs = map snd appArgs <> [i | (_, Just (i, _), _) <- xsInfo]
+            args = [i | PreArgument i _ _ <- appArgs]
+            allParentArgs = args <> [i | (_, Just (i, _), _) <- xsInfo]
             lets = [LetM i e | (_, Just (i, e), _) <- xsInfo] 
             -- arguments on the calling side
             passedParentArgs = concat [[r | r <- allParentArgs, r == i] | i <- callArgs]
             -- manifold arguments
             nContextArgs = length appArgs - length vs
-            args = map snd appArgs
 
         return
           . ManifoldM m (ManifoldPart (map pass $ take nContextArgs args) (map pass $ drop nContextArgs args))
           . chain lets
           . ReturnM
-          . ForeignInterfaceM (Serial lamOutType) passedParentArgs
-          $ AppM call xs'
+          . AppM
+              ( ForeignInterfaceM (Serial lamOutType) passedParentArgs
+              . ReturnM
+              $ AppM call xs'
+              )
+          $ [BndVarM (Serial p) i | PreArgument i _ p <- lamArgs]
 
     where
       sameLanguage = langOf pc == langOf callType
@@ -886,7 +866,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express' False _ (SAnno (One (LamS vs body@(SAnno (One (_, (_, bodyArgs))) _), (Idx _ lambdaType, manifoldArguments))) _) = do
     body' <- express' False lambdaType body
     let boundArguments = drop (length bodyArgs - length vs) bodyArgs   -- arguments bound by the lambda
-    return $ LamM (map (pass . snd) manifoldArguments) (map (pass . snd) boundArguments) body'
+    return $ LamM [pass i | PreArgument i _ _ <- manifoldArguments] [pass i | PreArgument i _ _ <- boundArguments] body'
 
   -- Apply arguments to a sourced function
   -- * The CallS object may be in a foreign language. These inter-language
@@ -913,7 +893,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
         say "  leaving case #1"
         return
-            . ManifoldM m (ManifoldFull (map (pass . snd) args))
+            . ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args])
             . ReturnM
             $ AppM f xs'
 
@@ -938,7 +918,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
           xs' <- zipWithM (express' False) inputs xs
           return
             . ForeignInterfaceM (packTypeM (typeP2typeM pc)) [] -- no args are passed, so empty
-            . ManifoldM m (ManifoldFull (map (pass . snd) args))
+            . ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args])
             . ReturnM
             $ AppM f xs'
 
@@ -1013,12 +993,12 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
              . ReturnM
              $ AppM (SrcM (typeP2typeM c) src) callVals
              )
-         $ zipWith (\t i -> BndVarM (Serial t) i) pinputs (map argId lambdaArgs)
+         $ zipWith (BndVarM . Serial) pinputs (map argId lambdaArgs)
 
   -- bound variables
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
     say $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
-    case [r | (v', r) <- rs, v == v'] of
+    case [i | (PreArgument i v' _) <- rs, v == v'] of
       [r] -> return $ BndVarM (Serial c) r
       rs' -> MM.throwError . OtherError . render $ "Expected VarS to match exactly one argument, found:" <+> list (map pretty rs')
 
@@ -1030,7 +1010,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express' _ _ (SAnno (One (e@UniS, (Idx _ c, _))) _) = peak e >> return (NullM (Native c))
 
   -- record access
-  express' isTop pc (SAnno (One ((AccS x k), (Idx _ _, _))) _) = do
+  express' isTop pc (SAnno (One (AccS x k, (Idx _ _, _))) _) = do
     x' <- express' isTop pc x
     return (AccM x' k)
 
@@ -1040,7 +1020,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- mapM (express' False t) xs
     let x = ListM (Native c) xs'
     if isTop
-      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
+      then return $ ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args]) (ReturnM x)
       else return x
   express' _ _ (SAnno (One (LstS _, _)) _) = MM.throwError . CallTheMonkeys $ "LstS can only be AppP type"
 
@@ -1050,7 +1030,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- zipWithM (express' False) ts xs
     let x = TupleM (Native c) xs'
     if isTop
-      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
+      then return $ ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args]) (ReturnM x)
       else return x
 
   -- records
@@ -1059,7 +1039,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- zipWithM (express' False) (map snd rs) (map snd entries)
     let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
-      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
+      then return $ ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args]) (ReturnM x)
       else return x
 
   -- catch all exception case
@@ -1078,20 +1058,19 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   partialExpress
       :: TypeP -- parent type of the manifold (not this expression)
       -> TypeP -- foreign type for this expression
-      -> SAnno Int One (Indexed TypeP, [(EVar, Int)]) -- expression
+      -> SAnno Int One (Indexed TypeP, [PreArgument]) -- expression
       -> MorlocMonad
           ( [Int] -- foreign arguments, should include ids bound by let (next arg)
           , Maybe (Int, ExprM Many) -- parent let statement if not in child language and eval is needed
           , ExprM Many -- final foreign expression
           )
-  partialExpress _ foreignType (SAnno (One (VarS _, (_, [arg]))) _) = do
-    let idx = snd arg
-        x' = BndVarM (Serial foreignType) idx
+  partialExpress _ foreignType (SAnno (One (VarS _, (_, [PreArgument idx _ _]))) _) = do
+    let x' = BndVarM (Serial foreignType) idx
     return ([idx], Nothing, x')
   partialExpress localType foreignType x@(SAnno (One (_, (Idx _ exprType, args))) _)
     | langOf exprType == langOf foreignType = do
         x' <- express' False foreignType x
-        return (map snd args, Nothing, x')
+        return ([i | PreArgument i _ _ <- args], Nothing, x')
     | otherwise = do
         letVal <- express' False localType x
         idx <- MM.getCounter
@@ -1268,6 +1247,7 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
             package m con (typeOfExprM app) e'
 
         f _ _ _ e@(SrcM _ _) = return e
+
         -- only pools and sources can be called
         f _ _ _ (AppM _ _) = undefined
 

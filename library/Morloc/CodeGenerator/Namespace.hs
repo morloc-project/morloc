@@ -15,6 +15,7 @@ module Morloc.CodeGenerator.Namespace
   , TypeM(..)
   , ExprM(..)
   , Argument(..)
+  , PreArgument(..)
   , JsonType(..)
   , PVar(..)
   , TypeP(..)
@@ -168,6 +169,12 @@ data JsonType
   | NamJ Text [(Text, JsonType)]
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
+
+data PreArgument = PreArgument Int EVar TypeP
+    deriving(Show, Eq, Ord)
+
+instance Pretty PreArgument where
+    pretty (PreArgument i v p) = "PreArgument<" <> pretty i <> "," <+> pretty v <> "," <+> pretty p <>">"
 
 -- | An argument that is passed to a manifold
 data Argument
