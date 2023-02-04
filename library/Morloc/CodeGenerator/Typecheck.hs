@@ -445,42 +445,14 @@ checkE i lang g1 (LstS (e:es)) (AppU v [t]) = do
   (g3, t3, LstS es') <- checkE i lang g2 (LstS es) (AppU v [t2])
   return (g3, t3, LstS (map (applyCon g3) (e':es')))
 
-checkE _ _ g1 (LamS [] e1) (FunU [] b1) = do
-  (g2, b2, e2) <- checkG' g1 e1 b1
-  return (g2, FunU [] b2, LamS [] e2)
+checkE _ _ g0 (LamS vs body) (FunU as b) = do
+  let g1 = g0 ++> zipWith AnnG vs as
+  (g2, t2, e2) <- checkG' g1 body b 
 
-checkE _ _ g1 (LamS [] e1) t0 = do
-  (g2, t1, e2) <- checkG' g1 e1 t0
-  return (g2, t1, LamS [] e2)
+  let t3 = apply g2 (FunU as t2)
+      e3 = applyConE g2 (LamS vs e2)
 
-checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
-  -- defined x:A
-  let vardef = AnnG v a1
-      g2 = g1 +> vardef
-
-  -- peal off one layer of bound terms and check
-  (g3, t3, e2) <- checkE' i lang g2 (LamS vs e1) (FunU as1 b1)
-
-  -- construct the final type
-  t4 <- case t3 of
-    (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> error "impossible"
-
-  let t5 = apply g3 t4
-
-  -- construct the final expression
-  e3 <- case e2 of
-    (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> error "impossible"
-
-  -- apply everything we know
-  let e4 = applyConE g3 e3
-
-  -- ignore trailing context `x:A,g3`
-  g4 <- cut' i vardef g3
-
-  return (g4, t5, e4)
-
+  return (g2, t3, e3)
 
 checkE i lang g1 e1 (ForallU v a) = checkE' i lang (g1 +> v) e1 (substitute v a)
 
@@ -501,11 +473,6 @@ subtype' i a b g = do
   case subtype a b g of
     (Left err') -> cerr i err'
     (Right x) -> return x
-
-cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
-cut' i idx g = case cut idx g of
-  (Left terr) -> cerr i terr
-  (Right x) -> return x
 
 -- apply context to a SAnno
 applyCon :: (Functor cf, Functor f, Applicable c)

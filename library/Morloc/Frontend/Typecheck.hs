@@ -259,11 +259,19 @@ synthE i g (TupS (e:es)) = do
 --   Records
 synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
 synthE i g0 (NamS ((k,x):rs)) = do
+  say $ "Entering synthE NamS (k=" <> pretty k <> ")"
+  seeGamma g0
+  say "-------- syn"
   -- type the head
   (g1, headType, headExpr) <- synthG' g0 x
 
   -- type the tail
   (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
+
+  say $ "Exiting synthE NamS (k=" <> pretty k <> ")"
+  say $ "  k type:" <+> pretty headType
+  seeGamma g2
+  say "-------- syn"
 
   -- merge the head with tail
   t <- case tailType of
@@ -443,44 +451,19 @@ checkE i g1 (LstS (e:es)) (AppU v [t]) = do
   (g3, t3, LstS es') <- checkE i g2 (LstS es) (AppU v [t2])
   return (g3, t3, LstS (map (applyGen g3) (e':es')))
 
-checkE _ g1 (LamS [] e1) (FunU [] b1) = do
-  (g2, b2, e2) <- checkG' g1 e1 b1
-  return (g2, FunU [] b2, LamS [] e2)
+checkE i g0 e0@(LamS vs body) t@(FunU as b)
+    | length vs == length as = do
+        let g1 = g0 ++> zipWith AnnG vs as
+        (g2, t2, e2) <- checkG' g1 body b 
 
-checkE i g e@(LamS [] _) t@(FunU ts _) = do
-    (g', e') <- expand (length ts) g e
-    checkE i g' e' t
+        let t3 = apply g2 (FunU as t2)
+            e3 = applyCon g2 (LamS vs e2)
 
-checkE _ g1 (LamS [] e1) t0 = do
-  (g2, t1, e2) <- checkG' g1 e1 t0
-  return (g2, t1, LamS [] e2)
+        return (g2, t3, e3)
 
-checkE i g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
-  -- defined x:A
-  let vardef = AnnG v a1
-      g2 = g1 +> vardef
-
-  -- peal off one layer of bound terms and check
-  (g3, t3, e2) <- checkE' i g2 (LamS vs e1) (FunU as1 b1)
-
-  -- construct the final type
-  t4 <- case t3 of
-    (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> error "impossible"
-
-  let t5 = apply g3 t4
-
-  -- construct the final expression
-  e3 <- case e2 of
-    (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> error "impossible"
-
-  let e4 = applyCon g3 e3
-
-  -- ignore trailing context `x:A,g3`
-  g4 <- cut' i vardef g3
-
-  return (g4, t5, e4)
+    | otherwise = do 
+        (g', e') <- expand (length as - length vs) g0 e0
+        checkE i g' e' t
 
 checkE i g1 e1 (ForallU v a) = checkE' i (g1 +> v) e1 (substitute v a)
 
@@ -499,10 +482,6 @@ subtype' i a b g = do
     (Left err') -> gerr i err'
     (Right x) -> return x
 
-cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
-cut' i idx g = case cut idx g of
-  (Left terr) -> gerr i terr
-  (Right x) -> return x
 
 ---- debugging
 
@@ -548,8 +527,9 @@ synthE' i g x = do
   enter "synthE"
   peak x
   seeGamma g
-  r@(g', t, _) <- synthE i g x 
+  r@(g', t, x') <- synthE i g x 
   leave "synthE"
+  peak x'
   seeGamma g'
   seeType t
   return r
@@ -559,8 +539,9 @@ checkE' i g x t = do
   peak x
   seeType t
   seeGamma g
-  r@(g', t', _) <- checkE i g x t 
+  r@(g', t', x') <- checkE i g x t 
   leave "checkE"
+  peak x'
   seeType t'
   seeGamma g'
   return r

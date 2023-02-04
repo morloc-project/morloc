@@ -320,7 +320,7 @@ instantiate ta tb@(ExistU v [] []) g1
           case lookupU v g1 of
             (Just _) -> return g1
             Nothing -> Left . InstantiationError ta tb . render
-              $ "Error in InstRSolve:" <+> tupled (map pretty (gammaContext g1))
+              $ "Error in InstRSolve with gamma:\n" <> tupled (map pretty (gammaContext g1))
 
 
 --  g1 |- t
