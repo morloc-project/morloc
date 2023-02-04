@@ -400,8 +400,8 @@ instance Pretty (ExprM f) where
           vsFull = map pretty manifoldArgs <> map pretty boundArgs
           vsNames = map (\r -> "x" <> pretty (argId r)) (manifoldArgs <> boundArgs)
       in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
-    f (BndVarM _ i) = ([], "x" <> pretty i)
-    f (LetVarM _ i) = ([], "a" <> pretty i)
+    f (BndVarM t i) = ([], "x" <> pretty i <> tupled [pretty t])
+    f (LetVarM t i) = ([], "a" <> pretty i <> tupled [pretty t])
     f (AccM e k) =
       let (ms, e') = f e
       in (ms, parens e' <> "@" <> pretty k)

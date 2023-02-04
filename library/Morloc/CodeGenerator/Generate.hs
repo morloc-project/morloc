@@ -1000,6 +1000,10 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         let lambdaArgs = equalZipWith NativeArgument ids pinputs
             callVals = zipWith (\t i -> BndVarM (Serial t) i) callInputs ids
 
+        say $ "src:" <+> pretty src
+        say $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
+        say $ "callVals:" <+> list (map pretty callVals)
+
         return
          . ManifoldM m (ManifoldPass lambdaArgs)
          . ReturnM
@@ -1031,9 +1035,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- mapM (express' False t) xs
     let x = ListM (Native c) xs'
     if isTop
-      then do
-        x' <- packExprM m x
-        return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x')
+      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
       else return x
   express' _ _ (SAnno (One (LstS _, _)) _) = MM.throwError . CallTheMonkeys $ "LstS can only be AppP type"
 
@@ -1043,9 +1045,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- zipWithM (express' False) ts xs
     let x = TupleM (Native c) xs'
     if isTop
-      then do
-        x' <- packExprM m x
-        return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x')
+      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
       else return x
 
   -- records
@@ -1054,9 +1054,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     xs' <- zipWithM (express' False) (map snd rs) (map snd entries)
     let x = RecordM (Native c) (zip (map fst entries) xs')
     if isTop
-      then do
-        x' <- packExprM m x
-        return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x')
+      then return $ ManifoldM m (ManifoldFull (map (pass . snd) args)) (ReturnM x)
       else return x
 
   -- catch all exception case
@@ -1191,61 +1189,6 @@ segment e0
 
   segment' _ _ e = return ([], e)
 
--- rehead :: ExprM Many -> MorlocMonad (ExprM Many)
--- rehead (LamM _ _ e) = rehead e
--- rehead (ManifoldM m form (ReturnM e)) = do
---   e' <- packExprM m e
---   return $ ManifoldM m form (ReturnM e)
--- rehead _ = MM.throwError $ CallTheMonkeys "Bad Head"
-
--- Now that the AST is segmented by language, we can resolve serialization.
--- The particulars of (de)serialization also depend on the mutability of the
--- data, which is language (and type) specific. All inputs to the root
--- manifold in the segment are serialized. We could recurse through the segment
--- to see how each variable is used (pool call or source call) and then handle
--- all needed deserialization (apart from lambda arguments) in the root and then pass
--- along native values. But if these values are used multiple times, and if they
--- are mutable, and if we want them to be immutable (as we do by default), then
--- this is not safe. The safest option is to pass everything in serial form and
--- then deserialize at the source call, the latest possible time.
-
--- reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
--- reserialize (ManifoldM m form e) = do
---     (usedArgs, e') <- f ManifoldContext ManifoldContext e
---
---
---     where
---
---     updateArg :: Map.Map Int Argument -> Argument -> Argument
---     updateArg argMap (argId -> i) = case Map.lookup i argMap of
---         (Just r) -> r
---         Nothing -> undefined
---
---     f :: Context -> ExprM Many -> MorlocMonad (Map.Map Int Argument, ExprM Many)
---     f = undefined
-
-    -- f c (ManifoldM m form e) = undefined
-    -- f c (LamM contextArgs lambdaArgs e) = undefined
-    -- f c (PoolCallM t i cmds args) = undefined
-    -- f c (SrcM t src) = undefined
-    -- f c (BndVarM t i) = undefined
-    -- f c (LetM i e1 e2) = undefined
-    -- f c (AppM e es) = undefined
-    -- f c (AccM e k) = undefined
-    -- f c (LetVarM t i) = undefined
-    -- f c (ListM t es) = undefined
-    -- f c (TupleM t es) = undefined
-    -- f c (RecordM t rs) = undefined
-    -- f c (ReturnM e) = undefined
-    -- f c (LogM t x) = undefined
-    -- f c (RealM t x) = undefined
-    -- f c (IntM t x) = undefined
-    -- f c (StrM t x) = undefined
-    -- f c (NullM t) = undefined
-    -- f c (SerializeM h e) = undefined
-    -- f c (DeserializeM h e) = undefined
-    -- f c (ForeignInterfaceM t args e) = undefined
-
 
 data Context = ManifoldContext | SerialContext | NativeContext
     deriving(Eq, Ord, Show)
@@ -1257,6 +1200,7 @@ reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
 reserialize x0@(ManifoldM m0 form0 e0) = do
     say "reserialize"
     say $ pretty x0
+    say $ "typemap:" <+> list (map pretty (Map.toList typemap))
     let form1 = mapManifoldArgs serializeArgs form0
     f m0 ManifoldContext (form2scope form1) (ManifoldM m0 form1 e0)
     where
@@ -1272,17 +1216,33 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         form2scope form = Map.fromList [(argId r, r) | r <- manifoldArgs form]
 
         inheritScope :: Map.Map Int Argument -> Argument -> Argument
-        inheritScope scope arg = fromJust $ Map.lookup (argId arg) scope 
+        inheritScope scope arg = case Map.lookup (argId arg) scope of
+            (Just r) -> r
+            Nothing -> error . MT.unpack . render $ "inheritScope fail:" <+> pretty (Map.toList scope, arg)
+
+        lambdaScope :: Argument -> Argument
+        lambdaScope (argId -> i) = case Map.lookup i typemap of
+            (Just (Just t)) -> NativeArgument i t
+            (Just Nothing) -> PassThroughArgument i
+            _ -> error "Expected lambdas to always be native"
+
+        rescope :: Map.Map Int Argument -> ManifoldForm -> ManifoldForm
+        rescope _ form@(ManifoldPass _) = mapManifoldArgs lambdaScope form
+        rescope scope form@(ManifoldFull _) = mapManifoldArgs (inheritScope scope) form
+        rescope scope (ManifoldPart contextArgs boundArgs) =
+            let contextArgs' = map (inheritScope scope) contextArgs
+                boundArgs' = map lambdaScope boundArgs
+            in ManifoldPart contextArgs' boundArgs'
 
         f :: Int -> Context -> Map.Map Int Argument -> ExprM Many -> MorlocMonad (ExprM Many)
         f _ _ scope (ManifoldM m form e) = do
-            let form' = mapManifoldArgs (inheritScope scope) form
+            let form' = rescope scope form
                 scope' = form2scope form'
             e' <- f m ManifoldContext scope' e
             return $ ManifoldM m form' e'
 
         -- set the (de)serialization contexts of applications
-        f m _ scope (AppM e@(PoolCallM {}) es) = AppM <$> f m SerialContext scope e <*> mapM (f m SerialContext scope) es
+        f m _ scope (AppM e@(PoolCallM {}) es) = AppM <$> f m SerialContext scope e <*> mapM (f m SerialContext scope >=> packExprM m) es
         f _ _ _ (PoolCallM t i cmds args) = return $ PoolCallM t i cmds (map serializeArgs args)
         f m _ scope (AppM e@(SrcM _ _) es) = AppM <$> f m NativeContext scope e <*> mapM (f m NativeContext scope) es
         f _ _ _ e@(SrcM _ _) = return e
@@ -1295,14 +1255,14 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
             (Just (NativeArgument _ _), Just p, _) -> return $ BndVarM (Native p) i
             (Just (SerialArgument _ _), Just p, _) -> return $ BndVarM (Serial p) i
             (_, Nothing, _) -> return $ BndVarM Passthrough i
-            x -> error . MT.unpack . render $ "error in reserialize:" <+> pretty x 
+            x -> error . MT.unpack . render $ "error in reserialize for BndVar" <+> pretty i <> ":" <+> pretty x
 
         f m con scope (LetVarM t i) = case (Map.lookup i scope, typeOfTypeM t, con) of
             (Just (NativeArgument _ _), Just p, SerialContext) -> packExprM m (LetVarM (Native p) i)
             (Just (SerialArgument _ _), Just p, NativeContext) -> unpackExprM m p (LetVarM (Serial p) i)
             (Just (NativeArgument _ _), Just p, _) -> return $ LetVarM (Native p) i
             (Just (SerialArgument _ _), Just p, _) -> return $ LetVarM (Serial p) i
-            x -> error . MT.unpack . render $ "error in reserialize:" <+> pretty x 
+            x -> error . MT.unpack . render $ "error in reserialize LetVar" <+> pretty i <> ":" <+> pretty x
 
         -- Add the newly bound argument to scope
         f m con scope (LetM i e1 e2) = LetM i <$> f m con scope e1 <*> f m con scope' e2
@@ -1316,12 +1276,20 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
 
         -- simple structural recursion cases
         f m con scope (AccM e k) = AccM <$> f m con scope e <*> pure k
-        f m con scope (ListM t es) = ListM t <$> mapM (f m con scope) es
-        f m con scope (TupleM t es) = TupleM t <$> mapM (f m con scope) es
-        f m con scope (RecordM t rs) = do
-            es <- mapM (f m con scope . snd) rs 
+        f m con scope (ListM t@(typeOfTypeM -> Just p) es)
+            = ListM t <$> mapM (f m con scope >=> unpackExprMByType m p) es
+        f m con scope (TupleM t@(typeOfTypeM -> Just (AppP _ ps)) es)
+            = TupleM t <$> zipWithM (\p e -> f m con scope e >>= unpackExprMByType m p) ps es
+        f m con scope (RecordM t@(typeOfTypeM -> Just (NamP _ _ _ rps)) rs) = do
+            es <- zipWithM (\p e -> f m con scope e >>= unpackExprMByType m p) (map snd rps) (map snd rs)
             return $ RecordM t (zip (map fst rs) es)
-        f m con scope (ReturnM e) = f m con scope e
+        f m con scope (ReturnM e)
+            -- always serialize the segment return value
+            | m == m0 = do
+                e' <- f m con scope e >>= packExprM m
+                return $ ReturnM e' 
+            -- otherwise leave as is?
+            | otherwise = ReturnM <$> f m con scope e
 
         -- currently all use cases are merged into partial manifolds
         f _ _ _ (LamM {}) = undefined
@@ -1335,13 +1303,12 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
 
         -- primitives
         f _ _ _ e = return e
-
 reserialize _ = undefined
 
 argumentType :: Map.Map Int (Maybe TypeP) -> ExprM Many -> Map.Map Int (Maybe TypeP)
 argumentType typemap (ManifoldM _ _ e) = argumentType typemap e
 argumentType typemap (LamM _ _ e) = argumentType typemap e
-argumentType typemap (AppM _ es) = foldl argumentType typemap es 
+argumentType typemap (AppM e es) = foldl argumentType typemap (e:es) 
 argumentType typemap (BndVarM t i) = Map.insert i (typeOfTypeM t) typemap 
 argumentType typemap (AccM e _) = argumentType typemap e
 argumentType typemap (LetVarM t i) = Map.insert i (typeOfTypeM t) typemap
@@ -1351,119 +1318,7 @@ argumentType typemap (RecordM _ rs) = foldl argumentType typemap (map snd rs)
 argumentType typemap (ReturnM e) = argumentType typemap e
 argumentType typemap (SerializeM _ e) = argumentType typemap e
 argumentType typemap (DeserializeM _ e) = argumentType typemap e
-argumentType _ _ = Map.empty
-
--- data ArgumentUsage = ArgumentUsage
---   { argumentNumberOfForeignCalls :: Int
---   , argumentNumberOfLocalCalls :: Int
---   , argumentType :: Maybe TypeP
---   }
---
--- insertArgumentUsage :: Map.Map Int ArgumentUsage -> Int -> Map.Map Int ArgumentUsage
--- insertArgumentUsage m i =
---     let v = ArgumentUsage {
---           argumentNumberOfForeignCalls = 0
---         , argumentNumberOfLocalCalls = 0
---         , argumentType = Nothing
---         }
---     in Map.insert i v m
---
--- argumentUsage :: Map.Map Int ArgumentUsage -> ExprM Many -> Map.Map Int ArgumentUsage
--- argumentUsage usage (ManifoldM _ form e) =
---     let usage' = foldl insertArgumentUsage usage (map argId $ manifoldArgs form)
---     in argumentUsage usage' e
--- argumentUsage usage (LamM _ lambdaArgs e) =
---     let usage' = foldl insertArgumentUsage usage (map argId lambdaArgs)
---     in argumentUsage usage' e
--- argumentUsage usage (AppM (SrcM _ _) es) =
---     let args = [i | BndVarM _ i <- es]
---         usage' = foldl argumentUsage usage es
---     in Map.mapWithKey (\i au -> if i `elem` args then au {argumentNumberOfLocalCalls = 1 + argumentNumberOfLocalCalls au} else au) usage'
--- argumentUsage usage (AppM (PoolCallM _ _ _ _) es) =
---     let args = [i | BndVarM _ i <- es]
---         usage' = foldl argumentUsage usage es
---     in Map.mapWithKey (\i au -> if i `elem` args then au {argumentNumberOfForeignCalls = 1 + argumentNumberOfForeignCalls au} else au) usage'
--- -- If it is a passthrough type, then do nothing, since that is default and will
--- -- be over-ridden from any typed usages
--- argumentUsage usage (BndVarM Passthrough _) = usage
--- argumentUsage usage (BndVarM t i) = Map.update (\u -> Just $ u {argumentType = typeOfTypeM t}) i usage
--- argumentUsage usage (LetM i e1 e2) =
---     let withLetArg = insertArgumentUsage usage i
---         withLetVal  = argumentUsage withLetArg e1
---     in argumentUsage withLetVal e2
--- argumentUsage usage (AccM e _) = argumentUsage usage e
--- argumentUsage usage (LetVarM t i) = argumentUsage usage (BndVarM t i)
--- argumentUsage usage (ListM _ es) =
---     let vars = [i | BndVarM _ i <- es]
---         usage' = foldl argumentUsage usage es
---     in Map.mapWithKey (\i au -> if i `elem` vars then au {argumentNumberOfLocalCalls = 1 + argumentNumberOfLocalCalls au} else au) usage'
--- argumentUsage usage (TupleM _ es) =
---     let vars = [i | BndVarM _ i <- es]
---         usage' = foldl argumentUsage usage es
---     in Map.mapWithKey (\i au -> if i `elem` vars then au {argumentNumberOfLocalCalls = 1 + argumentNumberOfLocalCalls au} else au) usage'
--- argumentUsage usage (RecordM _ rs) =
---     let es = map snd rs
---         vars = [i | BndVarM _ i <- es]
---         usage' = foldl argumentUsage usage es
---     in Map.mapWithKey (\i au -> if i `elem` vars then au {argumentNumberOfLocalCalls = 1 + argumentNumberOfLocalCalls au} else au) usage'
--- argumentUsage usage (ReturnM e) = argumentUsage usage e
--- argumentUsage _ (SerializeM _ _) = error "found SerializeM in argumentUsage"
--- argumentUsage _ (DeserializeM _ _) = error "found DeserializeM in argumentUsage"
--- argumentUsage _ (ForeignInterfaceM _ _ _) = error "found ForeignInterfaceM in argumentUsage"
--- argumentUsage usage _ = usage
-
-
--- reserialize e0 = snd (substituteBndArgs e0) where
---   substituteBndArgs :: ExprM Many -> ([(Int, TypeM)], ExprM Many)
---   substituteBndArgs (ForeignInterfaceM i (unzip -> (largs, fargs)) e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, ForeignInterfaceM i (zip (map (sub vs) largs) (map (sub vs) fargs)) (snd $ substituteBndArgs e'))
---   substituteBndArgs (ManifoldM m form e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, ManifoldM m (mapManifoldArgs (sub vs) form) e')
---   substituteBndArgs (AppM e es) =
---     let (vs, e') = substituteBndArgs e
---         (vss, es') = unzip $ map substituteBndArgs es
---     in (vs ++ concat vss, AppM e' es')
---   substituteBndArgs (LamM manifoldArgs boundArgs e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, LamM (map (sub vs) manifoldArgs) (map (sub vs) boundArgs) e')
---   substituteBndArgs (LetM i e1 e2) =
---     let (vs1, e1') = substituteBndArgs e1
---         (vs2, e2') = substituteBndArgs e2
---     in (vs1 ++ vs2, LetM i e1' e2')
---   substituteBndArgs (AccM e k) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, AccM e' k)
---   substituteBndArgs (ListM t es) =
---     let (vss, es') = unzip $ map substituteBndArgs es
---     in (concat vss, ListM t es')
---   substituteBndArgs (TupleM t es) =
---     let (vss, es') = unzip $ map substituteBndArgs es
---     in (concat vss, TupleM t es')
---   substituteBndArgs (RecordM t entries) =
---     let (vss, es') = unzip $ map (substituteBndArgs . snd) entries
---     in (concat vss, RecordM t (zip (map fst entries) es'))
---   substituteBndArgs (SerializeM s e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, SerializeM s e')
---   substituteBndArgs (DeserializeM s e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, DeserializeM s e')
---   substituteBndArgs (ReturnM e) =
---     let (vs, e') = substituteBndArgs e
---     in (vs, ReturnM e')
---   substituteBndArgs e@(BndVarM t i) = ([(i, t)], e)
---   substituteBndArgs e = ([], e)
---
---   sub :: [(Int, TypeM)] -> Argument -> Argument
---   sub bnds r@(PassThroughArgument i) = case [t | (i', t) <- bnds, i == i'] of
---     ((Serial t):_) -> SerialArgument i t
---     ((Native t):_) -> NativeArgument i t
---     ((Function _ _):_) -> error "You don't need to pass functions as manifold arguments"
---     (Passthrough : _) -> error "What about 'Passthrough' do you not understand?"
---     _ -> r
---   sub _ r = r
+argumentType typemap _ = typemap
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
