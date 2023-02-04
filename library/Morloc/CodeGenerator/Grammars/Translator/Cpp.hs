@@ -56,7 +56,11 @@ type RecMap = [((PVar, [PVar]), RecEntry)]
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
-preprocess = invertExprM
+preprocess e = do
+    say "inverting"
+    e' <- invertExprM e
+    say $ "e' = " <> pretty e'
+    return e'
 
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do

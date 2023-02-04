@@ -109,15 +109,15 @@ serialize v0 s0 = do
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} <- list#{tupled ss'}|]
-      return (concat befores ++ [x], v');
+      return (concat befores ++ [x], v')
 
     construct v (SerialObject _ _ _ rs) = do
       (befores, ss') <- mapAndUnzipM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
-          decl = [idoc|#{v'} <- list#{tupled entries};|]
-      return (concat befores ++ [decl], v');
+          decl = [idoc|#{v'} <- list#{tupled entries}|]
+      return (concat befores ++ [decl], v')
 
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
@@ -128,14 +128,14 @@ deserialize v0 s0
   | isSerializable s0 = do
       t <- serialAstToType s0
       schema <- typeSchema t
-      let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+      let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
       schema <- typeSchema t
       let rawvar = "s" <> idx
-          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -164,8 +164,8 @@ deserialize v0 s0
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
-          x = [idoc|#{v'} <- list#{tupled ss'};|]
-      return (v', concat befores ++ [x]);
+          x = [idoc|#{v'} <- list#{tupled ss'}|]
+      return (v', concat befores ++ [x])
 
     construct v (SerialObject _ (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty MM.getCounter
@@ -173,8 +173,8 @@ deserialize v0 s0
       (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
-          decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries};|]
-      return (v', concat befores ++ [decl]);
+          decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
+      return (v', concat befores ++ [decl])
 
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
@@ -349,7 +349,7 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
         tryCatch(
           do.call(f, args),
           error = function(e) {
-            fails <<- e$message;
+            fails <<- e$message
             isOK <<- FALSE
           }
         ),

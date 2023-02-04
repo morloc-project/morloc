@@ -249,27 +249,6 @@ translateManifold m0@(ManifoldM _ form0 _) = do
         , poolPriorExprs = priorExprs
         }
 
-    -- (PoolDocs completeManifolds body priorLines priorExprs) <- f args e
-    -- let mname = manNamer i
-    --     def = "def" <+> mname <> tupled (map argName args) <> ":"
-    --     newManifold = nest 4 (vsep $ def:priorLines <> [body])
-    --     call = case splitArgs args pargs of
-    --       -- rs: args in pargs
-    --       -- vs: args not in pargs
-    --       ************ base case
-    --       (rs, []) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
-    --       ************ when wrapped in LamM with 0 bound args
-    --       ([], _ ) -> mname
-    --       ************ when wrapped in LamM with more than 0 bound args
-    --       (rs, vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
-    -- return $ PoolDocs
-    --     { poolCompleteManifolds = newManifold : completeManifolds
-    --     , poolExpr = call
-    --     , poolPriorLines = []
-    --     , poolPriorExprs = priorExprs
-    --     }
-
-
   f _ (PoolCallM _ _ cmds args) = do
     let call = "_morloc_foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return $ PoolDocs [] call [] [] 

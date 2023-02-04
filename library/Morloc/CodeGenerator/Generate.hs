@@ -869,8 +869,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
         return
           . ManifoldM m (ManifoldPart (map pass $ take nContextArgs args) (map pass $ drop nContextArgs args))
-          . ReturnM
           . chain lets
+          . ReturnM
           . ForeignInterfaceM (Serial lamOutType) passedParentArgs
           $ AppM call xs'
 
@@ -1007,8 +1007,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
         return
          . ManifoldM m (ManifoldPass lambdaArgs)
          . ReturnM
-         . ForeignInterfaceM (Serial pout) (map argId lambdaArgs)
-         $ AppM (SrcM (typeP2typeM c) src) callVals
+         . AppM
+             ( ForeignInterfaceM (Serial pout) (map argId lambdaArgs)
+             . ManifoldM m (ManifoldFull lambdaArgs)
+             . ReturnM
+             $ AppM (SrcM (typeP2typeM c) src) callVals
+             )
+         $ zipWith (\t i -> BndVarM (Serial t) i) pinputs (map argId lambdaArgs)
 
   -- bound variables
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
@@ -1121,6 +1126,7 @@ segment e0
 
   -- This is where segmentation happens, every other match is just traversal
   segment' _ args (ForeignInterfaceM t _ e@(ManifoldM m form _)) = do
+    say $ "segmenting foreign interface" <+> pretty m
     (ms, e') <- segment' m (map argId $ manifoldArgs form) e
     config <- MM.ask
     case MC.buildPoolCallBase config (langOf e') m of
@@ -1128,8 +1134,9 @@ segment e0
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
   segment' m _ (ForeignInterfaceM t args e) = do
+    say $ "segmenting foreign interface for expression:" <+> pretty e
     (ms, e') <- segment' m args e
-    -- create the foriegn manifold, make sure all arugments are packed
+    -- create the foreign manifold, make sure all arugments are packed
     let foreignManifold = ManifoldM m (ManifoldFull (map PassThroughArgument args)) (ReturnM e')
         -- pack the arguments that will be passed to the foreign manifold
         es' = map (BndVarM Passthrough) args
@@ -1190,10 +1197,10 @@ segment e0
   segment' _ _ e = return ([], e)
 
 
-data Context = ManifoldContext | SerialContext | NativeContext
+data Request = SerialContent | NativeContent
     deriving(Eq, Ord, Show)
 
-instance Pretty Context where
+instance Pretty Request where
     pretty = viaShow
 
 reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
@@ -1202,7 +1209,7 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
     say $ pretty x0
     say $ "typemap:" <+> list (map pretty (Map.toList typemap))
     let form1 = mapManifoldArgs serializeArgs form0
-    f m0 ManifoldContext (form2scope form1) (ManifoldM m0 form1 e0)
+    f m0 SerialContent (form2scope form1) (ManifoldM m0 form1 e0)
     where
         typemap = argumentType Map.empty x0
 
@@ -1234,32 +1241,47 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
                 boundArgs' = map lambdaScope boundArgs
             in ManifoldPart contextArgs' boundArgs'
 
-        f :: Int -> Context -> Map.Map Int Argument -> ExprM Many -> MorlocMonad (ExprM Many)
-        f _ _ scope (ManifoldM m form e) = do
+        package :: Int -> Request -> TypeM -> ExprM Many -> MorlocMonad (ExprM Many)
+        package m r t e = case (r, typeOfTypeM t) of
+            (SerialContent, Nothing) -> return e
+            (NativeContent, Nothing) -> error "Cannot deserialize passthrough type"
+            (SerialContent, _) -> packExprM m e
+            (NativeContent, Just p) -> unpackExprMByType m p e
+
+        f :: Int -> Request -> Map.Map Int Argument -> ExprM Many -> MorlocMonad (ExprM Many)
+
+        f _ con scope (ManifoldM m form e) = do
             let form' = rescope scope form
                 scope' = form2scope form'
-            e' <- f m ManifoldContext scope' e
+            e' <- f m con scope' e
             return $ ManifoldM m form' e'
 
         -- set the (de)serialization contexts of applications
-        f m _ scope (AppM e@(PoolCallM {}) es) = AppM <$> f m SerialContext scope e <*> mapM (f m SerialContext scope >=> packExprM m) es
+        f m con scope (AppM e@(PoolCallM t _ _ _) es) = do
+            e' <- AppM <$> f m SerialContent scope e <*> mapM (f m SerialContent scope) es
+            package m con t e'
+
         f _ _ _ (PoolCallM t i cmds args) = return $ PoolCallM t i cmds (map serializeArgs args)
-        f m _ scope (AppM e@(SrcM _ _) es) = AppM <$> f m NativeContext scope e <*> mapM (f m NativeContext scope) es
+
+        f m con scope app@(AppM e@(SrcM _ _) es) = do
+            e' <- AppM <$> f m NativeContent scope e <*> mapM (f m NativeContent scope) es
+            package m con (typeOfExprM app) e'
+
         f _ _ _ e@(SrcM _ _) = return e
         -- only pools and sources can be called
         f _ _ _ (AppM _ _) = undefined
 
         f m con scope (BndVarM t i) = case (Map.lookup i scope, typeOfTypeM t, con) of
-            (Just (NativeArgument _ _), Just p, SerialContext) -> packExprM m (BndVarM (Native p) i)
-            (Just (SerialArgument _ _), Just p, NativeContext) -> unpackExprM m p (BndVarM (Serial p) i)
+            (Just (NativeArgument _ _), Just p, SerialContent) -> packExprM m (BndVarM (Native p) i)
+            (Just (SerialArgument _ _), Just p, NativeContent) -> unpackExprM m p (BndVarM (Serial p) i)
             (Just (NativeArgument _ _), Just p, _) -> return $ BndVarM (Native p) i
             (Just (SerialArgument _ _), Just p, _) -> return $ BndVarM (Serial p) i
             (_, Nothing, _) -> return $ BndVarM Passthrough i
             x -> error . MT.unpack . render $ "error in reserialize for BndVar" <+> pretty i <> ":" <+> pretty x
 
         f m con scope (LetVarM t i) = case (Map.lookup i scope, typeOfTypeM t, con) of
-            (Just (NativeArgument _ _), Just p, SerialContext) -> packExprM m (LetVarM (Native p) i)
-            (Just (SerialArgument _ _), Just p, NativeContext) -> unpackExprM m p (LetVarM (Serial p) i)
+            (Just (NativeArgument _ _), Just p, SerialContent) -> packExprM m (LetVarM (Native p) i)
+            (Just (SerialArgument _ _), Just p, NativeContent) -> unpackExprM m p (LetVarM (Serial p) i)
             (Just (NativeArgument _ _), Just p, _) -> return $ LetVarM (Native p) i
             (Just (SerialArgument _ _), Just p, _) -> return $ LetVarM (Serial p) i
             x -> error . MT.unpack . render $ "error in reserialize LetVar" <+> pretty i <> ":" <+> pretty x
@@ -1276,20 +1298,16 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
 
         -- simple structural recursion cases
         f m con scope (AccM e k) = AccM <$> f m con scope e <*> pure k
-        f m con scope (ListM t@(typeOfTypeM -> Just p) es)
-            = ListM t <$> mapM (f m con scope >=> unpackExprMByType m p) es
-        f m con scope (TupleM t@(typeOfTypeM -> Just (AppP _ ps)) es)
-            = TupleM t <$> zipWithM (\p e -> f m con scope e >>= unpackExprMByType m p) ps es
-        f m con scope (RecordM t@(typeOfTypeM -> Just (NamP _ _ _ rps)) rs) = do
-            es <- zipWithM (\p e -> f m con scope e >>= unpackExprMByType m p) (map snd rps) (map snd rs)
-            return $ RecordM t (zip (map fst rs) es)
-        f m con scope (ReturnM e)
-            -- always serialize the segment return value
-            | m == m0 = do
-                e' <- f m con scope e >>= packExprM m
-                return $ ReturnM e' 
-            -- otherwise leave as is?
-            | otherwise = ReturnM <$> f m con scope e
+        f m con scope (ListM t es) = do
+            e' <- ListM t <$> mapM (f m NativeContent scope) es
+            package m con t e'
+        f m con scope (TupleM t es) = do
+            e' <- TupleM t <$> mapM (f m NativeContent scope) es
+            package m con t e'
+        f m con scope (RecordM t rs) = do
+            es <- mapM (f m NativeContent scope . snd) rs
+            package m con t $ RecordM t (zip (map fst rs) es)
+        f m con scope (ReturnM e) = ReturnM <$> f m con scope e
 
         -- currently all use cases are merged into partial manifolds
         f _ _ _ (LamM {}) = undefined
