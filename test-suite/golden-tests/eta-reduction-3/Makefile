@@ -1,6 +1,6 @@
 all:
 	rm -f obs.txt
-	morloc make main.loc
+	morloc make -v main.loc > log
 	./nexus.pl foo0 2 > obs.txt
 	./nexus.pl foo1 2 >> obs.txt
 	./nexus.pl foo2 2 >> obs.txt

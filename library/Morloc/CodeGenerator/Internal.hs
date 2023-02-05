@@ -62,7 +62,10 @@ w lang Nothing (NamT o (TV _ n) ps rs)
 w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 
 
-weaveResolvedTypes :: Type -> Type -> MorlocMonad TypeP
+weaveResolvedTypes
+    :: Type -- ^ general type (optional)
+    -> Type -- ^ concrete type (required)
+    -> MorlocMonad TypeP
 weaveResolvedTypes g0 t0 = do
   case (langOf g0, langOf t0) of
     (_, Nothing) -> MM.throwError . CallTheMonkeys . render

@@ -20,6 +20,7 @@ import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstTo
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
+import Morloc.CodeGenerator.Typecheck (say)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML
@@ -108,15 +109,15 @@ serialize v0 s0 = do
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           x = [idoc|#{v'} <- list#{tupled ss'}|]
-      return (concat befores ++ [x], v');
+      return (concat befores ++ [x], v')
 
     construct v (SerialObject _ _ _ rs) = do
       (befores, ss') <- mapAndUnzipM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
-          decl = [idoc|#{v'} <- list#{tupled entries};|]
-      return (concat befores ++ [decl], v');
+          decl = [idoc|#{v'} <- list#{tupled entries}|]
+      return (concat befores ++ [decl], v')
 
     construct _ s = MM.throwError . SerializationError . render
       $ "construct: " <> prettySerialOne s
@@ -127,14 +128,14 @@ deserialize v0 s0
   | isSerializable s0 = do
       t <- serialAstToType s0
       schema <- typeSchema t
-      let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+      let deserializing = [idoc|rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       return (deserializing, [])
   | otherwise = do
       idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
       schema <- typeSchema t
       let rawvar = "s" <> idx
-          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema});|]
+          deserializing = [idoc|#{rawvar} <- rmorlocinternals::mlc_deserialize(#{v0}, #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
@@ -163,8 +164,8 @@ deserialize v0 s0
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [1..] ss
       idx <- fmap pretty MM.getCounter
       let v' = "s" <> idx
-          x = [idoc|#{v'} <- list#{tupled ss'};|]
-      return (v', concat befores ++ [x]);
+          x = [idoc|#{v'} <- list#{tupled ss'}|]
+      return (v', concat befores ++ [x])
 
     construct v (SerialObject _ (PV _ _ constructor) _ rs) = do
       idx <- fmap pretty MM.getCounter
@@ -172,124 +173,144 @@ deserialize v0 s0
       (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
       let v' = "s" <> idx
           entries = zipWith (\(PV _ _ key) val -> pretty key <> "=" <> val) (map fst rs) ss'
-          decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries};|]
-      return (v', concat befores ++ [decl]);
+          decl = [idoc|#{v'} <- #{pretty constructor}#{tupled entries}|]
+      return (v', concat befores ++ [decl])
 
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
 
-
 -- break a call tree into manifolds
 translateManifold :: ExprM One -> MorlocMonad MDoc
-translateManifold m0@(ManifoldM _ args0 _) = do
+translateManifold m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  vsep . punctuate line . (\(x,_,_)->x) <$> f args0 m0
+  e <- f (manifoldArgs form0) m0
+  return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
-
-  f :: [Argument] -> ExprM One -> MorlocMonad ([MDoc], MDoc, [MDoc])
-  f pargs m@(ManifoldM i args e) = do
-    (ms', body, rs') <- f args e
-    let decl = manNamer i <+> "<- function" <> tupled (map makeArgument args)
-        mdoc = block 4 decl (vsep $ rs' ++ [body])
+  f :: [Argument]
+    -> ExprM One
+    -> MorlocMonad PoolDocs
+  f _ (ManifoldM i form e) = do
+    let args = manifoldArgs form
+    (PoolDocs completeManifolds body priorLines priorExprs) <- f args e
+    let decl = manNamer i <+> "<- function" <> tupled (map argName args)
+        newManifold = block 4 decl (vsep $ priorLines ++ [body])
         mname = manNamer i
-    -- TODO: handle partials BEFORE translation
-    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-      ((rs, []), _) -> mname <> tupled (map makeArgument rs) -- covers #1, #2 and #4
-      (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map makeArgument (rs ++ vs))) -- covers #5
-    return (mdoc : ms', call, [])
+        call = case form of
+          (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+          (ManifoldPass _) -> mname
+          (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+    return $ PoolDocs
+        { poolCompleteManifolds = newManifold : completeManifolds
+        , poolExpr = call
+        , poolPriorLines = []
+        , poolPriorExprs = priorExprs
+        }
 
   f _ (PoolCallM _ _ cmds args) = do
     let quotedCmds = map dquotes cmds
-        callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map makeArgument args)) <> ")"
+        callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ map argName args)) <> ")"
         call = ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
-    return ([], call, [])
+    return $ PoolDocs [] call [] []
 
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i e1 e2) = do
-    (ms1', e1', rs1) <- f args e1
-    (ms2', e2', rs2) <- f args e2
+    (PoolDocs ms1' e1' rs1 pes1) <- f args e1
+    (PoolDocs ms2' e2' rs2 pes2) <- f args e2
     let rs = rs1 ++ [ letNamer i <+> "<-" <+> e1' ] ++ rs2
-    return (ms1' ++ ms2', e2', rs)
+    return $ PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
-  f args (AppM (SrcM _ src) xs) = do
-    (mss', xs', rss') <- mapM (f args) xs |>> unzip3
-    return (concat mss', pretty (srcName src) <> tupled xs', concat rss')
 
-  f _ (AppM _ _) = error "Can only apply functions"
+  f args (AppM (SrcM _ src) xs)
+    = mergePoolDocs (\xs' -> pretty (srcName src) <> tupled xs')
+    <$> mapM (f args) xs
 
-  f _ (SrcM _ src) = return ([], pretty (srcName src), [])
+  f args (AppM (PoolCallM _ _ cmds _) xs) = mapM (f args) xs |>> mergePoolDocs makePoolCall where
+    makePoolCall xs' =
+        let quotedCmds = map dquotes cmds
+            callArgs = "list(" <> hsep (punctuate "," (drop 1 quotedCmds ++ xs')) <> ")"
+        in ".morloc_foreign_call" <> tupled [head quotedCmds, callArgs, dquotes "_", dquotes "_"]
 
-  -- this should not happen
-  f args (LamM lambdaArgs e) = do
-    (ms', e', rs) <- f args e
-    let vs = map (bndNamer . argId) lambdaArgs
-    return (ms', "LAMBDA" <> tupled vs <> "{" <+> e' <> "}", rs)
+  f _ (AppM f _) = error . MT.unpack . render $ "Can only apply functions, found:" <+> pretty f
 
-  f _ (BndVarM _ i) = return ([], bndNamer i, [])
+  f _ (SrcM _ src) = return (PoolDocs [] (pretty (srcName src)) [] [])
 
-  f _ (LetVarM _ i) = return ([], letNamer i, [])
+  f _ (LamM manifoldArgs boundArgs body) = do
+    p <- f (manifoldArgs <> boundArgs) body 
+    return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
+  -- f args (LamM lambdaArgs body) = do
+  --   p <- f args body
+  --   i <- MM.getCounter
+  --   let vs = map (bndNamer . argId) lambdaArgs
+  --       lambdaName = "mlc_lam_" <> pretty i
+  --       decl = lambdaName <+> "<- function" <> tupled vs
+  --       lambdaDef = block 4 decl (vsep $ poolPriorLines p <> [poolExpr p])
+  --       call = lambdaName
+  --   return $ p
+  --       { poolExpr = call
+  --       , poolPriorLines = []
+  --       , poolPriorExprs = [lambdaDef]
+  --       }
+
+  f _ (BndVarM _ i) = return $ PoolDocs [] (bndNamer i) [] []
+
+  f _ (LetVarM _ i) = return $ PoolDocs [] (letNamer i) [] []
 
   f args (AccM e k) = do
-    (ms, e', ps) <- f args e
-    return (ms, e' <> "$" <> pretty k, ps)
+    p <- f args e
+    return $ p {poolExpr = poolExpr p <> "$" <> pretty k}
 
-  f args (ListM t es) = do
-    (mss', es', rss) <- mapM (f args) es |>> unzip3
-    x' <- return $ case t of
-      (Native (AppP _ [VarP et])) -> case et of
-        (PV _ _ "numeric") -> "c" <> tupled es'
-        (PV _ _ "logical") -> "c" <> tupled es'
-        (PV _ _ "character") -> "c" <> tupled es'
-        _ -> "list" <> tupled es'
-      _ -> "list" <> tupled es'
-    return (concat mss', x', concat rss)
+  f args (ListM t es) = mapM (f args) es |>> mergePoolDocs rList
+    where
+        rList es' = case t of
+          (Native (AppP _ [VarP et])) -> case et of
+            (PV _ _ "numeric") -> "c" <> tupled es'
+            (PV _ _ "logical") -> "c" <> tupled es'
+            (PV _ _ "character") -> "c" <> tupled es'
+            _ -> "list" <> tupled es'
+          _ -> "list" <> tupled es'
 
-  f args (TupleM _ es) = do
-    (mss', es', rss) <- mapM (f args) es |>> unzip3
-    return (concat mss', "list" <> tupled es', concat rss)
+  f args (TupleM _ es) = mapM (f args) es |>> mergePoolDocs (\es' -> "list" <> tupled es')
 
-  f args (RecordM _ entries) = do
-    (mss', es', rss) <- mapM (f args . snd) entries |>> unzip3
-    let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-    return (concat mss', "list" <> tupled entries', concat rss)
+  f args (RecordM _ entries) = mapM (f args . snd) entries |>> mergePoolDocs rNamedList
+    where
+        rNamedList es' =
+            let entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
+            in "list" <> tupled entries'
 
-  f _ (LogM _ x) = return ([], if x then "TRUE" else "FALSE", [])
+  f _ (LogM _ x) = return $ PoolDocs [] (if x then "TRUE" else "FALSE") [] []
 
-  f _ (RealM _ x) = return ([], viaShow x, [])
+  f _ (RealM _ x) = return $ PoolDocs [] (viaShow x) [] []
 
-  f _ (IntM _ x) = return ([], viaShow x, [])
+  f _ (IntM _ x) = return $ PoolDocs [] (viaShow x) [] []
 
-  f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
+  f _ (StrM _ x) = return $ PoolDocs [] (dquotes $ pretty x) [] []
 
-  f _ (NullM _) = return ([], "NULL", [])
+  f _ (NullM _) = return $ PoolDocs [] "NULL" [] []
 
   f args (SerializeM s e) = do
-    (ms, e', rs1) <- f args e
-    (serialized, rs2) <- serialize e' s
-    return (ms, serialized, rs1 ++ rs2)
+    p <- f args e
+    (serialized, assignments) <- serialize (poolExpr p) s
+    return $ p {poolExpr = serialized, poolPriorLines = poolPriorLines p <> assignments}
 
   f args (DeserializeM s e) = do
-    (ms, e', rs1) <- f args e
-    (deserialized, rs2) <- deserialize e' s
-    return (ms, deserialized, rs1 ++ rs2)
+    p <- f args e
+    (deserialized, assignments) <- deserialize (poolExpr p) s
+    return $ p {poolExpr = deserialized, poolPriorLines = poolPriorLines p <> assignments}
 
-  f args (ReturnM e) = do
-    (ms, e', rs) <- f args e
-    return (ms, e', rs)
+  f args (ReturnM e) = f args e
 translateManifold _ = error "Every ExprM object must start with a Manifold term"
 
 makeLambda :: [Argument] -> MDoc -> MDoc
-makeLambda args body = "function" <+> tupled (map makeArgument args) <> "{" <> body <> "}"
+makeLambda args body = "function" <+> tupled (map argName args) <> "{" <> body <> "}"
 
-makeArgument :: Argument -> MDoc
-makeArgument (SerialArgument v _) = bndNamer v
-makeArgument (NativeArgument v _) = bndNamer v
-makeArgument (PassThroughArgument v) = bndNamer v
+argName :: Argument -> MDoc
+argName (SerialArgument v _) = bndNamer v
+argName (NativeArgument v _) = bndNamer v
+argName (PassThroughArgument v) = bndNamer v
 
 -- For R, the type schema is the JSON representation of the type
 typeSchema :: TypeP -> MorlocMonad MDoc
@@ -328,7 +349,7 @@ makePool sources manifolds = [idoc|#!/usr/bin/env Rscript
         tryCatch(
           do.call(f, args),
           error = function(e) {
-            fails <<- e$message;
+            fails <<- e$message
             isOK <<- FALSE
           }
         ),

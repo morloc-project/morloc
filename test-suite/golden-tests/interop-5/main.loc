@@ -1,0 +1,7 @@
+import pybase (add)
+import rbase (map)
+
+foo R :: ["numeric"] -> ["numeric"]
+foo xs = map (\x -> add 1.0 x) xs
+
+export foo

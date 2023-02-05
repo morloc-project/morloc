@@ -60,7 +60,10 @@ typecheck e0 = do
   seeGamma g2
   say $ pretty t
   say "---------------^-----------------"
-  weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  say "--- weaving ---"
+  w <- weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  say "--- weaving done ---"
+  return w
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.
@@ -123,7 +126,11 @@ weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
+  say $ pretty i
+  say $ " ct: " <+> pretty ct
+  say $ " gt: " <+> pretty gt
   pt <- weaveResolvedTypes gt (typeOf ct)
+  say $ " pt: " <+> pretty pt
   x1 <- case x0 of
     UniS -> return UniS
     (VarS v) -> return $ VarS v
@@ -166,8 +173,11 @@ synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ _)) = do
   return (g1, t, SAnno (One (x', Idx i t)) m)
 
 -- AnnoMany=>
-synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m)
-  = checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
+synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m) = do
+  say $ "Checking against annotation:" <+> pretty t
+  say $ "ts:" <+> vsep (map pretty ts)
+  say $ " -- that's all "
+  checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
 
 
 
@@ -435,38 +445,14 @@ checkE i lang g1 (LstS (e:es)) (AppU v [t]) = do
   (g3, t3, LstS es') <- checkE i lang g2 (LstS es) (AppU v [t2])
   return (g3, t3, LstS (map (applyCon g3) (e':es')))
 
-checkE _ _ g1 (LamS [] e1) (FunU [] b1) = do
-  (g2, b2, e2) <- checkG' g1 e1 b1
-  return (g2, FunU [] b2, LamS [] e2)
+checkE _ _ g0 (LamS vs body) (FunU as b) = do
+  let g1 = g0 ++> zipWith AnnG vs as
+  (g2, t2, e2) <- checkG' g1 body b 
 
-checkE _ _ g1 (LamS [] e1) t0 = do
-  (g2, t1, e2) <- checkG' g1 e1 t0
-  return (g2, t1, LamS [] e2)
+  let t3 = apply g2 (FunU as t2)
+      e3 = applyConE g2 (LamS vs e2)
 
-checkE i lang g1 (LamS (v:vs) e1) (FunU (a1:as1) b1) = do
-  -- defined x:A
-  let vardef = AnnG v a1
-      g2 = g1 +> vardef
-
-  -- peal off one layer of bound terms and check
-  (g3, t3, e2) <- checkE' i lang g2 (LamS vs e1) (FunU as1 b1)
-
-  -- construct the final type
-  t4 <- case t3 of
-    (FunU as2 b2) -> return $ FunU (a1:as2) b2
-    _ -> error "impossible"
-
-  let t5 = apply g3 t4
-
-  -- construct the final expression
-  e3 <- case e2 of
-    (LamS vs' body) -> return $ LamS (v:vs') body
-    _ -> error "impossible"
-
-  -- ignore trailing context `x:A,g3`
-  g4 <- cut' i vardef g3
-
-  return (g4, t5, e3)
+  return (g2, t3, e3)
 
 checkE i lang g1 e1 (ForallU v a) = checkE' i lang (g1 +> v) e1 (substitute v a)
 
@@ -488,15 +474,15 @@ subtype' i a b g = do
     (Left err') -> cerr i err'
     (Right x) -> return x
 
-cut' :: Int -> GammaIndex -> Gamma -> MorlocMonad Gamma
-cut' i idx g = case cut idx g of
-  (Left terr) -> cerr i terr
-  (Right x) -> return x
-
 -- apply context to a SAnno
 applyCon :: (Functor cf, Functor f, Applicable c)
          => Gamma -> SAnno g f (cf c) -> SAnno g f (cf c)
 applyCon g = mapSAnno id (fmap (apply g))
+
+-- apply context to a SExpr
+applyConE :: (Functor cf, Functor f, Applicable c)
+         => Gamma -> SExpr g f (cf c) -> SExpr g f (cf c)
+applyConE g = mapSExpr id (fmap (apply g))
 
 ---- debugging
 

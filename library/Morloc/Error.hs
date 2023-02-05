@@ -103,8 +103,8 @@ instance Pretty TypeError where
     = "SubtypeError:" <+> pretty msg <> "\n  "
     <> "(" <> pretty t1 <+> "<:" <+> pretty t2 <> ")"
   pretty (InstantiationError t1 t2 msg)
-    = "InstantiationError:" <+> pretty msg <> "\n  "
-    <> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")"
+    = "InstantiationError:" <+> "(" <> pretty t1 <+> "<:=" <+> pretty t2 <> ")" <> "\n"
+    <> "   " <> align (pretty msg)
   pretty (EmptyCut gi) = "EmptyCut:" <+> pretty gi
   pretty OccursCheckFail {} = "OccursCheckFail"
   pretty (Mismatch t1 t2 msg)

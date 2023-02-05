@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Grammars.Common
@@ -10,21 +11,25 @@ Stability   : experimental
 -}
 module Morloc.CodeGenerator.Grammars.Common
   ( argType
+  , packArgument
   , unpackArgument
+  , replaceArgumentType
   , typeOfExprM
   , gmetaOf
-  , argsOf
   , typeOfTypeM
   , invertExprM
   , packTypeM
   , packExprM
+  , unpackExprMByType
   , unpackExprM
   , unpackTypeM
   , nargsTypeM
+  , argsOf
   , arg2typeM
   , type2jsontype
   , jsontype2json
-  , splitArgs
+  , PoolDocs(..)
+  , mergePoolDocs
   ) where
 
 import Morloc.Data.Doc
@@ -33,6 +38,31 @@ import qualified Morloc.Data.Text as MT
 import qualified Morloc.Monad as MM
 import qualified Morloc.CodeGenerator.Serial as MCS
 
+import qualified Data.Set as Set
+
+-- Stores pieces of code made while building a pool
+data PoolDocs = PoolDocs
+  { poolCompleteManifolds :: [MDoc]
+    -- ^ completely generated manifolds
+  , poolExpr :: MDoc
+    -- ^ the inplace expression
+  , poolPriorLines :: [MDoc]
+    -- ^ lines to precede the returned expression
+  , poolPriorExprs :: [MDoc]
+    -- ^ expressions that should precede this manifold, may include helper
+    -- functions or imports
+  }
+
+-- | Merge a series of pools, keeping prior lines, expression and manifolds, but
+-- merging bodies with a function. For example, merge all elements in a list and
+-- process the poolExpr variales into list syntax in the given language.
+mergePoolDocs :: ([MDoc] -> MDoc) -> [PoolDocs] -> PoolDocs
+mergePoolDocs f ms = PoolDocs
+    { poolCompleteManifolds = concatMap poolCompleteManifolds ms
+    , poolExpr = f (map poolExpr ms)
+    , poolPriorLines = concatMap poolPriorLines ms
+    , poolPriorExprs = concatMap poolPriorExprs ms
+    }
 
 argType :: Argument -> Maybe TypeP
 argType (SerialArgument _ t) = Just t
@@ -43,9 +73,29 @@ unpackArgument :: Argument -> Argument
 unpackArgument (SerialArgument i t) = NativeArgument i t
 unpackArgument x = x
 
+packArgument :: Argument -> Argument
+packArgument (NativeArgument i t) = SerialArgument i t
+packArgument x = x
+
 nargsTypeM :: TypeM -> Int
 nargsTypeM (Function ts _) = length ts
 nargsTypeM _ = 0
+
+argsOf :: ExprM f -> Set.Set Argument
+argsOf (ManifoldM _ form x) = Set.fromList (manifoldArgs form) `Set.union` argsOf x
+argsOf (ForeignInterfaceM _ _ x) = argsOf x
+argsOf (PoolCallM _ _ _ args) = Set.fromList args
+argsOf (LetM _ _ x) = argsOf x
+argsOf (AppM x xs) = Set.unions (map argsOf (x:xs))
+argsOf (LamM contextArgs boundArgs x) = (argsOf x `Set.union` Set.fromList contextArgs) `Set.difference` Set.fromList boundArgs
+argsOf (AccM x _) = argsOf x
+argsOf (ListM _ xs) = Set.unions (map argsOf xs)
+argsOf (TupleM _ xs) = Set.unions (map argsOf xs)
+argsOf (RecordM _ ks) = Set.unions (map (argsOf . snd) ks)
+argsOf (SerializeM _ x) = argsOf x
+argsOf (DeserializeM _ x) = argsOf x
+argsOf (ReturnM x) = argsOf x
+argsOf _ = Set.empty
 
 -- recordPVar :: TypeP -> MDoc
 -- recordPVar (VarP (PV _ _ v)) = pretty v
@@ -64,23 +114,37 @@ nargsTypeM _ = 0
 -- >       in let a3 = h 1 a2
 -- >          in f a1 a3
 -- expression inversion will not alter expression type
-invertExprM :: (ExprM f) -> MorlocMonad (ExprM f)
-invertExprM (ManifoldM m args e) = do
+invertExprM :: ExprM f -> MorlocMonad (ExprM f)
+invertExprM (ManifoldM m form e) = do
   MM.startCounter
   e' <- invertExprM e
-  return $ ManifoldM m args e'
+  return $ ManifoldM m form e'
 invertExprM (LetM v e1 e2) = do
   e2' <- invertExprM e2
   return $ LetM v e1 e2'
+invertExprM (AppM c@(PoolCallM _ _ _ _) es) = do
+  es' <- mapM invertExprM es
+  return $ foldl dependsOn (AppM c (map terminalOf es')) es'
+invertExprM (PoolCallM t i cmds args) = do
+  v <- MM.getCounter
+  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
 invertExprM e@(AppM f es) = do
   f' <- invertExprM f
   es' <- mapM invertExprM es
   v <- MM.getCounter
   let t = typeOfExprM e
       appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
-  return $ foldl dependsOn appM' (f':es')
--- you can't pull the body of the lambda out into a let statement
-invertExprM f@(LamM _ _) = return f
+  return $ foldl dependsOn appM' (f':es') 
+-- A LamM will generate a new function declaration in the output code. This
+-- function will be like a manifold, but lighter, since at the moment the only
+-- thing it is used for is wrapping higher order functions that call external manifolds.
+invertExprM (LamM contextArgs boundArgs body) = do
+  -- restart the counter, this is NOT a lambda expression so variables are NOT
+  -- in the parent scope, the body will be in a fresh function declaration and
+  -- this function will be called with
+  -- arguments `vs`
+  MM.startCounter
+  LamM contextArgs boundArgs <$> invertExprM body
 invertExprM (AccM e k) = do
   e' <- invertExprM e
   return $ dependsOn (AccM (terminalOf e') k) e'
@@ -88,20 +152,20 @@ invertExprM (ListM c es) = do
   es' <- mapM invertExprM es
   v <- MM.getCounter
   let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (TupleM c es) = do
   es' <- mapM invertExprM es
   v <- MM.getCounter
   let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (RecordM c entries) = do
-  es' <- mapM invertExprM (map snd entries)
+  es' <- mapM (invertExprM . snd) entries
   v <- MM.getCounter
   let entries' = zip (map fst entries) (map terminalOf es')
       e = LetM v (RecordM c entries') (LetVarM c v)
-      e' = foldl (\x y -> dependsOn x y) e es'
+      e' = foldl dependsOn e es'
   return e'
 invertExprM (SerializeM p e) = do
   e' <- invertExprM e
@@ -116,9 +180,6 @@ invertExprM (DeserializeM p e) = do
 invertExprM (ReturnM e) = do
   e' <- invertExprM e
   return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM (PoolCallM t i cmds args) = do
-  v <- MM.getCounter
-  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
 invertExprM e = return e
 
 -- transfer all let-dependencies from y to x
@@ -147,22 +208,36 @@ arg2typeM (SerialArgument _ c) = Serial c
 arg2typeM (NativeArgument _ c) = Native c
 arg2typeM (PassThroughArgument _) = Passthrough
 
+replaceArgumentType :: TypeP -> Argument -> Argument
+replaceArgumentType t (SerialArgument i _) = SerialArgument i t
+replaceArgumentType t (NativeArgument i _) = NativeArgument i t
+replaceArgumentType _ (PassThroughArgument i) = PassThroughArgument i
+
 -- | Get the manifold type of an expression
 --
 -- The ExprM must have exactly enough type information to infer the type of any
 -- element without reference to the element's parent.
 typeOfExprM :: ExprM f -> TypeM
-typeOfExprM (ManifoldM _ args e) = Function (map arg2typeM args) (typeOfExprM e)
-typeOfExprM (ForeignInterfaceM t _) = t
+typeOfExprM (ManifoldM _ form e) = Function (map arg2typeM (manifoldArgs form)) (typeOfExprM e)
 typeOfExprM (PoolCallM t _ _ _) = t
 typeOfExprM (LetM _ _ e2) = typeOfExprM e2
+
+-- ------------------------------------------
+-- FIXME: I clearly need to store more type info foreign calls
+typeOfExprM (ForeignInterfaceM t _ _) = t          -- FIXME, this is just the return type, should be a function
+typeOfExprM (AppM (PoolCallM t _ _ _) _) = t     -- FIXME, only correct when fully applied
+typeOfExprM (AppM (ForeignInterfaceM t _ _) _) = t -- FIXME, only correct when fully applied
+-- ------------------------------------------
+
 typeOfExprM (AppM f xs) = case typeOfExprM f of
   (Function inputs output) -> case drop (length xs) inputs of
     [] -> output
     inputs' -> Function inputs' output
   _ -> error . MT.unpack . render $ "COMPILER BUG: application of non-function" <+> parens (pretty $ typeOfExprM f)
 typeOfExprM (SrcM t _) = t
-typeOfExprM (LamM args x) = Function (map arg2typeM args) (typeOfExprM x)
+-- The lambda function will pass scoped arguments to its children, but only the
+-- bound arguments are part of the type signature
+typeOfExprM (LamM _ boundArgs x) = Function (map arg2typeM boundArgs) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
 typeOfExprM (LetVarM t _) = t
 typeOfExprM (AccM e _) = typeOfExprM e
@@ -178,22 +253,34 @@ typeOfExprM (SerializeM _ e) = packTypeM (typeOfExprM e)
 typeOfExprM (DeserializeM _ e) = unpackTypeM (typeOfExprM e)
 typeOfExprM (ReturnM e) = typeOfExprM e
 
+-- | Serialize a type if possible, otherwise return the original value
 packTypeM :: TypeM -> TypeM
 packTypeM (Native t) = Serial t
-packTypeM (Function _ _) = error $ "BUG: Cannot pack a function"
+packTypeM t@(Function _ _) = t -- functions cannot be serialized
 packTypeM t = t
 
 unpackTypeM :: TypeM -> TypeM
 unpackTypeM (Serial t) = Native t
-unpackTypeM Passthrough = error $ "BUG: Cannot unpack a passthrough type"
+unpackTypeM Passthrough = error "BUG: Cannot unpack a passthrough type"
 unpackTypeM t = t 
 
-unpackExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many) 
-unpackExprM m e = do
+-- Deserializes anything that is not already Native
+-- FIXME needing both of these functions is fucked up
+unpackExprM :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprM m p e = do
   packers <- MM.metaPackMap m
   case typeOfExprM e of
-    (Serial t) -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
-    (Passthrough) -> MM.throwError . SerializationError $ "Cannot unpack a passthrough typed expression"
+    (Serial t)  -> DeserializeM <$> MCS.makeSerialAST packers t <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    _ -> return e
+
+-- Deserializes anything that is not already Native
+unpackExprMByType :: GIndex -> TypeP -> ExprM Many -> MorlocMonad (ExprM Many) 
+unpackExprMByType m p e = do
+  packers <- MM.metaPackMap m
+  case typeOfExprM e of
+    (Serial _)  -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
+    Passthrough -> DeserializeM <$> MCS.makeSerialAST packers p <*> pure e
     _ -> return e
 
 packExprM :: GIndex -> ExprM Many -> MorlocMonad (ExprM Many)
@@ -224,21 +311,7 @@ jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "
   vals = map jsontype2json (map snd rs)
   rs' = zipWith (\key val -> key <> ":" <> val) keys vals
 
-argsOf :: ExprM f -> [Argument]
-argsOf (LamM args _) = args
-argsOf (ManifoldM _ args _) = args
-argsOf _ = []
-
 gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m
-gmetaOf (LamM _ e) = gmetaOf e
+gmetaOf (LamM _ _ e) = gmetaOf e
 gmetaOf _ = error "Malformed top-expression"
-
--- divide a list of arguments based on wheither they are in a second list
-splitArgs :: [Argument] -> [Argument] -> ([Argument], [Argument])
-splitArgs args1 args2 = partitionEithers $ map splitOne args1 where
-  splitOne :: Argument -> Either Argument Argument
-  splitOne r = if elem r args2
-               then Left r
-               else Right r
-

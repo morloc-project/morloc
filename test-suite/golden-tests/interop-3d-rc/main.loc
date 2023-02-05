@@ -1,0 +1,6 @@
+import rbase (map)
+import cppbase (add, neg)
+export foo
+
+foo R :: "numeric" -> ["numeric"] -> ["numeric"]
+foo x ys = map (\y -> add x (neg y)) ys

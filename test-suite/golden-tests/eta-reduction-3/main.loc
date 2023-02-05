@@ -1,4 +1,4 @@
-import base (zipWith, add)
+import pybase (zipWith, add)
 export foo0
 export foo1
 export foo2

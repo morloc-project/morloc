@@ -1,0 +1,11 @@
+record Person = Person { name :: Str, age :: Int, parent :: Str }
+record Py Person = "dict" { name :: "str", age :: "int", parent :: "str" }
+
+siblings :: Str -> (Person, Person)
+siblings Py :: "str" -> (Person, Person)
+siblings parent =
+    ( {name = "Bob", age = 26, parent = parent}
+    , {name = "Alice", age = 28, parent = parent}
+    )
+
+export siblings

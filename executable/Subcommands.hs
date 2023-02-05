@@ -114,7 +114,7 @@ writeFrontendTypes  s (SAnno _ (Idx gidx t)) = writeTerm s gidx (pretty t)
 writeTerm :: MorlocState -> Int -> MDoc -> MDoc
 writeTerm s i typeDoc =
     case ( Map.lookup i (stateName s)
-         ,  GMap.lookup i (stateSignatures s))
+         , GMap.lookup i (stateSignatures s))
     of
         (Just v, GMapJust (TermTypes {termGeneral = Just t'})) -> pretty v <+> "::" <+> pretty t'
         (Just v, _) -> pretty v <+> "|-" <+> typeDoc

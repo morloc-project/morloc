@@ -24,6 +24,7 @@ import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.CodeGenerator.Serial as Serial
 import qualified Morloc.Monad as MM
 import qualified Morloc.System as MS
+import qualified Morloc.Data.Text as MT
 
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess = invertExprM
@@ -57,9 +58,9 @@ makeImport :: MDoc -> MDoc
 makeImport n = "use" <+> n <> ";"
 
 translateManifold :: [(Name, MDoc)] -> ExprM One -> MorlocMonad MDoc
-translateManifold funmap m0@(ManifoldM _ args0 _) = do
+translateManifold funmap m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
+  (vsep . punctuate line . (\(x,_,_)->x)) <$> f (manifoldArgs form0) m0
   where
 
   f :: [Argument]
@@ -69,23 +70,24 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
         , MDoc   -- a tag for the returned expression
         , [MDoc] -- lines to precede the returned expression
         )
-  f pargs m@(ManifoldM i args e) = do
+  f pargs m@(ManifoldM i form e) = do
+    let args = manifoldArgs form
     (ms', e', rs') <- f args e
     let mname = manNamer i
         def = "fn" <+> mname <> tupled (map makeArgument args) <+> "->" <+> showTypeM Out (typeOfExprM e)
         body = vsep $ rs' ++ [e']
         mdoc = block 4 def body
-    call <- return $ case (splitArgs args pargs, nargsTypeM (typeOfExprM m)) of
-      ((rs, []), _) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
-      (([], _ ), _) -> mname
-      ((rs, vs), _) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
+    call <- return $ case form of
+      (ManifoldFull rs) -> mname <> tupled (map argName rs) -- covers #1, #2 and #4
+      (ManifoldPass _) -> mname
+      (ManifoldPart rs vs) -> makeLambda vs (mname <> tupled (map argName (rs ++ vs))) -- covers #5
     return (mdoc : ms', call, [])
 
   f _ (PoolCallM _ _ cmds args) = do
     let call = "foreign_call(" <> list(map dquotes cmds ++ map argName args) <> ")"
     return ([], call, [])
 
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
   f args (LetM i (DeserializeM s e1) e2) = do
@@ -113,7 +115,7 @@ translateManifold funmap m0@(ManifoldM _ args0 _) = do
 
   f _ (SrcM _ src) = return ([], pretty (srcName src), [])
 
-  f _ (LamM _ _) = undefined -- FIXME: this is defined in R
+  f _ (LamM _ _ _) = undefined -- FIXME: this is defined in R
 
   f _ (BndVarM _ i) = return ([], bndNamer i, [])
 
@@ -263,7 +265,8 @@ findPkgName path = do
     False -> MM.throwError . PoolBuildError . render $
       "Expected a Rust crate directory, found:" <+> squotes (pretty path)
 
-  pkgName <- case dir of
+  -- return find package name
+  case dir of
     (_ :/ Failed _ ioerr) -> MM.throwError . PoolBuildError . render
       $ "While trying to load what I thought as a Rust crate at"
       <+> squotes (pretty path)
@@ -274,8 +277,6 @@ findPkgName path = do
       then return modName
       else MM.throwError . PoolBuildError . render $
           "Expected" <+> squotes (pretty path) <+> "to be a Rust crate, but found no Cargo.toml file"
-
-  return pkgName
 
 
 makeTheMaker :: [Source] -> MorlocMonad [SysCommand]
@@ -289,9 +290,9 @@ makeDispatch varin varout ms
   = block 4 ("match" <+> varin) (vsep (map makeCase ms ++ [defaultCase]))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM i args _) =
-        let args' = take (length args) $ repeat "&args.next().unwrap()"
-        in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args'},|]
+    makeCase (ManifoldM i form _) =
+        let args = replicate (length (manifoldArgs form)) "&args.next().unwrap()"
+        in [idoc|#{viaShow i} => #{varout} = #{manNamer i}#{tupled args},|]
     makeCase _ = error "Every ExprM must start with a manifold object"
 
     defaultCase = [idoc|_ => panic!("invalid function!")|]

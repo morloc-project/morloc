@@ -15,12 +15,14 @@ module Morloc.CodeGenerator.Namespace
   , TypeM(..)
   , ExprM(..)
   , Argument(..)
+  , PreArgument(..)
   , JsonType(..)
   , PVar(..)
   , TypeP(..)
   , JsonPath
   , JsonAccessor(..)
   , NexusCommand(..)
+  , ManifoldForm(..)
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -28,6 +30,8 @@ module Morloc.CodeGenerator.Namespace
   , argId
   -- ** Other
   , prettyGenTypeP
+  , manifoldArgs
+  , mapManifoldArgs
   ) where
 
 import Morloc.Namespace
@@ -166,6 +170,12 @@ data JsonType
   -- ^ {"Foo":{"bar":"A","baz":"B"}}
   deriving (Show, Ord, Eq)
 
+data PreArgument = PreArgument Int EVar TypeP
+    deriving(Show, Eq, Ord)
+
+instance Pretty PreArgument where
+    pretty (PreArgument i v p) = "PreArgument<" <> pretty i <> "," <+> pretty v <> "," <+> pretty p <>">"
+
 -- | An argument that is passed to a manifold
 data Argument
   = SerialArgument Int TypeP
@@ -194,14 +204,43 @@ data TypeM
   deriving(Show, Eq, Ord)
 
 
+data ManifoldForm
+  = ManifoldPass [Argument]
+  -- ^ Unapplied function passed as argument
+  | ManifoldFull [Argument]
+  -- ^ Fully applied function
+  | ManifoldPart [Argument] [Argument]
+  -- ^ Partially applied function
+  deriving(Show, Eq, Ord)
+
+instance Pretty ManifoldForm where
+    pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
+    pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
+    pretty (ManifoldPart contextArgs boundArgs)
+        = "ManifoldPart" <> tupled
+            [ "context:" <+> list (map pretty contextArgs)
+            , "bound:"   <+> list (map pretty boundArgs)
+            ]
+
+manifoldArgs :: ManifoldForm -> [Argument]
+manifoldArgs (ManifoldPass args) = args
+manifoldArgs (ManifoldFull args) = args
+manifoldArgs (ManifoldPart contextArgs boundArgs) = contextArgs <> boundArgs
+
+mapManifoldArgs :: (Argument -> Argument) -> ManifoldForm -> ManifoldForm
+mapManifoldArgs f (ManifoldPass args) = ManifoldPass (map f args)
+mapManifoldArgs f (ManifoldFull args) = ManifoldFull (map f args)
+mapManifoldArgs f (ManifoldPart contextArgs boundArgs) = ManifoldPart (map f contextArgs) (map f boundArgs)
+
 -- | A grammar that describes the implementation of the pools. Expressions in
 -- this grammar will be directly translated into concrete code.
 data ExprM f
-  = ManifoldM Int [Argument] (ExprM f)
+  = ManifoldM Int ManifoldForm (ExprM f)
   -- ^ A wrapper around a single source call or (in some cases) a container.
 
   | ForeignInterfaceM
       TypeM -- required type in the calling language
+      [Int] -- the argument ids that are passed between pools
       (ExprM f) -- expression in the foreign language
   -- ^ A generic interface to an expression in another language. Currently it
   -- will be resolved only to the specfic pool call interface type, where
@@ -216,7 +255,10 @@ data ExprM f
       [Argument] -- argument passed to the foreign function (must be serialized)
   -- ^ Make a system call to another language
 
-  | LetM Int (ExprM f) (ExprM f)
+  | LetM
+      Int -- index for the newly bound variable
+      (ExprM f) -- the value bound to the new variable
+      (ExprM f) -- the remaining code
   -- ^ let syntax allows fine control over order of operations in the generated
   -- code. The Int is an index for a LetVarM. It is also important in languages
   -- such as C++ where values need to be declared with explicit types and
@@ -224,17 +266,20 @@ data ExprM f
 
   | AppM
       (ExprM f) -- ManifoldM | SrcM | LamM
-      [(ExprM f)]
+      [ExprM f]
 
   | SrcM TypeM Source
   -- ^ a within pool function call (cis)
 
-  | LamM [Argument] (ExprM f)
-  -- ^ Nothing Evar will be auto generated
+  | LamM
+        [Argument] -- arguments from scope used in body
+        [Argument] -- formal arguments to the lambda
+        (ExprM f)  -- body
+  -- ^ This will appear as a lambda in the generated code
 
   | BndVarM TypeM Int
   -- ^ A lambda-bound variable. BndVarM only describes variables bound as positional
-  -- arguments in a manifold. The are represented as integers since the name
+  -- arguments in a manifold. They are represented as integers since the name
   -- will be language-specific.
   --
   -- In the rewrite step, morloc declarations are removed. So the expression:
@@ -299,12 +344,12 @@ instance HasOneLanguage (TypeM) where
 instance HasOneLanguage (ExprM f) where
   -- langOf :: a -> Maybe Lang
   langOf' (ManifoldM _ _ e) = langOf' e
-  langOf' (ForeignInterfaceM t _) = langOf' t
+  langOf' (ForeignInterfaceM t _ _) = langOf' t
   langOf' (PoolCallM t _ _ _) = langOf' t
   langOf' (LetM _ _ e2) = langOf' e2
   langOf' (AppM e _) = langOf' e
   langOf' (SrcM _ src) = srcLang src
-  langOf' (LamM _ e) = langOf' e
+  langOf' (LamM _ _ e) = langOf' e
   langOf' (BndVarM t _) = langOf' t
   langOf' (LetVarM t _) = langOf' t
   langOf' (AccM e _) = langOf' e
@@ -323,25 +368,29 @@ instance HasOneLanguage (ExprM f) where
 
 instance Pretty Argument where
   pretty (SerialArgument i c) =
-    "Serial" <+> "x" <> pretty i <+> parens (pretty c)
+    "SerialArgument" <+> "x" <> pretty i <+> parens (pretty c)
   pretty (NativeArgument i c) =
-    "Native" <+> "x" <> pretty i <+> parens (pretty c)
+    "NativeArgument" <+> "x" <> pretty i <+> parens (pretty c)
   pretty (PassThroughArgument i) =
-    "PassThrough" <+> "x" <> pretty i
+    "PassThroughArgument" <+> "x" <> pretty i
 
 instance Pretty (ExprM f) where
-  pretty e0 = (vsep . punctuate line . fst $ f e0) <> line where
+  pretty e0 = prettyExpr where
     manNamer i = "m" <> pretty i
 
-    f (ManifoldM m args e) =
+    prettyExpr = case f e0 of
+        ([], x) -> x
+        (xs, _) -> (vsep . punctuate line $ xs) <> line
+
+    f (ManifoldM m form e) =
       let (ms', body) = f e
-          decl = manNamer m <> tupled (map pretty args)
+          decl = manNamer m <> tupled (map pretty (manifoldArgs form))
           mdoc = block 4 decl body
       in (mdoc : ms', manNamer m)
     f (PoolCallM t _ cmds args) =
       let poolArgs = cmds ++ map pretty args
       in ([], "PoolCallM" <> list (map (pretty . render) poolArgs) <+> "::" <+> pretty t)
-    f (ForeignInterfaceM t e) =
+    f (ForeignInterfaceM t _ e) =
       let (ms, _) = f e
       in (ms, "ForeignInterface :: " <> pretty t)
     f (LetM v e1 e2) =
@@ -351,15 +400,15 @@ instance Pretty (ExprM f) where
     f (AppM fun xs) =
       let (ms', fun') = f fun
           (mss', xs') = unzip $ map f xs
-      in (ms' ++ concat mss', fun' <> tupled xs')
+      in (ms' ++ concat mss', "AppM" <> tupled (fun':xs'))
     f (SrcM _ src) = ([], pretty (srcName src))
-    f (LamM args e) =
+    f (LamM manifoldArgs boundArgs e) =
       let (ms', e') = f e
-          vsFull = map pretty args
-          vsNames = map (\r -> "x" <> pretty (argId r)) args
+          vsFull = map pretty manifoldArgs <> map pretty boundArgs
+          vsNames = map (\r -> "x" <> pretty (argId r)) (manifoldArgs <> boundArgs)
       in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
-    f (BndVarM _ i) = ([], "x" <> pretty i)
-    f (LetVarM _ i) = ([], "a" <> pretty i)
+    f (BndVarM t i) = ([], "x" <> pretty i <> tupled [pretty t])
+    f (LetVarM t i) = ([], "a" <> pretty i <> tupled [pretty t])
     f (AccM e k) =
       let (ms, e') = f e
       in (ms, parens e' <> "@" <> pretty k)

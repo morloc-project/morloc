@@ -24,6 +24,7 @@ import Morloc.CodeGenerator.Serial ( isSerializable
                                    , shallowType
                                    )
 import Morloc.CodeGenerator.Grammars.Common
+import Morloc.CodeGenerator.Typecheck (say)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
 import Morloc.Quasi
@@ -55,7 +56,11 @@ type RecMap = [((PVar, [PVar]), RecEntry)]
 
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
-preprocess = invertExprM
+preprocess e = do
+    say "inverting"
+    e' <- invertExprM e
+    say $ "e' = " <> pretty e'
+    return e'
 
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
 translate srcs es = do
@@ -121,17 +126,18 @@ serialType = "std::string"
 makeSignature :: RecMap -> ExprM One -> MDoc
 makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
   f :: ExprM One -> [MDoc]
-  f (ManifoldM i args e) =
+  f (ManifoldM i form e) =
     let t = typeOfExprM e
+        args = manifoldArgs form
         sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
     in sig : f e
   f (LetM _ e1 e2) = f e1 ++ f e2
   f (AppM e es) = f e ++ concatMap f es
-  f (LamM _ e) = f e
+  f (LamM _ _ e) = f e
   f (AccM e _) = f e
   f (ListM _ es) = concatMap f es
   f (TupleM _ es) = concatMap f es
-  f (RecordM _ entries) = concatMap f (map snd entries)
+  f (RecordM _ entries) = concatMap (f . snd) entries
   f (SerializeM _ e) = f e
   f (DeserializeM _ e) = f e
   f (ReturnM e) = f e
@@ -187,7 +193,7 @@ serialize
   -> MorlocMonad [MDoc]
 serialize recmap letIndex datavar0 s0 = do
   (x, before) <- serialize' datavar0 s0
-  t0 <- (showTypeM recmap . Native) <$> serialAstToType s0
+  t0 <- showTypeM recmap . Native <$> serialAstToType s0
   let schemaName = [idoc|#{letNamer letIndex}_schema|]
       schema = [idoc|#{t0} #{schemaName};|]
       final = [idoc|#{serialType} #{letNamer letIndex} = serialize(#{x}, #{schemaName});|]
@@ -209,7 +215,7 @@ serialize recmap letIndex datavar0 s0 = do
       serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v lst@(SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       t <- serialAstToType lst
       let v' = "s" <> idx 
           decl = [idoc|#{showType recmap t} #{v'};|]
@@ -221,7 +227,7 @@ serialize recmap letIndex datavar0 s0 = do
 
     construct v tup@(SerialTuple ss) = do
       (ss', befores) <- fmap unzip $ zipWithM (\i s -> serialize' (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       t <- serialAstToType tup
       let v' = "s" <> idx
           x = [idoc|#{showType recmap t} #{v'} = std::make_tuple#{tupled ss'};|]
@@ -229,8 +235,8 @@ serialize recmap letIndex datavar0 s0 = do
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
       (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> serialize' (recordAccess v (pretty k)) s) rs
-      idx <- fmap pretty $ MM.getCounter
-      t <- (showType recmap) <$> serialAstToType rec
+      idx <- fmap pretty MM.getCounter
+      t <- showType recmap <$> serialAstToType rec
       let v' = "s" <> idx
           decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
@@ -248,9 +254,9 @@ deserialize recmap letIndex typestr0 varname0 s0
           deserializing = [idoc|#{typestr0} #{letNamer letIndex} = deserialize(#{varname0}, #{schemaName});|]
       return [schema, deserializing]
   | otherwise = do
-      idx <- fmap pretty $ MM.getCounter
+      idx <- fmap pretty MM.getCounter
       t <- serialAstToType s0
-      let rawtype = showType recmap $ t
+      let rawtype = showType recmap t
           schemaName = [idoc|#{letNamer letIndex}_schema|]
           rawvar = "s" <> idx
           schema = [idoc|#{rawtype} #{schemaName};|]
@@ -275,8 +281,8 @@ deserialize recmap letIndex typestr0 varname0 s0
       return (deserialized, before)
 
     construct v lst@(SerialList s) = do
-      idx <- fmap pretty $ MM.getCounter
-      t <- fmap (showType recmap) $ shallowType lst
+      idx <- fmap pretty MM.getCounter
+      t <- showType recmap <$> shallowType lst
       let v' = "s" <> idx 
           decl = [idoc|#{t} #{v'};|]
       (x, before) <- check [idoc|#{v}[i#{idx}]|] s
@@ -286,17 +292,17 @@ deserialize recmap letIndex typestr0 varname0 s0
       return (v', [decl, loop])
 
     construct v tup@(SerialTuple ss) = do
-      idx <- fmap pretty $ MM.getCounter
-      (ss', befores) <- fmap unzip $ zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
+      idx <- fmap pretty MM.getCounter
+      (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
       t <- shallowType tup
       let v' = "s" <> idx
           x = [idoc|#{showType recmap $ t} #{v'} = std::make_tuple#{tupled ss'};|]
       return (v', concat befores ++ [x]);
 
     construct v rec@(SerialObject NamRecord _ _ rs) = do
-      idx <- fmap pretty $ MM.getCounter
-      (ss', befores) <- fmap unzip $ mapM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
-      t <- fmap (showType recmap) $ shallowType rec
+      idx <- fmap pretty MM.getCounter
+      (ss', befores) <- mapAndUnzipM (\(PV _ _ k,s) -> check (recordAccess v (pretty k)) s) rs
+      t <- showType recmap <$> shallowType rec
       let v' = "s" <> idx
           decl = encloseSep "{" "}" "," ss'
           x = [idoc|#{t} #{v'} = #{decl};|]
@@ -306,31 +312,38 @@ deserialize recmap letIndex typestr0 varname0 s0
       $ "deserializeDescend: " <> prettySerialOne s
 
 translateManifold :: RecMap -> ExprM One -> MorlocMonad MDoc
-translateManifold recmap m0@(ManifoldM _ args0 _) = do
+translateManifold recmap m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  (vsep . punctuate line . (\(x,_,_)->x)) <$> f args0 m0
+  e <- f (manifoldArgs form0) m0
+  return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
 
   f :: [Argument]
     -> ExprM One
-    -> MorlocMonad
-       ( [MDoc] -- the collection of final manifolds
-       , MDoc -- a call tag for this expression
-       , [MDoc] -- a list of statements that should precede this assignment
-       )
+    -> MorlocMonad PoolDocs
 
   f args (LetM i (SerializeM s e1) e2) = do
-    (ms1, e1', ps1) <- f args e1
-    (ms2, e2', ps2) <- f args e2
+    (PoolDocs ms1 e1' ps1 pes1) <- f args e1
+    (PoolDocs ms2 e2' ps2 pes2) <- f args e2
     serialized <- serialize recmap i e1' s
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ serialized ++ [e2'], [])
+    return $ PoolDocs
+      { poolCompleteManifolds = ms1 <> ms2
+      , poolExpr = vsep $ ps1 <> ps2 <> serialized <> [e2']
+      , poolPriorLines = []
+      , poolPriorExprs = pes1 <> pes2
+      }
 
   f args (LetM i (DeserializeM s e1) e2) = do
-    (ms1, e1', ps1) <- f args e1
-    (ms2, e2', ps2) <- f args e2
+    (PoolDocs ms1 e1' ps1 pes1) <- f args e1
+    (PoolDocs ms2 e2' ps2 pes2) <- f args e2
     t <- showNativeTypeM recmap (typeOfExprM e1)
     deserialized <- deserialize recmap i t e1' s
-    return (ms1 ++ ms2, vsep $ ps1 ++ ps2 ++ deserialized ++ [e2'], [])
+    return $ PoolDocs
+      { poolCompleteManifolds = ms1 <> ms2
+      , poolExpr = vsep $ ps1 <> ps2 <> deserialized <> [e2']
+      , poolPriorLines = []
+      , poolPriorExprs = pes1 <> pes2
+      }
 
   f _ (SerializeM _ _) = MM.throwError . SerializationError
     $ "SerializeM should only appear in an assignment"
@@ -339,37 +352,63 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
     $ "DeserializeM should only appear in an assignment"
 
   f args (LetM i e1 e2) = do
-    (ms1', e1', ps1) <- (f args) e1
-    (ms2', e2', ps2) <- (f args) e2
+    (PoolDocs ms1' e1' ps1 pes1) <- f args e1
+    (PoolDocs ms2' e2' ps2 pes2) <- f args e2
     let t = showTypeM recmap (typeOfExprM e1)
         ps = ps1 ++ ps2 ++ [[idoc|#{t} #{letNamer i} = #{e1'};|], e2']
-    return (ms1' ++ ms2', vsep ps, [])
+    return $ PoolDocs
+      { poolCompleteManifolds = ms1' <> ms2'
+      , poolExpr = vsep ps
+      , poolPriorLines = []
+      , poolPriorExprs = pes1 <> pes2
+      }
 
   f args (AppM (SrcM (Function inputs output) src) xs) = do
-    (mss', xs', pss) <- mapM (f args) xs |>> unzip3
-    let
-        name' = pretty $ srcName src
+    let name' = pretty $ srcName src
         mangledName = mangleSourceName name'
         inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
         sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name'};|]
-    return (concat mss', mangledName <> tupled xs', sig : concat pss)
+    m <- mergePoolDocs (\xs' -> mangledName <> tupled xs') <$> mapM (f args) xs
+    return $ m {poolPriorLines = sig : poolPriorLines m}
+
+  f _ (PoolCallM _ _ cmds args) = do
+    let bufDef = "std::ostringstream s;"
+        callArgs = map dquotes cmds ++ map argName args
+        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
+        call = [idoc|foreign_call(s.str())|]
+    return $ PoolDocs
+      { poolCompleteManifolds = []
+      , poolExpr = call
+      , poolPriorLines = [bufDef, cmd]
+      , poolPriorExprs = []
+      }
+
+  f args (AppM (PoolCallM _ _ cmds _) xs) = do
+    ms <- mapM (f args) xs
+    let bufDef = "std::ostringstream s;"
+        callArgs = map dquotes cmds <> map poolExpr ms
+        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
+        call = [idoc|foreign_call(s.str())|]
+        m = mergePoolDocs (const call) ms
+    return $ m {poolPriorLines = poolPriorLines m <> [bufDef, cmd]}
 
   f _ (AppM _ _) = error "Can only apply functions"
 
-  f _ (SrcM _ src) = return ([], pretty $ srcName src, [])
+  f _ (SrcM _ src) = return $ PoolDocs [] (pretty $ srcName src) [] []
 
-  f pargs (ManifoldM i args e) = do
-    (ms', body, ps1) <- f args e
+  f _ (ManifoldM i form e) = do
+    let args = manifoldArgs form
+    (PoolDocs ms' body ps1 pes1) <- f args e
     let t = typeOfExprM e
         decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
         mdoc = block 4 decl body
         mname = manNamer i
-    (call, ps2) <- case (splitArgs args pargs, nargsTypeM t) of
-      ((rs, []), _) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
-      (([], _ ), _) -> return (mname, [])
-      ((rs, vs), _) -> do
+    (call, ps2) <- case form of
+      (ManifoldFull rs) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
+      (ManifoldPass _) -> return (mname, [])
+      (ManifoldPart rs vs) -> do
         let v = mname <> "_fun"
-        lhs <- stdFunction recmap t vs |>> (\x -> x <+> v)
+        lhs <- stdFunction recmap t vs |>> (<+> v)
         castFunction <- staticCast recmap t args mname
         let vs' = take
                   (length vs)
@@ -378,57 +417,58 @@ translateManifold recmap m0@(ManifoldM _ args0 _) = do
             rhs = stdBind $ castFunction : (rs' ++ vs')
             sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
         return (v, [sig])
-    return (mdoc : ms', call, ps1 ++ ps2)
+    return $ PoolDocs
+      { poolCompleteManifolds = mdoc : ms'
+      , poolExpr = call
+      , poolPriorLines = ps1 ++ ps2
+      , poolPriorExprs = pes1
+      }
 
-  f _ (PoolCallM _ _ cmds args) = do
-    let bufDef = "std::ostringstream s;"
-        callArgs = map dquotes cmds ++ map argName args
-        cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
-        call = [idoc|foreign_call(s.str())|] 
-    return ([], call, [bufDef, cmd])
-
-  f _ (ForeignInterfaceM _ _) = MM.throwError . CallTheMonkeys $
+  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  -- this should not happen
-  f args (LamM lambdaArgs e) = do
-    (ms', e', rs) <- f args e
-    let vs = map (bndNamer . argId) lambdaArgs
-    return (ms', "<LAMBDA>" <> tupled vs <> "{" <+> e' <> "}", rs)
+  f args (LamM manifoldArgs boundArgs body) = undefined -- do
+    -- p <- f (manifoldArgs <> boundArgs) e
+    -- return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
+
+    -- p <- f args body
+    -- idx <- MM.getCounter
+    -- let t = typeOfExprM body
+    --     lambdaName = "f" <> pretty idx
+    --     declaration = showTypeM recmap t <+> lambdaName <> tupled (map (makeArg recmap) lambdaArgs)
+    -- return $ p
+    --   { poolExpr = lambdaName
+    --   , poolPriorExprs = poolPriorExprs p <> [block 4 declaration (poolExpr p)]
+    --   }
 
   f args (AccM e k) = do
-    (ms, e', ps) <- f args e
-    return (ms, e' <> "." <> pretty k, ps)
+    p <- f args e
+    return $ p {poolExpr = poolExpr p <> "." <> pretty k}
 
-  f args (ListM _ es) = do
-    (mss', es', pss) <- mapM (f args) es |>> unzip3
-    let x' = encloseSep "{" "}" "," es'
-    return (concat mss', x', concat pss)
+  f args (ListM _ es) = mergePoolDocs (encloseSep "{" "}" ",") <$> mapM (f args) es
 
-  f args (TupleM _ es) = do
-    (mss', es', pss) <- mapM (f args) es |>> unzip3
-    return (concat mss', "std::make_tuple" <> tupled es', concat pss)
+  f args (TupleM _ es) = mergePoolDocs (\es' -> "std::make_tuple" <> tupled es') <$> mapM (f args) es
 
   f args (RecordM c entries) = do
-    (mss', es', pss) <- mapM (f args . snd) entries |>> unzip3
-    idx <- fmap pretty $ MM.getCounter
+    idx <- MM.getCounter
     let t = showTypeM recmap c
-        v' = "a" <> idx
-        decl = encloseSep "{" "}" "," es'
-        x = [idoc|#{t} #{v'} = #{decl};|]
-    return (concat mss', v', concat pss ++ [x])
+        v' = "a" <> pretty idx
+    ps <- mapM (f args . snd) entries
+    let decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map poolExpr ps) <> ";"
+        p = mergePoolDocs (const v') ps
+    return $ p {poolPriorLines = poolPriorLines p <> [decl]}
 
-  f _ (BndVarM _ i) = return ([], bndNamer i, [])
-  f _ (LetVarM _ i) = return ([], letNamer i, [])
-  f _ (LogM _ x) = return ([], if x then "true" else "false", [])
-  f _ (RealM _ x) = return ([], viaShow x, [])
-  f _ (IntM _ x) = return ([], viaShow x, [])
-  f _ (StrM _ x) = return ([], dquotes $ pretty x, [])
-  f _ (NullM _) = return ([], "null", [])
+  f _ (BndVarM _ i) = return $ PoolDocs [] (bndNamer i) [] []
+  f _ (LetVarM _ i) = return $ PoolDocs [] (letNamer i) [] []
+  f _ (LogM _ x) = return $ PoolDocs [] (if x then "true" else "false") [] []
+  f _ (RealM _ x) = return $ PoolDocs [] (viaShow x) [] []
+  f _ (IntM _ x) = return $ PoolDocs [] (viaShow x) [] []
+  f _ (StrM _ x) = return $ PoolDocs [] (dquotes $ pretty x) [] []
+  f _ (NullM _) = return $ PoolDocs [] "null" [] []
 
   f args (ReturnM e) = do
-    (ms, e', ps) <- f args e
-    return (ms, "return(" <> e' <> ");", ps)
+    p <- f args e
+    return $ p {poolExpr = "return(" <> poolExpr p <> ");"}
 translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
 
 -- take a name from the source and return a new function name
@@ -452,7 +492,7 @@ staticCast recmap t args name' = do
   let output = showTypeM recmap t
       inputs = map (argTypeM recmap) args
       argList = cat (punctuate "," inputs)
-  return $ [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
+  return [idoc|static_cast<#{output}(*)(#{argList})>(&#{name'})|]
 
 argTypeM :: RecMap -> Argument -> MDoc
 argTypeM _ (SerialArgument _ _) = serialType
@@ -463,8 +503,8 @@ makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
   where
     makeCase :: ExprM One -> MDoc
-    makeCase (ManifoldM i args _) =
-      let args' = take (length args) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
+    makeCase (ManifoldM i form _) =
+      let args' = take (length (manifoldArgs form)) $ map (\j -> "argv[" <> viaShow j <> "]") ([2..] :: [Int])
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
@@ -511,11 +551,11 @@ showNativeTypeM _ _ = MM.throwError . OtherError $ "Expected a native or seriali
 collectRecords :: ExprM One -> [(PVar, GIndex, [(PVar, TypeP)])]
 collectRecords e0 = f (gmetaOf e0) e0 where
   f _ (ManifoldM m _ e) = f m e
-  f m (ForeignInterfaceM t e) = cleanRecord m t ++ f m e
+  f m (ForeignInterfaceM t _ e) = cleanRecord m t ++ f m e
   f m (PoolCallM t _ _ _) = cleanRecord m t
   f m (LetM _ e1 e2) = f m e1 ++ f m e2
   f m (AppM e es) = f m e ++ concatMap (f m) es
-  f m (LamM _ e) = f m e
+  f m (LamM _ _ e) = f m e
   f m (AccM e _) = f m e
   f m (ListM t es) = cleanRecord m t ++ concatMap (f m) es
   f m (TupleM t es) = cleanRecord m t ++ concatMap (f m) es
@@ -539,8 +579,8 @@ cleanRecord m tm = case typeOfTypeM tm of
     toRecord (VarP _) = []
     toRecord (FunP ts t) = concatMap toRecord (t:ts)
     toRecord (AppP t ts) = concatMap toRecord (t:ts)
-    toRecord (NamP _ v@(PV _ _ "struct") _ rs) = (v, m, rs) : concatMap toRecord (map snd rs)
-    toRecord (NamP _ _ _ rs) = concatMap toRecord (map snd rs)
+    toRecord (NamP _ v@(PV _ _ "struct") _ rs) = (v, m, rs) : concatMap (toRecord . snd) rs
+    toRecord (NamP _ _ _ rs) = concatMap (toRecord . snd) rs
 
 -- unify records with the same name/keys
 unifyRecords
@@ -610,13 +650,13 @@ generateSourcedSerializers es0
       -> ExprM One
       -> MorlocMonad (Map.Map TVar (Type, [TVar]))
     collect' m (ManifoldM g _ e) = MM.metaTypedefs g >>= (\t -> collect' (Map.union m t) e)
-    collect' m (ForeignInterfaceM _ e) = collect' m e
+    collect' m (ForeignInterfaceM _ _ e) = collect' m e
     collect' m (LetM _ e1 e2) = Map.union <$> collect' m e1 <*> collect' m e2
     collect' m (AppM e es) = do
       e' <- collect' m e
       es' <- mapM (collect' m) es
       return $ Map.unions (e':es')
-    collect' m (LamM _ e) = collect' m e
+    collect' m (LamM _ _ e) = collect' m e
     collect' m (AccM e _) = collect' m e
     collect' m (ListM _ es) = Map.unions <$> mapM (collect' m) es
     collect' m (TupleM _ es) = Map.unions <$> mapM (collect' m) es
