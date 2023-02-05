@@ -37,12 +37,14 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Describe the core data structures and algorithms
  - [ ] Allow module namespaces (e.g., `alice:math.complex`)
 
-0.40.0 [2023.01.03]
+0.40.0 [2023.02.04]
 -------------------
 
- - [x] Infer types of records
- - [x] Fix bug in concrete type inference
- - [ ] Fix bugs in foreign higher order function code generation
+ * Infer types of records
+ * Fix bug in concrete type inference
+ * Fix bugs in foreign higher order function code generation
+ * Simplify generator code
+ * Add many tests
 
 0.39.0 [2023.01.03]
 -------------------
