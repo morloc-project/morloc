@@ -1,157 +1,128 @@
--- QA:
---  * How are functions passed? They can't be serialized. Calls are written
---    into the generate code.
--- 
---  * What if a language cannot pass functions as arguments?
--- 
---  * What about OOP methods? Styles. Though support is not finished yet.
--- 
---  * What about mutability? Effects and styles.
--- 
---  * What about laziness? No solution in the works yet. For now, everything is
---    eager between languages and potentially lazy within. This violates the
---    agnostic principle. Perhaps I could add type-level syntax for laziness?
--- 
---  * How are arguments passed (i.e., pass-by-reference versus pass-by-value)?
---    Currently, pass-by-value between languages (serialization to JSON), and
---    variable within languages.
--- 
---  * What about `const` keywords and other random hints different languages add?
---    This is challenging. The styles is intended to address that partially.
-
-
--- import packages from central morloc hub OR the local module IF in module path
--- import bio.io
--- -- import from a special namespace
--- import alice:bio.io
--- -- import from a github repo
--- import alice@github:bio.io
-
-import bio.io (readFasta, writeFasta)
-import bio.tree (NelTree, treeOf, viewTree)
-import bio.algo (njTree as tree, fooMsa as align)
-import bio.db (searchEntrez, nucleotideAccessionToXml)
-
-import db (cache)
-import local (cache)
-
-record VirusEntry = VirusEntry
-    { accession :: Str
-    , strain :: Str
-    , date :: Str
-    , host :: Str
-    , location :: Str
-    , spike :: Str
-    }
-
-accession :: VirusEntry -> Str
-accession x = x.accession
-
-spike :: VirusEntry -> Str
-spike x = x.spike
-
-parseEntrezNucleotideXml :: Str -> VirusEntry
-
-
-retrieve = concat
-         . map ( sleep 1
-               . map parseEntrezNucleotideXml
-               . cache (md5sum . join) nucleotideAccessionToXml
-               )
-         . chunks 1000
-         . sort
-         . searchEntrez
-
-
-
-makeTree xs = mapLeaf (at xs)
-            . cache (md5sum . join . map snd) tree
-            . cache (md5sum . join . map accession) (align . map spike)
-
-result = sampleTree
-       . makeTree
-       . retrieve "Influenza+A+Virus[Organism]" "2022/01" "2022/12"
-
-
-import base (withVals, seq, toSnd, map)
-
-gbkToSeq :: GenBankRecord -> Str
-
+export align
 export analysis
+export at
+export childrenOf
+export chunks
+export elem
+export fetchIdRecords
+export fst
+export gt
+export head
+export ifelse
+export join
+export length
+export longestORF
+export lookup
+export makeRefHeader
+export mapLeafs
+export nodes
+export parseRecord
+export pull
+export readFasta
+export retrieve
+export fetchIds
+export sleep
+export snd
+export strLength
+export translate
+export treeify
+export unique
+export annTree
 
-augment :: (a -> b) -> [a] -> [(a, b)]
-augment f xs = map (coupleRight f) xs 
+
+type Filename = Str 
+type Clade = Str 
+type StrainName = Str
+type Sequence = Str
+type EntrezQuery = Str
+type Label = Str
+type Date = Str
+type Query = Str
+
+record Meta = Meta
+  { accession :: Str
+  , clade :: Str
+  }
+
+record EntrezSearchConfig = EntrezSearchConfig
+  { email :: Str
+  , db :: Str  
+  , mindate :: Str
+  , maxdate :: Str
+  , retmax :: Int 
+  }
+
+-- import bio.io (readFasta, writeFasta)
+-- import bio.tree (Tree, treeOf, viewTree)
+-- import bio.algo (njTree as treeify, fooMsa as align)
+-- import bio.db (searchEntrez as fetchIds, nucleotideAccessionToXml)
+-- import bio.util (chunks, sleep)
+
+align :: [Sequence] -> [Sequence]
+annTree :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+at :: [a] -> Int -> a
+childrenOf :: Tree n e l -> n -> [l]
+chunks :: Int -> [a] -> [[a]]
+elem :: a -> [a] -> Bool
+fetchIdRecords :: [Str] -> [Str]
+fst :: (a, b) -> a
+gt :: Int -> Int -> Bool
+head :: [a] -> a
+ifelse :: Bool -> a -> a -> a
+join :: [a] -> [a] -> [a]
+length :: [a] -> Int
+longestORF :: Sequence -> Sequence
+lookup :: k -> [(k, v)] -> v
+makeRefHeader :: Str -> Meta
+mapLeafs :: (l -> l') -> Tree n e l -> Tree n e l'
+nodes :: Tree n e l -> [n]
+parseRecord :: Str -> (Meta, Sequence)
+readFasta :: Filename -> [(Str, Sequence)]
+fetchIds :: EntrezSearchConfig -> Query -> [Str]
+sleep :: Real -> a -> a
+snd :: (a, b) -> b
+strLength :: Str -> Int
+translate :: Sequence -> Sequence
+treeify :: [Sequence] -> Tree Int Real Int
+unique :: [a] -> [a]
+withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
+
+pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+
+classify = pull pullLeaf pullClade where
+  pullLeaf :: Meta -> Str
+  pullLeaf leaf = "asdf" -- leaf@clade
+
+  pullClade :: [Str] -> Str
+  pullClade xs = ifelse (eq (length observedClades) 1) (head observedClades) ""
+    where
+      observedClades = unique (filter (\x -> gt (strLength x) 0) xs)
+
+analysis :: Str -> Str -> Filename -> Filename -> ()
+analysis mindate maxdate reffile treeFile
+  = plotTree treeFile mindate maxdate tree
+  where
+    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+swine[ALL]"
+    config = { email = "weena@mlc.com"
+             , db = "nuccore"
+             , mindate = mindate
+             , maxdate = maxdate
+             , retmax = 1000
+             }
+    refStrains = mapKeys makeRefHeader (readFasta reffile)
+    newStrains = retrieve config query
+    tree = ( classify
+           . annTree treeify
+           . withVals align
+           ) (join refStrains newStrains)
 
 
-
-fetch :: Conditions -> [VirusEntry]
-
-
-partitionTree = mapLeafs (toSnd . regexCapture "(human|swine)")
-
-subsamplePartitionedTree :: 
-
-subsample
-    :: (NelTree n e l -> NelTree n e (l, Str))
-    -> (NelTree n e l2 -> NelTree n e l2)
-    -> NelTree n e l -> NelTree n e l
-
-
--- fetch
--- align
--- makeTree
--- subsample
--- view
--- stats
-
-
--- getCovid :: Str -> [(MetaData, Str)]
---
--- -- type Filename = Str
--- -- type Tag = Str
--- -- type Jsonpath = [Str]
--- -- type Identifier = Str
--- -- type Sequence = Str
---
--- analysis :: Filename -> ()
--- analysis gisaidFile = fold seq
---       [ writeTree "tree.newick" tree
---       , viewTree "tree.pdf" tree,
---       ]
---     where
---         tree = treeOf buildTree alignment
---
---         alignment = withVals align (
---             augment lookupSequence (
---                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
---                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
---             )
---         )
---
---
--- -- filter a large file, create raw strings for individual elements
--- jsonListFilterMap
---     :: (String -> a)  -- Convert an element string
---     -> (a -> Bool)    -- Decide whether to keep the parsed object
---     -> Filename       -- Path to the JSON file
---     -> [Tag]          -- Path to the array in the JSON structure
---     -> [a]            -- Final list of things of interest
---
--- lookupSequence :: Identifier -> Sequence
---
--- align xs =
---     seq (seq
---         (writeFasta (map (withFst show) (enumerate xs)) tmpfile)
---         (map snd (readFasta (third (shellCmd ["mafft", tmpfile]))))
---     )
---         (rm tmpfile)
---     where
---         tmpfile = "tmp.fa"
---
--- -- -- Where [a] has length 1 or 0
--- -- pack_maybe   :: pack   => [a] -> Maybe a
--- -- unpack_maybe :: unpack => Maybe a -> [a]
--- --
--- -- -- Where either [a] or [b] is empty and the other has length 1
--- -- pack_either   :: pack   => ([a], [b]) -> Either a b
--- -- unpack_either :: unpack => Either a b -> ([a], [b])
+retrieve :: EntrezSearchConfig -> Query -> [(Meta, Str)]
+retrieve config
+  = mapVal (translate . longestORF)
+  . concat
+  . map ( map parseRecord
+        . fetchIdRecords
+        )
+  . chunks 100
+  . fetchIds config
