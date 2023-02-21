@@ -13,13 +13,11 @@ export join
 export length
 export longestORF
 export lookup
-export makeRefHeader
 export mapLeafs
 export nodes
 export parseRecord
 export pull
 export readFasta
-export retrieve
 export fetchIds
 export sleep
 export snd
@@ -29,8 +27,8 @@ export treeify
 export unique
 export annTree
 
-
 type Filename = Str 
+type Accession = Str
 type Clade = Str 
 type StrainName = Str
 type Sequence = Str
@@ -39,10 +37,12 @@ type Label = Str
 type Date = Str
 type Query = Str
 
+
 record Meta = Meta
-  { accession :: Str
-  , clade :: Str
+  { accession :: Accession
+  , clade :: Clade
   }
+
 
 record EntrezSearchConfig = EntrezSearchConfig
   { email :: Str
@@ -51,6 +51,7 @@ record EntrezSearchConfig = EntrezSearchConfig
   , maxdate :: Str
   , retmax :: Int 
   }
+
 
 -- import bio.io (readFasta, writeFasta)
 -- import bio.tree (Tree, treeOf, viewTree)
@@ -65,20 +66,24 @@ childrenOf :: Tree n e l -> n -> [l]
 chunks :: Int -> [a] -> [[a]]
 elem :: a -> [a] -> Bool
 fetchIdRecords :: [Str] -> [Str]
+fetchIds :: EntrezSearchConfig -> Query -> [Str]
 fst :: (a, b) -> a
 gt :: Int -> Int -> Bool
 head :: [a] -> a
 ifelse :: Bool -> a -> a -> a
 join :: [a] -> [a] -> [a]
+keys :: Map a b -> [a]
+labelRef :: Map Accession Clade -> Meta -> Meta
 length :: [a] -> Int
 longestORF :: Sequence -> Sequence
 lookup :: k -> [(k, v)] -> v
-makeRefHeader :: Str -> Meta
 mapLeafs :: (l -> l') -> Tree n e l -> Tree n e l'
 nodes :: Tree n e l -> [n]
+onFst :: (a -> a') -> (a, b) -> (a', b) 
 parseRecord :: Str -> (Meta, Sequence)
+pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
 readFasta :: Filename -> [(Str, Sequence)]
-fetchIds :: EntrezSearchConfig -> Query -> [Str]
+readMap :: Filename -> Map key val
 sleep :: Real -> a -> a
 snd :: (a, b) -> b
 strLength :: Str -> Int
@@ -87,42 +92,51 @@ treeify :: [Sequence] -> Tree Int Real Int
 unique :: [a] -> [a]
 withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
 
-pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
 
-classify = pull pullLeaf pullClade where
-  pullLeaf :: Meta -> Str
-  pullLeaf leaf = "asdf" -- leaf@clade
-
-  pullClade :: [Str] -> Str
-  pullClade xs = ifelse (eq (length observedClades) 1) (head observedClades) ""
-    where
-      observedClades = unique (filter (\x -> gt (strLength x) 0) xs)
-
-analysis :: Str -> Str -> Filename -> Filename -> ()
-analysis mindate maxdate reffile treeFile
-  = plotTree treeFile mindate maxdate tree
+analysis :: Date -> Date -> Filename -> Filename -> ()
+analysis mindate maxdate reffile treefile
+  = ( plotTree treefile
+    . classify
+    . annTree treeify
+    . withVals align
+    . search config refmap
+    ) query
   where
-    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+swine[ALL]"
-    config = { email = "weena@mlc.com"
+    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
+    config = { email = "weena@mlang.com"
              , db = "nuccore"
              , mindate = mindate
              , maxdate = maxdate
              , retmax = 1000
              }
-    refStrains = mapKeys makeRefHeader (readFasta reffile)
-    newStrains = retrieve config query
-    tree = ( classify
-           . annTree treeify
-           . withVals align
-           ) (join refStrains newStrains)
+    refmap = readMap reffile
 
 
-retrieve :: EntrezSearchConfig -> Query -> [(Meta, Str)]
-retrieve config
-  = mapVal (translate . longestORF)
+classify = push (pull pullLeaf pullClade) where
+  pullLeaf :: Meta -> Clade
+  pullLeaf leaf = "asdf" -- leaf@clade
+
+  pullClade :: [Clade] -> Clade
+  pullClade xs
+    = ifelse (eq (length seenClades) 1)
+             (head seenClades) ""
+    where
+      seenClades = ( unique
+                   . filter (\ x -> gt (strLength x) 0)
+                   ) xs
+
+  push = mapPC id (\ p c -> ifelse (eq c "") p c)
+
+
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search config refs query =
+  ( map (onFst (labelRef refs))
   . concat
   . map ( map parseRecord
-        . fetchIdRecords
+        . sleep 1.0
+        . fetchRecords
         )
   . chunks 100
+  . join (keys refs)
   . fetchIds config
+  ) query
