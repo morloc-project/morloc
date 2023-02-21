@@ -93,13 +93,17 @@ treeify d
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
-         let exports = [i | (i, _) <- AST.findExports e]
+         let exports = [(i, EV (symbolName v)) | (i, v) <- AST.findExports e]
 
-         -- store all exported indices in state
-         MM.modify (\s -> s {stateExports = exports})
+         -- - store all exported indices in state
+         -- - Add the export name to state. Failing to do so here, will lose
+         --   the name of terms that are exported but not defined, this leads
+         --   to cryptic error messages.
+         MM.modify (\s -> s { stateExports = map fst exports
+                            , stateName = Map.union (stateName s) (Map.fromList exports)})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM collect exports
+         mapM (collect . fst) exports
 
 
 

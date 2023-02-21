@@ -74,6 +74,7 @@ module Morloc.Namespace
   , GammaIndex(..)
   -- * Mostly frontend expressions
   , Symbol(..)
+  , symbolName
   , AliasedSymbol(..)
   , Expr(..)
   , ExprI(..)
@@ -234,6 +235,9 @@ data TermTypes = TermTypes {
 -- before they are separated in Treeify.
 data Symbol = TypeSymbol DT.Text | TermSymbol DT.Text
   deriving (Show, Ord, Eq)
+
+symbolName (TypeSymbol x) = x
+symbolName (TermSymbol x) = x
 
 data AliasedSymbol = AliasedTerm DT.Text DT.Text | AliasedType DT.Text DT.Text
   deriving (Show, Ord, Eq)

@@ -15,7 +15,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
  - [ ] Replace recursive data structures with recursion schemes
 
-0.3x.0 [2023.xx.xx]
+0.4x.0 [2023.xx.xx]
 -------------------
 
  - [ ] typeclasses
@@ -24,18 +24,69 @@ handling for several very different languages (proofs-of-concept).
  - [ ] constraint checking
  - [ ] effect checking
  - [ ] limited inference of concrete type from general type
- - [ ] lambdas
  - [ ] Rust support
+ - [ ] Add `uninstall` function to uninstall a module
+ - [ ] Move exports to the module definition (as in Haskell)
+ - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+
+0.43.1 [2023.xx.xx]
+-------------------
+
+ - [ ] Write and test full preludes for all supported languages
+ - [ ] Make more demos
+ - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
- - [ ] Add `uninstall` function to uninstall a module
- - [ ] Clean up error handling (remove unused error types)
- - [ ] Move exports to the module definition (as in Haskell)
+
+0.43.0 [2023.xx.xx]
+-------------------
+
+ Module sugar
+
  - [ ] Add `*` wildcard to exports and imports
  - [ ] Add `import Foo hiding (...)` syntax
- - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
- - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+ - [ ] Move exports to the module list (as in Haskell)
+
+0.42.0 [2023.xx.xx]
+-------------------
+
+ Styles
+
+ - [ ] add styles
+ - [ ] test C++ functions with `const` and pass-by-reference
+ - [ ] test mutation in python and C++ functions 
+ - [ ] test keyword and argument reordering in python and R
+
+ And a bit of cleaning
+
+ - [ ] simplify the serialization schema in C++ (I think the `schema` empty
+       expression can be removed)
+ - [ ] generate commented type expressions in the pool code 
+
+0.41.0 [2023.xx.xx]
+-------------------
+
+ Before adding the more advanced features (typeclasses, algebraic types,
+ constraints, effects, extensible records) ensure that records, tables, and
+ objects are really working. Also add Haskell, this will be better test of
+ output type correctness than C++.
+
+ - [ ] add Haskell support
+ - [ ] add record keyword aliases
+ - [ ] systematically test records, tables, and objects
+       - [ ] source functions that take each (this is easier, since C++ can use templates)
+       - [ ] source functions that return each
+       - [ ] cases where the same type is an object in one language and a
+             record in another 
+ - [ ] demo practical tables in Python, R, C++, and Haskell (e.g., numpy)
+
+0.40.1 [2023.03.xx]
+-------------------
+ - [ ] Fix typechecking bug in record access
+ - [x] Resolve "shit output" error message (map index to export name)
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly
+ - [ ] Tidy up the verbose diagnostics
 
 0.40.0 [2023.02.04]
 -------------------

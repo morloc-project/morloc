@@ -101,7 +101,7 @@ synthG g (SAnno (Many []) i) = do
             -- This branch is entered for exported type definitions
             -- FIXME: return all definitions and their parameters, check parameter count
             (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
-            Nothing -> error ("Shit output for index " <> show i)-- this should not happen
+            Nothing -> error "Indexing error, this should not occur, please message the maintainer"
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
 
@@ -161,6 +161,9 @@ synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
 synthE i g (AccS e k) = do
   (g1, t1, e1) <- synthG' g e
+  say "accs"
+  say $ "t1:" <+> pretty t1
+  seeGamma g1
   valType <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
       Nothing -> gerr i (KeyError k t1)
