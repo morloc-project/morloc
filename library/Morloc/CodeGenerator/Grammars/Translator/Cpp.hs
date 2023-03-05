@@ -106,8 +106,8 @@ makeTheMaker srcs = do
   let incs = [pretty ("-I" <> i) | i <- includes]
   let flags' = map pretty flags
 
-  -- let cmd = SysRun . Code $ MT.unwords (["g++ --std=c++11", "-o", MT.pack outfile, MT.pack src] ++ flags ++ map MT.pack incs)
-  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++11 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+  -- TODO: This is garbage - the C++ version should NOT be specified here
+  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
 
   return [cmd]
 

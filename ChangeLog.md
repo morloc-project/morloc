@@ -83,6 +83,7 @@ handling for several very different languages (proofs-of-concept).
 0.40.1 [2023.03.xx]
 -------------------
  - [ ] Fix typechecking bug in record access
+ - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly
