@@ -343,7 +343,7 @@ data UnresolvedPacker =
     }
   deriving (Show, Ord, Eq)
 
-type PackMap = Map (TVar, Int) [UnresolvedPacker]
+type PackMap = Map TVar [UnresolvedPacker]
 
 
 -- | A context, see Dunfield Figure 6

@@ -132,10 +132,10 @@ prettyPackMap :: PackMap -> Doc ann
 prettyPackMap m =  "----- pacmaps ----\n"
                 <> vsep (map f (Map.toList m))
                 <> "\n------------------" where
-  f :: ((TVar, Int), [UnresolvedPacker]) -> Doc ann
-  f ((v, i), ps) =
+  f :: (TVar, [UnresolvedPacker]) -> Doc ann
+  f (v, ps) =
     block 4
-      ("packmap" <+> pretty v <> parens (pretty i))
+      ("packmap" <+> pretty v)
       (vsep $ map pretty ps)
 
 

@@ -301,16 +301,31 @@ removeTypeImports d = case MDD.roots d of
     filterEmpty _ _ _ [] = False
     filterEmpty _ _ _ _ = True
 
--- | Packers need to be passed along with the types the pack, they are imported
--- explicitly with the type and they pack. Should packers be universal? The
+-- | Packers need to be passed along with the types they pack, they are imported
+-- explicitly with the type they pack. Should packers be universal? The
 -- packers describe how a term may be simplified. But often there are multiple
 -- reasonable ways to simplify a term, for example `Map a b` could simplify to
--- `[(a,b)]` or `([a],[b])`. The former is semantically richer (since it
+-- `[(a,b)]` or `([a],[b])`. The former is semantically more precise (since it
 -- naturally maintains the one-to-one variant), but the latter may be more
 -- efficient or natural in some languages. For any interface, both sides must
 -- adopt the same forms. The easiest way to enforce this is to require one
 -- global packer, but ultimately it would be better to resolve packers
 -- case-by-base as yet another optimization degree of freedom.
+--
+-- There is another case where multiple packers may make sense. Some types, such
+-- as the generic "Tree node edge leaf" type may not be so generic in idiomatic
+-- representations in some languages. For the phylogenetics case study in the
+-- ICFL2023 paper, the C++ Tree type is fully generic, but the R type is a
+-- "phylo", where edges are branch lengths (numeric) and nodes and leafs are
+-- text labels. Thus the "phylo" type in R is a specialized Tree. This should be
+-- supported. There may be multiple concrete types representing a given general
+-- types. So we should also not unify to a single packer. What will be constant
+-- is the number of type parameters. So the "phylo" type, if it is an instance
+-- of Tree, will be represented as ("phylo" "character" "numeric"
+-- "character"). Like Tree, it takes 3 parameters, but unlike Tree, they are not
+-- generic. If any use of an R function of "phylo" with different type
+-- parameters will fail at compile time, since there is no path to synthesizing
+-- such a type.
 addPackerMap
   :: DAG MVar [(EVar, EVar)] ExprI
   -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)
@@ -326,9 +341,9 @@ gatherPackers
   -> ExprI -- data about the importing module
   -> [( MVar -- the name of an imported module
       , [(EVar , EVar)]
-      , (ExprI, Map.Map (TVar, Int) [UnresolvedPacker]) -- data about the imported module
+      , (ExprI, Map.Map TVar [UnresolvedPacker]) -- data about the imported module
      )]
-  -> MorlocMonad (ExprI, Map.Map (TVar, Int) [UnresolvedPacker])
+  -> MorlocMonad (ExprI, Map.Map TVar [UnresolvedPacker])
 gatherPackers mv e xs =
   case findPackers e of
     (Left err') -> MM.throwError err'
@@ -337,13 +352,13 @@ gatherPackers mv e xs =
       attachPackers mv e m2
       return (e, m2)
 
-attachPackers :: MVar -> ExprI -> Map.Map (TVar, Int) [UnresolvedPacker] -> MorlocMonad ()
+attachPackers :: MVar -> ExprI -> Map.Map TVar [UnresolvedPacker] -> MorlocMonad ()
 attachPackers mv e m = do
   s <- MM.get
   let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
   MM.put (s {statePackers = p})
 
-findPackers :: ExprI -> Either MorlocError (Map.Map (TVar, Int) [UnresolvedPacker])
+findPackers :: ExprI -> Either MorlocError (Map.Map TVar [UnresolvedPacker])
 findPackers expr
   = Map.fromList
   . groupSort
@@ -371,8 +386,8 @@ findPackers expr
     isUnpacker :: EType -> Bool
     isUnpacker e = Set.member Unpack (eprop e)
 
-    toPackerPair :: ((TVar, Int), [(Property, TypeU, Source)]) -> ((TVar, Int), UnresolvedPacker)
-    toPackerPair (k@(v, _), xs) = (,) k $
+    toPackerPair :: (TVar, [(Property, TypeU, Source)]) -> (TVar, UnresolvedPacker)
+    toPackerPair (v, xs) = (,) v $
       UnresolvedPacker
         { unresolvedPackerTerm = Just (EV "Bob") -- TODO: replace this with the general name
         , unresolvedPackerCType = unifyTypes [t | (_, t, _) <- xs, langOf t == langOf v ]
@@ -380,18 +395,18 @@ findPackers expr
         , unresolvedPackerReverse = [src | (Unpack, _, src) <- xs]
         }
 
-    toPair :: (Source, EType) -> Either MorlocError ((TVar, Int), (Property, TypeU, Source))
+    toPair :: (Source, EType) -> Either MorlocError (TVar, (Property, TypeU, Source))
     toPair (src, e) = case packerKeyVal e of
       (Right (Just (key, t, p))) -> return (key, (p, t, src))
       (Right Nothing) -> error "impossible" -- this is called after filtering away general types
       Left err' -> Left err'
 
-    packerKeyVal :: EType -> Either MorlocError (Maybe ((TVar, Int), TypeU, Property))
+    packerKeyVal :: EType -> Either MorlocError (Maybe (TVar, TypeU, Property))
     packerKeyVal e@(EType t0 _ _) = case unqualify t0 of
       (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
         (True, True) -> Left $ CyclicPacker (qualify vs t)
-        (True, False) -> Right (Just ((packerKey b, length vs), qualify vs a, Pack))
-        (False, True) -> Right (Just ((packerKey a, length vs), qualify vs b, Unpack))
+        (True, False) -> Right (Just (packerKey b, qualify vs a, Pack))
+        (False, True) -> Right (Just (packerKey a, qualify vs b, Unpack))
         (False, False) -> Right Nothing
       (vs, t) -> Left $ IllegalPacker (qualify vs t)
 
@@ -406,7 +421,6 @@ findPackers expr
     unifyTypes [] = error "impossible" -- This cannot occur since the right hand list accumulated in groupSort is never empty
     unifyTypes (x:_) = x -- FIXME: need to actually check that they all agree
 
-
 -- packerTypesMatch :: TypeU -> TypeU -> Bool
 -- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
 --   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
@@ -420,10 +434,3 @@ qualify vs t = foldr ForallU t vs
 unqualify :: TypeU -> ([TVar], TypeU)
 unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
 unqualify t = ([], t)
-
--- splitArgs :: TypeU -> ([TVar], [TypeU])
--- splitArgs (ForallU v u) =
---   let (vs, ts) = splitArgs u
---   in (v:vs, ts)
--- splitArgs (FunU ts t) = ([], ts <> [t])
--- splitArgs t = ([], [t])

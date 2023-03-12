@@ -117,7 +117,7 @@ shallowType (SerialPack _ (One (p, _))) = return (typePackerFrom p)
 shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
 shallowType (SerialObject o n ps rs) = do
-  ts <- mapM shallowType (map snd rs)
+  ts <- mapM (shallowType . snd) rs
   return $ NamP o n ps (zip (map fst rs) ts)
 shallowType (SerialReal   x) = return $ VarP x
 shallowType (SerialInt    x) = return $ VarP x
@@ -141,24 +141,23 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST _ (AppP _ []) = undefined
+makeSerialAST _ (AppP p []) = error $ show p
 makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts@(t0:_))
   | isList t = SerialList <$> makeSerialAST m t0
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
-  | otherwise = case Map.lookup (pv2tv v, length ts) m of
-        (Just ps) -> do
-          ps' <- mapM (resolvePacker t ts) ps
-          ts' <- mapM (makeSerialAST m . typePackerType) ps'
-          return $ SerialPack v (Many (zip ps' ts'))
-        Nothing -> MM.throwError . SerializationError . render
-          $ "Cannot find constructor" <+> dquotes (pretty s)
-          <> "<" <> pretty (length ts) <> ">"
-          <+> "in packmap:\n" <> prettyPackMap m
+  | otherwise = case Map.lookup (pv2tv v) m of
+      (Just ps) -> do
+        ps' <- mapM (resolvePacker t ts) ps
+        ts' <- mapM (makeSerialAST m . typePackerType) ps'
+        return $ SerialPack v (Many (zip ps' ts'))
+      Nothing -> MM.throwError . SerializationError . render
+        $ "Cannot find constructor" <+> dquotes (pretty s)
+        <> "<" <> pretty (length ts) <> ">"
+        <+> "in packmap:\n" <> prettyPackMap m
 makeSerialAST m (NamP o n ps rs) = do
   ts <- mapM (makeSerialAST m . snd) rs
   return $ SerialObject o n ps (zip (map fst rs) ts)
 makeSerialAST _ _ = undefined
-
 
 pvarEqual :: PVar -> PVar -> Bool
 pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
