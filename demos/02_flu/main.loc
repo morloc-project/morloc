@@ -1,31 +1,4 @@
-export align
 export analysis
-export at
-export childrenOf
-export chunks
-export elem
-export fetchIdRecords
-export fst
-export gt
-export head
-export ifelse
-export join
-export length
-export longestORF
-export lookup
-export mapLeafs
-export nodes
-export parseRecord
-export pull
-export readFasta
-export fetchIds
-export sleep
-export snd
-export strLength
-export translate
-export treeify
-export unique
-export annTree
 
 type Filename = Str 
 type Accession = Str
@@ -37,12 +10,10 @@ type Label = Str
 type Date = Str
 type Query = Str
 
-
 record Meta = Meta
   { accession :: Accession
   , clade :: Clade
   }
-
 
 record EntrezSearchConfig = EntrezSearchConfig
   { email :: Str
@@ -52,53 +23,57 @@ record EntrezSearchConfig = EntrezSearchConfig
   , retmax :: Int 
   }
 
+import bio.algo
+  ( fooMsa as align    -- align :: [Sequence] -> [Sequence]
+  , njTree as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
+  )
 
--- import bio.io (readFasta, writeFasta)
--- import bio.tree (Tree, treeOf, viewTree)
--- import bio.algo (njTree as treeify, fooMsa as align)
--- import bio.db (searchEntrez as fetchIds, nucleotideAccessionToXml)
--- import bio.util (chunks, sleep)
+import bio.tree
+  ( Tree
+  , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  , pull               -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
+  )
 
-align :: [Sequence] -> [Sequence]
-annTree :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
-at :: [a] -> Int -> a
-childrenOf :: Tree n e l -> n -> [l]
-chunks :: Int -> [a] -> [[a]]
-elem :: a -> [a] -> Bool
-fetchIdRecords :: [Str] -> [Str]
-fetchIds :: EntrezSearchConfig -> Query -> [Str]
-fst :: (a, b) -> a
-gt :: Int -> Int -> Bool
-head :: [a] -> a
-ifelse :: Bool -> a -> a -> a
-join :: [a] -> [a] -> [a]
-keys :: Map a b -> [a]
-labelRef :: Map Accession Clade -> Meta -> Meta
-length :: [a] -> Int
-longestORF :: Sequence -> Sequence
-lookup :: k -> [(k, v)] -> v
-mapLeafs :: (l -> l') -> Tree n e l -> Tree n e l'
-nodes :: Tree n e l -> [n]
-onFst :: (a -> a') -> (a, b) -> (a', b) 
-parseRecord :: Str -> (Meta, Sequence)
-pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
-readFasta :: Filename -> [(Str, Sequence)]
-readMap :: Filename -> Map key val
-sleep :: Real -> a -> a
-snd :: (a, b) -> b
-strLength :: Str -> Int
-translate :: Sequence -> Sequence
-treeify :: [Sequence] -> Tree Int Real Int
-unique :: [a] -> [a]
-withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
+import bio.db
+  ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
+  , nucleotideAccessionToXml as fetchIdRecords  -- fetchIdRecords :: [Str] -> [Str]
+  )
 
+import core
+  ( at        -- at :: [a] -> Int -> a
+  , shard     -- shard :: Int -> [a] -> [[a]]
+  , elem      -- elem :: a -> [a] -> Bool
+  , fst       -- fst :: (a, b) -> a
+  , gt        -- gt :: Int -> Int -> Bool
+  , eq        -- eq :: Int -> Int -> Bool
+  , head      -- head :: [a] -> a
+  , ifelse    -- ifelse :: Bool -> a -> a -> a
+  , join      -- join :: [a] -> [a] -> [a]
+  , keys      -- keys :: Map a b -> [a]
+  , length    -- length :: [a] -> Int
+  , lookup    -- lookup :: k -> [(k, v)] -> v
+  , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
+  , sleep     -- sleep :: Real -> a -> a
+  , snd       -- snd :: (a, b) -> b
+  , strLength -- strLength :: Str -> Int
+  , unique    -- unique :: [a] -> [a]
+  , withVals  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
+  , readMap   -- readMap :: Filename -> Map key val
+  )
+
+source Py from "analysis-functions.py"
+  ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
+  , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
+  , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
+  )
 
 analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . classify
-    . annTree treeify
-    . withVals align
+    . treeBy treeify
+    . withVals align  -- TODO: rethink this ... this is rather particular
     . search config refmap
     ) query
   where
@@ -110,6 +85,20 @@ analysis mindate maxdate reffile treefile
              , retmax = 1000
              }
     refmap = readMap reffile
+
+
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search config refs query =
+  ( map (onFst (labelRef refs))
+  . concat
+  . map ( map parseRecord
+        . sleep 1.0
+        . fetchRecords
+        )
+  . shard 100
+  . join (keys refs)
+  . fetchIds config
+  ) query
 
 
 classify = push (pull pullLeaf pullClade) where
@@ -125,18 +114,4 @@ classify = push (pull pullLeaf pullClade) where
                    . filter (\ x -> gt (strLength x) 0)
                    ) xs
 
-  push = mapPC id (\ p c -> ifelse (eq c "") p c)
-
-
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
-search config refs query =
-  ( map (onFst (labelRef refs))
-  . concat
-  . map ( map parseRecord
-        . sleep 1.0
-        . fetchRecords
-        )
-  . chunks 100
-  . join (keys refs)
-  . fetchIds config
-  ) query
+  push = mapChildWithParent id (\ p c -> ifelse (eq c "") p c)

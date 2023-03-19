@@ -22,6 +22,8 @@ module Morloc.Typecheck.Internal
   , tvarname
   , newvarRich
   , evarname
+  , qualify
+  , unqualify
   -- * Typeclasses
   , Applicable(..)
   , Indexable(..)
@@ -37,6 +39,8 @@ module Morloc.Typecheck.Internal
   , occursCheck
   -- * subtyping
   , subtype
+  -- * misc
+  , seeGamma
   ) where
 
 import Morloc.Namespace
@@ -44,13 +48,23 @@ import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import Morloc.Frontend.Lang.DefaultTypes (recordGC)
+import qualified Morloc.Monad as MM
 
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 
+qualify :: [TVar] -> TypeU -> TypeU
+qualify vs t = foldr ForallU t vs
+
+unqualify :: TypeU -> ([TVar], TypeU)
+unqualify (ForallU v (unqualify -> (vs, t))) = (v:vs, t)
+unqualify t = ([], t)
 
 class Applicable a where
   apply :: Gamma -> a -> a
+
+seeGamma :: Gamma -> MorlocMonad ()
+seeGamma g = MM.say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
@@ -361,7 +375,6 @@ occursCheck t1 t2 place = do
 -- [t/v]A
 substitute :: TVar -> TypeU -> TypeU
 substitute v t = substituteTVar v (ExistU v [] []) t
-
 
 access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])
 access1 v gs =

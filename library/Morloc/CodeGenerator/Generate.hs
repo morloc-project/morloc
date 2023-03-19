@@ -1447,7 +1447,7 @@ chooseSerializer = mapM chooseSerializer' where
   chooseSerializer' (NullM t) = return $ NullM t
 
   oneSerial :: SerialAST Many -> MorlocMonad (SerialAST One)
-  oneSerial (SerialPack _ (Many [])) = MM.throwError . SerializationError $ "No valid serializer found"
+  oneSerial (SerialPack v (Many [])) = MM.throwError . SerializationError . render $ "No valid serializer found for" <+> dquotes (pretty v)
   oneSerial (SerialPack v (Many ((p,s):_))) = do
     s' <- oneSerial s
     return $ SerialPack v (One (p, s'))

@@ -496,9 +496,6 @@ say d = do
   depth <- MM.getDepth
   debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
 
-seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
-
 seeType :: TypeU -> MorlocMonad ()
 seeType t = say $ pretty t
 

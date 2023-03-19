@@ -160,7 +160,7 @@ data MorlocState = MorlocState
   , stateExports :: [Int]
   -- ^ The indices of each exported term
   , stateName :: Map Int EVar
-    -- ^ store the names of morloc compositions
+  -- ^ store the names of morloc compositions
   }
 
 {-
@@ -333,12 +333,14 @@ data UnresolvedPacker =
     -- ^ The general import term used for this type. For example, the 'Map'
     -- type may have language-specific realizations such as 'dict' or 'hash',
     -- but it is imported as 'import xxx (Map)'.
-    , unresolvedPackerCType :: TypeU
-    -- ^ The decomposed (unpacked) type
+    , unresolvedPackedType :: TypeU
+    -- ^ The packed type (e.g., Map key val)
+    , unresolvedUnpackedType :: TypeU
+    -- ^ The decomposed (unpacked) type (e.g., [(key,val)])
     , unresolvedPackerForward :: [Source]
-    -- ^ The unpack function, there may be more than one, the compiler will make
-    -- a half-hearted effort to find the best one. It is called "Forward" since
-    -- it is moves one step towards serialization.
+    -- ^ The unpack function, there may be more than one, the compiler will
+    -- try to find the best one. It is called "Forward" since it moves one
+    -- step towards serialization.
     , unresolvedPackerReverse :: [Source]
     }
   deriving (Show, Ord, Eq)
@@ -804,25 +806,6 @@ instance Typelike TypeU where
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
   normalizeType (ExistU v ps ds) = ExistU v (map normalizeType ps) (map normalizeType ds)
   normalizeType t = t
-
--- -- | A type with existentials and universals
--- data TypeU
---   = VarU TVar
---   -- ^ (a)
---   | ExistU TVar
---     [TypeU] -- type parameters
---     [TypeU] -- default types
---   -- ^ (a^) will be solved into one of the other types
---   | ForallU TVar TypeU
---   -- ^ (Forall a . A)
---   | FunU [TypeU] TypeU -- function
---   | AppU TypeU [TypeU] -- type application
---   | NamU NamType TVar [TypeU] [(Text, TypeU)] -- record / object / table
---   deriving (Show, Ord, Eq)
-
-
-
-
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
 newVariable :: TypeU -> TypeU -> TVar

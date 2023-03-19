@@ -119,11 +119,12 @@ prettyTypeU (NamU o n ps rs)
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 instance Pretty UnresolvedPacker where
-  pretty (UnresolvedPacker v t fs rs) = vsep
-    [ pretty v
-    , pretty t 
-    , "forward:" <+> tupled (map pretty fs)
-    , "reverse:" <+> tupled (map pretty rs)
+  pretty p = vsep
+    [ "packerTerm:" <+> pretty (unresolvedPackerTerm p)
+    , "packedType:" <+> pretty (unresolvedPackedType p)
+    , "unpackedType:" <+> pretty (unresolvedUnpackedType p)
+    , "forward:" <+> pretty (unresolvedPackerForward p)
+    , "reverse:" <+> pretty (unresolvedPackerReverse p)
     ]
 
 
