@@ -503,6 +503,7 @@ data Config =
   Config
     { configHome :: !Path
     , configLibrary :: !Path
+    , configPlain :: !Path
     , configTmpDir :: !Path
     , configLangPython3 :: !Path
     -- ^ path to python interpreter

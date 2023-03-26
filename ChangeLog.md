@@ -87,10 +87,13 @@ handling for several very different languages (proofs-of-concept).
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
  - [ ] Bring back the cut operation to the bidirectional typechecker
-       The current approach depends on renaming every term, which is ugly
- - [ ] Tidy up the verbose diagnostics
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
  - [ ] Fix error raised when a module exporting a type is compiled 
+ - [ ] Tidy up the verbose diagnostics
  - [x] Add multiple levels of verbosity (quiet by default)
+ - [x] Restructured the library to avoid name conflicts with pre-existing
+       packages.
 
 0.40.0 [2023.02.04]
 -------------------

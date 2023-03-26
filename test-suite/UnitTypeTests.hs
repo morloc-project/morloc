@@ -52,6 +52,7 @@ runBackendCheck code = do
 emptyConfig =  Config
     { configHome = ""
     , configLibrary = ""
+    , configPlain = ""
     , configTmpDir = ""
     , configLangPython3 = ""
     , configLangR = ""
