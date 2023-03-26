@@ -83,11 +83,14 @@ handling for several very different languages (proofs-of-concept).
 0.40.1 [2023.03.xx]
 -------------------
  - [ ] Fix typechecking bug in record access
+ - [ ] Allow concrete (un)packers to vary in number of generic terms
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly
  - [ ] Tidy up the verbose diagnostics
+ - [ ] Fix error raised when a module exporting a type is compiled 
+ - [x] Add multiple levels of verbosity (quiet by default)
 
 0.40.0 [2023.02.04]
 -------------------

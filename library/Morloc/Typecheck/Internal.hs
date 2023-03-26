@@ -39,14 +39,22 @@ module Morloc.Typecheck.Internal
   , occursCheck
   -- * subtyping
   , subtype
-  -- * misc
+  -- * debugging
   , seeGamma
+  -- debugging
+  , enter
+  , insetSay
+  , leave
+  , peak
+  , peakGen
+  , seeType
+  , showGen
   ) where
 
 import Morloc.Namespace
 import qualified Morloc.Data.Text as MT
 import Morloc.Data.Doc
-import Morloc.Pretty ()
+import Morloc.Pretty (prettySExpr, prettySAnno)
 import Morloc.Frontend.Lang.DefaultTypes (recordGC)
 import qualified Morloc.Monad as MM
 
@@ -62,9 +70,6 @@ unqualify t = ([], t)
 
 class Applicable a where
   apply :: Gamma -> a -> a
-
-seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = MM.say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
 
 -- | Apply a context to a type (See Dunfield Figure 8).
 instance Applicable TypeU where
@@ -502,3 +507,36 @@ evarname :: Gamma -> MT.Text -> (Gamma, EVar)
 evarname g prefix =
   let i = gammaCounter g
   in (g {gammaCounter = i + 1}, EV (prefix <> MT.pack (show i)))
+
+
+-- debugging -------------------
+
+enter :: MDoc -> MorlocMonad ()
+enter d = do
+  depth <- MM.incDepth
+  insetSay $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
+
+insetSay :: MDoc -> MorlocMonad ()
+insetSay d = do
+  depth <- MM.getDepth
+  MM.sayVVV $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
+
+seeType :: TypeU -> MorlocMonad ()
+seeType t = insetSay $ pretty t
+
+leave :: MDoc -> MorlocMonad ()
+leave d = do
+  depth <- MM.decDepth
+  insetSay $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
+
+seeGamma :: Gamma -> MorlocMonad ()
+seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
+
+peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
+peak = insetSay . prettySExpr pretty showGen
+
+peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
+peakGen = insetSay . prettySAnno pretty showGen
+
+showGen :: Pretty g => g -> MDoc
+showGen g = parens (pretty g)

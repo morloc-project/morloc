@@ -41,12 +41,12 @@ typecheck = mapM run where
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
           ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
       (g2, _, e2) <- synthG' g1 e1
-      say "-------- leaving frontend typechecker ------------------"
-      say "g2:"
+      insetSay "-------- leaving frontend typechecker ------------------"
+      insetSay "g2:"
       seeGamma g2
-      say "e2:"
+      insetSay "e2:"
       peakGen e2
-      say "========================================================"
+      insetSay "========================================================"
       return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
 -- TypeU --> Type
@@ -161,8 +161,8 @@ synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
 synthE i g (AccS e k) = do
   (g1, t1, e1) <- synthG' g e
-  say "accs"
-  say $ "t1:" <+> pretty t1
+  insetSay "accs"
+  insetSay $ "t1:" <+> pretty t1
   seeGamma g1
   valType <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
@@ -211,7 +211,7 @@ synthE i g0 f@(LamS vs x) = do
   if n > 0
     then do
       (g2, f2) <- expand n g1 f
-      say $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
+      insetSay $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
       synthE i g2 f2
     else do
       -- create existentials for everything and pass it off to check
@@ -262,19 +262,19 @@ synthE i g (TupS (e:es)) = do
 --   Records
 synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
 synthE i g0 (NamS ((k,x):rs)) = do
-  say $ "Entering synthE NamS (k=" <> pretty k <> ")"
+  insetSay $ "Entering synthE NamS (k=" <> pretty k <> ")"
   seeGamma g0
-  say "-------- syn"
+  insetSay "-------- syn"
   -- type the head
   (g1, headType, headExpr) <- synthG' g0 x
 
   -- type the tail
   (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
 
-  say $ "Exiting synthE NamS (k=" <> pretty k <> ")"
-  say $ "  k type:" <+> pretty headType
+  insetSay $ "Exiting synthE NamS (k=" <> pretty k <> ")"
+  insetSay $ "  k type:" <+> pretty headType
   seeGamma g2
-  say "-------- syn"
+  insetSay "-------- syn"
 
   -- merge the head with tail
   t <- case tailType of
@@ -380,7 +380,7 @@ application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyGen g1) es1 
       funType = apply g1 $ FunU (as1 <> remainder) b0
-  say $ "remainder:" <+> vsep (map pretty remainder)
+  insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
@@ -480,37 +480,25 @@ checkE i g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  say $ parens (pretty a) <+> "<:" <+> parens (pretty b)
+  insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype a b g of
     (Left err') -> gerr i err'
     (Right x) -> return x
 
 
+-- helpers
+
+-- apply context to a SAnno
+applyGen :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
+applyGen g = mapSAnno (fmap (apply g)) id
+
+applyCon :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
+applyCon g = mapSExpr (fmap (apply g)) id
+
+
 ---- debugging
-
-enter :: Doc ann -> MorlocMonad ()
-enter d = do
-  depth <- MM.incDepth
-  debugLog $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
-
-say :: Doc ann -> MorlocMonad ()
-say d = do
-  depth <- MM.getDepth
-  debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
-
-
-seeType :: TypeU -> MorlocMonad ()
-seeType t = say $ pretty t
-
-leave :: Doc ann -> MorlocMonad ()
-leave d = do
-  depth <- MM.decDepth
-  debugLog $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
-
-debugLog :: Doc ann -> MorlocMonad ()
-debugLog d = do
-  verbosity <- MM.gets stateVerbosity
-  when (verbosity > 0) $ (liftIO . putDoc) d
 
 synthG' g x = do
   enter "synthG"
@@ -558,20 +546,3 @@ application' i g es t = do
   seeType t'
   mapM_ peakGen es'
   return r
-
-peak :: Foldable f => SExpr g f c -> MorlocMonad ()
-peak = say . prettySExpr (const "") (const "")
--- peak x = say $ f x where
-
-peakGen :: Foldable f => SAnno g f c -> MorlocMonad ()
-peakGen = say . prettySAnno (const "") (const "")
--- peak x = say $ f x where
-
--- apply context to a SAnno
-applyGen :: (Functor gf, Functor f, Applicable g)
-         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
-applyGen g = mapSAnno (fmap (apply g)) id
-
-applyCon :: (Functor gf, Functor f, Applicable g)
-         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
-applyCon g = mapSExpr (fmap (apply g)) id

@@ -32,7 +32,7 @@ cliParser = hsubparser
 data MakeCommand = MakeCommand
   { makeExpression :: Bool
   , makeConfig :: String
-  , makeVerbose :: Bool
+  , makeVerbose :: Int
   , makeVanilla :: Bool
   , makeOutfile :: String
   , makeScript :: String
@@ -53,7 +53,7 @@ makeSubcommand = command "make" (info (CmdMake <$> makeCommandParser) (progDesc 
 
 data InstallCommand = InstallCommand
   { installConfig :: String
-  , installVerbose :: Bool
+  , installVerbose :: Int
   , installGithub :: Bool
   , installVanilla :: Bool
   , installModuleName :: String
@@ -77,7 +77,7 @@ data TypecheckCommand = TypecheckCommand
   , typecheckType :: Bool
   , typecheckRaw :: Bool
   , typecheckExpression :: Bool
-  , typecheckVerbose :: Bool
+  , typecheckVerbose :: Int
   , typecheckRealize :: Bool
   , typecheckScript :: String
   }
@@ -117,12 +117,8 @@ optRaw = switch
   <> help "print raw objects"
   )
 
-optVerbose :: Parser Bool
-optVerbose = switch
-  ( long "verbose"
-  <> short 'v'
-  <> help "print debugging information"
-  )
+optVerbose :: Parser Int
+optVerbose = length <$> many (flag' () (short 'v'))
 
 optRealize :: Parser Bool
 optRealize = switch

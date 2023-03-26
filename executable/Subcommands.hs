@@ -20,7 +20,6 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
 import qualified Morloc.Data.GMap as GMap
 import Morloc.CodeGenerator.Namespace (TypeP, prettyGenTypeP)
-import Morloc.Pretty
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -48,9 +47,9 @@ getConfig' "" _ = Config.loadMorlocConfig Nothing
 getConfig' filename _ = Config.loadMorlocConfig (Just filename)
 
 getVerbosity :: CliCommand -> Int
-getVerbosity (CmdMake      g) = if makeVerbose      g then 1 else 0
-getVerbosity (CmdInstall   g) = if installVerbose   g then 1 else 0
-getVerbosity (CmdTypecheck g) = if typecheckVerbose g then 1 else 0
+getVerbosity (CmdMake      g) = makeVerbose      g
+getVerbosity (CmdInstall   g) = installVerbose   g
+getVerbosity (CmdTypecheck g) = typecheckVerbose g
 
 readScript :: Bool -> String -> IO (Maybe Path, Code)
 readScript True code = return (Nothing, Code (MT.pack code))
@@ -83,7 +82,7 @@ cmdMake args verbosity config = do
 cmdTypecheck :: TypecheckCommand -> Int -> Config.Config -> IO ()
 cmdTypecheck args _ config = do
   (path, code) <- readScript (typecheckExpression args) (typecheckScript args)
-  let verbosity = if typecheckVerbose args then 1 else 0
+  let verbosity = typecheckVerbose args
   if typecheckType args
     then case F.readType (unCode code) of
       (Left err') -> print (errorBundlePretty err')

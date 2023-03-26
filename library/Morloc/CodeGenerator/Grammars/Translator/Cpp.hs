@@ -24,7 +24,6 @@ import Morloc.CodeGenerator.Serial ( isSerializable
                                    , shallowType
                                    )
 import Morloc.CodeGenerator.Grammars.Common
-import Morloc.CodeGenerator.Typecheck (say)
 import qualified Morloc.CodeGenerator.Grammars.Translator.Source.CppInternals as Src
 import Morloc.Data.Doc
 import Morloc.Quasi
@@ -57,9 +56,9 @@ type RecMap = [((PVar, [PVar]), RecEntry)]
 -- tree rewrites
 preprocess :: ExprM Many -> MorlocMonad (ExprM Many)
 preprocess e = do
-    say "inverting"
+    MM.sayVVV "inverting"
     e' <- invertExprM e
-    say $ "e' = " <> pretty e'
+    MM.sayVVV $ "e' = " <> pretty e'
     return e'
 
 translate :: [Source] -> [ExprM One] -> MorlocMonad Script
