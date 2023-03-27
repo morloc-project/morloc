@@ -45,7 +45,7 @@ typecheck = mapM run where
       insetSay "g2:"
       seeGamma g2
       insetSay "e2:"
-      peakGen e2
+      -- peakGen e2
       insetSay "========================================================"
       return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
@@ -514,23 +514,23 @@ checkG' g x t = do
 
 synthE' i g x = do
   enter "synthE"
-  peak x
+  -- peak x
   seeGamma g
   r@(g', t, x') <- synthE i g x 
   leave "synthE"
-  peak x'
+  -- peak x'
   seeGamma g'
   seeType t
   return r
 
 checkE' i g x t = do
   enter "checkE"
-  peak x
+  -- peak x
   seeType t
   seeGamma g
   r@(g', t', x') <- checkE i g x t 
   leave "checkE"
-  peak x'
+  -- peak x'
   seeType t'
   seeGamma g'
   return r
@@ -539,10 +539,10 @@ application' i g es t = do
   enter "application"
   seeGamma g
   seeType t
-  mapM_ peakGen es
+  -- mapM_ peakGen es
   r@(g',t',es') <- application i g es t
   leave "application"
   seeGamma g'
   seeType t'
-  mapM_ peakGen es'
+  -- mapM_ peakGen es'
   return r

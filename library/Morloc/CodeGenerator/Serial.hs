@@ -115,7 +115,7 @@ serialAstToType' (SerialUnknown (PV lang _ _)) = defaultSerialType lang
 
 -- | get only the toplevel type
 shallowType :: SerialAST One -> MorlocMonad TypeP
-shallowType (SerialPack _ (One (p, _))) = return (typePackerFrom p)
+shallowType (SerialPack _ (One (p, _))) = return (typePackerPacked p)
 shallowType (SerialList s) = shallowType s |>> defaultListFirst
 shallowType (SerialTuple ss) = mapM shallowType ss |>> defaultTupleFirst
 shallowType (SerialObject o n ps rs) = do
@@ -150,7 +150,7 @@ makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts@(t0:_))
   | otherwise = case Map.lookup (pv2tv v) m of
       (Just ps) -> do
         ps' <- catMaybes <$> mapM (resolvePacker t) ps
-        ts' <- mapM (makeSerialAST m . typePackerType) ps'
+        ts' <- mapM (makeSerialAST m . typePackerUnpacked) ps'  -- recurse into the unpacked type
 
         MM.say $ "makeSerialAST:" <+> pretty t
         MM.say $ "ps:" <+> tupled (map pretty ps)
@@ -202,44 +202,81 @@ resolvePacker :: TypeP -> UnresolvedPacker -> MorlocMonad (Maybe TypePacker)
 resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedUnpackedType -> (_, AppU _ ts2))
     | length ts1 == length ts2 = do
         -- genericPackFunction <- regeneric (unresolvedPackedType p) (unresolvedUnpackedType p)
-        resolvedUnpackedType <- resolveP (type2typeu (typeOf packedType)) (unresolvedPackedType p) (unresolvedUnpackedType p)
-        pack <- asPack resolvedUnpackedType
-        return $ Just pack
+        resolvedUnpackedType <- resolveP packedType (unresolvedPackedType p) (unresolvedUnpackedType p) (unresolvedPackerGeneralTypes p)
+        return . Just $ TypePacker
+            { typePackerPacked = packedType
+            , typePackerUnpacked = resolvedUnpackedType
+            , typePackerForward = unresolvedPackerForward p
+            , typePackerReverse = unresolvedPackerReverse p
+            }
     | otherwise = return Nothing
     where
-        asPack :: TypeU -- unpacked type
-               -> MorlocMonad TypePacker
-        asPack unpackedType = do
-            t <- weaveTypes Nothing (typeOf unpackedType)
-            let packer = TypePacker { typePackerType = t
-                , typePackerFrom = packedType
-                , typePackerForward = unresolvedPackerForward p
-                , typePackerReverse = unresolvedPackerReverse p
-                }
-            MM.say $ "typepacker:" <+> pretty packer
-            return packer
-
         -- Both sides of the packer function are guaranteed to have the same
         -- generic values, this is guaranteed by the implementation of
         -- Desugar.hs. So it is sufficient to resolve the generics in the packed
         -- type and map them to the unpacked type.
+        --
+        -- Example:
+        --
+        --  resolveP ("dict" "str" "int") ("dict" a b) ("list" ("list" a b) --> ("list" ("list" "str" "int"))
+        --                    x_r             x_u                y_u                       y_r
+        --
+        -- x_u is the unresolved packed type that is extracted before typechecking
+        -- x_r is equal to x_u after type inference
+        --
+        -- () |- x_u <: x_y -| g
+        -- y_r = apply g y_u
+        --
+        -- y_u is the unresolved unpacked type that is extracted with x_u
+        --
+        -- y_u and y_r are both processed by Desugar.hs and are both guaranteed
+        -- to share the same set of generics. We can find the identity of these
+        -- generics by subtyping x_u against x_y. The produced context contains
+        -- the types for each generic variable. The context can be applied to
+        -- y_u to get the final desired y_r.
         resolveP
-            :: TypeU -- resolved packed type (e.g., "dict" "str" "int")
+            :: TypeP -- resolved packed type (e.g., "dict" "str" "int")
             -> TypeU -- unresolved packed type (e.g., "dict" a b)
             -> TypeU -- unresolved unpacked type (e.g., "list" ("list" a b))
-            -> MorlocMonad TypeU -- the resolved unpacked types
-        resolveP a b c = do
-            -- MM.say   "resolveP:"
-            -- MM.say $ "a" <+> pretty a
-            -- MM.say $ "b" <+> pretty b
-            -- MM.say $ "c" <+> pretty c
-            case subtype b a (Gamma 0 []) of
-                (Left err) -> MM.throwError . SerializationError . render $ pretty err
+            -> Maybe (TypeU, TypeU) -- The general unresolved packed and unpacked types
+            -> MorlocMonad TypeP -- the resolved unpacked types
+        resolveP a b c generalTypes = do
+            let ca = type2typeu (typeOf a)
+                gaMay = type2typeu <$> generalTypeOf a
+
+            MM.say   "resolveP:"
+            MM.say $ "a:" <+> pretty a
+            MM.say $ "b:" <+> pretty b
+            MM.say $ "c:" <+> pretty c
+            MM.say $ "ca:" <+> pretty ca
+            MM.say $ "gaMay:" <+> pretty gaMay
+            MM.say $ "generalTypes:" <+> maybe "none" (\(x,y) -> tupled [pretty x, pretty y]) generalTypes
+
+            unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
+                (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
                 (Right g) -> do
-                    seeGamma g
-                    -- MM.say $ "resolved b" <+> pretty (apply g (existential b))
-                    -- MM.say $ "resolved c" <+> pretty (apply g (existential c))
+
+                    MM.say $ "resolved cb" <+> pretty (apply g (existential b))
+                    MM.say $ "resolved cc" <+> pretty (apply g (existential c))
+
                     return (apply g (existential c))
+            
+            unpackedGeneralType <- case (gaMay, generalTypes) of
+                (Just r, Just (u, gc)) ->
+                    -- where r  is the resolved general type (no generics)
+                    --       u  is the unresolved general packed type that was stored in Desugar.hs
+                    --       gc is the unresolved general unpacked type
+                    case subtype u r (Gamma 0 []) of
+                        (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
+                        (Right g) -> do
+
+                            MM.say $ "resolved gb" <+> pretty (apply g (existential b))
+                            MM.say $ "resolved gc" <+> pretty (apply g (existential c))
+
+                            return . Just $ apply g (existential gc)
+                _ -> return Nothing
+
+            weaveTypes (typeOf <$> unpackedGeneralType) (typeOf unpackedConcreteType)
 
         -- Replaces each generic term with an existential term of the same name
         existential :: TypeU -> TypeU

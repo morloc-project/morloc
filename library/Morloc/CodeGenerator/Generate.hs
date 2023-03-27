@@ -44,7 +44,7 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.CodeGenerator.Typecheck (typecheck, say, peak)
+import Morloc.CodeGenerator.Typecheck (typecheck, peak)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import qualified Data.Map as Map

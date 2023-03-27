@@ -342,6 +342,8 @@ data UnresolvedPacker =
     -- try to find the best one. It is called "Forward" since it moves one
     -- step towards serialization.
     , unresolvedPackerReverse :: [Source]
+    , unresolvedPackerGeneralTypes :: Maybe (TypeU, TypeU)
+    -- ^ The general packed and unpacked types, if available
     }
   deriving (Show, Ord, Eq)
 

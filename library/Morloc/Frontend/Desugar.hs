@@ -20,6 +20,7 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
+import Data.Bifunctor (second)
 import qualified Morloc.Frontend.PartialOrder as MTP
 import qualified Morloc.Data.Text as MT
 import Morloc.Typecheck.Internal (qualify, unqualify)
@@ -360,74 +361,94 @@ attachPackers mv e m = do
   let p = GMap.insertMany (AST.getIndices e) mv m (statePackers s)
   MM.put (s {statePackers = p})
 
+-- | This function should 1) couple matching pack/unpack functions, 2) find the
+-- general types for the packed and unpacked forms, and 3) tie all this info
+-- together
 findPackers :: ExprI -> Either MorlocError (Map.Map TVar [UnresolvedPacker])
 findPackers expr
   = Map.fromList
   . groupSort
-  . map toPackerPair
+  . map (second toPackerPair)
   . groupSort
   <$> mapM toPair
-    [ (src, t)
+    [ (alias1, src, t)
     | (alias1, t) <- packers
     , src@(Source _ lang2 _ alias2 _) <- sources
     , alias1 == alias2
     , langOf t == Just lang2
     ]
+
   where
-    sources :: [Source]
-    sources = AST.findSources expr
 
-    packers :: [(EVar, EType)]
-    packers = [ (v, e)
-              | (v, _, e) <- AST.findSignatures expr -- drop the label (eventually this may need to be added back in
-              ,  isPacker e || isUnpacker e]
+  sources :: [Source]
+  sources = AST.findSources expr
 
-    isPacker :: EType -> Bool
-    isPacker e = Set.member Pack (eprop e)
+  generalMap
+    = Map.fromList
+    . mapMaybe (\(l, ts) -> (,) l <$> unifyGeneralTypes ts)
+    . groupSort
+    $ [ (v, t)
+      | (v, t) <- packers
+      , isNothing (langOf t)
+      ]
 
-    isUnpacker :: EType -> Bool
-    isUnpacker e = Set.member Unpack (eprop e)
+  unifyGeneralTypes :: [EType] -> Maybe (TypeU, TypeU) -- (packed type, unpacked type)
+  unifyGeneralTypes (x@(unqualify . etype -> (vs, FunU [a] b)):_)
+      | isPacker x   = Just (qualify vs b, qualify vs a)
+      | isUnpacker x = Just (qualify vs a, qualify vs b)
+  unifyGeneralTypes _ = Nothing
 
-    toPackerPair :: (TVar, [(Property, TypeU, TypeU, Source)]) -> (TVar, UnresolvedPacker)
-    toPackerPair (v, xs) = (,) v $
-      let (packedType, unpackedType) = unifyTypes [(t, u) | (_, t, u, _) <- xs, langOf t == langOf v]
-      in UnresolvedPacker
-          { unresolvedPackerTerm = Just (EV "Bob") -- TODO: replace this with the general name
-          , unresolvedPackedType = packedType
-          , unresolvedUnpackedType = unpackedType
-          , unresolvedPackerForward = [src | (Pack, _, _, src) <- xs]
-          , unresolvedPackerReverse = [src | (Unpack, _, _, src) <- xs]
-          }
+  -- pulls out the packed type name, this key is used to group together all the
+  -- packers for that language-specific type
+  toPair :: (EVar, Source, EType) -> Either MorlocError (TVar, (EVar, Property, TypeU, TypeU, Source))
+  toPair (fname, src, e) = case packerKeyVal e of
+    (Right (Just (key, packedType, unpackedType, p))) -> return (key, (fname, p, packedType, unpackedType, src))
+    (Right Nothing) -> error "impossible" -- this is called after filtering away general types
+    Left err' -> Left err'
 
-    toPair :: (Source, EType) -> Either MorlocError (TVar, (Property, TypeU, TypeU, Source))
-    toPair (src, e) = case packerKeyVal e of
-      (Right (Just (key, packedType, unpackedType, p))) -> return (key, (p, packedType, unpackedType, src))
-      (Right Nothing) -> error "impossible" -- this is called after filtering away general types
-      Left err' -> Left err'
+  packerKeyVal :: EType -> Either MorlocError (Maybe (TVar, TypeU, TypeU, Property))
+  packerKeyVal e@(EType t0 _ _) = case unqualify t0 of
+    (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
+      (True, True) -> Left $ CyclicPacker (qualify vs t)
+      (True, False) -> Right (Just (packerKey b, qualify vs b, qualify vs a, Pack))
+      (False, True) -> Right (Just (packerKey a, qualify vs a, qualify vs b, Unpack))
+      (False, False) -> Right Nothing
+    (vs, t) -> Left $ IllegalPacker (qualify vs t)
 
-    packerKeyVal :: EType -> Either MorlocError (Maybe (TVar, TypeU, TypeU, Property))
-    packerKeyVal e@(EType t0 _ _) = case unqualify t0 of
-      (vs, t@(FunU [a] b)) ->  case (isPacker e, isUnpacker e) of
-        (True, True) -> Left $ CyclicPacker (qualify vs t)
-        (True, False) -> Right (Just (packerKey b, qualify vs b, qualify vs a, Pack))
-        (False, True) -> Right (Just (packerKey a, qualify vs a, qualify vs b, Unpack))
-        (False, False) -> Right Nothing
-      (vs, t) -> Left $ IllegalPacker (qualify vs t)
+  packerKey :: TypeU -> TVar
+  packerKey (VarU v)   = v
+  packerKey (AppU (VarU v) _) = v
+  packerKey (NamU _ v _ _) = v
+  packerKey t = error $ "bad packer: " <> show t
 
-    packerKey :: TypeU -> TVar
-    packerKey (VarU v)   = v
-    packerKey (AppU (VarU v) _) = v
-    packerKey (NamU _ v _ _) = v
-    packerKey t = error $ "bad packer: " <> show t
+  toPackerPair :: [(EVar, Property, TypeU, TypeU, Source)] -> UnresolvedPacker
+  toPackerPair xs =
+    let (genMay, packedType, unpackedType) = unifyTypes [(f, t, u) | (f, _, t, u, _) <- xs]
+    in UnresolvedPacker
+         { unresolvedPackerTerm = Nothing
+         , unresolvedPackedType = packedType
+         , unresolvedUnpackedType = unpackedType
+         , unresolvedPackerForward = [src | (_, Pack, _, _, src) <- xs]
+         , unresolvedPackerReverse = [src | (_, Unpack, _, _, src) <- xs]
+         , unresolvedPackerGeneralTypes = genMay
+         }
 
-    -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
-    unifyTypes :: [(TypeU, TypeU)] -> (TypeU, TypeU)
-    unifyTypes [] = error "impossible" -- This cannot occur since the right hand list accumulated in groupSort is never empty
-    unifyTypes (x:_) = x -- FIXME: need to actually check that they all agree
+  packers :: [(EVar, EType)]
+  packers = [ (v, e)
+            | (v, _, e) <- AST.findSignatures expr
+            ,  isPacker e || isUnpacker e
+            ]
 
--- packerTypesMatch :: TypeU -> TypeU -> Bool
--- packerTypesMatch t1 t2 = case (splitArgs t1, splitArgs t2) of
---   ((vs1@[_,_], [t11, t12]), (vs2@[_,_], [t21, t22]))
---     -> MTP.equivalent (qualify vs1 t11) (qualify vs2 t22)
---     && MTP.equivalent (qualify vs1 t12) (qualify vs2 t21)
---   _ -> False
+  isPacker :: EType -> Bool
+  isPacker e = Set.member Pack (eprop e)
+
+  isUnpacker :: EType -> Bool
+  isUnpacker e = Set.member Unpack (eprop e)
+
+  -- FIXME: this is a place where real user errors will be caught, so needs good error reporting
+  unifyTypes :: [(EVar, TypeU, TypeU)] -> (Maybe (TypeU, TypeU), TypeU, TypeU)
+  unifyTypes [] = error "impossible" -- This cannot occur since the right hand list accumulated in groupSort is never empty
+  unifyTypes [(_, p, u)] = (Nothing, p, u)
+  unifyTypes ((f, p, u):xs) = case Map.lookup f generalMap of
+    Nothing -> unifyTypes xs
+    mayGen -> (mayGen, p, u)

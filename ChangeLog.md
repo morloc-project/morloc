@@ -79,6 +79,9 @@ handling for several very different languages (proofs-of-concept).
        - [ ] cases where the same type is an object in one language and a
              record in another 
  - [ ] demo practical tables in Python, R, C++, and Haskell (e.g., numpy)
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
 
 0.40.1 [2023.03.xx]
 -------------------
@@ -86,11 +89,8 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Allow concrete (un)packers to vary in number of generic terms
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
- - [ ] Bring back the cut operation to the bidirectional typechecker
-       The current approach depends on renaming every term, which is ugly and
-       also clutters the diagnostics (gamma gets huge)
  - [ ] Fix error raised when a module exporting a type is compiled 
- - [ ] Tidy up the verbose diagnostics
+ - [x] Tidy up the verbose diagnostics
  - [x] Add multiple levels of verbosity (quiet by default)
  - [x] Restructured the library to avoid name conflicts with pre-existing
        packages.

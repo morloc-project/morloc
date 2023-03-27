@@ -32,6 +32,7 @@ module Morloc.CodeGenerator.Namespace
   , prettyGenTypeP
   , manifoldArgs
   , mapManifoldArgs
+  , generalTypeOf
   ) where
 
 import Morloc.Namespace
@@ -39,6 +40,7 @@ import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Set as Set
 import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 import Morloc.Pretty ()
 
 
@@ -107,6 +109,23 @@ instance Typelike TypeP where
 pvar2tvar :: PVar -> TVar
 pvar2tvar (PV lang _ v) = TV (Just lang) v
 
+generalTypeOf :: TypeP -> Maybe Type
+generalTypeOf (UnkP v) = UnkT <$> pvar2genTVar v
+generalTypeOf (VarP v) = VarT <$> pvar2genTVar v
+generalTypeOf (FunP ts t) = FunT <$> mapM generalTypeOf ts <*> generalTypeOf t
+generalTypeOf (AppP v ts) = AppT <$> generalTypeOf v <*> mapM generalTypeOf ts
+generalTypeOf (NamP o n ps es)
+    = NamT o
+    <$> pvar2genTVar n
+    <*> mapM generalTypeOf ps
+    <*> mapM typeOfEntry es
+    where
+        typeOfEntry :: (PVar, TypeP) -> Maybe (MT.Text, Type)
+        typeOfEntry (PV _ v _, t) = (,) <$> v <*> generalTypeOf t
+
+pvar2genTVar :: PVar -> Maybe TVar
+pvar2genTVar (PV _ v _) = TV Nothing <$> v
+
 -- | A tree describing how to (de)serialize an object
 data SerialAST f
   = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
@@ -145,16 +164,16 @@ instance Foldable f => Pretty (SerialAST f) where
   pretty (SerialUnknown v) = parens ("SerialUnknown" <+> pretty v)
 
 data TypePacker = TypePacker
-  { typePackerType    :: TypeP
-  , typePackerFrom    :: TypeP
+  { typePackerPacked    :: TypeP
+  , typePackerUnpacked  :: TypeP
   , typePackerForward :: [Source]
   , typePackerReverse :: [Source]
   } deriving (Show, Ord, Eq)
 
 instance Pretty TypePacker where
   pretty p = "TypePacker" <+> encloseSep "{" "}" ","
-    [ "typePackerType" <+> "=" <+> pretty (typePackerType p)
-    , "typePackerFrom" <+> "=" <+> pretty (typePackerFrom p)
+    [ "typePackerPacked" <+> "=" <+> pretty (typePackerPacked p)
+    , "typePackerUnpacked" <+> "=" <+> pretty (typePackerUnpacked p)
     , "typePackerForward" <+> "=" <+> list (map pretty (typePackerForward p))
     , "typePackerReverse" <+> "=" <+> list (map pretty (typePackerReverse p))
     ]
