@@ -628,7 +628,7 @@ makeSerializers :: RecMap -> RecEntry -> ([MDoc],[MDoc])
 makeSerializers recmap rec
   = ([structDecl, serialDecl, deserialDecl], [serializer, deserializer])
   where
-    templateTerms = map ((<> "T") . pretty) ([1..] :: [Int])
+    templateTerms = map (("T" <>) . pretty) ([1..] :: [Int])
     rs' = zip templateTerms (recFields rec)
 
     params = [t | (t, (_, Nothing)) <- rs']

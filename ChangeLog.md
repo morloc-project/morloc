@@ -86,7 +86,7 @@ handling for several very different languages (proofs-of-concept).
 0.40.1 [2023.03.xx]
 -------------------
  - [ ] Fix typechecking bug in record access
- - [ ] Allow concrete (un)packers to vary in number of generic terms
+ - [x] Allow concrete (un)packers to vary in number of generic terms
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
  - [ ] Fix error raised when a module exporting a type is compiled 
