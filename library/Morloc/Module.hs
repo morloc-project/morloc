@@ -102,10 +102,18 @@ commonPrefix (x:xs) (y:ys)
     | otherwise = []
 commonPrefix _ _ = []
 
-removeSuffix :: Eq a => [a] -> [a] -> [a]
-removeSuffix xs ys 
-    | last xs == last ys = removeSuffix (init xs) (init ys)
+removePathSuffix :: [String] -> [String] -> [String]
+removePathSuffix [] ys = ys
+removePathSuffix _ [] = []
+removePathSuffix xs ys 
+    | stringPath (last xs) == stringPath (last ys) = removePathSuffix (init xs) (init ys)
     | otherwise = ys
+    where
+    stringPath :: String -> String
+    stringPath s
+        | last s == '/' = init s
+        | otherwise = s
+
 
 -- | Find an ordered list of possible locations to search for a module
 getModulePaths :: Path -> Path -> Maybe (Path, MVar) -> MVar -> [Path]
@@ -184,11 +192,13 @@ getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> m
     --
     -- The only place where `foo.bif` may be found is:
     --    /../src/foo/bif/main.loc
+    --
+        -- _ -> error $ show (modulePath, importName, moduleName)
         _ -> let rootPath = if last modulePath == "main.loc"
                             -- e.g., `/../src/foo/bar/baz/main.loc` -> '/../src/'
-                            then removeSuffix moduleName (init modulePath)
+                            then removePathSuffix moduleName (init modulePath)
                             -- e.g., `/../src/foo/bar/baz.loc`  -> '/../src/'
-                            else removeSuffix (init moduleName) (init modulePath)
+                            else removePathSuffix (init moduleName) (init modulePath)
              in map MS.joinPath [
                         rootPath <> importName <> ["main.loc"]
                     ,   rootPath <> init importName <> [last importName <> ".loc"]

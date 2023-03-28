@@ -40,7 +40,7 @@ import bio.db
   , nucleotideAccessionToXml as fetchIdRecords  -- fetchIdRecords :: [Str] -> [Str]
   )
 
-import core
+import base
   ( at        -- at :: [a] -> Int -> a
   , shard     -- shard :: Int -> [a] -> [[a]]
   , elem      -- elem :: a -> [a] -> Bool
@@ -103,7 +103,7 @@ search config refs query =
 
 classify = push (pull pullLeaf pullClade) where
   pullLeaf :: Meta -> Clade
-  pullLeaf leaf = "asdf" -- leaf@clade
+  pullLeaf leaf = leaf@clade
 
   pullClade :: [Clade] -> Clade
   pullClade xs

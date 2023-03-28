@@ -94,6 +94,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Add multiple levels of verbosity (quiet by default)
  - [x] Restructured the library to avoid name conflicts with pre-existing
        packages.
+ - [x] Fix bug in cousin module imports
 
 0.40.0 [2023.02.04]
 -------------------
