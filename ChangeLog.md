@@ -89,7 +89,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Allow concrete (un)packers to vary in number of generic terms
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
- - [ ] Fix error raised when a module exporting a type is compiled 
+ - [x] Fix error raised when a module exporting a type is compiled 
  - [x] Tidy up the verbose diagnostics
  - [x] Add multiple levels of verbosity (quiet by default)
  - [x] Restructured the library to avoid name conflicts with pre-existing

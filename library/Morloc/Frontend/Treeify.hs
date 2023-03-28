@@ -93,7 +93,8 @@ treeify d
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
-         let exports = [(i, EV (symbolName v)) | (i, v) <- AST.findExports e]
+         -- find all term exports (do not include type exports)
+         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
 
          -- - store all exported indices in state
          -- - Add the export name to state. Failing to do so here, will lose
