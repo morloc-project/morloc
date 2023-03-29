@@ -139,30 +139,40 @@ makeSerialAST m t@(VarP v@(PV _ _ _))
   | isPrimitiveType Def.defaultString t = return $ SerialString v
   | isPrimitiveType Def.defaultReal   t = return $ SerialReal   v
   | isPrimitiveType Def.defaultInt    t = return $ SerialInt    v
-  | otherwise = makeSerialAST m (AppP (VarP v) [])
+  | otherwise = case Map.lookup (pv2tv v) m of
+  -- = SerialPack PVar (f (TypePacker, SerialAST f)) -- ^ use an (un)pack function to simplify an object
+        (Just ps) -> do
+            packers <- mapM makeTypePacker ps
+            unpacked <- mapM (makeSerialAST m . typePackerUnpacked) packers
+            return $ SerialPack v (Many (zip packers unpacked))
+        Nothing -> MM.throwError . SerializationError . render
+            $ "Cannot find constructor" <+> dquotes (pretty v)
+            <+> "in packmap:\n" <> prettyPackMap m
+  where
+    makeTypePacker :: UnresolvedPacker -> MorlocMonad TypePacker
+    makeTypePacker u = do
+        packedType <- weaveTypes (typeOf . fst <$> unresolvedPackerGeneralTypes u) (typeOf (unresolvedPackedType u))
+        unpackedType <- weaveTypes (typeOf . snd <$> unresolvedPackerGeneralTypes u) (typeOf (unresolvedUnpackedType u))
+        return $ TypePacker
+          { typePackerPacked   = packedType
+          , typePackerUnpacked = unpackedType -- TypeP
+          , typePackerForward  = unresolvedPackerForward u -- [Source]
+          , typePackerReverse  = unresolvedPackerReverse u -- [Source]
+          }
 makeSerialAST _ (FunP _ _)
   = MM.throwError . SerializationError
   $ "Cannot serialize functions"
-makeSerialAST _ (AppP p []) = error $ show p
-makeSerialAST m t@(AppP (VarP v@(PV _ _ s)) ts@(t0:_))
+makeSerialAST m t@(AppP (VarP v) ts@(t0:_))
   | isList t = SerialList <$> makeSerialAST m t0
   | isTuple t = SerialTuple <$> mapM (makeSerialAST m) ts
   | otherwise = case Map.lookup (pv2tv v) m of
       (Just ps) -> do
+        let t = AppP (VarP v) ts
         ps' <- catMaybes <$> mapM (resolvePacker t) ps
-        ts' <- mapM (makeSerialAST m . typePackerUnpacked) ps'  -- recurse into the unpacked type
-
-        MM.say $ "makeSerialAST:" <+> pretty t
-        MM.say $ "ps:" <+> tupled (map pretty ps)
-        MM.say $ "ps':" <+> tupled (map pretty ps')
-        MM.say $ "ts:" <+> tupled (map pretty ts)
-        MM.say $ tupled (map pretty ps')
-        MM.say $ tupled (map pretty ts')
-        MM.say $ "----------------------------"
-
-        return $ SerialPack v (Many (zip ps' ts'))
+        unpacked <- mapM (makeSerialAST m . typePackerUnpacked) ps'  -- recurse into the unpacked type
+        return $ SerialPack v (Many (zip ps' unpacked))
       Nothing -> MM.throwError . SerializationError . render
-        $ "Cannot find constructor" <+> dquotes (pretty s)
+        $ "Cannot find constructor" <+> dquotes (pretty v)
         <> "<" <> pretty (length ts) <> ">"
         <+> "in packmap:\n" <> prettyPackMap m
 makeSerialAST m (NamP o n ps rs) = do
@@ -170,36 +180,9 @@ makeSerialAST m (NamP o n ps rs) = do
   return $ SerialObject o n ps (zip (map fst rs) ts)
 makeSerialAST _ _ = undefined
 
-pvarEqual :: PVar -> PVar -> Bool
-pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
-
-typeEqual :: TypeP -> TypeP -> Bool
-typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
-typeEqual (FunP [] t1) (FunP [] t2) = typeEqual t1 t2
-typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
- = typeEqual t11 t21 && typeEqual (FunP rs1 t12) (FunP rs2 t22)
-typeEqual (AppP v1 []) (AppP v2 []) = typeEqual v1 v2
-typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
- = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
-typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
-  = o1 == o2 && n1 == n2 && length ps1 == length ps2
-
--- ps1 and ps2 don't need to be tested, since the typechecker will have
--- ensured they are equivalent IF the main records are equivalent.
-typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 es2) =
-  -- equality does not depend on order
-  case filterApart (\(k2, _) -> k1 == k2) es2 of 
-    -- if the key was found
-    (Just (_, t2), rs2) ->
-         -- then ensure the values are the same
-         typeEqual t1 t2
-         -- and check the (n-1) records
-      && typeEqual (NamP o1 n1 ps1 rs1) (NamP o2 n2 ps2 rs2)
-    (Nothing, _) -> False
-typeEqual _ _ = False
 
 resolvePacker :: TypeP -> UnresolvedPacker -> MorlocMonad (Maybe TypePacker)
-resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedUnpackedType -> (_, AppU _ ts2))
+resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedPackedType -> (_, AppU _ ts2))
     | length ts1 == length ts2 = do
         -- genericPackFunction <- regeneric (unresolvedPackedType p) (unresolvedUnpackedType p)
         resolvedUnpackedType <- resolveP packedType (unresolvedPackedType p) (unresolvedUnpackedType p) (unresolvedPackerGeneralTypes p)
@@ -243,24 +226,11 @@ resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedUnpackedType -> (
         resolveP a b c generalTypes = do
             let ca = type2typeu (typeOf a)
                 gaMay = type2typeu <$> generalTypeOf a
-
-            MM.say   "resolveP:"
-            MM.say $ "a:" <+> pretty a
-            MM.say $ "b:" <+> pretty b
-            MM.say $ "c:" <+> pretty c
-            MM.say $ "ca:" <+> pretty ca
-            MM.say $ "gaMay:" <+> pretty gaMay
-            MM.say $ "generalTypes:" <+> maybe "none" (\(x,y) -> tupled [pretty x, pretty y]) generalTypes
-
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
                 (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
                 (Right g) -> do
-
-                    MM.say $ "resolved cb" <+> pretty (apply g (existential b))
-                    MM.say $ "resolved cc" <+> pretty (apply g (existential c))
-
                     return (apply g (existential c))
-            
+
             unpackedGeneralType <- case (gaMay, generalTypes) of
                 (Just r, Just (u, gc)) ->
                     -- where r  is the resolved general type (no generics)
@@ -269,10 +239,6 @@ resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedUnpackedType -> (
                     case subtype u r (Gamma 0 []) of
                         (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
                         (Right g) -> do
-
-                            MM.say $ "resolved gb" <+> pretty (apply g (existential b))
-                            MM.say $ "resolved gc" <+> pretty (apply g (existential c))
-
                             return . Just $ apply g (existential gc)
                 _ -> return Nothing
 
@@ -284,6 +250,34 @@ resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedUnpackedType -> (
         existential t0 = t0
 resolvePacker _ _ = return Nothing
 
+
+pvarEqual :: PVar -> PVar -> Bool
+pvarEqual (PV lang1 _ v1) (PV lang2 _ v2) = lang1 == lang2 && v1 == v2 
+
+typeEqual :: TypeP -> TypeP -> Bool
+typeEqual (VarP v1) (VarP v2) = pvarEqual v1 v2
+typeEqual (FunP [] t1) (FunP [] t2) = typeEqual t1 t2
+typeEqual (FunP (t11:rs1) t12) (FunP (t21:rs2) t22)
+ = typeEqual t11 t21 && typeEqual (FunP rs1 t12) (FunP rs2 t22)
+typeEqual (AppP v1 []) (AppP v2 []) = typeEqual v1 v2
+typeEqual (AppP v1 (t1:rs1)) (AppP v2 (t2:rs2))
+ = typeEqual t1 t2 && typeEqual (AppP v1 rs1) (AppP v2 rs2)
+typeEqual (NamP o1 n1 ps1 []) (NamP o2 n2 ps2 [])
+  = o1 == o2 && n1 == n2 && length ps1 == length ps2
+
+-- ps1 and ps2 don't need to be tested, since the typechecker will have
+-- ensured they are equivalent IF the main records are equivalent.
+typeEqual (NamP o1 n1 ps1 ((k1,t1):rs1)) (NamP o2 n2 ps2 es2) =
+  -- equality does not depend on order
+  case filterApart (\(k2, _) -> k1 == k2) es2 of 
+    -- if the key was found
+    (Just (_, t2), rs2) ->
+         -- then ensure the values are the same
+         typeEqual t1 t2
+         -- and check the (n-1) records
+      && typeEqual (NamP o1 n1 ps1 rs1) (NamP o2 n2 ps2 rs2)
+    (Nothing, _) -> False
+typeEqual _ _ = False
 
 -- | Given serialization trees for two languages, where each serialization tree
 -- may contain, try to find
