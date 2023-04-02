@@ -20,9 +20,7 @@ import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Data.Bifunctor (second)
 import qualified Morloc.Frontend.PartialOrder as MTP
-import qualified Morloc.Data.Text as MT
 import Morloc.Typecheck.Internal (qualify, unqualify)
 
 -- | Resolve type aliases, term aliases and import/exports
@@ -63,7 +61,7 @@ checkForSelfRecursion d = do
     hasTerm v (NamU o n (p:ps) []) = hasTerm v p || hasTerm v (NamU o n ps [])
     hasTerm _ (NamU _ _ [] []) = False
 
-    hasTerm _ (ExistU _ _ _) = error "There should not be existentionals in typedefs"
+    hasTerm _ (ExistU _ _ _ _) = error "There should not be existentionals in typedefs"
 
 
 -- | Consider export/import information to determine which terms are imported
@@ -198,10 +196,11 @@ desugarType h _ _ = f
   --     (_, t) <- foldlM (mergeAliases v 0) t' ts'
   --     f t
   --   Nothing -> MM.throwError . CallTheMonkeys $ "Type term in VarU missing from type map"
-  f (ExistU v ps ds) = do
+  f (ExistU v ps ds rs) = do
     ps' <- mapM f ps
     ds' <- mapM f ds
-    return $ ExistU v ps' ds'
+    rs' <- mapM (\(k,v) -> (,) k <$> f v) rs
+    return $ ExistU v ps' ds' rs'
   f (FunU ts t) = FunU <$> mapM f ts <*> f t
   f (NamU o n ps rs) = do
     ts <- mapM (f . snd) rs
@@ -250,7 +249,7 @@ desugarType h _ _ = f
   parsub (v, t2) t1@(VarU v0)
     | v0 == v = t2 -- substitute
     | otherwise = t1 -- keep the original
-  parsub _ (ExistU _ _ _) = error "What the bloody hell is an existential doing down here?"
+  parsub _ (ExistU _ _ _ _) = error "What the bloody hell is an existential doing down here?"
   parsub pair (ForallU v t1) = ForallU v (parsub pair t1)
   parsub pair (FunU ts t) = FunU (map (parsub pair) ts) (parsub pair t)
   parsub pair (AppU t ts) = AppU (parsub pair t) (map (parsub pair) ts)
@@ -279,8 +278,9 @@ desugarType h _ _ = f
 -- FIXME: And why is it done? Resloving existentials before typechecking seems sketch
 chooseExistential :: TypeU -> TypeU
 chooseExistential (VarU v) = VarU v
-chooseExistential (ExistU _ _ (t:_)) = chooseExistential t
-chooseExistential (ExistU _ _ []) = error "Existential with no default value"
+chooseExistential (ExistU _ _ _ (_:_)) = error "Existentials with keys cannot be resolved yet"
+chooseExistential (ExistU _ _ (t:_) _) = chooseExistential t
+chooseExistential (ExistU _ _ [] _) = error "Existential with no default value"
 chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
 chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)

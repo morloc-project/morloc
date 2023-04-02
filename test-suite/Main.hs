@@ -222,6 +222,8 @@ main = do
       , golden "record-access-c" "record-access-c"
       , golden "record-access-py" "record-access-py"
       , golden "record-access-r" "record-access-r"
+      -- Test the @clade issue from the case study
+      , golden "record-access-2" "record-access-2"
       -- scoping
       , golden "scoping-1" "scoping-1"
       , golden "scoping-2" "scoping-2"

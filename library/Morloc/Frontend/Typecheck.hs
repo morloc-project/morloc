@@ -18,11 +18,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
-import Data.Bifunctor (first)
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and everything else are abstracted away.
@@ -159,17 +157,24 @@ synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
 synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
 synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
-synthE i g (AccS e k) = do
-  (g1, t1, e1) <- synthG' g e
+synthE i g0 (AccS e k) = do
+  (g1, t1, e1) <- synthG' g0 e
   insetSay "accs"
   insetSay $ "t1:" <+> pretty t1
   seeGamma g1
-  valType <- case t1 of
+  (g2, valType) <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
       Nothing -> gerr i (KeyError k t1)
-      (Just t) -> return t
+      (Just val) -> return (g1, val)
+    (ExistU v ps ds rs) -> case lookup k rs of
+      Nothing -> do
+        let (g12, val) = newvar (unTVar v <> "_" <> k) Nothing g1
+        case access1 v (gammaContext g12) of
+          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
     _ -> gerr i (KeyError k t1)
-  return (g1, valType, AccS e1 k)
+  return (g2, valType, AccS e1 k)
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -391,14 +396,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV _ s) [] _) =
+application i g0 es (ExistU v@(TV _ s) [] _ _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") Nothing
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' [] [] [] | v' <- veas]
+          ea = ExistU vea [] [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas

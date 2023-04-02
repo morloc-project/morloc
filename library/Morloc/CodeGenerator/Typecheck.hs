@@ -242,14 +242,25 @@ synthE _ lang g (LogS x) = do
       (g', t) = newvarRich [] ts "log_" (Just lang) g
   return (g' +> t, t, LogS x)
 
-synthE i _ g (AccS e k) = do
-  (g1, t1, e1) <- synthG' g e
-  valType <- case t1 of
+synthE i _ g0 (AccS e k) = do
+  (g1, t1, e1) <- synthG' g0 e
+  insetSay "accs"
+  insetSay $ "t1:" <+> pretty t1
+  seeGamma g1
+  (g2, valType) <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
-      Nothing -> cerr i (KeyError k t1)
-      (Just t) -> return t
-    _ -> cerr i (KeyError k t1)
-  return (g1, valType, AccS e1 k)
+      Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
+    (ExistU v ps ds rs) -> case lookup k rs of
+      Nothing -> do
+        let (g12, val) = newvar (unTVar v <> "_" <> k) (langOf t1) g1
+        case access1 v (gammaContext g12) of
+          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
+    _ -> gerr i (KeyError k t1)
+  return (g2, valType, AccS e1 k)
+
 
 --   -->E0
 synthE _ _ g (AppS f []) = do
@@ -382,14 +393,14 @@ application i lang g0 es (ForallU v s) = application' i lang (g0 +> v) es (subst
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i _ g0 es (ExistU v@(TV (Just lang) s) [] _) =
+application i _ g0 es (ExistU v@(TV (Just lang) s) [] _ _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" (Just lang)) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") (Just lang)
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' [] [] [] | v' <- veas]
+          ea = ExistU vea [] [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
@@ -531,3 +542,7 @@ application' i l g es t = do
   seeType t'
   mapM_ peakGen es'
   return r
+
+-- prepare a general, indexed typechecking error
+gerr :: Int -> TypeError -> MorlocMonad a
+gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)

@@ -359,6 +359,7 @@ data GammaIndex
   | ExistG TVar
     [TypeU] -- type parameters
     [TypeU] -- type defaults
+    [(Text, TypeU)] -- keys
   -- ^ (G,a^) unsolved existential variable
   | SolvedG TVar TypeU
   -- ^ (G,a^=t) Store a solved existential variable
@@ -642,7 +643,10 @@ gtype t
   | isNothing (langOf t) = GType t
   | otherwise = error "COMPILER BUG - incorrect assignment to general type"
 
-data NamType = NamRecord | NamObject | NamTable
+data NamType
+  = NamRecord
+  | NamObject
+  | NamTable
   deriving(Show, Ord, Eq)
 
 -- | A basic type
@@ -666,6 +670,7 @@ data TypeU
   | ExistU TVar
     [TypeU] -- type parameters
     [TypeU] -- default types
+    [(Text, TypeU)] -- key accesses into this type
   -- ^ (a^) will be solved into one of the other types
   | ForallU TVar TypeU
   -- ^ (Forall a . A)
@@ -764,17 +769,17 @@ instance Typelike TypeU where
   --  * all existentials are replaced with default values if a possible
   --    FIXME: should I really just take the first in the list???
   typeOf (VarU v) = VarT v
-  typeOf (ExistU v _ []) = typeOf (ForallU v (VarU v)) -- whatever
-  typeOf (ExistU _ _ (t:_)) = typeOf t
+  typeOf (ExistU v _ [] _) = typeOf (ForallU v (VarU v)) -- whatever
+  typeOf (ExistU _ _ (t:_) _) = typeOf t
   typeOf (ForallU v t) = substituteTVar v (UnkT v) (typeOf t)
   typeOf (FunU ts t) = FunT (map typeOf ts) (typeOf t)
   typeOf (AppU t ts) = AppT (typeOf t) (map typeOf ts)
   typeOf (NamU n o ps rs) = NamT n o (map typeOf ps) (zip (map fst rs) (map (typeOf . snd) rs))
 
   free v@(VarU _) = Set.singleton v
-  free v@(ExistU _ [] _) = Set.singleton v
+  free v@(ExistU _ [] _ rs) = Set.unions $ Set.singleton v : map (free . snd) rs
   -- Why exactly do you turn ExistU into AppU? Not judging, but it seems weird ...
-  free (ExistU v ts _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
+  free (ExistU v ts _ _) = Set.unions $ Set.singleton (AppU (VarU v) ts) : map free ts
   free (ForallU v t) = Set.delete (VarU v) (free t)
   free (FunU ts t) = Set.unions $ map free (t:ts)
   free (AppU t ts) = Set.unions $ map free (t:ts)
@@ -795,7 +800,7 @@ instance Typelike TypeU where
       sub t@(VarU v)
         | v0 == v = r0 -- replace v with the new type
         | otherwise = t
-      sub (ExistU v (map sub -> ps) (map sub -> ts)) = ExistU v ps ts
+      sub (ExistU v (map sub -> ps) (map sub -> ts) (map (second sub) -> rs)) = ExistU v ps ts rs
       sub (ForallU v t)
         | v0 == v = ForallU v t -- stop looking if we hit a bound variable of the same name
         | otherwise = ForallU v (sub t)
@@ -807,7 +812,7 @@ instance Typelike TypeU where
   normalizeType (AppU t ts) = AppU (normalizeType t) (map normalizeType ts)
   normalizeType (NamU n v ds ks) = NamU n v (map normalizeType ds) (zip (map fst ks) (map (normalizeType . snd) ks))
   normalizeType (ForallU v t) = ForallU v (normalizeType t)
-  normalizeType (ExistU v ps ds) = ExistU v (map normalizeType ps) (map normalizeType ds)
+  normalizeType (ExistU v (map normalizeType -> ps) (map normalizeType -> ds) (map (second normalizeType) -> rs)) = ExistU v ps ds rs
   normalizeType t = t
 
 -- | get a fresh variable name that is not used in t1 or t2, it reside in the same namespace as the first type
@@ -854,7 +859,7 @@ instance HasOneLanguage TVar where
 
 instance HasOneLanguage TypeU where
   langOf (VarU (TV lang _)) = lang
-  langOf (ExistU (TV lang _) _ _) = lang
+  langOf (ExistU (TV lang _) _ _ _) = lang
   langOf (ForallU (TV lang _) _) = lang
   langOf (FunU _ t) = langOf t
   langOf (AppU t _) = langOf t

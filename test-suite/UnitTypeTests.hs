@@ -80,16 +80,17 @@ assertConcreteType msg code t = testCase msg $ do
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
  f s (VarU v) = (s, VarU v)
- f (i,m) (ExistU v@(TV lang _) ps ds) =
+ f (i,m) (ExistU v@(TV lang _) ps ds rs) =
   case Map.lookup v m of
-    (Just v') -> ((i, m), ExistU v' ps ds)
+    (Just v') -> ((i, m), ExistU v' ps ds rs)
     Nothing ->
       let v' = TV lang ("e" <> MT.pack (show i))
           i' = i+1
           m' = Map.insert v v' m
           (s', ps') = statefulMap f (i', m') ps 
           (s'', ds') = statefulMap f s' ds
-      in (s'', ExistU v' ps' ds')
+          (s''', vs') = statefulMap f s'' (map snd rs)
+      in (s''', ExistU v' ps' ds' (zip (map fst rs) vs'))
  f s (ForallU v t) =
   let (s', t') = f s t
   in (s', ForallU v t') 
@@ -157,7 +158,7 @@ fun ts = FunU (init ts) (last ts)
 forall [] t = t
 forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
 
-exist v = ExistU (TV Nothing v) [] []
+exist v = ExistU (TV Nothing v) [] [] []
 
 forallc _ [] t = t
 forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
@@ -204,9 +205,9 @@ subtypeTests =
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
     , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
-        (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
+        (ExistU (v "x1") [eb] [] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
-        (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst c), solvedB c]
+        (lst c) (ExistU (v "x1") [eb] [] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
     , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
       -- nested types
@@ -223,14 +224,14 @@ subtypeTests =
     a = var "A"
     b = var "B"
     c = var "C"
-    ea = ExistU (v "x1") [] []
-    eb = ExistU (v "x2") [] []
-    ec = ExistU (v "x3") [] []
-    ed = ExistU (v "x4") [] []
-    eag = ExistG (v "x1") [] []
-    ebg = ExistG (v "x2") [] []
-    ecg = ExistG (v "x3") [] []
-    edg = ExistG (v "x4") [] []
+    ea = ExistU (v "x1") [] [] []
+    eb = ExistU (v "x2") [] [] []
+    ec = ExistU (v "x3") [] [] []
+    ed = ExistU (v "x4") [] [] []
+    eag = ExistG (v "x1") [] [] []
+    ebg = ExistG (v "x2") [] [] []
+    ecg = ExistG (v "x3") [] [] []
+    edg = ExistG (v "x4") [] [] []
     solvedA t = SolvedG (v "x1") t
     solvedB t = SolvedG (v "x2") t
     solvedC t = SolvedG (v "x3") t

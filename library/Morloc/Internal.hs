@@ -22,6 +22,7 @@ module Morloc.Internal
   , module Control.Monad
   , module Control.Monad.IO.Class
   , module Data.Monoid
+  , module Data.Bifunctor
   -- Data.Char characters
   , isUpper
   , isLower
@@ -68,6 +69,7 @@ import Data.List.Extra hiding (list) -- 'list' conflicts with Doc
 import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
+import Data.Bifunctor
 import Data.Char (isUpper, isLower)
 import Safe hiding (at, headDef, lastDef)
 import System.FilePath

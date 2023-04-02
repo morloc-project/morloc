@@ -54,14 +54,12 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.CodeGenerator.Serial as MCS
 import qualified Data.Set as Set
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
-import Data.Bifunctor (second)
 
 realityCheck
   :: [SAnno (Indexed Type) Many Int]

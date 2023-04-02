@@ -533,7 +533,7 @@ pUniU = do
     (Nothing, [t]) -> return t -- there is a unique general unit type
     (_, []) -> fancyFailure . Set.singleton . ErrorFail
       $ "No NULL type is defined for language" <> maybe "Morloc" show lang
-    (_, ts) -> return $ ExistU v [] ts  -- other languages maybe have multiple definitions
+    (_, ts) -> return $ ExistU v [] ts [] -- other languages maybe have multiple definitions
 
 parensType :: Parser TypeU
 parensType = tag (symbol "(") >> parens pType
@@ -567,7 +567,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV Nothing v) [] [])
+  return (ExistU (TV Nothing v) [] [] [])
 
 pAppU :: Parser TypeU
 pAppU = do

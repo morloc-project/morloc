@@ -295,8 +295,12 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1) t2@(ExistU (TV l2 _) ps2 _)
-  | l1 == l2 = ExistU v <$> zipWithM mergeTypeUs ps1 ps2 <*> pure ds1
+mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1 rs1) t2@(ExistU (TV l2 _) ps2 _ rs2)
+  | l1 == l2
+    = ExistU v
+    <$> zipWithM mergeTypeUs ps1 ps2
+    <*> pure ds1
+    <*> mapM (\(k, x:xs) -> (,) k <$> foldM mergeTypeUs x xs) (groupSort (rs1 ++ rs2))
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
 mergeTypeUs ExistU {} t = return t
 mergeTypeUs t ExistU {} = return t

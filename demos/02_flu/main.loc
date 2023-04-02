@@ -15,6 +15,17 @@ record Meta = Meta
   , clade :: Clade
   }
 
+record Py Meta = "dict"
+  { accession :: "str"
+  , clade :: "str"
+  }
+
+record Cpp Meta = "struct"
+  { accession :: "std::string"
+  , clade :: "std::string"
+  }
+
+
 record EntrezSearchConfig = EntrezSearchConfig
   { email :: Str
   , db :: Str  
@@ -23,10 +34,10 @@ record EntrezSearchConfig = EntrezSearchConfig
   , retmax :: Int 
   }
 
-import bio.algo
-  ( fooMsa as align    -- align :: [Sequence] -> [Sequence]
-  , njTree as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
-  )
+-- import bio.algo
+--   ( align    -- align :: [Sequence] -> [Sequence]
+--   , nj as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
+--   )
 
 import bio.tree
   ( Tree
@@ -35,10 +46,10 @@ import bio.tree
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   )
 
-import bio.db
-  ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
-  , nucleotideAccessionToXml as fetchIdRecords  -- fetchIdRecords :: [Str] -> [Str]
-  )
+-- import bio.db
+--   ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
+--   , nucleotideAccessionToXml as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+--   )
 
 import base
   ( at        -- at :: [a] -> Int -> a
@@ -52,13 +63,12 @@ import base
   , join      -- join :: [a] -> [a] -> [a]
   , keys      -- keys :: Map a b -> [a]
   , length    -- length :: [a] -> Int
-  , lookup    -- lookup :: k -> [(k, v)] -> v
+  , lengthS   -- lengthS :: Str -> Int
   , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
   , sleep     -- sleep :: Real -> a -> a
   , snd       -- snd :: (a, b) -> b
-  , strLength -- strLength :: Str -> Int
   , unique    -- unique :: [a] -> [a]
-  , withVals  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
+  , withSnds  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
   , readMap   -- readMap :: Filename -> Map key val
   )
 
@@ -68,40 +78,42 @@ source Py from "analysis-functions.py"
   , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
   )
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
-analysis mindate maxdate reffile treefile
-  = ( plotTree treefile
-    . classify
-    . treeBy treeify
-    . withVals align  -- TODO: rethink this ... this is rather particular
-    . search config refmap
-    ) query
-  where
-    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
-    config = { email = "weena@mlang.com"
-             , db = "nuccore"
-             , mindate = mindate
-             , maxdate = maxdate
-             , retmax = 1000
-             }
-    refmap = readMap reffile
+-- analysis :: Date -> Date -> Filename -> Filename -> ()
+-- analysis mindate maxdate reffile treefile
+--   = ( plotTree treefile
+--     . classify
+--     . treeBy treeify
+--     . withSnds align  -- TODO: rethink this ... this is rather particular
+--     . search config refmap
+--     ) query
+--   where
+--     query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
+--     config = { email = "weena@mlang.com"
+--              , db = "nuccore"
+--              , mindate = mindate
+--              , maxdate = maxdate
+--              , retmax = 1000
+--              }
+--     refmap = readMap reffile
+--
+--
+-- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+-- search config refs query =
+--   ( map (onFst (labelRef refs))
+--   . concat
+--   . map ( map parseRecord
+--         . sleep 1.0
+--         . fetchRecords
+--         )
+--   . shard 100
+--   . join (keys refs)
+--   . fetchIds config
+--   ) query
 
-
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
-search config refs query =
-  ( map (onFst (labelRef refs))
-  . concat
-  . map ( map parseRecord
-        . sleep 1.0
-        . fetchRecords
-        )
-  . shard 100
-  . join (keys refs)
-  . fetchIds config
-  ) query
-
-
+export classify
+classify :: Tree () e Meta -> Tree Str e Meta
 classify = push (pull pullLeaf pullClade) where
+
   pullLeaf :: Meta -> Clade
   pullLeaf leaf = leaf@clade
 
@@ -114,4 +126,4 @@ classify = push (pull pullLeaf pullClade) where
                    . filter (\ x -> gt (strLength x) 0)
                    ) xs
 
-  push = mapChildWithParent id (\ p c -> ifelse (eq c "") p c)
+  push = mapChildWithParent id (\ p c -> ifelse (eq (lengthS c) 0) p c)
