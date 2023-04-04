@@ -1,0 +1,44 @@
+import pybase (map)
+
+record Person = Person
+  { name :: Str
+  , age :: Int
+  }
+
+record Py Person = "dict"
+  { name :: "str"
+  , age :: "int"
+  }
+
+record Info = Info
+  { job :: Str
+  , sob :: Bool
+  }
+
+record Py Info = Info
+  { job :: "std::str"
+  , sob :: "bool"
+  }
+
+export foo
+
+foo = map doit where
+
+  getJob :: Info -> Str
+  getJob Py :: Info -> "str"
+
+  pullLeaf :: Meta -> Clade
+  pullLeaf Cpp :: Meta -> Clade
+  pullLeaf leaf = leaf@clade
+
+  pullClade :: [Clade] -> Clade
+  pullClade Cpp :: [Clade] -> Clade
+  pullClade xs
+    = ifelse (eq (length seenClades) 1)
+             (head seenClades) ""
+    where
+      seenClades = ( unique
+                   . filter (\ x -> gt (strLength x) 0)
+                   ) xs
+
+  push = mapChildWithParent id (\ p c -> ifelse (eq (lengthS c) 0) p c)

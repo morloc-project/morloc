@@ -12,6 +12,7 @@ record Py Person = "dict"
 
 export foo
 
+foo :: [Person] -> [Int]
+foo Py :: [Person] -> ["int"]
 foo = map getAge where
-  getAge :: Person -> Int
-  getAge x = x@age
+    getAge x = x@age

@@ -10,6 +10,26 @@ type Label = Str
 type Date = Str
 type Query = Str
 
+-- type Py Filename = "str"
+-- type Py Accession = "str"
+-- type Py Clade = "str"
+-- type Py StrainName = "str"
+-- type Py Sequence = "str"
+-- type Py EntrezQuery = "str"
+-- type Py Label = "str"
+-- type Py Date = "str"
+-- type Py Query = "str"
+
+type Cpp Filename = "std::string" 
+type Cpp Accession = "std::string"
+type Cpp Clade = "std::string" 
+type Cpp StrainName = "std::string"
+type Cpp Sequence = "std::string"
+type Cpp EntrezQuery = "std::string"
+type Cpp Label = "std::string"
+type Cpp Date = "std::string"
+type Cpp Query = "std::string"
+
 record Meta = Meta
   { accession :: Accession
   , clade :: Clade
@@ -26,14 +46,14 @@ record Cpp Meta = "struct"
   }
 
 
-record EntrezSearchConfig = EntrezSearchConfig
-  { email :: Str
-  , db :: Str  
-  , mindate :: Str
-  , maxdate :: Str
-  , retmax :: Int 
-  }
-
+-- record EntrezSearchConfig = EntrezSearchConfig
+--   { email :: Str
+--   , db :: Str
+--   , mindate :: Str
+--   , maxdate :: Str
+--   , retmax :: Int
+--   }
+--
 -- import bio.algo
 --   ( align    -- align :: [Sequence] -> [Sequence]
 --   , nj as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
@@ -42,7 +62,7 @@ record EntrezSearchConfig = EntrezSearchConfig
 import bio.tree
   ( Tree
   , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
-  , pull               -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   )
 
@@ -53,6 +73,8 @@ import bio.tree
 
 import base
   ( at        -- at :: [a] -> Int -> a
+  , id
+  , filter
   , shard     -- shard :: Int -> [a] -> [[a]]
   , elem      -- elem :: a -> [a] -> Bool
   , fst       -- fst :: (a, b) -> a
@@ -72,12 +94,12 @@ import base
   , readMap   -- readMap :: Filename -> Map key val
   )
 
-source Py from "analysis-functions.py"
-  ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
-  , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
-  , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
-  )
-
+-- source Py from "analysis-functions.py"
+--   ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
+--   , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
+--   , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
+--   )
+--
 -- analysis :: Date -> Date -> Filename -> Filename -> ()
 -- analysis mindate maxdate reffile treefile
 --   = ( plotTree treefile
@@ -112,18 +134,21 @@ source Py from "analysis-functions.py"
 
 export classify
 classify :: Tree () e Meta -> Tree Str e Meta
-classify = push (pull pullLeaf pullClade) where
+classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
+classify = push (pullNode pullLeaf pullClade) where
 
   pullLeaf :: Meta -> Clade
+  pullLeaf Cpp :: Meta -> Clade
   pullLeaf leaf = leaf@clade
 
   pullClade :: [Clade] -> Clade
+  pullClade Cpp :: [Clade] -> Clade
   pullClade xs
     = ifelse (eq (length seenClades) 1)
              (head seenClades) ""
     where
       seenClades = ( unique
-                   . filter (\ x -> gt (strLength x) 0)
+                   . filter (\ x -> gt (lengthS x) 0)
                    ) xs
 
   push = mapChildWithParent id (\ p c -> ifelse (eq (lengthS c) 0) p c)
