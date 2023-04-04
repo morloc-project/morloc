@@ -1,6 +1,6 @@
-import cppbase (add)
+module main (foo)
 
-export foo
+import cppbase (add)
 
 y = 40.0
 

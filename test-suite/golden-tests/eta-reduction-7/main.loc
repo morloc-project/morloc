@@ -1,7 +1,7 @@
+module main (foo)
+
 import pybase (map, id)
 
 foo :: Real -> [Real] -> [Real]
 foo Py :: "float" -> ["float"] -> ["float"]
 foo x = map id
-
-export foo

@@ -1,7 +1,6 @@
+module main (foo0, foo1, foo2)
+
 import base (zipWith, add)
-export foo0
-export foo1
-export foo2
 
 foo0 = zipWith add
 foo1 xs = zipWith add xs

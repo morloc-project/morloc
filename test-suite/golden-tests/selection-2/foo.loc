@@ -1,8 +1,9 @@
+module main (foo)
+
 -- This should compile to exactly the same code as selection-1.
 -- The only difference is that it uses an extra module, Arithmetic, to abstract
 -- away the concrete language imports, this is likely to be a common pattern.
 
 import Arithmetic (add)
-export foo
 
 foo x y = add x (add y 42.0)

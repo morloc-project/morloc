@@ -1,3 +1,5 @@
+module main (foo)
+
 -- A function may be imported from multiple modules. The compiler is
 -- responsible for deciding which of the available implementations to use.
 --
@@ -6,6 +8,5 @@
 
 import pybase (add)
 import cppbase (add)
-export foo
 
 foo x y = add x (add y 42.0)

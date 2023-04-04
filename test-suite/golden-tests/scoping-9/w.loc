@@ -1,6 +1,6 @@
-import pybase (add)
+module main (f)
 
-export f
+import pybase (add)
 
 -- functions with or without signatures may be defined in the where-scope
 f = bar (bif 2.0) where

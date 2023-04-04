@@ -1,4 +1,5 @@
+module main (foo)
+
 import pybase (map, neg)
-export foo
 
 foo xs = map neg xs

@@ -1,6 +1,6 @@
-import cppbase (map, mul)
+module main (foo)
 
-export foo
+import cppbase (map, mul)
 
 -- variable partially-applied function passed as argument
 foo x xs = map (mul x) xs

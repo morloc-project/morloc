@@ -1,10 +1,8 @@
+module main (foo)
+
 import pybase (map, add)
 import rbase (fold, add)
-export foo
 
 sum xs b = fold add b xs
 
 foo xs = sum (map (add 1.0) xs) 0.0
-
--- foo xs = fold add 0.0 (map (add 1.0) xs)
---          R    R        Py   Py

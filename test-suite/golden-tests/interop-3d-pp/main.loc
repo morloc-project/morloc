@@ -1,4 +1,5 @@
+module main (foo)
+
 import pybase (map, add, neg)
-export foo
 
 foo x ys = map (\y -> add x (neg y)) ys

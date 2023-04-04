@@ -15,7 +15,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
  - [ ] Replace recursive data structures with recursion schemes
 
-0.4x.0 [2023.xx.xx]
+0.4x.0 [2024.xx.xx]
 -------------------
 
  - [ ] typeclasses
@@ -29,25 +29,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Move exports to the module definition (as in Haskell)
  - [ ] Allow module namespaces (e.g., `alice:math.complex`)
 
-0.43.1 [2023.xx.xx]
--------------------
-
- - [ ] Write and test full preludes for all supported languages
- - [ ] Make more demos
- - [ ] Improve the error messages, add line numbers to errors
- - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
-
-0.43.0 [2023.xx.xx]
--------------------
-
- Module sugar
-
- - [ ] Add `*` wildcard to exports and imports
- - [ ] Add `import Foo hiding (...)` syntax
- - [ ] Move exports to the module list (as in Haskell)
-
-0.42.0 [2023.xx.xx]
+0.43.0 [2023.10.xx]
 -------------------
 
  Styles
@@ -57,13 +39,18 @@ handling for several very different languages (proofs-of-concept).
  - [ ] test mutation in python and C++ functions 
  - [ ] test keyword and argument reordering in python and R
 
+ Module sugar
+
+ - [ ] Add `import Foo hiding (...)` syntax
+
  And a bit of cleaning
 
  - [ ] simplify the serialization schema in C++ (I think the `schema` empty
        expression can be removed)
  - [ ] generate commented type expressions in the pool code 
 
-0.41.0 [2023.xx.xx]
+
+0.42.0 [2023.06.xx]
 -------------------
 
  Before adding the more advanced features (typeclasses, algebraic types,
@@ -82,20 +69,29 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly and
        also clutters the diagnostics (gamma gets huge)
+ - [ ] Write and test full preludes for all supported languages
+ - [ ] Make more demos
+ - [ ] Improve the error messages, add line numbers to errors
+ - [ ] Haddock documentation
+ - [ ] Describe the core data structures and algorithms
 
-0.40.1 [2023.03.xx]
+0.41.0 [2023.04.xx]
 -------------------
- - [ ] Fix typechecking bug in record access
+
+ - [x] Improve exports
+   - [x] Move exports to module list (as in Haskell)
+   - [x] Add `*` wildcard to export every top-level named term or type
  - [x] Allow concrete (un)packers to vary in number of generic terms
  - [x] Default to c++17, rather than c++11
  - [x] Resolve "shit output" error message (map index to export name)
  - [x] Fix error raised when a module exporting a type is compiled 
  - [x] Tidy up the verbose diagnostics
  - [x] Add multiple levels of verbosity (quiet by default)
- - [x] Restructured the library to avoid name conflicts with pre-existing
-       packages.
+ - [x] Restructure library to avoid name conflicts with pre-existing packages
  - [x] Fix bug in cousin module imports
  - [x] Fix bug in unparameterized (un)packer serialization
+ - [ ] Fix typechecking bug in record access
+ - [ ] Derive concrete type signatures when possible
 
 0.40.0 [2023.02.04]
 -------------------

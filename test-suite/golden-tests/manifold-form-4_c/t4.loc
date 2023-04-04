@@ -1,4 +1,5 @@
+module main (foo)
+
 import cppbase (mul)
-export foo
 
 foo = ((True, 42.0), mul 1.0 4.0)

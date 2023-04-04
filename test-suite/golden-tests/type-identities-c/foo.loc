@@ -1,6 +1,6 @@
-import cppbase (id)
+module main (foo)
 
-export foo
+import cppbase (id)
 
 foo :: (Int, Int) -> (Int, Int)
 foo Cpp :: ("size_t", "long") -> ("size_t", "long")

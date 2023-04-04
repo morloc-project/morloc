@@ -1,6 +1,6 @@
-import rbase (add, mul)
+module main (foo)
 
-export foo
+import rbase (add, mul)
 
 -- full application with variable passing
 -- cannot optimize out this manifold

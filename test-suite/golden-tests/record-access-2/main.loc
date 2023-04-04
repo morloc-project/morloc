@@ -1,3 +1,5 @@
+module main (foo)
+
 import pybase (map)
 
 record Person = Person
@@ -9,8 +11,6 @@ record Py Person = "dict"
   { name :: "str"
   , age :: "int"
   }
-
-export foo
 
 foo :: [Person] -> [Int]
 foo Py :: [Person] -> ["int"]

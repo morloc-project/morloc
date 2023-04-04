@@ -1,3 +1,5 @@
+module main (sub)
+
 -- 1n0 - souce 1, import n
 
 import pybase (sub)
@@ -6,4 +8,3 @@ import rbase (sub)
 
 source py from "foo.py" ("sub_loc" as sub)
 
-export sub

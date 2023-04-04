@@ -1,6 +1,6 @@
-import rustbase (zip_with, mul)
+module main (foo)
 
-export foo
+import rustbase (zip_with, mul)
 
 -- literal function with no application
 foo xs ys = zip_with mul xs ys

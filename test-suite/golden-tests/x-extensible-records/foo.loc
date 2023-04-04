@@ -1,6 +1,5 @@
 -- look up notes in tablet
 
-
 -- A `Person` must have exactly these fields, losing or retyping them removes
 -- the `Person` type. This is especially important for objects in some languages
 -- where fields cannot be arbitrarily added.

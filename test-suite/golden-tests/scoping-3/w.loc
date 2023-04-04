@@ -1,4 +1,4 @@
-export f
+module main (f)
 
 -- a function may use terms from its where-scope
 f = x where

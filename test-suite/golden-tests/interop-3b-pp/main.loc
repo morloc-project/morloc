@@ -1,4 +1,5 @@
+module main (foo)
+
 import pybase (map, add)
-export foo
 
 foo xs = map (add 1.0) xs

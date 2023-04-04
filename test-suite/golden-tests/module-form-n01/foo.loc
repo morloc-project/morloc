@@ -1,3 +1,5 @@
+module main (sub)
+
 -- n01 - source n, declare 1
 
 import pybase (add, mul)
@@ -6,8 +8,6 @@ import cppbase (add, mul)
 
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
-
-export sub
 
 sub :: Real -> Real -> Real
 sub py :: "float" -> "float" -> "float"

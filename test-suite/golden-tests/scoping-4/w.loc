@@ -1,6 +1,6 @@
-import pybase (add)
+module main (f)
 
-export f
+import pybase (add)
 
 -- terms in the function's where-scope are unordered and share scope
 f = x where

@@ -1,6 +1,6 @@
-import rustbase (add)
+module main (foo)
 
-export foo
+import rustbase (add)
 
 y = 40.0
 

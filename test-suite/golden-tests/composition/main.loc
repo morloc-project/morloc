@@ -1,7 +1,6 @@
-import pybase (map, sub)
+module main (foo, bar)
 
-export foo
-export bar
+import pybase (map, sub)
 
 source py from "paste.py" (
     "morloc_paste" as paste

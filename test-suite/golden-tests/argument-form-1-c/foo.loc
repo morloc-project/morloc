@@ -1,6 +1,6 @@
-import cppbase (add, mul)
+module main (foo)
 
-export foo
+import cppbase (add, mul)
 
 -- full application with constants
 -- can potentially optimize out this manifold

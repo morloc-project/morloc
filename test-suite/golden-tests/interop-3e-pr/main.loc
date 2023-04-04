@@ -1,6 +1,7 @@
+module main (foo)
+
 import pybase (zipWith, mul)
 import rbase (add)
-export foo
 
 add3 x y z = add x (add y z)
 

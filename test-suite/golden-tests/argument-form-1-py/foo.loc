@@ -1,6 +1,6 @@
-import pybase (add, mul)
+module main (foo)
 
-export foo
+import pybase (add, mul)
 
 -- full application with constants
 -- can potentially optimize out this manifold

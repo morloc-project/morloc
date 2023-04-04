@@ -1,6 +1,6 @@
-import rbase (add)
+module main (foo)
 
-export foo
+import rbase (add)
 
 y = 40.0
 

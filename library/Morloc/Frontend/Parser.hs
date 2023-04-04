@@ -79,8 +79,30 @@ pModule expModuleName = do
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
     (Just (MV n)) -> symbol n
 
+  exportSym <- parens ((char '*' >> return ExportAll) <|> (sepBy pSymbol (symbol ",") |>> ExportMany))
+
   es <- align pTopExpr |>> concat
-  exprI $ ModE (MV moduleName) es
+
+  exports <- mapM (findExports exportSym) (unique . concatMap findSymbols $ es) |>> catMaybes
+
+  exprI $ ModE (MV moduleName) (es <> exports)
+
+  where
+    findSymbols :: ExprI -> [Symbol]
+    findSymbols (ExprI _ (TypE (TV _ v) _ _)) = [TypeSymbol v]
+    findSymbols (ExprI _ (AssE (EV e) _ _)) = [TermSymbol e]
+    findSymbols (ExprI _ (SigE (EV e) _ _)) = [TermSymbol e]
+    findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
+        =  [TermSymbol alias | (AliasedTerm _ alias) <- imps]
+        <> [TypeSymbol alias | (AliasedType _ alias) <- imps]
+    findSymbols _ = []
+
+    findExports :: Exports -> Symbol -> Parser (Maybe ExprI)
+    findExports ExportAll s = Just <$> exprI (ExpE s)
+    findExports (ExportMany es) s =  
+        if s `elem` es
+        then Just <$> exprI (ExpE s)
+        else return Nothing
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
@@ -111,7 +133,6 @@ createMainFunction es = case (init es, last es) of
 pTopExpr :: Parser [ExprI]
 pTopExpr = 
       try (plural pImport)
-  <|> try (plural pExport) -- TODO allow many exports from one statement
   <|> try (plural pTypedef)
   <|> try (plural pAssE)
   <|> try (plural pSigE)
@@ -204,12 +225,6 @@ pImport = do
     n <- freenameU
     a <- option n (reserved "as" >> freenameU)
     return (AliasedType n a)
-
-pExport :: Parser ExprI
-pExport = do
-  reserved "export"
-  v <- pSymbol
-  exprI $ ExpE v
 
 
 pTypedef :: Parser ExprI

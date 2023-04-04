@@ -1,6 +1,6 @@
-import rbase (zipWith, mul)
+module main (foo)
 
-export foo
+import rbase (zipWith, mul)
 
 -- literal function with no application
 foo xs ys = zipWith mul xs ys

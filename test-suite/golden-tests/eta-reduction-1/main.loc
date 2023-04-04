@@ -1,5 +1,6 @@
+module main (foo)
+
 import base (mul, add)
-export foo
 
 bar y = mul (add 1.0 y)
 
