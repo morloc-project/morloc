@@ -1,0 +1,6 @@
+module main (makeValue)
+
+source Cpp from "foo.hpp" ("makeValue")
+
+makeValue :: () -> Int
+makeValue Cpp :: () -> "int"

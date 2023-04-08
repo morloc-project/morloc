@@ -153,6 +153,7 @@ int = VarU (TV Nothing "Int")
 str = VarU (TV Nothing "Str")
 
 fun [] = error "Cannot infer type of empty list"
+fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forall [] t = t
@@ -1679,7 +1680,6 @@ unitTypeTests =
         (tuple [int, str])
     , assertGeneralType "1-tuples are just for grouping" "module main (f)\nf :: (Int)" int
 
-    --- FIXME - distinguish between Unit an Null
     -- unit type
     , assertGeneralType
         "unit as input"
@@ -1687,7 +1687,15 @@ unitTypeTests =
         module main (f)
         f :: () -> Bool
         |]
-        (fun [VarU (TV Nothing "Unit"), bool])
+        (fun [bool])
+
+    , assertGeneralType
+        "unit as 2rd input"
+        [r|
+        module main (f)
+        f :: Int -> () -> Bool
+        |]
+        (fun [int, bool])
 
     , assertGeneralType
         "unit as output"

@@ -92,6 +92,7 @@ handling for several very different languages (proofs-of-concept).
  - [x] Fix bug in unparameterized (un)packer serialization
  - [ ] Fix typechecking bug in record access
  - [ ] Derive concrete type signatures when possible
+ - [x] Fix handling of functions with Null inputs (set to empty argument lists)
 
 0.40.0 [2023.02.04]
 -------------------

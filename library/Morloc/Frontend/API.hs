@@ -20,8 +20,6 @@ import qualified Data.Set as Set
 import qualified Data.Map as Map
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.Text as MT
-import qualified Morloc.Data.Doc as MD
-import Morloc.Data.Doc ((<+>))
 import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Parser as Parser

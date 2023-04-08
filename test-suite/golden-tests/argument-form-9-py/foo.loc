@@ -1,0 +1,6 @@
+module main (makeValue)
+
+source Py from "foo.py" ("makeValue")
+
+makeValue :: () -> Int
+makeValue Py :: () -> "int"

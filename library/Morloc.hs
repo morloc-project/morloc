@@ -8,7 +8,7 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.CodeGenerator.Namespace (TypeP)
-import Morloc.Frontend.Desugar (desugar) 
+import Morloc.Frontend.Desugar (desugar)
 import Morloc.CodeGenerator.Generate (realityCheck, generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)

@@ -14,10 +14,12 @@ module Morloc.Frontend.Desugar (desugar, desugarType) where
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
 import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.AST as AST
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.DAG as MDD
 import qualified Morloc.Data.GMap as GMap
+import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Morloc.Frontend.PartialOrder as MTP
@@ -31,6 +33,7 @@ desugar s
   = checkForSelfRecursion s -- modules should not import themselves
   >>= resolveImports -- rewrite DAG edges to map imported terms to their aliases
   >>= desugarDag -- substitute type aliases
+  |>> nullify
   >>= removeTypeImports -- Remove type imports and exports
   >>= addPackerMap -- add the packers to state
 
@@ -285,6 +288,18 @@ chooseExistential (ForallU v t) = ForallU v (chooseExistential t)
 chooseExistential (FunU ts t) = FunU (map chooseExistential ts) (chooseExistential t)
 chooseExistential (AppU t ts) = AppU (chooseExistential t) (map chooseExistential ts)
 chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, chooseExistential t) | (k,t) <- rs]
+
+nullify :: DAG m e ExprI -> DAG m e ExprI
+nullify = MDD.mapNode f where
+    f :: ExprI -> ExprI
+    f (ExprI i (SigE v n (EType (FunU ts ot) ps cs))) = ExprI i (SigE v n (EType (FunU (filter (not . isNull) ts) ot) ps cs))
+    f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
+    f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
+    f e = e
+
+    isNull :: TypeU -> Bool
+    isNull (ExistU _ _ (t:_) _) = t `elem` MLD.defaultNull (langOf t)
+    isNull t = t `elem` MLD.defaultNull (langOf t)
 
 
 removeTypeImports :: DAG MVar [AliasedSymbol] ExprI -> MorlocMonad (DAG MVar [(EVar, EVar)] ExprI)

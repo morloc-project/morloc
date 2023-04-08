@@ -1053,6 +1053,10 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
       then return $ ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args]) (ReturnM x)
       else return x
 
+  -- An sourced value, transform to 0-argument function
+  express' _ _ (SAnno (One (CallS src, _)) _)
+    = MM.throwError . OtherError . render $ "Cannot export the value" <+> squotes (pretty (srcName src)) <+> "from a pool, you should define this in morloc code instead"
+
   -- catch all exception case
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     MM.sayVVV "Bad case"
