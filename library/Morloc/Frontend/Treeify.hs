@@ -252,6 +252,8 @@ unifyTermTypes mv xs m0
       _ -> return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
+  -- Yes, their types may be inferrable by usage or (eventually) static analysis
+  -- of the source code.
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
   fc srcs' = return $ TermTypes Nothing [(mv, [], Just (Idx i src)) | (src, i) <- srcs'] []
 
@@ -455,7 +457,7 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f (LogE x) = return (LogS x)
   f (StrE x) = return (StrS x)
 
-  -- none of the following cases should every occur
+  -- none of the following cases should ever occur
   f (AnnE _ _) = error "impossible"
   f (ModE _ _) = error "impossible"
   f TypE {} = error "impossible"

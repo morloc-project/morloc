@@ -24,6 +24,8 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "type-synthesis" "type-synthesis"
+
       , golden "import-1" "import-1"
 
       , golden "argument-form-1-c" "argument-form-1-c"

@@ -66,6 +66,7 @@ module Morloc.Namespace
   , NamType(..)
   , Type(..)
   , TypeU(..)
+  , type2typeu
   , EType(..)
   , unresolvedType2type
   , Source(..)
@@ -146,7 +147,7 @@ data MorlocState = MorlocState
   , stateDepth :: Int
   -- ^ store depth in the SAnno tree in the frontend and backend typecheckers
   , stateSignatures :: GMap Int Int TermTypes
-  , stateTypedefs :: GMap Int MVar (Map TVar (Type, [TVar]))
+  , stateTypedefs :: GMap Int MVar (Map TVar [([TVar], TypeU)])
   -- ^ Stores all type definitions available to an index e.g.:
   --   `type Cpp (Map k v) = "std::map<$1,$2>" k v`
   --   Where `TVar` is `Map`
@@ -682,6 +683,13 @@ data TypeU
   | AppU TypeU [TypeU] -- type application
   | NamU NamType TVar [TypeU] [(Text, TypeU)] -- record / object / table
   deriving (Show, Ord, Eq)
+
+type2typeu :: Type -> TypeU
+type2typeu (VarT v) = VarU v
+type2typeu (UnkT v) = ForallU v (VarU v) -- sus
+type2typeu (FunT ts t) = FunU (map type2typeu ts) (type2typeu t)
+type2typeu (AppT v ts) = AppU (type2typeu v) (map type2typeu ts)
+type2typeu (NamT o n ps rs) = NamU o n (map type2typeu ps) [(k, type2typeu x) | (k,x) <- rs]
 
 -- | Extended Type that may represent a language specific type as well as sets
 -- of properties and constrains.

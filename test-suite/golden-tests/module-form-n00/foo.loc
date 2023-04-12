@@ -8,6 +8,7 @@ import rbase (add)
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
 
+type py Real = "float"
+type R Real = "numeric" 
+
 sub :: Real -> Real -> Real
-sub py :: "float" -> "float" -> "float"
-sub r :: "numeric" -> "numeric" -> "numeric"

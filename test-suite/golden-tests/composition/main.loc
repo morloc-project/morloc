@@ -8,11 +8,12 @@ source py from "paste.py" (
 
 source py ("abs")
 
+type Py Real = "float"
+type Py Str = "str"
+
 abs :: Real -> Real
-abs py :: "float" -> "float"
 
 paste :: Str -> Str -> Str
-paste py :: "str" -> "str" -> "str"
 
 foo xs = map (paste "a" . paste "b" . paste "c") xs
 bar = abs . sub 1.0 . abs

@@ -9,7 +9,7 @@ Maintainer  : zbwrnz@gmail.com
 Stability   : experimental
 -}
 
-module Morloc.Frontend.Desugar (desugar, desugarType) where
+module Morloc.Frontend.Desugar (desugar, desugarType, desugarEType) where
 
 import Morloc.Frontend.Namespace
 import Morloc.Pretty ()
@@ -129,15 +129,20 @@ desugarExpr d k e0 = do
   -- this will be the only way to access module-specific info.
   MM.put (s { stateSources = GMap.insertMany indices k objSources (stateSources s)
             , stateTypedefs = GMap.insertMany indices k typedefs (stateTypedefs s) } )
-  mapExprM f e0
+
+  case mapExprM f e0 of
+    (Right x) -> return x
+    (Left  e) -> MM.throwError e
   where
 
-  f :: Expr -> MorlocMonad Expr
-  f (SigE v l t) = SigE v l <$> desugarEType termmap d k t
-  f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap d k) ts
+  f :: Expr -> Either MorlocError Expr
+  f (SigE v l t) = SigE v l <$> desugarEType termmap t
+  f (AnnE e ts) = AnnE e <$> mapM (desugarType termmap) ts
   f e = return e
 
-  -- Find all non-generic type terms used in this module
+  objSources = [src | src <- AST.findSources e0]
+
+  -- Find all type terms used in this module
   -- These are the terms that may need alias expansion
   terms :: [TVar]
   terms = AST.findSignatureTypeTerms e0
@@ -168,31 +173,34 @@ desugarExpr d k e0 = do
 
   indices = AST.getIndices e0
 
-  -- FIXME: should a term be allowed to have multiple type definitions within a language?
-  typedefs :: Map.Map TVar (Type, [TVar])
-  typedefs = Map.map (\(vs, t) -> (typeOf t, vs))
-    (Map.map head (Map.filter (not . null) termmap))
+  typedefs :: Map.Map TVar [([TVar], TypeU)]
+  typedefs 
+    = Map.fromList
+    . groupSort
+    . (<>) (Map.toList $ AST.findTypedefs e0)
+    . concatMap
+      ( (\(v, es) -> [(TV (langOf t) v, (vs, t)) | (vs, t) <- es])
+      . second (concatMap (uncurry lookupName) . MDD.nodes)
+      )
+    . MDD.inherit k AST.findTypedefs
+    . MDD.mapEdge (\es -> [(a, b) | AliasedType a b <- es])
+    $ d
 
-  objSources = [src | src <- AST.findSources e0]
+  lookupName :: MT.Text -> Map.Map TVar a -> [a] 
+  lookupName k1 m = [x | (TV _ k2, x) <- Map.toList m, k1 == k2]
 
 
-desugarEType
-  :: Map.Map TVar [([TVar], TypeU)]
-  -> DAG MVar [AliasedSymbol] ExprI
-  -> MVar -> EType -> MorlocMonad EType
-desugarEType h d k (EType t ps cs) = EType <$> desugarType h d k t <*> pure ps <*> pure cs
-
+desugarEType :: Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
+desugarEType h (EType t ps cs) = EType <$> desugarType h t <*> pure ps <*> pure cs
 
 desugarType
   :: Map.Map TVar [([TVar], TypeU)]
-  -> DAG MVar [AliasedSymbol] ExprI
-  -> MVar
   -> TypeU
-  -> MorlocMonad TypeU
-desugarType h _ _ = f
+  -> Either MorlocError TypeU
+desugarType h = f
   where
 
-  f :: TypeU -> MorlocMonad TypeU
+  f :: TypeU -> Either MorlocError TypeU
 
   --   (Just []) -> return (t0, [])
   --   (Just ts'@(t':_)) -> do
@@ -265,7 +273,7 @@ desugarType h _ _ = f
     -> Int
     -> ([TVar], TypeU)
     -> ([TVar], TypeU)
-    -> MorlocMonad ([TVar], TypeU)
+    -> Either MorlocError ([TVar], TypeU)
   mergeAliases v i t@(ts1, t1) (ts2, t2)
     | i /= length ts1 = MM.throwError $ BadTypeAliasParameters v i (length ts1)
     |    MTP.isSubtypeOf t1' t2'

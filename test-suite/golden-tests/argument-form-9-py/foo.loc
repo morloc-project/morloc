@@ -2,5 +2,6 @@ module main (makeValue)
 
 source Py from "foo.py" ("makeValue")
 
+type Py Int = "int"
+
 makeValue :: () -> Int
-makeValue Py :: () -> "int"

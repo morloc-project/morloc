@@ -95,6 +95,7 @@ pModule expModuleName = do
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
         =  [TermSymbol alias | (AliasedTerm _ alias) <- imps]
         <> [TypeSymbol alias | (AliasedType _ alias) <- imps]
+    findSymbols (ExprI _ (SrcE src)) = [TermSymbol (unEVar $ srcAlias src)]
     findSymbols _ = []
 
     findExports :: Exports -> Symbol -> Parser (Maybe ExprI)

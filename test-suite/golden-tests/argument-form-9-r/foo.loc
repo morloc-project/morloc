@@ -2,5 +2,6 @@ module main (makeValue)
 
 source R from "foo.R" ("makeValue")
 
+type R Int = "integer"
+
 makeValue :: () -> Int
-makeValue R :: () -> "integer"

@@ -3,6 +3,10 @@ module main (foo)
 import rbase (map)
 import cppbase (neg)
 
+-- this is also a test of repeated signatures. Having duplicates like this in a
+-- single module is highly sus. Should I really support it? It does show up
+-- through if someone adds signatures in multiple modules for largely documentation
+-- purposes.
 foo R :: ["numeric"] -> ["numeric"]
 foo R :: ["numeric"] -> ["numeric"]
 foo xs = map neg xs

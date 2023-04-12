@@ -19,7 +19,8 @@ import qualified Morloc.Module as Mod
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.API as F
 import qualified Morloc.Data.GMap as GMap
-import Morloc.CodeGenerator.Namespace (TypeP, prettyGenTypeP)
+import Morloc.Pretty ()
+import Morloc.CodeGenerator.Namespace (TypeP, prettyGenTypeP, generalTypeOf)
 import Morloc.Data.Doc
 import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
@@ -122,9 +123,17 @@ writeTerm s i typeDoc =
 
 writeTypecheckOutput :: Int -> ((Either MorlocError ([SAnno (Indexed Type) One ()], [SAnno Int One (Indexed TypeP)]), [MT.Text]), MorlocState) -> MDoc
 writeTypecheckOutput _ ((Left e, _), _) = pretty e
-writeTypecheckOutput 0 ((Right (_, rasts), _), s) = vsep (map (writeRast 0 s) rasts)
-writeTypecheckOutput 1 ((Right (_, rasts), _), s) = "\nExports:\n\n" <> vsep (map (writeRast 1 s) rasts)
+writeTypecheckOutput 0   ((Right (_, rasts), _), s) = vsep (map (writeRealizedType s) rasts)
+writeTypecheckOutput 1 x@((Right (_, rasts), _), s) = "Types:\n" <> writeTypecheckOutput 0 x <> "\n\nExports:\n" <> vsep (map (writeRast 1 s) rasts)
 writeTypecheckOutput _ _ = "I don't know how to be that verbose"
+
+writeRealizedType :: MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
+writeRealizedType state (SAnno (One (_, Idx _ p)) m) =
+    let c = fname <+> maybe "_" pretty (langOf p) <+> "::" <+> pretty p
+        g = fname <+> "::" <+> pretty (generalTypeOf p)
+    in c <> "\n" <> g
+    where
+        fname = maybe "_" pretty (Map.lookup m (stateName state))
 
  
 -- data SAnno g f c = SAnno (f (SExpr g f c, c)) g

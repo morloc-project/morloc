@@ -40,11 +40,19 @@ module Morloc.Frontend.Lang.DefaultTypes
   , recordG
   , recordC
   , recordGC
+  -- * functions for concrete synthesis
+  , generalDefaultToConcrete
   ) where
 
 import Morloc.Frontend.Namespace
 import qualified Morloc.Data.Text as MT
 
+generalDefaultToConcrete :: MT.Text -> Int -> Lang -> MT.Text
+generalDefaultToConcrete = undefined
+-- generalDefaultToConcrete v n lang
+--     | v == listG = listC lang
+--     | v == tupleG = tupleG lang
+--     | _ = []
 
 listG :: MT.Text
 listG = "List"

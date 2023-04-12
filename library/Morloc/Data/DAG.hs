@@ -19,6 +19,7 @@ module Morloc.Data.DAG
   , lookupEdge
   , lookupEdgeTriple
   , local
+  , inherit
   , roots
   , shake
   , leafs
@@ -247,6 +248,11 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
           n2 <- f k1 n1 augmented
           return $ Map.insert k1 (n2, xs) dn
 
+-- Inherit all imported values and their terminal aliases
+inherit :: (Ord k, Eq v) => k -> (n -> a) -> DAG k [(v,v)] n -> [(v, DAG k None (v,a))]
+inherit k f d = case local k d of
+    Nothing -> []
+    (Just (_, xs)) -> concat [[(v, lookupAliasedTerm v k' f d) | (v,_) <- vs] | (k', vs, _) <- xs]
 
 lookupAliasedTerm
   :: (Ord k, Eq v)
