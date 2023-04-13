@@ -62,7 +62,7 @@ instance Pretty Type where
   pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
   pretty (VarT (TV _ "Unit")) = "()"
   pretty (VarT v) = pretty v
-  pretty (FunT [] t) = "<MISSING> -> " <> pretty t
+  pretty (FunT [] t) = "() -> " <> pretty t
   pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
   pretty (AppT t ts) = hsep (map pretty (t:ts))
   pretty (NamT o n ps rs)
@@ -97,7 +97,7 @@ instance Pretty Constraint where
   pretty (Con x) = pretty x
 
 instance Pretty TypeU where
-  pretty (FunU [] t) = "<MISSING> -> " <> prettyTypeU t 
+  pretty (FunU [] t) = "() -> " <> prettyTypeU t 
   pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
@@ -110,7 +110,7 @@ prettyTypeU (ExistU v ts ds rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
 prettyTypeU (VarU (TV _ "Unit")) = "()"
 prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
+prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
 prettyTypeU (AppU t ts) = hsep $ map parenTypeU (t:ts) where
     parenTypeU t'@(AppU _ _) = parens $ prettyTypeU t'
