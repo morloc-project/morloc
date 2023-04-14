@@ -1,4 +1,4 @@
-export analysis
+module flucase (classify)
 
 type Filename = Str 
 type Accession = Str
@@ -10,15 +10,15 @@ type Label = Str
 type Date = Str
 type Query = Str
 
--- type Py Filename = "str"
--- type Py Accession = "str"
--- type Py Clade = "str"
--- type Py StrainName = "str"
--- type Py Sequence = "str"
--- type Py EntrezQuery = "str"
--- type Py Label = "str"
--- type Py Date = "str"
--- type Py Query = "str"
+type Py Filename = "str"
+type Py Accession = "str"
+type Py Clade = "str"
+type Py StrainName = "str"
+type Py Sequence = "str"
+type Py EntrezQuery = "str"
+type Py Label = "str"
+type Py Date = "str"
+type Py Query = "str"
 
 type Cpp Filename = "std::string" 
 type Cpp Accession = "std::string"
@@ -60,8 +60,7 @@ record Cpp Meta = "struct"
 --   )
 
 import bio.tree
-  ( Tree
-  , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  ( treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
   , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   )
@@ -132,23 +131,22 @@ import base
 --   . fetchIds config
 --   ) query
 
-export classify
-classify :: Tree () e Meta -> Tree Str e Meta
-classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
-classify = push (pullNode pullLeaf pullClade) where
-
-  pullLeaf :: Meta -> Clade
-  pullLeaf Cpp :: Meta -> Clade
-  pullLeaf leaf = leaf@clade
-
-  pullClade :: [Clade] -> Clade
-  pullClade Cpp :: [Clade] -> Clade
-  pullClade xs
-    = ifelse (eq (length seenClades) 1)
-             (head seenClades) ""
-    where
-      seenClades = ( unique
-                   . filter (\ x -> gt (lengthS x) 0)
-                   ) xs
-
-  push = mapChildWithParent id (\ p c -> ifelse (eq (lengthS c) 0) p c)
+-- classify :: Tree () e Meta -> Tree Str e Meta
+-- classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
+-- classify = push (pullNode pullLeaf pullClade) where
+--
+--   pullLeaf :: Meta -> Clade
+--   pullLeaf Cpp :: Meta -> Clade
+--   pullLeaf leaf = leaf@clade
+--
+--   pullClade :: [Clade] -> Clade
+--   pullClade Cpp :: [Clade] -> Clade
+--   pullClade xs
+--     = ifelse (eq (length seenClades) 1)
+--              (head seenClades) ""
+--     where
+--       seenClades = ( unique
+--                    . filter (\ x -> gt (lengthS x) 0)
+--                    ) xs
+--
+--   push = mapChildWithParent id (\ p c -> ifelse (eq (lengthS c) 0) p c)
