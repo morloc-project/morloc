@@ -60,7 +60,7 @@ instance Pretty Source where
 
 instance Pretty Type where
   pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
-  pretty (VarT (TV _ "Unit")) = "()"
+  pretty (VarT (TV _ "Unit")) = "Unit"
   pretty (VarT v) = pretty v
   pretty (FunT [] t) = "() -> " <> pretty t
   pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
@@ -108,7 +108,7 @@ prettyTypeU (ExistU v ts ds rs)
   <+> list (map prettyTypeU ds)
   <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
-prettyTypeU (VarU (TV _ "Unit")) = "()"
+prettyTypeU (VarU (TV _ "Unit")) = "Unit"
 prettyTypeU (VarU v) = pretty v
 prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))

@@ -78,21 +78,29 @@ handling for several very different languages (proofs-of-concept).
 0.41.0 [2023.04.xx]
 -------------------
 
- - [x] Improve exports
-   - [x] Move exports to module list (as in Haskell)
-   - [x] Add `*` wildcard to export every top-level named term or type
- - [x] Allow concrete (un)packers to vary in number of generic terms
- - [x] Default to c++17, rather than c++11
- - [x] Resolve "shit output" error message (map index to export name)
- - [x] Fix error raised when a module exporting a type is compiled 
- - [x] Tidy up the verbose diagnostics
- - [x] Add multiple levels of verbosity (quiet by default)
- - [x] Restructure library to avoid name conflicts with pre-existing packages
- - [x] Fix bug in cousin module imports
- - [x] Fix bug in unparameterized (un)packer serialization
+Language updates
+ * Synthesize concrete types from general types when possible
+ * Improve exports
+   * Move exports to module list (as in Haskell)
+   * Add `*` wildcard to export every top-level named term or type
+ * Allow concrete (un)packers to vary in number of generic terms
+ * Fix handling of functions with Null inputs (set to empty argument lists)
+
+Package updates
+ * Default to c++17, rather than c++11
+ * Restructure library to avoid name conflicts with pre-existing packages
+
+Better error messages and logs
+ * Resolve "shit output" error message (map index to export name)
+ * Tidy up the verbose diagnostics
+ * Print general and concrete types for typecheck with -r option
+ * Add multiple levels of verbosity (quiet by default)
+
+Bug fixes
+ * Fix bug in cousin module imports
+ * Fix bug in unparameterized (un)packer serialization
  - [ ] Fix typechecking bug in record access
- - [x] Derive concrete type signatures when possible
- - [x] Fix handling of functions with Null inputs (set to empty argument lists)
+ * Fix error raised when a module exporting a type is compiled 
 
 0.40.0 [2023.02.04]
 -------------------

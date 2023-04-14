@@ -300,10 +300,19 @@ chooseExistential (NamU o n ps rs) = NamU o n (map chooseExistential ps) [(k, ch
 nullify :: DAG m e ExprI -> DAG m e ExprI
 nullify = MDD.mapNode f where
     f :: ExprI -> ExprI
-    f (ExprI i (SigE v n (EType (FunU ts ot) ps cs))) = ExprI i (SigE v n (EType (FunU (filter (not . isNull) ts) ot) ps cs))
+    f (ExprI i (SigE v n (EType t ps cs))) = ExprI i (SigE v n (EType (nullifyT t) ps cs))
     f (ExprI i (ModE m es)) = ExprI i (ModE m (map f es))
     f (ExprI i (AssE v e es)) = ExprI i (AssE v (f e) (map f es))
     f e = e
+
+    nullifyT :: TypeU -> TypeU
+    nullifyT (FunU ts t) = FunU (filter (not . isNull) (map nullifyT ts)) (nullifyT t)
+    nullifyT (ExistU v ts ds rs) = ExistU v (map nullifyT ts) (map nullifyT ds) (map (second nullifyT) rs)
+    nullifyT (ForallU v t) = ForallU v (nullifyT t)
+    nullifyT (AppU t ts) = AppU (nullifyT t) (map nullifyT ts)
+    nullifyT (NamU o v ds rs) = NamU o v (map nullifyT ds) (map (second nullifyT) rs)
+    nullifyT t = t
+
 
     isNull :: TypeU -> Bool
     isNull (ExistU _ _ (t:_) _) = t `elem` MLD.defaultNull (langOf t)
