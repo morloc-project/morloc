@@ -241,7 +241,7 @@ data Symbol = TypeSymbol DT.Text | TermSymbol DT.Text
 symbolName (TypeSymbol x) = x
 symbolName (TermSymbol x) = x
 
-data Exports = ExportMany [Symbol] | ExportAll
+data Exports = ExportMany (Set.Set Symbol) | ExportAll
   deriving (Show, Ord, Eq)
 
 data AliasedSymbol = AliasedTerm DT.Text DT.Text | AliasedType DT.Text DT.Text

@@ -102,6 +102,7 @@ instance Pretty TypeU where
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
 
+prettyTypeU (ExistU v [] [] []) = angles $ pretty v
 prettyTypeU (ExistU v ts ds rs)
   = angles $ pretty v
   <+> list (map prettyTypeU ts)

@@ -79,31 +79,36 @@ pModule expModuleName = do
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
     (Just (MV n)) -> symbol n
 
-  exportSym <- parens ((char '*' >> return ExportAll) <|> (sepBy pSymbol (symbol ",") |>> ExportMany))
+  exportSym <- parens ((char '*' >> return ExportAll) <|> (sepBy pSymbol (symbol ",") |>> ExportMany . Set.fromList))
 
   es <- align pTopExpr |>> concat
 
-  exports <- mapM (findExports exportSym) (unique . concatMap findSymbols $ es) |>> catMaybes
+  let allSymbols = Set.unions . map findSymbols $ es
+      exports = case exportSym of
+        ExportAll -> allSymbols
+        (ExportMany exps) -> exps
 
-  exprI $ ModE (MV moduleName) (es <> exports)
+  case Set.toList (exports `Set.difference` allSymbols) of
+    [] -> return ()
+    missing -> fancyFailure . Set.singleton . ErrorFail
+            $ "Module " <> show moduleName <> " does not export the following terms or types: [" <>  (intercalate ", " . map (show . symbolName) $ missing) <> "]"
+
+  exportExpr <- mapM (exprI . ExpE) (Set.toList exports)
+
+  exprI $ ModE (MV moduleName) (es <> exportExpr)
 
   where
-    findSymbols :: ExprI -> [Symbol]
-    findSymbols (ExprI _ (TypE (TV _ v) _ _)) = [TypeSymbol v]
-    findSymbols (ExprI _ (AssE (EV e) _ _)) = [TermSymbol e]
-    findSymbols (ExprI _ (SigE (EV e) _ _)) = [TermSymbol e]
+    findSymbols :: ExprI -> Set.Set Symbol
+    findSymbols (ExprI _ (TypE (TV _ v) _ _)) = Set.singleton $ TypeSymbol v
+    findSymbols (ExprI _ (AssE (EV e) _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (SigE (EV e) _ _)) = Set.singleton $ TermSymbol e
     findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
-        =  [TermSymbol alias | (AliasedTerm _ alias) <- imps]
-        <> [TypeSymbol alias | (AliasedType _ alias) <- imps]
-    findSymbols (ExprI _ (SrcE src)) = [TermSymbol (unEVar $ srcAlias src)]
-    findSymbols _ = []
+        = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
+                         [TypeSymbol alias | (AliasedType _ alias) <- imps]
+    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (unEVar $ srcAlias src)
+    findSymbols _ = Set.empty
 
-    findExports :: Exports -> Symbol -> Parser (Maybe ExprI)
-    findExports ExportAll s = Just <$> exprI (ExpE s)
-    findExports (ExportMany es) s =  
-        if s `elem` es
-        then Just <$> exprI (ExpE s)
-        else return Nothing
+-- exprI (ExpE s)
 
 -- | match an implicit Main module
 pMain :: Parser ExprI

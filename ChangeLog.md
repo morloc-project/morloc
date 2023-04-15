@@ -83,6 +83,7 @@ Language updates
  * Improve exports
    * Move exports to module list (as in Haskell)
    * Add `*` wildcard to export every top-level named term or type
+   * Raise an error if a non-existing term is exported from a module
  * Allow concrete (un)packers to vary in number of generic terms
  * Set functions with empty inputs (e.g., `()`) to have empty lists of arguments
  * Replace the `Null` literal term with `()`
@@ -100,18 +101,9 @@ Better error messages and logs
  * Add multiple levels of verbosity (quiet by default)
 
 Bug fixes
+ - [ ] Add check to avoid infinite recursion
  * Typechecking bug in record access
- - [ ] Add occurs check to avoid infinite recursion
- - [ ] Fix error raised when only a packed type is exported from a module  
-       e.g.
-       This works
-       ```
-       import table (Table, headT)
-       ```
-       But this fails
-       ```
-       import table (Table)
-       ```
+ * Fix bug allowing undefined things in module export lists
  * Fix cousin module imports
  * Fix unparameterized (un)packer serialization
  * Fix error raised when a module exporting a type is compiled 
