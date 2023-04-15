@@ -144,11 +144,11 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pComposition
+      try pUni
+  <|> try pComposition
   <|> try pAcc    -- access <expr>@
   <|> try pNamE   -- record
   <|> try pTupE
-  <|> try pUni
   <|> try pAnn
   <|> try pApp
   <|> try pStrE
@@ -446,7 +446,7 @@ pNamEntryE = do
 
 
 pUni :: Parser ExprI
-pUni = symbol "Null" >> exprI UniE
+pUni = symbol "(" >> symbol ")" >> exprI UniE
 
 
 pAcc :: Parser ExprI
@@ -471,8 +471,8 @@ pApp = do
   es <- many1 s
   exprI $ AppE f es
   where
-    s =   try (parens pExpr)
-      <|> try pUni
+    s =   try pUni
+      <|> try (parens pExpr)
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE

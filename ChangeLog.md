@@ -84,7 +84,9 @@ Language updates
    * Move exports to module list (as in Haskell)
    * Add `*` wildcard to export every top-level named term or type
  * Allow concrete (un)packers to vary in number of generic terms
- * Fix handling of functions with Null inputs (set to empty argument lists)
+ * Set functions with empty inputs (e.g., `()`) to have empty lists of arguments
+ * Replace the `Null` literal term with `()`
+
 
 Package updates
  * Default to c++17, rather than c++11
