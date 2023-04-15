@@ -100,7 +100,8 @@ Better error messages and logs
  * Add multiple levels of verbosity (quiet by default)
 
 Bug fixes
- - [ ] Typechecking bug in record access
+ * Typechecking bug in record access
+ - [ ] Add occurs check to avoid infinite recursion
  - [ ] Fix error raised when only a packed type is exported from a module  
        e.g.
        This works
