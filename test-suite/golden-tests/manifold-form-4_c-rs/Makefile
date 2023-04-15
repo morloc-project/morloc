@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make -v t4.loc > log
-	./nexus.pl foo > obs.txt
+	./nexus.py foo > obs.txt
 
 clean:
 	rm -rf nexus* *out *out

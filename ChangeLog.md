@@ -89,6 +89,7 @@ Language updates
 Package updates
  * Default to c++17, rather than c++11
  * Restructure library to avoid name conflicts with pre-existing packages
+ * Replace Perl nexus with Python nexus and remove Perl dependencies
 
 Better error messages and logs
  * Resolve "shit output" error message (map index to export name)
@@ -97,10 +98,21 @@ Better error messages and logs
  * Add multiple levels of verbosity (quiet by default)
 
 Bug fixes
- * Fix bug in cousin module imports
- * Fix bug in unparameterized (un)packer serialization
- - [ ] Fix typechecking bug in record access
+ - [ ] Typechecking bug in record access
+ - [ ] Fix error raised when only a packed type is exported from a module  
+       e.g.
+       This works
+       ```
+       import table (Table, headT)
+       ```
+       But this fails
+       ```
+       import table (Table)
+       ```
+ * Fix cousin module imports
+ * Fix unparameterized (un)packer serialization
  * Fix error raised when a module exporting a type is compiled 
+ * Fix out of order record fields in nexus output
 
 0.40.0 [2023.02.04]
 -------------------
