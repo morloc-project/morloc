@@ -35,13 +35,6 @@ syn keyword reserved source
 syn keyword reserved export
 syn keyword reserved True
 syn keyword reserved False
-syn keyword reserved Null
-syn keyword reserved and
-syn keyword reserved or
-syn keyword reserved xor
-syn keyword reserved nand
-syn keyword reserved not
-syn keyword reserved system
 
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
