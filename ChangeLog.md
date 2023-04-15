@@ -101,7 +101,7 @@ Better error messages and logs
  * Add multiple levels of verbosity (quiet by default)
 
 Bug fixes
- - [ ] Add check to avoid infinite recursion
+ - [ ] Add check to avoid infinite typechecker recursion
  * Typechecking bug in record access
  * Fix bug allowing undefined things in module export lists
  * Fix cousin module imports

@@ -119,3 +119,4 @@ instance Pretty TypeError where
   pretty TooManyArguments = "TooManyArguments"
   pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
   pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
+  pretty InfiniteRecursion = "InfiniteRecursion"

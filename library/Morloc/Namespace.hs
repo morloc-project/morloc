@@ -400,6 +400,7 @@ data TypeError
   | TooManyArguments
   | EmptyExpression EVar
   | MissingFeature Text
+  | InfiniteRecursion
 
 data MorlocError
   -- | An error that is associated with an expression index

@@ -1747,6 +1747,34 @@ unitTypeTests =
         f x = 9999
         |]
 
+    , expectError
+        "catch infinite recursion of list"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: [a] -> a
+        f :: a -> a
+        f x = g x
+        |]
+    , expectError
+        "catch infinite recursion of tuple"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: (a, b) -> a
+        f :: a -> a
+        f x = g x
+        |]
+    , expectError
+        "catch infinite recursion of functions"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: (a -> b) -> a
+        f :: a -> a
+        f x = g x
+        |]
+
     -- -- tags
     -- , exprEqual
     --     "variable tags"
