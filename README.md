@@ -78,11 +78,12 @@ echo 'au BufRead,BufNewFile *.loc set filetype=loc' > ~/.vim/ftdetect/loc.vim
 ## Getting Started
 
 ```
-export hello
+module hw (hello)
+
 hello = "Hello World"
 ```
 
-The "export" keyword exports the variable "hello" from the module.
+We create a module named `hw` and export the `hello` term.
 
 Paste this into a file (e.g. "hello.loc") and then it can be imported by other
 `morloc` modules or directly compiled into a program where every exported term
@@ -120,13 +121,11 @@ Hello World
 The following code uses only C++ functions (`fold`, `map`, `add` and `mul`). 
 
 ```
+module sos (*)
+
 import cppbase (fold, map, add, mul)
 
-export square
-export sumOfSquares
-
 square x = mul x x
-
 sumOfSquares xs = fold add 0 (map square xs)
 ```
 
@@ -172,10 +171,10 @@ The `nexus` executable dispatches the command to the compiled C++ program,
 `morloc` can compose functions across languages. For example:
 
 ```
+module fib (fibplot)
+
 import math (fibonacci)
 import rbase (plotVectorPDF, ints2reals)
-
-export fibplot
 
 fibplot n = plotVectorPDF (ints2reals (fibonacci n)) "fibonacci-plot.pdf"
 ```
@@ -219,10 +218,9 @@ be used in the generated code. The same occurs in the python type constructors
 The following example is available in `examples/rmsWithTypes.loc`:
 
 ```
-import cppbase (fold, map, add, mul)
+module sos (*) -- '*' means export every term
 
-export square
-export sumOfSquares
+import cppbase (fold, map, add, mul)
 
 square x = mul x x
 
