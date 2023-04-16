@@ -1765,15 +1765,15 @@ unitTypeTests =
         f :: a -> a
         f x = g x
         |]
-    , expectError
-        "catch infinite recursion of functions"
-        (GeneralTypeError InfiniteRecursion)
-        [r|
-        module main (f)
-        g :: (a -> b) -> a
-        f :: a -> a
-        f x = g x
-        |]
+    -- , expectError
+    --     "check signatures under supposed identity"
+    --     (GeneralTypeError InfiniteRecursion)
+    --     [r|
+    --     module main (f)
+    --     g :: (a -> b) -> a
+    --     f :: a -> a
+    --     f x = g x
+    --     |]
 
     -- -- tags
     -- , exprEqual

@@ -58,6 +58,15 @@ handling for several very different languages (proofs-of-concept).
  objects are really working. Also add Haskell, this will be better test of
  output type correctness than C++.
 
+ - [ ] resolve failure to check against some type sigs, for example: 
+
+   ```
+   g :: (a -> b) -> a
+   f :: a -> a
+   f x = g x
+   ```
+   Uncomment the "check signatures under supposed identity" unit test
+
  - [ ] add Haskell support
  - [ ] add record keyword aliases
  - [ ] systematically test records, tables, and objects
