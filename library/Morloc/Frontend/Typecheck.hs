@@ -534,8 +534,8 @@ checkE' i g x t = do
   seeGamma g
   r@(g', t', _) <- checkE i g x t 
   leave "checkE"
-  seeType t'
   seeGamma g'
+  seeType t'
   return r
 
 application' i g es t = do

@@ -79,6 +79,7 @@ handling for several very different languages (proofs-of-concept).
 -------------------
 
 Language updates
+ * Add check to avoid infinite typechecker recursion
  * Synthesize concrete types from general types when possible
  * Improve exports
    * Move exports to module list (as in Haskell)
@@ -101,7 +102,6 @@ Better error messages and logs
  * Add multiple levels of verbosity (quiet by default)
 
 Bug fixes
- - [ ] Add check to avoid infinite typechecker recursion
  * Typechecking bug in record access
  * Fix bug allowing undefined things in module export lists
  * Fix cousin module imports

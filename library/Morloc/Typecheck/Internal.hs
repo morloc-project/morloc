@@ -231,8 +231,9 @@ subtype t1@(ExistU v1 ps1 _ []) t2@(AppU v2 ps2) g1
   | otherwise = do
     g2 <- foldM (\g (p1, p2) -> subtype p1 p2 g) g1 (zip ps1 ps2)
     case access1 v1 (gammaContext g2) of
-      Just (rs, _, ls) ->
-        return $ g2 { gammaContext = rs ++ [SolvedG v1 t2] ++ ls }
+      Just (rs, _, ls) -> do
+        solved <- solve v1 t2
+        return $ g2 { gammaContext = rs ++ [solved] ++ ls }
       Nothing -> return g2 -- it is already solved, so do nothing
 
 --  g1,>Ea,Ea |- [Ea/x]A <: B -| g2,>Ea,g3
@@ -266,7 +267,9 @@ instantiate ta@(ExistU _ _ _ (_:_)) tb@(NamU _ _ _ _) g1 = instantiate tb ta g1
 instantiate ta@(NamU _ _ _ rs1) tb@(ExistU v _ _ rs2@(_:_)) g1 = do
   g2 <- foldM (\g' (t1, t2) -> subtype t1 t2 g') g1 [(t1, t2) | (k1, t1) <- rs1, (k2, t2) <- rs2, k1 == k2]
   case access1 v (gammaContext g2) of 
-    (Just (rhs, _, lhs)) -> return $ g2 {gammaContext = rhs ++ [SolvedG v ta] ++ lhs}
+    (Just (rhs, _, lhs)) -> do
+        solved <- solve v ta
+        return $ g2 {gammaContext = rhs ++ [solved] ++ lhs}
     Nothing -> Left $ InstantiationError ta tb "Error in NamU with existential keys"
 
 instantiate ta@(ExistU v@(TV lang _) [] _ _) tb@(FunU as b) g1 = do
@@ -275,8 +278,9 @@ instantiate ta@(ExistU v@(TV lang _) [] _ _) tb@(FunU as b) g1 = do
       eas = [ExistU v' [] [] [] | v' <- veas]
       eb = ExistU veb [] [] []
   g4 <- case access1 v (gammaContext g3) of
-      Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ (index eb : map index eas) ++ ls }
+      Just (rs, _, ls) -> do
+        solved <- solve v (FunU eas eb)
+        return $ g3 { gammaContext = rs ++ [solved] ++ (index eb : map index eas) ++ ls }
       Nothing -> Left $ InstantiationError ta tb "Error in InstLApp"
   g5 <- foldlM (\g (e, t) -> instantiate e t g) g4 (zip eas as)
   instantiate eb (apply g5 b) g5
@@ -291,8 +295,9 @@ instantiate ta@(FunU as b) tb@(ExistU v@(TV lang _) [] _ _) g1 = do
       eas = [ExistU v' [] [] [] | v' <- veas]
       eb = ExistU veb [] [] []
   g4 <- case access1 v (gammaContext g3) of
-    Just (rs, _, ls) ->
-        return $ g3 { gammaContext = rs ++ [SolvedG v (FunU eas eb)] ++ (index eb : map index eas) ++ ls }
+    Just (rs, _, ls) -> do
+        solved <- solve v (FunU eas eb)
+        return $ g3 { gammaContext = rs ++ [solved] ++ (index eb : map index eas) ++ ls }
     Nothing -> Left $ InstantiationError ta tb "Error in InstRApp"
   g5 <- foldlM (\g (e, t) -> instantiate t e g) g4 (zip eas as)
   instantiate eb (apply g5 b) g5
@@ -316,12 +321,15 @@ instantiate (ExistU v1 ps1 [] rs1) (ExistU v2 ps2 [] rs2) g1 = do
       tb = ExistU v2 ps2 [] rs3
   case access2 v1 v2 (gammaContext g3) of
     -- InstLReach
-    (Just (ls, _, ms, x, rs)) -> return $ g3 { gammaContext = ls <> (SolvedG v1 tb : ms) <> (x : rs) }
+    (Just (ls, _, ms, x, rs)) -> do
+        solved <- solve v1 tb
+        return $ g3 { gammaContext = ls <> (solved : ms) <> (x : rs) }
     Nothing ->
       case access2 v2 v1 (gammaContext g3) of
       -- InstRReach
-        (Just (ls, _, ms, x, rs)) ->
-          return $ g3 { gammaContext = ls <> (SolvedG v2 ta : ms) <> (x : rs) }
+        (Just (ls, _, ms, x, rs)) -> do
+          solved <- solve v2 ta
+          return $ g3 { gammaContext = ls <> (solved : ms) <> (x : rs) }
         Nothing -> return g3
 
 --  g1[Ea],>Eb,Eb |- [Eb/x]B <=: Ea -| g2,>Eb,g3
@@ -342,7 +350,9 @@ instantiate ta tb@(ExistU v [] [] []) g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       case access1 v (gammaContext g1) of
-        (Just (ls, _, rs)) -> return $ g1 { gammaContext = ls ++ SolvedG v ta : rs }
+        (Just (ls, _, rs)) -> do
+            solved <- solve v ta
+            return $ g1 { gammaContext = ls ++ solved : rs }
         Nothing ->
           case lookupU v g1 of
             (Just _) -> return g1
@@ -357,7 +367,9 @@ instantiate ta@(ExistU v [] [] []) tb g1
   | langOf ta /= langOf tb = return g1
   | otherwise =
       case access1 v (gammaContext g1) of
-        (Just (ls, _, rs)) -> return $ g1 { gammaContext = ls ++ SolvedG v tb : rs }
+        (Just (ls, _, rs)) -> do
+            solved <- solve v tb
+            return $ g1 { gammaContext = ls ++ solved : rs }
         Nothing ->
           case lookupU v g1 of
             (Just _) -> return g1
@@ -379,18 +391,30 @@ instantiate (ExistU _ ps1 _ rs1) (ExistU _ ps2 _ rs2) g1 = do
 instantiate _ _ g = return g
 
 
+solve :: TVar -> TypeU -> Either TypeError GammaIndex
+solve v t
+    | v `elem` (mapMaybe toTVar . Set.toList . free $ t) = Left InfiniteRecursion
+    | otherwise = Right (SolvedG v t)
+    where
+        toTVar :: TypeU -> Maybe TVar
+        toTVar (ExistU v' _ _ _) = Just v'
+        toTVar (VarU v') = Just v'
+        toTVar _ = Nothing
+    
+
+
 occursCheck :: TypeU -> TypeU -> MT.Text -> Either TypeError ()
-occursCheck t1 t2 place = do
-  case Set.member t1 (free t2) of
-    True -> Left $ OccursCheckFail t1 t2 place
-    False -> Right ()
+occursCheck t1 t2 place =
+  if Set.member t1 (free t2)
+  then Left $ OccursCheckFail t1 t2 place
+  else Right ()
 
 
 
 -- | substitute all appearances of a given variable with an existential
 -- [t/v]A
 substitute :: TVar -> TypeU -> TypeU
-substitute v t = substituteTVar v (ExistU v [] [] []) t
+substitute v = substituteTVar v (ExistU v [] [] [])
 
 access1 :: TVar -> [GammaIndex] -> Maybe ([GammaIndex], GammaIndex, [GammaIndex])
 access1 v gs =
