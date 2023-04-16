@@ -1,6 +1,6 @@
-import rustbase (id)
+module main (foo)
 
-export foo
+import rustbase (id)
 
 type Rust Str = "String"
 type Rust Int = "i64"

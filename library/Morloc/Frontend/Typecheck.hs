@@ -18,11 +18,9 @@ import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
-import qualified Morloc.Data.Text as MT
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
-import Data.Bifunctor (first)
 
 -- | Each SAnno object in the input list represents one exported function.
 -- Modules, scopes, imports and everything else are abstracted away.
@@ -41,12 +39,12 @@ typecheck = mapM run where
       let g0 = Gamma {gammaCounter = 0, gammaContext = []}
           ((_, g1), e1) = renameSAnno (Map.empty, g0) e0
       (g2, _, e2) <- synthG' g1 e1
-      say "-------- leaving frontend typechecker ------------------"
-      say "g2:"
+      insetSay "-------- leaving frontend typechecker ------------------"
+      insetSay "g2:"
       seeGamma g2
-      say "e2:"
-      peakGen e2
-      say "========================================================"
+      insetSay "e2:"
+      -- peakGen e2
+      insetSay "========================================================"
       return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 
 -- TypeU --> Type
@@ -101,7 +99,7 @@ synthG g (SAnno (Many []) i) = do
             -- This branch is entered for exported type definitions
             -- FIXME: return all definitions and their parameters, check parameter count
             (Just (EV v)) -> return (g, VarU (TV Nothing v), SAnno (Many []) (Idx i (VarU (TV Nothing v))))
-            Nothing -> error ("Shit output for index " <> show i)-- this should not happen
+            Nothing -> error "Indexing error, this should not occur, please message the maintainer"
 
 synthG g0 (SAnno (Many ((e0, j):es)) i) = do
 
@@ -159,14 +157,24 @@ synthE _ g (IntS x) = return (g, MLD.defaultGeneralType (IntS x), IntS x)
 synthE _ g (LogS x) = return (g, MLD.defaultGeneralType (LogS x), LogS x)
 synthE _ g (StrS x) = return (g, MLD.defaultGeneralType (StrS x), StrS x)
 
-synthE i g (AccS e k) = do
-  (g1, t1, e1) <- synthG' g e
-  valType <- case t1 of
+synthE i g0 (AccS e k) = do
+  (g1, t1, e1) <- synthG' g0 e
+  insetSay "accs"
+  insetSay $ "t1:" <+> pretty t1
+  seeGamma g1
+  (g2, valType) <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
       Nothing -> gerr i (KeyError k t1)
-      (Just t) -> return t
+      (Just val) -> return (g1, val)
+    (ExistU v ps ds rs) -> case lookup k rs of
+      Nothing -> do
+        let (g12, val) = newvar (unTVar v <> "_" <> k) Nothing g1
+        case access1 v (gammaContext g12) of
+          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
     _ -> gerr i (KeyError k t1)
-  return (g1, valType, AccS e1 k)
+  return (g2, valType, AccS e1 k)
 
 --   -->E0
 synthE _ g (AppS f []) = do
@@ -208,7 +216,7 @@ synthE i g0 f@(LamS vs x) = do
   if n > 0
     then do
       (g2, f2) <- expand n g1 f
-      say $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
+      insetSay $ "Expanded in -->I==>:" <+> prettySExpr (const "") (const "") f2
       synthE i g2 f2
     else do
       -- create existentials for everything and pass it off to check
@@ -259,19 +267,19 @@ synthE i g (TupS (e:es)) = do
 --   Records
 synthE _ g (NamS []) = return (g, head $ MLD.defaultRecord Nothing [], NamS [])
 synthE i g0 (NamS ((k,x):rs)) = do
-  say $ "Entering synthE NamS (k=" <> pretty k <> ")"
+  insetSay $ "Entering synthE NamS (k=" <> pretty k <> ")"
   seeGamma g0
-  say "-------- syn"
+  insetSay "-------- syn"
   -- type the head
   (g1, headType, headExpr) <- synthG' g0 x
 
   -- type the tail
   (g2, tailType, tailExpr) <- synthE' i g1 (NamS rs)
 
-  say $ "Exiting synthE NamS (k=" <> pretty k <> ")"
-  say $ "  k type:" <+> pretty headType
+  insetSay $ "Exiting synthE NamS (k=" <> pretty k <> ")"
+  insetSay $ "  k type:" <+> pretty headType
   seeGamma g2
-  say "-------- syn"
+  insetSay "-------- syn"
 
   -- merge the head with tail
   t <- case tailType of
@@ -377,7 +385,7 @@ application i g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyGen g1) es1 
       funType = apply g1 $ FunU (as1 <> remainder) b0
-  say $ "remainder:" <+> vsep (map pretty remainder)
+  insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
@@ -388,14 +396,14 @@ application i g0 es (ForallU v s) = application' i (g0 +> v) es (substitute v s)
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i g0 es (ExistU v@(TV _ s) [] _) =
+application i g0 es (ExistU v@(TV _ s) [] _ _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" Nothing) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") Nothing
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' [] [] [] | v' <- veas]
+          ea = ExistU vea [] [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
@@ -477,39 +485,25 @@ checkE i g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  say $ parens (pretty a) <+> "<:" <+> parens (pretty b)
+  insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype a b g of
     (Left err') -> gerr i err'
     (Right x) -> return x
 
 
+-- helpers
+
+-- apply context to a SAnno
+applyGen :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
+applyGen g = mapSAnno (fmap (apply g)) id
+
+applyCon :: (Functor gf, Functor f, Applicable g)
+         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
+applyCon g = mapSExpr (fmap (apply g)) id
+
+
 ---- debugging
-
-enter :: Doc ann -> MorlocMonad ()
-enter d = do
-  depth <- MM.incDepth
-  debugLog $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
-
-say :: Doc ann -> MorlocMonad ()
-say d = do
-  depth <- MM.getDepth
-  debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
-
-seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
-
-seeType :: TypeU -> MorlocMonad ()
-seeType t = say $ pretty t
-
-leave :: Doc ann -> MorlocMonad ()
-leave d = do
-  depth <- MM.decDepth
-  debugLog $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
-
-debugLog :: Doc ann -> MorlocMonad ()
-debugLog d = do
-  verbosity <- MM.gets stateVerbosity
-  when (verbosity > 0) $ (liftIO . putDoc) d
 
 synthG' g x = do
   enter "synthG"
@@ -525,52 +519,47 @@ checkG' g x t = do
 
 synthE' i g x = do
   enter "synthE"
-  peak x
+  insetSay $ "synthesize type for: " <> peakSExpr x
   seeGamma g
-  r@(g', t, x') <- synthE i g x 
+  r@(g', t, _) <- synthE i g x 
   leave "synthE"
-  peak x'
   seeGamma g'
-  seeType t
+  insetSay $ "synthesized type = " <> pretty t
   return r
 
 checkE' i g x t = do
   enter "checkE"
-  peak x
-  seeType t
+  insetSay $ "check if expr: " <> peakSExpr x
+  insetSay $ "matches type: " <> pretty t
   seeGamma g
-  r@(g', t', x') <- checkE i g x t 
+  r@(g', t', _) <- checkE i g x t 
   leave "checkE"
-  peak x'
-  seeType t'
   seeGamma g'
+  seeType t'
   return r
 
 application' i g es t = do
   enter "application"
   seeGamma g
   seeType t
-  mapM_ peakGen es
-  r@(g',t',es') <- application i g es t
+  r@(g',t',_) <- application i g es t
   leave "application"
   seeGamma g'
   seeType t'
-  mapM_ peakGen es'
+  -- mapM_ peakGen es'
   return r
 
-peak :: Foldable f => SExpr g f c -> MorlocMonad ()
-peak = say . prettySExpr (const "") (const "")
--- peak x = say $ f x where
-
-peakGen :: Foldable f => SAnno g f c -> MorlocMonad ()
-peakGen = say . prettySAnno (const "") (const "")
--- peak x = say $ f x where
-
--- apply context to a SAnno
-applyGen :: (Functor gf, Functor f, Applicable g)
-         => Gamma -> SAnno (gf g) f c -> SAnno (gf g) f c
-applyGen g = mapSAnno (fmap (apply g)) id
-
-applyCon :: (Functor gf, Functor f, Applicable g)
-         => Gamma -> SExpr (gf g) f c -> SExpr (gf g) f c
-applyCon g = mapSExpr (fmap (apply g)) id
+peakSExpr :: SExpr Int Many Int -> MDoc
+peakSExpr UniS = "UniS"
+peakSExpr (VarS v) = "VarS" <+> pretty v
+peakSExpr (AccS _ k) = "AccS" <> brackets (pretty k)
+peakSExpr (AppS _ xs) = "AppS" <+> "nargs=" <> pretty (length xs)
+peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
+peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
+peakSExpr (TupS xs) = "TupS" <> "n=" <> pretty (length xs)
+peakSExpr (NamS rs) = "NamS" <> encloseSep "{" "}" "," (map (pretty . fst) rs)
+peakSExpr (RealS x) = "RealS" <+> viaShow x
+peakSExpr (IntS x) = "IntS" <+> pretty x
+peakSExpr (LogS x) = "LogS" <+> pretty  x
+peakSExpr (StrS x) = "StrS" <+> pretty x
+peakSExpr (CallS src) = "CallS" <+> pretty src

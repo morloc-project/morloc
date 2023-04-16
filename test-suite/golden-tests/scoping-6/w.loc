@@ -1,6 +1,6 @@
-import pybase (add)
+module main (f)
 
-export f
+import pybase (add)
 
 -- where-scopes inherit the scope of their parent
 f = x where

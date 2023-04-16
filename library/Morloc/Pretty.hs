@@ -60,9 +60,9 @@ instance Pretty Source where
 
 instance Pretty Type where
   pretty (UnkT (TV lang v)) = pretty lang <> "@*" <> pretty v
-  pretty (VarT (TV _ "Unit")) = "()"
+  pretty (VarT (TV _ "Unit")) = "Unit"
   pretty (VarT v) = pretty v
-  pretty (FunT [] t) = "<MISSING> -> " <> pretty t
+  pretty (FunT [] t) = "() -> " <> pretty t
   pretty (FunT ts t) = encloseSep "(" ")" " -> " (map pretty (ts <> [t]))
   pretty (AppT t ts) = hsep (map pretty (t:ts))
   pretty (NamT o n ps rs)
@@ -97,19 +97,21 @@ instance Pretty Constraint where
   pretty (Con x) = pretty x
 
 instance Pretty TypeU where
-  pretty (FunU [] t) = "<MISSING> -> " <> prettyTypeU t 
+  pretty (FunU [] t) = "() -> " <> prettyTypeU t 
   pretty (FunU ts t) = hsep $ punctuate " ->" (map prettyTypeU (ts <> [t]))
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
 
-prettyTypeU (ExistU v ts ds)
+prettyTypeU (ExistU v [] [] []) = angles $ pretty v
+prettyTypeU (ExistU v ts ds rs)
   = angles $ pretty v
-  <> list (map prettyTypeU ts)
-  <> list (map prettyTypeU ds)
+  <+> list (map prettyTypeU ts)
+  <+> list (map prettyTypeU ds)
+  <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
 prettyTypeU (ForallU _ t) = prettyTypeU t
-prettyTypeU (VarU (TV _ "Unit")) = "()"
+prettyTypeU (VarU (TV _ "Unit")) = "Unit"
 prettyTypeU (VarU v) = pretty v
-prettyTypeU (FunU [] t) = parens $ "<MISSING> -> " <> prettyTypeU t
+prettyTypeU (FunU [] t) = parens $ "() -> " <> prettyTypeU t
 prettyTypeU (FunU ts t) = encloseSep "(" ")" " -> " (map prettyTypeU (ts <> [t]))
 prettyTypeU (AppU t ts) = hsep $ map parenTypeU (t:ts) where
     parenTypeU t'@(AppU _ _) = parens $ prettyTypeU t'
@@ -119,11 +121,12 @@ prettyTypeU (NamU o n ps rs)
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 instance Pretty UnresolvedPacker where
-  pretty (UnresolvedPacker v t fs rs) = vsep
-    [ pretty v
-    , pretty t 
-    , "forward:" <+> tupled (map pretty fs)
-    , "reverse:" <+> tupled (map pretty rs)
+  pretty p = vsep
+    [ "packerTerm:" <+> pretty (unresolvedPackerTerm p)
+    , "packedType:" <+> pretty (unresolvedPackedType p)
+    , "unpackedType:" <+> pretty (unresolvedUnpackedType p)
+    , "forward:" <+> pretty (unresolvedPackerForward p)
+    , "reverse:" <+> pretty (unresolvedPackerReverse p)
     ]
 
 
@@ -132,10 +135,10 @@ prettyPackMap :: PackMap -> Doc ann
 prettyPackMap m =  "----- pacmaps ----\n"
                 <> vsep (map f (Map.toList m))
                 <> "\n------------------" where
-  f :: ((TVar, Int), [UnresolvedPacker]) -> Doc ann
-  f ((v, i), ps) =
+  f :: (TVar, [UnresolvedPacker]) -> Doc ann
+  f (v, ps) =
     block 4
-      ("packmap" <+> pretty v <> parens (pretty i))
+      ("packmap" <+> pretty v)
       (vsep $ map pretty ps)
 
 
@@ -184,11 +187,13 @@ instance Pretty a => Pretty (Indexed a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
-  pretty (ExistG tv ts ds)
+  pretty (ExistG tv [] [] []) = angles (pretty tv)
+  pretty (ExistG tv ts ds rs)
     = "ExistG:"
     <+> pretty tv
     <+> list (map (parens . pretty) ts)
     <+> list (map (parens . pretty) ds)
+    <+> list (map ((\(x,y) -> tupled [x, y]) . bimap pretty prettyTypeU) rs)
   pretty (SolvedG tv t) = "SolvedG:" <+> pretty tv <+> "=" <+> pretty t
   pretty (MarkG tv) = "MarkG:" <+> pretty tv
   pretty (SrcG (Source ev1 lang _ _ _)) = "SrcG:" <+> pretty ev1 <+> viaShow lang

@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
 
 {-|
 Module      : Morloc.CodeGenerator.Typecheck
@@ -15,18 +14,15 @@ module Morloc.CodeGenerator.Typecheck
     typecheck
   , peak
   , peakGen
-  , say
 ) where
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
-import Morloc.Pretty
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
-import qualified Morloc.Data.Text as MT
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -39,9 +35,9 @@ typecheck
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 typecheck e0 = do
 
-  say "------ entering typechecker ------"
+  insetSay "------ entering typechecker ------"
   peakGen e0
-  say "---------------^------------------"
+  insetSay "---------------^------------------"
 
   let g0 = Gamma {gammaCounter = 0, gammaContext = []}
 
@@ -49,20 +45,20 @@ typecheck e0 = do
   -- packers <- MM.gets statePackers
   (g1, e1) <- retrieveTypes g0 e0
 
-  say "------ expression after type retrieval ------"
+  insetSay "------ expression after type retrieval ------"
   peakGen e1
-  say "----------------------^---------------------"
+  insetSay "----------------------^---------------------"
 
   (g2, t, e2) <- synthG g1 e1 
 
   -- show the final gamma and type if verbose
-  say "------ exiting typechecker ------"
+  insetSay "------ exiting typechecker ------"
   seeGamma g2
-  say $ pretty t
-  say "---------------^-----------------"
-  say "--- weaving ---"
+  insetSay $ pretty t
+  insetSay "---------------^-----------------"
+  insetSay "--- weaving ---"
   w <- weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
-  say "--- weaving done ---"
+  insetSay "--- weaving done ---"
   return w
 
 -- | Load the known concrete types into the tree. This is all the information
@@ -82,10 +78,10 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
       return (g1', zipWith (\e' t -> e' {etype = t}) es ts'')
     Nothing -> return (g0, [])
 
-  say $ "retrieveTypes" <+> pretty i <+> pretty j
-  say $ pretty ts
+  insetSay $ "retrieveTypes" <+> pretty i <+> pretty j
+  insetSay $ pretty ts
   peakGen e
-  say "----------------------"
+  insetSay "----------------------"
 
   (g2, x1) <- case x0 of
     UniS -> return (g1, UniS)
@@ -117,7 +113,7 @@ retrieveTypes g0 e@(SAnno (One (x0, Idx i lang)) g@(Idx j _)) = do
 
   let e2 = SAnno (One (x1, Idx i (lang, ts))) g
   peakGen e2
-  say "======================"
+  insetSay "======================"
 
   return (g2, e2)
 
@@ -126,11 +122,11 @@ weaveAndResolve
   :: SAnno (Indexed Type) One (Indexed TypeU)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
 weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
-  say $ pretty i
-  say $ " ct: " <+> pretty ct
-  say $ " gt: " <+> pretty gt
+  insetSay $ pretty i
+  insetSay $ " ct: " <+> pretty ct
+  insetSay $ " gt: " <+> pretty gt
   pt <- weaveResolvedTypes gt (typeOf ct)
-  say $ " pt: " <+> pretty pt
+  insetSay $ " pt: " <+> pretty pt
   x1 <- case x0 of
     UniS -> return UniS
     (VarS v) -> return $ VarS v
@@ -174,9 +170,9 @@ synthG g0 (SAnno (One (x, Idx i (l, []))) m@(Idx _ _)) = do
 
 -- AnnoMany=>
 synthG g0 (SAnno (One (x, Idx i (lang, t:ts))) m) = do
-  say $ "Checking against annotation:" <+> pretty t
-  say $ "ts:" <+> vsep (map pretty ts)
-  say $ " -- that's all "
+  insetSay $ "Checking against annotation:" <+> pretty t
+  insetSay $ "ts:" <+> vsep (map pretty ts)
+  insetSay $ " -- that's all "
   checkG g0 (SAnno (One (x, Idx i (lang, ts))) m) (etype t)
 
 
@@ -243,14 +239,25 @@ synthE _ lang g (LogS x) = do
       (g', t) = newvarRich [] ts "log_" (Just lang) g
   return (g' +> t, t, LogS x)
 
-synthE i _ g (AccS e k) = do
-  (g1, t1, e1) <- synthG' g e
-  valType <- case t1 of
+synthE i _ g0 (AccS e k) = do
+  (g1, t1, e1) <- synthG' g0 e
+  insetSay "accs"
+  insetSay $ "t1:" <+> pretty t1
+  seeGamma g1
+  (g2, valType) <- case t1 of
     (NamU _ _ _ rs) -> case lookup k rs of
-      Nothing -> cerr i (KeyError k t1)
-      (Just t) -> return t
-    _ -> cerr i (KeyError k t1)
-  return (g1, valType, AccS e1 k)
+      Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
+    (ExistU v ps ds rs) -> case lookup k rs of
+      Nothing -> do
+        let (g12, val) = newvar (unTVar v <> "_" <> k) (langOf t1) g1
+        case access1 v (gammaContext g12) of
+          (Just (rhs, _, lhs)) -> return (g12 { gammaContext = rhs <> [ExistG v ps ds ((k, val):rs)] <> lhs }, val)
+          Nothing -> gerr i (KeyError k t1)
+      (Just val) -> return (g1, val)
+    _ -> gerr i (KeyError k t1)
+  return (g2, valType, AccS e1 k)
+
 
 --   -->E0
 synthE _ _ g (AppS f []) = do
@@ -372,7 +379,7 @@ application i _ g0 es0 (FunU as0 b0) = do
   (g1, as1, es1, remainder) <- zipCheck i g0 es0 as0
   let es2 = map (applyCon g1) es1
       funType = apply g1 $ FunU (as1 <> remainder) b0
-  say $ "remainder:" <+> vsep (map pretty remainder)
+  insetSay $ "remainder:" <+> vsep (map pretty remainder)
   return (g1, funType, es2)
 
 --  g1,Ea |- [Ea/a]A o e =>> C -| g2
@@ -383,14 +390,14 @@ application i lang g0 es (ForallU v s) = application' i lang (g0 +> v) es (subst
 --  g1[Ea2, Ea1, Ea=Ea1->Ea2] |- e <= Ea1 -| g2
 -- ----------------------------------------- EaApp
 --  g1[Ea] |- Ea o e =>> Ea2 -| g2
-application i _ g0 es (ExistU v@(TV (Just lang) s) [] _) =
+application i _ g0 es (ExistU v@(TV (Just lang) s) [] _ _) =
   case access1 v (gammaContext g0) of
     -- replace <t0> with <t0>:<ea1> -> <ea2>
     Just (rs, _, ls) -> do
       let (g1, veas) = statefulMap (\g _ -> tvarname g "a_" (Just lang)) g0 es
           (g2, vea) = tvarname g1 (s <> "o_") (Just lang)
-          eas = [ExistU v' [] [] | v' <- veas]
-          ea = ExistU vea [] []
+          eas = [ExistU v' [] [] [] | v' <- veas]
+          ea = ExistU vea [] [] []
           f = FunU eas ea
           g3 = g2 {gammaContext = rs <> [SolvedG v f] <> map index eas <> [index ea] <> ls}
       (g4, _, es', _) <- zipCheck i g3 es eas
@@ -469,7 +476,7 @@ checkE i lang g1 e1 b = do
 
 subtype' :: Int -> TypeU -> TypeU -> Gamma -> MorlocMonad Gamma
 subtype' i a b g = do
-  say $ parens (pretty a) <+> "<:" <+> parens (pretty b)
+  insetSay $ parens (pretty a) <+> "<:" <+> parens (pretty b)
   case subtype a b g of
     (Left err') -> cerr i err'
     (Right x) -> return x
@@ -484,42 +491,8 @@ applyConE :: (Functor cf, Functor f, Applicable c)
          => Gamma -> SExpr g f (cf c) -> SExpr g f (cf c)
 applyConE g = mapSExpr id (fmap (apply g))
 
+
 ---- debugging
-
-enter :: Doc ann -> MorlocMonad ()
-enter d = do
-  depth <- MM.incDepth
-  debugLog $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
-
-say :: Doc ann -> MorlocMonad ()
-say d = do
-  depth <- MM.getDepth
-  debugLog $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
-
-seeGamma :: Gamma -> MorlocMonad ()
-seeGamma g = say $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))
-
-seeType :: TypeU -> MorlocMonad ()
-seeType t = say $ pretty t
-
-leave :: Doc ann -> MorlocMonad ()
-leave d = do
-  depth <- MM.decDepth
-  debugLog $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
-
-debugLog :: Doc ann -> MorlocMonad ()
-debugLog d = do
-  verbosity <- MM.gets stateVerbosity
-  when (verbosity > 0) $ (liftIO . putDoc) d
-
-peak :: (Pretty c, Pretty g) => SExpr g One c -> MorlocMonad ()
-peak = say . prettySExpr pretty showGen
-
-peakGen :: (Pretty c, Pretty g) => SAnno g One c -> MorlocMonad ()
-peakGen = say . prettySAnno pretty showGen
-
-showGen :: Pretty g => g -> Doc ann
-showGen g = parens (pretty g)
 
 synthG' g x = do
   enter "synthG"
@@ -566,3 +539,7 @@ application' i l g es t = do
   seeType t'
   mapM_ peakGen es'
   return r
+
+-- prepare a general, indexed typechecking error
+gerr :: Int -> TypeError -> MorlocMonad a
+gerr i e = MM.throwError $ IndexedError i (GeneralTypeError e)

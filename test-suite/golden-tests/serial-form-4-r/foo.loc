@@ -1,6 +1,6 @@
-import rbase (id)
+module main (foo)
 
-export foo
+import rbase (id)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

@@ -37,7 +37,8 @@ instance FromJSON Config where
     withObject "object" $ \o ->
       Config
         <$> o .:? "home" .!= "$HOME/.morloc"
-        <*> o .:? "source" .!= "$HOME/.morloc/src"
+        <*> o .:? "source" .!= "$HOME/.morloc/src/morloc"
+        <*> o .:? "plain" .!= "morloclib"
         <*> o .:? "tmpdir" .!= "$HOME/.morloc/tmp" 
         <*> o .:? "lang_python3" .!= "python3"
         <*> o .:? "lang_R" .!= "Rscript"
@@ -51,6 +52,7 @@ loadDefaultMorlocConfig = do
     Config
       (MT.unpack $ defaults H.! "home")
       (MT.unpack $ defaults H.! "source")
+      (MT.unpack $ defaults H.! "plain")
       (MT.unpack $ defaults H.! "tmpdir")
       "python3" -- lang_python3
       "Rscript" -- lang_R
@@ -106,7 +108,7 @@ defaultFields = do
   home <- MT.pack <$> getDefaultMorlocHome
   lib <- MT.pack <$> getDefaultMorlocSource
   tmp <- MT.pack <$> getDefaultMorlocTmpDir
-  return $ H.fromList [("home", home), ("source", lib), ("tmpdir", tmp)]
+  return $ H.fromList [("home", home), ("source", lib), ("plain", "morloclib"), ("tmpdir", tmp)]
 
 -- | Get the Morloc home directory (absolute path)
 getDefaultMorlocHome :: IO Path
@@ -116,7 +118,7 @@ getDefaultMorlocHome = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc"
 -- folder inside the home directory. This is the path to the source data (often
 -- a get repo).
 getDefaultMorlocSource :: IO Path
-getDefaultMorlocSource = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/src"
+getDefaultMorlocSource = MS.combine <$> MS.getHomeDirectory <*> pure ".morloc/src/morloc"
 
 -- | Get the path to the morloc shared libraries folder 
 getDefaultMorlocLibrary :: IO Path

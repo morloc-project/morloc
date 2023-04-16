@@ -1,6 +1,7 @@
+module main (foo)
+
 import pybase (map, add)
 import rbase (fold)
-export foo
 
 -- yes, this is an odd definition of `sum`
 sum R :: ["numeric"] -> "numeric" -> "numeric"

@@ -28,7 +28,6 @@ These can be written as added flags?
 
 -}
 
-
 min :: (Ord a) => a -> a -> a
 min Rust :: a -> a -> a
 

@@ -1,9 +1,9 @@
+module main (foo)
+
 import cppbase (fold, add)
 
 table (Person a) = Person {name :: Str, info :: a}
 table Cpp (Person a) = "struct" {name :: "std::string", info :: a}
-
-export foo
 
 foo :: Person Real -> Real
 foo Cpp :: Person "double" -> "double"

@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make -v foo.loc > log
-	./nexus.pl sub 3 5 > obs.txt
+	./nexus.py sub 3 5 > obs.txt
 
 clean:
 	rm -f nexus* pool*

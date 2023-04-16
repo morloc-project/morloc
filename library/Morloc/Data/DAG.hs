@@ -19,6 +19,7 @@ module Morloc.Data.DAG
   , lookupEdge
   , lookupEdgeTriple
   , local
+  , inherit
   , roots
   , shake
   , leafs
@@ -47,15 +48,15 @@ edgelist :: DAG k e n -> [(k,k)]
 edgelist d = concat [[(k,j) | (j,_) <- xs] | (k, (_, xs)) <- Map.toList d ]
 
 insertEdge :: Ord k => k -> k -> e -> DAG k e n -> DAG k e n
-insertEdge k1 k2 e d = Map.alter f k1 d
+insertEdge k1 k2 e = Map.alter f k1
   where  
     -- f :: Maybe [(k, e)] -> Maybe [(k, e)]
     f Nothing = error "Cannot add edge to non-existant node"
-    f (Just (n,xs)) = Just $ (n,(k2,e):xs)
+    f (Just (n,xs)) = Just (n,(k2,e):xs)
 
 -- | Get all edges
 edges :: DAG k e n -> [e]
-edges = map snd . concat . map snd . Map.elems
+edges = map snd . concatMap snd . Map.elems
 
 -- | Get all nodes
 nodes :: DAG k e n -> [n]
@@ -81,8 +82,8 @@ lookupEdgeTriple k1 k2 d = do
 local :: Ord k => k -> DAG k e n -> Maybe (n, [(k, e, n)])
 local k d = do
   (n1, xs) <- Map.lookup k d
-  ns <- mapM (flip lookupNode $ d) (map fst xs)
-  return $ (n1, [(k',e,n2) | (n2, (k', e)) <- zip ns xs])
+  ns <- mapM ((`lookupNode` d) . fst) xs
+  return (n1, [(k',e,n2) | (n2, (k', e)) <- zip ns xs])
 
 -- | Get all roots
 roots :: Ord k => DAG k e n -> [k]
@@ -105,10 +106,10 @@ findCycle d = case mapMaybe (findCycle' []) (roots d) of
   where
     -- findCycle' :: [k] -> k -> Maybe [k]
     findCycle' seen k
-      | elem k seen = Just seen
+      | k `elem` seen = Just seen
       | otherwise = case Map.lookup k d of
           Nothing -> Nothing -- we have reached a leaf
-          (Just (_,xs)) -> case mapMaybe (findCycle' (k:seen)) (map fst xs) of
+          (Just (_,xs)) -> case mapMaybe (findCycle' (k:seen) . fst) xs of
             [] -> Nothing
             (x:_) -> Just x
 
@@ -117,7 +118,7 @@ mapNode :: (n1 -> n2) -> DAG k e n1 -> DAG k e n2
 mapNode f d = Map.map (\(n, xs) -> (f n, xs)) d
 
 mapNodeWithKey :: (k -> n1 -> n2) -> DAG k e n1 -> DAG k e n2
-mapNodeWithKey f d = Map.mapWithKey (\k (n, xs) -> (f k n, xs)) d
+mapNodeWithKey f = Map.mapWithKey (\k (n, xs) -> (f k n, xs))
 
 -- | Map function over nodes independent of the edge data
 mapNodeM :: Ord k => (n1 -> MorlocMonad n2) -> DAG k e n1 -> MorlocMonad (DAG k e n2)
@@ -240,13 +241,18 @@ synthesizeDAG f d0 = synthesizeDAG' (Just Map.empty) where
   -- add nodes where all children have been processed
   addIfPossible dn (k1, (n1, xs))
     | Map.member k1 dn = return dn
-    | otherwise = case mapM (\k -> Map.lookup k dn) (map fst xs) of
+    | otherwise = case mapM ((`Map.lookup` dn) . fst) xs of
         Nothing -> return dn
         (Just children) -> do
           let augmented = [(k,e,n2) | ((k, e), (n2, _)) <- zip xs children]
           n2 <- f k1 n1 augmented
           return $ Map.insert k1 (n2, xs) dn
 
+-- Inherit all imported values and their terminal aliases
+inherit :: (Ord k, Eq v) => k -> (n -> a) -> DAG k [(v,v)] n -> [(v, DAG k None (v,a))]
+inherit k f d = case local k d of
+    Nothing -> []
+    (Just (_, xs)) -> concat [[(v, lookupAliasedTerm v k' f d) | (v,_) <- vs] | (k', vs, _) <- xs]
 
 lookupAliasedTerm
   :: (Ord k, Eq v)
@@ -280,7 +286,7 @@ lookupAliasedTermM v0 k0 f d0 = lookupAliasedTerm' v0 k0 mempty where
         (Just (n, xs)) -> do
           let xs' = [ (k', [(v1,v2) | (v1,v2) <- vs, v2 == v])
                     | (k', vs) <- xs
-                    , elem v (map snd vs)]
+                    , v `elem` map snd vs]
               edges' = map (\(k', _) -> (k', None)) xs'
           n' <- f n
           foldlM (\d2 (k2,v2) -> lookupAliasedTerm' v2 k2 d2)

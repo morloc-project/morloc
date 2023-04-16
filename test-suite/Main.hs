@@ -24,6 +24,8 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      , golden "type-synthesis" "type-synthesis"
+
       , golden "import-1" "import-1"
 
       , golden "argument-form-1-c" "argument-form-1-c"
@@ -67,6 +69,10 @@ main = do
       , golden "argument-form-8-c" "argument-form-8-c"
       , golden "argument-form-8-py" "argument-form-8-py"
       , golden "argument-form-8-r" "argument-form-8-r"
+
+      , golden "argument-form-9-c" "argument-form-9-c"
+      , golden "argument-form-9-py" "argument-form-9-py"
+      , golden "argument-form-9-r" "argument-form-9-r"
 
       , golden "defaults-1-py" "defaults-1-py"
 
@@ -222,6 +228,8 @@ main = do
       , golden "record-access-c" "record-access-c"
       , golden "record-access-py" "record-access-py"
       , golden "record-access-r" "record-access-r"
+      -- Test the @clade issue from the case study
+      , golden "record-access-2" "record-access-2"
       -- scoping
       , golden "scoping-1" "scoping-1"
       , golden "scoping-2" "scoping-2"

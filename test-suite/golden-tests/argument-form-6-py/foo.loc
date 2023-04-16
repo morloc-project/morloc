@@ -1,6 +1,6 @@
-import pybase (zipWith, mul)
+module main (foo)
 
-export foo
+import pybase (zipWith, mul)
 
 -- literal function with no application
 foo xs ys = zipWith mul xs ys

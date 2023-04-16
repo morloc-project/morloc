@@ -1,6 +1,6 @@
-import pybase (add)
+module main (foo)
 
-export foo
+import pybase (add)
 
 y = 40.0
 

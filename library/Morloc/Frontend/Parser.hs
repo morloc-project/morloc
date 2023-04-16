@@ -79,8 +79,36 @@ pModule expModuleName = do
     Nothing -> MT.intercalate "." <$> sepBy freename (symbol ".")
     (Just (MV n)) -> symbol n
 
+  exportSym <- parens ((char '*' >> return ExportAll) <|> (sepBy pSymbol (symbol ",") |>> ExportMany . Set.fromList))
+
   es <- align pTopExpr |>> concat
-  exprI $ ModE (MV moduleName) es
+
+  let allSymbols = Set.unions . map findSymbols $ es
+      exports = case exportSym of
+        ExportAll -> allSymbols
+        (ExportMany exps) -> exps
+
+  case Set.toList (exports `Set.difference` allSymbols) of
+    [] -> return ()
+    missing -> fancyFailure . Set.singleton . ErrorFail
+            $ "Module " <> show moduleName <> " does not export the following terms or types: [" <>  (intercalate ", " . map (show . symbolName) $ missing) <> "]"
+
+  exportExpr <- mapM (exprI . ExpE) (Set.toList exports)
+
+  exprI $ ModE (MV moduleName) (es <> exportExpr)
+
+  where
+    findSymbols :: ExprI -> Set.Set Symbol
+    findSymbols (ExprI _ (TypE (TV _ v) _ _)) = Set.singleton $ TypeSymbol v
+    findSymbols (ExprI _ (AssE (EV e) _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (SigE (EV e) _ _)) = Set.singleton $ TermSymbol e
+    findSymbols (ExprI _ (ImpE (Import _ (Just imps) _ _)))
+        = Set.fromList $ [TermSymbol alias | (AliasedTerm _ alias) <- imps] <>
+                         [TypeSymbol alias | (AliasedType _ alias) <- imps]
+    findSymbols (ExprI _ (SrcE src)) = Set.singleton $ TermSymbol (unEVar $ srcAlias src)
+    findSymbols _ = Set.empty
+
+-- exprI (ExpE s)
 
 -- | match an implicit Main module
 pMain :: Parser ExprI
@@ -111,7 +139,6 @@ createMainFunction es = case (init es, last es) of
 pTopExpr :: Parser [ExprI]
 pTopExpr = 
       try (plural pImport)
-  <|> try (plural pExport) -- TODO allow many exports from one statement
   <|> try (plural pTypedef)
   <|> try (plural pAssE)
   <|> try (plural pSigE)
@@ -122,11 +149,11 @@ pTopExpr =
 -- | Expressions that are allowed in function or data declarations
 pExpr :: Parser ExprI
 pExpr =
-      try pComposition
+      try pUni
+  <|> try pComposition
   <|> try pAcc    -- access <expr>@
   <|> try pNamE   -- record
   <|> try pTupE
-  <|> try pUni
   <|> try pAnn
   <|> try pApp
   <|> try pStrE
@@ -204,12 +231,6 @@ pImport = do
     n <- freenameU
     a <- option n (reserved "as" >> freenameU)
     return (AliasedType n a)
-
-pExport :: Parser ExprI
-pExport = do
-  reserved "export"
-  v <- pSymbol
-  exprI $ ExpE v
 
 
 pTypedef :: Parser ExprI
@@ -430,7 +451,7 @@ pNamEntryE = do
 
 
 pUni :: Parser ExprI
-pUni = symbol "Null" >> exprI UniE
+pUni = symbol "(" >> symbol ")" >> exprI UniE
 
 
 pAcc :: Parser ExprI
@@ -455,8 +476,8 @@ pApp = do
   es <- many1 s
   exprI $ AppE f es
   where
-    s =   try (parens pExpr)
-      <|> try pUni
+    s =   try pUni
+      <|> try (parens pExpr)
       <|> try pStrE
       <|> try pLogE
       <|> try pNumE
@@ -533,7 +554,7 @@ pUniU = do
     (Nothing, [t]) -> return t -- there is a unique general unit type
     (_, []) -> fancyFailure . Set.singleton . ErrorFail
       $ "No NULL type is defined for language" <> maybe "Morloc" show lang
-    (_, ts) -> return $ ExistU v [] ts  -- other languages maybe have multiple definitions
+    (_, ts) -> return $ ExistU v [] ts [] -- other languages maybe have multiple definitions
 
 parensType :: Parser TypeU
 parensType = tag (symbol "(") >> parens pType
@@ -567,7 +588,7 @@ pNamEntryU = do
 pExistential :: Parser TypeU
 pExistential = do
   v <- angles freenameL
-  return (ExistU (TV Nothing v) [] [])
+  return (ExistU (TV Nothing v) [] [] [])
 
 pAppU :: Parser TypeU
 pAppU = do

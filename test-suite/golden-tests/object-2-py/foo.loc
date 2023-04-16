@@ -1,3 +1,5 @@
+module main (foo, newPerson, birthday)
+
 import pybase (id)
 
 source py from "person.py" ("PersonObj" as Person, "newPerson", "birthday")
@@ -13,6 +15,3 @@ birthday Py :: Person "int" -> Person "int"
 
 foo name = birthday (birthday (newPerson name 5))
 
-export newPerson
-export birthday
-export foo

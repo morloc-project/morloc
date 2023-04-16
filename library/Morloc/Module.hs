@@ -63,14 +63,15 @@ findModule :: Maybe (Path, MVar) -> MVar -> MorlocMonad Path
 findModule currentModuleM importModule = do
   config <- MM.ask
   let lib = Config.configLibrary config
-  let allPaths = getModulePaths lib currentModuleM importModule
+      plain = Config.configPlain config
+      allPaths = getModulePaths lib plain currentModuleM importModule
   existingPaths <- liftIO . fmap catMaybes . mapM getFile $ allPaths
   case existingPaths of
     [x] -> return x
     (x:_) -> return x -- should shadowing raise a warning?
     [] ->
       MM.throwError . CannotLoadModule . render $
-        "module not found among the paths:" <+> list (map pretty allPaths)
+        "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths)
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder
@@ -101,13 +102,21 @@ commonPrefix (x:xs) (y:ys)
     | otherwise = []
 commonPrefix _ _ = []
 
-removeSuffix :: Eq a => [a] -> [a] -> [a]
-removeSuffix xs ys 
-    | last xs == last ys = removeSuffix (init xs) (init ys)
+removePathSuffix :: [String] -> [String] -> [String]
+removePathSuffix [] ys = ys
+removePathSuffix _ [] = []
+removePathSuffix xs ys 
+    | stringPath (last xs) == stringPath (last ys) = removePathSuffix (init xs) (init ys)
     | otherwise = ys
+    where
+    stringPath :: String -> String
+    stringPath s
+        | last s == '/' = init s
+        | otherwise = s
+
 
 -- | Find an ordered list of possible locations to search for a module
-getModulePaths :: Path -> Maybe (Path, MVar) -> MVar -> [Path]
+getModulePaths :: Path -> Path -> Maybe (Path, MVar) -> MVar -> [Path]
 -- CASE #1
 --   If we are not in a module, then the import may be from the system or
 --   the local "working" directory.
@@ -120,7 +129,7 @@ getModulePaths :: Path -> Maybe (Path, MVar) -> MVar -> [Path]
 -- `bif.buf` may be imported locally or from the system
 -- --  1. /../src/foo/bar/baz/bif/buf/main.loc
 -- --  2. $MORLOC_LIB/src/bif/buf/main.loc
-getModulePaths lib Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
+getModulePaths lib plain Nothing (splitModuleName -> namePath) = map MS.joinPath paths where
 
     -- either search the working directory for a life like "math.loc" or look
     -- for a folder named after the module with with a "main.loc" script
@@ -138,9 +147,14 @@ getModulePaths lib Nothing (splitModuleName -> namePath) = map MS.joinPath paths
           , lib : namePath <> ["main.loc"]
         ]
 
-    paths = localPaths <> systemPaths
+    plainPaths = [
+            [lib, "plain", plain] <> init namePath <> [last namePath <> ".loc"]
+          , [lib, "plain", plain] <> namePath <> ["main.loc"]
+        ]
 
-getModulePaths lib (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
+    paths = localPaths <> plainPaths <> systemPaths
+
+getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> moduleName)) (splitModuleName -> importName) =
     case commonPrefix moduleName importName of
     -- CASE #2
     --   If we are in a module, and if the module name path and the import name
@@ -156,8 +170,12 @@ getModulePaths lib (Just (MS.splitPath -> modulePath, splitModuleName -> moduleN
     -- The only where `bif.buf` may be foud is the system library:
     --   $MORLOC_LIB/src/bif/buf/main.loc
         [] ->  map MS.joinPath [
+                -- system paths
                   lib : init importName <> [last importName <> ".loc"]
                 , lib : importName <> ["main.loc"]
+                -- plain paths
+                , [lib, "plain", plain] <> init importName <> [last importName <> ".loc"]
+                , [lib, "plain", plain] <> importName <> ["main.loc"]
               ]
 
     -- CASE #3
@@ -174,11 +192,13 @@ getModulePaths lib (Just (MS.splitPath -> modulePath, splitModuleName -> moduleN
     --
     -- The only place where `foo.bif` may be found is:
     --    /../src/foo/bif/main.loc
+    --
+        -- _ -> error $ show (modulePath, importName, moduleName)
         _ -> let rootPath = if last modulePath == "main.loc"
                             -- e.g., `/../src/foo/bar/baz/main.loc` -> '/../src/'
-                            then removeSuffix moduleName (init modulePath)
+                            then removePathSuffix moduleName (init modulePath)
                             -- e.g., `/../src/foo/bar/baz.loc`  -> '/../src/'
-                            else removeSuffix (init moduleName) (init modulePath)
+                            else removePathSuffix (init moduleName) (init modulePath)
              in map MS.joinPath [
                         rootPath <> importName <> ["main.loc"]
                     ,   rootPath <> init importName <> [last importName <> ".loc"]
@@ -308,9 +328,10 @@ installGithubRepo repo url = do
 -- | Install a morloc module
 installModule :: ModuleSource -> MorlocMonad ()
 installModule (GithubRepo repo) =
-  installGithubRepo repo ("https://github.com/" <> repo)
-installModule (CoreGithubRepo name') =
-  installGithubRepo name' ("https://github.com/morloclib/" <> name')
+  installGithubRepo repo ("https://github.com/" <> repo) -- repo has form "user/reponame"
+installModule (CoreGithubRepo name') = do
+  config <- MM.ask
+  installGithubRepo name' ("https://github.com/" <> configPlain config <> "/" <> name')
 installModule (LocalModule Nothing) =
   MM.throwError (NotImplemented "module installation from working directory")
 installModule (LocalModule (Just _)) =

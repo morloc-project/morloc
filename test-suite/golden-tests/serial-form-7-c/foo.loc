@@ -1,6 +1,6 @@
-import cppbase (id, Map)
+module main (foo)
 
-export foo
+import cppbase (id, Map)
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

@@ -1,0 +1,3 @@
+makeValue <- function(){
+    42
+}

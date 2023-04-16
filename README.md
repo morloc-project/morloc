@@ -32,15 +32,6 @@ cd morloc
 stack install --fast
 ```
 
-`morloc` also depends on the `JSON::XS` perl module from CPAN, which can be
-installed as follows:
-
-```sh
-export PERL_MM_USE_DEFAULT=1
-export PERL_CANARY_STABILITY_NOPROMPT=1
-sudo perl -MCPAN -e 'install JSON::XS' 
-```
-
 For Python support, you need to download the `pymorlocinternals` library from
 PyPi:
 

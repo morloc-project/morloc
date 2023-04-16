@@ -22,7 +22,6 @@ module Morloc.Monad
   , logFile
   , logFileWith
   , readLang
-  , say
   -- * re-exports
   , module Control.Monad.Trans
   , module Control.Monad.Except
@@ -48,6 +47,11 @@ module Morloc.Monad
   , getDepth
   , decDepth
   , setDepth
+  -- * messages
+  , say
+  , sayV
+  , sayVV
+  , sayVVV
   ) where
 
 import Control.Monad.Except
@@ -157,8 +161,31 @@ runCommand loc cmd = do
     SE.ExitSuccess -> tell [MT.pack err']
     _ -> throwError (SystemCallError cmd loc (MT.pack err')) |>> const ()
 
+sayIf :: Int -> MDoc -> MorlocMonad ()
+sayIf i d = do
+  verbosity <- gets stateVerbosity
+  when (verbosity >= i) $ (liftIO . putDoc) (d <> "\n")
+
+-- print anytime
 say :: MDoc -> MorlocMonad ()
-say d = liftIO . putDoc $ " : " <> d <> "\n"
+say = sayIf 0
+
+-- print for verbose level 1
+-- messages that may be of interest to the user
+sayV :: MDoc -> MorlocMonad ()
+sayV = sayIf 1
+
+-- print for verbose level 2
+-- messages for the programmer
+sayVV :: MDoc -> MorlocMonad ()
+sayVV = sayIf 2 
+
+-- print for verbose level 3
+-- really boring shit that probably no one wants to ever hear, but we spent a
+-- lot of time working on it and don't want to delete it.
+sayVVV :: MDoc -> MorlocMonad ()
+sayVVV = sayIf 3
+
 
 -- | Execute a system call and return a function of the STDOUT
 runCommandWith ::
@@ -288,9 +315,12 @@ metaPackMap i = do
 
 
 -- | This is currently only used in the C++ translator.
+-- FIXME: should a term be allowed to have multiple type definitions within a language?
 metaTypedefs :: Int -> MorlocMonad (Map.Map TVar (Type, [TVar]))
 metaTypedefs i = do
     p <- gets stateTypedefs
-    case GMap.lookup i p of
-      (GMapJust p') -> return p'
-      _ -> return Map.empty
+
+    return $ case GMap.lookup i p of
+      (GMapJust termmap) -> Map.map (\(vs, t) -> (typeOf t, vs))
+          (Map.map head (Map.filter (not . null) termmap))
+      _ -> Map.empty

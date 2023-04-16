@@ -1,5 +1,6 @@
+module main (bar)
+
 import base (zipWith, add)
-export bar
 
 foo0       = add
 foo1 x     = add x

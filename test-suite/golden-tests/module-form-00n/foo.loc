@@ -1,10 +1,10 @@
+module main (foo)
+
 -- 00n - declare n
 
 import pybase
 import cppbase
 import rbase
-
-export foo
 
 foo x y = mul 2.0 (add x y)
 foo x y = add 0.0 (mul 2.0 (add x y))

@@ -1,3 +1,5 @@
+module main (foo)
+
 -- 101 - source 1, declare 1
 
 import pybase  (sub, add, mul)
@@ -5,7 +7,5 @@ import cppbase (sub, add, mul)
 import rbase   (sub, add, mul)
 
 source py from "foo.py" ("foo_loc" as foo)
-
-export foo
 
 foo x = add 1.0 x

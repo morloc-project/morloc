@@ -1,6 +1,6 @@
-import pybase (add, mul)
+module main (foo)
 
-export foo
+import pybase (add, mul)
 
 f = mul 20.0 2.0
 

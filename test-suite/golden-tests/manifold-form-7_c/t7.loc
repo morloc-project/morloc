@@ -1,4 +1,5 @@
+module main (foo)
+
 import cppbase (fold, div, add)
-export foo
 
 foo x = fold add 0.0 [1.0, 2.0, 3.0, x, div x 4.0]

@@ -28,8 +28,8 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
   generalize' ((e, r):xs) t = generalize' xs (generalizeOne e r t)
 
   setDefaults :: TypeU -> TypeU
-  setDefaults (ExistU v ps []) = ExistU v (map setDefaults ps) []
-  setDefaults (ExistU _ _ (d:_)) = setDefaults d
+  setDefaults (ExistU v ps [] rs) = ExistU v (map setDefaults ps) [] (map (second setDefaults) rs)
+  setDefaults (ExistU _ _ (d:_) _) = setDefaults d
   setDefaults t@(VarU _) = t
   setDefaults (ForallU v t) = ForallU v (setDefaults t)
   setDefaults (FunU ts t) = FunU (map setDefaults ts) (setDefaults t)
@@ -44,11 +44,12 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
 
   findExistentials :: TypeU -> Set.Set TVar
   findExistentials (VarU _) = Set.empty
-  findExistentials (ExistU v ts ds) =
+  findExistentials (ExistU v ts ds rs) =
     Set.unions
       $ [Set.singleton v]
       ++ map findExistentials ts
       ++ map findExistentials ds
+      ++ map (findExistentials . snd) rs
   findExistentials (ForallU v t) = Set.delete v (findExistentials t)
   findExistentials (FunU ts t) = Set.unions (findExistentials t : map findExistentials ts)
   findExistentials (AppU t ts) = Set.unions (findExistentials t : map findExistentials ts)
@@ -61,12 +62,14 @@ generalize = (\t -> generalize' (existentialMap t) t) . setDefaults where
       replacementTerm = TV lang0 (unName r0)
 
       f :: TVar -> TypeU -> TypeU
-      f v t1@(ExistU v' [] _)
+      f v t1@(ExistU v' [] _ _)
         | v == v' = VarU replacementTerm -- substitute
         | otherwise = t1
-      f v (ExistU v' ts _)
+      f v (ExistU v' ts _ [])
         | v == v' = AppU (VarU replacementTerm) (map (f v) ts) -- substitute
         | otherwise = AppU (VarU v) (map (f v) ts)
+      f _ (ExistU _ _ _ _) = error "Bad thing happen"
+
       f v t1@(ForallU x t2)
         | v /= x = ForallU x (f v t2)
         | otherwise = t1

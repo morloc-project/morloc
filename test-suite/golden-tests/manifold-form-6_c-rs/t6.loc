@@ -1,4 +1,5 @@
+module main (foo)
+
 import rustbase (div)
-export foo
 
 foo x = (True, x, div 4.0 x)

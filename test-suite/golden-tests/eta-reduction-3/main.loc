@@ -1,7 +1,6 @@
+module main (foo0, foo1, foo2)
+
 import pybase (zipWith, add)
-export foo0
-export foo1
-export foo2
 
 bar x y z = add x (add y z)
 

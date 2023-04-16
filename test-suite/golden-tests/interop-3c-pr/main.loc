@@ -1,6 +1,7 @@
+module main (foo)
+
 import pybase (map)
 import rbase (add)
-export foo
 
 foo Py :: "float" -> ["float"] -> ["float"]
 foo x xs = map (add x) xs

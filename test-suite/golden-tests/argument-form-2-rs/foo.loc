@@ -1,6 +1,6 @@
-import rustbase (add, mul)
+module main (foo)
 
-export foo
+import rustbase (add, mul)
 
 -- full application with variable passing
 -- cannot optimize out this manifold

@@ -1,6 +1,7 @@
+module main (foo)
+
 import cppbase (map)
 import pybase (add, neg)
-export foo
 
 foo Cpp :: "double" -> ["double"] -> ["double"]
 foo x ys = map (\y -> add x (neg y)) ys

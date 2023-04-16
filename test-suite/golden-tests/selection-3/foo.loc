@@ -1,5 +1,6 @@
+module main (foo)
+
 source R from "rms.R" ("rms1" as rms, "rms2" as rms, "add") 
-export foo
 
 rms :: [Real] -> Real
 rms R :: ["numeric"] -> "numeric"

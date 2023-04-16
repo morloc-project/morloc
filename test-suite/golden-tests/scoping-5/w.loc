@@ -1,6 +1,6 @@
-import pybase (add)
+module main (f)
 
-export f
+import pybase (add)
 
 -- where scopes may be nested
 f = x where

@@ -19,14 +19,11 @@ ungap :: DNA + GAP -> DNA
 
 ungap py :: "str" -> "str"
 
-
 -- General sumtypes
 
 -- This may need to be a special type to represent the NULL handling of some languages
 Maybe a :: Nothing | Just a
 
-
 RoseTree a :: Leaf a | Node [Tree a]
-
 
 Arithmetic a :: Add a a | Mul a a | a  

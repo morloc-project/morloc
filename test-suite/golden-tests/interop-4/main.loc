@@ -1,7 +1,7 @@
+module main (foo)
+
 import pybase (id)
 import cppbase (add)
 
 foo py :: "float" -> "float"
 foo x = id (add 1.0 x)
-
-export foo

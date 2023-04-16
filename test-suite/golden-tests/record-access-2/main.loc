@@ -1,0 +1,18 @@
+module main (foo)
+
+import pybase (map)
+
+record Person = Person
+  { name :: Str
+  , age :: Int
+  }
+
+record Py Person = "dict"
+  { name :: "str"
+  , age :: "int"
+  }
+
+foo :: [Person] -> [Int]
+foo Py :: [Person] -> ["int"]
+foo = map getAge where
+    getAge x = x@age

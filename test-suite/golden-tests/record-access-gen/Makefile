@@ -1,7 +1,7 @@
 all:
 	rm -f obs.txt
 	morloc make -v foo.loc > log
-	./nexus.pl foo '{"name":"alice","info":34}' > obs.txt
+	./nexus.py foo '{"name":"alice","info":34}' > obs.txt
 
 clean:
 	rm -f nexus* pool*

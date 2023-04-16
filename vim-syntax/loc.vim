@@ -29,23 +29,12 @@ let b:current_syntax = "loc"
 
 syn keyword reserved where
 syn keyword reserved module
-syn keyword reserved import
 syn keyword reserved from
 syn keyword reserved as
 syn keyword reserved source
 syn keyword reserved export
 syn keyword reserved True
 syn keyword reserved False
-syn keyword reserved and
-syn keyword reserved or
-syn keyword reserved xor
-syn keyword reserved nand
-syn keyword reserved not
-syn keyword reserved type
-syn keyword reserved object
-syn keyword reserved table
-syn keyword reserved record
-syn keyword reserved system
 
 " -----------------------------------------------------------------------------
 hi def link reserved Keyword
@@ -134,6 +123,12 @@ syn region s_comment start="{-" end="-}" contains=s_todo,s_tag
 "                               E R R O R S                                    
 " -----------------------------------------------------------------------------
 syn match s_error '^#'
+
+syn match reserved '^table'
+syn match reserved '^import'
+syn match reserved '^type'
+syn match reserved '^object'
+syn match reserved '^record'
 
 " -----------------------------------------------------------------------------
 hi def link s_comment  Comment

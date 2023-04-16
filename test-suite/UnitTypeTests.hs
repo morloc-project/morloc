@@ -52,6 +52,7 @@ runBackendCheck code = do
 emptyConfig =  Config
     { configHome = ""
     , configLibrary = ""
+    , configPlain = ""
     , configTmpDir = ""
     , configLangPython3 = ""
     , configLangR = ""
@@ -79,16 +80,17 @@ assertConcreteType msg code t = testCase msg $ do
 renameExistentials :: TypeU -> TypeU
 renameExistentials = snd . f (0, Map.empty) where
  f s (VarU v) = (s, VarU v)
- f (i,m) (ExistU v@(TV lang _) ps ds) =
+ f (i,m) (ExistU v@(TV lang _) ps ds rs) =
   case Map.lookup v m of
-    (Just v') -> ((i, m), ExistU v' ps ds)
+    (Just v') -> ((i, m), ExistU v' ps ds rs)
     Nothing ->
       let v' = TV lang ("e" <> MT.pack (show i))
           i' = i+1
           m' = Map.insert v v' m
           (s', ps') = statefulMap f (i', m') ps 
           (s'', ds') = statefulMap f s' ds
-      in (s'', ExistU v' ps' ds')
+          (s''', vs') = statefulMap f s'' (map snd rs)
+      in (s''', ExistU v' ps' ds' (zip (map fst rs) vs'))
  f s (ForallU v t) =
   let (s', t') = f s t
   in (s', ForallU v t') 
@@ -151,12 +153,13 @@ int = VarU (TV Nothing "Int")
 str = VarU (TV Nothing "Str")
 
 fun [] = error "Cannot infer type of empty list"
+fun [t] = FunU [] t
 fun ts = FunU (init ts) (last ts)
 
 forall [] t = t
 forall (s:ss) t = ForallU (TV Nothing s) (forall ss t)
 
-exist v = ExistU (TV Nothing v) [] []
+exist v = ExistU (TV Nothing v) [] [] []
 
 forallc _ [] t = t
 forallc lang (s:ss) t = ForallU (TV (Just lang) s) (forallc lang ss t)
@@ -203,9 +206,9 @@ subtypeTests =
     , assertSubtypeGamma "<b> -| [A] <: <b> |- <b>:[A]" [ebg] (lst a) (eb) [solvedB (lst a)]
     , assertSubtypeGamma "<a> -| <a> <: [B] |- <a>:[B]" [eag] (lst b) (ea) [solvedA (lst b)]
     , assertSubtypeGamma "<a>, <b> -| <a> <b> <: [C] |- <a>:[C], <b>:C" [eag, ebg]
-        (ExistU (v "x1") [eb] []) (lst c) [solvedA (lst c), solvedB c]
+        (ExistU (v "x1") [eb] [] []) (lst c) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "<a>, <b> -|[C] <: <a> <b> |- <a>:[C], <b>:C" [eag, ebg]
-        (lst c) (ExistU (v "x1") [eb] []) [solvedA (lst c), solvedB c]
+        (lst c) (ExistU (v "x1") [eb] [] []) [solvedA (lst c), solvedB c]
     , assertSubtypeGamma "[] -| forall a . a <: A -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
     , assertSubtypeGamma "[] -| A <: forall a . a -| a:A" [] (forall ["a"] (var "a")) a [SolvedG (v "a") a]
       -- nested types
@@ -222,14 +225,14 @@ subtypeTests =
     a = var "A"
     b = var "B"
     c = var "C"
-    ea = ExistU (v "x1") [] []
-    eb = ExistU (v "x2") [] []
-    ec = ExistU (v "x3") [] []
-    ed = ExistU (v "x4") [] []
-    eag = ExistG (v "x1") [] []
-    ebg = ExistG (v "x2") [] []
-    ecg = ExistG (v "x3") [] []
-    edg = ExistG (v "x4") [] []
+    ea = ExistU (v "x1") [] [] []
+    eb = ExistU (v "x2") [] [] []
+    ec = ExistU (v "x3") [] [] []
+    ed = ExistU (v "x4") [] [] []
+    eag = ExistG (v "x1") [] [] []
+    ebg = ExistG (v "x2") [] [] []
+    ecg = ExistG (v "x3") [] [] []
+    edg = ExistG (v "x4") [] [] []
     solvedA t = SolvedG (v "x1") t
     solvedB t = SolvedG (v "x2") t
     solvedC t = SolvedG (v "x3") t
@@ -248,44 +251,41 @@ whitespaceTests =
     "Tests whitespace handling for modules"
     [ assertGeneralType
       "module indent == 1 and top indent == module indent"
-      "module Foo\nx = 1\ny = 2\nexport y"
+      "module Foo (y)\nx = 1\ny = 2"
       int
     , assertGeneralType
       "module indent == 1 and top indent > module indent"
-      "module Foo\n  x = 1\n  y = 2\n  export y"
+      "module Foo (y)\n  x = 1\n  y = 2"
       int
     , assertGeneralType
       "module indent > 1 and top indent > module indent"
-      " module Foo\n   x = 1\n   y = 2\n   export y"
+      " module Foo (y)\n   x = 1\n   y = 2"
       int
     , assertGeneralType
       "module indent > 1 and top indent = module indent"
-      "  module Foo\n  x = 1\n  y = 2\n  export y"
+      "  module Foo (y)\n  x = 1\n  y = 2"
       int
     -- indenting main
     , assertGeneralType
       "main indent == 1"
-      "x = 1\ny = 2\nexport y"
+      "module main (y)\nx = 1\ny = 2"
       int
     , assertGeneralType
       "main indent > 1"
-      "  x = 1\n  y = 2\n  export y"
+      "module main (y)\n  x = 1\n  y = 2"
       int
     -- multiple modules
     , assertGeneralType
       "multiple modules at pos 1 with pos > 1 exprs"
       [r|
-module Foo
+module Foo (x)
   x = True
-  export x
-module Bar
+module Bar (y)
   import Foo
   y = True
-  export y
-module Main
+module Main (z)
   import Bar
   z = 1
-  export z
       |]
       int
     ]
@@ -431,83 +431,83 @@ typeAliasTests =
     [ assertGeneralType
         "general type alias"
         [r|
+        module main (f)
         type Foo = A
         f :: Foo
-        export f
         |]
         (var "A")
     , assertGeneralType
         "parameterized generic"
         [r|
+        module main (f)
         f :: m (a -> b)
-        export f
         |]
         (forall ["m_q0", "a_q1", "b_q2"] (arr "m_q0" [fun [var "a_q1", var "b_q2"]]))
     , assertGeneralType
         "non-parametric, general type alias"
         [r|
+        module main (f)
         type Foo = A
         f :: Foo -> B
-        export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> B`"
         [r|
+        module main (f)
         type Foo = A
         f :: [Foo] -> B
-        export f
         |]
         (fun [lst (var "A"), var "B"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> Foo`"
         [r|
+        module main (f)
         type Foo = A
         f :: [Foo] -> Foo
-        export f
         |]
         (fun [lst (var "A"), var "A"])
     , assertGeneralType
         "deep type substitution: `[Foo] -> { a = Foo }`"
         [r|
+        module main (f)
         type Foo = A
         f :: [Foo] -> { a :: Foo }
-        export f
         |]
         (fun [lst (var "A"), record [("a", var "A")]])
     , assertGeneralType
         "parametric alias, general type alias"
         [r|
+        module main (f)
         type (Foo a b) = (a,b)
         f :: Foo X Y -> Z
-        export f
         |]
         (fun [tuple [var "X", var "Y"], var "Z"])
     , assertGeneralType
         "nested types"
         [r|
+           module main (foo)
            type A = B
            type B = C
            foo :: A -> B -> C
-           export foo
         |]
         (fun [var "C", var "C", var "C"])
     , assertGeneralType
         "state is preserved across binding"
         [r|
+           module main (f)
            type Foo = A
            g :: Foo -> Int
            f = g
-           export f
         |]
         (fun [var "A", var "Int"])
     , assertGeneralType
         "state is inherited across binding"
         [r|
+           module main (f)
            type Foo = A
            f :: Foo -> Int
            f = g  {- yes, g isn't defined -}
-           export f
         |]
         (fun [var "A", var "Int"])
     -- , assertGeneralType
@@ -603,64 +603,52 @@ typeAliasTests =
     , assertGeneralType
         "non-parametric, general type alias, imported"
         [r|
-           module M1
+           module M1 (Foo)
              type Foo = A
-             export Foo
-           module Main
+           module Main (f)
              import M1 (Foo)
              f :: Foo -> B
-             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported"
         [r|
-           module M3
+           module M3 (Foo)
              type Foo = A
-             export Foo
-           module M2
+           module M2 (Foo)
              import M3 (Foo)
-             export Foo
-           module M1
+           module M1 (Foo)
              import M2 (Foo)
-             export Foo
-           module Main
+           module Main (f)
              import M1 (Foo)
              f :: Foo -> B
-             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, imported aliased"
         [r|
-           module M1
+           module M1 (Foo)
              type Foo = A
-             export Foo
-           module Main
+           module Main (f)
              import M1 (Foo as Bar)
              f :: Bar -> B
-             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "non-parametric, general type alias, reimported aliased"
         [r|
-           module M3
+           module M3 (Foo1)
              type Foo1 = A
-             export Foo1
 
-           module M2
+           module M2 (Foo2)
              import M3 (Foo1 as Foo2)
-             export Foo2
 
-           module M1
+           module M1 (Foo3)
              import M2 (Foo2 as Foo3)
-             export Foo3
 
-           module Main
+           module Main (f)
              import M1 (Foo3 as Foo4)
              f :: Foo4 -> B
-             export f
         |]
         (fun [var "A", var "B"])
     -- , assertConcreteType
@@ -689,37 +677,31 @@ typeAliasTests =
     , assertGeneralType
         "non-parametric, general type alias, duplicate import"
         [r|
-           module M2
+           module M2 (Foo)
              type Foo = A
-             export Foo
 
-           module M1
+           module M1 (Foo)
              type Foo = A
-             export Foo
 
-           module Main
+           module Main (f)
              import M1 (Foo)
              import M2 (Foo)
              f :: Foo -> B
-             export f
         |]
         (fun [var "A", var "B"])
     , assertGeneralType
         "parametric alias, general type alias, duplicate import"
         [r|
-           module M2
+           module M2 (Foo)
              type (Foo a b) = (a,b)
-             export Foo
 
-           module M1
+           module M1 (Foo)
              type (Foo c d) = (c,d)
-             export Foo
 
-           module Main
+           module Main (f)
              import M1 (Foo)
              import M2 (Foo)
              f :: Foo X Y -> Z
-             export f
         |]
         (fun [tuple [var "X", var "Y"], var "Z"])
     ]
@@ -963,44 +945,44 @@ unitTypeTests =
     , assertConcreteType
         "py: id [1, 2]"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = id [1, 2]
-        export foo
         |]
         (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
 
     , assertConcreteType
         "py: [id 1, 2]"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = [id 1, 2]
-        export foo
         |]
         (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
 
     , assertConcreteType
         "py: [id 1, id 2]"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = [id 1, id 2]
-        export foo
         |]
         (AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"])
 
     , assertConcreteType
         "py: id (1, True)"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = id (1, True)
-        export foo
         |]
         (AppP (varp Python3Lang (Just "Tuple2") "tuple")
               [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
@@ -1008,11 +990,11 @@ unitTypeTests =
     , assertConcreteType
         "py: (id 1, True)"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = (id 1, True)
-        export foo
         |]
         (AppP (varp Python3Lang (Just "Tuple2") "tuple")
               [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
@@ -1020,11 +1002,11 @@ unitTypeTests =
     , assertConcreteType
         "py: id (id 1, id True)"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id :: a -> a
         id py :: a -> a
         foo = id (id 1, id True)
-        export foo
         |]
         (AppP (varp Python3Lang (Just "Tuple2") "tuple")
               [varp Python3Lang (Just "Int") "int", varp Python3Lang (Just "Bool") "bool"])
@@ -1033,10 +1015,10 @@ unitTypeTests =
     , assertConcreteType
         "py - add"
         [r|
+        module main (add)
         source py from "_" ("add")
         add py :: "float" -> "float" -> "float" 
         add :: Int -> Int -> Int
-        export add
         |]
         (FunP [ varp Python3Lang (Just "Int") "float"
               , varp Python3Lang (Just "Int") "float" ]
@@ -1045,11 +1027,11 @@ unitTypeTests =
     , assertConcreteType
         "py - foo x = add 5 x"
         [r|
+        module main (foo)
         source py from "_" ("add")
         add py :: "float" -> "float" -> "float" 
         add :: Int -> Int -> Int
         foo x = add 5 x
-        export foo
         |]
         (FunP [ varp Python3Lang (Just "Int") "float" ]
               ( varp Python3Lang (Just "Int") "float" ))
@@ -1057,11 +1039,11 @@ unitTypeTests =
     , assertConcreteType
         "py: foo x = [x, id 1]"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id py :: a -> a
         id :: a -> a
         foo x = [x, id 1]
-        export foo
         |]
         (FunP [varp Python3Lang (Just "Int") "int"]
               ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"] ))
@@ -1069,11 +1051,11 @@ unitTypeTests =
     , assertConcreteType
         "py: foo x = [id 1, x]"
         [r|
+        module main (foo)
         source py from "_" ("id")
         id py :: a -> a
         id :: a -> a
         foo x = [id 1, x]
-        export foo
         |]
         (FunP [varp Python3Lang (Just "Int") "int"]
               ( AppP (varp Python3Lang (Just "List") "list") [varp Python3Lang (Just "Int") "int"] ))
@@ -1114,13 +1096,13 @@ unitTypeTests =
     , assertConcreteType
         "py+r: foo = inc@{py,r} x  - selection"
         [r|
+        module main (foo)
         source r from "_" ("inc")
         source py from "_" ("inc")
         inc :: Int -> Int
         inc r :: "integer" -> "integer"
         inc py :: "int" -> "int"
         foo x = inc x
-        export foo
         |]
         (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
 
@@ -1234,8 +1216,8 @@ unitTypeTests =
     , assertGeneralType
         "existential function passing"
         [r|
+        module main (g)
         g f = f True
-        export g
         |]
         (fun [fun [bool, exist "e0"], exist "e0"])
 
@@ -1379,8 +1361,8 @@ unitTypeTests =
     , assertGeneralType
         "variable annotation"
         [r|
+        module main (f)
         f :: Foo
-        export f
         |]
         (var "Foo")
 
@@ -1388,13 +1370,13 @@ unitTypeTests =
     , assertConcreteType
         "py - id over add"
         [r|
+        module main (f)
         source py from "_" ("id", "add")
         add :: Real -> Real -> Real 
         add py :: "float" -> "float" -> "float"
         id :: a -> a
         id py :: a -> a
         f x y = id (add x y)
-        export f
         |]
         (funp [ varp Python3Lang (Just "Real") "float"
               , varp Python3Lang (Just "Real") "float"
@@ -1404,8 +1386,8 @@ unitTypeTests =
     , assertGeneralType
         "function with parameterized types"
         [r|
+        module main (f)
         f :: A B -> C
-        export f
         |]
         (fun [arr "A" [var "B"], var "C"])
     , assertGeneralType "fully applied lambda (1)" "(\\x y -> x) 1 True" int
@@ -1522,8 +1504,8 @@ unitTypeTests =
     , assertGeneralType
         "annotated variables without definition are legal"
         [r|
+        module main (x)
         x :: Int
-        export x
         |]
         int
     , assertGeneralType
@@ -1541,22 +1523,22 @@ unitTypeTests =
     , assertGeneralType
         "parameterized type (n=1)"
         [r|
+        module main (xs)
         xs :: Foo A
-        export xs
         |]
         (arr "Foo" [var "A"])
     , assertGeneralType
         "parameterized type (n=2)"
         [r|
+        module main (xs)
         xs :: Foo A B
-        export xs
         |]
         (arr "Foo" [var "A", var "B"])
     , assertGeneralType
         "nested parameterized type"
         [r|
+        module main (xs)
         xs :: Foo (Bar A) [B]
-        export xs
         |]
         (arr "Foo" [arr "Bar" [var "A"], arr "List" [var "B"]])
     -- , assertTerminalType
@@ -1692,33 +1674,40 @@ unitTypeTests =
     , assertGeneralType
         "check 2-tuples type signature"
         [r|
+        module main (f)
         f :: (Int, Str)
-        export f
         |]
         (tuple [int, str])
-    , assertGeneralType "1-tuples are just for grouping" "f :: (Int)\nexport f" int
+    , assertGeneralType "1-tuples are just for grouping" "module main (f)\nf :: (Int)" int
 
-    --- FIXME - distinguish between Unit an Null
     -- unit type
     , assertGeneralType
         "unit as input"
         [r|
+        module main (f)
         f :: () -> Bool
-        export f
         |]
-        (fun [VarU (TV Nothing "Unit"), bool])
+        (fun [bool])
+
+    , assertGeneralType
+        "unit as 2rd input"
+        [r|
+        module main (f)
+        f :: Int -> () -> Bool
+        |]
+        (fun [int, bool])
 
     , assertGeneralType
         "unit as output"
         [r|
+        module main (f)
         f :: Bool -> ()
-        export f
         |]
         (fun [bool, VarU (TV Nothing "Unit")])
 
     -- FIXME - I really don't like "Unit" being a normal var ...
     -- I am inclined to cast it as the unit type
-    , assertGeneralType "empty tuples are of unit type" "f :: ()\nexport f" (var "Unit")
+    , assertGeneralType "empty tuples are of unit type" "module main (f)\nf :: ()" (var "Unit")
 
     -- extra space
     , assertGeneralType "leading space" " 42" int
@@ -1753,10 +1742,38 @@ unitTypeTests =
         "primitive type mismatch should raise error"
         (GeneralTypeError (SubtypeError int bool "mismatch"))
         [r|
+        module main (f)
         f :: Int -> Bool
         f x = 9999
-        export f"
         |]
+
+    , expectError
+        "catch infinite recursion of list"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: [a] -> a
+        f :: a -> a
+        f x = g x
+        |]
+    , expectError
+        "catch infinite recursion of tuple"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: (a, b) -> a
+        f :: a -> a
+        f x = g x
+        |]
+    -- , expectError
+    --     "check signatures under supposed identity"
+    --     (GeneralTypeError InfiniteRecursion)
+    --     [r|
+    --     module main (f)
+    --     g :: (a -> b) -> a
+    --     f :: a -> a
+    --     f x = g x
+    --     |]
 
     -- -- tags
     -- , exprEqual
@@ -1786,11 +1803,11 @@ unitTypeTests =
     --     "F :: foo:{x::(i:Int), y::Str}"
 
     -- properties
-    , assertGeneralType "property syntax (1)" "f :: Foo => Int\nexport f" int
-    , assertGeneralType "property syntax (2)" "f :: Foo bar => Int\nexport f" int
-    , assertGeneralType "property syntax (3)" "f :: Foo a, Bar b => Int\nexport f" int
-    , assertGeneralType "property syntax (4)" "f :: (Foo a) => Int\nf" int
-    , assertGeneralType "property syntax (5)" "f :: (Foo a, Bar b) => Int\nexport f" int
+    , assertGeneralType "property syntax (1)" "module main (f)\nf :: Foo => Int" int
+    , assertGeneralType "property syntax (2)" "module main (f)\nf :: Foo bar => Int" int
+    , assertGeneralType "property syntax (3)" "module main (f)\nf :: Foo a, Bar b => Int" int
+    , assertGeneralType "property syntax (4)" "module main (f)\nf :: (Foo a) => Int" int
+    , assertGeneralType "property syntax (5)" "module main (f)\nf :: (Foo a, Bar b) => Int" int
 
     -- constraints
     , assertGeneralType
@@ -1816,29 +1833,24 @@ unitTypeTests =
     , assertGeneralType
         "basic Main module"
         [r|
-          module Main
-            x = [1,2,3]
-            export x
+          module Main(x)
+          x = [1,2,3]
         |]
         (lst int)
     , (flip $ assertGeneralType "import/export") (lst int) $
         [r|
-          module Foo
-            export x
+          module Foo (x)
             x = 42
-          module Bar
-            export f
+          module Bar (f)
             f :: a -> [a]
-          module Main
+          module Main (z)
             import Foo (x)
             import Bar (f)
             z = f x
-            export z
         |]
     , (flip $ assertGeneralType "complex parse (1)") int $
       [r|
-         module Foo
-           export x
+         module Foo (x)
            add :: Int -> Int -> Int
            x = add a y where
              a = 1
@@ -1846,381 +1858,4 @@ unitTypeTests =
                b = 42
            z = 19
       |]
-
-    -- , (flip $ assertTerminalType "import/export") [varc RLang "numeric"] $
-    --   [r|
-    --      module Foo
-    --      export x
-    --      x = [1,2,3]
-    --
-    --      module Bar
-    --      export f
-    --      f R :: ["numeric"] -> "numeric"
-    --
-    --      module Main
-    --      import Foo (x)
-    --      import Bar (f)
-    --      f x
-    --   |]
-    --
-    -- , (flip $ assertTerminalType "multiple imports") [varc Python3Lang "float", varc RLang "numeric"] $
-    --   [r|
-    --      module Foo
-    --      export f
-    --      f py :: ["float"] -> "float"
-    --
-    --      module Bar
-    --      export f
-    --      f R :: ["numeric"] -> "numeric"
-    --
-    --      module Main
-    --      import Foo (f)
-    --      import Bar (f)
-    --      f [1,2,3]
-    --   |]
-    --
-    -- , expectError
-    --     "fail on import of non-existing variable"
-    --     (BadImport (MVar "Foo") (EV [] "x")) $
-    --     [r|
-    --        module Foo
-    --        export y
-    --        y = 42
-    --
-    --        module Main
-    --        import Foo (x)
-    --        x
-    --     |]
-    -- , expectError
-    --     "fail on cyclic dependency"
-    --     CyclicDependency $
-    --     [r|
-    --        module Foo
-    --        import Bar (y)
-    --        export x
-    --        x = 42
-    --
-    --        module Bar
-    --        import Foo (x)
-    --        export y
-    --        y = 88
-    --     |]
-    -- , expectError "fail on self import"
-    --     (SelfImport (MVar "Foo")) $
-    --     [r|
-    --        module Foo
-    --        import Foo (x)
-    --        x = 42
-    --     |]
-    -- , expectError
-    --     "fail on import of non-exported variable"
-    --     (BadImport (MVar "Foo") (EV [] "x")) $
-    --     [r|
-    --         module Foo {x = 42}
-    --         module Main
-    --         import Foo (x)
-    --         x
-    --     |]
-    --
-    -- -- test realization integration
-    -- , assertTerminalType
-    --     "a realization can be defined following general type signature"
-    --     [r|
-    --        f :: Num -> Num
-    --        f r :: "integer" -> "integer"
-    --        f 44
-    --     |]
-    --     [num, varc RLang "integer"]
-    -- , assertTerminalType
-    --     "realizations can map one general type to multiple specific ones"
-    --     [r|
-    --        f :: Num -> Num
-    --        f r :: "integer" -> "numeric"
-    --        f 44
-    --     |]
-    --     [num, varc RLang "numeric"]
-    -- , assertTerminalType
-    --     "realizations can map multiple general type to one specific one"
-    --     [r|
-    --        f :: Num -> Nat
-    --        f r :: "integer" -> "integer"
-    --        f 44
-    --     |]
-    --     [var "Nat", varc RLang "integer"]
-    -- , assertTerminalType
-    --     "multiple realizations for different languages can be defined"
-    --     [r|
-    --        f :: Num -> Num
-    --        f r :: "integer" -> "integer"
-    --        f c :: "int" -> "int"
-    --        f 44
-    --     |]
-    --     [num, varc CLang "int", varc RLang "integer"]
-    -- , assertTerminalType
-    --     "realizations with parameterized variables"
-    --     [r|
-    --        f :: [Num] -> Num
-    --        f r :: "$1" "integer" -> "integer"
-    --        f cpp :: "std::vector<$1>" "int" -> "int"
-    --        f [44]
-    --     |]
-    --     [num, varc CppLang "int", varc RLang "integer"]
-    -- , assertTerminalType
-    --     "realizations can use quoted variables"
-    --     [r|
-    --        sum :: [Num] -> Num
-    --        sum c :: "$1*" "double" -> "double"
-    --        sum cpp :: "std::vector<$1>" "double" -> "double"
-    --        sum [1,2]
-    --     |]
-    --     [num, varc CLang "double", varc CppLang "double"]
-    -- , assertTerminalType
-    --     "the order of general signatures and realizations does not matter (1)"
-    --     [r|
-    --        f r :: "integer" -> "integer"
-    --        f :: Num -> Num
-    --        f c :: "int" -> "int"
-    --        f 44
-    --     |]
-    --     [num, varc CLang "int", varc RLang "integer"]
-    -- , assertTerminalType
-    --     "the order of general signatures and realizations does not matter (2)"
-    --     [r|
-    --        f r :: "integer" -> "integer"
-    --        f c :: "int" -> "int"
-    --        f :: Num -> Num
-    --        f 44
-    --     |]
-    --     [num, varc CLang "int", varc RLang "integer"]
-    -- , assertTerminalType
-    --     "multiple realizations for a single language cannot be defined"
-    --     [r|
-    --        f r :: A -> B
-    --        f r :: C -> D
-    --        f 1
-    --     |]
-    --     [varc RLang "B", varc RLang "D"]
-    -- , assertTerminalType
-    --     "general signatures are optional"
-    --     [r|
-    --        f r :: "integer" -> "integer"
-    --        f 44
-    --     |]
-    --     [varc RLang "integer"]
-    -- , assertTerminalType
-    --     "compositions can have concrete realizations"
-    --     [r|
-    --        f r :: "integer" -> "integer"
-    --        f x = 42
-    --        f 44
-    --     |]
-    --     [varc RLang "integer", num]
-    -- , expectError
-    --    "arguments number in realizations must equal the general case (1)"
-    --     BadRealization $
-    --     [r|
-    --        f :: Num -> String -> Num
-    --        f r :: "integer" -> "integer"
-    --        f 44
-    --     |]
-    -- , expectError
-    --      "arguments number in realizations must equal the general case (2)"
-    --      BadRealization $
-    --      [r|
-    --         f :: Num -> Num
-    --         f r :: "integer" -> "integer" -> "string"
-    --         f 44
-    --      |]
-    -- , assertTerminalType
-    --     "multiple realizations for one type"
-    --     [r|
-    --        foo :: Num -> Num
-    --        foo r :: A -> B
-    --        foo c :: C -> D
-    --        bar c :: C -> C
-    --        foo (bar 1)
-    --     |]
-    --     [num, varc CLang "D", varc RLang "B"]
-    -- , assertTerminalType
-    --   "concrete snd: simple test with containers"
-    --   [r|
-    --      snd :: (a, b) -> b
-    --      snd r :: list a b -> b
-    --      snd (1, True)
-    --   |]
-    --   [bool, varc RLang "logical"]
-    -- , assertTerminalType
-    --   "concrete map: single map, single f"
-    --   [r|
-    --      map cpp :: (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
-    --      f cpp :: "double" -> "double"
-    --      map f [1,2]
-    --   |]
-    --   [arrc CppLang "std::vector<$1>" [varc CppLang "double"]]
-    -- , assertTerminalType
-    --   "concrete map: multiple maps, single f"
-    --   [r|
-    --      map :: (a -> b) -> [a] -> [b]
-    --      map c :: (a -> b) -> "std::vector<$1>" a -> "std::vector<$1>" b
-    --      map r :: (a -> b) -> vector a -> vector b
-    --      f c :: "double" -> "double"
-    --      map f [1,2]
-    --   |]
-    --   [ forall ["a"] (arr "List" [var "a"])
-    --   , forallc RLang ["a"] (arrc RLang "vector" [varc RLang "a"])
-    --   , arrc CLang "std::vector<$1>" [varc CLang "double"]
-    --   ]
-    -- , assertTerminalType
-    --   "infer type signature from concrete functions"
-    --   [r|
-    --      sqrt :: Num -> Num
-    --      sqrt R :: "numeric" -> "numeric"
-    --      foo x = sqrt x
-    --      sqrt 42
-    --   |]
-    --   [num, varc RLang "numeric"]
-    -- , assertTerminalType
-    --   "calls cross-language"
-    --   [r|
-    --      f R :: A -> B
-    --      g Cpp :: B -> C
-    --      g (f 4)
-    --   |]
-    --   [varc CppLang "C"]
-    -- , assertTerminalType
-    --   "language branching"
-    --   [r|
-    --      id R :: a -> a
-    --      sqrt C :: "double" -> "double"
-    --      sqrt R :: "numeric" -> "numeric"
-    --      id (sqrt 4)
-    --   |]
-    --   [varc RLang "numeric"]
-    -- , assertTerminalType
-    --   "obligate foreign call"
-    --   [r|
-    --      foo r :: (a -> a) -> a -> a
-    --      f c :: "int" -> "int"
-    --      foo f 42
-    --   |]
-    --   [varc RLang "numeric"]
-    -- , assertTerminalType
-    --   "obligate foreign call - tupled"
-    --   [r|
-    --      foo r :: (a -> a) -> a -> (a,a)
-    --      f c :: "int" -> "int"
-    --      foo f 42
-    --   |]
-    --   [arrc RLang "tuple" [varc RLang "numeric", varc RLang "numeric"]]
-    -- , assertTerminalType
-    --   "declarations represent all realizations"
-    --   [r|
-    --      sqrt :: Num -> Num
-    --      sqrt r :: "integer" -> "numeric"
-    --      foo x = sqrt x
-    --      foo
-    --   |]
-    --   [fun [num, num], fun [varc RLang "integer", varc RLang "numeric"]]
-    --
-    -- , assertTerminalType
-    --   "all internal concrete and general types are right"
-    --   [r|
-    --      snd :: a -> b -> b
-    --      snd Cpp :: a -> b -> b
-    --      sqrt :: Num -> Num
-    --      sqrt Cpp :: "double" -> "double"
-    --      foo x = snd x (sqrt x)
-    --      foo
-    --   |]
-    --   [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
-    --
-    -- , assertTerminalType
-    --   "declaration general type signatures are respected"
-    --   [r|
-    --      sqrt cpp :: "double" -> "double"
-    --      sqrt :: a -> a
-    --      foo :: Num -> Num
-    --      foo x = sqrt x
-    --      foo
-    --   |]
-    --   [fun [num, num], fun [varc CppLang "double", varc CppLang "double"]]
-    --
-    -- , assertTerminalExprWithAnnot
-    --   "all internal concrete and general types are right"
-    --   [r|
-    --      snd :: a -> b -> b
-    --      snd Cpp :: a -> b -> b
-    --      sqrt :: Num -> Num
-    --      sqrt Cpp :: "double" -> "double"
-    --      foo x = snd x (sqrt x)
-    --   |]
-    --   (Declaration (EV [] "foo")
-    --     (AnnE (LamE (EV ["foo"] "x")
-    --       (AnnE (AppE
-    --         (AnnE (AppE
-    --           (AnnE (VarE (EV [] "snd"))
-    --             [ fun [num, num, num]
-    --             , fun [varc CppLang "double", varc CppLang "double", varc CppLang "double"]])
-    --           (AnnE (VarE (EV ["foo"] "x"))
-    --             [num,varc CppLang "double"]))
-    --           [ FunU num num
-    --           , FunU (varc CppLang "double") (varc CppLang "double")])
-    --         (AnnE (AppE
-    --           (AnnE (VarE (EV [] "sqrt"))
-    --             [ FunU num num
-    --             , FunU (varc CppLang "double") (varc CppLang "double")])
-    --           (AnnE (VarE (EV ["foo"] "x"))
-    --             [ num
-    --             , varc CppLang "double"]))
-    --           [num,varc CppLang "double"]))
-    --         [num,varc CppLang "double"]))
-    --       [ FunU num num
-    --       , FunU (varc CppLang "double") (varc CppLang "double")]))
-    --
-    -- -- internal
-    -- , exprTestFull
-    --     "every sub-expression should be annotated in output"
-    --     "f :: a -> Bool\nf 42"
-    --     "f :: a -> Bool\n(((f :: Num -> Bool) (42 :: Num)) :: Bool)"
-    --
-    -- -- -- TODO: resurrect to test github issue #7
-    -- -- , exprTestFullDec
-    -- --     "concrete types should be inferred for declared variables"
-    -- --     (MT.unlines
-    -- --       [ "id :: Num -> Num;"
-    -- --       , "id C :: \"int\" -> \"int\";"
-    -- --       , "id x = x;"
-    -- --       , "y = 40;"
-    -- --       , "foo = id y;"
-    -- --       ]
-    -- --     )
-    -- --     [ (EV [] "foo",
-    -- --       AnnE (AppE
-    -- --           (AnnE (VarE (EV [] "id")) [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
-    -- --           (AnnE (VarE (EV [] "y")) [num, varc CLang "int"])
-    -- --                                      -- ^ The purpose of this test is to assert that the above
-    -- --                                      -- type is defined. As of commit 'c31660a0', `y` was assigned
-    -- --                                      -- only the general type Num.
-    -- --         )
-    -- --       [num, varc CLang "int"]
-    -- --       )
-    -- --     , (EV [] "id",
-    -- --       AnnE (LamE (EV [] "x")
-    -- --           (AnnE (VarE (EV [] "x"))
-    -- --             [num, varc CLang "int"]))
-    -- --         [fun [num, num], fun [varc CLang "int", varc CLang "int"]])
-    -- --     , (EV [] "y", AnnE (NumE 40.0) [num])
-    -- --     ]
-    --
-    -- -- default list evaluation of arguments
-    -- , assertTerminalType
-    --     "can infer multiple argument types"
-    --     [r|
-    --        ith :: [Num] -> Num -> Num
-    --        ith R :: ["numeric"] -> "numeric" -> "numeric"
-    --        snd x = ith x 2
-    --        snd [1,2,3]
-    --     |]
-    --     [num, varc RLang "numeric"]
-
     ]

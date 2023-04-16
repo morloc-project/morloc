@@ -1,157 +1,153 @@
--- QA:
---  * How are functions passed? They can't be serialized. Calls are written
---    into the generate code.
--- 
---  * What if a language cannot pass functions as arguments?
--- 
---  * What about OOP methods? Styles. Though support is not finished yet.
--- 
---  * What about mutability? Effects and styles.
--- 
---  * What about laziness? No solution in the works yet. For now, everything is
---    eager between languages and potentially lazy within. This violates the
---    agnostic principle. Perhaps I could add type-level syntax for laziness?
--- 
---  * How are arguments passed (i.e., pass-by-reference versus pass-by-value)?
---    Currently, pass-by-value between languages (serialization to JSON), and
---    variable within languages.
--- 
---  * What about `const` keywords and other random hints different languages add?
---    This is challenging. The styles is intended to address that partially.
+module flucase (classify, search, analysis)
+
+type Filename = Str 
+type Accession = Str
+type Clade = Str 
+type StrainName = Str
+type Sequence = Str
+type EntrezQuery = Str
+type Label = Str
+type Date = Str
+type Query = Str
+
+type Py Filename = "str"
+type Py Accession = "str"
+type Py Clade = "str"
+type Py StrainName = "str"
+type Py Sequence = "str"
+type Py EntrezQuery = "str"
+type Py Label = "str"
+type Py Date = "str"
+type Py Query = "str"
+
+type Cpp Filename = "std::string" 
+type Cpp Accession = "std::string"
+type Cpp Clade = "std::string" 
+type Cpp StrainName = "std::string"
+type Cpp Sequence = "std::string"
+type Cpp EntrezQuery = "std::string"
+type Cpp Label = "std::string"
+type Cpp Date = "std::string"
+type Cpp Query = "std::string"
+
+record Meta = Meta
+  { accession :: Accession
+  , clade :: Clade
+  }
+
+record Py Meta = "dict"
+  { accession :: "str"
+  , clade :: "str"
+  }
+
+record Cpp Meta = "struct"
+  { accession :: "std::string"
+  , clade :: "std::string"
+  }
 
 
--- import packages from central morloc hub OR the local module IF in module path
--- import bio.io
--- -- import from a special namespace
--- import alice:bio.io
--- -- import from a github repo
--- import alice@github:bio.io
+record EntrezSearchConfig = EntrezSearchConfig
+  { email :: Str
+  , db :: Str
+  , mindate :: Str
+  , maxdate :: Str
+  , retmax :: Int
+  }
 
-import bio.io (readFasta, writeFasta)
-import bio.tree (NelTree, treeOf, viewTree)
-import bio.algo (njTree as tree, fooMsa as align)
-import bio.db (searchEntrez, nucleotideAccessionToXml)
+import bio.algo
+  ( align    -- align :: [Sequence] -> [Sequence]
+  , nj as treeify  -- treeify :: [Sequence] -> Tree Int Real Int
+  )
 
-import db (cache)
-import local (cache)
+import bio.tree
+  ( treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
+  )
 
-record VirusEntry = VirusEntry
-    { accession :: Str
-    , strain :: Str
-    , date :: Str
-    , host :: Str
-    , location :: Str
-    , spike :: Str
-    }
+import bio.db
+  ( searchEntrez as fetchIds                    -- fetchIds :: EntrezSearchConfig -> Query -> [Str]
+  , nucleotideAccessionToXml as fetchRecords  -- fetchIdRecords :: [Str] -> [Str]
+  )
 
-accession :: VirusEntry -> Str
-accession x = x.accession
+import base
+  ( at        -- at :: [a] -> Int -> a
+  , id
+  , filter
+  , shard     -- shard :: Int -> [a] -> [[a]]
+  , elem      -- elem :: a -> [a] -> Bool
+  , fst       -- fst :: (a, b) -> a
+  , gt        -- gt :: Int -> Int -> Bool
+  , eq        -- eq :: Int -> Int -> Bool
+  , head      -- head :: [a] -> a
+  , ifelse    -- ifelse :: Bool -> a -> a -> a
+  , join      -- join :: [a] -> [a] -> [a]
+  , keys      -- keys :: Map a b -> [a]
+  , length    -- length :: [a] -> Int
+  , lengthS   -- lengthS :: Str -> Int
+  , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
+  , sleep     -- sleep :: Real -> a -> a
+  , snd       -- snd :: (a, b) -> b
+  , unique    -- unique :: [a] -> [a]
+  , withSnds  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
+  , readMap   -- readMap :: Filename -> Map key val
+  )
 
-spike :: VirusEntry -> Str
-spike x = x.spike
+source Py from "analysis-functions.py"
+  ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
+  , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
+  , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
+  )
 
-parseEntrezNucleotideXml :: Str -> VirusEntry
-
-
-retrieve = concat
-         . map ( sleep 1
-               . map parseEntrezNucleotideXml
-               . cache (md5sum . join) nucleotideAccessionToXml
-               )
-         . chunks 1000
-         . sort
-         . searchEntrez
-
-
-
-makeTree xs = mapLeaf (at xs)
-            . cache (md5sum . join . map snd) tree
-            . cache (md5sum . join . map accession) (align . map spike)
-
-result = sampleTree
-       . makeTree
-       . retrieve "Influenza+A+Virus[Organism]" "2022/01" "2022/12"
-
-
-import base (withVals, seq, toSnd, map)
-
-gbkToSeq :: GenBankRecord -> Str
-
-export analysis
-
-augment :: (a -> b) -> [a] -> [(a, b)]
-augment f xs = map (coupleRight f) xs 
-
-
-
-fetch :: Conditions -> [VirusEntry]
-
-
-partitionTree = mapLeafs (toSnd . regexCapture "(human|swine)")
-
-subsamplePartitionedTree :: 
-
-subsample
-    :: (NelTree n e l -> NelTree n e (l, Str))
-    -> (NelTree n e l2 -> NelTree n e l2)
-    -> NelTree n e l -> NelTree n e l
+analysis :: Date -> Date -> Filename -> Filename -> ()
+analysis mindate maxdate reffile treefile
+  = ( plotTree treefile
+    . classify
+    . treeBy treeify
+    . withSnds align  -- TODO: rethink this ... this is rather particular
+    . search config refmap
+    ) query
+  where
+    query = "Influenza+A+Virus[Organism]+H3N2[ALL]+HA[ALL]"
+    config = { email = "weena@mlang.com"
+             , db = "nuccore"
+             , mindate = mindate
+             , maxdate = maxdate
+             , retmax = 1000
+             }
+    refmap = readMap reffile
 
 
--- fetch
--- align
--- makeTree
--- subsample
--- view
--- stats
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search config refs query =
+  ( map (onFst (labelRef refs))
+  . concat
+  . map ( map parseRecord
+        . sleep 1.0
+        . fetchRecords
+        )
+  . shard 100
+  . join (keys refs)
+  . fetchIds config
+  ) query
 
 
--- getCovid :: Str -> [(MetaData, Str)]
---
--- -- type Filename = Str
--- -- type Tag = Str
--- -- type Jsonpath = [Str]
--- -- type Identifier = Str
--- -- type Sequence = Str
---
--- analysis :: Filename -> ()
--- analysis gisaidFile = fold seq
---       [ writeTree "tree.newick" tree
---       , viewTree "tree.pdf" tree,
---       ]
---     where
---         tree = treeOf buildTree alignment
---
---         alignment = withVals align (
---             augment lookupSequence (
---                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
---                 jsonListFilterMap parseRecord selectRecord gisaidFile ["x", "y"]
---             )
---         )
---
---
--- -- filter a large file, create raw strings for individual elements
--- jsonListFilterMap
---     :: (String -> a)  -- Convert an element string
---     -> (a -> Bool)    -- Decide whether to keep the parsed object
---     -> Filename       -- Path to the JSON file
---     -> [Tag]          -- Path to the array in the JSON structure
---     -> [a]            -- Final list of things of interest
---
--- lookupSequence :: Identifier -> Sequence
---
--- align xs =
---     seq (seq
---         (writeFasta (map (withFst show) (enumerate xs)) tmpfile)
---         (map snd (readFasta (third (shellCmd ["mafft", tmpfile]))))
---     )
---         (rm tmpfile)
---     where
---         tmpfile = "tmp.fa"
---
--- -- -- Where [a] has length 1 or 0
--- -- pack_maybe   :: pack   => [a] -> Maybe a
--- -- unpack_maybe :: unpack => Maybe a -> [a]
--- --
--- -- -- Where either [a] or [b] is empty and the other has length 1
--- -- pack_either   :: pack   => ([a], [b]) -> Either a b
--- -- unpack_either :: unpack => Either a b -> ([a], [b])
+classify :: Tree () e Meta -> Tree Str e Meta
+classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
+classify = push . pullNode pullLeaf pullClade where
+
+  pullLeaf :: Meta -> Clade
+  pullLeaf Cpp :: Meta -> Clade
+  pullLeaf leaf = leaf@clade
+
+  pullClade :: [Clade] -> Clade
+  pullClade Cpp :: [Clade] -> Clade
+  pullClade xs
+    = ifelse (eq (length seenClades) 1)
+             (head seenClades) ""
+    where
+      seenClades = ( unique
+                   . filter (ne 0 . lengthS)
+                   ) xs
+
+  push = mapChildWithParent id (ifelse (eq 0 (lengthS c)))

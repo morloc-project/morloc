@@ -20,7 +20,6 @@ import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstTo
 import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
-import Morloc.CodeGenerator.Typecheck (say)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Language as ML

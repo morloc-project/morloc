@@ -1,7 +1,8 @@
+module main (add)
+
 -- 0n0 - import n
 
 import pybase (add)
 import cppbase (add)
 import rbase (add)
 
-export add

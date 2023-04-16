@@ -44,7 +44,7 @@ module Morloc.CodeGenerator.Generate
 
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Internal
-import Morloc.CodeGenerator.Typecheck (typecheck, say, peak)
+import Morloc.CodeGenerator.Typecheck (typecheck, peak)
 import Morloc.Data.Doc
 import Morloc.Pretty ()
 import qualified Data.Map as Map
@@ -54,14 +54,12 @@ import qualified Morloc.Language as Lang
 import qualified Morloc.Monad as MM
 import Morloc.CodeGenerator.Grammars.Common
 import qualified Morloc.CodeGenerator.Nexus as Nexus
-import qualified Morloc.CodeGenerator.Serial as MCS
 import qualified Data.Set as Set
 
 import qualified Morloc.CodeGenerator.Grammars.Translator.Cpp as Cpp
 import qualified Morloc.CodeGenerator.Grammars.Translator.Rust as Rust
 import qualified Morloc.CodeGenerator.Grammars.Translator.R as R
 import qualified Morloc.CodeGenerator.Grammars.Translator.Python3 as Python3
-import Data.Bifunctor (second)
 
 realityCheck
   :: [SAnno (Indexed Type) Many Int]
@@ -591,10 +589,10 @@ parameterize
   :: SAnno Int One (Indexed TypeP)
   -> MorlocMonad (SAnno Int One (Indexed TypeP, [PreArgument]))
 parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
-  say "Entering parameterize LamS"
-  say $ "m" <> pretty m
-  say $ "vs =" <+> list (map pretty vs)
-  say $ "input types =" <+> list (map pretty inputs) 
+  MM.sayVVV "Entering parameterize LamS"
+  MM.sayVVV $ "m" <> pretty m
+  MM.sayVVV $ "vs =" <+> list (map pretty vs)
+  MM.sayVVV $ "input types =" <+> list (map pretty inputs) 
 
   ids <- MM.takeFromCounter (length inputs)
   let args0 = zipWith3 PreArgument ids vs inputs
@@ -602,7 +600,7 @@ parameterize (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   x' <- parameterize' args0 x
   return $ SAnno (One (LamS vs x', (c, args0))) m
 parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
-  say $ "Entering parameterize CallS - " <> pretty (srcName src) <> "@" <> pretty (srcLang src)
+  MM.sayVVV $ "Entering parameterize CallS - " <> pretty (srcName src) <> "@" <> pretty (srcLang src)
 
   ids <- MM.takeFromCounter (length inputs)
   let vs = map EV (freshVarsAZ [])
@@ -610,7 +608,7 @@ parameterize (SAnno (One (CallS src, c@(Idx _ (FunP inputs _)))) m) = do
 
   return $ SAnno (One (CallS src, (c, args0))) m
 parameterize x = do
-  say "Entering parameterize Other"
+  MM.sayVVV "Entering parameterize Other"
   parameterize' [] x
 
 -- TODO: the arguments coupled to every term should be the arguments USED
@@ -669,9 +667,9 @@ parameterize' args (SAnno (One (AppS x xs, c)) m) = do
 
 express :: SAnno Int One (Indexed TypeP, [PreArgument]) -> MorlocMonad (ExprM Many)
 express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
-  say "Entering express"
+  MM.sayVVV "Entering express"
   final <- express' True c0 s0
-  say "Exiting express"
+  MM.sayVVV "Exiting express"
   return final
 
   where
@@ -697,7 +695,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- ----
   -- lambda
   express' True _ (SAnno (One (e@(LamS _ (SAnno (One (x, (Idx i c, _))) _)), (_, lambdaArgs))) lambdaIndex) = do
-    say "express' LamS"
+    MM.sayVVV "express' LamS"
     peak e
     express' True c (SAnno (One (x, (Idx i c, lambdaArgs))) lambdaIndex)
 
@@ -729,7 +727,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | sameLanguage && length appArgs == length vs = do
-        say "case #3"
+        MM.sayVVV "case #3"
         let args = [pass i | PreArgument i _ _ <- appArgs]
         xs' <- zipWithM (express' False) callInputTypes xs
         return
@@ -747,7 +745,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | sameLanguage = do
-        say "case #4"
+        MM.sayVVV "case #4"
         let nContextArgs = length appArgs - length vs
             args = [pass i | PreArgument i _ _ <- appArgs]
         xs' <- zipWithM (express' False) callInputTypes xs 
@@ -775,7 +773,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage && length appArgs == length vs = do
-        say "case #7"
+        MM.sayVVV "case #7"
         let n = length xs - length vs
         xsLocal <- zipWithM (express' False) callInputTypes (take n xs)
 
@@ -811,7 +809,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          return g(lambda z, x: m2(x, y, z))               |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
-        say "case #8"
+        MM.sayVVV "case #8"
         -- 1. express all xs under the foreign type if they are in the foreign language or
         --    the parent type (pc) if they are in the parent language
         --
@@ -891,13 +889,13 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          g m2(x, y, z)                                    |             |           |
     ----------------------------------------------------------------------------------------
     | sameLanguage = do
-        say $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
+        MM.sayVVV $ "case #1 - " <> parens (pretty (srcName src)) <> ":"
         -- There should be an equal number of input types and input arguments
         -- That is, the function should be fully applied. If it were partially
         -- applied, the lambda case would have been entered previously instead.
         xs' <- zipWithM (express' False) inputs xs
 
-        say "  leaving case #1"
+        MM.sayVVV "  leaving case #1"
         return
             . ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args])
             . ReturnM
@@ -920,8 +918,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --                                                           |             |           |
     ----------------------------------------------------------------------------------------
     | not sameLanguage = do
-          say $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
-          say $ "args:" <+> list (map pretty args)
+          MM.sayVVV $ "case #5 - " <> parens (pretty (srcName src)) <> ":"
+          MM.sayVVV $ "args:" <+> list (map pretty args)
 
           xs' <- zipWithM (express' False) inputs xs
           return
@@ -941,7 +939,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   -- CallS - direct export of a sourced function, e.g.:
   express' True _ (SAnno (One (CallS src, (Idx _ c@(FunP inputs _), _))) m) = do
-    say $ "express' CallS - direct export:" <+> parens (pretty $ srcName src) <+> "::" <+> pretty c
+    MM.sayVVV $ "express' CallS - direct export:" <+> parens (pretty $ srcName src) <+> "::" <+> pretty c
     ids <- MM.takeFromCounter (length inputs)
     let lambdaTypes = map (packTypeM . typeP2typeM) inputs
         lambdaVals = equalZipWith BndVarM lambdaTypes ids
@@ -962,7 +960,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          g(m2, xs)                                        |             |           |
     ----------------------------------------------------------------------------------------
     | langOf pc == langOf c = do
-        say $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
+        MM.sayVVV $ "case #2 - un-applied cis source call:" <+> pretty (srcName src)
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaTypes = map typeP2typeM callInputs
             lambdaArgs = equalZipWith NativeArgument ids callInputs
@@ -987,15 +985,15 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     --          return g(m2, xs)                                 |             |           |
     ----------------------------------------------------------------------------------------
     | otherwise = do
-        say $ "case #6"
-        say $ "Un-applied trans source call:" <+> pretty (srcName src)
+        MM.sayVVV $ "case #6"
+        MM.sayVVV $ "Un-applied trans source call:" <+> pretty (srcName src)
         ids <- MM.takeFromCounter (length callInputs)
         let lambdaArgs = equalZipWith NativeArgument ids pinputs
             callVals = zipWith (\t i -> BndVarM (Serial t) i) callInputs ids
 
-        say $ "src:" <+> pretty src
-        say $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
-        say $ "callVals:" <+> list (map pretty callVals)
+        MM.sayVVV $ "src:" <+> pretty src
+        MM.sayVVV $ "lambdaArgs:" <+> list (map pretty lambdaArgs)
+        MM.sayVVV $ "callVals:" <+> list (map pretty callVals)
 
         return
          . ManifoldM m (ManifoldPass lambdaArgs)
@@ -1010,7 +1008,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
 
   -- bound variables
   express' _ _ (SAnno (One (VarS v, (Idx _ c, rs))) _) = do
-    say $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
+    MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
     case [i | (PreArgument i v' _) <- rs, v == v'] of
       [r] -> return $ BndVarM (Serial c) r
       rs' -> MM.throwError . OtherError . render $ "Expected VarS to match exactly one argument, found:" <+> list (map pretty rs')
@@ -1055,10 +1053,14 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
       then return $ ManifoldM m (ManifoldFull [pass i | PreArgument i _ _ <- args]) (ReturnM x)
       else return x
 
+  -- An sourced value, transform to 0-argument function
+  express' _ _ (SAnno (One (CallS src, _)) _)
+    = MM.throwError . OtherError . render $ "Cannot export the value" <+> squotes (pretty (srcName src)) <+> "from a pool, you should define this in morloc code instead"
+
   -- catch all exception case
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
-    say "Bad case"
-    say $ "  t :: " <> pretty t
+    MM.sayVVV "Bad case"
+    MM.sayVVV $ "  t :: " <> pretty t
     peak e
     name' <- MM.metaName m
     case name' of
@@ -1118,7 +1120,7 @@ segment e0
 
   -- This is where segmentation happens, every other match is just traversal
   segment' _ args (ForeignInterfaceM t _ e@(ManifoldM m form _)) = do
-    say $ "segmenting foreign interface" <+> pretty m
+    MM.sayVVV $ "segmenting foreign interface" <+> pretty m
     (ms, e') <- segment' m (map argId $ manifoldArgs form) e
     config <- MM.ask
     case MC.buildPoolCallBase config (langOf e') m of
@@ -1126,7 +1128,7 @@ segment e0
       Nothing -> MM.throwError . OtherError $ "Unsupported language: " <> MT.show' (langOf e')
 
   segment' m _ (ForeignInterfaceM t args e) = do
-    say $ "segmenting foreign interface for expression:" <+> pretty e
+    MM.sayVVV $ "segmenting foreign interface for expression:" <+> pretty e
     (ms, e') <- segment' m args e
     -- create the foreign manifold, make sure all arugments are packed
     let foreignManifold = ManifoldM m (ManifoldFull (map PassThroughArgument args)) (ReturnM e')
@@ -1197,9 +1199,9 @@ instance Pretty Request where
 
 reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
 reserialize x0@(ManifoldM m0 form0 e0) = do
-    say "reserialize"
-    say $ pretty x0
-    say $ "typemap:" <+> list (map pretty (Map.toList typemap))
+    MM.sayVVV "reserialize"
+    MM.sayVVV $ pretty x0
+    MM.sayVVV $ "typemap:" <+> list (map pretty (Map.toList typemap))
     let form1 = mapManifoldArgs serializeArgs form0
     f m0 SerialContent (form2scope form1) (ManifoldM m0 form1 e0)
     where
@@ -1447,7 +1449,7 @@ chooseSerializer = mapM chooseSerializer' where
   chooseSerializer' (NullM t) = return $ NullM t
 
   oneSerial :: SerialAST Many -> MorlocMonad (SerialAST One)
-  oneSerial (SerialPack _ (Many [])) = MM.throwError . SerializationError $ "No valid serializer found"
+  oneSerial (SerialPack v (Many [])) = MM.throwError . SerializationError . render $ "No valid serializer found for" <+> dquotes (pretty v)
   oneSerial (SerialPack v (Many ((p,s):_))) = do
     s' <- oneSerial s
     return $ SerialPack v (One (p, s'))

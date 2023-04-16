@@ -1,11 +1,11 @@
+module main (foo)
+
 import pybase (id)
 
 source py from "person.py" ("PersonObj" as Person)
 
 object (Person a) = Person {name :: Str, info :: a}
 object py (Person a) = "PersonObj" {name :: "str", info :: a}
-
-export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

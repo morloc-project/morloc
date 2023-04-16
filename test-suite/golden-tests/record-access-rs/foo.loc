@@ -1,9 +1,9 @@
+module main (foo)
+
 import rustbase (fold, add)
 
 table (Person a) = Person {name :: Str, info :: a}
 table Rust (Person a) = "struct" {name :: "String", info :: a}
-
-export foo
 
 foo :: Person Real -> Real
 foo Rust :: Person "f64" -> "f64"

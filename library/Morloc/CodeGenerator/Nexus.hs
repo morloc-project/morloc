@@ -24,24 +24,25 @@ import qualified Morloc.Language as ML
 import qualified Morloc.Monad as MM
 
 type FData =
-  ( MDoc -- pool call command, (e.g., "RScript pool.R 4 --")
+  ( [MDoc] -- pool call command arguments, (e.g., ["RScript", "pool.R", "4", "--"])
   , MDoc -- subcommand name
   , TypeP -- argument type
   )
 
 generate :: [NexusCommand] -> [(TypeP, Int)] -> MorlocMonad Script
 generate cs xs = do
+  config <- MM.ask
 
-  callNames <- mapM MM.metaName (map snd xs) |>> catMaybes |>> map pretty
+  callNames <- mapM (MM.metaName . snd) xs |>> catMaybes |>> map pretty
   let gastNames = map (pretty . commandName) cs
       names = callNames <> gastNames 
   fdata <- CM.mapM getFData xs -- [FData]
-  outfile <- fmap (maybe "nexus.pl" id) $ CMS.gets stateOutfile
+  outfile <- CMS.gets (fromMaybe "nexus.py" . stateOutfile)
   return $
     Script
       { scriptBase = outfile
-      , scriptLang = ML.PerlLang
-      , scriptCode = "." :/ File outfile (Code . render $ main names fdata cs)
+      , scriptLang = ML.Python3Lang
+      , scriptCode = "." :/ File outfile (Code . render $ main names fdata (pretty $ configLangPython3 config) cs)
       , scriptMake = [SysExe outfile]
       }
 
@@ -53,77 +54,57 @@ getFData (t, i) = do
       config <- MM.ask
       let lang = langOf t
       case MC.buildPoolCallBase config lang i of
-        (Just cmds) -> return (hsep cmds, pretty name', t)
+        (Just cmds) -> return (cmds, pretty name', t)
         Nothing ->
           MM.throwError . GeneratorError $
           "No execution method found for language: " <> ML.showLangName (fromJust lang)
-    (Nothing) -> MM.throwError . GeneratorError $ "No name in FData"
+    Nothing -> MM.throwError . GeneratorError $ "No name in FData"
 
-main :: [MDoc] -> [FData] -> [NexusCommand] -> MDoc
-main names fdata cdata =
-  [idoc|#!/usr/bin/env perl
+main :: [MDoc] -> [FData] -> MDoc -> [NexusCommand] -> MDoc
+main names fdata pythonExe cdata =
+  [idoc|#!/usr/bin/env #{pythonExe}
 
-use strict;
-use warnings;
-
-use JSON::XS;
-
-my $json = JSON::XS->new->canonical;
-
-&printResult(&dispatch(@ARGV));
-
-sub printResult {
-    my $result = shift;
-    print "$result";
-}
-
-sub dispatch {
-    if(scalar(@_) == 0){
-        &usage();
-    }
-
-    my $cmd = shift;
-    my $result = undef;
-
-    #{mapT names}
-
-    if($cmd eq '-h' || $cmd eq '-?' || $cmd eq '--help' || $cmd eq '?'){
-        &usage();
-    }
-
-    if(exists($cmds{$cmd})){
-        $result = $cmds{$cmd}(@_);
-    } else {
-        print STDERR "Command '$cmd' not found\n";
-        &usage();
-    }
-
-    return $result;
-}
+import json
+import subprocess
+import sys
 
 #{usageT fdata cdata}
 
 #{vsep (map functionCT cdata ++ map functionT fdata)}
 
+#{mapT names}
+
+def dispatch(cmd, *args):
+    if(cmd in ["-h", "--help", "-?", "?"]):
+        usage()
+    else:
+        command_table[cmd](*args)
+
+if __name__ == '__main__':
+    if len(sys.argv) == 1:
+        usage()
+    else:
+        cmd = sys.argv[1]
+        args = sys.argv[2:]
+        dispatch(cmd, *args)
 |]
 
-mapT names = [idoc|my %cmds = #{tupled (map mapEntryT names)};|]
+mapT names = [idoc|command_table = #{dict}|] where
+    dict = encloseSep "{" "}" "," (map mapEntryT names)
 
-mapEntryT n = [idoc|#{n} => \&call_#{n}|]
+mapEntryT n = [idoc|"#{n}" : call_#{n}|]
 
 usageT :: [FData] -> [NexusCommand] -> MDoc
 usageT fdata cdata =
   [idoc|
-sub usage{
-    print STDERR "The following commands are exported:\n";
+def usage():
+    print("The following commands are exported:")
     #{align $ vsep (map usageLineT fdata ++ map usageLineConst cdata)}
-    exit 0;
-}
 |]
 
 usageLineT :: FData -> MDoc
 usageLineT (_, name', t) = vsep
-  ( [idoc|print STDERR "  #{name'}\n";|]
+  ( [idoc|print("  #{name'}")|]
   : writeTypes (gtypeOf t)
   )
 
@@ -140,7 +121,7 @@ gtypeOf _ = UnkT (TV Nothing "?") -- this shouldn't happen
 
 usageLineConst :: NexusCommand -> MDoc
 usageLineConst cmd = vsep
-  ( [idoc|print STDERR "  #{pretty (commandName cmd)}\n";|]
+  ( [idoc|print("  #{pretty (commandName cmd)}")|]
   : writeTypes (commandType cmd) 
   )
 
@@ -151,59 +132,50 @@ writeTypes (FunT inputs output)
 writeTypes t = [writeType Nothing t]
 
 writeType :: Maybe Int -> Type -> MDoc
-writeType (Just i) t  = [idoc|print STDERR q{    param #{pretty i}: #{pretty t}}, "\n";|]
-writeType (Nothing) t = [idoc|print STDERR q{    return: #{pretty t}}, "\n";|]
+writeType (Just i) t = [idoc|print('''    param #{pretty i}: #{pretty t}''')|]
+writeType Nothing  t = [idoc|print('''    return: #{pretty t}''')|]
 
 
 functionT :: FData -> MDoc
-functionT (cmd, name', t) =
+functionT (cmd, subcommand, t) =
   [idoc|
-sub call_#{name'}{
-    if(scalar(@_) != #{pretty n}){
-        print STDERR "Expected #{pretty n} arguments to '#{name'}', given " . 
-        scalar(@_) . "\n";
-        exit 1;
-    }
-    return `#{poolcall}`;
-}
+def call_#{subcommand}(*args):
+    if len([*args]) != #{pretty n}:
+        sys.exit("Expected #{pretty n} arguments to '#{subcommand}', given " + str(len([*args])))
+    else:
+        subprocess.run(#{poolcallArgs})
 |]
   where
     n = nargs t
-    poolcall = hsep $ cmd : map argT [0 .. (n - 1)]
+    poolcallArgs = list $ map dquotes cmd <> ["*args"]
 
 functionCT :: NexusCommand -> MDoc
 functionCT (NexusCommand cmd _ json_str args subs) =
   [idoc|
-sub call_#{pretty cmd}{
-    if(scalar(@_) != #{pretty $ length args}){
-        print STDERR "Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " . scalar(@_) . "\n";
-        exit 1;
-    }
-    my $json_obj = $json->decode(q{#{json_str}});
-    #{align . vsep $ readArguments ++ replacements}
-    return ($json->encode($json_obj) . "\n");
-}
+def call_#{pretty cmd}(*args): 
+    if len([*args]) != #{pretty $ length args}:
+        sys.exit("Expected #{pretty $ length args} arguments to '#{pretty cmd}', given " + str(len([*args])))
+    else:
+        json_obj = json.loads('''#{json_str}''')
+        #{align . vsep $ readArguments ++ replacements}
+        print(json.dumps(json_obj, separators=(",", ":")))
 |]
   where
-    readArguments = zipWith readJsonArg args [1..]
+    readArguments = zipWith readJsonArg args [0..]
     replacements = map (uncurry3 replaceJson) subs
 
 replaceJson :: JsonPath -> MT.Text -> JsonPath -> MDoc
 replaceJson pathTo v pathFrom
-  = (access "$json_obj" pathTo)
+  = access "json_obj" pathTo
   <+> "="
-  <+> (access ([idoc|$json_#{pretty v}|]) pathFrom)
-  <> ";"
+  <+> access [idoc|json_#{pretty v}|] pathFrom
 
 access :: MDoc -> JsonPath -> MDoc
-access v ps = cat $ punctuate "->" (v : map pathElement ps)  
+access = foldl pathElement
 
-pathElement :: JsonAccessor -> MDoc
-pathElement (JsonIndex i) = brackets (pretty i)
-pathElement (JsonKey key) = braces (pretty key)
+pathElement :: MDoc -> JsonAccessor -> MDoc
+pathElement jsonObj (JsonIndex i) = jsonObj <> brackets (pretty i)
+pathElement jsonObj (JsonKey key) = jsonObj <> brackets (dquotes (pretty key))
 
-readJsonArg ::EVar -> Int -> MDoc
-readJsonArg (EV v) i = [idoc|my $json_#{pretty v} = $json->decode($ARGV[#{pretty i}]); |]
-
-argT :: Int -> MDoc
-argT i = "'$_[" <> pretty i <> "]'" 
+readJsonArg :: EVar -> Int -> MDoc
+readJsonArg (EV v) i = [idoc|json_#{pretty v} = json.loads([*args][#{pretty i}])|]

@@ -1,11 +1,11 @@
+module main (foo)
+
 import rustbase (id)
 
 source Rust from "person.h" ("PersonYay")
 
 table (Person a) = Person {name :: Str, info :: a}
 table Rust (Person a) = "PersonYay" {name :: "String", info :: a}
-
-export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

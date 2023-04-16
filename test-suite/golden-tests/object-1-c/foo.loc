@@ -1,11 +1,11 @@
+module main (foo)
+
 import cppbase (id, add)
 
 source Cpp from "person.h" ("PersonObj")
 
 object (Person a) = Person {name :: Str, info :: a}
 object Cpp (Person a) = "PersonObj" {name :: "std::string", info :: a}
-
-export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

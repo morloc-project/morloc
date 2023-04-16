@@ -1,3 +1,5 @@
+module main (siblings)
+
 import pybase (map, fst, snd)
 
 record Person = Person { name :: Str, age :: Int, parent :: Str }
@@ -7,4 +9,3 @@ siblings :: Str -> [(Str, Int)] -> [Person]
 siblings Py :: "str" -> [("str", "int")] -> [Person]
 siblings parent xs = map (\child -> { name = fst child, age = snd child, parent = parent }) xs
 
-export siblings

@@ -1,10 +1,10 @@
+module main (sub)
+
 -- 01n - import 1, declare n
 
 import pybase (sub)
 import cppbase (add, mul)
 import rbase (add, mul)
-
-export sub
 
 sub x y = add x (mul -1.0 y)
 sub x y = mul 1.0 (add x (mul -1.0 y))

@@ -1,3 +1,5 @@
+module main (sub)
+
 -- n00 - source n
 
 import pybase (add)
@@ -6,8 +8,7 @@ import rbase (add)
 source py from "foo.py" ("sub_loc" as sub)
 source r from "foo.R" ("sub_loc" as sub)
 
-export sub
+type py Real = "float"
+type R Real = "numeric" 
 
 sub :: Real -> Real -> Real
-sub py :: "float" -> "float" -> "float"
-sub r :: "numeric" -> "numeric" -> "numeric"

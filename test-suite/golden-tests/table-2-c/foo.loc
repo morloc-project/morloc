@@ -1,11 +1,11 @@
+module main (foo)
+
 import cppbase (id)
 
 source Cpp from "person.h" ("PersonYay")
 
 table (Person a) = Person {name :: Str, info :: a}
 table Cpp (Person a) = "PersonYay" {name :: "std::string", info :: a}
-
-export foo
 
 -- This function returns the input, but passes it though a language-specific id
 -- function, which forces deserialization and then serialization.

@@ -8,10 +8,11 @@ import Morloc.Namespace
 
 import qualified Morloc.Frontend.API as F
 import Morloc.CodeGenerator.Namespace (TypeP)
-import Morloc.Frontend.Desugar (desugar) 
+import Morloc.Frontend.Desugar (desugar)
 import Morloc.CodeGenerator.Generate (realityCheck, generate)
 import Morloc.ProgramBuilder.Build (buildProgram)
 import Morloc.Frontend.Treeify (treeify)
+import Morloc.Frontend.InferMissing (inferMissingTypes)
 
 typecheckFrontend
   :: Maybe Path
@@ -25,6 +26,8 @@ typecheckFrontend path code
   >>= desugar
   -- convert to Sanno
   >>= treeify
+  -- infer missing concrete types from general types
+  >>= inferMissingTypes
   -- add type annotations to sub-expressions and raise type errors
   >>= F.typecheck
 

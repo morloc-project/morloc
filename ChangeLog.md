@@ -15,7 +15,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] well tested core libraries
  - [ ] Replace recursive data structures with recursion schemes
 
-0.3x.0 [2023.xx.xx]
+0.4x.0 [2024.xx.xx]
 -------------------
 
  - [ ] typeclasses
@@ -24,18 +24,99 @@ handling for several very different languages (proofs-of-concept).
  - [ ] constraint checking
  - [ ] effect checking
  - [ ] limited inference of concrete type from general type
- - [ ] lambdas
  - [ ] Rust support
- - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
  - [ ] Add `uninstall` function to uninstall a module
- - [ ] Clean up error handling (remove unused error types)
  - [ ] Move exports to the module definition (as in Haskell)
- - [ ] Add `*` wildcard to exports and imports
+ - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+
+0.43.0 [2023.10.xx]
+-------------------
+
+ Styles
+
+ - [ ] add styles
+ - [ ] test C++ functions with `const` and pass-by-reference
+ - [ ] test mutation in python and C++ functions 
+ - [ ] test keyword and argument reordering in python and R
+
+ Module sugar
+
  - [ ] Add `import Foo hiding (...)` syntax
+
+ And a bit of cleaning
+
+ - [ ] simplify the serialization schema in C++ (I think the `schema` empty
+       expression can be removed)
+ - [ ] generate commented type expressions in the pool code 
+
+
+0.42.0 [2023.06.xx]
+-------------------
+
+ Before adding the more advanced features (typeclasses, algebraic types,
+ constraints, effects, extensible records) ensure that records, tables, and
+ objects are really working. Also add Haskell, this will be better test of
+ output type correctness than C++.
+
+ - [ ] resolve failure to check against some type sigs, for example: 
+
+   ```
+   g :: (a -> b) -> a
+   f :: a -> a
+   f x = g x
+   ```
+   Uncomment the "check signatures under supposed identity" unit test
+
+ - [ ] add Haskell support
+ - [ ] add record keyword aliases
+ - [ ] systematically test records, tables, and objects
+       - [ ] source functions that take each (this is easier, since C++ can use templates)
+       - [ ] source functions that return each
+       - [ ] cases where the same type is an object in one language and a
+             record in another 
+ - [ ] demo practical tables in Python, R, C++, and Haskell (e.g., numpy)
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
+ - [ ] Write and test full preludes for all supported languages
+ - [ ] Make more demos
+ - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
- - [ ] Allow module namespaces (e.g., `alice:math.complex`)
+
+0.41.0 [2023.04.xx]
+-------------------
+
+Language updates
+ * Add check to avoid infinite typechecker recursion
+ * Synthesize concrete types from general types when possible
+ * Improve exports
+   * Move exports to module list (as in Haskell)
+   * Add `*` wildcard to export every top-level named term or type
+   * Raise an error if a non-existing term is exported from a module
+ * Allow concrete (un)packers to vary in number of generic terms
+ * Set functions with empty inputs (e.g., `()`) to have empty lists of arguments
+ * Replace the `Null` literal term with `()`
+
+
+Package updates
+ * Default to c++17, rather than c++11
+ * Restructure library to avoid name conflicts with pre-existing packages
+ * Replace Perl nexus with Python nexus and remove Perl dependencies
+
+Better error messages and logs
+ * Resolve "shit output" error message (map index to export name)
+ * Tidy up the verbose diagnostics
+ * Print general and concrete types for typecheck with -r option
+ * Add multiple levels of verbosity (quiet by default)
+
+Bug fixes
+ * Typechecking bug in record access
+ * Fix bug allowing undefined things in module export lists
+ * Fix cousin module imports
+ * Fix unparameterized (un)packer serialization
+ * Fix error raised when a module exporting a type is compiled 
+ * Fix out of order record fields in nexus output
 
 0.40.0 [2023.02.04]
 -------------------

@@ -93,13 +93,18 @@ treeify d
          -- set counter for reindexing expressions in collect
          MM.setCounter $ maximum (map AST.maxIndex (DAG.nodes d)) + 1
 
-         let exports = [i | (i, _) <- AST.findExports e]
+         -- find all term exports (do not include type exports)
+         let exports = [(i, EV v) | (i, TermSymbol v) <- AST.findExports e]
 
-         -- store all exported indices in state
-         MM.modify (\s -> s {stateExports = exports})
+         -- - store all exported indices in state
+         -- - Add the export name to state. Failing to do so here, will lose
+         --   the name of terms that are exported but not defined, this leads
+         --   to cryptic error messages.
+         MM.modify (\s -> s { stateExports = map fst exports
+                            , stateName = Map.union (stateName s) (Map.fromList exports)})
 
          -- dissolve modules, imports, and sources, leaving behind only a tree for each term exported from main
-         mapM collect exports
+         mapM (collect . fst) exports
 
 
 
@@ -247,6 +252,8 @@ unifyTermTypes mv xs m0
       _ -> return $ TermTypes (Just e') [] []
 
   -- Should we even allow concrete terms with no type signatures?
+  -- Yes, their types may be inferrable by usage or (eventually) static analysis
+  -- of the source code.
   fc :: [(Source, Int)] -> MorlocMonad TermTypes
   fc srcs' = return $ TermTypes Nothing [(mv, [], Just (Idx i src)) | (src, i) <- srcs'] []
 
@@ -290,8 +297,12 @@ mergeTypeUs :: TypeU -> TypeU -> MorlocMonad TypeU
 mergeTypeUs t1@(VarU v1) t2@(VarU v2)
   | v1 == v2 = return (VarU v1)
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
-mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1) t2@(ExistU (TV l2 _) ps2 _)
-  | l1 == l2 = ExistU v <$> zipWithM mergeTypeUs ps1 ps2 <*> pure ds1
+mergeTypeUs t1@(ExistU v@(TV l1 _) ps1 ds1 rs1) t2@(ExistU (TV l2 _) ps2 _ rs2)
+  | l1 == l2
+    = ExistU v
+    <$> zipWithM mergeTypeUs ps1 ps2
+    <*> pure ds1
+    <*> mapM (\(k, x:xs) -> (,) k <$> foldM mergeTypeUs x xs) (groupSort (rs1 ++ rs2))
   | otherwise = MM.throwError $ IncompatibleGeneralType t1 t2 
 mergeTypeUs ExistU {} t = return t
 mergeTypeUs t ExistU {} = return t
@@ -446,7 +457,7 @@ collectSExpr (ExprI i e0) = (,) <$> f e0 <*> pure i
   f (LogE x) = return (LogS x)
   f (StrE x) = return (StrS x)
 
-  -- none of the following cases should every occur
+  -- none of the following cases should ever occur
   f (AnnE _ _) = error "impossible"
   f (ModE _ _) = error "impossible"
   f TypE {} = error "impossible"

@@ -1,19 +1,13 @@
 -- This should compile to exactly the same code as selection-2. Expect the
 -- Arithmetic module is in the same file.
 
-module Arithmetic
+module Arithmetic (add, mul, div, sub)
 
     import pybase  (add, mul, div, sub)
     import cppbase (add, mul, div, sub)
     import rbase   (add, mul, div, sub)
 
-    export add
-    export mul
-    export div 
-    export sub
-
-module Main
+module Main (foo)
 
     import Arithmetic (add)
-    export foo
     foo x y = add x (add y 42.0)

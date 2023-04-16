@@ -1,6 +1,10 @@
+module main (foo)
+
 import pybase (map)
 import rbase (neg)
-export foo
 
-foo Py :: ["float"] -> ["float"]
+type Py Real = "float"
+type Py (List a) = "list" a
+
+foo :: [Real] -> [Real]
 foo xs = map neg xs

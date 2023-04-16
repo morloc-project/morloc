@@ -19,6 +19,7 @@ module Morloc.Data.GMap
   , mapInnerKeys
   , mapKeys
   , mapVals
+  , mapValsM
   , yIsX
   ) where
 
@@ -29,6 +30,12 @@ import qualified Data.Set as Set
 
 mapVals :: (c -> c') -> GMap a b c -> GMap a b c'
 mapVals f (GMap x y) = GMap x (Map.map f y)
+
+mapValsM :: (Ord b, Monad m) => (c -> m c') -> GMap a b c -> m (GMap a b c')
+mapValsM f (GMap m1 m2) = do
+    let m2list = Map.toList m2
+    xs2 <- mapM (f . snd) m2list
+    return $ GMap m1 (Map.fromList (zip (map fst m2list) xs2))
 
 mapKeys :: (Ord a') => (a -> a') -> GMap a b c -> GMap a' b c
 mapKeys f (GMap x y) = GMap (Map.mapKeys f x) y
