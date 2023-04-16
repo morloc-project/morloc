@@ -525,12 +525,11 @@ evarname g prefix =
 enter :: MDoc -> MorlocMonad ()
 enter d = do
   depth <- MM.incDepth
-  insetSay $ pretty (replicate depth '-') <> ">" <+> d <> "\n"
+  insetSay $ "--" <> pretty depth <> "-->" <+> d
 
 insetSay :: MDoc -> MorlocMonad ()
 insetSay d = do
-  depth <- MM.getDepth
-  MM.sayVVV $ pretty (replicate depth ' ') <> ":" <+> d <> "\n"
+  MM.sayVVV $ " :" <+> d
 
 seeType :: TypeU -> MorlocMonad ()
 seeType t = insetSay $ pretty t
@@ -538,7 +537,7 @@ seeType t = insetSay $ pretty t
 leave :: MDoc -> MorlocMonad ()
 leave d = do
   depth <- MM.decDepth
-  insetSay $ "<" <> pretty (replicate (depth+1) '-') <+> d <> "\n"
+  insetSay $ "<--" <> pretty (depth+1) <> "--" <+> d
 
 seeGamma :: Gamma -> MorlocMonad ()
 seeGamma g = MM.sayVVV $ nest 4 $ "Gamma:" <> line <> vsep (map pretty (gammaContext g))

@@ -187,6 +187,7 @@ instance Pretty a => Pretty (Indexed a) where
 
 instance Pretty GammaIndex where
   pretty (VarG tv) = "VarG:" <+> pretty tv
+  pretty (ExistG tv [] [] []) = angles (pretty tv)
   pretty (ExistG tv ts ds rs)
     = "ExistG:"
     <+> pretty tv

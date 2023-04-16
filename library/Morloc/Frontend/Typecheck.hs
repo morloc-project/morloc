@@ -519,23 +519,21 @@ checkG' g x t = do
 
 synthE' i g x = do
   enter "synthE"
-  -- peak x
+  insetSay $ "synthesize type for: " <> peakSExpr x
   seeGamma g
-  r@(g', t, x') <- synthE i g x 
+  r@(g', t, _) <- synthE i g x 
   leave "synthE"
-  -- peak x'
   seeGamma g'
-  seeType t
+  insetSay $ "synthesized type = " <> pretty t
   return r
 
 checkE' i g x t = do
   enter "checkE"
-  -- peak x
-  seeType t
+  insetSay $ "check if expr: " <> peakSExpr x
+  insetSay $ "matches type: " <> pretty t
   seeGamma g
-  r@(g', t', x') <- checkE i g x t 
+  r@(g', t', _) <- checkE i g x t 
   leave "checkE"
-  -- peak x'
   seeType t'
   seeGamma g'
   return r
@@ -544,10 +542,24 @@ application' i g es t = do
   enter "application"
   seeGamma g
   seeType t
-  -- mapM_ peakGen es
-  r@(g',t',es') <- application i g es t
+  r@(g',t',_) <- application i g es t
   leave "application"
   seeGamma g'
   seeType t'
   -- mapM_ peakGen es'
   return r
+
+peakSExpr :: SExpr Int Many Int -> MDoc
+peakSExpr UniS = "UniS"
+peakSExpr (VarS v) = "VarS" <+> pretty v
+peakSExpr (AccS _ k) = "AccS" <> brackets (pretty k)
+peakSExpr (AppS _ xs) = "AppS" <+> "nargs=" <> pretty (length xs)
+peakSExpr (LamS vs _) = "LamS" <> tupled (map pretty vs)
+peakSExpr (LstS xs) = "LstS" <> "n=" <> pretty (length xs)
+peakSExpr (TupS xs) = "TupS" <> "n=" <> pretty (length xs)
+peakSExpr (NamS rs) = "NamS" <> encloseSep "{" "}" "," (map (pretty . fst) rs)
+peakSExpr (RealS x) = "RealS" <+> viaShow x
+peakSExpr (IntS x) = "IntS" <+> pretty x
+peakSExpr (LogS x) = "LogS" <+> pretty  x
+peakSExpr (StrS x) = "StrS" <+> pretty x
+peakSExpr (CallS src) = "CallS" <+> pretty src
