@@ -37,12 +37,12 @@ jobs:
       - name: "Set up R environment"
         run: |
           sudo apt-get install -y r-base
-          sudo apt-get install -y libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev
+          sudo apt-get install -y libgsl-dev # required for installation of morloc module math
           R -e 'remotes::install_github("morloc-project/rmorlocinternals", dependencies=TRUE)'
 
       - name: "Build Morloc"
         run: |
-          sudo apt-get install haskell-stack
+          curl -sSL https://get.haskellstack.org/ | sh
           stack upgrade
           stack install --fast
 
@@ -61,7 +61,6 @@ jobs:
           morloc install rbase
           morloc install pybase
           morloc install cppbase
-          # morloc install rustbase
           morloc install math
 
       - name: "Test morloc"
