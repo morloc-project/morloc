@@ -38,8 +38,7 @@ jobs:
         run: |
           sudo apt-get install -y r-base
           sudo apt-get install -y libcurl4-openssl-dev libharfbuzz-dev libfribidi-dev
-          R -e 'install.packages("devtools", repos="https://cloud.r-project.org")'
-          R -e 'devtools::install_github("morloc-project/rmorlocinternals", dependencies=TRUE)'
+          R -e 'remotes::install_github("morloc-project/rmorlocinternals", dependencies=TRUE)'
 
       - name: "Build Morloc"
         run: |
