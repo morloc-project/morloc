@@ -84,7 +84,13 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Haddock documentation
  - [ ] Describe the core data structures and algorithms
 
-0.41.0 [2023.04.xx]
+0.41.1 [2023.04.xx]
+-------------------
+
+ * Streamline github actions script
+ - [ ] Fix `morloc install` path download for core modules
+
+0.41.0 [2023.04.16]
 -------------------
 
 Language updates
