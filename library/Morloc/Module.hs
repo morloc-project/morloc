@@ -317,22 +317,27 @@ getFile x = do
 -- | Attempt to clone a package from github
 installGithubRepo ::
      String -- ^ the repo path ("<username>/<reponame>")
+  -> [String] -- ^ directory path (e.g., ["github"], or ["plain", "rbase"] for core)
   -> String -- ^ the url for github (e.g., "https://github.com/")
   -> MorlocMonad ()
-installGithubRepo repo url = do
+installGithubRepo repo dirPath url = do
   config <- MM.ask
-  let lib = Config.configLibrary config
-  let cmd = unwords ["git clone", url, MS.combine lib repo]
+  let path = foldl MS.combine (Config.configLibrary config) (dirPath <> [repo])
+      cmd = unwords ["git clone", url, path]
   MM.runCommand "installGithubRepo" (MT.pack cmd)
 
 -- | Install a morloc module
-installModule :: ModuleSource -> MorlocMonad ()
-installModule (GithubRepo repo) =
-  installGithubRepo repo ("https://github.com/" <> repo) -- repo has form "user/reponame"
-installModule (CoreGithubRepo name') = do
-  config <- MM.ask
-  installGithubRepo name' ("https://github.com/" <> configPlain config <> "/" <> name')
-installModule (LocalModule Nothing) =
+installModule
+    :: ModuleSource
+    -> Maybe Path -- plain path
+    -> MorlocMonad ()
+installModule (GithubRepo repo) _ =
+  installGithubRepo repo ["github"] ("https://github.com/" <> repo) -- repo has form "user/reponame"
+installModule (CoreGithubRepo name') (Just plain) = do
+  plainDir <- MM.asks configPlain
+  installGithubRepo name' ["plain", plain] ("https://github.com/" <> plainDir <> "/" <> name')
+installModule (LocalModule Nothing) _ =
   MM.throwError (NotImplemented "module installation from working directory")
-installModule (LocalModule (Just _)) =
+installModule (LocalModule (Just _)) _ =
   MM.throwError (NotImplemented "module installation from local directory")
+installModule _ _ = undefined

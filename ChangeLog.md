@@ -88,7 +88,7 @@ handling for several very different languages (proofs-of-concept).
 -------------------
 
  * Streamline github actions script
- - [ ] Fix `morloc install` path download for core modules
+ * Fix `morloc install` path download for core modules
 
 0.41.0 [2023.04.16]
 -------------------
