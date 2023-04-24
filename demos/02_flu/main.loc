@@ -73,6 +73,9 @@ import bio.db
 import base
   ( at        -- at :: [a] -> Int -> a
   , id
+  , map
+  , ne
+  , concat
   , filter
   , shard     -- shard :: Int -> [a] -> [[a]]
   , elem      -- elem :: a -> [a] -> Bool
@@ -94,12 +97,17 @@ import base
   )
 
 source Py from "analysis-functions.py"
-  ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
-  , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
-  , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
+  ( "parseRecord"
+  , "labelRef"
+  , "plotTree"
   )
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
+parseRecord :: Str -> (Meta, Sequence)
+labelRef :: Map Accession Clade -> Meta -> Meta
+plotTree :: Filename -> Tree n Real Meta -> ()
+
+
+-- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . classify
@@ -118,7 +126,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+-- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat
@@ -136,12 +144,8 @@ classify :: Tree () e Meta -> Tree Str e Meta
 classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
 classify = push . pullNode pullLeaf pullClade where
 
-  pullLeaf :: Meta -> Clade
-  pullLeaf Cpp :: Meta -> Clade
   pullLeaf leaf = leaf@clade
 
-  pullClade :: [Clade] -> Clade
-  pullClade Cpp :: [Clade] -> Clade
   pullClade xs
     = ifelse (eq (length seenClades) 1)
              (head seenClades) ""
@@ -149,5 +153,4 @@ classify = push . pullNode pullLeaf pullClade where
       seenClades = ( unique
                    . filter (ne 0 . lengthS)
                    ) xs
-
   push = mapChildWithParent id (ifelse (eq 0 (lengthS c)))
