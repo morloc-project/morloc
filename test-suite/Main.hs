@@ -16,6 +16,7 @@ main = do
       , unitTypeTests
       , typeOrderTests
       , typeAliasTests
+      , concreteTypeSynthesisTests
       , propertyTests
       , jsontype2jsonTests
       , whereTests

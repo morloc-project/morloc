@@ -7,3 +7,4 @@ import cppbase (sub)
 import rbase (sub)
 
 source py from "foo.py" ("sub_loc" as sub)
+sub Py :: "float" -> "float" -> "float"

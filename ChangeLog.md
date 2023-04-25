@@ -89,6 +89,8 @@ handling for several very different languages (proofs-of-concept).
 
  * Streamline github actions script
  * Fix `morloc install` path download for core modules
+ * Raise type error for untyped concrete term
+ * Fix bug in concrete type synthesis
 
 0.41.0 [2023.04.16]
 -------------------

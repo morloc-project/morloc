@@ -12,21 +12,18 @@ module UnitTypeTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
+  , concreteTypeSynthesisTests
   ) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Frontend.Parser
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Generate (realityCheck)
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
-import qualified Morloc.Data.DAG as MDD
 import Morloc (typecheck, typecheckFrontend)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
-import qualified Morloc.Frontend.API as F
 
 import qualified Data.Text as MT
 import qualified Data.Map as Map
@@ -740,6 +737,30 @@ whereTests =
             f
         |]
         int
+  ]
+
+
+concreteTypeSynthesisTests =
+  testGroup
+  "Test concrete type synthesis"
+  [ assertConcreteType
+      "Synth Int to py:int"
+      [r|
+      module m (foo)
+      source Py from "_" ("foo")
+      type Py Int = "int"
+      foo :: Int -> Int
+      |]
+      (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
+
+  , expectError
+      "Synth error raised if no type alias given"
+      (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]))
+      [r|
+      module m (foo)
+      source Py from "_" ("foo")
+      foo :: Int -> Int
+      |]
   ]
 
 orderInvarianceTests =
