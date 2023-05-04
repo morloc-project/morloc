@@ -1,4 +1,4 @@
-module flucase (classify, search, analysis)
+module flucase (search, classify, analysis)
 
 type Filename = Str 
 type Accession = Str
@@ -96,15 +96,23 @@ import base
   , readMap   -- readMap :: Filename -> Map key val
   )
 
+
 source Py from "analysis-functions.py"
   ( "parseRecord"
   , "labelRef"
-  , "plotTree"
   )
 
 parseRecord :: Str -> (Meta, Sequence)
+parseRecord Py :: Str -> (Meta, Sequence)
+
 labelRef :: Map Accession Clade -> Meta -> Meta
+labelRef Py :: Map Accession Clade -> Meta -> Meta
+
+
+source R from "plot-tree.R" ("plotTree")
+
 plotTree :: Filename -> Tree n Real Meta -> ()
+plotTree R :: Filename -> "phylo" n e l -> ()
 
 
 -- analysis :: Date -> Date -> Filename -> Filename -> ()
