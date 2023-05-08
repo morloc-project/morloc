@@ -53,6 +53,8 @@ handling for several very different languages (proofs-of-concept).
 0.42.0 [2023.06.xx]
 -------------------
 
+ * Fix the import of working directory modules
+
  Before adding the more advanced features (typeclasses, algebraic types,
  constraints, effects, extensible records) ensure that records, tables, and
  objects are really working. Also add Haskell, this will be better test of

@@ -71,7 +71,9 @@ findModule currentModuleM importModule = do
     (x:_) -> return x -- should shadowing raise a warning?
     [] ->
       MM.throwError . CannotLoadModule . render $
-        "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths)
+        "module" <+> squotes (pretty importModule) <+> "not found among the paths:" <+> list (map pretty allPaths) <> "\n" <>
+        "current module:" <+> viaShow currentModuleM <> "\n" <>
+        "import module:" <+> viaShow importModule
 
 -- | Give a module path (e.g. "/your/path/foo.loc") find the package metadata.
 -- It currently only looks for a file named "package.yaml" in the same folder
@@ -116,7 +118,12 @@ removePathSuffix xs ys
 
 
 -- | Find an ordered list of possible locations to search for a module
-getModulePaths :: Path -> Path -> Maybe (Path, MVar) -> MVar -> [Path]
+getModulePaths
+    :: Path -- ^ morloc default library path (e.g., "~/.morloc/src/morloc")
+    -> Path -- ^ morloc plain (e.g., "morloclib")
+    -> Maybe (Path, MVar) -- ^ the path and name of the current module (e.g., `Just ("foo.loc", MVar "bar")`)
+    -> MVar -- ^ the name of the module that is being imported
+    -> [Path]
 -- CASE #1
 --   If we are not in a module, then the import may be from the system or
 --   the local "working" directory.
@@ -159,7 +166,7 @@ getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> m
     -- CASE #2
     --   If we are in a module, and if the module name path and the import name
     --   path do no share a common root, then look for the import in the system
-    --   library.
+    --   library or local working directory.
     --
     -- Example:
     --   Give the following code in file /../src/foo/bar/baz/main.loc
@@ -176,6 +183,9 @@ getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> m
                 -- plain paths
                 , [lib, "plain", plain] <> init importName <> [last importName <> ".loc"]
                 , [lib, "plain", plain] <> importName <> ["main.loc"]
+                -- local path
+                , init importName <> [last importName <> ".loc"]
+                , importName <> ["main.loc"]
               ]
 
     -- CASE #3
@@ -193,6 +203,9 @@ getModulePaths lib plain (Just (MS.splitPath -> modulePath, splitModuleName -> m
     -- The only place where `foo.bif` may be found is:
     --    /../src/foo/bif/main.loc
     --
+    -- For now I do not allow local directory imports that mask the module. So
+    -- the import `foo.bif` in the module `foo.bar.baz` will not search for the
+    -- local directory "foo". Maybe I should allow this?
         -- _ -> error $ show (modulePath, importName, moduleName)
         _ -> let rootPath = if last modulePath == "main.loc"
                             -- e.g., `/../src/foo/bar/baz/main.loc` -> '/../src/'
