@@ -17,6 +17,7 @@ handling for several very different languages (proofs-of-concept).
 
 0.4x.0 [2024.xx.xx]
 -------------------
+ - [ ] add Haskell support
 
  - [ ] typeclasses
  - [ ] algebraic types
@@ -58,19 +59,18 @@ handling for several very different languages (proofs-of-concept).
  objects are really working. Also add Haskell, this will be better test of
  output type correctness than C++.
 
+ Type system bug fixes:
+ - [ ] resolve the recursive typedef issue described on 2023/05/09
+ - [ ] resolve "check signatures under supposed identity" unit test
+ - [ ] resolve "realization of ambiguous types" unit test
+
+ Module bug fixes:
  * Fix the import of working directory modules
- - [ ] Resolve the recursive typedef issue described on 2023/05/09
- - [ ] resolve failure to check against some type sigs, for example: 
 
-   ```
-   g :: (a -> b) -> a
-   f :: a -> a
-   f x = g x
-   ```
-   Uncomment the "check signatures under supposed identity" unit test
-
- - [ ] add Haskell support
+ New features:
  - [ ] add record keyword aliases
+
+ Testing and documentation:
  - [ ] systematically test records, tables, and objects
        - [ ] source functions that take each (this is easier, since C++ can use templates)
        - [ ] source functions that return each

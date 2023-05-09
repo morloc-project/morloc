@@ -648,6 +648,26 @@ typeAliasTests =
              f :: Foo4 -> B
         |]
         (fun [var "A", var "B"])
+
+    , assertConcreteType
+        "realization of ambiguous types"
+        [r|
+          source Cpp from "foo.hpp" ("g")
+      
+          g :: a -> a
+          g Py :: a -> a
+          g Cpp :: a -> a
+      
+          f :: Int -> Int 
+          f Py :: "int" -> "int"
+      
+          foo x = bar (f x)
+          bar x = g x
+      
+          foo 42
+        |]
+        (varp Python3Lang Nothing "int")
+
     -- , assertConcreteType
     --     "non-parametric, concrete type alias, reimported aliased"
     --     [r|
@@ -1786,15 +1806,15 @@ unitTypeTests =
         f :: a -> a
         f x = g x
         |]
-    -- , expectError
-    --     "check signatures under supposed identity"
-    --     (GeneralTypeError InfiniteRecursion)
-    --     [r|
-    --     module main (f)
-    --     g :: (a -> b) -> a
-    --     f :: a -> a
-    --     f x = g x
-    --     |]
+    , expectError
+        "check signatures under supposed identity"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: (a -> b) -> a
+        f :: a -> a
+        f x = g x
+        |]
 
     -- -- tags
     -- , exprEqual
