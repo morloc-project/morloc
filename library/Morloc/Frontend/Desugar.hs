@@ -37,6 +37,20 @@ desugar s
   >>= removeTypeImports -- Remove type imports and exports
   >>= addPackerMap -- add the packers to state
 
+-- | Check for infinitely expanding self-recursive types
+--
+-- There are cases were the defined term may appear on the right. For example:
+--
+--   type Py (Tree n e l) = "Tree" n e l
+--
+-- Here the general type Tree is mapped to the concrete type "Tree" in Python.
+-- The fact that the general and concrete names are the same is fine. They are
+-- different languages. But what about:
+--
+--   type (Tree n) = Node n [Tree n]
+--
+-- This type probably should be legal, but currently it is not supported. Which
+-- is why I need to raise an explicit error to avoid infinite loops.
 checkForSelfRecursion :: Ord k => DAG k e ExprI -> MorlocMonad (DAG k e ExprI)
 checkForSelfRecursion d = do
   MDD.mapNodeM (AST.checkExprI isExprSelfRecursive) d
@@ -44,7 +58,7 @@ checkForSelfRecursion d = do
   where
     -- A typedef is self-recursive if its name appears in its definition
     isExprSelfRecursive :: ExprI -> MorlocMonad ()
-    isExprSelfRecursive (ExprI _ (TypE v _ t))
+    isExprSelfRecursive (ExprI _ (TypE v@(TV Nothing _) _ t))
       | hasTerm v t = MM.throwError . SelfRecursiveTypeAlias $ v
       | otherwise = return ()
     isExprSelfRecursive _ = return ()
