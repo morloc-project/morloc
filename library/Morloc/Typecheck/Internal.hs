@@ -212,14 +212,14 @@ subtype t1@(NamU o1 v1 p1 ((k1,x1):rs1)) t2@(NamU o2 v2 p2 es2) g0
 --  g1[Ea] |- A <: Ea -| g2
 subtype a b@(ExistU _ [] _ _) g
   | langOf a /= langOf b = return g -- incomparable
-  | otherwise = occursCheck a b "InstantiateR" >> instantiate a b g
+  | otherwise = occursCheck b a "InstantiateR" >> instantiate a b g
 --  Ea not in FV(a)
 --  g1[Ea] |- Ea <=: A -| g2
 -- ----------------------------------------- <:InstantiateL
 --  g1[Ea] |- Ea <: A -| g2
 subtype a@(ExistU _ [] _ _) b g
   | langOf a /= langOf b = return g -- incomparable
-  | otherwise = occursCheck b a "InstantiateL" >> instantiate a b g
+  | otherwise = occursCheck a b "InstantiateL" >> instantiate a b g
 
 subtype a@(AppU _ _) b@(ExistU _ _ _ _) g
   | langOf a /= langOf b = return g -- incomparable

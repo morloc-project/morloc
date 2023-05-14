@@ -54,37 +54,34 @@ handling for several very different languages (proofs-of-concept).
 0.42.0 [2023.06.xx]
 -------------------
 
- Before adding the more advanced features (typeclasses, algebraic types,
- constraints, effects, extensible records) ensure that records, tables, and
- objects are really working. Also add Haskell, this will be better test of
- output type correctness than C++.
+ New features:
+ - [ ] add typeclasses
+ - [ ] add record keyword aliases
 
  Type system bug fixes:
  - [ ] resolve the recursive typedef issue described on 2023/05/09
  - [ ] resolve "check signatures under supposed identity" unit test
- - [ ] resolve "realization of ambiguous types" unit test
+ - * Resolve "realization of ambiguous types" unit test. The cause of this bug
+     was that the types in the subtype occur check were in the wrong order. So
+     instead of, for example, checking that 'a' is not in '(a, a)', I checked
+     the reverse case. This allowed recursive types to be defined.
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
 
  Module bug fixes:
  * Fix the import of working directory modules
 
- New features:
- - [ ] add record keyword aliases
-
  Testing and documentation:
+ - [ ] Complete flu demo
  - [ ] systematically test records, tables, and objects
        - [ ] source functions that take each (this is easier, since C++ can use templates)
        - [ ] source functions that return each
        - [ ] cases where the same type is an object in one language and a
              record in another 
- - [ ] demo practical tables in Python, R, C++, and Haskell (e.g., numpy)
- - [ ] Bring back the cut operation to the bidirectional typechecker
-       The current approach depends on renaming every term, which is ugly and
-       also clutters the diagnostics (gamma gets huge)
- - [ ] Write and test full preludes for all supported languages
- - [ ] Make more demos
+ - [ ] demo practical tables in Python (e.g., numpy), R, and C++ 
  - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
 
 0.41.1 [2023.04.xx]
 -------------------
