@@ -35,10 +35,10 @@ data TermOrigin = Declared ExprI | Sourced Source
 -- Generate integers for all positions in the tree, use these to map into a table that includes:
 --  * manual type annotations or signatures
 --  * inferred type annotations
-
--- all expressions are mapped to integers that serve as indices linking
--- expressions to their ultimate type annotations. The indices also match terms
--- to their signatures or (eventually) to locations in source code.
+--
+-- All expressions are mapped to integer indices linking expressions to their
+-- ultimate type annotations. The indices also match terms to their signatures
+-- and locations in source code.
 treeify
   :: DAG MVar [(EVar, EVar)] ExprI
   -> MorlocMonad [SAnno Int Many Int]

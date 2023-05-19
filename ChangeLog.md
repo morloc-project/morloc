@@ -59,12 +59,10 @@ handling for several very different languages (proofs-of-concept).
  - [ ] add record keyword aliases
 
  Type system bug fixes:
+ - * Resolve bug in occur check
+ - [ ] Resolve "realization of ambiguous types" unit test.
  - [ ] resolve the recursive typedef issue described on 2023/05/09
  - [ ] resolve "check signatures under supposed identity" unit test
- - * Resolve "realization of ambiguous types" unit test. The cause of this bug
-     was that the types in the subtype occur check were in the wrong order. So
-     instead of, for example, checking that 'a' is not in '(a, a)', I checked
-     the reverse case. This allowed recursive types to be defined.
  - [ ] Bring back the cut operation to the bidirectional typechecker
        The current approach depends on renaming every term, which is ugly and
        also clutters the diagnostics (gamma gets huge)

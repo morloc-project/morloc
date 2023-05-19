@@ -72,14 +72,11 @@ import bio.db
 
 import base
   ( at        -- at :: [a] -> Int -> a
-  , id
   , map
   , ne
   , concat
   , filter
   , shard     -- shard :: Int -> [a] -> [[a]]
-  , elem      -- elem :: a -> [a] -> Bool
-  , fst       -- fst :: (a, b) -> a
   , gt        -- gt :: Int -> Int -> Bool
   , eq        -- eq :: Int -> Int -> Bool
   , head      -- head :: [a] -> a
@@ -90,11 +87,12 @@ import base
   , lengthS   -- lengthS :: Str -> Int
   , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
   , sleep     -- sleep :: Real -> a -> a
-  , snd       -- snd :: (a, b) -> b
   , unique    -- unique :: [a] -> [a]
   , withSnds  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
   , readMap   -- readMap :: Filename -> Map key val
   )
+
+import cppbase (id)
 
 
 source Py from "analysis-functions.py"
@@ -149,7 +147,6 @@ search config refs query =
 
 
 classify :: Tree () e Meta -> Tree Str e Meta
-classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
 classify = push . pullNode pullLeaf pullClade where
 
   pullLeaf leaf = leaf@clade
