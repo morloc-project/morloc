@@ -51,21 +51,25 @@ handling for several very different languages (proofs-of-concept).
  - [ ] generate commented type expressions in the pool code 
 
 
+0.43.0 [2023.xx.xx]
+-------------------
+ - [ ] resolve issue from 2023/05/09 commit
+ - [ ] resolve issue from 2023/05/19 commit
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
+
 0.42.0 [2023.06.xx]
 -------------------
 
  New features:
  - [ ] add typeclasses
+ - [ ] add effects
  - [ ] add record keyword aliases
 
  Type system bug fixes:
  - * Resolve bug in occur check
- - [ ] Resolve "realization of ambiguous types" unit test.
- - [ ] resolve the recursive typedef issue described on 2023/05/09
- - [ ] resolve "check signatures under supposed identity" unit test
- - [ ] Bring back the cut operation to the bidirectional typechecker
-       The current approach depends on renaming every term, which is ugly and
-       also clutters the diagnostics (gamma gets huge)
+ - [ ] fix typechecking bug in flu demo
 
  Module bug fixes:
  * Fix the import of working directory modules
