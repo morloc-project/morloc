@@ -23,6 +23,8 @@ import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import Morloc.Frontend.PartialOrder ()
+-- import Morloc.Pretty
+-- import qualified Morloc.Data.Text as MT
 
 -- I don't need explicit convert functions, necessarily. The pack functions can
 -- be used to convert between values that are in the same language. Because
@@ -33,6 +35,7 @@ import Morloc.Frontend.PartialOrder ()
 typecheck
   :: SAnno (Indexed Type) One (Indexed Lang)
   -> MorlocMonad (SAnno Int One (Indexed TypeP))
+-- typecheck = error . MT.unpack . render . prettySAnno (const "") (const "")
 typecheck e0 = do
 
   insetSay "------ entering typechecker ------"

@@ -17,38 +17,45 @@ import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import qualified Morloc.Monad as MM
 import qualified Morloc.Data.GMap as GMap
+import qualified Data.Set as Set
 import Morloc.Frontend.Desugar (desugarType)
 
 inferMissingTypes :: a -> MorlocMonad a
 inferMissingTypes x = do
-    MM.modify infer
+    MM.get >>= infer >>= MM.put
     return x
 
--- I also need to synthesize stateAnnotations
+-- TODO: I also need to synthesize stateAnnotations
 
-infer :: MorlocState -> MorlocState 
+infer :: MorlocState -> MorlocMonad MorlocState
 infer s = do
-    s {stateSignatures = GMap.mapVals (processTermType (stateTypedefs s)) (stateSignatures s)}
+    sigs <- GMap.mapValsM (processTermType (stateTypedefs s)) (stateSignatures s)
+    return $ s {stateSignatures = sigs}
 
 
-processTermType :: GMap Int MVar (Map.Map TVar [([TVar], TypeU)]) -> TermTypes -> TermTypes
-processTermType (GMap _ typedefs) (TermTypes (Just g) cs ds) =
-    let cs' = [(mv, processTypes (Map.lookup mv typedefs) g es maySrc, maySrc) | (mv, es, maySrc) <- cs]
-    in TermTypes (Just g) cs' ds
-processTermType _ t = t 
+processTermType :: GMap Int MVar (Map.Map TVar [([TVar], TypeU)]) -> TermTypes -> MorlocMonad TermTypes
+processTermType (GMap _ typedefs) (TermTypes (Just g) cs ds) = do
+    case mapM (\(mv, es, maySrc) -> processTypes (Map.lookup mv typedefs) g es maySrc) cs of
+        (Left e) -> MM.throwError e
+        (Right ess') -> return $ TermTypes (Just g) (zipWith (\e (m, _, s) -> (m, e, s)) ess' cs) ds 
+processTermType _ t = return t 
 
 
-processTypes :: Maybe (Map.Map TVar [([TVar], TypeU)]) -> EType -> [EType] -> Maybe (Indexed Source) -> [EType]
+processTypes :: Maybe (Map.Map TVar [([TVar], TypeU)]) -> EType -> [EType] -> Maybe (Indexed Source) -> Either MorlocError [EType]
+processTypes Nothing g [] (Just (Idx _ src)) = Left (CannotSynthesizeConcreteType src (etype g))
 -- if there are no given concrete types, try to synthesize one from the general type
-processTypes (Just typedefs) g [] (Just (Idx _ (srcLang -> lang))) =
-    case synthesizeEType lang typedefs g of
-        (Left _) -> []
-        (Right e) -> [e]
-processTypes _ _ es _ = es
+processTypes (Just typedefs) g [] (Just (Idx _ src)) = return <$> synthesizeEType src typedefs g
+processTypes _ _ es _ = return es
 
 
-synthesizeEType :: Lang -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
-synthesizeEType lang typedefs (EType t0 ps cs) = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs where
+synthesizeEType :: Source -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
+synthesizeEType src@(srcLang -> lang) typedefs (EType t0 ps cs)
+  | canSynth = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
+  | otherwise = Left (CannotSynthesizeConcreteType src t0)
+  where
+    -- true if all free general variables in the type have aliases in the concrete language
+    canSynth = all isJust [Map.lookup (TV (Just lang) v) typedefs | VarU (TV _ v) <- Set.toList (free t0)]
+
     switchLang :: TypeU -> TypeU
     switchLang (VarU (TV _ v)) = VarU (TV (Just lang) v)
     switchLang (ForallU (TV _ v) t) = ForallU (TV (Just lang) v) (switchLang t)
@@ -63,4 +70,4 @@ synthesizeEType lang typedefs (EType t0 ps cs) = EType <$> desugarType typedefs 
     switchLang (NamU n (TV _ v) ts rs) =
         let ts' = map switchLang ts
             rs' = map (switchLang . snd) rs
-        in NamU n (TV (Just lang) v) ts' (zip (map fst rs) rs')
+        in NamU n (TV (Just lang) v) ts' (zip (map fst rs) rs') 

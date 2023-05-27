@@ -26,7 +26,7 @@ import Text.Megaparsec.Error (errorBundlePretty)
 import qualified Data.Map as Map
 
 
-runMorloc :: CliCommand -> IO () 
+runMorloc :: CliCommand -> IO ()
 runMorloc args = do
   config <- getConfig args
   let verbose = getVerbosity args
@@ -34,7 +34,7 @@ runMorloc args = do
     (CmdMake g) -> cmdMake g verbose config
     (CmdInstall g) -> cmdInstall g verbose config
     (CmdTypecheck g) -> cmdTypecheck g verbose config
-    
+
 
 -- | read the global morloc config file or return a default one
 getConfig :: CliCommand -> IO Config.Config
@@ -67,8 +67,8 @@ cmdInstall args verbosity conf =
     cmdInstall' = do
       let name' = installModuleName args
       if installGithub args
-        then Mod.installModule (Mod.GithubRepo name')
-        else Mod.installModule (Mod.CoreGithubRepo name')
+        then Mod.installModule (Mod.GithubRepo name') Nothing
+        else Mod.installModule (Mod.CoreGithubRepo name') (Just $ configPlain conf)
 
 -- | build a Morloc program, generating the nexus and pool files
 cmdMake :: MakeCommand -> Int -> Config.Config -> IO ()
@@ -87,7 +87,7 @@ cmdTypecheck args _ config = do
   if typecheckType args
     then case F.readType (unCode code) of
       (Left err') -> print (errorBundlePretty err')
-      (Right x) -> print x 
+      (Right x) -> print x
     else if typecheckRealize args
         then
             MM.runMorlocMonad
@@ -135,7 +135,7 @@ writeRealizedType state (SAnno (One (_, Idx _ p)) m) =
     where
         fname = maybe "_" pretty (Map.lookup m (stateName state))
 
- 
+
 -- data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 writeRast :: Int -> MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
 writeRast _ s (SAnno (One (e, Idx _ t)) gidx) = msg where
@@ -148,7 +148,7 @@ writeRast _ s (SAnno (One (e, Idx _ t)) gidx) = msg where
   writeRealizedTermC UniS = "Unit"
   writeRealizedTermC (VarS v) = pretty v
   writeRealizedTermC (AccS x k) = parens (writeRealizedTermG x) <> "@" <> pretty k
-  writeRealizedTermC (AppS x xs) = parens $ hsep (map writeRealizedTermG (x:xs)) 
+  writeRealizedTermC (AppS x xs) = parens $ hsep (map writeRealizedTermG (x:xs))
   writeRealizedTermC (LamS vs x) = parens $ "\\" <+> hsep (map pretty vs) <+> "->" <+> writeRealizedTermG x
   writeRealizedTermC (LstS xs) = list $ map writeRealizedTermG xs
   writeRealizedTermC (TupS xs) = tupled $ map writeRealizedTermG xs

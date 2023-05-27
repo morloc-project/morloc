@@ -12,21 +12,18 @@ module UnitTypeTests
   , whereTests
   , orderInvarianceTests
   , whitespaceTests
+  , concreteTypeSynthesisTests
   ) where
 
 import Morloc.Frontend.Namespace
-import Morloc.Frontend.Parser
 import Morloc.CodeGenerator.Namespace
-import Morloc.CodeGenerator.Generate (realityCheck)
 import Text.RawString.QQ
 import Morloc.CodeGenerator.Grammars.Common (jsontype2json)
 import qualified Morloc.Data.Doc as Doc
-import qualified Morloc.Data.DAG as MDD
 import Morloc (typecheck, typecheckFrontend)
 import qualified Morloc.Monad as MM
 import qualified Morloc.Frontend.PartialOrder as MP
 import qualified Morloc.Typecheck.Internal as MTI
-import qualified Morloc.Frontend.API as F
 
 import qualified Data.Text as MT
 import qualified Data.Map as Map
@@ -651,6 +648,26 @@ typeAliasTests =
              f :: Foo4 -> B
         |]
         (fun [var "A", var "B"])
+
+    -- , assertConcreteType
+    --     "realization of ambiguous types"
+    --     [r|
+    --       source Cpp from "foo.hpp" ("g")
+    --
+    --       g :: a -> a
+    --       g Py :: a -> a
+    --       g Cpp :: a -> a
+    --
+    --       f :: Int -> Int
+    --       f Py :: "int" -> "int"
+    --
+    --       foo x = bar (f x)
+    --       bar x = g x
+    --
+    --       foo 42
+    --     |]
+    --     (varp Python3Lang Nothing "int")
+
     -- , assertConcreteType
     --     "non-parametric, concrete type alias, reimported aliased"
     --     [r|
@@ -740,6 +757,30 @@ whereTests =
             f
         |]
         int
+  ]
+
+
+concreteTypeSynthesisTests =
+  testGroup
+  "Test concrete type synthesis"
+  [ assertConcreteType
+      "Synth Int to py:int"
+      [r|
+      module m (foo)
+      source Py from "_" ("foo")
+      type Py Int = "int"
+      foo :: Int -> Int
+      |]
+      (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
+
+  , expectError
+      "Synth error raised if no type alias given"
+      (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]))
+      [r|
+      module m (foo)
+      source Py from "_" ("foo")
+      foo :: Int -> Int
+      |]
   ]
 
 orderInvarianceTests =
@@ -1765,15 +1806,15 @@ unitTypeTests =
         f :: a -> a
         f x = g x
         |]
-    -- , expectError
-    --     "check signatures under supposed identity"
-    --     (GeneralTypeError InfiniteRecursion)
-    --     [r|
-    --     module main (f)
-    --     g :: (a -> b) -> a
-    --     f :: a -> a
-    --     f x = g x
-    --     |]
+    , expectError
+        "check signatures under supposed identity"
+        (GeneralTypeError InfiniteRecursion)
+        [r|
+        module main (f)
+        g :: (a -> b) -> a
+        f :: a -> a
+        f x = g x
+        |]
 
     -- -- tags
     -- , exprEqual

@@ -17,6 +17,7 @@ handling for several very different languages (proofs-of-concept).
 
 0.4x.0 [2024.xx.xx]
 -------------------
+ - [ ] add Haskell support
 
  - [ ] typeclasses
  - [ ] algebraic types
@@ -50,41 +51,48 @@ handling for several very different languages (proofs-of-concept).
  - [ ] generate commented type expressions in the pool code 
 
 
+0.43.0 [2023.xx.xx]
+-------------------
+ - [ ] resolve issue from 2023/05/09 commit
+ - [ ] resolve issue from 2023/05/19 commit
+ - [ ] Bring back the cut operation to the bidirectional typechecker
+       The current approach depends on renaming every term, which is ugly and
+       also clutters the diagnostics (gamma gets huge)
+
 0.42.0 [2023.06.xx]
 -------------------
 
- Before adding the more advanced features (typeclasses, algebraic types,
- constraints, effects, extensible records) ensure that records, tables, and
- objects are really working. Also add Haskell, this will be better test of
- output type correctness than C++.
-
- - [ ] resolve failure to check against some type sigs, for example: 
-
-   ```
-   g :: (a -> b) -> a
-   f :: a -> a
-   f x = g x
-   ```
-   Uncomment the "check signatures under supposed identity" unit test
-
- - [ ] add Haskell support
+ New features:
+ - [ ] add typeclasses
+ - [ ] add effects
  - [ ] add record keyword aliases
+
+ Type system bug fixes:
+ - [ ] fix typechecking bug in flu demo
+
+ Testing and documentation:
+ - [ ] Complete flu demo
  - [ ] systematically test records, tables, and objects
        - [ ] source functions that take each (this is easier, since C++ can use templates)
        - [ ] source functions that return each
        - [ ] cases where the same type is an object in one language and a
              record in another 
- - [ ] demo practical tables in Python, R, C++, and Haskell (e.g., numpy)
- - [ ] Bring back the cut operation to the bidirectional typechecker
-       The current approach depends on renaming every term, which is ugly and
-       also clutters the diagnostics (gamma gets huge)
- - [ ] Write and test full preludes for all supported languages
- - [ ] Make more demos
+ - [ ] demo practical tables in Python (e.g., numpy), R, and C++ 
  - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
- - [ ] Describe the core data structures and algorithms
 
-0.41.0 [2023.04.xx]
+0.41.1 [2023.05.26]
+-------------------
+
+ * Print nothing if "null" is returned
+ * Fix the import of working directory modules
+ * Resolve bug in occur check
+ * Streamline github actions script
+ * Fix `morloc install` path download for core modules
+ * Raise type error for untyped concrete term
+ * Fix bug in concrete type synthesis
+
+0.41.0 [2023.04.16]
 -------------------
 
 Language updates

@@ -7,5 +7,6 @@ import rbase (add, mul)
 import cppbase (add, mul, sub) -- import sub
 
 source py from "foo.py" ("sub_loc" as sub) -- source sub
+sub Py :: "float" -> "float" -> "float"
 
 sub x y = add x (mul -1.0 y) -- declare sub

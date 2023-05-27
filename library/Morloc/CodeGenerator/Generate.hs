@@ -131,8 +131,10 @@ generate gASTs rASTs = do
 
 
 -- | Choose a single concrete implementation. In the future, this component
--- will likely be the most complex component of the morloc compiler. It will
--- probably need to be implemented using an optimizing SMT solver.
+-- may be one of te more complex components of the morloc compiler. It will
+-- probably need to be implemented using an optimizing SMT solver. It will
+-- also need benchmarking data from all the implementations and possibly
+-- statistical info describing inputs.
 realize
   :: SAnno (Indexed Type) Many Int
   -> MorlocMonad (Either (SAnno (Indexed Type) One ())
@@ -143,6 +145,10 @@ realize s0 = do
     (Idx _ Nothing) -> makeGAST e |>> Left 
     (Idx _ _) -> Right <$> propagateDown e
   where
+
+  -- | Depth first pass calculating scores for each language. Alternates with
+  -- scoresSExpr.
+  --
   scoreSAnno
     :: [Lang]
     -> SAnno (Indexed Type) Many Int
@@ -151,6 +157,8 @@ realize s0 = do
     xs' <- mapM (scoreExpr langs) xs
     return (SAnno (Many xs') t)
 
+  -- | Alternates with scoresSAnno, finds the best score for each language at
+  -- application nodes.
   scoreExpr
     :: [Lang]
     -> (SExpr (Indexed Type) Many Int, Int)
@@ -303,7 +311,7 @@ realize s0 = do
   minPairs = map (second minimum) . groupSort
 
   propagateDown
-    ::             SAnno (Indexed Type) One (Indexed (Maybe Lang))
+    ::              SAnno (Indexed Type) One (Indexed (Maybe Lang))
     -> MorlocMonad (SAnno (Indexed Type) One (Indexed        Lang))
   propagateDown (SAnno (One (_, Idx _ Nothing)) _) = MM.throwError . CallTheMonkeys $ "Nothing is not OK"
   propagateDown e@(SAnno (One (_, Idx _ (Just lang0))) _) = f lang0 e where

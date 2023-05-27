@@ -18,6 +18,7 @@ import Morloc.Data.Doc
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Morloc.Data.GMap as GMap
 import qualified Morloc.Monad as MM
+-- import qualified Morloc.Data.Text as MT
 
 import qualified Control.Monad.State as CMS
 import qualified Data.Map as Map
@@ -31,7 +32,7 @@ import qualified Data.Map as Map
 typecheck
   :: [SAnno Int Many Int]
   -> MorlocMonad [SAnno (Indexed TypeU) Many Int]
--- typecheck xs = error . MT.unpack . render . vsep . map (prettySAnno viaShow viaShow) $ xs
+-- typecheck = error . MT.unpack . render . vsep . map (prettySAnno (const "") (const ""))
 typecheck = mapM run where
     run :: SAnno Int Many Int -> MorlocMonad (SAnno (Indexed TypeU) Many Int)
     run e0 = do

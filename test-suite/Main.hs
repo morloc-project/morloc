@@ -16,6 +16,7 @@ main = do
       , unitTypeTests
       , typeOrderTests
       , typeAliasTests
+      , concreteTypeSynthesisTests
       , propertyTests
       , jsontype2jsonTests
       , whereTests
@@ -25,8 +26,6 @@ main = do
       , subtypeTests
 
       , golden "type-synthesis" "type-synthesis"
-
-      , golden "import-1" "import-1"
 
       , golden "argument-form-1-c" "argument-form-1-c"
       , golden "argument-form-1-py" "argument-form-1-py"

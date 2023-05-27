@@ -1,4 +1,4 @@
-module flucase (classify, search, analysis)
+module flucase (search, classify, analysis)
 
 type Filename = Str 
 type Accession = Str
@@ -72,11 +72,11 @@ import bio.db
 
 import base
   ( at        -- at :: [a] -> Int -> a
-  , id
+  , map
+  , ne
+  , concat
   , filter
   , shard     -- shard :: Int -> [a] -> [[a]]
-  , elem      -- elem :: a -> [a] -> Bool
-  , fst       -- fst :: (a, b) -> a
   , gt        -- gt :: Int -> Int -> Bool
   , eq        -- eq :: Int -> Int -> Bool
   , head      -- head :: [a] -> a
@@ -87,19 +87,33 @@ import base
   , lengthS   -- lengthS :: Str -> Int
   , onFst     -- onFst :: (a -> a') -> (a, b) -> (a', b)
   , sleep     -- sleep :: Real -> a -> a
-  , snd       -- snd :: (a, b) -> b
   , unique    -- unique :: [a] -> [a]
   , withSnds  -- withVals :: ([a] -> [b]) -> [(c, a)] -> [(c, b)]
   , readMap   -- readMap :: Filename -> Map key val
   )
 
+import cppbase (id)
+
+
 source Py from "analysis-functions.py"
-  ( "parseRecord"   -- parseRecord :: Str -> (Meta, Sequence)
-  , "labelRef"      -- labelRef :: Map Accession Clade -> Meta -> Meta
-  , "plotTree"      -- plotTree :: Filename -> Tree n Real Meta -> ()
+  ( "parseRecord"
+  , "labelRef"
   )
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
+parseRecord :: Str -> (Meta, Sequence)
+parseRecord Py :: Str -> (Meta, Sequence)
+
+labelRef :: Map Accession Clade -> Meta -> Meta
+labelRef Py :: Map Accession Clade -> Meta -> Meta
+
+
+source R from "plot-tree.R" ("plotTree")
+
+plotTree :: Filename -> Tree n Real Meta -> ()
+plotTree R :: Filename -> "phylo" n e l -> ()
+
+
+-- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . classify
@@ -118,7 +132,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+-- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat
@@ -133,15 +147,10 @@ search config refs query =
 
 
 classify :: Tree () e Meta -> Tree Str e Meta
-classify Cpp :: Tree () e Meta -> Tree "std::string" e Meta
 classify = push . pullNode pullLeaf pullClade where
 
-  pullLeaf :: Meta -> Clade
-  pullLeaf Cpp :: Meta -> Clade
   pullLeaf leaf = leaf@clade
 
-  pullClade :: [Clade] -> Clade
-  pullClade Cpp :: [Clade] -> Clade
   pullClade xs
     = ifelse (eq (length seenClades) 1)
              (head seenClades) ""
@@ -149,5 +158,4 @@ classify = push . pullNode pullLeaf pullClade where
       seenClades = ( unique
                    . filter (ne 0 . lengthS)
                    ) xs
-
   push = mapChildWithParent id (ifelse (eq 0 (lengthS c)))

@@ -117,7 +117,8 @@ prettyTypeU (AppU t ts) = hsep $ map parenTypeU (t:ts) where
     parenTypeU t'@(AppU _ _) = parens $ prettyTypeU t'
     parenTypeU t' = prettyTypeU t'
 prettyTypeU (NamU o n ps rs)
-    = block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
+    = parens
+    $ block 4 (viaShow o <+> pretty n <> encloseSep "<" ">" "," (map pretty ps))
               (vsep [pretty k <+> "::" <+> prettyTypeU x | (k, x) <- rs])
 
 instance Pretty UnresolvedPacker where

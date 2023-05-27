@@ -97,6 +97,10 @@ instance Pretty MorlocError where
   pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
   pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
   pretty TooManyRealizations = "TooManyRealizations"
+  pretty (CannotSynthesizeConcreteType src t)
+    = "Cannot synthesize" <+> pretty (srcLang src) <+>
+      "type for" <+> squotes (pretty (srcAlias src)) <+>
+      "from general type:" <+> parens (pretty t)
 
 instance Pretty TypeError where
   pretty (SubtypeError t1 t2 msg)

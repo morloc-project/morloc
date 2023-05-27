@@ -472,6 +472,8 @@ data MorlocError
   | ConflictingSignatures
   | CompositionsMustBeGeneral
   | IllegalConcreteAnnotation
+  -- type synthesis errors
+  | CannotSynthesizeConcreteType Source TypeU
 
 data PackageMeta =
   PackageMeta
