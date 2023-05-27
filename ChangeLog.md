@@ -68,11 +68,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] add record keyword aliases
 
  Type system bug fixes:
- - * Resolve bug in occur check
  - [ ] fix typechecking bug in flu demo
-
- Module bug fixes:
- * Fix the import of working directory modules
 
  Testing and documentation:
  - [ ] Complete flu demo
@@ -85,9 +81,12 @@ handling for several very different languages (proofs-of-concept).
  - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
 
-0.41.1 [2023.04.xx]
+0.41.1 [2023.05.26]
 -------------------
 
+ * Print nothing if "null" is returned
+ * Fix the import of working directory modules
+ * Resolve bug in occur check
  * Streamline github actions script
  * Fix `morloc install` path download for core modules
  * Raise type error for untyped concrete term
