@@ -421,5 +421,6 @@ if __name__ == '__main__':
 
     result = f(*sys.argv[2:])
 
-    print(result)
+    if result != "null":
+        print(result)
 |]

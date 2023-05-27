@@ -860,7 +860,9 @@ int main(int argc, char * argv[])
     #{serialType} result;
     cmdID = std::stoi(argv[1]);
     #{dispatch}
-    std::cout << result << std::endl;
+    if(result != "null"){
+        std::cout << result << std::endl;
+    }
     return 0;
 }
 |]

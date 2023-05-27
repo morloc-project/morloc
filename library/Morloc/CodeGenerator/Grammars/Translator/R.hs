@@ -412,7 +412,9 @@ if(length(args) == 0){
   if(exists(f_str)){
     f <- eval(parse(text=paste0("m", cmdID)))
     result <- do.call(f, args[-1])
-    cat(result, "\n")
+    if(result != "null"){
+        cat(result, "\n")
+    }
   } else {
     cat("Could not find manifold '", cmdID, "'\n", file=stderr())
   }
