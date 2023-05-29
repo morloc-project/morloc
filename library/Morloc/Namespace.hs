@@ -473,7 +473,7 @@ data MorlocError
   | CompositionsMustBeGeneral
   | IllegalConcreteAnnotation
   -- type synthesis errors
-  | CannotSynthesizeConcreteType Source TypeU
+  | CannotSynthesizeConcreteType Source TypeU [Text]
 
 data PackageMeta =
   PackageMeta

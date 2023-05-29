@@ -97,10 +97,15 @@ instance Pretty MorlocError where
   pretty IllegalConcreteAnnotation = "IllegalConcreteAnnotation"
   pretty (DagMissingKey msg) = "DagMissingKey: " <> pretty msg
   pretty TooManyRealizations = "TooManyRealizations"
-  pretty (CannotSynthesizeConcreteType src t)
+  pretty (CannotSynthesizeConcreteType src t [])
     = "Cannot synthesize" <+> pretty (srcLang src) <+>
       "type for" <+> squotes (pretty (srcAlias src)) <+>
       "from general type:" <+> parens (pretty t)
+  pretty (CannotSynthesizeConcreteType src t vs)
+    = pretty (CannotSynthesizeConcreteType src t vs) <> "\n" <>
+      "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
+      "  Are you missing type alias imports?"
+
 
 instance Pretty TypeError where
   pretty (SubtypeError t1 t2 msg)

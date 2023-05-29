@@ -42,7 +42,7 @@ processTermType _ t = return t
 
 
 processTypes :: Maybe (Map.Map TVar [([TVar], TypeU)]) -> EType -> [EType] -> Maybe (Indexed Source) -> Either MorlocError [EType]
-processTypes Nothing g [] (Just (Idx _ src)) = Left (CannotSynthesizeConcreteType src (etype g))
+processTypes Nothing g [] (Just (Idx _ src)) = Left (CannotSynthesizeConcreteType src (etype g) [])
 -- if there are no given concrete types, try to synthesize one from the general type
 processTypes (Just typedefs) g [] (Just (Idx _ src)) = return <$> synthesizeEType src typedefs g
 processTypes _ _ es _ = return es
@@ -50,11 +50,13 @@ processTypes _ _ es _ = return es
 
 synthesizeEType :: Source -> Map.Map TVar [([TVar], TypeU)] -> EType -> Either MorlocError EType
 synthesizeEType src@(srcLang -> lang) typedefs (EType t0 ps cs)
-  | canSynth = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
-  | otherwise = Left (CannotSynthesizeConcreteType src t0)
+  | null unaliasedTerms = EType <$> desugarType typedefs (switchLang t0) <*> pure ps <*> pure cs
+  | otherwise = Left (CannotSynthesizeConcreteType src t0 unaliasedTerms)
   where
-    -- true if all free general variables in the type have aliases in the concrete language
-    canSynth = all isJust [Map.lookup (TV (Just lang) v) typedefs | VarU (TV _ v) <- Set.toList (free t0)]
+    -- list of general variables in the type that do not have concrete type aliases
+    unaliasedTerms = filter (\v -> not $ Map.member (TV (Just lang) v) typedefs) [v | VarU (TV _ v) <- Set.toList (free t0)]
+
+
 
     switchLang :: TypeU -> TypeU
     switchLang (VarU (TV _ v)) = VarU (TV (Just lang) v)

@@ -775,7 +775,7 @@ concreteTypeSynthesisTests =
 
   , expectError
       "Synth error raised if no type alias given"
-      (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]))
+      (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
       [r|
       module m (foo)
       source Py from "_" ("foo")
