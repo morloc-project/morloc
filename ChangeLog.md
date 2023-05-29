@@ -61,7 +61,6 @@ handling for several very different languages (proofs-of-concept).
 
 0.42.0 [2023.06.xx]
 -------------------
-
  New features:
  - [ ] add typeclasses
  - [ ] add effects
@@ -80,6 +79,7 @@ handling for several very different languages (proofs-of-concept).
  - [ ] demo practical tables in Python (e.g., numpy), R, and C++ 
  - [ ] Improve the error messages, add line numbers to errors
  - [ ] Haddock documentation
+
 
 0.41.1 [2023.05.26]
 -------------------
