@@ -461,8 +461,8 @@ instance Pretty (ExprM f) where
     prettyRecordPVar _ = "<UNKNOWN RECORD>"
 
 instance Pretty PVar where
-  pretty (PV _ (Just g) t) = parens (pretty g <+> pretty t)
-  pretty (PV _ Nothing t) = parens ("*" <+> pretty t)
+  pretty (PV lang (Just g) t) = parens (pretty g <+> "|" <+> pretty t <> "@" <> pretty lang)
+  pretty (PV lang Nothing t) = parens ("*" <+> "|" <+> pretty t <> "@" <> pretty lang)
 
 instance Pretty TypeP where
   pretty = pretty . typeOf
