@@ -102,7 +102,7 @@ instance Pretty MorlocError where
       "type for" <+> squotes (pretty (srcAlias src)) <+>
       "from general type:" <+> parens (pretty t)
   pretty (CannotSynthesizeConcreteType src t vs)
-    = pretty (CannotSynthesizeConcreteType src t vs) <> "\n" <>
+    = pretty (CannotSynthesizeConcreteType src t []) <> "\n" <>
       "  Cannot resolve concrete types for these general types:" <+> list (map pretty vs) <> "\n" <>
       "  Are you missing type alias imports?"
 
