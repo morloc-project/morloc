@@ -21,7 +21,9 @@ import Morloc.CodeGenerator.Internal
 import Morloc.Typecheck.Internal
 import Morloc.Data.Doc
 import qualified Morloc.Monad as MM
+import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
+import qualified Data.Map as Map
 import Morloc.Frontend.PartialOrder ()
 -- import Morloc.Pretty
 -- import qualified Morloc.Data.Text as MT
@@ -59,10 +61,95 @@ typecheck e0 = do
   seeGamma g2
   insetSay $ pretty t
   insetSay "---------------^-----------------"
+
+  insetSay "--- substituting general aliases ---"
+  (g3, e3) <- substituteGeneralAliases g2 e2 
+  seeGamma g3
+
   insetSay "--- weaving ---"
-  w <- weaveAndResolve (applyCon g2 (mapSAnno id (fmap normalizeType) e2))
+  w <- weaveAndResolve (applyCon g3 (mapSAnno id (fmap normalizeType) e3))
   insetSay "--- weaving done ---"
   return w
+
+substituteGeneralAliases :: Gamma -> SAnno (Indexed Type) One (Indexed TypeU) -> MorlocMonad (Gamma, SAnno (Indexed Type) One (Indexed TypeU))
+substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
+    -- [(TVar, Type)]
+    -- The TVar is the existential name (something wonky and computer generated)
+    -- and Type is the general type
+    let existentials = unique (s e0)
+
+
+    -- [ (TV (Just CppLang) "n_e0_x3", VarT (TV Nothing "Int"))
+    -- , (TV (Just CppLang) "o_4",     VarT (TV Nothing "Str"))]
+    -- error $ show existentials
+
+    -- typedefs :: Map Text [TypeU]
+    -- This is a map from alias (e.g., "Map") to concrete type (e.g., "dict a b")
+    typedefs <- MM.get |>>
+                stateTypedefs |>>
+                (\ (GMap a b) -> fromJust . fromJust $ Map.lookup <$> Map.lookup i0 a <*> pure b) |>>
+                Map.map (map snd) |>>
+                Map.filterWithKey (\v _ -> langOf v == langOf t0) |>>
+                Map.mapKeys (\(TV _ v) -> v)
+
+    -- substitute all the existentials that have definitions
+    g1 <- mapM (synthesizeTypeFrom typedefs . snd) existentials |>> zip (map fst existentials) |>> foldl solve g0 
+
+    return (g1, applyCon g1 e0)
+
+    where
+
+    s (SAnno (One (e, Idx _ concreteType)) (Idx _ generalType)) = findExistentials concreteType generalType <> c e
+
+    findExistentials :: TypeU -> Type -> [(TVar, Type)]
+    findExistentials (ExistU v [] _ _) t = [(v, t)]
+    findExistentials (ExistU v ts1 _ _) (AppT t ts2) = (v, t) : concat (zipWith findExistentials ts1 ts2)
+    findExistentials t1@(ForallU _ _) t2 = error . MT.unpack . render $ "Did not expect a qualified term down here:" <+> pretty t1 <+> pretty t2
+    findExistentials (FunU ts1 t1) (FunT ts2 t2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
+    findExistentials (AppU t1 ts1) (AppT t2 ts2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
+    findExistentials (NamU _ _ _ rs1) (NamT _ _ _ rs2) = concat (zipWith findExistentials (map snd rs1) (map snd rs2))
+    findExistentials _ _ = []
+    -- -- FIXME here, or somewhere, we ought to 
+    -- findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
+
+    c (AccS e _) = s e
+    c (AppS e es) = s e ++ concatMap s es
+    c (LamS _ e) = s e
+    c (LstS es) = concatMap s es
+    c (TupS es) = concatMap s es
+    c (NamS rs) = concatMap (s . snd) rs
+    c _ = [] 
+
+    solve :: Gamma -> (TVar, Maybe Type) -> Gamma
+    solve g (_, Nothing) = g
+    solve g (v, Just t) = case access1 v (gammaContext g) of
+        (Just (rs, _, ls)) -> g { gammaContext = rs <> (SolvedG v (type2typeu t) : ls) }
+        Nothing -> g
+
+
+synthesizeTypeFrom :: Map.Map MT.Text [TypeU] -> Type -> MorlocMonad (Maybe Type)
+synthesizeTypeFrom _ (UnkT _) = return Nothing
+synthesizeTypeFrom typedef (VarT (TV _ v)) = case Map.lookup v typedef of
+    (Just []) -> return Nothing
+    (Just (t:_)) -> return $ Just (typeOf t)
+    _ -> return Nothing
+synthesizeTypeFrom typedef (FunT xs o) = do
+    xs' <- mapM (synthesizeTypeFrom typedef) xs |>> sequence
+    o' <- synthesizeTypeFrom typedef o
+    return $ FunT <$> xs' <*> o'
+synthesizeTypeFrom typedef (AppT x ps) = do
+    x' <- synthesizeTypeFrom typedef x
+    ps' <- mapM (synthesizeTypeFrom typedef) ps |>> sequence
+    return $ AppT <$> x' <*> ps'
+synthesizeTypeFrom typedef (NamT o v ts rs) = do
+    x' <- synthesizeTypeFrom typedef (VarT v)
+    ts' <- mapM (synthesizeTypeFrom typedef) ts |>> sequence
+    xs' <- mapM (synthesizeTypeFrom typedef . snd) rs |>> sequence
+    case x' of 
+        (Just (VarT v')) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
+        _ -> return Nothing
+
+
 
 -- | Load the known concrete types into the tree. This is all the information
 -- necessary for concrete type checking.

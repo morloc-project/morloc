@@ -1,6 +1,7 @@
 module flucase (search, classify, analysis)
 
-type Filename = Str 
+import conventions (Str, Filename, Real, Unit, Map, Tuple2)
+
 type Accession = Str
 type Clade = Str 
 type StrainName = Str
@@ -10,7 +11,6 @@ type Label = Str
 type Date = Str
 type Query = Str
 
-type Py Filename = "str"
 type Py Accession = "str"
 type Py Clade = "str"
 type Py StrainName = "str"
@@ -20,7 +20,6 @@ type Py Label = "str"
 type Py Date = "str"
 type Py Query = "str"
 
-type Cpp Filename = "std::string" 
 type Cpp Accession = "std::string"
 type Cpp Clade = "std::string" 
 type Cpp StrainName = "std::string"
@@ -29,6 +28,15 @@ type Cpp EntrezQuery = "std::string"
 type Cpp Label = "std::string"
 type Cpp Date = "std::string"
 type Cpp Query = "std::string"
+
+type R Accession = "character"
+type R Clade = "character" 
+type R StrainName = "character"
+type R Sequence = "character"
+type R EntrezQuery = "character"
+type R Label = "character"
+type R Date = "character"
+type R Query = "character"
 
 record Meta = Meta
   { accession :: Accession
@@ -60,7 +68,8 @@ import bio.algo
   )
 
 import bio.tree
-  ( treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
+  ( Tree
+  , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
   , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   )
@@ -101,19 +110,16 @@ source Py from "analysis-functions.py"
   )
 
 parseRecord :: Str -> (Meta, Sequence)
-parseRecord Py :: Str -> (Meta, Sequence)
 
 labelRef :: Map Accession Clade -> Meta -> Meta
-labelRef Py :: Map Accession Clade -> Meta -> Meta
 
 
 source R from "plot-tree.R" ("plotTree")
 
 plotTree :: Filename -> Tree n Real Meta -> ()
-plotTree R :: Filename -> "phylo" n e l -> ()
 
 
--- analysis :: Date -> Date -> Filename -> Filename -> ()
+analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . classify
@@ -132,7 +138,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
--- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat

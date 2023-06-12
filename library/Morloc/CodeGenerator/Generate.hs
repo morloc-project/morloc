@@ -1019,7 +1019,9 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     MM.sayVVV $ "express' VarS" <+> parens (pretty v) <+> "::" <+> pretty c
     case [i | (PreArgument i v' _) <- rs, v == v'] of
       [r] -> return $ BndVarM (Serial c) r
-      rs' -> MM.throwError . OtherError . render $ "Expected VarS to match exactly one argument, found:" <+> list (map pretty rs')
+      rs' -> MM.throwError . OtherError . render
+          $ "Expected VarS" <+> dquotes (pretty v) <+>
+            "of type" <+> parens (pretty c) <+> "to match exactly one argument, found:" <+> list (map pretty rs')
 
   -- primitives
   express' _ _ (SAnno (One (e@(RealS x), (Idx _ c, _))) _) = peak e >> return (RealM (Native c) x)

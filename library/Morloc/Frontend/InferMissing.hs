@@ -32,7 +32,6 @@ infer s = do
     sigs <- GMap.mapValsM (processTermType (stateTypedefs s)) (stateSignatures s)
     return $ s {stateSignatures = sigs}
 
-
 processTermType :: GMap Int MVar (Map.Map TVar [([TVar], TypeU)]) -> TermTypes -> MorlocMonad TermTypes
 processTermType (GMap _ typedefs) (TermTypes (Just g) cs ds) = do
     case mapM (\(mv, es, maySrc) -> processTypes (Map.lookup mv typedefs) g es maySrc) cs of

@@ -130,7 +130,7 @@ writeTypecheckOutput _ _ = "I don't know how to be that verbose"
 writeRealizedType :: MorlocState -> SAnno Int One (Indexed TypeP) -> MDoc
 writeRealizedType state (SAnno (One (_, Idx _ p)) m) =
     let c = fname <+> maybe "_" pretty (langOf p) <+> "::" <+> pretty p
-        g = fname <+> "::" <+> pretty (generalTypeOf p)
+        g = fname <+> "::" <+> maybe "undefined" pretty (generalTypeOf p)
     in c <> "\n" <> g
     where
         fname = maybe "_" pretty (Map.lookup m (stateName state))
