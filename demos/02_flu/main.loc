@@ -152,7 +152,7 @@ search config refs query =
   ) query
 
 
-classify :: Tree () e Meta -> Tree Str e Meta
+-- classify :: Tree n e Meta -> Tree Str e Meta
 classify = push . pullNode pullLeaf pullClade where
 
   pullLeaf leaf = leaf@clade
@@ -164,4 +164,4 @@ classify = push . pullNode pullLeaf pullClade where
       seenClades = ( unique
                    . filter (ne 0 . lengthS)
                    ) xs
-  push = mapChildWithParent id (ifelse (eq 0 (lengthS c)))
+  push = mapChildWithParent id (\ parent child -> ifelse (eq 0 (lengthS child)) parent child)

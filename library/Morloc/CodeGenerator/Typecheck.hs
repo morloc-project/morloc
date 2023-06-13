@@ -24,6 +24,7 @@ import qualified Morloc.Monad as MM
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Frontend.Lang.DefaultTypes as MLD
 import qualified Data.Map as Map
+import Morloc.Pretty
 import Morloc.Frontend.PartialOrder ()
 -- import Morloc.Pretty
 -- import qualified Morloc.Data.Text as MT
@@ -73,15 +74,15 @@ typecheck e0 = do
 
 substituteGeneralAliases :: Gamma -> SAnno (Indexed Type) One (Indexed TypeU) -> MorlocMonad (Gamma, SAnno (Indexed Type) One (Indexed TypeU))
 substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
+
+    MM.sayVVV $ "e0:" <> "\n  " <> prettySAnno viaShow viaShow e0
+
     -- [(TVar, Type)]
     -- The TVar is the existential name (something wonky and computer generated)
     -- and Type is the general type
     let existentials = unique (s e0)
 
-
-    -- [ (TV (Just CppLang) "n_e0_x3", VarT (TV Nothing "Int"))
-    -- , (TV (Just CppLang) "o_4",     VarT (TV Nothing "Str"))]
-    -- error $ show existentials
+    MM.sayVVV $ "existentials:" <+> viaShow existentials
 
     -- typedefs :: Map Text [TypeU]
     -- This is a map from alias (e.g., "Map") to concrete type (e.g., "dict a b")
@@ -101,16 +102,23 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
 
     s (SAnno (One (e, Idx _ concreteType)) (Idx _ generalType)) = findExistentials concreteType generalType <> c e
 
-    findExistentials :: TypeU -> Type -> [(TVar, Type)]
-    findExistentials (ExistU v [] _ _) t = [(v, t)]
-    findExistentials (ExistU v ts1 _ _) (AppT t ts2) = (v, t) : concat (zipWith findExistentials ts1 ts2)
+    findExistentials
+        :: TypeU -- concrete type
+        -> Type -- geneeral type
+        -> [(( TVar -- the existential name, e.g., "n_e0_x3", it will match a term in Gamma that should be replaced
+             , [TypeU] -- any parameters of the existential
+             )
+            , Type -- the general type corresponding to the existential 
+            )]
+    findExistentials _ (UnkT _) = []
+    findExistentials (ExistU v [] _ _) t = [((v, []), t)]
+    findExistentials (ExistU v ts1 _ _) t@(AppT _ ts2) = ((v, ts1), t) : concat (zipWith findExistentials ts1 ts2)
     findExistentials t1@(ForallU _ _) t2 = error . MT.unpack . render $ "Did not expect a qualified term down here:" <+> pretty t1 <+> pretty t2
     findExistentials (FunU ts1 t1) (FunT ts2 t2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
     findExistentials (AppU t1 ts1) (AppT t2 ts2) = concat (zipWith findExistentials ts1 ts2) <> findExistentials t1 t2
     findExistentials (NamU _ _ _ rs1) (NamT _ _ _ rs2) = concat (zipWith findExistentials (map snd rs1) (map snd rs2))
-    findExistentials _ _ = []
-    -- -- FIXME here, or somewhere, we ought to 
-    -- findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
+    findExistentials (VarU _) (VarT _) = []
+    findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
 
     c (AccS e _) = s e
     c (AppS e es) = s e ++ concatMap s es
@@ -118,12 +126,15 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
     c (LstS es) = concatMap s es
     c (TupS es) = concatMap s es
     c (NamS rs) = concatMap (s . snd) rs
-    c _ = [] 
+    c _ = []
 
-    solve :: Gamma -> (TVar, Maybe Type) -> Gamma
+    solve :: Gamma -> ((TVar, [TypeU]), Maybe Type) -> Gamma
     solve g (_, Nothing) = g
-    solve g (v, Just t) = case access1 v (gammaContext g) of
-        (Just (rs, _, ls)) -> g { gammaContext = rs <> (SolvedG v (type2typeu t) : ls) }
+    solve g ((v, ts1), Just t) = case access1 v (gammaContext g) of
+        (Just (lhs, _, rhs)) -> g { gammaContext = lhs <> (SolvedG v t' : rhs) } where
+            t' = case t of 
+                (AppT t2 _) -> AppU (type2typeu t2) ts1
+                _ -> type2typeu t
         Nothing -> g
 
 
@@ -131,7 +142,8 @@ synthesizeTypeFrom :: Map.Map MT.Text [TypeU] -> Type -> MorlocMonad (Maybe Type
 synthesizeTypeFrom _ (UnkT _) = return Nothing
 synthesizeTypeFrom typedef (VarT (TV _ v)) = case Map.lookup v typedef of
     (Just []) -> return Nothing
-    (Just (t:_)) -> return $ Just (typeOf t)
+    (Just [t]) -> return $ Just (typeOf t)
+    (Just ts) -> error $ "Expected just one alias, found: " <> show ts
     _ -> return Nothing
 synthesizeTypeFrom typedef (FunT xs o) = do
     xs' <- mapM (synthesizeTypeFrom typedef) xs |>> sequence

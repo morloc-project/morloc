@@ -20,6 +20,7 @@ module Morloc.CodeGenerator.Internal
 import Morloc.CodeGenerator.Namespace
 import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
+import qualified Morloc.Data.Text as MT
 
 weaveTypes :: Maybe Type -> Type -> MorlocMonad TypeP
 weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
@@ -88,7 +89,10 @@ weaveResolvedTypes g0 t0 = do
           [(PV lang (Just k1) k2, f lang t1 t2) | ((k1, t1), (k2, t2)) <- zip rs1 rs2]
     f lang g (UnkT (TV _ v)) = UnkP (PV lang (Just passthroughGen) v) where
       passthroughGen = render $ "*" <> parens (pretty g)
-    f lang t1 t2 = error $ "General and concrete types are not compatible: " <> show (lang, t1, t2)
+    f _ t1 t2 = error . MT.unpack . render
+        $ "General and concrete types are not compatible: "
+        <> "\n  " <> viaShow t1
+        <> "\n  " <> viaShow t2
 
 typeP2typeM :: TypeP -> TypeM
 typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)

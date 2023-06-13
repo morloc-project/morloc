@@ -61,6 +61,9 @@ handling for several very different languages (proofs-of-concept).
 
 0.42.0 [2023.06.xx]
 -------------------
+
+ * Infer concrete types from inferred general types when necessary and possible
+
  New features:
  - [ ] add typeclasses
  - [ ] add effects
