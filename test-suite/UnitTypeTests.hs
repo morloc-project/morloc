@@ -790,6 +790,17 @@ concreteTypeSynthesisTests =
       |]
       (FunP [varp CppLang (Just "Real") "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang (Just "Real") "double", UnkP (PV CppLang (Just "a_q0") "a_q0") ]))
 
+  , assertConcreteType
+      "test: (asCpp . asPy) [1.0]"
+      [r|
+      module m (foo)
+      import conventions (Real, List)
+      import pybase (id as asPy)
+      import cppbase (id as asCpp)
+      foo = (asCpp . asPy) [1.0]
+      |]
+      (appp CppLang "List" "std::vector" [varp CppLang (Just "Real") "double"])
+
   , expectError
       "Synth error raised if no type alias given"
       (CannotSynthesizeConcreteType (Source (Name "foo") Python3Lang (Just "_") (EV "foo") Nothing) (fun [int, int]) ["Int"])
