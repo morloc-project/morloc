@@ -183,6 +183,8 @@ unkp lang gv cv = UnkP (PV lang gv cv)
 
 varp lang gv cv = VarP (PV lang gv cv)
 
+appp lang gv cv ps = AppP (VarP (PV lang (Just gv) cv)) ps 
+
 funp [] = error "Cannot infer type of empty list"
 funp ts = FunP (init ts) (last ts)
 
@@ -772,6 +774,21 @@ concreteTypeSynthesisTests =
       foo :: Int -> Int
       |]
       (FunP [varp Python3Lang (Just "Int") "int"] (varp Python3Lang (Just "Int") "int"))
+
+  , assertConcreteType
+      -- This tests the desugar bug fixed in #a50c75
+      "test: foo :: Real -> (Real, a)"
+      [r|
+      module m (foo)
+     
+      type Cpp Real = "double"
+      type Cpp (Tuple2 a b) = "std::tuple" a b
+     
+      source Cpp from "foo.hpp" ("foo")
+     
+      foo :: Real -> (Real, a)
+      |]
+      (FunP [varp CppLang (Just "Real") "double"] ( appp CppLang "Tuple2" "std::tuple" [ varp CppLang (Just "Real") "double", UnkP (PV CppLang (Just "a_q0") "a_q0") ]))
 
   , expectError
       "Synth error raised if no type alias given"
