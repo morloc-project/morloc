@@ -63,6 +63,7 @@ handling for several very different languages (proofs-of-concept).
 -------------------
 
  * Infer concrete types from inferred general types when necessary and possible
+ * More informative error messages 
 
  New features:
  - [ ] add typeclasses

@@ -86,9 +86,9 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
     typedefs <- MM.get |>>
                 stateTypedefs |>>
                 (\ (GMap a b) -> fromJust . fromJust $ Map.lookup <$> Map.lookup i0 a <*> pure b) |>>
-                Map.map (map snd) |>>
-                Map.filterWithKey (\v _ -> langOf v == langOf t0) |>>
-                Map.mapKeys (\(TV _ v) -> v)
+                Map.map (map snd)
+
+    MM.sayVVV $ "typedefs:" <+> viaShow typedefs
 
     -- substitute all the existentials that have definitions
     mapM (synthesizeTypeFromExistential typedefs) existentials |>> foldl solve g0 
@@ -115,9 +115,9 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
     findExistentials (VarU _) (VarT _) = []
     findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
 
-    synthesizeTypeFromExistential :: Map.Map MT.Text [TypeU] -> ((TVar, [TypeU]), Type) -> MorlocMonad (TVar, Maybe Type)
+    synthesizeTypeFromExistential :: Map.Map TVar [TypeU] -> ((TVar, [TypeU]), Type) -> MorlocMonad (TVar, Maybe Type)
     synthesizeTypeFromExistential typedefs ((v, ts), alias) = do
-        unaliasedType <- synthesizeType typedefs alias
+        unaliasedType <- synthesizeType (langOf v) typedefs alias
 
         MM.sayVVV $ "synthesizeTypeFromExistential - v:" <+> pretty v
         MM.sayVVV $ "synthesizeTypeFromExistential - ts:" <+> list (map pretty ts)
@@ -150,29 +150,46 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
         Nothing -> g
 
 
-synthesizeType :: Map.Map MT.Text [TypeU] -> Type -> MorlocMonad (Maybe Type)
-synthesizeType _ (UnkT _) = return Nothing
-synthesizeType typedef (VarT (TV _ v)) = case Map.lookup v typedef of
-    (Just []) -> return Nothing
-    (Just [t]) -> return $ Just (typeOf t)
-    (Just ts) -> error $ "Expected just one alias, found: " <> show ts
-    _ -> return Nothing
-synthesizeType typedef (FunT xs o) = do
-    xs' <- mapM (synthesizeType typedef) xs |>> sequence
-    o' <- synthesizeType typedef o
-    return $ FunT <$> xs' <*> o'
-synthesizeType typedef (AppT (VarT (TV _ v)) ps) = case Map.lookup v typedef of
-    (Just [AppU x ps0]) ->
-        if length ps0 == length ps then do
-            ps' <- mapM (synthesizeType typedef) ps |>> sequence
-            return $ AppT (typeOf x) <$> ps'
-        else error "Incompatible general types"
-    _ -> return Nothing
-synthesizeType _ (AppT _ _) = error "AppT should have a VarT as the first element -- I really need to make this bug unwrittable"
-synthesizeType typedef (NamT o v ts rs) = do
-    x' <- synthesizeType typedef (VarT v)
-    ts' <- mapM (synthesizeType typedef) ts |>> sequence
-    xs' <- mapM (synthesizeType typedef . snd) rs |>> sequence
+{-
+typedefs: fromList [
+    (TV (Just Python3Lang) "List",[AppU (VarU (TV (Just Python3Lang) "list")) [VarU (TV (Just Python3Lang) "a")]]),
+    (TV (Just Python3Lang) "Real",[VarU (TV (Just Python3Lang) "float")]),
+    (TV (Just CppLang) "List",[AppU (VarU (TV (Just CppLang) "std::vector<$1>")) [VarU (TV (Just CppLang) "a")]]),
+    (TV (Just CppLang) "Real",[VarU (TV (Just CppLang) "double")])
+]
+-}
+-- Synthesize a type for a given language given an alias map and a general type
+synthesizeType :: Maybe Lang -> Map.Map TVar [TypeU] -> Type -> MorlocMonad (Maybe Type)
+synthesizeType _ _ (UnkT _) = return Nothing
+synthesizeType lang typedef t0@(VarT (TV _ v)) = do
+    x <- case Map.lookup (TV lang v) typedef of
+        (Just []) -> return Nothing
+        (Just [t]) -> return $ Just (typeOf t)
+        (Just ts) -> error $ "Expected just one alias, found: " <> show ts
+        _ -> return Nothing
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType lang typedef t0@(FunT xs o) = do
+    xs' <- mapM (synthesizeType lang typedef) xs |>> sequence
+    o' <- synthesizeType lang typedef o
+    let x = FunT <$> xs' <*> o'
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType lang typedef t0@(AppT (VarT (TV _ v)) ps) = do
+    x <- case Map.lookup (TV lang v) typedef of
+        (Just [AppU x ps0]) ->
+            if length ps0 == length ps then do
+                ps' <- mapM (synthesizeType lang typedef) ps |>> sequence
+                return $ AppT (typeOf x) <$> ps'
+            else error "Incompatible general types"
+        _ -> return Nothing
+    MM.sayVVV $ "synthesizeType" <+> parens (viaShow t0) <+> "to" <+> parens (pretty x)
+    return x
+synthesizeType _ _ (AppT _ _) = error "AppT should have a VarT as the first element -- I really need to make this bug unwrittable"
+synthesizeType lang typedef (NamT o v ts rs) = do
+    x' <- synthesizeType lang typedef (VarT v)
+    ts' <- mapM (synthesizeType lang typedef) ts |>> sequence
+    xs' <- mapM (synthesizeType lang typedef . snd) rs |>> sequence
     case x' of 
         (Just (VarT v')) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
         _ -> return Nothing
