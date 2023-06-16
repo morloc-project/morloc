@@ -64,19 +64,16 @@ typecheck e0 = do
   insetSay "---------------^-----------------"
 
   insetSay "--- substituting general aliases ---"
-  (g3, e3) <- substituteGeneralAliases g2 e2 
+  g3 <- substituteGeneralAliases g2 e2
   seeGamma g3
 
   insetSay "--- weaving ---"
-  w <- weaveAndResolve (applyCon g3 (mapSAnno id (fmap normalizeType) e3))
+  w <- weaveAndResolve (applyCon g3 (mapSAnno id (fmap normalizeType) e2))
   insetSay "--- weaving done ---"
   return w
 
-substituteGeneralAliases :: Gamma -> SAnno (Indexed Type) One (Indexed TypeU) -> MorlocMonad (Gamma, SAnno (Indexed Type) One (Indexed TypeU))
+substituteGeneralAliases :: Gamma -> SAnno (Indexed Type) One (Indexed TypeU) -> MorlocMonad Gamma
 substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
-
-    MM.sayVVV $ "e0:" <> "\n  " <> prettySAnno viaShow viaShow e0
-
     -- [(TVar, Type)]
     -- The TVar is the existential name (something wonky and computer generated)
     -- and Type is the general type
@@ -94,9 +91,7 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
                 Map.mapKeys (\(TV _ v) -> v)
 
     -- substitute all the existentials that have definitions
-    g1 <- mapM (synthesizeTypeFrom typedefs . snd) existentials |>> zip (map fst existentials) |>> foldl solve g0 
-
-    return (g1, applyCon g1 e0)
+    mapM (synthesizeTypeFromExistential typedefs) existentials |>> foldl solve g0 
 
     where
 
@@ -104,7 +99,7 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
 
     findExistentials
         :: TypeU -- concrete type
-        -> Type -- geneeral type
+        -> Type -- general type
         -> [(( TVar -- the existential name, e.g., "n_e0_x3", it will match a term in Gamma that should be replaced
              , [TypeU] -- any parameters of the existential
              )
@@ -120,6 +115,23 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
     findExistentials (VarU _) (VarT _) = []
     findExistentials t1 t2 = error . MT.unpack . render $ "Disagreement between concrete and general types:" <> "\n  " <> pretty t1 <> "\n  " <> pretty t2
 
+    synthesizeTypeFromExistential :: Map.Map MT.Text [TypeU] -> ((TVar, [TypeU]), Type) -> MorlocMonad (TVar, Maybe Type)
+    synthesizeTypeFromExistential typedefs ((v, ts), alias) = do
+        unaliasedType <- synthesizeType typedefs alias
+
+        MM.sayVVV $ "synthesizeTypeFromExistential - v:" <+> pretty v
+        MM.sayVVV $ "synthesizeTypeFromExistential - ts:" <+> list (map pretty ts)
+        MM.sayVVV $ "synthesizeTypeFromExistential - alias:" <+> pretty alias
+        MM.sayVVV $ "synthesizeTypeFromExistential - unaliasedType:" <+> pretty unaliasedType
+
+        case unaliasedType of
+            Just x@(AppT t gts) -> 
+                if length gts == length ts
+                then return (v, Just $ AppT t (map typeOf ts))
+                else return (v, Just x) -- MM.throwError $ IncompatibleGeneralType (AppU (VarU v) ts) (type2typeu gt)
+            Just x -> return (v, Just x) 
+            Nothing -> return (v, Nothing)
+
     c (AccS e _) = s e
     c (AppS e es) = s e ++ concatMap s es
     c (LamS _ e) = s e
@@ -128,35 +140,39 @@ substituteGeneralAliases g0 e0@(SAnno (One (_, Idx _ t0)) (Idx i0 _)) = do
     c (NamS rs) = concatMap (s . snd) rs
     c _ = []
 
-    solve :: Gamma -> ((TVar, [TypeU]), Maybe Type) -> Gamma
+    solve :: Gamma -> (TVar, Maybe Type) -> Gamma
     solve g (_, Nothing) = g
-    solve g ((v, ts1), Just t) = case access1 v (gammaContext g) of
+    solve g (v, Just t) = case access1 v (gammaContext g) of
         (Just (lhs, _, rhs)) -> g { gammaContext = lhs <> (SolvedG v t' : rhs) } where
             t' = case t of 
-                (AppT t2 _) -> AppU (type2typeu t2) ts1
+                (AppT t2 ts) -> AppU (type2typeu t2) (map type2typeu ts)
                 _ -> type2typeu t
         Nothing -> g
 
 
-synthesizeTypeFrom :: Map.Map MT.Text [TypeU] -> Type -> MorlocMonad (Maybe Type)
-synthesizeTypeFrom _ (UnkT _) = return Nothing
-synthesizeTypeFrom typedef (VarT (TV _ v)) = case Map.lookup v typedef of
+synthesizeType :: Map.Map MT.Text [TypeU] -> Type -> MorlocMonad (Maybe Type)
+synthesizeType _ (UnkT _) = return Nothing
+synthesizeType typedef (VarT (TV _ v)) = case Map.lookup v typedef of
     (Just []) -> return Nothing
     (Just [t]) -> return $ Just (typeOf t)
     (Just ts) -> error $ "Expected just one alias, found: " <> show ts
     _ -> return Nothing
-synthesizeTypeFrom typedef (FunT xs o) = do
-    xs' <- mapM (synthesizeTypeFrom typedef) xs |>> sequence
-    o' <- synthesizeTypeFrom typedef o
+synthesizeType typedef (FunT xs o) = do
+    xs' <- mapM (synthesizeType typedef) xs |>> sequence
+    o' <- synthesizeType typedef o
     return $ FunT <$> xs' <*> o'
-synthesizeTypeFrom typedef (AppT x ps) = do
-    x' <- synthesizeTypeFrom typedef x
-    ps' <- mapM (synthesizeTypeFrom typedef) ps |>> sequence
-    return $ AppT <$> x' <*> ps'
-synthesizeTypeFrom typedef (NamT o v ts rs) = do
-    x' <- synthesizeTypeFrom typedef (VarT v)
-    ts' <- mapM (synthesizeTypeFrom typedef) ts |>> sequence
-    xs' <- mapM (synthesizeTypeFrom typedef . snd) rs |>> sequence
+synthesizeType typedef (AppT (VarT (TV _ v)) ps) = case Map.lookup v typedef of
+    (Just [AppU x ps0]) ->
+        if length ps0 == length ps then do
+            ps' <- mapM (synthesizeType typedef) ps |>> sequence
+            return $ AppT (typeOf x) <$> ps'
+        else error "Incompatible general types"
+    _ -> return Nothing
+synthesizeType _ (AppT _ _) = error "AppT should have a VarT as the first element -- I really need to make this bug unwrittable"
+synthesizeType typedef (NamT o v ts rs) = do
+    x' <- synthesizeType typedef (VarT v)
+    ts' <- mapM (synthesizeType typedef) ts |>> sequence
+    xs' <- mapM (synthesizeType typedef . snd) rs |>> sequence
     case x' of 
         (Just (VarT v')) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
         _ -> return Nothing

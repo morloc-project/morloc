@@ -794,12 +794,17 @@ concreteTypeSynthesisTests =
       "test: (asCpp . asPy) [1.0]"
       [r|
       module m (foo)
-      import conventions (Real, List)
-      import pybase (id as asPy)
-      import cppbase (id as asCpp)
+      type Cpp Real = "double"
+      type Py Real = "float"
+      type Cpp (List a) = "std::vector<$1>" a
+      type Py (List a) = "list" a
+      asPy :: a -> a
+      source Py from "foo.py" ("id" as asPy)
+      asCpp :: a -> a
+      source Cpp from "foo.cpp" ("id" as asCpp)
       foo = (asCpp . asPy) [1.0]
       |]
-      (appp CppLang "List" "std::vector" [varp CppLang (Just "Real") "double"])
+      (appp CppLang "List" "std::vector<$1>" [varp CppLang (Just "Real") "double"])
 
   , expectError
       "Synth error raised if no type alias given"
