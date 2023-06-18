@@ -401,6 +401,7 @@ data TypeError
   | EmptyExpression EVar
   | MissingFeature Text
   | InfiniteRecursion
+  | FunctionSerialization
 
 data MorlocError
   -- | An error that is associated with an expression index

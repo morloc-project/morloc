@@ -1075,7 +1075,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     name' <- MM.metaName m
     case name' of
         (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
-        Nothing ->  MM.throwError . ConcreteTypeError $ MissingConcreteSignature (EV "--") (langOf' t)
+        Nothing ->  MM.throwError . ConcreteTypeError $ FunctionSerialization
 
 
   -- partitions evaluation of expressions applied to a foreign pool between the
