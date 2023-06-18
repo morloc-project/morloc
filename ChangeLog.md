@@ -64,25 +64,14 @@ handling for several very different languages (proofs-of-concept).
 
  * Infer concrete types from inferred general types when necessary and possible
  * More informative error messages 
-
- New features:
- - [ ] add typeclasses
- - [ ] add effects
- - [ ] add record keyword aliases
-
- Type system bug fixes:
- - [ ] fix typechecking bug in flu demo
+ [ ] Add error if undefined functions are used in a composition
+     [ ] When typechecking, raise error if they have no type signature
+     [ ] When building, additionally raise error if they have no source (this is already done somewhere down the line)
+ [ ] Fix the performance bug (8 million lines of log is way too much)
+     This is probably related to removal of the cut step in the typechecker
 
  Testing and documentation:
  - [ ] Complete flu demo
- - [ ] systematically test records, tables, and objects
-       - [ ] source functions that take each (this is easier, since C++ can use templates)
-       - [ ] source functions that return each
-       - [ ] cases where the same type is an object in one language and a
-             record in another 
- - [ ] demo practical tables in Python (e.g., numpy), R, and C++ 
- - [ ] Improve the error messages, add line numbers to errors
- - [ ] Haddock documentation
 
 
 0.41.1 [2023.05.26]
