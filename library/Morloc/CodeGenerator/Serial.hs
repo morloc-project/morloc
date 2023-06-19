@@ -227,7 +227,21 @@ resolvePacker packedType@(AppP _ ts1) p@(unqualify . unresolvedPackedType -> (_,
             let ca = type2typeu (typeOf a)
                 gaMay = type2typeu <$> generalTypeOf a
             unpackedConcreteType <- case subtype b ca (Gamma 0 []) of
-                (Left typeErr) -> MM.throwError . SerializationError . render $ pretty typeErr
+                (Left typeErr) -> MM.throwError . SerializationError . render
+                    $ "There was an error raised in subtypgin while resolving serialization"
+                    <> "\nThe packer involved maps the type:"
+                    <> "\n  " <> maybe "<missing type>" (pretty . fst) generalTypes
+                    <> "\n\nTo the serialized form:"
+                    <> "\n  " <> maybe "<missing type>" (pretty . snd) generalTypes
+                    <> "\n\nHere the unresolved concrete packed type:"
+                    <> "\n  b:" <+> pretty b
+                    <> "\n\nShould be the subtype of the resolved packed type:"
+                    <> "\n  a:" <+> pretty a
+                    <> "\n\nThe generic terms in b should be resolved through subtyping and used to resolve the unpacked type:"
+                    <> "\n  c:" <+> pretty c
+                    <> "\n\nHowever, the b <: a step failed:\n"
+                    <> pretty typeErr
+                    <> "\n\nThe packer function may not be generic enough to pack the type you specify, if this is the case, you may need to simplify the datatype"
                 (Right g) -> do
                     return (apply g (existential c))
 
