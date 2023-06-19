@@ -135,8 +135,8 @@ defaultNull :: Maybe Lang -> [TypeU]
 defaultNull lang@Nothing = [VarU (TV lang "Unit")]
 defaultNull lang@(Just Python3Lang) = [VarU (TV lang "None")]
 defaultNull lang@(Just RLang) = [VarU (TV lang "NULL")]
-defaultNull lang@(Just CLang) = [VarU (TV lang "null")]
-defaultNull lang@(Just CppLang) = [VarU (TV lang "null")]
+defaultNull lang@(Just CLang) = [VarU (TV lang "void")]
+defaultNull lang@(Just CppLang) = [VarU (TV lang "void")]
 defaultNull lang@(Just RustLang) = [VarU (TV lang "<VOID>")] -- Rust doesn't have an explicit NULL
 defaultNull lang@(Just PerlLang) = [VarU (TV lang "NULL")]
 
