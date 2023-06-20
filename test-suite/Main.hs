@@ -25,6 +25,10 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
+      -- tests the bug solved on DATE involving the lambdaScope function in
+      -- Generate.hs:reserialize. See that commit message.
+      , golden "edge-cases-1" "edge-cases-1"
+
       , golden "type-synthesis" "type-synthesis"
 
       , golden "argument-form-1-c" "argument-form-1-c"

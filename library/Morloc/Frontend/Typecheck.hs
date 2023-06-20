@@ -43,8 +43,6 @@ typecheck = mapM run where
       insetSay "-------- leaving frontend typechecker ------------------"
       insetSay "g2:"
       seeGamma g2
-      insetSay "e2:"
-      -- peakGen e2
       insetSay "========================================================"
       return $ mapSAnno (fmap normalizeType) id . applyGen g2 $ e2
 

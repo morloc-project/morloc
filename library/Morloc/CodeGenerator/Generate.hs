@@ -1232,10 +1232,12 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
             Nothing -> error . MT.unpack . render $ "inheritScope fail:" <+> pretty (Map.toList scope, arg)
 
         lambdaScope :: Argument -> Argument
-        lambdaScope (argId -> i) = case Map.lookup i typemap of
+        lambdaScope arg@(argId -> i) = case Map.lookup i typemap of
             (Just (Just t)) -> NativeArgument i t
             (Just Nothing) -> PassThroughArgument i
-            Nothing -> error "Missing index"
+            -- this case occurs for arguments that are passed but never used their types may be inferrable in
+            -- the given language, but they are never used. So no need to serialize/deserialize them. Probably.
+            Nothing -> PassThroughArgument i 
 
         rescope :: Map.Map Int Argument -> ManifoldForm -> ManifoldForm
         rescope _ form@(ManifoldPass _) = mapManifoldArgs lambdaScope form
@@ -1335,6 +1337,7 @@ argumentType typemap (LamM _ _ e) = argumentType typemap e
 argumentType typemap (AppM e es) = foldl argumentType typemap (e:es) 
 argumentType typemap (BndVarM t i) = Map.insert i (typeOfTypeM t) typemap 
 argumentType typemap (AccM e _) = argumentType typemap e
+argumentType typemap (LetM _ v e) = foldl argumentType typemap [v, e]
 argumentType typemap (LetVarM t i) = Map.insert i (typeOfTypeM t) typemap
 argumentType typemap (ListM _ es) = foldl argumentType typemap es
 argumentType typemap (TupleM _ es) = foldl argumentType typemap es
@@ -1343,6 +1346,10 @@ argumentType typemap (ReturnM e) = argumentType typemap e
 argumentType typemap (SerializeM _ e) = argumentType typemap e
 argumentType typemap (DeserializeM _ e) = argumentType typemap e
 argumentType typemap _ = typemap
+
+-- ForeignInterfaceM TypeM [Int] (ExprM f)
+-- PoolCallM TypeM Int [MDoc] [Argument]
+
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
