@@ -228,9 +228,14 @@ desugarType h = f Set.empty
     return $ ExistU v ps' ds' rs'
   f bnd (FunU ts t) = FunU <$> mapM (f bnd) ts <*> f bnd t
   f bnd (NamU o n ps rs) = do
+    (n', o') <- case Map.lookup n h of
+        -- If the record type itself is aliased, substitute the name and record form
+        (Just [(_, NamU o'' n'' _ _)]) -> return (n'', o'')
+        -- Otherwise, keep the record name and form and recurse only into children
+        _ -> return (n, o)
     ts <- mapM (f bnd . snd) rs
     ps' <- mapM (f bnd) ps
-    return $ NamU o n ps' (zip (map fst rs) ts)
+    return $ NamU o' n' ps' (zip (map fst rs) ts)
 
   -- type Cpp (A a b) = "map<$1,$2>" a b
   -- foo Cpp :: A D [B] -> X

@@ -190,8 +190,13 @@ synthesizeType lang typedef (NamT o v ts rs) = do
     x' <- synthesizeType lang typedef (VarT v)
     ts' <- mapM (synthesizeType lang typedef) ts |>> sequence
     xs' <- mapM (synthesizeType lang typedef . snd) rs |>> sequence
+
+    MM.sayVVV $ "x':" <+> pretty x'
+    MM.sayVVV $ "ts':" <+> pretty ts'
+    MM.sayVVV $ "xs':" <+> pretty xs'
+
     case x' of 
-        (Just (VarT v')) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
+        (Just (NamT _ v' _ _)) -> return $ NamT o v' <$> ts' <*> (zip (map fst rs) <$> xs')
         _ -> return Nothing
 
 

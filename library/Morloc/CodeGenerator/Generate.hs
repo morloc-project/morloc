@@ -1232,7 +1232,7 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
             Nothing -> error . MT.unpack . render $ "inheritScope fail:" <+> pretty (Map.toList scope, arg)
 
         lambdaScope :: Argument -> Argument
-        lambdaScope arg@(argId -> i) = case Map.lookup i typemap of
+        lambdaScope (argId -> i) = case Map.lookup i typemap of
             (Just (Just t)) -> NativeArgument i t
             (Just Nothing) -> PassThroughArgument i
             -- this case occurs for arguments that are passed but never used their types may be inferrable in

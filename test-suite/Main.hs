@@ -25,9 +25,10 @@ main = do
       , substituteTVarTests
       , subtypeTests
 
-      -- tests the bug solved on DATE involving the lambdaScope function in
+      -- tests the bug solved involving the lambdaScope function in
       -- Generate.hs:reserialize. See that commit message.
       , golden "edge-cases-1" "edge-cases-1"
+      , golden "edge-cases-2" "edge-cases-2"
 
       , golden "type-synthesis" "type-synthesis"
 
