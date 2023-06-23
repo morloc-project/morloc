@@ -240,7 +240,18 @@ typeOfExprM (SrcM t _) = t
 typeOfExprM (LamM _ boundArgs x) = Function (map arg2typeM boundArgs) (typeOfExprM x)
 typeOfExprM (BndVarM t _) = t
 typeOfExprM (LetVarM t _) = t
-typeOfExprM (AccM e _) = typeOfExprM e
+typeOfExprM (AccM e key) = case typeOfExprM e of
+  Passthrough -> error "Passthrough type cannot be accessed by key"
+  (Function _ _) -> error "Function type cannot be accessed by key"
+  (Serial (NamP _ _ _ rs)) -> Serial (lookupKey rs)
+  (Native (NamP _ _ _ rs)) -> Native (lookupKey rs)
+  _ -> error "Bad access, expected a named type"
+  where
+    lookupKey :: [(PVar, TypeP)] -> TypeP
+    lookupKey [] = error "Bad access, key not found"
+    lookupKey ((PV _ _ key', t) : rs')
+        | key == key' = t
+        | otherwise = lookupKey rs'
 typeOfExprM (ListM t _) = t
 typeOfExprM (TupleM t _) = t
 typeOfExprM (RecordM t _) = t
