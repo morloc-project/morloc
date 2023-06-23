@@ -844,13 +844,13 @@ using namespace std;
 
 #{Src.foreignCallFunction}
 
-#{Src.serializationHandling}
-
 #{vsep includes}
 
-#{vsep signatures}
+#{Src.serializationHandling}
 
 #{vsep serialization}
+
+#{vsep signatures}
 
 #{vsep manifolds}
 
