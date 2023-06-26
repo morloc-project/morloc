@@ -264,11 +264,16 @@ handleFlagsAndPaths CppLang srcs = do
     . unique
     $ [s | s <- srcs, srcLang s == CppLang]
 
+  -- include the morloc home directory include folder
+  -- this should store the mlc.hpp file that defines Unit
+  home <- MM.asks configHome
+  let mlcInclude = ["-I" <> home <> "/include"]
+
   return (
          -- all sources that have a defined path (import something)
            filter (isJust . srcPath) srcs'
          -- compiler flags and shared libraries
-         , gccflags ++ (map MT.pack . concat) libflags
+         , gccflags ++ (map MT.pack . concat) (mlcInclude : libflags)
          -- paths to files to include
          , unique (catMaybes paths) 
          )
