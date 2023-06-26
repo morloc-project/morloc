@@ -1347,14 +1347,30 @@ argumentType typemap (SerializeM _ e) = argumentType typemap e
 argumentType typemap (DeserializeM _ e) = argumentType typemap e
 argumentType typemap _ = typemap
 
--- ForeignInterfaceM TypeM [Int] (ExprM f)
--- PoolCallM TypeM Int [MDoc] [Argument]
-
 
 
 -- Sort manifolds into pools. Within pools, group manifolds into call sets.
 pool :: [ExprM Many] -> MorlocMonad [(Lang, [ExprM Many])]
-pool = return . groupSort . map (\e -> (fromJust $ langOf e, e))
+pool es = do
+  roots <- mapM prepareRoot es
+  return $ uniqueManifolds . groupSort $ roots 
+  where
+    -- This should never fail. All ExprM objects should be manifolds and all
+    -- manifolds have defined languages.
+    prepareRoot :: ExprM Many -> MorlocMonad (Lang, (Int, ExprM Many))
+    prepareRoot e@(ManifoldM i _ _) = case langOf e of
+        (Just lang) -> return (lang, (i, e))
+        Nothing -> MM.throwError $ OtherError "Malformed manifold" 
+    prepareRoot _ =  MM.throwError $ OtherError "Malformed manifold" 
+
+    {-
+    Each of the `ExprM Many` values is a ManifoldM object. These objects
+    represent a single subtree of the program and thus contain many nested
+    manifolds. Each is thus the root of a tree. If two of these trees share a
+    same root and language, then they should contain the children. So here we
+    prune the duplicate trees.
+    -}
+    uniqueManifolds = map (second (Map.elems . Map.fromList))
 
 findSources
   :: (Lang, [ExprM Many])
