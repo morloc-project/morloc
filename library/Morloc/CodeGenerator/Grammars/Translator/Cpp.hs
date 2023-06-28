@@ -31,6 +31,7 @@ import qualified Morloc.System as MS
 import Morloc.CodeGenerator.Grammars.Macro (expandMacro)
 import qualified Morloc.Monad as MM
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Morloc.Data.Text as MT
 import qualified Morloc.Module as Mod
 import qualified Morloc.Language as ML
@@ -76,11 +77,11 @@ translate srcs es = do
   let recmap = unifyRecords . concatMap collectRecords $ es
       (autoDecl, autoSerial) = generateAnonymousStructs recmap
       dispatch = makeDispatch es
-      signatures = map (makeSignature recmap) es
+      (_, signatures) = statefulMap (`makeSignature` recmap) Set.empty es
       serializationCode = autoDecl ++ srcDecl ++ autoSerial ++ srcSerial
 
   -- translate each manifold tree, rooted on a call from nexus or another pool
-  mDocs <- mapM (translateManifold recmap) es
+  (_, mDocs) <- statefulMapM (translateManifold recmap) Set.empty es
 
   -- create and return complete pool script
   let code = makeMain includeDocs signatures serializationCode mDocs dispatch
@@ -122,26 +123,35 @@ bndNamer i = "x" <> viaShow i
 serialType :: MDoc
 serialType = "std::string"
 
-makeSignature :: RecMap -> ExprM One -> MDoc
-makeSignature recmap e0@(ManifoldM _ _ _) = vsep (f e0) where
-  f :: ExprM One -> [MDoc]
-  f (ManifoldM i form e) =
-    let t = typeOfExprM e
-        args = manifoldArgs form
-        sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
-    in sig : f e
-  f (LetM _ e1 e2) = f e1 ++ f e2
-  f (AppM e es) = f e ++ concatMap f es
-  f (LamM _ _ e) = f e
-  f (AccM e _) = f e
-  f (ListM _ es) = concatMap f es
-  f (TupleM _ es) = concatMap f es
-  f (RecordM _ entries) = concatMap (f . snd) entries
-  f (SerializeM _ e) = f e
-  f (DeserializeM _ e) = f e
-  f (ReturnM e) = f e
-  f _ = []
-makeSignature _ _ = error "Expected ManifoldM"
+makeSignature :: Set.Set Int -> RecMap -> ExprM One -> (Set.Set Int, MDoc)
+makeSignature seen0 recmap e0@(ManifoldM _ _ _) = second vsep (f seen0 e0) where
+  f :: Set.Set Int -> ExprM One -> (Set.Set Int, [MDoc])
+  f seen (ManifoldM i form e)
+    | Set.member i seen = (seen, [])
+    | otherwise =
+        let t = typeOfExprM e
+            args = manifoldArgs form
+            sig = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args) <> ";"
+            (seen', sigs) = f (Set.insert i seen) e
+        in (seen', sig : sigs)
+  f seen (LetM _ e1 e2) =
+    let (seen', sigs1) = f seen e1
+        (seen'', sigs2) = f seen' e2
+    in (seen'', sigs1 ++ sigs2)
+  f seen (AppM e es) =
+    let (seen', sigs1) = f seen e
+        (seen'', sigs2) = second concat $ statefulMap f seen' es
+    in (seen'', sigs1 ++ sigs2)
+  f seen (LamM _ _ e) = f seen e
+  f seen (AccM e _) = f seen e
+  f seen (ListM _ es) = second concat $ statefulMap f seen es
+  f seen (TupleM _ es) = second concat $ statefulMap f seen es
+  f seen (RecordM _ entries) = second concat $ statefulMap f seen (map snd entries)
+  f seen (SerializeM _ e) = f seen e
+  f seen (DeserializeM _ e) = f seen e
+  f seen (ReturnM e) = f seen e
+  f seen _ = (seen, [])
+makeSignature _ _ _ = error "Expected ManifoldM"
 
 makeArg :: RecMap -> Argument -> MDoc
 makeArg _ (SerialArgument i _) = serialType <+> bndNamer i
@@ -310,165 +320,176 @@ deserialize recmap letIndex typestr0 varname0 s0
     construct _ s = MM.throwError . SerializationError . render
       $ "deserializeDescend: " <> prettySerialOne s
 
-translateManifold :: RecMap -> ExprM One -> MorlocMonad MDoc
-translateManifold recmap m0@(ManifoldM _ form0 _) = do
+translateManifold :: RecMap -> Set.Set Int -> ExprM One -> MorlocMonad (Set.Set Int, MDoc)
+translateManifold recmap done0 m0@(ManifoldM _ form0 _) = do
   MM.startCounter
-  e <- f (manifoldArgs form0) m0
-  return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
+  (done, e) <- f done0 (manifoldArgs form0) m0
+  m <- return . vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
+  return (done, m)
   where
 
-  f :: [Argument]
+  f :: Set.Set Int
+    -> [Argument]
     -> ExprM One
-    -> MorlocMonad PoolDocs
+    -> MorlocMonad (Set.Set Int, PoolDocs)
 
-  f args (LetM i (SerializeM s e1) e2) = do
-    (PoolDocs ms1 e1' ps1 pes1) <- f args e1
-    (PoolDocs ms2 e2' ps2 pes2) <- f args e2
+  f done args (LetM i (SerializeM s e1) e2) = do
+    (d1, PoolDocs ms1 e1' ps1 pes1) <- f done args e1
+    (d2, PoolDocs ms2 e2' ps2 pes2) <- f d1 args e2
     serialized <- serialize recmap i e1' s
-    return $ PoolDocs
+    return (d2, PoolDocs
       { poolCompleteManifolds = ms1 <> ms2
       , poolExpr = vsep $ ps1 <> ps2 <> serialized <> [e2']
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
       }
+      )
 
-  f args (LetM i (DeserializeM s e1) e2) = do
-    (PoolDocs ms1 e1' ps1 pes1) <- f args e1
-    (PoolDocs ms2 e2' ps2 pes2) <- f args e2
+  f done args (LetM i (DeserializeM s e1) e2) = do
+    (d1, PoolDocs ms1 e1' ps1 pes1) <- f done args e1
+    (d2, PoolDocs ms2 e2' ps2 pes2) <- f d1 args e2
     t <- showNativeTypeM recmap (typeOfExprM e1)
     deserialized <- deserialize recmap i t e1' s
-    return $ PoolDocs
+    return (d2, PoolDocs
       { poolCompleteManifolds = ms1 <> ms2
       , poolExpr = vsep $ ps1 <> ps2 <> deserialized <> [e2']
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
-      }
+      })
 
-  f _ (SerializeM _ _) = MM.throwError . SerializationError
+  f _ _ (SerializeM _ _) = MM.throwError . SerializationError
     $ "SerializeM should only appear in an assignment"
 
-  f _ (DeserializeM _ _) = MM.throwError . SerializationError
+  f _ _ (DeserializeM _ _) = MM.throwError . SerializationError
     $ "DeserializeM should only appear in an assignment"
 
-  f args (LetM i e1 e2) = do
-    (PoolDocs ms1' e1' ps1 pes1) <- f args e1
-    (PoolDocs ms2' e2' ps2 pes2) <- f args e2
+  f done args (LetM i e1 e2) = do
+    (d1, PoolDocs ms1' e1' ps1 pes1) <- f done args e1
+    (d2, PoolDocs ms2' e2' ps2 pes2) <- f d1 args e2
     let t = showTypeM recmap (typeOfExprM e1)
         ps = ps1 ++ ps2 ++ [[idoc|#{t} #{letNamer i} = #{e1'};|], e2']
-    return $ PoolDocs
+    return (d2, PoolDocs
       { poolCompleteManifolds = ms1' <> ms2'
       , poolExpr = vsep ps
       , poolPriorLines = []
       , poolPriorExprs = pes1 <> pes2
-      }
+      })
 
-  f args (AppM (SrcM (Function inputs output) src) xs) = do
+  f done args (AppM (SrcM (Function inputs output) src) xs) = do
     let name' = pretty $ srcName src
         mangledName = mangleSourceName name'
         inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
         sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name'};|]
-    m <- mergePoolDocs (\xs' -> mangledName <> tupled xs') <$> mapM (f args) xs
-    return $ m {poolPriorLines = sig : poolPriorLines m}
+    (d2, es) <- statefulMapM (`f` args) done xs
+    let m = mergePoolDocs (\xs' -> mangledName <> tupled xs') es
+    return (d2, m {poolPriorLines = sig : poolPriorLines m})
 
-  f _ (PoolCallM _ _ cmds args) = do
+  f done _ (PoolCallM _ _ cmds args) = do
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds ++ map argName args
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
         call = [idoc|foreign_call(s.str())|]
-    return $ PoolDocs
+    return (done, PoolDocs
       { poolCompleteManifolds = []
       , poolExpr = call
       , poolPriorLines = [bufDef, cmd]
       , poolPriorExprs = []
-      }
+      })
 
-  f args (AppM (PoolCallM _ _ cmds _) xs) = do
-    ms <- mapM (f args) xs
+  f done args (AppM (PoolCallM _ _ cmds _) xs) = do
+    (d2, ms) <- statefulMapM (`f` args) done xs
     let bufDef = "std::ostringstream s;"
         callArgs = map dquotes cmds <> map poolExpr ms
         cmd = "s << " <> cat (punctuate " << \" \" << " callArgs) <> ";"
         call = [idoc|foreign_call(s.str())|]
         m = mergePoolDocs (const call) ms
-    return $ m {poolPriorLines = poolPriorLines m <> [bufDef, cmd]}
+    return (d2, m {poolPriorLines = poolPriorLines m <> [bufDef, cmd]})
 
-  f _ (AppM _ _) = error "Can only apply functions"
+  f _ _ (AppM _ _) = error "Can only apply functions"
 
-  f _ (SrcM _ src) = return $ PoolDocs [] (pretty $ srcName src) [] []
+  f done _ (SrcM _ src) = return (done, PoolDocs [] (pretty $ srcName src) [] [])
 
-  f _ (ManifoldM i form e) = do
-    let args = manifoldArgs form
-    (PoolDocs ms' body ps1 pes1) <- f args e
-    let t = typeOfExprM e
-        decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
-        mdoc = block 4 decl body
-        mname = manNamer i
-    (call, ps2) <- case form of
-      (ManifoldFull rs) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
-      (ManifoldPass _) -> return (mname, [])
-      (ManifoldPart rs vs) -> do
-        let v = mname <> "_fun"
-        lhs <- stdFunction recmap t vs |>> (<+> v)
-        castFunction <- staticCast recmap t args mname
-        let vs' = take
-                  (length vs)
-                  (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
-            rs' = map (bndNamer . argId) rs
-            rhs = stdBind $ castFunction : (rs' ++ vs')
-            sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
-        return (v, [sig])
-    return $ PoolDocs
-      { poolCompleteManifolds = mdoc : ms'
-      , poolExpr = call
-      , poolPriorLines = ps1 ++ ps2
-      , poolPriorExprs = pes1
-      }
+  f done _ (ManifoldM i form e)
+    -- If this manifold has already been evaluated, just generate the call to it
+    | Set.member i done = do
+        let mname = manNamer i
+        call <- case form of
+          (ManifoldFull rs) -> return $ mname <> tupled (map (bndNamer . argId) rs)
+          (ManifoldPass _) -> return mname
+          (ManifoldPart _ _) -> return $ mname <> "_fun"
+        return (done, PoolDocs
+          { poolCompleteManifolds = []
+          , poolExpr = call
+          , poolPriorLines = []
+          , poolPriorExprs = []
+          })
+    -- Otherwise, generate a signature for the manifold and all children
+    | otherwise = do
+        let args = manifoldArgs form
+        (d2, PoolDocs ms' body ps1 pes1) <- f (Set.insert i done) args e
+        let t = typeOfExprM e
+            decl = showTypeM recmap t <+> manNamer i <> tupled (map (makeArg recmap) args)
+            mdoc = block 4 decl body
+            mname = manNamer i
+        (call, ps2) <- case form of
+          (ManifoldFull rs) -> return (mname <> tupled (map (bndNamer . argId) rs), [])
+          (ManifoldPass _) -> return (mname, [])
+          (ManifoldPart rs vs) -> do
+            let v = mname <> "_fun"
+            lhs <- stdFunction recmap t vs |>> (<+> v)
+            castFunction <- staticCast recmap t args mname
+            let vs' = take
+                      (length vs)
+                      (map (\j -> "std::placeholders::_" <> viaShow j) ([1..] :: [Int]))
+                rs' = map (bndNamer . argId) rs
+                rhs = stdBind $ castFunction : (rs' ++ vs')
+                sig = nest 4 (vsep [lhs <+> "=", rhs]) <> ";"
+            return (v, [sig])
+        return (d2, PoolDocs
+          { poolCompleteManifolds = mdoc : ms'
+          , poolExpr = call
+          , poolPriorLines = ps1 ++ ps2
+          , poolPriorExprs = pes1
+          })
 
-  f _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
+  f _ _ (ForeignInterfaceM _ _ _) = MM.throwError . CallTheMonkeys $
     "Foreign interfaces should have been resolved before passed to the translators"
 
-  f args (LamM manifoldArgs boundArgs body) = undefined -- do
-    -- p <- f (manifoldArgs <> boundArgs) e
-    -- return $ p { poolExpr = makeLambda boundArgs (poolExpr p) }
+  f _ _ (LamM _ _ _) = undefined
 
-    -- p <- f args body
-    -- idx <- MM.getCounter
-    -- let t = typeOfExprM body
-    --     lambdaName = "f" <> pretty idx
-    --     declaration = showTypeM recmap t <+> lambdaName <> tupled (map (makeArg recmap) lambdaArgs)
-    -- return $ p
-    --   { poolExpr = lambdaName
-    --   , poolPriorExprs = poolPriorExprs p <> [block 4 declaration (poolExpr p)]
-    --   }
+  f done args (AccM e k) = do
+    (d2, p) <- f done args e
+    return (d2, p {poolExpr = poolExpr p <> "." <> pretty k})
 
-  f args (AccM e k) = do
-    p <- f args e
-    return $ p {poolExpr = poolExpr p <> "." <> pretty k}
+  f done args (ListM _ es) = do
+    (done', es') <- statefulMapM (`f` args) done es
+    return (done', mergePoolDocs (encloseSep "{" "}" ",") es')
 
-  f args (ListM _ es) = mergePoolDocs (encloseSep "{" "}" ",") <$> mapM (f args) es
+  f done args (TupleM _ es) = do
+    (done', es') <- statefulMapM (`f` args) done es
+    return (done', mergePoolDocs (\xs -> "std::make_tuple" <> tupled xs) es')
 
-  f args (TupleM _ es) = mergePoolDocs (\es' -> "std::make_tuple" <> tupled es') <$> mapM (f args) es
-
-  f args (RecordM c entries) = do
+  f done args (RecordM c entries) = do
     idx <- MM.getCounter
     let t = showTypeM recmap c
         v' = "a" <> pretty idx
-    ps <- mapM (f args . snd) entries
+    (done', ps) <- statefulMapM (\s a -> f s args . snd $ a) done entries
     let decl = t <+> v' <+> "=" <+> encloseSep "{" "}" "," (map poolExpr ps) <> ";"
         p = mergePoolDocs (const v') ps
-    return $ p {poolPriorLines = poolPriorLines p <> [decl]}
+    return (done', p {poolPriorLines = poolPriorLines p <> [decl]})
 
-  f _ (BndVarM _ i) = return $ PoolDocs [] (bndNamer i) [] []
-  f _ (LetVarM _ i) = return $ PoolDocs [] (letNamer i) [] []
-  f _ (LogM _ x) = return $ PoolDocs [] (if x then "true" else "false") [] []
-  f _ (RealM _ x) = return $ PoolDocs [] (viaShow x) [] []
-  f _ (IntM _ x) = return $ PoolDocs [] (viaShow x) [] []
-  f _ (StrM _ x) = return $ PoolDocs [] (dquotes $ pretty x) [] []
-  f _ (NullM _) = return $ PoolDocs [] "null" [] []
+  f done _ (BndVarM _ i) = return (done, PoolDocs [] (bndNamer i) [] [])
+  f done _ (LetVarM _ i) = return (done, PoolDocs [] (letNamer i) [] [])
+  f done _ (LogM _ x) = return (done, PoolDocs [] (if x then "true" else "false") [] [])
+  f done _ (RealM _ x) = return (done, PoolDocs [] (viaShow x) [] [])
+  f done _ (IntM _ x) = return (done, PoolDocs [] (viaShow x) [] [])
+  f done _ (StrM _ x) = return (done, PoolDocs [] (dquotes $ pretty x) [] [])
+  f done _ (NullM _) = return (done, PoolDocs [] "null" [] [])
 
-  f args (ReturnM e) = do
-    p <- f args e
-    return $ p {poolExpr = "return(" <> poolExpr p <> ");"}
-translateManifold _ _ = error "Every ExprM object must start with a Manifold term"
+  f done args (ReturnM e) = do
+    (done', p) <- f done args e
+    return (done', p {poolExpr = "return(" <> poolExpr p <> ");"})
+translateManifold _ _ _ = error "Every ExprM object must start with a Manifold term"
 
 -- take a name from the source and return a new function name
 -- this must work even if there is a namespace, for example:
