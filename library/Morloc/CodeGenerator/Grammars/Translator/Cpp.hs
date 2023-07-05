@@ -375,14 +375,13 @@ translateManifold recmap done0 m0@(ManifoldM _ form0 _) = do
       , poolPriorExprs = pes1 <> pes2
       })
 
-  f done args (AppM (SrcM (Function inputs output) src) xs) = do
-    let name' = pretty $ srcName src
-        mangledName = mangleSourceName name'
-        inputBlock = cat (punctuate "," (map (showTypeM recmap) inputs))
-        sig = [idoc|#{showTypeM recmap output}(*#{mangledName})(#{inputBlock}) = &#{name'};|]
+  -- dropping the redefinition
+  f done args (AppM (SrcM (Function inputs _) src) xs) = do
     (d2, es) <- statefulMapM (`f` args) done xs
-    let m = mergePoolDocs (\xs' -> mangledName <> tupled xs') es
-    return (d2, m {poolPriorLines = sig : poolPriorLines m})
+    let name' = pretty $ srcName src
+        ts' = map (showTypeM recmap) inputs
+        m = mergePoolDocs (\xs' -> name' <> tupled (zipWith (\t x -> t <> parens x) ts' xs') ) es
+    return (d2, m {poolPriorLines = poolPriorLines m})
 
   f done _ (PoolCallM _ _ cmds args) = do
     let bufDef = "std::ostringstream s;"

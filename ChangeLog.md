@@ -64,6 +64,7 @@ handling for several very different languages (proofs-of-concept).
 
  * Infer concrete types from inferred general types when necessary and possible
  * More informative error messages 
+ * Fix template resolution in generated C++ code
  [ ] Add error if undefined functions are used in a composition
      [ ] When typechecking, raise error if they have no type signature
      [ ] When building, additionally raise error if they have no source (this is already done somewhere down the line)

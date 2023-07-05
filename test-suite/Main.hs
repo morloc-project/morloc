@@ -46,6 +46,8 @@ main = do
       , golden "argument-form-3-r" "argument-form-3-r"
 
       , golden "composition" "composition"
+      , golden "generic-hofs-1" "generic-hofs-1"
+      , golden "generic-hofs-2" "generic-hofs-2"
       , golden "eta-reduction-1" "eta-reduction-1"
       , golden "eta-reduction-2" "eta-reduction-2"
       , golden "eta-reduction-3" "eta-reduction-3"
