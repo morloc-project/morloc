@@ -70,7 +70,7 @@ import bio.algo
 import bio.tree
   ( Tree
   , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
-  , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , pullNode               -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   , mapLeaf
   )
@@ -124,7 +124,7 @@ analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
   = ( plotTree treefile
     . mapLeaf (\x -> x@accession)
-    . classify
+    . classify -- Tree string double meta
     . treeBy treeify
     . withSnds align
     . search config refmap
