@@ -55,6 +55,8 @@ main = do
       , golden "eta-reduction-5" "eta-reduction-5"
       , golden "eta-reduction-6" "eta-reduction-6"
       , golden "eta-reduction-7" "eta-reduction-7"
+      , golden "eta-reduction-8-py" "eta-reduction-8-py"
+      , golden "eta-reduction-8-cpp" "eta-reduction-8-cpp"
 
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"

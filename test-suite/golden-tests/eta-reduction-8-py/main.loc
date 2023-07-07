@@ -1,0 +1,10 @@
+module m (foo)
+
+import conventions (Tuple3, Int, Str, Bool)
+
+source Py from "foo.py" ("onThree" as onThree, "inc")
+
+onThree :: (a -> b -> c -> d) -> (a, b, c) -> d
+inc :: Int -> Int
+
+foo x y = onThree (\a b c -> (inc x, b)) (inc y, True, "hi")

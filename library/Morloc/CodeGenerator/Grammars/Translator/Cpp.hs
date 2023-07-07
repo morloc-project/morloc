@@ -435,6 +435,11 @@ translateManifold recmap done0 m0@(ManifoldM _ form0 _) = do
           (ManifoldPass _) -> return (mname, [])
           (ManifoldPart rs vs) -> do
             let v = mname <> "_fun"
+
+            MM.sayVVV $ "ManifoldPart" <+> v <> ":"
+                      <+> "\n  vs = " <> list (map pretty vs)
+                      <+> "\n  rs = " <> list (map pretty rs)
+
             lhs <- stdFunction recmap t vs |>> (<+> v)
             castFunction <- staticCast recmap t args mname
             let vs' = take

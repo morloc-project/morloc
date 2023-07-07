@@ -403,7 +403,7 @@ instance Pretty (ExprM f) where
 
     f (ManifoldM m form e) =
       let (ms', body) = f e
-          decl = manNamer m <> tupled (map pretty (manifoldArgs form))
+          decl = manNamer m <+> pretty form -- tupled (map pretty (manifoldArgs form))
           mdoc = block 4 decl body
       in (mdoc : ms', manNamer m)
     f (PoolCallM t _ cmds args) =

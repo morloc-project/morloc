@@ -661,8 +661,16 @@ parameterize' args (SAnno (One (LamS vs x, c@(Idx _ (FunP inputs _)))) m) = do
   ids <- MM.takeFromCounter (length inputs)
   let contextArgs = [r | r@(PreArgument _ v _) <- args, v `notElem` vs] -- remove shadowed arguments
       boundArgs = zipWith3 PreArgument ids vs inputs
+
+  MM.sayVVV $ "parameterize':"
+            <> "\n  ids:" <+> list (map pretty ids) 
+            <> "\n  vs:" <+> list (map pretty vs) 
+            <> "\n  inputs:" <+> list (map pretty inputs) 
+            <> "\n  contextArgs:" <+> list (map pretty contextArgs) 
+            <> "\n  boundArgs:" <+> list (map pretty boundArgs) 
+
   x' <- parameterize' (contextArgs ++ boundArgs) x
-  return $ SAnno (One (LamS vs x', (c, contextArgs))) m
+  return $ SAnno (One (LamS vs x', (c, contextArgs ++ boundArgs))) m
 -- LamS MUST have a functional type, deviations would have been caught by the typechecker
 parameterize' _ (SAnno (One (LamS _ _, _)) _) = error "impossible"
 parameterize' args (SAnno (One (AppS x xs, c)) m) = do
@@ -702,7 +710,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   -- application.
   -- ----
   -- lambda
-  express' True _ (SAnno (One (e@(LamS _ (SAnno (One (x, (Idx i c, _))) _)), (_, lambdaArgs))) lambdaIndex) = do
+  express' True _ (SAnno (One (e@(LamS vs (SAnno (One (x, (Idx i c, _))) _)), (_, lambdaArgs))) lambdaIndex) = do
     MM.sayVVV "express' LamS"
     peak e
     express' True c (SAnno (One (x, (Idx i c, lambdaArgs))) lambdaIndex)
@@ -870,11 +878,19 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
       chain (f:fs) x = chain fs (f x)
 
 
-  express' False _ (SAnno (One (LamS vs body@(SAnno (One (_, (_, bodyArgs))) _), (Idx _ lambdaType, manifoldArguments))) m) = do
+  express' False _ (SAnno (One (LamS vs body, (Idx _ lambdaType, manifoldArguments))) m) = do
     body' <- express' False lambdaType body
-    let nBound = length bodyArgs - length vs
-        contextArguments = [pass i | PreArgument i _ _ <- manifoldArguments]
-        boundArguments = [pass i | PreArgument i _ _ <- drop nBound bodyArgs]   -- arguments bound by the lambda
+
+    let contextArguments = [pass i | PreArgument i _ _ <- take (length manifoldArguments - length vs) manifoldArguments]
+        boundArguments = [pass i | PreArgument i _ _ <- drop (length contextArguments) manifoldArguments]
+
+    MM.sayVVV $ "Express lambda:" 
+              <> "\n  vs:" <+> pretty vs
+              <> "\n  lambdaType:" <+> pretty lambdaType
+              <> "\n  manifoldArguments:" <+> list (map pretty manifoldArguments)
+              <> "\n  contextArguments:" <+> list (map pretty contextArguments)
+              <> "\n  boundArguments" <+> list (map pretty boundArguments)
+
     return
       . ManifoldM m (ManifoldPart contextArguments boundArguments)
       . ReturnM
@@ -1207,29 +1223,52 @@ data Request = SerialContent | NativeContent
 instance Pretty Request where
     pretty = viaShow
 
+-- | This step is performed after segmentation. In `express`, all arguments were
+-- cast as passthrough. This was done because it is far easier to untangle
+-- serialization after segmentation, since only one language is involved. The
+-- input ExprM object represents a single expression in one language. Here the
+-- serialization forms are determined, from the serialized input to the
+-- serialized return values.
 reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
 reserialize x0@(ManifoldM m0 form0 e0) = do
     MM.sayVVV "reserialize"
     MM.sayVVV $ pretty x0
     MM.sayVVV $ "typemap:" <+> list (map pretty (Map.toList typemap))
+    -- all input is serialized
     let form1 = mapManifoldArgs serializeArgs form0
+
+    -- The scope is represented by a map from argument id to Argument object. It
+    -- stores all the outside values that are available to a given
+    -- expression. The initial scope consists of just the serialized arguments
+    -- passed to the pool.
     f m0 SerialContent (form2scope form1) (ManifoldM m0 form1 e0)
     where
+        -- A map from every argument id in this expression to its type.
+        -- The type may be Nothing, indicating it is a passthrough type.
         typemap = argumentType Map.empty x0
 
+        -- Convert all arguments to their serialized forms.
+        -- If they are already serialized, nothing changes.
         serializeArgs :: Argument -> Argument
         serializeArgs (argId -> i) =
             case Map.lookup i typemap of
                 (Just (Just t)) -> SerialArgument i t
                 _ -> PassThroughArgument i
 
+        -- Createa a scope for children from the arguments of the parent
         form2scope :: ManifoldForm -> Map.Map Int Argument
         form2scope form = Map.fromList [(argId r, r) | r <- manifoldArgs form]
 
+        -- Inherit an argument from the parent. The child argument ID is looked
+        -- up in scope and that argument replaces the child argument. This
+        -- converts the child serialization state to atch the parent.
         inheritScope :: Map.Map Int Argument -> Argument -> Argument
         inheritScope scope arg = case Map.lookup (argId arg) scope of
             (Just r) -> r
-            Nothing -> error . MT.unpack . render $ "inheritScope fail:" <+> pretty (Map.toList scope, arg)
+            -- If the argument is not in scope, then change nothing.
+            -- This will only occur for newly bound lambda variables for
+            -- manifolds that are passed as functions to source functions.
+            Nothing -> arg
 
         lambdaScope :: Argument -> Argument
         lambdaScope (argId -> i) = case Map.lookup i typemap of
@@ -1239,13 +1278,16 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
             -- the given language, but they are never used. So no need to serialize/deserialize them. Probably.
             Nothing -> PassThroughArgument i 
 
-        rescope :: Map.Map Int Argument -> ManifoldForm -> ManifoldForm
-        rescope _ form@(ManifoldPass _) = mapManifoldArgs lambdaScope form
-        rescope scope form@(ManifoldFull _) = mapManifoldArgs (inheritScope scope) form
-        rescope scope (ManifoldPart contextArgs boundArgs) =
+        rescope :: Map.Map Int Argument -> ManifoldForm -> MorlocMonad ManifoldForm
+        rescope _ form@(ManifoldPass _) = return $ mapManifoldArgs lambdaScope form
+        rescope scope form@(ManifoldFull _) = return $ mapManifoldArgs (inheritScope scope) form
+        rescope scope (ManifoldPart contextArgs boundArgs) = do
             let contextArgs' = map (inheritScope scope) contextArgs
                 boundArgs' = map lambdaScope boundArgs
-            in ManifoldPart contextArgs' boundArgs'
+            MM.sayVVV $ "rescope:"
+              <> "\n  contextArgs':" <+> list (map pretty contextArgs')
+              <> "\n  boundsArgs':" <+> list (map pretty boundArgs')
+            return $ ManifoldPart contextArgs' boundArgs'
 
         package :: Int -> Request -> TypeM -> ExprM Many -> MorlocMonad (ExprM Many)
         package m r t e = case (r, typeOfTypeM t) of
@@ -1258,8 +1300,8 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         f :: Int -> Request -> Map.Map Int Argument -> ExprM Many -> MorlocMonad (ExprM Many)
 
         f _ con scope (ManifoldM m form e) = do
-            let form' = rescope scope form
-                scope' = form2scope form'
+            form' <- rescope scope form
+            let scope' = form2scope form'
             e' <- f m con scope' e
             return $ ManifoldM m form' e'
 
@@ -1331,9 +1373,26 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         f _ _ _ e = return e
 reserialize _ = undefined
 
+-- | Map all arguments in an expression to their types. Lack of a type binding
+-- implies that the argument is passed through. This means the argument is
+-- passed through the segment in serilaized form and possibly passed to an
+-- outside segment where it may be deserialized and used.
 argumentType :: Map.Map Int (Maybe TypeP) -> ExprM Many -> Map.Map Int (Maybe TypeP)
 argumentType typemap (ManifoldM _ _ e) = argumentType typemap e
 argumentType typemap (LamM _ _ e) = argumentType typemap e
+-- Collect arguments bound in lambdas sent to source functions
+-- These are not used in the morloc source, so must be more manually extracted
+argumentType typemap (AppM (SrcM (Function ts _) _) es)
+    = foldl gatherPartials typemap (zip ts es)
+    where
+    gatherPartials
+        :: Map.Map Int (Maybe TypeP)
+        -> (TypeM, ExprM Many)
+        -> Map.Map Int (Maybe TypeP)
+    gatherPartials typemap' (Function inputTypes _, ManifoldM _ (ManifoldPart _ boundArgs) e) =
+        let typemap'' = foldl (\m (t, r) -> Map.insert (argId r) (typem2typep t) m) typemap' (zip inputTypes boundArgs)
+        in argumentType typemap'' e
+    gatherPartials typemap' (_, e) = argumentType typemap' e
 argumentType typemap (AppM e es) = foldl argumentType typemap (e:es) 
 argumentType typemap (BndVarM t i) = Map.insert i (typeOfTypeM t) typemap 
 argumentType typemap (AccM e _) = argumentType typemap e
@@ -1346,6 +1405,13 @@ argumentType typemap (ReturnM e) = argumentType typemap e
 argumentType typemap (SerializeM _ e) = argumentType typemap e
 argumentType typemap (DeserializeM _ e) = argumentType typemap e
 argumentType typemap _ = typemap
+
+typem2typep :: TypeM -> Maybe TypeP
+typem2typep Passthrough = Nothing
+typem2typep (Serial t) = Just t
+typem2typep (Native t) = Just t
+typem2typep (Function ts t) = FunP <$> mapM typem2typep ts <*> typem2typep t
+
 
 
 
