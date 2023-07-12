@@ -65,6 +65,7 @@ handling for several very different languages (proofs-of-concept).
  * Infer concrete types from inferred general types when necessary and possible
  * More informative error messages 
  * Fix template resolution in generated C++ code
+ * Fix include name shadowing conflict in generated C++ code
  [ ] Fix infinite loop raised from `type Cpp Unit = "Unit"` - see case study bug in nj code.
      This problem goes away when I add the namespace (i.e., "mlc:Unit"), but
      still infinite loops are bad.

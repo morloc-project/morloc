@@ -67,7 +67,7 @@ translate srcs es = do
   -- translate sources
   includeDocs <- mapM
     translateSource
-    (unique . catMaybes . map srcPath $ srcs)
+    (unique . mapMaybe srcPath $ srcs)
 
   -- diagnostics
   liftIO . putDoc . vsep $ "-- C++ translation --" : map pretty es
@@ -107,7 +107,7 @@ makeTheMaker srcs = do
   let flags' = map pretty flags
 
   -- TODO: This is garbage - the C++ version should NOT be specified here
-  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++17 -o #{outfile} #{src} #{hsep flags'} #{hsep incs}|]
+  let cmd = SysRun . Code . render $ [idoc|g++ --std=c++17 -o #{outfile} #{src} #{hsep flags'}|]
 
   return [cmd]
 
@@ -187,11 +187,14 @@ recordAccess record field = record <> "." <> field
 -- neater (no hard-coded local paths), but now the g++ compiler will search
 -- through all the module paths for each file, which introduces the possibility
 -- of name conflicts.
+--
+-- UPDATE: And now those naming conflicts have bitten me. Simply including every
+-- module directory is a wretched idea.
 translateSource
   :: Path -- ^ Path to a header (e.g., `$MORLOC_HOME/src/foo.h`)
   -> MorlocMonad MDoc
 translateSource path = return $
-  "#include" <+> (dquotes . pretty . MS.takeFileName) path
+  "#include" <+> (dquotes . pretty) path
 
 
 serialize
