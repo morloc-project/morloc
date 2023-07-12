@@ -1,0 +1,6 @@
+module baz (*)
+
+source Py from "main.hpp" ("mul")
+
+mul :: Real -> Real -> Real
+mul Py :: "float" -> "float" -> "float"

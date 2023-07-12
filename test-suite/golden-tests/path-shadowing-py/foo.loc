@@ -1,0 +1,6 @@
+module main (foo)
+
+import bar (add)
+import baz (mul)
+
+foo x = add x (mul 2.0 20.0)

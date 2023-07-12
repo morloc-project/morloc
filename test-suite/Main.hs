@@ -58,6 +58,10 @@ main = do
       , golden "eta-reduction-8-py" "eta-reduction-8-py"
       , golden "eta-reduction-8-cpp" "eta-reduction-8-cpp"
 
+      , golden "path-shadowing-c" "path-shadowing-c"
+      , golden "path-shadowing-py" "path-shadowing-py"
+      , golden "path-shadowing-r" "path-shadowing-r"
+
       , golden "argument-form-4-c" "argument-form-4-c"
       , golden "argument-form-4-py" "argument-form-4-py"
       , golden "argument-form-4-r" "argument-form-4-r"
