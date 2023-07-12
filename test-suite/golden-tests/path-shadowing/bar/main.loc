@@ -1,0 +1,6 @@
+module bar (*)
+
+source Cpp from "main.hpp" ("add")
+
+add :: Real -> Real -> Real
+add Cpp :: "double" -> "double" -> "double"
