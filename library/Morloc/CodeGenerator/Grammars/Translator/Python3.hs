@@ -350,7 +350,7 @@ argName (PassThroughArgument v) = bndNamer v
 makeDispatch :: [ExprM One] -> MDoc
 makeDispatch ms = align . vsep $
   [ align . vsep $ ["dispatch = {", indent 4 (vsep $ map entry ms), "}"]
-  , "f = dispatch[cmdID]"
+  , "__mlc_function__ = dispatch[cmdID]"
   ]
   where
     entry :: ExprM One -> MDoc
@@ -419,8 +419,8 @@ if __name__ == '__main__':
     except KeyError:
         sys.exit("Internal error in {}: no manifold found with id={}".format(sys.argv[0], cmdID))
 
-    result = f(*sys.argv[2:])
+    __mlc_result__ = __mlc_function__(*sys.argv[2:])
 
-    if result != "null":
-        print(result)
+    if __mlc_result__ != "null":
+        print(__mlc_result__)
 |]

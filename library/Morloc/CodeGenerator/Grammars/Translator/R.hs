@@ -407,16 +407,16 @@ args <- as.list(commandArgs(trailingOnly=TRUE))
 if(length(args) == 0){
   stop("Expected 1 or more arguments")
 } else {
-  cmdID <- args[[1]]
-  f_str <- paste0("m", cmdID)
-  if(exists(f_str)){
-    f <- eval(parse(text=paste0("m", cmdID)))
-    result <- do.call(f, args[-1])
+  mlc_pool_cmdID <- args[[1]]
+  mlc_pool_function_name <- paste0("m", mlc_pool_cmdID)
+  if(exists(mlc_pool_function_name)){
+    mlc_pool_function <- eval(parse(text=paste0("m", mlc_pool_cmdID)))
+    result <- do.call(mlc_pool_function, args[-1])
     if(result != "null"){
         cat(result, "\n")
     }
   } else {
-    cat("Could not find manifold '", cmdID, "'\n", file=stderr())
+    cat("Could not find manifold '", mlc_pool_cmdID, "'\n", file=stderr())
   }
 }
 |]

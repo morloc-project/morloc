@@ -66,6 +66,9 @@ handling for several very different languages (proofs-of-concept).
  * More informative error messages 
  * Fix template resolution in generated C++ code
  * Fix include name shadowing conflict in generated C++ code
+ * Partially fix naming conflict in Python and R pools caused by use of "f". My
+   solution was name mangling, though we need a more permanent solution to our
+   problem.
  [ ] Fix infinite loop raised from `type Cpp Unit = "Unit"` - see case study bug in nj code.
      This problem goes away when I add the namespace (i.e., "mlc:Unit"), but
      still infinite loops are bad.

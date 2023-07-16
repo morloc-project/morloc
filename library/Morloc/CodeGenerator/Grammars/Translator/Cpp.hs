@@ -527,7 +527,7 @@ argTypeM recmap (NativeArgument _ c) = showType recmap c
 argTypeM _ (PassThroughArgument _) = serialType
 
 makeDispatch :: [ExprM One] -> MDoc
-makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
+makeDispatch ms = block 4 "switch(std::stoi(argv[1]))" (vsep (map makeCase ms))
   where
     makeCase :: ExprM One -> MDoc
     makeCase (ManifoldM i form _) =
@@ -535,7 +535,7 @@ makeDispatch ms = block 4 "switch(cmdID)" (vsep (map makeCase ms))
       in
         (nest 4 . vsep)
           [ "case" <+> viaShow i <> ":"
-          , "result = " <> manNamer i <> tupled args' <> ";"
+          , "__mlc_result__ = " <> manNamer i <> tupled args' <> ";"
           , "break;"
           ]
     makeCase _ = error "Every ExprM must start with a manifold object"
@@ -884,12 +884,10 @@ using namespace std;
 
 int main(int argc, char * argv[])
 {
-    int cmdID;
-    #{serialType} result;
-    cmdID = std::stoi(argv[1]);
+    #{serialType} __mlc_result__;
     #{dispatch}
-    if(result != "null"){
-        std::cout << result << std::endl;
+    if(__mlc_result__ != "null"){
+        std::cout << __mlc_result__ << std::endl;
     }
     return 0;
 }
