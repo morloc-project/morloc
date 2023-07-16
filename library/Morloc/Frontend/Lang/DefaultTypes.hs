@@ -136,7 +136,7 @@ defaultNull lang@Nothing = [VarU (TV lang "Unit")]
 defaultNull lang@(Just Python3Lang) = [VarU (TV lang "None")]
 defaultNull lang@(Just RLang) = [VarU (TV lang "NULL")]
 defaultNull lang@(Just CLang) = [VarU (TV lang "void")] -- need to add Unit
-defaultNull lang@(Just CppLang) = [VarU (TV lang "Unit")] -- the Unit enum is from mlc.hpp in ~/.morloc/include
+defaultNull lang@(Just CppLang) = [VarU (TV lang "Unit")] -- the Unit enum is from mlccpptypes/prelude.hpp
 defaultNull lang@(Just RustLang) = [VarU (TV lang "<VOID>")] -- Rust doesn't have an explicit NULL
 defaultNull lang@(Just PerlLang) = [VarU (TV lang "NULL")]
 

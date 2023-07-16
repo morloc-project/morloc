@@ -265,7 +265,7 @@ handleFlagsAndPaths CppLang srcs = do
     $ [s | s <- srcs, srcLang s == CppLang]
 
   -- include the morloc home directory include folder
-  -- this should store the mlc.hpp file that defines Unit
+  -- this should store the mlccpptypes library that defines Unit
   home <- MM.asks configHome
   let mlcInclude = ["-I" <> home <> "/include"]
 
