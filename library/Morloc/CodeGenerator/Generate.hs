@@ -1083,6 +1083,8 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
   express' _ _ (SAnno (One (CallS src, _)) _)
     = MM.throwError . OtherError . render $ "Cannot export the value" <+> squotes (pretty (srcName src)) <+> "from a pool, you should define this in morloc code instead"
 
+  express' _ _ (SAnno (One (AppS (SAnno (One (VarS f, _)) _) _, _)) _) = MM.throwError . ConcreteTypeError $ FunctionSerialization f
+
   -- catch all exception case
   express' _ _ (SAnno (One (e, (Idx _ t, _))) m) = do
     MM.sayVVV "Bad case"
@@ -1091,7 +1093,7 @@ express s0@(SAnno (One (_, (Idx _ c0, _))) _) = do
     name' <- MM.metaName m
     case name' of
         (Just v) -> MM.throwError . ConcreteTypeError $ MissingConcreteSignature v (langOf' t)
-        Nothing ->  MM.throwError . ConcreteTypeError $ FunctionSerialization
+        Nothing ->  error "But I thought, I thought I fixed that?"
 
 
   -- partitions evaluation of expressions applied to a foreign pool between the

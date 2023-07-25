@@ -18,6 +18,7 @@ module Morloc.CodeGenerator.Grammars.Translator.R
 import Morloc.CodeGenerator.Namespace
 import Morloc.CodeGenerator.Serial (isSerializable, prettySerialOne, serialAstToType)
 import Morloc.CodeGenerator.Grammars.Common
+import Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.Monad as MM
@@ -317,6 +318,23 @@ typeSchema t = do
   json <- jsontype2rjson <$> type2jsontype t
   -- FIXME: Need to support single quotes inside strings
   return $ "'" <> json <> "'"
+  where
+
+  type2jsontype :: TypeP -> MorlocMonad JsonType
+  type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
+  type2jsontype (AppP (VarP (PV _ (Just gt) v)) ts)
+    -- see rmorlocinternal package where tuples, lists, and records are all
+    -- represented by the R list type
+    | Def.isTuple gt (length ts) = ArrJ "tuple" <$> mapM type2jsontype ts
+    | gt == Def.listG = ArrJ "list" <$> mapM type2jsontype ts
+    | otherwise = ArrJ v <$> mapM type2jsontype ts
+  type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
+  type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
+  type2jsontype (NamP _ (PV _ _ v) _ rs) = do
+    ts <- mapM (type2jsontype . snd) rs
+    return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
+  type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
+  type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
 
 jsontype2rjson :: JsonType -> MDoc
 jsontype2rjson (VarJ v) = dquotes (pretty v)

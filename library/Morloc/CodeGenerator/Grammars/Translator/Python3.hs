@@ -380,6 +380,16 @@ typeSchema t0 = f <$> type2jsontype t0
     var :: MT.Text -> MDoc
     var v = dquotes (pretty v)
 
+    type2jsontype :: TypeP -> MorlocMonad JsonType
+    type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
+    type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
+    type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
+    type2jsontype (NamP _ (PV _ _ v) _ rs) = do
+      ts <- mapM (type2jsontype . snd) rs
+      return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
+    type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
+    type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
+
 makePool :: MDoc -> [MDoc] -> [MDoc] -> MDoc -> MDoc
 makePool lib includeDocs manifolds dispatch = [idoc|#!/usr/bin/env python
 

@@ -62,15 +62,12 @@ record EntrezSearchConfig = EntrezSearchConfig
   , retmax :: Int
   }
 
-import bio.algo
-  ( align    -- align :: [Sequence] -> [Sequence]
-  , nj as treeify  -- treeify :: [Sequence] -> Tree () Real Int
-  )
+import bio.algo (upgma)
 
 import bio.tree
   ( Tree
   , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
-  , pullNode               -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
+  , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
   , mapLeaf
   )
@@ -81,7 +78,8 @@ import bio.db
   )
 
 import base
-  ( at        -- at :: [a] -> Int -> a
+  ( id
+  , at        -- at :: [a] -> Int -> a
   , map
   , ne
   , concat
@@ -102,10 +100,8 @@ import base
   , readMap   -- readMap :: Filename -> Map key val
   )
 
-import cppbase (id)
 
-
-source Py from "analysis-functions.py"
+source Py from "utilities.py"
   ( "parseRecord"
   , "labelRef"
   )
@@ -120,13 +116,12 @@ source R from "plot-tree.R" ("plotTree")
 plotTree :: Filename -> Tree n Real Str -> ()
 
 
-analysis :: Date -> Date -> Filename -> Filename -> ()
+-- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
-  = ( plotTree treefile
-    . mapLeaf (\x -> x@accession)
-    . classify -- Tree string double meta
-    . treeBy treeify
-    . withSnds align
+  -- = ( plotTree treefile
+  --   . mapLeaf (\x -> x@accession)
+  --   . classify -- Tree string double meta
+  = ( treeBy upgma
     . search config refmap
     ) query
   where
@@ -140,7 +135,7 @@ analysis mindate maxdate reffile treefile
     refmap = readMap reffile
 
 
-search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
+-- search :: EntrezSearchConfig -> Map Accession Clade -> Query -> [(Meta, Sequence)]
 search config refs query =
   ( map (onFst (labelRef refs))
   . concat

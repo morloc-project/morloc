@@ -27,8 +27,8 @@ import qualified Data.Map as Map
 import qualified Morloc.Frontend.Lang.DefaultTypes as Def
 import Morloc.Pretty (prettyPackMap)
 import Morloc.Data.Doc
-import Morloc.Typecheck.Internal (subtype, apply, unqualify, seeGamma, substitute)
--- import qualified Morloc.Data.Text as MT
+import Morloc.Typecheck.Internal (subtype, apply, unqualify, substitute)
+import qualified Morloc.Data.Text as MT
 
 defaultSerialType :: Lang -> TypeP
 defaultSerialType Python3Lang = VarP (PV Python3Lang (Just "Str") "str")
@@ -46,17 +46,11 @@ defaultListFirst t = head $ defaultListAll t
 defaultTupleFirst :: [TypeP] -> TypeP
 defaultTupleFirst ts = head $ defaultTupleAll ts
 
--- | An infinite line of dummies ...
-dummies :: Maybe Lang -> [TypeU]
-dummies lang = repeat $ VarU (TV lang "dummy")
-
 defaultListAll :: TypeP -> [TypeP]
 defaultListAll t@(langOf' -> lang)
   = [AppP (VarP $ PV lang (Just Def.listG) v) [t] | v <- Def.listC lang]
 
-isList (AppP (VarP (PV lang _ v)) [_]) =
-  let ds = Def.defaultList (Just lang) (head (dummies (Just lang)))
-  in not . null $ [v' | (AppU (VarU (TV _ v')) _) <- ds, v == v']
+isList (AppP (VarP (PV _ (Just generalName) _)) [_]) = generalName == Def.listG
 isList _ = False
 
 defaultTupleAll :: [TypeP] -> [TypeP]
@@ -69,7 +63,7 @@ defaultTupleAll ts@(t:_) =
 
 
 isTuple :: TypeP -> Bool
-isTuple (AppP (VarP (PV lang _ v)) (length -> i)) = v `elem` Def.tupleC i lang
+isTuple (AppP (VarP (PV _ (Just generalName) _)) (length -> i)) = Def.isTuple generalName i
 isTuple _ = False
 
 isPrimitiveType :: (Maybe Lang -> [TypeU]) -> TypeP -> Bool
@@ -178,7 +172,7 @@ makeSerialAST m t@(AppP (VarP v) ts@(t0:_))
 makeSerialAST m (NamP o n ps rs) = do
   ts <- mapM (makeSerialAST m . snd) rs
   return $ SerialObject o n ps (zip (map fst rs) ts)
-makeSerialAST _ _ = undefined
+makeSerialAST _ t = MM.throwError . SerializationError . render $ "makeSerialAST error on type:" <+> pretty t
 
 
 resolvePacker :: TypeP -> UnresolvedPacker -> MorlocMonad (Maybe TypePacker)

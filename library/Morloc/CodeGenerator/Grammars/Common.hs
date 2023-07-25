@@ -26,8 +26,6 @@ module Morloc.CodeGenerator.Grammars.Common
   , nargsTypeM
   , argsOf
   , arg2typeM
-  , type2jsontype
-  , jsontype2json
   , PoolDocs(..)
   , mergePoolDocs
   ) where
@@ -301,26 +299,6 @@ packExprM m e = do
     (Native t) -> SerializeM <$> MCS.makeSerialAST packers t <*> pure e
     -- (Function _ _) -> error "Cannot pack a function"
     _ -> return e
-
-type2jsontype :: TypeP -> MorlocMonad JsonType
-type2jsontype (VarP (PV _ _ v)) = return $ VarJ v
-type2jsontype (AppP (VarP (PV _ _ v)) ts) = ArrJ v <$> mapM type2jsontype ts
-type2jsontype (AppP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: complex AppP"
-type2jsontype (NamP _ (PV _ _ v) _ rs) = do
-  ts <- mapM (type2jsontype . snd) rs
-  return $ NamJ v (zip [k | (PV _ _ k, _) <- rs] ts) 
-type2jsontype (UnkP _) = MM.throwError . SerializationError $ "Invalid JSON type: UnkT"
-type2jsontype (FunP _ _) = MM.throwError . SerializationError $ "Invalid JSON type: cannot serialize function"
-
-jsontype2json :: JsonType -> MDoc
-jsontype2json (VarJ v) = dquotes (pretty v)
-jsontype2json (ArrJ v ts) = "{" <> key <> ":" <> val <> "}" where
-  key = dquotes (pretty v)
-  val = encloseSep "[" "]" "," (map jsontype2json ts)
-jsontype2json (NamJ v rs) = "{" <> dquotes (pretty v) <> ":" <> encloseSep "{" "}" "," rs' <> "}" where
-  keys = map (dquotes . pretty) (map fst rs) 
-  vals = map jsontype2json (map snd rs)
-  rs' = zipWith (\key val -> key <> ":" <> val) keys vals
 
 gmetaOf :: ExprM f -> GIndex
 gmetaOf (ManifoldM m _ _) = m

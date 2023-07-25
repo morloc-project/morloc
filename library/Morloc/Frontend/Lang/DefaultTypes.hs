@@ -42,6 +42,8 @@ module Morloc.Frontend.Lang.DefaultTypes
   , recordGC
   -- * functions for concrete synthesis
   , generalDefaultToConcrete
+  -- * determin if a type name is a tuple
+  , isTuple
   ) where
 
 import Morloc.Frontend.Namespace
@@ -78,9 +80,12 @@ defaultList lang@(Just l) t = [AppU (VarU (TV lang v)) [t] | v <- listC l]
 tupleG :: Int -> MT.Text
 tupleG i = MT.pack $ "Tuple" ++ show i
 
+isTuple :: MT.Text -> Int -> Bool
+isTuple generalName size = generalName == "Tuple" <> MT.show' size
+
 tupleC :: Int -> Lang -> [MT.Text]
 tupleC _ Python3Lang = ["tuple"]
-tupleC _ RLang = ["tuple"]
+tupleC _ RLang = ["list"]
 tupleC _ CLang = []
 tupleC i CppLang =
   let vars = ["$" <> MT.show' i' | i' <- [1..i]]

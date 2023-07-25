@@ -18,7 +18,6 @@ main = do
       , typeAliasTests
       , concreteTypeSynthesisTests
       , propertyTests
-      , jsontype2jsonTests
       , whereTests
       , orderInvarianceTests
       , whitespaceTests
@@ -120,6 +119,7 @@ main = do
       , golden "interop-4" "interop-4"
       , golden "interop-5" "interop-5"
       , golden "interop-6" "interop-6"
+      , golden "interop-7" "interop-7"
 
       , golden "manifold-form-0" "manifold-form-0"
       , golden "manifold-form-0x" "manifold-form-0x"

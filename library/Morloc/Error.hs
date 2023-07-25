@@ -130,4 +130,4 @@ instance Pretty TypeError where
   pretty (MissingFeature msg) = "MissingFeature: " <> pretty msg
   pretty (EmptyExpression e) = "EmptyExpression:" <+> squotes (pretty e) <+> "has no bound signature or expression"
   pretty InfiniteRecursion = "InfiniteRecursion"
-  pretty FunctionSerialization = "Maybe you are using a function that has not been defined? Ask the lazy-ass maintainer to improve the error messages."
+  pretty (FunctionSerialization v) = "Undefined function" <+> dquotes (pretty v) <> ", did you forget an import?"
