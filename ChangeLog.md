@@ -70,6 +70,7 @@ handling for several very different languages (proofs-of-concept).
    solution was name mangling, though we need a more permanent solution to our
    problem.
  * Let user write correct "list" R types for lists, tuples, and records
+ * Fix bug in code generation of lets
  [ ] Fix infinite loop raised from `type Cpp Unit = "Unit"` - see case study bug in nj code.
      This problem goes away when I add the namespace (i.e., "mlc:Unit"), but
      still infinite loops are bad.

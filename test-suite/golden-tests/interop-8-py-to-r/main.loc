@@ -1,0 +1,18 @@
+module m (foo)
+
+type R Bool = "logical"
+type R (List a) = "list" a
+
+type Py Bool = "bool"
+type Py (List a) = "list" a
+
+source R from "foo.R" ("g")
+source Py from "foo.py" ("f")
+
+f :: Bool -> Bool
+
+g :: (n -> a -> a) -> a -> n -> a
+
+bar = g (\n a -> [n]) []
+
+foo = bar . f

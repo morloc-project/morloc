@@ -95,13 +95,6 @@ argsOf (DeserializeM _ x) = argsOf x
 argsOf (ReturnM x) = argsOf x
 argsOf _ = Set.empty
 
--- recordPVar :: TypeP -> MDoc
--- recordPVar (VarP (PV _ _ v)) = pretty v
--- recordPVar (UnkP (PV _ _ v)) = pretty v
--- recordPVar (FunP _ _) = "<FunP>" -- illegal value
--- recordPVar (AppP _ _) = "<AppP>" -- illegal value
--- recordPVar (NamP _ (PV _ _ v) _ _) = pretty v
-
 -- see page 112 of my super-secret notes ...
 -- example:
 -- > f [g x, 42] (h 1 [1,2])
@@ -113,72 +106,102 @@ argsOf _ = Set.empty
 -- >          in f a1 a3
 -- expression inversion will not alter expression type
 invertExprM :: ExprM f -> MorlocMonad (ExprM f)
-invertExprM (ManifoldM m form e) = do
-  MM.startCounter
-  e' <- invertExprM e
-  return $ ManifoldM m form e'
-invertExprM (LetM v e1 e2) = do
-  e2' <- invertExprM e2
-  return $ LetM v e1 e2'
-invertExprM (AppM c@(PoolCallM _ _ _ _) es) = do
-  es' <- mapM invertExprM es
-  return $ foldl dependsOn (AppM c (map terminalOf es')) es'
-invertExprM (PoolCallM t i cmds args) = do
-  v <- MM.getCounter
-  return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
-invertExprM e@(AppM f es) = do
-  f' <- invertExprM f
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let t = typeOfExprM e
-      appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
-  return $ foldl dependsOn appM' (f':es') 
--- A LamM will generate a new function declaration in the output code. This
--- function will be like a manifold, but lighter, since at the moment the only
--- thing it is used for is wrapping higher order functions that call external manifolds.
-invertExprM (LamM contextArgs boundArgs body) = do
-  -- restart the counter, this is NOT a lambda expression so variables are NOT
-  -- in the parent scope, the body will be in a fresh function declaration and
-  -- this function will be called with
-  -- arguments `vs`
-  MM.startCounter
-  LamM contextArgs boundArgs <$> invertExprM body
-invertExprM (AccM e k) = do
-  e' <- invertExprM e
-  return $ dependsOn (AccM (terminalOf e') k) e'
-invertExprM (ListM c es) = do
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (TupleM c es) = do
-  es' <- mapM invertExprM es
-  v <- MM.getCounter
-  let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (RecordM c entries) = do
-  es' <- mapM (invertExprM . snd) entries
-  v <- MM.getCounter
-  let entries' = zip (map fst entries) (map terminalOf es')
-      e = LetM v (RecordM c entries') (LetVarM c v)
-      e' = foldl dependsOn e es'
-  return e'
-invertExprM (SerializeM p e) = do
-  e' <- invertExprM e
-  v <- MM.getCounter
-  let t' = packTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (SerializeM p (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (DeserializeM p e) = do
-  e' <- invertExprM e
-  v <- MM.getCounter
-  let t' = unpackTypeM $ typeOfExprM e
-  return $ dependsOn (LetM v (DeserializeM p (terminalOf e')) (LetVarM t' v)) e'
-invertExprM (ReturnM e) = do
-  e' <- invertExprM e
-  return $ dependsOn (ReturnM (terminalOf e')) e'
-invertExprM e = return e
+invertExprM e0 = do
+  MM.setCounter (maxLetIndex e0)
+  invertExprM' e0
+  where
+
+  invertExprM' :: ExprM f -> MorlocMonad (ExprM f)
+  invertExprM' (ManifoldM m form e) = do
+    -- There may already be let expressions in this manifold.
+    -- If so, we want to start our index, which is used for assigning unique
+    -- names, to the max let index + 1.
+    e' <- invertExprM' e
+    MM.sayVVV "invertExprM' ManifoldM"
+    return $ ManifoldM m form e'
+  invertExprM' (LetM v e1 e2) = do
+    e1' <- invertExprM' e1
+    e2' <- invertExprM' e2
+    MM.sayVVV "invertExprM' LetM"
+    return $ LetM v e1' e2'
+  invertExprM' (AppM c@(PoolCallM _ _ _ _) es) = do
+    es' <- mapM invertExprM' es
+    MM.sayVVV "invertExprM' AppM"
+    return $ foldl dependsOn (AppM c (map terminalOf es')) es'
+  invertExprM' (PoolCallM t i cmds args) = do
+    v <- MM.getCounter
+    MM.sayVVV $ "invertExprM' PoolCallM" <+> pretty v
+    return $ LetM v (PoolCallM t i cmds args) (LetVarM t v)
+  invertExprM' e@(AppM f es) = do
+    f' <- invertExprM' f
+    es' <- mapM invertExprM' es
+    v <- MM.getCounter
+    let t = typeOfExprM e
+        appM' = LetM v (AppM (terminalOf f') (map terminalOf es')) (LetVarM t v)
+    MM.sayVVV $ "invertExprM' AppM" <+> pretty v
+    return $ foldl dependsOn appM' (f':es') 
+  invertExprM' (LamM contextArgs boundArgs body) = do
+    MM.sayVVV "invertExprM' LamM"
+    LamM contextArgs boundArgs <$> invertExprM' body
+  invertExprM' (AccM e k) = do
+    e' <- invertExprM' e
+    MM.sayVVV "invertExprM' AccM"
+    return $ dependsOn (AccM (terminalOf e') k) e'
+  invertExprM' (ListM c es) = do
+    es' <- mapM invertExprM' es
+    v <- MM.getCounter
+    let e = LetM v (ListM c (map terminalOf es')) (LetVarM c v)
+        e' = foldl dependsOn e es'
+    MM.sayVVV $ "invertExprM' ListM" <+> pretty v
+    return e'
+  invertExprM' (TupleM c es) = do
+    es' <- mapM invertExprM' es
+    v <- MM.getCounter
+    let e = LetM v (TupleM c (map terminalOf es')) (LetVarM c v)
+        e' = foldl dependsOn e es'
+    MM.sayVVV $ "invertExprM' TupleM" <+> pretty v
+    return e'
+  invertExprM' (RecordM c entries) = do
+    es' <- mapM (invertExprM' . snd) entries
+    v <- MM.getCounter
+    let entries' = zip (map fst entries) (map terminalOf es')
+        e = LetM v (RecordM c entries') (LetVarM c v)
+        e' = foldl dependsOn e es'
+    MM.sayVVV $ "invertExprM' RecordM" <+> pretty v
+    return e'
+  invertExprM' (SerializeM p e) = do
+    e' <- invertExprM' e
+    v <- MM.getCounter
+    let t' = packTypeM $ typeOfExprM e
+    MM.sayVVV $ "invertExprM' SerializeM" <+> pretty v
+    return $ dependsOn (LetM v (SerializeM p (terminalOf e')) (LetVarM t' v)) e'
+  invertExprM' (DeserializeM p e) = do
+    e' <- invertExprM' e
+    let t' = unpackTypeM $ typeOfExprM e
+    v <- MM.getCounter
+    MM.sayVVV $ "invertExprM' DeserializeM" <+> pretty v
+    return $ dependsOn (LetM v (DeserializeM p (terminalOf e')) (LetVarM t' v)) e'
+  invertExprM' (ReturnM e) = do
+    e' <- invertExprM' e
+    MM.sayVVV "invertExprM' ReturnM"
+    return $ dependsOn (ReturnM (terminalOf e')) e'
+  invertExprM' e = do
+    MM.sayVVV "invertExprM' e"
+    return e
+
+maxLetIndex :: ExprM f -> Int
+maxLetIndex (LetM i e1 e2) = foldl max (i + 1) [maxLetIndex e1, maxLetIndex e2] 
+maxLetIndex (AppM e es) = foldl max (maxLetIndex e) (map maxLetIndex es)
+maxLetIndex (LamM _ _ e) = maxLetIndex e
+maxLetIndex (AccM e _) = maxLetIndex e
+maxLetIndex (LetVarM _ i) = i + 1
+maxLetIndex (ListM _ es) = foldl max 0 $ map maxLetIndex es
+maxLetIndex (TupleM _ es) = foldl max 0 $ map maxLetIndex es
+maxLetIndex (RecordM _ rs) = foldl max 0 $ map (maxLetIndex . snd) rs
+maxLetIndex (SerializeM _ e) = maxLetIndex e
+maxLetIndex (DeserializeM _ e) = maxLetIndex e
+maxLetIndex (ReturnM e) = maxLetIndex e
+maxLetIndex _ = 0
 
 -- transfer all let-dependencies from y to x
 --
