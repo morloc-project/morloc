@@ -65,7 +65,7 @@ record EntrezSearchConfig = EntrezSearchConfig
 import bio.algo (upgma)
 
 import bio.tree
-  ( Tree
+  ( RootedTree
   , treeBy             -- treeBy :: ([b] -> Tree n e Int) -> [(l, b)] -> Tree n e l
   , pullNode           -- pull :: (l -> n') -> ([n'] -> n') -> Tree n e l -> Tree n' e l
   , mapChildWithParent -- mapChildWithParent :: (n -> n') -> (n' -> n -> n') -> Tree n e l -> Tree n' e l
@@ -113,15 +113,15 @@ labelRef :: Map Accession Clade -> Meta -> Meta
 
 source R from "plot-tree.R" ("plotTree")
 
-plotTree :: Filename -> Tree n Real Str -> ()
+plotTree :: Filename -> RootedTree n Real Str -> ()
 
 
 -- analysis :: Date -> Date -> Filename -> Filename -> ()
 analysis mindate maxdate reffile treefile
-  -- = ( plotTree treefile
-  --   . mapLeaf (\x -> x@accession)
-  --   . classify -- Tree string double meta
-  = ( treeBy upgma
+  = ( plotTree treefile
+    . mapLeaf (\x -> x@accession)
+    . classify -- Tree string double meta
+    . treeBy upgma
     . search config refmap
     ) query
   where
@@ -149,7 +149,7 @@ search config refs query =
   ) query
 
 
-classify :: Tree n e Meta -> Tree Str e Meta
+classify :: RootedTree n e Meta -> RootedTree Str e Meta
 classify = push . pullNode pullLeaf pullClade where
 
   pullLeaf leaf = leaf@clade
