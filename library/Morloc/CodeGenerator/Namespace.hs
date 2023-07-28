@@ -399,7 +399,7 @@ instance Pretty (ExprM f) where
 
     prettyExpr = case f e0 of
         ([], x) -> x
-        (xs, _) -> (vsep . punctuate line $ xs) <> line
+        (xs, _) -> (vsep . punctuate (line <> line) $ xs) <> line
 
     f (ManifoldM m form e) =
       let (ms', body) = f e
@@ -420,32 +420,33 @@ instance Pretty (ExprM f) where
       let (ms', fun') = f fun
           (mss', xs') = unzip $ map f xs
       in (ms' ++ concat mss', "AppM" <> tupled (fun':xs'))
-    f (SrcM _ src) = ([], pretty (srcName src))
-    f (LamM manifoldArgs boundArgs e) =
+    f (SrcM t src) = ([], pretty (srcName src) <+> "::" <+> parens (pretty t))
+    f (LamM contextArgs boundArgs e) =
       let (ms', e') = f e
-          vsFull = map pretty manifoldArgs <> map pretty boundArgs
-          vsNames = map (\r -> "x" <> pretty (argId r)) (manifoldArgs <> boundArgs)
+          vsFull = map pretty contextArgs <> map pretty boundArgs
+          vsNames = map (\r -> "x" <> pretty (argId r)) (contextArgs <> boundArgs)
       in (ms', "\\ " <+> hsep (punctuate "," vsFull) <> "->" <+> e' <> tupled vsNames)
     f (BndVarM t i) = ([], "x" <> pretty i <> tupled [pretty t])
     f (LetVarM t i) = ([], "a" <> pretty i <> tupled [pretty t])
     f (AccM e k) =
       let (ms, e') = f e
       in (ms, parens e' <> "@" <> pretty k)
-    f (ListM _ es) =
+    f (ListM t es) =
       let (mss', es') = unzip $ map f es
-      in (concat mss', list es')
-    f (TupleM _ es) =
+          expr = list es' <+> "::" <+> parens (pretty t)
+      in (concat mss', expr)
+    f (TupleM t es) =
       let (mss', es') = unzip $ map f es
-      in (concat mss', tupled es')
+      in (concat mss', tupled es' <+> "::" <+> parens (pretty t))
     f (RecordM c entries) =
       let (mss', es') = unzip $ map (f . snd) entries
           entries' = zipWith (\k v -> pretty k <> "=" <> v) (map fst entries) es'
-      in (concat mss', prettyRecordPVar c <+> "{" <> tupled entries' <> "}")
-    f (LogM _ x) = ([], if x then "true" else "false")
-    f (RealM _ x) = ([], viaShow x)
-    f (IntM _ x) = ([], viaShow x)
-    f (StrM _ x) = ([], dquotes $ pretty x)
-    f (NullM _) = ([], "null")
+      in (concat mss', block 4 (prettyRecordPVar c) (vsep entries'))
+    f (LogM t x) = ([], (if x then "true" else "false") <+> "::" <+> parens (pretty t))
+    f (RealM t x) = ([], viaShow x <+> "::" <+> parens (pretty t))
+    f (IntM t x) = ([], viaShow x <+> "::" <+> parens (pretty t))
+    f (StrM t x) = ([], dquotes (pretty x) <+> "::" <+> parens (pretty t))
+    f (NullM t) = ([], "null" <+> "::" <+> parens (pretty t))
     f (SerializeM _ e) =
       let (ms, e') = f e
       in (ms, "PACK" <> tupled [e'])
@@ -483,7 +484,7 @@ prettyGenTypeP (NamP o (PV _ Nothing _) ps rs)
 
 instance Pretty TypeM where
   pretty Passthrough = "Passthrough"
-  pretty (Serial c) = "Serial<" <> pretty c <> ">"
-  pretty (Native c) = "Native<" <> pretty c <> ">"
+  pretty (Serial c) = "Serial{" <> pretty c <> "}"
+  pretty (Native c) = "Native{" <> pretty c <> "}"
   pretty (Function ts t) =
-    "Function<" <> hsep (punctuate "->" (map pretty (ts ++ [t]))) <> ">"
+    nest 4 (vsep $ ["Function{"] <> map (\x -> pretty x <+> "->") ts <> [pretty t <> "}"] )

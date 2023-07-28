@@ -118,6 +118,8 @@ generate gASTs rASTs = do
     >>= mapM segment |>> concat
     -- specify serialization across each segment
     >>= mapM reserialize
+    -- Print diagnostics on each segment
+    >>= mapM viewSegment
     -- Gather segments into pools, currently this entails gathering all
     -- segments from a given language into one pool. Later it may be more
     -- nuanced.
@@ -218,6 +220,7 @@ realize s0 = do
         let pairss = [ (minPairs . concat) [xs'' | (_, Idx _ xs'') <- xs']
                      | SAnno (Many xs') _ <- xs]
             langs' = unique (langs <> concatMap (map fst) pairss)
+        -- Got 10 billion nodes in your AST? I didn't think so, so don't say my sentinal's ugly.
         in [(l1, sum [ minimumDef 999999999 [ score + Lang.pairwiseCost l1 l2
                                | (l2, score) <- pairs]
                      | pairs <- pairss])
@@ -634,8 +637,8 @@ parameterize' _ (SAnno (One (RealS x, c)) m) = return $ SAnno (One (RealS x, (c,
 parameterize' _ (SAnno (One (IntS x, c)) m) = return $ SAnno (One (IntS x, (c, []))) m
 parameterize' _ (SAnno (One (LogS x, c)) m) = return $ SAnno (One (LogS x, (c, []))) m
 parameterize' _ (SAnno (One (StrS x, c)) m) = return $ SAnno (One (StrS x, (c, []))) m
-parameterize' args (SAnno (One (VarS v, c)) m) = do
-  let args' = [r | r@(PreArgument _ v' _) <- args, v' == v]
+parameterize' args (SAnno (One (VarS v, c@(Idx _ varType))) m) = do
+  let args' = [PreArgument i' v' varType | (PreArgument i' v' _) <- args, v' == v]
   return $ SAnno (One (VarS v, (c, args'))) m
 parameterize' _ (SAnno (One (CallS src, c)) m) = do
   return $ SAnno (One (CallS src, (c, []))) m
@@ -1125,11 +1128,6 @@ equalZipWith f xs ys
     | length xs == length ys = zipWith f xs ys
     | otherwise = error . MT.unpack . render $ "Unequal lengths in equalZipWith:" <+> "xs=" <> list (map pretty xs) <+> "ys=" <> list (map pretty ys)
 
-argument2ExprM :: Argument -> ExprM f
-argument2ExprM (SerialArgument i t) = BndVarM (Serial t) i
-argument2ExprM (NativeArgument i t) = BndVarM (Native t) i
-argument2ExprM (PassThroughArgument i) = BndVarM Passthrough i
-
 pass :: Int -> Argument
 pass = PassThroughArgument
 
@@ -1235,7 +1233,7 @@ reserialize :: ExprM Many -> MorlocMonad (ExprM Many)
 reserialize x0@(ManifoldM m0 form0 e0) = do
     MM.sayVVV "reserialize"
     MM.sayVVV $ pretty x0
-    MM.sayVVV $ "typemap:" <+> list (map pretty (Map.toList typemap))
+    MM.sayVVV $ "typemap:" <+> list [tupled [pretty k, list (map pretty (Set.toList vs))] | (k,vs) <- Map.toList typemap]
     -- all input is serialized
     let form1 = mapManifoldArgs serializeArgs form0
 
@@ -1254,8 +1252,11 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         serializeArgs :: Argument -> Argument
         serializeArgs (argId -> i) =
             case Map.lookup i typemap of
-                (Just (Just t)) -> SerialArgument i t
-                _ -> PassThroughArgument i
+                (Just (Set.toList -> [])) -> PassThroughArgument i
+                (Just (Set.toList -> [t])) -> SerialArgument i t
+                -- (Just (Set.toList -> ts)) -> SerialArgument i (head (reverse ts)) -- FIXME stub, don't head
+                (Just _) -> error . MT.unpack . render $ "Multiple argument types:" <+> viaShow typemap
+                Nothing -> PassThroughArgument i
 
         -- Createa a scope for children from the arguments of the parent
         form2scope :: ManifoldForm -> Map.Map Int Argument
@@ -1274,8 +1275,11 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
 
         lambdaScope :: Argument -> Argument
         lambdaScope (argId -> i) = case Map.lookup i typemap of
-            (Just (Just t)) -> NativeArgument i t
-            (Just Nothing) -> PassThroughArgument i
+            (Just (Set.toList -> [])) -> PassThroughArgument i
+            (Just (Set.toList -> [t])) -> NativeArgument i t
+            -- (Just (Set.toList -> ts)) -> NativeArgument i (head (reverse ts)) -- FIXME stub, don't head
+            (Just _) -> error . MT.unpack . render $ "Multiple argument types for native:" <+> viaShow typemap
+
             -- this case occurs for arguments that are passed but never used their types may be inferrable in
             -- the given language, but they are never used. So no need to serialize/deserialize them. Probably.
             Nothing -> PassThroughArgument i 
@@ -1375,11 +1379,73 @@ reserialize x0@(ManifoldM m0 form0 e0) = do
         f _ _ _ e = return e
 reserialize _ = undefined
 
+viewSegment :: ExprM Many -> MorlocMonad (ExprM Many)
+viewSegment e0 = do
+    MM.say "--- writing segment ---"
+    MM.say $ pretty e0
+    MM.say "--- segment complete ---"
+    return e0
+
+-- -- Recurse to the tips of the trees to grab the correct argument types, pull
+-- -- them up the tree. Why is this necessary? If prior functions had done their
+-- -- jobs correctly, this fix would not be needed.
+-- pullTypes :: ExprM Many -> MorlocMonad (ExprM Many)
+-- pullTypes e0 = push' (pull' e0) e0 where
+--     pull' :: ExprM Many -> Map.Map Int TypeP
+--     pull' (ManifoldM _ _ e) = pull' e
+--     pull' (ForeignInterfaceM _ _ e) = pull' e
+--     pull' (LetM _ e1 e2) = Map.union (pull' e1) (pull' e2)
+--     pull' (AppM e es) = Map.unions (map pull' (e:es))
+--     pull' (LamM _ _ e) = pull' e
+--     pull' (BndVarM (Serial t) i) = Map.singleton i t
+--     pull' (BndVarM (Native t) i) = Map.singleton i t
+--     pull' (AccM e _) = pull' e
+--     pull' (ListM _ es) = Map.unions (map pull' es)
+--     pull' (TupleM _ es) = Map.unions (map pull' es)
+--     pull' (RecordM _ rs) = Map.unions (map (pull' . snd) rs)
+--     pull' (SerializeM _ e) = pull' e
+--     pull' (DeserializeM _ e) = pull' e
+--     pull' (ReturnM e) = pull' e
+--     pull' _ = Map.empty
+--
+--     push' :: Map.Map Int TypeP -> ExprM Many -> MorlocMonad (ExprM Many)
+--     push' m (ManifoldM i form e) = ManifoldM i (updateForm m form) <$> push' m e
+--     push' m (ForeignInterfaceM t vs e) = ForeignInterfaceM t vs <$> push' m e
+--     push' m (PoolCallM t i ms args) = return $ PoolCallM t i ms (map (updateArgument m) args)
+--     push' m (LetM i e1 e2) = LetM i <$> push' m e1 <*> push' m e2
+--     push' m (AppM e es) = AppM <$> push' m e <*> mapM (push' m) es
+--     push' m (LamM contextArgs lambdaArgs e) = LamM (map (updateArgument m) contextArgs)
+--                                                    (map (updateArgument m) lambdaArgs) <$> push' m e
+--     push' m (AccM e key) = AccM <$> push' m e <*> pure key
+--     push' m (ListM t es) = ListM t <$> mapM (push' m) es
+--     push' m (TupleM t es) = TupleM t <$> mapM (push' m) es
+--     push' m (RecordM t rs) = do
+--         es' <- mapM (push' m . snd) rs
+--         return $ RecordM t (zip (map fst rs) es')
+--     push' m (SerializeM s e) = SerializeM s <$> push' m e
+--     push' m (DeserializeM s e) = DeserializeM s <$> push' m e
+--     push' m (ReturnM e) = ReturnM <$> push' m e
+--     push' _ e = return e
+--
+--     replaceType :: Maybe TypeP -> Argument -> Argument
+--     replaceType (Just t) (SerialArgument i _) = SerialArgument i t
+--     replaceType (Just t) (NativeArgument i _) = NativeArgument i t
+--     replaceType _ r = r
+--
+--     updateForm :: Map.Map Int TypeP -> ManifoldForm -> ManifoldForm
+--     updateForm m (ManifoldPass args) = ManifoldPass (map (updateArgument m) args)
+--     updateForm m (ManifoldFull args) = ManifoldFull (map (updateArgument m) args)
+--     updateForm m (ManifoldPart contextArgs boundArgs) = ManifoldPart (map (updateArgument m) contextArgs)
+--                                                                      (map (updateArgument m) boundArgs)
+--
+--     updateArgument :: Map.Map Int TypeP -> Argument -> Argument
+--     updateArgument m arg = replaceType (Map.lookup (argId arg) m) arg
+
 -- | Map all arguments in an expression to their types. Lack of a type binding
 -- implies that the argument is passed through. This means the argument is
 -- passed through the segment in serilaized form and possibly passed to an
 -- outside segment where it may be deserialized and used.
-argumentType :: Map.Map Int (Maybe TypeP) -> ExprM Many -> Map.Map Int (Maybe TypeP)
+argumentType :: Map.Map Int (Set.Set TypeP) -> ExprM Many -> Map.Map Int (Set.Set TypeP)
 argumentType typemap (ManifoldM _ _ e) = argumentType typemap e
 argumentType typemap (LamM _ _ e) = argumentType typemap e
 -- Collect arguments bound in lambdas sent to source functions
@@ -1388,18 +1454,18 @@ argumentType typemap (AppM (SrcM (Function ts _) _) es)
     = foldl gatherPartials typemap (zip ts es)
     where
     gatherPartials
-        :: Map.Map Int (Maybe TypeP)
+        :: Map.Map Int (Set.Set TypeP)
         -> (TypeM, ExprM Many)
-        -> Map.Map Int (Maybe TypeP)
+        -> Map.Map Int (Set.Set TypeP)
     gatherPartials typemap' (Function inputTypes _, ManifoldM _ (ManifoldPart _ boundArgs) e) =
-        let typemap'' = foldl (\m (t, r) -> Map.insert (argId r) (typem2typep t) m) typemap' (zip inputTypes boundArgs)
+        let typemap'' = foldl (\m (t, r) -> insertList (argId r) (typem2typep t) m) typemap' (zip inputTypes boundArgs)
         in argumentType typemap'' e
     gatherPartials typemap' (_, e) = argumentType typemap' e
 argumentType typemap (AppM e es) = foldl argumentType typemap (e:es) 
-argumentType typemap (BndVarM t i) = Map.insert i (typeOfTypeM t) typemap 
+argumentType typemap (BndVarM t i) = insertList i (typeOfTypeM t) typemap 
 argumentType typemap (AccM e _) = argumentType typemap e
 argumentType typemap (LetM _ v e) = foldl argumentType typemap [v, e]
-argumentType typemap (LetVarM t i) = Map.insert i (typeOfTypeM t) typemap
+argumentType typemap (LetVarM t i) = insertList i (typeOfTypeM t) typemap
 argumentType typemap (ListM _ es) = foldl argumentType typemap es
 argumentType typemap (TupleM _ es) = foldl argumentType typemap es
 argumentType typemap (RecordM _ rs) = foldl argumentType typemap (map snd rs)
@@ -1407,6 +1473,10 @@ argumentType typemap (ReturnM e) = argumentType typemap e
 argumentType typemap (SerializeM _ e) = argumentType typemap e
 argumentType typemap (DeserializeM _ e) = argumentType typemap e
 argumentType typemap _ = typemap
+
+insertList :: (Ord a, Ord b) =>  a -> Maybe b -> Map.Map a (Set.Set b) -> Map.Map a (Set.Set b) 
+insertList _ Nothing m = m
+insertList a (Just b) m = Map.insertWith Set.union a (Set.singleton b) m
 
 typem2typep :: TypeM -> Maybe TypeP
 typem2typep Passthrough = Nothing

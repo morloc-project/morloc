@@ -1,0 +1,11 @@
+module main (foo)
+
+type Py Real = "float"
+type R Real = "numeric"
+type Cpp Real = "double"
+
+import pybase (div)
+import rbase (mul)
+import cppbase (add)
+
+foo x = div (add (mul 20.0 x) x) 10.0

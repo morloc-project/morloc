@@ -115,6 +115,10 @@ main = do
       , golden "interop-3e-pr" "interop-3e-pr"
       , golden "interop-3e-rc" "interop-3e-rc"
       , golden "interop-3e-pp" "interop-3e-pp"
+
+      -- 3f - test serialization type bug
+      , golden "interop-3f" "interop-3f"
+
       -- other random interop tests (I should kill them)
       , golden "interop-4" "interop-4"
       , golden "interop-5" "interop-5"
