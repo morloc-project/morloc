@@ -23,12 +23,15 @@ module Morloc.Internal
   , module Control.Monad.IO.Class
   , module Data.Monoid
   , module Data.Bifunctor
+  , module Data.Traversable
   -- Data.Char characters
   , isUpper
   , isLower
   -- ** selected functions from Data.Foldable
   , foldlM
   , foldrM
+  -- ** extra Map functions
+  , mapKeysM
   -- ** selected functions from Data.Tuple.Extra
   , uncurry3
   , curry3
@@ -45,6 +48,7 @@ module Morloc.Internal
   , mapFold
   , mapSum
   , mapSumWith
+  , catEither
   -- ** safe versions of errant functions
   , module Safe
   , maximumOnMay
@@ -55,11 +59,18 @@ module Morloc.Internal
   , statefulMap
   , statefulMapM
   , filterApart
+  -- ** Zip functions that fail on inputs of unequal length. These should be
+  -- used when unequal lengths implies a compiler bug. In a better world, the
+  -- typechecker would catch these issues before failing here.
+  , equalZip
+  , equalZipWith
+  , equalZipWithM
   ) where
 
 -- Don't import anything from Morloc here. This module should be VERY lowest
 -- in the hierarchy, to avoid circular dependencies, since the lexer needs to
 -- access it.
+import Prelude hiding(mapM) -- replace Prelude mapM for lists with general traverable map
 import Control.Monad
 import Control.Monad.IO.Class
 import Control.Applicative ((<|>))
@@ -70,6 +81,7 @@ import Data.Tuple.Extra ((***), (&&&))
 import Data.Maybe
 import Data.Monoid
 import Data.Bifunctor
+import Data.Traversable
 import Data.Char (isUpper, isLower)
 import Safe hiding (at, headDef, lastDef)
 import System.FilePath
@@ -163,6 +175,31 @@ filterApart f (x:xs)
   | f x = (Just x, xs)  
   | otherwise = case filterApart f xs of 
     (r, xs') -> (r, x:xs') 
+
+equalZip :: [a] -> [b] -> [(a, b)]
+equalZip (x:xs) (y:ys) = (x,y) : equalZip xs ys
+equalZip [] [] = []
+equalZip xs ys = error $ "Unequal lengths in equalZip: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+
+equalZipWith :: (a -> b -> c) -> [a] -> [b] -> [c] 
+equalZipWith f xs ys
+    | length xs == length ys = zipWith f xs ys
+    | otherwise = error $ "Unequal lengths in equalZipWith: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+
+equalZipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m [c] 
+equalZipWithM f xs ys
+    | length xs == length ys = zipWithM f xs ys
+    | otherwise = error $ "Unequal lengths in equalZipWith: xs=" <> show (length xs) <> " ys=" <> show (length ys)
+
+mapKeysM :: (Ord k', Monad m) => (k -> m k') -> Map.Map k v -> m (Map.Map k' v)
+mapKeysM f x = do
+    let (keys, vals) = unzip $ Map.toList x
+    keys' <- mapM f keys
+    return . Map.fromList $ zip keys' vals
+
+catEither :: Either a a -> a
+catEither (Left x) = x
+catEither (Right x) = x
 
 -- | pipe the lhs functor into the rhs function
 infixl 1 |>>

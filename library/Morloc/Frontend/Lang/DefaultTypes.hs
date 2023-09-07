@@ -75,10 +75,8 @@ defaultList :: Maybe Lang -> TypeU -> [TypeU]
 defaultList Nothing t = [AppU (VarU (TV Nothing listG)) [t]]
 defaultList lang@(Just l) t = [AppU (VarU (TV lang v)) [t] | v <- listC l] 
 
-
-
 tupleG :: Int -> MT.Text
-tupleG i = MT.pack $ "Tuple" ++ show i
+tupleG i = "Tuple" <> MT.show' i
 
 isTuple :: MT.Text -> Int -> Bool
 isTuple generalName size = generalName == "Tuple" <> MT.show' size

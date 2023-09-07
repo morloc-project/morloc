@@ -1,0 +1,4 @@
+source R from "foo.R" ("add")
+source py from "foo.py" ("sub")
+
+foo x = (sub (sub (add 1 x) x) x)

@@ -102,6 +102,15 @@ instance Pretty TypeU where
   pretty (ForallU _ t) = pretty t
   pretty t = prettyTypeU t
 
+instance Pretty None where
+  pretty None = "()"
+
+instance Pretty a => Pretty (One a) where
+  pretty (One x) = pretty x
+
+instance Pretty a => Pretty (Many a) where
+  pretty (Many xs) = list $ map pretty xs
+
 prettyTypeU (ExistU v [] [] []) = angles $ pretty v
 prettyTypeU (ExistU v ts ds rs)
   = angles $ pretty v

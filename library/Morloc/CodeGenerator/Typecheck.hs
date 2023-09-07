@@ -265,7 +265,9 @@ weaveAndResolve (SAnno (One (x0, Idx i ct)) (Idx j gt)) = do
   insetSay $ pretty i
   insetSay $ " ct: " <+> pretty ct
   insetSay $ " gt: " <+> pretty gt
-  pt <- weaveResolvedTypes gt (typeOf ct)
+  pt <- case weaveResolvedTypes gt (typeOf ct) of
+    (Right x) -> return x
+    (Left weaveErr) -> MM.throwError . CallTheMonkeys $ weaveErr
   insetSay $ " pt: " <+> pretty pt
   x1 <- case x0 of
     UniS -> return UniS

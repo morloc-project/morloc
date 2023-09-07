@@ -80,6 +80,13 @@ handling for several very different languages (proofs-of-concept).
  [ ] Fix the performance bug (8 million lines of log is way too much)
      This is probably related to removal of the cut step in the typechecker
 
+## Internal
+ * For `ForeignInterfaceM` constructor of ExprM, store the full call type, not
+   just the return type
+ * Parameterize `ExprM` with the type type (e.g., `Maybe TypeP` or `TypeM`)
+ * Replace `Argument` and `PreArgument` with a parameterized `Arg` type.
+ * Fix broken `ForeignInterfaceM` and `PoolCallM` cases in `typeOfExprM`
+
  Testing and documentation:
  - [ ] Complete flu demo
 

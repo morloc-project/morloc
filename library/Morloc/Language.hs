@@ -25,6 +25,8 @@ module Morloc.Language
   , standardizeLangName
   , pairwiseCost
   , languageCost
+  , serialType
+  , generalSerialType
   ) where
 
 import Data.Text (Text, toLower)
@@ -41,6 +43,17 @@ data Lang
   | RustLang
   | PerlLang
   deriving (Ord, Eq, Show)
+
+serialType :: Lang -> Text
+serialType CppLang = "std::string"
+serialType RLang = "character"
+serialType Python3Lang = "str"
+serialType CLang = error "C is not yet supported"
+serialType RustLang = error "Rust is not yet supported"
+serialType PerlLang = error "Perl is not yet supported"
+
+generalSerialType :: Text
+generalSerialType = "Str"
 
 -- | Map a function over each supported language
 mapLang :: (Lang -> a) -> [a]

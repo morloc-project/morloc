@@ -562,10 +562,10 @@ data SAnno g f c = SAnno (f (SExpr g f c, c)) g
 data None = None
   deriving (Show)
 
-newtype One a = One a
+newtype One a = One { unOne :: a }
   deriving (Show)
 
-newtype Many a = Many [a]
+newtype Many a = Many { unMany :: [a] }
   deriving (Show)
 
 

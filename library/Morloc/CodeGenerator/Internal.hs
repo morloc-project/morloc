@@ -14,19 +14,18 @@ module Morloc.CodeGenerator.Internal
     weaveTypes
   , weaveTypes'
   , weaveResolvedTypes
-  , typeP2typeM
 ) where
 
 import Morloc.CodeGenerator.Namespace
-import qualified Morloc.Monad as MM
 import Morloc.Data.Doc
 import qualified Morloc.Data.Text as MT
+import Control.Monad.Except (Except, throwError)
 
-weaveTypes :: Maybe Type -> Type -> MorlocMonad TypeP
+weaveTypes :: Maybe Type -> Type -> Except MDoc TypeP
 weaveTypes g0 t0 = case (g0 >>= langOf, langOf t0) of
-  (_, Nothing) -> MM.throwError . CallTheMonkeys . render
+  (_, Nothing) -> throwError
     $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
-  (Just _, _) -> MM.throwError . CallTheMonkeys . render
+  (Just _, _) -> throwError
     $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
   (_, Just lang) -> return $ w lang g0 t0
 
@@ -67,12 +66,12 @@ w _ _ _ = error "impossible" -- the typechecker shouldn't let this happen
 weaveResolvedTypes
     :: Type -- ^ general type (optional)
     -> Type -- ^ concrete type (required)
-    -> MorlocMonad TypeP
+    -> Either MT.Text TypeP
 weaveResolvedTypes g0 t0 = do
   case (langOf g0, langOf t0) of
-    (_, Nothing) -> MM.throwError . CallTheMonkeys . render
+    (_, Nothing) -> Left . render
       $ "Expected a language-specific type as the second argument, found " <> viaShow (g0, t0)
-    (Just _, _) -> MM.throwError . CallTheMonkeys . render
+    (Just _, _) -> Left . render
       $ "Expected a general type as the first argument, found" <> viaShow (g0, t0)
     (Nothing, Just lang) -> return $ f lang g0 t0
   where
@@ -93,8 +92,3 @@ weaveResolvedTypes g0 t0 = do
         $ "General and concrete types are not compatible: "
         <> "\n  " <> viaShow t1
         <> "\n  " <> viaShow t2
-
-typeP2typeM :: TypeP -> TypeM
-typeP2typeM (FunP ts t) = Function (map typeP2typeM ts) (typeP2typeM t)
-typeP2typeM (UnkP _) = Passthrough
-typeP2typeM t = Native t
