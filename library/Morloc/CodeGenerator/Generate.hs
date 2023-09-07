@@ -1141,6 +1141,7 @@ bindVar :: [Arg a] -> [TypeP] -> [PolyExpr]
 bindVar args = bindVarIds (map argId args)
 
 bindVarIds :: [Int] -> [TypeP] -> [PolyExpr]
+bindVarIds [] [] = []
 bindVarIds (i : args) (t : types) = PolyBndVar (Right t) i : bindVarIds args types
 -- These error states indicate a bug in the compiler, not the user code, so no mercy
 bindVarIds [] ts = error $ "bindVarIds: too few arguments: " <> show ts
@@ -1595,7 +1596,12 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   nativeExpr
     :: MonoExpr
     -> Except MDoc (Map.Map Int Request, NativeExpr)
-  nativeExpr MonoManifold{} = error "MonoManifold does not map to NativeExpr"
+
+  nativeExpr (MonoManifold m form e) = do
+    let form' = mapManifoldArgs (\ (Arg i _) -> Arg i Nothing) form
+    (rs, nm) <- nativeManifold m form' e
+    let t = undefined
+    return (rs, AppManN t nm [])
 
   nativeExpr MonoPoolCall{} = error "MonoPoolCall does not map to NativeExpr"
 

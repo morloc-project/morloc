@@ -39,7 +39,8 @@ prettyFoldManifold = FoldManifoldM
     makeNativeManifold (NativeManifold_ m _ form (_, x)) = translateManifold "NativeManifold" m form x
 
     makeSerialExpr :: Monad m => SerialExpr_ PoolDocs -> m PoolDocs
-    makeSerialExpr (AppManS_ f (map catEither -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled) (f : rs)
+    makeSerialExpr (AppManS_ f _) = return f
+    -- makeSerialExpr (AppManS_ f (map catEither -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled) (f : rs)
     makeSerialExpr (AppPoolS_ (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
         where
         makePoolCall xs' = "__foreign_call__(" <> list(map dquotes cmds ++ xs') <> ")"
@@ -53,8 +54,9 @@ prettyFoldManifold = FoldManifoldM
     makeNativeExpr :: Monad m => NativeExpr_ PoolDocs -> m PoolDocs
     makeNativeExpr (AppSrcN_      _ (pretty . srcName -> functionName) xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) xs
-    makeNativeExpr (AppManN_      _ call (map catEither -> xs)) = 
-        return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
+    makeNativeExpr (AppManN_      _ call _) = return call 
+    -- makeNativeExpr (AppManN_      _ call (map catEither -> xs)) =
+    --     return $ mergePoolDocs ((<>) (poolExpr call) . tupled) (call : xs)
     makeNativeExpr (ReturnN_      _ x) =
         return $ x { poolExpr = "ReturnN(" <> poolExpr x <> ")" }
     makeNativeExpr (SerialLetN_     i x1 (_, x2)) = return $ makeLet letNamerS "SerialLetN" i x1 x2
