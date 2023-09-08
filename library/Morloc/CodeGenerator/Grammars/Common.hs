@@ -98,80 +98,80 @@ instance Dependable SerialExpr where
 
 invertSerialManifold :: SerialManifold -> SerialManifold
 invertSerialManifold sm0 =
-  runIndex (maxIndex sm0) (foldSerialManifold6M fm sm0)
+  runIndex (maxIndex sm0) (foldSerialManifoldM fm sm0)
   where
 
-  fm = FoldManifold6M
-    { opSerialManifold6M = invertSerialManifoldM
-    , opNativeManifold6M = invertNativeManifoldM
-    , opSerialExpr6M = invertSerialExprM
-    , opNativeExpr6M = invertNativeExprM
-    , opSerialArg6M = invertSerialArgM
-    , opNativeArg6M = invertNativeArgM
+  fm = FoldManifoldM
+    { opSerialManifoldM = invertSerialManifoldM
+    , opNativeManifoldM = invertNativeManifoldM
+    , opSerialExprM = invertSerialExprM
+    , opNativeExprM = invertNativeExprM
+    , opSerialArgM = invertSerialArgM
+    , opNativeArgM = invertNativeArgM
     }
 
-  invertSerialManifoldM :: SerialManifold6 (D SerialExpr) -> Index SerialManifold
-  invertSerialManifoldM (SerialManifold6 m lang form (weave -> se)) =
+  invertSerialManifoldM :: SerialManifold_ (D SerialExpr) -> Index SerialManifold
+  invertSerialManifoldM (SerialManifold_ m lang form (weave -> se)) =
     return $ SerialManifold m lang form se
 
-  invertNativeManifoldM :: NativeManifold6 (D NativeExpr) -> Index NativeManifold
-  invertNativeManifoldM (NativeManifold6 m lang form (t, weave -> ne)) = return $ NativeManifold m lang form (t, ne)
+  invertNativeManifoldM :: NativeManifold_ (D NativeExpr) -> Index NativeManifold
+  invertNativeManifoldM (NativeManifold_ m lang form (t, weave -> ne)) = return $ NativeManifold m lang form (t, ne)
 
   invertSerialExprM
-    :: SerialExpr6 SerialManifold (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg)
+    :: SerialExpr_ SerialManifold (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg)
     -> Index (D SerialExpr)
-  invertSerialExprM (AppManS6 sm eitherArgs) = do
+  invertSerialExprM (AppManS_ sm eitherArgs) = do
     let eitherArgs' = map (bimap unD unD) eitherArgs
         deps = concatMap (either getDeps getDeps) eitherArgs
     atomize (AppManS sm eitherArgs') deps
-  invertSerialExprM (AppPoolS6 pool serialArgs) = do
+  invertSerialExprM (AppPoolS_ pool serialArgs) = do
     let serialArgs' = map unD serialArgs
         deps = concatMap getDeps serialArgs
     atomize (AppPoolS pool serialArgs') deps
-  invertSerialExprM (ReturnS6 (D se lets)) = return $ D (ReturnS se) lets
-  invertSerialExprM (SerialLetS6 i (D se1 lets1) (D se2 lets2)) =
+  invertSerialExprM (ReturnS_ (D se lets)) = return $ D (ReturnS se) lets
+  invertSerialExprM (SerialLetS_ i (D se1 lets1) (D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Left  se1) : lets1))
-  invertSerialExprM (NativeLetS6 i (_, D ne1 lets1) (D se2 lets2)) =
+  invertSerialExprM (NativeLetS_ i (_, D ne1 lets1) (D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
-  invertSerialExprM (LetVarS6 i) = atomize (LetVarS i) []
-  invertSerialExprM (BndVarS6 i) = atomize (BndVarS i) []
-  invertSerialExprM (SerializeS6 s (D ne lets)) = atomize (SerializeS s ne) lets
+  invertSerialExprM (LetVarS_ i) = atomize (LetVarS i) []
+  invertSerialExprM (BndVarS_ i) = atomize (BndVarS i) []
+  invertSerialExprM (SerializeS_ s (D ne lets)) = atomize (SerializeS s ne) lets
 
-  invertNativeExprM :: NativeExpr6 NativeManifold (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
-  invertNativeExprM (AppSrcN6 t src nativeArgs) = do
+  invertNativeExprM :: NativeExpr_ NativeManifold (D SerialExpr) (D NativeExpr) (D SerialArg) (D NativeArg) -> Index (D NativeExpr)
+  invertNativeExprM (AppSrcN_ t src nativeArgs) = do
     let nativeArgs' = map unD nativeArgs
         deps = concatMap getDeps nativeArgs
     atomize (AppSrcN t src nativeArgs') deps
-  invertNativeExprM (AppManN6 t nm eitherArgs) = do
+  invertNativeExprM (AppManN_ t nm eitherArgs) = do
     let eitherArgs' = map (bimap unD unD) eitherArgs
         deps = concatMap (either getDeps getDeps) eitherArgs
     atomize (AppManN t nm eitherArgs') deps
-  invertNativeExprM (ReturnN6 t (D ne lets)) = atomize (ReturnN t ne) lets
-  invertNativeExprM (SerialLetN6 i (D se1 lets1) (_, D ne2 lets2)) =
+  invertNativeExprM (ReturnN_ t (D ne lets)) = atomize (ReturnN t ne) lets
+  invertNativeExprM (SerialLetN_ i (D se1 lets1) (_, D ne2 lets2)) =
     return $ D ne2 (lets2 <> ((i, Left  se1) : lets1))
-  invertNativeExprM (NativeLetN6 i (_, D ne1 lets1) (_, D se2 lets2)) =
+  invertNativeExprM (NativeLetN_ i (_, D ne1 lets1) (_, D se2 lets2)) =
     return $ D se2 (lets2 <> ((i, Right ne1) : lets1))
-  invertNativeExprM (LetVarN6 t i) = atomize (LetVarN t i) []
-  invertNativeExprM (BndVarN6 t i) = atomize (BndVarN t i) []
-  invertNativeExprM (DeserializeN6 t s (D se lets)) = atomize (DeserializeN t s se) lets
-  invertNativeExprM (AccN6 t o v (D ne deps) key) = atomize (AccN t o v ne key) deps
-  invertNativeExprM (SrcN6 t src) = atomize (SrcN t src) []
-  invertNativeExprM (ListN6 v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
-  invertNativeExprM (TupleN6 v xs) = atomize (TupleN v (map (second unD) xs)) (concatMap (getDeps . snd) xs)
-  invertNativeExprM (RecordN6 o v ps rs) = atomize (RecordN o v ps (map (second (second unD)) rs)) (concatMap (getDeps . snd . snd) rs)
-  invertNativeExprM (LogN6 v x) = atomize (LogN v x) []
-  invertNativeExprM (RealN6 v x) = atomize (RealN v x) []
-  invertNativeExprM (IntN6 v x) = atomize (IntN v x) []
-  invertNativeExprM (StrN6 v x) = atomize (StrN v x) []
-  invertNativeExprM (NullN6 v) = atomize (NullN v) []
+  invertNativeExprM (LetVarN_ t i) = atomize (LetVarN t i) []
+  invertNativeExprM (BndVarN_ t i) = atomize (BndVarN t i) []
+  invertNativeExprM (DeserializeN_ t s (D se lets)) = atomize (DeserializeN t s se) lets
+  invertNativeExprM (AccN_ t o v (D ne deps) key) = atomize (AccN t o v ne key) deps
+  invertNativeExprM (SrcN_ t src) = atomize (SrcN t src) []
+  invertNativeExprM (ListN_ v t nes) = atomize (ListN v t (map unD nes)) (concatMap getDeps nes)
+  invertNativeExprM (TupleN_ v xs) = atomize (TupleN v (map (second unD) xs)) (concatMap (getDeps . snd) xs)
+  invertNativeExprM (RecordN_ o v ps rs) = atomize (RecordN o v ps (map (second (second unD)) rs)) (concatMap (getDeps . snd . snd) rs)
+  invertNativeExprM (LogN_ v x) = atomize (LogN v x) []
+  invertNativeExprM (RealN_ v x) = atomize (RealN v x) []
+  invertNativeExprM (IntN_ v x) = atomize (IntN v x) []
+  invertNativeExprM (StrN_ v x) = atomize (StrN v x) []
+  invertNativeExprM (NullN_ v) = atomize (NullN v) []
 
-  invertSerialArgM :: SerialArg6 SerialManifold (D SerialExpr) -> Index (D SerialArg)
-  invertSerialArgM (SerialArgManifold6 sm) = return $ D (SerialArgManifold sm) []
-  invertSerialArgM (SerialArgExpr6 (D se deps)) = return $ D (SerialArgExpr se) deps
+  invertSerialArgM :: SerialArg_ SerialManifold (D SerialExpr) -> Index (D SerialArg)
+  invertSerialArgM (SerialArgManifold_ sm) = return $ D (SerialArgManifold sm) []
+  invertSerialArgM (SerialArgExpr_ (D se deps)) = return $ D (SerialArgExpr se) deps
 
-  invertNativeArgM :: NativeArg6 NativeManifold (D NativeExpr) -> Index (D NativeArg)
-  invertNativeArgM (NativeArgManifold6 nm) = return $ D (NativeArgManifold nm) []
-  invertNativeArgM (NativeArgExpr6 (D ne deps)) = return $ D (NativeArgExpr ne) deps
+  invertNativeArgM :: NativeArg_ NativeManifold (D NativeExpr) -> Index (D NativeArg)
+  invertNativeArgM (NativeArgManifold_ nm) = return $ D (NativeArgManifold nm) []
+  invertNativeArgM (NativeArgExpr_ (D ne deps)) = return $ D (NativeArgExpr ne) deps
 
 
 maxIndex :: SerialManifold -> Int
@@ -186,12 +186,12 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
     , opNativeArgM = return . foldl max 0
     }
 
-  findSerialIndices :: Monad m => SerialExpr_ Int -> m Int
+  findSerialIndices :: Monad m => SerialExpr_ Int Int Int Int Int -> m Int
   findSerialIndices (LetVarS_ i) = return i
   findSerialIndices (BndVarS_ i) = return i
-  findSerialIndices e = return $ foldl max 0 e
+  findSerialIndices e = return $ foldlSE max 0 e
 
-  findNativeIndices :: Monad m => NativeExpr_ Int -> m Int
+  findNativeIndices :: Monad m => NativeExpr_ Int Int Int Int Int -> m Int
   findNativeIndices (LetVarN_ _ i) = return i
   findNativeIndices (BndVarN_ _ i) = return i
-  findNativeIndices e = return $ foldl max 0 e
+  findNativeIndices e = return $ foldlNE max 0 e

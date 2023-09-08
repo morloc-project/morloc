@@ -1707,19 +1707,25 @@ serializeOne packmap (MonoHead lang m0 args0 e0)  = do
   inferState _ = NonSerialized
 
 
--- | recursively replace BndVarS term with a LetVarS term
+-- | recursively replace BndVarS term with a LetVarS term, do not recurse across manifold borders
 letSwapS :: MFunctor a => Int -> a -> a
-letSwapS i = mmap mm where
-    mm = defaultManifoldMap {mapSerialExpr = swapLet}
+letSwapS i = mgatedMap gates mm where
+    gates = alwaysGate { gateSerialManifold = const False
+                       , gateNativeManifold = const False
+                       }
+    mm = defaultManifoldMap { mapSerialExpr = swapLet }
     swapLet (BndVarS i')
         | i' == i = LetVarS i
         | otherwise = BndVarS i
     swapLet e = e
 
--- | recursively replace BndVarN term with a LetVarN term
+-- | recursively replace BndVarN term with a LetVarN term, do not recurse across manifold borders
 letSwapN :: MFunctor a => Int -> a -> a 
-letSwapN i = mmap mm where
-    mm = defaultManifoldMap {mapNativeExpr = swapLet}
+letSwapN i = mgatedMap gates mm where
+    gates = alwaysGate { gateSerialManifold = const False
+                       , gateNativeManifold = const False
+                       }
+    mm = defaultManifoldMap { mapNativeExpr = swapLet }
     swapLet (BndVarN t i')
         | i' == i = LetVarN t i
         | otherwise = BndVarN t i
@@ -1759,14 +1765,14 @@ findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
   fm = FoldManifoldM
     { opSerialManifoldM = return . foldl (<>) []
     , opNativeManifoldM = return . foldl (<>) []
-    , opSerialExprM = return . foldl (<>) []
+    , opSerialExprM = return . foldlSE (<>) []
     , opNativeExprM = nativeExprSrcs
     , opSerialArgM = return . foldl (<>) []
     , opNativeArgM = return . foldl (<>) []
     }
   
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
-  nativeExprSrcs e = return $ foldl (<>) [] e
+  nativeExprSrcs e = return $ foldlNE (<>) [] e
 
 
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script

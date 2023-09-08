@@ -151,8 +151,8 @@ makeSignature = foldSerialManifoldM fm where
   fm = FoldManifoldM
     { opSerialManifoldM = serialManifold
     , opNativeManifoldM = nativeManifold
-    , opSerialExprM = return . foldl (<>) []
-    , opNativeExprM = return . foldl (<>) []
+    , opSerialExprM = return . foldlSE (<>) []
+    , opNativeExprM = return . foldlNE (<>) []
     , opSerialArgM = return . foldl (<>) []
     , opNativeArgM = return . foldl (<>) []
     }
@@ -370,15 +370,15 @@ translateSegment m0 = do
   makeNativeManifold :: NativeManifold_ PoolDocs -> CppTranslator PoolDocs
   makeNativeManifold (NativeManifold_ i _ form (_, e)) = makeManifold i form e
 
-  makeSerialArg :: SerialArg_ PoolDocs -> CppTranslator PoolDocs
+  makeSerialArg :: SerialArg_ PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeSerialArg (SerialArgManifold_ x) = return x
   makeSerialArg (SerialArgExpr_ x) = return x
 
-  makeNativeArg :: NativeArg_ PoolDocs -> CppTranslator PoolDocs
+  makeNativeArg :: NativeArg_ PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeNativeArg (NativeArgManifold_ x) = return x
   makeNativeArg (NativeArgExpr_ x) = return x
 
-  makeSerialExpr :: SerialExpr_ PoolDocs -> CppTranslator PoolDocs
+  makeSerialExpr :: SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeSerialExpr (AppManS_ e (map catEither -> es)) =
     return $ mergePoolDocs ((<>) (poolExpr e) . tupled) (e:es)
   makeSerialExpr (AppPoolS_ (PoolCall _ cmds args) es) = do
@@ -403,7 +403,7 @@ translateSegment m0 = do
     se <- serialize (poolExpr e) s 
     return $ mergePoolDocs (\_ -> poolExpr se) [e, se]
 
-  makeNativeExpr :: NativeExpr_ PoolDocs -> CppTranslator PoolDocs
+  makeNativeExpr :: NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> CppTranslator PoolDocs
   makeNativeExpr (AppSrcN_      _ src es) =
     return $ mergePoolDocs ((<>) (pretty $ srcName src) . tupled) es
   makeNativeExpr (AppManN_      _ call (map catEither -> xs)) =
@@ -788,7 +788,7 @@ collectRecords e0@(SerialManifold i0 _ _ _) = CMS.evalState (foldSerialManifoldM
   fm = FoldManifoldM
     { opSerialManifoldM = serialManifold
     , opNativeManifoldM = nativeManifold
-    , opSerialExprM = return . foldl (<>) []
+    , opSerialExprM = return . foldlSE (<>) []
     , opNativeExprM = nativeExpr
     , opSerialArgM = return . foldl (<>) []
     , opNativeArgM = return . foldl (<>) []
@@ -801,8 +801,8 @@ collectRecords e0@(SerialManifold i0 _ _ _) = CMS.evalState (foldSerialManifoldM
   nativeExpr e@(RecordN_ _ v _ rs) = do
     m <- CMS.get
     let entry = (v, m, [(key, valType) | (key, (valType, _)) <- rs])
-    return $ entry : foldl (<>) [] e
-  nativeExpr x = return . foldl (<>) [] $ x
+    return $ entry : foldlNE (<>) [] e
+  nativeExpr x = return . foldlNE (<>) [] $ x
 
 -- unify records with the same name/keys
 unifyRecords

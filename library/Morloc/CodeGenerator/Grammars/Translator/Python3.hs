@@ -229,7 +229,7 @@ translateSegment m0 =
     makeNativeManifold :: NativeManifold_ PoolDocs -> Index PoolDocs
     makeNativeManifold (NativeManifold_ m _ form (_, x)) = translateManifold m form x
 
-    makeSerialExpr :: SerialExpr_ PoolDocs -> Index PoolDocs
+    makeSerialExpr :: SerialExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> Index PoolDocs
     makeSerialExpr (AppManS_ f _) = return f
     -- makeSerialExpr (AppManS_ f (map catEither -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled . tail) (f : rs)
     makeSerialExpr (AppPoolS_ (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
@@ -244,7 +244,7 @@ translateSegment m0 =
       (serialized, assignments) <- serialize (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
-    makeNativeExpr :: NativeExpr_ PoolDocs -> Index PoolDocs
+    makeNativeExpr :: NativeExpr_ PoolDocs PoolDocs PoolDocs PoolDocs PoolDocs -> Index PoolDocs
     makeNativeExpr (AppSrcN_      _ (pretty . srcName -> functionName) xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) xs
     makeNativeExpr (AppManN_      _ call _) = return call
@@ -279,11 +279,11 @@ translateSegment m0 =
     makeNativeExpr (StrN_         _ v) = return $ PoolDocs [] (dquotes $ pretty v) [] []
     makeNativeExpr (NullN_        _)   = return $ PoolDocs [] "None" [] []
 
-    makeSerialArg :: SerialArg_ PoolDocs -> Index PoolDocs
+    makeSerialArg :: SerialArg_ PoolDocs PoolDocs -> Index PoolDocs
     makeSerialArg (SerialArgManifold_ x) = return x
     makeSerialArg (SerialArgExpr_ x) = return x
 
-    makeNativeArg :: NativeArg_ PoolDocs -> Index PoolDocs
+    makeNativeArg :: NativeArg_ PoolDocs PoolDocs -> Index PoolDocs
     makeNativeArg (NativeArgManifold_ x) = return x
     makeNativeArg (NativeArgExpr_ x) = return x
 
