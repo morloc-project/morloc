@@ -66,13 +66,11 @@ debugLog d = do
   verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
--- create an internal variable based on a unique id
-letNamer :: Int -> MDoc
-letNamer i = "a" <> viaShow i
+svarNamer :: Int -> MDoc
+svarNamer i = "s" <> viaShow i
 
--- create namer for manifold positional arguments
-bndNamer :: Int -> MDoc
-bndNamer i = "x" <> viaShow i
+nvarNamer :: Int -> MDoc
+nvarNamer i = "n" <> viaShow i
 
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc
@@ -236,10 +234,10 @@ translateSegment m0 =
         where
         makePoolCall xs' = "_morloc_foreign_call(" <> list(map dquotes cmds ++ xs') <> ")"
     makeSerialExpr (ReturnS_ x) = return $ x {poolExpr = "return(" <> poolExpr x <> ")"}
-    makeSerialExpr (SerialLetS_ i e1 e2) = return $ makeLet i e1 e2
-    makeSerialExpr (NativeLetS_ i (_, e1) e2) = return $ makeLet i e1 e2
-    makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (letNamer i) [] []
-    makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (bndNamer i) [] []
+    makeSerialExpr (SerialLetS_ i e1 e2) = return $ makeLet svarNamer i e1 e2
+    makeSerialExpr (NativeLetS_ i (_, e1) e2) = return $ makeLet nvarNamer i e1 e2
+    makeSerialExpr (LetVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
+    makeSerialExpr (BndVarS_ i) = return $ PoolDocs [] (svarNamer i) [] []
     makeSerialExpr (SerializeS_ s e) = do
       (serialized, assignments) <- serialize (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
@@ -252,10 +250,10 @@ translateSegment m0 =
     --     return $ mergePoolDocs ((<>) (poolExpr call) . tupled . tail) (call : xs)
     makeNativeExpr (ReturnN_      _ x) =
         return $ x { poolExpr = "return(" <> poolExpr x <> ")" }
-    makeNativeExpr (SerialLetN_     i x1 (_, x2)) = return $ makeLet i x1 x2
-    makeNativeExpr (NativeLetN_     i (_, x1) (_, x2)) = return $ makeLet i x1 x2
-    makeNativeExpr (LetVarN_      _ i) = return $ PoolDocs [] (letNamer i) [] []
-    makeNativeExpr (BndVarN_      _ i) = return $ PoolDocs [] (bndNamer i) [] []
+    makeNativeExpr (SerialLetN_     i x1 (_, x2)) = return $ makeLet svarNamer i x1 x2
+    makeNativeExpr (NativeLetN_     i (_, x1) (_, x2)) = return $ makeLet nvarNamer i x1 x2
+    makeNativeExpr (LetVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
+    makeNativeExpr (BndVarN_      _ i) = return $ PoolDocs [] (nvarNamer i) [] []
     makeNativeExpr (DeserializeN_ _ s x) = do
         (deserialized, assignments) <- deserialize (poolExpr x) s
         return $ x
@@ -304,16 +302,17 @@ translateSegment m0 =
           , poolPriorExprs = priorExprs
           }
 
-    makeLet :: Int -> PoolDocs -> PoolDocs -> PoolDocs
-    makeLet i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
-      let rs = rs1 ++ [ letNamer i <+> "=" <+> e1' ] ++ rs2
+    makeLet :: (Int -> MDoc) -> Int -> PoolDocs -> PoolDocs -> PoolDocs
+    makeLet namer i (PoolDocs ms1' e1' rs1 pes1) (PoolDocs ms2' e2' rs2 pes2) =
+      let rs = rs1 ++ [ namer i <+> "=" <+> e1' ] ++ rs2
       in PoolDocs (ms1' <> ms2') e2' rs (pes1 <> pes2)
 
 makeLambda :: [Arg TypeM] -> MDoc -> MDoc
 makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
 
 argName :: Arg TypeM -> MDoc
-argName (argId -> i) = bndNamer i
+argName (Arg i (Native _)) = nvarNamer i
+argName (Arg i _) = svarNamer i
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = align . vsep $

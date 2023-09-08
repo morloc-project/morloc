@@ -793,13 +793,13 @@ class MFunctor a where
 instance MFunctor NativeManifold where
     mgatedMap g f nm@(NativeManifold m l form (t, ne))
       | gateNativeManifold g nm = mapNativeManifold f $ NativeManifold m l form (t, mgatedMap g f ne)
-      | otherwise = nm
+      | otherwise = mapNativeManifold f nm
         
 
 instance MFunctor SerialManifold where
     mgatedMap g f sm@(SerialManifold m l form se)
       | gateSerialManifold g sm = mapSerialManifold f $ SerialManifold m l form (mgatedMap g f se)
-      | otherwise = sm
+      | otherwise = mapSerialManifold f sm
         
 
 instance MFunctor SerialArg where
@@ -807,14 +807,14 @@ instance MFunctor SerialArg where
     | gateSerialArg g sr = case sr of
         (SerialArgManifold sm) -> mapSerialArg f $ SerialArgManifold (mgatedMap g f sm)
         (SerialArgExpr se) -> mapSerialArg f $ SerialArgExpr (mgatedMap g f se)
-    | otherwise = sr
+    | otherwise = mapSerialArg f sr
 
 instance MFunctor NativeArg where
   mgatedMap g f nr
     | gateNativeArg g nr = case nr of
         (NativeArgManifold nm) -> mapNativeArg f $ NativeArgManifold (mgatedMap g f nm)
         (NativeArgExpr ne) -> mapNativeArg f $ NativeArgExpr (mgatedMap g f ne)
-    | otherwise = nr
+    | otherwise = mapNativeArg f nr
 
 instance MFunctor SerialExpr where
   mgatedMap g f se0
@@ -830,7 +830,7 @@ instance MFunctor SerialExpr where
         e@(LetVarS _) -> mapSerialExpr f e
         e@(BndVarS _) -> mapSerialExpr f e
         (SerializeS s ne) -> mapSerialExpr f $ SerializeS s (mgatedMap g f ne)
-    | otherwise = se0
+    | otherwise = mapSerialExpr f se0
 
 -- WARNING - mapping must not change the type of any argument
 instance MFunctor NativeExpr where
@@ -854,7 +854,7 @@ instance MFunctor NativeExpr where
         e@(IntN _ _) -> mapNativeExpr f e
         e@(StrN _ _) -> mapNativeExpr f e
         e@(NullN _) -> mapNativeExpr f e
-    | otherwise = ne0
+    | otherwise = mapNativeExpr f ne0
 
 
 instance HasOneLanguage PVar where
