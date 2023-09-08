@@ -21,33 +21,21 @@ import Morloc.CodeGenerator.Grammars.Common
 import Morloc.Data.Doc
 import Morloc.Quasi
 import qualified Morloc.Config as MC
-import qualified Morloc.Monad as MM
+import Morloc.Monad (asks, gets, Index, newIndex, runIndex)
 import qualified Morloc.Data.Text as MT
 import qualified System.FilePath as SF
 import qualified Data.Char as DC
 import qualified Morloc.Language as ML
-import qualified Control.Monad.State as CMS
-import Control.Monad.Identity (Identity)
 import Morloc.CodeGenerator.Grammars.Translator.PseudoCode (pseudocodeSerialManifold)
-
-newtype PyTranslatorState = PyTranslatorState { translatorCounter :: Int }
-type PyTranslator a = CMS.StateT PyTranslatorState Identity a
-
-getCounter :: PyTranslator Int
-getCounter = do
-    s <- CMS.get
-    let i = translatorCounter s
-    CMS.put $ s {translatorCounter = translatorCounter s + 1}
-    return i
 
 -- tree rewrites
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = invertSerialManifold
+preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do
   -- setup library paths
-  lib <- pretty <$> MM.asks MC.configLibrary
+  lib <- pretty <$> asks MC.configLibrary
 
   -- translate sources
   includeDocs <- mapM
@@ -75,7 +63,7 @@ translate srcs es = do
 
 debugLog :: Doc ann -> MorlocMonad ()
 debugLog d = do
-  verbosity <- MM.gets stateVerbosity
+  verbosity <- gets stateVerbosity
   when (verbosity > 0) $ (liftIO . putDoc) d
 
 -- create an internal variable based on a unique id
@@ -93,7 +81,7 @@ manNamer i = "m" <> viaShow i
 -- FIXME: should definitely use namespaces here, not `import *`
 translateSource :: Path -> MorlocMonad MDoc
 translateSource s = do
-  lib <- MT.pack <$> MM.asks configLibrary
+  lib <- MT.pack <$> asks configLibrary
   let moduleStr = pretty
                 . MT.liftToText (map DC.toLower)
                 . MT.replace "/" "."
@@ -119,25 +107,25 @@ recordAccess record field = record <> "[" <> dquotes field <> "]"
 objectAccess :: MDoc -> MDoc -> MDoc
 objectAccess object field = object <> "." <> field
 
-serialize :: MDoc -> SerialAST -> PyTranslator (MDoc, [MDoc])
+serialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 serialize v0 s0 = do
   (ms, v1) <- serialize' v0 s0
   let schema = typeSchema s0
       v2 = "mlc_serialize" <> tupled [v1, schema]
   return (v2, ms)
   where
-    serialize' :: MDoc -> SerialAST -> PyTranslator ([MDoc], MDoc)
+    serialize' :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
     serialize' v s
       | isSerializable s = return ([], v)
       | otherwise = construct v s
 
-    construct :: MDoc -> SerialAST -> PyTranslator ([MDoc], MDoc)
+    construct :: MDoc -> SerialAST -> Index ([MDoc], MDoc)
     construct v (SerialPack _ (p, s)) =
       let unpacker = pretty . srcName . typePackerReverse $ p
       in serialize' [idoc|#{unpacker}(#{v})|] s
 
     construct v (SerialList _ s) = do
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let v' = "s" <> idx
       (before, x) <- serialize' [idoc|i#{idx}|] s
       let push = [idoc|#{v'}.append(#{x})|]
@@ -148,7 +136,7 @@ serialize v0 s0 = do
 
     construct v (SerialTuple _ ss) = do
       (befores, ss') <- unzip <$> zipWithM (\i s -> construct (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (concat befores ++ [x], v')
@@ -156,7 +144,7 @@ serialize v0 s0 = do
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
       let accessField = selectAccessor namType constructor
       (befores, ss') <- mapAndUnzipM (\(FV _ k,s) -> serialize' (accessField v (pretty k)) s) rs
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let v' = "s" <> idx
           entries = zipWith (\(FV _ key) val -> pretty key <> "=" <> val)
                             (map fst rs) ss'
@@ -165,26 +153,26 @@ serialize v0 s0 = do
 
     construct _ _ = error "Told you that branch was reachable"
 
-deserialize :: MDoc -> SerialAST -> PyTranslator (MDoc, [MDoc])
+deserialize :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
 deserialize v0 s0
   | isSerializable s0 = do
       let schema = typeSchema s0
           deserializing = [idoc|mlc_deserialize(#{v0}, #{schema})|]
       return (deserializing, [])
   | otherwise = do
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let schema = typeSchema s0
           rawvar = "s" <> idx
           deserializing = [idoc|#{rawvar} = mlc_deserialize(#{v0}, #{schema})|]
       (x, befores) <- check rawvar s0
       return (x, deserializing:befores)
   where
-    check :: MDoc -> SerialAST -> PyTranslator (MDoc, [MDoc])
+    check :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
     check v s
       | isSerializable s = return (v, [])
       | otherwise = construct v s
 
-    construct :: MDoc -> SerialAST -> PyTranslator (MDoc, [MDoc])
+    construct :: MDoc -> SerialAST -> Index (MDoc, [MDoc])
     construct v (SerialPack _ (p, s')) = do
       (x, before) <- check v s'
       let packer = pretty . srcName . typePackerForward $ p
@@ -192,7 +180,7 @@ deserialize v0 s0
       return (deserialized, before)
 
     construct v (SerialList _ s) = do
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let v' = "s" <> idx
       (x, before) <- check [idoc|i#{idx}|] s
       let push = [idoc|#{v'}.append(#{x})|]
@@ -203,13 +191,13 @@ deserialize v0 s0
 
     construct v (SerialTuple _ ss) = do
       (ss', befores) <- unzip <$> zipWithM (\i s -> check (tupleKey i v) s) [0..] ss
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let v' = "s" <> idx
           x = [idoc|#{v'} = #{tupled ss'}|]
       return (v', concat befores ++ [x])
 
     construct v (SerialObject namType (FV _ constructor) _ rs) = do
-      idx <- fmap pretty getCounter
+      idx <- fmap pretty newIndex
       let accessField = selectAccessor namType constructor
       (ss', befores) <- mapAndUnzipM (\(FV _ k,s) -> check (accessField v (pretty k)) s) rs
       let v' = "s" <> idx
@@ -223,7 +211,7 @@ deserialize v0 s0
 
 translateSegment :: SerialManifold -> MDoc
 translateSegment m0 =
-  let e = CMS.evalState (foldSerialManifoldM fm m0) (PyTranslatorState 0)
+  let e = runIndex 0 (foldSerialManifoldM fm m0)
   in vsep . punctuate line $ poolPriorExprs e <> poolCompleteManifolds e
   where
     fm = FoldManifoldM
@@ -235,13 +223,13 @@ translateSegment m0 =
       , opNativeArgM = makeNativeArg
       }
 
-    makeSerialManifold :: SerialManifold_ PoolDocs -> PyTranslator PoolDocs
+    makeSerialManifold :: SerialManifold_ PoolDocs -> Index PoolDocs
     makeSerialManifold (SerialManifold_ m _ form x) = translateManifold m form x
 
-    makeNativeManifold :: NativeManifold_ PoolDocs -> PyTranslator PoolDocs
+    makeNativeManifold :: NativeManifold_ PoolDocs -> Index PoolDocs
     makeNativeManifold (NativeManifold_ m _ form (_, x)) = translateManifold m form x
 
-    makeSerialExpr :: SerialExpr_ PoolDocs -> PyTranslator PoolDocs
+    makeSerialExpr :: SerialExpr_ PoolDocs -> Index PoolDocs
     makeSerialExpr (AppManS_ f _) = return f
     -- makeSerialExpr (AppManS_ f (map catEither -> rs)) = return $ mergePoolDocs ((<>) (poolExpr f) . tupled . tail) (f : rs)
     makeSerialExpr (AppPoolS_ (PoolCall _ cmds _) args) = return $ mergePoolDocs makePoolCall args
@@ -256,7 +244,7 @@ translateSegment m0 =
       (serialized, assignments) <- serialize (poolExpr e) s
       return $ e {poolExpr = serialized, poolPriorLines = poolPriorLines e <> assignments}
 
-    makeNativeExpr :: NativeExpr_ PoolDocs -> PyTranslator PoolDocs
+    makeNativeExpr :: NativeExpr_ PoolDocs -> Index PoolDocs
     makeNativeExpr (AppSrcN_      _ (pretty . srcName -> functionName) xs) =
         return $ mergePoolDocs ((<>) functionName . tupled) xs
     makeNativeExpr (AppManN_      _ call _) = return call
@@ -291,15 +279,15 @@ translateSegment m0 =
     makeNativeExpr (StrN_         _ v) = return $ PoolDocs [] (dquotes $ pretty v) [] []
     makeNativeExpr (NullN_        _)   = return $ PoolDocs [] "None" [] []
 
-    makeSerialArg :: SerialArg_ PoolDocs -> PyTranslator PoolDocs
+    makeSerialArg :: SerialArg_ PoolDocs -> Index PoolDocs
     makeSerialArg (SerialArgManifold_ x) = return x
     makeSerialArg (SerialArgExpr_ x) = return x
 
-    makeNativeArg :: NativeArg_ PoolDocs -> PyTranslator PoolDocs
+    makeNativeArg :: NativeArg_ PoolDocs -> Index PoolDocs
     makeNativeArg (NativeArgManifold_ x) = return x
     makeNativeArg (NativeArgExpr_ x) = return x
 
-    translateManifold :: Int -> ManifoldForm TypeM -> PoolDocs -> PyTranslator PoolDocs
+    translateManifold :: Int -> ManifoldForm TypeM -> PoolDocs -> Index PoolDocs
     translateManifold m form (PoolDocs completeManifolds body priorLines priorExprs) = do
       let args = manifoldArgs form
       let mname = manNamer m

@@ -76,7 +76,7 @@ resetCounter = do
 
 -- tree rewrites
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = invertSerialManifold
+preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate srcs es = do

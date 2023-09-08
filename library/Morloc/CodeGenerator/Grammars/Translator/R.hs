@@ -27,7 +27,7 @@ import qualified Morloc.Language as ML
 
 -- tree rewrites
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = invertSerialManifold
+preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate = undefined

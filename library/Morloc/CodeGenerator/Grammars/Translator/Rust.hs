@@ -27,7 +27,7 @@ import qualified Morloc.System as MS
 import qualified Morloc.Data.Text as MT
 
 preprocess :: SerialManifold -> MorlocMonad SerialManifold
-preprocess = invertSerialManifold
+preprocess = return . invertSerialManifold
 
 translate :: [Source] -> [SerialManifold] -> MorlocMonad Script
 translate = undefined
