@@ -1765,7 +1765,7 @@ findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
   fm = FoldManifoldM
     { opSerialManifoldM = return . foldl (<>) []
     , opNativeManifoldM = return . foldl (<>) []
-    , opSerialExprM = return . foldlSE (<>) []
+    , opSerialExprM = serialExprSrcs
     , opNativeExprM = nativeExprSrcs
     , opSerialArgM = return . foldlSA (<>) []
     , opNativeArgM = return . foldlNA (<>) []
@@ -1773,7 +1773,18 @@ findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
   
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
   nativeExprSrcs (SrcN_ _ src) = return [src]
+  nativeExprSrcs (DeserializeN_ _ s xs) = return $ serialASTsources s <> xs
   nativeExprSrcs e = return $ foldlNE (<>) [] e
+
+  serialExprSrcs (SerializeS_ s xs) = return $ serialASTsources s <> xs
+  serialExprSrcs e = return $ foldlSE (<>) [] e
+
+  serialASTsources :: SerialAST -> [Source]
+  serialASTsources (SerialPack _ (p, s)) = [ typePackerForward p, typePackerReverse p ] <> serialASTsources s
+  serialASTsources (SerialList _ s) = serialASTsources s
+  serialASTsources (SerialTuple _ ss) = concatMap serialASTsources ss
+  serialASTsources (SerialObject _ _ _ (map snd -> ss)) = concatMap serialASTsources ss
+  serialASTsources _ = []
 
 
 translate :: Lang -> [Source] -> [SerialManifold] -> MorlocMonad Script

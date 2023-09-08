@@ -271,7 +271,8 @@ resolvePacker lang packedType@(AppF _ ts1) p@(unqualify . resolvedPackedType -> 
               zip (zipWith FV (map fst rsg) (map fst rsc)) <$>
               zipWithM weaveTypeF (map (Just . snd) rsg) (map snd rsc)
             )
-        weaveTypeF _ _ = undefined
+        weaveTypeF (Just (ExistU (TV _ gv) _ _ _)) (ExistU (TV _ cv) _ _ _) = return $ UnkF (FV gv cv)
+        weaveTypeF gt ct = error . show $ (gt, ct)
 
         -- Replaces each generic term with an existential term of the same name
         existential :: TypeU -> TypeU
