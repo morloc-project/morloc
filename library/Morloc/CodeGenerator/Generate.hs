@@ -1767,11 +1767,12 @@ findSources ms = unique $ concatMap (MI.runIdentity . foldSerialManifoldM fm) ms
     , opNativeManifoldM = return . foldl (<>) []
     , opSerialExprM = return . foldlSE (<>) []
     , opNativeExprM = nativeExprSrcs
-    , opSerialArgM = return . foldl (<>) []
-    , opNativeArgM = return . foldl (<>) []
+    , opSerialArgM = return . foldlSA (<>) []
+    , opNativeArgM = return . foldlNA (<>) []
     }
   
   nativeExprSrcs (AppSrcN_ _ src xss) = return (src : concat xss)
+  nativeExprSrcs (SrcN_ _ src) = return [src]
   nativeExprSrcs e = return $ foldlNE (<>) [] e
 
 

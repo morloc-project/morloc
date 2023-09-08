@@ -62,6 +62,8 @@ module Morloc.CodeGenerator.Namespace
   , NativeExpr_(..)
   , foldlSE
   , foldlNE
+  , foldlSA
+  , foldlNA
   -- ** Serialization AST
   , SerialAST(..)
   , TypePacker(..)
@@ -348,7 +350,6 @@ instance Foldable ManifoldForm where
   foldr f b (ManifoldFull xs) = foldr f b [x | Arg _ x <- xs]
   foldr f b (ManifoldPart xs ys) = foldr f b [x | Arg _ x <- xs <> ys]
 
-
 instance Pretty t => Pretty (ManifoldForm t) where
     pretty (ManifoldPass args) = "ManifoldPass" <> tupled (map pretty args)
     pretty (ManifoldFull args) = "ManifoldFull"  <> tupled (map pretty args)
@@ -476,6 +477,13 @@ data NativeExpr
   | StrN         FVar Text
   | NullN        FVar
 
+foldlSA :: (b -> a -> b) -> b -> SerialArg_ a a -> b
+foldlSA f b (SerialArgManifold_ sm) = f b sm
+foldlSA f b (SerialArgExpr_ se) = f b se
+
+foldlNA :: (b -> a -> b) -> b -> NativeArg_ a a -> b
+foldlNA f b (NativeArgManifold_ nm) = f b nm
+foldlNA f b (NativeArgExpr_ ne) = f b ne
 
 foldlSE :: (b -> a -> b) -> b -> SerialExpr_ a a a a a -> b
 foldlSE f b (AppManS_ x eitherXs) = foldl f b (x: map catEither eitherXs)
@@ -531,10 +539,8 @@ data SerialManifold_ se = SerialManifold_ Int Lang (ManifoldForm TypeM) se
   deriving(Functor, Foldable)
 
 data SerialArg_ sm se = SerialArgManifold_ sm | SerialArgExpr_ se
-  deriving(Functor, Foldable)
 
 data NativeArg_ nm ne = NativeArgManifold_ nm | NativeArgExpr_ ne
-  deriving(Functor, Foldable)
 
 data SerialExpr_ sm se ne sr nr
   = AppManS_ sm [Either sr nr]

@@ -182,8 +182,8 @@ maxIndex = (+1) . runIdentity . foldSerialManifoldM fm
     , opNativeManifoldM = return . foldl max 0
     , opSerialExprM = findSerialIndices
     , opNativeExprM = findNativeIndices
-    , opSerialArgM = return . foldl max 0
-    , opNativeArgM = return . foldl max 0
+    , opSerialArgM = return . foldlSA max 0
+    , opNativeArgM = return . foldlNA max 0
     }
 
   findSerialIndices :: Monad m => SerialExpr_ Int Int Int Int Int -> m Int

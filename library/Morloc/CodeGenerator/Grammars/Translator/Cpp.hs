@@ -153,8 +153,8 @@ makeSignature = foldSerialManifoldM fm where
     , opNativeManifoldM = nativeManifold
     , opSerialExprM = return . foldlSE (<>) []
     , opNativeExprM = return . foldlNE (<>) []
-    , opSerialArgM = return . foldl (<>) []
-    , opNativeArgM = return . foldl (<>) []
+    , opSerialArgM = return . foldlSA (<>) []
+    , opNativeArgM = return . foldlNA (<>) []
     }
 
   serialManifold (SerialManifold_ i _ form _) = manifoldSignature i serialType form
@@ -790,8 +790,8 @@ collectRecords e0@(SerialManifold i0 _ _ _) = CMS.evalState (foldSerialManifoldM
     , opNativeManifoldM = nativeManifold
     , opSerialExprM = return . foldlSE (<>) []
     , opNativeExprM = nativeExpr
-    , opSerialArgM = return . foldl (<>) []
-    , opNativeArgM = return . foldl (<>) []
+    , opSerialArgM = return . foldlSA (<>) []
+    , opNativeArgM = return . foldlNA (<>) []
     }
 
   serialManifold (SerialManifold_ i _ _ x) = CMS.put i >> return x
