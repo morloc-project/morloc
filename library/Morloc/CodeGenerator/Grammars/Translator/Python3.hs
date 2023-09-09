@@ -72,6 +72,10 @@ svarNamer i = "s" <> viaShow i
 nvarNamer :: Int -> MDoc
 nvarNamer i = "n" <> viaShow i
 
+argName :: Arg TypeM -> MDoc
+argName (Arg i (Native _)) = nvarNamer i
+argName (Arg i _) = svarNamer i
+
 -- create a name for a manifold based on a unique id
 manNamer :: Int -> MDoc
 manNamer i = "m" <> viaShow i
@@ -309,10 +313,6 @@ translateSegment m0 =
 
 makeLambda :: [Arg TypeM] -> MDoc -> MDoc
 makeLambda args body = "lambda" <+> hsep (punctuate "," (map argName args)) <> ":" <+> body
-
-argName :: Arg TypeM -> MDoc
-argName (Arg i (Native _)) = nvarNamer i
-argName (Arg i _) = svarNamer i
 
 makeDispatch :: [SerialManifold] -> MDoc
 makeDispatch ms = align . vsep $
